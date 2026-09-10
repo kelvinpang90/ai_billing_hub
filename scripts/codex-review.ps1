@@ -130,17 +130,22 @@ if ($isDesign) {
 
         # 按判定行判断，不能全文子串匹配：一条以「旧的 APPROVED: design v1
         # 已作废」结尾、实为 REQUEST_CHANGES 的评论会被算成批准。
+        # 取【最后一条】针对当前版本的判定，不是「历史上出现过批准就算批准」。
+        # 先批准后拒绝时，撤回必须生效。
         $records = @()
-        $hasCurrentApproval = $false
+        $latestStatus = $null
         foreach ($c in $do.comments) {
             $st = Get-CommentDesignVerdict $c.body $designVersion
-            if ($st -eq 'APPROVE') {
-                $hasCurrentApproval = $true
-                $records += "- ✅ 批准当前版本 v$designVersion"
-            } elseif ($st -eq 'VERSION_MISMATCH') {
-                $records += "- ⚠️ 批准的是**其他版本**（当前是 v$designVersion）：" + (Get-VerdictLine ($c.body -split '\r?\n'))
+            if ($st -eq 'NOT_A_REVIEW') { continue }
+            $line = Get-VerdictLine ($c.body -split '\r?\n')
+            switch ($st) {
+                'APPROVE'          { $records += "- ✅ 批准当前版本 v$designVersion"; $latestStatus = 'APPROVE' }
+                'REQUEST_CHANGES'  { $records += "- ❌ 拒绝"; $latestStatus = 'REQUEST_CHANGES' }
+                'VERSION_MISMATCH' { $records += "- ⚠️ 批准的是**其他版本**（当前是 v$designVersion）：$line" }
+                'INVALID'          { $records += "- ⚠️ 判定行格式不合法：$line" }
             }
         }
+        $hasCurrentApproval = ($latestStatus -eq 'APPROVE')
 
         $designSection = @(
             "## 关联设计（Issue #$designIssue）", '',
@@ -156,8 +161,13 @@ if ($isDesign) {
             '## 关联设计', '',
             '本 PR 的描述里没有声明关联的设计 Issue（约定写法：设计闸门：#N）。',
             '',
-            '若本 PR 触及钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机，',
-            '**缺少设计闸门本身就是一个阻断项**。若不涉及这些，属正常。'
+            '按 docs/WORKFLOW.md 第 3 节的准入分档，下面两类**都必须**走设计闸门：',
+            '',
+            '- 钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 —— 填全部章节',
+            '- 用量摄取 / 集成认证 / Webhook —— 填 §1–§7',
+            '',
+            '**只有前端 / 文档 / CI / 脚本类改动才允许没有关联设计。**',
+            '本 PR 若属于上面两类之一，缺少设计闸门本身就是一个阻断项。'
         )
     }
 

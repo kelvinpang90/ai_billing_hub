@@ -58,18 +58,20 @@ Assert-Equal 'INVALID' (Get-DesignVerdict 'approved: design v2' 2) '大小写不
 Assert-Equal 'INVALID' (Get-DesignVerdict 'request_changes' 2) '拒绝行大小写不符 = 无效'
 
 Write-Host "Get-CommentDesignVerdict"
-# Codex 实测出的假阳性：正文里出现批准字样，但判定是拒绝
-$falsePositive = @"
-## review
-旧的 APPROVED: design v1 已作废
+$prefix = '## 🔍 CODEX REVIEW — 设计闸门'
 
-REQUEST_CHANGES
-"@
-Assert-Equal 'REQUEST_CHANGES' (Get-CommentDesignVerdict $falsePositive 1) '正文提到批准但判定是拒绝 = 不算批准'
-Assert-Equal 'APPROVE' (Get-CommentDesignVerdict "## review`n无问题`n`nAPPROVED: design v2" 2) '判定行是批准 = 算批准'
-Assert-Equal 'VERSION_MISMATCH' (Get-CommentDesignVerdict "## review`n`nAPPROVED: design v1" 2) '批准的是旧版本 = 不算当前批准'
-Assert-Equal 'INVALID' (Get-CommentDesignVerdict '' 2) '空评论 = 无效'
-Assert-Equal 'INVALID' (Get-CommentDesignVerdict "只是随口提了 APPROVED: design v2 这串字" 2) '批准字样不在最后一行 = 无效'
+# Codex 实测出的假阳性：正文里出现批准字样，但判定是拒绝
+Assert-Equal 'REQUEST_CHANGES' (Get-CommentDesignVerdict "$prefix`n旧的 APPROVED: design v1 已作废`n`nREQUEST_CHANGES" 1) '正文提到批准但判定是拒绝 = 不算批准'
+Assert-Equal 'APPROVE' (Get-CommentDesignVerdict "$prefix`n无问题`n`nAPPROVED: design v2" 2) '判定行是批准 = 算批准'
+Assert-Equal 'VERSION_MISMATCH' (Get-CommentDesignVerdict "$prefix`n`nAPPROVED: design v1" 2) '批准的是旧版本 = 不算当前批准'
+Assert-Equal 'INVALID' (Get-CommentDesignVerdict "$prefix`n只是随口提了 APPROVED: design v2 这串字" 2) '批准字样不在最后一行 = 无效'
+Assert-Equal 'NOT_A_REVIEW' (Get-CommentDesignVerdict '' 2) '空评论 = 不是审查'
+
+# 自批准漏洞：两边共用同一个 GitHub 账号，作者分不出来，
+# 前缀是「这条是独立审查」的唯一凭据。不校验的话 Claude 能自己批准自己。
+Assert-Equal 'NOT_A_REVIEW' (Get-CommentDesignVerdict "## 🔧 CLAUDE RESPONSE`n已按意见修改`n`nAPPROVED: design v2" 2) 'Claude 回应以批准行结尾 = 不算批准'
+Assert-Equal 'NOT_A_REVIEW' (Get-CommentDesignVerdict "随便一条评论`n`nAPPROVED: design v2" 2) '无审查前缀 = 不算批准'
+Assert-Equal 'NOT_A_REVIEW' (Get-CommentDesignVerdict "## 🔍 CODEX REVIEW`n`nAPPROVED: design v2" 2) '实现闸门前缀 ≠ 设计闸门前缀'
 
 Write-Host "Get-LinkedDesignIssue"
 Assert-Equal 12 (Get-LinkedDesignIssue '## 任务`n设计闸门：#12`n其余') '中文冒号'

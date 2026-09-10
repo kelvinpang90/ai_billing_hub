@@ -73,12 +73,21 @@ function Get-LinkedDesignIssue {
 # 「旧的 APPROVED: design v1 已作废」结尾、判定为 REQUEST_CHANGES 的评论
 # 也会被算成批准记录（Codex 实测过这个假阳性）。
 # 必须按判定行（最后一个非空行）来判。
+#
+# 还必须校验开头的固定前缀。Claude 与 Codex 共用同一个 GitHub 账号，
+# 评论作者分不出谁是谁，这个前缀是「这条是独立审查」的唯一凭据。
+# 不校验的话，Claude 自己写一条以合法批准行结尾的回应就会被算成批准 ——
+# 独立审查形同虚设。
+$DesignReviewPrefix = '## 🔍 CODEX REVIEW — 设计闸门'
+
 function Get-CommentDesignVerdict {
     param(
         [string]$CommentBody,
         [Nullable[int]]$ExpectedVersion
     )
-    if (-not $CommentBody) { return 'INVALID' }
-    $line = Get-VerdictLine ($CommentBody -split '\r?\n')
-    return Get-DesignVerdict $line $ExpectedVersion
+    if (-not $CommentBody) { return 'NOT_A_REVIEW' }
+    $lines = $CommentBody -split '\r?\n'
+    $first = $lines | Where-Object { $_.Trim() } | Select-Object -First 1
+    if ($null -eq $first -or $first.Trim() -ne $DesignReviewPrefix) { return 'NOT_A_REVIEW' }
+    return Get-DesignVerdict (Get-VerdictLine $lines) $ExpectedVersion
 }
