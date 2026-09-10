@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     跑 Codex 独立审查（只读沙箱），可选把结果发回 PR 或设计 Issue。
 
@@ -58,6 +58,31 @@ if (-not $codex) {
 }
 
 $slug = (& git -C $repo remote get-url origin) -replace '^.*github\.com[:/]', '' -replace '\.git$', ''
+
+# Codex 通过 gh 取 diff，但通过 -C $repo 读工作区里的清单与文档。
+# 两者不一致时，它会拿着 A 分支的 diff 去对照 B 分支的规则 —— 结论不可信。
+if ($PSCmdlet.ParameterSetName -eq 'Implementation') {
+    $prHead = (& gh pr view $Pr --repo $slug --json headRefOid --jq '.headRefOid' 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $prHead) {
+        Write-Error "取不到 PR #$Pr 的 head SHA。PR 存在吗？gh 登录了吗？"
+        exit 2
+    }
+    $localHead = (& git -C $repo rev-parse HEAD).Trim()
+    if ($localHead -ne $prHead.Trim()) {
+        Write-Error @"
+本地工作区与 PR #$Pr 不一致，审查结论会不可信：
+  PR head : $($prHead.Trim())
+  本地 HEAD: $localHead
+
+Codex 会用 gh 取 PR 的 diff，却从本地工作区读审查清单与文档。
+两者不一致就会拿着一个分支的改动去对照另一个分支的规则。
+
+先切到该 PR 的分支再跑：
+  gh pr checkout $Pr
+"@
+        exit 2
+    }
+}
 
 $common = @"
 你是本仓库的独立审查者，不是开发者。
