@@ -135,6 +135,82 @@ $common = @"
 以及 docs/Acuven_Central_AI_Billing_Platform_Spec_v1.2.md 的相关章节。
 "@
 
+if ($PSCmdlet.ParameterSetName -eq 'Design') {
+    $target = "Issue #$Issue"
+    $out = Join-Path $repo ".codex-review-design-$Issue.md"
+    $approvedPattern = '^APPROVED: design v'
+    $prompt = @"
+$common
+
+本次是【设计闸门】审查，目标是 $slug 的 Issue #$Issue。
+
+步骤：
+1. 读 $rel —— 设计文档全文已在里面。
+2. 走 scripts/review_checklist.md 的「设计审查」一节，明确回答那五个问题。
+3. 核对设计闸门的七条判定。
+
+按以下格式输出，最后一行必须是判定：
+
+## 🔍 CODEX REVIEW — 设计闸门
+
+**结论**：<一句话>
+
+### 五问
+1. 哪个具体场景会破坏不变量？<答>
+2. 哪条失败路径没有定义最终状态或恢复方式？<答>
+3. 哪项正确性只靠应用代码、缺少数据库约束？<答>
+4. 哪个新增分支没有对应测试？<答>
+5. 设计是否与 spec 的具体章节冲突？<答>
+
+### 阻断项
+- ``章节`` — 问题 → 后果
+（没有就写「无」）
+
+### 闸门判定
+逐条列出七条判定是否满足。
+
+---
+APPROVED: design v<该 Issue 顶部标注的版本号>
+"@
+} else {
+    $target = "PR #$Pr"
+    $out = Join-Path $repo ".codex-review-$Pr.md"
+    $approvedPattern = '^VERDICT: APPROVE$'
+    $prompt = @"
+$common
+
+本次是【实现闸门】审查，目标是 $slug 的 PR #$Pr。
+
+步骤：
+1. 读 $rel —— PR 描述与完整 diff 都在里面。
+2. 走 scripts/review_checklist.md 的「实现审查」A–E 各节。
+3. 若该 PR 关联了设计 Issue，核对实现是否忠于已批准的那一版设计。
+
+按以下格式输出，最后一行必须是判定：
+
+## 🔍 CODEX REVIEW
+
+**结论**：<一句话>
+
+### 阻断项
+- ``文件:行`` — 问题 → 后果
+（没有就写「无」）
+
+### 建议项
+- ``文件:行`` — 问题 → 建议
+（没有就写「无」）
+
+### 清单核对
+- 不变量：<触碰了第几条，是否保住>
+- DoD：<哪几条未满足>
+- 测试：<改动引入的边界是否被覆盖>
+
+---
+VERDICT: APPROVE
+"@
+}
+$rejected = 'REQUEST_CHANGES'
+
 Write-Host "审查目标：$target（$slug）" -ForegroundColor Cyan
 Write-Host "沙箱：read-only —— Codex 改不了任何文件" -ForegroundColor Cyan
 Write-Host ("-" * 60)
