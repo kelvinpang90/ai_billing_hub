@@ -36,7 +36,7 @@ Assert-Equal 'APPROVE' (Get-ImplementationVerdict 'VERDICT: APPROVE') '标准通
 Assert-Equal 'REQUEST_CHANGES' (Get-ImplementationVerdict 'VERDICT: REQUEST_CHANGES') '标准拒绝'
 # 真实风险：Codex 在判定行后多写了字，前缀匹配会误判成通过
 Assert-Equal 'INVALID' (Get-ImplementationVerdict 'VERDICT: APPROVE 但有保留') '判定行有尾随文本 = 无效'
-Assert-Equal 'INVALID' (Get-ImplementationVerdict 'VERDICT: approve') '大小写不符 = 无效'
+Assert-Equal 'INVALID' (Get-ImplementationVerdict 'VERDICT: approve') '大小写不符 = 无效'  # check-docs:allow
 Assert-Equal 'INVALID' (Get-ImplementationVerdict '结论：VERDICT: APPROVE') '判定行有前缀 = 无效'
 Assert-Equal 'INVALID' (Get-ImplementationVerdict '') '空行 = 无效'
 

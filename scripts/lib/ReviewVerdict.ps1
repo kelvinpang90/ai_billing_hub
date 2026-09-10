@@ -20,7 +20,7 @@ function Get-VerdictLine {
 function Get-ImplementationVerdict {
     param([string]$Line)
     # -casesensitive 是必须的：PowerShell 的 switch -regex / -match 默认忽略大小写，
-    # 不加的话 'VERDICT: approve' 也会被判成通过。
+    # 不加的话 'VERDICT: approve' 也会被判成通过。  check-docs:allow
     switch -regex -casesensitive ($Line) {
         '^VERDICT: APPROVE$'         { return 'APPROVE' }
         '^VERDICT: REQUEST_CHANGES$' { return 'REQUEST_CHANGES' }

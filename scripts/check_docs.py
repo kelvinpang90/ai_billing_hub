@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Validate the docs navigation layer.
+"""Validate the docs navigation layer and cross-file conventions.
 
 本仓库的 docs/ 是一层「导航层」：PROJECT / ARCHITECTURE / REQUIREMENTS / TODO /
 HANDOFF 互相交叉链接，并大量以 §N 指回 spec 正文。这两样东西烂掉是静默的
 ——链接断了、spec 重新编号了，读的人不会立刻发现。所以放进 CI 挡住合并。
 
-检查两件事：
+检查三件事：
 1. Markdown 相对链接指向的文件真实存在
 2. 文档里引用的 §N / §N.M 在 spec 里有对应标题
+3. 跨文件重复的「约定串」逐字一致
 """
 
 from __future__ import annotations
@@ -26,6 +27,54 @@ SPEC_HEADING_RE = re.compile(r"^#{1,2}\s+(\d+(?:\.\d+)?)[.\s]")
 FENCE_RE = re.compile(r"^\s*```")
 
 EXTERNAL_SCHEMES = {"http", "https", "mailto", "tel"}
+
+# 审查脚本产出的临时材料，不是仓库内容
+TRANSIENT_PREFIX = ".codex-"
+
+# 跨文件重复的「约定串」。同一个约定散在多个文件里，改一处忘另一处是本仓库
+# 反复出现的缺陷 —— REVIEW-LOG 里已经记过三次，说明光靠自觉不管用。
+#
+# loose 用来匹配「疑似在说同一件事」的写法；一旦命中，就必须与 canonical
+# 逐字相同，否则报错。
+#
+# files  —— 只在这些文件里检查。用于本身有歧义的串（例如 §1–§4 在需求索引里
+#           是合法的章节区间，不是设计闸门档位）。
+# 行内加 check-docs:allow 可放行有意为之的反例（例如故意写错大小写的测试用例）。
+ALLOW_MARKER = "check-docs:allow"
+
+CONSISTENCY_RULES = [
+    {
+        "name": "碰钱清单",
+        "canonical": "钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机",
+        "loose": re.compile(r"钱包\s*/\s*账本[^\n]{0,80}?状态机"),
+    },
+    {
+        "name": "设计闸门档位",
+        "canonical": "§1–§7",
+        "loose": re.compile(r"§1\s*[–—-]\s*§\d(?:\s*\+\s*§\d)?"),
+        "files": {
+            ".github/ISSUE_TEMPLATE/design-gate.md",
+            "docs/WORKFLOW.md",
+            "scripts/review_checklist.md",
+        },
+    },
+    {
+        "name": "实现闸门通过判定",
+        "canonical": "VERDICT: APPROVE",
+        "loose": re.compile(r"VERDICT:\s*APPROVE(?!_)", re.IGNORECASE),
+    },
+    {
+        "name": "实现闸门拒绝判定",
+        "canonical": "VERDICT: REQUEST_CHANGES",
+        "loose": re.compile(r"VERDICT:\s*REQUEST_CHANGES", re.IGNORECASE),
+    },
+]
+
+CONSISTENCY_SUFFIXES = {".md", ".ps1", ".py"}
+
+
+def is_transient(path: Path) -> bool:
+    return path.name.startswith(TRANSIENT_PREFIX)
 
 
 def read_lines(path: Path) -> list[str]:
@@ -82,6 +131,30 @@ def check_section_refs(md_path: Path, known: set[str]) -> list[str]:
     return errors
 
 
+def check_conventions(path: Path) -> list[str]:
+    """约定串一旦出现，必须与 canonical 逐字相同。"""
+    errors = []
+    rel_name = path.relative_to(ROOT).as_posix()
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    for rule in CONSISTENCY_RULES:
+        allowed_files = rule.get("files")
+        if allowed_files is not None and rel_name not in allowed_files:
+            continue
+        for match in rule["loose"].finditer(text):
+            found = match.group(0)
+            if found == rule["canonical"]:
+                continue
+            line_no = text.count("\n", 0, match.start()) + 1
+            if ALLOW_MARKER in lines[line_no - 1]:
+                continue
+            errors.append(
+                f"{rel_name}:{line_no}  约定串「{rule['name']}」写法不一致："
+                f"实得 [{found}]，应为 [{rule['canonical']}]"
+            )
+    return errors
+
+
 def main() -> int:
     # Windows 控制台默认不是 UTF-8，§ 会打成乱码。
     if hasattr(sys.stdout, "reconfigure"):
@@ -95,11 +168,18 @@ def main() -> int:
     errors: list[str] = []
 
     for md_path in sorted(ROOT.rglob("*.md")):
-        if ".git" in md_path.parts:
+        if ".git" in md_path.parts or is_transient(md_path):
             continue
         errors.extend(check_links(md_path))
         if md_path != SPEC:
             errors.extend(check_section_refs(md_path, known))
+
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file() or ".git" in path.parts or is_transient(path):
+            continue
+        if path.suffix not in CONSISTENCY_SUFFIXES or path == SPEC:
+            continue
+        errors.extend(check_conventions(path))
 
     if errors:
         print(f"docs check failed ({len(errors)} problem(s)):\n")
@@ -107,7 +187,10 @@ def main() -> int:
             print(f"  {error}")
         return 1
 
-    print(f"docs check passed ({len(known)} spec sections indexed)")
+    print(
+        f"docs check passed ({len(known)} spec sections indexed, "
+        f"{len(CONSISTENCY_RULES)} convention rules)"
+    )
     return 0
 
 
