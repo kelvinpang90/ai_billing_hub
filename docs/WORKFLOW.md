@@ -122,7 +122,7 @@ Phase 0 建好 `app/` 与 `tests/` 之后，这里会补上 lint 与 pytest。**
 2. 读 scripts/review_checklist.md，这是本项目的审查清单，逐条走。
 3. 执行 gh pr view N --json title,body 和 gh pr diff N 拿到改动意图与 diff。
 4. 需要上下文时读 docs/ARCHITECTURE.md（14 条不变量）与
-   docs/Acuven_Central_AI_Billing_Platform_Spec_v1.1.md 的相关章节。
+   docs/Acuven_Central_AI_Billing_Platform_Spec_v1.2.md 的相关章节。
 5. 把结果写进 .codex-review-N.md，严格用 docs/WORKFLOW.md 第 4 节的格式，
    最后一行必须是 VERDICT: APPROVE 或 VERDICT: REQUEST_CHANGES。
 6. 执行 gh pr comment N --body-file .codex-review-N.md

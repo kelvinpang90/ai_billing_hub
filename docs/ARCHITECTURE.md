@@ -1,7 +1,7 @@
 # ARCHITECTURE — 架构摘要
 
 > 本文件是**摘要与索引**，不是事实来源。精确定义一律以
-> [Acuven_Central_AI_Billing_Platform_Spec_v1.1.md](Acuven_Central_AI_Billing_Platform_Spec_v1.1.md) 为准，括号里的 §N 是 spec 节号。
+> [Acuven_Central_AI_Billing_Platform_Spec_v1.2.md](Acuven_Central_AI_Billing_Platform_Spec_v1.2.md) 为准，括号里的 §N 是 spec 节号。
 > 最后更新：2026-09-10
 
 ---
@@ -135,33 +135,30 @@ optional: document-worker
 环境: 本地 Docker 测试环境 + 生产 VPS（V1 无独立 staging）
 ```
 
-交付要求：~~私有~~ GitHub 仓库（**见第 7.1 节：当前实际为公开，是一处未经批准的偏离**）、受保护 `main`、CI 通过才能合并、合并触发 GitHub Actions 部署、镜像用不可变 tag 标识提交、密钥走 GitHub environment secrets 绝不入库、迁移按文档化的安全顺序执行、部署等健康检查 + 冒烟测试、有经过验证的回滚/前滚流程、并发部署串行化。
+交付要求：**公开** GitHub 仓库（见第 7.1 节与 [ADR-0001](adr/ADR-0001-repository-visibility.md)）、受保护 `main`、CI 通过才能合并、合并触发 GitHub Actions 部署、镜像用不可变 tag 标识提交、密钥走 GitHub environment secrets 绝不入库、迁移按文档化的安全顺序执行、部署等健康检查 + 冒烟测试、有经过验证的回滚/前滚流程、并发部署串行化。
 
 ⚠️ 因为没有 staging，支付 / Email / WhatsApp / 数据库迁移 / 破坏性恢复类改动，必须先在沙箱或本地验证，并走明确的生产变更清单。
 
-## 7.1 与 spec 的偏离：仓库可见性 ⚠️ 未决
+## 7.1 仓库可见性：公开（已批准）
 
 | | |
 | --- | --- |
-| **spec 要求** | §99「private GitHub repository」 |
+| **spec 要求** | §99 自 v1.2 起为「public GitHub repository」，与实际一致 |
 | **当前实际** | `github.com/kelvinpang90/ai_billing_hub` 为**公开** |
 | **发生时间** | 2026-09-10 |
 | **原因** | GitHub Free 的**私有**仓库不支持分支保护（branch protection 与 rulesets 两个 API 均返回 403，提示需 Pro）。为拿到 spec §99 同样要求的「受保护 `main` + CI 通过才能合并」，仓库改为公开 |
 
 **这是用一条 spec 要求换另一条 spec 要求，不是一个干净的决定。** 代价是：spec 全文、数据库表结构、HMAC 与密钥管理方案、部署拓扑、`SPEC_REVIEW_v1.0.md`（一份系统弱点清单）与 `REVIEW_FOLLOWUP_v1.1.md`（5 条至今未解决的残留）全部永久公开。
 
-**当前状态：尚未正式批准。** spec §99 仍写着 private，两处互斥。必须二选一收口：
+**状态：已收口（2026-09-10）。** 决策人选择接受公开，决策与完整代价记录在
+[ADR-0001](adr/ADR-0001-repository-visibility.md)，spec 已修订至 v1.2 使 §99 与实际一致。
 
-- **选项 A** —— 升级 GitHub Pro（约 US$4/月），仓库转回私有，偏离消失，spec 无需改动
-- **选项 B** —— 接受公开，把决策与取舍写成 ADR 并修订 spec 至 v1.2，让 §99 与实际一致
-
-在收口之前，任何人读到 §99 都无法判断「公开」是已批准的架构偏离还是失误。**收口前不得进入生产部署。**
-
-追踪见 [TODO.md](TODO.md) 的 R6。
+派生的硬约束（ADR-0001「后果」一节）：**绝不可提交**凭据、密钥、`.env`、真实主机名 / IP、
+客户数据、供应商合同价。CI 的 `secret-scan` job 是兜底，不是许可。
 
 ## 8. 待补的 ADR（§136）
 
-以下决策**必须在对应实现阶段之前**落成 `docs/adr/` 下的 ADR：
+目录与写法约定见 [adr/README.md](adr/README.md)。以下决策**必须在对应实现阶段之前**落成 ADR：
 
 - [ ] 中心摄取语义（同步 vs 异步的最终定稿与边界）
 - [ ] 财务期间与 cut-off 规则
