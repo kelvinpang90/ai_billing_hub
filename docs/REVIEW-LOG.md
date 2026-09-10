@@ -63,7 +63,8 @@
 | 自己发明约定（`[~]`） | 复选框白名单 | CheckboxTests | 其它形式的「自造状态」（新的措辞、新的标签） |
 | 跨层假设（5 次） | GitHub 写操作回读比对 | `test_gh_verified_write.py` | 本地文件写入仍靠工具选择纪律 |
 | 审查中加范围 | 复审材料带增量 diff；第三轮起强制「完整影响面」 | — | 扩张是否**必要**，由 Codex 按清单 F 节判 |
-| 退出码契约被运行时破坏 | 策略脚本 0/1/2 分离；`trap` 归 2 | ExitCodeTests、`Test-ReviewVerdict.ps1` | — |
+| 退出码契约被运行时破坏 | 策略脚本 0/1/2 分离；`trap` 归 2 | `MainExitCodeTests`（`main()` 对真实仓库跑 0/1/2 十条路径）、`ValidateCommitTests`、`Test-ReviewVerdict.ps1` | — |
+| 审查中的 PR 里加范围（续） | 复审逻辑抽进 `lib\ReviewVerdict.ps1`（评论扫描、`reviewed-head` 提取、影响面节） | `Test-ReviewVerdict.ps1` 新增 25 用例 | `codex-review.ps1` 里剩下的 `gh` 集成路径仍无自动测试，靠 `-MaterialOnly` 手工验证 |
 | 枚举代替整体比对 | 材料逐段比对 | `Compare-MaterialParts` 用例 | — |
 
 > 右列不是遗憾，是分工：左边三列让审查者不必再花配额抓格式问题，右列才是独立审查真正该花时间的地方。

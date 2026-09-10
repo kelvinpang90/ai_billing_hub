@@ -76,6 +76,37 @@ function Fail {
     exit 2
 }
 
+# check_repo_policy.py 的退出码：1 = 查出违规，2 = 检查本身跑不动。两者最终都归 2，
+# 但报错要分开 —— 排障时「正文写错」和「本地仓库缺提交对象」是两条完全不同的路。
+function Assert-PolicyExit {
+    param([string]$What)
+    switch ($LASTEXITCODE) {
+        0       { return }
+        1       { Fail "$What 未通过（违规，见上方 ERROR 行）。未形成审查判定。" }
+        default { Fail "$What 无法运行（退出码 $LASTEXITCODE，见上方 CHECK ERROR 行）。多半是本地缺提交对象或参数问题，不是正文写错。" }
+    }
+}
+
+# 同 Invoke-GhUtf8 的理由：git diff 里有中文，经 PowerShell 管道会按控制台代码页解码。
+# 增量 diff 放在材料的元数据段，乱码会触发完整性校验 —— 是 fail-closed，但每次都失败。
+# 不在这里 Fail：--no-index 用退出码 1 表示「有差异」，由调用方解释。
+function Invoke-GitUtf8 {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'git'
+    foreach ($a in (@('-C', $repo) + $Arguments)) { [void]$psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    [void]$proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return [pscustomobject]@{ Output = $stdout; ExitCode = $proc.ExitCode }
+}
+
 # 不能直接用 & gh：PowerShell 捕获原生命令输出时按 [Console]::OutputEncoding
 # 解码，那是控制台的属性，受代码页影响。实测在简中机器上把 gh 的 UTF-8
 # 解成了乱码，而且在脚本里改 [Console]::OutputEncoding 也没能纠正。
@@ -163,7 +194,9 @@ if (-not $isDesign) {
 # 在消耗 Codex 配额之前检查实际 CI 和 PR 正文；不满足准入不产生审查判定。
 function Test-PrAdmission {
     $checks = @( (Invoke-GhUtf8 @('pr', 'checks', "$Pr", '--repo', $slug, '--json', 'name,bucket')) | ConvertFrom-Json )
-    foreach ($required in @('docs', 'scripts', 'secret-scan')) {
+    # 名单必须与 .github/workflows/ci.yml 的 job 名一致，且与 WORKFLOW §4 的准入描述一致。
+    # 漏一个（之前漏了 policy）= 一个把该 job 删掉的 PR 照样进审查。
+    foreach ($required in @('docs', 'scripts', 'policy', 'secret-scan')) {
         $matching = @($checks | Where-Object { $_.name -ceq $required })
         if ($matching.Count -eq 0 -or @($matching | Where-Object { $_.bucket -cne 'pass' }).Count -gt 0) {
             Fail "准入未通过：$required 缺失或尚未成功。未调用 Codex。"
@@ -203,65 +236,91 @@ function Get-ReviewMaterial {
         }
     }
 
-    $json = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'title,body,baseRefOid,headRefOid,comments')
+    $json = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'title,body,baseRefName,baseRefOid,headRefOid,comments')
     $obj = $json | ConvertFrom-Json
     if ($obj.headRefOid -cne $localHead) { Fail '取材时 PR head 已改变。' }
+
+    # 策略检查与增量计算都要本地有 base 的提交对象。没 fetch 过就会「跑不动」（退出 2），
+    # 看起来像正文写错。先把 base 取到本地。
+    $fetch = Invoke-GitUtf8 @('fetch', '-q', 'origin', $obj.baseRefName)
+    if ($fetch.ExitCode -ne 0) { Fail "无法 fetch base 分支 $($obj.baseRefName)，策略检查与增量无法计算。" }
+
     $bodyFile = Join-Path $repo ".codex-pr-body-$Pr.md"
     [System.IO.File]::WriteAllText($bodyFile, $obj.body, [System.Text.UTF8Encoding]::new($false))
     try {
         & python (Join-Path $PSScriptRoot 'check_repo_policy.py') --body-file $bodyFile --base $obj.baseRefOid --head $localHead
-        if ($LASTEXITCODE -ne 0) { Fail 'PR 策略检查未通过；未形成审查判定。' }
+        Assert-PolicyExit 'PR 正文策略检查'
     } finally { Remove-Item -LiteralPath $bodyFile -ErrorAction SilentlyContinue }
     $diff = Invoke-GhUtf8 @('pr', 'diff', "$Pr", '--repo', $slug)
 
     # 保留最近一轮审查及其后的回应，复审不用靠模型记忆恢复上下文。
-    $previousReview = $null
-    $response = $null
-    $reviewCount = 0
-    foreach ($comment in $obj.comments) {
-        if (Test-ReviewHeader $comment.body) {
-            $verdict = Get-ImplementationVerdict (Get-VerdictLine ($comment.body -split '\r?\n'))
-            if ($verdict -eq 'INVALID') { continue }
-            $previousReview = $comment.body
-            $response = $null
-            $reviewCount++
-        } elseif ((Get-FirstNonEmptyLine ($comment.body -split '\r?\n')) -ceq '## 🔧 CLAUDE RESPONSE') {
-            $response = $comment.body
-        }
-    }
+    # 扫评论的逻辑在 lib 里（Get-ImplementationReviewHistory），有测试。
+    $history = Get-ImplementationReviewHistory $obj.comments
     $revisionSection = '首次审查：无历史实现审查。'
-    if ($previousReview) {
-        $heads = [regex]::Matches($previousReview, '(?m)^reviewed-head: ([0-9a-f]{40})\r?$')
-        if ($heads.Count -ne 1) { Fail '上轮审查缺少唯一 reviewed-head，不能猜测复审基线。' }
-        $reviewedHead = $heads[0].Groups[1].Value
-        $previousVerdict = Get-ImplementationVerdict (Get-VerdictLine ($previousReview -split '\r?\n'))
-        if ($reviewedHead -cne $localHead -or $previousVerdict -eq 'REQUEST_CHANGES') {
-            if (-not $response) { Fail '复审缺少上轮审查之后的 CLAUDE RESPONSE。' }
-            $responseHeads = [regex]::Matches($response, '(?m)^reviewed-head: ([0-9a-f]{40})\r?$')
-            if ($responseHeads.Count -ne 1 -or $responseHeads[0].Groups[1].Value -cne $reviewedHead) {
-                Fail '回应未绑定最近一轮 reviewed-head。'
-            }
+    if ($history.PreviousReview) {
+        $reviewedHead = Get-ReviewedHead $history.PreviousReview
+        if (-not $reviewedHead) { Fail '上轮审查缺少唯一 reviewed-head，不能猜测复审基线。' }
+        $previousVerdict = Get-ImplementationVerdict (Get-VerdictLine ($history.PreviousReview -split '\r?\n'))
+        $response = $history.Response
+
+        # 只有上轮要求修改时才需要回应。上轮通过、之后又推了提交（含分支保护要求的
+        # 同步 base）时没有意见可回应 —— 强制要一张非空表只能逼人凑一行「不改」。
+        if ($previousVerdict -eq 'REQUEST_CHANGES') {
+            if (-not $response) { Fail '上轮审查要求修改，但之后没有 CLAUDE RESPONSE。' }
+            if ((Get-ReviewedHead $response) -cne $reviewedHead) { Fail '回应未绑定最近一轮 reviewed-head。' }
             $responseFile = Join-Path $repo ".codex-response-$Pr.md"
             [System.IO.File]::WriteAllText($responseFile, $response, [System.Text.UTF8Encoding]::new($false))
             try {
                 & python (Join-Path $PSScriptRoot 'check_repo_policy.py') --response-file $responseFile --head $localHead
-                if ($LASTEXITCODE -ne 0) { Fail '修复回应的证据检查未通过。' }
+                Assert-PolicyExit '回应证据检查'
             } finally { Remove-Item -LiteralPath $responseFile -ErrorAction SilentlyContinue }
-            if ($reviewCount -ge 2 -and $response -notmatch '(?ms)^### 完整影响面\r?\n\s*\S') {
+            if ($history.ReviewCount -ge 2 -and -not (Test-ImpactSection $response)) {
                 Fail '第三轮起必须在回应中填写「### 完整影响面」，先停止逐项补洞。'
             }
         }
-        & git -C $repo merge-base --is-ancestor $reviewedHead $localHead
-        if ($LASTEXITCODE -ne 0) { Fail '上轮 reviewed-head 不在当前提交历史中，需明确重新确定基线。' }
-        $delta = & git -C $repo diff --stat "$reviewedHead..$localHead"
-        if ($LASTEXITCODE -ne 0) { Fail '无法生成复审增量统计。' }
-        $deltaDiff = & git -C $repo diff "$reviewedHead..$localHead"
-        if ($LASTEXITCODE -ne 0) { Fail '无法生成复审增量 diff。' }
+
+        $anc = Invoke-GitUtf8 @('merge-base', '--is-ancestor', $reviewedHead, $localHead)
+        if ($anc.ExitCode -ne 0) {
+            Fail '上轮 reviewed-head 不在当前提交历史中。审查开始后不得 rebase / force-push（WORKFLOW §5），同步 base 请用 merge。'
+        }
+
+        # 增量 = 两版「PR 相对 base 的 diff」之间的差异。不能用 reviewedHead..HEAD 两点式：
+        # 分支保护要求分支最新，merge base 之后 base 上的所有改动都会混进来，
+        # Codex 会把一次同步 base 判成范围扩张（实测 #7 同步 main 会带进 13 文件 / +1340 行）。
+        $mbOld = Invoke-GitUtf8 @('merge-base', $obj.baseRefOid, $reviewedHead)
+        $mbNew = Invoke-GitUtf8 @('merge-base', $obj.baseRefOid, $localHead)
+        if ($mbOld.ExitCode -ne 0 -or $mbNew.ExitCode -ne 0) { Fail '无法计算与 base 的 merge-base，增量无法生成。' }
+        $oldDiff = [System.IO.Path]::GetTempFileName()
+        $newDiff = [System.IO.Path]::GetTempFileName()
+        try {
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+            $d1 = Invoke-GitUtf8 @('diff', $mbOld.Output.Trim(), $reviewedHead)
+            $d2 = Invoke-GitUtf8 @('diff', $mbNew.Output.Trim(), $localHead)
+            if ($d1.ExitCode -ne 0 -or $d2.ExitCode -ne 0) { Fail '无法生成两版 PR diff。' }
+            [System.IO.File]::WriteAllText($oldDiff, $d1.Output, $utf8)
+            [System.IO.File]::WriteAllText($newDiff, $d2.Output, $utf8)
+            # --no-index：0 = 两版逐字相同，1 = 有差异，其它 = 出错
+            $stat  = Invoke-GitUtf8 @('diff', '--no-index', '--stat', $oldDiff, $newDiff)
+            $delta = Invoke-GitUtf8 @('diff', '--no-index', $oldDiff, $newDiff)
+            if ($stat.ExitCode -gt 1 -or $delta.ExitCode -gt 1) { Fail '无法生成复审增量。' }
+        } finally {
+            Remove-Item -LiteralPath $oldDiff, $newDiff -ErrorAction SilentlyContinue
+        }
+        if ($stat.ExitCode -eq 0) {
+            $deltaStatText = '（空 —— 本轮只同步了 base，PR 自身改动与上轮逐字相同）'
+            $deltaText = $deltaStatText
+        } else {
+            $deltaStatText = $stat.Output
+            $deltaText = $delta.Output
+        }
         $revisionSection = @(
-            "第 $($reviewCount + 1) 轮审查；上轮 reviewed-head: $reviewedHead", '',
-            '### 上轮审查', $previousReview, '', '### 本轮回应', $response, '',
-            '### 自动生成的增量统计', ($delta -join $nl), '',
-            '### 自动生成的增量 diff', ($deltaDiff -join $nl)
+            "第 $($history.ReviewCount + 1) 轮审查；上轮 reviewed-head: $reviewedHead；上轮判定: $previousVerdict", '',
+            '增量口径：两版「PR 相对 base 的 diff」之间的差异，同步 base 带进来的改动不计入。',
+            '下面的增量 diff 是 diff 的 diff：行首第一个 `+`/`-` 是本轮相对上轮的增删，第二个才是 PR 自身的增删。', '',
+            '### 上轮审查', $history.PreviousReview, '',
+            '### 本轮回应', $(if ($response) { $response } else { '（无 —— 上轮已通过，本轮只有新提交）' }), '',
+            '### 自动生成的增量统计', $deltaStatText, '',
+            '### 自动生成的增量 diff', $deltaText
         ) -join $nl
     }
 
@@ -456,6 +515,7 @@ $common
 3. 若材料里有关联设计，核对实现是否忠于**已批准的那一版**；
    若材料说明没有关联设计，按其中的提示判断这是否构成阻断项。
 4. 若有上轮审查，逐条核对回应和增量及其影响的上下文；指出与修复无关的范围扩张。
+   增量已排除同步 base 带来的改动（口径见材料）；增量为空时只需确认上轮意见的处理。
    检查完整意见集合是否都有处理，SHA 和行号只证明引用存在，不证明问题已修复。
 
 按以下格式输出。最后一行只能是这两种之一，**多一个字都会被判为无效**：

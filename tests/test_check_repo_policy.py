@@ -8,7 +8,10 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
+import io
+import json
 import subprocess
 import tempfile
 import unittest
@@ -296,7 +299,7 @@ class ResponseTests(unittest.TestCase):
 # 退出码契约：2 = 检查跑不动，1 = 查出违规。混在一起会让基础设施故障被当成结论
 # --------------------------------------------------------------------------
 
-class ExitCodeTests(unittest.TestCase):
+class ValidateCommitTests(unittest.TestCase):
     def test_bad_sha_argument_is_a_check_error_not_a_violation(self):
         with TempRepo() as repo:
             with self.assertRaises(policy.PolicyError):
@@ -307,6 +310,147 @@ class ExitCodeTests(unittest.TestCase):
         with TempRepo() as repo:
             with self.assertRaises(policy.PolicyError):
                 policy.validate_commit(repo.root, repo.head[:12])
+
+
+# main() 是 CI 与 codex-review.ps1 唯一依赖的入口。它的 0/1/2 映射之前没有任何用例
+# —— REVIEW-LOG 却写着「ExitCodeTests 覆盖退出码契约」，是预审指出的假引用。
+# 这里对着真实仓库跑（check_local 与 git 都以 ROOT 为根），不 mock。
+
+def real_repo_shas() -> tuple[str, str]:
+    root = policy.ROOT
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD~1"], capture_output=True, text=True, check=True).stdout.strip()
+    return base, head
+
+
+def event_file(tmpdir: Path, payload) -> Path:
+    path = tmpdir / "event.json"
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+    return path
+
+
+NONE_BODY = BODY.replace("TODO impact: updated\nTODO target: docs/TODO.md:12",
+                         "TODO impact: none\nTODO reason: 纯测试用例，无任务状态变化")
+
+
+class MainExitCodeTests(unittest.TestCase):
+    def run_main(self, argv: list[str]) -> int:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return policy.main(argv)
+
+    def test_no_arguments_runs_local_checks_only(self):
+        self.assertEqual(self.run_main([]), 0)
+
+    def test_push_event_runs_local_checks_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = event_file(Path(tmp), {"ref": "refs/heads/main", "after": "0" * 40})
+            self.assertEqual(self.run_main(["--event-file", str(path)]), 0)
+
+    def test_pull_request_event_with_valid_body_passes(self):
+        base, head = real_repo_shas()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = event_file(Path(tmp), {"pull_request": {"body": NONE_BODY, "base": {"sha": base}, "head": {"sha": head}}})
+            self.assertEqual(self.run_main(["--event-file", str(path)]), 0)
+
+    def test_pull_request_event_with_placeholder_body_is_a_violation(self):
+        base, head = real_repo_shas()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = event_file(Path(tmp), {"pull_request": {"body": "## 任务\n\nTBD", "base": {"sha": base}, "head": {"sha": head}}})
+            self.assertEqual(self.run_main(["--event-file", str(path)]), 1)
+
+    def test_pull_request_event_with_null_body_is_a_violation_not_a_crash(self):
+        base, head = real_repo_shas()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = event_file(Path(tmp), {"pull_request": {"body": None, "base": {"sha": base}, "head": {"sha": head}}})
+            self.assertEqual(self.run_main(["--event-file", str(path)]), 1)
+
+    def test_bad_json_is_a_check_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = event_file(Path(tmp), "{not json")
+            self.assertEqual(self.run_main(["--event-file", str(path)]), 2)
+
+    def test_unknown_event_shape_is_a_check_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = event_file(Path(tmp), {"something": "else"})
+            self.assertEqual(self.run_main(["--event-file", str(path)]), 2)
+
+    def test_unknown_base_sha_is_a_check_error_not_a_violation(self):
+        # 本地没 fetch 到 base 时，是「跑不动」不是「正文写错」—— 两者的排障路径完全不同
+        _, head = real_repo_shas()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = event_file(Path(tmp), {"pull_request": {"body": NONE_BODY, "base": {"sha": "f" * 40}, "head": {"sha": head}}})
+            self.assertEqual(self.run_main(["--event-file", str(path)]), 2)
+
+    def test_body_file_without_base_and_head_is_a_usage_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "b.md"
+            body.write_text(NONE_BODY, encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                self.run_main(["--body-file", str(body)])
+            self.assertEqual(ctx.exception.code, 2)
+
+    def test_response_file_path_maps_violation_to_1(self):
+        _, head = real_repo_shas()
+        with tempfile.TemporaryDirectory() as tmp:
+            resp = Path(tmp) / "r.md"
+            resp.write_text(response("| 阻断 1 | 已修 | 已写进收口条件 | 看过了 |", head), encoding="utf-8")
+            self.assertEqual(self.run_main(["--response-file", str(resp), "--head", head]), 1)
+
+
+# --------------------------------------------------------------------------
+# check_local 与 sections：CI policy job 走的就是这两条路，之前零测试
+# --------------------------------------------------------------------------
+
+class LocalAndSectionTests(unittest.TestCase):
+    def test_check_local_scans_tracked_and_untracked_markdown(self):
+        with TempRepo() as repo:
+            (repo.root / "docs" / "new.md").write_text("- [~] 未跟踪的文件也要查\n", encoding="utf-8")
+            errors = policy.check_local(repo.root)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("docs/new.md:1", errors[0])
+
+    def test_check_local_ignores_gitignored_files(self):
+        # 审查脚本的临时材料在 .gitignore 里，不能被当成仓库内容
+        with TempRepo() as repo:
+            (repo.root / ".gitignore").write_text(".codex-*.md\n", encoding="utf-8")
+            (repo.root / ".codex-input-1.md").write_text("- [~] 临时材料\n", encoding="utf-8")
+            self.assertEqual(policy.check_local(repo.root), [])
+
+    def test_duplicate_section_is_reported(self):
+        _, errors = policy.sections("## 任务\n\na\n\n## 任务\n\nb\n")
+        self.assertEqual(errors, ["duplicate PR section: 任务"])
+
+
+# --------------------------------------------------------------------------
+# 宽容度：合法但略有差异的写法不该被拒 —— 预审实测三种都曾被拒且报错看不出原因
+# --------------------------------------------------------------------------
+
+class ToleranceTests(unittest.TestCase):
+    def test_response_header_with_leading_blank_line_and_trailing_space(self):
+        # 首行规则必须与 ps1 的 Test-ResponseHeader 一致：第一个非空行、trim 后相等
+        with TempRepo() as repo:
+            body = "\n" + response(f"| 阻断 1 | 已修 | {repo.head} · docs/TODO.md:12 | ok |", repo.head)
+            body = body.replace("## 🔧 CLAUDE RESPONSE\n", "## 🔧 CLAUDE RESPONSE \n", 1)
+            self.assertEqual(policy.check_response(body, root=repo.root, head=repo.head), [])
+
+    def test_backticked_evidence_is_accepted(self):
+        with TempRepo() as repo:
+            row = f"| 阻断 1 | 已修 | `{repo.head}` · `docs/TODO.md:12` | ok |"
+            self.assertEqual(policy.check_response(response(row, repo.head), root=repo.root, head=repo.head), [])
+
+    def test_quoted_reviewed_head_line_is_ignored(self):
+        with TempRepo() as repo:
+            body = response(f"| 阻断 1 | 已修 | {repo.head} · docs/TODO.md:12 | ok |", repo.head)
+            body = body.replace("| 意见 |", f"> reviewed-head: {repo.head}\n\n| 意见 |", 1)
+            self.assertEqual(policy.check_response(body, root=repo.root, head=repo.head), [])
+
+    def test_trailing_spaces_on_todo_and_reviewed_head_lines(self):
+        with TempRepo() as repo:
+            body = BODY.replace("TODO impact: updated\n", "TODO impact: updated  \n").replace("docs/TODO.md:12\n", "docs/TODO.md:12 \n")
+            self.assertEqual(policy.check_pr(body, {"docs/TODO.md"}, root=repo.root, head=repo.head), [])
+            resp = response(f"| 阻断 1 | 已修 | {repo.head} · docs/TODO.md:12 | ok |", repo.head)
+            resp = resp.replace(f"reviewed-head: {repo.head}\n", f"reviewed-head: {repo.head}  \n")
+            self.assertEqual(policy.check_response(resp, root=repo.root, head=repo.head), [])
 
 
 if __name__ == "__main__":

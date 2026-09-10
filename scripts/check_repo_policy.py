@@ -133,7 +133,8 @@ def check_pr(body: str, changed_paths: set[str], *, root: Path = ROOT, head: str
     gates = re.findall(r"(?m)^设计闸门：([^\r\n]*)$", plain)
     if len(gates) != 1 or not re.fullmatch(r"(?:#[1-9]\d*|不适用)", gates[0].strip()):
         errors.append("PR must contain exactly one 设计闸门：#<number> or 设计闸门：不适用")
-    todo = content.get("TODO 影响", "")
+    # 行尾空格不该改变语义；否则报错只说「must appear exactly once」，看不出是空格
+    todo = "\n".join(line.rstrip() for line in content.get("TODO 影响", "").splitlines())
     impacts = re.findall(r"(?m)^TODO impact: (.*)$", todo)
     if len(impacts) != 1 or impacts[0] not in {"updated", "none"}:
         errors.append("TODO impact must appear exactly once as updated or none")
@@ -162,10 +163,14 @@ def is_ancestor(root: Path, commit: str, head: str) -> bool:
 
 def check_response(body: str, *, root: Path = ROOT, head: str = "HEAD") -> list[str]:
     errors = []
-    lines = [line for _, line in visible_lines(body)]
-    if not body.splitlines() or body.splitlines()[0] != "## 🔧 CLAUDE RESPONSE":
+    lines = [line.rstrip() for _, line in visible_lines(body)]
+    # 首行规则必须与 scripts/lib/ReviewVerdict.ps1 的 Test-ResponseHeader 一致：
+    # 第一个非空行、去掉首尾空白后逐字相等。两套实现会让 ps1 认下的回应被这里拒绝。
+    first = next((line.strip() for line in lines if line.strip()), "")
+    if first != "## 🔧 CLAUDE RESPONSE":
         errors.append("response must start with ## 🔧 CLAUDE RESPONSE")
-    reviewed = re.findall(r"(?m)^reviewed-head: ([0-9a-f]{40})$", "\n".join(lines))
+    # 整行匹配：`> reviewed-head: …` 这种引用上轮的写法自然不算，不需要额外排除
+    reviewed = [m[1] for line in lines for m in [re.fullmatch(r"reviewed-head: ([0-9a-f]{40})", line)] if m]
     if len(reviewed) != 1:
         errors.append("response requires one full reviewed-head SHA")
     else:
@@ -197,6 +202,9 @@ def check_response(body: str, *, root: Path = ROOT, head: str = "HEAD") -> list[
             continue
         opinion, handling, evidence, _ = cells
         if handling == "已修":
+            # markdown 里给 SHA 和路径加反引号是最自然的写法（CLAUDE.md 自己就这么描述格式），
+            # 分隔点两侧的空格数也不该影响语义
+            evidence = re.sub(r"\s*·\s*", " · ", evidence.replace("`", "")).strip()
             match = re.fullmatch(r"([0-9a-f]{40}) · (.+):([1-9]\d*)", evidence)
             if not match:
                 errors.append(f"{opinion}: 已修 requires full SHA · file:line")

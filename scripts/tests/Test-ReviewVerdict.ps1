@@ -125,6 +125,57 @@ Assert-Equal 'APPROVAL_CHANGED' (Compare-DesignState 2 $true 2 $false) '审查�
 Assert-Equal 'APPROVAL_CHANGED' (Compare-DesignState 2 $false 2 $true) '审查期间才拿到批准'
 Assert-Equal 'VERSION_CHANGED' (Compare-DesignState 2 $true $null $true) '设计版本读不到了'
 
+Write-Host "Test-ResponseHeader"
+Assert-Equal $true  (Test-ResponseHeader "## 🔧 CLAUDE RESPONSE`n表") '标准回应'
+Assert-Equal $true  (Test-ResponseHeader "`n## 🔧 CLAUDE RESPONSE `n表") '前导空行与尾随空格不影响（与 Python 侧同一规则）'
+Assert-Equal $false (Test-ResponseHeader "## 🔍 CODEX REVIEW`n表") '审查不是回应'
+Assert-Equal $false (Test-ResponseHeader '') '空 = 不是回应'
+
+Write-Host "Get-ReviewedHead"
+$sha  = 'a' * 40
+$sha2 = 'b' * 40
+Assert-Equal $sha  (Get-ReviewedHead "## 🔍 CODEX REVIEW`nreviewed-head: $sha`n`nVERDICT: APPROVE") '恰好一处'
+Assert-Equal $sha  (Get-ReviewedHead "reviewed-head: $sha   `nVERDICT: APPROVE") '行尾空格不影响'
+Assert-Equal $null (Get-ReviewedHead "## 🔍 CODEX REVIEW`nVERDICT: APPROVE") '没有 = null，不猜'
+Assert-Equal $null (Get-ReviewedHead "reviewed-head: $sha`nreviewed-head: $sha2") '两处 = null，不猜'
+# 回应里引用上轮那一行是正常写法，不能算成第二处
+Assert-Equal $sha  (Get-ReviewedHead "## 🔧 CLAUDE RESPONSE`n> reviewed-head: $sha`n`nreviewed-head: $sha") '引用行不计'
+Assert-Equal $null (Get-ReviewedHead "reviewed-head: $($sha.Substring(0,12))") '短 SHA 不收'
+
+Write-Host "Get-ImplementationReviewHistory"
+$rev1 = @{ body = "## 🔍 CODEX REVIEW`n意见`nreviewed-head: $sha`n`nVERDICT: REQUEST_CHANGES" }
+$rev2 = @{ body = "## 🔍 CODEX REVIEW`n意见`nreviewed-head: $sha2`n`nVERDICT: APPROVE" }
+$resp = @{ body = "## 🔧 CLAUDE RESPONSE`n`nreviewed-head: $sha`n表" }
+$pre  = @{ body = "## 🧪 CLAUDE 预审`n`nPRE-REVIEW: 有阻断项" }
+$bad  = @{ body = "## 🔍 CODEX REVIEW`n草稿`n`nVERDICT: approve" }  # check-docs:allow
+
+$h = Get-ImplementationReviewHistory @()
+Assert-Equal $null $h.PreviousReview '无评论 = 无上轮'
+Assert-Equal 0 $h.ReviewCount '无评论 = 0 轮'
+
+$h = Get-ImplementationReviewHistory @($rev1, $resp)
+Assert-Equal $rev1.body $h.PreviousReview '取到上轮审查'
+Assert-Equal $resp.body $h.Response '取到其后的回应'
+Assert-Equal 1 $h.ReviewCount '一轮'
+
+$h = Get-ImplementationReviewHistory @($rev1, $resp, $rev2)
+Assert-Equal $rev2.body $h.PreviousReview '新一轮审查覆盖上一轮'
+Assert-Equal $null $h.Response '新一轮出现后旧回应作废'
+Assert-Equal 2 $h.ReviewCount '两轮'
+
+$h = Get-ImplementationReviewHistory @($pre, $rev1)
+Assert-Equal 1 $h.ReviewCount '预审不算审查轮次'
+$h = Get-ImplementationReviewHistory @($bad, $rev1)
+Assert-Equal 1 $h.ReviewCount '判定行不合法的审查不算数'
+$h = Get-ImplementationReviewHistory @($resp)
+Assert-Equal $null $h.PreviousReview '只有回应没有审查 = 无上轮'
+
+Write-Host "Test-ImpactSection"
+Assert-Equal $true  (Test-ImpactSection "## 🔧 CLAUDE RESPONSE`n`n### 完整影响面`n- 改动覆盖 X、Y") '有内容'
+Assert-Equal $false (Test-ImpactSection "## 🔧 CLAUDE RESPONSE`n`n### 完整影响面`n`n") '标题下面是空的 = 没写'
+Assert-Equal $false (Test-ImpactSection "## 🔧 CLAUDE RESPONSE`n表") '没有这一节'
+Assert-Equal $true  (Test-ImpactSection "### 完整影响面  `n内容") '标题尾随空格不影响'
+
 Write-Host ""
 if ($script:failed -gt 0) {
     Write-Host "$script:passed 通过，$script:failed 失败" -ForegroundColor Red

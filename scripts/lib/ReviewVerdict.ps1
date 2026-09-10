@@ -156,3 +156,57 @@ function Compare-MaterialParts {
     }
     return $changed
 }
+
+# ---- 复审：从评论历史里恢复上下文 ----
+# 下面这几个函数原本内联在 codex-review.ps1 的取材逻辑里，无法测试。
+# 抽出来的理由和 Get-LatestDesignApproval 一样：判断「上一轮是谁说的、说了什么」
+# 出错时是静默的 —— 要么把回应当成审查，要么把预审当成审查。
+
+$ClaudeResponsePrefix = '## 🔧 CLAUDE RESPONSE'
+
+function Test-ResponseHeader {
+    param([string]$Body)
+    return ((Get-FirstNonEmptyLine ($Body -split '\r?\n')) -ceq $ClaudeResponsePrefix)
+}
+
+# 取评论里的 reviewed-head。整行匹配，所以 `> reviewed-head: …` 这种引用上轮的写法
+# 自然不算。恰好一处才返回，否则 $null（不猜）。
+function Get-ReviewedHead {
+    param([string]$Body)
+    if (-not $Body) { return $null }
+    $found = @()
+    foreach ($line in ($Body -split '\r?\n')) {
+        if ($line.TrimEnd() -cmatch '^reviewed-head: ([0-9a-f]{40})$') { $found += $Matches[1] }
+    }
+    if ($found.Count -eq 1) { return $found[0] }
+    return $null
+}
+
+# 扫一遍评论，得到：最近一轮有效实现审查、它之后的最后一条回应、审查轮数。
+# 新一轮审查出现时上一条回应作废（它回应的是更早那轮）。
+# 判定行不合法的「审查」不算数 —— 那是发布方校验前的残留或人工贴的草稿。
+function Get-ImplementationReviewHistory {
+    param($Comments)
+    $previous = $null
+    $response = $null
+    $count = 0
+    foreach ($c in $Comments) {
+        if (Test-ReviewHeader $c.body) {
+            $verdict = Get-ImplementationVerdict (Get-VerdictLine ($c.body -split '\r?\n'))
+            if ($verdict -eq 'INVALID') { continue }
+            $previous = $c.body
+            $response = $null
+            $count++
+        } elseif (Test-ResponseHeader $c.body) {
+            $response = $c.body
+        }
+    }
+    return [pscustomobject]@{ PreviousReview = $previous; Response = $response; ReviewCount = $count }
+}
+
+# 第三轮起要求回应里有非空的「### 完整影响面」。
+function Test-ImpactSection {
+    param([string]$Body)
+    if (-not $Body) { return $false }
+    return [bool]($Body -match '(?ms)^### 完整影响面[ \t]*\r?\n\s*\S')
+}
