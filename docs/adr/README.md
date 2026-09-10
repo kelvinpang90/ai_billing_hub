@@ -37,6 +37,9 @@
 | [0002](ADR-0002-production-datastore-isolation.md) | 生产数据存储隔离：专用实例而非共享基建 | 已接受 | 2026-09-10 |
 | [0003](ADR-0003-financial-period-and-cutoff.md) | 财务期间与 cut-off：T+1 宽限 + 上期调整 | 已接受 | 2026-09-10 |
 | [0004](ADR-0004-credential-encryption.md) | 凭据加密与密钥管理 | 已接受 | 2026-09-10 |
+| [0005](ADR-0005-fx-rate-source.md) | 汇率来源与版本化：BNM openAPI + 显式发布 | 已接受 | 2026-09-10 |
+| [0006](ADR-0006-payment-gateway-contract.md) | 支付网关：先定准入契约，供应商延到 Phase 4 前 | 已接受 | 2026-09-10 |
+| [0007](ADR-0007-concurrent-pending-payments.md) | 并发 PENDING 支付：允许并存，都付都入账 | 已接受 | 2026-09-10 |
 
 ## 待写（spec §136 要求）
 
@@ -44,4 +47,5 @@
 - [x] 财务期间与 cut-off 规则 → [ADR-0003](ADR-0003-financial-period-and-cutoff.md)
 - [x] 凭据加密方案（密钥管理、轮换、恢复）→ [ADR-0004](ADR-0004-credential-encryption.md)
 - [x] 生产数据库隔离 → [ADR-0002](ADR-0002-production-datastore-isolation.md)
-- [ ] 外部供应商选型：支付网关、FX 数据源
+- [x] FX 数据源 → [ADR-0005](ADR-0005-fx-rate-source.md)
+- [~] 支付网关选型 → [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**具体供应商仍未选定，硬截止在 Phase 4 开工前**
