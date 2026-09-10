@@ -160,6 +160,22 @@ if (-not $isDesign) {
     }
 }
 
+# 在消耗 Codex 配额之前检查实际 CI 和 PR 正文；不满足准入不产生审查判定。
+function Test-PrAdmission {
+    $checks = @( (Invoke-GhUtf8 @('pr', 'checks', "$Pr", '--repo', $slug, '--json', 'name,bucket')) | ConvertFrom-Json )
+    foreach ($required in @('docs', 'scripts', 'secret-scan')) {
+        $matching = @($checks | Where-Object { $_.name -ceq $required })
+        if ($matching.Count -eq 0 -or @($matching | Where-Object { $_.bucket -cne 'pass' }).Count -gt 0) {
+            Fail "准入未通过：$required 缺失或尚未成功。未调用 Codex。"
+        }
+    }
+    if (@($checks | Where-Object { $_.bucket -cne 'pass' }).Count -gt 0) {
+        Fail '准入未通过：仍有未通过的 CI 检查。'
+    }
+}
+
+if (-not $isDesign) { Test-PrAdmission }
+
 # ---- 取审查材料 ----
 $inputFile = Join-Path $repo ".codex-input-$kind-$number.md"
 $nl = [Environment]::NewLine
@@ -187,9 +203,67 @@ function Get-ReviewMaterial {
         }
     }
 
-    $json = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'title,body')
+    $json = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'title,body,baseRefOid,headRefOid,comments')
     $obj = $json | ConvertFrom-Json
+    if ($obj.headRefOid -cne $localHead) { Fail '取材时 PR head 已改变。' }
+    $bodyFile = Join-Path $repo ".codex-pr-body-$Pr.md"
+    [System.IO.File]::WriteAllText($bodyFile, $obj.body, [System.Text.UTF8Encoding]::new($false))
+    try {
+        & python (Join-Path $PSScriptRoot 'check_repo_policy.py') --body-file $bodyFile --base $obj.baseRefOid --head $localHead
+        if ($LASTEXITCODE -ne 0) { Fail 'PR 策略检查未通过；未形成审查判定。' }
+    } finally { Remove-Item -LiteralPath $bodyFile -ErrorAction SilentlyContinue }
     $diff = Invoke-GhUtf8 @('pr', 'diff', "$Pr", '--repo', $slug)
+
+    # 保留最近一轮审查及其后的回应，复审不用靠模型记忆恢复上下文。
+    $previousReview = $null
+    $response = $null
+    $reviewCount = 0
+    foreach ($comment in $obj.comments) {
+        if (Test-ReviewHeader $comment.body) {
+            $verdict = Get-ImplementationVerdict (Get-VerdictLine ($comment.body -split '\r?\n'))
+            if ($verdict -eq 'INVALID') { continue }
+            $previousReview = $comment.body
+            $response = $null
+            $reviewCount++
+        } elseif ((Get-FirstNonEmptyLine ($comment.body -split '\r?\n')) -ceq '## 🔧 CLAUDE RESPONSE') {
+            $response = $comment.body
+        }
+    }
+    $revisionSection = '首次审查：无历史实现审查。'
+    if ($previousReview) {
+        $heads = [regex]::Matches($previousReview, '(?m)^reviewed-head: ([0-9a-f]{40})\r?$')
+        if ($heads.Count -ne 1) { Fail '上轮审查缺少唯一 reviewed-head，不能猜测复审基线。' }
+        $reviewedHead = $heads[0].Groups[1].Value
+        $previousVerdict = Get-ImplementationVerdict (Get-VerdictLine ($previousReview -split '\r?\n'))
+        if ($reviewedHead -cne $localHead -or $previousVerdict -eq 'REQUEST_CHANGES') {
+            if (-not $response) { Fail '复审缺少上轮审查之后的 CLAUDE RESPONSE。' }
+            $responseHeads = [regex]::Matches($response, '(?m)^reviewed-head: ([0-9a-f]{40})\r?$')
+            if ($responseHeads.Count -ne 1 -or $responseHeads[0].Groups[1].Value -cne $reviewedHead) {
+                Fail '回应未绑定最近一轮 reviewed-head。'
+            }
+            $responseFile = Join-Path $repo ".codex-response-$Pr.md"
+            [System.IO.File]::WriteAllText($responseFile, $response, [System.Text.UTF8Encoding]::new($false))
+            try {
+                & python (Join-Path $PSScriptRoot 'check_repo_policy.py') --response-file $responseFile --head $localHead
+                if ($LASTEXITCODE -ne 0) { Fail '修复回应的证据检查未通过。' }
+            } finally { Remove-Item -LiteralPath $responseFile -ErrorAction SilentlyContinue }
+            if ($reviewCount -ge 2 -and $response -notmatch '(?ms)^### 完整影响面\r?\n\s*\S') {
+                Fail '第三轮起必须在回应中填写「### 完整影响面」，先停止逐项补洞。'
+            }
+        }
+        & git -C $repo merge-base --is-ancestor $reviewedHead $localHead
+        if ($LASTEXITCODE -ne 0) { Fail '上轮 reviewed-head 不在当前提交历史中，需明确重新确定基线。' }
+        $delta = & git -C $repo diff --stat "$reviewedHead..$localHead"
+        if ($LASTEXITCODE -ne 0) { Fail '无法生成复审增量统计。' }
+        $deltaDiff = & git -C $repo diff "$reviewedHead..$localHead"
+        if ($LASTEXITCODE -ne 0) { Fail '无法生成复审增量 diff。' }
+        $revisionSection = @(
+            "第 $($reviewCount + 1) 轮审查；上轮 reviewed-head: $reviewedHead", '',
+            '### 上轮审查', $previousReview, '', '### 本轮回应', $response, '',
+            '### 自动生成的增量统计', ($delta -join $nl), '',
+            '### 自动生成的增量 diff', ($deltaDiff -join $nl)
+        ) -join $nl
+    }
 
     # 关联的设计文档必须一起给，否则 prompt 里「核对是否忠于已批准的设计」
     # 是一条无法执行的要求 —— Codex 没有网络，看不到那个 Issue。
@@ -253,6 +327,8 @@ function Get-ReviewMaterial {
         Parts         = [ordered]@{
             '标题'     = "# $($obj.title)"
             'PR 正文'  = $obj.body
+            'PR 基线'  = "$($obj.baseRefOid)..$($obj.headRefOid)"
+            '复审上下文' = $revisionSection
             '关联设计' = ($designSection -join $nl)
             'DIFF'     = ($diff -join $nl)
         }
@@ -267,6 +343,7 @@ function Format-Material {
     }
     return (@(
         $p['标题'], '', $p['PR 正文'], '', $p['关联设计'],
+        '', '## 复审上下文', '', $p['复审上下文'],
         '', '## DIFF', '', ($fence + 'diff'), $p['DIFF'], $fence
     ) -join $nl)
 }
@@ -378,6 +455,8 @@ $common
 2. 走 scripts/review_checklist.md 的「实现审查」A–E 各节。
 3. 若材料里有关联设计，核对实现是否忠于**已批准的那一版**；
    若材料说明没有关联设计，按其中的提示判断这是否构成阻断项。
+4. 若有上轮审查，逐条核对回应和增量及其影响的上下文；指出与修复无关的范围扩张。
+   检查完整意见集合是否都有处理，SHA 和行号只证明引用存在，不证明问题已修复。
 
 按以下格式输出。最后一行只能是这两种之一，**多一个字都会被判为无效**：
   VERDICT: APPROVE
@@ -483,6 +562,7 @@ if (-not $isDesign) {
 # 前面那些是「想到了才查得到」的专项检查，漏一项就是一个静默的洞。
 # 这里重新取一次材料逐段比对 —— **材料逐字没变，才允许发布判定**。
 $after = Get-ReviewMaterial
+if (-not $isDesign) { Test-PrAdmission }
 
 if ($material.DesignIssue -ne $after.DesignIssue) {
     Fail "审查期间 PR 正文里关联的设计 Issue 变了（#$($material.DesignIssue) → #$($after.DesignIssue)），未发布。"
@@ -526,9 +606,9 @@ if (-not $isDesign) {
 }
 
 if ($Post) {
-    if ($isDesign) { & gh issue comment $Issue --repo $slug --body-file $out }
-    else           { & gh pr comment $Pr --repo $slug --body-file $out }
-    if ($LASTEXITCODE -ne 0) { Fail "发布评论失败" }
+    $writeKind = if ($isDesign) { 'issue-comment' } else { 'pr-comment' }
+    & python (Join-Path $PSScriptRoot 'gh_verified_write.py') --repo $slug --number $number --kind $writeKind --body-file $out
+    if ($LASTEXITCODE -ne 0) { Fail '发布或回读验证失败；不得自动重发，先核对远端对象。' }
     Write-Host "已发布到 $target" -ForegroundColor Green
 } else {
     Write-Host "未发布（加 -Post 可发到 $target）"

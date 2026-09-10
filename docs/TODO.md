@@ -200,6 +200,22 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ---
 
+## 流程加固 —— 审查流水线（2026-09-11）
+
+背景：#5 六轮 + #6 两轮共 17 条阻断，**0 条自查发现**；重复的错误类型见 [REVIEW-LOG.md](REVIEW-LOG.md)「反复出现的问题」与「机械化对照」。写下来的规则对开发者无效（写下的当轮就违反过），所以本节只做两类：机器执行的检查，和让错误做不出来的格式约束。
+
+- [x] `scripts/check_repo_policy.py`：复选框白名单（只允许 `[ ]` / `[x]`）、PR 模板小节齐全与 `设计闸门：` 行、`TODO 影响` 声明与 diff 一致、回应证据 `完整 SHA · 文件:行` 在所指提交上真实存在且在 head 历史内。**验收**：`tests/test_check_repo_policy.py` 32 用例，全部取自真实缺陷（`[~]`、假引用、过期 SHA、越界行号、代码块 / 链接 / HTML 注释不误判）；变异测试——禁用复选框逻辑后 5 个用例失败
+- [x] `scripts/gh_verified_write.py`：GitHub 写操作以参数数组调 `gh api`，写完按对象 id 回读比对；不一致退出 2 且**不自动重发**。**验收**：`tests/test_gh_verified_write.py` 10 用例，全部 mock，不打真实 PR
+- [x] `scripts/codex-review.ps1` 接入：准入（CI 全绿 + 正文策略检查）不过则不调 Codex；复审材料自动带上轮审查、本轮回应、`reviewed-head..HEAD` 增量；第三轮起要求 `### 完整影响面`；发布改走回读验证
+- [x] CI 新增 `policy` job（策略检查 + Python 回归）；`pull_request` 触发加 `edited`，PR 正文改了会重跑
+- [x] 模板与文档同步：PR 模板 `TODO 影响` 节、WORKFLOW §4 / §6 / §7、审查清单准入与 F 节、CLAUDE.md / AGENTS.md 入口。**验收**：`check_docs.py` 通过（约定串规则含署名前缀）
+- [ ] 合并后把 `policy` 加进 `main` 的必需检查（分支保护是仓库设置，PR 里改不了）
+- [ ] 已开的 #6、#7 按新模板补 `TODO 影响` 节；#6 上旧格式的 `CLAUDE RESPONSE` 要在复审前重发一条新格式的，否则复审取材会被策略检查拒绝
+
+**仍靠语义审查、机器抓不住的**：ADR 与 TODO 的*内容*是否一致（检查只证明声明了影响）；「已修」是否真修好（SHA · 行号只证明引用存在）；范围扩张是否必要。这三样写进了审查清单 F 节，由 Codex 复审时判断。
+
+---
+
 ## 文档欠账
 
 - [ ] D1–D7 的 ADR（`docs/adr/` 目录已建，见 [adr/README.md](adr/README.md)；ADR-0001 已完成）

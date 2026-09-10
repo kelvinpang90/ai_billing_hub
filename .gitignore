@@ -31,3 +31,5 @@ Thumbs.db
 /data/
 .codex-review-*.md
 .codex-input-*.md
+.codex-pr-body-*.md
+.codex-response-*.md
