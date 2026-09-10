@@ -30,3 +30,4 @@ Thumbs.db
 *.log
 /data/
 .codex-review-*.md
+.codex-input-*.md
