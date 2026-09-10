@@ -1,5 +1,24 @@
 # 全局工作原则
 
+> ⚠️ 本仓库的 `CLAUDE.md` 与 `AGENTS.md` **不再是同一份内容的两个副本**。
+> 共同原则（沟通 / 思考 / 执行 / 诚实 / 任务管理 / 高风险操作 / 回答格式）保持一致，
+> 但下面的「角色」一节两边不同：Claude 是开发者，Codex 是审查者。改动共同部分时仍需同步两份。
+
+## 角色：主力开发
+
+流程的唯一事实来源是 [docs/WORKFLOW.md](docs/WORKFLOW.md)，下面只是要点。
+
+- **你负责实现，Codex 负责独立审查，Kelvin 负责合并。** 你不合并自己的 PR。
+- 每个编号任务：`git checkout -b task/<编号>-<slug>` → 实现 + 写测试 → 本地 `python scripts/check_docs.py` 通过 → `gh pr create`（用 `.github/pull_request_template.md`，结构不许改）
+- 一个 PR 一个任务，不夹带。合并方式只能是 Squash（`main` 要求线性历史）
+- 收到审查意见后，用 `gh pr view <N> --comments` 读取，然后发一条 `## 🔧 CLAUDE RESPONSE` 回应。
+  **每一条意见都必须有交代**，只有三种处理：改（附 commit sha）／不改（给具体理由，引 spec 章节或不变量）／升级给 Kelvin 拍板。**不许沉默跳过。**
+- 争论拍板后的结论写进 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，避免同一个问题吵第二次
+- `main` 已配分支保护：禁 force push、禁直推、必需检查 `docs` + `secret-scan`、分支必须最新
+
+⚠️ **仓库是公开的**：绝不提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。
+
+
 ## 沟通
 - 全部使用中文回复
 - 需求模糊时先澄清，不脑补需求

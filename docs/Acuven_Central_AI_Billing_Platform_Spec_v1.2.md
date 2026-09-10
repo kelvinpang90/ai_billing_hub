@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.1  
+**Version:** 1.2  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -14,6 +14,7 @@
 | --- | --- | --- |
 | 1.0 | 2026-09-09 | Initial V1 product and implementation specification. |
 | 1.1 | 2026-09-10 | Clarified currency conversion, pricing data, asynchronous ingestion, idempotency, financial periods, status handling, security, recovery, compliance gates, and production operations. |
+| 1.2 | 2026-09-10 | §99 repository visibility changed from private to public to obtain branch protection under GitHub Free. See ADR-0001. No other normative change. |
 
 ## Document Navigation
 
@@ -3558,7 +3559,9 @@ document-worker
 
 Production source and delivery:
 
-- private GitHub repository
+- public GitHub repository — see `docs/adr/ADR-0001-repository-visibility.md`
+  - GitHub Free does not support branch protection on private repositories, so the protected `main` and mandatory-CI requirements below could not be met while staying private.
+  - Because the repository is public, credentials, secrets, `.env` files, real hostnames/IP addresses, customer data, and supplier contract pricing must never be committed. The `secret-scan` CI job is a backstop, not a licence.
 - protected `main` branch
 - CI must pass before merge/deployment
 - merge to `main` triggers GitHub Actions deployment to the VPS

@@ -1,6 +1,7 @@
 # 评审意见落实核对（v1.0 评审 → spec v1.1）
 
-> 逐条比对 [SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) 的 25 条意见与 [spec v1.1](Acuven_Central_AI_Billing_Platform_Spec_v1.1.md) 正文。
+> 逐条比对 [SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) 的 25 条意见与 spec **v1.1** 正文。
+> 核对之后 spec 修订至 [v1.2](Acuven_Central_AI_Billing_Platform_Spec_v1.2.md)（仅改 §99 仓库可见性，见 [ADR-0001](adr/ADR-0001-repository-visibility.md)），本文件的核对结论不受影响。
 > 核对日期：2026-09-10 · 核对方式：按每条意见点名的章节读原文比对，非抽样
 
 **结论**：25 条里 **20 条已解决**，**5 条有残留**（#4 / #16 / #20 / #21 / #24）。所有 P0 阻断级（7 条）**全部解决**，Phase 0 / Phase 1 没有被评审意见卡住的地方。
