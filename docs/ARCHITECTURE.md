@@ -135,9 +135,29 @@ optional: document-worker
 环境: 本地 Docker 测试环境 + 生产 VPS（V1 无独立 staging）
 ```
 
-交付要求：私有 GitHub 仓库、受保护 `main`、CI 通过才能合并、合并触发 GitHub Actions 部署、镜像用不可变 tag 标识提交、密钥走 GitHub environment secrets 绝不入库、迁移按文档化的安全顺序执行、部署等健康检查 + 冒烟测试、有经过验证的回滚/前滚流程、并发部署串行化。
+交付要求：~~私有~~ GitHub 仓库（**见第 7.1 节：当前实际为公开，是一处未经批准的偏离**）、受保护 `main`、CI 通过才能合并、合并触发 GitHub Actions 部署、镜像用不可变 tag 标识提交、密钥走 GitHub environment secrets 绝不入库、迁移按文档化的安全顺序执行、部署等健康检查 + 冒烟测试、有经过验证的回滚/前滚流程、并发部署串行化。
 
 ⚠️ 因为没有 staging，支付 / Email / WhatsApp / 数据库迁移 / 破坏性恢复类改动，必须先在沙箱或本地验证，并走明确的生产变更清单。
+
+## 7.1 与 spec 的偏离：仓库可见性 ⚠️ 未决
+
+| | |
+| --- | --- |
+| **spec 要求** | §99「private GitHub repository」 |
+| **当前实际** | `github.com/kelvinpang90/ai_billing_hub` 为**公开** |
+| **发生时间** | 2026-09-10 |
+| **原因** | GitHub Free 的**私有**仓库不支持分支保护（branch protection 与 rulesets 两个 API 均返回 403，提示需 Pro）。为拿到 spec §99 同样要求的「受保护 `main` + CI 通过才能合并」，仓库改为公开 |
+
+**这是用一条 spec 要求换另一条 spec 要求，不是一个干净的决定。** 代价是：spec 全文、数据库表结构、HMAC 与密钥管理方案、部署拓扑、`SPEC_REVIEW_v1.0.md`（一份系统弱点清单）与 `REVIEW_FOLLOWUP_v1.1.md`（5 条至今未解决的残留）全部永久公开。
+
+**当前状态：尚未正式批准。** spec §99 仍写着 private，两处互斥。必须二选一收口：
+
+- **选项 A** —— 升级 GitHub Pro（约 US$4/月），仓库转回私有，偏离消失，spec 无需改动
+- **选项 B** —— 接受公开，把决策与取舍写成 ADR 并修订 spec 至 v1.2，让 §99 与实际一致
+
+在收口之前，任何人读到 §99 都无法判断「公开」是已批准的架构偏离还是失误。**收口前不得进入生产部署。**
+
+追踪见 [TODO.md](TODO.md) 的 R6。
 
 ## 8. 待补的 ADR（§136）
 

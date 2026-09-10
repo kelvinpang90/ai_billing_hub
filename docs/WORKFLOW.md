@@ -14,6 +14,9 @@
 | **审查者** | Codex desktop（本机） | 读 diff、按清单审查、把意见发到 PR | **改任何代码、push、合并** |
 | **验收者** | 你 | 触发审查、最终判断、点 Squash and merge | — |
 
+> 「只读」的**唯一例外**：写一个被 `.gitignore` 忽略的临时审查文件 `.codex-review-<N>.md`，
+> 用来给 `gh pr comment --body-file` 当输入，发完即删。除此之外不碰工作区任何文件。
+
 分工的意义在于**审查者没有实现时的思维定势**。所以审查者只读不写这条是硬规则——一旦 Codex 开始动手改，它就变成了第二个开发者，独立性没了。
 
 ## 2. 闭环
@@ -23,21 +26,27 @@
  2  git checkout -b task/<编号>-<slug>
  3  实现 + 写测试
  4  本地全套检查通过（见 §5）
- 5  push + gh pr create（用 PR 模板）
- 6  CI 跑：docs / secret-scan（+ 将来的 backend）
+ 5  在同一分支上写好 docs/TODO.md 的任务记录：
+    勾掉 [ ]，写清做了什么、偏离了什么、验证到什么程度
+ 6  push + gh pr create（用 PR 模板）
+ 7  CI 跑：docs / secret-scan（+ 将来的 backend）
  ────────────────────────────────────────────
- 7  ★ 你在 Codex desktop 粘 §6 那段指令，启动审查
- 8  Codex 按 scripts/review_checklist.md 审 diff，
+ 8  ★ 你在 Codex desktop 粘 §6 那段指令，启动审查
+ 9  Codex 按 scripts/review_checklist.md 审 diff，
     用 gh pr comment 发结构化意见，末行给 VERDICT
  ────────────────────────────────────────────
- 9  Claude 读 gh pr view --comments，
-    逐条修 或 逐条说明为什么不改（不许沉默跳过）
-10  回到 6，直到 VERDICT: APPROVE
-11  你 Squash and merge
-12  Claude 回写 docs/TODO.md 的任务记录 + docs/REVIEW-LOG.md 的教训
+10  Claude 读 gh pr view --comments，
+    逐条修 或 逐条说明为什么不改（不许沉默跳过）；
+    有值得沉淀的教训就一并写进 docs/REVIEW-LOG.md，提交到同一分支
+11  回到 7，直到 VERDICT: APPROVE
+12  你 Squash and merge —— 任务记录与教训随 PR 一起进 main
 ```
 
-**第 7 步是唯一的人工触发点。** Codex desktop 是本地应用，不会被 GitHub webhook 叫醒，这是这套形态的天花板，绕不过去。所以指令固定成下面那段，你复制粘贴即可。
+⚠️ **合并之后没有步骤。** `main` 受保护、不能直接推，任何"合并后再补记录"都得另开一个 PR ——
+那是闭环里没有定义的动作。所以任务记录（第 5 步）与审查教训（第 10 步）必须在分支上完成，随 PR 一起进 `main`。
+这也和 [TODO.md](TODO.md) 顶部「做完把 `[ ]` 改成 `[x]` 并补记录」的约定对齐。
+
+**第 8 步是唯一的人工触发点。** Codex desktop 是本地应用，不会被 GitHub webhook 叫醒，这是这套形态的天花板，绕不过去。所以指令固定成下面那段，你复制粘贴即可。
 
 ## 3. 分支与 PR 约定
 
