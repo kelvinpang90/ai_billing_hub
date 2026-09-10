@@ -1,14 +1,17 @@
-﻿<#
+<#
 .SYNOPSIS
     跑 Codex 独立审查（只读沙箱），可选把结果发回 PR 或设计 Issue。
 
 .DESCRIPTION
     流程见 docs/WORKFLOW.md，审查清单见 scripts/review_checklist.md。
 
-    Codex 在 read-only 沙箱里跑 —— 「审查者只读」是沙箱强制的，不是约定。
-    输出实时打在终端上，同时落盘到 .codex-review-*.md（已被 .gitignore 忽略）。
+    职责切分：
+      脚本  取材料（gh）→ 落盘 .codex-input-*.md
+      Codex 只读本地文件做分析，不碰网络（read-only 沙箱挡住 gh 的配置）
+      脚本  校验判定 → 发布评论
 
-    退出码：0 = APPROVE，1 = REQUEST_CHANGES，2 = 执行出错或判定缺失。
+    退出码：0 = 通过，1 = 要改，2 = 执行出错或判定无效。
+    这个契约是自动化的基础，不要破坏。
 
 .PARAMETER Pr
     要审的 Pull Request 编号（实现闸门）。
@@ -17,19 +20,14 @@
     要审的设计 Issue 编号（设计闸门）。
 
 .PARAMETER Post
-    审完把结果作为评论发到该 PR / Issue。不加则只在本地产出。
+    审完把结果作为评论发到该 PR / Issue。**判定无效时不会发布。**
 
 .EXAMPLE
     .\scripts\codex-review.ps1 -Pr 5
-    审 PR #5，结果只留在本地，先自己看。
-
 .EXAMPLE
     .\scripts\codex-review.ps1 -Pr 5 -Post
-    审 PR #5 并把结果发到 PR 上。
-
 .EXAMPLE
     .\scripts\codex-review.ps1 -Issue 12 -Post
-    审设计 Issue #12 并回帖。
 #>
 [CmdletBinding()]
 param(
@@ -43,89 +41,128 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
 $repo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'lib\ReviewVerdict.ps1')
 
-# codex 可能不在 PATH 里（装完没重开 shell），回退到已知安装位置
+# 不能用 Write-Error：ErrorActionPreference=Stop 下它会先终止脚本并返回 1，
+# 让「执行出错」和「审查拒绝」变成同一个退出码，破坏契约。
+function Fail {
+    param([string]$Message)
+    Write-Host "错误：$Message" -ForegroundColor Red
+    exit 2
+}
+
+$isDesign = $PSCmdlet.ParameterSetName -eq 'Design'
+$number = if ($isDesign) { $Issue } else { $Pr }
+
+# ---- 定位 codex ----
 $codex = (Get-Command codex -ErrorAction SilentlyContinue).Source
 if (-not $codex) {
     $fallback = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe'
     if (Test-Path $fallback) { $codex = $fallback }
 }
-if (-not $codex) {
-    Write-Error "找不到 codex CLI。PATH 里没有，$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin 下也没有。"
-    exit 2
-}
+if (-not $codex) { Fail "找不到 codex CLI。PATH 里没有，$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin 下也没有。" }
 
 $slug = (& git -C $repo remote get-url origin) -replace '^.*github\.com[:/]', '' -replace '\.git$', ''
 
-# Codex 通过 gh 取 diff，但通过 -C $repo 读工作区里的清单与文档。
-# 两者不一致时，它会拿着 A 分支的 diff 去对照 B 分支的规则 —— 结论不可信。
-if ($PSCmdlet.ParameterSetName -eq 'Implementation') {
-    $prHead = (& gh pr view $Pr --repo $slug --json headRefOid --jq '.headRefOid' 2>$null)
-    if ($LASTEXITCODE -ne 0 -or -not $prHead) {
-        Write-Error "取不到 PR #$Pr 的 head SHA。PR 存在吗？gh 登录了吗？"
-        exit 2
-    }
+# ---- 前置校验：Codex 读的是工作区文件，工作区必须就是被审的那一版 ----
+$dirty = & git -C $repo status --porcelain
+if ($dirty) {
+    Fail @"
+工作区有未提交改动，审查结论会不可信：
+
+$($dirty -join "`n")
+
+Codex 从工作区读审查清单、架构文档与规格。这些文件若有未提交的本地修改，
+它就会依据不属于本次审查对象的规则下判断，而且不会有任何提示。
+
+先提交或 stash 再跑。
+"@
+}
+
+if (-not $isDesign) {
+    $prHead = & gh pr view $Pr --repo $slug --json headRefOid --jq '.headRefOid'
+    if ($LASTEXITCODE -ne 0 -or -not $prHead) { Fail "取不到 PR #$Pr 的 head SHA。PR 存在吗？gh 登录了吗？" }
     $localHead = (& git -C $repo rev-parse HEAD).Trim()
     if ($localHead -ne $prHead.Trim()) {
-        Write-Error @"
-本地工作区与 PR #$Pr 不一致，审查结论会不可信：
+        Fail @"
+本地工作区与 PR #$Pr 不是同一版：
   PR head : $($prHead.Trim())
   本地 HEAD: $localHead
 
-Codex 会用 gh 取 PR 的 diff，却从本地工作区读审查清单与文档。
-两者不一致就会拿着一个分支的改动去对照另一个分支的规则。
-
-先切到该 PR 的分支再跑：
-  gh pr checkout $Pr
+先切过去：gh pr checkout $Pr
 "@
-        exit 2
     }
 }
 
 # ---- 取审查材料 ----
-# Codex 在 read-only 沙箱里跑不了 gh：沙箱挡住 %APPDATA%\GitHub CLI\config.yml。
-# 与其放宽沙箱，不如让脚本把材料取好落盘 —— Codex 只做纯分析，不碰网络。
-# 附带好处：审查输入是一个可检视、可复现的文件，事后能确认它到底看了什么。
-$inputFile = Join-Path $repo ".codex-input-$($PSCmdlet.ParameterSetName)-$(if ($Pr) { $Pr } else { $Issue }).md"
-
-Write-Host "取审查材料..." -ForegroundColor Cyan
+$inputFile = Join-Path $repo ".codex-input-$($PSCmdlet.ParameterSetName)-$number.md"
 $nl = [Environment]::NewLine
 $fence = '```'
+$expectedVersion = $null
 
-if ($PSCmdlet.ParameterSetName -eq 'Design') {
+Write-Host "取审查材料..." -ForegroundColor Cyan
+
+if ($isDesign) {
     $json = & gh issue view $Issue --repo $slug --json title,body
-    if ($LASTEXITCODE -ne 0) { Write-Error "取 Issue #$Issue 失败"; exit 2 }
+    if ($LASTEXITCODE -ne 0) { Fail "取 Issue #$Issue 失败" }
     $obj = $json | ConvertFrom-Json
+    $expectedVersion = Get-DesignVersion $obj.body
+    if ($null -eq $expectedVersion) {
+        Fail "Issue #$Issue 里读不到设计版本。模板要求顶部写「设计版本：v1」。读不到就无法做批准绑定。"
+    }
     $sections = @("# $($obj.title)", '', $obj.body)
 } else {
     $json = & gh pr view $Pr --repo $slug --json title,body
-    if ($LASTEXITCODE -ne 0) { Write-Error "取 PR #$Pr 失败"; exit 2 }
+    if ($LASTEXITCODE -ne 0) { Fail "取 PR #$Pr 失败" }
     $obj = $json | ConvertFrom-Json
     $diff = & gh pr diff $Pr --repo $slug
-    if ($LASTEXITCODE -ne 0) { Write-Error "取 PR #$Pr 的 diff 失败"; exit 2 }
-    $sections = @(
-        "# $($obj.title)", '', $obj.body, '',
-        '## DIFF', '', ($fence + 'diff'), ($diff -join $nl), $fence
+    if ($LASTEXITCODE -ne 0) { Fail "取 PR #$Pr 的 diff 失败" }
+
+    # 关联的设计文档必须一起给，否则 prompt 里「核对是否忠于已批准的设计」
+    # 是一条无法执行的要求 —— Codex 没有网络，看不到那个 Issue。
+    $designIssue = Get-LinkedDesignIssue $obj.body
+    if ($designIssue) {
+        $dj = & gh issue view $designIssue --repo $slug --json title,body,comments
+        if ($LASTEXITCODE -ne 0) { Fail "PR 声明关联设计 Issue #$designIssue，但取不到它" }
+        $do = $dj | ConvertFrom-Json
+        $approvals = @($do.comments | Where-Object { $_.body -cmatch 'APPROVED: design v\d+' } | ForEach-Object { $_.body })
+        $designSection = @(
+            "## 关联设计（Issue #$designIssue）", '',
+            "顶部声明的设计版本：v$(Get-DesignVersion $do.body)", '',
+            $do.body, '',
+            '### 该设计的批准记录', '',
+            $(if ($approvals) { $approvals -join $nl } else { '（无批准记录 —— 该设计尚未通过闸门）' })
+        )
+    } else {
+        $designSection = @(
+            '## 关联设计', '',
+            '本 PR 的描述里没有声明关联的设计 Issue（约定写法：设计闸门：#N）。',
+            '',
+            '若本 PR 触及钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机，',
+            '**缺少设计闸门本身就是一个阻断项**。若不涉及这些，属正常。'
+        )
+    }
+
+    $sections = @("# $($obj.title)", '', $obj.body, '') + $designSection + @(
+        '', '## DIFF', '', ($fence + 'diff'), ($diff -join $nl), $fence
     )
 }
-Set-Content -Path $inputFile -Value ($sections -join $nl) -Encoding UTF8
 
+Set-Content -Path $inputFile -Value ($sections -join $nl) -Encoding UTF8
 $sizeKb = [math]::Round((Get-Item $inputFile).Length / 1KB, 1)
 Write-Host "审查材料：$inputFile（$sizeKb KB）"
-if ($sizeKb -gt 400) {
-    Write-Warning "材料超过 400 KB，可能超出上下文。考虑拆分 PR。"
-}
+if ($sizeKb -gt 400) { Write-Warning "材料超过 400 KB，可能超出上下文。考虑拆分。" }
 
 $rel = Split-Path -Leaf $inputFile
 
+# ---- 组 prompt ----
 $common = @"
 你是本仓库的独立审查者，不是开发者。
 
 硬规则：
 - 只读。不修改工作区任何文件，不 git add / commit / push，不合并任何东西。
-- **不要调用 gh 或任何网络命令**。审查材料已经取好放在 $rel 里，直接读那个文件。
+- **不要调用 gh 或任何网络命令**。审查材料已取好放在 $rel 里，直接读那个文件。
 - 只报你能指出具体位置和具体后果的问题。指不出后果的观感问题不要写。
 - 不要重复 linter 和 CI 已经能抓的东西（格式、import 顺序、拼写）。
 - 没有问题就写「无」，不要为了显得认真而凑数。
@@ -135,21 +172,22 @@ $common = @"
 以及 docs/Acuven_Central_AI_Billing_Platform_Spec_v1.2.md 的相关章节。
 "@
 
-if ($PSCmdlet.ParameterSetName -eq 'Design') {
+if ($isDesign) {
     $target = "Issue #$Issue"
     $out = Join-Path $repo ".codex-review-design-$Issue.md"
-    $approvedPattern = '^APPROVED: design v'
     $prompt = @"
 $common
 
-本次是【设计闸门】审查，目标是 $slug 的 Issue #$Issue。
+本次是【设计闸门】审查，目标是 $slug 的 Issue #$Issue，**设计版本 v$expectedVersion**。
 
 步骤：
 1. 读 $rel —— 设计文档全文已在里面。
 2. 走 scripts/review_checklist.md 的「设计审查」一节，明确回答那五个问题。
 3. 核对设计闸门的七条判定。
 
-按以下格式输出，最后一行必须是判定：
+按以下格式输出。最后一行只能是这两种之一，**多一个字都会被判为无效**：
+  APPROVED: design v$expectedVersion
+  REQUEST_CHANGES
 
 ## 🔍 CODEX REVIEW — 设计闸门
 
@@ -170,23 +208,25 @@ $common
 逐条列出七条判定是否满足。
 
 ---
-APPROVED: design v<该 Issue 顶部标注的版本号>
+REQUEST_CHANGES
 "@
 } else {
     $target = "PR #$Pr"
     $out = Join-Path $repo ".codex-review-$Pr.md"
-    $approvedPattern = '^VERDICT: APPROVE$'
     $prompt = @"
 $common
 
 本次是【实现闸门】审查，目标是 $slug 的 PR #$Pr。
 
 步骤：
-1. 读 $rel —— PR 描述与完整 diff 都在里面。
+1. 读 $rel —— PR 描述、关联设计（含批准记录）、完整 diff 都在里面。
 2. 走 scripts/review_checklist.md 的「实现审查」A–E 各节。
-3. 若该 PR 关联了设计 Issue，核对实现是否忠于已批准的那一版设计。
+3. 若材料里有关联设计，核对实现是否忠于**已批准的那一版**；
+   若材料说明没有关联设计，按其中的提示判断这是否构成阻断项。
 
-按以下格式输出，最后一行必须是判定：
+按以下格式输出。最后一行只能是这两种之一，**多一个字都会被判为无效**：
+  VERDICT: APPROVE
+  VERDICT: REQUEST_CHANGES
 
 ## 🔍 CODEX REVIEW
 
@@ -206,39 +246,37 @@ $common
 - 测试：<改动引入的边界是否被覆盖>
 
 ---
-VERDICT: APPROVE
+VERDICT: REQUEST_CHANGES
 "@
 }
-$rejected = 'REQUEST_CHANGES'
 
 Write-Host "审查目标：$target（$slug）" -ForegroundColor Cyan
 Write-Host "沙箱：read-only —— Codex 改不了任何文件" -ForegroundColor Cyan
 Write-Host ("-" * 60)
 
 & $codex exec -s read-only -C $repo -o $out $prompt
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "codex exec 失败，退出码 $LASTEXITCODE"
-    exit 2
-}
+if ($LASTEXITCODE -ne 0) { Fail "codex exec 失败，退出码 $LASTEXITCODE" }
+if (-not (Test-Path $out)) { Fail "codex 没有产出结果文件：$out" }
 
-if (-not (Test-Path $out)) {
-    Write-Error "codex 没有产出结果文件：$out"
-    exit 2
-}
-
-$verdictLine = (Get-Content $out | Where-Object { $_.Trim() } | Select-Object -Last 1).Trim()
+# ---- 先校验判定，再发布 ----
+# 顺序不能反：畸形的审查结果一旦发出去就永久留在 PR 上了。
+$verdictLine = Get-VerdictLine (Get-Content $out)
+$result = if ($isDesign) { Get-DesignVerdict $verdictLine $expectedVersion } else { Get-ImplementationVerdict $verdictLine }
 
 Write-Host ("-" * 60)
 Write-Host "结果已保存：$out"
-Write-Host "判定：$verdictLine" -ForegroundColor Yellow
+Write-Host "判定行：$verdictLine" -ForegroundColor Yellow
+
+switch ($result) {
+    'INVALID'          { Fail "最后一行不是合法判定，Codex 没按格式输出。未发布。请人工看 $out" }
+    'VERSION_UNKNOWN'  { Fail "批准里没有可比对的设计版本。未发布。" }
+    'VERSION_MISMATCH' { Fail "批准的设计版本与 Issue 顶部的 v$expectedVersion 不一致 —— 批准的是另一版设计。未发布。" }
+}
 
 if ($Post) {
-    if ($PSCmdlet.ParameterSetName -eq 'Design') {
-        & gh issue comment $Issue --repo $slug --body-file $out
-    } else {
-        & gh pr comment $Pr --repo $slug --body-file $out
-    }
-    if ($LASTEXITCODE -ne 0) { Write-Error "发布评论失败"; exit 2 }
+    if ($isDesign) { & gh issue comment $Issue --repo $slug --body-file $out }
+    else           { & gh pr comment $Pr --repo $slug --body-file $out }
+    if ($LASTEXITCODE -ne 0) { Fail "发布评论失败" }
     Write-Host "已发布到 $target" -ForegroundColor Green
 } else {
     Write-Host "未发布（加 -Post 可发到 $target）"
@@ -246,8 +284,6 @@ if ($Post) {
 
 Remove-Item $inputFile -ErrorAction SilentlyContinue
 
-if ($verdictLine -match $approvedPattern) { exit 0 }
-if ($verdictLine -match $rejected) { exit 1 }
-
-Write-Warning "最后一行不是合法判定，Codex 可能没按格式输出。请人工看 $out"
-exit 2
+if ($result -eq 'APPROVE') { Write-Host "判定：通过" -ForegroundColor Green; exit 0 }
+Write-Host "判定：要改" -ForegroundColor Yellow
+exit 1

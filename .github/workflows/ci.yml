@@ -25,6 +25,15 @@ jobs:
       - name: Validate doc links and spec section references
         run: python scripts/check_docs.py
 
+  scripts:
+    name: scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review verdict parsing tests
+        shell: pwsh
+        run: ./scripts/tests/Test-ReviewVerdict.ps1
+
   secret-scan:
     name: secret-scan
     runs-on: ubuntu-latest
