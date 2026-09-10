@@ -37,7 +37,11 @@
 param(
     [int]$Pr = 0,
     [int]$Issue = 0,
-    [switch]$Post
+    [switch]$Post,
+
+    # 只取材料并做完整性校验就停，不调 Codex。
+    # 用来验证取材与编码这条路径，不必每次烧一次审查。
+    [switch]$MaterialOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -218,8 +222,18 @@ Set-Content -Path $inputFile -Value ($sections -join $nl) -Encoding UTF8
 
 # 材料坏了必须当场炸，不能让 Codex 对着乱码给判定。
 $written = Get-Content $inputFile -Raw -Encoding UTF8
-if ($written -match "�") {
-    Fail "审查材料里有替换字符（U+FFFD），说明 gh 输出的编码没被正确解码。不能对着乱码审查。"
+
+# 替换字符必须运行时构造，不能在源码里写字面量 —— 否则本文件自身就含有它，
+# 任何改到本文件的 PR，其 diff 都会让这条检查自己触发自己。踩过一次。
+$replacementChar = [char]0xFFFD
+
+# 只查元数据部分。diff 里出现任意字节都是合法的（比如本文件这段注释），
+# 拿它当乱码证据会误判。
+$metaEnd = $written.IndexOf($nl + '## DIFF' + $nl)
+$metaText = if ($metaEnd -gt 0) { $written.Substring(0, $metaEnd) } else { $written }
+
+if ($metaText.Contains($replacementChar)) {
+    Fail "审查材料的元数据部分有替换字符（U+FFFD），说明 gh 输出的编码没被正确解码。不能对着乱码审查。"
 }
 if ($obj.title -and -not $written.Contains($obj.title)) {
     Fail "审查材料里找不到 PR/Issue 标题原文，材料可能在写盘时被破坏。标题应为：$($obj.title)"
@@ -231,6 +245,12 @@ if (-not $isDesign -and $written -notmatch '(?m)^diff --git ') {
 $sizeKb = [math]::Round((Get-Item $inputFile).Length / 1KB, 1)
 Write-Host "审查材料：$inputFile（$sizeKb KB，完整性校验通过）"
 if ($sizeKb -gt 400) { Write-Warning "材料超过 400 KB，可能超出上下文。考虑拆分。" }
+
+if ($MaterialOnly) {
+    Write-Host "-MaterialOnly：材料已生成并通过校验，未调用 Codex。" -ForegroundColor Green
+    Write-Host "标题：$($obj.title)"
+    exit 0
+}
 
 $rel = Split-Path -Leaf $inputFile
 
