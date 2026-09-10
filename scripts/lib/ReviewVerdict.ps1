@@ -91,3 +91,32 @@ function Get-CommentDesignVerdict {
     if ($null -eq $first -or $first.Trim() -ne $DesignReviewPrefix) { return 'NOT_A_REVIEW' }
     return Get-DesignVerdict (Get-VerdictLine $lines) $ExpectedVersion
 }
+
+# 从一串评论里取【最后一条】针对当前版本的判定，返回是否处于已批准状态。
+# 不能用「出现过批准就算批准」—— 后续的撤回必须生效。
+function Get-LatestDesignApproval {
+    param(
+        $Comments,
+        [Nullable[int]]$ExpectedVersion
+    )
+    $latest = $null
+    foreach ($c in $Comments) {
+        $status = Get-CommentDesignVerdict $c.body $ExpectedVersion
+        if ($status -eq 'APPROVE' -or $status -eq 'REQUEST_CHANGES') { $latest = $status }
+    }
+    return ($latest -eq 'APPROVE')
+}
+
+# 审查期间设计可能升版，批准也可能被撤回。发布前必须确认这两样都没变，
+# 否则会把一份基于旧设计的通过判定发出去 —— 设计版本绑定就白做了。
+function Compare-DesignState {
+    param(
+        [Nullable[int]]$BeforeVersion,
+        [bool]$BeforeApproved,
+        [Nullable[int]]$AfterVersion,
+        [bool]$AfterApproved
+    )
+    if ($BeforeVersion -ne $AfterVersion) { return 'VERSION_CHANGED' }
+    if ($BeforeApproved -ne $AfterApproved) { return 'APPROVAL_CHANGED' }
+    return 'UNCHANGED'
+}

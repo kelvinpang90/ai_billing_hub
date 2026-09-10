@@ -81,6 +81,27 @@ Assert-Equal 7 (Get-LinkedDesignIssue '设计闸门: #7') '英文冒号'
 Assert-Equal $null (Get-LinkedDesignIssue '本 PR 不涉及设计闸门') '没写编号返回 null'
 Assert-Equal $null (Get-LinkedDesignIssue '') '空正文返回 null'
 
+Write-Host "Get-LatestDesignApproval"
+$approve = @{ body = "$prefix`n无问题`n`nAPPROVED: design v2" }
+$reject  = @{ body = "$prefix`n有问题`n`nREQUEST_CHANGES" }
+$chatter = @{ body = "## 🔧 CLAUDE RESPONSE`n已修" }
+$oldVer  = @{ body = "$prefix`n`nAPPROVED: design v1" }
+
+Assert-Equal $true  (Get-LatestDesignApproval @($approve) 2) '只有批准 = 已批准'
+Assert-Equal $false (Get-LatestDesignApproval @($approve, $reject) 2) '先批准后拒绝 = 撤回生效'
+Assert-Equal $true  (Get-LatestDesignApproval @($reject, $approve) 2) '先拒绝后批准 = 已批准'
+Assert-Equal $false (Get-LatestDesignApproval @($chatter) 2) '非审查评论不算数'
+Assert-Equal $false (Get-LatestDesignApproval @($oldVer) 2) '批准的是旧版本 = 当前未批准'
+Assert-Equal $false (Get-LatestDesignApproval @() 2) '无评论 = 未批准'
+Assert-Equal $true  (Get-LatestDesignApproval @($approve, $chatter) 2) '批准后的闲聊不影响结论，批准仍然成立'
+
+Write-Host "Compare-DesignState"
+Assert-Equal 'UNCHANGED' (Compare-DesignState 2 $true 2 $true) '版本与批准都没变'
+Assert-Equal 'VERSION_CHANGED' (Compare-DesignState 2 $true 3 $true) '审查期间设计升版'
+Assert-Equal 'APPROVAL_CHANGED' (Compare-DesignState 2 $true 2 $false) '审查期间批准被撤回'
+Assert-Equal 'APPROVAL_CHANGED' (Compare-DesignState 2 $false 2 $true) '审查期间才拿到批准'
+Assert-Equal 'VERSION_CHANGED' (Compare-DesignState 2 $true $null $true) '设计版本读不到了'
+
 Write-Host ""
 if ($script:failed -gt 0) {
     Write-Host "$script:passed 通过，$script:failed 失败" -ForegroundColor Red

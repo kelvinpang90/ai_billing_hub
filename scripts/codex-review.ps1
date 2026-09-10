@@ -46,6 +46,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# ErrorActionPreference=Stop 让任何未捕获的终止性错误结束脚本，而 PowerShell
+# 对此的默认退出码是 1 —— 那在本脚本契约里是「审查要求修改」。
+# 于是 ConvertFrom-Json 解析失败、磁盘写不进去这类基础设施故障，会被自动化
+# 当成 Codex 的有效判定。顶层 trap 把它们统一归到 2。
+trap {
+    Write-Host "错误：未捕获的异常 —— $($_.Exception.Message)" -ForegroundColor Red
+    if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray }
+    exit 2
+}
+
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host "错误：本脚本需要 PowerShell 7+。当前是 $($PSVersionTable.PSVersion)。请用 pwsh 运行。" -ForegroundColor Red
     exit 2
@@ -101,13 +111,17 @@ $isDesign = $Issue -gt 0
 $number = if ($isDesign) { $Issue } else { $Pr }
 $kind = if ($isDesign) { 'Design' } else { 'Implementation' }
 
-# ---- 定位 codex ----
-$codex = (Get-Command codex -ErrorAction SilentlyContinue).Source
-if (-not $codex) {
-    $fallback = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe'
-    if (Test-Path $fallback) { $codex = $fallback }
+# codex 的定位推迟到真要调用它的时候。-MaterialOnly 只取材料，
+# 没装 Codex 的机器也该能用。
+function Resolve-CodexPath {
+    $path = (Get-Command codex -ErrorAction SilentlyContinue).Source
+    if (-not $path) {
+        $fallback = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe'
+        if (Test-Path $fallback) { $path = $fallback }
+    }
+    if (-not $path) { Fail "找不到 codex CLI。PATH 里没有，$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin 下也没有。" }
+    return $path
 }
-if (-not $codex) { Fail "找不到 codex CLI。PATH 里没有，$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin 下也没有。" }
 
 $slug = (& git -C $repo remote get-url origin) -replace '^.*github\.com[:/]', '' -replace '\.git$', ''
 
@@ -175,19 +189,18 @@ if ($isDesign) {
         # 取【最后一条】针对当前版本的判定，不是「历史上出现过批准就算批准」。
         # 先批准后拒绝时，撤回必须生效。
         $records = @()
-        $latestStatus = $null
         foreach ($c in $do.comments) {
             $st = Get-CommentDesignVerdict $c.body $designVersion
             if ($st -eq 'NOT_A_REVIEW') { continue }
             $line = Get-VerdictLine ($c.body -split '\r?\n')
             switch ($st) {
-                'APPROVE'          { $records += "- ✅ 批准当前版本 v$designVersion"; $latestStatus = 'APPROVE' }
-                'REQUEST_CHANGES'  { $records += "- ❌ 拒绝"; $latestStatus = 'REQUEST_CHANGES' }
+                'APPROVE'          { $records += "- ✅ 批准当前版本 v$designVersion" }
+                'REQUEST_CHANGES'  { $records += "- ❌ 拒绝" }
                 'VERSION_MISMATCH' { $records += "- ⚠️ 批准的是**其他版本**（当前是 v$designVersion）：$line" }
                 'INVALID'          { $records += "- ⚠️ 判定行格式不合法：$line" }
             }
         }
-        $hasCurrentApproval = ($latestStatus -eq 'APPROVE')
+        $hasCurrentApproval = Get-LatestDesignApproval $do.comments $designVersion
 
         $designSection = @(
             "## 关联设计（Issue #$designIssue）", '',
@@ -348,6 +361,8 @@ VERDICT: REQUEST_CHANGES
 "@
 }
 
+$codex = Resolve-CodexPath
+
 Write-Host "审查目标：$target（$slug）" -ForegroundColor Cyan
 Write-Host "沙箱：read-only —— Codex 改不了任何文件" -ForegroundColor Cyan
 Write-Host ("-" * 60)
@@ -397,6 +412,24 @@ if (-not $isDesign) {
 
 重新跑一次。
 "@
+    }
+
+    # 关联设计只在取材时读过一次。审查期间设计可能升版、批准可能被撤回 ——
+    # 那样发出去的就是一份基于旧设计的通过判定，设计版本绑定等于白做。
+    if ($designIssue) {
+        $djAfter = Invoke-GhUtf8 @('issue', 'view', "$designIssue", '--repo', $slug, '--json', 'title,body,comments')
+        $doAfter = $djAfter | ConvertFrom-Json
+        $versionAfter = Get-DesignVersion $doAfter.body
+        $approvedAfter = Get-LatestDesignApproval $doAfter.comments $versionAfter
+
+        switch (Compare-DesignState $designVersion $hasCurrentApproval $versionAfter $approvedAfter) {
+            'VERSION_CHANGED' {
+                Fail "审查期间关联设计 Issue #$designIssue 升版（v$designVersion → v$versionAfter），本次判定针对的是旧设计，未发布。"
+            }
+            'APPROVAL_CHANGED' {
+                Fail "审查期间关联设计 Issue #$designIssue 的批准状态变了（已批准=$hasCurrentApproval → $approvedAfter），未发布。"
+            }
+        }
     }
 
     # 判定必须携带它审的是哪个提交。没有这行，一次 APPROVE 会被后续提交
