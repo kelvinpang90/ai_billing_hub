@@ -66,3 +66,19 @@ function Get-LinkedDesignIssue {
     if ($m.Success) { return [int]$m.Groups[1].Value }
     return $null
 }
+
+# 判断一条评论是不是对某版设计的有效批准。
+#
+# 不能用全文子串匹配 'APPROVED: design v\d+' —— 一条以
+# 「旧的 APPROVED: design v1 已作废」结尾、判定为 REQUEST_CHANGES 的评论
+# 也会被算成批准记录（Codex 实测过这个假阳性）。
+# 必须按判定行（最后一个非空行）来判。
+function Get-CommentDesignVerdict {
+    param(
+        [string]$CommentBody,
+        [Nullable[int]]$ExpectedVersion
+    )
+    if (-not $CommentBody) { return 'INVALID' }
+    $line = Get-VerdictLine ($CommentBody -split '\r?\n')
+    return Get-DesignVerdict $line $ExpectedVersion
+}

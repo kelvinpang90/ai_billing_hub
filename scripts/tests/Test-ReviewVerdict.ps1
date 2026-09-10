@@ -57,6 +57,20 @@ Assert-Equal 'INVALID' (Get-DesignVerdict 'APPROVED: design v2 已确认' 2) '�
 Assert-Equal 'INVALID' (Get-DesignVerdict 'approved: design v2' 2) '大小写不符 = 无效'
 Assert-Equal 'INVALID' (Get-DesignVerdict 'request_changes' 2) '拒绝行大小写不符 = 无效'
 
+Write-Host "Get-CommentDesignVerdict"
+# Codex 实测出的假阳性：正文里出现批准字样，但判定是拒绝
+$falsePositive = @"
+## review
+旧的 APPROVED: design v1 已作废
+
+REQUEST_CHANGES
+"@
+Assert-Equal 'REQUEST_CHANGES' (Get-CommentDesignVerdict $falsePositive 1) '正文提到批准但判定是拒绝 = 不算批准'
+Assert-Equal 'APPROVE' (Get-CommentDesignVerdict "## review`n无问题`n`nAPPROVED: design v2" 2) '判定行是批准 = 算批准'
+Assert-Equal 'VERSION_MISMATCH' (Get-CommentDesignVerdict "## review`n`nAPPROVED: design v1" 2) '批准的是旧版本 = 不算当前批准'
+Assert-Equal 'INVALID' (Get-CommentDesignVerdict '' 2) '空评论 = 无效'
+Assert-Equal 'INVALID' (Get-CommentDesignVerdict "只是随口提了 APPROVED: design v2 这串字" 2) '批准字样不在最后一行 = 无效'
+
 Write-Host "Get-LinkedDesignIssue"
 Assert-Equal 12 (Get-LinkedDesignIssue '## 任务`n设计闸门：#12`n其余') '中文冒号'
 Assert-Equal 7 (Get-LinkedDesignIssue '设计闸门: #7') '英文冒号'

@@ -83,6 +83,9 @@
 2. 本地全套检查通过（见 §7）
 3. 在同一分支写好 [TODO.md](TODO.md) 的任务记录：勾掉 `[ ]`，写清做了什么、偏离了什么、验证到什么程度
 4. push + **开 Draft PR**（用 [PR 模板](../.github/pull_request_template.md)，结构不许改）
+   - 模板里的 `设计闸门：#N` 一行是**机器可读**的：`codex-review.ps1` 靠它把设计文档
+     与批准记录一并取进审查材料。不走闸门的改动写「不适用」；触及钱包 / 账本 / 定价 /
+     汇率 / 支付 / 幂等 / 状态机却写「不适用」的，审查时会被判为阻断项
 5. CI 跑绿
 6. 跑 `scripts\codex-review.ps1 -Pr <N> -Post`
 7. `REQUEST_CHANGES` → Claude 发 `## 🔧 CLAUDE RESPONSE` 逐条回应 → 修 → push → 回到 5

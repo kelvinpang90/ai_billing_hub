@@ -126,13 +126,30 @@ if ($isDesign) {
         $dj = & gh issue view $designIssue --repo $slug --json title,body,comments
         if ($LASTEXITCODE -ne 0) { Fail "PR 声明关联设计 Issue #$designIssue，但取不到它" }
         $do = $dj | ConvertFrom-Json
-        $approvals = @($do.comments | Where-Object { $_.body -cmatch 'APPROVED: design v\d+' } | ForEach-Object { $_.body })
+        $designVersion = Get-DesignVersion $do.body
+
+        # 按判定行判断，不能全文子串匹配：一条以「旧的 APPROVED: design v1
+        # 已作废」结尾、实为 REQUEST_CHANGES 的评论会被算成批准。
+        $records = @()
+        $hasCurrentApproval = $false
+        foreach ($c in $do.comments) {
+            $st = Get-CommentDesignVerdict $c.body $designVersion
+            if ($st -eq 'APPROVE') {
+                $hasCurrentApproval = $true
+                $records += "- ✅ 批准当前版本 v$designVersion"
+            } elseif ($st -eq 'VERSION_MISMATCH') {
+                $records += "- ⚠️ 批准的是**其他版本**（当前是 v$designVersion）：" + (Get-VerdictLine ($c.body -split '\r?\n'))
+            }
+        }
+
         $designSection = @(
             "## 关联设计（Issue #$designIssue）", '',
-            "顶部声明的设计版本：v$(Get-DesignVersion $do.body)", '',
+            "顶部声明的设计版本：**v$designVersion**", '',
+            "当前版本是否已获批准：**$(if ($hasCurrentApproval) { '是' } else { '否' })**", '',
             $do.body, '',
             '### 该设计的批准记录', '',
-            $(if ($approvals) { $approvals -join $nl } else { '（无批准记录 —— 该设计尚未通过闸门）' })
+            '（判定依据是每条评论的最后一行，不是正文里是否出现过批准字样）', '',
+            $(if ($records) { $records -join $nl } else { '（无有效批准记录 —— 该设计尚未通过闸门）' })
         )
     } else {
         $designSection = @(
