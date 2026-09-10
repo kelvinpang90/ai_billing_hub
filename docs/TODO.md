@@ -23,9 +23,9 @@
 
 - [ ] **D1 — 汇率来源与版本化策略**：数据源（人工录入 / API 供应商）、更新频率、按 `occurred_at` 还是结算日取值、`provider_price_versions` 存 USD 原价还是换算后 MYR。→ ADR
 - [ ] **D2 — SST 税务口径**：向会计确认。收 RM100 是含税还是不含税？税在收款时确认还是消费时确认？receipt / statement 表要预留哪些字段。（spec §45.1 是上线闸门，但**字段现在就要留**，事后加等于重做所有历史凭证）→ ADR
-- [ ] **D3 — 生产数据库隔离**：**结论已由 spec §98 给出 —— 专用 MySQL/Redis 容器、凭据、库、持久卷、资源限制、备份任务，不与现有应用共享实例**（即不接 `vps_infra` 的 `infra_mysql` / `infra_redis`）。本项只剩：落成 ADR 记录理由。→ ADR
-- [ ] **D4 — 凭据加密方案**：KMS / 应用层信封加密的具体选型、主密钥保管与恢复流程。→ ADR
-- [ ] **D5 — 财务期间与 cut-off**：T+N 的 N 取值、晚到事件的归属规则、Prior Period Adjustment 在对账单上的呈现。→ ADR
+- [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
+- [ ] **D4 — 凭据加密方案** —— 草案已写：[ADR-0004](adr/ADR-0004-credential-encryption.md)。原则 spec §36 已定死（认证式可逆加密、主密钥外置），**待你拍板的是具体机制**（推荐选项 A：应用层信封加密）+ 主密钥注入与轮换流程 + R4 的重放存储 TTL。→ 拍板后 ADR 转「已接受」
+- [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ 该 ADR 指出 T+1（24h）覆盖不了 §31 举例的 31 小时积压，上期调整会是常态，需加监控
 - [ ] **D6 — 支付网关选型**：马来西亚网关，FPX 优先。含手续费结构、沙箱可用性、对账 API 能力。→ ADR
 - [ ] **D7 — 通知通道**：Email adapter 用什么；WhatsApp 复用 `whatsapp_gateway` 还是自建出站。
 
