@@ -33,7 +33,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | 架构决策记录（ADR） | ❌ 未开始 |
 | 代码 | ❌ 未开始，Phase 0 尚未启动 |
 | 数据库 schema | ❌ 未开始 |
-| git 仓库 | ✅ 已推送到 `github.com/kelvinpang90/ai_billing_hub`（私有，默认分支 `main`） |
+| git 仓库 | ✅ `github.com/kelvinpang90/ai_billing_hub`（**公开**，`main` 已配分支保护） |
 
 **当前所处阶段：Phase 0 之前**。下一步见 [HANDOFF.md](HANDOFF.md)。
 
@@ -58,6 +58,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 - **金额计算**：全部用 Python `Decimal`，禁止 `float`。
 - **隐私**：AI 对话内容**不进**计费平台，只存元数据。
 - **部署**：V1 单 VPS + Docker Compose，无独立 staging 环境。
+- **仓库是公开的**：⚠️ 绝不可提交任何凭据、密钥、`.env`、真实主机名/IP、客户数据或供应商合同价。生产配置一律走 GitHub Secrets 与主机密钥管理。
 - **钱包**：一个租户一个共享钱包，租户下所有 project 从同一钱包扣费。
 
 ## V1 范围外

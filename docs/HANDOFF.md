@@ -14,7 +14,7 @@
 - spec v1.0 评审意见（25 条：P0×7 / P1×10 / P2×8）
 - 文档结构整理：PROJECT / ARCHITECTURE / REQUIREMENTS / TODO / HANDOFF
 - 评审意见逐条核对（2026-09-10）：25 条中 20 条已在 v1.1 解决，5 条残留转为 TODO 的 R1–R5
-- git 仓库：已初始化并推送到私有远端 `github.com/kelvinpang90/ai_billing_hub`
+- git 仓库：已初始化并推送到公开远端 `github.com/kelvinpang90/ai_billing_hub`，`main` 已配分支保护
 
 未完成：ADR、数据库 schema、任何代码。
 
@@ -56,7 +56,7 @@ spec §137 的起步指令说得很清楚：**不要先写前端页面**，先�
 ## 环境与凭据
 
 - 尚无任何生产环境、域名、凭据。
-- 远端仓库：`github.com/kelvinpang90/ai_billing_hub`（私有，HTTPS remote，默认分支 `main`）。**`main` 的分支保护与 CI 尚未配置**，spec §99 要求受保护 `main` + CI 通过才能合并 —— 属 Phase 0 任务。
+- 远端仓库：`github.com/kelvinpang90/ai_billing_hub`（**公开**，HTTPS remote，默认分支 `main`）。2026-09-10 由私有转公开，目的是在 GitHub Free 上启用分支保护（私有仓库该功能需 Pro）。
 - 共享基建 `vps_infra` 提供 `infra_nginx` / `infra_mysql` / `infra_redis`，本项目是否接入取决于 D3。
 
 ## 代码目录说明
