@@ -30,6 +30,8 @@ Assert-Equal 'VERDICT: APPROVE' (Get-VerdictLine @('## R', '', 'VERDICT: APPROVE
 Assert-Equal 'VERDICT: APPROVE' (Get-VerdictLine @('VERDICT: APPROVE', '', '   ')) '尾部空白行不算'
 Assert-Equal '' (Get-VerdictLine @()) '空输入返回空串'
 Assert-Equal '' (Get-VerdictLine @('', '  ')) '全空白返回空串'
+# 发布前会在判定行之前插入 reviewed-head，插入后判定仍必须是最后一个非空行
+Assert-Equal 'VERDICT: APPROVE' (Get-VerdictLine @('## R', '', 'reviewed-head: abc1234', '', 'VERDICT: APPROVE')) 'reviewed-head 不影响判定行定位'
 
 Write-Host "Get-ImplementationVerdict"
 Assert-Equal 'APPROVE' (Get-ImplementationVerdict 'VERDICT: APPROVE') '标准通过'

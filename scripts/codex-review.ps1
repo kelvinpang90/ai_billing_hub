@@ -41,6 +41,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 必须先设编码再调 gh：Windows PowerShell 捕获原生命令输出时按
+# [Console]::OutputEncoding 解码，默认是 OEM 代码页（简中机器上是 936）。
+# 不设的话 gh 吐出的 UTF-8 字节会被解成乱码，材料文件整篇是坏的，
+# 而 Codex 照样能对着乱码输出一个判定 —— 静默失效。
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
 $repo = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'lib\ReviewVerdict.ps1')
 
@@ -177,8 +185,21 @@ if ($isDesign) {
 }
 
 Set-Content -Path $inputFile -Value ($sections -join $nl) -Encoding UTF8
+
+# 材料坏了必须当场炸，不能让 Codex 对着乱码给判定。
+$written = Get-Content $inputFile -Raw -Encoding UTF8
+if ($written -match "�") {
+    Fail "审查材料里有替换字符（U+FFFD），说明 gh 输出的编码没被正确解码。不能对着乱码审查。"
+}
+if ($obj.title -and -not $written.Contains($obj.title)) {
+    Fail "审查材料里找不到 PR/Issue 标题原文，材料可能在写盘时被破坏。标题应为：$($obj.title)"
+}
+if (-not $isDesign -and $written -notmatch '(?m)^diff --git ') {
+    Fail "审查材料里没有一行 diff --git，diff 没取到或已损坏。"
+}
+
 $sizeKb = [math]::Round((Get-Item $inputFile).Length / 1KB, 1)
-Write-Host "审查材料：$inputFile（$sizeKb KB）"
+Write-Host "审查材料：$inputFile（$sizeKb KB，完整性校验通过）"
 if ($sizeKb -gt 400) { Write-Warning "材料超过 400 KB，可能超出上下文。考虑拆分。" }
 
 $rel = Split-Path -Leaf $inputFile
@@ -298,6 +319,47 @@ switch ($result) {
     'INVALID'          { Fail "最后一行不是合法判定，Codex 没按格式输出。未发布。请人工看 $out" }
     'VERSION_UNKNOWN'  { Fail "批准里没有可比对的设计版本。未发布。" }
     'VERSION_MISMATCH' { Fail "批准的设计版本与 Issue 顶部的 v$expectedVersion 不一致 —— 批准的是另一版设计。未发布。" }
+}
+
+# ---- 审查后再校验一次基线 ----
+# 开跑前查过不代表跑完还成立：审查期间的新提交或工作区改动，会让这份判定
+# 指向的是已经不存在的那一版代码。这种情况下发布出去，等于给未审查的代码
+# 盖了个通过的章。
+$dirtyAfter = & git -C $repo status --porcelain
+if ($dirtyAfter) {
+    Fail @"
+审查期间工作区被改动，本次判定不可信，未发布：
+
+$($dirtyAfter -join "`n")
+
+Codex 读工作区文件是实时的，中途改动会让它依据一半旧一半新的规则下判断。
+"@
+}
+
+if (-not $isDesign) {
+    $headAfter = & gh pr view $Pr --repo $slug --json headRefOid --jq '.headRefOid'
+    if ($LASTEXITCODE -ne 0 -or -not $headAfter) { Fail "审查后取不到 PR head，无法确认基线未变，未发布。" }
+    if ($headAfter.Trim() -ne $prHead.Trim()) {
+        Fail @"
+审查期间 PR 有了新提交，本次判定针对的是旧代码，未发布：
+  审查时 : $($prHead.Trim())
+  现在   : $($headAfter.Trim())
+
+重新跑一次。
+"@
+    }
+
+    # 判定必须携带它审的是哪个提交。没有这行，一次 APPROVE 会被后续提交
+    # 沿用下去 —— 未审查的代码就凭旧批准进了正式 PR。
+    $reviewed = @()
+    $lines = @(Get-Content $out)
+    $lastIdx = $lines.Count - 1
+    while ($lastIdx -ge 0 -and -not $lines[$lastIdx].Trim()) { $lastIdx-- }
+    if ($lastIdx -gt 0) { $reviewed += $lines[0..($lastIdx - 1)] }
+    $reviewed += "reviewed-head: $($prHead.Trim())"
+    $reviewed += ''
+    $reviewed += $lines[$lastIdx]
+    Set-Content -Path $out -Value $reviewed -Encoding UTF8
 }
 
 if ($Post) {
