@@ -14,7 +14,7 @@
 - spec v1.0 评审意见（25 条：P0×7 / P1×10 / P2×8）
 - 文档结构整理：PROJECT / ARCHITECTURE / REQUIREMENTS / TODO / HANDOFF
 - 评审意见逐条核对（2026-09-10）：25 条中 20 条已在 v1.1 解决，5 条残留转为 TODO 的 R1–R5
-- git 仓库本地初始化
+- git 仓库：已初始化并推送到私有远端 `github.com/kelvinpang90/ai_billing_hub`
 
 未完成：ADR、数据库 schema、任何代码。
 
