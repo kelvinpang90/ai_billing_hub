@@ -48,4 +48,4 @@
 - [x] 凭据加密方案（密钥管理、轮换、恢复）→ [ADR-0004](ADR-0004-credential-encryption.md)
 - [x] 生产数据库隔离 → [ADR-0002](ADR-0002-production-datastore-isolation.md)
 - [x] FX 数据源 → [ADR-0005](ADR-0005-fx-rate-source.md)
-- [~] 支付网关选型 → [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**具体供应商仍未选定，硬截止在 Phase 4 开工前**
+- [ ] 支付网关选型（准入契约已定，供应商未选）→ [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**具体供应商仍未选定，硬截止在 Phase 4 开工前**
