@@ -29,25 +29,27 @@
 .EXAMPLE
     .\scripts\codex-review.ps1 -Issue 12 -Post
 #>
+
+# 刻意不用 Mandatory / ParameterSetName：PowerShell 的参数绑定失败发生在脚本
+# 代码之前，会以退出码 1 结束 —— 而 1 在本脚本的契约里是「审查要求修改」。
+# 自动化会把「命令写错了」误判成「Codex 说要改」。所以自己接管校验，统一走 2。
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory, ParameterSetName = 'Implementation')]
-    [int]$Pr,
-
-    [Parameter(Mandatory, ParameterSetName = 'Design')]
-    [int]$Issue,
-
+    [int]$Pr = 0,
+    [int]$Issue = 0,
     [switch]$Post
 )
 
 $ErrorActionPreference = 'Stop'
 
-# 必须先设编码再调 gh：Windows PowerShell 捕获原生命令输出时按
-# [Console]::OutputEncoding 解码，默认是 OEM 代码页（简中机器上是 936）。
-# 不设的话 gh 吐出的 UTF-8 字节会被解成乱码，材料文件整篇是坏的，
-# 而 Codex 照样能对着乱码输出一个判定 —— 静默失效。
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "错误：本脚本需要 PowerShell 7+。当前是 $($PSVersionTable.PSVersion)。请用 pwsh 运行。" -ForegroundColor Red
+    exit 2
+}
+
+# 仅为了让本脚本打印的中文在 GBK 控制台上不糊。
+# 取材料的正确性不靠这个 —— 靠 Invoke-GhUtf8 显式指定的流编码。
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
 
 $repo = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'lib\ReviewVerdict.ps1')
@@ -60,8 +62,40 @@ function Fail {
     exit 2
 }
 
-$isDesign = $PSCmdlet.ParameterSetName -eq 'Design'
+# 不能直接用 & gh：PowerShell 捕获原生命令输出时按 [Console]::OutputEncoding
+# 解码，那是控制台的属性，受代码页影响。实测在简中机器上把 gh 的 UTF-8
+# 解成了乱码，而且在脚本里改 [Console]::OutputEncoding 也没能纠正。
+#
+# 这里直接起进程并显式指定 StandardOutputEncoding，不依赖控制台是什么编码。
+function Invoke-GhUtf8 {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'gh'
+    foreach ($a in $Arguments) { [void]$psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    if ($proc.ExitCode -ne 0) {
+        Fail "gh $($Arguments -join ' ') 失败（退出码 $($proc.ExitCode)）：$stderr"
+    }
+    return $stdout
+}
+
+if ($Pr -le 0 -and $Issue -le 0) { Fail "必须指定 -Pr <PR编号> 或 -Issue <设计Issue编号>。" }
+if ($Pr -gt 0 -and $Issue -gt 0) { Fail "-Pr 与 -Issue 不能同时指定。" }
+
+$isDesign = $Issue -gt 0
 $number = if ($isDesign) { $Issue } else { $Pr }
+$kind = if ($isDesign) { 'Design' } else { 'Implementation' }
 
 # ---- 定位 codex ----
 $codex = (Get-Command codex -ErrorAction SilentlyContinue).Source
@@ -89,8 +123,8 @@ Codex 从工作区读审查清单、架构文档与规格。这些文件若有�
 }
 
 if (-not $isDesign) {
-    $prHead = & gh pr view $Pr --repo $slug --json headRefOid --jq '.headRefOid'
-    if ($LASTEXITCODE -ne 0 -or -not $prHead) { Fail "取不到 PR #$Pr 的 head SHA。PR 存在吗？gh 登录了吗？" }
+    $prHead = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'headRefOid', '--jq', '.headRefOid')
+    if (-not $prHead.Trim()) { Fail "取不到 PR #$Pr 的 head SHA。" }
     $localHead = (& git -C $repo rev-parse HEAD).Trim()
     if ($localHead -ne $prHead.Trim()) {
         Fail @"
@@ -104,7 +138,7 @@ if (-not $isDesign) {
 }
 
 # ---- 取审查材料 ----
-$inputFile = Join-Path $repo ".codex-input-$($PSCmdlet.ParameterSetName)-$number.md"
+$inputFile = Join-Path $repo ".codex-input-$kind-$number.md"
 $nl = [Environment]::NewLine
 $fence = '```'
 $expectedVersion = $null
@@ -112,8 +146,7 @@ $expectedVersion = $null
 Write-Host "取审查材料..." -ForegroundColor Cyan
 
 if ($isDesign) {
-    $json = & gh issue view $Issue --repo $slug --json title,body
-    if ($LASTEXITCODE -ne 0) { Fail "取 Issue #$Issue 失败" }
+    $json = Invoke-GhUtf8 @('issue', 'view', "$Issue", '--repo', $slug, '--json', 'title,body')
     $obj = $json | ConvertFrom-Json
     $expectedVersion = Get-DesignVersion $obj.body
     if ($null -eq $expectedVersion) {
@@ -121,18 +154,15 @@ if ($isDesign) {
     }
     $sections = @("# $($obj.title)", '', $obj.body)
 } else {
-    $json = & gh pr view $Pr --repo $slug --json title,body
-    if ($LASTEXITCODE -ne 0) { Fail "取 PR #$Pr 失败" }
+    $json = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'title,body')
     $obj = $json | ConvertFrom-Json
-    $diff = & gh pr diff $Pr --repo $slug
-    if ($LASTEXITCODE -ne 0) { Fail "取 PR #$Pr 的 diff 失败" }
+    $diff = Invoke-GhUtf8 @('pr', 'diff', "$Pr", '--repo', $slug)
 
     # 关联的设计文档必须一起给，否则 prompt 里「核对是否忠于已批准的设计」
     # 是一条无法执行的要求 —— Codex 没有网络，看不到那个 Issue。
     $designIssue = Get-LinkedDesignIssue $obj.body
     if ($designIssue) {
-        $dj = & gh issue view $designIssue --repo $slug --json title,body,comments
-        if ($LASTEXITCODE -ne 0) { Fail "PR 声明关联设计 Issue #$designIssue，但取不到它" }
+        $dj = Invoke-GhUtf8 @('issue', 'view', "$designIssue", '--repo', $slug, '--json', 'title,body,comments')
         $do = $dj | ConvertFrom-Json
         $designVersion = Get-DesignVersion $do.body
 
@@ -337,8 +367,8 @@ Codex 读工作区文件是实时的，中途改动会让它依据一半旧一�
 }
 
 if (-not $isDesign) {
-    $headAfter = & gh pr view $Pr --repo $slug --json headRefOid --jq '.headRefOid'
-    if ($LASTEXITCODE -ne 0 -or -not $headAfter) { Fail "审查后取不到 PR head，无法确认基线未变，未发布。" }
+    $headAfter = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'headRefOid', '--jq', '.headRefOid')
+    if (-not $headAfter.Trim()) { Fail "审查后取不到 PR head，无法确认基线未变，未发布。" }
     if ($headAfter.Trim() -ne $prHead.Trim()) {
         Fail @"
 审查期间 PR 有了新提交，本次判定针对的是旧代码，未发布：
