@@ -6,7 +6,7 @@
 | **日期** | 2026-09-10 |
 | **决策人** | Kelvin Peng |
 | **来源** | spec §36、§74.4、§96、§98.1 已定原则；本 ADR 定具体机制 |
-| **影响** | `integration_credentials` / `projects` 表、Phase 0 密钥方案、Phase 2/3 验签实现 |
+| **影响** | `integration_credentials` / `projects` 表（出站 webhook 密钥可能新增 `project_webhook_secrets`，见第 4a 节）、Phase 0 密钥方案、Phase 2/3 验签实现 |
 | **相关** | `REQ-AUTH-001`、[TODO.md](../TODO.md) 的 D4 与 R4 |
 
 ---
@@ -346,6 +346,8 @@ spec §136 要求**仓库内**的 `docs/runbook.md` 覆盖 `encryption master-ke
 - [x] 备份与访问控制策略选定：与数据库备份分离
 - [x] 重放存储与过期策略选定：支付 Webhook 落库，其余走 Redis；过期时刻 = 请求 timestamp + 5 分钟（R4 关闭）
 - [ ] Phase 0 的「备份、恢复、加密密钥方案设计」验收通过
+- [ ] Phase 0 确定 API / Celery 容器的运行 UID，宿主机主密钥文件属主设为该 UID、权限 `0400`（**不得为读密钥把容器改回 root**）
+- [ ] Phase 1 前选定出站 webhook 密钥的 schema（方案 i / ii），更新第 4a 节并走设计闸门
 - [ ] `docs/runbook.md` 写入主密钥恢复**流程**（脱敏），私有附录写入具体值，边界按第 6 节
 - [ ] 季度恢复演练含主密钥恢复
 - [ ] 密钥泄露测试（§113 的 secret-leak tests）覆盖日志、审计、API 响应、异常栈四条路径

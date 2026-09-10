@@ -24,8 +24,8 @@
 - [ ] **D1 — 汇率来源与版本化策略**：数据源（人工录入 / API 供应商）、更新频率、按 `occurred_at` 还是结算日取值、`provider_price_versions` 存 USD 原价还是换算后 MYR。→ ADR
 - [ ] **D2 — SST 税务口径**：向会计确认。收 RM100 是含税还是不含税？税在收款时确认还是消费时确认？receipt / statement 表要预留哪些字段。（spec §45.1 是上线闸门，但**字段现在就要留**，事后加等于重做所有历史凭证）→ ADR
 - [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
-- [x] **D4 — 凭据加密方案** —— 已收口。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)
-- [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ 该 ADR 指出 T+1（24h）覆盖不了 §31 举例的 31 小时积压，上期调整会是常态，需加监控
+- [~] **D4 — 凭据加密方案** —— 主体已收口。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节）
+- [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ T+1（24h）覆盖不了 §31 举例的 31 小时积压，所以上期调整**是预期会出现的**；但 §31 那个数字是**告警阈值示例，不是日常状态**——每一笔都应能追溯到一次具体延迟事件，**不是会计常态**。笔数与金额占比必须进 §95 监控，占比走高要查根因
 - [ ] **D6 — 支付网关选型**：马来西亚网关，FPX 优先。评估项：手续费结构、沙箱可用性、对账 API 能力、**回调是否提供稳定的幂等标识**（决定 `(gateway, gateway_event_id)` 唯一约束能否成立——没有它，ADR-0004 的永久防重方案在支付侧落不了地）。→ ADR
 - [ ] **D7 — 通知通道**：Email adapter 用什么；WhatsApp 复用 `whatsapp_gateway` 还是自建出站。
 
@@ -40,7 +40,7 @@
 - [ ] **R3 — 账本膨胀权衡**：§82 已承认钱包变更按租户串行化并要求测最热租户，§119 给了量化目标，但**没有对「按对话/时间窗聚合成一笔 AI_USAGE ledger、usage_events 保留明细」做权衡分析**。即使决定不做，也要写明理由。（Phase 2 前）
 - [x] **R4 — 重放保护存储与过期策略** —— 已收口。支付 Webhook 的 nonce 落数据库，其余四个签名端点走 Redis；**过期时刻 = 请求 timestamp + 5 分钟**（跟着请求自己算，不是「记录时刻 + 固定 TTL」——时间窗是 ±5 分钟，固定 TTL 会留下约 4 分钟重放窗口）。Redis 丢失最长让纵深防御第二层失效约 10 分钟，不产生财务缺口——财务安全网是 `event_id` 与 `(gateway, gateway_event_id)` 的领域幂等。见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 5 节
 - [ ] **R5 — 需求编号覆盖度**：`REQ-*` 只有 13 条，未覆盖每条硬性要求；140 节仍无完整 TOC。影响 §132 逐条验收。（Phase 1 前）
-- [x] **R7 — 对账单 cut-off** —— 已复核（2026-09-10）：**仍选 T+1**。那条「T+3 也挡不住 31 小时积压」的论据是错的（T+3 = 72 小时），已撤回；但剩下两条理由（上期调整机制无论如何都必须存在、客户体验）足以支撑 T+1。代价：上期调整会是常态，已派生监控要求。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)
+- [x] **R7 — 对账单 cut-off** —— 已复核（2026-09-10）：**仍选 T+1**。那条「T+3 也挡不住 31 小时积压」的论据是错的（T+3 = 72 小时），已撤回；但剩下两条理由（上期调整机制无论如何都必须存在、客户体验）足以支撑 T+1。代价：上期调整会经常出现，已派生监控要求——**但它是投递链路的延迟信号，不是会计常态**（见 ADR-0003「要读准这个数字的性质」）。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)
 - [x] **R6 — 仓库可见性偏离** —— 已收口（2026-09-10）。决策人选 B：接受公开，写成 [ADR-0001](adr/ADR-0001-repository-visibility.md)，spec 修订至 v1.2 使 §99 与实际一致。派生硬约束：绝不可提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。（来源：Codex 审查 PR #2）
 
 ---
@@ -58,6 +58,7 @@
 - [ ] ~~GitHub 仓库 + 受保护 `main`~~ ✅ 已建、已推送、`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限）；CI workflow 已建，待做：**在分支保护里把 `docs` / `secret-scan` 设为必需状态检查**
 - [ ] 专用生产 MySQL/Redis 拓扑（依赖 D3）
 - [ ] 备份、恢复、加密密钥方案设计（依赖 D4）
+- [ ] 确定 API / Celery 容器的运行 UID，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
 - [ ] 初始性能 / SLO 基线
 - [ ] FX 供应商评估（依赖 D1）
 
@@ -74,6 +75,7 @@
 - [ ] 不可变钱包账本
 - [ ] 管理员手工调账
 - [ ] API 凭据（加密存储、版本化、可轮换）
+- [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节
 - [ ] 审计日志
 
 **验收**：管理员建客户 → 自动有钱包 · 建 project · 建 API 凭据 · 调账生效 · 所有动作都有审计
