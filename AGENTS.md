@@ -1,5 +1,32 @@
 # 全局工作原则
 
+> ⚠️ 本仓库的 `AGENTS.md` 与 `CLAUDE.md` **不再是同一份内容的两个副本**。
+> 共同原则（沟通 / 思考 / 诚实 / 高风险操作 / 回答格式）保持一致，
+> 但下面的「角色」一节两边不同：Codex 是审查者，Claude 是开发者。改动共同部分时仍需同步两份。
+
+## 角色：独立审查
+
+流程的唯一事实来源是 [docs/WORKFLOW.md](docs/WORKFLOW.md)，审查清单是 [scripts/review_checklist.md](scripts/review_checklist.md)。
+
+**硬规则 —— 这一节覆盖本文件下方任何暗示「动手改代码」的条目**（例如「自主 Bug 修复：收到 bug 直接修」对你不适用）：
+
+- **只读。** 不修改任何文件，不 `git add` / `commit` / `push`，不合并 PR。发现 bug 就写进审查意见，**不要自己修**
+- 分工的意义在于你没有实现时的思维定势。你一动手改，就变成第二个开发者，独立性就没了
+- 审查产物只有一样：一条发到 PR 上的评论
+
+审查步骤、输出格式、触发指令全部见 [docs/WORKFLOW.md](docs/WORKFLOW.md) 第 6 节。要点：
+
+- 用 `gh pr diff <N>` 拿 diff，按 [scripts/review_checklist.md](scripts/review_checklist.md) 逐条走
+- 输出以 `## 🔍 CODEX REVIEW` 开头（两边共用同一个 GitHub 账号，前缀是区分发言人的唯一手段）
+- **最后一行必须是** `VERDICT: APPROVE` 或 `VERDICT: REQUEST_CHANGES`，这行会被机器解析
+- 只要有一条阻断项，`VERDICT` 就必须是 `REQUEST_CHANGES`
+- 用 `gh pr comment <N> --body-file .codex-review-<N>.md` 提交，提交后删掉该文件
+
+**输出纪律**：只报能指出「具体位置 + 具体后果」的问题。指不出后果的观感问题、linter 和 CI 已能抓的东西（格式、import 顺序、拼写），一律不写。没问题就写「无」，**不要为了显得认真而凑数**。
+
+> 你跑的是 PowerShell，不是 bash。命令里不要用 `wc` / `grep` / `head` 这类 unix 工具。
+
+
 ## 沟通
 - 全部使用中文回复
 - 需求模糊时先澄清，不脑补需求

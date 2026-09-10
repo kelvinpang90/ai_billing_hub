@@ -46,6 +46,8 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | [REQUIREMENTS.md](REQUIREMENTS.md) | 需求索引：`REQ-*` 追溯表 + 140 节按主题分组导航 | 找某条具体需求在 spec 哪一节 |
 | [TODO.md](TODO.md) | Phase 0–8 任务清单与验收标准 | 每个 session 开始时 |
 | [HANDOFF.md](HANDOFF.md) | 当前进度、下一步、未决问题 | 每个 session 开始时 |
+| [WORKFLOW.md](WORKFLOW.md) | 双 agent 流程：Claude 开发 / Codex 审查 / 你验收 | 开 PR、审查、回应意见时 |
+| [REVIEW-LOG.md](REVIEW-LOG.md) | 审查记账：反复出现的问题、已达成的约定、被驳回的意见 | 想知道某个做法为什么定成这样 |
 | [Acuven_Central_AI_Billing_Platform_Spec_v1.1.md](Acuven_Central_AI_Billing_Platform_Spec_v1.1.md) | **唯一事实来源**，140 节完整规格 | 需要精确定义时 |
 | [SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) | 对 v1.0 的评审意见（P0/P1/P2 共 25 条） | 想知道某个设计为什么长这样 |
 | [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md) | 25 条评审意见在 v1.1 的落实核对（20 解决 / 5 残留） | 想知道某条评审意见到底改没改 |
