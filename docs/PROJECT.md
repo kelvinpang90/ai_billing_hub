@@ -33,7 +33,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | 架构决策记录（ADR） | ❌ 未开始 |
 | 代码 | ❌ 未开始，Phase 0 尚未启动 |
 | 数据库 schema | ❌ 未开始 |
-| git 仓库 | ⚠️ 本地已初始化，remote 已配置（`git@github.com:kelvinpang90/ai_billing_hub.git`），**尚未推送**——SSH host key 未验证 |
+| git 仓库 | ✅ 已推送到 `github.com/kelvinpang90/ai_billing_hub`（私有，默认分支 `main`） |
 
 **当前所处阶段：Phase 0 之前**。下一步见 [HANDOFF.md](HANDOFF.md)。
 

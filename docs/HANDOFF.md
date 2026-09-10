@@ -16,7 +16,7 @@
 - 评审意见逐条核对（2026-09-10）：25 条中 20 条已在 v1.1 解决，5 条残留转为 TODO 的 R1–R5
 - git 仓库本地初始化
 
-未完成：ADR、数据库 schema、任何代码、远端仓库。
+未完成：ADR、数据库 schema、任何代码。
 
 ## 下一步
 
@@ -56,7 +56,7 @@ spec §137 的起步指令说得很清楚：**不要先写前端页面**，先�
 ## 环境与凭据
 
 - 尚无任何生产环境、域名、凭据。
-- 远端仓库未创建（spec §99 要求私有 GitHub 仓库 + 受保护 `main`）。
+- 远端仓库：`github.com/kelvinpang90/ai_billing_hub`（私有，HTTPS remote，默认分支 `main`）。**`main` 的分支保护与 CI 尚未配置**，spec §99 要求受保护 `main` + CI 通过才能合并 —— 属 Phase 0 任务。
 - 共享基建 `vps_infra` 提供 `infra_nginx` / `infra_mysql` / `infra_redis`，本项目是否接入取决于 D3。
 
 ## 代码目录说明
