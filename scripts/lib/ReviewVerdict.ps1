@@ -79,6 +79,25 @@ function Get-LinkedDesignIssue {
 # 不校验的话，Claude 自己写一条以合法批准行结尾的回应就会被算成批准 ——
 # 独立审查形同虚设。
 $DesignReviewPrefix = '## 🔍 CODEX REVIEW — 设计闸门'
+$ImplementationReviewPrefix = '## 🔍 CODEX REVIEW'
+
+function Get-FirstNonEmptyLine {
+    param([string[]]$Lines)
+    if (-not $Lines) { return '' }
+    $first = $Lines | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1
+    if ($null -eq $first) { return '' }
+    return $first.Trim()
+}
+
+# 署名前缀校验。**发布方与读取方必须调用同一个函数** —— 各写一份的话，
+# 会发布一条自己认为合法、而读取方判为 NOT_A_REVIEW 的批准：
+# 设计闸门显示通过，实现审查却说该设计未批准，两端各说各话且都不报错。
+function Test-ReviewHeader {
+    param([string]$Body, [switch]$Design)
+    $expected = if ($Design) { $DesignReviewPrefix } else { $ImplementationReviewPrefix }
+    # -ceq：大小写必须一致，理由同 Get-ImplementationVerdict
+    return ((Get-FirstNonEmptyLine ($Body -split '\r?\n')) -ceq $expected)
+}
 
 function Get-CommentDesignVerdict {
     param(
@@ -86,10 +105,8 @@ function Get-CommentDesignVerdict {
         [Nullable[int]]$ExpectedVersion
     )
     if (-not $CommentBody) { return 'NOT_A_REVIEW' }
-    $lines = $CommentBody -split '\r?\n'
-    $first = $lines | Where-Object { $_.Trim() } | Select-Object -First 1
-    if ($null -eq $first -or $first.Trim() -ne $DesignReviewPrefix) { return 'NOT_A_REVIEW' }
-    return Get-DesignVerdict (Get-VerdictLine $lines) $ExpectedVersion
+    if (-not (Test-ReviewHeader $CommentBody -Design)) { return 'NOT_A_REVIEW' }
+    return Get-DesignVerdict (Get-VerdictLine ($CommentBody -split '\r?\n')) $ExpectedVersion
 }
 
 # 从一串评论里取【最后一条】针对当前版本的判定，返回是否处于已批准状态。
@@ -119,4 +136,23 @@ function Compare-DesignState {
     if ($BeforeVersion -ne $AfterVersion) { return 'VERSION_CHANGED' }
     if ($BeforeApproved -ne $AfterApproved) { return 'APPROVAL_CHANGED' }
     return 'UNCHANGED'
+}
+
+# 逐段比对审查材料，返回变化了的段名。
+#
+# 前置的那几项复检（PR head、设计版本、批准状态）都是「猜到了才会查」的专项检查，
+# 漏掉一项就是一个静默的洞：PR 正文被改成关联另一个设计、设计正文原地改写而版本
+# 不变、base 前进导致 diff 变化 —— 这些都绕得过专项检查。
+# 这里做的是兜底：审查材料本身逐字没变，才允许发布判定。
+function Compare-MaterialParts {
+    param($Before, $After)
+    $changed = @()
+    foreach ($k in $Before.Keys) {
+        if (-not $After.Contains($k)) { $changed += $k; continue }
+        if ($Before[$k] -cne $After[$k]) { $changed += $k }
+    }
+    foreach ($k in $After.Keys) {
+        if (-not $Before.Contains($k)) { $changed += $k }
+    }
+    return $changed
 }

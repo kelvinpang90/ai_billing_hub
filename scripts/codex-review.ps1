@@ -140,10 +140,15 @@ Codex 从工作区读审查清单、架构文档与规格。这些文件若有�
 "@
 }
 
+# Codex 读的是工作区文件，所以「工作区停在哪个提交」本身就是审查基线的一部分。
+# 光查 status --porcelain 不够：审查期间 checkout 到另一个干净的提交，
+# porcelain 依然是空的，只有比对 HEAD 才发现得了。设计闸门同样要查 ——
+# 它读的清单、架构文档、spec 也都来自工作区。
+$localHead = (& git -C $repo rev-parse HEAD).Trim()
+
 if (-not $isDesign) {
     $prHead = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'headRefOid', '--jq', '.headRefOid')
     if (-not $prHead.Trim()) { Fail "取不到 PR #$Pr 的 head SHA。" }
-    $localHead = (& git -C $repo rev-parse HEAD).Trim()
     if ($localHead -ne $prHead.Trim()) {
         Fail @"
 本地工作区与 PR #$Pr 不是同一版：
@@ -159,19 +164,29 @@ if (-not $isDesign) {
 $inputFile = Join-Path $repo ".codex-input-$kind-$number.md"
 $nl = [Environment]::NewLine
 $fence = '```'
-$expectedVersion = $null
-
-Write-Host "取审查材料..." -ForegroundColor Cyan
-
-if ($isDesign) {
-    $json = Invoke-GhUtf8 @('issue', 'view', "$Issue", '--repo', $slug, '--json', 'title,body')
-    $obj = $json | ConvertFrom-Json
-    $expectedVersion = Get-DesignVersion $obj.body
-    if ($null -eq $expectedVersion) {
-        Fail "Issue #$Issue 里读不到设计版本。模板要求顶部写「设计版本：v1」。读不到就无法做批准绑定。"
+# 材料按段返回，不是拼成一个大字符串就把结构丢掉。审查跑完要拿它逐段复检，
+# 有分段才能指出「哪一段变了」，而不是只说「变了」。
+function Get-ReviewMaterial {
+    if ($isDesign) {
+        $json = Invoke-GhUtf8 @('issue', 'view', "$Issue", '--repo', $slug, '--json', 'title,body')
+        $obj = $json | ConvertFrom-Json
+        $version = Get-DesignVersion $obj.body
+        if ($null -eq $version) {
+            Fail "Issue #$Issue 里读不到设计版本。模板要求顶部写「设计版本：v1」。读不到就无法做批准绑定。"
+        }
+        return [pscustomobject]@{
+            Title         = $obj.title
+            Version       = $version
+            DesignIssue   = $null
+            DesignVersion = $null
+            HasApproval   = $false
+            Parts         = [ordered]@{
+                '标题'     = "# $($obj.title)"
+                '设计正文' = $obj.body
+            }
+        }
     }
-    $sections = @("# $($obj.title)", '', $obj.body)
-} else {
+
     $json = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'title,body')
     $obj = $json | ConvertFrom-Json
     $diff = Invoke-GhUtf8 @('pr', 'diff', "$Pr", '--repo', $slug)
@@ -179,6 +194,9 @@ if ($isDesign) {
     # 关联的设计文档必须一起给，否则 prompt 里「核对是否忠于已批准的设计」
     # 是一条无法执行的要求 —— Codex 没有网络，看不到那个 Issue。
     $designIssue = Get-LinkedDesignIssue $obj.body
+    $designVersion = $null
+    $hasCurrentApproval = $false
+
     if ($designIssue) {
         $dj = Invoke-GhUtf8 @('issue', 'view', "$designIssue", '--repo', $slug, '--json', 'title,body,comments')
         $do = $dj | ConvertFrom-Json
@@ -226,12 +244,38 @@ if ($isDesign) {
         )
     }
 
-    $sections = @("# $($obj.title)", '', $obj.body, '') + $designSection + @(
-        '', '## DIFF', '', ($fence + 'diff'), ($diff -join $nl), $fence
-    )
+    return [pscustomobject]@{
+        Title         = $obj.title
+        Version       = $null
+        DesignIssue   = $designIssue
+        DesignVersion = $designVersion
+        HasApproval   = $hasCurrentApproval
+        Parts         = [ordered]@{
+            '标题'     = "# $($obj.title)"
+            'PR 正文'  = $obj.body
+            '关联设计' = ($designSection -join $nl)
+            'DIFF'     = ($diff -join $nl)
+        }
+    }
 }
 
-Set-Content -Path $inputFile -Value ($sections -join $nl) -Encoding UTF8
+function Format-Material {
+    param($Material)
+    $p = $Material.Parts
+    if ($isDesign) {
+        return (@($p['标题'], '', $p['设计正文']) -join $nl)
+    }
+    return (@(
+        $p['标题'], '', $p['PR 正文'], '', $p['关联设计'],
+        '', '## DIFF', '', ($fence + 'diff'), $p['DIFF'], $fence
+    ) -join $nl)
+}
+
+Write-Host "取审查材料..." -ForegroundColor Cyan
+$material = Get-ReviewMaterial
+$expectedVersion = $material.Version
+
+Set-Content -Path $inputFile -Value (Format-Material $material) -Encoding UTF8
 
 # 材料坏了必须当场炸，不能让 Codex 对着乱码给判定。
 $written = Get-Content $inputFile -Raw -Encoding UTF8
@@ -248,8 +292,8 @@ $metaText = if ($metaEnd -gt 0) { $written.Substring(0, $metaEnd) } else { $writ
 if ($metaText.Contains($replacementChar)) {
     Fail "审查材料的元数据部分有替换字符（U+FFFD），说明 gh 输出的编码没被正确解码。不能对着乱码审查。"
 }
-if ($obj.title -and -not $written.Contains($obj.title)) {
-    Fail "审查材料里找不到 PR/Issue 标题原文，材料可能在写盘时被破坏。标题应为：$($obj.title)"
+if ($material.Title -and -not $written.Contains($material.Title)) {
+    Fail "审查材料里找不到 PR/Issue 标题原文，材料可能在写盘时被破坏。标题应为：$($material.Title)"
 }
 if (-not $isDesign -and $written -notmatch '(?m)^diff --git ') {
     Fail "审查材料里没有一行 diff --git，diff 没取到或已损坏。"
@@ -261,7 +305,7 @@ if ($sizeKb -gt 400) { Write-Warning "材料超过 400 KB，可能超出上下�
 
 if ($MaterialOnly) {
     Write-Host "-MaterialOnly：材料已生成并通过校验，未调用 Codex。" -ForegroundColor Green
-    Write-Host "标题：$($obj.title)"
+    Write-Host "标题：$($material.Title)"
     exit 0
 }
 
@@ -380,6 +424,13 @@ Write-Host ("-" * 60)
 Write-Host "结果已保存：$out"
 Write-Host "判定行：$verdictLine" -ForegroundColor Yellow
 
+# 署名前缀同样要校验，而且必须用读取方那个函数（见 lib 里 Test-ReviewHeader 的注释）。
+# 只看最后一行的话，会发布一条自己判为合法、读取方判为「不是审查」的批准。
+if (-not (Test-ReviewHeader (Get-Content $out -Raw) -Design:$isDesign)) {
+    $expectedHeader = if ($isDesign) { $DesignReviewPrefix } else { $ImplementationReviewPrefix }
+    Fail "审查结果的首行不是约定的署名前缀，未发布。应为「$expectedHeader」。请人工看 $out"
+}
+
 switch ($result) {
     'INVALID'          { Fail "最后一行不是合法判定，Codex 没按格式输出。未发布。请人工看 $out" }
     'VERSION_UNKNOWN'  { Fail "批准里没有可比对的设计版本。未发布。" }
@@ -401,6 +452,18 @@ Codex 读工作区文件是实时的，中途改动会让它依据一半旧一�
 "@
 }
 
+$localHeadAfter = (& git -C $repo rev-parse HEAD).Trim()
+if ($localHeadAfter -ne $localHead) {
+    Fail @"
+审查期间本地 HEAD 被切换，本次判定不可信，未发布：
+  审查时 : $localHead
+  现在   : $localHeadAfter
+
+Codex 读的是工作区文件。切到另一个提交后它看到的已经是另一版代码，
+而工作区依旧是干净的 —— 只查 git status 发现不了这种情况。
+"@
+}
+
 if (-not $isDesign) {
     $headAfter = Invoke-GhUtf8 @('pr', 'view', "$Pr", '--repo', $slug, '--json', 'headRefOid', '--jq', '.headRefOid')
     if (-not $headAfter.Trim()) { Fail "审查后取不到 PR head，无法确认基线未变，未发布。" }
@@ -413,25 +476,42 @@ if (-not $isDesign) {
 重新跑一次。
 "@
     }
+}
 
-    # 关联设计只在取材时读过一次。审查期间设计可能升版、批准可能被撤回 ——
-    # 那样发出去的就是一份基于旧设计的通过判定，设计版本绑定等于白做。
-    if ($designIssue) {
-        $djAfter = Invoke-GhUtf8 @('issue', 'view', "$designIssue", '--repo', $slug, '--json', 'title,body,comments')
-        $doAfter = $djAfter | ConvertFrom-Json
-        $versionAfter = Get-DesignVersion $doAfter.body
-        $approvedAfter = Get-LatestDesignApproval $doAfter.comments $versionAfter
+# 材料只在开跑前取过一次，之后它的每一个来源都还可能变：设计升版、批准被撤回、
+# 设计正文原地改写（版本不变）、PR 正文改成关联另一个设计、base 前进导致 diff 变化。
+# 前面那些是「想到了才查得到」的专项检查，漏一项就是一个静默的洞。
+# 这里重新取一次材料逐段比对 —— **材料逐字没变，才允许发布判定**。
+$after = Get-ReviewMaterial
 
-        switch (Compare-DesignState $designVersion $hasCurrentApproval $versionAfter $approvedAfter) {
-            'VERSION_CHANGED' {
-                Fail "审查期间关联设计 Issue #$designIssue 升版（v$designVersion → v$versionAfter），本次判定针对的是旧设计，未发布。"
-            }
-            'APPROVAL_CHANGED' {
-                Fail "审查期间关联设计 Issue #$designIssue 的批准状态变了（已批准=$hasCurrentApproval → $approvedAfter），未发布。"
-            }
+if ($material.DesignIssue -ne $after.DesignIssue) {
+    Fail "审查期间 PR 正文里关联的设计 Issue 变了（#$($material.DesignIssue) → #$($after.DesignIssue)），未发布。"
+}
+
+# 专项检查留着不是为了兜底（上面那段才是），是为了给出具体到「升版」还是
+# 「撤回」的错误信息 —— 逐段比对只能说「关联设计变了」。
+if ($material.DesignIssue) {
+    switch (Compare-DesignState $material.DesignVersion $material.HasApproval $after.DesignVersion $after.HasApproval) {
+        'VERSION_CHANGED' {
+            Fail "审查期间关联设计 Issue #$($material.DesignIssue) 升版（v$($material.DesignVersion) → v$($after.DesignVersion)），本次判定针对的是旧设计，未发布。"
+        }
+        'APPROVAL_CHANGED' {
+            Fail "审查期间关联设计 Issue #$($material.DesignIssue) 的批准状态变了（已批准=$($material.HasApproval) → $($after.HasApproval)），未发布。"
         }
     }
+}
 
+$changedParts = Compare-MaterialParts $material.Parts $after.Parts
+if ($changedParts) {
+    Fail @"
+审查期间审查材料发生了变化，本次判定针对的是旧材料，未发布：
+  变化的部分：$($changedParts -join '、')
+
+重新跑一次。
+"@
+}
+
+if (-not $isDesign) {
     # 判定必须携带它审的是哪个提交。没有这行，一次 APPROVE 会被后续提交
     # 沿用下去 —— 未审查的代码就凭旧批准进了正式 PR。
     $reviewed = @()

@@ -59,6 +59,20 @@ CONSISTENCY_RULES = [
         },
     },
     {
+        # 署名前缀是「这条评论是独立审查」的唯一凭据（两边共用同一个 GitHub
+        # 账号）。它同时出现在 lib 的常量、prompt 模板、WORKFLOW 的约定表里 ——
+        # 任意一处漂移，脚本发出去的批准就会被读取方判为「不是审查」。
+        "name": "设计审查署名前缀",
+        "canonical": "## 🔍 CODEX REVIEW — 设计闸门",
+        "loose": re.compile(r"##\s*🔍\s*CODEX REVIEW\s*[—–-]\s*设计闸门", re.IGNORECASE),
+    },
+    {
+        "name": "实现审查署名前缀",
+        "canonical": "## 🔍 CODEX REVIEW",
+        # 负向前瞻把设计闸门那条排除掉，否则它会被当成实现前缀的不一致写法
+        "loose": re.compile(r"##\s*🔍\s*CODEX REVIEW(?!\s*[—–-])", re.IGNORECASE),
+    },
+    {
         "name": "实现闸门通过判定",
         "canonical": "VERDICT: APPROVE",
         "loose": re.compile(r"VERDICT:\s*APPROVE(?!_)", re.IGNORECASE),

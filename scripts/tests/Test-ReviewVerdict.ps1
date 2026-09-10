@@ -75,6 +75,29 @@ Assert-Equal 'NOT_A_REVIEW' (Get-CommentDesignVerdict "## 🔧 CLAUDE RESPONSE`n
 Assert-Equal 'NOT_A_REVIEW' (Get-CommentDesignVerdict "随便一条评论`n`nAPPROVED: design v2" 2) '无审查前缀 = 不算批准'
 Assert-Equal 'NOT_A_REVIEW' (Get-CommentDesignVerdict "## 🔍 CODEX REVIEW`n`nAPPROVED: design v2" 2) '实现闸门前缀 ≠ 设计闸门前缀'
 
+Write-Host "Test-ReviewHeader"
+# 发布方与读取方共用这一个判断。少了它，脚本会发布一条自己认为合法、
+# 而 Get-CommentDesignVerdict 判为 NOT_A_REVIEW 的批准 —— 两端各说各话。
+Assert-Equal $true  (Test-ReviewHeader "$prefix`n正文`n`nAPPROVED: design v2" -Design) '设计审查前缀正确'
+Assert-Equal $true  (Test-ReviewHeader "`n`n$prefix`n正文" -Design) '前导空行不影响'
+Assert-Equal $false (Test-ReviewHeader "**结论**：无问题`n`nAPPROVED: design v2" -Design) '缺前缀 = 不合法'
+Assert-Equal $false (Test-ReviewHeader "## 🔍 CODEX REVIEW`n正文" -Design) '实现前缀不能用于设计闸门'
+Assert-Equal $true  (Test-ReviewHeader "## 🔍 CODEX REVIEW`n正文") '实现审查前缀正确'
+Assert-Equal $false (Test-ReviewHeader "$prefix`n正文") '设计前缀不能用于实现闸门'
+Assert-Equal $false (Test-ReviewHeader "## 🔍 codex review`n正文") '大小写不符 = 不合法'  # check-docs:allow
+Assert-Equal $false (Test-ReviewHeader '') '空结果 = 不合法'
+
+Write-Host "Compare-MaterialParts"
+$before = [ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b' }
+Assert-Equal 0 (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b' })).Count) '逐字相同 = 无变化'
+Assert-Equal 'PR 正文' (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# T'; 'PR 正文' = 'body2'; 'DIFF' = 'diff --git a b' })))[0] 'PR 正文被改动'
+Assert-Equal 'DIFF' (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a c' })))[0] 'base 前进导致 diff 变化'
+# 关联设计从无到有（PR 正文补上「设计闸门：#N」）会让材料多出一段
+Assert-Equal '关联设计' (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b'; '关联设计' = 'x' })))[0] '多出一段也算变化'
+Assert-Equal 'DIFF' (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# T'; 'PR 正文' = 'body' })))[0] '少一段也算变化'
+# 大小写变化必须被认出来 —— 判定行、批准记录都是大小写敏感的
+Assert-Equal '标题' (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# t'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b' })))[0] '只改大小写也算变化'
+
 Write-Host "Get-LinkedDesignIssue"
 Assert-Equal 12 (Get-LinkedDesignIssue '## 任务`n设计闸门：#12`n其余') '中文冒号'
 Assert-Equal 7 (Get-LinkedDesignIssue '设计闸门: #7') '英文冒号'
