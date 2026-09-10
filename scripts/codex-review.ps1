@@ -84,97 +84,56 @@ Codex 会用 gh 取 PR 的 diff，却从本地工作区读审查清单与文档�
     }
 }
 
+# ---- 取审查材料 ----
+# Codex 在 read-only 沙箱里跑不了 gh：沙箱挡住 %APPDATA%\GitHub CLI\config.yml。
+# 与其放宽沙箱，不如让脚本把材料取好落盘 —— Codex 只做纯分析，不碰网络。
+# 附带好处：审查输入是一个可检视、可复现的文件，事后能确认它到底看了什么。
+$inputFile = Join-Path $repo ".codex-input-$($PSCmdlet.ParameterSetName)-$(if ($Pr) { $Pr } else { $Issue }).md"
+
+Write-Host "取审查材料..." -ForegroundColor Cyan
+$nl = [Environment]::NewLine
+$fence = '```'
+
+if ($PSCmdlet.ParameterSetName -eq 'Design') {
+    $json = & gh issue view $Issue --repo $slug --json title,body
+    if ($LASTEXITCODE -ne 0) { Write-Error "取 Issue #$Issue 失败"; exit 2 }
+    $obj = $json | ConvertFrom-Json
+    $sections = @("# $($obj.title)", '', $obj.body)
+} else {
+    $json = & gh pr view $Pr --repo $slug --json title,body
+    if ($LASTEXITCODE -ne 0) { Write-Error "取 PR #$Pr 失败"; exit 2 }
+    $obj = $json | ConvertFrom-Json
+    $diff = & gh pr diff $Pr --repo $slug
+    if ($LASTEXITCODE -ne 0) { Write-Error "取 PR #$Pr 的 diff 失败"; exit 2 }
+    $sections = @(
+        "# $($obj.title)", '', $obj.body, '',
+        '## DIFF', '', ($fence + 'diff'), ($diff -join $nl), $fence
+    )
+}
+Set-Content -Path $inputFile -Value ($sections -join $nl) -Encoding UTF8
+
+$sizeKb = [math]::Round((Get-Item $inputFile).Length / 1KB, 1)
+Write-Host "审查材料：$inputFile（$sizeKb KB）"
+if ($sizeKb -gt 400) {
+    Write-Warning "材料超过 400 KB，可能超出上下文。考虑拆分 PR。"
+}
+
+$rel = Split-Path -Leaf $inputFile
+
 $common = @"
 你是本仓库的独立审查者，不是开发者。
 
 硬规则：
 - 只读。不修改工作区任何文件，不 git add / commit / push，不合并任何东西。
+- **不要调用 gh 或任何网络命令**。审查材料已经取好放在 $rel 里，直接读那个文件。
 - 只报你能指出具体位置和具体后果的问题。指不出后果的观感问题不要写。
 - 不要重复 linter 和 CI 已经能抓的东西（格式、import 顺序、拼写）。
 - 没有问题就写「无」，不要为了显得认真而凑数。
 
 先读 scripts/review_checklist.md，那是本项目的审查清单。
-需要上下文时读 docs/ARCHITECTURE.md（14 条不变量）、docs/adr/ 下的决策记录，
+需要上下文时读工作区里的 docs/ARCHITECTURE.md（14 条不变量）、docs/adr/ 下的决策记录，
 以及 docs/Acuven_Central_AI_Billing_Platform_Spec_v1.2.md 的相关章节。
 "@
-
-if ($PSCmdlet.ParameterSetName -eq 'Design') {
-    $target = "Issue #$Issue"
-    $out = Join-Path $repo ".codex-review-design-$Issue.md"
-    $prompt = @"
-$common
-
-本次是【设计闸门】审查，目标是 $slug 的 Issue #$Issue。
-
-步骤：
-1. 执行 gh issue view $Issue --repo $slug 读设计文档全文。
-2. 走 scripts/review_checklist.md 的「设计审查」一节，明确回答那五个问题。
-3. 核对设计闸门的七条判定。
-
-按以下格式输出，最后一行必须是判定：
-
-## 🔍 CODEX REVIEW — 设计闸门
-
-**结论**：<一句话>
-
-### 五问
-1. 哪个具体场景会破坏不变量？<答>
-2. 哪条失败路径没有定义最终状态或恢复方式？<答>
-3. 哪项正确性只靠应用代码、缺少数据库约束？<答>
-4. 哪个新增分支没有对应测试？<答>
-5. 设计是否与 spec 的具体章节冲突？<答>
-
-### 阻断项
-- `章节` — 问题 → 后果
-（没有就写「无」）
-
-### 闸门判定
-逐条列出七条判定是否满足。
-
----
-APPROVED: design v<该 Issue 顶部标注的版本号>
-"@
-    $rejected = 'REQUEST_CHANGES'
-    $approvedPattern = '^APPROVED: design v'
-} else {
-    $target = "PR #$Pr"
-    $out = Join-Path $repo ".codex-review-$Pr.md"
-    $prompt = @"
-$common
-
-本次是【实现闸门】审查，目标是 $slug 的 PR #$Pr。
-
-步骤：
-1. 执行 gh pr view $Pr --repo $slug --json title,body 拿改动意图。
-2. 执行 gh pr diff $Pr --repo $slug 拿完整 diff。
-3. 走 scripts/review_checklist.md 的「实现审查」A–E 各节。
-4. 若该 PR 关联了设计 Issue，核对实现是否忠于已批准的那一版设计。
-
-按以下格式输出，最后一行必须是判定：
-
-## 🔍 CODEX REVIEW
-
-**结论**：<一句话>
-
-### 阻断项
-- `文件:行` — 问题 → 后果
-（没有就写「无」）
-
-### 建议项
-- `文件:行` — 问题 → 建议
-（没有就写「无」）
-
-### 清单核对
-- 不变量：<触碰了第几条，是否保住>
-- DoD：<哪几条未满足>
-- 测试：<改动引入的边界是否被覆盖>
-
----
-VERDICT: APPROVE
-"@
-    $rejected = 'REQUEST_CHANGES'
-    $approvedPattern = '^VERDICT: APPROVE$'
-}
 
 Write-Host "审查目标：$target（$slug）" -ForegroundColor Cyan
 Write-Host "沙箱：read-only —— Codex 改不了任何文件" -ForegroundColor Cyan
@@ -208,6 +167,8 @@ if ($Post) {
 } else {
     Write-Host "未发布（加 -Post 可发到 $target）"
 }
+
+Remove-Item $inputFile -ErrorAction SilentlyContinue
 
 if ($verdictLine -match $approvedPattern) { exit 0 }
 if ($verdictLine -match $rejected) { exit 1 }

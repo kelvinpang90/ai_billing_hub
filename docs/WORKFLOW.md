@@ -142,6 +142,16 @@ Phase 0 建好 `app/` 与 `tests/` 之后，这里会补上 lint 与 pytest。**
 .\scripts\codex-review.ps1 -Issue 12 -Post
 ```
 
+脚本做三件事：**取材料 → 调 Codex 分析 → 发结果**。
+
+⚠️ **Codex 不碰网络，也不调 `gh`。** `codex exec -s read-only` 的沙箱会挡住 `%APPDATA%\GitHub CLI\config.yml`，`gh` 在里面根本起不来（放宽沙箱试过，`disk-full-read-access` 也不行）。所以由脚本先把 PR 描述与完整 diff 取好、落成 `.codex-input-*.md`，Codex 只做纯分析。
+
+这不只是绕过限制，架构上也更好：
+
+- 审查者的权限面收到最小 —— 只读本仓库，不需要任何网络能力
+- **审查输入是一个可检视的文件**，事后能确认它到底看了什么，而不是只能相信它「取到了正确的 diff」
+- 少几轮 agent 往返，快
+
 **同一个脚本，谁都能跑。** Kelvin 在自己终端跑就能实时看到全过程；Claude 也能调它。**审查内容不会因为谁按的回车而变**——提示词与清单都在仓库里、受版本控制、在 PR 里可审。这是防止 Claude 临时把提示词写得偏向自己的唯一保障，**不要把提示词挪到脚本外面临时拼**。
 
 ## 9. 已知约束
@@ -149,6 +159,7 @@ Phase 0 建好 `app/` 与 `tests/` 之后，这里会补上 lint 与 pytest。**
 | 约束 | 影响 | 现状 |
 | --- | --- | --- |
 | `codex exec` 的会话不进 Codex desktop 与 CLI 的会话列表 | 想看过程只能看终端输出 | 在终端跑脚本即可实时看 |
+| read-only 沙箱挡住 `%APPDATA%`，`gh` 在沙箱内不可用 | Codex 自己取不了 PR 内容 | 脚本先取材落盘，Codex 只读本地文件（见 §8） |
 | 两边共用一个 GitHub 账号 | Codex **无法**给出正式的 GitHub APPROVE（GitHub 不允许 approve 自己的 PR），只能发评论 + 判定行 | 接受。闸门在 Kelvin 手上，功能等价 |
 | Codex 跑 PowerShell | 给它的命令不能用 `wc` / `grep` / `head` 这类 unix 工具 | 脚本里已规避 |
 | 同账号导致评论难分辨 | 靠 `## 🔍` / `## 🔧` 前缀区分 | §6 已约定 |
