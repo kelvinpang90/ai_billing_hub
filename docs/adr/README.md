@@ -34,11 +34,14 @@
 | ADR | 标题 | 状态 | 日期 |
 | --- | --- | --- | --- |
 | [0001](ADR-0001-repository-visibility.md) | 仓库可见性：公开而非私有 | 已接受 | 2026-09-10 |
+| [0002](ADR-0002-production-datastore-isolation.md) | 生产数据存储隔离：专用实例而非共享基建 | 已接受 | 2026-09-10 |
+| [0003](ADR-0003-financial-period-and-cutoff.md) | 财务期间与 cut-off：T+1 宽限 + 上期调整 | 已接受 | 2026-09-10 |
+| [0004](ADR-0004-credential-encryption.md) | 凭据加密与密钥管理 | 已接受 | 2026-09-10 |
 
 ## 待写（spec §136 要求）
 
 - [ ] 中心摄取语义（同步 vs 异步的最终定稿与边界）
-- [ ] 财务期间与 cut-off 规则
-- [ ] 凭据加密方案（密钥管理、轮换、恢复）
-- [ ] 生产数据库隔离（结论 spec §98 已给出：专用实例，ADR 只需记录理由）
+- [x] 财务期间与 cut-off 规则 → [ADR-0003](ADR-0003-financial-period-and-cutoff.md)
+- [x] 凭据加密方案（密钥管理、轮换、恢复）→ [ADR-0004](ADR-0004-credential-encryption.md)
+- [x] 生产数据库隔离 → [ADR-0002](ADR-0002-production-datastore-isolation.md)
 - [ ] 外部供应商选型：支付网关、FX 数据源

@@ -161,9 +161,9 @@ optional: document-worker
 目录与写法约定见 [adr/README.md](adr/README.md)。以下决策**必须在对应实现阶段之前**落成 ADR：
 
 - [ ] 中心摄取语义（同步 vs 异步的最终定稿与边界）
-- [ ] 财务期间与 cut-off 规则
-- [ ] 凭据加密方案（密钥管理、轮换、恢复）
-- [ ] 生产数据库隔离（**结论 §98 已给出：专用实例，不复用 `vps_infra`**；ADR 只需记录理由）
+- [x] 财务期间与 cut-off 规则 → [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)
+- [x] 凭据加密方案（密钥管理、轮换、恢复）→ [ADR-0004](adr/ADR-0004-credential-encryption.md)
+- [x] 生产数据库隔离 → [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
 - [ ] 外部供应商选型（支付网关、FX 数据源）
 
 spec §136 还要求维护 `database-schema.md` / `api.md` / `integrated-application-backend.md` / `payment-flow.md` / `pricing-engine.md` / `currency-and-fx.md` / `data-governance.md` / `deployment.md` / `runbook.md`。这些在对应 Phase 落地时再建，现在不预创建空文件。
