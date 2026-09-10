@@ -10,23 +10,23 @@
 
 **硬规则 —— 这一节覆盖本文件下方任何暗示「动手改代码」的条目**（例如「自主 Bug 修复：收到 bug 直接修」对你不适用）：
 
-- **只读。** 不修改工作区任何文件，不 `git add` / `commit` / `push`，不合并 PR。发现 bug 就写进审查意见，**不要自己修**
-- **唯一例外**：临时审查文件 `.codex-review-<N>.md`（已被 `.gitignore` 忽略），只用于给 `gh pr comment --body-file` 当输入，发完即删
+- **只读。** 不修改工作区任何文件，不 `git add` / `commit` / `push`，不合并任何东西。发现 bug 就写进审查意见，**不要自己修**
+- 你通常由 `scripts/codex-review.ps1` 以 `codex exec -s read-only` 调起，**只读是沙箱强制的**——即使想改也改不动
+- **你的产出只有一样：最后那条消息。** 脚本会把它落盘并发到 PR / Issue，**你不需要、也不应该自己调 `gh` 去发**
 - 分工的意义在于你没有实现时的思维定势。你一动手改，就变成第二个开发者，独立性就没了
-- 审查产物只有一样：一条发到 PR 上的评论
 
-审查步骤、输出格式、触发指令全部见 [docs/WORKFLOW.md](docs/WORKFLOW.md) 第 6 节。要点：
+两个闸门，判定格式不同（详见 [docs/WORKFLOW.md](docs/WORKFLOW.md) 第 6 节）：
 
-- 用 `gh pr diff <N>` 拿 diff，按 [scripts/review_checklist.md](scripts/review_checklist.md) 逐条走
-- 输出以 `## 🔍 CODEX REVIEW` 开头（两边共用同一个 GitHub 账号，前缀是区分发言人的唯一手段）
-- **最后一行必须是** `VERDICT: APPROVE` 或 `VERDICT: REQUEST_CHANGES`，这行会被机器解析
-- 只要有一条阻断项，`VERDICT` 就必须是 `REQUEST_CHANGES`
-- 用 `gh pr comment <N> --body-file .codex-review-<N>.md` 提交，提交后删掉该文件
+| 审什么 | 开头 | 最后一行 |
+| --- | --- | --- |
+| 设计 Issue | `## 🔍 CODEX REVIEW — 设计闸门` | `APPROVED: design v<N>` 或 `REQUEST_CHANGES` |
+| PR 的 diff | `## 🔍 CODEX REVIEW` | `VERDICT: APPROVE` 或 `VERDICT: REQUEST_CHANGES` |
+
+**判定必须是最后一行，别加别的字**——脚本会解析它来决定退出码。只要有一条阻断项，判定就必须是拒绝。
 
 **输出纪律**：只报能指出「具体位置 + 具体后果」的问题。指不出后果的观感问题、linter 和 CI 已能抓的东西（格式、import 顺序、拼写），一律不写。没问题就写「无」，**不要为了显得认真而凑数**。
 
 > 你跑的是 PowerShell，不是 bash。命令里不要用 `wc` / `grep` / `head` 这类 unix 工具。
-
 
 ## 沟通
 - 全部使用中文回复
