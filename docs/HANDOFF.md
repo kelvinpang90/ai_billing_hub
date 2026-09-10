@@ -12,7 +12,8 @@
 已完成：
 - spec v1.1（140 节）—— 已按 v1.0 评审意见修订
 - spec v1.0 评审意见（25 条：P0×7 / P1×10 / P2×8）
-- 文档结构整理（本次）：PROJECT / ARCHITECTURE / REQUIREMENTS / TODO / HANDOFF
+- 文档结构整理：PROJECT / ARCHITECTURE / REQUIREMENTS / TODO / HANDOFF
+- 评审意见逐条核对（2026-09-10）：25 条中 20 条已在 v1.1 解决，5 条残留转为 TODO 的 R1–R5
 - git 仓库本地初始化
 
 未完成：ADR、数据库 schema、任何代码、远端仓库。
@@ -21,9 +22,10 @@
 
 按 [TODO.md](TODO.md) 的顺序：
 
-1. **先做 P-1 的 D1–D7 七个前置决策**，尤其是 D1（汇率）、D2（SST）、D3（数据库隔离）—— 这三个直接决定表结构，事后改代价极高。
-2. 决策落成 `docs/adr/` 下的 ADR。
-3. 再启动 Phase 0。
+1. **先做 P-1 的 D1–D7 前置决策**，尤其是 D1（汇率）、D2（SST）—— 这两个直接决定表结构，事后改代价极高。D3 的结论 spec §98 已给出（专用实例），只需落 ADR。
+2. 顺带定 P-2 的 R1 / R3 / R4（Phase 2 前）与 R5（Phase 1 前）；R2 可留到 Phase 4 前。
+3. 决策落成 `docs/adr/` 下的 ADR。
+4. 再启动 Phase 0。
 
 spec §137 的起步指令说得很清楚：**不要先写前端页面**，先立域模型与财务不变量。第一个里程碑是 Phase 0 + Phase 1。
 
@@ -33,10 +35,11 @@ spec §137 的起步指令说得很清楚：**不要先写前端页面**，先�
 | --- | --- | --- | --- |
 | 1 | 汇率数据源、更新频率、取值时点 | `usage_events` / `fx_rate_versions` 表结构 | 需拍板（D1） |
 | 2 | SST 含税口径、税点确认时机 | receipt / statement 表字段，事后加等于重做所有历史凭证 | 会计（D2） |
-| 3 | 生产 MySQL 独立实例 vs 复用 `infra_mysql` | 备份策略、爆炸半径、Phase 0 拓扑 | 需拍板（D3） |
+| 3 | ~~生产 MySQL 独立实例 vs 复用 `infra_mysql`~~ | **已定案**：spec §98 要求专用实例，不共享。只剩落 ADR | — |
 | 4 | 支付网关选哪家 | Phase 4 全部 | 需拍板（D6） |
 | 5 | WhatsApp 通知复用 `whatsapp_gateway` 还是自建 | Phase 6 | 需拍板（D7） |
-| 6 | 25 条评审意见在 v1.1 里到底落实了几条 | 可能有 P0 遗留 | 需逐条核对 |
+| 6 | ~~25 条评审意见落实了几条~~ | **已核对（2026-09-10）**：20 条已解决 / 5 条残留，见 [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md) | — |
+| 7 | 同租户是否允许并存多笔 PENDING 支付 | Phase 4，spec 完全没规定 | 需拍板（R2） |
 
 ## 已知冲突（待清理）
 

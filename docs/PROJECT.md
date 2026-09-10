@@ -29,10 +29,11 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | --- | --- |
 | 规格文档 | ✅ v1.1（140 节，已按 v1.0 评审意见修订） |
 | 规格评审 | ✅ 已完成（针对 v1.0，25 条意见） |
+| 评审落实核对 | ✅ 已完成（20 条已解决 / 5 条残留 R1–R5） |
 | 架构决策记录（ADR） | ❌ 未开始 |
 | 代码 | ❌ 未开始，Phase 0 尚未启动 |
 | 数据库 schema | ❌ 未开始 |
-| git 仓库 | ✅ 本地已初始化，尚未推远端 |
+| git 仓库 | ⚠️ 本地已初始化，remote 已配置（`git@github.com:kelvinpang90/ai_billing_hub.git`），**尚未推送**——SSH host key 未验证 |
 
 **当前所处阶段：Phase 0 之前**。下一步见 [HANDOFF.md](HANDOFF.md)。
 
@@ -47,6 +48,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | [HANDOFF.md](HANDOFF.md) | 当前进度、下一步、未决问题 | 每个 session 开始时 |
 | [Acuven_Central_AI_Billing_Platform_Spec_v1.1.md](Acuven_Central_AI_Billing_Platform_Spec_v1.1.md) | **唯一事实来源**，140 节完整规格 | 需要精确定义时 |
 | [SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) | 对 v1.0 的评审意见（P0/P1/P2 共 25 条） | 想知道某个设计为什么长这样 |
+| [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md) | 25 条评审意见在 v1.1 的落实核对（20 解决 / 5 残留） | 想知道某条评审意见到底改没改 |
 
 > ARCHITECTURE.md 和 REQUIREMENTS.md 是**导航层**，不重复定义需求。两者与 spec 冲突时，**以 spec 为准**。
 
@@ -67,8 +69,8 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 ## 与 E:\projects 其他项目的关系
 
 - **首个试点**：`E:\projects\ai_chatbot_demo`（Phase 3）。它已有请求级 Anthropic 用量观测和基础 `conversation_id`，但**没有**持久化 outbox、没有计费凭据与签名、没有本地状态同步。Phase 3 是**扩展现有窄接口**，不是推倒重来。
-- **共享基建**：`vps_infra` 提供 `infra_nginx` / `infra_mysql` / `infra_redis`。本平台跑的是钱包余额和财务账本，**是否复用共享 MySQL 实例尚未定案**（评审 P2-23）。这是 Phase 0 必须拍板的事，见 TODO.md。
-- **WhatsApp 通知**：复用 `whatsapp_gateway` 还是自建出站通道，未定。
+- **共享基建**：`vps_infra` 提供 `infra_nginx` / `infra_mysql` / `infra_redis`。本平台跑的是钱包余额和财务账本，spec §98 已定案：**使用专用 MySQL / Redis 容器，不与现有应用共享实例**，即不接 `infra_mysql` / `infra_redis`。只剩落成 ADR 记录理由。
+- **WhatsApp 通知**：复用 `whatsapp_gateway` 还是自建出站通道，未定（TODO 的 D7）。
 
 ## 命名
 

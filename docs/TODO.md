@@ -23,11 +23,23 @@
 
 - [ ] **D1 — 汇率来源与版本化策略**：数据源（人工录入 / API 供应商）、更新频率、按 `occurred_at` 还是结算日取值、`provider_price_versions` 存 USD 原价还是换算后 MYR。→ ADR
 - [ ] **D2 — SST 税务口径**：向会计确认。收 RM100 是含税还是不含税？税在收款时确认还是消费时确认？receipt / statement 表要预留哪些字段。（spec §45.1 是上线闸门，但**字段现在就要留**，事后加等于重做所有历史凭证）→ ADR
-- [ ] **D3 — 生产数据库隔离**：独立 MySQL 实例，还是复用 `vps_infra` 的 `infra_mysql`？财务系统的爆炸半径、备份策略、资源隔离都与其他项目不同。→ ADR
+- [ ] **D3 — 生产数据库隔离**：**结论已由 spec §98 给出 —— 专用 MySQL/Redis 容器、凭据、库、持久卷、资源限制、备份任务，不与现有应用共享实例**（即不接 `vps_infra` 的 `infra_mysql` / `infra_redis`）。本项只剩：落成 ADR 记录理由。→ ADR
 - [ ] **D4 — 凭据加密方案**：KMS / 应用层信封加密的具体选型、主密钥保管与恢复流程。→ ADR
 - [ ] **D5 — 财务期间与 cut-off**：T+N 的 N 取值、晚到事件的归属规则、Prior Period Adjustment 在对账单上的呈现。→ ADR
 - [ ] **D6 — 支付网关选型**：马来西亚网关，FPX 优先。含手续费结构、沙箱可用性、对账 API 能力。→ ADR
 - [ ] **D7 — 通知通道**：Email adapter 用什么；WhatsApp 复用 `whatsapp_gateway` 还是自建出站。
+
+---
+
+## P-2. 评审残留项（R1–R5）
+
+来自 [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md)：25 条评审意见中 20 条已在 spec v1.1 解决，以下 5 条有残留。
+
+- [ ] **R1 — 停机/复机阈值**：阈值仍硬编码 `balance <= 0`（§49），无可配置 `suspend_at` / `resume_at` 与滞后带。§7.10 的「RM0 保持挂起 + 最小恢复额」已消除死锁，抖动也被 §7.11/§48 的跃迁触发挡住。**决定采纳双阈值，还是明确记为已知取舍。**（Phase 2 前）
+- [ ] **R2 — 并发 PENDING payment**：同一租户是否允许并存多笔 `PENDING` 支付，spec 无任何规定。客户连点两次充值 → 两笔都付了怎么办、UI 显示哪一笔。**Phase 4 前必须定。**
+- [ ] **R3 — 账本膨胀权衡**：§82 已承认钱包变更按租户串行化并要求测最热租户，§119 给了量化目标，但**没有对「按对话/时间窗聚合成一笔 AI_USAGE ledger、usage_events 保留明细」做权衡分析**。即使决定不做，也要写明理由。（Phase 2 前）
+- [ ] **R4 — 重放保护存储与 TTL**：§37 只说「别把 Redis 硬编码成唯一重放存储」，**nonce 的存储介质与 TTL 未定义**（应等于签名时间窗大小）。（Phase 2 前，影响 §37 实现）
+- [ ] **R5 — 需求编号覆盖度**：`REQ-*` 只有 13 条，未覆盖每条硬性要求；140 节仍无完整 TOC。影响 §132 逐条验收。（Phase 1 前）
 
 ---
 
@@ -195,5 +207,5 @@ Phase 全做完还不能上，以下五条必须全过：
 - [ ] `docs/integrated-application-backend.md`（Phase 3）
 - [ ] `docs/payment-flow.md`（Phase 4）
 - [ ] `docs/data-governance.md`、`docs/deployment.md`、`docs/runbook.md`（Phase 0 起补，runbook 需覆盖 §136 列的 18 个故障场景）
-- [ ] 逐条核对 25 条评审意见与 spec v1.1（见 [REQUIREMENTS.md](REQUIREMENTS.md) 第四节）
-- [ ] 给 spec 的硬性要求补 `REQ-*` 编号（见 REQUIREMENTS.md 第三节）
+- [x] 逐条核对 25 条评审意见与 spec v1.1 —— 完成于 2026-09-10，结果见 [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md)（20 条已解决 / 5 条残留，已转为上方 R1–R5）
+- [ ] 给 spec 的硬性要求补 `REQ-*` 编号（= R5）
