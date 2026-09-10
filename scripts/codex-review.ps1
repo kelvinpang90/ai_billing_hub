@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     跑 Codex 独立审查（只读沙箱），可选把结果发回 PR 或设计 Issue。
 

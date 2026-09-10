@@ -1,4 +1,4 @@
-<#
+﻿<#
 判定解析的纯函数。抽出来是为了能在不调用 Codex 的前提下测试
 （见 scripts/tests/Test-ReviewVerdict.ps1）。
 

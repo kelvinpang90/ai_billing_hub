@@ -1,4 +1,4 @@
-<#
+﻿<#
 scripts/lib/ReviewVerdict.ps1 的测试。不依赖 Pester，直接跑：
 
     pwsh -File scripts\tests\Test-ReviewVerdict.ps1
