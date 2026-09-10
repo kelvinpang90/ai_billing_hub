@@ -24,7 +24,7 @@
 - [ ] **D1 — 汇率来源与版本化策略**：数据源（人工录入 / API 供应商）、更新频率、按 `occurred_at` 还是结算日取值、`provider_price_versions` 存 USD 原价还是换算后 MYR。→ ADR
 - [ ] **D2 — SST 税务口径**：向会计确认。收 RM100 是含税还是不含税？税在收款时确认还是消费时确认？receipt / statement 表要预留哪些字段。（spec §45.1 是上线闸门，但**字段现在就要留**，事后加等于重做所有历史凭证）→ ADR
 - [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
-- [~] **D4 — 凭据加密方案** —— 主体已收口。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节）
+- [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节）
 - [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ T+1（24h）覆盖不了 §31 举例的 31 小时积压，所以上期调整**是预期会出现的**；但 §31 那个数字是**告警阈值示例，不是日常状态**——每一笔都应能追溯到一次具体延迟事件，**不是会计常态**。笔数与金额占比必须进 §95 监控，占比走高要查根因
 - [ ] **D6 — 支付网关选型**：马来西亚网关，FPX 优先。评估项：手续费结构、沙箱可用性、对账 API 能力、**回调是否提供稳定的幂等标识**（决定 `(gateway, gateway_event_id)` 唯一约束能否成立——没有它，ADR-0004 的永久防重方案在支付侧落不了地）。→ ADR
 - [ ] **D7 — 通知通道**：Email adapter 用什么；WhatsApp 复用 `whatsapp_gateway` 还是自建出站。

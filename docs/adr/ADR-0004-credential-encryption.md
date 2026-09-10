@@ -4,6 +4,7 @@
 | --- | --- |
 | **状态** | 已接受 |
 | **日期** | 2026-09-10 |
+| **修订** | 2026-09-10 勘误：nonce 过期改为「请求 timestamp + 5 分钟」；主密钥文件属主按容器运行 UID；撤回「表结构不变」并列出出站 webhook schema 待定项；补 runbook 公私边界（PR #6） |
 | **决策人** | Kelvin Peng |
 | **来源** | spec §36、§74.4、§96、§98.1 已定原则；本 ADR 定具体机制 |
 | **影响** | `integration_credentials` / `projects` 表（出站 webhook 密钥可能新增 `project_webhook_secrets`，见第 4a 节）、Phase 0 密钥方案、Phase 2/3 验签实现 |
@@ -133,7 +134,7 @@ Docker Compose 的 `file:` 型 secret 走 **bind mount**，`uid` / `gid` / `mode
 - **方案 i（推荐）**：新建 `project_webhook_secrets` 表，结构对齐 `integration_credentials`（多行、带版本与状态）。与入站语义统一，将来支持多下游也不用再改
 - **方案 ii**：`projects` 加一组暂存列（`next_encrypted_webhook_secret` / `next_webhook_key_version`）。改动小，但只能暂存一把，且语义与入站不一致
 
-选定后更新本节，并在 Phase 1 的设计闸门里体现。
+选定后按 [README](README.md) 的「修订规则」补完本节（属**补完待定项**，需在文件头追加一行修订记录），并在 Phase 1 的设计闸门里体现。
 
 ##### 两者共同的约束
 
