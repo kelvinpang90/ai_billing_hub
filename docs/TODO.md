@@ -13,7 +13,7 @@
 4. 本文件里**没有**的工作（临时需求、探索型任务）才需要先写计划、等确认。
 5. 每个 Phase 的每个功能都必须过 spec §132 的 15 条 Definition of Done，否则不算完成。
 
-> ⚠️ 项目根的 `CLAUDE.md` 里写的是 `tasks/todo.md`。那个文件和目录**不存在**，本文件取而代之。见 [HANDOFF.md](HANDOFF.md) 的「已知冲突」。
+> ℹ️ `CLAUDE.md` / `AGENTS.md` 的「任务管理」一节已指向本文件（2026-09-10 修正，此前指向不存在的 `tasks/todo.md`）。
 
 ---
 

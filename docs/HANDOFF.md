@@ -40,10 +40,8 @@ spec §137 的起步指令说得很清楚：**不要先写前端页面**，先�
 
 ## 已知冲突（待清理）
 
-1. **`tasks/todo.md` vs `docs/TODO.md`**
-   项目根 `CLAUDE.md` 的「任务管理」一节写着「本仓库的编号任务走 `tasks/todo.md` 顶部那套约定」，但 `tasks/` 目录和该文件**从未存在**（那段大概是从别的项目抄来的模板）。
-   现状：任务清单在 `docs/TODO.md`。
-   → **建议改 `CLAUDE.md` 和 `AGENTS.md` 指向 `docs/TODO.md`**（两份是同一内容的副本，改一个要同步另一个）。同理，`CLAUDE.md` 提到的 `tasks/REVIEW.md` 也不存在。
+1. ~~`tasks/todo.md` vs `docs/TODO.md`~~ —— **已解决（2026-09-10）**
+   `CLAUDE.md` / `AGENTS.md` 的「任务管理」一节原本指向从未存在过的 `tasks/todo.md`（应是从别的项目抄来的模板）。现已改为指向 `docs/TODO.md`，并明确写死「本仓库没有 `tasks/` 目录」。两份文件是同一内容的副本，**以后改一个记得同步另一个**。
 
 2. **spec §101 的仓库结构 vs 实际结构**
    §101 写的是 `backend/app/` + `frontend/` + `integration-client/` + 小写文档名，实际采用扁平的 `app/` + `tests/` + 大写文档名。
