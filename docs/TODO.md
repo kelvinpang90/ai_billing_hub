@@ -52,8 +52,8 @@
 - [ ] MySQL + Redis + Celery 接通
 - [ ] 认证基座
 - [ ] 日志与统一错误处理（§94、§107）
-- [ ] CI 测试结构
-- [ ] ~~GitHub 仓库 + 受保护 `main`~~ ✅ 已建、已推送、`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限）；待做：**CI workflow，并设为必需状态检查**
+- [ ] CI 测试结构 —— 文档层已有（`.github/workflows/ci.yml` 的 `docs` + `secret-scan` 两个 job）；待补：**后端 lint + pytest job**（等 `app/` 与 `tests/` 建好）
+- [ ] ~~GitHub 仓库 + 受保护 `main`~~ ✅ 已建、已推送、`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限）；CI workflow 已建，待做：**在分支保护里把 `docs` / `secret-scan` 设为必需状态检查**
 - [ ] 专用生产 MySQL/Redis 拓扑（依赖 D3）
 - [ ] 备份、恢复、加密密钥方案设计（依赖 D4）
 - [ ] 初始性能 / SLO 基线
