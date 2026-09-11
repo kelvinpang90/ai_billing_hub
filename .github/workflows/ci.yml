@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # edited 必须在：PR 正文改了要重跑策略检查，否则旧的通过结果会一直挂着
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -24,6 +26,31 @@ jobs:
           python-version: "3.12"
       - name: Validate doc links and spec section references
         run: python scripts/check_docs.py
+
+  scripts:
+    name: scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review verdict parsing tests
+        shell: pwsh
+        run: ./scripts/tests/Test-ReviewVerdict.ps1
+
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 策略检查要对着 base...head 算 diff、按 head 校验 TODO 行号，浅克隆拿不到
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Repository and PR policy checks
+        run: python scripts/check_repo_policy.py --event-file "$GITHUB_EVENT_PATH"
+      - name: Policy and verified-write regression tests
+        run: python -m unittest discover -s tests -v
 
   secret-scan:
     name: secret-scan
