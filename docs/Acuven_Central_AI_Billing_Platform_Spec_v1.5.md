@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.4  
+**Version:** 1.5  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -15,8 +15,9 @@
 | 1.0 | 2026-09-09 | Initial V1 product and implementation specification. |
 | 1.1 | 2026-09-10 | Clarified currency conversion, pricing data, asynchronous ingestion, idempotency, financial periods, status handling, security, recovery, compliance gates, and production operations. |
 | 1.2 | 2026-09-10 | §99 repository visibility changed from private to public to obtain branch protection under GitHub Free. See ADR-0001. No other normative change. |
-| 1.4 | 2026-09-11 | Editorial only, no normative change. Retired two illustrative sections; section numbers are stable, so both leave a gap rather than causing a renumber. **§102** (Integrated Application Backend Structure) was a directory tree the section itself declared non-binding ("Adapt to existing project conventions rather than blindly forcing this exact layout"). **§138** (Final Target User Experience) was a mock dashboard with invented figures; every field it named is already normative in §67–§69, and §69 additionally carries the "Do NOT show" list. |
 | 1.3 | 2026-09-11 | Errata only, no new normative decision. §6 no longer states a monetary precision of its own — it contradicted §80 (`DECIMAL(18,6)` vs `DECIMAL(20,8)` with a single `ROUND_HALF_UP` to 8 decimal places); §80 is now the sole definition. §123 Phase 0 repository visibility corrected from private to public — v1.2 declared this change but missed this occurrence. |
+| 1.4 | 2026-09-11 | Editorial only, no normative change. Retired two illustrative sections; section numbers are stable, so both leave a gap rather than causing a renumber. **§102** (Integrated Application Backend Structure) was a directory tree the section itself declared non-binding ("Adapt to existing project conventions rather than blindly forcing this exact layout"). **§138** (Final Target User Experience) was a mock dashboard with invented figures; every field it named is already normative in §67–§69, and §69 additionally carries the "Do NOT show" list. |
+| 1.5 | 2026-09-11 | Errata only, no new normative decision. §30 applied reconciliation responses on `status_version >=` local while §28 applies webhooks on `>` and §30 claimed both used the same rule — §30 now states the §28 rule. §55 listed an undefined dashboard field "Actual AI Provider Cost"; it now uses the term defined in §14 (Estimated/Reconciled, with the basis shown). §30's bare "every 5 minutes" polling example sat exactly on the §119 reconciliation safety bound and did not reference it; replaced by the cross-reference. |
 
 ## Document Navigation
 
@@ -1348,11 +1349,7 @@ Webhook alone is insufficient.
 
 Each Integrated Application Backend must periodically query Central Billing asynchronously.
 
-Example:
-
-```text
-every 5 minutes
-```
+Choose the polling interval against the status reconciliation safety bound in §119. Worst-case staleness of the locally cached status is the interval plus request latency, so an interval equal to the bound does not meet it.
 
 Endpoint:
 
@@ -1376,7 +1373,7 @@ Response:
 }
 ```
 
-The backend atomically applies the response only when `status_version` is greater than or equal to the local version. Reconciliation and Webhook processing use the same comparison rule.
+The backend atomically applies the response only when `status_version` is greater than the local version — the same comparison rule as §28: the same version is idempotent; an older version is ignored.
 
 This protects against missed Webhooks.
 
@@ -2127,7 +2124,7 @@ Admin Portal must include at minimum:
 Show:
 
 - Total Customer Revenue
-- Actual AI Provider Cost
+- Estimated/Reconciled Provider Cost, showing which basis was used (§14)
 - Payment Gateway Fees
 - Gross Profit
 - Gross Margin
