@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
@@ -19,6 +21,7 @@ from app.core.database import check_database
 from app.core.logging import current_request_id
 from app.schemas.envelope import ApiResponse, success
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
 
@@ -60,6 +63,13 @@ def readyz(request: Request) -> ApiResponse[ReadinessStatus]:
     """
     check_database(getattr(request.app.state, "engine", None))
     broker = check_broker(request.app.state.settings)
+    if broker is not BrokerStatus.OK:
+        # **这条日志是这个故障唯一的发现途径。**因为返回的是 200，负载均衡
+        # 不会替我们发现它；告警只能挂在这条上。message 与 component 是稳定
+        # 契约，改它们等于把告警条件改没了 —— 见 docs/runbook.md。
+        logger.warning(
+            "Readiness degraded", extra={"component": "redis", "component_status": broker.value}
+        )
     return success(
         ReadinessStatus(
             status="ok" if broker is BrokerStatus.OK else "degraded",

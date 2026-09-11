@@ -74,6 +74,8 @@
 - [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
+
+> ⚠️ **T0.9 必须包含的一条具体告警**（T0.5 派生，PR #28 审查指出）：`/readyz` 在 Redis 不可用时**刻意返回 200**，所以负载均衡不会发现这个故障，**它只能靠日志告警发现**。告警名 `billing_readiness_degraded_redis`，条件、分级与升级路径写在 [runbook](runbook.md)。告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
 - [x] ~~GitHub 仓库 + 受保护 `main`~~ 已建、已推送；`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限），CI 五项 `docs` / `scripts` / `policy` / `backend` / `secret-scan` 已全部设为必需状态检查（`backend` 于 T0.2 合并后追加）
 
@@ -252,7 +254,11 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
   - `REQ-AVAIL-001`：Redis 不可用**不得**成为终端 AI 请求路径上的同步依赖
   - Redis 挂了，API 仍能收用量事件、落库、返回 202，投递触发欠着，等 Redis 回来由周期恢复补上（Invariant 14）
   - **把 Redis 做成就绪阻断项，等于 Redis 一挂就把所有实例摘出轮转 —— 那正是 Invariant 1 要防的中断，而且是我们自己造出来的**
-  - 代价：Redis 静默不可用不会被负载均衡发现，**必须由监控告警兜住**。这条已是 T0.9 的范围（§95）
+  - 代价：Redis 静默不可用不会被负载均衡发现，**必须由监控告警兜住**。审查（PR #28）判这条为阻断项 —— 我自己选了 200，就必须自己把补偿控制补上。本任务能给的都给了：
+    - `/readyz` 判定 degraded 时打一条 **稳定契约**的 WARNING（`message="Readiness degraded"`、`component="redis"`），并有用例钉住「degraded 时恰好一条」「正常时一条都没有」
+    - 新建 [runbook.md](runbook.md) 的第一个场景「Redis / Celery broker 不可用」，含告警名、条件、分级、升级路径与「绝不能做什么」
+    - T0.9 的任务描述里钉上了这条具体告警
+    - **告警设施本身建不了**：还没有任何部署、没有日志聚合。那是 T0.9 的前置，属排序事实，不是取舍
 - **beat 的 schedule 留空**，不塞示例条目 —— 示例条目会被真的跑起来
 - **任务模块显式列出**（`TASK_MODULES`），不用 `autodiscover_tasks`：后者靠约定扫包，改了包名时只是**安静地少注册一个任务**，调用方拿到 `NotRegistered` 才发现
 - **没做 worker 的存活探针**：那要容器编排配合，是 T0.6 的事
