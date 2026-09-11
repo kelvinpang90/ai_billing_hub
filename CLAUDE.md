@@ -10,13 +10,16 @@
 - **你负责实现，Codex 负责独立审查，Kelvin 负责合并。** 你不合并自己的 PR。
 - **碰钱的任务先过设计闸门**：钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 —— 用 [design-gate 模板](.github/ISSUE_TEMPLATE/design-gate.md) 开 Issue，`scripts\codex-review.ps1 -Issue <N> -Post` 拿到 `APPROVED: design v<N>` 之后才动手写代码。前端 / 文档 / CI / 脚本不走闸门
 - **设计版本一变，之前的批准作废**，必须重新过闸门
-- 每个编号任务：`git checkout -b task/<编号>-<slug>` → 实现 + 写测试 → 写 `docs/TODO.md` 任务记录 → 本地 `python scripts/check_docs.py` 通过 → 开 **Draft PR**（用 `.github/pull_request_template.md`，结构不许改）→ `scripts\codex-review.ps1 -Pr <N> -Post`
+- 每个编号任务：`git checkout -b task/<编号>-<slug>` → 实现 + 写测试 → 写 `docs/TODO.md` 任务记录 → 本地三项全过（`python scripts/check_docs.py`、`python scripts/check_repo_policy.py`、`python -m unittest discover -s tests`）→ 开 **Draft PR**（用 `.github/pull_request_template.md`，结构不许改，**`TODO 影响` 一节必填**）→ CI 全绿后 `scripts\codex-review.ps1 -Pr <N> -Post`（脚本先查准入，不过不调 Codex）
 - **不要开 stacked PR**（base 指向另一个功能分支）：基分支合并被删时 GitHub 会自动关闭子 PR，且关闭后不能改 base 也不能重开
 - 一个 PR 一个任务，不夹带。合并方式只能是 Squash（`main` 要求线性历史）
-- 收到审查意见后，用 `gh pr view <N> --comments` 读取，然后发一条 `## 🔧 CLAUDE RESPONSE` 回应。
-  **每一条意见都必须有交代**，只有三种处理：改（附 commit sha）／不改（给具体理由，引 spec 章节或不变量）／升级给 Kelvin 拍板。**不许沉默跳过。**
+- 收到审查意见后，用 `gh pr view <N> --comments` 读取，然后发一条 `## 🔧 CLAUDE RESPONSE` 回应（格式见 WORKFLOW §6，复审时会被机器校验）。
+  **每一条意见都必须有交代**，只有三种处理：`已修`（证据必须是 `完整 SHA · 文件:行`，短 SHA 与散文不收）／`不改`（给具体理由，引 spec 章节或不变量）／`升级` 给 Kelvin 拍板。**不许沉默跳过。**回应开头带 `reviewed-head: <上轮审查的 SHA>`；第三轮起必须写 `### 完整影响面`
+- **复审只修被指出的问题。**顺手加的功能、顺手修的旁边问题，都会被判为范围扩张。想做就记进 `docs/TODO.md` 另开 PR
+- **发到 GitHub 的写操作走 `python scripts/gh_verified_write.py`**（评论、PR 正文），写完回读比对；工具报成功不算，回读一致才算。回读失败不得自动重发
+- **约定不够用时不要自己发明**（`[~]` 这种）。没做完就是 `[ ]`，剩什么写正文；复选框只允许 `[ ]` / `[x]`，CI 会查
 - 争论拍板后的结论写进 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，避免同一个问题吵第二次
-- `main` 已配分支保护：禁 force push、禁直推、必需检查 `docs` + `secret-scan`、分支必须最新
+- `main` 已配分支保护：禁 force push、禁直推、必需检查 `docs` + `scripts` + `secret-scan`（`policy` 待本 PR 合并后加入）、分支必须最新
 
 ⚠️ **仓库是公开的**：绝不提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。
 

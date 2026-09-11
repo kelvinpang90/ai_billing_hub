@@ -156,3 +156,136 @@ function Compare-MaterialParts {
     }
     return $changed
 }
+
+# ---- 复审：从评论历史里恢复上下文 ----
+# 下面这几个函数原本内联在 codex-review.ps1 的取材逻辑里，无法测试。
+# 抽出来的理由和 Get-LatestDesignApproval 一样：判断「上一轮是谁说的、说了什么」
+# 出错时是静默的 —— 要么把回应当成审查，要么把预审当成审查。
+
+$ClaudeResponsePrefix = '## 🔧 CLAUDE RESPONSE'
+
+function Test-ResponseHeader {
+    param([string]$Body)
+    return ((Get-FirstNonEmptyLine ($Body -split '\r?\n')) -ceq $ClaudeResponsePrefix)
+}
+
+# 取评论里的 reviewed-head。整行匹配，所以 `> reviewed-head: …` 这种引用上轮的写法
+# 自然不算。恰好一处才返回，否则 $null（不猜）。
+function Get-ReviewedHead {
+    param([string]$Body)
+    if (-not $Body) { return $null }
+    $found = @()
+    foreach ($line in ($Body -split '\r?\n')) {
+        if ($line.TrimEnd() -cmatch '^reviewed-head: ([0-9a-f]{40})$') { $found += $Matches[1] }
+    }
+    if ($found.Count -eq 1) { return $found[0] }
+    return $null
+}
+
+# 扫一遍评论，得到：最近一轮有效实现审查、它之后的最后一条回应、审查轮数。
+# 新一轮审查出现时上一条回应作废（它回应的是更早那轮）。
+# 判定行不合法的「审查」不算数 —— 那是发布方校验前的残留或人工贴的草稿。
+function Get-ImplementationReviewHistory {
+    param($Comments)
+    $previous = $null
+    $response = $null
+    $count = 0
+    foreach ($c in $Comments) {
+        if (Test-ReviewHeader $c.body) {
+            $verdict = Get-ImplementationVerdict (Get-VerdictLine ($c.body -split '\r?\n'))
+            if ($verdict -eq 'INVALID') { continue }
+            $previous = $c.body
+            $response = $null
+            $count++
+        } elseif (Test-ResponseHeader $c.body) {
+            $response = $c.body
+        }
+    }
+    return [pscustomobject]@{ PreviousReview = $previous; Response = $response; ReviewCount = $count }
+}
+
+# 第三轮起要求回应里有非空的「### 完整影响面」。
+#
+# 不能用 `^### 完整影响面[ \t]*\r?\n\s*\S`：`\s*` 会跨过空行，而后面跟的下一个
+# 章节标题本身就是 `\S`，于是「本节留空、紧接另一个章节」也返回真 —— 这条要求
+# 可以被一个空章节静默绕过，拦不住继续逐项补洞。
+# 必须在下一个标题之前找到真正的内容行。
+function Test-ImpactSection {
+    param([string]$Body)
+    if (-not $Body) { return $false }
+    $inSection = $false
+    foreach ($line in ($Body -split '\r?\n')) {
+        if (-not $inSection) {
+            if ($line.TrimEnd() -ceq '### 完整影响面') { $inSection = $true }
+            continue
+        }
+        if ($line -match '^#{1,6}\s') { return $false }   # 下一个标题 = 本节到此为止
+        if ($line.Trim()) { return $true }
+    }
+    return $false
+}
+
+# ---- 唯一一处要起 git 进程的地方 ----
+# 上面都是纯函数。下面两个要调 git，但仍放在 lib 里：增量的稳定性是能测的，
+# 而且必须测 —— 它一旦不稳定，复审就永远发不出判定，且失败信息只说「材料变了」。
+
+# git 的输出经 PowerShell 管道会按控制台代码页解码，中文会糊（实测）。这里显式
+# 指定流编码，不依赖控制台是什么代码页。
+# stderr 丢弃：--no-index 会为 CRLF 转换打 warning，那不是错误，也不该进审查材料。
+# 不在这里抛错：--no-index 用退出码 1 表示「有差异」，由调用方解释。
+function Invoke-GitCommand {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$WorkingDirectory
+    )
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'git'
+    foreach ($a in (@('-C', $WorkingDirectory) + $Arguments)) { [void]$psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    [void]$proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return [pscustomobject]@{ Output = $stdout; ExitCode = $proc.ExitCode }
+}
+
+# 两版「PR 相对 base 的 diff」之间的差异。
+#
+# 文件名必须是固定的、且要以所在目录为工作目录用相对名调 git。
+# `git diff --no-index` 把命令行上给的路径原样写进输出（`--stat` 里还会截断成
+# `...abc.tmp`，事后做字符串替换救不回来）。用随机临时名的话，这段文本进了
+# 「复审上下文」，审查前后两次取材就会逐字不等，Compare-MaterialParts 判为
+# 材料变化 —— 只要增量非空，所有正常的修复复审都发不出判定。
+# 相对名调用时输出里只会出现 previous.diff / current.diff，两次调用逐字相同。
+function Get-DiffOfDiffs {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Previous,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Current
+    )
+    # $PID 只为避免并发跑的两个进程互相踩；它不进输出，所以不影响逐段比对。
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) "codex-review-delta-$PID"
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    try {
+        [void](New-Item -ItemType Directory -Force -Path $dir)
+        [System.IO.File]::WriteAllText((Join-Path $dir 'previous.diff'), $Previous, $utf8)
+        [System.IO.File]::WriteAllText((Join-Path $dir 'current.diff'), $Current, $utf8)
+        # --no-index：0 = 两版逐字相同，1 = 有差异，其它 = 出错
+        $stat  = Invoke-GitCommand @('diff', '--no-index', '--stat', 'previous.diff', 'current.diff') $dir
+        $delta = Invoke-GitCommand @('diff', '--no-index', 'previous.diff', 'current.diff') $dir
+    } finally {
+        Remove-Item -Recurse -Force -LiteralPath $dir -ErrorAction SilentlyContinue
+    }
+    if ($stat.ExitCode -gt 1 -or $delta.ExitCode -gt 1) {
+        return [pscustomobject]@{ Ok = $false; Identical = $false; Stat = ''; Delta = '' }
+    }
+    return [pscustomobject]@{
+        Ok        = $true
+        Identical = ($stat.ExitCode -eq 0)
+        Stat      = $stat.Output
+        Delta     = $delta.Output
+    }
+}
