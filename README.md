@@ -15,7 +15,7 @@
 | 知道现在做到哪、下一步是什么 | [docs/HANDOFF.md](docs/HANDOFF.md) |
 | 找具体任务与验收标准 | [docs/TODO.md](docs/TODO.md) |
 | 写代码前理解架构与财务不变量 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| 需要精确定义 | [spec v1.2](docs/Acuven_Central_AI_Billing_Platform_Spec_v1.3.md) —— **唯一事实来源** |
+| 需要精确定义 | [spec v1.2](docs/Acuven_Central_AI_Billing_Platform_Spec_v1.4.md) —— **唯一事实来源** |
 | 开 PR / 做审查 | [docs/WORKFLOW.md](docs/WORKFLOW.md) |
 
 ## 提 PR 前必须本地跑过

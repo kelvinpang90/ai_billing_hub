@@ -62,7 +62,9 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
    → §101 视为**已被 [ARCHITECTURE.md](ARCHITECTURE.md) 第 9 节取代**，实现时不要回去照抄。
 
 2. **spec 文件名 vs 内容版本**
-   约定：spec 文件名跟随文档内 Revision History。现为 `..._Spec_v1.3.md`（2026-09-11 勘误：§6 精度、§123 仓库可见性）。
+   约定：spec 文件名跟随文档内 Revision History。现为 `..._Spec_v1.4.md`（2026-09-11 退役两节示意内容，见 spec 的 Revision History）。
+   **章节号是稳定引用**，退役的章节留编号空洞、不重编号。
+   ⚠️ 退役之后就**不能再用 `§` 写法引用它**——`check_docs.py` 会判为「unknown spec section」。要点名退役章节，写成「第 N 节」。
    `SPEC_REVIEW_v1.0.md` 与 `REVIEW_FOLLOWUP_v1.1.md` 的文件名**不跟随**——它们各自评审/核对的确实是 v1.0 与 v1.1，**不要改**。
 
 3. **`AGENTS.md` §10 / §11 的 `erp_os` 模板残留**
