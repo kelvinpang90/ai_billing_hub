@@ -170,7 +170,7 @@ labels: design-gate
 
 审查方要回答的五个问题常驻在 [scripts/review_checklist.md](../../scripts/review_checklist.md) 的「设计审查」一节，此处不重复。
 
-**版本绑定规则：**
+**版本绑定规则**（规则的出处是 [WORKFLOW §3](../../docs/WORKFLOW.md)；这里保留一份是因为审查材料里只有本 Issue 正文，两处改一起改）：
 
 - Codex 的批准必须写成 `APPROVED: design v<N>`，`<N>` 取本 Issue 顶部的「设计版本」
 - **设计版本一变，之前的 APPROVE 自动作废**，必须重新过闸门
