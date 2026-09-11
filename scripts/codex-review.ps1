@@ -89,22 +89,10 @@ function Assert-PolicyExit {
 
 # 同 Invoke-GhUtf8 的理由：git diff 里有中文，经 PowerShell 管道会按控制台代码页解码。
 # 增量 diff 放在材料的元数据段，乱码会触发完整性校验 —— 是 fail-closed，但每次都失败。
-# 不在这里 Fail：--no-index 用退出码 1 表示「有差异」，由调用方解释。
+# 实现在 lib 里（Get-DiffOfDiffs 也要用同一个），这里只固定工作目录为本仓库。
 function Invoke-GitUtf8 {
     param([Parameter(Mandatory)][string[]]$Arguments)
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = 'git'
-    foreach ($a in (@('-C', $repo) + $Arguments)) { [void]$psi.ArgumentList.Add($a) }
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    [void]$proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-    return [pscustomobject]@{ Output = $stdout; ExitCode = $proc.ExitCode }
+    return Invoke-GitCommand $Arguments $repo
 }
 
 # 不能直接用 & gh：PowerShell 捕获原生命令输出时按 [Console]::OutputEncoding
@@ -290,28 +278,19 @@ function Get-ReviewMaterial {
         $mbOld = Invoke-GitUtf8 @('merge-base', $obj.baseRefOid, $reviewedHead)
         $mbNew = Invoke-GitUtf8 @('merge-base', $obj.baseRefOid, $localHead)
         if ($mbOld.ExitCode -ne 0 -or $mbNew.ExitCode -ne 0) { Fail '无法计算与 base 的 merge-base，增量无法生成。' }
-        $oldDiff = [System.IO.Path]::GetTempFileName()
-        $newDiff = [System.IO.Path]::GetTempFileName()
-        try {
-            $utf8 = [System.Text.UTF8Encoding]::new($false)
-            $d1 = Invoke-GitUtf8 @('diff', $mbOld.Output.Trim(), $reviewedHead)
-            $d2 = Invoke-GitUtf8 @('diff', $mbNew.Output.Trim(), $localHead)
-            if ($d1.ExitCode -ne 0 -or $d2.ExitCode -ne 0) { Fail '无法生成两版 PR diff。' }
-            [System.IO.File]::WriteAllText($oldDiff, $d1.Output, $utf8)
-            [System.IO.File]::WriteAllText($newDiff, $d2.Output, $utf8)
-            # --no-index：0 = 两版逐字相同，1 = 有差异，其它 = 出错
-            $stat  = Invoke-GitUtf8 @('diff', '--no-index', '--stat', $oldDiff, $newDiff)
-            $delta = Invoke-GitUtf8 @('diff', '--no-index', $oldDiff, $newDiff)
-            if ($stat.ExitCode -gt 1 -or $delta.ExitCode -gt 1) { Fail '无法生成复审增量。' }
-        } finally {
-            Remove-Item -LiteralPath $oldDiff, $newDiff -ErrorAction SilentlyContinue
-        }
-        if ($stat.ExitCode -eq 0) {
+        $d1 = Invoke-GitUtf8 @('diff', $mbOld.Output.Trim(), $reviewedHead)
+        $d2 = Invoke-GitUtf8 @('diff', $mbNew.Output.Trim(), $localHead)
+        if ($d1.ExitCode -ne 0 -or $d2.ExitCode -ne 0) { Fail '无法生成两版 PR diff。' }
+        # 固定文件名，输出里不出现临时路径 —— 否则审查前后两次取材的「复审上下文」
+        # 逐字不等，判定永远发不出去。理由见 Get-DiffOfDiffs 的注释。
+        $dod = Get-DiffOfDiffs $d1.Output $d2.Output
+        if (-not $dod.Ok) { Fail '无法生成复审增量。' }
+        if ($dod.Identical) {
             $deltaStatText = '（空 —— 本轮只同步了 base，PR 自身改动与上轮逐字相同）'
             $deltaText = $deltaStatText
         } else {
-            $deltaStatText = $stat.Output
-            $deltaText = $delta.Output
+            $deltaStatText = $dod.Stat
+            $deltaText = $dod.Delta
         }
         $revisionSection = @(
             "第 $($history.ReviewCount + 1) 轮审查；上轮 reviewed-head: $reviewedHead；上轮判定: $previousVerdict", '',

@@ -97,6 +97,18 @@ class CheckboxTests(unittest.TestCase):
     def test_reference_link_is_not_a_task(self):
         self.assertEqual(self.errors("- [spec][1] 见规格\n"), [])
 
+    def test_invented_state_followed_by_a_link_is_still_rejected(self):
+        # 曾经按「后面跟着链接就不是任务项」豁免，于是 `[~]` 后面加个链接就能绕过，
+        # 扫 `[ ]` 找待办的人照样看不见这一条
+        self.assertEqual(len(self.errors("- [~] [任务](链接)\n")), 1)
+        self.assertEqual(len(self.errors("- [~] (部分完成)\n")), 1)
+        self.assertEqual(len(self.errors("- [X] [文档](a.md)\n")), 1)
+
+    def test_link_label_longer_than_one_character_is_never_a_checkbox(self):
+        # 豁免的判据改成「方括号里不止一个字符」——链接标签是它，复选框状态不是
+        self.assertEqual(self.errors("- [spec] [1] 见规格\n"), [])
+        self.assertEqual(self.errors("- [ ] [ADR-0001](adr/ADR-0001.md) 已完成\n"), [])
+
     def test_fenced_example_is_not_scanned(self):
         # WORKFLOW / REVIEW-LOG 里会举反例，正文里的示例不能触发检查
         self.assertEqual(self.errors("```text\n- [~] 反例\n```\n"), [])

@@ -54,10 +54,11 @@ def check_checkboxes(body: str, label: str) -> list[str]:
     errors = []
     for number, line in visible_lines(body):
         match = re.match(r"^\s*(?:[-+*]|\d+[.)])\s+\[([^]\r\n]*)\](.*)$", line)
-        if not match or not match[2] or not match[2][0].isspace():
-            continue
-        # Markdown reference/inline links are not task items.
-        if match[2].lstrip().startswith(("(", "[")):
+        # A task checkbox holds one character; longer brackets are link labels.
+        # Do not skip on what FOLLOWS the bracket: `- [~] [task](link)` is an
+        # invented state that happens to be followed by a link, and exempting it
+        # hides the task from anyone scanning for `[ ]`.
+        if not match or len(match[1]) > 1 or not match[2] or not match[2][0].isspace():
             continue
         if match[1] not in {" ", "x"}:
             errors.append(f"{label}:{number}: unsupported task checkbox [{match[1]}]")

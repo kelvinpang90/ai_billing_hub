@@ -175,6 +175,27 @@ Assert-Equal $true  (Test-ImpactSection "## 🔧 CLAUDE RESPONSE`n`n### 完整�
 Assert-Equal $false (Test-ImpactSection "## 🔧 CLAUDE RESPONSE`n`n### 完整影响面`n`n") '标题下面是空的 = 没写'
 Assert-Equal $false (Test-ImpactSection "## 🔧 CLAUDE RESPONSE`n表") '没有这一节'
 Assert-Equal $true  (Test-ImpactSection "### 完整影响面  `n内容") '标题尾随空格不影响'
+# 真实风险：正则里的 `\s*` 会跨过空行，把下一个章节的 `#` 当成本节内容
+Assert-Equal $false (Test-ImpactSection "### 完整影响面`n`n### 数字`n- 59 用例") '本节留空、紧接另一个章节 = 没写'
+Assert-Equal $false (Test-ImpactSection "### 完整影响面`n`n`n## 下一章`n内容") '空行再多也不算内容'
+Assert-Equal $true  (Test-ImpactSection "### 完整影响面`n`n- 覆盖 X`n`n### 数字`n- 59") '有内容、后面还有别的章节'
+
+Write-Host "Get-DiffOfDiffs"
+$prevDiff = "diff --git a/f b/f`n--- a/f`n+++ b/f`n@@ -1 +1 @@`n-old`n+new`n"
+$currDiff = "diff --git a/f b/f`n--- a/f`n+++ b/f`n@@ -1 +1 @@`n-old`n+newer`n"
+$r1 = Get-DiffOfDiffs $prevDiff $currDiff
+$r2 = Get-DiffOfDiffs $prevDiff $currDiff
+Assert-Equal $true  $r1.Ok '两版有差异时仍算成功（--no-index 退出 1 不是错误）'
+Assert-Equal $false $r1.Identical '两版不同 = 非空增量'
+# 这条是本轮的核心回归：增量非空时，审查前后两次取材必须逐字相同。
+# 用随机临时文件名的话 git 会把路径写进 --stat 与 diff 头，两次取材必然不等，
+# Compare-MaterialParts 判为「材料变化」，所有正常的修复复审都发不出判定。
+Assert-Equal $true ($r1.Stat  -ceq $r2.Stat)  '非空增量：两次调用的 stat 逐字相同'
+Assert-Equal $true ($r1.Delta -ceq $r2.Delta) '非空增量：两次调用的 diff 逐字相同'
+Assert-Equal $true ($r1.Delta -notmatch [regex]::Escape([System.IO.Path]::GetTempPath())) '输出里不出现临时目录路径'
+Assert-Equal $true ($r1.Delta -match 'previous\.diff')  '输出用固定文件名'
+$same = Get-DiffOfDiffs $prevDiff $prevDiff
+Assert-Equal $true $same.Identical '两版逐字相同 = 只同步了 base'
 
 Write-Host ""
 if ($script:failed -gt 0) {
