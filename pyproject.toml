@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acuven-billing-hub"
+version = "0.1.0"
+description = "Acuven Central AI Billing Platform — central metering, prepaid MYR wallet and immutable financial ledger"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "uvicorn[standard]>=0.32",
+]
+
+# SQLAlchemy / Alembic / Celery / redis 等依赖在接通它们的那个任务里加，
+# 现在不预先声明用不上的包。
+[project.optional-dependencies]
+dev = [
+    # starlette 的 TestClient 现在要 httpx2，装旧 httpx 会拿到 deprecation 警告
+    "httpx2",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# scripts/ 与 tests/test_*.py 是早于 ruff 的流程工具代码，把它们一并纳入会让
+# T0.1 变成一次大范围格式化。纳入是单独的清理任务，已记进 docs/TODO.md。
+# `*.md` 必须排除：ruff 会格式化 Markdown 里的 Python 代码块，而 spec 里那些
+# 代码块是**规格原文**，被工具改写等于静默改需求。
+extend-exclude = ["scripts", "tests/test_*.py", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+# 只跑后端测试。tests/ 顶层那两个文件是流程脚本自己的 unittest 回归，
+# 由 WORKFLOW §7 的 `python -m unittest discover -s tests` 跑，两套互不干扰。
+testpaths = ["tests/backend"]
+pythonpath = ["."]

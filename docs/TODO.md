@@ -47,22 +47,66 @@
 
 ## Phase 0 — Foundation（§123）
 
-- [ ] 仓库骨架：`app/`、`tests/`、Alembic、`.env.example`、~~`README.md`~~（README 已于 2026-09-11 单独补上，其余未做）
-- [ ] Docker Compose：nginx · frontend · api · celery-worker · celery-beat · redis · mysql
-- [ ] FastAPI 结构（`app/api` / `core` / `models` / `schemas` / `repositories` / `services` / `tasks`）
-- [ ] React 结构（Vite + TS + Ant Design + i18n 骨架）
-- [ ] MySQL + Redis + Celery 接通
-- [ ] 认证基座
-- [ ] 日志与统一错误处理（§94、§107）
-- [ ] CI 测试结构 —— 文档层已有（`.github/workflows/ci.yml` 的 `docs` + `secret-scan` 两个 job）；待补：**后端 lint + pytest job**（等 `app/` 与 `tests/` 建好）
-- [ ] ~~GitHub 仓库 + 受保护 `main`~~ ✅ 已建、已推送、`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限）；CI workflow 已建，待做：**在分支保护里把 `docs` / `secret-scan` 设为必需状态检查**
-- [ ] 专用生产 MySQL/Redis 拓扑（依赖 D3）
-- [ ] 备份、恢复、加密密钥方案设计（依赖 D4）
-- [ ] 确定 API / Celery 容器的运行 UID，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
-- [ ] 初始性能 / SLO 基线
+§123 的 13 项是一个大块，**一个 PR 装不下**（[HANDOFF](HANDOFF.md) 已要求拆分）。
+下面按「能独立提 PR、能独立验收」拆成 T0.1–T0.10，编号即分支名里的 `<TODO 编号>`
+（例：`task/phase0-1-backend-skeleton`）。依赖列写明必须先合并谁，**不要开 stacked PR**。
+
+| 编号 | 任务 | 依赖 |
+| --- | --- | --- |
+| T0.1 | 后端骨架与配置 | — |
+| T0.2 | CI 后端 job（lint + pytest） | T0.1 |
+| T0.3 | 日志与统一错误处理 | T0.1 |
+| T0.4 | MySQL + SQLAlchemy + Alembic 接通 | T0.1 |
+| T0.5 | Redis + Celery 接通 | T0.4 |
+| T0.6 | Docker Compose 七服务栈 | T0.5 |
+| T0.7 | React 骨架 | — |
+| T0.8 | 认证基座（管理员登录 + 2FA） | T0.3、T0.4 |
+| T0.9 | 生产拓扑 + 备份 / 恢复 / 密钥方案（RPO/RTO） | — |
+| T0.10 | 初始性能 / SLO 基线 | T0.6 |
+
+- [x] **T0.1 — 后端骨架与配置**：`app/` 七层目录（`api` / `core` / `models` / `schemas` / `repositories` / `services` / `tasks`）、`app/main.py` 应用工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`（依赖 + ruff + pytest）、`.env.example`、`tests/backend/` 与首个冒烟测试
+- [ ] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查
+- [ ] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
+- [ ] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
+- [ ] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
+- [ ] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
+- [ ] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）
+- [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA
+- [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准
+- [ ] **T0.10 — 初始性能 / SLO 基线**
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
+- [x] ~~GitHub 仓库 + 受保护 `main`~~ 已建、已推送；`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限），CI 四项 `docs` / `scripts` / `policy` / `secret-scan` 已全部设为必需状态检查
 
 **验收**：所有服务能起 · DB 迁移能跑 · 管理员能登录 · 2FA 可用 · CI 拦住合并并能部署不可变镜像 · RPO/RTO 恢复方案已批准
+
+### T0.1 任务记录（2026-09-11）
+
+**做了什么**
+
+- `app/` 建成 spec §101 的分层（扁平化口径见 [ARCHITECTURE](ARCHITECTURE.md) 第 9 节）：七个包各带一行说明该层放什么，**不预建将来才用的空子目录**（`api/auth`、`services/wallet` 等在对应 Phase 再建）
+- `app/main.py` 用 `create_app(settings)` 工厂，不是模块级单例 —— 测试要能拿到互不干扰的实例，且 API 保持无状态（§100）
+- `/healthz` **刻意不依赖任何外部组件**：MySQL / Redis 挂掉时它仍须应答，否则编排器会在数据库恢复期间反复重启 API 容器。带依赖的就绪检查留给 T0.4 / T0.5
+- `app/core/config.py`：`pydantic-settings`，前缀 `BILLING_`。配置只有这一个入口；默认值里不许出现真实主机名 / 凭据
+- `pyproject.toml`：运行依赖只装 FastAPI 这条链，**SQLAlchemy / Alembic / Celery / redis 等到接通它们的任务里再加**
+- `tests/backend/` 走 pytest（`pythonpath = ["."]`，不需要安装包），与 `tests/test_*.py` 那套流程脚本 unittest 回归**物理分开**、互不收集
+
+**偏离了什么**
+
+- **ruff 暂不纳入 `scripts/` 与 `tests/test_*.py`**：它们早于 ruff，全量纳入会让本任务变成一次 52 处报错的大范围格式化，属于范围扩张。已记为下方待清理项
+- ruff 的 `extend-exclude` 里排除了 `*.md`：ruff 会格式化 Markdown 里的 Python 代码块，而 spec 里那些代码块是**规格原文**，被工具改写等于静默改需求（实测会改 spec 第 1438 行）
+- dev 依赖用 `httpx2` 而不是 `httpx`：starlette 的 `TestClient` 已弃用旧 httpx，装 `httpx` 会在每次跑测试时刷弃用警告
+- 本任务**没有**做 Alembic（原「仓库骨架」条目里带的）—— 它要和数据库 engine 一起落地才验得了，已移入 T0.4
+
+**验证到什么程度**
+
+- `python -m pytest` → 2 passed（应用能起、`/healthz` 返回 200、注入的配置生效）
+- `python -m ruff check .` / `python -m ruff format --check .` → 通过
+- [WORKFLOW §7](WORKFLOW.md) 三项本地检查通过；`python -m unittest discover -s tests` 仍是 61 passed，**新增的 `tests/backend/` 没有被它收集**（该目录无 `__init__.py`，不是可导入包）
+- **未验证**：容器内启动、生产配置分支 —— 那是 T0.6 的事
+
+**待清理**
+
+- [ ] 把 `scripts/` 与 `tests/test_*.py` 纳入 ruff（约 52 处报错 + 5 个文件需重新格式化），单独开 `chore/` PR
 
 ---
 

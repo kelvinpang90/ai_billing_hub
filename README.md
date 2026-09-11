@@ -2,7 +2,7 @@
 
 给 Acuven 旗下所有 AI 应用做一套独立的中心化计费平台：**请求级用量计量 + 预付 MYR 钱包 + 不可变财务账本 + 支付网关充值 + 自动扣费与停复机**。
 
-> **当前状态：Phase 0 之前，尚无产品代码。** 本仓库目前只有规格、架构决策与开发流程工具。
+> **当前状态：Phase 0 进行中（T0.1 已完成，后端骨架已立）。**
 > 详细进度与下一步见 [docs/HANDOFF.md](docs/HANDOFF.md)。
 
 ---
@@ -17,6 +17,17 @@
 | 写代码前理解架构与财务不变量 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | 需要精确定义 | [spec](docs/Acuven_Central_AI_Billing_Platform_Spec.md) —— **唯一事实来源** |
 | 开 PR / 做审查 | [docs/WORKFLOW.md](docs/WORKFLOW.md) |
+
+## 本地跑后端
+
+```bash
+python -m venv .venv && .venv/Scripts/activate   # Linux/macOS: source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env
+uvicorn app.main:app --reload                    # http://127.0.0.1:8000/healthz
+```
+
+数据库、Redis、Celery 与 Docker Compose 还没接（Phase 0 的 T0.4–T0.6），现在只有一个不依赖外部组件的 `/healthz`。
 
 ## 提 PR 前必须本地跑过
 
