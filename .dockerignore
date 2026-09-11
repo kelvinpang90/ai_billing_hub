@@ -4,7 +4,12 @@
 .github/
 .venv/
 venv/
-node_modules/
+# ⚠️ 必须写成 **/node_modules：不带 ** 的 `node_modules/` 只匹配上下文根目录那一层，
+# frontend/node_modules（几百 MB）会照样被打包发给 daemon。
+**/node_modules/
+
+# 前端有自己的构建上下文（./frontend），后端镜像一个文件都不需要它。
+frontend/
 
 # 绝不能进镜像：真实凭据。.env 已被 .gitignore 忽略，但构建上下文读的是工作区。
 .env

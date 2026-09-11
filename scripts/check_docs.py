@@ -105,9 +105,34 @@ CONSISTENCY_RULES = [
 
 CONSISTENCY_SUFFIXES = {".md", ".ps1", ".py"}
 
+# 依赖与构建产物：不是我们写的，也不归我们管。
+#
+# ⚠️ T0.7 建了 frontend/ 之后，`node_modules` 里第三方包的 README 让这个脚本报了
+# 156 条「dead link」—— 全是别人仓库里的相对链接。
+#
+# 刻意**不**改成「只查 git 跟踪的文件」：那样一个刚写好、还没 `git add` 的新文档
+# 会被**静默跳过**，而这个脚本的全部价值就在于不静默。宁可维护一份明确的清单。
+VENDOR_DIRS = frozenset(
+    {
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        "__pycache__",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".mypy_cache",
+    }
+)
+
 
 def is_transient(path: Path) -> bool:
     return path.name.startswith(TRANSIENT_PREFIX)
+
+
+def is_vendored(path: Path) -> bool:
+    return not VENDOR_DIRS.isdisjoint(path.parts)
 
 
 def read_lines(path: Path) -> list[str]:
@@ -201,14 +226,14 @@ def main() -> int:
     errors: list[str] = []
 
     for md_path in sorted(ROOT.rglob("*.md")):
-        if ".git" in md_path.parts or is_transient(md_path):
+        if ".git" in md_path.parts or is_transient(md_path) or is_vendored(md_path):
             continue
         errors.extend(check_links(md_path))
         if md_path != SPEC and ARCHIVE not in md_path.parents:
             errors.extend(check_section_refs(md_path, known))
 
     for path in sorted(ROOT.rglob("*")):
-        if not path.is_file() or ".git" in path.parts or is_transient(path):
+        if not path.is_file() or ".git" in path.parts or is_transient(path) or is_vendored(path):
             continue
         if path.suffix not in CONSISTENCY_SUFFIXES or path == SPEC:
             continue

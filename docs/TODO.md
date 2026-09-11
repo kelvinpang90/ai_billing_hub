@@ -70,12 +70,14 @@
 - [x] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
 - [x] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
 - [x] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
-- [ ] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）。**另含 T0.6 欠下的第七个服务**：compose 加 `frontend`、把 `deploy/nginx/billing.conf` 的 `location /` 从 503 占位改成指向它、同步 `tests/backend/test_compose.py` 的 `EXPECTED_SERVICES`（三处漏一处测试就红）
+- [x] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）。**另含 T0.6 欠下的第七个服务**：compose 加 `frontend`、把 `deploy/nginx/billing.conf` 的 `location /` 从 503 占位改成指向它、同步 `tests/backend/test_compose.py` 的 `EXPECTED_SERVICES`（三处漏一处测试就红）
 - [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
+> ⚠️ **边缘 nginx 的上游超时没有收紧**（T0.7 实测发现）：api 容器停掉时，边缘 nginx 要 **约 4 秒**才返回 502（DNS 解析不到上游的等待），`proxy_connect_timeout` 更是还挂着 60 秒的默认值。后果是**一次停机在用户侧表现成卡住而不是报错**，而且每个挂起的请求都占着 nginx 的连接。T0.9 要把 `resolver_timeout` 与 `proxy_connect_timeout` 收到秒级。实测数据：`curl` 到 `/healthz` 在 api 停机时耗时 3.96s。
+> ⚠️ **前端产物是单个 877 kB 的 chunk**（gzip 283 kB，主要是 antd）。只有一个路由时拆包没有意义，**加到第三、四个路由时必须做路由级懒加载**，否则首屏会越拖越久。归 T0.10（性能 / SLO 基线）一并量。
 > ⚠️ **celery-beat 没有存活探针**（T0.6 派生）：`celery inspect ping` 问的是 worker，够不着 beat。现在 beat 的 schedule 是空的，崩了也没有后果；**第一条周期任务落地时这就变成静默故障** —— beat 挂掉 = 对账扫描、状态轮询全部不执行，而 API 一切正常、没有任何报错。加第一条周期任务的那个任务必须同时给出探测手段（例如让 beat 自己周期性打一条心跳日志并挂告警）。
 > ⚠️ **T0.9 必须包含的一条具体告警**（T0.5 派生，PR #28 审查指出）：`/readyz` 在 Redis 不可用时**刻意返回 200**，所以负载均衡不会发现这个故障，**它只能靠日志告警发现**。告警名 `billing_readiness_degraded_redis`，条件、分级与升级路径写在 [runbook](runbook.md)。告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
@@ -337,6 +339,81 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 这是「测试通过但东西是坏的」那一类，和 [REVIEW-LOG](REVIEW-LOG.md) 里正则永不匹配那次是同一个病根：**断言的范围比它自以为的大**。修法是加一个 `instructions()` 只保留非注释行，所有文本断言都走它；补完 12 条变异全部被抓到。
 
 派生的通用规矩：**校验配置文件内容的用例，必须先剥掉注释再断言**，并且要用「把那行注释掉」这一种变异验证过。
+
+---
+
+### T0.7 任务记录（2026-09-12）
+
+**做了什么**
+
+- `frontend/`：spec §3.2 钉死的那一套 —— React 19 + TypeScript + Vite + React Router 7 + TanStack Query 5 + Axios + Ant Design 6，i18n-ready（V1 只出英文）
+- 目录照 §101 分（`api` / `layouts` / `routes` / `i18n` / `features`）。**`features/` 下的九个业务子目录不预建** —— 空目录会让人以为那块已经开工，和 runbook 不预留空标题是同一条道理
+- `frontend/Dockerfile` + `frontend/nginx.conf`：node 构建 → nginx 发静态文件，运行期没有 node
+- compose 补上第七个服务，边缘 nginx 的 `location /` 从 T0.6 的 503 占位改成真转发；`EXPECTED_SERVICES` 同步，并**单独加一条用例**钉住「根路径真的转发到 frontend」—— 光加服务不改边缘是一个能跑通其他所有用例的错误状态
+- CI 加 `frontend` job（lint / typecheck / test / build），`Compose stack` 那步改成 `build api frontend`
+
+**三条「失败方式是安静的」，都做成了机械保证**
+
+1. **文案硬编码**：自定义 ESLint 规则 `no-hardcoded-jsx-text`，管 JSX 文本、表达式容器里的字符串、以及 `title` / `label` / `placeholder` / `alt` 这类面向用户的属性；纯空白与标点放行。规则自己有 14 个断言（8 个应放行、6 个应报错）—— **一条永不触发的 lint 规则和没有规则完全一样，而且看起来更让人放心**
+2. **i18n key 不存在**：i18next 默认**把 key 原样渲染给用户**，像一句奇怪的英文，不报错不告警。`keys.test.ts` 校验源码用到的每个 key 都在 `en.json` 里、且没有没人用的死 key。另外配了 `parseMissingKeyHandler` 让漏网的显示成 `⟪ missing:key ⟫`
+3. **信封没解开**：§107 的成功与失败共用一种形状，漏看 `success` 就会把 `data: null` 当正常值渲染 —— 界面一片空白而不报错。解信封只存在 `api/client.ts` 一处，**不认识的形状当成错误而不是空数据**（代理层出问题时回的是 HTML）
+
+**几个不是随手选的决定**
+
+- **`keySeparator` 与 `nsSeparator` 都关掉，key 一律扁平字符串。** 默认开着时 `"wallet.balance"` 会被拆成嵌套查找，于是「key 不存在」和「key 的父节点是个字符串」两种情况**失败方式一模一样**，都是安静地渲染 key 本身
+- **axios 的 `baseURL` 是 `/` 而不是 `/api`。** nginx 转发刻意不改写路径（T0.6），所以浏览器请求的 uri、nginx 日志里的 uri、应用日志里的 path 是**同一个字符串**；在这里偷偷加前缀，三处就对不上
+- **浏览器端生成 `X-Request-ID`**，而不是让 nginx 兜底生成 —— 兜底那个前端自己不知道，用户截图里就没有可搜的 id。格式落在后端 `_SAFE_REQUEST_ID` 的字符集内
+- **错误界面必须显示 `request_id`**，那是用户能报给支持、支持能在日志里搜到的唯一钥匙（§94 的关联链条到这里才闭合）
+- **`RequestReference` 的参数类型是 `Error` 而不是 `ApiError`**，运行时用 `instanceof` 收窄：TanStack Query 把 `error` 标成 `Error`，queryFn 里一个普通 TypeError 也会走到这里。写成 `ApiError` 是在骗类型系统，真出事时读到 `undefined`
+- **`retry: 1` 而不是默认的 3**；写操作的重试策略要在引入它的那个任务里单独定，不许靠这里的默认值
+- **`sourcemap: false`**：源码映射会把完整前端逻辑摆到公网上，排障靠 `request_id` 关联服务端日志
+- **index.html 不缓存、带哈希的产物永久缓存。** 反过来做的话，用户拿着缓存的旧 index.html 去要一个已经不存在的 bundle，结果是白屏，而且强刷之前一直白着
+- **用 antd 的 `<App>` 包一层、组件里走 `App.useApp()`**，不用 `message.x()` 这类静态方法 —— 静态方法拿不到 `ConfigProvider` 的上下文，顺带也就不需要 React 19 的兼容补丁包
+
+**版本选型：不按数字最新，按「这套能不能真跑通」**
+
+初装拿到的是 eslint 9（已标停止支持）、vite 6、vitest 2，都落后一个大版本。查了一轮主线版本后实测组装，结论有两条是**查出来的不是猜的**：
+
+- `typescript-eslint@8` 的 peer 是 `typescript >=4.8.4 <6.1.0`，**TypeScript 7 还不能用**，所以留在 5.9
+- `eslint-plugin-react@7.37.5` 的 peer 只到 eslint 9.7，与 eslint 10 互斥。**选择去掉这个插件**：与其为一条规则把整个 lint 链钉死在一个不再收安全修复的大版本上，不如自己维护那 60 行规则 —— 何况它是本项目的硬要求，本来就该本项目负责
+
+最终：eslint 10 / vite 8 / vitest 5 / antd 6 / React 19 / TS 5.9，装完零弃用告警。
+
+**验证到什么程度**
+
+- **七个服务实测起来**，五个有健康检查的全部 `healthy`
+- **真浏览器**（Chrome）打开 `http://127.0.0.1:8080/`：渲染出布局 + 平台状态卡片，**成功态**显示「The billing platform is responding.」—— 证明 浏览器 → nginx → api → §107 信封 → TanStack Query → 界面 整条链通了
+- **关联 ID 闭合**：浏览器生成的 UUID（带连字符）与 nginx 兜底生成的 32 位十六进制**能在日志里区分开**，实测浏览器那次的同一个 id 出现在 nginx 访问日志、应用 `Request completed` 日志两处
+- **SPA 兜底**：`/nope/deep/path` 返回 200 + index.html，前端路由匹配到 `*` 渲染 404 页
+- **缓存策略实测**：`/` 是 `no-cache, must-revalidate`，`/assets/index-*.js` 是 `public, max-age=31536000, immutable`
+- **三态齐全**（DoD 第 8 条）：停掉 api 看到**加载态**（骨架条 + Checking…）；把查询推进错误态看到**错误态** —— 后端安全文案 + `Reference: <request_id>`（可复制）+ 「Try again」按钮
+- `npm run lint` / `typecheck` / `test`（11 passed）/ `build` 全过；后端 `pytest` **88 passed、0 skipped**；[WORKFLOW §7](WORKFLOW.md) 六项本地全过
+- **`check_docs.py` 顺带修了一个被 `frontend/` 暴露出来的缺口**：它遍历全仓库的 Markdown，把 `node_modules` 里第三方包 README 的相对链接报成了 156 条死链。加了 `VENDOR_DIRS` 跳过依赖与构建产物。**刻意不改成「只查 git 跟踪的文件」**——那样一个刚写好、还没 `git add` 的新文档会被静默跳过，而这个脚本的全部价值就在于不静默。改完做了变异验证：仓库自己的死链接、`docs/` 下的死链接、不存在的 `§N` 引用，三条都照样被抓到
+
+**合并后要做的一步（[WORKFLOW §2](WORKFLOW.md) 的受控例外，预先写明）**
+
+把新的 `frontend` job 设为 `main` 的必需状态检查。**这一步 PR 里做不到**：新增的 CI job 必须先合进 `main` 才存在，顺序上只能后做。
+
+- 走 `POST /repos/{owner}/{repo}/branches/main/protection/required_status_checks/contexts` 这个**纯追加**端点，而不是 `PUT` 整份 protection —— 后者要重发全部字段，漏一个就是静默降级，而在保护 `main` 的配置上静默降级不会报错（与 T0.2 加 `backend` 时同一个做法）
+- 执行后回读 `GET .../protection/required_status_checks/contexts`，确认是六项：`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`
+- 用一个只改状态陈述的 `chore/` PR 把前后对照补回仓库
+
+**教训：先分清「被测系统坏了」和「测量环境坏了」**
+
+停掉 api 之后，界面**永远停在加载态**，重试一次都不发。我一度判定这是真缺陷。查下来不是：
+
+TanStack Query 的 retryer 源码里写着
+
+```js
+const canContinue = () => focusManager.isFocused() && (...) && config.canRun();
+sleep(delay).then(() => canContinue() ? undefined : pause())
+```
+
+**窗口失焦时重试被无限期挂起**，查询状态停在 `fetchStatus: "paused"`。而自动化浏览器的标签页永远是 `hidden`、永远拿不到焦点。真实用户窗口有焦点，重试正常走完。
+
+值得记的不是这条 API 细节，而是排查顺序上的两次浪费：我先后猜了「计时器节流」和「onlineManager 判定离线」，两条都有表面证据（标签页确实 hidden、确实测到 setTimeout 被拖长），**也都是错的**。真正定位靠的是两步：① 写一个一次性复现脚本，证明 `apiGet` 对着 502 确实会 reject —— 把「我的代码」从嫌疑里排除掉；② 直接读 `node_modules` 里库的源码，而不是继续猜它的行为。
+
+派生规矩：**在自动化浏览器里观察到的「卡住」，先证明它在真实环境也卡住，再当缺陷处理**；以及**依赖库的行为有源码可读时不要猜**。
 
 ---
 

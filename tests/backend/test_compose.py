@@ -20,10 +20,17 @@ NGINX_HEADERS = REPO_ROOT / "deploy" / "nginx" / "billing-proxy-headers.inc"
 # ⚠️ 改这个数字，宿主机上主密钥文件的属主必须同步改（ADR-0004）。
 APP_UID = "10001"
 
-# spec §99 的服务清单是七个；frontend 还不存在（TODO 的 T0.7）。
-# 这里写死六个，是为了让「加上 frontend」成为一次**有意识的**改动：
-# T0.7 必须同时改这份清单和 nginx 的 location /，漏一个测试就红。
-EXPECTED_SERVICES = {"mysql", "redis", "api", "celery-worker", "celery-beat", "nginx"}
+# spec §99 的服务清单，七个到齐（T0.7 补上 frontend）。
+# 写死而不是「至少包含」：多一个服务也要是一次有意识的改动。
+EXPECTED_SERVICES = {
+    "mysql",
+    "redis",
+    "api",
+    "celery-worker",
+    "celery-beat",
+    "frontend",
+    "nginx",
+}
 
 
 @pytest.fixture(scope="module")
@@ -134,6 +141,17 @@ def test_every_proxied_location_forwards_the_correlation_id() -> None:
     assert conf.count("proxy_pass") == conf.count(
         "include /etc/nginx/conf.d/billing-proxy-headers.inc;"
     )
+
+
+def test_the_edge_serves_the_frontend_at_the_root() -> None:
+    """T0.6 时 `location /` 是一句 503 占位，frontend 落地后必须真的转发过去。
+
+    单独钉这一条，是因为 `EXPECTED_SERVICES` 里加了 frontend **并不能**说明
+    边缘已经指向它 —— 服务起着、占位还在，是一个能跑通所有其他用例的状态。
+    """
+    block = nginx_location_block("/")
+    assert "proxy_pass" in block
+    assert "return 503" not in block
 
 
 def test_readiness_is_not_exposed_to_the_public_internet() -> None:

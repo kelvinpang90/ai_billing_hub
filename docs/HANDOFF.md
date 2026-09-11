@@ -8,15 +8,15 @@
 ## 现在在哪
 
 **Phase 0 进行中。** §123 的 13 项已拆成 T0.1–T0.10（拆法与依赖见 [TODO.md](TODO.md) 的 Phase 0 一节），
-**T0.1–T0.6 已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`、
+**T0.1–T0.7 已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`、
 `.env.example`、`tests/backend/`；CI 的 `backend` job（lint + 格式 + pytest + 打包冒烟）；结构化 JSON 日志 +
 关联 ID + 脱敏 + §107 统一错误信封 + `AppError` 领域异常基类；MySQL + SQLAlchemy + Alembic 接通
 （`Money` = `DECIMAL(20,8)`、会话生命周期、基线迁移、`/readyz` 就绪探针）；Redis + Celery 接通
 （worker / beat 入口、探活任务、面向财务不变量的 Celery 默认值）；Docker Compose 栈（`Dockerfile` +
-`docker-compose.yml` + `deploy/nginx/`，**六个**服务实测跑通）。
+`docker-compose.yml` + `deploy/nginx/`）；React 骨架（`frontend/`，§3.2 那一套 + i18n，**七个**服务实测跑通）。
 
 **业务表一张都还没有**（基线迁移是空的，Phase 1 才开始建）；**周期任务一条都还没有**（beat 的 schedule 是空的）；
-**第七个服务 `frontend` 还没有**（compose 里缺的就是它，nginx 的 `location /` 暂时返回 503 占位，归 T0.7）；认证也还没有。
+**前端只有一个落地页**（一张平台状态卡片，Phase 1 起换成真内容）；**认证还没有**（T0.8）。
 
 已完成：
 
@@ -25,15 +25,15 @@
 - **前置决策 D1–D7**：3 项完全收口、3 项部分收口、1 项（D2）等会计
 - **评审残留 R1–R7**：4 项收口（R2 / R4 / R6 / R7），3 项未做（R1 / R3 / R5）
 - **双 agent 流程与闸门已落地并经受住实战**：设计闸门 + 实现闸门、`codex-review.ps1` 取材与准入、`check_repo_policy.py` 策略检查、`gh_verified_write.py` 写后回读
-- **CI 五项**（`docs` / `scripts` / `policy` / `backend` / `secret-scan`）全部已进 `main` 的必需检查（`backend` 于 2026-09-11 T0.2 合并后追加）。分支保护其余项：禁 force push、禁直推、禁删除、线性历史、分支必须最新、`enforce_admins`、对话必须解决
+- **CI 六项**（`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`）。前五项已进 `main` 的必需检查（`backend` 于 2026-09-11 T0.2 合并后追加）；**`frontend` 待追加** —— 新 job 要先合进 `main` 才存在，做法与回读要求写在 T0.7 任务记录里。分支保护其余项：禁 force push、禁直推、禁删除、线性历史、分支必须最新、`enforce_admins`、对话必须解决
 
-未完成：数据库 schema、T0.7 之后的全部 Phase 0 任务。
+未完成：数据库 schema、T0.8 之后的全部 Phase 0 任务。
 
 ## 下一步
 
-**接着做 T0.7（React 骨架）**，再按 T0.8 往下走。⚠️ T0.7 还欠着 T0.6 没做的第七个服务：
-compose 加 `frontend`、`deploy/nginx/billing.conf` 的 `location /` 从 503 占位改成指向它、
-同步 `tests/backend/test_compose.py` 的 `EXPECTED_SERVICES`（三处漏一处测试就红）。
+**接着做 T0.8（认证基座：管理员登录 + 密码哈希 + 会话/令牌 + 2FA）**，再按 T0.9 / T0.10 往下走。
+⚠️ T0.8 要记着 spec §51：一套认证同时服务 ADMIN 与 CUSTOMER、**同一个 React 前端**，角色只决定可见的路由；
+**授权必须由后端独立强制执行，前端藏菜单不构成任何访问控制**。
 清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
 **每个 T0.x 一个 PR**，从 `main` 开分支，不要开 stacked PR（[WORKFLOW.md](WORKFLOW.md) §5）。
 
@@ -99,3 +99,7 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
 | `tests/test_*.py` | 流程脚本（策略检查、写后回读）自己的回归 | `python -m unittest discover -s tests` |
 
 `tests/backend/` 没有 `__init__.py`，所以 unittest 的 discover 不会递归进去——**不要给它加 `__init__.py`**，加了两套测试就会互相收集。
+
+前端是第三套，完全独立：`frontend/` 下 `npm test`（vitest）。它的测试和源码放在一起（`*.test.ts`），
+由 `frontend/tsconfig.test.json` 单独类型检查——**应用代码那份（`tsconfig.app.json`）刻意不给 Node 类型**，
+免得浏览器代码里出现 `import fs` 这种打包时才炸的写法。

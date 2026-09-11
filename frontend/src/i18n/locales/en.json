@@ -1,0 +1,13 @@
+{
+  "app.name": "Acuven Billing",
+  "nav.dashboard": "Dashboard",
+  "dashboard.platformStatus.title": "Platform status",
+  "dashboard.platformStatus.checking": "Checking the billing platform…",
+  "dashboard.platformStatus.ok": "The billing platform is responding.",
+  "dashboard.platformStatus.unreachable": "The billing platform is not responding.",
+  "dashboard.platformStatus.retry": "Try again",
+  "error.referenceLabel": "Reference",
+  "notFound.title": "Page not found",
+  "notFound.description": "The page you asked for does not exist.",
+  "notFound.backToDashboard": "Back to the dashboard"
+}

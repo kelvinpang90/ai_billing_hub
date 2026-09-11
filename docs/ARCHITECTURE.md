@@ -137,10 +137,10 @@ optional: document-worker
 环境: 本地 Docker 测试环境 + 生产 VPS（V1 无独立 staging）
 ```
 
-**落地状态（2026-09-12，T0.6）**：`docker-compose.yml` + `Dockerfile` + `deploy/nginx/` 已经能实际跑起来，
-但只有**六个**服务 —— `frontend` 还不存在（TODO 的 T0.7 才建 React 骨架），在那之前 nginx 的 `location /`
-返回一句说明用的 503。api / celery-worker / celery-beat 共用同一个镜像、以非 root UID `10001` 运行
-（[ADR-0004](adr/ADR-0004-credential-encryption.md) 要求 Phase 0 定的就是这个数字）。
+**落地状态（2026-09-12，T0.6 + T0.7）**：`docker-compose.yml` + `Dockerfile` + `frontend/` + `deploy/nginx/`
+已经能实际跑起来，**七个服务到齐**。api / celery-worker / celery-beat 共用同一个镜像、以非 root UID `10001`
+运行（[ADR-0004](adr/ADR-0004-credential-encryption.md) 要求 Phase 0 定的就是这个数字）；
+`frontend` 是另一个镜像（node 构建 → nginx 发静态文件），只经边缘 nginx 对外。
 **生产侧尚未落地**：TLS、真实域名、镜像 tag、GitHub Actions 部署、备份与恢复都归 T0.9。
 
 交付要求：**公开** GitHub 仓库（见第 7.1 节与 [ADR-0001](adr/ADR-0001-repository-visibility.md)）、受保护 `main`、CI 通过才能合并、合并触发 GitHub Actions 部署、镜像用不可变 tag 标识提交、密钥走 GitHub environment secrets 绝不入库、迁移按文档化的安全顺序执行、部署等健康检查 + 冒烟测试、有经过验证的回滚/前滚流程、并发部署串行化。
@@ -191,7 +191,10 @@ ai_billing_hub/
 ├── app/           # 后端主体（Phase 0 创建）
 ├── alembic/       # 迁移（T0.4 创建；⚠️ 不在 wheel 里，镜像要单独 COPY）
 ├── deploy/        # 部署期配置，目前只有 nginx/（T0.6 创建）
+├── frontend/      # React SPA，自带 Dockerfile 与 nginx.conf（T0.7 创建）
 └── tests/         # 后端测试（Phase 0 创建）
 ```
 
-前端与 integration-client 的目录在对应 Phase 再定。**§101 视为已被本节取代**，实现时不要再回去照抄。
+`frontend/src/` 内部**照 §101 的分法**（`api` / `components` / `features` / `layouts` / `routes` / `i18n`），
+只有 `features/` 下的九个业务子目录不预建 —— 空目录会让人以为那块已经开工。
+integration-client 的目录在对应 Phase 再定。**§101 的顶层结构视为已被本节取代**，实现时不要再回去照抄。

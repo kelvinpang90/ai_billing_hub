@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    // 测试要读源码文件做静态校验（i18n key），所以这一份**要**有 Node 类型。
+    "types": ["node"],
+
+    "noEmit": true,
+    "composite": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true
+  },
+  // 测试要 import 被测源码，所以这份把 src 整个纳进来。
+  // 「应用代码不许拿到 Node 类型」那条边界由 tsconfig.app.json 把守 ——
+  // 它排除测试文件、且没有 "types": ["node"]，src 在那边会被再查一遍。
+  "include": ["src"]
+}

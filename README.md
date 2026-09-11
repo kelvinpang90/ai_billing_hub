@@ -2,7 +2,7 @@
 
 给 Acuven 旗下所有 AI 应用做一套独立的中心化计费平台：**请求级用量计量 + 预付 MYR 钱包 + 不可变财务账本 + 支付网关充值 + 自动扣费与停复机**。
 
-> **当前状态：Phase 0 进行中（T0.1–T0.6 已完成，后端骨架 + MySQL / Redis / Celery + Compose 栈已通）。**
+> **当前状态：Phase 0 进行中（T0.1–T0.7 已完成，后端骨架 + MySQL / Redis / Celery + 七服务 Compose 栈 + React 骨架已通）。**
 > 详细进度与下一步见 [docs/HANDOFF.md](docs/HANDOFF.md)。
 
 ---
@@ -38,9 +38,8 @@ docker compose run --rm api alembic upgrade head    # 迁移是显式一步，�
 curl http://127.0.0.1:8080/healthz
 ```
 
-六个服务：`nginx` · `api` · `celery-worker` · `celery-beat` · `redis` · `mysql`。
-spec §99 的清单是**七**个 —— `frontend` 还不存在（[TODO](docs/TODO.md) 的 T0.7 才建 React 骨架），
-在那之前 `/` 返回一句说明用的 503。
+七个服务（spec §99 的清单）：`nginx` · `frontend` · `api` · `celery-worker` · `celery-beat` · `redis` · `mysql`。
+浏览器打开 <http://127.0.0.1:8080/> 就是前端；`/healthz` 与 `/api/` 走后端。
 
 几条不是随手选的默认：
 
@@ -56,11 +55,22 @@ spec §99 的清单是**七**个 —— `frontend` 还不存在（[TODO](docs/TO
 
 停掉：`docker compose down`；连数据一起删：`docker compose down -v`。
 
+## 只改前端时
+
+Compose 里的 `frontend` 跑的是**打包后的产物**，改一行组件要重建镜像。写前端时用 Vite 的开发服务器：
+
+```bash
+cd frontend && npm install && npm run dev      # http://localhost:5173
+```
+
+它把 `/healthz` 与 `/api` 代理到本机 Compose 栈的 nginx（`vite.config.ts`），所以后端那套仍然照常起着。
+
 ## 提 PR 前必须本地跑过
 
 命令清单只在 [docs/WORKFLOW.md §7](docs/WORKFLOW.md) 一处，这里不重复。
 
-CI 跑五项：`docs` / `scripts` / `policy` / `backend` / `secret-scan`，都是 `main` 的必需检查。
+CI 跑六项：`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`。
+前五项已是 `main` 的必需检查，`frontend` 要等它先合进 `main` 才能设（见 [WORKFLOW §2](docs/WORKFLOW.md) 的受控例外）。
 
 ## 开发流程
 
