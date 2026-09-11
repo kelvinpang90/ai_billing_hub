@@ -8,7 +8,7 @@
 流程的唯一事实来源是 [docs/WORKFLOW.md](docs/WORKFLOW.md)，下面只是要点。
 
 - **你负责实现，Codex 负责独立审查，Kelvin 负责合并。** 你不合并自己的 PR。
-- **碰钱的任务先过设计闸门**：钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 —— 用 [design-gate 模板](.github/ISSUE_TEMPLATE/design-gate.md) 开 Issue，`scripts\codex-review.ps1 -Issue <N> -Post` 拿到 `APPROVED: design v<N>` 之后才动手写代码。前端 / 文档 / CI / 脚本不走闸门
+- **碰钱的任务先过设计闸门**：钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 —— 用 [design-gate 模板](.github/ISSUE_TEMPLATE/design-gate.md) 开 Issue，`scripts\codex-review.ps1 -Issue <N> -Post` 拿到 `APPROVED: design v<N>` 之后才动手写代码。前端 / 文档 / CI / 脚本不走闸门；既不碰钱、也不碰用量摄取 / 集成认证 / Webhook 的后端改动同样不走（分档看主题，不看「是不是 API」）
 - **设计版本一变，之前的批准作废**，必须重新过闸门
 - 每个编号任务：`git checkout -b task/<编号>-<slug>` → 实现 + 写测试 → 写 `docs/TODO.md` 任务记录 → 本地检查全过（命令清单只在 [WORKFLOW §7](docs/WORKFLOW.md) 一处）→ 开 **Draft PR**（用 `.github/pull_request_template.md`，结构不许改，**`TODO 影响` 一节必填**）→ CI 全绿后 `scripts\codex-review.ps1 -Pr <N> -Post`（脚本先查准入，不过不调 Codex）
 - **不要开 stacked PR**（base 指向另一个功能分支）：基分支合并被删时 GitHub 会自动关闭子 PR，且关闭后不能改 base 也不能重开
