@@ -11,13 +11,17 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from app.core.broker import BrokerStatus, check_broker
 from app.core.database import check_database
 from app.core.logging import current_request_id
 from app.schemas.envelope import ApiResponse, success
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
 
@@ -28,6 +32,7 @@ class HealthStatus(BaseModel):
 class ReadinessStatus(BaseModel):
     status: str
     database: str
+    redis: str
 
 
 @router.get("/healthz", response_model=ApiResponse[HealthStatus])
@@ -44,8 +49,32 @@ def healthz() -> ApiResponse[HealthStatus]:
 def readyz(request: Request) -> ApiResponse[ReadinessStatus]:
     """Check every dependency this process needs to serve traffic.
 
+    **数据库不通 = 503；Redis 不通 = 200 但 `degraded`。**这个不对称是刻意的：
+
+    spec §74.6 规定 Redis/Celery 只承载投递触发、数据库 Outbox 才是事实来源，
+    REQ-AVAIL-001 又要求 Redis 不可用不得成为终端 AI 请求路径上的同步依赖。
+    Redis 挂了，API 仍能收用量事件、落库、返回 202，投递触发等 Redis 回来由
+    周期恢复补上。**这时把实例摘出轮转，就是自己造出 Invariant 1 要防的中断。**
+
+    数据库不通则不同：落不了库就等于事件丢了，那必须停止接流量。
+
     失败时 `check_database()` 抛 `AppError`，由统一处理器渲染成 503 信封 ——
     **不在这里 catch 后自己拼响应**，那样会出现第二种错误形状。
     """
     check_database(getattr(request.app.state, "engine", None))
-    return success(ReadinessStatus(status="ok", database="ok"), request_id=current_request_id())
+    broker = check_broker(request.app.state.settings)
+    if broker is not BrokerStatus.OK:
+        # **这条日志是这个故障唯一的发现途径。**因为返回的是 200，负载均衡
+        # 不会替我们发现它；告警只能挂在这条上。message 与 component 是稳定
+        # 契约，改它们等于把告警条件改没了 —— 见 docs/runbook.md。
+        logger.warning(
+            "Readiness degraded", extra={"component": "redis", "component_status": broker.value}
+        )
+    return success(
+        ReadinessStatus(
+            status="ok" if broker is BrokerStatus.OK else "degraded",
+            database="ok",
+            redis=broker.value,
+        ),
+        request_id=current_request_id(),
+    )

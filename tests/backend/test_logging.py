@@ -180,6 +180,23 @@ def test_exception_tracebacks_are_scrubbed() -> None:
     assert "Traceback" in payload["exception"]
 
 
+def test_string_extras_are_scrubbed_even_under_harmless_key_names() -> None:
+    """Celery 把任务 args / kwargs 以 repr 字符串写进 extra，而 `args` 不是敏感键名。
+
+    只按键名脱敏的话，参数里的东西会原样落盘。
+    """
+    # 这就是 Celery 实际打出来的形状：extra={"data": {"args": "...", ...}}。
+    payload = format_record(
+        data={"args": "('api_secret=s3cr3t',)", "kwargs": "{'token': 'abc'}", "id": "t-1"}
+    )
+
+    assert "s3cr3t" not in payload["data"]["args"]
+    assert REDACTED in payload["data"]["args"]
+    assert "abc" not in payload["data"]["kwargs"]
+    # 不敏感的值要原样留着，否则日志就没法排障了。
+    assert payload["data"]["id"] == "t-1"
+
+
 def test_message_itself_is_scrubbed() -> None:
     assert "s3cr3t" not in format_record(msg="using api_secret=s3cr3t")["message"]
 

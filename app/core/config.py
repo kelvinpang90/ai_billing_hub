@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # 报 DATABASE_NOT_CONFIGURED，而不是拿着假地址去连然后超时。
     database_url: str = ""
 
+    # 同样是空串 = 未配置。⚠️ Redis **不是**就绪阻断项：spec §74.6 规定
+    # 「Redis/Celery 只承载投递触发，数据库 Outbox 才是可恢复的事实来源」，
+    # REQ-AVAIL-001 又要求 Redis 不可用不得成为终端 AI 请求路径上的同步依赖。
+    # 因为 Redis 挂了就把 API 摘出轮转，恰好制造出 Invariant 1 要防的那种中断。
+    redis_url: str = ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

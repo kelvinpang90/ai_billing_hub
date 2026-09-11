@@ -68,12 +68,14 @@
 - [x] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查。**另加打包冒烟**：装进干净 venv 后 `import app.main` 并起一次 `/healthz` —— `pytest` 跑的是源码树（`pythonpath = ["."]`），发现不了 wheel 少打子包这类问题（PR #22 审查实证）
 - [x] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
 - [x] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
-- [ ] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
+- [x] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
 - [ ] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
 - [ ] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）
 - [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
+
+> ⚠️ **T0.9 必须包含的一条具体告警**（T0.5 派生，PR #28 审查指出）：`/readyz` 在 Redis 不可用时**刻意返回 200**，所以负载均衡不会发现这个故障，**它只能靠日志告警发现**。告警名 `billing_readiness_degraded_redis`，条件、分级与升级路径写在 [runbook](runbook.md)。告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
 - [x] ~~GitHub 仓库 + 受保护 `main`~~ 已建、已推送；`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限），CI 五项 `docs` / `scripts` / `policy` / `backend` / `secret-scan` 已全部设为必需状态检查（`backend` 于 T0.2 合并后追加）
 
@@ -229,6 +231,54 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 `alembic.ini` 初版写了中文注释。Alembic 用 `configparser` 读它，而 `configparser` 用**平台默认编码** —— Windows 上是 cp1252，直接 `UnicodeDecodeError`；Linux 的 CI runner 是 UTF-8，跑得好好的。**这个 bug 只在开发机上炸、CI 看不见**，是最难发现的那一类。
 
 已落成机械检查：`test_alembic_ini_is_ascii_only` 直接按 ASCII 解码那个文件，解不出来就失败。写文件时的判据是：**这个文件由谁解析？** 由 Python 解析的（`env.py`、迁移脚本）随便写中文；由第三方库按平台编码解析的，只写 ASCII，理由写到旁边的 `.py` 里去。
+
+### T0.5 任务记录（2026-09-12）
+
+**做了什么**
+
+- `app/core/celery_app.py`：Celery 工厂。**每一条默认值都是从 spec §74.6 和 Invariant 14 推出来的，不是抄模板**：
+  - **不存任务结果**（`task_ignore_result=True`、`result_backend=None`）。§74.6 写死了「Redis/Celery 只承载投递触发，数据库 Outbox 才是可恢复的事实来源」。结果放 Redis 会让人依赖它做判断，而 Redis 是可丢的 —— 任务的产出必须落库，落不了库就是这个任务没做完
+  - `task_acks_late` + `task_reject_on_worker_lost`：worker 被 kill 时消息回队列重投，而不是「已 ack 但没做完」。**代价是任务必须幂等**，已写进 `app/tasks/__init__.py` 的硬规矩
+  - `worker_prefetch_multiplier=1`：配合 acks_late。预取多了，一个 worker 崩掉会让一批消息同时重投，放大重复
+  - **只收 JSON**：pickle 反序列化等于允许 broker 上的任意代码在 worker 里执行
+  - UTC（§109）：beat 的调度时刻要和账本时间同一个基准
+- `app/worker.py`：`celery -A app.worker worker / beat` 的入口。**worker 没有 broker 就直接起不来**，与 API「没数据库也要能起」相反 —— 这个不对称是有意的：API 要让存活探针应答，worker 没有 broker 则毫无意义
+- `app/tasks/ping.py`：探活任务。Celery 配线错了（任务没注册、队列名不对、序列化器不匹配）**不会在启动时报错**，只会在第一个真任务被丢进队列后安静地不执行
+- `/readyz` 加 `redis` 字段与 `degraded` 状态（见下）
+- CI 的 `backend` job 加 Redis service
+
+**偏离了什么 —— 一个需要论证的设计决定**
+
+- **Redis 不通 = 200 `degraded`，不是 503。** 数据库不通才是 503。这个不对称是刻意的：
+  - §74.6：Redis/Celery 只承载投递触发，数据库 Outbox 才是事实来源
+  - `REQ-AVAIL-001`：Redis 不可用**不得**成为终端 AI 请求路径上的同步依赖
+  - Redis 挂了，API 仍能收用量事件、落库、返回 202，投递触发欠着，等 Redis 回来由周期恢复补上（Invariant 14）
+  - **把 Redis 做成就绪阻断项，等于 Redis 一挂就把所有实例摘出轮转 —— 那正是 Invariant 1 要防的中断，而且是我们自己造出来的**
+  - 代价：Redis 静默不可用不会被负载均衡发现，**必须由监控告警兜住**。审查（PR #28）判这条为阻断项 —— 我自己选了 200，就必须自己把补偿控制补上。本任务能给的都给了：
+    - `/readyz` 判定 degraded 时打一条 **稳定契约**的 WARNING（`message="Readiness degraded"`、`component="redis"`），并有用例钉住「degraded 时恰好一条」「正常时一条都没有」
+    - 新建 [runbook.md](runbook.md) 的第一个场景「Redis / Celery broker 不可用」，含告警名、条件、分级、升级路径与「绝不能做什么」
+    - T0.9 的任务描述里钉上了这条具体告警
+    - **告警设施本身建不了**：还没有任何部署、没有日志聚合。那是 T0.9 的前置，属排序事实，不是取舍
+- **beat 的 schedule 留空**，不塞示例条目 —— 示例条目会被真的跑起来
+- **任务模块显式列出**（`TASK_MODULES`），不用 `autodiscover_tasks`：后者靠约定扫包，改了包名时只是**安静地少注册一个任务**，调用方拿到 `NotRegistered` 才发现
+- **没做 worker 的存活探针**：那要容器编排配合，是 T0.6 的事
+
+**验证到什么程度**
+
+- **起了真 worker 端到端跑通**（本地 Docker 一次性 Redis）：`celery inspect ping` → `pong`；`inspect registered` → `app.tasks.ping`；派发任务 → worker `received` → `succeeded`，返回 UTC 时间戳
+- `pytest` **75 passed、0 skipped**（带 `BILLING_TEST_DATABASE_URL` + `BILLING_TEST_REDIS_URL` 时）
+- 配置断言逐条钉住：不存结果、acks_late 三件套、只收 JSON、UTC、beat 空、任务模块显式
+- 对着真 Redis 验了**入队**（eager 模式跑不到的那一半：序列化、连接、入队）
+- `/readyz` 的 Redis 三态都有用例：未配置 / 连不上 / 正常；且断言连接目标不出现在响应里
+- [WORKFLOW §7](WORKFLOW.md) 六项本地全过
+
+**实测发现的两个坑（都只有起真 worker 才看得见）**
+
+1. **Celery 默认劫持 root logger**（`worker_hijack_root_logger`），把 T0.3 装的 JSON handler 顶掉。后果不是报错，是 **worker 打纯文本、API 打 JSON**，集中日志里两半对不上 —— 而且 worker 那半**完全不过脱敏**。已关掉，连同 `worker_redirect_stdouts`
+2. **Celery 会把任务的 `args` / `kwargs` 写进日志**（`"Task ... received"` 那条的 extra 里）。而 `args` 这个键名不敏感，**只按键名脱敏兜不住**。两道补救：
+   - `redact()` 现在对**字符串值**也跑一遍文本脱敏，不只按键名
+   - `app/tasks/__init__.py` 写死硬规矩：**任务参数只传标识符，不传值** —— 密钥、token、AI prompt / response、请求体一律在任务里按 id 去库里取
+   - 端到端验过：派发 `args=["api_secret=s3cr3t-must-not-appear"]`，该串在 worker 日志里出现 **0 次**，「received」行与异常栈两处都是 `***REDACTED***`
 
 ---
 

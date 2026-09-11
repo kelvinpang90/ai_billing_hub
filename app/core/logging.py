@@ -140,6 +140,11 @@ def redact(value: Any, _depth: int = 0, _seen: frozenset[int] = frozenset()) -> 
         }
     if isinstance(value, (list, tuple)):
         return [redact(item, _depth + 1, _seen) for item in value]
+    if isinstance(value, str):
+        # 字符串值也要过一遍文本脱敏。起因是实测：Celery 把任务的 args / kwargs
+        # 以 repr 字符串写进日志的 extra 里，而 `args` 这个键名不敏感 —— 只按
+        # 键名脱敏的话，参数里的东西会原样落盘。
+        return scrub_text(value)
     return value
 
 

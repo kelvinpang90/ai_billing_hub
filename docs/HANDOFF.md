@@ -8,12 +8,13 @@
 ## 现在在哪
 
 **Phase 0 进行中。** §123 的 13 项已拆成 T0.1–T0.10（拆法与依赖见 [TODO.md](TODO.md) 的 Phase 0 一节），
-**T0.1–T0.4 已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`、
+**T0.1–T0.5 已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`、
 `.env.example`、`tests/backend/`；CI 的 `backend` job（lint + 格式 + pytest + 打包冒烟）；结构化 JSON 日志 +
 关联 ID + 脱敏 + §107 统一错误信封 + `AppError` 领域异常基类；MySQL + SQLAlchemy + Alembic 接通
-（`Money` = `DECIMAL(20,8)`、会话生命周期、基线迁移、`/readyz` 就绪探针）。
+（`Money` = `DECIMAL(20,8)`、会话生命周期、基线迁移、`/readyz` 就绪探针）；Redis + Celery 接通
+（worker / beat 入口、探活任务、面向财务不变量的 Celery 默认值）。
 
-**业务表一张都还没有**（基线迁移是空的，Phase 1 才开始建）；Celery、Docker、前端、认证也都还没有。
+**业务表一张都还没有**（基线迁移是空的，Phase 1 才开始建）；**周期任务一条都还没有**（beat 的 schedule 是空的）；Docker、前端、认证也都还没有。
 
 已完成：
 
@@ -24,11 +25,11 @@
 - **双 agent 流程与闸门已落地并经受住实战**：设计闸门 + 实现闸门、`codex-review.ps1` 取材与准入、`check_repo_policy.py` 策略检查、`gh_verified_write.py` 写后回读
 - **CI 五项**（`docs` / `scripts` / `policy` / `backend` / `secret-scan`）全部已进 `main` 的必需检查（`backend` 于 2026-09-11 T0.2 合并后追加）。分支保护其余项：禁 force push、禁直推、禁删除、线性历史、分支必须最新、`enforce_admins`、对话必须解决
 
-未完成：数据库 schema、T0.5 之后的全部 Phase 0 任务。
+未完成：数据库 schema、T0.6 之后的全部 Phase 0 任务。
 
 ## 下一步
 
-**接着做 T0.5（Redis + Celery 接通）**，再按 T0.6 / T0.7 往下走。清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
+**接着做 T0.6（Docker Compose 七服务栈）**，再按 T0.7 / T0.8 往下走。清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
 **每个 T0.x 一个 PR**，从 `main` 开分支，不要开 stacked PR（[WORKFLOW.md](WORKFLOW.md) §5）。
 
 D1–D7 里剩下的未决项**全部落在 Phase 1 及以后**，没有一项挡住 Phase 0：
