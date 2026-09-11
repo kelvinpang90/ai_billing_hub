@@ -66,16 +66,16 @@
 
 - [x] **T0.1 — 后端骨架与配置**：`app/` 七层目录（`api` / `core` / `models` / `schemas` / `repositories` / `services` / `tasks`）、`app/main.py` 应用工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`（依赖 + ruff + pytest）、`.env.example`、`tests/backend/` 与首个冒烟测试
 - [x] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查。**另加打包冒烟**：装进干净 venv 后 `import app.main` 并起一次 `/healthz` —— `pytest` 跑的是源码树（`pythonpath = ["."]`），发现不了 wheel 少打子包这类问题（PR #22 审查实证）
-- [ ] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
+- [x] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
 - [ ] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
 - [ ] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
 - [ ] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
 - [ ] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）
 - [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA
-- [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准
+- [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
-- [x] ~~GitHub 仓库 + 受保护 `main`~~ 已建、已推送；`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限），CI 四项 `docs` / `scripts` / `policy` / `secret-scan` 已全部设为必需状态检查
+- [x] ~~GitHub 仓库 + 受保护 `main`~~ 已建、已推送；`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限），CI 五项 `docs` / `scripts` / `policy` / `backend` / `secret-scan` 已全部设为必需状态检查（`backend` 于 T0.2 合并后追加）
 
 **验收**：所有服务能起 · DB 迁移能跑 · 管理员能登录 · 2FA 可用 · CI 拦住合并并能部署不可变镜像 · RPO/RTO 恢复方案已批准
 
@@ -140,6 +140,38 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 - 走 `POST .../protection/required_status_checks/contexts` 这个**纯追加**端点，而不是 PUT 整份 protection —— 后者要重发全部字段，漏一个就是静默降级
 - 回读：必需检查现为 `backend` / `docs` / `policy` / `scripts` / `secret-scan`
 - 其余设置逐项回读确认未变动：`strict` 真、`enforce_admins` 真、线性历史 真、禁 force push、禁删除、对话必须解决 真、`dismiss_stale_reviews` 真、`required_approving_review_count` 0
+
+### T0.3 任务记录（2026-09-11）
+
+**做了什么**
+
+- `app/core/logging.py`：JSON 行日志（stdlib `logging` + 自写 formatter，**没引 structlog** —— 三十行能解决的事不值得加一个依赖）。关联 ID 走 `ContextVar`，`request_id` 由中间件写入，`tenant_id` / `project_id` / `event_id` 留给后续 Phase 在拿到它们的地方 `bind_log_context()` 补上（§94 点名的四个字段）
+- **脱敏做成格式化时的过滤，不是调用点的自觉**：按字段名部分匹配（`password` / `secret` / `token` / `authorization` / `totp` / `signature` / `prompt` / `completion` 等），递归进嵌套 dict 与 list。⚠️ 这是**兜底**，不是防线 —— 兜不住换了名字的字段，更兜不住塞进 message 的自由文本。首要防线仍是「根本不把 payload 交给 logger」，已写进模块顶部
+- `configure_logging()` 接管 `uvicorn` / `uvicorn.error` / `uvicorn.access` 三个 logger。它们自带 handler 且 `propagate=False`，不接管的话生产日志会一半 JSON 一半纯文本 —— **那等于没有结构化日志**
+- `app/schemas/envelope.py`：§107 的 `{success, data, error, request_id}`。成功时 `error` 为 null、失败时 `data` 为 null，客户端只看 `success` 一个字段就能分支
+- `app/core/errors.py`：`AppError` 基类（`code` + `http_status`，后续领域异常从这里派生）+ 四个处理器 —— `AppError` / 框架 `HTTPException` / 请求校验失败 / **未处理异常**。未处理异常一律返回固定文案 `INTERNAL_ERROR`，栈只进日志
+- `app/core/middleware.py`：`RequestContextMiddleware`。每个请求从**空**上下文开始，分配或复用 `X-Request-ID`，记一条完成日志（方法、路径、状态码、耗时）
+- `/healthz` 改为走同一个信封。给健康检查开形状例外，就得在每个客户端里维护「这个端点不一样」，而一致的代价在这里是零
+
+**偏离了什么**
+
+- **入站 `X-Request-ID` 接受但严格校验**（`^[A-Za-z0-9._-]{1,64}$`，不合规就自己生成）。接受它是为了让计费平台与 Integrated Application Backend 两侧日志能对上同一次调用；校验是因为它**会进日志也会回响应头** —— 换行能伪造日志行，超长值能撑爆日志
+- **请求日志不记 query string、不记请求体**。query 里可能有密钥，而按字段名脱敏对一整串原始文本无能为力
+- **§94 的生产日志要求（轮转、保留期、磁盘上限、安全删除、异地留存、磁盘告警）不在本任务**：那是部署侧的事，已移进 T0.9 的任务描述。T0.3 只管日志的**内容与格式**
+- 校验失败只回字段名、不回收到的值：请求体里可能有密钥
+
+**验证到什么程度**
+
+- `pytest` **27 passed**（T0.1 的 2 条 + 本任务新增 25 条），其中写死的是这几条边界：
+  - 未处理异常的响应里**不出现**异常原文（用例故意抛一个带 `postgres://user:hunter2@...` 的异常，断言响应里既无 `hunter2` 也无 `postgres` 也无 `Traceback`）
+  - 框架 404 与领域异常走**同一个信封形状**
+  - 校验失败不回显收到的值
+  - 敌意 `X-Request-ID`（空格 / 换行 / 65 字符 / 分号 / 空串）一律被换成自己生成的 uuid4
+  - 脱敏递归进嵌套结构；自引用结构不会栈溢出
+  - 两次请求拿到不同 id（上下文没串）
+- **测试抓到一个真 bug**：未处理异常的响应由最外层 `ServerErrorMiddleware` 产出，**绕过** `RequestContextMiddleware`，`X-Request-ID` 响应头根本没设上 —— 而 500 恰恰最需要客户端报得出 id。改成在信封生成处设头
+- [WORKFLOW §7](WORKFLOW.md) 六项本地全过；打包冒烟在干净 venv 通过
+- **未验证**：真实 uvicorn 进程下的日志输出（测试里是 TestClient，走不到 uvicorn 的 logger 接管路径）。等 T0.6 起容器时看
 
 ---
 

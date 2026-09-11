@@ -8,9 +8,9 @@
 ## 现在在哪
 
 **Phase 0 进行中。** §123 的 13 项已拆成 T0.1–T0.10（拆法与依赖见 [TODO.md](TODO.md) 的 Phase 0 一节），
-**T0.1（后端骨架与配置）与 T0.2（CI 后端 job）已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、
-`app/core/config.py`、`pyproject.toml`、`.env.example`、`tests/backend/` 冒烟测试，以及 CI 的 `backend` job
-（lint + 格式 + pytest + 打包冒烟）。
+**T0.1–T0.3 已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`、
+`.env.example`、`tests/backend/`；CI 的 `backend` job（lint + 格式 + pytest + 打包冒烟）；结构化 JSON 日志 +
+关联 ID + 脱敏 + §107 统一错误信封 + `AppError` 领域异常基类。
 
 数据库、Celery、Docker、前端、认证**都还没有**。
 
@@ -23,11 +23,11 @@
 - **双 agent 流程与闸门已落地并经受住实战**：设计闸门 + 实现闸门、`codex-review.ps1` 取材与准入、`check_repo_policy.py` 策略检查、`gh_verified_write.py` 写后回读
 - **CI 五项**（`docs` / `scripts` / `policy` / `backend` / `secret-scan`）全部已进 `main` 的必需检查（`backend` 于 2026-09-11 T0.2 合并后追加）。分支保护其余项：禁 force push、禁直推、禁删除、线性历史、分支必须最新、`enforce_admins`、对话必须解决
 
-未完成：数据库 schema、T0.3 之后的全部 Phase 0 任务。
+未完成：数据库 schema、T0.4 之后的全部 Phase 0 任务。
 
 ## 下一步
 
-**接着做 T0.3（日志与统一错误处理）**，再按 T0.4 / T0.5 往下走。清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
+**接着做 T0.4（MySQL + SQLAlchemy + Alembic 接通）**，再按 T0.5 / T0.6 往下走。清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
 **每个 T0.x 一个 PR**，从 `main` 开分支，不要开 stacked PR（[WORKFLOW.md](WORKFLOW.md) §5）。
 
 D1–D7 里剩下的未决项**全部落在 Phase 1 及以后**，没有一项挡住 Phase 0：
