@@ -35,7 +35,7 @@
                               ↓
                         Draft PR
                               ↓
-              确定性 CI：docs / secret-scan（+ 将来的 backend）
+              确定性 CI：docs / scripts / policy / backend / secret-scan
                               ↓
         ┌───────────── 闸门 B：实现
         │   Codex 冷读 diff → VERDICT: APPROVE / REQUEST_CHANGES
@@ -91,7 +91,7 @@
    - 模板里的 `设计闸门：#N` 一行是**机器可读**的：`codex-review.ps1` 靠它把设计文档
      与批准记录一并取进审查材料。不走闸门的改动写「不适用」；触及钱包 / 账本 / 定价 /
      汇率 / 支付 / 幂等 / 状态机却写「不适用」的，审查时会被判为阻断项
-5. **审查准入**：CI 三项（`docs` / `scripts` / `policy`）与 `secret-scan` 全绿，且 PR 正文过
+5. **审查准入**：CI 五项（`docs` / `scripts` / `policy` / `backend` / `secret-scan`）全绿，且 PR 正文过
    `scripts/check_repo_policy.py`（模板小节齐全、`设计闸门：` 一行、`TODO 影响` 声明）。
    `codex-review.ps1` 会先查这两样，**不满足就不调 Codex**——配额不花在注定被打回的材料上
 6. 跑 `scripts\codex-review.ps1 -Pr <N> -Post`
@@ -186,14 +186,29 @@ reviewed-head: <上轮审查评论里那个 40 位 SHA>
 python scripts/check_docs.py
 python scripts/check_repo_policy.py
 python -m unittest discover -s tests
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest
 ```
 
-三项分别管：链接与 `§N` 引用 + 约定串一致性 / 任务复选框与 PR 字段 / 策略脚本与回读脚本自身的回归。
+六项分别管：链接与 `§N` 引用 + 约定串一致性 / 任务复选框与 PR 字段 / 策略脚本与回读脚本自身的回归 / 后端 lint / 后端格式 / 后端测试。
 PowerShell 侧另有 `pwsh -NoProfile -File scripts/tests/Test-ReviewVerdict.ps1`（CI 的 `scripts` 项跑它）。
 
-**这里是命令清单的唯一出处。**`CLAUDE.md`、`README.md`、PR 模板的自检行只链接到这里，不再各抄一份——加 lint、加 pytest 时只改这里。
+`unittest discover -s tests` 与 `pytest` **跑的是两套不相交的测试**：前者是流程脚本（`tests/test_*.py`）的回归，后者是后端产品代码（`tests/backend/`）的测试。`tests/backend/` 故意不放 `__init__.py`，unittest 的 discover 才不会递归进去——**不要给它加**，加了两套就会互相收集。
 
-Phase 0 建好 `app/` 与 `tests/` 之后，这里会补上 lint 与 pytest。**跑不过就不许 push**——让 CI 替你发现本地能发现的问题是浪费一轮。
+改了打包配置（`pyproject.toml` 的依赖、`[tool.setuptools]`）还要再跑一次打包冒烟：
+
+```bash
+python -m venv /tmp/pkgcheck
+/tmp/pkgcheck/bin/python -m pip install .
+/tmp/pkgcheck/bin/python scripts/packaging_smoke.py
+```
+
+`pytest` 走 `pythonpath = ["."]`，跑的是**源码树**，结构上发现不了 wheel 少打子包这类缺陷（PR #22 上真发生过）。这一条 CI 的 `backend` 项每次都跑，本地只在动打包配置时需要手跑。
+
+**这里是命令清单的唯一出处。**`CLAUDE.md`、`README.md`、PR 模板的自检行只链接到这里，不再各抄一份。
+
+**跑不过就不许 push**——让 CI 替你发现本地能发现的问题是浪费一轮。
 
 ## 8. 怎么跑审查
 

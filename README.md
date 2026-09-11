@@ -33,7 +33,7 @@ uvicorn app.main:app --reload                    # http://127.0.0.1:8000/healthz
 
 命令清单只在 [docs/WORKFLOW.md §7](docs/WORKFLOW.md) 一处，这里不重复。
 
-CI 跑四项：`docs` / `scripts` / `policy` / `secret-scan`，四项都是 `main` 的必需检查。
+CI 跑五项：`docs` / `scripts` / `policy` / `backend` / `secret-scan`，都是 `main` 的必需检查。
 
 ## 开发流程
 

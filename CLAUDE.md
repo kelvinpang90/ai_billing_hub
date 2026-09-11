@@ -19,7 +19,7 @@
 - **发到 GitHub 的写操作走 `python scripts/gh_verified_write.py`**（评论、PR 正文），写完回读比对；工具报成功不算，回读一致才算。回读失败不得自动重发
 - **约定不够用时不要自己发明**（`[~]` 这种）。没做完就是 `[ ]`，剩什么写正文；复选框只允许 `[ ]` / `[x]`，CI 会查
 - 争论拍板后的结论写进 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，避免同一个问题吵第二次
-- `main` 已配分支保护：禁 force push、禁直推、必需检查 `docs` + `scripts` + `policy` + `secret-scan`、分支必须最新
+- `main` 已配分支保护：禁 force push、禁直推、必需检查 `docs` + `scripts` + `policy` + `backend` + `secret-scan`、分支必须最新
 
 ⚠️ **仓库是公开的**：绝不提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。
 
