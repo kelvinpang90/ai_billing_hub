@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acuven-billing-hub"
+version = "0.1.0"
+description = "Acuven Central AI Billing Platform — central metering, prepaid MYR wallet and immutable financial ledger"
+requires-python = ">=3.12"
+dependencies = [
+    # floor 不能再往下放：dev extra 里的 TestClient 依赖是 httpx2，而 httpx2 是
+    # 较新的 starlette 才用的。放低 fastapi 的下界，解析器就可能挑到一个仍要
+    # 旧 httpx 的 starlette，干净环境里 pytest 会在导入 TestClient 时挂掉。
+    # 这两个下界是一对，改一个要复验另一个。
+    "fastapi>=0.141",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "uvicorn[standard]>=0.32",
+]
+
+# SQLAlchemy / Alembic / Celery / redis 等依赖在接通它们的那个任务里加，
+# 现在不预先声明用不上的包。
+[project.optional-dependencies]
+dev = [
+    # TestClient 的 HTTP 传输。starlette 已弃用旧 httpx，装 httpx 会在每次跑
+    # 测试时刷弃用警告；实测干净环境里**没有** httpx 模块，pytest 照样通过。
+    # 与上面 fastapi 的下界绑定，见那里的注释。
+    "httpx2>=2.12",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+# 必须用自动发现：显式写 packages = ["app"] 只会把根包打进 wheel，
+# app.api / app.core 等子包全部丢失，装完 `uvicorn app.main:app` 直接起不来。
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# scripts/ 与 tests/test_*.py 是早于 ruff 的流程工具代码，把它们一并纳入会让
+# T0.1 变成一次大范围格式化。纳入是单独的清理任务，已记进 docs/TODO.md。
+# `*.md` 必须排除：ruff 会格式化 Markdown 里的 Python 代码块，而 spec 里那些
+# 代码块是**规格原文**，被工具改写等于静默改需求。
+extend-exclude = ["scripts", "tests/test_*.py", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+# 只跑后端测试。tests/ 顶层那两个文件是流程脚本自己的 unittest 回归，
+# 由 WORKFLOW §7 的 `python -m unittest discover -s tests` 跑，两套互不干扰。
+testpaths = ["tests/backend"]
+pythonpath = ["."]
