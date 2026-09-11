@@ -122,7 +122,7 @@
 
 **偏离了什么**
 
-- **分支保护里把 `backend` 设为必需检查这一步没做在 PR 里** —— 分支保护是仓库设置，PR 改不了，而且 `backend` job 要先随本 PR 合进 `main` 才存在。合并后单独执行，做法照 T0.1 之前加 `policy` 的先例：读回现有四项，**追加**而不是覆盖，其余设置逐项回读确认未变动
+- **分支保护里把 `backend` 设为必需检查这一步没做在 PR 里** —— 分支保护是仓库设置，PR 改不了，而且 `backend` job 要先随 PR #24 合进 `main` 才存在。**2026-09-11 已在 #24 合并后补做**（见下方补记）
 - 打包冒烟没做成 `pytest` 用例：它要一个独立 venv 和一次 `pip install`，塞进单元测试会让本地跑测试从秒级变成分钟级。放 CI 每次跑、本地按需跑，是更合适的位置
 - `scripts/packaging_smoke.py` **不在 ruff 覆盖范围内**（`pyproject.toml` 排除了 `scripts`）。与 T0.1 留下的待清理项同源，等那条清理时一并纳入
 
@@ -131,7 +131,15 @@
 - 打包冒烟脚本**正反两面都跑过**：干净 venv `pip install .` → exit 0（`site-packages/app serves /healthz`）；指向源码树的 editable 安装 → exit 1 并打印拒绝理由。**只验通过路径不算数**——一个永远返回 0 的检查和没有检查一样
 - [WORKFLOW §7](WORKFLOW.md) 六项本地全过：`check_docs` 8 条约定串、`check_repo_policy`、`unittest discover -s tests` 61 passed、`ruff check` / `ruff format --check`、`pytest` 2 passed
 - `pwsh scripts/tests/Test-ReviewVerdict.ps1` 96 通过
-- **未验证**：`backend` job 在 GitHub Runner 上的实际行为（Linux + Python 3.12），要等 PR 的 CI 跑完才算数 —— 本地是 Windows + Python 3.14
+- ~~**未验证**：`backend` job 在 GitHub Runner 上的实际行为~~ → PR #24 的 CI 已跑：`backend` 通过，25s（Linux + Python 3.12；本地是 Windows + Python 3.14）
+
+**合并后补记（2026-09-11）**
+
+PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `main` 的必需状态检查。
+
+- 走 `POST .../protection/required_status_checks/contexts` 这个**纯追加**端点，而不是 PUT 整份 protection —— 后者要重发全部字段，漏一个就是静默降级
+- 回读：必需检查现为 `backend` / `docs` / `policy` / `scripts` / `secret-scan`
+- 其余设置逐项回读确认未变动：`strict` 真、`enforce_admins` 真、线性历史 真、禁 force push、禁删除、对话必须解决 真、`dismiss_stale_reviews` 真、`required_approving_review_count` 0
 
 ---
 
