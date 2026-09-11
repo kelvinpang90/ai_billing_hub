@@ -7,9 +7,11 @@
 
 ## 现在在哪
 
-**Phase 0 之前。项目仍然一行产品代码都没有**——`main` 上只有 `.github/` `docs/` `scripts/` `tests/` 和两个 agent 指令文件，没有 `app/`。
+**Phase 0 进行中。** §123 的 13 项已拆成 T0.1–T0.10（拆法与依赖见 [TODO.md](TODO.md) 的 Phase 0 一节），
+**T0.1（后端骨架与配置）已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、
+`pyproject.toml`、`.env.example`、`tests/backend/` 冒烟测试。
 
-但**前置工作基本做完了**，Phase 0 现在**没有任何阻塞**。
+数据库、Celery、Docker、前端、认证**都还没有**。
 
 已完成：
 
@@ -20,24 +22,25 @@
 - **双 agent 流程与闸门已落地并经受住实战**：设计闸门 + 实现闸门、`codex-review.ps1` 取材与准入、`check_repo_policy.py` 策略检查、`gh_verified_write.py` 写后回读
 - **CI 四项**（`docs` / `scripts` / `policy` / `secret-scan`）全部已进 `main` 的必需检查；分支保护：禁 force push、禁直推、线性历史、分支必须最新
 
-未完成：数据库 schema、任何代码。
+未完成：数据库 schema、T0.2 之后的全部 Phase 0 任务。
 
 ## 下一步
 
-**开 Phase 0。** D1–D7 里剩下的未决项**全部落在 Phase 1 及以后**，没有一项挡住 Phase 0：
+**接着做 T0.2（CI 后端 job）**，再按 T0.3 / T0.4 往下走。清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
+**每个 T0.x 一个 PR**，从 `main` 开分支，不要开 stacked PR（[WORKFLOW.md](WORKFLOW.md) §5）。
+
+D1–D7 里剩下的未决项**全部落在 Phase 1 及以后**，没有一项挡住 Phase 0：
 
 | Phase 0 要做的 | 依赖任何未决项吗 |
 | --- | --- |
-| 仓库骨架（`app/` `tests/` Alembic `.env.example` `README.md`） | 否 |
-| Docker Compose、FastAPI 分层、React 脚手架 | 否 |
+| 后端骨架、CI job、日志与错误处理 | 否 |
+| Docker Compose、React 脚手架 | 否 |
 | MySQL + Redis + Celery 接通 | 否（D3 已收口：专用实例） |
-| 认证基座、日志与统一错误处理 | 否 |
+| 认证基座 | 否 |
 | 专用生产数据库拓扑 | 否（ADR-0002） |
 | 备份 / 恢复 / 密钥方案设计 | 部分（D4 主体已定，未决的是出站 webhook 密钥 schema，那是 Phase 1 的事） |
 
 spec §137 的起步指令：**不要先写前端页面**，先立域模型与财务不变量。第一个里程碑是 Phase 0 + Phase 1。
-
-⚠️ Phase 0 是 13 项的大块，**拆成能独立提 PR 的小任务再动手**，不要堆一个巨型 PR（一个 PR 一个任务，见 [WORKFLOW.md](WORKFLOW.md) §5）。
 
 ## 未决问题
 
@@ -78,4 +81,13 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
 
 ## 代码目录说明
 
-`app/` 与 `tests/` 里的产品代码**尚未创建**（`tests/` 目前只放流程脚本自己的回归测试）。Phase 0 启动时按 [ARCHITECTURE.md](ARCHITECTURE.md) 第 9 节创建。
+`app/` 已按 [ARCHITECTURE.md](ARCHITECTURE.md) 第 9 节建好七层包（T0.1），里面目前只有应用工厂、配置与 `/healthz`。
+
+`tests/` 下有两套测试，**跑法不同、互不收集**：
+
+| 目录 | 内容 | 怎么跑 |
+| --- | --- | --- |
+| `tests/backend/` | 后端产品代码的测试 | `python -m pytest` |
+| `tests/test_*.py` | 流程脚本（策略检查、写后回读）自己的回归 | `python -m unittest discover -s tests` |
+
+`tests/backend/` 没有 `__init__.py`，所以 unittest 的 discover 不会递归进去——**不要给它加 `__init__.py`**，加了两套测试就会互相收集。
