@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import io
+import logging
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from app.core.errors import AppError, register_error_handlers
+from app.core.logging import REDACTED, JsonFormatter
 from app.core.middleware import REQUEST_ID_HEADER, RequestContextMiddleware
 
 
@@ -40,6 +44,29 @@ def client() -> TestClient:
         return {"ok": True}
 
     return TestClient(app, raise_server_exceptions=False)
+
+
+def test_unexpected_error_log_is_scrubbed_too(client: TestClient) -> None:
+    """响应守住了不等于日志守住了 —— 两条路径都要验。
+
+    日志里的凭据比响应里的更危险：它会被永久留存、被转发到集中日志平台，
+    而且没人会盯着它看。
+    """
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        client.get("/boom")
+    finally:
+        root.removeHandler(handler)
+
+    logged = stream.getvalue()
+    assert "hunter2" not in logged
+    assert REDACTED in logged
+    # 栈帧仍在，否则脱敏的代价是排不了障。
+    assert "Traceback" in logged
 
 
 def test_unexpected_error_never_leaks_internals(client: TestClient) -> None:

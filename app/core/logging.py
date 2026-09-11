@@ -8,10 +8,22 @@
    `bind_log_context()` 补上。
 3. **脱敏是过滤器，不是调用点的自觉。**
 
+脱敏覆盖**三条**进入日志的路径，缺一条就等于没做：
+
+- `extra=` 传进来的结构化字段 —— 按字段名递归脱敏
+- 日志 message 本身 —— 按文本模式脱敏（`key=value`、带凭据的 URL）
+- **异常栈** —— 同样按文本模式脱敏。这条最容易漏：`logger.exception()` 会把
+  异常消息原样写进日志，而异常消息最常见的写法就是把触发它的那个值带上
+  （连接串、密钥、请求体片段）。栈帧本身（文件、行号、函数、源码行）来自我们
+  自己的代码，不含运行时数据，照记。
+
 ⚠️ §94 的「绝不记录」清单（密码、TOTP 密钥、API 明文密钥、支付密钥、客户的
-AI prompt / response）**首要防线是根本不把它们交给 logger**。下面的过滤器按
-字段名兜底，兜不住换了名字的字段，更兜不住塞进 message 里的自由文本。
-**不要把请求体、响应体、异常里的原始 payload 直接写进日志。**
+AI prompt / response）**首要防线是根本不把它们交给 logger**。这里的脱敏是
+**兜底，不是防线**：按字段名兜不住换了名字的字段，按文本模式兜不住没有
+`key=value` 形状的自由文本。两条硬规矩：
+
+1. **不要把请求体、响应体、原始 payload 写进日志。**
+2. **不要把密钥、token、prompt 拼进异常消息** —— 异常消息会进日志。
 """
 
 from __future__ import annotations
@@ -19,6 +31,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import sys
 from contextvars import ContextVar
 from typing import Any
@@ -44,6 +57,21 @@ _SENSITIVE_KEY_PARTS = (
 )
 
 REDACTED = "***REDACTED***"
+
+# 自由文本（日志 message、异常栈）里的脱敏模式。结构化字段那条路径按字段名走，
+# 这条只能按形状认。
+#
+# 1) 带凭据的 URL：postgres://user:hunter2@host/db —— 连接串出现在异常消息里
+#    是最常见的一种泄漏。
+_URL_CREDENTIALS = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://[^\s:/@]+:)([^\s@/]+)(@)")
+# 2) key=value / key: value / "key": "value" —— f-string 调试消息与 dict repr
+#    落进异常消息时的形状。
+#    值那一组里 `Bearer xxx` 这个分支不能省：`Authorization: Bearer abc.def`
+#    如果按「取到空格为止」，redact 掉的是 `Bearer`，token 原样留在后面。
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)((?:" + "|".join(_SENSITIVE_KEY_PARTS) + r")[\w.\-]*[\"']?\s*[=:]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|(?:bearer|basic|token|digest)\s+\S+|[^\s,;)\]}]+)"
+)
 
 # LogRecord 自带的属性。要挑出调用方通过 extra= 传进来的字段，只能靠排除法。
 _RESERVED_RECORD_ATTRS = frozenset(
@@ -97,6 +125,19 @@ def redact(value: Any, _depth: int = 0) -> Any:
     return value
 
 
+def scrub_text(text: str) -> str:
+    """Redact secret-shaped fragments in free text (log messages, tracebacks).
+
+    只能按形状认，认不出没有 `key=value` 形状的自由文本 —— 见模块顶部那两条
+    硬规矩。它的作用是把最常见的几种泄漏形状挡掉，不是许可把敏感值往消息里放。
+
+    用 lambda 而不是 `\\1` 模板串：反向引用模板经过任何一层转义就会**静默失效**，
+    变成「脱敏跑了但什么都没换掉」。lambda 没有这个失效模式。
+    """
+    text = _URL_CREDENTIALS.sub(lambda m: f"{m[1]}{REDACTED}{m[3]}", text)
+    return _SENSITIVE_ASSIGNMENT.sub(lambda m: f"{m[1]}{REDACTED}", text)
+
+
 class JsonFormatter(logging.Formatter):
     """Render one JSON object per line."""
 
@@ -105,7 +146,7 @@ class JsonFormatter(logging.Formatter):
             "timestamp": dt.datetime.fromtimestamp(record.created, dt.UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": scrub_text(record.getMessage()),
         }
         payload.update(redact(get_log_context()))
         extras = {
@@ -113,8 +154,10 @@ class JsonFormatter(logging.Formatter):
         }
         payload.update(redact(extras))
         if record.exc_info:
-            # 栈只进日志，绝不进 HTTP 响应（§107）。
-            payload["exception"] = self.formatException(record.exc_info)
+            # 栈只进日志，绝不进 HTTP 响应（§107）—— 但**进日志也要过脱敏**。
+            # 异常消息是自由文本里最容易夹带密钥的一处：抛错的人往往把触发它的
+            # 那个值一起写进消息。漏掉这条，等于结构化字段守住了、栈这条路敞着。
+            payload["exception"] = scrub_text(self.formatException(record.exc_info))
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 

@@ -146,7 +146,11 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 **做了什么**
 
 - `app/core/logging.py`：JSON 行日志（stdlib `logging` + 自写 formatter，**没引 structlog** —— 三十行能解决的事不值得加一个依赖）。关联 ID 走 `ContextVar`，`request_id` 由中间件写入，`tenant_id` / `project_id` / `event_id` 留给后续 Phase 在拿到它们的地方 `bind_log_context()` 补上（§94 点名的四个字段）
-- **脱敏做成格式化时的过滤，不是调用点的自觉**：按字段名部分匹配（`password` / `secret` / `token` / `authorization` / `totp` / `signature` / `prompt` / `completion` 等），递归进嵌套 dict 与 list。⚠️ 这是**兜底**，不是防线 —— 兜不住换了名字的字段，更兜不住塞进 message 的自由文本。首要防线仍是「根本不把 payload 交给 logger」，已写进模块顶部
+- **脱敏做成格式化时的过滤，不是调用点的自觉**，且覆盖**三条**进入日志的路径（缺一条就等于没做）：
+  1. `extra=` 的结构化字段 —— 按字段名递归脱敏（`password` / `secret` / `token` / `authorization` / `totp` / `signature` / `prompt` / `completion` 等）
+  2. 日志 message 本身 —— 按文本形状脱敏
+  3. **异常栈** —— 同样按文本形状脱敏。**初版漏了这条**（PR #26 审查指出）：`logger.exception()` 把异常消息原样写进日志，而抛错的人最常见的写法就是把触发它的那个值一起写进消息。结构化字段守住了、这条路敞着，等于没守
+  ⚠️ 这是**兜底**，不是防线 —— 按字段名兜不住换了名字的字段，按文本形状兜不住没有 `key=value` 形状的自由文本。模块顶部写死了两条硬规矩：不把 payload 交给 logger、不把密钥拼进异常消息
 - `configure_logging()` 接管 `uvicorn` / `uvicorn.error` / `uvicorn.access` 三个 logger。它们自带 handler 且 `propagate=False`，不接管的话生产日志会一半 JSON 一半纯文本 —— **那等于没有结构化日志**
 - `app/schemas/envelope.py`：§107 的 `{success, data, error, request_id}`。成功时 `error` 为 null、失败时 `data` 为 null，客户端只看 `success` 一个字段就能分支
 - `app/core/errors.py`：`AppError` 基类（`code` + `http_status`，后续领域异常从这里派生）+ 四个处理器 —— `AppError` / 框架 `HTTPException` / 请求校验失败 / **未处理异常**。未处理异常一律返回固定文案 `INTERNAL_ERROR`，栈只进日志
@@ -162,14 +166,28 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 
 **验证到什么程度**
 
-- `pytest` **27 passed**（T0.1 的 2 条 + 本任务新增 25 条），其中写死的是这几条边界：
+- `pytest` **35 passed**（T0.1 的 2 条 + 本任务新增 33 条），其中写死的是这几条边界：
+  - **异常栈进日志前过脱敏**：用例抛一个消息里带 `postgres://svc:hunter2@db-01/billing` 的异常，断言日志输出里无 `hunter2`、有 `***REDACTED***`、**且仍有 `Traceback`**（脱敏不能把排障信息一起吃掉）
+  - 响应守住不等于日志守住 —— 两条路径分别验。日志里的凭据比响应里的更危险：会被永久留存、会转发到集中日志平台，而且没人盯着看
   - 未处理异常的响应里**不出现**异常原文（用例故意抛一个带 `postgres://user:hunter2@...` 的异常，断言响应里既无 `hunter2` 也无 `postgres` 也无 `Traceback`）
   - 框架 404 与领域异常走**同一个信封形状**
   - 校验失败不回显收到的值
   - 敌意 `X-Request-ID`（空格 / 换行 / 65 字符 / 分号 / 空串）一律被换成自己生成的 uuid4
   - 脱敏递归进嵌套结构；自引用结构不会栈溢出
   - 两次请求拿到不同 id（上下文没串）
-- **测试抓到一个真 bug**：未处理异常的响应由最外层 `ServerErrorMiddleware` 产出，**绕过** `RequestContextMiddleware`，`X-Request-ID` 响应头根本没设上 —— 而 500 恰恰最需要客户端报得出 id。改成在信封生成处设头
+- **测试抓到三个真 bug**：
+  1. 未处理异常的响应由最外层 `ServerErrorMiddleware` 产出，**绕过** `RequestContextMiddleware`，`X-Request-ID` 响应头根本没设上 —— 而 500 恰恰最需要客户端报得出 id。改成在信封生成处设头
+  2. 异常栈没过脱敏（PR #26 审查指出）—— 见上
+  3. `Authorization: Bearer abc.def` 只 redact 掉 `Bearer`，token 原样留在后面（值匹配「取到空格为止」）。值那一组补了 `Bearer|Basic|Token|Digest` 分支
+
+**教训：含反斜杠的内容不要经 shell heredoc**
+
+写那两条正则时走了 `python - <<'PY'` 的 heredoc，`\1` 和 `\b` 在普通 Python 字符串里是**八进制转义与退格符**，落盘成了不可见的 `\x01` / `\x03` / `\x08`。后果不是报错，是 **`\x08` 藏在正则里让它永不匹配** —— 脱敏照跑、什么都没换掉，而且 `Edit` 工具按可见文本也匹配不上那几行。
+
+这正是 [REVIEW-LOG](REVIEW-LOG.md)「跨层假设」那条记过的坑（原文：**含正则 / 转义 / 反斜杠的内容只走 Write / Edit 工具，不进 shell**），我没照做。两个派生做法已落进代码：
+
+- 替换用 `lambda` 而不是 `\1` 模板串 —— 反向引用模板经过任何一层转义都会**静默失效**，lambda 没有这个失效模式
+- 脱敏测试断言的是「`hunter2` 不在输出里**且** `***REDACTED***` 在输出里」。只断言前者的话，一个永不匹配的正则也能通过
 - [WORKFLOW §7](WORKFLOW.md) 六项本地全过；打包冒烟在干净 venv 通过
 - **未验证**：真实 uvicorn 进程下的日志输出（测试里是 TestClient，走不到 uvicorn 的 logger 接管路径）。等 T0.6 起容器时看
 
