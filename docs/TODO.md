@@ -67,7 +67,7 @@
 - [x] **T0.1 — 后端骨架与配置**：`app/` 七层目录（`api` / `core` / `models` / `schemas` / `repositories` / `services` / `tasks`）、`app/main.py` 应用工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`（依赖 + ruff + pytest）、`.env.example`、`tests/backend/` 与首个冒烟测试
 - [x] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查。**另加打包冒烟**：装进干净 venv 后 `import app.main` 并起一次 `/healthz` —— `pytest` 跑的是源码树（`pythonpath = ["."]`），发现不了 wheel 少打子包这类问题（PR #22 审查实证）
 - [x] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
-- [ ] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
+- [x] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
 - [ ] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
 - [ ] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
 - [ ] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）
@@ -191,7 +191,44 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 - 替换用 `lambda` 而不是 `\1` 模板串 —— 反向引用模板经过任何一层转义都会**静默失效**，lambda 没有这个失效模式
 - 脱敏测试断言的是「`hunter2` 不在输出里**且** `***REDACTED***` 在输出里」。只断言前者的话，一个永不匹配的正则也能通过
 - [WORKFLOW §7](WORKFLOW.md) 六项本地全过；打包冒烟在干净 venv 通过
-- **未验证**：真实 uvicorn 进程下的日志输出（测试里是 TestClient，走不到 uvicorn 的 logger 接管路径）。等 T0.6 起容器时看
+- **未验证**：真实 uvicorn 进程下的日志输出（测试里是 TestClient，走不到 uvicorn 的 logger 接管路径）。等 T0.6 起容器时看。⚠️ T0.4 的打包冒烟在**独立进程**里跑时已经打出了合格的 JSON 行（`{"timestamp": ..., "level": "WARNING", "logger": "app.main", ...}`），所以「formatter 在真实进程里生效」这半条已验；剩下未验的只是 uvicorn 自己那三个 logger 的接管
+
+### T0.4 任务记录（2026-09-12）
+
+**做了什么**
+
+- `app/models/base.py`：`Base` + **`Money` 注解类型**（`Numeric(20, 8)`，spec §80）+ `quantize_money()`。
+  金额列一律用 `Money` 声明，不要每张表各写一遍 `Numeric(...)` —— 写散了就会有人写成 `Numeric(10, 2)`，**而那时候没有任何东西会报错**。`quantize_money()` 是 §80 那「恰好一次 `ROUND_HALF_UP`」的唯一实现：散在各处的话，迟早有一处漏写 `rounding=` 而落回 Python 默认的 `ROUND_HALF_EVEN`，差异只在 `.5` 那类值上出现，对账时才发现
+- `app/core/database.py`：engine（`pool_pre_ping` + `pool_recycle=1800`）、`session_factory`、`session_scope()`、`check_database()`。
+  **同步 SQLAlchemy，不是 async**：Celery worker 是同步的，两边共用一套仓储代码才不会写两遍；钱包变更要 `SELECT ... FOR UPDATE`（§81），同步写法里事务边界一眼看得出来。FastAPI 会把同步依赖丢进线程池
+- `/readyz`（新）与 `/healthz`（既有）**分开**：存活探针刻意不依赖外部组件——MySQL 挂掉时它仍须应答，否则编排器会在数据库恢复期间反复重启容器，把一次可恢复的故障变成滚动重启；就绪探针才查依赖，不通返回 503
+- **没配数据库不让进程崩**：`create_app()` 捕获 `DatabaseNotConfigured`，记一条 warning 后照常起。一个配置笔误不该让容器进重启循环，而日志里只有一行没人看得见的堆栈
+- Alembic：`alembic.ini` + `alembic/env.py` + 基线迁移。连接串**不在 `alembic.ini` 里**，`env.py` 从 `app.core.config` 读；`compare_type=True`（列类型变更默认不被 autogenerate 检测，对一个金额必须是 `DECIMAL(20,8)` 的系统来说那正是最不能漏的一类）
+- CI 的 `backend` job 加 MySQL service，并**显式把「有任何 skipped」判成失败**
+
+**偏离了什么**
+
+- **基线迁移故意不建任何表**。它的作用是让 `alembic upgrade head` 在空库上真的跑起来、建出 `alembic_version`，把 §123 验收里的「DB migrations execute」在 Phase 0 就验掉。业务表从 Phase 1 开始
+- **驱动选 `pymysql` 而不是 `mysqlclient`**：后者要编译、镜像里得带编译链。计费的瓶颈在 IO 与锁，不在驱动的解析速度
+- **连接池大小没做成配置项**：`pool_pre_ping` 与 `pool_recycle` 是 MySQL 必需的（默认 8 小时掐空闲连接），先硬编码；池大小要等 T0.10 有了并发基线才知道该设多少，现在开个旋钮只是猜
+- **`alembic/` 不在 wheel 里**（`packages.find` 只含 `app*`）。迁移是从镜像里的源码树跑的，不是从安装包跑的 —— T0.6 建镜像时要记得把 `alembic/` 与 `alembic.ini` 一起 COPY 进去
+- `Decimal` 的**跨进程一致性**（MySQL 端 `DECIMAL(20,8)` 与 Python `Decimal` 的往返）没有端到端用例，因为还没有任何表。Phase 1 建钱包表时必须补一条「写进去再读出来，值与小数位都不变」
+
+**验证到什么程度**
+
+- **迁移对着真 MySQL 8.4 跑通**（本地 Docker 一次性容器）：`upgrade head` 建出 `alembic_version`；`downgrade base` → `upgrade head` 可逆。**能升不能降的迁移链，出事时只能靠恢复备份**
+- `pytest` **62 passed、0 skipped**（带 `BILLING_TEST_DATABASE_URL` 时）；不带时 60 passed **2 skipped**，跳的正是那两条迁移用例
+- 就绪探针三种状态都有用例：未配置 → `DATABASE_NOT_CONFIGURED`、连不上 → `DATABASE_UNAVAILABLE`、正常 → 200；**且断言连接目标不出现在响应里**（连接错误里带主机名、端口，有时还有用户名，§94 不许外泄）
+- 存活探针在数据库不通时仍返回 200，同一用例里断言 `/readyz` 同时是 503
+- `session_scope()` 的提交 / 回滚 / 关闭三条路径都有用例。**漏掉 `rollback()` 的连接会带着脏事务回到连接池，下一个请求拿到它才报错，现场已经没了**
+- `quantize_money()` 的 `.5` 边界与负数有用例，并显式断言它与 Python 默认的 `ROUND_HALF_EVEN` **结果不同**
+- [WORKFLOW §7](WORKFLOW.md) 六项本地全过；打包冒烟在干净 venv 通过
+
+**教训：第三方解析器读的配置文件要保持 ASCII**
+
+`alembic.ini` 初版写了中文注释。Alembic 用 `configparser` 读它，而 `configparser` 用**平台默认编码** —— Windows 上是 cp1252，直接 `UnicodeDecodeError`；Linux 的 CI runner 是 UTF-8，跑得好好的。**这个 bug 只在开发机上炸、CI 看不见**，是最难发现的那一类。
+
+已落成机械检查：`test_alembic_ini_is_ascii_only` 直接按 ASCII 解码那个文件，解不出来就失败。写文件时的判据是：**这个文件由谁解析？** 由 Python 解析的（`env.py`、迁移脚本）随便写中文；由第三方库按平台编码解析的，只写 ASCII，理由写到旁边的 `.py` 里去。
 
 ---
 

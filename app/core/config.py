@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
+    # 空串 = 未配置。默认值里**不许**出现任何真实主机名或凭据（仓库是公开的），
+    # 所以这里不能给一个「看起来能用」的默认连接串。未配置时 `/readyz` 会明确
+    # 报 DATABASE_NOT_CONFIGURED，而不是拿着假地址去连然后超时。
+    database_url: str = ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

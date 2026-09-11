@@ -218,6 +218,17 @@ python -m venv /tmp/pkgcheck
 
 `pytest` 走 `pythonpath = ["."]`，跑的是**源码树**，结构上发现不了 wheel 少打子包这类缺陷（PR #22 上真发生过）。这一条 CI 的 `backend` 项每次都跑，本地只在动打包配置时需要手跑。
 
+### 迁移测试要一个真 MySQL
+
+`tests/backend/test_migrations.py` 在 `BILLING_TEST_DATABASE_URL` 没设时会 **skip**。本地要跑它，起一个一次性库：
+
+```bash
+docker run -d --name ai-billing-hub-test-mysql   -e MYSQL_ROOT_PASSWORD=throwaway-local-only -e MYSQL_DATABASE=billing_test   -p 13307:3306 mysql:8.4
+BILLING_TEST_DATABASE_URL="mysql+pymysql://root:throwaway-local-only@127.0.0.1:13307/billing_test?charset=utf8mb4"   python -m pytest
+```
+
+⚠️ **不要把 skipped 读成 passed。**SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上跑通的迁移证明不了生产上跑得通。CI 的 `backend` job 起了 MySQL service，并且**显式把「有任何 skipped」判成失败** —— 少了那一步，MySQL 起不来时 pytest 照样绿。
+
 **这里是命令清单的唯一出处。**`CLAUDE.md`、`README.md`、PR 模板的自检行只链接到这里，不再各抄一份。
 
 **跑不过就不许 push**——让 CI 替你发现本地能发现的问题是浪费一轮。

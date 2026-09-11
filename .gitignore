@@ -8,6 +8,8 @@ venv/
 .ruff_cache/
 *.egg-info/
 build/
+# CI 的 backend job 把 pytest 输出落盘再检查有没有 skipped
+pytest-output.txt
 
 # Node
 node_modules/

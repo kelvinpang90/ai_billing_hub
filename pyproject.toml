@@ -16,10 +16,14 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    # 纯 Python 的 MySQL 驱动：mysqlclient 要编译、镜像里得带上编译链。
+    # 计费的瓶颈在 IO 与锁，不在驱动的解析速度。
+    "pymysql>=1.1",
 ]
 
-# SQLAlchemy / Alembic / Celery / redis 等依赖在接通它们的那个任务里加，
-# 现在不预先声明用不上的包。
+# Celery / redis 等依赖在接通它们的那个任务里加，现在不预先声明用不上的包。
 [project.optional-dependencies]
 dev = [
     # TestClient 的 HTTP 传输。starlette 已弃用旧 httpx，装 httpx 会在每次跑
