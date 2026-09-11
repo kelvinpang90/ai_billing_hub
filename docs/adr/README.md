@@ -11,7 +11,7 @@
 满足任一条就写：
 
 - 决策改变系统的财务、安全或数据边界
-- 决策与 [spec](../Acuven_Central_AI_Billing_Platform_Spec_v1.6.md) 的既有条款冲突（**偏离必须有 ADR**）
+- 决策与 [spec](../Acuven_Central_AI_Billing_Platform_Spec.md) 的既有条款冲突（**偏离必须有 ADR**）
 - 决策一旦落地，改回来的代价很高（表结构、加密方案、供应商绑定）
 - 两个方案都说得通，选了其中一个，理由值得留给后来者
 

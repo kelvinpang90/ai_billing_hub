@@ -53,7 +53,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 
 | 文件 | 作用 | 什么时候读 |
 | --- | --- | --- |
-| [docs/Acuven_Central_AI_Billing_Platform_Spec_v1.6.md](Acuven_Central_AI_Billing_Platform_Spec_v1.6.md) | 140 节完整规格。**所有冲突以它为准** | 需要精确定义时 |
+| [docs/Acuven_Central_AI_Billing_Platform_Spec.md](Acuven_Central_AI_Billing_Platform_Spec.md) | 140 节完整规格。**所有冲突以它为准** | 需要精确定义时 |
 
 ### C. spec 的导航层（不重复定义需求，只指路）
 
