@@ -62,7 +62,7 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
    → §101 视为**已被 [ARCHITECTURE.md](ARCHITECTURE.md) 第 9 节取代**，实现时不要回去照抄。
 
 2. **spec 文件名 vs 内容版本**
-   约定：spec 文件名跟随文档内 Revision History。现为 `..._Spec_v1.6.md`（2026-09-11 瘦身第二批，见 spec 的 Revision History）。
+   约定（2026-09-11 起）：spec 文件名**不带版本号**，固定为 `docs/Acuven_Central_AI_Billing_Platform_Spec.md`；版本只记在文档内的 Revision History。旧约定「文件名跟随版本」让每次改几行正文都要改名并同步 9 处引用，连做三次（v1.3 → v1.6）后取消。
    **章节号是稳定引用**，退役的章节留编号空洞、不重编号。
    ⚠️ 退役之后就**不能再用 `§` 写法引用它**——`check_docs.py` 会判为「unknown spec section」。要点名退役章节，写成「第 N 节」。
    `SPEC_REVIEW_v1.0.md` 与 `REVIEW_FOLLOWUP_v1.1.md` 的文件名**不跟随**——它们各自评审/核对的确实是 v1.0 与 v1.1，**不要改**。

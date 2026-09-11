@@ -439,7 +439,7 @@ $common = @"
 
 先读 scripts/review_checklist.md，那是本项目的审查清单。
 需要上下文时读工作区里的 docs/ARCHITECTURE.md（14 条不变量）、docs/adr/ 下的决策记录，
-以及 docs/Acuven_Central_AI_Billing_Platform_Spec_v1.6.md 的相关章节。
+以及 docs/Acuven_Central_AI_Billing_Platform_Spec.md 的相关章节。
 "@
 
 if ($isDesign) {
