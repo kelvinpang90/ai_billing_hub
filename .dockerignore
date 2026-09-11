@@ -1,0 +1,33 @@
+# 构建上下文白名单式收紧：Dockerfile 只 COPY 需要的路径，但整个上下文仍会被
+# 打包发给 daemon。.git 与虚拟环境动辄几百 MB，且**可能带着本地凭据**。
+.git/
+.github/
+.venv/
+venv/
+node_modules/
+
+# 绝不能进镜像：真实凭据。.env 已被 .gitignore 忽略，但构建上下文读的是工作区。
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 构建产物与缓存 —— 带进去会污染镜像层，也会让缓存无谓失效
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+pytest-output.txt
+
+# 文档与审查草稿：改一个 Markdown 不该让镜像重建
+docs/
+tests/
+.codex-review-*.md
+.codex-input-*.md
+.codex-pr-body-*.md
+.codex-response-*.md

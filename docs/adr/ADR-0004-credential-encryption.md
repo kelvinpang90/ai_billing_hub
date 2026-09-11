@@ -72,7 +72,11 @@ Docker Compose 的 `file:` 型 secret 走 **bind mount**，`uid` / `gid` / `mode
 正确做法：
 
 - Phase 0 先确定 API / Celery 容器的**运行 UID**（非 root）
+  —— **已定：`10001`**（2026-09-12，T0.6）。写在 `Dockerfile` 的 `ARG APP_UID`，
+  api / celery-worker / celery-beat 三个服务共用同一个镜像，实测三者都以它运行；
+  `tests/backend/test_compose.py` 钉住这个数字，也钉住 compose 不许用 `user:` 顶回去
 - 宿主机主密钥文件**属主设为该 UID**，权限 `0400`
+  —— 这一半要等有生产主机才做得了，归 T0.9。**改 `APP_UID` 就必须同步改宿主机文件属主**
 - **不要为了读密钥把容器改回 root 运行**——那是用一个更大的问题解决一个小问题
 
 其余要求：
@@ -347,7 +351,8 @@ spec §136 要求**仓库内**的 `docs/runbook.md` 覆盖 `encryption master-ke
 - [x] 备份与访问控制策略选定：与数据库备份分离
 - [x] 重放存储与过期策略选定：支付 Webhook 落库，其余走 Redis；过期时刻 = 请求 timestamp + 5 分钟（R4 关闭）
 - [ ] Phase 0 的「备份、恢复、加密密钥方案设计」验收通过
-- [ ] Phase 0 确定 API / Celery 容器的运行 UID，宿主机主密钥文件属主设为该 UID、权限 `0400`（**不得为读密钥把容器改回 root**）
+- [x] Phase 0 确定 API / Celery 容器的运行 UID —— `10001`，见第 2 节（T0.6，2026-09-12）
+- [ ] 宿主机主密钥文件属主设为 `10001`、权限 `0400`（**不得为读密钥把容器改回 root**）—— 要有生产主机才做得了，归 T0.9
 - [ ] Phase 1 前选定出站 webhook 密钥的 schema（方案 i / ii），更新第 4a 节并走设计闸门
 - [ ] `docs/runbook.md` 写入主密钥恢复**流程**（脱敏），私有附录写入具体值，边界按第 6 节
 - [ ] 季度恢复演练含主密钥恢复

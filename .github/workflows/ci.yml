@@ -116,6 +116,19 @@ jobs:
           python -m venv "$RUNNER_TEMP/pkgcheck"
           "$RUNNER_TEMP/pkgcheck/bin/python" -m pip install --disable-pip-version-check --quiet .
           "$RUNNER_TEMP/pkgcheck/bin/python" scripts/packaging_smoke.py
+      - name: Compose stack
+        # 两件事都是「不构建就发现不了、发现时通常已经在部署」的那种缺陷：
+        #   1. compose 文件可解析（`${VAR:?}` 的必填校验也在这一步生效）
+        #   2. 后端镜像真的能构建 —— 构建期还会在容器里跑一次 packaging_smoke
+        # 这里**不起整个栈**：起栈是 T0.6 记录里的人工验证，放进 CI 只会换来
+        # 一个慢且不稳的检查。tests/backend/test_compose.py 已经把不变量钉住了。
+        env:
+          # 只为让 `${VAR:?}` 有值，不是任何真实环境的凭据。
+          BILLING_MYSQL_ROOT_PASSWORD: ci-validation-only
+          BILLING_MYSQL_PASSWORD: ci-validation-only
+        run: |
+          docker compose --env-file .env.example config --quiet
+          docker compose build api
 
   secret-scan:
     name: secret-scan

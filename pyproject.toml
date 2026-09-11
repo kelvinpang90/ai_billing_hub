@@ -33,6 +33,9 @@ dev = [
     "httpx2>=2.12",
     "pytest>=8.3",
     "ruff>=0.8",
+    # 只给 tests/backend/test_compose.py 用：把 docker-compose.yml 的若干条
+    # 不变量钉成用例，这样不必在 CI 里起一整个栈也能挡住回退。
+    "pyyaml>=6.0",
 ]
 
 # 必须用自动发现：显式写 packages = ["app"] 只会把根包打进 wheel，

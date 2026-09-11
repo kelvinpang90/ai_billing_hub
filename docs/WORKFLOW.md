@@ -218,6 +218,16 @@ python -m venv /tmp/pkgcheck
 
 `pytest` 走 `pythonpath = ["."]`，跑的是**源码树**，结构上发现不了 wheel 少打子包这类缺陷（PR #22 上真发生过）。这一条 CI 的 `backend` 项每次都跑，本地只在动打包配置时需要手跑。
 
+改了 `Dockerfile` 或 `docker-compose.yml` 还要再构建一次：
+
+```bash
+docker compose build api
+```
+
+`tests/backend/test_compose.py` 只校验配置里的不变量，**证明不了镜像能构建**——
+构建期那一步（在容器里跑 `packaging_smoke.py`）才是验「装进去的那一份能用」。
+同样由 CI 的 `backend` 项每次跑，本地只在动这两个文件时需要手跑。
+
 ### 迁移测试要一个真 MySQL
 
 `tests/backend/test_migrations.py` 在 `BILLING_TEST_DATABASE_URL` 没设时会 **skip**。本地要跑它，起一个一次性库：
