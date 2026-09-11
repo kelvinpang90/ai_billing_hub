@@ -6,6 +6,9 @@ from fastapi import FastAPI
 
 from app.api.health import router as health_router
 from app.core.config import Settings, get_settings
+from app.core.errors import register_error_handlers
+from app.core.logging import configure_logging
+from app.core.middleware import RequestContextMiddleware
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -15,10 +18,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     共享状态一律放 Redis / DB（spec §100）。
     """
     settings = settings or get_settings()
+    configure_logging(settings.log_level)
+
     app = FastAPI(
         title="Acuven Central AI Billing Platform",
         debug=settings.debug,
     )
+    # 中间件要在异常处理器之前装：处理器要读中间件绑上的 request_id，
+    # 才能把它写进 §107 的信封。
+    app.add_middleware(RequestContextMiddleware)
+    register_error_handlers(app)
     app.include_router(health_router)
     return app
 
