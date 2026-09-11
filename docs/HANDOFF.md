@@ -25,7 +25,7 @@
 - **前置决策 D1–D7**：3 项完全收口、3 项部分收口、1 项（D2）等会计
 - **评审残留 R1–R7**：4 项收口（R2 / R4 / R6 / R7），3 项未做（R1 / R3 / R5）
 - **双 agent 流程与闸门已落地并经受住实战**：设计闸门 + 实现闸门、`codex-review.ps1` 取材与准入、`check_repo_policy.py` 策略检查、`gh_verified_write.py` 写后回读
-- **CI 六项**（`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`）。前五项已进 `main` 的必需检查（`backend` 于 2026-09-11 T0.2 合并后追加）；**`frontend` 待追加** —— 新 job 要先合进 `main` 才存在，做法与回读要求写在 T0.7 任务记录里。分支保护其余项：禁 force push、禁直推、禁删除、线性历史、分支必须最新、`enforce_admins`、对话必须解决
+- **CI 六项**（`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`）**全部已进 `main` 的必需检查**（`backend` 于 2026-09-11 T0.2 合并后追加，`frontend` 于 2026-09-12 T0.7 合并后追加）。分支保护其余项：禁 force push、禁直推、禁删除、线性历史、分支必须最新、`enforce_admins`、对话必须解决
 
 未完成：数据库 schema、T0.8 之后的全部 Phase 0 任务。
 

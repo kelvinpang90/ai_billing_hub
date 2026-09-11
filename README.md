@@ -69,8 +69,7 @@ cd frontend && npm install && npm run dev      # http://localhost:5173
 
 命令清单只在 [docs/WORKFLOW.md §7](docs/WORKFLOW.md) 一处，这里不重复。
 
-CI 跑六项：`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`。
-前五项已是 `main` 的必需检查，`frontend` 要等它先合进 `main` 才能设（见 [WORKFLOW §2](docs/WORKFLOW.md) 的受控例外）。
+CI 跑六项：`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`，都是 `main` 的必需检查。
 
 ## 开发流程
 
