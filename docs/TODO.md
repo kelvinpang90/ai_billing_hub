@@ -21,12 +21,12 @@
 
 这些是 [SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) 的「建议的处理顺序」，即使 v1.1 已修订，落地前仍需确认结论并落成 ADR。
 
-- [ ] **D1 — 汇率来源与版本化策略**：数据源（人工录入 / API 供应商）、更新频率、按 `occurred_at` 还是结算日取值、`provider_price_versions` 存 USD 原价还是换算后 MYR。→ ADR
+- [x] **D1 — 汇率来源与版本化策略** —— 已收口。BNM openAPI 每日拉取落 `DRAFT`，需显式发布为 `PUBLISHED` 才可用于计算；按用量事件的 `occurred_at` 取版本（不是结算日）；`provider_price_versions` 存供应商原币种原价，MYR 换算结果连同 `fx_rate_version_id` 快照进用量事件。计费热路径不实时调用 BNM。见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)。⚠️ BNM 是中间价且周末无新价，偏差须由 markup 的 FX 缓冲吸收
 - [ ] **D2 — SST 税务口径**：向会计确认。收 RM100 是含税还是不含税？税在收款时确认还是消费时确认？receipt / statement 表要预留哪些字段。（spec §45.1 是上线闸门，但**字段现在就要留**，事后加等于重做所有历史凭证）→ ADR
 - [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
 - [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节）
 - [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ T+1（24h）覆盖不了 §31 举例的 31 小时积压，所以上期调整**是预期会出现的**；但 §31 那个数字是**告警阈值示例，不是日常状态**——每一笔都应能追溯到一次具体延迟事件，**不是会计常态**。笔数与金额占比必须进 §95 监控，占比走高要查根因
-- [ ] **D6 — 支付网关选型**：马来西亚网关，FPX 优先。评估项：手续费结构、沙箱可用性、对账 API 能力、**回调是否提供稳定的幂等标识**（决定 `(gateway, gateway_event_id)` 唯一约束能否成立——没有它，ADR-0004 的永久防重方案在支付侧落不了地）。→ ADR
+- [ ] **D6 — 支付网关选型** —— 准入契约已定，**供应商尚未选定**。已定四条硬性准入（H1 回调带稳定唯一标识 / H2 服务端权威状态查询 / H3 回调可验签 / H4 沙箱 + 对账）与适配器接口，Phase 1–3 不再被阻塞。见 [ADR-0006](adr/ADR-0006-payment-gateway-contract.md)。⚠️ **具体供应商仍未选定，硬截止在 Phase 4 开工前**；H1–H4 必须用沙箱实测，不能凭供应商文档
 - [ ] **D7 — 通知通道**：Email adapter 用什么；WhatsApp 复用 `whatsapp_gateway` 还是自建出站。
 
 ---
@@ -36,7 +36,7 @@
 来自 [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md)：25 条评审意见中 20 条已在 spec v1.1 解决，以下 5 条有残留。
 
 - [ ] **R1 — 停机/复机阈值**：阈值仍硬编码 `balance <= 0`（§49），无可配置 `suspend_at` / `resume_at` 与滞后带。§7.10 的「RM0 保持挂起 + 最小恢复额」已消除死锁，抖动也被 §7.11/§48 的跃迁触发挡住。**决定采纳双阈值，还是明确记为已知取舍。**（Phase 2 前）
-- [ ] **R2 — 并发 PENDING payment**：同一租户是否允许并存多笔 `PENDING` 支付，spec 无任何规定。客户连点两次充值 → 两笔都付了怎么办、UI 显示哪一笔。**Phase 4 前必须定。**
+- [x] **R2 — 并发 PENDING payment** —— 已收口。允许并存；两笔都付则都入账（钱已收到，拒绝入账等于吞客户的钱，且预付钱包多充仍是客户余额）；60 秒内同额重复请求复用同一笔挡误触；PENDING 60 分钟置 `EXPIRED`，但**过期后收到成功回调仍然入账**。见 [ADR-0007](adr/ADR-0007-concurrent-pending-payments.md)。⚠️ 人工退款流程超出 V1 范围，是明确缺口
 - [ ] **R3 — 账本膨胀权衡**：§82 已承认钱包变更按租户串行化并要求测最热租户，§119 给了量化目标，但**没有对「按对话/时间窗聚合成一笔 AI_USAGE ledger、usage_events 保留明细」做权衡分析**。即使决定不做，也要写明理由。（Phase 2 前）
 - [x] **R4 — 重放保护存储与过期策略** —— 已收口。支付 Webhook 的 nonce 落数据库，其余四个签名端点走 Redis；**过期时刻 = 请求 timestamp + 5 分钟**（跟着请求自己算，不是「记录时刻 + 固定 TTL」——时间窗是 ±5 分钟，固定 TTL 会留下约 4 分钟重放窗口）。Redis 丢失最长让纵深防御第二层失效约 10 分钟，不产生财务缺口——财务安全网是 `event_id` 与 `(gateway, gateway_event_id)` 的领域幂等。见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 5 节
 - [ ] **R5 — 需求编号覆盖度**：`REQ-*` 只有 13 条，未覆盖每条硬性要求；140 节仍无完整 TOC。影响 §132 逐条验收。（Phase 1 前）
@@ -60,7 +60,7 @@
 - [ ] 备份、恢复、加密密钥方案设计（依赖 D4）
 - [ ] 确定 API / Celery 容器的运行 UID，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
 - [ ] 初始性能 / SLO 基线
-- [ ] FX 供应商评估（依赖 D1）
+- [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
 
 **验收**：所有服务能起 · DB 迁移能跑 · 管理员能登录 · 2FA 可用 · CI 拦住合并并能部署不可变镜像 · RPO/RTO 恢复方案已批准
 
@@ -225,7 +225,7 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ## 文档欠账
 
-- [ ] D1–D7 的 ADR（`docs/adr/` 目录已建，见 [adr/README.md](adr/README.md)；ADR-0001 已完成）
+- [ ] D1–D7 的 ADR（`docs/adr/` 目录已建，见 [adr/README.md](adr/README.md)；D1、D3、D4、D5 已完成，D6 部分完成，**剩 D2、D7**）
 - [ ] `docs/database-schema.md`（Phase 1 起维护）
 - [ ] `docs/api.md`（Phase 1 起维护）
 - [ ] `docs/pricing-engine.md`、`docs/currency-and-fx.md`（Phase 2）
