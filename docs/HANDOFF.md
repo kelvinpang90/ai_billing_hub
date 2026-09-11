@@ -62,7 +62,7 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
    → §101 视为**已被 [ARCHITECTURE.md](ARCHITECTURE.md) 第 9 节取代**，实现时不要回去照抄。
 
 2. **spec 文件名 vs 内容版本**
-   约定：spec 文件名跟随文档内 Revision History。现为 `..._Spec_v1.2.md`（2026-09-10 因 §99 仓库可见性修订）。
+   约定：spec 文件名跟随文档内 Revision History。现为 `..._Spec_v1.3.md`（2026-09-11 勘误：§6 精度、§123 仓库可见性）。
    `SPEC_REVIEW_v1.0.md` 与 `REVIEW_FOLLOWUP_v1.1.md` 的文件名**不跟随**——它们各自评审/核对的确实是 v1.0 与 v1.1，**不要改**。
 
 3. **`AGENTS.md` §10 / §11 的 `erp_os` 模板残留**
