@@ -278,8 +278,6 @@ Claude 回应中的：
 - 明显 Regression
 - API Contract Breaking Change
 - Payment / Billing 错误
-- Inventory 错误
-- e-Invoice 严重错误
 - Race Condition
 - Duplicate Side Effect
 - 重要 Requirement 未实现
@@ -312,9 +310,6 @@ Claude 回应中的：
 - Wallet / Credit
 - Database Migration
 - Database Transaction
-- Inventory
-- Order
-- e-Invoice
 - Security-sensitive Code
 - Shared Core Module
 - Public API Contract
