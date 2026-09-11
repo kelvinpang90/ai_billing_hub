@@ -1,7 +1,7 @@
 # ARCHITECTURE — 架构摘要
 
 > 本文件是**摘要与索引**，不是事实来源。精确定义一律以
-> [Acuven_Central_AI_Billing_Platform_Spec_v1.5.md](Acuven_Central_AI_Billing_Platform_Spec_v1.5.md) 为准，括号里的 §N 是 spec 节号。
+> [Acuven_Central_AI_Billing_Platform_Spec_v1.6.md](Acuven_Central_AI_Billing_Platform_Spec_v1.6.md) 为准，括号里的 §N 是 spec 节号。
 > 最后更新：2026-09-10
 
 ---

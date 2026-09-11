@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.5  
+**Version:** 1.6  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -18,6 +18,7 @@
 | 1.3 | 2026-09-11 | Errata only, no new normative decision. §6 no longer states a monetary precision of its own — it contradicted §80 (`DECIMAL(18,6)` vs `DECIMAL(20,8)` with a single `ROUND_HALF_UP` to 8 decimal places); §80 is now the sole definition. §123 Phase 0 repository visibility corrected from private to public — v1.2 declared this change but missed this occurrence. |
 | 1.4 | 2026-09-11 | Editorial only, no normative change. Retired two illustrative sections; section numbers are stable, so both leave a gap rather than causing a renumber. **§102** (Integrated Application Backend Structure) was a directory tree the section itself declared non-binding ("Adapt to existing project conventions rather than blindly forcing this exact layout"). **§138** (Final Target User Experience) was a mock dashboard with invented figures; every field it named is already normative in §67–§69, and §69 additionally carries the "Do NOT show" list. |
 | 1.5 | 2026-09-11 | Errata only, no new normative decision. §30 applied reconciliation responses on `status_version >=` local while §28 applies webhooks on `>` and §30 claimed both used the same rule — §30 now states the §28 rule. §55 listed an undefined dashboard field "Actual AI Provider Cost"; it now uses the term defined in §14 (Estimated/Reconciled, with the basis shown). §30's bare "every 5 minutes" polling example sat exactly on the §119 reconciliation safety bound and did not reference it; replaced by the cross-reference. |
+| 1.6 | 2026-09-11 | Editorial only, no normative change. Second slimming batch: §2's generic flow diagram now defers to §20/§103; §55's filter list defers to §87; §134's 15-step block defers to §126; §135 keeps only the constraints with no other home and points the rest at theirs (retitled Implementation Constraints); §139's mock dashboard and drill-down defer to §86/§61/§87, keeping the auditable-trail requirement and the §139.1 table. **§72** (Customer Statements Page) retired — §46 and §90 already cover both items. |
 
 ## Document Navigation
 
@@ -32,7 +33,7 @@
 
 The section number is the stable requirement reference for V1. Critical normative requirements additionally use `REQ-*` identifiers where implementation and test traceability are required.
 
-Because section numbers are stable, retired sections leave a gap rather than being renumbered. Retired so far: **§102** and **§138** (v1.4 — both were illustrative only; see the Revision History).
+Because section numbers are stable, retired sections leave a gap rather than being renumbered. Retired so far: **§102** and **§138** (v1.4) and **§72** (v1.6) — illustrative only or fully covered elsewhere; see the Revision History.
 
 ---
 
@@ -146,29 +147,7 @@ Integrated Application Backends and the Central Billing Platform are separate tr
       MySQL            MySQL            MySQL
 ```
 
-Each Integrated Application Backend continues to call the AI provider directly.
-
-Example:
-
-```text
-WhatsApp / Website
-        ↓
-Integrated Application Backend
-        ↓
-Claude / OpenAI / Gemini
-        ↓
-AI Response returned to user
-        ↓
-Usage Event saved into LOCAL OUTBOX
-        ↓
-Background Worker
-        ↓
-Central Billing API
-        ↓
-Pricing + Wallet Deduction
-```
-
-The AI response must NOT wait for Billing API completion.
+Each Integrated Application Backend continues to call the AI provider directly, and the AI response must NOT wait for Billing API completion. The asynchronous boundaries and the request flow are defined once in §20; the Integrated Application Backend request flow is in §103.
 
 ---
 
@@ -2137,13 +2116,7 @@ Show:
 - Billing Processing Errors
 - Outbox/Integration Health Alerts
 
-Filters:
-
-- date range
-- customer
-- project
-- provider
-- model
+Filters: the analytics dimensions defined in §87.
 
 ---
 
@@ -2527,15 +2500,6 @@ Customer can:
 - enter custom amount
 - see payment history
 - open/download receipt
-
----
-
-# 72. Customer Statements Page
-
-Customer can:
-
-- view monthly statements
-- download PDF
 
 ---
 
@@ -4509,81 +4473,22 @@ Do NOT immediately modify every existing Integrated Application Backend.
 
 Select one Integrated Application Backend as pilot.
 
-Implementation order:
-
-```text
-1. Identify all current calls through app/services/llm.py
-2. Introduce normalized Usage model
-3. Extract Anthropic usage
-4. Add conversation session mechanism
-5. Add billing_outbox
-6. Persist Usage Event
-7. Implement async delivery
-8. Connect sandbox Central Billing API
-9. Verify end-to-end usage
-10. Test Billing outage
-11. Test duplicate events
-12. Test suspension
-13. Test reactivation
-14. Only then create reusable integration package
-15. Roll out to remaining customer systems
-```
+Implementation scope, order, and acceptance for the pilot are defined in §126. Only after a successful pilot is the integration packaged for reuse and rolled out to the remaining Integrated Application Backends.
 
 ---
 
-# 135. Codex Development Rules
+# 135. Implementation Constraints
 
-Codex must follow these rules.
+These constraints bind every implementation phase.
 
-### Rule 1
-
-Do not implement the entire application in one uncontrolled change.
-
-Work phase-by-phase.
-
-### Rule 2
-
-Before each phase:
-
-- inspect existing repository
-- identify affected modules
-- produce implementation plan
-- identify migrations
-- identify tests
-
-Then implement.
-
-### Rule 3
-
-Never remove working customer AI functionality merely to introduce Billing.
-
-### Rule 4
-
-Do not add synchronous Central Billing dependency to AI request path.
-
-### Rule 5
-
-Do not calculate customer selling price inside an Integrated Application Backend.
-
-### Rule 6
-
-Do not trust monetary amount submitted by an Integrated Application Backend.
-
-### Rule 7
-
-Do not put Provider API secrets in frontend.
-
-### Rule 8
-
-Do not create a central AI Gateway in V1.
-
-### Rule 9
-
-Prefer simple modular monolith architecture for Central Billing V1 rather than unnecessary microservices.
-
-### Rule 10
-
-All significant architecture decisions that differ from this specification must be documented before implementation.
+- Never remove working customer AI functionality merely to introduce Billing.
+- Do not add synchronous Central Billing dependency to the AI request path (§20, `REQ-AVAIL-001`).
+- Do not calculate customer selling price inside an Integrated Application Backend.
+- Do not trust monetary amount submitted by an Integrated Application Backend.
+- Do not put Provider API secrets in frontend.
+- Do not create a central AI Gateway in V1 (§121).
+- Prefer simple modular monolith architecture for Central Billing V1 rather than unnecessary microservices.
+- Work phase-by-phase (§123). All significant architecture decisions that differ from this specification must be documented as ADRs before implementation (§136).
 
 ---
 
@@ -4665,64 +4570,9 @@ Do not continue to Phase 2 until Phase 0 and Phase 1 tests pass.
 
 # 139. Final Admin Experience
 
-Acuven Admin sees:
+Admin dashboard metrics are defined in §86 and drill-down dimensions in §61 and §87; this section does not restate them.
 
-```text
-Revenue              RM 8,420.50
-Provider Cost Basis    RM 3,186.20
-Gateway Fees         RM   126.30
-Gross Profit         RM 5,108.00
-Gross Margin             60.66%
-```
-
-Admin can drill down:
-
-```text
-Customer
-→ Project
-→ Conversation
-→ Request
-→ Provider
-→ Model
-→ Token
-→ Estimated/Reconciled Provider Cost
-→ Customer Charge
-→ Margin
-```
-
-The complete financial trail must be auditable from:
-
-```text
-AI Request
-        ↓
-Usage Event
-        ↓
-Provider Price Version
-        ↓
-FX Rate Version
-        ↓
-Estimated Provider Cost Snapshot
-        ↓
-Customer Pricing Rule
-        ↓
-Wallet Transaction
-        ↓
-Wallet Balance
-```
-
-And for top-up:
-
-```text
-Payment
-        ↓
-Gateway Confirmation
-        ↓
-Wallet Transaction
-        ↓
-Receipt
-        ↓
-Wallet Balance
-```
+The complete financial trail must be auditable end to end: from AI request through Usage Event, provider price version, FX rate version, estimated provider cost snapshot, and customer pricing rule to the wallet transaction and resulting balance (Invariant 6, §79); and from payment through gateway confirmation and wallet transaction to receipt and balance (§43, §45).
 
 ---
 
