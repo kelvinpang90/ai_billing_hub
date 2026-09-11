@@ -23,6 +23,24 @@
 
 <!-- 按文件或按模块列，一条一句。不要贴 diff。 -->
 
+## TODO 影响
+
+<!--
+机器可读（scripts/check_repo_policy.py 会校验，审查脚本在调 Codex 之前也会校验）。
+本仓库最常见的缺陷是「改了 ADR / 结论，没改 docs/TODO.md」，所以每个 PR 都要显式声明。
+
+二选一，多余的行删掉：
+
+  TODO impact: updated
+  TODO target: docs/TODO.md:<行号>      ← 本 PR 改动的那一条所在行，按 PR head 计
+
+  TODO impact: none
+  TODO reason: <为什么这次改动不影响任何任务状态>   ← 不接受「无」「不适用」
+-->
+
+TODO impact: updated
+TODO target: docs/TODO.md:<行号>
+
 ## 触碰的不变量 / REQ
 
 <!--
@@ -39,7 +57,7 @@
 
 ## 自检
 
-- [ ] 本地 `python scripts/check_docs.py` 通过
+- [ ] 本地三项全过：`python scripts/check_docs.py`、`python scripts/check_repo_policy.py`、`python -m unittest discover -s tests`
 - [ ] 金额相关代码全用 `Decimal`，无 `float`
 - [ ] 涉及查询的地方都带 tenant 过滤
 - [ ] 新增的失败路径不会静默吞掉事件
