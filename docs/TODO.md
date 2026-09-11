@@ -76,6 +76,7 @@
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
+> ⚠️ **celery-beat 没有存活探针**（T0.6 派生）：`celery inspect ping` 问的是 worker，够不着 beat。现在 beat 的 schedule 是空的，崩了也没有后果；**第一条周期任务落地时这就变成静默故障** —— beat 挂掉 = 对账扫描、状态轮询全部不执行，而 API 一切正常、没有任何报错。加第一条周期任务的那个任务必须同时给出探测手段（例如让 beat 自己周期性打一条心跳日志并挂告警）。
 > ⚠️ **T0.9 必须包含的一条具体告警**（T0.5 派生，PR #28 审查指出）：`/readyz` 在 Redis 不可用时**刻意返回 200**，所以负载均衡不会发现这个故障，**它只能靠日志告警发现**。告警名 `billing_readiness_degraded_redis`，条件、分级与升级路径写在 [runbook](runbook.md)。告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
 - [x] ~~GitHub 仓库 + 受保护 `main`~~ 已建、已推送；`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限），CI 五项 `docs` / `scripts` / `policy` / `backend` / `secret-scan` 已全部设为必需状态检查（`backend` 于 T0.2 合并后追加）
