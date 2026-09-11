@@ -35,7 +35,7 @@
                               ↓
                         Draft PR
                               ↓
-              确定性 CI：docs / scripts / policy / backend / secret-scan
+     确定性 CI：docs / scripts / policy / backend / frontend / secret-scan
                               ↓
         ┌───────────── 闸门 B：实现
         │   Codex 冷读 diff → VERDICT: APPROVE / REQUEST_CHANGES
@@ -206,6 +206,18 @@ python -m pytest
 六项分别管：链接与 `§N` 引用 + 约定串一致性 / 任务复选框与 PR 字段 / 策略脚本与回读脚本自身的回归 / 后端 lint / 后端格式 / 后端测试。
 PowerShell 侧另有 `pwsh -NoProfile -File scripts/tests/Test-ReviewVerdict.ps1`（CI 的 `scripts` 项跑它）。
 
+**动了 `frontend/` 就再加四项**（在 `frontend/` 目录下跑）：
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+`lint` 里包含自定义规则 `no-hardcoded-jsx-text` —— spec §3.2 的「文案不许硬编码在组件里」靠它机械保证。
+`npm test` 里有一条校验源码用到的每个 i18n key 都在 `en.json` 里存在：**缺 key 不会报错，只会把 key 原样渲染给用户**。
+
 `unittest discover -s tests` 与 `pytest` **跑的是两套不相交的测试**：前者是流程脚本（`tests/test_*.py`）的回归，后者是后端产品代码（`tests/backend/`）的测试。`tests/backend/` 故意不放 `__init__.py`，unittest 的 discover 才不会递归进去——**不要给它加**，加了两套就会互相收集。
 
 改了打包配置（`pyproject.toml` 的依赖、`[tool.setuptools]`）还要再跑一次打包冒烟：
@@ -218,10 +230,10 @@ python -m venv /tmp/pkgcheck
 
 `pytest` 走 `pythonpath = ["."]`，跑的是**源码树**，结构上发现不了 wheel 少打子包这类缺陷（PR #22 上真发生过）。这一条 CI 的 `backend` 项每次都跑，本地只在动打包配置时需要手跑。
 
-改了 `Dockerfile` 或 `docker-compose.yml` 还要再构建一次：
+改了 `Dockerfile`、`frontend/Dockerfile` 或 `docker-compose.yml` 还要再构建一次：
 
 ```bash
-docker compose build api
+docker compose build api frontend
 ```
 
 `tests/backend/test_compose.py` 只校验配置里的不变量，**证明不了镜像能构建**——

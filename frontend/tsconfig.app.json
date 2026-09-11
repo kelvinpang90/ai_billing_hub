@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "useDefineForClassFields": true,
+
+    // Vite 负责产出 JS，tsc 只做类型检查。
+    "noEmit": true,
+    "composite": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+
+    // ⚠️ 这几条是这个项目真正在意的部分，不是抄来的模板。
+    "strict": true,
+    // 索引访问返回 `T | undefined`。计费界面上「拿到的是 undefined 却当成 0」
+    // 会直接变成显示错误的金额。
+    "noUncheckedIndexedAccess": true,
+    // switch 漏写 break 在状态机代码里是一类真实缺陷（§24–§30 的状态迁移）。
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true
+  },
+  // ⚠️ 测试文件走 tsconfig.test.json，不在这里。应用代码**不该**拿到 Node 的
+  // 全局类型：能 `import fs` 的浏览器代码是打包时才炸的那种错。
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+}

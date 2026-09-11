@@ -1,0 +1,16 @@
+# 构建上下文是 ./frontend，所以这份 .dockerignore 归它自己管
+# （Docker 读的是 <context>/.dockerignore，仓库根那份管不到这里）。
+
+# 依赖与产物在镜像里重新装、重新构建。node_modules 动辄几百 MB，
+# 而且里面可能有平台相关的二进制，带进 Linux 镜像是错的。
+node_modules/
+dist/
+.vite/
+
+# 本地环境变量绝不能进镜像
+.env
+.env.*
+!.env.example
+
+# 构建用不到
+*.md

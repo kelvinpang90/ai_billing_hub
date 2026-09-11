@@ -121,6 +121,21 @@ services:
     volumes:
       - celery-beat-state:/var/lib/celery
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: acuven-billing-hub-frontend:local
+    restart: unless-stopped
+    logging: *logging
+    # ⚠️ 不发布端口：它只经边缘 nginx 对外。产物是静态文件，没有任何依赖 ——
+    # 所以这里既没有 depends_on 也不需要数据库或 broker。
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/index.html"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped
@@ -132,6 +147,7 @@ services:
       - ./deploy/nginx/billing-proxy-headers.inc:/etc/nginx/conf.d/billing-proxy-headers.inc:ro
     depends_on:
       - api
+      - frontend
     healthcheck:
       # 只问 nginx 自己活着没有，不经过 api。
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/nginx-health"]
@@ -139,10 +155,8 @@ services:
       timeout: 3s
       retries: 3
 
-# ⚠️ spec §99 的服务清单是七个，这里只有六个：**frontend 还不存在**（TODO 的
-# T0.7 才建 React 骨架）。给一个构建不出来的 frontend 占位，会让 `up` 直接失败、
-# 整个栈验证不了。T0.7 要补的是：frontend 服务 + 把 nginx 的 `location /`
-# 从 503 改成指向它。tests/backend/test_compose.py 钉住了现在这六个。
+# spec §99 的七个服务到齐（T0.7 补上 frontend）。
+# tests/backend/test_compose.py 的 EXPECTED_SERVICES 钉住这份清单。
 
 volumes:
   mysql-data:
