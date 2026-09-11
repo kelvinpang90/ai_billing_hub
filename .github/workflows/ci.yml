@@ -55,6 +55,24 @@ jobs:
   backend:
     name: backend
     runs-on: ubuntu-latest
+    services:
+      # 迁移必须对着真 MySQL 跑。SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上
+      # 跑通证明不了生产上跑得通 —— 而迁移跑不通是部署时才发现的那种故障。
+      # 这个口令只存在于 CI runner 的生命周期内，不是任何真实环境的凭据。
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-throwaway
+          MYSQL_DATABASE: billing_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      BILLING_TEST_DATABASE_URL: mysql+pymysql://root:ci-throwaway@127.0.0.1:3306/billing_test?charset=utf8mb4
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,7 +87,16 @@ jobs:
           python -m ruff check .
           python -m ruff format --check .
       - name: Backend tests
-        run: python -m pytest
+        # **CI 里一条都不许 skip。**迁移用例靠 BILLING_TEST_DATABASE_URL 决定
+        # 跑不跑：MySQL service 起不来时它们会安静地 skip，而 pytest 仍然绿 ——
+        # 没人会注意到「迁移这轮没验」。所以这里显式把 skip 判成失败。
+        run: |
+          set -o pipefail
+          python -m pytest -ra | tee pytest-output.txt
+          if grep -qE '[0-9]+ skipped' pytest-output.txt; then
+            echo "::error::Tests were skipped in CI; every test must run here."
+            exit 1
+          fi
       - name: Packaging smoke
         # pytest 走 pythonpath = ["."]，跑的是源码树，发现不了 wheel 少打子包。
         # 装进一个独立 venv 再验一次；脚本自己会拒绝解析到源码树的情况。
