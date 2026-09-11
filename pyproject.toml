@@ -24,8 +24,10 @@ dev = [
     "ruff>=0.8",
 ]
 
-[tool.setuptools]
-packages = ["app"]
+# 必须用自动发现：显式写 packages = ["app"] 只会把根包打进 wheel，
+# app.api / app.core 等子包全部丢失，装完 `uvicorn app.main:app` 直接起不来。
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.ruff]
 line-length = 100

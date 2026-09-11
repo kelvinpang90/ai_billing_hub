@@ -65,7 +65,7 @@
 | T0.10 | 初始性能 / SLO 基线 | T0.6 |
 
 - [x] **T0.1 — 后端骨架与配置**：`app/` 七层目录（`api` / `core` / `models` / `schemas` / `repositories` / `services` / `tasks`）、`app/main.py` 应用工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`（依赖 + ruff + pytest）、`.env.example`、`tests/backend/` 与首个冒烟测试
-- [ ] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查
+- [ ] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查。**另加打包冒烟**：装进干净 venv 后 `import app.main` 并起一次 `/healthz` —— `pytest` 跑的是源码树（`pythonpath = ["."]`），发现不了 wheel 少打子包这类问题（PR #22 审查实证）
 - [ ] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
 - [ ] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
 - [ ] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
@@ -102,6 +102,7 @@
 - `python -m pytest` → 2 passed（应用能起、`/healthz` 返回 200、注入的配置生效）
 - `python -m ruff check .` / `python -m ruff format --check .` → 通过
 - [WORKFLOW §7](WORKFLOW.md) 三项本地检查通过；`python -m unittest discover -s tests` 仍是 61 passed，**新增的 `tests/backend/` 没有被它收集**（该目录无 `__init__.py`，不是可导入包）
+- **打包路径单独验过**（PR #22 审查指出 `packages = ["app"]` 会漏掉全部子包）：改成 `[tool.setuptools.packages.find] include = ["app*"]` 后，`pip install .` 进一个干净 venv → `import app.main` 成功、`GET /healthz` 返回 200。这条**自动化留给 T0.2**，因为 `pytest` 跑的是源码树，结构上发现不了打包缺陷
 - **未验证**：容器内启动、生产配置分支 —— 那是 T0.6 的事
 
 **待清理**
