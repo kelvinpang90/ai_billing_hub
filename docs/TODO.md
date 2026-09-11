@@ -135,7 +135,7 @@
 
 **合并后补记（2026-09-11）**
 
-PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `main` 的必需状态检查。
+PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `main` 的必需状态检查。这属于 [WORKFLOW §2](WORKFLOW.md) 的**唯一例外**（PR 里物理上做不到的仓库设置），按那里的三步走：原 PR 预先写明 → 合并后用追加型 API 执行 → 用只改状态陈述的 `chore/` PR 把逐项回读补回仓库。
 
 - 走 `POST .../protection/required_status_checks/contexts` 这个**纯追加**端点，而不是 PUT 整份 protection —— 后者要重发全部字段，漏一个就是静默降级
 - 回读：必需检查现为 `backend` / `docs` / `policy` / `scripts` / `secret-scan`
