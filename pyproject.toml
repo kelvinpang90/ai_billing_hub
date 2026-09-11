@@ -21,9 +21,10 @@ dependencies = [
     # 纯 Python 的 MySQL 驱动：mysqlclient 要编译、镜像里得带上编译链。
     # 计费的瓶颈在 IO 与锁，不在驱动的解析速度。
     "pymysql>=1.1",
+    # celery[redis] 会把 redis 客户端一并装上，就绪探针也用它。
+    "celery[redis]>=5.4",
 ]
 
-# Celery / redis 等依赖在接通它们的那个任务里加，现在不预先声明用不上的包。
 [project.optional-dependencies]
 dev = [
     # TestClient 的 HTTP 传输。starlette 已弃用旧 httpx，装 httpx 会在每次跑

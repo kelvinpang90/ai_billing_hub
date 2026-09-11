@@ -71,8 +71,20 @@ jobs:
           --health-interval=5s
           --health-timeout=5s
           --health-retries=20
+      # broker 的配线错了（序列化器不匹配、队列名不对）**不会在启动时报错**，
+      # 只会在第一个真任务被丢进队列后安静地不执行。要对着真 Redis 验入队。
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     env:
       BILLING_TEST_DATABASE_URL: mysql+pymysql://root:ci-throwaway@127.0.0.1:3306/billing_test?charset=utf8mb4
+      BILLING_TEST_REDIS_URL: redis://127.0.0.1:6379/0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

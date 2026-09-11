@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
@@ -50,15 +53,55 @@ def test_readyz_reports_not_configured_when_there_is_no_database() -> None:
     assert set(body) == {"success", "data", "error", "request_id"}
 
 
-def test_readyz_passes_when_the_database_answers() -> None:
-    app = create_app(Settings(database_url=""))
+def test_readyz_is_degraded_but_serving_when_redis_is_missing() -> None:
+    """⚠️ Redis 不通**不能**让实例被摘出轮转。
+
+    spec §74.6：Redis/Celery 只承载投递触发，数据库 Outbox 才是事实来源。
+    REQ-AVAIL-001：Redis 不可用不得成为终端 AI 请求路径上的同步依赖。
+    把 Redis 做成就绪阻断项，等于 Redis 一挂就自己造出 Invariant 1 要防的中断。
+    """
+    app = create_app(Settings(database_url="", redis_url=""))
     app.state.engine = create_engine("sqlite+pysqlite:///:memory:")
 
     with TestClient(app) as client:
         response = client.get("/readyz")
 
     assert response.status_code == 200
-    assert response.json()["data"] == {"status": "ok", "database": "ok"}
+    assert response.json()["data"] == {
+        "status": "degraded",
+        "database": "ok",
+        "redis": "not_configured",
+    }
+
+
+def test_readyz_is_degraded_when_redis_is_unreachable() -> None:
+    app = create_app(Settings(database_url="", redis_url="redis://127.0.0.1:1/0"))
+    app.state.engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["status"] == "degraded"
+    assert body["redis"] == "unavailable"
+    # 连接错误里带着主机名与端口（§94）—— 一个字都不许进响应。
+    assert "127.0.0.1" not in response.text
+
+
+@pytest.mark.skipif(
+    not os.environ.get("BILLING_TEST_REDIS_URL"),
+    reason="BILLING_TEST_REDIS_URL is not set; the healthy-readiness path needs a real Redis",
+)
+def test_readyz_is_ok_when_both_dependencies_answer() -> None:
+    app = create_app(Settings(database_url="", redis_url=os.environ["BILLING_TEST_REDIS_URL"]))
+    app.state.engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"status": "ok", "database": "ok", "redis": "ok"}
 
 
 def test_readyz_reports_unavailable_without_leaking_the_target() -> None:
