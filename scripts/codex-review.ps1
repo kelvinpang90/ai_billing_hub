@@ -184,7 +184,7 @@ function Test-PrAdmission {
     $checks = @( (Invoke-GhUtf8 @('pr', 'checks', "$Pr", '--repo', $slug, '--json', 'name,bucket')) | ConvertFrom-Json )
     # 名单必须与 .github/workflows/ci.yml 的 job 名一致，且与 WORKFLOW §4 的准入描述一致。
     # 漏一个（之前漏了 policy）= 一个把该 job 删掉的 PR 照样进审查。
-    foreach ($required in @('docs', 'scripts', 'policy', 'secret-scan')) {
+    foreach ($required in @('docs', 'scripts', 'policy', 'backend', 'secret-scan')) {
         $matching = @($checks | Where-Object { $_.name -ceq $required })
         if ($matching.Count -eq 0 -or @($matching | Where-Object { $_.bucket -cne 'pass' }).Count -gt 0) {
             Fail "准入未通过：$required 缺失或尚未成功。未调用 Codex。"

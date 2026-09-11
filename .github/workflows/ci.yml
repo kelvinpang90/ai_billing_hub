@@ -52,6 +52,32 @@ jobs:
       - name: Policy and verified-write regression tests
         run: python -m unittest discover -s tests -v
 
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # 与 pyproject 的 requires-python 下界一致：CI 要跑我们声明支持的
+          # 最低版本，跑最新版会让下界形同虚设
+          python-version: "3.12"
+      - name: Install backend and dev tooling
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Lint
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Backend tests
+        run: python -m pytest
+      - name: Packaging smoke
+        # pytest 走 pythonpath = ["."]，跑的是源码树，发现不了 wheel 少打子包。
+        # 装进一个独立 venv 再验一次；脚本自己会拒绝解析到源码树的情况。
+        run: |
+          python -m venv "$RUNNER_TEMP/pkgcheck"
+          "$RUNNER_TEMP/pkgcheck/bin/python" -m pip install --disable-pip-version-check --quiet .
+          "$RUNNER_TEMP/pkgcheck/bin/python" scripts/packaging_smoke.py
+
   secret-scan:
     name: secret-scan
     runs-on: ubuntu-latest

@@ -8,8 +8,9 @@
 ## 现在在哪
 
 **Phase 0 进行中。** §123 的 13 项已拆成 T0.1–T0.10（拆法与依赖见 [TODO.md](TODO.md) 的 Phase 0 一节），
-**T0.1（后端骨架与配置）已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、
-`pyproject.toml`、`.env.example`、`tests/backend/` 冒烟测试。
+**T0.1（后端骨架与配置）与 T0.2（CI 后端 job）已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、
+`app/core/config.py`、`pyproject.toml`、`.env.example`、`tests/backend/` 冒烟测试，以及 CI 的 `backend` job
+（lint + 格式 + pytest + 打包冒烟）。
 
 数据库、Celery、Docker、前端、认证**都还没有**。
 
@@ -20,13 +21,13 @@
 - **前置决策 D1–D7**：3 项完全收口、3 项部分收口、1 项（D2）等会计
 - **评审残留 R1–R7**：4 项收口（R2 / R4 / R6 / R7），3 项未做（R1 / R3 / R5）
 - **双 agent 流程与闸门已落地并经受住实战**：设计闸门 + 实现闸门、`codex-review.ps1` 取材与准入、`check_repo_policy.py` 策略检查、`gh_verified_write.py` 写后回读
-- **CI 四项**（`docs` / `scripts` / `policy` / `secret-scan`）全部已进 `main` 的必需检查；分支保护：禁 force push、禁直推、线性历史、分支必须最新
+- **CI 五项**（`docs` / `scripts` / `policy` / `backend` / `secret-scan`）。⚠️ 其中**只有前三项与 `secret-scan` 是 `main` 的必需检查**，`backend` 随 T0.2 新增，要等它合进 `main` 之后才能加进分支保护（仓库设置，PR 里改不了）。分支保护其余项：禁 force push、禁直推、线性历史、分支必须最新
 
-未完成：数据库 schema、T0.2 之后的全部 Phase 0 任务。
+未完成：数据库 schema、T0.3 之后的全部 Phase 0 任务。
 
 ## 下一步
 
-**接着做 T0.2（CI 后端 job）**，再按 T0.3 / T0.4 往下走。清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
+**接着做 T0.3（日志与统一错误处理）**，再按 T0.4 / T0.5 往下走。清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，
 **每个 T0.x 一个 PR**，从 `main` 开分支，不要开 stacked PR（[WORKFLOW.md](WORKFLOW.md) §5）。
 
 D1–D7 里剩下的未决项**全部落在 Phase 1 及以后**，没有一项挡住 Phase 0：

@@ -65,7 +65,7 @@
 | T0.10 | 初始性能 / SLO 基线 | T0.6 |
 
 - [x] **T0.1 — 后端骨架与配置**：`app/` 七层目录（`api` / `core` / `models` / `schemas` / `repositories` / `services` / `tasks`）、`app/main.py` 应用工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`（依赖 + ruff + pytest）、`.env.example`、`tests/backend/` 与首个冒烟测试
-- [ ] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查。**另加打包冒烟**：装进干净 venv 后 `import app.main` 并起一次 `/healthz` —— `pytest` 跑的是源码树（`pythonpath = ["."]`），发现不了 wheel 少打子包这类问题（PR #22 审查实证）
+- [x] **T0.2 — CI 后端 job**：`.github/workflows/ci.yml` 加 `backend` job（`ruff check` + `ruff format --check` + `pytest`）；[WORKFLOW §7](WORKFLOW.md) 的命令清单补上 lint 与 pytest；在分支保护里把 `backend` 设为必需状态检查。**另加打包冒烟**：装进干净 venv 后 `import app.main` 并起一次 `/healthz` —— `pytest` 跑的是源码树（`pythonpath = ["."]`），发现不了 wheel 少打子包这类问题（PR #22 审查实证）
 - [ ] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
 - [ ] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
 - [ ] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
@@ -109,6 +109,29 @@
 **待清理**
 
 - [ ] 把 `scripts/` 与 `tests/test_*.py` 纳入 ruff（约 52 处报错 + 5 个文件需重新格式化），单独开 `chore/` PR
+
+### T0.2 任务记录（2026-09-11）
+
+**做了什么**
+
+- `.github/workflows/ci.yml` 加 `backend` job：装 `-e ".[dev]"` → `ruff check` + `ruff format --check` → `pytest` → **打包冒烟**
+- `scripts/packaging_smoke.py`：新增。装进独立 venv 后验证子包真的在 wheel 里、`/healthz` 真的挂上了。它**放在 `scripts/` 下是刻意的** —— 以脚本方式运行时 `sys.path[0]` 是脚本自己的目录，那里没有 `app`，所以 `import app` 只能解析到已安装的那一份；脚本里再断言一次路径含 `site-packages`，防止有人把它挪到仓库根目录后静默失效
+- [WORKFLOW §7](WORKFLOW.md) 命令清单从三项补到六项，并写明 `unittest discover` 与 `pytest` 跑的是两套不相交的测试；打包冒烟单列，说明只在动打包配置时需要本地手跑
+- `scripts/codex-review.ps1` 的准入名单加 `backend`。**不加这一条，一个把 `backend` job 删掉的 PR 照样能进审查** —— 脚本注释里记着之前漏 `policy` 就是这么出的事
+- CI 项数从四涨到五，四处引用同步：`README.md`、`CLAUDE.md`、[WORKFLOW](WORKFLOW.md) §2 的流程图与 §4 的准入描述、[HANDOFF](HANDOFF.md)
+
+**偏离了什么**
+
+- **分支保护里把 `backend` 设为必需检查这一步没做在 PR 里** —— 分支保护是仓库设置，PR 改不了，而且 `backend` job 要先随本 PR 合进 `main` 才存在。合并后单独执行，做法照 T0.1 之前加 `policy` 的先例：读回现有四项，**追加**而不是覆盖，其余设置逐项回读确认未变动
+- 打包冒烟没做成 `pytest` 用例：它要一个独立 venv 和一次 `pip install`，塞进单元测试会让本地跑测试从秒级变成分钟级。放 CI 每次跑、本地按需跑，是更合适的位置
+- `scripts/packaging_smoke.py` **不在 ruff 覆盖范围内**（`pyproject.toml` 排除了 `scripts`）。与 T0.1 留下的待清理项同源，等那条清理时一并纳入
+
+**验证到什么程度**
+
+- 打包冒烟脚本**正反两面都跑过**：干净 venv `pip install .` → exit 0（`site-packages/app serves /healthz`）；指向源码树的 editable 安装 → exit 1 并打印拒绝理由。**只验通过路径不算数**——一个永远返回 0 的检查和没有检查一样
+- [WORKFLOW §7](WORKFLOW.md) 六项本地全过：`check_docs` 8 条约定串、`check_repo_policy`、`unittest discover -s tests` 61 passed、`ruff check` / `ruff format --check`、`pytest` 2 passed
+- `pwsh scripts/tests/Test-ReviewVerdict.ps1` 96 通过
+- **未验证**：`backend` job 在 GitHub Runner 上的实际行为（Linux + Python 3.12），要等 PR 的 CI 跑完才算数 —— 本地是 Windows + Python 3.14
 
 ---
 
