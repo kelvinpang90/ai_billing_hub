@@ -20,6 +20,8 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "docs" / "Acuven_Central_AI_Billing_Platform_Spec.md"
+# 历史评审记录针对的是当时的 spec 版本，里面的 §N 不再对现行 spec 校验；链接与约定串照查。
+ARCHIVE = ROOT / "docs" / "archive"
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)")
 SECTION_REF_RE = re.compile(r"§(\d+(?:\.\d+)?)")
@@ -192,7 +194,7 @@ def main() -> int:
         if ".git" in md_path.parts or is_transient(md_path):
             continue
         errors.extend(check_links(md_path))
-        if md_path != SPEC:
+        if md_path != SPEC and ARCHIVE not in md_path.parents:
             errors.extend(check_section_refs(md_path, known))
 
     for path in sorted(ROOT.rglob("*")):

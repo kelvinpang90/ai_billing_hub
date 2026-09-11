@@ -65,7 +65,7 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
    约定（2026-09-11 起）：spec 文件名**不带版本号**，固定为 `docs/Acuven_Central_AI_Billing_Platform_Spec.md`；版本只记在文档内的 Revision History。旧约定「文件名跟随版本」让每次改几行正文都要改名并同步 9 处引用，连做三次（v1.3 → v1.6）后取消。
    **章节号是稳定引用**，退役的章节留编号空洞、不重编号。
    ⚠️ 退役之后就**不能再用 `§` 写法引用它**——`check_docs.py` 会判为「unknown spec section」。要点名退役章节，写成「第 N 节」。
-   `SPEC_REVIEW_v1.0.md` 与 `REVIEW_FOLLOWUP_v1.1.md` 的文件名**不跟随**——它们各自评审/核对的确实是 v1.0 与 v1.1，**不要改**。
+   `docs/archive/` 下的 `SPEC_REVIEW_v1.0.md` 与 `REVIEW_FOLLOWUP_v1.1.md` 是对 v1.0 / v1.1 的历史记录，内容冻结、文件名不改；`check_docs.py` 对该目录**不校验 `§N`**（它们引用的是当时版本的章节），链接与约定串照查。要退役一个只被历史记录引用的章节，不再需要改历史记录。
 
 3. **`AGENTS.md` §10 / §11 的 `erp_os` 模板残留**
    列了 `Inventory` / `Order` / `e-Invoice`，本项目没有这些模块，会把审查者的注意力引到不存在的地方。属噪音不属错误，已记进 [TODO.md](TODO.md)，另开 PR 清。

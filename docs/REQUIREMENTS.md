@@ -274,6 +274,6 @@
 
 ## 四、评审意见的落实状态
 
-✅ **逐条核对已完成（2026-09-10）** —— 结果见 [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md)。
+✅ **逐条核对已完成（2026-09-10）** —— 结果见 [REVIEW_FOLLOWUP_v1.1.md](archive/REVIEW_FOLLOWUP_v1.1.md)。
 
 结论：25 条里 20 条已解决，5 条有残留（R1–R5，已进 [TODO.md](TODO.md)）。**7 条 P0 阻断级全部解决**，Phase 0 / Phase 1 没有被评审意见卡住的地方。

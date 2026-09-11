@@ -66,10 +66,12 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 
 ### D. spec 的演进史（想知道「为什么长这样」时读）
 
+> 历史评审记录在 [docs/archive/](archive/README.md)，内容冻结；里面的 `§N` 指当时版本的章节，`check_docs.py` 不对它们校验。
+
 | 文件 | 作用 | 什么时候读 |
 | --- | --- | --- |
-| [docs/SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) | 对 v1.0 的评审意见（P0×7 / P1×10 / P2×8） | 想知道某个设计为什么这么定 |
-| [docs/REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md) | 25 条意见在 v1.1 的落实核对（20 解决 / 5 残留） | 想知道某条意见到底改没改 |
+| [docs/SPEC_REVIEW_v1.0.md](archive/SPEC_REVIEW_v1.0.md) | 对 v1.0 的评审意见（P0×7 / P1×10 / P2×8） | 想知道某个设计为什么这么定 |
+| [docs/REVIEW_FOLLOWUP_v1.1.md](archive/REVIEW_FOLLOWUP_v1.1.md) | 25 条意见在 v1.1 的落实核对（20 解决 / 5 残留） | 想知道某条意见到底改没改 |
 
 ### E. 决策记录
 
