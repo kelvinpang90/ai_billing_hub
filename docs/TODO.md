@@ -47,7 +47,7 @@
 
 ## Phase 0 — Foundation（§123）
 
-- [ ] 仓库骨架：`app/`、`tests/`、Alembic、`.env.example`、`README.md`
+- [ ] 仓库骨架：`app/`、`tests/`、Alembic、`.env.example`、~~`README.md`~~（README 已于 2026-09-11 单独补上，其余未做）
 - [ ] Docker Compose：nginx · frontend · api · celery-worker · celery-beat · redis · mysql
 - [ ] FastAPI 结构（`app/api` / `core` / `models` / `schemas` / `repositories` / `services` / `tasks`）
 - [ ] React 结构（Vite + TS + Ant Design + i18n 骨架）
@@ -216,6 +216,7 @@ Phase 全做完还不能上，以下五条必须全过：
 - [ ] 准入查询的瞬态空结果：`gh pr checks --watch` 刚返回时立刻跑 `codex-review.ps1`，`gh pr checks --json` 曾报「no checks reported」（复制延迟），几秒后正常。现在是 fail-closed（退出 2），但紧跟 CI 跑审查是最常见的用法。给这一种报错加有界重试（只读查询，≤3 次），**不是本轮顺手修的范围**，另开 PR
 - [ ] `.ps1` 文件 UTF-8 BOM 检查（Codex 建议时看的是无 `.ps1` 的分支才暂缓；现在 main 上有三个）
 - [x] 收口 #9 留下的输出格式冲突：重写后的 `AGENTS.md` §18 自带一套「推荐格式」（`### P1 — 问题标题` + 位置 / 问题 / 触发条件 / 后果 / 建议），与 `codex-review.ps1` 提示词强制的 `### 阻断项` / `### 建议项` / `### 清单核对` 是两套。脚本只解析首行前缀与末行判定，退出码不受影响，但 Codex 每次会同时收到两套格式指令。按「一个格式约定只准有一份实现」收口：格式模板只留在提示词里（它每次随材料送达），§18 改为指向它，并把原 P1 格式里那五项作为**内容底线**保留（位置 / 问题 / 触发条件 / 后果 / 建议）。**验收**：`check_docs.py`（含约定串规则）、`check_repo_policy.py`、Python 61 用例、PS 96 用例全过
+- [x] 刷新入口文档（2026-09-11）。整理全仓库 25 份文档时发现**入口文档本身在骗人**：`HANDOFF.md` 停在 09-10，写着「未完成：ADR」（实际 0001–0009 全写完）、7 条未决问题里 4 条已收口，最要命的是「已知冲突 #1」还写着 `CLAUDE.md` 与 `AGENTS.md`「是同一内容的副本，改一个记得同步另一个」——#9 已经把两者拆成独立文件，照着做会同步错方向。`PROJECT.md` 的文档地图只覆盖 `docs/` 内部，漏了 `CLAUDE.md` / `AGENTS.md` / `review_checklist.md` 与两个 GitHub 模板。仓库还没有 `README.md`，GitHub 首页是空的。三项一并修：HANDOFF 重写到当前真实状态、文档地图补全为七组 25 份、新增根 `README.md`
 - [ ] `AGENTS.md` §10 / §11 列的 `Inventory` / `Order` / `e-Invoice` 不是本项目的模块（疑似从 `erp_os` 模板带入），会把 Codex 的注意力引到不存在的地方。属噪音不属错误，另开 PR 清
 - [x] 第二轮 Codex 审查的三条阻断（审查发现，非自查）：① 复审增量用随机临时文件名，`git diff --no-index` 把路径写进 `--stat` 与 diff 头，审查前后两次取材逐字不等 → **只要增量非空，所有修复复审都发不出判定**，改为固定文件名 + 以临时目录为工作目录用相对名调 git；② `Test-ImpactSection` 的 `\s*\S` 跨空行，空的「完整影响面」后接另一个章节也算写了 → 改成在下一个标题之前找内容行；③ 复选框白名单按「后面跟链接就豁免」，于是 `[~]` 后面接一个 Markdown 链接就能绕过 → 判据改为「方括号里不止一个字符才是链接标签」。**验收**：三条各做变异测试，分别有用例失败；Python 61 用例、PS 96 用例
 

@@ -1,7 +1,7 @@
 # PROJECT — Acuven Central AI Billing Platform
 
 > 项目总览与文档地图。**新人 / 新 session 从这里开始读。**
-> 最后更新：2026-09-10
+> 最后更新：2026-09-11
 
 ---
 
@@ -39,21 +39,65 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 
 ## 文档地图
 
+全仓库 Markdown 按**作用**分七组。路径相对仓库根目录。
+
+### A. 入口 —— 迷路时从这里进
+
 | 文件 | 作用 | 什么时候读 |
 | --- | --- | --- |
-| `PROJECT.md`（本文件） | 项目总览、文档地图 | 第一次接触项目 |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 架构摘要、技术栈、关键决策、14 条不变量 | 动手写任何代码之前 |
-| [REQUIREMENTS.md](REQUIREMENTS.md) | 需求索引：`REQ-*` 追溯表 + 140 节按主题分组导航 | 找某条具体需求在 spec 哪一节 |
-| [TODO.md](TODO.md) | Phase 0–8 任务清单与验收标准 | 每个 session 开始时 |
-| [HANDOFF.md](HANDOFF.md) | 当前进度、下一步、未决问题 | 每个 session 开始时 |
-| [WORKFLOW.md](WORKFLOW.md) | 双 agent 流程：Claude 开发 / Codex 审查 / 你验收 | 开 PR、审查、回应意见时 |
-| [REVIEW-LOG.md](REVIEW-LOG.md) | 审查记账：反复出现的问题、已达成的约定、被驳回的意见 | 想知道某个做法为什么定成这样 |
-| [adr/](adr/README.md) | 架构决策记录：写法约定 + 索引 | 做架构决策、或想知道某个决策为什么这么定 |
-| [Acuven_Central_AI_Billing_Platform_Spec_v1.2.md](Acuven_Central_AI_Billing_Platform_Spec_v1.2.md) | **唯一事实来源**，140 节完整规格 | 需要精确定义时 |
-| [SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) | 对 v1.0 的评审意见（P0/P1/P2 共 25 条） | 想知道某个设计为什么长这样 |
-| [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md) | 25 条评审意见在 v1.1 的落实核对（20 解决 / 5 残留） | 想知道某条评审意见到底改没改 |
+| `docs/PROJECT.md`（本文件） | 项目总览、文档地图 | 第一次接触项目 |
+| [docs/HANDOFF.md](HANDOFF.md) | 现在在哪、下一步、未决问题、环境状态 | **每个 session 开始时** |
+| [docs/TODO.md](TODO.md) | Phase 0–8 任务清单与验收、前置决策 D1–D7、评审残留 R1–R7 | 每个 session 开始时 |
 
-> ARCHITECTURE.md 和 REQUIREMENTS.md 是**导航层**，不重复定义需求。两者与 spec 冲突时，**以 spec 为准**。
+### B. 唯一事实来源
+
+| 文件 | 作用 | 什么时候读 |
+| --- | --- | --- |
+| [docs/Acuven_Central_AI_Billing_Platform_Spec_v1.2.md](Acuven_Central_AI_Billing_Platform_Spec_v1.2.md) | 140 节完整规格。**所有冲突以它为准** | 需要精确定义时 |
+
+### C. spec 的导航层（不重复定义需求，只指路）
+
+| 文件 | 作用 | 什么时候读 |
+| --- | --- | --- |
+| [docs/ARCHITECTURE.md](ARCHITECTURE.md) | 架构摘要、技术栈、**14 条财务不变量**、目录结构（第 9 节） | 动手写任何代码之前 |
+| [docs/REQUIREMENTS.md](REQUIREMENTS.md) | `REQ-*` 追溯表 + 140 节按主题分组导航 | 找某条具体需求在 spec 哪一节 |
+
+> 这两份是导航层。与 spec 冲突时，**以 spec 为准**。
+
+### D. spec 的演进史（想知道「为什么长这样」时读）
+
+| 文件 | 作用 | 什么时候读 |
+| --- | --- | --- |
+| [docs/SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) | 对 v1.0 的评审意见（P0×7 / P1×10 / P2×8） | 想知道某个设计为什么这么定 |
+| [docs/REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md) | 25 条意见在 v1.1 的落实核对（20 解决 / 5 残留） | 想知道某条意见到底改没改 |
+
+### E. 决策记录
+
+| 文件 | 作用 | 什么时候读 |
+| --- | --- | --- |
+| [docs/adr/README.md](adr/README.md) | ADR 的写法约定、**修订规则**、索引、待写清单 | 要写新 ADR 或改已有 ADR 时 |
+| `docs/adr/ADR-0001` … `ADR-0009` | 逐项架构决策。索引与状态见上一行 | 想知道某个决策为什么这么定 |
+
+> ⚠️ 有四份是**部分接受**（0004 / 0006 / 0008 / 0009），各自留了显式待补项，别当成已定案。
+
+### F. 双 agent 流程
+
+| 文件 | 作用 | 什么时候读 |
+| --- | --- | --- |
+| [docs/WORKFLOW.md](WORKFLOW.md) | **流程的唯一事实来源**：两个闸门、评论格式、回应表、写后回读、退出码契约 | 开 PR、审查、回应意见时 |
+| [docs/REVIEW-LOG.md](REVIEW-LOG.md) | 审查记账：反复出现的问题、已达成的约定、机械化对照表 | 想知道某个做法为什么定成这样 |
+| [scripts/review_checklist.md](../scripts/review_checklist.md) | Codex 审查时逐条走的清单（A 不变量 / B DoD / C 财务 / D 通用 / E 文档CI脚本 / F 复审） | 审查时；写代码时可当自查表 |
+| [CLAUDE.md](../CLAUDE.md) | **Claude（开发者）的指令文件** | 由 Claude Code 自动加载 |
+| [AGENTS.md](../AGENTS.md) | **Codex（审查者）的指令文件** | 由 Codex 自动加载 |
+
+> ⚠️ `CLAUDE.md` 与 `AGENTS.md` **不是同一内容的两个副本**（2026-09-11 起各自独立）。两边必须一致的只有评论署名前缀与判定行，由 `check_docs.py` 的约定串规则机械保证。
+
+### G. GitHub 模板（机器可读，结构不要改）
+
+| 文件 | 作用 | 什么时候读 |
+| --- | --- | --- |
+| [.github/pull_request_template.md](../.github/pull_request_template.md) | PR 正文结构。`设计闸门：` 行与 `TODO 影响` 节会被 `check_repo_policy.py` 校验 | 开 PR 时 |
+| [.github/ISSUE_TEMPLATE/design-gate.md](../.github/ISSUE_TEMPLATE/design-gate.md) | 设计闸门 Issue 模板 | 碰钱的任务写代码前 |
 
 ## 硬性约束
 
