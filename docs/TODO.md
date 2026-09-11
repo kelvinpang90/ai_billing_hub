@@ -209,7 +209,7 @@ Phase 全做完还不能上，以下五条必须全过：
 - [x] `scripts/codex-review.ps1` 接入：准入（CI 全绿 + 正文策略检查）不过则不调 Codex；复审材料自动带上轮审查、本轮回应、本轮相对上轮的增量（= 两版「PR 相对 base 的 diff」之间的差异，同步 base 不计入）；第三轮起要求 `### 完整影响面`；发布改走回读验证
 - [x] CI 新增 `policy` job（策略检查 + Python 回归）；`pull_request` 触发加 `edited`，PR 正文改了会重跑
 - [x] 模板与文档同步：PR 模板 `TODO 影响` 节、WORKFLOW §4 / §6 / §7、审查清单准入与 F 节、CLAUDE.md / AGENTS.md 入口。**验收**：`check_docs.py` 通过（约定串规则含署名前缀）
-- [ ] 合并后把 `policy` 加进 `main` 的必需检查（分支保护是仓库设置，PR 里改不了）
+- [x] 合并后把 `policy` 加进 `main` 的必需检查（分支保护是仓库设置，PR 里改不了）。2026-09-11 已加：必需检查现为 `docs` / `scripts` / `policy` / `secret-scan`，`strict: true`；其余设置（enforce_admins、线性历史、禁 force push、禁删除、对话必须解决）逐项回读确认未变动
 - [ ] 已开的 #6、#7 按新模板补 `TODO 影响` 节；#6 上旧格式的 `CLAUDE RESPONSE` 要在复审前重发一条新格式的，否则复审取材会被策略检查拒绝
 - [ ] 准入查询的瞬态空结果：`gh pr checks --watch` 刚返回时立刻跑 `codex-review.ps1`，`gh pr checks --json` 曾报「no checks reported」（复制延迟），几秒后正常。现在是 fail-closed（退出 2），但紧跟 CI 跑审查是最常见的用法。给这一种报错加有界重试（只读查询，≤3 次），**不是本轮顺手修的范围**，另开 PR
 - [ ] `.ps1` 文件 UTF-8 BOM 检查（Codex 建议时看的是无 `.ps1` 的分支才暂缓；现在 main 上有三个）
