@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.3  
+**Version:** 1.4  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -15,6 +15,7 @@
 | 1.0 | 2026-09-09 | Initial V1 product and implementation specification. |
 | 1.1 | 2026-09-10 | Clarified currency conversion, pricing data, asynchronous ingestion, idempotency, financial periods, status handling, security, recovery, compliance gates, and production operations. |
 | 1.2 | 2026-09-10 | §99 repository visibility changed from private to public to obtain branch protection under GitHub Free. See ADR-0001. No other normative change. |
+| 1.4 | 2026-09-11 | Editorial only, no normative change. Retired two illustrative sections; section numbers are stable, so both leave a gap rather than causing a renumber. **§102** (Integrated Application Backend Structure) was a directory tree the section itself declared non-binding ("Adapt to existing project conventions rather than blindly forcing this exact layout"). **§138** (Final Target User Experience) was a mock dashboard with invented figures; every field it named is already normative in §67–§69, and §69 additionally carries the "Do NOT show" list. |
 | 1.3 | 2026-09-11 | Errata only, no new normative decision. §6 no longer states a monetary precision of its own — it contradicted §80 (`DECIMAL(18,6)` vs `DECIMAL(20,8)` with a single `ROUND_HALF_UP` to 8 decimal places); §80 is now the sole definition. §123 Phase 0 repository visibility corrected from private to public — v1.2 declared this change but missed this occurrence. |
 
 ## Document Navigation
@@ -29,6 +30,8 @@
 - Repository structure, integration flow, testing, and delivery: §101–§140
 
 The section number is the stable requirement reference for V1. Critical normative requirements additionally use `REQ-*` identifiers where implementation and test traceability are required.
+
+Because section numbers are stable, retired sections leave a gap rather than being renumbered. Retired so far: **§102** and **§138** (v1.4 — both were illustrative only; see the Revision History).
 
 ---
 
@@ -3672,42 +3675,6 @@ ai_billing_hub/
 
 ---
 
-# 102. Integrated Application Backend Structure
-
-Existing customer repository should receive modules similar to:
-
-```text
-app/
-├── services/
-│   ├── ai/
-│   │   ├── anthropic_provider.py
-│   │   ├── openai_transcription_provider.py
-│   │   └── usage.py
-│   │
-│   └── billing/
-│       ├── client.py
-│       ├── outbox.py
-│       ├── events.py
-│       ├── status.py
-│       └── webhook.py
-│
-├── models/
-│   ├── billing_outbox.py
-│   └── conversation_session.py
-│
-├── tasks/
-│   ├── billing_delivery.py
-│   └── billing_status_sync.py
-│
-└── api/
-    └── internal/
-        └── billing_webhook.py
-```
-
-Adapt to existing project conventions rather than blindly forcing this exact layout.
-
----
-
 # 103. Integrated Application Backend Request Flow
 
 Target implementation:
@@ -4696,46 +4663,6 @@ Before writing code:
 Then begin implementation.
 
 Do not continue to Phase 2 until Phase 0 and Phase 1 tests pass.
-
----
-
-# 138. Final Target User Experience
-
-## Customer
-
-Customer logs in and sees:
-
-```text
-AI Credit Balance
-RM 238.62
-
-This Month Usage
-RM 61.38
-
-AI Requests
-4,732
-
-Conversations
-1,286
-
-[ Top Up ]
-[ Usage Details ]
-[ Transactions ]
-[ Statements ]
-```
-
-Customer can drill down:
-
-```text
-Conversation
-    ↓
-Requests
-    ↓
-Provider / Model
-Input Tokens
-Output Tokens
-Charged Amount
-```
 
 ---
 

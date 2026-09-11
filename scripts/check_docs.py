@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = ROOT / "docs" / "Acuven_Central_AI_Billing_Platform_Spec_v1.3.md"
+SPEC = ROOT / "docs" / "Acuven_Central_AI_Billing_Platform_Spec_v1.4.md"
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)")
 SECTION_REF_RE = re.compile(r"§(\d+(?:\.\d+)?)")
