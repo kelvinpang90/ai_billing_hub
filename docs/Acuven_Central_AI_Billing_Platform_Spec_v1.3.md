@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.2  
+**Version:** 1.3  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -15,6 +15,7 @@
 | 1.0 | 2026-09-09 | Initial V1 product and implementation specification. |
 | 1.1 | 2026-09-10 | Clarified currency conversion, pricing data, asynchronous ingestion, idempotency, financial periods, status handling, security, recovery, compliance gates, and production operations. |
 | 1.2 | 2026-09-10 | §99 repository visibility changed from private to public to obtain branch protection under GitHub Free. See ADR-0001. No other normative change. |
+| 1.3 | 2026-09-11 | Errata only, no new normative decision. §6 no longer states a monetary precision of its own — it contradicted §80 (`DECIMAL(18,6)` vs `DECIMAL(20,8)` with a single `ROUND_HALF_UP` to 8 decimal places); §80 is now the sole definition. §123 Phase 0 repository visibility corrected from private to public — v1.2 declared this change but missed this occurrence. |
 
 ## Document Navigation
 
@@ -328,13 +329,7 @@ Wallet Balance: RM235.728412
 
 Internally retain high precision.
 
-Required V1 mechanism:
-
-```sql
-DECIMAL(18,6)
-```
-
-or greater precision where appropriate.
+Persisted precision, the rounding rule, and the display boundary are defined once in §80. This section must not restate them.
 
 Customer-facing screens normally display:
 
@@ -4224,7 +4219,7 @@ Build:
 - logging
 - error handling
 - CI test structure
-- private GitHub repository and protected `main` CI/CD
+- public GitHub repository and protected `main` CI/CD — see §99
 - dedicated production MySQL/Redis topology
 - backup, recovery, and encryption-key design
 - initial performance/SLO baseline
