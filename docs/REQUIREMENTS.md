@@ -1,6 +1,6 @@
 # REQUIREMENTS — 需求索引
 
-> **这不是需求正文。** 正文在 [Acuven_Central_AI_Billing_Platform_Spec_v1.4.md](Acuven_Central_AI_Billing_Platform_Spec_v1.4.md)（140 节）。
+> **这不是需求正文。** 正文在 [Acuven_Central_AI_Billing_Platform_Spec_v1.5.md](Acuven_Central_AI_Billing_Platform_Spec_v1.5.md)（140 节）。
 > 本文件的用途：① 按主题快速定位到 spec 的哪一节；② 提供 `REQ-*` 可追溯性清单。
 > 冲突时以 spec 为准。
 > 最后更新：2026-09-10
