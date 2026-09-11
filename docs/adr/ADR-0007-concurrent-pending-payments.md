@@ -4,7 +4,7 @@
 | --- | --- |
 | **状态** | 已接受 |
 | **日期** | 2026-09-10 |
-| **来源** | [REVIEW_FOLLOWUP_v1.1.md](../REVIEW_FOLLOWUP_v1.1.md) 的 R2。spec §42、§43 定义了充值与支付流程，但对「同一租户能否并存多笔 PENDING」无任何规定 |
+| **来源** | [REVIEW_FOLLOWUP_v1.1.md](../archive/REVIEW_FOLLOWUP_v1.1.md) 的 R2。spec §42、§43 定义了充值与支付流程，但对「同一租户能否并存多笔 PENDING」无任何规定 |
 | **影响** | `payments` 状态机、Phase 4 客户门户（spec §127）、spec §71 客户支付页 |
 | **相关** | Invariant 3（同一笔支付永不重复入账）、spec §81 钱包并发 |
 
