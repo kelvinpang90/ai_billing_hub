@@ -75,6 +75,8 @@
 - 什么算实质修改：改了契约、表结构、事务边界、状态机、失败语义、不变量控制。改错别字不算
 - 实质修改时：顶部版本 +1，§12 追加变更说明，状态退回 `READY_FOR_REVIEW`
 
+> 这条规则在 [design-gate 模板](../.github/ISSUE_TEMPLATE/design-gate.md)末尾**有意保留一份面向审查者的副本**：Codex 审设计时材料里只有 Issue 正文，读不到本文件。改这里必须同时改那里；审查清单不再第三次复述，只指向 Issue 正文。
+
 > 不设这条，就会出现「批准的是 v1、合并的是 v3」——PR #2 上真发生过类似情况：`APPROVE` 在两版改动之前给出，之后又叠了新改动。
 
 ## 4. 闸门 B：实现
@@ -184,6 +186,9 @@ python -m unittest discover -s tests
 ```
 
 三项分别管：链接与 `§N` 引用 + 约定串一致性 / 任务复选框与 PR 字段 / 策略脚本与回读脚本自身的回归。
+PowerShell 侧另有 `pwsh -NoProfile -File scripts/tests/Test-ReviewVerdict.ps1`（CI 的 `scripts` 项跑它）。
+
+**这里是命令清单的唯一出处。**`CLAUDE.md`、`README.md`、PR 模板的自检行只链接到这里，不再各抄一份——加 lint、加 pytest 时只改这里。
 
 Phase 0 建好 `app/` 与 `tests/` 之后，这里会补上 lint 与 pytest。**跑不过就不许 push**——让 CI 替你发现本地能发现的问题是浪费一轮。
 

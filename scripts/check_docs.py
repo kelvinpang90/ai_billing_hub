@@ -59,6 +59,13 @@ CONSISTENCY_RULES = [
         },
     },
     {
+        # 「不走闸门」的清单出现在 WORKFLOW、design-gate 模板、PR 模板、CLAUDE.md 四处，
+        # 各自服务不同读者，删不掉，所以钉住写法。
+        "name": "不走闸门清单",
+        "canonical": "前端 / 文档 / CI / 脚本",
+        "loose": re.compile(r"前端\s*/\s*文档\s*/\s*CI\s*/\s*脚本", re.IGNORECASE),
+    },
+    {
         # 署名前缀是「这条评论是独立审查」的唯一凭据（两边共用同一个 GitHub
         # 账号）。它同时出现在 lib 的常量、prompt 模板、WORKFLOW 的约定表里 ——
         # 任意一处漂移，脚本发出去的批准就会被读取方判为「不是审查」。

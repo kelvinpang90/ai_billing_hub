@@ -20,13 +20,7 @@
 
 ## 提 PR 前必须本地跑过
 
-```bash
-python scripts/check_docs.py
-python scripts/check_repo_policy.py
-python -m unittest discover -s tests
-```
-
-PowerShell 侧另有 `pwsh -NoProfile -File scripts/tests/Test-ReviewVerdict.ps1`。
+命令清单只在 [docs/WORKFLOW.md §7](docs/WORKFLOW.md) 一处，这里不重复。
 
 CI 跑四项：`docs` / `scripts` / `policy` / `secret-scan`，四项都是 `main` 的必需检查。
 

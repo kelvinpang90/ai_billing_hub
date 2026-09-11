@@ -57,7 +57,7 @@ TODO target: docs/TODO.md:<行号>
 
 ## 自检
 
-- [ ] 本地三项全过：`python scripts/check_docs.py`、`python scripts/check_repo_policy.py`、`python -m unittest discover -s tests`
+- [ ] 本地检查全过（命令清单见 [WORKFLOW §7](../docs/WORKFLOW.md)）
 - [ ] 金额相关代码全用 `Decimal`，无 `float`
 - [ ] 涉及查询的地方都带 tenant 过滤
 - [ ] 新增的失败路径不会静默吞掉事件
