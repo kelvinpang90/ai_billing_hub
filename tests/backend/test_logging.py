@@ -9,7 +9,10 @@ import sys
 import pytest
 
 from app.core.logging import (
+    _MAX_REDACT_DEPTH,
+    CYCLE,
     REDACTED,
+    TRUNCATED,
     JsonFormatter,
     bind_log_context,
     clear_log_context,
@@ -93,7 +96,38 @@ def test_redaction_terminates_on_self_referencing_structures() -> None:
     loop: dict = {"name": "x"}
     loop["self"] = loop
 
-    redact(loop)  # 不抛 RecursionError 即为通过
+    assert redact(loop) == {"name": "x", "self": CYCLE}
+
+
+def test_shared_references_are_not_mistaken_for_cycles() -> None:
+    """同一个对象出现在两个并列位置是共享引用，不是环。"""
+    shared = {"email": "a@example.com"}
+
+    assert redact({"left": shared, "right": shared}) == {"left": shared, "right": shared}
+
+
+def test_depth_limit_fails_closed() -> None:
+    """查不下去必须当作「有东西没查」，返回原对象就是 fail-open。
+
+    返回原对象的话，没遍历到的那层里若有 password / prompt，它会原样落进日志。
+    """
+    deep: dict = {"password": "leaked", "prompt": "customer said hello"}
+    for _ in range(_MAX_REDACT_DEPTH + 3):
+        deep = {"nested": deep}
+
+    assert "leaked" not in json.dumps(redact(deep))
+    assert "customer said hello" not in json.dumps(redact(deep))
+    assert TRUNCATED in json.dumps(redact(deep))
+
+
+def test_deeply_nested_but_within_limit_is_still_redacted() -> None:
+    deep: dict = {"password": "leaked"}
+    for _ in range(_MAX_REDACT_DEPTH - 2):
+        deep = {"nested": deep}
+
+    rendered = json.dumps(redact(deep))
+    assert "leaked" not in rendered
+    assert REDACTED in rendered
 
 
 def test_credential_urls_in_free_text_are_scrubbed() -> None:

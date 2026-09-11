@@ -57,6 +57,12 @@ _SENSITIVE_KEY_PARTS = (
 )
 
 REDACTED = "***REDACTED***"
+# 脱敏查不下去时的占位符。它们出现在日志里本身就是信号：要么有人往日志里塞了
+# 深到离谱的结构，要么塞了自引用结构，两种都该去改调用点。
+TRUNCATED = "***TRUNCATED***"
+CYCLE = "***CYCLE***"
+# 上限放得比任何合理的日志上下文都深 —— 有环检测兜着，不需要靠浅上限防挂死。
+_MAX_REDACT_DEPTH = 12
 
 # 自由文本（日志 message、异常栈）里的脱敏模式。结构化字段那条路径按字段名走，
 # 这条只能按形状认。
@@ -107,21 +113,33 @@ def is_sensitive_key(key: str) -> bool:
     return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
 
 
-def redact(value: Any, _depth: int = 0) -> Any:
+def redact(value: Any, _depth: int = 0, _seen: frozenset[int] = frozenset()) -> Any:
     """Recursively replace values held under sensitive-looking keys.
 
-    深度设上限是为了挡住自引用结构——日志格式化里出现无限递归，会把一次误用
-    变成进程挂死。
+    两道防线，且**都必须 fail-closed**：
+
+    - **环检测**挡住自引用结构。日志格式化里出现无限递归，会把一次误用变成
+      进程挂死。
+    - **深度上限**挡住深到离谱的结构。到顶时返回占位符而**不是原对象**——
+      返回原对象是 fail-open：没遍历到的那层里若有 `password` / `prompt`，
+      它会原样落进日志。一个「查不下去」的脱敏必须当作「有东西没查」，
+      而不是「没问题」。
     """
-    if _depth >= 6:
-        return value
+    if _depth >= _MAX_REDACT_DEPTH:
+        return TRUNCATED
+    if isinstance(value, (dict, list, tuple)):
+        if id(value) in _seen:
+            return CYCLE
+        # 每条分支各拿一份，兄弟节点之间不互相影响：同一个对象在两个并列
+        # 位置出现是共享引用，不是环。
+        _seen = _seen | {id(value)}
     if isinstance(value, dict):
         return {
-            key: REDACTED if is_sensitive_key(str(key)) else redact(item, _depth + 1)
+            key: REDACTED if is_sensitive_key(str(key)) else redact(item, _depth + 1, _seen)
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return [redact(item, _depth + 1) for item in value]
+        return [redact(item, _depth + 1, _seen) for item in value]
     return value
 
 

@@ -151,6 +151,7 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
   2. 日志 message 本身 —— 按文本形状脱敏
   3. **异常栈** —— 同样按文本形状脱敏。**初版漏了这条**（PR #26 审查指出）：`logger.exception()` 把异常消息原样写进日志，而抛错的人最常见的写法就是把触发它的那个值一起写进消息。结构化字段守住了、这条路敞着，等于没守
   ⚠️ 这是**兜底**，不是防线 —— 按字段名兜不住换了名字的字段，按文本形状兜不住没有 `key=value` 形状的自由文本。模块顶部写死了两条硬规矩：不把 payload 交给 logger、不把密钥拼进异常消息
+- **递归脱敏 fail-closed**：环检测（按对象 id，兄弟节点各拿一份 `seen`，共享引用不误判成环）+ 深度上限 12，**到顶返回占位符而不是原对象**。初版到顶直接 `return value` 是 fail-open（PR #26 第二轮审查指出）—— 没遍历到的那层里若有 `password` / `prompt`，它会原样落进日志。**一个「查不下去」的脱敏必须当作「有东西没查」**
 - `configure_logging()` 接管 `uvicorn` / `uvicorn.error` / `uvicorn.access` 三个 logger。它们自带 handler 且 `propagate=False`，不接管的话生产日志会一半 JSON 一半纯文本 —— **那等于没有结构化日志**
 - `app/schemas/envelope.py`：§107 的 `{success, data, error, request_id}`。成功时 `error` 为 null、失败时 `data` 为 null，客户端只看 `success` 一个字段就能分支
 - `app/core/errors.py`：`AppError` 基类（`code` + `http_status`，后续领域异常从这里派生）+ 四个处理器 —— `AppError` / 框架 `HTTPException` / 请求校验失败 / **未处理异常**。未处理异常一律返回固定文案 `INTERNAL_ERROR`，栈只进日志
@@ -166,7 +167,7 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 
 **验证到什么程度**
 
-- `pytest` **35 passed**（T0.1 的 2 条 + 本任务新增 33 条），其中写死的是这几条边界：
+- `pytest` **38 passed**（T0.1 的 2 条 + 本任务新增 36 条），其中写死的是这几条边界：
   - **异常栈进日志前过脱敏**：用例抛一个消息里带 `postgres://svc:hunter2@db-01/billing` 的异常，断言日志输出里无 `hunter2`、有 `***REDACTED***`、**且仍有 `Traceback`**（脱敏不能把排障信息一起吃掉）
   - 响应守住不等于日志守住 —— 两条路径分别验。日志里的凭据比响应里的更危险：会被永久留存、会转发到集中日志平台，而且没人盯着看
   - 未处理异常的响应里**不出现**异常原文（用例故意抛一个带 `postgres://user:hunter2@...` 的异常，断言响应里既无 `hunter2` 也无 `postgres` 也无 `Traceback`）
@@ -175,9 +176,10 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
   - 敌意 `X-Request-ID`（空格 / 换行 / 65 字符 / 分号 / 空串）一律被换成自己生成的 uuid4
   - 脱敏递归进嵌套结构；自引用结构不会栈溢出
   - 两次请求拿到不同 id（上下文没串）
-- **测试抓到三个真 bug**：
+- **测试与审查抓到四个真 bug**：
   1. 未处理异常的响应由最外层 `ServerErrorMiddleware` 产出，**绕过** `RequestContextMiddleware`，`X-Request-ID` 响应头根本没设上 —— 而 500 恰恰最需要客户端报得出 id。改成在信封生成处设头
-  2. 异常栈没过脱敏（PR #26 审查指出）—— 见上
+  2. 异常栈没过脱敏（PR #26 第一轮审查指出）—— 见上
+  4. 递归脱敏到深度上限时 fail-open（PR #26 第二轮审查指出）—— 见上
   3. `Authorization: Bearer abc.def` 只 redact 掉 `Bearer`，token 原样留在后面（值匹配「取到空格为止」）。值那一组补了 `Bearer|Basic|Token|Digest` 分支
 
 **教训：含反斜杠的内容不要经 shell heredoc**
