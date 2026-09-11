@@ -1,0 +1,150 @@
+# 本地 / 单 VPS 的服务栈（spec §99）。
+#
+# ⚠️ **本文件里不许出现任何真实凭据**（仓库是公开的）。密码一律从 `.env` 取，
+# 且用 `${VAR:?...}` 形式：没设就**直接报错停住**，而不是悄悄用空密码起一个
+# 谁都能连的数据库。
+#
+# ⚠️ **这里不用 `env_file: .env`**。宿主机的 `.env` 里 BILLING_DATABASE_URL 指向
+# 127.0.0.1（给直接跑 uvicorn 用），整份灌进容器会让容器连回自己。容器要的
+# 每一个变量都在下面显式写出来。
+#
+# 用法见 README「本地起整套栈」。
+
+# 日志上限：没有它，json-file 驱动会一直写到磁盘满。
+# ⚠️ 生产侧的轮转 / 保留期 / 异地留存 / 磁盘告警是 §94 的要求，归 T0.9；
+# 这里只是先堵住「把开发机写满」这一种。
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# api / celery-worker / celery-beat 跑同一份代码、同一个镜像，只有 command 不同。
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: acuven-billing-hub:local
+  restart: unless-stopped
+  logging: *logging
+  environment:
+    BILLING_ENVIRONMENT: local
+    BILLING_DEBUG: "false"
+    BILLING_LOG_LEVEL: ${BILLING_LOG_LEVEL:-INFO}
+    # ⚠️ 密码里出现 @ : / # 会把 DSN 解析切错位置，见 .env.example 的说明。
+    BILLING_DATABASE_URL: mysql+pymysql://${BILLING_MYSQL_USER:-billing}:${BILLING_MYSQL_PASSWORD:?set BILLING_MYSQL_PASSWORD in .env (copy .env.example)}@mysql:3306/${BILLING_MYSQL_DATABASE:-billing}?charset=utf8mb4
+    BILLING_REDIS_URL: redis://redis:6379/0
+  # ⚠️ 只是启动顺序，**不是** service_healthy。API 被设计成依赖不可用时照样
+  # 启动、由 /readyz 如实汇报（见 app/main.py 与 app/api/health.py）——
+  # 让它等 MySQL 健康，等于 MySQL 坏了就连 /healthz 都拿不到，排障时手上空空。
+  depends_on:
+    - mysql
+    - redis
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # ⚠️ 显式钉死 UTC。spec §109 要求一律以 UTC 存储、只在展示层转
+      # Asia/Kuala_Lumpur；默认的 SYSTEM 时区会让「换一台宿主机」变成一次
+      # 静默的数据语义变更。
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${BILLING_MYSQL_ROOT_PASSWORD:?set BILLING_MYSQL_ROOT_PASSWORD in .env (copy .env.example)}
+      MYSQL_DATABASE: ${BILLING_MYSQL_DATABASE:-billing}
+      # 应用**不用 root 连**。这个用户只对上面那个库有权限。
+      MYSQL_USER: ${BILLING_MYSQL_USER:-billing}
+      MYSQL_PASSWORD: ${BILLING_MYSQL_PASSWORD:?set BILLING_MYSQL_PASSWORD in .env (copy .env.example)}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    # ⚠️ 端口**不发布到宿主机**。公开仓库 + 单 VPS，发布 3306 等于把数据库
+    # 摆到公网。要连就 `docker compose exec mysql mysql ...`。
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *logging
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    <<: *backend
+    healthcheck:
+      # ⚠️ 探的必须是 /healthz，**绝不能是 /readyz**。/readyz 在数据库不可用时
+      # 返回 503，用它做容器健康检查会让一次可恢复的数据库故障变成 API 的
+      # 滚动重启 —— 正是 app/api/health.py 里那段注释要防的事。
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  celery-worker:
+    <<: *backend
+    command:
+      - celery
+      - -A
+      - app.worker
+      - worker
+      - --loglevel=${BILLING_LOG_LEVEL:-INFO}
+
+  celery-beat:
+    <<: *backend
+    command:
+      - celery
+      - -A
+      - app.worker
+      - beat
+      - --loglevel=${BILLING_LOG_LEVEL:-INFO}
+      # beat 要往磁盘写「上次跑到哪」。非 root 进程写不进 /srv/billing，
+      # 镜像里 /var/lib/celery 的属主就是容器运行 UID，命名卷继承它。
+      - --schedule=/var/lib/celery/beat-schedule
+    volumes:
+      - celery-beat-state:/var/lib/celery
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    logging: *logging
+    ports:
+      - "${BILLING_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./deploy/nginx/billing.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/nginx/billing-proxy-headers.inc:/etc/nginx/conf.d/billing-proxy-headers.inc:ro
+    depends_on:
+      - api
+    healthcheck:
+      # 只问 nginx 自己活着没有，不经过 api。
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/nginx-health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+# ⚠️ spec §99 的服务清单是七个，这里只有六个：**frontend 还不存在**（TODO 的
+# T0.7 才建 React 骨架）。给一个构建不出来的 frontend 占位，会让 `up` 直接失败、
+# 整个栈验证不了。T0.7 要补的是：frontend 服务 + 把 nginx 的 `location /`
+# 从 503 改成指向它。tests/backend/test_compose.py 钉住了现在这六个。
+
+volumes:
+  mysql-data:
+  redis-data:
+  celery-beat-state:

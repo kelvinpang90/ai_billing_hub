@@ -1,7 +1,7 @@
 # TODO — 开发任务清单
 
 > 任务骨架来自 spec §123–§131（Phase 0–8）。验收标准直接抄自 spec，**不要自行放宽**。
-> 最后更新：2026-09-10
+> 最后更新：2026-09-12
 
 ---
 
@@ -69,12 +69,13 @@
 - [x] **T0.3 — 日志与统一错误处理**（§94、§107）：结构化日志、request id、统一错误响应体、领域异常层次、日志脱敏（密钥与 AI 内容绝不入日志）
 - [x] **T0.4 — MySQL + SQLAlchemy + Alembic 接通**：engine / session 生命周期、`Decimal` 列约定（Invariant 10）、Alembic 初始化与首个迁移、带依赖的就绪检查
 - [x] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
-- [ ] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
-- [ ] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）
+- [x] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
+- [ ] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）。**另含 T0.6 欠下的第七个服务**：compose 加 `frontend`、把 `deploy/nginx/billing.conf` 的 `location /` 从 503 占位改成指向它、同步 `tests/backend/test_compose.py` 的 `EXPECTED_SERVICES`（三处漏一处测试就红）
 - [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 
+> ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
 > ⚠️ **T0.9 必须包含的一条具体告警**（T0.5 派生，PR #28 审查指出）：`/readyz` 在 Redis 不可用时**刻意返回 200**，所以负载均衡不会发现这个故障，**它只能靠日志告警发现**。告警名 `billing_readiness_degraded_redis`，条件、分级与升级路径写在 [runbook](runbook.md)。告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
 - [x] ~~GitHub 仓库 + 受保护 `main`~~ 已建、已推送；`main` 保护规则已配（禁 force push / 禁删除 / 强制 PR / 线性历史 / 管理员同样受限），CI 五项 `docs` / `scripts` / `policy` / `backend` / `secret-scan` 已全部设为必需状态检查（`backend` 于 T0.2 合并后追加）
@@ -279,6 +280,62 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
    - `redact()` 现在对**字符串值**也跑一遍文本脱敏，不只按键名
    - `app/tasks/__init__.py` 写死硬规矩：**任务参数只传标识符，不传值** —— 密钥、token、AI prompt / response、请求体一律在任务里按 id 去库里取
    - 端到端验过：派发 `args=["api_secret=s3cr3t-must-not-appear"]`，该串在 worker 日志里出现 **0 次**，「received」行与异常栈两处都是 `***REDACTED***`
+
+---
+
+### T0.6 任务记录（2026-09-12）
+
+**做了什么**
+
+- `Dockerfile`：api / celery-worker / celery-beat **共用一个镜像**，只换 `command`。分成三个镜像只会让「worker 和 api 版本不一致」变成可能
+  - 两阶段：build 造 wheel，runtime 只装 wheel，构建期工具不留在运行镜像里
+  - **构建期就地跑一次 `scripts/packaging_smoke.py`**，验「装进 site-packages 的那一份」能起 `/healthz` —— 这一类缺陷（PR #22 的 wheel 少打子包）只有在安装后的环境里才看得见
+  - `alembic/` 与 `alembic.ini` **单独 COPY**（wheel 只打 `app*`）。这是 T0.5 记下的欠账，现在由用例钉住
+  - WORKDIR 用 `/srv/billing` 而不是 `/app`：cwd 会进 `sys.path`，一个叫 `app` 的目录在那里会让 `import app` 的解析变得要靠运气
+- `docker-compose.yml`：六个服务 + 三个命名卷。MySQL 显式 `--default-time-zone=+00:00`（§109 要求一律 UTC 存储，默认的 `SYSTEM` 会让「换一台宿主机」变成一次静默的数据语义变更）
+- `deploy/nginx/`：边缘反向代理。转发头单独成 `.inc` 文件被三处 `location` include —— 各抄一遍早晚有一处少 `X-Request-ID`，而少了它那条链路在日志里就断了
+- `tests/backend/test_compose.py`：10 条不变量用例
+- CI 的 `backend` job 加 `Compose stack` 一步：`docker compose config` + `docker compose build api`
+
+**几个不是随手选的默认**
+
+- **api 的容器健康检查探 `/healthz`，不探 `/readyz`。** `/readyz` 在数据库不可用时返回 503，拿它做健康检查会把一次**可恢复**的数据库故障放大成 API 的滚动重启 —— 正是 `app/api/health.py` 那段注释要防的事。用例钉住
+- **`depends_on` 只用启动顺序，不用 `service_healthy`。** API 被设计成依赖不可用时照样启动、由 `/readyz` 如实汇报；让它等 MySQL 健康，等于 MySQL 坏了连 `/healthz` 都拿不到，排障时手上空空
+- **迁移不是启动副作用**，是显式的 `docker compose run --rm api alembic upgrade head`。§100 要求 API 可水平扩展，多实例同时启动就会同时迁移同一个库；§98 要求迁移有明确顺序与回滚策略。用例钉住 `Dockerfile` 与所有 `command` 里都没有 `alembic upgrade`
+- **只发布 nginx 一个端口。** 公开仓库 + 单 VPS，发布 3306 等于把数据库摆到公网
+- **密码空着就起不来**（`${VAR:?...}`）。实测：不设时 compose 直接报错并指名该设哪个变量，而不是悄悄起一个空密码的数据库
+- **compose 里没有 `env_file: .env`。** 宿主机 `.env` 里的 `BILLING_DATABASE_URL` 指向 `127.0.0.1`（给直接跑 uvicorn 用），整份灌进容器会让容器连回自己
+- **nginx 访问日志记 `$uri` 而不是 `$request`**：`$request` 带查询串，查询串里可能有密钥（§94）
+- **`/readyz` 只对私有网段开放**：响应体逐个报出依赖状态，等于公开内部拓扑与故障窗口。⚠️ 这条控制的前提是 nginx 直接面对客户端 —— 前面再放一层代理，`$remote_addr` 全变成那层代理的私有地址，限制就形同虚设（已写进配置注释，归 T0.9）
+- **容器运行 UID = `10001`**，[ADR-0004](adr/ADR-0004-credential-encryption.md) 要求 Phase 0 定的就是它。宿主机主密钥文件要按它设属主 —— 那一半要有生产主机才做得了，归 T0.9
+
+**偏离了什么**
+
+- **spec §99 的服务清单是七个，这里只有六个：`frontend` 不存在**（T0.7 才建 React 骨架）。给一个构建不出来的 frontend 占位会让 `up` 直接失败、整个栈验证不了；在 `location /` 放注释掉的 `proxy_pass` 更糟 —— 注释掉的配置看起来像「已经有了」。现在 `/` 返回一句说明用的 503，欠账**钉在 T0.7 的任务描述里**，且 `EXPECTED_SERVICES` 写死六个，T0.7 必须一并改
+- **nginx 以官方镜像默认方式运行**（master 是 root、worker 是 `nginx` 用户），没有换成非 root 镜像。它要绑 80，换镜像属于生产加固，归 T0.9
+- **没起整个栈进 CI**：慢且不稳。CI 只做「配置可解析 + 镜像能构建」，不变量交给用例
+- **没加 §93 的文档存储卷**：那个卷要等有代码用它的时候再加，现在加就是占位
+
+**验证到什么程度**
+
+- **真起了整套栈**（本机 Docker 29.7.2，Linux 容器）：六个服务全 `Up`，四个有健康检查的全部 `healthy`
+- 端到端经 nginx：`/healthz` → 200 信封；`/readyz` → `{"status":"ok","database":"ok","redis":"ok"}`；`/` → 503 占位；`/nginx-health` → 200
+- **关联 ID 跨进程对上了**：nginx 在客户端没带时生成 `$request_id`，同一个值出现在 nginx 访问日志、应用 `Request completed` 日志和响应头里
+- **顺带验到一件事**：故意在 URL 里塞 `?api_secret=must-not-appear-in-logs` —— nginx 日志因为记 `$uri` 完全没有查询串；`uvicorn.access` **确实**带查询串，被 T0.3 的 `scrub_text()` 拦成 `api_secret=***REDACTED***`。两道都成立
+- **密钥扫描**：两个密码与那个假密钥在六个服务的日志里各出现 **0 次**
+- `docker compose exec` 实测 api / celery-worker / celery-beat 三者都是 `uid=10001(app)`
+- **迁移在容器里跑通**：`alembic upgrade head` → MySQL 的 `alembic_version` 落 `0001_baseline`，`alembic current` 确认 —— 证明 `alembic/` 确实进了镜像
+- **worker 端到端**：`inspect ping` → pong、`inspect registered` → `app.tasks.ping`、派发 → `received` → `succeeded`；worker 日志是 JSON（在容器里也确认了 T0.5 关掉 root logger 劫持这一条生效）
+- **beat 以非 root 写出了调度文件**：`/var/lib/celery/beat-schedule` 属主 `app:app`
+- `pytest` **87 passed、0 skipped**（带 `BILLING_TEST_DATABASE_URL` + `BILLING_TEST_REDIS_URL`）；[WORKFLOW §7](WORKFLOW.md) 六项本地全过
+
+**教训：所有基于文本的断言，默认都会匹配到注释里**
+
+写完 10 条用例后做了一轮变异测试（12 种改法，每种都该让测试变红）。两条**存活**了：把 `COPY alembic ./alembic` 和 `proxy_set_header X-Request-ID` 各注释掉，测试照样绿 —— 因为 `"COPY alembic" in text` 在注释行上同样为真。
+
+这是「测试通过但东西是坏的」那一类，和 [REVIEW-LOG](REVIEW-LOG.md) 里正则永不匹配那次是同一个病根：**断言的范围比它自以为的大**。修法是加一个 `instructions()` 只保留非注释行，所有文本断言都走它；补完 12 条变异全部被抓到。
+
+派生的通用规矩：**校验配置文件内容的用例，必须先剥掉注释再断言**，并且要用「把那行注释掉」这一种变异验证过。
 
 ---
 
