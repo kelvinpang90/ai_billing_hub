@@ -390,13 +390,14 @@ PR #24 合并后执行了 PR 里改不了的那一步：把 `backend` 加进 `ma
 - `npm run lint` / `typecheck` / `test`（11 passed）/ `build` 全过；后端 `pytest` **88 passed、0 skipped**；[WORKFLOW §7](WORKFLOW.md) 六项本地全过
 - **`check_docs.py` 顺带修了一个被 `frontend/` 暴露出来的缺口**：它遍历全仓库的 Markdown，把 `node_modules` 里第三方包 README 的相对链接报成了 156 条死链。加了 `VENDOR_DIRS` 跳过依赖与构建产物。**刻意不改成「只查 git 跟踪的文件」**——那样一个刚写好、还没 `git add` 的新文档会被静默跳过，而这个脚本的全部价值就在于不静默。改完做了变异验证：仓库自己的死链接、`docs/` 下的死链接、不存在的 `§N` 引用，三条都照样被抓到
 
-**合并后要做的一步（[WORKFLOW §2](WORKFLOW.md) 的受控例外，预先写明）**
+**合并后的那一步（[WORKFLOW §2](WORKFLOW.md) 的受控例外）—— 已执行，2026-09-12**
 
 把新的 `frontend` job 设为 `main` 的必需状态检查。**这一步 PR 里做不到**：新增的 CI job 必须先合进 `main` 才存在，顺序上只能后做。
 
-- 走 `POST /repos/{owner}/{repo}/branches/main/protection/required_status_checks/contexts` 这个**纯追加**端点，而不是 `PUT` 整份 protection —— 后者要重发全部字段，漏一个就是静默降级，而在保护 `main` 的配置上静默降级不会报错（与 T0.2 加 `backend` 时同一个做法）
-- 执行后回读 `GET .../protection/required_status_checks/contexts`，确认是六项：`docs` / `scripts` / `policy` / `backend` / `frontend` / `secret-scan`
-- 用一个只改状态陈述的 `chore/` PR 把前后对照补回仓库
+- 走了 `POST /repos/{owner}/{repo}/branches/main/protection/required_status_checks/contexts` 这个**纯追加**端点，而不是 `PUT` 整份 protection —— 后者要重发全部字段，漏一个就是静默降级，而在保护 `main` 的配置上静默降级不会报错（与 T0.2 加 `backend` 时同一个做法）
+- 回读对照：**前** `docs` / `secret-scan` / `scripts` / `policy` / `backend`（五项）→ **后** 同样五项 + `frontend`（六项）
+- 其余保护项逐项回读，**一项未变**：`strict=true`、`enforce_admins=true`、线性历史、禁 force push、禁删除、对话必须解决、PR 审查照旧 —— 确认纯追加端点只做了这一件事
+- 执行结果由 `chore/frontend-required-check` 这个只改状态陈述的 PR 补回仓库
 
 **教训：先分清「被测系统坏了」和「测量环境坏了」**
 
