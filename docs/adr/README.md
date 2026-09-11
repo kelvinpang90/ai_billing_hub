@@ -57,6 +57,8 @@
 | [0005](ADR-0005-fx-rate-source.md) | 汇率来源与版本化：BNM openAPI + 显式发布 | 已接受 | 2026-09-10 |
 | [0006](ADR-0006-payment-gateway-contract.md) | 支付网关：先定准入契约，供应商延到 Phase 4 前 | 已接受 | 2026-09-10 |
 | [0007](ADR-0007-concurrent-pending-payments.md) | 并发 PENDING 支付：允许并存，都付都入账 | 已接受 | 2026-09-10 |
+| [0008](ADR-0008-sst-tax-treatment.md) | SST 税务口径：对客户展示的金额一律含税 | **部分接受**（§45.1 尚缺五项会计意见） | 2026-09-11 |
+| [0009](ADR-0009-notification-channels.md) | 通知通道：Email 自管 SMTP + Outbox 投递；WhatsApp 不自建但路径待定 | **部分接受**（WhatsApp 传输路径未定） | 2026-09-11 |
 
 ## 待写（spec §136 要求）
 
@@ -66,3 +68,5 @@
 - [x] 生产数据库隔离 → [ADR-0002](ADR-0002-production-datastore-isolation.md)
 - [x] FX 数据源 → [ADR-0005](ADR-0005-fx-rate-source.md)
 - [ ] 支付网关选型（准入契约已定，供应商未选）→ [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**具体供应商仍未选定，硬截止在 Phase 4 开工前**
+- [ ] SST 税务口径（含税已定，其余五项待会计）→ [ADR-0008](ADR-0008-sst-tax-treatment.md) 定了「对客户展示的金额一律含税」与税额反算规则；**spec §45.1 其余五项未齐，Phase 4 不得开工**
+- [ ] 通知通道（Email 已定，WhatsApp 传输路径未定）→ [ADR-0009](ADR-0009-notification-channels.md) 定了 Adapter 抽象、Email 传输层与 Outbox 投递模型；**WhatsApp 需在「扩建既有网关」与「独立 App / 号码」之间拍板，Phase 6 的 WhatsApp 部分不得开工**
