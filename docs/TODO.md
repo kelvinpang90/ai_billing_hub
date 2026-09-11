@@ -94,7 +94,7 @@
 
 - **ruff 暂不纳入 `scripts/` 与 `tests/test_*.py`**：它们早于 ruff，全量纳入会让本任务变成一次 52 处报错的大范围格式化，属于范围扩张。已记为下方待清理项
 - ruff 的 `extend-exclude` 里排除了 `*.md`：ruff 会格式化 Markdown 里的 Python 代码块，而 spec 里那些代码块是**规格原文**，被工具改写等于静默改需求（实测会改 spec 第 1438 行）
-- dev 依赖用 `httpx2` 而不是 `httpx`：starlette 的 `TestClient` 已弃用旧 httpx，装 `httpx` 会在每次跑测试时刷弃用警告
+- dev 依赖用 `httpx2` 而不是 `httpx`：starlette 的 `TestClient` 已弃用旧 httpx，装 `httpx` 会在每次跑测试时刷弃用警告。**代价是 `fastapi` 的下界被这条绑住**——下界放低，解析器可能挑到仍要旧 httpx 的 starlette，干净环境里 pytest 会在导入 `TestClient` 时挂掉。两个下界是一对，改一个必须复验另一个（PR #22 审查暴露）
 - 本任务**没有**做 Alembic（原「仓库骨架」条目里带的）—— 它要和数据库 engine 一起落地才验得了，已移入 T0.4
 
 **验证到什么程度**
@@ -103,6 +103,7 @@
 - `python -m ruff check .` / `python -m ruff format --check .` → 通过
 - [WORKFLOW §7](WORKFLOW.md) 三项本地检查通过；`python -m unittest discover -s tests` 仍是 61 passed，**新增的 `tests/backend/` 没有被它收集**（该目录无 `__init__.py`，不是可导入包）
 - **打包路径单独验过**（PR #22 审查指出 `packages = ["app"]` 会漏掉全部子包）：改成 `[tool.setuptools.packages.find] include = ["app*"]` 后，`pip install .` 进一个干净 venv → `import app.main` 成功、`GET /healthz` 返回 200。这条**自动化留给 T0.2**，因为 `pytest` 跑的是源码树，结构上发现不了打包缺陷
+- **干净环境单独验过**：新建 venv → `pip install -e ".[dev]"` → `pytest` 2 passed，且该环境里**根本没有 `httpx` 模块**（`import httpx` 抛 `ModuleNotFoundError`），证明 `TestClient` 走的就是 `httpx2`
 - **未验证**：容器内启动、生产配置分支 —— 那是 T0.6 的事
 
 **待清理**

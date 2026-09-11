@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "Acuven Central AI Billing Platform — central metering, prepaid MYR wallet and immutable financial ledger"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
+    # floor 不能再往下放：dev extra 里的 TestClient 依赖是 httpx2，而 httpx2 是
+    # 较新的 starlette 才用的。放低 fastapi 的下界，解析器就可能挑到一个仍要
+    # 旧 httpx 的 starlette，干净环境里 pytest 会在导入 TestClient 时挂掉。
+    # 这两个下界是一对，改一个要复验另一个。
+    "fastapi>=0.141",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "uvicorn[standard]>=0.32",
@@ -18,8 +22,10 @@ dependencies = [
 # 现在不预先声明用不上的包。
 [project.optional-dependencies]
 dev = [
-    # starlette 的 TestClient 现在要 httpx2，装旧 httpx 会拿到 deprecation 警告
-    "httpx2",
+    # TestClient 的 HTTP 传输。starlette 已弃用旧 httpx，装 httpx 会在每次跑
+    # 测试时刷弃用警告；实测干净环境里**没有** httpx 模块，pytest 照样通过。
+    # 与上面 fastapi 的下界绑定，见那里的注释。
+    "httpx2>=2.12",
     "pytest>=8.3",
     "ruff>=0.8",
 ]
