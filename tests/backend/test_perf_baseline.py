@@ -63,6 +63,23 @@ class MeasurementDatabaseTests(unittest.TestCase):
             self.perf._measurement_settings(STACK_URL, self.settings)
         self.assertIn("celery worker", str(raised.exception))
 
+    def test_it_refuses_an_equivalent_connection_string(self) -> None:
+        """⚠️ 复审第二轮的阻断项：比原始字符串挡不住等价写法。
+
+        `...@mysql:3306/billing` 与 `...@mysql:3306/billing?charset=utf8mb4` 是同一个
+        schema 的两种写法。第一版直接比字符串，**去掉一个查询参数就能绕过整道防线** ——
+        而后果是往运行中的库里写真实重置令牌，由 worker 发出去。
+        """
+        for equivalent in (
+            "mysql+pymysql://billing:pw@mysql:3306/billing",  # 去掉查询参数
+            "mysql+pymysql://billing:pw@MySQL:3306/billing?charset=utf8mb4",  # 大小写
+            "mysql+pymysql://root:other@mysql:3306/billing?charset=utf8mb4",  # 换凭据
+            "mysql+pymysql://billing:pw@mysql/billing",  # 省略默认端口
+        ):
+            with self.subTest(url=equivalent):
+                with self.assertRaises(SystemExit):
+                    self.perf._measurement_settings(equivalent, self.settings)
+
     def test_it_refuses_to_fall_back_to_the_configured_database(self) -> None:
         """不给 `--database-url` 时**直接失败**，不是悄悄用 `BILLING_DATABASE_URL`。
 

@@ -47,7 +47,9 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
 from app.core.database import create_database_engine, create_session_factory
@@ -492,13 +494,75 @@ def _measurement_settings(raw_url: str, settings) -> object:
             "the celery worker attached to that one will deliver the outbox rows this "
             "script writes. See docs/perf-baseline.md section 6 for the throwaway schema."
         )
-    if settings.database_url and raw_url == settings.database_url:
+    if settings.database_url and _same_target(raw_url, settings.database_url):
         raise SystemExit(
             "refusing to measure against the stack's own database "
             "(BILLING_DATABASE_URL): its celery worker would deliver the reset tokens "
             "this script writes. Use a separate schema; see docs/perf-baseline.md."
         )
     return settings.model_copy(update={"database_url": raw_url})
+
+
+def _same_target(left: str, right: str) -> bool:
+    """两个连接串是不是指向**同一个 schema**。
+
+    ⚠️ **比的是归一化之后的目标，不是原始字符串**（复审第二轮的阻断项）。
+    第一版直接比字符串，而 `...@mysql:3306/billing` 与
+    `...@mysql:3306/billing?charset=utf8mb4` 是同一个 schema 的两种写法 ——
+    去掉一个查询参数就能绕过整道防线，而后果是往运行中的库里写真实重置令牌。
+
+    只看 host / port / database：用户名、密码与查询参数都不改变「写到哪张表」。
+
+    ⚠️ **它挡不住同一台机器的不同写法**（`mysql` 与 `127.0.0.1`）。那一层由
+    `_assert_distinct_server` 在真的连上之后用服务端自己的身份兜底 —— URL 比对
+    只能做到「形状不同但目标相同」这一层，再往上必须问服务器。
+    """
+    a, b = make_url(left), make_url(right)
+    return (
+        (a.host or "").lower() == (b.host or "").lower()
+        and (a.port or 3306) == (b.port or 3306)
+        and a.database == b.database
+    )
+
+
+def _identity(engine) -> tuple[str, str] | None:
+    """问服务器：你是谁、我现在在哪个库里。连不上就返回 None。"""
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(text("SELECT @@server_uuid, DATABASE()")).one()
+    except SQLAlchemyError:
+        return None
+    return (str(row[0]), str(row[1]))
+
+
+def _assert_distinct_server(measurement_engine, settings) -> None:
+    """连上之后再确认一次：测量库和栈的库**不是同一个 schema**。
+
+    ⚠️ 这道和 `_same_target` 不是重复，它们挡的是不同的东西：前者比 URL 的形状，
+    只能发现「写法不同、目标相同」；这一道问的是**服务器自己**（`@@server_uuid`
+    加上当前 database 名），所以连 `mysql` 与 `127.0.0.1` 这种同机不同写法也挡得住。
+
+    URL 比对永远追不上所有等价写法 —— 复审第二轮指出的 `?charset=utf8mb4` 只是
+    其中一种。能给出确定答案的只有服务器本身。
+
+    ⚠️ 栈的库连不上时**放行**：那种情况下本来也没有 worker 在跑，而让一个连不上
+    的依赖去阻断测量，只会让人把这道检查整个绕过去。
+    """
+    if not settings.database_url:
+        return
+    stack_engine = create_engine(settings.database_url, pool_pre_ping=True)
+    try:
+        stack = _identity(stack_engine)
+    finally:
+        stack_engine.dispose()
+    if stack is None:
+        return
+    if _identity(measurement_engine) == stack:
+        raise SystemExit(
+            "refusing to measure against the stack's own database: the server reports "
+            f"the same instance and schema ({stack[1]}). Its celery worker would deliver "
+            "the reset tokens this script writes. See docs/perf-baseline.md."
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -522,6 +586,7 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = _measurement_settings(args.database_url, settings)
     engine = create_database_engine(settings)
+    _assert_distinct_server(engine, get_settings())
     session_factory = create_session_factory(engine)
 
     baseline = Baseline()
