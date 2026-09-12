@@ -15,6 +15,7 @@ import { Route, Routes } from "react-router";
 
 import { AppLayout } from "../layouts/AppLayout";
 import { RequireAuth } from "./RequireAuth";
+import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { ROUTES } from "./paths";
 
 // ⚠️ 这几个模块都是**具名导出**，`lazy()` 要的是 `{ default }`，所以每条都要
@@ -46,25 +47,30 @@ function RouteFallback() {
 
 export function AppRoutes() {
   return (
-    // ⚠️ `Suspense` 放在 `Routes` **外面**。放进每个 element 里的话，切换路由时
-    // 旧页面会先被卸载、再等新分片 —— 中间那一下是整页空白，不是一个转圈。
-    <Suspense fallback={<RouteFallback />}>
-      <Routes>
-        {/* 登录页在守卫**外面** —— 放进去就成了「要先登录才能登录」。
-            忘记 / 重置密码同理，而且更硬：走到这两页的人按定义就是进不去的那些人。
-            ⚠️ 它们必须在守卫外面**显式登记**。少了这两条，重置邮件里的链接会落到
-            守卫里的 `*` 兜底上，被当成未登录直接重定向去登录页 —— 用户点开链接
-            看到的是一张登录表单，而他来这儿正是因为登不进去。 */}
-        <Route path={ROUTES.login} element={<LoginPage />} />
-        <Route path={ROUTES.forgotPassword} element={<ForgotPasswordPage />} />
-        <Route path={ROUTES.resetPassword} element={<ResetPasswordPage />} />
-        <Route element={<RequireAuth />}>
-          <Route element={<AppLayout />}>
-            <Route path={ROUTES.dashboard} element={<DashboardPage />} />
-            <Route path="*" element={<NotFoundPage />} />
+    // ⚠️ 错误边界在 `Suspense` **外面**：它要接住的正是「分片加载失败」，而那
+    // 表现为 `lazy()` 的 Promise 被拒 —— Suspense 自己不处理拒绝，只处理挂起。
+    // 少了它，一次发版就能让所有开着旧标签页的用户看到一片空白（见该文件注释）。
+    <RouteErrorBoundary>
+      {/* ⚠️ `Suspense` 放在 `Routes` **外面**。放进每个 element 里的话，切换路由时
+          旧页面会先被卸载、再等新分片 —— 中间那一下是整页空白，不是一个转圈。 */}
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          {/* 登录页在守卫**外面** —— 放进去就成了「要先登录才能登录」。
+              忘记 / 重置密码同理，而且更硬：走到这两页的人按定义就是进不去的那些人。
+              ⚠️ 它们必须在守卫外面**显式登记**。少了这两条，重置邮件里的链接会落到
+              守卫里的 `*` 兜底上，被当成未登录直接重定向去登录页 —— 用户点开链接
+              看到的是一张登录表单，而他来这儿正是因为登不进去。 */}
+          <Route path={ROUTES.login} element={<LoginPage />} />
+          <Route path={ROUTES.forgotPassword} element={<ForgotPasswordPage />} />
+          <Route path={ROUTES.resetPassword} element={<ResetPasswordPage />} />
+          <Route element={<RequireAuth />}>
+            <Route element={<AppLayout />}>
+              <Route path={ROUTES.dashboard} element={<DashboardPage />} />
+              <Route path="*" element={<NotFoundPage />} />
+            </Route>
           </Route>
-        </Route>
-      </Routes>
-    </Suspense>
+        </Routes>
+      </Suspense>
+    </RouteErrorBoundary>
   );
 }

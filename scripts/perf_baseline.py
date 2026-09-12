@@ -78,7 +78,11 @@ from app.tasks import outbox as outbox_task
 # 复用」，而清理阶段是**无条件删除** —— 库里若已经有同名账号，这个脚本会连它的
 # 审计记录（§66）一起删掉。改成每轮唯一之后，我们只可能删掉自己刚建的那一个。
 BASELINE_EMAIL_TEMPLATE = "perf-baseline+{run}@example.com"
-BASELINE_PASSWORD = "a throwaway baseline passphrase"
+#
+# ⚠️ 密码**每轮随机生成**，不是源码里的常量。脚本在 S2 和 cleanup 之间崩掉的话，
+# 库里会留下一个 ADMIN 账号；密码写死在源码里，那就是一个**口令已公开**的管理员。
+# 测量库本来就不该被应用服务，但「留下的残骸无法登录」这件事不该依赖那个前提。
+BASELINE_PASSWORD = f"baseline-{uuid.uuid4().hex}-{uuid.uuid4().hex}"
 
 CONTEXT = RequestContext(ip_address="127.0.0.1", user_agent="perf-baseline")
 
