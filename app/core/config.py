@@ -109,6 +109,51 @@ class Settings(BaseSettings):
     # compose 里已按容器网段配好。
     trusted_proxies: str = ""
 
+    # --- 密码重置（T0.8d，同一个设计闸门 Issue #32 v5） ---------------------
+
+    # 重置令牌的寿命。30 分钟是闸门定的：足够去邮箱把信翻出来，又不至于让一封
+    # 躺在收件箱里的旧信长期是一把可用的钥匙。
+    password_reset_ttl_seconds: int = Field(default=1_800, gt=0)
+
+    # 重置链接的基址，例如 `https://billing.example.com`。**空 = 未配置**，
+    # 此时信里拼不出可点的链接，投递任务会判为失败并重试（配上就自动补投）。
+    #
+    # ⚠️ 为什么不从请求的 Host 头推：那个头是客户端可以随便写的，而这里拼出来的
+    # 是一封**发给用户、带着一把钥匙**的链接。攻击者只要在申请重置时改一个 Host，
+    # 就能让受害者收到一封指向自己服务器的信 —— 受害者点进去，令牌就到了对方手上。
+    # 这类漏洞有个名字叫 host header poisoning，密码重置是它最经典的落点。
+    frontend_base_url: str = ""
+
+    # --- 出站邮件（ADR-0009；仍是 T0.8d） -----------------------------------
+
+    # **空 host = 未配置**，是一个合法状态（ADR-0009）：开发与 CI 不需要真实
+    # 邮箱凭据就能跑通全流程。未配置时发送函数返回 False 并记一条 warning，
+    # **不抛异常**（Invariant 1 的同一条道理：邮件服务器的事不该把业务打成 500）。
+    smtp_host: str = ""
+    smtp_port: int = Field(default=587, gt=0, le=65_535)
+    smtp_username: str = ""
+    # ⚠️ 密码所在的**文件路径**，不是密码本身 —— 与 JWT 签名密钥、加密主密钥
+    # 同一条规矩（ADR-0004 第 2 节）：环境变量会进 /proc/<pid>/environ、崩溃转储，
+    # 并被子进程继承。生产上由 Docker secret 挂成文件。
+    smtp_password_file: str = ""
+    # 发件人地址与认证用户名**分开配**：用 relay + API key 认证时两者不是一回事
+    # （ADR-0009 借 rs-roof-pms 的那几条之一）。空则回退到 smtp_username。
+    smtp_from: str = ""
+    # ⚠️ 不能不设。SMTP 连接卡住时默认会一直等下去，worker 的那个进程就永久占着 ——
+    # 积压的信一封也发不出去，而现象只是「队列不动了」。
+    smtp_timeout_seconds: int = Field(default=10, gt=0)
+
+    # --- Outbox 投递（spec §74.6、§25、§98.1） -------------------------------
+
+    # 退避基数：第 n 次重试等 base * 2^(n-1) 秒（60s → 2m → 4m … ）。
+    outbox_retry_base_seconds: int = Field(default=60, gt=0)
+    # 用尽后这一行进 `FAILED` 死信，不再被恢复任务捡起。默认 8 次 ≈ 覆盖约 4 小时
+    # 的持续故障。⚠️ **没有上限的重试会把一封永远发不出去的信（比如收件地址根本
+    # 不存在）变成一个永久转的循环**，而且它会一直排在别的信前面。
+    outbox_max_attempts: int = Field(default=8, gt=0)
+    # 恢复任务一次最多领多少行。防止一次积压把 worker 淹掉。
+    outbox_recovery_batch: int = Field(default=100, gt=0)
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

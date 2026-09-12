@@ -18,12 +18,21 @@ import enum
 import pytest
 from sqlalchemy import Enum as SAEnum
 
-from app.models.auth import _ENUM_LENGTH, AuditAction, AuditLog, User, UserRole, UserStatus
+from app.models.auth import (
+    _ENUM_LENGTH,
+    AuditAction,
+    AuditLog,
+    DomainOutbox,
+    OutboxStatus,
+    User,
+    UserRole,
+    UserStatus,
+)
 
 
 def enum_columns():
     """Every VARCHAR-backed enum column in the auth tables."""
-    for model in (User, AuditLog):
+    for model in (User, AuditLog, DomainOutbox):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
                 yield f"{model.__tablename__}.{column.name}", column
@@ -53,7 +62,9 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
 
 
 @pytest.mark.parametrize(
-    "enum_class", [AuditAction, UserRole, UserStatus], ids=lambda cls: cls.__name__
+    "enum_class",
+    [AuditAction, UserRole, UserStatus, OutboxStatus],
+    ids=lambda cls: cls.__name__,
 )
 def test_enum_values_stay_within_the_pinned_width(enum_class: type[enum.StrEnum]) -> None:
     """反向的那一半：加枚举值时，这条会先于数据库告诉你超了。"""

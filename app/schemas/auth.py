@@ -72,6 +72,21 @@ class RecoveryCodesResponse(BaseModel):
     recovery_codes: list[str]
 
 
+class ForgotPasswordRequest(BaseModel):
+    """⚠️ 响应对任何输入都一模一样 —— 这里收什么不改变外部可观测的结果。"""
+
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+    # ⚠️ 上限在这里钉一次，让超长输入在进 Argon2 之前就被挡掉。
+    # **下限刻意不在这里查**：强度规则（长度、弱口令表、不得等于账号名）在
+    # `validate_password_strength` 一处，分两处写早晚会对不上，而对不上的那一半
+    # 会**安静地**放行一个不该放行的密码。
+    new_password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+
 class RegenerateRecoveryCodesRequest(BaseModel):
     """重新生成恢复码要**重新验证密码**。
 

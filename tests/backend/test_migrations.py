@@ -19,6 +19,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
 from alembic import command
+from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
+from app.models.base import Base
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
 
@@ -70,3 +72,34 @@ def test_downgrade_to_base_is_reversible(alembic_config: Config) -> None:
 
     inspector = inspect(create_engine(TEST_DATABASE_URL))
     assert "alembic_version" in inspector.get_table_names()
+
+
+@needs_mysql
+def test_the_migrated_columns_are_as_wide_as_the_models_say(alembic_config: Config) -> None:
+    """⚠️ **这条用例来自一次真的踩坑（T0.8d）。**
+
+    `sa.Enum(native_enum=False)` 不写 `length=` 时，宽度按**建表那一刻最长的
+    成员**推。`domain_outbox.status` 因此在真 MySQL 上建成了 `VARCHAR(7)`，而
+    模型那边是 `VARCHAR(64)` —— 两边悄悄对不上。
+
+    后果是以后加一个更长的枚举值（`CANCELLED` 就够）会在插入时报
+    `Data too long`，而**整套单元测试全绿**：SQLite 根本不强制 VARCHAR 长度。
+    `test_model_columns.py` 也抓不到 —— 它检查的是模型，不是迁移建出来的东西。
+
+    所以这里比的是**库里真实的列宽**与模型声明的列宽。它只能对着真 MySQL 跑。
+    """
+    command.upgrade(alembic_config, "head")
+    inspector = inspect(create_engine(TEST_DATABASE_URL))
+
+    mismatched = []
+    for table in Base.metadata.sorted_tables:
+        actual = {c["name"]: c["type"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            declared = getattr(column.type, "length", None)
+            if declared is None or column.name not in actual:
+                continue
+            in_db = getattr(actual[column.name], "length", None)
+            if in_db is not None and in_db != declared:
+                mismatched.append(f"{table.name}.{column.name}: 库里 {in_db} ≠ 模型 {declared}")
+
+    assert mismatched == [], "迁移建出来的列宽与模型不一致：" + "; ".join(mismatched)

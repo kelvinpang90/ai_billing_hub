@@ -74,14 +74,32 @@ def test_schedule_runs_on_utc(celery_app) -> None:
     assert celery_app.conf.enable_utc is True
 
 
-def test_beat_schedule_starts_empty(celery_app) -> None:
-    """留空而不是先塞示例条目 —— 示例条目会被真的跑起来。"""
-    assert celery_app.conf.beat_schedule == {}
+def test_the_only_periodic_task_is_the_outbox_sweep(celery_app) -> None:
+    """周期条目只放**真的需要跑**的那些，不放示例条目（示例条目会被真的跑起来）。
+
+    ⚠️ T0.8d 之前这里断言的是「beat 为空」。现在有一条了，而它不是可选的：
+    没有这个扫描，Redis 一丢、或者 worker 在触发之后挂掉，那些 outbox 行就
+    **永远躺在库里**没人再看一眼（Invariant 14），而用户那边只表现为没收到信。
+    """
+    assert set(celery_app.conf.beat_schedule) == {"outbox-recovery"}
+    entry = celery_app.conf.beat_schedule["outbox-recovery"]
+    assert entry["task"] == "app.tasks.outbox.recover"
+
+
+def test_the_sweep_does_not_pile_up_while_beat_is_down(celery_app) -> None:
+    """⚠️ beat 停了一小时再起来时，攒下的几十次触发**不该**一口气全放出去。
+
+    它们做的是同一件事，只会让 worker 抢同一批行。`expires` 短于周期就让过期的
+    那些自己消失 —— 没有它，一次 beat 重启会制造一波自己打自己的重复投递。
+    """
+    entry = celery_app.conf.beat_schedule["outbox-recovery"]
+
+    assert entry["options"]["expires"] < entry["schedule"]
 
 
 def test_task_modules_are_listed_explicitly(celery_app) -> None:
     """不用 autodiscover：它靠约定扫包，改了包名时只是**安静地少注册一个任务**。"""
-    assert TASK_MODULES == ["app.tasks.ping"]
+    assert TASK_MODULES == ["app.tasks.ping", "app.tasks.outbox"]
     assert celery_app.conf.include == TASK_MODULES
 
 
