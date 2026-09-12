@@ -9,11 +9,19 @@
 
 name: Deploy
 
+# ⚠️ **现在只能手动触发，刻意没有 `push: branches: [main]`。**
+#
+# 加上那一条，这个 workflow 就会在合并的那一刻开火 —— 而生产主机还没就绪、
+# 四个 secret 也还没配。后果不只是「一次红色的 CD」：build 那一步会**真的把镜像
+# 推到 ghcr**，那是个对外的副作用，不该由一次「先把代码合进去」顺带触发。
+#
+# 等 docs/deployment.md §9.4 那张前置清单逐条关闭之后，再把下面两行加回来：
+#
+#     push:
+#       branches: [main]
+#
+# 那应该是一次**有意识的改动**，而不是从一开始就挂在那里等着。
 on:
-  push:
-    branches: [main]
-  # 手动触发：回滚用。⚠️ 回滚不是「重新部署上一个 commit」那么简单 ——
-  # 迁移不会跟着回退，所以只有**向后兼容**的那一步才能这样退。见 deploy.sh 的注释。
   workflow_dispatch:
     inputs:
       ref:

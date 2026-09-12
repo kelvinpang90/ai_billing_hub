@@ -372,6 +372,13 @@ Connection refused，被当成「部署失败」而实际只是早了几秒。�
 - [ ] 宿主机的 `.env` 与三个密钥文件就位
 - [ ] ghcr 的包可见性确认过（公开仓库默认公开；镜像里没有密钥，与 ADR-0001 一致）
 - [ ] ⚠️ **先手工跑一次 `deploy/deploy.sh`**，别让第一次执行是由一次 push 触发的
+- [ ] 上面全部关闭之后，才把 `push: branches: [main]` 触发器加回 workflow
+
+⚠️ **现在这个 workflow 只能手动触发（`workflow_dispatch`）。**挂上 push 触发器的话，
+它会在这个 PR 合并的那一刻开火 —— 而主机还没就绪、secret 也没配。后果不只是一次
+红色的 CD：build 那一步会**真的把镜像推到 ghcr**，那是个对外的副作用，不该由一次
+「先把代码合进去」顺带触发。有一条用例（`test_deploying_is_a_deliberate_act...`）
+钉着这件事，加回触发器的人必须同时改掉它 —— 那一刻他会读到为什么。
 
 ---
 

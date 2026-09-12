@@ -113,3 +113,20 @@ def test_the_script_waits_for_the_database_before_migrating() -> None:
     waits = script.index("wait_for_health mysql")
     migrates = script.index("alembic upgrade head")
     assert waits < migrates
+
+
+def test_deploying_is_a_deliberate_act_not_a_side_effect_of_merging() -> None:
+    """⚠️ 现在**刻意只能手动触发**。
+
+    挂上 `push: branches: [main]` 的话，这个 workflow 会在合并的那一刻开火 ——
+    而生产主机还没就绪、四个 secret 也还没配。后果不只是「一次红色的 CD」：
+    build 那一步会**真的把镜像推到 ghcr**，那是个对外的副作用，不该由一次
+    「先把代码合进去」顺带触发。
+
+    等 `docs/deployment.md` §9.4 的前置清单关闭之后再加回来 —— 那应该是一次
+    有意识的改动。这条用例存在的意义就是逼它成为有意识的：加回触发器的人
+    必须同时改掉这里，而那一刻他会读到上面这段话。
+    """
+    workflow = uncommented(WORKFLOW)
+    assert "workflow_dispatch" in workflow
+    assert "branches: [main]" not in workflow
