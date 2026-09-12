@@ -35,6 +35,23 @@ class Settings(BaseSettings):
     # 报 DATABASE_NOT_CONFIGURED，而不是拿着假地址去连然后超时。
     database_url: str = ""
 
+    # --- 连接池（T0.10 的容量基线定的，见 docs/perf-baseline.md）-------------
+    #
+    # T0.4 当时把这三个值硬编码了，理由写着「池大小要等 T0.10 有了并发基线才知道
+    # 该设多少，现在开个旋钮只是猜」。基线跑出来了，所以现在它们是配置项 ——
+    # 而**默认值没有变大**，因为基线说的恰恰是「再大也没用」：
+    #
+    # 写入路径的吞吐在并发 8 就到顶（401/s），16 与 32 反而掉到 ~378/s，
+    # 同时 p99 从 39ms 涨到 1647ms。多出来的并发全部变成排队，没有一点变成吞吐。
+    #
+    # ⚠️ `pool_timeout` 是这次**真正要改**的那个：SQLAlchemy 默认 30 秒。
+    # 池满时请求会在那里干等半分钟 —— 对一个 HTTP 接口来说，等 30 秒再成功
+    # 比立刻失败更糟：调用方早就超时了，而我们还占着一个线程和一条连接。
+    # 5 秒足够跨过一次瞬时尖峰，又不至于把线程池堵死。
+    database_pool_size: int = Field(default=5, gt=0)
+    database_pool_max_overflow: int = Field(default=10, ge=0)
+    database_pool_timeout_seconds: int = Field(default=5, gt=0)
+
     # 同样是空串 = 未配置。⚠️ Redis **不是**就绪阻断项：spec §74.6 规定
     # 「Redis/Celery 只承载投递触发，数据库 Outbox 才是可恢复的事实来源」，
     # REQ-AVAIL-001 又要求 Redis 不可用不得成为终端 AI 请求路径上的同步依赖。
