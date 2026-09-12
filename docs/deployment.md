@@ -19,7 +19,7 @@
 | CI（六项必需检查 + 受保护 `main`） | ✅ T0.2 起 |
 | 容量基线 | ✅ T0.10 |
 | **生产主机上的任何东西** | ❌ 一件都没有 |
-| **部署流水线（CD）** | ❌ 见 §9 —— 这是一条**没有归属**的 Phase 0 验收项 |
+| **部署流水线（CD）** | ⚠️ 骨架已写、脚本本地演练过，**但从未在真实 VPS 上跑过**（§9） |
 | **备份 / 恢复 / RPO·RTO** | ❌ 本文件第 5 节 |
 | **生产日志与告警** | ❌ 第 7、8 节 |
 
@@ -314,21 +314,64 @@ runbook 链接**。现在**一项都没有**，因为没有任何日志聚合设
 
 ---
 
-## 9. ⚠️ 部署流水线：一条没有归属的 Phase 0 验收项
+## 9. 部署流水线（CD）
 
-spec §123 的 Phase 0 验收写着：
+决策 ⑥ 把它划进了 T0.9。spec §123 的 Phase 0 验收要求「CI gates merge and
+**deploys an immutable commit image**」，§99 给了具体要求。
 
-```text
-CI gates merge and deploys an immutable commit image
+### 9.1 形状：薄 workflow + 可演练的脚本
+
+| 文件 | 干什么 | 验证到什么程度 |
+| --- | --- | --- |
+| [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | 构建镜像 → 推 ghcr → ssh 上去跑脚本 | ⚠️ **从未在真实 VPS 上执行过** |
+| [`deploy/deploy.sh`](../deploy/deploy.sh) | 等库 → 迁移 → 换版本 → 等健康 → 冒烟 → 失败回滚 | ✅ **本地栈上整套演练过**，成功与回滚两条路都跑通 |
+
+⚠️ **逻辑放脚本里不放 YAML 里，只有一个理由**：YAML 里的步骤没有任何办法在生产
+之外跑一遍，而迁移顺序、健康等待、回滚恰恰是最不该第一次就在生产上验的东西。
+
+⚠️ **镜像在 GitHub Actions 上构建，不在 VPS 上。**那台机器只有 1–2 核、12 GB 可用
+磁盘，上面还跑着另外八个项目 —— 在它上面构建会把同机的别人一起拖慢。
+
+### 9.2 本地演练的结果
+
+```
+成功路径：等库 → 迁移 → 启动 → 七服务健康 → 冒烟 GET /healthz → exit 0
+失败路径：冒烟指向一个不通的端口 → 回滚到上一个镜像 → exit 1
 ```
 
-§99 进一步要求：合并到 `main` 触发 GitHub Actions 部署到 VPS、**不可变镜像标签对应
-确切 commit**、按文档化的安全顺序跑迁移、等健康检查、跑冒烟测试、失败时有**演练过的**
-回滚或前滚。
+⚠️ **回滚成功仍然以非零退出。**回滚让服务恢复了，但「这个 commit 上不了线」这件事
+不能被一个绿色的 CD 掩盖 —— 那样下一个人会以为它已经上线了。
 
-**现在 `.github/workflows/` 里只有 `ci.yml`，没有任何部署流水线。**
-而 T0.1–T0.10 的任务描述里**没有一条认领它**。这是一个排序疏漏，不是取舍 ——
-见决策 ⑥。
+⚠️ 演练本身抓到一个缺陷：第一版**没等数据库就跑迁移**，MySQL 还在初始化就
+Connection refused，被当成「部署失败」而实际只是早了几秒。首次部署与 MySQL 重启后
+各会中一次 —— 而那正是最容易手忙脚乱的两个时刻。
+
+### 9.3 ⚠️ 需要 Kelvin 配的 GitHub secret
+
+**我不碰任何凭据。**下面这四个要你在 GitHub 仓库的 **Environments → `production`**
+里配（不是仓库级 secret —— environment 才能配「需要人工批准」与「只允许从 main
+部署」，那是误合并直接变成误部署之外唯一的防线）：
+
+| Secret | 内容 | 注意 |
+| --- | --- | --- |
+| `DEPLOY_SSH_KEY` | 部署专用的 SSH 私钥 | ⚠️ **新生成一把，不要复用你自己的登录密钥**。那台机器上给它一个只能进部署目录的账号 |
+| `DEPLOY_KNOWN_HOSTS` | `ssh-keyscan <host>` 的输出 | ⚠️ 不校验主机指纹的 SSH 等于把部署凭据交给任何能做中间人的人 |
+| `DEPLOY_TARGET` | `user@host` | 仓库是公开的，**绝不能写进任何文件** |
+| `DEPLOY_PATH` | VPS 上的部署目录 | 同上 |
+
+宿主机那一侧还要准备好（**都不在仓库里**）：
+
+- `.env`（按 [`.env.example`](../.env.example) 填，含数据库口令、`BILLING_FRONTEND_BASE_URL`、SMTP）
+- `secrets/jwt.key`、`secrets/master.key`、`secrets/smtp.password`
+- ⚠️ 主密钥文件 `chown 10001:10001` + `chmod 0400`（见 §6）
+
+### 9.4 第一次跑之前
+
+- [ ] VPS 内存升配完成（决策 ③）
+- [ ] 四个 secret 配好，`production` environment 开了人工批准
+- [ ] 宿主机的 `.env` 与三个密钥文件就位
+- [ ] ghcr 的包可见性确认过（公开仓库默认公开；镜像里没有密钥，与 ADR-0001 一致）
+- [ ] ⚠️ **先手工跑一次 `deploy/deploy.sh`**，别让第一次执行是由一次 push 触发的
 
 ---
 
@@ -382,4 +425,4 @@ CI gates merge and deploys an immutable commit image
 - [ ] 日志轮转 / 保留 / 上限 / 安全删除 / 异地 / 磁盘告警
 - [ ] **上线前配好 SMTP**，否则密码重置的信发不出去（outbox 会重试到死信）
 - [ ] 容量基线在**升配后的**生产机上重跑一次（[perf-baseline.md](perf-baseline.md) 第 6 节）
-- [ ] 部署流水线（CD）落地 —— 决策 ⑥ 把它算进了本任务，见 §9
+- [ ] 部署流水线在真实 VPS 上跑通一次 —— 骨架与脚本已就位，见 §9.4 的前置清单

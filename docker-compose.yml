@@ -30,7 +30,12 @@ x-backend: &backend
   build:
     context: .
     dockerfile: Dockerfile
-  image: acuven-billing-hub:local
+  # ⚠️ 生产上由 CD 覆盖成 `ghcr.io/<owner>/<repo>:<commit sha>` —— spec §99 要求
+  # 「immutable image tags identify the exact commit」。不覆盖时就是本地构建的那个。
+  #
+  # ⚠️ **绝不能用 `:latest`**：那样「线上跑的是哪个 commit」就没有答案了，
+  # 回滚也无从谈起（回到哪个 latest？）。deploy/deploy.sh 会拒绝这种标签。
+  image: ${BILLING_IMAGE:-acuven-billing-hub:local}
   restart: unless-stopped
   logging: *logging
   # ⚠️ 资源限额是 ADR-0002 的收口条件，不是洁癖：单 VPS 上一个失控的 celery
@@ -262,7 +267,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: acuven-billing-hub-frontend:local
+    image: ${BILLING_FRONTEND_IMAGE:-acuven-billing-hub-frontend:local}
     restart: unless-stopped
     logging: *logging
     # ⚠️ 不发布端口：它只经边缘 nginx 对外。产物是静态文件，没有任何依赖 ——
