@@ -21,9 +21,12 @@ export default defineConfig({
   },
 
   test: {
-    // 骨架阶段的测试全是纯逻辑（信封解包、i18n key、lint 规则），不碰 DOM。
-    // 组件渲染测试要等 T0.8 引入 testing-library，见 TODO 的 T0.7 记录。
-    environment: "node",
-    include: ["src/**/*.test.ts", "eslint-rules/**/*.test.js"],
+    // T0.8c 起有了组件测试（登录页、路由守卫），所以默认环境从 node 换成 jsdom。
+    // 纯逻辑的测试在 jsdom 里照跑不误；反过来「默认 node + 需要 DOM 的文件各自
+    // 加 docblock」是个只在忘记时才发作的陷阱，而且报错是 `document is not
+    // defined` 这种指不回原因的话。
+    environment: "jsdom",
+    setupFiles: ["src/test/setup.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "eslint-rules/**/*.test.js"],
   },
 });

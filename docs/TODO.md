@@ -74,7 +74,7 @@
 - [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA。**设计闸门 [#32](https://github.com/kelvinpang90/ai_billing_hub/issues/32) 已批准 `design v5`**，按下面四个 PR 落地
   - [x] **T0.8a** — `users` / `refresh_tokens` / `audit_logs` 三张表、Argon2id 密码哈希与强度、登录、JWT + 刷新轮换与重放检测、登出与吊销、失败锁定、按来源限流、bootstrap CLI
   - [x] **T0.8b** — 信封加密模块（[ADR-0004](adr/ADR-0004-credential-encryption.md)）、`two_factor_settings` / `recovery_codes`、TOTP 注册 / 确认 / 校验、恢复码、**ADMIN 强制 2FA**
-  - [ ] **T0.8c** — 前端登录页、路由守卫、令牌持有与刷新
+  - [x] **T0.8c** — 前端登录页、路由守卫、令牌持有与刷新
   - [ ] **T0.8d** — `password_reset_tokens` + `domain_outbox`、忘记密码 / 重置密码、[ADR-0009](adr/ADR-0009-notification-channels.md) 的 Email 传输与投递任务（补齐 §53 的最后两项）
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
@@ -85,6 +85,7 @@
 > ⚠️ **主密钥没有重包裹任务**（T0.8b 派生）：`app/core/crypto.py` 已经支持多版本钥匙串（轮换时老行仍能解开），但把老行重新用新密钥包裹的后台任务还没有。没有它，轮换之后老密钥必须**永久保留**，否则历史 TOTP 注册全部作废。
 > ⚠️ **边缘 nginx 自己的 `$binary_remote_addr` 仍是直连对端**（T0.8a 派生）：应用侧已经会解析 `X-Forwarded-For`（`app/core/clientip.py`，只在可信代理后面采信），但**边缘那层 `limit_req` 与 `/readyz` 的网段限制还没有**。生产上若在 nginx 前面再放一层代理，这两处都会把所有客户端看成同一个来源。T0.9 要配 `real_ip_header` + `set_real_ip_from`，三处一并收口。
 > ⚠️ **边缘 nginx 的上游超时没有收紧**（T0.7 实测发现）：api 容器停掉时，边缘 nginx 要 **约 4 秒**才返回 502（DNS 解析不到上游的等待），`proxy_connect_timeout` 更是还挂着 60 秒的默认值。后果是**一次停机在用户侧表现成卡住而不是报错**，而且每个挂起的请求都占着 nginx 的连接。T0.9 要把 `resolver_timeout` 与 `proxy_connect_timeout` 收到秒级。实测数据：`curl` 到 `/healthz` 在 api 停机时耗时 3.96s。
+> ⚠️ **pending 2FA 令牌的 120 秒 TTL 对注册路径不够用**（T0.8c 整栈实测发现，**待 Kelvin 拍板**）：`issue_pending_2fa_token` 的 `ttl_seconds=120` 对正常的第二因子路径（掏手机输 6 位）合适，但 ADMIN 首次登录要扫码 + 抄下 10 个恢复码 —— 实测 `/2fa/confirm` 卡在 t+113 秒，紧贴上限，慢一点就得从头再来一轮。T0.8c 已在前端把「令牌失效」收敛成退回第一步（不再让用户对着一张永远提交不成的表单重输），但**这一段仍必须在 120 秒内走完**。彻底的修法在后端：给注册路径单独的 TTL，或让 `/2fa/confirm` 返回一张新的 pending 令牌。那是 T0.8a/b 定的安全参数、过过设计闸门 #32，不在前端任务的范围里，故升级给 Kelvin。
 > ⚠️ **前端产物是单个 877 kB 的 chunk**（gzip 283 kB，主要是 antd）。只有一个路由时拆包没有意义，**加到第三、四个路由时必须做路由级懒加载**，否则首屏会越拖越久。归 T0.10（性能 / SLO 基线）一并量。
 > ⚠️ **celery-beat 没有存活探针**（T0.6 派生）：`celery inspect ping` 问的是 worker，够不着 beat。现在 beat 的 schedule 是空的，崩了也没有后果；**第一条周期任务落地时这就变成静默故障** —— beat 挂掉 = 对账扫描、状态轮询全部不执行，而 API 一切正常、没有任何报错。加第一条周期任务的那个任务必须同时给出探测手段（例如让 beat 自己周期性打一条心跳日志并挂告警）。
 > ⚠️ **T0.9 必须包含的一条具体告警**（T0.5 派生，PR #28 审查指出）：`/readyz` 在 Redis 不可用时**刻意返回 200**，所以负载均衡不会发现这个故障，**它只能靠日志告警发现**。告警名 `billing_readiness_degraded_redis`，条件、分级与升级路径写在 [runbook](runbook.md)。告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
@@ -571,6 +572,59 @@ sleep(delay).then(() => canContinue() ? undefined : pause())
 
 - **同一个 30 秒窗口里的 TOTP 码只能用一次**（防重放，刻意的），所以测试里「连续登录两次」的辅助函数第二次起要改用恢复码 —— 把时钟往前推会让 JWT 的 `iat` 落在未来被 PyJWT 拒掉（T0.8a 踩过）
 - **并发用例第二次踩了内存 SQLite 的坑**：`StaticPool` 是单连接共享，两个「并发」会话其实在同一个事务里。已挪到真 MySQL 的独立库
+
+
+### T0.8c 任务记录（2026-09-12）
+
+**做了什么**
+
+- `src/auth/tokenStore.ts`：访问令牌只放**内存**（模块级变量 + 订阅），不进 `localStorage` / `sessionStorage` / 可读 cookie
+- `src/auth/refresh.ts`：**single-flight** 刷新 —— 同一时刻只有一次刷新在飞
+- `src/api/client.ts`：请求拦截器带 Bearer，响应拦截器在 401 时刷新一次并重放原请求
+- `src/api/auth.ts`：`/login`、`/login/totp`、`/2fa/enrol`、`/2fa/confirm`、`/logout` 五个调用
+- `src/auth/AuthProvider.tsx`：`unknown` / `anonymous` / `authenticated` 三态，挂载时静默换一张访问令牌
+- `src/features/auth/LoginPage.tsx`：密码 → 验证码 → （新管理员）扫码注册 → 抄恢复码
+- `src/features/auth/QrCode.tsx`：二维码**本地渲染**，绝不调在线服务（URI 里就是 TOTP 密钥）
+- `src/routes/RequireAuth.tsx`：守卫；`AppLayout` 加登出按钮（调后端，不只是清本地）
+- 测试基建：引入 `@testing-library/react` + `jsdom`（T0.7 记录里欠下的），vitest 默认环境从 node 换成 jsdom
+
+**几个不是随手选的决定**
+
+- **访问令牌不落任何持久化存储。** 那三个地方 JS 都读得到，一次 XSS（包括来自某个依赖的）就能把会话整个拿走。代价是刷新页面会丢 —— 而那正是刷新令牌存在的理由：它在 httpOnly cookie 里，页面加载时静默换一张新的回来
+- **single-flight 刷新是安全要求，不是性能优化。** 后端刷新令牌一次性，同一张被提交两次即判重放、**整条会话链被吊销**。「每个 401 各自刷一次」在三个请求同时过期时必然踩中，现象是**用户随机掉登录**，越是网慢、请求多越容易中
+- **`AuthStatus` 必须有 `unknown` 第三态。** 少了它，守卫会在静默刷新回来之前就把人踢到登录页 —— 现象是「每按一次 F5 都要重新登录」
+- **登出先调后端。** 只清本地令牌的话那张刷新 cookie 还活着，谁拿到它都能继续换访问令牌
+- **认证端点的 401 不触发刷新。** 密码错是业务结果不是令牌过期；在那里刷新等于每输错一次密码就白发一个刷新请求
+- **`authRetried` 标记保证一个请求至多重试一次。** 少了它，一个始终 401 的端点会把刷新与重试打成死循环
+- **`client.ts` 对 `refresh.ts` 改回静态 import。** 原本写成动态 import 是为了防循环依赖，但 `refresh.ts` 把 client 当参数收、自己不 import 它，压根不成环；构建器也直接警告这个动态 import 无效（`INEFFECTIVE_DYNAMIC_IMPORT`）
+
+**整栈实测抓到的缺陷：pending 令牌只活 120 秒，而注册路径走不完**
+
+单元测试全绿、`npm run build` 干净之后起整栈实跑，新管理员第一次登录走到最后一步报「The token is invalid or has expired.」。
+
+从 api 日志还原时间线：`/login` 在 07:36:43，`/2fa/confirm` 在 07:38:36 通过（**t+113 秒，紧贴 120 秒上限**），随后的 `/login/totp` 在 07:39:12（t+149 秒）吃 401。
+
+根因是 `issue_pending_2fa_token(..., ttl_seconds: int = 120)`：这个 TTL 对**正常的**第二因子路径（掏出手机输 6 位）是合适的，但注册路径要求用户扫码 + **抄下 10 个恢复码**，真人几乎不可能在 120 秒内走完。而当时的前端在抄完恢复码后直接跳到验证码那一步、继续用那张早已过期的 pending 令牌 —— 用户拿到的错误指向验证码，原因却在两步之前。
+
+前端侧修了两处（都在 T0.8c 范围内）：
+
+1. 抄完恢复码 → **回到密码那一步**并提示「Two-factor authentication is on. Sign in again to finish.」，不再复用 pending 令牌
+2. 任何一步拿到 `TOKEN_INVALID` → 退回第一步。留在原地等于让用户对着一张**再也不可能提交成功**的表单反复重输
+
+⚠️ **剩下的一半要 Kelvin 拍板（见下）**：即便如此，`/login` → 扫码 → `/2fa/confirm` 这一段仍必须在 120 秒内走完，超时就得从头再来一轮。彻底的修法是后端的（给注册路径单独的 TTL，或让 `/2fa/confirm` 回一张新的 pending 令牌），那是 T0.8a/b 定的安全参数、过过设计闸门，不该在前端任务里顺手改。
+
+**测试**
+
+- 39 条前端用例（8 个文件）：token store、single-flight 刷新、拦截器（**换 adapter 而不是打桩 `client.post`**，拦截器与重试出去的 config 全是真的）、登录页状态机、路由守卫三态
+- **变异测试 11 个变异体，10 个被抓**（single-flight 拆掉、in-flight 不清、重试用旧令牌、认证端点不豁免、`authRetried` 不置位、令牌写进 localStorage、`unknown` 当成未登录、守卫直接放行、2FA 没走完就发会话、pending 令牌传空串）
+- 活下来那一个是**等价变异体**：`finishEnrolment` 里的 `setRecoveryCodes([])` 求的是内存卫生，不是界面效果 —— 换了 stage 之后那段本来就不渲染。已在代码注释里写明
+- 整栈实测（本地 compose + 真 MySQL）：新管理员注册 → 抄恢复码 → 重新登录 → 进后台；F5 保持登录；登出后再刷新页面**回不到后台**（会话确实在服务端被吊销）；`localStorage` / `sessionStorage` 均为空，刷新 cookie 对 JS 不可见
+
+**踩到的坑**
+
+- `tsc --noEmit -p tsconfig.app.json` **看不到测试文件**（那份 config 显式 `exclude` 了它们）。检查得用 `npm run typecheck`（`tsc --build`，覆盖三个 project），不然测试里的类型错要等 `npm run build` 才暴露
+- jsdom 没实现 `matchMedia`，而 antd 的响应式栅格挂载时就调它 —— 在 `src/test/setup.ts` 里补一个永远不匹配的实现
+- antd 的 `onFinish` 要 `void`，直接递 async 函数会让里面的异常变成无人接管的 rejection；每个提交口改成「同步壳 + `void guard(...)`」
 
 
 ## Phase 1 — Tenant, Project & Wallet Core（§124）
