@@ -8,6 +8,22 @@
 
 import axios, { AxiosError, type AxiosInstance } from "axios";
 
+import { refreshAccessToken } from "../auth/refresh";
+import { getAccessToken } from "../auth/tokenStore";
+
+/**
+ * 拦截器挂在请求配置上的标记。
+ *
+ * ⚠️ `skipAuthRefresh` 给刷新请求自己用；`authRetried` 保证一个请求至多被
+ * 重试一次 —— 少了它，一个始终 401 的端点会把刷新与重试打成死循环。
+ */
+declare module "axios" {
+  interface AxiosRequestConfig {
+    skipAuthRefresh?: boolean;
+    authRetried?: boolean;
+  }
+}
+
 /** 与后端 `app/core/middleware.py` 的 `REQUEST_ID_HEADER` 必须一致。 */
 export const REQUEST_ID_HEADER = "X-Request-ID";
 
@@ -109,8 +125,48 @@ client.interceptors.request.use((config) => {
   // 没带的话 nginx 会生成一个，但那个 id 前端自己不知道。
   // 格式必须落在后端 `_SAFE_REQUEST_ID` 的字符集内，否则会被丢弃后重新生成。
   config.headers.set(REQUEST_ID_HEADER, crypto.randomUUID());
+
+  // 访问令牌只在内存里（见 auth/tokenStore.ts）。这里每次现取，不缓存 ——
+  // 刷新之后拿到的必须是新的那张。
+  //
+  // ⚠️ 刷新请求**不带**这个头：它靠 httpOnly cookie 认人，而此刻手上那张
+  // 访问令牌已经过期了，带上只会让服务端日志更难读。
+  const token = getAccessToken();
+  if (token && !config.skipAuthRefresh) {
+    config.headers.set("Authorization", `Bearer ${token}`);
+  }
   return config;
 });
+
+client.interceptors.response.use(
+  (response) => response,
+  async (error: unknown) => {
+    if (!(error instanceof AxiosError) || error.response?.status !== 401) {
+      throw error;
+    }
+    const config = error.config;
+    // ⚠️ 三种情况都**不能**重试，否则会打转：
+    //   1. 刷新请求自己 401 —— 再刷一次还是 401
+    //   2. 已经重试过一次 —— 说明新令牌也不被接受，问题不在过期
+    //   3. 认证端点自己 401（密码错、验证码错）—— 那是业务结果，不是令牌过期
+    if (!config || config.skipAuthRefresh || config.authRetried) {
+      throw error;
+    }
+    if (config.url?.startsWith("/api/v1/auth/")) {
+      throw error;
+    }
+
+    // 静态 import 不会成环：`refresh.ts` 把 client 当参数收，自己不 import 它。
+    const token = await refreshAccessToken(client);
+    if (!token) {
+      throw error;
+    }
+
+    config.authRetried = true;
+    config.headers.set("Authorization", `Bearer ${token}`);
+    return client.request(config);
+  },
+);
 
 /**
  * 发一个 GET 并拆信封。
