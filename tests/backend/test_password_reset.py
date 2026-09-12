@@ -272,6 +272,22 @@ def test_a_disabled_account_gets_no_reset_email(session_factory, settings: Setti
     assert audit_actions(session_factory) == []
 
 
+def test_the_outbox_payload_carries_nothing_beyond_what_the_email_needs(
+    session_factory, settings: Settings
+) -> None:
+    """⚠️ 这条 payload 里装着**令牌明文**，而 `domain_outbox` 是长期保留的。
+
+    装进去的每一样东西都得有人真的读 —— 初版还存了 `expires_at`，而渲染邮件时
+    根本没用它。没有消费方的字段不该待在一条含敏感材料的记录里。
+    """
+    make_user(session_factory)
+    request_reset(session_factory, settings, email=EMAIL, context=CONTEXT)
+
+    payload = json.loads(outbox_rows(session_factory)[-1].payload_json or "{}")
+
+    assert set(payload) == {"to", "token"}
+
+
 def test_the_stored_token_is_only_a_hash(session_factory, settings: Settings) -> None:
     """⚠️ 库里不能有任何可以直接拿去重置别人密码的东西。"""
     make_user(session_factory)

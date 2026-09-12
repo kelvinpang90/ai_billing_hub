@@ -74,7 +74,7 @@ def transport(monkeypatch) -> FakeTransport:
 
 def add_row(session_factory, *, event_type: str = EVENT_PASSWORD_RESET, **overrides) -> int:
     now = utc_now()
-    payload = {"to": "admin@example.com", "token": TOKEN, "expires_at": now.isoformat()}
+    payload = {"to": "admin@example.com", "token": TOKEN}
     fields = {
         "event_type": event_type,
         "aggregate_type": AGGREGATE_USERS,

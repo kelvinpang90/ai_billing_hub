@@ -182,17 +182,15 @@ def _start_reset(
             event_type=EVENT_PASSWORD_RESET,
             aggregate_type=AGGREGATE_USERS,
             aggregate_id=str(user.id),
-            # ⚠️ payload 里**只放发这封信必需的东西**：收件地址、令牌明文、
-            # 过期时刻。令牌明文必须在这里 —— 库里别处只有哈希，信发不出去。
+            # ⚠️ payload 里**只放发这封信必需的东西**：收件地址 + 令牌明文。
+            # 令牌明文必须在这里 —— 库里别处只有哈希，没有它信就发不出去。
             # 投递成功的那一刻这一列会被置空（见 app/tasks/outbox.py）。
-            payload_json=json.dumps(
-                {
-                    "to": user.email,
-                    "token": raw_token,
-                    "expires_at": expires_at.isoformat(),
-                },
-                sort_keys=True,
-            ),
+            #
+            # ⚠️ 初版还存了 `expires_at`，而渲染邮件时**根本没用它** —— 一个没有
+            # 消费方的字段，却躺在这条含敏感材料的 payload 里。这张表是长期保留的，
+            # 装进去的每一样东西都要有人真的读。要在信里写明过期时刻是另一件事，
+            # 到时候连同模板层一起做（见 `docs/TODO.md` 的 Phase 6 通知模板）。
+            payload_json=json.dumps({"to": user.email, "token": raw_token}, sort_keys=True),
             status=OutboxStatus.PENDING,
             attempt_count=0,
             # 立刻可投。
