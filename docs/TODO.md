@@ -939,6 +939,15 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ---
 
+## 待办：缺失的 secret 文件不会让栈起不来（既有，与 compose 注释所写相反）
+
+- [ ] **`docker-compose.yml` 的 `secrets:` 注释说「文件不存在时 `docker compose up` 直接失败 —— 与密码留空同一种 fail-closed」，实测不成立**（T0.8d 复审时验证）：Docker 会把缺失的 `file:` secret 挂成一个**空目录**，栈照常起来。三把密钥都一样 ——
+  - `jwt.key` 缺失 → `load_signing_key` 抛 `AuthNotConfigured`，认证端点 503（**这一条仍是 fail-closed，只是不在 compose 那一层**）
+  - `master.key` 缺失 → 2FA 端点报 `ENCRYPTION_NOT_CONFIGURED`
+  - `smtp.password` 缺失 → 密码**静默变成空串**，只留一条 error 日志（T0.8d 已在自己那条注释里写明实际行为）
+
+  也就是说「忘了建文件」与「本来就不需要密码」在行为上几乎一样。要真的 fail-closed，得在应用启动时显式校验这几个路径指向的是**可读的文件**而不是目录。**这是既有缺口，不是 T0.8d 引入的**；T0.8d 复审只修了被指出的问题，没有顺手改那条既有注释（范围）。
+
 ## 待办：既有配置项缺下界校验
 
 - [ ] **`Settings` 里既有的 TTL / 计数类配置项没有下界约束**（T0.8e 派生）：`access_token_ttl_seconds`、`refresh_token_ttl_seconds`、`refresh_token_idle_seconds`、`login_max_failures`、`login_lockout_seconds`、`auth_rate_limit_*` 设成 0 或负数都不会被拒，各自会带来一种「配置对了一半」的故障（令牌立刻过期、锁定立刻解除、限流桶为空…）。T0.8e 只给自己新增的两个加了 `gt=0`，**刻意没有顺手补旁边的**（那是范围扩张）。补的时候要逐个想清楚每项的合理下界，不是无脑 `gt=0`

@@ -64,9 +64,15 @@ x-backend: &backend
     BILLING_SMTP_PORT: ${BILLING_SMTP_PORT:-587}
     BILLING_SMTP_USERNAME: ${BILLING_SMTP_USERNAME:-}
     BILLING_SMTP_FROM: ${BILLING_SMTP_FROM:-}
+    # ⚠️ 这里给的是**路径，不是密码** —— 与 JWT 签名密钥、加密主密钥同一条规矩。
+    # 少了这一行，用常规「用户名 + 密码」认证的 SMTP 在 compose 部署下拿到的是
+    # **空密码**：`login()` 必然失败，outbox 一路重试到死信，而用户那边的现象
+    # 只是「没收到信」。
+    BILLING_SMTP_PASSWORD_FILE: /run/secrets/billing_smtp_password
   secrets:
     - billing_jwt_key
     - billing_master_key
+    - billing_smtp_password
   # ⚠️ 只是启动顺序，**不是** service_healthy。API 被设计成依赖不可用时照样
   # 启动、由 /readyz 如实汇报（见 app/main.py 与 app/api/health.py）——
   # 让它等 MySQL 健康，等于 MySQL 坏了就连 /healthz 都拿不到，排障时手上空空。
@@ -208,6 +214,20 @@ secrets:
   # 生成：echo "1:$(openssl rand -base64 32)" > secrets/master.key
   billing_master_key:
     file: ./secrets/master.key
+  # SMTP 密码（ADR-0009 的 Email 传输）。与上面两把同一种处置：**只有路径进环境
+  # 变量，密码本身走文件**（ADR-0004 第 2 节）。
+  #
+  # ⚠️ 不配 SMTP 也要有这个文件，**创建一个空的就行**：
+  #     : > secrets/smtp.password
+  # 空内容的语义是「没有密码」，而不是「没配好」—— 有些 relay 只认 IP 白名单，
+  # 那时本来就不该有密码（见 app/core/mailer.py：用户名为空时根本不调 login）。
+  #
+  # ⚠️ **文件不存在时栈照样起得来**（实测）：Docker 会把缺失的 `file:` secret
+  # 挂成一个**空目录**，读它抛 OSError，于是密码静默变成空串 —— 只在日志里留一条
+  # `Could not read the SMTP password file`。所以「忘了建文件」与「本来就不需要
+  # 密码」在行为上几乎一样，差别只在那一行日志。**别指望 compose 替你挡住。**
+  billing_smtp_password:
+    file: ./secrets/smtp.password
 
 volumes:
   mysql-data:

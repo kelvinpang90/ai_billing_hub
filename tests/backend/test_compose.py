@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app.core.config import Settings
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = REPO_ROOT / "docker-compose.yml"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
@@ -119,9 +121,17 @@ def test_api_healthcheck_probes_liveness_not_readiness(compose: dict) -> None:
 
 
 def test_no_password_is_hardcoded_in_the_compose_file(compose: dict) -> None:
-    """仓库是公开的：密码只能来自 `.env`，不能有字面量。"""
+    """仓库是公开的：密码只能来自 `.env`，不能有字面量。
+
+    ⚠️ `*_FILE` 结尾的那些**是路径，不是密码**（`BILLING_SMTP_PASSWORD_FILE` 名字里
+    也有 PASSWORD）。它们不归这一条管，但**没有被放过** —— 上面
+    `test_every_credential_file_setting_points_at_a_mounted_secret` 要求它们必须指向
+    真的挂了的 `/run/secrets/` 条目，所以往那种键里塞一个字面量密码同样会红。
+    """
     for name, service in compose["services"].items():
         for key, value in (service.get("environment") or {}).items():
+            if key.upper().endswith("_FILE"):
+                continue
             if "PASSWORD" in key.upper():
                 assert str(value).startswith("${"), f"{name}.{key} is not read from the environment"
 
@@ -167,6 +177,38 @@ def test_the_signing_key_is_injected_as_a_file_not_an_environment_variable(compo
         if "JWT" in key.upper() or "SECRET" in key.upper():
             assert str(value).startswith(("/run/secrets/", "${")), f"{key} must not carry a secret"
     assert "billing_jwt_key" in compose["secrets"]
+
+
+def test_every_credential_file_setting_is_wired_into_compose(compose: dict) -> None:
+    """⚠️ **这条用例来自 PR #39 的一个阻断项。**
+
+    T0.8d 给 `Settings` 加了 `smtp_password_file`、在 `.env.example` 里写明「密码走
+    文件注入」，**却没在 compose 里挂那个 secret、也没设对应的环境变量**。后果：
+    用常规「用户名 + 密码」认证的 SMTP 在 compose 部署下拿到的是**空密码**，
+    `login()` 必然失败，outbox 一路重试到死信 —— 而用户那边的现象只是「没收到信」。
+
+    ⚠️ **方向很要紧。**先写的那版是「遍历 compose 里的 `*_FILE` 键，检查它们指向
+    真的挂了的 secret」—— 而那个缺陷恰恰是**键根本不存在**，于是用例在空集合上
+    通过了。变异测试当场把它抓出来：把那一行删掉（= 被指出的原状），用例照样全绿。
+
+    所以要从 **`Settings` 那一侧**问：每个 `*_file` 字段，compose 配了没有。
+    以后再加第四把密钥，忘了配 compose 就会在这里红。
+    """
+    backend = compose["x-backend"]
+    env = backend["environment"]
+    mounted = set(backend["secrets"])
+
+    file_fields = [name for name in Settings.model_fields if name.endswith("_file")]
+    assert file_fields, "Settings 一个 *_file 字段都没有，这条用例在空集合上空转"
+
+    for field in file_fields:
+        key = f"BILLING_{field.upper()}"
+        assert key in env, f"Settings.{field} 走文件注入，但 compose 没给它配 {key}"
+        value = str(env[key])
+        assert value.startswith("/run/secrets/"), f"{key} 应当指向挂载进来的 secret"
+        name = value.removeprefix("/run/secrets/")
+        assert name in compose["secrets"], f"{key} 指向 {name}，但 secrets: 里没有它"
+        assert name in mounted, f"{name} 定义了却没挂给后端，容器里那个路径不存在"
 
 
 def test_the_auth_endpoints_are_rate_limited_at_the_edge() -> None:
