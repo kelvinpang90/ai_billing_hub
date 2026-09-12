@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
+import os
 
+import pyotp
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -45,8 +48,11 @@ def in_memory_engine():
 def client(tmp_path) -> TestClient:
     key = tmp_path / "jwt.key"
     key.write_text("a-test-signing-key-that-is-long-enough", encoding="utf-8")
+    master = tmp_path / "master.key"
+    master.write_text(f"1:{base64.b64encode(os.urandom(32)).decode()}\n", encoding="utf-8")
     settings = Settings(
         jwt_secret_file=str(key),
+        master_key_file=str(master),
         login_max_failures=3,
         # 本地 http：Secure cookie 发不出去。生产默认 True。
         session_cookie_secure=False,
@@ -76,8 +82,45 @@ def client(tmp_path) -> TestClient:
     return TestClient(app)
 
 
+# 每个 client 的 TOTP 密钥只在注册那一刻拿得到，之后库里只有密文。
+_TOTP_SECRETS: dict[int, str] = {}
+
+
+def sign_in(client: TestClient):
+    """Walk both steps and return the final response.
+
+    ⚠️ T0.8b 起 ADMIN 的 2FA 是强制的（spec §54），所以「登录」是两次请求：
+    密码换一张 pending 令牌，验证码才换会话。第一次调用顺带把 2FA 注册掉。
+    """
+    first = client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD}).json()[
+        "data"
+    ]
+
+    if first["stage"] == "ENROL_2FA":
+        enrolment = client.post(
+            "/api/v1/auth/2fa/enrol", json={"pending_token": first["pending_token"]}
+        ).json()["data"]
+        client.post(
+            "/api/v1/auth/2fa/confirm",
+            json={
+                "pending_token": first["pending_token"],
+                "code": pyotp.TOTP(enrolment["secret"]).now(),
+            },
+        )
+        _TOTP_SECRETS[id(client)] = enrolment["secret"]
+        first = client.post(
+            "/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD}
+        ).json()["data"]
+
+    secret = _TOTP_SECRETS[id(client)]
+    return client.post(
+        "/api/v1/auth/login/totp",
+        json={"pending_token": first["pending_token"], "code": pyotp.TOTP(secret).now()},
+    )
+
+
 def test_login_returns_the_envelope_and_sets_an_httponly_cookie(client: TestClient) -> None:
-    response = client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    response = sign_in(client)
 
     assert response.status_code == 200
     body = response.json()
@@ -95,7 +138,7 @@ def test_login_returns_the_envelope_and_sets_an_httponly_cookie(client: TestClie
 
 def test_the_refresh_token_is_not_in_the_response_body(client: TestClient) -> None:
     """⚠️ 它只走 httpOnly cookie。出现在正文里就等于把它交给了 JS。"""
-    response = client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    response = sign_in(client)
     raw_cookie = client.cookies.get(REFRESH_COOKIE_NAME)
     assert raw_cookie
     assert raw_cookie not in response.text
@@ -116,7 +159,7 @@ def test_wrong_password_and_unknown_email_look_identical(client: TestClient) -> 
 
 
 def test_refresh_rotates_the_cookie(client: TestClient) -> None:
-    client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    sign_in(client)
     first = client.cookies.get(REFRESH_COOKIE_NAME)
 
     response = client.post("/api/v1/auth/refresh")
@@ -129,7 +172,7 @@ def test_refresh_without_a_cookie_is_refused(client: TestClient) -> None:
 
 
 def test_logout_is_idempotent_and_clears_the_cookie(client: TestClient) -> None:
-    client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    sign_in(client)
     assert client.post("/api/v1/auth/logout").status_code == 200
     # 再来一次仍然 200 —— 失败的登出没有任何有用语义。
     assert client.post("/api/v1/auth/logout").status_code == 200
@@ -205,7 +248,7 @@ def test_credentials_never_reach_the_logs(client: TestClient) -> None:
     root = logging.getLogger()
     root.addHandler(handler)
     try:
-        response = client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+        response = sign_in(client)
         client.post("/api/v1/auth/refresh")
         client.post("/api/v1/auth/login", json={"email": EMAIL, "password": "wrong-password-here"})
     finally:

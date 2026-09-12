@@ -8,7 +8,7 @@
 ## 现在在哪
 
 **Phase 0 进行中。** §123 的 13 项已拆成 T0.1–T0.10（拆法与依赖见 [TODO.md](TODO.md) 的 Phase 0 一节），
-**T0.1–T0.7 与 T0.8a 已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`、
+**T0.1–T0.7 与 T0.8a / T0.8b 已做完**：`app/` 七层包、`create_app()` 工厂、`/healthz`、`app/core/config.py`、`pyproject.toml`、
 `.env.example`、`tests/backend/`；CI 的 `backend` job（lint + 格式 + pytest + 打包冒烟）；结构化 JSON 日志 +
 关联 ID + 脱敏 + §107 统一错误信封 + `AppError` 领域异常基类；MySQL + SQLAlchemy + Alembic 接通
 （`Money` = `DECIMAL(20,8)`、会话生命周期、基线迁移、`/readyz` 就绪探针）；Redis + Celery 接通
@@ -16,7 +16,7 @@
 `docker-compose.yml` + `deploy/nginx/`）；React 骨架（`frontend/`，§3.2 那一套 + i18n，**七个**服务实测跑通）。
 
 **业务表一张都还没有**（基线迁移是空的，Phase 1 才开始建）；**周期任务一条都还没有**（beat 的 schedule 是空的）；
-**前端只有一个落地页**（一张平台状态卡片，Phase 1 起换成真内容）；**认证只做了后端的单因素那一半**（T0.8a：登录 / 令牌 / 锁定 / 限流 / 审计；2FA 与前端登录页还没有）。
+**前端只有一个落地页**（一张平台状态卡片，Phase 1 起换成真内容）；**认证的后端已经完整**（T0.8a + T0.8b：登录两步、TOTP、恢复码、信封加密、令牌轮换、递增锁定、限流、审计）；**前端登录页还没有**（T0.8c），**自助密码重置还没有**（T0.8d）。
 
 已完成：
 
@@ -31,10 +31,10 @@
 
 ## 下一步
 
-**接着做 T0.8b（2FA）**。T0.8 的设计闸门（Issue #32）已批准 `design v5`，拆成四个 PR：
-**T0.8a 已合并**（登录 / 令牌 / 锁定 / 限流 / 审计 / bootstrap CLI）；剩 **T0.8b**（信封加密 + TOTP + 恢复码 + ADMIN 强制 2FA）、
-**T0.8c**（前端登录页与路由守卫）、**T0.8d**（忘记密码 / 重置密码 + Email 投递）。
-⚠️ 两条**上线前置**已钉进 T0.9：T0.8b 合并前管理员登录是单因素的（与 §54 不符）；T0.8d 合并前没有自助密码重置。
+**接着做 T0.8c（前端登录页与路由守卫）**。T0.8 的设计闸门（Issue #32）已批准 `design v5`，拆成四个 PR：
+**T0.8a / T0.8b 已合并**（登录 / 令牌 / 锁定 / 限流 / 审计 / bootstrap CLI / 信封加密 / TOTP / 恢复码 / ADMIN 强制 2FA）；
+剩 **T0.8c**（前端登录页与路由守卫）、**T0.8d**（忘记密码 / 重置密码 + Email 投递）。
+⚠️ **上线前置**已钉进 T0.9：T0.8d 合并前没有自助密码重置；主密钥的宿主机权限那一半也还没做。
 ⚠️ 仍要记着 spec §51：一套认证同时服务 ADMIN 与 CUSTOMER、**同一个 React 前端**，角色只决定可见的路由；
 **授权必须由后端独立强制执行，前端藏菜单不构成任何访问控制**。
 清单与依赖在 [TODO.md](TODO.md) 的 Phase 0 一节，

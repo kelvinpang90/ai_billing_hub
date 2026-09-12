@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import os
 
+import pyotp
 import pytest
 from sqlalchemy import create_engine, select
 
@@ -19,14 +21,18 @@ from app.core.tokens import TOKEN_TYPE_ACCESS, decode_token
 from app.models.auth import AuditAction, AuditLog, RefreshToken, User, UserRole, UserStatus
 from app.models.base import Base
 from app.services.auth import (
+    STAGE_ENROL_2FA,
     InvalidCredentials,
+    IssuedSession,
     RequestContext,
     TokenReused,
     authenticate,
+    complete_second_factor,
     logout,
     refresh_session,
     utc_now,
 )
+from app.services.two_factor import confirm_enrolment, start_enrolment
 
 PASSWORD = "a-perfectly-fine-passphrase"
 CONTEXT = RequestContext(ip_address="10.0.0.1", user_agent="pytest")
@@ -36,7 +42,65 @@ CONTEXT = RequestContext(ip_address="10.0.0.1", user_agent="pytest")
 def settings(tmp_path) -> Settings:
     key = tmp_path / "jwt.key"
     key.write_text("a-test-signing-key-that-is-long-enough", encoding="utf-8")
-    return Settings(jwt_secret_file=str(key), login_max_failures=3, login_lockout_seconds=900)
+    master = tmp_path / "master.key"
+    master.write_text(f"1:{base64.b64encode(os.urandom(32)).decode()}\n", encoding="utf-8")
+    return Settings(
+        jwt_secret_file=str(key),
+        master_key_file=str(master),
+        login_max_failures=3,
+        login_lockout_seconds=900,
+    )
+
+
+# 每个用户的 TOTP 密钥与恢复码只在注册那一刻能拿到，之后库里只有密文 / 哈希 ——
+# 用例要重复登录就得自己记着。键是 (库的 id, user_id)，免得不同 fixture 的
+# 同号用户串味。
+_ENROLLED: dict[tuple[int, int], tuple[str, list[str]]] = {}
+
+
+def sign_in(session_factory, settings: Settings, *, user_id: int) -> IssuedSession:
+    """Complete both steps of login and return the session.
+
+    ⚠️ T0.8b 起，**密码正确不再等于登进来了** —— ADMIN 的 2FA 是强制的
+    （spec §54），所以拿到会话必须走完第二步。这个 helper 存在的理由就是让
+    「需要一个真会话」的用例不必各自重复这段。
+
+    ⚠️ 只在还没注册时注册。重复调用要能正常登录 —— 有用例会连着登两次
+    （「失败—成功—失败—成功」那条）。
+
+    ⚠️ **第二次起用恢复码，不用 TOTP。**同一个 30 秒窗口里的验证码只能用一次
+    （防重放，这是刻意的），而把时钟往前推又会让 JWT 的 `iat` 落在未来被拒。
+    恢复码正好是为「换一种方式证明自己」准备的，用它最贴近真实。
+    """
+    key = (id(session_factory), user_id)
+    entry = _ENROLLED.get(key)
+    if entry is None:
+        enrolment = start_enrolment(session_factory, settings, user_id=user_id)
+        codes = confirm_enrolment(
+            session_factory,
+            settings,
+            user_id=user_id,
+            code=pyotp.TOTP(enrolment.secret).now(),
+            context=CONTEXT,
+        )
+        entry = (enrolment.secret, list(codes))
+        _ENROLLED[key] = entry
+        second_factor = pyotp.TOTP(enrolment.secret).now()
+    else:
+        second_factor = entry[1].pop()
+
+    outcome = authenticate(
+        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert outcome.pending_token is not None
+    issued, _ = complete_second_factor(
+        session_factory,
+        settings,
+        pending_token=outcome.pending_token,
+        code=second_factor,
+        context=CONTEXT,
+    )
+    return issued
 
 
 @pytest.fixture
@@ -77,14 +141,23 @@ def audit_actions(session_factory) -> list[AuditAction]:
 # --- 正常路径 -----------------------------------------------------------------
 
 
-def test_login_issues_a_session_and_audits_it(session_factory, settings: Settings) -> None:
+def test_an_admin_without_2fa_is_sent_to_enrol(session_factory, settings: Settings) -> None:
+    """⚠️ spec §54：ADMIN 的 2FA 是**强制**的，所以密码对只换来一张 pending 令牌。"""
     make_user(session_factory)
-    issued = authenticate(
+    outcome = authenticate(
         session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
     )
+    assert outcome.stage == STAGE_ENROL_2FA
+    assert outcome.issued is None
+    assert audit_actions(session_factory) == [], "还没登进来，不该有 LOGIN 审计"
+
+
+def test_login_issues_a_session_and_audits_it(session_factory, settings: Settings) -> None:
+    user = make_user(session_factory)
+    issued = sign_in(session_factory, settings, user_id=user.id)
     payload = decode_token(settings, issued.access_token, expected_type=TOKEN_TYPE_ACCESS)
     assert payload["role"] == "ADMIN"
-    assert audit_actions(session_factory) == [AuditAction.LOGIN]
+    assert AuditAction.LOGIN in audit_actions(session_factory)
 
 
 def test_email_matching_is_case_insensitive(session_factory, settings: Settings) -> None:
@@ -93,9 +166,11 @@ def test_email_matching_is_case_insensitive(session_factory, settings: Settings)
     不做归一化的话，用户会遇到「密码明明对却登不进去」，而且没有任何线索。
     """
     make_user(session_factory, email="admin@example.com")
-    authenticate(
+    outcome = authenticate(
         session_factory, settings, email="ADMIN@Example.COM", password=PASSWORD, context=CONTEXT
     )
+    # 匹配上了就会进第二因子那一步；匹配不上会抛 InvalidCredentials。
+    assert outcome.stage == STAGE_ENROL_2FA
 
 
 # --- 用户枚举 -----------------------------------------------------------------
@@ -193,7 +268,7 @@ def test_failures_are_not_cumulative_across_a_success(session_factory, settings:
     成功时不清零的话，历史失败会永久累积，管理员会在一次次正常登录之间
     突然被锁 —— 而看起来像随机故障。
     """
-    make_user(session_factory)
+    user = make_user(session_factory)
     for _ in range(settings.login_max_failures - 1):
         with pytest.raises(InvalidCredentials):
             authenticate(
@@ -203,17 +278,13 @@ def test_failures_are_not_cumulative_across_a_success(session_factory, settings:
                 password="wrong",
                 context=CONTEXT,
             )
-    authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    sign_in(session_factory, settings, user_id=user.id)
     # 再错一次不应该锁定。
     with pytest.raises(InvalidCredentials):
         authenticate(
             session_factory, settings, email="admin@example.com", password="wrong", context=CONTEXT
         )
-    authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    sign_in(session_factory, settings, user_id=user.id)
 
 
 def test_an_expired_lock_resets_the_counter_before_judging(
@@ -228,10 +299,8 @@ def test_an_expired_lock_resets_the_counter_before_judging(
         stored.locked_until = utc_now() - dt.timedelta(seconds=1)
         session.commit()
 
-    # 锁已过期：这一次应该被正常判定（密码对 → 成功）。
-    authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    # 锁已过期：这一次应该被正常判定（密码对 → 进第二因子那一步）。
+    sign_in(session_factory, settings, user_id=user.id)
     with session_factory() as session:
         stored = session.get(User, user.id)
         assert stored is not None
@@ -381,9 +450,7 @@ def test_a_successful_login_resets_the_escalation_level(
     _drive_to_lockout(session_factory, settings)
     _expire_lock(session_factory, user.id)
 
-    authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    sign_in(session_factory, settings, user_id=user.id)
     with session_factory() as session:
         stored = session.get(User, user.id)
         assert stored is not None
@@ -433,7 +500,9 @@ def test_concurrent_refresh_lets_exactly_one_through(tmp_path) -> None:
 
     key = tmp_path / "jwt.key"
     key.write_text("a-test-signing-key-that-is-long-enough", encoding="utf-8")
-    local_settings = Settings(jwt_secret_file=str(key))
+    master = tmp_path / "master.key"
+    master.write_text(f"1:{base64.b64encode(os.urandom(32)).decode()}\n", encoding="utf-8")
+    local_settings = Settings(jwt_secret_file=str(key), master_key_file=str(master))
 
     # ⚠️ **用一个独立的库**，不要和迁移用例共用。
     # 第一版共用了：这里的 `drop_all` 把表删掉，而 `alembic_version` 仍停在
@@ -466,9 +535,10 @@ def test_concurrent_refresh_lets_exactly_one_through(tmp_path) -> None:
         )
         session.commit()
 
-    issued = authenticate(
-        factory, local_settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    with factory() as session:
+        the_user = session.execute(select(User)).scalar_one()
+        user_id = the_user.id
+    issued = sign_in(factory, local_settings, user_id=user_id)
 
     outcomes: list[str] = []
     barrier = threading.Barrier(2)
@@ -521,10 +591,8 @@ def test_a_disabled_account_cannot_log_in(session_factory, settings: Settings) -
 
 
 def test_refresh_rotates_the_token(session_factory, settings: Settings) -> None:
-    make_user(session_factory)
-    first = authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    user = make_user(session_factory)
+    first = sign_in(session_factory, settings, user_id=user.id)
     second = refresh_session(
         session_factory, settings, raw_token=first.refresh_token, context=CONTEXT
     )
@@ -540,10 +608,8 @@ def test_reusing_a_refresh_token_revokes_the_whole_family(
     双方都被踢出去。代价是真用户要重新登录 —— 远好过两边共用一个会话而谁都
     不知道。
     """
-    make_user(session_factory)
-    first = authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    user = make_user(session_factory)
+    first = sign_in(session_factory, settings, user_id=user.id)
     refresh_session(session_factory, settings, raw_token=first.refresh_token, context=CONTEXT)
 
     with pytest.raises(TokenReused):
@@ -562,10 +628,8 @@ def test_an_unknown_refresh_token_is_refused(session_factory, settings: Settings
 
 
 def test_an_expired_refresh_token_is_refused(session_factory, settings: Settings) -> None:
-    make_user(session_factory)
-    issued = authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    user = make_user(session_factory)
+    issued = sign_in(session_factory, settings, user_id=user.id)
     with session_factory() as session:
         row = session.execute(select(RefreshToken)).scalar_one()
         row.expires_at = utc_now() - dt.timedelta(seconds=1)
@@ -577,10 +641,8 @@ def test_an_expired_refresh_token_is_refused(session_factory, settings: Settings
 def test_an_idle_refresh_token_is_refused(session_factory, settings: Settings) -> None:
     """闲置上限与绝对上限是两条独立的线；只有绝对上限的话，一个被偷走的令牌
     可以安静地躺 11 个小时再用。"""
-    make_user(session_factory)
-    issued = authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    user = make_user(session_factory)
+    issued = sign_in(session_factory, settings, user_id=user.id)
     with session_factory() as session:
         row = session.execute(select(RefreshToken)).scalar_one()
         row.issued_at = utc_now() - dt.timedelta(seconds=settings.refresh_token_idle_seconds + 60)
@@ -590,10 +652,8 @@ def test_an_idle_refresh_token_is_refused(session_factory, settings: Settings) -
 
 
 def test_logout_revokes_the_family_and_is_idempotent(session_factory, settings: Settings) -> None:
-    make_user(session_factory)
-    issued = authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    user = make_user(session_factory)
+    issued = sign_in(session_factory, settings, user_id=user.id)
     logout(session_factory, raw_token=issued.refresh_token, context=CONTEXT)
     # 再登出一次仍然不报错 —— 失败的登出没有任何有用语义。
     logout(session_factory, raw_token=issued.refresh_token, context=CONTEXT)
@@ -607,9 +667,7 @@ def test_refresh_is_refused_once_the_account_is_disabled(
 ) -> None:
     """⚠️ 停用账号必须立刻切断续期，否则一次停用要等刷新令牌自然过期才生效。"""
     user = make_user(session_factory)
-    issued = authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    issued = sign_in(session_factory, settings, user_id=user.id)
     with session_factory() as session:
         stored = session.get(User, user.id)
         assert stored is not None
@@ -624,10 +682,8 @@ def test_refresh_is_refused_once_the_account_is_disabled(
 
 def test_audit_rows_never_contain_credentials(session_factory, settings: Settings) -> None:
     """⚠️ before/after 是自由 JSON，最容易被人塞进整个请求体。审计表长期保留。"""
-    make_user(session_factory)
-    issued = authenticate(
-        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
-    )
+    user = make_user(session_factory)
+    issued = sign_in(session_factory, settings, user_id=user.id)
     with session_factory() as session:
         blob = " ".join(
             f"{row.before_state} {row.after_state} {row.reason}"
@@ -637,3 +693,46 @@ def test_audit_rows_never_contain_credentials(session_factory, settings: Setting
     assert issued.refresh_token not in blob
     assert issued.access_token not in blob
     assert "$argon2" not in blob
+
+
+def test_a_correct_password_alone_does_not_reset_the_lockout_counter(
+    session_factory, settings: Settings
+) -> None:
+    """⚠️ **T0.8b 的核心安全规则。**
+
+    清零的触发点必须是「令牌真的发出去了」，不是「密码这一步过了」。
+    放在密码那一步的话，知道密码但不知道验证码的人可以**无限次猜 TOTP** ——
+    每猜一次都先用正确密码把计数清掉。
+    """
+    user = make_user(session_factory)
+    # 先注册并确认 2FA，让登录停在第二因子那一步。
+    enrolment = start_enrolment(session_factory, settings, user_id=user.id)
+    confirm_enrolment(
+        session_factory,
+        settings,
+        user_id=user.id,
+        code=pyotp.TOTP(enrolment.secret).now(),
+        context=CONTEXT,
+    )
+
+    for _ in range(settings.login_max_failures - 1):
+        with pytest.raises(InvalidCredentials):
+            authenticate(
+                session_factory,
+                settings,
+                email="admin@example.com",
+                password="wrong",
+                context=CONTEXT,
+            )
+
+    # 密码正确，但停在 TOTP 那一步 —— 计数**不能**被清零。
+    outcome = authenticate(
+        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert outcome.issued is None
+    with session_factory() as session:
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert stored.failed_login_count == settings.login_max_failures - 1, (
+            "密码正确不算认证成功，计数不能清零"
+        )

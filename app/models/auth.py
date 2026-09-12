@@ -26,6 +26,17 @@ from app.models.base import Base
 _PrimaryKey = BigInteger().with_variant(Integer, "sqlite")
 _ForeignKeyInt = BigInteger().with_variant(Integer, "sqlite")
 
+# ⚠️ 枚举列的宽度**必须写死**。
+#
+# `Enum(native_enum=False)` 生成的 VARCHAR 宽度默认按**建表那一刻最长的成员**
+# 算。往枚举里加一个更长的值不会有任何提示，直到真 MySQL 在插入时报
+# `Data too long for column`。而**单元测试看不见它** —— SQLite 根本不强制
+# VARCHAR 长度，所以整套用例照样全绿。T0.8b 上真踩过一次：加了
+# `RECOVERY_CODES_REGENERATED`（26 字符），列还是按 `LOGIN_FAILED`（12）建的。
+#
+# 写死一个宽裕的宽度之后，加枚举值不再需要配一次 ALTER。
+_ENUM_LENGTH = 64
+
 
 class UserRole(enum.StrEnum):
     """spec §51：一套认证同时服务 ADMIN 与 CUSTOMER，角色只决定可见的路由。
@@ -52,9 +63,13 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
     # Argon2id 的完整编码串，**参数嵌在里面**，所以以后能逐个升级开销参数。
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole, native_enum=False), nullable=False)
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, native_enum=False, length=_ENUM_LENGTH), nullable=False
+    )
     status: Mapped[UserStatus] = mapped_column(
-        Enum(UserStatus, native_enum=False), nullable=False, default=UserStatus.ACTIVE
+        Enum(UserStatus, native_enum=False, length=_ENUM_LENGTH),
+        nullable=False,
+        default=UserStatus.ACTIVE,
     )
 
     # ⚠️ 这个计数器同时统计密码失败与（T0.8b 之后的）TOTP 失败。分开计数只会
@@ -113,6 +128,8 @@ class AuditAction(enum.StrEnum):
     LOGOUT = "LOGOUT"
     TOKEN_REUSED = "TOKEN_REUSED"
     USER_CREATED = "USER_CREATED"
+    TWO_FACTOR_ENABLED = "TWO_FACTOR_ENABLED"
+    RECOVERY_CODES_REGENERATED = "RECOVERY_CODES_REGENERATED"
 
 
 class AuditLog(Base):
@@ -131,7 +148,7 @@ class AuditLog(Base):
     actor_user_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
     actor_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
     action: Mapped[AuditAction] = mapped_column(
-        Enum(AuditAction, native_enum=False), nullable=False
+        Enum(AuditAction, native_enum=False, length=_ENUM_LENGTH), nullable=False
     )
     entity_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -146,3 +163,55 @@ class AuditLog(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
 
     __table_args__ = (Index("ix_audit_logs_actor_created", "actor_user_id", "created_at"),)
+
+
+class TwoFactorSetting(Base):
+    """One row per user's TOTP enrolment (spec §54; design gate Issue #32 v5).
+
+    ⚠️ `confirmed_at IS NULL` = `PENDING`，**一律按「未启用 2FA」处理**。
+    否则「生成了密钥但没扫码确认」会把管理员锁在门外。
+    """
+
+    __tablename__ = "two_factor_settings"
+
+    user_id: Mapped[int] = mapped_column(
+        _ForeignKeyInt, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    # 信封加密后的自描述字符串，格式见 app/core/crypto.py。
+    encrypted_totp_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    # 单独存一列是为了轮换主密钥时能查出还有哪些行用着老版本 —— 只存在
+    # 密文字符串里就得全表扫。
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # ⚠️ 每次 `enrol` +1。`confirm` 必须带上它校验时读到的版本号：期间若有人
+    # 重新 `enrol` 换了密钥，版本对不上、确认落空 —— 否则可能把一个**从未被
+    # 验证过的密钥**标成已确认。
+    secret_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confirmed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # ⚠️ 防同一个验证码在有效期内被用第二次。判定靠**条件更新**的受影响行数，
+    # 不靠应用层先读后写 —— 见 app/services/two_factor.py。
+    last_used_counter: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RecoveryCode(Base):
+    """Single-use backup codes (spec §54: provide recovery codes, stored hashed)."""
+
+    __tablename__ = "recovery_codes"
+
+    id: Mapped[int] = mapped_column(_PrimaryKey, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        _ForeignKeyInt, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # Argon2id。⚠️ 恢复码等价于第二因子本身，**必须哈希**，不能像 TOTP 密钥
+    # 那样可还原 —— 校验它只需要比对，不需要读出原文。
+    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 重新生成时把旧码全部置上，保证任何时刻至多 10 个可用。
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (Index("ix_recovery_codes_user", "user_id", "used_at", "revoked_at"),)

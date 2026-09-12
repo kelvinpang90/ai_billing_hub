@@ -93,8 +93,13 @@ def create_admin(email: str, password: str | None) -> int:
         session.commit()
 
     print(f"Created admin {normalised}.")
-    # ⚠️ 提醒而不是静默：T0.8b 之前管理员登录是单因素的。
-    print("Note: two-factor authentication is not implemented yet (T0.8b).", file=sys.stderr)
+    # ADMIN 的 2FA 是强制的（spec §54），所以新账号第一次登录会停在注册那一步。
+    # 说清楚比让人对着 `stage=ENROL_2FA` 猜要好。
+    print(
+        "Next: sign in once to set up two-factor authentication "
+        "(the first login returns stage=ENROL_2FA).",
+        file=sys.stderr,
+    )
     return 0
 
 

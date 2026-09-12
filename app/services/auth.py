@@ -26,11 +26,14 @@ from app.core.errors import AppError
 from app.core.passwords import spend_dummy_verification, verify_password
 from app.core.tokens import (
     TOKEN_TYPE_ACCESS,
+    TOKEN_TYPE_PENDING_2FA,
+    decode_token,
     generate_refresh_token,
     hash_refresh_token,
     issue_access_token,
+    issue_pending_2fa_token,
 )
-from app.models.auth import AuditAction, AuditLog, RefreshToken, User, UserStatus
+from app.models.auth import AuditAction, AuditLog, RefreshToken, User, UserRole, UserStatus
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,24 @@ class IssuedSession:
     access_token: str
     refresh_token: str
     refresh_expires_at: dt.datetime
+
+
+# 登录第一步的两种「还没完」结果。
+STAGE_TOTP_REQUIRED = "TOTP_REQUIRED"
+STAGE_ENROL_2FA = "ENROL_2FA"
+
+
+@dataclass(frozen=True)
+class LoginOutcome:
+    """What the first step of login produced.
+
+    要么已经拿到会话（客户侧未启用 2FA），要么停在第二因子那一步 —— 后者手上
+    只有一张 `pending_token`，**它不是访问令牌**，调不动任何业务端点。
+    """
+
+    issued: IssuedSession | None = None
+    stage: str | None = None
+    pending_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +203,18 @@ def _register_failure(
         session.commit()
 
 
+def two_factor_confirmed(session: Session, user_id: int) -> bool:
+    """True when this account has a **confirmed** TOTP enrolment.
+
+    ⚠️ 在函数里 import 是因为 `app.services.two_factor` 反过来要用本模块的
+    `record_audit` / `RequestContext` —— 顶层互相 import 会转不动。
+    这是两个模块之间唯一的一处环。
+    """
+    from app.services.two_factor import is_enrolled
+
+    return is_enrolled(session, user_id)
+
+
 def _clear_lock_if_expired(session: Session, user: User, now: dt.datetime) -> None:
     """A lock that has run out resets the counter **before** this attempt is judged.
 
@@ -236,12 +269,12 @@ def authenticate(
     password: str,
     context: RequestContext,
     now: dt.datetime | None = None,
-) -> IssuedSession:
-    """Verify an email/password pair and issue a session.
+) -> LoginOutcome:
+    """First step of login: verify the email/password pair.
 
-    ⚠️ T0.8a 还没有 2FA，所以密码正确**就是**「完整认证成功」，计数在这里清零。
-    T0.8b 接上 TOTP 之后，清零点要移到 TOTP 通过之后 —— 否则知道密码但不知道
-    验证码的人可以无限次猜（每猜一次都顺手把计数清了）。
+    ⚠️ **密码正确不是「认证成功」。**启用了 2FA（或身为必须启用的 ADMIN）时，
+    这一步只发一张 `pending_token`，失败计数**不清零** —— 清了的话，知道密码
+    但不知道验证码的人可以无限次猜 TOTP。
     """
     moment = now or utc_now()
 
@@ -296,26 +329,115 @@ def authenticate(
             )
             raise InvalidCredentials
 
-        # 完整认证成功：清零计数、锁定**与递增档位**，发令牌，写审计 —— 一个事务。
-        # ⚠️ `lockout_level` 只在这里清零。这是整条递增策略的锚点：成功登录才是
-        # 「确实是本人」的证据，锁到期不是。
-        user.failed_login_count = 0
-        user.locked_until = None
-        user.lockout_level = 0
-        user.last_login_at = moment
-        user.updated_at = moment
-        issued = _issue_session(session, settings, user=user, context=context, now=moment)
-        record_audit(
-            session,
-            action=AuditAction.LOGIN,
-            context=context,
-            now=moment,
-            actor=user,
-            entity_type="users",
-            entity_id=str(user.id),
+        # ⚠️ **密码正确不等于认证成功。**这里**绝不清零失败计数** —— 清了的话，
+        # 知道密码但不知道验证码的人可以无限次猜 TOTP，每猜一次都顺手把计数
+        # 清掉。清零的唯一触发点是 `_complete_login()`：令牌真的发出去那一刻。
+        if two_factor_confirmed(session, user.id):
+            session.commit()
+            return LoginOutcome(
+                stage=STAGE_TOTP_REQUIRED,
+                pending_token=issue_pending_2fa_token(settings, user_id=user.id, now=moment),
+            )
+
+        if user.role is UserRole.ADMIN:
+            # spec §54：ADMIN 的 2FA 是**强制**的。没注册过就先去注册，
+            # 不发访问令牌 —— 否则「强制」只是一句话。
+            session.commit()
+            return LoginOutcome(
+                stage=STAGE_ENROL_2FA,
+                pending_token=issue_pending_2fa_token(settings, user_id=user.id, now=moment),
+            )
+
+        # CUSTOMER 且未启用 2FA：spec §54 说客户侧「supported」，是否强制由配置
+        # 决定（Phase 4 的事）。现在直接发令牌。
+        return LoginOutcome(
+            issued=_complete_login(session, settings, user=user, context=context, now=moment)
         )
+
+
+def _complete_login(
+    session: Session,
+    settings: Settings,
+    *,
+    user: User,
+    context: RequestContext,
+    now: dt.datetime,
+) -> IssuedSession:
+    """The one place a session is actually handed out. Caller commits.
+
+    ⚠️ **清零失败计数、锁定与递增档位只发生在这里。**「完整认证成功」的定义是
+    令牌真的发出去了，不是「某一个因子过了」—— 把清零放在密码那一步，等于给
+    知道密码的人一个无限次猜验证码的通道。
+
+    ⚠️ `lockout_level` 同样只在这里清零。它是递增锁定的锚点：成功登录才是
+    「确实是本人」的证据，锁到期不是。
+    """
+    user.failed_login_count = 0
+    user.locked_until = None
+    user.lockout_level = 0
+    user.last_login_at = now
+    user.updated_at = now
+    issued = _issue_session(session, settings, user=user, context=context, now=now)
+    record_audit(
+        session,
+        action=AuditAction.LOGIN,
+        context=context,
+        now=now,
+        actor=user,
+        entity_type="users",
+        entity_id=str(user.id),
+    )
+    return issued
+
+
+def complete_second_factor(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    *,
+    pending_token: str,
+    code: str,
+    context: RequestContext,
+    now: dt.datetime | None = None,
+) -> tuple[IssuedSession, int]:
+    """Second step of login: verify TOTP (or a recovery code) and hand out the session.
+
+    返回 `(会话, 剩余可用恢复码数)`。
+    """
+    moment = now or utc_now()
+    # ⚠️ `expected_type` 必须是 pending —— 拿访问令牌来走这一步就等于跳过第一步。
+    payload = decode_token(settings, pending_token, expected_type=TOKEN_TYPE_PENDING_2FA)
+    user_id = int(payload["sub"])
+
+    with session_factory() as session:
+        user = session.get(User, user_id)
+        if user is None or user.status is UserStatus.DISABLED:
+            raise InvalidCredentials
+        _clear_lock_if_expired(session, user, moment)
+        if user.locked_until is not None and user.locked_until > moment:
+            session.commit()
+            raise InvalidCredentials
+
+        from app.services.two_factor import InvalidTotp, verify_second_factor
+
+        try:
+            result = verify_second_factor(session, settings, user_id=user_id, code=code, now=moment)
+        except InvalidTotp:
+            session.commit()  # 先落下解锁后的清零
+            # ⚠️ TOTP 失败与密码失败**共用同一个计数器**。分开计数只会多一个
+            # 能被分别耗尽的额度 —— 知道密码的人照样有无限次机会猜验证码。
+            _register_failure(
+                session_factory,
+                settings,
+                user_id=user_id,
+                context=context,
+                now=moment,
+                reason="BAD_SECOND_FACTOR",
+            )
+            raise
+
+        issued = _complete_login(session, settings, user=user, context=context, now=moment)
         session.commit()
-        return issued
+        return issued, result.remaining_recovery_codes
 
 
 def refresh_session(
@@ -473,14 +595,19 @@ def logout(
 __all__ = [
     "REFRESH_COOKIE_NAME",
     "REFRESH_COOKIE_PATH",
+    "STAGE_ENROL_2FA",
+    "STAGE_TOTP_REQUIRED",
     "TOKEN_TYPE_ACCESS",
     "InvalidCredentials",
     "IssuedSession",
+    "LoginOutcome",
     "RequestContext",
     "TokenReused",
     "authenticate",
+    "complete_second_factor",
     "logout",
     "record_audit",
     "refresh_session",
+    "two_factor_confirmed",
     "utc_now",
 ]

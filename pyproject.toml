@@ -31,6 +31,11 @@ dependencies = [
     "argon2-cffi>=23.1",
     # 访问令牌签名（spec §53 点名 JWT）。
     "pyjwt>=2.9",
+    # 信封加密（ADR-0004）。TOTP 密钥与将来的 HMAC 凭据必须可还原，
+    # 不能像密码那样单向哈希（spec 第 1542 行）。
+    "cryptography>=43",
+    # TOTP（spec §54 推荐机制）。
+    "pyotp>=2.9",
 ]
 
 [project.optional-dependencies]

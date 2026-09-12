@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.api.two_factor import router as two_factor_router
 from app.core.clientip import parse_trusted_proxies
 from app.core.config import Settings, get_settings
 from app.core.database import (
@@ -42,6 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(two_factor_router)
 
     app.state.settings = settings
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。
