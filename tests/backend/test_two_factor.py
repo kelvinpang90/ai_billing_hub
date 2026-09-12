@@ -249,6 +249,50 @@ def test_the_same_code_cannot_be_used_twice(session_factory, settings, user_id) 
         verify_second_factor(session, settings, user_id=user_id, code=code, now=moment)
 
 
+def test_a_future_window_code_cannot_be_replayed_when_its_step_arrives(
+    session_factory, settings, user_id
+) -> None:
+    """⚠️ 实现闸门第一轮的阻断项，回归用例。
+
+    我们容忍前后各一格的时钟偏差。原先记的是「当前这一格」而不是「实际匹配到的
+    那一格」，于是留下一个重放窗口：
+
+    1. 用户提交 `n+1` 格的码（时钟快了半格）→ 通过，计数器记成 `n`
+    2. 30 秒后 `n+1` 变成当前格，**同一个码再提交一次** → `n < n+1`，又通过
+
+    一个验证码能用两次。「同一格内重放」那条用例抓不到它 —— 那条用的是当前格的
+    码，记当前格恰好是对的。
+    """
+    secret, _ = enrol_and_confirm(session_factory, settings, user_id)
+    totp = pyotp.TOTP(secret)
+    now = utc_now()
+
+    # 下一格的码，现在就提交（时钟偏差，在容忍范围内）。
+    future_code = totp.at(now.replace(tzinfo=dt.UTC) + dt.timedelta(seconds=30))
+    with session_factory() as session:
+        verify_second_factor(session, settings, user_id=user_id, code=future_code, now=now)
+        session.commit()
+
+    # 30 秒后那一格变成当前格 —— 同一个码必须已经作废。
+    later = now + dt.timedelta(seconds=30)
+    with session_factory() as session, pytest.raises(InvalidTotp):
+        verify_second_factor(session, settings, user_id=user_id, code=future_code, now=later)
+
+
+def test_a_past_window_code_is_accepted_once(session_factory, settings, user_id) -> None:
+    """容忍的是**两侧**偏差：慢了半格的验证器也要能进来，但同样只能进一次。"""
+    secret, _ = enrol_and_confirm(session_factory, settings, user_id)
+    totp = pyotp.TOTP(secret)
+    now = utc_now()
+    past_code = totp.at(now.replace(tzinfo=dt.UTC) - dt.timedelta(seconds=30))
+
+    with session_factory() as session:
+        verify_second_factor(session, settings, user_id=user_id, code=past_code, now=now)
+        session.commit()
+    with session_factory() as session, pytest.raises(InvalidTotp):
+        verify_second_factor(session, settings, user_id=user_id, code=past_code, now=now)
+
+
 def test_a_recovery_code_works_and_is_single_use(session_factory, settings, user_id) -> None:
     _, codes = enrol_and_confirm(session_factory, settings, user_id)
     with session_factory() as session:

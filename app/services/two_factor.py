@@ -322,10 +322,11 @@ def _consume_totp(
 ) -> bool:
     secret = decrypt_secret(load_keyring(settings), row.encrypted_totp_secret)
     totp = pyotp.TOTP(secret)
-    if not totp.verify(code, valid_window=TOTP_VALID_WINDOW):
+
+    counter = _matching_counter(totp, code, now)
+    if counter is None:
         return False
 
-    counter = int(now.replace(tzinfo=dt.UTC).timestamp()) // totp.interval
     # ⚠️ 判定来自受影响行数。先读 `last_used_counter` 再比较的话，同一个码并发
     # 提交两次会**都通过**，于是一个验证码换出两条会话。
     result = session.execute(
@@ -338,6 +339,28 @@ def _consume_totp(
         .values(last_used_counter=counter, updated_at=now)
     )
     return result.rowcount == 1
+
+
+def _matching_counter(totp: pyotp.TOTP, code: str, now: dt.datetime) -> int | None:
+    """Which time step this code belongs to, or None if it matches no accepted step.
+
+    ⚠️ **必须记「实际匹配到的那一格」，不能记「当前这一格」。**
+
+    我们容忍前后各一格的时钟偏差。记当前格的话会留下一个重放窗口：用户提交了
+    `n+1` 格的码 → 通过，计数器记成 `n`；30 秒后 `n+1` 变成当前格，**同一个码
+    再提交一次，`n < n+1` 条件成立，于是又通过一次**。一个验证码能用两次。
+
+    这个洞在「同一格内重放」的用例里看不见 —— 那条用例用的是当前格的码，
+    记当前格恰好是对的。实现闸门第一轮就是在这里被挡下的。
+    """
+    current = int(now.replace(tzinfo=dt.UTC).timestamp()) // totp.interval
+    for offset in range(-TOTP_VALID_WINDOW, TOTP_VALID_WINDOW + 1):
+        candidate = current + offset
+        at = dt.datetime.fromtimestamp(candidate * totp.interval, tz=dt.UTC)
+        # valid_window=0：只比这一格，不再展开，否则又分不清是哪一格匹配的。
+        if totp.verify(code, for_time=at, valid_window=0):
+            return candidate
+    return None
 
 
 def _consume_recovery_code(session: Session, *, user_id: int, code: str, now: dt.datetime) -> bool:
