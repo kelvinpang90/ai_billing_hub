@@ -115,9 +115,18 @@ def issue_access_token(
 
 
 def issue_pending_2fa_token(
-    settings: Settings, *, user_id: int, now: dt.datetime, ttl_seconds: int = 120
+    settings: Settings, *, user_id: int, now: dt.datetime, ttl_seconds: int
 ) -> str:
-    """Sign the short-lived token that carries a half-finished login (T0.8b uses it)."""
+    """Sign the short-lived token that carries a half-finished login (T0.8b uses it).
+
+    ⚠️ `ttl_seconds` **没有默认值，这是刻意的**（设计闸门 #37）。两条路径的寿命
+    不同：日常登录 120 秒，ADMIN 首次注册 600 秒。留一个默认值，将来第三个签发点
+    漏传就会**安静地**拿到其中一个，而症状是「某条路径偶尔提前失效」——最难查的
+    那一类。
+
+    同一条道理已经用在 `decode_token(expected_type=...)` 上：那里漏写默认值会让
+    pending 令牌被当成访问令牌接受，是一次完整的第二因子绕过。
+    """
     payload: dict[str, Any] = {
         "sub": str(user_id),
         "typ": TOKEN_TYPE_PENDING_2FA,

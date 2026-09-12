@@ -37,6 +37,37 @@ def settings(tmp_path) -> Settings:
     return Settings(jwt_secret_file=str(key))
 
 
+def test_pending_token_lifetime_follows_the_caller(settings: Settings) -> None:
+    """`ttl_seconds` 真的被用上了，而不是被某个常数悄悄覆盖。"""
+    now = _now()
+    for ttl in (120, 600):
+        token = issue_pending_2fa_token(settings, user_id=7, now=now, ttl_seconds=ttl)
+        payload = decode_token(settings, token, expected_type=TOKEN_TYPE_PENDING_2FA)
+        assert payload["exp"] - payload["iat"] == ttl
+
+
+def test_a_pending_token_expires_at_its_ttl(settings: Settings) -> None:
+    """600 秒那条路径的两侧边界。
+
+    ⚠️ 做法是把**签发时间往过去推**，再用真实当前时间解码 —— 不能把时钟往未来推：
+    PyJWT 2.10 会拒绝 `iat` 落在未来的令牌，那样失败原因看起来像签名问题（T0.8a
+    踩过这个坑）。
+    """
+    ttl = 600
+    now = _now()
+
+    still_valid = issue_pending_2fa_token(
+        settings, user_id=7, now=now - dt.timedelta(seconds=ttl - 1), ttl_seconds=ttl
+    )
+    assert decode_token(settings, still_valid, expected_type=TOKEN_TYPE_PENDING_2FA)["sub"] == "7"
+
+    expired = issue_pending_2fa_token(
+        settings, user_id=7, now=now - dt.timedelta(seconds=ttl + 1), ttl_seconds=ttl
+    )
+    with pytest.raises(InvalidToken):
+        decode_token(settings, expired, expected_type=TOKEN_TYPE_PENDING_2FA)
+
+
 def test_access_token_round_trips(settings: Settings) -> None:
     now = _now()
     token = issue_access_token(settings, user_id=7, role="ADMIN", session_id="fam", now=now)
@@ -53,7 +84,7 @@ def test_a_pending_2fa_token_is_not_accepted_as_an_access_token(settings: Settin
     2FA 就等于不存在 —— 而且不会有任何东西报错。
     """
     now = _now()
-    pending = issue_pending_2fa_token(settings, user_id=7, now=now)
+    pending = issue_pending_2fa_token(settings, user_id=7, now=now, ttl_seconds=120)
 
     # 用对类型能解开……
     assert decode_token(settings, pending, expected_type=TOKEN_TYPE_PENDING_2FA)["sub"] == "7"

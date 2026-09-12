@@ -336,7 +336,13 @@ def authenticate(
             session.commit()
             return LoginOutcome(
                 stage=STAGE_TOTP_REQUIRED,
-                pending_token=issue_pending_2fa_token(settings, user_id=user.id, now=moment),
+                pending_token=issue_pending_2fa_token(
+                    settings,
+                    user_id=user.id,
+                    now=moment,
+                    # 已经有验证器了，只需输 6 位数。
+                    ttl_seconds=settings.pending_token_ttl_seconds,
+                ),
             )
 
         if user.role is UserRole.ADMIN:
@@ -345,7 +351,14 @@ def authenticate(
             session.commit()
             return LoginOutcome(
                 stage=STAGE_ENROL_2FA,
-                pending_token=issue_pending_2fa_token(settings, user_id=user.id, now=moment),
+                pending_token=issue_pending_2fa_token(
+                    settings,
+                    user_id=user.id,
+                    now=moment,
+                    # ⚠️ 这条路径要扫码 + 抄下 10 个恢复码，寿命刻意更长
+                    # （设计闸门 #37；120 秒实测不够，见 config.py 的说明）。
+                    ttl_seconds=settings.enrolment_pending_token_ttl_seconds,
+                ),
             )
 
         # CUSTOMER 且未启用 2FA：spec §54 说客户侧「supported」，是否强制由配置

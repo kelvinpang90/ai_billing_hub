@@ -19,11 +19,12 @@ from sqlalchemy import create_engine, select
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.passwords import hash_password
-from app.core.tokens import TOKEN_TYPE_ACCESS, decode_token
+from app.core.tokens import TOKEN_TYPE_ACCESS, TOKEN_TYPE_PENDING_2FA, decode_token
 from app.models.auth import AuditAction, AuditLog, RefreshToken, User, UserRole, UserStatus
 from app.models.base import Base
 from app.services.auth import (
     STAGE_ENROL_2FA,
+    STAGE_TOTP_REQUIRED,
     InvalidCredentials,
     IssuedSession,
     RequestContext,
@@ -164,6 +165,46 @@ def test_an_admin_without_2fa_is_sent_to_enrol(session_factory, settings: Settin
     assert outcome.stage == STAGE_ENROL_2FA
     assert outcome.issued is None
     assert audit_actions(session_factory) == [], "还没登进来，不该有 LOGIN 审计"
+
+
+def test_each_login_path_gets_its_own_pending_token_lifetime(
+    session_factory, settings: Settings
+) -> None:
+    """注册那条路径的 pending 令牌更长寿，日常登录那条**没有被顺手一起延长**。
+
+    ⚠️ 这条用例存在的唯一理由是**防止两个签发点把参数传反**（设计闸门 #37）。
+    传反了不会有任何东西报错：日常登录变成 10 分钟窗口（无谓放宽），首次注册
+    变回 2 分钟（真人做不完）—— 两边都只在很久以后、以「偶尔登不进」的形式
+    暴露出来。`test_config.py` 只能证明两个默认值不同，证明不了它们接对了地方。
+    """
+
+    def pending_lifetime(outcome) -> int:
+        assert outcome.pending_token is not None
+        payload = decode_token(
+            settings, outcome.pending_token, expected_type=TOKEN_TYPE_PENDING_2FA
+        )
+        return payload["exp"] - payload["iat"]
+
+    user = make_user(session_factory)
+
+    # 1) 还没注册 2FA 的 ADMIN —— 要扫码 + 抄 10 个恢复码。
+    enrol = authenticate(
+        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert enrol.stage == STAGE_ENROL_2FA
+    assert pending_lifetime(enrol) == settings.enrolment_pending_token_ttl_seconds
+
+    # 2) 注册完之后再登录 —— 只需输 6 位数。
+    sign_in(session_factory, settings, user_id=user.id)
+    totp = authenticate(
+        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert totp.stage == STAGE_TOTP_REQUIRED
+    assert pending_lifetime(totp) == settings.pending_token_ttl_seconds
+
+    # 绝对值也钉一下：两个都跟着同一个配置项走的话，上面两条断言会同时为真。
+    assert pending_lifetime(enrol) == 600
+    assert pending_lifetime(totp) == 120
 
 
 def test_login_issues_a_session_and_audits_it(session_factory, settings: Settings) -> None:

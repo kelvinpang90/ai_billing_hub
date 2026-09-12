@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "production"]
@@ -64,6 +65,24 @@ class Settings(BaseSettings):
     # 刷新令牌的绝对寿命与闲置上限。计费后台不需要长会话。
     refresh_token_ttl_seconds: int = 43_200
     refresh_token_idle_seconds: int = 1_800
+
+    # 两步登录中间那张 pending 令牌的寿命。**两条路径刻意不同**（设计闸门 #37）：
+    #
+    # - 日常登录（已启用 2FA）：掏出手机输 6 位数，120 秒绰绰有余
+    # - ADMIN 首次登录（还要当场注册 2FA）：扫码 + 抄下 10 个恢复码 + 输验证码。
+    #   T0.8c 整栈实测，脚本化操作、恢复码还是复制而非手抄，`/2fa/confirm` 就用掉
+    #   了 113 秒 —— 紧贴 120 秒上限。真人必然超时，而超时后拿到的错误是
+    #   「令牌无效」，此刻他正盯着验证码输入框：**现象指向验证码，原因在两步之前**。
+    #
+    # ⚠️ 只放宽注册那一段。日常登录那条一起延长纯属无谓放宽（没有任何收益，
+    # 却把「密码已验、第二因子未验」的窗口整体拉长 5 倍）。
+    #
+    # ⚠️ `gt=0` 不是装饰：设成 0 或负数时令牌**签发即过期**，ADMIN 永远走不完
+    # spec §54 强制的 2FA 注册，**全部新管理员被锁在门外**，而症状是「密码明明
+    # 对却一直说令牌无效」。这里让进程直接起不来 —— 与 compose 里密码留空直接
+    # 报错停住、签名密钥缺失时不临时生成，是同一种 fail-closed。
+    pending_token_ttl_seconds: int = Field(default=120, gt=0)
+    enrolment_pending_token_ttl_seconds: int = Field(default=600, gt=0)
 
     # 账号锁定：连续失败次数与锁定时长。⚠️ 这防的是**针对某个账号**的猜测；
     # 针对来源的高频请求由 auth_rate_limit_* 挡，两者防的不是一回事。
