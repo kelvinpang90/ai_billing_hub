@@ -34,6 +34,18 @@ from app.models.auth import AuditAction, AuditLog, RefreshToken, User, UserStatu
 
 logger = logging.getLogger(__name__)
 
+# 递增锁定的倍数（设计 v5：15 → 30 → 60 分钟，封顶 60）。
+# ⚠️ 写成相对倍数而不是写死秒数，是为了 `login_lockout_seconds` 仍然是唯一的
+# 基准旋钮 —— 两处各配一份，早晚有一处被改而另一处没有。
+_LOCKOUT_LADDER = (1, 2, 4)
+
+
+def _lockout_seconds(settings: Settings, level: int) -> int:
+    """How long this lockout lasts, given how many times the account has been locked."""
+    index = min(max(level, 1), len(_LOCKOUT_LADDER)) - 1
+    return settings.login_lockout_seconds * _LOCKOUT_LADDER[index]
+
+
 REFRESH_COOKIE_NAME = "billing_refresh"
 # cookie 只发给刷新端点：别的端点根本收不到它，XSS 之外的误用面小一圈。
 REFRESH_COOKIE_PATH = "/api/v1/auth"
@@ -144,10 +156,20 @@ def _register_failure(
         )
         locked = session.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
         if locked is not None and locked.failed_login_count >= settings.login_max_failures:
-            locked.locked_until = now + dt.timedelta(seconds=settings.login_lockout_seconds)
+            # ⚠️ **递增**，不是每次都锁同样的时长。固定时长的话，攻击者每过一个
+            # 锁定周期就白拿一轮 5 次猜测，长期看根本挡不住。档位存在
+            # `lockout_level` 上，它不随锁到期而清零。
+            locked.lockout_level = min(locked.lockout_level + 1, len(_LOCKOUT_LADDER))
+            seconds = _lockout_seconds(settings, locked.lockout_level)
+            locked.locked_until = now + dt.timedelta(seconds=seconds)
+            locked.failed_login_count = 0
             logger.warning(
                 "Account locked after repeated failures",
-                extra={"user_id": user_id, "failed_login_count": locked.failed_login_count},
+                extra={
+                    "user_id": user_id,
+                    "lockout_level": locked.lockout_level,
+                    "lockout_seconds": seconds,
+                },
             )
         record_audit(
             session,
@@ -164,6 +186,10 @@ def _clear_lock_if_expired(session: Session, user: User, now: dt.datetime) -> No
     """A lock that has run out resets the counter **before** this attempt is judged.
 
     ⚠️ 不清的话，锁一解开、下一次失败立刻又达阈值，实际锁定时长变成无限。
+
+    ⚠️ **但 `lockout_level` 绝不在这里清零。**清了的话每一轮锁定都是同样的时长，
+    攻击者每过一个锁定周期就白拿一轮猜测，递增策略等于没有。它只在**完整认证
+    成功**时清零 —— 那才是「这个账号确实是本人在用」的证据。
     """
     if user.locked_until is not None and user.locked_until <= now:
         user.locked_until = None
@@ -270,9 +296,12 @@ def authenticate(
             )
             raise InvalidCredentials
 
-        # 完整认证成功：清零计数与锁定，发令牌，写审计 —— 一个事务。
+        # 完整认证成功：清零计数、锁定**与递增档位**，发令牌，写审计 —— 一个事务。
+        # ⚠️ `lockout_level` 只在这里清零。这是整条递增策略的锚点：成功登录才是
+        # 「确实是本人」的证据，锁到期不是。
         user.failed_login_count = 0
         user.locked_until = None
+        user.lockout_level = 0
         user.last_login_at = moment
         user.updated_at = moment
         issued = _issue_session(session, settings, user=user, context=context, now=moment)

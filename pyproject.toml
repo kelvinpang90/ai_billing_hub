@@ -51,6 +51,12 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+# ⚠️ 数据文件默认**不进 wheel**：上面的 find 只收 Python 包。漏了这一段不会有
+# 任何报错，直到装好的那一份在运行时找不到文件 —— 和「alembic/ 不在 wheel 里」
+# 是同一类坑。`scripts/packaging_smoke.py` 会验它真的在已安装的发行版里。
+[tool.setuptools.package-data]
+"app.data" = ["*.txt"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

@@ -8,6 +8,7 @@ from app.core.passwords import (
     MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
     WeakPassword,
+    common_passwords,
     hash_password,
     validate_password_strength,
     verify_password,
@@ -61,9 +62,43 @@ def test_the_bounds_themselves_are_sane() -> None:
     assert MAX_PASSWORD_LENGTH <= 1024
 
 
+def test_the_bundled_wordlist_is_the_real_thing() -> None:
+    """⚠️ 绝对断言。
+
+    第一版只放了 13 条占位并把真表推给 T0.9 —— 实现闸门判为阻断项，判得对：
+    设计 v5 写的是内置约一万条，把它推给下一个任务和「写进不做」没有区别。
+    """
+    words = common_passwords()
+    assert len(words) > 9_000
+    # 抽查几条公认的弱口令确实在表里。
+    assert {"password", "123456", "qwerty", "letmein"} <= words
+
+
 def test_common_passwords_are_rejected() -> None:
+    """够长、但在表里 —— 这正是长度下限挡不住、需要这份表的那一类。"""
+    long_but_common = [word for word in common_passwords() if len(word) >= MIN_PASSWORD_LENGTH]
+    assert long_but_common, "otherwise this check can never fire"
+    for word in long_but_common[:20]:
+        with pytest.raises(WeakPassword):
+            validate_password_strength(word)
+
+
+def test_matching_is_case_insensitive() -> None:
+    """表里存的是小写。大小写变体是**最廉价的**绕过，必须一起挡。"""
+    sample = next(word for word in common_passwords() if len(word) >= MIN_PASSWORD_LENGTH)
     with pytest.raises(WeakPassword):
-        validate_password_strength("password123")
+        validate_password_strength(sample.upper())
+
+
+def test_the_length_floor_does_most_of_the_work() -> None:
+    """⚠️ 这条记录的是一个**实测事实**，不是断言表的大小。
+
+    一万条常见口令里只有二十几条长度 ≥ 12 —— 12 位下限已经挡掉了 99.8%。
+    所以真正在挡弱口令的是长度下限，这份表补的是那少数「够长但仍然烂」的。
+    把这个数字钉下来，是为了让以后有人想放宽长度下限时，能看到代价有多大。
+    """
+    long_ones = [word for word in common_passwords() if len(word) >= MIN_PASSWORD_LENGTH]
+    assert len(long_ones) < len(common_passwords()) // 100
 
 
 def test_password_matching_the_account_name_is_rejected() -> None:

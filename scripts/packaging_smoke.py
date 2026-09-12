@@ -36,6 +36,20 @@ def main() -> int:
     import app.api.health  # noqa: F401
     import app.core.config  # noqa: F401
 
+    # ⚠️ 数据文件默认**不进 wheel**（`packages.find` 只收 Python 包），要靠
+    # `[tool.setuptools.package-data]` 显式带上。漏了不会有任何报错，直到装好的
+    # 那一份在设置密码时才崩 —— 和 `alembic/` 不在 wheel 里是同一类。
+    from app.core.passwords import common_passwords
+
+    try:
+        wordlist = common_passwords()
+    except Exception as error:  # noqa: BLE001 - 这里要的就是「任何原因都算失败」
+        print(f"Installed app cannot load its bundled password list: {error}", file=sys.stderr)
+        return 1
+    if len(wordlist) < 1000:
+        print(f"Bundled password list looks truncated: {len(wordlist)} entries", file=sys.stderr)
+        return 1
+
     paths = create_app().openapi()["paths"]
     if "/healthz" not in paths:
         print(f"Installed app does not expose /healthz (paths: {sorted(paths)})", file=sys.stderr)

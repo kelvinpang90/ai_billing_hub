@@ -62,6 +62,11 @@ class User(Base):
     # 「某一个因子过了」—— 否则知道密码的人可以无限次猜验证码。
     failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     locked_until: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # ⚠️ 递增锁定的档位。**它刻意不随锁到期而清零** —— `failed_login_count` 会清
+    # （否则锁一解开下一次失败立刻又达阈值），但档位必须留着，否则每一轮锁定
+    # 都是同样的 15 分钟，攻击者每 15 分钟白拿一轮 5 次猜测窗口，**永远不会被
+    # 真正挡住**。只有完整认证成功才清零。
+    lockout_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_login_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)

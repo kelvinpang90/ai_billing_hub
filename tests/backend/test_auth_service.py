@@ -295,6 +295,103 @@ def test_a_failed_attempt_still_counts_when_the_lock_had_just_expired(
         assert stored.failed_login_count == 1
 
 
+def _drive_to_lockout(session_factory, settings: Settings) -> None:
+    for _ in range(settings.login_max_failures):
+        with pytest.raises(InvalidCredentials):
+            authenticate(
+                session_factory,
+                settings,
+                email="admin@example.com",
+                password="wrong",
+                context=CONTEXT,
+            )
+
+
+def _expire_lock(session_factory, user_id: int) -> None:
+    with session_factory() as session:
+        stored = session.get(User, user_id)
+        assert stored is not None
+        stored.locked_until = utc_now() - dt.timedelta(seconds=1)
+        session.commit()
+
+
+def test_lockouts_escalate_and_then_cap(session_factory, settings: Settings) -> None:
+    """⚠️ 固定时长的锁定挡不住长期爆破。
+
+    每一轮都锁同样的 15 分钟，攻击者每过 15 分钟就白拿一轮 5 次猜测，**永远不会
+    被真正挡住**。设计 v5 因此要求 15 → 30 → 60 递增、封顶 60。
+    第一版实现成了固定时长（实现闸门判为阻断项）。
+    """
+    user = make_user(session_factory)
+    expected = [
+        settings.login_lockout_seconds,
+        settings.login_lockout_seconds * 2,
+        settings.login_lockout_seconds * 4,
+        settings.login_lockout_seconds * 4,  # 封顶：第四轮不再翻倍
+    ]
+
+    for round_index, seconds in enumerate(expected, start=1):
+        _drive_to_lockout(session_factory, settings)
+        with session_factory() as session:
+            stored = session.get(User, user.id)
+            assert stored is not None
+            assert stored.locked_until is not None
+            actual = (stored.locked_until - utc_now()).total_seconds()
+            # 允许几秒执行时间的偏差。
+            assert abs(actual - seconds) < 30, (
+                f"round {round_index}: {actual}s, expected {seconds}s"
+            )
+        _expire_lock(session_factory, user.id)
+
+
+def test_an_expired_lock_does_not_reset_the_escalation_level(
+    session_factory, settings: Settings
+) -> None:
+    """⚠️ 这条是递增策略的命门。
+
+    锁到期会清 `failed_login_count`（否则锁定时长变成无限），但**绝不能**清
+    `lockout_level` —— 清了的话每一轮都从 15 分钟重新开始，递增等于没有。
+    """
+    user = make_user(session_factory)
+    _drive_to_lockout(session_factory, settings)
+    _expire_lock(session_factory, user.id)
+
+    with session_factory() as session:
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert stored.lockout_level == 1
+
+    # 锁到期后再失败一次：计数从 0 重新数起，但档位还在。
+    with pytest.raises(InvalidCredentials):
+        authenticate(
+            session_factory, settings, email="admin@example.com", password="wrong", context=CONTEXT
+        )
+    with session_factory() as session:
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert stored.failed_login_count == 1
+        assert stored.lockout_level == 1, "锁到期不算「确实是本人」，档位必须留着"
+
+
+def test_a_successful_login_resets_the_escalation_level(
+    session_factory, settings: Settings
+) -> None:
+    """只有完整认证成功才是「确实是本人在用」的证据。"""
+    user = make_user(session_factory)
+    _drive_to_lockout(session_factory, settings)
+    _expire_lock(session_factory, user.id)
+
+    authenticate(
+        session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
+    )
+    with session_factory() as session:
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert stored.lockout_level == 0
+        assert stored.failed_login_count == 0
+        assert stored.locked_until is None
+
+
 def test_an_unknown_email_still_costs_a_hash_verification(
     session_factory, settings: Settings, monkeypatch
 ) -> None:

@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+from importlib import resources
+
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
@@ -22,26 +25,26 @@ MAX_PASSWORD_LENGTH = 128
 
 _hasher = PasswordHasher()
 
-# 最小可用的弱口令表。⚠️ 这**不是**完整方案：真正的常见口令表有上万条，
-# 归 T0.9 随部署一起带（放进镜像或挂成文件）。现在这一份只保证「最蠢的那些
-# 进不来」，并把校验点固定下来，将来换数据源不用改调用方。
-_COMMON_PASSWORDS = frozenset(
-    {
-        "password",
-        "password1",
-        "password123",
-        "passw0rd",
-        "123456789012",
-        "1234567890123",
-        "qwertyuiop12",
-        "administrator",
-        "letmein12345",
-        "welcome12345",
-        "acuvenbilling",
-        "billingadmin",
-        "changeme1234",
-    }
-)
+_COMMON_PASSWORDS_FILE = "common_passwords.txt"
+
+
+@lru_cache(maxsize=1)
+def common_passwords() -> frozenset[str]:
+    """The bundled wordlist (see `app/data/__init__.py` for provenance).
+
+    ⚠️ **懒加载 + 缓存**：模块 import 时读 76 KB 会拖慢每一个只想 import 配置的
+    进程（包括 Celery worker 与 CLI），而这份表只在设置密码时用得上。
+
+    ⚠️ 走 `importlib.resources` 而不是 `Path(__file__).parent / ...`：后者在
+    zip 安装或非常规布局下取不到，而**失败方式是「表变空、校验静默放行」**。
+    这里读不到就抛异常 —— 弱口令校验宁可崩，也不要假装通过。
+    """
+    text = resources.files("app.data").joinpath(_COMMON_PASSWORDS_FILE).read_text(encoding="utf-8")
+    words = frozenset(line.strip().lower() for line in text.splitlines() if line.strip())
+    if len(words) < 1000:
+        # 文件在、但内容不对（截断、被替换）。同样是静默放行的风险。
+        raise RuntimeError(f"The bundled password list looks wrong: {len(words)} entries")
+    return words
 
 
 class WeakPassword(AppError):
@@ -61,7 +64,7 @@ def validate_password_strength(password: str, *, email: str | None = None) -> No
         raise WeakPassword(f"Password must be at least {MIN_PASSWORD_LENGTH} characters long.")
     if len(password) > MAX_PASSWORD_LENGTH:
         raise WeakPassword(f"Password must be at most {MAX_PASSWORD_LENGTH} characters long.")
-    if password.lower() in _COMMON_PASSWORDS:
+    if password.lower() in common_passwords():
         raise WeakPassword("Password is too common.")
     if email:
         local_part = email.split("@", 1)[0].strip().lower()

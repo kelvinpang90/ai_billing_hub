@@ -74,6 +74,8 @@ def upgrade() -> None:
         sa.Column("status", _STATUS, nullable=False),
         sa.Column("failed_login_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("locked_until", sa.DateTime(), nullable=True),
+        # 递增锁定的档位。不随锁到期清零 —— 见 app/models/auth.py 的注释。
+        sa.Column("lockout_level", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("last_login_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
