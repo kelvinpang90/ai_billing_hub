@@ -239,3 +239,96 @@ def test_nginx_access_log_keeps_query_strings_out() -> None:
     log_format = conf[conf.index("log_format billing_json") : conf.index("server_tokens")]
     assert "$uri" in log_format
     assert "$request," not in log_format and '"$request"' not in log_format
+
+
+# --- T0.9：资源限额与边缘代理 ------------------------------------------------
+
+
+def test_every_service_has_a_memory_limit(compose: dict) -> None:
+    """七个服务都要有内存上限（ADR-0002 的收口条件）。
+
+    ⚠️ 这不是洁癖。生产 VPS 只有 3.6 GB 且已经在用 swap，上面还跑着另外七个项目
+    （见 docs/deployment.md §3.1）。少一个限额，那个容器就能把 MySQL 挤出内存 ——
+    而表现出来的是「数据库莫名其妙重启」，一条完全指不回原因的现象。
+
+    ⚠️ 三个后端服务的限额来自 `x-backend` 锚点，所以删掉锚点里那一行会**一次
+    干掉三个**，而这条用例会红。
+    """
+    missing = [name for name, service in compose["services"].items() if "mem_limit" not in service]
+    assert missing == []
+
+
+def test_redis_caps_its_own_memory_too(compose: dict) -> None:
+    """⚠️ 只设容器 mem_limit 不够，Redis 自己也要知道天花板。
+
+    少了 `maxmemory`，Redis 会一直收数据直到被 OOM kill —— 进程整个消失。
+    设了它才会在自己那一侧按策略淘汰。
+    """
+    command = " ".join(str(part) for part in compose["services"]["redis"]["command"])
+    assert "--maxmemory" in command
+    assert "--maxmemory-policy" in command
+
+
+def test_mysql_pins_its_buffer_pool(compose: dict) -> None:
+    """buffer pool 必须显式钉住，否则换台大内存机器它会自己长大然后撞限额。
+
+    撞限额的现象是「数据库随机重启」，同样指不回原因。
+    """
+    command = " ".join(str(part) for part in compose["services"]["mysql"]["command"])
+    assert "--innodb-buffer-pool-size" in command
+
+
+def test_the_edge_resolves_the_real_client_address() -> None:
+    """⚠️ 生产上本平台的 nginx 接在 infra_nginx 后面（T0.9 决策 ①A）。
+
+    没有这一段的话三处一起坏，而且**全是静默的**：按来源限流退化成全局限流、
+    `/readyz` 的网段限制形同虚设、审计里的 ip_address 全是同一个值。
+    """
+    config = instructions(NGINX_CONF)
+    assert "real_ip_header X-Forwarded-For;" in config
+    assert "set_real_ip_from" in config
+
+
+def test_the_edge_does_not_trust_a_recursive_forwarded_chain() -> None:
+    """⚠️ 反直觉的一条：`real_ip_recursive` 必须保持 off（即不出现）。
+
+    off 时 nginx 取 X-Forwarded-For 的**最后一个**地址 —— 那是上游代理亲自追加的、
+    客户端伪造不了的那个。开了 recursive 反而要依赖「可信名单写得够准」才安全，
+    而名单一宽，客户端塞进去的伪造地址就可能被当成真的。
+    """
+    config = instructions(NGINX_CONF)
+    assert "real_ip_recursive" not in config
+
+
+def test_the_edge_fails_fast_when_the_backend_is_down() -> None:
+    """⚠️ `proxy_connect_timeout` 的默认值是 60 秒。
+
+    T0.7 实测：api 停掉时边缘要 3.96 秒才回 502。不收紧的话，一次后端停机在用户
+    侧表现成「点了没反应」而不是「报错」，而且每个挂着的请求都占着 nginx 一条连接。
+    """
+    config = instructions(NGINX_CONF)
+    assert "proxy_connect_timeout" in config
+    assert "resolver_timeout" in config
+
+
+def test_celery_pins_its_concurrency(compose: dict) -> None:
+    """⚠️ celery 的默认并发 = 宿主机 CPU 核数，而每个 prefork 子进程都会把整个
+    应用 import 一遍。配合 `mem_limit`，内存占用就跟着**跑在哪台机器**变。
+
+    这条是被真实缺陷逼出来的：本地（20 核）第一次加上限额起栈，worker 起了 20
+    个子进程、崩溃重启 4 次，而 `docker inspect` 的 OOMKilled 还是 false ——
+    被杀的是子进程，主进程自己退了 0。一条完全指不回原因的现象。
+    """
+    command = " ".join(str(part) for part in compose["services"]["celery-worker"]["command"])
+    assert "--concurrency" in command
+
+
+def test_beat_does_not_inherit_the_api_memory_limit(compose: dict) -> None:
+    """beat 只把任务名丢进队列，不执行任务，给它和 api 一样的额度是浪费。
+
+    ⚠️ 它从 `x-backend` 锚点继承 `mem_limit`，所以**不显式覆盖就会静默拿到 384m**。
+    在一台只有 1.8 GB 可用的机器上，浪费的那部分是别人要用的。
+    """
+    beat = compose["services"]["celery-beat"]["mem_limit"]
+    api = compose["services"]["api"]["mem_limit"]
+    assert beat != api

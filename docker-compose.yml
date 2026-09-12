@@ -11,13 +11,19 @@
 # 用法见 README「本地起整套栈」。
 
 # 日志上限：没有它，json-file 驱动会一直写到磁盘满。
-# ⚠️ 生产侧的轮转 / 保留期 / 异地留存 / 磁盘告警是 §94 的要求，归 T0.9；
-# 这里只是先堵住「把开发机写满」这一种。
+#
+# ⚠️ **json-file 按大小轮转，不按时间。**所以「保留 30 天」这件事**在这里表达
+# 不了** —— 下面两个旋钮定的是「本地最多占多少磁盘」，而 T0.9 定的 30 天保留期
+# 是**离机那一侧**的属性，要由日志外送的目的地强制（那套设施还不存在）。
+# 把两者混为一谈的话，会得到一个「以为留了 30 天、实际按量早就滚掉了」的假象。
+#
+# 默认 3 × 10m = 每容器最多 30 MB，七个服务合计上限约 210 MB。
+# ⚠️ 生产 VPS 只剩 12 GB，而 binlog 也要占（见 docs/deployment.md §3.1）。
 x-logging: &logging
   driver: json-file
   options:
-    max-size: "10m"
-    max-file: "3"
+    max-size: "${BILLING_LOG_MAX_SIZE:-10m}"
+    max-file: "${BILLING_LOG_MAX_FILES:-3}"
 
 # api / celery-worker / celery-beat 跑同一份代码、同一个镜像，只有 command 不同。
 x-backend: &backend
@@ -27,6 +33,19 @@ x-backend: &backend
   image: acuven-billing-hub:local
   restart: unless-stopped
   logging: *logging
+  # ⚠️ 资源限额是 ADR-0002 的收口条件，不是洁癖：单 VPS 上一个失控的 celery
+  # worker 能把 MySQL 挤出内存，而表现出来的是「数据库莫名其妙重启」——
+  # 一条完全指不回原因的现象。
+  #
+  # ⚠️ 用 `mem_limit` / `cpus` 短式而不是 `deploy.resources.limits`。两种写法
+  # 在 compose v2 下**都真的生效**（实测 `docker inspect` 的 HostConfig.Memory
+  # 都被设上了），选短式只是为了不和本文件里 secrets 那条「swarm-only 选项会被
+  # 静默忽略」的教训混淆。
+  #
+  # 数值按生产 VPS 的实测余量定（1 核 / 可用 1.8 GB，见 docs/deployment.md §3.1）。
+  # ⚠️ api 留得比另外两个宽：Argon2 每次并发哈希要 64 MiB。
+  mem_limit: ${BILLING_BACKEND_MEM_LIMIT:-384m}
+  cpus: ${BILLING_BACKEND_CPUS:-0.5}
   environment:
     BILLING_ENVIRONMENT: local
     BILLING_DEBUG: "false"
@@ -92,6 +111,13 @@ services:
       # Asia/Kuala_Lumpur；默认的 SYSTEM 时区会让「换一台宿主机」变成一次
       # 静默的数据语义变更。
       - --default-time-zone=+00:00
+      # ⚠️ 必须和下面的 mem_limit 一起看。MySQL 默认的 buffer pool 是 128M，
+      # 但整个 mysqld 的常驻远不止这个数；不显式钉住的话，换一台内存更大的机器
+      # 时它会自己长大，然后在限额上被 OOM kill —— 而现象是「数据库随机重启」。
+      - --innodb-buffer-pool-size=128M
+    # 生产 VPS 只有 1 核，MySQL 是最该留出余量的那个。
+    mem_limit: ${BILLING_MYSQL_MEM_LIMIT:-512m}
+    cpus: ${BILLING_MYSQL_CPUS:-0.6}
     environment:
       MYSQL_ROOT_PASSWORD: ${BILLING_MYSQL_ROOT_PASSWORD:?set BILLING_MYSQL_ROOT_PASSWORD in .env (copy .env.example)}
       MYSQL_DATABASE: ${BILLING_MYSQL_DATABASE:-billing}
@@ -113,6 +139,21 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     logging: *logging
+    # ⚠️ **两个上限都要设。**只设容器 mem_limit 的话，Redis 自己不知道天花板在
+    # 哪，会一直收数据直到被 OOM kill —— 而 Redis 被杀掉的表现是「投递触发丢了」
+    # （INV-14 说过那不致命，周期恢复会补，但每次都要等最多一分钟）。
+    # 设了 maxmemory，它会在自己那一侧按策略淘汰，而不是整个进程消失。
+    #
+    # `allkeys-lru`：Redis 在本平台只承载**投递触发与限流兜底**，两者都是
+    # 可重建的瞬时数据（spec §74.6、§98.1）。没有任何不可重建的东西在这里。
+    command:
+      - redis-server
+      - --maxmemory
+      - ${BILLING_REDIS_MAXMEMORY:-64mb}
+      - --maxmemory-policy
+      - allkeys-lru
+    mem_limit: ${BILLING_REDIS_MEM_LIMIT:-96m}
+    cpus: ${BILLING_REDIS_CPUS:-0.2}
     volumes:
       - redis-data:/data
     healthcheck:
@@ -145,8 +186,23 @@ services:
       - app.worker
       - worker
       - --loglevel=${BILLING_LOG_LEVEL:-INFO}
+      # ⚠️ **必须显式钉住，不能用默认值。**celery 的默认并发 = 宿主机 CPU 核数，
+      # 而每个 prefork 子进程都会把整个应用 import 一遍。于是内存占用跟着**跑在
+      # 哪台机器**变 —— 配合上面的 mem_limit，换一台核多的机器就会撞限额。
+      #
+      # 这不是推演：本地（20 核）第一次加上限额起栈，worker 就起了 20 个子进程、
+      # 崩溃重启了 4 次，而 `docker inspect` 的 OOMKilled 还是 false
+      # （被杀的是子进程，主进程自己退了 0）—— 一条完全指不回原因的现象。
+      #
+      # 生产 VPS 只有 1 核，2 个足够：任务都是 IO 密集（发信、写库），不是 CPU 密集。
+      - --concurrency=${BILLING_CELERY_CONCURRENCY:-2}
 
   celery-beat:
+    # ⚠️ 覆盖 `x-backend` 锚点里那个 384m。beat 只做一件事：按时把任务名丢进
+    # 队列，不执行任务本身。给它和 api 一样的额度纯属浪费 —— 而在一台
+    # 只有 1.8 GB 可用的机器上，浪费的那部分是别人要用的。
+    mem_limit: ${BILLING_BEAT_MEM_LIMIT:-128m}
+    cpus: ${BILLING_BEAT_CPUS:-0.2}
     <<: *backend
     command:
       - celery
@@ -161,6 +217,9 @@ services:
       - celery-beat-state:/var/lib/celery
 
   frontend:
+    # 静态文件而已，给得很紧。
+    mem_limit: ${BILLING_FRONTEND_MEM_LIMIT:-64m}
+    cpus: ${BILLING_FRONTEND_CPUS:-0.2}
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -177,6 +236,10 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
+    # ⚠️ 刻意**没有**换成非 root 镜像（T0.9 决策 ④）：生产上本层只收
+    # infra_nginx 转进来的内网流量，风险面小。这是一次有意识的选择，不是遗漏。
+    mem_limit: ${BILLING_NGINX_MEM_LIMIT:-64m}
+    cpus: ${BILLING_NGINX_CPUS:-0.3}
     restart: unless-stopped
     logging: *logging
     ports:
