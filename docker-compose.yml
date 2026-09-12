@@ -38,6 +38,9 @@ x-backend: &backend
     # 走环境变量的话它会进 /proc/<pid>/environ、崩溃转储，并被子进程继承
     # （ADR-0004 第 2 节）。
     BILLING_JWT_SECRET_FILE: /run/secrets/billing_jwt_key
+    # 信封加密的主密钥，同样只给路径。轮换时往这个文件里加一行更高版本的
+    # 密钥即可 —— 老行仍按它自己的版本解开（见 app/core/crypto.py）。
+    BILLING_MASTER_KEY_FILE: /run/secrets/billing_master_key
     # 本地是 http，Secure cookie 发不出去。生产必须是 true（配置项默认就是 true，
     # 这里显式写出来是为了让「本地不安全」是一次有意识的选择）。
     BILLING_SESSION_COOKIE_SECURE: "false"
@@ -51,6 +54,7 @@ x-backend: &backend
     BILLING_TRUSTED_PROXIES: "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
   secrets:
     - billing_jwt_key
+    - billing_master_key
   # ⚠️ 只是启动顺序，**不是** service_healthy。API 被设计成依赖不可用时照样
   # 启动、由 /readyz 如实汇报（见 app/main.py 与 app/api/health.py）——
   # 让它等 MySQL 健康，等于 MySQL 坏了就连 /healthz 都拿不到，排障时手上空空。
@@ -187,6 +191,11 @@ secrets:
   # 生成：openssl rand -base64 48 > secrets/jwt.key
   billing_jwt_key:
     file: ./secrets/jwt.key
+  # ⚠️ **这一把丢了，所有 TOTP 注册全部作废** —— 每个管理员都要重新扫码。
+  # 备份要与数据库备份分开存放、两套访问控制（ADR-0004 第 3 节）。
+  # 生成：echo "1:$(openssl rand -base64 32)" > secrets/master.key
+  billing_master_key:
+    file: ./secrets/master.key
 
 volumes:
   mysql-data:

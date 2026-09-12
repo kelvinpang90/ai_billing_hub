@@ -21,8 +21,62 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    """刷新令牌**不在这里** —— 它走 httpOnly cookie，JS 读不到。"""
+    """刷新令牌**不在这里** —— 它走 httpOnly cookie，JS 读不到。
 
-    access_token: str
-    token_type: str = "Bearer"
-    expires_in: int
+    三种可能的形状，用 `stage` 区分：
+
+    - `stage=None` + `access_token`：已经登进去了
+    - `stage="TOTP_REQUIRED"` + `pending_token`：去输验证码
+    - `stage="ENROL_2FA"` + `pending_token`：ADMIN 还没注册 2FA，先去注册
+
+    ⚠️ `pending_token` **不是**访问令牌，调不动任何业务端点（令牌里的 `typ`
+    不同，校验时会被拒）。
+    """
+
+    access_token: str | None = None
+    token_type: str | None = None
+    expires_in: int | None = None
+    stage: str | None = None
+    pending_token: str | None = None
+    # 剩余可用恢复码。少于阈值时前端该提醒用户重新生成。
+    recovery_codes_remaining: int | None = None
+
+
+class SecondFactorRequest(BaseModel):
+    pending_token: str = Field(min_length=1, max_length=4096)
+    # TOTP 是 6 位数字，恢复码是 `XXXX-XXXX-XXXX` —— 同一个字段收两种，
+    # 因为对用户来说它们是同一件事：「证明你是你」。
+    code: str = Field(min_length=1, max_length=64)
+
+
+class EnrolRequest(BaseModel):
+    """注册 2FA 时手上只有 pending_token（ADMIN 首次登录就在这一步）。"""
+
+    pending_token: str = Field(min_length=1, max_length=4096)
+
+
+class EnrolResponse(BaseModel):
+    """⚠️ 这是明文密钥**唯一一次**离开服务端。之后库里只有密文。"""
+
+    secret: str
+    otpauth_uri: str
+
+
+class ConfirmEnrolRequest(EnrolRequest):
+    code: str = Field(min_length=1, max_length=64)
+
+
+class RecoveryCodesResponse(BaseModel):
+    """⚠️ 恢复码明文**唯一一次**返回。之后库里只有 Argon2id 哈希。"""
+
+    recovery_codes: list[str]
+
+
+class RegenerateRecoveryCodesRequest(BaseModel):
+    """重新生成恢复码要**重新验证密码**。
+
+    ⚠️ 光有访问令牌不够：一张被偷走的访问令牌就能换出十个新的第二因子，
+    那等于把 2FA 绕过了。
+    """
+
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)

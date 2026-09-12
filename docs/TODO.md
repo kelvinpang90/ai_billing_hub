@@ -73,14 +73,16 @@
 - [x] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）。**另含 T0.6 欠下的第七个服务**：compose 加 `frontend`、把 `deploy/nginx/billing.conf` 的 `location /` 从 503 占位改成指向它、同步 `tests/backend/test_compose.py` 的 `EXPECTED_SERVICES`（三处漏一处测试就红）
 - [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA。**设计闸门 [#32](https://github.com/kelvinpang90/ai_billing_hub/issues/32) 已批准 `design v5`**，按下面四个 PR 落地
   - [x] **T0.8a** — `users` / `refresh_tokens` / `audit_logs` 三张表、Argon2id 密码哈希与强度、登录、JWT + 刷新轮换与重放检测、登出与吊销、失败锁定、按来源限流、bootstrap CLI
-  - [ ] **T0.8b** — 信封加密模块（[ADR-0004](adr/ADR-0004-credential-encryption.md)）、`two_factor_settings` / `recovery_codes`、TOTP 注册 / 确认 / 校验、恢复码、**ADMIN 强制 2FA**
+  - [x] **T0.8b** — 信封加密模块（[ADR-0004](adr/ADR-0004-credential-encryption.md)）、`two_factor_settings` / `recovery_codes`、TOTP 注册 / 确认 / 校验、恢复码、**ADMIN 强制 2FA**
   - [ ] **T0.8c** — 前端登录页、路由守卫、令牌持有与刷新
   - [ ] **T0.8d** — `password_reset_tokens` + `domain_outbox`、忘记密码 / 重置密码、[ADR-0009](adr/ADR-0009-notification-channels.md) 的 Email 传输与投递任务（补齐 §53 的最后两项）
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
-> ⚠️ **T0.9 的两条上线前置**（T0.8a 派生，设计闸门 #32 定的）：① **T0.8b 合并前管理员登录是单因素的**，与 spec §54「ADMIN 2FA mandatory」不符；② **T0.8d 合并前没有任何自助密码重置**，只能走 `python -m app.cli create-admin` 那条 CLI。两条都必须在第一次部署之前关掉 —— 现在可接受的唯一理由是还没有任何部署。
+> ⚠️ **T0.9 的上线前置**（设计闸门 #32 定的）：**T0.8d 合并前没有任何自助密码重置**，只能走 `python -m app.cli create-admin` 那条 CLI。必须在第一次部署之前关掉。（另一条「管理员登录是单因素」已由 T0.8b 关闭。）
+> ⚠️ **主密钥的宿主机那一半仍归 T0.9**（ADR-0004）：宿主机主密钥文件要 `chown 10001:10001` + `chmod 0400`。应用侧的加解密与文件读取 T0.8b 已实现，**但在宿主机那一半落地前不能部署到生产**。
+> ⚠️ **主密钥没有重包裹任务**（T0.8b 派生）：`app/core/crypto.py` 已经支持多版本钥匙串（轮换时老行仍能解开），但把老行重新用新密钥包裹的后台任务还没有。没有它，轮换之后老密钥必须**永久保留**，否则历史 TOTP 注册全部作废。
 > ⚠️ **边缘 nginx 自己的 `$binary_remote_addr` 仍是直连对端**（T0.8a 派生）：应用侧已经会解析 `X-Forwarded-For`（`app/core/clientip.py`，只在可信代理后面采信），但**边缘那层 `limit_req` 与 `/readyz` 的网段限制还没有**。生产上若在 nginx 前面再放一层代理，这两处都会把所有客户端看成同一个来源。T0.9 要配 `real_ip_header` + `set_real_ip_from`，三处一并收口。
 > ⚠️ **边缘 nginx 的上游超时没有收紧**（T0.7 实测发现）：api 容器停掉时，边缘 nginx 要 **约 4 秒**才返回 502（DNS 解析不到上游的等待），`proxy_connect_timeout` 更是还挂着 60 秒的默认值。后果是**一次停机在用户侧表现成卡住而不是报错**，而且每个挂起的请求都占着 nginx 的连接。T0.9 要把 `resolver_timeout` 与 `proxy_connect_timeout` 收到秒级。实测数据：`curl` 到 `/healthz` 在 api 停机时耗时 3.96s。
 > ⚠️ **前端产物是单个 877 kB 的 chunk**（gzip 283 kB，主要是 antd）。只有一个路由时拆包没有意义，**加到第三、四个路由时必须做路由级懒加载**，否则首屏会越拖越久。归 T0.10（性能 / SLO 基线）一并量。
@@ -511,6 +513,65 @@ sleep(delay).then(() => canContinue() ? undefined : pause())
 派生规矩两条：**边界值要有绝对断言**（`assert MIN_PASSWORD_LENGTH >= 12`），相对断言只能证明「边界两侧行为不同」，证不了边界在合理位置；**并发语义必须对着真数据库验** —— 内存 SQLite 要么每连接一个库、要么（StaticPool）所有会话共用一条连接，后者意味着两个「并发」事务其实是同一个事务，模拟不出竞态。第一版并发用例就是这么写的，两边都被判成重放，而那个失败与被测代码无关。
 
 ---
+
+### T0.8b 任务记录（2026-09-12）
+
+**做了什么**
+
+- `app/core/crypto.py`：ADR-0004 的信封加密。一条 secret 一把 DEK，DEK 再用主密钥包裹 —— **这正是「换主密钥只需重包 DEK、不碰密文」的原因**，否则轮换要把整张表解密再加密一遍
+- `two_factor_settings` / `recovery_codes` 两张表 + 迁移 `0003`
+- `app/services/two_factor.py`：注册 / 确认 / 校验 / 重新生成恢复码
+- 登录改成两步：`/login` 只发 `pending_token`，`/login/totp` 才发会话
+- `/api/v1/auth/2fa/{enrol,confirm,recovery-codes}` 三个端点
+- `require_current_user()`：仓库第一个 Bearer 鉴权依赖，主体只从已验签令牌的 `sub` 取
+
+**几个不是随手选的决定**
+
+- **注册端点收 `pending_token` 而不是访问令牌。** ADMIN 的 2FA 是强制的，所以新管理员**第一次登录时还没有访问令牌** —— 他停在 `ENROL_2FA`，手上只有 pending 令牌。注册必须能用它走完，否则新管理员永远进不来
+- **`PENDING`（没扫码确认）一律算未启用。** 算成已启用的话，「生成了密钥但没确认」会把人锁在门外 —— 既进不去，也没法重新注册
+- **TOTP 密钥可还原、恢复码单向哈希。** 不是不一致：校验 TOTP 需要密钥原文（spec 第 1542 行写死了这一点），而校验恢复码只需要比对
+- **钥匙串能同时持有多把主密钥。** 只留一把的话，换密钥那一刻所有历史 TOTP 注册立刻读不出来
+- **重新生成恢复码要重新验密码。** 光有访问令牌不够 —— 恢复码等价于第二因子，一张被偷的令牌就能换出十个新的，那等于把 2FA 绕过了
+- **失败计数的清零点移到了 `_complete_login()`**（令牌真的发出去那一刻）。留在密码那一步的话，知道密码但不知道验证码的人可以**无限次猜 TOTP**，每猜一次都顺手把计数清掉
+- **TOTP 失败与密码失败共用同一个计数器。** 分开计数只会多一个能被分别耗尽的额度
+- **错误的验证码与用过的恢复码同码同文案。** 区分它们只对攻击者有价值
+
+**四处「只能发生一次」，全部靠条件更新**（设计闸门在这一块挡了两轮）
+
+| 只能发生一次的事 | 条件 |
+| --- | --- |
+| 一个 TOTP 码只能用一次 | `last_used_counter IS NULL OR last_used_counter < :counter` |
+| 一个恢复码只能用一次 | `used_at IS NULL AND revoked_at IS NULL` |
+| 一份注册只能确认一次 | `confirmed_at IS NULL AND secret_version = :version` |
+| 已确认的注册不能被覆盖 | `confirmed_at IS NULL` |
+
+`secret_version` 是为第三条专门加的列：校验之后、置位之前若有人重新 `enrol` 换了密钥，确认必须落空 —— 否则会把一个**从未被验证过的密钥**标成已确认，用户的验证器从此对不上。
+
+**验证到什么程度**
+
+- `pytest` **215 passed、0 skipped**（带真 MySQL + Redis）
+- **三条并发用例跑在真 MySQL 上**：并发 `confirm` 只生成一批恢复码（不是两批 20 个）、同一个 TOTP 码只过一次、同一个恢复码只消费一次
+- **整栈九步实测**（经 nginx）：ADMIN 密码对 → `stage=ENROL_2FA` 且不发访问令牌 → 注册拿密钥 → 确认拿 10 个恢复码 → 重新登录停在 `TOTP_REQUIRED` → 输码登进来 → **同码再用被拒** → 恢复码登录（剩 9）→ **同恢复码再用被拒** → **pending 令牌冒充访问令牌被拒**
+- 迁移对真 MySQL 跑通，三个枚举列确认是 `varchar(64)`
+- **密钥泄漏扫描**：`otpauth://`、密码、恢复码在四个服务日志里各 **0 次**
+
+**教训：SQLite 对「列宽」这一类缺陷是结构性失明的**
+
+整栈实测时 `/2fa/confirm` 报 500，真 MySQL 说 `Data too long for column 'action'`。
+
+根因：`Enum(native_enum=False)` 生成的 VARCHAR 宽度按**建表那一刻最长的成员**算。`0002` 建 `action` 列时最长是 `LOGIN_FAILED`（12 字符），而本任务新增了 `RECOVERY_CODES_REGENERATED`（26 字符）。
+
+**而 208 条单元测试全绿** —— SQLite 根本不强制 VARCHAR 长度。这不是「用例写少了」，是跑在 SQLite 上的用例对这一类缺陷**看不见**。
+
+两处修：① 三个枚举列的宽度写死成 `_ENUM_LENGTH = 64`，以后加枚举值不必再配 ALTER；② 新增 `tests/backend/test_model_columns.py` —— 它不测行为，直接测**列的形状**（宽度装不装得下所有成员），所以在 SQLite 上照样有效。变异验证过：把宽度调窄，用例立刻变红。
+
+派生规矩：**凡是「数据库会拒绝、而 SQLite 会接受」的约束（列宽、字符集、严格模式），都要有一条直接断言 schema 形状的用例**，不能指望行为用例覆盖到。
+
+**另外两个小坑**
+
+- **同一个 30 秒窗口里的 TOTP 码只能用一次**（防重放，刻意的），所以测试里「连续登录两次」的辅助函数第二次起要改用恢复码 —— 把时钟往前推会让 JWT 的 `iat` 落在未来被 PyJWT 拒掉（T0.8a 踩过）
+- **并发用例第二次踩了内存 SQLite 的坑**：`StaticPool` 是单连接共享，两个「并发」会话其实在同一个事务里。已挪到真 MySQL 的独立库
+
 
 ## Phase 1 — Tenant, Project & Wallet Core（§124）
 

@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     # 而且每次重启都让所有令牌失效。
     jwt_secret_file: str = ""
 
+    # 信封加密的主密钥（KEK）所在的**文件路径**，同样不走环境变量
+    # （ADR-0004 第 2 节）。文件里一行一把 `版本:base64`，版本号最大的
+    # 那把用于加密 —— 多把并存是为了轮换时老数据仍能解开。
+    # 空串 = 未配置：应用照常启动，但 2FA 相关端点明确报
+    # ENCRYPTION_NOT_CONFIGURED，**不会临时造一把密钥**。
+    master_key_file: str = ""
+
     # 访问令牌短寿命是刻意的：吊销作用在刷新令牌上，访问令牌靠过期自然失效。
     # 这意味着「吊销后最多还有这么久旧令牌可用」，是明确接受的取舍。
     access_token_ttl_seconds: int = 600

@@ -15,8 +15,9 @@ from app.core.clientip import FORWARDED_FOR_HEADER, resolve_client_ip
 from app.core.errors import AppError
 from app.core.logging import current_request_id
 from app.core.ratelimit import RateLimited, TokenBucket
-from app.core.tokens import AuthNotConfigured
-from app.schemas.auth import LoginRequest, LoginResponse
+from app.core.tokens import TOKEN_TYPE_ACCESS, AuthNotConfigured, InvalidToken, decode_token
+from app.models.auth import User, UserStatus
+from app.schemas.auth import LoginRequest, LoginResponse, SecondFactorRequest
 from app.schemas.envelope import ApiResponse, success
 from app.services.auth import (
     REFRESH_COOKIE_NAME,
@@ -25,6 +26,7 @@ from app.services.auth import (
     RequestContext,
     TokenReused,
     authenticate,
+    complete_second_factor,
     logout,
     refresh_session,
 )
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
-def _client_ip(request: Request) -> str | None:
+def client_ip(request: Request) -> str | None:
     """The caller's address, honouring `X-Forwarded-For` only from trusted peers.
 
     ⚠️ **不能直接用 `request.client.host`。**经 nginx 时它对每个请求都是同一个
@@ -48,10 +50,10 @@ def _client_ip(request: Request) -> str | None:
     )
 
 
-def _context(request: Request) -> RequestContext:
+def request_context(request: Request) -> RequestContext:
     """Who is calling, for the audit trail (spec §66)."""
     return RequestContext(
-        ip_address=_client_ip(request),
+        ip_address=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -61,10 +63,10 @@ def _rate_limit(request: Request) -> None:
     bucket: TokenBucket | None = getattr(request.app.state, "auth_rate_limiter", None)
     if bucket is None:
         return
-    bucket.check(_client_ip(request) or "unknown")
+    bucket.check(client_ip(request) or "unknown")
 
 
-def _require_session_factory(request: Request):  # noqa: ANN202 - sessionmaker type is verbose
+def require_session_factory(request: Request):  # noqa: ANN202 - sessionmaker type is verbose
     factory = getattr(request.app.state, "session_factory", None)
     if factory is None:
         # 与 `/readyz` 的处置一致：没有数据库就明说，不要拿一个假地址去连。
@@ -97,25 +99,60 @@ def _set_refresh_cookie(response: Response, request: Request, issued: IssuedSess
 def login(
     request: Request, response: Response, payload: LoginRequest
 ) -> ApiResponse[LoginResponse]:
-    """Email + password (spec §53).
+    """First step: email + password (spec §53).
 
-    ⚠️ T0.8a 还没有第二因子，所以这里直接发令牌。T0.8b 接上 TOTP 后，
-    ADMIN 必须改成先返回 pending 令牌 —— 这条是 T0.9 的上线前置。
+    ⚠️ **密码对不等于登进来了。**启用了 2FA、或身为必须启用 2FA 的 ADMIN 时，
+    这里只发一张 `pending_token`，客户端要拿它去走 `/login/totp`（或先
+    `/2fa/enrol`）。
     """
     _rate_limit(request)
     settings = request.app.state.settings
-    issued = authenticate(
-        _require_session_factory(request),
+    outcome = authenticate(
+        require_session_factory(request),
         settings,
         email=payload.email,
         password=payload.password,
-        context=_context(request),
+        context=request_context(request),
+    )
+    if outcome.issued is None:
+        # 停在第二因子那一步：**不发 cookie**，因为还没有会话。
+        return success(
+            LoginResponse(stage=outcome.stage, pending_token=outcome.pending_token),
+            request_id=current_request_id(),
+        )
+
+    _set_refresh_cookie(response, request, outcome.issued)
+    return success(
+        LoginResponse(
+            access_token=outcome.issued.access_token,
+            token_type="Bearer",
+            expires_in=settings.access_token_ttl_seconds,
+        ),
+        request_id=current_request_id(),
+    )
+
+
+@router.post("/login/totp", response_model=ApiResponse[LoginResponse])
+def login_second_factor(
+    request: Request, response: Response, payload: SecondFactorRequest
+) -> ApiResponse[LoginResponse]:
+    """Second step: a TOTP code, or a recovery code if the authenticator is gone."""
+    _rate_limit(request)
+    settings = request.app.state.settings
+    issued, remaining = complete_second_factor(
+        require_session_factory(request),
+        settings,
+        pending_token=payload.pending_token,
+        code=payload.code,
+        context=request_context(request),
     )
     _set_refresh_cookie(response, request, issued)
     return success(
         LoginResponse(
             access_token=issued.access_token,
+            token_type="Bearer",
             expires_in=settings.access_token_ttl_seconds,
+            recovery_codes_remaining=remaining,
         ),
         request_id=current_request_id(),
     )
@@ -130,10 +167,10 @@ def refresh(request: Request, response: Response) -> ApiResponse[LoginResponse]:
     if not raw:
         raise TokenReused
     issued = refresh_session(
-        _require_session_factory(request),
+        require_session_factory(request),
         settings,
         raw_token=raw,
-        context=_context(request),
+        context=request_context(request),
     )
     _set_refresh_cookie(response, request, issued)
     return success(
@@ -150,10 +187,44 @@ def logout_endpoint(request: Request, response: Response) -> ApiResponse[dict]:
     """Revoke the whole token family. Idempotent — repeating it still returns 200."""
     raw = request.cookies.get(REFRESH_COOKIE_NAME)
     if raw:
-        logout(_require_session_factory(request), raw_token=raw, context=_context(request))
+        logout(require_session_factory(request), raw_token=raw, context=request_context(request))
     # 无论如何都清 cookie：留着一个已吊销的令牌只会让下次刷新拿到 401。
     response.delete_cookie(REFRESH_COOKIE_NAME, path=REFRESH_COOKIE_PATH)
     return success({}, request_id=current_request_id())
 
 
-__all__ = ["AuthNotConfigured", "RateLimited", "router"]
+def require_current_user(request: Request) -> User:
+    """Resolve the caller from the `Authorization: Bearer` header.
+
+    ⚠️ **主体只从已验签的令牌里取。**请求体、查询串、任何头里的 `user_id`
+    一律忽略 —— 那是 Invariant 8（租户不可互访）的地基，主体错了后面每一条
+    租户过滤都建在错的东西上。
+
+    ⚠️ `expected_type` 显式写成访问令牌：2FA 的 pending 令牌拿到这里必须被拒，
+    否则第二因子等于不存在。
+    """
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise InvalidToken
+
+    payload = decode_token(request.app.state.settings, token, expected_type=TOKEN_TYPE_ACCESS)
+    factory = require_session_factory(request)
+    with factory() as session:
+        user = session.get(User, int(payload["sub"]))
+        if user is None or user.status is not UserStatus.ACTIVE:
+            # 停用的账号必须立刻失效，不能等访问令牌自然过期。
+            raise InvalidToken
+        session.expunge(user)
+        return user
+
+
+__all__ = [
+    "AuthNotConfigured",
+    "RateLimited",
+    "client_ip",
+    "request_context",
+    "require_current_user",
+    "require_session_factory",
+    "router",
+]
