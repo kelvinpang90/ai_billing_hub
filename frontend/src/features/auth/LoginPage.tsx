@@ -12,7 +12,7 @@
 import { Alert, Button, Card, Form, Input, Space, Typography } from "antd";
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 
 import {
   STAGE_ENROL_2FA,
@@ -26,6 +26,7 @@ import {
 import { ApiError } from "../../api/client";
 import { useAuth } from "../../auth/AuthProvider";
 import { ROUTES } from "../../routes/paths";
+import { ErrorAlert } from "./ErrorAlert";
 import { QrCode } from "./QrCode";
 
 type Stage = "credentials" | "second-factor" | "enrol" | "recovery-codes";
@@ -141,15 +142,7 @@ export function LoginPage() {
   return (
     <div style={{ display: "flex", justifyContent: "center", paddingTop: 64 }}>
       <Card style={{ width: 460 }} title={t("login.title")}>
-        {error ? (
-          <Alert
-            type="error"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message={error.message}
-            description={<ErrorReference error={error} />}
-          />
-        ) : null}
+        <ErrorAlert error={error} />
 
         {stage === "credentials" && enrolled ? (
           <Alert
@@ -172,6 +165,14 @@ export function LoginPage() {
               {t("login.submit")}
             </Button>
           </Form>
+        ) : null}
+
+        {/* ⚠️ 只在密码这一步给入口。走到第二因子那一步的人，问题已经不是密码了，
+            这时候再摆一个「忘记密码」只会把人引到一条解决不了他问题的路上。 */}
+        {stage === "credentials" ? (
+          <Typography.Paragraph style={{ marginTop: 16, marginBottom: 0 }}>
+            <Link to={ROUTES.forgotPassword}>{t("login.forgotPassword")}</Link>
+          </Typography.Paragraph>
         ) : null}
 
         {stage === "second-factor" ? (
@@ -231,22 +232,5 @@ export function LoginPage() {
         ) : null}
       </Card>
     </div>
-  );
-}
-
-/** 把 request_id 显示出来 —— 没有它，用户能说的只有「登不进去」。 */
-function ErrorReference({ error }: { error: ApiError }) {
-  const { t } = useTranslation();
-  if (error.requestId === null) {
-    return null;
-  }
-  return (
-    <Typography.Text type="secondary">
-      {t("error.referenceLabel")}
-      {": "}
-      <Typography.Text code copyable>
-        {error.requestId}
-      </Typography.Text>
-    </Typography.Text>
   );
 }
