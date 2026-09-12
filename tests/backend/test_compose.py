@@ -332,3 +332,54 @@ def test_beat_does_not_inherit_the_api_memory_limit(compose: dict) -> None:
     beat = compose["services"]["celery-beat"]["mem_limit"]
     api = compose["services"]["api"]["mem_limit"]
     assert beat != api
+
+
+def test_every_service_has_a_healthcheck(compose: dict) -> None:
+    """七个服务都要有存活探针。
+
+    ⚠️ 两个 celery 服务在 T0.9 之前**一个探针都没有**，而 beat 崩掉是本平台最
+    安静的故障：API 正常、/readyz 正常、日志无错，只有周期任务不再发生 ——
+    而「没发生」是没有信号的。
+    """
+    missing = [
+        name for name, service in compose["services"].items() if "healthcheck" not in service
+    ]
+    assert missing == []
+
+
+def test_the_beat_probe_does_not_go_through_the_broker(compose: dict) -> None:
+    """⚠️ beat 的判据必须是它**自己**的调度状态，不能是 `celery inspect ping`。
+
+    `inspect ping` 问的是 worker，够不着 beat；而且它走 broker 往返，Redis 一挂
+    就会把 beat 也判成红的 —— 那会让「broker 挂了」和「beat 挂了」两件事混在
+    同一个信号里，而它们的处置完全不同。
+    """
+    probe = " ".join(
+        str(part) for part in compose["services"]["celery-beat"]["healthcheck"]["test"]
+    )
+    assert "beat-schedule" in probe
+    assert "inspect" not in probe
+
+
+def test_the_beat_probe_tolerates_a_cold_start(compose: dict) -> None:
+    """起步宽限必须大于一个调度周期。
+
+    ⚠️ beat 刚起来时还没派发过任何任务，文件时间戳停在启动时刻。没有这段宽限，
+    它会在第一个周期内就被判不健康 —— 而那是**假警报**，最伤告警的可信度。
+    """
+    beat = compose["services"]["celery-beat"]["healthcheck"]
+    assert beat["start_period"] == "90s"
+
+
+def test_the_worker_probe_names_itself(compose: dict) -> None:
+    """⚠️ 指名问自己，不要广播。
+
+    广播式的 `inspect ping` 只要**有人**回应就算通过。将来跑多个 worker 时，
+    一个死掉的 worker 会被它的同伴掩护，而探针一路绿着。
+    """
+    probe = " ".join(
+        str(part) for part in compose["services"]["celery-worker"]["healthcheck"]["test"]
+    )
+    assert "-d" in probe
+    # ⚠️ 两个 `$` 是必需的：单个会被 compose **在宿主机上**插值成空串。
+    assert "$$HOSTNAME" in probe
