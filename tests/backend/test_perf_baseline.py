@@ -6,6 +6,12 @@
 
 ⚠️ 测量脚本没有别的兜底。产品代码写错了有整套用例接着，而一个只在手工跑的
 脚本写错了，唯一会发现的时刻是它已经造成后果之后。
+
+⚠️ **这个文件在 `tests/backend/` 而不是 `tests/`，尽管它测的是一个脚本。**
+两处的分界是**依赖环境**，不是「是不是脚本」：CI 的 `policy` 项跑
+`unittest discover -s tests`，那个环境**只装流程脚本要的东西、没有 pydantic**。
+`scripts/perf_baseline.py` 大量 import `app.*`，放在 `tests/` 会让 `policy` 直接
+`ModuleNotFoundError`（本地全装着，所以只有 CI 看得见 —— 这条注释就是为此写的）。
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from pathlib import Path
 
 from app.core.config import Settings
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "perf_baseline.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "perf_baseline.py"
 
 
 def _load():
