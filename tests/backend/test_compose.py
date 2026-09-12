@@ -154,6 +154,34 @@ def test_the_edge_serves_the_frontend_at_the_root() -> None:
     assert "return 503" not in block
 
 
+def test_the_signing_key_is_injected_as_a_file_not_an_environment_variable(compose: dict) -> None:
+    """ADR-0004 第 2 节：密钥走文件，不走环境变量。
+
+    ⚠️ 环境变量会进 `/proc/<pid>/environ`、崩溃转储，并被子进程继承。
+    这条用例挡的是「图省事把密钥直接写成 env」——那样能跑，而且不会有任何报错。
+    """
+    backend_env = compose["x-backend"]["environment"]
+    assert backend_env["BILLING_JWT_SECRET_FILE"].startswith("/run/secrets/")
+    # 任何一个值看起来像密钥本身都不行。
+    for key, value in backend_env.items():
+        if "JWT" in key.upper() or "SECRET" in key.upper():
+            assert str(value).startswith(("/run/secrets/", "${")), f"{key} must not carry a secret"
+    assert "billing_jwt_key" in compose["secrets"]
+
+
+def test_the_auth_endpoints_are_rate_limited_at_the_edge() -> None:
+    """spec §53 的 `Login attempt rate limiting`。
+
+    ⚠️ 主控必须在 nginx：登录为了不泄露「邮箱是否存在」，在用户不存在时**也会
+    跑一次 Argon2**。没有边缘限流，换着不存在的邮箱发请求就是一条 CPU 放大通道，
+    而按账号的锁定永远不会触发。
+    """
+    conf = instructions(NGINX_CONF)
+    assert "limit_req_zone" in conf
+    block = nginx_location_block("/api/v1/auth/")
+    assert "limit_req zone=" in block
+
+
 def test_readiness_is_not_exposed_to_the_public_internet() -> None:
     """/readyz 的响应体逐个报出依赖状态，等于公开内部拓扑与故障窗口。"""
     block = nginx_location_block("= /readyz")

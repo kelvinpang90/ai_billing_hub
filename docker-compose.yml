@@ -34,6 +34,23 @@ x-backend: &backend
     # ⚠️ 密码里出现 @ : / # 会把 DSN 解析切错位置，见 .env.example 的说明。
     BILLING_DATABASE_URL: mysql+pymysql://${BILLING_MYSQL_USER:-billing}:${BILLING_MYSQL_PASSWORD:?set BILLING_MYSQL_PASSWORD in .env (copy .env.example)}@mysql:3306/${BILLING_MYSQL_DATABASE:-billing}?charset=utf8mb4
     BILLING_REDIS_URL: redis://redis:6379/0
+    # ⚠️ 这里给的是**路径，不是密钥**。密钥本身由下面的 secrets 挂成文件。
+    # 走环境变量的话它会进 /proc/<pid>/environ、崩溃转储，并被子进程继承
+    # （ADR-0004 第 2 节）。
+    BILLING_JWT_SECRET_FILE: /run/secrets/billing_jwt_key
+    # 本地是 http，Secure cookie 发不出去。生产必须是 true（配置项默认就是 true，
+    # 这里显式写出来是为了让「本地不安全」是一次有意识的选择）。
+    BILLING_SESSION_COOKIE_SECURE: "false"
+    # ⚠️ **不配这个，按来源限流会退化成全局限流。**
+    # 经 nginx 时每个请求的直连对端都是 nginx 的容器地址，所有用户共用一个桶 ——
+    # 任何人发到第 21 个认证请求，**所有人**都拿 429。审计里的 ip_address 也会
+    # 全都一样，取证时没用。
+    #
+    # 这里写的是 Docker 会用的私有网段。只有直连对端落在其中时才采信
+    # `X-Forwarded-For`（那个头客户端可以随便写），逻辑见 app/core/clientip.py。
+    BILLING_TRUSTED_PROXIES: "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
+  secrets:
+    - billing_jwt_key
   # ⚠️ 只是启动顺序，**不是** service_healthy。API 被设计成依赖不可用时照样
   # 启动、由 /readyz 如实汇报（见 app/main.py 与 app/api/health.py）——
   # 让它等 MySQL 健康，等于 MySQL 坏了就连 /healthz 都拿不到，排障时手上空空。
@@ -157,6 +174,19 @@ services:
 
 # spec §99 的七个服务到齐（T0.7 补上 frontend）。
 # tests/backend/test_compose.py 的 EXPECTED_SERVICES 钉住这份清单。
+
+secrets:
+  # ⚠️ Compose 的 `file:` 型 secret 走 **bind mount**：`uid` / `gid` / `mode`
+  # 三个选项**只在 swarm 模式生效，普通 compose 下被忽略**，宿主机文件的属主与
+  # 权限原样带进容器。所以生产上这个文件要 `chown 10001:10001` + `chmod 0400`
+  # （10001 就是 Dockerfile 里的 APP_UID）。**不得为了读密钥把容器改回 root。**
+  # 见 ADR-0004 第 2 节；宿主机那一半归 T0.9。
+  #
+  # 文件不存在时 `docker compose up` 直接失败 —— 与密码留空同一种 fail-closed：
+  # 宁可起不来，也不要一个「认证看起来能用但密钥来路不明」的栈。
+  # 生成：openssl rand -base64 48 > secrets/jwt.key
+  billing_jwt_key:
+    file: ./secrets/jwt.key
 
 volumes:
   mysql-data:

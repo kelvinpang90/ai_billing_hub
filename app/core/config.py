@@ -40,6 +40,49 @@ class Settings(BaseSettings):
     # 因为 Redis 挂了就把 API 摘出轮转，恰好制造出 Invariant 1 要防的那种中断。
     redis_url: str = ""
 
+    # --- 认证（T0.8，设计闸门 Issue #32 v5） ---------------------------------
+
+    # 访问令牌签名密钥所在的**文件路径**，不是密钥本身。
+    # ⚠️ 密钥绝不走环境变量（ADR-0004 第 2 节）：环境变量会进 /proc/<pid>/environ、
+    # 崩溃转储，并被子进程继承。生产上由 Docker secret 挂成文件。
+    # 空串 = 未配置：应用照常启动、`/healthz` 照常应答，但认证端点明确报
+    # AUTH_NOT_CONFIGURED —— 与数据库未配置时同一种处置。
+    # **刻意没有「没配就临时生成一个」的兜底**：那会让配置缺失变成静默的，
+    # 而且每次重启都让所有令牌失效。
+    jwt_secret_file: str = ""
+
+    # 访问令牌短寿命是刻意的：吊销作用在刷新令牌上，访问令牌靠过期自然失效。
+    # 这意味着「吊销后最多还有这么久旧令牌可用」，是明确接受的取舍。
+    access_token_ttl_seconds: int = 600
+    # 刷新令牌的绝对寿命与闲置上限。计费后台不需要长会话。
+    refresh_token_ttl_seconds: int = 43_200
+    refresh_token_idle_seconds: int = 1_800
+
+    # 账号锁定：连续失败次数与锁定时长。⚠️ 这防的是**针对某个账号**的猜测；
+    # 针对来源的高频请求由 auth_rate_limit_* 挡，两者防的不是一回事。
+    login_max_failures: int = 5
+    login_lockout_seconds: int = 900
+
+    # 进程内限流兜底（每来源每分钟）。主控在 nginx 的 limit_req；这一层是为了
+    # 「不经 nginx 直接跑 uvicorn」时 Argon2 的调用次数仍有上界。
+    auth_rate_limit_per_minute: int = 10
+    auth_rate_limit_burst: int = 20
+
+    # ⚠️ 默认 True（安全优先）。本地跑 http 时 Secure cookie 不会被发送，
+    # 所以本地 .env 要显式设成 false —— 让不安全成为一次**有意识的**选择。
+    session_cookie_secure: bool = True
+
+    # 可信反向代理的 CIDR 清单（逗号分隔）。**只有直连对端落在这里时，才采信
+    # `X-Forwarded-For`** —— 那个头是客户端可以随便写的。
+    #
+    # ⚠️ 不配的后果很具体：经 nginx 时每个请求的直连对端都是 nginx，于是
+    # 按来源限流变成**全局**限流（任何人发到第 21 个认证请求，所有人都拿 429），
+    # 审计里的 ip_address 也全是 nginx 的地址。见 app/core/clientip.py。
+    #
+    # 默认空 = 不信任任何转发头。直接跑 uvicorn 时这正好是对的；
+    # compose 里已按容器网段配好。
+    trusted_proxies: str = ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

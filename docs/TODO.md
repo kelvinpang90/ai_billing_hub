@@ -71,11 +71,17 @@
 - [x] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
 - [x] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
 - [x] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）。**另含 T0.6 欠下的第七个服务**：compose 加 `frontend`、把 `deploy/nginx/billing.conf` 的 `location /` 从 503 占位改成指向它、同步 `tests/backend/test_compose.py` 的 `EXPECTED_SERVICES`（三处漏一处测试就红）
-- [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA
+- [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA。**设计闸门 [#32](https://github.com/kelvinpang90/ai_billing_hub/issues/32) 已批准 `design v5`**，按下面四个 PR 落地
+  - [x] **T0.8a** — `users` / `refresh_tokens` / `audit_logs` 三张表、Argon2id 密码哈希与强度、登录、JWT + 刷新轮换与重放检测、登出与吊销、失败锁定、按来源限流、bootstrap CLI
+  - [ ] **T0.8b** — 信封加密模块（[ADR-0004](adr/ADR-0004-credential-encryption.md)）、`two_factor_settings` / `recovery_codes`、TOTP 注册 / 确认 / 校验、恢复码、**ADMIN 强制 2FA**
+  - [ ] **T0.8c** — 前端登录页、路由守卫、令牌持有与刷新
+  - [ ] **T0.8d** — `password_reset_tokens` + `domain_outbox`、忘记密码 / 重置密码、[ADR-0009](adr/ADR-0009-notification-channels.md) 的 Email 传输与投递任务（补齐 §53 的最后两项）
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
+> ⚠️ **T0.9 的两条上线前置**（T0.8a 派生，设计闸门 #32 定的）：① **T0.8b 合并前管理员登录是单因素的**，与 spec §54「ADMIN 2FA mandatory」不符；② **T0.8d 合并前没有任何自助密码重置**，只能走 `python -m app.cli create-admin` 那条 CLI。两条都必须在第一次部署之前关掉 —— 现在可接受的唯一理由是还没有任何部署。
+> ⚠️ **边缘 nginx 自己的 `$binary_remote_addr` 仍是直连对端**（T0.8a 派生）：应用侧已经会解析 `X-Forwarded-For`（`app/core/clientip.py`，只在可信代理后面采信），但**边缘那层 `limit_req` 与 `/readyz` 的网段限制还没有**。生产上若在 nginx 前面再放一层代理，这两处都会把所有客户端看成同一个来源。T0.9 要配 `real_ip_header` + `set_real_ip_from`，三处一并收口。
 > ⚠️ **边缘 nginx 的上游超时没有收紧**（T0.7 实测发现）：api 容器停掉时，边缘 nginx 要 **约 4 秒**才返回 502（DNS 解析不到上游的等待），`proxy_connect_timeout` 更是还挂着 60 秒的默认值。后果是**一次停机在用户侧表现成卡住而不是报错**，而且每个挂起的请求都占着 nginx 的连接。T0.9 要把 `resolver_timeout` 与 `proxy_connect_timeout` 收到秒级。实测数据：`curl` 到 `/healthz` 在 api 停机时耗时 3.96s。
 > ⚠️ **前端产物是单个 877 kB 的 chunk**（gzip 283 kB，主要是 antd）。只有一个路由时拆包没有意义，**加到第三、四个路由时必须做路由级懒加载**，否则首屏会越拖越久。归 T0.10（性能 / SLO 基线）一并量。
 > ⚠️ **celery-beat 没有存活探针**（T0.6 派生）：`celery inspect ping` 问的是 worker，够不着 beat。现在 beat 的 schedule 是空的，崩了也没有后果；**第一条周期任务落地时这就变成静默故障** —— beat 挂掉 = 对账扫描、状态轮询全部不执行，而 API 一切正常、没有任何报错。加第一条周期任务的那个任务必须同时给出探测手段（例如让 beat 自己周期性打一条心跳日志并挂告警）。
@@ -415,6 +421,94 @@ sleep(delay).then(() => canContinue() ? undefined : pause())
 值得记的不是这条 API 细节，而是排查顺序上的两次浪费：我先后猜了「计时器节流」和「onlineManager 判定离线」，两条都有表面证据（标签页确实 hidden、确实测到 setTimeout 被拖长），**也都是错的**。真正定位靠的是两步：① 写一个一次性复现脚本，证明 `apiGet` 对着 502 确实会 reject —— 把「我的代码」从嫌疑里排除掉；② 直接读 `node_modules` 里库的源码，而不是继续猜它的行为。
 
 派生规矩：**在自动化浏览器里观察到的「卡住」，先证明它在真实环境也卡住，再当缺陷处理**；以及**依赖库的行为有源码可读时不要猜**。
+
+---
+
+### T0.8 设计闸门记录（2026-09-12，Issue [#32](https://github.com/kelvinpang90/ai_billing_hub/issues/32)）
+
+**判定：`APPROVED: design v5`。走了五轮，前四轮都是 `REQUEST_CHANGES`，四条阻断项全部成立。**
+
+⚠️ **分档表里没有「平台认证」这一行 —— 这是表本身的缺口，待 Kelvin 拍板。**
+按字面读，[WORKFLOW §3](WORKFLOW.md) 第二行的「集成认证」指的是应用后端的 HMAC 凭据（`REQ-AUTH-001`、§36–§37、§74.4），**不是**管理员登录；那样 T0.8 落进第四行「不走」。但管理员认证是钱包调整、定价发布、退款的**唯一前门**，而闸门 §6 要管的密钥存储、鉴权主体、日志脱敏条条正中本任务。**我按更严的一档走了**，没有等拍板。建议把第二行改成「用量摄取 / **认证与会话**（集成侧与平台侧）/ Webhook」，结论记进 [REVIEW-LOG](REVIEW-LOG.md) —— 那是单独一个 PR。
+
+**四条阻断项，每一条都是真的设计缺陷**
+
+| 轮次 | 阻断项 | 为什么成立 |
+| --- | --- | --- |
+| 1 | 把 §53 明确要求的「忘记密码 / 重置密码」列进「不做」 | 我的理由（邮件投递能力不存在）是**事实**，但它只能决定**排序**，不能决定**范围**。把一条 spec 硬性要求写进「不做」而不给落地路径，读起来就像这个要求被免掉了 |
+| 1 | TOTP 防重放只有应用层比较，没有数据库并发控制 | **真 bug**。我在刷新令牌那里写了条件更新，还专门写了「不靠先读后写 —— 那是经典 TOCTOU」，**然后在 TOTP 和恢复码上原样犯了这个错** |
+| 2 | 没规定完整认证成功后清零失败计数 | 历史失败会永久累积，「连续失败才锁定」根本不成立 |
+| 3 | 2FA 的 `confirm` / `enrol` 没有数据库级串行化 | 并发两个 `confirm` 各生成 10 个恢复码 = 20 个有效码；`enrol` 与 `confirm` 交错还能确认一个**从未被验证过**的密钥 |
+| 4 | 只有按账号的锁定，没有按来源的限流（§53 `Login attempt rate limiting`） | 见下 |
+
+**两个值得单独记的发现**
+
+1. **同一类错误在三轮里换了三个地方出现**（v1 漏 TOTP 与恢复码、v3 漏状态置位本身）。每次我修的都是「被指出的那一处」，下一处照旧。v4 因此改了做法：**先写规则，再列出规则管辖的全部位置**，让「哪里需要条件更新」变成一张能数清的表，而不是每处各想一遍。
+2. **第四轮那个洞是我自己造的。** v1 为防时序泄露规定「用户不存在时也跑一次假的 Argon2 verify」—— 于是任意不存在的邮箱都能稳定消耗一次 Argon2，换着邮箱发就是一条 CPU 放大通道，而账号锁定永远不会触发。**一个为了堵信息泄露加的控制，变成了一条资源放大通道。**这类「防御自身成为攻击面」的二阶效应，我在前四版里一次都没有主动检查过。
+3. 自查还发现 §53 的 `Password strength requirements` 在 v4 里只有「密码强度」四个字、**没有定义任何规则** —— 那等于没设计。v5 补了 §53/§54 **逐项覆盖表**，让遗漏可数，而不是靠审查方替我数。
+
+⚠️ **`scripts/gh_verified_write.py` 的 `--kind` 里没有 `issue-body`**，只支持 PR 正文与评论。而设计闸门的正文住在 Issue 里，所以本轮的回读比对是手工做的（`gh issue view --json body` 逐字对比，五次全部一致）。补这个 kind 是一个独立的小任务。
+
+---
+
+### T0.8a 任务记录（2026-09-12）
+
+**做了什么**
+
+- `users` / `refresh_tokens` / `audit_logs` 三张表 + 迁移（仓库第一次建真实业务表，见下）
+- `app/core/passwords.py`：Argon2id + 强度规则（NIST SP 800-63B：长度下限 12 / 上限 128、**不做组成规则**、拒常见口令与邮箱同名口令）
+- `app/core/tokens.py`：JWT 访问令牌（10 分钟）+ 不透明刷新令牌（SHA-256 存储）
+- `app/core/ratelimit.py` + nginx `limit_req`：按来源限流，三层
+- `app/services/auth.py`：登录、刷新轮换与重放检测、登出、锁定、审计
+- `app/api/auth.py`：`/api/v1/auth/{login,refresh,logout}`
+- `app/cli.py`：`python -m app.cli create-admin` —— **管理员只能这样创建，没有自助注册端点**
+- `app/core/emails.py`：邮箱归一化，登录与 CLI 共用
+
+**几个不是随手选的决定**
+
+- **两种令牌两套机制。** 访问令牌是 JWT（验签不查库，每请求便宜，代价是签发后收不回 → 寿命 10 分钟）；刷新令牌是不透明串落库（能立刻吊销，代价是每次刷新一次查库，而刷新本就不频繁）。**「吊销后最多 10 分钟旧访问令牌仍可用」是明确接受的取舍**，不是没想到
+- **刷新令牌用 SHA-256 存，密码用 Argon2id。** 不是不一致：刷新令牌是我们生成的 256 位随机串，无字典可猜，而**查表必须靠等值索引**——Argon2 带盐，同一个令牌两次哈希结果不同，根本查不出来。密码相反，那是人选的，必须慢
+- **锁定计数落库，不落 Redis。** Redis 一重启计数全清零，那是又一个 fail-open 的安全控制；而管理员登录量极小，DB 写不是瓶颈
+- **限流的进程内那层用内存，也不用 Redis 或数据库。** Redis 丢失会 fail-open；数据库是把 CPU 放大换成写放大；进程内的失效模式是**退化到 nginx 那层**，不是安全控制消失
+- **邮箱不存在、密码错误、账号被锁定三者同码同文案。** 锁定**刻意不返回 423**：那个状态码等于告诉对方「这个邮箱存在，而且正在被爆破」
+- **失败计数单独提交。** 与请求其余部分共用一个会被回滚的事务时，一次数据库错误就把爆破计数清零了
+- **审计表不加 `actor_user_id` 外键。** §66 要求审计长期保留，外键会让「删用户」变成「要么级联删掉他的审计记录、要么删不掉用户」—— 两种都不对，**审计必须比它记录的对象活得更久**
+
+**实测发现的三个坑**
+
+1. **naive UTC 被当成本机时区。** 数据库列按 §109 存 naive UTC，而 `datetime.timestamp()` 对 naive 值的解释是**本机时区**。本机是 UTC+8，于是签出的令牌 `exp` 落在 8 小时前 —— **一签出就是过期的**。最坏的是它**在 UTC 的服务器上完全正常**，开发机与生产机时区不同时只在一边出现，而现象（「用户随机掉登录」）指不回原因。已加 `_epoch()` 与一条回归用例
+2. **`BigInteger` 主键在 SQLite 上不自增。** SQLite 只对 `INTEGER PRIMARY KEY` 做自增，BIGINT 主键插入直接撞 NOT NULL。用 `with_variant(Integer, "sqlite")`：生产 MySQL 拿 BIGINT，单元测试拿 INTEGER，**不用在测试里写特例**
+3. **内存 SQLite 每连接一个独立的库。** TestClient 在线程池里跑同步端点，换线程就换连接，于是建好的表在请求里「不存在」。报错是 `no such table: users`，看起来像迁移没跑。要 `StaticPool` + `check_same_thread=False`
+
+**迁移：spec §132 第 13 条分析**（T0.4 写的「业务表从 Phase 1 开始」被本任务打破，所以这条落在这里）
+
+- **锁表**：三张全新建，空库上瞬时完成，不锁任何既有表。**这是本项目在锁表上唯一轻松的一次**
+- **回滚**：`downgrade` 直接 DROP。⚠️ 一旦有真实管理员账号，它就是数据丢失，且审计记录按 §66 不可重建 —— **生产上不 downgrade 这一版，往前修**
+- ⚠️ **回退实测失败过一次，留下了坏状态**：`DROP INDEX ix_refresh_tokens_family` 报错（MySQL 不允许删掉外键依赖的索引），结果 `audit_logs` 已删而 `alembic_version` 仍停在本版 —— **schema 与版本号对不上，再 upgrade 也补不回来**。根因是 `drop_index` 本来就多余（`DROP TABLE` 会一并删索引）。已删掉那两行，并**把迁移里那段写错的失败分析改对**：MySQL 的 DDL 不参与事务，「三条 CREATE TABLE 要么全成要么全不成」是不成立的
+
+**验证到什么程度**
+
+- `pytest` **150 passed、0 skipped**（带真 MySQL + Redis）
+- **对着真 MySQL 验迁移往返**：`upgrade head` → `downgrade base`（干净剩 `alembic_version`）→ 再 `upgrade head`
+- **整栈端到端**（七服务）：经 nginx 登录 → 200 + httpOnly/SameSite=strict/Path 收窄的 cookie；刷新 → 轮换出新令牌；**重放旧令牌 → 401 `TOKEN_REUSED` 且整个家族被吊销**（新令牌随之失效）
+- **nginx 限流实测**：连发 30 次，第 19 次起返回 429（burst 20 用尽）
+- **密钥泄漏扫描**：密码、Argon2 哈希、两个刷新令牌在 nginx / api / worker / mysql 四个服务日志里各出现 **0 次**
+- **CLI 实测**：弱口令被拒（exit 2）、大小写邮箱归一化、重复账号被拒（exit 1）
+- **16 条变异全部被抓到**（见下）
+
+**教训：变异测试抓出了 5 条「看起来在测、其实没测」的用例**
+
+第一轮变异有 5 条存活，每条都是真缺口：
+
+| 存活的变异 | 用例为什么没抓到 |
+| --- | --- |
+| 锁到期后不清零计数 | 用例断言的是「**成功登录后**计数为 0」，而成功路径本来就会清零 —— 它没测到它声称测的东西 |
+| 条件更新退回先读后写 | **根本没有并发用例**。重放那条走的是早期的 `used_at` 判断，绕过了条件更新 |
+| 用户不存在时不跑假校验 | 没有任何断言盯着这条控制 |
+| 密码下限放宽到 1 | 用例写的是 `MIN_PASSWORD_LENGTH - 1`，**跟着常量一起变** |
+| 锁定计数与主事务共用 | 没有用例区分「两个事务」与「一个事务」 |
+
+派生规矩两条：**边界值要有绝对断言**（`assert MIN_PASSWORD_LENGTH >= 12`），相对断言只能证明「边界两侧行为不同」，证不了边界在合理位置；**并发语义必须对着真数据库验** —— 内存 SQLite 要么每连接一个库、要么（StaticPool）所有会话共用一条连接，后者意味着两个「并发」事务其实是同一个事务，模拟不出竞态。第一版并发用例就是这么写的，两边都被判成重放，而那个失败与被测代码无关。
 
 ---
 

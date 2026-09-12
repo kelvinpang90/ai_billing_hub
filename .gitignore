@@ -36,3 +36,6 @@ Thumbs.db
 .codex-input-*.md
 .codex-pr-body-*.md
 .codex-response-*.md
+
+# 本地生成的密钥文件，绝不提交（ADR-0004：密钥走文件注入，不进仓库）
+/secrets/
