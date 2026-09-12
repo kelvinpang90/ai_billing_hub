@@ -13,6 +13,9 @@ from app.core.config import get_settings
 
 # 必须 import 所有模型模块，`Base.metadata` 才是完整的；否则 autogenerate 会把
 # 没被 import 的表当成「已删除」，生成一个 drop table 的迁移。
+from app.models import (
+    auth as _auth_models,  # noqa: F401  (registers users/refresh_tokens/audit_logs)
+)
 from app.models.base import Base  # noqa: F401  (imported for metadata side effects)
 
 config = context.config

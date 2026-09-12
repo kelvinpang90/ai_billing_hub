@@ -13,7 +13,9 @@ dependencies = [
     # 旧 httpx 的 starlette，干净环境里 pytest 会在导入 TestClient 时挂掉。
     # 这两个下界是一对，改一个要复验另一个。
     "fastapi>=0.141",
-    "pydantic>=2.9",
+    # [email] 带上 email-validator：`EmailStr` 没有它会在**运行时**才抛
+    # ImportError，而不是装的时候。
+    "pydantic[email]>=2.9",
     "pydantic-settings>=2.6",
     "uvicorn[standard]>=0.32",
     "sqlalchemy>=2.0",
@@ -23,6 +25,12 @@ dependencies = [
     "pymysql>=1.1",
     # celery[redis] 会把 redis 客户端一并装上，就绪探针也用它。
     "celery[redis]>=5.4",
+    # 密码哈希。Argon2id 是当前推荐；bcrypt 有 72 字节静默截断的坑（超长密码
+    # 的尾部被丢掉，两个不同密码可能验成同一个）。实测 python:3.12-slim 上
+    # 有 wheel，不需要编译链。
+    "argon2-cffi>=23.1",
+    # 访问令牌签名（spec §53 点名 JWT）。
+    "pyjwt>=2.9",
 ]
 
 [project.optional-dependencies]

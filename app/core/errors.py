@@ -36,6 +36,10 @@ class AppError(Exception):
     code = "APP_ERROR"
     http_status = status.HTTP_400_BAD_REQUEST
 
+    # 少数错误必须带响应头才有意义（429 的 Retry-After 是标准要求：没有它，
+    # 客户端只能瞎猜多久以后重试）。子类覆盖这个属性，处理器统一加上。
+    headers: dict[str, str] = {}
+
     def __init__(self, message: str, *, code: str | None = None, http_status: int | None = None):
         super().__init__(message)
         self.message = message
@@ -45,9 +49,17 @@ class AppError(Exception):
             self.http_status = http_status
 
 
-def _envelope(request_id: str | None, code: str, message: str, http_status: int) -> JSONResponse:
+def _envelope(
+    request_id: str | None,
+    code: str,
+    message: str,
+    http_status: int,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     body = failure(code=code, message=message, request_id=request_id)
     response = JSONResponse(status_code=http_status, content=body.model_dump())
+    for name, value in (headers or {}).items():
+        response.headers[name] = value
     # 响应头也要带 —— 未处理异常的响应由最外层的 ServerErrorMiddleware 产出，
     # **绕过了 RequestContextMiddleware**，指望那边加头是加不上的。而 500 恰恰
     # 是最需要客户端报得出 id 的场合。
@@ -59,7 +71,7 @@ def _envelope(request_id: str | None, code: str, message: str, http_status: int)
 async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
     # 这是「预期内的失败」，warning 就够；用 error 会让真正的故障淹没在噪声里。
     logger.warning("Request failed", extra={"error_code": exc.code, "path": request.url.path})
-    return _envelope(current_request_id(), exc.code, exc.message, exc.http_status)
+    return _envelope(current_request_id(), exc.code, exc.message, exc.http_status, exc.headers)
 
 
 async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:

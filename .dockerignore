@@ -36,3 +36,4 @@ tests/
 .codex-input-*.md
 .codex-pr-body-*.md
 .codex-response-*.md
+secrets/

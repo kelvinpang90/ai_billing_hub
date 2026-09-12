@@ -51,6 +51,12 @@ _SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
     "totp",
+    # ⚠️ 这两个都**不含**上面任何一个子串，靠 "token" / "secret" 兜不住：
+    # - recovery_code：2FA 的恢复码，等价于第二因子本身
+    # - otpauth：`otpauth://totp/...?secret=` 这种 URI **看起来像 URL 而不像密钥**，
+    #   是最容易被漏掉的一种（设计闸门自查时才发现）
+    "recovery",
+    "otpauth",
     "signature",
     "prompt",
     "completion",

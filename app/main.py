@@ -6,6 +6,7 @@ import logging
 
 from fastapi import FastAPI
 
+from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.core.config import Settings, get_settings
 from app.core.database import (
@@ -16,6 +17,7 @@ from app.core.database import (
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
+from app.core.ratelimit import TokenBucket
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +40,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     register_error_handlers(app)
     app.include_router(health_router)
+    app.include_router(auth_router)
 
     app.state.settings = settings
+    # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。
+    # 每个应用实例一个桶：它是瞬时状态，重启清空可接受 —— 失效模式是退化到
+    # nginx 那一层，而不是安全控制消失。
+    app.state.auth_rate_limiter = TokenBucket(
+        per_minute=settings.auth_rate_limit_per_minute,
+        burst=settings.auth_rate_limit_burst,
+    )
+    if not settings.jwt_secret_file.strip():
+        # 与「没配数据库」同一种处置：照常启动让存活探针能应答，但把缺失说清楚。
+        # 认证端点会明确返回 AUTH_NOT_CONFIGURED，而不是签出一个临时密钥——
+        # 临时密钥会让配置缺失变成静默的。
+        logger.warning("Starting without a JWT signing key; authentication will refuse to serve")
     # 没配数据库不等于起不来。**存活探针必须能应答**，`/readyz` 会明确报
     # DATABASE_NOT_CONFIGURED —— 启动时直接崩掉的话，一个配置笔误会让容器
     # 进入重启循环，而日志里只有一行没人看得见的堆栈。
