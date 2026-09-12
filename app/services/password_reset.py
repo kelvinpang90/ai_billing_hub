@@ -236,31 +236,74 @@ def reset_password(
     token_hash = hash_opaque_token(token)
 
     with session_factory() as session:
+        # ⚠️ 第一次读**刻意不加锁**：它只用来拿 `user_id`，而 `user_id` 是不变的。
+        # 加锁读会把加锁顺序变成「先令牌、后用户」，与下面那两条 UPDATE 的顺序
+        # 相反 —— 那正是死锁的配方（见下一段）。
         row = session.execute(
             select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
         ).scalar_one_or_none()
         if row is None:
             raise InvalidResetToken
-        user = session.get(User, row.user_id)
+        token_id = row.id
+
+        # ⚠️ **用户级串行化。**没有这一把锁，同一个用户的两条有效链接同时提交时：
+        #   A 消费 token1（持 token1 的行锁）→ 去作废 token2
+        #   B 消费 token2（持 token2 的行锁）→ 去作废 token1
+        # 两边交叉等待，**MySQL 死锁**，其中一条回滚成 500 —— 而正确的结果应该是
+        # 一条成功、另一条拿 `INVALID_RESET_TOKEN`。
+        #
+        # 锁在 `users` 行上，所有该用户的重置因此排成一队；**加锁顺序统一成
+        # 「先用户、后令牌」**，不再有环。同一条道理将来也用在钱包上（spec §81）。
+        #
+        # ⚠️ SQLite 不支持 `FOR UPDATE`，SQLAlchemy 在那个方言下**静默忽略**它 ——
+        # 也就是说单元测试**验证不了这一条**，它只能对着真 MySQL 验
+        # （见 tests/backend/test_password_reset_concurrency.py）。
+        user = session.execute(
+            select(User).where(User.id == row.user_id).with_for_update()
+        ).scalar_one_or_none()
         if user is None or user.status is not UserStatus.ACTIVE:
             raise InvalidResetToken
 
-        # ⚠️ 强度校验**排在消费令牌之前**：不然「新密码太弱」会连令牌一起烧掉，
-        # 用户被迫重新走一遍收信流程 —— 而他什么都没做错。
-        # 这里的先读后写不构成 TOCTOU：真正的判定在下面那条条件更新上。
+        # ⚠️ 拿到用户锁之后**重新读一次令牌**，而且是加锁读。
+        # REPEATABLE READ 下，上面那次普通 SELECT 拿到的是事务开始时的快照 ——
+        # 排在队里等锁的那个请求，读到的 `used_at` 可能还是 `NULL`。加锁读总是读
+        # 最新已提交版本，这才是「它现在还能不能用」的答案。
+        #
+        # ⚠️ **`populate_existing=True` 不能少。**没有它，这次查询确实发到了数据库，
+        # 但 SQLAlchemy 看见 identity map 里已经有同一行的对象，就**原样把旧对象还
+        # 给你**，新读到的值被丢掉 —— 于是「重读」这一步看起来做了、实际什么也没
+        # 更新。这是实测发现的：并发用例里落败的那条拿到了 `WEAK_PASSWORD`。
+        row = session.execute(
+            select(PasswordResetToken)
+            .where(PasswordResetToken.id == token_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one()
+
+        # ⚠️ **令牌是否还有效，必须在强度校验之前判定。**
+        # 反过来的话，一张已经用过或过期的链接配上一个弱密码，拿到的是
+        # `WEAK_PASSWORD` —— 而那张链接无论密码多强都不可能成功。错误码于是取决于
+        # 密码的内容，「这条链接还能不能用」这个稳定契约就没了。
+        if row.used_at is not None or row.expires_at <= moment:
+            raise InvalidResetToken
+
+        # 强度校验排在**消费令牌**之前：这样「新密码太弱」不会连一张**仍然有效**的
+        # 令牌一起烧掉，用户不必重走一遍收信流程 —— 他什么都没做错。
         validate_password_strength(new_password, email=user.email)
 
         consumed = session.execute(
             update(PasswordResetToken)
             .where(
-                PasswordResetToken.id == row.id,
+                PasswordResetToken.id == token_id,
                 PasswordResetToken.used_at.is_(None),
                 PasswordResetToken.expires_at > moment,
             )
             .values(used_at=moment)
         )
         if int(consumed.rowcount) != 1:
-            # 已经用过、已过期，或者刚刚被另一个并发请求抢走。
+            # 上面已经在持锁状态下判过一次，正常走不到这里。留着是因为**判定必须
+            # 来自条件更新的受影响行数** —— 它是唯一不依赖「读与写之间没人插队」
+            # 这个假设的判据（本文件开头那条规则）。
             raise InvalidResetToken
 
         user.password_hash = hash_password(new_password)
@@ -288,7 +331,7 @@ def reset_password(
             update(PasswordResetToken)
             .where(
                 PasswordResetToken.user_id == user.id,
-                PasswordResetToken.id != row.id,
+                PasswordResetToken.id != token_id,
                 PasswordResetToken.used_at.is_(None),
             )
             .values(used_at=moment)

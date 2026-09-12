@@ -342,6 +342,42 @@ def test_an_expired_token_is_refused(session_factory, settings: Settings) -> Non
         )
 
 
+def test_a_used_token_is_refused_even_when_the_new_password_is_weak(
+    session_factory, settings: Settings
+) -> None:
+    """⚠️ **错误码不能取决于密码的内容。**
+
+    一张已经用过的链接，无论新密码多强都不可能成功 —— 所以它必须回
+    `INVALID_RESET_TOKEN`。先校验强度的话会回 `WEAK_PASSWORD`，于是「这条链接
+    还能不能用」这个稳定契约变成了「看你填的密码」。
+    """
+    make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+    reset_password(session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT)
+
+    with pytest.raises(InvalidResetToken):
+        reset_password(session_factory, settings, token=raw, new_password="短", context=CONTEXT)
+
+
+def test_an_expired_token_is_refused_even_when_the_new_password_is_weak(
+    session_factory, settings: Settings
+) -> None:
+    """过期那条路径同理。"""
+    make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+    later = utc_now() + dt.timedelta(seconds=settings.password_reset_ttl_seconds + 1)
+
+    with pytest.raises(InvalidResetToken):
+        reset_password(
+            session_factory,
+            settings,
+            token=raw,
+            new_password="短",
+            context=CONTEXT,
+            now=later,
+        )
+
+
 def test_an_unknown_token_is_refused(session_factory, settings: Settings) -> None:
     make_user(session_factory)
 
