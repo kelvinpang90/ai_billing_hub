@@ -130,6 +130,8 @@ class AuditAction(enum.StrEnum):
     USER_CREATED = "USER_CREATED"
     TWO_FACTOR_ENABLED = "TWO_FACTOR_ENABLED"
     RECOVERY_CODES_REGENERATED = "RECOVERY_CODES_REGENERATED"
+    PASSWORD_RESET_REQUESTED = "PASSWORD_RESET_REQUESTED"
+    PASSWORD_RESET = "PASSWORD_RESET"
 
 
 class AuditLog(Base):
@@ -215,3 +217,85 @@ class RecoveryCode(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
 
     __table_args__ = (Index("ix_recovery_codes_user", "user_id", "used_at", "revoked_at"),)
+
+
+class PasswordResetToken(Base):
+    """One row per reset request (spec §53; design gate Issue #32 v5).
+
+    ⚠️ **只存哈希。**库里没有任何能直接用来重置别人密码的东西 —— 与
+    `refresh_tokens` 同一条道理。用 SHA-256 而不是 Argon2id：这是一个 256 位的
+    随机串，没有字典可猜，而查表需要**等值索引**（Argon2 每行盐不同，只能全表
+    逐行 verify）。密码与恢复码那种「人选的 / 短的」才必须用 Argon2id。
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[int] = mapped_column(_PrimaryKey, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        _ForeignKeyInt, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # SHA-256 十六进制。UNIQUE 既是查找索引，也是并发下的兜底。
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    # 非空 = 已经用掉。⚠️ 单用**靠条件更新的受影响行数**判定，不靠先读后写 ——
+    # 中间那一瞬就是 TOCTOU 窗口，同一张令牌会被两个并发请求各用一次。
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (Index("ix_password_reset_tokens_user", "user_id", "used_at"),)
+
+
+class OutboxStatus(enum.StrEnum):
+    """⚠️ 刻意没有 `PROCESSING`。
+
+    「领取中」这个状态需要配一个可见性超时，否则 worker 崩在中间的那一行会
+    **永远卡在 PROCESSING**，谁也不会再碰它 —— 而那正是 Invariant 14 要防的
+    「队列丢了，已持久化的工作也跟着没了」。
+
+    这里改成：领取时把 `next_retry_at` 推后一个退避间隔，状态仍是 `PENDING`。
+    worker 崩掉的后果因此变成「这一行晚几分钟重投」，不需要任何额外的超时清扫
+    逻辑。代价是崩溃那一次白占一个 `attempt_count` 名额 —— 便宜得多。
+    """
+
+    PENDING = "PENDING"
+    SENT = "SENT"
+    # 重试次数用尽。⚠️ 这是**死信**，不是「失败了以后会再试」：它不会被恢复
+    # 任务再捡起来，需要人介入。连续失败告警归 T0.9。
+    FAILED = "FAILED"
+
+
+class DomainOutbox(Base):
+    """Transactional outbox (spec §74.6, §25, §98.1; ADR-0009).
+
+    ⚠️ **这张表是事实来源，队列只是投递触发。**行与触发它的业务变更**同事务**
+    写入（Invariant 13），Redis / Celery 整个丢掉之后，周期恢复任务仍能从这张表
+    把该做而没做的投递重建出来（Invariant 14）。
+
+    反过来说：**任何「只发了队列消息、没写这张表」的做法都是错的** —— Redis
+    一丢，那件事就再也没人知道该做了。
+    """
+
+    __tablename__ = "domain_outbox"
+
+    id: Mapped[int] = mapped_column(_PrimaryKey, primary_key=True, autoincrement=True)
+    # 字段清单照 spec §74.6，一列不多一列不少。
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # ⚠️ 投递密码重置信时，这里**含令牌明文** —— 邮件必须带着它，而库里其他
+    # 地方只有哈希。所以投递成功的那一刻会把这一列置空（见 app/tasks/outbox.py）：
+    # 它的用途在投递完成的一瞬就结束了，而 outbox 行是长期保留的。
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[OutboxStatus] = mapped_column(
+        Enum(OutboxStatus, native_enum=False, length=_ENUM_LENGTH),
+        nullable=False,
+        default=OutboxStatus.PENDING,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 下一次可以被领取的时刻。新行填 `created_at`（立刻可投）。
+    next_retry_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    processed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # 恢复任务每分钟扫一次「到期的待投递行」，这条索引就是为那个查询建的。
+    __table_args__ = (Index("ix_domain_outbox_due", "status", "next_retry_at"),)

@@ -159,12 +159,12 @@ def decode_token(settings: Settings, token: str, *, expected_type: str) -> dict[
     return payload
 
 
-def generate_refresh_token() -> str:
-    """Return a fresh opaque refresh token (the plaintext the client will hold)."""
+def generate_opaque_token() -> str:
+    """A fresh 256-bit random string — the plaintext the holder will present."""
     return secrets.token_urlsafe(_REFRESH_TOKEN_BYTES)
 
 
-def hash_refresh_token(token: str) -> str:
+def hash_opaque_token(token: str) -> str:
     """Return the value stored in the database.
 
     ⚠️ 用 SHA-256 而**不是** Argon2id。两个理由，缺一不可：
@@ -175,3 +175,16 @@ def hash_refresh_token(token: str) -> str:
        不同，根本无法索引。
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# 刷新令牌与密码重置令牌是同一种东西：我们自己发的高熵不透明串，落库只存哈希。
+# ⚠️ **两处必须用同一个实现** —— 哈希方案分成两份写，改一处漏一处时，症状是
+# 「某一类令牌全部验不过」，而且只在改完之后才暴露。
+def generate_refresh_token() -> str:
+    """Return a fresh opaque refresh token (the plaintext the client will hold)."""
+    return generate_opaque_token()
+
+
+def hash_refresh_token(token: str) -> str:
+    """Return the value stored in `refresh_tokens.token_hash`."""
+    return hash_opaque_token(token)

@@ -75,13 +75,14 @@
   - [x] **T0.8a** — `users` / `refresh_tokens` / `audit_logs` 三张表、Argon2id 密码哈希与强度、登录、JWT + 刷新轮换与重放检测、登出与吊销、失败锁定、按来源限流、bootstrap CLI
   - [x] **T0.8b** — 信封加密模块（[ADR-0004](adr/ADR-0004-credential-encryption.md)）、`two_factor_settings` / `recovery_codes`、TOTP 注册 / 确认 / 校验、恢复码、**ADMIN 强制 2FA**
   - [x] **T0.8c** — 前端登录页、路由守卫、令牌持有与刷新
-  - [ ] **T0.8d** — `password_reset_tokens` + `domain_outbox`、忘记密码 / 重置密码、[ADR-0009](adr/ADR-0009-notification-channels.md) 的 Email 传输与投递任务（补齐 §53 的最后两项）
+  - [x] **T0.8d** — `password_reset_tokens` + `domain_outbox`、忘记密码 / 重置密码、[ADR-0009](adr/ADR-0009-notification-channels.md) 的 Email 传输与投递任务（补齐 §53 的最后两项）
+  - [ ] **T0.8f** — 前端「忘记密码 / 重置密码」两个页面（T0.8d 派生）。后端两个端点已就绪，但邮件里的链接指向 `/reset-password?token=...`，前端**还没有这条路由**，点进去是 404 —— **在它落地之前，自助密码重置从用户视角看仍然不通**，T0.9 的那条上线前置也就没有真正关闭
   - [x] **T0.8e** — 注册路径的 pending 2FA 令牌 TTL 改为 600 秒（T0.8c 整栈实测发现 120 秒走不完首次注册；设计闸门 [#37](https://github.com/kelvinpang90/ai_billing_hub/issues/37) `APPROVED: design v2`）
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
-> ⚠️ **T0.9 的上线前置**（设计闸门 #32 定的）：**T0.8d 合并前没有任何自助密码重置**，只能走 `python -m app.cli create-admin` 那条 CLI。必须在第一次部署之前关掉。（另一条「管理员登录是单因素」已由 T0.8b 关闭。）
+> ⚠️ **T0.9 的上线前置**（设计闸门 #32 定的）：~~**T0.8d 合并前没有任何自助密码重置**~~ —— **后端已由 T0.8d 关闭**（`/api/v1/auth/password/{forgot,reset}`）。⚠️ **但前端页面还没有**：邮件里的链接指向 `{BILLING_FRONTEND_BASE_URL}/reset-password?token=...`，而那条路由目前是 404，所以**从用户视角看这条路仍然不通**（见下面 T0.8f）。另外**上线前必须配 SMTP**，否则信发不出去（outbox 会重试到死信）。（「管理员登录是单因素」那一条已由 T0.8b 关闭。）
 > ⚠️ **主密钥的宿主机那一半仍归 T0.9**（ADR-0004）：宿主机主密钥文件要 `chown 10001:10001` + `chmod 0400`。应用侧的加解密与文件读取 T0.8b 已实现，**但在宿主机那一半落地前不能部署到生产**。
 > ⚠️ **主密钥没有重包裹任务**（T0.8b 派生）：`app/core/crypto.py` 已经支持多版本钥匙串（轮换时老行仍能解开），但把老行重新用新密钥包裹的后台任务还没有。没有它，轮换之后老密钥必须**永久保留**，否则历史 TOTP 注册全部作废。
 > ⚠️ **边缘 nginx 自己的 `$binary_remote_addr` 仍是直连对端**（T0.8a 派生）：应用侧已经会解析 `X-Forwarded-For`（`app/core/clientip.py`，只在可信代理后面采信），但**边缘那层 `limit_req` 与 `/readyz` 的网段限制还没有**。生产上若在 nginx 前面再放一层代理，这两处都会把所有客户端看成同一个来源。T0.9 要配 `real_ip_header` + `set_real_ip_from`，三处一并收口。
@@ -692,6 +693,84 @@ v1 把「配置下界要不要校验」写成未决问题、请审查方判断�
 
 **边界用例的写法**：把**签发时间往过去推**，再用真实当前时间解码。不能把时钟往未来推 ——
 PyJWT 2.10 会拒绝 `iat` 落在未来的令牌，那样失败原因看起来像签名问题（T0.8a 踩过）。
+
+
+### T0.8d 任务记录（2026-09-12）
+
+**做了什么**
+
+- `password_reset_tokens` / `domain_outbox` 两张表 + 迁移 `0004`
+- `POST /api/v1/auth/password/forgot` 与 `/password/reset`
+- `app/core/mailer.py`：Email 传输层（ADR-0009）
+- `app/tasks/outbox.py`：投递任务 + 每分钟一次的周期恢复（beat）
+- 配置：重置 TTL、前端基址、SMTP 四项、Outbox 退避三项
+
+设计走的是**已批准的闸门 [#32](https://github.com/kelvinpang90/ai_billing_hub/issues/32) `design v5`**
+（端点、表、并发条件更新、失败模式、测试矩阵都在 v5 的 §2/§4/§6/§8 里）。**没有另开闸门**——
+设计没变，按 [WORKFLOW §3](WORKFLOW.md) 的规则原批准仍然有效。
+
+**整栈实测抓到三件单元测试结构性看不见的事**
+
+① **`domain_outbox.status` 在真 MySQL 上建成了 `VARCHAR(7)`。**
+`sa.Enum(native_enum=False)` 不写 `length=` 时按**建表那一刻最长的成员**（`PENDING`）推宽度，
+而模型那边是 `VARCHAR(64)`。以后加一个更长的枚举值（`CANCELLED` 就够）会在插入时报
+`Data too long`，**而整套单元测试全绿**——SQLite 不强制 VARCHAR 长度，`test_model_columns.py`
+检查的又是模型而不是迁移建出来的东西。0003 的文件头记着同一个坑在 `audit_logs.action`
+上真发生过一次，我在 0004 的注释里写着「钉成 64」、代码却没写 `length=`。
+**补了一条对着真 MySQL 跑的守卫**（`test_the_migrated_columns_are_as_wide_as_the_models_say`），
+比的是库里真实列宽与模型声明的列宽，并验证过它确实抓得住（把列改回 `VARCHAR(7)` 立刻报出来）。
+
+② **「忘记密码」有一条可用的用户枚举通道，而且修了两轮才关掉。**
+响应体一致不够——设计闸门 §6 要求的是「耗时也相当」：
+
+| 版本 | 存在 | 不存在 | 结果 |
+| --- | --- | --- | --- |
+| 初版（不存在时直接 return） | ~11ms | ~4.8ms | 完全不重叠，**区分度 100%** |
+| 修一：不存在时烧一次 Argon2 | ~11ms | ~42ms | **方向反了**，照样 100% 可分辨 |
+| 修二：固定耗时下限 120ms | ~125ms | ~124ms | 仍稳定差约 1ms 且不重叠 |
+| 修三：把 celery 触发也纳入下限窗口 | [123.8, 125.5] | [123.6, 125.5] | **完全重叠，不可区分** |
+
+三条教训，每一条都只有实测才看得见：
+**(a)** 拿一个比真实工作贵得多的操作（Argon2 ~40ms vs 数据库写入 ~11ms）去「对齐」，
+只是把差值翻到另一边；
+**(b)** 补齐漏掉任何一段可区分的工作，通道就还在，只是更窄——那 1ms 的来源是
+`_trigger_outbox` 当时还在端点层、落在下限窗口之外；
+**(c)** 刻意**不用** Argon2 来填这个下限：那会把代价变成 CPU，而 CPU 是我们的、不是攻击者的。
+`sleep` 只占一个线程池线程。按来源限流是这条控制的配套，不是可选项。
+
+③ **周期恢复任务确实在补投。**worker 日志里出现 `attempt: 2` 的行——那是第一次投递失败之后，
+beat 的扫描把它重新捡起来投的。这是 Invariant 14 那一半在真栈上的验证，单元测试里它只是
+一个 monkeypatch。
+
+**几个不是随手选的决定**
+
+- **`OutboxStatus` 刻意没有 `PROCESSING`。**「领取中」要配一个可见性超时，否则 worker 崩在
+  中间的那一行**永远卡在 PROCESSING**，谁也不会再碰它——而那正是 Invariant 14 要防的。
+  改成「领取时把 `next_retry_at` 推后、状态仍是 PENDING」之后，worker 崩掉的后果只是这一行
+  晚几分钟重投，不需要任何清扫逻辑，也就不会有那种逻辑写错时的永久卡死
+- **投递成功（以及进死信）时把 `payload_json` 置空。**那一列里是**令牌明文**——邮件必须带着它，
+  而库里别处只有哈希。它的用途在投递完成的一瞬就结束了，而 outbox 行是长期保留的
+- **重置成功吊销该用户**全部**刷新令牌，不只是某一个 family**，并**解除账号锁定**。
+  不解锁的话「重置成功却依然登不进去，且界面上看不出原因」（锁定状态刻意不对外暴露）
+- **强度校验排在消费令牌之前**：否则「新密码太弱」会连令牌一起烧掉，用户什么都没做错却要
+  重走一遍收信流程
+- **未知 event_type 走重试而不是立刻死信**：最可能的原因是滚动更新的时间差（API 已经在写新
+  事件、worker 镜像还是旧的），立刻判死信等于把那些行永久丢掉
+- **`frontend_base_url` 不从请求的 Host 头推**：那个头客户端可以随便写，而这里拼出来的是一封
+  **发给用户、带着一把钥匙**的链接（host header poisoning，密码重置是它最经典的落点）
+
+**一处对 ADR-0009 的偏离，已明写在代码里**：ADR 提的是 `aiosmtplib`，这里用标准库 `smtplib`。
+调用方是**同步的 Celery worker**，用异步库就得在每次发送时 `asyncio.run()` 起停一次事件循环。
+ADR 借那五条实质（不绑供应商、465/587 TLS 分支、空 host = 未配置、发送不抛异常、发件人与
+用户名分离）一条不少地保留了。换回去只影响 `app/core/mailer.py` 一个函数。
+
+**测试**：新增 74 条用例（289 passed / 9 skipped，原 215）。**变异测试 31/31 抓住**，
+其中三个存活体各暴露了一处真缺口：
+① 忘记密码端点**不限流**时全套用例照样全绿（补了限流用例）；
+② 令牌与 outbox 行**不同事务**时正常路径毫无差别（补了「中途失败必须全部回滚」）；
+③ **退避退化成固定间隔**时用例照样通过——原来的断言只要求「第二次比第一次大」，
+**而毫秒级的执行抖动就能满足它**。一条看起来在测退避的用例，实际上什么也没钉住。
+改成直接钉纯函数 `_backoff_seconds` 的值。
 
 
 ## Phase 1 — Tenant, Project & Wallet Core（§124）

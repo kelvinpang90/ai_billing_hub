@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.two_factor import router as two_factor_router
+from app.core.celery_app import RedisNotConfigured, create_celery_app
 from app.core.clientip import parse_trusted_proxies
 from app.core.config import Settings, get_settings
 from app.core.database import (
@@ -72,6 +73,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.engine = engine
         app.state.session_factory = create_session_factory(engine)
+
+    # ⚠️ 这个 Celery 实例在 API 进程里**只用来发投递触发**，一个任务也不执行。
+    # 没有 broker 时它是 None，而那**不是**故障：outbox 行已经在库里，周期恢复
+    # 任务会补投（spec §74.6、Invariant 14）。唯一的后果是那封信晚一点到。
+    try:
+        app.state.celery_app = create_celery_app(settings)
+    except RedisNotConfigured:
+        logger.warning("Starting without a broker; outbox delivery falls back to periodic recovery")
+        app.state.celery_app = None
     return app
 
 

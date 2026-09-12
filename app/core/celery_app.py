@@ -26,7 +26,15 @@ from app.core.config import Settings
 
 # 任务模块要显式列出来，不用 autodiscover：autodiscover 靠约定扫包，加错目录
 # 或改了包名时它只是**安静地少注册一个任务**，调用方拿到 NotRegistered 才发现。
-TASK_MODULES = ["app.tasks.ping"]
+TASK_MODULES = ["app.tasks.ping", "app.tasks.outbox"]
+
+# Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
+# ⚠️ **这一条不是优化，是可恢复性本身。**没有它，「Redis 被清空」或者「worker 在
+# 触发之后、投递之前挂掉」都会让那些行永远躺在库里：状态 PENDING、谁也不再看
+# 它们一眼，而用户那边只表现为「没收到信」。
+# 60 秒是与「用户点了忘记密码之后能接受等多久」对齐的 —— 正常路径由 API 直接
+# 触发，这一条是兜底。
+OUTBOX_RECOVERY_SECONDS = 60.0
 
 
 class RedisNotConfigured(RuntimeError):
@@ -61,7 +69,16 @@ def create_celery_app(settings: Settings) -> Celery:
         # 东西会绕过我们的 formatter。
         worker_redirect_stdouts=False,
         # 周期任务在需要它们的那个任务里注册（对账扫描、状态轮询……）。
-        # 这里留空而不是先塞几个示例条目 —— 示例条目会被真的跑起来。
-        beat_schedule={},
+        # **不放示例条目** —— 示例条目会被真的跑起来。
+        beat_schedule={
+            "outbox-recovery": {
+                "task": "app.tasks.outbox.recover",
+                "schedule": OUTBOX_RECOVERY_SECONDS,
+                # ⚠️ `expires` 比周期略短：beat 停了一小时再起来时，**不要**把
+                # 攒下的几十次触发一口气全放出去 —— 它们做的是同一件事，
+                # 只会让 worker 白白抢同一批行。
+                "options": {"expires": OUTBOX_RECOVERY_SECONDS * 0.9},
+            }
+        },
     )
     return app

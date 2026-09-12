@@ -52,6 +52,18 @@ x-backend: &backend
     # 这里写的是 Docker 会用的私有网段。只有直连对端落在其中时才采信
     # `X-Forwarded-For`（那个头客户端可以随便写），逻辑见 app/core/clientip.py。
     BILLING_TRUSTED_PROXIES: "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
+    # 密码重置链接的基址。本地就是这个栈自己（nginx 发布的那个端口）。
+    # ⚠️ 刻意不从请求的 Host 头推：那个头客户端可以随便写，而这里拼出来的是一封
+    # **发给用户、带着一把钥匙**的链接 —— 改一个 Host 就能让受害者收到指向攻击者
+    # 服务器的信（host header poisoning，密码重置是它最经典的落点）。
+    BILLING_FRONTEND_BASE_URL: ${BILLING_FRONTEND_BASE_URL:-http://localhost:${BILLING_HTTP_PORT:-8080}}
+    # ⚠️ **本地栈刻意不配 SMTP**（空 host = 未配置，ADR-0009）。开发不需要真实
+    # 邮箱凭据：重置令牌与 outbox 行照常落库，投递会重试并留下 warning，
+    # 从日志里就能把链接捞出来。配的话密码同样走文件注入，不走环境变量。
+    BILLING_SMTP_HOST: ${BILLING_SMTP_HOST:-}
+    BILLING_SMTP_PORT: ${BILLING_SMTP_PORT:-587}
+    BILLING_SMTP_USERNAME: ${BILLING_SMTP_USERNAME:-}
+    BILLING_SMTP_FROM: ${BILLING_SMTP_FROM:-}
   secrets:
     - billing_jwt_key
     - billing_master_key
