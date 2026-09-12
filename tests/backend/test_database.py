@@ -117,7 +117,7 @@ def test_the_pool_timeout_is_not_sqlalchemys_default() -> None:
     """默认的 `pool_timeout` 必须远小于 SQLAlchemy 的 30 秒。
 
     池满时干等 30 秒对 HTTP 接口毫无意义 —— 调用方早就超时了，而我们还占着一个
-    线程和一条连接。T0.10 的基线实测到并发 32 时 p99 到 1647ms，就是这种排队。
+    线程和一条连接。T0.10 的基线实测到并发 32 时 p99 到 1665ms，就是这种排队。
     """
     engine = create_database_engine(
         Settings(database_url="mysql+pymysql://user:pw@example.invalid:3306/db")

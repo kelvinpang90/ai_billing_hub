@@ -33,6 +33,7 @@
 | MySQL | 8.4.11（compose 里的 `mysql:8.4`，默认参数 + UTC 时区） |
 | API 进程 | **单个 uvicorn 进程，无 `--workers`**（见 `Dockerfile` 的 CMD） |
 | 连接池 | 测量时 `pool_size=5`、`max_overflow=10`、`pool_timeout=30`（SQLAlchemy 默认） |
+| 测量库 | **独立 schema `billing_perf`**（同一个 MySQL 实例，**没有 worker 挂在上面**，见第 6 节） |
 | 数据集 | 空库起测；跑完时 `password_reset_tokens` / `domain_outbox` / `audit_logs` 各约 1.4k 行 |
 | 网络 | 全在一台机器的 Docker 网络内，**没有真实网络往返** |
 
@@ -44,19 +45,24 @@
 
 | 场景 | 并发 | 样本 | p50 | p95 | p99 | 吞吐 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| S1a Argon2id hash（设置密码） | 1 | 200 | 34.23 | 36.40 | 37.54 | 29.0/s |
-| S1b Argon2id verify（每次登录） | 1 | 200 | 34.61 | 36.65 | 37.48 | 28.7/s |
-| S2 重置写入路径（3 表 + 1 次提交） | 1 | 60 | 5.82 | 6.98 | 9.03 | 167.8/s |
-| S2 同上 | 2 | 60 | 7.85 | 9.96 | 16.50 | 243.6/s |
-| S2 同上 | 4 | 80 | 10.43 | 17.57 | 32.54 | 325.2/s |
-| **S2 同上** | **8** | 160 | 20.08 | 27.40 | 39.14 | **401.0/s** |
-| S2 同上 | 16 | 320 | 37.97 | 53.44 | 65.37 | 377.2/s |
-| S2 同上 | 32 | 640 | 38.97 | 59.72 | **1646.81** | 379.5/s |
-| S2b 同上，含反枚举耗时地板 | 1 | 40 | 120.11 | 120.22 | 120.29 | 8.3/s |
-| S3 outbox 单行领取+投递+结算 | 1 | 200 | 9.98 | 12.33 | 26.62 | 95.8/s |
-| S4 `GET /healthz`（经 nginx） | 1 | 200 | 1.14 | 1.37 | 1.57 | 848.2/s |
-| S4 同上 | 8 | 400 | 6.41 | 7.52 | 8.01 | 1225.4/s |
-| S4 同上 | 32 | 1600 | 25.28 | 27.79 | 46.49 | 1233.4/s |
+| S1a Argon2id hash（设置密码） | 1 | 200 | 35.11 | 37.52 | 37.98 | 28.3/s |
+| S1b Argon2id verify（每次登录） | 1 | 200 | 35.87 | 39.52 | 42.88 | 27.6/s |
+| S2 重置写入路径（3 表 + 1 次提交） | 1 | 60 | 5.77 | 7.54 | 8.95 | 168.3/s |
+| S2 同上 | 2 | 60 | 7.83 | 9.68 | 16.64 | 246.9/s |
+| S2 同上 | 4 | 80 | 10.63 | 22.55 | 30.00 | 325.1/s |
+| **S2 同上** | **8** | 160 | 19.83 | 24.77 | 36.55 | **390.3/s** |
+| S2 同上 | 16 | 320 | 37.66 | 50.98 | 70.54 | 375.4/s |
+| S2 同上 | 32 | 640 | 39.11 | 61.43 | **1664.56** | 374.1/s |
+| S2b 同上，含反枚举耗时地板 | 1 | 40 | 120.10 | 120.23 | 120.38 | 8.3/s |
+| S3 outbox 单行领取+投递+结算 | 1 | 200 | 9.90 | 11.52 | 14.85 | 98.4/s |
+| S4 `GET /healthz`（经 nginx） | 1 | 200 | 1.27 | 1.52 | 1.73 | 708.7/s |
+| S4 同上 | 8 | 400 | 7.02 | 8.57 | 21.99 | 1069.7/s |
+| S4 同上 | 32 | 1600 | 28.44 | 31.33 | 50.18 | 1097.2/s |
+
+⚠️ **量的时候栈必须是安静的。**中间有一轮是在 celery worker 每 60 秒抛一次异常
+（栈的库没迁移，恢复任务一直失败）的情况下跑的，S2 的峰值吞吐从 390/s 掉到
+**170/s**、c=1 的 p50 从 5.8ms 涨到 32.9ms —— 一个后台任务的错误循环就足以让整组
+数字面目全非。上表是把那个错误消掉之后重跑的。
 
 ---
 
@@ -64,9 +70,9 @@
 
 ### 3.1 ⚠️ 每一条路径都在**并发 8** 饱和，而机器有 20 核
 
-写入路径 401/s 出现在并发 8；16 与 32 反而掉到 ~378/s，延迟却从 20ms 涨到 39ms、
-p99 从 39ms 炸到 **1647ms**。`/healthz` 同样：并发 8 已经 1225/s，并发 32 还是
-1233/s，只是每个请求多等 19ms。
+写入路径 390/s 出现在并发 8；16 与 32 反而掉到 ~375/s，延迟却从 20ms 涨到 39ms、
+p99 从 37ms 炸到 **1665ms**。`/healthz` 同样：并发 8 已经 1070/s，并发 32 还是
+1097/s，只是每个请求多等 21ms。
 
 **多出来的并发全部变成排队，没有一点变成吞吐。**
 
@@ -78,12 +84,12 @@ p99 从 39ms 炸到 **1647ms**。`/healthz` 同样：并发 8 已经 1225/s，�
 
 ### 3.2 登录的成本是 35ms CPU + 64 MiB 内存，每一次
 
-Argon2id 校验 p50 **34.6ms**，参数是 argon2-cffi 的默认值
+Argon2id 校验 p50 **35.9ms**，参数是 argon2-cffi 的默认值
 （`time_cost=3`、`memory_cost=65536 KiB = 64 MiB`、`parallelism=4`）。
 
 两条推论：
 
-- **CPU**：单线程约 **29 次/秒**。Argon2 在 C 层会释放 GIL，所以它是少数能吃到
+- **CPU**：单线程约 **28 次/秒**。Argon2 在 C 层会释放 GIL，所以它是少数能吃到
   多核的部分
 - **内存**：每一次并发的哈希要 **64 MiB**。20 个并发登录 = **1.28 GB**。
   单 VPS 上这是个硬约束，和 CPU 一样值钱
@@ -96,7 +102,7 @@ Argon2id 校验 p50 **34.6ms**，参数是 argon2-cffi 的默认值
 两层限流都配着 **10 r/m、突发 20**：边缘 nginx 的 `limit_req`（主控，
 `deploy/nginx/billing.conf:38`）与进程内的 `TokenBucket`（兜底）。
 
-所以**按来源**看，登录的稳态上限是 10/分钟 —— 远在 3.2 那个 29/秒之下。Argon2 的
+所以**按来源**看，登录的稳态上限是 10/分钟 —— 远在 3.2 那个 28/秒之下。Argon2 的
 开销要到「大量不同来源同时登录」时才会变成瓶颈。
 
 ⚠️ **认证端点刻意没有做 HTTP 压测。**打到第 21 个请求就是 429，压出来的是限流器
@@ -140,11 +146,11 @@ Argon2id 校验 p50 **34.6ms**，参数是 argon2-cffi 的默认值
 | §119 的目标 | 现在能不能量 | 为什么 |
 | --- | --- | --- |
 | Stored Usage Events >= 1,000,000 | ❌ | 用量表 Phase 2 才建 |
-| Sustained ingestion >= 20 events/s | ❌ | 同上。⚠️ 但 S2 的 401/s 说明**写入路径本身**离 20/s 很远，不是风险点 |
+| Sustained ingestion >= 20 events/s | ❌ | 同上。⚠️ 但 S2 的 390/s 说明**写入路径本身**离 20/s 很远，不是风险点 |
 | Five-minute burst >= 100 events/s | ❌ | 同上 |
-| Durable-acceptance API latency p95 <= 500ms | ⚠️ 部分 | S2 是形状最接近的写入路径：并发 8 时 p95 27ms。但真实摄取还要加鉴权、配额与定价 |
+| Durable-acceptance API latency p95 <= 500ms | ⚠️ 部分 | S2 是形状最接近的写入路径：并发 8 时 p95 25ms。但真实摄取还要加鉴权、配额与定价 |
 | Event-to-wallet p95 <= 60s / p99 <= 5min | ❌ | 钱包 Phase 1、计费引擎 Phase 2 |
-| Backlog recovery >= 5x peak | ⚠️ 部分 | S3 量的正是将来承载它的那套 outbox 机制：单线程 95.8/s。⚠️ 恢复扫描现在是**单个 beat 任务串行投递**，5x 目标真到跟前时要重新量 |
+| Backlog recovery >= 5x peak | ⚠️ 部分 | S3 量的正是将来承载它的那套 outbox 机制：单线程 98.4/s。⚠️ 恢复扫描现在是**单个 beat 任务串行投递**，5x 目标真到跟前时要重新量 |
 | Status Webhook enqueue p95 <= 60s | ❌ | Webhook 是 Phase 3 |
 | 99.5% 月度可用性 | ❌ | 要生产环境跑满一个月才谈得上 |
 | **最热租户的工作负载** | ❌ | `users` 表现在还没有 `tenant_id`（Phase 4 引入 CUSTOMER 时才有） |
@@ -157,18 +163,38 @@ Argon2id 校验 p50 **34.6ms**，参数是 argon2-cffi 的默认值
 
 ## 6. 怎么重跑
 
-⚠️ `scripts/` 不在镜像里（`Dockerfile` 只 COPY 了 `app` 与 `alembic`），所以要挂进去：
+### ⚠️ 测量必须用一个**独立的 schema**，不能用栈自己那个库
+
+S2 会写出上千行状态为 `PENDING`、payload 里带着**真实重置令牌**的 outbox 行。而
+compose 里的 celery-beat 每 60 秒跑一次恢复扫描，worker 会在**它自己的进程**里投递
+它们 —— 脚本里那个 `NullTransport` 只换掉了脚本自己进程的传输层，对 worker 毫无作用。
+
+本地栈刻意不配 SMTP，所以这件事在本地看不见；**配了 SMTP 的环境会真的把上千封带
+令牌的信发出去**。所以脚本**拒绝**在 `--database-url` 等于 `BILLING_DATABASE_URL`
+时运行，`--database-url` 也是必填的。
+
+⚠️ `scripts/` 不在镜像里（`Dockerfile` 只 COPY 了 `app` 与 `alembic`），也要挂进去：
 
 ```bash
 docker compose up -d --build
-docker compose run --rm api alembic upgrade head
+docker compose run --rm api alembic upgrade head        # 栈自己的库
+
+# 测量专用 schema：同一个 MySQL 实例（性能特征一致），但**没有 worker 挂在上面**
+PERF_URL='mysql+pymysql://root:<BILLING_MYSQL_ROOT_PASSWORD>@mysql:3306/billing_perf?charset=utf8mb4'
+docker compose exec -T mysql mysql -u root -p"$BILLING_MYSQL_ROOT_PASSWORD" \
+  -e 'CREATE DATABASE IF NOT EXISTS billing_perf'
+docker compose run --rm -e BILLING_DATABASE_URL="$PERF_URL" api alembic upgrade head
+
 docker compose run --rm \
   -v "$PWD/scripts:/srv/billing/scripts:ro" \
-  api python scripts/perf_baseline.py
+  api python scripts/perf_baseline.py --database-url "$PERF_URL"
 ```
 
-它会往库里写垃圾行，跑完自己删掉，并且**拒绝在 `BILLING_ENVIRONMENT=production`
-下运行**。
+跑完把 schema 删掉即可：`DROP DATABASE billing_perf`。
+
+脚本还会：往库里写垃圾行但**跑完自己删掉**、**拒绝在
+`BILLING_ENVIRONMENT=production` 下运行**、**每轮用一个唯一的账号地址并拒绝复用
+已存在的账号**（它清理时会连审计记录一起删，复用别人的账号等于销毁它的审计轨迹）。
 
 ⚠️ 脚本里有一道 `_assert_writes_rows` 守卫：S2 开跑前先确认它真的写了行。这道守卫
 不是防御性编程，是被一个真实缺陷逼出来的 —— 见第 8 节。

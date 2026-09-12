@@ -42,6 +42,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -70,7 +71,11 @@ from app.tasks import outbox as outbox_task
 # 而 `_start_reset` 拒绝之后**立刻返回、根本不碰数据库**。第一版就是这么写的，
 # 结果整组 S2 报出 0.02ms 的漂亮数字，测的却是一次提前返回。
 # 下面 `_assert_writes_rows` 那道守卫就是为这件事加的。
-BASELINE_EMAIL = "perf-baseline@example.com"
+#
+# ⚠️ **每次跑都换一个地址**（复审第一轮的阻断项）。第一版是固定地址 + 「有就
+# 复用」，而清理阶段是**无条件删除** —— 库里若已经有同名账号，这个脚本会连它的
+# 审计记录（§66）一起删掉。改成每轮唯一之后，我们只可能删掉自己刚建的那一个。
+BASELINE_EMAIL_TEMPLATE = "perf-baseline+{run}@example.com"
 BASELINE_PASSWORD = "a throwaway baseline passphrase"
 
 CONTEXT = RequestContext(ip_address="127.0.0.1", user_agent="perf-baseline")
@@ -244,7 +249,7 @@ def _row_count(session_factory, table: str) -> int:
         return int(session.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one())
 
 
-def _assert_writes_rows(session_factory, settings) -> None:
+def _assert_writes_rows(session_factory, settings, email: str) -> None:
     """跑 S2 之前先确认它**真的写了行**。
 
     ⚠️ 这道守卫不是防御性编程，是**被真实缺陷逼出来的**。`_start_reset` 在
@@ -256,19 +261,19 @@ def _assert_writes_rows(session_factory, settings) -> None:
     """
     with session_factory() as session:
         before = session.execute(text("SELECT COUNT(*) FROM password_reset_tokens")).scalar_one()
-    outbox_id = _start_reset(
-        session_factory, settings, email=BASELINE_EMAIL, context=CONTEXT, now=None
-    )
+    outbox_id = _start_reset(session_factory, settings, email=email, context=CONTEXT, now=None)
     with session_factory() as session:
         after = session.execute(text("SELECT COUNT(*) FROM password_reset_tokens")).scalar_one()
     if outbox_id is None or after <= before:
         raise RuntimeError(
             "S2 measured nothing: _start_reset returned without writing a row. "
-            f"Check that {BASELINE_EMAIL} exists, is ACTIVE, and parses as an address."
+            f"Check that {email} exists, is ACTIVE, and parses as an address."
         )
 
 
-def scenario_reset_write(baseline: Baseline, session_factory, settings, concurrencies) -> None:
+def scenario_reset_write(
+    baseline: Baseline, session_factory, settings, email: str, concurrencies
+) -> None:
     """S2 —— 一次密码重置申请的写入路径（三张表 + 一次提交）。
 
     Phase 0 里最接近 §119「durable acceptance」写入形状的东西。并发扫描的用途
@@ -276,9 +281,9 @@ def scenario_reset_write(baseline: Baseline, session_factory, settings, concurre
     """
 
     def start_reset(_: int) -> None:
-        _start_reset(session_factory, settings, email=BASELINE_EMAIL, context=CONTEXT, now=None)
+        _start_reset(session_factory, settings, email=email, context=CONTEXT, now=None)
 
-    _assert_writes_rows(session_factory, settings)
+    _assert_writes_rows(session_factory, settings, email)
 
     for concurrency in concurrencies:
         # ⚠️ 行数要在**每一轮开跑前**数。整个脚本跑下来这张表会涨到上千行，
@@ -298,7 +303,7 @@ def scenario_reset_write(baseline: Baseline, session_factory, settings, concurre
 
     # 对照：客户端真正经历的那一个（含地板）。
     def full_request(_: int) -> None:
-        request_reset(session_factory, settings, email=BASELINE_EMAIL, context=CONTEXT)
+        request_reset(session_factory, settings, email=email, context=CONTEXT)
 
     baseline.add(
         measure(
@@ -311,7 +316,9 @@ def scenario_reset_write(baseline: Baseline, session_factory, settings, concurre
     )
 
 
-def scenario_outbox_drain(baseline: Baseline, session_factory, settings, rows: int) -> None:
+def scenario_outbox_drain(
+    baseline: Baseline, session_factory, settings, email: str, rows: int
+) -> None:
     """S3 —— outbox 的领取 / 结算吞吐。
 
     §119 的「Backlog recovery throughput >= 5x peak」将来就落在这套机制上，所以
@@ -325,20 +332,32 @@ def scenario_outbox_drain(baseline: Baseline, session_factory, settings, rows: i
         def send(self, _message) -> bool:
             return True
 
-    original = outbox_task.build_transport
+    # ⚠️ 三样都要换，换漏一样这个场景就在**别的库**上跑。
+    #
+    # `deliver()` 不用调用方给的 session_factory：它调 `outbox_task._session_factory()`，
+    # 那个函数带 `lru_cache`、自己按全局 `get_settings()` 建引擎 —— 也就是**栈自己
+    # 那个库**。只换 `build_transport` 的话，S3 往测量库写行、`deliver()` 却去栈的
+    # 库里读，两边根本不是一张表。
+    #
+    # 这不是推演出来的：隔离改完第一次跑就报 `Table 'billing.domain_outbox'
+    # doesn't exist` —— 反过来说明**在隔离之前，投递一直打在栈的库上**。
+    # `tests/backend/test_outbox.py` 的 `wired` 夹具早就这么做了，我漏看了。
+    original_transport = outbox_task.build_transport
+    original_factory = outbox_task._session_factory
+    original_settings = outbox_task.get_settings
     outbox_task.build_transport = lambda _settings: NullTransport()  # type: ignore[assignment]
+    outbox_task._session_factory = lambda: session_factory  # type: ignore[assignment]
+    outbox_task.get_settings = lambda: settings  # type: ignore[assignment]
     try:
         with session_factory() as session:
-            user_id = session.execute(
-                select(User.id).where(User.email == BASELINE_EMAIL)
-            ).scalar_one()
+            user_id = session.execute(select(User.id).where(User.email == email)).scalar_one()
             for _ in range(rows):
                 session.add(
                     DomainOutbox(
                         event_type="PASSWORD_RESET_REQUESTED",
                         aggregate_type="users",
                         aggregate_id=str(user_id),
-                        payload_json=json.dumps({"to": BASELINE_EMAIL, "token": "x" * 43}),
+                        payload_json=json.dumps({"to": email, "token": "x" * 43}),
                         status=OutboxStatus.PENDING,
                         attempt_count=0,
                         next_retry_at=utc_now(),
@@ -364,7 +383,9 @@ def scenario_outbox_drain(baseline: Baseline, session_factory, settings, rows: i
             )
         )
     finally:
-        outbox_task.build_transport = original  # type: ignore[assignment]
+        outbox_task.build_transport = original_transport  # type: ignore[assignment]
+        outbox_task._session_factory = original_factory  # type: ignore[assignment]
+        outbox_task.get_settings = original_settings  # type: ignore[assignment]
 
 
 def scenario_http_floor(baseline: Baseline, base_url: str, concurrencies) -> None:
@@ -403,35 +424,44 @@ def scenario_http_floor(baseline: Baseline, base_url: str, concurrencies) -> Non
 # --------------------------------------------------------------------------
 
 
-def ensure_baseline_user(session_factory) -> None:
+def create_baseline_user(session_factory, email: str) -> None:
+    """建这一轮专用的账号。
+
+    ⚠️ **地址已经存在就直接失败，绝不复用**（复审第一轮的阻断项）。下面的
+    `cleanup` 会把这个账号连同它的审计记录一起删掉 —— 复用一个别人的账号，
+    等于顺手销毁了它的审计轨迹（§66）。地址每轮唯一，撞上只可能是真撞了。
+    """
     with session_factory() as session:
-        existing = session.execute(
-            select(User).where(User.email == BASELINE_EMAIL)
-        ).scalar_one_or_none()
-        if existing is None:
-            session.add(
-                User(
-                    email=BASELINE_EMAIL,
-                    password_hash=hash_password(BASELINE_PASSWORD),
-                    role=UserRole.ADMIN,
-                    status=UserStatus.ACTIVE,
-                    created_at=utc_now(),
-                    updated_at=utc_now(),
-                )
+        existing = session.execute(select(User.id).where(User.email == email)).scalar_one_or_none()
+        if existing is not None:
+            raise RuntimeError(
+                f"{email} already exists; refusing to reuse an account this script will delete"
             )
-            session.commit()
+        session.add(
+            User(
+                email=email,
+                password_hash=hash_password(BASELINE_PASSWORD),
+                role=UserRole.ADMIN,
+                status=UserStatus.ACTIVE,
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+        )
+        session.commit()
 
 
-def cleanup(session_factory) -> None:
+def cleanup(session_factory, email: str) -> None:
     """把这次测量写进去的东西删干净。
 
     ⚠️ 顺序是「先子后父」：`password_reset_tokens` 有指向 `users` 的外键。
     反过来删会在外键上报错，而那时候前面的删除已经提交了一半。
+
+    ⚠️ 删的范围只到**这一轮自己建的那个账号**。地址每轮唯一（见
+    `create_baseline_user`），所以 `aggregate_id` / `actor_user_id` 命中的行
+    必然是这一轮写的。
     """
     with session_factory() as session:
-        user_id = session.execute(
-            select(User.id).where(User.email == BASELINE_EMAIL)
-        ).scalar_one_or_none()
+        user_id = session.execute(select(User.id).where(User.email == email)).scalar_one_or_none()
         if user_id is not None:
             session.execute(delete(PasswordResetToken).where(PasswordResetToken.user_id == user_id))
             session.execute(delete(DomainOutbox).where(DomainOutbox.aggregate_id == str(user_id)))
@@ -442,12 +472,46 @@ def cleanup(session_factory) -> None:
         session.commit()
 
 
+def _measurement_settings(raw_url: str, settings) -> object:
+    """把测量用的库换成调用方显式指定的那一个。
+
+    ⚠️ **不允许就是栈自己那个库**（复审第一轮的阻断项）。S2 会写出上千行状态为
+    `PENDING`、payload 里带着**真实重置令牌**的 outbox 行；而 compose 里的
+    celery-beat 每 60 秒跑一次恢复扫描，worker 会在**它自己的进程**里投递它们 ——
+    脚本里那个 `NullTransport` 只换掉了脚本自己进程的传输层，对 worker 毫无作用。
+
+    本地栈刻意不配 SMTP，所以这件事在本地看不见；**配了 SMTP 的环境会真的把上千
+    封带令牌的信发出去**。这正是「本地没报错」最危险的那一类：缺陷被环境的另一个
+    缺省值挡住了。
+
+    根治的办法不是在脚本里再加一层开关，而是**让测量根本不和 worker 共用一个库**。
+    """
+    if not raw_url:
+        raise SystemExit(
+            "--database-url is required. It must NOT be the stack's own database: "
+            "the celery worker attached to that one will deliver the outbox rows this "
+            "script writes. See docs/perf-baseline.md section 6 for the throwaway schema."
+        )
+    if settings.database_url and raw_url == settings.database_url:
+        raise SystemExit(
+            "refusing to measure against the stack's own database "
+            "(BILLING_DATABASE_URL): its celery worker would deliver the reset tokens "
+            "this script writes. Use a separate schema; see docs/perf-baseline.md."
+        )
+    return settings.model_copy(update={"database_url": raw_url})
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python scripts/perf_baseline.py")
     parser.add_argument("--samples", type=int, default=200, help="S1 的样本数")
     parser.add_argument("--outbox-rows", type=int, default=300)
     parser.add_argument("--base-url", default="http://nginx")
     parser.add_argument("--json-out", default=None, help="把结果另存成 JSON")
+    parser.add_argument(
+        "--database-url",
+        default="",
+        help="测量专用的库。⚠️ 必填，且不能是栈自己那个（见 _measurement_settings）",
+    )
     args = parser.parse_args(argv)
 
     settings = get_settings()
@@ -456,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         print("refusing to run against BILLING_ENVIRONMENT=production", file=sys.stderr)
         return 2
 
+    settings = _measurement_settings(args.database_url, settings)
     engine = create_database_engine(settings)
     session_factory = create_session_factory(engine)
 
@@ -466,14 +531,16 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(baseline.environment, indent=2, ensure_ascii=False))
     print()
 
-    ensure_baseline_user(session_factory)
+    email = BASELINE_EMAIL_TEMPLATE.format(run=uuid.uuid4().hex[:12])
+    baseline.environment["baseline_account"] = email
+    create_baseline_user(session_factory, email)
     try:
         scenario_argon2(baseline, args.samples)
-        scenario_reset_write(baseline, session_factory, settings, (1, 2, 4, 8, 16, 32))
-        scenario_outbox_drain(baseline, session_factory, settings, args.outbox_rows)
+        scenario_reset_write(baseline, session_factory, settings, email, (1, 2, 4, 8, 16, 32))
+        scenario_outbox_drain(baseline, session_factory, settings, email, args.outbox_rows)
         scenario_http_floor(baseline, args.base_url.rstrip("/"), (1, 8, 32))
     finally:
-        cleanup(session_factory)
+        cleanup(session_factory, email)
 
     baseline.environment["dataset_after_run"] = {
         "users": _row_count(session_factory, "users"),
