@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.core.clientip import parse_trusted_proxies
 from app.core.config import Settings, get_settings
 from app.core.database import (
     DatabaseNotConfigured,
@@ -46,6 +47,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。
     # 每个应用实例一个桶：它是瞬时状态，重启清空可接受 —— 失效模式是退化到
     # nginx 那一层，而不是安全控制消失。
+    # 只有直连对端落在这里时才采信 X-Forwarded-For（见 app/core/clientip.py）。
+    app.state.trusted_proxies = parse_trusted_proxies(settings.trusted_proxies)
     app.state.auth_rate_limiter = TokenBucket(
         per_minute=settings.auth_rate_limit_per_minute,
         burst=settings.auth_rate_limit_burst,

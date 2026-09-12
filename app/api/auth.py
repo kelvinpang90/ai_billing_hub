@@ -11,6 +11,7 @@ import logging
 
 from fastapi import APIRouter, Request, Response
 
+from app.core.clientip import FORWARDED_FOR_HEADER, resolve_client_ip
 from app.core.errors import AppError
 from app.core.logging import current_request_id
 from app.core.ratelimit import RateLimited, TokenBucket
@@ -32,17 +33,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
-def _context(request: Request) -> RequestContext:
-    """Who is calling, for the audit trail and the rate limiter.
+def _client_ip(request: Request) -> str | None:
+    """The caller's address, honouring `X-Forwarded-For` only from trusted peers.
 
-    ⚠️ 这里用的是 `request.client.host`，也就是**直连对端**。经过 nginx 时那是
-    nginx 的地址，所以按来源限流真正起作用的是边缘那一层（`limit_req`）。
-    要让应用侧也看到真实客户端地址，得让边缘写 `X-Forwarded-For` 并在这里信任
-    它 —— **而信任转发头必须先限定可信代理**，否则任何人都能伪造来源。
-    那属于生产拓扑，归 T0.9，和 `/readyz` 的网段限制是同一条待办。
+    ⚠️ **不能直接用 `request.client.host`。**经 nginx 时它对每个请求都是同一个
+    值（nginx 的容器地址），后果是按来源限流退化成**全局**限流 —— 任何人发到
+    第 21 个认证请求，所有人都拿 429。审计里的地址也会全都一样，取证时没用。
+    判定逻辑与「为什么只在可信代理后面才采信 XFF」见 app/core/clientip.py。
     """
+    return resolve_client_ip(
+        peer=request.client.host if request.client else None,
+        forwarded_for=request.headers.get(FORWARDED_FOR_HEADER),
+        trusted=getattr(request.app.state, "trusted_proxies", ()),
+    )
+
+
+def _context(request: Request) -> RequestContext:
+    """Who is calling, for the audit trail (spec §66)."""
     return RequestContext(
-        ip_address=request.client.host if request.client else None,
+        ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -52,8 +61,7 @@ def _rate_limit(request: Request) -> None:
     bucket: TokenBucket | None = getattr(request.app.state, "auth_rate_limiter", None)
     if bucket is None:
         return
-    source = request.client.host if request.client else "unknown"
-    bucket.check(source)
+    bucket.check(_client_ip(request) or "unknown")
 
 
 def _require_session_factory(request: Request):  # noqa: ANN202 - sessionmaker type is verbose

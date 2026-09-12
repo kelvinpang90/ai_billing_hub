@@ -81,7 +81,7 @@
 
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
 > ⚠️ **T0.9 的两条上线前置**（T0.8a 派生，设计闸门 #32 定的）：① **T0.8b 合并前管理员登录是单因素的**，与 spec §54「ADMIN 2FA mandatory」不符；② **T0.8d 合并前没有任何自助密码重置**，只能走 `python -m app.cli create-admin` 那条 CLI。两条都必须在第一次部署之前关掉 —— 现在可接受的唯一理由是还没有任何部署。
-> ⚠️ **应用侧看不到真实客户端地址**（T0.8a 派生）：`request.client.host` 在 nginx 后面是 nginx 的地址，所以按来源限流真正起作用的是边缘那层 `limit_req`。要让应用侧也看到，得让边缘写 `X-Forwarded-For` 并**限定可信代理**后才信任它 —— 与 `/readyz` 的网段限制、`limit_req` 的 `$binary_remote_addr` 是同一条待办，T0.9 一并处理。
+> ⚠️ **边缘 nginx 自己的 `$binary_remote_addr` 仍是直连对端**（T0.8a 派生）：应用侧已经会解析 `X-Forwarded-For`（`app/core/clientip.py`，只在可信代理后面采信），但**边缘那层 `limit_req` 与 `/readyz` 的网段限制还没有**。生产上若在 nginx 前面再放一层代理，这两处都会把所有客户端看成同一个来源。T0.9 要配 `real_ip_header` + `set_real_ip_from`，三处一并收口。
 > ⚠️ **常见口令表只有十几条**（T0.8a 派生）：`app/core/passwords.py` 里那份是占位，真正的表有上万条。T0.9 随部署带进来（放镜像或挂成文件），调用点不用改。
 > ⚠️ **边缘 nginx 的上游超时没有收紧**（T0.7 实测发现）：api 容器停掉时，边缘 nginx 要 **约 4 秒**才返回 502（DNS 解析不到上游的等待），`proxy_connect_timeout` 更是还挂着 60 秒的默认值。后果是**一次停机在用户侧表现成卡住而不是报错**，而且每个挂起的请求都占着 nginx 的连接。T0.9 要把 `resolver_timeout` 与 `proxy_connect_timeout` 收到秒级。实测数据：`curl` 到 `/healthz` 在 api 停机时耗时 3.96s。
 > ⚠️ **前端产物是单个 877 kB 的 chunk**（gzip 283 kB，主要是 antd）。只有一个路由时拆包没有意义，**加到第三、四个路由时必须做路由级懒加载**，否则首屏会越拖越久。归 T0.10（性能 / SLO 基线）一并量。

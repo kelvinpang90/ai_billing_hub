@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     # 所以本地 .env 要显式设成 false —— 让不安全成为一次**有意识的**选择。
     session_cookie_secure: bool = True
 
+    # 可信反向代理的 CIDR 清单（逗号分隔）。**只有直连对端落在这里时，才采信
+    # `X-Forwarded-For`** —— 那个头是客户端可以随便写的。
+    #
+    # ⚠️ 不配的后果很具体：经 nginx 时每个请求的直连对端都是 nginx，于是
+    # 按来源限流变成**全局**限流（任何人发到第 21 个认证请求，所有人都拿 429），
+    # 审计里的 ip_address 也全是 nginx 的地址。见 app/core/clientip.py。
+    #
+    # 默认空 = 不信任任何转发头。直接跑 uvicorn 时这正好是对的；
+    # compose 里已按容器网段配好。
+    trusted_proxies: str = ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

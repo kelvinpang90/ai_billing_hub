@@ -41,6 +41,14 @@ x-backend: &backend
     # 本地是 http，Secure cookie 发不出去。生产必须是 true（配置项默认就是 true，
     # 这里显式写出来是为了让「本地不安全」是一次有意识的选择）。
     BILLING_SESSION_COOKIE_SECURE: "false"
+    # ⚠️ **不配这个，按来源限流会退化成全局限流。**
+    # 经 nginx 时每个请求的直连对端都是 nginx 的容器地址，所有用户共用一个桶 ——
+    # 任何人发到第 21 个认证请求，**所有人**都拿 429。审计里的 ip_address 也会
+    # 全都一样，取证时没用。
+    #
+    # 这里写的是 Docker 会用的私有网段。只有直连对端落在其中时才采信
+    # `X-Forwarded-For`（那个头客户端可以随便写），逻辑见 app/core/clientip.py。
+    BILLING_TRUSTED_PROXIES: "172.16.0.0/12,10.0.0.0/8,192.168.0.0/16"
   secrets:
     - billing_jwt_key
   # ⚠️ 只是启动顺序，**不是** service_healthy。API 被设计成依赖不可用时照样
