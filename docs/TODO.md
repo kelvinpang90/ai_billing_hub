@@ -78,12 +78,13 @@
   - [x] **T0.8d** — `password_reset_tokens` + `domain_outbox`、忘记密码 / 重置密码、[ADR-0009](adr/ADR-0009-notification-channels.md) 的 Email 传输与投递任务（补齐 §53 的最后两项）
   - [x] **T0.8f** — 前端「忘记密码 / 重置密码」两个页面（T0.8d 派生）。落地前那条链接会落到守卫的 `*` 兜底上、被当成未登录重定向去登录页 —— 用户点开重置链接看到的是登录表单，而他来这儿正是因为登不进去。另加一条跨端守卫，机械比对「后端拼出来的链接」与「前端登记的路由」
   - [x] **T0.8e** — 注册路径的 pending 2FA 令牌 TTL 改为 600 秒（T0.8c 整栈实测发现 120 秒走不完首次注册；设计闸门 [#37](https://github.com/kelvinpang90/ai_billing_hub/issues/37) `APPROVED: design v2`）
-- [ ] **T0.9 — 生产拓扑与恢复方案**（方案文档已起草：[deployment.md](deployment.md)，**待批准**，含六件待拍板的事）：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
+- [ ] **T0.9 — 生产拓扑与恢复方案**（方案见 [deployment.md](deployment.md)，**七件待拍板的事已于 2026-09-13 定案**；⚠️ 还包含部署流水线 CD，见下）：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 > ⚠️ **T0.10 给 T0.9 添了一条**：API 现在是**单个 uvicorn 进程**（`Dockerfile` 的 CMD 没有 `--workers`），容量基线实测每一条路径都在**并发 8** 饱和 —— 机器有 20 核也用不上，多出来的并发全部变成排队（p99 从 37ms 到 1665ms）。进程模型是 T0.9 的事。⚠️ 但它**不是一个免费的性能开关**：进程内那层兜底限流的状态在进程内存里，跑 N 个 worker 就有 N 个独立的桶，**兜底额度变成 N 倍**（主控在边缘 nginx，不受影响）。见 [perf-baseline.md](perf-baseline.md) 第 3.1 / 3.4 节。
 > ⚠️ **容量基线必须在生产 VPS 上重跑一次**才能外推（现有数字来自开发机）。命令在 [perf-baseline.md](perf-baseline.md) 第 6 节。
 - [x] **T0.10 — 初始性能 / SLO 基线**：可重复跑的测量工具 [`scripts/perf_baseline.py`](../scripts/perf_baseline.py) + 基线本体 [perf-baseline.md](perf-baseline.md)（spec §119 要求的那份 documented Phase 0 capacity baseline）。连接池三参数变成配置项，`pool_timeout` 30s → 5s；前端路由级懒加载
 
-> ⚠️ **部署流水线（CD）是一条没有归属的 Phase 0 验收项**（T0.9 起草方案时发现）：spec §123 的 Phase 0 验收写着「CI gates merge and **deploys an immutable commit image**」，§99 进一步要求合并到 `main` 触发 GitHub Actions 部署、不可变镜像标签对应确切 commit、按文档化顺序跑迁移、等健康检查、跑冒烟测试、失败时有**演练过的**回滚。而 `.github/workflows/` 里**只有 `ci.yml`**，T0.1–T0.10 没有一条认领它。**这是排序疏漏不是取舍。**建议单开 T0.11（理由见 [deployment.md](deployment.md) 决策 ⑥），但归属由 Kelvin 定。
+> ⚠️ **部署流水线（CD）是一条没有归属的 Phase 0 验收项**（T0.9 起草方案时发现）：spec §123 的 Phase 0 验收写着「CI gates merge and **deploys an immutable commit image**」，§99 进一步要求合并到 `main` 触发 GitHub Actions 部署、不可变镜像标签对应确切 commit、按文档化顺序跑迁移、等健康检查、跑冒烟测试、失败时有**演练过的**回滚。而 `.github/workflows/` 里**只有 `ci.yml`**，T0.1–T0.10 没有一条认领它。**这是排序疏漏不是取舍。**~~建议单开 T0.11~~ —— **Kelvin 2026-09-13 拍板：算进 T0.9**，所以 T0.9 现在还包含镜像标签、迁移顺序、冒烟测试与回滚。
+> ⚠️ **生产 VPS 只有 1 核 / 3.6 GB 内存 / 剩 12 GB 磁盘，而且已经在用 swap**（2026-09-13 实测，见 [deployment.md](deployment.md) §3.1）。两条后果：① **T0.10 那条「单进程在并发 8 饱和、20 核用不上」的结论不转移到生产** —— 1 核上加 `--workers` 只会多占内存，所以生产保持单进程；② ⚠️ **升配内存之前不要上线**（Kelvin 已定）：Argon2 每次并发哈希 64 MiB，十个人同时登录就吃掉余量，而那时整台机器一起变慢，**包括同机的另外七个项目**。这条也把 ADR-0002 挂了很久的「VPS 容量核算」收口条件补上了。
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
 > ⚠️ **T0.9 的上线前置**（设计闸门 #32 定的）：~~**T0.8d 合并前没有任何自助密码重置**~~ —— **后端已由 T0.8d 关闭**（`/api/v1/auth/password/{forgot,reset}`）。~~⚠️ 但前端页面还没有~~ —— **前端已由 T0.8f 关闭**（`/forgot-password`、`/reset-password` 两页已登记在守卫外面，整栈实测走通了「点邮件链接 → 改密码 → 用新密码登录」）。⚠️ **仍然剩一条：上线前必须配 SMTP**，否则信发不出去（outbox 会重试到死信）。（「管理员登录是单因素」那一条已由 T0.8b 关闭。）
 > ⚠️ **主密钥的宿主机那一半仍归 T0.9**（ADR-0004）：宿主机主密钥文件要 `chown 10001:10001` + `chmod 0400`。应用侧的加解密与文件读取 T0.8b 已实现，**但在宿主机那一半落地前不能部署到生产**。
@@ -1168,6 +1169,6 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 - [ ] `docs/pricing-engine.md`、`docs/currency-and-fx.md`（Phase 2）
 - [ ] `docs/integrated-application-backend.md`（Phase 3）
 - [ ] `docs/payment-flow.md`（Phase 4）
-- [ ] `docs/data-governance.md`、`docs/runbook.md`（Phase 0 起补，runbook 需覆盖 §136 列的 18 个故障场景）；[`docs/deployment.md`](deployment.md) **已起草，待批准** —— T0.9 的方案文档，里面有六件待拍板的事，没答案就往下做会返工
+- [ ] `docs/data-governance.md`、`docs/runbook.md`（Phase 0 起补，runbook 需覆盖 §136 列的 18 个故障场景）；[`docs/deployment.md`](deployment.md) **已起草，七件决策已定案** —— T0.9 的方案文档；落地部分仍待生产主机
 - [x] 逐条核对 25 条评审意见与 spec v1.1 —— 完成于 2026-09-10，结果见 [REVIEW_FOLLOWUP_v1.1.md](archive/REVIEW_FOLLOWUP_v1.1.md)（20 条已解决 / 5 条残留，已转为上方 R1–R5）
 - [ ] 给 spec 的硬性要求补 `REQ-*` 编号（= R5）
