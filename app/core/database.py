@@ -17,8 +17,10 @@ from contextlib import contextmanager
 
 from fastapi import status
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from app.core.config import Settings
 from app.core.errors import AppError
@@ -54,7 +56,31 @@ def create_database_engine(settings: Settings) -> Engine:
         pool_pre_ping=True,
         pool_recycle=_POOL_RECYCLE_SECONDS,
         future=True,
+        **_pool_options(settings),
     )
+
+
+def _pool_options(settings: Settings) -> dict[str, int]:
+    """池的三个参数，**只在池类真的接受它们时才传**。
+
+    取值理由在 `app/core/config.py` 那几行注释里，实测数据在
+    [perf-baseline.md](../../docs/perf-baseline.md)。其中 `pool_timeout` 是
+    T0.10 唯一改了行为的一个：SQLAlchemy 默认 30 秒，池满时请求会在那里干等
+    半分钟 —— 对 HTTP 接口来说，等 30 秒再成功比立刻失败更糟。
+
+    ⚠️ 这个判断不是多余的。只有 `QueuePool` 一族认 `max_overflow` /
+    `pool_timeout`；内存 SQLite 用的是 `SingletonThreadPool`，把这几个参数传给它
+    的话 `create_engine` 直接抛 `TypeError`。**用方言名写死（「以 sqlite 开头就
+    跳过」）同样不行** —— 那是在猜哪些方言用哪种池，而 SQLAlchemy 自己就能回答。
+    """
+    url = make_url(settings.database_url)
+    if not issubclass(url.get_dialect().get_pool_class(url), QueuePool):
+        return {}
+    return {
+        "pool_size": settings.database_pool_size,
+        "max_overflow": settings.database_pool_max_overflow,
+        "pool_timeout": settings.database_pool_timeout_seconds,
+    }
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:

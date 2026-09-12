@@ -46,5 +46,8 @@
   "reset.requestNewLink": "Send me a new link",
   "reset.doneTitle": "Your password has been changed",
   "reset.doneBody": "You have been signed out everywhere else. Sign in again with your new password.",
-  "reset.signIn": "Sign in"
+  "reset.signIn": "Sign in",
+  "appError.title": "This page could not be loaded",
+  "appError.description": "The app may have been updated since you opened this tab. Reloading usually fixes it.",
+  "appError.reload": "Reload the page"
 }

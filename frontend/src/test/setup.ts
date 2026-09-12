@@ -30,6 +30,18 @@ Object.defineProperty(window, "matchMedia", {
     }) as MediaQueryList,
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+
+  // ⚠️ 光 `cleanup()` 不够：antd 的按钮 loading 走 `@rc-component/util` 的
+  // `useDelayState`，它排了一个 `setTimeout`，而**卸载并不会把它取消**。测试结束
+  // 得够快的话，那个回调会在 jsdom 已经拆掉之后才触发，抛
+  // `ReferenceError: window is not defined`。
+  //
+  // 症状极具迷惑性：**所有测试都显示通过**，只在末尾多出几个 "Uncaught Exception"，
+  // 而且它指的文件常常不是真正排下那个定时器的地方。更糟的是它**取决于时序** ——
+  // 本地连跑几次都不出现，在 CI 上偶发（T0.10 的 CI 上真的中了一次）。
+  //
+  // 这里 await 一个 0ms 定时器：先前排下的那些会在它之前烧掉，而此刻 jsdom 还活着。
+  await new Promise((resolve) => setTimeout(resolve, 0));
 });
