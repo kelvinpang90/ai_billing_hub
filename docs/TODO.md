@@ -620,6 +620,28 @@ sleep(delay).then(() => canContinue() ? undefined : pause())
 - 活下来那一个是**等价变异体**：`finishEnrolment` 里的 `setRecoveryCodes([])` 求的是内存卫生，不是界面效果 —— 换了 stage 之后那段本来就不渲染。已在代码注释里写明
 - 整栈实测（本地 compose + 真 MySQL）：新管理员注册 → 抄恢复码 → 重新登录 → 进后台；F5 保持登录；登出后再刷新页面**回不到后台**（会话确实在服务端被吊销）；`localStorage` / `sessionStorage` 均为空，刷新 cookie 对 JS 不可见
 
+**顺带修了一条会随机挡住合并的偶发红（测试基建，非产品代码）**
+
+本 PR 的 CI 在 `backend` 上连续两轮变红，两轮**失败在不同的用例上**、错误却一样：
+`TwoFactorNotEnrolled`。本 PR 后端一行没动，本地 209 条也从没红过。
+
+根因在 `tests/backend/test_auth_service.py` 的 `sign_in` 助手：它把每个用户的 TOTP
+密钥与恢复码缓存起来（注册那一刻之后库里只剩密文与哈希），键是 **`id(session_factory)`**。
+`id()` 是内存地址，**对象被回收后地址会被复用** —— `session_factory` 是函数级 fixture，
+上一个用例的工厂一释放，下一个用例的新工厂就可能落在同一地址上，于是助手认为「这个库
+已经注册过了」，跳过注册、直接拿**上一个库**的恢复码去登录，在自己那个没有
+`two_factor_settings` 行的库里炸掉。
+
+实测「建工厂 → 释放」40 次里有 17 次地址复用，所以它只是**碰巧**大多数时候不发作。
+
+改成 `WeakKeyDictionary`（按对象身份索引，条目随工厂一起消失）后 CI 转绿。新增用例
+`test_the_enrolment_cache_dies_with_its_session_factory` 直接断言那条让地址复用变得无害的
+性质 —— 不去赌地址复用本身（那不可控）。变异验证：把键改回 `id(...)`，该用例立刻变红。
+
+⚠️ **这是 T0.8b 的文件，严格说超出 T0.8c 的范围**，之所以在本 PR 修而不是另开一个：
+`main` 要求 `backend` 检查通过，这条偶发红**会随机挡住任何 PR 的合并**，包括本 PR 自己。
+只动了测试助手的索引方式，没有碰任何产品代码，也没有改任何用例的断言。
+
 **踩到的坑**
 
 - `tsc --noEmit -p tsconfig.app.json` **看不到测试文件**（那份 config 显式 `exclude` 了它们）。检查得用 `npm run typecheck`（`tsc --build`，覆盖三个 project），不然测试里的类型错要等 `npm run build` 才暴露
