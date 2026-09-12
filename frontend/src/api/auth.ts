@@ -62,3 +62,25 @@ export function confirmEnrolment(pendingToken: string, code: string): Promise<Re
 export function logout(): Promise<unknown> {
   return post<unknown>("/api/v1/auth/logout");
 }
+
+/**
+ * 申请一封重置邮件。
+ *
+ * ⚠️ **无论邮箱存不存在，后端都回同一个 200 空响应**（还刻意补齐了耗时），
+ * 这样这个不需要凭据的端点才不会变成用户枚举工具。调用方**不许**试图从结果
+ * 里区分两种情况 —— 没有可区分的东西，任何「看起来能区分」的写法都是错觉。
+ */
+export function requestPasswordReset(email: string): Promise<unknown> {
+  return post<unknown>("/api/v1/auth/password/forgot", { email });
+}
+
+/** 用邮件里那张令牌换一个新密码。这一个**会**明说令牌不对（见后端注释）。 */
+export function resetPassword(token: string, newPassword: string): Promise<unknown> {
+  return post<unknown>("/api/v1/auth/password/reset", {
+    token,
+    new_password: newPassword,
+  });
+}
+
+/** 后端 `InvalidResetToken` 的错误码（`app/services/password_reset.py`）。 */
+export const INVALID_RESET_TOKEN = "INVALID_RESET_TOKEN";
