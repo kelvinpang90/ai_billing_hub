@@ -16,7 +16,7 @@
 
 import type { AxiosInstance } from "axios";
 
-import { setAccessToken } from "./tokenStore";
+import { getAccessToken, setAccessTokenIfUnchanged, tokenGeneration } from "./tokenStore";
 
 /** 正在飞的那一次。null = 当前没有刷新在进行。 */
 let inFlight: Promise<string | null> | null = null;
@@ -42,6 +42,13 @@ export function refreshAccessToken(client: AxiosInstance): Promise<string | null
 }
 
 async function run(client: AxiosInstance): Promise<string | null> {
+  // ⚠️ 出发前记下代号，回来时只在「这期间没人写过令牌」的前提下才写。
+  //
+  // 页面加载时的静默刷新可能飞很久（超时 15 秒），而用户完全可以在它返回之前
+  // 就登录成功。那一次刷新的结果**已经过时**：无论它是失败（会把新会话清掉）
+  // 还是成功（会把新会话换成旧 cookie 那条），覆盖都是错的。
+  // 现象是「登录成功后立刻被踢回登录页」，只在慢网络下偶发，极难复现。
+  const startedAt = tokenGeneration();
   try {
     // ⚠️ `skipAuthRefresh` 有两个作用：请求拦截器据此**不加** Authorization
     // 头（刷新靠 httpOnly cookie 认人），响应拦截器据此**不对它做刷新重试**
@@ -50,13 +57,11 @@ async function run(client: AxiosInstance): Promise<string | null> {
       skipAuthRefresh: true,
     });
     const token = response.data?.data?.access_token ?? null;
-    setAccessToken(token);
-    return token;
+    return setAccessTokenIfUnchanged(token, startedAt) ? token : getAccessToken();
   } catch {
     // 刷新失败就是「这条会话结束了」—— 可能过期，也可能因为重放检测被整条吊销。
     // 两种情况下用户都得重新登录，所以这里不区分。
-    setAccessToken(null);
-    return null;
+    return setAccessTokenIfUnchanged(null, startedAt) ? null : getAccessToken();
   }
 }
 

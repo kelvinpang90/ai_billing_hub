@@ -13,7 +13,7 @@ import type { AxiosInstance } from "axios";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { refreshAccessToken, resetRefreshState } from "./refresh";
-import { getAccessToken, resetTokenStore } from "./tokenStore";
+import { getAccessToken, resetTokenStore, setAccessToken } from "./tokenStore";
 
 afterEach(() => {
   resetRefreshState();
@@ -97,6 +97,37 @@ describe("refreshAccessToken", () => {
     // 失败也必须解锁：否则一次网络抖动之后，这一整个标签页再也刷不了令牌。
     post.mockImplementation(() => Promise.resolve(envelope("token-late")));
     expect(await refreshAccessToken(client)).toBe("token-late");
+  });
+
+  it("does not wipe a session that was signed in while the refresh was in flight", async () => {
+    // ⚠️ 页面加载时的静默刷新是异步的，而用户可以在它返回之前就登录成功
+    // （密码管理器自动提交 + 慢网络时尤其容易）。那次刷新**迟到地失败**，
+    // 若无条件清令牌，就会把刚拿到的会话抹掉 —— 现象是「登录成功后立刻被踢
+    // 回登录页」，只在慢网络下偶发。
+    const gate = deferred<never>();
+    const post = vi.fn(() => gate.promise);
+    const pending = refreshAccessToken(clientWith(post));
+
+    // 刷新还在飞的时候，用户走完了登录。
+    setAccessToken("token-from-login");
+    gate.reject(new Error("401"));
+
+    expect(await pending).toBe("token-from-login");
+    expect(getAccessToken()).toBe("token-from-login");
+  });
+
+  it("does not replace a newer session with a late successful refresh", async () => {
+    // 成功那一支同样不能覆盖：迟到的刷新换回来的是**旧 cookie 那条会话**，
+    // 盖上去等于把用户悄悄换回上一个会话。
+    const gate = deferred<ReturnType<typeof envelope>>();
+    const post = vi.fn(() => gate.promise);
+    const pending = refreshAccessToken(clientWith(post));
+
+    setAccessToken("token-from-login");
+    gate.resolve(envelope("token-stale"));
+
+    expect(await pending).toBe("token-from-login");
+    expect(getAccessToken()).toBe("token-from-login");
   });
 
   it("treats a successful response without a token as a failed refresh", async () => {

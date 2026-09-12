@@ -14,6 +14,19 @@
 
 let accessToken: string | null = null;
 
+/**
+ * 每次写入都 +1。
+ *
+ * ⚠️ 存在的理由是一个具体的竞态：页面加载时的静默刷新是**异步**的，而用户可以
+ * 在它返回之前就把密码输完、登录成功（密码管理器自动提交 + 慢网络时尤其容易）。
+ * 那次刷新迟到地失败，若无条件 `setAccessToken(null)`，就会把刚拿到的会话抹掉 ——
+ * 现象是「登录成功后立刻被踢回登录页」，而且只在慢网络下偶发。
+ *
+ * 代号让「我出发之后有没有别人写过」成为一个可判断的事实，而不是靠比较令牌值
+ * 去猜（那分不清「没人写过」和「别人写了同一个值」）。
+ */
+let generation = 0;
+
 /** 令牌变化时通知订阅者（React 那边靠它重新渲染）。 */
 type Listener = (token: string | null) => void;
 const listeners = new Set<Listener>();
@@ -22,11 +35,30 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
+/** 当前代号。配合 `setAccessTokenIfUnchanged` 使用。 */
+export function tokenGeneration(): number {
+  return generation;
+}
+
 export function setAccessToken(token: string | null): void {
+  generation += 1;
   accessToken = token;
   for (const listener of listeners) {
     listener(token);
   }
+}
+
+/**
+ * 只有在 `since` 之后没有别人写过时才写入。
+ *
+ * 返回是否真的写了 —— 没写说明调用方手上的结果已经过期，该丢掉。
+ */
+export function setAccessTokenIfUnchanged(token: string | null, since: number): boolean {
+  if (generation !== since) {
+    return false;
+  }
+  setAccessToken(token);
+  return true;
 }
 
 export function subscribeToAccessToken(listener: Listener): () => void {
@@ -39,5 +71,6 @@ export function subscribeToAccessToken(listener: Listener): () => void {
 /** Only for tests. */
 export function resetTokenStore(): void {
   accessToken = null;
+  generation = 0;
   listeners.clear();
 }

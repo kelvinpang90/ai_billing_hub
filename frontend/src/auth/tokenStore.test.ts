@@ -12,7 +12,9 @@ import {
   getAccessToken,
   resetTokenStore,
   setAccessToken,
+  setAccessTokenIfUnchanged,
   subscribeToAccessToken,
+  tokenGeneration,
 } from "./tokenStore";
 
 afterEach(() => {
@@ -48,6 +50,29 @@ describe("tokenStore", () => {
     setAccessToken(null);
 
     expect(seen).toEqual(["token-1", "token-2", null]);
+  });
+
+  it("refuses a conditional write once somebody else has written", () => {
+    const since = tokenGeneration();
+    setAccessToken("token-from-login");
+
+    // 一次迟到的刷新拿着旧代号回来，必须被拒。
+    expect(setAccessTokenIfUnchanged(null, since)).toBe(false);
+    expect(getAccessToken()).toBe("token-from-login");
+
+    // 代号对得上就照写。
+    expect(setAccessTokenIfUnchanged("token-refreshed", tokenGeneration())).toBe(true);
+    expect(getAccessToken()).toBe("token-refreshed");
+  });
+
+  it("counts a write of the same value as a write", () => {
+    // ⚠️ 用代号而不是比较令牌值，正是为了分清「没人写过」与「别人写了同一个
+    // 值」——后者在登出再登录时会出现。
+    const since = tokenGeneration();
+    setAccessToken(null);
+
+    expect(setAccessTokenIfUnchanged("token-late", since)).toBe(false);
+    expect(getAccessToken()).toBeNull();
   });
 
   it("stops notifying after unsubscribe", () => {
