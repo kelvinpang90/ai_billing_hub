@@ -11,22 +11,46 @@
 # 用法见 README「本地起整套栈」。
 
 # 日志上限：没有它，json-file 驱动会一直写到磁盘满。
-# ⚠️ 生产侧的轮转 / 保留期 / 异地留存 / 磁盘告警是 §94 的要求，归 T0.9；
-# 这里只是先堵住「把开发机写满」这一种。
+#
+# ⚠️ **json-file 按大小轮转，不按时间。**所以「保留 30 天」这件事**在这里表达
+# 不了** —— 下面两个旋钮定的是「本地最多占多少磁盘」，而 T0.9 定的 30 天保留期
+# 是**离机那一侧**的属性，要由日志外送的目的地强制（那套设施还不存在）。
+# 把两者混为一谈的话，会得到一个「以为留了 30 天、实际按量早就滚掉了」的假象。
+#
+# 默认 3 × 10m = 每容器最多 30 MB，七个服务合计上限约 210 MB。
+# ⚠️ 生产 VPS 只剩 12 GB，而 binlog 也要占（见 docs/deployment.md §3.1）。
 x-logging: &logging
   driver: json-file
   options:
-    max-size: "10m"
-    max-file: "3"
+    max-size: "${BILLING_LOG_MAX_SIZE:-10m}"
+    max-file: "${BILLING_LOG_MAX_FILES:-3}"
 
 # api / celery-worker / celery-beat 跑同一份代码、同一个镜像，只有 command 不同。
 x-backend: &backend
   build:
     context: .
     dockerfile: Dockerfile
-  image: acuven-billing-hub:local
+  # ⚠️ 生产上由 CD 覆盖成 `ghcr.io/<owner>/<repo>:<commit sha>` —— spec §99 要求
+  # 「immutable image tags identify the exact commit」。不覆盖时就是本地构建的那个。
+  #
+  # ⚠️ **绝不能用 `:latest`**：那样「线上跑的是哪个 commit」就没有答案了，
+  # 回滚也无从谈起（回到哪个 latest？）。deploy/deploy.sh 会拒绝这种标签。
+  image: ${BILLING_IMAGE:-acuven-billing-hub:local}
   restart: unless-stopped
   logging: *logging
+  # ⚠️ 资源限额是 ADR-0002 的收口条件，不是洁癖：单 VPS 上一个失控的 celery
+  # worker 能把 MySQL 挤出内存，而表现出来的是「数据库莫名其妙重启」——
+  # 一条完全指不回原因的现象。
+  #
+  # ⚠️ 用 `mem_limit` / `cpus` 短式而不是 `deploy.resources.limits`。两种写法
+  # 在 compose v2 下**都真的生效**（实测 `docker inspect` 的 HostConfig.Memory
+  # 都被设上了），选短式只是为了不和本文件里 secrets 那条「swarm-only 选项会被
+  # 静默忽略」的教训混淆。
+  #
+  # 数值按生产 VPS 的实测余量定（1 核 / 可用 1.8 GB，见 docs/deployment.md §3.1）。
+  # ⚠️ api 留得比另外两个宽：Argon2 每次并发哈希要 64 MiB。
+  mem_limit: ${BILLING_BACKEND_MEM_LIMIT:-384m}
+  cpus: ${BILLING_BACKEND_CPUS:-0.5}
   environment:
     BILLING_ENVIRONMENT: local
     BILLING_DEBUG: "false"
@@ -92,6 +116,27 @@ services:
       # Asia/Kuala_Lumpur；默认的 SYSTEM 时区会让「换一台宿主机」变成一次
       # 静默的数据语义变更。
       - --default-time-zone=+00:00
+      # ⚠️ 必须和下面的 mem_limit 一起看。MySQL 默认的 buffer pool 是 128M，
+      # 但整个 mysqld 的常驻远不止这个数；不显式钉住的话，换一台内存更大的机器
+      # 时它会自己长大，然后在限额上被 OOM kill —— 而现象是「数据库随机重启」。
+      - --innodb-buffer-pool-size=128M
+      # --- binlog：RPO <= 5 分钟的前提（spec §98.1）------------------------
+      #
+      # MySQL 8.4 默认就开着 binlog、格式也已经是 ROW（实测确认），所以这里只调
+      # 两个和**磁盘**有关的值 —— 生产 VPS 只剩 12 GB 可用，而升配内存并没有加磁盘。
+      #
+      # ⚠️ 默认保留 **30 天**、单文件上限 **1 GB**。按默认值走，binlog 迟早把磁盘
+      # 吃光，而磁盘写满时 **MySQL 直接停止写入** —— 那是比丢备份严重得多的故障。
+      #
+      # 本地只需要留到「够从最近一次全量做一次 PITR」：全量每天一次，留 3 天有
+      # 两天余量。**长期保留是 R2 那一侧的事**，不是这台机器的事。
+      - --binlog-expire-logs-seconds=${BILLING_BINLOG_EXPIRE_SECONDS:-259200}
+      # 单文件调小：备份脚本每 5 分钟 FLUSH 一次再推走**已关闭**的文件，
+      # 文件小一点，单次上传的粒度就细一点，中断重传的代价也小。
+      - --max-binlog-size=${BILLING_MAX_BINLOG_SIZE:-134217728}
+    # 生产 VPS 只有 1 核，MySQL 是最该留出余量的那个。
+    mem_limit: ${BILLING_MYSQL_MEM_LIMIT:-512m}
+    cpus: ${BILLING_MYSQL_CPUS:-0.6}
     environment:
       MYSQL_ROOT_PASSWORD: ${BILLING_MYSQL_ROOT_PASSWORD:?set BILLING_MYSQL_ROOT_PASSWORD in .env (copy .env.example)}
       MYSQL_DATABASE: ${BILLING_MYSQL_DATABASE:-billing}
@@ -113,6 +158,21 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     logging: *logging
+    # ⚠️ **两个上限都要设。**只设容器 mem_limit 的话，Redis 自己不知道天花板在
+    # 哪，会一直收数据直到被 OOM kill —— 而 Redis 被杀掉的表现是「投递触发丢了」
+    # （INV-14 说过那不致命，周期恢复会补，但每次都要等最多一分钟）。
+    # 设了 maxmemory，它会在自己那一侧按策略淘汰，而不是整个进程消失。
+    #
+    # `allkeys-lru`：Redis 在本平台只承载**投递触发与限流兜底**，两者都是
+    # 可重建的瞬时数据（spec §74.6、§98.1）。没有任何不可重建的东西在这里。
+    command:
+      - redis-server
+      - --maxmemory
+      - ${BILLING_REDIS_MAXMEMORY:-64mb}
+      - --maxmemory-policy
+      - allkeys-lru
+    mem_limit: ${BILLING_REDIS_MEM_LIMIT:-96m}
+    cpus: ${BILLING_REDIS_CPUS:-0.2}
     volumes:
       - redis-data:/data
     healthcheck:
@@ -145,8 +205,41 @@ services:
       - app.worker
       - worker
       - --loglevel=${BILLING_LOG_LEVEL:-INFO}
+      # ⚠️ **必须显式钉住，不能用默认值。**celery 的默认并发 = 宿主机 CPU 核数，
+      # 而每个 prefork 子进程都会把整个应用 import 一遍。于是内存占用跟着**跑在
+      # 哪台机器**变 —— 配合上面的 mem_limit，换一台核多的机器就会撞限额。
+      #
+      # 这不是推演：本地（20 核）第一次加上限额起栈，worker 就起了 20 个子进程、
+      # 崩溃重启了 4 次，而 `docker inspect` 的 OOMKilled 还是 false
+      # （被杀的是子进程，主进程自己退了 0）—— 一条完全指不回原因的现象。
+      #
+      # 生产 VPS 只有 1 核，2 个足够：任务都是 IO 密集（发信、写库），不是 CPU 密集。
+      - --concurrency=${BILLING_CELERY_CONCURRENCY:-2}
+    # worker 的存活探针可以直接问它自己 —— 这是 beat 没有的待遇（见下）。
+    # ⚠️ `inspect ping` 走 broker 往返，所以 Redis 挂了它也会红。那是**对的**：
+    # 拿不到任务的 worker 确实不能算健康。但排障时要记得先看 redis 那一格，
+    # 别把「broker 挂了」误判成「worker 挂了」。
+    healthcheck:
+      # ⚠️ `$$HOSTNAME` 的两个 `$` 都是必需的：单个 `$` 会被 **compose 在宿主机上**
+      # 插值成空串（实测 compose 会警告 "variable is not set"），而 exec 形式的
+      # `CMD` 没有 shell、容器里也不会展开。所以这里必须是 CMD-SHELL + `$$`。
+      #
+      # 指名问自己（`-d celery@<主机名>`）而不是广播：将来跑多个 worker 时，
+      # 广播式的 ping 只要**有人**回应就算通过，一个死掉的 worker 会被它的同伴掩护。
+      test:
+        - CMD-SHELL
+        - celery -A app.worker inspect ping -d "celery@$$HOSTNAME"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   celery-beat:
+    # ⚠️ 覆盖 `x-backend` 锚点里那个 384m。beat 只做一件事：按时把任务名丢进
+    # 队列，不执行任务本身。给它和 api 一样的额度纯属浪费 —— 而在一台
+    # 只有 1.8 GB 可用的机器上，浪费的那部分是别人要用的。
+    mem_limit: ${BILLING_BEAT_MEM_LIMIT:-128m}
+    cpus: ${BILLING_BEAT_CPUS:-0.2}
     <<: *backend
     command:
       - celery
@@ -159,12 +252,36 @@ services:
       - --schedule=/var/lib/celery/beat-schedule
     volumes:
       - celery-beat-state:/var/lib/celery
+    # ⚠️ **beat 的存活探针只能这么做。**`celery inspect ping` 问的是 worker，
+    # 够不着 beat；而 beat 崩掉是**静默故障** —— 周期任务全停（outbox 不再补投）、
+    # API 一切正常、没有任何报错，只有等到有人发现「信都没发出去」才暴露。
+    #
+    # 判据是 beat 自己的调度状态文件有多久没动：它现在每派发一次就落盘
+    # （`beat_sync_every=1`，见 app/core/celery_app.py 那段注释）。
+    #
+    # 阈值取周期的三倍多一点（60s → 200s）：容得下一次错过，又不至于让故障
+    # 拖太久才暴露。⚠️ 改 OUTBOX_RECOVERY_SECONDS 时要一起改这里。
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test $(( $(date +%s) - $(stat -c %Y /var/lib/celery/beat-schedule) ))
+          -lt ${BILLING_BEAT_STALE_SECONDS:-200}
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # ⚠️ 起步宽限必须大于一个调度周期：beat 刚起来时还没派发过任何任务，
+      # 文件是空的 / 时间戳是启动时刻。没有这段宽限，它会在第一个周期内被判不健康。
+      start_period: 90s
 
   frontend:
+    # 静态文件而已，给得很紧。
+    mem_limit: ${BILLING_FRONTEND_MEM_LIMIT:-64m}
+    cpus: ${BILLING_FRONTEND_CPUS:-0.2}
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: acuven-billing-hub-frontend:local
+    image: ${BILLING_FRONTEND_IMAGE:-acuven-billing-hub-frontend:local}
     restart: unless-stopped
     logging: *logging
     # ⚠️ 不发布端口：它只经边缘 nginx 对外。产物是静态文件，没有任何依赖 ——
@@ -177,6 +294,10 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
+    # ⚠️ 刻意**没有**换成非 root 镜像（T0.9 决策 ④）：生产上本层只收
+    # infra_nginx 转进来的内网流量，风险面小。这是一次有意识的选择，不是遗漏。
+    mem_limit: ${BILLING_NGINX_MEM_LIMIT:-64m}
+    cpus: ${BILLING_NGINX_CPUS:-0.3}
     restart: unless-stopped
     logging: *logging
     ports:
