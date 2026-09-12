@@ -130,3 +130,59 @@ def test_deploying_is_a_deliberate_act_not_a_side_effect_of_merging() -> None:
     workflow = uncommented(WORKFLOW)
     assert "workflow_dispatch" in workflow
     assert "branches: [main]" not in workflow
+
+
+BACKUP = REPO_ROOT / "deploy" / "backup.sh"
+
+
+def test_backups_are_never_committed() -> None:
+    """⚠️ 仓库是公开的，而 `backups/` 里是**整个计费库**。
+
+    它是加密的，但「加密了所以可以提交」是错的推理：口令一旦泄漏，历史里那份
+    密文永远拿不回来 —— git 删不掉已经推出去的东西。
+
+    这条是真发生过的：备份脚本第一次跑完，`git status` 里就躺着一个未被忽略的
+    `backups/`。
+    """
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "/backups/" in ignored
+
+
+def test_the_backup_is_verified_before_it_is_uploaded() -> None:
+    """⚠️ 「备份在跑」和「备份能恢复」是两件事，只有第二件算数。
+
+    一个口令配错、或者写盘出错的备份，看起来和好的一模一样：都是一个大小合理的
+    文件静静躺在桶里，直到真出事那天才发现打不开。所以解密验证必须在上传**之前**。
+    """
+    script = uncommented(BACKUP)
+    verifies = script.index("cannot be decrypted")
+    uploads = script.index("aws s3 cp")
+    assert verifies < uploads
+
+
+def test_the_backup_rejects_a_truncated_dump() -> None:
+    """⚠️ 往返比对抓不到这一种。
+
+    截断发生在加密**之前**，所以明文和解回来的密文一致、`cmp` 照样通过 ——
+    变异测试确认了这一点：把这条检查换掉之后，一份被截断的 dump 一路畅通。
+    所以它不是冗余的，是唯一的防线。
+    """
+    assert "Dump completed" in uncommented(BACKUP)
+
+
+def test_the_backup_records_the_binlog_position() -> None:
+    """⚠️ 没有它，PITR 无从下手。
+
+    你有一份全量和一堆 binlog，却不知道该从哪一条开始重放 —— 少放会丢数据，
+    多放会重复。`--source-data=2` 把导出那一刻的位置写进 dump 的注释里。
+    """
+    assert "--source-data=2" in uncommented(BACKUP)
+
+
+def test_a_local_only_backup_is_an_explicit_failure() -> None:
+    """⚠️ 没配 R2 **不能**静默跳过上传。
+
+    只在本地留备份的系统满足不了 §98.1 的 off-VPS 要求，而它看起来一切正常 ——
+    那正是最危险的形态：每天都「成功」，直到机器整个没了。
+    """
+    assert "does NOT satisfy spec" in uncommented(BACKUP)

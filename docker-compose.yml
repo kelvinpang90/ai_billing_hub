@@ -120,6 +120,20 @@ services:
       # 但整个 mysqld 的常驻远不止这个数；不显式钉住的话，换一台内存更大的机器
       # 时它会自己长大，然后在限额上被 OOM kill —— 而现象是「数据库随机重启」。
       - --innodb-buffer-pool-size=128M
+      # --- binlog：RPO <= 5 分钟的前提（spec §98.1）------------------------
+      #
+      # MySQL 8.4 默认就开着 binlog、格式也已经是 ROW（实测确认），所以这里只调
+      # 两个和**磁盘**有关的值 —— 生产 VPS 只剩 12 GB 可用，而升配内存并没有加磁盘。
+      #
+      # ⚠️ 默认保留 **30 天**、单文件上限 **1 GB**。按默认值走，binlog 迟早把磁盘
+      # 吃光，而磁盘写满时 **MySQL 直接停止写入** —— 那是比丢备份严重得多的故障。
+      #
+      # 本地只需要留到「够从最近一次全量做一次 PITR」：全量每天一次，留 3 天有
+      # 两天余量。**长期保留是 R2 那一侧的事**，不是这台机器的事。
+      - --binlog-expire-logs-seconds=${BILLING_BINLOG_EXPIRE_SECONDS:-259200}
+      # 单文件调小：备份脚本每 5 分钟 FLUSH 一次再推走**已关闭**的文件，
+      # 文件小一点，单次上传的粒度就细一点，中断重传的代价也小。
+      - --max-binlog-size=${BILLING_MAX_BINLOG_SIZE:-134217728}
     # 生产 VPS 只有 1 核，MySQL 是最该留出余量的那个。
     mem_limit: ${BILLING_MYSQL_MEM_LIMIT:-512m}
     cpus: ${BILLING_MYSQL_CPUS:-0.6}
