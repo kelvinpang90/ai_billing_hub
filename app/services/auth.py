@@ -16,6 +16,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import NoReturn
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -313,25 +314,9 @@ def refresh_session(
             raise TokenReused
 
         if row.used_at is not None or row.revoked_at is not None:
-            _revoke_family(session, user_id=row.user_id, family_id=row.family_id, now=moment)
-            user = session.get(User, row.user_id)
-            record_audit(
-                session,
-                action=AuditAction.TOKEN_REUSED,
-                context=context,
-                now=moment,
-                actor=user,
-                entity_type="refresh_tokens",
-                entity_id=row.family_id,
-                reason="REPLAY_DETECTED",
+            _treat_as_replay(
+                session, row=row, context=context, now=moment, reason="REPLAY_DETECTED"
             )
-            session.commit()
-            # ⚠️ 稳定的告警契约：这是令牌被盗的信号，T0.9 要挂告警。
-            logger.warning(
-                "Refresh token reuse detected",
-                extra={"component": "auth", "family_id": row.family_id, "user_id": row.user_id},
-            )
-            raise TokenReused
 
         idle_deadline = row.issued_at + dt.timedelta(seconds=settings.refresh_token_idle_seconds)
         if row.expires_at <= moment or idle_deadline <= moment:
@@ -349,8 +334,15 @@ def refresh_session(
             .values(used_at=moment)
         )
         if marked.rowcount != 1:
-            session.rollback()
-            raise TokenReused
+            # ⚠️ **竞争失败就是重放**，和上面那条早期检测走完全同一条处置。
+            #
+            # 第一版这里只 rollback 后抛错、不吊销家族（实现闸门判为阻断项，
+            # 判得对）。后果很具体：攻击者与真用户并发提交同一个令牌，**赢的
+            # 那一方拿到有效的新令牌，而家族没有被吊销** —— 会话继续可用，
+            # 失败的一方只是被拒，整个重放检测等于没生效。
+            #
+            # 两条路径共用一个函数，是为了让它们不可能再分叉。
+            _treat_as_replay(session, row=row, context=context, now=moment, reason="RACE_LOST")
 
         user = session.get(User, row.user_id)
         if user is None or user.status is UserStatus.DISABLED:
@@ -362,6 +354,45 @@ def refresh_session(
         )
         session.commit()
         return issued
+
+
+def _treat_as_replay(
+    session: Session,
+    *,
+    row: RefreshToken,
+    context: RequestContext,
+    now: dt.datetime,
+    reason: str,
+) -> NoReturn:
+    """Revoke the whole family, audit, alert, and refuse.
+
+    ⚠️ **只此一处。**重放有两条发现途径（进来就看到 `used_at` 非空、以及条件
+    更新竞争失败），两条的处置必须完全一样。分成两段写过一次，结果其中一段漏了
+    吊销家族 —— 而漏掉的那段恰好是攻击者与真用户同时提交时走的那条。
+    """
+    _revoke_family(session, user_id=row.user_id, family_id=row.family_id, now=now)
+    record_audit(
+        session,
+        action=AuditAction.TOKEN_REUSED,
+        context=context,
+        now=now,
+        actor=session.get(User, row.user_id),
+        entity_type="refresh_tokens",
+        entity_id=row.family_id,
+        reason=reason,
+    )
+    session.commit()
+    # ⚠️ 稳定的告警契约：这是令牌被盗的信号，T0.9 要挂告警。
+    logger.warning(
+        "Refresh token reuse detected",
+        extra={
+            "component": "auth",
+            "family_id": row.family_id,
+            "user_id": row.user_id,
+            "reason": reason,
+        },
+    )
+    raise TokenReused
 
 
 def _revoke_family(session: Session, *, user_id: int, family_id: str, now: dt.datetime) -> int:

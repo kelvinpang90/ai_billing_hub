@@ -394,6 +394,20 @@ def test_concurrent_refresh_lets_exactly_one_through(tmp_path) -> None:
 
     assert outcomes.count("ok") == 1, f"exactly one rotation may win, got {outcomes}"
 
+    # ⚠️ 「恰好一个成功」**不够**。实现闸门指出的正是这一点：第一版竞争失败那支
+    # 只 rollback 抛错、不吊销家族，于是赢的那一方（可能是攻击者）拿到有效的新
+    # 令牌而会话继续可用 —— 而上面那条断言照样绿。
+    #
+    # 竞争失败就是重放，整个家族必须已被吊销。
+    with factory() as session:
+        rows = list(session.execute(select(RefreshToken)).scalars())
+        assert rows
+        assert all(row.revoked_at is not None for row in rows), (
+            "losing the race is a replay: the whole family must be revoked"
+        )
+        actions = list(session.execute(select(AuditLog.action)).scalars())
+        assert AuditAction.TOKEN_REUSED in actions
+
     # 不给后面的迁移用例留下表。
     Base.metadata.drop_all(engine)
 
