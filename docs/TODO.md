@@ -71,24 +71,24 @@
 - [x] **T0.5 — Redis + Celery 接通**：Celery app、worker 与 beat 配置、一个可验证的探活任务
 - [x] **T0.6 — Docker Compose**：nginx · frontend · api · celery-worker · celery-beat · redis · mysql；含 API / Celery 容器的运行 UID 决定，宿主机主密钥文件**属主设为该 UID**、权限 `0400`（Compose 的 `file:` secret 走 bind mount，`uid`/`gid`/`mode` 只在 swarm 生效；**不得为读密钥把容器改回 root**）
 - [x] **T0.7 — React 骨架**：Vite + TS + React Router + TanStack Query + Axios + Ant Design + i18n 骨架（V1 只出英文，文案不许硬编码在组件里）。**另含 T0.6 欠下的第七个服务**：compose 加 `frontend`、把 `deploy/nginx/billing.conf` 的 `location /` 从 503 占位改成指向它、同步 `tests/backend/test_compose.py` 的 `EXPECTED_SERVICES`（三处漏一处测试就红）
-- [ ] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA。**设计闸门 [#32](https://github.com/kelvinpang90/ai_billing_hub/issues/32) 已批准 `design v5`**，按下面四个 PR 落地
+- [x] **T0.8 — 认证基座**：管理员登录、密码哈希、会话 / 令牌、2FA。**设计闸门 [#32](https://github.com/kelvinpang90/ai_billing_hub/issues/32) 已批准 `design v5`**，按下面四个 PR 落地
   - [x] **T0.8a** — `users` / `refresh_tokens` / `audit_logs` 三张表、Argon2id 密码哈希与强度、登录、JWT + 刷新轮换与重放检测、登出与吊销、失败锁定、按来源限流、bootstrap CLI
   - [x] **T0.8b** — 信封加密模块（[ADR-0004](adr/ADR-0004-credential-encryption.md)）、`two_factor_settings` / `recovery_codes`、TOTP 注册 / 确认 / 校验、恢复码、**ADMIN 强制 2FA**
   - [x] **T0.8c** — 前端登录页、路由守卫、令牌持有与刷新
   - [x] **T0.8d** — `password_reset_tokens` + `domain_outbox`、忘记密码 / 重置密码、[ADR-0009](adr/ADR-0009-notification-channels.md) 的 Email 传输与投递任务（补齐 §53 的最后两项）
-  - [ ] **T0.8f** — 前端「忘记密码 / 重置密码」两个页面（T0.8d 派生）。后端两个端点已就绪，但邮件里的链接指向 `/reset-password?token=...`，前端**还没有这条路由**，点进去是 404 —— **在它落地之前，自助密码重置从用户视角看仍然不通**，T0.9 的那条上线前置也就没有真正关闭
+  - [x] **T0.8f** — 前端「忘记密码 / 重置密码」两个页面（T0.8d 派生）。落地前那条链接会落到守卫的 `*` 兜底上、被当成未登录重定向去登录页 —— 用户点开重置链接看到的是登录表单，而他来这儿正是因为登不进去。另加一条跨端守卫，机械比对「后端拼出来的链接」与「前端登记的路由」
   - [x] **T0.8e** — 注册路径的 pending 2FA 令牌 TTL 改为 600 秒（T0.8c 整栈实测发现 120 秒走不完首次注册；设计闸门 [#37](https://github.com/kelvinpang90/ai_billing_hub/issues/37) `APPROVED: design v2`）
 - [ ] **T0.9 — 生产拓扑与恢复方案**：专用生产 MySQL/Redis 拓扑（依赖 D3 / [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)）、备份与恢复、加密密钥方案（依赖 D4 / [ADR-0004](adr/ADR-0004-credential-encryption.md)）、RPO/RTO 设计待批准；**另含 §94 的生产日志要求**（轮转、保留期、磁盘上限、安全删除、异地留存，以及「日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警」）—— T0.3 只做了应用侧的日志**内容与格式**，这些是部署侧的事
 - [ ] **T0.10 — 初始性能 / SLO 基线**
 
 > ⚠️ **T0.9 必须处理的三件边缘代理遗留**（T0.6 派生）：① `deploy/nginx/billing.conf` 对 `/readyz` 的网段限制比的是 `$remote_addr`，生产上若在 nginx 前面再放一层代理，这条限制**形同虚设**，届时要改用 `real_ip_header` + `set_real_ip_from` 或在前一层拦掉；② nginx 仍以官方镜像默认方式运行（master 是 root）；③ TLS / 证书 / 真实域名尚未配置，栈现在只监听 80。
-> ⚠️ **T0.9 的上线前置**（设计闸门 #32 定的）：~~**T0.8d 合并前没有任何自助密码重置**~~ —— **后端已由 T0.8d 关闭**（`/api/v1/auth/password/{forgot,reset}`）。⚠️ **但前端页面还没有**：邮件里的链接指向 `{BILLING_FRONTEND_BASE_URL}/reset-password?token=...`，而那条路由目前是 404，所以**从用户视角看这条路仍然不通**（见下面 T0.8f）。另外**上线前必须配 SMTP**，否则信发不出去（outbox 会重试到死信）。（「管理员登录是单因素」那一条已由 T0.8b 关闭。）
+> ⚠️ **T0.9 的上线前置**（设计闸门 #32 定的）：~~**T0.8d 合并前没有任何自助密码重置**~~ —— **后端已由 T0.8d 关闭**（`/api/v1/auth/password/{forgot,reset}`）。~~⚠️ 但前端页面还没有~~ —— **前端已由 T0.8f 关闭**（`/forgot-password`、`/reset-password` 两页已登记在守卫外面，整栈实测走通了「点邮件链接 → 改密码 → 用新密码登录」）。⚠️ **仍然剩一条：上线前必须配 SMTP**，否则信发不出去（outbox 会重试到死信）。（「管理员登录是单因素」那一条已由 T0.8b 关闭。）
 > ⚠️ **主密钥的宿主机那一半仍归 T0.9**（ADR-0004）：宿主机主密钥文件要 `chown 10001:10001` + `chmod 0400`。应用侧的加解密与文件读取 T0.8b 已实现，**但在宿主机那一半落地前不能部署到生产**。
 > ⚠️ **主密钥没有重包裹任务**（T0.8b 派生）：`app/core/crypto.py` 已经支持多版本钥匙串（轮换时老行仍能解开），但把老行重新用新密钥包裹的后台任务还没有。没有它，轮换之后老密钥必须**永久保留**，否则历史 TOTP 注册全部作废。
 > ⚠️ **边缘 nginx 自己的 `$binary_remote_addr` 仍是直连对端**（T0.8a 派生）：应用侧已经会解析 `X-Forwarded-For`（`app/core/clientip.py`，只在可信代理后面采信），但**边缘那层 `limit_req` 与 `/readyz` 的网段限制还没有**。生产上若在 nginx 前面再放一层代理，这两处都会把所有客户端看成同一个来源。T0.9 要配 `real_ip_header` + `set_real_ip_from`，三处一并收口。
 > ⚠️ **边缘 nginx 的上游超时没有收紧**（T0.7 实测发现）：api 容器停掉时，边缘 nginx 要 **约 4 秒**才返回 502（DNS 解析不到上游的等待），`proxy_connect_timeout` 更是还挂着 60 秒的默认值。后果是**一次停机在用户侧表现成卡住而不是报错**，而且每个挂起的请求都占着 nginx 的连接。T0.9 要把 `resolver_timeout` 与 `proxy_connect_timeout` 收到秒级。实测数据：`curl` 到 `/healthz` 在 api 停机时耗时 3.96s。
 > ⚠️ ~~**pending 2FA 令牌的 120 秒 TTL 对注册路径不够用**~~ —— **已由 T0.8e 收口**（Kelvin 2026-09-12 拍板取「给注册路径单独的 TTL」那条；现在注册路径 600 秒、日常登录仍 120 秒）。原文留档：`issue_pending_2fa_token` 的 `ttl_seconds=120` 对正常的第二因子路径（掏手机输 6 位）合适，但 ADMIN 首次登录要扫码 + 抄下 10 个恢复码 —— 实测 `/2fa/confirm` 卡在 t+113 秒，紧贴上限，慢一点就得从头再来一轮。T0.8c 已在前端把「令牌失效」收敛成退回第一步（不再让用户对着一张永远提交不成的表单重输），但**这一段仍必须在 120 秒内走完**。彻底的修法在后端：给注册路径单独的 TTL，或让 `/2fa/confirm` 返回一张新的 pending 令牌。那是 T0.8a/b 定的安全参数、过过设计闸门 #32，不在前端任务的范围里，故升级给 Kelvin。→ **已落地**：设计闸门 [#37](https://github.com/kelvinpang90/ai_billing_hub/issues/37) `APPROVED: design v2`，实现见 T0.8e 的任务记录。
-> ⚠️ **前端产物是单个 877 kB 的 chunk**（gzip 283 kB，主要是 antd）。只有一个路由时拆包没有意义，**加到第三、四个路由时必须做路由级懒加载**，否则首屏会越拖越久。归 T0.10（性能 / SLO 基线）一并量。
+> ⚠️ **前端产物是单个 974 kB 的 chunk**（gzip 317 kB，主要是 antd；T0.8f 之后实测，此前是 877 / 283）。**「加到第三、四个路由时必须做路由级懒加载」这条门槛已经过了** —— 现在是 5 条路由。仍归 T0.10（性能 / SLO 基线）一并量，但不再是「以后再说」。
 > ⚠️ **celery-beat 没有存活探针**（T0.6 派生）：`celery inspect ping` 问的是 worker，够不着 beat。现在 beat 的 schedule 是空的，崩了也没有后果；**第一条周期任务落地时这就变成静默故障** —— beat 挂掉 = 对账扫描、状态轮询全部不执行，而 API 一切正常、没有任何报错。加第一条周期任务的那个任务必须同时给出探测手段（例如让 beat 自己周期性打一条心跳日志并挂告警）。
 > ⚠️ **T0.9 必须包含的一条具体告警**（T0.5 派生，PR #28 审查指出）：`/readyz` 在 Redis 不可用时**刻意返回 200**，所以负载均衡不会发现这个故障，**它只能靠日志告警发现**。告警名 `billing_readiness_degraded_redis`，条件、分级与升级路径写在 [runbook](runbook.md)。告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
 - [x] FX 供应商评估（D1 已定：BNM openAPI，见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)）
@@ -771,6 +771,95 @@ ADR 借那五条实质（不绑供应商、465/587 TLS 分支、空 host = 未�
 ③ **退避退化成固定间隔**时用例照样通过——原来的断言只要求「第二次比第一次大」，
 **而毫秒级的执行抖动就能满足它**。一条看起来在测退避的用例，实际上什么也没钉住。
 改成直接钉纯函数 `_backoff_seconds` 的值。
+
+
+### T0.8f 任务记录（2026-09-12）
+
+**做了什么**
+
+- `src/features/auth/ForgotPasswordPage.tsx` / `ResetPasswordPage.tsx`：两个页面
+- `src/routes/paths.ts`：`forgotPassword` / `resetPassword` 两条路由 + `RESET_TOKEN_PARAM`
+- `src/routes/index.tsx`：两条路由登记在 `RequireAuth` **外面**
+- `src/api/auth.ts`：`requestPasswordReset` / `resetPassword` 两个调用
+- `src/features/auth/ErrorAlert.tsx`：从 `LoginPage` 抽出来的错误展示（三个认证页面共用）
+- 登录页加「Forgot your password?」入口（只在密码那一步）
+- `tests/backend/test_password_reset_link.py`：**跨端守卫**，见下
+
+前端任务**不走设计闸门**（[CLAUDE.md](../CLAUDE.md)：前端 / 文档 / CI / 脚本不走）。
+
+**为什么这个任务存在**
+
+T0.8d 把后端两个端点做通了，但邮件里的链接指向 `{BILLING_FRONTEND_BASE_URL}/reset-password?token=...`，
+而前端没有这条路由。**失败方式还不是 404**：那条路径会落到守卫里的 `*` 兜底上，被当成未登录
+重定向去登录页 —— 用户点开重置链接看到的是一张登录表单，而他来这儿正是因为登不进去。
+
+**几个不是随手选的决定**
+
+- **忘记密码页对任何邮箱说同一句条件句。**后端为了不让这个免鉴权端点变成用户枚举工具，
+  抹平了响应体、状态码**与耗时**（T0.8d 为此返工了三轮）。界面上一句「该邮箱未注册」，
+  或者只是一句体贴的「信已发往 x@y.com」，就能让那一整套白费。两条用例专门盯着这件事：
+  一条钉「不回显地址」，一条钉「不存在的邮箱看到的东西逐字相同」
+- **「令牌不对」与「密码不合格」必须分开处理。**前者把表单直接收走（那张表单已经**再也
+  不可能提交成功**，留着只会让用户反复改密码、反复拿到同一句错误 —— 现象指向密码，原因
+  却在链接），后者留在原地可以重试。这是 T0.8c 在 pending 令牌上踩过的同一个坑
+- **重置页不复述强度规则的具体数字。**最短长度只有后端 `validate_password_strength` 一处
+  说得算（`ResetPasswordRequest` 的注释也是这么写的：分两处写早晚会对不上）。前端再写一遍
+  「至少 12 位」，后端一改这里就变成一句**安静地说错**的提示。密码不合格时后端返回的文案
+  本身就是精确的（实测显示的正是 `Password must be at least 12 characters long.`），直接显示
+  那一句。代价是用户要多来回一次才知道规则 —— 换来的是不会有一句骗人的提示。**有一条用例
+  钉住「页面上不许出现『N characters』」**
+- **令牌留在地址栏里，不做 `replaceState` 抹除。**想过抹掉（它会进浏览器历史），但抹掉之后
+  用户按一次 F5 就会看到「链接已失效」，而他的链接其实好好的 —— 一个**假的**失效提示。
+  令牌本来就一次性、30 分钟过期，且同一张令牌在邮箱里躺着的时间更长。这个交换不划算
+
+**跨端守卫（`tests/backend/test_password_reset_link.py`，7 条）**
+
+这条链接的两半住在两个技术栈里，**两边各自的测试都证明不了它们对得上**：后端测「拼出来的
+字符串长这样」，前端测「这条路由渲染了这个页面」，两边同时全绿而链接是死的，完全可能。
+所以这个文件拿**后端真的拼出来的链接**去比对**前端真的登记的那条路由**：
+
+- 路径一致（后端 `_render_password_reset` 的产物 vs `ROUTES.resetPassword`）
+- 查询参数名一致，且**比的是解码后的值** —— 后端对令牌做了 percent-encoding
+- 那条路由真的被挂进了 `routes/index.tsx`（在 `paths.ts` 里加常量是免费的，忘了用它一样免费）
+- 两页都在 `RequireAuth` **之前**登记
+- 前端 `post()` 的地址在 FastAPI 的 OpenAPI 路径表里（**走 OpenAPI 不走 `app.routes`**：
+  子路由是延迟挂载的，`app.routes` 里只有几个 `_IncludedRouter` 壳子，拿它比对永远比不上）
+- 请求体字段名与 Pydantic 模型 `model_fields` 逐字相同
+
+**顺带堵上的一个测试盲区**：页面用例把整个 `api/auth` 模块 mock 掉了（它们测状态机，不测
+网络），所以**端点路径与字段名写错时前端一条用例都不会红** —— `new_password` 打成
+`newPassword` 在浏览器里是一句 422，在测试里什么也不会发生。补了 `src/api/auth.test.ts`
+钉住线上形状，跨端那条再从后端一侧比对一次。
+
+**测试**：新增 20 条前端用例（59 passed，原 39）+ 7 条后端用例（300 passed / 12 skipped，原 293）。
+**变异测试 14/14 全部抓到**，包括「令牌不对时不收走表单」「任何错误都收走表单」「忽略缺失的
+令牌」「去掉两次确认」「回显邮箱地址」「前端复述长度规则」「路径 / 参数名 / 字段名各自改错」
+「路由挪进守卫里面」。
+
+**整栈实测（七服务栈 + 真 MySQL + 真 nginx，Chrome 手动走）**
+
+这一轮**没有抓到缺陷** —— 值得写下来，因为前几个任务每次都抓到了。走完的路径：
+
+1. `/forgot-password` 提交 → `Check your inbox`（条件句，未回显地址）
+2. 库里 `domain_outbox` 出现真实行，用**后端渲染函数本身**生成那封信，得到可点链接
+3. 点链接 → 重置表单（T0.8f 要关掉的那个「点进去回登录页」没有了）
+4. 短密码 → 表单留在原地 + 后端原话 + request_id
+5. 两次不一致 → 前端拦住，**不发请求**
+6. 合格密码 → `Your password has been changed`；库里 `used_at` 落定、审计链 `USER_CREATED`
+   → `PASSWORD_RESET_REQUESTED` → `PASSWORD_RESET` 完整
+7. **同一条链接再点一次** → 表单被收走 + 「链接已失效」+ 新链接入口
+8. 用新密码登录 → 通过（进入 2FA 注册步骤）
+9. 不存在的邮箱再走一遍 → 界面逐字相同，且库里**零新增行**（outbox / token / audit 都没动）
+10. `/reset-password` 不带令牌（链接被邮件客户端截断的情形）→ 直接给失效提示
+
+**记进 backlog 的事**
+
+- ⚠️ **前端产物涨到 974 kB**（gzip 317 kB，原 877 / 283）。TODO 里「加到第三、四个路由时
+  必须做路由级懒加载」那条**门槛已经过了** —— 现在是 5 条路由。仍归 T0.10（那条本来就写在
+  T0.10 名下），但不再是「以后再说」
+- 重置成功后**不主动登出本地会话**。后端吊销了全部刷新令牌，但访问令牌是自包含的，最多还
+  能用 600 秒（`access_token_ttl_seconds`）。前端登出自己并不能杀掉攻击者那一边，这是后端
+  「访问令牌无法吊销」的性质，不是前端能修的 —— 记在这里是为了下次有人问起时不用重新推一遍
 
 
 ## Phase 1 — Tenant, Project & Wallet Core（§124）

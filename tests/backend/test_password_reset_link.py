@@ -20,9 +20,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app.core.config import Settings
+from app.main import create_app
+from app.schemas.auth import ForgotPasswordRequest, ResetPasswordRequest
 from app.tasks.outbox import _render_password_reset
 
-PATHS_TS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "routes" / "paths.ts"
+FRONTEND_SRC = Path(__file__).resolve().parents[2] / "frontend" / "src"
+PATHS_TS = FRONTEND_SRC / "routes" / "paths.ts"
+AUTH_TS = FRONTEND_SRC / "api" / "auth.ts"
 
 BASE_URL = "https://billing.example.com"
 TOKEN = "a-token-with-url-unsafe-bytes+/="
@@ -94,6 +98,52 @@ def test_the_reset_page_is_outside_the_signed_in_guard() -> None:
     guard = routes.index("<RequireAuth />")
     for name in ("ROUTES.login", "ROUTES.forgotPassword", "ROUTES.resetPassword"):
         assert routes.index(name) < guard, f"{name} must be registered before <RequireAuth />"
+
+
+def _frontend_post(function_name: str) -> tuple[str, set[str]]:
+    """从 `api/auth.ts` 里某个导出函数中，取出它 `post()` 的地址与请求体字段名。
+
+    ⚠️ 这一对是**前端所有页面用例都盖不到的**：页面用例把整个 `api/auth` 模块
+    mock 掉了（它们测状态机，不测网络），所以路径写错、字段名写成驼峰，前端
+    一条用例都不会红 —— 到浏览器里才表现成 404 或 422。
+
+    ⚠️ 定位靠的是**函数名**而不是 URL 片段。按 URL 找的话，路径一改就变成
+    「找不到这个调用」，报出来的原因和真正的毛病（发去了一个没人服务的地址）
+    对不上，排查要多绕一圈。
+    """
+    source = AUTH_TS.read_text(encoding="utf-8")
+    match = re.search(
+        rf"export function {re.escape(function_name)}\b[^{{]*\{{\s*"
+        r'return post<[^>]*>\(\s*"([^"]+)",\s*\{([^}]*)\}',
+        source,
+    )
+    assert match is not None, f"{function_name}() no longer posts a body in {AUTH_TS.name}"
+    # `{ email }` 与 `{ token, new_password: newPassword }` 两种写法都要认。
+    body = {part.split(":")[0].strip() for part in match.group(2).split(",") if part.strip()}
+    return match.group(1), body
+
+
+def test_the_frontend_posts_to_routes_the_backend_actually_serves() -> None:
+    # ⚠️ 走 OpenAPI 而不是 `app.routes`：子路由是延迟挂载的，`app.routes` 里
+    # 只看得到几个 `_IncludedRouter` 壳子，拿它比对会**永远比不上**。
+    served = set(create_app().openapi()["paths"])
+    for function_name in ("requestPasswordReset", "resetPassword"):
+        url, _ = _frontend_post(function_name)
+        assert url in served, f"{function_name}() posts to {url}, which no route serves"
+
+
+def test_the_frontend_sends_the_field_names_the_backend_declares() -> None:
+    """请求体字段名必须和 Pydantic 模型逐字相同。
+
+    ⚠️ `new_password` 打成 `newPassword` 的后果是 FastAPI 以「缺字段」回 422 ——
+    界面上表现成一句莫名其妙的错误，而前后端两边的测试全绿。这里比的是**模型
+    自己声明的名字**，不是我抄在用例里的一份副本：后端改名时这条会跟着动。
+    """
+    _, forgot_body = _frontend_post("requestPasswordReset")
+    assert forgot_body == set(ForgotPasswordRequest.model_fields)
+
+    _, reset_body = _frontend_post("resetPassword")
+    assert reset_body == set(ResetPasswordRequest.model_fields)
 
 
 def test_the_pages_ask_for_every_translation_key_they_use() -> None:

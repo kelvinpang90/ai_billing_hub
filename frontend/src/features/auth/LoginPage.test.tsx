@@ -202,6 +202,26 @@ describe("LoginPage", () => {
     expect(screen.getByLabelText("Verification code")).toBeInTheDocument();
   });
 
+  it("offers the way out to the reset flow, but only while the password is the question", async () => {
+    const user = userEvent.setup();
+    api.login.mockResolvedValue(
+      loginResult({ stage: "TOTP_REQUIRED", pending_token: "pending-1" }),
+    );
+    renderLogin();
+
+    // ⚠️ 这是重置流程在整个界面上**唯一**的入口。没有它，那两页只有邮件里的
+    // 链接能走到 —— 而忘了密码的人第一反应是来登录页找，不是去翻邮箱。
+    const link = screen.getByRole("link", { name: "Forgot your password?" });
+    expect(link).toHaveAttribute("href", "/forgot-password");
+
+    await fillCredentials(user);
+    await screen.findByLabelText("Verification code");
+
+    // 走到第二因子这一步，问题已经不是密码了。这时候还摆着「忘记密码」只会
+    // 把人引到一条解决不了他问题的路上。
+    expect(screen.queryByRole("link", { name: "Forgot your password?" })).not.toBeInTheDocument();
+  });
+
   it("shows the backend message and the request id when login fails", async () => {
     const user = userEvent.setup();
     api.login.mockRejectedValue(
