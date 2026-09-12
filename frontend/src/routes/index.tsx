@@ -8,17 +8,23 @@
 
 import { Route, Routes } from "react-router";
 
+import { LoginPage } from "../features/auth/LoginPage";
 import { DashboardPage } from "../features/dashboard/DashboardPage";
 import { AppLayout } from "../layouts/AppLayout";
 import { NotFoundPage } from "./NotFoundPage";
+import { RequireAuth } from "./RequireAuth";
 import { ROUTES } from "./paths";
 
 export function AppRoutes() {
   return (
     <Routes>
-      <Route element={<AppLayout />}>
-        <Route path={ROUTES.dashboard} element={<DashboardPage />} />
-        <Route path="*" element={<NotFoundPage />} />
+      {/* 登录页在守卫**外面** —— 放进去就成了「要先登录才能登录」。 */}
+      <Route path={ROUTES.login} element={<LoginPage />} />
+      <Route element={<RequireAuth />}>
+        <Route element={<AppLayout />}>
+          <Route path={ROUTES.dashboard} element={<DashboardPage />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Route>
       </Route>
     </Routes>
   );

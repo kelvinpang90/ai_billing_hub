@@ -7,6 +7,7 @@ import { App as AntdApp, ConfigProvider } from "antd";
 import enUS from "antd/locale/en_US";
 import { BrowserRouter } from "react-router";
 
+import { AuthProvider } from "./auth/AuthProvider";
 import { AppRoutes } from "./routes";
 
 /**
@@ -36,7 +37,12 @@ export function App() {
       <AntdApp>
         <QueryClientProvider client={queryClient}>
           <BrowserRouter>
-            <AppRoutes />
+            {/* AuthProvider 要在 Router **里面**：它用不到路由，但登录页要用
+                useNavigate，而守卫要读 AuthProvider 的状态 —— 放外面的话
+                两者的生命周期会错开。 */}
+            <AuthProvider>
+              <AppRoutes />
+            </AuthProvider>
           </BrowserRouter>
         </QueryClientProvider>
       </AntdApp>

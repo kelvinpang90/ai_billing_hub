@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import gc
 import os
+import weakref
 
 import pyotp
 import pytest
@@ -54,9 +56,21 @@ def settings(tmp_path) -> Settings:
 
 
 # 每个用户的 TOTP 密钥与恢复码只在注册那一刻能拿到，之后库里只有密文 / 哈希 ——
-# 用例要重复登录就得自己记着。键是 (库的 id, user_id)，免得不同 fixture 的
-# 同号用户串味。
-_ENROLLED: dict[tuple[int, int], tuple[str, list[str]]] = {}
+# 用例要重复登录就得自己记着。
+#
+# ⚠️ **键必须是 session factory 对象本身，不能是 `id(session_factory)`。**
+# `id()` 是内存地址，**对象被回收后地址会被复用**：`session_factory` 是函数级
+# fixture，上一个用例的工厂一释放，下一个用例的新工厂就可能落在同一个地址上，
+# 于是这里会把**上一个库**的密钥与恢复码交给它 —— 而那个库里根本没有
+# `two_factor_settings` 行，结果是 `TwoFactorNotEnrolled`。
+# 实测 40 次「建工厂 → 释放」里有 17 次地址复用；CI 上连续两次撞在**不同**用例
+# 上（PR #35 的 34682007589 两轮），本地却一次没撞过 —— 典型的偶发红。
+#
+# `WeakKeyDictionary` 同时解决两件事：按对象身份索引（活着的工厂彼此绝不串味），
+# 且条目随工厂一起消失（死掉的工厂不会把脏数据留给下一个）。
+_ENROLLED: weakref.WeakKeyDictionary[object, dict[int, tuple[str, list[str]]]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def sign_in(session_factory, settings: Settings, *, user_id: int) -> IssuedSession:
@@ -73,8 +87,8 @@ def sign_in(session_factory, settings: Settings, *, user_id: int) -> IssuedSessi
     （防重放，这是刻意的），而把时钟往前推又会让 JWT 的 `iat` 落在未来被拒。
     恢复码正好是为「换一种方式证明自己」准备的，用它最贴近真实。
     """
-    key = (id(session_factory), user_id)
-    entry = _ENROLLED.get(key)
+    per_user = _ENROLLED.setdefault(session_factory, {})
+    entry = per_user.get(user_id)
     if entry is None:
         enrolment = start_enrolment(session_factory, settings, user_id=user_id)
         codes = confirm_enrolment(
@@ -85,7 +99,7 @@ def sign_in(session_factory, settings: Settings, *, user_id: int) -> IssuedSessi
             context=CONTEXT,
         )
         entry = (enrolment.secret, list(codes))
-        _ENROLLED[key] = entry
+        per_user[user_id] = entry
         second_factor = pyotp.TOTP(enrolment.secret).now()
     else:
         second_factor = entry[1].pop()
@@ -677,6 +691,31 @@ def test_an_expired_refresh_token_is_refused(session_factory, settings: Settings
         session.commit()
     with pytest.raises(TokenReused):
         refresh_session(session_factory, settings, raw_token=issued.refresh_token, context=CONTEXT)
+
+
+def test_the_enrolment_cache_dies_with_its_session_factory(settings: Settings) -> None:
+    """`sign_in` 记住的密钥与恢复码，**绝不能被下一个 session factory 捡到**。
+
+    ⚠️ 这一条钉的是测试基建自己的一个缺陷，不是产品代码：缓存原本按
+    `id(session_factory)` 索引，而 `id()` 是内存地址、对象回收后会被复用 ——
+    下一个用例的新工厂落在同一个地址上，就会拿到**上一个库**的恢复码，在自己
+    那个（没有 2FA 行的）库里炸成 `TwoFactorNotEnrolled`。
+
+    它只在地址恰好复用时发作，所以表现为**随机某个用例变红**（CI 上连续两轮
+    撞在不同用例上，本地一次没撞过）。这里不去赌地址复用，而是直接断言那条
+    让复用变得无害的性质：条目随工厂一起消失。
+    """
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = create_session_factory(engine)
+    user = make_user(factory)
+    sign_in(factory, settings, user_id=user.id)
+    assert len(_ENROLLED) == 1
+
+    del factory
+    gc.collect()
+
+    assert len(_ENROLLED) == 0
 
 
 def test_an_idle_refresh_token_is_refused(session_factory, settings: Settings) -> None:
