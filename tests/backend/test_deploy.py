@@ -49,22 +49,40 @@ def test_the_workflow_tags_images_with_the_commit() -> None:
 
 
 def test_the_workflow_never_hardcodes_the_target_host() -> None:
-    """⚠️ 仓库是公开的：真实主机名 / IP / 路径绝不能进来。
+    """⚠️ 仓库是公开的：真实主机名 / IP 绝不能进来。
 
-    它们全部走 GitHub secret。这条用例是 `secret-scan` 那一层的补充 ——
-    secret-scan 找的是凭据形状的东西，认不出一个看着普通的主机名。
+    它们全部走 GitHub secret，名字沿用本工作区其它项目的 `VPS_*` 约定
+    （`rs-roof-pms`、`crm_os`、`erp_os` 等八个项目都这么叫）。这条用例是
+    `secret-scan` 的补充 —— 那一层找的是凭据形状的东西，认不出一个普通的主机名。
     """
     workflow = uncommented(WORKFLOW)
-    for needle in ("DEPLOY_TARGET", "DEPLOY_PATH", "DEPLOY_SSH_KEY", "DEPLOY_KNOWN_HOSTS"):
+    for needle in ("VPS_HOST", "VPS_USER", "VPS_SSH_KEY", "VPS_PORT", "VPS_FINGERPRINT"):
         assert f"secrets.{needle}" in workflow
-    # 形如 user@host 或裸 IP 的字面量都不该出现。
     assert not re.search(r"\b\d{1,3}(\.\d{1,3}){3}\b", workflow)
     assert not re.search(r"[a-z0-9_-]+@[a-z0-9.-]+\.[a-z]{2,}", workflow)
 
 
 def test_the_workflow_verifies_the_host_key() -> None:
-    """⚠️ 不校验主机指纹的 SSH，等于把部署凭据交给任何能做中间人的人。"""
-    assert "known_hosts" in uncommented(WORKFLOW)
+    """⚠️ 不校验主机指纹的 SSH，等于把部署私钥交给任何能做中间人的人。
+
+    本工作区其它项目的 deploy workflow **都没有**做这一条。这里补上，而且
+    `appleboy/ssh-action` 的 `fingerprint` 留空时是**静默跳过**校验 —— 所以光传进去
+    不够，还要在前面单独检查它非空，空就让 job 红掉。
+    """
+    workflow = uncommented(WORKFLOW)
+    assert "fingerprint: ${{ secrets.VPS_FINGERPRINT }}" in workflow
+    assert "refusing to SSH without verifying the host key" in workflow
+
+
+def test_the_vps_checks_out_the_exact_commit_it_was_built_from() -> None:
+    """⚠️ `git pull` 拿的是 main 的最新 HEAD，不是这一次构建的 commit。
+
+    构建完成后又合进来一个 commit 的话，VPS 上跑的 deploy.sh 与 compose 就和镜像
+    不是同一个版本。本工作区其它项目用的是 `git pull --ff-only`，这里刻意没沿用。
+    """
+    workflow = uncommented(WORKFLOW)
+    assert "git checkout --quiet --detach" in workflow
+    assert "git pull" not in workflow
 
 
 def test_deployments_do_not_run_concurrently() -> None:

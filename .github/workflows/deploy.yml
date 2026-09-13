@@ -92,41 +92,52 @@ jobs:
     name: deploy to the VPS
     needs: build
     runs-on: ubuntu-latest
-    # ⚠️ 用 GitHub Environment 而不是裸 secret：environment 可以配「需要人工批准」
-    # 与「只允许从 main 部署」，而那两条是这里唯一的防线 —— 一次误合并直接就是
-    # 一次生产部署。
+    # ⚠️ environment 带来两道保护：「需要人工批准」与「只允许从 main 部署」——
+    # 一次误合并直接就是一次生产部署，这是它之外唯一的防线。保护规则配在
+    # GitHub → Settings → Environments → production 上。
     environment: production
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.build.outputs.tag }}
-
-      # ⚠️ 私钥只从 secret 来，**绝不落到仓库里**（仓库是公开的）。
-      # known_hosts 也走 secret：不校验主机指纹的 SSH 等于把部署凭据交给任何
-      # 能做中间人的人。
-      - name: Configure SSH
+      # ⚠️ **主机指纹必须校验，而且没配就直接失败**。
+      #
+      # appleboy/ssh-action 的 `fingerprint` 留空时是**静默跳过**校验 —— 那等于把
+      # 部署私钥交给任何能在中间做手脚的人，而一切看起来照常工作。所以这里先查
+      # 一遍，空的就红，不让它退化成「不校验」。
+      - name: Require the host fingerprint
+        env:
+          FINGERPRINT: ${{ secrets.VPS_FINGERPRINT }}
         run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+          if [ -z "$FINGERPRINT" ]; then
+            echo "::error::VPS_FINGERPRINT is not set; refusing to SSH without verifying the host key"
+            exit 1
+          fi
 
-      # 把仓库里的 compose 与部署脚本同步过去。⚠️ **不同步 `.env` 与 `secrets/`** ——
-      # 那些只存在于宿主机上，仓库里根本没有（`.gitignore` 挡着）。
-      - name: Ship compose and the deploy script
-        run: |
-          rsync -az --delete \
-            --include='docker-compose.yml' \
-            --include='deploy/***' \
-            --include='alembic.ini' \
-            --exclude='*' \
-            ./ "${{ secrets.DEPLOY_TARGET }}:${{ secrets.DEPLOY_PATH }}/"
-
+      # 与本工作区其它项目同一套约定：appleboy/ssh-action + VPS_* 四个 secret +
+      # VPS 上一份 git 工作副本（见 docs/deployment.md §9.3）。
       - name: Deploy
-        run: |
-          ssh "${{ secrets.DEPLOY_TARGET }}" \
-            "cd '${{ secrets.DEPLOY_PATH }}' \
-             && BILLING_IMAGE_REPO=ghcr.io/${{ github.repository }} \
-                BILLING_FRONTEND_IMAGE_REPO=ghcr.io/${{ github.repository }}-frontend \
-                bash deploy/deploy.sh '${{ needs.build.outputs.tag }}'"
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
+          script: |
+            set -euo pipefail
+            cd /opt/ai_billing_hub
+
+            # ⚠️ **检出这一次构建的那个 commit，不是 `git pull`。**
+            # `git pull` 拿的是 main 的最新 HEAD —— 如果构建完成之后又合进来一个
+            # commit，VPS 上跑的 deploy.sh 与 compose 就和镜像不是同一个版本。
+            # §99 要求「immutable image tags identify the exact commit」，那条对
+            # 部署脚本本身同样成立。
+            git fetch --quiet origin
+            git checkout --quiet --detach '${{ needs.build.outputs.tag }}'
+
+            # ghcr 上的包默认是私有的，拉镜像要登录。令牌是这一次 job 的临时令牌，
+            # 用完即登出。
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+
+            BILLING_IMAGE_REPO='ghcr.io/${{ github.repository }}' \
+            BILLING_FRONTEND_IMAGE_REPO='ghcr.io/${{ github.repository }}-frontend' \
+              bash deploy/deploy.sh '${{ needs.build.outputs.tag }}'

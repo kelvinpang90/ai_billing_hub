@@ -381,29 +381,71 @@ runbook 链接**。现在**一项都没有**，因为没有任何日志聚合设
 Connection refused，被当成「部署失败」而实际只是早了几秒。首次部署与 MySQL 重启后
 各会中一次 —— 而那正是最容易手忙脚乱的两个时刻。
 
-### 9.3 ⚠️ 需要 Kelvin 配的 GitHub secret
+### 9.3 GitHub secret 与 VPS 上的准备
 
-**我不碰任何凭据。**下面这四个要你在 GitHub 仓库的 **Environments → `production`**
-里配（不是仓库级 secret —— environment 才能配「需要人工批准」与「只允许从 main
-部署」，那是误合并直接变成误部署之外唯一的防线）：
+**沿用本工作区其它八个项目的约定**（`rs-roof-pms`、`crm_os`、`erp_os` 等）：
+`appleboy/ssh-action` + `VPS_*` 四个 secret + VPS 上一份 git 工作副本 + 路径写死
+`/opt/<项目名>`。Kelvin 2026-09-13 已按这套配好前四个。
 
-| Secret | 内容 | 注意 |
-| --- | --- | --- |
-| `DEPLOY_SSH_KEY` | 部署专用的 SSH 私钥 | ⚠️ **新生成一把，不要复用你自己的登录密钥**。那台机器上给它一个只能进部署目录的账号 |
-| `DEPLOY_KNOWN_HOSTS` | `ssh-keyscan <host>` 的输出 | ⚠️ 不校验主机指纹的 SSH 等于把部署凭据交给任何能做中间人的人 |
-| `DEPLOY_TARGET` | `user@host` | 仓库是公开的，**绝不能写进任何文件** |
-| `DEPLOY_PATH` | VPS 上的部署目录 | 同上 |
+| Secret | 状态 |
+| --- | --- |
+| `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` / `VPS_PORT` | ✅ 已配（仓库级） |
+| **`VPS_FINGERPRINT`** | ⚠️ **还没有，必须补** —— 见下 |
+
+#### 与其它项目**刻意不同**的两处
+
+**① 主机指纹必须校验。**其它八个项目的 deploy workflow **都没有**做这一条。
+`appleboy/ssh-action` 的 `fingerprint` 留空时是**静默跳过**校验，而不校验主机指纹
+的 SSH 等于把部署私钥交给任何能在中间做手脚的人。所以这里补一个 `VPS_FINGERPRINT`，
+并在前面单独检查它非空 —— 没配就让 job 直接红，不让它退化成「不校验」。
+
+取值（**在 VPS 上**执行，要的是 `SHA256:` 开头的那一段）：
+
+```bash
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}'
+```
+
+**② 检出这次构建的 commit，不 `git pull`。**其它项目用 `git pull --ff-only`，那拿到的
+是 main 的最新 HEAD —— 构建完成后又合进来一个 commit 的话，VPS 上跑的部署脚本与
+compose 就和镜像不是同一个版本。§99 要求镜像标签对应确切 commit，那条对部署脚本
+本身同样成立。
+
+#### ⚠️ 仓库级 secret 与 environment secret 的一处真实差别
+
+`VPS_SSH_KEY` 现在是**仓库级**的。deploy job 引用了 `environment: production`，
+所以照样读得到、人工批准也照样生效 —— **但批准只拦住了部署 job，没拦住那把私钥**：
+仓库级 secret 对仓库里**任何** workflow 都可读，不需要经过批准。
+
+实际风险不高：来自 fork 的 PR 拿不到 secret（GitHub 不会传给它们），能加 workflow 的
+只有有写权限的人。与其它项目一致起见先保持仓库级；想收紧的话把 `VPS_SSH_KEY` 挪到
+`production` 环境里即可，workflow 不用改。
+
+#### VPS 上的一次性准备
+
+`/opt/ai_billing_hub` 里已经有 `.env` 和 `secrets/`，所以**不能** `git clone`（它要求空目录）。
+改成就地初始化 —— `.env` 与 `secrets/` 都被 `.gitignore` 挡着，不会冲突：
+
+```bash
+cd /opt/ai_billing_hub
+git init
+git remote add origin https://github.com/kelvinpang90/ai_billing_hub.git
+git fetch origin
+git checkout main
+```
 
 宿主机那一侧还要准备好（**都不在仓库里**）：
 
-- `.env`（按 [`.env.example`](../.env.example) 填，含数据库口令、`BILLING_FRONTEND_BASE_URL`、SMTP）
+- `.env`（按 [`.env.example`](../.env.example) 填，含数据库口令、`BILLING_FRONTEND_BASE_URL`、SMTP、R2）
 - `secrets/jwt.key`、`secrets/master.key`、`secrets/smtp.password`
 - ⚠️ 主密钥文件 `chown 10001:10001` + `chmod 0400`（见 §6）
 
 ### 9.4 第一次跑之前
 
 - [ ] VPS 内存升配完成（决策 ③）
-- [ ] 四个 secret 配好，`production` environment 开了人工批准
+- [x] `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` / `VPS_PORT` 已配（2026-09-13）
+- [ ] ⚠️ **`VPS_FINGERPRINT` 补上**（没有它 job 会直接失败，这是刻意的）
+- [ ] `production` environment 开了人工批准与「只允许 main」
+- [ ] VPS 上 `/opt/ai_billing_hub` 已 `git init` 并检出 main
 - [ ] 宿主机的 `.env` 与三个密钥文件就位
 - [ ] ghcr 的包可见性确认过（公开仓库默认公开；镜像里没有密钥，与 ADR-0001 一致）
 - [ ] ⚠️ **先手工跑一次 `deploy/deploy.sh`**，别让第一次执行是由一次 push 触发的
