@@ -114,8 +114,15 @@ fi
 # 直接 Connection refused —— 而那会被当成「这次部署失败」，实际只是早了几秒。
 # 正常部署里 MySQL 本来就在跑，所以这条只在首次部署与 MySQL 重启后才生效 ——
 # 而那正是最容易手忙脚乱的两个时刻。
+#
+# ⚠️ **等之前先把它拉起来。**只等不拉的话，首次部署时 mysql 容器根本还没被创建，
+# 这里会一直等到超时然后退出 —— 首个生产部署永远走不到迁移那一步（Codex #42 R1）。
+# 对已经在跑的 mysql，`up -d` 在配置没变时什么也不做。
+log "starting the database"
+$COMPOSE up -d --no-build mysql || die "cannot start the database; the application containers are untouched"
+
 log "waiting for the database"
-wait_for_health mysql || die "the database did not become healthy; nothing has been changed"
+wait_for_health mysql || die "the database did not become healthy; the application containers are untouched"
 
 log "running migrations"
 $COMPOSE run --rm --no-deps api alembic upgrade head \

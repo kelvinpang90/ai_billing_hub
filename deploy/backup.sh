@@ -125,6 +125,14 @@ $COMPOSE exec -T mysql mysqldump \
 # 会被照常加密上传，而它长得和好的一模一样。
 grep -q "^-- Dump completed" "$PLAIN" || die "the dump is truncated (no completion marker)"
 
+# ⚠️ 把这台 MySQL 的 server_uuid 写进 dump。锚点只给出 `binlog.000002` 这样的编号，
+# 而编号在每台主机上都从 000001 开始；binlog_ship.sh 按 server_uuid 分目录存放，
+# 恢复时靠这一行才知道该去哪条链上找锚点之后的 binlog。
+SERVER_UUID="$($COMPOSE exec -T mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e 'SELECT @@server_uuid' 2>/dev/null | tr -d '\r')" \
+    || die "cannot read server_uuid"
+[ -n "$SERVER_UUID" ] || die "cannot read server_uuid"
+printf -- '-- billing-server-uuid: %s\n' "$SERVER_UUID" >> "$PLAIN"
+
 # 记下 binlog 锚点，方便人直接看见。
 ANCHOR="$(grep -m1 '^-- CHANGE REPLICATION SOURCE TO' "$PLAIN" || true)"
 log "dump ok ($(wc -c < "$PLAIN") bytes)"

@@ -46,16 +46,33 @@ jobs:
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-
+      # ⚠️ **这一步必须排在第一个，而且 `ref` 只能经 env 进 shell**（Codex #42 R1）。
+      #
+      # `inputs.ref` 是触发者随手填的文本。写成 `run: echo "${{ inputs.ref }}"` 时，
+      # Actions 是先把文本**原样替换进脚本**再交给 bash —— 填一个 `"; curl … | sh #`
+      # 就是在 runner 上执行命令；它随后还会被拼进 VPS 上的部署脚本，那里握着部署私钥
+      # 和数据库。经 env 传进来的值只是一个变量，bash 不会再解析它。
+      #
+      # 只放行 40 位小写十六进制：那既是注入的闸，也是 §99「immutable image tags
+      # identify the exact commit」本身 —— 分支名、短 SHA、latest 都不是确切的 commit。
+      # 下游所有步骤只用这一步的输出，不再碰 `inputs.ref`。
       - name: Resolve the immutable tag
         id: resolve
-        # ⚠️ 用完整 commit SHA 作为标签，**不是** latest（§99 要求
-        # 「immutable image tags identify the exact commit」）。deploy.sh 会拒绝
-        # latest / main / master 这类可变标签。
-        run: echo "tag=${{ inputs.ref || github.sha }}" >> "$GITHUB_OUTPUT"
+        env:
+          REF: ${{ inputs.ref || github.sha }}
+        # ⚠️ 用 bash 的 `=~` 做**整串**匹配，不用 `grep -x`：grep 按行比，一个
+        # 「第二行恰好是合法 SHA」的多行输入会被它放行（API 触发时输入可以带换行）。
+        shell: bash
+        run: |
+          if [[ ! "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::ref must be a full 40-character lowercase commit SHA"
+            exit 1
+          fi
+          echo "tag=$REF" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
 
       - uses: docker/setup-buildx-action@v3
 
