@@ -146,6 +146,9 @@ def test_backups_are_never_committed() -> None:
     """
     ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
     assert "/backups/" in ignored
+    # ⚠️ 恢复时拉回来的也是整库备份。这一条也是真发生过的：`git check-ignore`
+    # 对一个刚删掉的目录报了「已忽略」，而规则里根本没有它 —— 用真文件一试就漏了。
+    assert "/restore/" in ignored
 
 
 def test_the_backup_is_verified_before_it_is_uploaded() -> None:
@@ -156,7 +159,8 @@ def test_the_backup_is_verified_before_it_is_uploaded() -> None:
     """
     script = uncommented(BACKUP)
     verifies = script.index("cannot be decrypted")
-    uploads = script.index("aws s3 cp")
+    # 上传现在走容器里的 aws-cli（见 backup.sh 的 aws_cli / s3 辅助函数）。
+    uploads = script.index("uploading to")
     assert verifies < uploads
 
 
@@ -186,3 +190,67 @@ def test_a_local_only_backup_is_an_explicit_failure() -> None:
     那正是最危险的形态：每天都「成功」，直到机器整个没了。
     """
     assert "does NOT satisfy spec" in uncommented(BACKUP)
+
+
+RESTORE = REPO_ROOT / "deploy" / "restore.sh"
+
+
+def test_restore_refuses_to_overwrite_the_live_database() -> None:
+    """⚠️ 恢复是导入一份 dump，而 dump 里是一连串 DROP TABLE / CREATE TABLE。
+
+    对着正在服务的库跑，等于在事故现场再制造一次事故，而且会把「恢复前那一刻的
+    数据」一起抹掉 —— 那可能正是你要找回来的东西。
+    """
+    assert "refusing to restore over the live database" in uncommented(RESTORE)
+
+
+def test_restore_counts_rows_exactly() -> None:
+    """⚠️ 不能用 `information_schema.tables.table_rows` —— 它对 InnoDB 只是估计值。
+
+    这条是恢复演练抓到的：一张确实有数据的 `users` 被报成了 **0 行**
+    （`SELECT COUNT(*)` 是 1）。一个会把有数据报成空的核对比没有核对更糟：
+    真出事时看到 0 行的人会以为备份是空的。
+    """
+    script = uncommented(RESTORE)
+    assert "SELECT COUNT(*)" in script
+    assert "table_rows" not in script
+
+
+def test_s3_credentials_never_appear_on_a_command_line() -> None:
+    """⚠️ `docker run -e NAME=value` 会让口令出现在 `ps` 能看到的参数里。
+
+    同机任何用户都读得到，而那台 VPS 上还跑着另外八个项目。必须用不带值的
+    `-e NAME`，让 docker 从自己的环境里取。
+    """
+    for path in (BACKUP, RESTORE):
+        script = uncommented(path)
+        assert "-e AWS_ACCESS_KEY_ID" in script
+        assert "-e AWS_ACCESS_KEY_ID=" not in script
+        assert "-e AWS_SECRET_ACCESS_KEY=" not in script
+
+
+def test_the_upload_is_confirmed_against_the_remote_object() -> None:
+    """⚠️ `cp` 返回 0 只说明客户端认为它发完了。
+
+    一次被中间设备截断的上传，本地看起来同样是成功的。所以传完要拉一次元数据
+    回来核对大小。
+    """
+    script = uncommented(BACKUP)
+    assert "head-object" in script
+    assert "size mismatch after upload" in script
+
+
+def test_no_comment_breaks_a_line_continuation() -> None:
+    """⚠️ 反斜杠续行的中间夹一行注释，续行就在那里断掉。
+
+    这是本任务里真踩到的：注释插在 `AWS_SECRET_ACCESS_KEY=... \\` 与
+    `docker run` 之间，前两个凭据变成当前 shell 里**没有导出**的变量，
+    容器拿不到，报 `Unable to locate credentials` —— 看着像凭据填错了。
+    """
+    for path in (SCRIPT, BACKUP, RESTORE):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for number, (line, following) in enumerate(zip(lines, lines[1:], strict=False), start=1):
+            if line.rstrip().endswith("\\") and following.strip().startswith("#"):
+                raise AssertionError(
+                    f"{path.name}:{number} continues onto a comment, which ends the command"
+                )

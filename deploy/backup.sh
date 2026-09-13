@@ -37,6 +37,36 @@ LOCAL_KEEP_DAYS="${BILLING_BACKUP_KEEP_DAYS:-3}"
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+# S3 客户端跑在容器里，不装在宿主机上。
+#
+# ⚠️ 两个理由都很实在：生产 VPS 上**不一定有** `aws` 命令，而那台机器上确定有的
+# 只有 Docker；而且版本钉死在镜像标签上，不会因为宿主机某次 apt upgrade 就换了行为。
+#
+# ⚠️ 凭据用 `-e NAME`（不带值）传进容器，**不是** `-e NAME=value`：后者会让
+# 口令出现在 `ps` 能看到的命令行参数里，同机任何用户都读得到。
+AWS_CLI_IMAGE="${BILLING_AWS_CLI_IMAGE:-amazon/aws-cli:2.27.50}"
+
+aws_cli() {
+    # ⚠️ MSYS_NO_PATHCONV 只对 Windows 的 Git Bash 有意义（Linux 上是个无害的空变量）：
+    # Git Bash 会把容器内路径 `/data/...` 改写成 `D:/Git/data/...`，于是上传报
+    # 「路径不存在」。**只能加在 docker 这一条上** —— 全局关掉的话，mktemp 给出的
+    # `/tmp/...` 反过来会让原生的 openssl 打不开。两种都实测踩过。
+    #
+    # ⚠️ **这段注释必须在命令外面。**写在下面那串反斜杠续行的中间，续行会在注释
+    # 那一行断掉：前两个凭据变成当前 shell 里**没有导出**的变量，`docker run -e`
+    # 拿不到，报的是 `Unable to locate credentials` —— 看着像凭据填错了。实测踩过。
+    AWS_ACCESS_KEY_ID="$(env_value R2_ACCESS_KEY_ID)" \
+    AWS_SECRET_ACCESS_KEY="$(env_value R2_SECRET_ACCESS_KEY)" \
+    MSYS_NO_PATHCONV=1 \
+    docker run --rm \
+        -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+        -e AWS_DEFAULT_REGION=auto \
+        -v "$(cd "$BACKUP_DIR" && pwd):/data" \
+        "$AWS_CLI_IMAGE" --endpoint-url "$R2_ENDPOINT" "$@"
+}
+s3() { aws_cli s3 "$@" --only-show-errors; }
+s3api() { aws_cli s3api "$@"; }
+
 # 从 .env 取一个值。
 # ⚠️ **刻意不用 `source`** —— 那等于执行这个文件，而它是一份凭据清单，
 # 里面任何一行写错都会变成命令。这里只做字面解析。
@@ -150,13 +180,18 @@ elif [ -z "$R2_BUCKET" ] || [ -z "$R2_ENDPOINT" ]; then
     die "R2 is not configured (BILLING_R2_BUCKET / BILLING_R2_ENDPOINT); the backup is local-only and does NOT satisfy spec §98.1"
 else
     log "uploading to ${R2_BUCKET}"
-    AWS_ACCESS_KEY_ID="$(env_value R2_ACCESS_KEY_ID)" \
-    AWS_SECRET_ACCESS_KEY="$(env_value R2_SECRET_ACCESS_KEY)" \
-    AWS_DEFAULT_REGION=auto \
-    aws s3 cp "$CIPHER" "s3://${R2_BUCKET}/full/$(basename "$CIPHER")" \
-        --endpoint-url "$R2_ENDPOINT" --only-show-errors \
+    s3 cp "/data/$(basename "$CIPHER")" "s3://${R2_BUCKET}/full/$(basename "$CIPHER")" \
         || die "upload failed; the verified backup is still at $CIPHER"
-    log "uploaded"
+
+    # ⚠️ 传完**拉一次元数据回来核对大小**。`cp` 返回 0 只说明客户端认为它发完了；
+    # 一次被中间设备截断的上传，本地看起来同样是成功的。
+    REMOTE_SIZE="$(s3api head-object --bucket "$R2_BUCKET" \
+        --key "full/$(basename "$CIPHER")" --query ContentLength --output text)" \
+        || die "uploaded, but the object cannot be read back"
+    LOCAL_SIZE="$(wc -c < "$CIPHER" | tr -d ' ')"
+    [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ] \
+        || die "size mismatch after upload: local ${LOCAL_SIZE}, remote ${REMOTE_SIZE}"
+    log "uploaded and confirmed (${REMOTE_SIZE} bytes)"
 fi
 
 # --------------------------------------------------------------------------
