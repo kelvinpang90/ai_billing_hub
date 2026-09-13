@@ -292,7 +292,16 @@ services:
       timeout: 3s
       retries: 3
 
-  nginx:
+  # ⚠️ **服务名必须带 `billing_` 前缀，不能叫 `nginx`**（T0.9）。
+  #
+  # 生产上这个服务要挂到 VPS 共享的 `proxy_net`（docker-compose.prod.yml），而
+  # compose 会把**服务名**注册成它在每个所挂网络上的 DNS 别名。`vps_infra` 自己的
+  # 服务就叫 `nginx` —— 我们也叫 `nginx` 的话，`proxy_net` 上同一个名字会解析到
+  # 两个容器。`erp_os` 的 compose 注释里记着同一个坑，它的服务名全带 `erp_` 前缀。
+  #
+  # 其余六个服务**不挂** `proxy_net`，只在本项目私有网络里，名字不会和别人撞，
+  # 所以不改 —— 也正因为它们不挂，别的项目的容器才够不着我们的 api / mysql / redis。
+  billing_nginx:
     image: nginx:1.27-alpine
     # ⚠️ 刻意**没有**换成非 root 镜像（T0.9 决策 ④）：生产上本层只收
     # infra_nginx 转进来的内网流量，风险面小。这是一次有意识的选择，不是遗漏。
@@ -301,7 +310,15 @@ services:
     restart: unless-stopped
     logging: *logging
     ports:
-      - "${BILLING_HTTP_PORT:-8080}:80"
+      # ⚠️ **默认只绑 127.0.0.1**，不是所有网卡。
+      #
+      # **Docker 发布的端口会绕过 UFW。**它把规则插在 ufw 之前，所以 `8080:80`
+      # 这种写法即使 ufw 拒绝了 8080 也照样能从公网访问 —— 上线后任何人都能用
+      # `http://<VPS>:8080` **明文**直连登录接口，完全绕开 infra_nginx 的 HTTPS。
+      #
+      # 生产上真正的入口是 `proxy_net`（infra_nginx 按服务名找过来），这个端口
+      # 只给宿主机自己用：本地开发的浏览器、部署脚本的冒烟测试。
+      - "${BILLING_HTTP_BIND:-127.0.0.1}:${BILLING_HTTP_PORT:-8080}:80"
     volumes:
       - ./deploy/nginx/billing.conf:/etc/nginx/conf.d/default.conf:ro
       - ./deploy/nginx/billing-proxy-headers.inc:/etc/nginx/conf.d/billing-proxy-headers.inc:ro

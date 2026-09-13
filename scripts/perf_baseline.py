@@ -573,7 +573,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python scripts/perf_baseline.py")
     parser.add_argument("--samples", type=int, default=200, help="S1 的样本数")
     parser.add_argument("--outbox-rows", type=int, default=300)
-    parser.add_argument("--base-url", default="http://nginx")
+    parser.add_argument("--base-url", default="http://billing_nginx")
     parser.add_argument("--json-out", default=None, help="把结果另存成 JSON")
     parser.add_argument(
         "--database-url",

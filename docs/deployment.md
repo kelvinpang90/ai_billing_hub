@@ -52,6 +52,48 @@ billing nginx（本项目，现在监听 80）
         └── redis（专用容器 + 专用卷）
 ```
 
+### 2.1 接入 `proxy_net`（已落地并本地实测）
+
+VPS 上的约定（`vps_infra` 与 `erp_os` 等项目）：`infra_nginx` 与各项目挂在共享网络
+**`proxy_net`** 上，按**服务名**互相访问；TLS 在 `infra_nginx` 终止；各项目**不发布公网端口**。
+
+本平台照这个接，三处改动：
+
+| 改动 | 为什么 |
+| --- | --- |
+| 边缘服务改名 `nginx` → **`billing_nginx`** | compose 把服务名注册成所挂网络上的 DNS 别名。`vps_infra` 自己的服务就叫 `nginx`，同名会让 `proxy_net` 上一个名字解析到两个容器。`erp_os` 的 compose 里记着同一个坑 |
+| **只有** `billing_nginx` 挂 `proxy_net` | 那张网上还有另外八个项目。api / mysql / redis 一挂上去，任何一个项目的容器被攻破都能直接够到我们的数据库和未经限流的 api |
+| 宿主机端口**默认只绑 127.0.0.1** | ⚠️ **Docker 发布的端口会绕过 UFW**。绑所有网卡的话，上线后任何人都能用 `http://<VPS>:8080` 明文直连登录接口，完全绕开 HTTPS |
+
+生产上的挂接放在 [`docker-compose.prod.yml`](../docker-compose.prod.yml)，本地开发不用它
+（本地没有 `proxy_net`，而它是 external 的，缺了 `up` 会直接失败）。VPS 的 `.env` 加两行：
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+COMPOSE_PATH_SEPARATOR=:
+```
+
+⚠️ 第二行不是多余的：分隔符在 Windows 上默认是 `;`。本地实测不加的话整串被当成一个文件名。
+
+⚠️ 覆盖文件里 `billing_nginx` 的 `networks:` **必须同时列出 `default`**。一个服务一旦写了
+`networks:`，compose 就不再自动挂默认网络 —— 只写 `proxy_net` 的话，部署成功、健康检查
+也过（它只问 nginx 自己），但每个请求都是 502。
+
+**本地模拟实测**（建一个 `proxy_net`，用挂在上面的容器冒充 `infra_nginx`）：
+
+| 检查 | 结果 |
+| --- | --- |
+| 按服务名访问 `billing_nginx/healthz` | ✅ 正常响应 |
+| 直连 `api:8000` | ✅ `bad address` —— 解析都解析不到 |
+| 直连 `mysql:3306` | ✅ 解析不到 |
+| `proxy_net` 上的 `nginx` 这个名字 | ✅ 不存在，没有撞名 |
+| 宿主机端口绑定 | ✅ `127.0.0.1:8080` |
+| 带 `X-Forwarded-For: 203.0.113.77` 访问 | ✅ 访问日志记为 `203.0.113.77`，不是代理地址 |
+
+⚠️ `infra_nginx` 那一侧的转发配置含**真实域名**，按仓库规则**不进这个公开仓库**，
+由 Kelvin 放进 `vps_infra`。要点：`proxy_pass` 指向变量 `billing_nginx:80`（与其它项目
+同一写法），并且在这一跳用 `$remote_addr` **覆盖**而不是追加 `X-Forwarded-For`。
+
 ### ⚠️ 这个拓扑有一个后果，不是可选的
 
 **已定走 `infra_nginx`（①A），所以 `real_ip_header` + `set_real_ip_from`

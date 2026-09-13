@@ -31,7 +31,8 @@ EXPECTED_SERVICES = {
     "celery-worker",
     "celery-beat",
     "frontend",
-    "nginx",
+    # 带前缀，见 docker-compose.yml 里 billing_nginx 那段注释。
+    "billing_nginx",
 }
 
 
@@ -139,7 +140,7 @@ def test_no_password_is_hardcoded_in_the_compose_file(compose: dict) -> None:
 def test_only_the_edge_proxy_is_published_to_the_host(compose: dict) -> None:
     """MySQL / Redis / api 都不对宿主机开放，唯一入口是 nginx。"""
     published = {name for name, service in compose["services"].items() if service.get("ports")}
-    assert published == {"nginx"}
+    assert published == {"billing_nginx"}
 
 
 def test_every_proxied_location_forwards_the_correlation_id() -> None:
@@ -383,3 +384,58 @@ def test_the_worker_probe_names_itself(compose: dict) -> None:
     assert "-d" in probe
     # ⚠️ 两个 `$` 是必需的：单个会被 compose **在宿主机上**插值成空串。
     assert "$$HOSTNAME" in probe
+
+
+# --- T0.9：接入 VPS 共享的 proxy_net -----------------------------------------
+
+PROD_OVERRIDE = REPO_ROOT / "docker-compose.prod.yml"
+
+
+@pytest.fixture(scope="module")
+def prod_override() -> dict:
+    return yaml.safe_load(PROD_OVERRIDE.read_text(encoding="utf-8"))
+
+
+def test_the_published_port_binds_to_loopback_by_default(compose: dict) -> None:
+    """⚠️ **Docker 发布的端口会绕过 UFW。**
+
+    `8080:80` 这种写法即使 ufw 拒绝了 8080 也照样能从公网访问 —— 上线后任何人都能
+    用 `http://<VPS>:8080` **明文**直连登录接口，完全绕开 infra_nginx 的 HTTPS。
+    所以默认必须只绑 127.0.0.1。
+    """
+    ports = compose["services"]["billing_nginx"]["ports"]
+    assert ports == ["${BILLING_HTTP_BIND:-127.0.0.1}:${BILLING_HTTP_PORT:-8080}:80"]
+
+
+def test_only_the_edge_joins_the_shared_proxy_network(prod_override: dict) -> None:
+    """只有边缘 nginx 挂 `proxy_net`，别的一个都不挂。
+
+    ⚠️ `proxy_net` 上还挂着另外八个项目。api / mysql / redis 一旦挂上去，任何一个
+    项目的容器被攻破都能直接够到我们的数据库与未经限流的 api。
+    """
+    joined = {
+        name
+        for name, service in prod_override["services"].items()
+        if "proxy_net" in (service.get("networks") or [])
+    }
+    assert joined == {"billing_nginx"}
+    assert prod_override["networks"]["proxy_net"]["external"] is True
+
+
+def test_the_edge_keeps_its_default_network_in_production(prod_override: dict) -> None:
+    """⚠️ 一个服务一旦写了 `networks:`，compose 就不再自动挂默认网络。
+
+    只写 `proxy_net` 的话，nginx 够不着只在 default 上的 `api:8000` 与 `frontend:80`
+    —— 部署成功、健康检查也过（它只问 nginx 自己），但每个请求都是 502。
+    """
+    assert "default" in prod_override["services"]["billing_nginx"]["networks"]
+
+
+def test_the_edge_service_name_cannot_collide_on_the_shared_network(compose: dict) -> None:
+    """⚠️ compose 把**服务名**注册成它所挂每个网络上的 DNS 别名。
+
+    `vps_infra` 自己的服务就叫 `nginx`；我们也叫 `nginx` 的话，`proxy_net` 上同一个
+    名字会解析到两个容器。`erp_os` 的 compose 里记着同一个坑。
+    """
+    assert "nginx" not in compose["services"]
+    assert "billing_nginx" in compose["services"]
