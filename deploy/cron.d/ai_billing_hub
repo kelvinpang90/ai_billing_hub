@@ -24,6 +24,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 #    FLUSH、不上传，所以每分钟一次不会造出一堆空文件。
 * * * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && bash deploy/binlog_ship.sh 2>&1 | logger -t billing-binlog
 
-# 全量，每天一次。⚠️ cron 按**系统时区**解释：VPS 是 UTC 时 19:17 = 马来西亚 03:17，
-# 业务低谷；不是 UTC 的话按 `timedatectl` 换算后改这一行。避开整点，免得与其它项目撞车。
-17 19 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-backup.lock bash deploy/backup.sh 2>&1 | logger -t billing-backup
+# 全量，每天一次，马来西亚 03:17（业务低谷）。避开整点，免得与其它项目撞车。
+# ⚠️ cron 按**系统时区**解释，而生产 VPS 的系统时区是 **UTC+8**（2026-09-14 实测：
+#    同一时刻 journalctl 显示 17:04、脚本的 `date -u` 打出 09:04）。第一版按「VPS 是 UTC」
+#    写成 `17 19`，实际会在马来西亚晚上 19:17 跑。换主机时先 `timedatectl` 看时区再定这一行。
+# ⚠️ 这个文件是**复制**进 /etc/cron.d 的，改完要按上面的安装命令重装一次才生效。
+17 3 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-backup.lock bash deploy/backup.sh 2>&1 | logger -t billing-backup
