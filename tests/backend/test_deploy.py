@@ -451,6 +451,45 @@ def test_each_binlog_is_verified_before_upload_and_confirmed_after() -> None:
     assert 'KEY="binlog/${SERVER_UUID}/' in script
 
 
+def test_backup_jobs_report_to_their_own_heartbeat_check() -> None:
+    """⚠️ 「没有日志」的故障只有外部心跳发现得了：cron 没跑、VPS 挂了、脚本卡死。
+
+    两个任务用两个检查：频率不同（每分钟 / 每天），混成一个的话每分钟的 binlog 心跳会把
+    「全量三天没跑」盖住。失败立刻发 /fail，不等宽限期。ping 必须有超时且失败不拖垮本轮 ——
+    binlog 那边卡住的 ping 会一直占着锁。
+    """
+    for path, own, other in (
+        (BACKUP, "BILLING_HEALTHCHECK_BACKUP_URL", "BILLING_HEALTHCHECK_BINLOG_URL"),
+        (BINLOG_SHIP, "BILLING_HEALTHCHECK_BINLOG_URL", "BILLING_HEALTHCHECK_BACKUP_URL"),
+    ):
+        script = uncommented(path)
+        assert f"env_value {own}" in script
+        assert other not in script
+        assert "heartbeat /fail" in script
+        assert "curl -fsS -m 10" in script
+        assert '|| log "heartbeat ping failed' in script
+
+
+def test_a_skipped_or_rehearsal_run_never_reports_success() -> None:
+    """⚠️ 成功心跳只能在真的做完之后发。
+
+    binlog 被锁挡住跳过的那一轮如果发成功心跳，一次卡死的推送会被每分钟的「成功」盖住；
+    全量的 --dry-run 没有上传，发了就等于告诉监控「今天有离机备份」。
+    """
+    ship = uncommented(BINLOG_SHIP)
+    start = ship.index("if ! flock -n 9; then")
+    skipped = ship[start : ship.index("\nfi\ncheck_freshness", start)]
+    assert "heartbeat" not in skipped
+    assert ship.index("nothing to ship") < ship.index('heartbeat ""')
+    assert ship.rstrip().endswith('heartbeat ""')
+    # alarm 在锁与新鲜度检查里就会被调用，它要读的心跳地址必须在那之前就读好。
+    reads_url = ship.index('HEARTBEAT_URL="$(env_value')
+    assert ship.index("env_value() {") < reads_url < ship.index("alarm() {")
+
+    backup = uncommented(BACKUP)
+    assert backup.rstrip().endswith('[ "$DRY_RUN" = "1" ] || heartbeat "" "$(basename "$CIPHER")"')
+
+
 def test_the_full_backup_closes_the_binlog_its_anchor_points_into() -> None:
     """⚠️ 锚点落在正在写的 binlog 上；之后没有写入的话 binlog_ship.sh 不 FLUSH，它永远到不了 R2。
 

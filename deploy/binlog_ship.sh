@@ -15,7 +15,8 @@
 #   2. 每一轮（**包括被跳过的那轮**）先查「binlog 上一次成功离机是多久以前」，
 #      超过 RPO 预算就以 err 级别写 syslog —— 卡死、变慢、连续失败都会在一分钟内冒出来
 #   3. 任何失败同样以 err 级别报出
-# ⚠️ 把 err 级别的日志**送到人手里**需要告警通道（§95），这个脚本不负责那一步。
+#   4. 成功时向 `BILLING_HEALTHCHECK_BINLOG_URL` 发心跳，失败与破 RPO 时发 `/fail`
+#      （docs/deployment.md §5.2.6）。心跳停了、或收到 fail，由外部服务通知到人
 #
 # 用法：
 #     deploy/binlog_ship.sh
@@ -36,6 +37,26 @@ LAST_OK="${STATE_DIR}/last-success"
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
+# ⚠️ 与 backup.sh 同一条：字面解析，**不 source**。
+# 排在 alarm 之前：alarm 要读心跳地址，而锁与新鲜度检查在读其它配置之前就可能调用它。
+env_value() {
+    [ -f "$ENV_FILE" ] || return 0
+    sed -n "s/^${1}=//p" "$ENV_FILE" | head -1
+}
+
+# 心跳（dead man's switch，docs/deployment.md §5.2.6）。
+# ⚠️ **心跳才能发现「没有日志」的故障**：cron 没跑、整台 VPS 挂了、脚本卡死 —— 这些情况下
+# 什么 err 都不会写出来，只有外部服务发现「该到的心跳没到」。
+# ⚠️ `-m 10`：ping 卡住会一直占着锁，之后每一轮都被跳过。ping 失败只记一行，不让本轮失败 ——
+# 数据已经离机，不能因为监控服务抖动就报「推送失败」。
+HEARTBEAT_URL="$(env_value BILLING_HEALTHCHECK_BINLOG_URL)"
+heartbeat() {
+    local suffix="$1" body="${2:-}"
+    [ -n "$HEARTBEAT_URL" ] || return 0
+    curl -fsS -m 10 --retry 2 -o /dev/null --data-raw "$body" "${HEARTBEAT_URL}${suffix}" \
+        || log "heartbeat ping failed (${suffix:-success}); the monitor will treat this run as missing"
+}
+
 # ⚠️ cron 那一行把输出整个以 info 级别送进 syslog。失败与破 RPO 必须**另外**以 err
 # 级别写一条，否则它们和每分钟一次的「shipped …」混在一起，告警规则无从区分。
 alarm() {
@@ -43,6 +64,8 @@ alarm() {
     if command -v logger >/dev/null 2>&1; then
         logger -p user.err -t billing-binlog -- "$*" || true
     fi
+    [ -n "$HEARTBEAT_URL" ] || log "no BILLING_HEALTHCHECK_BINLOG_URL configured: nobody will be told about this"
+    heartbeat /fail "$*"
 }
 die() { alarm "$*"; exit 1; }
 
@@ -95,12 +118,6 @@ if ! flock -n 9; then
     exit 0
 fi
 check_freshness
-
-# ⚠️ 与 backup.sh 同一条：字面解析，**不 source**。
-env_value() {
-    [ -f "$ENV_FILE" ] || return 0
-    sed -n "s/^${1}=//p" "$ENV_FILE" | head -1
-}
 
 # 与 backup.sh 同一个容器化客户端，理由见那边。
 aws_cli() {
@@ -185,6 +202,7 @@ if [ "$BEFORE" = "$(cat "$IDLE_MARK" 2>/dev/null || true)" ] \
     && [ "$NEWEST_CLOSED" = "$(cat "$MARK" 2>/dev/null || true)" ]; then
     mark_success "$CHECKED_AT"
     log "no writes since the last successful run; nothing to ship"
+    heartbeat ""
     exit 0
 fi
 
@@ -273,3 +291,4 @@ EOF
 printf '%s\n' "$AFTER_FLUSH" > "${IDLE_MARK}.tmp" && mv "${IDLE_MARK}.tmp" "$IDLE_MARK"
 mark_success "$FLUSHED_AT"
 log "binlog shipping complete: ${shipped} file(s); last shipped ${LAST:-none}"
+heartbeat ""
