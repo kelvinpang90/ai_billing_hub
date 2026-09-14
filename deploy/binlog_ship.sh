@@ -46,15 +46,26 @@ alarm() {
 }
 die() { alarm "$*"; exit 1; }
 
+# ⚠️ **还没有过一次成功时，从「开始看守」的时刻起算，不是不查**（Codex #42 R3）。
+# 第一版在心跳文件不存在时直接返回：新部署的第一轮推送卡住，之后每一轮都走跳过分支、
+# 都「查」了一次，却永远不报 —— 恰好是最容易出问题的首次上线。心跳文件丢了也是同一条路。
+WATCH_SINCE="${STATE_DIR}/watching-since"
+
 check_freshness() {
-    [ -f "$LAST_OK" ] || return 0
-    last="$(cat "$LAST_OK")"
+    ref="$LAST_OK"
+    what="binlogs last left this host"
+    if [ ! -f "$LAST_OK" ]; then
+        [ -f "$WATCH_SINCE" ] || date +%s > "$WATCH_SINCE"
+        ref="$WATCH_SINCE"
+        what="no binlog has left this host since monitoring started"
+    fi
+    last="$(cat "$ref")"
     case "$last" in
-        ""|*[!0-9]*) alarm "cannot read ${LAST_OK}; binlog freshness is unknown"; return 0 ;;
+        ""|*[!0-9]*) alarm "cannot read ${ref}; binlog freshness is unknown"; return 0 ;;
     esac
     age=$(( $(date +%s) - last ))
     [ "$age" -le "$RPO_SECONDS" ] \
-        || alarm "RPO breached: binlogs last left this host ${age}s ago (budget ${RPO_SECONDS}s)"
+        || alarm "RPO breached: ${what} ${age}s ago (budget ${RPO_SECONDS}s)"
 }
 
 # 记下「这个时刻之前写入的一切都已离机」。

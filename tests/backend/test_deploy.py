@@ -345,6 +345,20 @@ def test_a_skipped_binlog_run_still_checks_freshness() -> None:
     assert 'die() { alarm "$*"; exit 1; }' in script
 
 
+def test_freshness_is_checked_even_before_the_first_successful_push() -> None:
+    """⚠️ R3 阻断项：心跳文件不存在时直接返回，首次推送卡住就永远不报。
+
+    新部署（或心跳文件丢失）时从「开始看守」的时刻起算。Ubuntu 容器真 flock 验证过：
+    无心跳、第一次看到 → 只起表不报；锁被占、无心跳、已看守 10 分钟 →
+    `user.err … no binlog has left this host since monitoring started`。
+    """
+    script = uncommented(BINLOG_SHIP)
+    body = script[script.index("check_freshness() {") : script.index("mark_success() {")]
+    assert '[ -f "$LAST_OK" ] || return 0' not in body
+    assert 'ref="$WATCH_SINCE"' in body
+    assert '[ -f "$WATCH_SINCE" ] || date +%s > "$WATCH_SINCE"' in body
+
+
 def test_the_freshness_clock_starts_at_the_flush_not_at_the_end_of_the_run() -> None:
     """⚠️ FLUSH 之后写入的数据要等下一轮才离机。
 
