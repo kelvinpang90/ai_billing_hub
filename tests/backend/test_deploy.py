@@ -496,6 +496,11 @@ def test_monthly_and_yearly_copies_are_kept_once_and_never_overwritten() -> None
     # ⚠️ KeyCount 在 aws-cli 分页后恒为 None —— 用它判断，月备份永远建不出来（本地演练踩到）。
     assert "KeyCount" not in body
     assert 'if [ "$found" = "$key" ]; then' in body
+    # ⚠️ 「查 + 复制」不是原子的，两轮同时跑会互相覆盖（Codex #51 R1）。锁必须在脚本里、
+    # 在第一次查之前拿到 —— cron 行上的 flock 管不到手工运行。
+    lock = script.index("flock -w 300 9")
+    assert script.index('exec 9>"${BACKUP_DIR}/.keep-copy.lock"') < lock
+    assert lock < script.index('keep_copy "monthly/')
 
 
 def test_the_month_of_a_backup_is_taken_in_malaysian_time_without_tzdata() -> None:

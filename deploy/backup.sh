@@ -225,6 +225,16 @@ else
     # 输出 `None`。第一版就这么写，本地 MinIO 演练时月备份一次都没建出来，每轮却都报
     # 「already exists」。现在按精确 key 过滤：输出**等于这个 key** 才算存在
     # （不存在时是 `None`，只有同前缀的更长 key 时是空串）。
+    #
+    # ⚠️ 「查有没有」与「复制」之间不是原子的：两轮同时跑（cron 那一轮还没完、有人手工又跑
+    # 一次）会都查到「没有」，后复制的覆盖先复制的（Codex #51 R1）。cron 行上的 flock 只管
+    # cron 自己，手工运行不经过它，所以锁在脚本里、罩住下面整段「查 + 复制」。
+    # 用 `-w` 等而不是 `-n` 跳过：这一段只要几秒，跳过的话手工那一轮会莫名其妙少做一步。
+    # 不用存储端条件写：aws-cli 的 copy-object 不支持 If-None-Match。
+    command -v flock >/dev/null 2>&1 || die "flock is required (util-linux); the daily backup IS uploaded"
+    exec 9>"${BACKUP_DIR}/.keep-copy.lock"
+    flock -w 300 9 || die "another backup has held the copy lock for 5 minutes; the daily backup IS uploaded, the next run retries"
+
     keep_copy() {
         local key="$1" found size
         found="$(s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "$key" \
