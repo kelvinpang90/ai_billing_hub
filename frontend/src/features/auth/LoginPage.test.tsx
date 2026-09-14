@@ -162,6 +162,28 @@ describe("LoginPage", () => {
     expect(screen.queryByText("aaaa-bbbb")).not.toBeInTheDocument();
   });
 
+  it("asks for the enrolment code in a sentence that reads correctly", async () => {
+    const user = userEvent.setup();
+    api.login.mockResolvedValue(loginResult({ stage: "ENROL_2FA", pending_token: "pending-3" }));
+    api.startEnrolment.mockResolvedValue({
+      secret: "JBSWY3DPEHPK3PXP",
+      otpauth_uri: "otpauth://totp/Acuven:admin@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Acuven",
+    });
+    renderLogin();
+
+    await fillCredentials(user);
+    await screen.findByText("JBSWY3DPEHPK3PXP");
+    await user.click(screen.getByRole("button", { name: "Turn on two-factor authentication" }));
+
+    // ⚠️ 首次生产登录时看到的是「Please enter Enter the code your app shows」：antd 的
+    // 默认必填提示把「Enter the code…」这个标签原样拼了进去。
+    expect(
+      await screen.findByText("Enter the 6-digit code from your authenticator app."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Please enter/)).not.toBeInTheDocument();
+    expect(api.confirmEnrolment).not.toHaveBeenCalled();
+  });
+
   it("sends the user back to the first step when the pending token has expired", async () => {
     const user = userEvent.setup();
     api.login.mockResolvedValue(

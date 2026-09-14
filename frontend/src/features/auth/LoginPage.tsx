@@ -203,7 +203,10 @@ export function LoginPage() {
             <Form.Item
               name="code"
               label={t("enrol.code")}
-              rules={[{ required: true }]}
+              // ⚠️ 必须显式给提示。antd 的默认必填提示是「Please enter ${label}」，而这个
+              // 标签本身是一句「Enter the code…」，拼出来是「Please enter Enter the code…」
+              // —— 首次生产登录时管理员看到的就是这句。
+              rules={[{ required: true, message: t("enrol.codeRequired") }]}
               style={{ marginTop: 16 }}
             >
               <Input autoComplete="one-time-code" />

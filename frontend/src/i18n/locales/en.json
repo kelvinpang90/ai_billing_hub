@@ -22,6 +22,7 @@
   "enrol.intro": "Two-factor authentication is required. Scan this with your authenticator app.",
   "enrol.manualHint": "Cannot scan? Enter this key manually instead:",
   "enrol.code": "Enter the code your app shows",
+  "enrol.codeRequired": "Enter the 6-digit code from your authenticator app.",
   "enrol.confirm": "Turn on two-factor authentication",
   "enrol.qrAlt": "Two-factor setup code",
   "enrol.qrFailed": "The QR code could not be drawn. Use the key below instead.",
