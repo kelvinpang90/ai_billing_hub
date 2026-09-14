@@ -94,6 +94,35 @@ COMPOSE_PATH_SEPARATOR=:
 由 Kelvin 放进 `vps_infra`。要点：`proxy_pass` 指向变量 `billing_nginx:80`（与其它项目
 同一写法），并且在这一跳用 `$remote_addr` **覆盖**而不是追加 `X-Forwarded-For`。
 
+### 2.2 为什么保留本项目自己的边缘 nginx（Kelvin 2026-09-14 选 A）
+
+同一台 VPS 上的其它项目是 `infra_nginx` **直接**转发到后端容器。本平台多一层：
+
+```text
+浏览器 → Cloudflare → infra_nginx（共享：TLS、按域名分发）→ billing_nginx（本项目）→ api / frontend
+```
+
+首次部署后复议过要不要统一成「只用 `infra_nginx`」。两种做法的区别：
+
+| | **A. 保留 billing_nginx（选定）** | B. 统一只用 infra_nginx |
+| --- | --- | --- |
+| 登录限流（spec §53 的主控） | 在 billing_nginx，配置进本仓库、有测试、走审查 | 挪进 infra_nginx；`limit_req_zone` 还必须写进**共享的** `nginx.conf` |
+| `/readyz` 对外封锁、安全响应头、JSON 访问日志（§94）、上游超时、`real_ip` | 同上 | 同上，全部挪进 infra_nginx |
+| 这些配置放在哪 | 本仓库，随 CD 部署 | `vps_infra/nginx/conf.d/` 的站点文件 —— ⚠️ **被 vps_infra 的 `.gitignore` 排除**：没有版本记录、没有测试、没有审查，只能在 VPS 上手工改 |
+| 改错的影响面 | 只影响本项目；`deploy.sh` 先 `nginx -t` 再 reload，无效就回滚 | 共享的 infra_nginx；reload 失败会保留旧配置，但误用 restart 会让**同机所有站点一起挂** |
+| 网络隔离 | 只有 billing_nginx 挂 `proxy_net` | api 与 frontend 都要挂 `proxy_net`：另外八个项目的容器能**绕过限流直连 API** |
+| 代价 | 多一个容器（限额 64 MB）；多一跳代理（本机网络内，可忽略）；配置变更要 reload（见下） | 少一个容器；与其它项目写法一致 |
+
+**选 A 的理由**：`infra_nginx` 只做各项目**共有**的事（TLS、按域名分发）；计费平台**特有**的安全控制
+留在自己的仓库里。它们守的是钱包调整、定价发布、退款的前门，必须有版本、测试与审查 ——
+放进一个不在 git 里的共享文件，下一次改错不会有任何人发现。这与 2026-09-13 的决策 ① 是同一条分工。
+
+⚠️ **A 的一个后果，已处理**：配置文件是从部署目录挂进 billing_nginx 的，而它的镜像与 compose
+定义很少变，`docker compose up -d` 不会重建它 —— **只改了 nginx 配置的部署，不 reload 就不会生效**。
+首次加安全响应头时生产上就是这样：部署成功、冒烟通过，外网一个头都没有。现在 `deploy.sh`
+每次部署都先 `nginx -t` 再 reload（无效算部署失败、走回滚），冒烟额外确认 `X-Frame-Options: DENY`
+—— 漏掉 reload 时这是唯一能发现的地方。本地演练四种情况都验证过（见 §9.2）。
+
 ### ⚠️ 这个拓扑有一个后果，不是可选的
 
 **已定走 `infra_nginx`（①A），所以 `real_ip_header` + `set_real_ip_from`
@@ -508,6 +537,15 @@ Connection refused，被当成「部署失败」而实际只是早了几秒。�
 而且只经环境变量进 shell —— 那是个触发者随手填的文本框，原样拼进脚本就是命令注入
 （Codex #42 R1）。短 SHA、分支名、`latest`、带引号或换行的输入全部被拒，本地逐个试过。
 
+⚠️ **边缘 nginx 的配置变更要 reload 才生效**（§2.2）。本地栈上按顺序演练的四种情况：
+
+| 场景 | 结果 |
+| --- | --- |
+| 以不带安全头的旧配置从零起栈 | 冒烟拦下 `not sending its security headers`，首次部署无回滚目标，exit 1 |
+| 磁盘上换成新配置，**去掉 reload 的变异** `deploy.sh`（= 生产上首次加安全头时的状态） | 冒烟拦下并回滚，exit 1 |
+| 同一份新配置，真正的 `deploy.sh` | `nginx -t` → reload → `X-Frame-Options: DENY` 出现，exit 0 |
+| 磁盘上是写错的配置 | `nginx -t` 失败、不 reload，回滚，exit 1；**线上继续以上一份配置服务，安全头仍在** |
+
 ### 9.3 GitHub secret 与 VPS 上的准备
 
 **沿用本工作区其它八个项目的约定**（`rs-roof-pms`、`crm_os`、`erp_os` 等）：
@@ -609,6 +647,7 @@ git checkout main
 | ⑤ | 保留期 | 财务记录先永久保存；**运营日志做成环境变量、暂定 30 天** | §7、下方 |
 | ⑥ | CD 单开编号还是算进 T0.9 | **算进 T0.9** | §9 |
 | ⑦ | 备份放哪 | **R2**，上传前自己加密；**主密钥不进 R2** | §5.1 |
+| ①′ | （2026-09-14 复议）要不要去掉 billing_nginx，统一只用 infra_nginx | **A：保留**。计费平台特有的安全控制留在本仓库 | §2.2 |
 
 ### ⚠️ 「先永久保存」有一处推迟、一处不适用
 

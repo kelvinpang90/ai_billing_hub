@@ -144,6 +144,31 @@ HEALTHY=0
 wait_for_health && HEALTHY=1
 
 # --------------------------------------------------------------------------
+# 5b. 让边缘 nginx 读到新配置
+# --------------------------------------------------------------------------
+#
+# ⚠️ **只改了 nginx 配置的部署，不做这一步就永远不会生效。**配置文件是从部署目录
+# 挂进容器的：部署前的 `git checkout` 已经换掉了磁盘上的文件，但 nginx 只在启动或
+# reload 时读它；而 billing_nginx 的镜像与 compose 定义没变，`up -d` 不会重建它。
+# T0.9 首次加安全响应头时就是这样：部署成功、冒烟通过，外网一个头都没有。
+#
+# 先 `nginx -t` 再 reload：配置有错时 reload 本身会保留旧配置继续跑，但那样这次
+# 部署会被当成成功 —— 所以把「配置无效」算作部署失败，走下面的回滚。
+# ⚠️ 回滚只换回镜像；磁盘上的配置仍是这次检出的版本，nginx 内存里的是上一次成功
+# reload 的版本（没被换掉）。修好配置之后重新部署即可。
+if [ "$HEALTHY" = "1" ]; then
+    log "checking and reloading the edge proxy configuration"
+    if ! NGINX_TEST="$($COMPOSE exec -T billing_nginx nginx -t 2>&1)"; then
+        printf '%s\n' "$NGINX_TEST"
+        log "the edge proxy configuration is invalid; not reloading"
+        HEALTHY=0
+    elif ! $COMPOSE exec -T billing_nginx nginx -s reload; then
+        log "the edge proxy reload failed"
+        HEALTHY=0
+    fi
+fi
+
+# --------------------------------------------------------------------------
 # 6. 冒烟
 # --------------------------------------------------------------------------
 #
@@ -154,7 +179,18 @@ SMOKE=0
 if [ "$HEALTHY" = "1" ]; then
     log "smoke: GET ${SMOKE_URL}/healthz"
     if curl -fsS --max-time 10 "${SMOKE_URL}/healthz" >/dev/null; then
-        SMOKE=1
+        # ⚠️ 顺带确认边缘 nginx 跑的是**带安全响应头的配置**。只看 200 的话，一个
+        # 没 reload 上的边缘照样返回 200 —— 上面 5b 那一步漏掉时，这里是唯一能发现的地方。
+        # reload 是异步的（master 收到信号后才换 worker），所以给几秒重试。
+        for _ in 1 2 3 4 5; do
+            if curl -fsS --max-time 10 -o /dev/null -D - "${SMOKE_URL}/healthz" \
+                | tr -d '\r' | grep -qi '^x-frame-options: *DENY$'; then
+                SMOKE=1
+                break
+            fi
+            sleep 2
+        done
+        [ "$SMOKE" = "1" ] || log "smoke test failed: the edge proxy is not sending its security headers"
     else
         log "smoke test failed"
     fi

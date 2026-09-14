@@ -292,6 +292,37 @@ def test_the_first_deploy_starts_the_database_before_waiting_for_it() -> None:
     assert starts < waits
 
 
+def test_every_deploy_reloads_the_edge_proxy_configuration() -> None:
+    """⚠️ 只改了 nginx 配置的部署，不 reload 就永远不会生效。
+
+    配置从部署目录挂进容器，`git checkout` 换掉了磁盘上的文件；而 billing_nginx 的镜像与
+    compose 定义没变，`up -d` 不会重建它。T0.9 首次加安全响应头时生产上就是这样：部署
+    成功、冒烟通过，外网一个头都没有。本地演练复现过：去掉 reload 的变异，新配置不生效。
+    """
+    script = uncommented(SCRIPT)
+    starts = script.index("up -d --no-build ||")
+    checks = script.index("exec -T billing_nginx nginx -t")
+    reloads = script.index("exec -T billing_nginx nginx -s reload")
+    smoke = script.index('log "smoke: GET')
+    assert starts < checks < reloads < smoke
+    # 配置无效要算部署失败（走回滚），不能 reload 失败了还报成功。
+    reload_block = script[checks : script.index("\nfi", reloads)]
+    assert reload_block.count("HEALTHY=0") == 2
+
+
+def test_the_smoke_test_fails_when_the_edge_runs_a_stale_configuration() -> None:
+    """⚠️ 只看 /healthz 返回 200 不够：一个没 reload 上的边缘照样返回 200。
+
+    本地演练：变异掉 reload 那一步、磁盘上是带安全头的新配置 —— 冒烟因为缺
+    `X-Frame-Options: DENY` 失败并回滚。这是 reload 漏掉时唯一能发现的地方。
+    """
+    script = uncommented(SCRIPT)
+    start = script.index('log "smoke: GET')
+    smoke = script[start : script.index('if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]', start)]
+    assert "x-frame-options: *DENY" in smoke
+    assert "not sending its security headers" in smoke
+
+
 def test_the_dispatch_ref_is_validated_before_any_shell_sees_it() -> None:
     """⚠️ `${{ inputs.ref }}` 写进 `run:` 是**先原样替换进脚本再交给 bash**（阻断项 2）。
 
