@@ -16,6 +16,13 @@
 # 全量导入之后会重放它之后的全部 binlog（PITR）。第三个参数给出**停止时间点（UTC）**，
 # 用于「恢复到误操作之前那一刻」；不给就重放到最后一个推出去的 binlog。
 #
+# 只恢复全量、不重放 binlog（月备份 / 年备份的 binlog 早已过了 35 天保留期）：
+#     BILLING_RESTORE_FULL_ONLY=1 deploy/restore.sh monthly/billing-202610.sql.enc billing_incident
+#
+# ⚠️ 这个开关**必须显式给**，binlog 链不全时脚本**不会自动**退化成只恢复全量：真出事时
+# 如果 binlog 推送早就悄悄坏了，自动退化会跳过重放、照样报「恢复完成」，静默丢掉
+# 最多一整天的数据。丢数据的决定必须是人做的。
+#
 # ⚠️ **目标库必须是一个新名字**，脚本拒绝恢复进正在用的那个库（见下）。
 # 演练就恢复进一个一次性的库、核对完删掉；真出事时恢复进新库、核对完再切换。
 
@@ -58,6 +65,17 @@ esac
 if [ -n "$STOP_AT" ] && [[ ! "$STOP_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
     die "stop time must be 'YYYY-MM-DD HH:MM:SS' (UTC)"
 fi
+
+FULL_ONLY="${BILLING_RESTORE_FULL_ONLY:-0}"
+case "$FULL_ONLY" in
+    0|1) ;;
+    *) die "BILLING_RESTORE_FULL_ONLY must be 0 or 1" ;;
+esac
+# 没有 binlog 就谈不上「停在某一刻」。两个一起给，说明给的人对恢复点的理解有误。
+if [ "$FULL_ONLY" = "1" ] && [ -n "$STOP_AT" ]; then
+    die "BILLING_RESTORE_FULL_ONLY=1 restores to the moment of the backup; it cannot stop at ${STOP_AT}"
+fi
+FULL_ONLY_HINT="if this backup is older than the 35-day binlog retention and you accept losing everything after it, rerun with BILLING_RESTORE_FULL_ONLY=1"
 
 PASSPHRASE="$(env_value BILLING_BACKUP_PASSPHRASE)"
 [ -n "$PASSPHRASE" ] || die "BILLING_BACKUP_PASSPHRASE is not set in $ENV_FILE"
@@ -121,32 +139,38 @@ ANCHOR="$(grep -m1 '^-- CHANGE REPLICATION SOURCE TO' "$PLAIN" || true)"
 # ⚠️ 链的检查排在**建库之前**：第一版是导入完才查，缺口一出现就留下一个导了一半的库，
 # 还得人去删。能在动任何东西之前发现的问题，就在动之前发现。
 
-UUID="$(sed -n 's/^-- billing-server-uuid: //p' "$PLAIN" | head -1)"
-case "$UUID" in
-    ""|*[!0-9a-f-]*) die "the dump carries no server_uuid; cannot locate its binlog chain" ;;
-esac
-ANCHOR_FILE="$(printf '%s' "$ANCHOR" | sed -n "s/.*SOURCE_LOG_FILE='\([A-Za-z0-9._-]*\)'.*/\1/p")"
-ANCHOR_POS="$(printf '%s' "$ANCHOR" | sed -n 's/.*SOURCE_LOG_POS=\([0-9]*\).*/\1/p')"
-[ -n "$ANCHOR_FILE" ] && [ -n "$ANCHOR_POS" ] || die "the dump carries no binlog anchor; cannot do PITR"
+if [ "$FULL_ONLY" = "1" ]; then
+    # ⚠️ 链一个都不查：月 / 年备份的 binlog 按保留期本来就没了，查了只会拒绝。
+    log "⚠️ BILLING_RESTORE_FULL_ONLY=1: NOT replaying binlogs — ${TARGET_DB} will hold the data as of the backup, nothing after it"
+else
+    UUID="$(sed -n 's/^-- billing-server-uuid: //p' "$PLAIN" | head -1)"
+    case "$UUID" in
+        ""|*[!0-9a-f-]*) die "the dump carries no server_uuid; cannot locate its binlog chain" ;;
+    esac
+    ANCHOR_FILE="$(printf '%s' "$ANCHOR" | sed -n "s/.*SOURCE_LOG_FILE='\([A-Za-z0-9._-]*\)'.*/\1/p")"
+    ANCHOR_POS="$(printf '%s' "$ANCHOR" | sed -n 's/.*SOURCE_LOG_POS=\([0-9]*\).*/\1/p')"
+    [ -n "$ANCHOR_FILE" ] && [ -n "$ANCHOR_POS" ] || die "the dump carries no binlog anchor; cannot do PITR"
 
-log "listing the binlog chain for server ${UUID}"
-KEYS="$(aws_cli s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "binlog/${UUID}/" \
-    --query 'Contents[].Key' --output text)" || die "cannot list binlogs"
+    log "listing the binlog chain for server ${UUID}"
+    KEYS="$(aws_cli s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "binlog/${UUID}/" \
+        --query 'Contents[].Key' --output text)" || die "cannot list binlogs"
 
-ANCHOR_NUM=$((10#${ANCHOR_FILE##*.}))
-CHAIN=""
-expected="$ANCHOR_NUM"
-for key in $(printf '%s\n' $KEYS | grep -E '/[A-Za-z0-9_-]+\.[0-9]+\.enc$' | sort); do
-    name="$(basename "$key" .enc)"
-    num=$((10#${name##*.}))
-    [ "$num" -lt "$ANCHOR_NUM" ] && continue
-    [ "$num" -eq "$expected" ] \
-        || die "gap in the binlog chain: expected #${expected}, found ${name}; refusing a silently incomplete restore"
-    CHAIN="${CHAIN} ${name}"
-    expected=$((num + 1))
-done
-[ -n "$CHAIN" ] \
-    || die "the anchor binlog ${ANCHOR_FILE} has not been shipped; run deploy/binlog_ship.sh on the source host first"
+    ANCHOR_NUM=$((10#${ANCHOR_FILE##*.}))
+    CHAIN=""
+    expected="$ANCHOR_NUM"
+    for key in $(printf '%s\n' $KEYS | grep -E '/[A-Za-z0-9_-]+\.[0-9]+\.enc$' | sort); do
+        name="$(basename "$key" .enc)"
+        num=$((10#${name##*.}))
+        [ "$num" -lt "$ANCHOR_NUM" ] && continue
+        # ⚠️ 保留期删掉的是链的**开头**，所以旧备份表现为这一条或下面那条。
+        [ "$num" -eq "$expected" ] \
+            || die "gap in the binlog chain: expected #${expected}, found ${name}; refusing a silently incomplete restore (${FULL_ONLY_HINT})"
+        CHAIN="${CHAIN} ${name}"
+        expected=$((num + 1))
+    done
+    [ -n "$CHAIN" ] \
+        || die "the anchor binlog ${ANCHOR_FILE} is not in R2: either deploy/binlog_ship.sh has not shipped it yet, or it has expired (${FULL_ONLY_HINT})"
+fi
 
 # --------------------------------------------------------------------------
 # 4. 导入新库
@@ -171,60 +195,63 @@ log "importing"
 # 5. 重放 binlog
 # --------------------------------------------------------------------------
 
-REPLAY_ERR="${WORK_DIR}/replay.err"
-cleanup_pitr() {
-    rm -f "$PLAIN" "$REPLAY_ERR" "${WORK_DIR}"/*.binlog.plain "${WORK_DIR}"/binlog.*.enc
-}
-trap cleanup_pitr EXIT
+# ⚠️ 只恢复全量时整节跳过（开关的理由见文件开头）。
+if [ "$FULL_ONLY" = "0" ]; then
+    REPLAY_ERR="${WORK_DIR}/replay.err"
+    cleanup_pitr() {
+        rm -f "$PLAIN" "$REPLAY_ERR" "${WORK_DIR}"/*.binlog.plain "${WORK_DIR}"/binlog.*.enc
+    }
+    trap cleanup_pitr EXIT
 
-FILES=()
-for name in $CHAIN; do
-    aws_cli s3 cp "s3://${R2_BUCKET}/binlog/${UUID}/${name}.enc" "/data/${name}.enc" --only-show-errors \
-        || die "fetch failed: ${name}"
-    printf '%s' "$PASSPHRASE" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
-        -in "${WORK_DIR}/${name}.enc" -out "${WORK_DIR}/${name}.binlog.plain" -pass stdin \
-        || die "decryption failed: ${name}"
-    FILES+=("/data/${name}.binlog.plain")
-done
+    FILES=()
+    for name in $CHAIN; do
+        aws_cli s3 cp "s3://${R2_BUCKET}/binlog/${UUID}/${name}.enc" "/data/${name}.enc" --only-show-errors \
+            || die "fetch failed: ${name}"
+        printf '%s' "$PASSPHRASE" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+            -in "${WORK_DIR}/${name}.enc" -out "${WORK_DIR}/${name}.binlog.plain" -pass stdin \
+            || die "decryption failed: ${name}"
+        FILES+=("/data/${name}.binlog.plain")
+    done
 
-# ⚠️ **官方 `mysql:8.4` 镜像里没有 `mysqlbinlog`**（只装了 server-minimal，它的软件源里
-# 也装不上 client 包）—— 第一版就是在生产那台 MySQL 容器里调它，演练时 exit 127。
-# 所以解码放在一个一次性容器里：Percona Server 与我们的服务端**同为 8.4.11**，
-# binlog 格式一致。它只读挂进来的文件、输出 SQL，**不连任何数据库**；SQL 仍然交给
-# 我们自己那台 mysql 执行。版本钉死，升级 mysql 时这里跟着改。
-# ⚠️ 镜像约 440 MB，只在恢复时才拉。磁盘只剩 12 GB，演练完可以 `docker image rm`。
-MYSQLBINLOG_IMAGE="${BILLING_MYSQLBINLOG_IMAGE:-percona/percona-server:8.4.11-11}"
+    # ⚠️ **官方 `mysql:8.4` 镜像里没有 `mysqlbinlog`**（只装了 server-minimal，它的软件源里
+    # 也装不上 client 包）—— 第一版就是在生产那台 MySQL 容器里调它，演练时 exit 127。
+    # 所以解码放在一个一次性容器里：Percona Server 与我们的服务端**同为 8.4.11**，
+    # binlog 格式一致。它只读挂进来的文件、输出 SQL，**不连任何数据库**；SQL 仍然交给
+    # 我们自己那台 mysql 执行。版本钉死，升级 mysql 时这里跟着改。
+    # ⚠️ 镜像约 440 MB，只在恢复时才拉。磁盘只剩 12 GB，演练完可以 `docker image rm`。
+    MYSQLBINLOG_IMAGE="${BILLING_MYSQLBINLOG_IMAGE:-percona/percona-server:8.4.11-11}"
 
-# ⚠️ 三个参数缺一不可：
-#   --start-position    只作用于第一个文件（锚点），跳过 dump 已经包含的那部分
-#   --rewrite-db        生产库名的事件改写进目标库；配合 --database 只放行这一个库
-#                       （mysqlbinlog 先改写、再按改写后的名字过滤）
-#   --disable-log-bin   重放本身不写 binlog，理由与上面导入时相同
-#
-# ⚠️ 停止时间里有空格，所以参数用数组传，不能拼成字符串再分词。
-STOP_ARGS=()
-if [ -n "$STOP_AT" ]; then
-    STOP_ARGS=("--stop-datetime=${STOP_AT}")
-    log "replaying binlogs from ${ANCHOR_FILE}:${ANCHOR_POS} up to ${STOP_AT} UTC:${CHAIN}"
-else
-    log "replaying every shipped binlog from ${ANCHOR_FILE}:${ANCHOR_POS}:${CHAIN}"
+    # ⚠️ 三个参数缺一不可：
+    #   --start-position    只作用于第一个文件（锚点），跳过 dump 已经包含的那部分
+    #   --rewrite-db        生产库名的事件改写进目标库；配合 --database 只放行这一个库
+    #                       （mysqlbinlog 先改写、再按改写后的名字过滤）
+    #   --disable-log-bin   重放本身不写 binlog，理由与上面导入时相同
+    #
+    # ⚠️ 停止时间里有空格，所以参数用数组传，不能拼成字符串再分词。
+    STOP_ARGS=()
+    if [ -n "$STOP_AT" ]; then
+        STOP_ARGS=("--stop-datetime=${STOP_AT}")
+        log "replaying binlogs from ${ANCHOR_FILE}:${ANCHOR_POS} up to ${STOP_AT} UTC:${CHAIN}"
+    else
+        log "replaying every shipped binlog from ${ANCHOR_FILE}:${ANCHOR_POS}:${CHAIN}"
+    fi
+    #
+    # ⚠️ 失败时把 mysql 的报错打出来（滤掉命令行口令那条固定警告）。第一版整个丢进
+    # /dev/null，演练失败时只剩一句「replay failed」，原因要另外手工复现才看得到 ——
+    # 真出事的那个晚上没有这个余裕。
+    # MSYS_NO_PATHCONV：与 aws_cli 同一个 Git Bash 坑（容器内路径 /data 会被改写）。
+    if ! MSYS_NO_PATHCONV=1 docker run --rm \
+            -v "$(cd "$WORK_DIR" && pwd):/data:ro" \
+            --entrypoint mysqlbinlog "$MYSQLBINLOG_IMAGE" \
+            --disable-log-bin \
+            --rewrite-db="${LIVE_DB}->${TARGET_DB}" --database="$TARGET_DB" \
+            --start-position="$ANCHOR_POS" "${STOP_ARGS[@]}" "${FILES[@]}" \
+        | $COMPOSE exec -T mysql mysql -uroot -p"$ROOT_PW" 2>"$REPLAY_ERR"; then
+        grep -v 'Using a password on the command line' "$REPLAY_ERR" >&2 || true
+        die "binlog replay failed; ${TARGET_DB} holds the full backup plus a partial replay — drop it before retrying"
+    fi
+    log "binlog replay complete (last file:${CHAIN##* })"
 fi
-#
-# ⚠️ 失败时把 mysql 的报错打出来（滤掉命令行口令那条固定警告）。第一版整个丢进
-# /dev/null，演练失败时只剩一句「replay failed」，原因要另外手工复现才看得到 ——
-# 真出事的那个晚上没有这个余裕。
-# MSYS_NO_PATHCONV：与 aws_cli 同一个 Git Bash 坑（容器内路径 /data 会被改写）。
-if ! MSYS_NO_PATHCONV=1 docker run --rm \
-        -v "$(cd "$WORK_DIR" && pwd):/data:ro" \
-        --entrypoint mysqlbinlog "$MYSQLBINLOG_IMAGE" \
-        --disable-log-bin \
-        --rewrite-db="${LIVE_DB}->${TARGET_DB}" --database="$TARGET_DB" \
-        --start-position="$ANCHOR_POS" "${STOP_ARGS[@]}" "${FILES[@]}" \
-    | $COMPOSE exec -T mysql mysql -uroot -p"$ROOT_PW" 2>"$REPLAY_ERR"; then
-    grep -v 'Using a password on the command line' "$REPLAY_ERR" >&2 || true
-    die "binlog replay failed; ${TARGET_DB} holds the full backup plus a partial replay — drop it before retrying"
-fi
-log "binlog replay complete (last file:${CHAIN##* })"
 
 # --------------------------------------------------------------------------
 # 6. 核对
@@ -259,4 +286,8 @@ done
 
 elapsed=$(( $(date +%s) - started ))
 log "restore complete in ${elapsed}s (RTO budget is 4h — spec §98.1)"
+# 开头那行警告在一长串导入输出之后很容易被看漏，结尾再说一次。
+if [ "$FULL_ONLY" = "1" ]; then
+    log "⚠️ restore point = the moment ${KEY} was taken; NOTHING written after it is in ${TARGET_DB}"
+fi
 log "⚠️ ${TARGET_DB} is NOT the live database. Check it, then drop it (drill) or switch to it (incident)."
