@@ -143,6 +143,21 @@ def test_only_the_edge_proxy_is_published_to_the_host(compose: dict) -> None:
     assert published == {"billing_nginx"}
 
 
+def test_the_edge_config_is_mounted_as_a_directory_not_as_files(compose: dict) -> None:
+    """⚠️ 单文件 bind mount 绑的是 inode：`git checkout` 用新文件替换旧文件之后，容器里
+    看到的永远是旧的 —— reload 读到的也是旧内容。
+
+    T0.9 在生产上踩过（安全响应头部署后外网没有，冒烟拦下回滚）。Linux 上用
+    docker-in-docker 复现：挂文件的容器替换后仍读到 `old`，挂目录的读到 `new`。
+    ⚠️ Windows 的 Docker Desktop 复现不出来，所以只有这条用例能在本地挡住回退。
+    """
+    volumes = compose["services"]["billing_nginx"]["volumes"]
+    assert volumes == ["./deploy/nginx:/etc/nginx/conf.d:ro"]
+    # 挂的是整个目录，其中每个 *.conf 都会被 nginx 加载：只许有 billing.conf 一个。
+    confs = sorted(path.name for path in NGINX_CONF.parent.glob("*.conf"))
+    assert confs == ["billing.conf"]
+
+
 def test_every_proxied_location_forwards_the_correlation_id() -> None:
     """§94 的关联 ID 要跨进程连起来，转发头少一处，那条链路在日志里就断了。"""
     assert "proxy_set_header X-Request-ID" in instructions(NGINX_HEADERS)
