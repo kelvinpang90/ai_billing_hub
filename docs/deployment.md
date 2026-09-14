@@ -529,8 +529,18 @@ Connection refused，被当成「部署失败」而实际只是早了几秒。�
 取值（**在 VPS 上**执行，要的是 `SHA256:` 开头的那一段）：
 
 ```bash
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}'
+ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub | awk '{print $2}'
 ```
+
+⚠️ **必须是 ECDSA 那把，不是 ED25519。**`appleboy/ssh-action@v1.0.3` → `drone-ssh:1.7.3` →
+`golang.org/x/crypto v0.17.0`，它不指定主机密钥算法，按库里的偏好顺序
+`ECDSA256 → ECDSA384 → ECDSA521 → RSA → … → ED25519` 协商 —— 服务器同时有 ECDSA 与
+ED25519 时出示的是 ECDSA，指纹就按那把比。第一版文档写的是 ED25519，首次部署时连续两次
+`ssh: handshake failed: ssh: host key fingerprint mismatch`（2026-09-14），换成 ECDSA 后通过。
+比对发生在登录认证之前，所以这类失败不会触发 fail2ban，VPS 上也没有执行任何东西。
+
+⚠️ 升级 `appleboy/ssh-action` 版本时这条要重新确认：偏好顺序跟着 `x/crypto` 版本走，后续版本
+里有调整过。换版本后第一次部署如果报 fingerprint mismatch，先查新版本协商的是哪种密钥。
 
 **② 检出这次构建的 commit，不 `git pull`。**其它项目用 `git pull --ff-only`，那拿到的
 是 main 的最新 HEAD —— 构建完成后又合进来一个 commit 的话，VPS 上跑的部署脚本与
