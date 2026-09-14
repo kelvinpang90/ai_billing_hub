@@ -31,7 +31,8 @@ EXPECTED_SERVICES = {
     "celery-worker",
     "celery-beat",
     "frontend",
-    "nginx",
+    # 带前缀，见 docker-compose.yml 里 billing_nginx 那段注释。
+    "billing_nginx",
 }
 
 
@@ -139,7 +140,7 @@ def test_no_password_is_hardcoded_in_the_compose_file(compose: dict) -> None:
 def test_only_the_edge_proxy_is_published_to_the_host(compose: dict) -> None:
     """MySQL / Redis / api 都不对宿主机开放，唯一入口是 nginx。"""
     published = {name for name, service in compose["services"].items() if service.get("ports")}
-    assert published == {"nginx"}
+    assert published == {"billing_nginx"}
 
 
 def test_every_proxied_location_forwards_the_correlation_id() -> None:
@@ -239,3 +240,202 @@ def test_nginx_access_log_keeps_query_strings_out() -> None:
     log_format = conf[conf.index("log_format billing_json") : conf.index("server_tokens")]
     assert "$uri" in log_format
     assert "$request," not in log_format and '"$request"' not in log_format
+
+
+# --- T0.9：资源限额与边缘代理 ------------------------------------------------
+
+
+def test_every_service_has_a_memory_limit(compose: dict) -> None:
+    """七个服务都要有内存上限（ADR-0002 的收口条件）。
+
+    ⚠️ 这不是洁癖。生产 VPS 只有 3.6 GB 且已经在用 swap，上面还跑着另外七个项目
+    （见 docs/deployment.md §3.1）。少一个限额，那个容器就能把 MySQL 挤出内存 ——
+    而表现出来的是「数据库莫名其妙重启」，一条完全指不回原因的现象。
+
+    ⚠️ 三个后端服务的限额来自 `x-backend` 锚点，所以删掉锚点里那一行会**一次
+    干掉三个**，而这条用例会红。
+    """
+    missing = [name for name, service in compose["services"].items() if "mem_limit" not in service]
+    assert missing == []
+
+
+def test_redis_caps_its_own_memory_too(compose: dict) -> None:
+    """⚠️ 只设容器 mem_limit 不够，Redis 自己也要知道天花板。
+
+    少了 `maxmemory`，Redis 会一直收数据直到被 OOM kill —— 进程整个消失。
+    设了它才会在自己那一侧按策略淘汰。
+    """
+    command = " ".join(str(part) for part in compose["services"]["redis"]["command"])
+    assert "--maxmemory" in command
+    assert "--maxmemory-policy" in command
+
+
+def test_mysql_pins_its_buffer_pool(compose: dict) -> None:
+    """buffer pool 必须显式钉住，否则换台大内存机器它会自己长大然后撞限额。
+
+    撞限额的现象是「数据库随机重启」，同样指不回原因。
+    """
+    command = " ".join(str(part) for part in compose["services"]["mysql"]["command"])
+    assert "--innodb-buffer-pool-size" in command
+
+
+def test_the_edge_resolves_the_real_client_address() -> None:
+    """⚠️ 生产上本平台的 nginx 接在 infra_nginx 后面（T0.9 决策 ①A）。
+
+    没有这一段的话三处一起坏，而且**全是静默的**：按来源限流退化成全局限流、
+    `/readyz` 的网段限制形同虚设、审计里的 ip_address 全是同一个值。
+    """
+    config = instructions(NGINX_CONF)
+    assert "real_ip_header X-Forwarded-For;" in config
+    assert "set_real_ip_from" in config
+
+
+def test_the_edge_does_not_trust_a_recursive_forwarded_chain() -> None:
+    """⚠️ 反直觉的一条：`real_ip_recursive` 必须保持 off（即不出现）。
+
+    off 时 nginx 取 X-Forwarded-For 的**最后一个**地址 —— 那是上游代理亲自追加的、
+    客户端伪造不了的那个。开了 recursive 反而要依赖「可信名单写得够准」才安全，
+    而名单一宽，客户端塞进去的伪造地址就可能被当成真的。
+    """
+    config = instructions(NGINX_CONF)
+    assert "real_ip_recursive" not in config
+
+
+def test_the_edge_fails_fast_when_the_backend_is_down() -> None:
+    """⚠️ `proxy_connect_timeout` 的默认值是 60 秒。
+
+    T0.7 实测：api 停掉时边缘要 3.96 秒才回 502。不收紧的话，一次后端停机在用户
+    侧表现成「点了没反应」而不是「报错」，而且每个挂着的请求都占着 nginx 一条连接。
+    """
+    config = instructions(NGINX_CONF)
+    assert "proxy_connect_timeout" in config
+    assert "resolver_timeout" in config
+
+
+def test_celery_pins_its_concurrency(compose: dict) -> None:
+    """⚠️ celery 的默认并发 = 宿主机 CPU 核数，而每个 prefork 子进程都会把整个
+    应用 import 一遍。配合 `mem_limit`，内存占用就跟着**跑在哪台机器**变。
+
+    这条是被真实缺陷逼出来的：本地（20 核）第一次加上限额起栈，worker 起了 20
+    个子进程、崩溃重启 4 次，而 `docker inspect` 的 OOMKilled 还是 false ——
+    被杀的是子进程，主进程自己退了 0。一条完全指不回原因的现象。
+    """
+    command = " ".join(str(part) for part in compose["services"]["celery-worker"]["command"])
+    assert "--concurrency" in command
+
+
+def test_beat_does_not_inherit_the_api_memory_limit(compose: dict) -> None:
+    """beat 只把任务名丢进队列，不执行任务，给它和 api 一样的额度是浪费。
+
+    ⚠️ 它从 `x-backend` 锚点继承 `mem_limit`，所以**不显式覆盖就会静默拿到 384m**。
+    在一台只有 1.8 GB 可用的机器上，浪费的那部分是别人要用的。
+    """
+    beat = compose["services"]["celery-beat"]["mem_limit"]
+    api = compose["services"]["api"]["mem_limit"]
+    assert beat != api
+
+
+def test_every_service_has_a_healthcheck(compose: dict) -> None:
+    """七个服务都要有存活探针。
+
+    ⚠️ 两个 celery 服务在 T0.9 之前**一个探针都没有**，而 beat 崩掉是本平台最
+    安静的故障：API 正常、/readyz 正常、日志无错，只有周期任务不再发生 ——
+    而「没发生」是没有信号的。
+    """
+    missing = [
+        name for name, service in compose["services"].items() if "healthcheck" not in service
+    ]
+    assert missing == []
+
+
+def test_the_beat_probe_does_not_go_through_the_broker(compose: dict) -> None:
+    """⚠️ beat 的判据必须是它**自己**的调度状态，不能是 `celery inspect ping`。
+
+    `inspect ping` 问的是 worker，够不着 beat；而且它走 broker 往返，Redis 一挂
+    就会把 beat 也判成红的 —— 那会让「broker 挂了」和「beat 挂了」两件事混在
+    同一个信号里，而它们的处置完全不同。
+    """
+    probe = " ".join(
+        str(part) for part in compose["services"]["celery-beat"]["healthcheck"]["test"]
+    )
+    assert "beat-schedule" in probe
+    assert "inspect" not in probe
+
+
+def test_the_beat_probe_tolerates_a_cold_start(compose: dict) -> None:
+    """起步宽限必须大于一个调度周期。
+
+    ⚠️ beat 刚起来时还没派发过任何任务，文件时间戳停在启动时刻。没有这段宽限，
+    它会在第一个周期内就被判不健康 —— 而那是**假警报**，最伤告警的可信度。
+    """
+    beat = compose["services"]["celery-beat"]["healthcheck"]
+    assert beat["start_period"] == "90s"
+
+
+def test_the_worker_probe_names_itself(compose: dict) -> None:
+    """⚠️ 指名问自己，不要广播。
+
+    广播式的 `inspect ping` 只要**有人**回应就算通过。将来跑多个 worker 时，
+    一个死掉的 worker 会被它的同伴掩护，而探针一路绿着。
+    """
+    probe = " ".join(
+        str(part) for part in compose["services"]["celery-worker"]["healthcheck"]["test"]
+    )
+    assert "-d" in probe
+    # ⚠️ 两个 `$` 是必需的：单个会被 compose **在宿主机上**插值成空串。
+    assert "$$HOSTNAME" in probe
+
+
+# --- T0.9：接入 VPS 共享的 proxy_net -----------------------------------------
+
+PROD_OVERRIDE = REPO_ROOT / "docker-compose.prod.yml"
+
+
+@pytest.fixture(scope="module")
+def prod_override() -> dict:
+    return yaml.safe_load(PROD_OVERRIDE.read_text(encoding="utf-8"))
+
+
+def test_the_published_port_binds_to_loopback_by_default(compose: dict) -> None:
+    """⚠️ **Docker 发布的端口会绕过 UFW。**
+
+    `8080:80` 这种写法即使 ufw 拒绝了 8080 也照样能从公网访问 —— 上线后任何人都能
+    用 `http://<VPS>:8080` **明文**直连登录接口，完全绕开 infra_nginx 的 HTTPS。
+    所以默认必须只绑 127.0.0.1。
+    """
+    ports = compose["services"]["billing_nginx"]["ports"]
+    assert ports == ["${BILLING_HTTP_BIND:-127.0.0.1}:${BILLING_HTTP_PORT:-8080}:80"]
+
+
+def test_only_the_edge_joins_the_shared_proxy_network(prod_override: dict) -> None:
+    """只有边缘 nginx 挂 `proxy_net`，别的一个都不挂。
+
+    ⚠️ `proxy_net` 上还挂着另外八个项目。api / mysql / redis 一旦挂上去，任何一个
+    项目的容器被攻破都能直接够到我们的数据库与未经限流的 api。
+    """
+    joined = {
+        name
+        for name, service in prod_override["services"].items()
+        if "proxy_net" in (service.get("networks") or [])
+    }
+    assert joined == {"billing_nginx"}
+    assert prod_override["networks"]["proxy_net"]["external"] is True
+
+
+def test_the_edge_keeps_its_default_network_in_production(prod_override: dict) -> None:
+    """⚠️ 一个服务一旦写了 `networks:`，compose 就不再自动挂默认网络。
+
+    只写 `proxy_net` 的话，nginx 够不着只在 default 上的 `api:8000` 与 `frontend:80`
+    —— 部署成功、健康检查也过（它只问 nginx 自己），但每个请求都是 502。
+    """
+    assert "default" in prod_override["services"]["billing_nginx"]["networks"]
+
+
+def test_the_edge_service_name_cannot_collide_on_the_shared_network(compose: dict) -> None:
+    """⚠️ compose 把**服务名**注册成它所挂每个网络上的 DNS 别名。
+
+    `vps_infra` 自己的服务就叫 `nginx`；我们也叫 `nginx` 的话，`proxy_net` 上同一个
+    名字会解析到两个容器。`erp_os` 的 compose 里记着同一个坑。
+    """
+    assert "nginx" not in compose["services"]
+    assert "billing_nginx" in compose["services"]

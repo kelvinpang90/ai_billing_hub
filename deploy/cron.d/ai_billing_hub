@@ -1,0 +1,29 @@
+# /etc/cron.d/ai_billing_hub —— 备份与 binlog 离机的定时任务（spec §98.1；T0.9）。
+#
+# 安装（在 VPS 的 /opt/ai_billing_hub 里，用部署用户执行）：
+#
+#     sed "s/@DEPLOY_USER@/$(id -un)/" deploy/cron.d/ai_billing_hub \
+#         | sudo tee /etc/cron.d/ai_billing_hub >/dev/null
+#     sudo chmod 0644 /etc/cron.d/ai_billing_hub
+#
+# ⚠️ 用 /etc/cron.d 而不是 `crontab <file>`：后者**整个替换**该用户的 crontab，
+#    同一台机器上其它项目的定时任务会被一并抹掉。
+# ⚠️ 用户名是占位符：真实的部署账号不进公开仓库。
+# ⚠️ 日志进 syslog：`journalctl -t billing-binlog` / `journalctl -t billing-backup`。
+# ⚠️ 失败与破 RPO 以 err 级别单独进 syslog：`journalctl -t billing-binlog -p err`。
+#    把它送到人手里是告警通道的事（§95），这个文件不负责。
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# binlog 离机，**每分钟**。
+# ⚠️ 锁在脚本里，不在这一行：上一轮还没跑完时，本轮仍要先查一次「binlog 多久没离机」
+#    再跳过。锁放在 cron 这一行的话，一次卡死的运行会让之后每一轮都在进脚本之前就被
+#    挡掉，那种状态下永远不会有人报警（Codex #42 R2）。
+# ⚠️ 每分钟而不是每 4 分钟：被跳过的代价是一分钟，而不是一整个周期。空闲时脚本不
+#    FLUSH、不上传，所以每分钟一次不会造出一堆空文件。
+* * * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && bash deploy/binlog_ship.sh 2>&1 | logger -t billing-binlog
+
+# 全量，每天一次。⚠️ cron 按**系统时区**解释：VPS 是 UTC 时 19:17 = 马来西亚 03:17，
+# 业务低谷；不是 UTC 的话按 `timedatectl` 换算后改这一行。避开整点，免得与其它项目撞车。
+17 19 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-backup.lock bash deploy/backup.sh 2>&1 | logger -t billing-backup

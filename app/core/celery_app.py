@@ -68,6 +68,18 @@ def create_celery_app(settings: Settings) -> Celery:
         # 同理：默认会把 worker 的 stdout/stderr 重定向进 logger，print 出来的
         # 东西会绕过我们的 formatter。
         worker_redirect_stdouts=False,
+        # ⚠️ 每派发一次就把调度状态落盘（默认是**每 3 分钟**才同步一次）。
+        #
+        # 这不是为了持久化，是为了**让 beat 有一个可探测的存活信号**：beat 自己
+        # 不接受 `celery inspect ping`（那问的是 worker），而它崩掉是**静默故障** ——
+        # 周期任务全停、API 一切正常、没有任何报错。改成每次派发都落盘之后，
+        # `beat-schedule` 文件的 mtime 就成了「beat 上一次真的干活是什么时候」，
+        # 容器健康检查拿它做判据（见 docker-compose.yml 的 celery-beat）。
+        #
+        # ⚠️ 默认值下这个信号**不够用**：实测连续观察三个 60 秒周期，mtime 停在
+        # 第一次同步的时刻不动。拿默认行为做探针，等于给它一个 3 分钟的盲区，
+        # 而且那个盲区的宽度是 celery 的内部默认值，我们改不了也看不见。
+        beat_sync_every=1,
         # 周期任务在需要它们的那个任务里注册（对账扫描、状态轮询……）。
         # **不放示例条目** —— 示例条目会被真的跑起来。
         beat_schedule={

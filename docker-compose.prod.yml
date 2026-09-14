@@ -1,0 +1,25 @@
+# 生产覆盖（T0.9）：把边缘 nginx 接到 VPS 共享的 `proxy_net` 上。
+#
+# ⚠️ 这个文件**只在生产 VPS 上**和 docker-compose.yml 一起用。本地开发不需要它 ——
+# 本地没有 `proxy_net`，而它被声明成 external，缺了会让 `docker compose up` 直接失败。
+#
+# 在 VPS 的 `.env` 里加一行，之后所有 `docker compose` 命令（部署、备份、恢复、手工排障）
+# 都会自动带上它，不会有哪一次忘了：
+#
+#     COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+#
+# 接入方式沿用本工作区其它项目的约定（见 vps_infra 与 erp_os）：infra_nginx 在
+# `proxy_net` 上按**服务名**找到各项目，TLS 在它那层终止，各项目不发布公网端口。
+
+services:
+  billing_nginx:
+    # ⚠️ `default` **必须显式列出来**。一个服务一旦写了 `networks:`，compose 就不再
+    # 自动把它挂到项目默认网络上 —— 只写 `proxy_net` 的话，nginx 就够不着 `api:8000`
+    # 和 `frontend:80` 了，而那两个只在 default 上。
+    networks:
+      - default
+      - proxy_net
+
+networks:
+  proxy_net:
+    external: true
