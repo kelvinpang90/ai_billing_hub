@@ -460,3 +460,39 @@ def test_production_backends_send_secure_cookies(compose: dict, prod_override: d
         environment = prod_override["services"][name]["environment"]
         assert environment["BILLING_SESSION_COOKIE_SECURE"] == "true", name
         assert environment["BILLING_ENVIRONMENT"] == "production", name
+
+
+SECURITY_HEADERS = (
+    'add_header X-Frame-Options "DENY" always;',
+    "add_header Content-Security-Policy \"frame-ancestors 'none'\" always;",
+    'add_header X-Content-Type-Options "nosniff" always;',
+    'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
+    'add_header Strict-Transport-Security "max-age=31536000" always;',
+)
+
+
+def test_the_edge_sends_security_headers() -> None:
+    """T0.9 首次部署后外网实测：页面与 API 响应上一个安全响应头都没有。
+
+    缺 X-Frame-Options / frame-ancestors = 登录页可以被嵌进别人的 iframe 做点击劫持；
+    缺 HSTS = 用户手敲 http:// 的那一次仍是明文。`always` 让错误响应也带上。
+    """
+    config = instructions(NGINX_CONF)
+    for header in SECURITY_HEADERS:
+        assert header in config, header
+
+
+def test_no_location_silently_drops_the_security_headers() -> None:
+    """⚠️ nginx 的继承规则：location 里只要写了一条 add_header，就**完全不再继承**
+    server 层的所有 add_header。
+
+    有人为了给某个路径加个 Cache-Control，会静默丢掉全部安全头 —— 而页面照常工作，
+    没有任何报错。所以 add_header 只允许出现在第一个 location 之前；被 include 进每个
+    location 的代理头文件里也不许有。
+    """
+    config = instructions(NGINX_CONF)
+    first_location = config.index("location ")
+    add_headers = [i for i in range(len(config)) if config.startswith("add_header", i)]
+    assert add_headers, "no add_header at all"
+    assert all(i < first_location for i in add_headers)
+    assert "add_header" not in instructions(NGINX_HEADERS)
