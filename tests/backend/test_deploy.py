@@ -213,6 +213,7 @@ def test_a_local_only_backup_is_an_explicit_failure() -> None:
 RESTORE = REPO_ROOT / "deploy" / "restore.sh"
 BINLOG_SHIP = REPO_ROOT / "deploy" / "binlog_ship.sh"
 CRON = REPO_ROOT / "deploy" / "cron.d" / "ai_billing_hub"
+DRILL = REPO_ROOT / "deploy" / "restore_drill.sh"
 
 
 def test_restore_refuses_to_overwrite_the_live_database() -> None:
@@ -242,7 +243,7 @@ def test_s3_credentials_never_appear_on_a_command_line() -> None:
     同机任何用户都读得到，而那台 VPS 上还跑着另外八个项目。必须用不带值的
     `-e NAME`，让 docker 从自己的环境里取。
     """
-    for path in (BACKUP, RESTORE, BINLOG_SHIP):
+    for path in (BACKUP, RESTORE, BINLOG_SHIP, DRILL):
         script = uncommented(path)
         assert "-e AWS_ACCESS_KEY_ID" in script
         assert "-e AWS_ACCESS_KEY_ID=" not in script
@@ -267,7 +268,7 @@ def test_no_comment_breaks_a_line_continuation() -> None:
     `docker run` 之间，前两个凭据变成当前 shell 里**没有导出**的变量，
     容器拿不到，报 `Unable to locate credentials` —— 看着像凭据填错了。
     """
-    for path in (SCRIPT, BACKUP, RESTORE, BINLOG_SHIP):
+    for path in (SCRIPT, BACKUP, RESTORE, BINLOG_SHIP, DRILL):
         lines = path.read_text(encoding="utf-8").splitlines()
         for number, (line, following) in enumerate(zip(lines, lines[1:], strict=False), start=1):
             if line.rstrip().endswith("\\") and following.strip().startswith("#"):
@@ -488,6 +489,59 @@ def test_a_skipped_or_rehearsal_run_never_reports_success() -> None:
 
     backup = uncommented(BACKUP)
     assert backup.rstrip().endswith('[ "$DRY_RUN" = "1" ] || heartbeat "" "$(basename "$CIPHER")"')
+
+
+def test_the_weekly_drill_restores_the_offsite_copy_with_the_real_restore_script() -> None:
+    """⚠️ 演练验的必须是出事时真会用的东西：R2 上那份，用 restore.sh 恢复。
+
+    从本机 backups/ 取的话，验证不了「离机那份能不能用」；自己另写一套导入逻辑的话，
+    验证不了 restore.sh。每周日跑一次（Kelvin 2026-09-15），排在当天全量之后。
+    """
+    drill = uncommented(DRILL)
+    assert '--prefix "full/"' in drill
+    assert 'bash deploy/restore.sh "$KEY" "$DRILL_DB"' in drill
+    cron = [line for line in uncommented(CRON).splitlines() if "restore_drill.sh" in line]
+    assert len(cron) == 1
+    assert cron[0].startswith("47 4 * * 0 ")
+
+
+def test_the_weekly_drill_can_only_ever_drop_its_own_database() -> None:
+    """⚠️ 演练在生产那台 MySQL 上做，而清理会无条件 DROP 演练库。
+
+    库名写死、再与生产库名比一次；DROP 关 binlog —— 否则这条语句被推到 R2，下次演练
+    重放到它会删掉正在恢复的库。无论成败都清理（整库副本、整库密文、440 MB 镜像）。
+    """
+    drill = uncommented(DRILL)
+    assert 'DRILL_DB="billing_autodrill"' in drill
+    assert "BILLING_DRILL" not in drill.replace("BILLING_HEALTHCHECK_DRILL_URL", "")
+    assert '[ "$DRILL_DB" != "$LIVE_DB" ]' in drill
+    assert "SET sql_log_bin=0; DROP DATABASE IF EXISTS \\`${DRILL_DB}\\`" in drill
+    assert drill.index("trap cleanup EXIT") < drill.index("bash deploy/restore.sh")
+    assert 'rm -rf "$WORK_DIR"' in drill
+    assert 'WORK_DIR="./restore/autodrill"' in drill
+
+
+def test_the_weekly_drill_opens_a_restored_secret_without_leaking_it() -> None:
+    """⚠️ 库导得进来不等于能用：主密钥与密文对不上时，所有集成凭据与 TOTP 注册全部作废。
+
+    解密在断网、以应用用户运行、密钥只读挂入的容器里做；**只打印 decrypted** ——
+    这一轮的输出进 syslog，任何码或密钥都不许出现在里面。
+    """
+    drill = uncommented(DRILL)
+    run = drill[drill.index('RESULT="$(MSYS_NO_PATHCONV=1 docker run') : drill.index("unset TOKEN")]
+    for flag in ("--network none", "--user 10001:10001", ':/drill/master.key:ro"', "-e TOKEN "):
+        assert flag in run
+    assert 'print("decrypted")' in run
+    assert run.count("print(") == 1
+    assert "pyotp" not in run
+
+
+def test_the_weekly_drill_reports_to_its_own_heartbeat_check() -> None:
+    """失败立刻 /fail；成功只在所有核对都过了之后发（放在脚本最后）。"""
+    drill = uncommented(DRILL)
+    assert "env_value BILLING_HEALTHCHECK_DRILL_URL" in drill
+    assert 'heartbeat /fail "restore drill failed: $*"' in drill
+    assert drill.rstrip().endswith('heartbeat "" "$SUMMARY"')
 
 
 def test_the_full_backup_closes_the_binlog_its_anchor_points_into() -> None:
