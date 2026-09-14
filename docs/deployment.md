@@ -318,7 +318,7 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 
 ### 5.2 §98.1 要求而现在一件都没有的
 
-- [ ] 备份成功与**新鲜度**的自动监控（§95 的 `backup age and backup failure`）
+- [ ] 备份成功与**新鲜度**的自动监控（§95 的 `backup age and backup failure`）—— 脚本侧已落地（§5.2.6），**Healthchecks.io 上配好两个检查、`.env` 填好地址之后才算**
 - [ ] **季度恢复演练**，且要验证钱包、账本、用量事件、支付、对账单、文档的完整性
 - [ ] 书面的**灾难恢复顺序**与恢复后对账
 - [x] 保留期（与 §112 的财务保留期挂钩，见决策 ⑤）—— R2 上每日全量与 binlog 35 天、月备份 12 个月、年备份永久（Kelvin 2026-09-14），见 §5.2.1 末尾
@@ -531,8 +531,57 @@ Ubuntu 容器里用真 `flock`：锁被占且心跳 10 分钟前 → 跳过**并
 ⚠️ 装进 `/etc/cron.d` 而不是 `crontab <file>` —— 后者会**整个替换**该用户的 crontab，
 同机其它项目的定时任务一并抹掉。安装命令在那个文件开头。
 
-⚠️ **`err` 级别的 syslog 不是告警。**它得被送到人手里（邮件 / IM / 外部心跳服务），而本项目
-还没有任何告警通道 —— 那是 §5.2 的新鲜度监控与 §95，**上线前必须补**，这里没有做。
+⚠️ **`err` 级别的 syslog 不是告警。**它得被送到人手里 —— 两个备份任务现在走外部心跳（§5.2.6）。
+§95 其余指标的告警通道仍未做。
+
+### 5.2.6 心跳监控（Kelvin 2026-09-15 定：Healthchecks.io + Telegram）
+
+⚠️ **最危险的故障不写日志**：cron 没跑、整台 VPS 挂了、脚本卡死 —— 任何基于日志的告警都发不出来。
+所以用 dead man's switch：脚本**成功时**向外部服务 ping 一次，**失败时**立刻 ping `/fail`；
+外部服务在「该到的 ping 没到」或「收到 fail」时通知人，恢复后再通知一次。
+
+| 任务 | `.env` 变量 | 成功 ping | 立刻 `/fail` | 不 ping |
+| --- | --- | --- | --- | --- |
+| `binlog_ship.sh` | `BILLING_HEALTHCHECK_BINLOG_URL` | 推送完成、空闲（无写入） | 任何失败、**破 RPO**（含被锁跳过的那轮） | 被锁跳过的那轮 —— 否则一次卡死的推送会被每分钟的「成功」盖住 |
+| `backup.sh` | `BILLING_HEALTHCHECK_BACKUP_URL` | 整轮完成（带上文件名） | 任何失败 | `--dry-run`（没有上传） |
+
+- **两个检查分开**：频率差 1440 倍，合成一个的话 binlog 每分钟的心跳会把「全量三天没跑」盖住
+- ping 带 `-m 10` 超时，失败只记一行、不让本轮失败：数据已经离机，监控服务抖动不该变成「推送失败」；
+  binlog 那边卡住的 ping 还会一直占着锁
+- 没配地址时照常运行，但失败时多打一行 `nobody will be told about this`
+- ⚠️ 心跳地址**不进仓库**：知道它的人都能伪造「成功」
+
+**为什么是 Telegram 不是 WhatsApp**：Healthchecks.io 的 WhatsApp 通知按条计费，定价页上只有
+US$20/月的 Business 档起才有额度（「50 SMS & WhatsApp credits」），免费档没有；Telegram 属于普通
+聊天集成。也不走自家的 `whatsapp_gateway`：它和本平台在同一台 VPS 上，**机器挂了告警一起挂**，
+而那正是最需要告警的时候。
+
+**配置步骤**（Kelvin 做；⚠️ 先部署并按 §5.2.5 重装 cron，否则全量仍在 19:17 跑，检查会一直报迟到）：
+
+1. 注册 healthchecks.io（免费档：20 个检查）
+2. Integrations → 添加 **Telegram**，按页面提示在 Telegram 里给它的 bot 发消息完成绑定
+3. 新建检查 `ai_billing_hub binlog`：Schedule 选 **Simple**，Period **1 分钟**，Grace **5 分钟**（= RPO）
+4. 新建检查 `ai_billing_hub full backup`：Schedule 选 **Cron**，表达式 `17 3 * * *`，时区 **Asia/Kuala_Lumpur**，Grace **1 小时**
+5. 两个检查都勾上 Telegram 通知
+6. 把两个检查各自的 Ping URL 写进 VPS 的 `.env`：
+   ```
+   BILLING_HEALTHCHECK_BINLOG_URL=https://hc-ping.com/<binlog 检查的 uuid>
+   BILLING_HEALTHCHECK_BACKUP_URL=https://hc-ping.com/<全量检查的 uuid>
+   ```
+7. 验证：一分钟内 binlog 检查变绿；手工跑一次 `bash deploy/backup.sh`，全量检查变绿
+
+**本地验证**（真 MySQL 8.4 + MinIO + 一个记录请求的假心跳服务）：
+
+| 场景 | 收到的 ping |
+| --- | --- |
+| binlog 推送两个文件 | `POST /hc-binlog` |
+| binlog 空闲 | `POST /hc-binlog` |
+| 锁被占 + 上次成功在 10 分钟前 | 只有 `POST /hc-binlog/fail`，正文 `RPO breached: … 600s ago (budget 300s)` |
+| 全量成功 | `POST /hc-backup`，正文是文件名 |
+| 全量 `--dry-run` | 无 |
+| 全量失败（R2 连不上） | `POST /hc-backup/fail`，正文 `upload failed; …`，exit 1 |
+| 心跳服务连不上 | 无；记 `heartbeat ping failed`，binlog 推送仍 exit 0 |
+| 没配地址 + 全量失败 | 无；多打 `nobody will be told about this` |
 
 ### 5.3 恢复之后必须做的对账
 

@@ -15,6 +15,8 @@
 #     BILLING_R2_BUCKET / BILLING_R2_ENDPOINT
 #     R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY
 #     BILLING_BACKUP_PASSPHRASE
+#     BILLING_HEALTHCHECK_BACKUP_URL   心跳地址（docs/deployment.md §5.2.6）；binlog_ship.sh 用
+#                                      BILLING_HEALTHCHECK_BINLOG_URL，**两个检查分开**
 #
 # ⚠️ 两条与「凭据放 .env」绑定的注意事项：
 #   1. 这个 .env 从此同时是「数据库口令」和「备份钥匙」—— 一次误贴同时交出
@@ -35,7 +37,17 @@ BACKUP_DIR="${BILLING_BACKUP_DIR:-./backups}"
 LOCAL_KEEP_DAYS="${BILLING_BACKUP_KEEP_DAYS:-3}"
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-die() { log "ERROR: $*"; exit 1; }
+# ⚠️ 失败要**立刻**发 /fail，不等外部服务等满宽限期才发现心跳没到。
+# heartbeat 定义在 env_value 之后，但 die 只在读配置之后才会被调用。
+die() {
+    log "ERROR: $*"
+    if [ "$DRY_RUN" != "1" ]; then
+        [ -n "$(env_value BILLING_HEALTHCHECK_BACKUP_URL)" ] \
+            || log "no BILLING_HEALTHCHECK_BACKUP_URL configured: nobody will be told about this"
+        heartbeat /fail "$*"
+    fi
+    exit 1
+}
 
 # S3 客户端跑在容器里，不装在宿主机上。
 #
@@ -74,6 +86,17 @@ env_value() {
     local key="$1"
     [ -f "$ENV_FILE" ] || return 0
     sed -n "s/^${key}=//p" "$ENV_FILE" | head -1
+}
+
+# 心跳（dead man's switch，docs/deployment.md §5.2.6）。每天一次的全量，外部服务在
+# 「该到没到」时通知 —— cron 没跑、机器挂了、脚本卡死都不会写出任何 err。
+# ⚠️ ping 失败只记一行，不让本轮失败：备份已经在桶里。
+heartbeat() {
+    local suffix="$1" body="${2:-}" url
+    url="$(env_value BILLING_HEALTHCHECK_BACKUP_URL)"
+    [ -n "$url" ] || return 0
+    curl -fsS -m 10 --retry 2 -o /dev/null --data-raw "$body" "${url}${suffix}" \
+        || log "heartbeat ping failed (${suffix:-success}); the monitor will treat this run as missing"
 }
 
 # --------------------------------------------------------------------------
@@ -285,3 +308,5 @@ log "pruning local copies older than ${LOCAL_KEEP_DAYS} days"
 find "$BACKUP_DIR" -name 'billing-*.sql.enc' -mtime "+${LOCAL_KEEP_DAYS}" -delete 2>/dev/null || true
 
 log "backup complete: $(basename "$CIPHER")"
+# 演练用的 --dry-run 没有上传，不能让监控以为今天有了一份离机备份。
+[ "$DRY_RUN" = "1" ] || heartbeat "" "$(basename "$CIPHER")"
