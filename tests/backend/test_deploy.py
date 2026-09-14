@@ -451,6 +451,18 @@ def test_each_binlog_is_verified_before_upload_and_confirmed_after() -> None:
     assert 'KEY="binlog/${SERVER_UUID}/' in script
 
 
+def test_the_full_backup_closes_the_binlog_its_anchor_points_into() -> None:
+    """⚠️ 锚点落在正在写的 binlog 上；之后没有写入的话 binlog_ship.sh 不 FLUSH，它永远到不了 R2。
+
+    VPS 演练撞到过：最新那份全量恢复时报「anchor binlog has not been shipped」。
+    FLUSH 必须在上传确认之后 —— 失败时好备份已经在桶里。
+    """
+    script = uncommented(BACKUP)
+    flush = script.index("-e 'FLUSH BINARY LOGS'")
+    assert script.index("uploaded and confirmed") < flush
+    assert flush < script.index("keep_copy() {")
+
+
 def test_the_full_backup_names_its_binlog_chain() -> None:
     """锚点只给出 `binlog.000002` 这样的编号，而编号每台主机都从 000001 开始。
 
