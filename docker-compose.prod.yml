@@ -11,7 +11,25 @@
 # 接入方式沿用本工作区其它项目的约定（见 vps_infra 与 erp_os）：infra_nginx 在
 # `proxy_net` 上按**服务名**找到各项目，TLS 在它那层终止，各项目不发布公网端口。
 
+# ⚠️ **后端三个服务都要覆盖，一个都不能漏。**docker-compose.yml 的 `x-backend` 为了
+# 本地 http 能登录，把这两项写死成了 local / false。只覆盖 api 的话，worker 与 beat
+# 里读到的仍是 local —— 现在它们不发 cookie，但「同一份代码三个进程三种环境」迟早咬人。
+#
+# ⚠️ 不覆盖的后果：会话 cookie 不带 Secure。用户只要访问一次 `http://`，浏览器就先把
+# 会话令牌**明文**发出去，然后才被 infra_nginx 301 到 https。
+# compose 对 `environment` 按键合并，所以这里只写要改的两项，其余沿用基础文件。
+x-production-backend-env: &production-backend-env
+  BILLING_ENVIRONMENT: production
+  BILLING_SESSION_COOKIE_SECURE: "true"
+
 services:
+  api:
+    environment: *production-backend-env
+  celery-worker:
+    environment: *production-backend-env
+  celery-beat:
+    environment: *production-backend-env
+
   billing_nginx:
     # ⚠️ `default` **必须显式列出来**。一个服务一旦写了 `networks:`，compose 就不再
     # 自动把它挂到项目默认网络上 —— 只写 `proxy_net` 的话，nginx 就够不着 `api:8000`
