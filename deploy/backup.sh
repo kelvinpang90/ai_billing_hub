@@ -208,6 +208,23 @@ else
     log "uploaded and confirmed (${REMOTE_SIZE} bytes)"
 
     # ----------------------------------------------------------------------
+    # 4a. 关闭锚点所在的 binlog
+    # ----------------------------------------------------------------------
+    #
+    # ⚠️ dump 的锚点落在**正在写**的那个 binlog 上。之后若一直没有写入，binlog_ship.sh
+    # 按设计不 FLUSH，那个文件就一直开着、永远到不了 R2 —— 于是恢复**最新这份**全量时
+    # restore.sh 在 R2 上找不到锚点，拒绝恢复。VPS 恢复演练撞到过（2026-09-15：19:17 那份
+    # 全量的锚点是 binlog.000005:158，之后没有写入）。夜里、周末正是这种状态，而机器
+    # 偏偏挂在那时的话，能用的最新备份恢复不了。
+    #
+    # 这里 FLUSH 一次把它关掉：下一分钟 binlog_ship.sh 看到「位置变了、最新已关闭的文件
+    # 没推过」，照常推走。放在上传确认**之后**：FLUSH 失败时备份本身已在桶里，只让这一轮
+    # 报失败，不丢一份好备份。
+    $COMPOSE exec -T mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e 'FLUSH BINARY LOGS' 2>/dev/null \
+        || die "the backup IS uploaded, but FLUSH BINARY LOGS failed; until the next write, restoring this backup will be refused for a missing anchor binlog"
+    log "closed the anchor binlog; binlog_ship.sh ships it within a minute"
+
+    # ----------------------------------------------------------------------
     # 4b. 月备份 / 年备份
     # ----------------------------------------------------------------------
     #
