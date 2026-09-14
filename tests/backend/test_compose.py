@@ -439,3 +439,24 @@ def test_the_edge_service_name_cannot_collide_on_the_shared_network(compose: dic
     """
     assert "nginx" not in compose["services"]
     assert "billing_nginx" in compose["services"]
+
+
+def test_production_backends_send_secure_cookies(compose: dict, prod_override: dict) -> None:
+    """⚠️ 基础文件为了本地 http 能登录，把 cookie 的 Secure 关掉、环境标成 local。
+
+    生产覆盖漏掉的话，会话 cookie 不带 Secure：用户只要访问一次 `http://`，浏览器就先把
+    会话令牌明文发出去，才被 301 到 https。T0.9 首次部署前整理上线手册时发现的。
+
+    后端服务从基础文件里**推出来**，不手写清单 —— 以后加一个后端服务、忘了在生产
+    覆盖里加，这条会红。本地容器实测过：三个服务里 `get_settings()` 都是 production / True。
+    """
+    backends = {
+        name
+        for name, service in compose["services"].items()
+        if "BILLING_SESSION_COOKIE_SECURE" in (service.get("environment") or {})
+    }
+    assert backends == {"api", "celery-worker", "celery-beat"}
+    for name in backends:
+        environment = prod_override["services"][name]["environment"]
+        assert environment["BILLING_SESSION_COOKIE_SECURE"] == "true", name
+        assert environment["BILLING_ENVIRONMENT"] == "production", name
