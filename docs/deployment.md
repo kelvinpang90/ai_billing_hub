@@ -123,6 +123,14 @@ COMPOSE_PATH_SEPARATOR=:
 每次部署都先 `nginx -t` 再 reload（无效算部署失败、走回滚），冒烟额外确认 `X-Frame-Options: DENY`
 —— 漏掉 reload 时这是唯一能发现的地方。本地演练四种情况都验证过（见 §9.2）。
 
+⚠️ **光 reload 还不够，第一版上线就被冒烟拦下回滚了**（run 34815465122）：`nginx -t` 与 reload
+都成功，外网仍然没有安全头。原因是配置**按单个文件**挂进容器，而单文件 bind mount 绑的是
+inode 不是路径 —— `git checkout` 用新文件替换旧文件后，容器里看到的永远是旧的，reload 读到的
+也是旧内容。改成**挂整个 `deploy/nginx/` 目录**。Linux 上（docker-in-docker）按生产的顺序复现：
+旧配置起 nginx → 按 git 的方式替换文件 → `nginx -t` + reload —— 挂文件的仍无 `X-Frame-Options`，
+挂目录的出现 `DENY`。⚠️ **Windows 的 Docker Desktop 复现不出来**（挂文件也能读到新内容），
+这正是本地演练没发现的原因；`tests/backend/test_compose.py` 钉着挂载方式。
+
 ### ⚠️ 这个拓扑有一个后果，不是可选的
 
 **已定走 `infra_nginx`（①A），所以 `real_ip_header` + `set_real_ip_from`

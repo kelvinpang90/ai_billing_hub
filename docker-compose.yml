@@ -320,8 +320,16 @@ services:
       # 只给宿主机自己用：本地开发的浏览器、部署脚本的冒烟测试。
       - "${BILLING_HTTP_BIND:-127.0.0.1}:${BILLING_HTTP_PORT:-8080}:80"
     volumes:
-      - ./deploy/nginx/billing.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./deploy/nginx/billing-proxy-headers.inc:/etc/nginx/conf.d/billing-proxy-headers.inc:ro
+      # ⚠️ **挂整个目录，不挂单个文件。**单文件的 bind mount 绑的是 inode，不是路径：
+      # `git checkout` 更新文件的方式是写一个新文件再替换（新 inode），容器里看到的
+      # 永远是部署那一刻之前的旧文件 —— reload 读到的也是旧内容。T0.9 在生产上踩过：
+      # 安全响应头部署后 reload 成功、外网仍然没有，被冒烟拦下回滚。Linux 上
+      # （docker-in-docker）实测复现；⚠️ Windows 的 Docker Desktop **复现不出来**，本地演练发现不了。
+      #
+      # 挂目录后 nginx 镜像自带的 conf.d/default.conf 被整体遮住，只剩这里的两个文件：
+      # billing.conf（被 nginx.conf 的 `include conf.d/*.conf` 加载）与
+      # billing-proxy-headers.inc（不是 .conf，只被 billing.conf 显式 include）。
+      - ./deploy/nginx:/etc/nginx/conf.d:ro
     depends_on:
       - api
       - frontend
