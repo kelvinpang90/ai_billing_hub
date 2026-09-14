@@ -308,19 +308,66 @@ def test_the_dispatch_ref_is_validated_before_any_shell_sees_it() -> None:
     assert "ref: ${{ steps.resolve.outputs.tag }}" in workflow
 
 
-def test_binlogs_leave_the_host_on_a_schedule_tight_enough_for_the_rpo() -> None:
-    """⚠️ RPO ≤ 5 分钟靠 binlog 离机，不靠每天一次的全量（阻断项 3）。
+def test_binlogs_leave_the_host_every_minute_and_the_lock_is_not_in_cron() -> None:
+    """⚠️ RPO ≤ 5 分钟靠 binlog 离机，不靠每天一次的全量（R1 阻断项 3）。
 
-    丢数据的上限是「间隔 + 一次推送的耗时」，所以间隔必须**严格小于** 5 分钟。
-    全量也必须被调度 —— 只能手工跑的备份等于没有备份。
+    R2 阻断项：`*/4` + cron 行上的 `flock -n`，上一轮没跑完时本轮被静默跳过，
+    离机间隔变成 8 分钟。现在每分钟一次（跳过只损失一分钟），而且**锁不在 cron 行上**
+    —— 锁在那里的话，一次卡死的运行会让之后每一轮在进脚本之前就被挡掉，脚本里的
+    新鲜度检查永远不会执行。全量也必须被调度。
     """
     cron = uncommented(CRON)
     binlog = [line for line in cron.splitlines() if "binlog_ship.sh" in line]
     assert len(binlog) == 1
-    assert binlog[0].startswith("*/4 ")
+    assert binlog[0].startswith("* * * * * ")
+    assert "flock" not in binlog[0]
     assert any("deploy/backup.sh" in line for line in cron.splitlines())
     # ⚠️ 真实部署账号不进公开仓库。
     assert "@DEPLOY_USER@" in cron
+
+
+def test_a_skipped_binlog_run_still_checks_freshness() -> None:
+    """⚠️ 调度保证不了 RPO（上传本身可以慢过 5 分钟），只能让它破掉时不可能不被发现。
+
+    锁与新鲜度检查排在读配置、连数据库**之前**，被跳过的那一轮也要先查一次。
+    在 Ubuntu 容器里用真 flock 验证过：锁被占着、心跳 10 分钟前 → 跳过**并且**
+    `logger -p user.err … RPO breached`；心跳新鲜时安静跳过。
+    """
+    script = uncommented(BINLOG_SHIP)
+    lock = script.index("flock -n 9")
+    assert lock < script.index("env_value BILLING_BACKUP_PASSPHRASE")
+    assert lock < script.index("FLUSH BINARY LOGS")
+    skip_branch = script[lock : script.index("skipping this one")]
+    assert "check_freshness" in skip_branch
+    assert "RPO breached" in script
+    # 失败与破 RPO 以 err 级别单独写 syslog，不和每分钟的 info 输出混在一起。
+    assert "logger -p user.err" in script
+    assert 'die() { alarm "$*"; exit 1; }' in script
+
+
+def test_the_freshness_clock_starts_at_the_flush_not_at_the_end_of_the_run() -> None:
+    """⚠️ FLUSH 之后写入的数据要等下一轮才离机。
+
+    用本轮结束的时刻记心跳，会把暴露窗口少算一整次上传的耗时 —— 恰好是上传变慢、
+    最需要报警的时候少算得最多。
+    """
+    script = uncommented(BINLOG_SHIP)
+    assert script.index('FLUSHED_AT="$(date +%s)"') < script.index("mysql_q 'FLUSH BINARY LOGS'")
+    assert 'mark_success "$FLUSHED_AT"' in script
+
+
+def test_an_idle_run_never_strands_unshipped_binlogs() -> None:
+    """空闲时不 FLUSH（否则每分钟造一个空文件），但「空闲」的判据有两道，各自变异验证过。
+
+    1. 位置记录**只在整轮成功之后**写。变异（FLUSH 后立刻写）：R2 断掉那一轮失败，
+       恢复后那一轮报 nothing to ship，积压留在本机
+    2. 还要确认最新一个已关闭的文件就是推过的最后一个。只保留这一道、去掉第 1 道的
+       变异照样把积压推走了 —— 位置记录因任何原因失准都不会搁浅文件
+    """
+    script = uncommented(BINLOG_SHIP)
+    record = script.index('> "${IDLE_MARK}.tmp"')
+    assert record > script.index("done 3<<EOF")
+    assert '[ "$NEWEST_CLOSED" = "$(cat "$MARK" 2>/dev/null || true)" ]' in script
 
 
 def test_binlog_shipping_closes_the_active_file_and_refuses_gaps() -> None:

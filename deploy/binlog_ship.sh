@@ -6,8 +6,16 @@
 # ⚠️ **RPO ≤ 5 分钟靠的是这个脚本，不是全量备份。**全量每天一次，只靠它的话机器
 # 没了就丢最多一整天的计费数据。PITR = 最近一次全量 + 它之后**每一个** binlog。
 #
-# 由 cron 每 4 分钟跑一次（deploy/cron.d/ai_billing_hub）。4 而不是 5：一次运行
-# 从 FLUSH 到上传完成要花时间，丢数据的窗口上限是「间隔 + 这段时间」，得给它留余量。
+# 由 cron **每分钟**跑一次（deploy/cron.d/ai_billing_hub）。
+#
+# ⚠️ **调度保证不了 RPO，只能缩小它、并让它破掉时不可能不被发现**（Codex #42 R2）。
+# 数据离机的时刻 = 下一次运行开始 + 那一次上传的耗时；上传慢到超过 5 分钟时，
+# 没有哪种调度能把它拉回来。所以这里做三件事：
+#   1. 每分钟一次：上一轮还没跑完时本轮跳过，代价只是一分钟，而不是一整个周期
+#   2. 每一轮（**包括被跳过的那轮**）先查「binlog 上一次成功离机是多久以前」，
+#      超过 RPO 预算就以 err 级别写 syslog —— 卡死、变慢、连续失败都会在一分钟内冒出来
+#   3. 任何失败同样以 err 级别报出
+# ⚠️ 把 err 级别的日志**送到人手里**需要告警通道（§95），这个脚本不负责那一步。
 #
 # 用法：
 #     deploy/binlog_ship.sh
@@ -22,8 +30,60 @@ ENV_FILE="${BILLING_ENV_FILE:-.env}"
 STATE_DIR="${BILLING_BINLOG_STATE_DIR:-./backups/binlog}"
 AWS_CLI_IMAGE="${BILLING_AWS_CLI_IMAGE:-amazon/aws-cli:2.27.50}"
 
+# RPO 预算（spec §98.1）。binlog 距上一次成功离机超过它，RPO 就已经破了。
+RPO_SECONDS="${BILLING_BINLOG_RPO_SECONDS:-300}"
+LAST_OK="${STATE_DIR}/last-success"
+
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-die() { log "ERROR: $*"; exit 1; }
+
+# ⚠️ cron 那一行把输出整个以 info 级别送进 syslog。失败与破 RPO 必须**另外**以 err
+# 级别写一条，否则它们和每分钟一次的「shipped …」混在一起，告警规则无从区分。
+alarm() {
+    log "ERROR: $*"
+    if command -v logger >/dev/null 2>&1; then
+        logger -p user.err -t billing-binlog -- "$*" || true
+    fi
+}
+die() { alarm "$*"; exit 1; }
+
+check_freshness() {
+    [ -f "$LAST_OK" ] || return 0
+    last="$(cat "$LAST_OK")"
+    case "$last" in
+        ""|*[!0-9]*) alarm "cannot read ${LAST_OK}; binlog freshness is unknown"; return 0 ;;
+    esac
+    age=$(( $(date +%s) - last ))
+    [ "$age" -le "$RPO_SECONDS" ] \
+        || alarm "RPO breached: binlogs last left this host ${age}s ago (budget ${RPO_SECONDS}s)"
+}
+
+# 记下「这个时刻之前写入的一切都已离机」。
+# ⚠️ 传进来的是 **FLUSH 的时刻，不是本轮结束的时刻**：FLUSH 之后写入的数据要等下一轮
+# 才走，用结束时刻会把暴露窗口少算一整次上传的耗时 —— 恰好是上传变慢时少算得最多。
+mark_success() {
+    printf '%s\n' "$1" > "${LAST_OK}.tmp" && mv "${LAST_OK}.tmp" "$LAST_OK"
+}
+
+# --------------------------------------------------------------------------
+# 锁 + 新鲜度 —— 排在读配置、连数据库**之前**
+# --------------------------------------------------------------------------
+#
+# ⚠️ 顺序是刻意的：一次卡死在数据库或上传上的运行会一直占着锁，之后每一轮都走
+# 「跳过」那条路。如果新鲜度检查排在后面，那种状态下它**永远不会执行** —— 而那
+# 恰恰是最需要它报警的时候。
+#
+# ⚠️ 用 flock 不用 mkdir 锁：进程被杀时 flock 随文件描述符自动释放；mkdir 锁会留下
+# 一个永远不删的目录，此后每一轮都「跳过」。
+
+mkdir -p "$STATE_DIR"
+command -v flock >/dev/null 2>&1 || die "flock is required (util-linux)"
+exec 9>"${STATE_DIR}/.lock"
+if ! flock -n 9; then
+    check_freshness
+    log "previous run still in progress; skipping this one"
+    exit 0
+fi
+check_freshness
 
 # ⚠️ 与 backup.sh 同一条：字面解析，**不 source**。
 env_value() {
@@ -57,7 +117,6 @@ mysql_q() {
     $COMPOSE exec -T mysql mysql -uroot -p"$ROOT_PW" -N -e "$1" 2>/dev/null | tr -d '\r'
 }
 
-mkdir -p "$STATE_DIR"
 PLAIN=""
 CIPHER=""
 VERIFY=""
@@ -91,7 +150,36 @@ mkdir -p "$MARK_DIR"
 # 换一个新文件，于是刚才那个变成「已关闭」。不 FLUSH 的话，一个 128 MB 的文件要
 # 写满才会轮转 —— 写入少的时候那可能是好几天，RPO 就成了好几天。
 
+#
+# ⚠️ **上一轮成功之后没有任何写入，就不 FLUSH。**每分钟无条件 FLUSH 的话，空闲时
+# 一天也要造出 1440 个空 binlog、1440 次上传。判据是「正在写的文件与位置」和上一轮
+# 成功结束时记下的一样。
+# ⚠️ 那个位置**只在整轮成功之后**才记：一轮 FLUSH 了、却在上传时失败，位置就不会
+# 被记下，下一轮照常把积压推完 —— 否则一次失败之后的空闲会把没推出去的文件永远
+# 当成「已经处理过」。
+
+IDLE_MARK="${MARK_DIR}/idle-at"
+current_position() { mysql_q 'SHOW BINARY LOG STATUS' | awk 'NR == 1 { print $1 ":" $2 }'; }
+
+#
+# ⚠️ 光比位置还不够，还要确认**最新一个已关闭的文件就是推过的最后一个**。位置记录
+# 一旦和实际不符（进程在两次写之间被杀、有人为了重推删过进度、……），只比位置会把
+# 积压当成空闲，直到下一次有写入才被推走 —— 演练里用一个「FLUSH 后立刻记位置」的
+# 变异复现过：R2 恢复之后那一轮报「nothing to ship」，积压的文件留在本机。
+CHECKED_AT="$(date +%s)"
+BEFORE="$(current_position)" || die "SHOW BINARY LOG STATUS failed"
+[ -n "$BEFORE" ] || die "SHOW BINARY LOG STATUS returned nothing"
+NEWEST_CLOSED="$(mysql_q 'SHOW BINARY LOGS' | awk '{ print $1 }' | sed '$d' | tail -1)"
+if [ "$BEFORE" = "$(cat "$IDLE_MARK" 2>/dev/null || true)" ] \
+    && [ "$NEWEST_CLOSED" = "$(cat "$MARK" 2>/dev/null || true)" ]; then
+    mark_success "$CHECKED_AT"
+    log "no writes since the last successful run; nothing to ship"
+    exit 0
+fi
+
+FLUSHED_AT="$(date +%s)"
 mysql_q 'FLUSH BINARY LOGS' >/dev/null || die "FLUSH BINARY LOGS failed"
+AFTER_FLUSH="$(current_position)" || die "SHOW BINARY LOG STATUS failed"
 
 # `SHOW BINARY LOGS` 按编号升序；最后一行是正在写的，其余都已关闭。
 LOGS="$(mysql_q 'SHOW BINARY LOGS' | awk '{ print $1, $2 }')"
@@ -171,4 +259,6 @@ done 3<<EOF
 $CLOSED
 EOF
 
+printf '%s\n' "$AFTER_FLUSH" > "${IDLE_MARK}.tmp" && mv "${IDLE_MARK}.tmp" "$IDLE_MARK"
+mark_success "$FLUSHED_AT"
 log "binlog shipping complete: ${shipped} file(s); last shipped ${LAST:-none}"
