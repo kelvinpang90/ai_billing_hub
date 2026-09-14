@@ -89,7 +89,13 @@ MYSQL_ROOT_PASSWORD="$(env_value BILLING_MYSQL_ROOT_PASSWORD)"
 [ -n "$MYSQL_ROOT_PASSWORD" ] || die "BILLING_MYSQL_ROOT_PASSWORD is not set in $ENV_FILE"
 
 mkdir -p "$BACKUP_DIR"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+NOW="$(date +%s)"
+STAMP="$(date -u -d "@${NOW}" +%Y%m%dT%H%M%SZ)"
+# 月备份 / 年备份按**马来西亚日期**归属（Kelvin 2026-09-14）：03:17 那一轮 = UTC 前一天
+# 19:17，按 UTC 算的话「10 月的月备份」会晚一天、多带 10 月 1 日一整天。
+# ⚠️ 用固定 +8 小时，不用 `TZ=Asia/Kuala_Lumpur`：主机缺 tzdata 时后者**静默回落成 UTC**。
+# 马来西亚没有夏令时，固定偏移是准确的。
+MYT_MONTH="$(date -u -d "@$((NOW + 8 * 3600))" +%Y%m)"
 PLAIN="${BACKUP_DIR}/billing-${STAMP}.sql"
 CIPHER="${PLAIN}.enc"
 
@@ -200,6 +206,55 @@ else
     [ "$REMOTE_SIZE" = "$LOCAL_SIZE" ] \
         || die "size mismatch after upload: local ${LOCAL_SIZE}, remote ${REMOTE_SIZE}"
     log "uploaded and confirmed (${REMOTE_SIZE} bytes)"
+
+    # ----------------------------------------------------------------------
+    # 4b. 月备份 / 年备份
+    # ----------------------------------------------------------------------
+    #
+    # R2 的 lifecycle 只能按「前缀 + 上传后天数」删，挑不出「1 号那一份」。所以把
+    # 当月 / 当年的**第一份**成功全量在桶内复制到独立前缀，每个前缀一条规则
+    # （docs/deployment.md §5.2.1）：full/ 与 binlog/ 35 天、monthly/ 366 天、yearly/ 永久。
+    #
+    # ⚠️ 判据是「这个月还没有」，不是「今天是 1 号」：1 号那一轮失败的话，后者会让
+    # 整个月缺一份，前者第二天自动补上。
+    # ⚠️ **已存在就绝不覆盖**：lifecycle 按上传时间计天数，覆盖一次等于重新计时；
+    # 而且会把月初那份快照换成更晚的一份。
+    # ⚠️ 用 list 判断存在，不用 head-object 的失败：网络或鉴权出错时 head-object
+    # 同样失败，会被误当成「不存在」而去覆盖。list 出错就是出错，直接停。
+    # ⚠️ **不能用 `--query KeyCount`**：aws-cli 自动分页后这个字段被丢掉，存在与否都
+    # 输出 `None`。第一版就这么写，本地 MinIO 演练时月备份一次都没建出来，每轮却都报
+    # 「already exists」。现在按精确 key 过滤：输出**等于这个 key** 才算存在
+    # （不存在时是 `None`，只有同前缀的更长 key 时是空串）。
+    #
+    # ⚠️ 「查有没有」与「复制」之间不是原子的：两轮同时跑（cron 那一轮还没完、有人手工又跑
+    # 一次）会都查到「没有」，后复制的覆盖先复制的（Codex #51 R1）。cron 行上的 flock 只管
+    # cron 自己，手工运行不经过它，所以锁在脚本里、罩住下面整段「查 + 复制」。
+    # 用 `-w` 等而不是 `-n` 跳过：这一段只要几秒，跳过的话手工那一轮会莫名其妙少做一步。
+    # 不用存储端条件写：aws-cli 的 copy-object 不支持 If-None-Match。
+    command -v flock >/dev/null 2>&1 || die "flock is required (util-linux); the daily backup IS uploaded"
+    exec 9>"${BACKUP_DIR}/.keep-copy.lock"
+    flock -w 300 9 || die "another backup has held the copy lock for 5 minutes; the daily backup IS uploaded, the next run retries"
+
+    keep_copy() {
+        local key="$1" found size
+        found="$(s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "$key" \
+            --query "Contents[?Key=='${key}'].Key" --output text)" \
+            || die "cannot check whether ${key} exists; the daily backup IS uploaded"
+        if [ "$found" = "$key" ]; then
+            log "${key} already exists; left untouched"
+            return 0
+        fi
+        s3 cp "s3://${R2_BUCKET}/full/$(basename "$CIPHER")" "s3://${R2_BUCKET}/${key}" \
+            || die "cannot copy to ${key}; the daily backup IS uploaded, the next run retries"
+        size="$(s3api head-object --bucket "$R2_BUCKET" --key "$key" \
+            --query ContentLength --output text)" \
+            || die "copied, but ${key} cannot be read back"
+        [ "$size" = "$LOCAL_SIZE" ] \
+            || die "size mismatch after copying to ${key}: local ${LOCAL_SIZE}, remote ${size}"
+        log "kept as ${key} (${size} bytes)"
+    }
+    keep_copy "monthly/billing-${MYT_MONTH}.sql.enc"
+    keep_copy "yearly/billing-${MYT_MONTH:0:4}.sql.enc"
 fi
 
 # --------------------------------------------------------------------------

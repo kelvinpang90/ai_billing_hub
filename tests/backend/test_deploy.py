@@ -480,6 +480,53 @@ def test_restore_checks_the_chain_before_touching_any_database() -> None:
     assert script.index("gap in the binlog chain") < script.index("CREATE DATABASE")
 
 
+def test_monthly_and_yearly_copies_are_kept_once_and_never_overwritten() -> None:
+    """R2 的 lifecycle 只能按「前缀 + 上传后天数」删，所以月 / 年备份要复制到独立前缀。
+
+    ⚠️ 已存在就绝不覆盖：lifecycle 按上传时间计天数，覆盖一次等于重新计时，还会把
+    月初那份快照换成更晚的。⚠️ 存在与否用 list 判断、且查询出错直接停 —— 用 head-object
+    的失败当「不存在」的话，一次网络抖动就会去覆盖。
+    """
+    script = uncommented(BACKUP)
+    assert 'keep_copy "monthly/billing-${MYT_MONTH}.sql.enc"' in script
+    assert 'keep_copy "yearly/billing-${MYT_MONTH:0:4}.sql.enc"' in script
+    body = script[script.index("keep_copy() {") :]
+    assert body.index("list-objects-v2") < body.index("already exists") < body.index("s3 cp")
+    assert "cannot check whether" in body
+    # ⚠️ KeyCount 在 aws-cli 分页后恒为 None —— 用它判断，月备份永远建不出来（本地演练踩到）。
+    assert "KeyCount" not in body
+    assert 'if [ "$found" = "$key" ]; then' in body
+    # ⚠️ 「查 + 复制」不是原子的，两轮同时跑会互相覆盖（Codex #51 R1）。锁必须在脚本里、
+    # 在第一次查之前拿到 —— cron 行上的 flock 管不到手工运行。
+    lock = script.index("flock -w 300 9")
+    assert script.index('exec 9>"${BACKUP_DIR}/.keep-copy.lock"') < lock
+    assert lock < script.index('keep_copy "monthly/')
+
+
+def test_the_month_of_a_backup_is_taken_in_malaysian_time_without_tzdata() -> None:
+    """03:17 那一轮是 UTC 前一天 19:17 —— 按 UTC 归月，月备份会晚一天、多带一天数据。
+
+    ⚠️ 不用 `TZ=Asia/Kuala_Lumpur`：主机缺 tzdata 时它静默回落成 UTC。
+    """
+    script = uncommented(BACKUP)
+    assert 'MYT_MONTH="$(date -u -d "@$((NOW + 8 * 3600))" +%Y%m)"' in script
+    assert "TZ=" not in script
+
+
+def test_restore_never_falls_back_to_full_only_on_its_own() -> None:
+    """⚠️ binlog 链不全时自动只恢复全量，会在推送早已坏掉的那一天静默丢掉一整天的数据。
+
+    所以只恢复全量必须显式开启，而且不能与停止时间同时给。
+    """
+    script = uncommented(RESTORE)
+    assert 'FULL_ONLY="${BILLING_RESTORE_FULL_ONLY:-0}"' in script
+    assert "it cannot stop at" in script
+    # 链检查与重放都只在显式开启时才跳过，默认仍然拒绝不完整的链。
+    assert 'if [ "$FULL_ONLY" = "1" ]; then' in script
+    assert 'if [ "$FULL_ONLY" = "0" ]; then' in script
+    assert "gap in the binlog chain" in script
+
+
 def test_restore_keeps_its_own_writes_out_of_the_binlog() -> None:
     """⚠️ 演练就在生产那台 MySQL 上做。
 
