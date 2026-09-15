@@ -857,7 +857,7 @@ git checkout main
 - [x] ⚠️ **`VPS_FINGERPRINT` 补上**（没有它 job 会直接失败，这是刻意的）—— 已补（2026-09-14，见 §9.3 的 ECDSA 那条）；此后 Deploy 多次成功（最近 run 34952597111）
 - [x] `production` environment 开了人工批准与「只允许 main」—— 2026-09-15 经 GitHub API 核对：1 条 required reviewers 规则，deployment branch policy 只有 `main`；run 34952597111 实际停在等待批准
 - [x] VPS 上 `/opt/ai_billing_hub` 已 `git init` 并检出 main —— 是一份指向本仓库的 git 工作副本，Deploy 按 SHA 检出（当前 `6ea9dc5`）
-- [x] 宿主机的 `.env` 与三个密钥文件就位 —— 2026-09-15 核对三个密钥文件存在且权限正确（§6）；`.env` 就位（部署、备份、心跳都在读它）。⚠️ 其中 SMTP 三项仍为空，见 §11
+- [x] 宿主机的 `.env` 与三个密钥文件就位 —— 2026-09-15 核对三个密钥文件存在且权限正确（§6）；`.env` 就位（部署、备份、心跳都在读它）。SMTP 四项 2026-09-15 补上（§11）
 - [ ] ghcr 的包可见性确认过（公开仓库默认公开；镜像里没有密钥，与 ADR-0001 一致）
 - [ ] ⚠️ **先手工跑一次 `deploy/deploy.sh`**，别让第一次执行是由一次 push 触发的
 - [x] 装上 `deploy/cron.d/ai_billing_hub`（§5.2.5），并看到第一轮 binlog 推送与第一份全量在 R2 里 —— 2026-09-14 首装；2026-09-15 部署 `6ea9dc5` 后重装为三行（binlog / 全量 `17 3` / 演练 `47 4 * * 0`）
@@ -921,6 +921,6 @@ git checkout main
 - [ ] §95 的 17 项指标各有阈值、分级、通知对象、抑制规则、runbook 链接
 - [ ] `billing_readiness_degraded_redis` 与 celery-beat 存活探针落地
 - [ ] 日志轮转 / 保留 / 上限 / 安全删除 / 异地 / 磁盘告警
-- [ ] **上线前配好 SMTP**，否则密码重置的信发不出去（outbox 会重试到死信）
+- [x] **上线前配好 SMTP**，否则密码重置的信发不出去（outbox 会重试到死信）—— 2026-09-15：Google Workspace（`smtp.gmail.com:587` STARTTLS + 应用专用密码，发信邮箱 `developer@acuventech.com`，显示名 `Acuven Billing`）。生产端到端：`/password/forgot` → outbox 行 `SENT`（第 1 次尝试，约 3 秒）→ 管理员收到信、链接能打开重置页。SPF / DKIM / DMARC 全部 pass，**但 Outlook.com 仍判进垃圾箱**（SCL 5，`SpamFilterAuthJ`）—— 属发信信誉与内容判定，不是配置问题；Phase 4 给客户发信前要重新评估传输（ADR-0009 备选 A）
 - [ ] 容量基线在**升配后的**生产机上重跑一次（[perf-baseline.md](perf-baseline.md) 第 6 节）
 - [x] 部署流水线在真实 VPS 上跑通一次 —— 2026-09-14 起在真实 VPS 上多次成功；其间 run 34815465122 被冒烟拦下并**自动回滚**（§2.2），也算实地走过一次回滚路径。最近一次是 run 34952597111，部署 `6ea9dc5`。⚠️ §9.4 里「ghcr 包可见性」「先手工跑一次 `deploy.sh`」两条事后无法核实，仍未勾；push 触发器仍未加回
