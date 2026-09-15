@@ -30,3 +30,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 #    写成 `17 19`，实际会在马来西亚晚上 19:17 跑。换主机时先 `timedatectl` 看时区再定这一行。
 # ⚠️ 这个文件是**复制**进 /etc/cron.d 的，改完要按上面的安装命令重装一次才生效。
 17 3 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-backup.lock bash deploy/backup.sh 2>&1 | logger -t billing-backup
+
+# 自动恢复演练，每周日马来西亚 04:47（Kelvin 2026-09-15 定每周一次）：排在当天 03:17 的全量之后，
+# 那份全量的锚点 binlog 一分钟内就已离机。锁与失败通知都在脚本里（心跳 BILLING_HEALTHCHECK_DRILL_URL）。
+47 4 * * 0 @DEPLOY_USER@ cd /opt/ai_billing_hub && bash deploy/restore_drill.sh 2>&1 | logger -t billing-drill

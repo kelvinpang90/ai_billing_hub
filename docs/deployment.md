@@ -563,6 +563,7 @@ Ubuntu 容器里用真 `flock`：锁被占且心跳 10 分钟前 → 跳过**并
 | --- | --- | --- | --- | --- |
 | `binlog_ship.sh` | `BILLING_HEALTHCHECK_BINLOG_URL` | 推送完成、空闲（无写入） | 任何失败、**破 RPO**（含被锁跳过的那轮） | 被锁跳过的那轮 —— 否则一次卡死的推送会被每分钟的「成功」盖住 |
 | `backup.sh` | `BILLING_HEALTHCHECK_BACKUP_URL` | 整轮完成（带上文件名） | 任何失败 | `--dry-run`（没有上传） |
+| `restore_drill.sh`（§5.2.7） | `BILLING_HEALTHCHECK_DRILL_URL` | 恢复与全部核对通过（带摘要） | 任何失败 | — |
 
 - **两个检查分开**：频率差 1440 倍，合成一个的话 binlog 每分钟的心跳会把「全量三天没跑」盖住
 - ping 带 `-m 10` 超时，失败只记一行、不让本轮失败：数据已经离机，监控服务抖动不该变成「推送失败」；
@@ -588,6 +589,8 @@ US$20/月的 Business 档起才有额度（「50 SMS & WhatsApp credits」），
    BILLING_HEALTHCHECK_BACKUP_URL=https://hc-ping.com/<全量检查的 uuid>
    ```
 7. 验证：一分钟内 binlog 检查变绿；手工跑一次 `bash deploy/backup.sh`，全量检查变绿
+8. 第三个检查 `ai_billing_hub restore drill`：Cron `47 4 * * 0`，时区 **Asia/Kuala_Lumpur**，Grace **2 小时**；
+   地址写进 `.env` 的 `BILLING_HEALTHCHECK_DRILL_URL`；手工跑一次 `bash deploy/restore_drill.sh` 验证变绿（§5.2.7）
 
 **本地验证**（真 MySQL 8.4 + MinIO + 一个记录请求的假心跳服务）：
 
@@ -601,6 +604,44 @@ US$20/月的 Business 档起才有额度（「50 SMS & WhatsApp credits」），
 | 全量失败（R2 连不上） | `POST /hc-backup/fail`，正文 `upload failed; …`，exit 1 |
 | 心跳服务连不上 | 无；记 `heartbeat ping failed`，binlog 推送仍 exit 0 |
 | 没配地址 + 全量失败 | 无；多打 `nobody will be told about this` |
+
+### 5.2.7 每周自动恢复演练（Kelvin 2026-09-15 定每周一次）
+
+⚠️ **全量与 binlog 每天、每分钟都在报成功，但证明它们能恢复的只有真的恢复一次。**手工演练一季度一次，
+中间三个月里口令被改、binlog 链断了、镜像拉不到、主密钥与密文对不上，都要等到出事那天才发现。
+
+[`deploy/restore_drill.sh`](../deploy/restore_drill.sh)，cron **每周日马来西亚 04:47**（排在当天 03:17 的全量之后）：
+
+1. 从 **R2** 取最新全量（验的是离机那一份，不是本机 `backups/`）；超过 26 小时就失败 —— 说明全量没到 R2
+2. 用 `deploy/restore.sh` **原样**恢复（全量 + binlog 重放）进专用库 `billing_autodrill`，工作目录 `./restore/autodrill`
+3. 核对：
+   - 表清单与生产库一致
+   - `users` 非空
+   - 生产有已确认的 2FA 时：在 `--network none`、`--user 10001:10001`、主密钥只读挂入的容器里，用**生产主密钥**解开一条恢复出来的 TOTP 密文。**只打印 `decrypted`**，不打印任何码或密钥（输出进 syslog）
+4. **无论成败**：`SET sql_log_bin=0` 后删演练库、删工作目录、删 mysqlbinlog 镜像（约 440 MB；每周重新拉一次，本身也验证了真出事时拉得到）
+5. 成功 ping `BILLING_HEALTHCHECK_DRILL_URL`（带「哪份、多旧、多少秒、几张表、解密是否通过」的摘要），失败 ping `/fail`
+
+刻意**不做**的：
+
+- **不和生产逐表比行数 / 校验和**：演练期间生产照常在写，比不出稳定结论；每周误报的检查很快会被所有人无视
+- **不替代季度手工演练**：离线副本（密码管理器里那份主密钥）与「新主机从零搭起」只有人能验
+- **不自动恢复线上**：恢复到哪一刻、要不要切流量是人的判断，自动做可能拿旧数据盖住仍然正确的数据
+
+已知的误报面：生产在演练前一分钟内做过 DDL（建表 / 删表）时，那条 binlog 还没离机，表清单会对不上。
+只在部署迁移时出现，而部署不会排在周日凌晨。
+
+演练库名写死、再与生产库名比一次：清理会无条件 `DROP` 它。
+
+**本地验证**（真 MySQL 8.4 + MinIO + 本地应用镜像的真 `app.core.crypto` + 假心跳服务）：
+
+| 场景 | 结果 | 心跳 |
+| --- | --- | --- |
+| 正常（带一个上一轮残留的 `billing_autodrill`） | `restore drill passed: … in 7s; 2 tables; users 1; TOTP secret decrypted` | `POST /hc-drill`，正文即摘要 |
+| 主机上的主密钥与数据对不上 | `the production master key cannot open a restored TOTP secret (…DecryptionFailed…)`，exit 1 | `/fail` |
+| 生产有一张没离机的新表 | `the restored table set differs from billing: live [late_table …] restored […]`，exit 1 | `/fail` |
+| R2 上最新全量是 2026-01-01 的 | `the newest full backup … is 6158h old; the daily backup is not reaching R2`，exit 1 | `/fail` |
+
+四个场景结束后：演练库 0 个、工作目录不存在、镜像已删。
 
 ### 5.3 恢复之后必须做的对账
 
