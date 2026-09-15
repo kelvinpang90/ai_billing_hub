@@ -20,7 +20,7 @@
 | 容量基线 | ✅ T0.10 |
 | **生产主机上的任何东西** | ❌ 一件都没有 |
 | **部署流水线（CD）** | ⚠️ 骨架已写、脚本本地演练过，**但从未在真实 VPS 上跑过**（§9） |
-| **备份 / 恢复 / RPO·RTO** | ⚠️ 全量（每日）+ binlog 离机（每分钟，破 RPO 以 err 级别报出）+ PITR 恢复 + cron 已落地，**本地整链演练通过**（§5.2.1、§5.2.3–§5.2.5）；**2026-09-14 在 VPS 上实测 binlog 离机 + PITR 恢复通过**（§5.2.4 末尾），主密钥真解密演练通过（2026-09-15）；每日全量的 cron 已自动跑出过一份（2026-09-14 19:17，按旧时间）；备份任务的心跳脚本已落地（§5.2.6），Healthchecks.io 待配置 |
+| **备份 / 恢复 / RPO·RTO** | ⚠️ 全量（每日）+ binlog 离机（每分钟，破 RPO 以 err 级别报出）+ PITR 恢复 + cron 已落地，**本地整链演练通过**（§5.2.1、§5.2.3–§5.2.5）；**2026-09-14 在 VPS 上实测 binlog 离机 + PITR 恢复通过**（§5.2.4 末尾），主密钥真解密演练通过（2026-09-15）；每日全量的 cron 已自动跑出过一份（2026-09-14 19:17，按旧时间）；备份与演练的心跳已在生产接通（Healthchecks.io + Telegram，§5.2.6）；R2 保留期规则已配；每周自动恢复演练已上线（§5.2.7） |
 | **生产日志与告警** | ❌ 第 7、8 节 |
 
 ~~⚠️ `docker-compose.yml` 目前没有任何资源限制~~ —— ✅ **已做**（见 §3.3），ADR-0002 那条收口条件关闭。原文留档：
@@ -318,7 +318,7 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 
 ### 5.2 §98.1 要求而现在一件都没有的
 
-- [ ] 备份成功与**新鲜度**的自动监控（§95 的 `backup age and backup failure`）—— 脚本侧已落地（§5.2.6），**Healthchecks.io 上配好两个检查、`.env` 填好地址之后才算**
+- [x] 备份成功与**新鲜度**的自动监控（§95 的 `backup age and backup failure`）—— 2026-09-15：Healthchecks.io 三个检查（binlog / 全量 / 每周演练）已建并写入 VPS 的 `.env`，三个都收到生产上的真实心跳，Telegram 收到 DOWN / UP 测试通知（§5.2.6 末尾）
 - [ ] **季度恢复演练**，且要验证钱包、账本、用量事件、支付、对账单、文档的完整性
 - [ ] 书面的**灾难恢复顺序**与恢复后对账
 - [x] 保留期（与 §112 的财务保留期挂钩，见决策 ⑤）—— R2 上每日全量与 binlog 35 天、月备份 12 个月、年备份永久（Kelvin 2026-09-14），见 §5.2.1 末尾
@@ -396,6 +396,11 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 | `monthly-full-366d` | `monthly/` | 366 |
 
 ⚠️ **不要建一条前缀为空、或覆盖 `yearly/` 的规则**：那会连永久保留的年备份一起删掉。
+
+**生产上已配**（2026-09-15，Kelvin 在控制台配、截图核对）：`full/` 35 天、`binlog/` 35 天、`monthly/` 366 天，
+外加 R2 自带的「未完成分片上传 7 天中止」；`yearly/` 不受任何规则影响。⚠️ 第一次配时 `monthly` 的前缀被填成了
+`monthly/366 days`（天数混进了前缀框）—— 那条规则一个对象都匹配不上，月备份会永远累积。**配完要逐条看前缀一栏**。
+同日生产上第一次按新脚本跑全量：建出 `monthly/billing-202609.sql.enc` 与 `yearly/billing-2026.sql.enc`，第二次报 `already exists`。
 
 **本地验证**（MinIO 冒充 R2、替身 compose 冒充 MySQL）：首轮建出 `monthly/` 与 `yearly/` 且大小回读一致；第二轮报 `already exists`、两者 ETag 不变；
 跨月边界 UTC `2026-09-30T15:59:59Z` → `202609`、`16:00:00Z` → `202610`、`2026-12-31T19:17:00Z` → `202701`。
@@ -604,6 +609,18 @@ US$20/月的 Business 档起才有额度（「50 SMS & WhatsApp credits」），
 | 全量失败（R2 连不上） | `POST /hc-backup/fail`，正文 `upload failed; …`，exit 1 |
 | 心跳服务连不上 | 无；记 `heartbeat ping failed`，binlog 推送仍 exit 0 |
 | 没配地址 + 全量失败 | 无；多打 `nobody will be told about this` |
+
+**生产上已接通**（2026-09-15）：三个检查经 Healthchecks.io 管理 API 建出（名字、周期、宽限与上面配置步骤一致，时区
+Asia/Kuala_Lumpur，挂 Telegram 与 email），ping 地址直接写入 VPS 的 `.env`、没有经过任何文档或对话。验证：
+
+| 检查 | 触发 | 状态 |
+| --- | --- | --- |
+| binlog | cron 每分钟 | up，几分钟内收到 3 次 |
+| full backup | 手工 `bash deploy/backup.sh` | up |
+| restore drill | 手工 `bash deploy/restore_drill.sh`（`restore drill passed … in 60s; 8 tables; users 1; TOTP secret decrypted`） | up |
+| 通知 | 对 full backup 发 `/fail` → down，再发成功 → up | Telegram 收到 DOWN 与 UP |
+
+建检查用的 read-write API Key 事后已删除（再调用返回 401）；ping 地址不依赖它。
 
 ### 5.2.7 每周自动恢复演练（Kelvin 2026-09-15 定每周一次）
 
@@ -839,8 +856,8 @@ git checkout main
 - [ ] 宿主机的 `.env` 与三个密钥文件就位
 - [ ] ghcr 的包可见性确认过（公开仓库默认公开；镜像里没有密钥，与 ADR-0001 一致）
 - [ ] ⚠️ **先手工跑一次 `deploy/deploy.sh`**，别让第一次执行是由一次 push 触发的
-- [ ] 装上 `deploy/cron.d/ai_billing_hub`（§5.2.5），并看到第一轮 binlog 推送与第一份全量在 R2 里
-- [ ] 在 VPS 上对 R2 里的真实备份跑一次 `deploy/restore.sh`（§5.2.4）
+- [x] 装上 `deploy/cron.d/ai_billing_hub`（§5.2.5），并看到第一轮 binlog 推送与第一份全量在 R2 里 —— 2026-09-14 首装；2026-09-15 部署 `6ea9dc5` 后重装为三行（binlog / 全量 `17 3` / 演练 `47 4 * * 0`）
+- [x] 在 VPS 上对 R2 里的真实备份跑一次 `deploy/restore.sh`（§5.2.4）—— 2026-09-14、09-15 手工，09-15 起每周自动（§5.2.7）
 - [ ] 上面全部关闭之后，才把 `push: branches: [main]` 触发器加回 workflow
 
 ⚠️ **现在这个 workflow 只能手动触发（`workflow_dispatch`）。**挂上 push 触发器的话，
