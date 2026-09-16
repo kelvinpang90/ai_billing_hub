@@ -804,6 +804,10 @@ def test_the_deploy_script_bounds_how_many_old_images_it_keeps() -> None:
     # ⚠️ 往返比对：64 位溢出不报错，而回绕可以落在很小的正数上（
     # `10#18446744073709551619` = 3）—— 那会把镜像真的删掉。
     assert '[ "$keep" = "$digits" ] || return 0' in script
+    # ⚠️ 窗口算法不得再做 `keep + 1`：`keep` 取到 2^63-1 时那个加法溢出成
+    # 负数，`tail` 会报错到 stderr，而往返比对拦不住它（2^63-1 是合法十进制）。
+    assert "keep + 1" not in script
+    assert "awk -v k=\"$keep\" 'NR > k'" in script
 
 
 def test_a_failed_image_cleanup_never_fails_a_successful_deploy() -> None:
@@ -1066,6 +1070,9 @@ def test_a_keep_count_that_overflows_removes_nothing(tmp_path) -> None:
         "18446744073709551621",  # 2**64 + 5 → 回绕成 5
         "99999999999999999999",  # 回绕成巨大正数
         "9223372036854775808",  # 2**63 → 回绕成负数
+        # ⚠️ 这一个**能过往返比对**（它本身是合法十进制），卡的是下一道：
+        # 窗口算法不得再做 `keep + 1` 那种会溢出的算术。
+        "9223372036854775807",  # 2**63-1 → keep+1 溢出成负数
     ):
         assert (
             run_prune(

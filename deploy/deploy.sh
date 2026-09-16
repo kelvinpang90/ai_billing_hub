@@ -91,6 +91,12 @@ prune_old_images() {
         # 在前，但那是没有文档保证的实现细节，而排错了就会删掉在跑的版本。
         # CreatedAt 的前缀是 `YYYY-MM-DD HH:MM:SS`，字典序即时间序。
         #
+        # ⚠️ 用 `awk 'NR > k'` 而不是 `tail -n "+$(( keep + 1 ))"`：后者多一次加法，
+        # 而 `keep` 取到 2^63-1 时那个加法溢出成负数，`tail` 报
+        # invalid number of lines 到 stderr。上面的往返比对拦不住它 —— 2^63-1
+        # 本身是合法十进制。**干脆把这个加法去掉**，awk 按浮点比大小，
+        # 大到离谱的 k 只是一行都不输出。（awk 本脚本 wait_for_health 已在用。）
+        #
         # ⚠️ **先收进变量、带 `|| true`，不能直接把管道接给 `while`。**本脚本开着
         # `set -euo pipefail`：枚举这一步任一环节出错，整条管道就是非零，于是
         # `set -e` 把一次**健康检查与冒烟都已经过了**的部署扔成失败，CD 变红。
@@ -100,7 +106,7 @@ prune_old_images() {
             docker images --filter "reference=${repo}:*" \
                           --format '{{.CreatedAt}}	{{.Repository}}:{{.Tag}}' 2>/dev/null \
                 | sort -r \
-                | tail -n "+$(( keep + 1 ))" \
+                | awk -v k="$keep" 'NR > k' \
                 | cut -f2 \
                 || true
         )"
