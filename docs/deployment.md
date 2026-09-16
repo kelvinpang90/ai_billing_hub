@@ -792,6 +792,24 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 | 没配 ping 地址 且有问题 | 无 ping，多打一行 `nobody will be told about this` | 1 |
 | 心跳服务连不上 | 无；记 `heartbeat ping failed`，巡检结论不变 | 1 |
 
+**生产上已接通**（2026-09-16）：三个检查经 Healthchecks.io 管理 API 建出（周期 300 秒、宽限 900 秒、
+通知渠道与既有三个备份检查完全一致），ping 地址直接写入 VPS 的 `.env`、**没有经过任何文档或对话**；
+建检查用的 read-write API Key 事后已撤销（再调用返回 401）。
+
+| 步骤 | 结果 |
+| --- | --- |
+| 部署 `7ae606e`（Deploy run 35053358264） | VPS 工作副本到位，`deploy/monitor.sh` 可执行 |
+| 重装 `/etc/cron.d/ai_billing_hub` | 四行：binlog 每分钟、全量 `17 3`、**巡检 `*/5`**、演练 `47 4 * * 0` |
+| 手工跑一次（`BILLING_MONITOR_RECHECK_SECONDS=0`） | `all containers healthy (7 services)` / `readyz ok (database + redis)` / `disk below 80% (68%)`，exit 0；三个检查全部变绿 |
+| **真实告警演练**：把警戒线临时压到 1% 跑一次 | exit 1；`journalctl -t billing-monitor -p err` 出现 `P2 disk / at 68% (warn 1%)`；`ai_billing_hub disk` 翻成 **down**，Telegram 收到通知 |
+| 恢复：按默认阈值再跑一次 | 三个检查回到 up |
+| cron 自动跑 | 13:00:02 (MYT) 那一轮自动执行，三条结论与手工一致 |
+
+⚠️ **这条告警上线当天就派上了用场**：接通后顺手查了一眼磁盘现状 —— 根分区 29 GB、已用 **68%**，
+离 80% 的警戒线只剩约 3.5 GB，而占大头的是一代代攒下来的部署镜像。那个缺口已由 PR #62 堵住
+（`deploy.sh` 的 `prune_old_images`，详见 §3.1 末尾）。**先有会响的告警，才会有人去查这件事** ——
+在此之前磁盘涨到 80% 不会有任何信号。
+
 ### 8.2 原来钉住的两条（现状）
 
 > ⚠️ **`billing_readiness_degraded_redis`**（T0.5 派生，PR #28 审查指出）：
@@ -999,7 +1017,7 @@ git checkout main
 - [x] 决策 ①–⑦ 有答案，本文件已按答案补完（2026-09-13）
 - [x] ⚠️ **VPS 内存升配完成**（决策 ③）—— 在此之前不要上线。2026-09-15 核对：2 核 / 7.3 GB，swap 几乎未用
 - [ ] `set_real_ip_from` 按实际拓扑收窄（见 §10 末尾那条待确认的事实）
-- [ ] binlog 的磁盘上限定下来（只剩 12 GB，写满时 MySQL 直接停止写入）
+- [ ] binlog 的磁盘上限定下来（写满时 MySQL 直接停止写入） —— ⚠️ 2026-09-16 实测：根分区 29 GB / 已用 68%，余量约 9 GB。**镜像那一半已由 `prune_old_images` 堵住**（§3.1 末尾），binlog 自己的上限仍未定
 - [x] compose 补上资源限制（ADR-0002 收口条件）—— 2026-09-13，见 §3.3
 - [x] 边缘 nginx 的 `real_ip` 与上游超时 —— 2026-09-13，见 §4
 - [ ] 边缘 nginx 的 TLS / 域名（①A：在 `infra_nginx` 那层，本层不做）
