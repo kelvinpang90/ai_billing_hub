@@ -575,6 +575,7 @@ Ubuntu 容器里用真 `flock`：锁被占且心跳 10 分钟前 → 跳过**并
 | `restore_drill.sh`（§5.2.7） | `BILLING_HEALTHCHECK_DRILL_URL` | 恢复与全部核对通过（带摘要） | 任何失败 | — |
 
 - **两个检查分开**：频率差 1440 倍，合成一个的话 binlog 每分钟的心跳会把「全量三天没跑」盖住
+- ⚠️ **生产巡检另有三个检查**（容器健康 / `/readyz` / 磁盘），同一个账号、同一条 Telegram，见 §8.1
 - ping 带 `-m 10` 超时，失败只记一行、不让本轮失败：数据已经离机，监控服务抖动不该变成「推送失败」；
   binlog 那边卡住的 ping 还会一直占着锁
 - 没配地址时照常运行，但失败时多打一行 `nobody will be told about this`
@@ -707,28 +708,102 @@ T0.3 做的是日志的**内容与格式**（结构化、request id、脱敏）�
 | 磁盘上限 | 只有每容器 30 MB 的隐含上限 | 要有主机层面的总量口径。⚠️ 只剩 12 GB，而 binlog 也要占 |
 | 安全删除 | 无 | §112 要求 |
 | 异地留存 | 无 | 事故调查需要 |
-| **磁盘告警** | 无 | ⚠️ §94 明写：**日志撑爆本地磁盘必须在威胁到 MySQL / 文档存储之前告警** |
+| **磁盘告警** | ✅ `deploy/monitor.sh` 每 5 分钟查一次水位，≥ 80% 报 P2、≥ 90% 报 P1（§8.1） | §94 的这一条已关闭；上面四条仍未做 |
 
 ---
 
 ## 8. 监控与告警（§95）
 
 §95 列了 17 项指标，并要求**上线前每一项都有阈值、分级、通知对象、抑制规则和
-runbook 链接**。现在**一项都没有**，因为没有任何日志聚合设施。
+runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道（采集 + 存储 + 规则表达式），
+本阶段没有。先落地的是**三条「不落地就永远没人发现」的故障**，它们的共同点是
+**不会让任何请求报错**：缺了告警就等于缺了唯一的发现途径。
 
-其中有一条是被点名钉住的：
+### 8.1 已落地的三条（2026-09-16）
+
+实现是一个巡检脚本 [`deploy/monitor.sh`](../deploy/monitor.sh)，由 cron **每 5 分钟**
+跑一次，结果发到 §5.2.6 那套 Healthchecks.io + Telegram 上（与备份心跳同一条通道）。
+
+| 告警 | 判据 | 阈值 / 分级 | 通知 | 抑制 | runbook |
+| --- | --- | --- | --- | --- | --- |
+| 容器不健康（含 **celery-beat 停止调度**） | `docker compose ps` 的 `State` / `Health`，七个服务逐个查 | 非 `running` 或非 `healthy`；`mysql` / `api` / `billing_nginx` / `frontend` = **P1**，`redis` / `celery-worker` / `celery-beat` = **P2** | Telegram（检查 `ai_billing_hub services`） | 状态翻转才通知，红着的期间不重复 | [celery-beat 停止调度](runbook.md) |
+| **`billing_readiness_degraded_redis`** | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"` | P2；非 2xx（数据库不通 / API 挂）= **P1** | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md) |
+| 磁盘水位（§94 点名的那条） | `df -P` 查根文件系统与部署目录，按设备去重 | ≥ **80%** = P2，≥ **90%** = P1（`BILLING_MONITOR_DISK_*_PERCENT` 可调） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7 的保留期与上限（仍未做完） |
+
+⚠️ **分级只体现在通知正文的前缀里**（`P1 mysql is not running`）。通道只有一条，
+它没有分级概念 —— P1 与 P2 的区别是**人该多快起身**，不是消息走哪条路。
+
+四条设计上的取舍，每一条都对应一种会让告警失效的形态：
+
+1. **三个维度各自一个检查，不合成一个。**外部服务只在**状态翻转**时通知人：
+   磁盘先红了之后 MySQL 再挂，检查早已是 down，**不会再有第二条通知**
+2. **全绿时也 ping**（dead man's switch）。cron 没跑、整台 VPS 挂了、脚本卡死 ——
+   这些情况**不写任何日志**，只有「该到的 ping 没到」能暴露
+3. **发现问题先隔 45 秒复核一次。**一次正常部署看起来和故障一模一样：换版本时
+   容器有半分钟不是 `healthy`。不复核的话每次部署误报一条，**而被误报训练过的人
+   不会再看告警**
+4. **cron 那一行不加 flock。**巡检是只读的，重叠无害；而 flock 会让一次卡死把之后
+   每一轮都挡在脚本外面 —— 那种状态下没有任何一轮真的检查过（与 `binlog_ship.sh`
+   同一条教训）
+
+`/readyz` 只放行回环与私有网段，而栈的 nginx 默认只绑 `127.0.0.1` —— **宿主机自己
+是唯一探得到它的地方**，这也是巡检必须跑在 VPS 上、而不是挂在外部监控服务里的原因。
+
+**配置步骤**（与 §5.2.6 同一个 Healthchecks 账号）：
+
+1. 新建三个检查，Schedule 选 **Simple**，Period **5 分钟**，Grace **15 分钟**
+   （容得下一次复核加一次错过）：`ai_billing_hub services` / `ai_billing_hub readyz` /
+   `ai_billing_hub disk`
+2. 三个都勾上 Telegram
+3. 把三个 Ping URL 写进 VPS 的 `.env`：
+   ```
+   BILLING_HEALTHCHECK_SERVICES_URL=https://hc-ping.com/<services 检查的 uuid>
+   BILLING_HEALTHCHECK_READYZ_URL=https://hc-ping.com/<readyz 检查的 uuid>
+   BILLING_HEALTHCHECK_DISK_URL=https://hc-ping.com/<disk 检查的 uuid>
+   ```
+4. 按 §5.2.5 重装 cron（那个文件是**复制**进 `/etc/cron.d` 的，改完不重装不生效）
+5. 验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh` 手工跑一次，三个变绿
+
+**本地演练**（假 docker + 一个记录请求的假心跳服务，九个场景）：
+
+| 场景 | 收到的 ping | 退出码 |
+| --- | --- | --- |
+| 全绿 | 三个检查各一次成功 ping | 0 |
+| celery-beat `unhealthy` | `services/fail`，正文 `P2 celery-beat health=unhealthy` | 1 |
+| mysql 容器不在了 | `services/fail`，正文 `P1 mysql is not running` | 1 |
+| `/readyz` 200 但 `degraded` | `readyz/fail`，正文 `P2 billing_readiness_degraded_redis: "redis":"unavailable"` | 1 |
+| `/readyz` 503 | `readyz/fail`，正文 `P1 readyz is not answering 2xx` | 1 |
+| 磁盘越过警戒线 | `disk/fail`，正文点名挂载点与百分比 | 1 |
+| 第一轮红、复核时已恢复 | 三个都是成功 ping | 0 |
+| 没配 ping 地址 且有问题 | 无 ping，多打一行 `nobody will be told about this` | 1 |
+| 心跳服务连不上 | 无；记 `heartbeat ping failed`，巡检结论不变 | 1 |
+
+### 8.2 原来钉住的两条（现状）
 
 > ⚠️ **`billing_readiness_degraded_redis`**（T0.5 派生，PR #28 审查指出）：
-> `/readyz` 在 Redis 不可用时**刻意返回 200**（理由见 `app/core/config.py`：
+> `/readyz` 在 Redis 不可用时**刻意**返回 200（理由见 `app/core/config.py`：
 > Redis 挂了就把 API 摘出轮转，恰好制造出 INV-1 要防的那种中断）。
 > 代价是**负载均衡永远发现不了这个故障，它只能靠日志告警发现**。
-> 告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。
+> ~~告警落地之前，Redis 静默不可用是一个**已知的、被接受的检测缺口**。~~
 
-另有一条 T0.6 派生的：
+→ **已关闭**（2026-09-16）。⚠️ 实现方式与 runbook 原先写的条件**不一样**：没有日志聚合，
+判据不是「日志里出现那条 WARNING」，而是**宿主机每 5 分钟直接读一次 `/readyz` 的响应体**。
+告警名不变 —— 它是 runbook 与通知之间的稳定契约。日志那条判据等有了日志聚合仍然成立。
 
 > ⚠️ **celery-beat 没有存活探针。**`celery inspect ping` 问的是 worker，够不着 beat。
 > T0.8d 之后 beat 已经有了真实的周期任务（outbox 恢复），所以**它崩了就是静默故障**：
 > outbox 不再补投、API 一切正常、没有任何报错。
+
+→ **探针**在 T0.6 就补上了（`docker-compose.yml` 里按调度状态文件的 mtime 判活），
+**缺的一直是把 `unhealthy` 送到人手里** —— 那一半由 §8.1 的服务维度关闭。
+
+### 8.3 还没有的（诚实清单）
+
+- §95 的 17 项**业务指标**（用量摄取速率、钱包余额异常、支付回调失败率……）：
+  需要指标管道，**不在 T0.9 的范围里**，Phase 1 起随功能补
+- 日志聚合，以及基于日志内容的告警规则（§94 的异地留存也卡在这一条上）
+- 告警的**值班与升级路径**：现在只有一个人、一条 Telegram。`P1 30 分钟未响应升级`
+  这类规则等有第二个人再谈 —— 写在 runbook 里而不是配置里
 
 ---
 
@@ -918,9 +993,9 @@ git checkout main
 - [ ] 备份四层全部在跑，且有新鲜度监控
 - [x] **做过一次恢复演练**，含主密钥恢复，并记录实际耗时 vs RTO 4 小时 —— 2026-09-14 数据库 60 秒恢复、与生产逐表校验和一致；2026-09-15 真解密演练：只凭离线 `master.key` 在断网容器里解开恢复库的 TOTP 密文，生成的码与验证器 App 一致，错误密钥被拒，从恢复到解密 4 分 12 秒（§5.2.4 末尾）。这正是 [REVIEW-LOG](REVIEW-LOG.md) 里 #52 分歧选 B 时要求补的那一步
 - [x] 宿主机主密钥文件 `chown 10001:10001` + `chmod 0400` —— 2026-09-15 核对（§6）
-- [ ] §95 的 17 项指标各有阈值、分级、通知对象、抑制规则、runbook 链接
-- [ ] `billing_readiness_degraded_redis` 与 celery-beat 存活探针落地
-- [ ] 日志轮转 / 保留 / 上限 / 安全删除 / 异地 / 磁盘告警
+- [ ] §95 的 17 项指标各有阈值、分级、通知对象、抑制规则、runbook 链接 —— ⚠️ 未做完：**三条被点名的已落地**（§8.1），其余 17 项业务指标要等指标管道，见 §8.3
+- [x] `billing_readiness_degraded_redis` 与 celery-beat 存活探针落地 —— 2026-09-16：探针 T0.6 就有（beat 按调度状态文件 mtime 判活），本次补的是**把它送到人手里**：`deploy/monitor.sh` 每 5 分钟巡检容器健康 + `/readyz` 响应体 + 磁盘水位，三个维度各自一个 Healthchecks 检查 + Telegram（§8.1）
+- [ ] 日志轮转 / 保留 / 上限 / 安全删除 / 异地 / 磁盘告警 —— ⚠️ 未做完：**磁盘告警已落地**（§8.1），轮转只有 compose 那层、保留期与安全删除与异地仍未做（§7）
 - [x] **上线前配好 SMTP**，否则密码重置的信发不出去（outbox 会重试到死信）—— 2026-09-15：Google Workspace（`smtp.gmail.com:587` STARTTLS + 应用专用密码，发信邮箱 `developer@acuventech.com`，显示名 `Acuven Billing`）。生产端到端：`/password/forgot` → outbox 行 `SENT`（第 1 次尝试，约 3 秒）→ 管理员收到信、链接能打开重置页。SPF / DKIM / DMARC 全部 pass，**但 Outlook.com 仍判进垃圾箱**（SCL 5，`SpamFilterAuthJ`）—— 属发信信誉与内容判定，不是配置问题；Phase 4 给客户发信前要重新评估传输（ADR-0009 备选 A）
 - [ ] 容量基线在**升配后的**生产机上重跑一次（[perf-baseline.md](perf-baseline.md) 第 6 节）
 - [x] 部署流水线在真实 VPS 上跑通一次 —— 2026-09-14 起在真实 VPS 上多次成功；其间 run 34815465122 被冒烟拦下并**自动回滚**（§2.2），也算实地走过一次回滚路径。最近一次是 run 34952597111，部署 `6ea9dc5`。⚠️ §9.4 里「ghcr 包可见性」「先手工跑一次 `deploy.sh`」两条事后无法核实，仍未勾；push 触发器仍未加回

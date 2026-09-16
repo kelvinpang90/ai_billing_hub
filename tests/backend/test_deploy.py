@@ -214,6 +214,7 @@ RESTORE = REPO_ROOT / "deploy" / "restore.sh"
 BINLOG_SHIP = REPO_ROOT / "deploy" / "binlog_ship.sh"
 CRON = REPO_ROOT / "deploy" / "cron.d" / "ai_billing_hub"
 DRILL = REPO_ROOT / "deploy" / "restore_drill.sh"
+MONITOR = REPO_ROOT / "deploy" / "monitor.sh"
 
 
 def test_restore_refuses_to_overwrite_the_live_database() -> None:
@@ -268,7 +269,7 @@ def test_no_comment_breaks_a_line_continuation() -> None:
     `docker run` 之间，前两个凭据变成当前 shell 里**没有导出**的变量，
     容器拿不到，报 `Unable to locate credentials` —— 看着像凭据填错了。
     """
-    for path in (SCRIPT, BACKUP, RESTORE, BINLOG_SHIP, DRILL):
+    for path in (SCRIPT, BACKUP, RESTORE, BINLOG_SHIP, DRILL, MONITOR):
         lines = path.read_text(encoding="utf-8").splitlines()
         for number, (line, following) in enumerate(zip(lines, lines[1:], strict=False), start=1):
             if line.rstrip().endswith("\\") and following.strip().startswith("#"):
@@ -641,3 +642,133 @@ def test_restore_keeps_its_own_writes_out_of_the_binlog() -> None:
     script = uncommented(RESTORE)
     assert "SET sql_log_bin=0; CREATE DATABASE" in script
     assert "printf 'SET sql_log_bin=0;\\n'; cat \"$PLAIN\"" in script
+
+
+# --- 生产巡检（§94 磁盘告警 / §95 告警通道；T0.9）-----------------------------
+
+
+def test_the_monitor_reports_each_dimension_to_its_own_check() -> None:
+    """⚠️ 三个维度合成一个检查时，**第二个故障不会有通知**。
+
+    外部服务只在状态翻转时通知人：磁盘先红了之后 MySQL 再挂，检查早已是 down，
+    不会再翻转一次。三个各自一个检查，才能各自翻转、各自恢复。
+    """
+    monitor = uncommented(MONITOR)
+    urls = (
+        "BILLING_HEALTHCHECK_SERVICES_URL",
+        "BILLING_HEALTHCHECK_READYZ_URL",
+        "BILLING_HEALTHCHECK_DISK_URL",
+    )
+    for url in urls:
+        assert f"publish {url} " in monitor
+    assert len(set(urls)) == 3
+    # 不复用备份那两个检查：频率与含义都不是一回事。
+    for taken in ("BILLING_HEALTHCHECK_BACKUP_URL", "BILLING_HEALTHCHECK_BINLOG_URL"):
+        assert taken not in monitor
+
+
+def test_the_monitor_pings_even_when_everything_is_fine() -> None:
+    """⚠️ dead man's switch：全绿时不 ping 的话，**cron 没跑 / VPS 挂了**无人知晓。
+
+    那正是最需要告警的场景，而它不写任何日志。
+    """
+    monitor = uncommented(MONITOR)
+    assert 'heartbeat "$url_name" "" "$ok_summary"' in monitor
+    assert 'heartbeat "$url_name" /fail "$problems"' in monitor
+
+
+def test_a_failed_monitor_ping_does_not_change_the_verdict() -> None:
+    """⚠️ 监控服务抖动不该被记成「生产有问题」，否则告警自己成了噪声源。"""
+    monitor = uncommented(MONITOR)
+    assert '|| log "heartbeat ping failed' in monitor
+    assert "curl -fsS -m 10" in monitor
+
+
+def test_the_monitor_carries_the_named_redis_alert() -> None:
+    """⚠️ `billing_readiness_degraded_redis` 是 runbook 与告警之间的**稳定契约**。
+
+    而且判据不能只看状态码：Redis 不可用时 `/readyz` **刻意**返回 200
+    （app/api/health.py 写了理由），所以必须读响应体。
+    """
+    monitor = uncommented(MONITOR)
+    assert "billing_readiness_degraded_redis" in monitor
+    assert '*\'"status":"ok"\'*' in monitor
+    runbook = (REPO_ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+    assert "billing_readiness_degraded_redis" in runbook
+
+
+def test_the_monitor_watches_every_service_that_has_a_probe() -> None:
+    """⚠️ beat 崩掉是本平台最安静的故障：探针早就有了，缺的是**把 unhealthy 送出去**。
+
+    盯的名单必须与 compose 里配了 healthcheck 的服务完全一致 —— 少写一个，
+    就等于那个服务永远不会告警，而且没有任何迹象。
+    """
+    monitor = uncommented(MONITOR)
+    watched: set[str] = set()
+    for name in ("SERVICES_P1", "SERVICES_P2"):
+        found = re.search(rf'{name}="\$\{{[A-Z0-9_]+:-([^}}]+)\}}"', monitor)
+        assert found is not None, name
+        watched |= set(found.group(1).split())
+
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    with_probe: set[str] = set()
+    current = None
+    for line in compose.splitlines():
+        if re.fullmatch(r"  [a-zA-Z_][a-zA-Z0-9_-]*:", line):
+            current = line.strip().rstrip(":")
+        elif line.strip() == "healthcheck:" and current is not None:
+            with_probe.add(current)
+    assert watched == with_probe, f"watched={watched} probed={with_probe}"
+    assert "celery-beat" in watched
+
+
+def test_the_monitor_alerts_before_the_disk_is_full() -> None:
+    """⚠️ §94 明写：日志撑爆磁盘必须在**威胁到 MySQL / 文档存储之前**告警。
+
+    阈值贴着 100% 的话这条告警就没有意义了 —— 它响的时候已经来不及了。
+    """
+    monitor = uncommented(MONITOR)
+    warn = re.search(r"BILLING_MONITOR_DISK_WARN_PERCENT:-(\d+)", monitor)
+    crit = re.search(r"BILLING_MONITOR_DISK_CRIT_PERCENT:-(\d+)", monitor)
+    assert warn is not None and crit is not None
+    assert int(warn.group(1)) <= 85
+    assert int(warn.group(1)) < int(crit.group(1)) <= 95
+    # ⚠️ `df` 不带 -P：长设备名会换行，字段跟着错位。
+    assert "df -P" in monitor
+    assert not re.search(r"df (?!-P)", monitor)
+
+
+def test_the_monitor_confirms_a_problem_before_it_wakes_anyone() -> None:
+    """⚠️ 一次正常部署看起来和故障一模一样：换版本时容器有半分钟不是 healthy。
+
+    不复核的话每次部署都误报一条 —— 而被误报训练过的人不会再看告警。
+    """
+    monitor = uncommented(MONITOR)
+    recheck = re.search(r"BILLING_MONITOR_RECHECK_SECONDS:-(\d+)", monitor)
+    assert recheck is not None and int(recheck.group(1)) >= 30
+    assert 'sleep "$RECHECK_SECONDS"' in monitor
+    # 复核必须把三个检查**原样再跑一遍**，不能只重试失败的那一个：
+    # 第一轮红、第二轮绿的服务如果不重跑，就会带着过期的结论去 ping。
+    after = monitor.split('sleep "$RECHECK_SECONDS"', 1)[1]
+    for check in ("check_services", "check_readyz", "check_disk"):
+        assert f"$({check} || true)" in after
+
+
+def test_the_monitor_never_sources_the_env_file() -> None:
+    """⚠️ `.env` 里有数据库口令与主密钥口令：source 它等于执行里面的内容。"""
+    monitor = uncommented(MONITOR)
+    assert 'sed -n "s/^${1}=//p" "$ENV_FILE"' in monitor
+    assert "source " not in monitor
+    assert not re.search(r"^\s*\.\s+\"?\$ENV_FILE", monitor, re.MULTILINE)
+
+
+def test_the_cron_runs_the_monitor_unlocked() -> None:
+    """⚠️ 巡检是只读的，重叠无害；而 flock 会让一次卡死把之后每一轮都挡在脚本外面。
+
+    那种状态下心跳照样停发 —— 但没有任何一轮真的检查过，日志里也看不出为什么。
+    """
+    lines = [line for line in uncommented(CRON).splitlines() if "monitor.sh" in line]
+    assert len(lines) == 1
+    assert lines[0].startswith("*/5 * * * *")
+    assert "flock" not in lines[0]
+    assert "logger -t billing-monitor" in lines[0]
