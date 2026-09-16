@@ -1467,7 +1467,9 @@ case "$2 $3" in
             mv "$FAKE_STATE/attached.new" "$FAKE_STATE/attached"
             if [ -s "$FAKE_STATE/attached" ]; then
                 names=""
-                while read -r svc; do names="${names}name:\\"${svc}\\" "; done < "$FAKE_STATE/attached"
+                while read -r svc; do
+                    names="${names}name:\\"${svc}\\" "
+                done < "$FAKE_STATE/attached"
                 echo "Error response from daemon: error while removing network:" >&2
                 echo "  network ai_billing_hub_default has active endpoints (${names})" >&2
                 exit 1
