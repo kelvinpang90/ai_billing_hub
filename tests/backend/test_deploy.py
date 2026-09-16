@@ -1575,9 +1575,11 @@ def test_a_changed_network_stops_the_stack_then_retries(tmp_path) -> None:
 
 
 def test_the_recovery_never_downs_the_stack(tmp_path) -> None:
-    """⚠️ `down` 会把容器删掉，`PREVIOUS_IMAGE` 指向的运行时信息一起没了 ——
+    """⚠️ 停就够了，没有理由去删容器。
 
-    那正是回滚的落脚点。**只能 stop**。
+    本地实测：`docker stop` 之后容器就不在网络端点列表里，全停之后 `network rm` 成功。
+    既然 `stop` 能达到同样效果，`down` 就只是多牵动别的东西（孤儿容器、外部网络）——
+    部署脚本在这一步该做**最小的那个动作**。
     """
     script = uncommented(SCRIPT)
     body = script[script.index("start_database() {") : script.index("prune_old_images() {")]
