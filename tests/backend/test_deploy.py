@@ -801,6 +801,9 @@ def test_the_deploy_script_bounds_how_many_old_images_it_keeps() -> None:
     # ⚠️ 一个值只能解析一次。`test` 按十进制读、算术展开按八进制读，
     # 两处各自解析就会在 `08` 上分岔（一个放行、一个报错）。
     assert "keep=$(( 10#$IMAGE_KEEP ))" in script
+    # ⚠️ 往返比对：64 位溢出不报错，而回绕可以落在很小的正数上（
+    # `10#18446744073709551619` = 3）—— 那会把镜像真的删掉。
+    assert '[ "$keep" = "$digits" ] || return 0' in script
 
 
 def test_a_failed_image_cleanup_never_fails_a_successful_deploy() -> None:
@@ -1046,6 +1049,34 @@ def test_a_keep_count_with_a_leading_zero_is_read_as_decimal(tmp_path) -> None:
         IMAGE_KEEP="04",
         BILLING_IMAGE_REPO="ghcr.io/o/r",
     ) == ["ghcr.io/o/r:old2"]
+
+
+def test_a_keep_count_that_overflows_removes_nothing(tmp_path) -> None:
+    """⚠️ bash 的整数是 64 位，**溢出不报错**，而回绕可以落在一个很小的正数上。
+
+    `10#18446744073709551619` = **3**。一个「想多留点」的配置于是变成只留 3 个，
+    而且是**真的去删** —— 这是这个函数里唯一一类不可逆的后果。
+
+    ⚠️ 光抽样几个大数是不够的：`99999999999999999999` 回绕成巨大正数（窗口大到
+    删不着任何东西）、`9223372036854775808` 回绕成负数（被 `-ge 2` 挡掉），
+    两个恰好都安全 —— 只按它们下结论会以为溢出都无害。（Codex 审查 PR #62 R3）
+    """
+    for keep in (
+        "18446744073709551619",  # 2**64 + 3 → 回绕成 3，会真的删
+        "18446744073709551621",  # 2**64 + 5 → 回绕成 5
+        "99999999999999999999",  # 回绕成巨大正数
+        "9223372036854775808",  # 2**63 → 回绕成负数
+    ):
+        assert (
+            run_prune(
+                tmp_path / f"of{keep}",
+                TAG="new3",
+                PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+                IMAGE_KEEP=keep,
+                BILLING_IMAGE_REPO="ghcr.io/o/r",
+            )
+            == []
+        ), keep
 
 
 def test_a_nonsense_keep_count_removes_nothing(tmp_path) -> None:
