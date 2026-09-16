@@ -46,3 +46,6 @@ Thumbs.db
 /backups/
 # 恢复时从离机存储拉回来的备份（deploy/restore.sh 的工作目录）。与上面同一个道理。
 /restore/
+# 日志归档（deploy/log_ship.sh 的产出）。同样是加密的，同样不进仓库 ——
+# 里面是脱敏之后仍能拼出业务轮廓的东西（租户、路径、时间线）。
+/logs/

@@ -10,7 +10,7 @@
 #    同一台机器上其它项目的定时任务会被一并抹掉。
 # ⚠️ 用户名是占位符：真实的部署账号不进公开仓库。
 # ⚠️ 日志进 syslog：`journalctl -t billing-binlog` / `-t billing-backup` / `-t billing-drill`
-#    / `-t billing-monitor`。
+#    / `-t billing-monitor` / `-t billing-logs`。
 # ⚠️ 失败与破 RPO 以 err 级别单独进 syslog：`journalctl -t billing-binlog -p err`。
 #    把它送到人手里是告警通道的事（§95），这个文件不负责。
 
@@ -31,6 +31,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 #    写成 `17 19`，实际会在马来西亚晚上 19:17 跑。换主机时先 `timedatectl` 看时区再定这一行。
 # ⚠️ 这个文件是**复制**进 /etc/cron.d 的，改完要按上面的安装命令重装一次才生效。
 17 3 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-backup.lock bash deploy/backup.sh 2>&1 | logger -t billing-backup
+
+# 日志外送，每天马来西亚 03:47：抓过去一天的容器日志 → 打包 → 加密 → 验证 → 传 R2 的 logs/ 前缀，
+# 然后按保留期与总量上限清理本机归档（安全删除）。排在 03:17 的全量之后，两者不会抢同一个窗口。
+# ⚠️ json-file 按大小轮转不按时间：某个服务一天写爆 30 MB 时，抓到的就是被截断的一段（脚本头部有说明）。
+47 3 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-logs.lock bash deploy/log_ship.sh 2>&1 | logger -t billing-logs
 
 # 生产巡检（容器健康 / `/readyz` 降级 / 磁盘水位），每 5 分钟。三条心跳分开发，
 # 地址见 .env 的 BILLING_HEALTHCHECK_{SERVICES,READYZ,DISK}_URL（docs/deployment.md §8）。

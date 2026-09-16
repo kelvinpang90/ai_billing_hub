@@ -218,6 +218,7 @@ BINLOG_SHIP = REPO_ROOT / "deploy" / "binlog_ship.sh"
 CRON = REPO_ROOT / "deploy" / "cron.d" / "ai_billing_hub"
 DRILL = REPO_ROOT / "deploy" / "restore_drill.sh"
 MONITOR = REPO_ROOT / "deploy" / "monitor.sh"
+LOG_SHIP = REPO_ROOT / "deploy" / "log_ship.sh"
 
 
 def test_restore_refuses_to_overwrite_the_live_database() -> None:
@@ -247,7 +248,7 @@ def test_s3_credentials_never_appear_on_a_command_line() -> None:
     同机任何用户都读得到，而那台 VPS 上还跑着另外八个项目。必须用不带值的
     `-e NAME`，让 docker 从自己的环境里取。
     """
-    for path in (BACKUP, RESTORE, BINLOG_SHIP, DRILL):
+    for path in (BACKUP, RESTORE, BINLOG_SHIP, DRILL, LOG_SHIP):
         script = uncommented(path)
         assert "-e AWS_ACCESS_KEY_ID" in script
         assert "-e AWS_ACCESS_KEY_ID=" not in script
@@ -272,7 +273,7 @@ def test_no_comment_breaks_a_line_continuation() -> None:
     `docker run` 之间，前两个凭据变成当前 shell 里**没有导出**的变量，
     容器拿不到，报 `Unable to locate credentials` —— 看着像凭据填错了。
     """
-    for path in (SCRIPT, BACKUP, RESTORE, BINLOG_SHIP, DRILL, MONITOR):
+    for path in (SCRIPT, BACKUP, RESTORE, BINLOG_SHIP, DRILL, MONITOR, LOG_SHIP):
         lines = path.read_text(encoding="utf-8").splitlines()
         for number, (line, following) in enumerate(zip(lines, lines[1:], strict=False), start=1):
             if line.rstrip().endswith("\\") and following.strip().startswith("#"):
@@ -1099,3 +1100,162 @@ def test_a_nonsense_keep_count_removes_nothing(tmp_path) -> None:
             )
             == []
         ), keep
+
+
+# --- 日志外送（§94 保留期 / 磁盘上限 / 安全删除 / 异地留存，§112；T0.9）--------
+
+
+def test_the_log_archive_is_encrypted_before_it_leaves_the_host() -> None:
+    """⚠️ 日志里有脱敏之后仍能拼出业务轮廓的东西（租户、路径、金额量级）。
+
+    与备份同一条（决策 ⑦a）：**自己加密**，不依赖 R2 的服务端加密 —— 那样密钥在
+    Cloudflare 手里，归档对它是明文。
+    """
+    ship = uncommented(LOG_SHIP)
+    assert "openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt" in ship
+    # 上传的一定是密文，不是打包出来的明文 tar
+    assert 's3 cp "/data/$(basename "$CIPHER")"' in ship
+    assert 's3 cp "/data/$(basename "$TAR")"' not in ship
+
+
+def test_the_log_archive_round_trips_before_upload() -> None:
+    """⚠️ 一个配错口令产出的归档，和好的那个长得一模一样。
+
+    而需要日志的那天通常没有第二份 —— 所以解回来逐字节比对之后才允许上传。
+    """
+    ship = uncommented(LOG_SHIP)
+    assert "openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000" in ship
+    assert 'cmp -s "$TAR" "$VERIFY"' in ship
+    assert "NOT uploading" in ship
+    # 验证必须排在上传之前
+    assert ship.index('cmp -s "$TAR" "$VERIFY"') < ship.index("s3 cp ")
+
+
+def test_log_shipping_refuses_to_be_local_only() -> None:
+    """⚠️ 没配 R2 时**不能**静默跳过：只留在本机的日志不满足 §94 的异地留存，
+
+    而机器没了的那一刻，正是最需要那份日志的时候。
+    """
+    ship = uncommented(LOG_SHIP)
+    assert "does NOT satisfy spec §94" in ship
+
+
+def test_the_log_window_only_advances_after_a_confirmed_upload() -> None:
+    """⚠️ 提前推进状态的话，一次失败的外送会让那段窗口**再也不会被抓第二次** ——
+
+    而它多半正是出问题的那一段。
+    """
+    ship = uncommented(LOG_SHIP)
+    assert 'printf \'%s\\n\' "$NOW" > "$STATE_FILE"' in ship
+    assert ship.index("uploaded and confirmed") < ship.index('> "$STATE_FILE"')
+    # head-object 核对大小：cp 返回 0 只说明客户端认为它发完了
+    assert "head-object" in ship
+    assert "size mismatch after upload" in ship
+
+
+def test_the_log_window_is_clamped() -> None:
+    """⚠️ 状态文件丢了的时候，没有上限就会一口气去抓几个月 —— 一次例行外送变成一次事故。"""
+    ship = uncommented(LOG_SHIP)
+    hours = re.search(r"BILLING_LOG_MAX_WINDOW_HOURS:-(\d+)", ship)
+    assert hours is not None and int(hours.group(1)) <= 24 * 14
+    assert 'SINCE_EPOCH="$OLDEST"' in ship
+
+
+def test_log_retention_and_cap_are_both_enforced() -> None:
+    """⚠️ 保留期管「多久」，总量上限管「最坏占多少」——**两个都要**。
+
+    日志量突然放大时只有上限拦得住；而只有上限的话，安静的几个月会把保留期变成空话。
+    ⚠️ 顺序必须是先按保留期删、再按总量删：反过来会让一次暴涨挤掉还在保留期内的归档。
+    """
+    ship = uncommented(LOG_SHIP)
+    days = re.search(r"BILLING_LOG_RETENTION_DAYS:-(\d+)", ship)
+    cap = re.search(r"BILLING_LOG_ARCHIVE_CAP_MB:-(\d+)", ship)
+    assert days is not None and int(days.group(1)) >= 30  # 决策 ⑤：暂定 30 天
+    assert cap is not None and int(cap.group(1)) > 0
+    assert ship.index('-mtime +"$RETENTION_DAYS"') < ship.index("over its cap")
+    # 撞上限是异常，要单独以 err 级别报出来
+    assert "logger -p user.err -t billing-logs" in ship
+    # ⚠️ 绝不删本轮刚传上去的那一份
+    assert '[ "$old" = "${CIPHER:-}" ] && continue' in ship
+
+
+def test_log_archives_are_deleted_securely() -> None:
+    """⚠️ §112 要求安全删除：`rm` 只摘掉目录项，数据块还在盘上。
+
+    脚本里**每一处**删除归档或明文都要走 secure_rm，漏一处就等于没做。
+    """
+    ship = uncommented(LOG_SHIP)
+    assert "shred -u -n 1" in ship
+    for needle in ('secure_rm "$old"', 'secure_rm "$TAR"'):
+        assert needle in ship
+    # 明文 tar 与解密出来的校验文件都不许用裸 rm 留在盘上
+    assert 'rm -f "$TAR"' not in ship
+    assert 'rm -f "$VERIFY"' not in ship
+
+
+def test_the_plaintext_logs_never_survive_the_run() -> None:
+    """⚠️ 明文日志落盘的那一段是这个脚本最脆弱的窗口 —— 失败路径也要清掉。"""
+    ship = uncommented(LOG_SHIP)
+    assert "trap cleanup EXIT" in ship
+    cleanup = ship[ship.index("cleanup() {") : ship.index("trap cleanup EXIT")]
+    assert "$WORK" in cleanup and "$TAR" in cleanup and "$VERIFY" in cleanup
+
+
+def test_shipped_logs_carry_timestamps_per_service() -> None:
+    """⚠️ 没有时间戳的日志在事故调查里几乎没用（对不上时间线、拼不起多个服务）。
+
+    而混成一个文件的话，某个服务刷屏会把别人淹掉。
+    """
+    ship = uncommented(LOG_SHIP)
+    assert "--timestamps" in ship
+    assert '> "$out"' in ship
+    services = re.search(r'SERVICES="\$\{[A-Z0-9_]+:-([^}]+)\}"', ship)
+    assert services is not None
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    declared = {
+        line.strip().rstrip(":")
+        for line in compose.splitlines()
+        if re.fullmatch(r"  [a-zA-Z_][a-zA-Z0-9_-]*:", line)
+        and line.strip().rstrip(":") not in {"build", "environment", "secrets", "depends_on"}
+    }
+    shipped = set(services.group(1).split())
+    # 七个服务一个都不能漏：漏掉的那个出事时没有任何历史可查
+    assert shipped <= declared
+    assert len(shipped) == 7
+
+
+def test_an_empty_window_is_reported_but_not_a_failure() -> None:
+    """⚠️ 一台没人访问的机器就是零行。让它失败会把「安静的周末」变成每周一次的假警报，
+
+    而被假警报训练过的人不会再看告警。
+    """
+    ship = uncommented(LOG_SHIP)
+    assert "WARNING: every service returned zero lines" in ship
+    assert 'die "every service' not in ship
+
+
+def test_the_cron_runs_log_shipping_after_the_full_backup() -> None:
+    """⚠️ 两者都要停 I/O、都要用 R2，撞在同一分钟只会互相拖慢。"""
+    # ⚠️ 不能只匹配 `log_ship.sh`：`binlog_ship.sh` 的结尾正好是同一串。
+    lines = [line for line in uncommented(CRON).splitlines() if "deploy/log_ship.sh" in line]
+    assert len(lines) == 1
+    assert lines[0].startswith("47 3 * * *")
+    assert "flock" in lines[0]
+    assert "logger -t billing-logs" in lines[0]
+    backup = [line for line in uncommented(CRON).splitlines() if "backup.sh" in line][0]
+    assert int(backup.split()[0]) < int(lines[0].split()[0])
+
+
+def test_retention_runs_on_the_failure_path_too() -> None:
+    """⚠️ 失败的那一轮照样在本机留下一份加密归档（Codex #64 R1）。
+
+    R2 挂一周就攒一周，没有任何东西会去删它们 —— 而「日志把磁盘撑爆、威胁到 MySQL」
+    正是 §94 要防的那件事。所以 `die` 也要清理，且清理本身出错不能盖住真正的失败原因。
+    """
+    ship = uncommented(LOG_SHIP)
+    die_body = ship[ship.index("die() {") : ship.index("used_mb() {")]
+    assert "enforce_retention || true" in die_body
+    # 成功路径那次调用仍在（独立一行，不带 `|| true`）
+    assert re.search(r"(?m)^enforce_retention$", ship)
+    # 本轮刚产出的那份在两条路上都不许被上限逻辑删掉
+    assert '[ "$old" = "${CIPHER:-}" ] && continue' in ship
