@@ -46,6 +46,12 @@ Thumbs.db
 /backups/
 # 恢复时从离机存储拉回来的备份（deploy/restore.sh 的工作目录）。与上面同一个道理。
 /restore/
+# 部署脚本记下的「上一个成功部署」（deploy/deploy.sh）。它是**主机上的状态**，
+# 每台机器各不相同，进仓库只会互相覆盖。
+/.last-good-deploy
+/.last-good-deploy-history
+/.last-good-deploy.tmp
+
 # 日志归档（deploy/log_ship.sh 的产出）。同样是加密的，同样不进仓库 ——
 # 里面是脱敏之后仍能拼出业务轮廓的东西（租户、路径、时间线）。
 /logs/

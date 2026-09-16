@@ -29,9 +29,39 @@ SMOKE_URL="${BILLING_SMOKE_URL:-http://127.0.0.1:${BILLING_HTTP_PORT:-8080}}"
 # 每个镜像仓库在本机保留几个版本。⚠️ 至少要 2：当前这个，加上回滚目标。
 # 默认 3 多留一个缓冲，让「回滚之后再回滚」也还有落脚点。
 IMAGE_KEEP="${BILLING_IMAGE_KEEP:-3}"
+# 「上一个成功部署的是哪个 commit」落盘的地方。
+#
+# ⚠️ **出事那天要用它填 workflow_dispatch 的 `ref`。**在此之前，唯一的来源是
+# `docker compose ps` 里正在跑的那个标签 —— 而需要回滚的时候，正在跑的恰恰就是
+# 坏的那一个。`git log` 也答不了：`main` 上最新那条未必部署过。
+DEPLOY_STATE="${BILLING_DEPLOY_STATE_FILE:-./.last-good-deploy}"
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# 记下这一次成功部署。⚠️ 只在**健康检查与冒烟都过了之后**调用：
+# 记早了的话，一次失败的部署会把「上一个好的」覆盖成那个坏的。
+record_last_good() {
+    local now tmp
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    tmp="${DEPLOY_STATE}.tmp"
+    # ⚠️ 先写临时文件再 `mv`：直接覆写时，写到一半被打断就留下一个残缺的记录，
+    # 而它恰恰是出事时唯一的依据。
+    {
+        printf 'tag=%s\n' "$TAG"
+        printf 'api_image=%s\n' "${BILLING_IMAGE:-}"
+        printf 'frontend_image=%s\n' "${BILLING_FRONTEND_IMAGE:-}"
+        printf 'deployed_at=%s\n' "$now"
+    # ⚠️ `2>/dev/null` 必须写在 `>` **前面**。重定向按从左到右建立，写在后面时
+    # 「目录不存在」那条报错是 shell 在建立 `>` 的当场打出来的，还没轮到它 ——
+    # 于是一次成功的部署日志里会平白多出一行 shell 报错。用例真踩到过。
+    } 2>/dev/null > "$tmp" && mv -f "$tmp" "$DEPLOY_STATE" 2>/dev/null \
+        || { log "WARNING: could not record the last good deploy at $DEPLOY_STATE"; return 0; }
+    # 再追加一行历史：回滚目标本身也坏掉时，要往前再找一个。
+    printf '%s %s\n' "$now" "$TAG" >> "${DEPLOY_STATE}-history" 2>/dev/null || true
+    log "recorded as the last good deploy: $TAG"
+    return 0
+}
 
 # 把本项目两个镜像仓库里过老的版本删掉，只留最近 IMAGE_KEEP 个。
 #
@@ -117,7 +147,9 @@ prune_old_images() {
             # ⚠️ 这一次的标签与回滚目标额外再挡一道。正常情况下它们就落在最近
             # keep 个里，但「回滚到一个很旧的版本」会让回滚目标掉出窗口。
             case " $in_use " in *" $img "*) continue ;; esac
-            if [ "$img" = "${repo}:${TAG}" ] || [ "$img" = "$PREVIOUS_IMAGE" ]; then
+            if [ "$img" = "${repo}:${TAG}" ] \
+                || [ "$img" = "$PREVIOUS_IMAGE" ] \
+                || [ "$img" = "${PREVIOUS_FRONTEND_IMAGE:-}" ]; then
                 continue
             fi
             log "removing old image $img"
@@ -178,10 +210,17 @@ esac
 # 第一次失败的部署就没有可回滚的目标了。
 
 PREVIOUS_IMAGE="$($COMPOSE ps --format '{{.Image}}' api 2>/dev/null | head -1 || true)"
+# ⚠️ **前端要单独记一份。**前端是独立的镜像（`BILLING_FRONTEND_IMAGE`），回滚时
+# 只换回后端的话，栈会停在「后端旧、前端新」的混搭状态 —— 而这种状态不会有任何
+# 报错：两个容器都健康，只有用户点到某个新页面才发现它在打一个不存在的接口。
+PREVIOUS_FRONTEND_IMAGE="$($COMPOSE ps --format '{{.Image}}' frontend 2>/dev/null | head -1 || true)"
 if [ -n "$PREVIOUS_IMAGE" ]; then
-    log "currently running: $PREVIOUS_IMAGE"
+    log "currently running: $PREVIOUS_IMAGE / ${PREVIOUS_FRONTEND_IMAGE:-frontend not running}"
 else
     log "nothing running yet (first deploy) — there is no rollback target"
+fi
+if [ -f "$DEPLOY_STATE" ]; then
+    log "last good deploy on record: $(sed -n 's/^tag=//p' "$DEPLOY_STATE" | head -1)"
 fi
 
 # --------------------------------------------------------------------------
@@ -311,6 +350,7 @@ if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then
     # prune_old_images 里，按保留窗口做（它头上那段注释记着这个洞在生产上的后果）。
     docker image prune -f >/dev/null 2>&1 || true
     prune_old_images
+    record_last_good
     exit 0
 fi
 
@@ -324,6 +364,24 @@ fi
 
 log "rolling back to $PREVIOUS_IMAGE"
 export BILLING_IMAGE="$PREVIOUS_IMAGE"
+
+# ⚠️ **前端必须跟着一起回滚。**不换它的话 `BILLING_FRONTEND_IMAGE` 还指着这一次
+# 那个坏标签，`compose up` 会把后端换回去、前端原地不动 —— 回滚看起来成功了，
+# 栈却停在「后端旧、前端新」，而这种不匹配是**静默**的。
+if [ -z "$PREVIOUS_FRONTEND_IMAGE" ] && [ -n "${BILLING_IMAGE_REPO:-}" ] && [ -n "$PREVIOUS_IMAGE" ]; then
+    # 前端容器此刻可能压根没起来（`ps` 列不出停掉的），但两个镜像同一个 commit
+    # 构建，所以能从后端那一版的标签推出来。
+    PREVIOUS_FRONTEND_IMAGE="${BILLING_FRONTEND_IMAGE_REPO:-${BILLING_IMAGE_REPO}-frontend}:${PREVIOUS_IMAGE##*:}"
+    log "the frontend was not running; deriving its rollback target from the api tag"
+fi
+if [ -n "$PREVIOUS_FRONTEND_IMAGE" ]; then
+    export BILLING_FRONTEND_IMAGE="$PREVIOUS_FRONTEND_IMAGE"
+    log "rolling the frontend back to $PREVIOUS_FRONTEND_IMAGE"
+else
+    # 演练模式下没有仓库名，推不出来。**说出来**，不要让人以为整栈都回去了。
+    log "WARNING: no previous frontend image is known; the frontend stays on $TAG"
+fi
+
 $COMPOSE up -d --no-build || die "rollback failed — manual intervention required"
 
 if wait_for_health; then

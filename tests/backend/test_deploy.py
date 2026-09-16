@@ -1259,3 +1259,130 @@ def test_retention_runs_on_the_failure_path_too() -> None:
     assert re.search(r"(?m)^enforce_retention$", ship)
     # 本轮刚产出的那份在两条路上都不许被上限逻辑删掉
     assert '[ "$old" = "${CIPHER:-}" ] && continue' in ship
+
+
+# --- 回滚的两个缺口（T0.9）----------------------------------------------------
+
+
+def test_rollback_takes_the_frontend_with_it() -> None:
+    """⚠️ 前端是**独立的镜像**。只换回后端的话，栈会停在「后端旧、前端新」——
+
+    两个容器都健康、没有任何报错，只有用户点到某个新页面才发现它在打一个不存在的接口。
+    """
+    script = uncommented(SCRIPT)
+    rollback = script[script.index('log "rolling back to $PREVIOUS_IMAGE"') :]
+    up = rollback.index("$COMPOSE up -d --no-build")
+    # 两个镜像都必须在 `compose up` **之前**导出
+    assert rollback.index('export BILLING_IMAGE="$PREVIOUS_IMAGE"') < up
+    assert rollback.index('export BILLING_FRONTEND_IMAGE="$PREVIOUS_FRONTEND_IMAGE"') < up
+    # 部署开始时就记下前端在跑的是什么（和后端同一时刻，改动之前）
+    assert "PREVIOUS_FRONTEND_IMAGE=\"$($COMPOSE ps --format '{{.Image}}' frontend" in script
+    assert script.index("PREVIOUS_FRONTEND_IMAGE=") < script.index("$COMPOSE pull")
+
+
+def test_the_frontend_rollback_target_has_a_fallback() -> None:
+    """⚠️ 前端容器此刻可能压根没起来（`ps` 列不出停掉的），那样就推不出回滚目标。
+
+    两个镜像同一个 commit 构建，所以按后端那一版的标签推。⚠️ 连这条都推不出来时
+    （演练模式没有仓库名）必须**说出来**，不能让人以为整栈都回去了。
+    """
+    script = uncommented(SCRIPT)
+    # ⚠️ 钉整条赋值，不只钉那个后缀展开：只查子串的话，把赋值换成别的语句
+    # （值还在字符串里）照样过 —— 变异验证时真漏过一次。
+    assert (
+        'PREVIOUS_FRONTEND_IMAGE="${BILLING_FRONTEND_IMAGE_REPO:-${BILLING_IMAGE_REPO}-frontend}'
+        ':${PREVIOUS_IMAGE##*:}"'
+    ) in script
+    assert "WARNING: no previous frontend image is known" in script
+
+
+def test_the_last_good_deploy_is_recorded_only_after_it_is_proven() -> None:
+    """⚠️ 记早了的话，一次失败的部署会把「上一个好的」覆盖成那个坏的 ——
+
+    而这份记录正是出事那天用来填 `ref` 的唯一依据。
+    """
+    script = uncommented(SCRIPT)
+    success = script[script.index('if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then') :]
+    assert "record_last_good" in success.split("exit 0")[0]
+    # 失败路径不许写这份记录：回滚回去的那个**就是**记录里的 last good
+    rollback = script[script.index('log "rolling back to $PREVIOUS_IMAGE"') :]
+    assert "record_last_good" not in rollback
+
+
+def test_the_last_good_record_is_written_atomically() -> None:
+    """⚠️ 直接覆写时，写到一半被打断就留下一个残缺的记录 —— 而它是出事时唯一的依据。"""
+    script = uncommented(SCRIPT)
+    assert 'tmp="${DEPLOY_STATE}.tmp"' in script
+    assert 'mv -f "$tmp" "$DEPLOY_STATE"' in script
+
+
+RECORD_RUNNER = """#!/usr/bin/env bash
+set -euo pipefail
+cd "$1"
+log() { printf 'LOG %s\\n' "$*"; }
+source "$PWD/fn.sh"
+record_last_good
+# ⚠️ 哨兵：runner 和 deploy.sh 一样开着 `set -euo pipefail`。记录这一步里任何
+# 没被兜住的失败都会把脚本提前提掉，这句就打不出来 —— 而它绝不能让一次
+# **已经成功**的部署变成失败。
+echo "DEPLOY CONTINUES"
+"""
+
+
+def run_record_last_good(tmp_path, state_path: str, **env):
+    """把 deploy.sh 里的 record_last_good 原样抠出来跑。"""
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    body = re.search(
+        r"^record_last_good\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S
+    )
+    assert body is not None, "deploy.sh 里找不到 record_last_good"
+
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "fn.sh").write_text(body.group(0) + "\n", encoding="utf-8", newline="\n")
+    runner = work / "run.sh"
+    runner.write_text(RECORD_RUNNER, encoding="utf-8", newline="\n")
+
+    full = {
+        **os.environ,
+        "TAG": "deadbeef",
+        "BILLING_IMAGE": "ghcr.io/o/r:deadbeef",
+        "BILLING_FRONTEND_IMAGE": "ghcr.io/o/r-frontend:deadbeef",
+        "DEPLOY_STATE": state_path,
+        **env,
+    }
+    return subprocess.run([bash, str(runner), str(work)], env=full, capture_output=True, text=True)
+
+
+def test_recording_the_last_good_deploy_writes_the_tag_and_both_images(tmp_path) -> None:
+    """记录要能直接回答两个问题：回滚填哪个 `ref`，以及那一版的两个镜像是什么。"""
+    state = tmp_path / "state" / ".last-good-deploy"
+    state.parent.mkdir(parents=True)
+    done = run_record_last_good(tmp_path, str(state))
+    assert done.returncode == 0, done.stderr
+    assert "DEPLOY CONTINUES" in done.stdout
+    written = state.read_text(encoding="utf-8")
+    assert "tag=deadbeef" in written
+    assert "api_image=ghcr.io/o/r:deadbeef" in written
+    assert "frontend_image=ghcr.io/o/r-frontend:deadbeef" in written
+    assert "deployed_at=" in written
+    # 历史文件追加一行：回滚目标本身也坏掉时要往前再找一个
+    history = state.parent / ".last-good-deploy-history"
+    assert history.exists() and "deadbeef" in history.read_text(encoding="utf-8")
+    # 临时文件不留下
+    assert not (state.parent / ".last-good-deploy.tmp").exists()
+
+
+def test_a_failed_recording_never_fails_the_deploy(tmp_path) -> None:
+    """⚠️ 部署已经健康、冒烟也过了。**记不下来是个警告，不是一次失败的部署** ——
+
+    把它扔成失败会触发回滚，而那才是真正制造停机的那一步。
+    """
+    missing = tmp_path / "nope" / "deeper" / ".last-good-deploy"
+    done = run_record_last_good(tmp_path, str(missing))
+    assert done.returncode == 0, done.stderr
+    assert "DEPLOY CONTINUES" in done.stdout
+    assert "could not record the last good deploy" in done.stdout
+    assert done.stderr == "", f"记录失败时不该有 shell 报错漏出来：{done.stderr!r}"
