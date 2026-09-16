@@ -10,7 +10,7 @@
 #    同一台机器上其它项目的定时任务会被一并抹掉。
 # ⚠️ 用户名是占位符：真实的部署账号不进公开仓库。
 # ⚠️ 日志进 syslog：`journalctl -t billing-binlog` / `-t billing-backup` / `-t billing-drill`
-#    / `-t billing-monitor` / `-t billing-logs`。
+#    / `-t billing-monitor` / `-t billing-logs` / `-t billing-config`。
 # ⚠️ 失败与破 RPO 以 err 级别单独进 syslog：`journalctl -t billing-binlog -p err`。
 #    把它送到人手里是告警通道的事（§95），这个文件不负责。
 
@@ -36,6 +36,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # 然后按保留期与总量上限清理本机归档（安全删除）。排在 03:17 的全量之后，两者不会抢同一个窗口。
 # ⚠️ json-file 按大小轮转不按时间：某个服务一天写爆 30 MB 时，抓到的就是被截断的一段（脚本头部有说明）。
 47 3 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-logs.lock bash deploy/log_ship.sh 2>&1 | logger -t billing-logs
+
+# 部署配置快照，每天马来西亚 03:57（排在日志外送之后）：把「在新主机上重建这个栈还需要
+# 知道什么」离机 —— 部署的 commit、.env 的**键名**、cron、nginx 配置校验和、在跑的镜像。
+# ⚠️ 绝不含任何密钥的值；上传前脚本会拿 .env 里的真值自查一遍，撞上就拒传。
+57 3 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-config.lock bash deploy/config_snapshot.sh 2>&1 | logger -t billing-config
 
 # 生产巡检（容器健康 / `/readyz` 降级 / 磁盘水位），每 5 分钟。三条心跳分开发，
 # 地址见 .env 的 BILLING_HEALTHCHECK_{SERVICES,READYZ,DISK}_URL（docs/deployment.md §8）。
