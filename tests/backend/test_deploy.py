@@ -218,6 +218,7 @@ BINLOG_SHIP = REPO_ROOT / "deploy" / "binlog_ship.sh"
 CRON = REPO_ROOT / "deploy" / "cron.d" / "ai_billing_hub"
 DRILL = REPO_ROOT / "deploy" / "restore_drill.sh"
 MONITOR = REPO_ROOT / "deploy" / "monitor.sh"
+COMPOSE = REPO_ROOT / "docker-compose.yml"
 LOG_SHIP = REPO_ROOT / "deploy" / "log_ship.sh"
 
 
@@ -1386,3 +1387,48 @@ def test_a_failed_recording_never_fails_the_deploy(tmp_path) -> None:
     assert "DEPLOY CONTINUES" in done.stdout
     assert "could not record the last good deploy" in done.stdout
     assert done.stderr == "", f"记录失败时不该有 shell 报错漏出来：{done.stderr!r}"
+
+
+# --- binlog 的本地磁盘上限（§98.1 / T0.9）------------------------------------
+
+
+def test_the_binlog_budget_is_checked_with_the_disk_dimension() -> None:
+    """⚠️ MySQL 8.4 **没有** `binlog_space_limit`（生产那台 8.4.11 实测：变量不存在）。
+
+    它自己只按**时间**清（本地 3 天），三天之内能攒出多少没有上限 —— 而磁盘写满时
+    MySQL 直接停止写入。所以总量口径只能在 MySQL 外面盯。
+    ⚠️ 并进磁盘那个维度，不另开检查：两条通知指向同一个原因时，人第一反应是「又抽风了」。
+    """
+    monitor = uncommented(MONITOR)
+    budget = re.search(r"BILLING_MONITOR_BINLOG_BUDGET_MB:-(\d+)", monitor)
+    assert budget is not None
+    # 预算要留在「磁盘告警之前就响」的量级：太大就失去了早期信号的意义
+    assert 256 <= int(budget.group(1)) <= 8192
+    # 在 check_disk 里调用 —— 也就是走 disk 那条心跳
+    disk_body = monitor[monitor.index("check_disk() {") : monitor.index("SERVICES_OUT=")]
+    assert "check_binlog" in disk_body
+
+
+def test_an_unreachable_mysql_does_not_raise_a_binlog_alert() -> None:
+    """⚠️ mysql 没起来是**服务维度**的事，在磁盘维度再报一次只是双响。"""
+    monitor = uncommented(MONITOR)
+    body = monitor[monitor.index("check_binlog() {") : monitor.index("check_disk() {")]
+    assert "skipping the budget check" in body
+    assert 'if [ -z "$kb" ]; then' in body
+    # 跳过的那一支必须 return 0，不能落到下面的比较（`$kb` 为空时算术展开会炸）
+    assert body.index('if [ -z "$kb" ]') < body.index("return 0") < body.index("mb=$((kb / 1024))")
+
+
+def test_local_binlog_retention_outlives_one_full_backup_cycle() -> None:
+    """⚠️ 本地保留期短于「全量间隔 + 余量」的话，最近一份全量的 PITR 链会缺前半截。
+
+    全量每天一次，所以至少要留两天；现在留 3 天。
+    """
+    compose = COMPOSE.read_text(encoding="utf-8")
+    expire = re.search(r"BILLING_BINLOG_EXPIRE_SECONDS:-(\d+)", compose)
+    assert expire is not None
+    assert int(expire.group(1)) >= 2 * 24 * 3600
+    size = re.search(r"BILLING_MAX_BINLOG_SIZE:-(\d+)", compose)
+    assert size is not None
+    # 单文件太大时，「推走已关闭的文件」这件事会被拖很久（离机粒度 = RPO 的一部分）
+    assert int(size.group(1)) <= 256 * 1024 * 1024
