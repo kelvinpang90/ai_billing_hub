@@ -824,6 +824,8 @@ FAKE_DOCKER = """#!/usr/bin/env bash
 case "$1 $2" in
     "ps -a") cat "$FAKE_STATE/in_use" ;;
     "images --filter")
+        # 枚举失败的开关（比如 docker daemon 此刻不应答）。
+        [ -e "$FAKE_STATE/fail_images" ] && { echo "boom" >&2; exit 1; }
         ref="${3#reference=}"
         repo="${ref%:*}"
         while IFS=$'\\t' read -r created image; do
@@ -853,6 +855,9 @@ export PATH="$PWD/bin:$PATH"
 log() { printf 'LOG %s\\n' "$*"; }
 source "$PWD/fn.sh"
 prune_old_images
+# ⚠️ 这一行是哨兵：runner 开着 `set -euo pipefail`，和 `deploy.sh` 一样。
+# 清理里任何未被兜住的失败都会把脚本提前提掉，这句就打不出来。
+echo "DEPLOY CONTINUES"
 """
 
 IMAGES = """2026-09-16 12:53:01 +0800 +08\tghcr.io/o/r:new3
@@ -871,7 +876,7 @@ IMAGES = """2026-09-16 12:53:01 +0800 +08\tghcr.io/o/r:new3
 IN_USE = "ghcr.io/o/r:pinned\nmysql:8.4\n"
 
 
-def run_prune(tmp_path, **env):
+def run_prune(tmp_path, fail_images: bool = False, **env):
     """把 deploy.sh 里的 prune_old_images 原样抠出来跑，返回被删掉的镜像列表。"""
     bash = shutil.which("bash")
     assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
@@ -900,6 +905,8 @@ def run_prune(tmp_path, **env):
     fake = put("bin/docker", FAKE_DOCKER)
     fake.chmod(0o755)
     runner = put("run.sh", RUNNER)
+    if fail_images:
+        put("fail_images", "")
 
     full = {**os.environ, "TAG": "", "PREVIOUS_IMAGE": "", "IMAGE_KEEP": "3", **env}
     full.pop("BILLING_IMAGE_REPO", None)
@@ -913,6 +920,9 @@ def run_prune(tmp_path, **env):
         text=True,
     )
     assert done.returncode == 0, done.stderr
+    # ⚠️ 清理是**善后**，不是部署的一部分：无论里面出什么事，调用方都必须
+    # 能继续往下走。这条断言对每一个场景都生效，不只是枚举失败那一个。
+    assert "DEPLOY CONTINUES" in done.stdout, done.stdout
     # ⚠️ 顺带钉死日志：漏查在用镜像时这里会冒出 could not remove。
     assert "could not remove" not in done.stdout, done.stdout
     return [line for line in (state / "removed").read_text(encoding="utf-8").splitlines() if line]
@@ -967,6 +977,27 @@ def test_a_rollback_target_outside_the_window_survives(tmp_path) -> None:
     assert "ghcr.io/o/r:old2" not in removed  # 这一次部署的
     assert "ghcr.io/o/r:new3" not in removed  # 回滚目标
     assert "ghcr.io/o/r:pinned" not in removed  # 在用的
+
+
+def test_a_failed_enumeration_does_not_sink_a_successful_deploy(tmp_path) -> None:
+    """⚠️ `deploy.sh` 开着 `set -euo pipefail`，而这个函数在**部署已经成功**之后才跑。
+
+    枚举镜像那条管道一旦返回非零（daemon 此刻不应答就够了），`set -e` 会把
+    一次**健康检查与冒烟都已经过了**的部署扔成失败 —— 人被叫醒去处理一件对
+    线上毫无影响的事，而下一次他就会开始忽略部署失败。
+    （Codex 审查 PR #62 指出的阻断项；修之前假 docker 一报错，runner 直接 exit 1。）
+    """
+    assert (
+        run_prune(
+            tmp_path,
+            fail_images=True,
+            TAG="new3",
+            PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+            IMAGE_KEEP="3",
+            BILLING_IMAGE_REPO="ghcr.io/o/r",
+        )
+        == []
+    )
 
 
 def test_rehearsal_mode_removes_nothing(tmp_path) -> None:

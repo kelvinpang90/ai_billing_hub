@@ -43,7 +43,7 @@ die() { log "ERROR: $*"; exit 1; }
 #
 # ⚠️ 清理失败绝不能让一次成功的部署变成失败 —— 出错只记日志，不改退出码。
 prune_old_images() {
-    local in_use repo img
+    local in_use repo img stale
     # 演练模式（BILLING_IMAGE_REPO 未设）下不知道仓库名，什么都不动。
     [ -n "${BILLING_IMAGE_REPO:-}" ] || return 0
     case "$IMAGE_KEEP" in ''|*[!0-9]*) return 0 ;; esac
@@ -62,23 +62,39 @@ prune_old_images() {
         # ⚠️ 按 CreatedAt 显式排序，不靠 `docker images` 的默认顺序 —— 默认确实是新的
         # 在前，但那是没有文档保证的实现细节，而排错了就会删掉在跑的版本。
         # CreatedAt 的前缀是 `YYYY-MM-DD HH:MM:SS`，字典序即时间序。
-        docker images --filter "reference=${repo}:*" \
-                      --format '{{.CreatedAt}}	{{.Repository}}:{{.Tag}}' 2>/dev/null \
-            | sort -r \
-            | tail -n "+$(( IMAGE_KEEP + 1 ))" \
-            | cut -f2 \
-            | while read -r img; do
-                # ⚠️ 这一次的标签与回滚目标额外再挡一道。正常情况下它们就落在最近
-                # IMAGE_KEEP 个里，但「回滚到一个很旧的版本」会让回滚目标掉出窗口。
-                case " $in_use " in *" $img "*) continue ;; esac
-                if [ "$img" = "${repo}:${TAG}" ] || [ "$img" = "$PREVIOUS_IMAGE" ]; then
-                    continue
-                fi
-                log "removing old image $img"
-                docker image rm "$img" >/dev/null 2>&1 \
-                    || log "could not remove $img; leaving it in place"
-            done
+        #
+        # ⚠️ **先收进变量、带 `|| true`，不能直接把管道接给 `while`。**本脚本开着
+        # `set -euo pipefail`：枚举这一步任一环节出错，整条管道就是非零，于是
+        # `set -e` 把一次**健康检查与冒烟都已经过了**的部署扔成失败，CD 变红。
+        # （Codex 审查 PR #62 指出；已用假 docker 复现：修之前函数后面的语句
+        # 根本执行不到，脚本直接 exit 1。）
+        stale="$(
+            docker images --filter "reference=${repo}:*" \
+                          --format '{{.CreatedAt}}	{{.Repository}}:{{.Tag}}' 2>/dev/null \
+                | sort -r \
+                | tail -n "+$(( IMAGE_KEEP + 1 ))" \
+                | cut -f2 \
+                || true
+        )"
+        [ -n "$stale" ] || continue
+
+        while read -r img; do
+            [ -n "$img" ] || continue
+            # ⚠️ 这一次的标签与回滚目标额外再挡一道。正常情况下它们就落在最近
+            # IMAGE_KEEP 个里，但「回滚到一个很旧的版本」会让回滚目标掉出窗口。
+            case " $in_use " in *" $img "*) continue ;; esac
+            if [ "$img" = "${repo}:${TAG}" ] || [ "$img" = "$PREVIOUS_IMAGE" ]; then
+                continue
+            fi
+            log "removing old image $img"
+            docker image rm "$img" >/dev/null 2>&1 \
+                || log "could not remove $img; leaving it in place"
+        done <<< "$stale"
     done
+
+    # ⚠️ 显式 `return 0`，不让函数的退出码取决于最后一句碰巧是什么。
+    # 这个函数在「部署已经成功」之后才跑，**它的成败不是部署的成败**。
+    return 0
 }
 
 # 等待指定服务（不给参数就是全部）变成 healthy。
