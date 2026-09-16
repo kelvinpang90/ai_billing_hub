@@ -43,12 +43,21 @@ die() { log "ERROR: $*"; exit 1; }
 #
 # ⚠️ 清理失败绝不能让一次成功的部署变成失败 —— 出错只记日志，不改退出码。
 prune_old_images() {
-    local in_use repo img stale
+    local in_use repo img stale keep
     # 演练模式（BILLING_IMAGE_REPO 未设）下不知道仓库名，什么都不动。
     [ -n "${BILLING_IMAGE_REPO:-}" ] || return 0
     case "$IMAGE_KEEP" in ''|*[!0-9]*) return 0 ;; esac
+
+    # ⚠️ **必须 `10#` 强制十进制。**带前导零的值（人写 `08` 是想要 8）能过
+    # 上面那一条「只有数字」与下面的 `-ge`（`test` 按十进制读），但 bash 的**算术
+    # 展开**把它当八进制：`$(( 08 + 1 ))` 直接报 value too great for base，
+    # `set -e` 于是把一次**已经成功**的部署扔成失败；而 `010` 更坏 —— 它不报错，
+    # **静默地**变成 8。两处各自解析同一个值是问题的根，所以只解析一次，
+    # 后面统一用 `keep`。（Codex 审查 PR #62 R2 指出。）
+    keep=$(( 10#$IMAGE_KEEP ))
+
     # ⚠️ 少于 2 就没有回滚目标了。配歪了宁可不清，也不能把能回滚的版本删掉。
-    [ "$IMAGE_KEEP" -ge 2 ] || return 0
+    [ "$keep" -ge 2 ] || return 0
 
     # ⚠️ 被**任何**容器引用的镜像都不能动，包括已退出的容器和本栈之外的容器
     # （这台机器上还跑着别的项目）。在用的镜像 docker 自己会拒绝删，但那会在部署
@@ -72,7 +81,7 @@ prune_old_images() {
             docker images --filter "reference=${repo}:*" \
                           --format '{{.CreatedAt}}	{{.Repository}}:{{.Tag}}' 2>/dev/null \
                 | sort -r \
-                | tail -n "+$(( IMAGE_KEEP + 1 ))" \
+                | tail -n "+$(( keep + 1 ))" \
                 | cut -f2 \
                 || true
         )"
@@ -81,7 +90,7 @@ prune_old_images() {
         while read -r img; do
             [ -n "$img" ] || continue
             # ⚠️ 这一次的标签与回滚目标额外再挡一道。正常情况下它们就落在最近
-            # IMAGE_KEEP 个里，但「回滚到一个很旧的版本」会让回滚目标掉出窗口。
+            # keep 个里，但「回滚到一个很旧的版本」会让回滚目标掉出窗口。
             case " $in_use " in *" $img "*) continue ;; esac
             if [ "$img" = "${repo}:${TAG}" ] || [ "$img" = "$PREVIOUS_IMAGE" ]; then
                 continue

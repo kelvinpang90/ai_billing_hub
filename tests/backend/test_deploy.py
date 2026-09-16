@@ -797,7 +797,10 @@ def test_the_deploy_script_bounds_how_many_old_images_it_keeps() -> None:
     assert keep is not None, "保留个数必须可配"
     # ⚠️ 下限是 2 而不是 1：留 1 个就等于把回滚目标删了。
     assert int(keep.group(1)) >= 2
-    assert '[ "$IMAGE_KEEP" -ge 2 ] || return 0' in script
+    assert '[ "$keep" -ge 2 ] || return 0' in script
+    # ⚠️ 一个值只能解析一次。`test` 按十进制读、算术展开按八进制读，
+    # 两处各自解析就会在 `08` 上分岔（一个放行、一个报错）。
+    assert "keep=$(( 10#$IMAGE_KEEP ))" in script
 
 
 def test_a_failed_image_cleanup_never_fails_a_successful_deploy() -> None:
@@ -920,6 +923,11 @@ def run_prune(tmp_path, fail_images: bool = False, **env):
         text=True,
     )
     assert done.returncode == 0, done.stderr
+    # ⚠️ stderr 必须是**空**的。函数里每一条 docker 调用都自带 `2>/dev/null`，
+    # 所以这里出现的任何东西都是 **shell 自己**的报错。光看退出码不够 ——
+    # bash 碍于算术展开出错时会把函数**惄无声息地提前结束**、返回 0，
+    # 于是清理根本没做而一切看起来都正常（`IMAGE_KEEP=08` 就是这个样子）。
+    assert done.stderr == "", done.stderr
     # ⚠️ 清理是**善后**，不是部署的一部分：无论里面出什么事，调用方都必须
     # 能继续往下走。这条断言对每一个场景都生效，不只是枚举失败那一个。
     assert "DEPLOY CONTINUES" in done.stdout, done.stdout
@@ -1003,6 +1011,39 @@ def test_a_failed_enumeration_does_not_sink_a_successful_deploy(tmp_path) -> Non
 def test_rehearsal_mode_removes_nothing(tmp_path) -> None:
     """⚠️ 本地演练（BILLING_IMAGE_REPO 未设）不知道仓库名，必须一个都不碰。"""
     assert run_prune(tmp_path, TAG="new3", IMAGE_KEEP="3") == []
+
+
+def test_a_keep_count_with_a_leading_zero_is_read_as_decimal(tmp_path) -> None:
+    """⚠️ bash 的**算术展开**把 `08` / `09` 当非法八进制，直接报错。
+
+    而 `test` 的 `-ge` 按十进制读 —— 于是 `08` 能一路过完校验，再在 `$(( ))`
+    里炸掉，`set -e` 把一次**已经成功**的部署扔成失败。`010` 更隐蔽：
+    不报错，静默地变成 8。（Codex 审查 PR #62 R2）
+
+    夹具里 `ghcr.io/o/r` 有 6 个版本，所以 `08` / `09` 的窗口比它们还宽 ——
+    一个都不该删，**但也一定不能崩**。
+    """
+    for keep in ("08", "09"):
+        assert (
+            run_prune(
+                tmp_path / f"wide{keep}",
+                TAG="new3",
+                PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+                IMAGE_KEEP=keep,
+                BILLING_IMAGE_REPO="ghcr.io/o/r",
+            )
+            == []
+        ), keep
+
+    # `04` 要真的当成 4：窗口 = new3 / new2 / new1 / old1，`old2` 掉出去、
+    # `pinned` 也掉出去但被容器引用着 —— 所以恰好只删一个。
+    assert run_prune(
+        tmp_path / "four",
+        TAG="new3",
+        PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+        IMAGE_KEEP="04",
+        BILLING_IMAGE_REPO="ghcr.io/o/r",
+    ) == ["ghcr.io/o/r:old2"]
 
 
 def test_a_nonsense_keep_count_removes_nothing(tmp_path) -> None:
