@@ -78,7 +78,7 @@ Redis 只做队列与缓存，看起来风险低。
 
 ## 收口条件
 
-- [ ] Phase 0 的 `docker-compose.yml` 含专用 `mysql` 与 `redis` 服务，独立卷与资源限制
-- [ ] 备份任务只作用于本平台的卷与数据库
-- [ ] 部署文档写明本项目**不接** `vps_infra` 的 `infra_mysql` / `infra_redis`
-- [ ] VPS 容量核算把多出来的一套算进去
+- [x] Phase 0 的 `docker-compose.yml` 含专用 `mysql` 与 `redis` 服务，独立卷与资源限制 —— T0.6 建服务，2026-09-13 补 `mem_limit` / `cpus`（[deployment.md](../deployment.md) §3.3）
+- [x] 备份任务只作用于本平台的卷与数据库 —— `deploy/backup.sh` 只 dump 本平台 compose 里的 `mysql` 容器上的 `BILLING_MYSQL_DATABASE`；`binlog_ship.sh` 只推这个容器的 binlog（§5.2）
+- [x] 部署文档写明本项目**不接** `vps_infra` 的 `infra_mysql` / `infra_redis` —— [deployment.md](../deployment.md) §2
+- [x] VPS 容量核算把多出来的一套算进去 —— [deployment.md](../deployment.md) §3.1 的核算结论是「升配内存后再上线」；2026-09-15 核对已升到 2 核 / 7.3 GB

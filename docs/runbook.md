@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-09-13
+> 最后更新：2026-09-16
 
 ---
 
@@ -30,14 +30,18 @@
 ⚠️ **负载均衡不会替你发现这件事。**`/readyz` 在 Redis 不可用时**刻意**返回 200，
 原因见下一节。因此这个故障**只能靠日志告警发现**，没有第二条路。
 
-**必须配的告警**（尚未实现，见 [TODO](TODO.md) 的 T0.9）：
+**告警**（2026-09-16 落地，见 [deployment.md](deployment.md) §8.1）：
 
 ```text
 名称：billing_readiness_degraded_redis
-条件：过去 5 分钟内出现 >= 1 条 message="Readiness degraded" 且 component="redis" 的日志
+条件：宿主机每 5 分钟 GET /readyz，响应体 data.status != "ok"
+     （非 2xx 是另一回事：数据库不通或 API 挂了，按 P1 处理）
 分级：P2（服务未中断，但投递在积压）
+通知：Healthchecks.io 检查 `ai_billing_hub readyz` → Telegram；状态翻转才发，恢复再发一次
 连续 30 分钟未恢复：升级 P1
 ```
+
+⚠️ **判据是响应体，不是日志。**原先写的条件是「过去 5 分钟出现 >= 1 条 `message="Readiness degraded"` 且 `component="redis"` 的日志」—— 那需要日志聚合，而本阶段没有。日志那条判据等有了聚合仍然成立，**告警名不变**：它是这份文档与通知之间的契约。
 
 ### 影响什么
 
@@ -97,6 +101,7 @@ T0.8d 之后 beat 有了真实职责（outbox 的周期恢复），所以它停�
 | 信号 | 说明 |
 | --- | --- |
 | `docker compose ps` 里 `celery-beat` 显示 **unhealthy** | **主信号**（T0.9 加的探针） |
+| Telegram 收到 `ai_billing_hub services` 变 DOWN，正文 `P2 celery-beat health=unhealthy` | 上面那条探针的**送达途径**（2026-09-16，`deploy/monitor.sh` 每 5 分钟巡检一次）。 ⚠️ 探针红了没人看，等于没有探针 |
 | `domain_outbox` 里 `status='PENDING'` 且 `next_retry_at` 早于现在的行在累积 | 业务侧的表现，比探针慢但更贴近后果 |
 
 探针的判据是 **beat 自己的调度状态文件有多久没动**：
