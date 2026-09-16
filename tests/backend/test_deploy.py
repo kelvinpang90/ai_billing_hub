@@ -1432,3 +1432,167 @@ def test_local_binlog_retention_outlives_one_full_backup_cycle() -> None:
     assert size is not None
     # 单文件太大时，「推走已关闭的文件」这件事会被拖很久（离机粒度 = RPO 的一部分）
     assert int(size.group(1)) <= 256 * 1024 * 1024
+
+
+# --- start_database 的行为（拿假 docker 真跑一遍）----------------------------
+#
+# ⚠️ 这一组和 prune_old_images 那组同理由：**这条路径 2026-09-16 真把生产搞停过**。
+# `up -d mysql` 在项目网络定义变了的时候，会先停掉 mysql、再去删网，而另外六个容器
+# 还挂在网上 —— 删除失败，mysql 再也没起来，`/readyz` 直接 503，而且失败发生在健康
+# 检查之前，回滚那条路按设计「保持现场不动」，所以**没有任何自动补救**。
+# 静态断言看不出「重试顺序对不对」「stop 有没有变成 down」，所以这里真的执行它。
+
+FAKE_DOCKER_DB = """#!/usr/bin/env bash
+# ⚠️ 这个假 docker **按端点建模**，不是「stop 之后就放行」的捷径（Codex 审查 PR #70 指出）。
+# 真实约束是：网络定义变了时 compose 要重建那张网，而**还挂在网上的容器**会让删除失败
+# （`network ... has active endpoints`）。本地实测确认了两件事：
+#   1. `docker stop <容器>` 之后，它就**不在**该网络的端点列表里了
+#   2. 全部容器停掉之后，`docker network rm` 成功
+# 生产事故日志同样佐证：报错只点名那 6 个**还在跑**的容器，刚被 compose 停掉的 mysql 不在其中。
+#
+# $FAKE_STATE/attached  —— 还挂在旧网上的服务（每行一个）
+# $FAKE_STATE/net_changed —— 存在时表示网络定义变了，起容器前必须先重建网络
+printf '%s\\n' "$*" >> "$FAKE_STATE/calls"
+attached() { [ -s "$FAKE_STATE/attached" ] && cat "$FAKE_STATE/attached"; }
+case "$2 $3" in
+    "up -d")
+        # 与网络无关的失败（镜像拉不到、磁盘满……）：原样失败，不该被补救掩盖
+        if [ -e "$FAKE_STATE/unrelated" ]; then
+            cat "$FAKE_STATE/unrelated" >&2
+            exit 1
+        fi
+        if [ -e "$FAKE_STATE/net_changed" ]; then
+            # compose 先停掉它要起的那个（mysql），再删网
+            grep -vx mysql "$FAKE_STATE/attached" > "$FAKE_STATE/attached.new" 2>/dev/null || true
+            mv "$FAKE_STATE/attached.new" "$FAKE_STATE/attached"
+            if [ -s "$FAKE_STATE/attached" ]; then
+                names=""
+                while read -r svc; do
+                    names="${names}name:\\"${svc}\\" "
+                done < "$FAKE_STATE/attached"
+                echo "Error response from daemon: error while removing network:" >&2
+                echo "  network ai_billing_hub_default has active endpoints (${names})" >&2
+                exit 1
+            fi
+            rm -f "$FAKE_STATE/net_changed"
+        fi
+        echo "mysql" >> "$FAKE_STATE/attached"
+        echo "Container mysql Started"
+        ;;
+    "stop "*|"stop")
+        # 停掉 = 端点被释放（本地实测）
+        : > "$FAKE_STATE/attached"
+        echo "Container api Stopped"
+        ;;
+    *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"""
+
+DB_RUNNER = """#!/usr/bin/env bash
+set -euo pipefail
+cd "$1"
+export FAKE_STATE="$PWD"
+export PATH="$PWD/bin:$PATH"
+log() { printf 'LOG %s\\n' "$*"; }
+COMPOSE="docker compose"
+source "$PWD/fn.sh"
+start_database && echo "RC=0" || echo "RC=$?"
+echo "DEPLOY CONTINUES"
+"""
+
+
+STACK_SERVICES = (
+    "mysql",
+    "redis",
+    "api",
+    "celery-worker",
+    "celery-beat",
+    "frontend",
+    "billing_nginx",
+)
+
+
+def run_start_database(
+    tmp_path, network_changed: bool = False, unrelated_failure: str | None = None
+):
+    """把 deploy.sh 里的 start_database 原样抠出来跑，返回 (stdout, 调用序列)。"""
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    body = re.search(
+        r"^start_database\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S
+    )
+    assert body is not None, "deploy.sh 里找不到 start_database"
+
+    state = tmp_path / "dbstate"
+    (state / "bin").mkdir(parents=True)
+
+    def put(rel: str, text: str) -> Path:
+        target = state / rel
+        target.write_text(text, encoding="utf-8", newline="\n")
+        return target
+
+    put("fn.sh", body.group(0) + "\n")
+    put("calls", "")
+    # 旧网上挂着的东西：本栈七个服务
+    put("attached", "\n".join(STACK_SERVICES) + "\n")
+    fake = put("bin/docker", FAKE_DOCKER_DB)
+    fake.chmod(0o755)
+    runner = put("run.sh", DB_RUNNER)
+    if network_changed:
+        put("net_changed", "")
+    if unrelated_failure is not None:
+        put("unrelated", unrelated_failure)
+
+    done = subprocess.run(
+        [bash, str(runner), str(state)], capture_output=True, text=True, env={**os.environ}
+    )
+    assert "DEPLOY CONTINUES" in done.stdout, done.stderr
+    calls = (state / "calls").read_text(encoding="utf-8").splitlines()
+    return done.stdout, calls
+
+
+def test_starting_the_database_normally_touches_nothing_else(tmp_path) -> None:
+    """正常部署里 mysql 本来就在跑，`up -d` 什么也不做 —— 更不该去停别的服务。"""
+    out, calls = run_start_database(tmp_path)
+    assert "RC=0" in out
+    assert [c for c in calls if " stop" in c] == []
+
+
+def test_a_changed_network_stops_the_stack_then_retries(tmp_path) -> None:
+    """⚠️ 这就是 2026-09-16 把生产搞停的那一幕。
+
+    compose 为了重建项目网络先停了 mysql、再删网，而别的容器还挂在网上：
+    `network ... has active endpoints`。正确的处置是**让整栈先离开那张网，再重试**。
+    """
+    out, calls = run_start_database(tmp_path, network_changed=True)
+    assert "RC=0" in out, "识别到这个特征之后应当重试成功"
+    ups = [i for i, c in enumerate(calls) if c.startswith("compose up")]
+    stops = [i for i, c in enumerate(calls) if c.startswith("compose stop")]
+    assert len(ups) == 2 and len(stops) == 1
+    # 顺序：先试一次 → stop → 再试一次
+    assert ups[0] < stops[0] < ups[1]
+
+
+def test_the_recovery_never_downs_the_stack(tmp_path) -> None:
+    """⚠️ 停就够了，没有理由去删容器。
+
+    本地实测：`docker stop` 之后容器就不在网络端点列表里，全停之后 `network rm` 成功。
+    既然 `stop` 能达到同样效果，`down` 就只是多牵动别的东西（孤儿容器、外部网络）——
+    部署脚本在这一步该做**最小的那个动作**。
+    """
+    script = uncommented(SCRIPT)
+    body = script[script.index("start_database() {") : script.index("prune_old_images() {")]
+    assert "$COMPOSE stop" in body
+    assert "down" not in body
+
+
+def test_an_unrelated_failure_is_not_papered_over(tmp_path) -> None:
+    """⚠️ 只对「网络要重建」这一个特征做补救。
+
+    别的失败（镜像拉不到、磁盘满、配置写错）照样要失败 —— 把它们也重试一遍，
+    只会在真正的原因上面盖一层噪声。
+    """
+    out, calls = run_start_database(tmp_path, unrelated_failure="Error: no space left on device")
+    assert "RC=1" in out
+    assert [c for c in calls if c.startswith("compose stop")] == []

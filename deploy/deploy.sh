@@ -63,6 +63,38 @@ record_last_good() {
     return 0
 }
 
+# 把数据库拉起来。正常情况下就是一句 `up -d mysql`。
+#
+# ⚠️ **但网络定义变了的时候，这一句会把生产搞停**（2026-09-16 在生产上真发生了）：
+# compose 为了按新定义重建项目网络，会**先停掉它要起的那个容器**（mysql），再删网 ——
+# 而另外六个容器还挂在那张网上，删除报 `network ... has active endpoints` 而失败。
+# 结果是：**数据库停了、应用还在跑、迁移没跑、也没有回滚**（失败发生在健康检查之前，
+# 那条路径按设计「保持现场不动」）。当时 `/readyz` 直接 503。
+#
+# 所以这里识别那一个特征：整栈先离开那张网，再重试。
+# ⚠️ **`stop` 就够，不要用 `down`**：本地实测确认「停掉 = 端点被释放」——
+# `docker stop` 之后容器就不在该网络的端点列表里，全停之后 `network rm` 成功；
+# 事故日志也佐证（报错只点名那 6 个**还在跑**的，刚被停掉的 mysql 不在其中）。
+# 既然停就够，就没有理由去删容器：`down` 还会牵动别的东西（孤儿容器、外部网络的处理），
+# 而部署脚本在这一步该做的是**最小的那个动作**。
+# ⚠️ 别把理由记成「down 会弄丢回滚目标」：`PREVIOUS_IMAGE` 第 1 步就读进变量了，
+# 回滚靠的是那个变量加本地还在的旧镜像，`down` 影响不到它。
+# ⚠️ 这一停是**有意的停机**（几十秒），它是「改网络定义」这件事本身的代价，
+# 不是这段代码引入的。迁移仍然排在应用容器之前，顺序没有被打乱。
+start_database() {
+    local out
+    out="$($COMPOSE up -d --no-build mysql 2>&1)" && { printf '%s\n' "$out"; return 0; }
+    printf '%s\n' "$out"
+    case "$out" in
+        *"has active endpoints"*|*"needs to be recreated"*) ;;
+        *) return 1 ;;
+    esac
+    log "the project network must be recreated; stopping the whole stack first (this is a brief, intended outage)"
+    $COMPOSE stop || return 1
+    $COMPOSE up -d --no-build mysql || return 1
+    return 0
+}
+
 # 把本项目两个镜像仓库里过老的版本删掉，只留最近 IMAGE_KEEP 个。
 #
 # ⚠️ **这件事 `docker image prune -f` 做不到。**那条命令只清悬空（无标签）镜像，
@@ -259,7 +291,7 @@ fi
 # 这里会一直等到超时然后退出 —— 首个生产部署永远走不到迁移那一步（Codex #42 R1）。
 # 对已经在跑的 mysql，`up -d` 在配置没变时什么也不做。
 log "starting the database"
-$COMPOSE up -d --no-build mysql || die "cannot start the database; the application containers are untouched"
+start_database || die "cannot start the database; the application containers are untouched"
 
 log "waiting for the database"
 wait_for_health mysql || die "the database did not become healthy; the application containers are untouched"
