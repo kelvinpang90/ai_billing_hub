@@ -22,13 +22,14 @@ repository:
       allow_force_push: false
       require_pull_request: true
       require_branch_up_to_date: true
-      # CI 的必需检查项。事实来源：CLAUDE.md 的分支保护一节。
-      # frontend 项在 CI 里存在但不是必需检查，故不列入。
+      # CI 的必需检查项。已在 2026-09-16 通过 GitHub branch protection API
+      # 回读，并与 docs/HANDOFF.md 的当前记录交叉核对。
       required_status_checks:
         - docs
         - scripts
         - policy
         - backend
+        - frontend
         - secret-scan
 
 roles:
