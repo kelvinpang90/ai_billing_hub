@@ -1115,8 +1115,7 @@ tail -5 /opt/ai_billing_hub/.last-good-deploy-history
 | nginx `/readyz` 的 allow | 同上四段 | `127.0.0.0/8` + **本栈网段** + proxy_net | 经 infra_nginx 进来的请求在这里已经是**客户端真实 IP**，公网一律 deny |
 | 应用 `BILLING_TRUSTED_PROXIES` | `172.16.0.0/12,10.0.0.0/8,192.168.0.0/16` | **本栈网段** | api 的直连对端只可能是本栈 nginx |
 
-**本栈网段被钉死成 `10.201.0.0/24`**（`docker-compose.yml` 的 `networks.default.ipam`，
-可用 `BILLING_STACK_SUBNET` 覆盖）。⚠️ 不钉的话 docker 每次随手分一个 172.x，
+**本栈网段被钉死成 `10.201.0.0/24`**（`docker-compose.yml` 的 `networks.default.ipam`，**写成字面量、不给环境变量旋钮**：nginx 的 conf 读不到环境变量，`/readyz` 的 allow 名单只能抄一份 —— 留一个只对一半生效的旋钮会让宿主机的巡检被 deny 掉，而那看着像应用出了问题。要换网段就改这两处，守卫用例钉着它们一致）。⚠️ 不钉的话 docker 每次随手分一个 172.x，
 「可信代理是谁」就成了每台机器、每次重建都不一样的东西 —— 那正是原来只能拿三段 RFC1918
 兜着的原因。选 10.201 是因为它**在 docker 默认分配池（172.17–172.31）之外**，
 而且生产 VPS 上 10.x 一个都没用（2026-09-16 实测 `ip -4 route`）。

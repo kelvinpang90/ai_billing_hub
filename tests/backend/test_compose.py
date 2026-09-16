@@ -533,7 +533,9 @@ def test_the_stack_subnet_is_pinned() -> None:
     """
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     subnets = [entry["subnet"] for entry in compose["networks"]["default"]["ipam"]["config"]]
-    assert subnets == [f"${{BILLING_STACK_SUBNET:-{STACK_SUBNET}}}"]
+    # ⚠️ 字面量，**不给环境变量旋钮**：nginx 的 conf 读不到环境变量，`/readyz` 的
+    # allow 名单只能抄一份。只对一半生效的旋钮比不给更糟（Codex 审查 PR #68）。
+    assert subnets == [STACK_SUBNET]
     # ⚠️ 必须落在 docker 默认分配池（172.17–172.31）之外，否则会和同机其它项目抢。
     assert STACK_SUBNET.startswith("10.")
 
@@ -546,7 +548,7 @@ def test_the_app_only_trusts_its_own_stack_network() -> None:
     """
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     trusted = compose["services"]["api"]["environment"]["BILLING_TRUSTED_PROXIES"]
-    assert trusted == f"${{BILLING_STACK_SUBNET:-{STACK_SUBNET}}}"
+    assert trusted == STACK_SUBNET
     for wide in WIDE_RANGES:
         assert wide not in trusted
 
@@ -583,5 +585,7 @@ def test_the_stack_subnet_is_the_same_string_everywhere() -> None:
     """
     compose = COMPOSE.read_text(encoding="utf-8")
     conf = NGINX_CONF.read_text(encoding="utf-8")
-    assert f"subnet: ${{BILLING_STACK_SUBNET:-{STACK_SUBNET}}}" in compose
+    assert f"subnet: {STACK_SUBNET}" in compose
+    # ⚠️ 任何形式的变量写法都不许回来：它只能改到 compose 那一半。
+    assert "BILLING_STACK_SUBNET" not in compose
     assert f"allow {STACK_SUBNET};" in conf
