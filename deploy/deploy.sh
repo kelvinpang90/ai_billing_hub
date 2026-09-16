@@ -26,9 +26,60 @@ COMPOSE="${BILLING_COMPOSE:-docker compose}"
 # 就要 90 秒（它必须等过一个调度周期，见 docker-compose.yml）。
 HEALTH_TIMEOUT_SECONDS="${BILLING_HEALTH_TIMEOUT_SECONDS:-180}"
 SMOKE_URL="${BILLING_SMOKE_URL:-http://127.0.0.1:${BILLING_HTTP_PORT:-8080}}"
+# 每个镜像仓库在本机保留几个版本。⚠️ 至少要 2：当前这个，加上回滚目标。
+# 默认 3 多留一个缓冲，让「回滚之后再回滚」也还有落脚点。
+IMAGE_KEEP="${BILLING_IMAGE_KEEP:-3}"
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# 把本项目两个镜像仓库里过老的版本删掉，只留最近 IMAGE_KEEP 个。
+#
+# ⚠️ **这件事 `docker image prune -f` 做不到。**那条命令只清悬空（无标签）镜像，
+# 而每次部署拉进来的都是带 commit SHA 标签的 —— 它永远不会被清掉。2026-09-16 在
+# 生产上实测这个漏洞的后果：攒了 8 个版本的 api + frontend 镜像，只有 1 个在跑，
+# 占掉约 2.4 GB；根分区已到 68%（告警线 80%，见 monitor.sh）。
+# 磁盘写满时 MySQL 直接停止写入，所以保留窗口必须是**有界**的。
+#
+# ⚠️ 清理失败绝不能让一次成功的部署变成失败 —— 出错只记日志，不改退出码。
+prune_old_images() {
+    local in_use repo img
+    # 演练模式（BILLING_IMAGE_REPO 未设）下不知道仓库名，什么都不动。
+    [ -n "${BILLING_IMAGE_REPO:-}" ] || return 0
+    case "$IMAGE_KEEP" in ''|*[!0-9]*) return 0 ;; esac
+    # ⚠️ 少于 2 就没有回滚目标了。配歪了宁可不清，也不能把能回滚的版本删掉。
+    [ "$IMAGE_KEEP" -ge 2 ] || return 0
+
+    # ⚠️ 被**任何**容器引用的镜像都不能动，包括已退出的容器和本栈之外的容器
+    # （这台机器上还跑着别的项目）。在用的镜像 docker 自己会拒绝删，但那会在部署
+    # 日志里留下一串吓人的报错 —— 先排除掉，日志才有信噪比。
+    # ⚠️ 必须 `tr` 成**一行**：下面用 `case " $in_use "` 做整词匹配，而多行字符串里
+    # 每个镜像后面跟的是换行不是空格 —— 那个 pattern 永远匹配不上，此刻
+    # 排除在用镜像这道防线形同虚设（2026-09-16 写这个函数时真踩了）。
+    in_use="$(docker ps -a --format '{{.Image}}' 2>/dev/null | tr '\n' ' ' || true)"
+
+    for repo in "$BILLING_IMAGE_REPO" "${BILLING_FRONTEND_IMAGE_REPO:-${BILLING_IMAGE_REPO}-frontend}"; do
+        # ⚠️ 按 CreatedAt 显式排序，不靠 `docker images` 的默认顺序 —— 默认确实是新的
+        # 在前，但那是没有文档保证的实现细节，而排错了就会删掉在跑的版本。
+        # CreatedAt 的前缀是 `YYYY-MM-DD HH:MM:SS`，字典序即时间序。
+        docker images --filter "reference=${repo}:*" \
+                      --format '{{.CreatedAt}}	{{.Repository}}:{{.Tag}}' 2>/dev/null \
+            | sort -r \
+            | tail -n "+$(( IMAGE_KEEP + 1 ))" \
+            | cut -f2 \
+            | while read -r img; do
+                # ⚠️ 这一次的标签与回滚目标额外再挡一道。正常情况下它们就落在最近
+                # IMAGE_KEEP 个里，但「回滚到一个很旧的版本」会让回滚目标掉出窗口。
+                case " $in_use " in *" $img "*) continue ;; esac
+                if [ "$img" = "${repo}:${TAG}" ] || [ "$img" = "$PREVIOUS_IMAGE" ]; then
+                    continue
+                fi
+                log "removing old image $img"
+                docker image rm "$img" >/dev/null 2>&1 \
+                    || log "could not remove $img; leaving it in place"
+            done
+    done
+}
 
 # 等待指定服务（不给参数就是全部）变成 healthy。
 wait_for_health() {
@@ -202,10 +253,14 @@ fi
 
 if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then
     log "deployed $TAG"
-    # ⚠️ 清掉悬空镜像。生产 VPS 磁盘很紧（12 GB 可用，见 docs/deployment.md §3.1），
-    # 每次部署都会留下上一个版本的层，不清的话它会慢慢把磁盘吃光 ——
-    # 而磁盘写满时 MySQL 直接停止写入。
+    # 生产 VPS 磁盘很紧（见 docs/deployment.md §3.1），而磁盘写满时 MySQL 直接
+    # 停止写入，所以每次成功部署都要把自己造出来的垃圾收干净。两步缺一不可：
+    #
+    # ⚠️ `image prune` **只清悬空（无标签）镜像**。它拦不住我们真正的增长源：
+    # 每次部署拉进来的那个带 commit SHA 标签的镜像。旧版本的回收在
+    # prune_old_images 里，按保留窗口做（它头上那段注释记着这个洞在生产上的后果）。
     docker image prune -f >/dev/null 2>&1 || true
+    prune_old_images
     exit 0
 fi
 
