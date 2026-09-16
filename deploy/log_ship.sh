@@ -69,6 +69,10 @@ die() {
     if command -v logger >/dev/null 2>&1; then
         logger -p user.err -t billing-logs -- "$*" || true
     fi
+    # ⚠️ **失败路径同样要清理**（Codex #64 R1）。失败的那一轮照样在本机留下一份加密
+    # 归档：R2 挂一周就攒一周，没有任何东西会去删它们 —— 而「日志把磁盘撑爆、威胁到
+    # MySQL」正是 §94 要防的那件事。清理本身出错不能盖住真正的失败原因，所以 `|| true`。
+    enforce_retention || true
     if [ "$DRY_RUN" != "1" ]; then
         [ -n "$(env_value BILLING_HEALTHCHECK_LOGS_URL)" ] \
             || log "no BILLING_HEALTHCHECK_LOGS_URL configured: nobody will be told about this"
@@ -93,6 +97,52 @@ secure_rm() {
             rm -f "$path"
         fi
     done
+}
+
+used_mb() {
+    local total
+    total="$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'billing-logs-*.tar.gz.enc' -printf '%s\n' 2>/dev/null \
+        | awk '{ sum += $1 } END { printf "%d", sum / 1048576 }')"
+    printf '%s' "${total:-0}"
+}
+
+# 本机归档的保留期与总量上限（§94）。
+#
+# ⚠️ 顺序是**先按保留期删，再按总量删**：反过来的话，一次日志暴涨会把还在保留期
+# 内的旧归档挤掉，而保留期是对外承诺的那一个。
+#
+# ⚠️ **成功和失败都要跑这一段**，`die` 里也调用它（Codex #64 R1）。
+enforce_retention() {
+    local old used
+    [ -d "$ARCHIVE_DIR" ] || return 0
+    log "enforcing retention: ${RETENTION_DAYS} days, cap ${ARCHIVE_CAP_MB} MB"
+    while IFS= read -r old; do
+        [ -n "$old" ] || continue
+        log "  expired: $(basename "$old")"
+        secure_rm "$old"
+    done <<EOF
+$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'billing-logs-*.tar.gz.enc' -mtime +"$RETENTION_DAYS" 2>/dev/null)
+EOF
+
+    used="$(used_mb)"
+    [ "$used" -gt "$ARCHIVE_CAP_MB" ] || return 0
+    # ⚠️ 撞上限是**异常**，不是日常维护：要么日志量变了，要么外送停了。
+    # 以 err 级别单独写一条 —— 巡检的磁盘告警只看百分比，看不见这一层。
+    log "ERROR: the archive directory is over its cap (${used} MB > ${ARCHIVE_CAP_MB} MB); deleting oldest first"
+    command -v logger >/dev/null 2>&1 \
+        && logger -p user.err -t billing-logs -- "log archive over cap: ${used}MB > ${ARCHIVE_CAP_MB}MB" || true
+    # ⚠️ **绝不删本轮刚产出的那一个**：成功时它是唯一一份还没被任何人看过的，
+    # 失败时它是那段窗口目前唯一的副本（`die` 的消息会告诉人它在哪）。
+    while IFS= read -r old; do
+        [ -n "$old" ] || continue
+        [ "$used" -gt "$ARCHIVE_CAP_MB" ] || break
+        [ "$old" = "${CIPHER:-}" ] && continue
+        log "  over cap: $(basename "$old")"
+        secure_rm "$old"
+        used="$(used_mb)"
+    done <<EOF
+$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'billing-logs-*.tar.gz.enc' -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
+EOF
 }
 
 aws_cli() {
@@ -236,44 +286,10 @@ fi
 # 5. 本地保留期与总量上限
 # --------------------------------------------------------------------------
 #
-# ⚠️ 顺序是**先按保留期删，再按总量删**：反过来的话，一次日志暴涨会把还在保留期
-# 内的旧归档挤掉，而保留期是对外承诺的那一个。
+# 规则与理由都在上面 `enforce_retention` 的注释里。这里只是**成功路径**的调用点 ——
+# 失败路径在 `die` 里调，两条路都必须清理。
 
-log "enforcing retention: ${RETENTION_DAYS} days, cap ${ARCHIVE_CAP_MB} MB"
-while IFS= read -r old; do
-    [ -n "$old" ] || continue
-    log "  expired: $(basename "$old")"
-    secure_rm "$old"
-done <<EOF
-$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'billing-logs-*.tar.gz.enc' -mtime +"$RETENTION_DAYS" 2>/dev/null)
-EOF
-
-used_mb() {
-    local total
-    total="$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'billing-logs-*.tar.gz.enc' -printf '%s\n' 2>/dev/null \
-        | awk '{ sum += $1 } END { printf "%d", sum / 1048576 }')"
-    printf '%s' "${total:-0}"
-}
-
-USED="$(used_mb)"
-if [ "$USED" -gt "$ARCHIVE_CAP_MB" ]; then
-    # ⚠️ 撞上限是**异常**，不是日常维护：要么日志量变了，要么外送停了。
-    # 以 err 级别单独写一条 —— 巡检的磁盘告警只看百分比，看不见这一层。
-    log "ERROR: the archive directory is over its cap (${USED} MB > ${ARCHIVE_CAP_MB} MB); deleting oldest first"
-    command -v logger >/dev/null 2>&1 \
-        && logger -p user.err -t billing-logs -- "log archive over cap: ${USED}MB > ${ARCHIVE_CAP_MB}MB" || true
-    # ⚠️ **绝不删本轮刚传上去的那一个**：它是唯一一份还没被任何人看过的。
-    while IFS= read -r old; do
-        [ -n "$old" ] || continue
-        [ "$USED" -gt "$ARCHIVE_CAP_MB" ] || break
-        [ "$old" = "$CIPHER" ] && continue
-        log "  over cap: $(basename "$old")"
-        secure_rm "$old"
-        USED="$(used_mb)"
-    done <<EOF
-$(find "$ARCHIVE_DIR" -maxdepth 1 -name 'billing-logs-*.tar.gz.enc' -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
-EOF
-fi
+enforce_retention
 
 SUMMARY="shipped ${TOTAL_LINES} lines since ${SINCE}; archive dir $(used_mb) MB"
 log "$SUMMARY"

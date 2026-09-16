@@ -1176,7 +1176,7 @@ def test_log_retention_and_cap_are_both_enforced() -> None:
     # 撞上限是异常，要单独以 err 级别报出来
     assert "logger -p user.err -t billing-logs" in ship
     # ⚠️ 绝不删本轮刚传上去的那一份
-    assert '[ "$old" = "$CIPHER" ] && continue' in ship
+    assert '[ "$old" = "${CIPHER:-}" ] && continue' in ship
 
 
 def test_log_archives_are_deleted_securely() -> None:
@@ -1244,3 +1244,18 @@ def test_the_cron_runs_log_shipping_after_the_full_backup() -> None:
     assert "logger -t billing-logs" in lines[0]
     backup = [line for line in uncommented(CRON).splitlines() if "backup.sh" in line][0]
     assert int(backup.split()[0]) < int(lines[0].split()[0])
+
+
+def test_retention_runs_on_the_failure_path_too() -> None:
+    """⚠️ 失败的那一轮照样在本机留下一份加密归档（Codex #64 R1）。
+
+    R2 挂一周就攒一周，没有任何东西会去删它们 —— 而「日志把磁盘撑爆、威胁到 MySQL」
+    正是 §94 要防的那件事。所以 `die` 也要清理，且清理本身出错不能盖住真正的失败原因。
+    """
+    ship = uncommented(LOG_SHIP)
+    die_body = ship[ship.index("die() {") : ship.index("used_mb() {")]
+    assert "enforce_retention || true" in die_body
+    # 成功路径那次调用仍在（独立一行，不带 `|| true`）
+    assert re.search(r"(?m)^enforce_retention$", ship)
+    # 本轮刚产出的那份在两条路上都不许被上限逻辑删掉
+    assert '[ "$old" = "${CIPHER:-}" ] && continue' in ship
