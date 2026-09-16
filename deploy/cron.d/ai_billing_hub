@@ -9,7 +9,8 @@
 # ⚠️ 用 /etc/cron.d 而不是 `crontab <file>`：后者**整个替换**该用户的 crontab，
 #    同一台机器上其它项目的定时任务会被一并抹掉。
 # ⚠️ 用户名是占位符：真实的部署账号不进公开仓库。
-# ⚠️ 日志进 syslog：`journalctl -t billing-binlog` / `journalctl -t billing-backup`。
+# ⚠️ 日志进 syslog：`journalctl -t billing-binlog` / `-t billing-backup` / `-t billing-drill`
+#    / `-t billing-monitor`。
 # ⚠️ 失败与破 RPO 以 err 级别单独进 syslog：`journalctl -t billing-binlog -p err`。
 #    把它送到人手里是告警通道的事（§95），这个文件不负责。
 
@@ -30,6 +31,13 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 #    写成 `17 19`，实际会在马来西亚晚上 19:17 跑。换主机时先 `timedatectl` 看时区再定这一行。
 # ⚠️ 这个文件是**复制**进 /etc/cron.d 的，改完要按上面的安装命令重装一次才生效。
 17 3 * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && flock -n /tmp/ai_billing_hub-backup.lock bash deploy/backup.sh 2>&1 | logger -t billing-backup
+
+# 生产巡检（容器健康 / `/readyz` 降级 / 磁盘水位），每 5 分钟。三条心跳分开发，
+# 地址见 .env 的 BILLING_HEALTHCHECK_{SERVICES,READYZ,DISK}_URL（docs/deployment.md §8）。
+# ⚠️ **不加 flock**：这个脚本是只读巡检，两轮重叠没有副作用；而 flock 会让一次卡死的
+#    运行把之后每一轮都挡在脚本外面 —— 那种状态下反倒**没有任何**心跳异常可查
+#    （与 binlog_ship.sh 同一条教训，Codex #42 R2）。真卡死时心跳自然停发，外部服务会发现。
+*/5 * * * * @DEPLOY_USER@ cd /opt/ai_billing_hub && bash deploy/monitor.sh 2>&1 | logger -t billing-monitor
 
 # 自动恢复演练，每周日马来西亚 04:47（Kelvin 2026-09-15 定每周一次）：排在当天 03:17 的全量之后，
 # 那份全量的锚点 binlog 一分钟内就已离机。锁与失败通知都在脚本里（心跳 BILLING_HEALTHCHECK_DRILL_URL）。
