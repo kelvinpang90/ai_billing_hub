@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -772,3 +775,327 @@ def test_the_cron_runs_the_monitor_unlocked() -> None:
     assert lines[0].startswith("*/5 * * * *")
     assert "flock" not in lines[0]
     assert "logger -t billing-monitor" in lines[0]
+
+
+# --- 旧镜像的保留窗口（§94 磁盘；2026-09-16 生产实测）-------------------------
+
+
+def test_the_deploy_script_bounds_how_many_old_images_it_keeps() -> None:
+    """⚠️ `docker image prune -f` **只清悬空镜像**，清不掉带 commit SHA 标签的旧版本。
+
+    这条曾经是生产上一个安静的洞：脚本里写着「清掉悬空镜像……不清的话它会慢慢
+    把磁盘吃光」，而它清的恰恰不是在长的那一类。2026-09-16 实测：8 个版本的
+    api + frontend 镜像堆在 VPS 上，只有 1 个在跑，占掉约 2.4 GB。
+    所以成功分支里除了 prune，还必须有一个**有界**的保留窗口。
+    """
+    script = uncommented(SCRIPT)
+    success = script.split('if [ "$HEALTHY" = "1" ]', 1)[1].split("exit 0", 1)[0]
+    assert "docker image prune -f" in success
+    assert "prune_old_images" in success, "成功部署后没有回收旧版本镜像"
+
+    keep = re.search(r"BILLING_IMAGE_KEEP:-(\d+)", script)
+    assert keep is not None, "保留个数必须可配"
+    # ⚠️ 下限是 2 而不是 1：留 1 个就等于把回滚目标删了。
+    assert int(keep.group(1)) >= 2
+    assert '[ "$keep" -ge 2 ] || return 0' in script
+    # ⚠️ 一个值只能解析一次。`test` 按十进制读、算术展开按八进制读，
+    # 两处各自解析就会在 `08` 上分岔（一个放行、一个报错）。
+    assert "keep=$(( 10#$IMAGE_KEEP ))" in script
+    # ⚠️ 往返比对：64 位溢出不报错，而回绕可以落在很小的正数上（
+    # `10#18446744073709551619` = 3）—— 那会把镜像真的删掉。
+    assert '[ "$keep" = "$digits" ] || return 0' in script
+    # ⚠️ 窗口算法不得再做 `keep + 1`：`keep` 取到 2^63-1 时那个加法溢出成
+    # 负数，`tail` 会报错到 stderr，而往返比对拦不住它（2^63-1 是合法十进制）。
+    assert "keep + 1" not in script
+    assert "awk -v k=\"$keep\" 'NR > k'" in script
+
+
+def test_a_failed_image_cleanup_never_fails_a_successful_deploy() -> None:
+    """⚠️ 清理是**善后**，不是部署的一部分。
+
+    删镜像失败（比如被别的项目的容器引用着）就让整个部署红掉的话，人会被叫醒
+    去处理一件对线上毫无影响的事 —— 而下一次他就会开始忽略部署失败。
+    """
+    script = uncommented(SCRIPT)
+    remove = [line for line in script.splitlines() if "docker image rm" in line]
+    assert len(remove) == 1
+    assert "|| log" in remove[0] or remove[0].rstrip().endswith("\\")
+    assert "die" not in remove[0]
+
+
+# --- prune_old_images 的行为（拿假 docker 真跑一遍）---------------------------
+#
+# ⚠️ 本文件其余用例钉的是「脚本不许长成什么样」，这一组不一样：它**真的执行**
+# prune_old_images。理由是这个函数会删东西 —— 排序排反了、整词匹配写错了，静态
+# 断言一个都看不出来，而后果是把正在跑的镜像删掉。写它的时候就真踩了一个：
+# `docker ps` 的多行输出没 `tr` 成一行，`case " $in_use "` 那道防线形同虚设。
+
+FAKE_DOCKER = """#!/usr/bin/env bash
+case "$1 $2" in
+    "ps -a") cat "$FAKE_STATE/in_use" ;;
+    "images --filter")
+        # 枚举失败的开关（比如 docker daemon 此刻不应答）。
+        [ -e "$FAKE_STATE/fail_images" ] && { echo "boom" >&2; exit 1; }
+        ref="${3#reference=}"
+        repo="${ref%:*}"
+        while IFS=$'\\t' read -r created image; do
+            [ "${image%:*}" = "$repo" ] || continue
+            printf '%s\\t%s\\n' "$created" "$image"
+        done < "$FAKE_STATE/images"
+        ;;
+    "image rm")
+        # 真 docker 也会拒绝删在用的镜像。这里照样拒绝，好让「防线漏了」这件事
+        # 在用例里以「多出一条 could not remove」的形式暴露出来。
+        grep -qxF "$3" "$FAKE_STATE/in_use" && exit 1
+        echo "$3" >> "$FAKE_STATE/removed"
+        ;;
+    *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"""
+
+# ⚠️ 先 `cd` 再用 `$PWD` 拼 PATH，不能直接拿传进来的路径：
+# pytest 的 tmp_path 在 Windows 上长成 `C:/...`，而 PATH 是**冒号**分隔的 ——
+# 盘符后面那个冒号会把条目切成两截，假 docker 就找不到了。
+# git-bash 里 `cd` 之后的 `$PWD` 是 `/c/...`，没有这个问题。
+RUNNER = """#!/usr/bin/env bash
+set -euo pipefail
+cd "$1"
+export FAKE_STATE="$PWD"
+export PATH="$PWD/bin:$PATH"
+log() { printf 'LOG %s\\n' "$*"; }
+source "$PWD/fn.sh"
+prune_old_images
+# ⚠️ 这一行是哨兵：runner 开着 `set -euo pipefail`，和 `deploy.sh` 一样。
+# 清理里任何未被兜住的失败都会把脚本提前提掉，这句就打不出来。
+echo "DEPLOY CONTINUES"
+"""
+
+IMAGES = """2026-09-16 12:53:01 +0800 +08\tghcr.io/o/r:new3
+2026-09-16 02:00:00 +0800 +08\tghcr.io/o/r:new2
+2026-09-15 10:00:00 +0800 +08\tghcr.io/o/r:new1
+2026-09-14 10:00:00 +0800 +08\tghcr.io/o/r:old1
+2026-09-13 10:00:00 +0800 +08\tghcr.io/o/r:old2
+2026-09-12 10:00:00 +0800 +08\tghcr.io/o/r:pinned
+2026-09-16 12:53:01 +0800 +08\tghcr.io/o/r-frontend:new3
+2026-09-14 10:00:00 +0800 +08\tghcr.io/o/r-frontend:old1
+"""
+
+# ⚠️ `pinned` 排在最老，却被一个容器引用着 —— 窗口算法一旦忘了查在用，
+# 它就是第一个被删的。`mysql:8.4` 是**别的项目**的容器，用来钉住「查的是这台机器
+# 上所有容器，不只是本栈」。
+IN_USE = "ghcr.io/o/r:pinned\nmysql:8.4\n"
+
+
+def run_prune(tmp_path, fail_images: bool = False, **env):
+    """把 deploy.sh 里的 prune_old_images 原样抠出来跑，返回被删掉的镜像列表。"""
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    body = re.search(
+        r"^prune_old_images\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S
+    )
+    assert body is not None, "deploy.sh 里找不到 prune_old_images"
+
+    state = tmp_path / "state"
+    (state / "bin").mkdir(parents=True)
+
+    # ⚠️ `newline="\\n"` 一个都不能漏。Windows 上默认会写成 CRLF，
+    # 于是 `cut` 切出来的镜像名拖着一个 `\\r` —— `[ "$img" = "$repo:$TAG" ]`
+    # 永远不成立，而跟着 CRLF 的 in_use 比却恰好成立。结果是用例在 Windows
+    # 上假报、在 CI 上又是绿的 —— 比它直接坏掉还难查（2026-09-16 真踩了）。
+    def put(rel: str, text: str) -> Path:
+        target = state / rel
+        target.write_text(text, encoding="utf-8", newline="\n")
+        return target
+
+    put("fn.sh", body.group(0) + "\n")
+    put("images", IMAGES)
+    put("in_use", IN_USE)
+    put("removed", "")
+    fake = put("bin/docker", FAKE_DOCKER)
+    fake.chmod(0o755)
+    runner = put("run.sh", RUNNER)
+    if fail_images:
+        put("fail_images", "")
+
+    full = {**os.environ, "TAG": "", "PREVIOUS_IMAGE": "", "IMAGE_KEEP": "3", **env}
+    full.pop("BILLING_IMAGE_REPO", None)
+    if "BILLING_IMAGE_REPO" in env:
+        full["BILLING_IMAGE_REPO"] = env["BILLING_IMAGE_REPO"]
+
+    done = subprocess.run(
+        [bash, str(runner), str(state)],
+        env=full,
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    # ⚠️ stderr 必须是**空**的。函数里每一条 docker 调用都自带 `2>/dev/null`，
+    # 所以这里出现的任何东西都是 **shell 自己**的报错。光看退出码不够 ——
+    # bash 碍于算术展开出错时会把函数**惄无声息地提前结束**、返回 0，
+    # 于是清理根本没做而一切看起来都正常（`IMAGE_KEEP=08` 就是这个样子）。
+    assert done.stderr == "", done.stderr
+    # ⚠️ 清理是**善后**，不是部署的一部分：无论里面出什么事，调用方都必须
+    # 能继续往下走。这条断言对每一个场景都生效，不只是枚举失败那一个。
+    assert "DEPLOY CONTINUES" in done.stdout, done.stdout
+    # ⚠️ 顺带钉死日志：漏查在用镜像时这里会冒出 could not remove。
+    assert "could not remove" not in done.stdout, done.stdout
+    return [line for line in (state / "removed").read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_the_window_keeps_the_newest_and_drops_the_rest(tmp_path) -> None:
+    """留最近 3 个，更老的删掉 —— 但在跑的那个一个都不许动。"""
+    removed = run_prune(
+        tmp_path,
+        TAG="new3",
+        PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+        IMAGE_KEEP="3",
+        BILLING_IMAGE_REPO="ghcr.io/o/r",
+    )
+    assert removed == ["ghcr.io/o/r:old1", "ghcr.io/o/r:old2"]
+    # frontend 仓库只有 2 个，还没满窗口，所以一个都不该删。
+    assert not [r for r in removed if "-frontend" in r]
+
+
+def test_an_image_a_container_still_uses_is_never_removed(tmp_path) -> None:
+    """⚠️ `pinned` 是**最老**的一个，却有容器在用。
+
+    真 docker 会拒绝删它，所以这里删不掉不等于安全 —— 危险的是那串报错会淹掉
+    部署日志，而且说明「在用」这道过滤根本没生效。
+    """
+    removed = run_prune(
+        tmp_path,
+        TAG="new3",
+        PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+        IMAGE_KEEP="3",
+        BILLING_IMAGE_REPO="ghcr.io/o/r",
+    )
+    # ⚠️ 光查「不在里面」会被空列表蒙混过去（假 docker 没被找到就是这个样子）。
+    assert removed, "一个都没删，这个用例实际什么都没验证"
+    assert "ghcr.io/o/r:pinned" not in removed
+
+
+def test_a_rollback_target_outside_the_window_survives(tmp_path) -> None:
+    """⚠️ 回滚到一个很旧的版本之后，**新**镜像才是回滚目标 —— 它必须活着。
+
+    窗口按时间算，而这时候「这一次部署的标签」是老的、「回滚目标」是新的，
+    两个都可能落在窗口外。少挡一个，下一次出事就没得退。
+    """
+    removed = run_prune(
+        tmp_path,
+        TAG="old2",
+        PREVIOUS_IMAGE="ghcr.io/o/r:new3",
+        IMAGE_KEEP="2",
+        BILLING_IMAGE_REPO="ghcr.io/o/r",
+    )
+    assert removed, "一个都没删，这个用例实际什么都没验证"
+    assert "ghcr.io/o/r:old2" not in removed  # 这一次部署的
+    assert "ghcr.io/o/r:new3" not in removed  # 回滚目标
+    assert "ghcr.io/o/r:pinned" not in removed  # 在用的
+
+
+def test_a_failed_enumeration_does_not_sink_a_successful_deploy(tmp_path) -> None:
+    """⚠️ `deploy.sh` 开着 `set -euo pipefail`，而这个函数在**部署已经成功**之后才跑。
+
+    枚举镜像那条管道一旦返回非零（daemon 此刻不应答就够了），`set -e` 会把
+    一次**健康检查与冒烟都已经过了**的部署扔成失败 —— 人被叫醒去处理一件对
+    线上毫无影响的事，而下一次他就会开始忽略部署失败。
+    （Codex 审查 PR #62 指出的阻断项；修之前假 docker 一报错，runner 直接 exit 1。）
+    """
+    assert (
+        run_prune(
+            tmp_path,
+            fail_images=True,
+            TAG="new3",
+            PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+            IMAGE_KEEP="3",
+            BILLING_IMAGE_REPO="ghcr.io/o/r",
+        )
+        == []
+    )
+
+
+def test_rehearsal_mode_removes_nothing(tmp_path) -> None:
+    """⚠️ 本地演练（BILLING_IMAGE_REPO 未设）不知道仓库名，必须一个都不碰。"""
+    assert run_prune(tmp_path, TAG="new3", IMAGE_KEEP="3") == []
+
+
+def test_a_keep_count_with_a_leading_zero_is_read_as_decimal(tmp_path) -> None:
+    """⚠️ bash 的**算术展开**把 `08` / `09` 当非法八进制，直接报错。
+
+    而 `test` 的 `-ge` 按十进制读 —— 于是 `08` 能一路过完校验，再在 `$(( ))` 里炸掉。
+    ⚠️ 而它**不**会把部署弄成红的：bash 把函数惄无声息地提前结束并返回 0，
+    清理根本没做而一切看起来都正常 —— 比直接失败难查得多。所以 `run_prune`
+    钉的是 **stderr 为空**，光看退出码这个变异活得好好的。
+    `010` 又是另一种坏法：不报错，静默地变成 8。（Codex 审查 PR #62 R2）
+
+    夹具里 `ghcr.io/o/r` 有 6 个版本，所以 `08` / `09` 的窗口比它们还宽 ——
+    一个都不该删，**但也一定不能崩**。
+    """
+    for keep in ("08", "09"):
+        assert (
+            run_prune(
+                tmp_path / f"wide{keep}",
+                TAG="new3",
+                PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+                IMAGE_KEEP=keep,
+                BILLING_IMAGE_REPO="ghcr.io/o/r",
+            )
+            == []
+        ), keep
+
+    # `04` 要真的当成 4：窗口 = new3 / new2 / new1 / old1，`old2` 掉出去、
+    # `pinned` 也掉出去但被容器引用着 —— 所以恰好只删一个。
+    assert run_prune(
+        tmp_path / "four",
+        TAG="new3",
+        PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+        IMAGE_KEEP="04",
+        BILLING_IMAGE_REPO="ghcr.io/o/r",
+    ) == ["ghcr.io/o/r:old2"]
+
+
+def test_a_keep_count_that_overflows_removes_nothing(tmp_path) -> None:
+    """⚠️ bash 的整数是 64 位，**溢出不报错**，而回绕可以落在一个很小的正数上。
+
+    `10#18446744073709551619` = **3**。一个「想多留点」的配置于是变成只留 3 个，
+    而且是**真的去删** —— 这是这个函数里唯一一类不可逆的后果。
+
+    ⚠️ 光抽样几个大数是不够的：`99999999999999999999` 回绕成巨大正数（窗口大到
+    删不着任何东西）、`9223372036854775808` 回绕成负数（被 `-ge 2` 挡掉），
+    两个恰好都安全 —— 只按它们下结论会以为溢出都无害。（Codex 审查 PR #62 R3）
+    """
+    for keep in (
+        "18446744073709551619",  # 2**64 + 3 → 回绕成 3，会真的删
+        "18446744073709551621",  # 2**64 + 5 → 回绕成 5
+        "99999999999999999999",  # 回绕成巨大正数
+        "9223372036854775808",  # 2**63 → 回绕成负数
+        # ⚠️ 这一个**能过往返比对**（它本身是合法十进制），卡的是下一道：
+        # 窗口算法不得再做 `keep + 1` 那种会溢出的算术。
+        "9223372036854775807",  # 2**63-1 → keep+1 溢出成负数
+    ):
+        assert (
+            run_prune(
+                tmp_path / f"of{keep}",
+                TAG="new3",
+                PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+                IMAGE_KEEP=keep,
+                BILLING_IMAGE_REPO="ghcr.io/o/r",
+            )
+            == []
+        ), keep
+
+
+def test_a_nonsense_keep_count_removes_nothing(tmp_path) -> None:
+    """⚠️ 配歪了宁可不清 —— 「清多了」在这里是不可逆的。"""
+    for keep in ("1", "0", "abc", ""):
+        assert (
+            run_prune(
+                tmp_path / keep if keep else tmp_path / "empty",
+                TAG="new3",
+                PREVIOUS_IMAGE="ghcr.io/o/r:new2",
+                IMAGE_KEEP=keep,
+                BILLING_IMAGE_REPO="ghcr.io/o/r",
+            )
+            == []
+        ), keep

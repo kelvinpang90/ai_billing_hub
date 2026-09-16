@@ -1,0 +1,64 @@
+# 控制契约 —— 可调度任务 allowlist
+#
+# 默认 deny。未在 tasks 里列出的 task_id 一律拒绝，不做前缀匹配、不做模糊匹配，
+# 也不因为「格式看起来像 AIH-TASK-xxx」就放行 —— 格式合法只是进入校验的门槛，
+# 不是授权。
+
+schema_version: 1
+project_id: ai_billing_hub
+default: deny
+
+unknown_task_id:
+  action: reject
+  state: failed
+  # 拒绝理由只回给请求方，不写进任何外部通知
+  reason_code: unknown_task_id
+
+tasks:
+  - id: AIH-TASK-001
+    title: platform control contract
+    purpose: 验证 .platform 控制契约本身，并跑仓库里已有的只读 / 测试检查
+    # 只能引用 .platform/commands.yaml 里存在的 low risk 命令
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - tests.backend
+      - scripts.verdict_tests
+    # 顺序执行；任一条非零退出即整体 failed，不继续往下跑
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    # ⚠️ 交接态 ≠ 终态。这两样必须分开写，否则「Worker 成功后停在 awaiting_review」
+    #    会被读成「run 到此为止、不得再迁移」，控制面就永远推不到 awaiting_merge /
+    #    completed，同一个 run 在两个组件眼里一个是完了一个是没完。
+    #
+    # worker_handoff_state 是本任务的「成功状态」：Worker 干完活、交给 reviewer，
+    # 自己**不再对这个 run 做任何事**。之后由控制面按人的判定继续推进。
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+
+    # 真正的终态：进去之后不再有任何合法迁移。
+    # awaiting_review / awaiting_merge 都**不在**这里 —— 它们是在等人。
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    # 允许的迁移写在 .platform/README.md 的状态迁移表里，由 Worker 与控制面在
+    # 运行时强制。JSON Schema 只看单份文档，保证不了跨文档的迁移合法性。
+    # 本任务不产生任何 GitHub 写操作。分支与 PR 字段在状态里保持 null。
+    creates_branch: false
+    creates_pull_request: false
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review

@@ -1,0 +1,93 @@
+{
+  "_note": "Fixtures for .platform/state.schema.json: one document that must validate and three that must not. This repo has NO JSON Schema validator today (jsonschema is not a declared dependency and this task installs nothing), so these fixtures are currently only well-formed JSON - they are NOT machine-checked against the schema. Wiring them into a validator is a precondition for enabling the worker.",
+  "valid": {
+    "schema_version": 1,
+    "run_id": "3f2a1c4e-9b7d-4a61-8c3f-1d2e5b6a7c80",
+    "task_id": "AIH-TASK-001",
+    "project_id": "ai_billing_hub",
+    "source": "telegram",
+    "requester_id_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "state": "awaiting_review",
+    "attempt": 1,
+    "created_at": "2026-09-16T01:20:00Z",
+    "updated_at": "2026-09-16T01:24:31Z",
+    "started_at": "2026-09-16T01:20:05Z",
+    "finished_at": "2026-09-16T01:24:31Z",
+    "branch": null,
+    "pull_request": null,
+    "approval": null,
+    "error": null,
+    "evidence": {
+      "command_results": [
+        {
+          "command_id": "docs.check",
+          "exit_code": 0,
+          "started_at": "2026-09-16T01:20:05Z",
+          "finished_at": "2026-09-16T01:20:07Z",
+          "skipped_count": null
+        },
+        {
+          "command_id": "tests.backend",
+          "exit_code": 0,
+          "started_at": "2026-09-16T01:21:02Z",
+          "finished_at": "2026-09-16T01:24:31Z",
+          "skipped_count": 4
+        }
+      ]
+    }
+  },
+  "invalid": [
+    {
+      "name": "raw-identifier-instead-of-hash",
+      "rejected_by": "properties.requester_id_hash.pattern",
+      "why": "Only a lowercase-hex SHA-256 fits. A raw sender identifier cannot be stored in this field. The placeholder below is deliberately not a real number - the point is the field shape, not the value.",
+      "document": {
+        "schema_version": 1,
+        "run_id": "3f2a1c4e-9b7d-4a61-8c3f-1d2e5b6a7c80",
+        "task_id": "AIH-TASK-001",
+        "project_id": "ai_billing_hub",
+        "source": "telegram",
+        "requester_id_hash": "RAW-SENDER-IDENTIFIER-PLACEHOLDER",
+        "state": "received",
+        "attempt": 1,
+        "created_at": "2026-09-16T01:20:00Z",
+        "updated_at": "2026-09-16T01:20:00Z"
+      }
+    },
+    {
+      "name": "unknown-state",
+      "rejected_by": "$defs.state.enum",
+      "why": "in_progress is not in the state enum. Inventing a state is how a run escapes the state machine.",
+      "document": {
+        "schema_version": 1,
+        "run_id": "3f2a1c4e-9b7d-4a61-8c3f-1d2e5b6a7c80",
+        "task_id": "AIH-TASK-001",
+        "project_id": "ai_billing_hub",
+        "source": "telegram",
+        "requester_id_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "state": "in_progress",
+        "attempt": 1,
+        "created_at": "2026-09-16T01:20:00Z",
+        "updated_at": "2026-09-16T01:20:00Z"
+      }
+    },
+    {
+      "name": "additional-property",
+      "rejected_by": "additionalProperties",
+      "why": "chat_transcript is not a declared field. additionalProperties:false is what keeps chat bodies, phone numbers and other unplanned payload out of persisted state.",
+      "document": {
+        "schema_version": 1,
+        "run_id": "3f2a1c4e-9b7d-4a61-8c3f-1d2e5b6a7c80",
+        "task_id": "AIH-TASK-001",
+        "project_id": "ai_billing_hub",
+        "source": "telegram",
+        "requester_id_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "state": "received",
+        "attempt": 1,
+        "created_at": "2026-09-16T01:20:00Z",
+        "updated_at": "2026-09-16T01:20:00Z",
+        "chat_transcript": "REDACTED"
+      }
+    }
+  ]
+}
