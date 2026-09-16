@@ -1110,6 +1110,46 @@ tail -5 /opt/ai_billing_hub/.last-good-deploy-history
 ⚠️ **迁移不回滚**：`deploy.sh` 只换镜像。所以破坏性的迁移必须拆成两次部署
 （先加、双写、再删）—— 否则回滚之后，旧代码面对的是一个它不认识的表结构。
 
+### 9.6 ⚠️ 一次真实的部署事故：改网络定义把数据库停了（2026-09-16）
+
+**现象**：Deploy run 35121333673 在 VPS 那步 23 秒失败，退出前打的是
+`cannot start the database; the application containers are untouched` ——
+但**应用容器并非「未受影响」**：`/readyz` 返回 503，mysql 已经停了。
+
+**经过**：那一次部署带着 §10 的网段收窄（本栈网络钉死成 `10.201.0.0/24`）。
+`deploy.sh` 的第一步是「先只起数据库」：
+
+```
+16:24:01  starting the database
+ Container ai_billing_hub-mysql-1 Stopping
+ Container ai_billing_hub-mysql-1 Stopped
+ Network ai_billing_hub_default Removed          ← 这行是 compose 的意图，不是结果
+Error response from daemon: error while removing network:
+  network ai_billing_hub_default has active endpoints (redis / nginx / worker / beat / frontend / api)
+16:24:05  ERROR: cannot start the database; the application containers are untouched
+```
+
+compose 为了按新定义重建网络，**先停掉它要起的那个容器**（mysql），再去删网 ——
+而另外六个容器还挂在那张网上，删除失败，于是 mysql 再也没起来。
+
+**为什么没有自动回滚**：失败发生在健康检查**之前**。那条路径按设计是「保持现场不动」
+（`die` 的措辞就是这个意思），因为通常这时确实什么都没动。这次它不成立了。
+
+**怎么恢复的**：`docker compose down`（停六个容器 + 删旧网；`proxy_net` 是 external 不受影响、
+命名卷保留）→ 重跑同一个 Deploy。恢复后七服务健康、`/readyz` 200、网段 `10.201.0.0/24`。
+⚠️ `down` 的代价是 `PREVIOUS_IMAGE` 没了，那一次部署**没有回滚目标** —— 真要回退得用
+`.last-good-deploy` 里记的上一版手工再部署一次。
+
+**修在哪**：`deploy.sh` 的 `start_database()`（§9.5 那条 fix 之后的下一条）。
+只对「网络要重建」这一个特征做补救：整栈 `stop`（**不是 `down`**，那会删掉容器、
+连带回滚落脚点）→ 重试 `up -d mysql`。别的失败照样失败，不在真正的原因上面盖噪声。
+迁移仍然排在应用容器之前，顺序没变。
+
+**这次真正值钱的地方**：这是新上线的巡检**第一次逮到真事故** ——
+00:25 报出 `P1 mysql is not running` 与 `P1 readyz is not answering 2xx`
+（都先复核 45 秒才发），Telegram 收到两条 DOWN。在这之前，这种「应用还在跑、
+数据库没了」的状态只有等人去点页面才会发现。
+
 ## 10. 七件事的决定（Kelvin，2026-09-13）
 
 | # | 问题 | 决定 | 落在哪一节 |
