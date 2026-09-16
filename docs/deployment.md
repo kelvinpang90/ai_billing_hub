@@ -202,6 +202,8 @@ worker。**但生产 VPS 只有 1 核**（第 3.1 节），那条结论**不转�
 （**68%**，告警线 80%），Docker 镜像从 9-13 的 7.8 GB 涨到 **11.02 GB** —— 其中
 `ai_billing_hub` 的 api + frontend 攒了 **8 个 commit SHA 版本**，只有 1 个在跑。
 
+→ **两件事之后，同日复测**：`prune_old_images` 上线后本项目镜像从 **16 个降到 6 个**（3 代 × api + frontend），Docker 镜像总量 11.02 GB → **6.47 GB**；Kelvin 同时把根分区扩到 **48 GB**，于是水位从 68% 落到 **31%**。⚠️ 扩容只是把时间买回来，**单调增长的那一部分是被回收窗口挡住的**，不是被磁盘大小挡住的。
+
 根因是 `deploy.sh` 里那句 `docker image prune -f` **清不掉它们**：prune 只清悬空（无标签）
 镜像，而每次部署拉进来的都带 commit SHA 标签。也就是说，脚本里写着「不清的话它会
 慢慢把磁盘吃光」的那道防护，拦的恰恰不是在长的那一类。已补 `prune_old_images`
@@ -417,7 +419,7 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 
 ⚠️ **不要建一条前缀为空、或覆盖 `yearly/` 的规则**：那会连永久保留的年备份一起删掉。
 
-**生产上已配**（2026-09-15，Kelvin 在控制台配、截图核对）：`full/` 35 天、`binlog/` 35 天、`monthly/` 366 天，
+**生产上已配**（2026-09-15 三条，2026-09-16 补上 `logs-35d`；Kelvin 在控制台配、截图核对）：`full/` 35 天、`binlog/` 35 天、`monthly/` 366 天、`logs/` 35 天，
 外加 R2 自带的「未完成分片上传 7 天中止」；`yearly/` 不受任何规则影响。⚠️ 第一次配时 `monthly` 的前缀被填成了
 `monthly/366 days`（天数混进了前缀框）—— 那条规则一个对象都匹配不上，月备份会永远累积。**配完要逐条看前缀一栏**。
 同日生产上第一次按新脚本跑全量：建出 `monthly/billing-202609.sql.enc` 与 `yearly/billing-2026.sql.enc`，第二次报 `already exists`。
@@ -643,6 +645,8 @@ Asia/Kuala_Lumpur，挂 Telegram 与 email），ping 地址直接写入 VPS 的 
 | full backup | 手工 `bash deploy/backup.sh` | up |
 | restore drill | 手工 `bash deploy/restore_drill.sh`（`restore drill passed … in 60s; 8 tables; users 1; TOTP secret decrypted`） | up |
 | 通知 | 对 full backup 发 `/fail` → down，再发成功 → up | Telegram 收到 DOWN 与 UP |
+| services / readyz / disk | 2026-09-16 巡检上线（§8.1） | 三个都 up；磁盘那条做过一次真实 DOWN / UP |
+| logs | 2026-09-16 日志外送上线（§7.1） | up（手工跑第一轮，1475 行 / 30 496 字节） |
 
 建检查用的 read-write API Key 事后已删除（再调用返回 401）；ping 地址不依赖它。
 
@@ -776,6 +780,21 @@ T0.3 做的是日志的**内容与格式**（结构化、request id、脱敏）�
 
 **归档可读性验证**：把桶里那份密文用口令解开 → `tar tzf` 列出七个 `<服务>.log` →
 抽样看到带 RFC3339 时间戳的原始行。⚠️ 与备份同一条：**能传上去不算数，能解开才算**。
+
+**生产上已接通**（2026-09-16）：部署 `308017d`（Deploy run 35109948596）→ 重装 cron 为五行 →
+建第四个检查 `ai_billing_hub logs`（Cron `47 3 * * *`、时区 Asia/Kuala_Lumpur、宽限 2 小时，
+渠道与另外三个一致）→ Kelvin 在 Cloudflare 加上 `logs-35d` 规则（前缀 `logs/`，35 天）。
+建检查用的 read-write API Key 事后已撤销（再调用返回 401）。
+
+| 步骤 | 结果 |
+| --- | --- |
+| 手工跑第一轮 | mysql 16 / redis 1048 / api 34 / celery-worker 33 / celery-beat 15 / frontend 29 / nginx 300 = **1475 行**；上传确认 **30 496 字节**；`enforcing retention` 照跑；exit 0 |
+| **读回演练** | 从 R2 把那份密文拉回来 → 用生产口令解开 → `tar tzf` 列出七个 `<服务>.log` → `api.log` 34 行、首行 `api-1 | 2026-09-16T14:41:35.755734883Z …` |
+| 心跳 | `ai_billing_hub logs` 变绿；七个检查（binlog / 全量 / 演练 / services / readyz / disk / logs）全部 up |
+
+⚠️ **一个顺带的观察**：redis 一天 1048 行，占了这一轮的三分之二 —— 它是目前最吵的服务。
+现在还在 512 MB 的归档上限之内，但真正要压缩日志量时，先看它。
+
 
 ---
 
@@ -1080,7 +1099,7 @@ git checkout main
 - [x] 宿主机主密钥文件 `chown 10001:10001` + `chmod 0400` —— 2026-09-15 核对（§6）
 - [ ] §95 的 17 项指标各有阈值、分级、通知对象、抑制规则、runbook 链接 —— ⚠️ 未做完：**三条被点名的已落地**（§8.1），其余 17 项业务指标要等指标管道，见 §8.3
 - [x] `billing_readiness_degraded_redis` 与 celery-beat 存活探针落地 —— 2026-09-16：探针 T0.6 就有（beat 按调度状态文件 mtime 判活），本次补的是**把它送到人手里**：`deploy/monitor.sh` 每 5 分钟巡检容器健康 + `/readyz` 响应体 + 磁盘水位，三个维度各自一个 Healthchecks 检查 + Telegram（§8.1）
-- [ ] 日志轮转 / 保留 / 上限 / 安全删除 / 异地 / 磁盘告警 —— 六项**都已有实现**（§7 的表），⚠️ 仍未勾是因为**生产上还没跑起来**：要部署、重装 cron、建第四个心跳检查 `ai_billing_hub logs`、在 R2 上加 `logs/` 35 天规则，四件做完并实测一轮再勾
+- [x] 日志轮转 / 保留 / 上限 / 安全删除 / 异地 / 磁盘告警 —— 2026-09-16：六项都有实现（§7 的表），生产上部署、重装 cron、第四个心跳检查、R2 的 `logs-35d` 规则四件都做完，**手工跑通一轮并从 R2 读回解开核对**（§7.1 末尾）。⚠️ 轮转仍是 json-file 的按大小窗口，保留期由归档承载；根治日志完整性要上日志聚合（§8.3）
 - [x] **上线前配好 SMTP**，否则密码重置的信发不出去（outbox 会重试到死信）—— 2026-09-15：Google Workspace（`smtp.gmail.com:587` STARTTLS + 应用专用密码，发信邮箱 `developer@acuventech.com`，显示名 `Acuven Billing`）。生产端到端：`/password/forgot` → outbox 行 `SENT`（第 1 次尝试，约 3 秒）→ 管理员收到信、链接能打开重置页。SPF / DKIM / DMARC 全部 pass，**但 Outlook.com 仍判进垃圾箱**（SCL 5，`SpamFilterAuthJ`）—— 属发信信誉与内容判定，不是配置问题；Phase 4 给客户发信前要重新评估传输（ADR-0009 备选 A）
 - [ ] 容量基线在**升配后的**生产机上重跑一次（[perf-baseline.md](perf-baseline.md) 第 6 节）
 - [x] 部署流水线在真实 VPS 上跑通一次 —— 2026-09-14 起在真实 VPS 上多次成功；其间 run 34815465122 被冒烟拦下并**自动回滚**（§2.2），也算实地走过一次回滚路径。最近一次是 run 34952597111，部署 `6ea9dc5`。⚠️ §9.4 里「ghcr 包可见性」「先手工跑一次 `deploy.sh`」两条事后无法核实，仍未勾；push 触发器仍未加回
