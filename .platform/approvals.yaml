@@ -1,0 +1,80 @@
+# 控制契约 —— 动作分档与批准绑定
+#
+# 三档，默认落入最严的一档：一个动作**没有**在 low 里明确列出，就不是 low。
+# 分档看动作的后果，不看它「跑起来像不像一条命令」。
+#
+# ⚠️ 本文件只写角色与稳定标识。任何凭据、电话号码、IP、token、secret
+#    都不得出现在这里 —— 仓库是公开的。
+
+schema_version: 1
+project_id: ai_billing_hub
+default: prohibited
+
+tiers:
+  # 只读、无外部副作用、失败了重跑一次没有代价。
+  low:
+    description: 直接执行，不需要人工批准
+    requires_approval: false
+    actions:
+      - read_run_state
+      - validate_platform_contract
+      - run_allowlisted_repo_check   # 见 .platform/commands.yaml，仅限那七条
+
+  # 有外部可见副作用，或者一旦做错要人去收拾。必须先拿到一次性批准。
+  approval_required:
+    description: 必须先有绑定到本 run 的一次性批准，才允许执行
+    requires_approval: true
+    actions:
+      - create_or_update_pull_request
+      - dependency_install
+      - external_notification
+      - deployment
+      - production_service_restart
+      - database_migration
+      - delete_or_truncate
+      - credential_rotation
+      - authentication_configuration_change
+      - firewall_configuration_change
+
+  # 无论谁批准都不做。这一档不存在「拿到批准就可以」的路径。
+  prohibited:
+    description: 契约层面禁止，没有批准可以解锁
+    requires_approval: false
+    actions:
+      - direct_push_to_default_branch
+      - merge_to_default_branch
+      - bypass_ci
+      - bypass_review
+      - read_or_output_secrets
+      - execute_arbitrary_shell_from_chat
+
+# 批准的绑定规则。这几条是**运行时约束**，靠 Worker 实现，不由本文件自动生效。
+approval_binding:
+  # 批准同时绑定这三样，缺一条即无效
+  bound_to:
+    - run_id
+    - action
+    - approver
+  single_use: true
+  # 批准发放时记下当时的 state；run 的 state 一变，这张批准立即作废，
+  # 必须重新申请。防的是「批准了 A 动作，run 走到别处时被拿去用」。
+  invalidated_on_state_change: true
+  # 过期也作废。时间单独算，不依赖状态是否变化。
+  expires_after_seconds: 3600
+  approver_roles:
+    - merge_owner
+  # 只记角色与批准 id，不记发送者的原始标识
+  records:
+    - approval_id
+    - action
+    - approver_role
+    - bound_run_id
+    - bound_state
+    - granted_at
+    - consumed
+    - consumed_at
+
+# 分档不清楚时的兜底：按最严的一档处理，不猜。
+unknown_action:
+  tier: prohibited
+  action: reject

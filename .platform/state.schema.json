@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kelvinpang90/ai_billing_hub/.platform/state.schema.json",
+  "title": "AIH run state",
+  "description": "One run of one task. Strict: unknown fields are rejected, so a raw phone number has no field to land in. Single-direction state advance and single-use approval binding are RUNTIME rules, not enforced here - see .platform/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "task_id",
+    "project_id",
+    "source",
+    "requester_id_hash",
+    "state",
+    "attempt",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^AIH-TASK-[0-9]{3,}$"
+    },
+    "project_id": {
+      "const": "ai_billing_hub"
+    },
+    "source": {
+      "enum": ["telegram"]
+    },
+    "requester_id_hash": {
+      "description": "Salted SHA-256 of the sender identity, lowercase hex. The raw identifier must never be stored, logged or echoed.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "state": {
+      "$ref": "#/$defs/state"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "$ref": "#/$defs/rfc3339_utc"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/rfc3339_utc"
+    },
+    "started_at": {
+      "$ref": "#/$defs/rfc3339_utc_or_null"
+    },
+    "finished_at": {
+      "$ref": "#/$defs/rfc3339_utc_or_null"
+    },
+    "branch": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._/-]{1,200}$"
+    },
+    "pull_request": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["number", "url"],
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/kelvinpang90/ai_billing_hub/pull/[1-9][0-9]*$"
+        }
+      }
+    },
+    "approval": {
+      "$ref": "#/$defs/approval"
+    },
+    "evidence": {
+      "$ref": "#/$defs/evidence"
+    },
+    "error": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "command_id": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "state": {
+      "enum": [
+        "received",
+        "validated",
+        "queued",
+        "running",
+        "approval_required",
+        "awaiting_review",
+        "awaiting_merge",
+        "completed",
+        "failed",
+        "cancel_requested",
+        "cancelled"
+      ]
+    },
+    "rfc3339_utc": {
+      "description": "RFC3339 timestamp, UTC only: the trailing Z is mandatory, offsets are rejected.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z$"
+    },
+    "rfc3339_utc_or_null": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z$"
+    },
+    "approval": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "approval_id",
+        "action",
+        "approver_role",
+        "granted_at",
+        "bound_run_id",
+        "bound_state",
+        "consumed"
+      ],
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "action": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "approver_role": {
+          "description": "Role only. Never a phone number, account handle, address or token.",
+          "enum": ["merge_owner"]
+        },
+        "granted_at": {
+          "$ref": "#/$defs/rfc3339_utc"
+        },
+        "bound_run_id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "bound_state": {
+          "$ref": "#/$defs/state"
+        },
+        "consumed": {
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "$ref": "#/$defs/rfc3339_utc_or_null"
+        }
+      }
+    },
+    "evidence": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["command_results"],
+      "properties": {
+        "command_results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command_result"
+          }
+        }
+      }
+    },
+    "command_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "exit_code", "started_at", "finished_at"],
+      "properties": {
+        "command_id": {
+          "description": "Must match an id in .platform/commands.yaml. Cross-file membership is a runtime check.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+        },
+        "exit_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "started_at": {
+          "$ref": "#/$defs/rfc3339_utc"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/rfc3339_utc"
+        },
+        "skipped_count": {
+          "description": "Tests reported as skipped. Non-zero means this run proves less than CI does.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

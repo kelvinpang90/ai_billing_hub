@@ -1,0 +1,162 @@
+# 控制契约 —— 可执行命令 allowlist
+#
+# 默认 deny：这里没有的命令一律不可执行，没有「差不多就放行」。
+# 每条命令的 executable 与 args 都是**固定数组**，调用方只能按 id 引用，
+# 不能追加参数、不能改工作目录、不能注入环境变量。
+#
+# 这里列的每一条都在 docs/WORKFLOW.md 第 7 节「提 PR 前必须本地跑过」里有出处，
+# 且对应文件在仓库中真实存在。不要往这里加仓库里没有的脚本。
+
+schema_version: 1
+project_id: ai_billing_hub
+default: deny
+
+# 机器可验证的硬约束。Worker 的实现必须逐条满足，不满足就不要启用 Worker。
+constraints:
+  # 不经 shell：直接 spawn 进程，argv 逐个传。禁止把命令拼成字符串。
+  shell: false
+  # args 是固定字面量数组，不做任何模板替换 / 变量展开
+  argument_templating: false
+  caller_supplied_arguments: false
+  caller_supplied_executable: false
+  # 不允许通配符展开（`*`、`?`、`**`），路径必须逐个写死
+  glob_expansion: false
+  # 不从聊天消息或任务参数注入任何环境变量
+  environment_injection: false
+
+  # ⚠️ 上面那条只挡住「注入」，挡不住「继承」。子进程按普通方式启动会原样拿到
+  #    宿主环境，于是 tests.backend 会看到 BILLING_TEST_DATABASE_URL 之类的变量，
+  #    一条声称无凭据、无网络的 low risk 命令就会去连真实服务。所以环境必须先清空。
+  environment:
+    mode: clean
+    inherit_host_environment: false
+    # 按**变量名**白名单放行，值由 Worker 安装侧固定，不写进仓库（公开仓库）。
+    # 这几个是让进程能起来的最小集：解析 git / pwsh 要 PATH，Windows 上的
+    # 系统调用要 SYSTEMROOT，临时文件要 TEMP / TMP。
+    allowed_names:
+      - PATH
+      - SYSTEMROOT
+      - TEMP
+      - TMP
+    # 即使有人把下面这些加进 allowed_names 也不放行 —— deny 优先于 allow。
+    precedence: denied_wins
+    denied_name_patterns:
+      - "BILLING_*"
+      - "*DATABASE*"
+      - "*REDIS*"
+      - "*MYSQL*"
+      - "*SECRET*"
+      - "*TOKEN*"
+      - "*PASSWORD*"
+      - "*CREDENTIAL*"
+      - "*API_KEY*"
+      - "GH_*"
+      - "GITHUB_*"
+      - "AWS_*"
+
+  # ⚠️ 每条命令的 `network: false` **不是元数据**，是必须在进程边界上强制的约束：
+  #    命令要跑在禁止出站网络的环境里（作业对象 / 防火墙规则 / 隔离账户，具体
+  #    机制由 Worker 安装侧决定）。强制不了就不要启用 Worker —— 一条只写在
+  #    YAML 里、没有任何东西执行的「无网络」声明，比不写更糟。
+  network_enforcement: process_boundary_required
+
+  # 只允许仓库根作为工作目录
+  allowed_working_directories:
+    - repository_root
+  # executable 必须在 Worker 安装侧解析成固定绝对路径，不从 PATH 查找 ——
+  # 绝对路径属于本机信息，按仓库公开的约定不写进仓库文件。
+  executable_resolution: pinned_at_worker_install
+
+# writes 的取值口径：
+#   none  —— 不写工作区任何文件
+#   cache —— 只写构建/测试缓存（__pycache__ / .ruff_cache / .pytest_cache），
+#            这些路径已被 .gitignore 忽略，不产生工作区 diff
+#   repo  —— 会改动仓库内被跟踪的文件。**本文件里一条都没有，也不许有。**
+commands:
+  - id: docs.check
+    description: 校验文档相对链接、spec 章节引用与跨文件约定串一致性
+    executable: python
+    args: ["scripts/check_docs.py"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 180
+    network: false
+    writes: none
+
+  - id: policy.check
+    description: 仓库策略检查（Markdown 复选框只允许两种状态等本地项）
+    executable: python
+    args: ["scripts/check_repo_policy.py"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 180
+    network: false
+    writes: none
+
+  - id: tests.process
+    description: 流程脚本（策略检查与回读脚本）的 unittest 回归
+    executable: python
+    args: ["-m", "unittest", "discover", "-s", "tests"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 600
+    network: false
+    writes: cache
+
+  - id: lint.check
+    description: 后端 lint（ruff check，只报告不改写）
+    executable: python
+    args: ["-m", "ruff", "check", "."]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 300
+    network: false
+    writes: cache
+
+  - id: format.check
+    description: 后端格式检查（ruff format --check，只报告不改写）
+    executable: python
+    args: ["-m", "ruff", "format", "--check", "."]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 300
+    network: false
+    writes: cache
+
+  - id: tests.backend
+    description: 后端产品代码测试（pytest，testpaths 指向 tests/backend）
+    executable: python
+    args: ["-m", "pytest"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 1800
+    network: false
+    writes: cache
+    # ⚠️ 本命令**不是 CI 的替代品**。CI 起了真 MySQL 与 Redis 并显式把
+    #    「有任何 skipped」判成失败；Worker 这边环境是清空的（见 constraints.environment，
+    #    `BILLING_*` 还额外落在 denied_name_patterns 里），所以迁移与 broker 用例
+    #    必然安静地 skip。不得把 skipped 读成 passed。
+    caveat: migration_and_broker_tests_skip_without_service_env
+
+  - id: scripts.verdict_tests
+    description: 审查判定行解析的 PowerShell 回归测试（CI 的 scripts 项跑的就是它）
+    executable: pwsh
+    args: ["-NoProfile", "-File", "scripts/tests/Test-ReviewVerdict.ps1"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 600
+    network: false
+    writes: none
+
+# 下面这些**不是命令**，是明确不得被伪装成 low risk 混进 allowlist 的动作类别。
+# 想做其中任何一件，走 .platform/approvals.yaml 的 approval_required 或 prohibited。
+never_low_risk:
+  - create_or_update_pull_request
+  - dependency_install
+  - external_notification
+  - deployment
+  - database_migration
+  - delete_or_truncate
+  - service_restart
+  - credential_access_or_rotation
+  - security_configuration_change

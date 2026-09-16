@@ -1,0 +1,69 @@
+# 控制契约 —— 项目事实与角色绑定
+#
+# 这份文件只描述「谁能做什么」，不描述业务。未来的 Windows Execution Worker
+# 启动前必须读它；读不到、解析失败、或 worker_enabled 不为 true，一律不调度。
+#
+# ⚠️ 本文件里的仓库事实来自本地 git remote 与 CLAUDE.md 的「分支保护」一节，
+#    **不是**从 GitHub API 实时读取的。改了 GitHub 上的保护规则要回来同步这里。
+
+schema_version: 1
+project_id: ai_billing_hub
+
+repository:
+  host: github.com
+  slug: kelvinpang90/ai_billing_hub
+  clone_url: https://github.com/kelvinpang90/ai_billing_hub.git
+  default_branch: main
+  # 合并方式只能是 squash：main 要求线性历史（docs/WORKFLOW.md 第 5 节）
+  merge_method: squash
+  protected_branches:
+    - name: main
+      allow_direct_push: false
+      allow_force_push: false
+      require_pull_request: true
+      require_branch_up_to_date: true
+      # CI 的必需检查项。已在 2026-09-16 通过 GitHub branch protection API
+      # 回读，并与 docs/HANDOFF.md 的当前记录交叉核对。
+      required_status_checks:
+        - docs
+        - scripts
+        - policy
+        - backend
+        - frontend
+        - secret-scan
+
+roles:
+  development_owner: claude_code
+  independent_reviewer: codex
+  merge_owner: kelvin
+
+execution:
+  execution_worker: windows-native
+  control_plane: openclaw
+
+  # ⚠️ 本任务不得启用 Worker。这一行是唯一的总开关：
+  #    保持 false 即不会有任何调度发生，也是出事时的回滚方式。
+  worker_enabled: false
+
+  # 置 true 需要同时满足下面三条，缺一不可。这不是由本文件强制的，
+  # 是给人看的准入条件 —— 机器侧的强制只有 worker_enabled 本身。
+  enable_preconditions:
+    - 本契约已经 Codex 审查并由 Kelvin 合并进 main
+    - Worker 的可执行文件解析路径已在 Worker 安装侧固定（不从 PATH 查找）
+    # 下面两条对应 commands.yaml 的 constraints.environment 与 network_enforcement：
+    # 那两样是**必须由 Worker 强制**的，不是写在 YAML 里就自动成立的。
+    - 已验证环境清理：子进程不继承宿主环境，denied_name_patterns 实际生效
+    - 已验证网络隔离：network false 的命令在禁止出站网络的环境里跑
+    - Kelvin 明确批准启用
+
+# 默认拒绝。未在对应文件里列出的东西一律不可执行、不可调度、不可批准。
+defaults:
+  command_policy: deny
+  task_policy: deny
+  approval_policy: deny
+
+contract_files:
+  commands: .platform/commands.yaml
+  tasks: .platform/tasks.yaml
+  approvals: .platform/approvals.yaml
+  state_schema: .platform/state.schema.json
