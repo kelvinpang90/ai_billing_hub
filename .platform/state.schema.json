@@ -34,7 +34,7 @@
       "const": "ai_billing_hub"
     },
     "source": {
-      "enum": ["whatsapp"]
+      "enum": ["telegram"]
     },
     "requester_id_hash": {
       "description": "Salted SHA-256 of the sender identity, lowercase hex. The raw identifier must never be stored, logged or echoed.",

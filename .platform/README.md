@@ -34,13 +34,13 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 
 ---
 
-## WhatsApp 只接受这四条
+## Telegram 只接受这四条
 
 ```text
-开启 AIH-TASK-XXX
-状态 <run_id>
-取消 <run_id>
-批准 <run_id>
+开启 ai_billing_hub AIH-TASK-001
+状态 [run_id]
+取消 [run_id]
+批准 [run_id]
 ```
 
 除此之外一律 **fail closed** ——
