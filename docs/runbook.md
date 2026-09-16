@@ -217,7 +217,8 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
    chmod 0400 secrets/*
    ```
    再写 `.env`（数据库口令、R2 凭据、备份口令、心跳地址、`BILLING_IMAGE_REPO` 等）
-6. **只起数据库**：`docker compose up -d mysql`，等它 healthy。⚠️ 先起全栈会让应用对着一个空库跑
+6. **只起数据库**：`docker compose up -d mysql`，等它 healthy。
+   ⚠️ 先起全栈会让应用对着一个空库跑。这一步不需要本项目的镜像 —— MySQL 用的是公共镜像，新主机上 compose 会自己拉
 7. **恢复**：
    ```bash
    deploy/restore.sh full/<最新一份全量的 key> billing_restore
@@ -225,8 +226,14 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
    脚本会拉回全量、解密、导入，再重放它之后**全部**的 binlog（PITR）。
    要恢复到误操作之前的某一刻就给第三个参数（UTC 时间）
 8. **对账**（见下一节），**通过之后**再往下走
-9. **切换**：把恢复库切成生产库名（改名或改 `BILLING_MYSQL_DATABASE`），`docker compose up -d`，
-   等七个服务 healthy，跑冒烟 `curl -fsS http://127.0.0.1:8080/healthz`
+9. **切换并起全栈**：把恢复库切成生产库名（改名或改 `.env` 里的 `BILLING_MYSQL_DATABASE`），然后
+   ```bash
+   deploy/deploy.sh <第 4 步那个 SHA>
+   ```
+   它会按那个 commit 拉两个不可变镜像、跑迁移、等七个服务 healthy、跑冒烟，并把这一次记进 `.last-good-deploy`。
+   ⚠️ **不要在这里手工 `docker compose up -d`**（Codex 审查 PR #67 指出）：`.env` 里只有 `BILLING_IMAGE_REPO`，**compose 不会自己拼出 `BILLING_IMAGE`** ——
+   它会退回 compose 文件里那个本地构建的默认标签 `acuven-billing-hub:local`，而新主机上根本没有这个镜像，栈直接起不来。
+   ⚠️ 迁移对一份刚恢复的库通常是空操作（dump 里带着 `alembic_version`）——**这是对的**，它同时也是「代码与表结构对得上」的一次检查
 10. **切流量**：把边缘 `infra_nginx` / DNS 指到新主机
 11. **恢复运维设施**：按 [deployment.md](deployment.md) §5.2.5 重装 cron（五行），确认四类心跳
     在下一个周期内全部回绿
@@ -272,6 +279,7 @@ SELECT COUNT(*) FROM two_factor_settings;
 - **不要在新主机上生成新的 `master.key`。**那不是「重新初始化」，是**把所有 TOTP 注册一次性作废**
 - **不要把 `.env`、密钥内容贴进聊天、工单或截图。**灾难当天最容易发生这件事
 - **不要跳过第 4 步直接用 `main`。**灾难恢复不是发布新版本的时机
+- **不要用 `docker compose up -d` 起应用**（起 mysql 除外）。理由见第 9 步：新主机上没有本项目的镜像，而 compose 不会从 `BILLING_IMAGE_REPO` 拼出标签 ——它会去找一个本地构建的默认标签，然后失败。**起应用只走 `deploy/deploy.sh`**
 
 ---
 
