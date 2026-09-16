@@ -438,6 +438,33 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 
 ⚠️ Phase 2 的用量摄取接上来之后 binlog 的增速会完全不同，那时要重新算这个数。
 
+#### 总量上限：MySQL 管不了，只能在外面盯（2026-09-17）
+
+⚠️ **MySQL 8.4 没有 `binlog_space_limit`** —— 在生产那台 8.4.11 上实测：变量根本不存在。
+它自己**只会按时间清**，所以「3 天」这个设置对**总量**不构成任何约束：写入量翻十倍时，
+三天之内攒出多少就是多少。而磁盘写满时 **MySQL 直接停止写入**。
+
+所以总量口径放在巡检里（`deploy/monitor.sh`，每 5 分钟，§8.1）：
+
+| 口径 | 值 | 越线了怎么样 |
+| --- | --- | --- |
+| 本地 binlog 总量预算 | **2 GB**（`BILLING_MONITOR_BINLOG_BUDGET_MB`） | 并进**磁盘那个维度**报 P2 —— 都是「磁盘要出事」这一件事，不另开一个检查、不让人收到两条指向同一个原因的通知 |
+| 磁盘水位 | 80% / 90%（§8.1） | 最后一道防线。binlog 这条是**早期信号**：它先响 |
+
+**现状**（2026-09-17 实测）：17 个文件、**3 MB**，离 2 GB 预算很远；根分区 48 GB、已用 31%。
+
+⚠️ **量不到的时候不报警**：mysql 没起来是服务维度的事，在磁盘维度再报一次只是双响。
+
+**这条告警响了怎么办**（按顺序）：
+
+1. **先看离机是不是还在跑**：`journalctl -t billing-binlog -p err --since -1h`。
+   ⚠️ 十有八九的真实成因是**推送坏了**，binlog 堆在本地推不走 —— 那时该修的是推送，不是删文件
+2. 看增速：`docker compose exec -T mysql sh -c 'ls -l /var/lib/mysql/binlog.*'`。
+   ⚠️ 如果是用量摄取上线之类的**正常增长**，那就是该重新算预算与保留期了
+3. **真要腾地方**：确认那些文件**已经离机**（`backups/binlog/` 的进度记录），再
+   `PURGE BINARY LOGS TO 'binlog.NNNNNN'`。
+   ⚠️ **绝不能删还没推走的 binlog** —— 那是把 PITR 链直接剪断，而且删掉就没了
+
 ### 5.2.3 binlog 离机（已落地，本地演练通过）
 
 ⚠️ **RPO ≤ 5 分钟靠的是它，不是全量。**第一版只有全量脚本，而且只能手工跑 ——
@@ -814,7 +841,7 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 | --- | --- | --- | --- | --- | --- |
 | 容器不健康（含 **celery-beat 停止调度**） | `docker compose ps` 的 `State` / `Health`，七个服务逐个查 | 非 `running` 或非 `healthy`；`mysql` / `api` / `billing_nginx` / `frontend` = **P1**，`redis` / `celery-worker` / `celery-beat` = **P2** | Telegram（检查 `ai_billing_hub services`） | 状态翻转才通知，红着的期间不重复 | [celery-beat 停止调度](runbook.md) |
 | **`billing_readiness_degraded_redis`** | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"` | P2；非 2xx（数据库不通 / API 挂）= **P1** | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md) |
-| 磁盘水位（§94 点名的那条） | `df -P` 查根文件系统与部署目录，按设备去重 | ≥ **80%** = P2，≥ **90%** = P1（`BILLING_MONITOR_DISK_*_PERCENT` 可调） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7 的保留期与上限（仍未做完） |
+| 磁盘水位（§94 点名的那条）**与 binlog 总量预算** | `df -P` 查根文件系统与部署目录（按设备去重）；另外进 mysql 容器量一次 binlog 占用 | 磁盘 ≥ **80%** = P2、≥ **90%** = P1；binlog ≥ **2 GB** = P2（三个阈值都可调） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7（日志）、§5.2.2 末尾（binlog） |
 
 ⚠️ **分级只体现在通知正文的前缀里**（`P1 mysql is not running`）。通道只有一条，
 它没有分级概念 —— P1 与 P2 的区别是**人该多快起身**，不是消息走哪条路。
@@ -1136,7 +1163,7 @@ tail -5 /opt/ai_billing_hub/.last-good-deploy-history
 - [x] 决策 ①–⑦ 有答案，本文件已按答案补完（2026-09-13）
 - [x] ⚠️ **VPS 内存升配完成**（决策 ③）—— 在此之前不要上线。2026-09-15 核对：2 核 / 7.3 GB，swap 几乎未用
 - [x] `set_real_ip_from` 按实际拓扑收窄 —— 2026-09-16 查实 infra_nginx 走 `proxy_net` 直连容器，三处一起收窄（nginx 的 `set_real_ip_from` 与 `/readyz` 名单、应用的 `BILLING_TRUSTED_PROXIES`），并把本栈网段钉死成 `10.201.0.0/24`，见 §10 末尾。⚠️ proxy_net 上还有同机另外八个项目的容器，那一层信任是**有意保留**的（要 vps_infra 给 infra_nginx 固定 IP）
-- [ ] binlog 的磁盘上限定下来（写满时 MySQL 直接停止写入） —— ⚠️ 2026-09-16 实测：根分区 29 GB / 已用 68%，余量约 9 GB。**镜像那一半已由 `prune_old_images` 堵住**（§3.1 末尾），binlog 自己的上限仍未定
+- [x] binlog 的磁盘上限定下来（写满时 MySQL 直接停止写入） —— 2026-09-17：本地保留 3 天 / 单文件 128 MB 之外，**再加一条 2 GB 的总量预算**，由巡检每 5 分钟量一次、并进磁盘维度报警（§5.2.2 末尾）。⚠️ **MySQL 8.4 没有 `binlog_space_limit`**（8.4.11 实测），所以这条只能在 MySQL 外面盯；告警响了先查**离机是不是坏了**，删文件是最后一步、且绝不能删没推走的
 - [x] compose 补上资源限制（ADR-0002 收口条件）—— 2026-09-13，见 §3.3
 - [x] 边缘 nginx 的 `real_ip` 与上游超时 —— 2026-09-13，见 §4
 - [ ] 边缘 nginx 的 TLS / 域名（①A：在 `infra_nginx` 那层，本层不做）

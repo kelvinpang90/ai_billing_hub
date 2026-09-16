@@ -38,6 +38,14 @@ SERVICES_P2="${BILLING_MONITOR_SERVICES_P2:-redis celery-worker celery-beat}"
 # 调高它们只会让告警来得更晚，而这条告警的全部价值就在于**来得早**（§94）。
 DISK_WARN_PERCENT="${BILLING_MONITOR_DISK_WARN_PERCENT:-80}"
 DISK_CRIT_PERCENT="${BILLING_MONITOR_DISK_CRIT_PERCENT:-90}"
+# binlog 的**本地总量预算**（T0.9 2026-09-17）。
+#
+# ⚠️ **MySQL 8.4 没有 `binlog_space_limit`**（在生产那台 8.4.11 上实测：变量不存在），
+# 所以 MySQL 自己只会按**时间**清（本地 3 天，见 docker-compose.yml）。写入量突然变大时，
+# 三天之内能攒出多少完全没有上限 —— 而磁盘写满时 **MySQL 直接停止写入**。
+#
+# 这条是**早期信号**：它先响，磁盘百分比那条才是最后一道防线。处置见 docs/deployment.md §5.2.2。
+BINLOG_BUDGET_MB="${BILLING_MONITOR_BINLOG_BUDGET_MB:-2048}"
 
 # 发现问题后隔多久复核一次。⚠️ 不复核的话，**一次正常部署就会误报**：deploy.sh
 # 换版本时容器会有半分钟左右不是 healthy，而那段时间照样可能撞上这个 cron。
@@ -128,6 +136,24 @@ check_readyz() {
     esac
 }
 
+check_binlog() {
+    local kb mb
+    # ⚠️ 只能进容器量：binlog 在命名卷里，宿主机上要 root 才读得到。
+    # ⚠️ `|| true` **必须写在命令替换里面**。本脚本开着 `set -e`：`kb="$(失败的命令)"`
+    # 会让函数当场中止，下面那一支「量不到就跳过」根本到不了 —— 本地演练时真踩到了。
+    kb="$($COMPOSE exec -T mysql sh -c 'du -ck /var/lib/mysql/binlog.* 2>/dev/null | tail -1' 2>/dev/null | head -1 | tr -cd '0-9' || true)"
+    if [ -z "$kb" ]; then
+        # ⚠️ 量不到**不报警**：mysql 没起来是服务维度的事，在这里再报一次只会制造双响，
+        # 而两条告警指向同一个原因时，人第一反应是「又抽风了」。
+        # ⚠️ 这一行走 stderr：本函数的 **stdout 就是问题清单**，往里写一行普通日志
+        # 等于凭空造出一条告警。cron 那行有 2>&1，照样进 syslog。
+        log "binlog size unavailable (is mysql up?); skipping the budget check" >&2
+        return 0
+    fi
+    mb=$((kb / 1024))
+    [ "$mb" -lt "$BINLOG_BUDGET_MB" ] || echo "P2 binlog at ${mb} MB (budget ${BINLOG_BUDGET_MB} MB)"
+}
+
 check_disk() {
     local target line device used mount seen=""
     # ⚠️ 用 `df -P` 而不是 `df`：长设备名会让默认输出换行，字段就错位了。
@@ -148,6 +174,9 @@ check_disk() {
             echo "P2 disk ${mount} at ${used}% (warn ${DISK_WARN_PERCENT}%)"
         fi
     done
+    # binlog 的预算并进**同一个维度**：都是「磁盘要出事」这一件事，
+    # 合在一起才不会让人收到两条指向同一个原因的通知。
+    check_binlog
 }
 
 # --- 巡检一轮 ----------------------------------------------------------------
