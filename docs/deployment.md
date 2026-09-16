@@ -1103,16 +1103,31 @@ tail -5 /opt/ai_billing_hub/.last-good-deploy-history
   所以这条推迟到那时定，不是忽略
 - **不适用**：运营日志不能永久保存（磁盘），已单独定为 30 天
 
-### ⚠️ 还差一个事实（不阻塞，但影响 `set_real_ip_from` 填什么）
+### ⚠️ ~~还差一个事实~~ —— **已查实**（2026-09-16），`set_real_ip_from` 已按它收窄
 
-`infra_nginx` 是**怎么**连到本平台 nginx 的？同一个 docker 网络直连容器，还是经宿主机
-发布端口？两者的对端地址不同，而 `set_real_ip_from` 必须**只信那一个**。
+`infra_nginx` 与本平台 nginx 在**同一张 docker 网络 `proxy_net` 上直连容器**，
+不经宿主机发布端口（`docker network inspect proxy_net`：本栈 nginx 与 infra_nginx 都在
+`172.19.0.0/16` 上）。所以三处一起收窄成：
 
-范围填太宽的后果很具体：任何能从私有地址够到我们的东西都能伪造 `X-Forwarded-For`，
-于是按来源限流可以被绕过、审计里的 IP 可以被伪造。
+| 处 | 收窄前 | 现在 | 为什么 |
+| --- | --- | --- | --- |
+| nginx `set_real_ip_from` | `10.0.0.0/8` + `172.16.0.0/12` + `192.168.0.0/16` + `127.0.0.0/8` | **`172.19.0.0/16`**（proxy_net） | 能够到本栈 nginx 的只有这张网 |
+| nginx `/readyz` 的 allow | 同上四段 | `127.0.0.0/8` + **本栈网段** + proxy_net | 经 infra_nginx 进来的请求在这里已经是**客户端真实 IP**，公网一律 deny |
+| 应用 `BILLING_TRUSTED_PROXIES` | `172.16.0.0/12,10.0.0.0/8,192.168.0.0/16` | **本栈网段** | api 的直连对端只可能是本栈 nginx |
 
-**先用私有网段 CIDR 作为默认值**（与 compose 里 `BILLING_TRUSTED_PROXIES` 的既有做法一致，
-私有 CIDR 在本仓库是可提交的），上线前按实际拓扑收窄。
+**本栈网段被钉死成 `10.201.0.0/24`**（`docker-compose.yml` 的 `networks.default.ipam`，**写成字面量、不给环境变量旋钮**：nginx 的 conf 读不到环境变量，`/readyz` 的 allow 名单只能抄一份 —— 留一个只对一半生效的旋钮会让宿主机的巡检被 deny 掉，而那看着像应用出了问题。要换网段就改这两处，守卫用例钉着它们一致）。⚠️ 不钉的话 docker 每次随手分一个 172.x，
+「可信代理是谁」就成了每台机器、每次重建都不一样的东西 —— 那正是原来只能拿三段 RFC1918
+兜着的原因。选 10.201 是因为它**在 docker 默认分配池（172.17–172.31）之外**，
+而且生产 VPS 上 10.x 一个都没用（2026-09-16 实测 `ip -4 route`）。
+
+⚠️ **还剩一层有意保留的信任**：`proxy_net` 上挂着同机另外八个项目的容器，它们仍在
+`set_real_ip_from` 的范围里 —— 其中任何一个被攻陷都能伪造 `X-Forwarded-For`。
+要再窄一层得让 `infra_nginx` 拿一个**固定 IP**，那是 `vps_infra` 仓库的改动，已记进
+[TODO](TODO.md)。
+
+⚠️ **`proxy_net` 的网段由 `vps_infra` 定，不是我们定的。**它变了而这里没跟着改，
+后果是**静默失效**：所有请求的来源又变回 infra_nginx 自己，限流与审计 IP 一起失真。
+换主机 / 重建 proxy_net 时要先 `docker network inspect proxy_net` 看一眼。
 
 ## 11. 收口条件
 
@@ -1120,7 +1135,7 @@ tail -5 /opt/ai_billing_hub/.last-good-deploy-history
 
 - [x] 决策 ①–⑦ 有答案，本文件已按答案补完（2026-09-13）
 - [x] ⚠️ **VPS 内存升配完成**（决策 ③）—— 在此之前不要上线。2026-09-15 核对：2 核 / 7.3 GB，swap 几乎未用
-- [ ] `set_real_ip_from` 按实际拓扑收窄（见 §10 末尾那条待确认的事实）
+- [x] `set_real_ip_from` 按实际拓扑收窄 —— 2026-09-16 查实 infra_nginx 走 `proxy_net` 直连容器，三处一起收窄（nginx 的 `set_real_ip_from` 与 `/readyz` 名单、应用的 `BILLING_TRUSTED_PROXIES`），并把本栈网段钉死成 `10.201.0.0/24`，见 §10 末尾。⚠️ proxy_net 上还有同机另外八个项目的容器，那一层信任是**有意保留**的（要 vps_infra 给 infra_nginx 固定 IP）
 - [ ] binlog 的磁盘上限定下来（写满时 MySQL 直接停止写入） —— ⚠️ 2026-09-16 实测：根分区 29 GB / 已用 68%，余量约 9 GB。**镜像那一半已由 `prune_old_images` 堵住**（§3.1 末尾），binlog 自己的上限仍未定
 - [x] compose 补上资源限制（ADR-0002 收口条件）—— 2026-09-13，见 §3.3
 - [x] 边缘 nginx 的 `real_ip` 与上游超时 —— 2026-09-13，见 §4

@@ -511,3 +511,81 @@ def test_no_location_silently_drops_the_security_headers() -> None:
     assert add_headers, "no add_header at all"
     assert all(i < first_location for i in add_headers)
     assert "add_header" not in instructions(NGINX_HEADERS)
+
+
+# --- 可信代理的范围（T0.9 2026-09-16 按实际拓扑收窄）-------------------------
+#
+# ⚠️ 这三处必须一起看：`set_real_ip_from`（谁能伪造 X-Forwarded-For）、
+# `/readyz` 的 allow 名单、应用侧的 `BILLING_TRUSTED_PROXIES`。放宽任何一处，
+# **栈照样起得来、请求照样通** —— 坏掉的是「按来源限流」和「审计里的 IP」，
+# 而那两样只有在被人利用之后才看得出来。
+
+STACK_SUBNET = "10.201.0.0/24"
+PROXY_NET = "172.19.0.0/16"
+# 收窄之前填的就是这三段；任何一段回来都意味着「这台机器上任何容器都可信」。
+WIDE_RANGES = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+
+
+def test_the_stack_subnet_is_pinned() -> None:
+    """⚠️ 不钉死的话 docker 每次随手分一个 172.x —— 「可信代理是谁」就成了
+
+    每台机器、每次重建都不一样的东西，只能拿三段 RFC1918 兜着。
+    """
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    subnets = [entry["subnet"] for entry in compose["networks"]["default"]["ipam"]["config"]]
+    # ⚠️ 字面量，**不给环境变量旋钮**：nginx 的 conf 读不到环境变量，`/readyz` 的
+    # allow 名单只能抄一份。只对一半生效的旋钮比不给更糟（Codex 审查 PR #68）。
+    assert subnets == [STACK_SUBNET]
+    # ⚠️ 必须落在 docker 默认分配池（172.17–172.31）之外，否则会和同机其它项目抢。
+    assert STACK_SUBNET.startswith("10.")
+
+
+def test_the_app_only_trusts_its_own_stack_network() -> None:
+    """⚠️ api 的直连对端只可能是本栈的 nginx。
+
+    填成三段 RFC1918 等于「这台 VPS 上任何一个容器都能伪造 X-Forwarded-For」——
+    而这台机器上还跑着另外八个项目。
+    """
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    trusted = compose["services"]["api"]["environment"]["BILLING_TRUSTED_PROXIES"]
+    assert trusted == STACK_SUBNET
+    for wide in WIDE_RANGES:
+        assert wide not in trusted
+
+
+def test_nginx_only_trusts_the_proxy_network() -> None:
+    """⚠️ 实测拓扑：infra_nginx 与本平台 nginx 在同一张 `proxy_net` 上直连容器。
+
+    可信的只有那一张网 —— 多信一段，按来源限流就能被绕过、审计 IP 就能被伪造。
+    """
+    conf = NGINX_CONF.read_text(encoding="utf-8")
+    directives = [
+        line.strip() for line in conf.splitlines() if line.strip().startswith("set_real_ip_from")
+    ]
+    assert directives == [f"set_real_ip_from {PROXY_NET};"]
+    # ⚠️ `real_ip_recursive` 保持默认 off：off 时取 X-Forwarded-For 的**最后一个**
+    # 地址，那是上游代理亲自追加、客户端伪造不了的那个。
+    assert "real_ip_recursive on" not in conf
+
+
+def test_readyz_is_not_open_to_every_private_address() -> None:
+    """⚠️ `/readyz` 的响应体逐个报出依赖状态，等于把内部拓扑与故障窗口告诉任何人。"""
+    conf = NGINX_CONF.read_text(encoding="utf-8")
+    block = conf[conf.index("location = /readyz") : conf.index("deny all;")]
+    allowed = [line.strip() for line in block.splitlines() if line.strip().startswith("allow")]
+    assert allowed == ["allow 127.0.0.0/8;", f"allow {STACK_SUBNET};", f"allow {PROXY_NET};"]
+    assert "deny all;" in conf
+
+
+def test_the_stack_subnet_is_the_same_string_everywhere() -> None:
+    """⚠️ nginx 的 conf 读不到环境变量，所以本栈网段在那边是**抄**过去的。
+
+    两处对不上时不会报错，只会让 `/readyz` 把宿主机自己的巡检也拒掉 ——
+    而那表现成「巡检报 readyz 不可用」，看着像应用出了问题。
+    """
+    compose = COMPOSE.read_text(encoding="utf-8")
+    conf = NGINX_CONF.read_text(encoding="utf-8")
+    assert f"subnet: {STACK_SUBNET}" in compose
+    # ⚠️ 任何形式的变量写法都不许回来：它只能改到 compose 那一半。
+    assert "BILLING_STACK_SUBNET" not in compose
+    assert f"allow {STACK_SUBNET};" in conf
