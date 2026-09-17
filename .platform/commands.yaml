@@ -110,6 +110,11 @@ commands:
     writes: cache
     # Worker 模式下同样消费 ACUVEN_GIT_LS_FILES_MANIFEST。要建临时 Git 仓库或读提交图的用例
     # **只在设置了该变量时**以固定原因 skip；manifest 消费用例照常运行。
+    # 不依赖 Git 的用例只有一个例外：tests/test_gh_verified_write.py::VerifiedWriteTests::
+    # test_file_with_spaces_unicode_and_relative_path。真实 Windows MXC run 里临时文件已创建，但
+    # AppContainer 拒绝最终路径解析，Path.resolve(strict=True) 报 WinError 5；本地 / CI 通过。它同样
+    # 只在设置了该变量时以固定原因（Windows MXC 最终路径解析）skip。不得整模块 / 整类 skip，
+    # 不得 skip 其它不依赖 Git 的用例。
     # ⚠️ 与 tests.backend 同理，Worker 里的 skipped 不是 passed：CI 不设该变量、全量运行，
     #    准入以 CI 为准。
 

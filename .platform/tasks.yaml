@@ -132,6 +132,13 @@ tasks:
   #    是管理员登记前置条件：必须由管理员先单独合并，之后才能调度本任务的 Worker run。
   #    Worker 本任务不改 .platform/ 下任何文件；控制面 Worker 拒绝 allowed_change_paths 里的
   #    任何 .platform 路径。
+  # ⚠️ 契约修正（管理员登记，同样须先合并再调度）：一次真实的 Windows MXC run 里，设置了
+  #    ACUVEN_GIT_LS_FILES_MANIFEST 后 tests.process 跑到了不依赖 Git 的用例
+  #    tests/test_gh_verified_write.py::VerifiedWriteTests::test_file_with_spaces_unicode_and_relative_path：
+  #    Unicode 临时文件已创建且确实在工作树里，但 Path.resolve(strict=True) 报 WinError 5 ——
+  #    AppContainer 拒绝最终路径解析。本地与 CI 全量运行该用例是通过的。因此把该测试文件加进
+  #    allowed_change_paths，且只允许这**一个**用例在设置了该变量时以固定原因 skip。
+  #    本登记不声称 AIH-TASK-003 或其重试已通过。
   - id: AIH-TASK-003
     title: consume the read-only Git manifest in Worker mode
     purpose: >-
@@ -146,12 +153,15 @@ tasks:
       - 文件缺失 / 不可读 / 链接或 reparse point / 非绝对或未规范化路径 / 超过 1000000 字节 / 非法 UTF-8 / NUL 分帧错误 / 绝对、穿越、点段、反斜杠或其它歧义记录，一律 PolicyError（退出码 2）；策略违规仍为 1
       - 单测传入的临时仓库根不走 manifest；PR 正文与回应检查仍只走真实 Git
       - 只在设置了该变量时跳过需要真实 Git 的用例，跳过原因固定；manifest 消费用例照常运行；CI 不设变量，全量运行
+      - 不依赖 Git 的用例里，只有 tests/test_gh_verified_write.py::VerifiedWriteTests::test_file_with_spaces_unicode_and_relative_path 可以跳过，且只在设置了该变量时；跳过原因固定并明确写出 Windows MXC（AppContainer）拒绝最终路径解析；不得跳过整个模块或整个类，不得跳过其它不依赖 Git 的用例；CI 不设变量，必须运行它
       - docs/TODO.md 记录本任务结果；不声称 AIH-TASK-003 或 AIH-TASK-002 的重试已通过
       - 改动只落在 allowed_change_paths；不改 .platform/ 下任何文件（其说明与登记属于管理员前置条件，须在 Worker run 之前已合并）；不输出本机路径、主机名、凭据
       - allowed_commands 里的检查全部零退出；以 Draft PR 交付，不合并、不直推
     allowed_change_paths:
       - scripts/check_repo_policy.py
       - tests/test_check_repo_policy.py
+      # 只为上面那一个 MXC 最终路径解析用例的条件 skip；不得改动该文件里的其它用例
+      - tests/test_gh_verified_write.py
       - docs/TODO.md
     allowed_commands:
       - docs.check
