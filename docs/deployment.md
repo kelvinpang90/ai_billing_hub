@@ -421,7 +421,7 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 
 ⚠️ **不要建一条前缀为空、或覆盖 `yearly/` 的规则**：那会连永久保留的年备份一起删掉。
 
-**生产上已配**（2026-09-15 三条，2026-09-16 补上 `logs-35d`；Kelvin 在控制台配、截图核对）：`full/` 35 天、`binlog/` 35 天、`monthly/` 366 天、`logs/` 35 天，
+**生产上已配**（2026-09-15 三条，2026-09-16 补上 `logs-35d`，2026-09-17 补上 `config-366d`；Kelvin 在控制台配）：`full/` 35 天、`binlog/` 35 天、`monthly/` 366 天、`logs/` 35 天、`config/` 366 天，
 外加 R2 自带的「未完成分片上传 7 天中止」；`yearly/` 不受任何规则影响。⚠️ 第一次配时 `monthly` 的前缀被填成了
 `monthly/366 days`（天数混进了前缀框）—— 那条规则一个对象都匹配不上，月备份会永远累积。**配完要逐条看前缀一栏**。
 同日生产上第一次按新脚本跑全量：建出 `monthly/billing-202609.sql.enc` 与 `yearly/billing-2026.sql.enc`，第二次报 `already exists`。
@@ -679,6 +679,7 @@ Asia/Kuala_Lumpur，挂 Telegram 与 email），ping 地址直接写入 VPS 的 
 | 通知 | 对 full backup 发 `/fail` → down，再发成功 → up | Telegram 收到 DOWN 与 UP |
 | services / readyz / disk | 2026-09-16 巡检上线（§8.1） | 三个都 up；磁盘那条做过一次真实 DOWN / UP |
 | logs | 2026-09-16 日志外送上线（§7.1） | up（手工跑第一轮，1475 行 / 30 496 字节） |
+| config | 2026-09-17 配置快照上线（§5.2.8） | up（手工跑第一轮，20 431 字节，读回后泄漏检查 0） |
 
 建检查用的 read-write API Key 事后已删除（再调用返回 401）；ping 地址不依赖它。
 
@@ -766,6 +767,18 @@ outbox 的投递语义本来就是 at-least-once，密码重置无害；**Phase 
 | compose 输出里带上了口令（模拟 `--no-interpolate` 被拿掉） | `ERROR: the snapshot contains the value of BILLING_MYSQL_PASSWORD` → 拒传、`/fail`、exit 1；**桶里没有多出文件** |
 | 快照里混进心跳地址 | 同样拒传 |
 | `--dry-run` | 生成 + 验证照做，不上传、不 ping |
+
+**生产上已接通**（2026-09-17）：部署 `b597555`（Deploy run 35174856955）→ 重装 cron 为六行 →
+建第五个检查 `ai_billing_hub config`（Cron `57 3 * * *`、时区 Asia/Kuala_Lumpur、宽限 2 小时，渠道与既有检查一致）→
+Kelvin 在 Cloudflare 加上 `config-366d`（前缀 `config/`、366 天）。建检查用的临时 API Key 事后已撤销。
+
+| 步骤 | 结果 |
+| --- | --- |
+| 手工跑第一轮 | 快照 **20 431 字节** → 加密 → 解回来逐字节一致 → 上传并回读核对 **20 448 字节** → exit 0 |
+| **读回演练** | 从 R2 拉回最新那份 → 用生产口令解开 → 六个小节齐全 |
+| 键名清单 | 快照里 **30** 个键 = `.env` 实际 **30** 个 |
+| **泄漏检查** | 拿 `.env` 里**每一个**长度 ≥ 8 的真值去 `grep -F` 解开后的快照：**0 个键**的值出现在里面 |
+| 心跳 | `ai_billing_hub config` 变绿；八个检查全部 up |
 
 ⚠️ **频率是每天，不是「变更后」**（§5.1 的表里写的是后者）：变更检测要么漏、要么吵，
 而这份快照只有 1 KB 量级 —— 每天一份既简单又不会漏掉「有人手工改了 `.env` 却没说」。
