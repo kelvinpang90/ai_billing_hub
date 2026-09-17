@@ -94,8 +94,21 @@ Claude Code 担任实现角色（改非生产文档、开 Draft PR），审查�
 | `AIH-TASK-001` | 校验本控制契约，并跑仓库已有的只读 / 测试检查 | 不建分支、不开 PR |
 | `AIH-TASK-002` | 第一次端到端 Pilot：Worker 中的 Claude 更新一份非生产文档，跑文档类检查，以 Draft PR 交付，验证「实现 → Codex 审查 → Kelvin 合并」这条链 | 建分支、开 Draft PR（开 PR 仍需绑定到该 run 的一次性批准）；不合并 |
 
-`AIH-TASK-002` 允许改哪些文件写在它的 `acceptance_criteria` 里，那是审查依据，
-不是机器强制的字段；硬边界由 Worker 现有策略执行。
+`AIH-TASK-002` 允许改哪些文件由 `tasks.yaml` 里的 `allowed_change_paths` 声明，
+目前只有 `docs/openclaw-worker-pilot.md` 一项。口径：
+
+- 仓库根相对的 POSIX 路径，**逐个精确匹配文件**；不是 glob，也不是目录前缀
+- 列表之外的任何改动都算越界，包括 rename / copy 的**源和目标**两端
+- `acceptance_criteria` 里的文件范围描述只是审查依据，不是强制手段
+
+⚠️ 这个字段写在本仓库里**不会让它自动生效**。强制它的是控制面 Worker 经审查的
+parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前核对改动集合，
+越界即 `failed`（fail closed）。对应的控制面实现**尚未合并**，所以在下面两件事
+都成立之前，`AIH-TASK-002` **不能运行**：
+
+- 那份控制面强制实现已合并并部署
+- Worker 预检针对 `AIH-TASK-002` 这一条任务校验通过（读得到、解析得了
+  `allowed_change_paths`，并按上面的口径生效）
 
 ---
 

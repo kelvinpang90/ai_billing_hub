@@ -83,6 +83,14 @@ tasks:
       - 改动只落在 docs/ 下的非生产文档；不改 .platform/、AGENTS.md、CLAUDE.md、应用代码、部署脚本、CI 或生产配置
       - allowed_commands 里的检查全部零退出
       - 以 Draft PR 交付，按 docs/WORKFLOW.md 使用 PR 模板；不合并、不直推
+    # 本 run 允许改动的文件：仓库根相对的 POSIX 路径，**逐个精确匹配**，
+    # 不是 glob、也不是目录前缀。rename / copy 的源和目标都必须在列表里。
+    # ⚠️ 这是机器可读字段，但强制它的是控制面 Worker 的 parser 与 pipeline：
+    #    在跑检查、commit、push、开 Draft PR 之前核对，不在列表里一律 failed。
+    #    对应的控制面实现尚未合并部署；在它合并部署、且预检针对本任务校验通过之前，
+    #    本任务不得运行。
+    allowed_change_paths:
+      - docs/openclaw-worker-pilot.md
     # 纯文档改动，只跑文档 / 策略 / 流程脚本回归三项；后端检查由 CI 覆盖。
     # 只能引用 .platform/commands.yaml 里存在的 low risk 命令
     allowed_commands:

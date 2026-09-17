@@ -60,6 +60,7 @@ execution:
     # 那两样是**必须由 Worker 强制**的，不是写在 YAML 里就自动成立的。
     - 已验证环境清理：子进程不继承宿主环境，denied_name_patterns 实际生效
     - 已验证网络隔离：network false 的命令在禁止出站网络的环境里跑
+    - 已审查并部署的控制面 Worker 版本会机器强制任务的 allowed_change_paths：在跑检查、commit、push、建 Draft PR 之前拦下越界改动
     - 控制面 registry 已登记本项目，Worker host-local 配置已就位
     - Worker 预检通过
     - Kelvin 明确批准启用（独立于合并本契约的那次批准）
