@@ -12,15 +12,26 @@ from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import os
+import stat
 import subprocess
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_repo_policy.py"
 SPEC = importlib.util.spec_from_file_location("check_repo_policy", SCRIPT)
 policy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(policy)
+
+# Worker 里刻意没有真实 Git，只有控制面给的只读 manifest。要建临时仓库或读提交图的用例
+# 只在设置了该变量时跳过，原因固定；CI 不设变量，全量运行。Worker 里的 skipped 不是 passed。
+requires_git = unittest.skipIf(
+    policy.MANIFEST_ENV in os.environ,
+    "requires real Git; Worker mode (ACUVEN_GIT_LS_FILES_MANIFEST set) provides only a read-only manifest",
+)
 
 GIT_IDENTITY = (
     "-c", "user.email=test@example.com",
@@ -160,6 +171,7 @@ TODO target: docs/TODO.md:12
 """
 
 
+@requires_git
 class PrBodyTests(unittest.TestCase):
     def check(self, body: str, changed=("docs/TODO.md",), repo=None) -> list[str]:
         return policy.check_pr(body, set(changed), root=repo.root, head=repo.head)
@@ -236,6 +248,7 @@ def response(rows: str, reviewed: str) -> str:
     )
 
 
+@requires_git
 class ResponseTests(unittest.TestCase):
     def check(self, body: str, repo) -> list[str]:
         return policy.check_response(body, root=repo.root, head=repo.head)
@@ -311,6 +324,7 @@ class ResponseTests(unittest.TestCase):
 # 退出码契约：2 = 检查跑不动，1 = 查出违规。混在一起会让基础设施故障被当成结论
 # --------------------------------------------------------------------------
 
+@requires_git
 class ValidateCommitTests(unittest.TestCase):
     def test_bad_sha_argument_is_a_check_error_not_a_violation(self):
         with TempRepo() as repo:
@@ -358,18 +372,21 @@ class MainExitCodeTests(unittest.TestCase):
             path = event_file(Path(tmp), {"ref": "refs/heads/main", "after": "0" * 40})
             self.assertEqual(self.run_main(["--event-file", str(path)]), 0)
 
+    @requires_git
     def test_pull_request_event_with_valid_body_passes(self):
         base, head = real_repo_shas()
         with tempfile.TemporaryDirectory() as tmp:
             path = event_file(Path(tmp), {"pull_request": {"body": NONE_BODY, "base": {"sha": base}, "head": {"sha": head}}})
             self.assertEqual(self.run_main(["--event-file", str(path)]), 0)
 
+    @requires_git
     def test_pull_request_event_with_placeholder_body_is_a_violation(self):
         base, head = real_repo_shas()
         with tempfile.TemporaryDirectory() as tmp:
             path = event_file(Path(tmp), {"pull_request": {"body": "## 任务\n\nTBD", "base": {"sha": base}, "head": {"sha": head}}})
             self.assertEqual(self.run_main(["--event-file", str(path)]), 1)
 
+    @requires_git
     def test_pull_request_event_with_null_body_is_a_violation_not_a_crash(self):
         base, head = real_repo_shas()
         with tempfile.TemporaryDirectory() as tmp:
@@ -386,6 +403,7 @@ class MainExitCodeTests(unittest.TestCase):
             path = event_file(Path(tmp), {"something": "else"})
             self.assertEqual(self.run_main(["--event-file", str(path)]), 2)
 
+    @requires_git
     def test_unknown_base_sha_is_a_check_error_not_a_violation(self):
         # 本地没 fetch 到 base 时，是「跑不动」不是「正文写错」—— 两者的排障路径完全不同
         _, head = real_repo_shas()
@@ -401,6 +419,7 @@ class MainExitCodeTests(unittest.TestCase):
                 self.run_main(["--body-file", str(body)])
             self.assertEqual(ctx.exception.code, 2)
 
+    @requires_git
     def test_response_file_path_maps_violation_to_1(self):
         _, head = real_repo_shas()
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,6 +433,7 @@ class MainExitCodeTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 class LocalAndSectionTests(unittest.TestCase):
+    @requires_git
     def test_check_local_scans_tracked_and_untracked_markdown(self):
         with TempRepo() as repo:
             (repo.root / "docs" / "new.md").write_text("- [~] 未跟踪的文件也要查\n", encoding="utf-8")
@@ -421,6 +441,7 @@ class LocalAndSectionTests(unittest.TestCase):
             self.assertEqual(len(errors), 1, errors)
             self.assertIn("docs/new.md:1", errors[0])
 
+    @requires_git
     def test_check_local_ignores_gitignored_files(self):
         # 审查脚本的临时材料在 .gitignore 里，不能被当成仓库内容
         with TempRepo() as repo:
@@ -434,9 +455,165 @@ class LocalAndSectionTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# Worker 模式的只读 manifest：读不懂就退出 2，绝不退化成「没有文件」——
+# 那样策略检查会在空集上静默通过。这一组不需要真实 Git，Worker 里照常运行。
+# --------------------------------------------------------------------------
+
+LS_FILES = ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name) / "repo"
+        (self.root / "docs").mkdir(parents=True)
+        self.control = os.path.join(tmp.name, "control")
+        os.mkdir(self.control)
+        self.manifest = os.path.join(self.control, "manifest")
+
+    def env(self, location=None):
+        return patch.dict(os.environ, {policy.MANIFEST_ENV: self.manifest if location is None else location})
+
+    def no_git(self):
+        return patch.object(policy.subprocess, "run", side_effect=AssertionError("git must not start"))
+
+    def local(self, data: bytes) -> list[str]:
+        Path(self.manifest).write_bytes(data)
+        with self.env(), patch.object(policy, "ROOT", self.root), self.no_git():
+            return policy.check_local(self.root)
+
+    def assert_check_error(self, data: bytes) -> None:
+        with self.assertRaises(policy.PolicyError) as ctx:
+            self.local(data)
+        self.assertNotIn(self.control, str(ctx.exception))
+
+    def read_error(self, location=None) -> str:
+        with self.assertRaises(policy.PolicyError) as ctx:
+            policy.read_manifest(self.manifest if location is None else location)
+        message = str(ctx.exception)
+        # manifest 路径是本机信息，报错不回显
+        self.assertNotIn(self.control, message)
+        return message
+
+    def test_unset_variable_still_runs_git_ls_files(self):
+        with patch.dict(os.environ), patch.object(policy.subprocess, "run") as run:
+            os.environ.pop(policy.MANIFEST_ENV, None)
+            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            self.assertEqual(policy.check_local(policy.ROOT), [])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv, [LS_FILES[0], "-C", str(policy.ROOT), *LS_FILES[1:]])
+
+    def test_temporary_root_never_reads_the_manifest(self):
+        # 变量指向一个不存在的文件：若误读 manifest 就会是 PolicyError，而不是调用 Git
+        with self.env(), patch.object(policy.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            self.assertEqual(policy.check_local(self.root), [])
+        self.assertEqual(run.call_args.args[0], [LS_FILES[0], "-C", str(self.root), *LS_FILES[1:]])
+
+    def test_manifest_records_drive_the_scan_without_git(self):
+        (self.root / "docs" / "bad.md").write_text("- [~] x\n", encoding="utf-8")
+        (self.root / "docs" / "with space.md").write_text("- [x] ok\n", encoding="utf-8")
+        # 不在 manifest 里的文件（等同被 .gitignore 挡住）不扫
+        (self.root / "ignored.md").write_text("- [~] 临时材料\n", encoding="utf-8")
+        errors = self.local(b"docs/with space.md\0docs/bad.md\0")
+        self.assertEqual(errors, ["docs/bad.md:1: unsupported task checkbox [~]"])
+
+    def test_records_correspond_to_ls_files_z_output(self):
+        data = "a b.md\0docs/中文.md\0-lead.md\0".encode()
+        self.assertEqual(policy.parse_manifest(data), ["a b.md", "docs/中文.md", "-lead.md"])
+
+    def test_nul_framing_errors(self):
+        for data in (b"", b"a.md", b"a.md\0b.md", b"\0", b"a.md\0\0", b"\0a.md\0"):
+            with self.subTest(data=data):
+                self.assert_check_error(data)
+
+    def test_invalid_utf8(self):
+        for data in (b"\xff.md\0", b"a\xc3.md\0", b"\xc0\xaf.md\0", b"\xed\xa0\x80.md\0"):
+            with self.subTest(data=data):
+                self.assert_check_error(data)
+
+    def test_absolute_traversal_dot_backslash_and_ambiguous_records(self):
+        records = (
+            "/etc/x.md", "../x.md", "a/../b.md", "./a.md", "a/./b.md", "a\\b.md", "C:/x.md",
+            "a:b.md", "a//b.md", "docs/", "a\tb.md", "a\x7f.md", "a\x85.md", "\ufeffa.md",
+        )
+        for record in records:
+            with self.subTest(record=record):
+                self.assert_check_error(record.encode() + b"\0")
+        self.assert_check_error(b"a.md\0b.md\0a.md\0")
+
+    def test_size_limit(self):
+        Path(self.manifest).write_bytes(b"a" * policy.MANIFEST_MAX_BYTES)
+        self.assertEqual(len(policy.read_manifest(self.manifest)), policy.MANIFEST_MAX_BYTES)
+        Path(self.manifest).write_bytes(b"a" * (policy.MANIFEST_MAX_BYTES + 1))
+        self.read_error()
+
+    def test_location_must_be_absolute_and_normalized(self):
+        Path(self.manifest).write_bytes(b"a.md\0")
+        for location in ("", "manifest", os.path.join("control", "manifest"),
+                         os.path.join(self.control, "..", "control", "manifest"),
+                         os.path.join(self.control, ".", "manifest")):
+            with self.subTest(location=location):
+                self.read_error(location)
+
+    def test_missing_directory_and_unreadable(self):
+        self.read_error()
+        self.read_error(self.control)
+        Path(self.manifest).write_bytes(b"a.md\0")
+        with patch.object(policy.os, "open", side_effect=PermissionError(13, "denied", self.manifest)):
+            self.read_error()
+
+    def test_link_and_reparse_point_are_rejected(self):
+        Path(self.manifest).write_bytes(b"a.md\0")
+        link = types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_file_attributes=0)
+        reparse = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        for fake in (link, reparse):
+            with self.subTest(mode=fake.st_mode), patch.object(policy.os, "lstat", return_value=fake):
+                self.assertIn("link or reparse point", self.read_error())
+
+    def test_file_swapped_after_check_is_rejected(self):
+        Path(self.manifest).write_bytes(b"a.md\0")
+        other = os.path.join(self.control, "other")
+        Path(other).write_bytes(b"b.md\0")
+        with patch.object(policy.os, "fstat", return_value=os.stat(other)):
+            self.read_error()
+
+    def test_main_exit_codes_in_worker_mode(self):
+        (self.root / "docs" / "bad.md").write_text("- [~] x\n", encoding="utf-8")
+        (self.root / "docs" / "ok.md").write_text("- [x] ok\n", encoding="utf-8")
+        for data, code in ((b"docs/ok.md\0", 0), (b"docs/ok.md\0docs/bad.md\0", 1), (b"docs/ok.md", 2), (b"../x.md\0", 2)):
+            Path(self.manifest).write_bytes(data)
+            stderr = io.StringIO()
+            with self.subTest(data=data), self.env(), patch.object(policy, "ROOT", self.root), self.no_git(), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                self.assertEqual(policy.main([]), code)
+                self.assertNotIn(self.control, stderr.getvalue())
+        with self.env(os.path.join(self.control, "missing")), patch.object(policy, "ROOT", self.root), self.no_git(), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(policy.main([]), 2)
+
+    @requires_git
+    def test_real_ls_files_output_gives_the_same_result(self):
+        # manifest 是 `git ls-files -z ...` 的原始字节：两条路径在同一个仓库上必须逐条一致
+        with TempRepo() as repo:
+            (repo.root / ".gitignore").write_text(".codex-*.md\n", encoding="utf-8")
+            (repo.root / ".codex-input-1.md").write_text("- [~] 临时材料\n", encoding="utf-8")
+            (repo.root / "docs" / "中文 new.md").write_text("- [~] 未跟踪\n", encoding="utf-8")
+            raw = subprocess.run(["git", "-C", str(repo.root), *LS_FILES[1:]], capture_output=True, check=True).stdout
+            Path(self.manifest).write_bytes(raw)
+            with patch.object(policy, "ROOT", repo.root):
+                expected = policy.check_local(repo.root)
+                with self.env(), self.no_git():
+                    self.assertEqual(policy.check_local(repo.root), expected)
+            self.assertEqual(len(expected), 1, expected)
+
+
+# --------------------------------------------------------------------------
 # 宽容度：合法但略有差异的写法不该被拒 —— 预审实测三种都曾被拒且报错看不出原因
 # --------------------------------------------------------------------------
 
+@requires_git
 class ToleranceTests(unittest.TestCase):
     def test_response_header_with_leading_blank_line_and_trailing_space(self):
         # 首行规则必须与 ps1 的 Test-ResponseHeader 一致：第一个非空行、trim 后相等
