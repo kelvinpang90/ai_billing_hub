@@ -37,11 +37,14 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ## Telegram 只接受这四条
 
 ```text
-开启 ai_billing_hub AIH-TASK-001
+开启 ai_billing_hub [task_id]
 状态 [run_id]
 取消 [run_id]
 批准 [run_id]
 ```
+
+`[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001` 与
+`AIH-TASK-002`（用途见下面「Worker 的启用状态」）。
 
 除此之外一律 **fail closed** ——
 
@@ -64,17 +67,35 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 独立审查 | Codex | 只读审查，不改任何文件 |
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
-Worker 不进入这三个角色中的任何一个。它只跑 `commands.yaml` 里那几条只读检查。
+Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 下由 Worker 中运行的
+Claude Code 担任实现角色（改非生产文档、开 Draft PR），审查仍是 Codex，合并仍是 Kelvin。
 
 ---
 
-## Worker 还没启用
+## Worker 的启用状态
 
-`project.yaml` 的 `worker_enabled: false` 是唯一的总开关。保持 false，就不会有任何
-调度发生 —— 这同时也是**出问题时的回滚方式**：不需要删文件、不需要改代码，
-把这一行改回 false 即可。
+`project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
+本仓库允许被调度 `AIH-TASK-002`。它本身不会让任何东西执行。真正跑起来还缺下面几样，
+**目前都没有完成**，所以当前仍不会有任何 run 发生：
 
-启用的前置条件写在 `project.yaml` 的 `enable_preconditions` 里，本次任务一条都不做。
+- 控制面 registry 登记本项目
+- Worker 的 host-local 配置就位（不在本仓库）
+- Worker 启动前预检通过
+- Kelvin 对启用给出独立的明确批准（合并本契约不算）
+
+完整清单见 `project.yaml` 的 `enable_preconditions`。把 `worker_enabled` 改回 `false`
+仍是**出问题时的回滚方式**：不需要删文件、不需要改代码。
+
+两个已登记任务的用途不同：
+
+| 任务 | 用途 | 写仓库吗 |
+| --- | --- | --- |
+| `AIH-TASK-001` | 校验本控制契约，并跑仓库已有的只读 / 测试检查 | 不建分支、不开 PR |
+| `AIH-TASK-002` | 第一次端到端 Pilot：Worker 中的 Claude 更新一份非生产文档，跑文档类检查，以 Draft PR 交付，验证「实现 → Codex 审查 → Kelvin 合并」这条链 | 建分支、开 Draft PR（开 PR 仍需绑定到该 run 的一次性批准）；不合并 |
+
+`AIH-TASK-002` 允许改哪些文件写在它的 `acceptance_criteria` 里，那是审查依据，
+不是机器强制的字段；硬边界由 Worker 现有策略执行。
 
 ---
 
@@ -136,6 +157,9 @@ Worker 不进入这三个角色中的任何一个。它只跑 `commands.yaml` �
 `AIH-TASK-001` 不建分支也不建 PR（`tasks.yaml` 的 `creates_pull_request: false`），
 所以它的 run **不会经过 `awaiting_merge`**：停在 `awaiting_review`，由人看完之后
 置 `completed` 或 `cancelled`。
+
+`AIH-TASK-002` 会开 Draft PR（`creates_pull_request: true`），它的 run 在审查通过后
+进 `awaiting_merge`，由 Kelvin 合并后才置 `completed`。
 
 ---
 

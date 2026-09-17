@@ -1169,6 +1169,25 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ---
 
+## 流程接入 —— OpenClaw Windows Worker 业务契约（ACVDEV-TASK-004，2026-09-17）
+
+Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启用、不部署**。本节只记本仓库这一侧；控制面与 Worker 主机那一侧不在本仓库。
+
+- [x] **契约改动（本分支）**：`.platform/project.yaml` 的 `execution.worker_enabled` 置 `true`，注释改为「业务契约侧开关，本身不执行」，`enable_preconditions` 补上控制面 registry / host-local 配置、Worker 预检、Kelvin 独立批准三条 gate；`.platform/tasks.yaml` 新增 `AIH-TASK-002`（纯文档的端到端 Pilot：`status: ready`、`depends_on: []`、`allowed_commands` 只引用已有的 `docs.check` / `policy.check` / `tests.process`、`creates_branch` 与 `creates_pull_request` 为 `true`、`prohibited` 与 `AIH-TASK-001` 同一份）；可改文件的范围写在 `acceptance_criteria` 里，硬边界由 Worker 现有策略执行，契约里不另设未被 Worker 读取的字段。`.platform/README.md` 同步：去掉「`worker_enabled: false`」「Telegram 只接受 `AIH-TASK-001`」「Worker 只跑只读检查」等旧说法，改为「业务契约侧允许 `AIH-TASK-002`，但控制面 registry、host-local 配置、预检与 Kelvin 独立批准均未完成，当前仍不会执行」，并列出 `AIH-TASK-001` / `AIH-TASK-002` 的不同用途。**不改写 `AIH-TASK-001`**；`commands.yaml` 现有命令够用，未动。验证程度（本地，**CI 未跑**）：
+  - Windows Worker 的真实 contract parser 成功加载 `AIH-TASK-002`：`status=ready`，命令为 `docs.check` / `policy.check` / `tests.process`，`creates_branch=true`、`creates_pull_request=true`；`AIH-TASK-001` 上没有的 `status` / `depends_on` / `acceptance_criteria` 未导致加载失败。本仓库自己有没有 validator 校验这几个字段仍未核实，本分支也没有新增
+  - `python scripts/check_docs.py`、`python scripts/check_repo_policy.py` 通过
+  - `python -m unittest discover -s tests`：61 passed
+  - `python -m ruff check .` 通过；`python -m ruff format --check .` 通过（70 files already formatted）
+  - `python -m pytest`：第一次因 PATH 选到 WindowsApps 的 WSL bash，13 个既有 deploy shell 测试处理不了 Windows 路径而失败；未改代码，把 PATH 固定为 Git Bash 后原样重跑：430 passed、12 skipped、1 warning。**12 skipped 是本地没有 MySQL / Redis service**，不能算后端测试全过，仍需 CI 验证
+  - `pwsh -NoProfile -File scripts/tests/Test-ReviewVerdict.ps1`：96 passed、0 failed
+- [ ] Draft PR 的 Codex 只读审查（未发生）
+- [ ] Kelvin 合并本契约（未发生）
+- [ ] 控制面 registry 登记、Worker host-local 配置、Worker 预检（未发生，不在本仓库）
+- [ ] Kelvin 对启用 Worker 的独立批准（未发生；合并本契约不算）
+- [ ] `AIH-TASK-002` 的 live run：Worker 中的 Claude 产出 `docs/openclaw-worker-pilot.md` 并开 Draft PR（未发生）
+
+---
+
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
 复审第三轮要求「停止逐项补洞、整体比对」，下面几项是那次自查发现的。**都不是

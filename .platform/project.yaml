@@ -41,12 +41,18 @@ execution:
   execution_worker: windows-native
   control_plane: openclaw
 
-  # ⚠️ 本任务不得启用 Worker。这一行是唯一的总开关：
-  #    保持 false 即不会有任何调度发生，也是出事时的回滚方式。
-  worker_enabled: false
+  # ⚠️ 这一行是**业务契约侧**的开关（ACVDEV-TASK-004 置 true）。它只表示本仓库
+  #    同意被 Worker 调度，**本身不会让任何东西执行**。真正跑起来还必须同时满足：
+  #    - 控制面 registry 里登记了本项目
+  #    - Worker 的 host-local 配置已就位（不在本仓库，公开仓库不写本机信息）
+  #    - Worker 启动前预检通过（读得到、解析得了本目录全部契约文件）
+  #    - Kelvin 对启用给出独立的明确批准（合并本文件不算这张批准）
+  #    任何一条不成立都不调度。改回 false 仍是出事时的回滚方式：
+  #    false 即不会有任何调度发生，不需要删文件、不需要改代码。
+  worker_enabled: true
 
-  # 置 true 需要同时满足下面三条，缺一不可。这不是由本文件强制的，
-  # 是给人看的准入条件 —— 机器侧的强制只有 worker_enabled 本身。
+  # 下面几条是真实运行前的准入条件，缺一不可。它们**不由本文件强制**，
+  # worker_enabled 为 true 也不代表它们已经成立 —— 由控制面、Worker 预检与人把关。
   enable_preconditions:
     - 本契约已经 Codex 审查并由 Kelvin 合并进 main
     - Worker 的可执行文件解析路径已在 Worker 安装侧固定（不从 PATH 查找）
@@ -54,7 +60,9 @@ execution:
     # 那两样是**必须由 Worker 强制**的，不是写在 YAML 里就自动成立的。
     - 已验证环境清理：子进程不继承宿主环境，denied_name_patterns 实际生效
     - 已验证网络隔离：network false 的命令在禁止出站网络的环境里跑
-    - Kelvin 明确批准启用
+    - 控制面 registry 已登记本项目，Worker host-local 配置已就位
+    - Worker 预检通过
+    - Kelvin 明确批准启用（独立于合并本契约的那次批准）
 
 # 默认拒绝。未在对应文件里列出的东西一律不可执行、不可调度、不可批准。
 defaults:
