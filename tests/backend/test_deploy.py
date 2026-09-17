@@ -1596,3 +1596,74 @@ def test_an_unrelated_failure_is_not_papered_over(tmp_path) -> None:
     out, calls = run_start_database(tmp_path, unrelated_failure="Error: no space left on device")
     assert "RC=1" in out
     assert [c for c in calls if c.startswith("compose stop")] == []
+
+
+# --- 部署配置快照（§98.1 备份四层的第三层；T0.9）------------------------------
+
+CONFIG_SNAPSHOT = REPO_ROOT / "deploy" / "config_snapshot.sh"
+
+
+def test_the_snapshot_never_interpolates_compose() -> None:
+    """⚠️ `docker compose config` **默认会把值代进去** —— 那一份里有数据库口令。
+
+    必须用 `--no-interpolate`，占位符保持 `${VAR}` 原样（本地实测：把口令塞进环境变量
+    再导出，值不会出现）。
+    """
+    script = uncommented(CONFIG_SNAPSHOT)
+    assert "$COMPOSE config --no-interpolate" in script
+    assert not re.search(r"\$COMPOSE config(?! --no-interpolate)", script)
+
+
+def test_only_env_key_names_are_collected() -> None:
+    """⚠️ `.env` 那一段只取**键名**：值在 Bitwarden，不该出现在任何离机文件里。"""
+    script = uncommented(CONFIG_SNAPSHOT)
+    assert r"sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'" in script
+    # 不许出现任何「把整行 .env 抄进去」的写法
+    assert not re.search(r'cat "\$ENV_FILE"', script)
+
+
+def test_the_snapshot_checks_itself_for_secrets_before_uploading() -> None:
+    """⚠️ 这道自查是给**未来的改动**兜底的：哪天有人去掉 `--no-interpolate`，
+
+    或者往键名那一段里塞了值，都要在上传之前当场拦住 —— 一份带口令的快照传上去就收不回来。
+    ⚠️ 心跳地址同样算凭据：知道它的人能伪造「成功」。
+    """
+    script = uncommented(CONFIG_SNAPSHOT)
+    assert "refusing to upload a snapshot that contains secret values" in script
+    assert "refusing to upload a snapshot that contains ${key}" in script
+    for key in ("BILLING_MYSQL_ROOT_PASSWORD", "BILLING_BACKUP_PASSPHRASE", "R2_SECRET_ACCESS_KEY"):
+        assert key in script
+    for key in ("BILLING_HEALTHCHECK_BACKUP_URL", "BILLING_HEALTHCHECK_CONFIG_URL"):
+        assert key in script
+    # 自查必须排在加密与上传之前
+    assert script.index("refusing to upload") < script.index("openssl enc -aes-256-cbc")
+
+
+def test_the_snapshot_round_trips_before_upload() -> None:
+    """⚠️ 与备份同一条：能传上去不算数，能解开才算。"""
+    script = uncommented(CONFIG_SNAPSHOT)
+    assert "openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000" in script
+    assert 'cmp -s "$PLAIN" "$VERIFY"' in script
+    assert "head-object" in script and "size mismatch after upload" in script
+
+
+def test_the_snapshot_carries_what_git_cannot() -> None:
+    """⚠️ compose / nginx 的**文件内容**在 git 里，再抄一遍是做样子。
+
+    这一层要带走的是**不在 git 里、灾难恢复时又必须知道**的东西。
+    """
+    script = uncommented(CONFIG_SNAPSHOT)
+    assert "$DEPLOY_STATE" in script  # 部署的是哪个 commit
+    assert "$CRON_FILE" in script  # cron 装成什么样
+    assert "sha256sum deploy/nginx/*" in script  # 线上那一版的校验和
+    assert "$COMPOSE images" in script  # 真正在跑的镜像
+
+
+def test_the_cron_runs_the_snapshot_after_the_log_shipping() -> None:
+    """三件事都要用 R2，错开分钟数，别在同一分钟互相拖慢。"""
+    lines = [line for line in uncommented(CRON).splitlines() if "config_snapshot.sh" in line]
+    assert len(lines) == 1
+    assert lines[0].startswith("57 3 * * *")
+    assert "flock" in lines[0] and "logger -t billing-config" in lines[0]
+    logs = [line for line in uncommented(CRON).splitlines() if "deploy/log_ship.sh" in line][0]
+    assert int(logs.split()[0]) < int(lines[0].split()[0])

@@ -307,7 +307,7 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 | --- | --- | --- |
 | MySQL 全量（`mysqldump --single-transaction`） | 每日一次 | 加密后传 R2 |
 | MySQL binlog | **≤ 5 分钟一次**推送 | 加密后传 R2 |
-| 部署配置（compose、nginx 配置） | 变更后 | 加密后传 R2。⚠️ **不含任何密钥** |
+| 部署配置（compose、nginx 配置） | ~~变更后~~ **每天一次**（§5.2.8 解释了为什么改） | 加密后传 R2 的 `config/`。⚠️ **不含任何密钥**，上传前自查一遍 |
 | 不可变文档文件 | 变更后 | R2，独立桶。Phase 3 才有，先留位 |
 | **加密主密钥** | 轮换时 | ⚠️ **不放 R2** —— 见下面 |
 
@@ -393,6 +393,7 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 | `monthly/billing-YYYYMM.sql.enc` | 当月第一份成功的全量 | **366 天**（12 个月，闰年不少一天） | R2 lifecycle |
 | `yearly/billing-YYYY.sql.enc` | 当年第一份成功的全量 | **永久** | 无规则 |
 | `logs/billing-logs-<UTC 时间戳>.tar.gz.enc` | 每天一份的容器日志归档（§7.1） | **35 天** | R2 lifecycle |
+| `config/billing-config-<UTC 时间戳>.txt.enc` | 每天一份的部署配置快照（§5.2.8） | **366 天** | R2 lifecycle。⚠️ 留得比别的久：它只有 1 KB 量级，而「机器没了 40 天后才发现」时，它是「要填哪些键」的唯一来源 |
 
 ⚠️ **R2 的 lifecycle 只能按「前缀 + 上传后天数」删，挑不出「1 号那一份」**，所以 `backup.sh`
 在每日全量上传确认之后，把它在桶内复制到 `monthly/` / `yearly/`：
@@ -416,6 +417,7 @@ point-in-time recovery**，而 binlog 必须**至少每 5 分钟**离机一次�
 | `binlog-35d` | `binlog/` | 35 |
 | `monthly-full-366d` | `monthly/` | 366 |
 | `logs-35d` | `logs/` | 35 |
+| `config-366d` | `config/` | 366 |
 
 ⚠️ **不要建一条前缀为空、或覆盖 `yearly/` 的规则**：那会连永久保留的年备份一起删掉。
 
@@ -619,6 +621,7 @@ Ubuntu 容器里用真 `flock`：锁被占且心跳 10 分钟前 → 跳过**并
 | `backup.sh` | `BILLING_HEALTHCHECK_BACKUP_URL` | 整轮完成（带上文件名） | 任何失败 | `--dry-run`（没有上传） |
 | `restore_drill.sh`（§5.2.7） | `BILLING_HEALTHCHECK_DRILL_URL` | 恢复与全部核对通过（带摘要） | 任何失败 | — |
 | `log_ship.sh`（§7.1） | `BILLING_HEALTHCHECK_LOGS_URL` | 归档上传确认（带行数与归档目录大小） | 任何失败 | `--dry-run` |
+| `config_snapshot.sh`（§5.2.8） | `BILLING_HEALTHCHECK_CONFIG_URL` | 快照上传确认 | 任何失败（含**自查发现密钥**） | `--dry-run` |
 
 - **两个检查分开**：频率差 1440 倍，合成一个的话 binlog 每分钟的心跳会把「全量三天没跑」盖住
 - ⚠️ **生产巡检另有三个检查**（容器健康 / `/readyz` / 磁盘），同一个账号、同一条 Telegram，见 §8.1
@@ -649,6 +652,8 @@ US$20/月的 Business 档起才有额度（「50 SMS & WhatsApp credits」），
    地址写进 `.env` 的 `BILLING_HEALTHCHECK_DRILL_URL`；手工跑一次 `bash deploy/restore_drill.sh` 验证变绿（§5.2.7）
 9. 日志外送的检查 `ai_billing_hub logs`：Cron `47 3 * * *`，时区 **Asia/Kuala_Lumpur**，Grace **2 小时**；
    地址写进 `.env` 的 `BILLING_HEALTHCHECK_LOGS_URL`；手工跑一次 `bash deploy/log_ship.sh` 验证变绿（§7.1）
+10. 配置快照的检查 `ai_billing_hub config`：Cron `57 3 * * *`，时区 **Asia/Kuala_Lumpur**，Grace **2 小时**；
+    地址写进 `.env` 的 `BILLING_HEALTHCHECK_CONFIG_URL`；手工跑一次 `bash deploy/config_snapshot.sh` 验证变绿（§5.2.8）
 
 **本地验证**（真 MySQL 8.4 + MinIO + 一个记录请求的假心跳服务）：
 
@@ -723,6 +728,47 @@ INV-14 的设计（DB 是事实来源、Redis/Celery 只承载触发）在这里
 ⚠️ 但这意味着**恢复点之后已投递、却因回滚而重新变回 `PENDING` 的行会被重投**。
 outbox 的投递语义本来就是 at-least-once，密码重置无害；**Phase 2 接上用量事件与
 钱包之后，重投必须是幂等的** —— 那是 Phase 1/2 建表时的事，这里先记下依赖。
+
+---
+
+### 5.2.8 部署配置快照（第三层，2026-09-17 落地）
+
+[`deploy/config_snapshot.sh`](../deploy/config_snapshot.sh)，cron 每天马来西亚 03:57
+（排在日志外送之后），加密上传到 R2 的 `config/` 前缀。
+
+⚠️ **这一层不是把 compose / nginx 的文件内容再抄一份。**那些在 git 里，每个 clone 都有 ——
+往 R2 抄一遍是做样子。真正**不在 git 里、灾难恢复时又必须知道**的是这些：
+
+| 采集的东西 | 为什么它不在 git 里 |
+| --- | --- |
+| `.last-good-deploy`（部署的是哪个 commit） | 它是**主机上的状态**，机器没了就没了（§9.5） |
+| `.env` 的**键名清单**（值在 Bitwarden） | `.env` 从来不进仓库。⚠️ 少填一个键，栈起得来但行为不对 —— 那种故障最难查 |
+| `/etc/cron.d/ai_billing_hub` 的实际内容 | 仓库里那份带 `@DEPLOY_USER@` 占位符，装成什么样只有主机知道 |
+| `deploy/nginx/*` 的 sha256 | 用来确认「git 里那一版就是线上跑的那一版」 |
+| `docker compose images` | 当时真正在跑的镜像与摘要 |
+| `docker compose config --no-interpolate` | 两个 compose 文件合并后的**最终形状**（生产上还叠着 `docker-compose.prod.yml`） |
+
+⚠️ **绝不含任何密钥的值**，两道保证：
+
+1. `--no-interpolate` 让占位符保持 `${VAR}` 原样。**实测**：把 `BILLING_MYSQL_PASSWORD=supersecret`
+   塞进环境变量再导出，输出里那个值出现 **0 次**
+2. **上传前拿 `.env` 里的真值自查一遍**：口令、R2 凭据、心跳地址逐个 `grep`，撞上就**拒传**。
+   ⚠️ 这道自查是给**未来的改动**兜底的 —— 哪天有人把 `--no-interpolate` 去掉，
+   一份带口令的快照传上去就收不回来了
+
+快照本身仍然加密之后才上传：键名与拓扑也算内部信息。
+
+**本地演练**（真 openssl + 假 docker，四个场景）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 正常一轮 | 979 字节 → 加密 → 解回来逐字节一致 → 上传并回读核对 → 心跳成功。解开后只有键名，口令出现 **0 次** |
+| compose 输出里带上了口令（模拟 `--no-interpolate` 被拿掉） | `ERROR: the snapshot contains the value of BILLING_MYSQL_PASSWORD` → 拒传、`/fail`、exit 1；**桶里没有多出文件** |
+| 快照里混进心跳地址 | 同样拒传 |
+| `--dry-run` | 生成 + 验证照做，不上传、不 ping |
+
+⚠️ **频率是每天，不是「变更后」**（§5.1 的表里写的是后者）：变更检测要么漏、要么吵，
+而这份快照只有 1 KB 量级 —— 每天一份既简单又不会漏掉「有人手工改了 `.env` 却没说」。
 
 ---
 
@@ -1208,7 +1254,7 @@ compose 为了按新定义重建网络，**先停掉它要起的那个容器**�
 - [x] 边缘 nginx 的 `real_ip` 与上游超时 —— 2026-09-13，见 §4
 - [ ] 边缘 nginx 的 TLS / 域名（①A：在 `infra_nginx` 那层，本层不做）
 - [x] 进程模型定案（保持单进程，见 §3）
-- [ ] 备份四层全部在跑，且有新鲜度监控
+- [x] 备份四层全部在跑，且有新鲜度监控 —— 2026-09-17：全量 ✅、binlog ✅、**部署配置 ✅**（§5.2.8，每天一份、不含密钥、上传前自查）；第四层「不可变文档文件」**按 §5.1 的设计就是 Phase 3 才有**，现在没有那类数据。四层各自有独立的心跳检查（§5.2.6）
 - [x] **做过一次恢复演练**，含主密钥恢复，并记录实际耗时 vs RTO 4 小时 —— 2026-09-14 数据库 60 秒恢复、与生产逐表校验和一致；2026-09-15 真解密演练：只凭离线 `master.key` 在断网容器里解开恢复库的 TOTP 密文，生成的码与验证器 App 一致，错误密钥被拒，从恢复到解密 4 分 12 秒（§5.2.4 末尾）。这正是 [REVIEW-LOG](REVIEW-LOG.md) 里 #52 分歧选 B 时要求补的那一步
 - [x] 宿主机主密钥文件 `chown 10001:10001` + `chmod 0400` —— 2026-09-15 核对（§6）
 - [ ] §95 的 17 项指标各有阈值、分级、通知对象、抑制规则、runbook 链接 —— ⚠️ 未做完：**三条被点名的已落地**（§8.1），其余 17 项业务指标要等指标管道，见 §8.3
