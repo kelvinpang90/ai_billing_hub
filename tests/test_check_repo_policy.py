@@ -12,10 +12,14 @@ from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import os
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_repo_policy.py"
 SPEC = importlib.util.spec_from_file_location("check_repo_policy", SCRIPT)
@@ -28,8 +32,19 @@ GIT_IDENTITY = (
     "-c", "commit.gpgsign=false",
 )
 
+# Worker 模式（控制面设置了 manifest 变量）里刻意没有真实 Git。要建临时仓库或读提交图的用例
+# 只在这时以固定原因 skip；CI 不设该变量，全量运行。Worker 里的 skipped 不是 passed。
+MANIFEST_ENV = "ACUVEN_GIT_LS_FILES_MANIFEST"
+REAL_GIT_SKIP_REASON = "requires real Git, which Worker mode (ACUVEN_GIT_LS_FILES_MANIFEST set) does not provide"
+
+
+def require_real_git() -> None:
+    if MANIFEST_ENV in os.environ:
+        raise unittest.SkipTest(REAL_GIT_SKIP_REASON)
+
 
 def git(root: Path, *args: str) -> str:
+    require_real_git()
     result = subprocess.run(
         ["git", "-C", str(root), *GIT_IDENTITY, *args],
         capture_output=True, encoding="utf-8", errors="replace", check=True,
@@ -41,7 +56,8 @@ class TempRepo:
     """A throwaway repo with two commits, so ancestry and file:line can be checked for real."""
 
     def __enter__(self) -> "TempRepo":
-        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        require_real_git()
+        self._tmp =tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self._tmp.name)
         git(self.root, "init", "-q", "-b", "main")
         (self.root / "docs").mkdir()
@@ -329,6 +345,7 @@ class ValidateCommitTests(unittest.TestCase):
 # 这里对着真实仓库跑（check_local 与 git 都以 ROOT 为根），不 mock。
 
 def real_repo_shas() -> tuple[str, str]:
+    require_real_git()
     root = policy.ROOT
     head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD~1"], capture_output=True, text=True, check=True).stdout.strip()
@@ -431,6 +448,188 @@ class LocalAndSectionTests(unittest.TestCase):
     def test_duplicate_section_is_reported(self):
         _, errors = policy.sections("## 任务\n\na\n\n## 任务\n\nb\n")
         self.assertEqual(errors, ["duplicate PR section: 任务"])
+
+
+# --------------------------------------------------------------------------
+# Git 输入的两条路：本地 / CI 问真实 Git，Worker 读控制面给的只读 manifest。
+# 下面的 Git 全是模拟的，所以两种模式都照常运行
+# --------------------------------------------------------------------------
+
+LS_FILES_ARGS = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+
+
+def fake_git(stdout: str):
+    return patch.object(policy.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout, ""))
+
+
+class GitInputTests(unittest.TestCase):
+    def test_without_variable_repo_root_still_runs_git_ls_files(self):
+        with patch.dict(os.environ), fake_git("") as run:
+            os.environ.pop(MANIFEST_ENV, None)
+            self.assertEqual(policy.check_local(), [])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["git", "-C", str(policy.ROOT), *LS_FILES_ARGS])
+
+    def test_temp_repo_root_ignores_manifest_even_when_variable_is_set(self):
+        # 变量指向一个不存在的文件：若误走 manifest，这里会是 PolicyError 而不是 Git 的结果
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.md").write_text("- [~] x\n", encoding="utf-8")
+            missing = os.path.join(tmp, "no-such-manifest")
+            with patch.dict(os.environ, {MANIFEST_ENV: missing}), fake_git("a.md\0") as run:
+                self.assertEqual(policy.check_local(root), ["a.md:1: unsupported task checkbox [~]"])
+            self.assertEqual(run.call_args.args[0], ["git", "-C", str(root), *LS_FILES_ARGS])
+
+    def test_commit_checks_use_git_even_in_worker_mode(self):
+        # PR 正文与回应检查读提交图，manifest 替代不了，仍只走真实 Git
+        with patch.dict(os.environ, {MANIFEST_ENV: "unused"}), fake_git("") as run:
+            policy.validate_commit(policy.ROOT, "a" * 40)
+        self.assertEqual(run.call_args.args[0][3:], ["cat-file", "-e", "a" * 40 + "^{commit}"])
+
+
+class ManifestTests(unittest.TestCase):
+    """读不懂的 manifest 一律 PolicyError（退出码 2），绝不退化成「仓库里没有文件」。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.root = Path(tmp.name) / "repo"
+        self.root.mkdir()
+        self.manifest = os.path.join(tmp.name, "manifest")
+        # 把「仓库根」指向临时目录；这里一旦启动 Git 就当场失败
+        for patcher in (
+            patch.object(policy, "ROOT", self.root),
+            patch.dict(os.environ, {MANIFEST_ENV: self.manifest}),
+            patch.object(policy.subprocess, "run", side_effect=AssertionError("Git must not run in Worker mode")),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write(self, data: bytes) -> None:
+        Path(self.manifest).write_bytes(data)
+
+    def assert_check_error(self) -> policy.PolicyError:
+        with self.assertRaises(policy.PolicyError) as ctx:
+            policy.check_local()
+        return ctx.exception
+
+    def run_main(self, argv: list[str]) -> int:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return policy.main(argv)
+
+    def test_records_are_scanned_one_for_one_without_git(self):
+        (self.root / "docs").mkdir()
+        (self.root / "docs" / "bad.md").write_text("- [~] 部分完成\n", encoding="utf-8")
+        (self.root / "中文 说明.md").write_text("- [?] 未知\n", encoding="utf-8")
+        (self.root / "ok.md").write_text("- [x] done\n", encoding="utf-8")
+        (self.root / "notes.txt").write_text("- [~] not markdown\n", encoding="utf-8")
+        # 不在 manifest 里的文件不查 —— 与 git ls-files 的结果逐条对应，不是扫目录
+        (self.root / "ignored.md").write_text("- [~] ignored\n", encoding="utf-8")
+        self.write("docs/bad.md\0中文 说明.md\0ok.md\0notes.txt\0".encode("utf-8"))
+        self.assertEqual(policy.check_local(), [
+            "docs/bad.md:1: unsupported task checkbox [~]",
+            "中文 说明.md:1: unsupported task checkbox [?]",
+        ])
+
+    def test_read_manifest_returns_the_nul_terminated_records(self):
+        self.write(b"a.md\0b/c.md\0")
+        self.assertEqual(policy.read_manifest(self.manifest), ["a.md", "b/c.md"])
+
+    def test_main_keeps_violation_and_check_error_apart(self):
+        (self.root / "ok.md").write_text("- [x] done\n", encoding="utf-8")
+        (self.root / "bad.md").write_text("- [~] x\n", encoding="utf-8")
+        self.write(b"ok.md\0")
+        self.assertEqual(self.run_main([]), 0)
+        self.write(b"ok.md\0bad.md\0")
+        self.assertEqual(self.run_main([]), 1)
+        self.write(b"ok.md")
+        self.assertEqual(self.run_main([]), 2)
+
+    def test_size_limit_is_one_million_bytes(self):
+        record = b"x" * (policy.MANIFEST_MAX_BYTES - 1)
+        self.write(record + b"\0")
+        self.assertEqual(policy.check_local(), [])
+        self.write(record + b"x\0")
+        self.assert_check_error()
+
+    def test_size_limit_applies_to_bytes_read_not_only_to_lstat(self):
+        # 文件在 lstat 与读取之间长大，也照样拒绝
+        self.write(b"x" * policy.MANIFEST_MAX_BYTES + b"\0")
+        small = SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_size=10)
+        with patch.object(policy.os, "lstat", return_value=small):
+            self.assert_check_error()
+
+    def test_location_must_be_absolute_and_normalized(self):
+        self.write(b"a.md\0")
+        for location in (
+            "",
+            "manifest",
+            os.path.join(self.tmp, "x", "..", "manifest"),
+            os.path.join(self.tmp, ".", "manifest"),
+        ):
+            with self.subTest(location=location), patch.dict(os.environ, {MANIFEST_ENV: location}):
+                self.assert_check_error()
+
+    def test_missing_directory_or_unreadable_manifest(self):
+        with self.subTest("missing"):
+            self.assert_check_error()
+        with self.subTest("unreadable"):
+            self.write(b"a.md\0")
+            with patch.object(policy.os, "open", side_effect=PermissionError("denied")):
+                self.assert_check_error()
+        with self.subTest("directory"):
+            os.remove(self.manifest)
+            os.mkdir(self.manifest)
+            self.assert_check_error()
+
+    def test_link_or_reparse_point_is_rejected(self):
+        # 真建链接在 Windows 上要特权，所以用 lstat 的结果模拟两种形态
+        self.write(b"a.md\0")
+        for name, mode, attributes in (
+            ("symlink", stat.S_IFLNK | 0o777, 0),
+            ("reparse point", stat.S_IFREG | 0o444, stat.FILE_ATTRIBUTE_REPARSE_POINT),
+        ):
+            fake = SimpleNamespace(st_mode=mode, st_size=5, st_file_attributes=attributes)
+            with self.subTest(name), patch.object(policy.os, "lstat", return_value=fake):
+                self.assert_check_error()
+
+    def test_unreadable_contents_fail_closed(self):
+        cases = {
+            "empty file": b"",
+            "missing final NUL": b"a.md",
+            "only NUL": b"\0",
+            "empty record": b"a.md\0\0",
+            "leading empty record": b"\0a.md\0",
+            "invalid UTF-8": b"\xff.md\0",
+            "overlong UTF-8": b"\xc0\xaf.md\0",
+            "UTF-8 BOM": "\ufeffa.md\0".encode("utf-8"),
+            "absolute": b"/etc/a.md\0",
+            "drive letter": b"C:/a.md\0",
+            "colon": b"a:b.md\0",
+            "backslash": b"docs\\a.md\0",
+            "leading parent": b"../a.md\0",
+            "inner parent": b"docs/../a.md\0",
+            "leading dot": b"./a.md\0",
+            "inner dot": b"docs/./a.md\0",
+            "double slash": b"docs//a.md\0",
+            "trailing slash": b"docs/\0",
+            "newline": b"a\nb.md\0",
+            "control character": b"a\x01.md\0",
+            "duplicate": b"a.md\0a.md\0",
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                self.write(data)
+                self.assert_check_error()
+
+    def test_errors_do_not_echo_location_or_record(self):
+        self.write("private-record-中文/../a.md\0".encode("utf-8"))
+        message = str(self.assert_check_error())
+        self.assertNotIn("private-record", message)
+        self.assertNotIn(self.tmp, message)
+        with patch.dict(os.environ, {MANIFEST_ENV: "private-relative-location"}):
+            self.assertNotIn("private-relative-location", str(self.assert_check_error()))
 
 
 # --------------------------------------------------------------------------
