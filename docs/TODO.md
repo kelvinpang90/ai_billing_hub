@@ -1169,6 +1169,27 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ---
 
+## 流程接入 —— OpenClaw Windows Worker 业务契约（ACVDEV-TASK-004，2026-09-17）
+
+Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启用、不部署**。本节只记本仓库这一侧；控制面与 Worker 主机那一侧不在本仓库。
+
+- [x] **契约改动（本分支）**：`.platform/project.yaml` 的 `execution.worker_enabled` 置 `true`，注释改为「业务契约侧开关，本身不执行」，`enable_preconditions` 补上控制面 registry / host-local 配置、Worker 预检、Kelvin 独立批准三条 gate；`.platform/tasks.yaml` 新增 `AIH-TASK-002`（纯文档的端到端 Pilot：`status: ready`、`depends_on: []`、`allowed_commands` 只引用已有的 `docs.check` / `policy.check` / `tests.process`、`creates_branch` 与 `creates_pull_request` 为 `true`、`prohibited` 与 `AIH-TASK-001` 同一份）；可改文件的范围最初只写在 `acceptance_criteria` 里（**已被下面 Codex 第一轮审查的阻断项推翻**，改为 `allowed_change_paths`）。`.platform/README.md` 同步：去掉「`worker_enabled: false`」「Telegram 只接受 `AIH-TASK-001`」「Worker 只跑只读检查」等旧说法，改为「业务契约侧允许 `AIH-TASK-002`，但控制面 registry、host-local 配置、预检与 Kelvin 独立批准均未完成，当前仍不会执行」，并列出 `AIH-TASK-001` / `AIH-TASK-002` 的不同用途。**不改写 `AIH-TASK-001`**；`commands.yaml` 现有命令够用，未动。验证程度（本地，**CI 未跑**）：
+  - Windows Worker 的真实 contract parser 成功加载 `AIH-TASK-002`：`status=ready`，命令为 `docs.check` / `policy.check` / `tests.process`，`allowed_change_paths` 精确为 `docs/openclaw-worker-pilot.md`，`creates_branch=true`、`creates_pull_request=true`；控制面目标测试已覆盖越界路径与 rename / copy 双端拒绝
+  - `python scripts/check_docs.py`、`python scripts/check_repo_policy.py` 通过
+  - `python -m unittest discover -s tests`：61 passed
+  - `python -m ruff check .` 通过；`python -m ruff format --check .` 通过（70 files already formatted）
+  - `python -m pytest`：第一次因 PATH 选到 WindowsApps 的 WSL bash，13 个既有 deploy shell 测试处理不了 Windows 路径而失败；未改代码，把 PATH 固定为 Git Bash 后原样重跑：430 passed、12 skipped、1 warning。**12 skipped 是本地没有 MySQL / Redis service**，不能算后端测试全过，仍需 CI 验证
+  - `pwsh -NoProfile -File scripts/tests/Test-ReviewVerdict.ps1`：96 passed、0 failed
+- [x] **Codex 第一轮审查的阻断项（#74，REQUEST_CHANGES，审查发现，非自查）**：`AIH-TASK-002`「只改文档」的限制只写在 `acceptance_criteria` 的散文里，没有任何机器可读字段，Worker 无从强制 —— 不是 fail closed。**本仓库侧的修复**：`.platform/tasks.yaml` 给 `AIH-TASK-002` 加 `allowed_change_paths: [docs/openclaw-worker-pilot.md]`（仓库根相对 POSIX 路径，逐个精确匹配文件，不是 glob、不是目录前缀）；`.platform/README.md` 删掉「文件范围只在 `acceptance_criteria` 里、不是机器强制字段」的说法，改为说明该字段须由控制面 Worker 经审查的 parser 与 pipeline 在检查 / commit / push / Draft PR 之前强制（含 rename / copy 的源与目标），且控制面实现合并部署、预检针对本任务校验通过之前本任务不能运行。`AIH-TASK-001` 与其它文件未动。本地验证由 Kelvin 执行，本条不记结果
+- [ ] **控制面依赖（未合并）**：控制面 Worker 对 `allowed_change_paths` 的精确文件匹配与 fail-closed 强制已有实现，其控制面测试套件本地通过，但**该控制面 PR 尚未审查合并、未部署**。它是 `AIH-TASK-002` 运行的前置 gate，不在本仓库
+- [ ] Draft PR 的 Codex 复审（针对上面的修复，未发生；第一轮结论仍是 REQUEST_CHANGES）
+- [ ] Kelvin 合并本契约（未发生）
+- [ ] 控制面 registry 登记、Worker host-local 配置、Worker 预检（含针对 `AIH-TASK-002` 校验 `allowed_change_paths`）（未发生，不在本仓库）
+- [ ] Kelvin 对启用 Worker 的独立批准（未发生；合并本契约不算）
+- [ ] `AIH-TASK-002` 的 live run：Worker 中的 Claude 产出 `docs/openclaw-worker-pilot.md` 并开 Draft PR（未发生）
+
+---
+
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
 复审第三轮要求「停止逐项补洞、整体比对」，下面几项是那次自查发现的。**都不是

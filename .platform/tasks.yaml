@@ -62,3 +62,63 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 第一次端到端 Pilot（ACVDEV-TASK-004 登记）。刻意选一个只动非生产文档的任务：
+  # 验证的是「Worker 里的 Claude 实现 → 开 Draft PR → Codex 只读审查 → Kelvin 合并」
+  # 这条链本身，不是业务功能。
+  - id: AIH-TASK-002
+    title: OpenClaw Windows Worker end-to-end pilot (docs only)
+    purpose: >-
+      由 Worker 中的 Claude 新增或更新一份 OpenClaw Worker Pilot 说明文档，
+      走完建分支、本地检查、开 Draft PR 的完整路径，验证 Worker 端到端链路；
+      不触碰任何应用代码、部署、CI、生产配置或凭据。
+    status: ready
+    # 没有前置任务。启用本身的 gate 写在 project.yaml 的 enable_preconditions，
+    # 不在这里表达成任务依赖。
+    depends_on: []
+    acceptance_criteria:
+      - 新增或更新 docs/openclaw-worker-pilot.md，全文不含本机路径、主机名、IP / 地址、凭据或 token
+      - 文档说明角色：Claude 是 implementer，Codex 是 read-only reviewer，Kelvin 批准 merge 与 deploy
+      - 文档明确写出本次 Pilot 不部署、不做数据库迁移、不访问凭据
+      - 改动只落在 docs/ 下的非生产文档；不改 .platform/、AGENTS.md、CLAUDE.md、应用代码、部署脚本、CI 或生产配置
+      - allowed_commands 里的检查全部零退出
+      - 以 Draft PR 交付，按 docs/WORKFLOW.md 使用 PR 模板；不合并、不直推
+    # 本 run 允许改动的文件：仓库根相对的 POSIX 路径，**逐个精确匹配**，
+    # 不是 glob、也不是目录前缀。rename / copy 的源和目标都必须在列表里。
+    # ⚠️ 这是机器可读字段，但强制它的是控制面 Worker 的 parser 与 pipeline：
+    #    在跑检查、commit、push、开 Draft PR 之前核对，不在列表里一律 failed。
+    #    对应的控制面实现尚未合并部署；在它合并部署、且预检针对本任务校验通过之前，
+    #    本任务不得运行。
+    allowed_change_paths:
+      - docs/openclaw-worker-pilot.md
+    # 纯文档改动，只跑文档 / 策略 / 流程脚本回归三项；后端检查由 CI 覆盖。
+    # 只能引用 .platform/commands.yaml 里存在的 low risk 命令
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    # 本任务会建分支、开 Draft PR，所以它的 run 会经过 awaiting_merge。
+    # ⚠️ 开 PR 在 approvals.yaml 里是 approval_required：这里写 true 只表示本任务
+    #    **可以**申请这个动作，执行前仍需一张绑定到本 run 的一次性批准。
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
