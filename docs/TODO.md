@@ -1188,6 +1188,16 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [ ] Kelvin 对启用 Worker 的独立批准（未发生；合并本契约不算）
 - [ ] `AIH-TASK-002` 的 live run：Worker 中的 Claude 产出 `docs/openclaw-worker-pilot.md` 并开 Draft PR（未发生）
 
+## 流程接入 —— Worker 模式消费只读 Git manifest（AIH-TASK-003，2026-09-17）
+
+`AIH-TASK-002` 第一次 Pilot 未通过：Worker 里刻意没有真实 Git，而 `policy.check` 与 `tests.process` 依赖它。本任务只做仓库侧适配，契约（`.platform/` 下的登记与说明）是管理员前置条件，本任务未改。**本节不声称 `AIH-TASK-003` 或 `AIH-TASK-002` 的重试已通过。**
+
+- [x] **实现（本分支）**：`scripts/check_repo_policy.py` 新增 `read_manifest`。`check_local` 只在「设置了 `ACUVEN_GIT_LS_FILES_MANIFEST` 且检查的是仓库根」时读 manifest、不启动 Git；否则照旧 `git ls-files -z --cached --others --exclude-standard`（单测传入的临时仓库根因此不走 manifest）。PR 正文与回应检查没有改，仍只走真实 Git。fail closed 一律是 `PolicyError`（退出码 2），策略违规仍是 1：变量值为空 / 非绝对 / 未规范化；文件缺失、不可读、目录、链接或 reparse point；按 lstat 或按实际读到的字节超过 1,000,000；非法 UTF-8（含 BOM，按格式字符拒绝）；空文件、缺结尾 NUL、空记录；记录以 `/` 开头、含 `.` / `..` / 空段（含结尾 `/`）、反斜杠、冒号、控制或格式字符、重复。报错不回显路径与记录内容。⚠️ 已知边界：Windows 上没有 `O_NOFOLLOW`，lstat 与 open 之间把文件换成链接的窗口没有关上（manifest 由控制面写成只读，不是工作负载可写的位置）
+- [x] **测试（本分支）**：`tests/test_check_repo_policy.py` 新增 `GitInputTests`（没设变量时对仓库根调用上面那条 Git 命令、临时仓库根设了变量也不走 manifest、提交校验在 Worker 模式仍调 Git；Git 均为模拟，两种模式都跑）与 `ManifestTests`（manifest 逐条对应、Git 被设成一启动就失败、`main` 的 0 / 1 / 2、上限边界、上面每一种 fail-closed 形态、报错不回显）。要建临时仓库或读提交图的既有用例经 `require_real_git()` 只在设置了该变量时以固定原因 skip。`tests/test_gh_verified_write.py` 只给 `test_file_with_spaces_unicode_and_relative_path` 这一个用例加条件 skip（只在设置了该变量时，原因写明 Windows MXC（AppContainer）拒绝最终路径解析），不跳整个模块或类，其它用例未动
+- [ ] **验证**：本次 Worker 会话里没有可用的命令执行工具，`docs.check` / `policy.check` / `tests.process` **都没有在本会话跑过**，结果以 Worker 事后执行的检查与 GitHub 上的 CI 为准。CI 不设该变量、全量运行；Worker 里的 skipped 不是 passed
+- [ ] Draft PR 的 Codex 审查与 Kelvin 合并（未发生）
+- [ ] `AIH-TASK-002` 重试（未发生，须在本任务合并之后）
+
 ---
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）

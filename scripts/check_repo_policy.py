@@ -5,13 +5,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+# Worker 模式：Worker 里刻意没有真实 Git，控制面把 `git ls-files -z --cached --others
+# --exclude-standard` 的原始输出写成只读文件，绝对路径放在这个变量里。契约见 .platform/README.md
+MANIFEST_ENV = "ACUVEN_GIT_LS_FILES_MANIFEST"
+MANIFEST_MAX_BYTES = 1_000_000
+AMBIGUOUS_CATEGORIES = {"Cc", "Cf", "Cs", "Zl", "Zp"}
 SECTIONS = (
     "任务", "改了什么", "触碰的不变量 / REQ", "如何验证", "自检",
     "已知未做 / 留给后续", "TODO 影响",
@@ -65,9 +73,65 @@ def check_checkboxes(body: str, label: str) -> list[str]:
     return errors
 
 
-def check_local(root: Path = ROOT) -> list[str]:
+def manifest_record_ok(record: str) -> bool:
+    """A record must be the plain repo-relative POSIX path git ls-files -z would print for a file."""
+    if not record or record.startswith("/") or "\\" in record or ":" in record:
+        return False
+    if any(unicodedata.category(char) in AMBIGUOUS_CATEGORIES for char in record):
+        return False
+    # 空段同时挡住 `a//b`、结尾 `/`（嵌套仓库那种目录记录）
+    return all(part not in {"", ".", ".."} for part in record.split("/"))
+
+
+def read_manifest(location: str) -> list[str]:
+    """Read the Worker's read-only ls-files manifest; anything not understood is a PolicyError.
+
+    Messages never echo the location or a record: both are host- or repo-specific input.
+    """
+    if not location or "\0" in location or not Path(location).is_absolute() or os.path.normpath(location) != location:
+        raise PolicyError(f"{MANIFEST_ENV} must be an absolute, normalized path")
+    try:
+        info = os.lstat(location)
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise PolicyError("git ls-files manifest must not be a link or reparse point")
+        if not stat.S_ISREG(info.st_mode):
+            raise PolicyError("git ls-files manifest must be a regular file")
+        if info.st_size > MANIFEST_MAX_BYTES:
+            raise PolicyError(f"git ls-files manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+        # O_NOFOLLOW 在有的平台上把 lstat 与 open 之间换成链接的窗口也关上
+        with os.fdopen(os.open(location, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)), "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise PolicyError("git ls-files manifest must be a regular file")
+            # 按读到的字节数判上限，不信 lstat：文件在两者之间长大也照样拒绝
+            data = handle.read(MANIFEST_MAX_BYTES + 1)
+    except OSError:
+        raise PolicyError("git ls-files manifest is missing or unreadable") from None
+    if len(data) > MANIFEST_MAX_BYTES:
+        raise PolicyError(f"git ls-files manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise PolicyError("git ls-files manifest is not valid UTF-8") from None
+    # 与 git ls-files -z 同形：每条记录以 NUL 结尾。空文件也拒绝 —— 读不懂不能退化成「没有文件」
+    if not text.endswith("\0"):
+        raise PolicyError("git ls-files manifest is empty or its last record is not NUL-terminated")
+    records = text[:-1].split("\0")
+    if not all(manifest_record_ok(record) for record in records):
+        raise PolicyError("git ls-files manifest has an empty, absolute, traversing, or ambiguous record")
+    if len(set(records)) != len(records):
+        raise PolicyError("git ls-files manifest has a duplicate record")
+    return records
+
+
+def check_local(root: Path | None = None) -> list[str]:
+    root = ROOT if root is None else root
     errors = []
-    paths = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
+    manifest = os.environ.get(MANIFEST_ENV)
+    # 只有检查仓库根才走 manifest：单测传入的临时仓库与 manifest 无关，仍问真实 Git
+    if manifest is not None and root == ROOT:
+        paths = read_manifest(manifest)
+    else:
+        paths = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
     for relative in sorted(set(paths)):
         path = root / relative
         if relative and path.suffix.lower() == ".md" and path.is_file():
