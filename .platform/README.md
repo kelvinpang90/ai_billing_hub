@@ -108,7 +108,8 @@ Codex，合并仍是 Kelvin。
 
 每个会写仓库的任务允许改哪些文件由 `tasks.yaml` 里的 `allowed_change_paths` 声明
 （`AIH-TASK-002` 只有 `docs/openclaw-worker-pilot.md` 一项；`AIH-TASK-003` 只有
-`scripts/check_repo_policy.py`、`tests/test_check_repo_policy.py`、`docs/TODO.md` 三项）。口径：
+`scripts/check_repo_policy.py`、`tests/test_check_repo_policy.py`、`tests/test_gh_verified_write.py`、
+`docs/TODO.md` 四项；`tests/test_gh_verified_write.py` 是契约修正加入的，理由见下面「Worker 模式的 Git 输入」）。口径：
 
 - 仓库根相对的 POSIX 路径，**逐个精确匹配文件**；不是 glob，也不是目录前缀
 - 不得包含任何 `.platform/` 路径（控制面 Worker 会拒绝）
@@ -262,6 +263,20 @@ Worker 里**刻意没有真实 Git**。控制面（ACVDEV-TASK-005）改为预�
 
 `policy.check` 与 `tests.process` 在 Worker 模式下都消费这个变量。`tests.process` 里要建临时
 Git 仓库或读提交图的用例**只在设置了该变量时**以固定原因 skip，manifest 消费用例照常运行。
+
+**唯一的非 Git 例外（契约修正）**：一次真实的 Windows MXC run 里，设置了该变量后 `tests.process`
+跑到了不依赖 Git 的用例
+`tests/test_gh_verified_write.py::VerifiedWriteTests::test_file_with_spaces_unicode_and_relative_path`。
+MXC 里 Unicode 临时文件已创建、确实在工作树中，但 `Path.resolve(strict=True)` 报 WinError 5 ——
+AppContainer 拒绝最终路径解析。本地与 CI 全量运行时该用例通过。因此：
+
+- `tests/test_gh_verified_write.py` 加进 `AIH-TASK-003` 的 `allowed_change_paths`
+- **只有这一个用例**、**只在设置了该变量时**可以 skip，原因固定且明确写出 Windows MXC 最终路径解析
+- 不得整模块 / 整类 skip，不得 skip 其它不依赖 Git 的用例；需要真实 Git 的 skip 与 manifest 消费用例保持原样
+- CI 不设该变量，必须运行它
+
+这条修正与任务登记一样是管理员前置条件，须先合并再调度。本文件不声称 `AIH-TASK-003` 或其重试已通过。
+
 和 `tests.backend` 一样，**Worker 里的 skipped 不是 passed**：CI 不设该变量、全量运行，
 准入以 CI 为准。
 
