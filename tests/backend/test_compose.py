@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -337,6 +338,21 @@ def test_celery_pins_its_concurrency(compose: dict) -> None:
     """
     command = " ".join(str(part) for part in compose["services"]["celery-worker"]["command"])
     assert "--concurrency" in command
+
+
+def test_the_api_gets_at_least_one_cpu(compose: dict) -> None:
+    """⚠️ 2026-09-17 生产 VPS 实测：api 配额 0.5 核时，一次登录（Argon2）要 ~600 ms。
+
+    Argon2 默认 parallelism=4，四个线程同时烧 CPU，配额越小节流越狠；
+    调到 1.0 核之后降到 279 ms。
+    那个 0.5 是按升配前的 1 核机器定的，升配后没人调 —— 这条守卫就是防它再悄悄退回去。
+    见 docs/perf-baseline.md §9。
+    """
+    cpus = str(compose["services"]["api"]["cpus"])
+    # 文件里是 `${BILLING_BACKEND_CPUS:-1.0}` 这种占位符，钉的是**默认值**
+    default = re.fullmatch(r"\$\{BILLING_BACKEND_CPUS:-([0-9.]+)\}", cpus)
+    assert default is not None, f"unexpected cpus value: {cpus}"
+    assert float(default.group(1)) >= 1.0, f"api cpus default={default.group(1)}"
 
 
 def test_beat_does_not_inherit_the_api_memory_limit(compose: dict) -> None:

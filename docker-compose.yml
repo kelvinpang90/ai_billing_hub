@@ -47,10 +47,13 @@ x-backend: &backend
   # 都被设上了），选短式只是为了不和本文件里 secrets 那条「swarm-only 选项会被
   # 静默忽略」的教训混淆。
   #
-  # 数值按生产 VPS 的实测余量定（1 核 / 可用 1.8 GB，见 docs/deployment.md §3.1）。
-  # ⚠️ api 留得比另外两个宽：Argon2 每次并发哈希要 64 MiB。
-  mem_limit: ${BILLING_BACKEND_MEM_LIMIT:-384m}
-  cpus: ${BILLING_BACKEND_CPUS:-0.5}
+  # 数值按**升配后**的生产 VPS 实测定（2 核 / 7.4 GB，2026-09-17 容量基线重跑，
+  # 见 docs/perf-baseline.md §9）。原来的 384m / 0.5 核是按升配前的 1 核机器定的，
+  # 升配后没人调 —— 在 0.5 核配额下一次登录（Argon2）要 ~600 ms、每秒最多 1.7 次。
+  # ⚠️ **CPU 配额不要低于 1 核**：Argon2 默认 parallelism=4，配额越小节流越狠
+  # （tests/backend/test_compose.py 钉着）。每次哈希还要 64 MiB。
+  mem_limit: ${BILLING_BACKEND_MEM_LIMIT:-768m}
+  cpus: ${BILLING_BACKEND_CPUS:-1.0}
   environment:
     BILLING_ENVIRONMENT: local
     BILLING_DEBUG: "false"
@@ -137,9 +140,11 @@ services:
       # 单文件调小：备份脚本每 5 分钟 FLUSH 一次再推走**已关闭**的文件，
       # 文件小一点，单次上传的粒度就细一点，中断重传的代价也小。
       - --max-binlog-size=${BILLING_MAX_BINLOG_SIZE:-134217728}
-    # 生产 VPS 只有 1 核，MySQL 是最该留出余量的那个。
-    mem_limit: ${BILLING_MYSQL_MEM_LIMIT:-512m}
-    cpus: ${BILLING_MYSQL_CPUS:-0.6}
+    # 升配后（2 核 / 7.4 GB）重跑基线定的（docs/perf-baseline.md §9）。
+    # ⚠️ buffer pool 仍钉在 128M（上面那条），调大内存限额**不会**让它自己长 ——
+    # 多出来的是给连接与排序缓冲的余量，不是悄悄换了一套性能特征。
+    mem_limit: ${BILLING_MYSQL_MEM_LIMIT:-1g}
+    cpus: ${BILLING_MYSQL_CPUS:-0.8}
     environment:
       MYSQL_ROOT_PASSWORD: ${BILLING_MYSQL_ROOT_PASSWORD:?set BILLING_MYSQL_ROOT_PASSWORD in .env (copy .env.example)}
       MYSQL_DATABASE: ${BILLING_MYSQL_DATABASE:-billing}
