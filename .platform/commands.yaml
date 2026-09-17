@@ -33,11 +33,14 @@ constraints:
     # 按**变量名**白名单放行，值由 Worker 安装侧固定，不写进仓库（公开仓库）。
     # 这几个是让进程能起来的最小集：解析 git / pwsh 要 PATH，Windows 上的
     # 系统调用要 SYSTEMROOT，临时文件要 TEMP / TMP。
+    # ACUVEN_GIT_LS_FILES_MANIFEST 只在 Worker 模式由控制面设置，值是只读 manifest 的
+    # 绝对路径（见下面 policy.check 的注释）；它不是凭据，也不指向任何服务。
     allowed_names:
       - PATH
       - SYSTEMROOT
       - TEMP
       - TMP
+      - ACUVEN_GIT_LS_FILES_MANIFEST
     # 即使有人把下面这些加进 allowed_names 也不放行 —— deny 优先于 allow。
     precedence: denied_wins
     denied_name_patterns:
@@ -92,6 +95,9 @@ commands:
     timeout_seconds: 180
     network: false
     writes: none
+    # Worker 模式：Worker 里刻意没有真实 Git，由控制面把 `git ls-files -z --cached --others
+    # --exclude-standard` 的原始输出写成只读文件，绝对路径放进 ACUVEN_GIT_LS_FILES_MANIFEST。
+    # 设置了它时本命令读 manifest、不启动 Git，读不懂一律退出 2；没设置时（本地 / CI）照旧调 Git。
 
   - id: tests.process
     description: 流程脚本（策略检查与回读脚本）的 unittest 回归
@@ -102,6 +108,10 @@ commands:
     timeout_seconds: 600
     network: false
     writes: cache
+    # Worker 模式下同样消费 ACUVEN_GIT_LS_FILES_MANIFEST。要建临时 Git 仓库或读提交图的用例
+    # **只在设置了该变量时**以固定原因 skip；manifest 消费用例照常运行。
+    # ⚠️ 与 tests.backend 同理，Worker 里的 skipped 不是 passed：CI 不设该变量、全量运行，
+    #    准入以 CI 为准。
 
   - id: lint.check
     description: 后端 lint（ruff check，只报告不改写）

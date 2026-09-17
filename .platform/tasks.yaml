@@ -87,8 +87,9 @@ tasks:
     # 不是 glob、也不是目录前缀。rename / copy 的源和目标都必须在列表里。
     # ⚠️ 这是机器可读字段，但强制它的是控制面 Worker 的 parser 与 pipeline：
     #    在跑检查、commit、push、开 Draft PR 之前核对，不在列表里一律 failed。
-    #    对应的控制面实现尚未合并部署；在它合并部署、且预检针对本任务校验通过之前，
-    #    本任务不得运行。
+    #    Worker 预检针对本任务校验不通过时，本任务不得运行。
+    # ⚠️ 第一次 Pilot 未通过。Worker 里刻意没有真实 Git，policy.check / tests.process 要改为
+    #    消费只读 manifest，重试前须先合并 AIH-TASK-003。本文件不记录重试结果。
     allowed_change_paths:
       - docs/openclaw-worker-pilot.md
     # 纯文档改动，只跑文档 / 策略 / 流程脚本回归三项；后端检查由 CI 覆盖。
@@ -111,6 +112,62 @@ tasks:
     # 本任务会建分支、开 Draft PR，所以它的 run 会经过 awaiting_merge。
     # ⚠️ 开 PR 在 approvals.yaml 里是 approval_required：这里写 true 只表示本任务
     #    **可以**申请这个动作，执行前仍需一张绑定到本 run 的一次性批准。
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 业务仓库适配，不是生产功能。policy.check 与 tests.process 原本需要真实 Git，而 Worker
+  # 刻意不提供；控制面 ACVDEV-TASK-005 改为给出只读的 `git ls-files` manifest（环境变量
+  # ACUVEN_GIT_LS_FILES_MANIFEST）。本任务让仓库侧按精确契约消费它，以便之后安全地重试
+  # 未通过的 AIH-TASK-002 Pilot。
+  # ⚠️ 本条登记（.platform/tasks.yaml、.platform/commands.yaml、.platform/README.md 的相应改动）
+  #    是管理员登记前置条件：必须由管理员先单独合并，之后才能调度本任务的 Worker run。
+  #    Worker 本任务不改 .platform/ 下任何文件；控制面 Worker 拒绝 allowed_change_paths 里的
+  #    任何 .platform 路径。
+  - id: AIH-TASK-003
+    title: consume the read-only Git manifest in Worker mode
+    purpose: >-
+      让 scripts/check_repo_policy.py 在检查仓库根且设置了 ACUVEN_GIT_LS_FILES_MANIFEST 时
+      读取只读 manifest 而不调用 Git，任何读不懂的 manifest 一律 fail closed；
+      未设置该变量时本地 / CI 行为不变。只做业务仓库适配，不部署、不迁移、不访问凭据。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 未设置 ACUVEN_GIT_LS_FILES_MANIFEST 时 check_local 照旧调用 git ls-files -z --cached --others --exclude-standard，有测试证明
+      - 设置该变量且检查仓库根时读取 manifest 字节，不启动 Git；严格 UTF-8、NUL 结尾记录，与 git ls-files -z 输出逐条对应
+      - 文件缺失 / 不可读 / 链接或 reparse point / 非绝对或未规范化路径 / 超过 1000000 字节 / 非法 UTF-8 / NUL 分帧错误 / 绝对、穿越、点段、反斜杠或其它歧义记录，一律 PolicyError（退出码 2）；策略违规仍为 1
+      - 单测传入的临时仓库根不走 manifest；PR 正文与回应检查仍只走真实 Git
+      - 只在设置了该变量时跳过需要真实 Git 的用例，跳过原因固定；manifest 消费用例照常运行；CI 不设变量，全量运行
+      - docs/TODO.md 记录本任务结果；不声称 AIH-TASK-003 或 AIH-TASK-002 的重试已通过
+      - 改动只落在 allowed_change_paths；不改 .platform/ 下任何文件（其说明与登记属于管理员前置条件，须在 Worker run 之前已合并）；不输出本机路径、主机名、凭据
+      - allowed_commands 里的检查全部零退出；以 Draft PR 交付，不合并、不直推
+    allowed_change_paths:
+      - scripts/check_repo_policy.py
+      - tests/test_check_repo_policy.py
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
     creates_branch: true
     creates_pull_request: true
     prohibited:

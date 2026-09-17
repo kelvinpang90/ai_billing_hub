@@ -43,8 +43,8 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 批准 [run_id]
 ```
 
-`[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001` 与
-`AIH-TASK-002`（用途见下面「Worker 的启用状态」）。
+`[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
+`AIH-TASK-002` 与 `AIH-TASK-003`（用途见下面「Worker 的启用状态」）。
 
 除此之外一律 **fail closed** ——
 
@@ -68,47 +68,57 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 下由 Worker 中运行的
-Claude Code 担任实现角色（改非生产文档、开 Draft PR），审查仍是 Codex，合并仍是 Kelvin。
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` / `AIH-TASK-003` 下由 Worker
+中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
+Codex，合并仍是 Kelvin。
 
 ---
 
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库允许被调度 `AIH-TASK-002`。它本身不会让任何东西执行。真正跑起来还缺下面几样，
-**目前都没有完成**，所以当前仍不会有任何 run 发生：
+本仓库允许被调度 `AIH-TASK-002` / `AIH-TASK-003`。它本身不会让任何东西执行。每次 run
+仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
 - Worker 的 host-local 配置就位（不在本仓库）
 - Worker 启动前预检通过
 - Kelvin 对启用给出独立的明确批准（合并本契约不算）
 
-完整清单见 `project.yaml` 的 `enable_preconditions`。把 `worker_enabled` 改回 `false`
-仍是**出问题时的回滚方式**：不需要删文件、不需要改代码。
+完整清单见 `project.yaml` 的 `enable_preconditions`。这些 gate 的实际状态由控制面记录，
+不在本仓库。把 `worker_enabled` 改回 `false` 仍是**出问题时的回滚方式**：不需要删文件、
+不需要改代码。
 
-两个已登记任务的用途不同：
+三个已登记任务的用途不同：
 
 | 任务 | 用途 | 写仓库吗 |
 | --- | --- | --- |
 | `AIH-TASK-001` | 校验本控制契约，并跑仓库已有的只读 / 测试检查 | 不建分支、不开 PR |
 | `AIH-TASK-002` | 第一次端到端 Pilot：Worker 中的 Claude 更新一份非生产文档，跑文档类检查，以 Draft PR 交付，验证「实现 → Codex 审查 → Kelvin 合并」这条链 | 建分支、开 Draft PR（开 PR 仍需绑定到该 run 的一次性批准）；不合并 |
+| `AIH-TASK-003` | 业务仓库适配（非生产功能）：让 `policy.check` / `tests.process` 在 Worker 模式下消费控制面给的只读 Git manifest（见下面「Worker 模式的 Git 输入」），以便之后重试 `AIH-TASK-002` | 同 `AIH-TASK-002` |
 
-`AIH-TASK-002` 允许改哪些文件由 `tasks.yaml` 里的 `allowed_change_paths` 声明，
-目前只有 `docs/openclaw-worker-pilot.md` 一项。口径：
+`AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
+`tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`
+的运行结果或 `AIH-TASK-002` 的重试结果，也不声称它们已通过。
+
+⚠️ **任务登记是管理员前置条件，不是 Worker 任务的改动。**`AIH-TASK-003` 在
+`tasks.yaml` 的登记、`commands.yaml` 里放行 `ACUVEN_GIT_LS_FILES_MANIFEST`、以及本文件的
+相应说明，必须由管理员先单独合并，之后才能调度该任务的 Worker run。控制面 Worker 拒绝
+`allowed_change_paths` 里的任何 `.platform/` 路径，所以 Worker 任务本身不改这三份文件。
+
+每个会写仓库的任务允许改哪些文件由 `tasks.yaml` 里的 `allowed_change_paths` 声明
+（`AIH-TASK-002` 只有 `docs/openclaw-worker-pilot.md` 一项；`AIH-TASK-003` 只有
+`scripts/check_repo_policy.py`、`tests/test_check_repo_policy.py`、`docs/TODO.md` 三项）。口径：
 
 - 仓库根相对的 POSIX 路径，**逐个精确匹配文件**；不是 glob，也不是目录前缀
+- 不得包含任何 `.platform/` 路径（控制面 Worker 会拒绝）
 - 列表之外的任何改动都算越界，包括 rename / copy 的**源和目标**两端
 - `acceptance_criteria` 里的文件范围描述只是审查依据，不是强制手段
 
 ⚠️ 这个字段写在本仓库里**不会让它自动生效**。强制它的是控制面 Worker 经审查的
 parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前核对改动集合，
-越界即 `failed`（fail closed）。对应的控制面实现**尚未合并**，所以在下面两件事
-都成立之前，`AIH-TASK-002` **不能运行**：
-
-- 那份控制面强制实现已合并并部署
-- Worker 预检针对 `AIH-TASK-002` 这一条任务校验通过（读得到、解析得了
-  `allowed_change_paths`，并按上面的口径生效）
+越界即 `failed`（fail closed）。Worker 预检针对该任务校验不通过（读不到、解析不了
+`allowed_change_paths`，或没按上面的口径生效）时，该任务**不能运行**。
 
 ---
 
@@ -171,8 +181,8 @@ parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前�
 所以它的 run **不会经过 `awaiting_merge`**：停在 `awaiting_review`，由人看完之后
 置 `completed` 或 `cancelled`。
 
-`AIH-TASK-002` 会开 Draft PR（`creates_pull_request: true`），它的 run 在审查通过后
-进 `awaiting_merge`，由 Kelvin 合并后才置 `completed`。
+`AIH-TASK-002` / `AIH-TASK-003` 会开 Draft PR（`creates_pull_request: true`），它们的 run
+在审查通过后进 `awaiting_merge`，由 Kelvin 合并后才置 `completed`。
 
 ---
 
@@ -210,7 +220,8 @@ parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前�
 
 - `inherit_host_environment: false` —— 环境先**清空**，不是过滤
 - 只按**变量名**白名单放行让进程起得来的最小集（`PATH`、`SYSTEMROOT`、`TEMP`、
-  `TMP`），值由 Worker 安装侧固定，不写进仓库
+  `TMP`），值由 Worker 安装侧固定，不写进仓库；另加 Worker 模式的
+  `ACUVEN_GIT_LS_FILES_MANIFEST`（只读 manifest 的路径，见下面「Worker 模式的 Git 输入」）
 - 另有一份 `denied_name_patterns`（`BILLING_*`、`*DATABASE*`、`*REDIS*`、
   `*SECRET*`、`*TOKEN*`、`*PASSWORD*`、`*CREDENTIAL*`、`*API_KEY*`、`GH_*`、
   `GITHUB_*`、`AWS_*`），**deny 优先于 allow** —— 有人日后往白名单里加错东西也拦得住
@@ -230,6 +241,29 @@ process_boundary_required` 要求它在进程边界上真的被强制（作业�
 拒绝名单里，所以那些用例**必然** skip；CI 那边起了真 MySQL 与 Redis，并且显式把
 「有任何 skipped」判成失败。**不得把 skipped 读成 passed。**
 准入判定以 GitHub 上的 CI 为准。
+
+### Worker 模式的 Git 输入
+
+Worker 里**刻意没有真实 Git**。控制面（ACVDEV-TASK-005）改为预先生成
+`git ls-files -z --cached --others --exclude-standard` 的原始输出，写成只读文件，
+把它的绝对路径放进环境变量 `ACUVEN_GIT_LS_FILES_MANIFEST`（已加进
+`constraints.environment.allowed_names`）。`scripts/check_repo_policy.py` 的消费契约：
+
+- **没设置该变量**（本地 / CI）：行为不变，照旧调用真实 Git
+- **设置了且检查的是仓库根**：读 manifest 字节，不启动 Git；严格 UTF-8，
+  每条记录以 NUL 结尾，与上面那条命令的输出逐条对应
+- 以下一律 fail closed（退出码 2，不退化成「当作没有文件」）：变量值不是绝对且规范化的路径、
+  文件缺失或不可读、是链接 / reparse point / 目录、超过 1,000,000 字节、非法 UTF-8、
+  NUL 分帧错误（空文件、缺结尾 NUL、空记录）、记录是绝对路径 / 含 `.` 或 `..` 段 /
+  含反斜杠、冒号或控制字符 / 重复
+- 单测传入的临时仓库根**不走** manifest；PR 正文与回应检查（`--event-file` /
+  `--body-file` / `--response-file`）仍只走真实 Git，属于本地 / CI 操作
+- 报错不回显路径或记录内容
+
+`policy.check` 与 `tests.process` 在 Worker 模式下都消费这个变量。`tests.process` 里要建临时
+Git 仓库或读提交图的用例**只在设置了该变量时**以固定原因 skip，manifest 消费用例照常运行。
+和 `tests.backend` 一样，**Worker 里的 skipped 不是 passed**：CI 不设该变量、全量运行，
+准入以 CI 为准。
 
 ---
 
