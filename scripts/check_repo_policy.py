@@ -5,13 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+# Worker 模式：Worker 里刻意没有真实 Git，控制面把 `git ls-files -z --cached --others
+# --exclude-standard` 的原始输出写成只读文件，绝对路径放在这个变量里。契约见 .platform/README.md
+MANIFEST_ENV = "ACUVEN_GIT_LS_FILES_MANIFEST"
+MANIFEST_MAX_BYTES = 1_000_000
 SECTIONS = (
     "任务", "改了什么", "触碰的不变量 / REQ", "如何验证", "自检",
     "已知未做 / 留给后续", "TODO 影响",
@@ -65,10 +72,70 @@ def check_checkboxes(body: str, label: str) -> list[str]:
     return errors
 
 
-def check_local(root: Path = ROOT) -> list[str]:
+def read_manifest(location: str) -> list[str]:
+    """Parse the Worker's read-only `git ls-files -z` manifest. Anything unclear fails closed.
+
+    报错不回显路径或记录内容：路径是本机信息，记录内容来自仓库之外。
+    """
+    # 只做字符串层面的判断，不 resolve()：Windows MXC（AppContainer）会拒绝最终路径解析
+    if not location or not Path(location).is_absolute() or os.path.normpath(location) != location:
+        raise PolicyError(f"{MANIFEST_ENV} must be an absolute, normalized path")
+    try:
+        info = os.lstat(location)
+    except (OSError, ValueError):
+        raise PolicyError("Git manifest is missing or unreadable") from None
+    reparse = getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if stat.S_ISLNK(info.st_mode) or reparse:
+        raise PolicyError("Git manifest must not be a link or reparse point")
+    if not stat.S_ISREG(info.st_mode):
+        raise PolicyError("Git manifest must be a regular file")
+    if info.st_size > MANIFEST_MAX_BYTES:
+        raise PolicyError(f"Git manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+    try:
+        fd = os.open(location, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise PolicyError("Git manifest must be a regular file")
+            # 多读一个字节：检查大小之后文件还可能变长
+            data = handle.read(MANIFEST_MAX_BYTES + 1)
+    except OSError:
+        raise PolicyError("Git manifest is missing or unreadable") from None
+    if len(data) > MANIFEST_MAX_BYTES:
+        raise PolicyError(f"Git manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+    # 空文件也落在这里：真实仓库根不可能一个文件都没有，空 manifest 只能是生成方出了错
+    if not data.endswith(b"\0"):
+        raise PolicyError("Git manifest must consist of NUL-terminated records")
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise PolicyError("Git manifest is not valid UTF-8") from None
+    records = text[:-1].split("\0")
+    seen = set()
+    for number, record in enumerate(records, 1):
+        if not record:
+            raise PolicyError(f"Git manifest record {number} is empty")
+        # 绝对路径与 `a//b`、`dir/` 都会切出空段；冒号挡 Windows 盘符与 NTFS 数据流
+        if ("\\" in record or ":" in record
+                or any(unicodedata.category(char) == "Cc" for char in record)
+                or any(segment in {"", ".", ".."} for segment in record.split("/"))):
+            raise PolicyError(f"Git manifest record {number} is not a plain repository-relative path")
+        if record in seen:
+            raise PolicyError(f"Git manifest record {number} is a duplicate")
+        seen.add(record)
+    return records
+
+
+def listed_paths(root: Path) -> list[str]:
+    # 只有检查仓库根时才读 manifest：单测传进来的临时仓库照旧走真实 Git
+    if MANIFEST_ENV in os.environ and root == ROOT:
+        return read_manifest(os.environ[MANIFEST_ENV])
+    return git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
+
+
+def check_local(root: Path | None = None) -> list[str]:
+    root = ROOT if root is None else root
     errors = []
-    paths = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
-    for relative in sorted(set(paths)):
+    for relative in sorted(set(listed_paths(root))):
         path = root / relative
         if relative and path.suffix.lower() == ".md" and path.is_file():
             errors.extend(check_checkboxes(path.read_text(encoding="utf-8-sig"), relative))

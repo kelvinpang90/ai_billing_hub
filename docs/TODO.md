@@ -1188,6 +1188,18 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [ ] Kelvin 对启用 Worker 的独立批准（未发生；合并本契约不算）
 - [ ] `AIH-TASK-002` 的 live run：Worker 中的 Claude 产出 `docs/openclaw-worker-pilot.md` 并开 Draft PR（未发生）
 
+### AIH-TASK-003 —— Worker 模式消费只读 Git manifest（2026-09-18）
+
+第一次 `AIH-TASK-002` Pilot **未通过**：Worker 里刻意没有真实 Git，而 `policy.check` 与 `tests.process` 依赖它。控制面（ACVDEV-TASK-005）改为给出 `git ls-files -z --cached --others --exclude-standard` 原始输出的只读文件，路径放在 `ACUVEN_GIT_LS_FILES_MANIFEST`。契约与任务登记在 `.platform/`（管理员前置条件，本任务不改）。
+
+- [x] **仓库侧改动（本分支，Worker 中的 Claude 实现）**：只动了 `allowed_change_paths` 里的四个文件
+  - `scripts/check_repo_policy.py`：检查仓库根且设置了该变量时，`check_local` 读 manifest 字节、不启动 Git；严格 UTF-8、每条记录以 NUL 结尾，结果与记录逐条对应（磁盘上有、manifest 里没有的文件不查）。以下一律 `PolicyError`（退出码 2）：变量值不是绝对且规范化的路径、文件缺失 / 不可读 / 是目录、链接或 reparse point、超过 1,000,000 字节、非法 UTF-8、NUL 分帧错误（空文件、缺结尾 NUL、空记录）、记录是绝对路径 / 含空段、`.`、`..` / 含反斜杠、冒号或控制字符 / 重复。报错不回显路径与记录内容。**只做字符串层面的路径判断、不 `resolve()`**（MXC 会拒绝最终路径解析）。没设变量时、或检查的不是仓库根时（单测的临时仓库），照旧调 Git；`--event-file` / `--body-file` / `--response-file` 仍只走真实 Git。违规仍为 1
+  - `tests/test_check_repo_policy.py`：新增 `ManifestTests`（逐条对应、退出码 0/1/2、上面每一种 fail closed、正文与回应检查仍调 Git）与 `GitListingTests`（没设变量时仓库根仍调 `git ls-files -z --cached --others --exclude-standard`；临时仓库根不读 manifest）。这两组用 mock 断言子进程，**不需要真实 Git，Worker 里照常运行**。要建临时仓库或读提交图的用例只在设置了该变量时以固定原因 skip
+  - `tests/test_gh_verified_write.py`：只给 `VerifiedWriteTests::test_file_with_spaces_unicode_and_relative_path` 加条件 skip —— 只在设置了该变量时，原因固定写明 Windows MXC（AppContainer）拒绝最终路径解析。其余用例未动，没有整模块 / 整类 skip
+  - 验证程度：**本 session 没有执行命令的工具，`docs.check` / `policy.check` / `tests.process` 一条都没有在这里跑过**；由 Worker 事后自行运行，结果不记在这里。CI 不设该变量、全量运行，准入以 CI 为准
+- [ ] `AIH-TASK-003` 的 Worker 检查、Codex 审查与 Kelvin 合并（未发生；本条不声称 `AIH-TASK-003` 已通过）。⚠️ Worker 里的 skipped 不是 passed
+- [ ] `AIH-TASK-002` 的重试（须在 `AIH-TASK-003` 合并之后；未发生，本条不声称通过）
+
 ---
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）

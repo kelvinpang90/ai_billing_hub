@@ -4,6 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -113,6 +114,14 @@ class VerifiedWriteTests(unittest.TestCase):
                 self.assertNotIn("private credential", str(error.exception))
                 self.assertEqual(run.call_count, 1)
 
+    # 唯一一个不依赖 Git 却在 Worker 里 skip 的用例：真实 Windows MXC run 里临时文件已创建，
+    # 但 AppContainer 拒绝最终路径解析，Path.resolve(strict=True) 报 WinError 5。
+    # 只在设置了 ACUVEN_GIT_LS_FILES_MANIFEST（Worker 模式）时 skip；本地与 CI 不设它，照常运行。
+    @unittest.skipIf(
+        "ACUVEN_GIT_LS_FILES_MANIFEST" in os.environ,
+        "Worker mode: Windows MXC (AppContainer) denies final path resolution"
+        " (Path.resolve(strict=True) raises WinError 5); runs locally and in CI",
+    )
     @patch.object(writer, "api")
     def test_file_with_spaces_unicode_and_relative_path(self, api):
         with tempfile.TemporaryDirectory(prefix="verified write ") as directory:
