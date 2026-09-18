@@ -4,24 +4,23 @@
 # YAML 里的步骤**没有任何办法在生产之外跑一遍** —— 而迁移顺序、健康等待、回滚
 # 恰恰是最不该第一次就在生产上验的东西。脚本可以在本地栈上整套跑通，也确实跑过。
 #
-# ⚠️ **这个文件本身从未在真实 VPS 上执行过**（写它的时候生产主机还没就绪）。
-# 第一次跑之前请按 docs/deployment.md §9 的清单逐条确认。
-
 name: Deploy
 
-# ⚠️ **现在只能手动触发，刻意没有 `push: branches: [main]`。**
+# **合并到 main 即部署**（spec §99「merge to `main` triggers GitHub Actions deployment」）。
 #
-# 加上那一条，这个 workflow 就会在合并的那一刻开火 —— 而生产主机还没就绪、
-# 四个 secret 也还没配。后果不只是「一次红色的 CD」：build 那一步会**真的把镜像
-# 推到 ghcr**，那是个对外的副作用，不该由一次「先把代码合进去」顺带触发。
+# 这条触发器起初刻意不挂：主机与 secret 就绪之前，一次合并就会把镜像推到 ghcr、
+# 再对着一台没准备好的主机开火。docs/deployment.md §9.4 的前置清单 2026-09-18
+# 全部关闭之后才加回来（此前十几次部署全是手动触发，见 §9.4）。
 #
-# 等 docs/deployment.md §9.4 那张前置清单逐条关闭之后，再把下面两行加回来：
+# ⚠️ **合并的时刻就是部署的时刻**：`production` 环境 2026-09-18 起不再要求人工批准
+# （Kelvin 拍板，见 §9.4）。会造成短暂停机的改动（例如改网络定义要整栈先停，§9.6）
+# 要在 PR 正文里写明，由合并的人挑时间合。
 #
-#     push:
-#       branches: [main]
-#
-# 那应该是一次**有意识的改动**，而不是从一开始就挂在那里等着。
+# `workflow_dispatch` 保留：手工回滚（`ref` 填 `.last-good-deploy` 里那个 SHA，§9.5）
+# 与重新部署都走它。
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
@@ -109,8 +108,9 @@ jobs:
     name: deploy to the VPS
     needs: build
     runs-on: ubuntu-latest
-    # ⚠️ environment 带来两道保护：「需要人工批准」与「只允许从 main 部署」——
-    # 一次误合并直接就是一次生产部署，这是它之外唯一的防线。保护规则配在
+    # ⚠️ environment 的保护是「只允许从 main 部署」（手动触发时填别的分支会被拒）。
+    # 「需要人工批准」那一道 2026-09-18 起撤掉了 —— 合并本身就是 Kelvin 的决定，
+    # 再批一次是同一件事确认两遍（docs/deployment.md §9.4）。保护规则配在
     # GitHub → Settings → Environments → production 上。
     environment: production
     steps:
@@ -150,8 +150,8 @@ jobs:
             git fetch --quiet origin
             git checkout --quiet --detach '${{ needs.build.outputs.tag }}'
 
-            # ghcr 上的包默认是私有的，拉镜像要登录。令牌是这一次 job 的临时令牌，
-            # 用完即登出。
+            # 两个包 2026-09-18 核对是公开的（匿名能拉），这里登录是为了不依赖那个
+            # 可见性设置。令牌是这一次 job 的临时令牌，用完即登出。
             echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
             trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
 
