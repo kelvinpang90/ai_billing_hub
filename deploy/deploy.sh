@@ -35,6 +35,8 @@ IMAGE_KEEP="${BILLING_IMAGE_KEEP:-3}"
 # `docker compose ps` 里正在跑的那个标签 —— 而需要回滚的时候，正在跑的恰恰就是
 # 坏的那一个。`git log` 也答不了：`main` 上最新那条未必部署过。
 DEPLOY_STATE="${BILLING_DEPLOY_STATE_FILE:-./.last-good-deploy}"
+# 部署成功后把两个镜像钉在这里（见 pin_deployed_images）。
+ENV_FILE="${BILLING_ENV_FILE:-.env}"
 
 log() { printf '%s  %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -60,6 +62,36 @@ record_last_good() {
     # 再追加一行历史：回滚目标本身也坏掉时，要往前再找一个。
     printf '%s %s\n' "$now" "$TAG" >> "${DEPLOY_STATE}-history" 2>/dev/null || true
     log "recorded as the last good deploy: $TAG"
+    return 0
+}
+
+# 把这一次部署的两个镜像钉进 `.env`，让之后**手工**的 `docker compose up -d` 也用它们。
+#
+# ⚠️ 没有这一步的话，镜像名只在本脚本运行期间 export 着。部署结束后手工起栈（改了
+# `.env` 之后最常见），compose 回落到 `acuven-billing-hub:local` —— VPS 上没有这个
+# 镜像，于是转头**在 VPS 上现场构建**。compose 自动读的 env 文件只有 `.env`
+# （在 `.env` 里写 `COMPOSE_ENV_FILES` 不生效，本地实测过），所以只能写在这里。
+# 本脚本 export 的值优先于 `.env`，下一次部署与回滚都不受这两行影响。
+#
+# ⚠️ `.env` 装着口令：只动这两个键，其余行逐字保留；先写临时文件再 `mv`，
+# 临时文件由 `cp -p` 得来，权限跟原文件一致。写坏一半比不写糟得多。
+pin_deployed_images() {
+    # 演练模式没有拉镜像，没有可钉的东西
+    [ -n "${BILLING_IMAGE_REPO:-}" ] || return 0
+    local tmp="${ENV_FILE}.deploy-tmp"
+    if cp -p "$ENV_FILE" "$tmp" 2>/dev/null && {
+        grep -v -e '^BILLING_IMAGE=' -e '^BILLING_FRONTEND_IMAGE=' "$ENV_FILE" || true
+        printf 'BILLING_IMAGE=%s\n' "$BILLING_IMAGE"
+        printf 'BILLING_FRONTEND_IMAGE=%s\n' "$BILLING_FRONTEND_IMAGE"
+    } 2>/dev/null > "$tmp" && mv -f "$tmp" "$ENV_FILE" 2>/dev/null; then
+        log "pinned the deployed images in $ENV_FILE"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+        # ⚠️ 和 record_last_good 一样只是警告：部署本身已经健康、冒烟也过了。
+        # 但要说清后果 —— `.env` 里留着的是**上一次**的镜像，手工起栈会悄悄退回去。
+        log "WARNING: could not pin the deployed images in $ENV_FILE;" \
+            "a manual 'docker compose up' would run the previous images — re-run deploy/deploy.sh $TAG instead"
+    fi
     return 0
 }
 
@@ -383,6 +415,7 @@ if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then
     docker image prune -f >/dev/null 2>&1 || true
     prune_old_images
     record_last_good
+    pin_deployed_images
     exit 0
 fi
 

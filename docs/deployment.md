@@ -1219,6 +1219,32 @@ compose 为了按新定义重建网络，**先停掉它要起的那个容器**�
 （都先复核 45 秒才发），Telegram 收到两条 DOWN。在这之前，这种「应用还在跑、
 数据库没了」的状态只有等人去点页面才会发现。
 
+### 9.7 部署之后手工起栈（T0.9 2026-09-18）
+
+**原来的洞**：`deploy.sh` 只在自己运行期间 export `BILLING_IMAGE` / `BILLING_FRONTEND_IMAGE`，
+没有落盘。部署结束后在 VPS 上手工 `docker compose up -d`（改完 `.env` 之后最常见），
+compose 回落到 compose 文件里的默认标签 `acuven-billing-hub:local` —— VPS 上没有这个镜像，
+于是**转头在 VPS 上现场构建**。之前全靠一条口头规矩兜着：「配置变更一律重跑 `deploy.sh <当前 SHA>`」。
+
+**现在**：部署成功（健康检查与冒烟都过了）之后，`deploy.sh` 把这一次的两个镜像写进 `.env`：
+
+```
+BILLING_IMAGE=ghcr.io/<owner>/<repo>:<SHA>
+BILLING_FRONTEND_IMAGE=ghcr.io/<owner>/<repo>-frontend:<SHA>
+```
+
+之后手工的 `docker compose up -d` 用的就是线上那一版。几点：
+
+- **为什么写 `.env`**：compose 自动读的 env 文件只有 `.env`。在 `.env` 里写 `COMPOSE_ENV_FILES`
+  指向第二个文件**不生效**；另生成一个覆盖文件挂进 `COMPOSE_FILE` 倒是生效，但那个文件一旦缺失，
+  **所有** compose 命令都报错 —— 包括每 5 分钟的巡检与每天的备份。两条都在本地实测过
+- **不影响下一次部署与回滚**：`deploy.sh` 自己 export 的值优先于 `.env`（本地实测）
+- **`.env` 装着口令**：只动这两个键，其余行逐字保留；先写临时文件再 `mv`，权限跟原文件一致
+  （生产上是 `600`）。只在成功分支写，回滚分支不写 —— `.env` 里留着的恰好就是回滚回去的那一版
+- **写不下去只是警告**（与 `.last-good-deploy` 同理），但警告会说清后果：`.env` 里还是**上一次**的
+  镜像，手工起栈会悄悄退回去，那时要重跑 `deploy.sh`
+- **灾难恢复的新主机上没有这两行**，起应用仍然只走 `deploy/deploy.sh`（[runbook](runbook.md) 第 9 步）
+
 ## 10. 七件事的决定（Kelvin，2026-09-13）
 
 | # | 问题 | 决定 | 落在哪一节 |

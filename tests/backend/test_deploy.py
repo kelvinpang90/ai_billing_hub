@@ -13,6 +13,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy.yml"
 SCRIPT = REPO_ROOT / "deploy" / "deploy.sh"
@@ -1387,6 +1389,137 @@ def test_a_failed_recording_never_fails_the_deploy(tmp_path) -> None:
     assert "DEPLOY CONTINUES" in done.stdout
     assert "could not record the last good deploy" in done.stdout
     assert done.stderr == "", f"记录失败时不该有 shell 报错漏出来：{done.stderr!r}"
+
+
+# --- 部署后手工起栈找得到镜像（T0.9）----------------------------------------
+
+
+def test_the_deployed_images_are_pinned_only_after_the_deploy_is_proven() -> None:
+    """⚠️ 钉早了的话，一次失败的部署会让之后手工的 `compose up` 把坏镜像起回来。"""
+    script = uncommented(SCRIPT)
+    success = script[script.index('if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then') :]
+    assert "pin_deployed_images" in success.split("exit 0")[0]
+    # 回滚路径不钉：`.env` 里留着的恰好就是回滚回去的那一版
+    rollback = script[script.index('log "rolling back to $PREVIOUS_IMAGE"') :]
+    assert "pin_deployed_images" not in rollback
+
+
+PIN_RUNNER = """#!/usr/bin/env bash
+set -euo pipefail
+cd "$1"
+log() { printf 'LOG %s\\n' "$*"; }
+source "$PWD/fn.sh"
+pin_deployed_images
+# ⚠️ 哨兵：与 RECORD_RUNNER 同理，钉不下来绝不能让一次已经成功的部署变成失败。
+echo "DEPLOY CONTINUES"
+"""
+
+ENV_BEFORE = (
+    "# production\n"
+    "BILLING_MYSQL_ROOT_PASSWORD=s3cr=t with spaces\n"
+    "COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml\n"
+    "\n"
+    "BILLING_SMTP_HOST=smtp.example.com"  # 故意没有结尾换行
+)
+
+
+def run_pin_deployed_images(tmp_path, env_path: str, **env):
+    """把 deploy.sh 里的 pin_deployed_images 原样抠出来跑。"""
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    body = re.search(
+        r"^pin_deployed_images\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S
+    )
+    assert body is not None, "deploy.sh 里找不到 pin_deployed_images"
+
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "fn.sh").write_text(body.group(0) + "\n", encoding="utf-8", newline="\n")
+    runner = work / "run.sh"
+    runner.write_text(PIN_RUNNER, encoding="utf-8", newline="\n")
+
+    full = {
+        **os.environ,
+        "TAG": "deadbeef",
+        "BILLING_IMAGE_REPO": "ghcr.io/o/r",
+        "BILLING_IMAGE": "ghcr.io/o/r:deadbeef",
+        "BILLING_FRONTEND_IMAGE": "ghcr.io/o/r-frontend:deadbeef",
+        "ENV_FILE": env_path,
+        **env,
+    }
+    return subprocess.run([bash, str(runner), str(work)], env=full, capture_output=True, text=True)
+
+
+def test_pinning_writes_both_images_and_keeps_every_other_line(tmp_path) -> None:
+    """`.env` 装着口令：除了这两个键，其余每一行都必须逐字保留。"""
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(ENV_BEFORE.encode("utf-8"))
+    done = run_pin_deployed_images(tmp_path, str(env_file))
+    assert done.returncode == 0, done.stderr
+    assert "DEPLOY CONTINUES" in done.stdout
+    assert "pinned the deployed images" in done.stdout
+    assert env_file.read_text(encoding="utf-8") == (
+        ENV_BEFORE + "\n"
+        "BILLING_IMAGE=ghcr.io/o/r:deadbeef\n"
+        "BILLING_FRONTEND_IMAGE=ghcr.io/o/r-frontend:deadbeef\n"
+    )
+    assert not (tmp_path / ".env.deploy-tmp").exists()
+
+
+def test_pinning_again_replaces_the_previous_pin(tmp_path) -> None:
+    """第二次部署要**换掉**上一次的两行，而不是再追加两行 —— 重复的键谁生效是没人记得住的事。"""
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(ENV_BEFORE.encode("utf-8"))
+    assert run_pin_deployed_images(tmp_path, str(env_file)).returncode == 0
+    done = run_pin_deployed_images(
+        tmp_path,
+        str(env_file),
+        TAG="cafef00d",
+        BILLING_IMAGE="ghcr.io/o/r:cafef00d",
+        BILLING_FRONTEND_IMAGE="ghcr.io/o/r-frontend:cafef00d",
+    )
+    assert done.returncode == 0, done.stderr
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    assert [ln for ln in lines if ln.startswith("BILLING_IMAGE=")] == [
+        "BILLING_IMAGE=ghcr.io/o/r:cafef00d"
+    ]
+    assert [ln for ln in lines if ln.startswith("BILLING_FRONTEND_IMAGE=")] == [
+        "BILLING_FRONTEND_IMAGE=ghcr.io/o/r-frontend:cafef00d"
+    ]
+    assert "BILLING_MYSQL_ROOT_PASSWORD=s3cr=t with spaces" in lines
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows 上没有 POSIX 权限位；CI 在 ubuntu 上跑")
+def test_pinning_keeps_the_env_file_private(tmp_path) -> None:
+    """⚠️ 换文件（`mv`）时权限不能退回默认的 0644 —— 那等于把口令文件对全机可读。"""
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(ENV_BEFORE.encode("utf-8"))
+    env_file.chmod(0o600)
+    assert run_pin_deployed_images(tmp_path, str(env_file)).returncode == 0
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_rehearsal_mode_leaves_the_env_file_alone(tmp_path) -> None:
+    """演练模式没拉镜像：`.env` 一个字节都不许动。"""
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(ENV_BEFORE.encode("utf-8"))
+    done = run_pin_deployed_images(tmp_path, str(env_file), BILLING_IMAGE_REPO="")
+    assert done.returncode == 0, done.stderr
+    assert env_file.read_bytes() == ENV_BEFORE.encode("utf-8")
+
+
+def test_a_failed_pin_never_fails_the_deploy(tmp_path) -> None:
+    """钉不下来是警告、不是失败（失败会触发回滚，那才制造停机）；但警告要说清后果。"""
+    missing = tmp_path / "nope" / ".env"
+    done = run_pin_deployed_images(tmp_path, str(missing))
+    assert done.returncode == 0, done.stderr
+    assert "DEPLOY CONTINUES" in done.stdout
+    assert "could not pin the deployed images" in done.stdout
+    assert "re-run deploy/deploy.sh deadbeef" in done.stdout
+    assert done.stderr == "", f"钉失败时不该有 shell 报错漏出来：{done.stderr!r}"
+    # 不许凭空造出一个只有两行的 `.env`
+    assert not missing.exists()
 
 
 # --- binlog 的本地磁盘上限（§98.1 / T0.9）------------------------------------
