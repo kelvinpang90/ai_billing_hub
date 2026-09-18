@@ -138,21 +138,24 @@ def test_the_script_waits_for_the_database_before_migrating() -> None:
     assert waits < migrates
 
 
-def test_deploying_is_a_deliberate_act_not_a_side_effect_of_merging() -> None:
-    """⚠️ 现在**刻意只能手动触发**。
+def test_merging_to_main_deploys_and_manual_dispatch_stays() -> None:
+    """spec §99：合并到 `main` 触发部署。2026-09-18 §9.4 的前置清单全部关闭后加回。
 
-    挂上 `push: branches: [main]` 的话，这个 workflow 会在合并的那一刻开火 ——
-    而生产主机还没就绪、四个 secret 也还没配。后果不只是「一次红色的 CD」：
-    build 那一步会**真的把镜像推到 ghcr**，那是个对外的副作用，不该由一次
-    「先把代码合进去」顺带触发。
+    ⚠️ 这条用例原来钉的是反面（「刻意只能手动触发」），逼加回触发器成为一次有意识
+    的改动 —— 现在就是那一次。三件事要一起成立：
 
-    等 `docs/deployment.md` §9.4 的前置清单关闭之后再加回来 —— 那应该是一次
-    有意识的改动。这条用例存在的意义就是逼它成为有意识的：加回触发器的人
-    必须同时改掉这里，而那一刻他会读到上面这段话。
+    - 只有 `main` 触发：别的分支一推就部署，等于绕过 PR 与 CI
+    - `workflow_dispatch` 必须留着：手工回滚（`ref` 填 `.last-good-deploy` 里的 SHA）
+      只有这一条路
+    - deploy job 仍挂 `environment: production`：它的「只允许 main」是手动触发时
+      填错分支的最后一道闸
     """
     workflow = uncommented(WORKFLOW)
-    assert "workflow_dispatch" in workflow
-    assert "branches: [main]" not in workflow
+    trigger = workflow[workflow.index("on:") : workflow.index("permissions:")]
+    assert re.search(r"^  push:\n    branches: \[main\]\n", trigger, re.M), trigger
+    assert "workflow_dispatch" in trigger
+    assert "tags:" not in trigger and "branches-ignore" not in trigger
+    assert "environment: production" in workflow
 
 
 BACKUP = REPO_ROOT / "deploy" / "backup.sh"

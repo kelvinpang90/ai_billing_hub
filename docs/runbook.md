@@ -209,14 +209,16 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
 3. **起新主机**：同区域，≥ 2 核 / 4 GB / 48 GB 盘（现网规格见 [deployment.md](deployment.md) §3.1），
    装 Docker 与 git
 4. **取代码**：`git clone` 之后 **checkout 上一次成功部署的那个 SHA**
-   （来源：GitHub Actions → Deploy → 最后一次成功那次的 `ref` 输入）。
+   （来源：R2 `config/` 最新快照里的 `.last-good-deploy`；或 GitHub Actions → Deploy → 最后一次成功的那次 ——
+   合并触发的看它的 commit，手动触发的看 `ref` 输入）。
    ⚠️ **不要直接用 `main` 的最新提交** —— 它未必部署过，灾难当天不是验证新代码的时候
 5. **还原密钥与配置**：`secrets/` 下三个文件，然后
    ```bash
    chown 10001:10001 secrets/*        # 10001 = 容器运行 UID（ADR-0004）
    chmod 0400 secrets/*
    ```
-   再写 `.env`（数据库口令、R2 凭据、备份口令、心跳地址、`BILLING_IMAGE_REPO` 等）
+   再写 `.env`（数据库口令、R2 凭据、备份口令、心跳地址等；键名清单见 R2 `config/` 里最新那份快照）。
+   ⚠️ `BILLING_IMAGE` / `BILLING_FRONTEND_IMAGE` 两行**不要手写**，由第 9 步的 `deploy.sh` 部署成功后写入
 6. **只起数据库**：`docker compose up -d mysql`，等它 healthy。
    ⚠️ 先起全栈会让应用对着一个空库跑。这一步不需要本项目的镜像 —— MySQL 用的是公共镜像，新主机上 compose 会自己拉
 7. **恢复**：
@@ -228,11 +230,17 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
 8. **对账**（见下一节），**通过之后**再往下走
 9. **切换并起全栈**：把恢复库切成生产库名（改名或改 `.env` 里的 `BILLING_MYSQL_DATABASE`），然后
    ```bash
-   deploy/deploy.sh <第 4 步那个 SHA>
+   BILLING_IMAGE_REPO=ghcr.io/<owner>/<repo> \
+   BILLING_FRONTEND_IMAGE_REPO=ghcr.io/<owner>/<repo>-frontend \
+     deploy/deploy.sh <第 4 步那个 SHA>
    ```
-   它会按那个 commit 拉两个不可变镜像、跑迁移、等七个服务 healthy、跑冒烟，并把这一次记进 `.last-good-deploy`。
-   ⚠️ **不要在这里手工 `docker compose up -d`**（Codex 审查 PR #67 指出）：`.env` 里只有 `BILLING_IMAGE_REPO`，**compose 不会自己拼出 `BILLING_IMAGE`** ——
-   它会退回 compose 文件里那个本地构建的默认标签 `acuven-billing-hub:local`，而新主机上根本没有这个镜像，栈直接起不来。
+   它会按那个 commit 拉两个不可变镜像、跑迁移、等七个服务 healthy、跑冒烟，把这一次记进 `.last-good-deploy`，
+   并把两个镜像钉进 `.env`（[deployment.md](deployment.md) §9.7）。
+   ⚠️ **两个 `*_REPO` 必须在命令行上给**：`deploy.sh` 只从 shell 环境读它们、不读 `.env`（平时是 CD workflow 传的）。
+   漏了它不会报错，而是**落进演练模式**：不拉镜像、去找本地构建的 `acuven-billing-hub:local`，新主机上没有，栈起不来
+   （2026-09-18 查实）。两个包是公开的，不需要 `docker login`。
+   ⚠️ **不要在这里手工 `docker compose up -d`**（Codex 审查 PR #67 指出）：新主机的 `.env` 里还没有部署钉进去的镜像，
+   compose 会退回 compose 文件里那个本地构建的默认标签 `acuven-billing-hub:local`，同样起不来。
    ⚠️ 迁移对一份刚恢复的库通常是空操作（dump 里带着 `alembic_version`）——**这是对的**，它同时也是「代码与表结构对得上」的一次检查
 10. **切流量**：把边缘 `infra_nginx` / DNS 指到新主机
 11. **恢复运维设施**：按 [deployment.md](deployment.md) §5.2.5 重装 cron（五行），确认四类心跳
@@ -279,7 +287,9 @@ SELECT COUNT(*) FROM two_factor_settings;
 - **不要在新主机上生成新的 `master.key`。**那不是「重新初始化」，是**把所有 TOTP 注册一次性作废**
 - **不要把 `.env`、密钥内容贴进聊天、工单或截图。**灾难当天最容易发生这件事
 - **不要跳过第 4 步直接用 `main`。**灾难恢复不是发布新版本的时机
-- **不要用 `docker compose up -d` 起应用**（起 mysql 除外）。理由见第 9 步：新主机上没有本项目的镜像，而 compose 不会从 `BILLING_IMAGE_REPO` 拼出标签 ——它会去找一个本地构建的默认标签，然后失败。**起应用只走 `deploy/deploy.sh`**
+- **不要用 `docker compose up -d` 起应用**（起 mysql 除外）。理由见第 9 步：新主机的 `.env` 里还没有部署钉进去的镜像 ——compose 会去找一个本地构建的默认标签，然后失败。**起应用只走 `deploy/deploy.sh`**
+- **恢复完成之前不要往 `main` 合并任何东西。**2026-09-18 起合并即部署、不经人工批准：`VPS_*` secret 指着哪台机器，
+  一次合并就会对着它开火 —— 指着旧机器是一次红色的 CD，已经改指新机器则是一次没人计划过的发布
 
 ---
 

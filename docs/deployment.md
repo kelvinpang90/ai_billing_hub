@@ -1099,8 +1099,9 @@ compose 就和镜像不是同一个版本。§99 要求镜像标签对应确切 
 #### ⚠️ 仓库级 secret 与 environment secret 的一处真实差别
 
 `VPS_SSH_KEY` 现在是**仓库级**的。deploy job 引用了 `environment: production`，
-所以照样读得到、人工批准也照样生效 —— **但批准只拦住了部署 job，没拦住那把私钥**：
-仓库级 secret 对仓库里**任何** workflow 都可读，不需要经过批准。
+所以照样读得到、环境的保护规则也照样生效 —— **但那些规则只拦住了部署 job，没拦住那把私钥**：
+仓库级 secret 对仓库里**任何** workflow 都可读，不经过环境的任何规则。（2026-09-18 起环境只剩
+「只允许 main」一条，人工批准已撤掉，见 §9.4 末尾。）
 
 实际风险不高：来自 fork 的 PR 拿不到 secret（GitHub 不会传给它们），能加 workflow 的
 只有有写权限的人。与其它项目一致起见先保持仓库级；想收紧的话把 `VPS_SSH_KEY` 挪到
@@ -1130,20 +1131,35 @@ git checkout main
 - [x] VPS 内存升配完成（决策 ③）—— 2026-09-15 核对：2 核 / 7.3 GB，swap 4 GB 只用 10 MB（§3.1）
 - [x] `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` / `VPS_PORT` 已配（2026-09-13）
 - [x] ⚠️ **`VPS_FINGERPRINT` 补上**（没有它 job 会直接失败，这是刻意的）—— 已补（2026-09-14，见 §9.3 的 ECDSA 那条）；此后 Deploy 多次成功（最近 run 34952597111）
-- [x] `production` environment 开了人工批准与「只允许 main」—— 2026-09-15 经 GitHub API 核对：1 条 required reviewers 规则，deployment branch policy 只有 `main`；run 34952597111 实际停在等待批准
+- [x] `production` environment 开了人工批准与「只允许 main」—— 2026-09-15 经 GitHub API 核对：1 条 required reviewers 规则，deployment branch policy 只有 `main`；run 34952597111 实际停在等待批准。⚠️ **2026-09-18 起撤掉人工批准**（Kelvin 拍板：合并本身就是他的决定，再批一次是同一件事确认两遍）；经 GitHub API 核对现在只剩 `branch_policy` 一条规则，run 35320661422 全程没有停下等批准。见本节末尾
 - [x] VPS 上 `/opt/ai_billing_hub` 已 `git init` 并检出 main —— 是一份指向本仓库的 git 工作副本，Deploy 按 SHA 检出（当前 `6ea9dc5`）
 - [x] 宿主机的 `.env` 与三个密钥文件就位 —— 2026-09-15 核对三个密钥文件存在且权限正确（§6）；`.env` 就位（部署、备份、心跳都在读它）。SMTP 四项 2026-09-15 补上（§11）
-- [ ] ghcr 的包可见性确认过（公开仓库默认公开；镜像里没有密钥，与 ADR-0001 一致）
-- [ ] ⚠️ **先手工跑一次 `deploy/deploy.sh`**，别让第一次执行是由一次 push 触发的
+- [x] ghcr 的包可见性确认过（公开仓库默认公开；镜像里没有密钥，与 ADR-0001 一致）—— 2026-09-18：两个包都能**匿名**取到 `1a8300d` 的 manifest（HTTP 200），即公开。镜像在 CI 的干净检出上构建，`.dockerignore` 另外挡了 `.env*`、`*.key`、`secrets/`。所以灾难恢复的新主机拉镜像不需要 `docker login`
+- [x] ⚠️ **先手工跑一次 `deploy/deploy.sh`**，别让第一次执行是由一次 push 触发的 —— 2026-09-18 核对：Deploy 的 **20 次** run 全部是 `workflow_dispatch`（18 次成功，最早 2026-09-14），没有一次由 push 触发
 - [x] 装上 `deploy/cron.d/ai_billing_hub`（§5.2.5），并看到第一轮 binlog 推送与第一份全量在 R2 里 —— 2026-09-14 首装；2026-09-15 部署 `6ea9dc5` 后重装为三行（binlog / 全量 `17 3` / 演练 `47 4 * * 0`）
 - [x] 在 VPS 上对 R2 里的真实备份跑一次 `deploy/restore.sh`（§5.2.4）—— 2026-09-14、09-15 手工，09-15 起每周自动（§5.2.7）
-- [ ] 上面全部关闭之后，才把 `push: branches: [main]` 触发器加回 workflow
+- [x] 上面全部关闭之后，才把 `push: branches: [main]` 触发器加回 workflow —— 2026-09-18 加回
 
-⚠️ **现在这个 workflow 只能手动触发（`workflow_dispatch`）。**挂上 push 触发器的话，
-它会在这个 PR 合并的那一刻开火 —— 而主机还没就绪、secret 也没配。后果不只是一次
-红色的 CD：build 那一步会**真的把镜像推到 ghcr**，那是个对外的副作用，不该由一次
-「先把代码合进去」顺带触发。有一条用例（`test_deploying_is_a_deliberate_act...`）
-钉着这件事，加回触发器的人必须同时改掉它 —— 那一刻他会读到为什么。
+**2026-09-18 起：合并到 `main` 即部署，不经人工批准**（spec §99；Kelvin 拍板）。
+
+这个触发器起初刻意不挂：主机与 secret 就绪之前，一次合并就会把镜像推到 ghcr、再对着一台
+没准备好的主机开火。上面的清单全部关闭后才加回，并同时撤掉 `production` 环境的人工批准。
+现在的形状：
+
+| 还在的 | 作用 |
+| --- | --- |
+| 分支保护（PR、五项必需检查、线性历史） | 进 `main` 之前的闸 —— 现在也就是进生产之前的闸 |
+| `environment: production` 只允许 `main` | 手动触发时填别的分支会被拒 |
+| `workflow_dispatch` | 手工回滚（`ref` 填 `.last-good-deploy` 里那个 SHA，§9.5）与重新部署 |
+| `deploy.sh` 的健康检查 + 冒烟 + 自动回滚 | 一次坏的合并最多换来一次红色的 CD 与自动回滚 |
+| `concurrency: deploy-production`（不取消进行中的） | 连着合两个 PR 时两次部署排队，不会互相踩 |
+
+⚠️ **合并的时刻就是部署的时刻。**会造成短暂停机的改动（例如改网络定义要整栈先停，§9.6；
+或重的迁移）要在 PR 正文里写明，由合并的人挑时间合。纯文档的合并同样会触发一次部署：
+镜像内容不变（构建缓存命中），但四个应用容器会按新标签重建一次，有几秒的重启。
+
+⚠️ 用例 `test_merging_to_main_deploys_and_manual_dispatch_stays` 钉着上面三件事
+（只有 `main` 触发、`workflow_dispatch` 留着、仍挂 `environment: production`）。
 
 ---
 
@@ -1311,4 +1327,4 @@ BILLING_FRONTEND_IMAGE=ghcr.io/<owner>/<repo>-frontend:<SHA>
 - [x] 日志轮转 / 保留 / 上限 / 安全删除 / 异地 / 磁盘告警 —— 2026-09-16：六项都有实现（§7 的表），生产上部署、重装 cron、第四个心跳检查、R2 的 `logs-35d` 规则四件都做完，**手工跑通一轮并从 R2 读回解开核对**（§7.1 末尾）。⚠️ 轮转仍是 json-file 的按大小窗口，保留期由归档承载；根治日志完整性要上日志聚合（§8.3）
 - [x] **上线前配好 SMTP**，否则密码重置的信发不出去（outbox 会重试到死信）—— 2026-09-15：Google Workspace（`smtp.gmail.com:587` STARTTLS + 应用专用密码，发信邮箱 `developer@acuventech.com`，显示名 `Acuven Billing`）。生产端到端：`/password/forgot` → outbox 行 `SENT`（第 1 次尝试，约 3 秒）→ 管理员收到信、链接能打开重置页。SPF / DKIM / DMARC 全部 pass，**但 Outlook.com 仍判进垃圾箱**（SCL 5，`SpamFilterAuthJ`）—— 属发信信誉与内容判定，不是配置问题；Phase 4 给客户发信前要重新评估传输（ADR-0009 备选 A）
 - [x] 容量基线在**升配后的**生产机上重跑一次 —— 2026-09-17 在生产 VPS 上跑了两轮（[perf-baseline.md](perf-baseline.md) §9）：维持单进程的结论复核通过；顺带发现当时的限额（api 0.5 核）才是最大瓶颈，一次登录 ~600 ms，已调到 1.0 核（登录 279 ms、写路径 308/s）
-- [x] 部署流水线在真实 VPS 上跑通一次 —— 2026-09-14 起在真实 VPS 上多次成功；其间 run 34815465122 被冒烟拦下并**自动回滚**（§2.2），也算实地走过一次回滚路径。最近一次是 run 34952597111，部署 `6ea9dc5`。⚠️ §9.4 里「ghcr 包可见性」「先手工跑一次 `deploy.sh`」两条事后无法核实，仍未勾；push 触发器仍未加回
+- [x] 部署流水线在真实 VPS 上跑通一次 —— 2026-09-14 起在真实 VPS 上多次成功；其间 run 34815465122 被冒烟拦下并**自动回滚**（§2.2），也算实地走过一次回滚路径。最近一次是 run 34952597111，部署 `6ea9dc5`。⚠️ §9.4 里「ghcr 包可见性」「先手工跑一次 `deploy.sh`」两条 ~~事后无法核实，仍未勾；push 触发器仍未加回~~ —— 2026-09-18 两条都核实并勾上，push 触发器已加回（合并即部署、不经人工批准，§9.4 末尾）
