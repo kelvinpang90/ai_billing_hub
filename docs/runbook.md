@@ -324,7 +324,10 @@ SELECT COUNT(*) FROM two_factor_settings;
    ```bash
    sha256sum secrets/master.key | cut -c1-8      # 与 Bitwarden 里记的前缀比对
    ```
-4. 起栈：`docker compose up -d`，等七个服务 healthy
+4. 起栈：`docker compose up -d`，等七个服务 healthy。
+   ⚠️ 这只在**这台主机部署过**时成立：`deploy.sh` 部署成功后把两个镜像钉在 `.env` 里
+   （[deployment.md](deployment.md) §9.7）。**灾难恢复的新主机上没有那两行** —— 在那里
+   不要在这一步起栈，等灾难恢复第 9 步的 `deploy/deploy.sh`
 5. **验证真的能解密**（这一步不能省）：在一个**断网**的一次性容器里，用这把密钥解开一条
    从数据库里取出来的 TOTP 密文，只打印 `decrypted` —— 做法与每周自动演练里那一段相同
    （见 [deployment.md](deployment.md) §5.2.7）。
