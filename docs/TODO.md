@@ -1193,6 +1193,22 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 
 ---
 
+## 流程接入 —— Worker 模式消费只读 Git manifest（AIH-TASK-003，2026-09-18）
+
+`AIH-TASK-002` 的第一次 Pilot 未通过：Worker 里刻意没有真实 Git，而 `policy.check` / `tests.process` 依赖它。本任务只做仓库侧适配；契约本身（`.platform/` 的登记、`ACUVEN_GIT_LS_FILES_MANIFEST` 放行、MXC 例外）是管理员前置条件，本任务未改 `.platform/`。**本节不声称 `AIH-TASK-003` 或 `AIH-TASK-002` 的重试已通过。**
+
+- [ ] **AIH-TASK-003 — 实现已写完，验收未完成**（Worker 中的 Claude 实现，本分支）：`scripts/check_repo_policy.py` 的 `check_local` 在设置了 `ACUVEN_GIT_LS_FILES_MANIFEST` **且检查的是仓库根**时读 manifest 字节、不启动 Git；没设置时照旧调 `git ls-files -z --cached --others --exclude-standard`。读不懂一律 `PolicyError`（退出码 2，不退化成「当作没有文件」）：变量不是绝对且规范化的路径、文件缺失 / 不可读、是链接 / reparse point / 目录、超过 1,000,000 字节（lstat 之后才变长的也拦）、空文件、开头 BOM、非法 UTF-8、缺结尾 NUL、空记录、绝对路径、空段 / `.` / `..` 段、反斜杠、冒号、控制字符（C0 / DEL / C1）、段尾的点或空格、重复记录。报错不回显路径与记录内容。单测传入的临时仓库根、PR 正文与回应检查仍只走真实 Git。策略违规仍是退出码 1
+  - 测试：新增 14 条**不启动 Git** 的用例，Worker 模式照常运行 —— manifest 就是文件清单、UTF-8 记录、退出码 1 / 0、25 种坏 manifest、1,000,000 字节边界、lstat 之后变长、路径写法、缺失与目录、链接与 reparse point（Windows 上建真链接要特权，用 lstat 的返回值表达）、不可读；以及用假 `subprocess.run` 证明：没设变量时的 argv 逐字是那条 `git ls-files`、临时仓库根不走 manifest、PR 正文 / 回应仍调 Git。另 1 条（需真实 Git）拿本仓库自己的 `git ls-files -z` 原始字节核对逐条对应
+  - 跳过：需要真实 Git 的 35 个用例**逐个**标注，只在设置了该变量时以固定原因跳过，不整类、不整模块；`tests/test_gh_verified_write.py` 只有 `test_file_with_spaces_unicode_and_relative_path` 一条在设置了该变量时跳过，原因写明 Windows MXC（AppContainer）拒绝最终路径解析。CI 不设该变量，全量运行。⚠️ Worker 里的 skipped 不是 passed，准入以 CI 为准
+  - 偏离：「段尾的点或空格」与「开头 BOM」是契约没逐字列出的，按「其它歧义记录」拒绝（Windows 会吞掉段尾的点与空格，`a.md.` 与 `a.md` 指向同一个文件）；链接 / reparse point 只查 manifest 文件本身，不查它的上级目录
+  - 验证程度：**本次实现的会话里没有 shell，一条命令都没跑过**；`docs.check` / `policy.check` / `tests.process` 由 Worker 事后执行，结果不记在本条。CI 未跑
+- [ ] Worker 执行 allowed_commands 三项检查（结果不在本文件记录）
+- [ ] Draft PR 的 Codex 审查（未发生）
+- [ ] Kelvin 合并（未发生）
+- [ ] `AIH-TASK-002` Pilot 的重试（未发生；须在本任务合并之后）
+
+---
+
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
 复审第三轮要求「停止逐项补洞、整体比对」，下面几项是那次自查发现的。**都不是

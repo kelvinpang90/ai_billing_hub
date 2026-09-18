@@ -5,13 +5,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+# Worker 模式：控制面把 `git ls-files -z --cached --others --exclude-standard` 的原始输出
+# 写成只读文件，绝对路径放在这个变量里（Worker 里刻意没有真实 Git）。契约见 .platform/README.md
+# 「Worker 模式的 Git 输入」。本地 / CI 不设它，照旧调 Git。
+MANIFEST_ENV = "ACUVEN_GIT_LS_FILES_MANIFEST"
+MANIFEST_MAX_BYTES = 1_000_000
+LS_FILES_ARGS = ("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+# C0、DEL、C1：git ls-files -z 不转义，这些字符原样出现就无法无歧义地当路径用
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 SECTIONS = (
     "任务", "改了什么", "触碰的不变量 / REQ", "如何验证", "自检",
     "已知未做 / 留给后续", "TODO 影响",
@@ -65,10 +75,81 @@ def check_checkboxes(body: str, label: str) -> list[str]:
     return errors
 
 
-def check_local(root: Path = ROOT) -> list[str]:
+def manifest_record_problem(record: str) -> str | None:
+    if not record:
+        return "empty"
+    if CONTROL_RE.search(record):
+        return "ambiguous (control character)"
+    if record.startswith("/"):
+        return "absolute"
+    if "\\" in record or ":" in record:
+        return "ambiguous (backslash or colon)"
+    parts = record.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return "ambiguous (empty, . or .. segment)"
+    # Windows 会吞掉段尾的点与空格，`a.md.` 与 `a.md` 指向同一个文件
+    if any(part.endswith((".", " ")) for part in parts):
+        return "ambiguous (trailing dot or space)"
+    return None
+
+
+def read_manifest(value: str) -> list[str]:
+    """Parse the read-only `git ls-files -z` manifest; anything not understood is a PolicyError.
+
+    报错刻意不回显路径与记录内容：前者是本机信息，后者可能正是读不懂的那个东西。
+    """
+    if not Path(value).is_absolute() or os.path.normpath(value) != value:
+        raise PolicyError(f"{MANIFEST_ENV} must be an absolute, normalized path")
+    try:
+        info = os.lstat(value)
+    except OSError:
+        raise PolicyError("manifest is missing or unreadable") from None
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise PolicyError("manifest must not be a link or reparse point")
+    if not stat.S_ISREG(info.st_mode):
+        raise PolicyError("manifest must be a regular file")
+    if info.st_size > MANIFEST_MAX_BYTES:
+        raise PolicyError(f"manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+    try:
+        with open(value, "rb") as handle:
+            data = handle.read(MANIFEST_MAX_BYTES + 1)
+    except OSError:
+        raise PolicyError("manifest is missing or unreadable") from None
+    # lstat 之后才变长的也不放过
+    if len(data) > MANIFEST_MAX_BYTES:
+        raise PolicyError(f"manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+    if not data:
+        raise PolicyError("manifest is empty")
+    if data.startswith(b"\xef\xbb\xbf"):
+        raise PolicyError("manifest must not start with a byte order mark")
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise PolicyError("manifest is not valid UTF-8") from None
+    if not text.endswith("\0"):
+        raise PolicyError("manifest's last record is not NUL-terminated")
+    records = text[:-1].split("\0")
+    seen: set[str] = set()
+    for number, record in enumerate(records, 1):
+        problem = manifest_record_problem(record) or ("duplicate" if record in seen else None)
+        if problem:
+            raise PolicyError(f"manifest record {number} is {problem}")
+        seen.add(record)
+    return records
+
+
+def local_paths(root: Path) -> list[str]:
+    manifest = os.environ.get(MANIFEST_ENV)
+    # manifest 描述的只是仓库根；单测传入的临时仓库照旧走真实 Git
+    if manifest is not None and root == ROOT:
+        return read_manifest(manifest)
+    return git(root, *LS_FILES_ARGS).split("\0")
+
+
+def check_local(root: Path | None = None) -> list[str]:
+    root = ROOT if root is None else root
     errors = []
-    paths = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
-    for relative in sorted(set(paths)):
+    for relative in sorted(set(local_paths(root))):
         path = root / relative
         if relative and path.suffix.lower() == ".md" and path.is_file():
             errors.extend(check_checkboxes(path.read_text(encoding="utf-8-sig"), relative))
