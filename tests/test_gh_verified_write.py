@@ -4,6 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -113,6 +114,13 @@ class VerifiedWriteTests(unittest.TestCase):
                 self.assertNotIn("private credential", str(error.exception))
                 self.assertEqual(run.call_count, 1)
 
+    # 唯一一个不依赖 Git 却在 Worker 模式下跳过的用例（.platform/README.md 的契约修正）：
+    # 只在设置了 manifest 变量时跳过；CI 不设它，必须运行。
+    @unittest.skipIf(
+        os.environ.get("ACUVEN_GIT_LS_FILES_MANIFEST") is not None,
+        "Windows MXC (AppContainer) denies final path resolution: "
+        "Path.resolve(strict=True) raises WinError 5; runs in local and CI",
+    )
     @patch.object(writer, "api")
     def test_file_with_spaces_unicode_and_relative_path(self, api):
         with tempfile.TemporaryDirectory(prefix="verified write ") as directory:
