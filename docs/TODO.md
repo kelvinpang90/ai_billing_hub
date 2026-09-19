@@ -1021,6 +1021,29 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 
 > 🔒 Phase 1 测试不通过，不得进入 Phase 2（§137）。
 
+### AIH-TASK-004 —— tenants / projects 身份表、迁移 0005、repository（2026-09-19）
+
+上面的 Tenant / Project **不勾**：本任务只落地两张表的身份与归属字段和数据访问层。§124 的这两项还要管理端客户管理、API、审计、状态模型，§132 的 15 条远没满足。表结构依据 [database-schema.md](database-schema.md)。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `app/models/tenancy.py`：`Tenant` / `Project`。主键 BIGINT（SQLite 走 `with_variant`，与 `app/models/auth.py` 同一写法）；`public_id` 为 `CHAR(36)`、唯一；`tenants.email` 非空且**刻意不唯一**；`projects.tenant_id` 非空、外键 → `tenants.id` `ON DELETE RESTRICT`、带索引 `ix_projects_tenant_id`；`projects.description` 可空
+  - `alembic/versions/20260919_0005_tenants_projects.py`：revision `0005_tenants_projects`，down_revision `0004_password_reset_outbox`。只有两个 `create_table`（索引写在 `projects` 的 `create_table` 里）与按外键反向的两个 `drop_table`，不 ALTER、不碰任何已有表。约束有名字（`uq_tenants_public_id`、`uq_projects_public_id`、`fk_projects_tenant_id`）。文件头附 §132 第 13 条分析（锁表、备份、部署顺序、失败处理、回滚）
+  - `app/repositories/tenancy.py`：只有 `create_tenant`、`get_tenant_by_public_id`、`create_project`、`get_project_for_tenant(tenant_id, public_id)`、`list_projects_for_tenant` 五个函数。同步 `Session`，只 flush 不 commit；时间戳由调用方传入；`public_id` 用 `uuid4` 生成；别的租户的项目与不存在的项目一样返回 `None`；这一层不写任何日志（联系人、邮箱、电话是个人数据）
+  - `app/repositories/__init__.py`：docstring 里「Owns queries and transactions」改为「flushes, never commits」—— 原句与只 flush 的约定相反，其余不动。`alembic/env.py`：只加 import `app.models.tenancy` 那一行
+  - 测试：`tests/backend/test_tenancy_repository.py`（SQLite，10 条：往返读写、可空字段、邮箱不唯一、`public_id` 互不相同且是 uuid4、跨租户返回 `None`、列表隔离、调用方回滚后什么都不留）；`tests/backend/test_migrations.py` 新增 4 条 MySQL 用例（0005 升降只增删这两张表、列集合与可空性 / 类型 / 唯一约束 / 索引 / 外键与删除规则、有项目的租户删不掉、`public_id` 重复插入被拒），既有的列宽比对用例因为导入了新模型，也自动覆盖这两张表
+- [x] **与 spec §75 / §76 字段的差集**（每列留给谁见 database-schema.md「尚未建的列」）：
+  - `tenants` 未建：`account_status`、`billing_status`、`status_version`、`low_balance_threshold`、`currency`
+  - `projects` 未建：`backend_base_url`、`status_webhook_url`、`encrypted_webhook_secret`、`webhook_key_version`、`integration_status`
+  - `projects` 多出：`description`（§57，Kelvin 2026-09-19 裁决，不需要勘误）
+  - 同样不在本任务：API / schema / 服务层、审计写入、`users.tenant_id`、任何凭据
+- [x] **验证程度**：
+  - ⚠️ 编写本分支的会话**没有运行任何检查**（该会话没有命令执行工具）：ruff、pytest、`check_docs.py`、`check_repo_policy.py` 都没跑。`docs.check` / `policy.check` / `tests.process` 由 Worker 之后自己运行，结果不记在本条
+  - ⚠️ `tests.process` 是 `unittest discover -s tests`，不进 `tests/backend`（那里没有 `__init__.py`），对本任务的新代码**没有信号**。lint / format / pytest（含 MySQL 用例）只由 CI 覆盖
+  - ⚠️ 删除规则那条断言有一个没有实测过的前提：MySQL 8 的 `information_schema.REFERENTIAL_CONSTRAINTS.DELETE_RULE` 对显式写了 `ON DELETE RESTRICT` 的外键报 `RESTRICT`（没写规则的报 `NO ACTION`）。CI 上如果只有这一条红，先查这个前提；删除行为本身由「有项目的租户删不掉」那条用例直接验
+- [ ] Worker 跑 `docs.check` / `policy.check` / `tests.process` 全部零退出（未记录；Worker 里的 skipped 不是 passed）
+- [ ] CI 全量运行：lint、format、pytest 含 MySQL 用例，一条都不 skip（未发生）
+- [ ] Codex 审查、Kelvin 合并（未发生）
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）
