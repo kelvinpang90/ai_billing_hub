@@ -87,6 +87,31 @@ Assert-Equal $false (Test-ReviewHeader "$prefix`n正文") '设计前缀不能用
 Assert-Equal $false (Test-ReviewHeader "## 🔍 codex review`n正文") '大小写不符 = 不合法'  # check-docs:allow
 Assert-Equal $false (Test-ReviewHeader '') '空结果 = 不合法'
 
+Write-Host "Add-ReviewerNote"
+$note = '> 审查者：测试'
+foreach ($case in @(
+    @{ Name = '前导空行'; Body = "`n`n$prefix`n正文`n`nAPPROVED: design v2" },
+    @{ Name = 'CRLF'; Body = "$prefix`r`n正文`r`n`r`nAPPROVED: design v2`r`n" },
+    @{ Name = '只有前缀和判定行'; Body = "$prefix`nAPPROVED: design v2" }
+)) {
+    $annotated = Add-ReviewerNote $case.Body $note
+    $lines = $annotated -split '\r?\n'
+    Assert-Equal $true (Test-ReviewHeader $annotated -Design) "$($case.Name)：插入后前缀仍是第一个非空行"
+    Assert-Equal 'APPROVED: design v2' (Get-VerdictLine $lines) "$($case.Name)：判定行不变"
+    $firstIndex = [Array]::IndexOf($lines, ($lines | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1))
+    Assert-Equal $note $lines[$firstIndex + 2] "$($case.Name)：说明紧跟在前缀之后（隔一空行）"
+}
+Assert-Equal '' (Add-ReviewerNote '' $note) '空结果原样返回，不凭空造出前缀'
+
+Write-Host "Remove-ReviewPreamble"
+$withPreamble = "设计我审完了，结论是要改。`n`n$prefix`n正文`n`nREQUEST_CHANGES"
+$stripped = Remove-ReviewPreamble $withPreamble -Design
+Assert-Equal $true (Test-ReviewHeader $stripped -Design) '去掉寒暄后前缀是第一个非空行'
+Assert-Equal "$prefix`n正文`n`nREQUEST_CHANGES" $stripped '前缀之后的内容逐字不变'
+Assert-Equal $false (Test-ReviewHeader (Remove-ReviewPreamble "只有寒暄`nREQUEST_CHANGES" -Design) -Design) '没有前缀行：原样返回，照旧不合法'
+Assert-Equal $false (Test-ReviewHeader (Remove-ReviewPreamble "说明：$prefix 之后`nREQUEST_CHANGES" -Design) -Design) '前缀只出现在句中：不截取'
+Assert-Equal "## 🔍 CODEX REVIEW`nVERDICT: APPROVE" (Remove-ReviewPreamble "好的`n## 🔍 CODEX REVIEW`nVERDICT: APPROVE") '实现闸门同理'
+
 Write-Host "Compare-MaterialParts"
 $before = [ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b' }
 Assert-Equal 0 (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b' })).Count) '逐字相同 = 无变化'

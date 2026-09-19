@@ -22,12 +22,24 @@
 .PARAMETER Post
     审完把结果作为评论发到该 PR / Issue。**判定无效时不会发布。**
 
+.PARAMETER Reviewer
+    谁来审：codex（默认）或 claude。缺省时读环境变量 BILLING_REVIEWER。
+    claude = 一个全新的、只读的 Claude Code 会话（只开 Read / Grep / Glob，不存会话、不接 MCP），
+    材料、判定格式、署名前缀、发布与回读都与 codex 完全相同；发布的评论里会注明实际审查者。
+    用于 Codex 额度不可用的时期（2026-09-19 Kelvin 拍板）。
+
+.PARAMETER Model
+    审查模型。缺省时读环境变量 BILLING_REVIEW_MODEL；再缺省则用该 CLI 自己的默认模型
+    （codex 读 ~/.codex/config.toml，claude 读 Claude Code 的默认模型）。
+
 .EXAMPLE
     .\scripts\codex-review.ps1 -Pr 5
 .EXAMPLE
     .\scripts\codex-review.ps1 -Pr 5 -Post
 .EXAMPLE
     .\scripts\codex-review.ps1 -Issue 12 -Post
+.EXAMPLE
+    .\scripts\codex-review.ps1 -Pr 5 -Post -Reviewer claude -Model claude-opus-5
 #>
 
 # 刻意不用 Mandatory / ParameterSetName：PowerShell 的参数绑定失败发生在脚本
@@ -41,7 +53,11 @@ param(
 
     # 只取材料并做完整性校验就停，不调 Codex。
     # 用来验证取材与编码这条路径，不必每次烧一次审查。
-    [switch]$MaterialOnly
+    [switch]$MaterialOnly,
+
+    # 字符串而非 ValidateSet：参数绑定失败会以退出码 1 结束（见上），校验放到脚本里统一走 2。
+    [string]$Reviewer = '',
+    [string]$Model = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,6 +142,11 @@ function Invoke-GhUtf8 {
 if ($Pr -le 0 -and $Issue -le 0) { Fail "必须指定 -Pr <PR编号> 或 -Issue <设计Issue编号>。" }
 if ($Pr -gt 0 -and $Issue -gt 0) { Fail "-Pr 与 -Issue 不能同时指定。" }
 
+if (-not $Reviewer) { $Reviewer = if ($env:BILLING_REVIEWER) { $env:BILLING_REVIEWER } else { 'codex' } }
+if ($Reviewer -cnotin @('codex', 'claude')) { Fail "-Reviewer 只能是 codex 或 claude，收到：$Reviewer" }
+if (-not $Model -and $env:BILLING_REVIEW_MODEL) { $Model = $env:BILLING_REVIEW_MODEL }
+if ($Model -and $Model -notmatch '^[A-Za-z0-9._:-]{1,64}$') { Fail "-Model 含非法字符：$Model" }
+
 $isDesign = $Issue -gt 0
 $number = if ($isDesign) { $Issue } else { $Pr }
 $kind = if ($isDesign) { 'Design' } else { 'Implementation' }
@@ -140,6 +161,56 @@ function Resolve-CodexPath {
     }
     if (-not $path) { Fail "找不到 codex CLI。PATH 里没有，$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin 下也没有。" }
     return $path
+}
+
+function Resolve-ClaudePath {
+    $path = (Get-Command claude -ErrorAction SilentlyContinue).Source
+    if (-not $path) {
+        $fallback = Join-Path $env:USERPROFILE '.local\bin\claude.exe'
+        if (Test-Path $fallback) { $path = $fallback }
+    }
+    if (-not $path) { Fail "找不到 claude CLI。PATH 里没有，$env:USERPROFILE\.local\bin 下也没有。" }
+    return $path
+}
+
+# 独立审查用的 Claude Code 会话：全新、不落盘会话、不接 MCP、不跑斜杠命令，
+# 工具只有只读的 Read / Grep / Glob —— 与 Codex 的 read-only 沙箱对等，改不了工作区。
+# prompt 走 stdin，输入输出都显式 UTF-8（理由同 Invoke-GhUtf8）。
+function Invoke-ClaudeReview {
+    param(
+        [Parameter(Mandatory)][string]$Executable,
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [string]$ModelName
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $Executable
+    foreach ($a in @(
+        '--print', '--restricted',
+        '--permission-mode', 'dontAsk',
+        '--tools', 'Read,Grep,Glob',
+        '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence',
+        '--output-format', 'text'
+    )) { [void]$psi.ArgumentList.Add($a) }
+    if ($ModelName) { [void]$psi.ArgumentList.Add('--model'); [void]$psi.ArgumentList.Add($ModelName) }
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $proc.StandardInput.Write($Prompt)
+    $proc.StandardInput.Close()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $proc.WaitForExit()
+    if ($proc.ExitCode -ne 0) { Fail "claude 审查失败（退出码 $($proc.ExitCode)）：$($stderrTask.Result)" }
+    return $stdout
 }
 
 $slug = (& git -C $repo remote get-url origin) -replace '^.*github\.com[:/]', '' -replace '\.git$', ''
@@ -523,15 +594,32 @@ VERDICT: REQUEST_CHANGES
 "@
 }
 
-$codex = Resolve-CodexPath
-
 Write-Host "审查目标：$target（$slug）" -ForegroundColor Cyan
-Write-Host "沙箱：read-only —— Codex 改不了任何文件" -ForegroundColor Cyan
-Write-Host ("-" * 60)
-
-& $codex exec -s read-only -C $repo -o $out $prompt
-if ($LASTEXITCODE -ne 0) { Fail "codex exec 失败，退出码 $LASTEXITCODE" }
-if (-not (Test-Path $out)) { Fail "codex 没有产出结果文件：$out" }
+if ($Reviewer -eq 'claude') {
+    $claude = Resolve-ClaudePath
+    Write-Host "审查者：Claude Code（$(if ($Model) { $Model } else { 'CLI 默认模型' })），只读工具 Read / Grep / Glob" -ForegroundColor Cyan
+    Write-Host ("-" * 60)
+    $reviewText = Invoke-ClaudeReview -Executable $claude -Prompt $prompt -WorkingDirectory $repo -ModelName $Model
+    # 原始输出原样另存（仍落在 .gitignore 的 .codex-review-*.md 里）：截掉的寒暄不能无痕消失。
+    $rawOut = $out -replace '\.md$', '.raw.md'
+    [System.IO.File]::WriteAllText($rawOut, $reviewText, [System.Text.UTF8Encoding]::new($false))
+    $trimmed = Remove-ReviewPreamble $reviewText -Design:$isDesign
+    if ($trimmed -cne $reviewText) {
+        $dropped = ($reviewText -split '\r?\n').Count - ($trimmed -split '\r?\n').Count
+        Write-Host "已去掉署名前缀之前的 $dropped 行（原始输出：$rawOut）：" -ForegroundColor Yellow
+        ($reviewText -split '\r?\n') | Select-Object -First $dropped | ForEach-Object { Write-Host "  | $_" -ForegroundColor DarkYellow }
+    }
+    [System.IO.File]::WriteAllText($out, $trimmed, [System.Text.UTF8Encoding]::new($false))
+} else {
+    $codex = Resolve-CodexPath
+    Write-Host "沙箱：read-only —— Codex 改不了任何文件" -ForegroundColor Cyan
+    Write-Host ("-" * 60)
+    $codexArgs = @('exec', '-s', 'read-only', '-C', $repo, '-o', $out)
+    if ($Model) { $codexArgs += @('-m', $Model) }
+    & $codex @codexArgs $prompt
+    if ($LASTEXITCODE -ne 0) { Fail "codex exec 失败，退出码 $LASTEXITCODE" }
+}
+if (-not (Test-Path $out)) { Fail "审查没有产出结果文件：$out" }
 
 # ---- 先校验判定，再发布 ----
 # 顺序不能反：畸形的审查结果一旦发出去就永久留在 PR 上了。
@@ -553,6 +641,20 @@ switch ($result) {
     'INVALID'          { Fail "最后一行不是合法判定，Codex 没按格式输出。未发布。请人工看 $out" }
     'VERSION_UNKNOWN'  { Fail "批准里没有可比对的设计版本。未发布。" }
     'VERSION_MISMATCH' { Fail "批准的设计版本与 Issue 顶部的 v$expectedVersion 不一致 —— 批准的是另一版设计。未发布。" }
+}
+
+# 署名前缀是读取方识别「这是一条独立审查」的机器约定，不随审查者改变；
+# 实际审查者写在前缀下一行，不冒名。只在校验通过之后改写，首行与最后一行都不动。
+if ($Reviewer -eq 'claude') {
+    $who = if ($Model) { $Model } else { 'CLI 默认模型' }
+    $note = "> 审查者：独立、只读的 Claude Code 会话（$who）。Codex 额度不可用期间临时替代（2026-09-19 Kelvin 拍板）；与实现方同属 Claude，先验可能重合（见 WORKFLOW 第 9 节）。"
+    $annotated = Add-ReviewerNote (Get-Content $out -Raw) $note
+    # 改写之后再按读取方的口径校验一遍：前缀仍是第一个非空行、判定行不变，否则不发布。
+    if (-not (Test-ReviewHeader $annotated -Design:$isDesign) -or
+        (Get-VerdictLine ($annotated -split "`n")) -cne $verdictLine) {
+        Fail "插入审查者说明后，署名前缀或判定行不再合法，未发布。请人工看 $out"
+    }
+    [System.IO.File]::WriteAllText($out, $annotated, [System.Text.UTF8Encoding]::new($false))
 }
 
 # ---- 审查后再校验一次基线 ----
