@@ -77,7 +77,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库允许被调度 `AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` / `AIH-TASK-005`。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` / `AIH-TASK-005`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -102,10 +102,16 @@ Codex，合并仍是 Kelvin。
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
 - `ready`：已登记，可以在 Telegram 发「开启」；
-- `done`：已交付（合并并部署）。Worker 只接受 `ready`，所以 `done` 的任务不会被误开第二次。
+- `done`：已交付（合并并部署）；
+- `superseded`：没有交付，由 Kelvin 决定不再做，`tasks.yaml` 里就地写明原因。
 
-控制面推荐「下一个任务」时只从 `ready` 里挑（控制面 ACVDEV-TASK-019），所以**每个任务的收尾 PR 都要把它改成 `done`**，
-否则控制面会一直推荐一个已经做完的任务。`AIH-TASK-002` 到 `AIH-TASK-005` 已于 2026-09-19 改成 `done`。
+Worker 只接受 `ready`，所以另外两种任务都不会被误开。控制面推荐「下一个任务」时只从 `ready` 里挑（控制面
+ACVDEV-TASK-019），所以任务合并部署之后，**要由管理员单独开一个收尾 PR 把它改成 `done`**（与 #93 那类
+close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `.platform/`，合并前也还没有部署。漏改的话，
+控制面会一直推荐一个已经做完的任务。
+
+2026-09-19 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）是 `done`；
+`AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
 
 `AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
 `tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`

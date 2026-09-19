@@ -1245,7 +1245,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [ ] Kelvin 合并本契约（未发生）
 - [ ] 控制面 registry 登记、Worker host-local 配置、Worker 预检（含针对 `AIH-TASK-002` 校验 `allowed_change_paths`）（未发生，不在本仓库）
 - [ ] Kelvin 对启用 Worker 的独立批准（未发生；合并本契约不算）
-- [ ] `AIH-TASK-002` 的 live run：Worker 中的 Claude 产出 `docs/openclaw-worker-pilot.md` 并开 Draft PR（未发生）
+- [x] 不再做（Kelvin 2026-09-19 决定）：`AIH-TASK-002` 的 live run——它要验证的端到端链已由 `AIH-TASK-004` / `AIH-TASK-005` 的真实 run 验证，`tasks.yaml` 里标为 `superseded`；`docs/openclaw-worker-pilot.md` 从未产出
 
 ### AIH-TASK-003 —— Worker 模式消费只读 Git manifest（2026-09-18）
 
@@ -1259,7 +1259,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [ ] Worker 跑 `docs.check` / `policy.check` / `tests.process` 全部零退出（未记录；⚠️ Worker 里的 skipped 不是 passed）
 - [ ] CI 全量运行（不设该变量，那些 skip 与 MXC 用例都要真跑）
 - [ ] Codex 审查、Kelvin 合并（未发生）
-- [ ] 合并之后重试 `AIH-TASK-002`（未发生；本条不声称 `AIH-TASK-003` 或该重试已通过）
+- [x] 不再做（Kelvin 2026-09-19 决定）：合并之后重试 `AIH-TASK-002`——`AIH-TASK-003` 已由 #81 合并，002 标为 `superseded`，理由同上；本条不声称 002 的重试通过过
 
 ### Worker 模式下 `tests.backend` 找不到 bash（2026-09-19）
 
@@ -1300,7 +1300,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 
 控制面 ACVDEV-TASK-019 要在 run 结束时推荐下一个任务，只从 `tasks.yaml` 里 `status: ready` 的任务里挑。原先做完的任务仍是 `ready`，会被反复推荐。
 
-- [x] `tasks.yaml`：`AIH-TASK-002` 到 `AIH-TASK-005` 改成 `status: done`，文件头注释写明两个取值；`.platform/README.md` 写明规则：每个任务的收尾 PR 要把它改成 `done`。本机用 Worker 自己的 `worker.contracts.load_task` 加载，整份文件照常解析，四个任务都以 `task is not ready` 被拒——`done` 同时防止已交付的任务被误开第二次
+- [x] `tasks.yaml`：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）改成 `status: done`；`AIH-TASK-002` 从未交付，按 Kelvin 的决定改成 `status: superseded` 并就地写明原因（Claude Code 审查 #94 指出，最初误标成了 `done`）。文件头注释写明三个取值；`.platform/README.md` 写明规则：合并部署之后由管理员单独开收尾 PR 改成 `done`（Worker 改不了 `.platform/`）。本机用 Worker 自己的 `worker.contracts.load_task` 加载，整份文件照常解析，四个任务都以 `task is not ready` 被拒
 - [ ] 控制面 ACVDEV-TASK-019（任务快照、推荐规则、回复补全、Telegram 主动推送）合并部署后，用下一个真实任务验证推荐与推送（未发生）
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
