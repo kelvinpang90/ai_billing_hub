@@ -1205,6 +1205,17 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [ ] Codex 审查、Kelvin 合并（未发生）
 - [ ] 合并之后重试 `AIH-TASK-002`（未发生；本条不声称 `AIH-TASK-003` 或该重试已通过）
 
+### Worker 模式下 `tests.backend` 找不到 bash（2026-09-19）
+
+`AIH-TASK-004` 的第一次 run（`150ccdba`）以 `checks_failed` 失败，实现本身没问题。Worker 不记录是哪一项检查失败，下面是复现出来的：
+
+- [x] **根因**：Worker 给检查命令的 `PATH` 只有 pinned Python 所在目录与 `System32`，没有 bash；`tests/backend/test_deploy.py` 里 17 个真跑 `deploy.sh` 函数的用例在找不到 bash 时 `assert` 失败。这是 Worker 环境与 `tests.backend` 的既有不兼容，**任何带 `tests.backend` 的任务都会撞上**，与 `AIH-TASK-004` 的代码无关（该 run 的工作树在有 bash 的环境下 452 passed、0 failed）
+- [x] **修复**：四处 `shutil.which("bash")` + `assert` 收成 `require_bash()`；**只在**设了 `ACUVEN_GIT_LS_FILES_MANIFEST` **且**找不到 bash 时以固定原因 skip，本地缺 bash 仍然失败，CI 不设该变量照常全跑。新增三条用例钉住这三种组合。做法与 `AIH-TASK-003` 的 MXC 条件 skip 同一口径
+- [x] 验证（本地，**模拟 Worker 环境**：清空环境、`PATH` 只留 Python 目录与 `System32`、设 manifest 变量）：修复前 17 failed / 418 passed / 13 skipped，17 个失败全是「需要 bash」；修复后 0 failed / 421 passed / 30 skipped。**真实的 MXC 隔离没有模拟**，以 Worker 重跑为准
+- [x] 验证（本地，正常环境，有 Git Bash、不设变量）：438 passed / 13 skipped，Worker skip 原因一次都没出现
+- [ ] 合并后在 Worker 上重跑 `AIH-TASK-004`（未发生）
+- ⚠️ **Worker 里 skipped 不是 passed**：这 17 个用例在 Worker 里不再有信号，只由 CI 覆盖。另：`AIH-TASK-001` 是只跑检查、不开 PR 的任务，而当前 Worker 只接受 `creates_branch` / `creates_pull_request` 为 `true` 且有 `allowed_change_paths` 的开发任务，所以它在这个 Worker 上跑不了（run `3a699c91` 以 `invalid_contract` 失败）。留在契约里会误导，待清理（删掉该任务，或让 Worker 支持只读检查任务）
+
 ---
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
