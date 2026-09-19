@@ -15,6 +15,8 @@ from app.core.config import get_settings
 # 没被 import 的表当成「已删除」，生成一个 drop table 的迁移。
 from app.models import (
     auth as _auth_models,  # noqa: F401  (registers users/refresh_tokens/audit_logs)
+)
+from app.models import (
     tenancy as _tenancy_models,  # noqa: F401  (registers tenants/projects)
 )
 from app.models.base import Base  # noqa: F401  (imported for metadata side effects)
