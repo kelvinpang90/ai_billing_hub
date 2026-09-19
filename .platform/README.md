@@ -255,13 +255,21 @@ process_boundary_required` 要求它在进程边界上真的被强制（作业�
 | 命令 | MXC 里 | 原因 |
 | --- | --- | --- |
 | `docs.check` / `policy.check` / `tests.process` | 能跑 | 纯 Python |
-| `lint.check` / `format.check` | 跑不起来 | `python -m ruff` 要再拉起 `ruff.exe`，进程初始化失败（`0xC0000142`） |
-| `tests.backend` | 跑不起来 | 一 import SQLAlchemy 就走到 `platform.machine()` → WMI 查询，AppContainer 里整进程崩溃（`0xC06D007E`） |
+| `lint.check` / `format.check` | 默认跑不起来；本机 Worker 按命令放开 Win32k 后能跑 | `ruff.exe` 导入 user32/gdi32，MXC 默认的 Win32k 禁用缓解让它初始化失败（`0xC0000142`）。只关掉这一条缓解、其余不变时两条都通过（实测，含 `-I` 形式） |
+| `tests.backend` | 跑不起来 | 默认一 import SQLAlchemy 就走到 `platform.machine()` → WMI 查询，整进程崩溃（`0xC06D007E`）；放开 Win32k 后仍有 5 个 API 测试文件挂在 `socket.socketpair()` 上（MXC 禁 loopback），另有 bash 用例 |
 | `scripts.verdict_tests` | 未实测 | 没有任何会写仓库的任务登记它 |
 
-所以会写仓库的任务目前只登记前三条，后三条交给 CI。这是 Worker 环境的限制，仓库侧改不了；
-Worker 环境修好之前，**不要**把后三条加回任何任务的 `allowed_commands`，否则 run 必然
-`checks_failed`。
+**lint / format 的放开（控制面 ACVDEV-TASK-017）**：控制面给本机 Worker 配置加了 `check_win32k`，只对**固定了
+完整定义**（executable + 逐字 args，首参数必须是 Python 隔离模式 `-I`）的检查关掉 Win32k 这一条缓解；网络、
+loopback、文件系统、capabilities 都不变。所以 `commands.yaml` 里这两条写成 `python -I -m ruff ...`，本机配置
+里固定的定义必须与之逐字一致 —— 改其中一边不改另一边，run 在任何检查之前以 `policy_violation` 失败。
+
+⚠️ 这件事**要等下面几样都成立**才能把 `lint.check` / `format.check` 加进会写仓库任务的 `allowed_commands`：
+控制面 ACVDEV-TASK-017 已合并、本机 Worker 部署副本已更新到该提交、本机配置已固定这两条定义、并在本机
+MXC 里实测过一次两条都零退出。本文件不声称这些已经发生。
+
+`tests.backend` 与 `scripts.verdict_tests` 仍只交给 CI；**不要**把它们加进任何任务的 `allowed_commands`，
+否则 run 必然 `checks_failed`。
 
 ### Worker 模式的 Git 输入
 
