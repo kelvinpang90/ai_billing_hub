@@ -118,10 +118,14 @@ commands:
     # ⚠️ 与 tests.backend 同理，Worker 里的 skipped 不是 passed：CI 不设该变量、全量运行，
     #    准入以 CI 为准。
 
+  # lint.check / format.check 用 Python 隔离模式 `-I`（WORKFLOW §7 那两条的等价写法）：`python -m` 会把 cwd
+  # 放在 sys.path 最前面，worktree 里的 ruff.py 能顶替真正的包。控制面 ACVDEV-TASK-017 只给固定了完整定义、
+  # 且首参数是 `-I` 的检查放开 MXC 的 Win32k 缓解（ruff.exe 需要），并逐字比对这里的 executable + args ——
+  # 改这两条的写法，本机 Worker 配置里固定的定义必须同步改，否则 run 以 policy_violation 失败。
   - id: lint.check
     description: 后端 lint（ruff check，只报告不改写）
     executable: python
-    args: ["-m", "ruff", "check", "."]
+    args: ["-I", "-m", "ruff", "check", "."]
     working_directory: repository_root
     risk: low
     timeout_seconds: 300
@@ -131,7 +135,7 @@ commands:
   - id: format.check
     description: 后端格式检查（ruff format --check，只报告不改写）
     executable: python
-    args: ["-m", "ruff", "format", "--check", "."]
+    args: ["-I", "-m", "ruff", "format", "--check", "."]
     working_directory: repository_root
     risk: low
     timeout_seconds: 300
