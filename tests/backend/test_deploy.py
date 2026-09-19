@@ -893,53 +893,10 @@ IMAGES = """2026-09-16 12:53:01 +0800 +08\tghcr.io/o/r:new3
 IN_USE = "ghcr.io/o/r:pinned\nmysql:8.4\n"
 
 
-WORKER_NO_BASH_REASON = (
-    "OpenClaw Worker runs checks with a PATH of only the pinned Python directory and System32, "
-    "which has no bash; skipped only when ACUVEN_GIT_LS_FILES_MANIFEST is set and bash is "
-    "missing, local and CI run this case"
-)
-
-
-def require_bash() -> str:
-    """Return bash for the cases that run deploy.sh functions for real.
-
-    ⚠️ 只在 Worker 模式（设了 `ACUVEN_GIT_LS_FILES_MANIFEST`）**且**确实找不到 bash 时 skip。
-    本地没装 bash 仍然直接失败 —— 那是开发机缺工具，不该被静默跳过；CI 不设该变量，
-    这些用例照常全跑。
-    """
-    bash = shutil.which("bash")
-    if bash is None and "ACUVEN_GIT_LS_FILES_MANIFEST" in os.environ:
-        pytest.skip(WORKER_NO_BASH_REASON)
-    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
-    return bash
-
-
-def test_missing_bash_is_skipped_only_in_worker_mode(monkeypatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    monkeypatch.setenv("ACUVEN_GIT_LS_FILES_MANIFEST", "manifest")
-
-    with pytest.raises(pytest.skip.Exception, match="ACUVEN_GIT_LS_FILES_MANIFEST"):
-        require_bash()
-
-
-def test_missing_bash_still_fails_outside_worker_mode(monkeypatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    monkeypatch.delenv("ACUVEN_GIT_LS_FILES_MANIFEST", raising=False)
-
-    with pytest.raises(AssertionError, match="需要 bash"):
-        require_bash()
-
-
-def test_present_bash_is_used_even_in_worker_mode(monkeypatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/bash")
-    monkeypatch.setenv("ACUVEN_GIT_LS_FILES_MANIFEST", "manifest")
-
-    assert require_bash() == "/usr/bin/bash"
-
-
 def run_prune(tmp_path, fail_images: bool = False, **env):
     """把 deploy.sh 里的 prune_old_images 原样抠出来跑，返回被删掉的镜像列表。"""
-    bash = require_bash()
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
 
     body = re.search(
         r"^prune_old_images\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S
@@ -1380,7 +1337,8 @@ echo "DEPLOY CONTINUES"
 
 def run_record_last_good(tmp_path, state_path: str, **env):
     """把 deploy.sh 里的 record_last_good 原样抠出来跑。"""
-    bash = require_bash()
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
 
     body = re.search(
         r"^record_last_good\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S
@@ -1470,7 +1428,8 @@ ENV_BEFORE = (
 
 def run_pin_deployed_images(tmp_path, env_path: str, **env):
     """把 deploy.sh 里的 pin_deployed_images 原样抠出来跑。"""
-    bash = require_bash()
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
 
     body = re.search(
         r"^pin_deployed_images\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S
@@ -1693,7 +1652,8 @@ def run_start_database(
     tmp_path, network_changed: bool = False, unrelated_failure: str | None = None
 ):
     """把 deploy.sh 里的 start_database 原样抠出来跑，返回 (stdout, 调用序列)。"""
-    bash = require_bash()
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
 
     body = re.search(
         r"^start_database\(\) \{.*?^\}", SCRIPT.read_text(encoding="utf-8"), re.M | re.S

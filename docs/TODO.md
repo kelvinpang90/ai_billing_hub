@@ -1239,8 +1239,8 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [x] 合并后在 Worker 上重跑 `AIH-TASK-004`：run `b603c5d3` **仍然 `checks_failed`**，见下面的更正
 - [x] ⚠️ **更正（同日，上面「根因」一条是错的）**：模拟环境给**所有**检查都设了 manifest 变量，而真实 Worker 只给本地配置 `check_inputs` 里声明的 `policy.check` / `tests.process` 设 —— `tests.backend` 拿不到它，所以 #83 的 skip 在 Worker 里**从不生效**（对本地与 CI 无害，也没有解决任何问题）。改用 Worker 自己的 `build_guarded_argv` 在真实 MXC 里逐项实测：`docs.check` 能跑；`lint.check` / `format.check` 因 `ruff.exe` 进程初始化失败（`0xC0000142`）跑不起来；`tests.backend` 一 import SQLAlchemy 就走到 `platform.machine()` → WMI 查询，AppContainer 里整进程崩溃（`0xC06D007E`），根本到不了那 17 个 bash 用例。检查按顺序且遇错即停，所以**两次 run 应该都停在第 4 项 `lint.check`**。实现本身没问题：`b603c5d3` 的工作树在 MXC 外六项全过（后端 433 passed / 34 skipped / 0 failed）
 - [x] **处置**：`AIH-TASK-004` 的 `allowed_commands` 收窄为 `docs.check` / `policy.check` / `tests.process`，后三项交给 CI；`.platform/README.md` 新增「在 Worker 的 MXC 里跑不起来的检查」一节。这是 Worker 环境的限制，仓库侧改不了
-- [ ] #83 的 `require_bash()` skip 目前是死代码：Worker 环境修好（或给 `tests.backend` 声明 manifest 输入）之前不会触发。保留还是撤回，待定
-- [ ] 按收窄后的契约再跑一次 `AIH-TASK-004`（未发生）
+- [x] #83 的 `require_bash()` skip 目前是死代码：Worker 环境修好（或给 `tests.backend` 声明 manifest 输入）之前不会触发。保留还是撤回，待定 —— **已撤回（Kelvin 批准，2026-09-19）**：`tests/backend/test_deploy.py` 恢复为 #83 之前的内容。本机实测证明 `tests.backend` 在 Worker 的 MXC 里即使放开 Win32k 也跑不了——5 个 API 测试文件的 `TestClient` 要 `socket.socketpair()`，而 MXC 禁回环，调用直接挂住；所以这条 skip 永远不会有用武之地
+- [x] 按收窄后的契约再跑一次 `AIH-TASK-004`：run `7671aead` 开出 PR #85，CI 第一次只挂 ruff I001（Worker 在 MXC 里跑不了 lint），补一个提交后 CI 全绿、Codex APPROVE，Squash 合并并部署，生产 `alembic_version = 0005_tenants_projects`。控制面因合并的 head 带了补丁提交，按规则把 run 结算为 `failed:merge_sha_mismatch`（只影响记账）
 - ⚠️ **Worker 里 skipped 不是 passed**：这 17 个用例在 Worker 里不再有信号，只由 CI 覆盖。另：`AIH-TASK-001` 是只跑检查、不开 PR 的任务，而当前 Worker 只接受 `creates_branch` / `creates_pull_request` 为 `true` 且有 `allowed_change_paths` 的开发任务，所以它在这个 Worker 上跑不了（run `3a699c91` 以 `invalid_contract` 失败）。留在契约里会误导，待清理（删掉该任务，或让 Worker 支持只读检查任务）
 
 ---
