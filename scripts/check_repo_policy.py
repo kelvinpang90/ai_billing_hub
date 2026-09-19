@@ -4,14 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SHA_RE = re.compile(r"[0-9a-f]{40}")
+# Worker 模式：控制面把 `git ls-files -z --cached --others --exclude-standard` 的原始输出
+# 写成只读文件，绝对路径放在这个变量里。契约见 .platform/README.md「Worker 模式的 Git 输入」
+MANIFEST_ENV = "ACUVEN_GIT_LS_FILES_MANIFEST"
+MANIFEST_MAX_BYTES = 1_000_000
 SECTIONS = (
     "任务", "改了什么", "触碰的不变量 / REQ", "如何验证", "自检",
     "已知未做 / 留给后续", "TODO 影响",
@@ -65,10 +73,82 @@ def check_checkboxes(body: str, label: str) -> list[str]:
     return errors
 
 
+def manifest_record_problem(record: str) -> str | None:
+    if not record:
+        return "is empty"
+    if record.startswith("/"):
+        return "is absolute"
+    if "\\" in record or ":" in record:
+        return "contains a backslash or colon"
+    if any(unicodedata.category(char) == "Cc" for char in record):
+        return "contains a control character"
+    if any(part in {"", ".", ".."} for part in record.split("/")):
+        return "has an empty, . or .. segment"
+    return None
+
+
+def read_manifest(value: str) -> list[str]:
+    """Parse the read-only `git ls-files -z` manifest; anything unexpected is a PolicyError.
+
+    读不懂就 fail closed，绝不退化成「当作没有文件」—— 那等于检查静默通过。
+    报错不回显路径或记录内容：两者都来自宿主机。
+    """
+    if (not value or any(unicodedata.category(char) == "Cc" for char in value)
+            or not Path(value).is_absolute() or os.path.normpath(value) != value):
+        raise PolicyError(f"{MANIFEST_ENV} must be an absolute, normalized path")
+    try:
+        info = os.lstat(value)
+    except (OSError, ValueError):
+        raise PolicyError("manifest is missing or unreadable") from None
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise PolicyError("manifest must not be a link or reparse point")
+    if not stat.S_ISREG(info.st_mode):
+        raise PolicyError("manifest must be a regular file")
+    if info.st_size > MANIFEST_MAX_BYTES:
+        raise PolicyError(f"manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+    try:
+        # O_NOFOLLOW 只在 POSIX 上有；Windows 上靠上面的 lstat 挡链接与 reparse point
+        fd = os.open(value, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            data = handle.read(MANIFEST_MAX_BYTES + 1)
+    except (OSError, ValueError):
+        raise PolicyError("manifest is missing or unreadable") from None
+    if not stat.S_ISREG(opened.st_mode):
+        raise PolicyError("manifest must be a regular file")
+    if len(data) > MANIFEST_MAX_BYTES:
+        raise PolicyError(f"manifest exceeds {MANIFEST_MAX_BYTES} bytes")
+    if data.startswith(codecs.BOM_UTF8):
+        raise PolicyError("manifest must not start with a byte order mark")
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise PolicyError("manifest is not valid UTF-8") from None
+    # git ls-files -z：每条记录以 NUL 结尾。空文件、缺结尾 NUL、空记录都是分帧错误
+    if not text.endswith("\0"):
+        raise PolicyError("manifest records must each end with NUL")
+    records = text[:-1].split("\0")
+    seen = set()
+    for number, record in enumerate(records, 1):
+        problem = manifest_record_problem(record)
+        if problem:
+            raise PolicyError(f"manifest record {number} {problem}")
+        if record in seen:
+            raise PolicyError(f"manifest record {number} is a duplicate")
+        seen.add(record)
+    return records
+
+
+def listed_paths(root: Path) -> list[str]:
+    # 只有检查仓库根时才读 manifest；单测传入的临时仓库根照旧走真实 Git
+    if MANIFEST_ENV in os.environ and root == ROOT:
+        return read_manifest(os.environ[MANIFEST_ENV])
+    return git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
+
+
 def check_local(root: Path = ROOT) -> list[str]:
     errors = []
-    paths = git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
-    for relative in sorted(set(paths)):
+    for relative in sorted(set(listed_paths(root))):
         path = root / relative
         if relative and path.suffix.lower() == ".md" and path.is_file():
             errors.extend(check_checkboxes(path.read_text(encoding="utf-8-sig"), relative))
@@ -239,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (args.body_file or args.response_file or args.event_file) and (args.base or args.head):
         parser.error("--base/--head requires a body or response")
     try:
-        errors = check_local()
+        errors = check_local(ROOT)
         if args.event_file:
             event = json.loads(args.event_file.read_text(encoding="utf-8-sig"))
             if not isinstance(event, dict):

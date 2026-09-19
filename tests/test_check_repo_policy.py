@@ -12,15 +12,32 @@ from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
+import os
+import stat
 import subprocess
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_repo_policy.py"
 SPEC = importlib.util.spec_from_file_location("check_repo_policy", SCRIPT)
 policy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(policy)
+
+# Worker 里刻意没有真实 Git，只给只读 manifest。要建临时仓库或读提交图的用例只在
+# 设置了该变量时 skip；CI 不设它，全量运行。下面的 ManifestTests 不需要 Git，两边都跑。
+GIT_SKIP_REASON = (
+    "needs real Git; skipped only when ACUVEN_GIT_LS_FILES_MANIFEST is set "
+    "(Worker mode has no Git); CI leaves it unset and runs this case"
+)
+
+
+def require_git() -> None:
+    if policy.MANIFEST_ENV in os.environ:
+        raise unittest.SkipTest(GIT_SKIP_REASON)
+
 
 GIT_IDENTITY = (
     "-c", "user.email=test@example.com",
@@ -41,6 +58,7 @@ class TempRepo:
     """A throwaway repo with two commits, so ancestry and file:line can be checked for real."""
 
     def __enter__(self) -> "TempRepo":
+        require_git()
         self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self._tmp.name)
         git(self.root, "init", "-q", "-b", "main")
@@ -329,6 +347,7 @@ class ValidateCommitTests(unittest.TestCase):
 # 这里对着真实仓库跑（check_local 与 git 都以 ROOT 为根），不 mock。
 
 def real_repo_shas() -> tuple[str, str]:
+    require_git()
     root = policy.ROOT
     head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD~1"], capture_output=True, text=True, check=True).stdout.strip()
@@ -431,6 +450,168 @@ class LocalAndSectionTests(unittest.TestCase):
     def test_duplicate_section_is_reported(self):
         _, errors = policy.sections("## 任务\n\na\n\n## 任务\n\nb\n")
         self.assertEqual(errors, ["duplicate PR section: 任务"])
+
+
+# --------------------------------------------------------------------------
+# Worker 模式的 manifest（AIH-TASK-003）：读不懂一律 fail closed。退化成「当作没有文件」
+# 等于检查静默通过。这些用例不需要 Git（Git 被换成一碰就失败的替身），两种模式都跑。
+# --------------------------------------------------------------------------
+
+GIT_LS_FILES = ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+
+
+def no_git(*args, **kwargs):
+    raise AssertionError("Git must not be started when the manifest is consumed")
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.root = self.tmp / "repo"
+        self.root.mkdir()
+        self.manifest = self.tmp / "manifest"
+        # manifest 只在检查仓库根时生效，所以把「仓库根」换成这个临时目录
+        for patcher in (
+            patch.object(policy, "ROOT", self.root),
+            patch.object(policy.subprocess, "run", side_effect=no_git),
+            patch.dict(os.environ, {policy.MANIFEST_ENV: str(self.manifest)}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_main(self, argv: list[str]) -> tuple[int, str]:
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = policy.main(argv)
+        return code, err.getvalue()
+
+    def check_error(self, data: bytes | None = None) -> str:
+        if data is not None:
+            self.manifest.write_bytes(data)
+        with self.assertRaises(policy.PolicyError) as ctx:
+            policy.check_local(self.root)
+        message = str(ctx.exception)
+        # 报错不回显宿主机路径
+        self.assertNotIn(str(self.tmp), message)
+        return message
+
+    def test_unset_variable_still_runs_git_ls_files(self):
+        del os.environ[policy.MANIFEST_ENV]
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(policy.subprocess, "run", return_value=done) as run:
+            self.assertEqual(policy.check_local(self.root), [])
+            self.assertEqual(run.call_args.args[0], ["git", "-C", str(self.root), *GIT_LS_FILES])
+            run.reset_mock()
+            self.assertEqual(self.run_main([])[0], 0)
+            self.assertEqual(run.call_args.args[0], ["git", "-C", str(self.root), *GIT_LS_FILES])
+
+    def test_temporary_repo_root_does_not_use_manifest(self):
+        # 变量设着、manifest 却不存在：真去读就会报错，所以不报错即证明没读
+        other = self.tmp / "other"
+        other.mkdir()
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(policy.subprocess, "run", return_value=done) as run:
+            self.assertEqual(policy.check_local(other), [])
+        self.assertEqual(run.call_args.args[0], ["git", "-C", str(other), *GIT_LS_FILES])
+
+    def test_manifest_is_scanned_without_starting_git(self):
+        (self.root / "docs").mkdir()
+        (self.root / "docs" / "bad one.md").write_text("- [~] x\n", encoding="utf-8")
+        (self.root / "clean.md").write_text("- [x] ok\n", encoding="utf-8")
+        (self.root / "notes.txt").write_text("- [~] not markdown\n", encoding="utf-8")
+        # 不在 manifest 里的文件（相当于被 .gitignore 挡住）不查
+        (self.root / "ignored.md").write_text("- [~] x\n", encoding="utf-8")
+        self.manifest.write_bytes(b"clean.md\0docs/bad one.md\0notes.txt\0")
+        self.assertEqual(policy.check_local(self.root), ["docs/bad one.md:1: unsupported task checkbox [~]"])
+
+    def test_records_match_git_ls_files_z_one_to_one(self):
+        records = ["docs/中文 b.md", "a b.txt", ".github/workflows/ci.yml"]
+        self.manifest.write_bytes("".join(r + "\0" for r in records).encode("utf-8"))
+        self.assertEqual(policy.read_manifest(str(self.manifest)), records)
+
+    def test_main_exit_codes_violation_1_unreadable_manifest_2(self):
+        (self.root / "bad.md").write_text("- [~] x\n", encoding="utf-8")
+        self.manifest.write_bytes(b"bad.md\0")
+        self.assertEqual(self.run_main([])[0], 1)
+        self.manifest.write_bytes(b"bad.md")
+        code, err = self.run_main([])
+        self.assertEqual(code, 2)
+        self.assertNotIn(str(self.tmp), err)
+        self.assertNotIn("bad.md", err)
+
+    def test_manifest_path_must_be_absolute_and_normalized(self):
+        self.manifest.write_bytes(b"a.md\0")
+        values = [
+            "", "manifest",
+            str(self.tmp) + os.sep + "." + os.sep + "manifest",
+            str(self.tmp / "x" / ".." / "manifest"),
+            str(self.manifest) + os.sep,
+        ]
+        if os.altsep:
+            values.append(str(self.manifest).replace(os.sep, os.altsep))
+        for value in values:
+            with self.subTest(value=value), patch.dict(os.environ, {policy.MANIFEST_ENV: value}):
+                self.check_error()
+
+    def test_missing_directory_or_unreadable_manifest(self):
+        self.check_error()
+        self.manifest.mkdir()
+        self.check_error()
+        self.manifest.rmdir()
+        self.manifest.write_bytes(b"a.md\0")
+        denied = PermissionError(13, "denied", str(self.manifest))
+        with patch.object(policy.os, "open", side_effect=denied):
+            self.check_error()
+
+    def test_link_or_reparse_point_is_rejected(self):
+        target = self.tmp / "target"
+        target.write_bytes(b"a.md\0")
+        try:
+            self.manifest.symlink_to(target)
+        except (OSError, NotImplementedError):
+            pass  # Windows 上无权建链接时走不到这里；下面两个替身覆盖同一分支
+        else:
+            self.check_error()
+        for fake in (
+            types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_size=5, st_file_attributes=0),
+            types.SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_size=5,
+                                  st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT),
+        ):
+            with self.subTest(mode=fake.st_mode), patch.object(policy.os, "lstat", return_value=fake):
+                self.check_error()
+
+    def test_size_limit_is_1000000_bytes(self):
+        limit = policy.MANIFEST_MAX_BYTES
+        self.assertEqual(limit, 1_000_000)
+        self.manifest.write_bytes(b"a" * (limit - 1) + b"\0")
+        self.assertEqual(policy.read_manifest(str(self.manifest)), ["a" * (limit - 1)])
+        self.check_error(b"a" * limit + b"\0")
+
+    def test_invalid_utf8_and_bom_are_rejected(self):
+        for data in (b"\xff.md\0", b"\xed\xa0\x80.md\0", b"\xc0\xae.md\0", "﻿a.md\0".encode("utf-8")):
+            with self.subTest(data=data):
+                self.check_error(data)
+
+    def test_nul_framing_errors_are_rejected(self):
+        for data in (b"", b"a.md", b"a.md\0\0", b"\0a.md\0", b"\0"):
+            with self.subTest(data=data):
+                self.check_error(data)
+
+    def test_ambiguous_records_are_rejected_without_echoing_them(self):
+        for record in (
+            "/leak/secret-name.md", "../secret-name.md", "docs/../secret-name.md", "./secret-name.md",
+            "docs/./secret-name.md", "docs//secret-name.md", "docs/secret-name/", "docs\\secret-name.md",
+            "C:secret-name.md", "docs/secret-name\t.md", "docs/secret-name\n.md",
+            "docs/secret-name\x7f.md", "docs/secret-name\x85.md",
+        ):
+            with self.subTest(record=record):
+                # 前面放一条合法记录：一条坏记录就让整份 manifest 作废
+                self.assertNotIn("secret-name", self.check_error(b"ok.md\0" + record.encode("utf-8") + b"\0"))
+
+    def test_duplicate_records_are_rejected(self):
+        self.check_error(b"a.md\0docs/b.md\0a.md\0")
 
 
 # --------------------------------------------------------------------------
