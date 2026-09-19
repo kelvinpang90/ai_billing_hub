@@ -229,15 +229,16 @@ tasks:
       - tests/backend/test_migrations.py
       - tests/backend/test_tenancy_repository.py
       - docs/TODO.md
-    # 第一次在 Worker 里跑后端三项。tests.backend 在 Worker 里没有 BILLING_TEST_* 服务，
-    # 迁移与 MySQL 用例必然 skip —— 准入以 CI 为准（CI 把任何 skipped 判失败）。
+    # 只跑在 Worker 的 MXC 里实测能运行的三项。lint.check / format.check / tests.backend 在 MXC 里
+    # 跑不起来（2026-09-19 用 Worker 自己的 build_guarded_argv 实测）：`python -m ruff` 要再拉起
+    # ruff.exe，进程初始化失败（0xC0000142）；tests.backend 一 import sqlalchemy 就走到
+    # platform.machine() → WMI 查询，AppContainer 里整进程崩溃（0xC06D007E）。前两次 run
+    # （150ccdba、b603c5d3）都因此 checks_failed，实现本身在 MXC 外全部通过。
+    # 这三项由 CI 覆盖（CI 全量运行、起真 MySQL，并把任何 skipped 判失败），准入以 CI 为准。
     allowed_commands:
       - docs.check
       - policy.check
       - tests.process
-      - lint.check
-      - format.check
-      - tests.backend
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1

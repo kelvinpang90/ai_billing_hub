@@ -247,6 +247,22 @@ process_boundary_required` 要求它在进程边界上真的被强制（作业�
 「有任何 skipped」判成失败。**不得把 skipped 读成 passed。**
 准入判定以 GitHub 上的 CI 为准。
 
+### 在 Worker 的 MXC 里跑不起来的检查
+
+`commands.yaml` 里登记了七条，但当前 Worker 的 MXC（AppContainer）里**只有纯 Python 的那几条能跑**。
+2026-09-19 用 Worker 自己的 `build_guarded_argv` 在 MXC 里实测：
+
+| 命令 | MXC 里 | 原因 |
+| --- | --- | --- |
+| `docs.check` / `policy.check` / `tests.process` | 能跑 | 纯 Python |
+| `lint.check` / `format.check` | 跑不起来 | `python -m ruff` 要再拉起 `ruff.exe`，进程初始化失败（`0xC0000142`） |
+| `tests.backend` | 跑不起来 | 一 import SQLAlchemy 就走到 `platform.machine()` → WMI 查询，AppContainer 里整进程崩溃（`0xC06D007E`） |
+| `scripts.verdict_tests` | 未实测 | 没有任何会写仓库的任务登记它 |
+
+所以会写仓库的任务目前只登记前三条，后三条交给 CI。这是 Worker 环境的限制，仓库侧改不了；
+Worker 环境修好之前，**不要**把后三条加回任何任务的 `allowed_commands`，否则 run 必然
+`checks_failed`。
+
 ### Worker 模式的 Git 输入
 
 Worker 里**刻意没有真实 Git**。控制面（ACVDEV-TASK-005）改为预先生成
