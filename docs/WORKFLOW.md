@@ -287,6 +287,20 @@ BILLING_TEST_REDIS_URL="redis://127.0.0.1:16379/0" python -m pytest
 - **审查输入是一个可检视的文件**，事后能确认它到底看了什么，而不是只能相信它「取到了正确的 diff」
 - 少几轮 agent 往返，快
 
+### 换审查者 / 换模型
+
+```powershell
+# 用独立、只读的 Claude Code 会话代替 Codex（Codex 额度不可用期间，2026-09-19 Kelvin 拍板）
+.\scripts\codex-review.ps1 -Pr 5 -Post -Reviewer claude -Model claude-opus-5
+
+# 也可以用环境变量设成默认值：BILLING_REVIEWER=claude、BILLING_REVIEW_MODEL=claude-opus-5
+```
+
+- `-Reviewer`：`codex`（默认）或 `claude`。`-Model`：审查模型。缺省时 codex 用 `~/.codex/config.toml` 的 `model`，claude 用 Claude Code CLI 自己的默认模型。
+- claude 审查者是一个**全新、不落盘会话、不接 MCP** 的 Claude Code 会话，只开只读的 Read / Grep / Glob 工具，与 Codex 的 read-only 沙箱对等。它读的材料文件、判定格式、署名前缀、发布与回读校验都与 codex 完全相同。
+- 署名前缀 `## 🔍 CODEX REVIEW` 是读取方识别「这是一条独立审查」的机器约定，**不随审查者改变**。脚本会在前缀下一行写明实际审查者与模型，不冒名。
+- ⚠️ 用 claude 审时，审查者与实现方同属 Claude，独立性缺口见 §9。Codex 额度恢复后换回默认值。
+
 **同一个脚本，谁都能跑。** Kelvin 在自己终端跑就能实时看到全过程；Claude 也能调它。**审查内容不会因为谁按的回车而变**——提示词与清单都在仓库里、受版本控制、在 PR 里可审。这是防止 Claude 临时把提示词写得偏向自己的唯一保障，**不要把提示词挪到脚本外面临时拼**。
 
 ## 9. 已知约束
@@ -302,7 +316,9 @@ BILLING_TEST_REDIS_URL="redis://127.0.0.1:16379/0" python -m pytest
 
 ### 关于「同一个模型」的独立性缺口
 
-设计闸门里 Codex 是**冷读**的（它没参与设计），所以这条不影响当前流程。但如果将来引入「Codex 同事」参与方案讨论或测试设计，那部分产物必须在 PR 描述里**标注来源**，审查方要显式声明先验可能重合、请人复核。
+设计闸门里 Codex 是**冷读**的（它没参与设计），所以这条不影响当前流程。
+
+⚠️ **用 `-Reviewer claude` 时这条缺口是真实存在的**：审查者与实现方同属 Claude。冷读（全新会话、只看材料）能挡住「记得自己写过什么」，挡不住同一模型的共同盲点。所以每条这样的审查评论都在署名前缀下注明了实际审查者；碰钱的设计与实现在 Codex 恢复后，值得再用 Codex 复看一次关键决定。但如果将来引入「Codex 同事」参与方案讨论或测试设计，那部分产物必须在 PR 描述里**标注来源**，审查方要显式声明先验可能重合、请人复核。
 
 **不假装独立性还在，而是把缺口标出来。**
 
