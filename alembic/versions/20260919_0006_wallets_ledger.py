@@ -60,6 +60,9 @@ down_revision: str | None = "0005_tenants_projects"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# 冻结的字面量，与 app/models/wallet.py 的同名常量一致（test_0006_column_shape 守住）。
+_REFERENCE_ID_COLLATION = "utf8mb4_0900_bin"
+
 _PREREQUISITE_QUERY = "SELECT @@log_bin, @@log_bin_trust_function_creators"
 _PREREQUISITE_ERROR = (
     "MySQL has binary logging on and log_bin_trust_function_creators OFF, "
@@ -278,7 +281,14 @@ def upgrade() -> None:
         sa.Column("balance_before", sa.Numeric(precision=20, scale=8), nullable=False),
         sa.Column("balance_after", sa.Numeric(precision=20, scale=8), nullable=False),
         sa.Column("reference_type", sa.String(length=32), nullable=False),
-        sa.Column("reference_id", sa.String(length=64), nullable=False),
+        # ⚠️ 二进制、NO PAD 排序：来源 ID（如网关支付 ID）区分大小写，也不忽略尾部
+        # 空格。库默认的 utf8mb4_0900_ai_ci 会把只差大小写的两笔支付判成同一来源，
+        # 第二笔就被当重放吞掉。
+        sa.Column(
+            "reference_id",
+            sa.String(length=64, collation=_REFERENCE_ID_COLLATION),
+            nullable=False,
+        ),
         sa.Column("description", sa.String(length=255), nullable=True),
         sa.Column("metadata_json", sa.JSON(), nullable=True),
         sa.Column("created_by", sa.BigInteger(), nullable=True),

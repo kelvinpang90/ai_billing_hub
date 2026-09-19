@@ -45,6 +45,9 @@ _ForeignKeyInt = BigInteger().with_variant(Integer, "sqlite")
 _ENUM_LENGTH = 64
 _REFERENCE_TYPE_LENGTH = 32
 _REFERENCE_ID_LENGTH = 64
+# ⚠️ 来源 ID 按字节比较（区分大小写、不忽略尾部空格）：库默认的 utf8mb4_0900_ai_ci
+# 会把只差大小写的两笔支付判成同一来源。只在 MySQL 上指定，SQLite 没有这个排序规则。
+REFERENCE_ID_COLLATION: Final = "utf8mb4_0900_bin"
 _DESCRIPTION_LENGTH = 255
 _PUBLIC_ID_LENGTH = 36
 
@@ -201,7 +204,12 @@ class WalletTransaction(Base):
         Enum(ReferenceType, native_enum=False, length=_REFERENCE_TYPE_LENGTH),
         nullable=False,
     )
-    reference_id: Mapped[str] = mapped_column(String(_REFERENCE_ID_LENGTH), nullable=False)
+    reference_id: Mapped[str] = mapped_column(
+        String(_REFERENCE_ID_LENGTH).with_variant(
+            String(_REFERENCE_ID_LENGTH, collation=REFERENCE_ID_COLLATION), "mysql"
+        ),
+        nullable=False,
+    )
     # 调账与系统更正时就是 spec §60 的 reason。⚠️ 只放业务说明，不放对话内容。
     description: Mapped[str | None] = mapped_column(String(_DESCRIPTION_LENGTH), nullable=True)
     # ⚠️ 只放客户可见的计费上下文：成本、毛利、prompt / response 类的键由

@@ -43,7 +43,7 @@ from alembic import command
 from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
 from app.models.base import Base
 from app.models.tenancy import BillingStatus, Project, Tenant
-from app.models.wallet import Wallet, WalletTransaction
+from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
 
@@ -568,6 +568,9 @@ def test_0006_column_shape(alembic_config: Config) -> None:
         }
         for name, width in widths.items():
             assert types["wallet_transactions"][name].length == width, name
+        # 来源 ID 按字节比较：只差大小写或尾部空格的两个来源不是同一个（审查 #92）。
+        reference_id = types["wallet_transactions"]["reference_id"]
+        assert reference_id.collation == REFERENCE_ID_COLLATION
         assert types["tenants"]["billing_status"].length == 64
     finally:
         engine.dispose()

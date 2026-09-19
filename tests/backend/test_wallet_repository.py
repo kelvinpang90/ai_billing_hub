@@ -54,6 +54,7 @@ from app.repositories.wallet import (
     EVENT_BILLING_STATUS_CHANGED,
     EVENT_LOW_BALANCE,
     LEDGER_MISSING,
+    MAX_PAGE_SIZE,
     REASON_BALANCE_NON_POSITIVE,
     REASON_BALANCE_POSITIVE,
     WALLET_MISSING,
@@ -642,6 +643,20 @@ def test_another_tenant_cannot_reuse_a_source(factory) -> None:
     assert ledger_rows(factory, second) == []
 
 
+def test_sources_that_differ_only_in_case_or_trailing_space_are_distinct(factory) -> None:
+    """INV-2：网关的支付 ID 区分大小写。按库默认排序规则比较，第二笔会被当重放吞掉。"""
+    tenant_id = make_tenant(factory)
+
+    results = [
+        post(factory, tenant_id, TOPUP, "10", reference_id=reference_id)
+        for reference_id in ("pi_3AbC", "pi_3abc", "pi_3AbC ")
+    ]
+
+    assert [result.replayed for result in results] == [False, False, False]
+    assert len(ledger_rows(factory, tenant_id)) == 3
+    assert state(factory, tenant_id)[0] == Decimal("30")
+
+
 # --- 原子性（INV-13） ----------------------------------------------------------------
 
 
@@ -708,6 +723,22 @@ def test_reads_are_scoped_to_the_tenant(factory) -> None:
         assert [row.amount for row in theirs] == [Decimal("99")]
         assert verify_wallet(session, first) == []
         assert verify_wallet(session, second) == []
+
+
+def test_a_page_is_capped_and_a_limit_below_one_is_refused(factory) -> None:
+    tenant_id = make_tenant(factory)
+    with factory() as session:
+        for _index in range(MAX_PAGE_SIZE + 1):
+            post_in(session, tenant_id, TOPUP, "1")
+        session.commit()
+
+    with factory() as session:
+        page = list_transactions_for_tenant(session, tenant_id, limit=MAX_PAGE_SIZE + 50)
+        assert len(page) == MAX_PAGE_SIZE
+        assert page[0].wallet_sequence == MAX_PAGE_SIZE + 1
+        for limit in (0, -1):
+            with pytest.raises(ValueError):
+                list_transactions_for_tenant(session, tenant_id, limit=limit)
 
 
 def test_a_thousand_smallest_postings_add_up_exactly(factory) -> None:
@@ -979,6 +1010,32 @@ def test_an_adjustment_and_its_audit_commit_or_vanish_together(factory) -> None:
     assert json.loads(audit.before_state or "{}") == {"balance": "0.00000000"}
     assert json.loads(audit.after_state or "{}") == {"balance": "25.00000000"}
     assert audit.created_at == NOW
+
+
+def test_a_system_correction_writes_its_audit_without_an_actor(factory) -> None:
+    """系统更正：`created_by` 与审计的 `actor_user_id` 都为空，原因必填并进审计。"""
+    tenant_id = make_tenant(factory)
+    post(factory, tenant_id, TOPUP, "10")
+
+    posted = post(
+        factory,
+        tenant_id,
+        TransactionType.SYSTEM_CORRECTION,
+        "-3",
+        description="Reconciliation found a duplicated top-up",
+        actor_role="SYSTEM",
+    )
+
+    assert posted.transaction.created_by is None
+    [audit] = audits(factory, AuditAction.WALLET_ADJUSTMENT_POSTED)
+    assert audit.actor_user_id is None
+    assert audit.actor_role == "SYSTEM"
+    assert audit.entity_type == "wallet_transaction"
+    assert audit.entity_id == posted.transaction.public_id
+    assert audit.reason == "Reconciliation found a duplicated top-up"
+    assert json.loads(audit.before_state or "{}") == {"balance": "10.00000000"}
+    assert json.loads(audit.after_state or "{}") == {"balance": "7.00000000"}
+    assert state(factory, tenant_id)[0] == Decimal("7")
 
 
 # --- 计费状态（spec §7 第 8–11 条） --------------------------------------------------

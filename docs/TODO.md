@@ -1048,7 +1048,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 
 上面的 Wallet 与「不可变钱包账本」**不勾**：本任务只落地数据层（模型、迁移 0006、repository、测试），实现依据是设计闸门 #88 已批准的 v6：[design/AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)。§124 的这两项还差 API、服务层、管理端，以及「建客户时自动建钱包」的服务编排。
 
-- [x] **做了什么（本分支，Draft PR 交付）**：
+- [x] **做了什么（PR #92 交付）**：
   - `app/models/wallet.py`：`Wallet`、`WalletTransaction`，枚举 `TransactionType`（spec §8 的 9 种）与 `ReferenceType`（5 种），类型↔符号、类型↔来源两组映射。数据库 `CHECK` 的条件文本**由这两组映射生成**，repository 的校验读的也是它们，两层只有一份定义
   - `app/models/tenancy.py`：`tenants` 加 `billing_status`（`BillingStatus`，默认 `SUSPENDED`）、`status_version`（默认 0）、`low_balance_threshold`（可空）与三条 `CHECK`。`app/models/auth.py`：`AuditAction` 加 `WALLET_ADJUSTMENT_POSTED`、`TENANT_BILLING_STATUS_CHANGED`（列宽已写死为 64，不需要 ALTER）
   - `alembic/versions/20260919_0006_wallets_ledger.py`：revision `0006_wallets_ledger`，down_revision `0005_tenants_projects`。第 0 步预检排在任何 DDL 之前；然后建两张表、6 个触发器、`tenants` 的三列与三条 `CHECK`，最后给既有租户回填空钱包。`CHECK` 在迁移里是冻结的字面量。`downgrade` 先删 `tenants` 的三条 `CHECK` 与三列，再按外键反向删两张表。文件头附 §132 第 13 条分析
@@ -1065,13 +1065,17 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
   - `verify_wallet` 的问题码：`WALLET_MISSING`、`LEDGER_MISSING`、`BALANCE_NOT_LEDGER_SUM`、`BALANCE_NOT_LAST_BALANCE_AFTER`、`VERSION_NOT_LAST_SEQUENCE`、`SEQUENCE_GAP`、`CHAIN_BROKEN`、`ROW_ARITHMETIC_BROKEN`、`BILLING_STATUS_MISMATCH`。核对规则是纯函数 `ledger_problems`，篡改场景（直接改余额、改金额、删行）在 MySQL 上被触发器挡住、造不出来，所以用构造的数据测它
   - metadata 禁用键不分大小写、任意嵌套层级都检查；存不进 JSON 列的值（`Decimal`、NaN）在写入前就拒绝
   - `list_transactions_for_tenant` 一页最多 200 行，超过按 200 截断；`limit < 1` 报 `ValueError`
+  - `reference_id` 用 `utf8mb4_0900_bin`（二进制、NO PAD）排序规则，迁移与模型两边都写：网关支付 ID 区分大小写，按库默认的 `utf8mb4_0900_ai_ci` 比较时，只差大小写的两笔支付会被判成同一来源，金额相同的第二笔被当重放吞掉。选 `0900_bin` 而不是 `utf8mb4_bin`，是因为后者是 PAD SPACE、仍把尾部空格当成相同。模型用 `with_variant` 只在 MySQL 上指定，SQLite 没有这个排序规则（Claude Code 审查 #92 建议项 1）
 - [x] **验证程度**：
-  - ⚠️ 编写本分支的会话**没有运行任何检查**（该会话没有命令执行工具）：ruff、pytest、`check_docs.py`、`check_repo_policy.py` 都没跑。格式与导入顺序是照 ruff 的规则手写的，CI 第一次跑 lint / format 时可能要补一个提交（`AIH-TASK-004` 就是这样）
-  - ⚠️ 下面几条前提**没有实测**，CI 上哪条红先查哪条：① MySQL 允许 `CHECK` 引用 `created_by`。MySQL 禁止 `CHECK` 引用带「引用动作」的外键列，按理 `ON DELETE RESTRICT` 不算引用动作；② 触发器里 `SELECT … INTO … FROM … FOR UPDATE` 的写法；③ pymysql 报出的错误号：`SIGNAL` 是 1644，`CHECK` 违反是 3819；④ 删掉 `CHECK` 还在引用的列会被 MySQL 拒绝，所以 `downgrade` 先 `DROP CHECK`
+  - 编写代码的 Worker 会话本身没有命令执行工具，格式与导入顺序照 ruff 的规则手写；之后 Worker 自己跑的 `lint.check` 挂在一条 I001 上（见下面第一条未勾项）
+  - 下面四条前提写代码时**没有实测**，已由 PR #92 第一轮 CI 在 `mysql:8.4` 上全部验证通过：① MySQL 允许 `CHECK` 引用 `created_by`。MySQL 禁止 `CHECK` 引用带「引用动作」的外键列，按理 `ON DELETE RESTRICT` 不算引用动作；② 触发器里 `SELECT … INTO … FROM … FOR UPDATE` 的写法；③ pymysql 报出的错误号：`SIGNAL` 是 1644，`CHECK` 违反是 3819；④ 删掉 `CHECK` 还在引用的列会被 MySQL 拒绝，所以 `downgrade` 先 `DROP CHECK`
   - Worker 只跑 `docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check`；`tests.backend` 只在 CI 跑，而 MySQL 用例在 Worker 里必然 skip
 - [ ] Worker 跑 `allowed_commands` 全部零退出：**没有**。run `5cfb3b84` 写完 14 个文件后，`lint.check` 只挂一条 ruff I001（`tests/backend/test_wallet_rules.py` 的导入顺序），控制面把 run 结算为 `failed:checks_failed`，没有提交、没开 PR；其余四条零退出。Claude Code 把该 run 工作区里的 14 个文件原样搬到 `task/AIH-TASK-005-wallet-ledger`，只做了 `ruff check --fix` 这一处导入排序，再开 Draft PR。搬过来后本地：`check_docs.py`、`check_repo_policy.py`、`unittest discover -s tests`、`ruff check .`、`ruff format --check .` 全过；`pytest` 558 passed、69 skipped（skipped 主要是要 MySQL 的 repository / 迁移 / 触发器用例，**不算 passed**，以 CI 为准）
-- [ ] CI 全量运行：lint、format、pytest 含全部 MySQL 用例，一条都不 skip（未发生）
-- [ ] PR 正文「设计闸门：」改为 #88，审查，Kelvin 合并，生产迁移 0006（未发生）
+- [x] CI 全量运行：lint、format、pytest 含全部 MySQL 用例，一条都不 skip：PR #92 head `5caa9d64393758d34ef49844178a19b475fcb2f7` 的 backend job `627 passed`、0 skipped（本地 skipped 的 69 条全部在 CI 跑到），其余检查全绿。审查修复提交之后的 CI 结果见 PR #92
+- [x] 审查：PR 正文写 `设计闸门：#88`；Claude Code（claude-opus-5）独立审查 `VERDICT: APPROVE`，无阻断项。4 条建议项都在本 PR 里修：`reference_id` 二进制排序规则（见上）；补 MySQL 用例——只差大小写或尾部空格的来源互不相干、系统更正的审计落库且没有操作者、分页上限与 `limit < 1`；本记录改成已发生的事实，并把两项后移工作登记在下面
+- [ ] 合并与生产迁移 0006：部署后核对 `alembic_version = 0006_wallets_ledger`、6 个触发器、既有租户各有一个空钱包、`/healthz` 与 `/readyz`（未发生）
+- [ ] 数据库账号权限拆分（迁移账号与运行账号分开）：运行账号现在是库级授权，`TRUNCATE` / `DROP` 这类 DDL 不经触发器，能清空或删掉账本。设计 §1「明确不做」与 §10 残余风险把它后移为运维任务；涉及部署、密钥与恢复流程，要单独设计（未开始）
+- [ ] 余额不一致的监控告警接线：本任务只提供 `verify_wallet`，定时核对与告警（spec §132 DoD 第 14 条）按设计 §1 后移（未开始）
 
 ---
 

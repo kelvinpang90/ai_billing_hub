@@ -98,7 +98,7 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 | `amount` | DECIMAL(20,8) | 非空，有符号：贷方为正、借方为负 |
 | `balance_before` / `balance_after` | DECIMAL(20,8) | 非空，`CHECK (balance_after = balance_before + amount)` |
 | `reference_type` | VARCHAR(32) | 非空，`USAGE_EVENT` / `PAYMENT` / `ADMIN_ADJUSTMENT` / `REBILL` / `SYSTEM` |
-| `reference_id` | VARCHAR(64) | 非空，`UNIQUE (reference_type, reference_id)`：每个财务来源至多一次效果 |
+| `reference_id` | VARCHAR(64) `utf8mb4_0900_bin` | 非空，`UNIQUE (reference_type, reference_id)`：每个财务来源至多一次效果。按字节比较：只差大小写或尾部空格的两个来源不是同一个 |
 | `description` | VARCHAR(255) | 可空；调账与系统更正时就是 spec §60 的原因 |
 | `metadata_json` | JSON | 可空；成本、毛利与对话内容类的键由 repository 拒绝 |
 | `created_by` | BIGINT | 可空，外键 → `users.id` `ON DELETE RESTRICT`；NULL 表示系统 |
