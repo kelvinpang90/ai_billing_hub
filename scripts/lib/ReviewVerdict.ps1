@@ -99,6 +99,23 @@ function Test-ReviewHeader {
     return ((Get-FirstNonEmptyLine ($Body -split '\r?\n')) -ceq $expected)
 }
 
+# 在署名前缀（**第一个非空行**，与 Test-ReviewHeader 同一口径）之后插入一段审查者说明。
+# 不能按固定行号插：审查输出允许有前导空行，按行号插会把说明挤到前缀前面，
+# 读取方就把整条评论判成 NOT_A_REVIEW（Claude Code 审查者在 PR #89 发现）。
+# 首个非空行与最后一行都保持原样；换行统一为 `n。
+function Add-ReviewerNote {
+    param([string]$Body, [string]$Note)
+    $lines = [System.Collections.Generic.List[string]]($Body -split '\r?\n')
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -and $lines[$i].Trim()) {
+            $lines.Insert($i + 1, '')
+            $lines.Insert($i + 2, $Note)
+            return ($lines -join "`n")
+        }
+    }
+    return $Body
+}
+
 function Get-CommentDesignVerdict {
     param(
         [string]$CommentBody,

@@ -637,11 +637,15 @@ switch ($result) {
 # 署名前缀是读取方识别「这是一条独立审查」的机器约定，不随审查者改变；
 # 实际审查者写在前缀下一行，不冒名。只在校验通过之后改写，首行与最后一行都不动。
 if ($Reviewer -eq 'claude') {
-    $lines = [System.Collections.Generic.List[string]]((Get-Content $out -Raw) -split "`r?`n")
     $who = if ($Model) { $Model } else { 'CLI 默认模型' }
-    $lines.Insert(1, '')
-    $lines.Insert(2, "> 审查者：独立、只读的 Claude Code 会话（$who）。Codex 额度不可用期间临时替代（2026-09-19 Kelvin 拍板）；与实现方同属 Claude，先验可能重合（见 WORKFLOW 第 9 节）。")
-    [System.IO.File]::WriteAllText($out, ($lines -join "`n"), [System.Text.UTF8Encoding]::new($false))
+    $note = "> 审查者：独立、只读的 Claude Code 会话（$who）。Codex 额度不可用期间临时替代（2026-09-19 Kelvin 拍板）；与实现方同属 Claude，先验可能重合（见 WORKFLOW 第 9 节）。"
+    $annotated = Add-ReviewerNote (Get-Content $out -Raw) $note
+    # 改写之后再按读取方的口径校验一遍：前缀仍是第一个非空行、判定行不变，否则不发布。
+    if (-not (Test-ReviewHeader $annotated -Design:$isDesign) -or
+        (Get-VerdictLine ($annotated -split "`n")) -cne $verdictLine) {
+        Fail "插入审查者说明后，署名前缀或判定行不再合法，未发布。请人工看 $out"
+    }
+    [System.IO.File]::WriteAllText($out, $annotated, [System.Text.UTF8Encoding]::new($false))
 }
 
 # ---- 审查后再校验一次基线 ----
