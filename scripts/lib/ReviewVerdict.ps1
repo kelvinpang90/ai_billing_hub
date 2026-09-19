@@ -200,16 +200,42 @@ function Test-ResponseHeader {
 }
 
 # 取评论里的 reviewed-head。整行匹配，所以 `> reviewed-head: …` 这种引用上轮的写法
-# 自然不算。恰好一处才返回，否则 $null（不猜）。
+# 自然不算。恰好一处才返回，否则 $null（不猜）；回应走这个默认口径，与
+# check_repo_policy.py 的 check_response 一致。
+# -AllowRepeated 只用于解析**审查正文**：同一个 SHA 出现多行不算歧义（#94：Claude 审查者照着
+# 材料里上轮的格式自己写了一行，脚本又补一行，两行必然相同）；不同 SHA 仍返回 $null。
 function Get-ReviewedHead {
-    param([string]$Body)
+    param([string]$Body, [switch]$AllowRepeated)
     if (-not $Body) { return $null }
     $found = @()
     foreach ($line in ($Body -split '\r?\n')) {
         if ($line.TrimEnd() -cmatch '^reviewed-head: ([0-9a-f]{40})$') { $found += $Matches[1] }
     }
+    if ($AllowRepeated) { $found = @($found | Sort-Object -CaseSensitive -Unique) }
     if ($found.Count -eq 1) { return $found[0] }
     return $null
+}
+
+# 发布前去掉审查者自己写的 reviewed-head 行（整行匹配，与 Get-ReviewedHead 同一口径），
+# 由脚本补上唯一一行权威的。审查者写的 SHA 可能抄自材料里的上轮，不能信。
+function Remove-ReviewedHeadLine {
+    param([string[]]$Lines)
+    return @($Lines | Where-Object { $_.TrimEnd() -cnotmatch '^reviewed-head: [0-9a-f]{40}$' })
+}
+
+# 拼出要发布的审查正文：去掉审查者写的 reviewed-head，再在判定行（最后一个非空行）之前
+# 插入脚本给的唯一一行。判定行仍是最后一个非空行。
+function Add-ReviewedHead {
+    param([string[]]$Lines, [string]$Head)
+    $lines = @(Remove-ReviewedHeadLine $Lines)
+    $lastIdx = $lines.Count - 1
+    while ($lastIdx -ge 0 -and -not $lines[$lastIdx].Trim()) { $lastIdx-- }
+    $result = @()
+    if ($lastIdx -gt 0) { $result += $lines[0..($lastIdx - 1)] }
+    $result += "reviewed-head: $($Head.Trim())"
+    $result += ''
+    if ($lastIdx -ge 0) { $result += $lines[$lastIdx] }
+    return $result
 }
 
 # 扫一遍评论，得到：最近一轮有效实现审查、它之后的最后一条回应、审查轮数。

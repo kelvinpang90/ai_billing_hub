@@ -162,7 +162,28 @@ $sha2 = 'b' * 40
 Assert-Equal $sha  (Get-ReviewedHead "## 🔍 CODEX REVIEW`nreviewed-head: $sha`n`nVERDICT: APPROVE") '恰好一处'
 Assert-Equal $sha  (Get-ReviewedHead "reviewed-head: $sha   `nVERDICT: APPROVE") '行尾空格不影响'
 Assert-Equal $null (Get-ReviewedHead "## 🔍 CODEX REVIEW`nVERDICT: APPROVE") '没有 = null，不猜'
-Assert-Equal $null (Get-ReviewedHead "reviewed-head: $sha`nreviewed-head: $sha2") '两处 = null，不猜'
+Assert-Equal $null (Get-ReviewedHead "reviewed-head: $sha`nreviewed-head: $sha2") '两处不同 = null，不猜'
+# 真实情况（#94 第二轮）：Claude 审查者照材料自己写了一行，脚本又补一行，两行 SHA 相同
+$doubled = "reviewed-head: $sha`n`nreviewed-head: $sha`n`nVERDICT: APPROVE"
+Assert-Equal $sha  (Get-ReviewedHead $doubled -AllowRepeated) '审查正文：同一 SHA 多行 = 该 SHA'
+Assert-Equal $null (Get-ReviewedHead $doubled) '默认口径（回应）仍要求恰好一处，与 check_repo_policy.py 一致'
+Assert-Equal $null (Get-ReviewedHead "reviewed-head: $sha`nreviewed-head: $sha`nreviewed-head: $sha2" -AllowRepeated) '混入不同 SHA 仍 = null'
+
+Write-Host "Remove-ReviewedHeadLine"
+$kept = Remove-ReviewedHeadLine @('## R', "reviewed-head: $sha2", "> reviewed-head: $sha2", "reviewed-head: $sha2  ", '', 'VERDICT: APPROVE')
+Assert-Equal 4 $kept.Count '整行的 reviewed-head（含行尾空格）都去掉'
+Assert-Equal "> reviewed-head: $sha2" $kept[1] '引用行保留'
+Assert-Equal 'VERDICT: APPROVE' $kept[-1] '判定行保留在最后'
+Assert-Equal 0 (Remove-ReviewedHeadLine @("reviewed-head: $sha")).Count '只剩 reviewed-head 时为空'
+
+Write-Host "Add-ReviewedHead"
+# 审查者从材料里抄了上轮的 SHA（$sha2）：发布的正文只能有脚本给的那一行，判定行仍在最后
+$published = Add-ReviewedHead @('## 🔍 CODEX REVIEW', 'body', "reviewed-head: $sha2", '', 'VERDICT: APPROVE', '') $sha
+$body = $published -join "`n"
+Assert-Equal $sha (Get-ReviewedHead $body) '只剩一行，且是脚本给的 SHA（默认严格口径也能取到）'
+Assert-Equal 'VERDICT: APPROVE' (Get-VerdictLine $published) '判定行仍是最后一个非空行'
+Assert-Equal "reviewed-head: $sha" $published[-3] 'reviewed-head 紧挨判定行之前（中间一个空行）'
+Assert-Equal 'body' $published[1] '正文不动'
 # 回应里引用上轮那一行是正常写法，不能算成第二处
 Assert-Equal $sha  (Get-ReviewedHead "## 🔧 CLAUDE RESPONSE`n> reviewed-head: $sha`n`nreviewed-head: $sha") '引用行不计'
 Assert-Equal $null (Get-ReviewedHead "reviewed-head: $($sha.Substring(0,12))") '短 SHA 不收'
