@@ -14,6 +14,8 @@ unknown_task_id:
   # 拒绝理由只回给请求方，不写进任何外部通知
   reason_code: unknown_task_id
 
+# status：ready = 已登记、可以在 Telegram 发「开启」；done = 已交付（合并并部署），Worker 拒绝再跑。
+#   控制面据此推荐下一个任务：只从 ready 里挑（ACVDEV-TASK-019）。任务的收尾 PR 负责把 ready 改成 done。
 tasks:
   - id: AIH-TASK-001
     title: platform control contract
@@ -72,7 +74,7 @@ tasks:
       由 Worker 中的 Claude 新增或更新一份 OpenClaw Worker Pilot 说明文档，
       走完建分支、本地检查、开 Draft PR 的完整路径，验证 Worker 端到端链路；
       不触碰任何应用代码、部署、CI、生产配置或凭据。
-    status: ready
+    status: done
     # 没有前置任务。启用本身的 gate 写在 project.yaml 的 enable_preconditions，
     # 不在这里表达成任务依赖。
     depends_on: []
@@ -145,7 +147,7 @@ tasks:
       让 scripts/check_repo_policy.py 在检查仓库根且设置了 ACUVEN_GIT_LS_FILES_MANIFEST 时
       读取只读 manifest 而不调用 Git，任何读不懂的 manifest 一律 fail closed；
       未设置该变量时本地 / CI 行为不变。只做业务仓库适配，不部署、不迁移、不访问凭据。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 未设置 ACUVEN_GIT_LS_FILES_MANIFEST 时 check_local 照旧调用 git ls-files -z --cached --others --exclude-standard，有测试证明
@@ -208,7 +210,7 @@ tasks:
       新增 tenants / projects 两张表（只含身份与归属字段）、Alembic 迁移 0005、同步 Session 的
       repository 与测试。不含状态、金额、认证、webhook，不含 API / 服务层 / 审计写入 / 前端，
       不部署、不对任何数据库执行迁移、不访问凭据。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - tenants 表：id BIGINT 主键；public_id CHAR(36) 唯一（uuid4）；company_name 非空；email 非空且不唯一；contact_name、phone 可空；created_at、updated_at 非空
@@ -279,7 +281,7 @@ tasks:
       wallet_transactions 两张表、tenants 的 billing_status / status_version / low_balance_threshold、
       迁移 0006（含预检与 6 个 MySQL 触发器）、同步 Session 的 wallet repository（只 flush 不 commit），
       以及 outbox 恢复任务只重投有处理器的事件类型。不含 API、服务层、管理端、充值、用量与通知投递。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-005-wallet-ledger.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计

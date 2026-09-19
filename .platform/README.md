@@ -99,6 +99,14 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-004` | Phase 1 第一刀：`tenants` / `projects` 两张表（只含身份与归属字段）、Alembic 迁移 0005、repository 与测试；不含状态、金额、认证、webhook 与 API。表结构裁决见 [docs/database-schema.md](../docs/database-schema.md) | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移，Worker 自己不对任何数据库跑迁移 |
 | `AIH-TASK-005` | Phase 1 第二刀：钱包与不可变账本的数据层，加上由余额驱动的计费状态。**碰钱，已过设计闸门** #88（`APPROVED: design v6`）；批准的设计逐字放在 [docs/design/AIH-TASK-005-wallet-ledger.md](../docs/design/AIH-TASK-005-wallet-ledger.md)，Worker 以它为准 | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移 0006（含触发器）。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#88` 再审 |
 
+`tasks.yaml` 里每个会写仓库的任务都有 `status`：
+
+- `ready`：已登记，可以在 Telegram 发「开启」；
+- `done`：已交付（合并并部署）。Worker 只接受 `ready`，所以 `done` 的任务不会被误开第二次。
+
+控制面推荐「下一个任务」时只从 `ready` 里挑（控制面 ACVDEV-TASK-019），所以**每个任务的收尾 PR 都要把它改成 `done`**，
+否则控制面会一直推荐一个已经做完的任务。`AIH-TASK-002` 到 `AIH-TASK-005` 已于 2026-09-19 改成 `done`。
+
 `AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
 `tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`
 的运行结果或 `AIH-TASK-002` 的重试结果，也不声称它们已通过。

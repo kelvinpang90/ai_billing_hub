@@ -1296,6 +1296,13 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 
 ---
 
+### 任务状态 `done` —— 给控制面推荐下一个任务用（2026-09-19，Kelvin 批准）
+
+控制面 ACVDEV-TASK-019 要在 run 结束时推荐下一个任务，只从 `tasks.yaml` 里 `status: ready` 的任务里挑。原先做完的任务仍是 `ready`，会被反复推荐。
+
+- [x] `tasks.yaml`：`AIH-TASK-002` 到 `AIH-TASK-005` 改成 `status: done`，文件头注释写明两个取值；`.platform/README.md` 写明规则：每个任务的收尾 PR 要把它改成 `done`。本机用 Worker 自己的 `worker.contracts.load_task` 加载，整份文件照常解析，四个任务都以 `task is not ready` 被拒——`done` 同时防止已交付的任务被误开第二次
+- [ ] 控制面 ACVDEV-TASK-019（任务快照、推荐规则、回复补全、Telegram 主动推送）合并部署后，用下一个真实任务验证推荐与推送（未发生）
+
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
 复审第三轮要求「停止逐项补洞、整体比对」，下面几项是那次自查发现的。**都不是
