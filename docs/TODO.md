@@ -1257,8 +1257,9 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
   - `tests/test_gh_verified_write.py`：**只有** `VerifiedWriteTests::test_file_with_spaces_unicode_and_relative_path` 一个用例在设置了该变量时 skip，原因固定写明 Windows MXC（AppContainer）拒绝最终路径解析；该文件其它用例不动
   - 验证程度：编写本分支的会话里**没有运行任何检查**（该会话没有命令执行工具）；`docs.check` / `policy.check` / `tests.process` 由 Worker 在之后自己运行，结果不记在本条
 - [ ] Worker 跑 `docs.check` / `policy.check` / `tests.process` 全部零退出（未记录；⚠️ Worker 里的 skipped 不是 passed）
-- [ ] CI 全量运行（不设该变量，那些 skip 与 MXC 用例都要真跑）
-- [ ] Codex 审查、Kelvin 合并（未发生）
+- [x] CI 全量运行：#81 合并时六项必需检查全部 success
+- [x] 合并：#81 于 2026-09-19 合并为 `746c01b`
+- [ ] 独立审查记录：#81 上找不到审查评论，审查结论未记录
 - [x] 不再做（Kelvin 2026-09-19 决定）：合并之后重试 `AIH-TASK-002`——`AIH-TASK-003` 已由 #81 合并，002 标为 `superseded`，理由同上；本条不声称 002 的重试通过过
 
 ### Worker 模式下 `tests.backend` 找不到 bash（2026-09-19）

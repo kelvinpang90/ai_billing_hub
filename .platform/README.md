@@ -115,7 +115,8 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 
 `AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
 `tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`
-的运行结果或 `AIH-TASK-002` 的重试结果，也不声称它们已通过。
+的运行结果或 `AIH-TASK-002` 的重试结果，也不声称它们已通过。2026-09-19 起这段只是历史：`AIH-TASK-003`
+已由 #81 合并，`AIH-TASK-002` 改为 `superseded`，不再重试（见上面「`status`」一段）。
 
 ⚠️ **任务登记是管理员前置条件，不是 Worker 任务的改动。**`AIH-TASK-003` 在
 `tasks.yaml` 的登记、`commands.yaml` 里放行 `ACUVEN_GIT_LS_FILES_MANIFEST`、以及本文件的

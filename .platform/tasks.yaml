@@ -96,6 +96,7 @@ tasks:
     #    Worker 预检针对本任务校验不通过时，本任务不得运行。
     # ⚠️ 第一次 Pilot 未通过。Worker 里刻意没有真实 Git，policy.check / tests.process 要改为
     #    消费只读 manifest，重试前须先合并 AIH-TASK-003。本文件不记录重试结果。
+    #    （2026-09-19：AIH-TASK-003 已由 #81 合并；本任务改为 superseded，见上面的 status，不再重试。）
     allowed_change_paths:
       - docs/openclaw-worker-pilot.md
     # 纯文档改动，只跑文档 / 策略 / 流程脚本回归三项；后端检查由 CI 覆盖。
