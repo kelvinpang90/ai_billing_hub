@@ -295,6 +295,16 @@ def test_mysql_pins_its_buffer_pool(compose: dict) -> None:
     assert "--innodb-buffer-pool-size" in command
 
 
+def test_mysql_lets_the_app_account_create_triggers(compose: dict) -> None:
+    """钱包账本的不可变与一一对应靠触发器（设计闸门 #88），迁移由应用账号执行。
+
+    binlog 开着而这个开关关着时，建触发器报 ERROR 1419，迁移在生产上失败 ——
+    而且 CI 用 root 连库，**CI 看不出来**。所以把开关钉在 compose 里，并由这条测试守住。
+    """
+    command = [str(part) for part in compose["services"]["mysql"]["command"]]
+    assert "--log-bin-trust-function-creators=ON" in command
+
+
 def test_the_edge_resolves_the_real_client_address() -> None:
     """⚠️ 生产上本平台的 nginx 接在 infra_nginx 后面（T0.9 决策 ①A）。
 
