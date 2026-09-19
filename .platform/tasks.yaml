@@ -261,3 +261,76 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # Phase 1 第二刀：钱包与不可变账本的数据层 + 由余额驱动的计费状态。碰钱，已过设计闸门：
+  # Issue #88 `APPROVED: design v6`（Claude Code 审查者，Codex 额度不可用期间临时替代）。
+  # Worker 读不到 GitHub，所以批准的设计逐字放在 docs/design/AIH-TASK-005-wallet-ledger.md，
+  # 实现以它为准。
+  # ⚠️ 前置条件已生效：生产 MySQL 的 log_bin_trust_function_creators = 1（#90）。
+  # ⚠️ 设计的核心控制在 MySQL 触发器里，SQLite 上没有；repository 的记账行为测试必须对着真 MySQL
+  #    （BILLING_TEST_DATABASE_URL）跑，只在 CI 里生效。Worker 跑不了 tests.backend，准入以 CI 为准。
+  # ⚠️ Worker 生成的 PR 正文里「设计闸门：」是固定的「不适用」；开 PR 后由实现方改为「设计闸门：#88」再审。
+  # ⚠️ 本条登记是管理员前置条件：须先合并，之后才能调度本任务的 Worker run。
+  - id: AIH-TASK-005
+    title: wallets, immutable ledger, and balance-driven billing status
+    purpose: >-
+      按 docs/design/AIH-TASK-005-wallet-ledger.md（设计闸门 #88 已批准 v6）实现：wallets 与
+      wallet_transactions 两张表、tenants 的 billing_status / status_version / low_balance_threshold、
+      迁移 0006（含预检与 6 个 MySQL 触发器）、同步 Session 的 wallet repository（只 flush 不 commit），
+      以及 outbox 恢复任务只重投有处理器的事件类型。不含 API、服务层、管理端、充值、用量与通知投递。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-005-wallet-ledger.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 表、列、类型、约束、索引、CHECK 与 6 个触发器（账本 BEFORE INSERT / AFTER INSERT / BEFORE UPDATE / BEFORE DELETE，钱包 BEFORE INSERT / BEFORE UPDATE）按设计 §2 建；迁移 0006 revision 为 0006_wallets_ledger、down_revision 为 0005_tenants_projects，第 0 步预检在任何 DDL 之前
+      - repository 提供 create_wallet、get_wallet_for_tenant、post_transaction、list_transactions_for_tenant、verify_wallet；两处加锁读用 with_for_update + populate_existing=True；不直接 UPDATE wallets；记账后使 Wallet 过期；返回余额以账本行 balance_after 为准
+      - post_transaction 在同一次 flush 里完成账本插入、调账与系统更正的 audit_logs（WALLET_ADJUSTMENT_POSTED）、计费状态跃迁（tenants 更新、TENANT_BILLING_STATUS_CHANGED 审计、tenant.billing_status_changed 事件）与低余额事件（tenant.low_balance）；只 flush、不 commit
+      - app/tasks/outbox.py 的 recover 只重投有渲染器的 event_type；deliver 不变；既有密码重置事件照常重投
+      - 测试按设计 §7：纯函数用 SQLite 或纯 Python；凡调用 post_transaction / create_wallet / verify_wallet 的场景一律用 BILLING_TEST_DATABASE_URL 的真 MySQL（未设置时 skip），覆盖 §7 列出的全部场景
+      - docs/database-schema.md 同步新表与 tenants 新列并更新「尚未建的列」；docs/TODO.md 新增 AIH-TASK-005 记录段，不勾选 Phase 1 的 Wallet / 不可变钱包账本
+      - 不含 API、服务层、管理端 UI、充值与支付、用量事件、rebill、account_status / integration_status / 有效状态合成、webhook 与通知的实际投递；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出；以 Draft PR 交付，不合并、不直推
+    allowed_change_paths:
+      - app/models/wallet.py
+      - app/models/tenancy.py
+      - app/models/auth.py
+      - app/repositories/wallet.py
+      - app/tasks/outbox.py
+      - alembic/env.py
+      - alembic/versions/20260919_0006_wallets_ledger.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_model_columns.py
+      - tests/backend/test_wallet_rules.py
+      - tests/backend/test_wallet_repository.py
+      - tests/backend/test_outbox.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项（lint / format 需要本机 check_win32k 的固定定义，已生效）；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
