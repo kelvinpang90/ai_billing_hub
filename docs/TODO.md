@@ -1256,7 +1256,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 设计闸门 #88 v6 已批准（`APPROVED: design v6`，Claude Code 审查者）：钱包账本的「只能插入」与「钱包只能经账本变动」靠 MySQL 触发器实现，迁移由应用账号执行。
 
 - [x] `docker-compose.yml` 的 mysql 加 `--log-bin-trust-function-creators=ON`，`test_compose` 守住。实测证据（一次性 `mysql:8.4` 容器，配置同生产：binlog 开、ROW、应用账号库级授权）：开关关着时应用账号 `CREATE TRIGGER` 报 ERROR 1419；打开后能建，UPDATE / DELETE 被拒（45000）、INSERT 照常，`mysqldump` 导出触发器。CI 用 root 连库，看不出这个问题，所以只能靠这条 compose 守卫
-- [x] 本 PR 合并部署后，确认生产 `@@log_bin_trust_function_creators = 1`，再登记 `AIH-TASK-005`：#90 部署后在生产上查到 `@@log_bin_trust_function_creators = 1`、`@@log_bin = 1`，mysql 重建后 healthy；`AIH-TASK-005` 已登记，批准的设计逐字放在 [design/AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)
+- [x] 本 PR 合并部署后，确认生产 `@@log_bin_trust_function_creators = 1`，再登记 `AIH-TASK-005`：#90 部署后在生产上查到 `@@log_bin_trust_function_creators = 1`、`@@log_bin = 1`，mysql 重建后 healthy；`AIH-TASK-005` 已登记，批准的设计逐字放在 [design/AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)。⚠️ CI 的 MySQL 也要满足同一前置条件：service 容器传不进 mysqld 参数，所以 `ci.yml` 的 backend job 在跑测试前用 root 设 `SET GLOBAL log_bin_trust_function_creators = ON`，`test_compose` 守住顺序（Claude Code 审查 #91 发现；少了它，迁移 0006 的预检会把 CI 上所有迁移用例拦下）
 - [ ] `AIH-TASK-005` 的 Worker run、CI、审查、合并与生产迁移 0006（未发生）
 - ⚠️ **Worker 里 skipped 不是 passed**：这 17 个用例在 Worker 里不再有信号，只由 CI 覆盖。另：`AIH-TASK-001` 是只跑检查、不开 PR 的任务，而当前 Worker 只接受 `creates_branch` / `creates_pull_request` 为 `true` 且有 `allowed_change_paths` 的开发任务，所以它在这个 Worker 上跑不了（run `3a699c91` 以 `invalid_contract` 失败）。留在契约里会误导，待清理（删掉该任务，或让 Worker 支持只读检查任务）
 

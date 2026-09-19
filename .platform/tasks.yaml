@@ -266,7 +266,8 @@ tasks:
   # Issue #88 `APPROVED: design v6`（Claude Code 审查者，Codex 额度不可用期间临时替代）。
   # Worker 读不到 GitHub，所以批准的设计逐字放在 docs/design/AIH-TASK-005-wallet-ledger.md，
   # 实现以它为准。
-  # ⚠️ 前置条件已生效：生产 MySQL 的 log_bin_trust_function_creators = 1（#90）。
+  # ⚠️ 前置条件：生产 MySQL 的 log_bin_trust_function_creators = 1（#90，已生效）；CI 的 MySQL service
+  #    在跑后端测试之前用 root 设同一个全局变量（本登记 PR 加入 ci.yml，test_compose 守住）。
   # ⚠️ 设计的核心控制在 MySQL 触发器里，SQLite 上没有；repository 的记账行为测试必须对着真 MySQL
   #    （BILLING_TEST_DATABASE_URL）跑，只在 CI 里生效。Worker 跑不了 tests.backend，准入以 CI 为准。
   # ⚠️ Worker 生成的 PR 正文里「设计闸门：」是固定的「不适用」；开 PR 后由实现方改为「设计闸门：#88」再审。
