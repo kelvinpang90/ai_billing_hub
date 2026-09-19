@@ -350,7 +350,7 @@ tasks:
       require_admin 鉴权、services.customers（建客户与钱包、审计同一事务）、五个 /api/v1/admin 接口
       （建客户、客户分页列表、客户详情、建项目、项目分页列表）、引擎 hide_parameters=True、docs/api.md。
       不含编辑客户、账户状态、低余额阈值、调账接口、API 凭据、webhook 与前端。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-006-admin-customers.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
