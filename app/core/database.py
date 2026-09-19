@@ -56,6 +56,11 @@ def create_database_engine(settings: Settings) -> Engine:
         pool_pre_ping=True,
         pool_recycle=_POOL_RECYCLE_SECONDS,
         future=True,
+        # ⚠️ 异常文本里不带 SQL 参数（设计闸门 #96 v3 §2）。SQLAlchemy 默认把
+        # `[parameters: …]` 写进异常消息，而全局处理器用 `logger.exception` 记下完整
+        # 异常 —— 一次数据库瞬时故障就会把请求里的 email、联系人、电话写进应用日志
+        # （REQ-PRIV-001）。设在引擎上而不是某个服务里，以后新增的写路径不会再漏。
+        hide_parameters=True,
         **_pool_options(settings),
     )
 

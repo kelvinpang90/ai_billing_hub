@@ -125,6 +125,22 @@ def test_the_pool_timeout_is_not_sqlalchemys_default() -> None:
     assert engine.pool._timeout <= 10
 
 
+@pytest.mark.parametrize(
+    "url",
+    [MEMORY_URL, "mysql+pymysql://user:pw@example.invalid:3306/db"],
+    ids=["sqlite", "mysql"],
+)
+def test_the_engine_hides_sql_parameters(url: str) -> None:
+    """设计闸门 #96 v3 §2：数据库异常的文本里不能带 SQL 参数。
+
+    ⚠️ 全局处理器用 `logger.exception` 记下完整异常，SQLAlchemy 默认把
+    `[parameters: …]` 写进异常消息 —— 少了这一项，一次数据库故障就把请求里的
+    email、联系人、电话写进日志（REQ-PRIV-001）。端到端的那一条在
+    test_admin_customers_api.py。
+    """
+    assert create_database_engine(Settings(database_url=url)).hide_parameters is True
+
+
 def test_pool_options_are_skipped_for_pools_that_reject_them() -> None:
     """内存 SQLite 用的是 `SingletonThreadPool`，它不认这几个参数。
 
