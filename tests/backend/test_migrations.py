@@ -11,16 +11,23 @@ passed。
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import pathlib
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import CHAR, BigInteger, create_engine, delete, func, insert, inspect, select, text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from alembic import command
 from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
 from app.models.base import Base
+from app.models.tenancy import Project, Tenant
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
 
@@ -103,3 +110,189 @@ def test_the_migrated_columns_are_as_wide_as_the_models_say(alembic_config: Conf
                 mismatched.append(f"{table.name}.{column.name}: 库里 {in_db} ≠ 模型 {declared}")
 
     assert mismatched == [], "迁移建出来的列宽与模型不一致：" + "; ".join(mismatched)
+
+
+# ---------------------------------------------------------------------------
+# 0005_tenants_projects（AIH-TASK-004）
+#
+# `test_tenancy_repository.py` 的表是 create_all 按模型建的，看不见**迁移**建出来的
+# 外键 RESTRICT、public_id 唯一与列形状；SQLite 又默认不强制外键与 VARCHAR 长度。
+# 这几样只能在这里验。
+# ---------------------------------------------------------------------------
+
+_BEFORE_0005 = "0004_password_reset_outbox"
+_REVISION_0005 = "0005_tenants_projects"
+_NOW = dt.datetime(2026, 9, 19, 8, 30, 0)
+
+# 列名 → 是否可空。⚠️ 比的是**完整集合**：状态列、金额列、webhook 列谁被顺手加进来，
+# 这里都会红 —— 它们各归一个后续任务（docs/database-schema.md「尚未建的列」）。
+_EXPECTED_COLUMNS = {
+    "tenants": {
+        "id": False,
+        "public_id": False,
+        "company_name": False,
+        "contact_name": True,
+        "email": False,
+        "phone": True,
+        "created_at": False,
+        "updated_at": False,
+    },
+    "projects": {
+        "id": False,
+        "public_id": False,
+        "tenant_id": False,
+        "name": False,
+        "description": True,
+        "created_at": False,
+        "updated_at": False,
+    },
+}
+
+
+def _table_names() -> set[str]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        return set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+
+@contextmanager
+def _rolled_back_connection() -> Iterator[Connection]:
+    """⚠️ 库是共享的：这几条用例写进去的行一律回滚，不留给后面的用例。"""
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                yield connection
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
+
+
+def _insert_tenant(connection: Connection, public_id: str) -> int:
+    result = connection.execute(
+        insert(Tenant).values(
+            public_id=public_id,
+            company_name="Migration Test Sdn Bhd",
+            email="ops@example.com",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    return int(result.inserted_primary_key[0])
+
+
+def _insert_project(connection: Connection, tenant_id: int, public_id: str) -> None:
+    connection.execute(
+        insert(Project).values(
+            public_id=public_id,
+            tenant_id=tenant_id,
+            name="Migration Test Project",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+
+@needs_mysql
+def test_0005_only_adds_and_drops_its_own_two_tables(alembic_config: Config) -> None:
+    """不 ALTER、不删除任何已有表：升降前后的表集合只差这两张。"""
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _BEFORE_0005)
+    without = _table_names()
+    assert "users" in without, "0004 的表应该都在，否则下面的比较没有意义"
+    assert "tenants" not in without
+    assert "projects" not in without
+
+    command.upgrade(alembic_config, _REVISION_0005)
+    assert _table_names() == without | {"tenants", "projects"}
+
+    command.downgrade(alembic_config, _BEFORE_0005)
+    assert _table_names() == without
+
+    command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0005_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        types = {}
+        for table, expected in _EXPECTED_COLUMNS.items():
+            columns = inspector.get_columns(table)
+            assert {c["name"]: c["nullable"] for c in columns} == expected, table
+            types[table] = {c["name"]: c["type"] for c in columns}
+
+            assert isinstance(types[table]["id"], BigInteger), table
+            assert isinstance(types[table]["public_id"], CHAR), table
+            assert types[table]["public_id"].length == 36, table
+
+            # public_id 是唯一的那一个；tenants.email 刻意**不**唯一。
+            unique = [u["column_names"] for u in inspector.get_unique_constraints(table)]
+            assert unique == [["public_id"]], table
+
+        assert isinstance(types["projects"]["tenant_id"], BigInteger)
+        indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("projects")}
+        assert indexes.get("ix_projects_tenant_id") == ["tenant_id"]
+
+        foreign_keys = [
+            (fk["name"], fk["constrained_columns"], fk["referred_table"], fk["referred_columns"])
+            for fk in inspector.get_foreign_keys("projects")
+        ]
+        assert foreign_keys == [("fk_projects_tenant_id", ["tenant_id"], "tenants", ["id"])]
+
+        # 删除规则从 information_schema 读：它记的是建表时写的那个规则本身。
+        with engine.connect() as connection:
+            delete_rule = connection.execute(
+                text(
+                    "SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS"
+                    " WHERE CONSTRAINT_SCHEMA = DATABASE()"
+                    " AND CONSTRAINT_NAME = 'fk_projects_tenant_id'"
+                )
+            ).scalar_one()
+        assert delete_rule == "RESTRICT"
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0005_tenant_with_projects_cannot_be_deleted(alembic_config: Config) -> None:
+    """ON DELETE RESTRICT 的行为本身：删租户不会级联删掉它的项目。"""
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant_id = _insert_tenant(connection, str(uuid.uuid4()))
+        _insert_project(connection, tenant_id, str(uuid.uuid4()))
+
+        with pytest.raises(IntegrityError):
+            with connection.begin_nested():
+                connection.execute(delete(Tenant).where(Tenant.id == tenant_id))
+
+        remaining = connection.execute(
+            select(func.count()).select_from(Project).where(Project.tenant_id == tenant_id)
+        ).scalar_one()
+        assert remaining == 1
+
+
+@needs_mysql
+def test_0005_public_ids_are_unique(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant_public_id = str(uuid.uuid4())
+        tenant_id = _insert_tenant(connection, tenant_public_id)
+        with pytest.raises(IntegrityError):
+            with connection.begin_nested():
+                _insert_tenant(connection, tenant_public_id)
+
+        # 同一个联系邮箱、不同的 public_id：必须插得进去。
+        _insert_tenant(connection, str(uuid.uuid4()))
+
+        project_public_id = str(uuid.uuid4())
+        _insert_project(connection, tenant_id, project_public_id)
+        with pytest.raises(IntegrityError):
+            with connection.begin_nested():
+                _insert_project(connection, tenant_id, project_public_id)
