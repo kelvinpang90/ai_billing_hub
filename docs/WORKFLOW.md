@@ -297,7 +297,7 @@ BILLING_TEST_REDIS_URL="redis://127.0.0.1:16379/0" python -m pytest
 ```
 
 - `-Reviewer`：`codex`（默认）或 `claude`。`-Model`：审查模型。缺省时 codex 用 `~/.codex/config.toml` 的 `model`，claude 用 Claude Code CLI 自己的默认模型。
-- claude 审查者是一个**全新、不落盘会话、不接 MCP** 的 Claude Code 会话，只开只读的 Read / Grep / Glob 工具，与 Codex 的 read-only 沙箱对等。它读的材料文件、判定格式、署名前缀、发布与回读校验都与 codex 完全相同。
+- claude 审查者是一个**全新、不落盘会话、不接 MCP** 的 Claude Code 会话，只开只读的 Read / Grep / Glob 工具，与 Codex 的 read-only 沙箱对等。它读的材料文件、判定格式、署名前缀、发布与回读校验都与 codex 相同，**唯一的差别**：Claude 偶尔会在署名前缀之前先说一句寒暄，脚本会去掉前缀（逐字相同的那一行）之前的内容再校验。原始输出另存为 `.codex-review-*.raw.md`，被去掉的行在终端打印出来；找不到逐字相同的前缀行时照旧拒绝发布。
 - 署名前缀 `## 🔍 CODEX REVIEW` 是读取方识别「这是一条独立审查」的机器约定，**不随审查者改变**。脚本会在前缀下一行写明实际审查者与模型，不冒名。
 - ⚠️ 用 claude 审时，审查者与实现方同属 Claude，独立性缺口见 §9。Codex 额度恢复后换回默认值。
 

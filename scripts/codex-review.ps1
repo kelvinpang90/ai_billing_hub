@@ -600,8 +600,16 @@ if ($Reviewer -eq 'claude') {
     Write-Host "审查者：Claude Code（$(if ($Model) { $Model } else { 'CLI 默认模型' })），只读工具 Read / Grep / Glob" -ForegroundColor Cyan
     Write-Host ("-" * 60)
     $reviewText = Invoke-ClaudeReview -Executable $claude -Prompt $prompt -WorkingDirectory $repo -ModelName $Model
-    $reviewText = Remove-ReviewPreamble $reviewText -Design:$isDesign
-    [System.IO.File]::WriteAllText($out, $reviewText, [System.Text.UTF8Encoding]::new($false))
+    # 原始输出原样另存（仍落在 .gitignore 的 .codex-review-*.md 里）：截掉的寒暄不能无痕消失。
+    $rawOut = $out -replace '\.md$', '.raw.md'
+    [System.IO.File]::WriteAllText($rawOut, $reviewText, [System.Text.UTF8Encoding]::new($false))
+    $trimmed = Remove-ReviewPreamble $reviewText -Design:$isDesign
+    if ($trimmed -cne $reviewText) {
+        $dropped = ($reviewText -split '\r?\n').Count - ($trimmed -split '\r?\n').Count
+        Write-Host "已去掉署名前缀之前的 $dropped 行（原始输出：$rawOut）：" -ForegroundColor Yellow
+        ($reviewText -split '\r?\n') | Select-Object -First $dropped | ForEach-Object { Write-Host "  | $_" -ForegroundColor DarkYellow }
+    }
+    [System.IO.File]::WriteAllText($out, $trimmed, [System.Text.UTF8Encoding]::new($false))
 } else {
     $codex = Resolve-CodexPath
     Write-Host "沙箱：read-only —— Codex 改不了任何文件" -ForegroundColor Cyan
