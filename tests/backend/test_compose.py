@@ -305,6 +305,21 @@ def test_mysql_lets_the_app_account_create_triggers(compose: dict) -> None:
     assert "--log-bin-trust-function-creators=ON" in command
 
 
+def test_ci_mysql_matches_production_for_triggers() -> None:
+    """CI 的 MySQL service 也必须打开同一个开关，而且要在跑后端测试之前。
+
+    service 容器传不进 mysqld 参数，所以 CI 用一个步骤设全局变量。少了它，迁移 0006
+    的预检（开关关着就拒绝建表）会把 CI 上所有迁移用例拦下（Claude Code 审查 #91 发现）。
+    """
+    ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+    steps = yaml.safe_load(ci.read_text(encoding="utf-8"))["jobs"]["backend"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    runs = [str(step.get("run", "")) for step in steps]
+    wanted = "SET GLOBAL log_bin_trust_function_creators = ON"
+    setter = next(i for i, run in enumerate(runs) if wanted in run)
+    assert setter < names.index("Backend tests")
+
+
 def test_the_edge_resolves_the_real_client_address() -> None:
     """⚠️ 生产上本平台的 nginx 接在 infra_nginx 后面（T0.9 决策 ①A）。
 

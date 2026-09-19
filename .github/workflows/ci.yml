@@ -98,6 +98,15 @@ jobs:
         run: |
           python -m ruff check .
           python -m ruff format --check .
+      - name: Match production MySQL (app-account triggers under binlog)
+        # 生产 compose 打开了 log_bin_trust_function_creators（#90）：钱包账本的触发器由应用账号
+        # 在迁移里建，迁移 0006 的预检在开关关着时会拒绝执行（设计闸门 #88 §8）。service 容器
+        # 传不进 mysqld 参数，只能在这里用 root 设全局变量；不设的话 CI 的迁移用例全被预检拦下。
+        run: >-
+          python -c "import pymysql;
+          c = pymysql.connect(host='127.0.0.1', port=3306, user='root', password='ci-throwaway');
+          c.cursor().execute('SET GLOBAL log_bin_trust_function_creators = ON');
+          c.close()"
       - name: Backend tests
         # **CI 里一条都不许 skip。**迁移用例靠 BILLING_TEST_DATABASE_URL 决定
         # 跑不跑：MySQL service 起不来时它们会安静地 skip，而 pytest 仍然绿 ——

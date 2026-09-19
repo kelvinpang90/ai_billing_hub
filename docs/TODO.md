@@ -1249,14 +1249,15 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [x] 业务仓库侧：`.platform/commands.yaml` 的 `lint.check` / `format.check` 改为 Python 隔离模式 `python -I -m ruff ...`。本机验证：`python -m ruff` 会执行 cwd 里预置的 `ruff.py`，`python -I -m ruff` 不会；`-I` 形式在 MXC（放开 Win32k）里两条都零退出。`.platform/README.md` 的 MXC 限制表同步
 - [x] 控制面 ACVDEV-TASK-017（按命令、按固定完整定义放开 Win32k）合并：独立受限评审三轮后 APPROVE，control-plane#17 已合并（`--match-head-commit` 绑定评审过的 head）
 - [x] 本机 Worker 部署副本更新到该提交，本机配置只固定这两条定义，并在本机 MXC 里实测一次：用合并后的 Worker 代码实跑，`python -I -m ruff check .` 与 `format --check .` 放开 Win32k 后零退出；不放开时 lint 仍为 `0xC0000142`（默认策略未变）；固定的定义与 `main` 上的 `commands.yaml` 逐字一致
-- [ ] 之后登记的会写仓库任务，把 `lint.check` / `format.check` 加进 `allowed_commands`
+- [x] 之后登记的会写仓库任务，把 `lint.check` / `format.check` 加进 `allowed_commands`：`AIH-TASK-005` 是第一个
 
 ### AIH-TASK-005 的前置：MySQL 允许应用账号建触发器（2026-09-19）
 
 设计闸门 #88 v6 已批准（`APPROVED: design v6`，Claude Code 审查者）：钱包账本的「只能插入」与「钱包只能经账本变动」靠 MySQL 触发器实现，迁移由应用账号执行。
 
 - [x] `docker-compose.yml` 的 mysql 加 `--log-bin-trust-function-creators=ON`，`test_compose` 守住。实测证据（一次性 `mysql:8.4` 容器，配置同生产：binlog 开、ROW、应用账号库级授权）：开关关着时应用账号 `CREATE TRIGGER` 报 ERROR 1419；打开后能建，UPDATE / DELETE 被拒（45000）、INSERT 照常，`mysqldump` 导出触发器。CI 用 root 连库，看不出这个问题，所以只能靠这条 compose 守卫
-- [ ] 本 PR 合并部署后，确认生产 `@@log_bin_trust_function_creators = 1`，再登记 `AIH-TASK-005`
+- [x] 本 PR 合并部署后，确认生产 `@@log_bin_trust_function_creators = 1`，再登记 `AIH-TASK-005`：#90 部署后在生产上查到 `@@log_bin_trust_function_creators = 1`、`@@log_bin = 1`，mysql 重建后 healthy；`AIH-TASK-005` 已登记，批准的设计逐字放在 [design/AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)。⚠️ CI 的 MySQL 也要满足同一前置条件：service 容器传不进 mysqld 参数，所以 `ci.yml` 的 backend job 在跑测试前用 root 设 `SET GLOBAL log_bin_trust_function_creators = ON`，`test_compose` 守住顺序（Claude Code 审查 #91 发现；少了它，迁移 0006 的预检会把 CI 上所有迁移用例拦下）
+- [ ] `AIH-TASK-005` 的 Worker run、CI、审查、合并与生产迁移 0006（未发生）
 - ⚠️ **Worker 里 skipped 不是 passed**：这 17 个用例在 Worker 里不再有信号，只由 CI 覆盖。另：`AIH-TASK-001` 是只跑检查、不开 PR 的任务，而当前 Worker 只接受 `creates_branch` / `creates_pull_request` 为 `true` 且有 `allowed_change_paths` 的开发任务，所以它在这个 Worker 上跑不了（run `3a699c91` 以 `invalid_contract` 失败）。留在契约里会误导，待清理（删掉该任务，或让 Worker 支持只读检查任务）
 
 ---
