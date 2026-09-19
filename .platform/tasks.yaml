@@ -189,3 +189,74 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # Phase 1 的第一刀：只建 tenants / projects 两张「身份 + 归属」表，加迁移、repository 与测试。
+  # 刻意收窄（Kelvin 2026-09-19 批准）：spec §75 / §76 里的状态列（account_status / billing_status /
+  # status_version / integration_status）属于 §24 状态模型，碰状态机按 docs/WORKFLOW.md §3 必须走
+  # 设计闸门，而 Worker 开不了闸门 Issue —— 留给之后过闸门的任务，与状态迁移逻辑一起设计；
+  # low_balance_threshold / currency 属于钱包任务；webhook 的 URL 与密钥列等 ADR-0004 第 4a 节的
+  # 决定；backend_base_url 归 Phase 3。这些以后都是纯新增列，生产表那时仍是空的。
+  # projects 表结构裁决（public_id 即 §57 的 project_id；加可空 description）见 docs/database-schema.md。
+  # ⚠️ 本条登记是管理员前置条件：须先合并，之后才能调度本任务的 Worker run。
+  #    Worker 本任务不改 .platform/ 下任何文件。
+  # ⚠️ 「写迁移文件」是代码改动，在 allowed_change_paths 之内；「执行迁移」仍是 prohibited 里的
+  #    database_migration —— Worker 不得对任何数据库跑 alembic。生产上的迁移由合并后的
+  #    自动部署（deploy.sh 先迁移、再换镜像）执行，不另设批准。
+  - id: AIH-TASK-004
+    title: tenant and project identity tables, migration, repository
+    purpose: >-
+      新增 tenants / projects 两张表（只含身份与归属字段）、Alembic 迁移 0005、同步 Session 的
+      repository 与测试。不含状态、金额、认证、webhook，不含 API / 服务层 / 审计写入 / 前端，
+      不部署、不对任何数据库执行迁移、不访问凭据。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - tenants 表：id BIGINT 主键；public_id CHAR(36) 唯一（uuid4）；company_name 非空；email 非空且不唯一；contact_name、phone 可空；created_at、updated_at 非空
+      - projects 表：id；public_id 同上；tenant_id 外键指向 tenants.id，ON DELETE RESTRICT，非空；name 非空；description 按 docs/database-schema.md（可空）；created_at、updated_at 非空
+      - 迁移 revision 为 0005_tenants_projects、down_revision 为 0004_password_reset_outbox；只含两个 create_table 与逆序 drop，不 ALTER、不删除任何已有表
+      - repository 用同步 Session，只 flush 不 commit，时间戳由调用方传入；只提供 create_tenant、get_tenant_by_public_id、create_project、get_project_for_tenant(tenant_id, public_id)、list_projects_for_tenant；取别的租户的项目返回 None；不记录联系人等个人字段
+      - SQLite 测试覆盖往返读写、public_id 为互不相同的 uuid4、跨租户返回 None 与列表隔离、未提交可回滚；MySQL 测试（BILLING_TEST_DATABASE_URL，只在 CI 跑）覆盖 upgrade / downgrade、列形状、FK RESTRICT、public_id 唯一
+      - 不含状态列、status_version、low_balance_threshold、currency、webhook 的 URL 或密钥列、backend_base_url、credential、API / schema / 服务层、审计写入、users.tenant_id
+      - docs/TODO.md 新增 AIH-TASK-004 记录段：做了什么、与 spec §75 / §76 字段的差集、验证到什么程度；不勾选 Phase 1 的 Tenant / Project
+      - 改动只落在 allowed_change_paths；app/repositories/__init__.py 只改 docstring 里关于事务的那一句，alembic/env.py 只加 import 新模型模块那一行；不改 .platform/ 下任何文件；不输出本机路径、主机名、凭据
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付（设计闸门：不适用，附 spec §132 第 13 条迁移分析），不合并、不直推
+    allowed_change_paths:
+      - app/models/tenancy.py
+      - app/repositories/__init__.py
+      - app/repositories/tenancy.py
+      - alembic/env.py
+      - alembic/versions/20260919_0005_tenants_projects.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_tenancy_repository.py
+      - docs/TODO.md
+    # 第一次在 Worker 里跑后端三项。tests.backend 在 Worker 里没有 BILLING_TEST_* 服务，
+    # 迁移与 MySQL 用例必然 skip —— 准入以 CI 为准（CI 把任何 skipped 判失败）。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - tests.backend
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review

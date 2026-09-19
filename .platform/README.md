@@ -44,7 +44,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002` 与 `AIH-TASK-003`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003` 与 `AIH-TASK-004`（用途见下面「Worker 的启用状态」）。
 
 除此之外一律 **fail closed** ——
 
@@ -68,7 +68,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` / `AIH-TASK-003` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -77,7 +77,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库允许被调度 `AIH-TASK-002` / `AIH-TASK-003`。它本身不会让任何东西执行。每次 run
+本仓库允许被调度 `AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004`。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -89,13 +89,14 @@ Codex，合并仍是 Kelvin。
 不在本仓库。把 `worker_enabled` 改回 `false` 仍是**出问题时的回滚方式**：不需要删文件、
 不需要改代码。
 
-三个已登记任务的用途不同：
+四个已登记任务的用途不同：
 
 | 任务 | 用途 | 写仓库吗 |
 | --- | --- | --- |
 | `AIH-TASK-001` | 校验本控制契约，并跑仓库已有的只读 / 测试检查 | 不建分支、不开 PR |
 | `AIH-TASK-002` | 第一次端到端 Pilot：Worker 中的 Claude 更新一份非生产文档，跑文档类检查，以 Draft PR 交付，验证「实现 → Codex 审查 → Kelvin 合并」这条链 | 建分支、开 Draft PR（开 PR 仍需绑定到该 run 的一次性批准）；不合并 |
 | `AIH-TASK-003` | 业务仓库适配（非生产功能）：让 `policy.check` / `tests.process` 在 Worker 模式下消费控制面给的只读 Git manifest（见下面「Worker 模式的 Git 输入」），以便之后重试 `AIH-TASK-002` | 同 `AIH-TASK-002` |
+| `AIH-TASK-004` | Phase 1 第一刀：`tenants` / `projects` 两张表（只含身份与归属字段）、Alembic 迁移 0005、repository 与测试；不含状态、金额、认证、webhook 与 API。表结构裁决见 [docs/database-schema.md](../docs/database-schema.md) | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移，Worker 自己不对任何数据库跑迁移 |
 
 `AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
 `tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`
@@ -109,7 +110,10 @@ Codex，合并仍是 Kelvin。
 每个会写仓库的任务允许改哪些文件由 `tasks.yaml` 里的 `allowed_change_paths` 声明
 （`AIH-TASK-002` 只有 `docs/openclaw-worker-pilot.md` 一项；`AIH-TASK-003` 只有
 `scripts/check_repo_policy.py`、`tests/test_check_repo_policy.py`、`tests/test_gh_verified_write.py`、
-`docs/TODO.md` 四项；`tests/test_gh_verified_write.py` 是契约修正加入的，理由见下面「Worker 模式的 Git 输入」）。口径：
+`docs/TODO.md` 四项；`tests/test_gh_verified_write.py` 是契约修正加入的，理由见下面「Worker 模式的 Git 输入」；
+`AIH-TASK-004` 是 `app/models/tenancy.py`、`app/repositories/__init__.py`、`app/repositories/tenancy.py`、
+`alembic/env.py`、`alembic/versions/20260919_0005_tenants_projects.py`、`tests/backend/test_migrations.py`、
+`tests/backend/test_tenancy_repository.py`、`docs/TODO.md` 八项）。口径：
 
 - 仓库根相对的 POSIX 路径，**逐个精确匹配文件**；不是 glob，也不是目录前缀
 - 不得包含任何 `.platform/` 路径（控制面 Worker 会拒绝）
@@ -182,7 +186,7 @@ parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前�
 所以它的 run **不会经过 `awaiting_merge`**：停在 `awaiting_review`，由人看完之后
 置 `completed` 或 `cancelled`。
 
-`AIH-TASK-002` / `AIH-TASK-003` 会开 Draft PR（`creates_pull_request: true`），它们的 run
+`AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` 会开 Draft PR（`creates_pull_request: true`），它们的 run
 在审查通过后进 `awaiting_merge`，由 Kelvin 合并后才置 `completed`。
 
 ---
