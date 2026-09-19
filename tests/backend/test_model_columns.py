@@ -17,6 +17,7 @@ import enum
 
 import pytest
 from sqlalchemy import Enum as SAEnum
+from sqlalchemy.types import Numeric
 
 from app.models.auth import (
     _ENUM_LENGTH,
@@ -28,11 +29,14 @@ from app.models.auth import (
     UserRole,
     UserStatus,
 )
+from app.models.base import MONEY_PRECISION, MONEY_SCALE
+from app.models.tenancy import BillingStatus, Tenant
+from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 
 
 def enum_columns():
-    """Every VARCHAR-backed enum column in the auth tables."""
-    for model in (User, AuditLog, DomainOutbox):
+    """Every VARCHAR-backed enum column in the auth, tenant and ledger tables."""
+    for model in (User, AuditLog, DomainOutbox, Tenant, WalletTransaction):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
                 yield f"{model.__tablename__}.{column.name}", column
@@ -63,10 +67,39 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
 
 @pytest.mark.parametrize(
     "enum_class",
-    [AuditAction, UserRole, UserStatus, OutboxStatus],
+    [
+        AuditAction,
+        UserRole,
+        UserStatus,
+        OutboxStatus,
+        BillingStatus,
+        TransactionType,
+        ReferenceType,
+    ],
     ids=lambda cls: cls.__name__,
 )
 def test_enum_values_stay_within_the_pinned_width(enum_class: type[enum.StrEnum]) -> None:
     """反向的那一半：加枚举值时，这条会先于数据库告诉你超了。"""
     too_long = [member.value for member in enum_class if len(member.value) > _ENUM_LENGTH]
     assert too_long == [], f"这些值超过了 _ENUM_LENGTH={_ENUM_LENGTH}：{too_long}"
+
+
+_MONEY_COLUMNS = [
+    Wallet.__table__.c.balance,
+    WalletTransaction.__table__.c.amount,
+    WalletTransaction.__table__.c.balance_before,
+    WalletTransaction.__table__.c.balance_after,
+    Tenant.__table__.c.low_balance_threshold,
+]
+
+
+@pytest.mark.parametrize(
+    "column",
+    _MONEY_COLUMNS,
+    ids=[f"{column.table.name}.{column.name}" for column in _MONEY_COLUMNS],
+)
+def test_every_amount_column_is_decimal_20_8(column) -> None:
+    """INV-10：金额列一律 DECIMAL(20,8) 且读出来是 Decimal，没有一列写散成别的精度。"""
+    assert isinstance(column.type, Numeric)
+    assert (column.type.precision, column.type.scale) == (MONEY_PRECISION, MONEY_SCALE)
+    assert column.type.asdecimal is True

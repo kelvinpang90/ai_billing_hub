@@ -17,6 +17,11 @@ from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.models.auth import DomainOutbox, OutboxStatus
 from app.models.base import Base
+from app.repositories.wallet import (
+    AGGREGATE_TENANT,
+    EVENT_BILLING_STATUS_CHANGED,
+    EVENT_LOW_BALANCE,
+)
 from app.services.auth import utc_now
 from app.services.password_reset import AGGREGATE_USERS, EVENT_PASSWORD_RESET
 from app.tasks import outbox as outbox_task
@@ -287,6 +292,34 @@ def test_recovery_requeues_every_due_row(wired, monkeypatch, settings: Settings)
 
     assert outbox_task.recover() == 2
     assert queued == due
+
+
+def test_recovery_leaves_events_without_a_handler_pending(wired, monkeypatch) -> None:
+    """INV-14（设计闸门 #88 §2）：没有处理器的事件**不重投**，原样等着。
+
+    ⚠️ 计费状态与低余额事件现在还没有投递方。重投它们只会失败、退避，几轮之后
+    成为 `FAILED` 死信 —— 等以后的 webhook / 通知任务接上处理器时，它们已经没了。
+    """
+    reset = add_row(wired)
+    waiting = [
+        add_row(
+            wired,
+            event_type=event_type,
+            aggregate_type=AGGREGATE_TENANT,
+            payload_json=json.dumps({"billing_status": "SUSPENDED"}),
+        )
+        for event_type in (EVENT_BILLING_STATUS_CHANGED, EVENT_LOW_BALANCE)
+    ]
+    queued: list[int] = []
+    monkeypatch.setattr(outbox_task.deliver, "delay", lambda outbox_id: queued.append(outbox_id))
+
+    assert outbox_task.recover() == 1
+    assert queued == [reset], "既有的密码重置事件照常重投，只有它"
+    for outbox_id in waiting:
+        row = read(wired, outbox_id)
+        assert row.status is OutboxStatus.PENDING
+        assert row.attempt_count == 0
+        assert row.payload_json is not None
 
 
 def test_recovery_takes_at_most_one_batch(wired, monkeypatch) -> None:
