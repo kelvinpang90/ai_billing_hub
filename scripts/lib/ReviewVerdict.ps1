@@ -200,7 +200,8 @@ function Test-ResponseHeader {
 }
 
 # 取评论里的 reviewed-head。整行匹配，所以 `> reviewed-head: …` 这种引用上轮的写法
-# 自然不算。恰好一处才返回，否则 $null（不猜）。
+# 自然不算。只有一个取值才返回，否则 $null（不猜）。同一个 SHA 出现多行不算歧义：
+# Claude 审查者照着材料里上轮的格式自己写了一行，脚本又补一行，两行必然相同。
 function Get-ReviewedHead {
     param([string]$Body)
     if (-not $Body) { return $null }
@@ -208,8 +209,16 @@ function Get-ReviewedHead {
     foreach ($line in ($Body -split '\r?\n')) {
         if ($line.TrimEnd() -cmatch '^reviewed-head: ([0-9a-f]{40})$') { $found += $Matches[1] }
     }
-    if ($found.Count -eq 1) { return $found[0] }
+    $distinct = @($found | Sort-Object -CaseSensitive -Unique)
+    if ($distinct.Count -eq 1) { return $distinct[0] }
     return $null
+}
+
+# 发布前去掉审查者自己写的 reviewed-head 行（整行匹配，与 Get-ReviewedHead 同一口径），
+# 由脚本补上唯一一行权威的。审查者写的 SHA 可能抄自材料里的上轮，不能信。
+function Remove-ReviewedHeadLine {
+    param([string[]]$Lines)
+    return @($Lines | Where-Object { $_.TrimEnd() -cnotmatch '^reviewed-head: [0-9a-f]{40}$' })
 }
 
 # 扫一遍评论，得到：最近一轮有效实现审查、它之后的最后一条回应、审查轮数。
