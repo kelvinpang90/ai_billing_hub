@@ -1044,6 +1044,39 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] CI 全量运行：lint、format、pytest 含 MySQL 用例，一条都不 skip（未发生）
 - [ ] Codex 审查、Kelvin 合并（未发生）
 
+### AIH-TASK-005 —— 钱包、不可变账本与余额驱动的计费状态（2026-09-19）
+
+上面的 Wallet 与「不可变钱包账本」**不勾**：本任务只落地数据层（模型、迁移 0006、repository、测试），实现依据是设计闸门 #88 已批准的 v6：[design/AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)。§124 的这两项还差 API、服务层、管理端，以及「建客户时自动建钱包」的服务编排。
+
+- [x] **做了什么（PR #92 交付）**：
+  - `app/models/wallet.py`：`Wallet`、`WalletTransaction`，枚举 `TransactionType`（spec §8 的 9 种）与 `ReferenceType`（5 种），类型↔符号、类型↔来源两组映射。数据库 `CHECK` 的条件文本**由这两组映射生成**，repository 的校验读的也是它们，两层只有一份定义
+  - `app/models/tenancy.py`：`tenants` 加 `billing_status`（`BillingStatus`，默认 `SUSPENDED`）、`status_version`（默认 0）、`low_balance_threshold`（可空）与三条 `CHECK`。`app/models/auth.py`：`AuditAction` 加 `WALLET_ADJUSTMENT_POSTED`、`TENANT_BILLING_STATUS_CHANGED`（列宽已写死为 64，不需要 ALTER）
+  - `alembic/versions/20260919_0006_wallets_ledger.py`：revision `0006_wallets_ledger`，down_revision `0005_tenants_projects`。第 0 步预检排在任何 DDL 之前；然后建两张表、6 个触发器、`tenants` 的三列与三条 `CHECK`，最后给既有租户回填空钱包。`CHECK` 在迁移里是冻结的字面量。`downgrade` 先删 `tenants` 的三条 `CHECK` 与三列，再按外键反向删两张表。文件头附 §132 第 13 条分析
+  - `app/repositories/wallet.py`：`create_wallet`、`get_wallet_for_tenant`、`post_transaction`、`list_transactions_for_tenant`、`verify_wallet`，外加可单测的纯函数。同步 `Session`，只 flush 不 commit。两处加锁读都用 `with_for_update()` 加 `populate_existing=True`，加锁顺序固定为钱包 → 租户。没有任何 `UPDATE wallets`，flush 之后 `session.expire(wallet)`，`PostResult.balance` 取账本行的 `balance_after`。同一次 flush 写入：账本行；调账与系统更正的审计；计费状态跃迁（租户、审计、`tenant.billing_status_changed`）；低余额事件 `tenant.low_balance`
+  - `app/tasks/outbox.py`：`recover` 的查询加 `event_type IN (有渲染器的类型)`，`deliver` 没动
+  - `alembic/env.py`：import `app.models.wallet`
+  - 测试：`tests/backend/test_wallet_rules.py` 只测纯函数，不连库（金额、类型↔符号↔来源、原因与操作者、metadata 禁用键、跃迁表、低余额跨越、核对规则与篡改检测、repository 没有更新或删除函数）。`tests/backend/test_wallet_repository.py` 只跑真 MySQL，覆盖设计 §7 里所有调用 `post_transaction` / `create_wallet` / `verify_wallet` 的场景，另有两个并发用例（20 线程 × 10 笔、8 线程同一来源）、两个会话抢同一序号的触发器行锁用例，以及 T0.4 记下的 `DECIMAL(20,8)` 往返断言。`tests/backend/test_migrations.py`：`tenants` 的期望列集合更新；0006 新增两个不连库的用例（迁移与模型的 `CHECK` 逐条相同；预检失败时没有发出任何 DDL），以及四个 MySQL 用例（升降只增删两张表与三列；列形状；键、索引、`CHECK`、触发器；既有租户回填）。`tests/backend/test_model_columns.py` 覆盖新的枚举列与金额列。`tests/backend/test_outbox.py`：两类新事件在 `recover` 之后仍是 `PENDING`、`attempt_count = 0`，密码重置照常重投
+  - 文档：[database-schema.md](database-schema.md) 补 `wallets`、`wallet_transactions`、触发器、`tenants` 的三列，更新「尚未建的列」
+- [x] **设计没写死、由实现定的细节**（审查时请看这几条）：
+  - 「超过 8 位小数」的判据是**存进 `DECIMAL(20,8)` 会不会改变值**：`Decimal("0.000000001")` 拒绝，`Decimal("1.500000000")` 放行。不舍入，这一点与设计一致
+  - 按来源查重是普通读，**不加锁**：对不存在的键做加锁读会取间隙锁，不同租户相邻的来源 ID 会互相阻塞甚至死锁。同一钱包已经由钱包锁串行，漏网的并发插入由唯一约束兜底，调用方重试后走重放或冲突分支（设计 §5 那一行）
+  - 计费状态跃迁的审计：`actor_user_id` 为空，`actor_role = "SYSTEM"`，`reason` 是 `BALANCE_POSITIVE` / `BALANCE_NON_POSITIVE`，前后状态里有状态与版本号，后状态另带余额和账本行 `public_id`。跃迁时**不改** `tenants.updated_at`，因为设计只列了 `billing_status` 与 `status_version`
+  - 事件 payload 与审计里的金额用定点字符串（`"-5.00000000"`），不用 `str(Decimal)`：库里读出来的 0 会写成 `0E-8`
+  - `verify_wallet` 的问题码：`WALLET_MISSING`、`LEDGER_MISSING`、`BALANCE_NOT_LEDGER_SUM`、`BALANCE_NOT_LAST_BALANCE_AFTER`、`VERSION_NOT_LAST_SEQUENCE`、`SEQUENCE_GAP`、`CHAIN_BROKEN`、`ROW_ARITHMETIC_BROKEN`、`BILLING_STATUS_MISMATCH`。核对规则是纯函数 `ledger_problems`，篡改场景（直接改余额、改金额、删行）在 MySQL 上被触发器挡住、造不出来，所以用构造的数据测它
+  - metadata 禁用键不分大小写、任意嵌套层级都检查；存不进 JSON 列的值（`Decimal`、NaN）在写入前就拒绝
+  - `list_transactions_for_tenant` 一页最多 200 行，超过按 200 截断；`limit < 1` 报 `ValueError`
+  - `reference_id` 用 `utf8mb4_0900_bin`（二进制、NO PAD）排序规则，迁移与模型两边都写：网关支付 ID 区分大小写，按库默认的 `utf8mb4_0900_ai_ci` 比较时，只差大小写的两笔支付会被判成同一来源，金额相同的第二笔被当重放吞掉。选 `0900_bin` 而不是 `utf8mb4_bin`，是因为后者是 PAD SPACE、仍把尾部空格当成相同。模型用 `with_variant` 只在 MySQL 上指定，SQLite 没有这个排序规则（Claude Code 审查 #92 建议项 1）
+- [x] **验证程度**：
+  - 编写代码的 Worker 会话本身没有命令执行工具，格式与导入顺序照 ruff 的规则手写；之后 Worker 自己跑的 `lint.check` 挂在一条 I001 上（见下面第一条未勾项）
+  - 下面四条前提写代码时**没有实测**，已由 PR #92 第一轮 CI 在 `mysql:8.4` 上全部验证通过：① MySQL 允许 `CHECK` 引用 `created_by`。MySQL 禁止 `CHECK` 引用带「引用动作」的外键列，按理 `ON DELETE RESTRICT` 不算引用动作；② 触发器里 `SELECT … INTO … FROM … FOR UPDATE` 的写法；③ pymysql 报出的错误号：`SIGNAL` 是 1644，`CHECK` 违反是 3819；④ 删掉 `CHECK` 还在引用的列会被 MySQL 拒绝，所以 `downgrade` 先 `DROP CHECK`
+  - Worker 只跑 `docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check`；`tests.backend` 只在 CI 跑，而 MySQL 用例在 Worker 里必然 skip
+- [ ] Worker 跑 `allowed_commands` 全部零退出：**没有**。run `5cfb3b84` 写完 14 个文件后，`lint.check` 只挂一条 ruff I001（`tests/backend/test_wallet_rules.py` 的导入顺序），控制面把 run 结算为 `failed:checks_failed`，没有提交、没开 PR；其余四条零退出。Claude Code 把该 run 工作区里的 14 个文件原样搬到 `task/AIH-TASK-005-wallet-ledger`，只做了 `ruff check --fix` 这一处导入排序，再开 Draft PR。搬过来后本地：`check_docs.py`、`check_repo_policy.py`、`unittest discover -s tests`、`ruff check .`、`ruff format --check .` 全过；`pytest` 558 passed、69 skipped（skipped 主要是要 MySQL 的 repository / 迁移 / 触发器用例，**不算 passed**，以 CI 为准）
+- [x] CI 全量运行：lint、format、pytest 含全部 MySQL 用例，一条都不 skip：PR #92 head `5caa9d64393758d34ef49844178a19b475fcb2f7` 的 backend job `627 passed`、0 skipped（本地 skipped 的 69 条全部在 CI 跑到），其余检查全绿。审查修复提交之后的 CI 结果见 PR #92
+- [x] 审查：PR 正文写 `设计闸门：#88`；Claude Code（claude-opus-5）独立审查 `VERDICT: APPROVE`，无阻断项。4 条建议项都在本 PR 里修：`reference_id` 二进制排序规则（见上）；补 MySQL 用例——只差大小写或尾部空格的来源互不相干、系统更正的审计落库且没有操作者、分页上限与 `limit < 1`；本记录改成已发生的事实，并把两项后移工作登记在下面
+- [ ] 合并与生产迁移 0006：部署后核对 `alembic_version = 0006_wallets_ledger`、6 个触发器、既有租户各有一个空钱包、`/healthz` 与 `/readyz`（未发生）
+- [ ] 数据库账号权限拆分（迁移账号与运行账号分开）：运行账号现在是库级授权，`TRUNCATE` / `DROP` 这类 DDL 不经触发器，能清空或删掉账本。设计 §1「明确不做」与 §10 残余风险把它后移为运维任务；涉及部署、密钥与恢复流程，要单独设计（未开始）
+- [ ] 余额不一致的监控告警接线：本任务只提供 `verify_wallet`，定时核对与告警（spec §132 DoD 第 14 条）按设计 §1 后移（未开始）
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）

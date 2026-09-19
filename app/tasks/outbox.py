@@ -83,6 +83,10 @@ def _render_password_reset(settings: Settings, payload: dict[str, object]) -> Ou
 # 因为最可能的原因是**滚动更新的时间差**：API 已经在写新事件，worker 镜像还是
 # 旧的。这种行在 worker 更新后就能正常投出去 —— 立刻判死信等于把它们永久丢掉，
 # 而它们本来只需要等几分钟。重试上限兜住了「真的没人认识它」那种情况。
+#
+# ⚠️ `recover` 只重投这里有的类型（设计闸门 #88 §2）。`tenant.billing_status_changed`
+# 与 `tenant.low_balance` 现在还没有处理器：它们以 PENDING 持久躺在库里，等以后的
+# webhook / 通知任务在这里加上处理器再接手，不会被反复重投、退避成死信（INV-14）。
 _RENDERERS = {EVENT_PASSWORD_RESET: _render_password_reset}
 
 
@@ -197,6 +201,9 @@ def recover() -> int:
     之前挂掉」都会让那些行**永远躺在库里**：状态是 PENDING、谁也不会再看它们
     一眼，而用户那边的表现只是「没收到信」。
 
+    ⚠️ 只捡有渲染器的事件类型。没有处理器的行重投了也只会失败、退避，最后成为
+    死信 —— 而它们本来只是在等以后的任务来处理（见 `_RENDERERS` 上方的注释）。
+
     返回重新触发了多少行（给日志与将来的积压告警用，T0.9）。
     """
     settings = get_settings()
@@ -208,6 +215,7 @@ def recover() -> int:
                 .where(
                     DomainOutbox.status == OutboxStatus.PENDING,
                     DomainOutbox.next_retry_at <= now,
+                    DomainOutbox.event_type.in_(list(_RENDERERS)),
                 )
                 .order_by(DomainOutbox.id)
                 .limit(settings.outbox_recovery_batch)
