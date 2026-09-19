@@ -600,6 +600,7 @@ if ($Reviewer -eq 'claude') {
     Write-Host "审查者：Claude Code（$(if ($Model) { $Model } else { 'CLI 默认模型' })），只读工具 Read / Grep / Glob" -ForegroundColor Cyan
     Write-Host ("-" * 60)
     $reviewText = Invoke-ClaudeReview -Executable $claude -Prompt $prompt -WorkingDirectory $repo -ModelName $Model
+    $reviewText = Remove-ReviewPreamble $reviewText -Design:$isDesign
     [System.IO.File]::WriteAllText($out, $reviewText, [System.Text.UTF8Encoding]::new($false))
 } else {
     $codex = Resolve-CodexPath

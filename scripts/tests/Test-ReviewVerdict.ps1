@@ -103,6 +103,15 @@ foreach ($case in @(
 }
 Assert-Equal '' (Add-ReviewerNote '' $note) '空结果原样返回，不凭空造出前缀'
 
+Write-Host "Remove-ReviewPreamble"
+$withPreamble = "设计我审完了，结论是要改。`n`n$prefix`n正文`n`nREQUEST_CHANGES"
+$stripped = Remove-ReviewPreamble $withPreamble -Design
+Assert-Equal $true (Test-ReviewHeader $stripped -Design) '去掉寒暄后前缀是第一个非空行'
+Assert-Equal "$prefix`n正文`n`nREQUEST_CHANGES" $stripped '前缀之后的内容逐字不变'
+Assert-Equal $false (Test-ReviewHeader (Remove-ReviewPreamble "只有寒暄`nREQUEST_CHANGES" -Design) -Design) '没有前缀行：原样返回，照旧不合法'
+Assert-Equal $false (Test-ReviewHeader (Remove-ReviewPreamble "说明：$prefix 之后`nREQUEST_CHANGES" -Design) -Design) '前缀只出现在句中：不截取'
+Assert-Equal "## 🔍 CODEX REVIEW`nVERDICT: APPROVE" (Remove-ReviewPreamble "好的`n## 🔍 CODEX REVIEW`nVERDICT: APPROVE") '实现闸门同理'
+
 Write-Host "Compare-MaterialParts"
 $before = [ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b' }
 Assert-Equal 0 (@(Compare-MaterialParts $before ([ordered]@{ '标题' = '# T'; 'PR 正文' = 'body'; 'DIFF' = 'diff --git a b' })).Count) '逐字相同 = 无变化'

@@ -99,6 +99,19 @@ function Test-ReviewHeader {
     return ((Get-FirstNonEmptyLine ($Body -split '\r?\n')) -ceq $expected)
 }
 
+# 去掉署名前缀**之前**的寒暄行（Claude Code 审查者偶尔会先说一句「我审完了……」）。
+# 只在输出里存在一行与前缀**逐字相同**的行时才截取；找不到就原样返回，交给 Test-ReviewHeader 拒绝。
+# 前缀之后的内容一个字都不动。
+function Remove-ReviewPreamble {
+    param([string]$Body, [switch]$Design)
+    $expected = if ($Design) { $DesignReviewPrefix } else { $ImplementationReviewPrefix }
+    $lines = $Body -split '\r?\n'
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -ceq $expected) { return ($lines[$i..($lines.Count - 1)] -join "`n") }
+    }
+    return $Body
+}
+
 # 在署名前缀（**第一个非空行**，与 Test-ReviewHeader 同一口径）之后插入一段审查者说明。
 # 不能按固定行号插：审查输出允许有前导空行，按行号插会把说明挤到前缀前面，
 # 读取方就把整条评论判成 NOT_A_REVIEW（Claude Code 审查者在 PR #89 发现）。
