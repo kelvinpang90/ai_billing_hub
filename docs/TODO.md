@@ -1224,7 +1224,7 @@ Phase 全做完还不能上，以下五条必须全过：
 - [x] `AGENTS.md` §10 / §11 的 `erp_os` 模板残留（2026-09-11）。删掉 §10 阻断清单里的 `Inventory 错误` / `e-Invoice 严重错误` 与 §11 高风险模块里的 `Inventory` / `Order` / `e-Invoice`，共 5 行；只删不加。**顺带发现的缺口，未动**：§11 高风险模块没有列本项目真正会算错钱的地方——定价 / 汇率、Outbox 与 Webhook 投递、幂等键——要不要补由 Kelvin 定，补的话属于改 Codex 的注意力分配，应单独一个 PR
 - [x] 第二轮 Codex 审查的三条阻断（审查发现，非自查）：① 复审增量用随机临时文件名，`git diff --no-index` 把路径写进 `--stat` 与 diff 头，审查前后两次取材逐字不等 → **只要增量非空，所有修复复审都发不出判定**，改为固定文件名 + 以临时目录为工作目录用相对名调 git；② `Test-ImpactSection` 的 `\s*\S` 跨空行，空的「完整影响面」后接另一个章节也算写了 → 改成在下一个标题之前找内容行；③ 复选框白名单按「后面跟链接就豁免」，于是 `[~]` 后面接一个 Markdown 链接就能绕过 → 判据改为「方括号里不止一个字符才是链接标签」。**验收**：三条各做变异测试，分别有用例失败；Python 61 用例、PS 96 用例
 
-- [x] Claude 审查者重复写 `reviewed-head`（2026-09-19）：#94 第二轮审查评论里有两行相同的 `reviewed-head`——审查者照着材料里上轮的格式自己写了一行，脚本又补一行。`Get-ReviewedHead` 要求「恰好一处」，于是第三轮以「上轮审查缺少唯一 reviewed-head」拒绝开审。修法：`Get-ReviewedHead` 改为「只有一个取值」才返回（同一 SHA 多行不算歧义，不同 SHA 仍返回 null）；发布前用新函数 `Remove-ReviewedHeadLine` 去掉审查者自己写的整行 `reviewed-head`，只留脚本补的那一行。`Test-ReviewVerdict.ps1` 新增 6 个用例，117 通过
+- [x] Claude 审查者重复写 `reviewed-head`（2026-09-19）：#94 第二轮审查评论里有两行相同的 `reviewed-head`——审查者照着材料里上轮的格式自己写了一行，脚本又补一行。`Get-ReviewedHead` 要求「恰好一处」，于是第三轮以「上轮审查缺少唯一 reviewed-head」拒绝开审。修法：解析**上轮审查正文**时用 `Get-ReviewedHead -AllowRepeated`（同一 SHA 多行不算歧义，不同 SHA 仍返回 null）；回应仍按默认的「恰好一处」，与 `check_repo_policy.py` 的 `check_response` 一致。发布前的拼装抽成 lib 函数 `Add-ReviewedHead`：先去掉审查者自己写的整行 `reviewed-head`（它可能抄自上轮），再在判定行之前补上脚本给的唯一一行。`Test-ReviewVerdict.ps1` 新增的用例覆盖拼装结果（审查者抄来不同 SHA 时只剩脚本那一行），122 通过（#95 审查建议）
 
 **仍靠语义审查、机器抓不住的**：ADR 与 TODO 的*内容*是否一致（检查只证明声明了影响）；「已修」是否真修好（SHA · 行号只证明引用存在）；范围扩张是否必要。这三样写进了审查清单 F 节，由 Codex 复审时判断。
 

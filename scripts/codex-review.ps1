@@ -317,7 +317,7 @@ function Get-ReviewMaterial {
     $history = Get-ImplementationReviewHistory $obj.comments
     $revisionSection = '首次审查：无历史实现审查。'
     if ($history.PreviousReview) {
-        $reviewedHead = Get-ReviewedHead $history.PreviousReview
+        $reviewedHead = Get-ReviewedHead $history.PreviousReview -AllowRepeated
         if (-not $reviewedHead) { Fail '上轮审查缺少唯一 reviewed-head，不能猜测复审基线。' }
         $previousVerdict = Get-ImplementationVerdict (Get-VerdictLine ($history.PreviousReview -split '\r?\n'))
         $response = $history.Response
@@ -735,15 +735,8 @@ if ($changedParts) {
 if (-not $isDesign) {
     # 判定必须携带它审的是哪个提交。没有这行，一次 APPROVE 会被后续提交
     # 沿用下去 —— 未审查的代码就凭旧批准进了正式 PR。
-    $reviewed = @()
-    # 审查者自己写的 reviewed-head 可能抄自上轮，只留脚本补的这一行。
-    $lines = @(Remove-ReviewedHeadLine @(Get-Content $out))
-    $lastIdx = $lines.Count - 1
-    while ($lastIdx -ge 0 -and -not $lines[$lastIdx].Trim()) { $lastIdx-- }
-    if ($lastIdx -gt 0) { $reviewed += $lines[0..($lastIdx - 1)] }
-    $reviewed += "reviewed-head: $($prHead.Trim())"
-    $reviewed += ''
-    $reviewed += $lines[$lastIdx]
+    # 审查者自己写的 reviewed-head 可能抄自上轮，只留脚本补的这一行（拼装逻辑在 lib，有测试）。
+    $reviewed = Add-ReviewedHead @(Get-Content $out) $prHead
     Set-Content -Path $out -Value $reviewed -Encoding UTF8
 }
 
