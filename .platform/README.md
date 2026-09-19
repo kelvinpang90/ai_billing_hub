@@ -44,7 +44,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004` 与 `AIH-TASK-005`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005` 与 `AIH-TASK-006`（用途见下面「Worker 的启用状态」）。
 
 除此之外一律 **fail closed** ——
 
@@ -68,7 +68,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` / `AIH-TASK-005` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-006` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -77,7 +77,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库登记了 `AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` / `AIH-TASK-005`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-006`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -89,7 +89,7 @@ Codex，合并仍是 Kelvin。
 不在本仓库。把 `worker_enabled` 改回 `false` 仍是**出问题时的回滚方式**：不需要删文件、
 不需要改代码。
 
-五个已登记任务的用途不同：
+六个已登记任务的用途不同：
 
 | 任务 | 用途 | 写仓库吗 |
 | --- | --- | --- |
@@ -98,6 +98,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-003` | 业务仓库适配（非生产功能）：让 `policy.check` / `tests.process` 在 Worker 模式下消费控制面给的只读 Git manifest（见下面「Worker 模式的 Git 输入」），以便之后重试 `AIH-TASK-002` | 同 `AIH-TASK-002` |
 | `AIH-TASK-004` | Phase 1 第一刀：`tenants` / `projects` 两张表（只含身份与归属字段）、Alembic 迁移 0005、repository 与测试；不含状态、金额、认证、webhook 与 API。表结构裁决见 [docs/database-schema.md](../docs/database-schema.md) | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移，Worker 自己不对任何数据库跑迁移 |
 | `AIH-TASK-005` | Phase 1 第二刀：钱包与不可变账本的数据层，加上由余额驱动的计费状态。**碰钱，已过设计闸门** #88（`APPROVED: design v6`）；批准的设计逐字放在 [docs/design/AIH-TASK-005-wallet-ledger.md](../docs/design/AIH-TASK-005-wallet-ledger.md)，Worker 以它为准 | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移 0006（含触发器）。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#88` 再审 |
+| `AIH-TASK-006` | Phase 1 第三刀：管理端客户管理。管理员建客户时在同一事务里建钱包并写审计，建项目，分页查看客户与项目；新增管理员鉴权 `require_admin`。**碰钱包创建与鉴权，已过设计闸门** #96（`APPROVED: design v3`）；批准的设计逐字放在 [docs/design/AIH-TASK-006-admin-customers.md](../docs/design/AIH-TASK-006-admin-customers.md)，Worker 以它为准 | 同 `AIH-TASK-002`；没有迁移。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#96` 再审 |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
@@ -129,7 +130,7 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 `docs/TODO.md` 四项；`tests/test_gh_verified_write.py` 是契约修正加入的，理由见下面「Worker 模式的 Git 输入」；
 `AIH-TASK-004` 是 `app/models/tenancy.py`、`app/repositories/__init__.py`、`app/repositories/tenancy.py`、
 `alembic/env.py`、`alembic/versions/20260919_0005_tenants_projects.py`、`tests/backend/test_migrations.py`、
-`tests/backend/test_tenancy_repository.py`、`docs/TODO.md` 八项；`AIH-TASK-005` 是十四项，逐个列在 `tasks.yaml` 里）。口径：
+`tests/backend/test_tenancy_repository.py`、`docs/TODO.md` 八项；`AIH-TASK-005` 与 `AIH-TASK-006` 各是十四项，逐个列在 `tasks.yaml` 里）。口径：
 
 - 仓库根相对的 POSIX 路径，**逐个精确匹配文件**；不是 glob，也不是目录前缀
 - 不得包含任何 `.platform/` 路径（控制面 Worker 会拒绝）
@@ -202,7 +203,7 @@ parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前�
 所以它的 run **不会经过 `awaiting_merge`**：停在 `awaiting_review`，由人看完之后
 置 `completed` 或 `cancelled`。
 
-`AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` / `AIH-TASK-005` 会开 Draft PR（`creates_pull_request: true`），它们的 run
+`AIH-TASK-002` 到 `AIH-TASK-006` 会开 Draft PR（`creates_pull_request: true`），它们的 run
 在审查通过后进 `awaiting_merge`，由 Kelvin 合并后才置 `completed`。
 
 ---
