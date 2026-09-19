@@ -1306,6 +1306,12 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [x] `tasks.yaml`：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）改成 `status: done`；`AIH-TASK-002` 从未交付，按 Kelvin 的决定改成 `status: superseded` 并就地写明原因（Claude Code 审查 #94 指出，最初误标成了 `done`）。文件头注释写明三个取值；`.platform/README.md` 写明规则：合并部署之后由管理员单独开收尾 PR 改成 `done`（Worker 改不了 `.platform/`）。本机用 Worker 自己的 `worker.contracts.load_task` 加载，整份文件照常解析，四个任务都以 `task is not ready` 被拒
 - [ ] 控制面 ACVDEV-TASK-019（任务快照、推荐规则、回复补全、Telegram 主动推送）合并部署后，用下一个真实任务验证推荐与推送（未发生）
 
+### AIH-TASK-006 的登记：管理端客户管理（2026-09-19）
+
+- [x] 设计闸门 #96：v1 → v3 三轮 Claude Code 设计审查，`APPROVED: design v3`。v1 的阻断项：鉴权靠每个处理函数手动调用 `require_admin`，测试计划却没有逐个接口验证 → 改为从 `app.routes` 枚举全部 `/api/v1/admin` 路由逐个断言。v2 的阻断项：全局异常处理器会把 SQLAlchemy 异常文本（含 SQL 参数，也就是 email、contact、phone）写进日志 → 引擎统一 `hide_parameters=True`，并加「日志不含个人数据」用例
+- [x] 登记：`tasks.yaml` 新增 `AIH-TASK-006`（`status: ready`，十四个 `allowed_change_paths`，五项 `allowed_commands`）；批准的设计逐字放在 [design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)；`.platform/README.md` 同步。审查 v3 的两条建议（项目写入的原子回滚、对不存在的客户建项目返回 404 且不写库）写进了验收标准
+- [ ] `AIH-TASK-006` 的 Worker run、CI、审查、合并与生产核对（未发生）
+
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
 复审第三轮要求「停止逐项补洞、整体比对」，下面几项是那次自查发现的。**都不是

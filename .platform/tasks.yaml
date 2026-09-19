@@ -342,3 +342,68 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-006
+    title: admin customer management (customer with wallet, projects, audit)
+    purpose: >-
+      按 docs/design/AIH-TASK-006-admin-customers.md（设计闸门 #96 已批准 v3）实现管理端客户管理：
+      require_admin 鉴权、services.customers（建客户与钱包、审计同一事务）、五个 /api/v1/admin 接口
+      （建客户、客户分页列表、客户详情、建项目、项目分页列表）、引擎 hide_parameters=True、docs/api.md。
+      不含编辑客户、账户状态、低余额阈值、调账接口、API 凭据、webhook 与前端。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-006-admin-customers.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 五个接口的路径、请求、响应字段白名单、错误码（TOKEN_INVALID / ADMIN_REQUIRED / CUSTOMER_NOT_FOUND / VALIDATION_ERROR / DATABASE_NOT_CONFIGURED）、分页边界与校验规则按设计 §2；响应从不含内部自增 id；余额是 quantize 到 8 位小数的字符串
+      - require_admin 放在 app/api/auth.py，先 require_current_user，再按数据库里的角色判 ADMIN；每个 /api/v1/admin 处理函数都显式调用它
+      - 建客户在一个 session_scope 里完成 create_tenant、create_wallet、CUSTOMER_CREATE 审计；建项目同一事务写 PROJECT_CREATE 审计；审计 after_state 只含设计 §6 列出的字段，不含 email、contact_name、phone
+      - create_database_engine 给 create_engine 加 hide_parameters=True
+      - 测试覆盖设计 §7 全部行，含从 app.routes 枚举全部 /api/v1/admin 路由的鉴权用例、日志不含个人数据用例；另补两条（设计审查 v3 的建议）：建项目时让写入失败，断言项目与 PROJECT_CREATE 审计都没留下；对不存在的客户建项目返回 404 且不写库
+      - 调用 create_wallet 的原子性用例同时在 SQLite 与 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 MySQL 部分 skip）
+      - docs/api.md 新建并记五个接口的契约；docs/TODO.md 新增 AIH-TASK-006 记录段，记下 PROJECT_CREATE 是对 spec §66 清单的补充
+      - 不含编辑客户、account_status、low_balance_threshold 配置、调账接口、API 凭据、webhook、前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出；以 Draft PR 交付，不合并、不直推
+    allowed_change_paths:
+      - app/api/auth.py
+      - app/api/admin_customers.py
+      - app/main.py
+      - app/schemas/customers.py
+      - app/services/customers.py
+      - app/repositories/tenancy.py
+      - app/models/auth.py
+      - app/core/database.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_customer_service.py
+      - tests/backend/test_tenancy_repository.py
+      - tests/backend/test_database.py
+      - docs/api.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
