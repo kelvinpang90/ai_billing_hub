@@ -1073,7 +1073,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] Worker 跑 `allowed_commands` 全部零退出：**没有**。run `5cfb3b84` 写完 14 个文件后，`lint.check` 只挂一条 ruff I001（`tests/backend/test_wallet_rules.py` 的导入顺序），控制面把 run 结算为 `failed:checks_failed`，没有提交、没开 PR；其余四条零退出。Claude Code 把该 run 工作区里的 14 个文件原样搬到 `task/AIH-TASK-005-wallet-ledger`，只做了 `ruff check --fix` 这一处导入排序，再开 Draft PR。搬过来后本地：`check_docs.py`、`check_repo_policy.py`、`unittest discover -s tests`、`ruff check .`、`ruff format --check .` 全过；`pytest` 558 passed、69 skipped（skipped 主要是要 MySQL 的 repository / 迁移 / 触发器用例，**不算 passed**，以 CI 为准）
 - [x] CI 全量运行：lint、format、pytest 含全部 MySQL 用例，一条都不 skip：PR #92 head `5caa9d64393758d34ef49844178a19b475fcb2f7` 的 backend job `627 passed`、0 skipped（本地 skipped 的 69 条全部在 CI 跑到），其余检查全绿。审查修复提交之后的 CI 结果见 PR #92
 - [x] 审查：PR 正文写 `设计闸门：#88`；Claude Code（claude-opus-5）独立审查 `VERDICT: APPROVE`，无阻断项。4 条建议项都在本 PR 里修：`reference_id` 二进制排序规则（见上）；补 MySQL 用例——只差大小写或尾部空格的来源互不相干、系统更正的审计落库且没有操作者、分页上限与 `limit < 1`；本记录改成已发生的事实，并把两项后移工作登记在下面
-- [ ] 合并与生产迁移 0006：部署后核对 `alembic_version = 0006_wallets_ledger`、6 个触发器、既有租户各有一个空钱包、`/healthz` 与 `/readyz`（未发生）
+- [x] 合并与生产迁移 0006：复审（head `a19a675`）`VERDICT: APPROVE`、无建议项，Squash 合并为 `6c02b9f`，Deploy run 35443229889 成功。生产只读核对：`alembic_version = 0006_wallets_ledger`；6 个触发器都在；`reference_id` 的排序规则是 `utf8mb4_0900_bin`；`@@log_bin_trust_function_creators = 1`；生产上还没有租户，所以回填是空操作，钱包与账本都是 0 行；`/healthz` 与 `/readyz` 都是 200，7 个容器 healthy，`.last-good-deploy` 的 tag 是 `6c02b9f`
 - [ ] 数据库账号权限拆分（迁移账号与运行账号分开）：运行账号现在是库级授权，`TRUNCATE` / `DROP` 这类 DDL 不经触发器，能清空或删掉账本。设计 §1「明确不做」与 §10 残余风险把它后移为运维任务；涉及部署、密钥与恢复流程，要单独设计（未开始）
 - [ ] 余额不一致的监控告警接线：本任务只提供 `verify_wallet`，定时核对与告警（spec §132 DoD 第 14 条）按设计 §1 后移（未开始）
 
@@ -1290,7 +1290,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 
 - [x] `docker-compose.yml` 的 mysql 加 `--log-bin-trust-function-creators=ON`，`test_compose` 守住。实测证据（一次性 `mysql:8.4` 容器，配置同生产：binlog 开、ROW、应用账号库级授权）：开关关着时应用账号 `CREATE TRIGGER` 报 ERROR 1419；打开后能建，UPDATE / DELETE 被拒（45000）、INSERT 照常，`mysqldump` 导出触发器。CI 用 root 连库，看不出这个问题，所以只能靠这条 compose 守卫
 - [x] 本 PR 合并部署后，确认生产 `@@log_bin_trust_function_creators = 1`，再登记 `AIH-TASK-005`：#90 部署后在生产上查到 `@@log_bin_trust_function_creators = 1`、`@@log_bin = 1`，mysql 重建后 healthy；`AIH-TASK-005` 已登记，批准的设计逐字放在 [design/AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)。⚠️ CI 的 MySQL 也要满足同一前置条件：service 容器传不进 mysqld 参数，所以 `ci.yml` 的 backend job 在跑测试前用 root 设 `SET GLOBAL log_bin_trust_function_creators = ON`，`test_compose` 守住顺序（Claude Code 审查 #91 发现；少了它，迁移 0006 的预检会把 CI 上所有迁移用例拦下）
-- [ ] `AIH-TASK-005` 的 Worker run、CI、审查、合并与生产迁移 0006（未发生）
+- [x] `AIH-TASK-005` 的 Worker run、CI、审查、合并与生产迁移 0006：Telegram 发起后常驻 Worker 8 秒内自动领取 run `5cfb3b84`（第一次无人手动启动 Worker）。run 写完 14 个文件，却因一条 ruff I001 结算为 `failed:checks_failed`、没开 PR；由 Claude Code 把工作区原样搬进 PR #92，只修导入顺序。CI 第一轮 `627 passed`、0 skipped，Worker 没能实测的四条 MySQL 前提全部成立；审查两轮 APPROVE，4 条建议项在同一 PR 修完；合并、部署与生产核对见上面 AIH-TASK-005 记录。⚠️ Worker 在 lint 上仍然没有自动修复这一步，小的导入顺序问题会让整个 run 失败，是否给 Worker 加 `ruff check --fix` / `ruff format` 属于控制面的事，未改
 - ⚠️ **Worker 里 skipped 不是 passed**：这 17 个用例在 Worker 里不再有信号，只由 CI 覆盖。另：`AIH-TASK-001` 是只跑检查、不开 PR 的任务，而当前 Worker 只接受 `creates_branch` / `creates_pull_request` 为 `true` 且有 `allowed_change_paths` 的开发任务，所以它在这个 Worker 上跑不了（run `3a699c91` 以 `invalid_contract` 失败）。留在契约里会误导，待清理（删掉该任务，或让 Worker 支持只读检查任务）
 
 ---
