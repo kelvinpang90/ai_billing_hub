@@ -77,7 +77,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库允许被调度 `AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` / `AIH-TASK-005`。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` / `AIH-TASK-003` / `AIH-TASK-004` / `AIH-TASK-005`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -99,9 +99,24 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-004` | Phase 1 第一刀：`tenants` / `projects` 两张表（只含身份与归属字段）、Alembic 迁移 0005、repository 与测试；不含状态、金额、认证、webhook 与 API。表结构裁决见 [docs/database-schema.md](../docs/database-schema.md) | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移，Worker 自己不对任何数据库跑迁移 |
 | `AIH-TASK-005` | Phase 1 第二刀：钱包与不可变账本的数据层，加上由余额驱动的计费状态。**碰钱，已过设计闸门** #88（`APPROVED: design v6`）；批准的设计逐字放在 [docs/design/AIH-TASK-005-wallet-ledger.md](../docs/design/AIH-TASK-005-wallet-ledger.md)，Worker 以它为准 | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移 0006（含触发器）。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#88` 再审 |
 
+`tasks.yaml` 里每个会写仓库的任务都有 `status`：
+
+- `ready`：已登记，可以在 Telegram 发「开启」；
+- `done`：已交付（合并并部署）；
+- `superseded`：没有交付，由 Kelvin 决定不再做，`tasks.yaml` 里就地写明原因。
+
+Worker 只接受 `ready`，所以另外两种任务都不会被误开。控制面推荐「下一个任务」时只从 `ready` 里挑（控制面
+ACVDEV-TASK-019），所以任务合并部署之后，**要由管理员单独开一个收尾 PR 把它改成 `done`**（与 #93 那类
+close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `.platform/`，合并前也还没有部署。漏改的话，
+控制面会一直推荐一个已经做完的任务。
+
+2026-09-19 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）是 `done`；
+`AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
+
 `AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
 `tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`
-的运行结果或 `AIH-TASK-002` 的重试结果，也不声称它们已通过。
+的运行结果或 `AIH-TASK-002` 的重试结果，也不声称它们已通过。2026-09-19 起这段只是历史：`AIH-TASK-003`
+已由 #81 合并，`AIH-TASK-002` 改为 `superseded`，不再重试（见上面「`status`」一段）。
 
 ⚠️ **任务登记是管理员前置条件，不是 Worker 任务的改动。**`AIH-TASK-003` 在
 `tasks.yaml` 的登记、`commands.yaml` 里放行 `ACUVEN_GIT_LS_FILES_MANIFEST`、以及本文件的

@@ -1247,7 +1247,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [ ] Kelvin 合并本契约（未发生）
 - [ ] 控制面 registry 登记、Worker host-local 配置、Worker 预检（含针对 `AIH-TASK-002` 校验 `allowed_change_paths`）（未发生，不在本仓库）
 - [ ] Kelvin 对启用 Worker 的独立批准（未发生；合并本契约不算）
-- [ ] `AIH-TASK-002` 的 live run：Worker 中的 Claude 产出 `docs/openclaw-worker-pilot.md` 并开 Draft PR（未发生）
+- [x] 不再做（Kelvin 2026-09-19 决定）：`AIH-TASK-002` 的 live run——它要验证的端到端链已由 `AIH-TASK-004` / `AIH-TASK-005` 的真实 run 验证，`tasks.yaml` 里标为 `superseded`；`docs/openclaw-worker-pilot.md` 从未产出
 
 ### AIH-TASK-003 —— Worker 模式消费只读 Git manifest（2026-09-18）
 
@@ -1259,9 +1259,10 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
   - `tests/test_gh_verified_write.py`：**只有** `VerifiedWriteTests::test_file_with_spaces_unicode_and_relative_path` 一个用例在设置了该变量时 skip，原因固定写明 Windows MXC（AppContainer）拒绝最终路径解析；该文件其它用例不动
   - 验证程度：编写本分支的会话里**没有运行任何检查**（该会话没有命令执行工具）；`docs.check` / `policy.check` / `tests.process` 由 Worker 在之后自己运行，结果不记在本条
 - [ ] Worker 跑 `docs.check` / `policy.check` / `tests.process` 全部零退出（未记录；⚠️ Worker 里的 skipped 不是 passed）
-- [ ] CI 全量运行（不设该变量，那些 skip 与 MXC 用例都要真跑）
-- [ ] Codex 审查、Kelvin 合并（未发生）
-- [ ] 合并之后重试 `AIH-TASK-002`（未发生；本条不声称 `AIH-TASK-003` 或该重试已通过）
+- [x] CI 全量运行：#81 合并时六项必需检查全部 success
+- [x] 合并：#81 于 2026-09-19 合并为 `746c01b`
+- [ ] 独立审查记录：#81 上找不到审查评论，审查结论未记录
+- [x] 不再做（Kelvin 2026-09-19 决定）：合并之后重试 `AIH-TASK-002`——`AIH-TASK-003` 已由 #81 合并，002 标为 `superseded`，理由同上；本条不声称 002 的重试通过过
 
 ### Worker 模式下 `tests.backend` 找不到 bash（2026-09-19）
 
@@ -1297,6 +1298,13 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - ⚠️ **Worker 里 skipped 不是 passed**：这 17 个用例在 Worker 里不再有信号，只由 CI 覆盖。另：`AIH-TASK-001` 是只跑检查、不开 PR 的任务，而当前 Worker 只接受 `creates_branch` / `creates_pull_request` 为 `true` 且有 `allowed_change_paths` 的开发任务，所以它在这个 Worker 上跑不了（run `3a699c91` 以 `invalid_contract` 失败）。留在契约里会误导，待清理（删掉该任务，或让 Worker 支持只读检查任务）
 
 ---
+
+### 任务状态 `done` —— 给控制面推荐下一个任务用（2026-09-19，Kelvin 批准）
+
+控制面 ACVDEV-TASK-019 要在 run 结束时推荐下一个任务，只从 `tasks.yaml` 里 `status: ready` 的任务里挑。原先做完的任务仍是 `ready`，会被反复推荐。
+
+- [x] `tasks.yaml`：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）改成 `status: done`；`AIH-TASK-002` 从未交付，按 Kelvin 的决定改成 `status: superseded` 并就地写明原因（Claude Code 审查 #94 指出，最初误标成了 `done`）。文件头注释写明三个取值；`.platform/README.md` 写明规则：合并部署之后由管理员单独开收尾 PR 改成 `done`（Worker 改不了 `.platform/`）。本机用 Worker 自己的 `worker.contracts.load_task` 加载，整份文件照常解析，四个任务都以 `task is not ready` 被拒
+- [ ] 控制面 ACVDEV-TASK-019（任务快照、推荐规则、回复补全、Telegram 主动推送）合并部署后，用下一个真实任务验证推荐与推送（未发生）
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
