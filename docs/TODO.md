@@ -1077,6 +1077,38 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] 数据库账号权限拆分（迁移账号与运行账号分开）：运行账号现在是库级授权，`TRUNCATE` / `DROP` 这类 DDL 不经触发器，能清空或删掉账本。设计 §1「明确不做」与 §10 残余风险把它后移为运维任务；涉及部署、密钥与恢复流程，要单独设计（未开始）
 - [ ] 余额不一致的监控告警接线：本任务只提供 `verify_wallet`，定时核对与告警（spec §132 DoD 第 14 条）按设计 §1 后移（未开始）
 
+### AIH-TASK-006 —— 管理端客户管理：建客户（同事务建钱包与审计）、建项目、分页查看（2026-09-20）
+
+上面的「管理端客户管理」「审计日志」**不勾**：本任务只有五个管理端接口，没有编辑客户、账户状态、低余额阈值、前端页面，审计也只覆盖建客户与建项目。实现依据是设计闸门 #96 已批准的 v3：[design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)；接口契约记在 [api.md](api.md)。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `app/api/auth.py`：新增 `require_admin`（先 `require_current_user`，再按**数据库里的**角色判 ADMIN，不是就 403 `ADMIN_REQUIRED`）与 `AdminRequired`
+  - `app/api/admin_customers.py`：五个接口，每个处理函数第一行显式调用 `require_admin`；`app/main.py` 注册路由
+  - `app/schemas/customers.py`：请求模型（`extra="forbid"`、名称去首尾空白后 1–255、`EmailStr` ≤ 320、可空文本空白存 NULL）与响应白名单模型；余额 `quantize` 到 8 位再 `format(value, "f")`
+  - `app/services/customers.py`：`create_customer` / `create_project` 各一个 `session_scope`（租户、钱包、`CUSTOMER_CREATE` 同一事务；项目与 `PROJECT_CREATE` 同一事务），`get_customer` / `list_customers` / `list_projects` 只读、不写审计。审计 `after_state` 只放设计 §6 列出的字段，不含 email、contact_name、phone
+  - `app/repositories/tenancy.py`：新增 `list_tenants(offset, limit) -> (rows, total)`（按 id 倒序）与 `count_projects_for_tenant`；`list_projects_for_tenant` 加可选 `offset` / `limit`，不传时行为不变
+  - `app/models/auth.py`：`AuditAction` 加 `CUSTOMER_CREATE`、`PROJECT_CREATE`（列宽已写死 64，不需要 ALTER，没有迁移）
+  - `app/core/database.py`：`create_engine` 加 `hide_parameters=True`，数据库异常的文本不再带 SQL 参数
+  - 测试：`tests/backend/test_admin_customers_api.py`（SQLite，设计 §7 的接口各行：从 `create_app()` 的 `app.routes` 枚举全部 `/api/v1/admin` 路由，逐个断言匿名 401、CUSTOMER 403、不写库，并断言恰好是这五个；令牌种类；降权即时生效；边界值；分页；租户隔离；金额字符串；重复提交；用 `create_database_engine` 建 SQLite 文件库、删掉 `tenants` 表后建客户，断言 500 且日志里没有 email / 联系人 / 电话）。`tests/backend/test_customer_service.py`（每条原子性用例在 SQLite 与 `BILLING_TEST_DATABASE_URL` 的真 MySQL 上各跑一次：建钱包失败、写审计失败、提交时失败都不留任何行；MySQL 上另有一条让迁移 0006 的触发器真实拒绝钱包插入；设计审查 v3 的两条建议——建项目写入失败时项目与 `PROJECT_CREATE` 都不留下、对不存在的客户建项目 404 且不写库）。`tests/backend/test_tenancy_repository.py` 加分页与计数用例；`tests/backend/test_database.py` 断言引擎 `hide_parameters` 为真
+  - 文档：新建 [api.md](api.md)
+- [x] **对 spec §66 的补充**：§66 的审计动作清单里只有 `PROJECT_UPDATE`，没有 `PROJECT_CREATE`。按 §124「所有动作都有审计」补上 `PROJECT_CREATE`（设计 §6、§10 假设 2）。它只是审计动作名，不影响任何外部契约；spec 本身没改
+- [x] **设计没写死、由实现定的细节**（审查时请看这几条）：
+  - 项目列表的 `total` 需要一条按租户的 `COUNT`，设计只列了 `list_tenants` 与 `list_projects_for_tenant` 的分页参数，所以 repository 多了一个 `count_projects_for_tenant`
+  - `created_at` / `updated_at` 取 `utc_now()` 后**截到整秒**：MySQL 的 `DATETIME` 不存小数秒（写入时四舍五入），不截的话 POST 响应里的时刻与之后 GET 读回的不一致——与设计 §2 里余额 `"0"` / `"0.00000000"` 同一类问题。客户、钱包、审计仍是同一个 `now`
+  - `PROJECT_CREATE` 的 `after_state` 里所属客户的 `public_id` 用键名 `tenant_public_id`
+  - 可空文本（`contact_name`、`phone`、`description`）先去首尾空白，剩空串再存 NULL；设计写的是「空串存 NULL」，只含空白的值按同一规则处理
+  - 路由枚举：设计写的是「从 `app.routes` 枚举」，但 `tests/backend/test_password_reset_link.py` 记过，本仓库的 FastAPI 延迟挂载子路由，`app.routes` 顶层只有 `_IncludedRouter` 壳子。所以用例把 `app.routes` 逐层展开（`routes` / `router.routes`），再并上 OpenAPI 文档里的路径（它看不见 `include_in_schema=False` 的路由，所以不能单用）。两条都落空时，「恰好是这五个」那条用例会红，不会静默通过
+  - 请求体与查询参数由 FastAPI 在处理函数之前校验，所以没带令牌、参数又不合法的请求得到 422 而不是 401（422 只列字段名）。鉴权用例因此给两个写接口带上合法请求体，否则测不到 `require_admin`。已写进 api.md
+  - 查单个客户时如果它没有钱包（数据不一致，正常路径造不出来），按意外异常返回 500，异常消息只是问题码 `WALLET_MISSING`
+  - repository 的分页参数为负（`offset < 0`、`limit < 1`）时抛 `ValueError`；接口层的边界是 422
+- [x] **验证程度**：
+  - ⚠️ 编写本分支的会话**没有命令执行工具**，ruff、pytest、`check_docs.py`、`check_repo_policy.py` 都没有跑过。格式与导入顺序照 ruff 的规则手写（行宽按 ruff 的显示宽度算，中文字符算 2）。`allowed_commands` 由 Worker 之后自己跑，结果不记在本条
+  - `tests.backend` 只在 CI 跑；`test_customer_service.py` 的 MySQL 一半在没设 `BILLING_TEST_DATABASE_URL` 时 skip，**skipped 不是 passed**
+  - 下面几条前提写代码时没有实测，CI 上如果红，先查这些：① Python 侧默认值（`billing_status` / `status_version`）在 flush 之后已经写回到对象上，所以建客户时审计与响应能直接读；② SQLAlchemy 2.0 对 SQLite 文件库默认用 `QueuePool` 且关掉 `check_same_thread`，日志用例能在 TestClient 的线程池里用它；③ 数据库异常在日志里的文本含 `no such table: tenants` 与 `[SQL parameters hidden due to hide_parameters=True]`；④ 审计的 `created_at` 为 NULL 时 SQLite 与 MySQL 都在提交时报 `IntegrityError`
+- [ ] Worker 跑 `allowed_commands` 全部零退出（未记录）
+- [ ] PR 正文把「设计闸门：不适用」改成 `#96`；CI 全量运行（lint、format、pytest 含 MySQL 用例，一条都不 skip）；审查；合并（未发生）
+- [ ] 合并部署后在生产上手工建一个测试客户验证（设计 §8，部署后核对项，未发生）
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）
@@ -1341,7 +1373,7 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 - [ ] D1–D7 的 ADR（`docs/adr/` 目录已建，见 [adr/README.md](adr/README.md)；D1、D3、D4、D5 已完成，D6 部分完成，**剩 D2、D7**）
 - [ ] `docs/database-schema.md`（Phase 1 起维护）
 - [x] `projects` 表结构裁决（Phase 1 建表前）：spec §57 的 UI 字段有 `project_id` 与 `description`，§76 的表却是 `id` + `public_id`、没有 `description`。两节不一致，建表前定下来并写进 `docs/database-schema.md`；改 spec 的话走一次勘误 —— **已裁决（Kelvin，2026-09-19）**：§57 的 `project_id` 就是 §76 的 `public_id`；加可空 `description`。§74 说表定义是最低要求，多一列不冲突，**不需要勘误**。见 [database-schema.md](database-schema.md)
-- [ ] `docs/api.md`（Phase 1 起维护）
+- [ ] `docs/api.md`（Phase 1 起维护）—— [已新建](api.md)（AIH-TASK-006），目前只有管理端客户管理的五个接口；认证接口的契约还没补进去
 - [ ] `docs/pricing-engine.md`、`docs/currency-and-fx.md`（Phase 2）
 - [ ] `docs/integrated-application-backend.md`（Phase 3）
 - [ ] `docs/payment-flow.md`（Phase 4）

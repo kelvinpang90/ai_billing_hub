@@ -119,7 +119,7 @@ class RefreshToken(Base):
 class AuditAction(enum.StrEnum):
     """spec §66 的动作清单，本任务只落地登录相关的几项。
 
-    其余（`CUSTOMER_CREATE`、`WALLET_ADJUSTMENT` 等）在实现它们的那个任务里加 ——
+    其余（`CUSTOMER_UPDATE`、`PROJECT_UPDATE` 等）在实现它们的那个任务里加 ——
     **不预先把整张清单塞进来**：没有写入方的枚举值会让人以为那件事已经在记了。
     """
 
@@ -136,6 +136,11 @@ class AuditAction(enum.StrEnum):
     # post_transaction，与账本行同一事务。
     WALLET_ADJUSTMENT_POSTED = "WALLET_ADJUSTMENT_POSTED"
     TENANT_BILLING_STATUS_CHANGED = "TENANT_BILLING_STATUS_CHANGED"
+    # AIH-TASK-006（设计闸门 #96）：写入方都是 app/services/customers.py，与所建的行
+    # 同一事务。`PROJECT_CREATE` 不在 spec §66 的清单里（那里只有 `PROJECT_UPDATE`），
+    # 按 §124「所有动作都有审计」补上，偏离记在 docs/TODO.md。
+    CUSTOMER_CREATE = "CUSTOMER_CREATE"
+    PROJECT_CREATE = "PROJECT_CREATE"
 
 
 class AuditLog(Base):

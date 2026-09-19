@@ -16,7 +16,7 @@ from app.core.errors import AppError
 from app.core.logging import current_request_id
 from app.core.ratelimit import RateLimited, TokenBucket
 from app.core.tokens import TOKEN_TYPE_ACCESS, AuthNotConfigured, InvalidToken, decode_token
-from app.models.auth import User, UserStatus
+from app.models.auth import User, UserRole, UserStatus
 from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -288,11 +288,43 @@ def require_current_user(request: Request) -> User:
         return user
 
 
+class AdminRequired(AppError):
+    """A valid, active caller who is not an ADMIN."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Administrator access is required.",
+            code="ADMIN_REQUIRED",
+            http_status=403,
+        )
+
+
+def require_admin(request: Request) -> User:
+    """Resolve the caller and require the ADMIN role (design gate #96 v3 §2).
+
+    ⚠️ **角色以数据库为准，令牌里的 `role` claim 不被信任。**`require_current_user`
+    每次都读库，所以把某人降成 CUSTOMER 立刻生效，不用等访问令牌过期。
+
+    ADMIN 只有过了 2FA 才拿得到访问令牌（`services/auth.py` 的登录流程），这里不再
+    重复检查 2FA。
+
+    ⚠️ 每个 `/api/v1/admin` 处理函数都要**显式**调用它（设计 §9：与
+    `require_current_user` 的用法一致，不挂路由器依赖）。漏调由
+    `tests/backend/test_admin_customers_api.py` 的路由枚举用例兜底。
+    """
+    user = require_current_user(request)
+    if user.role is not UserRole.ADMIN:
+        raise AdminRequired
+    return user
+
+
 __all__ = [
+    "AdminRequired",
     "AuthNotConfigured",
     "RateLimited",
     "client_ip",
     "request_context",
+    "require_admin",
     "require_current_user",
     "require_session_factory",
     "router",

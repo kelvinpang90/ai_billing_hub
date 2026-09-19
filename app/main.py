@@ -6,6 +6,7 @@ import logging
 
 from fastapi import FastAPI
 
+from app.api.admin_customers import router as admin_customers_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.two_factor import router as two_factor_router
@@ -45,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(two_factor_router)
+    app.include_router(admin_customers_router)
 
     app.state.settings = settings
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。

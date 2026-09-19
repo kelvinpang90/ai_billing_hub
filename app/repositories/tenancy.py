@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.tenancy import Project, Tenant
@@ -55,6 +55,18 @@ def get_tenant_by_public_id(session: Session, public_id: str) -> Tenant | None:
     return session.execute(statement).scalar_one_or_none()
 
 
+def list_tenants(session: Session, *, offset: int, limit: int) -> tuple[list[Tenant], int]:
+    """One page of tenants, newest first, and the total count.
+
+    按内部 `id` 倒序：自增 id 就是创建顺序，`created_at` 同一秒内会并列。
+    `total` 用一条 `COUNT`（数据量是百级，设计闸门 #96 §2）。
+    """
+    _check_page(offset, limit)
+    total = session.execute(select(func.count()).select_from(Tenant)).scalar_one()
+    statement = select(Tenant).order_by(Tenant.id.desc()).offset(offset).limit(limit)
+    return list(session.execute(statement).scalars().all()), int(total)
+
+
 def create_project(
     session: Session,
     *,
@@ -85,6 +97,31 @@ def get_project_for_tenant(session: Session, tenant_id: int, public_id: str) -> 
     return session.execute(statement).scalar_one_or_none()
 
 
-def list_projects_for_tenant(session: Session, tenant_id: int) -> list[Project]:
+def list_projects_for_tenant(
+    session: Session,
+    tenant_id: int,
+    *,
+    offset: int | None = None,
+    limit: int | None = None,
+) -> list[Project]:
+    """Oldest first. Without `offset` / `limit` it returns every project of the tenant."""
     statement = select(Project).where(Project.tenant_id == tenant_id).order_by(Project.id)
+    _check_page(offset, limit)
+    if offset is not None:
+        statement = statement.offset(offset)
+    if limit is not None:
+        statement = statement.limit(limit)
     return list(session.execute(statement).scalars().all())
+
+
+def count_projects_for_tenant(session: Session, tenant_id: int) -> int:
+    statement = select(func.count()).select_from(Project).where(Project.tenant_id == tenant_id)
+    return int(session.execute(statement).scalar_one())
+
+
+def _check_page(offset: int | None, limit: int | None) -> None:
+    # 边界由接口层校验（422）；这里只挡住调用方写错，免得负数被数据库各自解释。
+    if offset is not None and offset < 0:
+        raise ValueError("offset must not be negative")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be at least 1")

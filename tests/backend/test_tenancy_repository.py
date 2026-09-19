@@ -17,11 +17,13 @@ from sqlalchemy import create_engine
 from app.core.database import create_session_factory
 from app.models.base import Base
 from app.repositories.tenancy import (
+    count_projects_for_tenant,
     create_project,
     create_tenant,
     get_project_for_tenant,
     get_tenant_by_public_id,
     list_projects_for_tenant,
+    list_tenants,
 )
 
 # 固定值而不是 utc_now()：断言「存进去的就是调用方给的那个时刻」要能逐字比对。
@@ -178,6 +180,67 @@ def test_project_list_is_scoped_to_the_tenant(session_factory) -> None:
         assert all(p.tenant_id == owner.id for p in owned)
         assert [p.name for p in list_projects_for_tenant(session, other.id)] == ["Theirs"]
         assert list_projects_for_tenant(session, empty.id) == []
+
+
+def test_tenants_are_paged_newest_first_with_a_total(session_factory) -> None:
+    """AIH-TASK-006（设计闸门 #96 §2）：客户列表最新在前，`total` 是全部条数。"""
+    with session_factory() as session:
+        created = [make_tenant(session, f"Company {n}") for n in range(5)]
+        session.commit()
+        newest_first = [tenant.public_id for tenant in reversed(created)]
+
+        pages = [list_tenants(session, offset=offset, limit=2) for offset in (0, 2, 4, 10)]
+
+    assert [[tenant.public_id for tenant in rows] for rows, _ in pages] == [
+        newest_first[0:2],
+        newest_first[2:4],
+        newest_first[4:],
+        [],
+    ]
+    # 超出末页也照报总数：客户端靠它判断「没有更多了」而不是「出错了」。
+    assert [total for _, total in pages] == [5, 5, 5, 5]
+
+
+def test_an_empty_tenant_table_lists_nothing(session_factory) -> None:
+    with session_factory() as session:
+        assert list_tenants(session, offset=0, limit=20) == ([], 0)
+
+
+def test_projects_can_be_paged_and_counted_per_tenant(session_factory) -> None:
+    with session_factory() as session:
+        owner = make_tenant(session, "Owner Sdn Bhd")
+        other = make_tenant(session, "Other Sdn Bhd")
+        owned = [
+            create_project(session, tenant_id=owner.id, name=f"Project {n}", now=NOW)
+            for n in range(5)
+        ]
+        create_project(session, tenant_id=other.id, name="Theirs", now=NOW)
+        session.commit()
+        ids = [project.public_id for project in owned]
+
+        def page(offset: int, limit: int) -> list[str]:
+            rows = list_projects_for_tenant(session, owner.id, offset=offset, limit=limit)
+            return [project.public_id for project in rows]
+
+        # 最早在前，只含本租户的项目。
+        assert page(0, 2) == ids[0:2]
+        assert page(2, 2) == ids[2:4]
+        assert page(4, 2) == ids[4:]
+        assert page(6, 2) == []
+        assert count_projects_for_tenant(session, owner.id) == 5
+        assert count_projects_for_tenant(session, other.id) == 1
+        # 不传分页参数时行为不变：全部项目。
+        assert [p.public_id for p in list_projects_for_tenant(session, owner.id)] == ids
+
+
+@pytest.mark.parametrize(("offset", "limit"), [(-1, 20), (0, 0)])
+def test_paging_arguments_are_checked(session_factory, offset: int, limit: int) -> None:
+    with session_factory() as session:
+        tenant = make_tenant(session)
+        with pytest.raises(ValueError):
+            list_tenants(session, offset=offset, limit=limit)
+        with pytest.raises(ValueError):
+            list_projects_for_tenant(session, tenant.id, offset=offset, limit=limit)
 
 
 def test_repository_does_not_commit(session_factory) -> None:
