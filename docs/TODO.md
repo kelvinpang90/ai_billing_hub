@@ -1105,9 +1105,10 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
   - ⚠️ 编写本分支的会话**没有命令执行工具**，ruff、pytest、`check_docs.py`、`check_repo_policy.py` 都没有跑过。格式与导入顺序照 ruff 的规则手写（行宽按 ruff 的显示宽度算，中文字符算 2）。`allowed_commands` 由 Worker 之后自己跑，结果不记在本条
   - `tests.backend` 只在 CI 跑；`test_customer_service.py` 的 MySQL 一半在没设 `BILLING_TEST_DATABASE_URL` 时 skip，**skipped 不是 passed**
   - 下面几条前提写代码时没有实测，CI 上如果红，先查这些：① Python 侧默认值（`billing_status` / `status_version`）在 flush 之后已经写回到对象上，所以建客户时审计与响应能直接读；② SQLAlchemy 2.0 对 SQLite 文件库默认用 `QueuePool` 且关掉 `check_same_thread`，日志用例能在 TestClient 的线程池里用它；③ 数据库异常在日志里的文本含 `no such table: tenants` 与 `[SQL parameters hidden due to hide_parameters=True]`；④ 审计的 `created_at` 为 NULL 时 SQLite 与 MySQL 都在提交时报 `IntegrityError`
-- [ ] Worker 跑 `allowed_commands` 全部零退出（未记录）
-- [ ] PR 正文把「设计闸门：不适用」改成 `#96`；CI 全量运行（lint、format、pytest 含 MySQL 用例，一条都不 skip）；审查；合并（未发生）
-- [ ] 合并部署后在生产上手工建一个测试客户验证（设计 §8，部署后核对项，未发生）
+- [x] Worker 跑 `allowed_commands` 全部零退出：run `4987b15d` 依次跑 `docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check`，全部零退出后提交并开出 Draft PR #98（见 PR 正文「如何验证」）。实现会话没有命令执行工具，上面列的四条未实测前提在 CI 上都成立
+- [x] PR 正文把「设计闸门：不适用」改成 `#96`，并补上 `REQ-PRIV-001`（回读一致）；CI 六项全绿，`backend` 721 passed、0 skipped（MySQL 用例实际运行，CI 不许 skip）；Worker 的独立受限审查 APPROVE；仓库审查（Claude Code，`reviewed-head: 0772a38`）APPROVE，无阻断项。Kelvin 在 Telegram 发「批准」，Worker 按审查过的 head squash 合并为 `2057b57`（#98），Deploy 成功，`2057b57` 记为最近一次正常部署。这是第一个从 Telegram 发起到合并部署全程走完的任务。前两次「批准」都被 Worker 以 `checks_not_passed` 拒绝，原因见下面「控制面」里的待办
+- [ ] 合并部署后在生产上手工建一个测试客户验证（设计 §8，部署后核对项）：需要管理员登录（含 TOTP），由 Kelvin 做（未发生）
+- [ ] 设计文本与已发布契约对齐（仓库审查的建议）：请求体与查询参数由 FastAPI 先于 `require_admin` 校验，所以没带令牌、参数又不合法的请求得到 422 而不是设计 §2 / §5 写的 401。实现与 [api.md](api.md) 已写明；下次改这份设计（或做「改用路由器依赖」的重构）时把 §2 流程与 §5 那一行改成实际顺序（未开始）
 
 ---
 
@@ -1327,6 +1328,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [x] 本 PR 合并部署后，确认生产 `@@log_bin_trust_function_creators = 1`，再登记 `AIH-TASK-005`：#90 部署后在生产上查到 `@@log_bin_trust_function_creators = 1`、`@@log_bin = 1`，mysql 重建后 healthy；`AIH-TASK-005` 已登记，批准的设计逐字放在 [design/AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)。⚠️ CI 的 MySQL 也要满足同一前置条件：service 容器传不进 mysqld 参数，所以 `ci.yml` 的 backend job 在跑测试前用 root 设 `SET GLOBAL log_bin_trust_function_creators = ON`，`test_compose` 守住顺序（Claude Code 审查 #91 发现；少了它，迁移 0006 的预检会把 CI 上所有迁移用例拦下）
 - [x] `AIH-TASK-005` 的 Worker run、CI、审查、合并与生产迁移 0006：Telegram 发起后常驻 Worker 8 秒内自动领取 run `5cfb3b84`（第一次无人手动启动 Worker）。run 写完 14 个文件，却因一条 ruff I001 结算为 `failed:checks_failed`、没开 PR；由 Claude Code 把工作区原样搬进 PR #92，只修导入顺序。CI 第一轮 `627 passed`、0 skipped，Worker 没能实测的四条 MySQL 前提全部成立；审查两轮 APPROVE，4 条建议项在同一 PR 修完；合并、部署与生产核对见上面 AIH-TASK-005 记录
 - [ ] 控制面：Worker 是否在 lint 之前跑 `ruff check --fix` / `ruff format`。现在 Worker 没有自动修复这一步，一条导入顺序问题就让整个 run 失败：`AIH-TASK-004`（run `7671aead`，CI 挂 I001 后补提交）与 `AIH-TASK-005`（run `5cfb3b84`，结算为 `checks_failed`）都是这样。要改的是控制面仓库，不在本仓库（未开始）
+- [ ] 控制面：Worker 合并前判断「检查是否通过」时，把同一 head 上**所有**工作流运行的检查都算进去（`statusCheckRollup`）。改 PR 正文会让 CI 重跑、把还在跑的旧一轮取消，留下的 `CANCELLED` 永远算作没通过，GitHub 页面却全绿。`AIH-TASK-006` 因此两次「批准」都被拒，靠 `gh run rerun <旧运行> --failed` 把那一项跑绿才合并。设计闸门任务每次都要改 PR 正文，所以会反复出现；应改成只看每个检查名最新的一次。要改的是控制面仓库（未开始）
 - ⚠️ **Worker 里 skipped 不是 passed**：这 17 个用例在 Worker 里不再有信号，只由 CI 覆盖。另：`AIH-TASK-001` 是只跑检查、不开 PR 的任务，而当前 Worker 只接受 `creates_branch` / `creates_pull_request` 为 `true` 且有 `allowed_change_paths` 的开发任务，所以它在这个 Worker 上跑不了（run `3a699c91` 以 `invalid_contract` 失败）。留在契约里会误导，待清理（删掉该任务，或让 Worker 支持只读检查任务）
 
 ---
@@ -1336,13 +1338,14 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 控制面 ACVDEV-TASK-019 要在 run 结束时推荐下一个任务，只从 `tasks.yaml` 里 `status: ready` 的任务里挑。原先做完的任务仍是 `ready`，会被反复推荐。
 
 - [x] `tasks.yaml`：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）改成 `status: done`；`AIH-TASK-002` 从未交付，按 Kelvin 的决定改成 `status: superseded` 并就地写明原因（Claude Code 审查 #94 指出，最初误标成了 `done`）。文件头注释写明三个取值；`.platform/README.md` 写明规则：合并部署之后由管理员单独开收尾 PR 改成 `done`（Worker 改不了 `.platform/`）。本机用 Worker 自己的 `worker.contracts.load_task` 加载，整份文件照常解析，四个任务都以 `task is not ready` 被拒
-- [ ] 控制面 ACVDEV-TASK-019（任务快照、推荐规则、回复补全、Telegram 主动推送）合并部署后，用下一个真实任务验证推荐与推送（未发生）
+- [x] `AIH-TASK-006`（#98）合并部署后同样改成 `status: done`（本次收尾），`.platform/README.md` 的状态句同步。改完用 `worker.contracts.ready_tasks` 读本分支得到 `[]`，没有 ready 任务
+- [x] 控制面 ACVDEV-TASK-019（任务快照、推荐规则、回复补全、Telegram 主动推送）合并部署后，用下一个真实任务验证推荐与推送：用 `AIH-TASK-006` 验证。ACVDEV-TASK-020 的空闲刷新在本仓库登记合并后上报快照 `[AIH-TASK-006]`；run `4987b15d` 的「等待批准」、两次「合并被拒」、「已合并」四条私信都已送达（`notifications.status = sent`）。帮助块里的推荐行没有截图确认
 
 ### AIH-TASK-006 的登记：管理端客户管理（2026-09-19）
 
 - [x] 设计闸门 #96：v1 → v3 三轮 Claude Code 设计审查，`APPROVED: design v3`。v1 的阻断项：鉴权靠每个处理函数手动调用 `require_admin`，测试计划却没有逐个接口验证 → 改为从 `app.routes` 枚举全部 `/api/v1/admin` 路由逐个断言。v2 的阻断项：全局异常处理器会把 SQLAlchemy 异常文本（含 SQL 参数，也就是 email、contact、phone）写进日志 → 引擎统一 `hide_parameters=True`，并加「日志不含个人数据」用例
 - [x] 登记：`tasks.yaml` 新增 `AIH-TASK-006`（`status: ready`，十四个 `allowed_change_paths`，五项 `allowed_commands`）；批准的设计逐字放在 [design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)；`.platform/README.md` 同步。审查 v3 的两条建议（项目写入的原子回滚、对不存在的客户建项目返回 404 且不写库）写进了验收标准
-- [ ] `AIH-TASK-006` 的 Worker run、CI、审查、合并与生产核对（未发生）
+- [x] `AIH-TASK-006` 的 Worker run、CI、审查与合并：run `4987b15d` → #98 → `2057b57`，已部署；生产上的手工核对还没做，见上面 AIH-TASK-006 一节
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
