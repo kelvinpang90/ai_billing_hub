@@ -1338,6 +1338,7 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 控制面 ACVDEV-TASK-019 要在 run 结束时推荐下一个任务，只从 `tasks.yaml` 里 `status: ready` 的任务里挑。原先做完的任务仍是 `ready`，会被反复推荐。
 
 - [x] `tasks.yaml`：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）改成 `status: done`；`AIH-TASK-002` 从未交付，按 Kelvin 的决定改成 `status: superseded` 并就地写明原因（Claude Code 审查 #94 指出，最初误标成了 `done`）。文件头注释写明三个取值；`.platform/README.md` 写明规则：合并部署之后由管理员单独开收尾 PR 改成 `done`（Worker 改不了 `.platform/`）。本机用 Worker 自己的 `worker.contracts.load_task` 加载，整份文件照常解析，四个任务都以 `task is not ready` 被拒
+- [x] `AIH-TASK-006`（#98）合并部署后同样改成 `status: done`（本次收尾），`.platform/README.md` 的状态句同步。改完用 `worker.contracts.ready_tasks` 读本分支得到 `[]`，没有 ready 任务
 - [x] 控制面 ACVDEV-TASK-019（任务快照、推荐规则、回复补全、Telegram 主动推送）合并部署后，用下一个真实任务验证推荐与推送：用 `AIH-TASK-006` 验证。ACVDEV-TASK-020 的空闲刷新在本仓库登记合并后上报快照 `[AIH-TASK-006]`；run `4987b15d` 的「等待批准」、两次「合并被拒」、「已合并」四条私信都已送达（`notifications.status = sent`）。帮助块里的推荐行没有截图确认
 
 ### AIH-TASK-006 的登记：管理端客户管理（2026-09-19）
