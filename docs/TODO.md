@@ -1108,6 +1108,9 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [x] Worker 跑 `allowed_commands` 全部零退出：run `4987b15d` 依次跑 `docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check`，全部零退出后提交并开出 Draft PR #98（见 PR 正文「如何验证」）。实现会话没有命令执行工具，上面列的四条未实测前提在 CI 上都成立
 - [x] PR 正文把「设计闸门：不适用」改成 `#96`，并补上 `REQ-PRIV-001`（回读一致）；CI 六项全绿，`backend` 721 passed、0 skipped（MySQL 用例实际运行，CI 不许 skip）；Worker 的独立受限审查 APPROVE；仓库审查（Claude Code，`reviewed-head: 0772a38`）APPROVE，无阻断项。Kelvin 在 Telegram 发「批准」，Worker 按审查过的 head squash 合并为 `2057b57`（#98），Deploy 成功，`2057b57` 记为最近一次正常部署。这是第一个从 Telegram 发起到合并部署全程走完的任务。前两次「批准」都被 Worker 以 `checks_not_passed` 拒绝，原因见下面「控制面」里的待办
 - [x] 合并部署后在生产上手工建一个测试客户验证（设计 §8，部署后核对项）：Kelvin 用管理员账号（含 TOTP）在 2026-09-20 02:49 UTC 做完。建客户 `a8cdc1ab-…`、读回详情、建项目 `7bdc3656-…`、列第一页（`total=1`，生产库的第一个租户）：`billing_status=SUSPENDED`、`status_version=0`、钱包 `MYR` / `"0.00000000"` / 版本 0，建客户的响应与读回的详情逐字一致。随后在生产库只读核对了审计：`CUSTOMER_CREATE` 的 `after_state` 恰好是 `public_id`、`company_name`、`billing_status`、`wallet_currency` 四个键，`PROJECT_CREATE` 是 `public_id`、`name`、`tenant_public_id` 三个键，都不含 email、contact_name、phone（REQ-PRIV-001）；两条审计与客户、项目同一秒，租户 / 钱包 / 项目各 1 行、钱包流水 0 行
+- [ ] 这次核对在**生产库**留下的测试数据要定去留：租户 `a8cdc1ab-…`（公司名「Acuven 上线核对 202609200249」）与它的钱包、项目 `7bdc3656-…`。
+  审计只追加管的是 `audit_logs`，管不到 `tenants` / `projects`，所以它会一直出现在管理端客户列表里，之后的客户数统计与「生产库第一个租户」这类基线判据都会把它算进去。
+  本任务没有删除接口，真要清掉就得直接动生产库（要 Kelvin 拍板）；也可以决定长期留作基线，那就把 public_id 前缀与用途写进本条。决定之前，任何按客户数做的核对都要先减掉它（未决）
 - [ ] 审计时间戳的取整在两条路径上不一致：新代码把 `utc_now()` 截到整秒，旧的登录路径不截，MySQL 的 `DATETIME` 不存小数秒会四舍五入。生产上因此出现登录审计（`02:49:16`）比它之后发生的建客户审计（`02:49:15`）还晚一秒的情况。排序以自增 id 为准，不影响正确性，但两处应当统一（未开始）
 - [ ] 设计文本与已发布契约对齐（仓库审查的建议）：请求体与查询参数由 FastAPI 先于 `require_admin` 校验，所以没带令牌、参数又不合法的请求得到 422 而不是设计 §2 / §5 写的 401。实现与 [api.md](api.md) 已写明；下次改这份设计（或做「改用路由器依赖」的重构）时把 §2 流程与 §5 那一行改成实际顺序（未开始）
 
