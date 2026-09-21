@@ -1389,6 +1389,15 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [x] 登记：`tasks.yaml` 新增 `AIH-TASK-006`（`status: ready`，十四个 `allowed_change_paths`，五项 `allowed_commands`）；批准的设计逐字放在 [design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)；`.platform/README.md` 同步。审查 v3 的两条建议（项目写入的原子回滚、对不存在的客户建项目返回 404 且不写库）写进了验收标准
 - [x] `AIH-TASK-006` 的 Worker run、CI、审查与合并：run `4987b15d` → #98 → `2057b57`，已部署；生产上的手工核对还没做，见上面 AIH-TASK-006 一节
 
+### AIH-TASK-007 的登记：需求编号覆盖度（R5）（2026-09-21）
+
+- [x] 起因：`AIH-TASK-001`–`006` 全是 `done` / `superseded`，`tasks.yaml` 里一个 `ready` 都没有，Telegram 发「开启」没有任何任务可跑。登记任务必须由运营者开 PR —— run 不能给自己登记任务，那是安全边界
+- [x] 登记前对着 `711a52e` 量过现状（复核结果写进了 `tasks.yaml` 的条目注释）：① 第二节章节索引逐节列出 131 个编号，§123–§131 九节只被一行合并行「123–131 | Development Phases 0–8」代掉，没有各自的标题；② spec 全文 13 个 `REQ-*`，第一节追溯表只有 12 行，缺 `REQ-INGEST-002`（§20）；③ 索引里 72 / 102 / 138 三行指向 spec 已退役的编号（changelog v1.4 退役 102 与 138，v1.6 退役 72，编号留空不重用），标题还是退役前的 —— 顺带确认：这三个编号在文中不能写成带 `§` 的形式，`scripts/check_docs.py` 会判成 unknown spec section；④ 大写 MUST / SHALL / NEVER 全文合计 14 次，小写 must 有 173 次 —— spec 不按 RFC 2119 写，「覆盖每条硬性要求」没法靠关键词判定
+- [x] 由 ④ 决定了任务形状：**先定义什么算一条硬性要求，且定义必须可枚举**（§133 的每条 `## Invariant N` + §132 的每条 DoD + §132 末尾每条上线前闸门），否则验收条件是空的。覆盖状态允许写「缺口」，但每个缺口要给理由 —— Worker 改不了 spec，给 spec 新增 `REQ-*` 编号是后续任务
+- [x] 登记：`tasks.yaml` 新增 `AIH-TASK-007`（`status: ready`，字段结构与 `AIH-TASK-006` 逐字对齐；三个 `allowed_change_paths`，五项 `allowed_commands`）；`.platform/README.md` 同步。校验脚本落在 `tests/test_requirements_coverage.py` 而不是 `scripts/`：CI 的 docs / policy 两个 job 只点名跑 `check_docs.py` 与 `check_repo_policy.py`，新脚本要被 CI 跑到就得改 `ci.yml`，而 `ci.yml` 刻意不在 `allowed_change_paths` 里；放进 `tests/` 则 `unittest discover -s tests` 自动收它 —— tests.process、WORKFLOW §7 与 CI policy job 三处都会执行
+- [x] 本机用控制面自己的 `worker.contracts` 加载验证：`ready_tasks` 只返回 `AIH-TASK-007`，`load_task` 取到三个 `allowed_change_paths`，`AIH-TASK-001` / `AIH-TASK-006` 仍以 `task is not ready` 被拒
+- [ ] `AIH-TASK-007` 的 Worker run、CI、审查、合并与部署（未发生）
+
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
 复审第三轮要求「停止逐项补洞、整体比对」，下面几项是那次自查发现的。**都不是

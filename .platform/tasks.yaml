@@ -407,3 +407,84 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+  # P-2 的 R5「需求编号覆盖度」（docs/TODO.md）。文档卫生任务：不碰钱、不碰用量摄取 /
+  # 认证与会话 / Webhook，按 CLAUDE.md「前端 / 文档 / CI / 脚本不走闸门」，设计闸门不适用。
+  #
+  # 登记前用脚本对着 711a52e 量过现状（2026-09-21），四条都是下面验收条件的依据：
+  #   ① 第二节章节索引逐节列出的编号有 131 个，§123–§131 九节没有自己的行 —— 它们被一行
+  #      合并的「123–131 | Development Phases 0–8 | 见 TODO.md」代掉了，既没有标题也没有说明；
+  #   ② spec 全文出现 13 个 REQ-*，第一节追溯表只有 12 行，缺 REQ-INGEST-002（§20）。按
+  #      REQUIREMENTS.md 自己的规矩（「没有下表列出的证据…该需求不算完成」），它现在无法被验收；
+  #   ③ 索引里 §72 / §102 / §138 三行指向 spec 已退役的编号 —— changelog v1.4 退役 §102 / §138、
+  #      v1.6 退役 §72，且明说编号稳定、留空不重用，但索引仍按退役前的标题列着；
+  #   ④ 大写 MUST / SHALL / NEVER 全文合计只出现 14 次（MUST 13，其中 MUST NOT 7；NEVER 1；SHALL 0），
+  #      小写 must 却有 173 次 —— spec 不按 RFC 2119 写。所以「覆盖每条硬性要求」没法靠关键词机械
+  #      判定，本任务必须先定义什么算一条硬性要求，且定义要可枚举，否则验收条件是空的。
+  #
+  # ⚠️ 本条登记是管理员前置条件：须先合并，之后才能调度本任务的 Worker run。
+  #    Worker 本任务不改 .platform/ 下任何文件。
+  # ⚠️ 校验脚本刻意是 tests/test_requirements_coverage.py 而不是 scripts/check_*.py：CI 的 docs
+  #    与 policy 两个 job 只点名跑 check_docs.py 与 check_repo_policy.py，新脚本要被 CI 跑到就得改
+  #    .github/workflows/ci.yml，而 ci.yml 不在 allowed_change_paths 里（本任务刻意不放宽）。
+  #    放进 tests/ 则 `python -m unittest discover -s tests` 自动发现它 —— 那正好是 commands.yaml
+  #    的 tests.process、WORKFLOW §7 的第三条本地检查、以及 CI policy job 的第二步，三处都会执行，
+  #    一行配置都不用动。一次性跑过的脚本挡不住以后的漂移，进 discover 才是持久保证。
+  - id: AIH-TASK-007
+    title: requirement traceability closure (R5)
+    purpose: >-
+      收口 docs/TODO.md P-2 的 R5：先在 docs/REQUIREMENTS.md 写下「什么算一条硬性要求」的可枚举
+      定义，再补完整的章节索引与 REQ-* 追溯闭合，并新增一个校验脚本把三件事机械锁死 ——
+      spec 每个一级编号章节都在索引里、spec 与追溯表里的 REQ-* 双向一致、每条硬性要求都有明确的
+      覆盖状态（具体 REQ 或显式缺口加理由）。只改文档与新增校验脚本，不碰业务代码、数据库、
+      迁移、CI 配置与 .platform/，不部署、不访问凭据。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - docs/REQUIREMENTS.md 写出「硬性要求」的定义，且定义是可枚举规则而不是形容词：硬性要求 = spec §133 的每条 `## Invariant N` + §132 的每条 Definition of Done + §132 末尾每条上线前跨功能闸门；定义写在正文里（不是 HTML 注释），并写明为什么不能用关键词判定（大写 MUST / SHALL / NEVER 全文仅 14 次，小写 must 有 173 次，spec 不按 RFC 2119 写）
+      - 校验脚本按同一条规则从 spec 原文枚举这些硬性要求（解析 `## Invariant N` 标题、§132 的有序列表与其后的闸门列表），不得把条数或条目正文硬编码进脚本；spec 增删一条，枚举结果随之变化，不需要改脚本
+      - 第二节章节索引：spec 里每个一级编号章节（`^# <N>. ` 形式的标题）在索引里恰好一行；§123–§131 由那行合并行改为九行逐节列出，标题取自 spec 原文
+      - 索引里 72 / 102 / 138 三行保留但就地标为已退役并注明退役版本（changelog v1.4 退役 102 与 138，v1.6 退役 72，编号留空不重用），不再沿用退役前的标题内容；脚本断言索引里出现的每个编号要么在 spec 里有对应章节，要么被标为已退役，二者必居其一
+      - 已退役的编号在文中一律不得写成带 `§` 的形式（`scripts/check_docs.py` 把 `§N` 当成 spec 章节引用校验，写 `§72` 会让 docs.check 以 unknown spec section 失败）；沿用索引现有的纯数字列写法
+      - 第一节追溯表与 spec 双向闭合：spec 中出现的每个 `REQ-*` 在表里恰好一行，表里每个 `REQ-*` 在 spec 里至少出现一次；本次至少补上 REQ-INGEST-002（§20：队列发布本身不构成确认，`RECEIVED` 数据库记录才是持久事实来源，worker 必须能靠扫库恢复），「主要章节」与「必需测试证据」两列按现有 12 行的粒度填
+      - 新增「硬性要求 → REQ」覆盖表：枚举出的每条硬性要求恰好一行，覆盖列要么是一个或多个在 spec 原文里真实存在的 REQ-* ID，要么是固定串「缺口」；写「缺口」的行必须在同一行给出非空理由，说明现有 REQ 为什么都不覆盖它
+      - 脚本逐项断言并在失败时指名道姓：缺哪一节、多哪一个编号、哪个 REQ-* 只在一边、哪条硬性要求没有行或覆盖列为空、哪个「缺口」行没写理由；只报断言失败不给具体项的不算
+      - 不得发明 spec 里没有的 REQ-* ID：REQ ID 的唯一来源是 spec 原文（Worker 改不了 spec，给 spec 新增 REQ 编号是后续任务，不在本任务范围）
+      - 校验脚本是新增文件 tests/test_requirements_coverage.py，只用标准库 unittest，只读 docs/ 下的 spec 与 REQUIREMENTS.md，不调 Git、不联网、不写任何文件、不装依赖；ruff check 与 ruff format --check 零退出
+      - docs/REQUIREMENTS.md 第三节「待办的需求编号工作」三条残留按本次实际结果更新；§139.1 标题层级那条不在本任务范围，保持 `[ ]` 并注明原因
+      - docs/TODO.md 新增 AIH-TASK-007 记录段（做了什么、验证到什么程度、覆盖表里还剩几个缺口）；P-2 的 R5 那一行按事实处理 —— 覆盖表里还有「缺口」行时 R5 保持 `[ ]` 并把剩余范围改写准确（不能再说 140 节仍无完整 TOC），一个缺口都不剩时才可以改成 `[x]`；复选框只允许 `[ ]` / `[x]`
+      - 改动只落在 allowed_change_paths；不改 docs/Acuven_Central_AI_Billing_Platform_Spec.md、不改 scripts/、不改 .github/、不改 .platform/ 下任何文件；不碰任何业务代码与数据库；不输出本机路径、主机名、凭据
+      - allowed_commands 里的检查全部零退出（新脚本由 tests.process 的 discover 自动收进去），skipped 如实报告且不算 passed；以 Draft PR 交付（设计闸门：不适用 —— 文档与脚本，既不碰钱也不碰用量摄取 / 认证与会话 / Webhook），不合并、不直推
+    # 收到最窄：两份文档 + 一个新校验脚本。不含 spec 本身、不含 ci.yml、不含 scripts/。
+    allowed_change_paths:
+      - docs/REQUIREMENTS.md
+      - tests/test_requirements_coverage.py
+      - docs/TODO.md
+    # MXC 里跑得动的五项；tests.backend 跑不起来（import sqlalchemy 即整进程崩溃），只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
