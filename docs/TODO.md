@@ -1108,11 +1108,43 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [x] Worker 跑 `allowed_commands` 全部零退出：run `4987b15d` 依次跑 `docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check`，全部零退出后提交并开出 Draft PR #98（见 PR 正文「如何验证」）。实现会话没有命令执行工具，上面列的四条未实测前提在 CI 上都成立
 - [x] PR 正文把「设计闸门：不适用」改成 `#96`，并补上 `REQ-PRIV-001`（回读一致）；CI 六项全绿，`backend` 721 passed、0 skipped（MySQL 用例实际运行，CI 不许 skip）；Worker 的独立受限审查 APPROVE；仓库审查（Claude Code，`reviewed-head: 0772a38`）APPROVE，无阻断项。Kelvin 在 Telegram 发「批准」，Worker 按审查过的 head squash 合并为 `2057b57`（#98），Deploy 成功，`2057b57` 记为最近一次正常部署。这是第一个从 Telegram 发起到合并部署全程走完的任务。前两次「批准」都被 Worker 以 `checks_not_passed` 拒绝，原因见下面「控制面」里的待办
 - [x] 合并部署后在生产上手工建一个测试客户验证（设计 §8，部署后核对项）：Kelvin 用管理员账号（含 TOTP）在 2026-09-20 02:49 UTC 做完。建客户 `a8cdc1ab-…`、读回详情、建项目 `7bdc3656-…`、列第一页（`total=1`，生产库的第一个租户）：`billing_status=SUSPENDED`、`status_version=0`、钱包 `MYR` / `"0.00000000"` / 版本 0，建客户的响应与读回的详情逐字一致。随后在生产库只读核对了审计：`CUSTOMER_CREATE` 的 `after_state` 恰好是 `public_id`、`company_name`、`billing_status`、`wallet_currency` 四个键，`PROJECT_CREATE` 是 `public_id`、`name`、`tenant_public_id` 三个键，都不含 email、contact_name、phone（REQ-PRIV-001）；两条审计与客户、项目同一秒，租户 / 钱包 / 项目各 1 行、钱包流水 0 行
-- [ ] 这次核对在**生产库**留下的测试数据要定去留：租户 `a8cdc1ab-…`（公司名「Acuven 上线核对 202609200249」）与它的钱包、项目 `7bdc3656-…`。
+- [x] 这次核对在**生产库**留下的测试数据要定去留：租户 `a8cdc1ab-…`（公司名「Acuven 上线核对 202609200249」）与它的钱包、项目 `7bdc3656-…`。
   审计只追加管的是 `audit_logs`，管不到 `tenants` / `projects`，所以它会一直出现在管理端客户列表里，之后的客户数统计与「生产库第一个租户」这类基线判据都会把它算进去。
-  本任务没有删除接口，真要清掉就得直接动生产库（要 Kelvin 拍板）；也可以决定长期留作基线，那就把 public_id 前缀与用途写进本条。决定之前，任何按客户数做的核对都要先减掉它（未决）
+  **2026-09-21 Kelvin 拍板：留着，改名标成废弃**，公司名改为 `[DEPRECATED] Acuven 上线核对 202609200249`。做法与它绕过审计的代价见下面「测试专用验收夹具」一节。
+  按客户数做的核对仍要减掉它
 - [ ] 审计时间戳的取整在两条路径上不一致：新代码把 `utc_now()` 截到整秒，旧的登录路径不截，MySQL 的 `DATETIME` 不存小数秒会四舍五入。生产上因此出现登录审计（`02:49:16`）比它之后发生的建客户审计（`02:49:15`）还晚一秒的情况。排序以自增 id 为准，不影响正确性，但两处应当统一（未开始）
 - [ ] 设计文本与已发布契约对齐（仓库审查的建议）：请求体与查询参数由 FastAPI 先于 `require_admin` 校验，所以没带令牌、参数又不合法的请求得到 422 而不是设计 §2 / §5 写的 401。实现与 [api.md](api.md) 已写明；下次改这份设计（或做「改用路由器依赖」的重构）时把 §2 流程与 §5 那一行改成实际顺序（未开始）
+
+### 测试专用验收夹具 —— 生产上固定的验收租户与账号（2026-09-21，Kelvin 要求）
+
+以后「合并部署后在生产上核对一遍」用这套固定夹具，不再每次新建一个客户，也不再用 Kelvin
+自己的管理员账号（那个账号的 TOTP 密钥泄露过，重置排在整个项目做完之后）。夹具的公司名以
+`[TEST]` 开头、正文写着 `DO NOT BILL`，**任何按客户数做的基线判据都要把它减掉**。
+
+- [x] **专用管理员账号**：`python -m app.cli create-admin` 在生产建了一个只用于验收的
+  ADMIN（`users` 第 2 行），再走 `/api/v1/auth/login` → `/api/v1/auth/2fa/enrol`
+  → `/api/v1/auth/2fa/confirm` 完成 TOTP 注册，拿到 10 个恢复码。⚠️ **账号标识、密码、TOTP
+  密钥与恢复码一概不写进本仓库**（仓库是公开的）——它们只在 VPS 上仓库外的一个 0600 文件里：
+  不在部署用的 git 工作副本内、没挂进任何容器、不进对话，连路径也不写在这里
+- [x] **验收租户与项目**：用这个账号调 `POST /api/v1/admin/customers` 建
+  `[TEST] Acceptance Fixture - DO NOT BILL`（`6e9fa169-…`），再调
+  `POST /api/v1/admin/customers/{customer_id}/projects` 建 `acceptance-smoke`（`ef3d4951-…`）。
+  读回核对：`billing_status=SUSPENDED`、`status_version=0`、钱包 `MYR` / `"0.00000000"` / 版本 0，
+  建客户的响应与 `GET /api/v1/admin/customers/{customer_id}` 的详情逐字一致
+- [x] **生产库只读核对**：`tenants` 与 `wallets` 各 2 行、`projects` 2 行；`CUSTOMER_CREATE` 的
+  `after_state` 恰好 `public_id`、`company_name`、`billing_status`、`wallet_currency` 四个键，
+  `PROJECT_CREATE` 恰好 `public_id`、`name`、`tenant_public_id` 三个键，都不含 email、
+  contact_name、phone（REQ-PRIV-001）
+- [x] **2026-09-20 那个核对客户改判为废弃**：不删，公司名前面加 `[DEPRECATED] `、同时刷新
+  `updated_at`。⚠️ **这一步直接 UPDATE 了生产库的一行，没有留下任何审计** —— 管理端没有编辑
+  客户的接口。用 `WHERE public_id = ... AND company_name = ...` 限定，`ROW_COUNT()` 为 1，
+  改完再用管理端接口读回确认（`mysql -N` 的默认字符集会把中文显示成 `????`，核对要走接口或
+  `--default-character-set=utf8mb4`，别按终端里看到的乱码判断）
+- ⚠️ **这个账号拿不到真正的第二因素保障**：要让核对能自动跑，它的两样东西必须由同一处保管。
+  只因为它**不持有任何真实数据、也没有钱包余额**才可接受；真实管理员账号绝不适用这套安排。
+  Kelvin 2026-09-21 知悉并接受。代价：它一旦被用来做别的事，就不再是「测试专用」了
+- [ ] 管理端缺一条**带审计的**「编辑客户」路径，所以改名这类事现在只能直接动生产库、绕过
+  `audit_logs`。Phase 4 客户门户之前要补上（未开始）
 
 ---
 
