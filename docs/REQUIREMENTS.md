@@ -18,7 +18,7 @@
 2. spec §132 那个有序列表里的每一项 Definition of Done
 3. spec §132 末尾、有序列表之后那串上线前跨功能闸门里的每一条
 
-按这条规则对当前 spec（v1.6）枚举出 **34 条**：14 条 Invariant + 15 条 DoD + 5 条上线前闸门。
+按这条规则对当前 spec（v1.7）枚举出 **34 条**：14 条 Invariant + 15 条 DoD + 5 条上线前闸门。
 **34 这个数字只是当前快照，不是判定标准** —— 判定标准是上面三条解析规则。spec 增删一条，第 1.3 节的枚举结果就随之变化，校验脚本不需要改（脚本里既没有写死条数，也没有写死任何一条的正文）。
 
 **为什么不能用关键词判定。** spec 不是按 RFC 2119 写的：
@@ -27,7 +27,13 @@
 - 不分大小写的 `must` 全文出现 **173 次**（其中小写 `must` 160 次），几乎每一节都有 —— 拿它当全集等于没有定义，而且同一句话里的 `must` 有时只是在描述实现细节。
 - 也就是说关键词既做不了上界也做不了下界。唯一稳定的抓手是**结构**：`## Invariant N` 是标题，DoD 是有序列表项，上线前闸门是紧随其后的无序列表项。三者都能机械解析，spec 改了会立刻反映出来。
 
-「硬性要求有没有被编号覆盖」的答案在第 1.3 节。**写「缺口」不是失败**：给 spec 新增 `REQ-*` 编号属于一次 spec 修订，不在本文件的改动范围；本文件能做的是把缺口一条条点名，而不是让它继续隐形。
+「硬性要求有没有被编号覆盖」的答案在第 1.3 节。**覆盖列只有三种合法写法**：
+
+1. **一个或多个 spec 里真实存在的 `REQ-*` ID** —— 这条硬性要求已经有编号可追溯
+2. **固定串「缺口」** —— 它本该有编号，但现有编号都不覆盖它；必须在同一行给出理由
+3. **固定串「不适用」** —— 该条是**逐功能的交付流程要求**：它约束的是每个功能交付时要做哪些动作，由 spec §132 的 DoD 与 PR 模板自检逐个功能强制，不构成可独立验收的系统规则，因此不发 `REQ-*` 编号；同样必须在同一行给出理由
+
+「不适用」不是豁免：这些条目照样要在每个功能上被 §132 逐条验收，只是强制手段不是 `REQ-*`。「缺口」也不是失败：它把「本该有编号却没有」点名，而不是让它继续隐形。两种写法都必须在同一行给出理由，[tests/test_requirements_coverage.py](../tests/test_requirements_coverage.py) 会挡住空理由。
 
 ### 1.2 关键需求追溯表
 
@@ -43,23 +49,27 @@
 | `REQ-IDEMP-001` | 全局 `event_id` 至多一次财务效果；ID 复用不匹配即冲突 | §23、§79、§82 | 重复 / 冲突 / 并发测试 |
 | `REQ-FIN-001` | 供应商源成本、币种、汇率、MYR 估算与各版本均为历史快照 | §5、§14、§17 | FX / 版本 / 舍入测试 |
 | `REQ-FIN-002` | 钱包只能通过不可变账本行变动，用 `Decimal`，每事件仅一次舍入 | §8、§77–§81 | 账本对账 + 并发测试 |
+| `REQ-TXN-001` | 钱包变更、由它引起的计费状态跃迁、审计记录与 domain outbox 事件在同一个数据库事务里提交 | §66、§74.6、§81–§82 | 原子提交 + 故障注入回滚 + outbox/账本一致性测试 |
 | `REQ-PRICE-001` | 供应商与客户定价按 `occurred_at` 解析出每一个必需分量 | §15–§17、§74 | 分量 / 缺口 / 重叠 / 晚到事件测试 |
 | `REQ-AUTH-001` | 按项目的 HMAC 密钥加密存储、版本化、可轮换、永不入日志 | §36–§37、§74.4、§96 | 签名 / 轮换 / 重放 / 密钥泄漏测试 |
 | `REQ-STATUS-001` | 账户、计费、项目状态确定性合成，单调传播 | §24–§30 | 状态跃迁 / 乱序 / 对账测试 |
 | `REQ-PAY-001` | 可信 MYR 支付只入账一次；金额不符绝不自动入账；丢失 Webhook 由对账补回 | §40–§45、§74.7、§110 | 支付安全 + 对账测试 |
+| `REQ-TAX-001` | SST 口径经批准后 Phase 4 方可开工，并落进版本化税务政策快照与引用它的不可变财务快照 | §45.1、§74.9、§127 | 税务政策版本快照 + 收据 / 对账单字段测试 |
 | `REQ-PERIOD-001` | T+1 定稿对账单不可变；之后的活动记为上期调整 | §19、§46、§74.8 | 月度边界 + rebill 测试 |
 | `REQ-OPS-001` | 专用存储满足 RPO/RTO；持久化工作可在无 Redis 时重建 | §95、§98–§99、§132 | 恢复演练 + 队列丢失测试 |
 | `REQ-PRIV-001` | 计费只存元数据，按数据分类执行已批准的留存策略 | §13、§94、§112 | 隐私 / 留存 / 租户隔离测试 |
+| `REQ-PRIV-002` | 客户可见面绝不暴露估算 / 对账供应商成本、markup、毛利与内部供应商定价 | §14、§46、§68–§69 | 门户 / 对账单 / 导出字段可见性测试 |
+| `REQ-LAUNCH-001` | 上线前用真实账号验证支付、Email、WhatsApp 三条集成 | §40–§41、§47–§50、§99 | 真实账号联调演练记录 + 上线前变更检查单 |
 
 ### 1.3 硬性要求 → REQ 覆盖表
 
-按第 1.1 节的规则枚举出的每一条硬性要求在下表恰好一行。**覆盖**列只有两种合法写法：一个或多个 spec 里真实存在的 `REQ-*` ID，或者固定串「缺口」；写「缺口」的行必须在同一行给出理由。
+按第 1.1 节的规则枚举出的每一条硬性要求在下表恰好一行。**覆盖**列的三种合法写法见第 1.1 节：一个或多个 spec 里真实存在的 `REQ-*` ID、固定串「缺口」、固定串「不适用」；后两种都必须在同一行给出理由。
 
 判定「覆盖」的口径：该 `REQ-*` 的**规范性规则、主要章节或必需测试证据**里明确含有这条硬性要求的内容（第 1.2 节三列都算）。仅仅「主题相邻」不算覆盖 —— 那正是要点名成缺口的东西。
 
-当前 34 条里 **19 条有覆盖、15 条是缺口**。
+当前 34 条里 **23 条有覆盖、11 条不适用、0 条缺口**。AIH-TASK-008（2026-09-21）按 Kelvin 拍板的分档口径收口了原先的 15 个缺口：Invariant 7、Invariant 13、上线前闸门 1 与 4 这四条是可独立验收的系统规则，已在 spec 里就地新增 `REQ-PRIV-002` / `REQ-TXN-001` / `REQ-TAX-001` / `REQ-LAUNCH-001`；DoD 1–8 与 13–15 共 11 条是逐功能的交付流程要求，按第 1.1 节第 3 种写法标「不适用」。
 
-| 硬性要求 | spec 原文（逐字） | 覆盖 | 缺口理由 |
+| 硬性要求 | spec 原文（逐字） | 覆盖 | 缺口 / 不适用理由 |
 | --- | --- | --- | --- |
 | Invariant 1 | Central Billing failure must NOT stop customer AI service. | `REQ-AVAIL-001` | — |
 | Invariant 2 | Same Usage Event must never financially charge twice. | `REQ-IDEMP-001` | — |
@@ -67,33 +77,33 @@
 | Invariant 4 | Wallet balance changes only through ledger transactions. | `REQ-FIN-002` | — |
 | Invariant 5 | Historical ledger entries are immutable. | `REQ-FIN-002` | — |
 | Invariant 6 | Historical Usage Event retains pricing/version references. | `REQ-FIN-001`、`REQ-PRICE-001` | — |
-| Invariant 7 | Customer cannot see Acuven Estimated/Reconciled Provider Cost or Margin. | 缺口 | 没有任何 REQ 约束「成本 / 毛利对客户不可见」的展示面权限：REQ-PRIV-001 管的是不存对话内容与按分类留存，REQ-AUTH-001 管的是集成凭据，都不涉及门户字段可见性（§68–§69、§86） |
+| Invariant 7 | Customer cannot see Acuven Estimated/Reconciled Provider Cost or Margin. | `REQ-PRIV-002` | — |
 | Invariant 8 | Customer cannot access another tenant's data. | `REQ-PRIV-001` | — |
 | Invariant 9 | AI conversation content is not stored in Billing Platform. | `REQ-PRIV-001` | — |
 | Invariant 10 | All monetary calculations use Decimal, not float. | `REQ-FIN-002` | — |
 | Invariant 11 | A globally unique Usage Event ID can produce at most one financial effect; mismatched reuse is a conflict, never a duplicate success. | `REQ-IDEMP-001` | — |
 | Invariant 12 | Finalized statements are immutable. Late usage and cross-period rebills are posted as explicit prior-period adjustments in an open period. | `REQ-PERIOD-001` | — |
-| Invariant 13 | Wallet mutation, billing-status transition, audit record, and durable outbound domain events are committed atomically where the transition is caused by that mutation. | 缺口 | REQ-FIN-002 只要求钱包经不可变账本变动，REQ-STATUS-001 只要求状态确定性合成与单调传播，两者都不要求这四件事**在同一个事务里**提交；审计记录（§66）与中心侧 domain outbox（§74.6）更是没有任何 REQ 提及 |
+| Invariant 13 | Wallet mutation, billing-status transition, audit record, and durable outbound domain events are committed atomically where the transition is caused by that mutation. | `REQ-TXN-001` | — |
 | Invariant 14 | Redis/Celery loss must not destroy durable financial, payment, notification, Webhook, or document-generation work. | `REQ-OPS-001`、`REQ-INGEST-002` | — |
-| DoD 1 | database migration exists | 缺口 | 13 条 REQ 全是财务 / 可用性 / 隐私的领域规则，没有一条约束「每个功能必须带数据库迁移」这类交付流程要求 |
-| DoD 2 | backend validation exists | 缺口 | 没有任何 REQ 提到后端入参校验；REQ-PRICE-001 与 REQ-FIN-002 只管算得对不对，不管非法输入被不被拒 |
-| DoD 3 | authorization exists | 缺口 | REQ-AUTH-001 只覆盖集成侧按项目的 HMAC 凭据（§36–§37），不涉及管理端与客户门户每个功能的授权检查（§55、§67、§89–§90） |
-| DoD 4 | audit logging exists where required | 缺口 | 审计日志（§66）没有任何 REQ 编号；最接近的 REQ-AUTH-001 只要求密钥永不入日志，方向相反 |
-| DoD 5 | tests exist | 缺口 | 「每个功能都要有测试」是交付流程要求；第 1.2 节的「必需测试证据」列只约束那 13 条 REQ 自己，不构成对每个功能的普遍要求 |
-| DoD 6 | error handling exists | 缺口 | 错误处理（§83、§107）没有任何 REQ 编号；REQ-AVAIL-001 只覆盖「计费故障不阻塞 AI 服务」这一条具体路径 |
-| DoD 7 | API contract documented | 缺口 | API 契约文档（§136）没有任何 REQ 编号，13 条 REQ 里也没有一条提到文档产出 |
-| DoD 8 | frontend loading/error states exist | 缺口 | 13 条 REQ 全部是后端财务、可用性与隐私规则，没有一条涉及前端状态 |
+| DoD 1 | database migration exists | 不适用 | 逐功能的交付流程要求：表结构变化由每个功能自己的迁移承担，由 §132 的 DoD 与 PR 模板自检逐个功能强制。它约束的是交付动作，不是系统在运行时的行为，没有可独立验收的系统规则能写进 REQ |
+| DoD 2 | backend validation exists | 不适用 | 逐功能的交付流程要求：入参校验是每个接口自己的事（§107 只统一错误响应格式），由 §132 的 DoD 与 PR 模板自检逐个功能强制。「都要校验」脱离具体接口无从验收 |
+| DoD 3 | authorization exists | 不适用 | 逐功能的交付流程要求：管理端与客户门户每个接口各自的授权检查（§55、§67、§89–§90），由 §132 的 DoD 与 PR 模板自检逐个功能强制。集成侧按项目的 HMAC 凭据那部分是可独立验收的系统规则，已由 `REQ-AUTH-001` 覆盖 |
+| DoD 4 | audit logging exists where required | 不适用 | 逐功能的交付流程要求：哪些操作「where required」要写审计由功能自己判断（§66 定字段与查询面），由 §132 的 DoD 与 PR 模板自检逐个功能强制。审计与钱包变更同事务提交这条系统规则另由 `REQ-TXN-001` 覆盖 |
+| DoD 5 | tests exist | 不适用 | 逐功能的交付流程要求，由 §132 的 DoD 与 PR 模板自检逐个功能强制。**这条最能说明为什么不发编号**：发了之后第 1.2 节的「必需测试证据」列只能填「有测试」，与本节自己的验收口径循环 |
+| DoD 6 | error handling exists | 不适用 | 逐功能的交付流程要求：每个功能各自的失败路径（§83 定「绝不静默丢弃」、§107 定响应格式），由 §132 的 DoD 与 PR 模板自检逐个功能强制。「计费故障不阻塞 AI 服务」是其中可独立验收的那条路径，已由 `REQ-AVAIL-001` 覆盖 |
+| DoD 7 | API contract documented | 不适用 | 逐功能的交付流程要求：每个接口写进 §136 点名的 `docs/api.md`，由 §132 的 DoD 与 PR 模板自检逐个功能强制。产出文档是交付动作，不是系统规则 |
+| DoD 8 | frontend loading/error states exist | 不适用 | 逐功能的交付流程要求：每个前端页面各自的加载态与错误态，由 §132 的 DoD 与 PR 模板自检逐个功能强制。没有对应的后端系统规则可编号 |
 | DoD 9 | tenant isolation verified | `REQ-PRIV-001` | — |
 | DoD 10 | financial idempotency verified where applicable | `REQ-IDEMP-001` | — |
 | DoD 11 | monetary precision, version selection, and accounting-period tests exist where applicable | `REQ-FIN-001`、`REQ-FIN-002`、`REQ-PRICE-001`、`REQ-PERIOD-001` | — |
 | DoD 12 | durable job state can recover from Redis/Celery loss where applicable | `REQ-OPS-001`、`REQ-INGEST-002` | — |
-| DoD 13 | migrations include production locking, backup, and failure-handling analysis | 缺口 | REQ-OPS-001 覆盖的是存储级 RPO/RTO 与无 Redis 重建（§98.1），不要求**每次迁移**单独给出生产锁表、备份与失败处理分析 |
-| DoD 14 | monitoring, alert ownership, and runbook coverage exist | 缺口 | REQ-OPS-001 只要求满足 RPO/RTO，不要求每个功能配齐监控、告警归属与 runbook 场景（§95、§120、§136 有正文但没有 REQ 编号） |
-| DoD 15 | performance and latency targets are verified for volume-sensitive features | 缺口 | §119 有量化性能目标的正文，但 13 条 REQ 里没有任何一条提到延迟或吞吐 |
-| Gate 1 | SST/accounting treatment approved and reflected in immutable financial snapshots | 缺口 | REQ-FIN-001 只覆盖供应商成本、汇率与 MYR 估算的历史快照，不含 SST 税务口径的认定与入账；§45.1 的税务闸门与 §74.9 的税务政策版本都没有 REQ 编号 |
+| DoD 13 | migrations include production locking, backup, and failure-handling analysis | 不适用 | 逐功能的交付流程要求：**每次迁移**各自给出生产锁表、备份与失败处理分析，由 §132 的 DoD 与 PR 模板自检逐个功能强制。存储级 RPO/RTO 与无 Redis 重建（§98.1）是可独立验收的系统规则，已由 `REQ-OPS-001` 覆盖 |
+| DoD 14 | monitoring, alert ownership, and runbook coverage exist | 不适用 | 逐功能的交付流程要求：每个功能各自配齐监控指标、告警归属与 runbook 场景（§95、§120、§136），由 §132 的 DoD 与 PR 模板自检逐个功能强制。RPO/RTO 那部分已由 `REQ-OPS-001` 覆盖 |
+| DoD 15 | performance and latency targets are verified for volume-sensitive features | 不适用 | 逐功能的交付流程要求：§119 的量化目标要由每个「量敏感」功能各自验证，由 §132 的 DoD 与 PR 模板自检逐个功能强制。哪个功能算量敏感是逐功能判断，写不成一条能独立验收的系统规则 |
+| Gate 1 | SST/accounting treatment approved and reflected in immutable financial snapshots | `REQ-TAX-001` | — |
 | Gate 2 | PDPA and data-retention policy approved | `REQ-PRIV-001` | — |
 | Gate 3 | RPO/RTO restore drill passed | `REQ-OPS-001` | — |
-| Gate 4 | payment, Email, and WhatsApp real-account integration verified | 缺口 | REQ-PAY-001 只约束支付入账一次与丢失 Webhook 对账，不含「用真实账号打通支付 / Email / WhatsApp」的上线验证；通知通道（§47–§50）完全没有 REQ 编号 |
+| Gate 4 | payment, Email, and WhatsApp real-account integration verified | `REQ-LAUNCH-001` | — |
 | Gate 5 | protected `main` CI/CD deployment and recovery procedure verified | `REQ-OPS-001` | — |
 
 ---
@@ -346,13 +356,13 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 
 评审 P2-24 指出 spec 层级偏平、缺可追溯编号。v1.1 已修掉 §3.2 / §3.3 的标题层级错误，并新增了「Document Navigation」导航段和一批 `REQ-*` ID（见本文件第 1.2 节）。
 
-AIH-TASK-007（2026-09-21）收口了其中一条，剩余状态如下：
+AIH-TASK-007（2026-09-21）收口了其中一条，AIH-TASK-008（2026-09-21）收口了第一条，剩余状态如下：
 
-- [ ] `REQ-*` **仍未覆盖每条硬性要求**：第 1.3 节已按第 1.1 节的可枚举定义列出当前全部 34 条硬性要求，其中 19 条能落到现有 `REQ-*` 上，**15 条是明确缺口**（逐条理由写在表里同一行）。补齐要给 spec 新增 `REQ-*` 编号，属于一次 spec 修订，不在本文件的改动范围
+- [x] `REQ-*` **覆盖状态已逐条落定**：第 1.3 节按第 1.1 节的可枚举定义列出当前全部 34 条硬性要求，**一个「缺口」都不剩** —— 23 条有 `REQ-*` 覆盖（其中四条是 AIH-TASK-008 在 spec v1.7 就地新增的 `REQ-PRIV-002` / `REQ-TXN-001` / `REQ-TAX-001` / `REQ-LAUNCH-001`），11 条是逐功能的交付流程要求，按第 1.1 节第 3 种写法标「不适用」并逐条给了理由
 - [x] **一级编号章节的完整索引已补齐**：第二节现在对 spec 里每个 `# N.` 章节各列一行（§123–§131 由一行合并行改为九行逐节列出），退役编号 72 / 102 / 138 就地标注版本；[tests/test_requirements_coverage.py](../tests/test_requirements_coverage.py) 机械校验「缺哪一节、多哪一个编号」
-- [ ] §139.1 写成了 `# 139.1`，与 §17.1 / §45.1 用 `##` 的写法不一致（纯瑕疵）。**不在 AIH-TASK-007 范围**：改它要动 [Acuven_Central_AI_Billing_Platform_Spec.md](Acuven_Central_AI_Billing_Platform_Spec.md)，而该文件不在本次任务的 allowed_change_paths 里；留待下一次 spec 勘误一并处理
+- [ ] §139.1 写成了 `# 139.1`，与 §17.1 / §45.1 用 `##` 的写法不一致（纯瑕疵）。**不在 AIH-TASK-008 范围**：本任务对 [Acuven_Central_AI_Billing_Platform_Spec.md](Acuven_Central_AI_Billing_Platform_Spec.md) 只许新增段落，全文唯一允许被改写的行是文件头的 `**Version:**`（这是 PR 里「删除行恰好一行」那条机械证据的前提）；改标题层级要改写既有行，且它是排版勘误而不是可追溯性标注，留待下一次 spec 勘误一并处理
 
-这些**不阻塞** Phase 0，但第一条会影响 §132 的可验收性，建议在 Phase 1 之前处理。
+这些**不阻塞** Phase 0；剩下的一条是纯排版瑕疵，不影响 §132 的可验收性。
 
 ## 四、评审意见的落实状态
 

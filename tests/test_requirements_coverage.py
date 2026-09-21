@@ -3,8 +3,11 @@
 1. spec 的每个一级编号章节（`# N.`）在第二节索引里恰好一行；反过来，索引里出现的
    每个编号要么在 spec 里有对应标题，要么被就地标成已退役。
 2. spec 与第 1.2 节追溯表里的 `REQ-*` 双向一致 —— 一边有一边没有都算破。
-3. 每条硬性要求在第 1.3 节覆盖表里恰好一行；覆盖列要么是 spec 原文里真实存在的
-   `REQ-*` ID，要么是固定串「缺口」并在同一行给出理由。
+3. 每条硬性要求在第 1.3 节覆盖表里恰好一行；覆盖列是 spec 原文里真实存在的
+   `REQ-*` ID，或固定串「缺口」，或固定串「不适用」（AIH-TASK-008 加的第三种：
+   该条是逐功能的交付流程要求，由 §132 的 DoD 与 PR 模板自检强制，不构成可独立
+   验收的系统规则）。后两种都必须在同一行给出非空理由 —— 两个固定串都是「这条
+   没有编号」的说法，区别只在原因，所以举证义务一样重。
 
 「硬性要求」按 REQUIREMENTS.md 第 1.1 节的定义，**从 spec 原文按结构枚举**：§133 的
 每个 `## Invariant N` 标题 + §132 有序列表里的每一项 DoD + 该有序列表之后那串上线前
@@ -13,7 +16,7 @@
 只有 14 次，而不分大小写的 must 有 173 次，两头都够不着。
 
 失败信息一律指名道姓（缺哪一节、多哪个编号、哪个 REQ 只在一边、哪条硬性要求没有行、
-哪个「缺口」没写理由）。只报「断言失败」不给具体项的检查拦不住任何真实回退。
+哪个「缺口」或「不适用」没写理由）。只报「断言失败」不给具体项的检查拦不住任何真实回退。
 
 只读 docs/ 下那两个文件：不调 Git、不联网、不写任何文件、只用标准库。
 """
@@ -46,7 +49,11 @@ RETIRED_VERSION_RE = re.compile(r"v\d+\.\d+")
 
 RETIRED_MARKER = "已退役"
 GAP_MARKER = "缺口"
-# 占位符不算「填了」。em dash 是本仓库表格里表示「不适用」的写法。
+NOT_APPLICABLE_MARKER = "不适用"
+# 覆盖列里这两个固定串都表示「这条没有 REQ 编号」，都要在同一行给理由。
+NO_REQ_MARKERS = (GAP_MARKER, NOT_APPLICABLE_MARKER)
+# 占位符不算「填了」。em dash 是本仓库表格里表示「本行无话可说」的写法 ——
+# 注意它与覆盖列的固定串「不适用」是两回事：后者是一种覆盖状态，必须带理由。
 EMPTY_CELLS = frozenset({"", "—", "–", "-", "N/A", "n/a", "TBD", "待定"})
 
 INDEX_HEADING = "按主题的章节索引"
@@ -355,8 +362,9 @@ class CoverageTableTests(unittest.TestCase):
         if problems:
             self.fail("\n".join(problems))
 
-    def test_coverage_cell_is_real_req_ids_or_the_gap_marker(self) -> None:
+    def test_coverage_cell_is_real_req_ids_or_a_fixed_marker(self) -> None:
         in_spec = spec_req_ids()
+        markers = "」「".join(NO_REQ_MARKERS)
         problems = []
         for req_id, _ in self.required:
             found = self.by_id.get(req_id)
@@ -367,12 +375,12 @@ class CoverageTableTests(unittest.TestCase):
                 problems.append(f"「{req_id}」那一行只有 {len(row)} 列，覆盖表应为 4 列")
                 continue
             cell = row[2]
-            if cell == GAP_MARKER:
+            if cell in NO_REQ_MARKERS:
                 continue
             ids = REQ_ID_RE.findall(cell)
             if not ids:
                 problems.append(
-                    f"「{req_id}」的覆盖列既不是固定串「{GAP_MARKER}」，也没有任何 "
+                    f"「{req_id}」的覆盖列既不是固定串「{markers}」，也没有任何 "
                     f"REQ-* ID：[{cell}]"
                 )
                 continue
@@ -387,22 +395,27 @@ class CoverageTableTests(unittest.TestCase):
             if leftover:
                 problems.append(
                     f"「{req_id}」的覆盖列除 REQ-* ID 外还混了别的内容：[{leftover}]；"
-                    f"该列只允许写 REQ-* ID 或固定串「{GAP_MARKER}」"
+                    f"该列只允许写 REQ-* ID 或固定串「{markers}」"
                 )
         if problems:
             self.fail("\n".join(problems))
 
-    def test_gap_rows_give_a_reason(self) -> None:
+    def test_rows_without_a_req_id_give_a_reason(self) -> None:
+        """「缺口」与「不适用」都是「没有编号」，都必须在同一行说明为什么。"""
+        why = {
+            GAP_MARKER: "必须说明现有 REQ 为什么都不覆盖它",
+            NOT_APPLICABLE_MARKER: "必须说明它为什么只是逐功能的交付流程要求，"
+            "而不是可独立验收的系统规则",
+        }
         problems = []
         for req_id, _ in self.required:
             found = self.by_id.get(req_id)
             if not found or len(found[0]) < 4:
                 continue
             row = found[0]
-            if row[2] == GAP_MARKER and row[3] in EMPTY_CELLS:
+            if row[2] in NO_REQ_MARKERS and row[3] in EMPTY_CELLS:
                 problems.append(
-                    f"「{req_id}」写了「{GAP_MARKER}」却没有在同一行给理由 —— "
-                    "必须说明现有 REQ 为什么都不覆盖它"
+                    f"「{req_id}」写了「{row[2]}」却没有在同一行给理由 —— {why[row[2]]}"
                 )
         if problems:
             self.fail("\n".join(problems))
