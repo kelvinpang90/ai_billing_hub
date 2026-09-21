@@ -44,7 +44,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005` 与 `AIH-TASK-006`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006` 与 `AIH-TASK-007`（用途见下面「Worker 的启用状态」）。
 
 除此之外一律 **fail closed** ——
 
@@ -68,7 +68,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-006` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-007` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -77,7 +77,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-006`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-007`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -89,7 +89,7 @@ Codex，合并仍是 Kelvin。
 不在本仓库。把 `worker_enabled` 改回 `false` 仍是**出问题时的回滚方式**：不需要删文件、
 不需要改代码。
 
-六个已登记任务的用途不同：
+七个已登记任务的用途不同：
 
 | 任务 | 用途 | 写仓库吗 |
 | --- | --- | --- |
@@ -99,6 +99,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-004` | Phase 1 第一刀：`tenants` / `projects` 两张表（只含身份与归属字段）、Alembic 迁移 0005、repository 与测试；不含状态、金额、认证、webhook 与 API。表结构裁决见 [docs/database-schema.md](../docs/database-schema.md) | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移，Worker 自己不对任何数据库跑迁移 |
 | `AIH-TASK-005` | Phase 1 第二刀：钱包与不可变账本的数据层，加上由余额驱动的计费状态。**碰钱，已过设计闸门** #88（`APPROVED: design v6`）；批准的设计逐字放在 [docs/design/AIH-TASK-005-wallet-ledger.md](../docs/design/AIH-TASK-005-wallet-ledger.md)，Worker 以它为准 | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移 0006（含触发器）。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#88` 再审 |
 | `AIH-TASK-006` | Phase 1 第三刀：管理端客户管理。管理员建客户时在同一事务里建钱包并写审计，建项目，分页查看客户与项目；新增管理员鉴权 `require_admin`。**碰钱包创建与鉴权，已过设计闸门** #96（`APPROVED: design v3`）；批准的设计逐字放在 [docs/design/AIH-TASK-006-admin-customers.md](../docs/design/AIH-TASK-006-admin-customers.md)，Worker 以它为准 | 同 `AIH-TASK-002`；没有迁移。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#96` 再审 |
+| `AIH-TASK-007` | 文档卫生，非生产功能：收口 P-2 的 R5「需求编号覆盖度」—— 在 [docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md) 写下「什么算一条硬性要求」的可枚举定义，补完整章节索引与 `REQ-*` 双向闭合，并新增 `tests/test_requirements_coverage.py` 把这些机械锁死。**不走设计闸门**（文档与脚本，既不碰钱也不碰用量摄取 / 认证与会话 / Webhook） | 改 [docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md)、[docs/TODO.md](../docs/TODO.md) 与新增一个测试文件，开 Draft PR；没有迁移、不碰业务代码。Worker 生成的 PR 正文固定写「设计闸门：不适用」，本任务正好就是不适用，不需要改 |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
@@ -111,9 +112,10 @@ ACVDEV-TASK-019），所以任务合并部署之后，**要由管理员单独开
 close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `.platform/`，合并前也还没有部署。漏改的话，
 控制面会一直推荐一个已经做完的任务。
 
-2026-09-20 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
+2026-09-21 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
 `AIH-TASK-006`（#98）是 `done`；`AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链
-已由 004 / 005 的真实 run 验证。
+已由 004 / 005 的真实 run 验证。`AIH-TASK-007` 是 `ready`，也是当前**唯一**可调度的任务 —— 在它登记之前
+一个 `ready` 都没有，Telegram 发「开启」没有任何任务可跑。
 
 `AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
 `tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`
@@ -131,7 +133,9 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 `docs/TODO.md` 四项；`tests/test_gh_verified_write.py` 是契约修正加入的，理由见下面「Worker 模式的 Git 输入」；
 `AIH-TASK-004` 是 `app/models/tenancy.py`、`app/repositories/__init__.py`、`app/repositories/tenancy.py`、
 `alembic/env.py`、`alembic/versions/20260919_0005_tenants_projects.py`、`tests/backend/test_migrations.py`、
-`tests/backend/test_tenancy_repository.py`、`docs/TODO.md` 八项；`AIH-TASK-005` 与 `AIH-TASK-006` 各是十四项，逐个列在 `tasks.yaml` 里）。口径：
+`tests/backend/test_tenancy_repository.py`、`docs/TODO.md` 八项；`AIH-TASK-005` 与 `AIH-TASK-006` 各是十四项；
+`AIH-TASK-007` 是 `docs/REQUIREMENTS.md`、`tests/test_requirements_coverage.py`、`docs/TODO.md` 三项 ——
+逐个列在 `tasks.yaml` 里）。口径：
 
 - 仓库根相对的 POSIX 路径，**逐个精确匹配文件**；不是 glob，也不是目录前缀
 - 不得包含任何 `.platform/` 路径（控制面 Worker 会拒绝）
@@ -204,7 +208,7 @@ parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前�
 所以它的 run **不会经过 `awaiting_merge`**：停在 `awaiting_review`，由人看完之后
 置 `completed` 或 `cancelled`。
 
-`AIH-TASK-002` 到 `AIH-TASK-006` 会开 Draft PR（`creates_pull_request: true`），它们的 run
+`AIH-TASK-002` 到 `AIH-TASK-007` 会开 Draft PR（`creates_pull_request: true`），它们的 run
 在审查通过后进 `awaiting_merge`，由 Kelvin 合并后才置 `completed`。
 
 ---
