@@ -437,7 +437,7 @@ tasks:
       spec 每个一级编号章节都在索引里、spec 与追溯表里的 REQ-* 双向一致、每条硬性要求都有明确的
       覆盖状态（具体 REQ 或显式缺口加理由）。只改文档与新增校验脚本，不碰业务代码、数据库、
       迁移、CI 配置与 .platform/，不部署、不访问凭据。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - docs/REQUIREMENTS.md 写出「硬性要求」的定义，且定义是可枚举规则而不是形容词：硬性要求 = spec §133 的每条 `## Invariant N` + §132 的每条 Definition of Done + §132 末尾每条上线前跨功能闸门；定义写在正文里（不是 HTML 注释），并写明为什么不能用关键词判定（大写 MUST / SHALL / NEVER 全文仅 14 次，小写 must 有 173 次，spec 不按 RFC 2119 写）
