@@ -39,9 +39,24 @@
 - [x] **R2 — 并发 PENDING payment** —— 已收口。允许并存；两笔都付则都入账（钱已收到，拒绝入账等于吞客户的钱，且预付钱包多充仍是客户余额）；60 秒内同额重复请求复用同一笔挡误触；PENDING 60 分钟置 `EXPIRED`，但**过期后收到成功回调仍然入账**。见 [ADR-0007](adr/ADR-0007-concurrent-pending-payments.md)。⚠️ 人工退款流程超出 V1 范围，是明确缺口
 - [ ] **R3 — 账本膨胀权衡**：§82 已承认钱包变更按租户串行化并要求测最热租户，§119 给了量化目标，但**没有对「按对话/时间窗聚合成一笔 AI_USAGE ledger、usage_events 保留明细」做权衡分析**。即使决定不做，也要写明理由。（Phase 2 前）
 - [x] **R4 — 重放保护存储与过期策略** —— 已收口。支付 Webhook 的 nonce 落数据库，其余四个签名端点走 Redis；**过期时刻 = 请求 timestamp + 5 分钟**（跟着请求自己算，不是「记录时刻 + 固定 TTL」——时间窗是 ±5 分钟，固定 TTL 会留下约 4 分钟重放窗口）。Redis 丢失最长让纵深防御第二层失效约 10 分钟，不产生财务缺口——财务安全网是 `event_id` 与 `(gateway, gateway_event_id)` 的领域幂等。见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 5 节
-- [ ] **R5 — 需求编号覆盖度**：`REQ-*` 只有 13 条，未覆盖每条硬性要求；140 节仍无完整 TOC。影响 §132 逐条验收。（Phase 1 前）
+- [ ] **R5 — 需求编号覆盖度**：~~140 节仍无完整 TOC~~ —— **章节索引与 `REQ-*` 双向闭合已补齐**（AIH-TASK-007，2026-09-21，见下方记录段）：[REQUIREMENTS.md](REQUIREMENTS.md) 第二节对 spec 每个一级编号章节各列一行，退役的 72 / 102 / 138 就地标注；追溯表补上 `REQ-INGEST-002` 后与 spec 全文的 13 个 `REQ-*` 一一对应。**剩余范围只剩编号本身**：按「硬性要求 = §133 每条 Invariant + §132 每条 Definition of Done + §132 末尾每条上线前跨功能闸门」枚举出 34 条，其中 **15 条没有任何 `REQ-*` 覆盖**（逐条理由见 [REQUIREMENTS.md](REQUIREMENTS.md) 第 1.3 节）。补齐要给 spec 新增 `REQ-*` 编号，那是一次 spec 修订。仍影响 §132 逐条验收。（Phase 1 前）
 - [x] **R7 — 对账单 cut-off** —— 已复核（2026-09-10）：**仍选 T+1**。那条「T+3 也挡不住 31 小时积压」的论据是错的（T+3 = 72 小时），已撤回；但剩下两条理由（上期调整机制无论如何都必须存在、客户体验）足以支撑 T+1。代价：上期调整会经常出现，已派生监控要求——**但它是投递链路的延迟信号，不是会计常态**（见 ADR-0003「要读准这个数字的性质」）。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)
 - [x] **R6 — 仓库可见性偏离** —— 已收口（2026-09-10）。决策人选 B：接受公开，写成 [ADR-0001](adr/ADR-0001-repository-visibility.md)，spec 修订至 v1.2 使 §99 与实际一致。派生硬约束：绝不可提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。（来源：Codex 审查 PR #2）
+
+---
+
+## AIH-TASK-007 —— 需求追溯闭合（R5 的文档与校验部分，2026-09-21）
+
+**不走设计闸门**（文档与脚本，既不碰钱也不碰用量摄取 / 认证与会话 / Webhook）。改动只有三处：[REQUIREMENTS.md](REQUIREMENTS.md)、本文件、新增 [`tests/test_requirements_coverage.py`](../tests/test_requirements_coverage.py)；没有迁移，没有业务代码改动。
+
+- [x] **先把「什么算一条硬性要求」定义成可枚举规则**（[REQUIREMENTS.md](REQUIREMENTS.md) 第 1.1 节正文，不是 HTML 注释）：§133 的每个 `## Invariant N` + §132 的每条 Definition of Done + §132 末尾每条上线前跨功能闸门 = 当前 **34 条**。**为什么不能靠关键词判定**：spec 不按 RFC 2119 写 —— 大写 `MUST` / `SHALL` / `NEVER` 全文合计只有 14 次（`MUST` 13、`NEVER` 1、`SHALL` 0），而不分大小写的 `must` 有 173 次（其中小写 `must` 160 次）。关键词既做不了上界也做不了下界，只能按结构枚举
+- [x] **章节索引补完整**：spec 里每个 `# N.` 一级章节在第二节**恰好一行**；§123–§131 由原来一行合并行改为九行逐节列出，标题逐字取自 spec。顺带更正 §135 的标题 —— spec v1.6 已把它改名为 `Implementation Constraints`，索引里还写着改名前的「Codex Development Rules」
+- [x] **退役编号就地标注**：72（v1.6 退役）、102 与 138（v1.4 退役）保留原行、标明退役版本、不再沿用退役前的标题内容。这三个编号在文中一律写成**纯数字** —— `scripts/check_docs.py` 把 `§N` 当 spec 章节引用校验，写成带 § 的形式会让 docs 检查以 unknown spec section 失败
+- [x] **追溯表与 spec 双向闭合**：补上 `REQ-INGEST-002`（§20：队列发布本身不构成确认，`RECEIVED` 数据库记录才是持久事实来源，worker 必须能靠扫库恢复；主要章节 §20、§82–§83、§110），12 行 → 13 行，与 spec 全文的 13 个 `REQ-*` 一一对应
+- [x] **新增「硬性要求 → REQ」覆盖表**（第 1.3 节）：34 条各一行，**19 条有覆盖、15 条写「缺口」并在同一行给出理由**。缺口分布：Invariant 7（成本 / 毛利对客户不可见）、Invariant 13（钱包变更 + 状态跃迁 + 审计 + domain outbox 的原子提交）、DoD 1–8 与 13–15（迁移 / 校验 / 授权 / 审计 / 测试 / 错误处理 / 文档 / 前端态 / 迁移分析 / 监控归属 / 性能这类交付流程要求没有任何 REQ）、上线前闸门 1（SST 口径）与 4（支付 / Email / WhatsApp 真实账号打通）
+- [x] **校验脚本** [`tests/test_requirements_coverage.py`](../tests/test_requirements_coverage.py)：只用标准库 `unittest`，只读 docs/ 下那两个文件，不调 Git、不联网、不写任何文件。硬性要求**按结构从 spec 原文枚举**（解析 `## Invariant N` 标题、§132 的有序列表与其后的闸门列表），**条数与条目正文都没有写进脚本** —— spec 增删一条，枚举结果自动跟着变，脚本不用改。失败信息指名道姓：缺哪一节、哪个编号多了行、哪个 `REQ-*` 只在一边、哪条硬性要求没有行或覆盖列不合法、哪个「缺口」没写理由。覆盖表的「spec 原文」列与 spec 逐字比对，防的是 spec 改了正文而表里还留着旧话
+- [x] **脚本放 `tests/` 而不是 `scripts/`**：CI 的 docs / policy 两个 job 只点名跑 `check_docs.py` 与 `check_repo_policy.py`，新脚本要被 CI 跑到就得改 `ci.yml`，而 `ci.yml` 刻意不在本任务的 allowed_change_paths 里；放进 `tests/` 则 `python -m unittest discover -s tests` 自动收它（tests.process、[WORKFLOW §7](WORKFLOW.md) 与 CI policy job 三处都会执行）。`pyproject.toml` 的 `extend-exclude` 把 `tests/test_*.py` 排除在 ruff 之外，`pytest` 的 `testpaths` 只有 `tests/backend`，所以它既不进 ruff 的检查面也不会被 pytest 重复跑
+- [ ] **R5 因此仍是未勾选状态**：覆盖表里还剩 **15 个缺口**，补齐要给 spec 新增 `REQ-*` 编号 —— 那是一次 spec 修订，本任务的 allowed_change_paths 里没有 `docs/Acuven_Central_AI_Billing_Platform_Spec.md`。同理，[REQUIREMENTS.md](REQUIREMENTS.md) 第三节那条「§139.1 写成了 `# 139.1`」也保持 `[ ]` 留在原地，理由已写在那一条里
 
 ---
 
