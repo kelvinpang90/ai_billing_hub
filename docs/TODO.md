@@ -1413,7 +1413,18 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [x] 本机用控制面自己的 `worker.contracts` 加载验证：`ready_tasks` 只返回 `AIH-TASK-007`，`load_task` 取到三个 `allowed_change_paths`，`AIH-TASK-001` / `AIH-TASK-006` 仍以 `task is not ready` 被拒
 - [x] `AIH-TASK-007` 的 Worker run、CI、审查、合并与部署：run `a7ad65ae` → PR #104 → 合并为 `a4aa18a`，部署 run `35580285479` 成功。**第一个全程由 Telegram 驱动的任务**：开启 → 实现 → 检查 → 评审 → 批准 → 合并 → 部署都在聊天里完成，没有人工接管
 - [x] 交付后独立复核（不采信机器人的「已完成」）：改动只落在登记允许的三个文件；`docs/REQUIREMENTS.md` 第二节现在覆盖 spec 全部 137 个一级章节（另有 72 / 102 / 138 三行标注退役），追溯表 13 行与 spec 的 13 个 `REQ-*` 一一对应，`REQ-INGEST-002` 已补上；覆盖表 34 条里 15 条写「缺口」且逐条有理由。变异测试确认校验脚本不是空转：删掉索引里 125 那一行 → 报「索引里缺一级章节 125」；删掉 `REQ-INGEST-002` 行 → 报「出现在 spec 原文里，但追溯表里没有对应行」。本地 `check_docs` / `check_repo_policy` / `unittest discover`（86 项，较交付前 +12）/ `ruff check` 全部零退出
-- [x] 收尾：`tasks.yaml` 里 `AIH-TASK-007` 由 `ready` 改为 `done`（本条记录所在 PR）。控制面此时已经不再推荐它，但仓库契约还写着 `ready` —— 两边不一致，以仓库为准，所以这一刀必须补。Kelvin 已于 2026-09-21 拍板由控制面在 run 走到 `completed` 后自动开这个收尾 PR，**尚未实现**，所以本次仍是手工
+- [x] 收尾：`tasks.yaml` 里 `AIH-TASK-007` 由 `ready` 改为 `done`（#105）。控制面此时已经不再推荐它，但仓库契约还写着 `ready` —— 两边不一致，以仓库为准，所以这一刀必须补。Kelvin 已于 2026-09-21 拍板由控制面在 run 走到 `completed` 后自动开这个收尾 PR，**尚未实现**，所以本次仍是手工
+
+### AIH-TASK-008 的登记：给剩下的硬性要求补 REQ 编号（R5 收口，2026-09-21）
+
+- [x] 起因：AIH-TASK-007 把章节索引与 `REQ-*` 双向闭合补齐了，但覆盖表里还剩 **15 个缺口** —— 补齐要给 spec 新增 `REQ-*` 编号，而 007 的 `allowed_change_paths` 刻意不含 spec。R5 因此仍是 `[ ]`
+- [x] **分档口径（Kelvin 2026-09-21 拍板，三选一里选「分档补」）**：15 条性质不同，不能一刀切发编号。Invariant 7（成本 / 毛利对客户不可见）、Invariant 13（钱包变更 + 状态跃迁 + 审计 + domain outbox 同事务提交）是真正的系统不变量；Gate 1（SST 口径）、Gate 4（支付 / Email / WhatsApp 真实账号打通）是可独立验收的上线闸门 —— 这四条**新增 REQ**。DoD 1–8 与 13–15 共 11 条是**逐功能的交付流程要求**（要有迁移 / 校验 / 授权 / 审计 / 测试 / 错误处理 / API 文档 / 前端态 / 迁移分析 / 监控归属 / 性能验证），由 spec §132 的 DoD 与 PR 模板自检强制，改标「不适用」并逐条给理由。**否决了「15 条全补」**：给「tests exist」发编号后，它的「必需测试证据」列只能写成「有测试」，与 REQUIREMENTS.md 第一节自己的规矩循环
+- [x] 登记：`tasks.yaml` 新增 `AIH-TASK-008`（`status: ready`，字段结构与 `AIH-TASK-006` 逐字对齐；四个 `allowed_change_paths`，五项 `allowed_commands`）；`.platform/README.md` 同步
+- [x] **本任务是唯一一个会改 spec 正文的已登记任务**，所以契约把它锁成「只许新增」：新 REQ 按 §20 里 `REQ-INGEST-001` / `REQ-INGEST-002` 的既有写法插在已经陈述该规则的那一节；全文唯一允许被改的行是文件头的 `**Version:**`（1.6 → 1.7），Revision History 另加一行。**机械证据**：spec 的 diff 里删除行必须恰好一行，且就是那行 Version —— 这一条要写进 PR 正文
+- [x] 设计闸门判为**不适用**并把理由写进契约：本任务只做可追溯性标注，spec 的规范性语义一个字不改（由「只许新增」三条机械保证），既不改钱的行为也不改状态机行为。⚠️ Invariant 13 的主题确实是钱包与状态机，所以 PR 正文不能只写「不适用」，要把这段理由写出来给审查者看
+- [x] 本机用控制面自己的 `worker.contracts` 加载验证：`ready_tasks` 只返回 `AIH-TASK-008`，`load_task` 取到四个 `allowed_change_paths` 与五项命令，`AIH-TASK-007` 已以 `task is not ready` 被拒
+- [x] **这次验证真的抓到一个会让 run 直接失败的缺陷**：有一条验收条件里写了 `` `REQ-<AREA>-<NNN>`: `` ——半角冒号加空格让 YAML 把整条解析成字典而不是字符串，`yaml.safe_load` 不报错、条数也还是 15，但控制面的 `load_task` 会以 `invalid task contract` 拒掉**整个任务**。已给那一条加引号并就地写明原因。教训：登记 PR 光看 `safe_load` 通过不够，必须用真加载器跑一遍，并确认每条 `acceptance_criteria` 都是字符串
+- [ ] `AIH-TASK-008` 的 Worker run、CI、审查、合并与部署（未发生）
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 
