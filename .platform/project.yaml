@@ -32,6 +32,22 @@ repository:
         - frontend
         - secret-scan
 
+# 合并之后由谁来判「这次到底上没上生产」（OpenClaw ACVDEV-TASK-023A）。
+#
+# 写的是**工作流的文件名**，不是它的显示名 —— 显示名改掉不会有任何东西报警。
+# 缺这一行就**不观察**：run 在合并处收尾，和加这一行之前一模一样。这是默认拒绝，
+# 不是默认信任：用别的方式部署的仓库永远不会被误判成「部署失败」。
+#
+# ⚠️ **OpenClaw 只读结论，不部署、不回滚、不重跑。** 真正的部署逻辑仍然全在
+#    `deploy/deploy.sh` 里（健康检查、冒烟、自动回滚都是它做的）。控制面拿着这个
+#    文件名去问 GitHub「这个合并 commit 上它跑成什么样了」，然后据此收尾那个 run：
+#    成功即完成，失败即 `deploy_failed`，一直问不到结论即 `deploy_timeout`。
+#
+# ⚠️ **这一行只能由运营者的 PR 改，run 改不了。** 控制面从 run 的 **base commit**
+#    读它，所以一个 run 没法在自己的分支里改掉（或删掉）判自己的那条规则。
+#    代价是：**加上这一行的这个 PR 本身不会被观察**，下一个任务才开始生效。
+deploy_workflow: deploy.yml
+
 roles:
   development_owner: claude_code
   independent_reviewer: codex
