@@ -1411,7 +1411,9 @@ Kelvin 已批准第一阶段：只做契约与文档接入，**不跑、不启�
 - [x] 由 ④ 决定了任务形状：**先定义什么算一条硬性要求，且定义必须可枚举**（§133 的每条 `## Invariant N` + §132 的每条 DoD + §132 末尾每条上线前闸门），否则验收条件是空的。覆盖状态允许写「缺口」，但每个缺口要给理由 —— Worker 改不了 spec，给 spec 新增 `REQ-*` 编号是后续任务
 - [x] 登记：`tasks.yaml` 新增 `AIH-TASK-007`（`status: ready`，字段结构与 `AIH-TASK-006` 逐字对齐；三个 `allowed_change_paths`，五项 `allowed_commands`）；`.platform/README.md` 同步。校验脚本落在 `tests/test_requirements_coverage.py` 而不是 `scripts/`：CI 的 docs / policy 两个 job 只点名跑 `check_docs.py` 与 `check_repo_policy.py`，新脚本要被 CI 跑到就得改 `ci.yml`，而 `ci.yml` 刻意不在 `allowed_change_paths` 里；放进 `tests/` 则 `unittest discover -s tests` 自动收它 —— tests.process、WORKFLOW §7 与 CI policy job 三处都会执行
 - [x] 本机用控制面自己的 `worker.contracts` 加载验证：`ready_tasks` 只返回 `AIH-TASK-007`，`load_task` 取到三个 `allowed_change_paths`，`AIH-TASK-001` / `AIH-TASK-006` 仍以 `task is not ready` 被拒
-- [ ] `AIH-TASK-007` 的 Worker run、CI、审查、合并与部署（未发生）
+- [x] `AIH-TASK-007` 的 Worker run、CI、审查、合并与部署：run `a7ad65ae` → PR #104 → 合并为 `a4aa18a`，部署 run `35580285479` 成功。**第一个全程由 Telegram 驱动的任务**：开启 → 实现 → 检查 → 评审 → 批准 → 合并 → 部署都在聊天里完成，没有人工接管
+- [x] 交付后独立复核（不采信机器人的「已完成」）：改动只落在登记允许的三个文件；`docs/REQUIREMENTS.md` 第二节现在覆盖 spec 全部 137 个一级章节（另有 72 / 102 / 138 三行标注退役），追溯表 13 行与 spec 的 13 个 `REQ-*` 一一对应，`REQ-INGEST-002` 已补上；覆盖表 34 条里 15 条写「缺口」且逐条有理由。变异测试确认校验脚本不是空转：删掉索引里 125 那一行 → 报「索引里缺一级章节 125」；删掉 `REQ-INGEST-002` 行 → 报「出现在 spec 原文里，但追溯表里没有对应行」。本地 `check_docs` / `check_repo_policy` / `unittest discover`（86 项，较交付前 +12）/ `ruff check` 全部零退出
+- [x] 收尾：`tasks.yaml` 里 `AIH-TASK-007` 由 `ready` 改为 `done`（本条记录所在 PR）。控制面此时已经不再推荐它，但仓库契约还写着 `ready` —— 两边不一致，以仓库为准，所以这一刀必须补。Kelvin 已于 2026-09-21 拍板由控制面在 run 走到 `completed` 后自动开这个收尾 PR，**尚未实现**，所以本次仍是手工
 
 ## 待办：密码重置与通知投递的几项加固（T0.8d 第三轮整体自查）
 

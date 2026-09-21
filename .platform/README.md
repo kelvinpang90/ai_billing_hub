@@ -113,9 +113,12 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 控制面会一直推荐一个已经做完的任务。
 
 2026-09-21 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
-`AIH-TASK-006`（#98）是 `done`；`AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链
-已由 004 / 005 的真实 run 验证。`AIH-TASK-007` 是 `ready`，也是当前**唯一**可调度的任务 —— 在它登记之前
-一个 `ready` 都没有，Telegram 发「开启」没有任何任务可跑。
+`AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）是 `done`；`AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，
+要验证的端到端链已由 004 / 005 的真实 run 验证。**现在一个 `ready` 都没有** —— 在登记下一个任务之前，
+Telegram 发「开启」没有任何任务可跑。
+
+`AIH-TASK-007` 是第一个**全程由 Telegram 驱动**的任务：开启 → 实现 → 检查 → 评审 → 批准 → 合并 → 部署
+都在聊天里完成（run `a7ad65ae`，PR #104，合并为 `a4aa18a`）。
 
 `AIH-TASK-002` 的第一次 Pilot **未通过**。Worker 里刻意没有真实 Git，而 `policy.check` 与
 `tests.process` 原本依赖它；重试前须先合并 `AIH-TASK-003`。本文件不记录 `AIH-TASK-003`
