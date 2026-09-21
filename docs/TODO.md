@@ -39,7 +39,7 @@
 - [x] **R2 — 并发 PENDING payment** —— 已收口。允许并存；两笔都付则都入账（钱已收到，拒绝入账等于吞客户的钱，且预付钱包多充仍是客户余额）；60 秒内同额重复请求复用同一笔挡误触；PENDING 60 分钟置 `EXPIRED`，但**过期后收到成功回调仍然入账**。见 [ADR-0007](adr/ADR-0007-concurrent-pending-payments.md)。⚠️ 人工退款流程超出 V1 范围，是明确缺口
 - [ ] **R3 — 账本膨胀权衡**：§82 已承认钱包变更按租户串行化并要求测最热租户，§119 给了量化目标，但**没有对「按对话/时间窗聚合成一笔 AI_USAGE ledger、usage_events 保留明细」做权衡分析**。即使决定不做，也要写明理由。（Phase 2 前）
 - [x] **R4 — 重放保护存储与过期策略** —— 已收口。支付 Webhook 的 nonce 落数据库，其余四个签名端点走 Redis；**过期时刻 = 请求 timestamp + 5 分钟**（跟着请求自己算，不是「记录时刻 + 固定 TTL」——时间窗是 ±5 分钟，固定 TTL 会留下约 4 分钟重放窗口）。Redis 丢失最长让纵深防御第二层失效约 10 分钟，不产生财务缺口——财务安全网是 `event_id` 与 `(gateway, gateway_event_id)` 的领域幂等。见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 5 节
-- [ ] **R5 — 需求编号覆盖度**：~~140 节仍无完整 TOC~~ —— **章节索引与 `REQ-*` 双向闭合已补齐**（AIH-TASK-007，2026-09-21，见下方记录段）：[REQUIREMENTS.md](REQUIREMENTS.md) 第二节对 spec 每个一级编号章节各列一行，退役的 72 / 102 / 138 就地标注；追溯表补上 `REQ-INGEST-002` 后与 spec 全文的 13 个 `REQ-*` 一一对应。**剩余范围只剩编号本身**：按「硬性要求 = §133 每条 Invariant + §132 每条 Definition of Done + §132 末尾每条上线前跨功能闸门」枚举出 34 条，其中 **15 条没有任何 `REQ-*` 覆盖**（逐条理由见 [REQUIREMENTS.md](REQUIREMENTS.md) 第 1.3 节）。补齐要给 spec 新增 `REQ-*` 编号，那是一次 spec 修订。仍影响 §132 逐条验收。（Phase 1 前）
+- [x] **R5 — 需求编号覆盖度** —— 已收口（AIH-TASK-008，2026-09-21，见下方记录段）。~~140 节仍无完整 TOC~~ 与 `REQ-*` 双向闭合由 AIH-TASK-007 补齐；本次把最后 15 个缺口按 Kelvin 拍板的分档口径清空。**收口范围**：按「硬性要求 = §133 每条 Invariant + §132 每条 Definition of Done + §132 末尾每条上线前跨功能闸门」枚举出的 34 条，现在 **23 条有 `REQ-*` 覆盖、11 条标「不适用」、0 条缺口**；spec v1.7 新增 `REQ-PRIV-002`（§69）、`REQ-TXN-001`（§74.6）、`REQ-TAX-001`（§45.1）、`REQ-LAUNCH-001`（§47）四个编号，全文 `REQ-*` 由 13 个增至 17 个。**证据**：[REQUIREMENTS.md](REQUIREMENTS.md) 第 1.3 节表里已无「缺口」行，11 条「不适用」逐条写了理由；第 1.2 节四个新编号各一行，与 spec 双向闭合；[tests/test_requirements_coverage.py](../tests/test_requirements_coverage.py) 的既有断言（章节索引全覆盖、退役编号标注、`REQ-*` 双向闭合、覆盖表与 spec 原文逐字比对）一条没放松，只把覆盖列的合法取值由两种扩成三种
 - [x] **R7 — 对账单 cut-off** —— 已复核（2026-09-10）：**仍选 T+1**。那条「T+3 也挡不住 31 小时积压」的论据是错的（T+3 = 72 小时），已撤回；但剩下两条理由（上期调整机制无论如何都必须存在、客户体验）足以支撑 T+1。代价：上期调整会经常出现，已派生监控要求——**但它是投递链路的延迟信号，不是会计常态**（见 ADR-0003「要读准这个数字的性质」）。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)
 - [x] **R6 — 仓库可见性偏离** —— 已收口（2026-09-10）。决策人选 B：接受公开，写成 [ADR-0001](adr/ADR-0001-repository-visibility.md)，spec 修订至 v1.2 使 §99 与实际一致。派生硬约束：绝不可提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。（来源：Codex 审查 PR #2）
 
@@ -57,6 +57,28 @@
 - [x] **校验脚本** [`tests/test_requirements_coverage.py`](../tests/test_requirements_coverage.py)：只用标准库 `unittest`，只读 docs/ 下那两个文件，不调 Git、不联网、不写任何文件。硬性要求**按结构从 spec 原文枚举**（解析 `## Invariant N` 标题、§132 的有序列表与其后的闸门列表），**条数与条目正文都没有写进脚本** —— spec 增删一条，枚举结果自动跟着变，脚本不用改。失败信息指名道姓：缺哪一节、哪个编号多了行、哪个 `REQ-*` 只在一边、哪条硬性要求没有行或覆盖列不合法、哪个「缺口」没写理由。覆盖表的「spec 原文」列与 spec 逐字比对，防的是 spec 改了正文而表里还留着旧话
 - [x] **脚本放 `tests/` 而不是 `scripts/`**：CI 的 docs / policy 两个 job 只点名跑 `check_docs.py` 与 `check_repo_policy.py`，新脚本要被 CI 跑到就得改 `ci.yml`，而 `ci.yml` 刻意不在本任务的 allowed_change_paths 里；放进 `tests/` 则 `python -m unittest discover -s tests` 自动收它（tests.process、[WORKFLOW §7](WORKFLOW.md) 与 CI policy job 三处都会执行）。`pyproject.toml` 的 `extend-exclude` 把 `tests/test_*.py` 排除在 ruff 之外，`pytest` 的 `testpaths` 只有 `tests/backend`，所以它既不进 ruff 的检查面也不会被 pytest 重复跑
 - [ ] **R5 因此仍是未勾选状态**：覆盖表里还剩 **15 个缺口**，补齐要给 spec 新增 `REQ-*` 编号 —— 那是一次 spec 修订，本任务的 allowed_change_paths 里没有 `docs/Acuven_Central_AI_Billing_Platform_Spec.md`。同理，[REQUIREMENTS.md](REQUIREMENTS.md) 第三节那条「§139.1 写成了 `# 139.1`」也保持 `[ ]` 留在原地，理由已写在那一条里
+
+> ℹ️ 上面这条已由 AIH-TASK-008 收口（见下一节），保留原文不改写，作为当时的状态记录。
+
+---
+
+## AIH-TASK-008 —— 给剩下的硬性要求补 REQ 编号（R5 收口，2026-09-21）
+
+**不走设计闸门，但理由不是「文档改动」这么简单**：本任务只做可追溯性标注，spec 的规范性语义一个字不改 —— 四段新 REQ 全是对既有规则的复述，spec 的 diff 里删除行恰好一行（文件头的 `**Version:**`），既没有改钱的行为也没有改状态机行为。⚠️ Invariant 13 的主题**确实**是钱包与状态机，所以这条理由在 PR 正文里写全，不只写「不适用」。改动只有四处：[Acuven_Central_AI_Billing_Platform_Spec.md](Acuven_Central_AI_Billing_Platform_Spec.md)、[REQUIREMENTS.md](REQUIREMENTS.md)、[`tests/test_requirements_coverage.py`](../tests/test_requirements_coverage.py)、本文件；没有迁移，没有业务代码改动。
+
+- [x] **分档口径（Kelvin 2026-09-21 拍板，三选一里选「分档补」）**：15 条性质不同，不能一刀切发编号。Invariant 7、Invariant 13、上线前闸门 1 与 4 是可独立验收的系统规则 → **新增 REQ**；DoD 1–8 与 13–15 共 11 条是**逐功能的交付流程要求**，由 §132 的 DoD 与 PR 模板自检逐个功能强制 → 标**「不适用」**并逐条给理由。4 + 11 = 15，覆盖表里不再有「缺口」行。否决了「15 条全补」：给「tests exist」发编号后，第 1.2 节的「必需测试证据」列只能填「有测试」，与 REQUIREMENTS 第一节自己的验收口径循环
+- [x] **四个新编号与落点**（都落在契约的建议落点上，**没有偏离**；每段都按 §20 里 `REQ-INGEST-001` / `REQ-INGEST-002` 的既有写法写成独立一段）：
+  - `REQ-PRIV-002` → **§69**（Invariant 7）。§69 已有「Do NOT show」清单，新段是对该清单与 Invariant 7 的复述。沿用 `PRIV` 而不是新开一个域：第 1.2 节里「客户能看到什么」本来就归这一族
+  - `REQ-TXN-001` → **§74.6**（Invariant 13）。两个建议落点里选 §74.6 而不是 §79：§74.6 已经写着「domain Outbox 与钱包 / 状态 / 支付变更在同一事务」，是四件事同事务提交这条规则**已经被陈述**的地方；§79 是用量事件表结构，只讲 `event_id` 唯一性。新开 `TXN` 域是因为这条横跨钱包、状态机、审计与 outbox，挂在 `FIN` 下会读成「只管钱」
+  - `REQ-TAX-001` → **§45.1**（Gate 1）。§45.1 就是税务闸门本身，新段复述「批准后方可开工 Phase 4 + 落进版本化税务政策快照并被不可变财务快照引用」。**没有**顺手复述紧挨着的那句「未批准前 top-up / receipt / statement schema 阻塞」—— 它就在上一行，重复一遍只会让人怀疑是不是改了措辞
+  - `REQ-LAUNCH-001` → **§47**（Gate 4）。两个建议落点里选 §47 而不是 §134：§47 是 Email / WhatsApp 两条通道与 Notification Adapter 抽象**被点名**的地方，§134 只说「先挑一个试点」、实现范围转给 §126。支付那条腿的日常规则由 `REQ-PAY-001`（§40–§45）覆盖，本编号只管「上线前用真实账号验过」这道闸门
+- [x] **11 条「不适用」的理由摘要**（逐条写在 [REQUIREMENTS.md](REQUIREMENTS.md) 第 1.3 节同一行）：DoD 1 迁移、2 入参校验、3 管理端 / 门户逐接口授权、4「where required」的审计、5 测试、6 失败路径、7 API 文档、8 前端加载 / 错误态、13 每次迁移的锁表 / 备份 / 失败分析、14 监控 / 告警归属 / runbook、15 量敏感功能的性能验证 —— 共同口径是「约束的是每个功能交付时要做的动作，不是系统运行时的行为」。其中四条顺带点明**可独立验收的那一半已经有编号**：DoD 3 → `REQ-AUTH-001`、DoD 4 → `REQ-TXN-001`、DoD 6 → `REQ-AVAIL-001`、DoD 13/14 → `REQ-OPS-001`
+- [x] **spec 只许新增**：全文唯一被改写的行是 `**Version:** 1.6` → `1.7`；Revision History 另加一行（Traceability only, no normative change，并列出四个新编号与落点）。四段 REQ 都插在既有段落之后，没有挪动、合并或改写任何已有句子
+- [x] **刻意没做：spec §139.1 的表不加行**。那张表在改动前就只有 12 行，而 spec 全文有 13 个 `REQ-*`（`REQ-INGEST-002` 从来不在表里）—— 它本来就不是穷举表，而穷举责任在 [REQUIREMENTS.md](REQUIREMENTS.md) 第 1.2 节（有测试锁双向闭合）。给它加四行属于契约没要求的额外 spec 改动，不做
+- [x] **校验脚本同步**：覆盖列接受三种取值；「缺口」与「不适用」两种都必须在同一行给非空理由（断言合并为一条 `test_rows_without_a_req_id_give_a_reason`，两种取值给不同的提示语）。其余断言一条没动 —— 章节索引全覆盖、退役编号标注版本、退役编号不得写成 `§N`、`REQ-*` 双向闭合、覆盖表逐字比对 spec 原文、追溯表四列非空全部保持原样。**四个新编号会自动被既有断言接管**：双向闭合强制它们在第 1.2 节各有一行，逐字比对强制覆盖表引用的 spec 原文与 spec 一致
+- [x] **验证到什么程度**：逐条人工核对 —— spec 新增四段的 ID 与第 1.2 节四行、第 1.3 节四个覆盖格三处逐字一致；第 1.3 节 34 行里 23 行填 `REQ-*`、11 行填「不适用」、0 行「缺口」，11 行理由列均非空；新增文字引用的 §14 / §40–§41 / §45.1 / §46 / §47–§50 / §66 / §68–§69 / §74.6 / §74.9 / §81–§82 / §99 / §127 在 spec 里都有对应标题，退役的 72 / 102 / 138 一次都没写成 `§` 形式
+- [ ] **本次会话没有执行环境**（无 shell 工具），`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check` 由 Worker 在 run 收尾时执行，结果以那一轮为准；**上一条的人工核对不能代替它们**。`tests/test_*.py` 不进 ruff 的检查面（`pyproject.toml` 的 `extend-exclude`），也不被 pytest 重复跑（`testpaths = ["tests/backend"]`）
+- [ ] `AIH-TASK-008` 的 CI、审查、合并与部署（未发生）
 
 ---
 
@@ -1461,4 +1483,4 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 - [ ] `docs/payment-flow.md`（Phase 4）
 - [ ] `docs/data-governance.md`、`docs/runbook.md`（Phase 0 起补，runbook 需覆盖 §136 列的 18 个故障场景）；[`docs/deployment.md`](deployment.md) **已起草，七件决策已定案** —— T0.9 的方案文档；落地部分仍待生产主机
 - [x] 逐条核对 25 条评审意见与 spec v1.1 —— 完成于 2026-09-10，结果见 [REVIEW_FOLLOWUP_v1.1.md](archive/REVIEW_FOLLOWUP_v1.1.md)（20 条已解决 / 5 条残留，已转为上方 R1–R5）
-- [ ] 给 spec 的硬性要求补 `REQ-*` 编号（= R5）
+- [x] 给 spec 的硬性要求补 `REQ-*` 编号（= R5）—— AIH-TASK-008（2026-09-21）收口：spec v1.7 新增 `REQ-PRIV-002` / `REQ-TXN-001` / `REQ-TAX-001` / `REQ-LAUNCH-001` 四个编号，其余 11 条逐功能交付流程要求标「不适用」并逐条给理由；[REQUIREMENTS.md](REQUIREMENTS.md) 第 1.3 节已无「缺口」行

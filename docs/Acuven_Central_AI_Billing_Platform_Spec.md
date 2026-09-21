@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.6  
+**Version:** 1.7  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -19,6 +19,7 @@
 | 1.4 | 2026-09-11 | Editorial only, no normative change. Retired two illustrative sections; section numbers are stable, so both leave a gap rather than causing a renumber. **§102** (Integrated Application Backend Structure) was a directory tree the section itself declared non-binding ("Adapt to existing project conventions rather than blindly forcing this exact layout"). **§138** (Final Target User Experience) was a mock dashboard with invented figures; every field it named is already normative in §67–§69, and §69 additionally carries the "Do NOT show" list. |
 | 1.5 | 2026-09-11 | Errata only, no new normative decision. §30 applied reconciliation responses on `status_version >=` local while §28 applies webhooks on `>` and §30 claimed both used the same rule — §30 now states the §28 rule. §55 listed an undefined dashboard field "Actual AI Provider Cost"; it now uses the term defined in §14 (Estimated/Reconciled, with the basis shown). §30's bare "every 5 minutes" polling example sat exactly on the §119 reconciliation safety bound and did not reference it; replaced by the cross-reference. |
 | 1.6 | 2026-09-11 | Editorial only, no normative change. Second slimming batch: §2's generic flow diagram now defers to §20/§103; §55's filter list defers to §87; §134's 15-step block defers to §126; §135 keeps only the constraints with no other home and points the rest at theirs (retitled Implementation Constraints); §139's mock dashboard and drill-down defer to §86/§61/§87, keeping the auditable-trail requirement and the §139.1 table. **§72** (Customer Statements Page) retired — §46 and §90 already cover both items. |
+| 1.7 | 2026-09-21 | Traceability only, no normative change. Four rules that were already stated normatively now also carry an identifier so implementation, migrations, and tests can reference them: `REQ-PRIV-002` (§69, Invariant 7), `REQ-TXN-001` (§74.6, Invariant 13), `REQ-TAX-001` (§45.1, SST/accounting launch gate), and `REQ-LAUNCH-001` (§47, real-account integration launch gate). Each added paragraph restates the rule of the section it sits in; no existing sentence was moved, merged, or reworded, and no requirement was added, tightened, or relaxed. |
 
 ## Document Navigation
 
@@ -1889,6 +1890,8 @@ LHDN e-Invoice being out of scope does not determine SST treatment. Before Phase
 
 Until this decision is approved, production top-up, receipt, and statement schema is blocked. The system must support versioned tax-policy snapshots, but this specification must not invent a tax rate.
 
+`REQ-TAX-001`: The SST/accounting treatment must be approved before Phase 4 implementation and reflected in the versioned tax-policy snapshot referenced by the immutable financial snapshots.
+
 ---
 
 # 46. Monthly Statement
@@ -1952,6 +1955,8 @@ Reuse existing Acuven:
 Central Billing must implement Notification Adapter abstraction.
 
 Do not rebuild WhatsApp infrastructure.
+
+`REQ-LAUNCH-001`: Before production launch, payment, Email, and WhatsApp integration must be verified using real accounts.
 
 ---
 
@@ -2467,6 +2472,8 @@ Do NOT show:
 - margin
 - internal provider pricing
 
+`REQ-PRIV-002`: Customer-facing surfaces must not expose Acuven estimated or reconciled provider cost, markup, margin, or internal provider pricing.
+
 ---
 
 # 70. Customer Wallet Page
@@ -2718,6 +2725,8 @@ processed_at
 ```
 
 The domain Outbox is written in the same transaction as wallet/status/payment changes. Redis/Celery carries delivery triggers only; database Outbox state remains the recoverable source of truth.
+
+`REQ-TXN-001`: A wallet mutation, the billing-status transition caused by that mutation, the audit record, and the durable outbound domain event are committed atomically in one database transaction.
 
 ## 74.7 payments and payment_gateway_events
 
