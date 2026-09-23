@@ -88,13 +88,14 @@
 
 设计依据：设计闸门 #96 `APPROVED: design v3`，全文见 [design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)（spec §56、§57、§124）。
 
-五个接口都在 `/api/v1/admin` 下，都要 ADMIN。
+六个接口都在 `/api/v1/admin` 下，都要 ADMIN。编辑客户是 AIH-TASK-009 加的，其余五个来自设计闸门 #96。
 
 | 方法与路径 | 成功 | 错误 |
 | --- | --- | --- |
 | `POST /api/v1/admin/customers` | 201，客户详情 | 401 / 403 / 422 / 503 |
 | `GET /api/v1/admin/customers` | 200，客户分页 | 401 / 403 / 422 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 503 |
+| `PATCH /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 422 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/projects` | 201，项目 | 401 / 403 / 404 / 422 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}/projects` | 200，项目分页 | 401 / 403 / 404 / 422 / 503 |
 
@@ -185,6 +186,33 @@
 
 成功：**200**，`data` 是客户详情。客户不存在：404 `CUSTOMER_NOT_FOUND`。只读，不写审计。
 
+### `PATCH /api/v1/admin/customers/{customer_id}` —— 编辑客户
+
+部分更新：只改请求体里出现的字段，至少带一个。
+
+| 字段 | 规则 |
+| --- | --- |
+| `company_name` | 去掉首尾空白后长度 1–255；不能是 `null` |
+| `email` | 合法邮箱，长度不超过 320；不能是 `null` |
+| `contact_name` | 不超过 255；`null` 或空白表示清空 |
+| `phone` | 不超过 32；`null` 或空白表示清空 |
+
+- 空请求体 `{}` 返回 422。
+- 其他字段一律 422，包括 `billing_status`、`status_version`、`public_id`、`id`、
+  `low_balance_threshold` 和余额。计费状态只随余额变化；账户状态、低余额阈值、调账不走这个接口。
+- 客户不存在：404 `CUSTOMER_NOT_FOUND`，什么都不写。
+
+成功：**200**，`data` 是改后的客户详情。钱包只读不写。客户行与一条 `CUSTOMER_UPDATE`
+审计同一事务提交，要么都在，要么都不在：
+
+- 审计的 `before_state` 是 `public_id`、`company_name`（改前）；
+- `after_state` 是 `public_id`、`company_name`（改后）和 `changed_fields`（实际改动的字段名，按
+  `company_name`、`contact_name`、`email`、`phone` 排序）；
+- email、联系人、电话的**值**不进审计，改前改后都不进，只在 `changed_fields` 里留字段名（REQ-PRIV-001）。
+
+所有字段都与现有值相同时，返回 200 和当前详情，不写库：不写审计，`updated_at` 也不变。
+并发编辑按最后写入为准；客户行在事务内加锁，每条审计的前后状态对应它自己那一次改动。
+
 ### `POST /api/v1/admin/customers/{customer_id}/projects` —— 建项目
 
 请求体：
@@ -207,5 +235,5 @@
 
 ### 不在本批接口里
 
-编辑客户、账户状态 `account_status`、低余额阈值配置、管理员调账、API 凭据、出站 webhook、删除或停用
+账户状态 `account_status`、低余额阈值配置、管理员调账、API 凭据、出站 webhook、删除或停用
 客户与项目（财务记录永久保留）。

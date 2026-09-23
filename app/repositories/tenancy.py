@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from collections.abc import Mapping
+from typing import Final
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -50,9 +52,47 @@ def create_tenant(
     return tenant
 
 
-def get_tenant_by_public_id(session: Session, public_id: str) -> Tenant | None:
+def get_tenant_by_public_id(
+    session: Session, public_id: str, *, for_update: bool = False
+) -> Tenant | None:
+    """`for_update` takes a row lock (MySQL; SQLite ignores it) until the transaction ends."""
     statement = select(Tenant).where(Tenant.public_id == public_id)
+    if for_update:
+        statement = statement.with_for_update()
     return session.execute(statement).scalar_one_or_none()
+
+
+# 客户资料里管理员可以改的列（AIH-TASK-009）。⚠️ `billing_status`、`status_version`、
+# `low_balance_threshold` 刻意不在这里：前两列只由 `post_transaction` 改变，阈值归
+# 另一个任务。
+PROFILE_FIELDS: Final = ("company_name", "contact_name", "email", "phone")
+
+
+def update_tenant_profile(
+    session: Session,
+    tenant: Tenant,
+    *,
+    changes: Mapping[str, str | None],
+    now: dt.datetime,
+) -> list[str]:
+    """Apply `changes` to the profile columns; return the names that really changed.
+
+    值与现有的相同就不算改动；一个都没变时不碰 `updated_at`、不 flush。
+    """
+    if not set(changes) <= set(PROFILE_FIELDS):
+        # 只报字段名，不带任何值。
+        raise ValueError(f"not profile fields: {sorted(set(changes) - set(PROFILE_FIELDS))}")
+    changed = [
+        name
+        for name in PROFILE_FIELDS
+        if name in changes and getattr(tenant, name) != changes[name]
+    ]
+    for name in changed:
+        setattr(tenant, name, changes[name])
+    if changed:
+        tenant.updated_at = now
+        session.flush()
+    return changed
 
 
 def list_tenants(session: Session, *, offset: int, limit: int) -> tuple[list[Tenant], int]:

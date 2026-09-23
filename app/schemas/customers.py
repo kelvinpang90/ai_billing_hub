@@ -23,6 +23,7 @@ from pydantic import (
     EmailStr,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
 from app.models.base import quantize_money
@@ -76,6 +77,49 @@ class CreateCustomerRequest(BaseModel):
             # 422 只列字段名，不回显这个值。
             raise ValueError("email is too long")
         return value
+
+
+class UpdateCustomerRequest(BaseModel):
+    """部分更新客户资料（AIH-TASK-009）：只改请求体里出现的字段。
+
+    ⚠️ 多余字段一律拒绝：`billing_status`、`status_version`、`public_id`、余额、阈值都
+    不能经这里改 —— 计费状态只由 `post_transaction` 改变，其余各归各的任务。
+
+    `company_name` / `email` 必填列，显式传 `null` 是 422；`contact_name` / `phone`
+    传 `null` 或空白就是清空。一个字段都不带也是 422。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    company_name: _Name | None = None
+    email: EmailStr | None = None
+    contact_name: _ContactName = None
+    phone: _Phone = None
+
+    @field_validator("company_name", "email", mode="before")
+    @classmethod
+    def _required_columns_are_not_null(cls, value: object) -> object:
+        # 只对显式传入的值运行（默认值不校验），所以「没带」与「带了 null」分得开。
+        if value is None:
+            raise ValueError("must not be null")
+        return value
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _email_fits_the_column(cls, value: object) -> object:
+        if isinstance(value, str) and len(value) > _EMAIL_LENGTH:
+            raise ValueError("email is too long")
+        return value
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> UpdateCustomerRequest:
+        if not self.model_fields_set:
+            raise ValueError("no fields to update")
+        return self
+
+    def changes(self) -> dict[str, str | None]:
+        """Only the fields the client actually sent."""
+        return {name: getattr(self, name) for name in self.model_fields_set}
 
 
 class CreateProjectRequest(BaseModel):
