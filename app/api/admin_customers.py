@@ -31,6 +31,7 @@ from app.schemas.customers import (
     CustomerSummary,
     Page,
     ProjectView,
+    UpdateCustomerRequest,
 )
 from app.schemas.envelope import ApiResponse, success
 from app.services import customers
@@ -81,6 +82,22 @@ def get_customer(request: Request, customer_id: str) -> ApiResponse[CustomerDeta
     """`customer_id` is the customer's `public_id`; anything else is a 404."""
     require_admin(request)
     detail = customers.get_customer(require_session_factory(request), customer_id)
+    return success(detail, request_id=current_request_id())
+
+
+@router.patch("/customers/{customer_id}", response_model=ApiResponse[CustomerDetail])
+def update_customer(
+    request: Request, customer_id: str, payload: UpdateCustomerRequest
+) -> ApiResponse[CustomerDetail]:
+    """Partial profile edit; the row and its `CUSTOMER_UPDATE` audit commit together."""
+    admin = require_admin(request)
+    detail = customers.update_customer(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        changes=payload.changes(),
+        context=request_context(request),
+    )
     return success(detail, request_id=current_request_id())
 
 

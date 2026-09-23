@@ -48,6 +48,13 @@ PHONE = "+60 3-7788 9911"
 # MySQL：SIGNAL SQLSTATE '45000' 报 1644（见 test_wallet_repository.py）。
 SIGNALLED = 1644
 
+# 这个服务写的审计动作。MySQL 库是共享的，清场与计数都只碰这几种。
+OUR_ACTIONS = [
+    AuditAction.CUSTOMER_CREATE,
+    AuditAction.PROJECT_CREATE,
+    AuditAction.CUSTOMER_UPDATE,
+]
+
 
 # --- 夹具 -----------------------------------------------------------------------
 
@@ -93,12 +100,11 @@ def _clean(engine: Engine) -> None:
     with engine.begin() as connection:
         # 账本拒绝 DELETE，只能 TRUNCATE；有账本行的钱包删不掉。
         connection.execute(text("TRUNCATE TABLE wallet_transactions"))
-    actions = [AuditAction.CUSTOMER_CREATE, AuditAction.PROJECT_CREATE]
     with engine.begin() as connection:
         connection.execute(delete(Wallet))
         connection.execute(delete(Project))
         connection.execute(delete(Tenant))
-        connection.execute(delete(AuditLog).where(AuditLog.action.in_(actions)))
+        connection.execute(delete(AuditLog).where(AuditLog.action.in_(OUR_ACTIONS)))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 
 
@@ -146,8 +152,8 @@ def add_project(factory, admin: User, customer_id: str, name: str = "Chatbot"):
 
 
 def counts(factory) -> dict[str, int]:
-    """Rows this service writes. Audits: only its two actions, the MySQL db is shared."""
-    ours = AuditLog.action.in_([AuditAction.CUSTOMER_CREATE, AuditAction.PROJECT_CREATE])
+    """Rows this service writes. Audits: only its own actions, the MySQL db is shared."""
+    ours = AuditLog.action.in_(OUR_ACTIONS)
     statements = {
         "tenants": select(func.count()).select_from(Tenant),
         "wallets": select(func.count()).select_from(Wallet),
@@ -337,6 +343,158 @@ def test_a_project_for_an_unknown_customer_is_not_found_and_writes_nothing(facto
         add_project(factory, admin, str(uuid.uuid4()))
 
     assert (raised.value.code, raised.value.http_status) == ("CUSTOMER_NOT_FOUND", 404)
+    assert counts(factory) == before
+
+
+# --- 编辑客户（AIH-TASK-009） ---------------------------------------------------
+
+LATER = NOW + dt.timedelta(hours=1)
+
+
+def edit(factory, admin: User, customer_id: str, **changes: str | None):
+    return customers.update_customer(
+        factory,
+        actor=admin,
+        customer_id=customer_id,
+        changes=changes,
+        context=CONTEXT,
+        now=LATER,
+    )
+
+
+def stored(factory, customer_id: str) -> dict[str, object]:
+    """Every column an edit could touch, plus the ones it must never touch."""
+    with factory() as session:
+        tenant = tenancy.get_tenant_by_public_id(session, customer_id)
+        assert tenant is not None
+        wallet = get_wallet_for_tenant(session, tenant.id)
+        assert wallet is not None
+        return {
+            "company_name": tenant.company_name,
+            "contact_name": tenant.contact_name,
+            "email": tenant.email,
+            "phone": tenant.phone,
+            "billing_status": tenant.billing_status,
+            "status_version": tenant.status_version,
+            "low_balance_threshold": tenant.low_balance_threshold,
+            "updated_at": tenant.updated_at,
+            "wallet": (wallet.balance, wallet.version, wallet.updated_at),
+        }
+
+
+def test_update_customer_commits_the_row_and_its_audit(factory) -> None:
+    admin = make_admin(factory)
+    customer = create(factory, admin, company_name="Old Name")
+    original = stored(factory, customer.id)
+    before = counts(factory)
+
+    detail = edit(
+        factory, admin, customer.id, company_name="New Name", email="new-" + EMAIL, phone=None
+    )
+
+    assert (detail.company_name, detail.email, detail.contact_name, detail.phone) == (
+        "New Name",
+        "new-" + EMAIL,
+        CONTACT,
+        None,
+    )
+    assert detail.updated_at == LATER
+    assert counts(factory) == {**before, "audits": before["audits"] + 1}
+    assert stored(factory, customer.id) == {
+        **original,
+        "company_name": "New Name",
+        "email": "new-" + EMAIL,
+        "phone": None,
+        "updated_at": LATER,
+    }
+
+    [audit] = audits(factory, AuditAction.CUSTOMER_UPDATE)
+    assert (audit.actor_user_id, audit.actor_role) == (admin.id, "ADMIN")
+    assert (audit.entity_type, audit.entity_id) == ("tenant", customer.id)
+    assert (audit.ip_address, audit.user_agent) == (CONTEXT.ip_address, CONTEXT.user_agent)
+    assert audit.created_at == LATER
+    assert json.loads(audit.before_state or "{}") == {
+        "public_id": customer.id,
+        "company_name": "Old Name",
+    }
+    assert json.loads(audit.after_state or "{}") == {
+        "public_id": customer.id,
+        "company_name": "New Name",
+        "changed_fields": ["company_name", "email", "phone"],
+    }
+    # 个人数据的旧值、新值都不进审计。
+    for personal in (EMAIL, "new-" + EMAIL, CONTACT, PHONE):
+        assert personal not in (audit.before_state or "")
+        assert personal not in (audit.after_state or "")
+
+
+def test_a_failed_update_audit_leaves_the_customer_unchanged(factory, monkeypatch) -> None:
+    """INV-13：审计写入失败，客户行回滚到改之前。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    original, before = stored(factory, customer.id), counts(factory)
+    monkeypatch.setattr(customers, "record_audit", _boom)
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        edit(factory, admin, customer.id, company_name="Renamed", phone=None)
+
+    assert stored(factory, customer.id) == original
+    assert counts(factory) == before
+    assert audits(factory, AuditAction.CUSTOMER_UPDATE) == []
+
+
+def test_a_failed_update_commit_leaves_the_customer_unchanged(factory, monkeypatch) -> None:
+    """提交那一刻才失败（审计行违反 NOT NULL）：客户行的 UPDATE 已经 flush，也一起回滚。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    original, before = stored(factory, customer.id), counts(factory)
+    monkeypatch.setattr(customers, "record_audit", _record_invalid_audit)
+
+    with pytest.raises(IntegrityError):
+        edit(factory, admin, customer.id, company_name="Renamed", email="new-" + EMAIL)
+
+    assert stored(factory, customer.id) == original
+    assert counts(factory) == before
+    assert audits(factory, AuditAction.CUSTOMER_UPDATE) == []
+
+
+def test_an_update_that_changes_nothing_writes_nothing(factory) -> None:
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    original, before = stored(factory, customer.id), counts(factory)
+
+    detail = edit(factory, admin, customer.id, company_name="Acme Sdn Bhd", phone=PHONE)
+
+    assert detail == customer
+    assert stored(factory, customer.id) == original
+    assert counts(factory) == before
+
+
+def test_an_update_for_an_unknown_customer_is_not_found_and_writes_nothing(factory) -> None:
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    original, before = stored(factory, customer.id), counts(factory)
+
+    with pytest.raises(CustomerNotFound):
+        edit(factory, admin, str(uuid.uuid4()), company_name="Renamed")
+
+    assert stored(factory, customer.id) == original
+    assert counts(factory) == before
+
+
+@pytest.mark.parametrize(
+    "column", ["billing_status", "status_version", "public_id", "low_balance_threshold"]
+)
+def test_the_repository_refuses_non_profile_columns(factory, column: str) -> None:
+    """请求体之外的第二道防线：计费状态等列不能经资料更新改动。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    original, before = stored(factory, customer.id), counts(factory)
+
+    with pytest.raises(ValueError, match=column):
+        edit(factory, admin, customer.id, **{column: "ACTIVE"})
+
+    assert stored(factory, customer.id) == original
     assert counts(factory) == before
 
 

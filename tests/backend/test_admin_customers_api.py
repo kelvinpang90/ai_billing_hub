@@ -53,11 +53,12 @@ PROJECT_FIELDS = {"id", "name", "description", "created_at", "updated_at"}
 PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
-# 设计 §2 的五个接口。
+# 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户。
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers/{customer_id}"),
+    ("PATCH", "/api/v1/admin/customers/{customer_id}"),
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"),
     ("GET", "/api/v1/admin/customers/{customer_id}/projects"),
 }
@@ -66,6 +67,7 @@ EXPECTED_ADMIN_ROUTES = {
 # 那条用例就测不到 `require_admin` 了。
 VALID_BODIES = {
     ("POST", "/api/v1/admin/customers"): {"company_name": "Probe", "email": "probe@example.com"},
+    ("PATCH", "/api/v1/admin/customers/{customer_id}"): {"company_name": "Renamed"},
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"): {"name": "Probe"},
 }
 
@@ -79,7 +81,7 @@ def admin_routes(application: FastAPI) -> set[tuple[str, str]]:
     两条来源取并集。⚠️ 本仓库的 FastAPI 延迟挂载子路由，`app.routes` 顶层只有
     `_IncludedRouter` 壳子（见 test_password_reset_link.py），所以逐层往里找；
     OpenAPI 文档是另一条来源，但它看不见 `include_in_schema=False` 的路由。
-    两条都落空时，下面「恰好是这五个」那条用例会红。
+    两条都落空时，下面「恰好是这六个」那条用例会红。
     """
     found = {
         (method.upper(), path)
@@ -301,7 +303,7 @@ def test_blank_optional_fields_are_stored_as_null(client, admin) -> None:
 # --- 鉴权 -----------------------------------------------------------------------
 
 
-def test_the_admin_routes_are_exactly_the_five_in_the_design() -> None:
+def test_the_admin_routes_are_exactly_the_expected_six() -> None:
     """既防枚举落空（下面的参数化用例一条都不跑也是绿的），也逼新增接口补进来。"""
     assert set(ADMIN_ROUTES) == EXPECTED_ADMIN_ROUTES
 
@@ -316,13 +318,15 @@ def test_every_admin_route_refuses_non_admins(
     customer_id = new_customer(client, admin)["id"]
     url = path.replace("{customer_id}", customer_id)
     headers = {} if caller == "anonymous" else customer_headers(app)
-    before = row_counts(app)
+    before, stored = row_counts(app), stored_tenant(app, customer_id)
 
     response = client.request(method, url, json=VALID_BODIES.get((method, path)), headers=headers)
 
     expected = (401, "TOKEN_INVALID") if caller == "anonymous" else (403, "ADMIN_REQUIRED")
     assert (response.status_code, error_code(response)) == expected
+    # 行数看不出 UPDATE，所以客户行逐列再比一次（编辑接口漏了鉴权会在这里红）。
     assert row_counts(app) == before
+    assert stored_tenant(app, customer_id) == stored
 
 
 @pytest.mark.parametrize(
@@ -537,6 +541,192 @@ def test_listing_defaults_to_the_first_page_of_twenty(client, admin) -> None:
     assert (page["page"], page["page_size"], page["total"]) == (1, 20, 1)
 
 
+# --- 编辑客户（AIH-TASK-009） ---------------------------------------------------
+
+
+def stored_tenant(application: FastAPI, customer_id: str) -> dict:
+    with application.state.session_factory() as session:
+        tenant = session.execute(select(Tenant).where(Tenant.public_id == customer_id)).scalar_one()
+        return {
+            column: getattr(tenant, column)
+            for column in (
+                "company_name",
+                "contact_name",
+                "email",
+                "phone",
+                "billing_status",
+                "status_version",
+                "low_balance_threshold",
+                "updated_at",
+            )
+        }
+
+
+def test_an_admin_edits_a_customer_and_it_is_audited(client, app, admin, admin_id) -> None:
+    created = new_customer(
+        client, admin, company_name="Old Name", contact_name=PII_CONTACT, phone=PII_PHONE
+    )
+    before = row_counts(app)
+
+    response = client.patch(
+        f"{CUSTOMERS}/{created['id']}",
+        json={"company_name": "  New Name  ", "email": PII_EMAIL, "phone": None},
+        headers={**admin, "User-Agent": "admin-console-test"},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert set(data) == DETAIL_FIELDS
+    assert (data["company_name"], data["email"], data["contact_name"], data["phone"]) == (
+        "New Name",
+        PII_EMAIL,
+        PII_CONTACT,
+        None,
+    )
+    # 计费状态与钱包不受影响。
+    assert (data["billing_status"], data["status_version"]) == ("SUSPENDED", 0)
+    assert data["wallet"] == created["wallet"]
+    assert client.get(f"{CUSTOMERS}/{created['id']}", headers=admin).json()["data"] == data
+
+    assert row_counts(app) == {**before, "audit_logs": before["audit_logs"] + 1}
+    [audit] = audits(app, AuditAction.CUSTOMER_UPDATE)
+    assert (audit.actor_user_id, audit.actor_role) == (admin_id, "ADMIN")
+    assert (audit.entity_type, audit.entity_id) == ("tenant", created["id"])
+    assert audit.user_agent == "admin-console-test"
+    assert json.loads(audit.before_state or "{}") == {
+        "public_id": created["id"],
+        "company_name": "Old Name",
+    }
+    assert json.loads(audit.after_state or "{}") == {
+        "public_id": created["id"],
+        "company_name": "New Name",
+        "changed_fields": ["company_name", "email", "phone"],
+    }
+    # 前后状态都不含个人数据的值，旧值新值都不含。
+    for personal in (PII_EMAIL, "ops@example.com", PII_CONTACT, PII_PHONE):
+        assert personal not in (audit.before_state or "")
+        assert personal not in (audit.after_state or "")
+
+
+def test_editing_only_personal_fields_records_names_not_values(client, app, admin) -> None:
+    created = new_customer(client, admin)
+
+    response = client.patch(
+        f"{CUSTOMERS}/{created['id']}",
+        json={"contact_name": PII_CONTACT, "phone": PII_PHONE},
+        headers=admin,
+    )
+
+    assert response.status_code == 200
+    [audit] = audits(app, AuditAction.CUSTOMER_UPDATE)
+    assert json.loads(audit.after_state or "{}")["changed_fields"] == ["contact_name", "phone"]
+    for personal in (PII_CONTACT, PII_PHONE, "ops@example.com"):
+        assert personal not in (audit.before_state or "")
+        assert personal not in (audit.after_state or "")
+
+
+def test_blank_optional_fields_clear_them_on_edit(client, admin) -> None:
+    created = new_customer(client, admin, contact_name="Someone", phone="123")
+
+    response = client.patch(
+        f"{CUSTOMERS}/{created['id']}", json={"contact_name": "  ", "phone": None}, headers=admin
+    )
+
+    assert response.status_code == 200
+    assert (response.json()["data"]["contact_name"], response.json()["data"]["phone"]) == (
+        None,
+        None,
+    )
+
+
+def test_an_edit_that_changes_nothing_writes_nothing(client, app, admin) -> None:
+    created = new_customer(client, admin, company_name="Same Name")
+    before, stored = row_counts(app), stored_tenant(app, created["id"])
+
+    response = client.patch(
+        f"{CUSTOMERS}/{created['id']}",
+        json={"company_name": " Same Name ", "email": "ops@example.com"},
+        headers=admin,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == created
+    assert row_counts(app) == before
+    assert stored_tenant(app, created["id"]) == stored
+    assert audits(app, AuditAction.CUSTOMER_UPDATE) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"billing_status": "ACTIVE"},
+        {"status_version": 5},
+        {"public_id": "00000000-0000-4000-8000-000000000000"},
+        {"id": "00000000-0000-4000-8000-000000000000"},
+        {"tenant_id": 1},
+        {"low_balance_threshold": "10.00000000"},
+        {"balance": "100.00000000"},
+        {"company_name": "Fine", "billing_status": "ACTIVE"},
+        {"company_name": "Fine", "status_version": 5},
+        {"company_name": "Fine", "public_id": "00000000-0000-4000-8000-000000000000"},
+        {},
+        {"company_name": None},
+        {"email": None},
+        {"company_name": "   "},
+        {"company_name": "x" * 256},
+        {"email": "not-an-email"},
+        {"email": "a" * 310 + "@example.com"},
+        {"contact_name": "x" * 256},
+        {"phone": "1" * 33},
+    ],
+    ids=[
+        "billing_status",
+        "status_version",
+        "public_id",
+        "id",
+        "tenant_id",
+        "low_balance_threshold",
+        "balance",
+        "valid+billing_status",
+        "valid+status_version",
+        "valid+public_id",
+        "empty",
+        "company-null",
+        "email-null",
+        "company-blank",
+        "company-256",
+        "email-format",
+        "email-length",
+        "contact-256",
+        "phone-33",
+    ],
+)
+def test_invalid_edit_bodies_are_rejected_and_write_nothing(client, app, admin, body: dict) -> None:
+    """extra="forbid"：计费状态、状态版本、public_id 都不能经这里改。"""
+    created = new_customer(client, admin)
+    before, stored = row_counts(app), stored_tenant(app, created["id"])
+
+    response = client.patch(f"{CUSTOMERS}/{created['id']}", json=body, headers=admin)
+
+    assert (response.status_code, error_code(response)) == (422, "VALIDATION_ERROR")
+    assert row_counts(app) == before
+    assert stored_tenant(app, created["id"]) == stored
+
+
+def test_an_edit_does_not_leak_personal_data_into_a_validation_error(client, admin) -> None:
+    created = new_customer(client, admin)
+
+    response = client.patch(
+        f"{CUSTOMERS}/{created['id']}",
+        json={"email": PII_EMAIL, "phone": PII_PHONE + "x" * 40},
+        headers=admin,
+    )
+
+    assert response.status_code == 422
+    assert PII_EMAIL not in response.text
+    assert PII_PHONE not in response.text
+
+
 # --- 项目 -----------------------------------------------------------------------
 
 
@@ -625,6 +815,7 @@ def test_unknown_ids_are_indistinguishable_404s(client, app, admin) -> None:
             client.get(f"{CUSTOMERS}/{unknown}", headers=admin),
             client.get(f"{CUSTOMERS}/{unknown}/projects", headers=admin),
             client.post(f"{CUSTOMERS}/{unknown}/projects", json={"name": "x"}, headers=admin),
+            client.patch(f"{CUSTOMERS}/{unknown}", json={"company_name": "x"}, headers=admin),
         ]
 
     assert {response.status_code for response in responses} == {404}

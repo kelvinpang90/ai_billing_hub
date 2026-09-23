@@ -1,7 +1,8 @@
 """Admin customer management (spec §56, §57, §124; design gate #96 v3).
 
 ⚠️ **每个写操作一个 `session_scope()`**（INV-13）。建客户：租户、钱包、`CUSTOMER_CREATE`
-审计三行；建项目：项目与 `PROJECT_CREATE` 审计两行。要么全在、要么全不在。repository
+审计三行；建项目：项目与 `PROJECT_CREATE` 审计两行；改客户：租户行与 `CUSTOMER_UPDATE`
+审计（AIH-TASK-009）。要么全在、要么全不在。repository
 只 flush，提交与回滚都发生在这里的 `session_scope` 里。
 
 ⚠️ **客户只从路径里的 `public_id` 解析**，项目的 `tenant_id` 取解析出来的内部 id，
@@ -15,6 +16,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Mapping
 from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -65,8 +67,8 @@ def _offset(page: int, page_size: int) -> int:
     return (page - 1) * page_size
 
 
-def _require_tenant(session: Session, customer_id: str) -> Tenant:
-    tenant = tenancy.get_tenant_by_public_id(session, customer_id)
+def _require_tenant(session: Session, customer_id: str, *, for_update: bool = False) -> Tenant:
+    tenant = tenancy.get_tenant_by_public_id(session, customer_id, for_update=for_update)
     if tenant is None:
         raise CustomerNotFound
     return tenant
@@ -122,12 +124,63 @@ def create_customer(
 def get_customer(session_factory: sessionmaker[Session], customer_id: str) -> CustomerDetail:
     with session_factory() as session:
         tenant = _require_tenant(session, customer_id)
-        wallet = get_wallet_for_tenant(session, tenant.id)
-        if wallet is None:
-            # 每个客户都有钱包（建客户同事务、迁移 0006 回填既有租户）。缺了是数据
-            # 不一致，按意外异常走 500；消息只是问题码，不含任何客户数据。
-            raise RuntimeError(WALLET_MISSING)
-        return customer_detail(tenant, wallet)
+        return _detail(session, tenant)
+
+
+def _detail(session: Session, tenant: Tenant) -> CustomerDetail:
+    wallet = get_wallet_for_tenant(session, tenant.id)
+    if wallet is None:
+        # 每个客户都有钱包（建客户同事务、迁移 0006 回填既有租户）。缺了是数据
+        # 不一致，按意外异常走 500；消息只是问题码，不含任何客户数据。
+        raise RuntimeError(WALLET_MISSING)
+    return customer_detail(tenant, wallet)
+
+
+def update_customer(
+    session_factory: sessionmaker[Session],
+    *,
+    actor: User,
+    customer_id: str,
+    changes: Mapping[str, str | None],
+    context: RequestContext,
+    now: dt.datetime | None = None,
+) -> CustomerDetail:
+    """Edit the profile columns; the tenant row and `CUSTOMER_UPDATE` audit commit together.
+
+    ⚠️ 只改 `tenancy.PROFILE_FIELDS` 里的列，钱包只读不写。客户行加锁再读，审计的
+    前后状态就是这一次改动真正的前后。值与现有的完全相同时什么都不写：没有改动
+    就没有可审计的动作，`updated_at` 也不变。
+
+    审计里 `company_name` 记前后值；`email` / `contact_name` / `phone` 是个人数据
+    （REQ-PRIV-001），只在 `changed_fields` 里记**字段名**，不记值。
+    """
+    moment = now or _now()
+    with session_scope(session_factory) as session:
+        tenant = _require_tenant(session, customer_id, for_update=True)
+        before: dict[str, object] = {
+            "public_id": tenant.public_id,
+            "company_name": tenant.company_name,
+        }
+        changed = tenancy.update_tenant_profile(session, tenant, changes=changes, now=moment)
+        if changed:
+            record_audit(
+                session,
+                action=AuditAction.CUSTOMER_UPDATE,
+                context=context,
+                now=moment,
+                actor=actor,
+                entity_type=ENTITY_TENANT,
+                entity_id=tenant.public_id,
+                # ⚠️ 字段白名单：不要换成 dump 整行或请求体。
+                before_state=before,
+                after_state={
+                    "public_id": tenant.public_id,
+                    "company_name": tenant.company_name,
+                    "changed_fields": changed,
+                },
+            )
+        detail = _detail(session, tenant)
+    return detail
 
 
 def list_customers(
@@ -211,4 +264,5 @@ __all__ = [
     "get_customer",
     "list_customers",
     "list_projects",
+    "update_customer",
 ]

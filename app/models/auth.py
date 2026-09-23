@@ -141,6 +141,9 @@ class AuditAction(enum.StrEnum):
     # 按 §124「所有动作都有审计」补上，偏离记在 docs/TODO.md。
     CUSTOMER_CREATE = "CUSTOMER_CREATE"
     PROJECT_CREATE = "PROJECT_CREATE"
+    # AIH-TASK-009：写入方是 app/services/customers.py 的 update_customer，与客户行同一
+    # 事务。列是写死宽度的 VARCHAR、没有 CHECK，加值不需要迁移。
+    CUSTOMER_UPDATE = "CUSTOMER_UPDATE"
 
 
 class AuditLog(Base):
