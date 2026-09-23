@@ -128,7 +128,6 @@ profiles:
       - tests.process
       - lint.check
       - format.check
-      - tests.backend
 
   # 流程工具：scripts/ 下的检查脚本与它们的测试
   # ⚠️ 这个档案能改 policy.check / docs.check 自己的实现和审查判定行的解析脚本。CI 仍然全跑，
@@ -144,4 +143,3 @@ profiles:
       - tests.process
       - lint.check
       - format.check
-      - scripts.verdict_tests
