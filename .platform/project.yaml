@@ -92,3 +92,54 @@ contract_files:
   tasks: .platform/tasks.yaml
   approvals: .platform/approvals.yaml
   state_schema: .platform/state.schema.json
+
+# 提议档案（OpenClaw ACVDEV-TASK-028）
+#
+# 控制面推来一条任务提议后，运营者在 Telegram 发「采纳 <proposal_id> <档案名>」，Worker 就按这里
+# 由人写死的档案当场拼出任务契约并开跑 —— 不写 tasks.yaml。模型只写提议的标题、理由与验收标准，
+# **碰不到下面任何一个字段**：能改哪些路径、能跑哪些命令，只由这一段决定，也只能由运营者的 PR 改。
+#
+# - 以 `/` 结尾的是目录范围（其下任何文件）；不以 `/` 结尾的是精确路径。目录范围只在档案里有效，
+#   tasks.yaml 里的手写任务仍然只能写精确路径。
+# - 每个改动路径仍先过控制面的禁止路径检查：`.platform/`、`.git`、`.github/`、凭据形状的文件名
+#   无论档案怎么写都改不了；目录范围也不能指向 `.github`。
+# - 命令必须是 commands.yaml 里已有的 id。最多 8 个档案；**任何一个加载不了，整个菜单都不显示**。
+# - 数据库迁移「写迁移文件」是代码改动，在 backend 之内；「执行迁移」仍是 prohibited。
+profiles:
+  # 只动文档
+  docs:
+    allowed_change_paths:
+      - docs/
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+
+  # 后端功能：产品代码、它的测试、迁移文件与接口文档
+  backend:
+    allowed_change_paths:
+      - app/
+      - tests/backend/
+      - alembic/
+      - docs/
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+
+  # 流程工具：scripts/ 下的检查脚本与它们的测试
+  # ⚠️ 这个档案能改 policy.check / docs.check 自己的实现和审查判定行的解析脚本。CI 仍然全跑，
+  #    但评审时要看清「检查本身被改了什么」。
+  tooling:
+    allowed_change_paths:
+      - scripts/
+      - tests/
+      - docs/
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
