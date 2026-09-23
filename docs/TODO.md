@@ -1196,6 +1196,16 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
   `before_state` 恰好 `public_id`、`company_name` 两个键，`after_state` 再加 `changed_fields`，
   都不含 email、contact_name、phone 的值
 
+### AIH-TASK-010 —— 管理端手工调账：设计草稿（2026-09-23）
+
+上面的「管理员手工调账」**不勾**：本次 Worker run 只交付设计草稿 [design/AIH-TASK-010-admin-wallet-adjustment.md](design/AIH-TASK-010-admin-wallet-adjustment.md)（v1，`READY_FOR_REVIEW`），**没有实现代码**。这项改动碰钱包、账本、幂等与计费状态，按 [WORKFLOW §3](WORKFLOW.md) 要先拿到 `APPROVED: design v<N>` 才能写代码；Worker 在沙箱里开不了 Issue，所以只能先把正文落进仓库。
+
+- [x] 设计草稿：接口 `POST /api/v1/admin/customers/{customer_id}/wallet/adjustments`；带符号的字符串金额（最多 8 位小数，不舍入）；幂等键就是账本的 `reference_id`，重放 200、同键不同载荷 409；一个 `session_scope` 里提交账本、调账审计、计费状态跃迁；`post_transaction` 加 ip / user agent 两个可选参数
+- [x] 读代码时发现、写进设计 §4 的一处并发细节：MySQL 默认 REPEATABLE READ，同一个键并发提交时，锁内查重读的是旧快照，后到的请求会撞唯一约束。服务层要回滚后换一个新事务重试一次，才能得到确定的 200 / 409，而不是 500
+- [ ] 用设计正文开 design-gate Issue，跑设计审查，拿到批准后把设计文件换成批准版的逐字副本
+- [ ] 批准后实现（范围见设计 §11「实现范围」）、CI、审查、合并与部署
+- [ ] 部署后在测试客户上记一笔小额调账和一笔反向调账，核对余额、审计与 `verify_wallet`
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）
