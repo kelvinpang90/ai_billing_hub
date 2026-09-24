@@ -1214,8 +1214,8 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   旧快照，后到的请求会撞唯一约束；服务层回滚后换新事务重试一次，得到确定的 200 / 409 而不是 500
 - [x] 实现登记为 `AIH-TASK-011`（`.platform/tasks.yaml`）。009 / 010 已被采纳提议的 run 占用，不能复用
 - [x] AIH-TASK-011 实现：见下一节（Draft PR 交付）
-- [ ] AIH-TASK-011 的 CI、审查、合并与部署
-- [ ] 部署后在测试客户上记一笔小额调账和一笔反向调账，核对余额、审计与 `verify_wallet`
+- [x] AIH-TASK-011 的 CI、审查、合并与部署：见下一节
+- [x] 部署后在测试客户上记一笔小额调账和一笔反向调账，核对余额、审计与 `verify_wallet`：见下一节最后一条
 
 ### AIH-TASK-011 —— 管理端手工调账：账本、审计与计费状态同一事务（2026-09-24）
 
@@ -1269,8 +1269,21 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   **不加** gitleaks 白名单：放行全部 uuid 会让 uuid 格式的真密钥也漏过。gitleaks 逐个扫 PR 里的提交，Worker
   的原提交里旧值还在，往后补提交修不掉，所以 Worker 的 Draft PR #114 关闭不合并，改由一个只含一个提交的新 PR
   交付，由 Claude Code 审查后合并；run `10fe6c87` 在 Telegram 取消。实现内容与 #114 逐字相同，只差这两个值
-- [ ] Worker 的 `allowed_commands`、CI 全量（lint、format、pytest 含 MySQL 用例，一条都不 skip）
-- [ ] 审查、合并与部署；部署后核对见上一节最后一条
+- [x] Worker 的 `allowed_commands` 在 run `10fe6c87` 里全部零退出；CI 全量在 #115 上跑：`854 passed`、0 skipped
+  （MySQL 用例全跑），secret-scan 通过。frontend 两次撞上 Vitest 收尾时的 `window is not defined`（测试全过、
+  与本任务无关的偶发错误），重跑后通过
+- [x] 审查、合并与部署：Codex 第一轮 `REQUEST_CHANGES` —— 同一个键并发重放时，重放分支在
+  `post_transaction` 锁租户之前返回，响应里的 `billing_status` / `status_version` 可能是事务开头那次不加锁的旧读。
+  在服务层重放分支带共享锁重读租户修复（`29e6587`），补了能复现它的确定性用例（拿掉修复时失败）和 8 线程用例的
+  状态断言；复审 `VERDICT: APPROVE`。Squash 合并为 `64e2e08`，Deploy run 36009878022 成功
+- [x] **生产核对**（2026-09-24 14:20 UTC，验收夹具账号与夹具租户）：核对前夹具是 `SUSPENDED` / 0 /
+  钱包 `"0.00000000"` 版本 0；贷方 `"0.01"` 201，`ACTIVE` / 1，钱包序号 1；同一个键重放 200、`replayed=true`、
+  账本行 id 相同、状态 `ACTIVE` / 1；反向 `"-0.01"` 201，`SUSPENDED` / 2；读回详情余额 `"0.00000000"`、版本 2。
+  库内只读：`verify_wallet` 为空；账本 2 行，来源 `ADMIN_ADJUSTMENT`、都有 `created_by`；`WALLET_ADJUSTMENT_POSTED`
+  2 条（`ADMIN`，带 ip 与 user agent，重放没有多写）；`TENANT_BILLING_STATUS_CHANGED` 2 条（`SYSTEM`，
+  `BALANCE_POSITIVE` / `BALANCE_NON_POSITIVE`，不带 ip 与 user agent）；`tenant.billing_status_changed` 出站事件
+  2 条，`PENDING`（还没有投递 worker）。⚠️ 夹具租户因此有了两行账本和两次状态跃迁，公司名照旧带
+  `[TEST]` / `DO NOT BILL`，按客户或账本计数的基线要把它减掉
 
 ---
 

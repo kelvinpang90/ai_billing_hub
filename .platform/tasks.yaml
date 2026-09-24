@@ -516,7 +516,7 @@ tasks:
       Invariant 13、Gate 1、Gate 4 四条在 spec 里新增 REQ-* 编号（只新增段落，不改写任何既有句子），
       其余 11 条逐功能交付流程要求改标「不适用」并逐条给理由；同步追溯表、覆盖列的合法取值与校验脚本。
       纯可追溯性标注，spec 的规范性语义一个字不改，不碰业务代码、数据库、迁移、CI 配置与 .platform/。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 分档口径照抄本条登记的注释（Kelvin 2026-09-21 拍板）：Invariant 7、Invariant 13、Gate 1、Gate 4 四条新增 REQ-* 编号；DoD 1–8 与 DoD 13–15 共 11 条把覆盖列改为固定串「不适用」并逐条写明理由；4 + 11 = 15，处理完覆盖表里不得再有「缺口」行
@@ -584,7 +584,7 @@ tasks:
       里经 post_transaction 记一笔 ADMIN_ADJUSTMENT 账本、写 WALLET_ADJUSTMENT_POSTED 审计（补 ip 与 user agent），
       余额跨零时同一事务完成计费状态跃迁；幂等键即账本 reference_id，并发撞唯一约束时换新事务重试一次。
       不含查看流水、调账审批与限额、充值与支付、账户状态、低余额阈值配置、前端。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-010-admin-wallet-adjustment.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
