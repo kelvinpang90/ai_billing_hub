@@ -26,10 +26,10 @@ from app.core.database import create_session_factory
 from app.core.logging import JsonFormatter
 from app.core.tokens import issue_access_token, issue_pending_2fa_token
 from app.main import create_app
-from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
+from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.tenancy import Project, Tenant
-from app.models.wallet import Wallet
+from app.models.wallet import Wallet, WalletTransaction
 from app.services.auth import utc_now
 
 ADMIN_PREFIX = "/api/v1/admin"
@@ -53,7 +53,7 @@ PROJECT_FIELDS = {"id", "name", "description", "created_at", "updated_at"}
 PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
-# 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户。
+# 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的手工调账。
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -61,6 +61,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("PATCH", "/api/v1/admin/customers/{customer_id}"),
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"),
     ("GET", "/api/v1/admin/customers/{customer_id}/projects"),
+    ("POST", "/api/v1/admin/customers/{customer_id}/wallet/adjustments"),
 }
 
 # 鉴权用例给写接口的合法请求体：体不合法的话 FastAPI 在处理函数之前就回 422，
@@ -69,6 +70,12 @@ VALID_BODIES = {
     ("POST", "/api/v1/admin/customers"): {"company_name": "Probe", "email": "probe@example.com"},
     ("PATCH", "/api/v1/admin/customers/{customer_id}"): {"company_name": "Renamed"},
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"): {"name": "Probe"},
+    ("POST", "/api/v1/admin/customers/{customer_id}/wallet/adjustments"): {
+        "transaction_type": "ADJUSTMENT_CREDIT",
+        "amount": "20",
+        "reason": "Probe credit",
+        "idempotency_key": "00000000-0000-4000-8000-000000000000",
+    },
 }
 
 
@@ -81,7 +88,7 @@ def admin_routes(application: FastAPI) -> set[tuple[str, str]]:
     两条来源取并集。⚠️ 本仓库的 FastAPI 延迟挂载子路由，`app.routes` 顶层只有
     `_IncludedRouter` 壳子（见 test_password_reset_link.py），所以逐层往里找；
     OpenAPI 文档是另一条来源，但它看不见 `include_in_schema=False` 的路由。
-    两条都落空时，下面「恰好是这六个」那条用例会红。
+    两条都落空时，下面「恰好是这七个」那条用例会红。
     """
     found = {
         (method.upper(), path)
@@ -213,6 +220,15 @@ def row_counts(application: FastAPI) -> dict[str, int]:
 NO_ROWS = {"tenants": 0, "projects": 0, "wallets": 0, "audit_logs": 0}
 
 
+def money_counts(application: FastAPI) -> dict[str, int]:
+    """Ledger rows and outbox events: what a wallet adjustment would add."""
+    with application.state.session_factory() as session:
+        return {
+            model.__tablename__: count_rows(session, model)
+            for model in (WalletTransaction, DomainOutbox)
+        }
+
+
 def audits(application: FastAPI, action: AuditAction) -> list[AuditLog]:
     statement = select(AuditLog).where(AuditLog.action == action).order_by(AuditLog.id)
     with application.state.session_factory() as session:
@@ -303,7 +319,7 @@ def test_blank_optional_fields_are_stored_as_null(client, admin) -> None:
 # --- 鉴权 -----------------------------------------------------------------------
 
 
-def test_the_admin_routes_are_exactly_the_expected_six() -> None:
+def test_the_admin_routes_are_exactly_the_expected_seven() -> None:
     """既防枚举落空（下面的参数化用例一条都不跑也是绿的），也逼新增接口补进来。"""
     assert set(ADMIN_ROUTES) == EXPECTED_ADMIN_ROUTES
 
@@ -319,6 +335,7 @@ def test_every_admin_route_refuses_non_admins(
     url = path.replace("{customer_id}", customer_id)
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
+    money_before = money_counts(app)
 
     response = client.request(method, url, json=VALID_BODIES.get((method, path)), headers=headers)
 
@@ -327,6 +344,8 @@ def test_every_admin_route_refuses_non_admins(
     # 行数看不出 UPDATE，所以客户行逐列再比一次（编辑接口漏了鉴权会在这里红）。
     assert row_counts(app) == before
     assert stored_tenant(app, customer_id) == stored
+    # 调账接口漏了鉴权会在这里红：账本行与出站事件都不许多（AIH-TASK-011）。
+    assert money_counts(app) == money_before
 
 
 @pytest.mark.parametrize(

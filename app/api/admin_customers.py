@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request, status
+from fastapi import APIRouter, Query, Request, Response, status
 
 from app.api.auth import request_context, require_admin, require_session_factory
 from app.core.logging import current_request_id
@@ -34,7 +34,8 @@ from app.schemas.customers import (
     UpdateCustomerRequest,
 )
 from app.schemas.envelope import ApiResponse, success
-from app.services import customers
+from app.schemas.wallet_adjustments import AdjustmentView, PostAdjustmentRequest
+from app.services import customers, wallet_adjustments
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -138,3 +139,30 @@ def list_projects(
         page_size=page_size,
     )
     return success(listing, request_id=current_request_id())
+
+
+# 手工调账（AIH-TASK-011，设计闸门 #111 v1）。首次 201，同一个幂等键同一载荷的重放 200、
+# `replayed: true`。⚠️ 这里刻意不写 docstring：函数体的第一条语句必须就是 `require_admin`，
+# `tests/backend/test_wallet_adjustment_api.py` 读源码钉住这一条。
+@router.post(
+    "/customers/{customer_id}/wallet/adjustments",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[AdjustmentView],
+)
+def post_wallet_adjustment(
+    request: Request, response: Response, customer_id: str, payload: PostAdjustmentRequest
+) -> ApiResponse[AdjustmentView]:
+    admin = require_admin(request)
+    adjustment = wallet_adjustments.post_adjustment(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        transaction_type=payload.transaction_type,
+        amount=payload.decimal_amount(),
+        reason=payload.reason,
+        idempotency_key=payload.idempotency_key,
+        context=request_context(request),
+    )
+    if adjustment.replayed:
+        response.status_code = status.HTTP_200_OK
+    return success(adjustment, request_id=current_request_id())

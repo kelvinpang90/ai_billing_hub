@@ -6,6 +6,7 @@
 目前收录：
 
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
+- [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -235,5 +236,111 @@
 
 ### 不在本批接口里
 
-账户状态 `account_status`、低余额阈值配置、管理员调账、API 凭据、出站 webhook、删除或停用
-客户与项目（财务记录永久保留）。
+账户状态 `account_status`、低余额阈值配置、API 凭据、出站 webhook、删除或停用
+客户与项目（财务记录永久保留）。管理员调账见下一节。
+
+---
+
+## 管理端手工调账
+
+设计依据：设计闸门 #111 `APPROVED: design v1`，全文见 [design/AIH-TASK-010-admin-wallet-adjustment.md](design/AIH-TASK-010-admin-wallet-adjustment.md)（spec §8、§60、§124）。实现登记为 AIH-TASK-011。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `POST /api/v1/admin/customers/{customer_id}/wallet/adjustments` | 201 首次入账 / 200 重放，调账对象 | 401 / 403 / 404 / 409 / 422 / 503 |
+
+只有 ADMIN 能调。`{customer_id}` 是客户的 `id`（`public_id`）。本接口专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | 路径里的客户不存在 | 否 |
+| 409 | `ADJUSTMENT_CONFLICT` | 这个幂等键已经记过，但客户、类型或金额不同 | 否 |
+| 422 | `VALIDATION_ERROR` | 请求体不合法（见下表）；只列字段名，不回显值 | 否 |
+| 422 | `BALANCE_OUT_OF_RANGE` | 这一笔之后余额超出 `DECIMAL(20,8)`（整数部分超过 12 位） | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误，包括客户没有钱包（数据不一致）、锁等待超时与死锁 | 整个事务回滚 |
+
+### 请求体
+
+多余字段一律 422：请求体不能带 `customer_id`、`tenant_id`、`created_by`、`balance`、`metadata`
+或任何 id。客户只来自路径，操作者只来自访问令牌。
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `transaction_type` | 是 | `ADJUSTMENT_CREDIT`、`BONUS`（贷方，金额为正）；`ADJUSTMENT_DEBIT`、`REFUND_ADJUSTMENT`（借方，金额为负）。`TOPUP`、`AI_USAGE`、`SYSTEM_CORRECTION`、rebill 等其他类型都是 422 |
+| `amount` | 是 | **JSON 字符串**，带符号，就是记进账本的那个数。格式 `^-?[0-9]{1,12}(\.[0-9]{1,8})?$`：整数部分最多 12 位，小数最多 8 位。不能是 0（`"-0.00000000"` 也是 0）。符号必须与类型一致。JSON 数字、指数写法、前后空白、`+` 号都是 422 |
+| `reason` | 是 | 去掉首尾空白后长度 1–255，存的是去掉首尾空白后的值（账本的 `description`） |
+| `idempotency_key` | 是 | 小写 uuid 的 36 字符串，例如 `"b7a1c2d3-0000-4000-8000-000000000000"`；大写、没有连字符、带花括号都是 422 |
+
+```json
+{
+  "transaction_type": "ADJUSTMENT_CREDIT",
+  "amount": "20",
+  "reason": "Goodwill credit for outage 2026-09-20",
+  "idempotency_key": "b7a1c2d3-0000-4000-8000-000000000000"
+}
+```
+
+- ⚠️ **超过 8 位小数一律 422，不舍入。**`"0.000000001"` 是 422，`"0.00000001"` 照常入账。
+- ⚠️ **原因只写业务说明，不写个人数据**：不写客户的联系人、电话、邮箱等。原因进账本与审计，
+  二者都永久保留、不可修改；也不要写对话内容。服务端不把原因写进应用日志。
+- 撤销一笔调账就是再记一笔反向调账，用新的幂等键。没有删除或修改调账的接口。
+
+### 幂等
+
+- 幂等键由调用方（前端）每次打开调账表单时生成一个；双击或超时重发都带**同一个键**。
+- 同一个键、同一个客户、同一类型、同一金额再提交：**200**，`replayed: true`，`data` 里账本行的字段
+  （`id` 到 `created_at`）与第一次逐字相同，不再写任何东西，也不再写审计。
+- 同一个键、同一财务效果但**原因不同**，也按重放处理，响应里的 `reason` 是第一次存下的那一份。
+- 同一个键配不同的客户、类型或金额：409 `ADJUSTMENT_CONFLICT`，不写任何东西；响应里没有另一笔的
+  任何字段。
+- 500 之后可以带同一个键重发：没入账就正常入账，其实已入账就走重放。
+
+### 调账对象
+
+成功：首次 **201**，重放 **200**，`data` 是：
+
+```json
+{
+  "id": "5d7e2f0a-1b3c-4d5e-8f90-a1b2c3d4e5f6",
+  "customer_id": "3f0e6c1a-8d4b-4c6e-9a51-2b7f0d9c4e11",
+  "transaction_type": "ADJUSTMENT_CREDIT",
+  "amount": "20.00000000",
+  "balance_before": "-5.00000000",
+  "balance_after": "15.00000000",
+  "wallet_sequence": 4,
+  "reason": "Goodwill credit for outage 2026-09-20",
+  "idempotency_key": "b7a1c2d3-0000-4000-8000-000000000000",
+  "created_at": "2026-09-23T08:30:00",
+  "replayed": false,
+  "billing_status": "ACTIVE",
+  "status_version": 3
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 账本行的 `public_id` |
+| `customer_id` | 客户的 `public_id` |
+| `amount` / `balance_before` / `balance_after` | 8 位小数的字符串；`amount` 带符号 |
+| `wallet_sequence` | 这一笔在钱包账本里的序号，从 1 开始 |
+| `reason` / `idempotency_key` | 库里存的原因与幂等键 |
+| `created_at` | 记账时刻（UTC，精确到秒）；调账按这个时刻落入当前开放期间 |
+| `replayed` | `false` 为这次入账，`true` 为重放 |
+| `billing_status` / `status_version` | **响应时**客户的当前计费状态与版本；重放时可能与第一次不同（中间有别的记账） |
+
+响应里只有这些字段：不含内部自增 id、`created_by`、`metadata`、低余额阈值，也不含任何成本或毛利。
+
+### 同一事务里写下的东西
+
+要么全在、要么全不在：
+
+- 一行账本（来源 `ADMIN_ADJUSTMENT`，`reference_id` 就是幂等键，`created_by` 是这位管理员，
+  `metadata` 为空）。钱包的余额与版本由数据库随账本推进，不单独改钱包；
+- 一条 `WALLET_ADJUSTMENT_POSTED` 审计：操作者、`ADMIN` 角色、前后余额、原因、ip、user agent
+  （截到 512 字符）；
+- 这一笔让余额从 ≤ 0 变成 > 0（或反过来）时，还有：客户的 `billing_status` 跃迁、`status_version` +1、
+  一条 `TENANT_BILLING_STATUS_CHANGED` 审计（操作者是系统，不带 ip 与 user agent）、一条
+  `tenant.billing_status_changed` 出站事件。余额正好为 0 也是 `SUSPENDED`；
+- 跌破客户的低余额阈值时，还有一条 `tenant.low_balance` 出站事件。
+
+同一个客户的调账与其他记账串行执行。

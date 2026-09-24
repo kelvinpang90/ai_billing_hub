@@ -90,6 +90,8 @@ _MONEY_LIMIT = Decimal(10) ** (MONEY_PRECISION - MONEY_SCALE)
 _REFERENCE_ID_LENGTH = 64
 _DESCRIPTION_LENGTH = 255
 _ACTOR_ROLE_LENGTH = 32
+# audit_logs.user_agent 的列宽，与 `record_audit` 同样截断。
+_USER_AGENT_LENGTH = 512
 
 
 class LedgerError(Exception):
@@ -334,11 +336,16 @@ def post_transaction(
     description: str | None = None,
     metadata: Mapping[str, Any] | None = None,
     actor_role: str | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> PostResult:
     """Append one ledger row and everything that must commit with it. Flushes, never commits.
 
     同一次 flush 里：账本行（触发器随之推进钱包）；调账与系统更正的审计；计费状态
     跃迁（租户、审计、`tenant.billing_status_changed`）；低余额事件。
+
+    `ip_address` / `user_agent` 只进 `WALLET_ADJUSTMENT_POSTED` 审计（AIH-TASK-011）。
+    计费状态跃迁的审计不带它们：那一条的操作者是系统，不是发起请求的人。
 
     同一来源 `(reference_type, reference_id)` 已记过时：钱包、类型、金额都一致就
     返回既有行（`replayed=True`，什么都不写），否则 `LedgerConflict`。
@@ -393,7 +400,10 @@ def post_transaction(
     )
     session.add(row)
     if source in ADJUSTMENT_REFERENCE_TYPES:
-        session.add(_adjustment_audit(row, actor_role=actor_role))
+        audit = _adjustment_audit(
+            row, actor_role=actor_role, ip_address=ip_address, user_agent=user_agent
+        )
+        session.add(audit)
     _apply_billing_status(session, tenant, row)
     if crosses_low_balance(tenant.low_balance_threshold, before, after):
         payload = {
@@ -551,7 +561,13 @@ def _apply_billing_status(session: Session, tenant: Tenant, row: WalletTransacti
     session.add(_outbox_event(EVENT_BILLING_STATUS_CHANGED, tenant, payload, row.created_at))
 
 
-def _adjustment_audit(row: WalletTransaction, *, actor_role: str | None) -> AuditLog:
+def _adjustment_audit(
+    row: WalletTransaction,
+    *,
+    actor_role: str | None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> AuditLog:
     # spec §60：操作者、前后余额、原因、账本行。⚠️ 不写 metadata_json。
     return AuditLog(
         actor_user_id=row.created_by,
@@ -561,6 +577,8 @@ def _adjustment_audit(row: WalletTransaction, *, actor_role: str | None) -> Audi
         entity_id=row.public_id,
         before_state=_json({"balance": _money_text(row.balance_before)}),
         after_state=_json({"balance": _money_text(row.balance_after)}),
+        ip_address=ip_address,
+        user_agent=user_agent[:_USER_AGENT_LENGTH] if user_agent else None,
         reason=row.description,
         created_at=row.created_at,
     )

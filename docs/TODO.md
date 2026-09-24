@@ -1049,7 +1049,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] 管理端客户管理
 - [ ] Wallet
 - [ ] 不可变钱包账本
-- [ ] 管理员手工调账
+- [x] 管理员手工调账 —— AIH-TASK-011，见下面「AIH-TASK-011」一节；这个勾随 PR 合并才生效，CI 不全绿就不合并
 - [ ] API 凭据（加密存储、版本化、可轮换）
 - [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节
 - [ ] 审计日志
@@ -1198,7 +1198,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 
 ### AIH-TASK-010 / AIH-TASK-011 —— 管理端手工调账：设计过闸门，实现另行登记（2026-09-24）
 
-上面的「管理员手工调账」**不勾**：到这里只有批准的设计，没有实现代码。
+本节只记设计过闸门这一步；实现见下一节「AIH-TASK-011」。
 
 - AIH-TASK-010 是 OpenClaw 采纳提议的 run（`c73076c4`，Draft PR #110）。采纳时的契约要求直接实现，
   但调账碰钱包、账本、幂等与计费状态，按 [WORKFLOW §3](WORKFLOW.md) 要先过设计闸门。Worker 的实现会话
@@ -1212,8 +1212,68 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [x] 草稿里写进设计 §4 的并发细节：MySQL 默认 REPEATABLE READ，同一个键并发提交时锁内查重读的是
   旧快照，后到的请求会撞唯一约束；服务层回滚后换新事务重试一次，得到确定的 200 / 409 而不是 500
 - [x] 实现登记为 `AIH-TASK-011`（`.platform/tasks.yaml`）。009 / 010 已被采纳提议的 run 占用，不能复用
-- [ ] AIH-TASK-011 实现、CI、审查、合并与部署（未开始）
+- [x] AIH-TASK-011 实现：见下一节（CI、审查、合并与部署的状态也记在那里）
 - [ ] 部署后在测试客户上记一笔小额调账和一笔反向调账，核对余额、审计与 `verify_wallet`
+
+### AIH-TASK-011 —— 管理端手工调账：账本、审计与计费状态同一事务（2026-09-24）
+
+实现依据是设计闸门 #111 已批准的 v1：[design/AIH-TASK-010-admin-wallet-adjustment.md](design/AIH-TASK-010-admin-wallet-adjustment.md)；
+接口契约记在 [api.md](api.md)。上面 Phase 1 的「管理员手工调账」在本 PR 里勾上，随合并生效（设计 §11 第 10 条写的是
+「CI 全绿并合并时勾上」，任务契约要求本 PR 勾上，两者在「CI 不绿就不合并」下一致）。不含：查看流水、调账审批与限额、
+充值与支付、`SYSTEM_CORRECTION`、`account_status`、低余额阈值配置、前端。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `app/repositories/wallet.py`：`post_transaction` 只加两个默认 `None` 的关键字参数 `ip_address`、`user_agent`，
+    只传给 `_adjustment_audit`，写进 `WALLET_ADJUSTMENT_POSTED` 审计（`user_agent` 截到 512，与 `record_audit`
+    一致）。计费状态跃迁的审计不带这两项。不传它们的调用方行为不变
+  - `app/schemas/wallet_adjustments.py`：请求模型 `extra="forbid"`，四个字段；`amount` 用 `Strict()` 只收 JSON
+    字符串，正则校验后 `Decimal(str)`，非零、符号与类型一致；响应白名单模型 `AdjustmentView`，金额先 quantize 再
+    `format(value, "f")`（沿用 `money_text`）
+  - `app/services/wallet_adjustments.py`：`post_adjustment` 一个 `session_scope`；按路径 `public_id` 不加锁读租户
+    （404 `CUSTOMER_NOT_FOUND`），调 `post_transaction`（来源 `ADMIN_ADJUSTMENT`、`reference_id` = 幂等键、
+    `created_by` = 管理员、`actor_role` 取数据库角色、带 ip 与 user agent）。只在 `IntegrityError` 时整个事务
+    回滚、换新事务重试一次，第二次仍失败原样抛出；`OperationalError` 不重试。错误映射：`LedgerConflict` → 409
+    `ADJUSTMENT_CONFLICT`；`InvalidAmount("BALANCE_OUT_OF_RANGE")` → 422 `BALANCE_OUT_OF_RANGE`；其余
+    `InvalidAmount` / `InvalidTransaction` → 422 `VALIDATION_ERROR`（消息只有问题码）；`WalletNotFound` 原样抛出
+    （500）。不写日志，没有直接改钱包的语句
+  - `app/api/admin_customers.py`：`POST /api/v1/admin/customers/{customer_id}/wallet/adjustments`，函数体第一条
+    语句是 `require_admin(request)`；首次 201，重放把状态码改成 200
+  - 测试：`tests/backend/test_admin_customers_api.py` 把本接口加进 `EXPECTED_ADMIN_ROUTES` 与 `VALID_BODIES`，
+    鉴权用例另断言 `wallet_transactions` 与 `domain_outbox` 行数不变（`tenants`、`audit_logs` 原本就在比）。
+    `tests/backend/test_wallet_adjustment_api.py`（SQLite）：正常路径与字段白名单、四种类型各带正确符号、
+    user agent 截断、处理函数首条语句（AST）、类型白名单与 `REFERENCE_TYPE_FOR` 一致、原因边界、金额精度与格式、
+    类型与符号、多余字段、幂等键格式、重放、同键不同载荷与跨客户 409、404、没有钱包 500、503、日志里没有原因文本。
+    `tests/backend/test_wallet_adjustment_service.py`：审计失败（flush 时失败与直接抛异常两种）与提交失败的回滚在
+    SQLite 与 MySQL 上各跑一次；唯一约束兜底只重试一次、第二次原样抛出、`OperationalError` 不重试、错误映射
+    （SQLite）；服务层源码里没有 `UPDATE wallets`、不导入 `update` / `Wallet`（INV-4）；真 MySQL 上：+20 / −5.12345678 后钱包 14.87654322、版本 2、`verify_wallet` 为空，跨零恢复，
+    余额正好到 0 暂停，余额超出范围，8 线程并发同键。`tests/backend/test_wallet_repository.py`：ip 与 user agent
+    进调账审计、跃迁审计不带、不传时为空
+  - 文档：[api.md](api.md) 新增本接口契约（含「原因只写业务说明、不写个人数据」），并从「不在本批接口里」删去
+    管理员调账
+- [x] **设计没写死、由实现定的细节**（审查时请看这几条）：
+  - 金额正则写成 `[0-9]` 而不是设计里的 `\d`：`\d` 还匹配全角与其他文字的数字，`Decimal()` 也认它们；
+    用例里有一条阿拉伯-印度数字的 422
+  - 金额为 0、符号与类型不符的 422 挂在 `amount` 字段上（`message` 里列的是 `body.amount`）；类型本身不合法时
+    只报 `transaction_type`
+  - 处理函数不写 docstring，改成函数上方的注释：docstring 在 AST 里也是一条语句，不写它，「第一条语句就是
+    `require_admin`」才没有歧义
+  - 重试时沿用第一次的 `now`：两次尝试属于同一个请求
+  - `BALANCE_OUT_OF_RANGE` 的判定靠 `InvalidAmount` 的消息等于问题码 `BALANCE_OUT_OF_RANGE`（repository 的
+    约定：异常消息只是问题码）
+  - 路由枚举用例的名字从「expected_six」改为「expected_seven」
+- [x] **验证程度**：
+  - ⚠️ 编写本分支的会话**没有命令执行工具**，ruff、pytest、`check_docs.py`、`check_repo_policy.py` 都没有跑过。
+    格式与导入顺序照 ruff 的规则手写（行宽按显示宽度算，中文字符算 2）。`allowed_commands` 由 Worker 之后自己跑，
+    结果不记在本条
+  - `tests.backend` 在 Worker 里是清空环境，MySQL 用例（`test_wallet_repository.py` 整个文件、
+    `test_wallet_adjustment_service.py` 的 MySQL 一半）必然 skip，**skipped 不是 passed**，以 CI 为准
+  - 下面几条前提写代码时没有实测，CI 上如果红，先查这些：① FastAPI 注入的 `Response` 上改了 `status_code`，
+    路由的默认 201 会被它覆盖；② TestClient 的对端地址是 `"testclient"`；③ MySQL 上审计行 `created_at` 为 NULL
+    报 1048，pymysql 把它归为 `IntegrityError`；④ 并发同键时后到的请求撞的是唯一约束（1062），不是触发器的 45000
+    —— 它是在钱包锁内按加锁读拿到的最新余额与版本，所以过得了 BEFORE INSERT 触发器
+- [ ] Worker 跑 `allowed_commands` 全部零退出（未记录；Worker 里的 skipped 不是 passed）
+- [ ] CI 全量运行：lint、format、pytest 含 MySQL 用例，一条都不 skip（未发生）
+- [ ] 审查、Kelvin 合并与部署（未发生）
 
 ---
 

@@ -1038,6 +1038,53 @@ def test_a_system_correction_writes_its_audit_without_an_actor(factory) -> None:
     assert state(factory, tenant_id)[0] == Decimal("7")
 
 
+def test_the_adjustment_audit_carries_the_callers_ip_and_user_agent(factory) -> None:
+    """AIH-TASK-011：ip 与 user agent 只进调账审计（user agent 截到 512 字符）；
+    同一笔引起的计费状态跃迁，操作者是系统，它的审计不带这两项。"""
+    tenant_id = make_tenant(factory)
+    admin_id = make_admin(factory)
+    public_id = public_id_of(factory, tenant_id)
+
+    posted = post(
+        factory,
+        tenant_id,
+        TransactionType.ADJUSTMENT_CREDIT,
+        "25",
+        created_by=admin_id,
+        description="Goodwill credit after outage",
+        actor_role="ADMIN",
+        ip_address="203.0.113.7",
+        user_agent="x" * 600,
+    )
+
+    [audit] = audits(factory, AuditAction.WALLET_ADJUSTMENT_POSTED)
+    assert audit.entity_id == posted.transaction.public_id
+    assert (audit.ip_address, audit.user_agent) == ("203.0.113.7", "x" * 512)
+    # 余额 0 → 25 跨零：同一笔还写了一条跃迁审计。
+    [transition] = status_audits(factory, public_id)
+    assert transition.reason == REASON_BALANCE_POSITIVE
+    assert (transition.ip_address, transition.user_agent) == (None, None)
+
+
+def test_without_ip_and_user_agent_the_adjustment_audit_leaves_them_empty(factory) -> None:
+    """两个参数默认 None：不传它们的调用方行为不变。"""
+    tenant_id = make_tenant(factory)
+    admin_id = make_admin(factory)
+
+    post(
+        factory,
+        tenant_id,
+        TransactionType.ADJUSTMENT_CREDIT,
+        "25",
+        created_by=admin_id,
+        description="Goodwill credit after outage",
+        actor_role="ADMIN",
+    )
+
+    [audit] = audits(factory, AuditAction.WALLET_ADJUSTMENT_POSTED)
+    assert (audit.ip_address, audit.user_agent) == (None, None)
+
+
 # --- 计费状态（spec §7 第 8–11 条） --------------------------------------------------
 
 
