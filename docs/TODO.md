@@ -1262,6 +1262,11 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - SQLite 把 `Numeric` 当浮点数存，20 位有效数字存不下，所以 12 位整数的边界金额只在 MySQL 上用
     （余额超出范围那条）；SQLite 上的接口用例每个客户至多成功记一笔
   - `ip_address` 来自 `request_context`，与其他管理端接口一样只在可信代理后面才采信 `X-Forwarded-For`
+- [x] **Worker 提交之后的一处修改**（Claude Code，Kelvin 选定的方案）：CI 的 secret-scan 把 [api.md](api.md)
+  调账响应示例里的 `idempotency_key`（一个随手编的高熵 uuid）判成 `generic-api-key`，是误报。改成低熵占位值
+  `00000000-0000-4000-8000-000000000000`，与 api.md 其他示例同一写法；**不加** gitleaks 白名单（放行全部 uuid
+  会让 uuid 格式的真密钥也漏过）。head 因此不再是 Worker 评审过的那个提交，改由 Claude Code 审查后合并，
+  run `10fe6c87` 按惯例结算为 `failed:merge_sha_mismatch`，只影响记录
 - [ ] Worker 的 `allowed_commands`、CI 全量（lint、format、pytest 含 MySQL 用例，一条都不 skip）
 - [ ] 审查、合并与部署；部署后核对见上一节最后一条
 

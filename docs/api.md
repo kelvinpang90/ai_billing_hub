@@ -286,7 +286,7 @@
   "balance_after": "15.00000000",
   "wallet_sequence": 4,
   "reason": "Goodwill credit for outage 2026-09-20",
-  "idempotency_key": "b7a1c3d2-6e5f-4a8b-9c0d-1e2f3a4b5c6d",
+  "idempotency_key": "00000000-0000-4000-8000-000000000000",
   "created_at": "2026-09-23T08:30:00",
   "replayed": false,
   "billing_status": "ACTIVE",
