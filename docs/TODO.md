@@ -1196,6 +1196,25 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
   `before_state` 恰好 `public_id`、`company_name` 两个键，`after_state` 再加 `changed_fields`，
   都不含 email、contact_name、phone 的值
 
+### AIH-TASK-010 / AIH-TASK-011 —— 管理端手工调账：设计过闸门，实现另行登记（2026-09-24）
+
+上面的「管理员手工调账」**不勾**：到这里只有批准的设计，没有实现代码。
+
+- AIH-TASK-010 是 OpenClaw 采纳提议的 run（`c73076c4`，Draft PR #110）。采纳时的契约要求直接实现，
+  但调账碰钱包、账本、幂等与计费状态，按 [WORKFLOW §3](WORKFLOW.md) 要先过设计闸门。Worker 的实现会话
+  照规矩只写了设计草稿 v1，Worker 评审再按「逐条满足验收标准」判 `REQUEST_CHANGES`，run 结算为
+  `failed:review_changes_requested`。这是采纳流程的缺口（碰钱的提议被开成了直接实现的契约），不是
+  实现或评审出错；要在控制面另开任务补。
+- [x] 设计闸门 #111：正文取自 #110 的草稿 v1，Codex 一轮 `APPROVED: design v1`，无阻断项。批准版逐字
+  放在 [design/AIH-TASK-010-admin-wallet-adjustment.md](design/AIH-TASK-010-admin-wallet-adjustment.md)，
+  #110 的内容并入本次登记，#110 关闭不合并
+- [x] `amount` 带符号（设计 §9 第一行）：Kelvin 2026-09-24 确认，不改契约
+- [x] 草稿里写进设计 §4 的并发细节：MySQL 默认 REPEATABLE READ，同一个键并发提交时锁内查重读的是
+  旧快照，后到的请求会撞唯一约束；服务层回滚后换新事务重试一次，得到确定的 200 / 409 而不是 500
+- [x] 实现登记为 `AIH-TASK-011`（`.platform/tasks.yaml`）。009 / 010 已被采纳提议的 run 占用，不能复用
+- [ ] AIH-TASK-011 实现、CI、审查、合并与部署（未开始）
+- [ ] 部署后在测试客户上记一笔小额调账和一笔反向调账，核对余额、审计与 `verify_wallet`
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）
