@@ -1010,6 +1010,36 @@ def test_an_adjustment_and_its_audit_commit_or_vanish_together(factory) -> None:
     assert json.loads(audit.before_state or "{}") == {"balance": "0.00000000"}
     assert json.loads(audit.after_state or "{}") == {"balance": "25.00000000"}
     assert audit.created_at == NOW
+    # 不传 ip / user agent 的调用方（AIH-TASK-011 之前的写法）行为不变。
+    assert (audit.ip_address, audit.user_agent) == (None, None)
+
+
+def test_the_adjustment_audit_carries_the_callers_ip_and_user_agent(factory) -> None:
+    """AIH-TASK-011：两项只进调账审计，user agent 截到列宽 512；跃迁审计不带它们。"""
+    tenant_id = make_tenant(factory)
+    admin_id = make_admin(factory)
+    public_id = public_id_of(factory, tenant_id)
+
+    posted = post(
+        factory,
+        tenant_id,
+        TransactionType.ADJUSTMENT_CREDIT,
+        "25",
+        created_by=admin_id,
+        description="Goodwill credit after outage",
+        actor_role="ADMIN",
+        ip_address="203.0.113.7",
+        user_agent="A" * 600,
+    )
+
+    [audit] = audits(factory, AuditAction.WALLET_ADJUSTMENT_POSTED)
+    assert audit.entity_id == posted.transaction.public_id
+    assert audit.ip_address == "203.0.113.7"
+    assert audit.user_agent == "A" * 512
+    # 0 → 25 跨零：跃迁审计的操作者是系统，不是发起这次请求的人。
+    [transition] = status_audits(factory, public_id)
+    assert (transition.actor_user_id, transition.actor_role) == (None, "SYSTEM")
+    assert (transition.ip_address, transition.user_agent) == (None, None)
 
 
 def test_a_system_correction_writes_its_audit_without_an_actor(factory) -> None:

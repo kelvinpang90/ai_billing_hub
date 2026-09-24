@@ -10,14 +10,15 @@
 ⚠️ 请求体与查询参数由 FastAPI 在处理函数**之前**校验，所以没带令牌、参数又不合法的
 请求拿到的是 422 而不是 401。422 只列字段名、不回显值（app/core/errors.py）。
 
-这一层不记请求体，也不记 `email` / `contact_name` / `phone`（REQ-PRIV-001）。
+这一层不记请求体，也不记 `email` / `contact_name` / `phone`（REQ-PRIV-001），调账的
+原因文本同样不记（设计闸门 #111 v1 §6）。
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request, status
+from fastapi import APIRouter, Query, Request, Response, status
 
 from app.api.auth import request_context, require_admin, require_session_factory
 from app.core.logging import current_request_id
@@ -34,7 +35,8 @@ from app.schemas.customers import (
     UpdateCustomerRequest,
 )
 from app.schemas.envelope import ApiResponse, success
-from app.services import customers
+from app.schemas.wallet_adjustments import AdjustmentView, CreateAdjustmentRequest
+from app.services import customers, wallet_adjustments
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -138,3 +140,32 @@ def list_projects(
         page_size=page_size,
     )
     return success(listing, request_id=current_request_id())
+
+
+@router.post(
+    "/customers/{customer_id}/wallet/adjustments",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[AdjustmentView],
+)
+def post_wallet_adjustment(
+    request: Request, response: Response, customer_id: str, payload: CreateAdjustmentRequest
+) -> ApiResponse[AdjustmentView]:
+    """Post a manual adjustment: 201 the first time, 200 when the key is replayed.
+
+    客户只来自路径，操作者只来自令牌（设计闸门 #111 v1 §2）。
+    """
+    admin = require_admin(request)
+    adjustment = wallet_adjustments.post_adjustment(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        transaction_type=payload.transaction_type,
+        amount=payload.amount,
+        reason=payload.reason,
+        idempotency_key=payload.idempotency_key,
+        context=request_context(request),
+    )
+    if adjustment.replayed:
+        # 重放不入账：200 加 `replayed: true`，调用方看得出这次没有新的财务效果。
+        response.status_code = status.HTTP_200_OK
+    return success(adjustment, request_id=current_request_id())
