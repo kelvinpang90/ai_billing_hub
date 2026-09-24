@@ -1049,7 +1049,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] 管理端客户管理
 - [ ] Wallet
 - [ ] 不可变钱包账本
-- [ ] 管理员手工调账
+- [x] 管理员手工调账（AIH-TASK-011，见下面的记录段；随合并生效）
 - [ ] API 凭据（加密存储、版本化、可轮换）
 - [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节
 - [ ] 审计日志
@@ -1198,7 +1198,8 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 
 ### AIH-TASK-010 / AIH-TASK-011 —— 管理端手工调账：设计过闸门，实现另行登记（2026-09-24）
 
-上面的「管理员手工调账」**不勾**：到这里只有批准的设计，没有实现代码。
+（登记时）上面的「管理员手工调账」不勾：到这里只有批准的设计，没有实现代码。实现见下一节
+AIH-TASK-011 的记录段，勾选随那次合并生效。
 
 - AIH-TASK-010 是 OpenClaw 采纳提议的 run（`c73076c4`，Draft PR #110）。采纳时的契约要求直接实现，
   但调账碰钱包、账本、幂等与计费状态，按 [WORKFLOW §3](WORKFLOW.md) 要先过设计闸门。Worker 的实现会话
@@ -1212,8 +1213,57 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [x] 草稿里写进设计 §4 的并发细节：MySQL 默认 REPEATABLE READ，同一个键并发提交时锁内查重读的是
   旧快照，后到的请求会撞唯一约束；服务层回滚后换新事务重试一次，得到确定的 200 / 409 而不是 500
 - [x] 实现登记为 `AIH-TASK-011`（`.platform/tasks.yaml`）。009 / 010 已被采纳提议的 run 占用，不能复用
-- [ ] AIH-TASK-011 实现、CI、审查、合并与部署（未开始）
+- [x] AIH-TASK-011 实现：见下一节（Draft PR 交付）
+- [ ] AIH-TASK-011 的 CI、审查、合并与部署
 - [ ] 部署后在测试客户上记一笔小额调账和一笔反向调账，核对余额、审计与 `verify_wallet`
+
+### AIH-TASK-011 —— 管理端手工调账：账本、审计与计费状态同一事务（2026-09-24）
+
+实现依据是设计闸门 #111 已批准的 v1：[design/AIH-TASK-010-admin-wallet-adjustment.md](design/AIH-TASK-010-admin-wallet-adjustment.md)；
+接口契约记在 [api.md](api.md) 的「管理端手工调账」。上面 Phase 1 的「管理员手工调账」在本分支勾上：
+这一处改动只有合并进主干才生效，而合并要求 CI 全绿，与设计 §11 第 10 条「CI 全绿并合并时勾上」一致。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `app/repositories/wallet.py`：`post_transaction` 只加 `ip_address`、`user_agent` 两个默认 `None` 的关键字参数，
+    只传给 `_adjustment_audit`，写进 `WALLET_ADJUSTMENT_POSTED` 审计（`user_agent` 截到 512，与 `record_audit`
+    一致）。计费状态跃迁的审计不带这两项。没有新的 `UPDATE wallets`
+  - `app/schemas/wallet_adjustments.py`：请求模型 `extra="forbid"`，四个字段；类型白名单由 `REFERENCE_TYPE_FOR`
+    里映射到 `ADMIN_ADJUSTMENT` 的四种生成；金额只收带符号的 JSON 字符串，按正则校验后 `Decimal(str)`，不舍入；
+    响应白名单模型 `AdjustmentView`，金额 quantize 到 8 位再 `format(value, "f")`
+  - `app/services/wallet_adjustments.py`：`post_adjustment`，一次调账一个 `session_scope`；租户用不加锁的
+    `get_tenant_by_public_id` 读，加锁全交给 `post_transaction`；只在 `IntegrityError` 时换新事务重试一次，
+    第二次原样抛出，`OperationalError` 不重试；`LedgerConflict` → 409 `ADJUSTMENT_CONFLICT`，
+    `InvalidAmount("BALANCE_OUT_OF_RANGE")` → 422 `BALANCE_OUT_OF_RANGE`，其余 `InvalidAmount` /
+    `InvalidTransaction` → 422 `VALIDATION_ERROR`（消息只有问题码）；`WalletNotFound` 按意外错误 500。
+    这一层不写日志
+  - `app/api/admin_customers.py`：`POST /api/v1/admin/customers/{customer_id}/wallet/adjustments`，处理函数
+    第一条语句 `require_admin`；首次 201，重放时把状态码改成 200
+  - 测试：`tests/backend/test_wallet_adjustment_api.py`（SQLite：正常路径与审计的 ip / user agent、四种类型
+    各自的符号、原因边界、金额精度、类型与符号、幂等键格式、多余字段、422 不回显原因、重放、原因不同的重放、
+    同键不同载荷、跨客户用键、不存在的客户、没有钱包的客户、没有数据库、处理函数第一条语句的 AST 检查、
+    成功与数据库失败两次调用的日志里都没有原因文本）。`tests/backend/test_wallet_adjustment_service.py`
+    （审计写入失败、提交失败在 SQLite 与 MySQL 上各一次；真实触发器下的连续记账、跨零恢复、跨零暂停、
+    余额超出范围、8 线程并发同键只在 MySQL 上；重试一次、第二次原样抛出、`OperationalError` 不重试、
+    错误映射、租户读取不加锁、服务模块里没有日志与 `Wallet` 引用在 SQLite 上）。
+    `tests/backend/test_admin_customers_api.py`：`EXPECTED_ADMIN_ROUTES` 与 `VALID_BODIES` 加本接口，
+    `row_counts` 加 `wallet_transactions` 与 `domain_outbox`。`tests/backend/test_wallet_repository.py`：
+    ip / user agent 进调账审计、跃迁审计不带，不传时两项为 NULL
+  - 文档：[api.md](api.md) 新增本接口契约（含「原因只写业务说明、不写个人数据」），从「不在本批接口里」删去
+    管理员调账
+- [x] **设计没写死、由实现定的细节**（审查时请看这几条）：
+  - 金额的正则用 `[0-9]` 而不是设计里的 `\d`：Python 与 pydantic 的 `\d` 都认全角等其他文字的数字，
+    `Decimal` 也会接受它们。只收 ASCII 数字更严，不改变设计的任何合法输入
+  - 符号与类型不一致的错误挂在 `amount` 字段上（字段校验器读已校验的 `transaction_type`），所以 422 的消息
+    列的是 `body.amount`；类型本身不合法时不再报符号
+  - 幂等键接受任意版本的小写 uuid（带连字符的 36 字符），不限定 uuid4
+  - 重试用同一个 `created_at`（`utc_now()` 截到整秒，与 `services/customers.py` 的 `_now` 同一写法）
+  - 审计写入失败的注入方式是让 `_adjustment_audit` 返回 `created_at` 为 NULL 的行：flush 时违反 NOT NULL
+    得到 `IntegrityError`，于是服务层按设计重试一次、第二次原样抛出。用例断言两次都回滚、什么都不留下
+  - SQLite 把 `Numeric` 当浮点数存，20 位有效数字存不下，所以 12 位整数的边界金额只在 MySQL 上用
+    （余额超出范围那条）；SQLite 上的接口用例每个客户至多成功记一笔
+  - `ip_address` 来自 `request_context`，与其他管理端接口一样只在可信代理后面才采信 `X-Forwarded-For`
+- [ ] Worker 的 `allowed_commands`、CI 全量（lint、format、pytest 含 MySQL 用例，一条都不 skip）
+- [ ] 审查、合并与部署；部署后核对见上一节最后一条
 
 ---
 

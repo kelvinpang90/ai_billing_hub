@@ -26,10 +26,10 @@ from app.core.database import create_session_factory
 from app.core.logging import JsonFormatter
 from app.core.tokens import issue_access_token, issue_pending_2fa_token
 from app.main import create_app
-from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
+from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.tenancy import Project, Tenant
-from app.models.wallet import Wallet
+from app.models.wallet import Wallet, WalletTransaction
 from app.services.auth import utc_now
 
 ADMIN_PREFIX = "/api/v1/admin"
@@ -53,7 +53,7 @@ PROJECT_FIELDS = {"id", "name", "description", "created_at", "updated_at"}
 PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
-# 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户。
+# 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账。
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -61,6 +61,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("PATCH", "/api/v1/admin/customers/{customer_id}"),
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"),
     ("GET", "/api/v1/admin/customers/{customer_id}/projects"),
+    ("POST", "/api/v1/admin/customers/{customer_id}/wallet/adjustments"),
 }
 
 # 鉴权用例给写接口的合法请求体：体不合法的话 FastAPI 在处理函数之前就回 422，
@@ -69,6 +70,12 @@ VALID_BODIES = {
     ("POST", "/api/v1/admin/customers"): {"company_name": "Probe", "email": "probe@example.com"},
     ("PATCH", "/api/v1/admin/customers/{customer_id}"): {"company_name": "Renamed"},
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"): {"name": "Probe"},
+    ("POST", "/api/v1/admin/customers/{customer_id}/wallet/adjustments"): {
+        "transaction_type": "ADJUSTMENT_CREDIT",
+        "amount": "20",
+        "reason": "Probe",
+        "idempotency_key": "6f1c2a9e-4b7d-4e3a-9c5f-0d8b7a6e5f41",
+    },
 }
 
 
@@ -81,7 +88,7 @@ def admin_routes(application: FastAPI) -> set[tuple[str, str]]:
     两条来源取并集。⚠️ 本仓库的 FastAPI 延迟挂载子路由，`app.routes` 顶层只有
     `_IncludedRouter` 壳子（见 test_password_reset_link.py），所以逐层往里找；
     OpenAPI 文档是另一条来源，但它看不见 `include_in_schema=False` 的路由。
-    两条都落空时，下面「恰好是这六个」那条用例会红。
+    两条都落空时，下面「恰好是这几个」那条用例会红。
     """
     found = {
         (method.upper(), path)
@@ -203,14 +210,22 @@ def count_rows(session, model) -> int:
 
 
 def row_counts(application: FastAPI) -> dict[str, int]:
+    """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。"""
     with application.state.session_factory() as session:
         return {
             model.__tablename__: count_rows(session, model)
-            for model in (Tenant, Project, Wallet, AuditLog)
+            for model in (Tenant, Project, Wallet, AuditLog, WalletTransaction, DomainOutbox)
         }
 
 
-NO_ROWS = {"tenants": 0, "projects": 0, "wallets": 0, "audit_logs": 0}
+NO_ROWS = {
+    "tenants": 0,
+    "projects": 0,
+    "wallets": 0,
+    "audit_logs": 0,
+    "wallet_transactions": 0,
+    "domain_outbox": 0,
+}
 
 
 def audits(application: FastAPI, action: AuditAction) -> list[AuditLog]:
@@ -277,7 +292,7 @@ def test_an_admin_creates_a_customer_with_an_empty_wallet(client, app, admin, ad
     assert (data["billing_status"], data["status_version"]) == ("SUSPENDED", 0)
     assert data["wallet"] == {"currency": "MYR", "balance": "0.00000000", "version": 0}
 
-    assert row_counts(app) == {"tenants": 1, "projects": 0, "wallets": 1, "audit_logs": 1}
+    assert row_counts(app) == {**NO_ROWS, "tenants": 1, "wallets": 1, "audit_logs": 1}
     [audit] = audits(app, AuditAction.CUSTOMER_CREATE)
     assert (audit.actor_user_id, audit.actor_role) == (admin_id, "ADMIN")
     assert (audit.entity_type, audit.entity_id) == ("tenant", data["id"])
@@ -303,7 +318,7 @@ def test_blank_optional_fields_are_stored_as_null(client, admin) -> None:
 # --- 鉴权 -----------------------------------------------------------------------
 
 
-def test_the_admin_routes_are_exactly_the_expected_six() -> None:
+def test_the_admin_routes_are_exactly_the_expected_ones() -> None:
     """既防枚举落空（下面的参数化用例一条都不跑也是绿的），也逼新增接口补进来。"""
     assert set(ADMIN_ROUTES) == EXPECTED_ADMIN_ROUTES
 
@@ -850,7 +865,7 @@ def test_posting_the_same_body_twice_makes_two_customers(client, app, admin) -> 
     second = client.post(CUSTOMERS, json=body, headers=admin).json()["data"]
 
     assert first["id"] != second["id"]
-    assert row_counts(app) == {"tenants": 2, "projects": 0, "wallets": 2, "audit_logs": 2}
+    assert row_counts(app) == {**NO_ROWS, "tenants": 2, "wallets": 2, "audit_logs": 2}
     for customer_id in (first["id"], second["id"]):
         fetched = client.get(f"{CUSTOMERS}/{customer_id}", headers=admin).json()["data"]
         assert fetched["wallet"] == {"currency": "MYR", "balance": "0.00000000", "version": 0}
