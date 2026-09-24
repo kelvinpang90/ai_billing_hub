@@ -572,3 +572,68 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 编号为什么跳过 009 / 010：两者都被 OpenClaw 采纳提议的 run 用掉了（控制面按「用过的最大号 + 1」
+  # 分配，run 表里的号也算），它们不写进本文件。AIH-TASK-010 那次 run 只交付了本任务的设计草稿，
+  # 因契约要求直接实现而被 Worker 评审判 REQUEST_CHANGES；设计随后走人工闸门 #111 获批。
+  - id: AIH-TASK-011
+    title: admin wallet adjustment (ledger, audit and billing status in one transaction)
+    purpose: >-
+      按 docs/design/AIH-TASK-010-admin-wallet-adjustment.md（设计闸门 #111 已批准 v1）实现管理端手工调账：
+      POST /api/v1/admin/customers/{customer_id}/wallet/adjustments，服务层 post_adjustment 在一个 session_scope
+      里经 post_transaction 记一笔 ADMIN_ADJUSTMENT 账本、写 WALLET_ADJUSTMENT_POSTED 审计（补 ip 与 user agent），
+      余额跨零时同一事务完成计费状态跃迁；幂等键即账本 reference_id，并发撞唯一约束时换新事务重试一次。
+      不含查看流水、调账审批与限额、充值与支付、账户状态、低余额阈值配置、前端。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-010-admin-wallet-adjustment.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 接口路径、请求体（extra=forbid，四个字段及其规则）、响应字段白名单、201 首次 / 200 重放与 replayed 字段、错误码（TOKEN_INVALID / ADMIN_REQUIRED / CUSTOMER_NOT_FOUND / ADJUSTMENT_CONFLICT / VALIDATION_ERROR / BALANCE_OUT_OF_RANGE / DATABASE_NOT_CONFIGURED）按设计 §2；amount 只收带符号的 JSON 字符串，符号必须与 transaction_type 一致，超过 8 位小数一律 422、不舍入
+      - 新处理函数的第一条语句调用 require_admin；本接口加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES，匿名 401、CUSTOMER 403，且 wallet_transactions、audit_logs、tenants、domain_outbox 行数不变
+      - 服务层读租户用不加锁的 get_tenant_by_public_id，所有加锁交给 post_transaction（钱包 → 租户）；只在捕获 IntegrityError 时整个事务回滚、换新事务重试一次，第二次仍失败原样抛出；OperationalError 不重试
+      - post_transaction 只新增 ip_address、user_agent 两个默认 None 的关键字参数，只写进 WALLET_ADJUSTMENT_POSTED 审计（user_agent 截到 512）；计费状态跃迁的审计不带这两项；现有调用方与测试行为不变
+      - 这一层不写日志、不记请求体与原因文本；新代码里没有直接 UPDATE wallets 的语句
+      - 测试覆盖设计 §7 全部行；依赖记账前余额的场景（跨零恢复、跨零暂停、连续记账、余额超出范围、并发同键）放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；审计失败与提交失败两个回滚用例在 SQLite 与 MySQL 上各跑一次
+      - docs/api.md 新增本接口契约（含「原因只写业务说明、不写个人数据」的约定），并从「不在本批接口里」删去管理员调账；docs/TODO.md 新增 AIH-TASK-011 记录段，勾上 Phase 1 的「管理员手工调账」
+      - 不加表、不加列、不加迁移；不含查看流水、审批与限额、TOPUP / SYSTEM_CORRECTION、account_status、low_balance_threshold 配置、前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推
+    allowed_change_paths:
+      - app/repositories/wallet.py
+      - app/services/wallet_adjustments.py
+      - app/schemas/wallet_adjustments.py
+      - app/api/admin_customers.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_wallet_adjustment_api.py
+      - tests/backend/test_wallet_adjustment_service.py
+      - tests/backend/test_wallet_repository.py
+      - docs/api.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review

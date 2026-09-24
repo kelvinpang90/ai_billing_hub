@@ -44,7 +44,8 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007` 与 `AIH-TASK-008`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008` 与 `AIH-TASK-011`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-009` / `AIH-TASK-010` 不在其中：它们是控制面给「采纳提议」的 run 分配的编号，不写进 `tasks.yaml`。
 
 除此之外一律 **fail closed** ——
 
@@ -68,7 +69,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008` 与 `AIH-TASK-011` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -77,7 +78,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008` 与 `AIH-TASK-011`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -89,7 +90,7 @@ Codex，合并仍是 Kelvin。
 不在本仓库。把 `worker_enabled` 改回 `false` 仍是**出问题时的回滚方式**：不需要删文件、
 不需要改代码。
 
-八个已登记任务的用途不同：
+九个已登记任务的用途不同：
 
 | 任务 | 用途 | 写仓库吗 |
 | --- | --- | --- |
@@ -101,6 +102,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-006` | Phase 1 第三刀：管理端客户管理。管理员建客户时在同一事务里建钱包并写审计，建项目，分页查看客户与项目；新增管理员鉴权 `require_admin`。**碰钱包创建与鉴权，已过设计闸门** #96（`APPROVED: design v3`）；批准的设计逐字放在 [docs/design/AIH-TASK-006-admin-customers.md](../docs/design/AIH-TASK-006-admin-customers.md)，Worker 以它为准 | 同 `AIH-TASK-002`；没有迁移。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#96` 再审 |
 | `AIH-TASK-007` | 文档卫生，非生产功能：收口 P-2 的 R5「需求编号覆盖度」—— 在 [docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md) 写下「什么算一条硬性要求」的可枚举定义，补完整章节索引与 `REQ-*` 双向闭合，并新增 `tests/test_requirements_coverage.py` 把这些机械锁死。**不走设计闸门**（文档与脚本，既不碰钱也不碰用量摄取 / 认证与会话 / Webhook） | 改 [docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md)、[docs/TODO.md](../docs/TODO.md) 与新增一个测试文件，开 Draft PR；没有迁移、不碰业务代码。Worker 生成的 PR 正文固定写「设计闸门：不适用」，本任务正好就是不适用，不需要改 |
 | `AIH-TASK-008` | R5 的最后一刀：按 2026-09-21 拍板的分档口径补齐覆盖表里剩下的 15 个缺口 —— Invariant 7 / Invariant 13 / Gate 1 / Gate 4 四条在 spec 里新增 `REQ-*` 编号，DoD 1–8 与 13–15 共 11 条改标「不适用」并逐条给理由。**不走设计闸门**：只做可追溯性标注，spec 的规范性语义一个字不改 | **唯一会改 spec 正文的任务**，所以契约把它锁成「只许新增」：spec 的 diff 里删除行必须恰好一行，且就是文件头的 Version 行（1.6 → 1.7）。另改 [docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md)、`tests/test_requirements_coverage.py` 与 [docs/TODO.md](../docs/TODO.md)；没有迁移、不碰业务代码 |
+| `AIH-TASK-011` | Phase 1 第四刀：管理端手工调账。管理员按客户记一笔 `ADMIN_ADJUSTMENT`，账本、调账审计与计费状态跃迁同一事务，幂等键即账本 `reference_id`。**碰钱，已过设计闸门** #111（`APPROVED: design v1`）；批准的设计逐字放在 [docs/design/AIH-TASK-010-admin-wallet-adjustment.md](../docs/design/AIH-TASK-010-admin-wallet-adjustment.md)（设计沿用 010 的编号），Worker 以它为准 | 同 `AIH-TASK-002`；没有迁移。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#111` 再审 |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
@@ -116,6 +118,7 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 2026-09-21 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
 `AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）是 `done`；`AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，
 要验证的端到端链已由 004 / 005 的真实 run 验证。`AIH-TASK-008` 是 `ready`，也是当前唯一可调度的任务。
+2026-09-24 登记 `AIH-TASK-011`（`ready`）。
 
 `AIH-TASK-007` 是第一个**全程由 Telegram 驱动**的任务：开启 → 实现 → 检查 → 评审 → 批准 → 合并 → 部署
 都在聊天里完成（run `a7ad65ae`，PR #104，合并为 `a4aa18a`）。
@@ -138,7 +141,7 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 `alembic/env.py`、`alembic/versions/20260919_0005_tenants_projects.py`、`tests/backend/test_migrations.py`、
 `tests/backend/test_tenancy_repository.py`、`docs/TODO.md` 八项；`AIH-TASK-005` 与 `AIH-TASK-006` 各是十四项；
 `AIH-TASK-007` 是 `docs/REQUIREMENTS.md`、`tests/test_requirements_coverage.py`、`docs/TODO.md` 三项；
-`AIH-TASK-008` 在这三项之外多一个 `docs/Acuven_Central_AI_Billing_Platform_Spec.md`，共四项 ——
+`AIH-TASK-008` 在这三项之外多一个 `docs/Acuven_Central_AI_Billing_Platform_Spec.md`，共四项；`AIH-TASK-011` 是十项 ——
 逐个列在 `tasks.yaml` 里）。口径：
 
 - 仓库根相对的 POSIX 路径，**逐个精确匹配文件**；不是 glob，也不是目录前缀
