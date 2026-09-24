@@ -160,6 +160,11 @@ def _post_once(
             )
             # 记账时 `post_transaction` 加锁重读了同一个租户对象（populate_existing），
             # 跃迁也写在它上面，所以这里读到的就是这个事务提交时的值。
+            # 重放分支在锁租户之前就返回了，`tenant` 还是开头那次不加锁的读：它可能早于
+            # 别的事务的提交（READ COMMITTED 下的并发同键，或 REPEATABLE READ 的旧快照）。
+            # 带共享锁重读一次，拿最新提交的值；钱包锁已在手，顺序仍是钱包 → 租户。
+            if result.replayed:
+                session.refresh(tenant, with_for_update={"read": True})
             view = adjustment_view(
                 result.transaction,
                 customer_id=tenant.public_id,

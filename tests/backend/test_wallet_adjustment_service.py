@@ -30,6 +30,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, create_engine, delete, func, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 
 from alembic import command
 from app.core.database import create_session_factory
@@ -459,6 +460,42 @@ def test_the_same_key_from_eight_threads_posts_once(mysql_factory) -> None:
         BillingStatus.ACTIVE,
         1,
     )
+    # 重放的响应也要带提交后的状态，不能是读租户那一刻的 SUSPENDED / 0。
+    assert {(result.billing_status, result.status_version) for result in results} == {
+        (BillingStatus.ACTIVE.value, 1)
+    }
+
+
+def test_a_replay_reports_the_status_committed_after_the_tenant_was_read(
+    factory, monkeypatch
+) -> None:
+    """重放分支不经过 `post_transaction` 的租户锁，响应里的状态要另外重读（PR #115 评审）。
+
+    确定性地复现并发重放的时序：服务开头读到的租户早于第一笔的提交（还是 SUSPENDED / 0），
+    重放时库里已经是 ACTIVE / 1。响应必须报后者。
+    """
+    admin = make_admin(factory)
+    _tenant_id, public_id = make_customer(factory)
+    key = str(uuid.uuid4())
+    first = adjust(factory, admin, public_id, CREDIT, "20", key=key)
+    assert (first.billing_status, first.status_version) == ("ACTIVE", 1)
+    real = tenancy.get_tenant_by_public_id
+
+    def read_before_the_first_commit(
+        session: Session, customer_id: str, *, for_update: bool = False
+    ):
+        tenant = real(session, customer_id, for_update=for_update)
+        set_committed_value(tenant, "billing_status", BillingStatus.SUSPENDED)
+        set_committed_value(tenant, "status_version", 0)
+        return tenant
+
+    monkeypatch.setattr(tenancy, "get_tenant_by_public_id", read_before_the_first_commit)
+
+    replay = adjust(factory, admin, public_id, CREDIT, "20", key=key)
+
+    assert replay.replayed is True
+    assert replay.id == first.id
+    assert (replay.billing_status, replay.status_version) == ("ACTIVE", 1)
 
 
 # --- 重试与错误映射（SQLite，替身） -----------------------------------------------
