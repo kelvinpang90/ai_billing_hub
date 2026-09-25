@@ -647,7 +647,7 @@ tasks:
       secret 只在建凭据与轮换的响应里出现一次，审计 API_KEY_CREATE / ROTATE / REVOKE 同事务；
       外加不接端点的签名校验库（§37 规范化、HMAC-SHA256、±5 分钟时间窗、find_verifiable_credential）。
       不含出站 webhook 密钥表、防重放 nonce、摄取端点、last_used_at 写入、解密缓存、前端。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-012-integration-access.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计

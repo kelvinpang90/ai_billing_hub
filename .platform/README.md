@@ -116,10 +116,15 @@ ACVDEV-TASK-019），所以任务合并部署之后，**要由管理员单独开
 close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `.platform/`，合并前也还没有部署。漏改的话，
 控制面会一直推荐一个已经做完的任务。
 
-2026-09-24 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
-`AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）、`AIH-TASK-008`（#107）、`AIH-TASK-011`（#115）是 `done`；
+2026-09-26 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
+`AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）、`AIH-TASK-008`（#107）、`AIH-TASK-011`（#115）、
+`AIH-TASK-012`（#120）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
-2026-09-25 登记 `AIH-TASK-012`（`ready`），是当前唯一可调度的任务。
+现在一个 `ready` 都没有。
+
+`AIH-TASK-012` 的 run `8f6c3ae3` 以 `failed:review_changes_requested` 结束（Worker 的独立受限评审要求修改，
+原文在 Worker 主机的诊断目录）。修复由管理员作为追加提交推到同一个 PR #120，CI 与 Codex 复审通过后直接合并
+（`1e790ba`），没有走 Telegram 批准 —— run 不在 `awaiting_merge`，批准会被拒。
 
 `AIH-TASK-011` 不是由它自己的 Worker PR 合并的：Worker 的 #114 被 secret-scan 拦下（示例 uuid 误报，
 gitleaks 逐个扫 PR 里的提交），实现改由只含一个提交的 #115 交付，run `10fe6c87` 在 Telegram 取消。

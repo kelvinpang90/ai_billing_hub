@@ -1312,8 +1312,15 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   文件当敏感文件一律拒绝，整个契约以 `invalid allowed_change_paths` 被拒。改用 `integration_access` 命名，表名不变；
   契约与设计副本文件头都写明文件名以契约为准。**教训**：给认证类任务起文件名时先对照 Worker 的敏感词表
 - [x] AIH-TASK-012 实现：见下一节（Draft PR 交付）
-- [ ] AIH-TASK-012 的 CI、审查、合并与部署
-- [ ] 部署后在验收夹具项目上建一个凭据、轮换一次、吊销，核对审计与密文
+- [x] AIH-TASK-012 的 CI、审查、合并与部署：Worker 的独立受限评审判 REQUEST_CHANGES（对照向量没写成十六进制字面值、
+  测试里有非全零示例、回滚矩阵缺 `revoke_key`），在 `790272b` 修掉；CI 六项全绿、Codex 两轮 `APPROVE`；
+  PR #120 Squash 合并为 `1e790ba`，自动部署跑完迁移 0007，`/healthz` 冒烟通过
+- [x] **生产核对**（2026-09-26，验收夹具账号与夹具项目）：建凭据 201（`key_version = 1`、`no-store`、格式对）→
+  列表里没有 `secret` → 轮换 201（同一 `api_key`、`key_version = 2`、新 `secret`）→ 旧版本号再轮换 409
+  `CREDENTIAL_VERSION_CONFLICT` → v1 有了 `valid_until` 且仍 `verifiable` → 吊销整个 key 200、两版都 `REVOKED`
+  → 重复吊销 200 且不写审计。库内只读核对：2 行、都 `REVOKED`、主密钥版本 1、密文里没有 secret；审计恰好
+  `API_KEY_CREATE` / `ROTATE` / `REVOKE` 三条、`ADMIN`、前后状态与 reason 里没有 secret。⚠️ 夹具项目因此留下
+  两行已吊销的凭据（凭据没有删除接口）。凭据只在 VPS 上的进程里读取，没有进对话或仓库
 - [ ] 出站 webhook 密钥表（方案 i）的设计闸门与实现
 
 ### AIH-TASK-012 —— API 凭据：加密存储、版本化、轮换与吊销，外加签名校验库（2026-09-25）
