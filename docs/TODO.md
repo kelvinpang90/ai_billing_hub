@@ -77,8 +77,8 @@
 - [x] **刻意没做：spec §139.1 的表不加行**。那张表在改动前就只有 12 行，而 spec 全文有 13 个 `REQ-*`（`REQ-INGEST-002` 从来不在表里）—— 它本来就不是穷举表，而穷举责任在 [REQUIREMENTS.md](REQUIREMENTS.md) 第 1.2 节（有测试锁双向闭合）。给它加四行属于契约没要求的额外 spec 改动，不做
 - [x] **校验脚本同步**：覆盖列接受三种取值；「缺口」与「不适用」两种都必须在同一行给非空理由（断言合并为一条 `test_rows_without_a_req_id_give_a_reason`，两种取值给不同的提示语）。其余断言一条没动 —— 章节索引全覆盖、退役编号标注版本、退役编号不得写成 `§N`、`REQ-*` 双向闭合、覆盖表逐字比对 spec 原文、追溯表四列非空全部保持原样。**四个新编号会自动被既有断言接管**：双向闭合强制它们在第 1.2 节各有一行，逐字比对强制覆盖表引用的 spec 原文与 spec 一致
 - [x] **验证到什么程度**：逐条人工核对 —— spec 新增四段的 ID 与第 1.2 节四行、第 1.3 节四个覆盖格三处逐字一致；第 1.3 节 34 行里 23 行填 `REQ-*`、11 行填「不适用」、0 行「缺口」，11 行理由列均非空；新增文字引用的 §14 / §40–§41 / §45.1 / §46 / §47–§50 / §66 / §68–§69 / §74.6 / §74.9 / §81–§82 / §99 / §127 在 spec 里都有对应标题，退役的 72 / 102 / 138 一次都没写成 `§` 形式
-- [ ] **本次会话没有执行环境**（无 shell 工具），`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check` 由 Worker 在 run 收尾时执行，结果以那一轮为准；**上一条的人工核对不能代替它们**。`tests/test_*.py` 不进 ruff 的检查面（`pyproject.toml` 的 `extend-exclude`），也不被 pytest 重复跑（`testpaths = ["tests/backend"]`）
-- [ ] `AIH-TASK-008` 的 CI、审查、合并与部署（未发生）
+- [x] **本次会话没有执行环境**（无 shell 工具），`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check` 由 Worker 在 run 收尾时执行，结果以那一轮为准；**上一条的人工核对不能代替它们**。`tests/test_*.py` 不进 ruff 的检查面（`pyproject.toml` 的 `extend-exclude`），也不被 pytest 重复跑（`testpaths = ["tests/backend"]`）→ 2026-09-25 补记：五项在 Worker run 里全部零退出 —— Worker 只在检查通过后才提交并开 PR，而它开出了 #107
+- [x] `AIH-TASK-008` 的 CI、审查、合并与部署：#107 全部检查通过；Worker 的受限评审 APPROVE（结论记在 run 状态），Telegram 批准后 Squash 合并为 `a7195f3`，Deploy run 35592939437 成功（2026-09-25 补记）
 
 ---
 
@@ -1054,6 +1054,14 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节
 - [ ] 审计日志
 
+> 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
+> - Tenant：身份字段（004）与计费状态（005）已有；缺账户状态 `account_status`（状态模型任务）
+> - Project：身份字段与管理端建 / 列（004、006）已有；缺集成字段（后端地址、状态 webhook 地址与密钥、`integration_status`），随 webhook 密钥 schema 与 Phase 3
+> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有；缺账户状态、低余额阈值配置、前端页面
+> - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
+> - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
+> - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么（例如管理端查看审计）**待澄清**
+
 **验收**：管理员建客户 → 自动有钱包 · 建 project · 建 API 凭据 · 调账生效 · 所有动作都有审计
 
 > 🔒 Phase 1 测试不通过，不得进入 Phase 2（§137）。
@@ -1078,8 +1086,8 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
   - ⚠️ `tests.process` 是 `unittest discover -s tests`，不进 `tests/backend`（那里没有 `__init__.py`），对本任务的新代码**没有信号**。lint / format / pytest（含 MySQL 用例）只由 CI 覆盖
   - ⚠️ 删除规则那条断言有一个没有实测过的前提：MySQL 8 的 `information_schema.REFERENTIAL_CONSTRAINTS.DELETE_RULE` 对显式写了 `ON DELETE RESTRICT` 的外键报 `RESTRICT`（没写规则的报 `NO ACTION`）。CI 上如果只有这一条红，先查这个前提；删除行为本身由「有项目的租户删不掉」那条用例直接验
 - [ ] Worker 跑 `docs.check` / `policy.check` / `tests.process` 全部零退出（未记录；Worker 里的 skipped 不是 passed）
-- [ ] CI 全量运行：lint、format、pytest 含 MySQL 用例，一条都不 skip（未发生）
-- [ ] Codex 审查、Kelvin 合并（未发生）
+- [x] CI 全量运行：lint、format、pytest 含 MySQL 用例，一条都不 skip：PR #85 全部检查通过（backend job 遇到任何 skipped 就判失败）
+- [x] Codex 审查、Kelvin 合并：Codex `VERDICT: APPROVE`（reviewed-head `2624bad`），2026-09-19 Squash 合并为 `f6d5b2d`（2026-09-25 补记，原记录写于合并之前）
 
 ### AIH-TASK-005 —— 钱包、不可变账本与余额驱动的计费状态（2026-09-19）
 
