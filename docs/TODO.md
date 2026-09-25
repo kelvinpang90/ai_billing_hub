@@ -1050,7 +1050,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] Wallet
 - [ ] 不可变钱包账本
 - [x] 管理员手工调账（AIH-TASK-011，见下面的记录段；随合并生效）
-- [ ] API 凭据（加密存储、版本化、可轮换）
+- [x] API 凭据（加密存储、版本化、可轮换）（AIH-TASK-012，见下面的记录段；随合并生效）
 - [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节。2026-09-25 已选定方案 i（新表），实现另过设计闸门
 - [ ] 审计日志
 
@@ -1296,7 +1296,7 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 
 ### AIH-TASK-012 —— API 凭据：设计过闸门与登记（2026-09-25）
 
-上面的「API 凭据」**不勾**：到这里只有批准的设计与任务登记，没有实现代码。
+设计与登记这一步时「API 凭据」不勾；实现见下一节，勾选随那次合并生效。
 
 - [x] **Kelvin 2026-09-25 的四项决定**（设计前逐条确认）：① 出站 webhook 密钥用 ADR-0004 第 4a 节方案 i，实现另过闸门，
   决定已写回 ADR-0004；② 轮换时 `api_key` 不变、新增版本（唯一约束因此是 `(public_api_key, key_version)`，偏离 spec §74.4
@@ -1311,9 +1311,75 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   问题**：设计 §11 的六个文件名带 `credentials`，而 Worker 把路径里含 `credential` / `secret` / `key` / `token` 等整词的
   文件当敏感文件一律拒绝，整个契约以 `invalid allowed_change_paths` 被拒。改用 `integration_access` 命名，表名不变；
   契约与设计副本文件头都写明文件名以契约为准。**教训**：给认证类任务起文件名时先对照 Worker 的敏感词表
-- [ ] AIH-TASK-012 实现、CI、审查、合并与部署
+- [x] AIH-TASK-012 实现：见下一节（Draft PR 交付）
+- [ ] AIH-TASK-012 的 CI、审查、合并与部署
 - [ ] 部署后在验收夹具项目上建一个凭据、轮换一次、吊销，核对审计与密文
 - [ ] 出站 webhook 密钥表（方案 i）的设计闸门与实现
+
+### AIH-TASK-012 —— API 凭据：加密存储、版本化、轮换与吊销，外加签名校验库（2026-09-25）
+
+实现依据是设计闸门 #118 已批准的 v1：[design/AIH-TASK-012-integration-access.md](design/AIH-TASK-012-integration-access.md)；
+接口契约与签名规则记在 [api.md](api.md) 的「管理端集成 API 凭据」与「集成请求签名」，表结构记在
+[database-schema.md](database-schema.md)。上面 Phase 1 的「API 凭据」在本分支勾上：这一处改动只有合并进主干才生效，
+而合并要求 CI 全绿，与设计 §11 第 21 条一致。文件名按契约用 `integration_access`（设计 §11 的 `integration_credentials`
+撞 Worker 的敏感路径规则），表名不变。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `alembic/versions/20260925_0007_integration_access.py`：revision `0007_integration_access`。先给 `projects` 加
+    `uq_projects_id_tenant (id, tenant_id)`，再建 `integration_credentials`（三条 `CHECK`、`(public_api_key, key_version)`
+    唯一、`ix_integration_credentials_project_id`、复合外键 `(project_id, tenant_id)` → `projects(id, tenant_id)`
+    `RESTRICT`、MySQL 上 `public_api_key` 为 `utf8mb4_0900_bin`）。`downgrade` 先删表再删约束。文件头附 §132 第 13 条分析
+  - `app/models/integration.py`：`IntegrationCredential` 与 `CredentialStatus`（`ACTIVE` / `REVOKED`）；`key_version`
+    （签名版本）与 `encryption_key_version`（主密钥版本）分两列。`app/models/tenancy.py`：`Project` 上的
+    `uq_projects_id_tenant`。`app/models/auth.py`：`API_KEY_CREATE` / `API_KEY_ROTATE` / `API_KEY_REVOKE`。
+    `alembic/env.py`：import 新模型
+  - `app/core/crypto.py`：`encrypt_secret` / `decrypt_secret` 只加一个默认 `None` 的关键字参数 `associated_data`，
+    只传给数据层的 AES-GCM；包裹 DEK 那一层、令牌格式与 2FA 的调用都不变
+  - `app/core/config.py`：`credential_rotation_overlap_seconds`，默认 604800，`ge=0`
+  - `app/repositories/integration_access.py`：插入、按 `api_key` 锁住项目下全部版本（`FOR UPDATE`，按 `key_version`
+    排序）、按 `(api_key, key_version)` 取一行、按项目分页列与计数、写 `valid_until`、吊销。只 flush；没有删除
+  - `app/services/integration_access.py`：建凭据、轮换、吊销版本、吊销 key、列表。每个写动作一个 `session_scope`，
+    凭据行与审计同事务；客户与项目不加锁读；轮换与吊销先锁 key 的全部版本；主密钥在生成 secret 与写库之前加载
+    （未配置即 503）；唯一约束的 `IntegrityError` 映射为 409 `CREDENTIAL_VERSION_CONFLICT`。这一层不写日志
+  - `app/services/integration_auth.py`：`canonical_request`、`sign`、`verify_signature`（`hmac.compare_digest`，
+    `MALFORMED_TIMESTAMP` / `TIMESTAMP_OUT_OF_WINDOW` / `BAD_SIGNATURE`）、`credential_aad`、`is_verifiable`、
+    `find_verifiable_credential`。不接端点、不做 nonce、不写 `last_used_at`、不缓存
+  - `app/schemas/integration_access.py`：三个请求模型都 `extra="forbid"`；`current_key_version` 严格正整数；
+    响应白名单 `CredentialView`，签发时的 `IssuedCredentialView` 多一个 `SecretStr` 的 `secret`（repr 是掩码，
+    只在序列化响应时取值）
+  - `app/api/admin_customers.py`：五个处理函数，第一条语句都是 `require_admin`，成功响应都带 `Cache-Control: no-store`
+  - 测试：`tests/backend/test_integration_access_api.py`（SQLite：建凭据的字段白名单与格式、secret 只返回一次、
+    no-store、列表顺序与分页、轮换、轮换冲突、轮换已吊销的 key、两种吊销与幂等、多余字段、`current_key_version`
+    与 `reason` 的边界、跨客户与跨项目的 404 一模一样、未知客户、主密钥未配置、处理函数第一条语句的 AST 检查、
+    成功与审计失败的日志里都没有 secret）。`tests/backend/test_integration_access_service.py`（审计写入失败与提交失败
+    × 三种动作在 SQLite 与 MySQL 上各一次，含异常因果链里没有 secret；两个线程同时轮换只在 MySQL 上；其余在 SQLite 上：
+    存储是密文与两个版本号、AAD 绑定、审计字段与泄露、轮换与重叠期、唯一约束兜底、校验可用性、加锁、没有删除路径）。
+    `tests/backend/test_integration_auth.py`（规范化、对照向量、篡改、时间窗、格式、常量时间比较的源码检查）。
+    `tests/backend/test_crypto.py`：AAD 用例。`tests/backend/test_migrations.py`：0007 的 CHECK 与模型比对、升降、
+    列与类型与排序规则、约束与索引与删除规则、复合外键拒绝不一致的 `tenant_id`、有凭据的项目删不掉、唯一性按字节、
+    CHECK 拒绝的行；0005 的唯一约束断言改成 head 上的形状（`projects` 多了 `(id, tenant_id)`）。
+    `tests/backend/test_admin_customers_api.py`：五个路由进 `EXPECTED_ADMIN_ROUTES` 与 `VALID_BODIES`，鉴权用例预先插入
+    一行凭据、逐行比较凭据表，`row_counts` 加凭据表
+  - 文档：[api.md](api.md) 的两节、[database-schema.md](database-schema.md) 的新表与 `projects` 的新约束
+- [x] **设计没写死、由实现定的细节**（审查时请看这几条）：
+  - `verifiable` 出现在所有凭据版本对象里（列表、吊销、建凭据与轮换的响应），签发响应 = 凭据版本对象 + `secret`。
+    设计的示例对象里没有它、紧接着说列表项带它，这里按「列表项是凭据版本对象」统一
+  - 轮换时先判「全部已吊销」（409 `CREDENTIAL_REVOKED`），再判版本号（409 `CREDENTIAL_VERSION_CONFLICT`）：
+    已吊销是终态，报它比报版本号更有用。「至少一个版本 `ACTIVE`」按存储状态判，不看是否已过期
+  - 吊销整个 key 的响应 `data` 是数组（该 key 的全部版本，版本从小到大）
+  - 建凭据的请求体必须是 JSON 对象 `{}`；不带请求体是 422
+  - 审计的版本清单写成 `{"versions": [{"key_version": …, "valid_until"/"status": …}]}`，轮换的 `after_state` 另有
+    新的 `key_version`；时刻是 ISO 8601 字符串
+  - `find_verifiable_credential` 的 `key_version` 只收 Python `int`（不收布尔与字符串），且在 INT 列的范围内；
+    以后的端点先把请求头解析成整数再调它
+  - 规范化查询串时，键与值都相同的两段（如 `a` 与 `a=`）再按整段字节排序，结果与输入顺序无关
+  - 签名对照向量：测试里逐字钉住了规范化请求串（空请求体）和 HMAC 的十六进制字面值
+    `903f7fc026621f3e2ff5eb51ef329293c8627b6fbb5053e36c72c8d8ce445199`（用 openssl 独立算出，不经过 `sign`），
+    给以后的 Billing Client 抄（独立评审指出原先用 `hmac` 重算是近似循环论证，已补）
+- [ ] 运维手册补一段：`BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 怎么改（设计 §2「配置」）。runbook 与
+  `.env.example` 不在本任务的可改路径里
+- [ ] **后移**：REQ-AUTH-001 的 replay 测试证据与防重放 nonce 存储随摄取端点做（Kelvin 2026-09-25 的第 4 项决定）；
+  同时接上 `last_used_at` 写入与解密结果缓存
 
 ---
 

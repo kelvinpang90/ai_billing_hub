@@ -144,6 +144,11 @@ class AuditAction(enum.StrEnum):
     # AIH-TASK-009：写入方是 app/services/customers.py 的 update_customer，与客户行同一
     # 事务。列是写死宽度的 VARCHAR、没有 CHECK，加值不需要迁移。
     CUSTOMER_UPDATE = "CUSTOMER_UPDATE"
+    # AIH-TASK-012（设计闸门 #118）：写入方都是 app/services/integration_access.py，与凭据行
+    # 同一事务。前后状态里永远没有 secret、密文与主密钥版本。
+    API_KEY_CREATE = "API_KEY_CREATE"
+    API_KEY_ROTATE = "API_KEY_ROTATE"
+    API_KEY_REVOKE = "API_KEY_REVOKE"
 
 
 class AuditLog(Base):

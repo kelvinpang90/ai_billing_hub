@@ -27,7 +27,11 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     CheckConstraint,
+    DateTime,
+    Integer,
     Numeric,
+    String,
+    Text,
     create_engine,
     delete,
     func,
@@ -37,11 +41,12 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
 from app.models.base import Base
+from app.models.integration import API_KEY_COLLATION, IntegrationCredential
 from app.models.tenancy import BillingStatus, Project, Tenant
 from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
 
@@ -170,6 +175,12 @@ _EXPECTED_COLUMNS = {
 }
 
 
+_EXPECTED_UNIQUE_AT_HEAD = {
+    "tenants": [["public_id"]],
+    "projects": [["id", "tenant_id"], ["public_id"]],
+}
+
+
 def _table_names() -> set[str]:
     engine = create_engine(TEST_DATABASE_URL)
     try:
@@ -253,9 +264,10 @@ def test_0005_column_shape(alembic_config: Config) -> None:
             assert isinstance(types[table]["public_id"], CHAR), table
             assert types[table]["public_id"].length == 36, table
 
-            # public_id 是唯一的那一个；tenants.email 刻意**不**唯一。
-            unique = [u["column_names"] for u in inspector.get_unique_constraints(table)]
-            assert unique == [["public_id"]], table
+            # public_id 是唯一的那一个；tenants.email 刻意**不**唯一。projects 在 head 上
+            # 另有 0007 加的 (id, tenant_id)，只为凭据的复合外键（AIH-TASK-012）。
+            unique = sorted(u["column_names"] for u in inspector.get_unique_constraints(table))
+            assert unique == _EXPECTED_UNIQUE_AT_HEAD[table], table
 
         assert isinstance(types["projects"]["tenant_id"], BigInteger)
         indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("projects")}
@@ -687,3 +699,303 @@ def test_0006_gives_every_existing_tenant_one_empty_wallet(alembic_config: Confi
             connection.execute(delete(Wallet).where(Wallet.tenant_id.in_(owned)))
             connection.execute(delete(Tenant).where(Tenant.public_id.in_(public_ids)))
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0007_integration_access（AIH-TASK-012，设计闸门 #118 v1）
+#
+# 表、约束、排序规则与复合外键的**形状与行为**都在这里验：SQLite 不强制外键，也没有
+# utf8mb4_0900_bin。第一条不连库，比对迁移与模型的 CHECK。
+# ---------------------------------------------------------------------------
+
+_REVISION_0007 = "0007_integration_access"
+_MIGRATION_0007 = pathlib.Path("alembic/versions/20260925_0007_integration_access.py")
+_CREDENTIALS_TABLE = "integration_credentials"
+
+_EXPECTED_0007_COLUMNS = {
+    "id": False,
+    "tenant_id": False,
+    "project_id": False,
+    "public_api_key": False,
+    "key_version": False,
+    "encrypted_secret": False,
+    "encryption_key_version": False,
+    "status": False,
+    "valid_from": False,
+    "valid_until": True,
+    "last_used_at": True,
+    "created_at": False,
+    "revoked_at": True,
+}
+
+_CREDENTIAL_DELETE_RULE_QUERY = text(
+    "SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS"
+    " WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND CONSTRAINT_NAME = 'fk_integration_credentials_project'"
+)
+_CREDENTIAL_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME = 'integration_credentials'"
+)
+
+# MySQL 的错误号。
+_ER_DUP_ENTRY = 1062
+_ER_ROW_IS_REFERENCED_2 = 1451
+_ER_NO_REFERENCED_ROW_2 = 1452
+_ER_CHECK_CONSTRAINT_VIOLATED = 3819
+
+# 全零占位值（设计 §2「格式」）：仓库是公开的，测试里不写看起来像真的 key。
+_ZERO_API_KEY = "ak_" + "0" * 32
+
+
+def _load_0007() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0007", _MIGRATION_0007)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _credential_checks() -> dict[str, str]:
+    return {
+        str(constraint.name): _normalised(str(constraint.sqltext))
+        for constraint in IntegrationCredential.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0007_checks_are_the_ones_the_model_declares() -> None:
+    migration = _load_0007()
+    from_migration = {name: _normalised(rule) for name, rule in migration._CHECKS.items()}
+
+    assert from_migration == _credential_checks()
+    assert len(from_migration) == 3
+    assert migration._API_KEY_COLLATION == API_KEY_COLLATION
+
+
+def _unique_sets(table: str) -> set[tuple[str, ...]]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        constraints = inspect(engine).get_unique_constraints(table)
+        return {tuple(u["column_names"]) for u in constraints}
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0007_only_adds_its_table_and_one_projects_constraint(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION_0006)
+    without = _table_names()
+    assert "wallets" in without, "0006 的表应该都在，否则下面的比较没有意义"
+    assert _CREDENTIALS_TABLE not in without
+    project_uniques = _unique_sets("projects")
+    assert ("id", "tenant_id") not in project_uniques
+
+    command.upgrade(alembic_config, _REVISION_0007)
+    assert _table_names() == without | {_CREDENTIALS_TABLE}
+    assert _unique_sets("projects") == project_uniques | {("id", "tenant_id")}
+
+    # downgrade 先删表、再删约束；反过来 MySQL 会拒绝（外键还在引用那个索引）。
+    command.downgrade(alembic_config, _REVISION_0006)
+    assert _table_names() == without
+    assert _unique_sets("projects") == project_uniques
+
+    command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0007_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        columns = inspector.get_columns(_CREDENTIALS_TABLE)
+        assert {c["name"]: c["nullable"] for c in columns} == _EXPECTED_0007_COLUMNS
+        types = {c["name"]: c["type"] for c in columns}
+
+        for name in ("id", "tenant_id", "project_id"):
+            assert isinstance(types[name], BigInteger), name
+        # 两个版本号都是 INT，而且是两列（ADR-0004 §4：签名版本与主密钥版本不能混用）。
+        for name in ("key_version", "encryption_key_version"):
+            assert isinstance(types[name], Integer), name
+            assert not isinstance(types[name], BigInteger), name
+        assert isinstance(types["encrypted_secret"], Text)
+        assert isinstance(types["public_api_key"], String)
+        assert types["public_api_key"].length == 64
+        # 按字节比较：只差大小写或尾部空格的两个 key 不是同一个。
+        assert types["public_api_key"].collation == API_KEY_COLLATION
+        assert isinstance(types["status"], String)
+        assert types["status"].length == 16
+        for name in ("valid_from", "valid_until", "last_used_at", "created_at", "revoked_at"):
+            assert isinstance(types[name], DateTime), name
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0007_keys_indexes_and_checks(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        # (public_api_key, key_version)，不是 §74.4 字面的 public_api_key 单列唯一（设计 §2）。
+        assert _unique_sets(_CREDENTIALS_TABLE) == {("public_api_key", "key_version")}
+        indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes(_CREDENTIALS_TABLE)}
+        assert indexes["ix_integration_credentials_project_id"] == ["project_id"]
+        foreign_keys = {
+            str(fk["name"]): (
+                fk["constrained_columns"],
+                fk["referred_table"],
+                fk["referred_columns"],
+            )
+            for fk in inspector.get_foreign_keys(_CREDENTIALS_TABLE)
+        }
+        assert foreign_keys == {
+            "fk_integration_credentials_project": (
+                ["project_id", "tenant_id"],
+                "projects",
+                ["id", "tenant_id"],
+            ),
+        }
+
+        with engine.connect() as connection:
+            delete_rule = connection.execute(_CREDENTIAL_DELETE_RULE_QUERY).scalar_one()
+            checks = set(connection.execute(_CREDENTIAL_CHECKS_QUERY).scalars())
+        assert delete_rule == "RESTRICT"
+        assert checks == set(_credential_checks())
+    finally:
+        engine.dispose()
+
+
+def _credential_values(tenant_id: int, project_id: int, **overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "public_api_key": _ZERO_API_KEY,
+        "key_version": 1,
+        "encrypted_secret": "not-a-real-ciphertext",
+        "encryption_key_version": 1,
+        "status": "ACTIVE",
+        "valid_from": _NOW,
+        "created_at": _NOW,
+    }
+    values.update(overrides)
+    return values
+
+
+def _insert_credential(connection: Connection, **values: object) -> None:
+    connection.execute(insert(IntegrationCredential).values(**values))
+
+
+def _project_id(connection: Connection, public_id: str) -> int:
+    return int(
+        connection.execute(select(Project.id).where(Project.public_id == public_id)).scalar_one()
+    )
+
+
+def _refused(connection: Connection, **values: object) -> int:
+    """Insert in a savepoint; return the MySQL error number it was refused with."""
+    with pytest.raises(DBAPIError) as raised:
+        with connection.begin_nested():
+            _insert_credential(connection, **values)
+    return int(raised.value.orig.args[0])
+
+
+@needs_mysql
+def test_0007_the_composite_foreign_key_refuses_a_mismatched_tenant(
+    alembic_config: Config,
+) -> None:
+    """INV-8：凭据行的 tenant_id 必须是项目所属的租户，由数据库保证。"""
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        owner = _insert_tenant(connection, str(uuid.uuid4()))
+        stranger = _insert_tenant(connection, str(uuid.uuid4()))
+        project_public_id = str(uuid.uuid4())
+        _insert_project(connection, owner, project_public_id)
+        project = _project_id(connection, project_public_id)
+
+        mismatched = _credential_values(stranger, project)
+        assert _refused(connection, **mismatched) == _ER_NO_REFERENCED_ROW_2
+
+        _insert_credential(connection, **_credential_values(owner, project))
+
+
+@needs_mysql
+def test_0007_a_project_with_credentials_cannot_be_deleted(alembic_config: Config) -> None:
+    """RESTRICT：以后的用量事件要引用凭据行，项目删不掉就不会留下悬空引用（INV-6）。"""
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant = _insert_tenant(connection, str(uuid.uuid4()))
+        project_public_id = str(uuid.uuid4())
+        _insert_project(connection, tenant, project_public_id)
+        project = _project_id(connection, project_public_id)
+        _insert_credential(connection, **_credential_values(tenant, project))
+
+        with pytest.raises(DBAPIError) as raised:
+            with connection.begin_nested():
+                connection.execute(delete(Project).where(Project.id == project))
+        assert int(raised.value.orig.args[0]) == _ER_ROW_IS_REFERENCED_2
+
+        ours = IntegrationCredential.project_id == project
+        remaining = connection.execute(
+            select(func.count()).select_from(IntegrationCredential).where(ours)
+        ).scalar_one()
+        assert remaining == 1
+
+
+@needs_mysql
+def test_0007_uniqueness_is_per_key_and_version_and_byte_exact(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant = _insert_tenant(connection, str(uuid.uuid4()))
+        project_public_id = str(uuid.uuid4())
+        _insert_project(connection, tenant, project_public_id)
+        project = _project_id(connection, project_public_id)
+        _insert_credential(connection, **_credential_values(tenant, project))
+
+        # 同一个 key 的同一个版本只有一行。
+        assert _refused(connection, **_credential_values(tenant, project)) == _ER_DUP_ENTRY
+        # 同一个 key 的下一个版本：轮换就是这样加行的。
+        _insert_credential(connection, **_credential_values(tenant, project, key_version=2))
+        # 只差大小写、只差尾部空格：utf8mb4_0900_bin 下是不同的 key。
+        for variant in (_ZERO_API_KEY.upper(), _ZERO_API_KEY + " "):
+            _insert_credential(
+                connection, **_credential_values(tenant, project, public_api_key=variant)
+            )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"key_version": 0},
+        {"key_version": -1},
+        {"status": "EXPIRED"},
+        {"status": "REVOKED"},
+        {"status": "ACTIVE", "revoked_at": _NOW},
+    ],
+    ids=[
+        "version-0",
+        "version-negative",
+        "status-expired",
+        "revoked-without-time",
+        "active-with-time",
+    ],
+)
+@needs_mysql
+def test_0007_checks_refuse_bad_rows(alembic_config: Config, overrides: dict) -> None:
+    """状态只有 ACTIVE / REVOKED；吊销时刻与状态同进退；版本号从 1 起。"""
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant = _insert_tenant(connection, str(uuid.uuid4()))
+        project_public_id = str(uuid.uuid4())
+        _insert_project(connection, tenant, project_public_id)
+        project = _project_id(connection, project_public_id)
+
+        bad = _credential_values(tenant, project, **overrides)
+        assert _refused(connection, **bad) == _ER_CHECK_CONSTRAINT_VIOLATED
+
+        # 合法的吊销行：状态与时刻都在。
+        revoked = _credential_values(tenant, project, status="REVOKED", revoked_at=_NOW)
+        _insert_credential(connection, **revoked)

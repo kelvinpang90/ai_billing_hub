@@ -29,6 +29,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -124,5 +125,11 @@ class Project(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
 
-    # 按租户列项目的查询走这条索引。
-    __table_args__ = (Index("ix_projects_tenant_id", "tenant_id"),)
+    __table_args__ = (
+        # 按租户列项目的查询走这条索引。
+        Index("ix_projects_tenant_id", "tenant_id"),
+        # `id` 本来就唯一；这个约束只为让 `integration_credentials` 的复合外键
+        # `(project_id, tenant_id)` 成立：凭据行的租户与项目所属租户由数据库保证一致
+        # （INV-8；AIH-TASK-012，迁移 0007）。
+        UniqueConstraint("id", "tenant_id", name="uq_projects_id_tenant"),
+    )

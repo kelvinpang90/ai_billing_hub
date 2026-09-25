@@ -144,11 +144,18 @@ def load_keyring(settings: Settings) -> MasterKeyring:
     return MasterKeyring(keys=keys, active_version=max(keys))
 
 
-def encrypt_secret(keyring: MasterKeyring, plaintext: str) -> tuple[str, int]:
-    """Encrypt with a fresh DEK. Returns (stored string, key version)."""
+def encrypt_secret(
+    keyring: MasterKeyring, plaintext: str, *, associated_data: bytes | None = None
+) -> tuple[str, int]:
+    """Encrypt with a fresh DEK. Returns (stored string, key version).
+
+    `associated_data` 只进数据层的 AES-GCM（包裹 DEK 那一层不变），解密时必须给同一份，
+    否则 `DecryptionFailed`。它不存进密文串：调用方按行重新算出来（AIH-TASK-012 设计 §2，
+    集成凭据用它把密文绑定到 `api_key` 与版本）。默认 `None`，2FA 的调用与已存的密文不变。
+    """
     dek = AESGCM.generate_key(bit_length=256)
     data_nonce = _random_nonce()
-    ciphertext = AESGCM(dek).encrypt(data_nonce, plaintext.encode("utf-8"), None)
+    ciphertext = AESGCM(dek).encrypt(data_nonce, plaintext.encode("utf-8"), associated_data)
 
     wrap_nonce = _random_nonce()
     master = keyring.key_for(keyring.active_version)
@@ -166,8 +173,13 @@ def encrypt_secret(keyring: MasterKeyring, plaintext: str) -> tuple[str, int]:
     return token, keyring.active_version
 
 
-def decrypt_secret(keyring: MasterKeyring, token: str) -> str:
-    """Open a stored secret, or raise :class:`DecryptionFailed`."""
+def decrypt_secret(
+    keyring: MasterKeyring, token: str, *, associated_data: bytes | None = None
+) -> str:
+    """Open a stored secret, or raise :class:`DecryptionFailed`.
+
+    `associated_data` 必须与加密时的那一份相同；不同与密文被改过一样，都是 `DecryptionFailed`。
+    """
     try:
         marker, version_text, wrapped_text, nonce_text, ciphertext_text = token.split(".")
         if marker != FORMAT_VERSION:
@@ -183,7 +195,7 @@ def decrypt_secret(keyring: MasterKeyring, token: str) -> str:
     master = keyring.key_for(version)
     try:
         dek = AESGCM(master).decrypt(wrapped_blob[:_NONCE_BYTES], wrapped_blob[_NONCE_BYTES:], None)
-        return AESGCM(dek).decrypt(data_nonce, ciphertext, None).decode("utf-8")
+        return AESGCM(dek).decrypt(data_nonce, ciphertext, associated_data).decode("utf-8")
     except (InvalidTag, ValueError):
         # 密钥不对与数据被篡改在这里长得一样 —— 对外也保持一样。
         logger.error("A stored secret failed authentication", extra={"key_version": version})

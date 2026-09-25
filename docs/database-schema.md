@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-09-19
+> 最后更新：2026-09-25
 
 ---
 
@@ -61,6 +61,9 @@
 
 按项目的读取**一律带 `tenant_id`**：给定 `(tenant_id, public_id)` 查不到就是查不到，
 不区分「不存在」与「属于别的租户」（spec §97、§115）。
+
+另有 `UNIQUE (id, tenant_id)`（`uq_projects_id_tenant`，迁移 0007，AIH-TASK-012）：`id` 本来就唯一，这个约束
+只为让 `integration_credentials` 的复合外键 `(project_id, tenant_id)` 成立。
 
 ### 裁决：§57 与 §76 的不一致（Kelvin，2026-09-19）
 
@@ -131,15 +134,49 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 
 ---
 
+## `integration_credentials`（spec §74.4；AIH-TASK-012，迁移 `0007_integration_access`）
+
+设计依据：[design/AIH-TASK-012-integration-access.md](design/AIH-TASK-012-integration-access.md)（设计闸门 #118 v1）。
+一行是**一个 `api_key` 的一个签名版本**：轮换时 `api_key` 不变、新增一行。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `tenant_id` / `project_id` | BIGINT | 非空；`(project_id, tenant_id)` 复合外键 → `projects(id, tenant_id)` `ON DELETE RESTRICT` |
+| `public_api_key` | VARCHAR(64) `utf8mb4_0900_bin` | 非空；`ak_` + 32 个小写十六进制字符。按字节比较：只差大小写或尾部空格的两个 key 不是同一个 |
+| `key_version` | INT | 非空，`CHECK (key_version >= 1)`；**签名密钥版本**，客户在 `X-Acuven-Key-Version` 里看到的就是它 |
+| `encrypted_secret` | TEXT | 非空；`encrypt_secret` 的输出（AES-256-GCM 信封加密），带行 AAD。库里没有明文 |
+| `encryption_key_version` | INT | 非空；**主密钥**版本。与 `key_version` 分开（ADR-0004 §4）：重新包裹只改它 |
+| `status` | VARCHAR(16) | 非空，`CHECK IN ('ACTIVE','REVOKED')`。「已过期」不存，由 `valid_until` 推出 |
+| `valid_from` | DATETIME | 非空，建立时刻 |
+| `valid_until` | DATETIME | 可空；NULL 表示没有截止，轮换时写入「现在 + 重叠期」 |
+| `last_used_at` | DATETIME | 可空；列已建，写入随摄取端点做 |
+| `created_at` | DATETIME | 非空 |
+| `revoked_at` | DATETIME | 可空；`CHECK ((status = 'REVOKED') = (revoked_at IS NOT NULL))` |
+
+- **唯一约束 `(public_api_key, key_version)`**（`uq_integration_credentials_key_version`），而不是 spec §74.4
+  字面的「`public_api_key` 唯一」：同一个 `api_key` 的多个版本各占一行（Kelvin 2026-09-25 选定「轮换时 key 不变、
+  新增版本」）。`api_key` 加版本号唯一定位一行；同一个 `api_key` 的所有行属于同一个项目（唯一插入新版本的路径是
+  轮换，新行的归属取自锁住的旧行）。
+- **复合外键**保证凭据行的 `tenant_id` 就是项目所属的租户（INV-8），由数据库而不是代码自觉保证。
+- 索引 `ix_integration_credentials_project_id (project_id)`；按 `api_key` 的查找走唯一约束。
+- **AAD**：`encrypted_secret` 加密时的关联数据是 `integration_credentials|<api_key>|<key_version>`。把一行的
+  密文拷到另一行就解不开。
+- **行永不删除**：以后的用量事件要引用它（INV-6）。外键 `RESTRICT`，代码里没有删除路径；吊销只改状态，
+  不清密文。
+
+---
+
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、
-`status_version`、`low_balance_threshold`。下面这些 spec 列刻意留给后续任务，届时都是**纯新增列**：
+`status_version`、`low_balance_threshold`。AIH-TASK-012 建了 spec §74.4 的 `integration_credentials`（入站
+API 凭据），没有给 `projects` 加列，只加了一个唯一约束。下面这些 spec 列刻意留给后续任务，届时都是**纯新增列**：
 
 | 表 | 列 | 留给谁 | 为什么现在不建 |
 | --- | --- | --- | --- |
 | `tenants` | `account_status` | 状态模型任务（走设计闸门） | §24 由管理员控制的那一维，以及有效状态合成；碰状态机按 [WORKFLOW §3](WORKFLOW.md) 必须过设计闸门。那个任务的跃迁与计费跃迁共用 `status_version` |
 | `tenants` | `currency` | **不建** | 币种由 `wallets.currency` 承载，不在租户上重复（设计闸门 #88） |
 | `projects` | `integration_status` | 状态模型任务（走设计闸门） | 同上，§24 |
-| `projects` | `status_webhook_url`、`encrypted_webhook_secret`、`webhook_key_version` | Webhook 任务 | 密钥的 schema 还在等 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节二选一 |
+| `projects` | `status_webhook_url`、`encrypted_webhook_secret`、`webhook_key_version` | Webhook 任务 | 出站签名密钥 2026-09-25 已选定 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节方案 i（新建 `project_webhook_secrets` 表，结构对齐 `integration_credentials`），实现另过设计闸门；`status_webhook_url` 随那个任务 |
 | `projects` | `backend_base_url` | Phase 3 | 应用后端集成（§35–§39） |
