@@ -1373,8 +1373,9 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - `find_verifiable_credential` 的 `key_version` 只收 Python `int`（不收布尔与字符串），且在 INT 列的范围内；
     以后的端点先把请求头解析成整数再调它
   - 规范化查询串时，键与值都相同的两段（如 `a` 与 `a=`）再按整段字节排序，结果与输入顺序无关
-  - 签名对照向量：测试里逐字钉住了规范化请求串（空请求体），HMAC 值用标准库 `hmac` 独立算出来比对，而不是写成
-    十六进制字面值。十六进制字面值待补进测试（设计 §7 那一行的原意是给 Billing Client 一个可以抄的值）
+  - 签名对照向量：测试里逐字钉住了规范化请求串（空请求体）和 HMAC 的十六进制字面值
+    `903f7fc026621f3e2ff5eb51ef329293c8627b6fbb5053e36c72c8d8ce445199`（用 openssl 独立算出，不经过 `sign`），
+    给以后的 Billing Client 抄（独立评审指出原先用 `hmac` 重算是近似循环论证，已补）
 - [ ] 运维手册补一段：`BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 怎么改（设计 §2「配置」）。runbook 与
   `.env.example` 不在本任务的可改路径里
 - [ ] **后移**：REQ-AUTH-001 的 replay 测试证据与防重放 nonce 存储随摄取端点做（Kelvin 2026-09-25 的第 4 项决定）；

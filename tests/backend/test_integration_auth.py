@@ -12,6 +12,7 @@ import datetime as dt
 import hashlib
 import hmac
 import inspect
+import secrets
 
 import pytest
 
@@ -84,7 +85,10 @@ def test_the_reference_canonical_request() -> None:
 
 
 def test_the_reference_signature_is_plain_hmac_sha256_of_the_canonical_string() -> None:
-    """对照计算不经过 `sign`：密钥是整个 `sk_…` 字符串的 UTF-8 字节，输出小写十六进制。"""
+    """期望值是写死的字面值（用 openssl 独立算出，不经过 `sign`）。
+
+    密钥是整个 `sk_…` 字符串的 UTF-8 字节，输出小写十六进制。
+    """
     canonical = (
         "POST\n"
         "/api/v1/usage-events?batch=7&source=chatbot\n"
@@ -92,10 +96,10 @@ def test_the_reference_signature_is_plain_hmac_sha256_of_the_canonical_string() 
         "00000000-0000-4000-8000-000000000000\n"
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     )
-    expected = hmac.new(SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    expected = "903f7fc026621f3e2ff5eb51ef329293c8627b6fbb5053e36c72c8d8ce445199"
 
+    assert hmac.new(SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest() == expected
     assert signed(body=b"") == expected
-    assert len(expected) == 64 and expected == expected.lower()
     verify(expected, body=b"")
 
 
@@ -134,7 +138,7 @@ def test_one_changed_signature_character_is_a_bad_signature() -> None:
 
 
 def test_another_secret_is_a_bad_signature() -> None:
-    other = sign("sk_" + "0" * 63 + "1", canonical_request(**REQUEST))  # type: ignore[arg-type]
+    other = sign("sk_" + secrets.token_hex(32), canonical_request(**REQUEST))  # type: ignore[arg-type]
 
     assert rejection(other) == BAD_SIGNATURE
 
@@ -317,4 +321,4 @@ def test_the_associated_data_names_the_table_the_key_and_the_version() -> None:
 
     assert credential_aad(api_key, 1) == b"integration_credentials|" + api_key.encode() + b"|1"
     assert credential_aad(api_key, 1) != credential_aad(api_key, 2)
-    assert credential_aad(api_key, 1) != credential_aad("ak_" + "0" * 31 + "1", 1)
+    assert credential_aad(api_key, 1) != credential_aad("ak_" + secrets.token_hex(16), 1)

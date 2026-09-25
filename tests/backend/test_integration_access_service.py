@@ -337,7 +337,7 @@ def exception_chain(error: BaseException | None) -> Iterator[BaseException]:
 
 
 @pytest.mark.parametrize("failure", ["audit", "commit"])
-@pytest.mark.parametrize("action", ["create", "rotate", "revoke"])
+@pytest.mark.parametrize("action", ["create", "rotate", "revoke_version", "revoke_key"])
 def test_a_failed_action_leaves_nothing(factory, settings, monkeypatch, action, failure) -> None:
     """设计 §3 INV-13：凭据行与审计都与调用前相同；已生成的 secret 从未返回。"""
     scene = Scene(factory, settings)
@@ -357,14 +357,17 @@ def test_a_failed_action_leaves_nothing(factory, settings, monkeypatch, action, 
         elif action == "rotate":
             assert existing is not None
             scene.rotate(existing.api_key, 1)
-        else:
+        elif action == "revoke_version":
             assert existing is not None
             scene.revoke_version(existing.api_key, 1)
+        else:
+            assert existing is not None
+            scene.revoke_key(existing.api_key)
 
     # 下面的核对只读、不提交，所以不必先撤掉提交的替身。
     assert snapshot(factory) == before
     # 异常及其整条因果链里都没有这次生成的 secret（设计 §6、§7「泄露：异常信息」）。
-    assert len(generated) == (0 if action == "revoke" else 1)
+    assert len(generated) == (0 if action.startswith("revoke") else 1)
     for error in exception_chain(raised.value):
         for text in (str(error), repr(error)):
             for secret in generated:
