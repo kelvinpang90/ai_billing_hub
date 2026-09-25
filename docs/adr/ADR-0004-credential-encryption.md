@@ -5,6 +5,7 @@
 | **状态** | 已接受 |
 | **日期** | 2026-09-10 |
 | **修订** | 2026-09-10 勘误：nonce 过期改为「请求 timestamp + 5 分钟」；主密钥文件属主按容器运行 UID；撤回「表结构不变」并列出出站 webhook schema 待定项；补 runbook 公私边界（PR #6） |
+| **修订** | 2026-09-25 补完：出站 webhook 密钥 schema 选定方案 i（新建 `project_webhook_secrets`），见第 4a 节（PR #119） |
 | **决策人** | Kelvin Peng |
 | **来源** | spec §36、§74.4、§96、§98.1 已定原则；本 ADR 定具体机制 |
 | **影响** | `integration_credentials` / `projects` 表（出站 webhook 密钥可能新增 `project_webhook_secrets`，见第 4a 节）、Phase 0 密钥方案、Phase 2/3 验签实现 |
@@ -139,6 +140,8 @@ Docker Compose 的 `file:` 型 secret 走 **bind mount**，`uid` / `gid` / `mode
 - **方案 ii**：`projects` 加一组暂存列（`next_encrypted_webhook_secret` / `next_webhook_key_version`）。改动小，但只能暂存一把，且语义与入站不一致
 
 选定后按 [README](README.md) 的「修订规则」补完本节（属**补完待定项**，需在文件头追加一行修订记录），并在 Phase 1 的设计闸门里体现。
+
+**已选定（2026-09-25，Kelvin Peng）：方案 i**，新建 `project_webhook_secrets` 表，结构对齐 `integration_credentials`（多行、签名版本与主密钥版本分列、状态、`valid_from` / `valid_until`）。入站凭据的设计闸门 #118 已按此预留（该设计 §1「明确不做」与 §10）；出站 webhook 密钥表本身的实现**另过设计闸门**，随发送 webhook 的代码一起做。
 
 ##### 两者共同的约束
 
@@ -353,7 +356,7 @@ spec §136 要求**仓库内**的 `docs/runbook.md` 覆盖 `encryption master-ke
 - [ ] Phase 0 的「备份、恢复、加密密钥方案设计」验收通过
 - [x] Phase 0 确定 API / Celery 容器的运行 UID —— `10001`，见第 2 节（T0.6，2026-09-12）
 - [x] 宿主机主密钥文件属主设为 `10001`、权限 `0400`（**不得为读密钥把容器改回 root**）—— 要有生产主机才做得了，归 T0.9。2026-09-15 在生产 VPS 核对：`master.key` 为 `10001:10001 400`，api / celery-worker / celery-beat 以 uid `10001` 运行
-- [ ] Phase 1 前选定出站 webhook 密钥的 schema（方案 i / ii），更新第 4a 节并走设计闸门
+- [ ] Phase 1 前选定出站 webhook 密钥的 schema（方案 i / ii），更新第 4a 节并走设计闸门 —— 2026-09-25 已选定方案 i、第 4a 节已补完；它自己的设计闸门还没开，所以这一项保持未勾
 - [ ] `docs/runbook.md` 写入主密钥恢复**流程**（脱敏），私有附录写入具体值，边界按第 6 节
 - [ ] 季度恢复演练含主密钥恢复
 - [ ] 密钥泄露测试（§113 的 secret-leak tests）覆盖日志、审计、API 响应、异常栈四条路径
