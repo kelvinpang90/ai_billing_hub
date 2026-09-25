@@ -637,3 +637,81 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-012
+    title: integration API credentials (encrypted, versioned, rotatable, revocable)
+    purpose: >-
+      按 docs/design/AIH-TASK-012-integration-access.md（设计闸门 #118 已批准 v1）实现集成 API 凭据：
+      迁移 0007 建 integration_credentials（密文 + 主密钥版本与签名版本分列、(public_api_key, key_version) 唯一、
+      (project_id, tenant_id) 复合外键），五个管理端接口（建凭据、列表、轮换、吊销版本、吊销 key），
+      secret 只在建凭据与轮换的响应里出现一次，审计 API_KEY_CREATE / ROTATE / REVOKE 同事务；
+      外加不接端点的签名校验库（§37 规范化、HMAC-SHA256、±5 分钟时间窗、find_verifiable_credential）。
+      不含出站 webhook 密钥表、防重放 nonce、摄取端点、last_used_at 写入、解密缓存、前端。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-012-integration-access.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 文件名以本契约的 allowed_change_paths 为准：设计 §11 里带 credentials 的六个文件名撞上 Worker 的敏感路径规则（credential / secret / key / token 等整词），一律改用 integration_access；表名 integration_credentials 与设计里的其余命名不变
+      - 五个接口的路径、请求体（extra=forbid）、响应字段白名单、错误码（含新增的 PROJECT_NOT_FOUND / CREDENTIAL_NOT_FOUND / CREDENTIAL_VERSION_CONFLICT / CREDENTIAL_REVOKED）按设计 §2；secret 只出现在建凭据与轮换的 201 响应里，响应带 Cache-Control no-store；api_key 与 secret 的格式按设计 §2
+      - 五个处理函数的第一条语句都调用 require_admin，并加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；匿名 401、CUSTOMER 403，都不写库
+      - 迁移 0007 的表、列、CHECK、(public_api_key, key_version) 唯一约束、MySQL 上 public_api_key 的 utf8mb4_0900_bin、(project_id, tenant_id) 复合外键与 projects 的 uq_projects_id_tenant 按设计 §2；encryption_key_version 存主密钥版本，与签名版本 key_version 分开；downgrade 先删表再删约束；文件头有 §132 第 13 条分析
+      - app/core/crypto.py 只新增默认 None 的 associated_data 关键字参数，只作用于数据层 AES-GCM；2FA 的调用与既有密文、令牌格式都不变；凭据的 AAD 按设计 §2
+      - 轮换与吊销在一个 session_scope 里先按 api_key 锁住该项目下这个 key 的全部版本行（按 key_version 排序）；轮换校验 current_key_version，冲突与唯一约束兜底都映射为 409；吊销幂等；凭据行与审计同事务，审计前后状态与 reason 里没有 secret、密文与主密钥版本
+      - 重叠期由 credential_rotation_overlap_seconds 配置，默认 604800；状态只存 ACTIVE / REVOKED，过期由 valid_until 推出；没有删除凭据行的函数
+      - 签名校验库按设计 §2「校验库」：canonical_request、verify_signature（hmac.compare_digest，错误码 MALFORMED_TIMESTAMP / TIMESTAMP_OUT_OF_WINDOW / BAD_SIGNATURE）、find_verifiable_credential；不接任何端点，不做 nonce，不写 last_used_at
+      - 这一层不写日志；secret 不进异常消息与 repr；文档与测试里的 api_key / secret 示例一律用全零占位值
+      - 测试覆盖设计 §7 全部行；依赖锁、并发、复合外键与迁移的场景放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；三种动作的审计失败与提交失败回滚用例在 SQLite 与 MySQL 上各跑一次
+      - docs/api.md 记五个接口与签名规则（时间戳是 Unix 纪元秒整数、规范化路径与查询串的规则）；docs/database-schema.md 记新表与 projects 的新约束；docs/TODO.md 新增 AIH-TASK-012 记录段，勾上 Phase 1 的「API 凭据」，并记下后移的 replay 证据
+      - 不含出站 webhook 密钥表、防重放 nonce、摄取端点、last_used_at 写入、解密缓存、主密钥重新包裹、客户门户、前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推
+    allowed_change_paths:
+      - alembic/versions/20260925_0007_integration_access.py
+      - alembic/env.py
+      - app/models/integration.py
+      - app/models/tenancy.py
+      - app/models/auth.py
+      - app/core/crypto.py
+      - app/core/config.py
+      - app/repositories/integration_access.py
+      - app/services/integration_access.py
+      - app/services/integration_auth.py
+      - app/schemas/integration_access.py
+      - app/api/admin_customers.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_integration_access_api.py
+      - tests/backend/test_integration_access_service.py
+      - tests/backend/test_integration_auth.py
+      - tests/backend/test_crypto.py
+      - tests/backend/test_migrations.py
+      - docs/api.md
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review

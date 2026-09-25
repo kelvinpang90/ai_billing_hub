@@ -24,7 +24,7 @@
 - [x] **D1 — 汇率来源与版本化策略** —— 已收口。BNM openAPI 每日拉取落 `DRAFT`，需显式发布为 `PUBLISHED` 才可用于计算；按用量事件的 `occurred_at` 取版本（不是结算日）；`provider_price_versions` 存供应商原币种原价，MYR 换算结果连同 `fx_rate_version_id` 快照进用量事件。计费热路径不实时调用 BNM。见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)。⚠️ BNM 是中间价且周末无新价，偏差须由 markup 的 FX 缓冲吸收
 - [ ] **D2 — SST 税务口径** —— **部分收口**。已定：**对客户展示的金额一律含税**（充值 RM100 → 钱包 +RM100，税嵌在消费价里；spec 第 359 行禁止税静默减少钱包额度）。字段语义因此确定，Phase 0–3 不再被阻塞。见 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md)。⚠️ **spec §45.1 六项里其余五项仍需会计意见**：是否需注册 SST、AI 服务的税务分类与豁免、充值属储值 / 押金 / 服务预付、税的确认时点与税率、receipt / statement 强制字段。**五项齐备前 Phase 4 不得开工**，`tax_policy_versions` 只能有 `DRAFT` 行
 - [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
-- [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节）
+- [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节） → **2026-09-25 已选定方案 i**（Kelvin），ADR-0004 第 4a 节已补完；它自己的设计闸门还没开，D4 因此仍不勾
 - [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ T+1（24h）覆盖不了 §31 举例的 31 小时积压，所以上期调整**是预期会出现的**；但 §31 那个数字是**告警阈值示例，不是日常状态**——每一笔都应能追溯到一次具体延迟事件，**不是会计常态**。笔数与金额占比必须进 §95 监控，占比走高要查根因
 - [ ] **D6 — 支付网关选型** —— 准入契约已定，**供应商尚未选定**。已定四条硬性准入（H1 回调带稳定唯一标识 / H2 服务端权威状态查询 / H3 回调可验签 / H4 沙箱 + 对账）与适配器接口，Phase 1–3 不再被阻塞。见 [ADR-0006](adr/ADR-0006-payment-gateway-contract.md)。⚠️ **具体供应商仍未选定，硬截止在 Phase 4 开工前**；H1–H4 必须用沙箱实测，不能凭供应商文档
 - [ ] **D7 — 通知通道** —— **部分收口**。已定：Email 借 `rs-roof-pms` 的 SMTP 传输层（`aiosmtplib`、465/587 TLS 分支、空 host = 未配置、发送不抛异常），但**投递模型不借**——改走 domain Outbox + worker + 周期恢复（Invariant 13/14；`rs-roof-pms` 是请求内同步发送、零重试、无发送记录）；一切通知走 spec §47 强制的 Notification Adapter 抽象。见 [ADR-0009](adr/ADR-0009-notification-channels.md)。⚠️ **WhatsApp 传输路径待定**：`whatsapp_gateway` 现已停机、出站端点从未被调用过、且缺模板消息能力与 24 小时窗口判定，接不了「我方发起」的业务通知；需在「复活并扩建网关」与「计费平台独立 App / 号码」之间拍板。**Email 与 Portal 不受此阻塞**
@@ -1051,7 +1051,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] 不可变钱包账本
 - [x] 管理员手工调账（AIH-TASK-011，见下面的记录段；随合并生效）
 - [ ] API 凭据（加密存储、版本化、可轮换）
-- [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节
+- [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节。2026-09-25 已选定方案 i（新表），实现另过设计闸门
 - [ ] 审计日志
 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
@@ -1292,6 +1292,28 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   `BALANCE_POSITIVE` / `BALANCE_NON_POSITIVE`，不带 ip 与 user agent）；`tenant.billing_status_changed` 出站事件
   2 条，`PENDING`（还没有投递 worker）。⚠️ 夹具租户因此有了两行账本和两次状态跃迁，公司名照旧带
   `[TEST]` / `DO NOT BILL`，按客户或账本计数的基线要把它减掉
+
+
+### AIH-TASK-012 —— API 凭据：设计过闸门与登记（2026-09-25）
+
+上面的「API 凭据」**不勾**：到这里只有批准的设计与任务登记，没有实现代码。
+
+- [x] **Kelvin 2026-09-25 的四项决定**（设计前逐条确认）：① 出站 webhook 密钥用 ADR-0004 第 4a 节方案 i，实现另过闸门，
+  决定已写回 ADR-0004；② 轮换时 `api_key` 不变、新增版本（唯一约束因此是 `(public_api_key, key_version)`，偏离 spec §74.4
+  字面，理由写在设计 §2 与 §9）；③ 轮换重叠期默认 7 天、可配置；④ 本任务只做纯函数签名校验，防重放 nonce 与
+  REQ-AUTH-001 的 replay 测试证据随摄取端点后移
+- [x] 设计闸门 #118：Codex 一轮 `APPROVED: design v1`，无阻断项。批准版放在
+  [design/AIH-TASK-012-integration-access.md](design/AIH-TASK-012-integration-access.md)，与 Issue 正文的差别只有
+  三处链接目标（改成仓库内相对路径），文件头写明
+- [x] 设计里补了 spec §37 没写死的两条签名契约：`X-Acuven-Timestamp` 是 Unix 纪元秒整数；`NORMALIZED_PATH_AND_QUERY`
+  的规则（路径原样、查询串按键值排序）。实现时写进 [api.md](api.md) 作为唯一出处，Phase 3 的 Billing Client 照它实现
+- [x] 登记为 `AIH-TASK-012`（`.platform/tasks.yaml`）。⚠️ **用控制面的真加载器验证时抓到一个会让「开启」当场失败的
+  问题**：设计 §11 的六个文件名带 `credentials`，而 Worker 把路径里含 `credential` / `secret` / `key` / `token` 等整词的
+  文件当敏感文件一律拒绝，整个契约以 `invalid allowed_change_paths` 被拒。改用 `integration_access` 命名，表名不变；
+  契约与设计副本文件头都写明文件名以契约为准。**教训**：给认证类任务起文件名时先对照 Worker 的敏感词表
+- [ ] AIH-TASK-012 实现、CI、审查、合并与部署
+- [ ] 部署后在验收夹具项目上建一个凭据、轮换一次、吊销，核对审计与密文
+- [ ] 出站 webhook 密钥表（方案 i）的设计闸门与实现
 
 ---
 
