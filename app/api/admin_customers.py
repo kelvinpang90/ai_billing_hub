@@ -12,6 +12,9 @@
 
 这一层不记请求体，也不记 `email` / `contact_name` / `phone`（REQ-PRIV-001），调账的
 原因文本同样不记（设计闸门 #111 v1 §6）。
+
+集成 API 凭据的五个接口（AIH-TASK-012，设计闸门 #118 v1 §2）：`secret` 只出现在建凭据与
+轮换的 201 响应里；五个响应都带 `Cache-Control: no-store`，中间缓存与浏览器都不留副本。
 """
 
 from __future__ import annotations
@@ -35,8 +38,15 @@ from app.schemas.customers import (
     UpdateCustomerRequest,
 )
 from app.schemas.envelope import ApiResponse, success
+from app.schemas.integration_access import (
+    CreateCredentialRequest,
+    CredentialView,
+    IssuedCredentialView,
+    RevokeCredentialRequest,
+    RotateCredentialRequest,
+)
 from app.schemas.wallet_adjustments import AdjustmentView, CreateAdjustmentRequest
-from app.services import customers, wallet_adjustments
+from app.services import customers, integration_access, wallet_adjustments
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -169,3 +179,146 @@ def post_wallet_adjustment(
         # 重放不入账：200 加 `replayed: true`，调用方看得出这次没有新的财务效果。
         response.status_code = status.HTTP_200_OK
     return success(adjustment, request_id=current_request_id())
+
+
+# --- 集成 API 凭据（AIH-TASK-012） ------------------------------------------------
+
+_CREDENTIALS = "/customers/{customer_id}/projects/{project_id}/credentials"
+
+
+def _no_store(response: Response) -> None:
+    # secret 只显示一次：响应不许被任何一层缓存（设计 §6）。
+    response.headers["Cache-Control"] = "no-store"
+
+
+@router.post(
+    _CREDENTIALS,
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[IssuedCredentialView],
+)
+def create_credential(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    payload: CreateCredentialRequest,
+) -> ApiResponse[IssuedCredentialView]:
+    """A new `api_key` at version 1; the `secret` is in this response and never again."""
+    admin = require_admin(request)
+    issued = integration_access.create_credential(
+        require_session_factory(request),
+        request.app.state.settings,
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        context=request_context(request),
+    )
+    _no_store(response)
+    return success(issued, request_id=current_request_id())
+
+
+@router.get(_CREDENTIALS, response_model=ApiResponse[Page[CredentialView]])
+def list_credentials(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    page: PageNumber = 1,
+    page_size: PageSize = DEFAULT_PAGE_SIZE,
+) -> ApiResponse[Page[CredentialView]]:
+    """Every version of every key of the project. Never a `secret`, never ciphertext."""
+    require_admin(request)
+    listing = integration_access.list_credentials(
+        require_session_factory(request),
+        customer_id=customer_id,
+        project_id=project_id,
+        page=page,
+        page_size=page_size,
+    )
+    _no_store(response)
+    return success(listing, request_id=current_request_id())
+
+
+@router.post(
+    _CREDENTIALS + "/{api_key}/rotate",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[IssuedCredentialView],
+)
+def rotate_credential(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    api_key: str,
+    payload: RotateCredentialRequest,
+) -> ApiResponse[IssuedCredentialView]:
+    """Same `api_key`, next version, a new `secret` shown once; older versions overlap."""
+    admin = require_admin(request)
+    issued = integration_access.rotate_credential(
+        require_session_factory(request),
+        request.app.state.settings,
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        api_key=api_key,
+        current_key_version=payload.current_key_version,
+        context=request_context(request),
+    )
+    _no_store(response)
+    return success(issued, request_id=current_request_id())
+
+
+@router.post(
+    _CREDENTIALS + "/{api_key}/versions/{key_version}/revoke",
+    response_model=ApiResponse[CredentialView],
+)
+def revoke_credential_version(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    api_key: str,
+    key_version: int,
+    payload: RevokeCredentialRequest,
+) -> ApiResponse[CredentialView]:
+    """Revoke one version at once. Idempotent: already revoked is 200 and writes nothing."""
+    admin = require_admin(request)
+    revoked = integration_access.revoke_version(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        api_key=api_key,
+        key_version=key_version,
+        reason=payload.reason,
+        context=request_context(request),
+    )
+    _no_store(response)
+    return success(revoked, request_id=current_request_id())
+
+
+@router.post(
+    _CREDENTIALS + "/{api_key}/revoke",
+    response_model=ApiResponse[list[CredentialView]],
+)
+def revoke_credential(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    api_key: str,
+    payload: RevokeCredentialRequest,
+) -> ApiResponse[list[CredentialView]]:
+    """Revoke every version of the key; the response lists all of them, oldest first."""
+    admin = require_admin(request)
+    revoked = integration_access.revoke_key(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        api_key=api_key,
+        reason=payload.reason,
+        context=request_context(request),
+    )
+    _no_store(response)
+    return success(revoked, request_id=current_request_id())

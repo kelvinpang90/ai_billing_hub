@@ -135,6 +135,57 @@ def test_an_empty_file_is_rejected(tmp_path) -> None:
         load_keyring(Settings(master_key_file=str(path)))
 
 
+# --- associated data（AIH-TASK-012，设计闸门 #118 v1 §2「加密：绑定到行」） ------------
+
+AAD = b"integration_credentials|ak_00000000000000000000000000000000|1"
+OTHER_AAD = b"integration_credentials|ak_00000000000000000000000000000000|2"
+
+
+def test_associated_data_round_trips(tmp_path) -> None:
+    keyring = write_keyring(tmp_path, 1)
+    token, version = encrypt_secret(keyring, SECRET, associated_data=AAD)
+
+    assert version == 1
+    assert decrypt_secret(keyring, token, associated_data=AAD) == SECRET
+    # 存储格式不变：AAD 不进密文串，仍是五段。
+    assert token.startswith("v1.1.")
+    assert len(token.split(".")) == 5
+    assert AAD not in token.encode()
+
+
+@pytest.mark.parametrize(
+    ("sealed_with", "opened_with"),
+    [(AAD, OTHER_AAD), (AAD, None), (None, AAD)],
+    ids=["other-row", "missing", "unexpected"],
+)
+def test_the_wrong_associated_data_cannot_open_it(tmp_path, sealed_with, opened_with) -> None:
+    """把一行的密文拷到另一行（换 key 或版本）、或漏给 / 多给 AAD：一律解不开。"""
+    keyring = write_keyring(tmp_path, 1)
+    token, _ = encrypt_secret(keyring, SECRET, associated_data=sealed_with)
+
+    with pytest.raises(DecryptionFailed):
+        decrypt_secret(keyring, token, associated_data=opened_with)
+
+
+def test_without_associated_data_nothing_changes(tmp_path) -> None:
+    """2FA 的调用不传 AAD：默认 None 与显式 None 是同一回事，已存的密文照常解开。"""
+    keyring = write_keyring(tmp_path, 1)
+    stored, _ = encrypt_secret(keyring, SECRET)
+
+    assert decrypt_secret(keyring, stored) == SECRET
+    assert decrypt_secret(keyring, stored, associated_data=None) == SECRET
+    explicit, _ = encrypt_secret(keyring, SECRET, associated_data=None)
+    assert decrypt_secret(keyring, explicit) == SECRET
+
+
+def test_associated_data_is_keyword_only(tmp_path) -> None:
+    """位置参数传不进去：既有调用的参数位置不可能被悄悄改变含义。"""
+    keyring = write_keyring(tmp_path, 1)
+
+    with pytest.raises(TypeError):
+        encrypt_secret(keyring, SECRET, AAD)  # type: ignore[misc]
+
+
 def _subdir(root, name: str):
     path = root / name
     path.mkdir(parents=True, exist_ok=True)

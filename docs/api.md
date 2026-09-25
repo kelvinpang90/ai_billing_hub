@@ -7,6 +7,7 @@
 
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
+- [管理端集成 API 凭据](#管理端集成-api-凭据)与[集成请求签名](#集成请求签名)（AIH-TASK-012）
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -236,8 +237,8 @@
 
 ### 不在本批接口里
 
-账户状态 `account_status`、低余额阈值配置、API 凭据、出站 webhook、删除或停用
-客户与项目（财务记录永久保留）。管理员调账见下一节。
+账户状态 `account_status`、低余额阈值配置、出站 webhook、删除或停用
+客户与项目（财务记录永久保留）。管理员调账与 API 凭据见后面两节。
 
 ---
 
@@ -322,3 +323,184 @@
   响应里没有第一次那一笔的任何字段。
 - 任何一步失败（包括提交失败）整个事务回滚，账本、审计、计费状态、出站事件都不留下。
   带同一个幂等键重发即可：若其实已经提交，重发走重放。
+
+---
+
+## 管理端集成 API 凭据
+
+设计依据：设计闸门 #118 `APPROVED: design v1`，全文见 [design/AIH-TASK-012-integration-access.md](design/AIH-TASK-012-integration-access.md)（spec §36、§37、§66、§74.4）。实现登记为 AIH-TASK-012。
+
+集成应用后端（以后的摄取端点、Billing Client）用 `api_key` + `secret` 签名请求。这里是管理员为
+客户的项目建、列、轮换、吊销凭据的五个接口；签名怎么算见下一节。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST /api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials` | `{}` | 201，签发的凭据版本 | 401 / 403 / 404 / 422 / 500 / 503 |
+| `GET /api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials` | — | 200，凭据版本分页 | 401 / 403 / 404 / 422 / 503 |
+| `POST …/credentials/{api_key}/rotate` | `{"current_key_version": int}` | 201，签发的凭据版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST …/credentials/{api_key}/versions/{key_version}/revoke` | `{"reason": str}` | 200，该版本 | 401 / 403 / 404 / 422 / 500 / 503 |
+| `POST …/credentials/{api_key}/revoke` | `{"reason": str}` | 200，该 key 的全部版本（数组，版本从小到大） | 401 / 403 / 404 / 422 / 500 / 503 |
+
+`…` 是 `/api/v1/admin/customers/{customer_id}/projects/{project_id}`。只有 ADMIN 能调。
+`{customer_id}`、`{project_id}` 是 `public_id`；`{api_key}` 是凭据的 `api_key`（非机密的查找标识）；
+`{key_version}` 是整数。
+
+⚠️ **`secret` 只出现一次**：只在建凭据与轮换的那一次 201 响应里，之后任何接口都不再返回它
+（spec §36）。调用方当场保存。五个接口的成功响应都带 `Cache-Control: no-store`。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | 路径里的客户不存在 | 否 |
+| 404 | `PROJECT_NOT_FOUND` | 项目不存在，或不属于路径里的客户（两者一模一样） | 否 |
+| 404 | `CREDENTIAL_NOT_FOUND` | `api_key` / `key_version` 不存在，或属于别的项目（一模一样） | 否 |
+| 409 | `CREDENTIAL_VERSION_CONFLICT` | 轮换时 `current_key_version` 不是当前最大版本 | 否 |
+| 409 | `CREDENTIAL_REVOKED` | 轮换一个所有版本都已吊销的 `api_key` | 否 |
+| 503 | `ENCRYPTION_NOT_CONFIGURED` | 主密钥未配置（只影响建凭据与轮换；列表与吊销照常） | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误；整个事务回滚，这次生成的 `secret` 随之作废、从未返回 | 否 |
+
+### 格式
+
+- `api_key` = `ak_` + 32 个小写十六进制字符，例如 `ak_00000000000000000000000000000000`。
+- `secret` = `sk_` + 64 个小写十六进制字符（256 位），例如
+  `sk_0000000000000000000000000000000000000000000000000000000000000000`。HMAC 的密钥就是这**整个字符串**
+  （含 `sk_` 前缀）的 UTF-8 字节。
+- 本文件与测试里的示例一律是全零占位值，不是真实凭据。
+
+### 凭据版本对象
+
+```json
+{
+  "api_key": "ak_00000000000000000000000000000000",
+  "key_version": 2,
+  "status": "ACTIVE",
+  "valid_from": "2026-09-25T08:30:00",
+  "valid_until": null,
+  "last_used_at": null,
+  "created_at": "2026-09-25T08:30:00",
+  "revoked_at": null,
+  "verifiable": true
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `api_key` | 查找标识。轮换时不变 |
+| `key_version` | 签名密钥版本，从 1 起；请求头 `X-Acuven-Key-Version` 里带的就是它 |
+| `status` | 只有 `ACTIVE` 与 `REVOKED`。`REVOKED` 是终态 |
+| `valid_from` / `valid_until` | 有效期；`valid_until` 为 `null` 表示没有截止。轮换时旧版本得到截止时间 |
+| `last_used_at` | 预留，目前总是 `null`（写入随摄取端点做） |
+| `revoked_at` | 吊销时刻；未吊销为 `null` |
+| `verifiable` | 按响应那一刻算：`ACTIVE`、已到 `valid_from`、且 `valid_until` 为空或还没到。「已过期」不另存状态 |
+
+**签发的凭据版本**（建凭据与轮换的响应）= 凭据版本对象 + `secret`。
+
+响应里没有内部自增 id、`tenant_id`、内部 `project_id`、密文与主密钥版本。
+
+### `POST …/credentials` —— 建凭据
+
+请求体是 `{}`。其他字段一律 422：不能指定 `api_key`、`secret`、`key_version`、`tenant_id`、
+`project_id`、`valid_until` 或任何 id —— 客户与项目只来自路径，操作者只来自令牌。
+
+成功：**201**。新的 `api_key`，`key_version = 1`，`ACTIVE`，没有截止时间。同一个事务里写一行凭据
+（`secret` 只以 AES-256-GCM 信封加密的密文存储）和一条 `API_KEY_CREATE` 审计（`after_state` 是
+`api_key`、`key_version`、`project_public_id`、`tenant_public_id`、`valid_from`）。不幂等：再调一次得到
+另一个 `api_key`。
+
+### `GET …/credentials` —— 凭据列表
+
+查询参数见[分页](#分页spec-108)。`data.items` 是这个项目下每个 `api_key` 的每个版本：先按 `api_key`
+的创建先后，再按 `key_version` 从小到大。只读，不写审计。没有 `secret`，没有密文。
+
+### `POST …/credentials/{api_key}/rotate` —— 轮换
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `current_key_version` | 是 | 正整数（JSON 数字，不收字符串、小数或布尔）。填调用方看到的**最新**版本号 |
+
+成功：**201**，`api_key` 不变，新版本 `key_version = N+1`、没有截止时间，响应里带它的 `secret`（只这一次）。
+同一事务里：此前未吊销的旧版本中，`valid_until` 为空或晚于「现在 + 重叠期」的，改为「现在 + 重叠期」；
+旧版本的密文不动。写一条 `API_KEY_ROTATE` 审计（`before_state` 是各未吊销版本的 `key_version` 与
+`valid_until`，`after_state` 是新 `key_version` 与各旧版本改后的 `valid_until`）。
+
+- **重叠期**默认 7 天（604800 秒），由配置项 `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 调整（`0` 表示
+  轮换即让旧版本立刻失效）。重叠期里新旧版本都能用于签名，集成方在这段时间里换上新 `secret`。
+- `current_key_version` 不是当前最大版本（双击、两个管理员同时轮换）：409 `CREDENTIAL_VERSION_CONFLICT`，
+  什么都不写。刷新列表后再决定。
+- 这个 `api_key` 的所有版本都已吊销：409 `CREDENTIAL_REVOKED`。
+- 失败重试：带同一个 `current_key_version` 重发。若提交成功而响应丢了，新版本已入库但拿不到 `secret`：
+  再轮换一次（或吊销那个版本），`secret` 不能事后找回。
+
+### `POST …/credentials/{api_key}/versions/{key_version}/revoke` —— 吊销一个版本
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `reason` | 是 | 去掉首尾空白后长度 1–255。进审计的 `reason`；只写业务说明，不写个人数据 |
+
+成功：**200**，`data` 是该版本。`ACTIVE` → `REVOKED`，`revoked_at` 为现在，立即不可用于校验；同一事务写一条
+`API_KEY_REVOKE` 审计（前后状态是该版本的 `key_version` 与 `status`）。**幂等**：已经 `REVOKED` 时返回 200 与
+当前状态，什么都不写。吊销最新版本、而旧版本还在重叠期内也允许：此后只剩旧版本可用，直到它过期。
+
+### `POST …/credentials/{api_key}/revoke` —— 吊销整个 key
+
+请求体同上。成功：**200**，`data` 是这个 `api_key` 的全部版本（数组，版本从小到大），所有 `ACTIVE` 版本
+都变成 `REVOKED`；一条 `API_KEY_REVOKE` 审计列出受影响的版本。全部已吊销时返回 200 与当前状态，什么都不写。
+
+吊销只改状态，不删行、不清密文；凭据没有删除接口（以后的用量事件要引用它）。
+
+---
+
+## 集成请求签名
+
+设计依据同上（设计 §2「校验库」；spec §37）。**本任务只提供校验库**（`app/services/integration_auth.py`），
+还没有任何端点按它校验；摄取端点随 Phase 2 / 3 接上。下面两条是 spec §37 没写死、由设计补的定义，
+**本节是它们的唯一出处**，Billing Client 与服务端都照这里实现。
+
+### 请求头
+
+| 请求头 | 内容 |
+| --- | --- |
+| `X-Acuven-Api-Key` | `api_key` |
+| `X-Acuven-Key-Version` | `key_version`（十进制整数） |
+| `X-Acuven-Timestamp` | **Unix 纪元秒的十进制整数字符串**：不带小数、不带正负号、不补零，例如 `1790325000` |
+| `X-Acuven-Request-Id` | 请求 id，原样参与签名 |
+| `X-Acuven-Signature` | HMAC-SHA256 输出的**小写**十六进制（64 个字符） |
+
+### 规范化请求串
+
+五行，用 `\n`（LF）连接，末尾没有换行：
+
+```text
+METHOD
+NORMALIZED_PATH_AND_QUERY
+X-Acuven-Timestamp
+X-Acuven-Request-Id
+SHA256(RAW_REQUEST_BODY)
+```
+
+1. `METHOD`：大写，例如 `POST`。
+2. `NORMALIZED_PATH_AND_QUERY`：
+   - 路径**原样**：不解码百分号编码、不折叠 `.` / `..`、不去掉尾部斜杠；
+   - 查询串按 `&` 拆成若干段，每段在第一个 `=` 处分成键与值（没有 `=` 的段，值为空串）；
+   - 按键、再按值做**字节序**（UTF-8 字节逐个比较，大写字母排在小写之前）排序，键值都相同时按整段排序；
+     排好后用 `&` 原样连接。各段的百分号编码原样保留，空值不丢；
+   - 没有查询串（包括只有一个 `?`）时不带 `?`。
+   - 例：`/api/v1/usage-events?source=chatbot&batch=7` → `/api/v1/usage-events?batch=7&source=chatbot`
+3. 时间戳：请求头 `X-Acuven-Timestamp` 的原值。
+4. 请求 id：请求头 `X-Acuven-Request-Id` 的原值。
+5. 请求体原始字节的 SHA-256，小写十六进制。空请求体也照算
+   （`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`）。
+
+签名 = `HMAC-SHA256(key = secret 的 UTF-8 字节, message = 规范化请求串的 UTF-8 字节)`，小写十六进制。
+
+### 服务端怎么判
+
+1. 时间戳不是上面的格式：拒绝（`MALFORMED_TIMESTAMP`）。
+2. `|服务端当前时刻 − 时间戳| > 300` 秒：拒绝（`TIMESTAMP_OUT_OF_WINDOW`）。正好 300 秒仍接受。
+3. 签名不是 64 个小写十六进制字符，或与服务端算出的不同（常量时间比较）：拒绝（`BAD_SIGNATURE`）。
+4. `api_key` + `key_version` 必须对应一个此刻可用的版本：`ACTIVE`、已到 `valid_from`、`valid_until`
+   为空或还没到。不存在、已吊销、已过期、版本号不是正整数，一律同样对待。
+
+以后的端点对以上所有拒绝给**同一个** 401，不让调用方区分原因；上面的码只在服务端内部使用。
+防重放（记住用过的请求 id）随摄取端点实现，本任务不做。

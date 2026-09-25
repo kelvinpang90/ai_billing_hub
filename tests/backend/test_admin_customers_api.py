@@ -9,9 +9,11 @@ test_auth_api.py，这里只关心拿着令牌之后的事。
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
+import os
 import uuid
 
 import pytest
@@ -28,8 +30,10 @@ from app.core.tokens import issue_access_token, issue_pending_2fa_token
 from app.main import create_app
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
+from app.models.integration import IntegrationCredential
 from app.models.tenancy import Project, Tenant
 from app.models.wallet import Wallet, WalletTransaction
+from app.repositories.integration_access import insert_credential
 from app.services.auth import utc_now
 
 ADMIN_PREFIX = "/api/v1/admin"
@@ -53,7 +57,9 @@ PROJECT_FIELDS = {"id", "name", "description", "created_at", "updated_at"}
 PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
-# 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账。
+# 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
+# 五个集成凭据接口。
+CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -62,6 +68,11 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"),
     ("GET", "/api/v1/admin/customers/{customer_id}/projects"),
     ("POST", "/api/v1/admin/customers/{customer_id}/wallet/adjustments"),
+    ("POST", CREDENTIALS_ROUTE),
+    ("GET", CREDENTIALS_ROUTE),
+    ("POST", CREDENTIALS_ROUTE + "/{api_key}/rotate"),
+    ("POST", CREDENTIALS_ROUTE + "/{api_key}/versions/{key_version}/revoke"),
+    ("POST", CREDENTIALS_ROUTE + "/{api_key}/revoke"),
 }
 
 # 鉴权用例给写接口的合法请求体：体不合法的话 FastAPI 在处理函数之前就回 422，
@@ -76,7 +87,14 @@ VALID_BODIES = {
         "reason": "Probe",
         "idempotency_key": "00000000-0000-4000-8000-000000000000",
     },
+    ("POST", CREDENTIALS_ROUTE): {},
+    ("POST", CREDENTIALS_ROUTE + "/{api_key}/rotate"): {"current_key_version": 1},
+    ("POST", CREDENTIALS_ROUTE + "/{api_key}/versions/{key_version}/revoke"): {"reason": "Probe"},
+    ("POST", CREDENTIALS_ROUTE + "/{api_key}/revoke"): {"reason": "Probe"},
 }
+
+# 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
+PROBE_API_KEY = "ak_" + "0" * 32
 
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}
@@ -129,7 +147,12 @@ ROUTE_IDS = [f"{method} {path}" for method, path in ADMIN_ROUTES]
 def settings_for(tmp_path, database_url: str = "") -> Settings:
     key = tmp_path / "jwt.key"
     key.write_text("a-test-signing-key-that-is-long-enough", encoding="utf-8")
-    return Settings(jwt_secret_file=str(key), database_url=database_url)
+    # 主密钥也配上：漏了鉴权的建凭据 / 轮换处理函数会真的成功，而不是碰巧 503。
+    master = tmp_path / "master.key"
+    master.write_text(f"1:{base64.b64encode(os.urandom(32)).decode()}\n", encoding="utf-8")
+    return Settings(
+        jwt_secret_file=str(key), master_key_file=str(master), database_url=database_url
+    )
 
 
 @pytest.fixture
@@ -209,13 +232,24 @@ def count_rows(session, model) -> int:
     return session.execute(select(func.count()).select_from(model)).scalar_one()
 
 
+COUNTED_MODELS = (
+    Tenant,
+    Project,
+    Wallet,
+    AuditLog,
+    WalletTransaction,
+    DomainOutbox,
+    IntegrationCredential,
+)
+
+
 def row_counts(application: FastAPI) -> dict[str, int]:
-    """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。"""
+    """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。
+
+    凭据表同理（AIH-TASK-012）。
+    """
     with application.state.session_factory() as session:
-        return {
-            model.__tablename__: count_rows(session, model)
-            for model in (Tenant, Project, Wallet, AuditLog, WalletTransaction, DomainOutbox)
-        }
+        return {model.__tablename__: count_rows(session, model) for model in COUNTED_MODELS}
 
 
 NO_ROWS = {
@@ -225,6 +259,7 @@ NO_ROWS = {
     "audit_logs": 0,
     "wallet_transactions": 0,
     "domain_outbox": 0,
+    "integration_credentials": 0,
 }
 
 
@@ -248,6 +283,40 @@ def new_project(
     response = client.post(f"{CUSTOMERS}/{customer_id}/projects", json=body, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()["data"]
+
+
+def probe_credential(application: FastAPI, project_id: str) -> None:
+    """An ACTIVE version 1 of `PROBE_API_KEY` under the project, written directly.
+
+    不经接口建：那样 `secret` 是随机的，而这里只需要一行能被路径找到的凭据。
+    """
+    with application.state.session_factory() as session:
+        project = session.execute(
+            select(Project).where(Project.public_id == project_id)
+        ).scalar_one()
+        insert_credential(
+            session,
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+            api_key=PROBE_API_KEY,
+            key_version=1,
+            encrypted_secret="not-a-real-ciphertext",
+            encryption_key_version=1,
+            now=utc_now().replace(microsecond=0),
+        )
+        session.commit()
+
+
+def stored_credentials(application: FastAPI) -> list[tuple]:
+    statement = select(
+        IntegrationCredential.public_api_key,
+        IntegrationCredential.key_version,
+        IntegrationCredential.status,
+        IntegrationCredential.valid_until,
+        IntegrationCredential.revoked_at,
+    ).order_by(IntegrationCredential.id)
+    with application.state.session_factory() as session:
+        return [tuple(row) for row in session.execute(statement)]
 
 
 def error_code(response) -> str:
@@ -329,11 +398,19 @@ def test_every_admin_route_refuses_non_admins(
     client, app, admin, method: str, path: str, caller: str
 ) -> None:
     """INV-8：匿名 401、CUSTOMER 403，且不写库 —— 漏调 `require_admin` 的接口在这里红。"""
-    # 路径参数填一个真实客户：漏了鉴权的处理函数会真的成功，而不是碰巧 404。
+    # 路径参数填真实的客户、项目与凭据：漏了鉴权的处理函数会真的成功，而不是碰巧 404。
     customer_id = new_customer(client, admin)["id"]
-    url = path.replace("{customer_id}", customer_id)
+    project_id = new_project(client, admin, customer_id)["id"]
+    probe_credential(app, project_id)
+    url = (
+        path.replace("{customer_id}", customer_id)
+        .replace("{project_id}", project_id)
+        .replace("{api_key}", PROBE_API_KEY)
+        .replace("{key_version}", "1")
+    )
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
+    credentials = stored_credentials(app)
 
     response = client.request(method, url, json=VALID_BODIES.get((method, path)), headers=headers)
 
@@ -342,6 +419,8 @@ def test_every_admin_route_refuses_non_admins(
     # 行数看不出 UPDATE，所以客户行逐列再比一次（编辑接口漏了鉴权会在这里红）。
     assert row_counts(app) == before
     assert stored_tenant(app, customer_id) == stored
+    # 凭据行同理：吊销与轮换改的是已有行的状态与截止时间。
+    assert stored_credentials(app) == credentials
 
 
 @pytest.mark.parametrize(

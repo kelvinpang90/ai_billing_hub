@@ -17,6 +17,9 @@ from app.models import (
     auth as _auth_models,  # noqa: F401  (registers users/refresh_tokens/audit_logs)
 )
 from app.models import (
+    integration as _integration_models,  # noqa: F401  (registers integration_credentials)
+)
+from app.models import (
     tenancy as _tenancy_models,  # noqa: F401  (registers tenants/projects)
 )
 from app.models import (

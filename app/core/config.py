@@ -171,6 +171,13 @@ class Settings(BaseSettings):
     # 恢复任务一次最多领多少行。防止一次积压把 worker 淹掉。
     outbox_recovery_batch: int = Field(default=100, gt=0)
 
+    # --- 集成 API 凭据（AIH-TASK-012，设计闸门 #118 v1） ---------------------
+
+    # 轮换后旧版本还能用多久（秒）。默认 7 天（Kelvin 2026-09-25）；ADR-0004 第 4a 节要求
+    # 可配置、不写死。`0` 表示轮换即让旧版本立刻失效。只影响之后的轮换，已写入的
+    # `valid_until` 不变。
+    credential_rotation_overlap_seconds: int = Field(default=604_800, ge=0)
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
