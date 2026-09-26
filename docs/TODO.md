@@ -1407,8 +1407,17 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - 签名对照向量：测试里逐字钉住了规范化请求串（空请求体）和 HMAC 的十六进制字面值
     `903f7fc026621f3e2ff5eb51ef329293c8627b6fbb5053e36c72c8d8ce445199`（用 openssl 独立算出，不经过 `sign`），
     给以后的 Billing Client 抄（独立评审指出原先用 `hmac` 重算是近似循环论证，已补）
-- [ ] 运维手册补一段：`BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 怎么改（设计 §2「配置」）。runbook 与
+- [x] 运维手册补一段：`BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 怎么改（设计 §2「配置」）。runbook 与
   `.env.example` 不在本任务的可改路径里
+  - AIH-TASK-013（2026-09-26）：[runbook.md](runbook.md) 新建「配置项」一节，下设
+    `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 小节（含义、默认 604800 秒、整数且不小于 0、`0` 的意思、怎么改、
+    改完怎么生效、对已轮换凭据的影响、绝不能做什么）。上一行「不在可改路径里」已过时：`docker-compose.yml` 的
+    `x-backend.environment` 转发与 `.env.example` 的说明已由 #124 补上，手册按这两处写。依据：设计 §2「配置」与 §4
+    状态表、`app/core/config.py` 的 `credential_rotation_overlap_seconds`、[api.md](api.md)「轮换」一节、
+    `app/services/integration_access.py` 的 `rotate_credential`。要点：配置只在轮换那一刻读一次，**不回溯**已写入的
+    `valid_until`；此后的轮换把未吊销旧版本中 `valid_until` 为空或晚于「此刻 + 新重叠期」的一律改成它 —— 按代码与
+    api.md 写，没按设计 §1 概述那句「没有截止时间的版本」写（Kelvin 2026-09-26 裁定，设计文件不改）。改完要重建后端容器
+    （`docker compose up -d`），`restart` 不行：容器环境在创建时定下，进程内 `get_settings()` 只解析一次
 - [ ] **后移**：REQ-AUTH-001 的 replay 测试证据与防重放 nonce 存储随摄取端点做（Kelvin 2026-09-25 的第 4 项决定）；
   同时接上 `last_used_at` 写入与解密结果缓存
 
