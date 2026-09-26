@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-09-16
+> 最后更新：2026-09-26
 
 ---
 
@@ -12,6 +12,9 @@
 
 「绝不能做什么」这一节不是客套。故障处置里最贵的错误都不是「没做对」，而是
 「做了不该做的」—— 半夜被叫醒的人手边只有这份文档。
+
+文件末尾的「配置项」一节不是故障场景，不套这五节：每个配置项固定写 **含义 · 默认值与取值规则 · 怎么改 ·
+改完怎么生效 · 对已有数据的影响 · 绝不能做什么**。
 
 ---
 
@@ -361,3 +364,111 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
   （重包裹的后台任务还没有，见 [TODO](TODO.md) 的 T0.9）
 - **不要把密钥值写进 `.env`、仓库、聊天、工单或截图。**ADR-0004 定的是「只有路径进环境变量」
 - **不要为了读到密钥把容器改回 root。**ADR-0004 明写；要改的是宿主机文件的属主
+
+---
+
+## 配置项
+
+**首次编写：2026-09-26（AIH-TASK-013）。**这一节收「运维会去改的配置项」，一项一小节。
+事实来源写在每一小节开头；与代码不一致时**以代码为准**，并回来改这份文档。
+
+### `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` —— 集成 API 凭据的轮换重叠期
+
+**依据**：[AIH-TASK-012 设计](design/AIH-TASK-012-integration-access.md)第 2 节「配置」与第 4 节状态表、
+`app/core/config.py` 的 `credential_rotation_overlap_seconds`、[api.md](api.md) 的「轮换」一节、
+`app/services/integration_access.py` 的 `rotate_credential`、`docker-compose.yml` 的 `x-backend.environment`、
+`.env.example` 的「集成 API 凭据」一段。
+
+#### 含义
+
+管理员**轮换**一个集成 API 凭据（`POST …/credentials/{api_key}/rotate`）之后，**旧版本还能继续用于签名校验多少秒**。
+重叠期里新旧版本都能通过校验，集成方在这段时间里换上新 `secret`；到点之后旧版本自然不可用 ——
+没有定时任务去改状态，校验时按 `valid_until` 判断（`now < valid_until` 才可用）。
+
+| 属性 | 值 |
+| --- | --- |
+| 配置项（代码里） | `credential_rotation_overlap_seconds` |
+| 环境变量 | `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS`（前缀 `BILLING_` 来自 `Settings` 的 `env_prefix`） |
+| 默认值 | **`604800` 秒 = 7 天**（Kelvin 2026-09-25 定） |
+| 取值规则 | **整数秒，且不小于 0**（`Field(ge=0)`） |
+| `0` 的意思 | 轮换即让旧版本**立刻**失效 —— 旧版本的 `valid_until` 被写成轮换那一刻，而校验要求 `now < valid_until` |
+| 谁用它 | 只有轮换这一个动作。建凭据、吊销、列表都不读它 |
+
+⚠️ **单位是秒，不是天或小时。**写 `7`、`7d`、`1.5` 都不是你想要的：`7` 是 7 秒；
+`7d`、`1.5` 这类非整数与负数过不了配置校验，进程**起不来**（`Settings` 在启动时解析一次，校验失败就抛错）。
+常用换算：`3600` = 1 小时，`86400` = 1 天，`604800` = 7 天。
+
+#### 怎么改
+
+在部署目录的 `.env` 里加（或改）一行：
+
+```bash
+BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS=3600
+```
+
+- 容器里的值来自 `docker-compose.yml` 的 `x-backend.environment` 那一行
+  `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS: ${BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS:-604800}`（#124 起）。
+  compose 读 `.env` **只为做 `${…}` 插值**，不把 `.env` 整个注入容器 —— 本栈**没有** `env_file:`，
+  只有 `environment` 里逐项列出的变量才进容器。这一行的作用就是把 `.env` 里的值转进 api / celery-worker /
+  celery-beat 三个后端容器
+- `.env` 里不写这一行（或删掉它）= 用 compose 里的默认值 `604800`，与代码默认值一致
+- `docker-compose.prod.yml` 只覆盖 `BILLING_ENVIRONMENT` 与 `BILLING_SESSION_COOKIE_SECURE`，**不碰**这一项，
+  所以生产与本地走的是同一条转发
+- 不经 compose、直接跑 uvicorn 时：`Settings` 从进程环境变量读，也读工作目录下的 `.env`（`env_file=".env"`）。
+  `.env` 不进镜像（`.dockerignore` 排除了它），所以**容器里只有 compose 转发这一条路**
+- ⚠️ **不要去改 `docker-compose.yml` 里的默认值**来「改配置」。那是仓库文件，下次部署 checkout 会把它换回去；
+  而且 `tests/backend/test_compose.py` 钉着那个默认值必须等于代码默认值
+
+#### 改完怎么生效
+
+**必须重建后端容器，只改 `.env` 不会生效。**两层原因：
+
+1. 容器的环境变量是**创建时**定下的。`docker compose restart` 只重启进程、不重新创建容器，拿到的仍是旧值
+2. 进程里配置只解析一次：`get_settings()` 带 `lru_cache`，`create_app` 启动时把它放进 `app.state.settings`，
+   轮换接口读的就是这一份。运行中的进程不会重读 `.env` 或环境变量
+
+所以改完 `.env` 之后：
+
+```bash
+docker compose up -d     # 只重建配置变了的服务：这里是 api / celery-worker / celery-beat
+```
+
+⚠️ 这条命令只在**这台主机部署过**时成立：部署成功后两个镜像钉在 `.env` 里（[deployment.md](deployment.md) §9.7）。
+灾难恢复的新主机上还没有那两行，不要在那里手工 `up -d`（理由见上面「整台 VPS 没了」第 9 步）。
+
+**确认生效**（只读，不需要真的轮换一次）：
+
+```bash
+docker compose exec api python -c \
+  'from app.core.config import get_settings; print(get_settings().credential_rotation_overlap_seconds)'
+```
+
+打印的是新值才算生效。⚠️ 这条命令起的是一个**新的** Python 进程，它证明的是「容器环境里的值对了」；
+API 进程本身是随容器重建的，所以两者一致 —— 前提是你用的是 `up -d` 重建，而不是 `restart`。
+
+#### 对已轮换凭据的影响
+
+⚠️ **改这个配置不回溯。**它只在**轮换那一刻**被读一次，算出 `valid_until = 轮换时刻 + 重叠期` 写进库里。
+已经写进库的 `valid_until` 是固定的时刻，不存「重叠期是多少」，改配置、重建容器都不会动它。
+
+| 情形 | 结果 |
+| --- | --- |
+| 已经轮换过、旧版本正在重叠期里 | **不变**。旧版本仍按当初写入的 `valid_until` 到点失效 —— 把配置从 7 天改成 1 小时，**不会**让它提前失效；改成 0 也不会 |
+| 从来没轮换过的凭据（`valid_until` 为空） | 不变，照常可用。直到下一次轮换才会用到新配置 |
+| 改配置之后的**下一次轮换** | 按新值算：`截止 = 此刻 + 新重叠期`。这个 `api_key` 下**所有未吊销的旧版本**里，`valid_until` 为空、或晚于这个截止的，一律改成这个截止；本来就早于它的不动。已吊销的版本不动。新版本没有截止 |
+
+最后一行有一个**容易踩到的后果**：把重叠期改短之后再轮换，**上一轮还在重叠期里的更老版本也会被一并截短**。
+例：版本 1 因为上一次轮换（重叠期 7 天）还剩 5 天；现在把配置改成 `3600` 再轮换一次 ——
+版本 1 与版本 2 的 `valid_until` 都变成「此刻 + 1 小时」。改成 `0` 再轮换，则**所有**未吊销的旧版本当场失效。
+反过来，把重叠期改长**不会延长**任何已写入的截止：只有「为空或晚于新截止」的才会被改。
+
+要**提前结束**某个旧版本的重叠期，不是改这个配置 —— 那对它不起作用 —— 而是吊销那个版本
+（`POST …/versions/{key_version}/revoke`，立即生效、写审计）。每次轮换改了哪些版本的截止，
+都记在那条 `API_KEY_ROTATE` 审计的 `before_state` / `after_state` 里。
+
+#### 绝不能做什么
+
+- **不要把它改成 0 当作「吊销旧版本」的办法。**它不影响已经轮换过的版本，只会让**下一次**轮换对集成方
+  毫无缓冲 —— 集成方还没来得及换 `secret`，签名就开始被拒。要撤销一个版本，用吊销接口
+- **不要只改 `.env` 就当改好了。**不重建容器，线上还是旧值；而轮换的后果（旧版本何时失效）要到重叠期结束时才看得出来
+- **不要在集成方正在切换 `secret` 的时候缩短它再轮换。**上面那张表的最后一行：更老的版本也会被截短
