@@ -99,6 +99,9 @@ x-backend: &backend
     # **空密码**：`login()` 必然失败，outbox 一路重试到死信，而用户那边的现象
     # 只是「没收到信」。
     BILLING_SMTP_PASSWORD_FILE: /run/secrets/billing_smtp_password
+    # 集成 API 凭据轮换后旧版本还能用多久（秒，AIH-TASK-012 设计 §2「配置」）。
+    # 本文件不读 .env，不在这里转发的话，改 .env 进不了容器。
+    BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS: ${BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS:-604800}
   secrets:
     - billing_jwt_key
     - billing_master_key
