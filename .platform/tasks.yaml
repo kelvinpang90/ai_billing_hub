@@ -715,3 +715,54 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AIH-TASK-012 留下的文档尾巴（docs/TODO.md 里 012 记录段的「运维手册补一段」）。选它做「按规划执行」
+  # 的第一项：只改文档，风险低，又是真实工作。编号跳过 009 / 010 的原因同上。
+  - id: AIH-TASK-013
+    title: runbook section for the credential rotation overlap setting
+    purpose: >-
+      在 docs/runbook.md 补一段 BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS 的运维说明（AIH-TASK-012 设计 §2「配置」
+      要求「运维手册里写明怎么改」），并在 docs/TODO.md 勾掉 012 记录段里对应的那一条。
+      纯运维文档，不碰业务代码、数据库、迁移、CI 配置与 .platform/。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - docs/runbook.md 新增一段，写清 BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS 的含义（轮换后旧版本继续可用于签名校验的时长）、默认值 604800 秒（7 天）、取值规则（整数且不小于 0；0 表示轮换即让旧版本立刻失效）、怎么改、改完怎么生效、改动对已轮换凭据重叠期的影响
+      - 每一条事实都以 docs/design/AIH-TASK-012-integration-access.md §2「配置」、app/core/config.py 里 credential_rotation_overlap_seconds 的定义、docs/api.md「轮换」一节与 app/services/integration_access.py 的实际行为为准，不得编造；「改完怎么生效」按 app/core/config.py 的配置加载方式与 runbook 里既有的改配置流程写；「对已轮换凭据的影响」按服务代码写清改配置是否回溯已经写入的 valid_until、以及此后的轮换怎样计算。上述来源彼此冲突或说不清时停下，在 PR 里说明，不自行裁决
+      - 段落的位置与写法沿用 runbook 里既有的配置 / 环境变量章节；示例值只用默认值或 0、3600 这类明显的示例，不写任何真实凭据、主机名、IP 或服务器路径
+      - docs/TODO.md 把 AIH-TASK-012 记录段里「运维手册补一段：BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS 怎么改」那一条改为 [x]，并在它下面补一行记录（改了 runbook 的哪一节、依据是什么）；.env.example 不在本任务的可改路径里，若它需要同步，就在记录里写明留给后续，不得当作已做
+      - 不改 docs/TODO.md 的 planning-v1 块（从「当前计划」移出本任务由管理员的收尾 PR 做，与 tasks.yaml 的状态一起改）；复选框只允许 [ ] / [x]
+      - 改动只落在 allowed_change_paths；不改代码、数据库、迁移、CI、.platform/ 下任何文件；不装依赖
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯运维文档，不改钱的行为、不改状态机、不改认证逻辑；PR 正文要把这条理由写出来，不能只写「不适用」
+    allowed_change_paths:
+      - docs/runbook.md
+      - docs/TODO.md
+    # MXC 里跑得动的五项；tests.backend 跑不起来，只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
