@@ -17,6 +17,29 @@
 
 ---
 
+## 规划（OpenClaw planning-v1）
+
+> 下面两个标记之间的块由 OpenClaw 控制面按固定格式解析，决定下一项任务；只管「做什么、先做什么」，执行权限仍以 `.platform/tasks.yaml` 为准。格式不对整块作废，项目 fail closed。
+
+<!-- openclaw:planning-v1:begin -->
+### 当前计划
+
+### 已阻塞
+- 待登记：出站 webhook 密钥表（方案 i）｜阻塞：等设计闸门
+- 待登记：第一个真实客户进生产前处置验收管理员账号｜阻塞：等 Kelvin 拍板
+- 待登记：审计日志（§124）剩余范围｜阻塞：范围待澄清
+
+### 后续计划
+- 待登记：租户账户状态 account_status
+- 待登记：管理端查看钱包流水
+- 待登记：余额不一致的定时核对与告警
+- 待登记：低余额阈值配置
+- 待登记：管理端客户管理前端页面
+- 待登记：Phase 2 用量计费（Provider / Model / Usage Meter 起步）
+<!-- openclaw:planning-v1:end -->
+
+---
+
 ## P-1. 前置决策（不写代码，但决定表结构 —— 必须先做）
 
 这些是 [SPEC_REVIEW_v1.0.md](archive/SPEC_REVIEW_v1.0.md) 的「建议的处理顺序」，即使 v1.1 已修订，落地前仍需确认结论并落成 ADR。
