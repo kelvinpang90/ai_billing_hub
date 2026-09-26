@@ -120,9 +120,12 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 
 2026-09-26 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
 `AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）、`AIH-TASK-008`（#107）、`AIH-TASK-011`（#115）、
-`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）是 `done`；
+`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
-2026-09-26 登记 `AIH-TASK-014`（`ready`），写进了 [docs/TODO.md](../docs/TODO.md) planning-v1 块「当前计划」第 1 条，是当前唯一可调度的任务。
+现在一个 `ready` 都没有，[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」也是空的。
+
+`AIH-TASK-014` 用来验证 OpenClaw P3（run `2c4a37ea`，PR #129，合并为 `f247a7c`）。第一次「批准」在 CI 的 `backend`
+还没跑完时发出，批准预检按 `checks_not_passed` 拒绝、run 回到等待批准；CI 全绿后再批准，合并与部署正常完成。
 
 `AIH-TASK-013` 是第一个**按规划执行**（ACVDEV-TASK-038）走通的任务：「当前计划」第 1 条 → 开启 → 实现 → 检查 →
 评审 → 批准 → 合并 → 部署都在 Telegram 里完成（run `ebbae679`，PR #126，合并为 `ee635cd`）。它的第一次 run
