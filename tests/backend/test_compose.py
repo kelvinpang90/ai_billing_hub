@@ -228,6 +228,20 @@ def test_every_credential_file_setting_is_wired_into_compose(compose: dict) -> N
         assert name in mounted, f"{name} 定义了却没挂给后端，容器里那个路径不存在"
 
 
+def test_the_credential_rotation_overlap_reaches_the_backend(compose: dict) -> None:
+    """AIH-TASK-012 设计 §2「配置」要求重叠期可配置；compose 不读 `.env`，不转发就改不动。
+
+    这条来自 AIH-TASK-013 的 Worker run：它要在运维手册里写「怎么改」，发现生产上
+    改 `.env` 根本进不了容器。默认值必须与 `Settings` 一致，否则不设时两边各说各话。
+    """
+    default = Settings.model_fields["credential_rotation_overlap_seconds"].default
+    env = compose["x-backend"]["environment"]
+
+    assert str(env.get("BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS")) == (
+        f"${{BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS:-{default}}}"
+    )
+
+
 def test_the_auth_endpoints_are_rate_limited_at_the_edge() -> None:
     """spec §53 的 `Login attempt rate limiting`。
 
