@@ -175,7 +175,17 @@ optional: document-worker
 - [x] FX 数据源 → [ADR-0005](adr/ADR-0005-fx-rate-source.md)
 - [ ] 支付网关（准入契约已定，供应商未选）→ [ADR-0006](adr/ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**供应商未选定，硬截止在 Phase 4 开工前**
 
-spec §136 还要求维护 `database-schema.md` / `api.md` / `integrated-application-backend.md` / `payment-flow.md` / `pricing-engine.md` / `currency-and-fx.md` / `data-governance.md` / `deployment.md` / [`runbook.md`](runbook.md)。这些在对应 Phase 落地时再建，现在不预创建空文件。
+spec §136 还要求维护以下九份文档：
+
+- [`database-schema.md`](database-schema.md)
+- [`api.md`](api.md)
+- `integrated-application-backend.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
+- `payment-flow.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
+- `pricing-engine.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
+- `currency-and-fx.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
+- `data-governance.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
+- [`deployment.md`](deployment.md)
+- [`runbook.md`](runbook.md)
 
 [`runbook.md`](runbook.md) 已开始（2026-09-12，T0.5）：**按场景逐个补，不预留空标题** —— 空标题会让人以为「已经有预案了」。目前只有「Redis / Celery broker 不可用」一条。
 
