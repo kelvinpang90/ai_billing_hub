@@ -724,7 +724,7 @@ tasks:
       在 docs/runbook.md 补一段 BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS 的运维说明（AIH-TASK-012 设计 §2「配置」
       要求「运维手册里写明怎么改」），并在 docs/TODO.md 勾掉 012 记录段里对应的那一条。
       纯运维文档，不碰业务代码、数据库、迁移、CI 配置与 .platform/。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - docs/runbook.md 新增一段，写清 BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS 的含义（轮换后旧版本继续可用于签名校验的时长）、默认值 604800 秒（7 天）、取值规则（整数且不小于 0；0 表示轮换即让旧版本立刻失效）、怎么改、改完怎么生效、改动对已轮换凭据重叠期的影响
