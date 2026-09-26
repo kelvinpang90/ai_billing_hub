@@ -728,7 +728,7 @@ tasks:
     depends_on: []
     acceptance_criteria:
       - docs/runbook.md 新增一段，写清 BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS 的含义（轮换后旧版本继续可用于签名校验的时长）、默认值 604800 秒（7 天）、取值规则（整数且不小于 0；0 表示轮换即让旧版本立刻失效）、怎么改、改完怎么生效、改动对已轮换凭据重叠期的影响
-      - 每一条事实都以 docs/design/AIH-TASK-012-integration-access.md §2「配置」、app/core/config.py 里 credential_rotation_overlap_seconds 的定义、docs/api.md「轮换」一节与 app/services/integration_access.py 的实际行为为准，不得编造；「怎么改」与「改完怎么生效」按 docker-compose.yml 里 x-backend.environment 对这个变量的转发（#124 起生效，compose 不读 .env，只转发逐项列出的变量）、.env.example 里的说明与 app/core/config.py 的配置加载方式写；「对已轮换凭据的影响」按服务代码写清改配置是否回溯已经写入的 valid_until、以及此后的轮换怎样计算。上述来源彼此冲突或说不清时停下，在 PR 里说明，不自行裁决
+      - 每一条事实都以 docs/design/AIH-TASK-012-integration-access.md §2「配置」、app/core/config.py 里 credential_rotation_overlap_seconds 的定义、docs/api.md「轮换」一节与 app/services/integration_access.py 的实际行为为准，不得编造；「怎么改」与「改完怎么生效」按 docker-compose.yml 里 x-backend.environment 对这个变量的转发（#124 起生效。compose 会读 .env 做 ${…} 插值，但不把它整个注入容器 —— 没有 env_file，只有 environment 里逐项列出的变量才进容器）、.env.example 里的说明与 app/core/config.py 的配置加载方式写；「对已轮换凭据的影响」按服务代码写清改配置是否回溯已经写入的 valid_until、以及此后的轮换怎样计算。上述来源彼此冲突或说不清时停下，在 PR 里说明，不自行裁决
       - 已知的一处不一致（Kelvin 2026-09-26 裁定，不必为它停下）：设计 §1 概述写的是「此前仍在生效、没有截止时间的版本」才改 valid_until，而设计 §4、docs/api.md「轮换」一节与服务代码都是「valid_until 为空或晚于 now + 重叠期」的未吊销旧版本都改。手册按后者（代码与 api.md）写，并在 PR 正文里指出这处不一致；不改设计文件
       - docs/runbook.md 现在没有配置 / 环境变量章节，新建一节（例如「配置项」）放这段说明，写法沿用 runbook 现有章节的风格；示例值只用默认值或 0、3600 这类明显的示例，不写任何真实凭据、主机名、IP 或服务器路径
       - docs/TODO.md 把 AIH-TASK-012 记录段里「运维手册补一段：BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS 怎么改」那一条改为 [x]，并在它下面补一行记录（改了 runbook 的哪一节、依据是什么）；该条原文「runbook 与 .env.example 不在本任务的可改路径里」已过时（compose 转发与 .env.example 已由 #124 补上），记录里按现状写明
