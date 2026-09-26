@@ -767,3 +767,48 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 验证 OpenClaw P3（就绪预检、状态时间线、批准预检、合并时的部署绑定）用的低风险文档任务。
+  # 缺口是真的：ARCHITECTURE.md 第 8 节说 spec §136 要求的九份文档「在对应 Phase 落地时再建」，
+  # 其中 database-schema.md / api.md / deployment.md 早已建好，却只有 runbook.md 带了链接。
+  - id: AIH-TASK-014
+    title: sync the ARCHITECTURE section 8 document list with the docs that exist
+    purpose: >-
+      docs/ARCHITECTURE.md 第 8 节列出 spec §136 要求维护的九份文档，并说它们「在对应 Phase 落地时再建」；
+      其中四份已经建好，却只有 runbook.md 带了链接。把那一句改成与仓库现状一致：已建的加链接，未建的写明尚未创建。
+      纯文档，只改 docs/ARCHITECTURE.md 这一句，不碰代码、迁移、docker/compose、.platform/ 与 docs/TODO.md。
+    status: ready
+    acceptance_criteria:
+      - 只改 docs/ARCHITECTURE.md 第 8 节里以「spec §136 还要求维护」开头的那一句（可以拆成一个短清单）；本节其余内容与文件其余章节一个字不改，不新建任何文件
+      - 九份文档的名单、顺序与写法保持原样（database-schema.md、api.md、integrated-application-backend.md、payment-flow.md、pricing-engine.md、currency-and-fx.md、data-governance.md、deployment.md、runbook.md），不增不减；perf-baseline.md 等不在 spec §136 名单里的文件不加进来
+      - 仓库里已经存在的四份 —— docs/database-schema.md、docs/api.md、docs/deployment.md、docs/runbook.md —— 都写成相对链接，写法与原句里 runbook.md 的链接一致（例如 [`api.md`](api.md)）
+      - 仓库里不存在的五份 —— integrated-application-backend.md、payment-flow.md、pricing-engine.md、currency-and-fx.md、data-governance.md —— 保持不带链接，并写明「尚未创建，在对应 Phase 落地时再建，不预创建空文件」；动手前逐个核对 docs/ 下这九个文件是否存在，结果与上面两条不符时停下，在 PR 里说明，不自行裁决
+      - 不写任何真实凭据、主机名、IP 或服务器路径
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯文档，只同步一句文档清单的链接与状态，不改钱的行为、不改状态机、不改认证逻辑；PR 正文要把这条理由写出来，不能只写「不适用」
+    allowed_change_paths:
+      - docs/ARCHITECTURE.md
+    # 只改一份文档，文档检查足够；tests.backend 跑不起来，只在 CI。
+    allowed_commands:
+      - docs.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
