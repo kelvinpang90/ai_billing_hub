@@ -815,8 +815,9 @@ tasks:
 
   # 015–018：Phase 1 管理端的前端页面。后端接口都已上线（006 / 009 / 011 / 012），前端至今只有登录与平台状态卡片。
   # 按 CLAUDE.md 分档：前端不走设计闸门，钱、幂等与认证的语义全在已批准的后端里，前端只按 docs/api.md 调用。
-  # ⚠️ commands.yaml 里没有前端检查，Worker 跑不了 npm；lint / typecheck / test / build 只在 CI 的 frontend job，
-  # 实现方以 CI 为准，Worker 里的五项检查只证明没碰坏 Python 侧与文档。
+  # 前端检查：Worker 跑 commands.yaml 的 frontend.test / frontend.typecheck / frontend.lint（node 直接执行
+  # 只读 frontend/node_modules 里的入口，不走 npm）；build 与 tsconfig.app / tsconfig.node 两份类型检查只在 CI 的
+  # frontend job。准入仍以 CI 为准。
   - id: AIH-TASK-015
     title: admin frontend - customer list, create, detail and edit
     purpose: >-
@@ -839,7 +840,7 @@ tasks:
       - 页面不显示、不发送 account_status、低余额阈值与任何成本、毛利字段（后端没有这些字段，也不许预留）
       - 所有面向用户的文案走 i18n（frontend/src/i18n/locales/en.json），满足 eslint 规则 no-hardcoded-jsx-text 与 frontend/src/i18n/keys.test.ts（不许有缺失或没人用的 key）
       - 测试（vitest + Testing Library，放在被测文件旁边，mock 写法沿用 frontend/src/features/auth/LoginPage.test.tsx）：api 模块的 URL、查询参数与请求体；列表的三种状态与分页；建客户的校验、提交中禁用、成功跳转；编辑只发改动字段、无改动不发请求；详情 404；MoneyText 对 "0.00000000"、"-5.00000000"、"1234567.12345678" 的展示；DateTimeText 的时区换算。测试数据里的 uuid 一律用 00000000-0000-4000-8000-000000000000 这类全零占位值（secret-scan）
-      - docs/TODO.md 在 Phase 1 下新增 AIH-TASK-015 记录段（做了什么、偏离了什么、验证到什么程度，并写明前端检查只在 CI 跑）；Phase 1 的「管理端客户管理」保持 [ ]（还缺账户状态与低余额阈值）；不改 planning-v1 块；复选框只允许 [ ] / [x]
+      - docs/TODO.md 在 Phase 1 下新增 AIH-TASK-015 记录段（做了什么、偏离了什么、验证到什么程度，并写明 Worker 里跑过的前端检查与只在 CI 跑的 build）；Phase 1 的「管理端客户管理」保持 [ ]（还缺账户状态与低余额阈值）；不改 planning-v1 块；复选框只允许 [ ] / [x]
       - 不装依赖（package.json / package-lock.json 不在可改路径里）；DashboardPage 只做上面那一处抽取；不改 .platform/
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（lint / typecheck / test / build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，只调用已上线、已过闸门 #96 的接口，不改钱的行为、状态机与认证逻辑；PR 正文要把这条理由写出来，不能只写「不适用」
     allowed_change_paths:
@@ -862,13 +863,16 @@ tasks:
       - frontend/src/layouts/AppLayout.tsx
       - frontend/src/i18n/locales/en.json
       - docs/TODO.md
-    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
     allowed_commands:
       - docs.check
       - policy.check
       - tests.process
       - lint.check
       - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1
@@ -920,13 +924,16 @@ tasks:
       - frontend/src/features/customers/CustomerDetailPage.test.tsx
       - frontend/src/i18n/locales/en.json
       - docs/TODO.md
-    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
     allowed_commands:
       - docs.check
       - policy.check
       - tests.process
       - lint.check
       - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1
@@ -981,13 +988,16 @@ tasks:
       - frontend/src/features/customers/CustomerDetailPage.test.tsx
       - frontend/src/i18n/locales/en.json
       - docs/TODO.md
-    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
     allowed_commands:
       - docs.check
       - policy.check
       - tests.process
       - lint.check
       - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1
@@ -1042,13 +1052,16 @@ tasks:
       - frontend/src/features/customers/ProjectsPanel.test.tsx
       - frontend/src/i18n/locales/en.json
       - docs/TODO.md
-    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
     allowed_commands:
       - docs.check
       - policy.check
       - tests.process
       - lint.check
       - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1

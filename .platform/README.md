@@ -106,7 +106,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-012` | Phase 1 第五刀：集成 API 凭据。管理员为项目建、列、轮换、吊销凭据（`api_key` 不变、版本递增，重叠期默认 7 天），签名密钥用信封加密存储，secret 只在建凭据与轮换时返回一次；另有不接端点的签名校验库。**碰认证与凭据，已过设计闸门** #118（`APPROVED: design v1`）；批准的设计放在 [docs/design/AIH-TASK-012-integration-access.md](../docs/design/AIH-TASK-012-integration-access.md)，Worker 以它为准 | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移 0007。文件名避开 Worker 的敏感路径规则，用 `integration_access`（见契约）。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#118` 再审 |
 | `AIH-TASK-013` | AIH-TASK-012 留下的文档尾巴：在 [docs/runbook.md](../docs/runbook.md) 补一段 `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 的运维说明（含义、默认 7 天、怎么改、怎么生效、对已轮换凭据的影响），事实以 012 的设计 §2「配置」与代码为准。**不走设计闸门**：纯运维文档，不改钱、状态机与认证逻辑。也是「按规划执行」的第一项 | 只改 `docs/runbook.md` 与 [docs/TODO.md](../docs/TODO.md)；不碰代码、数据库与迁移。planning-v1 块由管理员的收尾 PR 改，Worker 不动 |
 | `AIH-TASK-014` | 把 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) 第 8 节那句 spec §136 文档清单同步成现状：已建的四份（database-schema / api / deployment / runbook）加链接，未建的五份写明尚未创建。**不走设计闸门**：纯文档。用来验证 OpenClaw P3（就绪预检、状态时间线、批准预检、合并时的部署绑定） | 只改 `docs/ARCHITECTURE.md` 一个文件，检查只有 `docs.check`；不碰代码、迁移、docker/compose、`.platform/` 与 `docs/TODO.md`。planning-v1 块由管理员的收尾 PR 改 |
-| `AIH-TASK-015` | 管理端前端第一刀：客户列表、建客户、客户详情（含钱包余额与计费状态）与编辑，调用 006 / 009 已上线的接口；新建 `features/customers/`，加 `MoneyText`（金额只按十进制字符串处理）与 `DateTimeText`（UTC → Asia/Kuala_Lumpur）。**不走设计闸门**：纯前端 | 十九项，全在 `frontend/src/` 与 `docs/TODO.md`（含把 `DashboardPage` 的 `RequestReference` 抽成共享组件）；不装依赖、不碰后端。⚠️ `commands.yaml` 没有前端检查，前端的 lint / typecheck / test / build 只在 CI 的 frontend job |
+| `AIH-TASK-015` | 管理端前端第一刀：客户列表、建客户、客户详情（含钱包余额与计费状态）与编辑，调用 006 / 009 已上线的接口；新建 `features/customers/`，加 `MoneyText`（金额只按十进制字符串处理）与 `DateTimeText`（UTC → Asia/Kuala_Lumpur）。**不走设计闸门**：纯前端 | 十九项，全在 `frontend/src/` 与 `docs/TODO.md`（含把 `DashboardPage` 的 `RequestReference` 抽成共享组件）；不装依赖、不碰后端。Worker 跑 `frontend.test` / `frontend.typecheck` / `frontend.lint`（见下面「在 Worker 的 MXC 里跑不起来的检查」的前端一行），`build` 只在 CI 的 frontend job |
 | `AIH-TASK-016` | 管理端前端第二刀：客户详情页的项目列表与建项目，并给 018 留挂载点。依赖 015。**不走设计闸门**：纯前端 | 八项；同 015 |
 | `AIH-TASK-017` | 管理端前端第三刀：手工调账（接口已过闸门 #111）。幂等键每次打开表单生成、结果未知时锁定表单只许同键重试。依赖 016（两者都改客户详情页）。**不走设计闸门**：纯前端，钱的规则全在后端 | 八项，新建 `features/wallet/`；同 015 |
 | `AIH-TASK-018` | 管理端前端第四刀：项目集成 API 凭据的建、列、轮换、吊销（接口已过闸门 #118）。`secret` 只在结果对话框出现一次，不进查询缓存与浏览器存储。依赖 016。**不走设计闸门**：纯前端 | 八项；文件名沿用 `integration_access` 的叫法避开 Worker 的敏感路径规则；同 015 |
@@ -302,7 +302,7 @@ process_boundary_required` 要求它在进程边界上真的被强制（作业�
 
 ### 在 Worker 的 MXC 里跑不起来的检查
 
-`commands.yaml` 里登记了七条，但当前 Worker 的 MXC（AppContainer）里**只有纯 Python 的那几条能跑**。
+`commands.yaml` 里登记了十条，但当前 Worker 的 MXC（AppContainer）里**只有纯 Python 的那几条能跑**。
 2026-09-19 用 Worker 自己的 `build_guarded_argv` 在 MXC 里实测：
 
 | 命令 | MXC 里 | 原因 |
@@ -311,6 +311,7 @@ process_boundary_required` 要求它在进程边界上真的被强制（作业�
 | `lint.check` / `format.check` | 默认跑不起来；本机 Worker 按命令放开 Win32k 后能跑 | `ruff.exe` 导入 user32/gdi32，MXC 默认的 Win32k 禁用缓解让它初始化失败（`0xC0000142`）。只关掉这一条缓解、其余不变时两条都通过（实测，含 `-I` 形式） |
 | `tests.backend` | 跑不起来 | 默认一 import SQLAlchemy 就走到 `platform.machine()` → WMI 查询，整进程崩溃（`0xC06D007E`）；放开 Win32k 后仍有 5 个 API 测试文件挂在 `socket.socketpair()` 上（MXC 禁 loopback），另有 bash 用例 |
 | `scripts.verdict_tests` | 未实测 | 没有任何会写仓库的任务登记它 |
+| `frontend.test` / `frontend.typecheck` / `frontend.lint` | 当前 argv 能跑；控制面部署前不可用 | 需要控制面以只读 junction 提供 `frontend/node_modules`、登记 `node`、把 `LOCALAPPDATA` 设成 worktree 之外的逐次临时目录。OpenClaw 在 Worker 的 MXC 里实测（2026-09-27），最早那版 argv 原样都跑不起来：AppContainer 里 lstat 不了 worktree 的上级目录，node 的 realpath 报 `EPERM`；`--configLoader runner` 解析不了 `@vitejs/plugin-react` 的依赖；经 junction 加载时 vitest 被加载两份；jsdom 安装检查误报。改成三条都带 `--preserve-symlinks` / `--preserve-symlinks-main`、test 用 `--configLoader native` 并经 `--execArgv` 传给子进程、`frontend/vite.config.ts` 加 `resolve.preserveSymlinks` 与 `VITEST_SKIP_INSTALL_CHECKS` 之后：test 63/63 用时 24s，typecheck 2.7s，lint 15–30s，工作区无改动 |
 
 **lint / format 的放开（控制面 ACVDEV-TASK-017）**：控制面给本机 Worker 配置加了 `check_win32k`，只对**固定了
 完整定义**（executable + 逐字 args，首参数必须是 Python 隔离模式 `-I`）的检查关掉 Win32k 这一条缓解；网络、
