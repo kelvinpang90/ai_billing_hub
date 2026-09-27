@@ -1,3 +1,5 @@
+import { generatePath } from "react-router";
+
 /**
  * 路径字面量只在这里出现一次。
  *
@@ -15,7 +17,21 @@ export const ROUTES = {
    * 所以由 `tests/backend/test_password_reset_link.py` 机械比对这两处。
    */
   resetPassword: "/reset-password",
+  customers: "/customers",
+  /** 静态段比 `:customerId` 优先匹配（react-router 按具体程度排序），所以 `new` 不会被当成 id。 */
+  customerCreate: "/customers/new",
+  customerDetail: "/customers/:customerId",
 } as const;
+
+/**
+ * 客户详情页的地址。用 `generatePath` 填参数，不手拼字符串。
+ *
+ * ⚠️ `generatePath` 不做 URL 转义。这里的 id 只来自后端（uuid 的 `public_id`），
+ * 不会含 `/`；换成用户输入的值之前先想清楚这一点。
+ */
+export function customerDetailPath(customerId: string): string {
+  return generatePath(ROUTES.customerDetail, { customerId });
+}
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */
 export const RESET_TOKEN_PARAM = "token";
