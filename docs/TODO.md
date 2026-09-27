@@ -1570,6 +1570,12 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   `ResizeObserver` 替身，只在环境里没有时才装，直接赋值、不写类型断言。先写复现 `src/test/setup.test.tsx`（不带局部替身渲染
   `Input.TextArea`，带与不带 `autoSize` 各一条），修复前两条都是 `ReferenceError: ResizeObserver is not defined`，修复后通过。
   `ProjectsPanel.test.tsx` 里 016 的局部替身没动：它也是「没有才装」，与全局替身共存无害，删它是另一件事
+- [x] 慢测试的逐字输入改成粘贴（2026-09-28，Kelvin 定在重新开启 AIH-TASK-017 之前做）：017 的 Worker run `c6e5144e` 只挂在
+  `frontend.test`，失败的是 `LoginPage` / `ResetPasswordPage` / `CustomerDetailPage` 里的 5s 超时 —— `user.type` 每按一个键
+  antd 表单就重渲染一次，全量并行或 MXC 里就跑不完，而这三个文件 017 都改不了（`CustomerDetailPage.test.tsx` 能改，但修复会话
+  看到的输出被截断，没看到它）。017 自己的实现在本地全过。四个文件（加上同类的 `ForgotPasswordPage`）的 11 处 `user.type`
+  改成 `user.click` + `user.paste`，提交的值不变、断言不动。本机按 `frontend.test` 原样 argv 全量对照：改前 6 次全挂（每次 1–3
+  条），改后 5 次全过。`CustomerForm` / `ProjectsPanel` 没出过超时，没动
 - [ ] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据
 
 ---
