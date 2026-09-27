@@ -23,19 +23,65 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
+1. `AIH-TASK-015` 管理端前端：客户列表、建客户、客户详情与编辑
+2. `AIH-TASK-016` 管理端前端：客户详情页的项目列表与建项目
+3. `AIH-TASK-017` 管理端前端：手工调账
+4. `AIH-TASK-018` 管理端前端：项目集成 API 凭据的建、列、轮换与吊销
 
 ### 已阻塞
 - 待登记：出站 webhook 密钥表（方案 i）｜阻塞：等设计闸门
 - 待登记：第一个真实客户进生产前处置验收管理员账号｜阻塞：等 Kelvin 拍板
 - 待登记：审计日志（§124）剩余范围｜阻塞：范围待澄清
+- 待登记：R1 停机/复机阈值与 R3 账本聚合的取舍（Phase 2 开工前必须定）｜阻塞：等 Kelvin 拍板
+- 待登记：D6 支付网关供应商选定与沙箱实测 H1–H4（Phase 4 支付开工前）｜阻塞：等 Kelvin 选定供应商
+- 待登记：D2 SST 其余五项（Phase 4 上生产前）｜阻塞：等会计意见
+- 待登记：D7 WhatsApp 通知的传输路径｜阻塞：等 Kelvin 拍板
+- 待登记：Phase 4 前重新评估 Email 传输（事务邮件服务、退信与投诉抑制）｜阻塞：等 Kelvin 拍板
 
 ### 后续计划
-- 待登记：租户账户状态 account_status
-- 待登记：管理端查看钱包流水
-- 待登记：余额不一致的定时核对与告警
-- 待登记：低余额阈值配置
-- 待登记：管理端客户管理前端页面
-- 待登记：Phase 2 用量计费（Provider / Model / Usage Meter 起步）
+- 待登记：租户账户状态 account_status（需设计闸门）
+- 待登记：低余额阈值配置（需设计闸门）
+- 待登记：管理端查看钱包流水（需设计闸门）
+- 待登记：余额不一致的定时核对与告警（需设计闸门）
+- 待登记：管理端前端：账户状态、低余额阈值与钱包流水
+- 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
+- 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
+- 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
+- 待登记：Phase 2 Provider、Model 与 Usage Meter 目录（需设计闸门）
+- 待登记：Phase 2 provider_price_versions 与泛化价格分量（需设计闸门）
+- 待登记：Phase 2 FX 汇率版本、审批与历史（需设计闸门）
+- 待登记：Phase 2 定价规则 MARKUP 与 FIXED_RATE（需设计闸门）
+- 待登记：Phase 2 用量摄取端点：签名校验接入、防重放 nonce、持久化 202（需设计闸门）
+- 待登记：Phase 2 全局 event 幂等与冲突检测（需设计闸门）
+- 待登记：Phase 2 异步计费：估算供应商成本、MYR 换算与客户计费额（需设计闸门）
+- 待登记：Phase 2 钱包扣费、负余额与停机（需设计闸门）
+- 待登记：Phase 2 管理端前端：供应商、模型、价格与汇率
+- 待登记：Phase 3 出站服务状态 webhook 投递与重试（需设计闸门，依赖 webhook 密钥表）
+- 待登记：Phase 3 服务状态查询接口，供集成方周期对账（需设计闸门）
+- 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
+- 待登记：Phase 3 ai_chatbot_demo 试点接入（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目）
+- 待登记：Phase 4 客户认证与客户门户登录（需设计闸门）
+- 待登记：Phase 4 客户仪表盘与钱包页
+- 待登记：Phase 4 支付网关适配器与支付 Webhook（需设计闸门，依赖 D6）
+- 待登记：Phase 4 stale payment 对账与金额不符人工复核（需设计闸门）
+- 待登记：Phase 4 充值 UI 与充值入账（需设计闸门）
+- 待登记：Phase 4 支付收据与下载
+- 待登记：Phase 5 会话摘要、请求级明细与用量筛选
+- 待登记：Phase 5 客户端用量导出
+- 待登记：Phase 5 管理端内部成本、毛利与供应商模型分析
+- 待登记：Phase 6 Notification Adapter 抽象与 Email adapter
+- 待登记：Phase 6 低余额、停机、复机通知与门户内通知（需设计闸门）
+- 待登记：Phase 6 WhatsApp adapter（依赖 D7）
+- 待登记：Phase 6 健康告警
+- 待登记：Phase 7 月度对账单、T+1 cut-off 与上期调整（需设计闸门）
+- 待登记：Phase 7 对账单 PDF 下载
+- 待登记：Phase 7 收入、成本、手续费、毛利分析与 CSV / Excel 导出
+- 待登记：Phase 8 供应商价格与 FX 同步适配器、草稿审批发布（需设计闸门）
+- 待登记：Phase 8 供应商账单成本对账（需设计闸门）
+- 待登记：Phase 8 Reprocess 与 Rebill 调整（需设计闸门）
+- 待登记：上线闸门：PDPA 与数据留存政策
+- 待登记：上线闸门：RPO/RTO 恢复演练
+- 待登记：上线闸门：支付、Email、WhatsApp 真实账号集成验证
 <!-- openclaw:planning-v1:end -->
 
 ---
