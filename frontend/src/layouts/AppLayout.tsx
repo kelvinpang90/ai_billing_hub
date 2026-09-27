@@ -19,6 +19,11 @@ export function AppLayout() {
   const { t } = useTranslation();
   const location = useLocation();
   const { signOut } = useAuth();
+  // 客户的子页面（建客户、详情）也让「客户」那一项亮着。
+  const inCustomers =
+    location.pathname === ROUTES.customers ||
+    location.pathname.startsWith(`${ROUTES.customers}/`);
+  const selectedKey = inCustomers ? ROUTES.customers : location.pathname;
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -27,12 +32,16 @@ export function AppLayout() {
         <Menu
           theme="dark"
           mode="horizontal"
-          selectedKeys={[location.pathname]}
+          selectedKeys={[selectedKey]}
           style={{ flex: 1, minWidth: 0 }}
           items={[
             {
               key: ROUTES.dashboard,
               label: <Link to={ROUTES.dashboard}>{t("nav.dashboard")}</Link>,
+            },
+            {
+              key: ROUTES.customers,
+              label: <Link to={ROUTES.customers}>{t("nav.customers")}</Link>,
             },
           ]}
         />

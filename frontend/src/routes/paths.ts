@@ -15,7 +15,18 @@ export const ROUTES = {
    * 所以由 `tests/backend/test_password_reset_link.py` 机械比对这两处。
    */
   resetPassword: "/reset-password",
+  /** 管理端客户管理（AIH-TASK-015）。列表的页码放在查询串里，从详情返回时还在原来那一页。 */
+  customers: "/customers",
+  newCustomer: "/customers/new",
+  customerDetail: "/customers/:customerId",
 } as const;
+
+/** 客户详情路由里装客户 `public_id` 的参数名，与 `ROUTES.customerDetail` 一致。 */
+export const CUSTOMER_ID_PARAM = "customerId";
+
+export function customerDetailPath(customerId: string): string {
+  return ROUTES.customerDetail.replace(`:${CUSTOMER_ID_PARAM}`, encodeURIComponent(customerId));
+}
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */
 export const RESET_TOKEN_PARAM = "token";

@@ -1126,7 +1126,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
 > - Tenant：身份字段（004）与计费状态（005）已有；缺账户状态 `account_status`（状态模型任务）
 > - Project：身份字段与管理端建 / 列（004、006）已有；缺集成字段（后端地址、状态 webhook 地址与密钥、`integration_status`），随 webhook 密钥 schema 与 Phase 3
-> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有；缺账户状态、低余额阈值配置、前端页面
+> - 管理端客户管理：建客户、列表、详情、编辑的接口（006、009）与前端页面（015）已有；缺账户状态、低余额阈值配置
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
 > - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么（例如管理端查看审计）**待澄清**
@@ -1465,6 +1465,61 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
     （`docker compose up -d`），`restart` 不行：容器环境在创建时定下，进程内 `get_settings()` 只解析一次
 - [ ] **后移**：REQ-AUTH-001 的 replay 测试证据与防重放 nonce 存储随摄取端点做（Kelvin 2026-09-25 的第 4 项决定）；
   同时接上 `last_used_at` 写入与解密结果缓存
+
+### AIH-TASK-015 —— 管理端前端：客户列表、建客户、客户详情与编辑（2026-09-27）
+
+上面的「管理端客户管理」**不勾**：本任务补上了前端页面，但还缺账户状态与低余额阈值配置。只做前端，调用的是
+[api.md](api.md)「管理端客户管理」里已上线的四个接口（建客户、列表、详情、编辑）；不改后端、数据库、依赖与 `.platform/`。
+设计闸门不适用：纯前端，接口都已过闸门并上线。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/adminCustomers.ts`：`listCustomers(page, page_size)`、`getCustomer(id)`、`createCustomer(body)`、
+    `updateCustomer(id, patch)`，读走 `apiGet`，写走 `client.post` / `client.patch` + `unwrapEnvelope`，错误一律经
+    `toApiError` 成为 `ApiError`。类型照 api.md 的客户对象写，`wallet.balance` 是 `string`；没有 `account_status`、
+    低余额阈值、成本或毛利字段，也不预留。另有分页边界常量（默认 20、上限 100、页码上限 10000）、query key 与读请求的
+    重试规则（403 / 404 / 422 不重试）
+  - `frontend/src/features/customers/`：`CustomerListPage.tsx`（分页列表，列公司名、联系邮箱、计费状态、创建时间，
+    行与公司名都能进详情；加载中、失败、空列表三种状态；403 显示「无权限」）、`CustomerForm.tsx`（建客户与编辑共用的
+    表单、`toCreateBody` / `toUpdatePatch` 两个纯函数、建客户页）、`CustomerDetailPage.tsx`（全部字段与钱包的币种、
+    余额、版本；404 `CUSTOMER_NOT_FOUND` 单独显示「客户不存在」；编辑只发改了的字段，没改就不发请求，
+    `contact_name` / `phone` 清空发 `null`，成功后用响应写回缓存）
+  - `frontend/src/components/`：`MoneyText.tsx`（只做字符串变换：币种 + 千分位，小数只去末尾多余的 0、至少 2 位，
+    不舍入、不截断、不经浮点）、`DateTimeText.tsx`（不带时区的 UTC 按字段拆开用 `Date.UTC` 组装，再用
+    `Intl.DateTimeFormat` 换成 Asia/Kuala_Lumpur，显示为 `YYYY-MM-DD HH:mm:ss`；不引入日期库）、
+    `RequestReference.tsx`（从 `DashboardPage.tsx` 原样抽出并导出，DashboardPage 改为引用它；DashboardPage 只少了
+    这个局部组件和随之不用的 `ApiError` 导入）
+  - 路由：`paths.ts` 新增 `/customers`、`/customers/new`、`/customers/:customerId` 与 `customerDetailPath()`；
+    `routes/index.tsx` 用 `lazy()` 引入三页，放在 `RequireAuth` + `AppLayout` 之内；`AppLayout` 菜单加「Customers」，
+    在客户的子页面上也亮着。不做前端角色判断
+  - i18n：`en.json` 新增 `nav.customers` 与 `customers.*`；antd 表单的每条校验提示都显式给文案，不用它不走 i18n 的默认句
+  - 测试（vitest + Testing Library，放在被测文件旁边，mock 写法沿用 `LoginPage.test.tsx`）：`adminCustomers.test.ts`
+    （URL、查询参数、请求体、失败信封变成 `ApiError`、重试规则）、`CustomerListPage.test.tsx`（加载中、失败带 message 与
+    request_id、403、空列表、行内容与详情链接、默认分页、地址里的分页、越界回落默认值、翻页）、`CustomerForm.test.tsx`
+    （必填、纯空白、非法邮箱与超长、255 的边界、去空白后的请求体与成功跳转、提交中禁用、422、两个纯函数）、
+    `CustomerDetailPage.test.tsx`（全部字段与钱包、404、只发改了的字段并用响应刷新、清空发 `null`、无改动不发请求、
+    编辑被拒）、`MoneyText.test.tsx`（`"0.00000000"`、`"-5.00000000"`、`"1234567.12345678"` 等）、
+    `DateTimeText.test.tsx`（跨日、跨年、午夜、小数秒、不合契约的值）。uuid 一律用全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 契约核对：api.md「通用约定」「管理端客户管理」与 `app/schemas/customers.py`、`app/api/admin_customers.py` 对照过，
+    字段、分页边界、错误码一致，**没有发现冲突**
+  - 建客户页没有单独的文件（可改路径里没有），放在 `CustomerForm.tsx` 里导出为 `CustomerCreatePage`，路由 `/customers/new`。
+    列表与详情共用的 `BillingStatusTag`、`CustomerErrorAlert` 从 `CustomerListPage.tsx` 导出
+  - 列表的页码与每页条数放在查询串里（`?page=2&page_size=50`），从详情返回时还在原页；缺失、非数字或越界的值回落到
+    默认值（1 / 20），不把越界值发给后端换一个 422。每页条数可选 10 / 20 / 50 / 100
+  - 前端校验的长度按**码点**数（与后端 Python 一致），不按 JS 的 `String.length`；`company_name` 与 `email` 发送前去首尾空白；
+    建客户时空白的可选字段不带（后端缺省存 `null`）；编辑时比较的是去空白后的值，只差首尾空白不算改动
+  - 防双击：提交进行中整张表单与提交按钮禁用，另有一个同步的 ref 挡住按钮禁用生效之前的第二次提交；建客户成功后
+    不解除禁用，直接进入详情。建好的详情写进缓存，详情页不再读一次
+  - 403 `ADMIN_REQUIRED` 显示「无权限」并带 request_id，不给「再试一次」；401 交给现有拦截器
+  - 可空字段为空时显示「—」；计费状态出现契约之外的值时原样显示；金额或时间不合契约时原样显示，不猜
+  - antd 表格与分页依赖 `ResizeObserver`，jsdom 没有：`CustomerListPage.test.tsx` 在 `vi.hoisted` 里补了一个空实现
+    （`src/test/setup.ts` 不在可改路径里）
+- [x] **验证程度**：
+  - 前端检查（lint / typecheck / test / build）只在 CI 的 frontend job 里跑，结果以 PR 上的 CI 为准，不记在本条
+  - Worker 的 `allowed_commands` 由 Worker 自己运行并记录；其中 skipped 的不算 passed
+  - 没有在浏览器里对真实后端走过一遍；合并部署后用验收夹具账号在生产上走一次列表 → 详情 → 编辑，见下一条
+- [ ] 合并部署后在生产上用验收夹具账号核对一次：列表能翻页、详情的余额与后端字符串数值相等、时间是吉隆坡时间、
+  编辑只发改了的字段（浏览器开发者工具里看请求体）、非 ADMIN 账号看到的是「无权限」（未发生）
 
 ---
 
