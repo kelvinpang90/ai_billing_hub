@@ -44,7 +44,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013` 与 `AIH-TASK-014`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013`、`AIH-TASK-014`、`AIH-TASK-015`、`AIH-TASK-016`、`AIH-TASK-017` 与 `AIH-TASK-018`（用途见下面「Worker 的启用状态」）。
 `AIH-TASK-009` / `AIH-TASK-010` 不在其中：它们是控制面给「采纳提议」的 run 分配的编号，不写进 `tasks.yaml`。
 
 除此之外一律 **fail closed** ——
@@ -69,7 +69,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-014` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-018` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -78,7 +78,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-014`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-018`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -90,7 +90,7 @@ Codex，合并仍是 Kelvin。
 不在本仓库。把 `worker_enabled` 改回 `false` 仍是**出问题时的回滚方式**：不需要删文件、
 不需要改代码。
 
-十个已登记任务的用途不同：
+已登记任务的用途不同：
 
 | 任务 | 用途 | 写仓库吗 |
 | --- | --- | --- |
@@ -106,6 +106,10 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-012` | Phase 1 第五刀：集成 API 凭据。管理员为项目建、列、轮换、吊销凭据（`api_key` 不变、版本递增，重叠期默认 7 天），签名密钥用信封加密存储，secret 只在建凭据与轮换时返回一次；另有不接端点的签名校验库。**碰认证与凭据，已过设计闸门** #118（`APPROVED: design v1`）；批准的设计放在 [docs/design/AIH-TASK-012-integration-access.md](../docs/design/AIH-TASK-012-integration-access.md)，Worker 以它为准 | 同 `AIH-TASK-002`；合并即由自动部署在生产上执行迁移 0007。文件名避开 Worker 的敏感路径规则，用 `integration_access`（见契约）。Worker 生成的 PR 正文固定写「设计闸门：不适用」，由实现方改成 `#118` 再审 |
 | `AIH-TASK-013` | AIH-TASK-012 留下的文档尾巴：在 [docs/runbook.md](../docs/runbook.md) 补一段 `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS` 的运维说明（含义、默认 7 天、怎么改、怎么生效、对已轮换凭据的影响），事实以 012 的设计 §2「配置」与代码为准。**不走设计闸门**：纯运维文档，不改钱、状态机与认证逻辑。也是「按规划执行」的第一项 | 只改 `docs/runbook.md` 与 [docs/TODO.md](../docs/TODO.md)；不碰代码、数据库与迁移。planning-v1 块由管理员的收尾 PR 改，Worker 不动 |
 | `AIH-TASK-014` | 把 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) 第 8 节那句 spec §136 文档清单同步成现状：已建的四份（database-schema / api / deployment / runbook）加链接，未建的五份写明尚未创建。**不走设计闸门**：纯文档。用来验证 OpenClaw P3（就绪预检、状态时间线、批准预检、合并时的部署绑定） | 只改 `docs/ARCHITECTURE.md` 一个文件，检查只有 `docs.check`；不碰代码、迁移、docker/compose、`.platform/` 与 `docs/TODO.md`。planning-v1 块由管理员的收尾 PR 改 |
+| `AIH-TASK-015` | 管理端前端第一刀：客户列表、建客户、客户详情（含钱包余额与计费状态）与编辑，调用 006 / 009 已上线的接口；新建 `features/customers/`，加 `MoneyText`（金额只按十进制字符串处理）与 `DateTimeText`（UTC → Asia/Kuala_Lumpur）。**不走设计闸门**：纯前端 | 十九项，全在 `frontend/src/` 与 `docs/TODO.md`（含把 `DashboardPage` 的 `RequestReference` 抽成共享组件）；不装依赖、不碰后端。⚠️ `commands.yaml` 没有前端检查，前端的 lint / typecheck / test / build 只在 CI 的 frontend job |
+| `AIH-TASK-016` | 管理端前端第二刀：客户详情页的项目列表与建项目，并给 018 留挂载点。依赖 015。**不走设计闸门**：纯前端 | 八项；同 015 |
+| `AIH-TASK-017` | 管理端前端第三刀：手工调账（接口已过闸门 #111）。幂等键每次打开表单生成、结果未知时锁定表单只许同键重试。依赖 015。**不走设计闸门**：纯前端，钱的规则全在后端 | 八项，新建 `features/wallet/`；同 015 |
+| `AIH-TASK-018` | 管理端前端第四刀：项目集成 API 凭据的建、列、轮换、吊销（接口已过闸门 #118）。`secret` 只在结果对话框出现一次，不进查询缓存与浏览器存储。依赖 016。**不走设计闸门**：纯前端 | 八项；文件名沿用 `integration_access` 的叫法避开 Worker 的敏感路径规则；同 015 |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
@@ -122,7 +126,8 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 `AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）、`AIH-TASK-008`（#107）、`AIH-TASK-011`（#115）、
 `AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
-现在一个 `ready` 都没有，[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」也是空的。
+2026-09-27 登记 `AIH-TASK-015` 到 `AIH-TASK-018`（管理端前端四刀）为 `ready`，按 015 → 016 → 017 → 018 排进
+[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
 
 `AIH-TASK-014` 用来验证 OpenClaw P3（run `2c4a37ea`，PR #129，合并为 `f247a7c`）。第一次「批准」在 CI 的 `backend`
 还没跑完时发出，批准预检按 `checks_not_passed` 拒绝、run 回到等待批准；CI 全绿后再批准，合并与部署正常完成。

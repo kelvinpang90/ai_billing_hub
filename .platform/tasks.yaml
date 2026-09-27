@@ -812,3 +812,261 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 015–018：Phase 1 管理端的前端页面。后端接口都已上线（006 / 009 / 011 / 012），前端至今只有登录与平台状态卡片。
+  # 按 CLAUDE.md 分档：前端不走设计闸门，钱、幂等与认证的语义全在已批准的后端里，前端只按 docs/api.md 调用。
+  # ⚠️ commands.yaml 里没有前端检查，Worker 跑不了 npm；lint / typecheck / test / build 只在 CI 的 frontend job，
+  # 实现方以 CI 为准，Worker 里的五项检查只证明没碰坏 Python 侧与文档。
+  - id: AIH-TASK-015
+    title: admin frontend - customer list, create, detail and edit
+    purpose: >-
+      管理端前端第一刀：客户列表（分页）、建客户、客户详情（含钱包余额与计费状态）与编辑客户，
+      调用 docs/api.md「管理端客户管理」里已上线的四个接口（POST / GET 列表 / GET 详情 / PATCH）。
+      顶部菜单加「客户」一项。只做前端，不改后端、数据库、依赖与 .platform/。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 接口路径、请求体、响应字段、错误码一律以 docs/api.md「通用约定」与「管理端客户管理」为准；两处说法与后端代码冲突时停下，在 PR 里说明，不自行裁决。不改任何后端文件
+      - 新增 frontend/src/api/adminCustomers.ts：listCustomers(page, page_size)、getCustomer(id)、createCustomer(body)、updateCustomer(id, patch)，沿用 frontend/src/api/client.ts 的 client / apiGet / unwrapEnvelope / toApiError，错误一律是 ApiError；类型按 docs/api.md 的客户对象写，金额字段类型是 string
+      - 新增 feature 目录 frontend/src/features/customers/（spec §101 的目录名）；路由路径只登记在 frontend/src/routes/paths.ts，页面在 frontend/src/routes/index.tsx 用 lazy() 引入，放在 RequireAuth + AppLayout 之内；AppLayout 菜单加一项
+      - 客户列表页：按 spec §108 分页（page / page_size，默认 20，与后端上限一致），顺序沿用后端（最新在前），至少显示公司名、邮箱、计费状态、创建时间；行可进入详情；加载中、失败、空列表三种状态都画出来（spec §132 DoD 第 8 条），失败时显示后端的 message 与 request_id：把 frontend/src/features/dashboard/DashboardPage.tsx 里的局部组件 RequestReference 原样抽到 frontend/src/components/RequestReference.tsx 并导出，DashboardPage 改为引用它（行为与文案不变，它的其余代码不动），本任务与后续页面都用这一个
+      - 建客户：表单字段与校验按 docs/api.md（company_name 必填、去首尾空白后 1–255；email 必填且合法、≤320；contact_name ≤255、phone ≤32 可选）；接口不幂等，提交进行中必须禁用提交按钮防双击；成功后进入该客户详情；422 显示后端 message
+      - 客户详情页：显示客户详情的全部字段与钱包（币种、余额、版本）；404 CUSTOMER_NOT_FOUND 显示「客户不存在」而不是通用错误
+      - 编辑客户：PATCH 只带实际改了的字段；没有任何改动时不发请求；contact_name / phone 清空时发 null；成功后用响应刷新详情
+      - 金额只按十进制字符串处理与显示，不 parseFloat、不 Number()、不转浮点（INV-10）；新增 frontend/src/components/MoneyText.tsx（带单测）负责展示：币种 + 千分位，小数部分只去掉末尾多余的 0、至少保留 2 位（"1234567.12345678" → 1,234,567.12345678，"0.00000000" → 0.00），不舍入、不截断，展示值与后端字符串在数值上完全相等
+      - 时间：后端给的是不带时区的 UTC（docs/api.md「时间」），展示时换成 Asia/Kuala_Lumpur；新增 frontend/src/components/DateTimeText.tsx（带单测）统一做这件事，不引入日期库
+      - 401 由现有拦截器处理；403 ADMIN_REQUIRED 显示无权限提示，不做前端角色判断（菜单不是权限，见 AppLayout 注释与 spec §51）
+      - 页面不显示、不发送 account_status、低余额阈值与任何成本、毛利字段（后端没有这些字段，也不许预留）
+      - 所有面向用户的文案走 i18n（frontend/src/i18n/locales/en.json），满足 eslint 规则 no-hardcoded-jsx-text 与 frontend/src/i18n/keys.test.ts（不许有缺失或没人用的 key）
+      - 测试（vitest + Testing Library，放在被测文件旁边，mock 写法沿用 frontend/src/features/auth/LoginPage.test.tsx）：api 模块的 URL、查询参数与请求体；列表的三种状态与分页；建客户的校验、提交中禁用、成功跳转；编辑只发改动字段、无改动不发请求；详情 404；MoneyText 对 "0.00000000"、"-5.00000000"、"1234567.12345678" 的展示；DateTimeText 的时区换算。测试数据里的 uuid 一律用 00000000-0000-4000-8000-000000000000 这类全零占位值（secret-scan）
+      - docs/TODO.md 在 Phase 1 下新增 AIH-TASK-015 记录段（做了什么、偏离了什么、验证到什么程度，并写明前端检查只在 CI 跑）；Phase 1 的「管理端客户管理」保持 [ ]（还缺账户状态与低余额阈值）；不改 planning-v1 块；复选框只允许 [ ] / [x]
+      - 不装依赖（package.json / package-lock.json 不在可改路径里）；DashboardPage 只做上面那一处抽取；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（lint / typecheck / test / build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，只调用已上线、已过闸门 #96 的接口，不改钱的行为、状态机与认证逻辑；PR 正文要把这条理由写出来，不能只写「不适用」
+    allowed_change_paths:
+      - frontend/src/api/adminCustomers.ts
+      - frontend/src/api/adminCustomers.test.ts
+      - frontend/src/components/MoneyText.tsx
+      - frontend/src/components/MoneyText.test.tsx
+      - frontend/src/components/DateTimeText.tsx
+      - frontend/src/components/DateTimeText.test.tsx
+      - frontend/src/components/RequestReference.tsx
+      - frontend/src/features/dashboard/DashboardPage.tsx
+      - frontend/src/features/customers/CustomerListPage.tsx
+      - frontend/src/features/customers/CustomerListPage.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/features/customers/CustomerForm.tsx
+      - frontend/src/features/customers/CustomerForm.test.tsx
+      - frontend/src/routes/index.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/layouts/AppLayout.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-016
+    title: admin frontend - customer projects list and create
+    purpose: >-
+      管理端前端第二刀：在 AIH-TASK-015 的客户详情页里加项目区块，列出该客户的项目（分页）并可新建项目，
+      调用 docs/api.md「管理端客户管理」里的建项目与项目列表两个接口。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-015
+    acceptance_criteria:
+      - 接口以 docs/api.md「建项目」「项目列表」两节为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件
+      - frontend/src/api/adminCustomers.ts 增加 listProjects(customerId, page, page_size) 与 createProject(customerId, body)，写法与 015 已有函数一致
+      - 新增 frontend/src/features/customers/ProjectsPanel.tsx，由 CustomerDetailPage 引入；列表分页、顺序沿用后端（最早在前），至少显示项目名、描述、创建时间（用 015 的 DateTimeText）；加载中、失败（带 request_id，用 015 抽出的 RequestReference）、空三种状态都画出来
+      - 建项目：name 必填、去首尾空白后 1–255，description 可选、≤1000；接口不幂等，提交进行中禁用按钮；成功后刷新项目列表；404 CUSTOMER_NOT_FOUND 与 422 显示后端 message
+      - 项目区块给每个项目留一个挂载点（例如展开行或「管理」入口）供 AIH-TASK-018 放集成凭据，但本任务不实现任何凭据功能、不发凭据接口的请求
+      - 文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts
+      - 测试：api 函数的 URL 与请求体；ProjectsPanel 的三种状态、分页、建项目的校验与提交中禁用；CustomerDetailPage 的既有用例保持通过。uuid 用全零占位值
+      - docs/TODO.md 新增 AIH-TASK-016 记录段；不改 planning-v1 块；复选框只允许 [ ] / [x]
+      - 不装依赖；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job 必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，只调用已上线、已过闸门 #96 的接口，不改钱的行为、状态机与认证逻辑；PR 正文要把这条理由写出来
+    allowed_change_paths:
+      - frontend/src/api/adminCustomers.ts
+      - frontend/src/api/adminCustomers.test.ts
+      - frontend/src/features/customers/ProjectsPanel.tsx
+      - frontend/src/features/customers/ProjectsPanel.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-017
+    title: admin frontend - manual wallet adjustment
+    purpose: >-
+      管理端前端第三刀：在客户详情页加「手工调账」入口，调用 docs/api.md「管理端手工调账」的接口（已过设计闸门 #111、
+      由 AIH-TASK-011 上线）。重点是幂等键的生命周期与「结果未知时不许改单」。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-015
+    acceptance_criteria:
+      - 语义一律以 docs/api.md「管理端手工调账」与 docs/design/AIH-TASK-010-admin-wallet-adjustment.md 为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件与设计文件
+      - 新增 frontend/src/api/walletAdjustments.ts：postAdjustment(customerId, body)，返回调账对象（金额字段是 string），错误是 ApiError
+      - 新增 feature 目录 frontend/src/features/wallet/（spec §101 的目录名）与 AdjustmentModal.tsx，由 CustomerDetailPage 打开
+      - 表单：transaction_type 只能选 ADJUSTMENT_CREDIT、BONUS、ADJUSTMENT_DEBIT、REFUND_ADJUSTMENT 四种；管理员输入不带符号的金额，前端按类型加符号（贷方为正、借方为负）组成请求里的 amount 字符串；金额格式按 docs/api.md（1–12 位整数、可选 1–8 位小数、不能为 0），全程字符串校验与拼接，不 parseFloat、不 Number()、不舍入；reason 必填、去首尾空白后 1–255，表单上提示「只写业务说明，不写个人数据，永久保留」
+      - 提交前有确认步骤，显示客户、类型、带符号的金额与原因；确认后才发请求
+      - 幂等键：每次打开表单用 crypto.randomUUID() 生成一个小写 uuid；同一次打开里的重试带同一个键。一旦发出过请求而结果未知（网络错误、超时、5xx），类型、金额与原因锁定为只读，只能「用同一个键重试」或关闭表单 —— 不许改了金额再用同一个键发（会 409），也不许换新键重发（可能已入账，造成重复调账）；关闭后再打开才生成新键。这条要写进组件注释
+      - 结果：201 显示记账成功与 balance_after、billing_status；200 且 replayed 为 true 时明确显示「此前已记过，本次未重复入账」；409 ADJUSTMENT_CONFLICT、422（含 BALANCE_OUT_OF_RANGE）、404 CUSTOMER_NOT_FOUND 显示后端 message 与 request_id；成功（含重放）后刷新客户详情（余额、计费状态）
+      - 金额展示用 015 的 MoneyText；文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts
+      - 测试：请求体的 amount 按类型带符号且是字符串；非法金额（0、13 位整数、9 位小数、带指数、带 +）被拦下且不发请求；同一次打开的重试复用同一个键、重新打开换新键；结果未知后字段只读；replayed 的展示；409 的展示；成功后刷新详情。uuid 与幂等键在测试里一律用 00000000-0000-4000-8000-000000000000 这类全零占位值（secret-scan 会把随机 uuid 当密钥）
+      - docs/TODO.md 新增 AIH-TASK-017 记录段；不改 planning-v1 块；复选框只允许 [ ] / [x]
+      - 不装依赖；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job 必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，调用的调账接口已过闸门 #111，钱的规则、幂等与状态跃迁全在后端，前端不改任何一条；PR 正文要把这条理由写出来
+    allowed_change_paths:
+      - frontend/src/api/walletAdjustments.ts
+      - frontend/src/api/walletAdjustments.test.ts
+      - frontend/src/features/wallet/AdjustmentModal.tsx
+      - frontend/src/features/wallet/AdjustmentModal.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 文件名避开 Worker 的敏感路径规则（credential / secret / key / token 等整词），沿用 012 的 integration_access 叫法。
+  - id: AIH-TASK-018
+    title: admin frontend - project integration access (create, list, rotate, revoke)
+    purpose: >-
+      管理端前端第四刀：在 AIH-TASK-016 的项目区块里管理项目的集成 API 凭据 —— 建、列、轮换、吊销单个版本、吊销整个 key，
+      调用 docs/api.md「管理端集成 API 凭据」的五个接口（已过设计闸门 #118、由 AIH-TASK-012 上线）。
+      重点是 secret 只显示一次、不落任何缓存。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-016
+    acceptance_criteria:
+      - 语义一律以 docs/api.md「管理端集成 API 凭据」与 docs/design/AIH-TASK-012-integration-access.md 为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件与设计文件
+      - 新增 frontend/src/api/integrationAccess.ts 封装五个接口；建凭据的请求体是 {}；轮换的 current_key_version 是 JSON 整数；吊销带 reason
+      - 新增 frontend/src/features/customers/IntegrationAccessPanel.tsx，挂在 016 留的项目挂载点上；列表分页，按 api_key 分组显示各版本的 key_version、status、verifiable、valid_from、valid_until、revoked_at（时间用 DateTimeText）
+      - secret 只显示一次：建凭据与轮换的 201 响应里的 secret 只在一个结果对话框里显示，带复制按钮和「关闭后无法再次查看」的警告；不写进 TanStack Query 的查询缓存（用 mutation 的返回值，不 setQueryData，成功后只让列表查询失效重取）、不写 localStorage / sessionStorage、不进 console、不进 URL；对话框关闭即丢弃
+      - 轮换：current_key_version 取该 api_key 当前列表里的最大版本；409 CREDENTIAL_VERSION_CONFLICT 提示「已被他人轮换」并刷新列表；409 CREDENTIAL_REVOKED 与 503 ENCRYPTION_NOT_CONFIGURED 显示后端 message 与 request_id；结果未知（网络错误、5xx）时提示按 docs/api.md 的恢复方式处理（新版本若已入库则 secret 无法找回，需再轮换或吊销该版本），不自动重试
+      - 吊销单个版本与吊销整个 key 都要二次确认并填 reason（去首尾空白后 1–255，提示不写个人数据）；吊销是终态，确认框写明
+      - 文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts
+      - 测试：五个 api 函数的 URL 与请求体；secret 只在结果对话框出现、关闭后从 DOM 消失且查询缓存里没有它；轮换带列表里的最大版本；409 冲突后重取列表；吊销的二次确认与 reason 校验。api_key / secret 示例一律用 docs/api.md 的全零占位值（ak_ 加 32 个 0、sk_ 加 64 个 0），uuid 同样全零
+      - docs/TODO.md 新增 AIH-TASK-018 记录段；不改 planning-v1 块；复选框只允许 [ ] / [x]
+      - 不装依赖；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job 必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，调用的凭据接口已过闸门 #118，认证与加密规则全在后端，前端不改任何一条；PR 正文要把这条理由写出来
+    allowed_change_paths:
+      - frontend/src/api/integrationAccess.ts
+      - frontend/src/api/integrationAccess.test.ts
+      - frontend/src/features/customers/IntegrationAccessPanel.tsx
+      - frontend/src/features/customers/IntegrationAccessPanel.test.tsx
+      - frontend/src/features/customers/ProjectsPanel.tsx
+      - frontend/src/features/customers/ProjectsPanel.test.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    # MXC 里能跑的五项；前端检查与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
