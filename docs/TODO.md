@@ -1126,7 +1126,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
 > - Tenant：身份字段（004）与计费状态（005）已有；缺账户状态 `account_status`（状态模型任务）
 > - Project：身份字段与管理端建 / 列（004、006）已有；缺集成字段（后端地址、状态 webhook 地址与密钥、`integration_status`），随 webhook 密钥 schema 与 Phase 3
-> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有；缺账户状态、低余额阈值配置、前端页面
+> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，前端的列表、建客户、详情与编辑页（015）已有；缺账户状态、低余额阈值配置
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
 > - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么（例如管理端查看审计）**待澄清**
@@ -1465,6 +1465,60 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
     （`docker compose up -d`），`restart` 不行：容器环境在创建时定下，进程内 `get_settings()` 只解析一次
 - [ ] **后移**：REQ-AUTH-001 的 replay 测试证据与防重放 nonce 存储随摄取端点做（Kelvin 2026-09-25 的第 4 项决定）；
   同时接上 `last_used_at` 写入与解密结果缓存
+
+### AIH-TASK-015 —— 管理端前端：客户列表、建客户、客户详情与编辑（2026-09-27）
+
+上面的「管理端客户管理」**不勾**：前端页面有了，但还缺账户状态与低余额阈值配置（后端也还没有）。
+只做前端，调用 [api.md](api.md)「管理端客户管理」里已上线的四个接口；设计闸门不适用 —— 纯前端，接口已过闸门 #96，
+不改钱的行为、状态机与认证逻辑。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/adminCustomers.ts`：`listCustomers(page, page_size)`、`getCustomer(id)`、`createCustomer(body)`、
+    `updateCustomer(id, patch)`，读走 `apiGet`，写走 `client.post` / `client.patch` + `unwrapEnvelope` / `toApiError`，
+    错误一律是 `ApiError`。类型照 api.md 的客户对象写，`wallet.balance` 是 `string`；路径里的 id 经 `encodeURIComponent`
+  - `frontend/src/components/RequestReference.tsx`：`DashboardPage` 里的局部组件原样抽出并导出；`DashboardPage` 改为引用它
+  - `frontend/src/components/MoneyText.tsx`：只做字符串运算 —— 整数部分加千分位，小数部分去掉末尾的 0、至少留 2 位，
+    不舍入不截断；币种在前（`MYR 1,234,567.12345678`）。没有 `parseFloat` / `Number()` / `Intl.NumberFormat`（INV-10）
+  - `frontend/src/components/DateTimeText.tsx`：后端的不带时区 UTC 串先补 `Z` 再用 `Intl.DateTimeFormat` 换成
+    Asia/Kuala_Lumpur，逐段拼成 `YYYY-MM-DD HH:mm:ss`；`<time>` 的 `dateTime` 是精确时刻，`title` 注明时区。不引入日期库
+  - `frontend/src/features/customers/`：`CustomerListPage`（分页，页码与每页条数在地址栏；加载中、失败带 message 与
+    request_id、空列表三态；公司名链接进详情）、`CustomerDetailPage`（客户详情全部字段 + 钱包币种、余额、版本；
+    404 `CUSTOMER_NOT_FOUND` 显示「Customer not found」；编辑只发改了的字段、无改动不发请求、清空联系人 / 电话发 `null`、
+    成功后用 PATCH 响应写回缓存）、`CustomerForm`（表单与校验、`CustomerCreatePage`、`toCreateBody` / `toPatch`、
+    `CustomerErrorAlert`）。403 `ADMIN_REQUIRED` 在四处都显示「只有管理员能管理客户」并附后端 message 与 request_id；前端不做角色判断
+  - 路由：`routes/paths.ts` 加 `customers`、`customerCreate`（`/customers/new`）、`customerDetail` 与 `customerDetailPath()`
+    （`generatePath` 填参数、不转义，id 只来自后端的 uuid）；`routes/index.tsx` 用 `lazy()` 引入三页，放在 `RequireAuth` + `AppLayout` 之内；
+    `AppLayout` 菜单加「Customers」，详情与建客户页也高亮这一项
+  - 文案全部进 `en.json`（`nav.customers`、`time.displayZone`、`customers.*`）
+  - 测试：`adminCustomers.test.ts`（URL、查询参数、请求体、PATCH 里的 `null`、id 转义、422 变成 `ApiError`）、
+    `MoneyText.test.tsx`（`"0.00000000"`、`"-5.00000000"`、`"1234567.12345678"` 及浮点存不准的值）、
+    `DateTimeText.test.tsx`（换算、跨日跨年、小数秒、不认识的形状）、`CustomerListPage.test.tsx`（三态、403、顺序与字段、
+    翻页、地址栏页码、越界回默认、末页之后的空页）、`CustomerForm.test.tsx`（校验、只含空白、超长、双击只发一次且提交中禁用、
+    成功跳转、422 与 403、`toCreateBody` / `toPatch`）、`CustomerDetailPage.test.tsx`（全部字段、404、其他错误、403、
+    只发改动字段、清空发 `null`、无改动不发请求、422 保留表单）。测试里的 uuid 都是全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 可改路径里没有单独的建客户页文件，所以 `CustomerCreatePage` 放在 `CustomerForm.tsx` 里、挂在 `/customers/new`；
+    `BillingStatusTag` 从列表页导出给详情页用，`CustomerErrorAlert` 从表单模块导出给两页用
+  - `DashboardPage` 除了改为引用 `RequestReference`，还删掉了因此不再使用的 `ApiError` 导入（`noUnusedLocals` 要求），其余没动
+  - 地址栏里的 `page` / `page_size` 不合法或超出后端范围（page 1–10000、page_size 1–100）时退回默认值，而不是把它发给后端
+    换一个 422；每页条数可选 10 / 20 / 50 / 100，默认 20
+  - 前端的长度校验按「去掉首尾空白后的码点数」算，与 Python 的 `len()` 一致；邮箱格式用 antd 的 `type: "email"`，
+    比后端的 `EmailStr` 宽或窄都有可能，以后端 422 为准。提交前邮箱也去掉首尾空白
+  - 建客户与编辑都用一个 ref 挡第二次提交，不只靠按钮禁用：`isPending` 要等下一次渲染，而 antd 的校验是异步的
+  - `"-0.00000000"` 显示成 `0.00`（数值相等，不让人误以为欠钱）；不是十进制字符串的金额、不是不带时区 ISO 串的时间原样显示
+  - 核对了 api.md 与 `app/api/admin_customers.py`、`app/schemas/customers.py`：路径、请求体、响应字段、分页上限与错误码
+    一致，没有需要停下来裁决的冲突
+- [x] **验证程度**：
+  - Worker 跑本任务的 `allowed_commands`：`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check`
+    与前端的 `frontend.test` / `frontend.typecheck` / `frontend.lint`；前端 `build`（`tsc --build && vite build`，含
+    tsconfig.app / tsconfig.node 两份类型检查）只在 CI 的 frontend job 跑。结果由 Worker 与 CI 记录，不写在本条
+  - 编写时没有对照安装好的 `node_modules` 核对的前提，CI 上如果红先查这些：① `antd` 顶层导出 `FormRule`、
+    `TableColumnsType`、`DescriptionsProps` 三个类型；② antd 分页的页码项带 `title="2"` 这样的属性（列表翻页用例用
+    `getByTitle` 找它）；③ 提交中的 antd 按钮在 jsdom 里带 `disabled` 属性；④ Node 的 ICU 带 Asia/Kuala_Lumpur 时区数据
+- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
+- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+- [ ] 部署后用验收夹具账号在生产上走一遍：列表里看到夹具客户、详情的余额与后端字符串一致、改一次联系人再改回（留两条
+  `CUSTOMER_UPDATE` 审计，`changed_fields` 只有 `contact_name`）
 
 ---
 
