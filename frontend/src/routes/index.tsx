@@ -1,7 +1,7 @@
 /**
  * 路由表。
  *
- * 目前只有落地页、认证相关的三页与兜底页。**不预建 spec §101 列的那九个
+ * 目前有落地页、认证相关的三页、管理端客户三页与兜底页。**不预建 spec §101 列的那九个
  * feature 目录** —— 空目录会让人以为「那块已经开工了」，和 runbook 不预留空
  * 标题是同一条道理。每个 feature 在它自己那个 Phase 落地时再建。
  *
@@ -31,6 +31,17 @@ const ResetPasswordPage = lazy(() =>
 );
 const DashboardPage = lazy(() =>
   import("../features/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })),
+);
+const CustomerListPage = lazy(() =>
+  import("../features/customers/CustomerListPage").then((m) => ({ default: m.CustomerListPage })),
+);
+const CustomerCreatePage = lazy(() =>
+  import("../features/customers/CustomerForm").then((m) => ({ default: m.CustomerCreatePage })),
+);
+const CustomerDetailPage = lazy(() =>
+  import("../features/customers/CustomerDetailPage").then((m) => ({
+    default: m.CustomerDetailPage,
+  })),
 );
 const NotFoundPage = lazy(() =>
   import("./NotFoundPage").then((m) => ({ default: m.NotFoundPage })),
@@ -66,6 +77,11 @@ export function AppRoutes() {
           <Route element={<RequireAuth />}>
             <Route element={<AppLayout />}>
               <Route path={ROUTES.dashboard} element={<DashboardPage />} />
+              {/* 管理端页面。守卫只管「登没登录」，是不是 ADMIN 由后端判（spec §51），
+                  非 ADMIN 进来会拿到 403，页面照实显示无权限。 */}
+              <Route path={ROUTES.customers} element={<CustomerListPage />} />
+              <Route path={ROUTES.customerNew} element={<CustomerCreatePage />} />
+              <Route path={ROUTES.customerDetail} element={<CustomerDetailPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Route>
           </Route>

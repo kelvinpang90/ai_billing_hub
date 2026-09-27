@@ -1126,7 +1126,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
 > - Tenant：身份字段（004）与计费状态（005）已有；缺账户状态 `account_status`（状态模型任务）
 > - Project：身份字段与管理端建 / 列（004、006）已有；缺集成字段（后端地址、状态 webhook 地址与密钥、`integration_status`），随 webhook 密钥 schema 与 Phase 3
-> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有；缺账户状态、低余额阈值配置、前端页面
+> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，这四项的前端页面（015）已有；缺账户状态、低余额阈值配置，以及项目、调账、凭据的前端页面
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
 > - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么（例如管理端查看审计）**待澄清**
@@ -1465,6 +1465,63 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
     （`docker compose up -d`），`restart` 不行：容器环境在创建时定下，进程内 `get_settings()` 只解析一次
 - [ ] **后移**：REQ-AUTH-001 的 replay 测试证据与防重放 nonce 存储随摄取端点做（Kelvin 2026-09-25 的第 4 项决定）；
   同时接上 `last_used_at` 写入与解密结果缓存
+
+### AIH-TASK-015 —— 管理端前端第一刀：客户列表、建客户、详情与编辑（2026-09-27）
+
+上面 Phase 1 的「管理端客户管理」**不勾**：本任务只给已上线的四个接口（建客户、列表、详情、编辑）配上前端页面，
+账户状态与低余额阈值还没有后端，项目、调账、凭据也还没有页面。只改前端与本文件，不改后端、数据库、依赖与
+`.platform/`。接口契约以 [api.md](api.md)「通用约定」与「管理端客户管理」为准；对照了
+`app/api/admin_customers.py` 与 `app/schemas/customers.py`，路径、字段、分页边界（默认 20、上限 100、页码上限
+10000）与错误码都与 api.md 一致，没有需要停下来裁决的冲突。设计闸门：不适用（纯前端，只调用已过闸门的接口）。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/adminCustomers.ts`：`listCustomers(page, page_size)`、`getCustomer(id)`、`createCustomer(body)`、
+    `updateCustomer(id, patch)`，走 `client.ts` 的 `client` / `apiGet` / `unwrapEnvelope` / `toApiError`，错误一律是
+    `ApiError`。类型照 api.md 的客户对象写，金额字段是 `string`；没有账户状态、阈值、成本、毛利字段。路径里的客户 id
+    先 `encodeURIComponent`。另有查询键与 `CUSTOMER_NOT_FOUND` / `ADMIN_REQUIRED` 常量
+  - `frontend/src/components/RequestReference.tsx`：从 `DashboardPage.tsx` 原样抽出并导出；`DashboardPage` 只改成
+    引用它（顺带删掉因此不再用到的 `ApiError` import），行为与文案不变
+  - `frontend/src/components/MoneyText.tsx`：纯字符串处理，币种 + 千分位，小数去掉末尾的 0、至少留 2 位；不
+    `parseFloat`、不 `Number()`、不 `Intl.NumberFormat`（INV-10）。认不出的输入原样显示
+  - `frontend/src/components/DateTimeText.tsx`：把后端不带时区的 UTC 拆成字段、按 UTC 组装，再用 `Intl` 换成
+    Asia/Kuala_Lumpur，显示为 `YYYY-MM-DD HH:mm:ss`；不经过 `new Date(string)`（它把不带时区的串按浏览器本地时区
+    解析）。认不出的输入原样显示。没有引入日期库
+  - `frontend/src/features/customers/`：`CustomerListPage`（分页状态放在地址栏 `?page=&page_size=`，越界或不是数字时
+    回到默认值；顺序沿用后端；公司名、邮箱、计费状态、创建时间；公司名是进入详情的链接；加载中、失败、空列表三态）、
+    `CustomerDetailPage`（全部字段与钱包；404 显示「客户不存在」；编辑就在这一页）、`CustomerForm`（建客户与编辑共用
+    的表单、建客户页，以及几个页面共用的错误提示、计费状态标签与查询重试策略）
+  - 路由：`paths.ts` 登记 `/customers`、`/customers/new`、`/customers/:customerId` 与 `customerDetailPath()`；
+    `routes/index.tsx` 用 `lazy()` 引入三页，放在 `RequireAuth` + `AppLayout` 之内；`AppLayout` 菜单加「Customers」，
+    子页面也亮这一项
+  - 文案全部进 `en.json`（`nav.customers` 与 `customers.*`）
+  - 测试（放在被测文件旁边）：`adminCustomers.test.ts`（URL、查询参数、请求体、转义、错误都成 `ApiError`）、
+    `MoneyText.test.tsx`、`DateTimeText.test.tsx`、`CustomerListPage.test.tsx`（三态、403、行内容与顺序、分页、地址栏的
+    页码与越界回退）、`CustomerForm.test.tsx`（校验、按码点数长度、双击只发一次且提交中禁用、成功跳转、422 与 403、
+    请求体的构造）、`CustomerDetailPage.test.tsx`（全部字段与钱包、空字段、404、403、其他错误、只发改动字段、清空发
+    `null`、用响应刷新、无改动不发请求、编辑被拒）。uuid 一律用 `00000000-0000-4000-8000-00000000000x` 占位
+- [x] **由实现定的细节**（审查时请看这几条）：
+  - 建客户防双击有两层：提交中按钮 `disabled` + `loading`、表单整体禁用；另有一个同步 ref。antd 的 `onFinish` 在
+    异步校验**之后**才调，双击的两次点击可能都在按钮变灰之前通过校验，只靠禁用挡不住
+  - 建客户成功后用 `replace` 跳到详情：「后退」不该回到一张填好了、一点就再建一个客户的表单
+  - 可选字段去首尾空白后为空时，建客户**不带**这个字段（后端默认 `null`）；编辑时联系人 / 电话清空发 `null`
+  - 前端长度校验按 Unicode 码点数（与后端 Python 的 `len()` 一致），不按 JS 的 `length`；邮箱只挡明显不像邮箱的输入，
+    最终判定在后端，422 时显示后端的 message 与 request_id
+  - 编辑无改动时不发请求，在表单上方提示「没有改动」，表单保持打开
+  - 读列表与详情时，后端已给出明确答复的错误（`CUSTOMER_NOT_FOUND`、`ADMIN_REQUIRED`、`VALIDATION_ERROR`、
+    `TOKEN_INVALID`）不重试，其余沿用全局的重试一次
+  - 403 `ADMIN_REQUIRED` 显示「没有权限」，同样带 request_id；前端不做角色判断，菜单对所有登录用户都有「Customers」
+  - 列表每页条数可选 10 / 20 / 50 / 100（默认 20，不超过后端上限 100）；「页码超过末页」时显示空表格与分页，不当成空列表
+  - 页面上时间列的标题写明是 MYT；`<time>` 的 `datetime` 属性保留 UTC 原值并补上 `Z`
+- [x] **偏离与未做**：
+  - 没有单独的编辑页，编辑在详情页上切换成表单；没有新的路由
+  - 建客户页放在 `CustomerForm.tsx` 里，共用的小件（错误提示、计费状态标签、重试策略）也放在那里：可改路径只给了三个
+    feature 文件
+  - 项目列表 / 建项目、调账、凭据的页面不在本任务
+- [x] **验证程度**：前端检查（lint / typecheck / test / build）只在 CI 的 frontend job 里跑，Worker 的
+  `allowed_commands` 不含前端；结果以 CI 与 Worker 的记录为准，不写在这里
+- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿（见 PR）
+- [ ] 审查与合并
+- [ ] 部署后用验收夹具账号在生产上走一遍：列表里能看到夹具客户、详情里的余额与时间显示正确、编辑一次后读回
 
 ---
 

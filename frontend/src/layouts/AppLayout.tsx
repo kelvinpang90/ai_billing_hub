@@ -20,6 +20,12 @@ export function AppLayout() {
   const location = useLocation();
   const { signOut } = useAuth();
 
+  // 客户详情、建客户这些子页面也要亮着「客户」那一项。
+  const inCustomers =
+    location.pathname === ROUTES.customers ||
+    location.pathname.startsWith(`${ROUTES.customers}/`);
+  const selectedKey = inCustomers ? ROUTES.customers : location.pathname;
+
   return (
     <Layout style={{ minHeight: "100vh" }}>
       <Header style={{ display: "flex", alignItems: "center", gap: 24 }}>
@@ -27,12 +33,16 @@ export function AppLayout() {
         <Menu
           theme="dark"
           mode="horizontal"
-          selectedKeys={[location.pathname]}
+          selectedKeys={[selectedKey]}
           style={{ flex: 1, minWidth: 0 }}
           items={[
             {
               key: ROUTES.dashboard,
               label: <Link to={ROUTES.dashboard}>{t("nav.dashboard")}</Link>,
+            },
+            {
+              key: ROUTES.customers,
+              label: <Link to={ROUTES.customers}>{t("nav.customers")}</Link>,
             },
           ]}
         />
