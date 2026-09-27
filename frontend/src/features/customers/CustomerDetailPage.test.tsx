@@ -143,7 +143,8 @@ describe("CustomerDetailPage", () => {
     const save = await openEditor(user);
     const name = screen.getByLabelText("Company name");
     await user.clear(name);
-    await user.type(name, "Acme Renamed");
+    await user.click(name);
+    await user.paste("Acme Renamed");
     await user.click(save);
 
     expect(await screen.findByText("Changes saved.")).toBeInTheDocument();
@@ -198,7 +199,8 @@ describe("CustomerDetailPage", () => {
     const save = await openEditor(user);
     const email = screen.getByLabelText("Email");
     await user.clear(email);
-    await user.type(email, "billing@example.com");
+    await user.click(email);
+    await user.paste("billing@example.com");
     await user.click(save);
 
     expect(await screen.findByText(/Invalid field: body\.email/)).toBeInTheDocument();

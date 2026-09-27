@@ -36,8 +36,10 @@ async function submitPassword(
   password: string,
   confirmation = password,
 ) {
-  await user.type(screen.getByLabelText("New password"), password);
-  await user.type(screen.getByLabelText("Confirm new password"), confirmation);
+  await user.click(screen.getByLabelText("New password"));
+  await user.paste(password);
+  await user.click(screen.getByLabelText("Confirm new password"));
+  await user.paste(confirmation);
   await user.click(screen.getByRole("button", { name: "Change my password" }));
 }
 
