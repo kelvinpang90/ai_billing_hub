@@ -37,8 +37,9 @@ constraints:
     # 绝对路径（见下面 policy.check 的注释）；它不是凭据，也不指向任何服务。
     # LOCALAPPDATA 给 frontend.test：vitest 启动时必须在 `%LOCALAPPDATA%\vitest\` 读或建一个
     # 本地 API token 文件（没有这个变量就回退到用户目录的 AppData\Local），建不了就退到
-    # frontend/node_modules/.vitest/，两处都写不了直接启动失败。值必须是**逐次 run 的可写临时目录**，
-    # 不是用户真实的 AppData —— 那里既写不进 AppContainer，也不该被 run 碰到。
+    # frontend/node_modules/.vitest/，两处都写不了直接启动失败。值由 OpenClaw 设成 **worktree 之外的
+    # 逐次 run 临时目录**：不是用户真实的 AppData（那里既写不进 AppContainer，也不该被 run 碰到），
+    # 也不在 worktree 里（否则 token 文件会作为未跟踪文件出现在改动集合里）。
     allowed_names:
       - PATH
       - SYSTEMROOT
@@ -176,28 +177,41 @@ commands:
   # （build 不在这里：它只比 typecheck 多一步 vite 打包，写 frontend/dist/，留给 CI）。
   # 不走 npm / npx：它们是脚本外壳，依赖 PATH 与 APPDATA；这里由 node 直接执行 frontend/node_modules
   # 里的入口文件，工作目录仍是仓库根，靠参数把项目指到 frontend/。
+  # 三条的 args 都以 --preserve-symlinks --preserve-symlinks-main 开头：Worker 的 AppContainer 里 lstat
+  # 不了 worktree 的任何上级目录（盘符根也不行），而 node 的 JS realpath 必然逐级 lstat 到盘符根，
+  # 报 EPERM。保留符号链接路径就不走 realpath；node_modules 以只读 junction 提供，这两个参数同时让
+  # 经 junction 的路径保持原样，不被解析成真实路径。
   # ⚠️ 前提：frontend/node_modules 由控制面按 frontend/package-lock.json 以**只读目录**提供，Worker
   #    不装依赖（never_low_risk 的 dependency_install）。三条都不往 node_modules 写，下面每条注明了
-  #    为此改掉的默认行为；2026-09-27 在只读 node_modules（ACL 拒写）、清空环境、拦截全部
-  #    connect / listen / DNS 的条件下实测零退出、零网络尝试、git status 干净。
+  #    为此改掉的默认行为。2026-09-27 实测两处：OpenClaw 在 Worker 的 MXC 里原样跑这三条定义，
+  #    全部零退出、工作区无改动；本机经只读 junction 提供 node_modules（ACL 拒写）、清空环境、
+  #    拦截全部 connect / listen / DNS，同样零退出、node_modules 无改动、零网络尝试。
   - id: frontend.test
     description: 前端单元与组件测试（vitest run，一次性，不 watch、不起 dev server）
     executable: node
-    args: ["frontend/node_modules/vitest/vitest.mjs", "run", "--root", "frontend", "--configLoader", "runner", "--no-cache"]
+    args: ["--preserve-symlinks", "--preserve-symlinks-main", "frontend/node_modules/vitest/vitest.mjs", "run", "--root", "frontend", "--configLoader", "native", "--no-cache", "--execArgv=--preserve-symlinks", "--execArgv=--preserve-symlinks-main"]
     working_directory: repository_root
     risk: low
     timeout_seconds: 600
     network: false
     writes: none
-    # --configLoader runner：默认的 bundle 加载器把 vite.config.ts 打包进 node_modules/.vite-temp/，
-    #   只读下启动即 EPERM。--no-cache：不写 node_modules/.vite/vitest/ 的结果缓存。
+    # --configLoader native：默认的 bundle 加载器把 vite.config.ts 打包进 node_modules/.vite-temp/，
+    #   只读下启动即 EPERM；runner 加载器在 AppContainer 里解析不了 @vitejs/plugin-react 的依赖。
+    #   native 由 node 自己加载 vite.config.ts（node 24 原生去类型），不落临时文件。
+    # --no-cache：不写 node_modules/.vite/vitest/ 的结果缓存。
+    # --execArgv=…：vitest 给 forks 子进程拼 node 参数时，父进程的只保留 --cpu-prof / --heap-prof /
+    #   --diagnostic-dir 几类，preserve-symlinks 会被丢掉，要经 --execArgv 显式再传一遍。
+    # frontend/vite.config.ts 为 Worker 配了两处：resolve.preserveSymlinks（经 junction 加载时 vitest
+    #   不被加载两份）与 VITEST_SKIP_INSTALL_CHECKS（jsdom 安装检查的 realpath 在 AppContainer 里失败）。
     # 仓库外会写两处：%LOCALAPPDATA%\vitest\ 的 token（见 constraints.environment）与 TEMP 下
-    #   vite 模块运行器的临时文件（约 0.5 MB）。子进程：默认 forks pool，经 IPC 管道通信，不开端口。
+    #   vite 模块运行器的临时文件（每次约 0.5 MB）。子进程：默认 forks pool，经 IPC 管道通信，不开端口。
+    # 另外 tsc、eslint 的入口会开 node 的编译缓存（module.enableCompileCache），写在 TEMP 下的
+    #   node-compile-cache/（三条跑完约 12 MB，可复用）。都在 TEMP 里，不进工作区。
 
   - id: frontend.typecheck
     description: 前端类型检查（tsc -p tsconfig.test.json，覆盖 src 下应用代码与测试）
     executable: node
-    args: ["frontend/node_modules/typescript/bin/tsc", "-p", "frontend/tsconfig.test.json", "--composite", "false", "--incremental", "false"]
+    args: ["--preserve-symlinks", "--preserve-symlinks-main", "frontend/node_modules/typescript/bin/tsc", "-p", "frontend/tsconfig.test.json", "--composite", "false", "--incremental", "false"]
     working_directory: repository_root
     risk: low
     timeout_seconds: 300
@@ -211,7 +225,7 @@ commands:
   - id: frontend.lint
     description: 前端 lint（eslint，含自定义规则 no-hardcoded-jsx-text，只报告不改写）
     executable: node
-    args: ["frontend/node_modules/eslint/bin/eslint.js", "frontend"]
+    args: ["--preserve-symlinks", "--preserve-symlinks-main", "frontend/node_modules/eslint/bin/eslint.js", "frontend"]
     working_directory: repository_root
     risk: low
     timeout_seconds: 300

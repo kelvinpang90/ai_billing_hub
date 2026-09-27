@@ -311,7 +311,7 @@ process_boundary_required` 要求它在进程边界上真的被强制（作业�
 | `lint.check` / `format.check` | 默认跑不起来；本机 Worker 按命令放开 Win32k 后能跑 | `ruff.exe` 导入 user32/gdi32，MXC 默认的 Win32k 禁用缓解让它初始化失败（`0xC0000142`）。只关掉这一条缓解、其余不变时两条都通过（实测，含 `-I` 形式） |
 | `tests.backend` | 跑不起来 | 默认一 import SQLAlchemy 就走到 `platform.machine()` → WMI 查询，整进程崩溃（`0xC06D007E`）；放开 Win32k 后仍有 5 个 API 测试文件挂在 `socket.socketpair()` 上（MXC 禁 loopback），另有 bash 用例 |
 | `scripts.verdict_tests` | 未实测 | 没有任何会写仓库的任务登记它 |
-| `frontend.test` / `frontend.typecheck` / `frontend.lint` | 未实测（控制面前置条件未就绪） | 需要控制面提供只读的 `frontend/node_modules` 并登记 `node`。本机在只读 node_modules、清空环境、拦截全部网络调用下实测通过（2026-09-27）。MXC 里两个待验证点：`node.exe` 静态导入 `USER32.dll`，大概率与 `ruff.exe` 一样需要按命令放开 Win32k；`frontend.test` 默认 forks pool 起子进程、走命名管道 IPC（不开端口） |
+| `frontend.test` / `frontend.typecheck` / `frontend.lint` | 当前 argv 能跑；控制面部署前不可用 | 需要控制面以只读 junction 提供 `frontend/node_modules`、登记 `node`、把 `LOCALAPPDATA` 设成 worktree 之外的逐次临时目录。OpenClaw 在 Worker 的 MXC 里实测（2026-09-27），最早那版 argv 原样都跑不起来：AppContainer 里 lstat 不了 worktree 的上级目录，node 的 realpath 报 `EPERM`；`--configLoader runner` 解析不了 `@vitejs/plugin-react` 的依赖；经 junction 加载时 vitest 被加载两份；jsdom 安装检查误报。改成三条都带 `--preserve-symlinks` / `--preserve-symlinks-main`、test 用 `--configLoader native` 并经 `--execArgv` 传给子进程、`frontend/vite.config.ts` 加 `resolve.preserveSymlinks` 与 `VITEST_SKIP_INSTALL_CHECKS` 之后：test 63/63 用时 24s，typecheck 2.7s，lint 15–30s，工作区无改动 |
 
 **lint / format 的放开（控制面 ACVDEV-TASK-017）**：控制面给本机 Worker 配置加了 `check_win32k`，只对**固定了
 完整定义**（executable + 逐字 args，首参数必须是 Python 隔离模式 `-I`）的检查关掉 Win32k 这一条缓解；网络、
