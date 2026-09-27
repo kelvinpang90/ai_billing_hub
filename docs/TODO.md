@@ -1566,6 +1566,10 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - 当时列的 jsdom 前提（展开按钮 `aria-label="Expand row"`、分页 `title="2"`、提交中按钮带 `disabled`）由上面的测试通过证实
 - [x] 本地按 `allowed_commands` 八项全部零退出（Worker run 没跑通，见「交付经过」；skipped 不算 passed）
 - [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#141，合并为 `d7d330a`）
+- [x] 上面那条「以后应挪到 setup 里统一补」（2026-09-27，Kelvin 定在开启 AIH-TASK-017 之前做）：`src/test/setup.ts` 加空的
+  `ResizeObserver` 替身，只在环境里没有时才装，直接赋值、不写类型断言。先写复现 `src/test/setup.test.tsx`（不带局部替身渲染
+  `Input.TextArea`，带与不带 `autoSize` 各一条），修复前两条都是 `ReferenceError: ResizeObserver is not defined`，修复后通过。
+  `ProjectsPanel.test.tsx` 里 016 的局部替身没动：它也是「没有才装」，与全局替身共存无害，删它是另一件事
 - [ ] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据
 
 ---

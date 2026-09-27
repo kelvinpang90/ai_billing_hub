@@ -30,6 +30,21 @@ Object.defineProperty(window, "matchMedia", {
     }) as MediaQueryList,
 });
 
+/**
+ * jsdom 也没有 `ResizeObserver`，而 antd 的 `Input.TextArea` 不管开没开 `autoSize`
+ * 挂载时都要它，缺了直接 `ReferenceError: ResizeObserver is not defined`。
+ * AIH-TASK-016 的 Worker run 就栽在这里：测试文件只能各自补，公共的放这里一处。
+ * 空实现即可 —— 这个仓库不测尺寸变化。只在没有时才装，不覆盖环境自带的实现。
+ */
+class NoopResizeObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = NoopResizeObserver;
+}
+
 afterEach(async () => {
   cleanup();
 
