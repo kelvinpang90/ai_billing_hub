@@ -23,6 +23,9 @@ const CUSTOMER_ID = "00000000-0000-4000-8000-000000000000";
 const api = vi.hoisted(() => ({
   getCustomer: vi.fn(),
   updateCustomer: vi.fn(),
+  // 项目区块（AIH-TASK-016）挂在详情页上；它自己的用例在 ProjectsPanel.test.tsx。
+  listProjects: vi.fn(),
+  createProject: vi.fn(),
 }));
 
 vi.mock("../../api/adminCustomers", async () => {
@@ -67,6 +70,7 @@ async function openEditor(user: ReturnType<typeof userEvent.setup>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  api.listProjects.mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 });
 });
 
 describe("CustomerDetailPage", () => {
@@ -200,5 +204,40 @@ describe("CustomerDetailPage", () => {
     expect(await screen.findByText(/Invalid field: body\.email/)).toBeInTheDocument();
     expect(screen.getByText("req-422")).toBeInTheDocument();
     expect(screen.getByLabelText("Email")).toHaveValue("billing@example.com");
+  });
+
+  it("shows the customer's projects below the wallet", async () => {
+    api.getCustomer.mockResolvedValue(customer());
+    api.listProjects.mockResolvedValue({
+      items: [
+        {
+          id: "00000000-0000-4000-8000-000000000001",
+          name: "Chatbot",
+          description: null,
+          created_at: "2026-09-20T08:31:00",
+          updated_at: "2026-09-20T08:31:00",
+        },
+      ],
+      page: 1,
+      page_size: 20,
+      total: 1,
+    });
+
+    renderDetail();
+
+    expect(await screen.findByText("Chatbot")).toBeInTheDocument();
+    expect(screen.getByText("Projects")).toBeInTheDocument();
+    expect(api.listProjects).toHaveBeenCalledWith(CUSTOMER_ID, 1, 20, expect.anything());
+  });
+
+  it("does not ask for projects of a customer that does not exist", async () => {
+    api.getCustomer.mockRejectedValue(
+      new ApiError("CUSTOMER_NOT_FOUND", "The customer does not exist.", "req-404"),
+    );
+
+    renderDetail();
+
+    expect(await screen.findByText("Customer not found")).toBeInTheDocument();
+    expect(api.listProjects).not.toHaveBeenCalled();
   });
 });
