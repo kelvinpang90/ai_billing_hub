@@ -901,7 +901,7 @@ tasks:
     purpose: >-
       管理端前端第二刀：在 AIH-TASK-015 的客户详情页里加项目区块，列出该客户的项目（分页）并可新建项目，
       调用 docs/api.md「管理端客户管理」里的建项目与项目列表两个接口。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-015
     acceptance_criteria:

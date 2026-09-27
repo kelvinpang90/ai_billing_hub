@@ -23,9 +23,8 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-016` 管理端前端：客户详情页的项目列表与建项目
-2. `AIH-TASK-017` 管理端前端：手工调账
-3. `AIH-TASK-018` 管理端前端：项目集成 API 凭据的建、列、轮换与吊销
+1. `AIH-TASK-017` 管理端前端：手工调账
+2. `AIH-TASK-018` 管理端前端：项目集成 API 凭据的建、列、轮换与吊销
 
 ### 已阻塞
 - 待登记：出站 webhook 密钥表（方案 i）｜阻塞：等设计闸门
@@ -1566,7 +1565,7 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - CI 的写法在本地也跑过：`npm run lint` / `typecheck` / `test`（134 passed）/ `build` 全部零退出
   - 当时列的 jsdom 前提（展开按钮 `aria-label="Expand row"`、分页 `title="2"`、提交中按钮带 `disabled`）由上面的测试通过证实
 - [x] 本地按 `allowed_commands` 八项全部零退出（Worker run 没跑通，见「交付经过」；skipped 不算 passed）
-- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+- [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#141，合并为 `d7d330a`）
 - [ ] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据
 
 ---
