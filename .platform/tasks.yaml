@@ -956,8 +956,9 @@ tasks:
       管理端前端第三刀：在客户详情页加「手工调账」入口，调用 docs/api.md「管理端手工调账」的接口（已过设计闸门 #111、
       由 AIH-TASK-011 上线）。重点是幂等键的生命周期与「结果未知时不许改单」。只做前端。
     status: ready
+    # 016 也改 CustomerDetailPage.tsx 及其测试；依赖 016 让两者按计划顺序串行，不在同一页面上冲突。
     depends_on:
-      - AIH-TASK-015
+      - AIH-TASK-016
     acceptance_criteria:
       - 语义一律以 docs/api.md「管理端手工调账」与 docs/design/AIH-TASK-010-admin-wallet-adjustment.md 为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件与设计文件
       - 新增 frontend/src/api/walletAdjustments.ts：postAdjustment(customerId, body)，返回调账对象（金额字段是 string），错误是 ApiError

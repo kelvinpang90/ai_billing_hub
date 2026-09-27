@@ -108,7 +108,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-014` | 把 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) 第 8 节那句 spec §136 文档清单同步成现状：已建的四份（database-schema / api / deployment / runbook）加链接，未建的五份写明尚未创建。**不走设计闸门**：纯文档。用来验证 OpenClaw P3（就绪预检、状态时间线、批准预检、合并时的部署绑定） | 只改 `docs/ARCHITECTURE.md` 一个文件，检查只有 `docs.check`；不碰代码、迁移、docker/compose、`.platform/` 与 `docs/TODO.md`。planning-v1 块由管理员的收尾 PR 改 |
 | `AIH-TASK-015` | 管理端前端第一刀：客户列表、建客户、客户详情（含钱包余额与计费状态）与编辑，调用 006 / 009 已上线的接口；新建 `features/customers/`，加 `MoneyText`（金额只按十进制字符串处理）与 `DateTimeText`（UTC → Asia/Kuala_Lumpur）。**不走设计闸门**：纯前端 | 十九项，全在 `frontend/src/` 与 `docs/TODO.md`（含把 `DashboardPage` 的 `RequestReference` 抽成共享组件）；不装依赖、不碰后端。⚠️ `commands.yaml` 没有前端检查，前端的 lint / typecheck / test / build 只在 CI 的 frontend job |
 | `AIH-TASK-016` | 管理端前端第二刀：客户详情页的项目列表与建项目，并给 018 留挂载点。依赖 015。**不走设计闸门**：纯前端 | 八项；同 015 |
-| `AIH-TASK-017` | 管理端前端第三刀：手工调账（接口已过闸门 #111）。幂等键每次打开表单生成、结果未知时锁定表单只许同键重试。依赖 015。**不走设计闸门**：纯前端，钱的规则全在后端 | 八项，新建 `features/wallet/`；同 015 |
+| `AIH-TASK-017` | 管理端前端第三刀：手工调账（接口已过闸门 #111）。幂等键每次打开表单生成、结果未知时锁定表单只许同键重试。依赖 016（两者都改客户详情页）。**不走设计闸门**：纯前端，钱的规则全在后端 | 八项，新建 `features/wallet/`；同 015 |
 | `AIH-TASK-018` | 管理端前端第四刀：项目集成 API 凭据的建、列、轮换、吊销（接口已过闸门 #118）。`secret` 只在结果对话框出现一次，不进查询缓存与浏览器存储。依赖 016。**不走设计闸门**：纯前端 | 八项；文件名沿用 `integration_access` 的叫法避开 Worker 的敏感路径规则；同 015 |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
