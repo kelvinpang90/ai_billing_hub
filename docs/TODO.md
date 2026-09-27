@@ -1519,6 +1519,56 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [ ] 部署后用验收夹具账号在生产上走一遍：列表里看到夹具客户、详情的余额与后端字符串一致、改一次联系人再改回（留两条
   `CUSTOMER_UPDATE` 审计，`changed_fields` 只有 `contact_name`）
 
+### AIH-TASK-016 —— 管理端前端：客户的项目列表与建项目（2026-09-27）
+
+在 AIH-TASK-015 的客户详情页里加项目区块。只做前端，调用 [api.md](api.md)「管理端客户管理」里已上线的「建项目」
+「项目列表」两个接口；设计闸门不适用 —— 纯前端，接口已过闸门 #96，不改钱的行为、状态机与认证逻辑。不改任何后端文件。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/adminCustomers.ts`：`listProjects(customerId, page, page_size)`（`GET …/customers/{id}/projects`，
+    读走 `apiGet`）与 `createProject(customerId, body)`（`POST` 同一路径，走与建客户相同的 `send` + `unwrapEnvelope` /
+    `toApiError`）；`Project`、`CreateProjectBody` 类型照 api.md 的项目对象与请求体写；路径里的客户 id 经
+    `encodeURIComponent`；查询键 `customerProjectsQueryKey(id)`（这个客户所有项目列表页的前缀）与 `projectListQueryKey`
+  - `frontend/src/features/customers/ProjectsPanel.tsx`：项目表（项目名、描述（空为「—」）、创建时间用 `DateTimeText`），
+    分页（默认 20，可选 10 / 20 / 50 / 100），顺序沿用后端（最早在前）；加载中、失败（`CustomerErrorAlert`，内含
+    `RequestReference`，带后端 message 与 request_id 和重试）、空列表三态，页码越过末页另有一句「这一页没有项目」；
+    建项目表单（name 必填、去首尾空白后 1–255；description 可选、去首尾空白后 ≤ 1000，空白不发），提交中禁用按钮并用 ref
+    挡第二次提交，成功后让该客户的项目列表整体过期重读并提示「Project created.」；404 `CUSTOMER_NOT_FOUND` 与 422 显示后端
+    message 与 request_id，表单保留
+  - AIH-TASK-018 的挂载点：`ProjectsPanel` 的可选属性 `renderProjectDetails(project)`，传了它表格每行可展开、展开内容由调用方
+    渲染；不传就没有展开列。本任务的 `CustomerDetailPage` 不传它，没有任何凭据功能，也不发凭据接口的请求
+  - `CustomerDetailPage.tsx`：钱包卡片下面挂 `<ProjectsPanel key={id} customerId={id} />`，详情读到之后才挂
+  - 文案进 `en.json`（`customers.projects.*`）；列标题「Created」与表单「Cancel」复用已有 key
+  - 测试：`adminCustomers.test.ts`（项目列表的 URL 与查询参数、建项目的 URL 与请求体、客户 id 转义、404 变成
+    `ApiError`）、`ProjectsPanel.test.tsx`（三态、顺序与字段、翻页、末页之后的空页、必填、只含空白、超长、恰好上限且带首尾空白、
+    去空白与不发空描述并重读列表、双击只发一次且提交中禁用、404、422、挂载点有无）、`CustomerDetailPage.test.tsx`（既有用例
+    加 `listProjects` 的 mock；新增项目区块显示、客户 404 时不请求项目）。测试里的 uuid 都是全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 项目区块的页码与每页条数放在组件状态里，不进地址栏（地址栏归客户详情；刷新回到第一页）
+  - 建项目成功后不自动翻到新项目所在的末页，只重读当前页（顺序最早在前，新项目在末页）；成功提示告诉用户已建好
+  - `trimmedLength` / `maxTrimmed` 两个小函数在 `ProjectsPanel.tsx` 里照抄了一份：`CustomerForm.tsx` 不在本任务的可改路径里，
+    没法把它们导出
+  - `ProjectsPanel.test.tsx` 顶部补了一个空的 `ResizeObserver`（只在环境里没有时才装）：antd 的 `Input.TextArea` 不管有没有
+    `autoSize` 都要它，jsdom 没有，建项目表单的用例会全部 `ReferenceError`。本该放进公共的 `src/test/setup.ts`，但它不在
+    可改路径里；以后别的测试也用到 TextArea 时，应挪到 setup 里统一补
+  - 核对了 api.md 与 `app/schemas/customers.py`（`CreateProjectRequest`、`ProjectView`）、`app/api/admin_customers.py`、
+    `app/services/customers.py`：路径、请求体规则（name 去空白后 1–255、description 去空白后 ≤ 1000、空白存 `null`、多余字段 422）、
+    响应字段与顺序一致，没有需要停下来裁决的冲突
+- [x] **交付经过**：Worker run `b287409b` 以 `checks_failed` 结束，没有开 PR。`frontend.test` 先挂在 `ResizeObserver`
+  上（8 个建项目用例），两次自动修复用完：第一次去掉 `autoSize`（判断错了），第二次加上面那个替身，test 通过了，但替身那行
+  写成 `NoopResizeObserver as unknown as typeof ResizeObserver`，被 `frontend.lint` 的
+  `@typescript-eslint/no-unnecessary-type-assertion` 拦下，已没有修复次数。Kelvin 2026-09-27 定由 Claude 接手：把 run
+  留下的 8 个文件原样拷到本分支，只改掉这一处断言，其余是 Worker 的实现
+- [x] **验证程度**：
+  - 按本任务的 `allowed_commands` 在本地逐条跑，八项全部零退出：`docs.check` / `policy.check` / `tests.process` /
+    `lint.check` / `format.check`，以及三条前端检查（按 `.platform/commands.yaml` 的原样 argv、`node_modules` 以只读 junction
+    提供、清空环境）—— `frontend.test` 19 个文件 134 个用例全过
+  - CI 的写法在本地也跑过：`npm run lint` / `typecheck` / `test`（134 passed）/ `build` 全部零退出
+  - 当时列的 jsdom 前提（展开按钮 `aria-label="Expand row"`、分页 `title="2"`、提交中按钮带 `disabled`）由上面的测试通过证实
+- [x] 本地按 `allowed_commands` 八项全部零退出（Worker run 没跑通，见「交付经过」；skipped 不算 passed）
+- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+- [ ] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）

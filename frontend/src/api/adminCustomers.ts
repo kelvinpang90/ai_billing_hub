@@ -1,7 +1,8 @@
 /**
  * 管理端客户管理（契约见 docs/api.md「管理端客户管理」，设计闸门 #96）。
  *
- * 只收录前端已经用到的四个接口：建客户、列表、详情、编辑。每个都要 ADMIN，
+ * 只收录前端已经用到的六个接口：建客户、列表、详情、编辑，以及某个客户的建项目与
+ * 项目列表（AIH-TASK-016）。每个都要 ADMIN，
  * 角色以后端数据库为准 —— 前端不做任何角色判断，403 原样交给页面显示。
  *
  * ⚠️ 金额是**字符串**（INV-10）。这里的类型刻意写成 `string`，不在这一层解析：
@@ -78,6 +79,24 @@ export interface CustomerPatch {
   phone?: string | null;
 }
 
+/** 项目。`description` 可为 `null`（后端把只含空白的描述也存成 `null`）。 */
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * 建项目的请求体。项目归属只来自路径里的客户 —— 请求体里带 `customer_id` /
+ * `tenant_id` 之类后端一律回 422，这里的类型也不给它们留位置。
+ */
+export interface CreateProjectBody {
+  name: string;
+  description?: string;
+}
+
 export const CUSTOMERS_QUERY_KEY = ["admin", "customers"] as const;
 /** 所有列表页的前缀：建客户、改客户之后让它们整体过期。 */
 export const CUSTOMER_LISTS_QUERY_KEY = [...CUSTOMERS_QUERY_KEY, "list"] as const;
@@ -88,6 +107,15 @@ export function customerListQueryKey(page: number, pageSize: number) {
 
 export function customerDetailQueryKey(customerId: string) {
   return [...CUSTOMERS_QUERY_KEY, "detail", customerId] as const;
+}
+
+/** 一个客户的所有项目列表页的前缀：建项目之后让它们整体过期。 */
+export function customerProjectsQueryKey(customerId: string) {
+  return [...customerDetailQueryKey(customerId), "projects"] as const;
+}
+
+export function projectListQueryKey(customerId: string, page: number, pageSize: number) {
+  return [...customerProjectsQueryKey(customerId), page, pageSize] as const;
 }
 
 function customerUrl(customerId: string): string {
@@ -128,4 +156,20 @@ export function createCustomer(body: CreateCustomerBody): Promise<CustomerDetail
 
 export function updateCustomer(customerId: string, patch: CustomerPatch): Promise<CustomerDetail> {
   return send<CustomerDetail>("patch", customerUrl(customerId), patch);
+}
+
+/** 这个客户的项目分页，**最早在前**（顺序由后端决定，前端不重排）。 */
+export function listProjects(
+  customerId: string,
+  page: number,
+  pageSize: number,
+  signal?: AbortSignal,
+): Promise<Page<Project>> {
+  const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  return apiGet<Page<Project>>(`${customerUrl(customerId)}/projects?${query.toString()}`, signal);
+}
+
+/** ⚠️ **不幂等**：提交两次就是两个项目。防双击是调用方的责任。 */
+export function createProject(customerId: string, body: CreateProjectBody): Promise<Project> {
+  return send<Project>("post", `${customerUrl(customerId)}/projects`, body);
 }

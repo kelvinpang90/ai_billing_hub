@@ -5,6 +5,8 @@
  * 不在这里解析（INV-10）。编辑只发实际改了的字段，没有改动就不发请求；成功后直接用
  * PATCH 的响应刷新详情，不再读一次。
  *
+ * 页底是这个客户的项目区块（`ProjectsPanel`，AIH-TASK-016），在详情读到之后才挂上。
+ *
  * 没有账户状态、低余额阈值、成本或毛利 —— 后端没有这些字段，这里也不预留。
  */
 
@@ -46,6 +48,7 @@ import {
   type CustomerFormValues,
 } from "./CustomerForm";
 import { BillingStatusTag } from "./CustomerListPage";
+import { ProjectsPanel } from "./ProjectsPanel";
 
 type Notice = "saved" | "unchanged" | null;
 
@@ -173,6 +176,9 @@ export function CustomerDetailPage() {
       <Card title={t("customers.wallet.title")}>
         <WalletDescriptions wallet={current.wallet} />
       </Card>
+
+      {/* key：换了客户，页码与建项目表单都从头来。 */}
+      <ProjectsPanel key={current.id} customerId={current.id} />
     </Space>
   );
 }

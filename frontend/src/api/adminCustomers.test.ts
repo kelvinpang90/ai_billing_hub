@@ -11,8 +11,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createCustomer,
+  createProject,
   getCustomer,
   listCustomers,
+  listProjects,
   updateCustomer,
 } from "./adminCustomers";
 import { ApiError, client } from "./client";
@@ -77,6 +79,77 @@ describe("admin customer requests", () => {
     expect(patch).toHaveBeenCalledWith(`/api/v1/admin/customers/${CUSTOMER_ID}`, {
       company_name: "Renamed",
       phone: null,
+    });
+  });
+
+  it("lists one customer's projects with the page and page_size the backend reads", async () => {
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValue(envelope({ items: [], page: 3, page_size: 10, total: 0 }));
+
+    const page = await listProjects(CUSTOMER_ID, 3, 10);
+
+    expect(get).toHaveBeenCalledWith(
+      `/api/v1/admin/customers/${CUSTOMER_ID}/projects?page=3&page_size=10`,
+      {},
+    );
+    expect(page).toEqual({ items: [], page: 3, page_size: 10, total: 0 });
+  });
+
+  it("escapes the customer id in the project paths too", async () => {
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValue(envelope({ items: [], page: 1, page_size: 20, total: 0 }));
+    const post = vi.spyOn(client, "post").mockResolvedValue(envelope({ id: CUSTOMER_ID }));
+
+    await listProjects("a/../b", 1, 20);
+    await createProject("a/../b", { name: "Chatbot" });
+
+    expect(get).toHaveBeenCalledWith(
+      "/api/v1/admin/customers/a%2F..%2Fb/projects?page=1&page_size=20",
+      {},
+    );
+    expect(post).toHaveBeenCalledWith("/api/v1/admin/customers/a%2F..%2Fb/projects", {
+      name: "Chatbot",
+    });
+  });
+
+  it("creates a project under the customer in the path with the body as given", async () => {
+    const post = vi.spyOn(client, "post").mockResolvedValue(envelope({ id: CUSTOMER_ID }));
+
+    await createProject(CUSTOMER_ID, { name: "Chatbot", description: "Support bot" });
+
+    // 归属只来自路径：请求体里没有 customer_id。
+    expect(post).toHaveBeenCalledWith(`/api/v1/admin/customers/${CUSTOMER_ID}/projects`, {
+      name: "Chatbot",
+      description: "Support bot",
+    });
+  });
+
+  it("turns a 404 on project creation into an ApiError with CUSTOMER_NOT_FOUND", async () => {
+    const response = {
+      data: {
+        success: false,
+        data: null,
+        error: { code: "CUSTOMER_NOT_FOUND", message: "The customer does not exist." },
+        request_id: "req-404",
+      },
+      status: 404,
+      statusText: "Not Found",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    } satisfies AxiosResponse;
+    vi.spyOn(client, "post").mockRejectedValue(
+      new AxiosError("Request failed", "ERR_BAD_REQUEST", undefined, undefined, response),
+    );
+
+    const failure = createProject(CUSTOMER_ID, { name: "Chatbot" });
+
+    await expect(failure).rejects.toBeInstanceOf(ApiError);
+    await expect(failure).rejects.toMatchObject({
+      code: "CUSTOMER_NOT_FOUND",
+      message: "The customer does not exist.",
+      requestId: "req-404",
     });
   });
 

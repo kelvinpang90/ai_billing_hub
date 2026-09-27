@@ -98,5 +98,20 @@
   "customers.detail.edit": "Edit",
   "customers.detail.editTitle": "Edit customer",
   "customers.detail.saved": "Changes saved.",
-  "customers.detail.unchanged": "Nothing was changed, so nothing was saved."
+  "customers.detail.unchanged": "Nothing was changed, so nothing was saved.",
+  "customers.projects.title": "Projects",
+  "customers.projects.create": "New project",
+  "customers.projects.loading": "Loading projects…",
+  "customers.projects.loadFailed": "The projects could not be loaded.",
+  "customers.projects.empty": "This customer has no projects yet.",
+  "customers.projects.emptyPage": "There are no projects on this page.",
+  "customers.projects.total": "{{total}} projects",
+  "customers.projects.field.name": "Project name",
+  "customers.projects.field.description": "Description",
+  "customers.projects.submit": "Create project",
+  "customers.projects.createFailed": "The project could not be created.",
+  "customers.projects.created": "Project created.",
+  "customers.projects.nameRequired": "Enter the project name.",
+  "customers.projects.nameTooLong": "The project name can be at most 255 characters.",
+  "customers.projects.descriptionTooLong": "The description can be at most 1000 characters."
 }
