@@ -35,11 +35,16 @@ constraints:
     # 系统调用要 SYSTEMROOT，临时文件要 TEMP / TMP。
     # ACUVEN_GIT_LS_FILES_MANIFEST 只在 Worker 模式由控制面设置，值是只读 manifest 的
     # 绝对路径（见下面 policy.check 的注释）；它不是凭据，也不指向任何服务。
+    # LOCALAPPDATA 给 frontend.test：vitest 启动时必须在 `%LOCALAPPDATA%\vitest\` 读或建一个
+    # 本地 API token 文件（没有这个变量就回退到用户目录的 AppData\Local），建不了就退到
+    # frontend/node_modules/.vitest/，两处都写不了直接启动失败。值必须是**逐次 run 的可写临时目录**，
+    # 不是用户真实的 AppData —— 那里既写不进 AppContainer，也不该被 run 碰到。
     allowed_names:
       - PATH
       - SYSTEMROOT
       - TEMP
       - TMP
+      - LOCALAPPDATA
       - ACUVEN_GIT_LS_FILES_MANIFEST
     # 即使有人把下面这些加进 allowed_names 也不放行 —— deny 优先于 allow。
     precedence: denied_wins
@@ -166,6 +171,54 @@ commands:
     timeout_seconds: 600
     network: false
     writes: none
+
+  # 前端三条是 WORKFLOW §7「动了 frontend/ 就再加四项」里 lint / typecheck / test 的 Worker 等价写法
+  # （build 不在这里：它只比 typecheck 多一步 vite 打包，写 frontend/dist/，留给 CI）。
+  # 不走 npm / npx：它们是脚本外壳，依赖 PATH 与 APPDATA；这里由 node 直接执行 frontend/node_modules
+  # 里的入口文件，工作目录仍是仓库根，靠参数把项目指到 frontend/。
+  # ⚠️ 前提：frontend/node_modules 由控制面按 frontend/package-lock.json 以**只读目录**提供，Worker
+  #    不装依赖（never_low_risk 的 dependency_install）。三条都不往 node_modules 写，下面每条注明了
+  #    为此改掉的默认行为；2026-09-27 在只读 node_modules（ACL 拒写）、清空环境、拦截全部
+  #    connect / listen / DNS 的条件下实测零退出、零网络尝试、git status 干净。
+  - id: frontend.test
+    description: 前端单元与组件测试（vitest run，一次性，不 watch、不起 dev server）
+    executable: node
+    args: ["frontend/node_modules/vitest/vitest.mjs", "run", "--root", "frontend", "--configLoader", "runner", "--no-cache"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 600
+    network: false
+    writes: none
+    # --configLoader runner：默认的 bundle 加载器把 vite.config.ts 打包进 node_modules/.vite-temp/，
+    #   只读下启动即 EPERM。--no-cache：不写 node_modules/.vite/vitest/ 的结果缓存。
+    # 仓库外会写两处：%LOCALAPPDATA%\vitest\ 的 token（见 constraints.environment）与 TEMP 下
+    #   vite 模块运行器的临时文件（约 0.5 MB）。子进程：默认 forks pool，经 IPC 管道通信，不开端口。
+
+  - id: frontend.typecheck
+    description: 前端类型检查（tsc -p tsconfig.test.json，覆盖 src 下应用代码与测试）
+    executable: node
+    args: ["frontend/node_modules/typescript/bin/tsc", "-p", "frontend/tsconfig.test.json", "--composite", "false", "--incremental", "false"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 300
+    network: false
+    writes: none
+    # CI 的 `tsc --build --force` 会把 tsbuildinfo 写进 node_modules/.tmp/，只读下报 TS5033。
+    # 单项目 -p 加关掉 composite / incremental 就不产出 tsbuildinfo（noEmit 本来就开着）。
+    # tsconfig.test.json 的 include 是整个 src，严格选项与 app 一致，所以应用代码与测试的类型错都能拦住。
+    # 只在 CI 的两样：tsconfig.app.json 那条「应用代码不许拿到 Node 类型」的边界，和 vite.config.ts（tsconfig.node.json）。
+
+  - id: frontend.lint
+    description: 前端 lint（eslint，含自定义规则 no-hardcoded-jsx-text，只报告不改写）
+    executable: node
+    args: ["frontend/node_modules/eslint/bin/eslint.js", "frontend"]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 300
+    network: false
+    writes: none
+    # eslint 10 从被检查文件所在目录向上找配置，所以从仓库根跑也用 frontend/eslint.config.js；
+    # 默认不开 --cache，不写文件。
 
 # 下面这些**不是命令**，是明确不得被伪装成 low risk 混进 allowlist 的动作类别。
 # 想做其中任何一件，走 .platform/approvals.yaml 的 approval_required 或 prohibited。
