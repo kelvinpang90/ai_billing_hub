@@ -59,6 +59,8 @@
 | [0007](ADR-0007-concurrent-pending-payments.md) | 并发 PENDING 支付：允许并存，都付都入账 | 已接受 | 2026-09-10 |
 | [0008](ADR-0008-sst-tax-treatment.md) | SST 税务口径：对客户展示的金额一律含税 | **部分接受**（§45.1 尚缺五项会计意见） | 2026-09-11 |
 | [0009](ADR-0009-notification-channels.md) | 通知通道：Email 自管 SMTP + Outbox 投递；WhatsApp 不自建但路径待定 | **部分接受**（WhatsApp 传输路径未定） | 2026-09-11 |
+| [0010](ADR-0010-suspension-threshold.md) | 停机 / 复机阈值：保持 `balance <= 0`，缓冲放进最小恢复额（R1） | **提议中**（待拍板） | 2026-09-27 |
+| [0011](ADR-0011-per-event-usage-ledger.md) | AI 用量入账粒度：每事件一行账本，不按窗口聚合（R3） | **提议中**（待确认 2026-09-19 的同意） | 2026-09-27 |
 
 ## 待写（spec §136 要求）
 
