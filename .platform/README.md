@@ -122,12 +122,16 @@ ACVDEV-TASK-019），所以任务合并部署之后，**要由管理员单独开
 close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `.platform/`，合并前也还没有部署。漏改的话，
 控制面会一直推荐一个已经做完的任务。
 
-2026-09-26 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
+2026-09-27 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
 `AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）、`AIH-TASK-008`（#107）、`AIH-TASK-011`（#115）、
-`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）是 `done`；
+`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
 2026-09-27 登记 `AIH-TASK-015` 到 `AIH-TASK-018`（管理端前端四刀）为 `ready`，按 015 → 016 → 017 → 018 排进
-[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；015 已交付，现在 016 是第 1 条；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+
+`AIH-TASK-015` 是第一个在 Worker 里跑前端检查的任务（#138 登记 `frontend.test` / `frontend.typecheck` / `frontend.lint`，
+控制面 ACVDEV-TASK-045 提供只读依赖目录）。前两次 run（`0bf98377` PR #133、`43dfa20c` PR #137）没有这三条检查，
+后一次失败在 CI 的 frontend job；第三次 run `d1bb9e18` 三条都在 Worker 里零退出，PR #139 合并为 `cccd91c` 并部署。
 
 `AIH-TASK-014` 用来验证 OpenClaw P3（run `2c4a37ea`，PR #129，合并为 `f247a7c`）。第一次「批准」在 CI 的 `backend`
 还没跑完时发出，批准预检按 `checks_not_passed` 拒绝、run 回到等待批准；CI 全绿后再批准，合并与部署正常完成。

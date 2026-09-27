@@ -824,7 +824,7 @@ tasks:
       管理端前端第一刀：客户列表（分页）、建客户、客户详情（含钱包余额与计费状态）与编辑客户，
       调用 docs/api.md「管理端客户管理」里已上线的四个接口（POST / GET 列表 / GET 详情 / PATCH）。
       顶部菜单加「客户」一项。只做前端，不改后端、数据库、依赖与 .platform/。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 接口路径、请求体、响应字段、错误码一律以 docs/api.md「通用约定」与「管理端客户管理」为准；两处说法与后端代码冲突时停下，在 PR 里说明，不自行裁决。不改任何后端文件
