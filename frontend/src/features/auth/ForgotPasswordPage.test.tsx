@@ -32,7 +32,8 @@ function renderPage() {
 }
 
 async function submitEmail(user: ReturnType<typeof userEvent.setup>, email: string) {
-  await user.type(screen.getByLabelText("Email"), email);
+  await user.click(screen.getByLabelText("Email"));
+  await user.paste(email);
   await user.click(screen.getByRole("button", { name: "Send the reset link" }));
 }
 

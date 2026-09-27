@@ -61,8 +61,10 @@ function renderLogin() {
 }
 
 async function fillCredentials(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(screen.getByLabelText("Email"), "admin@example.com");
-  await user.type(screen.getByLabelText("Password"), "correct horse battery");
+  await user.click(screen.getByLabelText("Email"));
+  await user.paste("admin@example.com");
+  await user.click(screen.getByLabelText("Password"));
+  await user.paste("correct horse battery");
   await user.click(screen.getByRole("button", { name: "Continue" }));
 }
 
@@ -96,7 +98,8 @@ describe("LoginPage", () => {
     await fillCredentials(user);
 
     const code = await screen.findByLabelText("Verification code");
-    await user.type(code, "123456");
+    await user.click(code);
+    await user.paste("123456");
     await user.click(screen.getByRole("button", { name: "Verify" }));
 
     await waitFor(() => {
@@ -139,7 +142,8 @@ describe("LoginPage", () => {
     expect(await screen.findByText("JBSWY3DPEHPK3PXP")).toBeInTheDocument();
     expect(api.startEnrolment).toHaveBeenCalledWith("pending-2");
 
-    await user.type(screen.getByLabelText("Enter the code your app shows"), "654321");
+    await user.click(screen.getByLabelText("Enter the code your app shows"));
+    await user.paste("654321");
     await user.click(screen.getByRole("button", { name: "Turn on two-factor authentication" }));
 
     expect(await screen.findByText("aaaa-bbbb")).toBeInTheDocument();
@@ -195,7 +199,8 @@ describe("LoginPage", () => {
     renderLogin();
 
     await fillCredentials(user);
-    await user.type(await screen.findByLabelText("Verification code"), "123456");
+    await user.click(await screen.findByLabelText("Verification code"));
+    await user.paste("123456");
     await user.click(screen.getByRole("button", { name: "Verify" }));
 
     // ⚠️ 令牌一过期，那张验证码表单**再也不可能提交成功**。留在原地等于让用户
@@ -216,7 +221,8 @@ describe("LoginPage", () => {
     renderLogin();
 
     await fillCredentials(user);
-    await user.type(await screen.findByLabelText("Verification code"), "000000");
+    await user.click(await screen.findByLabelText("Verification code"));
+    await user.paste("000000");
     await user.click(screen.getByRole("button", { name: "Verify" }));
 
     // 输错验证码是**可以重试**的，别把人踢回去重输密码。
