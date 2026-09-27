@@ -124,10 +124,14 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 
 2026-09-27 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
 `AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）、`AIH-TASK-008`（#107）、`AIH-TASK-011`（#115）、
-`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）是 `done`；
+`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）、`AIH-TASK-016`（#141）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
 2026-09-27 登记 `AIH-TASK-015` 到 `AIH-TASK-018`（管理端前端四刀）为 `ready`，按 015 → 016 → 017 → 018 排进
-[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；015 已交付，现在 016 是第 1 条；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；015、016 已交付，现在 017 是第 1 条；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+
+`AIH-TASK-016` 不是由 Worker 的 PR 交付的：run `b287409b` 以 `checks_failed` 结束、没有开 PR —— `frontend.test` 先挂在
+jsdom 缺 `ResizeObserver` 上，第二次自动修复在测试里补了替身，替身那行的多余类型断言又被 `frontend.lint` 拦下，修复次数已用完。
+Kelvin 选由 Claude 接手：run 留下的 8 个文件原样拷到新分支，只改那一处断言，#141 合并为 `d7d330a` 并部署。
 
 `AIH-TASK-015` 是第一个在 Worker 里跑前端检查的任务（#138 登记 `frontend.test` / `frontend.typecheck` / `frontend.lint`，
 控制面 ACVDEV-TASK-045 提供只读依赖目录）。前两次 run（`0bf98377` PR #133、`43dfa20c` PR #137）没有这三条检查，
