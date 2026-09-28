@@ -1578,6 +1578,57 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   条），改后 5 次全过。`CustomerForm` / `ProjectsPanel` 没出过超时，没动
 - [ ] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据
 
+### AIH-TASK-017 —— 管理端前端：手工调账（2026-09-28）
+
+在 AIH-TASK-015 的客户详情页上加「手工调账」入口。只做前端，调用 [api.md](api.md)「管理端手工调账」里已上线的
+接口（AIH-TASK-011）；语义以 api.md 与 [design/AIH-TASK-010-admin-wallet-adjustment.md](design/AIH-TASK-010-admin-wallet-adjustment.md)
+为准。设计闸门不适用 —— 纯前端，调用的接口已过闸门 #111。不改任何后端文件与设计文件。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/walletAdjustments.ts`：`postAdjustment(customerId, body)`（`POST …/customers/{id}/wallet/adjustments`，
+    客户 id 经 `encodeURIComponent`），返回调账对象（金额字段是 `string`）；失败抛 `AdjustmentError` —— 它是 `ApiError` 的子类，
+    多带一个 HTTP 状态（没有响应时为 `null`）。`isOutcomeUnknown(error)`：只有 api.md 为本接口列出的明确拒绝
+    （400 / 401 / 403 / 404 / 409 / 422）算「结果已知」，网络错误、超时、5xx、非信封响应及其他任何状态都算「结果未知」。
+    金额的字符串校验 `amountProblem`（`[0-9]{1,12}` 可选 `.[0-9]{1,8}`、不能为 0，先去首尾空白）与 `signedAmount`
+    （贷方原样、借方前面加 `-`），不 `parseFloat`、不 `Number()`、不舍入
+  - `frontend/src/features/wallet/AdjustmentModal.tsx`：填表 → 确认 → 发送。类型用单选只列 `ADJUSTMENT_CREDIT`、`BONUS`、
+    `ADJUSTMENT_DEBIT`、`REFUND_ADJUSTMENT`，标明加还是减；金额不带符号；原因必填、去首尾空白后 1–255（按码点数），表单上提示
+    「只写业务说明，不写个人数据，永久保留」。确认步骤显示客户（公司名与 id）、类型、带符号的金额（`MoneyText`）与原因，
+    确认后才发请求；双击只发一次
+  - 幂等键：组件挂载时 `crypto.randomUUID()` 生成一个小写 uuid，同一次打开里的重试带同一个键、同一份内容。结果未知后类型、金额与
+    原因锁为只读，只剩「Retry with the same key」与关闭，锁一直保持到关闭；关闭后再打开才是新键。规则写在组件文件头注释里
+  - 结果：201 显示「Adjustment posted.」、金额、`balance_after` 与计费状态；200 且 `replayed` 为 true 时显示「此前已记过，本次未重复
+    入账」并注明金额与余额是第一次记账时的值；409 `ADJUSTMENT_CONFLICT` 显示冲突说明与后端 message、request_id，只能关闭；
+    422（含 `BALANCE_OUT_OF_RANGE`）、404 `CUSTOMER_NOT_FOUND` 等明确拒绝显示后端 message 与 request_id，可以回去改（仍用这个键，
+    它没被用过）。成功（含重放）后让客户详情（`exact`，不连带项目列表）与客户列表过期重读
+  - `CustomerDetailPage.tsx`：钱包卡片加「Adjust balance」按钮，表单只在打开时挂载、关闭即卸载
+  - 文案进 `en.json`（`wallet.adjustment.*`）；计费状态的字段名复用 `customers.field.billingStatus`
+  - 测试：`walletAdjustments.test.ts`（URL 与请求体、id 转义、409 带状态变成 `ApiError`、没有响应时状态为 `null`、各状态的
+    结果已知 / 未知、金额的合法与非法写法、加符号）、`AdjustmentModal.test.tsx`（四种类型的请求体 amount 带符号且是字符串、
+    不丢位、确认前不发请求且确认页内容齐全、原因去空白、非法金额 0 / 13 位整数 / 9 位小数 / 指数 / `+` 被拦下且不发请求、
+    原因与类型必填、双击只发一次、网络错误 / 500 / 503 后字段只读、重试同键同内容且不再生成键、结果未知时显示 request_id、
+    201 与重放的展示及刷新、409、422 / 404 可回去改、发送中不能关闭）、`CustomerDetailPage.test.tsx`（成功后重读详情、
+    关闭再打开换新键）。测试里的 uuid 与幂等键都是全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 「结果未知」按 HTTP 状态判定，所以 `postAdjustment` 抛的是带状态的 `AdjustmentError`（`ApiError` 子类）而不是裸 `ApiError`：
+    `client.ts` 的 `ApiError` 不带状态，而它不在本任务的可改路径里。408 / 429 / 502 / 504 等没列在 api.md 里的状态也算未知
+  - 锁一旦上了就保持到关闭，哪怕之后某次重试得到明确的 4xx 也不解锁 —— 宁可让管理员关掉重开
+  - 管理员输入的金额先去首尾空白再校验（粘贴常带空白）；前导 0（如 `020`）后端也收，原样发出，不做规范化
+  - 发送中不能关闭表单（关闭按钮、Esc 都无效），点遮罩在任何时候都不关闭：否则结果未知时「用同一个键重试」这条路会被误点丢掉
+  - `trimmedLength` / `maxTrimmed` 在 `AdjustmentModal.tsx` 里又照抄了一份（同 AIH-TASK-016 的理由：`CustomerForm.tsx` 不在可改路径里）
+  - 核对了 api.md、设计文件与 `app/schemas/wallet_adjustments.py`（金额正则 `-?[0-9]{1,12}(\.[0-9]{1,8})?`、非零、符号与类型
+    一致、原因去空白后 1–255、幂等键小写 uuid、响应字段白名单）：一致，没有需要停下来裁决的冲突
+- [x] **验证程度**：编写时手边没有安装好的 `node_modules`，CI 上如果红先查这些：① antd 的 `Modal` 仍接受 `maskClosable` /
+  `keyboard` / `closable`；② antd `Radio` 在 jsdom 里的可访问名是它的文字、`Form` 的 `disabled` 让单选框带 `disabled`；
+  ③ 发送中的 antd 按钮名字前面多出 loading 图标的名字（用例等它恢复可点再点）；④ jsdom 里的 `crypto.randomUUID` 可以被 `vi.spyOn`
+- [x] **Worker 第一轮 `frontend.test` 挂的两条**：① 文件里第一个用例 5s 超时 —— 填表流程里的 `getByRole` 每次都算整棵 antd 弹窗的
+  可访问性树，冷启动还要生成全部样式。填表助手改用 `getByLabelText` 找单选、按文字找按钮，`AdjustmentModal` 的 describe 超时放到
+  15s，断言不动；② 确认页上「原因」同时出现在只读的 textarea 与摘要里，断言改为忽略 textarea
+- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
+- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+- [ ] 部署后用验收夹具账号在生产上走一遍：给夹具客户记一笔小额贷方再记一笔等额借方（两个键、两行账本、两条
+  `WALLET_ADJUSTMENT_POSTED`），余额回到原值
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）

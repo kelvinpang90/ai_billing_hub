@@ -7,6 +7,9 @@
  *
  * 页底是这个客户的项目区块（`ProjectsPanel`，AIH-TASK-016），在详情读到之后才挂上。
  *
+ * 钱包卡片上的「Adjust balance」打开手工调账表单（`features/wallet/AdjustmentModal`，
+ * AIH-TASK-017）。调账成功后由表单让这里的详情过期重读，余额与计费状态以后端为准。
+ *
  * 没有账户状态、低余额阈值、成本或毛利 —— 后端没有这些字段，这里也不预留。
  */
 
@@ -40,6 +43,7 @@ import { ApiError } from "../../api/client";
 import { DateTimeText } from "../../components/DateTimeText";
 import { MoneyText } from "../../components/MoneyText";
 import { ROUTES } from "../../routes/paths";
+import { AdjustmentModal } from "../wallet/AdjustmentModal";
 import {
   CustomerErrorAlert,
   CustomerForm,
@@ -61,6 +65,7 @@ export function CustomerDetailPage() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  const [adjusting, setAdjusting] = useState(false);
   // 与建客户同一个理由：双击时两次 onFinish 可能都赶在按钮禁用之前。
   const inFlight = useRef(false);
 
@@ -173,9 +178,18 @@ export function CustomerDetailPage() {
         </Card>
       )}
 
-      <Card title={t("customers.wallet.title")}>
+      <Card
+        title={t("customers.wallet.title")}
+        extra={<Button onClick={() => setAdjusting(true)}>{t("wallet.adjustment.open")}</Button>}
+      >
         <WalletDescriptions wallet={current.wallet} />
       </Card>
+
+      {/* ⚠️ 只在打开时挂载、关闭即卸载：调账的幂等键在挂载时生成，这样每次打开才是新键。
+          详见 AdjustmentModal 的文件头注释。 */}
+      {adjusting ? (
+        <AdjustmentModal customer={current} onClose={() => setAdjusting(false)} />
+      ) : null}
 
       {/* key：换了客户，页码与建项目表单都从头来。 */}
       <ProjectsPanel key={current.id} customerId={current.id} />
