@@ -51,7 +51,7 @@ from app.models.integration import (
     IntegrationCredential,
     ProjectWebhookSecret,
 )
-from app.models.tenancy import BillingStatus, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
 from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
@@ -149,9 +149,10 @@ _BEFORE_0005 = "0004_password_reset_outbox"
 _REVISION_0005 = "0005_tenants_projects"
 _NOW = dt.datetime(2026, 9, 19, 8, 30, 0)
 
-# 列名 → 是否可空（head 上）。⚠️ 比的是**完整集合**：`account_status`、webhook 列谁被
+# 列名 → 是否可空（head 上）。⚠️ 比的是**完整集合**：`integration_status`、webhook 列谁被
 # 顺手加进来，这里都会红 —— 它们各归一个后续任务（docs/database-schema.md「尚未建的列」）。
-# 最后三列是 0006 加的（AIH-TASK-005）。
+# `billing_status` 起三列是 0006 加的（AIH-TASK-005），`account_status` 是 0009 加的
+# （AIH-TASK-020）。
 _TENANT_COLUMNS_0006 = {"billing_status", "status_version", "low_balance_threshold"}
 _EXPECTED_COLUMNS = {
     "tenants": {
@@ -166,6 +167,7 @@ _EXPECTED_COLUMNS = {
         "billing_status": False,
         "status_version": False,
         "low_balance_threshold": True,
+        "account_status": False,
     },
     "projects": {
         "id": False,
@@ -435,8 +437,11 @@ def test_0006_checks_are_the_ones_the_models_declare() -> None:
         name: (table, _normalised(condition))
         for name, (table, condition) in migration._CHECKS.items()
     }
+    # 0009 在 tenants 上加的那一条由 test_0009_checks_are_the_ones_the_model_declares 比对。
+    later = set(_load_0009()._CHECKS)
+    model = {name: check for name, check in _model_checks().items() if name not in later}
 
-    assert from_migration == _model_checks()
+    assert from_migration == model
     # tenants 3 条、wallets 1 条、wallet_transactions 5 条。
     assert len(from_migration) == 9
 
@@ -1340,3 +1345,148 @@ def test_0008_checks_refuse_bad_rows(alembic_config: Config, overrides: dict) ->
             connection,
             **_webhook_values(tenant, project, key_version=2, activated_at=_NOW, **retired),
         )
+
+
+# ---------------------------------------------------------------------------
+# 0009_tenant_account_status（AIH-TASK-020，设计闸门 #136 v2）
+#
+# 设计 §7「迁移」：upgrade 后已有行为 ENABLED；非法值被 CHECK 拒绝；downgrade 先删 CHECK
+# 再删列。头两条不连库：比对迁移与模型的 CHECK、列宽与默认值，钉住版本链。
+# ---------------------------------------------------------------------------
+
+_REVISION_0009 = "0009_tenant_account_status"
+_MIGRATION_0009 = pathlib.Path("alembic/versions/20260928_0009_tenant_account_status.py")
+_ACCOUNT_STATUS_CHECK = "ck_tenants_account_status"
+
+_TENANT_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME = 'tenants'"
+)
+
+
+def _load_0009() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0009", _MIGRATION_0009)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0009_checks_are_the_ones_the_model_declares() -> None:
+    migration = _load_0009()
+    from_migration = {
+        name: ("tenants", _normalised(rule)) for name, rule in migration._CHECKS.items()
+    }
+    model = _model_checks()
+
+    assert set(from_migration) == {_ACCOUNT_STATUS_CHECK}
+    assert from_migration[_ACCOUNT_STATUS_CHECK] == model[_ACCOUNT_STATUS_CHECK]
+    # CHECK 的取值恰好是枚举的四个成员（设计 §2「数据库」）。
+    condition = from_migration[_ACCOUNT_STATUS_CHECK][1]
+    assert {status.value for status in AccountStatus} == {
+        "PENDING_ACTIVATION",
+        "ENABLED",
+        "DISABLED",
+        "CLOSED",
+    }
+    for status in AccountStatus:
+        assert f"'{status.value}'" in condition, status
+    # 列宽与服务端默认值：迁移与模型一致。
+    column = Tenant.__table__.c.account_status
+    assert column.type.length == 32
+    assert column.nullable is False
+    assert migration._DEFAULT == column.server_default.arg == AccountStatus.ENABLED.value
+
+
+def test_0009_follows_0008() -> None:
+    migration = _load_0009()
+
+    assert migration.revision == _REVISION_0009
+    assert migration.down_revision == _REVISION_0008
+
+
+def _tenant_checks() -> set[str]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            return set(connection.execute(_TENANT_CHECKS_QUERY).scalars())
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0009_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        columns = {c["name"]: c for c in inspect(engine).get_columns("tenants")}
+        column = columns["account_status"]
+        assert isinstance(column["type"], String)
+        assert column["type"].length == 32
+        assert column["nullable"] is False
+        assert "ENABLED" in str(column["default"])
+        # 不加索引：没有按账户状态筛选的查询（设计 §2「数据库」）。
+        indexes = inspect(engine).get_indexes("tenants")
+        assert not [index for index in indexes if "account_status" in index["column_names"]]
+    finally:
+        engine.dispose()
+    assert _ACCOUNT_STATUS_CHECK in _tenant_checks()
+
+
+@needs_mysql
+def test_0009_backfills_enabled_refuses_bad_values_and_downgrades(alembic_config: Config) -> None:
+    """已有行回填 ENABLED、版本不动；CHECK 拒绝四个取值以外的值；downgrade 删 CHECK 与列。"""
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION_0008)
+    tables = _table_names()
+    assert "account_status" not in _column_names("tenants")
+    assert _ACCOUNT_STATUS_CHECK not in _tenant_checks()
+    public_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.begin() as connection:
+            for public_id in public_ids:
+                # 0008 的表形状：Tenant 模型已经多了 account_status，这里只能写裸 SQL。
+                connection.execute(
+                    text(
+                        "INSERT INTO tenants (public_id, company_name, email, created_at,"
+                        " updated_at) VALUES (:public_id, 'Account Status Sdn Bhd',"
+                        " 'ops@example.com', :now, :now)"
+                    ),
+                    {"public_id": public_id, "now": _NOW},
+                )
+
+        command.upgrade(alembic_config, _REVISION_0009)
+
+        # 只动 tenants：表集合不变，多一列、多一条 CHECK。
+        assert _table_names() == tables
+        assert _ACCOUNT_STATUS_CHECK in _tenant_checks()
+        backfilled = select(Tenant.account_status, Tenant.status_version).where(
+            Tenant.public_id.in_(public_ids)
+        )
+        with engine.connect() as connection:
+            rows = connection.execute(backfilled).all()
+        assert [tuple(row) for row in rows] == [(AccountStatus.ENABLED, 0)] * 2
+
+        # 裸 SQL：绕过枚举类型，直接看数据库自己拒不拒绝。
+        set_status = text("UPDATE tenants SET account_status = :value WHERE public_id = :id")
+        with _rolled_back_connection() as connection:
+            for bad in ("SUSPENDED", "ACTIVE", ""):
+                with pytest.raises(DBAPIError) as raised:
+                    with connection.begin_nested():
+                        connection.execute(set_status, {"value": bad, "id": public_ids[0]})
+                assert int(raised.value.orig.args[0]) == _ER_CHECK_CONSTRAINT_VIOLATED, bad
+            # 四个取值都放行，包括本任务不产生的两个。
+            for status in AccountStatus:
+                connection.execute(set_status, {"value": status.value, "id": public_ids[0]})
+
+        command.downgrade(alembic_config, _REVISION_0008)
+        assert "account_status" not in _column_names("tenants")
+        assert _ACCOUNT_STATUS_CHECK not in _tenant_checks()
+        assert _table_names() == tables
+    finally:
+        command.upgrade(alembic_config, "head")
+        with engine.begin() as connection:
+            connection.execute(delete(Tenant).where(Tenant.public_id.in_(public_ids)))
+        engine.dispose()

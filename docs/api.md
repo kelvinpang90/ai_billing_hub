@@ -91,7 +91,8 @@
 
 设计依据：设计闸门 #96 `APPROVED: design v3`，全文见 [design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)（spec §56、§57、§124）。
 
-六个接口都在 `/api/v1/admin` 下，都要 ADMIN。编辑客户是 AIH-TASK-009 加的，其余五个来自设计闸门 #96。
+七个接口都在 `/api/v1/admin` 下，都要 ADMIN。编辑客户是 AIH-TASK-009 加的，改账户状态是
+AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个来自设计闸门 #96。
 
 | 方法与路径 | 成功 | 错误 |
 | --- | --- | --- |
@@ -99,6 +100,7 @@
 | `GET /api/v1/admin/customers` | 200，客户分页 | 401 / 403 / 422 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 503 |
 | `PATCH /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 422 / 503 |
+| `POST /api/v1/admin/customers/{customer_id}/account-status` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/projects` | 201，项目 | 401 / 403 / 404 / 422 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}/projects` | 200，项目分页 | 401 / 403 / 404 / 422 / 503 |
 
@@ -120,6 +122,7 @@
   "email": "ops@example.com",
   "phone": "+60 3-0000 0000",
   "billing_status": "SUSPENDED",
+  "account_status": "ENABLED",
   "status_version": 0,
   "created_at": "2026-09-20T08:30:00",
   "updated_at": "2026-09-20T08:30:00",
@@ -134,7 +137,8 @@
 | `contact_name` / `phone` | 可为 `null` |
 | `email` | 联系邮箱，不是登录账号，不要求唯一 |
 | `billing_status` | 由余额驱动：`ACTIVE`（余额 > 0）或 `SUSPENDED`（余额 ≤ 0）。新客户余额为 0，所以是 `SUSPENDED` |
-| `status_version` | 计费状态每跃迁一次 +1。新客户是 0 |
+| `account_status` | 管理员控制的账户生命周期，与 `billing_status` 互相独立：`PENDING_ACTIVATION`、`ENABLED`、`DISABLED`、`CLOSED` 之一。新客户与迁移前已有的客户都是 `ENABLED`；现在只有 `ENABLED` / `DISABLED` 会出现（AIH-TASK-020） |
+| `status_version` | 计费状态或账户状态每真实跃迁一次 +1，两维共用、只增不减。新客户是 0 |
 | `wallet.currency` | V1 只有 `MYR` |
 | `wallet.balance` | 8 位小数的字符串 |
 | `wallet.version` | 钱包的账本序号，新钱包是 0 |
@@ -173,7 +177,7 @@
 
 成功：**201**，`data` 是客户详情。同一个事务里建好三样东西，要么全在、要么全不在：
 
-- 客户：`billing_status = SUSPENDED`、`status_version = 0`；
+- 客户：`billing_status = SUSPENDED`、`account_status = ENABLED`、`status_version = 0`；
 - 一个 MYR 钱包：余额 `"0.00000000"`、版本 0；
 - 一条 `CUSTOMER_CREATE` 审计。审计的 `after_state` 只有 `public_id`、`company_name`、
   `billing_status`、`wallet_currency`，不含 email、联系人、电话。
@@ -201,8 +205,9 @@
 | `phone` | 不超过 32；`null` 或空白表示清空 |
 
 - 空请求体 `{}` 返回 422。
-- 其他字段一律 422，包括 `billing_status`、`status_version`、`public_id`、`id`、
-  `low_balance_threshold` 和余额。计费状态只随余额变化；账户状态、低余额阈值、调账不走这个接口。
+- 其他字段一律 422，包括 `billing_status`、`account_status`、`status_version`、`public_id`、`id`、
+  `low_balance_threshold` 和余额。计费状态只随余额变化；账户状态只走
+  [`POST …/account-status`](#管理端账户状态)；低余额阈值、调账不走这个接口。
 - 客户不存在：404 `CUSTOMER_NOT_FOUND`，什么都不写。
 
 成功：**200**，`data` 是改后的客户详情。钱包只读不写。客户行与一条 `CUSTOMER_UPDATE`
@@ -238,8 +243,84 @@
 
 ### 不在本批接口里
 
-账户状态 `account_status`、低余额阈值配置、出站 webhook、删除或停用
-客户与项目（财务记录永久保留）。管理员调账与 API 凭据见后面两节。
+低余额阈值配置、出站 webhook、删除客户与项目（财务记录永久保留）、关户（`→ CLOSED`，
+见下一节末尾）。账户状态、管理员调账与 API 凭据见后面几节。
+
+---
+
+## 管理端账户状态
+
+设计依据：设计闸门 #136 `APPROVED: design v2`，全文见 [design/AIH-TASK-020-tenant-account-status.md](design/AIH-TASK-020-tenant-account-status.md)（spec §24、§25、§56、§66、§112.1）。实现登记为 AIH-TASK-020。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `POST /api/v1/admin/customers/{customer_id}/account-status` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+
+只有 ADMIN 能调。`{customer_id}` 是客户的 `id`（`public_id`）。账户状态是管理员控制的那一维，
+独立于由余额驱动的计费状态：改账户状态不改计费状态，记账也不改账户状态。本接口专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | 路径里的客户不存在 | 否 |
+| 409 | `ACCOUNT_STATUS_TRANSITION_INVALID` | 跃迁表里没有这一格：从 `CLOSED` 出去（终态） | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误（含与记账争租户行锁超时）；整个事务回滚 | 否 |
+
+### 请求体
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `account_status` | 是 | `ENABLED` 或 `DISABLED`，大小写敏感。`PENDING_ACTIVATION` 与 `CLOSED` 不能作为目标（422） |
+| `reason` | 是 | 去掉首尾空白后长度 1–255。存的是去掉首尾空白后的值 |
+
+- 其他字段一律 422，包括 `status_version`、`billing_status`、余额、`tenant_id`、`customer_id` 与
+  任何 id：客户只来自路径。
+- ⚠️ **原因只写业务说明，不写客户的联系人、电话、邮箱等个人数据。**原因只进审计（永久保留），
+  不进出站事件、不进应用日志。
+
+### 跃迁表
+
+| 当前状态 | 目标 | 结果 |
+| --- | --- | --- |
+| `PENDING_ACTIVATION` | `ENABLED` / `DISABLED` | 跃迁 |
+| `ENABLED` | `DISABLED` | 跃迁 |
+| `DISABLED` | `ENABLED` | 跃迁 |
+| `CLOSED` | 任何目标 | 409 `ACCOUNT_STATUS_TRANSITION_INVALID` |
+| 任何状态 | 与当前相同 | 200，不写 |
+
+现在没有任何路径会产生 `PENDING_ACTIVATION`（V1 没有自助注册）或 `CLOSED`（关户另立任务）；
+表按全部取值写全，保证关户上线后本接口也不会把已关的户重开。
+
+### 语义
+
+- **跃迁**：200，`data` 是改后的客户详情。同一个事务里：客户行锁内改 `account_status`、
+  `status_version` +1、`updated_at`；一条 `TENANT_ACCOUNT_STATUS_CHANGED` 审计；一条
+  `tenant.account_status_changed` 出站事件。任何一步失败（包括提交失败）整体回滚，状态与版本不变。
+- **目标等于当前状态**：200，返回当前详情，什么都不写（不写审计、不加版本、不写事件，
+  `updated_at` 也不变）。所以超时重发是安全的；原因不同的重发按同一目标处理，保留第一次的审计。
+- 只锁客户（租户）行，不读也不改钱包。与记账并发时两者在租户行锁上串行，`status_version`
+  严格递增、不重复。
+- 审计：操作者是调用的管理员（带 ip 与 user agent），`entity_type = tenant`、`entity_id` 是客户的
+  `public_id`；`before_state` / `after_state` 只有 `account_status` 与 `status_version`；`reason`
+  是请求里的原因。
+- 出站事件：`aggregate_type = tenant`、`aggregate_id` 是客户的 `public_id`，状态 `PENDING`
+  （现在没有处理器，持久等待；以后由状态 webhook 投递合成有效状态）。payload 只有下面五项，
+  **没有原因**：
+
+```json
+{
+  "account_status": "DISABLED",
+  "previous_account_status": "ENABLED",
+  "billing_status": "SUSPENDED",
+  "status_version": 1,
+  "changed_at": "2026-09-28T08:30:00"
+}
+```
+
+`billing_status` 是跃迁那一刻的计费状态；`changed_at` 与客户的 `updated_at` 相同（UTC，截到整秒）。
+
+不在本接口里：关户（`→ CLOSED`，要等用量事件与支付落地后另立任务）、有效状态（`ALLOW_AI` /
+`BLOCK_AI`）与 `reason_code`、项目的 `integration_status`。各状态下摄取、充值、客户登录的行为
+是对以后功能的契约，记在 [TODO.md](TODO.md) 的 AIH-TASK-020 一节。
 
 ---
 

@@ -48,6 +48,8 @@ CUSTOMER_FIELDS = {
     "email",
     "phone",
     "billing_status",
+    # AIH-TASK-020（设计闸门 #136 v2 §2「客户对象」）。
+    "account_status",
     "status_version",
     "created_at",
     "updated_at",
@@ -59,7 +61,7 @@ PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
-# 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口。
+# 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
@@ -81,6 +83,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", WEBHOOK_SECRETS_ROUTE),
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/activate"),
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"),
+    ("POST", "/api/v1/admin/customers/{customer_id}/account-status"),
 }
 
 # 鉴权用例给写接口的合法请求体：体不合法的话 FastAPI 在处理函数之前就回 422，
@@ -102,6 +105,11 @@ VALID_BODIES = {
     ("POST", WEBHOOK_SECRETS_ROUTE): {},
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/activate"): {},
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"): {"reason": "Probe"},
+    # 新客户是 ENABLED：漏了鉴权的处理函数会真的把它停用，而不是碰巧「没变化」。
+    ("POST", "/api/v1/admin/customers/{customer_id}/account-status"): {
+        "account_status": "DISABLED",
+        "reason": "Probe",
+    },
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -404,6 +412,8 @@ def test_an_admin_creates_a_customer_with_an_empty_wallet(client, app, admin, ad
         "+60 3-0000 0000",
     )
     assert (data["billing_status"], data["status_version"]) == ("SUSPENDED", 0)
+    # 新租户默认 ENABLED，不是跃迁：版本仍是 0（AIH-TASK-020 设计 §9）。
+    assert data["account_status"] == "ENABLED"
     assert data["wallet"] == {"currency": "MYR", "balance": "0.00000000", "version": 0}
 
     assert row_counts(app) == {**NO_ROWS, "tenants": 1, "wallets": 1, "audit_logs": 1}
@@ -698,6 +708,7 @@ def stored_tenant(application: FastAPI, customer_id: str) -> dict:
                 "email",
                 "phone",
                 "billing_status",
+                "account_status",
                 "status_version",
                 "low_balance_threshold",
                 "updated_at",
@@ -854,6 +865,28 @@ def test_invalid_edit_bodies_are_rejected_and_write_nothing(client, app, admin, 
     assert (response.status_code, error_code(response)) == (422, "VALIDATION_ERROR")
     assert row_counts(app) == before
     assert stored_tenant(app, created["id"]) == stored
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"account_status": "DISABLED"},
+        {"account_status": "ENABLED"},
+        {"company_name": "Fine", "account_status": "DISABLED"},
+    ],
+    ids=["disabled", "enabled", "valid+disabled"],
+)
+def test_patch_refuses_account_status(client, app, admin, body: dict) -> None:
+    """AIH-TASK-020 设计 §2「客户对象」：账户状态只走专用接口，PATCH 仍是 422。"""
+    created = new_customer(client, admin)
+    before, stored = row_counts(app), stored_tenant(app, created["id"])
+
+    response = client.patch(f"{CUSTOMERS}/{created['id']}", json=body, headers=admin)
+
+    assert (response.status_code, error_code(response)) == (422, "VALIDATION_ERROR")
+    assert row_counts(app) == before
+    assert stored_tenant(app, created["id"]) == stored
+    assert stored["account_status"] == "ENABLED"
 
 
 def test_an_edit_does_not_leak_personal_data_into_a_validation_error(client, admin) -> None:

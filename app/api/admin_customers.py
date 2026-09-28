@@ -18,6 +18,9 @@
 
 出站 webhook 签名密钥的四个接口（AIH-TASK-019，设计闸门 #135 v1 §2）同理：`secret` 只出现在
 签发的 201 响应里，四个响应都带 `Cache-Control: no-store`。
+
+改账户状态（AIH-TASK-020，设计闸门 #136 v2 §2）：目标只有 `ENABLED` / `DISABLED`，原因只进
+审计，这一层不记。
 """
 
 from __future__ import annotations
@@ -28,10 +31,12 @@ from fastapi import APIRouter, Path, Query, Request, Response, status
 
 from app.api.auth import request_context, require_admin, require_session_factory
 from app.core.logging import current_request_id
+from app.models.tenancy import AccountStatus
 from app.schemas.customers import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE,
     MAX_PAGE_SIZE,
+    ChangeAccountStatusRequest,
     CreateCustomerRequest,
     CreateProjectRequest,
     CustomerDetail,
@@ -56,7 +61,13 @@ from app.schemas.webhook_signing import (
     RetireWebhookSecretRequest,
     WebhookSecretView,
 )
-from app.services import customers, integration_access, wallet_adjustments, webhook_signing
+from app.services import (
+    account_status,
+    customers,
+    integration_access,
+    wallet_adjustments,
+    webhook_signing,
+)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -118,6 +129,26 @@ def update_customer(
         actor=admin,
         customer_id=customer_id,
         changes=payload.changes(),
+        context=request_context(request),
+    )
+    return success(detail, request_id=current_request_id())
+
+
+@router.post(
+    "/customers/{customer_id}/account-status",
+    response_model=ApiResponse[CustomerDetail],
+)
+def change_account_status(
+    request: Request, customer_id: str, payload: ChangeAccountStatusRequest
+) -> ApiResponse[CustomerDetail]:
+    """ENABLED ↔ DISABLED. Already at the target: 200 and nothing is written."""
+    admin = require_admin(request)
+    detail = account_status.change_account_status(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        account_status=AccountStatus(payload.account_status),
+        reason=payload.reason,
         context=request_context(request),
     )
     return success(detail, request_id=current_request_id())
