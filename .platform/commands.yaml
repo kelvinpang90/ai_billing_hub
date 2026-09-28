@@ -234,6 +234,27 @@ commands:
     # eslint 10 从被检查文件所在目录向上找配置，所以从仓库根跑也用 frontend/eslint.config.js；
     # 默认不开 --cache，不写文件。
 
+  # 部署后的浏览器验收（OpenClaw ACVDEV-TASK-048 / 049）。它和上面每一条都不一样，逐条写清：
+  # - **只在合并后部署成功时由 Worker 运行**（一个 run 最多 3 次尝试），不是提 PR 前的检查。它只能被任务的
+  #   `acceptance` 块引用，**不得**出现在任何任务的 `allowed_commands` 里：同一个任务两处都写，控制面判
+  #   invalid_contract；别的任务把它列进 allowed_commands，控制面拦不住，只靠评审拦。
+  # - **不走 MXC、网络不受限**（控制面安全边界 A7）：浏览器由 Worker 启动、只经它的代理访问 project.yaml 的
+  #   `acceptance_hosts`，但脚本进程本身不受这层约束 —— 它能不能越界只看评审，所以脚本按生产代码严审。
+  # - **拿凭据**：验收夹具管理员的字段由 Worker 从本机凭据管理器读出，经 stdin 一行 JSON 交给脚本，不进环境变量、
+  #   参数或任何文件。值与账号标识都不写进本仓库。
+  # - 只用 node 自带模块：验收时的检出没有 node_modules。
+  # 所以它**不是** approvals.yaml 里 low 档的 run_allowlisted_repo_check，不写 `risk: low`。
+  # ⚠️ 与文件头「对应文件在仓库中真实存在」不同：登记时 scripts/acceptance/admin_customers.mjs 还不存在，
+  #    由 AIH-TASK-024 写出；在它合并之前，没有任何任务能触发这条命令。
+  - id: acceptance.browser
+    description: 部署后浏览器验收（管理端客户页，只读），只由 Worker 在部署成功后运行
+    executable: node
+    args: ["scripts/acceptance/admin_customers.mjs"]
+    working_directory: repository_root
+    timeout_seconds: 300
+    network: true
+    writes: none
+
 # 下面这些**不是命令**，是明确不得被伪装成 low risk 混进 allowlist 的动作类别。
 # 想做其中任何一件，走 .platform/approvals.yaml 的 approval_required 或 prohibited。
 never_low_risk:

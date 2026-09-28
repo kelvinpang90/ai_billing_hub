@@ -48,6 +48,20 @@ repository:
 #    代价是：**加上这一行的这个 PR 本身不会被观察**，下一个任务才开始生效。
 deploy_workflow: deploy.yml
 
+# 部署后浏览器验收能访问的主机（OpenClaw ACVDEV-TASK-048 / 049；本仓库从 AIH-TASK-024 起用）。
+#
+# Worker 启动的浏览器只能经它的出站代理访问这里列出的主机的 443，别的一概连不上。管理端页面与它调用的
+# API 同源（nginx 整站反代，前端 client 的 baseURL 是 `/`），所以只有一个。只列生产主机。
+#
+# 只有声明了 `acceptance` 的任务才读它；有这样的任务而这里缺失或不合法（1–4 个小写 DNS 主机名，不带协议、
+# 端口、路径、通配符），契约即 invalid_contract。与 deploy_workflow 一样只能由运营者的 PR 改：Worker 改不了
+# `.platform/`，验收时读的是合并 commit 里的这份。
+#
+# ⚠️ 这是本仓库**唯一**写进来的真实主机名，是 ADR-0001「不提交真实主机名」的登记例外（见该 ADR 的派生要求）。
+#    不要照着这一行把主机名写到别处。
+acceptance_hosts:
+  - aibilling.acuventech.com
+
 roles:
   development_owner: claude_code
   independent_reviewer: codex

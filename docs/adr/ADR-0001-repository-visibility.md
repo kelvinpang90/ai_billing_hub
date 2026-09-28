@@ -90,6 +90,7 @@ spec 同步修订至 **v1.2**，§99 的「private GitHub repository」改为公
 派生要求：
 
 - **绝不可提交**任何凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。CI 的 `secret-scan` job 是兜底，不是许可
+  - **唯一例外（2026-09-28，Kelvin 批准）**：`.platform/project.yaml` 的 `acceptance_hosts` 写生产管理端的公开域名。OpenClaw 浏览器验收只从业务仓库读这一项、没有本机替代，浏览器靠它限定只能访问哪台主机。例外只限这一处、只限域名：不写 IP、端口、内网地址、VPS 信息或其他主机名，也不因此放宽别处
 - 未来若有客户数据样例、真实成本数据、合同条款，必须放在本仓库之外
 - PR、Issue、commit message 同样公开，讨论中不得出现上述内容
 
