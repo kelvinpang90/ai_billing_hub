@@ -704,18 +704,24 @@ def test_the_enrolment_cache_dies_with_its_session_factory(settings: Settings) -
     它只在地址恰好复用时发作，所以表现为**随机某个用例变红**（CI 上连续两轮
     撞在不同用例上，本地一次没撞过）。这里不去赌地址复用，而是直接断言那条
     让复用变得无害的性质：条目随工厂一起消失。
+
+    ⚠️ 比的是**相对基线的增减**，不是绝对条数：`_ENROLLED` 是模块级的，前面的
+    用例（CI 上还有带 MySQL 的那条）留下的工厂可能还没被回收，按绝对条数断言
+    会在 CI 上偶发 `assert 2 == 1`（AIH-TASK-020 的 run 与收尾 PR 各撞一次）。
     """
+    gc.collect()
+    baseline = len(_ENROLLED)
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = create_session_factory(engine)
     user = make_user(factory)
     sign_in(factory, settings, user_id=user.id)
-    assert len(_ENROLLED) == 1
+    assert len(_ENROLLED) == baseline + 1
 
     del factory
     gc.collect()
 
-    assert len(_ENROLLED) == 0
+    assert len(_ENROLLED) == baseline
 
 
 def test_an_idle_refresh_token_is_refused(session_factory, settings: Settings) -> None:
