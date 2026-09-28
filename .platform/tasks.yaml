@@ -1028,7 +1028,7 @@ tasks:
       管理端前端第四刀：在 AIH-TASK-016 的项目区块里管理项目的集成 API 凭据 —— 建、列、轮换、吊销单个版本、吊销整个 key，
       调用 docs/api.md「管理端集成 API 凭据」的五个接口（已过设计闸门 #118、由 AIH-TASK-012 上线）。
       重点是 secret 只显示一次、不落任何缓存。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-016
     acceptance_criteria:
