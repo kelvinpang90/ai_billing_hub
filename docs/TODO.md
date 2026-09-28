@@ -1789,7 +1789,8 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [x] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署：run `dfb9e574` 第一轮只有
   `format.check` 没过（测试文件一处换行），修一次后通过，提交 `a9838c9`；Worker 的受限审查第一轮 `REQUEST_CHANGES`（测试里
   一个非全零的 event id），repair 1 `80cf225` 改掉后 `APPROVE`。CI 六项全绿，#152 合并为 `1aabe11`，CI 与 Deploy 成功（迁移
-  0008 随部署执行）。上面「§7 冲突」那条的裁定在 #152 上没有记录，#152 正文的「设计闸门」一行也没改成 `#135`，见收尾 PR
+  0008 随部署执行）。上面「§7 冲突」那条 #152 合并时没留裁定，收尾 PR #153 上由 Kelvin 裁定接受（记入 [REVIEW-LOG](REVIEW-LOG.md)「升级给人的分歧」）；
+  #152 正文的「设计闸门」一行没改成 `#135`
 - [ ] **后续**：ADR-0004「收口条件」里第 4a 节那一项的勾选（要改 ADR 文件，不在本任务的可改路径里）；管理端前端（已在
   「后续计划」）；Phase 3 的投递设计闸门接上 `signing_material` 与 `sign_status_webhook`，并在 api.md「状态 webhook 签名」
   补时间窗、重试与按事件 id 去重的约定
