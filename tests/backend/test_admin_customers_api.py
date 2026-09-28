@@ -30,10 +30,11 @@ from app.core.tokens import issue_access_token, issue_pending_2fa_token
 from app.main import create_app
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.integration import IntegrationCredential
+from app.models.integration import IntegrationCredential, ProjectWebhookSecret
 from app.models.tenancy import Project, Tenant
 from app.models.wallet import Wallet, WalletTransaction
 from app.repositories.integration_access import insert_credential
+from app.repositories.webhook_signing import insert_pending
 from app.services.auth import utc_now
 
 ADMIN_PREFIX = "/api/v1/admin"
@@ -58,8 +59,11 @@ PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
-# 五个集成凭据接口。
+# 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
+WEBHOOK_SECRETS_ROUTE = (
+    "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
+)
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -73,6 +77,10 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", CREDENTIALS_ROUTE + "/{api_key}/rotate"),
     ("POST", CREDENTIALS_ROUTE + "/{api_key}/versions/{key_version}/revoke"),
     ("POST", CREDENTIALS_ROUTE + "/{api_key}/revoke"),
+    ("POST", WEBHOOK_SECRETS_ROUTE),
+    ("GET", WEBHOOK_SECRETS_ROUTE),
+    ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/activate"),
+    ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"),
 }
 
 # 鉴权用例给写接口的合法请求体：体不合法的话 FastAPI 在处理函数之前就回 422，
@@ -91,6 +99,9 @@ VALID_BODIES = {
     ("POST", CREDENTIALS_ROUTE + "/{api_key}/rotate"): {"current_key_version": 1},
     ("POST", CREDENTIALS_ROUTE + "/{api_key}/versions/{key_version}/revoke"): {"reason": "Probe"},
     ("POST", CREDENTIALS_ROUTE + "/{api_key}/revoke"): {"reason": "Probe"},
+    ("POST", WEBHOOK_SECRETS_ROUTE): {},
+    ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/activate"): {},
+    ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"): {"reason": "Probe"},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -240,13 +251,14 @@ COUNTED_MODELS = (
     WalletTransaction,
     DomainOutbox,
     IntegrationCredential,
+    ProjectWebhookSecret,
 )
 
 
 def row_counts(application: FastAPI) -> dict[str, int]:
     """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。
 
-    凭据表同理（AIH-TASK-012）。
+    凭据表（AIH-TASK-012）与出站签名密钥表（AIH-TASK-019）同理。
     """
     with application.state.session_factory() as session:
         return {model.__tablename__: count_rows(session, model) for model in COUNTED_MODELS}
@@ -260,6 +272,7 @@ NO_ROWS = {
     "wallet_transactions": 0,
     "domain_outbox": 0,
     "integration_credentials": 0,
+    "project_webhook_secrets": 0,
 }
 
 
@@ -305,6 +318,38 @@ def probe_credential(application: FastAPI, project_id: str) -> None:
             now=utc_now().replace(microsecond=0),
         )
         session.commit()
+
+
+def probe_webhook_secret(application: FastAPI, project_id: str) -> None:
+    """A PENDING version 1 under the project, written directly (AIH-TASK-019).
+
+    PENDING：漏了鉴权的启用与退役处理函数会真的改它，而不是碰巧 404。
+    """
+    with application.state.session_factory() as session:
+        project = session.execute(
+            select(Project).where(Project.public_id == project_id)
+        ).scalar_one()
+        insert_pending(
+            session,
+            tenant_id=project.tenant_id,
+            project_id=project.id,
+            key_version=1,
+            encrypted_secret="not-a-real-ciphertext",
+            encryption_key_version=1,
+            now=utc_now().replace(microsecond=0),
+        )
+        session.commit()
+
+
+def stored_webhook_secrets(application: FastAPI) -> list[tuple]:
+    statement = select(
+        ProjectWebhookSecret.key_version,
+        ProjectWebhookSecret.status,
+        ProjectWebhookSecret.activated_at,
+        ProjectWebhookSecret.retired_at,
+    ).order_by(ProjectWebhookSecret.id)
+    with application.state.session_factory() as session:
+        return [tuple(row) for row in session.execute(statement)]
 
 
 def stored_credentials(application: FastAPI) -> list[tuple]:
@@ -402,6 +447,7 @@ def test_every_admin_route_refuses_non_admins(
     customer_id = new_customer(client, admin)["id"]
     project_id = new_project(client, admin, customer_id)["id"]
     probe_credential(app, project_id)
+    probe_webhook_secret(app, project_id)
     url = (
         path.replace("{customer_id}", customer_id)
         .replace("{project_id}", project_id)
@@ -411,6 +457,7 @@ def test_every_admin_route_refuses_non_admins(
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
     credentials = stored_credentials(app)
+    webhook_secrets = stored_webhook_secrets(app)
 
     response = client.request(method, url, json=VALID_BODIES.get((method, path)), headers=headers)
 
@@ -421,6 +468,8 @@ def test_every_admin_route_refuses_non_admins(
     assert stored_tenant(app, customer_id) == stored
     # 凭据行同理：吊销与轮换改的是已有行的状态与截止时间。
     assert stored_credentials(app) == credentials
+    # 签名密钥行同理：启用与退役改的是已有行的状态与时间（AIH-TASK-019）。
+    assert stored_webhook_secrets(app) == webhook_secrets
 
 
 @pytest.mark.parametrize(

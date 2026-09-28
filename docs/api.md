@@ -8,6 +8,7 @@
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端集成 API 凭据](#管理端集成-api-凭据)与[集成请求签名](#集成请求签名)（AIH-TASK-012）
+- [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥)与[状态 webhook 签名](#状态-webhook-签名)（AIH-TASK-019）
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -504,3 +505,157 @@ SHA256(RAW_REQUEST_BODY)
 
 以后的端点对以上所有拒绝给**同一个** 401，不让调用方区分原因；上面的码只在服务端内部使用。
 防重放（记住用过的请求 id）随摄取端点实现，本任务不做。
+
+---
+
+## 管理端出站 webhook 签名密钥
+
+设计依据：设计闸门 #135 `APPROVED: design v1`，全文见 [design/AIH-TASK-019-webhook-signing.md](design/AIH-TASK-019-webhook-signing.md)（spec §28、§36、§37、§66；ADR-0004 §4a）。实现登记为 AIH-TASK-019。
+
+平台向集成应用后端推送的状态 webhook 用**每个项目一把**的出站签名密钥签名（spec §28）。这里是管理员为
+客户的项目签发、列出、启用、退役这把密钥的四个接口；签名怎么算见下一节。**本任务不发送 webhook**：
+`status_webhook_url`、投递、重试与 payload 形状归 Phase 3 的投递设计闸门。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST /api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets` | `{}` | 201，签发的版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `GET /api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets` | — | 200，版本分页 | 401 / 403 / 404 / 422 / 503 |
+| `POST …/webhook-secrets/{key_version}/activate` | `{}` | 200，启用后的全部版本（数组，版本从小到大） | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST …/webhook-secrets/{key_version}/retire` | `{"reason": str}` | 200，该版本 | 401 / 403 / 404 / 422 / 500 / 503 |
+
+`…` 是 `/api/v1/admin/customers/{customer_id}/projects/{project_id}`。只有 ADMIN 能调。
+`{customer_id}`、`{project_id}` 是 `public_id`；`{key_version}` 是正整数（`0`、负数、非整数、超出 INT 上界都是 422）。
+
+⚠️ **`secret` 只出现一次**：只在签发的那一次 201 响应里，之后任何接口都不再返回它（spec §36）。调用方
+当场保存并交给集成方。四个接口的成功响应都带 `Cache-Control: no-store`。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | 路径里的客户不存在 | 否 |
+| 404 | `PROJECT_NOT_FOUND` | 项目不存在，或不属于路径里的客户（两者一模一样） | 否 |
+| 404 | `WEBHOOK_SECRET_NOT_FOUND` | 该项目没有这个 `key_version`（属于别的项目的与不存在的一模一样） | 否 |
+| 409 | `WEBHOOK_SECRET_PENDING_EXISTS` | 签发时已有一个 `PENDING` 版本（先启用或退役它） | 否 |
+| 409 | `WEBHOOK_SECRET_NOT_PENDING` | 启用一个 `RETIRED` 版本 | 否 |
+| 409 | `WEBHOOK_SECRET_CONFLICT` | 数据库唯一约束兜底触发（并发下理论上被行锁挡住） | 否 |
+| 503 | `ENCRYPTION_NOT_CONFIGURED` | 主密钥未配置（只影响签发；列表、启用、退役照常） | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误；整个事务回滚，这次生成的 `secret` 随之作废、从未返回 | 否 |
+
+### 格式
+
+- `secret` = `whs_` + 64 个小写十六进制字符（256 位），例如
+  `whs_0000000000000000000000000000000000000000000000000000000000000000`。HMAC 的密钥就是这**整个字符串**
+  （含 `whs_` 前缀）的 UTF-8 字节，与入站的 `sk_…` 规则一致。
+- 本文件与测试里的示例一律是全零占位值，不是真实密钥。
+
+### 版本对象
+
+```json
+{
+  "key_version": 2,
+  "status": "ACTIVE",
+  "created_at": "2026-09-28T08:30:00",
+  "activated_at": "2026-09-28T09:00:00",
+  "retired_at": null
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `key_version` | 签名版本，从 1 起，只增不减，退役的不复用；出站请求头 `X-Acuven-Key-Version` 里带的就是它 |
+| `status` | `PENDING`（已签发、平台还没用它签名）/ `ACTIVE`（平台此刻用它签名）/ `RETIRED`（终态） |
+| `created_at` / `activated_at` / `retired_at` | 服务端时刻，整秒、UTC；后两者没发生时为 `null`（从 `PENDING` 直接退役的没有 `activated_at`） |
+
+**签发的版本**（签发的响应）= 版本对象 + `secret`。
+
+响应里没有内部自增 id、`tenant_id`、内部 `project_id`、密文与主密钥版本。
+
+每个项目任何时刻**至多一个 `ACTIVE`、至多一个 `PENDING`**，由数据库唯一索引保证。
+
+### `POST …/webhook-secrets` —— 签发
+
+请求体是 `{}`。其他字段一律 422：不能指定 `secret`、`key_version`、`status` 或任何 id —— 客户与项目只来自
+路径，操作者只来自令牌。
+
+成功：**201**，新版本 `key_version` = 该项目最大版本 + 1（没有则 1），`PENDING`，响应里带它的 `secret`
+（只这一次）。同一事务里写一行密文（AES-256-GCM 信封加密）和一条 `WEBHOOK_SECRET_ISSUE` 审计（`after_state`
+是 `key_version` 与 `status`）。
+
+- 已有 `PENDING`：409 `WEBHOOK_SECRET_PENDING_EXISTS`，什么都不写。
+- 不幂等。若提交成功而响应丢了，新版本已是 `PENDING` 但拿不到 `secret`：退役它再签发一次，`secret` 不能事后找回。
+
+### `GET …/webhook-secrets` —— 版本列表
+
+查询参数见[分页](#分页spec-108)。`data.items` 是这个项目的全部版本，`key_version` 从小到大。只读，不写审计。
+没有 `secret`，没有密文。
+
+### `POST …/webhook-secrets/{key_version}/activate` —— 启用
+
+请求体是 `{}`。成功：**200**，`data` 是这个项目启用后的全部版本（数组，版本从小到大）。
+
+- `PENDING` → `ACTIVE`，`activated_at` 为现在；原来的 `ACTIVE`（若有）**同一事务**变成 `RETIRED`，`retired_at`
+  为现在。平台从此用新版本签名，不会出现两把 `ACTIVE` 或一把都没有的中间态。写一条 `WEBHOOK_SECRET_ACTIVATE`
+  审计（前后状态是新旧两个版本的 `key_version` 与 `status`）。
+- 已是 `ACTIVE`：200 与当前各版本，什么都不写（幂等）。
+- `RETIRED`：409 `WEBHOOK_SECRET_NOT_PENDING`。
+
+**正常轮换**（ADR-0004 §4a）：签发新版本 → 把 `secret` 交给集成方，集成方配置成「新旧两个版本都接受」→ 启用
+新版本（平台原子切换）→ 集成方确认新签名能通过后自己停止接受旧版本。旧版本在启用那一步已是 `RETIRED`，
+平台不会再用它签名。
+
+### `POST …/webhook-secrets/{key_version}/retire` —— 退役
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `reason` | 是 | 去掉首尾空白后长度 1–255。进审计的 `reason`；只写业务说明，不写个人数据 |
+
+成功：**200**，`data` 是该版本。`PENDING` 或 `ACTIVE` → `RETIRED`，`retired_at` 为现在；同一事务写一条
+`WEBHOOK_SECRET_RETIRE` 审计（前后状态是该版本的 `key_version` 与 `status`）。**幂等**：已经 `RETIRED` 时返回
+200 与当前状态，什么都不写。
+
+⚠️ 退役 `ACTIVE`（例如泄露时）之后**项目没有签名密钥**：平台不会不签名就发送，以后的投递要等到有新的
+`ACTIVE` 为止。退役只改状态，不删行、不清密文；没有删除接口。
+
+---
+
+## 状态 webhook 签名
+
+设计依据同上（设计 §2「签名库」；spec §28、§37）。**本任务只提供签名库**（`app/services/webhook_signing.py`
+的 `signing_material` 与 `sign_status_webhook`），还没有任何发送方；投递随 Phase 3 接上。规范串与
+[集成请求签名](#集成请求签名)是**同一套规则、同一份实现**，只有第四行不同。**本节是那条差别的唯一出处**，
+集成方验签照这里实现。
+
+### 请求头
+
+| 请求头 | 内容 |
+| --- | --- |
+| `X-Acuven-Timestamp` | **Unix 纪元秒的十进制整数字符串**（同入站：不带小数、不带正负号、不补零）。每次发送重新生成 |
+| `X-Acuven-Signature` | HMAC-SHA256 输出的**小写**十六进制（64 个字符） |
+| `X-Acuven-Event-ID` | 事件 id，原样参与签名 |
+| `X-Acuven-Key-Version` | 签名用的 `key_version`（十进制整数） |
+
+### 规范化请求串
+
+五行，用 `\n`（LF）连接，末尾没有换行：
+
+```text
+POST
+NORMALIZED_PATH_AND_QUERY
+X-Acuven-Timestamp
+X-Acuven-Event-ID
+SHA256(RAW_REQUEST_BODY)
+```
+
+⚠️ **第四行填 `X-Acuven-Event-ID`**。spec §37 的第四行是请求 id，而 spec §28 的出站请求头里没有请求 id；
+在出站 webhook 上，事件 id 就是那一行的角色（设计 §2）。其余四行与[集成请求签名](#规范化请求串)完全相同：
+方法是 `POST`；路径与查询串是 webhook URL 的路径与查询串，按同样的规则规范化；时间戳是请求头原值；
+最后一行是请求体原始字节的 SHA-256 小写十六进制。
+
+签名 = `HMAC-SHA256(key = secret 的 UTF-8 字节, message = 规范化请求串的 UTF-8 字节)`，小写十六进制。
+
+### 集成方怎么验
+
+按 `X-Acuven-Key-Version` 选密钥，照上面的规则算出签名，与 `X-Acuven-Signature` 做常量时间比较。轮换期间
+同时接受新旧两个版本，确认新版本能通过后再停用旧版本（ADR-0004 §4a）。时间窗、重试与按事件 id 去重的约定
+随 Phase 3 投递设计闸门写进这里。

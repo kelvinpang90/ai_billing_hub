@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-09-25
+> 最后更新：2026-09-28
 
 ---
 
@@ -167,16 +167,55 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 
 ---
 
+## `project_webhook_secrets`（spec §28；AIH-TASK-019，迁移 `0008_webhook_signing`）
+
+设计依据：[design/AIH-TASK-019-webhook-signing.md](design/AIH-TASK-019-webhook-signing.md)（设计闸门 #135 v1），
+[ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节方案 i。一行是**一个项目的出站状态 webhook 签名密钥的
+一个版本**。平台同一时刻只用 `ACTIVE` 那一把签名。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `project_id` / `tenant_id` | BIGINT | 非空；`(project_id, tenant_id)` 复合外键 → `projects(id, tenant_id)`（`uq_projects_id_tenant`，0007 建）`ON DELETE RESTRICT` |
+| `key_version` | INT | 非空，`CHECK (key_version >= 1)`；**签名版本**，客户在 `X-Acuven-Key-Version` 里看到的就是它。按项目从 1 递增，不复用 |
+| `status` | VARCHAR(16) | 非空，`CHECK IN ('PENDING','ACTIVE','RETIRED')`。`RETIRED` 是终态 |
+| `encrypted_secret` | TEXT | 非空；`encrypt_secret` 的输出（AES-256-GCM 信封加密），带 AAD。库里没有明文 |
+| `encryption_key_version` | INT | 非空；**主密钥**版本。与 `key_version` 分开（ADR-0004 §4） |
+| `active_slot` | BIGINT，STORED 生成列 | `CASE WHEN status = 'ACTIVE' THEN project_id END`；唯一索引 `ux_project_webhook_secrets_active_slot` |
+| `pending_slot` | BIGINT，STORED 生成列 | `CASE WHEN status = 'PENDING' THEN project_id END`；唯一索引 `ux_project_webhook_secrets_pending_slot` |
+| `created_at` | DATETIME | 非空 |
+| `activated_at` | DATETIME | 可空；启用时刻 |
+| `retired_at` | DATETIME | 可空；退役时刻 |
+
+- **唯一约束 `(project_id, key_version)`**（`uq_project_webhook_secrets_key_version`）。
+- **每个项目至多一个 `ACTIVE`、至多一个 `PENDING`**：由两个生成列上的唯一索引保证。非该状态的行在列上是
+  NULL，唯一索引允许多个 NULL（MySQL 与 SQLite 都是这个语义，测试实际插入违反约束的行验证）。绕过服务层
+  的写入也造不出两把 `ACTIVE`。
+- **时间与状态一致**（`ck_project_webhook_secrets_times`）：`PENDING` ⇒ `activated_at`、`retired_at` 都为空；
+  `ACTIVE` ⇒ `activated_at` 非空、`retired_at` 为空；`RETIRED` ⇒ `retired_at` 非空（从 `PENDING` 直接退役的
+  没有 `activated_at`）。
+- **复合外键**保证行的 `tenant_id` 就是项目所属的租户（INV-8）。
+- **AAD**：`encrypted_secret` 加密时的关联数据是 `project_webhook_secrets|<项目 public_id>|<key_version>`（ASCII）。
+  把一行的密文拷到别的项目或别的版本上就解不开。
+- **行不删除**：外键 `RESTRICT`，代码里没有删除路径；退役只改状态，不清密文（以后的投递记录要引用版本）。
+- 写路径先 `SELECT … FOR UPDATE` 锁项目行，同一项目的签发、启用、退役串行执行；启用在同一事务里把原 `ACTIVE`
+  改为 `RETIRED`（先退旧、再启新）。
+
+---
+
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、
 `status_version`、`low_balance_threshold`。AIH-TASK-012 建了 spec §74.4 的 `integration_credentials`（入站
-API 凭据），没有给 `projects` 加列，只加了一个唯一约束。下面这些 spec 列刻意留给后续任务，届时都是**纯新增列**：
+API 凭据），没有给 `projects` 加列，只加了一个唯一约束。AIH-TASK-019 建了 `project_webhook_secrets`（出站签名
+密钥），也没有给 `projects` 加列：spec §76 的 `encrypted_webhook_secret` / `webhook_key_version` 由这张表取代，
+**不再建**。下面这些 spec 列刻意留给后续任务，届时都是**纯新增列**：
 
 | 表 | 列 | 留给谁 | 为什么现在不建 |
 | --- | --- | --- | --- |
 | `tenants` | `account_status` | 状态模型任务（走设计闸门） | §24 由管理员控制的那一维，以及有效状态合成；碰状态机按 [WORKFLOW §3](WORKFLOW.md) 必须过设计闸门。那个任务的跃迁与计费跃迁共用 `status_version` |
 | `tenants` | `currency` | **不建** | 币种由 `wallets.currency` 承载，不在租户上重复（设计闸门 #88） |
 | `projects` | `integration_status` | 状态模型任务（走设计闸门） | 同上，§24 |
-| `projects` | `status_webhook_url`、`encrypted_webhook_secret`、`webhook_key_version` | Webhook 任务 | 出站签名密钥 2026-09-25 已选定 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节方案 i（新建 `project_webhook_secrets` 表，结构对齐 `integration_credentials`），实现另过设计闸门；`status_webhook_url` 随那个任务 |
+| `projects` | `status_webhook_url` | Phase 3「出站服务状态 webhook 投递」设计闸门 | 投递目标随投递 worker、重试与 `webhook_deliveries` 一起做（AIH-TASK-019 设计 §1 非目标） |
+| `projects` | `encrypted_webhook_secret`、`webhook_key_version` | **不建** | 由 `project_webhook_secrets` 表取代（[ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节方案 i，AIH-TASK-019）：多版本、签名版本与主密钥版本分列 |
 | `projects` | `backend_base_url` | Phase 3 | 应用后端集成（§35–§39） |

@@ -15,13 +15,16 @@
 
 集成 API 凭据的五个接口（AIH-TASK-012，设计闸门 #118 v1 §2）：`secret` 只出现在建凭据与
 轮换的 201 响应里；五个响应都带 `Cache-Control: no-store`，中间缓存与浏览器都不留副本。
+
+出站 webhook 签名密钥的四个接口（AIH-TASK-019，设计闸门 #135 v1 §2）同理：`secret` 只出现在
+签发的 201 响应里，四个响应都带 `Cache-Control: no-store`。
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 
 from app.api.auth import request_context, require_admin, require_session_factory
 from app.core.logging import current_request_id
@@ -46,7 +49,14 @@ from app.schemas.integration_access import (
     RotateCredentialRequest,
 )
 from app.schemas.wallet_adjustments import AdjustmentView, CreateAdjustmentRequest
-from app.services import customers, integration_access, wallet_adjustments
+from app.schemas.webhook_signing import (
+    ActivateWebhookSecretRequest,
+    IssuedWebhookSecretView,
+    IssueWebhookSecretRequest,
+    RetireWebhookSecretRequest,
+    WebhookSecretView,
+)
+from app.services import customers, integration_access, wallet_adjustments, webhook_signing
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -322,3 +332,112 @@ def revoke_credential(
     )
     _no_store(response)
     return success(revoked, request_id=current_request_id())
+
+
+# --- 出站 webhook 签名密钥（AIH-TASK-019） ---------------------------------------------
+
+_WEBHOOK_SECRETS = "/customers/{customer_id}/projects/{project_id}/webhook-secrets"
+
+# 正整数，INT 列的上界；`0`、负数、非整数都是 422（设计 §2、§7「边界值」）。
+WebhookKeyVersion = Annotated[int, Path(ge=1, le=2**31 - 1)]
+
+
+@router.post(
+    _WEBHOOK_SECRETS,
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[IssuedWebhookSecretView],
+)
+def issue_webhook_secret(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    payload: IssueWebhookSecretRequest,
+) -> ApiResponse[IssuedWebhookSecretView]:
+    """A new PENDING version; the `secret` is in this response and never again."""
+    admin = require_admin(request)
+    issued = webhook_signing.issue_secret(
+        require_session_factory(request),
+        request.app.state.settings,
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        context=request_context(request),
+    )
+    _no_store(response)
+    return success(issued, request_id=current_request_id())
+
+
+@router.get(_WEBHOOK_SECRETS, response_model=ApiResponse[Page[WebhookSecretView]])
+def list_webhook_secrets(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    page: PageNumber = 1,
+    page_size: PageSize = DEFAULT_PAGE_SIZE,
+) -> ApiResponse[Page[WebhookSecretView]]:
+    """Every version of the project, `key_version` ascending. Never a `secret`."""
+    require_admin(request)
+    listing = webhook_signing.list_secrets(
+        require_session_factory(request),
+        customer_id=customer_id,
+        project_id=project_id,
+        page=page,
+        page_size=page_size,
+    )
+    _no_store(response)
+    return success(listing, request_id=current_request_id())
+
+
+@router.post(
+    _WEBHOOK_SECRETS + "/{key_version}/activate",
+    response_model=ApiResponse[list[WebhookSecretView]],
+)
+def activate_webhook_secret(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    key_version: WebhookKeyVersion,
+    payload: ActivateWebhookSecretRequest,
+) -> ApiResponse[list[WebhookSecretView]]:
+    """PENDING → ACTIVE, the old ACTIVE → RETIRED at once. Already ACTIVE: 200, no write."""
+    admin = require_admin(request)
+    versions = webhook_signing.activate_secret(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        key_version=key_version,
+        context=request_context(request),
+    )
+    _no_store(response)
+    return success(versions, request_id=current_request_id())
+
+
+@router.post(
+    _WEBHOOK_SECRETS + "/{key_version}/retire",
+    response_model=ApiResponse[WebhookSecretView],
+)
+def retire_webhook_secret(
+    request: Request,
+    response: Response,
+    customer_id: str,
+    project_id: str,
+    key_version: WebhookKeyVersion,
+    payload: RetireWebhookSecretRequest,
+) -> ApiResponse[WebhookSecretView]:
+    """PENDING or ACTIVE → RETIRED. Idempotent: already retired is 200 and writes nothing."""
+    admin = require_admin(request)
+    retired = webhook_signing.retire_secret(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        key_version=key_version,
+        reason=payload.reason,
+        context=request_context(request),
+    )
+    _no_store(response)
+    return success(retired, request_id=current_request_id())

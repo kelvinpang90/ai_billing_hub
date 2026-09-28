@@ -149,6 +149,12 @@ class AuditAction(enum.StrEnum):
     API_KEY_CREATE = "API_KEY_CREATE"
     API_KEY_ROTATE = "API_KEY_ROTATE"
     API_KEY_REVOKE = "API_KEY_REVOKE"
+    # AIH-TASK-019（设计闸门 #135）：写入方都是 app/services/webhook_signing.py，与密钥行
+    # 同一事务。三个都不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在
+    # docs/TODO.md。前后状态里永远没有 secret、密文与主密钥版本。
+    WEBHOOK_SECRET_ISSUE = "WEBHOOK_SECRET_ISSUE"
+    WEBHOOK_SECRET_ACTIVATE = "WEBHOOK_SECRET_ACTIVATE"
+    WEBHOOK_SECRET_RETIRE = "WEBHOOK_SECRET_RETIRE"
 
 
 class AuditLog(Base):
