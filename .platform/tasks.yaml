@@ -1427,7 +1427,7 @@ tasks:
       写 scripts/acceptance/admin_customers.mjs：部署后由 Worker 在生产上用验收夹具账号，只读地验证 AIH-TASK-015
       已上线的管理端客户页（登录、客户列表、夹具客户详情、余额）。它是 OpenClaw 浏览器验收（P6）的试点：本任务自己声明
       acceptance，合并部署后 Worker 就跑它写出的这个脚本。只写这一个脚本，不改前端、后端与文档。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-015
     acceptance_criteria:

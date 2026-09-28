@@ -23,11 +23,10 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-024` AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，只读）
-2. `AIH-TASK-020` 租户账户状态：启用与停用
-3. `AIH-TASK-021` 审计表在数据库层只追加
-4. `AIH-TASK-022` 管理端审计日志查询接口
-5. `AIH-TASK-023` 管理端前端：审计日志页
+1. `AIH-TASK-020` 租户账户状态：启用与停用
+2. `AIH-TASK-021` 审计表在数据库层只追加
+3. `AIH-TASK-022` 管理端审计日志查询接口
+4. `AIH-TASK-023` 管理端前端：审计日志页
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -1551,8 +1550,8 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
 - [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
 - [ ] 部署后用验收夹具账号在生产上走一遍：列表里看到夹具客户、详情的余额与后端字符串一致、改一次联系人再改回（留两条
-  `CUSTOMER_UPDATE` 审计，`changed_fields` 只有 `contact_name`）。只读部分（登录、列表、详情、余额）将由 AIH-TASK-024
-  的自动浏览器验收覆盖；「改联系人再改回」在只读版跑稳后再加
+  `CUSTOMER_UPDATE` 审计，`changed_fields` 只有 `contact_name`）。只读部分（登录、列表、详情、余额）已由 AIH-TASK-024
+  的自动浏览器验收覆盖（2026-09-28 首次 PASS，见 024 记录段）；「改联系人再改回」在只读版跑稳后再加，这一条因此仍不勾
 
 ### AIH-TASK-016 —— 管理端前端：客户的项目列表与建项目（2026-09-27）
 
@@ -1798,6 +1797,36 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [ ] **后续**：ADR-0004「收口条件」里第 4a 节那一项的勾选（要改 ADR 文件，不在本任务的可改路径里）；管理端前端（已在
   「后续计划」）；Phase 3 的投递设计闸门接上 `signing_material` 与 `sign_status_webhook`，并在 api.md「状态 webhook 签名」
   补时间窗、重试与按事件 id 去重的约定
+
+### AIH-TASK-024 —— AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，2026-09-28）
+
+OpenClaw 部署后浏览器验收（控制面 ACVDEV-TASK-049 / 050）在本仓库的第一个试点：登记见 #154，验收条件按 ACVDEV-TASK-050
+在 #156、#157 修订（入口取 stdin 的 `hosts[0]`、接管唯一的 `about:blank` 页面目标、报 `check_balance` 前把余额滚进视口）。
+只写 `scripts/acceptance/admin_customers.mjs` 一个文件；设计闸门不适用 —— 只读驱动已上线页面，不碰钱、状态机、认证逻辑与
+webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补。
+
+- [x] **做了什么**：`scripts/acceptance/admin_customers.mjs`（1211 行，只用 `node:buffer` / `node:crypto` / `node:process` /
+  `node:timers/promises` 与全局 `WebSocket`）。读 stdin 一行 JSON 并逐字段校验（不回显）；在浏览器级 `cdp` 上用
+  `Target.getTargets` 找唯一的 `about:blank` 页面、`Target.attachToTarget` 接管；登录（凭据与 RFC 6238 现算的 TOTP 只经
+  `Input.insertText` 填进表单）→ 客户列表逐页找 `[TEST] Acceptance Fixture` → 点进夹具详情 → 被动读取详情接口的响应体，
+  用照 `MoneyText.tsx` 重写的 `formatMoney` 与页面上的余额逐字比较，滚进视口后报到。用到的 CDP 方法只有
+  `Target.getTargets`、`Target.attachToTarget`、`Network.enable`、`Network.getResponseBody`、`Page.navigate`、
+  `Runtime.evaluate`、`Input.insertText`；进入 2FA 绑定页即以 `login_failed` 结束，不做写操作
+- [x] 上一个 run 按旧契约写的 #155（head `fa4ad6b`）关闭未合并，新 run 从 #157 之后的 main 重新实现
+- [x] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）、审查、合并与部署：run `4a633c9d` 提交
+  `2cbe5f7`，`docs.check` / `policy.check` 零退出；Worker 的受限审查一轮 `APPROVE`。#158 合并为 `9a857a6`，main 上 CI 与
+  Deploy 成功
+- [x] **部署后浏览器验收**：attempt 1 `PASS`，四个步骤按声明顺序报到，用时 7 秒，没超时；四张截图齐全（第 4 张看得到
+  `Balance MYR 0.00`），控制台错误 0，浏览器 profile 用完已删。Worker 的请求记录只有两条：页面对 `/api/v1/auth/refresh`
+  的 401（登录前前端试着续会话，预期内），以及一条发往非声明主机、被出站限制拒掉的 GET（`egress_refused` 共 23 次；
+  路径不记录，来源没有核对，验收结论不依赖它）
+- [ ] **后续**：
+  - 受限审查的不阻塞意见：`emit()` 不检查 `finished`，285 秒硬停与某一步完成撞在一起时，理论上会在结论行之后多打一行
+    `ACCEPTANCE_STEP`，一行守卫即可堵上；改这个脚本要另登记任务
+  - 脚本依赖的几条前端事实（分页反映在 `?page=`、表格不拆表头与表体、详情接口与 `hosts[0]` 同源、响应信封是
+    `{ success, data: { id, wallet } }`）现在成立；前端改了它们，验收会以 FAIL 结束（不会误报 PASS），届时一起改脚本
+  - 「改联系人再改回」的写入版验收，在只读版跑稳后另开任务（AIH-TASK-015 的走查项因此仍不勾）
+  - 验收管理员账号在第一个真实客户进生产之前降权或撤销，见「测试专用验收夹具」与「已阻塞」
 
 ---
 
