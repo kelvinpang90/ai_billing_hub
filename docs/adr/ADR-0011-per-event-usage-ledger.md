@@ -2,7 +2,8 @@
 
 | | |
 | --- | --- |
-| **状态** | **提议中**。方案 A 已于 2026-09-19 由决策人在 AIH-TASK-005 设计 v6 里同意为默认（[design/AIH-TASK-005-wallet-ledger.md](../design/AIH-TASK-005-wallet-ledger.md) §9「R3」一行），但 [TODO.md](../TODO.md) P-2 的 R3 一直没有收口。本 ADR 把那次同意补成正式记录，并补上当时没写的量级分析，待决策人确认 |
+| **状态** | **已接受**：决策人 2026-09-28 确认方案 A |
+| **修订** | 2026-09-28 补完：状态由「提议中」改为「已接受」，收口条件按拍板结果勾选。原状态说明保留如下 —— 方案 A 已于 2026-09-19 由决策人在 AIH-TASK-005 设计 v6 里同意为默认（[design/AIH-TASK-005-wallet-ledger.md](../design/AIH-TASK-005-wallet-ledger.md) §9「R3」一行），但 [TODO.md](../TODO.md) P-2 的 R3 一直没有收口。本 ADR 把那次同意补成正式记录，并补上当时没写的量级分析，待决策人确认 |
 | **日期** | 2026-09-27 |
 | **来源** | spec §8、§9、§19、§46、§62、§69、§70、§73、§78、§80、§81、§82、§111、§117、§119；评审残留项 R3（[TODO.md](../TODO.md) P-2，来源 `docs/archive/SPEC_REVIEW_v1.0.md`） |
 | **影响** | Phase 2 用量扣费（worker 事务）、`wallet_transactions` 的行数与写入速率、Phase 5 用量明细、Phase 7 对账单、Phase 8 rebill |
@@ -71,6 +72,6 @@ Phase 2 用量扣费的设计闸门必须包含：
 
 ## 收口条件
 
-- [ ] 决策人确认方案 A（即再次确认 2026-09-19 的同意），本 ADR「状态」改为「已接受」
-- [ ] [TODO.md](../TODO.md) P-2 的 R3 改为 `[x]`，写明依据本 ADR；`docs/HANDOFF.md` 的未决表同步
-- [ ] Phase 2 用量扣费的 TODO 条目里注明设计闸门必须带最热租户压测与方案 C 的切换判据
+- [x] 决策人确认方案 A（即再次确认 2026-09-19 的同意），本 ADR「状态」改为「已接受」
+- [x] [TODO.md](../TODO.md) P-2 的 R3 改为 `[x]`，写明依据本 ADR；`docs/HANDOFF.md` 的未决表同步
+- [x] Phase 2 用量扣费的 TODO 条目里注明设计闸门必须带最热租户压测与方案 C 的切换判据
