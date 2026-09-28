@@ -1433,7 +1433,7 @@ tasks:
     acceptance_criteria:
       - 只用 Node 自带模块（全局 WebSocket 与 node:crypto，以及读标准输入所需的 node:process 等内置模块），不引入任何依赖；不装依赖，不改 package.json / package-lock.json
       - '从标准输入读一行 JSON：steps、writes、attempt、cdp（浏览器级调试地址）、hosts（项目声明的主机，顺序同 .platform/project.yaml 的 acceptance_hosts）、credentials（email、password、totp_secret）；字段缺失或类型不对时以 ACCEPTANCE_VERDICT: FAIL <第一个步骤> login_failed 结束，不打印收到的内容'
-      - 入口与起始目标（控制面 ACVDEV-TASK-050）：从 stdin 那一行 JSON 的 hosts[0] 取入口，从 https://<hosts[0]> 开始；起始时浏览器里恰好一个 type 为 page、URL 为 about:blank 的目标，脚本在 cdp（浏览器级地址）上用 Target.getTargets 找到它，再用 Target.attachToTarget 接管，找不到恰好一个这样的目标就以 FAIL <第一个步骤> navigation_failed 结束；不新建目标或浏览器上下文；文件里不写死任何主机名，主机只写在 .platform/project.yaml 的 acceptance_hosts
+      - 入口与起始目标（控制面 ACVDEV-TASK-050）：从 stdin 那一行 JSON 的 hosts[0] 取入口，从 hosts[0] 这个主机的 https 首页开始；起始时浏览器里恰好一个 type 为 page、URL 为 about:blank 的目标，脚本在 cdp（浏览器级地址）上用 Target.getTargets 找到它，再用 Target.attachToTarget 接管，找不到恰好一个这样的目标就以 FAIL <第一个步骤> navigation_failed 结束；不新建目标或浏览器上下文；文件里不写死任何主机名，主机只写在 .platform/project.yaml 的 acceptance_hosts
       - 只经 cdp 地址操作那个浏览器（连它已有的页面目标）；不自己联网（不用 fetch / http / https / net / dns，页面里也不执行发请求的脚本）、不开新浏览器或浏览器上下文（不用 Target.createBrowserContext / Target.createTarget）、不改代理、不拦截或伪造请求（不用 Fetch.*、Network.setRequestInterception、Network.emulateNetworkConditions）、不读写 Cookie 与存储（不用 Network.getCookies / Storage.* / DOMStorage.* 等）、不截图（不用 Page.captureScreenshot）、不写任何文件
       - 不打印、不保存凭据、TOTP 码或页面内容；标准输出只有 ACCEPTANCE_STEP / ACCEPTANCE_VERDICT 两类行，出错时也不把异常信息、URL 查询串或响应体打出来；凭据只填进登录表单；TOTP 按 RFC 6238（node:crypto 的 HMAC-SHA1、30 秒步长、6 位）现算，base32 解码自己写
       - 只读：不点任何会写数据的按钮（新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等）；只看公司名以 [TEST] Acceptance Fixture 开头的夹具客户，不打开其他客户的详情。登录本身会在服务端留下会话与登录审计，这是只读验收不可避免的，不算写数据；writes 为 true 时同样只做只读步骤
