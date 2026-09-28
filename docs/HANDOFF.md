@@ -63,8 +63,8 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
 | 2 | **出站 webhook 密钥的 schema**：新建 `project_webhook_secrets` 表，还是 `projects` 加暂存列 | 密钥轮换重叠期无处安放 | 需拍板，**且要走设计闸门** | Phase 1 开工前 |
 | 3 | **支付网关选哪家** | Phase 4 全部 | 需拍板（商务） | Phase 4 开工前 |
 | 4 | **WhatsApp 传输路径**：复活并扩建 `whatsapp_gateway`，还是计费平台用独立 App / 号码 | Phase 6 的 WhatsApp 通道（Email 与 Portal 不受影响） | 需拍板 | Phase 6 的 WhatsApp 部分 |
-| 5 | **R1 停机/复机阈值**：仍硬编码 `balance <= 0`，无可配置阈值 | Phase 2 | 需拍板 | 建议 Phase 2 前 |
-| 6 | **R3 账本膨胀权衡**：钱包变更按租户串行化的量级验证 | Phase 1–2 性能 | 需评估 | Phase 2 前 |
+| 5 | ~~**R1 停机/复机阈值**~~ | Phase 2 | **已定**：2026-09-28 方案 A，见 [ADR-0010](adr/ADR-0010-suspension-threshold.md) | — |
+| 6 | ~~**R3 账本膨胀权衡**~~ | Phase 1–2 性能 | **已定**：2026-09-28 方案 A（每事件一行），见 [ADR-0011](adr/ADR-0011-per-event-usage-ledger.md)；量级在 Phase 2 压测 | — |
 | 7 | **R5 `REQ-*` 覆盖度**：只有 13 条，未覆盖每条硬性要求 | 可追溯性 | 待补 | Phase 1 前 |
 
 **D2（第 1 条）与 WhatsApp（第 4 条）的背景已经整理好**，分别见 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md) 与 [ADR-0009](adr/ADR-0009-notification-channels.md)，可以直接拿去问会计 / 做评估。
