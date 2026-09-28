@@ -134,10 +134,11 @@ def _clean(engine: Engine) -> None:
     with engine.begin() as connection:
         # 账本拒绝 DELETE，只能 TRUNCATE；有账本行的钱包删不掉。
         connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        # 审计表同理：0010 的触发器拒绝 DELETE，TRUNCATE 是 DDL、不经触发器。
+        connection.execute(text("TRUNCATE TABLE audit_logs"))
     with engine.begin() as connection:
         connection.execute(delete(Wallet).where(Wallet.tenant_id.in_(ours)))
         connection.execute(delete(Tenant).where(Tenant.company_name == COMPANY))
-        connection.execute(delete(AuditLog).where(AuditLog.action.in_(OUR_ACTIONS)))
         connection.execute(delete(DomainOutbox).where(DomainOutbox.aggregate_type == "tenant"))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 

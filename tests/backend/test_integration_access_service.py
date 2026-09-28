@@ -144,16 +144,20 @@ def _mysql_factory(monkeypatch) -> Iterator[sessionmaker[Session]]:
 def _clean(engine: Engine) -> None:
     """⚠️ 库是共享的，每个用例前后都清场，只删本文件建的行。
 
-    凭据行没有删除接口（设计 §6）；这里是测试清场，直接删表行。
+    凭据行没有删除接口（设计 §6）；这里是测试清场，直接删表行。审计表例外：0010 的
+    触发器拒绝 DELETE，只能 TRUNCATE —— 它是 DDL、不经触发器（与
+    test_wallet_repository.py 清账本同一做法），也就顾不上「只删本文件的行」。
     """
     ours = select(Tenant.id).where(Tenant.company_name == COMPANY)
+    with engine.begin() as connection:
+        # exec_driver_sql 而不是 text()：本文件的 `for text in …` 会遮住导入（ruff F402）。
+        connection.exec_driver_sql("TRUNCATE TABLE audit_logs")
     with engine.begin() as connection:
         connection.execute(
             delete(IntegrationCredential).where(IntegrationCredential.tenant_id.in_(ours))
         )
         connection.execute(delete(Project).where(Project.tenant_id.in_(ours)))
         connection.execute(delete(Tenant).where(Tenant.company_name == COMPANY))
-        connection.execute(delete(AuditLog).where(AuditLog.action.in_(OUR_ACTIONS)))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 
 

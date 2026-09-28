@@ -224,6 +224,44 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 
 ---
 
+## `audit_logs`（spec §66；T0.8a 迁移 `0002_auth_tables` 建表，AIH-TASK-021 迁移 `0010_audit_logs_append_only` 加触发器）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增 |
+| `actor_user_id` | BIGINT | 可空（登录失败时不一定知道是谁）；**刻意没有外键**：审计要比它记录的用户活得更久，删用户不连带、也不被审计挡住 |
+| `actor_role` | VARCHAR(32) | 可空 |
+| `action` | VARCHAR(64) | 非空，`AuditAction` 之一（非原生 enum） |
+| `entity_type` / `entity_id` | VARCHAR(64) | 可空 |
+| `before_state` / `after_state` | TEXT | 可空；写入走服务层的字段白名单，密码、令牌、密钥不进 |
+| `ip_address` | VARCHAR(45) | 可空 |
+| `user_agent` | VARCHAR(512) | 可空 |
+| `reason` | VARCHAR(255) | 可空 |
+| `created_at` | DATETIME | 非空 |
+
+索引 `ix_audit_logs_actor_created (actor_user_id, created_at)`。
+
+### 只追加：由触发器强制（迁移 0010 建，只在 MySQL 上）
+
+| 触发器 | 作用 |
+| --- | --- |
+| `trg_audit_logs_before_update` | BEFORE UPDATE，一律 `SIGNAL SQLSTATE '45000'`，消息 `audit_logs is append-only` |
+| `trg_audit_logs_before_delete` | BEFORE DELETE，同上 |
+
+写法照搬账本的 `trg_wallet_transactions_before_update` / `before_delete`。应用本来就只有插入路径
+（`record_audit`）；触发器把「审计只能插入」从代码约定变成数据库保证：绕过应用、直接连库的 UPDATE /
+DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读不改任何行）。
+
+- ⚠️ 前置条件与账本相同：`log_bin_trust_function_creators = ON`；迁移 0010 的第 0 步在任何 DDL 之前检查它。
+- ⚠️ **残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器；有 `TRIGGER` / `DROP` 权限的账号也能先删触发器再改数据。
+  这两条挡不住，归「迁移账号与运行账号拆分」那项运维任务。测试库正是靠 `TRUNCATE TABLE audit_logs` 清场的
+  —— 这本身就说明了为什么生产上运行账号不该有 DDL 权限。
+- SQLite 上的单元测试用 `create_all` 建表，没有这两个触发器；只追加的行为只在真 MySQL 上验
+  （`tests/backend/test_migrations.py` 的 `test_0010_*`）。
+- `scripts/perf_baseline.py` 收尾不再删除审计行：压测账号那一轮的审计留在库里。
+
+---
+
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、

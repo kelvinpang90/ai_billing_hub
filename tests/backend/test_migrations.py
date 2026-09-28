@@ -45,6 +45,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
+from app.models.auth import AuditAction, AuditLog
 from app.models.base import Base
 from app.models.integration import (
     API_KEY_COLLATION,
@@ -654,7 +655,11 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             "fk_wallet_transactions_created_by": "RESTRICT",
         }
         assert checks == set(_model_checks())
-        assert triggers == _EXPECTED_TRIGGERS
+        # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验。
+        ledger_tables = {"wallets", "wallet_transactions"}
+        ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
+        assert ours == _EXPECTED_TRIGGERS
+        assert set(triggers) == set(_EXPECTED_TRIGGERS) | set(_EXPECTED_TRIGGERS_0010)
     finally:
         engine.dispose()
 
@@ -1490,3 +1495,180 @@ def test_0009_backfills_enabled_refuses_bad_values_and_downgrades(alembic_config
         with engine.begin() as connection:
             connection.execute(delete(Tenant).where(Tenant.public_id.in_(public_ids)))
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0010_audit_logs_append_only（AIH-TASK-021）
+#
+# 触发器的形状与行为都在这里验：两个触发器存在；UPDATE / DELETE 被拒、SQLSTATE 是
+# 45000；INSERT 照常；downgrade 删掉两个触发器。头几条不连库：钉住版本链、触发器语句
+# 与 0006 同一写法、预检排在任何 DDL 之前。
+# ---------------------------------------------------------------------------
+
+_REVISION_0010 = "0010_audit_logs_append_only"
+_MIGRATION_0010 = pathlib.Path("alembic/versions/20260928_0010_audit_logs_append_only.py")
+
+# 触发器名 → (表, 时机, 事件)。
+_EXPECTED_TRIGGERS_0010 = {
+    "trg_audit_logs_before_update": ("audit_logs", "BEFORE", "UPDATE"),
+    "trg_audit_logs_before_delete": ("audit_logs", "BEFORE", "DELETE"),
+}
+
+# SIGNAL 用户定义的 SQLSTATE 时 MySQL 报 1644（ER_SIGNAL_EXCEPTION）。SQLSTATE 本身驱动
+# 不带回来，要用 GET DIAGNOSTICS 读。
+_ER_SIGNAL_EXCEPTION = 1644
+_APPEND_ONLY_MESSAGE = "audit_logs is append-only"
+_GET_SQLSTATE = "GET DIAGNOSTICS CONDITION 1 @audit_sqlstate = RETURNED_SQLSTATE"
+# CAST 成 CHAR：用户变量的字符集随来源而定，驱动可能把它当二进制交回 bytes。
+_READ_SQLSTATE = text("SELECT CAST(@audit_sqlstate AS CHAR)")
+
+
+def _load_0010() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0010", _MIGRATION_0010)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0010_follows_0009() -> None:
+    migration = _load_0010()
+
+    assert migration.revision == _REVISION_0010
+    assert migration.down_revision == _REVISION_0009
+
+
+def test_0010_triggers_are_written_like_the_ledger_ones() -> None:
+    """写法照 0006 的账本 BEFORE UPDATE / BEFORE DELETE：只换表名（消息随之换）。"""
+    ledger = _load_0006()._TRIGGERS
+    audit = _load_0010()._TRIGGERS
+
+    assert set(audit) == set(_EXPECTED_TRIGGERS_0010)
+    for event in ("update", "delete"):
+        statement = audit[f"trg_audit_logs_before_{event}"]
+        expected = ledger[f"trg_wallet_transactions_before_{event}"]
+        assert _normalised(statement) == _normalised(
+            expected.replace("wallet_transactions", "audit_logs")
+        )
+        assert "SIGNAL SQLSTATE '45000'" in statement
+        assert f"'{_APPEND_ONLY_MESSAGE}'" in statement
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0010_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    """与 0006 同一个预检：binlog 开着而开关关着时建不了触发器（ERROR 1419）。"""
+    migration = _load_0010()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0010_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL 的 DDL 不参与事务：预检失败时不能已经建了一个触发器。"""
+    migration = _load_0010()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    # 反过来：开关开着时同一个 upgrade 确实建了两个触发器 —— 上面的空列表不是因为没走到。
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    assert allowed.calls == ["execute", "execute"]
+
+
+def _audit_triggers() -> dict[str, tuple[str, ...]]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(_TRIGGERS_QUERY).all()
+    finally:
+        engine.dispose()
+    return {row[0]: tuple(row[1:]) for row in rows if row[1] == "audit_logs"}
+
+
+def _insert_audit(connection: Connection, reason: str) -> int:
+    result = connection.execute(
+        insert(AuditLog).values(action=AuditAction.LOGIN, reason=reason, created_at=_NOW)
+    )
+    return int(result.inserted_primary_key[0])
+
+
+def _count_audits(connection: Connection) -> int:
+    return int(connection.execute(select(func.count()).select_from(AuditLog)).scalar_one())
+
+
+@needs_mysql
+def test_0010_audit_logs_refuse_update_and_delete_but_take_inserts(
+    alembic_config: Config,
+) -> None:
+    command.upgrade(alembic_config, "head")
+    assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
+
+    with _rolled_back_connection() as connection:
+        before = _count_audits(connection)
+        audit_id = _insert_audit(connection, "migration test")
+        # INSERT 照常。
+        assert _count_audits(connection) == before + 1
+
+        refused = {
+            "UPDATE": "UPDATE audit_logs SET reason = 'edited' WHERE id = %s",
+            "DELETE": "DELETE FROM audit_logs WHERE id = %s",
+        }
+        for event, statement in refused.items():
+            # ⚠️ 不用 begin_nested：回滚到保存点会清掉诊断区，GET DIAGNOSTICS 就读不到了。
+            # MySQL 里失败的语句只撤销它自己，外层事务照常；外层事务里 SQLAlchemy 也不会
+            # 替我们回滚。
+            with pytest.raises(DBAPIError) as raised:
+                connection.exec_driver_sql(statement, (audit_id,))
+            errno, message = raised.value.orig.args[:2]
+            connection.exec_driver_sql(_GET_SQLSTATE)
+            sqlstate = connection.execute(_READ_SQLSTATE).scalar_one()
+            assert (int(errno), message, sqlstate) == (
+                _ER_SIGNAL_EXCEPTION,
+                _APPEND_ONLY_MESSAGE,
+                "45000",
+            ), event
+
+        # 两次都被拒：那一行原样还在。
+        reason = select(AuditLog.reason).where(AuditLog.id == audit_id)
+        assert connection.execute(reason).scalar_one() == "migration test"
+        assert _count_audits(connection) == before + 1
+
+
+@needs_mysql
+def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    tables = _table_names()
+    columns = _column_names("audit_logs")
+
+    try:
+        command.downgrade(alembic_config, _REVISION_0009)
+        assert _audit_triggers() == {}
+        # 只删触发器：表与列都不动。
+        assert _table_names() == tables
+        assert _column_names("audit_logs") == columns
+        # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
+        with _rolled_back_connection() as connection:
+            audit_id = _insert_audit(connection, "migration test")
+            connection.exec_driver_sql(
+                "UPDATE audit_logs SET reason = 'edited' WHERE id = %s", (audit_id,)
+            )
+            connection.exec_driver_sql("DELETE FROM audit_logs WHERE id = %s", (audit_id,))
+
+        command.upgrade(alembic_config, _REVISION_0010)
+        assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
+    finally:
+        command.upgrade(alembic_config, "head")
