@@ -1097,7 +1097,7 @@ tasks:
       （签发、列表、启用、退役），secret 只在签发的响应里出现一次，审计 WEBHOOK_SECRET_ISSUE / ACTIVATE / RETIRE 同事务；
       外加不接发送方的签名库（signing_material、sign_status_webhook，规范串第四行填 event id）。
       不含 status_webhook_url、integration_status、webhook_deliveries、投递 worker、重试、前端。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-019-webhook-signing.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计

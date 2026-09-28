@@ -23,11 +23,10 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-019` 出站 webhook 签名密钥：签发、启用、退役与签名库
-2. `AIH-TASK-020` 租户账户状态：启用与停用
-3. `AIH-TASK-021` 审计表在数据库层只追加
-4. `AIH-TASK-022` 管理端审计日志查询接口
-5. `AIH-TASK-023` 管理端前端：审计日志页
+1. `AIH-TASK-020` 租户账户状态：启用与停用
+2. `AIH-TASK-021` 审计表在数据库层只追加
+3. `AIH-TASK-022` 管理端审计日志查询接口
+4. `AIH-TASK-023` 管理端前端：审计日志页
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号｜阻塞：等 Kelvin 拍板
@@ -1787,7 +1786,10 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   两个线程同时启用同一个 `PENDING`，断言两个都 200、只切换一次（一条 `ACTIVATE` 审计）、任何时刻至多一个 `ACTIVE`。
   「签发」那一半（一个 201、一个 409 `WEBHOOK_SECRET_PENDING_EXISTS`）照设计原样测。请在 PR 审查时裁定：接受这个理解，
   或在 Issue #135 升版本改写 §7 那一行
-- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署
+- [x] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署：run `dfb9e574` 第一轮只有
+  `format.check` 没过（测试文件一处换行），修一次后通过，提交 `a9838c9`；Worker 的受限审查第一轮 `REQUEST_CHANGES`（测试里
+  一个非全零的 event id），repair 1 `80cf225` 改掉后 `APPROVE`。CI 六项全绿，#152 合并为 `1aabe11`，CI 与 Deploy 成功（迁移
+  0008 随部署执行）。上面「§7 冲突」那条的裁定在 #152 上没有记录，#152 正文的「设计闸门」一行也没改成 `#135`，见收尾 PR
 - [ ] **后续**：ADR-0004「收口条件」里第 4a 节那一项的勾选（要改 ADR 文件，不在本任务的可改路径里）；管理端前端（已在
   「后续计划」）；Phase 3 的投递设计闸门接上 `signing_material` 与 `sign_status_webhook`，并在 api.md「状态 webhook 签名」
   补时间窗、重试与按事件 id 去重的约定
