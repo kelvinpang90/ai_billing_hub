@@ -1874,9 +1874,10 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   （`assert 2 == 1`，1265 过 1 挂），run 因此以 `pr_checks_failed` 结束；本地在 PR head 上连跑三次该文件全过，CI 历史里
   这是它第一次红，只重跑失败的 job 即绿。PR 正文的设计闸门改为 #136，Codex 一轮 `APPROVE`（无阻断、无建议）。#161 合并为
   `d07e13a`，main 上 CI 与 Deploy 成功
-- [ ] **偶发失败的根因（未修）**：那条用例在 `sign_in` 之后、`gc.collect()` 之前就断言模块级 `_ENROLLED`
-  （`WeakKeyDictionary`）恰好 1 条；同文件前一个用例的 `session_factory` 若还挂在引用环上没被回收，就是 2 条。修法是在第一个
-  断言前先 `gc.collect()`（或改为断言新增 1 条）；只动测试，另开 PR
+- [x] **偶发失败的根因**：那条用例断言模块级 `_ENROLLED`（`WeakKeyDictionary`）在 `sign_in` 后**恰好 1 条**，隐含假设它
+  开始时是空的；前面的用例（CI 上还有本地被 skip 的 MySQL 并发用例）留下尚未回收的工厂时就是 2 条 —— 本收尾 PR 的第一轮 CI
+  也撞上了。#165 改为先 `gc.collect()` 取基线、断言 `baseline + 1` 再回到基线，合并为 `d6f2625`；用临时插件往缓存塞一个存活
+  条目，旧版复现 `assert 2 == 1`、新版通过
 - [ ] **后续**：管理端前端的账户状态（已在「后续计划」的「管理端前端：账户状态、低余额阈值与钱包流水」）；关户（已在
   「后续计划」，前置条件见上）；Phase 3 的投递设计闸门把 `tenant.billing_status_changed` 与 `tenant.account_status_changed`
   合成有效状态、扇出到各项目
