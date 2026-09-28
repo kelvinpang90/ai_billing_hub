@@ -609,6 +609,19 @@ Review 的目标是：
 
 ---
 
+# 21. 登记任务时的浏览器验收约定
+
+登记任务时的浏览器验收约定（OpenClaw 浏览器验收契约）：
+- 有用户可见页面的前端任务，登记时默认带 acceptance 块：沿用项目已有的验收命令，writes: false，按页面写 2–4 个只读步骤
+  （小写下划线步骤名），timeout_seconds 不超过 300；验收命令不写进 allowed_commands；allowed_change_paths 加上验收脚本。
+- 验收标准里写清每个新步骤验什么，通用约束一句「沿用验收脚本已有的约束」带过；脚本只执行 stdin 里 steps 列出的步骤。
+- 纯后端、数据库、文档任务不带；运营者说「这个不验」时不带。
+- 任务的标题、目的与验收标准会原样进 PR 正文并过泄漏规则：不写任何 xxx:// 形式的地址、主机名、邮箱地址。
+
+本仓库已有的验收命令是 .platform/commands.yaml 里的 acceptance.browser（脚本 scripts/acceptance/admin_customers.mjs）。
+
+---
+
 # 核心原则
 
 **独立审查 · 只读验证 · 最小上下文 · 高信号 Finding · 证据充分即停止**
