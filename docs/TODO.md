@@ -23,10 +23,9 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-020` 租户账户状态：启用与停用
-2. `AIH-TASK-021` 审计表在数据库层只追加
-3. `AIH-TASK-022` 管理端审计日志查询接口
-4. `AIH-TASK-023` 管理端前端：审计日志页
+1. `AIH-TASK-021` 审计表在数据库层只追加
+2. `AIH-TASK-022` 管理端审计日志查询接口
+3. `AIH-TASK-023` 管理端前端：审计日志页
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -1866,7 +1865,15 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - 锁等待超时（与记账争租户行锁）不另映射，按意外异常 500，与设计 §5 一致
   - `test_migrations.py` 里 0006 的 CHECK 比对原先比「模型上 `tenants` / `wallets` / `wallet_transactions` 的全部 CHECK」，
     现在 `tenants` 多了 0009 的一条，改成排除 0009 的 CHECK 名后再比，0009 那一条由自己的用例比
-- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署
+- [x] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署：run `9c45ee02` 提交
+  `fa9e5b5`，`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check` 零退出；Worker 的受限审查通过。
+  CI 第一轮 `backend` 红在 PR 没碰过的 `test_auth_service.py::test_the_enrolment_cache_dies_with_its_session_factory`
+  （`assert 2 == 1`，1265 过 1 挂），run 因此以 `pr_checks_failed` 结束；本地在 PR head 上连跑三次该文件全过，CI 历史里
+  这是它第一次红，只重跑失败的 job 即绿。PR 正文的设计闸门改为 #136，Codex 一轮 `APPROVE`（无阻断、无建议）。#161 合并为
+  `d07e13a`，main 上 CI 与 Deploy 成功
+- [ ] **偶发失败的根因（未修）**：那条用例在 `sign_in` 之后、`gc.collect()` 之前就断言模块级 `_ENROLLED`
+  （`WeakKeyDictionary`）恰好 1 条；同文件前一个用例的 `session_factory` 若还挂在引用环上没被回收，就是 2 条。修法是在第一个
+  断言前先 `gc.collect()`（或改为断言新增 1 条）；只动测试，另开 PR
 - [ ] **后续**：管理端前端的账户状态（已在「后续计划」的「管理端前端：账户状态、低余额阈值与钱包流水」）；关户（已在
   「后续计划」，前置条件见上）；Phase 3 的投递设计闸门把 `tenant.billing_status_changed` 与 `tenant.account_status_changed`
   合成有效状态、扇出到各项目

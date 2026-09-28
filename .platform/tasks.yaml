@@ -1168,7 +1168,7 @@ tasks:
       POST /api/v1/admin/customers/{customer_id}/account-status（目标只能是 ENABLED / DISABLED），
       在租户行锁内改状态、status_version +1、写 TENANT_ACCOUNT_STATUS_CHANGED 审计与 tenant.account_status_changed outbox 事件，
       同一事务；客户详情与列表加 account_status 字段。不含关户、有效状态合成、integration_status、前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-019
     acceptance_criteria:
