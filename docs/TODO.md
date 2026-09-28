@@ -1125,11 +1125,41 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 > - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，前端的列表、建客户、详情与编辑页（015）已有；缺账户状态、低余额阈值配置
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
-> - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么（例如管理端查看审计）**待澄清**
+> - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么见下面的「审计日志差异清单」，**等 Kelvin 定范围**
 
 **验收**：管理员建客户 → 自动有钱包 · 建 project · 建 API 凭据 · 调账生效 · 所有动作都有审计
 
 > 🔒 Phase 1 测试不通过，不得进入 Phase 2（§137）。
+
+### 审计日志差异清单 —— §124「审计日志」还差什么（2026-09-27，等 Kelvin 定范围）
+
+对照 spec §66（必审动作与字段）、§89（`GET /api/v1/admin/audit-logs`）、§101（前端 `features/audit/`）、§112（保留期）与现有实现。**写审计这一侧已覆盖 Phase 1 现有的全部写操作**；缺的是「查看」与「数据库层保护」。
+
+| spec 要求 | 现状 | 说明 |
+| --- | --- | --- |
+| §66 必存字段（actor、actor_role、action、entity、before / after、ip、user agent、时间、reason） | 已有 | `audit_logs` 表（迁移 0002）；时间即 `created_at` |
+| `LOGIN` / `LOGIN_FAILED` | 已有 | `app/services/auth.py` |
+| `CUSTOMER_CREATE` / `CUSTOMER_UPDATE` | 已有 | `app/services/customers.py`；联系人、邮箱、电话的值不进审计（REQ-PRIV-001） |
+| `API_KEY_CREATE` / `ROTATE` / `REVOKE` | 已有 | `app/services/integration_access.py` |
+| `WALLET_ADJUSTMENT` | 已有，名字不同 | 实际是 `WALLET_ADJUSTMENT_POSTED` |
+| `TENANT_SUSPEND` / `TENANT_REACTIVATE`（余额驱动的那部分） | 已有，名字不同 | 实际是 `TENANT_BILLING_STATUS_CHANGED`，与钱包变动同一事务 |
+| 手工的停用 / 复用（`account_status`） | 随功能 | 状态模型任务的设计闸门里补 |
+| `PROJECT_UPDATE` | 随功能 | 还没有编辑项目的接口；随 webhook 密钥表与 Phase 3 的项目集成字段 |
+| `ADMIN_SETTING_CHANGE` | 随功能 | 还没有管理端设置；随低余额阈值等配置任务 |
+| `PRICING_*`、`PROVIDER_PRICE_PUBLISH`、`REBILL`、`PAYMENT_STATUS_CHANGE` 等 | 随后续 Phase | Phase 2 / 4 / 7 / 8，各自的设计闸门负责 |
+| 审计不能经应用 API 修改（§66） | 已有 | 只有插入路径（`record_audit`），没有更新或删除接口 |
+| **管理端查询接口 `GET /api/v1/admin/audit-logs`（§89）** | **缺** | 没有任何读取路由；要定筛选条件（动作、实体、操作者、时间段）、分页，并补 `(entity_type, entity_id)` 与按时间的索引（现在只有 `(actor_user_id, created_at)`） |
+| **前端审计页 `features/audit/`（§101）** | **缺** | 依赖上一行 |
+| **数据库层只追加** | **缺**（spec 未强制） | 账本有 BEFORE UPDATE / DELETE 触发器，`audit_logs` 没有；`scripts/perf_baseline.py` 收尾时还会 `DELETE FROM audit_logs`（只删它自己那轮的行） |
+| 审计时间戳取整不一致 | 缺 | 见 AIH-TASK-006 记录段；排序以自增 id 为准，不影响正确性 |
+| 保留期、不许自动清除（§112、REQ-PRIV-001） | 上线闸门 | 现在从不删除，满足「不自动清除」；保留期随 PDPA 与留存政策 |
+| `request_id` 进审计 | spec 未要求 | 只在 §94 的结构化日志里要求 |
+
+**要拍板的三件事**（建议写在每条后面）：
+
+- [ ] 1. Phase 1 要不要做审计查询接口与前端页面？**建议做**：§89 与 §101 都把它列为 V1 内容，而且接口是只读的，既不碰钱，也不碰摄取、认证或 webhook，不用过设计闸门，可以直接登记给 Worker（后端一刀、前端一刀）
+- [ ] 2. 要不要给 `audit_logs` 加数据库触发器，禁止 UPDATE / DELETE？**建议加**：写法照搬账本的触发器，改动小；要同时改掉 `perf_baseline.py` 删除审计行的收尾（压测账号的审计留着即可）。`TRUNCATE` / `DROP` 挡不住，这一块仍归「迁移账号与运行账号拆分」那项运维任务
+- [ ] 3. 时间戳取整的统一要不要并进来？**建议不并**：它改的是登录、2FA、密码重置的代码路径，属于认证，按 CLAUDE.md 要过设计闸门；保持「后续计划」里的独立一项
 
 ### AIH-TASK-004 —— tenants / projects 身份表、迁移 0005、repository（2026-09-19）
 
