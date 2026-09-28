@@ -908,7 +908,7 @@ def test_a_different_event_id_is_a_different_signature() -> None:
             ZERO_SECRET, 1, url_path_and_query="/", event_id=event_id, body=b"", now=NOW
         )["X-Acuven-Signature"]
 
-    assert signature(ZERO_EVENT_ID) != signature("00000000-0000-4000-8000-000000000001")
+    assert signature(ZERO_EVENT_ID) != signature("probe-event")
 
 
 def test_signing_material_follows_the_active_version(sqlite_factory, settings) -> None:
