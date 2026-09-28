@@ -74,19 +74,6 @@ describe("listCredentials", () => {
     expect(get).toHaveBeenCalledWith(`${BASE}?page=2&page_size=10`, {});
     expect(page.items).toEqual([version()]);
   });
-
-  it("escapes the customer and project ids instead of letting them change the path", async () => {
-    const get = vi
-      .spyOn(client, "get")
-      .mockResolvedValue(envelope({ items: [], page: 1, page_size: 20, total: 0 }));
-
-    await listCredentials("a/../b", "c/d", 1, 20);
-
-    expect(get).toHaveBeenCalledWith(
-      "/api/v1/admin/customers/a%2F..%2Fb/projects/c%2Fd/credentials?page=1&page_size=20",
-      {},
-    );
-  });
 });
 
 describe("createCredential", () => {
@@ -175,14 +162,6 @@ describe("revokeCredential", () => {
 
     expect(post).toHaveBeenCalledWith(`${BASE}/${API_KEY}/revoke`, { reason: "Project retired" });
     expect(revoked).toEqual(all);
-  });
-
-  it("escapes the api key instead of letting it change the path", async () => {
-    const post = vi.spyOn(client, "post").mockResolvedValue(envelope([]));
-
-    await revokeCredential(CUSTOMER_ID, PROJECT_ID, "../x", "Project retired");
-
-    expect(post).toHaveBeenCalledWith(`${BASE}/..%2Fx/revoke`, { reason: "Project retired" });
   });
 });
 

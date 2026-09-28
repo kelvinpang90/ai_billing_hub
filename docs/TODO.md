@@ -1660,13 +1660,13 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
     重读列表。已吊销的版本按钮禁用
   - `ProjectsPanel.tsx`：`renderProjectDetails` 不传时默认在展开区挂 `IntegrationAccessPanel`（展开之后才挂、才请求）
   - 文案进 `en.json`（`integrations.*`）
-  - 测试：`integrationAccess.test.ts`（五个函数的 URL 与请求体、`{}`、`current_key_version` 是整数、id 与 `api_key` 转义、
+  - 测试：`integrationAccess.test.ts`（五个函数的 URL 与请求体、`{}`、`current_key_version` 是整数、
     409 带状态变成 `ApiError`、没有响应时状态为 `null`、结果已知 / 未知）、`IntegrationAccessPanel.test.tsx`（三态、分组与字段、
     secret 只在结果对话框出现且关闭后从 DOM 消失、查询缓存始终没有它、关闭后 mutation 缓存也没有、存储 / 控制台 / 地址栏没有它、
-    复制、双击只建一个、轮换带该 key 的最大版本、取消轮换、409 冲突后重读列表、`CREDENTIAL_REVOKED` / `ENCRYPTION_NOT_CONFIGURED`
+    复制、双击只建一个、轮换带该 key 的最大版本（列表倒序给出）、取消轮换、409 冲突后重读列表、`CREDENTIAL_REVOKED` / `ENCRYPTION_NOT_CONFIGURED`
     显示 message 与 request_id、网络错误 / 500 的恢复提示且不重试、建凭据结果未知、两种吊销的二次确认与 reason 校验
     （空、只含空白、超长、恰好 255 且带首尾空白）、吊销失败、取消吊销）、`ProjectsPanel.test.tsx`（默认挂载凭据面板、传入时用
-    调用方的内容）。`api_key` / `secret` / uuid 用 api.md 的全零占位值，例外两处见下方偏离
+    调用方的内容）。`api_key` / `secret` / uuid 一律用 api.md 的全零占位值，没有例外
 - [x] **偏离与由实现定的细节**（审查时请看这几条）：
   - 挂载点的默认值放在 `ProjectsPanel.tsx` 里，而不是由 `CustomerDetailPage` 传入：后者不在本任务的可改路径里。
     016 的「没传就没有展开列」那条用例相应改成「默认挂凭据面板」
@@ -1677,13 +1677,10 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - `trimmedLength` / `maxTrimmed` 又照抄了一份（同 016、017 的理由：`CustomerForm.tsx` 不在可改路径里）
   - 核对了 api.md、设计文件与 `app/schemas/integration_access.py`（建凭据 `extra="forbid"` 的空体、`current_key_version`
     严格整数 ≥ 1、reason 去空白后 1–255、响应字段白名单）、`app/api/admin_customers.py` 的五条路由：一致，没有需要停下来裁决的冲突
-  - 测试夹具有两处不是全零占位值（验收要求「一律」全零，这里请任务负责人明确认可）：
-    - `IntegrationAccessPanel.test.tsx` 的 `OTHER_KEY` 是 `ak_` 加 31 个 0 再加一个 `1`，用在分组、轮换取本 key 最大版本与
-      `groupByApiKey` 三处用例：这些用例要验证「两个不同的 key 各自成组、互不串版本」，只有一个全零 key 写不出来；
-      它格式上仍是合法的占位 key，不对应任何真实凭据
-    - `integrationAccess.test.ts` 的路径转义用例把 customer / project id 写成 `"a/../b"`、`"c/d"`，`api_key` 写成 `"../x"`：
-      要验证 `encodeURIComponent` 把 `/`、`..` 转义掉，全零 uuid / key 里没有这些字符；同 016、017 的 api 测试的做法。
-      其余用例全部用全零值
+  - 测试夹具一律全零，因此少测了两样（审查第 2 轮要求去掉非全零夹具）：
+    - 路径转义（`encodeURIComponent` 把 `/`、`..` 转义掉）没有用例 —— 全零 uuid / key 里没有这些字符；实现照旧转义
+    - 「两个不同的 key 各自成组、互不串版本」没有用例 —— 全零 key 只有一个；分组用例只验证同一个 key 的版本归成一组、
+      保持后端顺序。若要补这两类用例，需任务负责人先放宽「一律全零」
 - [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
 - [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
 

@@ -22,8 +22,6 @@ const CUSTOMER_ID = "00000000-0000-0000-0000-000000000000";
 const PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const API_KEY = `ak_${"0".repeat(32)}`;
 const SECRET = `sk_${"0".repeat(64)}`;
-// 第二个 key 只用来测分组：仍是全零，末位换成 1 以示区分。
-const OTHER_KEY = `ak_${"0".repeat(31)}1`;
 
 const WARNING =
   "This secret is shown only once. After you close this dialog it cannot be viewed again. Copy it and store it safely now.";
@@ -216,14 +214,14 @@ describe("IntegrationAccessPanel", { timeout: 15_000 }, () => {
           verifiable: false,
           revoked_at: "2026-09-26T20:00:00",
         }),
-        version({ api_key: OTHER_KEY }),
+        version({ key_version: 3 }),
       ]),
     );
 
     renderPanel();
 
     expect(await screen.findByText(API_KEY)).toBeInTheDocument();
-    expect(screen.getByText(OTHER_KEY)).toBeInTheDocument();
+    expect(screen.getAllByText(API_KEY)).toHaveLength(1);
     expect(screen.getByText("3 credential versions")).toBeInTheDocument();
     expect(api.listCredentials).toHaveBeenCalledWith(
       CUSTOMER_ID,
@@ -233,11 +231,11 @@ describe("IntegrationAccessPanel", { timeout: 15_000 }, () => {
       expect.anything(),
     );
 
+    // 同一个 key 的三个版本归成一组、一张表。
     const tables = screen.getAllByRole("table");
-    expect(tables).toHaveLength(2);
-    const [first, second] = tables.map((table) => within(table).getAllByRole("row").slice(1));
-    expect(first).toHaveLength(2);
-    expect(second).toHaveLength(1);
+    expect(tables).toHaveLength(1);
+    const first = within(tables[0] as HTMLElement).getAllByRole("row").slice(1);
+    expect(first).toHaveLength(3);
 
     // 时间按吉隆坡时间显示；UTC 20:00 已经是第二天。
     expect(first?.[0]).toHaveTextContent("Active");
@@ -248,7 +246,7 @@ describe("IntegrationAccessPanel", { timeout: 15_000 }, () => {
     expect(first?.[1]).toHaveTextContent("No");
     expect(first?.[1]).toHaveTextContent("No end date");
     expect(first?.[1]).toHaveTextContent("2026-09-27 04:00:00");
-    expect(second?.[0]).toHaveTextContent("—");
+    expect(first?.[2]).toHaveTextContent("—");
 
     // 已吊销的版本不能再吊销（终态）。
     expect(buttonWithText("Revoke v2")).toBeDisabled();
@@ -334,7 +332,8 @@ describe("IntegrationAccessPanel", { timeout: 15_000 }, () => {
 
   it("rotates with the newest version of that key in the list and shows the new secret once", async () => {
     const user = userEvent.setup();
-    api.listCredentials.mockResolvedValue(page([...threeVersions(), version({ api_key: OTHER_KEY })]));
+    // 倒序给出：取的是最大版本，不是最后一个。
+    api.listCredentials.mockResolvedValue(page([...threeVersions()].reverse()));
     api.rotateCredential.mockResolvedValue(issued({ key_version: 4 }));
     const { queryClient } = renderPanel();
 
@@ -577,12 +576,12 @@ describe("groupByApiKey / newestVersion", () => {
   it("keeps the backend's order and groups adjacent versions of the same key", () => {
     const groups = groupByApiKey([
       version({ key_version: 1 }),
+      version({ key_version: 3 }),
       version({ key_version: 2 }),
-      version({ api_key: OTHER_KEY, key_version: 1 }),
     ]);
 
-    expect(groups.map((group) => group.apiKey)).toEqual([API_KEY, OTHER_KEY]);
-    expect(groups[0]?.versions.map((each) => each.key_version)).toEqual([1, 2]);
+    expect(groups.map((group) => group.apiKey)).toEqual([API_KEY]);
+    expect(groups[0]?.versions.map((each) => each.key_version)).toEqual([1, 3, 2]);
   });
 
   it("takes the largest version, not the last one", () => {
