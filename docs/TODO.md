@@ -23,8 +23,7 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-017` 管理端前端：手工调账
-2. `AIH-TASK-018` 管理端前端：项目集成 API 凭据的建、列、轮换与吊销
+1. `AIH-TASK-018` 管理端前端：项目集成 API 凭据的建、列、轮换与吊销
 
 ### 已阻塞
 - 待登记：出站 webhook 密钥表（方案 i）｜阻塞：等设计闸门
@@ -1624,8 +1623,10 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [x] **Worker 第一轮 `frontend.test` 挂的两条**：① 文件里第一个用例 5s 超时 —— 填表流程里的 `getByRole` 每次都算整棵 antd 弹窗的
   可访问性树，冷启动还要生成全部样式。填表助手改用 `getByLabelText` 找单选、按文字找按钮，`AdjustmentModal` 的 describe 超时放到
   15s，断言不动；② 确认页上「原因」同时出现在只读的 textarea 与摘要里，断言改为忽略 textarea
-- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
-- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+- [x] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）：run `d7f6b9db` 第一轮只有
+  `frontend.test` 没过（上面那两条），其余七项通过；修一次后八项通过才开出 #145，Worker 的受限审查 `APPROVE`。
+  上一次 run `c6e5144e` 挂在既有的慢测试上，由 #143（ResizeObserver 公共替身）、#144（逐字输入改粘贴）先修掉再重开
+- [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#145，合并为 `9bf4e94`，部署成功）
 - [ ] 部署后用验收夹具账号在生产上走一遍：给夹具客户记一笔小额贷方再记一笔等额借方（两个键、两行账本、两条
   `WALLET_ADJUSTMENT_POSTED`），余额回到原值
 

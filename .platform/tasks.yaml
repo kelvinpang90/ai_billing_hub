@@ -962,7 +962,7 @@ tasks:
     purpose: >-
       管理端前端第三刀：在客户详情页加「手工调账」入口，调用 docs/api.md「管理端手工调账」的接口（已过设计闸门 #111、
       由 AIH-TASK-011 上线）。重点是幂等键的生命周期与「结果未知时不许改单」。只做前端。
-    status: ready
+    status: done
     # 016 也改 CustomerDetailPage.tsx 及其测试；依赖 016 让两者按计划顺序串行，不在同一页面上冲突。
     depends_on:
       - AIH-TASK-016
