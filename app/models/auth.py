@@ -155,6 +155,10 @@ class AuditAction(enum.StrEnum):
     WEBHOOK_SECRET_ISSUE = "WEBHOOK_SECRET_ISSUE"
     WEBHOOK_SECRET_ACTIVATE = "WEBHOOK_SECRET_ACTIVATE"
     WEBHOOK_SECRET_RETIRE = "WEBHOOK_SECRET_RETIRE"
+    # AIH-TASK-020（设计闸门 #136）：写入方是 app/services/account_status.py，与租户状态、
+    # `status_version` 与 outbox 同一事务。一个动作名覆盖账户状态的全部跃迁，对 spec §66 的
+    # `TENANT_SUSPEND` / `TENANT_REACTIVATE` 的映射记在 docs/TODO.md。
+    TENANT_ACCOUNT_STATUS_CHANGED = "TENANT_ACCOUNT_STATUS_CHANGED"
 
 
 class AuditLog(Base):

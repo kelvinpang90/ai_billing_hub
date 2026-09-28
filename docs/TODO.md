@@ -1122,9 +1122,9 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] 审计日志
 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
-> - Tenant：身份字段（004）与计费状态（005）已有；缺账户状态 `account_status`（状态模型任务）
+> - Tenant：身份字段（004）与计费状态（005）已有；账户状态 `account_status` 的列与启用 / 停用接口在 AIH-TASK-020（随合并生效）；缺关户（依赖 Phase 2 与 Phase 4）与有效状态合成（Phase 3）
 > - Project：身份字段与管理端建 / 列（004、006）已有，出站 webhook 签名密钥（019，`project_webhook_secrets` 表）已有；缺集成字段（后端地址、状态 webhook 地址、`integration_status`），随状态模型任务与 Phase 3
-> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，前端的列表、建客户、详情与编辑页（015）已有；缺账户状态、低余额阈值配置
+> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，前端的列表、建客户、详情与编辑页（015）已有，账户状态的启用 / 停用接口（020）随合并生效；缺账户状态的前端、低余额阈值配置
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
 > - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么见下面的「审计日志差异清单」；Kelvin 2026-09-28 定了范围，登记为 AIH-TASK-021 到 023
@@ -1146,7 +1146,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 | `WEBHOOK_SECRET_ISSUE` / `ACTIVATE` / `RETIRE` | 已有，spec 外补充 | `app/services/webhook_signing.py`（AIH-TASK-019）；§66 清单里没有，按 `PROJECT_CREATE` 的先例补上，见 AIH-TASK-019 记录段 |
 | `WALLET_ADJUSTMENT` | 已有，名字不同 | 实际是 `WALLET_ADJUSTMENT_POSTED` |
 | `TENANT_SUSPEND` / `TENANT_REACTIVATE`（余额驱动的那部分） | 已有，名字不同 | 实际是 `TENANT_BILLING_STATUS_CHANGED`，与钱包变动同一事务 |
-| 手工的停用 / 复用（`account_status`） | 随功能 | 状态模型任务的设计闸门里补 |
+| 手工的停用 / 复用（`account_status`） | 已有，名字不同（随 AIH-TASK-020 合并生效） | 实际是 `TENANT_ACCOUNT_STATUS_CHANGED`，与租户状态、`status_version`、outbox 同一事务；与 §66 的映射见 AIH-TASK-020 记录段 |
 | `PROJECT_UPDATE` | 随功能 | 还没有编辑项目的接口；随 Phase 3 的项目集成字段（webhook 密钥表 AIH-TASK-019 没有编辑项目，它的三个动作见上一行） |
 | `ADMIN_SETTING_CHANGE` | 随功能 | 还没有管理端设置；随低余额阈值等配置任务 |
 | `PRICING_*`、`PROVIDER_PRICE_PUBLISH`、`REBILL`、`PAYMENT_STATUS_CHANGE` 等 | 随后续 Phase | Phase 2 / 4 / 7 / 8，各自的设计闸门负责 |
@@ -1797,6 +1797,80 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   「后续计划」）；Phase 3 的投递设计闸门接上 `signing_material` 与 `sign_status_webhook`，并在 api.md「状态 webhook 签名」
   补时间窗、重试与按事件 id 去重的约定
 
+### AIH-TASK-020 —— 租户账户状态：启用与停用（2026-09-28）
+
+实现依据是设计闸门 #136 已批准的 v2：[design/AIH-TASK-020-tenant-account-status.md](design/AIH-TASK-020-tenant-account-status.md)；
+接口契约记在 [api.md](api.md) 的「管理端账户状态」与「客户对象」，表结构与各状态下的契约表记在
+[database-schema.md](database-schema.md) 的 `tenants`。上面 Phase 1 的 Tenant 仍不勾：关户与有效状态合成都还没有。
+不含关户（`→ CLOSED`）、`post_transaction` 的任何改动、有效状态合成（`ALLOW_AI` / `BLOCK_AI`）、`reason_code` 取值表、
+`projects.integration_status`、前端（设计 §1 非目标）。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `alembic/versions/20260928_0009_tenant_account_status.py`：revision `0009_tenant_account_status`，`down_revision` 是
+    `0008_webhook_signing`。`tenants` 加 `account_status VARCHAR(32) NOT NULL DEFAULT 'ENABLED'`（服务端默认值回填已有行）
+    与 `ck_tenants_account_status`（四个取值）；不加索引。`downgrade` 先删 CHECK 再删列。文件头附 §132 第 13 条分析
+  - `app/models/tenancy.py`：`AccountStatus`（`PENDING_ACTIVATION` / `ENABLED` / `DISABLED` / `CLOSED`）、列（Python 默认与
+    服务端默认都是 `ENABLED`）与 CHECK。`app/models/auth.py`：`TENANT_ACCOUNT_STATUS_CHANGED`
+  - `app/services/account_status.py`：跃迁表 `TRANSITIONS` 与纯函数 `transition`（目标等于当前返回 `None`；表里没有这一格
+    抛 409 `ACCOUNT_STATUS_TRANSITION_INVALID`）；`change_account_status` 一个 `session_scope`：按路径 `public_id` 加锁读
+    租户行（`SELECT … FOR UPDATE`，不锁、不读、不写钱包）→ 404 / 不写 / 409 → 改状态、`status_version` +1、`updated_at`
+    → 审计 → `tenant.account_status_changed` outbox（`PENDING`）→ 提交。这一层不写日志，不导入钱包模型
+  - `app/schemas/customers.py`：`ChangeAccountStatusRequest`（`extra="forbid"`，`account_status` 只收 `ENABLED` /
+    `DISABLED`、大小写敏感，`reason` 去空白后 1–255）；`CustomerSummary`（因而详情与列表项）加 `account_status`
+  - `app/api/admin_customers.py`：`POST /api/v1/admin/customers/{customer_id}/account-status`，第一条语句是 `require_admin`
+  - 测试：`tests/backend/test_account_status_api.py`（SQLite：`ENABLED → DISABLED → ENABLED` 每步的版本、审计、outbox 与
+    payload；审计与事件里没有个人数据；目标 `PENDING_ACTIVATION` / `CLOSED` / 小写 / 空、原因空白 / 256 字符等 422；多余字段
+    422；255 字符的原因；幂等；404；`CLOSED` 出发的 409；`PENDING_ACTIVATION` 出发的两格；匿名 401 / CUSTOMER 403 不写库；
+    AST 检查；详情与列表的字段；`DISABLED` 下调账跨零；成功与审计失败的日志里都没有原因）。
+    `tests/backend/test_account_status_service.py`（跃迁表每一格的纯函数用例；`PENDING_ACTIVATION` / `CLOSED` 出发经服务层；
+    审计、outbox、提交三种失败的回滚与「与计费状态独立」（含钱包 `version` 不变）在 SQLite 与 MySQL 上各一次；只锁租户行、
+    事务里没有一条语句碰 `wallets`（MySQL 上断言租户读是 `FOR UPDATE`）；两个线程反复改账户状态、一个线程反复调账跨零的
+    并发版本用例只在 MySQL 上）。`tests/backend/test_migrations.py`：0009 的 CHECK、列宽与默认值和模型比对、版本链、列形状
+    与无索引、已有行回填 `ENABLED` 且版本不动、CHECK 拒绝非法值而放行四个取值、downgrade 删 CHECK 与列；0006 的 CHECK 比对
+    排除 0009 那一条；head 上 `tenants` 的列集合加 `account_status`。`tests/backend/test_admin_customers_api.py`：路由进
+    `EXPECTED_ADMIN_ROUTES` 与 `VALID_BODIES`（目标 `DISABLED`，漏了鉴权会真的改库）、客户字段白名单加 `account_status`、
+    鉴权用例逐列比较加 `account_status`、新建客户是 `ENABLED`、PATCH 带 `account_status` 仍是 422 的显式用例
+  - 文档：[api.md](api.md)、[database-schema.md](database-schema.md)（`tenants` 表与「尚未建的列」去掉 `account_status`）
+- [x] **对 spec §66 的动作名映射**：§66 的清单里只有 `TENANT_SUSPEND` / `TENANT_REACTIVATE`，而余额驱动的那一维已用
+  `TENANT_BILLING_STATUS_CHANGED`。账户状态按同一写法用一个动作名 `TENANT_ACCOUNT_STATUS_CHANGED` 覆盖全部跃迁（设计 §2
+  「审计」）：`→ DISABLED` 对应 `TENANT_SUSPEND`，`DISABLED → ENABLED` 对应 `TENANT_REACTIVATE`（`PENDING_ACTIVATION →
+  ENABLED` 是首次启用，§66 没有对应项）。操作者是调用的管理员（带 ip 与 user agent），`entity_type` / `entity_id` 是
+  `tenant` / 租户 `public_id`，前后状态只有 `account_status` 与 `status_version`，原因进 `reason`。spec 本身没改
+- [x] **对以后功能的契约**（设计 §2 末尾，Kelvin 2026-09-28 确认；本任务不实现，各 Phase 的设计闸门落地，已分别写进
+  下面 Phase 2、3、4 的条目）：
+
+  | 功能 | `PENDING_ACTIVATION` | `ENABLED` | `DISABLED` | `CLOSED`（关户任务） |
+  | --- | --- | --- | --- | --- |
+  | 新的 AI 调用（有效状态） | 阻断 | 看计费与集成状态 | 阻断 | 阻断 |
+  | 用量事件摄取与扣费（Phase 2） | 照常 | 照常 | **照常**（§112.1：在途的合法事件要处理完） | 不入账，进人工复核 |
+  | 新充值（Phase 4） | 允许 | 允许 | **拒绝**（§112.1 第 1 步） | 拒绝 |
+  | 管理员调账 | 允许 | 允许 | 允许（关户前清偿 / 退款要用） | 拒绝 |
+  | 建项目、建凭据、轮换凭据 | 允许 | 允许 | 允许 | 拒绝（吊销凭据、查看、编辑客户仍允许） |
+  | 客户门户登录（Phase 4） | 由 Phase 4 定 | 允许 | 只读（看账单与收据） | 只读 |
+
+  现在的管理员调账、建项目、建凭据、轮换凭据在四个状态下都不看账户状态 —— 与上表一致，因为本任务不产生 `CLOSED`；
+  「`CLOSED` 拒绝」的那几格归关户任务
+- [x] **关户任务的前置条件**（写进 Phase 4 的条目，供那个任务的设计闸门使用）：只能从 `DISABLED` 关；钱包余额恰好为 0；
+  没有非终态的用量事件与支付（§112.1）；在记账总入口 `post_transaction` 的租户行锁内拒绝给 `CLOSED` 租户入账；`CLOSED`
+  为终态。Kelvin 2026-09-28 确认过的口径（余额恰好为 0、关户后拒绝新调账 / 建项目 / 建凭据 / 轮换凭据、`CLOSED` 为终态）
+  原样作为那个任务的输入。本任务的跃迁表已让 `CLOSED` 出发的每一格都是 409，列与 CHECK 已允许 `CLOSED`，关户任务不必改列
+- [x] **设计没写死、由实现定的细节**（审查时请看这几条）：
+  - **响应里的客户详情在提交之后另开一次只读会话读取**。设计要求 200 返回客户详情（含钱包），又要求本路径「不读、不锁、
+    不写钱包」。实现把两者分开：事务里只碰租户行，提交后调 `customers.get_customer` 读详情（含钱包）。代价是提交与读取
+    之间若有别的变更，响应显示的是更新后的值
+  - payload 的 `changed_at` 是 `now.isoformat()`（不带时区的 UTC、截到整秒，如 `2026-09-28T08:30:00`），与客户详情的
+    `updated_at` 同值同格式；`billing_status` 取锁内读到的租户行
+  - 请求模型用 `Literal["ENABLED", "DISABLED"]`：小写、首字母大写都是 422。数据库的 CHECK 在库默认的
+    `utf8mb4_0900_ai_ci` 排序规则下**不区分大小写**（`'enabled'` 也能过 CHECK）；应用只写枚举值，所以不影响，但 CHECK
+    不是大小写的兜底
+  - 锁等待超时（与记账争租户行锁）不另映射，按意外异常 500，与设计 §5 一致
+  - `test_migrations.py` 里 0006 的 CHECK 比对原先比「模型上 `tenants` / `wallets` / `wallet_transactions` 的全部 CHECK」，
+    现在 `tenants` 多了 0009 的一条，改成排除 0009 的 CHECK 名后再比，0009 那一条由自己的用例比
+- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署
+- [ ] **后续**：管理端前端的账户状态（已在「后续计划」的「管理端前端：账户状态、低余额阈值与钱包流水」）；关户（已在
+  「后续计划」，前置条件见上）；Phase 3 的投递设计闸门把 `tenant.billing_status_changed` 与 `tenant.account_status_changed`
+  合成有效状态、扇出到各项目
+
 ### AIH-TASK-024 —— AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，2026-09-28）
 
 OpenClaw 部署后浏览器验收（控制面 ACVDEV-TASK-049 / 050）在本仓库的第一个试点：登记见 #154，验收条件按 ACVDEV-TASK-050
@@ -1841,6 +1915,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 - [ ] 钱包扣费
 - [ ] 负余额处理
 - [ ] 停机
+  - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：用量事件摄取与扣费在 `PENDING_ACTIVATION` / `ENABLED` / `DISABLED`
+    下**照常**（§112.1：在途的合法事件要处理完，停用不拦用量）；`CLOSED`（关户任务之后才会出现）的事件不入账，进人工复核
   - ADR-0011：用量扣费的设计闸门必须带最热租户压测（单租户 100 事件 / 秒突发、500 / 秒回补、worker 重试与崩溃下事件 / 账本 / 余额一致），以及压测不达标时切到「同租户批事务」的判据；ADR-0010：停机规则保持 `balance <= 0`
 
 **验收**：用量事件只计费一次 · 估算成本与 MYR 换算正确 · 客户计费额正确 · 钱包扣减 · 重复事件不双扣 · ID 冲突事件拒绝且不扣费 · 队列丢失后可从数据库状态恢复
@@ -1861,6 +1937,10 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 - [ ] 集成认证 + HMAC 签名
 - [ ] Webhook 接收端
 - [ ] 本地版本化的有效服务状态
+  - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：新的 AI 调用在账户状态 `PENDING_ACTIVATION` / `DISABLED` / `CLOSED` 下
+    阻断，`ENABLED` 时看计费与集成状态。投递设计把 `tenant.billing_status_changed` 与 `tenant.account_status_changed` 两类
+    outbox 事件合成有效状态（`ALLOW_AI` / `BLOCK_AI` 与 `reason_code`）、扇出到各项目；两维共用的 `status_version` 就是
+    集成方按版本丢弃旧状态的依据。`projects.integration_status` 也归那个设计闸门
 - [ ] 周期性状态对账
 - [ ] 积压监控
   - ADR-0010：试点观测项加「每次停机时的余额（透支了多少）」，透支明显时再按新 ADR 评估提前停机
@@ -1874,6 +1954,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 ## Phase 4 — Payment & Customer Portal（§127）
 
 - [ ] 客户认证
+  - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：客户门户登录在 `ENABLED` 下允许，`DISABLED` 与 `CLOSED` 下只读（看账单
+    与收据），`PENDING_ACTIVATION` 由本 Phase 的设计闸门定
 - [ ] 客户仪表盘
 - [ ] 钱包页
 - [ ] 充值 UI（金额不许硬编码）
@@ -1883,6 +1965,13 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 - [ ] 主动的 stale payment 对账定时任务
 - [ ] 支付金额不符的人工复核流
 - [ ] 钱包充值入账
+  - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：新充值在 `PENDING_ACTIVATION` / `ENABLED` 下允许，在 `DISABLED`
+    下**拒绝**（§112.1 第 1 步），`CLOSED` 下拒绝
+- [ ] **关户（`→ CLOSED`）**：Phase 2 的用量事件与本 Phase 的支付落地后另立任务，走设计闸门（已在「后续计划」）。
+  前置条件（AIH-TASK-020 设计 §2 末尾，Kelvin 2026-09-28 确认）：只能从 `DISABLED` 关；钱包余额恰好为 0；没有非终态的
+  用量事件与支付（§112.1）；在记账总入口 `post_transaction` 的租户行锁内拒绝给 `CLOSED` 租户入账；`CLOSED` 为终态。
+  关户后拒绝新调账、建项目、建凭据、轮换凭据（吊销凭据、查看、编辑客户仍允许）。AIH-TASK-020 已让列与 CHECK 允许
+  `CLOSED`、账户状态接口从 `CLOSED` 出发一律 409，这个任务不必改列
 - [ ] 支付收据 + 下载
 - [ ] **开工前重新评估 Email 传输**：Phase 0 用 Google Workspace SMTP 直连，认证全过仍被 Outlook.com 判进垃圾箱（T0.9 2026-09-15 实测）。给客户发收据 / 通知之前，决定是否换事务邮件 API 服务，并补退信与投诉抑制（[ADR-0009](adr/ADR-0009-notification-channels.md) 备选 A 与已知缺口）
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -82,8 +82,9 @@ class CreateCustomerRequest(BaseModel):
 class UpdateCustomerRequest(BaseModel):
     """部分更新客户资料（AIH-TASK-009）：只改请求体里出现的字段。
 
-    ⚠️ 多余字段一律拒绝：`billing_status`、`status_version`、`public_id`、余额、阈值都
-    不能经这里改 —— 计费状态只由 `post_transaction` 改变，其余各归各的任务。
+    ⚠️ 多余字段一律拒绝：`billing_status`、`account_status`、`status_version`、`public_id`、
+    余额、阈值都不能经这里改 —— 计费状态只由 `post_transaction` 改变，账户状态只走
+    `POST …/account-status`（AIH-TASK-020），其余各归各的任务。
 
     `company_name` / `email` 必填列，显式传 `null` 是 422；`contact_name` / `phone`
     传 `null` 或空白就是清空。一个字段都不带也是 422。
@@ -131,6 +132,24 @@ class CreateProjectRequest(BaseModel):
     description: _Description = None
 
 
+# 去掉首尾空白后长度 1–255：写进审计的 `reason` 列（§66）。只写业务说明，不写个人数据。
+_Reason = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+
+
+class ChangeAccountStatusRequest(BaseModel):
+    """改账户状态（AIH-TASK-020，设计闸门 #136 v2 §2）。
+
+    ⚠️ 目标只能是 `ENABLED` / `DISABLED`，大小写敏感：`PENDING_ACTIVATION`
+    没有产生路径，`CLOSED` 归关户任务，都是 422。多余字段一律拒绝：`status_version`、
+    `billing_status`、余额、任何 id 都不能经这里带进来 —— 客户只来自路径（INV-8）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_status: Literal["ENABLED", "DISABLED"]
+    reason: _Reason
+
+
 class WalletView(BaseModel):
     currency: str
     # 恰好 8 位小数的定点字符串，永远不是浮点数。
@@ -147,6 +166,7 @@ class CustomerSummary(BaseModel):
     email: str
     phone: str | None
     billing_status: str
+    account_status: str
     status_version: int
     created_at: dt.datetime
     updated_at: dt.datetime
@@ -186,6 +206,7 @@ def _customer_fields(tenant: Tenant) -> dict[str, Any]:
         "email": tenant.email,
         "phone": tenant.phone,
         "billing_status": tenant.billing_status.value,
+        "account_status": tenant.account_status.value,
         "status_version": tenant.status_version,
         "created_at": tenant.created_at,
         "updated_at": tenant.updated_at,
