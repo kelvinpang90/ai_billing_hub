@@ -44,7 +44,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013`、`AIH-TASK-014`、`AIH-TASK-015`、`AIH-TASK-016`、`AIH-TASK-017`、`AIH-TASK-018`、`AIH-TASK-019`、`AIH-TASK-020`、`AIH-TASK-021`、`AIH-TASK-022` 与 `AIH-TASK-023`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013`、`AIH-TASK-014`、`AIH-TASK-015`、`AIH-TASK-016`、`AIH-TASK-017`、`AIH-TASK-018`、`AIH-TASK-019`、`AIH-TASK-020`、`AIH-TASK-021`、`AIH-TASK-022`、`AIH-TASK-023` 与 `AIH-TASK-024`（用途见下面「Worker 的启用状态」）。
 `AIH-TASK-009` / `AIH-TASK-010` 不在其中：它们是控制面给「采纳提议」的 run 分配的编号，不写进 `tasks.yaml`。
 
 除此之外一律 **fail closed** ——
@@ -69,7 +69,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-023` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-024` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -78,7 +78,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-023`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-024`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -115,6 +115,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-021` | 审计表在数据库层只追加：迁移 0010 加 BEFORE UPDATE / DELETE 触发器（照账本），靠 DELETE 清场的 MySQL 测试改用 TRUNCATE，压测脚本不再删审计。**不走设计闸门**：不碰钱、状态机与认证。依赖 020 | 十三项（`test_password_reset_concurrency.py` 撞 Worker 敏感路径词，由管理员前置 PR 改）；合并即执行迁移 0010 |
 | `AIH-TASK-022` | 管理端审计日志查询接口 `GET /api/v1/admin/audit-logs`（spec §89）：筛选、分页、最新在前，内部 id 一律换成用户邮箱；迁移 0011 补查询索引。**不走设计闸门**：只读。依赖 021 | 十二项；合并即执行迁移 0011 |
 | `AIH-TASK-023` | 管理端前端审计页（spec §101 `features/audit/`）。**不走设计闸门**：纯前端。依赖 022 | 十一项；Worker 跑前端三项检查，build 只在 CI |
+| `AIH-TASK-024` | OpenClaw 浏览器验收（P6）的试点：写 `scripts/acceptance/admin_customers.mjs`，部署后由 Worker 在生产上用验收夹具账号只读地验 015 的页面（登录、列表、夹具详情、余额）。任务自己声明 `acceptance`（命令 `acceptance.browser`，只读，四个步骤），主机见 `project.yaml` 的 `acceptance_hosts`。依赖 015。**不走设计闸门**：只读驱动已上线页面，不碰钱、状态机、认证逻辑与 webhook | 只改那一个脚本，检查只有 `docs.check` / `policy.check`。⚠️ 这个脚本在 MXC 之外、带凭据、网络不受限运行（控制面安全边界 A7），评审按生产代码逐行看；`acceptance.browser` 只能被 `acceptance` 块引用，不得进任何任务的 `allowed_commands` |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
@@ -132,7 +133,7 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 `AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）、`AIH-TASK-016`（#141）、`AIH-TASK-017`（#145）、`AIH-TASK-018`（#147）、`AIH-TASK-019`（#152）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
 2026-09-27 登记 `AIH-TASK-015` 到 `AIH-TASK-018`（管理端前端四刀）为 `ready`，按 015 → 016 → 017 → 018 排进
-[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付。2026-09-28 登记 `AIH-TASK-019`（#135）与 `AIH-TASK-020`（#136）为 `ready`，按 019 → 020 排进「当前计划」；同日按「审计日志差异清单」的拍板登记 `AIH-TASK-021` 到 `AIH-TASK-023`，排在 020 之后；019 已交付，现在 020 是第 1 条；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付。2026-09-28 登记 `AIH-TASK-019`（#135）与 `AIH-TASK-020`（#136）为 `ready`，按 019 → 020 排进「当前计划」；同日按「审计日志差异清单」的拍板登记 `AIH-TASK-021` 到 `AIH-TASK-023`，排在 020 之后；019 已交付。同日按 Kelvin 的决定登记 `AIH-TASK-024`（浏览器验收试点）并排在「当前计划」第 1 条；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
 
 `AIH-TASK-016` 不是由 Worker 的 PR 交付的：run `b287409b` 以 `checks_failed` 结束、没有开 PR —— `frontend.test` 先挂在
 jsdom 缺 `ResizeObserver` 上，第二次自动修复在测试里补了替身，替身那行的多余类型断言又被 `frontend.lint` 拦下，修复次数已用完。
