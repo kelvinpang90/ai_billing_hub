@@ -34,7 +34,8 @@
 | `email` | VARCHAR(320) | 非空，**不唯一**（联系邮箱不是登录账号；同一联系人可对应多家公司） |
 | `phone` | VARCHAR(32) | 可空 |
 | `billing_status` | VARCHAR(64) | 非空，默认 `SUSPENDED`，`CHECK IN ('ACTIVE','SUSPENDED')`（AIH-TASK-005） |
-| `status_version` | BIGINT | 非空，默认 0，`CHECK >= 0`；只增不减（AIH-TASK-005） |
+| `account_status` | VARCHAR(32) | 非空，服务端默认 `'ENABLED'`，`ck_tenants_account_status`：`CHECK IN ('PENDING_ACTIVATION','ENABLED','DISABLED','CLOSED')`；无索引（AIH-TASK-020，迁移 `0009_tenant_account_status`） |
+| `status_version` | BIGINT | 非空，默认 0，`CHECK >= 0`；只增不减，计费与账户两维共用（AIH-TASK-005 / 020） |
 | `low_balance_threshold` | DECIMAL(20,8) | 可空，`CHECK >= 0`；NULL 表示不发低余额事件（AIH-TASK-005） |
 | `created_at` | DATETIME | 非空 |
 | `updated_at` | DATETIME | 非空 |
@@ -45,7 +46,27 @@
 `SUSPENDED`，**正好为 0 也是暂停**。新租户余额为 0，所以默认 `SUSPENDED`。`billing_status` 与
 `status_version` 只经 `app/repositories/wallet.py` 的 `post_transaction` 改变，与账本行同一事务提交；
 只有真正跃迁时 `status_version` 才 +1。设置 `low_balance_threshold` 的管理入口（spec §56）归客户管理
-服务任务。管理员控制的 `account_status` 是另一维，尚未建（见文末）。
+服务任务。
+
+**账户状态由管理员控制**（spec §24、§56；设计闸门 #136 v2，AIH-TASK-020）：与计费状态互相独立，共用
+`status_version`。只经 `app/services/account_status.py` 改变：在租户行锁（`SELECT … FOR UPDATE`，不锁钱包）
+内改状态、`status_version` +1、`updated_at`，与一条 `TENANT_ACCOUNT_STATUS_CHANGED` 审计和一条
+`tenant.account_status_changed` outbox 事件同一事务提交。计费跃迁同样在租户行锁内 +1，所以两维交错时版本号
+严格递增、不重复。新租户与迁移前已有的租户都是 `ENABLED`（服务端默认值回填）。本任务只产生
+`ENABLED` / `DISABLED`：`PENDING_ACTIVATION` 没有产生路径（V1 没有自助注册），`CLOSED` 归关户任务；两者
+现在就是 CHECK 允许的取值，关户任务不必再改列。跃迁表见 [api.md](api.md) 的「管理端账户状态」。
+
+各账户状态下以后功能的行为（设计 §2 末尾「对以后功能的契约」，Kelvin 2026-09-28 确认；本任务不实现，
+由各自 Phase 的设计闸门落地，同一份记在 [TODO.md](TODO.md) 的 AIH-TASK-020 一节）：
+
+| 功能 | `PENDING_ACTIVATION` | `ENABLED` | `DISABLED` | `CLOSED`（关户任务） |
+| --- | --- | --- | --- | --- |
+| 新的 AI 调用（有效状态） | 阻断 | 看计费与集成状态 | 阻断 | 阻断 |
+| 用量事件摄取与扣费（Phase 2） | 照常 | 照常 | **照常**（§112.1：在途的合法事件要处理完） | 不入账，进人工复核 |
+| 新充值（Phase 4） | 允许 | 允许 | **拒绝**（§112.1 第 1 步） | 拒绝 |
+| 管理员调账 | 允许 | 允许 | 允许（关户前清偿 / 退款要用） | 拒绝 |
+| 建项目、建凭据、轮换凭据 | 允许 | 允许 | 允许 | 拒绝（吊销凭据、查看、编辑客户仍允许） |
+| 客户门户登录（Phase 4） | 由 Phase 4 定 | 允许 | 只读（看账单与收据） | 只读 |
 
 ## `projects`（spec §76，UI 字段见 §57）
 
@@ -206,16 +227,16 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、
-`status_version`、`low_balance_threshold`。AIH-TASK-012 建了 spec §74.4 的 `integration_credentials`（入站
-API 凭据），没有给 `projects` 加列，只加了一个唯一约束。AIH-TASK-019 建了 `project_webhook_secrets`（出站签名
-密钥），也没有给 `projects` 加列：spec §76 的 `encrypted_webhook_secret` / `webhook_key_version` 由这张表取代，
-**不再建**。下面这些 spec 列刻意留给后续任务，届时都是**纯新增列**：
+`status_version`、`low_balance_threshold`，AIH-TASK-020 加了 `account_status`（迁移 0009）。AIH-TASK-012 建了
+spec §74.4 的 `integration_credentials`（入站 API 凭据），没有给 `projects` 加列，只加了一个唯一约束。
+AIH-TASK-019 建了 `project_webhook_secrets`（出站签名密钥），也没有给 `projects` 加列：spec §76 的
+`encrypted_webhook_secret` / `webhook_key_version` 由这张表取代，**不再建**。下面这些 spec 列刻意留给后续任务，
+届时都是**纯新增列**：
 
 | 表 | 列 | 留给谁 | 为什么现在不建 |
 | --- | --- | --- | --- |
-| `tenants` | `account_status` | 状态模型任务（走设计闸门） | §24 由管理员控制的那一维，以及有效状态合成；碰状态机按 [WORKFLOW §3](WORKFLOW.md) 必须过设计闸门。那个任务的跃迁与计费跃迁共用 `status_version` |
 | `tenants` | `currency` | **不建** | 币种由 `wallets.currency` 承载，不在租户上重复（设计闸门 #88） |
-| `projects` | `integration_status` | 状态模型任务（走设计闸门） | 同上，§24 |
+| `projects` | `integration_status` | 状态模型任务（走设计闸门） | §24 项目的集成状态，与有效状态合成（`ALLOW_AI` / `BLOCK_AI`）一起归「出站服务状态 webhook 投递」设计闸门（AIH-TASK-020 设计 §1 非目标）；碰状态机按 [WORKFLOW §3](WORKFLOW.md) 必须过设计闸门 |
 | `projects` | `status_webhook_url` | Phase 3「出站服务状态 webhook 投递」设计闸门 | 投递目标随投递 worker、重试与 `webhook_deliveries` 一起做（AIH-TASK-019 设计 §1 非目标） |
 | `projects` | `encrypted_webhook_secret`、`webhook_key_version` | **不建** | 由 `project_webhook_secrets` 表取代（[ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节方案 i，AIH-TASK-019）：多版本、签名版本与主密钥版本分列 |
 | `projects` | `backend_base_url` | Phase 3 | 应用后端集成（§35–§39） |
