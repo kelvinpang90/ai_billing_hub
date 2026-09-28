@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, select, text
 
 from alembic import command
 from app.core.config import Settings
@@ -30,7 +30,6 @@ from app.core.database import create_session_factory
 from app.core.errors import AppError
 from app.core.passwords import hash_password, verify_password
 from app.models.auth import (
-    AuditLog,
     DomainOutbox,
     PasswordResetToken,
     RefreshToken,
@@ -75,11 +74,14 @@ def session_factory(monkeypatch):
     engine = create_engine(TEST_DATABASE_URL, pool_size=8, max_overflow=8)
     factory = create_session_factory(engine)
     # ⚠️ 每个用例自己清场：这张库是共享的，上一个用例留下的行会让断言读到别人的数据。
+    # 审计表用 TRUNCATE：它是 DDL、不经触发器，AIH-TASK-021 给 audit_logs 加上只追加的
+    # 触发器之后 DELETE 会被拒（与 test_wallet_repository.py 清账本同一做法）。
+    with engine.begin() as connection:
+        connection.execute(text("TRUNCATE TABLE audit_logs"))
     with factory() as session:
         session.execute(delete(DomainOutbox))
         session.execute(delete(PasswordResetToken))
         session.execute(delete(RefreshToken))
-        session.execute(delete(AuditLog))
         session.execute(delete(User).where(User.email == EMAIL))
         session.commit()
     yield factory
