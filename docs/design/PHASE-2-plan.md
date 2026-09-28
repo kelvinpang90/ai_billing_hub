@@ -1,6 +1,8 @@
 # Phase 2 计划 —— AI Usage Billing Engine（spec §125）
 
 > 状态：**草案，等 Kelvin 确认**（2026-09-28）。确认前不登记任何任务、不开任何设计闸门。
+>
+> 2026-09-28 Kelvin 答复：第 1 条同意（设计闸门先写，实现等 020–023 合并部署）；第 2、4、5 条同意；第 3 条待定（先解释告警清单）。
 > 依据：spec §125 及其引用的 §11–§17.1、§20、§23、§36–§39、§58–§59、§74–§84、§89、§113–§120；
 > [ADR-0005](../adr/ADR-0005-fx-rate-source.md)、[ADR-0008](../adr/ADR-0008-sst-tax-treatment.md)、
 > [ADR-0010](../adr/ADR-0010-suspension-threshold.md)、[ADR-0011](../adr/ADR-0011-per-event-usage-ledger.md)。
