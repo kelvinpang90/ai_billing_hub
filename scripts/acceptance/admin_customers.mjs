@@ -14,8 +14,10 @@
  * - `writes`：只校验类型。本脚本只有只读步骤，writes 为 true 时也一样只读。
  * - `attempt`：大于 1 时先等到下一个 TOTP 时间格再登录。后端拒绝不晚于上次已用时间格的码
  *   （app/services/two_factor.py 的 last_used_counter），上一次尝试若刚用过当前格的码，重试会必然失败。
- * - 站点主机不在输入里：读 .platform/project.yaml 的 `acceptance_hosts` 第一项（只读这个文件）。
- *   不把主机名抄进本文件 —— ADR-0001 只给 project.yaml 那一行登记了例外。
+ * - 站点主机不在输入里，也不读任何文件：取自 Worker 已经打开在站点上的那个页面目标。
+ *   浏览器级地址：Target.getTargets 里 https 页面目标的 origin，必须恰好一个（零个或多个不同 origin 都不猜）；
+ *   页面级地址：连上后 Runtime.evaluate 读 location.href 取 origin。必须是 https、合法 DNS 主机名、不带端口。
+ *   不把主机名抄进本文件。
  *
  * 输出（标准输出只有两类行）
  *   ACCEPTANCE_STEP: <step> ok                 每完成一个声明步骤一行，按声明顺序
@@ -23,7 +25,7 @@
  *   ACCEPTANCE_VERDICT: FAIL <step> <code>     最后一行
  * - code ∈ login_failed、navigation_failed、page_error、element_missing、assertion_failed；
  *   host_unreachable 只在主文档完全没有得到 HTTP 响应时报，service_unavailable 只在主文档得到 502 / 503 / 504 时报。
- * - 连不上 cdp 地址、读不到 acceptance_hosts、找不到可用的页面目标：navigation_failed（都是「到不了要验的页面」）。
+ * - 连不上 cdp 地址、找不到可用的页面目标、从页面目标定不出站点 origin：navigation_failed（都是「到不了要验的页面」）。
  * - 出错时不打印异常信息、URL、查询串、响应体；不写 stderr；未捕获的异常也只落成一行 FAIL。
  * - 退出码：PASS 为 0，FAIL 为 1。以 VERDICT 行为准。
  *
@@ -39,14 +41,15 @@
  *   后面的步骤缺前提（例如没跑 open_fixture 就 check_balance）时，自己走到那个页面，但不替没声明的步骤报 ok。
  *
  * 约束（评审逐条核对）
- * - 只用 Node 自带模块：全局 WebSocket（Node 22+）、node:crypto、node:process、node:fs（只读 project.yaml）、
- *   node:buffer、node:timers/promises。没有依赖，不碰 package.json / package-lock.json。
+ * - 只用 Node 自带模块：全局 WebSocket（Node 22+）、node:crypto、node:process、
+ *   node:buffer、node:timers/promises。不用 node:fs，不读也不写任何文件。没有依赖，不碰 package.json / package-lock.json。
  * - 只经 cdp 地址操作那个浏览器，连它**已有的**页面目标（Target.attachToTarget）。不自己联网（不用 fetch / http /
  *   https / net / dns）；不开新浏览器、新上下文或新标签页（不用 Target.createBrowserContext / Target.createTarget）；
  *   不改代理；不拦截或伪造请求（不用 Fetch.*、Network.setRequestInterception、Network.emulateNetworkConditions）；
  *   不读写 Cookie 与存储（不用 Network.getCookies / Storage.* / DOMStorage.*）；不截图（不用 Page.captureScreenshot）；
- *   不写任何文件。能发的 CDP 方法只有 ALLOWED_CDP_METHODS 里那几个，别的在发出前就被拒绝。
- * - 在页面里执行的只有 pageProbe：只读 DOM、聚焦输入框、滚动到元素，不发请求、不碰存储。
+ *   不读也不写任何文件。能发的 CDP 方法只有 ALLOWED_CDP_METHODS 里那几个，别的在发出前就被拒绝。
+ * - 在页面里执行的只有 pageProbe（只读 DOM、聚焦输入框、滚动到元素）和页面级地址下的一次 `location.href`，
+ *   不发请求、不碰存储。
  *   点击走 Input.dispatchMouseEvent，输入走 Input.insertText —— 凭据与验证码只经这条路进登录表单，
  *   不出现在任何执行到页面里的脚本文本中，也不回读（只核对输入框里的字符数）。
  * - 不打印、不保存凭据、TOTP 码与页面内容。TOTP 按 RFC 6238 现算：HMAC-SHA1、30 秒步长、6 位；base32 解码自己写。
@@ -61,7 +64,6 @@
 
 import { Buffer } from "node:buffer";
 import { createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -126,9 +128,11 @@ const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 // 站点与路径
 // ---------------------------------------------------------------------------------------------
 
-/** 主机从这里读（`acceptance_hosts` 第一项）。管理端页面与 API 同源，所以只要一个。 */
-const PROJECT_YAML = new URL("../../.platform/project.yaml", import.meta.url);
-/** 与 project.yaml 注释的约定一致：小写 DNS 主机名，不带协议、端口、路径、通配符。 */
+/**
+ * 站点 origin 取自 Worker 已打开的页面目标（见 siteOriginOf）。管理端页面与 API 同源，所以只要一个。
+ * 只认 https、小写 DNS 主机名、不带端口。
+ */
+const SITE_PROTOCOL = "https:";
 const HOSTNAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
 /** frontend/src/routes/paths.ts 的 ROUTES.login / ROUTES.customers。 */
@@ -219,7 +223,7 @@ const ALLOWED_CDP_METHODS = new Set([
   "Page.navigate", // 打开 /login（或缺前提时的 /customers）
   "Network.enable", // 被动观察响应（状态码、详情 GET）
   "Network.getResponseBody", // 读详情页自己那次 GET 的响应体
-  "Runtime.evaluate", // 只执行 pageProbe
+  "Runtime.evaluate", // 只执行 pageProbe，以及页面级地址下读一次 location.href
   "Input.dispatchMouseEvent", // 点击
   "Input.insertText", // 往已聚焦的登录表单输入框里输入
 ]);
@@ -925,31 +929,27 @@ function onPageEvent(method, params) {
   }
 }
 
-function readAcceptanceHost() {
-  let text = "";
+/**
+ * 页面目标的 URL → 站点 origin（https、合法主机名、无端口、无账号）；不合格返回 null。
+ * 站点 origin 只从 Worker 已打开的页面目标来，不读文件、不另收输入。
+ */
+function siteOriginOf(url) {
+  let parsed = null;
   try {
-    text = readFileSync(PROJECT_YAML, "utf8");
+    parsed = new URL(url);
   } catch {
     return null;
   }
-  const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((line) => /^acceptance_hosts:\s*(#.*)?$/.test(line));
-  if (start < 0) {
+  if (
+    parsed.protocol !== SITE_PROTOCOL ||
+    parsed.port !== "" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    !HOSTNAME.test(parsed.hostname)
+  ) {
     return null;
   }
-  const hosts = [];
-  for (const line of lines.slice(start + 1)) {
-    if (/^\s*(#.*)?$/.test(line)) {
-      continue;
-    }
-    const match = /^\s+-\s+(["']?)([^\s"'#]+)\1\s*(#.*)?$/.exec(line);
-    if (match === null) {
-      break;
-    }
-    hosts.push(match[2]);
-  }
-  const host = hosts[0];
-  return host !== undefined && HOSTNAME.test(host) ? host : null;
+  return parsed.origin;
 }
 
 /** 第一个真正要动浏览器的步骤才连；连不上就是这个步骤 navigation_failed。 */
@@ -961,28 +961,22 @@ async function openSession() {
     if (typeof WebSocket !== "function") {
       throw new Error("no WebSocket");
     }
-    const host = readAcceptanceHost();
-    if (host === null) {
-      throw new Error("no host");
-    }
-    siteOrigin = `https://${host}`;
-
     const cdp = await CdpConnection.open(input.cdp);
     let sessionId;
     if (!input.pageEndpoint) {
+      // 浏览器级地址：Worker 已打开的 https 站点页面目标。不同 origin 不止一个时不猜，直接失败。
       const { targetInfos = [] } = await cdp.send("Target.getTargets", {});
       const pages = targetInfos.filter(
         (target) =>
-          target.type === "page" &&
-          typeof target.url === "string" &&
-          !target.url.startsWith("devtools://") &&
-          !target.url.startsWith("chrome-extension://"),
+          target.type === "page" && typeof target.url === "string" && siteOriginOf(target.url) !== null,
       );
-      const target = pages.find((candidate) => originOf(candidate.url) === siteOrigin) ?? pages[0];
-      if (target === undefined) {
+      const origins = new Set(pages.map((target) => siteOriginOf(target.url)));
+      if (origins.size !== 1) {
         cdp.close();
-        throw new Error("no page target");
+        throw new Error("no site target");
       }
+      const target = pages[0];
+      siteOrigin = siteOriginOf(target.url);
       ({ sessionId } = await cdp.send("Target.attachToTarget", {
         targetId: target.targetId,
         flatten: true,
@@ -994,6 +988,18 @@ async function openSession() {
       }
     });
     const page = { send: (method, params) => cdp.send(method, params ?? {}, sessionId) };
+    if (siteOrigin === null) {
+      // 页面级地址：这个页面本身就是 Worker 打开的站点页；只读 location.href，不发请求。
+      const { result, exceptionDetails } = await page.send("Runtime.evaluate", {
+        expression: "location.href",
+        returnByValue: true,
+      });
+      siteOrigin = exceptionDetails ? null : siteOriginOf(result?.value);
+      if (siteOrigin === null) {
+        cdp.close();
+        throw new Error("no site origin");
+      }
+    }
     const { frameTree } = await page.send("Page.getFrameTree");
     mainFrameId = frameTree?.frame?.id ?? null;
     await page.send("Network.enable", {});
