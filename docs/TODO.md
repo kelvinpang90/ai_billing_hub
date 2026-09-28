@@ -23,7 +23,6 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-018` 管理端前端：项目集成 API 凭据的建、列、轮换与吊销
 
 ### 已阻塞
 - 待登记：出站 webhook 密钥表（方案 i）｜阻塞：等设计闸门
@@ -1575,7 +1574,7 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   看到的输出被截断，没看到它）。017 自己的实现在本地全过。四个文件（加上同类的 `ForgotPasswordPage`）的 11 处 `user.type`
   改成 `user.click` + `user.paste`，提交的值不变、断言不动。本机按 `frontend.test` 原样 argv 全量对照：改前 6 次全挂（每次 1–3
   条），改后 5 次全过。`CustomerForm` / `ProjectsPanel` 没出过超时，没动
-- [ ] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据
+- [x] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据（#147：不传时 `ProjectsPanel` 默认挂 `IntegrationAccessPanel`）
 
 ### AIH-TASK-017 —— 管理端前端：手工调账（2026-09-28）
 
@@ -1681,8 +1680,9 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
     - 路径转义（`encodeURIComponent` 把 `/`、`..` 转义掉）没有用例 —— 全零 uuid / key 里没有这些字符；实现照旧转义
     - 「两个不同的 key 各自成组、互不串版本」没有用例 —— 全零 key 只有一个；分组用例只验证同一个 key 的版本归成一组、
       保持后端顺序。若要补这两类用例，需任务负责人先放宽「一律全零」
-- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
-- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+- [x] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）：run `ab4f44f0` 八项一次通过开出 #147；
+  Worker 的受限审查又要了两轮修复（repair 1 在记录里说明两处非全零夹具，repair 2 按审查要求删掉它们），每轮提交 CI 全绿
+- [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#147，合并为 `9ac0646`，部署成功）
 
 ---
 
