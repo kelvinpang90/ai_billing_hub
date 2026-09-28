@@ -1084,3 +1084,145 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 019：出站 webhook 签名密钥（ADR-0004 §4a 方案 i）。设计闸门 #135 APPROVED: design v1；
+  # Kelvin 2026-09-28 同意把「密钥表 + 签名库」与「投递」拆成两步，投递归 Phase 3。
+  # 文件名避开 Worker 的敏感路径规则（secret / key / credential / token 等整词），统一用 webhook_signing。
+  - id: AIH-TASK-019
+    title: outbound webhook signing (issue, activate, retire, signing library)
+    purpose: >-
+      按 docs/design/AIH-TASK-019-webhook-signing.md（设计闸门 #135 已批准 v1）实现出站状态 webhook 的签名密钥：
+      迁移 0008 建 project_webhook_secrets（密文 + 主密钥版本与签名版本分列、PENDING / ACTIVE / RETIRED 三态、
+      生成列唯一索引保证每个项目至多一个 ACTIVE 与一个 PENDING、(project_id, tenant_id) 复合外键），四个管理端接口
+      （签发、列表、启用、退役），secret 只在签发的响应里出现一次，审计 WEBHOOK_SECRET_ISSUE / ACTIVATE / RETIRE 同事务；
+      外加不接发送方的签名库（signing_material、sign_status_webhook，规范串第四行填 event id）。
+      不含 status_webhook_url、integration_status、webhook_deliveries、投递 worker、重试、前端。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-019-webhook-signing.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 四个接口的路径、请求体（extra=forbid）、响应字段白名单、错误码（WEBHOOK_SECRET_NOT_FOUND / WEBHOOK_SECRET_PENDING_EXISTS / WEBHOOK_SECRET_NOT_PENDING / WEBHOOK_SECRET_CONFLICT，另有 CUSTOMER_NOT_FOUND / PROJECT_NOT_FOUND / ENCRYPTION_NOT_CONFIGURED）按设计 §2；secret 格式 whs_ 加 64 个小写十六进制，只出现在签发的 201 响应里；四个成功响应都带 Cache-Control no-store
+      - 四个处理函数的第一条语句都调用 require_admin，并加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；匿名 401、CUSTOMER 403，都不写库
+      - 迁移文件名 alembic/versions/20260928_0008_webhook_signing.py，down_revision 指向 0007；表、列、两个生成列与它们的唯一索引、(project_id, key_version) 唯一、三条 CHECK（版本下限、状态取值、状态与时间一致）、复合外键 RESTRICT 按设计 §2；downgrade 删表；文件头有 §132 第 13 条分析
+      - 状态机按设计 §4：签发要求没有 PENDING，版本号 = 该项目最大版本 + 1；启用在同一事务里把原 ACTIVE 改为 RETIRED；启用已是 ACTIVE、退役已是 RETIRED 都是 200 不写；每个操作先 SELECT … FOR UPDATE 锁项目行；唯一约束冲突映射为 409 WEBHOOK_SECRET_CONFLICT
+      - AAD 按设计 §2（project_webhook_secrets|项目 public_id|版本号），encrypt_secret / decrypt_secret 用现有 associated_data 参数，不改 app/core/crypto.py；encryption_key_version 存主密钥版本，与 key_version 分开
+      - 签名库复用 app/services/integration_auth.py 的 canonical_request 与 sign，不另写规范化；sign_status_webhook 返回 X-Acuven-Timestamp（Unix 纪元秒整数）、X-Acuven-Signature、X-Acuven-Event-ID、X-Acuven-Key-Version 四个头；signing_material 在没有 ACTIVE 时返回 None
+      - 这一层不写日志；secret 与密文不进审计前后状态、异常消息与 repr；文档与测试里的 secret 示例一律用全零占位值（whs_ 加 64 个 0），uuid 用 00000000-0000-4000-8000-000000000000 这类全零值（secret-scan）
+      - 测试覆盖设计 §7 全部行；并发、生成列唯一索引、复合外键与迁移的场景放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次。设计 §10 假设 1（生成列唯一索引）若在 SQLite 上不成立，按设计写明的退路处理并在 PR 里说明
+      - docs/api.md 记四个接口与「状态 webhook 签名」规则（规范串第四行是 event id）；docs/database-schema.md 记新表并更新「尚未建的列」；docs/TODO.md 新增 AIH-TASK-019 记录段，Phase 1 的「出站 webhook 密钥 schema」一条改为 [x]，并把三个新审计动作记为对 spec §66 的补充；D4 按 ADR-0004 第 4a 节的收口条件判断是否可勾，不可勾就写明还差什么
+      - 不含 status_webhook_url、backend_base_url、integration_status、webhook_deliveries、投递 worker、重试、payload 形状、前端、主密钥重新包裹；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #135
+    allowed_change_paths:
+      - alembic/versions/20260928_0008_webhook_signing.py
+      - alembic/env.py
+      - app/models/integration.py
+      - app/models/auth.py
+      - app/repositories/webhook_signing.py
+      - app/services/webhook_signing.py
+      - app/schemas/webhook_signing.py
+      - app/api/admin_customers.py
+      - tests/backend/test_webhook_signing_api.py
+      - tests/backend/test_webhook_signing_service.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_migrations.py
+      - docs/api.md
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 020：租户账户状态（启用 / 停用）。设计闸门 #136 APPROVED: design v2；关户（→ CLOSED）移出，等 Phase 2 / 4。
+  # 依赖 019：两者都改 app/api/admin_customers.py 与 tests/backend/test_admin_customers_api.py，迁移序号也要接在 0008 后面。
+  - id: AIH-TASK-020
+    title: tenant account status (enable and disable)
+    purpose: >-
+      按 docs/design/AIH-TASK-020-tenant-account-status.md（设计闸门 #136 已批准 v2）实现租户账户状态：
+      迁移 0009 给 tenants 加 account_status（默认 ENABLED、CHECK 四个取值），管理端接口
+      POST /api/v1/admin/customers/{customer_id}/account-status（目标只能是 ENABLED / DISABLED），
+      在租户行锁内改状态、status_version +1、写 TENANT_ACCOUNT_STATUS_CHANGED 审计与 tenant.account_status_changed outbox 事件，
+      同一事务；客户详情与列表加 account_status 字段。不含关户、有效状态合成、integration_status、前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-019
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-020-tenant-account-status.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 接口、请求体（extra=forbid，account_status 只收 ENABLED / DISABLED，reason 去首尾空白后 1–255）、错误码（CUSTOMER_NOT_FOUND、ACCOUNT_STATUS_TRANSITION_INVALID）按设计 §2；目标等于当前状态时 200 且不写审计、不加版本、不写 outbox
+      - 处理函数第一条语句调用 require_admin，并加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；匿名 401、CUSTOMER 403，都不写库；PATCH 带 account_status 仍是 422（新增显式用例）
+      - 迁移文件名 alembic/versions/20260928_0009_tenant_account_status.py，down_revision 指向 0008；列 VARCHAR(32) NOT NULL 服务端默认 'ENABLED'，CHECK 四个取值；downgrade 先删 CHECK 再删列；文件头有 §132 第 13 条分析
+      - 跃迁表按设计 §4（含 PENDING_ACTIVATION 出发的两格与 CLOSED 出发的非法格）；只锁租户行（SELECT … FOR UPDATE），不锁、不读、不写钱包；状态、status_version、审计、outbox 同一事务
+      - outbox 事件 payload 只有 account_status、previous_account_status、billing_status、status_version、changed_at，原因不进 payload；审计前后状态只有 account_status 与 status_version，reason 进审计的 reason
+      - 客户详情与客户列表项加 account_status；响应仍不含内部 id、低余额阈值、成本与毛利
+      - 测试覆盖设计 §7 全部行；并发版本与迁移的场景放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；uuid 用全零占位值（secret-scan）
+      - docs/api.md 记新接口与客户对象的新字段；docs/database-schema.md 更新 tenants 表并从「尚未建的列」移除 account_status；docs/TODO.md 新增 AIH-TASK-020 记录段，记下 §66 的动作名映射、设计 §2 末尾的「对以后功能的契约」与关户任务的前置条件（写进对应 Phase）
+      - 不含关户（→ CLOSED）、post_transaction 的任何改动、有效状态合成、reason_code 表、integration_status、前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #136
+    allowed_change_paths:
+      - alembic/versions/20260928_0009_tenant_account_status.py
+      - app/models/tenancy.py
+      - app/models/auth.py
+      - app/services/account_status.py
+      - app/schemas/customers.py
+      - app/api/admin_customers.py
+      - tests/backend/test_account_status_api.py
+      - tests/backend/test_account_status_service.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_migrations.py
+      - docs/api.md
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
