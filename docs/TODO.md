@@ -44,15 +44,18 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
-- 待登记：Phase 2 Provider、Model 与 Usage Meter 目录（需设计闸门）
-- 待登记：Phase 2 provider_price_versions 与泛化价格分量（需设计闸门）
-- 待登记：Phase 2 FX 汇率版本、审批与历史（需设计闸门）
-- 待登记：Phase 2 定价规则 MARKUP 与 FIXED_RATE（需设计闸门）
-- 待登记：Phase 2 用量摄取端点：签名校验接入、防重放 nonce、持久化 202（需设计闸门）
-- 待登记：Phase 2 全局 event 幂等与冲突检测（需设计闸门）
-- 待登记：Phase 2 异步计费：估算供应商成本、MYR 换算与客户计费额（需设计闸门）
-- 待登记：Phase 2 钱包扣费、负余额与停机（需设计闸门）
-- 待登记：Phase 2 管理端前端：供应商、模型、价格与汇率
+- 待登记：Phase 2 T-A Provider、Model 与 Usage Meter 目录（需设计闸门）
+- 待登记：Phase 2 T-B 供应商价格版本与泛化价格分量（需设计闸门）
+- 待登记：Phase 2 T-C FX 汇率版本、BNM 拉取、审批与告警计数接口（需设计闸门）
+- 待登记：Phase 2 T-D 定价规则 MARKUP 与 FIXED_RATE（需设计闸门）
+- 待登记：Phase 2 T-E 用量摄取端点：签名、防重放、持久化 202、全局幂等与冲突（需设计闸门）
+- 待登记：Phase 2 T-F 批量用量摄取端点（需设计闸门）
+- 待登记：Phase 2 T-G 计价引擎与管理端试算预览（需设计闸门）
+- 待登记：Phase 2 T-H 异步计费 worker：扣费、负余额、停机与恢复扫描（需设计闸门）
+- 待登记：Phase 2 T-I 最热租户压测与 §119 基线（脚本）
+- 待登记：Phase 2 T-J 管理端用量事件查询接口
+- 待登记：Phase 2 T-K 管理端前端：供应商、模型、价格与汇率
+- 待登记：Phase 2 T-L 管理端前端：定价规则、试算与用量事件
 - 待登记：Phase 3 出站服务状态 webhook 投递与重试（需设计闸门，依赖 webhook 密钥表）
 - 待登记：Phase 3 服务状态查询接口，供集成方周期对账（需设计闸门）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
@@ -73,7 +76,7 @@
 - 待登记：Phase 7 月度对账单、T+1 cut-off 与上期调整（需设计闸门）
 - 待登记：Phase 7 对账单 PDF 下载
 - 待登记：Phase 7 收入、成本、手续费、毛利分析与 CSV / Excel 导出
-- 待登记：Phase 8 供应商价格与 FX 同步适配器、草稿审批发布（需设计闸门）
+- 待登记：Phase 8 供应商价格同步适配器、草稿审批发布（需设计闸门）
 - 待登记：Phase 8 供应商账单成本对账（需设计闸门）
 - 待登记：Phase 8 Reprocess 与 Rebill 调整（需设计闸门）
 - 待登记：上线闸门：PDPA 与数据留存政策
@@ -1911,6 +1914,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）
+
+> 拆分、依赖与关键路径见 [PHASE-2-plan.md](design/PHASE-2-plan.md)（Kelvin 2026-09-28 确认）：12 个任务 T-A…T-L，8 个过设计闸门；设计闸门先写，实现任务等 AIH-TASK-020–023 合并部署后再登记。自动 FX 适配器（BNM）归本 Phase，Phase 8 只做供应商价格同步。
 
 - [ ] Provider / Model / Usage Meter
 - [ ] `provider_price_versions` + 泛化价格分量（含缓存 token、非 token 单位）
