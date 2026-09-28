@@ -6,6 +6,7 @@
 | **日期** | 2026-09-10 |
 | **修订** | 2026-09-10 勘误：nonce 过期改为「请求 timestamp + 5 分钟」；主密钥文件属主按容器运行 UID；撤回「表结构不变」并列出出站 webhook schema 待定项；补 runbook 公私边界（PR #6） |
 | **修订** | 2026-09-25 补完：出站 webhook 密钥 schema 选定方案 i（新建 `project_webhook_secrets`），见第 4a 节（PR #119） |
+| **修订** | 2026-09-28 补完：第 4a 节「随发送 webhook 的代码一起做」拆成两步 —— 密钥表、管理端操作与签名库先做（设计闸门 #135 已批准 v1，实现登记为 AIH-TASK-019），投递随 Phase 3 的状态 webhook 投递设计闸门。决策人 2026-09-28 同意 |
 | **决策人** | Kelvin Peng |
 | **来源** | spec §36、§74.4、§96、§98.1 已定原则；本 ADR 定具体机制 |
 | **影响** | `integration_credentials` / `projects` 表（出站 webhook 密钥可能新增 `project_webhook_secrets`，见第 4a 节）、Phase 0 密钥方案、Phase 2/3 验签实现 |

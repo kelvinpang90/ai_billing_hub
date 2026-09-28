@@ -44,7 +44,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013`、`AIH-TASK-014`、`AIH-TASK-015`、`AIH-TASK-016`、`AIH-TASK-017` 与 `AIH-TASK-018`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013`、`AIH-TASK-014`、`AIH-TASK-015`、`AIH-TASK-016`、`AIH-TASK-017`、`AIH-TASK-018`、`AIH-TASK-019` 与 `AIH-TASK-020`（用途见下面「Worker 的启用状态」）。
 `AIH-TASK-009` / `AIH-TASK-010` 不在其中：它们是控制面给「采纳提议」的 run 分配的编号，不写进 `tasks.yaml`。
 
 除此之外一律 **fail closed** ——
@@ -69,7 +69,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-018` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-020` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -78,7 +78,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-018`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-020`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -110,6 +110,8 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-016` | 管理端前端第二刀：客户详情页的项目列表与建项目，并给 018 留挂载点。依赖 015。**不走设计闸门**：纯前端 | 八项；同 015 |
 | `AIH-TASK-017` | 管理端前端第三刀：手工调账（接口已过闸门 #111）。幂等键每次打开表单生成、结果未知时锁定表单只许同键重试。依赖 016（两者都改客户详情页）。**不走设计闸门**：纯前端，钱的规则全在后端 | 八项，新建 `features/wallet/`；同 015 |
 | `AIH-TASK-018` | 管理端前端第四刀：项目集成 API 凭据的建、列、轮换、吊销（接口已过闸门 #118）。`secret` 只在结果对话框出现一次，不进查询缓存与浏览器存储。依赖 016。**不走设计闸门**：纯前端 | 八项；文件名沿用 `integration_access` 的叫法避开 Worker 的敏感路径规则；同 015 |
+| `AIH-TASK-019` | 出站状态 webhook 的签名密钥：`project_webhook_secrets`（待启用 / 签名中 / 已退役）、四个管理端接口、不接发送方的签名库。**碰 Webhook 与密钥，已过设计闸门** #135（`APPROVED: design v1`）；批准的设计逐字放在 [docs/design/AIH-TASK-019-webhook-signing.md](../docs/design/AIH-TASK-019-webhook-signing.md)，Worker 以它为准 | 十五项；合并即由自动部署在生产上执行迁移 0008。文件名用 `webhook_signing` 避开 Worker 的敏感路径规则。PR 正文由实现方改成 `#135` 再审 |
+| `AIH-TASK-020` | 租户账户状态的启用与停用：`tenants.account_status`、管理端接口、与计费状态共用 `status_version`，审计与 outbox 同事务；关户移出，等 Phase 2 / 4。**状态机，已过设计闸门** #136（`APPROVED: design v2`）；设计在 [docs/design/AIH-TASK-020-tenant-account-status.md](../docs/design/AIH-TASK-020-tenant-account-status.md)。依赖 019 | 十三项；合并即执行迁移 0009。PR 正文由实现方改成 `#136` 再审 |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
@@ -127,7 +129,7 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 `AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）、`AIH-TASK-016`（#141）、`AIH-TASK-017`（#145）、`AIH-TASK-018`（#147）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
 2026-09-27 登记 `AIH-TASK-015` 到 `AIH-TASK-018`（管理端前端四刀）为 `ready`，按 015 → 016 → 017 → 018 排进
-[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付，「当前计划」现在是空的，等下一批任务登记后再排入；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付。2026-09-28 登记 `AIH-TASK-019`（#135）与 `AIH-TASK-020`（#136）为 `ready`，按 019 → 020 排进「当前计划」；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
 
 `AIH-TASK-016` 不是由 Worker 的 PR 交付的：run `b287409b` 以 `checks_failed` 结束、没有开 PR —— `frontend.test` 先挂在
 jsdom 缺 `ResizeObserver` 上，第二次自动修复在测试里补了替身，替身那行的多余类型断言又被 `frontend.lint` 拦下，修复次数已用完。
