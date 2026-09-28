@@ -23,9 +23,8 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-021` 审计表在数据库层只追加
-2. `AIH-TASK-022` 管理端审计日志查询接口
-3. `AIH-TASK-023` 管理端前端：审计日志页
+1. `AIH-TASK-022` 管理端审计日志查询接口
+2. `AIH-TASK-023` 管理端前端：审计日志页
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -1919,7 +1918,12 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   不经触发器
 - [x] **残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器；有 `TRIGGER` / `DROP` 权限的账号也能先删触发器。测试库正是靠
   `TRUNCATE` 清场的。彻底封住归「迁移账号与运行账号拆分」那项运维任务
-- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署
+- [x] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署：第一个 run `7d02e32c`
+  基于 `ed77020`，实现已提交（lint 第一轮的 F402 在修复轮改掉），但执行期间纯文档的 #166 合进了 main，Worker 推送前判为
+  `branch_outdated`（不自动重试、不 rebase），没有推分支也没有开 PR。重发「开启」后 run `53641ac5` 基于 `7119fde` 提交
+  `b3cadee`，`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check` 零退出；Worker 的受限审查一轮
+  `APPROVE`（它看不到 `needs_mysql` 用例是否在 Worker 里被跳过，这些由 CI 的 `backend` 在真 MySQL 上跑过）。#167 合并为
+  `e18f1bc`，main 上 CI 与 Deploy 成功
 
 ### AIH-TASK-024 —— AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，2026-09-28）
 

@@ -1236,7 +1236,7 @@ tasks:
       照 wallet_transactions 的做法，迁移 0010 给 audit_logs 加 BEFORE UPDATE / BEFORE DELETE 触发器，一律 SIGNAL 45000，
       让审计记录在数据库层只能插入。随之把在真 MySQL 上靠 DELETE 清场的测试改成 TRUNCATE（与账本测试同一做法），
       并去掉 scripts/perf_baseline.py 收尾时删除审计行的那一步。不改任何业务代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-020
     acceptance_criteria:
