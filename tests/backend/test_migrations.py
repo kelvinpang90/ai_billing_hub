@@ -46,7 +46,11 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from alembic import command
 from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
 from app.models.base import Base
-from app.models.integration import API_KEY_COLLATION, IntegrationCredential
+from app.models.integration import (
+    API_KEY_COLLATION,
+    IntegrationCredential,
+    ProjectWebhookSecret,
+)
 from app.models.tenancy import BillingStatus, Project, Tenant
 from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
 
@@ -999,3 +1003,340 @@ def test_0007_checks_refuse_bad_rows(alembic_config: Config, overrides: dict) ->
         # 合法的吊销行：状态与时刻都在。
         revoked = _credential_values(tenant, project, status="REVOKED", revoked_at=_NOW)
         _insert_credential(connection, **revoked)
+
+
+# ---------------------------------------------------------------------------
+# 0008_webhook_signing（AIH-TASK-019，设计闸门 #135 v1）
+#
+# 生成列、它们的唯一索引、CHECK 与复合外键的**形状与行为**在真 MySQL 上验（设计 §7「迁移」
+# 「数据库兜底」）。头两条不连库：比对迁移与模型的 CHECK 与生成列表达式，钉住版本链。
+# 并发与 SQLite 上的同一组数据库兜底在 test_webhook_signing_service.py。
+# ---------------------------------------------------------------------------
+
+_REVISION_0008 = "0008_webhook_signing"
+_MIGRATION_0008 = pathlib.Path("alembic/versions/20260928_0008_webhook_signing.py")
+_WEBHOOK_TABLE = "project_webhook_secrets"
+
+_EXPECTED_0008_COLUMNS = {
+    "id": False,
+    "project_id": False,
+    "tenant_id": False,
+    "key_version": False,
+    "status": False,
+    "encrypted_secret": False,
+    "encryption_key_version": False,
+    # 生成列：非 ACTIVE / PENDING 的行上是 NULL。
+    "active_slot": True,
+    "pending_slot": True,
+    "created_at": False,
+    "activated_at": True,
+    "retired_at": True,
+}
+
+_WEBHOOK_DELETE_RULE_QUERY = text(
+    "SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS"
+    " WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND CONSTRAINT_NAME = 'fk_project_webhook_secrets_project'"
+)
+_WEBHOOK_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME = 'project_webhook_secrets'"
+)
+
+
+def _load_0008() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0008", _MIGRATION_0008)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _webhook_checks() -> dict[str, str]:
+    return {
+        str(constraint.name): _normalised(str(constraint.sqltext))
+        for constraint in ProjectWebhookSecret.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0008_checks_and_slots_are_the_ones_the_model_declares() -> None:
+    migration = _load_0008()
+    from_migration = {name: _normalised(rule) for name, rule in migration._CHECKS.items()}
+
+    assert from_migration == _webhook_checks()
+    assert len(from_migration) == 3
+    table = ProjectWebhookSecret.__table__
+    for name, expression in migration._SLOTS.items():
+        computed = table.c[name].computed
+        assert computed is not None, name
+        assert computed.persisted is True, name
+        assert _normalised(str(computed.sqltext)) == _normalised(expression), name
+    assert set(migration._SLOTS) == {"active_slot", "pending_slot"}
+
+
+def test_0008_follows_0007() -> None:
+    migration = _load_0008()
+
+    assert migration.revision == _REVISION_0008
+    assert migration.down_revision == _REVISION_0007
+
+
+@needs_mysql
+def test_0008_only_adds_and_drops_its_table(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION_0007)
+    without = _table_names()
+    assert _CREDENTIALS_TABLE in without, "0007 的表应该都在，否则下面的比较没有意义"
+    assert _WEBHOOK_TABLE not in without
+    project_uniques = _unique_sets("projects")
+
+    command.upgrade(alembic_config, _REVISION_0008)
+    assert _table_names() == without | {_WEBHOOK_TABLE}
+
+    # downgrade 只删表，不碰 projects 上 0007 的约束。
+    command.downgrade(alembic_config, _REVISION_0007)
+    assert _table_names() == without
+    assert _unique_sets("projects") == project_uniques
+
+    command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0008_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        columns = inspect(engine).get_columns(_WEBHOOK_TABLE)
+        assert {c["name"]: c["nullable"] for c in columns} == _EXPECTED_0008_COLUMNS
+        types = {c["name"]: c["type"] for c in columns}
+        computed = {c["name"]: c.get("computed") for c in columns}
+
+        for name in ("id", "project_id", "tenant_id", "active_slot", "pending_slot"):
+            assert isinstance(types[name], BigInteger), name
+        # 两个版本号都是 INT，而且是两列（ADR-0004 §4）。
+        for name in ("key_version", "encryption_key_version"):
+            assert isinstance(types[name], Integer), name
+            assert not isinstance(types[name], BigInteger), name
+        assert isinstance(types["encrypted_secret"], Text)
+        assert isinstance(types["status"], String)
+        assert types["status"].length == 16
+        for name in ("created_at", "activated_at", "retired_at"):
+            assert isinstance(types[name], DateTime), name
+
+        # 两个生成列都是 STORED，只有它们两个是生成列。
+        assert {name for name, value in computed.items() if value} == {
+            "active_slot",
+            "pending_slot",
+        }
+        for name, status in (("active_slot", "ACTIVE"), ("pending_slot", "PENDING")):
+            assert computed[name]["persisted"] is True, name
+            assert status in str(computed[name]["sqltext"]), name
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0008_keys_indexes_and_checks(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        assert _unique_sets(_WEBHOOK_TABLE) == {
+            ("project_id", "key_version"),
+            ("active_slot",),
+            ("pending_slot",),
+        }
+        indexes = {i["name"]: i for i in inspector.get_indexes(_WEBHOOK_TABLE)}
+        for name, column in (
+            ("ux_project_webhook_secrets_active_slot", "active_slot"),
+            ("ux_project_webhook_secrets_pending_slot", "pending_slot"),
+        ):
+            assert indexes[name]["column_names"] == [column], name
+            assert indexes[name]["unique"], name
+        foreign_keys = {
+            str(fk["name"]): (
+                fk["constrained_columns"],
+                fk["referred_table"],
+                fk["referred_columns"],
+            )
+            for fk in inspector.get_foreign_keys(_WEBHOOK_TABLE)
+        }
+        assert foreign_keys == {
+            "fk_project_webhook_secrets_project": (
+                ["project_id", "tenant_id"],
+                "projects",
+                ["id", "tenant_id"],
+            ),
+        }
+
+        with engine.connect() as connection:
+            delete_rule = connection.execute(_WEBHOOK_DELETE_RULE_QUERY).scalar_one()
+            checks = set(connection.execute(_WEBHOOK_CHECKS_QUERY).scalars())
+        assert delete_rule == "RESTRICT"
+        assert checks == set(_webhook_checks())
+    finally:
+        engine.dispose()
+
+
+def _webhook_values(tenant_id: int, project_id: int, **overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "key_version": 1,
+        "status": "PENDING",
+        "encrypted_secret": "not-a-real-ciphertext",
+        "encryption_key_version": 1,
+        "created_at": _NOW,
+    }
+    values.update(overrides)
+    return values
+
+
+def _insert_webhook_secret(connection: Connection, **values: object) -> None:
+    connection.execute(insert(ProjectWebhookSecret).values(**values))
+
+
+def _webhook_refused(connection: Connection, **values: object) -> int:
+    """Insert in a savepoint; return the MySQL error number it was refused with."""
+    with pytest.raises(DBAPIError) as raised:
+        with connection.begin_nested():
+            _insert_webhook_secret(connection, **values)
+    return int(raised.value.orig.args[0])
+
+
+def _new_project(connection: Connection) -> tuple[int, int]:
+    """(tenant id, project id), both internal."""
+    tenant = _insert_tenant(connection, str(uuid.uuid4()))
+    public_id = str(uuid.uuid4())
+    _insert_project(connection, tenant, public_id)
+    return tenant, _project_id(connection, public_id)
+
+
+@needs_mysql
+def test_0008_the_composite_foreign_key_refuses_a_mismatched_tenant(
+    alembic_config: Config,
+) -> None:
+    """INV-8：密钥行的 tenant_id 必须是项目所属的租户，由数据库保证。"""
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        owner, project = _new_project(connection)
+        stranger = _insert_tenant(connection, str(uuid.uuid4()))
+
+        mismatched = _webhook_values(stranger, project)
+        assert _webhook_refused(connection, **mismatched) == _ER_NO_REFERENCED_ROW_2
+
+        _insert_webhook_secret(connection, **_webhook_values(owner, project))
+
+
+@needs_mysql
+def test_0008_a_project_with_webhook_secrets_cannot_be_deleted(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant, project = _new_project(connection)
+        _insert_webhook_secret(connection, **_webhook_values(tenant, project))
+
+        with pytest.raises(DBAPIError) as raised:
+            with connection.begin_nested():
+                connection.execute(delete(Project).where(Project.id == project))
+        assert int(raised.value.orig.args[0]) == _ER_ROW_IS_REFERENCED_2
+
+
+@needs_mysql
+def test_0008_at_most_one_active_and_one_pending_per_project(alembic_config: Config) -> None:
+    """设计 §7「数据库兜底」：绕过服务层直接插第二个 ACTIVE / PENDING、重复版本号，都被拒绝。
+
+    同时验证设计 §10 假设 1：生成列上的唯一索引允许多个 NULL（多个 RETIRED 行）。
+    """
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant, project = _new_project(connection)
+        other_tenant, other_project = _new_project(connection)
+        active = {"status": "ACTIVE", "activated_at": _NOW}
+        retired = {"status": "RETIRED", "retired_at": _NOW}
+
+        _insert_webhook_secret(connection, **_webhook_values(tenant, project, key_version=1))
+        _insert_webhook_secret(
+            connection, **_webhook_values(tenant, project, key_version=2, **active)
+        )
+
+        # 第二个 PENDING、第二个 ACTIVE、重复的版本号。
+        second_pending = _webhook_values(tenant, project, key_version=3)
+        second_active = _webhook_values(tenant, project, key_version=3, **active)
+        duplicate_version = _webhook_values(tenant, project, key_version=1, **retired)
+        for bad in (second_pending, second_active, duplicate_version):
+            assert _webhook_refused(connection, **bad) == _ER_DUP_ENTRY
+
+        # 多个 RETIRED：唯一索引上都是 NULL，可以并存。
+        for version in (3, 4, 5):
+            _insert_webhook_secret(
+                connection, **_webhook_values(tenant, project, key_version=version, **retired)
+            )
+        # 别的项目有自己的一个 ACTIVE 与一个 PENDING，互不影响。
+        _insert_webhook_secret(connection, **_webhook_values(other_tenant, other_project))
+        _insert_webhook_secret(
+            connection,
+            **_webhook_values(other_tenant, other_project, key_version=2, **active),
+        )
+
+        slots = connection.execute(
+            select(
+                ProjectWebhookSecret.key_version,
+                ProjectWebhookSecret.active_slot,
+                ProjectWebhookSecret.pending_slot,
+            )
+            .where(ProjectWebhookSecret.project_id == project)
+            .order_by(ProjectWebhookSecret.key_version)
+        ).all()
+        assert [tuple(row) for row in slots] == [
+            (1, None, project),
+            (2, project, None),
+            (3, None, None),
+            (4, None, None),
+            (5, None, None),
+        ]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"key_version": 0},
+        {"key_version": -1},
+        {"status": "REVOKED"},
+        {"status": "PENDING", "activated_at": _NOW},
+        {"status": "PENDING", "retired_at": _NOW},
+        {"status": "ACTIVE"},
+        {"status": "ACTIVE", "activated_at": _NOW, "retired_at": _NOW},
+        {"status": "RETIRED"},
+        {"status": "RETIRED", "activated_at": _NOW},
+    ],
+    ids=[
+        "version-0",
+        "version-negative",
+        "status-unknown",
+        "pending-with-activated",
+        "pending-with-retired",
+        "active-without-activated",
+        "active-with-retired",
+        "retired-without-time",
+        "retired-with-only-activated",
+    ],
+)
+@needs_mysql
+def test_0008_checks_refuse_bad_rows(alembic_config: Config, overrides: dict) -> None:
+    """版本号从 1 起；状态只有三种；时间与状态一致（设计 §2）。"""
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        tenant, project = _new_project(connection)
+
+        bad = _webhook_values(tenant, project, **overrides)
+        assert _webhook_refused(connection, **bad) == _ER_CHECK_CONSTRAINT_VIOLATED
+
+        # 合法的两种退役行：从 PENDING 直接退役（没有启用时刻）、从 ACTIVE 退役（两个都有）。
+        retired = {"status": "RETIRED", "retired_at": _NOW}
+        _insert_webhook_secret(connection, **_webhook_values(tenant, project, **retired))
+        _insert_webhook_secret(
+            connection,
+            **_webhook_values(tenant, project, key_version=2, activated_at=_NOW, **retired),
+        )

@@ -1,4 +1,5 @@
-"""Integration API credentials (spec §36, §37, §74.4; design gate #118 v1, AIH-TASK-012).
+"""Integration API credentials (spec §36, §37, §74.4; design gate #118 v1, AIH-TASK-012),
+and outbound webhook signing secrets (spec §28; design gate #135 v1, AIH-TASK-019).
 
 一行是**一个 `api_key` 的一个签名版本**。轮换时 `api_key` 不变、新增一行（Kelvin
 2026-09-25 选的方案 A），所以唯一约束是 `(public_api_key, key_version)`，而不是 §74.4
@@ -25,6 +26,7 @@ from typing import Final
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Computed,
     DateTime,
     Enum,
     ForeignKeyConstraint,
@@ -115,4 +117,85 @@ class IntegrationCredential(Base):
         CheckConstraint(KEY_VERSION_CHECK, name="ck_integration_credentials_key_version"),
         CheckConstraint(STATUS_CHECK, name="ck_integration_credentials_status"),
         CheckConstraint(REVOKED_AT_CHECK, name="ck_integration_credentials_revoked_at"),
+    )
+
+
+# --- 出站状态 webhook 的签名密钥（AIH-TASK-019，设计闸门 #135 v1） -----------------------
+
+
+class WebhookSecretStatus(enum.StrEnum):
+    """`PENDING` → `ACTIVE` → `RETIRED`；`PENDING` 也可直接 `RETIRED`。`RETIRED` 是终态。
+
+    平台同一时刻只用 `ACTIVE` 那一把签名（设计 §4、§9）。
+    """
+
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    RETIRED = "RETIRED"
+
+
+# ⚠️ 条件与生成列表达式同迁移 0008 逐字一致（空白除外），test_migrations.py 比对两边。
+WEBHOOK_KEY_VERSION_CHECK: Final = "key_version >= 1"
+WEBHOOK_STATUS_CHECK: Final = "status IN ('PENDING', 'ACTIVE', 'RETIRED')"
+WEBHOOK_TIMES_CHECK: Final = (
+    "(status = 'PENDING' AND activated_at IS NULL AND retired_at IS NULL)"
+    " OR (status = 'ACTIVE' AND activated_at IS NOT NULL AND retired_at IS NULL)"
+    " OR (status = 'RETIRED' AND retired_at IS NOT NULL)"
+)
+# 只有该状态的行才有值，其余是 NULL；唯一索引允许多个 NULL，所以「每个项目至多一个
+# ACTIVE、至多一个 PENDING」由数据库保证（设计 §2、§10 假设 1）。
+ACTIVE_SLOT_EXPRESSION: Final = "CASE WHEN status = 'ACTIVE' THEN project_id END"
+PENDING_SLOT_EXPRESSION: Final = "CASE WHEN status = 'PENDING' THEN project_id END"
+
+
+class ProjectWebhookSecret(Base):
+    """One signing version of a project's outbound status-webhook secret (ADR-0004 §4a 方案 i).
+
+    ⚠️ 与 `integration_credentials` 一样，`key_version`（签名版本，客户在
+    `X-Acuven-Key-Version` 里看到）与 `encryption_key_version`（主密钥版本）是两列。
+
+    ⚠️ 行不删除：退役只改状态、不清密文（设计 §6）。
+    """
+
+    __tablename__ = "project_webhook_secrets"
+
+    id: Mapped[int] = mapped_column(_PrimaryKey, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(_ForeignKeyInt, nullable=False)
+    tenant_id: Mapped[int] = mapped_column(_ForeignKeyInt, nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[WebhookSecretStatus] = mapped_column(
+        Enum(WebhookSecretStatus, native_enum=False, length=_STATUS_LENGTH),
+        nullable=False,
+        default=WebhookSecretStatus.PENDING,
+    )
+    # `encrypt_secret` 的输出，AAD 见 app/services/webhook_signing.py 的 `webhook_secret_aad`。
+    encrypted_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    encryption_key_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 生成列（STORED）：只读，ORM 从不写它们。
+    active_slot: Mapped[int | None] = mapped_column(
+        _ForeignKeyInt, Computed(ACTIVE_SLOT_EXPRESSION, persisted=True)
+    )
+    pending_slot: Mapped[int | None] = mapped_column(
+        _ForeignKeyInt, Computed(PENDING_SLOT_EXPRESSION, persisted=True)
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    activated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    retired_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        # 数据库保证行的租户就是项目所属的租户（INV-8）。
+        ForeignKeyConstraint(
+            ["project_id", "tenant_id"],
+            ["projects.id", "projects.tenant_id"],
+            name="fk_project_webhook_secrets_project",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "project_id", "key_version", name="uq_project_webhook_secrets_key_version"
+        ),
+        Index("ux_project_webhook_secrets_active_slot", "active_slot", unique=True),
+        Index("ux_project_webhook_secrets_pending_slot", "pending_slot", unique=True),
+        CheckConstraint(WEBHOOK_KEY_VERSION_CHECK, name="ck_project_webhook_secrets_key_version"),
+        CheckConstraint(WEBHOOK_STATUS_CHECK, name="ck_project_webhook_secrets_status"),
+        CheckConstraint(WEBHOOK_TIMES_CHECK, name="ck_project_webhook_secrets_times"),
     )

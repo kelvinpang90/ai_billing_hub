@@ -93,7 +93,7 @@
 - [x] **D1 — 汇率来源与版本化策略** —— 已收口。BNM openAPI 每日拉取落 `DRAFT`，需显式发布为 `PUBLISHED` 才可用于计算；按用量事件的 `occurred_at` 取版本（不是结算日）；`provider_price_versions` 存供应商原币种原价，MYR 换算结果连同 `fx_rate_version_id` 快照进用量事件。计费热路径不实时调用 BNM。见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)。⚠️ BNM 是中间价且周末无新价，偏差须由 markup 的 FX 缓冲吸收
 - [ ] **D2 — SST 税务口径** —— **部分收口**。已定：**对客户展示的金额一律含税**（充值 RM100 → 钱包 +RM100，税嵌在消费价里；spec 第 359 行禁止税静默减少钱包额度）。字段语义因此确定，Phase 0–3 不再被阻塞。见 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md)。⚠️ **spec §45.1 六项里其余五项仍需会计意见**：是否需注册 SST、AI 服务的税务分类与豁免、充值属储值 / 押金 / 服务预付、税的确认时点与税率、receipt / statement 强制字段。**五项齐备前 Phase 4 不得开工**，`tax_policy_versions` 只能有 `DRAFT` 行
 - [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
-- [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节） → **2026-09-25 已选定方案 i**（Kelvin），ADR-0004 第 4a 节已补完；它自己的设计闸门还没开，D4 因此仍不勾
+- [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节） → **2026-09-25 已选定方案 i**（Kelvin），ADR-0004 第 4a 节已补完；它自己的设计闸门还没开，D4 因此仍不勾 → 2026-09-28：设计闸门 #135 已批准 v1，AIH-TASK-019 实现了表、管理端与签名库，ADR-0004「收口条件」的第 4a 节那一项随合并满足（勾选要改 ADR-0004，不在 019 的可改路径里，留给下一次改 ADR 的任务）。**D4 仍不勾**：ADR-0004「收口条件」还有五项未满足 —— ① Phase 0 的「备份、恢复、加密密钥方案设计」验收（T0.9）；② `docs/runbook.md` 写入主密钥恢复流程（脱敏）与私有附录；③ 季度恢复演练含主密钥恢复；④ §113 的 secret-leak tests 覆盖日志、审计、API 响应、异常栈四条路径（入站凭据与出站签名密钥各自的用例已覆盖这四条，但收口条件指的是整体，要有人对照 ADR 判定）；⑤ D6 选型时确认支付网关回调的幂等标识
 - [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ T+1（24h）覆盖不了 §31 举例的 31 小时积压，所以上期调整**是预期会出现的**；但 §31 那个数字是**告警阈值示例，不是日常状态**——每一笔都应能追溯到一次具体延迟事件，**不是会计常态**。笔数与金额占比必须进 §95 监控，占比走高要查根因
 - [ ] **D6 — 支付网关选型** —— 准入契约已定，**供应商尚未选定**。已定四条硬性准入（H1 回调带稳定唯一标识 / H2 服务端权威状态查询 / H3 回调可验签 / H4 沙箱 + 对账）与适配器接口，Phase 1–3 不再被阻塞。见 [ADR-0006](adr/ADR-0006-payment-gateway-contract.md)。⚠️ **具体供应商仍未选定，硬截止在 Phase 4 开工前**；H1–H4 必须用沙箱实测，不能凭供应商文档
 - [ ] **D7 — 通知通道** —— **部分收口**。已定：Email 借 `rs-roof-pms` 的 SMTP 传输层（`aiosmtplib`、465/587 TLS 分支、空 host = 未配置、发送不抛异常），但**投递模型不借**——改走 domain Outbox + worker + 周期恢复（Invariant 13/14；`rs-roof-pms` 是请求内同步发送、零重试、无发送记录）；一切通知走 spec §47 强制的 Notification Adapter 抽象。见 [ADR-0009](adr/ADR-0009-notification-channels.md)。⚠️ **WhatsApp 传输路径待定**：`whatsapp_gateway` 现已停机、出站端点从未被调用过、且缺模板消息能力与 24 小时窗口判定，接不了「我方发起」的业务通知；需在「复活并扩建网关」与「计费平台独立 App / 号码」之间拍板。**Email 与 Portal 不受此阻塞**
@@ -1120,12 +1120,12 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [ ] 不可变钱包账本
 - [x] 管理员手工调账（AIH-TASK-011，见下面的记录段；随合并生效）
 - [x] API 凭据（加密存储、版本化、可轮换）（AIH-TASK-012，见下面的记录段；随合并生效）
-- [ ] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节。2026-09-25 已选定方案 i（新表），实现另过设计闸门 → 设计闸门 #135 `APPROVED: design v1`（2026-09-27），实现登记为 AIH-TASK-019；Kelvin 2026-09-28 同意密钥表与投递拆成两步，投递归 Phase 3
+- [x] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节。2026-09-25 已选定方案 i（新表），实现另过设计闸门 → 设计闸门 #135 `APPROVED: design v1`（2026-09-27），实现登记为 AIH-TASK-019；Kelvin 2026-09-28 同意密钥表与投递拆成两步，投递归 Phase 3。AIH-TASK-019 建了表、四个管理端接口与签名库（见下面的记录段；随合并生效）
 - [ ] 审计日志
 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
 > - Tenant：身份字段（004）与计费状态（005）已有；缺账户状态 `account_status`（状态模型任务）
-> - Project：身份字段与管理端建 / 列（004、006）已有；缺集成字段（后端地址、状态 webhook 地址与密钥、`integration_status`），随 webhook 密钥 schema 与 Phase 3
+> - Project：身份字段与管理端建 / 列（004、006）已有，出站 webhook 签名密钥（019，`project_webhook_secrets` 表）已有；缺集成字段（后端地址、状态 webhook 地址、`integration_status`），随状态模型任务与 Phase 3
 > - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，前端的列表、建客户、详情与编辑页（015）已有；缺账户状态、低余额阈值配置
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
@@ -1145,10 +1145,11 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 | `LOGIN` / `LOGIN_FAILED` | 已有 | `app/services/auth.py` |
 | `CUSTOMER_CREATE` / `CUSTOMER_UPDATE` | 已有 | `app/services/customers.py`；联系人、邮箱、电话的值不进审计（REQ-PRIV-001） |
 | `API_KEY_CREATE` / `ROTATE` / `REVOKE` | 已有 | `app/services/integration_access.py` |
+| `WEBHOOK_SECRET_ISSUE` / `ACTIVATE` / `RETIRE` | 已有，spec 外补充 | `app/services/webhook_signing.py`（AIH-TASK-019）；§66 清单里没有，按 `PROJECT_CREATE` 的先例补上，见 AIH-TASK-019 记录段 |
 | `WALLET_ADJUSTMENT` | 已有，名字不同 | 实际是 `WALLET_ADJUSTMENT_POSTED` |
 | `TENANT_SUSPEND` / `TENANT_REACTIVATE`（余额驱动的那部分） | 已有，名字不同 | 实际是 `TENANT_BILLING_STATUS_CHANGED`，与钱包变动同一事务 |
 | 手工的停用 / 复用（`account_status`） | 随功能 | 状态模型任务的设计闸门里补 |
-| `PROJECT_UPDATE` | 随功能 | 还没有编辑项目的接口；随 webhook 密钥表与 Phase 3 的项目集成字段 |
+| `PROJECT_UPDATE` | 随功能 | 还没有编辑项目的接口；随 Phase 3 的项目集成字段（webhook 密钥表 AIH-TASK-019 没有编辑项目，它的三个动作见上一行） |
 | `ADMIN_SETTING_CHANGE` | 随功能 | 还没有管理端设置；随低余额阈值等配置任务 |
 | `PRICING_*`、`PROVIDER_PRICE_PUBLISH`、`REBILL`、`PAYMENT_STATUS_CHANGE` 等 | 随后续 Phase | Phase 2 / 4 / 7 / 8，各自的设计闸门负责 |
 | 审计不能经应用 API 修改（§66） | 已有 | 只有插入路径（`record_audit`），没有更新或删除接口 |
@@ -1420,7 +1421,7 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   → 重复吊销 200 且不写审计。库内只读核对：2 行、都 `REVOKED`、主密钥版本 1、密文里没有 secret；审计恰好
   `API_KEY_CREATE` / `ROTATE` / `REVOKE` 三条、`ADMIN`、前后状态与 reason 里没有 secret。⚠️ 夹具项目因此留下
   两行已吊销的凭据（凭据没有删除接口）。凭据只在 VPS 上的进程里读取，没有进对话或仓库
-- [ ] 出站 webhook 密钥表（方案 i）的设计闸门与实现
+- [x] 出站 webhook 密钥表（方案 i）的设计闸门与实现 —— 设计闸门 #135 `APPROVED: design v1`，实现是 AIH-TASK-019（见该记录段）
 
 ### AIH-TASK-012 —— API 凭据：加密存储、版本化、轮换与吊销，外加签名校验库（2026-09-25）
 
@@ -1717,6 +1718,79 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [x] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）：run `ab4f44f0` 八项一次通过开出 #147；
   Worker 的受限审查又要了两轮修复（repair 1 在记录里说明两处非全零夹具，repair 2 按审查要求删掉它们），每轮提交 CI 全绿
 - [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#147，合并为 `9ac0646`，部署成功）
+
+### AIH-TASK-019 —— 出站 webhook 签名密钥：签发、启用、退役与签名库（2026-09-28）
+
+实现依据是设计闸门 #135 已批准的 v1：[design/AIH-TASK-019-webhook-signing.md](design/AIH-TASK-019-webhook-signing.md)；
+接口契约与签名规则记在 [api.md](api.md) 的「管理端出站 webhook 签名密钥」与「状态 webhook 签名」，表结构记在
+[database-schema.md](database-schema.md)。上面 Phase 1 的「出站 webhook 密钥 schema」在本分支勾上：这一处改动只有合并进
+主干才生效。不含 `status_webhook_url`、`backend_base_url`、`integration_status`、`webhook_deliveries`、投递 worker、
+重试、payload 形状、前端与主密钥重新包裹（设计 §1 非目标）。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `alembic/versions/20260928_0008_webhook_signing.py`：revision `0008_webhook_signing`，`down_revision` 是
+    `0007_integration_access`。建 `project_webhook_secrets`：两个 STORED 生成列 `active_slot` / `pending_slot` 与
+    它们的唯一索引、`(project_id, key_version)` 唯一、三条 `CHECK`（版本下限、状态取值、状态与时间一致）、复合外键
+    `(project_id, tenant_id)` → `projects(id, tenant_id)` `RESTRICT`。`downgrade` 删表，不碰 `projects`。文件头附
+    §132 第 13 条分析
+  - `app/models/integration.py`：`ProjectWebhookSecret` 与 `WebhookSecretStatus`（`PENDING` / `ACTIVE` / `RETIRED`）；
+    `key_version`（签名版本）与 `encryption_key_version`（主密钥版本）分两列；CHECK 条件与生成列表达式是模块常量，
+    与迁移逐字比对。`app/models/auth.py`：三个审计动作。`alembic/env.py`：注释
+  - `app/repositories/webhook_signing.py`：锁项目行（`FOR UPDATE`）、锁内读全部版本（也是 `FOR UPDATE`，理由见下）、
+    插入 `PENDING`、启用、退役、分页列与计数、取 `ACTIVE`（连同项目 `public_id`，给 AAD 用）。只 flush；没有删除
+  - `app/services/webhook_signing.py`：签发、启用、退役、列表，每个写动作一个 `session_scope`，状态变化与审计同事务；
+    签发先 `load_keyring`（未配置即 503，什么都不做）；唯一约束的 `IntegrityError`（插入与启用）映射为 409
+    `WEBHOOK_SECRET_CONFLICT`。签名库 `signing_material`（没有 `ACTIVE` 返回 `None`；`SigningMaterial` 的 repr 不含
+    secret）与 `sign_status_webhook`（复用 `integration_auth.canonical_request` 与 `sign`，第四行填 event id）。
+    AAD 是 `project_webhook_secrets|<项目 public_id>|<key_version>`，经 `crypto.py` 现有的 `associated_data` 传入，
+    `crypto.py` 没改。这一层不写日志
+  - `app/schemas/webhook_signing.py`：三个请求模型都 `extra="forbid"`；`reason` 去空白后 1–255；响应白名单
+    `WebhookSecretView`，签发的 `IssuedWebhookSecretView` 多一个 `SecretStr` 的 `secret`
+  - `app/api/admin_customers.py`：四个处理函数，第一条语句都是 `require_admin`，成功响应都带 `Cache-Control: no-store`；
+    路径里的 `{key_version}` 用 `Path(ge=1, le=2**31 - 1)`，`0` 与非整数都是 422
+  - 测试：`tests/backend/test_webhook_signing_api.py`（SQLite：正常轮换路径与每步审计、secret 只返回一次、no-store、
+    密文存储、列表顺序与分页、三种 409 与两种幂等、退役 ACTIVE、多余字段、`key_version` 与 `reason` 的边界、跨客户与
+    跨项目的 404、未知客户、主密钥未配置只拒签发、处理函数第一条语句的 AST 检查、成功与审计失败的日志里都没有 secret）。
+    `tests/backend/test_webhook_signing_service.py`（审计写入失败与提交失败 × 签发 / 启用 / 退役，以及绕过服务层的
+    数据库兜底，都在 SQLite 与 MySQL 上各一次；两个线程同时签发、同时启用只在 MySQL 上；其余在 SQLite 上：密文与两个
+    版本号、repr、AAD 绑定、审计字段与日志、状态机、唯一约束映射、加锁顺序、签名库的四个头与手算签名、整数秒时间戳、
+    `signing_material` 随 ACTIVE 变化、没有删除与日志）。`tests/backend/test_migrations.py`：0008 的 CHECK 与生成列
+    表达式和模型比对、版本链、升降只动这一张表、列与类型与生成列、唯一约束与索引与外键与删除规则与 CHECK、复合外键拒绝
+    不一致的 `tenant_id`、有密钥的项目删不掉、至多一个 ACTIVE / PENDING 且多个 RETIRED 并存、CHECK 拒绝的行。
+    `tests/backend/test_admin_customers_api.py`：四个路由进 `EXPECTED_ADMIN_ROUTES` 与 `VALID_BODIES`，鉴权用例预先
+    插入一行 `PENDING`、逐行比较密钥表，`row_counts` 加密钥表
+  - 文档：[api.md](api.md) 的两节、[database-schema.md](database-schema.md) 的新表与「尚未建的列」
+- [x] **对 spec §66 的补充**：§66 的审计动作清单里只有入站的 `API_KEY_*` 与 `PROJECT_UPDATE`，没有出站签名密钥的动作。
+  按 `PROJECT_CREATE` 的先例补上 `WEBHOOK_SECRET_ISSUE`、`WEBHOOK_SECRET_ACTIVATE`、`WEBHOOK_SECRET_RETIRE`（设计 §2
+  「审计」）。`entity_type` 是 `project_webhook_secret`，`entity_id` 是项目 `public_id`；前后状态只有 `key_version` 与
+  `status`（启用写成 `{"versions": [...]}`，列出新旧两个版本），退役另有 `reason`。它们只是审计动作名，不影响外部契约；
+  spec 本身没改
+- [x] **设计没写死、由实现定的细节**（审查时请看这几条）：
+  - **锁内读版本也用 `FOR UPDATE`**。设计 §2 只写了锁项目行。MySQL 默认 REPEATABLE READ 下，普通 SELECT 读的是本事务
+    第一次读（解析客户与项目时）建立的快照：在项目锁上排队的那一个会看不见先到者刚提交的 `PENDING`，接着撞唯一索引，
+    得到 409 `WEBHOOK_SECRET_CONFLICT` 而不是设计要的 `WEBHOOK_SECRET_PENDING_EXISTS`。加锁读总是读最新提交的行。
+    入站凭据（012）锁的就是版本行本身，所以没有这个问题
+  - 启用时先把旧 `ACTIVE` 改为 `RETIRED` 并 flush，再把目标改为 `ACTIVE`：`active_slot` 的唯一索引逐行检查，顺序反了
+    会撞上
+  - 生成列上的唯一索引建成独立的 `CREATE UNIQUE INDEX`（`ux_…`），`(project_id, key_version)` 是表内唯一约束
+    （`uq_…`）；迁移因此是一条建表加两条建索引，失败处理写在迁移文件头
+  - 签名库的 `signing_material(session, keyring, project_id)` 里 `project_id` 是项目的**内部 id**（以后的投递 worker
+    手里拿的是项目行）；项目 `public_id` 在同一条查询里连带取出，用于 AAD
+  - 审计 `after_state` 只有 `key_version` 与 `status`，没有 `project_public_id` / `tenant_public_id`（设计 §2 的审计表
+    只列这两项；项目已在 `entity_id` 里）
+- [x] **设计 §10 假设 1（生成列上的唯一索引）**：SQLite 上没有走退路，两个唯一索引照建 —— 模型用 `Computed(…,
+  persisted=True)`，`create_all` 在 SQLite 上建出 STORED 生成列与唯一索引。数据库兜底的用例（第二个 ACTIVE / PENDING、
+  重复版本号、多个 RETIRED 并存）在 SQLite 与 MySQL 上各跑一次，就是这条假设在两种库上的验证
+- [x] **设计 §7 与自身约束冲突的一处，按设计文件原样停下说明，没有改设计**：§7「并发」写「两个线程同时启用不同的
+  `PENDING`（先造数据）… 只有一个成功，另一个 409」。但同一设计 §2 的 `pending_slot` 唯一索引让一个项目**至多一个
+  `PENDING`**，这份数据造不出来；而按 §4 状态表，启用一个已是 `ACTIVE` 的版本是 200 不写。实现测的是唯一可造的情形：
+  两个线程同时启用同一个 `PENDING`，断言两个都 200、只切换一次（一条 `ACTIVATE` 审计）、任何时刻至多一个 `ACTIVE`。
+  「签发」那一半（一个 201、一个 409 `WEBHOOK_SECRET_PENDING_EXISTS`）照设计原样测。请在 PR 审查时裁定：接受这个理解，
+  或在 Issue #135 升版本改写 §7 那一行
+- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署
+- [ ] **后续**：ADR-0004「收口条件」里第 4a 节那一项的勾选（要改 ADR 文件，不在本任务的可改路径里）；管理端前端（已在
+  「后续计划」）；Phase 3 的投递设计闸门接上 `signing_material` 与 `sign_status_webhook`，并在 api.md「状态 webhook 签名」
+  补时间窗、重试与按事件 id 去重的约定
 
 ---
 
