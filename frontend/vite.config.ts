@@ -1,8 +1,22 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+// OpenClaw Worker 的沙箱（AppContainer）里 lstat 不了 worktree 的上级目录，vitest 检查
+// jsdom 是否安装时用的 realpath 因此失败，误报 MISSING DEPENDENCY 并以 1 退出。依赖由
+// package-lock.json 固定、`npm ci` 装好，这道检查对本项目没有信息量，所以跳过。`??=`
+// 保留外部显式给的值。见 .platform/commands.yaml 的 frontend.test。
+process.env.VITEST_SKIP_INSTALL_CHECKS ??= "1";
+
 export default defineConfig({
   plugins: [react()],
+
+  resolve: {
+    // Worker 里 node_modules 以只读 junction 提供。按真实路径解析的话，同一个包会经
+    // junction 与真实路径各加载一份：vitest 被加载两次，jest-dom 的 matcher 注册到另一份
+    // 上，toBeInTheDocument 报 Invalid Chai property。普通 `npm ci` 的 node_modules 没有
+    // 链接，这条不改变任何解析结果。
+    preserveSymlinks: true,
+  },
 
   server: {
     // `npm run dev` 时把 API 请求转给本机 Compose 栈的 nginx（T0.6 默认发布

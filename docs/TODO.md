@@ -23,10 +23,6 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-015` 管理端前端：客户列表、建客户、客户详情与编辑
-2. `AIH-TASK-016` 管理端前端：客户详情页的项目列表与建项目
-3. `AIH-TASK-017` 管理端前端：手工调账
-4. `AIH-TASK-018` 管理端前端：项目集成 API 凭据的建、列、轮换与吊销
 
 ### 已阻塞
 - 待登记：出站 webhook 密钥表（方案 i）｜阻塞：等设计闸门
@@ -1126,7 +1122,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
 > - Tenant：身份字段（004）与计费状态（005）已有；缺账户状态 `account_status`（状态模型任务）
 > - Project：身份字段与管理端建 / 列（004、006）已有；缺集成字段（后端地址、状态 webhook 地址与密钥、`integration_status`），随 webhook 密钥 schema 与 Phase 3
-> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有；缺账户状态、低余额阈值配置、前端页面
+> - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，前端的列表、建客户、详情与编辑页（015）已有；缺账户状态、低余额阈值配置
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
 > - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么见下面的「审计日志差异清单」，**等 Kelvin 定范围**
@@ -1495,6 +1491,228 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
     （`docker compose up -d`），`restart` 不行：容器环境在创建时定下，进程内 `get_settings()` 只解析一次
 - [ ] **后移**：REQ-AUTH-001 的 replay 测试证据与防重放 nonce 存储随摄取端点做（Kelvin 2026-09-25 的第 4 项决定）；
   同时接上 `last_used_at` 写入与解密结果缓存
+
+### AIH-TASK-015 —— 管理端前端：客户列表、建客户、客户详情与编辑（2026-09-27）
+
+上面的「管理端客户管理」**不勾**：前端页面有了，但还缺账户状态与低余额阈值配置（后端也还没有）。
+只做前端，调用 [api.md](api.md)「管理端客户管理」里已上线的四个接口；设计闸门不适用 —— 纯前端，接口已过闸门 #96，
+不改钱的行为、状态机与认证逻辑。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/adminCustomers.ts`：`listCustomers(page, page_size)`、`getCustomer(id)`、`createCustomer(body)`、
+    `updateCustomer(id, patch)`，读走 `apiGet`，写走 `client.post` / `client.patch` + `unwrapEnvelope` / `toApiError`，
+    错误一律是 `ApiError`。类型照 api.md 的客户对象写，`wallet.balance` 是 `string`；路径里的 id 经 `encodeURIComponent`
+  - `frontend/src/components/RequestReference.tsx`：`DashboardPage` 里的局部组件原样抽出并导出；`DashboardPage` 改为引用它
+  - `frontend/src/components/MoneyText.tsx`：只做字符串运算 —— 整数部分加千分位，小数部分去掉末尾的 0、至少留 2 位，
+    不舍入不截断；币种在前（`MYR 1,234,567.12345678`）。没有 `parseFloat` / `Number()` / `Intl.NumberFormat`（INV-10）
+  - `frontend/src/components/DateTimeText.tsx`：后端的不带时区 UTC 串先补 `Z` 再用 `Intl.DateTimeFormat` 换成
+    Asia/Kuala_Lumpur，逐段拼成 `YYYY-MM-DD HH:mm:ss`；`<time>` 的 `dateTime` 是精确时刻，`title` 注明时区。不引入日期库
+  - `frontend/src/features/customers/`：`CustomerListPage`（分页，页码与每页条数在地址栏；加载中、失败带 message 与
+    request_id、空列表三态；公司名链接进详情）、`CustomerDetailPage`（客户详情全部字段 + 钱包币种、余额、版本；
+    404 `CUSTOMER_NOT_FOUND` 显示「Customer not found」；编辑只发改了的字段、无改动不发请求、清空联系人 / 电话发 `null`、
+    成功后用 PATCH 响应写回缓存）、`CustomerForm`（表单与校验、`CustomerCreatePage`、`toCreateBody` / `toPatch`、
+    `CustomerErrorAlert`）。403 `ADMIN_REQUIRED` 在四处都显示「只有管理员能管理客户」并附后端 message 与 request_id；前端不做角色判断
+  - 路由：`routes/paths.ts` 加 `customers`、`customerCreate`（`/customers/new`）、`customerDetail` 与 `customerDetailPath()`
+    （`generatePath` 填参数、不转义，id 只来自后端的 uuid）；`routes/index.tsx` 用 `lazy()` 引入三页，放在 `RequireAuth` + `AppLayout` 之内；
+    `AppLayout` 菜单加「Customers」，详情与建客户页也高亮这一项
+  - 文案全部进 `en.json`（`nav.customers`、`time.displayZone`、`customers.*`）
+  - 测试：`adminCustomers.test.ts`（URL、查询参数、请求体、PATCH 里的 `null`、id 转义、422 变成 `ApiError`）、
+    `MoneyText.test.tsx`（`"0.00000000"`、`"-5.00000000"`、`"1234567.12345678"` 及浮点存不准的值）、
+    `DateTimeText.test.tsx`（换算、跨日跨年、小数秒、不认识的形状）、`CustomerListPage.test.tsx`（三态、403、顺序与字段、
+    翻页、地址栏页码、越界回默认、末页之后的空页）、`CustomerForm.test.tsx`（校验、只含空白、超长、双击只发一次且提交中禁用、
+    成功跳转、422 与 403、`toCreateBody` / `toPatch`）、`CustomerDetailPage.test.tsx`（全部字段、404、其他错误、403、
+    只发改动字段、清空发 `null`、无改动不发请求、422 保留表单）。测试里的 uuid 都是全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 可改路径里没有单独的建客户页文件，所以 `CustomerCreatePage` 放在 `CustomerForm.tsx` 里、挂在 `/customers/new`；
+    `BillingStatusTag` 从列表页导出给详情页用，`CustomerErrorAlert` 从表单模块导出给两页用
+  - `DashboardPage` 除了改为引用 `RequestReference`，还删掉了因此不再使用的 `ApiError` 导入（`noUnusedLocals` 要求），其余没动
+  - 地址栏里的 `page` / `page_size` 不合法或超出后端范围（page 1–10000、page_size 1–100）时退回默认值，而不是把它发给后端
+    换一个 422；每页条数可选 10 / 20 / 50 / 100，默认 20
+  - 前端的长度校验按「去掉首尾空白后的码点数」算，与 Python 的 `len()` 一致；邮箱格式用 antd 的 `type: "email"`，
+    比后端的 `EmailStr` 宽或窄都有可能，以后端 422 为准。提交前邮箱也去掉首尾空白
+  - 建客户与编辑都用一个 ref 挡第二次提交，不只靠按钮禁用：`isPending` 要等下一次渲染，而 antd 的校验是异步的
+  - `"-0.00000000"` 显示成 `0.00`（数值相等，不让人误以为欠钱）；不是十进制字符串的金额、不是不带时区 ISO 串的时间原样显示
+  - 核对了 api.md 与 `app/api/admin_customers.py`、`app/schemas/customers.py`：路径、请求体、响应字段、分页上限与错误码
+    一致，没有需要停下来裁决的冲突
+- [x] **验证程度**：
+  - Worker 跑本任务的 `allowed_commands`：`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check`
+    与前端的 `frontend.test` / `frontend.typecheck` / `frontend.lint`；前端 `build`（`tsc --build && vite build`，含
+    tsconfig.app / tsconfig.node 两份类型检查）只在 CI 的 frontend job 跑。结果由 Worker 与 CI 记录，不写在本条
+  - 编写时没有对照安装好的 `node_modules` 核对的前提，CI 上如果红先查这些：① `antd` 顶层导出 `FormRule`、
+    `TableColumnsType`、`DescriptionsProps` 三个类型；② antd 分页的页码项带 `title="2"` 这样的属性（列表翻页用例用
+    `getByTitle` 找它）；③ 提交中的 antd 按钮在 jsdom 里带 `disabled` 属性；④ Node 的 ICU 带 Asia/Kuala_Lumpur 时区数据
+- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
+- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+- [ ] 部署后用验收夹具账号在生产上走一遍：列表里看到夹具客户、详情的余额与后端字符串一致、改一次联系人再改回（留两条
+  `CUSTOMER_UPDATE` 审计，`changed_fields` 只有 `contact_name`）
+
+### AIH-TASK-016 —— 管理端前端：客户的项目列表与建项目（2026-09-27）
+
+在 AIH-TASK-015 的客户详情页里加项目区块。只做前端，调用 [api.md](api.md)「管理端客户管理」里已上线的「建项目」
+「项目列表」两个接口；设计闸门不适用 —— 纯前端，接口已过闸门 #96，不改钱的行为、状态机与认证逻辑。不改任何后端文件。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/adminCustomers.ts`：`listProjects(customerId, page, page_size)`（`GET …/customers/{id}/projects`，
+    读走 `apiGet`）与 `createProject(customerId, body)`（`POST` 同一路径，走与建客户相同的 `send` + `unwrapEnvelope` /
+    `toApiError`）；`Project`、`CreateProjectBody` 类型照 api.md 的项目对象与请求体写；路径里的客户 id 经
+    `encodeURIComponent`；查询键 `customerProjectsQueryKey(id)`（这个客户所有项目列表页的前缀）与 `projectListQueryKey`
+  - `frontend/src/features/customers/ProjectsPanel.tsx`：项目表（项目名、描述（空为「—」）、创建时间用 `DateTimeText`），
+    分页（默认 20，可选 10 / 20 / 50 / 100），顺序沿用后端（最早在前）；加载中、失败（`CustomerErrorAlert`，内含
+    `RequestReference`，带后端 message 与 request_id 和重试）、空列表三态，页码越过末页另有一句「这一页没有项目」；
+    建项目表单（name 必填、去首尾空白后 1–255；description 可选、去首尾空白后 ≤ 1000，空白不发），提交中禁用按钮并用 ref
+    挡第二次提交，成功后让该客户的项目列表整体过期重读并提示「Project created.」；404 `CUSTOMER_NOT_FOUND` 与 422 显示后端
+    message 与 request_id，表单保留
+  - AIH-TASK-018 的挂载点：`ProjectsPanel` 的可选属性 `renderProjectDetails(project)`，传了它表格每行可展开、展开内容由调用方
+    渲染；不传就没有展开列。本任务的 `CustomerDetailPage` 不传它，没有任何凭据功能，也不发凭据接口的请求
+  - `CustomerDetailPage.tsx`：钱包卡片下面挂 `<ProjectsPanel key={id} customerId={id} />`，详情读到之后才挂
+  - 文案进 `en.json`（`customers.projects.*`）；列标题「Created」与表单「Cancel」复用已有 key
+  - 测试：`adminCustomers.test.ts`（项目列表的 URL 与查询参数、建项目的 URL 与请求体、客户 id 转义、404 变成
+    `ApiError`）、`ProjectsPanel.test.tsx`（三态、顺序与字段、翻页、末页之后的空页、必填、只含空白、超长、恰好上限且带首尾空白、
+    去空白与不发空描述并重读列表、双击只发一次且提交中禁用、404、422、挂载点有无）、`CustomerDetailPage.test.tsx`（既有用例
+    加 `listProjects` 的 mock；新增项目区块显示、客户 404 时不请求项目）。测试里的 uuid 都是全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 项目区块的页码与每页条数放在组件状态里，不进地址栏（地址栏归客户详情；刷新回到第一页）
+  - 建项目成功后不自动翻到新项目所在的末页，只重读当前页（顺序最早在前，新项目在末页）；成功提示告诉用户已建好
+  - `trimmedLength` / `maxTrimmed` 两个小函数在 `ProjectsPanel.tsx` 里照抄了一份：`CustomerForm.tsx` 不在本任务的可改路径里，
+    没法把它们导出
+  - `ProjectsPanel.test.tsx` 顶部补了一个空的 `ResizeObserver`（只在环境里没有时才装）：antd 的 `Input.TextArea` 不管有没有
+    `autoSize` 都要它，jsdom 没有，建项目表单的用例会全部 `ReferenceError`。本该放进公共的 `src/test/setup.ts`，但它不在
+    可改路径里；以后别的测试也用到 TextArea 时，应挪到 setup 里统一补
+  - 核对了 api.md 与 `app/schemas/customers.py`（`CreateProjectRequest`、`ProjectView`）、`app/api/admin_customers.py`、
+    `app/services/customers.py`：路径、请求体规则（name 去空白后 1–255、description 去空白后 ≤ 1000、空白存 `null`、多余字段 422）、
+    响应字段与顺序一致，没有需要停下来裁决的冲突
+- [x] **交付经过**：Worker run `b287409b` 以 `checks_failed` 结束，没有开 PR。`frontend.test` 先挂在 `ResizeObserver`
+  上（8 个建项目用例），两次自动修复用完：第一次去掉 `autoSize`（判断错了），第二次加上面那个替身，test 通过了，但替身那行
+  写成 `NoopResizeObserver as unknown as typeof ResizeObserver`，被 `frontend.lint` 的
+  `@typescript-eslint/no-unnecessary-type-assertion` 拦下，已没有修复次数。Kelvin 2026-09-27 定由 Claude 接手：把 run
+  留下的 8 个文件原样拷到本分支，只改掉这一处断言，其余是 Worker 的实现
+- [x] **验证程度**：
+  - 按本任务的 `allowed_commands` 在本地逐条跑，八项全部零退出：`docs.check` / `policy.check` / `tests.process` /
+    `lint.check` / `format.check`，以及三条前端检查（按 `.platform/commands.yaml` 的原样 argv、`node_modules` 以只读 junction
+    提供、清空环境）—— `frontend.test` 19 个文件 134 个用例全过
+  - CI 的写法在本地也跑过：`npm run lint` / `typecheck` / `test`（134 passed）/ `build` 全部零退出
+  - 当时列的 jsdom 前提（展开按钮 `aria-label="Expand row"`、分页 `title="2"`、提交中按钮带 `disabled`）由上面的测试通过证实
+- [x] 本地按 `allowed_commands` 八项全部零退出（Worker run 没跑通，见「交付经过」；skipped 不算 passed）
+- [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#141，合并为 `d7d330a`）
+- [x] 上面那条「以后应挪到 setup 里统一补」（2026-09-27，Kelvin 定在开启 AIH-TASK-017 之前做）：`src/test/setup.ts` 加空的
+  `ResizeObserver` 替身，只在环境里没有时才装，直接赋值、不写类型断言。先写复现 `src/test/setup.test.tsx`（不带局部替身渲染
+  `Input.TextArea`，带与不带 `autoSize` 各一条），修复前两条都是 `ReferenceError: ResizeObserver is not defined`，修复后通过。
+  `ProjectsPanel.test.tsx` 里 016 的局部替身没动：它也是「没有才装」，与全局替身共存无害，删它是另一件事
+- [x] 慢测试的逐字输入改成粘贴（2026-09-28，Kelvin 定在重新开启 AIH-TASK-017 之前做）：017 的 Worker run `c6e5144e` 只挂在
+  `frontend.test`，失败的是 `LoginPage` / `ResetPasswordPage` / `CustomerDetailPage` 里的 5s 超时 —— `user.type` 每按一个键
+  antd 表单就重渲染一次，全量并行或 MXC 里就跑不完，而这三个文件 017 都改不了（`CustomerDetailPage.test.tsx` 能改，但修复会话
+  看到的输出被截断，没看到它）。017 自己的实现在本地全过。四个文件（加上同类的 `ForgotPasswordPage`）的 11 处 `user.type`
+  改成 `user.click` + `user.paste`，提交的值不变、断言不动。本机按 `frontend.test` 原样 argv 全量对照：改前 6 次全挂（每次 1–3
+  条），改后 5 次全过。`CustomerForm` / `ProjectsPanel` 没出过超时，没动
+- [x] AIH-TASK-018 在 `renderProjectDetails` 挂载点上放集成凭据（#147：不传时 `ProjectsPanel` 默认挂 `IntegrationAccessPanel`）
+
+### AIH-TASK-017 —— 管理端前端：手工调账（2026-09-28）
+
+在 AIH-TASK-015 的客户详情页上加「手工调账」入口。只做前端，调用 [api.md](api.md)「管理端手工调账」里已上线的
+接口（AIH-TASK-011）；语义以 api.md 与 [design/AIH-TASK-010-admin-wallet-adjustment.md](design/AIH-TASK-010-admin-wallet-adjustment.md)
+为准。设计闸门不适用 —— 纯前端，调用的接口已过闸门 #111。不改任何后端文件与设计文件。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/walletAdjustments.ts`：`postAdjustment(customerId, body)`（`POST …/customers/{id}/wallet/adjustments`，
+    客户 id 经 `encodeURIComponent`），返回调账对象（金额字段是 `string`）；失败抛 `AdjustmentError` —— 它是 `ApiError` 的子类，
+    多带一个 HTTP 状态（没有响应时为 `null`）。`isOutcomeUnknown(error)`：只有 api.md 为本接口列出的明确拒绝
+    （400 / 401 / 403 / 404 / 409 / 422）算「结果已知」，网络错误、超时、5xx、非信封响应及其他任何状态都算「结果未知」。
+    金额的字符串校验 `amountProblem`（`[0-9]{1,12}` 可选 `.[0-9]{1,8}`、不能为 0，先去首尾空白）与 `signedAmount`
+    （贷方原样、借方前面加 `-`），不 `parseFloat`、不 `Number()`、不舍入
+  - `frontend/src/features/wallet/AdjustmentModal.tsx`：填表 → 确认 → 发送。类型用单选只列 `ADJUSTMENT_CREDIT`、`BONUS`、
+    `ADJUSTMENT_DEBIT`、`REFUND_ADJUSTMENT`，标明加还是减；金额不带符号；原因必填、去首尾空白后 1–255（按码点数），表单上提示
+    「只写业务说明，不写个人数据，永久保留」。确认步骤显示客户（公司名与 id）、类型、带符号的金额（`MoneyText`）与原因，
+    确认后才发请求；双击只发一次
+  - 幂等键：组件挂载时 `crypto.randomUUID()` 生成一个小写 uuid，同一次打开里的重试带同一个键、同一份内容。结果未知后类型、金额与
+    原因锁为只读，只剩「Retry with the same key」与关闭，锁一直保持到关闭；关闭后再打开才是新键。规则写在组件文件头注释里
+  - 结果：201 显示「Adjustment posted.」、金额、`balance_after` 与计费状态；200 且 `replayed` 为 true 时显示「此前已记过，本次未重复
+    入账」并注明金额与余额是第一次记账时的值；409 `ADJUSTMENT_CONFLICT` 显示冲突说明与后端 message、request_id，只能关闭；
+    422（含 `BALANCE_OUT_OF_RANGE`）、404 `CUSTOMER_NOT_FOUND` 等明确拒绝显示后端 message 与 request_id，可以回去改（仍用这个键，
+    它没被用过）。成功（含重放）后让客户详情（`exact`，不连带项目列表）与客户列表过期重读
+  - `CustomerDetailPage.tsx`：钱包卡片加「Adjust balance」按钮，表单只在打开时挂载、关闭即卸载
+  - 文案进 `en.json`（`wallet.adjustment.*`）；计费状态的字段名复用 `customers.field.billingStatus`
+  - 测试：`walletAdjustments.test.ts`（URL 与请求体、id 转义、409 带状态变成 `ApiError`、没有响应时状态为 `null`、各状态的
+    结果已知 / 未知、金额的合法与非法写法、加符号）、`AdjustmentModal.test.tsx`（四种类型的请求体 amount 带符号且是字符串、
+    不丢位、确认前不发请求且确认页内容齐全、原因去空白、非法金额 0 / 13 位整数 / 9 位小数 / 指数 / `+` 被拦下且不发请求、
+    原因与类型必填、双击只发一次、网络错误 / 500 / 503 后字段只读、重试同键同内容且不再生成键、结果未知时显示 request_id、
+    201 与重放的展示及刷新、409、422 / 404 可回去改、发送中不能关闭）、`CustomerDetailPage.test.tsx`（成功后重读详情、
+    关闭再打开换新键）。测试里的 uuid 与幂等键都是全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 「结果未知」按 HTTP 状态判定，所以 `postAdjustment` 抛的是带状态的 `AdjustmentError`（`ApiError` 子类）而不是裸 `ApiError`：
+    `client.ts` 的 `ApiError` 不带状态，而它不在本任务的可改路径里。408 / 429 / 502 / 504 等没列在 api.md 里的状态也算未知
+  - 锁一旦上了就保持到关闭，哪怕之后某次重试得到明确的 4xx 也不解锁 —— 宁可让管理员关掉重开
+  - 管理员输入的金额先去首尾空白再校验（粘贴常带空白）；前导 0（如 `020`）后端也收，原样发出，不做规范化
+  - 发送中不能关闭表单（关闭按钮、Esc 都无效），点遮罩在任何时候都不关闭：否则结果未知时「用同一个键重试」这条路会被误点丢掉
+  - `trimmedLength` / `maxTrimmed` 在 `AdjustmentModal.tsx` 里又照抄了一份（同 AIH-TASK-016 的理由：`CustomerForm.tsx` 不在可改路径里）
+  - 核对了 api.md、设计文件与 `app/schemas/wallet_adjustments.py`（金额正则 `-?[0-9]{1,12}(\.[0-9]{1,8})?`、非零、符号与类型
+    一致、原因去空白后 1–255、幂等键小写 uuid、响应字段白名单）：一致，没有需要停下来裁决的冲突
+- [x] **验证程度**：编写时手边没有安装好的 `node_modules`，CI 上如果红先查这些：① antd 的 `Modal` 仍接受 `maskClosable` /
+  `keyboard` / `closable`；② antd `Radio` 在 jsdom 里的可访问名是它的文字、`Form` 的 `disabled` 让单选框带 `disabled`；
+  ③ 发送中的 antd 按钮名字前面多出 loading 图标的名字（用例等它恢复可点再点）；④ jsdom 里的 `crypto.randomUUID` 可以被 `vi.spyOn`
+- [x] **Worker 第一轮 `frontend.test` 挂的两条**：① 文件里第一个用例 5s 超时 —— 填表流程里的 `getByRole` 每次都算整棵 antd 弹窗的
+  可访问性树，冷启动还要生成全部样式。填表助手改用 `getByLabelText` 找单选、按文字找按钮，`AdjustmentModal` 的 describe 超时放到
+  15s，断言不动；② 确认页上「原因」同时出现在只读的 textarea 与摘要里，断言改为忽略 textarea
+- [x] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）：run `d7f6b9db` 第一轮只有
+  `frontend.test` 没过（上面那两条），其余七项通过；修一次后八项通过才开出 #145，Worker 的受限审查 `APPROVE`。
+  上一次 run `c6e5144e` 挂在既有的慢测试上，由 #143（ResizeObserver 公共替身）、#144（逐字输入改粘贴）先修掉再重开
+- [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#145，合并为 `9bf4e94`，部署成功）
+- [ ] 部署后用验收夹具账号在生产上走一遍：给夹具客户记一笔小额贷方再记一笔等额借方（两个键、两行账本、两条
+  `WALLET_ADJUSTMENT_POSTED`），余额回到原值
+
+### AIH-TASK-018 —— 管理端前端：项目集成 API 凭据的建、列、轮换与吊销（2026-09-28）
+
+在 AIH-TASK-016 的项目区块里管理项目的集成 API 凭据。只做前端，调用 [api.md](api.md)「管理端集成 API 凭据」里已上线的
+五个接口（AIH-TASK-012）；语义以 api.md 与 [design/AIH-TASK-012-integration-access.md](design/AIH-TASK-012-integration-access.md)
+为准。设计闸门不适用 —— 纯前端，调用的接口已过闸门 #118。不改任何后端文件与设计文件。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/integrationAccess.ts`：`listCredentials`（`GET …/projects/{project_id}/credentials?page&page_size`）、
+    `createCredential`（请求体 `{}`）、`rotateCredential`（`{"current_key_version": <JSON 整数>}`）、
+    `revokeCredentialVersion`（`…/{api_key}/versions/{key_version}/revoke`，`{"reason"}`）、`revokeCredential`
+    （`…/{api_key}/revoke`，`{"reason"}`，返回该 key 的全部版本）；路径里的客户 id、项目 id、`api_key` 都经 `encodeURIComponent`。
+    写接口失败抛 `CredentialError`（`ApiError` 子类，多带 HTTP 状态，同 AIH-TASK-017 的 `AdjustmentError`）；
+    `isOutcomeUnknown`：400 / 401 / 403 / 404 / 409 / 422 与 503 `ENCRYPTION_NOT_CONFIGURED` / `DATABASE_NOT_CONFIGURED`
+    算「结果已知」，网络错误、超时、其余 5xx 与其他状态算「结果未知」。查询键 `projectCredentialsQueryKey` 挂在该客户项目键下
+  - `frontend/src/features/customers/IntegrationAccessPanel.tsx`：列表分页（默认 20，可选 10 / 20 / 50 / 100），顺序沿用后端，
+    同一页里相邻的同一个 `api_key` 归成一组，每组一张表列出 `key_version`、`status`、`verifiable`、`valid_from`、`valid_until`
+    （空为「No end date」）、`revoked_at`（空为「—」），时间用 `DateTimeText`；加载中、失败（带 request_id 与重试）、空列表三态
+  - secret 只显示一次：建凭据与轮换的 201 结果只从 mutation 返回值读，只画在结果对话框里（复制按钮 + 「关闭后无法再次查看」警告，
+    点遮罩与 Esc 不关，只能点「I have saved the secret, close」）。成功后不 `setQueryData`，只让该项目的凭据列表过期重读；
+    两个 mutation 的 `gcTime` 为 0，关闭时 `reset()`，mutation 缓存里的那份随即丢掉；不写 localStorage / sessionStorage、
+    不进 console、不进 URL；对话框关闭即卸载
+  - 轮换：先弹确认框，`current_key_version` 取该 `api_key` 在当前列表里的最大版本。409 `CREDENTIAL_VERSION_CONFLICT` 提示
+    「已被他人轮换」并让列表过期重读；409 `CREDENTIAL_REVOKED`、503 `ENCRYPTION_NOT_CONFIGURED` 等明确拒绝显示后端 message
+    与 request_id；结果未知时提示按 api.md 的恢复方式处理（新版本若已入库 secret 无法找回，需再轮换或吊销该版本），重读列表，
+    不自动重试。建凭据结果未知同理（提示吊销那个拿不到 secret 的 key 再建一个）。建凭据不幂等：提交中禁用并用 ref 挡双击
+  - 吊销一个版本 / 整个 key：点按钮后弹确认框（第二次确认），写明吊销是终态；reason 必填、去首尾空白后 1–255（按码点数），
+    提示只写业务说明、不写个人数据；发的是去空白后的值。失败时确认框保留并显示后端 message 与 request_id；成功后关闭、提示并
+    重读列表。已吊销的版本按钮禁用
+  - `ProjectsPanel.tsx`：`renderProjectDetails` 不传时默认在展开区挂 `IntegrationAccessPanel`（展开之后才挂、才请求）
+  - 文案进 `en.json`（`integrations.*`）
+  - 测试：`integrationAccess.test.ts`（五个函数的 URL 与请求体、`{}`、`current_key_version` 是整数、
+    409 带状态变成 `ApiError`、没有响应时状态为 `null`、结果已知 / 未知）、`IntegrationAccessPanel.test.tsx`（三态、分组与字段、
+    secret 只在结果对话框出现且关闭后从 DOM 消失、查询缓存始终没有它、关闭后 mutation 缓存也没有、存储 / 控制台 / 地址栏没有它、
+    复制、双击只建一个、轮换带该 key 的最大版本（列表倒序给出）、取消轮换、409 冲突后重读列表、`CREDENTIAL_REVOKED` / `ENCRYPTION_NOT_CONFIGURED`
+    显示 message 与 request_id、网络错误 / 500 的恢复提示且不重试、建凭据结果未知、两种吊销的二次确认与 reason 校验
+    （空、只含空白、超长、恰好 255 且带首尾空白）、吊销失败、取消吊销）、`ProjectsPanel.test.tsx`（默认挂载凭据面板、传入时用
+    调用方的内容）。`api_key` / `secret` / uuid 一律用 api.md 的全零占位值，没有例外
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 挂载点的默认值放在 `ProjectsPanel.tsx` 里，而不是由 `CustomerDetailPage` 传入：后者不在本任务的可改路径里。
+    016 的「没传就没有展开列」那条用例相应改成「默认挂凭据面板」
+  - 列表分页而版本按 key 分组：一个 key 的版本若跨页，只在各自那一页里成组；轮换取的是**当前页里**该 key 的最大版本，
+    若更大的版本在下一页，后端回 409 冲突，前端提示并重读，管理员翻页后再轮换
+  - 轮换多了一个确认框（任务没要求）：轮换会给旧版本设截止时间，不该一键触发
+  - 「结果未知」同调账按 HTTP 状态判定；503 只有 `ENCRYPTION_NOT_CONFIGURED` / `DATABASE_NOT_CONFIGURED` 两种算明确拒绝
+  - `trimmedLength` / `maxTrimmed` 又照抄了一份（同 016、017 的理由：`CustomerForm.tsx` 不在可改路径里）
+  - 核对了 api.md、设计文件与 `app/schemas/integration_access.py`（建凭据 `extra="forbid"` 的空体、`current_key_version`
+    严格整数 ≥ 1、reason 去空白后 1–255、响应字段白名单）、`app/api/admin_customers.py` 的五条路由：一致，没有需要停下来裁决的冲突
+  - 测试夹具一律全零，因此少测了两样（审查第 2 轮要求去掉非全零夹具）：
+    - 路径转义（`encodeURIComponent` 把 `/`、`..` 转义掉）没有用例 —— 全零 uuid / key 里没有这些字符；实现照旧转义
+    - 「两个不同的 key 各自成组、互不串版本」没有用例 —— 全零 key 只有一个；分组用例只验证同一个 key 的版本归成一组、
+      保持后端顺序。若要补这两类用例，需任务负责人先放宽「一律全零」
+- [x] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）：run `ab4f44f0` 八项一次通过开出 #147；
+  Worker 的受限审查又要了两轮修复（repair 1 在记录里说明两处非全零夹具，repair 2 按审查要求删掉它们），每轮提交 CI 全绿
+- [x] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署（#147，合并为 `9ac0646`，部署成功）
 
 ---
 
