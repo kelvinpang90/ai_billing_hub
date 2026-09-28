@@ -1432,13 +1432,15 @@ tasks:
       - AIH-TASK-015
     acceptance_criteria:
       - 只用 Node 自带模块（全局 WebSocket 与 node:crypto，以及读标准输入所需的 node:process 等内置模块），不引入任何依赖；不装依赖，不改 package.json / package-lock.json
-      - '从标准输入读一行 JSON：steps、writes、attempt、cdp（浏览器调试地址）、credentials（email、password、totp_secret）；字段缺失或类型不对时以 ACCEPTANCE_VERDICT: FAIL <第一个步骤> login_failed 结束，不打印收到的内容'
+      - '从标准输入读一行 JSON：steps、writes、attempt、cdp（浏览器级调试地址）、hosts（项目声明的主机，顺序同 .platform/project.yaml 的 acceptance_hosts）、credentials（email、password、totp_secret）；字段缺失或类型不对时以 ACCEPTANCE_VERDICT: FAIL <第一个步骤> login_failed 结束，不打印收到的内容'
+      - 入口与起始目标（控制面 ACVDEV-TASK-050）：从 stdin 那一行 JSON 的 hosts[0] 取入口，从 https://<hosts[0]> 开始；起始时浏览器里恰好一个 type 为 page、URL 为 about:blank 的目标，脚本在 cdp（浏览器级地址）上用 Target.getTargets 找到它，再用 Target.attachToTarget 接管，找不到恰好一个这样的目标就以 FAIL <第一个步骤> navigation_failed 结束；不新建目标或浏览器上下文；文件里不写死任何主机名，主机只写在 .platform/project.yaml 的 acceptance_hosts
       - 只经 cdp 地址操作那个浏览器（连它已有的页面目标）；不自己联网（不用 fetch / http / https / net / dns，页面里也不执行发请求的脚本）、不开新浏览器或浏览器上下文（不用 Target.createBrowserContext / Target.createTarget）、不改代理、不拦截或伪造请求（不用 Fetch.*、Network.setRequestInterception、Network.emulateNetworkConditions）、不读写 Cookie 与存储（不用 Network.getCookies / Storage.* / DOMStorage.* 等）、不截图（不用 Page.captureScreenshot）、不写任何文件
       - 不打印、不保存凭据、TOTP 码或页面内容；标准输出只有 ACCEPTANCE_STEP / ACCEPTANCE_VERDICT 两类行，出错时也不把异常信息、URL 查询串或响应体打出来；凭据只填进登录表单；TOTP 按 RFC 6238（node:crypto 的 HMAC-SHA1、30 秒步长、6 位）现算，base32 解码自己写
       - 只读：不点任何会写数据的按钮（新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等）；只看公司名以 [TEST] Acceptance Fixture 开头的夹具客户，不打开其他客户的详情。登录本身会在服务端留下会话与登录审计，这是只读验收不可避免的，不算写数据；writes 为 true 时同样只做只读步骤
       - '每完成一个声明步骤打印 ACCEPTANCE_STEP: <step> ok，按声明顺序；最后一行打印 ACCEPTANCE_VERDICT: PASS，或 ACCEPTANCE_VERDICT: FAIL <step> <code>，码取 login_failed、navigation_failed、page_error、element_missing、assertion_failed；只有主文档完全没有得到 HTTP 响应时才报 host_unreachable，得到 502 / 503 / 504 时才报 service_unavailable。只执行 stdin 里 steps 列出的步骤；遇到不认识的步骤名报 FAIL <该步骤> assertion_failed'
       - 步骤含义：login 登录成功进入管理端（包括 TOTP 第二步；以离开登录页、出现管理端布局为准）；open_customers 客户列表页里看到夹具客户（按公司名找到那一行，列表分页时逐页找，不改每页条数以外的任何设置）；open_fixture 从列表点进夹具客户详情，详情页的公司名就是它
       - check_balance：后端值取详情页自己发出的 GET /api/v1/admin/customers/{customer_id} 的响应体里的 wallet.balance 与 wallet.currency —— 经 CDP 的 Network.enable 被动观察、Network.getResponseBody 读取，不自己发请求、不拦截；页面上钱包余额一项的文字必须与 formatMoney(balance, currency) 逐字相同，格式规则照 frontend/src/components/MoneyText.tsx（整数部分千分位，小数去末尾 0、至少 2 位，不舍入；全零不带负号；夹具的 "0.00000000" 显示为 "MYR 0.00"）。规则在脚本里重写一份并在注释里指向 MoneyText.tsx，不 import 前端代码
+      - 'Worker 在每个步骤报到后自己截图，而详情页的钱包余额在首屏以下：打印 ACCEPTANCE_STEP: check_balance ok 之前，先把钱包余额那一项滚动到视口内（DOM.scrollIntoViewIfNeeded，或在页面里对该元素调 scrollIntoView），让这一步的截图看得到余额；滚动不点任何东西、不算写数据'
       - 每个步骤都必须真的检查到它声称的东西（元素存在、文字匹配、响应已观察到），不能不操作就报到；等待元素一律有上限，超时按对应的失败码结束，不无限等；总时长在 timeout_seconds（300 秒）之内
       - 找元素按页面上的可见文字（文案取 frontend/src/i18n/locales/en.json）或语义结构，不依赖 antd 生成的类名哈希；选择器与文案在脚本顶部集中写成常量并注明出处
       - 文件头注释写明：它由 Worker 在部署成功后运行、不走 MXC、拿凭据（控制面安全边界 A7），以及上面这几条约束，方便评审逐条核对
