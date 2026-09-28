@@ -1630,6 +1630,56 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [ ] 部署后用验收夹具账号在生产上走一遍：给夹具客户记一笔小额贷方再记一笔等额借方（两个键、两行账本、两条
   `WALLET_ADJUSTMENT_POSTED`），余额回到原值
 
+### AIH-TASK-018 —— 管理端前端：项目集成 API 凭据的建、列、轮换与吊销（2026-09-28）
+
+在 AIH-TASK-016 的项目区块里管理项目的集成 API 凭据。只做前端，调用 [api.md](api.md)「管理端集成 API 凭据」里已上线的
+五个接口（AIH-TASK-012）；语义以 api.md 与 [design/AIH-TASK-012-integration-access.md](design/AIH-TASK-012-integration-access.md)
+为准。设计闸门不适用 —— 纯前端，调用的接口已过闸门 #118。不改任何后端文件与设计文件。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/integrationAccess.ts`：`listCredentials`（`GET …/projects/{project_id}/credentials?page&page_size`）、
+    `createCredential`（请求体 `{}`）、`rotateCredential`（`{"current_key_version": <JSON 整数>}`）、
+    `revokeCredentialVersion`（`…/{api_key}/versions/{key_version}/revoke`，`{"reason"}`）、`revokeCredential`
+    （`…/{api_key}/revoke`，`{"reason"}`，返回该 key 的全部版本）；路径里的客户 id、项目 id、`api_key` 都经 `encodeURIComponent`。
+    写接口失败抛 `CredentialError`（`ApiError` 子类，多带 HTTP 状态，同 AIH-TASK-017 的 `AdjustmentError`）；
+    `isOutcomeUnknown`：400 / 401 / 403 / 404 / 409 / 422 与 503 `ENCRYPTION_NOT_CONFIGURED` / `DATABASE_NOT_CONFIGURED`
+    算「结果已知」，网络错误、超时、其余 5xx 与其他状态算「结果未知」。查询键 `projectCredentialsQueryKey` 挂在该客户项目键下
+  - `frontend/src/features/customers/IntegrationAccessPanel.tsx`：列表分页（默认 20，可选 10 / 20 / 50 / 100），顺序沿用后端，
+    同一页里相邻的同一个 `api_key` 归成一组，每组一张表列出 `key_version`、`status`、`verifiable`、`valid_from`、`valid_until`
+    （空为「No end date」）、`revoked_at`（空为「—」），时间用 `DateTimeText`；加载中、失败（带 request_id 与重试）、空列表三态
+  - secret 只显示一次：建凭据与轮换的 201 结果只从 mutation 返回值读，只画在结果对话框里（复制按钮 + 「关闭后无法再次查看」警告，
+    点遮罩与 Esc 不关，只能点「I have saved the secret, close」）。成功后不 `setQueryData`，只让该项目的凭据列表过期重读；
+    两个 mutation 的 `gcTime` 为 0，关闭时 `reset()`，mutation 缓存里的那份随即丢掉；不写 localStorage / sessionStorage、
+    不进 console、不进 URL；对话框关闭即卸载
+  - 轮换：先弹确认框，`current_key_version` 取该 `api_key` 在当前列表里的最大版本。409 `CREDENTIAL_VERSION_CONFLICT` 提示
+    「已被他人轮换」并让列表过期重读；409 `CREDENTIAL_REVOKED`、503 `ENCRYPTION_NOT_CONFIGURED` 等明确拒绝显示后端 message
+    与 request_id；结果未知时提示按 api.md 的恢复方式处理（新版本若已入库 secret 无法找回，需再轮换或吊销该版本），重读列表，
+    不自动重试。建凭据结果未知同理（提示吊销那个拿不到 secret 的 key 再建一个）。建凭据不幂等：提交中禁用并用 ref 挡双击
+  - 吊销一个版本 / 整个 key：点按钮后弹确认框（第二次确认），写明吊销是终态；reason 必填、去首尾空白后 1–255（按码点数），
+    提示只写业务说明、不写个人数据；发的是去空白后的值。失败时确认框保留并显示后端 message 与 request_id；成功后关闭、提示并
+    重读列表。已吊销的版本按钮禁用
+  - `ProjectsPanel.tsx`：`renderProjectDetails` 不传时默认在展开区挂 `IntegrationAccessPanel`（展开之后才挂、才请求）
+  - 文案进 `en.json`（`integrations.*`）
+  - 测试：`integrationAccess.test.ts`（五个函数的 URL 与请求体、`{}`、`current_key_version` 是整数、id 与 `api_key` 转义、
+    409 带状态变成 `ApiError`、没有响应时状态为 `null`、结果已知 / 未知）、`IntegrationAccessPanel.test.tsx`（三态、分组与字段、
+    secret 只在结果对话框出现且关闭后从 DOM 消失、查询缓存始终没有它、关闭后 mutation 缓存也没有、存储 / 控制台 / 地址栏没有它、
+    复制、双击只建一个、轮换带该 key 的最大版本、取消轮换、409 冲突后重读列表、`CREDENTIAL_REVOKED` / `ENCRYPTION_NOT_CONFIGURED`
+    显示 message 与 request_id、网络错误 / 500 的恢复提示且不重试、建凭据结果未知、两种吊销的二次确认与 reason 校验
+    （空、只含空白、超长、恰好 255 且带首尾空白）、吊销失败、取消吊销）、`ProjectsPanel.test.tsx`（默认挂载凭据面板、传入时用
+    调用方的内容）。`api_key` / `secret` / uuid 一律是 api.md 的全零占位值
+- [x] **偏离与由实现定的细节**（审查时请看这几条）：
+  - 挂载点的默认值放在 `ProjectsPanel.tsx` 里，而不是由 `CustomerDetailPage` 传入：后者不在本任务的可改路径里。
+    016 的「没传就没有展开列」那条用例相应改成「默认挂凭据面板」
+  - 列表分页而版本按 key 分组：一个 key 的版本若跨页，只在各自那一页里成组；轮换取的是**当前页里**该 key 的最大版本，
+    若更大的版本在下一页，后端回 409 冲突，前端提示并重读，管理员翻页后再轮换
+  - 轮换多了一个确认框（任务没要求）：轮换会给旧版本设截止时间，不该一键触发
+  - 「结果未知」同调账按 HTTP 状态判定；503 只有 `ENCRYPTION_NOT_CONFIGURED` / `DATABASE_NOT_CONFIGURED` 两种算明确拒绝
+  - `trimmedLength` / `maxTrimmed` 又照抄了一份（同 016、017 的理由：`CustomerForm.tsx` 不在可改路径里）
+  - 核对了 api.md、设计文件与 `app/schemas/integration_access.py`（建凭据 `extra="forbid"` 的空体、`current_key_version`
+    严格整数 ≥ 1、reason 去空白后 1–255、响应字段白名单）、`app/api/admin_customers.py` 的五条路由：一致，没有需要停下来裁决的冲突
+- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
+- [ ] CI 的 frontend job（lint / typecheck / test / build）全绿、审查、合并与部署
+
 ---
 
 ## Phase 2 — AI Usage Billing Engine（§125）

@@ -8,8 +8,9 @@
  * 建项目**不幂等**：提交进行中禁用按钮，并用一个 ref 挡住第二次提交。成功后让这个客户的
  * 所有项目列表页过期、重新读，不在前端拼一行进去。
  *
- * `renderProjectDetails` 是给 AIH-TASK-018（集成凭据）留的挂载点：传了它，每一行就能展开，
- * 展开的内容由调用方决定。本组件自己不碰凭据，也不发凭据接口的请求。
+ * `renderProjectDetails` 是每一行展开区的挂载点。不传时默认挂 AIH-TASK-018 的
+ * `IntegrationAccessPanel`（集成凭据）；本组件自己不碰凭据，凭据接口只在某一行展开之后
+ * 由那个面板去请求。
  */
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -42,6 +43,7 @@ import {
 } from "../../api/adminCustomers";
 import { DateTimeText } from "../../components/DateTimeText";
 import { CustomerErrorAlert } from "./CustomerForm";
+import { IntegrationAccessPanel } from "./IntegrationAccessPanel";
 
 /** 与后端 `app/schemas/customers.py` 的上限一致。 */
 const NAME_MAX = 255;
@@ -84,7 +86,7 @@ export function ProjectsPanel({
   renderProjectDetails,
 }: {
   customerId: string;
-  /** AIH-TASK-018 的挂载点：每个项目展开后显示什么。不传就没有展开。 */
+  /** 每个项目展开后显示什么。不传就是这个项目的集成凭据（AIH-TASK-018）。 */
   renderProjectDetails?: ((project: Project) => ReactNode) | undefined;
 }) {
   const { t } = useTranslation();
@@ -204,11 +206,16 @@ export function ProjectsPanel({
     />
   ) : null;
 
-  // `exactOptionalPropertyTypes` 下不能传 `expandable={undefined}`：没有挂载内容就不带这个属性。
-  const expandable =
-    renderProjectDetails === undefined
-      ? {}
-      : { expandable: { expandedRowRender: (project: Project) => renderProjectDetails(project) } };
+  // 展开区只在展开之后才渲染，所以凭据接口只为展开的那几个项目发请求。
+  // `CustomerDetailPage` 不在 AIH-TASK-018 的可改路径里，默认值只能放在这里。
+  const expandable = {
+    expandedRowRender: (project: Project) =>
+      renderProjectDetails === undefined ? (
+        <IntegrationAccessPanel customerId={customerId} project={project} />
+      ) : (
+        renderProjectDetails(project)
+      ),
+  };
 
   let body: ReactNode;
   if (projects.isPending) {
@@ -246,7 +253,7 @@ export function ProjectsPanel({
           showTotal: (count) => t("customers.projects.total", { total: count }),
           onChange: goTo,
         }}
-        {...expandable}
+        expandable={expandable}
       />
     );
   }

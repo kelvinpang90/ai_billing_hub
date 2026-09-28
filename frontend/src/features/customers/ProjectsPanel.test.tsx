@@ -39,6 +39,12 @@ vi.mock("../../api/adminCustomers", async () => {
   return { ...actual, ...api };
 });
 
+// 凭据面板自己的用例在 IntegrationAccessPanel.test.tsx；这里只看它挂没挂上、拿到的是哪个项目。
+vi.mock("./IntegrationAccessPanel", () => ({
+  IntegrationAccessPanel: ({ customerId, project }: { customerId: string; project: Project }) =>
+    `credentials:${customerId}:${project.id}`,
+}));
+
 function project(overrides: Partial<Project> = {}): Project {
   return {
     id: PROJECT_ID,
@@ -323,16 +329,23 @@ describe("ProjectsPanel", () => {
     expect(screen.queryByText("Project created.")).not.toBeInTheDocument();
   });
 
-  it("has no expandable rows unless something is mounted into them", async () => {
+  it("mounts the project's integration credentials into each row by default", async () => {
+    const user = userEvent.setup();
     api.listProjects.mockResolvedValue(page([project()], 1));
 
     renderPanel();
 
     await screen.findByText("Chatbot");
-    expect(screen.queryByRole("button", { name: "Expand row" })).not.toBeInTheDocument();
+    // 没展开之前不挂：凭据接口只为展开的项目请求。
+    expect(screen.queryByText(`credentials:${CUSTOMER_ID}:${PROJECT_ID}`)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Expand row" }));
+
+    expect(
+      await screen.findByText(`credentials:${CUSTOMER_ID}:${PROJECT_ID}`),
+    ).toBeInTheDocument();
   });
 
-  it("gives each project a mount point that shows what the caller renders into it", async () => {
+  it("shows what the caller renders into the mount point instead, when given", async () => {
     const user = userEvent.setup();
     api.listProjects.mockResolvedValue(page([project()], 1));
 
