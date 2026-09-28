@@ -434,8 +434,9 @@ def create_baseline_user(session_factory, email: str) -> None:
     """建这一轮专用的账号。
 
     ⚠️ **地址已经存在就直接失败，绝不复用**（复审第一轮的阻断项）。下面的
-    `cleanup` 会把这个账号连同它的审计记录一起删掉 —— 复用一个别人的账号，
-    等于顺手销毁了它的审计轨迹（§66）。地址每轮唯一，撞上只可能是真撞了。
+    `cleanup` 会把这个账号连同它的重置令牌与 outbox 行一起删掉 —— 复用一个别人的
+    账号，等于顺手删掉别人的账号。（审计行自 AIH-TASK-021 起不再删除，见 `cleanup`。）
+    地址每轮唯一，撞上只可能是真撞了。
     """
     with session_factory() as session:
         existing = session.execute(select(User.id).where(User.email == email)).scalar_one_or_none()
@@ -463,17 +464,18 @@ def cleanup(session_factory, email: str) -> None:
     反过来删会在外键上报错，而那时候前面的删除已经提交了一半。
 
     ⚠️ 删的范围只到**这一轮自己建的那个账号**。地址每轮唯一（见
-    `create_baseline_user`），所以 `aggregate_id` / `actor_user_id` 命中的行
-    必然是这一轮写的。
+    `create_baseline_user`），所以 `aggregate_id` 命中的行必然是这一轮写的。
+
+    ⚠️ **审计行不删，留在库里**：迁移 0010 给 `audit_logs` 加了 BEFORE DELETE
+    触发器（AIH-TASK-021），DELETE 会报 45000，而审计本来就该比它记录的对象
+    活得更久。`actor_user_id` 刻意没有外键（见迁移 0002），所以删掉压测账号之后，
+    这一轮的审计行照样保留，也不挡删用户。
     """
     with session_factory() as session:
         user_id = session.execute(select(User.id).where(User.email == email)).scalar_one_or_none()
         if user_id is not None:
             session.execute(delete(PasswordResetToken).where(PasswordResetToken.user_id == user_id))
             session.execute(delete(DomainOutbox).where(DomainOutbox.aggregate_id == str(user_id)))
-            session.execute(
-                text("DELETE FROM audit_logs WHERE actor_user_id = :uid"), {"uid": user_id}
-            )
             session.execute(delete(User).where(User.id == user_id))
         session.commit()
 

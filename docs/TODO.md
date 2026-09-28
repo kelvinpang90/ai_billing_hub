@@ -1155,7 +1155,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 | 审计不能经应用 API 修改（§66） | 已有 | 只有插入路径（`record_audit`），没有更新或删除接口 |
 | **管理端查询接口 `GET /api/v1/admin/audit-logs`（§89）** | **缺** | 没有任何读取路由；要定筛选条件（动作、实体、操作者、时间段）、分页，并补 `(entity_type, entity_id)` 与按时间的索引（现在只有 `(actor_user_id, created_at)`） |
 | **前端审计页 `features/audit/`（§101）** | **缺** | 依赖上一行 |
-| **数据库层只追加** | **缺**（spec 未强制） | 账本有 BEFORE UPDATE / DELETE 触发器，`audit_logs` 没有；`scripts/perf_baseline.py` 收尾时还会 `DELETE FROM audit_logs`（只删它自己那轮的行） |
+| 数据库层只追加 | 已有（spec 未强制；随 AIH-TASK-021 合并生效） | 迁移 0010 给 `audit_logs` 加了 BEFORE UPDATE / BEFORE DELETE 触发器，一律 45000；`scripts/perf_baseline.py` 收尾不再删审计行。`TRUNCATE` / `DROP` 不经触发器，仍归「迁移账号与运行账号拆分」，见 AIH-TASK-021 记录段 |
 | 审计时间戳取整不一致 | 缺 | 见 AIH-TASK-006 记录段；排序以自增 id 为准，不影响正确性 |
 | 保留期、不许自动清除（§112、REQ-PRIV-001） | 上线闸门 | 现在从不删除，满足「不自动清除」；保留期随 PDPA 与留存政策 |
 | `request_id` 进审计 | spec 未要求 | 只在 §94 的结构化日志里要求 |
@@ -1881,6 +1881,45 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
 - [ ] **后续**：管理端前端的账户状态（已在「后续计划」的「管理端前端：账户状态、低余额阈值与钱包流水」）；关户（已在
   「后续计划」，前置条件见上）；Phase 3 的投递设计闸门把 `tenant.billing_status_changed` 与 `tenant.account_status_changed`
   合成有效状态、扇出到各项目
+
+### AIH-TASK-021 —— `audit_logs` 在数据库层只追加（2026-09-28）
+
+上面「审计日志差异清单」第 2 条（Kelvin 2026-09-28 同意）。照账本的做法给 `audit_logs` 加 BEFORE UPDATE / BEFORE DELETE
+触发器，审计记录在数据库层只能插入。表结构与残余风险记在 [database-schema.md](database-schema.md) 的 `audit_logs`。
+设计闸门不适用：只给审计表加只追加的数据库保护，不改钱的行为、状态机与认证逻辑；不改 `app/` 下任何文件（应用本来就只有
+插入路径 `record_audit`）。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `alembic/versions/20260928_0010_audit_logs_append_only.py`：revision `0010_audit_logs_append_only`，`down_revision` 是
+    `0009_tenant_account_status`。第 0 步与 0006 相同的建触发器权限预检（`log_bin_trust_function_creators`），排在任何 DDL
+    之前；然后建 `trg_audit_logs_before_update` / `trg_audit_logs_before_delete`，写法照 0006 的
+    `trg_wallet_transactions_before_update` / `before_delete`（`SIGNAL SQLSTATE '45000'`，消息 `audit_logs is append-only`）。
+    `downgrade` 删两个触发器，表与数据不动。文件头附 §132 第 13 条分析（已有审计行不受影响、不改表结构不重建表、失败处理、
+    残余风险）
+  - 测试清场：在真 MySQL 上跑、原先 `delete(AuditLog)` 清场的六个文件改为 `TRUNCATE TABLE audit_logs`，写法照
+    `test_wallet_repository.py` 的 `_clean`：`test_wallet_repository.py`、`test_customer_service.py`、
+    `test_wallet_adjustment_service.py`、`test_account_status_service.py`、`test_integration_access_service.py`、
+    `test_webhook_signing_service.py`。后两个文件的用例里有 `for text in …` 循环，导入 `text` 会被 ruff F402 判为遮住导入，
+    所以用 `connection.exec_driver_sql("TRUNCATE TABLE audit_logs")`。`test_password_reset_concurrency.py` 已由管理员的前置
+    PR 改为 TRUNCATE，本分支动手前核对过，没有改它
+  - `scripts/perf_baseline.py`：`cleanup` 不再 `DELETE FROM audit_logs`；压测账号那一轮的审计留在库里（`actor_user_id` 没有
+    外键，删掉用户后审计行照样保留），docstring 写明原因；`create_baseline_user` 的 docstring 随之改掉「连同审计记录一起删」
+  - `tests/backend/test_migrations.py`：0010 的版本链；两个触发器语句与 0006 的账本触发器只差表名；预检矩阵与「预检排在任何
+    DDL 之前」；真 MySQL 上两个触发器存在、对 `audit_logs` 的 UPDATE 与 DELETE 都失败（错误号 1644、消息
+    `audit_logs is append-only`、`GET DIAGNOSTICS` 读出 SQLSTATE `45000`）、INSERT 照常、被拒之后行原样还在；downgrade 到
+    0009 后两个触发器消失、表与列不变、UPDATE / DELETE 又能执行，再 upgrade 回来。0006 的触发器用例原先比较整个库的触发器
+    集合，现在只比 `wallets` / `wallet_transactions` 两张表上的，另断言 head 上的全集是 0006 的 6 个加 0010 的 2 个
+  - 文档：[database-schema.md](database-schema.md) 新增 `audit_logs` 一节；本文件「审计日志差异清单」的「数据库层只追加」改为已有
+- [x] **全仓搜索对 `audit_logs` 的 UPDATE / DELETE**（`delete(AuditLog)`、`update(AuditLog)`、`DELETE FROM audit_logs`、
+  `UPDATE audit_logs`、`AuditLog.__table__`、`query(AuditLog)`）：`app/` 下没有；命中的只有上面六个测试文件的清场与
+  `scripts/perf_baseline.py`，都在本任务允许的路径里并已改掉。只在 SQLite 上跑的 API 测试
+  （`test_webhook_signing_api.py`、`test_account_status_api.py`、`test_integration_access_api.py`、
+  `test_wallet_adjustment_api.py`、`test_admin_customers_api.py`）对审计表只读、只数行数，没有 UPDATE / DELETE；它们用
+  `create_all` 建内存库，本来也没有触发器，不受影响。`test_two_factor.py`、`test_auth_service.py` 的 `drop_all` 是 DROP，
+  不经触发器
+- [x] **残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器；有 `TRIGGER` / `DROP` 权限的账号也能先删触发器。测试库正是靠
+  `TRUNCATE` 清场的。彻底封住归「迁移账号与运行账号拆分」那项运维任务
+- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI、审查、合并与部署
 
 ### AIH-TASK-024 —— AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，2026-09-28）
 

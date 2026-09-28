@@ -117,21 +117,17 @@ def factory(engine: Engine) -> sessionmaker[Session]:
 def _clean(engine: Engine) -> None:
     """⚠️ 库是共享的，每个用例前后都清场。
 
-    账本拒绝 DELETE（那正是触发器要保证的），所以只能 TRUNCATE —— 它是 DDL、不经
-    触发器，也就是设计 §10 记的残余风险。测试库能这样清场，本身就说明了为什么生产上
-    要拆分迁移账号与运行账号。
+    账本与审计表都拒绝 DELETE（那正是触发器要保证的：账本见 0006，审计见 0010），
+    所以只能 TRUNCATE —— 它是 DDL、不经触发器，也就是设计 §10 记的残余风险。测试库
+    能这样清场，本身就说明了为什么生产上要拆分迁移账号与运行账号。
     """
     with engine.begin() as connection:
         connection.execute(text("TRUNCATE TABLE wallet_transactions"))
-    actions = [
-        AuditAction.WALLET_ADJUSTMENT_POSTED,
-        AuditAction.TENANT_BILLING_STATUS_CHANGED,
-    ]
+        connection.execute(text("TRUNCATE TABLE audit_logs"))
     with engine.begin() as connection:
         connection.execute(delete(Wallet))
         connection.execute(delete(Project))
         connection.execute(delete(Tenant))
-        connection.execute(delete(AuditLog).where(AuditLog.action.in_(actions)))
         connection.execute(delete(DomainOutbox).where(DomainOutbox.aggregate_type == "tenant"))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 
