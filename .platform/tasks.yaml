@@ -1583,12 +1583,12 @@ tasks:
       - bypass_ci
       - bypass_review
 
-  # 026 / 027：Phase 2 的 T-B（供应商价格）与 T-D（定价规则），碰定价，分别过了设计闸门 #177（v3）与 #178（v3）。
+  # 026 / 027：Phase 2 的 T-B（供应商价格）与 T-D（定价规则），碰定价，分别过了设计闸门 #177（v4）与 #178（v3）。
   # 纯后端，不带 acceptance 块。迁移串行：025 的 0012 → 026 的 0013 → 027 的 0014。
   - id: AIH-TASK-026
     title: provider price versions and generalized price components
     purpose: >-
-      按 docs/design/AIH-TASK-026-provider-prices.md（设计闸门 #177 已批准 v3）实现供应商成本价的版本化：迁移 0013 建
+      按 docs/design/AIH-TASK-026-provider-prices.md（设计闸门 #177 已批准 v4）实现供应商成本价的版本化：迁移 0013 建
       provider_price_versions 与 provider_price_components，状态 DRAFT / PUBLISHED / RETIRED / DISCARDED，只在末尾追加、
       可预约未来生效、不许回溯（第一个版本除外），发布与退役在供应商行排他锁内、边界时刻在锁后取；发布后由触发器保证不可变、
       发布跃迁上校验分量完整、区间不重叠；管理端七个接口与五个审计动作；只读查询 resolve_provider_price 与计费解析串行。
@@ -1602,7 +1602,7 @@ tasks:
       - 管理端七个接口、请求字段、错误码按设计 §2「接口」；金额一律 JSON 字符串精确解析、超过 8 位小数 422、不静默舍入；每个处理函数第一条语句调用 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id
       - 发布与退役在 ai_providers 行 SELECT … FOR UPDATE 内完成，t 在拿到锁之后取、向上取整到下一个整秒；区间规则（第一个版本、预约、截断、撤销预约、退役后不回填）与写入顺序按设计；每次写后在同一事务里复查区间，不满足回滚
       - resolve_provider_price(session, provider_id, model_id, occurred_at) 用加锁读（FOR SHARE），取 PUBLISHED / RETIRED 且区间覆盖 occurred_at 的版本及其分量；本任务不接到任何计费路径
-      - 五个审计动作（PROVIDER_PRICE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）与写入同一事务，内容按设计 §2「审计」
+      - 五个审计动作（PROVIDER_PRICE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）与写入同一事务，内容按设计 §2「审计」；新 entity_type provider_price_version 的 entity_id 是 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红
       - 测试覆盖设计 §7 全部行；触发器、约束、并发（发布与计费并发、快照读陷阱）放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表的枚举列加进 test_model_columns.py；测试与文档里的价格一律用明显的虚构值；uuid 用全零占位值（secret-scan）
       - docs/api.md 记全部新接口；docs/database-schema.md 记两张表、触发器与锁；docs/TODO.md 新增 AIH-TASK-026 记录段，记下四个 §66 之外补的审计动作与设计 §2「对下游任务的契约」
       - 不含 FX、成本计算、试算、价格同步与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
@@ -1614,6 +1614,7 @@ tasks:
       - app/models/auth.py
       - app/repositories/provider_prices.py
       - app/services/provider_prices.py
+      - app/services/audit_query.py
       - app/schemas/provider_prices.py
       - app/api/admin_provider_prices.py
       - app/main.py
