@@ -23,7 +23,6 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-023` 管理端前端：审计日志页
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -2017,10 +2016,20 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   已落地；剩下的 `PROJECT_UPDATE`、`ADMIN_SETTING_CHANGE` 与后续 Phase 的动作是「随功能」—— 对应的写操作还不存在，§124
   「所有动作都有审计」对现有动作成立；时间戳取整是第 3 条，按决定仍是后续计划里的独立一项，不是 §124 的验收项；保留期归
   上线闸门。勾选随本任务合并生效
-- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI 的 frontend job（含 build）、审查、合并与部署
-- [ ] **部署后浏览器验收**：本任务的 acceptance 块跑 `login`、`open_audit`、`check_audit_entry`（由 Worker 记录）；
-  AIH-TASK-024 的四个步骤行为未变，照跑仍应 PASS
+- [x] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI 的 frontend job（含 build）、审查、合并与部署：
+  run `8608c47a` 基于 `e2658d6`。前两轮 `frontend.test` 各挂两条：本任务的「时间范围跨午夜」用例（断言的查询参数不符），
+  以及既有的 `ResetPasswordPage`「sends the token from the link…」5s 超时；第 2 次修复后八项全部零退出，提交 `a39d538`。
+  Worker 的受限审查一轮 `APPROVE`。#173 的 CI 六项全绿（frontend job 含 build），合并为 `0525e24`，main 上 CI 与 Deploy 成功
+- [x] **部署后浏览器验收**：本任务的 acceptance 块 attempt 1 `PASS`，`login`、`open_audit`、`check_audit_entry` 按序报到，
+  用时 7 秒，没超时；三张截图齐全（第 3 张是按 `LOGIN` 筛过的表格，第一行就是本次验收登录的审计），控制台错误 0，profile
+  用完已删。请求记录与 024 那次相同：登录前 `/api/v1/auth/refresh` 的 401（预期内），一条发往非声明主机、被出站限制拒掉的
+  GET（`egress_refused` 20 次，来源没有核对）。这次 run 只跑 023 声明的三步；024 的四个步骤没有重跑，「照跑仍应 PASS」
+  靠受限审查核对 `login` 以外的既有步骤代码未变，没有实跑证据
 - [ ] **后续**：
+  - `ResetPasswordPage` 的 5s 超时在 2026-09-28 把逐字输入改成粘贴之后又在 Worker 里连挂两轮（本任务没改它）；本任务新加的
+    `AuditLogPage.test.tsx` 又用了逐字的 `user.type`，全量并行时可能拖慢同批用例。要不要把它也改成粘贴、或给 auth 页用例
+    放宽超时，另开任务
+  - 第 3 张截图里「Entity」列在窄视口下把邮箱逐字折行，可读性差；属于样式，另开任务
   - 脚本新增步骤依赖的前端事实：审计表格的「Action」「Actor」列头、动作下拉的选项带 `title` 与 `aria-selected`（antd Select
     的现状）、「Apply filters」按钮；前端改了它们，验收以 FAIL 结束（不会误报 PASS），届时一起改脚本
   - 实体类型现在是自由文本框；要改成下拉，选项得与 `app/services/audit_query.py` 的两类清单同步
