@@ -2198,6 +2198,87 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 是 `AuditAction` 的手抄副本，还没有这八个新动作（本任务不改
     前端）；审计页的动作下拉因此选不到它们，按 `entity_type` 筛选不受影响。随 T-K（AIH-TASK-035）补上
 
+### AIH-TASK-026 —— 供应商价格版本与泛化价格分量（T-B，2026-09-29）
+
+设计闸门 #177 `APPROVED: design v3`，全文在 [design/AIH-TASK-026-provider-prices.md](design/AIH-TASK-026-provider-prices.md)。
+接口记在 [api.md](api.md) 的「管理端供应商价格」，表、触发器与锁记在 [database-schema.md](database-schema.md) 的
+「供应商成本价」。不含 FX、成本计算、试算、价格同步与前端（T-C、T-G、Phase 8、T-K）。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `alembic/versions/20260929_0013_provider_prices.py`：revision `0013_provider_prices`，`down_revision` 是
+    `0012_ai_catalog`。先做 0006 同款的触发器权限预检（在任何 DDL 之前），再建 `provider_price_versions`（复合外键
+    `(model_id, provider_id)` → `ai_models(id, provider_id)`、STORED 生成列 `open_slot` 与
+    `(provider_id, model_id, open_slot)` 唯一索引、五条 CHECK）与 `provider_price_components`（两条 `> 0` 的 CHECK、
+    `(版本, 计价分量)` 唯一），外键全是 `RESTRICT`；六个触发器：只能以草稿插入、丢弃的不可改、发布后只许截断与
+    `PUBLISHED → RETIRED`、发布跃迁上的分量完整性、锁供应商行后检查非空区间不重叠、版本禁止删除、分量只在草稿阶段
+    可增删改。不写种子。`downgrade` 按外键依赖倒序删表。文件头附 §132 第 13 条分析。`alembic/env.py` 加 import
+    `app.models.provider_prices`
+  - `app/models/provider_prices.py`：两个模型、两个枚举（`PriceVersionStatus`、`PriceSourceType`）、与迁移逐字一致的
+    CHECK / 生成列表达式常量
+  - `app/repositories/provider_prices.py`：只 flush。`lock_provider`（`FOR UPDATE`，按内部 id）、`period_versions`
+    （加锁读该（供应商, 模型）的全部已发布版本）、按写入顺序各自 flush 的截断 / 恢复 / 发布 / 退役 / 丢弃；
+    `resolve_provider_price(session, provider_id, model_id, occurred_at)` 对版本与分量都用 `FOR SHARE`
+    （`populate_existing`），返回版本及其分量（`component_code`、`quantity_field`、两个金额），没有接到任何计费路径
+  - `app/services/provider_prices.py`：每个写一个 `session_scope`，版本、分量、前一个版本与审计同一事务，不写 outbox。
+    发布、退役先锁供应商行，**拿到锁之后**才调用时钟取 `t`（向上取整到下一个整秒，复用 025 的 `boundary_after`）；
+    写完在同一事务里加锁重读并 `verify_periods` 复查，不满足抛 `PricePeriodsBroken`（500，整体回滚）。时钟可注入
+  - `app/schemas/provider_prices.py`、`app/api/admin_provider_prices.py`（`app/main.py` 注册）：七个接口，请求体
+    `extra="forbid"`，金额只收 JSON 字符串、按正则精确解析、超过 8 位小数 422；每个处理函数第一条语句
+    `require_admin(request)`；响应是字段白名单，人用邮箱表示
+  - `app/models/auth.py`：五个审计动作
+  - 测试：`test_provider_prices_api.py`（SQLite 上的接口契约）、`test_provider_prices_service.py`（冻结时钟下的区间
+    规则、复查与加锁顺序；事务中途失败在 SQLite 与 MySQL 各一次；真 MySQL 上的触发器、完整性、区间不重叠与 CHECK）、
+    `test_provider_prices_resolve.py`（取价、时间稳定性性质用例；真 MySQL 上「发布与计费并发」两种顺序与「快照读
+    陷阱」）；`test_migrations.py` 加 0013 的一组，并把 0006 的触发器集合、0010 / 0011 两条降级用例的表集合改成
+    同时算上 0013；`test_model_columns.py` 加新表的枚举列与两个 DECIMAL(20,8) 列；`test_admin_customers_api.py` 的
+    `EXPECTED_ADMIN_ROUTES` / `VALID_BODIES` 加七个接口，鉴权用例预置一份价格草稿（public_id 用全零占位值）并比对
+    它没有被改。价格一律是明显的虚构值
+- [x] **审计动作对 spec §66 的补充**：`PROVIDER_PRICE_CREATE`、`PROVIDER_PRICE_UPDATE`、`PROVIDER_PRICE_DISCARD`、
+  `PROVIDER_PRICE_RETIRE` 四个不在 §66 的清单里（§66 只有 `PROVIDER_PRICE_PUBLISH`），按 `PROJECT_CREATE`、
+  `WEBHOOK_SECRET_*` 的先例补上（设计 §2「审计」）。`entity_type` 是 `provider_price_version`，`entity_id` 是版本的
+  `public_id`
+- [x] **对下游任务的契约**（设计 §2「对下游任务的契约」，逐字要点）：
+  - **T-G**：用 `resolve_provider_price` 取版本与分量；分量按 025 的 `quantity_field` 取数；事件需要的分量在版本里
+    缺失 → `PRICING_ERROR`，不按 0；`source_currency = MYR` 时不查 FX
+  - **T-H**：在同一个计费事务里，先 `resolve_model`（它加供应商行共享锁），再 `resolve_provider_price`；两者都用加锁读；
+    把 `provider_price_version_id`（`ResolvedProviderPrice.version_id`）写进事件快照
+  - **T-K**：列表与详情接口即本任务的接口；界面标明「成本价，原币种，客户不可见」
+- [ ] ⚠️ **合并前要补契约：`app/services/audit_query.py` 不在本任务的允许路径里**。新的 `entity_type`
+  `provider_price_version`（`entity_id` 是 `public_id`）要加进 `PUBLIC_ENTITY_TYPES`，否则
+  `tests/backend/test_admin_audit_api.py::test_every_written_entity_type_is_classified` 在 CI 变红（运行时审计查询
+  照样原样返回 `entity_id`，只是没有归类）。与 AIH-TASK-025 #185 同一个情形；本分支没有改那个文件
+- [x] **实现定的细节**（审查时请看这几条；都不是改设计，认为应回闸门的话在 PR 里提）：
+  - ⚠️ **空区间不参与「末尾版本」与复查**：撤销预约后，被撤销的版本是 `[F, F)`、前一个版本 P 恢复为未截断。设计
+    §2「事务内复查」按 `effective_from` 排序、要求「前一个未截断时它必须是最后一个」—— 字面照做，P 排在 `[F, F)`
+    之前，撤销预约这一正常路径就会被自己的复查回滚。实现里复查与「末尾版本 L」都只看**非空**区间（空区间永不匹配，
+    数据库的重叠触发器也按设计不看它），另查空区间只能出现在 `RETIRED` 的行上
+  - **L 是尚未开始的预约时，不指定时刻的发布**：设计表格写「有 L，请求未给：`t`，截断 L 于 `t`」，但 L 的起点晚于
+    `t`，截断会得到倒置区间。按同一张表「F 必须 > L 的起点」的规则判 409 `EFFECTIVE_FROM_CONFLICT`（先撤销预约
+    或指定更晚的时刻）。同一秒内连续两次不指定时刻的发布也落在这一条（025 在这里取「起点 + 1 秒」，这里不自动推后
+    生效时刻：成本价的生效时刻应由管理员明确）
+  - **撤销预约只恢复「被它截断的」前一个版本**：P 仍是 `PUBLISHED` 且 `effective_to` 等于被撤销版本的起点才恢复；
+    P 若是以**退役**结束于那一刻，不恢复（退役不回填）
+  - 退役时起点恰好等于 `t`（同一秒内发布又退役）按设计字面归入「已开始生效」：`effective_to = t`，得到空区间，
+    前一个版本不恢复（`t` 起无价，与退役当前版本的语义一致）
+  - 退役草稿是 409 `PRICE_VERSION_NOT_RETIRABLE`；对已退役 / 已丢弃版本的编辑与丢弃是 `PRICE_VERSION_FINAL`（比
+    `PRICE_VERSION_NOT_DRAFT` 更具体，设计的错误表两条都覆盖）
+  - 「发布人」在响应与审计里用登录邮箱（`approved_by_email`），与审计查询把内部用户 id 换成邮箱同一口径；响应不含
+    内部用户 id
+  - PATCH 没有实际变化是 200、不写（与目录的 PATCH 一致）；已发布再发布是 200、不写，请求体里的 `effective_from`
+    被忽略
+  - 列表筛选里的供应商 / 模型不存在是 404（错误码沿用设计的错误表）
+  - 一个版本最多 64 个分量（设计没写上限；种子一共 12 个分量）
+  - 区间重叠触发器用局部变量接供应商行锁的结果（设计示例写的是 `@lock_id` 会话变量），语义相同、不污染会话
+- [ ] **设计缺口（未擅改，建议下一版闸门补）**：设计的 BEFORE UPDATE 对 `OLD.status = 'DRAFT'` 允许任意改，发布跃迁的
+  完整性检查只挂在 `DRAFT → PUBLISHED` 上。绕过服务直接 `UPDATE … SET status = 'RETIRED'`（带区间与发布人）能让一个
+  不完整、甚至零分量的版本进入 `RETIRED`，而 `RETIRED` 的版本在自己的区间里照样被取价。服务层没有这条路径；数据库
+  兜底要么把完整性检查扩到 `DRAFT → RETIRED`，要么禁止这个跃迁。本实现按设计字面，没有加
+- [ ] **后续**：
+  - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-K
+    （AIH-TASK-036）补上
+  - 「快照读陷阱」用例同时断言了陷阱本身（同一事务里的普通读仍是旧快照），与 025 一样依赖 MySQL 默认的
+    REPEATABLE READ
+
 ---
 
 ## Phase 3 — Integrated Application Backend 试点（§126）

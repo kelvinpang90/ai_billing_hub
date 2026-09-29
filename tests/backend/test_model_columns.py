@@ -39,16 +39,25 @@ from app.models.auth import (
     UserStatus,
 )
 from app.models.base import MONEY_PRECISION, MONEY_SCALE
+from app.models.provider_prices import (
+    PriceSourceType,
+    PriceVersionStatus,
+    ProviderPriceComponent,
+    ProviderPriceVersion,
+)
 from app.models.tenancy import BillingStatus, Tenant
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 
 # AI 目录（AIH-TASK-025）的四张表各有枚举列：状态、上报形态、数量类型。
 _CATALOG_MODELS = (UsageMeterType, UsageMeterComponent, AiProvider, AiModel)
+# 供应商价格版本（AIH-TASK-026）的两个枚举列：状态、来源类型。
+_PRICE_MODELS = (ProviderPriceVersion,)
 
 
 def enum_columns():
-    """Every VARCHAR-backed enum column in the auth, tenant, ledger and catalog tables."""
-    for model in (User, AuditLog, DomainOutbox, Tenant, WalletTransaction, *_CATALOG_MODELS):
+    """Every VARCHAR-backed enum column in the auth, tenant, ledger, catalog and price tables."""
+    tables = (User, AuditLog, DomainOutbox, Tenant, WalletTransaction)
+    for model in (*tables, *_CATALOG_MODELS, *_PRICE_MODELS):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
                 yield f"{model.__tablename__}.{column.name}", column
@@ -82,6 +91,21 @@ def test_the_catalog_enum_columns_are_collected() -> None:
     }
 
 
+def test_the_price_enum_columns_are_collected() -> None:
+    """设计 §2 写死的列宽：状态 16、来源类型 16（与迁移 0013 一致）。"""
+    tables = {model.__tablename__ for model in _PRICE_MODELS}
+    widths = {
+        label: column.type.length
+        for label, column in _ENUM_COLUMNS
+        if label.split(".")[0] in tables
+    }
+
+    assert widths == {
+        "provider_price_versions.source_type": 16,
+        "provider_price_versions.status": 16,
+    }
+
+
 @pytest.mark.parametrize("label,column", _ENUM_COLUMNS, ids=[label for label, _ in _ENUM_COLUMNS])
 def test_every_enum_value_fits_its_column(label: str, column) -> None:
     """⚠️ 宽度必须装得下**所有**成员，包括以后加的。
@@ -109,6 +133,8 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
         CatalogStatus,
         PayloadShape,
         QuantityKind,
+        PriceVersionStatus,
+        PriceSourceType,
     ],
     ids=lambda cls: cls.__name__,
 )
@@ -124,6 +150,9 @@ _MONEY_COLUMNS = [
     WalletTransaction.__table__.c.balance_before,
     WalletTransaction.__table__.c.balance_after,
     Tenant.__table__.c.low_balance_threshold,
+    # 供应商价格分量（AIH-TASK-026）：原币种单价与「多少个单位」，同一精度、都不经过 float。
+    ProviderPriceComponent.__table__.c.unit_quantity,
+    ProviderPriceComponent.__table__.c.rate_amount,
 ]
 
 

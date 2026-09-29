@@ -10,6 +10,8 @@
 - [管理端集成 API 凭据](#管理端集成-api-凭据)与[集成请求签名](#集成请求签名)（AIH-TASK-012）
 - [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥)与[状态 webhook 签名](#状态-webhook-签名)（AIH-TASK-019）
 - [管理端审计日志](#管理端审计日志)（AIH-TASK-022）
+- [AI 目录](#ai-目录计量类型供应商模型与别名)（AIH-TASK-025）
+- [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -1095,3 +1097,202 @@ SHA256(RAW_REQUEST_BODY)
 提交。计费侧（T-H）必须在写事件快照、扣费的同一事务里调用它，并只处理 `is_due(occurred_at, now)` 为真的
 事件（`now` 在它拿到锁之后取）；更晚的留到下一轮。契约全文见设计 §2「对下游任务的契约」与
 [TODO.md](TODO.md) 的 AIH-TASK-025 记录段。
+
+---
+
+## 管理端供应商价格
+
+设计依据：设计闸门 #177 `APPROVED: design v3`，全文见
+[design/AIH-TASK-026-provider-prices.md](design/AIH-TASK-026-provider-prices.md)（spec §14、§15.1、§17、§66、§74.1、
+§80）。实现登记为 AIH-TASK-026。表结构见 [database-schema.md](database-schema.md) 的「供应商成本价」。
+
+一个**价格版本**是某个（供应商, 模型）的一版**成本价**：原币种（通常 USD）、来源说明、若干价格分量。状态
+`DRAFT → PUBLISHED → RETIRED`，草稿也可以 `DISCARDED`。已发布的版本在 `[effective_from, effective_to)` 内生效，
+同一（供应商, 模型）的区间首尾相接、不重叠，只在末尾追加。**成本价，原币种，客户不可见**：只有这一组管理端
+接口。**不含** FX 换算、成本计算、试算、价格同步与前端。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/admin/provider-prices` | — | 200，版本分页 | 401 / 403 / 404 / 422 / 503 |
+| `POST /api/v1/admin/provider-prices` | 见下 | 201，版本（草稿） | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `GET /api/v1/admin/provider-prices/{price_version_id}` | — | 200，版本 | 401 / 403 / 404 / 503 |
+| `PATCH /api/v1/admin/provider-prices/{price_version_id}` | 见下 | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/provider-prices/{price_version_id}/publish` | 见下 | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/provider-prices/{price_version_id}/retire` | `{"reason": …}` | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/provider-prices/{price_version_id}/discard` | `{}` | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+
+只有 ADMIN 能调（处理函数第一条语句就是鉴权）。路径里的 `price_version_id` 是版本的 `public_id`；响应里没有内部
+自增 id，人一律用登录邮箱表示。所有请求体都拒绝多余字段（422）。**没有删除接口**：草稿只能丢弃，版本行永不删除。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `PRICE_VERSION_NOT_FOUND` | 路径里的版本不存在 | 否 |
+| 404 | `AI_PROVIDER_NOT_FOUND` | 请求体或筛选里的供应商不存在 | 否 |
+| 404 | `AI_MODEL_NOT_FOUND` | 模型不存在，或不属于那个供应商（两者一模一样） | 否 |
+| 404 | `USAGE_METER_COMPONENT_NOT_FOUND` | `component_code` 不是目录里的计价分量（大小写精确比较） | 否 |
+| 409 | `PRICE_VERSION_NOT_DRAFT` | 编辑或丢弃一个已发布的版本 | 否 |
+| 409 | `PRICE_VERSION_INCOMPLETE` | 发布时完整性不满足；`message` 列出缺的分量代码 | 否 |
+| 409 | `CATALOG_ITEM_RETIRED` | 供应商、模型或某个分量所属的计量类型已停用（建草稿、改草稿、发布时检查） | 否 |
+| 409 | `PRICE_VERSION_NOT_RETIRABLE` | 退役一个已被后继截断的历史版本，或退役草稿 | 否 |
+| 409 | `PRICE_VERSION_FINAL` | 对已退役 / 已丢弃的版本做任何写操作 | 否 |
+| 409 | `EFFECTIVE_FROM_CONFLICT` | 生效时刻不晚于末尾版本的起点，或早于它的尽头（见「发布」） | 否 |
+| 422 | `EFFECTIVE_FROM_IN_PAST` | 请求的生效时刻早于 `t`（不许回溯） | 否 |
+| 422 | `VALIDATION_ERROR` | 格式、精度、正数、多余字段 | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误（含发布 / 退役后区间复查不通过、锁等待超时）；整个事务回滚 | 否 |
+
+### 字段规则
+
+| 字段 | 规则 |
+| --- | --- |
+| `provider_id` / `model_id` | 供应商与模型的 `public_id`；模型必须属于该供应商 |
+| `source_currency` | ISO 4217 大写三字母，`^[A-Z]{3}$`（`usd` 是 422）。可以是 `MYR` |
+| `source_reference` | 去首尾空白后 1–255：价格出处（例如「供应商价格页，查看于 2026-09-29」）。不要写合同价 |
+| `components` | 1–64 个，同一版本里 `component_code` 不重复（重复是 422） |
+| `components[].component_code` | 目录里的计价分量代码，例如 `LLM_INPUT_TOKEN`、`EMBEDDING_TOKEN` |
+| `components[].unit_quantity` | 多少个计量单位对应一个 `rate_amount`，例如 `"1000000"` |
+| `components[].rate_amount` | 原币种单价 |
+| `components[].metadata` | 可选，JSON 对象；只作备注（例如档位名），**计价不读它** |
+
+`unit_quantity` 与 `rate_amount` **只收 JSON 字符串**，正数，`^[0-9]{1,12}(\.[0-9]{1,8})?$`：JSON 数字、`0`、负号、
+正号、指数写法、逗号、空白一律 422；**超过 8 位小数是 422，不舍入**。响应里两者都是恰好 8 位小数的字符串。
+
+### 版本对象
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000000",
+  "provider_id": "00000000-0000-4000-8000-000000000000",
+  "provider_code": "anthropic",
+  "model_id": "00000000-0000-4000-8000-000000000000",
+  "model_code": "claude-x",
+  "source_currency": "USD",
+  "source_type": "MANUAL",
+  "source_reference": "Fictional price sheet, viewed 2026-09-29",
+  "status": "PUBLISHED",
+  "effective_from": null,
+  "effective_to": null,
+  "components": [
+    {
+      "component_code": "LLM_INPUT_TOKEN",
+      "meter_type_code": "LLM_TOKEN",
+      "unit": "TOKEN",
+      "unit_quantity": "1000000.00000000",
+      "rate_amount": "1.11111111",
+      "metadata": null,
+      "created_at": "2026-09-29T08:30:00"
+    }
+  ],
+  "created_by_email": "admin@example.com",
+  "approved_by_email": "admin@example.com",
+  "created_at": "2026-09-29T08:30:00",
+  "updated_at": "2026-09-29T08:30:00",
+  "approved_at": "2026-09-29T08:30:00"
+}
+```
+
+（示例里的价格是虚构值。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `source_type` | 本任务只有 `MANUAL`；`SYNC` 留给 Phase 8 的供应商价格同步 |
+| `status` | `DRAFT` / `PUBLISHED` / `RETIRED` / `DISCARDED` |
+| `effective_from` | 草稿为 `null`；已发布时 `null` 只有一种含义：该（供应商, 模型）第一个版本、未指定生效时刻 =「一直以来」 |
+| `effective_to` | `null` = 仍生效（或尚未发布）。`effective_from == effective_to` 是被撤销的预约，永不生效 |
+| `components` | `component_code` 升序；`meter_type_code` / `unit` 是分量所属计量类型与它的单位 |
+| `created_by_email` / `approved_by_email` | 建草稿人与发布人的登录邮箱；未发布时 `approved_by_email`、`approved_at` 为 `null` |
+
+时间都是不带时区的 UTC，精确到秒。
+
+#### `GET /api/v1/admin/provider-prices` —— 版本列表
+
+按供应商 `code`、模型 `code`、`effective_from`（`null` 在前，含草稿）排序，每项带分量。查询参数：`provider_id`、
+`model_id`（`public_id`，最长 64）、`status=DRAFT|PUBLISHED|RETIRED|DISCARDED`，以及[分页](#分页spec-108)。
+筛选里的供应商不存在是 404 `AI_PROVIDER_NOT_FOUND`；模型不存在（或同时给了供应商而模型不属于它）是 404
+`AI_MODEL_NOT_FOUND`。
+
+#### `POST /api/v1/admin/provider-prices` —— 建草稿
+
+请求体：`provider_id`、`model_id`、`source_currency`、`source_reference`、`components`（都必填）。201；同一事务写
+版本、分量与一条 `PROVIDER_PRICE_CREATE`。草稿**可以不完整**：完整性在发布时校验。供应商、模型或分量所属计量类型
+已停用：409 `CATALOG_ITEM_RETIRED`。不锁供应商行；重发会建出两个草稿（草稿不影响计费，丢弃多余的即可）。
+
+#### `PATCH /api/v1/admin/provider-prices/{price_version_id}` —— 改草稿
+
+只收 `source_currency`、`source_reference`、`components`，至少一个，都不许是 `null`；`components` 是**整体替换**。
+带 `provider_id`、`model_id`、`status`、`effective_from` 或任何多余字段是 422。只对草稿：已发布 409
+`PRICE_VERSION_NOT_DRAFT`，已退役 / 已丢弃 409 `PRICE_VERSION_FINAL`。目录检查同建草稿。**没有实际变化**（分量
+按代码、数值与备注比较，`1000000` 与 `1000000.0` 相同）：200，什么都不写；有变化时写一条 `PROVIDER_PRICE_UPDATE`。
+
+#### `POST /api/v1/admin/provider-prices/{price_version_id}/publish` —— 发布
+
+请求体：可选 `effective_from`，RFC 3339 且**必须带时区**（`2026-10-01T00:00:00Z`、`2026-10-01T08:00:00+08:00`）；
+换算成 UTC 后必须是整秒（`.000` 可以，`.5` 是 422）。不带或 `null` = 不指定。
+
+在供应商行排他锁内完成：拿到锁之后取 `t` = 服务端当前时间**向上**取整到下一个整秒（恰好整秒时取下一秒），所以
+`t` 严格晚于此刻。设该（供应商, 模型）已发布版本中（撤销的空区间除外）`effective_from` 最晚的一个为末尾版本 L：
+
+| 情形 | 本版本的 `effective_from` | 对 L 做什么 |
+| --- | --- | --- |
+| 没有 L，不指定 | `null`（一直以来：此前该模型的事件一律无价、从未扣过钱） | — |
+| 没有 L，指定 F | F | — |
+| L 未截断，不指定 | `t`（必须晚于 L 的起点，否则 409 `EFFECTIVE_FROM_CONFLICT`：L 是尚未开始的预约时先撤销它） | L 截断于 `t` |
+| L 未截断，指定 F | F（必须晚于 L 的起点，否则 409） | L 截断于 F |
+| L 已截断或已退役，尽头 E | `max(E, F 或 t)`；F 早于 E 是 409 | —（退役留下的空档不回填） |
+
+- 指定的 F 早于 `t`：422 `EFFECTIVE_FROM_IN_PAST`。F 等于 `t` 可以。
+- 完整性：至少一个分量；**出现的计量类型，它的全部分量都必须出现**（例如出现 `LLM_TOKEN` 就必须有输入、输出、
+  缓存写入、缓存读取四个价）。不满足：409 `PRICE_VERSION_INCOMPLETE`，`message` 列出缺的分量。
+- 目录已停用：409 `CATALOG_ITEM_RETIRED`。已退役 / 已丢弃：409 `PRICE_VERSION_FINAL`。
+- **已发布再发布**：200，返回当前版本，什么都不写（幂等；请求体里的 `effective_from` 被忽略）。
+- 成功时同一事务写：（需要时）截断 L、本版本改为已发布（`approved_by` / `approved_at` 为发布人与发布时刻）、复查
+  区间首尾相接、一条 `PROVIDER_PRICE_PUBLISH`；复查不通过整体回滚（500）。
+
+**一个时刻一旦取到某个版本，以后永远取到同一个版本**：发布只影响 `t` 及以后（或第一个版本把「无价」变成「有价」）。
+
+#### `POST /api/v1/admin/provider-prices/{price_version_id}/retire` —— 退役
+
+请求体：`reason`，去首尾空白后 1–255（记在审计的 `reason` 上）。在供应商行排他锁内完成，`t` 取法同发布：
+
+| 被退役的版本 | 做什么 |
+| --- | --- |
+| 未截断、已开始生效（起点为 `null` 或 ≤ `t`） | `effective_to = t`、`RETIRED`：`t` 起发生的事件无价（计费侧 `PRICING_ERROR`），`t` 之前照旧 |
+| 未截断、尚未开始（预约的，起点 > `t`） | `effective_to = effective_from`（空区间，永不生效）、`RETIRED`；前一个版本若正是被它截断的，恢复为未截断（撤销预约） |
+| 已被后继截断的历史版本、草稿 | 409 `PRICE_VERSION_NOT_RETIRABLE` |
+| 已退役 / 已丢弃 | 409 `PRICE_VERSION_FINAL` |
+
+同一事务写版本、（需要时）被恢复的前一个版本、复查与一条 `PROVIDER_PRICE_RETIRE`。退役的版本在它自己的区间里照样
+取得到（已经发生的用量照样算钱）。要纠正历史价格走 Phase 8 的 reprocess，不在这里。
+
+#### `POST /api/v1/admin/provider-prices/{price_version_id}/discard` —— 丢弃草稿
+
+请求体是 `{}`。草稿 → `DISCARDED`，行留着（不删除），写一条 `PROVIDER_PRICE_DISCARD`。已发布 409
+`PRICE_VERSION_NOT_DRAFT`；已退役 / 已丢弃 409 `PRICE_VERSION_FINAL`。不看目录状态。
+
+### 审计
+
+五个动作都与写入同一事务，不写 outbox；操作者带 ip 与 user agent。`entity_type` = `provider_price_version`，
+`entity_id` = 版本的 `id`。供应商、模型、分量一律用 `code`，被截断 / 被恢复的版本用 `public_id`，发布人用邮箱。
+审计里有价格：管理员可见的业务数据，不是秘密；应用日志不打印分量明细。
+
+| `action` | `before_state` | `after_state` |
+| --- | --- | --- |
+| `PROVIDER_PRICE_CREATE` | — | `provider_code`、`model_code`、`source_currency`、`source_type`、`source_reference`、`status`、`components`（每项 `component_code`、`unit_quantity`、`rate_amount`） |
+| `PROVIDER_PRICE_UPDATE` | 变化的字段的旧值；分量变了时是整组旧分量 | 变化的字段的新值；分量变了时是整组新分量 |
+| `PROVIDER_PRICE_DISCARD` | `status`（`DRAFT`） | `status`（`DISCARDED`） |
+| `PROVIDER_PRICE_PUBLISH` | `status`（`DRAFT`）；截断了前一个版本时 `truncated_version`：它的 `id` 与原 `effective_to`（`null`） | `status`、`effective_from`、`effective_to`、`approved_by_email`、`approved_at`；截断了前一个版本时 `truncated_version`：它的 `id` 与新的 `effective_to` |
+| `PROVIDER_PRICE_RETIRE` | `status`、`effective_from`、`effective_to`；恢复了前一个版本时 `restored_version`：它的 `id` 与原 `effective_to` | `status`、`effective_from`、`effective_to`；恢复了前一个版本时 `restored_version`：它的 `id` 与 `effective_to`（`null`）。`reason` 记在审计行的 `reason` 上 |
+
+「已发布再发布」与无变化的 PATCH 不写审计。只有 `PROVIDER_PRICE_PUBLISH` 在 spec §66 的清单里，其余四个按先例补上
+（见 [TODO.md](TODO.md) 的 AIH-TASK-026 记录段）。
+
+### 取价（计费侧调用，本任务不接线）
+
+`app/repositories/provider_prices.py` 的 `resolve_provider_price(session, provider_id, model_id, occurred_at)`：
+参数是 `resolve_model` 返回的模型的内部 `provider_id` / `id` 与不带时区的 UTC `occurred_at`；返回状态为
+`PUBLISHED` 或 `RETIRED`、且 `effective_from ≤ occurred_at < effective_to`（`null` 端不比）的版本及其分量
+（`component_code`、`quantity_field`、`unit_quantity`、`rate_amount`，`component_code` 升序），没有就是 `None`
+（计费侧 `PRICING_ERROR`，缺价不按 0 算）。版本与分量都是加锁读（`FOR SHARE`），锁持有到**调用方**的事务提交；
+计费侧必须在同一个计费事务里**先** `resolve_model`（它对供应商行加共享锁）**再**调用它，并把返回的版本 id 写进事件
+快照。契约全文见设计 §2「对下游任务的契约」与 [TODO.md](TODO.md) 的 AIH-TASK-026 记录段。

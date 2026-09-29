@@ -23,6 +23,9 @@ from app.models import (
     integration as _integration_models,  # noqa: F401  (registers the two integration tables)
 )
 from app.models import (
+    provider_prices as _provider_price_models,  # noqa: F401  (registers the two price tables)
+)
+from app.models import (
     tenancy as _tenancy_models,  # noqa: F401  (registers tenants/projects)
 )
 from app.models import (
