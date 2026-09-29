@@ -2111,6 +2111,83 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 
 **验收**：用量事件只计费一次 · 估算成本与 MYR 换算正确 · 客户计费额正确 · 钱包扣减 · 重复事件不双扣 · ID 冲突事件拒绝且不扣费 · 队列丢失后可从数据库状态恢复
 
+### AIH-TASK-025 —— 供应商、模型与计量单位目录（T-A，2026-09-29）
+
+设计闸门 #163 `APPROVED: design v4`，全文在 [design/AIH-TASK-025-ai-catalog.md](design/AIH-TASK-025-ai-catalog.md)。
+接口记在 [api.md](api.md) 的「AI 目录」，表与种子记在 [database-schema.md](database-schema.md) 的「AI 目录」。不含价格、
+定价规则、FX、用量事件表、未知模型的重新入队、告警与前端（T-B…T-L）。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `alembic/versions/20260929_0012_ai_catalog.py`：revision `0012_ai_catalog`，`down_revision` 是
+    `0011_audit_logs_query_indexes`。建 `usage_meter_types`、`usage_meter_components`、`ai_providers`、`ai_models`、
+    `ai_model_aliases` 五张表（代码列 `utf8mb4_0900_bin`；九条 CHECK；分量的 `(meter_type_id, payload_shape)` 与别名的
+    `(model_id, provider_id)` 两条复合外键；别名表的 STORED 生成列 `open_slot` 与 `(provider_id, alias, open_slot)` 唯一索引），
+    写入 9 个计量类型与 12 个分量的种子（常量写死在迁移里，不 import 应用代码；分量用 `INSERT … SELECT` 按类型代码找
+    `meter_type_id`，`--sql` 离线模式也能生成）。`downgrade` 按外键依赖倒序删表。文件头附 §132 第 13 条分析。
+    `alembic/env.py` 加 import `app.models.ai_catalog`
+  - `app/models/ai_catalog.py`：五个模型、三个枚举（`PayloadShape`、`QuantityKind`、`CatalogStatus`）、与迁移逐字一致的
+    CHECK / 生成列表达式常量，以及种子的代码常量 `SEED_METER_TYPES`
+  - `app/repositories/ai_catalog.py`：只 flush。`lock_provider`（`FOR UPDATE`）；写路径里的读都是加锁读；
+    `resolve_model(session, provider_code, model_code, occurred_at)` 对供应商、按代码的模型、生效的别名段、别名指向的模型
+    四次读都用 `FOR SHARE`（`populate_existing`），不做规范化、不看状态；`is_due(occurred_at, now)` 是设计 §7 要的
+    「`occurred_at` 不晚于持锁后当前时间」判定。两者都没有接到任何计费路径
+  - `app/services/ai_catalog.py`：每个写一个 `session_scope`，目录行与审计同一事务，不写 outbox。建模型、映射、撤销先锁
+    供应商行，**拿到锁之后**才调用时钟取 `t`（向上取整到下一个整秒）；模型代码与别名表里出现过的任何字符串不撞；每次写
+    别名后在同一事务里加锁重读该字符串的全部段，`verify_segments` 复查首尾相接、只有第一段起点为空，不满足抛
+    `AliasSegmentsBroken`（500，整体回滚）。时钟可注入（`clock=`），测试据此冻结
+  - `app/schemas/ai_catalog.py`、`app/api/admin_ai_catalog.py`（`app/main.py` 注册）：十五个接口，请求体 `extra="forbid"`，
+    每个处理函数第一条语句 `require_admin(request)`；列表的 `status` 筛选参数在 Python 里叫 `status_filter`（`alias="status"`），
+    免得遮住 `fastapi.status`
+  - `app/models/auth.py`：八个审计动作；`app/services/audit_query.py`：四个新 `entity_type` 归进 `PUBLIC_ENTITY_TYPES`
+  - 测试：`test_usage_meter_api.py`、`test_ai_catalog_api.py`（SQLite 上的接口契约）、`test_ai_catalog_resolve.py`
+    （解析、分段语义、边界时刻、性质用例、复查与加锁顺序；事务中途失败在 SQLite 与 MySQL 各一次；真 MySQL 上的数据库兜底、
+    并发撞车、「解析与改映射并发」两种顺序、「快照读陷阱」、「共享锁互不阻塞」）；`test_migrations.py` 加 0012 的一组
+    （版本链、CHECK / 生成列 / 排序规则与模型一致、种子三方一致、升降只增删五张表、列形状、键与外键删除规则、种子行、CHECK
+    拒绝非法值），并把 0010 / 0011 两条降级用例的表集合比较改成「减去 0012 的五张表」（降到 0010 / 0009 时它们一并删掉）；
+    `test_model_columns.py` 加新表的枚举列；`test_admin_customers_api.py` 的 `EXPECTED_ADMIN_ROUTES` / `VALID_BODIES` 加十五个
+    接口，鉴权用例预置一组目录行（public_id 用全零占位值）并比对它们没有被改
+- [x] **审计动作对 spec §66 的补充**：`USAGE_METER_TYPE_CREATE`、`USAGE_METER_TYPE_UPDATE`、`AI_PROVIDER_CREATE`、
+  `AI_PROVIDER_UPDATE`、`AI_MODEL_CREATE`、`AI_MODEL_UPDATE`、`AI_MODEL_ALIAS_MAP`、`AI_MODEL_ALIAS_RETIRE` 八个都不在 §66 的
+  清单里，按 `PROJECT_CREATE`、`WEBHOOK_SECRET_*` 的先例补上（设计 §2「审计」）。`entity_type` 分别是 `usage_meter_type`、
+  `ai_provider`、`ai_model`、`ai_model_alias`，`entity_id` 都是 `public_id`；前后状态里指向一律用模型 `code`
+- [x] **已知限制：缓存写入只设一档价格**（设计 §10 第 2 条，Kelvin 2026-09-28 同意）：Anthropic 的缓存写入按缓存时长
+  （5 分钟 / 1 小时）有两档价，但 §11 的上报载荷只有一个 `cache_creation_input_tokens`，平台分不出是哪一档。V1 只设一个
+  分量 `LLM_CACHE_WRITE_TOKEN`，价格按试点实际使用的那一档录入（T-B）。以后要用两档，要同时扩上报载荷（应用侧分开上报）
+  与分量种子，另开任务
+- [x] **对下游任务的契约**（设计 §2「对下游任务的契约」，逐字要点）：
+  - **T-B / T-D**：价格分量、FIXED_RATE 分量用 `usage_meter_components.component_code`；不许给 `RETIRED` 的计量类型 /
+    供应商 / 模型建新版本或新规则
+  - **T-E**：校验按上报形态查表，不写死类型清单：`usage_type` 查 `usage_meter_types`；`LLM_TOKEN_FIELDS` 要四个 token 字段、
+    不许带 `quantity` / `unit`；`QUANTITY` 要 `quantity` 与 `unit`、`unit` 等于该类型的 `unit`、数量按 `quantity_kind`
+    校验、不许带 token 字段。`usage_type` 不在表里时拒绝还是保留为错误状态，由 T-E 的闸门定。上报的 `provider` / `model`
+    原样存，长度上限不小于 64 / 128。另：把 `occurred_at` 允许的未来偏差限制在一个小值，使 T-H 第 ② 条的推迟只是短暂等待
+  - **T-G**：分量从 `quantity_field` 取数，不按类型写分支；类型没有分量按 `PRICING_ERROR`，不按 0 计。「一个事件要哪些
+    分量有价」（例如缓存读取为 0 时要不要有价）归 T-G
+  - **T-H**：① `resolve_model` 必须在写事件快照、扣费的**同一个事务**里调用，它加的供应商行共享锁持有到该事务提交；不许
+    在单独的短事务里解析、再到另一个事务里用结果。② 只处理 `is_due(occurred_at, 持锁后的当前时间)` 为真的事件，更晚的留在
+    `RECEIVED` 下一轮再取。③ 锁顺序：供应商（共享）→ 钱包 → 租户。④ T-B / T-D 按 `occurred_at` 选价格与规则时，发布方
+    同样要与解析串行（由那两个闸门定）
+- [x] **实现定的细节**（审查时请看这几条）：
+  - ⚠️ **同一秒内连续改映射**：设计只写了「截断当前段于 `t`」。当前段若是本秒内刚开的，它的起点（上一次在将来取的 `t`）
+    会 ≥ 这一次的 `t`，照写会得到空区间、撞 CHECK。实现取 `max(t, 当前段起点 + 1 秒)`：仍是整秒、仍严格晚于 `now`；
+    需要推后时 `now` < 当前段起点，此后还没有任何事件能被解析（T-H 只处理 `occurred_at ≤ now`），所以不改变任何已解析的
+    结果（`test_changes_within_one_second_never_make_an_empty_segment`、性质用例覆盖）。这是对设计空白的补全，不是改设计；
+    认为应回闸门的话在 PR 里提
+  - 映射的 HTTP 状态：写了新段 201；「已指向这个模型」200、不写（设计 §7「指向相同」写的是 200）
+  - `AI_MODEL_ALIAS_MAP` 的前状态按字面取「被截断那一段」在截断**之前**的 `model_code` 与 `effective_to`（即 `null`，与
+    `AI_MODEL_ALIAS_RETIRE` 的前状态同一口径）；撤销后重新映射没有被截断的段，前状态为空
+  - PATCH 一个字段都不带是 422（与编辑客户一致）；显式传 `null` 也是 422
+  - 撤销接口的请求体是 `{}`（与启用 webhook 密钥同一写法），带任何字段 422
+  - 种子的显示名（`LLM tokens` 等）设计没有给，取英文短语；可随时经 PATCH 改
+  - 计量类型、供应商、模型三张表的 `status` 都带服务端默认 `ACTIVE`（设计只对供应商写了「默认」，模型写「同供应商」）
+- [ ] **后续**：
+  - 设计 §7「撤销与重新映射」写「共三段首尾相接」，但「映射 → 撤销 → 重新映射」只产生两段（重新映射从撤销点接上）；用例
+    按「映射 → 改指向 → 撤销 → 重新映射」造出三段，逐段核对了设计列出的各个时刻的解析结果
+  - 「快照读陷阱」用例同时断言了陷阱本身（同一事务里的普通读仍是旧快照），依赖 MySQL 默认的 REPEATABLE READ；CI 的
+    MySQL 若改了隔离级别，那一条断言要跟着调整
+  - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 是 `AuditAction` 的手抄副本，还没有这八个新动作（本任务不改
+    前端）；审计页的动作下拉因此选不到它们，按 `entity_type` 筛选不受影响。随 T-K（AIH-TASK-035）补上
+
 ---
 
 ## Phase 3 — Integrated Application Backend 试点（§126）

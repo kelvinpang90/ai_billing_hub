@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-09-28
+> 最后更新：2026-09-29
 
 ---
 
@@ -271,6 +271,137 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 - SQLite 上的单元测试用 `create_all` 建表，没有这两个触发器；只追加的行为只在真 MySQL 上验
   （`tests/backend/test_migrations.py` 的 `test_0010_*`）。
 - `scripts/perf_baseline.py` 收尾不再删除审计行：压测账号那一轮的审计留在库里。
+
+---
+
+## AI 目录（spec §74、§12、§15.1、§84；AIH-TASK-025，迁移 `0012_ai_catalog`）
+
+设计依据：[design/AIH-TASK-025-ai-catalog.md](design/AIH-TASK-025-ai-catalog.md)（设计闸门 #163 v4）§2「数据库」。
+五张表：`usage_meter_types`、`usage_meter_components`、`ai_providers`、`ai_models`、`ai_model_aliases`。
+接口见 [api.md](api.md) 的「AI 目录」。
+
+共同的约定：
+
+- **代码列一律 `utf8mb4_0900_bin`**（区分大小写、不忽略尾部空格；只在 MySQL 上指定）：`usage_meter_types.code`
+  与 `unit`、`usage_meter_components.component_code`、`ai_providers.code`、`ai_models.code`、`ai_model_aliases.alias`。
+  理由同 `integration_credentials.public_api_key`：库默认的 `utf8mb4_0900_ai_ci` 会把 `GPT-4o` 与 `gpt-4o`
+  当成同一个值。
+- **行永不删除**：价格版本（T-B）、定价规则（T-D）与用量事件会永久引用它们（INV-6）。外键都是 `RESTRICT`，
+  代码里没有删除路径；停用只改状态，别名段只会被截断。
+- **代码建后不可改**：`code`、`alias`、`component_code`、`unit`、`quantity_kind`、`payload_shape` 没有任何
+  修改路径（PATCH 带它们是 422）。
+- **状态**（三张表的 `status`）：`VARCHAR(16)`，`CHECK IN ('ACTIVE','RETIRED')`，默认 `ACTIVE`。停用只影响
+  「以后选不选它」，不影响摄取、计价与解析；双向都允许，没有终态。
+
+### `usage_meter_types`（计量类型：迁移种子 + 管理员新建）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_usage_meter_types_public_id`） |
+| `code` | VARCHAR(32) bin | 非空，唯一（`uq_usage_meter_types_code`）；即上报事件的 `usage_type` |
+| `display_name` | VARCHAR(255) | 非空；可改 |
+| `payload_shape` | VARCHAR(32) | 非空，`CHECK IN ('LLM_TOKEN_FIELDS','QUANTITY')`：上报形态 |
+| `unit` | VARCHAR(16) bin | 非空；上报的 `unit` 必须与它相等 |
+| `quantity_kind` | VARCHAR(16) | 非空，`CHECK IN ('INTEGER','DECIMAL')` |
+| `status` | VARCHAR(16) | 见上 |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+
+- 唯一约束 `(id, payload_shape)`（`uq_usage_meter_types_id_shape`）：只为分量表的复合外键。
+- `ck_usage_meter_types_token_shape`：`payload_shape <> 'LLM_TOKEN_FIELDS' OR (unit = 'TOKEN' AND quantity_kind = 'INTEGER')`。
+- 管理员新建的类型一律是 `QUANTITY`；`LLM_TOKEN_FIELDS` 只有种子 `LLM_TOKEN`。
+
+### `usage_meter_components`（计价分量）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库，没有 `public_id`（对外用 `component_code`） |
+| `meter_type_id` / `payload_shape` | BIGINT / VARCHAR(32) | 非空；复合外键 `(meter_type_id, payload_shape)` → `usage_meter_types(id, payload_shape)` `ON DELETE RESTRICT`（`fk_usage_meter_components_type`）：分量的形态**由数据库保证**与所属类型一致。子表索引 `ix_usage_meter_components_type_shape` |
+| `component_code` | VARCHAR(64) bin | 非空，唯一（`uq_usage_meter_components_code`）。T-B 的价格分量、T-D 的 FIXED_RATE 分量按它挂 |
+| `quantity_field` | VARCHAR(64) | 非空；这个分量从上报事件的哪个字段取数量（T-G 按它取数，不按类型写分支） |
+| `created_at` | DATETIME | 非空 |
+
+- `ck_usage_meter_components_quantity_field`：`(payload_shape = 'QUANTITY' AND quantity_field = 'quantity') OR
+  (payload_shape = 'LLM_TOKEN_FIELDS' AND quantity_field IN ('input_tokens','output_tokens','cache_creation_input_tokens','cache_read_input_tokens'))`。
+- 唯一约束 `(meter_type_id, quantity_field)`（`uq_usage_meter_components_type_field`）：同一类型下一个字段只对应
+  一个分量，同一批数量不会被算两次；加上上一条 CHECK，`QUANTITY` 类型至多一个分量。
+- 「每个类型至少一个分量」数据库表达不了：由「建类型与建分量同一事务」保证（没有单独建类型或单独建分量的
+  路径）。万一出现没有分量的类型，T-G 按 `PRICING_ERROR` 处理，不按 0 计。
+
+### 种子（迁移 0012 写入，常量写死在迁移里）
+
+| 计量类型 | 形态 | 单位 | 数量 | 分量 → 取数字段 |
+| --- | --- | --- | --- | --- |
+| `LLM_TOKEN` | `LLM_TOKEN_FIELDS` | `TOKEN` | `INTEGER` | `LLM_INPUT_TOKEN` → `input_tokens`；`LLM_OUTPUT_TOKEN` → `output_tokens`；`LLM_CACHE_WRITE_TOKEN` → `cache_creation_input_tokens`；`LLM_CACHE_READ_TOKEN` → `cache_read_input_tokens` |
+| `EMBEDDING_TOKEN` | `QUANTITY` | `TOKEN` | `INTEGER` | `EMBEDDING_TOKEN` → `quantity` |
+| `AUDIO_SECOND` | `QUANTITY` | `SECOND` | `DECIMAL` | `AUDIO_SECOND` → `quantity` |
+| `AUDIO_MINUTE` | `QUANTITY` | `MINUTE` | `DECIMAL` | `AUDIO_MINUTE` → `quantity` |
+| `TTS_CHARACTER` | `QUANTITY` | `CHARACTER` | `INTEGER` | `TTS_CHARACTER` → `quantity` |
+| `IMAGE_GENERATION` | `QUANTITY` | `IMAGE` | `INTEGER` | `IMAGE_GENERATION` → `quantity` |
+| `OCR_PAGE` | `QUANTITY` | `PAGE` | `INTEGER` | `OCR_PAGE` → `quantity` |
+| `DOCUMENT_PAGE` | `QUANTITY` | `PAGE` | `INTEGER` | `DOCUMENT_PAGE` → `quantity` |
+| `CUSTOM` | `QUANTITY` | `UNIT` | `DECIMAL` | `CUSTOM` → `quantity` |
+
+9 个类型、12 个分量，全部 `ACTIVE`；显示名见 `app/models/ai_catalog.py` 的 `SEED_METER_TYPES`（代码里的同一份
+清单，`tests/backend/test_migrations.py` 逐行比对迁移、代码常量与库里三方）。⚠️ 缓存写入只有一个分量
+`LLM_CACHE_WRITE_TOKEN`（已知限制，见 [TODO.md](TODO.md) 的 AIH-TASK-025 记录段）。本任务**不**预置任何供应商与模型。
+
+### `ai_providers`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_ai_providers_public_id`） |
+| `code` | VARCHAR(64) bin | 非空，唯一（`uq_ai_providers_code`）；与上报事件的 `provider` 精确比较 |
+| `display_name` | VARCHAR(255) | 非空；可改 |
+| `status` | VARCHAR(16) | 见上 |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+
+⚠️ 这一行也是**解析与改映射的串行点**：建模型、映射别名、撤销别名 `SELECT … FOR UPDATE` 它；计费解析
+（`resolve_model`）在计费事务里 `FOR SHARE` 它并持有到提交（设计 §2「时间」）。
+
+### `ai_models`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_ai_models_public_id`） |
+| `provider_id` | BIGINT | 非空；外键 → `ai_providers(id)` `ON DELETE RESTRICT`（`fk_ai_models_provider`） |
+| `code` | VARCHAR(128) bin | 非空；与上报事件的 `model` 精确比较 |
+| `display_name` | VARCHAR(255) | 非空；可改 |
+| `status` | VARCHAR(16) | 见上 |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+
+- 唯一约束 `(provider_id, code)`（`uq_ai_models_provider_code`），也是按供应商查模型的索引。
+- 唯一约束 `(id, provider_id)`（`uq_ai_models_id_provider`）：只为别名表的复合外键（先例 `uq_projects_id_tenant`）。
+- 同一供应商下，模型代码不能是别名表里**出现过**的任何字符串（不论哪一段、是否已截断），反之亦然。跨两张表，
+  数据库表达不了：服务层在供应商行锁内检查。
+
+### `ai_model_aliases`（§84 的「映射」，按 `occurred_at` 分段）
+
+一行是「某个字符串在 `[effective_from, effective_to)` 内指向某个模型」。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_ai_model_aliases_public_id`） |
+| `provider_id` / `model_id` | BIGINT | 非空；复合外键 `(model_id, provider_id)` → `ai_models(id, provider_id)` `ON DELETE RESTRICT`（`fk_ai_model_aliases_model`）：别名只能指向**同一供应商**的模型，由数据库保证。子表索引 `ix_ai_model_aliases_model` |
+| `alias` | VARCHAR(128) bin | 非空；上报事件里出现、但不是模型代码的那个字符串 |
+| `effective_from` | DATETIME | 可空；`NULL` = 「一直以来」，只有一个字符串的第一段是 `NULL` |
+| `effective_to` | DATETIME | 可空；`NULL` = 仍生效。只能从 `NULL` 改成一个时刻（截断），截断后不再改 |
+| `open_slot` | INT，STORED 生成列 | `CASE WHEN effective_to IS NULL THEN 1 END`；只读 |
+| `created_at` | DATETIME | 非空 |
+| `closed_at` | DATETIME | 可空；与 `effective_to` 同时写 |
+
+- **唯一索引 `(provider_id, alias, open_slot)`**（`ux_ai_model_aliases_open_slot`）：一个字符串至多一段未截断。
+  已截断的段在 `open_slot` 上是 NULL，唯一索引允许多个 NULL（写法同 `project_webhook_secrets.active_slot`）。
+  它也是按 (供应商, 字符串) 查段的索引。
+- `ck_ai_model_aliases_period`：`effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to`。
+- **各段首尾相接、不重叠**跨行，数据库表达不了：服务层在供应商行锁内保证（新段的起点永远取当前段被截断的
+  那个时刻，或撤销后最后一段的终点），并在每次写入后于同一事务里复查该字符串的全部段（排序后相邻段
+  `effective_to == 下一段 effective_from`、只有第一段 `effective_from` 为空），不满足就回滚。
+- 段从不修改指向、从不往过去延伸；改指向与撤销只截断当前段、从边界时刻 `t`（拿到供应商行锁之后的当前时间
+  向上取整到下一个整秒）起开新段。
 
 ---
 

@@ -159,6 +159,17 @@ class AuditAction(enum.StrEnum):
     # `status_version` 与 outbox 同一事务。一个动作名覆盖账户状态的全部跃迁，对 spec §66 的
     # `TENANT_SUSPEND` / `TENANT_REACTIVATE` 的映射记在 docs/TODO.md。
     TENANT_ACCOUNT_STATUS_CHANGED = "TENANT_ACCOUNT_STATUS_CHANGED"
+    # AIH-TASK-025（设计闸门 #163）：写入方都是 app/services/ai_catalog.py，与目录行同一
+    # 事务，不写 outbox。八个都不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，
+    # 记在 docs/TODO.md。前后状态里指向一律用模型 code，不用内部 id。
+    USAGE_METER_TYPE_CREATE = "USAGE_METER_TYPE_CREATE"
+    USAGE_METER_TYPE_UPDATE = "USAGE_METER_TYPE_UPDATE"
+    AI_PROVIDER_CREATE = "AI_PROVIDER_CREATE"
+    AI_PROVIDER_UPDATE = "AI_PROVIDER_UPDATE"
+    AI_MODEL_CREATE = "AI_MODEL_CREATE"
+    AI_MODEL_UPDATE = "AI_MODEL_UPDATE"
+    AI_MODEL_ALIAS_MAP = "AI_MODEL_ALIAS_MAP"
+    AI_MODEL_ALIAS_RETIRE = "AI_MODEL_ALIAS_RETIRE"
 
 
 class AuditLog(Base):

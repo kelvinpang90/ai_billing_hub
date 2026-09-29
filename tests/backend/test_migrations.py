@@ -45,6 +45,16 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
 from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
+from app.models.ai_catalog import (
+    CODE_COLLATION,
+    OPEN_SLOT_EXPRESSION,
+    SEED_METER_TYPES,
+    AiModel,
+    AiModelAlias,
+    AiProvider,
+    UsageMeterComponent,
+    UsageMeterType,
+)
 from app.models.auth import AuditAction, AuditLog
 from app.models.base import Base
 from app.models.integration import (
@@ -1657,8 +1667,8 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动。
-        assert _table_names() == tables
+        # 只删触发器：表与列都不动（0012 的五张表随降级到 0009 一并删掉）。
+        assert _table_names() == tables - _TABLES_0012
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
         with _rolled_back_connection() as connection:
@@ -1753,8 +1763,8 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动。
-        assert _table_names() == tables
+        # 只删索引：表、列与 0010 的触发器都不动（0012 的五张表随降级到 0010 一并删掉）。
+        assert _table_names() == tables - _TABLES_0012
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
 
@@ -1762,3 +1772,512 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011 | _EXPECTED_INDEXES_0011
     finally:
         command.upgrade(alembic_config, "head")
+
+
+# ---------------------------------------------------------------------------
+# 0012_ai_catalog（AIH-TASK-025，设计闸门 #163 v4）
+#
+# 头几条不连库：钉住版本链；迁移与模型的 CHECK、生成列、排序规则一致；种子在迁移、代码常量
+# 与设计 §2 的清单三方一致；downgrade 按外键依赖倒序删表。真 MySQL 上验五张表的形状、键、
+# 外键删除规则、种子行、CHECK 拒绝非法取值，以及升降只增删这五张表。约束的**行为**（形态
+# 不符的分量、第二个未截断段、跨供应商的别名、删有引用的行）在 test_usage_meter_api.py 与
+# test_ai_catalog_resolve.py。
+# ---------------------------------------------------------------------------
+
+_REVISION_0012 = "0012_ai_catalog"
+_MIGRATION_0012 = pathlib.Path("alembic/versions/20260929_0012_ai_catalog.py")
+_CATALOG_MODELS = (UsageMeterType, UsageMeterComponent, AiProvider, AiModel, AiModelAlias)
+_TABLES_0012 = {model.__tablename__ for model in _CATALOG_MODELS}
+# 建表顺序；downgrade 必须恰好反过来（外键依赖）。
+_CREATE_ORDER_0012 = [
+    "usage_meter_types",
+    "usage_meter_components",
+    "ai_providers",
+    "ai_models",
+    "ai_model_aliases",
+]
+
+# 设计 §2「种子」那张表逐行手抄：code → (上报形态, 单位, 数量类型, {分量: 取数字段})。
+# 不从代码或迁移里取 —— 两边各自对照这一份。
+_DESIGN_SEED: dict[str, tuple[str, str, str, dict[str, str]]] = {
+    "LLM_TOKEN": (
+        "LLM_TOKEN_FIELDS",
+        "TOKEN",
+        "INTEGER",
+        {
+            "LLM_INPUT_TOKEN": "input_tokens",
+            "LLM_OUTPUT_TOKEN": "output_tokens",
+            "LLM_CACHE_WRITE_TOKEN": "cache_creation_input_tokens",
+            "LLM_CACHE_READ_TOKEN": "cache_read_input_tokens",
+        },
+    ),
+    "EMBEDDING_TOKEN": ("QUANTITY", "TOKEN", "INTEGER", {"EMBEDDING_TOKEN": "quantity"}),
+    "AUDIO_SECOND": ("QUANTITY", "SECOND", "DECIMAL", {"AUDIO_SECOND": "quantity"}),
+    "AUDIO_MINUTE": ("QUANTITY", "MINUTE", "DECIMAL", {"AUDIO_MINUTE": "quantity"}),
+    "TTS_CHARACTER": ("QUANTITY", "CHARACTER", "INTEGER", {"TTS_CHARACTER": "quantity"}),
+    "IMAGE_GENERATION": ("QUANTITY", "IMAGE", "INTEGER", {"IMAGE_GENERATION": "quantity"}),
+    "OCR_PAGE": ("QUANTITY", "PAGE", "INTEGER", {"OCR_PAGE": "quantity"}),
+    "DOCUMENT_PAGE": ("QUANTITY", "PAGE", "INTEGER", {"DOCUMENT_PAGE": "quantity"}),
+    "CUSTOM": ("QUANTITY", "UNIT", "DECIMAL", {"CUSTOM": "quantity"}),
+}
+
+_EXPECTED_0012_COLUMNS = {
+    "usage_meter_types": {
+        "id": False,
+        "public_id": False,
+        "code": False,
+        "display_name": False,
+        "payload_shape": False,
+        "unit": False,
+        "quantity_kind": False,
+        "status": False,
+        "created_at": False,
+        "updated_at": False,
+    },
+    "usage_meter_components": {
+        "id": False,
+        "meter_type_id": False,
+        "payload_shape": False,
+        "component_code": False,
+        "quantity_field": False,
+        "created_at": False,
+    },
+    "ai_providers": {
+        "id": False,
+        "public_id": False,
+        "code": False,
+        "display_name": False,
+        "status": False,
+        "created_at": False,
+        "updated_at": False,
+    },
+    "ai_models": {
+        "id": False,
+        "public_id": False,
+        "provider_id": False,
+        "code": False,
+        "display_name": False,
+        "status": False,
+        "created_at": False,
+        "updated_at": False,
+    },
+    "ai_model_aliases": {
+        "id": False,
+        "public_id": False,
+        "provider_id": False,
+        "model_id": False,
+        "alias": False,
+        # NULL = 「一直以来」/「仍生效」；生成列在截断的段上是 NULL。
+        "effective_from": True,
+        "effective_to": True,
+        "open_slot": True,
+        "created_at": False,
+        "closed_at": True,
+    },
+}
+
+# (表, 列) → 列宽。这几列是代码，按字节比较（utf8mb4_0900_bin）。
+_CODE_COLUMNS_0012 = {
+    ("usage_meter_types", "code"): 32,
+    ("usage_meter_types", "unit"): 16,
+    ("usage_meter_components", "component_code"): 64,
+    ("ai_providers", "code"): 64,
+    ("ai_models", "code"): 128,
+    ("ai_model_aliases", "alias"): 128,
+}
+
+_EXPECTED_UNIQUE_0012 = {
+    "usage_meter_types": {("public_id",), ("code",), ("id", "payload_shape")},
+    "usage_meter_components": {("component_code",), ("meter_type_id", "quantity_field")},
+    "ai_providers": {("public_id",), ("code",)},
+    "ai_models": {("public_id",), ("provider_id", "code"), ("id", "provider_id")},
+    "ai_model_aliases": {("public_id",), ("provider_id", "alias", "open_slot")},
+}
+
+_EXPECTED_FOREIGN_KEYS_0012 = {
+    "usage_meter_components": {
+        "fk_usage_meter_components_type": (
+            ["meter_type_id", "payload_shape"],
+            "usage_meter_types",
+            ["id", "payload_shape"],
+        ),
+    },
+    "ai_models": {
+        "fk_ai_models_provider": (["provider_id"], "ai_providers", ["id"]),
+    },
+    "ai_model_aliases": {
+        "fk_ai_model_aliases_model": (
+            ["model_id", "provider_id"],
+            "ai_models",
+            ["id", "provider_id"],
+        ),
+    },
+}
+
+_CATALOG_DELETE_RULES_QUERY = text(
+    "SELECT CONSTRAINT_NAME, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS"
+    " WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME IN ('usage_meter_types',"
+    " 'usage_meter_components', 'ai_providers', 'ai_models', 'ai_model_aliases')"
+)
+_CATALOG_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME IN ('usage_meter_types', 'usage_meter_components', 'ai_providers',"
+    " 'ai_models', 'ai_model_aliases')"
+)
+
+
+def _load_0012() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0012", _MIGRATION_0012)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _catalog_checks() -> dict[str, tuple[str, str]]:
+    return {
+        str(constraint.name): (model.__tablename__, _normalised(str(constraint.sqltext)))
+        for model in _CATALOG_MODELS
+        for constraint in model.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0012_follows_0011() -> None:
+    migration = _load_0012()
+
+    assert migration.revision == _REVISION_0012
+    assert migration.down_revision == _REVISION_0011
+
+
+def test_0012_checks_slot_and_collation_are_the_ones_the_models_declare() -> None:
+    migration = _load_0012()
+    from_migration = {
+        name: (table, _normalised(condition))
+        for name, (table, condition) in migration._CHECKS.items()
+    }
+
+    assert from_migration == _catalog_checks()
+    # 类型 4 条、分量 2 条、供应商 1 条、模型 1 条、别名 1 条。
+    assert len(from_migration) == 9
+    computed = AiModelAlias.__table__.c.open_slot.computed
+    assert computed is not None
+    assert computed.persisted is True
+    assert _normalised(str(computed.sqltext)) == _normalised(migration._OPEN_SLOT)
+    assert _normalised(migration._OPEN_SLOT) == _normalised(OPEN_SLOT_EXPRESSION)
+    assert migration._CODE_COLLATION == CODE_COLLATION
+
+
+def test_0012_seed_is_the_design_list_in_the_migration_and_in_the_code() -> None:
+    """设计 §5「迁移种子与代码里的常量不一致」：三方逐行一致，9 个类型、12 个分量。"""
+    migration = _load_0012()
+    from_migration = {
+        code: (shape, unit, kind, dict(components))
+        for code, _, shape, unit, kind, components in migration._SEED_METER_TYPES
+    }
+    from_code = {
+        seed.code: (
+            seed.payload_shape.value,
+            seed.unit,
+            seed.quantity_kind.value,
+            dict(seed.components),
+        )
+        for seed in SEED_METER_TYPES
+    }
+
+    assert from_migration == _DESIGN_SEED
+    assert from_code == _DESIGN_SEED
+    assert len(from_migration) == 9
+    assert sum(len(components) for *_, components in from_migration.values()) == 12
+    # 顺序与显示名也一致。
+    assert [(row[0], row[1]) for row in migration._SEED_METER_TYPES] == [
+        (seed.code, seed.display_name) for seed in SEED_METER_TYPES
+    ]
+
+
+class _ArgsRecorder:
+    """Stands in for `alembic.op` and keeps each call's positional arguments."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __getattr__(self, name: str):
+        def record(*args: object, **_kwargs: object) -> None:
+            self.calls.append((name, args))
+
+        return record
+
+    def first_args(self, name: str) -> list[object]:
+        return [args[0] for called, args in self.calls if called == name]
+
+
+def test_0012_downgrade_drops_the_five_tables_in_dependency_order(monkeypatch) -> None:
+    migration = _load_0012()
+    upgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert upgrade.first_args("create_table") == _CREATE_ORDER_0012
+    # 种子：一次写 9 个类型，12 条 INSERT … SELECT 写分量。
+    assert len(upgrade.first_args("bulk_insert")) == 1
+    assert len(upgrade.first_args("execute")) == 12
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.first_args("drop_table") == _CREATE_ORDER_0012[::-1]
+    assert [name for name, _ in downgrade.calls] == ["drop_table"] * 5
+
+
+@needs_mysql
+def test_0012_only_adds_and_drops_its_five_tables(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    try:
+        command.downgrade(alembic_config, _REVISION_0011)
+        without = _table_names()
+        assert "audit_logs" in without, "0011 的表应该都在，否则下面的比较没有意义"
+        assert not _TABLES_0012 & without
+
+        command.upgrade(alembic_config, _REVISION_0012)
+        assert _table_names() == without | _TABLES_0012
+
+        command.downgrade(alembic_config, _REVISION_0011)
+        assert _table_names() == without
+    finally:
+        command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0012_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        columns = {table: inspector.get_columns(table) for table in _EXPECTED_0012_COLUMNS}
+        for table, expected in _EXPECTED_0012_COLUMNS.items():
+            assert {c["name"]: c["nullable"] for c in columns[table]} == expected, table
+        types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
+
+        for (table, name), column_type in types.items():
+            if name == "id" or (name.endswith("_id") and name != "public_id"):
+                assert isinstance(column_type, BigInteger), (table, name)
+            if name == "public_id":
+                assert isinstance(column_type, CHAR), table
+                assert column_type.length == 36, table
+            if name.endswith("_at") or name.startswith("effective_"):
+                assert isinstance(column_type, DateTime), (table, name)
+        # 代码列：写死的宽度，按字节比较。其余文本列用库默认的排序规则。
+        for key, width in _CODE_COLUMNS_0012.items():
+            assert isinstance(types[key], String), key
+            assert types[key].length == width, key
+            assert types[key].collation == CODE_COLLATION, key
+        for key, column_type in types.items():
+            if key not in _CODE_COLUMNS_0012 and isinstance(column_type, String):
+                assert getattr(column_type, "collation", None) != CODE_COLLATION, key
+        widths = {
+            ("usage_meter_types", "display_name"): 255,
+            ("usage_meter_types", "payload_shape"): 32,
+            ("usage_meter_types", "quantity_kind"): 16,
+            ("usage_meter_types", "status"): 16,
+            ("usage_meter_components", "payload_shape"): 32,
+            ("usage_meter_components", "quantity_field"): 64,
+            ("ai_providers", "status"): 16,
+            ("ai_models", "status"): 16,
+        }
+        for key, width in widths.items():
+            assert types[key].length == width, key
+
+        # 状态默认 ACTIVE（设计 §2）。
+        for table in ("usage_meter_types", "ai_providers", "ai_models"):
+            [status] = [c for c in columns[table] if c["name"] == "status"]
+            assert "ACTIVE" in str(status["default"]), table
+
+        # 只有 open_slot 是生成列，而且是 STORED。
+        computed = {
+            (table, c["name"]): c.get("computed")
+            for table, found in columns.items()
+            for c in found
+            if c.get("computed")
+        }
+        assert set(computed) == {("ai_model_aliases", "open_slot")}
+        open_slot = computed[("ai_model_aliases", "open_slot")]
+        assert open_slot["persisted"] is True
+        assert "effective_to" in str(open_slot["sqltext"])
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0012_keys_indexes_foreign_keys_and_checks(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        for table, expected in _EXPECTED_UNIQUE_0012.items():
+            assert _unique_sets(table) == expected, table
+        for table in _TABLES_0012:
+            foreign_keys = {
+                str(fk["name"]): (
+                    fk["constrained_columns"],
+                    fk["referred_table"],
+                    fk["referred_columns"],
+                )
+                for fk in inspector.get_foreign_keys(table)
+            }
+            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0012.get(table, {}), table
+
+        component_indexes = inspector.get_indexes("usage_meter_components")
+        by_name = {i["name"]: i["column_names"] for i in component_indexes}
+        assert by_name["ix_usage_meter_components_type_shape"] == [
+            "meter_type_id",
+            "payload_shape",
+        ]
+        alias_indexes = {i["name"]: i for i in inspector.get_indexes("ai_model_aliases")}
+        open_slot = alias_indexes["ux_ai_model_aliases_open_slot"]
+        assert open_slot["column_names"] == ["provider_id", "alias", "open_slot"]
+        assert open_slot["unique"]
+        assert alias_indexes["ix_ai_model_aliases_model"]["column_names"] == [
+            "model_id",
+            "provider_id",
+        ]
+
+        with engine.connect() as connection:
+            delete_rules = dict(connection.execute(_CATALOG_DELETE_RULES_QUERY).all())
+            checks = set(connection.execute(_CATALOG_CHECKS_QUERY).scalars())
+        # ⚠️ RESTRICT：目录行删不掉，价格版本与用量事件会永久引用它们（INV-6）。
+        assert delete_rules == {
+            "fk_usage_meter_components_type": "RESTRICT",
+            "fk_ai_models_provider": "RESTRICT",
+            "fk_ai_model_aliases_model": "RESTRICT",
+        }
+        assert checks == set(_catalog_checks())
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0012_seeds_the_design_list(alembic_config: Config) -> None:
+    """升到 0012 的那一刻，库里恰好是设计 §2 的 9 个类型与 12 个分量。"""
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        # 重建这五张表：别的用例在共享库里留下的目录行不算进来。
+        command.downgrade(alembic_config, _REVISION_0011)
+        command.upgrade(alembic_config, _REVISION_0012)
+        with engine.connect() as connection:
+            types = connection.execute(
+                text(
+                    "SELECT id, public_id, code, display_name, payload_shape, unit,"
+                    " quantity_kind, status, created_at, updated_at FROM usage_meter_types"
+                )
+            ).all()
+            components = connection.execute(
+                text(
+                    "SELECT meter_type_id, payload_shape, component_code, quantity_field"
+                    " FROM usage_meter_components"
+                )
+            ).all()
+
+        by_id = {row.id: row for row in types}
+        seeded: dict[str, tuple[str, str, str, dict[str, str]]] = {
+            row.code: (row.payload_shape, row.unit, row.quantity_kind, {}) for row in types
+        }
+        for component in components:
+            owner = by_id[component.meter_type_id]
+            # 分量的形态就是所属类型的形态。
+            assert component.payload_shape == owner.payload_shape
+            seeded[owner.code][3][component.component_code] = component.quantity_field
+
+        assert seeded == _DESIGN_SEED
+        assert len(components) == 12
+        names = {seed.code: seed.display_name for seed in SEED_METER_TYPES}
+        for row in types:
+            assert row.display_name == names[row.code]
+            assert row.status == "ACTIVE"
+            assert str(uuid.UUID(row.public_id)) == row.public_id
+            assert row.created_at == row.updated_at
+            assert row.created_at.microsecond == 0
+        assert len({row.public_id for row in types}) == 9
+    finally:
+        command.upgrade(alembic_config, "head")
+        engine.dispose()
+
+
+# 裸 SQL：绕过模型的枚举类型，直接看数据库自己拒不拒绝。
+_METER_TYPE_INSERT = text(
+    "INSERT INTO usage_meter_types (public_id, code, display_name, payload_shape, unit,"
+    " quantity_kind, status, created_at, updated_at) VALUES (:public_id, 'MIGRATION_T',"
+    " 'Migration test', :shape, :unit, :kind, :status, :now, :now)"
+)
+_PROVIDER_INSERT = text(
+    "INSERT INTO ai_providers (public_id, code, display_name, status, created_at, updated_at)"
+    " VALUES (:public_id, 'migration-test', 'Migration test', :status, :now, :now)"
+)
+_MODEL_INSERT = text(
+    "INSERT INTO ai_models (public_id, provider_id, code, display_name, status, created_at,"
+    " updated_at) VALUES (:public_id, :provider_id, 'migration-test', 'Migration test',"
+    " :status, :now, :now)"
+)
+
+
+def _check_refused(connection: Connection, statement, **values: object) -> int:
+    """Run in a savepoint; return the MySQL error number it was refused with."""
+    params = {"public_id": str(uuid.uuid4()), "now": _NOW, **values}
+    with pytest.raises(DBAPIError) as raised:
+        with connection.begin_nested():
+            connection.execute(statement, params)
+    return int(raised.value.orig.args[0])
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"shape": "OTHER"},
+        {"kind": "FLOAT"},
+        {"status": "DISABLED"},
+        {"shape": "LLM_TOKEN_FIELDS", "unit": "SECOND", "kind": "INTEGER"},
+        {"shape": "LLM_TOKEN_FIELDS", "unit": "TOKEN", "kind": "DECIMAL"},
+    ],
+    ids=[
+        "shape-unknown",
+        "kind-unknown",
+        "status-unknown",
+        "token-shape-not-token-unit",
+        "token-shape-decimal",
+    ],
+)
+@needs_mysql
+def test_0012_meter_type_checks_refuse_bad_values(alembic_config: Config, overrides: dict) -> None:
+    """形态、数量类型、状态的取值；`LLM_TOKEN_FIELDS` 只能是 TOKEN、整数（设计 §2）。"""
+    command.upgrade(alembic_config, "head")
+    valid = {"shape": "QUANTITY", "unit": "UNIT", "kind": "DECIMAL", "status": "ACTIVE"}
+    with _rolled_back_connection() as connection:
+        refused = _check_refused(connection, _METER_TYPE_INSERT, **{**valid, **overrides})
+        assert refused == _ER_CHECK_CONSTRAINT_VIOLATED
+        # 合法的 LLM_TOKEN_FIELDS 行放行：CHECK 不是一律拒绝这个形态。
+        token = {"shape": "LLM_TOKEN_FIELDS", "unit": "TOKEN", "kind": "INTEGER"}
+        connection.execute(
+            _METER_TYPE_INSERT,
+            {"public_id": str(uuid.uuid4()), "now": _NOW, **valid, **token},
+        )
+
+
+@needs_mysql
+def test_0012_provider_and_model_status_checks(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    with _rolled_back_connection() as connection:
+        refused = _check_refused(connection, _PROVIDER_INSERT, status="DISABLED")
+        assert refused == _ER_CHECK_CONSTRAINT_VIOLATED
+
+        # RETIRED 是合法取值：停用的供应商照样能挂模型。
+        params = {"public_id": str(uuid.uuid4()), "now": _NOW, "status": "RETIRED"}
+        provider = connection.execute(_PROVIDER_INSERT, params).lastrowid
+        refused = _check_refused(
+            connection,
+            _MODEL_INSERT,
+            provider_id=provider,
+            status="DISABLED",
+        )
+        assert refused == _ER_CHECK_CONSTRAINT_VIOLATED
