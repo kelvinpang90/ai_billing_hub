@@ -51,6 +51,12 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "wallet_transaction",
         # 令牌家族 id（随机 uuid 的十六进制，不是自增 id）：app/services/auth.py 的登出与重放。
         "refresh_tokens",
+        # 目录行的 public_id：app/services/ai_catalog.py（AIH-TASK-025）。计量类型、供应商、
+        # 模型各是自己那一行的；别名是新段（映射）或被截断那一段（撤销）的。
+        "usage_meter_type",
+        "ai_provider",
+        "ai_model",
+        "ai_model_alias",
     }
 )
 

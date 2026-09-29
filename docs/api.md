@@ -829,6 +829,10 @@ SHA256(RAW_REQUEST_BODY)
 | `integration_credential` | `api_key` |
 | `wallet_transaction` | 调账对象的 `id`（账本行的 `public_id`） |
 | `refresh_tokens` | 登录会话的令牌家族 id（随机 uuid 的 32 位十六进制，不是自增 id） |
+| `usage_meter_type` | 计量类型的 `id`（`public_id`） |
+| `ai_provider` | 供应商的 `id`（`public_id`） |
+| `ai_model` | 模型的 `id`（`public_id`） |
+| `ai_model_alias` | 别名段的 `id`（`public_id`）：映射是新段的，撤销是被截断那一段的 |
 
 两类的清单在 `app/services/audit_query.py`；新增一种写审计的 `entity_type` 而没有归类，
 `tests/backend/test_admin_audit_api.py` 的扫描用例会红。
@@ -838,3 +842,256 @@ SHA256(RAW_REQUEST_BODY)
 **最新在前，按审计行的自增 id 倒序**，不按 `created_at`。登录路径与业务路径写 `created_at` 时的取整不一致
 （见 [TODO.md](TODO.md) 的 AIH-TASK-006 记录段）：登录审计可能比它之后写入的建客户审计晚一秒。自增 id 才是
 真实的写入顺序。同一个原因，按 `created_from` / `created_to` 筛选在整秒边界上可能差一秒。
+
+---
+
+## AI 目录：计量类型、供应商、模型与别名
+
+设计依据：设计闸门 #163 `APPROVED: design v4`，全文见 [design/AIH-TASK-025-ai-catalog.md](design/AIH-TASK-025-ai-catalog.md)
+（spec §11、§12、§15.1、§58、§74、§84）。实现登记为 AIH-TASK-025。表结构见
+[database-schema.md](database-schema.md) 的「AI 目录」。
+
+本节是 Phase 2 价格、定价规则与计费挂靠的目录。**不含**价格、定价规则、FX、用量事件、未知模型的重新入队与前端。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/admin/usage-meter-types` | — | 200，计量类型分页 | 401 / 403 / 422 / 503 |
+| `POST /api/v1/admin/usage-meter-types` | 见下 | 201，计量类型 | 401 / 403 / 409 / 422 / 500 / 503 |
+| `GET /api/v1/admin/usage-meter-types/{meter_type_id}` | — | 200，计量类型 | 401 / 403 / 404 / 503 |
+| `PATCH /api/v1/admin/usage-meter-types/{meter_type_id}` | 见下 | 200，计量类型 | 401 / 403 / 404 / 422 / 500 / 503 |
+| `GET /api/v1/admin/ai-providers` | — | 200，供应商分页 | 401 / 403 / 422 / 503 |
+| `POST /api/v1/admin/ai-providers` | 见下 | 201，供应商 | 401 / 403 / 409 / 422 / 500 / 503 |
+| `GET /api/v1/admin/ai-providers/{provider_id}` | — | 200，供应商 | 401 / 403 / 404 / 503 |
+| `PATCH /api/v1/admin/ai-providers/{provider_id}` | 见下 | 200，供应商 | 401 / 403 / 404 / 422 / 500 / 503 |
+| `GET …/{provider_id}/models` | — | 200，模型分页 | 401 / 403 / 404 / 422 / 503 |
+| `POST …/{provider_id}/models` | 见下 | 201，模型 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `GET …/{provider_id}/models/{model_id}` | — | 200，模型详情 | 401 / 403 / 404 / 503 |
+| `PATCH …/{provider_id}/models/{model_id}` | 见下 | 200，模型 | 401 / 403 / 404 / 422 / 500 / 503 |
+| `GET …/{provider_id}/model-aliases` | — | 200，别名段分页 | 401 / 403 / 404 / 422 / 503 |
+| `POST …/{provider_id}/model-aliases` | 见下 | 201 或 200，当前未截断的那一段 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST …/{provider_id}/model-aliases/{alias_id}/retire` | `{}` | 200，被截断的那一段 | 401 / 403 / 404 / 422 / 500 / 503 |
+
+`…` 是 `/api/v1/admin/ai-providers`。只有 ADMIN 能调（处理函数第一条语句就是鉴权）。路径里的 id 一律是
+`public_id`；响应里没有内部自增 id。别名段**没有 PATCH**：段一旦写下就不改指向，改映射只能再 POST 一次。
+没有删除接口：目录行只停用、不删除（价格版本与用量事件会永久引用它们）。
+
+列表按[分页](#分页spec-108)，按 `code` 升序；计量类型、供应商、模型的列表可加 `status=ACTIVE|RETIRED` 筛选
+（别的值 422），不带时列出全部。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `USAGE_METER_TYPE_NOT_FOUND` | 计量类型不存在 | 否 |
+| 404 | `AI_PROVIDER_NOT_FOUND` | 路径里的供应商不存在 | 否 |
+| 404 | `AI_MODEL_NOT_FOUND` | 路径或请求体里的模型不存在，或不属于路径里的供应商（两者一模一样，不泄露别家的模型是否存在） | 否 |
+| 404 | `AI_MODEL_ALIAS_NOT_FOUND` | 撤销的不是该供应商下当前未截断的那一段（已截断、别家的、不存在的都一样） | 否 |
+| 409 | `USAGE_METER_TYPE_CODE_TAKEN` | 计量类型 `code` 已存在（含与种子重复） | 否 |
+| 409 | `USAGE_METER_COMPONENT_CODE_TAKEN` | `component_code` 已存在（任何类型下，含种子） | 否 |
+| 409 | `AI_PROVIDER_CODE_TAKEN` | 供应商 `code` 已存在 | 否 |
+| 409 | `AI_MODEL_CODE_TAKEN` | 同供应商下已有同名模型，**或该字符串在别名表里出现过**（不论哪一段、是否已截断） | 否 |
+| 409 | `AI_MODEL_ALIAS_TAKEN` | 映射的字符串与同供应商下某个模型的 `code` 相同 | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误（含别名段首尾相接的复查不通过、锁等待超时）；整个事务回滚 | 否 |
+
+### 字段规则
+
+| 字段 | 规则 |
+| --- | --- |
+| 计量类型 `code`、`component_code` | `^[A-Z][A-Z0-9_]{1,31}$` |
+| `unit` | `^[A-Z][A-Z0-9_]{0,15}$` |
+| `quantity_kind` | `INTEGER` / `DECIMAL` |
+| 供应商 `code` | `^[a-z0-9][a-z0-9_-]{0,63}$` |
+| 模型 `code`、`alias` | `^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$`（不含空白；覆盖 `claude-sonnet-4-5-20250929`、`gpt-4o-mini-transcribe`、`models/gemini-x`） |
+| `display_name` | 去首尾空白后 1–255 |
+| `status` | `ACTIVE` / `RETIRED` |
+
+代码**不去空白、不改大小写**：带空白就是 422；`GPT-4o` 与 `gpt-4o` 是两个不同的代码（库里按字节比较）。
+所有请求体都拒绝多余字段（422）。
+
+### 计量类型对象
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000000",
+  "code": "VIDEO_SECOND",
+  "display_name": "Video seconds",
+  "payload_shape": "QUANTITY",
+  "unit": "SECOND",
+  "quantity_kind": "DECIMAL",
+  "status": "ACTIVE",
+  "components": [
+    { "component_code": "VIDEO_SECOND", "quantity_field": "quantity", "created_at": "2026-09-29T08:30:00" }
+  ],
+  "created_at": "2026-09-29T08:30:00",
+  "updated_at": "2026-09-29T08:30:00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `code` | 即上报事件的 `usage_type`。建后不可改 |
+| `payload_shape` | 上报形态：`LLM_TOKEN_FIELDS`（四个 token 字段，每个分量对应一个；只有种子 `LLM_TOKEN`）/ `QUANTITY`（`quantity` + `unit`，唯一一个分量取 `quantity`）。建后不可改 |
+| `unit` | 上报的 `unit` 必须与它相等（摄取按它校验）。建后不可改 |
+| `quantity_kind` | 数量是整数还是小数。建后不可改 |
+| `status` | 停用只影响「以后选不选它」：**不影响**摄取与计价 |
+| `components` | 计价分量，`component_code` 升序；`quantity_field` 是这个分量从上报事件的哪个字段取数量 |
+
+迁移预置 9 个类型、12 个分量（spec §12、§15.1，清单见 [database-schema.md](database-schema.md)）。
+
+#### `POST /api/v1/admin/usage-meter-types` —— 新建计量类型
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `code` | 是 | 见字段规则 |
+| `display_name` | 是 | 见字段规则 |
+| `unit` | 是 | 见字段规则 |
+| `quantity_kind` | 是 | `INTEGER` / `DECIMAL` |
+| `component_code` | 是 | 见字段规则；与已有任何分量（任何类型下）都不能重复 |
+
+新建的类型**固定为 `QUANTITY`**，同一事务建出它唯一的分量（`quantity_field` = `quantity`）与一条
+`USAGE_METER_TYPE_CREATE` 审计。请求体带 `payload_shape` 或 `quantity_field`（或任何多余字段）是 422。
+新建之后，应用按非 token 的写法上报 `usage_type = <code>`、`quantity`、`unit` 即可被接收与计价，不需要改代码；
+要新的多字段形态（例如分开上报两档缓存写入）才需要改载荷与代码。
+
+- `code` 或 `component_code` 已存在：409，类型行与分量行都不写。
+
+#### `PATCH /api/v1/admin/usage-meter-types/{meter_type_id}` —— 改名或改状态
+
+只收 `display_name`、`status`，至少一个；两者都不许是 `null`。带 `code`、`unit`、`quantity_kind`、
+`payload_shape`、`component_code`、`quantity_field` 或任何多余字段是 422。**没有实际变化**：200，什么都不写
+（`updated_at` 不变、不写审计）；有变化时写一条 `USAGE_METER_TYPE_UPDATE`。`ACTIVE ↔ RETIRED` 双向都允许。
+
+### 供应商对象
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000000",
+  "code": "anthropic",
+  "display_name": "Anthropic",
+  "status": "ACTIVE",
+  "created_at": "2026-09-29T08:30:00",
+  "updated_at": "2026-09-29T08:30:00"
+}
+```
+
+`code` 与上报事件的 `provider` 精确比较，建后不可改。
+
+- `POST /api/v1/admin/ai-providers`：请求体 `code`、`display_name`。201；同一事务写一条 `AI_PROVIDER_CREATE`。
+  `code` 已存在：409 `AI_PROVIDER_CODE_TAKEN`。
+- `PATCH /api/v1/admin/ai-providers/{provider_id}`：规则同计量类型的 PATCH（只收 `display_name`、`status`；带
+  `code` 等是 422；无变化 200 不写）。审计动作 `AI_PROVIDER_UPDATE`。
+
+### 模型对象
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000000",
+  "provider_id": "00000000-0000-4000-8000-000000000000",
+  "provider_code": "anthropic",
+  "code": "claude-sonnet-4-5",
+  "display_name": "Claude Sonnet 4.5",
+  "status": "ACTIVE",
+  "created_at": "2026-09-29T08:30:00",
+  "updated_at": "2026-09-29T08:30:00"
+}
+```
+
+`provider_id` 是供应商的 `public_id`。`code` 与上报事件的 `model` 精确比较，建后不可改。**模型详情**
+（`GET …/models/{model_id}`）多一项 `aliases`：当前（未截断的段）指向它的别名段，`alias` 升序。
+
+- `POST …/{provider_id}/models`：请求体 `code`、`display_name`；供应商只来自路径（带 `provider_id` 是 422）。
+  201；同一事务写一条 `AI_MODEL_CREATE`。在供应商行排他锁内检查：同供应商下已有同名模型，**或该字符串在
+  别名表里出现过**：409 `AI_MODEL_CODE_TAKEN`。
+- `PATCH …/{provider_id}/models/{model_id}`：规则同上。审计动作 `AI_MODEL_UPDATE`。
+
+**停用（`RETIRED`）不影响解析与计费**：用量已经发生，钱照样要算；停用只表示以后建新价格、新规则时不许选它。
+
+### 别名段对象
+
+一段 = 「某个字符串在 `[effective_from, effective_to)` 内指向某个模型」。一个字符串的所有段首尾相接、
+不重叠，至多一段未截断。
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000000",
+  "alias": "claude-sonnet-4-5-20250929",
+  "model_id": "00000000-0000-4000-8000-000000000000",
+  "model_code": "claude-sonnet-4-5",
+  "effective_from": null,
+  "effective_to": null,
+  "created_at": "2026-09-29T08:30:00",
+  "closed_at": null
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `alias` | 上报事件里出现、但不是模型代码的那个字符串 |
+| `model_id` / `model_code` | 这一段指向的模型（`public_id` 与代码）。段写下之后指向不变 |
+| `effective_from` | `null` = 「一直以来」；只有一个字符串的第一段是 `null` |
+| `effective_to` | `null` = 仍未截断；截断后不再改 |
+| `closed_at` | 截断的那一刻（服务端时间，整秒） |
+
+#### `GET …/{provider_id}/model-aliases` —— 别名段列表
+
+全部历史，按 `alias`、`effective_from`（`null` 在前）排序。查询参数：`alias`（精确匹配，最长 128，
+不做大小写折叠）、`current=true`（只列未截断的段），以及分页。
+
+#### `POST …/{provider_id}/model-aliases` —— 映射
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `alias` | 是 | 见字段规则 |
+| `model_id` | 是 | **同一供应商下**模型的 `public_id`；别家的与不存在的一样是 404 `AI_MODEL_NOT_FOUND` |
+
+在供应商行排他锁内完成；边界时刻 `t` 在**拿到锁之后**取：服务端当前时间**向上**取整到下一个整秒（恰好是
+整秒时取下一秒），所以 `t` 严格晚于此刻。按该字符串的现状：
+
+| 现状 | 做什么 | 响应 |
+| --- | --- | --- |
+| 从没有过段 | 插入第一段 `[null, null) → M`：对过去全部生效（过去这个字符串一律是「未知」、从未扣过钱） | 201 |
+| 有未截断的段，且指向 M | 什么都不写 | 200 |
+| 有未截断的段，指向别的模型 N | 截断当前段于 `t`，插入 `[t, null) → M`。`t` 之前发生的事件永远按 N | 201 |
+| 所有段都已截断（撤销过），最后一段止于 `t0` | 插入 `[t0, null) → M`，补上撤销以来的空档 | 201 |
+
+- 字符串与同供应商下某个模型的 `code` 相同：409 `AI_MODEL_ALIAS_TAKEN`，不写。
+- 写了新段时同一事务写一条 `AI_MODEL_ALIAS_MAP`，并在提交前复查该字符串的全部段首尾相接、只有第一段
+  `effective_from` 为空；不满足就整体回滚（500）。
+- 同一秒内对同一字符串连续两次改映射（或改映射后立刻撤销）时，当前段的起点可能已经 ≥ 这一次的 `t`；这时
+  截断点取「当前段起点 + 1 秒」，仍是整秒、仍严格晚于此刻，段不会变成空区间。
+
+**已经解析到某个模型的 `(字符串, 时刻)` 永远不会改成另一个模型**：映射的每一次变动只可能把某些时刻从「未知」
+变成某个模型，或只影响 `t` 及以后发生的事件。
+
+#### `POST …/{provider_id}/model-aliases/{alias_id}/retire` —— 撤销
+
+请求体是 `{}`。`alias_id` 必须是这个供应商下**当前未截断**的那一段，否则 404 `AI_MODEL_ALIAS_NOT_FOUND`、
+不写。成功：200，截断于 `t`（取法同映射），同一事务写一条 `AI_MODEL_ALIAS_RETIRE`。`t` 起发生的事件
+解析为「未知」（计费侧进 `MODEL_UNKNOWN`，不扣费、可见）。
+
+### 审计
+
+八个动作都与目录写入同一事务，不写 outbox；操作者带 ip 与 user agent。前后状态里指向一律用模型 `code`，
+不用内部 id。
+
+| `action` | `entity_type` / `entity_id` | `before_state` | `after_state` |
+| --- | --- | --- | --- |
+| `USAGE_METER_TYPE_CREATE` | `usage_meter_type` / 类型的 `id` | — | `code`、`display_name`、`payload_shape`、`unit`、`quantity_kind`、`status`、`component_code` |
+| `USAGE_METER_TYPE_UPDATE` | 同上 | 变化的字段的旧值 | 变化的字段的新值 |
+| `AI_PROVIDER_CREATE` | `ai_provider` / 供应商的 `id` | — | `code`、`display_name`、`status` |
+| `AI_PROVIDER_UPDATE` | 同上 | 变化的字段的旧值 | 变化的字段的新值 |
+| `AI_MODEL_CREATE` | `ai_model` / 模型的 `id` | — | `provider_code`、`code`、`display_name`、`status` |
+| `AI_MODEL_UPDATE` | 同上 | 变化的字段的旧值 | 变化的字段的新值 |
+| `AI_MODEL_ALIAS_MAP` | `ai_model_alias` / 新段的 `id` | 被截断那一段的 `model_code` 与 `effective_to`（截断前为 `null`）；没有被截断的段时为空 | `provider_code`、`alias`、`model_code`（新段的目标）、`effective_from` |
+| `AI_MODEL_ALIAS_RETIRE` | `ai_model_alias` / 被截断那一段的 `id` | `effective_to`（`null`） | `effective_to` |
+
+「指向相同」的映射与无变化的 PATCH 不写审计。
+
+### 解析（计费侧调用，本任务不接线）
+
+`app/repositories/ai_catalog.py` 的 `resolve_model(session, provider_code, model_code, occurred_at)`：按「模型代码
+精确匹配 → 在 `occurred_at` 那一刻生效的别名段」返回模型，都不中返回 `None`。不做大小写或任何规范化；不看
+供应商与模型的状态。它对供应商行加共享锁（`FOR SHARE`），模型与别名也用加锁读，锁持有到**调用方**的事务
+提交。计费侧（T-H）必须在写事件快照、扣费的同一事务里调用它，并只处理 `is_due(occurred_at, now)` 为真的
+事件（`now` 在它拿到锁之后取）；更晚的留到下一轮。契约全文见设计 §2「对下游任务的契约」与
+[TODO.md](TODO.md) 的 AIH-TASK-025 记录段。

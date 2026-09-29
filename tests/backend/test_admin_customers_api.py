@@ -28,6 +28,15 @@ from app.core.database import create_session_factory
 from app.core.logging import JsonFormatter
 from app.core.tokens import issue_access_token, issue_pending_2fa_token
 from app.main import create_app
+from app.models.ai_catalog import (
+    AiModel,
+    AiModelAlias,
+    AiProvider,
+    PayloadShape,
+    QuantityKind,
+    UsageMeterComponent,
+    UsageMeterType,
+)
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.integration import IntegrationCredential, ProjectWebhookSecret
@@ -62,11 +71,16 @@ ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
 # 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态、
-# AIH-TASK-022 的审计日志查询。
+# AIH-TASK-022 的审计日志查询、AIH-TASK-025 的十五个 AI 目录接口。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
 )
+METER_TYPES_ROUTE = "/api/v1/admin/usage-meter-types"
+PROVIDERS_ROUTE = "/api/v1/admin/ai-providers"
+PROVIDER_ROUTE = PROVIDERS_ROUTE + "/{provider_id}"
+MODELS_ROUTE = PROVIDER_ROUTE + "/models"
+ALIASES_ROUTE = PROVIDER_ROUTE + "/model-aliases"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -86,7 +100,25 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"),
     ("POST", "/api/v1/admin/customers/{customer_id}/account-status"),
     ("GET", "/api/v1/admin/audit-logs"),
+    ("GET", METER_TYPES_ROUTE),
+    ("POST", METER_TYPES_ROUTE),
+    ("GET", METER_TYPES_ROUTE + "/{meter_type_id}"),
+    ("PATCH", METER_TYPES_ROUTE + "/{meter_type_id}"),
+    ("GET", PROVIDERS_ROUTE),
+    ("POST", PROVIDERS_ROUTE),
+    ("GET", PROVIDER_ROUTE),
+    ("PATCH", PROVIDER_ROUTE),
+    ("GET", MODELS_ROUTE),
+    ("POST", MODELS_ROUTE),
+    ("GET", MODELS_ROUTE + "/{model_id}"),
+    ("PATCH", MODELS_ROUTE + "/{model_id}"),
+    ("GET", ALIASES_ROUTE),
+    ("POST", ALIASES_ROUTE),
+    ("POST", ALIASES_ROUTE + "/{alias_id}/retire"),
 }
+
+# AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
+PROBE_CATALOG_ID = "00000000-0000-4000-8000-000000000000"
 
 # 鉴权用例给写接口的合法请求体：体不合法的话 FastAPI 在处理函数之前就回 422，
 # 那条用例就测不到 `require_admin` 了。
@@ -112,6 +144,22 @@ VALID_BODIES = {
         "account_status": "DISABLED",
         "reason": "Probe",
     },
+    # AI 目录（AIH-TASK-025）：预置的行都是 ACTIVE、别名段未截断，所以漏了鉴权的 PATCH 与
+    # 撤销会真的改它们，建与映射会真的多出行。
+    ("POST", METER_TYPES_ROUTE): {
+        "code": "PROBE_UNIT",
+        "display_name": "Probe",
+        "unit": "UNIT",
+        "quantity_kind": "DECIMAL",
+        "component_code": "PROBE_UNIT",
+    },
+    ("PATCH", METER_TYPES_ROUTE + "/{meter_type_id}"): {"status": "RETIRED"},
+    ("POST", PROVIDERS_ROUTE): {"code": "probe-new", "display_name": "Probe"},
+    ("PATCH", PROVIDER_ROUTE): {"status": "RETIRED"},
+    ("POST", MODELS_ROUTE): {"code": "probe-model-new", "display_name": "Probe"},
+    ("PATCH", MODELS_ROUTE + "/{model_id}"): {"status": "RETIRED"},
+    ("POST", ALIASES_ROUTE): {"alias": "probe-alias-new", "model_id": PROBE_CATALOG_ID},
+    ("POST", ALIASES_ROUTE + "/{alias_id}/retire"): {},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -262,13 +310,19 @@ COUNTED_MODELS = (
     DomainOutbox,
     IntegrationCredential,
     ProjectWebhookSecret,
+    UsageMeterType,
+    UsageMeterComponent,
+    AiProvider,
+    AiModel,
+    AiModelAlias,
 )
 
 
 def row_counts(application: FastAPI) -> dict[str, int]:
     """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。
 
-    凭据表（AIH-TASK-012）与出站签名密钥表（AIH-TASK-019）同理。
+    凭据表（AIH-TASK-012）、出站签名密钥表（AIH-TASK-019）与 AI 目录的五张表（AIH-TASK-025）
+    同理。
     """
     with application.state.session_factory() as session:
         return {model.__tablename__: count_rows(session, model) for model in COUNTED_MODELS}
@@ -283,6 +337,11 @@ NO_ROWS = {
     "domain_outbox": 0,
     "integration_credentials": 0,
     "project_webhook_secrets": 0,
+    "usage_meter_types": 0,
+    "usage_meter_components": 0,
+    "ai_providers": 0,
+    "ai_models": 0,
+    "ai_model_aliases": 0,
 }
 
 
@@ -349,6 +408,76 @@ def probe_webhook_secret(application: FastAPI, project_id: str) -> None:
             now=utc_now().replace(microsecond=0),
         )
         session.commit()
+
+
+def probe_catalog(application: FastAPI) -> None:
+    """ACTIVE meter type, provider and model, plus an untruncated alias segment (AIH-TASK-025).
+
+    都用 `PROBE_CATALOG_ID` 作 public_id，直接写库：漏了鉴权的处理函数会真的找到它们。
+    """
+    now = utc_now().replace(microsecond=0)
+    with application.state.session_factory() as session:
+        meter_type = UsageMeterType(
+            public_id=PROBE_CATALOG_ID,
+            code="PROBE",
+            display_name="Probe",
+            payload_shape=PayloadShape.QUANTITY,
+            unit="UNIT",
+            quantity_kind=QuantityKind.DECIMAL,
+            created_at=now,
+            updated_at=now,
+        )
+        provider = AiProvider(
+            public_id=PROBE_CATALOG_ID,
+            code="probe",
+            display_name="Probe",
+            created_at=now,
+            updated_at=now,
+        )
+        session.add_all([meter_type, provider])
+        session.flush()
+        model = AiModel(
+            public_id=PROBE_CATALOG_ID,
+            provider_id=provider.id,
+            code="probe-model",
+            display_name="Probe",
+            created_at=now,
+            updated_at=now,
+        )
+        component = UsageMeterComponent(
+            meter_type_id=meter_type.id,
+            payload_shape=PayloadShape.QUANTITY,
+            component_code="PROBE",
+            quantity_field="quantity",
+            created_at=now,
+        )
+        session.add_all([model, component])
+        session.flush()
+        session.add(
+            AiModelAlias(
+                public_id=PROBE_CATALOG_ID,
+                provider_id=provider.id,
+                model_id=model.id,
+                alias="probe-alias",
+                created_at=now,
+            )
+        )
+        session.commit()
+
+
+def stored_catalog(application: FastAPI) -> list[tuple]:
+    """What PATCH and retire change: statuses, names, `updated_at`, and segment ends."""
+    editable = [
+        select(model.code, model.display_name, model.status, model.updated_at).order_by(model.id)
+        for model in (UsageMeterType, AiProvider, AiModel)
+    ]
+    ends = (AiModelAlias.alias, AiModelAlias.effective_to, AiModelAlias.closed_at)
+    segments = select(*ends).order_by(AiModelAlias.id)
+    stored: list[tuple] = []
+    with application.state.session_factory() as session:
+        for statement in [*editable, segments]:
+            stored += [tuple(row) for row in session.execute(statement)]
+    return stored
 
 
 def stored_webhook_secrets(application: FastAPI) -> list[tuple]:
@@ -460,16 +589,20 @@ def test_every_admin_route_refuses_non_admins(
     project_id = new_project(client, admin, customer_id)["id"]
     probe_credential(app, project_id)
     probe_webhook_secret(app, project_id)
+    probe_catalog(app)
     url = (
         path.replace("{customer_id}", customer_id)
         .replace("{project_id}", project_id)
         .replace("{api_key}", PROBE_API_KEY)
         .replace("{key_version}", "1")
     )
+    for name in ("meter_type_id", "provider_id", "model_id", "alias_id"):
+        url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
     credentials = stored_credentials(app)
     webhook_secrets = stored_webhook_secrets(app)
+    catalog = stored_catalog(app)
 
     response = client.request(method, url, json=VALID_BODIES.get((method, path)), headers=headers)
 
@@ -482,6 +615,8 @@ def test_every_admin_route_refuses_non_admins(
     assert stored_credentials(app) == credentials
     # 签名密钥行同理：启用与退役改的是已有行的状态与时间（AIH-TASK-019）。
     assert stored_webhook_secrets(app) == webhook_secrets
+    # AI 目录同理：PATCH 改状态与名字，撤销改段的终点（AIH-TASK-025）。
+    assert stored_catalog(app) == catalog
 
 
 @pytest.mark.parametrize(

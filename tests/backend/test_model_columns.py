@@ -19,6 +19,15 @@ import pytest
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.types import Numeric
 
+from app.models.ai_catalog import (
+    AiModel,
+    AiProvider,
+    CatalogStatus,
+    PayloadShape,
+    QuantityKind,
+    UsageMeterComponent,
+    UsageMeterType,
+)
 from app.models.auth import (
     _ENUM_LENGTH,
     AuditAction,
@@ -33,10 +42,13 @@ from app.models.base import MONEY_PRECISION, MONEY_SCALE
 from app.models.tenancy import BillingStatus, Tenant
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 
+# AI 目录（AIH-TASK-025）的四张表各有枚举列：状态、上报形态、数量类型。
+_CATALOG_MODELS = (UsageMeterType, UsageMeterComponent, AiProvider, AiModel)
+
 
 def enum_columns():
-    """Every VARCHAR-backed enum column in the auth, tenant and ledger tables."""
-    for model in (User, AuditLog, DomainOutbox, Tenant, WalletTransaction):
+    """Every VARCHAR-backed enum column in the auth, tenant, ledger and catalog tables."""
+    for model in (User, AuditLog, DomainOutbox, Tenant, WalletTransaction, *_CATALOG_MODELS):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
                 yield f"{model.__tablename__}.{column.name}", column
@@ -49,6 +61,25 @@ def test_there_are_enum_columns_to_check() -> None:
     """⚠️ 没有这一条，上面那个收集函数一旦失效，下面的参数化用例会在空集合上
     「全部通过」—— 测试全绿而校验什么也没做。"""
     assert len(_ENUM_COLUMNS) >= 3
+
+
+def test_the_catalog_enum_columns_are_collected() -> None:
+    """设计 §2 写死的列宽：状态 16、上报形态 32、数量类型 16（与迁移 0012 一致）。"""
+    tables = {model.__tablename__ for model in _CATALOG_MODELS}
+    widths = {
+        label: column.type.length
+        for label, column in _ENUM_COLUMNS
+        if label.split(".")[0] in tables
+    }
+
+    assert widths == {
+        "usage_meter_types.payload_shape": 32,
+        "usage_meter_types.quantity_kind": 16,
+        "usage_meter_types.status": 16,
+        "usage_meter_components.payload_shape": 32,
+        "ai_providers.status": 16,
+        "ai_models.status": 16,
+    }
 
 
 @pytest.mark.parametrize("label,column", _ENUM_COLUMNS, ids=[label for label, _ in _ENUM_COLUMNS])
@@ -75,6 +106,9 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
         BillingStatus,
         TransactionType,
         ReferenceType,
+        CatalogStatus,
+        PayloadShape,
+        QuantityKind,
     ],
     ids=lambda cls: cls.__name__,
 )
