@@ -48,9 +48,6 @@ _MOMENT_PATTERN: Final = re.compile(
     r"(?P<fraction>\.[0-9]{1,6})?(?P<zone>Z|[+-][0-9]{2}:[0-9]{2})"
 )
 
-# 一个版本最多带多少个分量：种子一共 12 个，给管理员新建的类型留足余量。
-MAX_COMPONENTS: Final = 64
-
 
 def _parse_positive(value: object) -> Decimal:
     """A positive decimal string → `Decimal`, never through float. Anything else is refused."""
@@ -115,7 +112,7 @@ class ComponentInput(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-Components = Annotated[list[ComponentInput], Field(min_length=1, max_length=MAX_COMPONENTS)]
+Components = Annotated[list[ComponentInput], Field(min_length=1)]
 
 
 def _distinct(components: list[ComponentInput]) -> list[ComponentInput]:

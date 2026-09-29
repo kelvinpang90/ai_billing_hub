@@ -559,7 +559,11 @@ def test_whole_seconds_with_zero_fractions_are_accepted(client, admin, catalog) 
 
 
 def test_a_start_not_after_the_latest_is_a_conflict(client, app, admin, catalog) -> None:
-    """设计 §7「不许回溯」：F ≤ 末尾版本的起点是 409 `EFFECTIVE_FROM_CONFLICT`。"""
+    """设计 §7「不许回溯」：请求的 F ≤ 末尾版本的起点是 409 `EFFECTIVE_FROM_CONFLICT`。
+
+    不指定时刻、末尾是尚未开始的预约那一格，设计 v3 没有合法结果（500），在
+    test_provider_prices_service.py 的缺口用例里。
+    """
     published(client, admin, catalog)
     reserved = new_draft(client, admin, catalog)
     act(client, admin, reserved["id"], "publish", {"effective_from": "2999-01-02T00:00:00Z"})
@@ -569,10 +573,9 @@ def test_a_start_not_after_the_latest_is_a_conflict(client, app, admin, catalog)
     responses = [
         act(client, admin, draft["id"], "publish", {"effective_from": "2999-01-02T00:00:00Z"}),
         act(client, admin, draft["id"], "publish", {"effective_from": "2999-01-01T00:00:00Z"}),
-        act(client, admin, draft["id"], "publish"),
     ]
 
-    assert outcomes(responses) == [(409, "EFFECTIVE_FROM_CONFLICT")] * 3
+    assert outcomes(responses) == [(409, "EFFECTIVE_FROM_CONFLICT")] * 2
     assert snapshot(app) == before
 
 

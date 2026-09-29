@@ -132,8 +132,14 @@ def lock_provider(session: Session, provider_id: int) -> AiProvider:
     return session.execute(statement).scalar_one()
 
 
-def get_model(session: Session, model_id: int) -> AiModel:
-    return session.execute(select(AiModel).where(AiModel.id == model_id)).scalar_one()
+def _locked[T](statement: Select[T], lock: bool) -> Select[T]:
+    """`FOR SHARE` when `lock`: reads made under the provider lock in a publish or retire."""
+    return _shared(statement) if lock else statement
+
+
+def get_model(session: Session, model_id: int, *, lock: bool = False) -> AiModel:
+    statement = select(AiModel).where(AiModel.id == model_id)
+    return session.execute(_locked(statement, lock)).scalar_one()
 
 
 def get_provider(session: Session, provider_id: int) -> AiProvider:
@@ -162,10 +168,32 @@ def meter_components_by_code(
     return {component.component_code: (component, kind) for component, kind in found}
 
 
+def meter_components_of(
+    session: Session, meter_type_ids: Iterable[int], *, lock: bool = False
+) -> dict[int, list[UsageMeterComponent]]:
+    """`meter_type_id` → its catalog components, `component_code` ascending.
+
+    与 app/repositories/ai_catalog.py 的 `components_for` 同一个查询，多一个加锁读的选项
+    （发布时的完整性校验在供应商行锁之后读它）。
+    """
+    ids = sorted(set(meter_type_ids))
+    found: dict[int, list[UsageMeterComponent]] = {meter_type_id: [] for meter_type_id in ids}
+    if not ids:
+        return found
+    statement = (
+        select(UsageMeterComponent)
+        .where(UsageMeterComponent.meter_type_id.in_(ids))
+        .order_by(UsageMeterComponent.component_code)
+    )
+    for row in session.execute(_locked(statement, lock)).scalars():
+        found[row.meter_type_id].append(row)
+    return found
+
+
 def components_for(
-    session: Session, version_ids: Iterable[int]
+    session: Session, version_ids: Iterable[int], *, lock: bool = False
 ) -> dict[int, list[PricedComponent]]:
-    """Version id → its components, `component_code` ascending."""
+    """Version id → its components, `component_code` ascending. `lock`: `FOR SHARE` on all three."""
     ids = sorted(set(version_ids))
     found: dict[int, list[PricedComponent]] = {version_id: [] for version_id in ids}
     if not ids:
@@ -180,34 +208,38 @@ def components_for(
         .where(ProviderPriceComponent.provider_price_version_id.in_(ids))
         .order_by(UsageMeterComponent.component_code)
     )
-    for row, component, kind in session.execute(statement):
+    for row, component, kind in session.execute(_locked(statement, lock)):
         found[row.provider_price_version_id].append(PricedComponent(row, component, kind))
     return found
 
 
 def providers_and_models(
-    session: Session, rows: Sequence[ProviderPriceVersion]
+    session: Session, rows: Sequence[ProviderPriceVersion], *, lock: bool = False
 ) -> tuple[dict[int, AiProvider], dict[int, AiModel]]:
     """The providers and models the versions hang on, by internal id."""
     provider_ids = sorted({row.provider_id for row in rows})
     model_ids = sorted({row.model_id for row in rows})
     if not rows:
         return {}, {}
-    providers = session.execute(select(AiProvider).where(AiProvider.id.in_(provider_ids)))
-    models = session.execute(select(AiModel).where(AiModel.id.in_(model_ids)))
+    providers = session.execute(
+        _locked(select(AiProvider).where(AiProvider.id.in_(provider_ids)), lock)
+    )
+    models = session.execute(_locked(select(AiModel).where(AiModel.id.in_(model_ids)), lock))
     return (
         {provider.id: provider for provider in providers.scalars()},
         {model.id: model for model in models.scalars()},
     )
 
 
-def user_emails(session: Session, user_ids: Iterable[int | None]) -> dict[int, str]:
+def user_emails(
+    session: Session, user_ids: Iterable[int | None], *, lock: bool = False
+) -> dict[int, str]:
     """Internal user id → login email. Admin views name people by email, never by id."""
     ids = sorted({user_id for user_id in user_ids if user_id is not None})
     if not ids:
         return {}
     statement = select(User.id, User.email).where(User.id.in_(ids))
-    return {row.id: row.email for row in session.execute(statement)}
+    return {row.id: row.email for row in session.execute(_locked(statement, lock))}
 
 
 def list_versions(
@@ -248,11 +280,6 @@ def list_versions(
 def version_order(row: ProviderPriceVersion) -> tuple[bool, dt.datetime, int]:
     """Time order: the one without a start first (排序在 Python 里做，不依赖方言的 NULL 约定)."""
     return (row.effective_from is not None, row.effective_from or dt.datetime.min, row.id)
-
-
-def is_empty_period(row: ProviderPriceVersion) -> bool:
-    """`[F, F)`: a retired reservation. It never matches and takes no part in the timeline."""
-    return row.effective_from is not None and row.effective_from == row.effective_to
 
 
 def period_versions(
@@ -506,13 +533,13 @@ __all__ = [
     "get_version",
     "insert_components",
     "insert_draft",
-    "is_empty_period",
     "list_versions",
     "lock_provider",
     "mark_discarded",
     "mark_published",
     "mark_retired",
     "meter_components_by_code",
+    "meter_components_of",
     "period_versions",
     "providers_and_models",
     "resolve_provider_price",
