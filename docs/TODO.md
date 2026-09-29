@@ -23,19 +23,18 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-026` Phase 2 供应商价格版本与泛化价格分量
-2. `AIH-TASK-027` Phase 2 定价规则 MARKUP 与 FIXED_RATE
-3. `AIH-TASK-028` Phase 2 FX 汇率版本、BNM 拉取、审批与告警接口
-4. `AIH-TASK-029` Phase 2 用量摄取端点
-5. `AIH-TASK-030` Phase 2 批量用量摄取端点
-6. `AIH-TASK-031` Phase 2 计价引擎与试算预览
-7. `AIH-TASK-032` Phase 2 异步计费 worker
-8. `AIH-TASK-033` Phase 2 最热租户压测脚本
-9. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-10. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-11. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-12. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-13. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-027` Phase 2 定价规则 MARKUP 与 FIXED_RATE
+2. `AIH-TASK-028` Phase 2 FX 汇率版本、BNM 拉取、审批与告警接口
+3. `AIH-TASK-029` Phase 2 用量摄取端点
+4. `AIH-TASK-030` Phase 2 批量用量摄取端点
+5. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+6. `AIH-TASK-032` Phase 2 异步计费 worker
+7. `AIH-TASK-033` Phase 2 最热租户压测脚本
+8. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+9. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+10. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+11. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+12. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -2289,6 +2288,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     RETIRED` 触发器、退役侧快照读）
   - 本地：六项检查全过；真 MySQL（一次性 `mysql:8.4` 容器）上 `test_provider_prices_service.py`、
     `test_provider_prices_resolve.py`、`test_migrations.py` 共 198 个用例全过、无 skipped
+  - 合并 main（#190、#189）后 CI 六项全绿；Codex `VERDICT: APPROVE`（`reviewed-head` `a0e5bbe`，无阻断、无建议），
+    Kelvin 合并为 `ef3800e`。main 上 Deploy（run `36577203854`）成功：`alembic upgrade head` 执行了迁移 0013（失败会中止部署），健康检查与 `/healthz` 冒烟通过，`ef3800e` 记为最近一次成功部署
 - [ ] **后续**：
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-K
     （AIH-TASK-036）补上

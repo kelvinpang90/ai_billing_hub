@@ -1593,7 +1593,7 @@ tasks:
       可预约未来生效、不许回溯（第一个版本除外），发布与退役在供应商行排他锁内、边界时刻在锁后取；发布后由触发器保证不可变、
       发布跃迁上校验分量完整、区间不重叠；管理端七个接口与五个审计动作；只读查询 resolve_provider_price 与计费解析串行。
       不含 FX、成本计算、试算、价格同步与前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-025
     acceptance_criteria:
