@@ -23,6 +23,7 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
+1. `AIH-TASK-025` Phase 2 Provider、Model 与 Usage Meter 目录
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -41,7 +42,6 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
-- 待登记：Phase 2 T-A Provider、Model 与 Usage Meter 目录（需设计闸门）
 - 待登记：Phase 2 T-B 供应商价格版本与泛化价格分量（需设计闸门）
 - 待登记：Phase 2 T-C FX 汇率版本、BNM 拉取、审批与告警计数接口（需设计闸门）
 - 待登记：Phase 2 T-D 定价规则 MARKUP 与 FIXED_RATE（需设计闸门）
@@ -2069,6 +2069,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 ## Phase 2 — AI Usage Billing Engine（§125）
 
 > 拆分、依赖与关键路径见 [PHASE-2-plan.md](design/PHASE-2-plan.md)（Kelvin 2026-09-28 确认）：12 个任务 T-A…T-L，8 个过设计闸门；设计闸门先写，实现任务等 AIH-TASK-020–023 合并部署后再登记。自动 FX 适配器（BNM）归本 Phase，Phase 8 只做供应商价格同步。
+>
+> 2026-09-29：020–023 已交付，T-A 登记为 `AIH-TASK-025`（设计闸门 #163 `APPROVED: design v4`，设计在 [AIH-TASK-025-ai-catalog.md](design/AIH-TASK-025-ai-catalog.md)）。审查中两处改动值得记住：计量类型由只读改为管理员可新建（Kelvin 选择满足 §58，不写偏离 ADR）；别名按 `occurred_at` 分段、解析与改映射用供应商行锁串行 —— T-B / T-D 的价格与规则发布将面临同一个「发布与计费解析的先后」问题，那两个闸门要照此处理。
 
 - [ ] Provider / Model / Usage Meter
 - [ ] `provider_price_versions` + 泛化价格分量（含缓存 token、非 token 单位）
