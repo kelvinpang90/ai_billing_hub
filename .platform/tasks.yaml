@@ -1527,7 +1527,7 @@ tasks:
       - 每个处理函数第一条语句调用 require_admin，新路由全部加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；匿名 401、CUSTOMER 403，都不写库；响应不含内部自增 id
       - 建模型、映射别名、撤销别名在供应商行 SELECT … FOR UPDATE 内完成，边界时刻 t 在拿到锁之后取、向上取整到下一个整秒；模型代码与别名表里出现过的任何字符串（含已截断的段）不撞；每次写别名后在同一事务里复查该字符串全部段首尾相接、只有第一段 effective_from 为空，不满足就回滚
       - resolve_model(session, provider_code, model_code, occurred_at) 对供应商行 FOR SHARE，模型与别名都用加锁读（FOR SHARE），不做大小写或其他规范化，不看供应商与模型的状态；另提供设计 §7 所说的「occurred_at 不晚于持锁后当前时间」判定函数，本任务不接到任何计费路径
-      - 八个审计动作（USAGE_METER_TYPE_CREATE / UPDATE、AI_PROVIDER_CREATE / UPDATE、AI_MODEL_CREATE / UPDATE、AI_MODEL_ALIAS_MAP / RETIRE）与目录写入同一事务，前后状态按设计 §2「审计」，指向一律用模型 code 表示；不写 outbox
+      - 八个审计动作（USAGE_METER_TYPE_CREATE / UPDATE、AI_PROVIDER_CREATE / UPDATE、AI_MODEL_CREATE / UPDATE、AI_MODEL_ALIAS_MAP / RETIRE）与目录写入同一事务，前后状态按设计 §2「审计」，指向一律用模型 code 表示；不写 outbox；四个新 entity_type（usage_meter_type、ai_provider、ai_model、ai_model_alias）的 entity_id 都是 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红
       - 测试覆盖设计 §7 全部行；数据库约束、并发、「解析与改映射并发」「快照读陷阱」「共享锁互不阻塞」放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表的枚举列加进 test_model_columns.py；uuid 用全零占位值（secret-scan）
       - docs/api.md 记全部新接口；docs/database-schema.md 记五张表与种子；docs/TODO.md 新增 AIH-TASK-025 记录段，记下八个审计动作对 spec §66 的补充、缓存写入只设一档价格的已知限制（设计 §10 第 2 条），以及设计 §2「对下游任务的契约」（T-B / T-D / T-E / T-G / T-H）
       - 不含价格、定价规则、FX、用量事件表、重新入队、告警与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
@@ -1540,6 +1540,7 @@ tasks:
       - app/models/auth.py
       - app/repositories/ai_catalog.py
       - app/services/ai_catalog.py
+      - app/services/audit_query.py
       - app/schemas/ai_catalog.py
       - app/api/admin_ai_catalog.py
       - app/main.py
