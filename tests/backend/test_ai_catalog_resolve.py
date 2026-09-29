@@ -501,7 +501,7 @@ def test_a_resolved_time_never_changes_its_model(sqlite_factory) -> None:
     seen: dict[tuple[str, dt.datetime], str] = {}
     changes = 0
 
-    for step in range(60):
+    for step in range(120):
         clock.advance(microseconds=rng.choice(steps))
         operation = rng.choice(["map", "map", "map", "retire", "model"])
         string = rng.choice(strings)
