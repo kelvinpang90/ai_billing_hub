@@ -191,7 +191,15 @@ class AuditLog(Base):
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
 
-    __table_args__ = (Index("ix_audit_logs_actor_created", "actor_user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_audit_logs_actor_created", "actor_user_id", "created_at"),
+        # 管理端审计查询的三个索引（AIH-TASK-022，迁移 0011）。排序按 id 倒序，所以前两个把
+        # `id` 显式写在末尾：按实体、按动作筛选之后直接按索引顺序倒着读，不用再排序。
+        Index("ix_audit_logs_entity", "entity_type", "entity_id", "id"),
+        Index("ix_audit_logs_action", "action", "id"),
+        # 时间段筛选。
+        Index("ix_audit_logs_created_at", "created_at"),
+    )
 
 
 class TwoFactorSetting(Base):

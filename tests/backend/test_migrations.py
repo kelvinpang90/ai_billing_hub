@@ -1672,3 +1672,93 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
     finally:
         command.upgrade(alembic_config, "head")
+
+
+# ---------------------------------------------------------------------------
+# 0011_audit_logs_query_indexes（AIH-TASK-022）
+#
+# 头两条不连库：钉住版本链、迁移与模型声明的索引一致。真 MySQL 上验 head 的索引集合，以及
+# downgrade 只删这三个、表与触发器不动。
+# ---------------------------------------------------------------------------
+
+_REVISION_0011 = "0011_audit_logs_query_indexes"
+_MIGRATION_0011 = pathlib.Path("alembic/versions/20260928_0011_audit_logs_query_indexes.py")
+
+# 0002 建表时就有的那一个。
+_AUDIT_INDEXES_BEFORE_0011 = {"ix_audit_logs_actor_created": ["actor_user_id", "created_at"]}
+_EXPECTED_INDEXES_0011 = {
+    "ix_audit_logs_entity": ["entity_type", "entity_id", "id"],
+    "ix_audit_logs_action": ["action", "id"],
+    "ix_audit_logs_created_at": ["created_at"],
+}
+
+
+def _load_0011() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0011", _MIGRATION_0011)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0011_follows_0010() -> None:
+    migration = _load_0011()
+
+    assert migration.revision == _REVISION_0011
+    assert migration.down_revision == _REVISION_0010
+
+
+def test_0011_indexes_are_the_ones_the_model_declares() -> None:
+    """迁移里是冻结的字面量；模型的 `__table_args__` 要声明同样的三个，一列不差。"""
+    migration = _load_0011()
+    model = {
+        str(index.name): [column.name for column in index.columns]
+        for index in AuditLog.__table__.indexes
+    }
+
+    assert migration._INDEXES == _EXPECTED_INDEXES_0011
+    assert model == _AUDIT_INDEXES_BEFORE_0011 | _EXPECTED_INDEXES_0011
+    assert not any(index.unique for index in AuditLog.__table__.indexes)
+
+
+def test_0011_downgrade_drops_what_upgrade_creates(monkeypatch) -> None:
+    migration = _load_0011()
+    recorder = _RecordingOp(_FakeBind(log_bin=0, trusted=0))
+    monkeypatch.setattr(migration, "op", recorder)
+
+    migration.upgrade()
+    migration.downgrade()
+
+    assert recorder.calls == ["create_index"] * 3 + ["drop_index"] * 3
+
+
+def _audit_indexes() -> dict[str, list[str]]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        indexes = inspect(engine).get_indexes("audit_logs")
+    finally:
+        engine.dispose()
+    return {str(index["name"]): list(index["column_names"]) for index in indexes}
+
+
+@needs_mysql
+def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
+    alembic_config: Config,
+) -> None:
+    command.upgrade(alembic_config, "head")
+    assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011 | _EXPECTED_INDEXES_0011
+    tables = _table_names()
+    columns = _column_names("audit_logs")
+
+    try:
+        command.downgrade(alembic_config, _REVISION_0010)
+        assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
+        # 只删索引：表、列与 0010 的触发器都不动。
+        assert _table_names() == tables
+        assert _column_names("audit_logs") == columns
+        assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
+
+        command.upgrade(alembic_config, _REVISION_0011)
+        assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011 | _EXPECTED_INDEXES_0011
+    finally:
+        command.upgrade(alembic_config, "head")
