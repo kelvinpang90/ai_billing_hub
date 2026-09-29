@@ -1360,7 +1360,8 @@ tasks:
     title: admin frontend - audit log page
     purpose: >-
       spec §101 的 features/audit/：管理端审计页，调用 AIH-TASK-022 的 GET /api/v1/admin/audit-logs，
-      分页表格 + 筛选（动作、实体类型与 id、操作者邮箱、时间段），展开一行看前后状态。顶部菜单加「审计」。只做前端。
+      分页表格 + 筛选（动作、实体类型与 id、操作者邮箱、时间段），展开一行看前后状态。顶部菜单加「审计」。只做前端，
+      外加在部署后浏览器验收脚本里补上审计页的两个只读步骤。
     status: ready
     depends_on:
       - AIH-TASK-022
@@ -1376,7 +1377,12 @@ tasks:
       - 不装依赖（package.json / package-lock.json 不在可改路径里）；不直接 import package.json 里没有声明的包；不改 .platform/
       - docs/TODO.md 新增 AIH-TASK-023 记录段，Phase 1 的「审计日志」按 docs/TODO.md「审计日志差异清单」判断是否可勾（第 3 项时间戳取整仍在后续计划里，它不是 §124 的验收项）；不改 planning-v1 块；复选框只允许 [ ] / [x]
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，只读调用 022 的查询接口；PR 正文要把这条理由写出来
+      - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把 open_audit、check_audit_entry 两个步骤加进这个脚本（文件名不变）。已有步骤 login、open_customers、open_fixture、check_balance 的行为不变，AIH-TASK-024 的四个步骤照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素。沿用验收脚本已有的约束（见 AIH-TASK-024 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤
+      - 验收只读：可以改审计页的筛选条件（只发 GET），不点任何会写数据的东西；不改每页条数，不翻页。夹具管理员的邮箱（stdin 的 credentials.email）只填进登录表单：不填进任何筛选框、不进页面脚本源码，与页面文字或接口响应的比较在脚本进程内做，不打印
+      - open_audit：点顶栏菜单里的审计项（文案取 en.json，链接指向 paths.ts 里的审计页路由）进入审计页；页面不是加载失败、无权限或空列表状态，审计表格至少有一行数据
+      - check_audit_entry：用动作下拉筛选 LOGIN（app/models/auth.py 的 AuditAction.LOGIN），页面回到第 1 页并重新请求；后端值取页面自己发出、查询串带 action=LOGIN 的 GET /api/v1/admin/audit-logs 的响应体（Network.enable 被动观察、Network.getResponseBody 读取，不自己发请求、不拦截）。响应里第一条 actor_email 等于夹具管理员邮箱的记录就是本次验收登录留下的那条：action 为 LOGIN、actor_role 为 ADMIN、entity_type 为 users，created_at（不带时区的 UTC）与本次运行 login 步骤完成的时刻相差不超过 120 秒；同一次运行里没跑过 login 就报 assertion_failed。表格里对应的那一行看得到（动作与操作者两列的文字与这条记录一致），报到前把它滚动到视口内，让 Worker 这一步的截图看得到
     allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminAudit.ts
       - frontend/src/api/adminAudit.test.ts
       - frontend/src/features/audit/AuditLogPage.tsx
@@ -1401,6 +1407,18 @@ tasks:
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1
+
+    # 合并且部署成功后，Worker 用本机固定的浏览器与凭据跑一次 acceptance.browser（最多 3 次尝试）。
+    # acceptance.browser 不在上面的 allowed_commands 里：它只能被这个 acceptance 块引用。
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_audit
+        - check_audit_entry
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed

@@ -247,7 +247,7 @@ commands:
   # ⚠️ 与文件头「对应文件在仓库中真实存在」不同：登记时 scripts/acceptance/admin_customers.mjs 还不存在，
   #    由 AIH-TASK-024 写出；在它合并之前，没有任何任务能触发这条命令。
   - id: acceptance.browser
-    description: 部署后浏览器验收（管理端客户页，只读），只由 Worker 在部署成功后运行
+    description: 部署后浏览器验收（管理端页面，只读），只由 Worker 在部署成功后运行
     executable: node
     args: ["scripts/acceptance/admin_customers.mjs"]
     working_directory: repository_root
