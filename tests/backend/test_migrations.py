@@ -40,6 +40,7 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
@@ -61,6 +62,13 @@ from app.models.integration import (
     API_KEY_COLLATION,
     IntegrationCredential,
     ProjectWebhookSecret,
+)
+from app.models.pricing_rules import (
+    SCOPE_KEY_EXPRESSION,
+    SQLITE_SCOPE_KEY_EXPRESSION,
+    PricingRule,
+    PricingRuleComponent,
+    PricingRuleLock,
 )
 from app.models.provider_prices import ProviderPriceComponent, ProviderPriceVersion
 from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
@@ -667,11 +675,16 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         }
         assert checks == set(_model_checks())
         # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验；价格表上的
-        # 六个由 0013 建，在 test_0013_* 里验。
+        # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
-        expected = {*_EXPECTED_TRIGGERS, *_EXPECTED_TRIGGERS_0010, *_EXPECTED_TRIGGERS_0013}
+        expected = {
+            *_EXPECTED_TRIGGERS,
+            *_EXPECTED_TRIGGERS_0010,
+            *_EXPECTED_TRIGGERS_0013,
+            *_EXPECTED_TRIGGERS_0014,
+        }
         assert set(triggers) == expected
     finally:
         engine.dispose()
@@ -1670,8 +1683,8 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012 的五张表、0013 的两张表随降级到 0009 一并删掉）。
-        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013
+        # 只删触发器：表与列都不动（0012–0014 的表随降级到 0009 一并删掉）。
+        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013 - _TABLES_0014
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
         with _rolled_back_connection() as connection:
@@ -1766,8 +1779,8 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012、0013 的表随降级到 0010 一并删掉）。
-        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013
+        # 只删索引：表、列与 0010 的触发器都不动（0012–0014 的表随降级到 0010 一并删掉）。
+        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013 - _TABLES_0014
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
 
@@ -2634,5 +2647,406 @@ def test_0013_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
         assert checks == set(_price_checks())
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0013}
         assert ours == _EXPECTED_TRIGGERS_0013
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0014_pricing_rules（AIH-TASK-027，设计闸门 #178 v3）
+#
+# The first cases need no database: the revision chain; the migration's checks and generated
+# columns equal the models' (`scope_key` per dialect); triggers written like 0006 with the 0006
+# precheck before any DDL; downgrade drops the tables in dependency order. On a real MySQL:
+# the shapes, keys, foreign keys and their rules, checks and triggers of the three tables, the
+# lock table holding exactly one row, and that upgrade / downgrade add and drop only these
+# tables. What the triggers and constraints refuse or let through is in
+# test_pricing_rules_service.py.
+# ---------------------------------------------------------------------------
+
+_REVISION_0014 = "0014_pricing_rules"
+_MIGRATION_0014 = pathlib.Path("alembic/versions/20260929_0014_pricing_rules.py")
+_RULE_MODELS = (PricingRuleLock, PricingRule, PricingRuleComponent)
+_TABLES_0014 = {model.__tablename__ for model in _RULE_MODELS}
+# Creation order; downgrade must be exactly the reverse (foreign keys).
+_CREATE_ORDER_0014 = ["pricing_rule_locks", "pricing_rules", "pricing_rule_components"]
+
+# Trigger → (table, timing, event). The eight of design §2, no more, no fewer.
+_EXPECTED_TRIGGERS_0014 = {
+    "trg_pricing_rule_locks_before_insert": ("pricing_rule_locks", "BEFORE", "INSERT"),
+    "trg_pricing_rule_locks_before_delete": ("pricing_rule_locks", "BEFORE", "DELETE"),
+    "trg_pricing_rules_before_insert": ("pricing_rules", "BEFORE", "INSERT"),
+    "trg_pricing_rules_before_update": ("pricing_rules", "BEFORE", "UPDATE"),
+    "trg_pricing_rules_before_delete": ("pricing_rules", "BEFORE", "DELETE"),
+    "trg_pricing_rule_components_before_insert": ("pricing_rule_components", "BEFORE", "INSERT"),
+    "trg_pricing_rule_components_before_update": ("pricing_rule_components", "BEFORE", "UPDATE"),
+    "trg_pricing_rule_components_before_delete": ("pricing_rule_components", "BEFORE", "DELETE"),
+}
+
+_EXPECTED_0014_COLUMNS = {
+    "pricing_rule_locks": {"id": False},
+    "pricing_rules": {
+        "id": False,
+        "public_id": False,
+        "priority_scope": False,
+        # Which of the three scope columns are set follows from `priority_scope` (CHECK).
+        "tenant_id": True,
+        "provider_id": True,
+        "model_id": True,
+        "strategy": False,
+        "markup_multiplier": True,
+        "status": False,
+        "effective_from": True,
+        "effective_to": True,
+        "scope_key": True,
+        "open_slot": True,
+        "created_by": False,
+        "approved_by": True,
+        "created_at": False,
+        "updated_at": False,
+        "approved_at": True,
+    },
+    "pricing_rule_components": {
+        "id": False,
+        "pricing_rule_id": False,
+        "strategy": False,
+        "usage_meter_component_id": False,
+        "unit_quantity": False,
+        "rate_amount": False,
+        "currency": False,
+        "created_at": False,
+    },
+}
+
+_EXPECTED_UNIQUE_0014 = {
+    "pricing_rule_locks": set(),
+    "pricing_rules": {("public_id",), ("id", "strategy"), ("scope_key", "open_slot")},
+    "pricing_rule_components": {("pricing_rule_id", "usage_meter_component_id")},
+}
+
+_EXPECTED_FOREIGN_KEYS_0014 = {
+    "pricing_rule_locks": {},
+    "pricing_rules": {
+        "fk_pricing_rules_tenant": (["tenant_id"], "tenants", ["id"]),
+        "fk_pricing_rules_provider": (["provider_id"], "ai_providers", ["id"]),
+        "fk_pricing_rules_model": (["model_id", "provider_id"], "ai_models", ["id", "provider_id"]),
+        "fk_pricing_rules_created_by": (["created_by"], "users", ["id"]),
+        "fk_pricing_rules_approved_by": (["approved_by"], "users", ["id"]),
+    },
+    "pricing_rule_components": {
+        "fk_pricing_rule_components_rule": (
+            ["pricing_rule_id", "strategy"],
+            "pricing_rules",
+            ["id", "strategy"],
+        ),
+        "fk_pricing_rule_components_meter_component": (
+            ["usage_meter_component_id"],
+            "usage_meter_components",
+            ["id"],
+        ),
+    },
+}
+
+_RULE_REFERENTIAL_RULES_QUERY = text(
+    "SELECT CONSTRAINT_NAME, DELETE_RULE, UPDATE_RULE"
+    " FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND TABLE_NAME IN ('pricing_rule_locks', 'pricing_rules', 'pricing_rule_components')"
+)
+_RULE_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME IN ('pricing_rule_locks', 'pricing_rules', 'pricing_rule_components')"
+)
+
+
+def _load_0014() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0014", _MIGRATION_0014)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _rule_checks() -> dict[str, tuple[str, str]]:
+    return {
+        str(constraint.name): (model.__tablename__, _normalised(str(constraint.sqltext)))
+        for model in _RULE_MODELS
+        for constraint in model.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0014_follows_0013() -> None:
+    migration = _load_0014()
+
+    assert migration.revision == _REVISION_0014
+    assert migration.down_revision == _REVISION_0013
+
+
+def test_0014_checks_and_generated_columns_are_the_ones_the_models_declare() -> None:
+    migration = _load_0014()
+    from_migration = {
+        name: (table, _normalised(condition))
+        for name, (table, condition) in migration._CHECKS.items()
+    }
+
+    assert from_migration == _rule_checks()
+    # Rules 8, components 4.
+    assert len(from_migration) == 12
+    columns = PricingRule.__table__.c
+    for name in ("scope_key", "open_slot"):
+        assert columns[name].computed is not None, name
+        assert columns[name].computed.persisted is True, name
+    open_slot = str(columns.open_slot.computed.sqltext)
+    assert _normalised(open_slot) == _normalised(migration._OPEN_SLOT)
+    # `scope_key` is written per dialect: MySQL takes the migration's CONCAT literally; SQLite
+    # (the unit tests) the same key with `||`.
+    scope_key = columns.scope_key.computed.sqltext
+    on_mysql = str(scope_key.compile(dialect=mysql.dialect()))
+    on_sqlite = str(scope_key.compile(dialect=sqlite.dialect()))
+    assert _normalised(on_mysql) == _normalised(migration._SCOPE_KEY)
+    assert _normalised(migration._SCOPE_KEY) == _normalised(SCOPE_KEY_EXPRESSION)
+    assert _normalised(on_sqlite) == _normalised(SQLITE_SCOPE_KEY_EXPRESSION)
+    assert _normalised(str(scope_key)) == _normalised(SCOPE_KEY_EXPRESSION)
+
+
+def test_0014_sqlite_tables_get_the_lock_row_and_a_non_null_scope_key() -> None:
+    """`create_all` (the unit tests) writes the one lock row like the migration does, and the
+    SQLite form of `scope_key` gives the same key as the MySQL one would."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        Base.metadata.create_all(engine)
+        with engine.connect() as connection:
+            locks = connection.execute(select(PricingRuleLock.id)).scalars().all()
+            key = connection.execute(
+                text(
+                    "SELECT 'GLOBAL' || ':' || COALESCE(NULL, 0) || ':' || COALESCE(7, 0)"
+                    " || ':' || COALESCE(NULL, 0)"
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert locks == [1]
+    assert key == "GLOBAL:0:7:0"
+
+
+def test_0014_triggers_are_the_eight_of_the_design_written_like_0006() -> None:
+    """Each is one complete CREATE TRIGGER that refuses with SIGNAL SQLSTATE '45000' (as 0006)."""
+    triggers = _load_0014()._TRIGGERS
+
+    assert set(triggers) == set(_EXPECTED_TRIGGERS_0014)
+    for name, (table, timing, event) in _EXPECTED_TRIGGERS_0014.items():
+        statement = _normalised(triggers[name])
+        assert statement.startswith(f"CREATE TRIGGER {name} {timing} {event} ON {table}"), name
+        assert "FOR EACH ROW" in statement, name
+        assert "SIGNAL SQLSTATE '45000'" in statement, name
+        # MySQL triggers cannot refer to generated columns through NEW / OLD.
+        for column in ("scope_key", "open_slot"):
+            assert f"NEW.{column}" not in statement, name
+            assert f"OLD.{column}" not in statement, name
+    # No overlapping periods: lock pricing_rule_locks first (the service's lock), then check.
+    update = _normalised(triggers["trg_pricing_rules_before_update"])
+    locked = update.index("FROM pricing_rule_locks WHERE id = 1 FOR UPDATE")
+    assert locked < update.index("pricing rule periods overlap")
+    assert "NEW.strategy = 'FIXED_RATE'" in update
+    assert "NEW.status NOT IN ('DRAFT', 'PUBLISHED', 'DISCARDED')" in update
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0014_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    migration = _load_0014()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0014_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL DDL is not transactional: a failed precheck must not leave a table behind."""
+    migration = _load_0014()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    # The lock table, its one row, the two rule tables, then eight triggers.
+    assert allowed.calls == ["create_table", "execute"] + ["create_table"] * 2 + ["execute"] * 8
+
+
+def test_0014_downgrade_drops_the_three_tables_in_dependency_order(monkeypatch) -> None:
+    migration = _load_0014()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert upgrade.first_args("create_table") == _CREATE_ORDER_0014
+    executed = upgrade.first_args("execute")
+    assert executed[0] == "INSERT INTO pricing_rule_locks (id) VALUES (1)"
+    assert len(executed) == 1 + 8
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.first_args("drop_table") == _CREATE_ORDER_0014[::-1]
+    assert [name for name, _ in downgrade.calls] == ["drop_table"] * 3
+
+
+@needs_mysql
+def test_0014_only_adds_and_drops_its_three_tables(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    try:
+        command.downgrade(alembic_config, _REVISION_0013)
+        without = _table_names()
+        assert "provider_price_versions" in without, "0013's tables must be there"
+        assert not _TABLES_0014 & without
+
+        command.upgrade(alembic_config, _REVISION_0014)
+        assert _table_names() == without | _TABLES_0014
+
+        command.downgrade(alembic_config, _REVISION_0013)
+        assert _table_names() == without
+        # Triggers go with their tables.
+        assert not set(_EXPECTED_TRIGGERS_0014) & set(_all_triggers())
+    finally:
+        command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0014_the_lock_table_holds_exactly_one_row(alembic_config: Config) -> None:
+    """§7 "migration": after upgrade the lock table holds exactly the row `id = 1`."""
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(text("SELECT id FROM pricing_rule_locks")).scalars().all()
+    finally:
+        engine.dispose()
+
+    assert rows == [1]
+
+
+@needs_mysql
+def test_0014_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        columns = {table: inspector.get_columns(table) for table in _EXPECTED_0014_COLUMNS}
+        for table, expected in _EXPECTED_0014_COLUMNS.items():
+            assert {c["name"]: c["nullable"] for c in columns[table]} == expected, table
+        types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
+
+        locks, rules, components = _CREATE_ORDER_0014
+        assert isinstance(types[(locks, "id")], Integer)
+        assert not isinstance(types[(locks, "id")], BigInteger)
+        for (table, name), column_type in types.items():
+            if table == locks:
+                continue
+            if name == "id" or (name.endswith("_id") and name != "public_id"):
+                assert isinstance(column_type, BigInteger), (table, name)
+            if name.endswith("_at") or name.startswith("effective_"):
+                assert isinstance(column_type, DateTime), (table, name)
+        for name in ("created_by", "approved_by"):
+            assert isinstance(types[(rules, name)], BigInteger), name
+        assert isinstance(types[(rules, "public_id")], CHAR)
+        assert types[(rules, "public_id")].length == 36
+        widths = {
+            (rules, "priority_scope"): 32,
+            (rules, "strategy"): 16,
+            (rules, "status"): 16,
+            (rules, "scope_key"): 128,
+            (components, "strategy"): 16,
+        }
+        for key, width in widths.items():
+            assert isinstance(types[key], String), key
+            assert types[key].length == width, key
+        assert isinstance(types[(components, "currency")], CHAR)
+        assert types[(components, "currency")].length == 3
+        money = [(rules, "markup_multiplier"), (components, "unit_quantity")]
+        for key in [*money, (components, "rate_amount")]:
+            assert isinstance(types[key], Numeric), key
+            assert (types[key].precision, types[key].scale) == (20, 8), key
+
+        # Exactly two generated columns, both STORED.
+        computed = {
+            (table, c["name"]): c.get("computed")
+            for table, found in columns.items()
+            for c in found
+            if c.get("computed")
+        }
+        assert set(computed) == {(rules, "scope_key"), (rules, "open_slot")}
+        for column in computed.values():
+            assert column["persisted"] is True
+        assert "concat" in str(computed[(rules, "scope_key")]["sqltext"]).lower()
+        assert "PUBLISHED" in str(computed[(rules, "open_slot")]["sqltext"])
+        assert isinstance(types[(rules, "open_slot")], Integer)
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        for table, expected in _EXPECTED_UNIQUE_0014.items():
+            assert _unique_sets(table) == expected, table
+            foreign_keys = {
+                str(fk["name"]): (
+                    fk["constrained_columns"],
+                    fk["referred_table"],
+                    fk["referred_columns"],
+                )
+                for fk in inspector.get_foreign_keys(table)
+            }
+            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0014[table], table
+
+        indexes = {i["name"]: i for i in inspector.get_indexes("pricing_rules")}
+        assert indexes["ux_pricing_rules_open_slot"]["column_names"] == ["scope_key", "open_slot"]
+        assert indexes["ux_pricing_rules_open_slot"]["unique"]
+        assert indexes["ix_pricing_rules_resolve"]["column_names"] == [
+            "priority_scope",
+            "tenant_id",
+            "provider_id",
+            "model_id",
+            "effective_from",
+        ]
+        assert indexes["ix_pricing_rules_model"]["column_names"] == ["model_id", "provider_id"]
+        by_rule = {i["name"]: i for i in inspector.get_indexes("pricing_rule_components")}
+        assert by_rule["ix_pricing_rule_components_rule"]["column_names"] == [
+            "pricing_rule_id",
+            "strategy",
+        ]
+
+        with engine.connect() as connection:
+            referential = {
+                row[0]: (row[1], row[2])
+                for row in connection.execute(_RULE_REFERENTIAL_RULES_QUERY)
+            }
+            checks = set(connection.execute(_RULE_CHECKS_QUERY).scalars())
+        # ⚠️ RESTRICT: rules and components are never deleted, nor what they refer to (INV-6);
+        # a draft with components cannot change its strategy under them.
+        names = {name for keys in _EXPECTED_FOREIGN_KEYS_0014.values() for name in keys}
+        assert set(referential) == names
+        assert {pair[0] for pair in referential.values()} == {"RESTRICT"}
+        assert referential["fk_pricing_rule_components_rule"][1] == "RESTRICT"
+        assert checks == set(_rule_checks())
+        ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0014}
+        assert ours == _EXPECTED_TRIGGERS_0014
     finally:
         engine.dispose()

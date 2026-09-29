@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.api.admin_ai_catalog import router as admin_ai_catalog_router
 from app.api.admin_audit import router as admin_audit_router
 from app.api.admin_customers import router as admin_customers_router
+from app.api.admin_pricing_rules import router as admin_pricing_rules_router
 from app.api.admin_provider_prices import router as admin_provider_prices_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
@@ -53,6 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_audit_router)
     app.include_router(admin_ai_catalog_router)
     app.include_router(admin_provider_prices_router)
+    app.include_router(admin_pricing_rules_router)
 
     app.state.settings = settings
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。

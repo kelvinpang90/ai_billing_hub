@@ -498,6 +498,114 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 
 ---
 
+## 客户定价规则（spec §15、§16、§74.3；ADR-0008；AIH-TASK-027，迁移 `0014_pricing_rules`）
+
+设计依据：[design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（设计闸门 #178 v3）
+§2「数据库」。三张表：`pricing_rule_locks`、`pricing_rules`、`pricing_rule_components`。接口见 [api.md](api.md) 的
+「管理端定价规则」；五级顺序与下落语义见 [pricing-engine.md](pricing-engine.md)。
+
+共同的约定：
+
+- **价格是 MYR 含税价**（ADR-0008）：`rate_amount` 是含税单价，倍数乘出来的是含税计费额。不存税额、不引用税务政策
+  版本。倍数与单价只在管理端出现（INV-7）。
+- **行永不删除**：规则由触发器拒绝 DELETE（丢弃的草稿也留痕）；外键都是 `RESTRICT`。
+- **发布后不可变**：由下面的触发器保证，只在 MySQL 上。SQLite（单元测试）上没有触发器，服务层按同样的规则写。
+
+### `pricing_rule_locks`（单行锁表）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | INT | 主键，不自增；迁移写入唯一一行 `id = 1` |
+
+没有业务字段。发布 / 停用对这一行 `SELECT … FOR UPDATE`，计费对它 `FOR SHARE`（见下「锁顺序」）。之所以不锁供应商
+行：「客户默认」「全局默认」两级规则没有供应商；锁租户行又会与计费既有的「钱包 → 租户」顺序相反。触发器保证它恰好
+一行。单元测试的 `Base.metadata.create_all` 同样写入这一行（`after_create` 事件，见 `app/models/pricing_rules.py`）。
+
+### `pricing_rules`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库（T-H 把它写进事件快照 `pricing_rule_id`，但不对外） |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_pricing_rules_public_id`） |
+| `priority_scope` | VARCHAR(32) | 非空，`CHECK IN ('CUSTOMER_PROVIDER_MODEL','CUSTOMER_PROVIDER','CUSTOMER','GLOBAL_PROVIDER_MODEL','GLOBAL')`（§16 从高到低） |
+| `tenant_id` | BIGINT | 可空；外键 → `tenants(id)` `RESTRICT`（`fk_pricing_rules_tenant`） |
+| `provider_id` | BIGINT | 可空；外键 → `ai_providers(id)` `RESTRICT`（`fk_pricing_rules_provider`） |
+| `model_id` | BIGINT | 可空；复合外键 `(model_id, provider_id)` → `ai_models(id, provider_id)` `RESTRICT`（`fk_pricing_rules_model`）：规则只能挂在同一供应商的模型上。子表索引 `ix_pricing_rules_model` |
+| `strategy` | VARCHAR(16) | 非空，`CHECK IN ('MARKUP','FIXED_RATE')` |
+| `markup_multiplier` | DECIMAL(20,8) | 可空；只有 MARKUP 有且 > 0 |
+| `status` | VARCHAR(16) | 非空，`CHECK IN ('DRAFT','PUBLISHED','RETIRED','DISCARDED')`；`DISCARDED` 是 §74.3 之外补的 |
+| `effective_from` | DATETIME | 可空；草稿为空。`NULL` 另一种含义只有一处：`GLOBAL` 范围第一条、未指定生效时刻 = 「一直以来」 |
+| `effective_to` | DATETIME | 可空；`NULL` = 仍生效（或尚未发布） |
+| `scope_key` | VARCHAR(128)，STORED 生成列 | `CONCAT(priority_scope, ':', COALESCE(tenant_id, 0), ':', COALESCE(provider_id, 0), ':', COALESCE(model_id, 0))`：把「同一范围」变成一个非空值，绕开 MySQL 唯一约束不管 NULL 的问题；只读。SQLite 上用 `\|\|` 写同一个值（`CONCAT` 要 SQLite 3.44） |
+| `open_slot` | INT，STORED 生成列 | `CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END`；只读 |
+| `created_by` | BIGINT | 非空；外键 → `users(id)` `RESTRICT`（`fk_pricing_rules_created_by`） |
+| `approved_by` | BIGINT | 可空；发布人；外键 → `users(id)` `RESTRICT`（`fk_pricing_rules_approved_by`） |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+| `approved_at` | DATETIME | 可空；发布时刻 |
+
+- `ck_pricing_rules_scope_columns`：**范围与 NULL 组合一一对应**（§74.3「不能有含糊的 NULL 组合」）：
+  `CUSTOMER_PROVIDER_MODEL` 三列都非空；`CUSTOMER_PROVIDER` 租户与供应商非空、模型空；`CUSTOMER` 只有租户；
+  `GLOBAL_PROVIDER_MODEL` 供应商与模型非空、租户空；`GLOBAL` 三列都空。§16 之外的组合写不进去。
+- `ck_pricing_rules_markup`：`(strategy = 'MARKUP' AND markup_multiplier IS NOT NULL AND markup_multiplier > 0)
+  OR (strategy = 'FIXED_RATE' AND markup_multiplier IS NULL)`。
+- `ck_pricing_rules_unpublished` / `_approved` / `_period`：与 `provider_price_versions` 同一写法（草稿与丢弃的草稿没有
+  区间与发布人；发布过的有发布人；区间不倒置，唯一的空区间 `[F, F)` 在 `RETIRED` 上）。
+- **唯一索引 `(scope_key, open_slot)`**（`ux_pricing_rules_open_slot`）：同一范围至多一条未截断的已发布规则（全局
+  范围也是：`scope_key` 非空）。
+- 唯一约束 `(id, strategy)`（`uq_pricing_rules_id_strategy`）：只为分量表的复合外键。
+- 索引 `ix_pricing_rules_resolve (priority_scope, tenant_id, provider_id, model_id, effective_from)`：解析时逐级查。
+
+### `pricing_rule_components`（只属于 FIXED_RATE 规则）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `pricing_rule_id` | BIGINT | 非空 |
+| `strategy` | VARCHAR(16) | 非空，`CHECK = 'FIXED_RATE'`；复合外键 `(pricing_rule_id, strategy)` → `pricing_rules(id, strategy)` `ON DELETE RESTRICT ON UPDATE RESTRICT`（`fk_pricing_rule_components_rule`，子表索引 `ix_pricing_rule_components_rule`）：**MARKUP 规则在数据库层挂不上分量**；有分量的草稿改不成 MARKUP（服务层先删分量） |
+| `usage_meter_component_id` | BIGINT | 非空；外键 → `usage_meter_components(id)` `RESTRICT`（`fk_pricing_rule_components_meter_component`）。§74.3 的 `meter_type_id`、`component_code`、`unit` 由它唯一确定 |
+| `unit_quantity` | DECIMAL(20,8) | 非空，`CHECK > 0` |
+| `rate_amount` | DECIMAL(20,8) | 非空，`CHECK > 0`；**MYR 含税单价** |
+| `currency` | CHAR(3) | 非空，`CHECK = 'MYR'` |
+| `created_at` | DATETIME | 非空 |
+
+- 唯一约束 `(pricing_rule_id, usage_meter_component_id)`（`uq_pricing_rule_components_rule_component`）。
+- **完整性**（FIXED_RATE 发布时）：至少一个分量；凡是出现的计量类型，它在 `usage_meter_components` 里的全部分量
+  都必须出现。服务层校验并列出缺的分量，发布跃迁上的触发器兜底。
+
+### 触发器（迁移 0014 建，只在 MySQL 上）
+
+写法与权限预检照迁移 0006。拒绝一律 `SIGNAL SQLSTATE '45000'`（MySQL 错误号 1644）。
+
+| 触发器 | 做什么 |
+| --- | --- |
+| `trg_pricing_rule_locks_before_insert` | 表里已有一行时拒绝 |
+| `trg_pricing_rule_locks_before_delete` | 一律拒绝 |
+| `trg_pricing_rules_before_insert` | `status` 不是 `DRAFT` 就拒绝：规则只能以草稿进入，发布跃迁上的检查因此绕不过去 |
+| `trg_pricing_rules_before_update` | ① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（设计 §4 的状态表；不许直接 `DRAFT → RETIRED` 绕过 ③）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；③ `DRAFT → PUBLISHED` 且 `FIXED_RATE` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁），再查同一 `scope_key` 里是否有另一个**非空区间**的已发布规则与本行相交，有就拒绝；空区间不参与判定 |
+| `trg_pricing_rules_before_delete` | 一律拒绝 |
+| `trg_pricing_rule_components_before_insert` / `_before_update` / `_before_delete` | 所属规则（更新时新旧两个）不是 `DRAFT` 就拒绝 |
+
+⚠️ MySQL 的触发器不能用 `NEW` / `OLD` 引用生成列，所以 ④ 按 `scope_key` 的定义现算出本行的键，与另一行存下的
+`scope_key` 比较；② 也不比两个生成列（它们只由被比较的列算出）。**残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经
+触发器（与 0006 相同）。
+
+### 锁顺序与写入顺序
+
+- **发布、停用**：事务的第一条语句是 `SELECT … FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`，拿到锁之后才取
+  边界时刻 `t`（服务端当前时间向上取整到下一个整秒）；再 `FOR UPDATE` 读规则行与该范围的全部已发布规则；对租户、
+  供应商、模型、分量、计量类型分量与用户的读一律 `FOR SHARE`（不读 REPEATABLE READ 在锁前建立的快照）。写完在同一
+  事务里复查区间，再写审计、提交。发布路径只拿这一把锁，不形成环。
+- **计费**（T-G / T-H，本任务不接线）：**供应商（S）→ 定价规则锁（S）→ 钱包 → 租户**。`resolve_model` 对供应商行
+  `FOR SHARE`；之后 `lock_pricing_rules_shared` 对 `pricing_rule_locks` 取 `FOR SHARE`，持有到计费事务提交；价格与
+  规则的解析都是 `FOR SHARE`。共享锁之间不冲突，计费事务彼此不阻塞；只有低频的发布 / 停用会让计费等一下。
+- **建草稿、改草稿、丢弃**：不拿规则锁（草稿不参与计费），只 `FOR UPDATE` 规则行；与发布同一条规则串行。
+- **写入顺序**（每一步立刻 flush，区间触发器与 `open_slot` 唯一索引按行检查）：发布时先截断前一条（写
+  `effective_to`），再把本行从草稿改为已发布；撤销预约时先把被撤销的一行改成空区间，再把前一条恢复为未截断。改草稿：
+  先删旧分量（改成 MARKUP 时复合外键要求分量先没了），再改策略与倍数（同一条 UPDATE，CHECK 要求两者一致），最后插入
+  新分量。
+
+---
+
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、
