@@ -1506,3 +1506,78 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 025：Phase 2 第一刀（docs/design/PHASE-2-plan.md 的 T-A）。碰定价的根（价格、规则、计费都按它的 id 挂，
+  # 解析错了就是按错的价格扣钱），走了设计闸门 #163（APPROVED: design v4）。纯后端，不带 acceptance 块。
+  - id: AIH-TASK-025
+    title: AI provider, model and usage meter catalog
+    purpose: >-
+      按 docs/design/AIH-TASK-025-ai-catalog.md（设计闸门 #163 已批准 v4）实现 Phase 2 的目录：迁移 0012 建
+      usage_meter_types、usage_meter_components（带 9 个计量类型与 12 个分量的种子）、ai_providers、ai_models、
+      ai_model_aliases 五张表；计量类型按上报形态（LLM_TOKEN_FIELDS / QUANTITY）约束取数字段，管理员可新建 QUANTITY
+      类型；供应商、模型可建、改名、停用；别名按 occurred_at 分段映射与撤销；只读解析函数 resolve_model 在调用方事务里
+      对供应商行加共享锁。不含价格、定价规则、FX、用量事件、重新入队与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-022
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-025-ai-catalog.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 迁移文件名 alembic/versions/20260929_0012_ai_catalog.py，down_revision 指向 0011；五张表的列、类型、utf8mb4_0900_bin 排序规则、CHECK、唯一约束、复合外键（分量的 (meter_type_id, payload_shape) 与别名的 (model_id, provider_id)）与别名表的 STORED 生成列 open_slot 按设计 §2；种子常量写死在迁移里、不 import 应用代码；downgrade 按外键依赖倒序删表；文件头有 §132 第 13 条分析；alembic/env.py 加 import 新模型模块
+      - 接口、请求体（extra=forbid）、字段规则、错误码按设计 §2「接口」；新建计量类型固定为 QUANTITY、同一事务建出唯一分量，带 payload_shape 或 quantity_field 为 422；PATCH 带不可改字段为 422、无变化 200 不写审计；别名只有映射与撤销两个 POST，没有 PATCH
+      - 每个处理函数第一条语句调用 require_admin，新路由全部加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；匿名 401、CUSTOMER 403，都不写库；响应不含内部自增 id
+      - 建模型、映射别名、撤销别名在供应商行 SELECT … FOR UPDATE 内完成，边界时刻 t 在拿到锁之后取、向上取整到下一个整秒；模型代码与别名表里出现过的任何字符串（含已截断的段）不撞；每次写别名后在同一事务里复查该字符串全部段首尾相接、只有第一段 effective_from 为空，不满足就回滚
+      - resolve_model(session, provider_code, model_code, occurred_at) 对供应商行 FOR SHARE，模型与别名都用加锁读（FOR SHARE），不做大小写或其他规范化，不看供应商与模型的状态；另提供设计 §7 所说的「occurred_at 不晚于持锁后当前时间」判定函数，本任务不接到任何计费路径
+      - 八个审计动作（USAGE_METER_TYPE_CREATE / UPDATE、AI_PROVIDER_CREATE / UPDATE、AI_MODEL_CREATE / UPDATE、AI_MODEL_ALIAS_MAP / RETIRE）与目录写入同一事务，前后状态按设计 §2「审计」，指向一律用模型 code 表示；不写 outbox
+      - 测试覆盖设计 §7 全部行；数据库约束、并发、「解析与改映射并发」「快照读陷阱」「共享锁互不阻塞」放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表的枚举列加进 test_model_columns.py；uuid 用全零占位值（secret-scan）
+      - docs/api.md 记全部新接口；docs/database-schema.md 记五张表与种子；docs/TODO.md 新增 AIH-TASK-025 记录段，记下八个审计动作对 spec §66 的补充、缓存写入只设一档价格的已知限制（设计 §10 第 2 条），以及设计 §2「对下游任务的契约」（T-B / T-D / T-E / T-G / T-H）
+      - 不含价格、定价规则、FX、用量事件表、重新入队、告警与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #163
+    allowed_change_paths:
+      - alembic/versions/20260929_0012_ai_catalog.py
+      - alembic/env.py
+      - app/models/__init__.py
+      - app/models/ai_catalog.py
+      - app/models/auth.py
+      - app/repositories/ai_catalog.py
+      - app/services/ai_catalog.py
+      - app/schemas/ai_catalog.py
+      - app/api/admin_ai_catalog.py
+      - app/main.py
+      - tests/backend/test_ai_catalog_api.py
+      - tests/backend/test_ai_catalog_resolve.py
+      - tests/backend/test_usage_meter_api.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_model_columns.py
+      - docs/api.md
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
