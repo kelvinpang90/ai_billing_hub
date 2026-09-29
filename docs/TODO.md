@@ -23,20 +23,19 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-025` Phase 2 Provider、Model 与 Usage Meter 目录
-2. `AIH-TASK-026` Phase 2 供应商价格版本与泛化价格分量
-3. `AIH-TASK-027` Phase 2 定价规则 MARKUP 与 FIXED_RATE
-4. `AIH-TASK-028` Phase 2 FX 汇率版本、BNM 拉取、审批与告警接口
-5. `AIH-TASK-029` Phase 2 用量摄取端点
-6. `AIH-TASK-030` Phase 2 批量用量摄取端点
-7. `AIH-TASK-031` Phase 2 计价引擎与试算预览
-8. `AIH-TASK-032` Phase 2 异步计费 worker
-9. `AIH-TASK-033` Phase 2 最热租户压测脚本
-10. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-11. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-12. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-13. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-14. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-026` Phase 2 供应商价格版本与泛化价格分量
+2. `AIH-TASK-027` Phase 2 定价规则 MARKUP 与 FIXED_RATE
+3. `AIH-TASK-028` Phase 2 FX 汇率版本、BNM 拉取、审批与告警接口
+4. `AIH-TASK-029` Phase 2 用量摄取端点
+5. `AIH-TASK-030` Phase 2 批量用量摄取端点
+6. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+7. `AIH-TASK-032` Phase 2 异步计费 worker
+8. `AIH-TASK-033` Phase 2 最热租户压测脚本
+9. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+10. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+11. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+12. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+13. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -2180,7 +2179,18 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
   - 撤销接口的请求体是 `{}`（与启用 webhook 密钥同一写法），带任何字段 422
   - 种子的显示名（`LLM tokens` 等）设计没有给，取英文短语；可随时经 PATCH 改
   - 计量类型、供应商、模型三张表的 `status` 都带服务端默认 `ACTIVE`（设计只对供应商写了「默认」，模型写「同供应商」）
+- [x] **交付**：Worker 跑 `allowed_commands`、CI、审查、合并与部署：
+  - 第一次 run `7c91c84c` 基于 `1483fe8`，#184 在 run 中途合进 main，以 `branch_outdated` 结束。它的收尾说明指出
+    `app/services/audit_query.py` 不在允许路径里（四个新 `entity_type` 不归类，`test_every_written_entity_type_is_classified`
+    会红），#185 补进契约（合并为 `61adb48`）
+  - 第二次 run `11443341` 基于 `61adb48`，五项检查零退出（第 1 轮 `lint.check` 的 E501 由修复轮修掉），提交 `d165fd5`、开出
+    #186；随后以 `review_input_unusable` 结束：diff 约 25.6 万字符，超过 Worker 评审的 20 万字符上限，受限评审没有运行
+  - Kelvin 选由 Claude 接手 #186：CI 的 backend 只挂 `test_a_resolved_time_never_changes_its_model` 的防空转断言
+    （固定种子下 60 步只有 18 次变化，阈值 20），`ea10ee3` 把步数改为 120（34 次变化），性质与阈值不变。CI 六项全绿，
+    Codex `VERDICT: APPROVE`，合并为 `9b63cfa`；main 上 Deploy 成功，迁移 0012 已在生产执行、健康检查通过
 - [ ] **后续**：
+  - Worker 评审的 20 万字符上限：026 / 027 的允许路径与 025 同一量级，很可能同样超限。是按 diff 规模拆着登记，还是
+    在控制面调高上限（控制面任务，走它自己的审查），Kelvin 定在 025 落地之后再决定
   - 设计 §7「撤销与重新映射」写「共三段首尾相接」，但「映射 → 撤销 → 重新映射」只产生两段（重新映射从撤销点接上）；用例
     按「映射 → 改指向 → 撤销 → 重新映射」造出三段，逐段核对了设计列出的各个时刻的解析结果
   - 「快照读陷阱」用例同时断言了陷阱本身（同一事务里的普通读仍是旧快照），依赖 MySQL 默认的 REPEATABLE READ；CI 的
