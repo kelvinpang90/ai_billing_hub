@@ -114,7 +114,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-020` | 租户账户状态的启用与停用：`tenants.account_status`、管理端接口、与计费状态共用 `status_version`，审计与 outbox 同事务；关户移出，等 Phase 2 / 4。**状态机，已过设计闸门** #136（`APPROVED: design v2`）；设计在 [docs/design/AIH-TASK-020-tenant-account-status.md](../docs/design/AIH-TASK-020-tenant-account-status.md)。依赖 019 | 十三项；合并即执行迁移 0009。PR 正文由实现方改成 `#136` 再审 |
 | `AIH-TASK-021` | 审计表在数据库层只追加：迁移 0010 加 BEFORE UPDATE / DELETE 触发器（照账本），靠 DELETE 清场的 MySQL 测试改用 TRUNCATE，压测脚本不再删审计。**不走设计闸门**：不碰钱、状态机与认证。依赖 020 | 十三项（`test_password_reset_concurrency.py` 撞 Worker 敏感路径词，由管理员前置 PR 改）；合并即执行迁移 0010 |
 | `AIH-TASK-022` | 管理端审计日志查询接口 `GET /api/v1/admin/audit-logs`（spec §89）：筛选、分页、最新在前，内部 id 一律换成用户邮箱；迁移 0011 补查询索引。**不走设计闸门**：只读。依赖 021 | 十二项；合并即执行迁移 0011 |
-| `AIH-TASK-023` | 管理端前端审计页（spec §101 `features/audit/`）。**不走设计闸门**：纯前端。依赖 022 | 十一项；Worker 跑前端三项检查，build 只在 CI |
+| `AIH-TASK-023` | 管理端前端审计页（spec §101 `features/audit/`）。任务自己声明 `acceptance`（命令 `acceptance.browser`，只读，三个步骤），审计页的两个新步骤加进 024 的验收脚本。**不走设计闸门**：纯前端。依赖 022 | 十二项（含验收脚本）；Worker 跑前端三项检查，build 只在 CI |
 | `AIH-TASK-024` | OpenClaw 浏览器验收（P6）的试点：写 `scripts/acceptance/admin_customers.mjs`，部署后由 Worker 在生产上用验收夹具账号只读地验 015 的页面（登录、列表、夹具详情、余额）。任务自己声明 `acceptance`（命令 `acceptance.browser`，只读，四个步骤），主机见 `project.yaml` 的 `acceptance_hosts`。依赖 015。**不走设计闸门**：只读驱动已上线页面，不碰钱、状态机、认证逻辑与 webhook | 只改那一个脚本，检查只有 `docs.check` / `policy.check`。⚠️ 这个脚本在 MXC 之外、带凭据、网络不受限运行（控制面安全边界 A7），评审按生产代码逐行看；`acceptance.browser` 只能被 `acceptance` 块引用，不得进任何任务的 `allowed_commands` |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
