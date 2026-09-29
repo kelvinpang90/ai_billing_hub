@@ -1362,7 +1362,7 @@ tasks:
       spec §101 的 features/audit/：管理端审计页，调用 AIH-TASK-022 的 GET /api/v1/admin/audit-logs，
       分页表格 + 筛选（动作、实体类型与 id、操作者邮箱、时间段），展开一行看前后状态。顶部菜单加「审计」。只做前端，
       外加在部署后浏览器验收脚本里补上审计页的两个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-022
     acceptance_criteria:
