@@ -1968,8 +1968,8 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   上跑）；Worker 的受限审查一轮 `APPROVE`。#170 合并为 `8b88c50`，main 上 CI 与 Deploy 成功；`deploy/deploy.sh` 先跑
   `alembic upgrade head`、失败即中止，Deploy 成功即 0011 已上生产
 - [ ] **后续**（受限审查的不阻塞意见）：
-  - `refresh_tokens` 归「对外 id」让 ADMIN 看得到令牌家族 id（也是会话 id），见上面「实现定的细节」第一条；要不要改成
-    用户类型，等 Kelvin 确认
+  - `refresh_tokens` 归「对外 id」让 ADMIN 看得到令牌家族 id（也是会话 id），见上面「实现定的细节」第一条 —— Kelvin
+    2026-09-29 确认不隐藏，保持现状（记入 [REVIEW-LOG](REVIEW-LOG.md)「升级给人的分歧」）
   - `entity_type` 扫描测试对「形参同名」的豁免太宽：包一层 `record_audit` / `AuditLog` 的辅助函数会让它的调用方漏扫；
     应把豁免限定在已知的写审计函数上
   - `_state` 假定库里的 JSON 是对象，非对象会在响应校验时 500；现有写入方都是 `json.dumps(dict)`，暂可接受
