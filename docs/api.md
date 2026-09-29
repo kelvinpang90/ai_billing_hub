@@ -9,6 +9,7 @@
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端集成 API 凭据](#管理端集成-api-凭据)与[集成请求签名](#集成请求签名)（AIH-TASK-012）
 - [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥)与[状态 webhook 签名](#状态-webhook-签名)（AIH-TASK-019）
+- [管理端审计日志](#管理端审计日志)（AIH-TASK-022）
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -740,3 +741,100 @@ SHA256(RAW_REQUEST_BODY)
 按 `X-Acuven-Key-Version` 选密钥，照上面的规则算出签名，与 `X-Acuven-Signature` 做常量时间比较。轮换期间
 同时接受新旧两个版本，确认新版本能通过后再停用旧版本（ADR-0004 §4a）。时间窗、重试与按事件 id 去重的约定
 随 Phase 3 投递设计闸门写进这里。
+
+---
+
+## 管理端审计日志
+
+依据：spec §89 的 `GET /api/v1/admin/audit-logs`、§66 的审计字段。实现登记为 AIH-TASK-022；只读接口，不改钱的行为、
+状态机与认证逻辑，没有走设计闸门（见 [TODO.md](TODO.md) 的「审计日志差异清单」第 1 条）。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/audit-logs` | 200，审计分页 | 401 / 403 / 422 / 503 |
+
+只有 ADMIN 能调。**只读**：查看审计本身不写审计，也不写任何行。
+
+### 查询参数
+
+全部可省略，给了几个就按几个同时筛（AND）。未知的查询参数不报错，与其他列表接口一致。
+
+| 参数 | 规则 |
+| --- | --- |
+| `page` / `page_size` | 见[分页](#分页spec-108) |
+| `action` | `AuditAction` 的一个值，大小写敏感（如 `CUSTOMER_CREATE`、`LOGIN_FAILED`）；别的值 422 |
+| `entity_type` | 精确匹配，如 `tenant`、`project`、`users` |
+| `entity_id` | 精确匹配。**只对非用户类型生效**（见下面的替换规则）：`entity_type` 是用户类型时同时带 `entity_id` 是 422；不带 `entity_type` 时只在非用户类型里找 |
+| `actor_email` | 去掉首尾空白、转小写后与操作者的登录邮箱精确匹配；没有这个用户就是空列表 |
+| `created_from` | 含。格式见[时间](#时间)：不带时区的 UTC，精确到秒，例如 `2026-09-20T08:30:00` |
+| `created_to` | 不含。格式同上 |
+
+- 时间只收 `YYYY-MM-DDTHH:MM:SS` 这一种写法：只有日期、带 `Z` 或 `+08:00`、带小数秒、用空格分隔、不补零、
+  日历上不存在的日期（`2026-02-30T00:00:00`）都是 422。
+- `created_from` 晚于或等于 `created_to` 时 422。
+- 422 都是 `VALIDATION_ERROR`，`message` 只列字段名（如 `query.created_from`），不回显值。
+- ⚠️ 分页与 `action` 在鉴权**之前**校验（与[通用约定](#鉴权)一致）；时间格式、时间区间与「用户类型带
+  `entity_id`」在鉴权**之后**判 —— 没带令牌时这几种先得到 401。
+
+### 审计对象
+
+`data` 是[分页](#分页spec-108)对象，`items` 里每一项：
+
+```json
+{
+  "created_at": "2026-09-20T08:30:00",
+  "action": "CUSTOMER_CREATE",
+  "actor_role": "ADMIN",
+  "actor_email": "admin@example.com",
+  "entity_type": "tenant",
+  "entity_id": "3f0e6c1a-8d4b-4c6e-9a51-2b7f0d9c4e11",
+  "entity_user_email": null,
+  "ip_address": "203.0.113.7",
+  "user_agent": "Mozilla/5.0 ...",
+  "reason": null,
+  "before_state": null,
+  "after_state": { "public_id": "3f0e6c1a-8d4b-4c6e-9a51-2b7f0d9c4e11", "company_name": "Acme Sdn Bhd" }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `created_at` | 写入时刻，不带时区的 UTC，精确到秒 |
+| `action` | `AuditAction` 的值 |
+| `actor_role` | 写入时操作者的角色；系统动作（计费状态跃迁）是 `SYSTEM`；不知道是谁时 `null` |
+| `actor_email` | 操作者的登录邮箱。没有操作者（如 `UNKNOWN_EMAIL` 的登录失败、系统动作）或用户已不存在时 `null` |
+| `entity_type` | 审计对象的类型；登录失败等没有对象的审计为 `null` |
+| `entity_id` | 对外 id，见下面的替换规则 |
+| `entity_user_email` | 只在用户类型上有值：那个用户的登录邮箱；用户已不存在时 `null` |
+| `ip_address` / `user_agent` / `reason` | 库里存的原值，可为 `null` |
+| `before_state` / `after_state` | 解析好的 JSON **对象**（不是字符串）；没有时 `null`。内容是写入方挑好的字段白名单，不含密码、令牌、密钥与客户的个人数据 |
+
+响应里只有上面这些字段：**没有**审计行的 `id`，也没有 `actor_user_id`。
+
+### 内部 id 的替换规则
+
+响应里不出现任何内部自增 id：
+
+- 操作者：`actor_user_id` 不返回，关联 `users` 换成 `actor_email`。
+- **用户类型**：`entity_type` 为 `users`、`two_factor_settings`、`recovery_codes` 的审计，库里的 `entity_id` 存的是
+  内部用户 id —— 响应里 `entity_id` 一律为 `null`，改填 `entity_user_email`。按 `entity_id` 筛选也不对它们生效，
+  内部用户 id 不能被探测出来。
+- 其他类型的 `entity_id` 本来就是对外 id，原样返回、`entity_user_email` 为 `null`：
+
+| `entity_type` | `entity_id` 是 |
+| --- | --- |
+| `tenant` | 客户的 `id`（`public_id`） |
+| `project` | 项目的 `id`（`public_id`） |
+| `project_webhook_secret` | 所属项目的 `id`（`public_id`） |
+| `integration_credential` | `api_key` |
+| `wallet_transaction` | 调账对象的 `id`（账本行的 `public_id`） |
+| `refresh_tokens` | 登录会话的令牌家族 id（随机 uuid 的 32 位十六进制，不是自增 id） |
+
+两类的清单在 `app/services/audit_query.py`；新增一种写审计的 `entity_type` 而没有归类，
+`tests/backend/test_admin_audit_api.py` 的扫描用例会红。
+
+### 排序
+
+**最新在前，按审计行的自增 id 倒序**，不按 `created_at`。登录路径与业务路径写 `created_at` 时的取整不一致
+（见 [TODO.md](TODO.md) 的 AIH-TASK-006 记录段）：登录审计可能比它之后写入的建客户审计晚一秒。自增 id 才是
+真实的写入顺序。同一个原因，按 `created_from` / `created_to` 筛选在整秒边界上可能差一秒。

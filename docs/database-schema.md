@@ -224,7 +224,7 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 
 ---
 
-## `audit_logs`（spec §66；T0.8a 迁移 `0002_auth_tables` 建表，AIH-TASK-021 迁移 `0010_audit_logs_append_only` 加触发器）
+## `audit_logs`（spec §66；T0.8a 迁移 `0002_auth_tables` 建表，AIH-TASK-021 迁移 `0010_audit_logs_append_only` 加触发器，AIH-TASK-022 迁移 `0011_audit_logs_query_indexes` 加查询索引）
 
 | 列 | 类型 | 约束 |
 | --- | --- | --- |
@@ -239,7 +239,19 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 | `reason` | VARCHAR(255) | 可空 |
 | `created_at` | DATETIME | 非空 |
 
-索引 `ix_audit_logs_actor_created (actor_user_id, created_at)`。
+索引：
+
+| 索引 | 列 | 来源与用途 |
+| --- | --- | --- |
+| `ix_audit_logs_actor_created` | `(actor_user_id, created_at)` | 0002；按操作者筛选 |
+| `ix_audit_logs_entity` | `(entity_type, entity_id, id)` | 0011；管理端审计查询按实体筛选，末尾的 `id` 让按 id 倒序的分页沿索引读 |
+| `ix_audit_logs_action` | `(action, id)` | 0011；按动作筛选，同上 |
+| `ix_audit_logs_created_at` | `(created_at)` | 0011；按时间段筛选 |
+
+都不唯一。0011 的三个由 `GET /api/v1/admin/audit-logs`（spec §89，契约见 [api.md](api.md) 的「管理端审计日志」）使用，
+模型 `AuditLog.__table_args__` 同步声明；InnoDB 在线建二级索引，不锁表、不停机（分析见迁移文件头）。
+`users`、`two_factor_settings`、`recovery_codes` 三类审计的 `entity_id` 存的是内部用户 id，查询接口不把它返回、
+也不让它参与筛选，换成用户邮箱。
 
 ### 只追加：由触发器强制（迁移 0010 建，只在 MySQL 上）
 

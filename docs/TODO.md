@@ -1152,7 +1152,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 | `ADMIN_SETTING_CHANGE` | 随功能 | 还没有管理端设置；随低余额阈值等配置任务 |
 | `PRICING_*`、`PROVIDER_PRICE_PUBLISH`、`REBILL`、`PAYMENT_STATUS_CHANGE` 等 | 随后续 Phase | Phase 2 / 4 / 7 / 8，各自的设计闸门负责 |
 | 审计不能经应用 API 修改（§66） | 已有 | 只有插入路径（`record_audit`），没有更新或删除接口 |
-| **管理端查询接口 `GET /api/v1/admin/audit-logs`（§89）** | **缺** | 没有任何读取路由；要定筛选条件（动作、实体、操作者、时间段）、分页，并补 `(entity_type, entity_id)` 与按时间的索引（现在只有 `(actor_user_id, created_at)`） |
+| **管理端查询接口 `GET /api/v1/admin/audit-logs`（§89）** | 已有（随 AIH-TASK-022 合并生效） | 按动作、实体、操作者邮箱、时间段筛选，按 id 倒序分页；迁移 0011 补了实体、动作、时间三个索引；内部 id 换成邮箱。见 AIH-TASK-022 记录段 |
 | **前端审计页 `features/audit/`（§101）** | **缺** | 依赖上一行 |
 | 数据库层只追加 | 已有（spec 未强制；随 AIH-TASK-021 合并生效） | 迁移 0010 给 `audit_logs` 加了 BEFORE UPDATE / BEFORE DELETE 触发器，一律 45000；`scripts/perf_baseline.py` 收尾不再删审计行。`TRUNCATE` / `DROP` 不经触发器，仍归「迁移账号与运行账号拆分」，见 AIH-TASK-021 记录段 |
 | 审计时间戳取整不一致 | 缺 | 见 AIH-TASK-006 记录段；排序以自增 id 为准，不影响正确性 |
@@ -1924,6 +1924,47 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   `b3cadee`，`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check` 零退出；Worker 的受限审查一轮
   `APPROVE`（它看不到 `needs_mysql` 用例是否在 Worker 里被跳过，这些由 CI 的 `backend` 在真 MySQL 上跑过）。#167 合并为
   `e18f1bc`，main 上 CI 与 Deploy 成功
+
+### AIH-TASK-022 —— 管理端审计日志查询接口（2026-09-29）
+
+上面「审计日志差异清单」第 1 条的后端一半（Kelvin 2026-09-28 同意；前端是 AIH-TASK-023）。spec §89 的
+`GET /api/v1/admin/audit-logs`：管理员分页查看审计，可按动作、实体、操作者邮箱与时间段筛选，最新在前。契约记在
+[api.md](api.md) 的「管理端审计日志」，索引记在 [database-schema.md](database-schema.md) 的 `audit_logs`。
+设计闸门不适用：只读的管理端查询，不改钱的行为、状态机与认证逻辑；不改任何写审计的代码。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `app/api/admin_audit.py`：新路由，在 `app/main.py` 注册。处理函数第一条语句是 `require_admin`；`page` / `page_size`
+    与 `action`（`AuditAction` 枚举）由 FastAPI 校验，其余参数交给服务层
+  - `app/services/audit_query.py`：`USER_ENTITY_TYPES`（`users`、`two_factor_settings`、`recovery_codes`）与
+    `PUBLIC_ENTITY_TYPES`（`tenant`、`project`、`integration_credential`、`project_webhook_secret`、`wallet_transaction`、
+    `refresh_tokens`）两类归类；时间只收 `YYYY-MM-DDTHH:MM:SS`（先正则、再 `strptime`，日历上不存在的日期也是 422）；
+    `created_from >= created_to`、用户类型带 `entity_id` 都是 422 `VALIDATION_ERROR`（只列字段名）。查询左连接 `users`
+    取操作者邮箱、按 `id` 倒序分页；这一页里用户类型的 `entity_id` 再一次 `IN` 查询换成邮箱。普通会话，不提交、不写库
+  - `app/schemas/audit_logs.py`：`AuditLogView` 字段白名单，没有审计行 `id` 与 `actor_user_id`；`before_state` /
+    `after_state` 解析成对象，空串与 `NULL` 都是 `null`；`created_at` 截到整秒（登录路径的时间在 SQLite 上带小数秒）
+  - `alembic/versions/20260928_0011_audit_logs_query_indexes.py`：revision `0011_audit_logs_query_indexes`，`down_revision`
+    是 `0010_audit_logs_append_only`。建 `ix_audit_logs_entity (entity_type, entity_id, id)`、
+    `ix_audit_logs_action (action, id)`、`ix_audit_logs_created_at (created_at)`，`downgrade` 反向删掉；文件头附 §132
+    第 13 条分析（生产 `audit_logs` 行数少，InnoDB 在线建二级索引，不锁表、不停机）。`app/models/auth.py` 的
+    `AuditLog.__table_args__` 同步声明
+  - 测试：`tests/backend/test_admin_audit_api.py`（SQLite）—— 每个筛选条件单独与组合、未知参数被忽略、分页与 `total`、
+    按 id 而非 `created_at` 倒序、字段恰好是白名单、三类用户对象的 id 换成邮箱（用户已不存在时两个都是 `null`）、按
+    `entity_id` 筛不到用户类型、真实的 `UNKNOWN_EMAIL` 登录失败 `actor_email` 为 `null`、前后状态是对象、各种 422、
+    匿名 401 / CUSTOMER 403、查看不写库；另有一条用 `ast` 扫描 `app/` 下所有 `record_audit(...)` / `AuditLog(...)` 的
+    `entity_type=`（字面量或本模块的字符串常量），断言每一种都归了类，认不出来的写法同样判红。
+    `tests/backend/test_admin_customers_api.py` 的 `EXPECTED_ADMIN_ROUTES` 加上本路由，于是它也进了那里的 401 / 403 枚举
+    用例。`tests/backend/test_migrations.py`：0011 的版本链、迁移与模型的索引逐个相同、`upgrade` / `downgrade` 对称
+    （不连库），以及真 MySQL 上 head 的索引集合、downgrade 到 0010 只删这三个（表、列、0010 的触发器不动）再升回来
+- [x] **实现定的细节**（审查时请看这几条）：
+  - `refresh_tokens` 归「对外 id」：它的 `entity_id` 是令牌家族 id（`uuid4().hex`），不是自增 id。它同时是访问令牌里的
+    会话 id，只给 ADMIN 看；觉得不该露出来的话，改成用户类型即可（一行）
+  - 不带 `entity_type` 只带 `entity_id` 时，同样只在非用户类型里找：否则 `entity_id=1` 会命中「用户 1」的审计，内部 id
+    可以被探测出来
+  - 分页与 `action` 先于鉴权校验（FastAPI），时间与组合在鉴权之后由服务层判：没带令牌、时间又不合法的请求得到 401
+  - 时间筛选按库里的 `created_at` 比较；由于登录与业务两条路径的取整不一致（AIH-TASK-006 记录段），整秒边界上可能
+    差一秒，排序不受影响（按 id）
+- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
+- [ ] CI 全量运行（含 `test_0011_*` 的 MySQL 用例）、审查、合并、生产迁移 0011
 
 ### AIH-TASK-024 —— AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，2026-09-28）
 

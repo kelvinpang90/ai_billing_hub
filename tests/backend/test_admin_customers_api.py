@@ -61,7 +61,8 @@ PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
-# 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态。
+# 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态、
+# AIH-TASK-022 的审计日志查询。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
@@ -84,6 +85,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/activate"),
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"),
     ("POST", "/api/v1/admin/customers/{customer_id}/account-status"),
+    ("GET", "/api/v1/admin/audit-logs"),
 }
 
 # 鉴权用例给写接口的合法请求体：体不合法的话 FastAPI 在处理函数之前就回 422，
