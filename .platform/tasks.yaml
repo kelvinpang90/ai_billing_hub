@@ -1581,3 +1581,148 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 026 / 027：Phase 2 的 T-B（供应商价格）与 T-D（定价规则），碰定价，分别过了设计闸门 #177（v3）与 #178（v3）。
+  # 纯后端，不带 acceptance 块。迁移串行：025 的 0012 → 026 的 0013 → 027 的 0014。
+  - id: AIH-TASK-026
+    title: provider price versions and generalized price components
+    purpose: >-
+      按 docs/design/AIH-TASK-026-provider-prices.md（设计闸门 #177 已批准 v3）实现供应商成本价的版本化：迁移 0013 建
+      provider_price_versions 与 provider_price_components，状态 DRAFT / PUBLISHED / RETIRED / DISCARDED，只在末尾追加、
+      可预约未来生效、不许回溯（第一个版本除外），发布与退役在供应商行排他锁内、边界时刻在锁后取；发布后由触发器保证不可变、
+      发布跃迁上校验分量完整、区间不重叠；管理端七个接口与五个审计动作；只读查询 resolve_provider_price 与计费解析串行。
+      不含 FX、成本计算、试算、价格同步与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-025
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-026-provider-prices.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 迁移文件名 alembic/versions/20260929_0013_provider_prices.py，down_revision 指向 0012；两张表的列、类型、CHECK、唯一约束（含 open_slot 生成列）、复合外键按设计 §2「数据库」；触发器按设计（只能以草稿插入、发布后只许截断与退役、分量只在草稿阶段可改、禁止删除、发布跃迁上的分量完整性、锁供应商行后检查区间不重叠），写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；alembic/env.py 加 import 新模型模块
+      - 管理端七个接口、请求字段、错误码按设计 §2「接口」；金额一律 JSON 字符串精确解析、超过 8 位小数 422、不静默舍入；每个处理函数第一条语句调用 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id
+      - 发布与退役在 ai_providers 行 SELECT … FOR UPDATE 内完成，t 在拿到锁之后取、向上取整到下一个整秒；区间规则（第一个版本、预约、截断、撤销预约、退役后不回填）与写入顺序按设计；每次写后在同一事务里复查区间，不满足回滚
+      - resolve_provider_price(session, provider_id, model_id, occurred_at) 用加锁读（FOR SHARE），取 PUBLISHED / RETIRED 且区间覆盖 occurred_at 的版本及其分量；本任务不接到任何计费路径
+      - 五个审计动作（PROVIDER_PRICE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）与写入同一事务，内容按设计 §2「审计」
+      - 测试覆盖设计 §7 全部行；触发器、约束、并发（发布与计费并发、快照读陷阱）放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表的枚举列加进 test_model_columns.py；测试与文档里的价格一律用明显的虚构值；uuid 用全零占位值（secret-scan）
+      - docs/api.md 记全部新接口；docs/database-schema.md 记两张表、触发器与锁；docs/TODO.md 新增 AIH-TASK-026 记录段，记下四个 §66 之外补的审计动作与设计 §2「对下游任务的契约」
+      - 不含 FX、成本计算、试算、价格同步与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #177
+    allowed_change_paths:
+      - alembic/versions/20260929_0013_provider_prices.py
+      - alembic/env.py
+      - app/models/provider_prices.py
+      - app/models/auth.py
+      - app/repositories/provider_prices.py
+      - app/services/provider_prices.py
+      - app/schemas/provider_prices.py
+      - app/api/admin_provider_prices.py
+      - app/main.py
+      - tests/backend/test_provider_prices_api.py
+      - tests/backend/test_provider_prices_service.py
+      - tests/backend/test_provider_prices_resolve.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_model_columns.py
+      - docs/api.md
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-027
+    title: pricing rules MARKUP and FIXED_RATE
+    purpose: >-
+      按 docs/design/AIH-TASK-027-pricing-rules.md（设计闸门 #178 已批准 v3）实现客户定价规则：迁移 0014 建 pricing_rule_locks
+      （单行锁表）、pricing_rules、pricing_rule_components；五级范围（§16）由 CHECK 钉死 NULL 组合，MARKUP / FIXED_RATE 的混合
+      由 CHECK 与复合外键拒绝；按范围只在末尾追加、可预约、只有全局默认的第一条可回溯；发布与停用在单行锁排他模式内；触发器保证
+      不可变、只能以草稿插入、发布跃迁上 FIXED_RATE 分量完整、区间不重叠；管理端七个接口与五个审计动作；只读解析
+      resolve_pricing_rule 按五级下落、命中即停。价格是 MYR 含税价（ADR-0008）。不含计费额计算、试算、税额与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-026
+    acceptance_criteria:
+      - 实现与 docs/design/AIH-TASK-027-pricing-rules.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 迁移文件名 alembic/versions/20260929_0014_pricing_rules.py，down_revision 指向 0013；锁表恰好一行；两张规则表的列、scope_key 与 open_slot 生成列、范围与 NULL 组合的 CHECK、策略与倍数的 CHECK、(id, strategy) 唯一约束与分量表的复合外键、currency = MYR 按设计 §2「数据库」；触发器按设计（锁表恰好一行、只能以草稿插入、发布后只许截断与停用、分量只在草稿阶段可改、禁止删除、发布跃迁上 FIXED_RATE 完整性、锁 pricing_rule_locks 后检查同一 scope_key 区间不重叠），写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；alembic/env.py 加 import 新模型模块
+      - 管理端七个接口、请求字段（范围字段与 priority_scope 必须匹配）、错误码按设计 §2「接口」；单价与倍数一律 JSON 字符串精确解析、超过 8 位小数 422；每个处理函数第一条语句调用 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id；字段说明标注含税
+      - 发布与停用在 pricing_rule_locks 行 SELECT … FOR UPDATE 内完成，t 在锁后取、向上取整到整秒；区间规则（只有 GLOBAL 的第一条可 effective_from 为空，其余一律 ≥ t）与写入顺序按设计；每次写后同一事务复查区间
+      - resolve_pricing_rule 按 CUSTOMER_PROVIDER_MODEL → CUSTOMER_PROVIDER → CUSTOMER → GLOBAL_PROVIDER_MODEL → GLOBAL 依次加锁读，第一级命中即返回、不因缺分量下落；另提供对 pricing_rule_locks 取 FOR SHARE 的函数供计费使用；本任务不接到任何计费路径
+      - 五个审计动作（PRICING_CREATE / UPDATE / PUBLISH / RETIRE / DISCARD）与写入同一事务，内容按设计 §2「审计」
+      - 测试覆盖设计 §7 全部行；触发器、约束、并发（发布与计费并发、共享锁互不阻塞、快照读陷阱）放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表的枚举列加进 test_model_columns.py；价格与倍数用虚构值；uuid 用全零占位值
+      - 新建 docs/pricing-engine.md 的「规则」一节（写明五级顺序、下落语义、含税）；docs/api.md 记全部新接口；docs/database-schema.md 记三张表、触发器与锁顺序；docs/TODO.md 新增 AIH-TASK-027 记录段，记下两个 §66 之外补的审计动作与设计 §2「对下游任务的契约」
+      - 不含计费额计算、试算、税额与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #178
+    allowed_change_paths:
+      - alembic/versions/20260929_0014_pricing_rules.py
+      - alembic/env.py
+      - app/models/pricing_rules.py
+      - app/models/auth.py
+      - app/repositories/pricing_rules.py
+      - app/services/pricing_rules.py
+      - app/schemas/pricing_rules.py
+      - app/api/admin_pricing_rules.py
+      - app/main.py
+      - tests/backend/test_pricing_rules_api.py
+      - tests/backend/test_pricing_rules_service.py
+      - tests/backend/test_pricing_rules_resolve.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_model_columns.py
+      - docs/pricing-engine.md
+      - docs/api.md
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review

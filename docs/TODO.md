@@ -24,6 +24,8 @@
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
 1. `AIH-TASK-025` Phase 2 Provider、Model 与 Usage Meter 目录
+2. `AIH-TASK-026` Phase 2 供应商价格版本与泛化价格分量
+3. `AIH-TASK-027` Phase 2 定价规则 MARKUP 与 FIXED_RATE
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -42,9 +44,7 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
-- 待登记：Phase 2 T-B 供应商价格版本与泛化价格分量（需设计闸门）
 - 待登记：Phase 2 T-C FX 汇率版本、BNM 拉取、审批与告警计数接口（需设计闸门）
-- 待登记：Phase 2 T-D 定价规则 MARKUP 与 FIXED_RATE（需设计闸门）
 - 待登记：Phase 2 T-E 用量摄取端点：签名、防重放、持久化 202、全局幂等与冲突（需设计闸门）
 - 待登记：Phase 2 T-F 批量用量摄取端点（需设计闸门）
 - 待登记：Phase 2 T-G 计价引擎与管理端试算预览（需设计闸门）
@@ -2071,6 +2071,22 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 > 拆分、依赖与关键路径见 [PHASE-2-plan.md](design/PHASE-2-plan.md)（Kelvin 2026-09-28 确认）：12 个任务 T-A…T-L，8 个过设计闸门；设计闸门先写，实现任务等 AIH-TASK-020–023 合并部署后再登记。自动 FX 适配器（BNM）归本 Phase，Phase 8 只做供应商价格同步。
 >
 > 2026-09-29：020–023 已交付，T-A 登记为 `AIH-TASK-025`（设计闸门 #163 `APPROVED: design v4`，设计在 [AIH-TASK-025-ai-catalog.md](design/AIH-TASK-025-ai-catalog.md)）。审查中两处改动值得记住：计量类型由只读改为管理员可新建（Kelvin 选择满足 §58，不写偏离 ADR）；别名按 `occurred_at` 分段、解析与改映射用供应商行锁串行 —— T-B / T-D 的价格与规则发布将面临同一个「发布与计费解析的先后」问题，那两个闸门要照此处理。
+>
+> **占位名与登记编号、设计闸门对照**（2026-09-29 更新；设计文件正文里用占位名互相引用，以此表为准）：
+>
+> | 占位 | 任务 | 设计闸门 | 登记 |
+> | --- | --- | --- | --- |
+> | T-A | 目录 | #163 `APPROVED: design v4` | `AIH-TASK-025` |
+> | T-B | 供应商价格版本 | #177 `APPROVED: design v3` | `AIH-TASK-026` |
+> | T-D | 定价规则 | #178 `APPROVED: design v3` | `AIH-TASK-027` |
+> | T-C | FX 汇率、BNM 拉取、告警接口 | 未开（草稿待 Kelvin 答两项口径） | 待登记 |
+> | T-E | 用量摄取端点 | #176 `APPROVED: design v8` | 待登记（依赖 T-C 的告警接口） |
+> | T-F | 批量摄取 | #180 `APPROVED: design v3` | 待登记（依赖 T-E） |
+> | T-G | 计价引擎与试算 | #179 `APPROVED: design v1` | 待登记（依赖 T-C 的汇率函数） |
+> | T-H | 异步计费 worker | #181 `APPROVED: design v2` | 待登记（依赖 T-C、T-E、T-G） |
+> | T-I / T-J / T-K / T-L | 压测、用量查询、两个前端 | 不走闸门 | 待登记（随依赖） |
+>
+> 审查中的教训（写给后面的闸门与实现）：① 凡是「只在末尾追加的版本序列」都要数据库层的三道保护 —— 只能以草稿插入、发布跃迁上校验完整性、锁住同一把锁后检查区间不重叠；只靠服务层会被 Codex 判阻断（T-B、T-C、T-D 都补了）。② 复合外键与 CHECK 只在组成列非空时生效，必需列要逐列写 NOT NULL（T-E）。③ 跑 `codex-review.ps1` 期间**不要改工作区**：脚本检测到改动会作废判定、不发布（本次踩过一次）。
 
 - [ ] Provider / Model / Usage Meter
 - [ ] `provider_price_versions` + 泛化价格分量（含缓存 token、非 token 单位）
