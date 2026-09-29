@@ -2078,7 +2078,7 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 > | 占位 | 任务 | 设计闸门 | 登记 |
 > | --- | --- | --- | --- |
 > | T-A | 目录 | #163 `APPROVED: design v4` | `AIH-TASK-025` |
-> | T-B | 供应商价格版本 | #177 `APPROVED: design v3` | `AIH-TASK-026` |
+> | T-B | 供应商价格版本 | #177 `APPROVED: design v4` | `AIH-TASK-026` |
 > | T-D | 定价规则 | #178 `APPROVED: design v3` | `AIH-TASK-027` |
 > | T-C | FX 汇率、BNM 拉取、告警接口 | #183 `APPROVED: design v1`（Kelvin 2026-09-29：从发布时刻起生效；过期阈值 5 个日历日） | `AIH-TASK-028` |
 > | T-E | 用量摄取端点 | #176 `APPROVED: design v8` | `AIH-TASK-029` |

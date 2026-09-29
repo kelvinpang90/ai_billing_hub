@@ -26,6 +26,8 @@ dist/
 # Editor / OS
 .vscode/
 .idea/
+# Claude Code 本地会话产物（worktree、图片、锁文件），永不提交
+.claude/
 .DS_Store
 Thumbs.db
 
