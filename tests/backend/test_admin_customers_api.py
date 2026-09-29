@@ -40,6 +40,12 @@ from app.models.ai_catalog import (
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.integration import IntegrationCredential, ProjectWebhookSecret
+from app.models.provider_prices import (
+    PriceSourceType,
+    PriceVersionStatus,
+    ProviderPriceComponent,
+    ProviderPriceVersion,
+)
 from app.models.tenancy import Project, Tenant
 from app.models.wallet import Wallet, WalletTransaction
 from app.repositories.integration_access import insert_credential
@@ -71,7 +77,8 @@ ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
 # 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态、
-# AIH-TASK-022 的审计日志查询、AIH-TASK-025 的十五个 AI 目录接口。
+# AIH-TASK-022 的审计日志查询、AIH-TASK-025 的十五个 AI 目录接口、AIH-TASK-026 的七个供应商价格
+# 接口。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
@@ -81,6 +88,8 @@ PROVIDERS_ROUTE = "/api/v1/admin/ai-providers"
 PROVIDER_ROUTE = PROVIDERS_ROUTE + "/{provider_id}"
 MODELS_ROUTE = PROVIDER_ROUTE + "/models"
 ALIASES_ROUTE = PROVIDER_ROUTE + "/model-aliases"
+PRICES_ROUTE = "/api/v1/admin/provider-prices"
+PRICE_ROUTE = PRICES_ROUTE + "/{price_version_id}"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -115,6 +124,13 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", ALIASES_ROUTE),
     ("POST", ALIASES_ROUTE),
     ("POST", ALIASES_ROUTE + "/{alias_id}/retire"),
+    ("GET", PRICES_ROUTE),
+    ("POST", PRICES_ROUTE),
+    ("GET", PRICE_ROUTE),
+    ("PATCH", PRICE_ROUTE),
+    ("POST", PRICE_ROUTE + "/publish"),
+    ("POST", PRICE_ROUTE + "/retire"),
+    ("POST", PRICE_ROUTE + "/discard"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -160,6 +176,19 @@ VALID_BODIES = {
     ("PATCH", MODELS_ROUTE + "/{model_id}"): {"status": "RETIRED"},
     ("POST", ALIASES_ROUTE): {"alias": "probe-alias-new", "model_id": PROBE_CATALOG_ID},
     ("POST", ALIASES_ROUTE + "/{alias_id}/retire"): {},
+    # 供应商价格（AIH-TASK-026）：预置的是一份完整的草稿（分量是预置的 PROBE），所以漏了鉴权的
+    # 建、改、发布、丢弃会真的多出行或改掉它；退役一份草稿本应 409，漏了鉴权同样过不了 401 / 403。
+    ("POST", PRICES_ROUTE): {
+        "provider_id": PROBE_CATALOG_ID,
+        "model_id": PROBE_CATALOG_ID,
+        "source_currency": "USD",
+        "source_reference": "Probe",
+        "components": [{"component_code": "PROBE", "unit_quantity": "1", "rate_amount": "1"}],
+    },
+    ("PATCH", PRICE_ROUTE): {"source_reference": "Renamed"},
+    ("POST", PRICE_ROUTE + "/publish"): {},
+    ("POST", PRICE_ROUTE + "/retire"): {"reason": "Probe"},
+    ("POST", PRICE_ROUTE + "/discard"): {},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -315,14 +344,16 @@ COUNTED_MODELS = (
     AiProvider,
     AiModel,
     AiModelAlias,
+    ProviderPriceVersion,
+    ProviderPriceComponent,
 )
 
 
 def row_counts(application: FastAPI) -> dict[str, int]:
     """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。
 
-    凭据表（AIH-TASK-012）、出站签名密钥表（AIH-TASK-019）与 AI 目录的五张表（AIH-TASK-025）
-    同理。
+    凭据表（AIH-TASK-012）、出站签名密钥表（AIH-TASK-019）、AI 目录的五张表（AIH-TASK-025）与
+    供应商价格的两张表（AIH-TASK-026）同理。
     """
     with application.state.session_factory() as session:
         return {model.__tablename__: count_rows(session, model) for model in COUNTED_MODELS}
@@ -342,6 +373,8 @@ NO_ROWS = {
     "ai_providers": 0,
     "ai_models": 0,
     "ai_model_aliases": 0,
+    "provider_price_versions": 0,
+    "provider_price_components": 0,
 }
 
 
@@ -414,6 +447,7 @@ def probe_catalog(application: FastAPI) -> None:
     """ACTIVE meter type, provider and model, plus an untruncated alias segment (AIH-TASK-025).
 
     都用 `PROBE_CATALOG_ID` 作 public_id，直接写库：漏了鉴权的处理函数会真的找到它们。
+    另有一份完整的价格草稿（AIH-TASK-026），建草稿人是已有的第一个 ADMIN。
     """
     now = utc_now().replace(microsecond=0)
     with application.state.session_factory() as session:
@@ -462,20 +496,56 @@ def probe_catalog(application: FastAPI) -> None:
                 created_at=now,
             )
         )
+        # 一份完整的价格草稿（AIH-TASK-026）：漏了鉴权的改、发布、丢弃会真的改它。
+        creator = select(User.id).where(User.role == UserRole.ADMIN).order_by(User.id).limit(1)
+        version = ProviderPriceVersion(
+            public_id=PROBE_CATALOG_ID,
+            provider_id=provider.id,
+            model_id=model.id,
+            source_currency="USD",
+            source_type=PriceSourceType.MANUAL,
+            source_reference="Probe",
+            status=PriceVersionStatus.DRAFT,
+            created_by=session.execute(creator).scalar_one(),
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(version)
+        session.flush()
+        session.add(
+            ProviderPriceComponent(
+                provider_price_version_id=version.id,
+                usage_meter_component_id=component.id,
+                unit_quantity=1,
+                rate_amount=1,
+                created_at=now,
+            )
+        )
         session.commit()
 
 
 def stored_catalog(application: FastAPI) -> list[tuple]:
-    """What PATCH and retire change: statuses, names, `updated_at`, and segment ends."""
+    """What PATCH and retire change: statuses, names, `updated_at`, and segment ends.
+
+    价格版本（AIH-TASK-026）同理：状态、来源、区间与 `updated_at`，以及分量的单价。
+    """
     editable = [
         select(model.code, model.display_name, model.status, model.updated_at).order_by(model.id)
         for model in (UsageMeterType, AiProvider, AiModel)
     ]
     ends = (AiModelAlias.alias, AiModelAlias.effective_to, AiModelAlias.closed_at)
     segments = select(*ends).order_by(AiModelAlias.id)
+    versions = select(
+        ProviderPriceVersion.status,
+        ProviderPriceVersion.source_reference,
+        ProviderPriceVersion.effective_from,
+        ProviderPriceVersion.effective_to,
+        ProviderPriceVersion.updated_at,
+    ).order_by(ProviderPriceVersion.id)
+    rates = select(ProviderPriceComponent.rate_amount).order_by(ProviderPriceComponent.id)
     stored: list[tuple] = []
     with application.state.session_factory() as session:
-        for statement in [*editable, segments]:
+        for statement in [*editable, segments, versions, rates]:
             stored += [tuple(row) for row in session.execute(statement)]
     return stored
 
@@ -596,7 +666,7 @@ def test_every_admin_route_refuses_non_admins(
         .replace("{api_key}", PROBE_API_KEY)
         .replace("{key_version}", "1")
     )
-    for name in ("meter_type_id", "provider_id", "model_id", "alias_id"):
+    for name in ("meter_type_id", "provider_id", "model_id", "alias_id", "price_version_id"):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
@@ -615,7 +685,8 @@ def test_every_admin_route_refuses_non_admins(
     assert stored_credentials(app) == credentials
     # 签名密钥行同理：启用与退役改的是已有行的状态与时间（AIH-TASK-019）。
     assert stored_webhook_secrets(app) == webhook_secrets
-    # AI 目录同理：PATCH 改状态与名字，撤销改段的终点（AIH-TASK-025）。
+    # AI 目录同理：PATCH 改状态与名字，撤销改段的终点（AIH-TASK-025）；价格草稿的改、发布、
+    # 丢弃改版本行（AIH-TASK-026）。
     assert stored_catalog(app) == catalog
 
 

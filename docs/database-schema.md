@@ -18,7 +18,8 @@
   用 `uuid4` 而不是 uuidv7：Python 3.12 标准库没有 uuid7，这两张表行数小，用不上时间有序带来的索引局部性
 - **金额**：一律 `DECIMAL(20,8)`（`Money`，`app/models/base.py`；spec §80），永远不用浮点。
   金额列：`tenants.low_balance_threshold`、`wallets.balance`、`wallet_transactions` 的
-  `amount` / `balance_before` / `balance_after`
+  `amount` / `balance_before` / `balance_after`；`provider_price_components` 的 `rate_amount`（原币种单价）与
+  `unit_quantity`（多少个计量单位）同一精度
 - **枚举列**：非原生 enum，`VARCHAR` 宽度写死（理由见 `app/models/auth.py` 的 `_ENUM_LENGTH`）
 
 ---
@@ -402,6 +403,98 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
   `effective_to == 下一段 effective_from`、只有第一段 `effective_from` 为空），不满足就回滚。
 - 段从不修改指向、从不往过去延伸；改指向与撤销只截断当前段、从边界时刻 `t`（拿到供应商行锁之后的当前时间
   向上取整到下一个整秒）起开新段。
+
+---
+
+## 供应商成本价（spec §14、§15.1、§17、§74.1；AIH-TASK-026，迁移 `0013_provider_prices`）
+
+设计依据：[design/AIH-TASK-026-provider-prices.md](design/AIH-TASK-026-provider-prices.md)（设计闸门 #177 v4）
+§2「数据库」。两张表：`provider_price_versions`、`provider_price_components`。接口见 [api.md](api.md) 的
+「管理端供应商价格」。
+
+共同的约定：
+
+- **价格只存原币种**（通常 USD，也可以是 MYR），不换算、不存 MYR（ADR-0005 §5）；FX 归 T-C。成本价只在管理端
+  出现，客户不可见（INV-7）。
+- **行永不删除**：版本由触发器拒绝 DELETE（丢弃的草稿也留痕）；外键都是 `RESTRICT`。
+- **发布后不可变**：由下面的触发器保证，只在 MySQL 上。SQLite（单元测试）上没有触发器，服务层按同样的规则写。
+
+### `provider_price_versions`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库（T-H 把它写进事件快照，但不对外） |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_provider_price_versions_public_id`） |
+| `provider_id` / `model_id` | BIGINT | 非空；复合外键 `(model_id, provider_id)` → `ai_models(id, provider_id)` `ON DELETE RESTRICT`（`fk_provider_price_versions_model`）：版本只能挂在**同一供应商**的模型上。子表索引 `ix_provider_price_versions_model` |
+| `source_currency` | CHAR(3) | 非空；ISO 4217 大写三字母（格式在接口层校验） |
+| `source_type` | VARCHAR(16) | 非空，`CHECK IN ('MANUAL','SYNC')`；本任务只写 `MANUAL`，`SYNC` 留给 Phase 8 |
+| `source_reference` | VARCHAR(255) | 非空；价格出处（例如供应商价格页与查看日期），去首尾空白后 1–255。不写合同价 |
+| `status` | VARCHAR(16) | 非空，`CHECK IN ('DRAFT','PUBLISHED','RETIRED','DISCARDED')`；`DISCARDED` 是 §74.1 之外补的 |
+| `effective_from` | DATETIME | 可空；草稿为空。`NULL` 另一种含义只有一处：该（供应商, 模型）第一个已发布版本未指定生效时刻 = 「一直以来」 |
+| `effective_to` | DATETIME | 可空；`NULL` = 仍生效（或尚未发布） |
+| `open_slot` | INT，STORED 生成列 | `CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END`；只读 |
+| `created_by` | BIGINT | 非空；外键 → `users(id)` `RESTRICT`（`fk_provider_price_versions_created_by`） |
+| `approved_by` | BIGINT | 可空；发布人；外键 → `users(id)` `RESTRICT`（`fk_provider_price_versions_approved_by`） |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+| `approved_at` | DATETIME | 可空；发布时刻 |
+
+- **唯一索引 `(provider_id, model_id, open_slot)`**（`ux_provider_price_versions_open_slot`）：一个（供应商, 模型）
+  至多一个未截断的已发布版本。其余行在 `open_slot` 上是 NULL，唯一索引允许多个 NULL。
+- `ck_provider_price_versions_unpublished`：`DRAFT` / `DISCARDED` 的 `effective_from`、`effective_to`、`approved_by`、
+  `approved_at` 全为空。
+- `ck_provider_price_versions_approved`：`PUBLISHED` / `RETIRED` 的 `approved_by`、`approved_at` 非空。
+- `ck_provider_price_versions_period`：`effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to
+  OR (status = 'RETIRED' AND effective_from = effective_to)`。最后一项是「撤销尚未生效的预约」留下的空区间
+  `[F, F)`，它永不匹配任何时刻。
+
+### `provider_price_components`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `provider_price_version_id` | BIGINT | 非空；外键 → `provider_price_versions(id)` `RESTRICT`（`fk_provider_price_components_version`） |
+| `usage_meter_component_id` | BIGINT | 非空；外键 → `usage_meter_components(id)` `RESTRICT`（`fk_provider_price_components_meter_component`）。§74.1 的 `meter_type_id`、`component_code`、`unit` 由它唯一确定，不在本表重复存；子表索引 `ix_provider_price_components_meter_component` |
+| `unit_quantity` | DECIMAL(20,8) | 非空，`CHECK > 0`；多少个计量单位对应一个 `rate_amount`（例如每 1 000 000 个 token） |
+| `rate_amount` | DECIMAL(20,8) | 非空，`CHECK > 0`；原币种单价 |
+| `metadata_json` | JSON | 可空；只作备注（例如供应商的档位名），**计价不读它**。区分价格的维度必须是不同的分量（§15.1） |
+| `created_at` | DATETIME | 非空 |
+
+- 唯一约束 `(provider_price_version_id, usage_meter_component_id)`（`uq_provider_price_components_version_component`）。
+- **完整性**：凡是版本里出现的计量类型，它在 `usage_meter_components` 里的全部分量都必须出现（出现 `LLM_TOKEN`
+  就要四个价）；整体没出现的计量类型不要求（那一类用量计价时 `PRICING_ERROR`，不按 0 算）。发布时服务层校验并
+  列出缺的分量，发布跃迁上的触发器兜底。
+
+### 触发器（迁移 0013 建，只在 MySQL 上）
+
+写法与权限预检照迁移 0006（binlog 开着而 `log_bin_trust_function_creators` 关着时，迁移在任何 DDL 之前拒绝运行）。
+拒绝一律 `SIGNAL SQLSTATE '45000'`（MySQL 错误号 1644）。
+
+| 触发器 | 做什么 |
+| --- | --- |
+| `trg_provider_price_versions_before_insert` | `status` 不是 `DRAFT` 就拒绝：版本只能以草稿进入，发布跃迁上的检查因此绕不过去 |
+| `trg_provider_price_versions_before_update` | ① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（不许直接 `DRAFT → RETIRED` 绕过 ③ 的完整性检查）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；③ `DRAFT → PUBLISHED` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM ai_providers WHERE id = NEW.provider_id FOR UPDATE`（与服务层发布同一把锁），再查同一（供应商, 模型）里是否有另一个**非空区间**的已发布版本与本行相交，有就拒绝。空区间不参与判定 |
+| `trg_provider_price_versions_before_delete` | 一律拒绝 |
+| `trg_provider_price_components_before_insert` / `_before_update` / `_before_delete` | 所属版本（更新时新旧两个）不是 `DRAFT` 就拒绝：分量只在草稿阶段可增删改 |
+
+`DRAFT` 的行在 ② 之外，可以任意改（服务层只改 `source_currency`、`source_reference`、`updated_at` 与发布、丢弃时的列）。
+**残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器（与 0006 相同）。
+
+### 锁与写入顺序
+
+- **发布、退役**：`SELECT … FROM ai_providers WHERE id = ? FOR UPDATE`（与 025 改映射同一把锁），拿到锁之后才取
+  边界时刻 `t`（服务端当前时间向上取整到下一个整秒）；再 `FOR UPDATE` 读版本行与该（供应商, 模型）的全部已发布
+  版本。写完在同一事务里复查区间，再写审计、提交。
+  ⚠️ 这把锁是事务的**第一条语句**：版本属于哪个供应商在另一个短事务里查；锁之后对模型、分量、计量类型分量、
+  响应里的供应商 / 模型 / 用户的读一律 `FOR SHARE`。MySQL 的 REPEATABLE READ 在事务第一次普通读时建立快照，
+  锁前做过普通读的话，锁后的普通读（以及触发器里的完整性子查询）仍读那个快照，看不见等锁期间提交的模型停用
+  或分量替换。改草稿同样先 `FOR UPDATE` 版本行，所以与发布串行。
+- **计费取价**（T-G / T-H，本任务不接线）：先 `resolve_model`（对供应商行 `FOR SHARE`），再
+  `resolve_provider_price`（对版本与分量 `FOR SHARE`），锁持有到计费事务提交。锁顺序：供应商（共享）→ 钱包 →
+  租户，价格表不引入新的锁顺序。
+- **建草稿、改草稿、丢弃**：不锁供应商行（草稿不参与计费），只 `FOR UPDATE` 版本行。
+- **写入顺序**（每一步立刻 flush，数据库的区间触发器与 `open_slot` 唯一索引按行检查）：发布时先截断前一个
+  （写 `effective_to`），再把本行从草稿改为已发布；撤销预约时先把被撤销的一行改成空区间，再把前一个恢复为未截断。
+  改草稿的分量是整体替换：先删旧分量（flush），再插新分量。
 
 ---
 

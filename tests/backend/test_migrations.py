@@ -62,6 +62,7 @@ from app.models.integration import (
     IntegrationCredential,
     ProjectWebhookSecret,
 )
+from app.models.provider_prices import ProviderPriceComponent, ProviderPriceVersion
 from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
 from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
 
@@ -665,11 +666,13 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             "fk_wallet_transactions_created_by": "RESTRICT",
         }
         assert checks == set(_model_checks())
-        # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验。
+        # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验；价格表上的
+        # 六个由 0013 建，在 test_0013_* 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
-        assert set(triggers) == set(_EXPECTED_TRIGGERS) | set(_EXPECTED_TRIGGERS_0010)
+        expected = {*_EXPECTED_TRIGGERS, *_EXPECTED_TRIGGERS_0010, *_EXPECTED_TRIGGERS_0013}
+        assert set(triggers) == expected
     finally:
         engine.dispose()
 
@@ -1667,8 +1670,8 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012 的五张表随降级到 0009 一并删掉）。
-        assert _table_names() == tables - _TABLES_0012
+        # 只删触发器：表与列都不动（0012 的五张表、0013 的两张表随降级到 0009 一并删掉）。
+        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
         with _rolled_back_connection() as connection:
@@ -1763,8 +1766,8 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012 的五张表随降级到 0010 一并删掉）。
-        assert _table_names() == tables - _TABLES_0012
+        # 只删索引：表、列与 0010 的触发器都不动（0012、0013 的表随降级到 0010 一并删掉）。
+        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
 
@@ -2281,3 +2284,355 @@ def test_0012_provider_and_model_status_checks(alembic_config: Config) -> None:
             status="DISABLED",
         )
         assert refused == _ER_CHECK_CONSTRAINT_VIOLATED
+
+
+# ---------------------------------------------------------------------------
+# 0013_provider_prices（AIH-TASK-026，设计闸门 #177 v3）
+#
+# 头几条不连库：钉住版本链；迁移与模型的 CHECK、生成列一致；触发器写法与预检照 0006，
+# 预检排在任何 DDL 之前；downgrade 按外键依赖倒序删表。真 MySQL 上验两张表的形状、键、外键删除规则、
+# CHECK 与触发器的集合，以及升降只增删这两张表。触发器与约束的**行为**（拒绝什么、放行什么）在
+# test_provider_prices_service.py。
+# ---------------------------------------------------------------------------
+
+_REVISION_0013 = "0013_provider_prices"
+_MIGRATION_0013 = pathlib.Path("alembic/versions/20260929_0013_provider_prices.py")
+_PRICE_MODELS = (ProviderPriceVersion, ProviderPriceComponent)
+_TABLES_0013 = {model.__tablename__ for model in _PRICE_MODELS}
+# 建表顺序；downgrade 必须恰好反过来（外键依赖）。
+_CREATE_ORDER_0013 = ["provider_price_versions", "provider_price_components"]
+
+# 触发器名 → (表, 时机, 事件)。设计 §2「不可变」的六个，一个不多一个不少。
+_EXPECTED_TRIGGERS_0013 = {
+    "trg_provider_price_versions_before_insert": ("provider_price_versions", "BEFORE", "INSERT"),
+    "trg_provider_price_versions_before_update": ("provider_price_versions", "BEFORE", "UPDATE"),
+    "trg_provider_price_versions_before_delete": ("provider_price_versions", "BEFORE", "DELETE"),
+    "trg_provider_price_components_before_insert": (
+        "provider_price_components",
+        "BEFORE",
+        "INSERT",
+    ),
+    "trg_provider_price_components_before_update": (
+        "provider_price_components",
+        "BEFORE",
+        "UPDATE",
+    ),
+    "trg_provider_price_components_before_delete": (
+        "provider_price_components",
+        "BEFORE",
+        "DELETE",
+    ),
+}
+
+_EXPECTED_0013_COLUMNS = {
+    "provider_price_versions": {
+        "id": False,
+        "public_id": False,
+        "provider_id": False,
+        "model_id": False,
+        "source_currency": False,
+        "source_type": False,
+        "source_reference": False,
+        "status": False,
+        # NULL = 草稿 / 「一直以来」/「仍生效」；生成列在截断、未发布的行上是 NULL。
+        "effective_from": True,
+        "effective_to": True,
+        "open_slot": True,
+        "created_by": False,
+        "approved_by": True,
+        "created_at": False,
+        "updated_at": False,
+        "approved_at": True,
+    },
+    "provider_price_components": {
+        "id": False,
+        "provider_price_version_id": False,
+        "usage_meter_component_id": False,
+        "unit_quantity": False,
+        "rate_amount": False,
+        "metadata_json": True,
+        "created_at": False,
+    },
+}
+
+_EXPECTED_UNIQUE_0013 = {
+    "provider_price_versions": {("public_id",), ("provider_id", "model_id", "open_slot")},
+    "provider_price_components": {("provider_price_version_id", "usage_meter_component_id")},
+}
+
+_EXPECTED_FOREIGN_KEYS_0013 = {
+    "provider_price_versions": {
+        "fk_provider_price_versions_model": (
+            ["model_id", "provider_id"],
+            "ai_models",
+            ["id", "provider_id"],
+        ),
+        "fk_provider_price_versions_created_by": (["created_by"], "users", ["id"]),
+        "fk_provider_price_versions_approved_by": (["approved_by"], "users", ["id"]),
+    },
+    "provider_price_components": {
+        "fk_provider_price_components_version": (
+            ["provider_price_version_id"],
+            "provider_price_versions",
+            ["id"],
+        ),
+        "fk_provider_price_components_meter_component": (
+            ["usage_meter_component_id"],
+            "usage_meter_components",
+            ["id"],
+        ),
+    },
+}
+
+_PRICE_DELETE_RULES_QUERY = text(
+    "SELECT CONSTRAINT_NAME, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS"
+    " WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND TABLE_NAME IN ('provider_price_versions', 'provider_price_components')"
+)
+_PRICE_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME IN ('provider_price_versions', 'provider_price_components')"
+)
+
+
+def _load_0013() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0013", _MIGRATION_0013)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _price_checks() -> dict[str, tuple[str, str]]:
+    return {
+        str(constraint.name): (model.__tablename__, _normalised(str(constraint.sqltext)))
+        for model in _PRICE_MODELS
+        for constraint in model.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0013_follows_0012() -> None:
+    migration = _load_0013()
+
+    assert migration.revision == _REVISION_0013
+    assert migration.down_revision == _REVISION_0012
+
+
+def test_0013_checks_and_slot_are_the_ones_the_models_declare() -> None:
+    migration = _load_0013()
+    from_migration = {
+        name: (table, _normalised(condition))
+        for name, (table, condition) in migration._CHECKS.items()
+    }
+
+    assert from_migration == _price_checks()
+    # 版本 5 条、分量 2 条。
+    assert len(from_migration) == 7
+    computed = ProviderPriceVersion.__table__.c.open_slot.computed
+    assert computed is not None
+    assert computed.persisted is True
+    assert _normalised(str(computed.sqltext)) == _normalised(migration._OPEN_SLOT)
+    # 生成列只在「未截断的已发布版本」上有值。
+    assert "'PUBLISHED'" in migration._OPEN_SLOT
+    assert "effective_to IS NULL" in migration._OPEN_SLOT
+
+
+def test_0013_triggers_are_the_six_of_the_design_written_like_0006() -> None:
+    """每条都是一条完整的 CREATE TRIGGER，拒绝时 SIGNAL SQLSTATE '45000'（与 0006 同一写法）。"""
+    triggers = _load_0013()._TRIGGERS
+
+    assert set(triggers) == set(_EXPECTED_TRIGGERS_0013)
+    for name, (table, timing, event) in _EXPECTED_TRIGGERS_0013.items():
+        statement = _normalised(triggers[name])
+        assert statement.startswith(f"CREATE TRIGGER {name} {timing} {event} ON {table}"), name
+        assert "FOR EACH ROW" in statement, name
+        assert "SIGNAL SQLSTATE '45000'" in statement, name
+    # 区间不重叠：先锁供应商行（与服务层同一把锁），再查相交。
+    update = _normalised(triggers["trg_provider_price_versions_before_update"])
+    locked = update.index("FROM ai_providers WHERE id = NEW.provider_id FOR UPDATE")
+    assert locked < update.index("provider price periods overlap")
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0013_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    """与 0006 同一个预检：binlog 开着而开关关着时建不了触发器（ERROR 1419）。"""
+    migration = _load_0013()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0013_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL 的 DDL 不参与事务：预检失败时不能已经建了一张表。"""
+    migration = _load_0013()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    # 反过来：开关开着时同一个 upgrade 确实走到了 DDL —— 上面的空列表不是因为没走到。
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    assert allowed.calls == ["create_table", "create_table"] + ["execute"] * 6
+
+
+class _OfflineArgsRecorder(_ArgsRecorder):
+    """`_ArgsRecorder` in `--sql` mode: no bind, so the precheck is skipped."""
+
+    def get_context(self) -> SimpleNamespace:
+        return SimpleNamespace(as_sql=True)
+
+
+def test_0013_downgrade_drops_the_two_tables_in_dependency_order(monkeypatch) -> None:
+    migration = _load_0013()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert upgrade.first_args("create_table") == _CREATE_ORDER_0013
+    # 不写种子：只有六条 CREATE TRIGGER。
+    assert len(upgrade.first_args("execute")) == 6
+    assert not upgrade.first_args("bulk_insert")
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.first_args("drop_table") == _CREATE_ORDER_0013[::-1]
+    assert [name for name, _ in downgrade.calls] == ["drop_table"] * 2
+
+
+@needs_mysql
+def test_0013_only_adds_and_drops_its_two_tables(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    try:
+        command.downgrade(alembic_config, _REVISION_0012)
+        without = _table_names()
+        assert "ai_models" in without, "0012 的表应该都在，否则下面的比较没有意义"
+        assert not _TABLES_0013 & without
+
+        command.upgrade(alembic_config, _REVISION_0013)
+        assert _table_names() == without | _TABLES_0013
+
+        command.downgrade(alembic_config, _REVISION_0012)
+        assert _table_names() == without
+        # 触发器随表删除。
+        assert not set(_EXPECTED_TRIGGERS_0013) & set(_all_triggers())
+    finally:
+        command.upgrade(alembic_config, "head")
+
+
+def _all_triggers() -> dict[str, tuple[str, ...]]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(_TRIGGERS_QUERY).all()
+    finally:
+        engine.dispose()
+    return {row[0]: tuple(row[1:]) for row in rows}
+
+
+@needs_mysql
+def test_0013_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        columns = {table: inspector.get_columns(table) for table in _EXPECTED_0013_COLUMNS}
+        for table, expected in _EXPECTED_0013_COLUMNS.items():
+            assert {c["name"]: c["nullable"] for c in columns[table]} == expected, table
+        types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
+
+        for (table, name), column_type in types.items():
+            if name == "id" or (name.endswith("_id") and name != "public_id"):
+                assert isinstance(column_type, BigInteger), (table, name)
+            if name.endswith("_at") or name.startswith("effective_"):
+                assert isinstance(column_type, DateTime), (table, name)
+        versions, components = "provider_price_versions", "provider_price_components"
+        for name in ("created_by", "approved_by"):
+            assert isinstance(types[(versions, name)], BigInteger), name
+        assert isinstance(types[(versions, "public_id")], CHAR)
+        assert types[(versions, "public_id")].length == 36
+        assert isinstance(types[(versions, "source_currency")], CHAR)
+        assert types[(versions, "source_currency")].length == 3
+        widths = {"source_type": 16, "status": 16, "source_reference": 255}
+        for name, width in widths.items():
+            assert isinstance(types[(versions, name)], String), name
+            assert types[(versions, name)].length == width, name
+        for name in ("unit_quantity", "rate_amount"):
+            column_type = types[(components, name)]
+            assert isinstance(column_type, Numeric), name
+            assert (column_type.precision, column_type.scale) == (20, 8), name
+        assert isinstance(types[(components, "metadata_json")], JSON)
+
+        # 只有 open_slot 是生成列，而且是 STORED、整数。
+        computed = {
+            (table, c["name"]): c.get("computed")
+            for table, found in columns.items()
+            for c in found
+            if c.get("computed")
+        }
+        assert set(computed) == {(versions, "open_slot")}
+        open_slot = computed[(versions, "open_slot")]
+        assert open_slot["persisted"] is True
+        assert "PUBLISHED" in str(open_slot["sqltext"])
+        assert isinstance(types[(versions, "open_slot")], Integer)
+        assert not isinstance(types[(versions, "open_slot")], BigInteger)
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0013_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        for table, expected in _EXPECTED_UNIQUE_0013.items():
+            assert _unique_sets(table) == expected, table
+            foreign_keys = {
+                str(fk["name"]): (
+                    fk["constrained_columns"],
+                    fk["referred_table"],
+                    fk["referred_columns"],
+                )
+                for fk in inspector.get_foreign_keys(table)
+            }
+            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0013[table], table
+
+        indexes = {i["name"]: i for i in inspector.get_indexes("provider_price_versions")}
+        open_slot = indexes["ux_provider_price_versions_open_slot"]
+        assert open_slot["column_names"] == ["provider_id", "model_id", "open_slot"]
+        assert open_slot["unique"]
+        by_model = indexes["ix_provider_price_versions_model"]["column_names"]
+        assert by_model == ["model_id", "provider_id"]
+
+        with engine.connect() as connection:
+            delete_rules = dict(connection.execute(_PRICE_DELETE_RULES_QUERY).all())
+            checks = set(connection.execute(_PRICE_CHECKS_QUERY).scalars())
+        # ⚠️ RESTRICT：价格版本与分量删不掉，被引用的模型、用户、计量分量也删不掉（INV-6）。
+        expected_rules = {
+            name: "RESTRICT"
+            for foreign_keys in _EXPECTED_FOREIGN_KEYS_0013.values()
+            for name in foreign_keys
+        }
+        assert delete_rules == expected_rules
+        assert checks == set(_price_checks())
+        ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0013}
+        assert ours == _EXPECTED_TRIGGERS_0013
+    finally:
+        engine.dispose()
