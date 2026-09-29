@@ -1517,7 +1517,7 @@ tasks:
       ai_model_aliases 五张表；计量类型按上报形态（LLM_TOKEN_FIELDS / QUANTITY）约束取数字段，管理员可新建 QUANTITY
       类型；供应商、模型可建、改名、停用；别名按 occurred_at 分段映射与撤销；只读解析函数 resolve_model 在调用方事务里
       对供应商行加共享锁。不含价格、定价规则、FX、用量事件、重新入队与前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-022
     acceptance_criteria:

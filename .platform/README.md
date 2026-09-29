@@ -116,7 +116,7 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-022` | 管理端审计日志查询接口 `GET /api/v1/admin/audit-logs`（spec §89）：筛选、分页、最新在前，内部 id 一律换成用户邮箱；迁移 0011 补查询索引。**不走设计闸门**：只读。依赖 021 | 十二项；合并即执行迁移 0011 |
 | `AIH-TASK-023` | 管理端前端审计页（spec §101 `features/audit/`）。任务自己声明 `acceptance`（命令 `acceptance.browser`，只读，三个步骤），审计页的两个新步骤加进 024 的验收脚本。**不走设计闸门**：纯前端。依赖 022 | 十二项（含验收脚本）；Worker 跑前端三项检查，build 只在 CI |
 | `AIH-TASK-024` | OpenClaw 浏览器验收（P6）的试点：写 `scripts/acceptance/admin_customers.mjs`，部署后由 Worker 在生产上用验收夹具账号只读地验 015 的页面（登录、列表、夹具详情、余额）。任务自己声明 `acceptance`（命令 `acceptance.browser`，只读，四个步骤），主机见 `project.yaml` 的 `acceptance_hosts`。依赖 015。**不走设计闸门**：只读驱动已上线页面，不碰钱、状态机、认证逻辑与 webhook | 只改那一个脚本，检查只有 `docs.check` / `policy.check`。⚠️ 这个脚本在 MXC 之外、带凭据、网络不受限运行（控制面安全边界 A7），评审按生产代码逐行看；`acceptance.browser` 只能被 `acceptance` 块引用，不得进任何任务的 `allowed_commands` |
-| `AIH-TASK-025` | Phase 2 第一刀（[PHASE-2-plan.md](../docs/design/PHASE-2-plan.md) 的 T-A）：计量类型与分量（按上报形态约束取数字段，管理员可新建）、供应商、模型、按 `occurred_at` 分段的模型别名，以及在调用方事务里加共享锁的只读解析函数 `resolve_model`。**碰定价的根，已过设计闸门** #163（`APPROVED: design v4`）；设计在 [docs/design/AIH-TASK-025-ai-catalog.md](../docs/design/AIH-TASK-025-ai-catalog.md)。依赖 022 | 十九项；合并即执行迁移 0012。纯后端，不带 `acceptance` 块。PR 正文由实现方改成 `#163` 再审 |
+| `AIH-TASK-025` | Phase 2 第一刀（[PHASE-2-plan.md](../docs/design/PHASE-2-plan.md) 的 T-A）：计量类型与分量（按上报形态约束取数字段，管理员可新建）、供应商、模型、按 `occurred_at` 分段的模型别名，以及在调用方事务里加共享锁的只读解析函数 `resolve_model`。**碰定价的根，已过设计闸门** #163（`APPROVED: design v4`）；设计在 [docs/design/AIH-TASK-025-ai-catalog.md](../docs/design/AIH-TASK-025-ai-catalog.md)。依赖 022 | 二十项（#185 补了 `app/services/audit_query.py`）；合并即执行迁移 0012。纯后端，不带 `acceptance` 块。PR 正文由实现方改成 `#163` 再审 |
 | `AIH-TASK-026` | Phase 2 的 T-B：供应商成本价的版本（草稿 → 发布 → 退役，只在末尾追加、可预约、不许回溯），发布与计费解析用供应商行锁串行，触发器保证不可变、分量完整与区间不重叠；只读查询 `resolve_provider_price`。**碰定价，已过设计闸门** #177（`APPROVED: design v3`）；设计在 [docs/design/AIH-TASK-026-provider-prices.md](../docs/design/AIH-TASK-026-provider-prices.md)。依赖 025 | 十八项；合并即执行迁移 0013。纯后端，不带 `acceptance` 块。PR 正文由实现方改成 `#177` 再审 |
 | `AIH-TASK-027` | Phase 2 的 T-D：客户定价规则（五级范围、MARKUP / FIXED_RATE、含税），单行锁表让发布与计费串行，只有全局默认的第一条可回溯，触发器保证不可变、完整与区间不重叠；只读解析 `resolve_pricing_rule`（命中即停）。**碰定价，已过设计闸门** #178（`APPROVED: design v3`）；设计在 [docs/design/AIH-TASK-027-pricing-rules.md](../docs/design/AIH-TASK-027-pricing-rules.md)。依赖 026 | 十九项；合并即执行迁移 0014。纯后端，不带 `acceptance` 块。PR 正文由实现方改成 `#178` 再审 |
 | `AIH-TASK-028` | Phase 2 的 T-C：汇率版本（BNM 中间价每日拉成草稿、手工录入、从发布时刻起生效）、单行锁串行、触发器；带令牌的内部告警接口 `/internal/alerts` 与 `fx_fetch` / `fx_stale` 两个维度，`monitor.sh` 按行推 Healthchecks。**碰汇率，已过设计闸门** #183（`APPROVED: design v1`）；设计在 [docs/design/AIH-TASK-028-fx-rates.md](../docs/design/AIH-TASK-028-fx-rates.md)。依赖 027 | 三十八项（含 nginx、monitor.sh、compose）；合并即执行迁移 0015；合并后有运维步骤（令牌文件、Healthchecks、验证 BNM 可达）。PR 正文改成 `#183` 再审 |
@@ -144,14 +144,18 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 
 2026-09-27 的状态：`AIH-TASK-003`（#81）、`AIH-TASK-004`（#85）、`AIH-TASK-005`（#92）、
 `AIH-TASK-006`（#98）、`AIH-TASK-007`（#104）、`AIH-TASK-008`（#107）、`AIH-TASK-011`（#115）、
-`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）、`AIH-TASK-016`（#141）、`AIH-TASK-017`（#145）、`AIH-TASK-018`（#147）、`AIH-TASK-019`（#152）、`AIH-TASK-024`（#158）、`AIH-TASK-020`（#161）、`AIH-TASK-021`（#167）、`AIH-TASK-022`（#170）、`AIH-TASK-023`（#173）是 `done`；
+`AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）、`AIH-TASK-016`（#141）、`AIH-TASK-017`（#145）、`AIH-TASK-018`（#147）、`AIH-TASK-019`（#152）、`AIH-TASK-024`（#158）、`AIH-TASK-020`（#161）、`AIH-TASK-021`（#167）、`AIH-TASK-022`（#170）、`AIH-TASK-023`（#173）、`AIH-TASK-025`（#186）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
 2026-09-27 登记 `AIH-TASK-015` 到 `AIH-TASK-018`（管理端前端四刀）为 `ready`，按 015 → 016 → 017 → 018 排进
-[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付。2026-09-28 登记 `AIH-TASK-019`（#135）与 `AIH-TASK-020`（#136）为 `ready`，按 019 → 020 排进「当前计划」；同日按「审计日志差异清单」的拍板登记 `AIH-TASK-021` 到 `AIH-TASK-023`，排在 020 之后；019 已交付。同日按 Kelvin 的决定登记 `AIH-TASK-024`（浏览器验收试点）并排在「当前计划」第 1 条，已交付（部署后首次浏览器验收 PASS），020 回到第 1 条，也已交付，021、022、023 随后交付；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。2026-09-29 登记 `AIH-TASK-025`（#163，Phase 2 的 T-A）为 `ready`，排在「当前计划」第 1 条；同日登记 `AIH-TASK-026`（#177，T-B）与 `AIH-TASK-027`（#178，T-D），排在 025 之后；同日登记 Phase 2 其余的 `AIH-TASK-028` 到 `AIH-TASK-038`（028–032 过了设计闸门 #183、#176、#180、#179、#181；033 / 034 与四个前端任务不走闸门），按编号顺序排在 027 之后。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付。2026-09-28 登记 `AIH-TASK-019`（#135）与 `AIH-TASK-020`（#136）为 `ready`，按 019 → 020 排进「当前计划」；同日按「审计日志差异清单」的拍板登记 `AIH-TASK-021` 到 `AIH-TASK-023`，排在 020 之后；019 已交付。同日按 Kelvin 的决定登记 `AIH-TASK-024`（浏览器验收试点）并排在「当前计划」第 1 条，已交付（部署后首次浏览器验收 PASS），020 回到第 1 条，也已交付，021、022、023 随后交付；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。2026-09-29 登记 `AIH-TASK-025`（#163，Phase 2 的 T-A）为 `ready`，排在「当前计划」第 1 条；同日登记 `AIH-TASK-026`（#177，T-B）与 `AIH-TASK-027`（#178，T-D），排在 025 之后；同日登记 Phase 2 其余的 `AIH-TASK-028` 到 `AIH-TASK-038`（028–032 过了设计闸门 #183、#176、#180、#179、#181；033 / 034 与四个前端任务不走闸门），按编号顺序排在 027 之后；025 已交付。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
 
 `AIH-TASK-016` 不是由 Worker 的 PR 交付的：run `b287409b` 以 `checks_failed` 结束、没有开 PR —— `frontend.test` 先挂在
 jsdom 缺 `ResizeObserver` 上，第二次自动修复在测试里补了替身，替身那行的多余类型断言又被 `frontend.lint` 拦下，修复次数已用完。
 Kelvin 选由 Claude 接手：run 留下的 8 个文件原样拷到新分支，只改那一处断言，#141 合并为 `d7d330a` 并部署。
+
+`AIH-TASK-025` 的 Worker PR #186 没有经过 Worker 的受限评审：run `11443341` 的 diff 约 25.6 万字符，超过评审的 20 万字符
+上限，以 `review_input_unusable` 结束。Kelvin 选由 Claude 接手这个 PR：修掉 CI 上一条测试的防空转阈值（`ea10ee3`），
+Codex 审查通过，合并为 `9b63cfa` 并部署。
 
 `AIH-TASK-015` 是第一个在 Worker 里跑前端检查的任务（#138 登记 `frontend.test` / `frontend.typecheck` / `frontend.lint`，
 控制面 ACVDEV-TASK-045 提供只读依赖目录）。前两次 run（`0bf98377` PR #133、`43dfa20c` PR #137）没有这三条检查，
