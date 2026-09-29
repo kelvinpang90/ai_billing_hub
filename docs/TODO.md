@@ -1119,7 +1119,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 - [x] 管理员手工调账（AIH-TASK-011，见下面的记录段；随合并生效）
 - [x] API 凭据（加密存储、版本化、可轮换）（AIH-TASK-012，见下面的记录段；随合并生效）
 - [x] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节。2026-09-25 已选定方案 i（新表），实现另过设计闸门 → 设计闸门 #135 `APPROVED: design v1`（2026-09-27），实现登记为 AIH-TASK-019；Kelvin 2026-09-28 同意密钥表与投递拆成两步，投递归 Phase 3。AIH-TASK-019 建了表、四个管理端接口与签名库（见下面的记录段；随合并生效）
-- [ ] 审计日志
+- [x] 审计日志（AIH-TASK-021 到 023，按下面的「审计日志差异清单」判断，见 AIH-TASK-023 记录段；随合并生效）
 
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
 > - Tenant：身份字段（004）与计费状态（005）已有；账户状态 `account_status` 的列与启用 / 停用接口在 AIH-TASK-020（随合并生效）；缺关户（依赖 Phase 2 与 Phase 4）与有效状态合成（Phase 3）
@@ -1127,7 +1127,9 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 > - 管理端客户管理：建客户、列表、详情、编辑（006、009）已有，前端的列表、建客户、详情与编辑页（015）已有，账户状态的启用 / 停用接口（020）随合并生效；缺账户状态的前端、低余额阈值配置
 > - Wallet：建客户时同事务建钱包（006）、手工调账（011）已有；缺管理端查看流水（011 设计 §10 后移）
 > - 不可变钱包账本：数据层与触发器（005）已有；缺余额不一致的定时核对与告警（005 记录的后移项）
-> - 审计日志：建客户、建项目、编辑客户、调账、计费状态跃迁都已同事务写审计；§124 这一项还差什么见下面的「审计日志差异清单」；Kelvin 2026-09-28 定了范围，登记为 AIH-TASK-021 到 023
+>
+> 审计日志已勾（AIH-TASK-023）：Kelvin 2026-09-28 定的范围 AIH-TASK-021 到 023 都已落地，下面「审计日志差异清单」里剩下的
+> 都不是 §124 的验收项，理由见 AIH-TASK-023 记录段
 
 **验收**：管理员建客户 → 自动有钱包 · 建 project · 建 API 凭据 · 调账生效 · 所有动作都有审计
 
@@ -1152,7 +1154,7 @@ feature 都会各自成片），但「压首屏」这件事真要做得从 antd 
 | `PRICING_*`、`PROVIDER_PRICE_PUBLISH`、`REBILL`、`PAYMENT_STATUS_CHANGE` 等 | 随后续 Phase | Phase 2 / 4 / 7 / 8，各自的设计闸门负责 |
 | 审计不能经应用 API 修改（§66） | 已有 | 只有插入路径（`record_audit`），没有更新或删除接口 |
 | **管理端查询接口 `GET /api/v1/admin/audit-logs`（§89）** | 已有（随 AIH-TASK-022 合并生效） | 按动作、实体、操作者邮箱、时间段筛选，按 id 倒序分页；迁移 0011 补了实体、动作、时间三个索引；内部 id 换成邮箱。见 AIH-TASK-022 记录段 |
-| **前端审计页 `features/audit/`（§101）** | **缺** | 依赖上一行 |
+| **前端审计页 `features/audit/`（§101）** | 已有（随 AIH-TASK-023 合并生效） | 顶栏「Audit log」进 `/audit`：分页表格，按动作、实体类型与 id、操作者邮箱、时间段（吉隆坡时间输入）筛选，展开行看前后状态。见 AIH-TASK-023 记录段 |
 | 数据库层只追加 | 已有（spec 未强制；随 AIH-TASK-021 合并生效） | 迁移 0010 给 `audit_logs` 加了 BEFORE UPDATE / BEFORE DELETE 触发器，一律 45000；`scripts/perf_baseline.py` 收尾不再删审计行。`TRUNCATE` / `DROP` 不经触发器，仍归「迁移账号与运行账号拆分」，见 AIH-TASK-021 记录段 |
 | 审计时间戳取整不一致 | 缺 | 见 AIH-TASK-006 记录段；排序以自增 id 为准，不影响正确性 |
 | 保留期、不许自动清除（§112、REQ-PRIV-001） | 上线闸门 | 现在从不删除，满足「不自动清除」；保留期随 PDPA 与留存政策 |
@@ -1973,6 +1975,55 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - `entity_type` 扫描测试对「形参同名」的豁免太宽：包一层 `record_audit` / `AuditLog` 的辅助函数会让它的调用方漏扫；
     应把豁免限定在已知的写审计函数上
   - `_state` 假定库里的 JSON 是对象，非对象会在响应校验时 500；现有写入方都是 `json.dumps(dict)`，暂可接受
+
+### AIH-TASK-023 —— 管理端前端：审计日志页（2026-09-29）
+
+上面「审计日志差异清单」第 1 条的前端一半（Kelvin 2026-09-28 同意；后端是 AIH-TASK-022）。spec §101 的 `features/audit/`：
+调用 `GET /api/v1/admin/audit-logs`，接口以 [api.md](api.md) 的「管理端审计日志」为准；动手前与 `app/api/admin_audit.py`、
+`app/services/audit_query.py`、`app/schemas/audit_logs.py` 逐项对过，没有冲突。设计闸门不适用：纯前端，只读调用 022 的查询
+接口，不改钱的行为、状态机、认证逻辑与 webhook，不改任何后端文件。
+
+- [x] **做了什么（本分支，Draft PR 交付）**：
+  - `frontend/src/api/adminAudit.ts`：`listAuditLogs(filters, page, page_size)`，写法照 `adminCustomers.ts`（`apiGet`、
+    错误统一成 `ApiError`）。省略的、以及去掉首尾空白后为空的条件不进查询串（后端把 `entity_type=` 当成「等于空串」）。
+    `AUDIT_ACTIONS` 常量照抄 `app/models/auth.py` 的 `AuditAction`（注释指向那里），只抄已有的值
+  - `frontend/src/components/DateTimeText.tsx`：新增 `displayTimeToUtc`，吉隆坡墙上时间（`datetime-local` 的值，秒可省）
+    → 后端收的 `YYYY-MM-DDTHH:MM:SS` 不带时区 UTC，是 `formatDateTime` 的反方向；偏移用 `Intl` 现算，与显示同一个时区来源；
+    日历上不存在的日期与 `24:00` 返回 `null`，不让 `Date.UTC` 滚到下个月
+  - `frontend/src/features/audit/AuditLogPage.tsx`：筛选表单（动作下拉、实体类型、实体 id、操作者邮箱、起止时间）+ 分页表格
+    （时间、动作、操作者、实体、IP、原因）+ 展开行（操作者角色、user agent、前后状态的格式化 JSON）。操作者为空时显示
+    「System」（`actor_role` 为 `SYSTEM`）或「Unknown」；以用户为对象的审计显示 `entity_user_email`。顺序沿用后端。
+    加载中、失败（`RequestReference` 带 request_id、可重试）、空列表（区分「一条都没有」与「没有符合条件的」）都画出来；
+    403 `ADMIN_REQUIRED` 显示无权限，422 显示「筛选条件不被接受」加后端 message，表单留着可改。改任何筛选条件、清空条件、
+    换每页条数都回到第 1 页。起止时间先在前端校验（形状、先后），免得一句只列字段名的 422
+  - 路由：`paths.ts` 的 `ROUTES.audit`（`/audit`），`routes/index.tsx` 用 `lazy()` 引入、放在 `RequireAuth` + `AppLayout`
+    之内；`AppLayout` 顶栏加「Audit log」。文案全在 `en.json` 的 `nav.audit` 与 `audit.*`
+  - 测试：`adminAudit.test.ts`（无条件、全部条件、省略与空白条件、去空白、422）；`DateTimeText.test.tsx` 加
+    `displayTimeToUtc`（同日、跨日、跨月跨年、与 `formatDateTime` 互逆、拒收不存在的时间）；`AuditLogPage.test.tsx`
+    （三种状态加 403 / 422、空结果的两种说法、行的内容与顺序、操作者为空的两种显示、展开行、翻页、改条件发新请求并回第 1 页、
+    动作下拉、时间段换算跨日、区间先后校验、清空条件）
+  - `scripts/acceptance/admin_customers.mjs`（文件名不变）：加 `open_audit`、`check_audit_entry` 两个步骤，文件头的步骤说明
+    与「只点」清单同步；已有四个步骤的逻辑不变（只是 `login` 完成时记下时刻、`typeInto` 多一个失败码参数，默认仍是
+    `login_failed`）。`check_audit_entry` 在动作下拉里选 `LOGIN`、点「Apply filters」，被动读取页面在点击之后发出的第 1 页
+    `action=LOGIN` 查询的响应体，找第一条 `actor_email` 是夹具管理员的记录，核对 `LOGIN` / `ADMIN` / `users` 与 created_at 距
+    `login` 完成不超过 120 秒，再核对表格那一行并滚进视口。用到的 CDP 方法没有增加；夹具邮箱只填登录表单
+- [x] **实现定的细节**（审查时请看这几条）：
+  - 筛选条件与页码放在组件状态里，**不进地址栏**（客户列表的页码在地址栏）：条件里有操作者邮箱，进了地址栏会留在浏览器
+    历史里，刷新时还会随查询串进 nginx 访问日志。代价是刷新后条件回到空
+  - 动作下拉 `virtual={false}`：只有二十来项，全部渲染出来，测试与验收脚本才找得到每一项
+  - 表格行没有 id（后端刻意不给），行 key 用「这一页的第几条」；展开状态随换页、换条件一起清掉
+  - 前后状态按 `JSON.stringify(…, null, 2)` 原样显示，不挑字段：内容是写入方挑好的白名单（api.md）
+- [x] **Phase 1「审计日志」可以勾**：按「审计日志差异清单」逐行看，Kelvin 定的三件事里第 1 条（022 + 023）与第 2 条（021）
+  已落地；剩下的 `PROJECT_UPDATE`、`ADMIN_SETTING_CHANGE` 与后续 Phase 的动作是「随功能」—— 对应的写操作还不存在，§124
+  「所有动作都有审计」对现有动作成立；时间戳取整是第 3 条，按决定仍是后续计划里的独立一项，不是 §124 的验收项；保留期归
+  上线闸门。勾选随本任务合并生效
+- [ ] Worker 跑 `allowed_commands`（由 Worker 记录；skipped 不算 passed）、CI 的 frontend job（含 build）、审查、合并与部署
+- [ ] **部署后浏览器验收**：本任务的 acceptance 块跑 `login`、`open_audit`、`check_audit_entry`（由 Worker 记录）；
+  AIH-TASK-024 的四个步骤行为未变，照跑仍应 PASS
+- [ ] **后续**：
+  - 脚本新增步骤依赖的前端事实：审计表格的「Action」「Actor」列头、动作下拉的选项带 `title` 与 `aria-selected`（antd Select
+    的现状）、「Apply filters」按钮；前端改了它们，验收以 FAIL 结束（不会误报 PASS），届时一起改脚本
+  - 实体类型现在是自由文本框；要改成下拉，选项得与 `app/services/audit_query.py` 的两类清单同步
 
 ### AIH-TASK-024 —— AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，2026-09-28）
 

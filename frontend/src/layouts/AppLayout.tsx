@@ -44,6 +44,10 @@ export function AppLayout() {
               key: ROUTES.customers,
               label: <Link to={ROUTES.customers}>{t("nav.customers")}</Link>,
             },
+            {
+              key: ROUTES.audit,
+              label: <Link to={ROUTES.audit}>{t("nav.audit")}</Link>,
+            },
           ]}
         />
         {/* 登出必须调后端：只清本地令牌的话，那张刷新 cookie 还活着，

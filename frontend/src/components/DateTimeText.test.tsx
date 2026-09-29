@@ -10,7 +10,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import "../i18n";
-import { DateTimeText, formatDateTime, parseUtc } from "./DateTimeText";
+import { DateTimeText, displayTimeToUtc, formatDateTime, parseUtc } from "./DateTimeText";
 
 describe("formatDateTime", () => {
   it("shifts a UTC timestamp to Kuala Lumpur time", () => {
@@ -30,6 +30,48 @@ describe("formatDateTime", () => {
     expect(formatDateTime("yesterday")).toBe("yesterday");
     // 已经带时区的串不是后端的契约形状，不替它再补一个 Z。
     expect(parseUtc("2026-09-20T08:30:00Z")).toBeNull();
+  });
+});
+
+describe("displayTimeToUtc", () => {
+  it("shifts a Kuala Lumpur time back to naive UTC with seconds", () => {
+    expect(displayTimeToUtc("2026-09-20T16:30")).toBe("2026-09-20T08:30:00");
+    expect(displayTimeToUtc("2026-09-20T16:30:05")).toBe("2026-09-20T08:30:05");
+  });
+
+  it("rolls back to the previous day when Kuala Lumpur is just past midnight", () => {
+    expect(displayTimeToUtc("2026-09-21T00:00")).toBe("2026-09-20T16:00:00");
+    expect(displayTimeToUtc("2026-09-21T07:59:59")).toBe("2026-09-20T23:59:59");
+    // 跨年、跨月也一样。
+    expect(displayTimeToUtc("2027-01-01T04:15:05")).toBe("2026-12-31T20:15:05");
+    expect(displayTimeToUtc("2026-03-01T03:00")).toBe("2026-02-28T19:00:00");
+  });
+
+  it("stays on the same day from 08:00 Kuala Lumpur time onwards", () => {
+    expect(displayTimeToUtc("2026-09-21T08:00")).toBe("2026-09-21T00:00:00");
+  });
+
+  it("accepts the milliseconds a normalised datetime-local value carries and drops them", () => {
+    expect(displayTimeToUtc("2026-09-22T07:59:59.000")).toBe("2026-09-21T23:59:59");
+    expect(displayTimeToUtc("2026-09-20T16:30:05.5")).toBe("2026-09-20T08:30:05");
+    expect(displayTimeToUtc("2026-09-20T16:30.000")).toBeNull();
+  });
+
+  it("is the exact inverse of formatDateTime", () => {
+    for (const utc of ["2026-09-20T08:30:00", "2026-09-20T16:00:00", "2026-12-31T20:15:05"]) {
+      const shown = formatDateTime(utc).replace(" ", "T");
+      expect(displayTimeToUtc(shown)).toBe(utc);
+    }
+  });
+
+  it("refuses anything that is not a real wall-clock time instead of rolling it over", () => {
+    expect(displayTimeToUtc("2026-02-30T00:00")).toBeNull();
+    expect(displayTimeToUtc("2026-09-20T24:00")).toBeNull();
+    expect(displayTimeToUtc("2026-09-20T08:60")).toBeNull();
+    expect(displayTimeToUtc("2026-09-20")).toBeNull();
+    expect(displayTimeToUtc("2026-09-20T08:30:00Z")).toBeNull();
+    expect(displayTimeToUtc("2026-09-20 08:30:00")).toBeNull();
+    expect(displayTimeToUtc("")).toBeNull();
   });
 });
 

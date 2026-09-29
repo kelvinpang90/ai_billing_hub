@@ -1,7 +1,8 @@
 /**
  * 路由表。
  *
- * 目前有落地页、认证相关的三页、管理端客户管理（AIH-TASK-015）与兜底页。
+ * 目前有落地页、认证相关的三页、管理端客户管理（AIH-TASK-015）、管理端审计日志（AIH-TASK-023）
+ * 与兜底页。
  * **不预建 spec §101 列的其余 feature 目录** —— 空目录会让人以为「那块已经开工了」，
  * 和 runbook 不预留空标题是同一条道理。每个 feature 在它自己那个 Phase 落地时再建。
  *
@@ -43,6 +44,9 @@ const CustomerDetailPage = lazy(() =>
     default: m.CustomerDetailPage,
   })),
 );
+const AuditLogPage = lazy(() =>
+  import("../features/audit/AuditLogPage").then((m) => ({ default: m.AuditLogPage })),
+);
 const NotFoundPage = lazy(() =>
   import("./NotFoundPage").then((m) => ({ default: m.NotFoundPage })),
 );
@@ -80,6 +84,7 @@ export function AppRoutes() {
               <Route path={ROUTES.customers} element={<CustomerListPage />} />
               <Route path={ROUTES.customerCreate} element={<CustomerCreatePage />} />
               <Route path={ROUTES.customerDetail} element={<CustomerDetailPage />} />
+              <Route path={ROUTES.audit} element={<AuditLogPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Route>
           </Route>

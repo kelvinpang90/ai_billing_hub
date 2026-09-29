@@ -1,5 +1,6 @@
 /**
- * 部署后浏览器验收：管理端客户页（AIH-TASK-015），本任务为 AIH-TASK-024。
+ * 部署后浏览器验收：管理端客户页（AIH-TASK-015），本任务为 AIH-TASK-024；AIH-TASK-023 加了审计页的两个只读步骤
+ * （open_audit、check_audit_entry）。文件名沿用，不改。
  *
  * 谁在什么时候跑它
  * ----------------
@@ -41,11 +42,16 @@
  *   不写任何文件。用到的 CDP 方法只有：Target.getTargets、Target.attachToTarget、Network.enable、
  *   Network.getResponseBody、Page.navigate、Runtime.evaluate、Input.insertText。
  * - 凭据只经 Input.insertText 填进登录表单，不进任何页面脚本的源码。TOTP 按 RFC 6238 现算（node:crypto 的
- *   HMAC-SHA1、30 秒步长、6 位），base32 解码在本文件里自己写。
- * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）和夹具客户的公司名
- *   链接。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何会写数据的按钮；只打开公司名以
- *   `[TEST] Acceptance Fixture` 开头的夹具客户的详情。登录会在服务端留下会话与登录审计，这是只读验收不可避免的，
- *   不算写数据。若账号走到「首次启用 2FA」那一步，那会写数据，直接 login_failed，不继续。
+ *   HMAC-SHA1、30 秒步长、6 位），base32 解码在本文件里自己写。Input.insertText 另外只用于往审计页「Action」
+ *   下拉的搜索框里输入动作值 `LOGIN`（常量，不是凭据）。
+ * - 夹具管理员的邮箱（credentials.email）只填进登录表单：不填进审计页的任何筛选框、不进页面脚本源码；
+ *   与页面文字或接口响应的比较都在本进程内做，不打印。
+ * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
+ *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
+ *   新的筛选条件重新发 GET）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何会写数据的按钮；只打开
+ *   公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。审计页不改每页条数、不翻页、不展开行、不点「Clear
+ *   filters」。登录会在服务端留下会话与登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的
+ *   正是这一条。若账号走到「首次启用 2FA」那一步，那会写数据，直接 login_failed，不继续。
  * - 每个步骤都真的检查它声称的东西；等待一律有上限（见下面的常量），总时长控制在 timeout_seconds（300 秒）内。
  * - 找元素只按可见文字（文案取自 frontend/src/i18n/locales/en.json）或语义结构（label→control、header、
  *   table/thead/th、th→td、role、title 属性），不依赖 antd 生成的类名哈希。文案与选择器集中在下面的常量里。
@@ -61,6 +67,17 @@
  *                   被动观察、Network.getResponseBody 读取）里的 wallet.balance / wallet.currency；页面上
  *                   「Balance」一项的文字必须与 formatMoney(balance, currency) 逐字相同。报到前把这一项滚动到视口
  *                   中间，让 Worker 在这一步的截图里看得到余额
+ *   open_audit      点顶栏「Audit log」（href 为 /audit）进审计页；页面不是加载失败、无权限、筛选被拒或空列表，
+ *                   审计表格（有「Action」「Actor」两列）至少有一行数据
+ *   check_audit_entry
+ *                   在「Action」下拉里选 LOGIN（app/models/auth.py 的 AuditAction.LOGIN）并点「Apply filters」；
+ *                   后端值取页面在点击之后自己发出的、查询串是 page=1 且 action=LOGIN（没有别的筛选条件）的
+ *                   GET /api/v1/admin/audit-logs 的响应体（被动观察，不自己发请求、不拦截），响应的 page 为 1。
+ *                   其中第一条 actor_email 等于夹具管理员邮箱（去首尾空白、不分大小写）的记录就是本次 login 留下的：
+ *                   action 为 LOGIN、actor_role 为 ADMIN、entity_type 为 users，created_at（不带时区的 UTC）与本次
+ *                   login 步骤完成的时刻相差不超过 120 秒；本次运行没跑过 login 就 assertion_failed。表格的数据行
+ *                   与响应的 items 一一对应（「Action」列全是 LOGIN），那条记录所在行的「Action」「Actor」两列文字与
+ *                   它的 action / actor_email 一致；报到前把这一行滚动到视口中间
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -94,6 +111,18 @@ const TEXT = {
   detailLoadFailed: "The customer could not be loaded.", // customers.detail.loadFailed
   detailNotFound: "Customer not found", // customers.detail.notFound
   walletBalance: "Balance", // customers.wallet.balance
+  navAudit: "Audit log", // nav.audit
+  auditLoading: "Loading audit records…", // audit.loading
+  auditLoadFailed: "The audit log could not be loaded.", // audit.loadFailed
+  auditForbidden: "Only administrators can view the audit log.", // audit.forbidden
+  auditInvalidFilters: "The filters were not accepted.", // audit.invalidFilters
+  auditEmpty: "No audit records yet.", // audit.empty
+  auditEmptyFiltered: "No audit records match these filters.", // audit.emptyFiltered
+  auditEmptyPage: "There are no audit records on this page.", // audit.emptyPage
+  auditColumnAction: "Action", // audit.column.action —— 审计表格的列头
+  auditColumnActor: "Actor", // audit.column.actor
+  auditFilterAction: "Action", // audit.filter.action —— 筛选表单里动作下拉的 label
+  auditApply: "Apply filters", // audit.filter.apply
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -101,6 +130,7 @@ const TEXT = {
   loginPath: "/login",
   customersPath: "/customers",
   customerCreatePath: "/customers/new",
+  auditPath: "/audit",
 };
 
 /** 夹具客户的公司名前缀。只看、只打开以它开头的客户。 */
@@ -111,6 +141,21 @@ const CUSTOMER_DETAIL_API = /^\/api\/v1\/admin\/customers\/([^/]+)$/;
 
 /** 列表里夹具那一行链接的 href（frontend/src/routes/paths.ts 的 customerDetailPath）。 */
 const CUSTOMER_DETAIL_HREF = /^\/customers\/([^/?#]+)$/;
+
+/** 审计查询接口的路径（frontend/src/api/adminAudit.ts 的 AUDIT_LOGS_URL）。 */
+const AUDIT_LOGS_API = /^\/api\/v1\/admin\/audit-logs$/;
+
+/** check_audit_entry 筛的动作：app/models/auth.py 的 AuditAction.LOGIN。 */
+const LOGIN_ACTION = "LOGIN";
+/** 本次登录留下的那条审计应有的其余字段（app/services/auth.py 写登录审计的那一处）。 */
+const LOGIN_ACTOR_ROLE = "ADMIN";
+const LOGIN_ENTITY_TYPE = "users";
+/** 那条审计的 created_at 与本次 login 步骤完成时刻的最大差距。 */
+const LOGIN_AUDIT_MAX_SKEW_MS = 120_000;
+/** 审计页只按动作筛：页面发出的查询串里只允许有这几个参数。 */
+const AUDIT_QUERY_PARAMS = new Set(["page", "page_size", "action"]);
+/** 后端的不带时区 UTC 时间（docs/api.md「时间」）。 */
+const NAIVE_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -498,6 +543,8 @@ const network = {
   lastDocumentStatus: null,
   /** 详情接口：requestId → { customerId, status, finished, failed, seq }。 */
   details: new Map(),
+  /** 审计查询接口：requestId → { loginFirstPage, status, finished, failed, seq }。查询串本身不保存。 */
+  audits: new Map(),
   seq: 0,
 };
 
@@ -512,6 +559,34 @@ function detailCustomerId(url) {
     }
     const match = CUSTOMER_DETAIL_API.exec(parsed.pathname);
     return match === null ? null : decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 是不是审计查询接口：不是回 null；是的话回「查询串是不是恰好第 1 页、只按 action=LOGIN 筛」。
+ * 只留这一个布尔，不保存 URL。
+ */
+function auditQueryKind(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host || !AUDIT_LOGS_API.test(parsed.pathname)) {
+      return null;
+    }
+    const query = parsed.searchParams;
+    const onlyKnown = [...query.keys()].every((name) => AUDIT_QUERY_PARAMS.has(name));
+    return {
+      loginFirstPage:
+        onlyKnown &&
+        query.getAll("page").length === 1 &&
+        query.get("page") === "1" &&
+        query.getAll("action").length === 1 &&
+        query.get("action") === LOGIN_ACTION,
+    };
   } catch {
     return null;
   }
@@ -535,6 +610,16 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const audit = auditQueryKind(params.request?.url);
+        if (audit !== null && params.request?.method === "GET") {
+          network.audits.set(params.requestId, {
+            loginFirstPage: audit.loginFirstPage,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -543,23 +628,23 @@ function observeNetwork(sessionId) {
           network.documents.set(params.loaderId, status);
           network.lastDocumentStatus = status;
         }
-        const detail = network.details.get(params.requestId);
-        if (detail !== undefined) {
-          detail.status = status;
+        const tracked = network.details.get(params.requestId) ?? network.audits.get(params.requestId);
+        if (tracked !== undefined) {
+          tracked.status = status;
         }
         break;
       }
       case "Network.loadingFinished": {
-        const detail = network.details.get(params.requestId);
-        if (detail !== undefined) {
-          detail.finished = true;
+        const tracked = network.details.get(params.requestId) ?? network.audits.get(params.requestId);
+        if (tracked !== undefined) {
+          tracked.finished = true;
         }
         break;
       }
       case "Network.loadingFailed": {
-        const detail = network.details.get(params.requestId);
-        if (detail !== undefined) {
-          detail.failed = true;
+        const tracked = network.details.get(params.requestId) ?? network.audits.get(params.requestId);
+        if (tracked !== undefined) {
+          tracked.failed = true;
         }
         break;
       }
@@ -584,6 +669,34 @@ function latestDetailResponse(customerId) {
     }
   }
   return best;
+}
+
+/** afterSeq 之后发出、第 1 页只按 action=LOGIN 筛、成功读完的审计查询里最近的一次。 */
+function latestLoginAuditResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, audit] of network.audits) {
+    if (
+      audit.loginFirstPage &&
+      audit.seq > afterSeq &&
+      audit.status === 200 &&
+      audit.finished &&
+      !audit.failed &&
+      (best === null || audit.seq > best.seq)
+    ) {
+      best = { requestId, seq: audit.seq };
+    }
+  }
+  return best;
+}
+
+/** 在此之前发出、还没有结束的第 1 页 LOGIN 审计查询：要等它落定再挑「最近的一次」。 */
+function loginAuditInFlight(afterSeq) {
+  for (const audit of network.audits.values()) {
+    if (audit.loginFirstPage && audit.seq > afterSeq && !audit.finished && !audit.failed) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -661,7 +774,35 @@ function pageLib() {
     appError: leaf(T.appErrorTitle) !== null,
     notFound: leaf(T.notFoundTitle) !== null,
   });
-  return { norm, leaf, control, button, alert, layout, valueCells, common };
+  /**
+   * 审计表格（表头里有「Action」「Actor」两列，frontend/src/features/audit/AuditLogPage.tsx）的数据行，按显示顺序。
+   * 只认表格自己的 thead / tbody（`:scope >`），不把展开行里嵌套的表算进来；空状态那一行只有一格，跳过。
+   * 没有这张表时回 null。
+   */
+  const auditRows = (T) => {
+    for (const table of document.querySelectorAll("table")) {
+      const heads = [...table.querySelectorAll(":scope > thead > tr > th")];
+      const action = heads.findIndex((th) => norm(th.textContent) === T.auditColumnAction);
+      const actor = heads.findIndex((th) => norm(th.textContent) === T.auditColumnActor);
+      if (action < 0 || actor < 0) {
+        continue;
+      }
+      const rows = [];
+      for (const tr of table.querySelectorAll(":scope > tbody > tr")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        const cells = tr.querySelectorAll(":scope > td");
+        if (cells.length !== heads.length) {
+          continue;
+        }
+        rows.push({ tr, action: norm(cells[action].textContent), actor: norm(cells[actor].textContent) });
+      }
+      return rows;
+    }
+    return null;
+  };
+  return { norm, leaf, control, button, alert, layout, valueCells, common, auditRows };
 }
 
 function probeLogin(lib, T) {
@@ -822,6 +963,69 @@ function balanceInView(lib, T) {
   return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
 }
 
+function clickNavAudit(lib, T) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === T.navAudit && a.getAttribute("href") === T.auditPath) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 审计页的状态。行的文字（含操作者邮箱）只回到本进程内存里比较，不打印。 */
+function probeAudit(lib, T) {
+  const rows = lib.auditRows(T);
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.auditLoading) !== null,
+    failed: lib.leaf(T.auditLoadFailed) !== null,
+    forbidden: lib.leaf(T.auditForbidden) !== null,
+    invalid: lib.leaf(T.auditInvalidFilters) !== null,
+    empty: lib.leaf(T.auditEmpty) !== null || lib.leaf(T.auditEmptyFiltered) !== null,
+    emptyPage: lib.leaf(T.auditEmptyPage) !== null,
+    table: rows !== null,
+    rows: rows === null ? [] : rows.map(({ action, actor }) => ({ action, actor })),
+  };
+}
+
+/**
+ * 点动作下拉里 title 恰好是 value、文字也恰好是 value 的那一项（antd Select 的选项带 title 与
+ * aria-selected；LOGIN_FAILED 也匹配搜索词，靠精确比较排除）。只点看得见的那一个。
+ */
+function clickAuditOption(lib, value) {
+  for (const el of document.querySelectorAll("[aria-selected][title]")) {
+    if (el.getAttribute("title") === value && lib.norm(el.textContent) === value && el.getClientRects().length > 0) {
+      el.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 把第 index 个数据行滚到视口中间。只滚动，不点任何东西（不展开行）。 */
+function scrollAuditRowIntoView(lib, { T, index }) {
+  const rows = lib.auditRows(T);
+  if (rows === null || index >= rows.length) {
+    return false;
+  }
+  rows[index].tr.scrollIntoView({ block: "center", inline: "nearest" });
+  return true;
+}
+
+function auditRowInView(lib, { T, index }) {
+  const rows = lib.auditRows(T);
+  if (rows === null || index >= rows.length) {
+    return false;
+  }
+  const rect = rows[index].tr.getBoundingClientRect();
+  return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+}
+
 // ---------------------------------------------------------------------------
 // 驱动页面
 // ---------------------------------------------------------------------------
@@ -865,8 +1069,9 @@ async function waitFor(probe, done, limitMs) {
 /**
  * 聚焦 label 对应的输入框并用 Input.insertText 填入。text 只进这一个 CDP 命令，不进页面脚本。
  * value 可以是一个返回文字的函数（TOTP）：聚焦之后才算，码不会在等元素时过期。
+ * 填不进去时报 failCode（登录表单是 login_failed）。
  */
-async function typeInto(labelText, value) {
+async function typeInto(labelText, value, failCode = "login_failed") {
   const focused = await waitFor(() => evaluate(focusField, labelText), (v) => v === true, ELEMENT_WAIT_MS);
   if (!focused.ok) {
     throw fail("element_missing");
@@ -875,10 +1080,10 @@ async function typeInto(labelText, value) {
   try {
     await cdp.send("Input.insertText", { text }, sessionId);
   } catch {
-    throw fail("login_failed");
+    throw fail(failCode);
   }
   if ((await evaluate(fieldLength, labelText)) !== text.length) {
-    throw fail("login_failed");
+    throw fail(failCode);
   }
 }
 
@@ -1004,6 +1209,8 @@ async function stepLogin(ctx) {
   if (!signedIn.ok || !signedIn.value.layout) {
     throw fail("login_failed");
   }
+  // check_audit_entry 用它判断「本次登录留下的那条审计」。
+  ctx.loginCompletedAt = Date.now();
 }
 
 async function stepOpenCustomers(ctx) {
@@ -1152,11 +1359,157 @@ async function stepCheckBalance(ctx) {
   }
 }
 
+/** 审计页落定：不在加载，且是某一种终态（表格、失败、无权限、筛选被拒、空列表）。 */
+function auditSettled(s) {
+  return (
+    s.appError ||
+    s.notFound ||
+    (s.path === TEXT.auditPath &&
+      !s.busy &&
+      (s.failed || s.forbidden || s.invalid || s.empty || (s.table && (s.rows.length > 0 || s.emptyPage))))
+  );
+}
+
+/** 审计页落在了不该落的状态上：各自的失败码。 */
+function rejectAuditState(s) {
+  if (s.appError || s.failed || s.invalid) {
+    throw fail("page_error");
+  }
+  if (s.notFound || s.path !== TEXT.auditPath) {
+    throw fail("navigation_failed");
+  }
+  if (s.forbidden || s.empty || !s.table || s.rows.length === 0) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepOpenAudit() {
+  const clicked = await waitFor(() => evaluate(clickNavAudit, TEXT), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  const opened = await waitFor(() => evaluate(probeAudit, TEXT), auditSettled, ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectAuditState(opened.value);
+}
+
+/** 不带时区的 UTC → 毫秒；形状不对回 null。 */
+function naiveUtcMs(value) {
+  if (typeof value !== "string" || !NAIVE_UTC.test(value)) {
+    return null;
+  }
+  const ms = Date.parse(`${value}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** 登录邮箱的比较：后端存小写（app/services/audit_query.py），stdin 里的可能带大写或空白。只在本进程内比，不打印。 */
+function sameEmail(a, b) {
+  return typeof a === "string" && typeof b === "string" && a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+async function stepCheckAuditEntry(ctx) {
+  if (ctx.loginCompletedAt === null) {
+    throw fail("assertion_failed");
+  }
+  const ready = await waitFor(() => evaluate(probeAudit, TEXT), auditSettled, ELEMENT_WAIT_MS);
+  if (!ready.ok) {
+    throw fail("element_missing");
+  }
+  rejectAuditState(ready.value);
+
+  // 点「Apply filters」之前的序号：只认在这之后页面自己重新发出的请求。
+  const beforeApply = network.seq;
+  await typeInto(TEXT.auditFilterAction, LOGIN_ACTION, "element_missing");
+  const picked = await waitFor(() => evaluate(clickAuditOption, LOGIN_ACTION), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!picked.ok) {
+    throw fail("element_missing");
+  }
+  const applied = await waitFor(() => evaluate(clickButton, TEXT.auditApply), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!applied.ok) {
+    throw fail("element_missing");
+  }
+
+  // 后端值：页面自己发出的第 1 页 action=LOGIN 查询的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => (loginAuditInFlight(beforeApply) ? null : latestLoginAuditResponse(beforeApply)),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let items;
+  let index;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const data = envelope?.success === true ? envelope.data : null;
+    if (data?.page !== 1 || !Array.isArray(data?.items)) {
+      throw fail("assertion_failed");
+    }
+    items = data.items;
+    index = items.findIndex((item) => sameEmail(item?.actor_email, ctx.email));
+    const record = index < 0 ? null : items[index];
+    const createdMs = naiveUtcMs(record?.created_at);
+    if (
+      record === null ||
+      record.action !== LOGIN_ACTION ||
+      record.actor_role !== LOGIN_ACTOR_ROLE ||
+      record.entity_type !== LOGIN_ENTITY_TYPE ||
+      createdMs === null ||
+      Math.abs(createdMs - ctx.loginCompletedAt) > LOGIN_AUDIT_MAX_SKEW_MS
+    ) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、不是第 1 页、找不到本次登录的那条：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+  const record = items[index];
+
+  // 表格显示的就是这一份响应：行数相同、动作列全是 LOGIN、那一行的动作与操作者和记录一致。
+  const shown = await waitFor(
+    () => evaluate(probeAudit, TEXT),
+    (s) =>
+      s.path === TEXT.auditPath &&
+      !s.busy &&
+      s.rows.length === items.length &&
+      s.rows.every((row) => row.action === LOGIN_ACTION) &&
+      s.rows[index].action === record.action &&
+      s.rows[index].actor === record.actor_email,
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.table ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把那一行滚进视口。
+  if ((await evaluate(scrollAuditRowIntoView, { T: TEXT, index })) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(auditRowInView, { T: TEXT, index }),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
   open_fixture: stepOpenFixture,
   check_balance: stepCheckBalance,
+  open_audit: stepOpenAudit,
+  check_audit_entry: stepCheckAuditEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1536,8 @@ async function main() {
     totpKey: input.totpKey,
     fixture: null,
     customerId: null,
+    /** login 步骤完成的时刻（毫秒）；本次运行没跑过 login 时为 null。 */
+    loginCompletedAt: null,
   };
 
   try {

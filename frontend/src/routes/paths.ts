@@ -21,6 +21,11 @@ export const ROUTES = {
   /** 静态段比 `:customerId` 优先匹配（react-router 按具体程度排序），所以 `new` 不会被当成 id。 */
   customerCreate: "/customers/new",
   customerDetail: "/customers/:customerId",
+  /**
+   * 管理端审计日志（AIH-TASK-023）。部署后浏览器验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `open_audit` 按这个 href 找顶栏链接，改了要同步那里。
+   */
+  audit: "/audit",
 } as const;
 
 /**
