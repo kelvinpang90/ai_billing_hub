@@ -2200,17 +2200,17 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 
 ### AIH-TASK-026 —— 供应商价格版本与泛化价格分量（T-B，2026-09-29）
 
-设计闸门 #177 `APPROVED: design v3`，全文在 [design/AIH-TASK-026-provider-prices.md](design/AIH-TASK-026-provider-prices.md)。
-接口记在 [api.md](api.md) 的「管理端供应商价格」，表、触发器与锁记在 [database-schema.md](database-schema.md) 的
+设计闸门 #177 `APPROVED: design v4`（v1–v3 也批准过；v4 由本任务的实现与审查发现的 v3 缺陷触发，见下），全文在
+[design/AIH-TASK-026-provider-prices.md](design/AIH-TASK-026-provider-prices.md)。接口记在 [api.md](api.md) 的「管理端供应商价格」，表、触发器与锁记在 [database-schema.md](database-schema.md) 的
 「供应商成本价」。不含 FX、成本计算、试算、价格同步与前端（T-C、T-G、Phase 8、T-K）。
 
-- [x] **做了什么（本分支，Draft PR 交付）**：
+- [x] **做了什么（本分支，Draft PR #188 交付）**：
   - `alembic/versions/20260929_0013_provider_prices.py`：revision `0013_provider_prices`，`down_revision` 是
     `0012_ai_catalog`。先做 0006 同款的触发器权限预检（在任何 DDL 之前），再建 `provider_price_versions`（复合外键
     `(model_id, provider_id)` → `ai_models(id, provider_id)`、STORED 生成列 `open_slot` 与
     `(provider_id, model_id, open_slot)` 唯一索引、五条 CHECK）与 `provider_price_components`（两条 `> 0` 的 CHECK、
-    `(版本, 计价分量)` 唯一），外键全是 `RESTRICT`；六个触发器：只能以草稿插入、丢弃的不可改、发布后只许截断与
-    `PUBLISHED → RETIRED`、发布跃迁上的分量完整性、锁供应商行后检查非空区间不重叠、版本禁止删除、分量只在草稿阶段
+    `(版本, 计价分量)` 唯一），外键全是 `RESTRICT`；六个触发器：只能以草稿插入、丢弃的不可改、草稿只能改成草稿 /
+    已发布 / 已丢弃（v4：禁止 `DRAFT → RETIRED`）、发布后只许截断与 `PUBLISHED → RETIRED`、发布跃迁上的分量完整性、锁供应商行后检查非空区间不重叠、版本禁止删除、分量只在草稿阶段
     可增删改。不写种子。`downgrade` 按外键依赖倒序删表。文件头附 §132 第 13 条分析。`alembic/env.py` 加 import
     `app.models.provider_prices`
   - `app/models/provider_prices.py`：两个模型、两个枚举（`PriceVersionStatus`、`PriceSourceType`）、与迁移逐字一致的
@@ -2220,8 +2220,10 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     `resolve_provider_price(session, provider_id, model_id, occurred_at)` 对版本与分量都用 `FOR SHARE`
     （`populate_existing`），返回版本及其分量（`component_code`、`quantity_field`、两个金额），没有接到任何计费路径
   - `app/services/provider_prices.py`：每个写一个 `session_scope`，版本、分量、前一个版本与审计同一事务，不写 outbox。
-    发布、退役先锁供应商行，**拿到锁之后**才调用时钟取 `t`（向上取整到下一个整秒，复用 025 的 `boundary_after`）；
-    写完在同一事务里加锁重读并 `verify_periods` 复查，不满足抛 `PricePeriodsBroken`（500，整体回滚）。时钟可注入
+    发布、退役「锁在前」（见下），**拿到锁之后**才调用时钟取 `t`（向上取整到下一个整秒，复用 025 的
+    `boundary_after`）；「末尾版本」与复查只看区间非空的版本（`_timeline`），写完在同一事务里加锁重读并
+    `verify_periods` 复查，不满足抛 `PricePeriodsBroken`（500，整体回滚）。时钟可注入
+  - `app/services/audit_query.py`：`provider_price_version` 归进 `PUBLIC_ENTITY_TYPES`（契约由 #190 补进允许路径）
   - `app/schemas/provider_prices.py`、`app/api/admin_provider_prices.py`（`app/main.py` 注册）：七个接口，请求体
     `extra="forbid"`，金额只收 JSON 字符串、按正则精确解析、超过 8 位小数 422；每个处理函数第一条语句
     `require_admin(request)`；响应是字段白名单，人用邮箱表示
@@ -2243,48 +2245,50 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
   - **T-H**：在同一个计费事务里，先 `resolve_model`（它加供应商行共享锁），再 `resolve_provider_price`；两者都用加锁读；
     把 `provider_price_version_id`（`ResolvedProviderPrice.version_id`）写进事件快照
   - **T-K**：列表与详情接口即本任务的接口；界面标明「成本价，原币种，客户不可见」
-- [ ] ⚠️ **阻断合并的契约缺口：`app/services/audit_query.py` 不在本任务的允许路径里**。本任务写审计的新
-  `entity_type` `provider_price_version`（`entity_id` 是 `public_id`）必须归进那个文件的 `PUBLIC_ENTITY_TYPES`；
-  `tests/backend/test_admin_audit_api.py::test_every_written_entity_type_is_classified` 扫描 `app/` 下全部写审计的
-  调用，要求每个 `entity_type` 都已归类，而本分支没有归类它。允许路径之外不能改，也不用绕开扫描的写法来躲这条检查。
-  需要契约把 `app/services/audit_query.py` 加进允许路径（一行：`"provider_price_version",`），或在合并前由另一个
-  任务补上。与 AIH-TASK-025 #185 同一个情形。运行时不受影响：审计查询照样原样返回 `entity_id`
-- [ ] ⚠️ **设计 v3 本身的问题（停下报回设计闸门 #177，实现按 v3 字面，没有自行改规则）**：
-  1. **撤销「截断了前一个版本」的预约，过不了设计自己的「事务内复查」**。§2「退役」要求把被撤销的版本写成空区间
-     `[F, F)`、把前一个版本 P 恢复为未截断；§2「事务内复查」要求按 `effective_from` 排序全部 `PUBLISHED` /
-     `RETIRED` 版本、「前一个 `effective_to` 为空时它必须是最后一个」。P 的起点早于 F，排在 `[F, F)` 之前且未截断
-     —— 复查必然不通过。按字面实现的结果：这种撤销**总是 500、整体回滚**，§7「撤销预约」那一行的预期（前一个版本
-     恢复为空）做不到。撤销前面没有版本的预约不受影响。建议 v4 二选一：复查与「末尾版本」都跳过空区间（数据库的
-     重叠触发器已经这样做），或规定空区间不参与排序
-  2. **「有 L，请求未给」在 L 起点不早于 `t` 时没有合法结果**。§2「发布」表格写「本版本从 `t` 起；若 L 未截断：
-     `effective_to = t`」。L 是尚未开始的预约（起点 > `t`）时，截断得到倒置区间；同一秒里第二次不指定时刻的发布
-     （L 的起点 = `t`）得到空的已发布区间 —— CHECK `ck_provider_price_versions_period` 都不允许，同一节的「只在末尾
-     追加」也不允许插到 L 之前。按字面实现：写入前检出，按 §5「复查不通过」**500、什么都不写**
-     （`_require_truncatable`）。建议 v4 明确这一格：409 `EFFECTIVE_FROM_CONFLICT`（与「请求给了 F」同一条规则），
-     或自动推后
-  3. （附带观察，按字面实现）**§2「末尾版本」按字面把空区间也算作 L**：撤销了一个前面没有版本的预约之后，下一个
-     不指定时刻的发布从被撤销预约的起点 F 起（「L 已截断，尽头 E = F」），而不是「一直以来」。F 之前的时刻保持
-     无价。若 v4 按第 1 条让空区间不参与，这一条随之改变
-  4. （附带观察，按字面实现）**§2「退役」表格按「起点 ≤ `t`」划分**：起点恰好等于 `t`（同一秒里发布又退役）归入
-     「已开始生效」，`effective_to = t` 得到空区间 `[t, t)`，前一个版本不恢复、`t` 起无价
-  5. **数据库兜底的完整性检查可以被 `DRAFT → RETIRED` 绕过**：设计的 BEFORE UPDATE 对 `OLD.status = 'DRAFT'`
-     允许任意改，完整性检查只挂在 `DRAFT → PUBLISHED` 上。绕过服务直接 `UPDATE … SET status = 'RETIRED'`（带区间
-     与发布人）能让一个不完整、甚至零分量的版本进入 `RETIRED`，而 `RETIRED` 的版本在自己的区间里照样被取价。服务层
-     没有这条路径。建议 v4 把完整性检查扩到 `DRAFT → RETIRED`，或禁止这个跃迁
-- [x] **设计没有写死、实现按设计已有条款取的细节**：
-  - 错误码：退役草稿是 409 `PRICE_VERSION_NOT_RETIRABLE`；对已退役 / 已丢弃版本的编辑与丢弃是
-    `PRICE_VERSION_FINAL`（设计错误表「对已退役 / 已丢弃版本操作」）
-  - 列表筛选里的供应商 / 模型不存在是 404 `AI_PROVIDER_NOT_FOUND` / `AI_MODEL_NOT_FOUND`（设计错误表「不存在或模型
-    不属于该供应商」）
-  - 「发布人」在响应与审计里用登录邮箱（`approved_by_email`）：设计 §6 禁止返回内部 id
-  - PATCH 没有实际变化是 200、不写（与目录的 PATCH 一致）；已发布再发布是 200、不写（设计 §2），请求体里的
-    `effective_from` 被忽略
-  - 分量个数不设上限（设计没写），至少 1 个（§7「给零个分量」422）
+- [x] **设计 v4 怎么来的**：run `9abfe47e` 的实现与它的独立审查发现 v3 的缺陷，设计闸门 #177 升 v4：
+  1. 撤销「截断了前一个版本 P」的预约过不了 v3 自己的「事务内复查」（空区间 `[F, F)` 参与排序，恢复为未截断的 P
+     排在它之前）→ v4：空区间只在 `RETIRED` 行上、不参与「末尾版本」与复查排序，复查另断言这一条。随之，撤销了
+     唯一的预约之后不指定时刻的发布从「一直以来」起（没有区间非空的版本 = 没有 L）
+  2. 末尾版本 L 尚未开始（起点 ≥ `t`：预约的，或同一秒里刚发布的）时不指定时刻的发布，v3 表格要求把 L 截断于 `t`，
+     得到倒置或空的已发布区间 → v4：409 `EFFECTIVE_FROM_CONFLICT`（与「F 必须晚于 L 的起点」同一条规则），不自动推后
+  3. 发布 / 退役在拿到供应商行锁之前做了普通读（快照读陷阱只测了计费侧）→ v4 新增「锁在前」一节，§7 补发布 / 退役侧
+     的三个真 MySQL 用例
+  4. 直接 `DRAFT → RETIRED` 能绕过发布跃迁上的完整性检查 → v4：触发器禁止这个跃迁
+  5. 新 `entity_type` 要在 `audit_query.py` 归类 → v4 §11 实现范围补上，契约由 #190 补进允许路径
+  6. 实现里设计没写的小决定，v4 逐条写明（见下一条）
+
+  v4 第一轮 Codex 设计审查判阻断「第一个版本不指定时刻 = `NULL`」是回溯发布。这条规则 v1–v3 都已批准。Kelvin
+  2026-09-29 裁定保留，设计 §2 补上对 §16、§17 与 Phase 2 计划 T-B 那句的逐条回应，第二轮 `APPROVED: design v4`；
+  裁定记在 [REVIEW-LOG.md](REVIEW-LOG.md)「升级给人的分歧」
+- [x] **设计 v4 写明的小决定，实现照做**：
+  - 退役起点恰好等于 `t`（同一秒里发布又退役）归入「已开始生效」：空区间 `[t, t)`，前一个版本不恢复，`t` 起无价
+  - 撤销预约只在前一个版本 P 仍是 `PUBLISHED`、终点等于被撤销版本的起点时恢复 P；P 以退役结束于那一刻的不恢复。
+    服务路径造不出后一种时间线，用例直接改库构造
+  - 退役草稿 409 `PRICE_VERSION_NOT_RETIRABLE`；对已退役 / 已丢弃版本的任何写操作 409 `PRICE_VERSION_FINAL`，
+    编辑 / 丢弃已发布的是 `PRICE_VERSION_NOT_DRAFT`
+  - 分量 1–64 个，超出 422（Worker 的首版就是 64，修复轮按 v3「没写」拿掉了，v4 写明后恢复）
+  - 列表筛选里的供应商 / 模型不存在（或模型不属于所给供应商）404 `AI_PROVIDER_NOT_FOUND` / `AI_MODEL_NOT_FOUND`
+  - PATCH 没有实际变化 200、不写不记审计；已发布再发布 200、不写，请求体里的 `effective_from` 被忽略
+  - 「发布人」「创建人」在响应与审计里用登录邮箱，不返回内部用户 id
   - 区间重叠触发器用局部变量接供应商行锁的结果（设计示例写的是 `@lock_id` 会话变量），语义相同、不污染会话
-- [x] **发布、退役的锁后读**：设计 §2「锁供应商行 → 取 `t` → 读并校验」。锁是事务的第一条语句（版本属于哪个
-  供应商在另一个短事务里查），锁后对版本行 `FOR UPDATE`，对模型、分量、目录分量与响应里的供应商 / 模型 / 用户
-  `FOR SHARE`。否则 REPEATABLE READ 在锁前的普通读就定下快照，等锁期间提交的模型停用、分量替换都看不见
-  （§7「快照读陷阱」的发布一侧；用例在 `test_provider_prices_service.py`）
+- [x] **发布、退役「锁在前」**（设计 §2「锁在前」）：锁是事务的第一条语句（版本属于哪个供应商在另一个短事务里查），
+  锁后对版本行 `FOR UPDATE` 并核对它仍挂在所锁的供应商上（不一致 500），对模型、分量、目录分量与响应里的供应商 /
+  模型 / 用户 `FOR SHARE`。否则 REPEATABLE READ 在锁前的普通读就定下快照，等锁期间提交的模型停用、分量替换、截断
+  了被退役版本的后继都看不见。真 MySQL 用例三个（`test_provider_prices_service.py`：模型停用、分量删除、退役等锁时
+  后继发布）；在退役里临时加回一次锁前普通读，第三个用例即失败，确认它测到的是陷阱本身
+- [x] **交付：Claude 手工接手 run `9abfe47e` 的 #188**：
+  - OpenClaw run `9abfe47e` 基于 `0e96cc3` 实现、开出 Draft #188（head `6e94cda`，18 个文件）。Worker 的独立审查
+    `REQUEST_CHANGES`，三条阻断：实现改了 v3 的规则而没有停下报回闸门、发布 / 退役的快照读陷阱、`audit_query.py`
+    的契约缺口。修复轮把发布 / 退役改成「锁在前」、代码退回 v3 字面并报告 v3 的缺陷，但它加的一行文档串触发 ruff
+    E501（`app/services/provider_prices.py` 第 10 行，123 > 100），run 以 `checks_failed` 结束，修改没有提交
+  - Kelvin 2026-09-29 决定：先让 v4 过闸门，再由 Claude 手工完成 #188，不重发「开启」（那会新开 run 与分支）。
+    #190 把契约改到 v4 并补允许路径
+  - 本分支上：`0c0dead` 是修复轮未提交的改动原样导出（Worker 的 run 工作树只读、未碰）；之后一个提交修 E501、按 v4
+    对齐代码与文档、注册 `provider_price_version`、补 v4 的用例（撤销预约恢复 P、撤销唯一预约后从「一直以来」起、
+    不恢复已退役的 P、预约前不指定时刻 409、同一秒第二次发布 409、复查的空区间断言、64 个分量的上限、`DRAFT →
+    RETIRED` 触发器、退役侧快照读）
+  - 本地：六项检查全过；真 MySQL（一次性 `mysql:8.4` 容器）上 `test_provider_prices_service.py`、
+    `test_provider_prices_resolve.py`、`test_migrations.py` 共 198 个用例全过、无 skipped
 - [ ] **后续**：
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-K
     （AIH-TASK-036）补上

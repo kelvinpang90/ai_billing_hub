@@ -1,4 +1,4 @@
-"""`resolve_provider_price` and its serialisation with publishing (design gate #177 v3 §7).
+"""`resolve_provider_price` and its serialisation with publishing (design gate #177 v4 §7).
 
 三类用例：
 
@@ -53,7 +53,6 @@ from app.services.auth import RequestContext, utc_now
 from app.services.provider_prices import (
     EffectiveFromConflict,
     EffectiveFromInPast,
-    PricePeriodsBroken,
     PriceVersionFinal,
     PriceVersionNotRetirable,
 )
@@ -425,9 +424,6 @@ def test_a_priced_moment_never_changes_its_version(sqlite_factory) -> None:
         except (
             EffectiveFromConflict,
             EffectiveFromInPast,
-            # 设计 v3 字面走不通的几格（撤销恢复前一个版本的预约、在预约前或同一秒里不指定时刻
-            # 的发布）整体回滚：同样什么都没变（见 docs/TODO.md）。
-            PricePeriodsBroken,
             PriceVersionFinal,
             PriceVersionNotRetirable,
         ):

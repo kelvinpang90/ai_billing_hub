@@ -1,15 +1,16 @@
-"""Provider price versions over time, through the services (design gate #177 v3 §7).
+"""Provider price versions over time, through the services (design gate #177 v4 §7).
 
 五类用例：
 
 - **区间规则**（SQLite，冻结时钟）：第一个版本对过去生效、截断于 `t`、预约生效、不许回溯、
-  撤销预约、退役当前版本、退役历史版本、退役后再发布；复查函数本身、复查失败回滚、「拿到
-  供应商行锁之后才取时间」；设计 v3 字面走不通的几格（用例名与文档串标明，见 docs/TODO.md）；
-- **发布侧的快照读陷阱**（真 MySQL，两个连接）：等锁期间提交的模型停用、分量删除，发布都看得见；
+  撤销预约、预约存在时不指定时刻的发布、退役当前版本、退役历史版本、退役后再发布；复查
+  函数本身、复查失败回滚、「拿到供应商行锁之后才取时间」；
+- **发布与退役侧的快照读陷阱**（真 MySQL，两个连接）：等锁期间提交的模型停用、分量删除、
+  截断了被退役版本的后继，发布 / 退役都看得见；
 - **事务中途失败**（审计写入、提交抛错）：`factory` 夹具的两个参数，在 SQLite 与真 MySQL 上
   各跑一次；
 - **触发器**（真 MySQL）：绕过服务直接改已发布的版本与分量、删除、把 `RETIRED` 改回
-  `PUBLISHED`；只许截断与退役；
+  `PUBLISHED`、把草稿直接改成 `RETIRED`；只许截断与退役；
 - **完整性、区间不重叠与约束的数据库兜底**（真 MySQL）：直接改状态为已发布、直接插入已发布的
   版本、直接写相交的区间、草稿带区间、非正的单价。
 
@@ -95,6 +96,7 @@ _ER_CHECK_CONSTRAINT_VIOLATED = 3819
 _IMMUTABLE = "a published provider price version is immutable"
 _RETIRE_ONLY = "a published provider price version can only be retired"
 _DISCARDED_FINAL = "a discarded provider price version is final"
+_DRAFT_TRANSITION = "a draft provider price version is published or discarded"
 _DRAFT_ONLY = "provider price components change only on a draft"
 _NEVER_DELETED = "provider price versions are never deleted"
 _STARTS_AS_DRAFT = "a provider price version starts as a draft"
@@ -524,11 +526,9 @@ def test_backdating_is_refused(sqlite_factory) -> None:
     assert other.publish_new(T0 + SECOND).effective_from == T0 + SECOND
 
 
-def test_withdrawing_a_reservation_that_truncated_a_version_rolls_back(sqlite_factory) -> None:
-    """⚠️ 设计 v3 的缺口（未擅改，见 docs/TODO.md）：设计 §7「撤销预约」要求前一个版本恢复为
-    未截断，但恢复后它按 `effective_from` 排在被撤销的空区间之前，设计字面的「事务内复查」
-    （「前一个 `effective_to` 为空时它必须是最后一个」）不通过 —— 整个撤销回滚（500），
-    被撤销的版本、前一个版本与审计都不变。
+def test_withdrawing_a_reservation_restores_the_version_it_truncated(sqlite_factory) -> None:
+    """设计 §7「撤销预约」①：被撤销的是空区间；前一个版本的 `effective_to` 恢复为空；复查通过
+    （空区间不参与排序，v4）；任何时刻都取不到被撤销的版本。
     """
     clock = Clock(T0)
     prices = Prices(sqlite_factory, clock)
@@ -536,18 +536,30 @@ def test_withdrawing_a_reservation_that_truncated_a_version_rolls_back(sqlite_fa
     reserved_at = T0 + DAY
     second = prices.publish_new(reserved_at)
     clock.advance(seconds=10)
-    before = snapshot(sqlite_factory)
 
-    with pytest.raises(PricePeriodsBroken):
-        prices.retire(second.id)
+    withdrawn = prices.retire(second.id)
 
-    assert snapshot(sqlite_factory) == before
-    assert prices.version(first.id).effective_to == reserved_at
-    assert prices.resolve(reserved_at) == second.id
+    assert (withdrawn.status, withdrawn.effective_from, withdrawn.effective_to) == (
+        "RETIRED",
+        reserved_at,
+        reserved_at,
+    )
+    assert prices.version(first.id).effective_to is None
+    for moment in (LONG_AGO, T0, reserved_at, reserved_at + DAY):
+        assert prices.resolve(moment) == first.id
+    [(before, after, _)] = audit_states(sqlite_factory, AuditAction.PROVIDER_PRICE_RETIRE)
+    assert before["restored_version"] == {"id": first.id, "effective_to": reserved_at.isoformat()}
+    assert after["restored_version"] == {"id": first.id, "effective_to": None}
+    # 恢复后时间线的末尾又是 P：不指定时刻的发布照常截断它。
+    third = prices.publish_new()
+    assert third.effective_from == T0 + 11 * SECOND
+    assert prices.version(first.id).effective_to == T0 + 11 * SECOND
 
 
 def test_withdrawing_the_first_reservation_leaves_nothing(sqlite_factory) -> None:
-    """撤销一个前面没有版本的预约：空区间，任何时刻都取不到；复查按设计字面通过。"""
+    """设计 §7「撤销预约」②：空区间，任何时刻都取不到；之后不指定时刻的发布从「一直以来」起
+    —— 空区间不当末尾版本（v4），此前的事件全是无价。
+    """
     prices = Prices(sqlite_factory, Clock(T0))
     reserved = prices.publish_new(T0 + DAY)
 
@@ -568,31 +580,66 @@ def test_withdrawing_the_first_reservation_leaves_nothing(sqlite_factory) -> Non
         "effective_to": (T0 + DAY).isoformat(),
     }
     assert reason == "Fictional retirement"
-    # 设计的「末尾版本」是已发布版本中起点最晚的一个，被撤销的预约也算：它的尽头 E 是它的
-    # 起点，下一个版本从 max(E, t) 起，不再是「一直以来」。
-    assert prices.publish_new().effective_from == T0 + DAY
+    again = prices.publish_new()
+    assert (again.effective_from, again.effective_to) == (None, None)
+    assert prices.resolve(LONG_AGO) == again.id
+    assert prices.resolve(T0 + DAY) == again.id
 
 
-def test_publishing_without_a_time_before_a_reservation_fails(sqlite_factory) -> None:
-    """⚠️ 设计 v3 的缺口（未擅改，见 docs/TODO.md）：末尾版本 L 是尚未开始的预约时，设计表格
-    「有 L，请求未给」要求从 `t` 起、把 L 截断于 `t` —— L 的区间会倒置，设计没有给别的结果。
-    按 §5「复查不通过」：500，什么都不写。
+def test_withdrawing_does_not_revive_a_retired_predecessor(sqlite_factory) -> None:
+    """设计 §2「恢复 P 的条件」（§7「撤销预约」③）：P 以退役结束于预约的起点时不恢复 ——
+    退役不回填。
+
+    服务路径造不出这种时间线（P 退役于 E ≤ `t`，从 E 起的预约在撤销时已不晚于 `t`，走「已开始
+    生效」那一行），所以直接改库把 P 改成 RETIRED；SQLite 上没有触发器。
+    """
+    clock = Clock(T0)
+    prices = Prices(sqlite_factory, clock)
+    first = prices.publish_new()
+    reserved_at = T0 + DAY
+    second = prices.publish_new(reserved_at)
+    with sqlite_factory() as session:
+        session.execute(
+            update(ProviderPriceVersion)
+            .where(ProviderPriceVersion.public_id == first.id)
+            .values(status=PriceVersionStatus.RETIRED)
+        )
+        session.commit()
+    clock.advance(seconds=10)
+
+    prices.retire(second.id)
+
+    assert prices.version(first.id).effective_to == reserved_at
+    assert prices.resolve(reserved_at - MICRO) == first.id
+    assert prices.resolve(reserved_at) is None
+    [(before, after, _)] = audit_states(sqlite_factory, AuditAction.PROVIDER_PRICE_RETIRE)
+    assert "restored_version" not in before
+    assert "restored_version" not in after
+
+
+def test_publishing_without_a_time_before_a_reservation_conflicts(sqlite_factory) -> None:
+    """设计 §7「预约存在时不指定时刻发布」（v4）：末尾版本是尚未开始的预约时，不给时刻 409
+    `EFFECTIVE_FROM_CONFLICT`，什么都不写；给一个晚于预约起点的 F 则通过、预约被截断于 F。
     """
     prices = Prices(sqlite_factory, Clock(T0))
-    prices.publish_new()
-    prices.publish_new(T0 + DAY)
+    first = prices.publish_new()
+    reserved = prices.publish_new(T0 + DAY)
     draft = prices.draft()
     before = snapshot(sqlite_factory)
 
-    with pytest.raises(PricePeriodsBroken):
+    with pytest.raises(EffectiveFromConflict):
         prices.publish(draft.id)
 
     assert snapshot(sqlite_factory) == before
+    later = prices.publish(draft.id, T0 + 2 * DAY)
+    assert later.effective_from == T0 + 2 * DAY
+    assert prices.version(reserved.id).effective_to == T0 + 2 * DAY
+    assert prices.version(first.id).effective_to == T0 + DAY
 
 
-def test_a_second_publish_in_the_same_second_fails(sqlite_factory) -> None:
-    """⚠️ 同一缺口：同一秒里两次不指定时刻的发布，`t` 相同，设计要求把刚发布的版本截断于它
-    自己的起点（空的已发布区间，CHECK 不允许）。500，什么都不写。
+def test_a_second_publish_in_the_same_second_conflicts(sqlite_factory) -> None:
+    """设计 §2「发布」（v4）：同一秒里两次不指定时刻的发布，`t` 相同，末尾版本的起点就是 `t`
+    —— 第二次 409 `EFFECTIVE_FROM_CONFLICT`，什么都不写；下一秒重发即可。
     """
     clock = Clock(T0)
     prices = Prices(sqlite_factory, clock)
@@ -604,15 +651,17 @@ def test_a_second_publish_in_the_same_second_fails(sqlite_factory) -> None:
     draft = prices.draft()
     before = snapshot(sqlite_factory)
 
-    with pytest.raises(PricePeriodsBroken):
+    with pytest.raises(EffectiveFromConflict):
         prices.publish(draft.id)
 
     assert snapshot(sqlite_factory) == before
+    clock.advance(seconds=1)
+    assert prices.publish(draft.id).effective_from == T0 + 2 * SECOND
 
 
 def test_retiring_a_version_that_starts_at_t_leaves_an_empty_period(sqlite_factory) -> None:
-    """设计 §2「退役」字面：起点 ≤ `t` 即「已开始生效」，终点写 `t`。起点恰好是 `t`（同一秒里
-    发布又退役）时得到空区间 `[t, t)`；前一个版本不恢复（不是「撤销预约」那一行），`t` 起无价。
+    """设计 §7「退役起点等于 `t` 的版本」（v4）：起点 ≤ `t` 即「已开始生效」，终点写 `t`。起点
+    恰好是 `t`（同一秒里发布又退役）时得到空区间 `[t, t)`；前一个版本不恢复，`t` 起无价。
     """
     clock = Clock(T0)
     prices = Prices(sqlite_factory, clock)
@@ -762,7 +811,8 @@ T2 = T0 + 2 * SECOND
         ([(None, T0, "PUBLISHED"), (T0, T0, "RETIRED"), (T0, None, "PUBLISHED")], False),
         ([(T1, T1, "RETIRED"), (T1, None, "PUBLISHED")], False),
         ([(T0, None, "PUBLISHED")], False),
-        ([(None, None, "PUBLISHED"), (T1, T1, "RETIRED")], True),
+        ([(None, None, "PUBLISHED"), (T1, T1, "RETIRED")], False),
+        ([(None, None, "PUBLISHED"), (T1, T1, "PUBLISHED")], True),
         ([(None, T1, "PUBLISHED"), (T0, None, "PUBLISHED")], True),
         ([(None, None, "PUBLISHED"), (T0, None, "PUBLISHED")], True),
         ([(None, T0, "PUBLISHED"), (None, None, "PUBLISHED")], True),
@@ -777,8 +827,9 @@ T2 = T0 + 2 * SECOND
         "empty-in-between",
         "after-a-withdrawn-first",
         "first-with-a-start",
-        # 设计字面：空区间也参与排序，恢复为未截断的前一个版本排在它之前（设计 v3 的缺口）。
+        # 撤销预约后恢复的 P 排在空区间之前：空区间不参与排序（v4）。
         "restored-before-a-withdrawn",
+        "empty-but-not-retired",
         "overlap",
         "two-open",
         "two-from-the-beginning",
@@ -786,7 +837,7 @@ T2 = T0 + 2 * SECOND
     ],
 )
 def test_verify_periods(rows: list, broken: bool) -> None:
-    """设计 §2「事务内复查」逐字的三条断言；区间自身的合法性归数据库的 CHECK。"""
+    """设计 §2「事务内复查」（v4）：空区间只在 RETIRED 行上；其余排序后的三条断言。"""
     versions = [_version(index + 1, *row) for index, row in enumerate(rows)]
     # 顺序打乱也一样：复查自己排序。
     versions.reverse()
@@ -819,8 +870,9 @@ def test_a_failed_recheck_rolls_the_publish_back(sqlite_factory, monkeypatch) ->
 
 
 def test_a_failed_recheck_rolls_the_withdrawal_back(sqlite_factory, monkeypatch) -> None:
-    """撤销预约（前面没有版本、设计字面能走通的那一种）：复查不通过时被撤销的一行回滚。"""
+    """撤销（截断了前一个版本的）预约：复查不通过时被撤销的一行与被恢复的前一个版本都回滚。"""
     prices = Prices(sqlite_factory, Clock(T0))
+    prices.publish_new()
     reserved = prices.publish_new(T0 + DAY)
     before = snapshot(sqlite_factory)
     monkeypatch.setattr(provider_prices, "verify_periods", _always_broken)
@@ -883,15 +935,18 @@ class Scene:
     """A timeline with every kind of row the writes below act on.
 
     `model-m`：一个未截断的已发布版本与一份草稿；`model-n`：只有一个尚未开始的预约（撤销它
-    不恢复任何版本 —— 恢复前一个版本的撤销过不了设计 v3 字面的复查，见上面的缺口用例）；
-    `model-o`：只有一份草稿（发布它就是该模型的第一个版本）。
+    不恢复任何版本）；`model-o`：只有一份草稿（发布它就是该模型的第一个版本）；`model-p`：
+    一个已发布版本与截断了它的预约（撤销预约要恢复它）。
     """
 
     def __init__(self, factory: sessionmaker[Session]) -> None:
         self.clock = Clock(T0)
-        self.prices = Prices(factory, self.clock, models=("model-m", "model-n", "model-o"))
+        models = ("model-m", "model-n", "model-o", "model-p")
+        self.prices = Prices(factory, self.clock, models=models)
         self.current = self.prices.publish_new(model="model-m")
         self.reserved = self.prices.publish_new(T0 + DAY, model="model-n")
+        self.prices.publish_new(model="model-p")
+        self.truncating = self.prices.publish_new(T0 + DAY, model="model-p")
         self.draft = self.prices.draft("model-m")
         self.lone_draft = self.prices.draft("model-o")
         self.clock.advance(seconds=5)
@@ -909,6 +964,7 @@ ACTIONS: dict[str, Callable[[Scene], object]] = {
     "publish-first": lambda scene: scene.prices.publish(scene.lone_draft.id),
     "retire-current": lambda scene: scene.prices.retire(scene.current.id),
     "withdraw-reservation": lambda scene: scene.prices.retire(scene.reserved.id),
+    "withdraw-restoring": lambda scene: scene.prices.retire(scene.truncating.id),
 }
 
 
@@ -1008,6 +1064,47 @@ def test_a_publish_checks_the_components_committed_while_it_waited(mysql_factory
     assert stored.status == "DRAFT"
     assert len(stored.components) == 3
     assert audit_states(mysql_factory, AuditAction.PROVIDER_PRICE_PUBLISH) == []
+
+
+def test_a_retire_sees_a_successor_published_while_it_waited(mysql_factory) -> None:
+    """设计 §7「快照读陷阱（发布 / 退役侧）」③：另一事务锁着供应商行、发布一个截断当前版本 V
+    的后继；退役 V 等这把锁，它提交后退役读到的 V 已被截断 —— 409
+    `PRICE_VERSION_NOT_RETIRABLE`，什么都不写、无退役审计。
+
+    退役若在锁之前做过普通读，锁后的普通读仍看到「V 未截断」，会把一个历史版本退役。
+    """
+    now = utc_now()
+    prices = Prices(mysql_factory, Clock(now))
+    current = prices.publish_new()
+    successor = prices.draft()
+    current_id = _internal_version_id(mysql_factory, current.id)
+    successor_id = _internal_version_id(mysql_factory, successor.id)
+    provider_id, _ = prices.ids()
+    boundary = now.replace(microsecond=0) + DAY
+    publishing = mysql_factory()
+    try:
+        # 服务层发布的写法：先锁供应商行，先截断前一个，再把后继从草稿改为已发布。
+        locked = select(AiProvider.id).where(AiProvider.id == provider_id).with_for_update()
+        publishing.execute(locked).scalar_one()
+        publishing.execute(
+            _update_version("effective_to = :end"), {"end": boundary, "id": current_id}
+        )
+        _publish_directly(publishing, prices, successor_id, (boundary, None))
+        before_commit = snapshot(mysql_factory)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            retiring = pool.submit(prices.retire, current.id)
+            with pytest.raises(TimeoutError):
+                retiring.result(timeout=2)
+            publishing.commit()
+            with pytest.raises(PriceVersionNotRetirable):
+                retiring.result(timeout=30)
+    finally:
+        publishing.close()
+
+    assert before_commit["audits"] == snapshot(mysql_factory)["audits"]
+    assert prices.version(current.id).status == "PUBLISHED"
+    assert prices.version(current.id).effective_to == boundary
+    assert audit_states(mysql_factory, AuditAction.PROVIDER_PRICE_RETIRE) == []
 
 
 # --- 触发器（真 MySQL） ---------------------------------------------------------------
@@ -1222,6 +1319,23 @@ def test_the_database_checks_completeness_on_the_publish_transition(mysql_factor
         session.rollback()
 
 
+def test_the_database_refuses_a_draft_going_straight_to_retired(mysql_factory) -> None:
+    """设计 §7「触发器」（v4）：绕过服务把草稿直接改成 `RETIRED`（带区间与发布人），分量完整与
+    零分量各一次，都被拒绝 —— 否则不完整的版本能跳过发布跃迁上的完整性检查、在自己的区间里被
+    取价。
+    """
+    prices = Prices(mysql_factory, utc_now)
+    llm_four = tuple(FICTIONAL_TOKEN_RATES)
+    with mysql_factory() as session:
+        for codes in ((), llm_four):
+            draft = _direct_draft(session, prices, codes)
+            with pytest.raises(DBAPIError) as raised:
+                with session.begin_nested():
+                    _publish_directly(session, prices, draft, (None, T0), status="RETIRED")
+            assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _DRAFT_TRANSITION)
+        session.rollback()
+
+
 @pytest.mark.parametrize(
     ("start", "end", "accepted"),
     [
@@ -1272,11 +1386,14 @@ def test_empty_periods_and_other_models_do_not_overlap(mysql_factory) -> None:
     """
     prices = Prices(mysql_factory, utc_now, models=("model-m", "model-n"))
     with mysql_factory() as session:
-        existing = _direct_draft(session, prices)
-        _publish_directly(session, prices, existing, (T0, T0 + 10 * SECOND))
+        # 空区间只能经「已发布 → 退役」得到（草稿不能直接改成 RETIRED，v4）。
         empty = _direct_draft(session, prices)
         at = T0 + 5 * SECOND
-        _publish_directly(session, prices, empty, (at, at), status="RETIRED")
+        _publish_directly(session, prices, empty, (at, None))
+        withdraw = _update_version("status = 'RETIRED', effective_to = effective_from")
+        session.execute(withdraw, {"id": empty})
+        existing = _direct_draft(session, prices)
+        _publish_directly(session, prices, existing, (T0, T0 + 10 * SECOND))
         theirs = _direct_draft(session, prices, model="model-n")
         _publish_directly(session, prices, theirs, (T0, None))
 
@@ -1291,11 +1408,11 @@ def test_empty_periods_and_other_models_do_not_overlap(mysql_factory) -> None:
 
 
 def test_the_service_paths_pass_the_triggers(mysql_factory) -> None:
-    """服务层正常的发布 / 截断 / 退役 / 退役后再发布 / 预约 / 撤销（前面没有版本的）预约，在真
-    触发器下都通过。恢复前一个版本的撤销过不了设计 v3 字面的复查，不在这里（见缺口用例）。
+    """服务层正常的发布 / 截断 / 退役 / 退役后再发布 / 预约 / 撤销预约（前面没有版本的，与截断了
+    前一个版本、要恢复它的），在真触发器下都通过（设计 §7「撤销预约」的 MySQL 那一次）。
     """
     clock = Clock(utc_now())
-    prices = Prices(mysql_factory, clock, models=("model-m", "model-n"))
+    prices = Prices(mysql_factory, clock, models=("model-m", "model-n", "model-p"))
     first = prices.publish_new()
     clock.advance(seconds=3)
     second = prices.publish_new()
@@ -1305,10 +1422,13 @@ def test_the_service_paths_pass_the_triggers(mysql_factory) -> None:
     third = prices.publish_new()
     fourth = prices.publish_new(clock.now.replace(microsecond=0) + DAY)
     lone = prices.publish_new(clock.now.replace(microsecond=0) + DAY, model="model-n")
+    restored = prices.publish_new(model="model-p")
+    truncating = prices.publish_new(clock.now.replace(microsecond=0) + DAY, model="model-p")
     clock.advance(seconds=3)
     prices.retire(lone.id)
+    prices.retire(truncating.id)
 
-    for model in ("model-m", "model-n"):
+    for model in ("model-m", "model-n", "model-p"):
         provider_id, model_id = prices.ids(model)
         with mysql_factory() as session:
             verify_periods(price_repository.period_versions(session, provider_id, model_id))
@@ -1318,6 +1438,8 @@ def test_the_service_paths_pass_the_triggers(mysql_factory) -> None:
     assert prices.version(fourth.id).effective_to is None
     withdrawn = prices.version(lone.id)
     assert withdrawn.effective_from == withdrawn.effective_to
+    assert prices.version(restored.id).effective_to is None
+    assert prices.resolve(truncating.effective_from, "model-p") == restored.id
 
 
 @pytest.mark.parametrize(

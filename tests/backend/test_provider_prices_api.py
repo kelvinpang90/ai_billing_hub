@@ -1,4 +1,4 @@
-"""Provider price endpoints end to end on SQLite (design gate #177 v3 §7).
+"""Provider price endpoints end to end on SQLite (design gate #177 v4 §7).
 
 这里测接口契约：正常路径与每一步的审计、完整性、目录停用、精度、生效时刻的格式与不许回溯、
 状态机的 409、404、封闭的请求体、列表的筛选与排序、响应里没有内部 id，以及「每个处理函数
@@ -559,10 +559,8 @@ def test_whole_seconds_with_zero_fractions_are_accepted(client, admin, catalog) 
 
 
 def test_a_start_not_after_the_latest_is_a_conflict(client, app, admin, catalog) -> None:
-    """设计 §7「不许回溯」：请求的 F ≤ 末尾版本的起点是 409 `EFFECTIVE_FROM_CONFLICT`。
-
-    不指定时刻、末尾是尚未开始的预约那一格，设计 v3 没有合法结果（500），在
-    test_provider_prices_service.py 的缺口用例里。
+    """设计 §7「不许回溯」「预约存在时不指定时刻发布」：请求的 F ≤ 末尾版本的起点，以及末尾是
+    尚未开始的预约时不给时刻，都是 409 `EFFECTIVE_FROM_CONFLICT`。
     """
     published(client, admin, catalog)
     reserved = new_draft(client, admin, catalog)
@@ -573,9 +571,10 @@ def test_a_start_not_after_the_latest_is_a_conflict(client, app, admin, catalog)
     responses = [
         act(client, admin, draft["id"], "publish", {"effective_from": "2999-01-02T00:00:00Z"}),
         act(client, admin, draft["id"], "publish", {"effective_from": "2999-01-01T00:00:00Z"}),
+        act(client, admin, draft["id"], "publish"),
     ]
 
-    assert outcomes(responses) == [(409, "EFFECTIVE_FROM_CONFLICT")] * 2
+    assert outcomes(responses) == [(409, "EFFECTIVE_FROM_CONFLICT")] * 3
     assert snapshot(app) == before
 
 
@@ -609,6 +608,14 @@ def test_meter_types_left_out_entirely_are_fine(client, admin, catalog) -> None:
     assert len(both["components"]) == 5
 
 
+def fictional_codes(count: int) -> list[dict[str, str]]:
+    """`count` distinct component codes that are not in the catalog."""
+    return [
+        {"component_code": f"FICTIONAL_{index}", "unit_quantity": "1", "rate_amount": "1"}
+        for index in range(count)
+    ]
+
+
 @pytest.mark.parametrize(
     ("components", "expected"),
     [
@@ -622,11 +629,14 @@ def test_meter_types_left_out_entirely_are_fine(client, admin, catalog) -> None:
             [{"component_code": "llm_input_token", "unit_quantity": "1", "rate_amount": "1"}],
             (404, "USAGE_METER_COMPONENT_NOT_FOUND"),
         ),
+        # 上限 64 个（设计 §2「接口」v4）：各不相同的未知代码，没超过上限才轮到查目录（404）。
+        (fictional_codes(64), (404, "USAGE_METER_COMPONENT_NOT_FOUND")),
+        (fictional_codes(65), (422, "VALIDATION_ERROR")),
     ],
-    ids=["none", "duplicate", "unknown", "wrong-case"],
+    ids=["none", "duplicate", "unknown", "wrong-case", "at-the-cap", "over-the-cap"],
 )
 def test_component_list_rules(client, app, admin, catalog, components, expected) -> None:
-    """设计 §7「完整性」：零个分量、重复分量 422；不存在的分量 404。都不写。"""
+    """设计 §7「完整性」：零个分量、重复分量、超过 64 个 422；不存在的分量 404。都不写。"""
     before = snapshot(app)
 
     created = create(client, admin, draft_body(catalog, components=components))

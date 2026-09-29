@@ -1101,7 +1101,7 @@ SHA256(RAW_REQUEST_BODY)
 
 ## 管理端供应商价格
 
-设计依据：设计闸门 #177 `APPROVED: design v3`，全文见
+设计依据：设计闸门 #177 `APPROVED: design v4`，全文见
 [design/AIH-TASK-026-provider-prices.md](design/AIH-TASK-026-provider-prices.md)（spec §14、§15.1、§17、§66、§74.1、
 §80）。实现登记为 AIH-TASK-026。表结构见 [database-schema.md](database-schema.md) 的「供应商成本价」。
 
@@ -1136,10 +1136,10 @@ SHA256(RAW_REQUEST_BODY)
 | 409 | `CATALOG_ITEM_RETIRED` | 供应商、模型或某个分量所属的计量类型已停用（建草稿、改草稿、发布时检查） | 否 |
 | 409 | `PRICE_VERSION_NOT_RETIRABLE` | 退役一个已被后继截断的历史版本，或退役草稿 | 否 |
 | 409 | `PRICE_VERSION_FINAL` | 对已退役 / 已丢弃的版本做任何写操作 | 否 |
-| 409 | `EFFECTIVE_FROM_CONFLICT` | 生效时刻不晚于末尾版本的起点，或早于它的尽头（见「发布」） | 否 |
+| 409 | `EFFECTIVE_FROM_CONFLICT` | 生效时刻不晚于末尾版本的起点，或早于它的尽头；不指定时刻而末尾版本尚未开始（见「发布」） | 否 |
 | 422 | `EFFECTIVE_FROM_IN_PAST` | 请求的生效时刻早于 `t`（不许回溯） | 否 |
-| 422 | `VALIDATION_ERROR` | 格式、精度、正数、多余字段 | 否 |
-| 500 | `INTERNAL_ERROR` | 意外错误（含发布 / 退役后区间复查不通过、设计 v3 没有合法结果的两种情形 —— 见「发布」「退役」、锁等待超时）；整个事务回滚 | 否 |
+| 422 | `VALIDATION_ERROR` | 格式、精度、正数、分量个数、多余字段 | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误（含发布 / 退役后区间复查不通过、锁等待超时）；整个事务回滚 | 否 |
 
 ### 字段规则
 
@@ -1148,7 +1148,7 @@ SHA256(RAW_REQUEST_BODY)
 | `provider_id` / `model_id` | 供应商与模型的 `public_id`；模型必须属于该供应商 |
 | `source_currency` | ISO 4217 大写三字母，`^[A-Z]{3}$`（`usd` 是 422）。可以是 `MYR` |
 | `source_reference` | 去首尾空白后 1–255：价格出处（例如「供应商价格页，查看于 2026-09-29」）。不要写合同价 |
-| `components` | 至少 1 个，同一版本里 `component_code` 不重复（重复是 422） |
+| `components` | 1–64 个（超出是 422），同一版本里 `component_code` 不重复（重复是 422） |
 | `components[].component_code` | 目录里的计价分量代码，例如 `LLM_INPUT_TOKEN`、`EMBEDDING_TOKEN` |
 | `components[].unit_quantity` | 多少个计量单位对应一个 `rate_amount`，例如 `"1000000"` |
 | `components[].rate_amount` | 原币种单价 |
@@ -1197,8 +1197,8 @@ SHA256(RAW_REQUEST_BODY)
 | --- | --- |
 | `source_type` | 本任务只有 `MANUAL`；`SYNC` 留给 Phase 8 的供应商价格同步 |
 | `status` | `DRAFT` / `PUBLISHED` / `RETIRED` / `DISCARDED` |
-| `effective_from` | 草稿为 `null`；已发布时 `null` 只有一种含义：该（供应商, 模型）第一个版本、未指定生效时刻 =「一直以来」 |
-| `effective_to` | `null` = 仍生效（或尚未发布）。`effective_from == effective_to` 是被撤销的预约，永不生效 |
+| `effective_from` | 草稿为 `null`；已发布时 `null` 只有一种含义：发布时该（供应商, 模型）没有区间非空的已发布版本、且未指定生效时刻 =「一直以来」 |
+| `effective_to` | `null` = 仍生效（或尚未发布）。`effective_from == effective_to` 是空区间（被撤销的预约，或同一秒里发布又退役），永不生效，只出现在 `RETIRED` 上 |
 | `components` | `component_code` 升序；`meter_type_code` / `unit` 是分量所属计量类型与它的单位 |
 | `created_by_email` / `approved_by_email` | 建草稿人与发布人的登录邮箱；未发布时 `approved_by_email`、`approved_at` 为 `null` |
 
@@ -1230,21 +1230,17 @@ SHA256(RAW_REQUEST_BODY)
 换算成 UTC 后必须是整秒（`.000` 可以，`.5` 是 422）。不带或 `null` = 不指定。
 
 在供应商行排他锁内完成：拿到锁之后取 `t` = 服务端当前时间**向上**取整到下一个整秒（恰好整秒时取下一秒），所以
-`t` 严格晚于此刻。设该（供应商, 模型）已发布（`PUBLISHED` / `RETIRED`）版本中 `effective_from` 最晚的一个为末尾
-版本 L（被撤销的预约留下的空区间也算）：
+`t` 严格晚于此刻。设该（供应商, 模型）**区间非空**的已发布（`PUBLISHED` / `RETIRED`）版本中 `effective_from`
+最晚的一个为末尾版本 L（空区间不参与时间线）：
 
 | 情形 | 本版本的 `effective_from` | 对 L 做什么 |
 | --- | --- | --- |
-| 没有 L，不指定 | `null`（一直以来：此前该模型的事件一律无价、从未扣过钱） | — |
+| 没有 L，不指定 | `null`（一直以来：此前该模型的事件一律无价、从未扣过钱；撤销了唯一的预约之后也是这样） | — |
 | 没有 L，指定 F | F | — |
-| L 未截断，不指定 | `t` | L 截断于 `t` |
+| L 未截断且已开始（起点为 `null` 或早于 `t`），不指定 | `t` | L 截断于 `t` |
+| L 未截断且尚未开始（起点不早于 `t`：预约的，或同一秒里刚发布的），不指定 | 409 `EFFECTIVE_FROM_CONFLICT`，什么都不写：先撤销预约、指定晚于它起点的时刻，或下一秒再发 | — |
 | L 未截断，指定 F | F（必须晚于 L 的起点，否则 409 `EFFECTIVE_FROM_CONFLICT`） | L 截断于 F |
 | L 已截断或已退役，尽头 E | `max(E, F 或 t)`；F 早于 E 是 409 | —（退役留下的空档不回填） |
-
-⚠️ **设计 v3 没有合法结果的一格**：「L 未截断，不指定」而 L 的起点不早于 `t`（L 是尚未开始的预约，或同一秒里
-刚发布的版本），截断会让 L 的区间倒置或变空。实现不自行改成别的规则，返回 500 `INTERNAL_ERROR`、什么都不写；
-这时请指定晚于 L 起点的 `effective_from`，或等下一秒再发布。已报回设计闸门（见 [TODO.md](TODO.md) 的
-AIH-TASK-026 记录段）。
 
 - 指定的 F 早于 `t`：422 `EFFECTIVE_FROM_IN_PAST`。F 等于 `t` 可以。
 - 完整性：至少一个分量；**出现的计量类型，它的全部分量都必须出现**（例如出现 `LLM_TOKEN` 就必须有输入、输出、
@@ -1263,14 +1259,9 @@ AIH-TASK-026 记录段）。
 | 被退役的版本 | 做什么 |
 | --- | --- |
 | 未截断、已开始生效（起点为 `null` 或 ≤ `t`） | `effective_to = t`、`RETIRED`：`t` 起发生的事件无价（计费侧 `PRICING_ERROR`），`t` 之前照旧。起点恰好是 `t`（同一秒里发布又退役）时得到空区间 `[t, t)`，前一个版本不恢复 |
-| 未截断、尚未开始（预约的，起点 > `t`） | `effective_to = effective_from`（空区间，永不生效）、`RETIRED`；前一个版本若正是被它截断的，恢复为未截断（撤销预约）—— ⚠️ 见下 |
+| 未截断、尚未开始（预约的，起点 > `t`） | `effective_to = effective_from`（空区间，永不生效）、`RETIRED`；前一个版本若仍是 `PUBLISHED` 且正是被它截断的（终点等于它的起点），恢复为未截断（撤销预约）；以退役结束于那一刻的不恢复（退役不回填） |
 | 已被后继截断的历史版本、草稿 | 409 `PRICE_VERSION_NOT_RETIRABLE` |
 | 已退役 / 已丢弃 | 409 `PRICE_VERSION_FINAL` |
-
-⚠️ **设计 v3 的缺口**：设计的「事务内复查」按 `effective_from` 排序、空区间也参与，恢复为未截断的前一个版本排在
-被撤销的空区间之前，复查不通过。所以**撤销一个截断了前一个版本的预约**目前总是 500 `INTERNAL_ERROR`、整体回滚、
-什么都不变；撤销前面没有版本的预约照常成功。实现不自行改复查规则，已报回设计闸门（见 [TODO.md](TODO.md) 的
-AIH-TASK-026 记录段）。
 
 同一事务写版本、（需要时）被恢复的前一个版本、复查与一条 `PROVIDER_PRICE_RETIRE`。退役的版本在它自己的区间里照样
 取得到（已经发生的用量照样算钱）。要纠正历史价格走 Phase 8 的 reprocess，不在这里。

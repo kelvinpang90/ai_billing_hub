@@ -1,6 +1,6 @@
 """provider price versions and components, with their immutability triggers
 
-照设计闸门 #177 v3（docs/design/AIH-TASK-026-provider-prices.md）§2「数据库」与 §8。
+照设计闸门 #177 v4（docs/design/AIH-TASK-026-provider-prices.md）§2「数据库」与 §8。
 
 步骤
 ----
@@ -14,9 +14,10 @@
    `(provider_id, model_id, open_slot)`；五条 CHECK
 2. `create_table provider_price_components`：外键 → 版本、→ `usage_meter_components`，都是
    RESTRICT；`(provider_price_version_id, usage_meter_component_id)` 唯一；两条 CHECK
-3. 6 个触发器：版本的 BEFORE INSERT（只能以草稿插入）/ BEFORE UPDATE（丢弃的不可改、发布后
-   只许截断与退役、发布跃迁上的分量完整性、锁供应商行后检查区间不重叠）/ BEFORE DELETE（一律
-   拒绝）；分量的 BEFORE INSERT / UPDATE / DELETE（所属版本不是草稿就拒绝）
+3. 6 个触发器：版本的 BEFORE INSERT（只能以草稿插入）/ BEFORE UPDATE（丢弃的不可改、草稿
+   只能改成草稿 / 已发布 / 已丢弃、发布后只许截断与退役、发布跃迁上的分量完整性、锁供应商行
+   后检查区间不重叠）/ BEFORE DELETE（一律拒绝）；分量的 BEFORE INSERT / UPDATE / DELETE
+   （所属版本不是草稿就拒绝）
 
 §132 第 13 条分析
 -----------------
@@ -127,8 +128,9 @@ BEGIN
     END IF;
 END
 """,
-    # 四道检查，按顺序：
+    # 五道检查，按顺序：
     # ① 丢弃的草稿不可改；
+    # ①′ 草稿只能改成草稿、已发布或已丢弃：不许 DRAFT → RETIRED 绕过 ③ 的完整性检查（v4）；
     # ② 发布过的行只许改 effective_to、PUBLISHED → RETIRED 与 updated_at（INV-6）；
     # ③ 「草稿 → 已发布」跃迁上：至少一个分量，出现的计量类型的全部分量都在（§15.1）；
     # ④ 发布过的行区间或状态有变化时：先锁供应商行（与服务层发布同一把锁），再查同一
@@ -142,6 +144,10 @@ BEGIN
     IF OLD.status = 'DISCARDED' THEN
         SIGNAL SQLSTATE '45000'
             SET MESSAGE_TEXT = 'a discarded provider price version is final';
+    END IF;
+    IF OLD.status = 'DRAFT' AND NEW.status NOT IN ('DRAFT', 'PUBLISHED', 'DISCARDED') THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'a draft provider price version is published or discarded';
     END IF;
     IF OLD.status IN ('PUBLISHED', 'RETIRED') THEN
         IF NOT (NEW.id <=> OLD.id)

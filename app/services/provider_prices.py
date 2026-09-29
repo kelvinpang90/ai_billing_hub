@@ -1,19 +1,21 @@
-"""Provider price versions: drafts, publishing and retiring (design gate #177 v3, AIH-TASK-026).
+"""Provider price versions: drafts, publishing and retiring (design gate #177 v4, AIH-TASK-026).
 
 ⚠️ **每个写操作一个 `session_scope()`**（INV-13）：版本、分量、被截断或恢复的前一个版本、
 复查与审计同一事务，要么都在、要么都不在。repository 只 flush。不写 outbox（设计 §2
 「外部系统与异步边界」）。
 
-⚠️ **发布与退役先 `SELECT … FOR UPDATE` 锁供应商行**（与 025 改映射同一把锁），这把锁是
-事务的第一条语句（版本属于哪个供应商在另一个短事务里查），之后的读全是加锁读、校验与写入
-都在锁内 —— 不读 REPEATABLE READ 在锁前建立的快照；边界时刻 `t` 在**拿到锁之后**才取
-当前时间，向上取整到下一个整秒（`boundary_after`）。计费侧在同一行上持共享锁、只处理 `occurred_at ≤` 持锁后当前时间的事件，
-所以一个事件一旦取到某个版本，以后永远取到同一个版本（设计 §2「为什么与计费不会交错」）。
-建草稿、改草稿、丢弃不锁供应商行（草稿不参与计费），只锁版本行。
+⚠️ **锁在前**（设计 §2「锁在前」）：发布与退役先 `SELECT … FOR UPDATE` 锁供应商行（与
+025 改映射同一把锁），这把锁是事务的第一条语句（版本属于哪个供应商在另一个短事务里查），
+之后的读全是加锁读、校验与写入都在锁内 —— 不读 REPEATABLE READ 在锁前建立的快照。边界
+时刻 `t` 在**拿到锁之后**才取当前时间，向上取整到下一个整秒（`boundary_after`）。计费侧在
+同一行上持共享锁、只处理 `occurred_at ≤` 持锁后当前时间的事件，所以一个事件一旦取到某个
+版本，以后永远取到同一个版本（设计 §2「为什么与计费不会交错」）。建草稿、改草稿、丢弃不锁
+供应商行（草稿不参与计费），只锁版本行。
 
-⚠️ **只在末尾追加**：新版本的 `effective_from` 永远 ≥ `t`（该（供应商, 模型）第一个版本未指定
-时刻时的「一直以来」除外）；退役留下的空档不回填。每次发布、退役写完后，在同一事务里加锁
-重读该（供应商, 模型）的全部已发布版本复查区间，不满足就抛错、整体回滚。
+⚠️ **只在末尾追加**：新版本的 `effective_from` 永远 ≥ `t`（该（供应商, 模型）没有区间非空的
+已发布版本、且未指定时刻时的「一直以来」除外）；退役留下的空档不回填。空区间 `[F, F)` 只在
+`RETIRED` 行上、不参与时间线。每次发布、退役写完后，在同一事务里加锁重读该（供应商, 模型）
+的全部已发布版本复查区间，不满足就抛错、整体回滚。
 
 ⚠️ 审计的前后状态里，供应商、模型、分量一律用 `code`，版本用 `public_id`，人用邮箱；不用
 内部 id（设计 §2「审计」）。这一层不写日志：应用日志不打印分量明细（设计 §6）。
@@ -324,19 +326,28 @@ def _new_components(
 # --- 区间 -------------------------------------------------------------------------
 
 
+def is_empty_period(row: ProviderPriceVersion) -> bool:
+    """`[F, F)`: never matches any moment and takes no part in the timeline (设计 §2 v4)."""
+    return row.effective_from is not None and row.effective_from == row.effective_to
+
+
+def _timeline(rows: Sequence[ProviderPriceVersion]) -> list[ProviderPriceVersion]:
+    """The versions with a non-empty period, earliest start first (a `NULL` start is earliest)."""
+    return sorted((row for row in rows if not is_empty_period(row)), key=prices.version_order)
+
+
 def verify_periods(rows: Sequence[ProviderPriceVersion]) -> None:
     """Raise `PricePeriodsBroken` unless the published versions chain in time.
 
-    设计 §2「事务内复查」逐字：按 `effective_from` 排序读取全部 `PUBLISHED` / `RETIRED` 版本，
-    只有第一个的 `effective_from` 可为空；相邻两个，前一个的 `effective_to` 为空时它必须是
-    最后一个，非空时 ≤ 后一个的 `effective_from`（等号 = 首尾相接，小于 = 退役留下的空档）。
-
-    ⚠️ 设计 v3 的缺口（未擅改，见 docs/TODO.md 的 AIH-TASK-026 记录段）：空区间 `[F, F)`
-    也参与排序。撤销一个截断了前一个版本 P 的预约后，恢复为未截断的 P 排在 `[F, F)` 之前，
-    这条复查因此不通过、整个撤销回滚（500）。
+    设计 §2「事务内复查」（v4）：① 空区间的行都是 `RETIRED`；② 其余（区间非空的）按
+    `effective_from` 排序，只有第一个的 `effective_from` 可为空；相邻两个，前一个的
+    `effective_to` 为空时它必须是最后一个，非空时 ≤ 后一个的 `effective_from`（等号 = 首尾
+    相接，小于 = 退役留下的空档）。区间自身的合法性归数据库的 CHECK。
     """
-    ordered = sorted(rows, key=prices.version_order)
-    for earlier, later in pairwise(ordered):
+    for row in rows:
+        if is_empty_period(row) and _status(row) is not PriceVersionStatus.RETIRED:
+            raise PricePeriodsBroken("only a retired version may have an empty period")
+    for earlier, later in pairwise(_timeline(rows)):
         if later.effective_from is None:
             raise PricePeriodsBroken("only the first version may start at the beginning")
         if earlier.effective_to is None:
@@ -355,39 +366,24 @@ def _placement(
 ) -> tuple[dt.datetime | None, bool]:
     """Where a new version starts, and whether the tail must be truncated there (设计 §2「发布」).
 
-    `tail` 是末尾版本 L：已发布（`PUBLISHED` / `RETIRED`）版本中 `effective_from` 最晚的一个
-    （设计原文，空区间也算）。
+    `tail` 是末尾版本 L：区间非空的已发布（`PUBLISHED` / `RETIRED`）版本中 `effective_from`
+    最晚的一个。
     """
     if tail is None:
-        # 第一个版本：未指定 = 一直以来（此前的事件全是 PRICING_ERROR，只会把无价变有价）。
+        # 没有 L：此前的事件全是 PRICING_ERROR，未指定 = 一直以来，只会把无价变有价。
         return requested, False
     if tail.effective_to is None:
-        if requested is None:
-            # 设计表格：「有 L，请求未给：`t`；若 L 未截断：`effective_to = t`」。
-            return t, True
-        # 「有 L，请求给了 F：F 必须 ≥ `t` 且 > L 的 `effective_from`」。
-        if tail.effective_from is not None and requested <= tail.effective_from:
+        # 「F 必须 > L 的起点」；不指定时刻而 L 尚未开始（起点 ≥ `t`）同样冲突（v4）：
+        # 截断会得到倒置或空的已发布区间，也不自动推后管理员没有给的生效时刻。
+        start = t if requested is None else requested
+        if tail.effective_from is not None and start <= tail.effective_from:
             raise EffectiveFromConflict
-        return requested, True
-    # L 已被截断或已退役，尽头 E：从 max(E, 所请求或 t) 起，空档保持无价（不回填）；F < E 冲突。
+        return start, True
+    # L 有尽头 E：从 max(E, 所请求或 t) 起，空档保持无价（不回填）；F < E 冲突。
     end = tail.effective_to
     if requested is not None and requested < end:
         raise EffectiveFromConflict
     return max(end, requested if requested is not None else t), False
-
-
-def _require_truncatable(tail: ProviderPriceVersion, at: dt.datetime) -> None:
-    """Refuse (500, rolled back) a truncation that would not leave L a period.
-
-    ⚠️ 设计 v3 的缺口（未擅改，见 docs/TODO.md 的 AIH-TASK-026 记录段）：L 是尚未开始的
-    预约（起点晚于 `t`），或 L 的起点就是 `t`（同一秒里第二次不指定时刻的发布）时，设计表格
-    「有 L，请求未给」要求把 L 截断于 `t`，得到倒置或空的已发布区间 —— CHECK 与复查都不允许，
-    设计也没有给这一格别的结果。这里在写入前按设计 §5「复查不通过」处理：500、什么都不写。
-    """
-    if tail.effective_from is not None and at <= tail.effective_from:
-        raise PricePeriodsBroken(
-            "design v3 truncates the latest version at t, before or at its own start"
-        )
 
 
 # --- 草稿 -------------------------------------------------------------------------
@@ -412,6 +408,20 @@ def _provider_of(session_factory: sessionmaker[Session], price_version_id: str) 
     """
     with session_factory() as session:
         return _require_version(session, price_version_id).provider_id
+
+
+def _locked_version(
+    session: Session, price_version_id: str, provider_id: int
+) -> ProviderPriceVersion:
+    """The version row `FOR UPDATE`, under the lock of the provider `_provider_of` found.
+
+    版本的 `provider_id` 建后不变；锁后读到的不是所锁的供应商，就是实现错误（设计 §2「锁在
+    前」第 3 条）：500，回滚。
+    """
+    row = _require_version(session, price_version_id, for_update=True)
+    if row.provider_id != provider_id:
+        raise RuntimeError("the provider price version is not on the locked provider")
+    return row
 
 
 def _require_draft(row: ProviderPriceVersion) -> None:
@@ -598,11 +608,8 @@ def publish(
     `effective_from` 是不带时区的 UTC 整秒，或 `None`。已发布：200，什么都不写（幂等）。
     已退役 / 已丢弃：409 `PRICE_VERSION_FINAL`。目录已停用：409 `CATALOG_ITEM_RETIRED`。
     不完整：409 `PRICE_VERSION_INCOMPLETE`。请求的时刻早于 `t`：422 `EFFECTIVE_FROM_IN_PAST`；
-    不晚于末尾版本的起点、或早于它的尽头：409 `EFFECTIVE_FROM_CONFLICT`。都不写。
-
-    ⚠️ 设计 v3 的缺口（未擅改）：不指定时刻、而末尾版本未截断且起点不早于 `t`（尚未开始的
-    预约，或同一秒里刚发布的版本）时，设计要求的截断没有合法结果：`PricePeriodsBroken`
-    （500），什么都不写。见 `_require_truncatable`。
+    不晚于末尾版本的起点、或早于它的尽头，以及不指定时刻而末尾版本尚未开始（起点 ≥ `t`）：
+    409 `EFFECTIVE_FROM_CONFLICT`。都不写。
     """
     provider_id = _provider_of(session_factory, price_version_id)
     with session_scope(session_factory) as session:
@@ -611,7 +618,7 @@ def publish(
         # ⚠️ 拿到锁之后才取时间：`t` 必须晚于任何先于它持锁的计费（设计 §2）。
         now = clock()
         # 与改草稿（同样 `FOR UPDATE` 版本行）串行：它先提交，这里读到的就是它写的分量。
-        row = _require_version(session, price_version_id, for_update=True)
+        row = _locked_version(session, price_version_id, provider_id)
         status = _status(row)
         if status is PriceVersionStatus.PUBLISHED:
             return _view(session, row, lock=True)
@@ -627,11 +634,9 @@ def publish(
         if effective_from is not None and effective_from < t:
             raise EffectiveFromInPast
 
-        periods = prices.period_versions(session, row.provider_id, row.model_id)
-        tail = periods[-1] if periods else None
+        timeline = _timeline(prices.period_versions(session, row.provider_id, row.model_id))
+        tail = timeline[-1] if timeline else None
         start, cut = _placement(tail, requested=effective_from, t=t)
-        if cut and tail is not None and start is not None:
-            _require_truncatable(tail, start)
         stamp = _seconds(now)
         before: dict[str, object] = {"status": PriceVersionStatus.DRAFT.value}
         after: dict[str, object] = {
@@ -680,11 +685,9 @@ def retire(
     - 已被后继截断的历史版本、草稿：409 `PRICE_VERSION_NOT_RETIRABLE`；
     - 已退役 / 已丢弃：409 `PRICE_VERSION_FINAL`。
 
-    恢复前一个版本只影响 `occurred_at ≥ 本版本起点 > t` 的时刻：它们都还没有被计费。
-
-    ⚠️ 设计 v3 的缺口（未擅改）：恢复了前一个版本的撤销过不了设计字面的「事务内复查」
-    （见 `verify_periods`），整体回滚、500；起点恰好等于 `t` 时按设计字面归入「已开始生效」，
-    得到空区间 `[t, t)`，前一个版本不恢复。见 docs/TODO.md 的 AIH-TASK-026 记录段。
+    恢复前一个版本只影响 `occurred_at ≥ 本版本起点 > t` 的时刻：它们都还没有被计费。起点
+    恰好等于 `t`（同一秒里发布又退役）归入「已开始生效」：空区间 `[t, t)`，前一个版本不恢复、
+    `t` 起无价（设计 §2「退役」v4）。
     """
     provider_id = _provider_of(session_factory, price_version_id)
     with session_scope(session_factory) as session:
@@ -692,7 +695,7 @@ def retire(
         prices.lock_provider(session, provider_id)
         # ⚠️ 拿到锁之后才取时间（同 `publish`）。
         now = clock()
-        row = _require_version(session, price_version_id, for_update=True)
+        row = _locked_version(session, price_version_id, provider_id)
         status = _status(row)
         if status in _FINAL_STATUSES:
             raise PriceVersionFinal
@@ -700,7 +703,7 @@ def retire(
             raise PriceVersionNotRetirable
         t = boundary_after(now)
         stamp = _seconds(now)
-        periods = prices.period_versions(session, row.provider_id, row.model_id)
+        timeline = _timeline(prices.period_versions(session, row.provider_id, row.model_id))
         start = row.effective_from
         before: dict[str, object] = {
             "status": PriceVersionStatus.PUBLISHED.value,
@@ -717,12 +720,17 @@ def retire(
         else:
             end = start
             key = prices.version_order(row)
-            earlier = [item for item in periods if prices.version_order(item) < key]
+            earlier = [item for item in timeline if prices.version_order(item) < key]
             previous = earlier[-1] if earlier else None
             # ⚠️ 写入顺序（设计 §2）：先把被撤销的一行改成空区间，再恢复前一个。
             prices.mark_retired(session, row, effective_to=end, now=stamp)
-            # 设计：前一个版本 P 的 `effective_to` 等于本版本的起点（被本版本截断的）就恢复。
-            if previous is not None and previous.effective_to == start:
+            # 设计 §2「恢复 P 的条件」：P 仍是 PUBLISHED、终点等于本版本的起点（被本版本截断的）
+            # 才恢复；P 以退役结束于那一刻的不恢复（退役不回填）。
+            if (
+                previous is not None
+                and _status(previous) is PriceVersionStatus.PUBLISHED
+                and previous.effective_to == start
+            ):
                 prices.restore_open(session, previous, now=stamp)
                 restored = previous.public_id
                 before["restored_version"] = {"id": restored, "effective_to": _text(start)}
@@ -817,6 +825,7 @@ __all__ = [
     "create_draft",
     "discard_draft",
     "get_price_version",
+    "is_empty_period",
     "list_price_versions",
     "missing_components",
     "publish",
