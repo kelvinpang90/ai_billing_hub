@@ -26,6 +26,17 @@
 1. `AIH-TASK-025` Phase 2 Provider、Model 与 Usage Meter 目录
 2. `AIH-TASK-026` Phase 2 供应商价格版本与泛化价格分量
 3. `AIH-TASK-027` Phase 2 定价规则 MARKUP 与 FIXED_RATE
+4. `AIH-TASK-028` Phase 2 FX 汇率版本、BNM 拉取、审批与告警接口
+5. `AIH-TASK-029` Phase 2 用量摄取端点
+6. `AIH-TASK-030` Phase 2 批量用量摄取端点
+7. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+8. `AIH-TASK-032` Phase 2 异步计费 worker
+9. `AIH-TASK-033` Phase 2 最热租户压测脚本
+10. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+11. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+12. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+13. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+14. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -44,15 +55,6 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
-- 待登记：Phase 2 T-C FX 汇率版本、BNM 拉取、审批与告警计数接口（需设计闸门）
-- 待登记：Phase 2 T-E 用量摄取端点：签名、防重放、持久化 202、全局幂等与冲突（需设计闸门）
-- 待登记：Phase 2 T-F 批量用量摄取端点（需设计闸门）
-- 待登记：Phase 2 T-G 计价引擎与管理端试算预览（需设计闸门）
-- 待登记：Phase 2 T-H 异步计费 worker：扣费、负余额、停机与恢复扫描（需设计闸门）
-- 待登记：Phase 2 T-I 最热租户压测与 §119 基线（脚本）
-- 待登记：Phase 2 T-J 管理端用量事件查询接口
-- 待登记：Phase 2 T-K 管理端前端：供应商、模型、价格与汇率
-- 待登记：Phase 2 T-L 管理端前端：定价规则、试算与用量事件
 - 待登记：Phase 3 出站服务状态 webhook 投递与重试（需设计闸门，依赖 webhook 密钥表）
 - 待登记：Phase 3 服务状态查询接口，供集成方周期对账（需设计闸门）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
@@ -2079,12 +2081,17 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 > | T-A | 目录 | #163 `APPROVED: design v4` | `AIH-TASK-025` |
 > | T-B | 供应商价格版本 | #177 `APPROVED: design v3` | `AIH-TASK-026` |
 > | T-D | 定价规则 | #178 `APPROVED: design v3` | `AIH-TASK-027` |
-> | T-C | FX 汇率、BNM 拉取、告警接口 | 未开（草稿待 Kelvin 答两项口径） | 待登记 |
-> | T-E | 用量摄取端点 | #176 `APPROVED: design v8` | 待登记（依赖 T-C 的告警接口） |
-> | T-F | 批量摄取 | #180 `APPROVED: design v3` | 待登记（依赖 T-E） |
-> | T-G | 计价引擎与试算 | #179 `APPROVED: design v1` | 待登记（依赖 T-C 的汇率函数） |
-> | T-H | 异步计费 worker | #181 `APPROVED: design v2` | 待登记（依赖 T-C、T-E、T-G） |
-> | T-I / T-J / T-K / T-L | 压测、用量查询、两个前端 | 不走闸门 | 待登记（随依赖） |
+> | T-C | FX 汇率、BNM 拉取、告警接口 | #183 `APPROVED: design v1`（Kelvin 2026-09-29：从发布时刻起生效；过期阈值 5 个日历日） | `AIH-TASK-028` |
+> | T-E | 用量摄取端点 | #176 `APPROVED: design v8` | `AIH-TASK-029` |
+> | T-F | 批量摄取 | #180 `APPROVED: design v3` | `AIH-TASK-030` |
+> | T-G | 计价引擎与试算 | #179 `APPROVED: design v1` | `AIH-TASK-031` |
+> | T-H | 异步计费 worker | #181 `APPROVED: design v2` | `AIH-TASK-032` |
+> | T-I | 最热租户压测脚本（ADR-0011） | 不走闸门 | `AIH-TASK-033` |
+> | T-J | 管理端用量查询接口 | 不走闸门（只读） | `AIH-TASK-034` |
+> | T-K | 管理端前端：目录；价格与汇率 | 不走闸门 | 拆成 `AIH-TASK-035` / `AIH-TASK-036` |
+> | T-L | 管理端前端：规则与试算；用量事件 | 不走闸门 | 拆成 `AIH-TASK-037` / `AIH-TASK-038` |
+>
+> 计划里的 T-K、T-L 各拆成两个前端任务（2026-09-29）：两者各覆盖三四组页面，单个 Worker run 的改动面会超过 20 个文件（015 的经验：十九个路径已经吃力）。拆分不改变范围与验收，只改变交付粒度；Phase 2 因此是 14 个编号任务。**Phase 2 全部 14 个任务已登记。**
 >
 > 审查中的教训（写给后面的闸门与实现）：① 凡是「只在末尾追加的版本序列」都要数据库层的三道保护 —— 只能以草稿插入、发布跃迁上校验完整性、锁住同一把锁后检查区间不重叠；只靠服务层会被 Codex 判阻断（T-B、T-C、T-D 都补了）。② 复合外键与 CHECK 只在组成列非空时生效，必需列要逐列写 NOT NULL（T-E）。③ 跑 `codex-review.ps1` 期间**不要改工作区**：脚本检测到改动会作废判定、不发布（本次踩过一次）。
 

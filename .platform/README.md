@@ -44,7 +44,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 ```
 
 `[task_id]` 只能是 `tasks.yaml` 里逐个列出的 id，目前是 `AIH-TASK-001`、
-`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013`、`AIH-TASK-014`、`AIH-TASK-015`、`AIH-TASK-016`、`AIH-TASK-017`、`AIH-TASK-018`、`AIH-TASK-019`、`AIH-TASK-020`、`AIH-TASK-021`、`AIH-TASK-022`、`AIH-TASK-023`、`AIH-TASK-024`、`AIH-TASK-025`、`AIH-TASK-026` 与 `AIH-TASK-027`（用途见下面「Worker 的启用状态」）。
+`AIH-TASK-002`、`AIH-TASK-003`、`AIH-TASK-004`、`AIH-TASK-005`、`AIH-TASK-006`、`AIH-TASK-007`、`AIH-TASK-008`、`AIH-TASK-011`、`AIH-TASK-012`、`AIH-TASK-013`、`AIH-TASK-014`、`AIH-TASK-015`、`AIH-TASK-016`、`AIH-TASK-017`、`AIH-TASK-018`、`AIH-TASK-019`、`AIH-TASK-020`、`AIH-TASK-021`、`AIH-TASK-022` 到 `AIH-TASK-038`（用途见下面「Worker 的启用状态」）。
 `AIH-TASK-009` / `AIH-TASK-010` 不在其中：它们是控制面给「采纳提议」的 run 分配的编号，不写进 `tasks.yaml`。
 
 除此之外一律 **fail closed** ——
@@ -69,7 +69,7 @@ Claude Code 实现 → Codex 只读审查 → Kelvin 合并。
 | 合并 | Kelvin | 唯一的 merge owner，也是唯一的批准角色 |
 
 Worker 本身不进入这三个角色中的任何一个，它只是执行环境。跑什么取决于任务：
-`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-027` 下由 Worker
+`AIH-TASK-001` 下只跑 `commands.yaml` 里的检查；`AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-038` 下由 Worker
 中运行的 Claude Code 担任实现角色（改 `allowed_change_paths` 列出的文件、开 Draft PR），审查仍是
 Codex，合并仍是 Kelvin。
 
@@ -78,7 +78,7 @@ Codex，合并仍是 Kelvin。
 ## Worker 的启用状态
 
 `project.yaml` 的 `worker_enabled` 已置 `true`，但这只是**业务契约侧**的同意：
-本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-027`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
+本仓库登记了 `AIH-TASK-002` 到 `AIH-TASK-008`、`AIH-TASK-011` 到 `AIH-TASK-038`，能否调度以 `tasks.yaml` 里的 `status` 为准（见下）。它本身不会让任何东西执行。每次 run
 仍要求下面几样成立：
 
 - 控制面 registry 登记本项目
@@ -119,6 +119,17 @@ Codex，合并仍是 Kelvin。
 | `AIH-TASK-025` | Phase 2 第一刀（[PHASE-2-plan.md](../docs/design/PHASE-2-plan.md) 的 T-A）：计量类型与分量（按上报形态约束取数字段，管理员可新建）、供应商、模型、按 `occurred_at` 分段的模型别名，以及在调用方事务里加共享锁的只读解析函数 `resolve_model`。**碰定价的根，已过设计闸门** #163（`APPROVED: design v4`）；设计在 [docs/design/AIH-TASK-025-ai-catalog.md](../docs/design/AIH-TASK-025-ai-catalog.md)。依赖 022 | 十九项；合并即执行迁移 0012。纯后端，不带 `acceptance` 块。PR 正文由实现方改成 `#163` 再审 |
 | `AIH-TASK-026` | Phase 2 的 T-B：供应商成本价的版本（草稿 → 发布 → 退役，只在末尾追加、可预约、不许回溯），发布与计费解析用供应商行锁串行，触发器保证不可变、分量完整与区间不重叠；只读查询 `resolve_provider_price`。**碰定价，已过设计闸门** #177（`APPROVED: design v3`）；设计在 [docs/design/AIH-TASK-026-provider-prices.md](../docs/design/AIH-TASK-026-provider-prices.md)。依赖 025 | 十八项；合并即执行迁移 0013。纯后端，不带 `acceptance` 块。PR 正文由实现方改成 `#177` 再审 |
 | `AIH-TASK-027` | Phase 2 的 T-D：客户定价规则（五级范围、MARKUP / FIXED_RATE、含税），单行锁表让发布与计费串行，只有全局默认的第一条可回溯，触发器保证不可变、完整与区间不重叠；只读解析 `resolve_pricing_rule`（命中即停）。**碰定价，已过设计闸门** #178（`APPROVED: design v3`）；设计在 [docs/design/AIH-TASK-027-pricing-rules.md](../docs/design/AIH-TASK-027-pricing-rules.md)。依赖 026 | 十九项；合并即执行迁移 0014。纯后端，不带 `acceptance` 块。PR 正文由实现方改成 `#178` 再审 |
+| `AIH-TASK-028` | Phase 2 的 T-C：汇率版本（BNM 中间价每日拉成草稿、手工录入、从发布时刻起生效）、单行锁串行、触发器；带令牌的内部告警接口 `/internal/alerts` 与 `fx_fetch` / `fx_stale` 两个维度，`monitor.sh` 按行推 Healthchecks。**碰汇率，已过设计闸门** #183（`APPROVED: design v1`）；设计在 [docs/design/AIH-TASK-028-fx-rates.md](../docs/design/AIH-TASK-028-fx-rates.md)。依赖 027 | 三十八项（含 nginx、monitor.sh、compose）；合并即执行迁移 0015；合并后有运维步骤（令牌文件、Healthchecks、验证 BNM 可达）。PR 正文改成 `#183` 再审 |
+| `AIH-TASK-029` | Phase 2 的 T-E：`POST /api/v1/integration/usage-events`（验签、nonce、持久化 202、全局幂等与冲突、固定的 `retryable`）；nginx 集成前缀的 JSON 413；冲突告警维度。**碰摄取与幂等，已过设计闸门** #176（`APPROVED: design v8`）；设计在 [docs/design/AIH-TASK-029-usage-ingest.md](../docs/design/AIH-TASK-029-usage-ingest.md)。依赖 028 | 二十七项；合并即执行迁移 0016。PR 正文改成 `#176` 再审 |
+| `AIH-TASK-030` | Phase 2 的 T-F：批量摄取端点，逐条复用 029 的单条逻辑。**已过设计闸门** #180（`APPROVED: design v3`）；设计在 [docs/design/AIH-TASK-030-usage-ingest-batch.md](../docs/design/AIH-TASK-030-usage-ingest-batch.md)。依赖 029 | 十项；无迁移。PR 正文改成 `#180` 再审 |
+| `AIH-TASK-031` | Phase 2 的 T-G：计价纯函数、解析与取锁、只读试算接口。**碰定价，已过设计闸门** #179（`APPROVED: design v1`）；设计在 [docs/design/AIH-TASK-031-pricing-engine.md](../docs/design/AIH-TASK-031-pricing-engine.md)。依赖 028 | 十项；无迁移。PR 正文改成 `#179` 再审 |
+| `AIH-TASK-032` | Phase 2 的 T-H：计费 worker（认领为 PROCESSING、防护令牌、扣费、卡住回收）、重新入队、七个告警维度。**碰钱包与状态机，已过设计闸门** #181（`APPROVED: design v2`）；设计在 [docs/design/AIH-TASK-032-usage-billing.md](../docs/design/AIH-TASK-032-usage-billing.md)。依赖 030、031 | 二十五项；合并即执行迁移 0017。PR 正文改成 `#181` 再审 |
+| `AIH-TASK-033` | Phase 2 的 T-I：最热租户压测脚本（ADR-0011 的 S1–S4 与方案 C 判据），只对 `billing_perf` 库运行。**不走设计闸门**：测量脚本。依赖 032 | 四项；实测是合并后的运维步骤 |
+| `AIH-TASK-034` | Phase 2 的 T-J：管理端用量事件查询（列表与详情）。**不走设计闸门**：只读。依赖 032 | 七项 |
+| `AIH-TASK-035` | Phase 2 的 T-K 上半：管理端前端 AI 目录（计量类型、供应商、模型、别名）。带 `acceptance`（`open_catalog`、`check_meter_types`）。**不走设计闸门**：纯前端。依赖 028 | 十六项（含验收脚本） |
+| `AIH-TASK-036` | Phase 2 的 T-K 下半：管理端前端供应商价格与汇率。带 `acceptance`（`open_provider_prices`、`open_fx_rates`）。依赖 035 | 二十项（含验收脚本） |
+| `AIH-TASK-037` | Phase 2 的 T-L 上半：管理端前端定价规则与试算。带 `acceptance`（`open_pricing_rules`、`open_pricing_preview`）。依赖 036、031 | 十七项（含验收脚本） |
+| `AIH-TASK-038` | Phase 2 的 T-L 下半：管理端前端用量事件与重新入队。带 `acceptance`（`open_usage_events`）。依赖 037、034 | 十四项（含验收脚本） |
 
 `tasks.yaml` 里每个会写仓库的任务都有 `status`：
 
@@ -136,7 +147,7 @@ close-out PR 一起做）。Worker 自己的实现 PR 做不到：它不能改 `
 `AIH-TASK-012`（#120）、`AIH-TASK-013`（#126）、`AIH-TASK-014`（#129）、`AIH-TASK-015`（#139）、`AIH-TASK-016`（#141）、`AIH-TASK-017`（#145）、`AIH-TASK-018`（#147）、`AIH-TASK-019`（#152）、`AIH-TASK-024`（#158）、`AIH-TASK-020`（#161）、`AIH-TASK-021`（#167）、`AIH-TASK-022`（#170）、`AIH-TASK-023`（#173）是 `done`；
 `AIH-TASK-002` 是 `superseded`：它的 Pilot 从未交付，要验证的端到端链已由 004 / 005 的真实 run 验证。
 2026-09-27 登记 `AIH-TASK-015` 到 `AIH-TASK-018`（管理端前端四刀）为 `ready`，按 015 → 016 → 017 → 018 排进
-[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付。2026-09-28 登记 `AIH-TASK-019`（#135）与 `AIH-TASK-020`（#136）为 `ready`，按 019 → 020 排进「当前计划」；同日按「审计日志差异清单」的拍板登记 `AIH-TASK-021` 到 `AIH-TASK-023`，排在 020 之后；019 已交付。同日按 Kelvin 的决定登记 `AIH-TASK-024`（浏览器验收试点）并排在「当前计划」第 1 条，已交付（部署后首次浏览器验收 PASS），020 回到第 1 条，也已交付，021、022、023 随后交付；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。2026-09-29 登记 `AIH-TASK-025`（#163，Phase 2 的 T-A）为 `ready`，排在「当前计划」第 1 条；同日登记 `AIH-TASK-026`（#177，T-B）与 `AIH-TASK-027`（#178，T-D），排在 025 之后。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
+[docs/TODO.md](../docs/TODO.md) planning-v1 块的「当前计划」；四个都已交付。2026-09-28 登记 `AIH-TASK-019`（#135）与 `AIH-TASK-020`（#136）为 `ready`，按 019 → 020 排进「当前计划」；同日按「审计日志差异清单」的拍板登记 `AIH-TASK-021` 到 `AIH-TASK-023`，排在 020 之后；019 已交付。同日按 Kelvin 的决定登记 `AIH-TASK-024`（浏览器验收试点）并排在「当前计划」第 1 条，已交付（部署后首次浏览器验收 PASS），020 回到第 1 条，也已交付，021、022、023 随后交付；项目余下的工作按 Phase 排进「后续计划」，要过设计闸门的在标题里注明，闸门批准后再逐个登记。2026-09-29 登记 `AIH-TASK-025`（#163，Phase 2 的 T-A）为 `ready`，排在「当前计划」第 1 条；同日登记 `AIH-TASK-026`（#177，T-B）与 `AIH-TASK-027`（#178，T-D），排在 025 之后；同日登记 Phase 2 其余的 `AIH-TASK-028` 到 `AIH-TASK-038`（028–032 过了设计闸门 #183、#176、#180、#179、#181；033 / 034 与四个前端任务不走闸门），按编号顺序排在 027 之后。每个任务合并部署后，收尾 PR 要同时把它改成 `done` 并移出「当前计划」，否则控制面按 `plan_task_delivered` 挡住整个项目。
 
 `AIH-TASK-016` 不是由 Worker 的 PR 交付的：run `b287409b` 以 `checks_failed` 结束、没有开 PR —— `frontend.test` 先挂在
 jsdom 缺 `ResizeObserver` 上，第二次自动修复在测试里补了替身，替身那行的多余类型断言又被 `frontend.lint` 拦下，修复次数已用完。
