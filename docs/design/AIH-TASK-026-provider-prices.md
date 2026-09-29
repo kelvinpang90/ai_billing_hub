@@ -1,8 +1,8 @@
-# AIH-TASK-026 设计：供应商价格版本与泛化价格分量（已批准 v3）
+# AIH-TASK-026 设计：供应商价格版本与泛化价格分量（已批准 v4）
 
-> **来源**：设计闸门 Issue #177。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**，审查者为 Codex。
+> **来源**：设计闸门 Issue #177。本文件是 `APPROVED: design v4` 那一版正文的**逐字副本**，审查者为 Codex。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #177 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #177 上被批准的 v4 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > 正文里的「T-B」即 [PHASE-2-plan.md](PHASE-2-plan.md) 的占位名；写「编号登记时分配」的实现任务，登记为 `AIH-TASK-026`。正文提到的其他占位名（T-A…T-L）对应的登记编号见 `docs/TODO.md` 的 Phase 2 一节。
 > 与 Issue 正文的唯一差别：一处链接目标由 GitHub 网页上的 `../blob/main/…` 改成仓库内的相对路径，链接文字与其余正文逐字相同。
 
@@ -23,9 +23,9 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v3`（v1、v2 都已获批准。T-D 的两轮审查先后指出「分量完整性只在服务层」「已截断区间的重叠数据库挡不住」，两个缺口本设计同样存在，v2、v3 主动补上，因此重新送审，见 §12）
+**设计版本**：`v4`（v1–v3 都已获批准。v4 修正实现时发现的 v3 两处缺陷 —— 撤销预约过不了自己的复查、预约存在时不指定时刻的发布没有合法结果 —— 并把发布 / 退役的「锁在前」写成规则、把实现里设计没写的小决定写明，因此重新送审，见 §12）
 对应需求：spec §14、§15.1、§17、§18（手工录入与审批）、§58、§66、§74.1、§80、§89、§113；`REQ-PRICE-001`、`REQ-FIN-001`、`REQ-FIN-002`、`REQ-PRIV-002`
-目标 PR：待开（批准后在 `.platform/tasks.yaml` 登记实现任务，编号登记时分配）
+目标 PR：#188（`AIH-TASK-026`；OpenClaw run `9abfe47e` 开出，v4 批准后由 Claude 手工接手）
 Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH-TASK-025-ai-catalog.md`（已批准 v4）
 
 ## 1. 目标与边界
@@ -49,8 +49,10 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 ```text
 管理端：建草稿 / 改草稿 / 丢弃 → 写版本与分量 → 审计 → commit
 管理端：发布 / 退役 →
-    SELECT … FROM ai_providers WHERE id = ? FOR UPDATE（与 025 的改映射同一把锁）
+    另一个短的只读事务：按 public_id 查版本挂在哪个供应商上（不存在 → 404），结束
+    主事务的第一条语句：SELECT … FROM ai_providers WHERE id = ? FOR UPDATE（与 025 的改映射同一把锁）
     拿到锁之后取 t（服务端当前时间向上取整到下一个整秒）
+    之后每一次读都是加锁读（见「锁在前」）
     校验 → 截断当前末尾版本 / 写本版本的区间与状态 → 同一事务复查区间首尾相接 → 审计 → commit
 
 计费（T-G / T-H 在计费事务里调用，本任务只提供）：
@@ -82,7 +84,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 - CHECK：
   - `status IN ('DRAFT','DISCARDED')` ⇒ `effective_from`、`effective_to`、`approved_by`、`approved_at` 全为空
   - `status IN ('PUBLISHED','RETIRED')` ⇒ `approved_by`、`approved_at` 非空
-  - `effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to OR (status = 'RETIRED' AND effective_from = effective_to)`（最后一项是「撤销尚未生效的预约版本」留下的空区间，见下）
+  - `effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to OR (status = 'RETIRED' AND effective_from = effective_to)`（最后一项是空区间 `[F, F)`：撤销尚未生效的预约、或退役起点恰好等于 `t` 的版本留下的，见「退役」。**空区间只能出现在 `RETIRED` 行上**，这条 CHECK 即其数据库保证）
 
 **`provider_price_components`**
 
@@ -101,7 +103,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 **不可变（触发器，照 0006 的写法与权限预检）**
 
 - `provider_price_versions` BEFORE UPDATE：
-  - `OLD.status = 'DRAFT'`：允许任意改（服务层限定可改字段）
+  - `OLD.status = 'DRAFT'`：允许改任意列（服务层限定可改字段），但 `NEW.status` 只能是 `DRAFT` / `PUBLISHED` / `DISCARDED`（v4：禁止 `DRAFT → RETIRED`。否则绕过服务直接改状态，一个不完整、甚至零分量的版本能跳过发布跃迁上的完整性检查进入 `RETIRED`，而 `RETIRED` 的版本在自己的区间里照样被取价）
   - `OLD.status = 'DISCARDED'`：拒绝任何改动
   - `OLD.status IN ('PUBLISHED','RETIRED')`：除 `effective_to`、`status`（只允许 `PUBLISHED → RETIRED`）、`updated_at` 外任何列变化都 SIGNAL
 - `provider_price_versions` BEFORE DELETE：一律拒绝。
@@ -140,32 +142,60 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 
 ### 发布：区间怎么定（与 025 的别名同一套推理）
 
-发布请求可带可选的 `effective_from`（未来时刻，§17 的例子是按日期生效的版本）。拿到供应商行锁之后取 `t`（当前时间向上取整到下一个整秒），设该（供应商, 模型）已发布（`PUBLISHED` / `RETIRED`）版本中 `effective_from` 最晚的一个为「末尾版本」 L：
+**空区间与非空区间**（v4）：区间 `[effective_from, effective_to)` 满足 `effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to` 的叫**非空区间**；`effective_from = effective_to` 的叫**空区间**，永不匹配任何时刻，只出现在 `RETIRED` 行上（CHECK 保证）。空区间的版本**不参与时间线**：不当「末尾版本」、不进「事务内复查」的排序、不参与数据库的重叠判定。
+
+发布请求可带可选的 `effective_from`（未来时刻，§17 的例子是按日期生效的版本）。拿到供应商行锁之后取 `t`（当前时间向上取整到下一个整秒），设该（供应商, 模型）**区间非空**的已发布（`PUBLISHED` / `RETIRED`）版本中 `effective_from` 最晚的一个为「末尾版本」 L（`effective_from` 为空视为最早）：
 
 | 情形 | 本版本的 `effective_from` | 对 L 做什么 |
 | --- | --- | --- |
-| 从没有已发布版本，请求未给 `effective_from` | `NULL`（一直以来） | — |
-| 从没有已发布版本，请求给了 F | F（必须 ≥ `t`） | — |
-| 有 L，请求未给 | `t` | 若 L 未截断：`effective_to = t` |
-| 有 L，请求给了 F | F（必须 ≥ `t` 且 > L 的 `effective_from`） | 若 L 未截断：`effective_to = F` |
-| 有 L，且 L 已被截断或已退役（区间有尽头 E） | `max(E, 所请求或 t)`；若请求 F < E → 409 | — |
+| 没有 L，请求未给 `effective_from` | `NULL`（一直以来） | — |
+| 没有 L，请求给了 F | F（必须 ≥ `t`） | — |
+| 有 L、L 未截断且已开始（起点为空或 < `t`），请求未给 | `t` | `effective_to = t` |
+| 有 L、L 未截断且尚未开始（起点 ≥ `t`：预约的，或同一秒里刚发布的），请求未给 | — | 409 `EFFECTIVE_FROM_CONFLICT`，什么都不写（v4） |
+| 有 L、L 未截断，请求给了 F | F（必须 ≥ `t` 且 > L 的 `effective_from`，L 起点为空时恒满足；否则 409） | `effective_to = F` |
+| 有 L、L 有尽头 E（已退役，或被一个已退役成空区间的后继截断） | `max(E, 所请求或 t)`；若请求 F < E → 409 | — |
 
-- **不许回溯**：`effective_from` 永远 ≥ `t`（第一个版本未指定时的 `NULL` 除外）。请求给的 F < `t` → 422 `EFFECTIVE_FROM_IN_PAST`。
+- **不许回溯**：`effective_from` 永远 ≥ `t`（没有 L 且未指定时的 `NULL` 除外）。请求给的 F < `t` → 422 `EFFECTIVE_FROM_IN_PAST`（先于 409 的判断）。
 - **只在末尾追加**：不能在已发布的时间线中间插入版本。
-- **第一个版本对过去生效是安全的**：在它之前，这个（供应商, 模型）的所有事件一律 `PRICING_ERROR`、从未扣过钱（T-H 契约），补上价格只会把「无价」变成「有价」。
+- **「没有 L」时对过去生效是安全的**：没有 L 意味着这个（供应商, 模型）从未有过区间非空的已发布版本 —— 要么一个都没发布过，要么发布过的都是被撤销的预约（空区间，从未匹配过任何时刻）。所以此前它的所有事件一律 `PRICING_ERROR`、从未扣过钱（T-H 契约），补上价格只会把「无价」变成「有价」。撤销了唯一的预约之后再不指定时刻发布，因此也从「一直以来」起算（v4 明确）。
+  - **与 §16、§17 及 Phase 2 计划 T-B「不许回溯发布」的关系**（v4 第一轮设计审查以此判阻断，2026-09-29 Kelvin 裁定保留本规则，理由如下）：
+    - §17「Historical cost must never change merely because current AI provider price changes」：历史成本只存在于已经取到版本的时刻。「没有 L」时，此前的事件一个版本都没取到 —— 都是 `PRICING_ERROR`、未扣费、快照里没有 `provider_price_version_id`。`NULL` 起点不改变任何已有的成本。
+    - §16「Retrying the same event must not select a newly published rule」：要防的是**已选定版本的事件**在重试时换到新版本。032 的自动重试只针对 `FAILED_RETRYABLE`（事务已回滚、快照没写），计价错误不自动重试；`PRICING_ERROR` 回到 `RECEIVED` 只经管理员「重新入队」，032 设计把它定为「修好价格后」的正规恢复路径，且只对从未产生财务效果的事件。事件一旦把某个版本写进快照，此后对（模型, `occurred_at`）永远取到同一版本（「为什么与计费不会交错」+ 只在末尾追加）；`NULL` 只在「没有 L」时出现，所以不会让任何已取到版本的时刻换版本 —— 本任务自己的不变量写的就是「除非那一刻原本无价」。
+    - 计划 T-B 那句的理由是「否则重试会选到新版本」：它针对的是从旧版本换到新版本；「没有 L」时没有旧版本。v1 起本例外就写在这里并获批准；027 设计「回溯生效只允许全局默认的第一条」也是按同一理由对照了本规则。
+    - 反过来一律从 `t` 起的代价：新模型在第一个价格发布之前的事件永远 `PRICING_ERROR`，管理员修好价格后重新入队也取不到价，只能等 Phase 8 reprocess。
+- **L 尚未开始时不自动推后**（v4）：v3 的表格对这一格写「从 `t` 起、截断 L 于 `t`」，但 L 的起点 ≥ `t`，截断得到倒置或空的**已发布**区间，CHECK 与「只在末尾追加」都不允许。v4 判 409，与「请求给了 F 时 F 必须 > L 的起点」同一条规则。不自动推后到 L 的起点之后：成本价从哪一刻生效应由管理员明确 —— 要么先撤销预约，要么指定一个晚于 L 起点的时刻。同一秒里连续两次不指定时刻的发布也落在这一格（第二次 409，下一秒重发即可；025 的别名在这里取「起点 + 1 秒」，价格不照搬）。
 - **退役后的空档不回填**（与 025 别名不同）：退役表示管理员明确宣布「从此刻起不按这个价算」，空档里的事件保持 `PRICING_ERROR`，由管理员另行决定（发布新版本，从 E 或更晚起算；或 Phase 8 reprocess）。回填会让退役失去意义。
 
 **为什么与计费不会交错**：发布在供应商行排他锁内、`t` 在拿到锁之后取；计费在同一行共享锁内、只处理 `occurred_at ≤` 持锁后当前时间的事件（025 §2「时间」的同一证明）。于是：计费先 → 事件的 `occurred_at` < `t` ≤ 本版本及被截断处的任何边界，新旧表对它给出同一个版本；发布先 → 计费读到的已是新表。**已取到某个版本的（模型, 时刻）永远取到同一个版本。**
 
-**事务内复查**：每次发布 / 退役写完后，在同一事务里按 `effective_from` 排序读取该（供应商, 模型）全部 `PUBLISHED` / `RETIRED` 版本，断言：只有第一个的 `effective_from` 可为空；相邻两个 `前.effective_to` 为空时它必须是最后一个，非空时 `≤ 后.effective_from`（等号 = 首尾相接，小于 = 退役留下的空档）；不满足就回滚（防实现错误）。
+**事务内复查**：每次发布 / 退役写完后，在同一事务里加锁读取该（供应商, 模型）全部 `PUBLISHED` / `RETIRED` 版本，断言：① 空区间的行都是 `RETIRED`；② 其余（区间非空的）按 `effective_from` 排序（为空的最早），只有第一个的 `effective_from` 可为空；相邻两个 `前.effective_to` 为空时它必须是最后一个，非空时 `≤ 后.effective_from`（等号 = 首尾相接，小于 = 退役留下的空档）。不满足就回滚（防实现错误，500）。v3 把空区间也放进排序：撤销一个截断了前一个版本 P 的预约后，恢复为未截断的 P 排在 `[F, F)` 之前，复查必然不通过、正常的撤销路径总是回滚 —— v4 让空区间不参与排序，改由 ① 单独检查。
+
+### 锁在前（v4）
+
+发布与退役的正确性建立在「读到的是拿到供应商行锁之后的数据」上。MySQL 的 REPEATABLE READ 在事务里**第一次普通读（一致性读）**时建立快照，之后的普通读都读那个快照；加锁读（`FOR UPDATE` / `FOR SHARE`）读最新提交的行。所以只要锁之前有一次普通读，锁之后的普通读就可能是等锁之前的旧数据：等锁期间提交的模型停用看不见（给已停用的模型发布价格，违反 025 契约），等锁期间提交的分量替换看不见（按旧分量集校验完整性）。发布跃迁上的触发器挡不住后者 —— 它的子查询是同一事务里的读。
+
+规则：
+
+1. 发布、退役先在**另一个短的只读事务**里按 `public_id` 查版本挂在哪个供应商上（不存在 → 404），这个事务随即结束。版本的 `provider_id` 建后不变（没有接口改它，已发布后触发器也不许改）。
+2. 主事务的**第一条语句**是 `SELECT … FROM ai_providers WHERE id = ? FOR UPDATE`。
+3. 锁之后**每一次读都是加锁读**：版本行 `FOR UPDATE`（与改草稿、丢弃对版本行的 `FOR UPDATE` 串行）；同（供应商, 模型）的已发布版本 `FOR UPDATE`；模型、版本的分量、目录分量、计量类型，以及响应用到的供应商、模型、用户 `FOR SHARE`。加锁读之后若版本行的 `provider_id` 与所锁的不一致，按实现错误处理（500，回滚）。
+4. 主事务里第一次一致性读因此只可能发生在锁与这些加锁读**之后**（例如触发器的子查询），它建立的快照不早于这些数据。
+
+建草稿、改草稿、丢弃不适用这条：它们不锁供应商行（草稿不参与计费），发布会在锁后重新加锁读草稿的全部内容。
 
 ### 退役
 
 | 被退役的版本 | 条件 | 做什么 |
 | --- | --- | --- |
 | 当前末尾、已开始生效（`effective_from` 为空或 ≤ `t`）、未截断 | — | `effective_to = t`，`RETIRED`：`t` 起发生的事件 `PRICING_ERROR` |
-| 当前末尾、尚未开始（预约的，`effective_from` > `t`） | — | `effective_to = effective_from`（空区间，永不匹配），`RETIRED`；若前一个版本 P 的 `effective_to` 等于本版本的 `effective_from`（被本版本截断的），把 P 的 `effective_to` 恢复为 `NULL` |
+| 当前末尾、尚未开始（预约的，`effective_from` > `t`） | — | `effective_to = effective_from`（空区间，永不匹配），`RETIRED`；前一个版本 P 若是被本版本截断的，把 P 的 `effective_to` 恢复为 `NULL`（条件见下） |
 | 已被后继截断的（历史版本） | — | 409 `PRICE_VERSION_NOT_RETIRABLE`：它的区间已经结束，退役没有意义；要纠正历史价格走 Phase 8 reprocess |
+| 草稿 | — | 409 `PRICE_VERSION_NOT_RETIRABLE`（草稿用丢弃，v4 明确） |
+| 已退役 / 已丢弃 | — | 409 `PRICE_VERSION_FINAL` |
+
+- **起点恰好等于 `t`**（同一秒里发布又退役，v4 明确）：归入第一行 —— `effective_to = t`，得到空区间 `[t, t)`，P 不恢复，`t` 起无价。与「晚一秒退役当前版本」的结果一致（P 同样不恢复，只是本版本多了一段非空区间）；空区间从未匹配过任何时刻，所以安全。区分「撤销预约」与「退役当前版本」的界线保持 v3 的「起点 > `t`」。
+- **恢复 P 的条件**（v4 写明）：P 是区间非空的已发布版本里起点早于本版本的最后一个；只有 P 仍是 `PUBLISHED` 且 `P.effective_to` 等于本版本的 `effective_from` 时才恢复。P 若以**退役**结束于那一刻（先退役 P、再从它的尽头预约了本版本），不恢复 —— 退役不回填。
+- **写入顺序**：先把本版本改成空区间的 `RETIRED`，再恢复 P（重叠触发器因此在每一步都看不到相交）。
 
 恢复 P 的 `effective_to` 只影响 `occurred_at ≥ 本版本 effective_from > t` 的时刻，按上面的证明，这些时刻还没有任何事件被计费，所以安全。触发器允许已发布行改 `effective_to`（见上），服务层只在这两种退役里改它。
 
@@ -183,26 +213,29 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 | `POST /api/v1/admin/provider-prices/{price_version_id}/retire` | 退役：必填 `reason` |
 | `POST /api/v1/admin/provider-prices/{price_version_id}/discard` | 丢弃草稿 |
 
-- `components[]` 里的 `component_code` 必须是 025 的计价分量；同一版本不重复。
-- 已发布再发布：200，不写（幂等）。已丢弃 / 已退役再做任何操作：409。
+- `components[]` 里的 `component_code` 必须是 025 的计价分量；同一版本不重复；**1 到 64 个**，超出 422（v4 写明：种子一共 12 个分量，64 给管理员新建的计量类型留足余量，同时给请求体一个上界）。
+- 已发布再发布：200，不写（幂等）；请求体里的 `effective_from` 被忽略（v4 写明）。已丢弃 / 已退役再做任何操作：409。
+- PATCH 没有实际变化（字段与分量逐一相同，金额按数值比较）：200，不写、不记审计（v4 写明，与 025 目录的 PATCH 一致）。
+- 列表筛选里的 `provider_id` / `model_id` 不存在，或同时给了两者而模型不属于该供应商：404 `AI_PROVIDER_NOT_FOUND` / `AI_MODEL_NOT_FOUND`（v4 写明，不是返回空列表：筛选值写错时空列表会被误读成「没有价格」）；`status` 不是四个取值之一：422。
+- 响应与审计里的「发布人」「创建人」用登录邮箱（`approved_by_email` / `created_by_email`），不返回内部用户 id（§6；与审计查询把用户 id 换成邮箱同一口径）。
 
 错误：
 
 | HTTP | `error.code` | 什么时候 |
 | --- | --- | --- |
 | 404 | `PRICE_VERSION_NOT_FOUND` / `AI_PROVIDER_NOT_FOUND` / `AI_MODEL_NOT_FOUND` / `USAGE_METER_COMPONENT_NOT_FOUND` | 不存在或模型不属于该供应商 |
-| 409 | `PRICE_VERSION_NOT_DRAFT` | 编辑 / 丢弃非草稿 |
+| 409 | `PRICE_VERSION_NOT_DRAFT` | 编辑 / 丢弃已发布的版本 |
 | 409 | `PRICE_VERSION_INCOMPLETE` | 发布时完整性不满足（列出缺的分量） |
 | 409 | `CATALOG_ITEM_RETIRED` | 供应商、模型或分量所属计量类型已停用 |
-| 409 | `PRICE_VERSION_NOT_RETIRABLE` | 退役历史版本 |
-| 409 | `PRICE_VERSION_FINAL` | 对已退役 / 已丢弃版本操作 |
-| 409 | `EFFECTIVE_FROM_CONFLICT` | 请求的生效时刻早于末尾版本的起点或尽头 |
+| 409 | `PRICE_VERSION_NOT_RETIRABLE` | 退役历史版本或草稿 |
+| 409 | `PRICE_VERSION_FINAL` | 对已退役 / 已丢弃版本做任何写操作（编辑、丢弃、发布、退役） |
+| 409 | `EFFECTIVE_FROM_CONFLICT` | 请求的生效时刻不晚于末尾版本的起点、或早于它的尽头；不指定时刻而末尾版本尚未开始（起点 ≥ `t`，v4） |
 | 422 | `EFFECTIVE_FROM_IN_PAST` | 请求的生效时刻早于 `t` |
-| 422 | `VALIDATION_ERROR` | 格式、精度、正数 |
+| 422 | `VALIDATION_ERROR` | 格式、精度、正数、分量个数 |
 
 ### 事务边界
 
-每个写接口一个 `session_scope`。发布与退役：锁供应商行 → 取 `t` → 读并校验 → 写本版本与（需要时）前一个版本 → 复查 → 审计 → 提交。建草稿、改草稿、丢弃不锁供应商行（草稿不参与计费）。
+每个写接口一个 `session_scope`。发布与退役：（另一个短的只读事务查所属供应商）→ 锁供应商行（主事务第一条语句）→ 取 `t` → 加锁读并校验 → 写本版本与（需要时）前一个版本 → 复查 → 审计 → 提交，见「锁在前」。建草稿、改草稿、丢弃不锁供应商行（草稿不参与计费），只对版本行 `FOR UPDATE`。
 
 锁顺序：只锁供应商行；计费路径的锁顺序（供应商 → 钱包 → 租户，025）不变，不形成环。
 
@@ -253,7 +286,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 | INV-3 | 否 | — | — | — |
 | INV-4 余额只经账本变动 | 否 | 不碰钱包 | — | — |
 | INV-5 历史账本不可变 | 否 | — | — | — |
-| INV-6 事件保留版本引用 | **是** | ① 已被事件引用的版本或分量被改；② 发布与计费交错，同一时刻前后取到不同版本；③ 回溯发布改变已计费时刻的价格；④ 不完整的版本被发布（绕过服务），该模型的相关事件全部 `PRICING_ERROR` | ① 触发器：发布后只许截断与退役，分量只在草稿阶段可改，禁止删除；② 供应商行锁串行、`t` 在锁后取、加锁读；③ 生效时刻 ≥ `t`，只在末尾追加，第一个版本例外（只把无价变有价）；④ 发布跃迁触发器 + 只能以草稿插入 | 触发器用例（MySQL）；「发布与计费并发」「快照读」用例；性质用例；完整性直接写库用例（见 §7） |
+| INV-6 事件保留版本引用 | **是** | ① 已被事件引用的版本或分量被改；② 发布与计费交错，同一时刻前后取到不同版本；③ 回溯发布改变已计费时刻的价格；④ 不完整的版本被发布或直接进入 `RETIRED`（绕过服务），该模型的相关事件全部 `PRICING_ERROR` 或按不完整的价计；⑤ 发布 / 退役按锁前的旧快照做判断（给已停用的模型发布、按旧分量集校验完整性、退役一个已被截断的版本） | ① 触发器：发布后只许截断与退役，分量只在草稿阶段可改，禁止删除；② 供应商行锁串行、`t` 在锁后取、加锁读；③ 生效时刻 ≥ `t`，只在末尾追加，「没有 L」例外（只把无价变有价）；④ 发布跃迁触发器 + 只能以草稿插入 + 禁止 `DRAFT → RETIRED`；⑤ 锁在前：锁是主事务第一条语句，之后全是加锁读 | 触发器用例（MySQL）；「发布与计费并发」「快照读」（计费侧与发布 / 退役侧）用例；性质用例；完整性直接写库用例（见 §7） |
 | INV-7 客户不可见成本毛利 | **是** | 成本价经客户接口泄露 | 只有 `/api/v1/admin` 路由，`require_admin` | 越权用例 |
 | INV-8 租户不可互访 | 否 | 价格是全局数据 | — | — |
 | INV-9 | 否 | — | — | — |
@@ -269,7 +302,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 
 状态表见 §2「状态」。
 
-- **串行化**：发布、退役在供应商行排他锁内；计费取价在同一行共享锁内（由 `resolve_model` 加、持有到计费事务提交）。草稿操作不锁。
+- **串行化**：发布、退役在供应商行排他锁内，锁是主事务第一条语句、之后全是加锁读（§2「锁在前」）；计费取价在同一行共享锁内（由 `resolve_model` 加、持有到计费事务提交）。草稿操作不锁供应商行，只对版本行 `FOR UPDATE`（与发布对版本行的 `FOR UPDATE` 串行）。
 - **数据库保证的唯一性**：`(provider_id, model_id, open_slot)`；`(provider_price_version_id, usage_meter_component_id)`；`public_id`。
 - **幂等键**：无客户端幂等键。发布已发布的版本 → 200 不写；建草稿重发会建出两个草稿（草稿不影响计费，管理员丢弃多余的即可）。
 - **相同 ID、不同载荷**：不适用。
@@ -281,8 +314,9 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 | 失败点 | 对外结果 | 数据最终状态 | 是否可重试 | 恢复来源 | 告警 |
 | --- | --- | --- | --- | --- | --- |
 | 校验失败 | 422 | 无改动 | 改后可 | — | 无 |
-| 不完整 / 目录已停用 / 状态不对 / 时刻冲突 | 409 | 无改动 | 改后可 | — | 无 |
-| 复查不通过（实现错误） | 500 | 回滚 | 否 | 修代码 | 错误日志 |
+| 不完整 / 目录已停用 / 状态不对 / 时刻冲突（含预约存在时不指定时刻发布） | 409 | 无改动 | 改后可（撤销预约或指定更晚的时刻） | — | 无 |
+| 复查不通过、锁后读到的版本不属于所锁的供应商（实现错误） | 500 | 回滚 | 否 | 修代码 | 错误日志 |
+| 查所属供应商之后、拿到锁之前版本被另一事务发布 / 退役 / 丢弃 | 按锁后读到的状态处理（已发布 200 不写；已退役 / 已丢弃 409；已被截断 409） | 由锁后的读决定 | — | — | 无 |
 | 审计或提交失败 | 500 | 回滚 | 是 | — | 错误日志 |
 | 锁等待超时（与计费争供应商行） | 500 | 回滚 | 是 | — | 错误日志 |
 | 提交成功、响应丢失 | 超时 | 已发布 | 重发发布 → 200 不写 | — | 无 |
@@ -305,22 +339,27 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 | 风险/需求 | 测试层级 | 场景 | 预期结果 |
 | --- | --- | --- | --- |
 | 正常路径 | integration（API） | 建草稿 → 改 → 发布 → 再建草稿 → 发布（截断前一个）→ 退役 | 各步状态、区间、审计正确 |
-| 第一个版本 | integration | 无已发布版本时发布、不给生效时刻 | `effective_from` 为空；很久以前的时刻取到它 |
+| 第一个版本 | integration | 无已发布版本时发布、不给生效时刻；发布前后对同一个过去时刻取价；再发布后继之后再取 | `effective_from` 为空；很久以前的时刻取到它；该时刻发布前 None、发布后是它，后继发布之后仍是它（只从无价变有价，不换版本） |
 | 预约生效 | integration | 给未来 F 发布 | 前一个版本截断于 F；F 之前取旧、之后取新 |
+| 预约存在时不指定时刻发布（v4） | integration | 末尾版本是尚未开始的预约时不给时刻发布；同一秒里连续两次不给时刻发布；预约存在时给 F ≤ 预约起点 | 都是 409 `EFFECTIVE_FROM_CONFLICT`，什么都不写；给 F > 预约起点则通过、预约被截断于 F |
 | 不许回溯 | integration | 给 F < `t`；给 F ≤ 末尾版本起点 | 422 / 409 |
-| 撤销预约 | integration | 预约版本在生效前退役 | 空区间；前一个版本 `effective_to` 恢复为空；任何时刻都取不到被撤销的版本 |
+| 撤销预约 | integration（SQLite 与 MySQL 各一次） | 预约版本在生效前退役：① 它截断了前一个版本 P ② 它前面没有版本 ③ P 以退役结束于预约起点 | ① 空区间、P 的 `effective_to` 恢复为空、复查通过、触发器放行 ② 空区间，之后不给时刻发布从「一直以来」起 ③ P 不恢复；三者任何时刻都取不到被撤销的版本 |
 | 退役当前版本 | integration | 退役正在生效的版本 | `t` 起取不到价（None）；`t` 之前照旧 |
-| 退役历史版本 | integration | 退役已被截断的版本 | 409 |
+| 退役历史版本 / 草稿 | integration | 退役已被截断的版本；退役草稿 | 409 `PRICE_VERSION_NOT_RETIRABLE` |
+| 退役起点等于 `t` 的版本（v4） | integration | 同一秒里发布（截断 P）又退役 | 空区间 `[t, t)`，P 不恢复，`t` 起无价 |
 | 退役后再发布 | integration | 退役于 E，之后发布新版本 | 新版本从 `max(E, t)` 起；空档保持无价 |
-| 完整性 | integration | 只给 `LLM_TOKEN` 的三个分量；给零个分量；重复分量；不存在的分量 | 409 / 422 / 404 |
+| 完整性 | integration | 只给 `LLM_TOKEN` 的三个分量；给零个分量；给 65 个分量；重复分量；不存在的分量 | 409 / 422 / 422 / 422 / 404 |
 | 目录停用 | integration | 供应商 / 模型 / 计量类型停用后建草稿或发布 | 409 |
 | 精度 | integration | `rate_amount` 8 位 / 9 位小数；0；负数；指数写法；JSON 数字而非字符串 | 通过 / 422 |
-| 触发器（MySQL） | integration | 直接 UPDATE 已发布版本的币种 / 分量单价 / `effective_from`；DELETE 任何版本；给已发布版本 INSERT 分量；把 `RETIRED` 改回 `PUBLISHED` | 全部 SIGNAL 拒绝；只有 `effective_to` 与 `PUBLISHED → RETIRED` 通过 |
+| 小决定（v4） | integration | PATCH 无实际变化；已发布再发布并带 `effective_from`；列表按不存在的供应商 / 模型筛、模型不属于所给供应商 | 200 不写不记审计；200 不写、区间不变；404 |
+| 触发器（MySQL） | integration | 直接 UPDATE 已发布版本的币种 / 分量单价 / `effective_from`；DELETE 任何版本；给已发布版本 INSERT 分量；把 `RETIRED` 改回 `PUBLISHED`；把草稿直接改成 `RETIRED`（带区间与发布人，分量完整与零分量各一次，v4） | 全部 SIGNAL 拒绝；只有 `effective_to` 与 `PUBLISHED → RETIRED` 通过 |
 | 完整性由数据库兜底（MySQL） | integration | 绕过服务：直接 `UPDATE … SET status = 'PUBLISHED'`（零个分量；`LLM_TOKEN` 缺一个分量）；直接 `INSERT` 一条 `status = 'PUBLISHED'` 的版本 | 触发器拒绝；完整的版本直接改状态则通过 |
 | 区间不重叠（MySQL） | integration | 绕过服务直接写：同一（供应商, 模型）两个**已截断**且相交的版本（部分相交、包含、起点相同）；首尾相接；空区间；不同模型相交 | 相交的被拒绝；其余通过；服务层正常的发布 / 退役 / 撤销预约路径通过 |
 | 数据库约束（MySQL） | integration | 同一（供应商, 模型）两个未截断的已发布版本；草稿带区间 | 唯一约束 / CHECK 拒绝 |
 | 发布与计费并发 | integration（真 MySQL，两个连接） | ① 发布事务写完未提交时，计费事务 `resolve_model` + `resolve_provider_price`（`occurred_at ≥ t`）② 反过来 | ① 计费阻塞到发布提交，取到新版本 ② 发布阻塞到计费提交，`t` 晚于该事件；提交后再取同一时刻结果一致 |
-| 快照读陷阱 | integration（真 MySQL） | 计费事务先做一次普通读，另一连接发布并提交，计费事务再取价 | 取到新版本（加锁读） |
+| 快照读陷阱（计费侧） | integration（真 MySQL） | 计费事务先做一次普通读，另一连接发布并提交，计费事务再取价 | 取到新版本（加锁读） |
+| 快照读陷阱（发布 / 退役侧，v4） | integration（真 MySQL，两个连接） | ① 另一连接锁着供应商行、停用模型；发布等锁，它提交后发布继续 ② 另一连接锁着版本行、删掉一个分量；发布等锁，它提交后发布继续 ③ 另一连接锁着供应商行、发布一个截断当前版本 V 的后继；退役 V 等锁，它提交后退役继续 | ① 409 `CATALOG_ITEM_RETIRED` ② 409 `PRICE_VERSION_INCOMPLETE`（列出删掉的分量）③ 409 `PRICE_VERSION_NOT_RETIRABLE`；三者都什么都不写、无审计 |
+| 事务内复查（v4） | unit | 空区间夹在时间线里（撤销预约后 P 恢复）；空区间出现在非 `RETIRED` 行；两个区间非空的版本相交；未截断的不是最后一个 | 第一种通过，其余抛错 |
 | 时间稳定性（性质用例） | unit | 随机的「发布 / 预约 / 退役 / 撤销预约」序列，每步后对早于该步 `t` 的一组固定时刻取价 | 一旦取到版本 V，之后永远是 V |
 | 事务中途失败 | integration（SQLite 与 MySQL 各一次） | 发布时截断写入后审计抛错 | 两个版本都回滚到发布前 |
 | 鉴权 | integration | 匿名 401、CUSTOMER 403；首条语句 `require_admin`（AST）；路由枚举 | 同左 |
@@ -353,7 +392,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 ## 10. 未决问题与假设
 
 - **未决问题**：无阻断项。
-- **需要谁拍板**：无（§9 的取舍都在 spec 与已批准设计的范围内）。
+- **需要谁拍板**：已拍板 —— v4 第一轮设计审查判阻断「第一个版本不指定时刻 = `NULL`（一直以来）违反不许回溯」；2026-09-29 Kelvin 裁定**保留**（v1–v3 已批准的规则），理由写在 §2「发布」的「与 §16、§17 及 Phase 2 计划 T-B 的关系」，并记入 `docs/REVIEW-LOG.md`「升级给人的分歧」。其余 §9 的取舍都在 spec 与已批准设计的范围内。
 - **尚未验证的假设**：
   1. MySQL 8.4 的 BEFORE UPDATE 触发器能比较 NEW / OLD 的 JSON 列（`metadata_json` 在已发布后不可改）—— 触发器用 `NOT (NEW.metadata_json <=> OLD.metadata_json)`；迁移测试在 CI 的 MySQL 上实跑。
   2. 触发器里读父行状态不需要额外锁：分量写入都在同一事务里、父行状态只在发布事务中改变，发布事务已锁供应商行；并发的草稿编辑与发布同一版本 —— 发布事务 `SELECT … FOR UPDATE` 版本行，草稿编辑也对版本行 `FOR UPDATE`，两者串行。
@@ -380,7 +419,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 ### 实现范围（批准后登记为 Worker 任务的 `allowed_change_paths`）
 
 - `alembic/versions/<日期>_<序号>_provider_prices.py`、`alembic/env.py`
-- `app/models/provider_prices.py`（新）、`app/models/auth.py`（审计动作）
+- `app/models/provider_prices.py`（新）、`app/models/auth.py`（审计动作）、`app/services/audit_query.py`（`provider_price_version` 归进 `PUBLIC_ENTITY_TYPES`，v4 补：否则 `test_every_written_entity_type_is_classified` 在 CI 变红，与 025 的 #185 同一情形）
 - `app/repositories/provider_prices.py`（新，含 `resolve_provider_price`）
 - `app/services/provider_prices.py`（新）
 - `app/schemas/provider_prices.py`（新）
@@ -396,3 +435,4 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-B；依赖 `docs/design/AIH
 | v1 | 2026-09-29 | 初稿 | — |
 | v2 | 2026-09-29 | 加 `provider_price_versions` 的 BEFORE INSERT（只能插入草稿）与「草稿 → 已发布」跃迁上的分量完整性触发器；INV-6 与 §7 补对应控制与直接写库用例。v1 的其余内容不变 | 主动修正：T-D 审查（#178）指出的同类缺口在本设计同样存在 |
 | v3 | 2026-09-29 | 加区间不重叠触发器（锁供应商行后检查同一（供应商, 模型）的非空区间相交）并规定服务层写入顺序；§7 补直接写库的重叠用例 | 主动修正：T-D 第二轮审查（#178）指出的同类缺口 |
+| v4 | 2026-09-29 | ① 空区间不参与「末尾版本」与「事务内复查」的排序，复查另断言空区间只在 `RETIRED` 行上；② 末尾版本尚未开始（起点 ≥ `t`）时不指定时刻的发布判 409 `EFFECTIVE_FROM_CONFLICT`；③ 新增「锁在前」：发布 / 退役的所属供应商在另一个短事务里查，主事务第一条语句是供应商行锁，之后全是加锁读；④ 触发器禁止 `DRAFT → RETIRED`；⑤ 写明小决定：退役起点等于 `t`、恢复 P 的条件、退役草稿、`PRICE_VERSION_FINAL` 的范围、分量 1–64 个、列表筛选 404、PATCH 无变化与重复发布不写、发布人用邮箱；⑥ §7 补对应用例（含发布 / 退役侧快照读陷阱，真 MySQL）；§11 实现范围补 `app/services/audit_query.py` | 实现（OpenClaw run `9abfe47e`，#188）与其独立审查发现：v3 的撤销预约过不了自己的复查、预约存在时不指定时刻的发布没有合法结果；发布 / 退役在锁前做了普通读（快照读陷阱只测了计费侧）；`DRAFT → RETIRED` 可绕过完整性检查；新 `entity_type` 需要归类。v4 第一轮设计审查判阻断「首版 `NULL` 回溯」，Kelvin 裁定保留，§2 补上理由、§7「第一个版本」补断言、§10 记裁定（规则本身与 v1–v3 相同，不另升版本） |
