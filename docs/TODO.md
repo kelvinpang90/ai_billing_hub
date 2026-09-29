@@ -23,8 +23,7 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-022` 管理端审计日志查询接口
-2. `AIH-TASK-023` 管理端前端：审计日志页
+1. `AIH-TASK-023` 管理端前端：审计日志页
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -1963,8 +1962,17 @@ AIH-TASK-011 的记录段，勾选随那次合并生效。
   - 分页与 `action` 先于鉴权校验（FastAPI），时间与组合在鉴权之后由服务层判：没带令牌、时间又不合法的请求得到 401
   - 时间筛选按库里的 `created_at` 比较；由于登录与业务两条路径的取整不一致（AIH-TASK-006 记录段），整秒边界上可能
     差一秒，排序不受影响（按 id）
-- [ ] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）
-- [ ] CI 全量运行（含 `test_0011_*` 的 MySQL 用例）、审查、合并、生产迁移 0011
+- [x] Worker 跑 `allowed_commands` 全部零退出（由 Worker 记录；skipped 不算 passed）：run `23060fd9` 基于 `22c3381` 一次
+  提交 `4a5f373`，`docs.check` / `policy.check` / `tests.process` / `lint.check` / `format.check` 零退出，没有修复轮
+- [x] CI 全量运行（含 `test_0011_*` 的 MySQL 用例）、审查、合并、生产迁移 0011：#170 的 CI 六项全绿（`backend` 在真 MySQL
+  上跑）；Worker 的受限审查一轮 `APPROVE`。#170 合并为 `8b88c50`，main 上 CI 与 Deploy 成功；`deploy/deploy.sh` 先跑
+  `alembic upgrade head`、失败即中止，Deploy 成功即 0011 已上生产
+- [ ] **后续**（受限审查的不阻塞意见）：
+  - `refresh_tokens` 归「对外 id」让 ADMIN 看得到令牌家族 id（也是会话 id），见上面「实现定的细节」第一条；要不要改成
+    用户类型，等 Kelvin 确认
+  - `entity_type` 扫描测试对「形参同名」的豁免太宽：包一层 `record_audit` / `AuditLog` 的辅助函数会让它的调用方漏扫；
+    应把豁免限定在已知的写审计函数上
+  - `_state` 假定库里的 JSON 是对象，非对象会在响应校验时 500；现有写入方都是 `json.dumps(dict)`，暂可接受
 
 ### AIH-TASK-024 —— AIH-TASK-015 管理端客户页的浏览器验收脚本（OpenClaw P6 试点，2026-09-28）
 

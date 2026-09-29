@@ -1297,7 +1297,7 @@ tasks:
     purpose: >-
       spec §89 的 GET /api/v1/admin/audit-logs：管理员分页查看审计记录，可按动作、实体、操作者邮箱与时间段筛选，
       最新在前。迁移 0011 补查询用的索引。响应里不出现任何内部自增 id：操作者与「以用户为对象」的审计都换成用户邮箱。只读。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-021
     acceptance_criteria:
