@@ -2466,7 +2466,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     「尽头为空」那一条而不是重叠；两条尽头都为空的已发布版本总是重叠触发器先于 `open_slot` 唯一索引报错（设计 v3 §7
     只断言被拒绝）
   - 同一报价日唯一约束不含 `status`：丢弃了的 BNM 草稿仍占着那个报价日，同日再拉取记 `NO_NEW_QUOTE`（与设计 §4
-    「管理员看到后可丢弃旧草稿、手工录入」一致，手工录入不受限）
+    「管理员看到后可丢弃旧草稿、手工录入」一致）。约束含 `source`，同日的手工版本不与 BNM 版本冲突；带报价日的手工版本
+    同样按（币种对、来源、报价日）唯一，只有报价日为 `NULL` 的行不受限（设计 §2 的手工录入接口不收报价日，写的是 `NULL`）
   - `fx_rate_versions` 没有另建取汇率用的索引：设计 §2 只列了两条唯一约束；`(base_currency, quote_currency, …)` 开头的
     两条唯一索引可供 `resolve_fx_rate` 按币种对查。F2 若实测需要按 `effective_from` 的索引，另走迁移
 - [ ] **交付**：Worker 跑 `allowed_commands`、CI（`test_fx_rates_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、

@@ -721,8 +721,11 @@ def test_open_slot_and_the_unique_constraints(db: Db) -> None:
 
 def test_one_bnm_version_per_quote_date(db: Db) -> None:
     """A second BNM version for the same currency and quote date is refused — also after the
-    first one is discarded (the fetch then records NO_NEW_QUOTE). Another date, another
-    currency and manual versions (whose quote date may be NULL) are not held back."""
+    first one is discarded (the fetch then records NO_NEW_QUOTE). Another date and another
+    currency are not held back. The constraint covers the source as well: a manual version
+    with the same quote date as the BNM one is allowed, but two manual versions with the same
+    non-NULL quote date collide too — only a NULL quote date (what the admin API writes for
+    manual entries) escapes it."""
     first = db.bnm_draft()
 
     assert db.refuses(db.bnm_draft)[0] == _ER_DUP_ENTRY
@@ -734,7 +737,10 @@ def test_one_bnm_version_per_quote_date(db: Db) -> None:
     db.draft()
     db.draft()
     db.draft(quote_date=QUOTE_DATE)
-    db.draft(quote_date=QUOTE_DATE)
+
+    assert db.refuses(lambda: db.draft(quote_date=QUOTE_DATE))[0] == _ER_DUP_ENTRY
+    db.draft(quote_date=QUOTE_DATE + DAY)
+    db.draft()
 
 
 # --- database fallbacks (design §7 "数据库兜底") ---------------------------------------------

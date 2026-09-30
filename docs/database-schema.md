@@ -660,8 +660,10 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 - **唯一索引 `(base_currency, quote_currency, open_slot)`**（`ux_fx_rate_versions_open_slot`）：一个币种对至多一个未截断
   的已发布版本。
 - **唯一约束 `(base_currency, quote_currency, source, source_quote_date)`**（`uq_fx_rate_versions_quote_date`）：同一报价日
-  的 BNM 版本只有一条，并发拉取由它决出一条草稿（输家记 `NO_NEW_QUOTE`）；丢弃的 BNM 草稿也占着这个报价日。手工录入
-  的报价日可空，MySQL 唯一约束不管 `NULL`，不受限。
+  的 BNM 版本只有一条，并发拉取由它决出一条草稿（输家记 `NO_NEW_QUOTE`）；丢弃的 BNM 草稿也占着这个报价日。约束含
+  `source`，所以同日的手工版本不与 BNM 版本冲突；但带报价日的手工版本同样按（币种对、来源、报价日）唯一，两条同日的
+  手工版本会冲突。只有报价日为 `NULL` 的行不受限（MySQL 唯一约束不管 `NULL`；设计 §2 的手工录入接口不收报价日，写入的
+  就是 `NULL`）。
 - 设计 §2 的 CHECK 1–5：
   1. `ck_fx_rate_versions_unpublished`：`DRAFT` / `DISCARDED` 没有区间、没有发布人与发布时刻
   2. `ck_fx_rate_versions_approved`：`PUBLISHED` / `RETIRED` 必有发布人与发布时刻
