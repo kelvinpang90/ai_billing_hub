@@ -1740,7 +1740,7 @@ tasks:
     title: 'FX rates 1/6 - migration, models and database triggers'
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F1，只做数据库层：迁移 0015 建 fx_rate_locks（单行）、fx_rate_versions、fx_fetch_attempts 与 ORM 模型；CHECK 1–5、open_slot 生成列与两条唯一约束；全部触发器（锁表恰好一行、只能以草稿插入、禁止 DRAFT → RETIRED、发布跃迁上尽头为空、PUBLISHED 只许截断与退役、RETIRED / DISCARDED 不可改、锁 fx_rate_locks 后判区间不重叠且空区间跳过、禁止删除、拉取记录只增）。不含服务、接口、拉取与告警（F2–F6 即 AIH-TASK-039 到 AIH-TASK-044）。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-027
     acceptance_criteria:
