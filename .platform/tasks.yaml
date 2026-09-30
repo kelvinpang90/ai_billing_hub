@@ -1899,7 +1899,7 @@ tasks:
       - AIH-TASK-039
     acceptance_criteria:
       - 实现与设计 v3 §2「BNM 适配器」、fx_fetch_attempts 一节、§4 的拉取并发与「相同 ID、不同载荷」、§10「已在 2026-09-30 实测的接口事实」逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
-      - 请求与解析按设计：按日期的 URL、Accept 请求头、逐字段核对（币种、日期、meta.session、meta.quote、unit、middle_rate 类型）；middle_rate 取最短往返十进制表示（Decimal(repr(float))）、最多 6 位小数；除以 unit 精确到 10 位；「No records found.」的 404 返回 None；其余错误码按设计；只用标准库 urllib，只接受 HTTPS 的 base_url
+      - 请求与解析按设计：按日期的 URL、Accept 请求头、逐字段核对（币种、日期、meta.session、meta.quote、unit、middle_rate 类型）；middle_rate 取最短往返十进制表示（Decimal(repr(float))）、最多 6 位小数；除以 unit 精确到 10 位；「No records found.」的 404 返回 None；其余错误码按设计；只用标准库 urllib，只接受 HTTPS 的 base_url；不跟随重定向（3xx 按设计的「其余 HTTP 状态」记 HTTP_<status>，urllib 默认会跟随、甚至跟到明文 http，要显式关掉）
       - 新建 tests/backend/test_fx_source.py：设计 §10 的录制响应逐字作为原样字符串常量（不另建夹具文件、不联网重录），覆盖设计 §7「BNM 解析」「双精度还原」「请求」三行；由录制派生的响应在用例里注明「派生自 2026-09-29 USD 录制」
       - 拉取任务的四种结果（NEW_DRAFT、NO_NEW_QUOTE（含 QUOTE_CHANGED，按还原后的 rate 数值比较）、NO_QUOTE_FOR_DATE、FAILED）、BNM 草稿的 source_reference 与 observed_at、BNM 草稿不写审计，按设计；每个配置币种各自一次拉取、各自一个事务：某个币种写库失败只记日志、继续其余币种，全部处理完后任务以失败结束；新建 tests/backend/test_fx_fetch.py 覆盖设计 §7「拉取幂等」「无记录」「BNM 更正同日价格」「不自动发布」四行与拉取记录写入抛错的回滚，并发拉取放在真 MySQL 上；「无记录」一行里「fx_fetch 仍 OK」的断言归 AIH-TASK-042（本任务断言 NO_QUOTE_FOR_DATE 与无草稿）
       - 配置 BILLING_FX_SOURCE、BILLING_FX_BNM_BASE_URL、BILLING_FX_CURRENCIES（逗号分隔、大写三字母、不含 MYR、不为空、不重复）、BILLING_FX_FETCH_TIMEOUT_SECONDS 带校验，test_config.py 有用例；新任务模块加进 TASK_MODULES，Beat 一个条目 crontab(minute=30, hour="4,6,9")、expires 3600，test_celery.py 钉住
