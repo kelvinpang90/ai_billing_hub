@@ -10,12 +10,12 @@
 - **你负责实现，Codex 负责独立审查，Kelvin 负责合并。** 你不合并自己的 PR。
 - **碰钱的任务先过设计闸门**：钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 —— 用 [design-gate 模板](.github/ISSUE_TEMPLATE/design-gate.md) 开 Issue，`scripts\codex-review.ps1 -Issue <N> -Post` 拿到 `APPROVED: design v<N>` 之后才动手写代码。前端 / 文档 / CI / 脚本不走闸门；既不碰钱、也不碰用量摄取 / 认证与会话 / Webhook 的后端改动同样不走（分档看主题，不看「是不是 API」）
 - **设计版本一变，之前的批准作废**，必须重新过闸门
-- 每个编号任务：`git checkout -b task/<编号>-<slug>` → 实现 + 写测试 → 写 `docs/TODO.md` 任务记录 → 本地检查全过（命令清单只在 [WORKFLOW §7](docs/WORKFLOW.md) 一处）→ 开 **Draft PR**（用 `.github/pull_request_template.md`，结构不许改，**`TODO 影响` 一节必填**）→ CI 全绿后 `scripts\codex-review.ps1 -Pr <N> -Post`（脚本先查准入，不过不调 Codex）
+- 每个编号任务：`git checkout -b task/<编号>-<slug>` → 实现 + 写测试 → 在 `docs/TODO.md` 勾掉完成的勾选项（任务记录写在 PR 描述里，TODO 只改勾选项和规划块）→ 本地检查全过（命令清单只在 [WORKFLOW §7](docs/WORKFLOW.md) 一处）→ 开 **Draft PR**（用 `.github/pull_request_template.md`，结构不许改，**`TODO 影响` 一节必填**）→ CI 全绿后 `scripts\codex-review.ps1 -Pr <N> -Post`（脚本先查准入，不过不调 Codex）
 - **不要开 stacked PR**（base 指向另一个功能分支）：基分支合并被删时 GitHub 会自动关闭子 PR，且关闭后不能改 base 也不能重开
 - 一个 PR 一个任务，不夹带。合并方式只能是 Squash（`main` 要求线性历史）
 - 收到审查意见后，用 `gh pr view <N> --comments` 读取，然后发一条 `## 🔧 CLAUDE RESPONSE` 回应（格式见 WORKFLOW §6，复审时会被机器校验）。
   **每一条意见都必须有交代**，只有三种处理：`已修`（证据必须是 `完整 SHA · 文件:行`，短 SHA 与散文不收）／`不改`（给具体理由，引 spec 章节或不变量）／`升级` 给 Kelvin 拍板。**不许沉默跳过。**回应开头带 `reviewed-head: <上轮审查的 SHA>`；第三轮起必须写 `### 完整影响面`
-- **复审只修被指出的问题。**顺手加的功能、顺手修的旁边问题，都会被判为范围扩张。想做就记进 `docs/TODO.md` 另开 PR
+- **复审只修被指出的问题。**顺手加的功能、顺手修的旁边问题，都会被判为范围扩张。想做就写进 PR 描述的「已知未做 / 留给后续」，由管理员收进 `docs/TODO.md` 规划块的「后续计划」另开 PR
 - **发到 GitHub 的写操作走 `python scripts/gh_verified_write.py`**（评论、PR 正文），写完回读比对；工具报成功不算，回读一致才算。回读失败不得自动重发
 - **约定不够用时不要自己发明**（`[~]` 这种）。没做完就是 `[ ]`，剩什么写正文；复选框只允许 `[ ]` / `[x]`，CI 会查
 - 争论拍板后的结论写进 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，避免同一个问题吵第二次
@@ -65,8 +65,8 @@
 - **一个 session 一个编号任务**：读 `docs/TODO.md` → 做完 → 验收 → commit，中途不需要逐步审批。计划本身有异议时才停下来讨论
 - 先计划：`docs/TODO.md` 里**还没有**的工作（临时需求、探索型任务）才需要先写计划、等确认
 - 追踪进度：做完把 `[ ]` 改成 `[x]`
-- 记录结果：在 `docs/TODO.md` 对应任务下写清楚做了什么、偏离了什么、验证到什么程度
-- 记录教训：写进该任务的记录里。**本仓库没有 `tasks/` 目录**，不要凭空创建 `tasks/todo.md` / `tasks/lessons.md` / `tasks/REVIEW.md`
+- 记录结果：**任务记录写在 PR 描述里**（「改了什么」「如何验证」「已知未做 / 留给后续」三节）：做了什么、偏离了什么、验证到什么程度；`docs/TODO.md` 只改勾选项和规划块，不新增记录段（2026-09-30 起；之前的记录在 `docs/archive/TODO_RECORDS_2026-09-30.md`）
+- 记录教训：写进 PR 描述的任务记录里。**本仓库没有 `tasks/` 目录**，不要凭空创建 `tasks/todo.md` / `tasks/lessons.md` / `tasks/REVIEW.md`
 
 ## 登记任务时的浏览器验收约定
 

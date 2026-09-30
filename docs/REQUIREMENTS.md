@@ -368,4 +368,4 @@ AIH-TASK-007（2026-09-21）收口了其中一条，AIH-TASK-008（2026-09-21）
 
 ✅ **逐条核对已完成（2026-09-10）** —— 结果见 [REVIEW_FOLLOWUP_v1.1.md](archive/REVIEW_FOLLOWUP_v1.1.md)。
 
-结论：25 条里 20 条已解决，5 条有残留（R1–R5，已进 [TODO.md](TODO.md)）。**7 条 P0 阻断级全部解决**，Phase 0 / Phase 1 没有被评审意见卡住的地方。
+结论：25 条里 20 条已解决，5 条有残留（R1–R5，已进 TODO.md 的 P-2，2026-09-30 起在 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md)）。**7 条 P0 阻断级全部解决**，Phase 0 / Phase 1 没有被评审意见卡住的地方。

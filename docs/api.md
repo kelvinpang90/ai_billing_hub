@@ -322,7 +322,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 不在本接口里：关户（`→ CLOSED`，要等用量事件与支付落地后另立任务）、有效状态（`ALLOW_AI` /
 `BLOCK_AI`）与 `reason_code`、项目的 `integration_status`。各状态下摄取、充值、客户登录的行为
-是对以后功能的契约，记在 [TODO.md](TODO.md) 的 AIH-TASK-020 一节。
+是对以后功能的契约，记在 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-020 一节。
 
 ---
 
@@ -748,7 +748,7 @@ SHA256(RAW_REQUEST_BODY)
 ## 管理端审计日志
 
 依据：spec §89 的 `GET /api/v1/admin/audit-logs`、§66 的审计字段。实现登记为 AIH-TASK-022；只读接口，不改钱的行为、
-状态机与认证逻辑，没有走设计闸门（见 [TODO.md](TODO.md) 的「审计日志差异清单」第 1 条）。
+状态机与认证逻辑，没有走设计闸门（见 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的「审计日志差异清单」第 1 条）。
 
 | 方法与路径 | 成功 | 错误 |
 | --- | --- | --- |
@@ -841,7 +841,7 @@ SHA256(RAW_REQUEST_BODY)
 ### 排序
 
 **最新在前，按审计行的自增 id 倒序**，不按 `created_at`。登录路径与业务路径写 `created_at` 时的取整不一致
-（见 [TODO.md](TODO.md) 的 AIH-TASK-006 记录段）：登录审计可能比它之后写入的建客户审计晚一秒。自增 id 才是
+（见 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-006 记录段）：登录审计可能比它之后写入的建客户审计晚一秒。自增 id 才是
 真实的写入顺序。同一个原因，按 `created_from` / `created_to` 筛选在整秒边界上可能差一秒。
 
 ---
@@ -1095,7 +1095,7 @@ SHA256(RAW_REQUEST_BODY)
 供应商与模型的状态。它对供应商行加共享锁（`FOR SHARE`），模型与别名也用加锁读，锁持有到**调用方**的事务
 提交。计费侧（T-H）必须在写事件快照、扣费的同一事务里调用它，并只处理 `is_due(occurred_at, now)` 为真的
 事件（`now` 在它拿到锁之后取）；更晚的留到下一轮。契约全文见设计 §2「对下游任务的契约」与
-[TODO.md](TODO.md) 的 AIH-TASK-025 记录段。
+[TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-025 记录段。
 
 ---
 
@@ -1286,7 +1286,7 @@ SHA256(RAW_REQUEST_BODY)
 | `PROVIDER_PRICE_RETIRE` | `status`、`effective_from`、`effective_to`；恢复了前一个版本时 `restored_version`：它的 `id` 与原 `effective_to` | `status`、`effective_from`、`effective_to`；恢复了前一个版本时 `restored_version`：它的 `id` 与 `effective_to`（`null`）。`reason` 记在审计行的 `reason` 上 |
 
 「已发布再发布」与无变化的 PATCH 不写审计。只有 `PROVIDER_PRICE_PUBLISH` 在 spec §66 的清单里，其余四个按先例补上
-（见 [TODO.md](TODO.md) 的 AIH-TASK-026 记录段）。
+（见 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-026 记录段）。
 
 ### 取价（计费侧调用，本任务不接线）
 
@@ -1296,7 +1296,7 @@ SHA256(RAW_REQUEST_BODY)
 （`component_code`、`quantity_field`、`unit_quantity`、`rate_amount`，`component_code` 升序），没有就是 `None`
 （计费侧 `PRICING_ERROR`，缺价不按 0 算）。版本与分量都是加锁读（`FOR SHARE`），锁持有到**调用方**的事务提交；
 计费侧必须在同一个计费事务里**先** `resolve_model`（它对供应商行加共享锁）**再**调用它，并把返回的版本 id 写进事件
-快照。契约全文见设计 §2「对下游任务的契约」与 [TODO.md](TODO.md) 的 AIH-TASK-026 记录段。
+快照。契约全文见设计 §2「对下游任务的契约」与 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-026 记录段。
 
 ---
 
@@ -1518,7 +1518,7 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
 | `PRICING_RETIRE` | `status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与原 `effective_to` | 范围四项、`status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与 `effective_to`（`null`）。`reason` 记在审计行的 `reason` 上 |
 
 「已发布再发布」与无变化的 PATCH 不写审计。`PRICING_CREATE` / `PRICING_UPDATE` / `PRICING_PUBLISH` 在 spec §66 的
-清单里；`PRICING_RETIRE`、`PRICING_DISCARD` 按先例补上（见 [TODO.md](TODO.md) 的 AIH-TASK-027 记录段）。
+清单里；`PRICING_RETIRE`、`PRICING_DISCARD` 按先例补上（见 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-027 记录段）。
 
 ### 解析（计费侧调用，本任务不接线）
 
@@ -1532,5 +1532,5 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
   （规则 + 分量；命中的 FIXED_RATE 规则缺事件所需分量也**不下落**），五级都没有返回 `None`（计费侧 `PRICING_ERROR`）。
 
 计费事务里的顺序：`resolve_model`（供应商 S）→ `lock_pricing_rules_shared` → 价格与规则的加锁读 → 钱包 → 租户；返回
-的规则内部 id 写进事件快照（`pricing_rule_id`）。契约全文见设计 §2「对下游任务的契约」与 [TODO.md](TODO.md) 的
+的规则内部 id 写进事件快照（`pricing_rule_id`）。契约全文见设计 §2「对下游任务的契约」与 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的
 AIH-TASK-027 记录段。

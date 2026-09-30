@@ -58,7 +58,7 @@
 现在就是 CHECK 允许的取值，关户任务不必再改列。跃迁表见 [api.md](api.md) 的「管理端账户状态」。
 
 各账户状态下以后功能的行为（设计 §2 末尾「对以后功能的契约」，Kelvin 2026-09-28 确认；本任务不实现，
-由各自 Phase 的设计闸门落地，同一份记在 [TODO.md](TODO.md) 的 AIH-TASK-020 一节）：
+由各自 Phase 的设计闸门落地，同一份记在 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-020 一节）：
 
 | 功能 | `PENDING_ACTIVATION` | `ENABLED` | `DISABLED` | `CLOSED`（关户任务） |
 | --- | --- | --- | --- | --- |
@@ -345,7 +345,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 
 9 个类型、12 个分量，全部 `ACTIVE`；显示名见 `app/models/ai_catalog.py` 的 `SEED_METER_TYPES`（代码里的同一份
 清单，`tests/backend/test_migrations.py` 逐行比对迁移、代码常量与库里三方）。⚠️ 缓存写入只有一个分量
-`LLM_CACHE_WRITE_TOKEN`（已知限制，见 [TODO.md](TODO.md) 的 AIH-TASK-025 记录段）。本任务**不**预置任何供应商与模型。
+`LLM_CACHE_WRITE_TOKEN`（已知限制，见 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-025 记录段）。本任务**不**预置任何供应商与模型。
 
 ### `ai_providers`
 

@@ -1748,7 +1748,7 @@ tasks:
       - 迁移文件名 alembic/versions/20260929_0015_fx_rates.py，down_revision 指向 0014；写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；downgrade 删触发器与表；alembic/env.py 加 import
       - "app/models/fx_rates.py 与迁移逐列一致（含 fx_fetch_attempts 的列类型、非空、按 outcome 的列组合 CHECK 与索引；base_currency 不做正则 CHECK）；照 app/models/pricing_rules.py 用 after_create 监听在 create_all 时写入 fx_rate_locks 的 id = 1 那一行（SQLite 测试靠它，生产由迁移写入）；open_slot 的表达式是 CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END（其余为 NULL，照迁移 0013）；新表枚举列加进 test_model_columns.py"
       - 新建 tests/backend/test_fx_rates_db.py，在 BILLING_TEST_DATABASE_URL 的真 MySQL 上覆盖设计 §7 的「触发器」「open_slot 与唯一约束」「数据库兜底」「区间不重叠」「迁移」五行（未设置时 skip、CI 必跑）；每条拒绝用例配一条证明不误杀的通过用例；本任务没有服务层，时间线用 SQL 按设计 §2 的例子直接构造
-      - docs/database-schema.md 记三张表、约束、触发器与计费路径的锁顺序（供应商 S → FX S → 规则 S → 钱包 → 租户）；docs/TODO.md 新增 AIH-TASK-028 记录段，写明本任务是 v3 §11 的 F1，以及 039–044 的分工
+      - docs/database-schema.md 记三张表、约束、触发器与计费路径的锁顺序（供应商 S → FX S → 规则 S → 钱包 → 租户）；PR 描述的任务记录写明本任务是 v3 §11 的 F1，以及 039–044 的分工
       - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
@@ -1802,7 +1802,7 @@ tasks:
       - 发布与退役的主事务第一条语句是 fx_rate_locks 的 SELECT … FOR UPDATE；t 在锁后取，复用 app/services/ai_catalog.py 的 boundary_after（整秒也加 1 秒）；之后全是加锁读；写入顺序按设计；复查不通过回滚并按实现错误处理
       - 新建 tests/backend/test_fx_rates_service.py：设计 §2 的 E1–E16 各一个用例（函数名带例子编号），经服务层、冻结时钟建「之前」的数据，执行「操作」，断言「之后」每一行的状态与区间以及结果（成功或错误码），SQLite 与 MySQL 各跑一次；另有设计 §7「事务内复查」的单元用例与「事务中途失败」里发布、撤销预约两种的回滚用例
       - 五个审计动作（FX_RATE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）加进 app/models/auth.py，与写入同一事务，内容按设计 §2「审计内容」表；entity_type fx_rate_version 的 entity_id 是 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红
-      - 新建 docs/currency-and-fx.md，写规则部分（rate 的含义、时间线术语、P1–P4 与 R1–R5、从发布时刻起生效、锁顺序、对下游的契约）；docs/TODO.md 新增 AIH-TASK-039 记录段，记下五个 §66 之外补的审计动作
+      - 新建 docs/currency-and-fx.md，写规则部分（rate 的含义、时间线术语、P1–P4 与 R1–R5、从发布时刻起生效、锁顺序、对下游的契约）；PR 描述的任务记录记下五个 §66 之外补的审计动作
       - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
@@ -1854,7 +1854,7 @@ tasks:
       - 用例与设计 v3 §7「时间稳定性（性质用例）」「发布与计费并发」「快照读陷阱（计费侧）」「快照读陷阱（发布侧）」四行逐条对应；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - 并发与快照读用例用两个独立连接，放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；每个用例写明两种顺序各自的预期（阻塞到对方提交、取到的版本、提交后再取的一致性）
       - 性质用例的断言按设计 §12「送审前的模型核对」：每步后 CHECK 与时间线不相交、至多一个未截断、事务内复查通过、对不晚于 now 的每个时刻一旦取到版本 V 之后永远是 V、除设计列出的 409 / 422 外没有其他失败；随机种子固定且可复现，序列数量让单次运行在 CI 上不超过 60 秒
-      - 只改 allowed_change_paths；不改 app/ 下任何文件；docs/TODO.md 新增 AIH-TASK-044 记录段，写明覆盖了设计 §7 哪几行与运行时长
+      - 只改 allowed_change_paths；不改 app/ 下任何文件；PR 描述的任务记录写明覆盖了设计 §7 哪几行与运行时长
       - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
@@ -1903,7 +1903,7 @@ tasks:
       - 新建 tests/backend/test_fx_source.py：设计 §10 的录制响应逐字作为原样字符串常量（不另建夹具文件、不联网重录），覆盖设计 §7「BNM 解析」「双精度还原」「请求」三行；由录制派生的响应在用例里注明「派生自 2026-09-29 USD 录制」
       - 拉取任务的四种结果（NEW_DRAFT、NO_NEW_QUOTE（含 QUOTE_CHANGED，按还原后的 rate 数值比较）、NO_QUOTE_FOR_DATE、FAILED）、BNM 草稿的 source_reference 与 observed_at、BNM 草稿不写审计，按设计；每个配置币种各自一次拉取、各自一个事务：某个币种写库失败只记日志、继续其余币种，全部处理完后任务以失败结束；新建 tests/backend/test_fx_fetch.py 覆盖设计 §7「拉取幂等」「无记录」「BNM 更正同日价格」「不自动发布」四行与拉取记录写入抛错的回滚，并发拉取放在真 MySQL 上；「无记录」一行里「fx_fetch 仍 OK」的断言归 AIH-TASK-042（本任务断言 NO_QUOTE_FOR_DATE 与无草稿）
       - 配置 BILLING_FX_SOURCE、BILLING_FX_BNM_BASE_URL、BILLING_FX_CURRENCIES（逗号分隔、大写三字母、不含 MYR、不为空、不重复）、BILLING_FX_FETCH_TIMEOUT_SECONDS 带校验，test_config.py 有用例；新任务模块加进 TASK_MODULES，Beat 一个条目 crontab(minute=30, hour="4,6,9")、expires 3600，test_celery.py 钉住
-      - docs/currency-and-fx.md 加 BNM 一节（端点与场次、双精度还原、「无记录」的含义、一天三次、在 worker 容器里手工触发的方法）；docs/TODO.md 新增 AIH-TASK-040 记录段
+      - docs/currency-and-fx.md 加 BNM 一节（端点与场次、双精度还原、「无记录」的含义、一天三次、在 worker 容器里手工触发的方法）
       - 测试里的 uuid 用全零占位值（secret-scan）；除设计 §10 的录制外，汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
@@ -1959,7 +1959,7 @@ tasks:
       - 八个接口的路径、请求字段与错误码（404 / 409 / 422）按设计；rate 是 JSON 字符串、正则精确解析、最多 10 位小数、不经 float；effective_from 是带时区的 RFC 3339、换成 UTC 后必须整秒；observed_at 同一格式规则；手工币种不限于 BILLING_FX_CURRENCIES；fetch-attempts 路由先于 {fx_rate_id} 注册，形状、排序与筛选按设计；分页照 §108；请求校验先于状态判断，已发布再发布 200 不写且忽略 effective_from；读接口不拿全局锁
       - 每个处理函数第一条语句调用 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id，发布人与创建人用登录邮箱
       - 新建 tests/backend/test_fx_rates_api.py，覆盖设计 §7「手工录入与编辑」「精度」「鉴权」三行，每个错误码至少一个经 HTTP 的用例，外加一次经 HTTP 的发布与撤销预约
-      - docs/api.md 记八个接口；docs/TODO.md 新增 AIH-TASK-041 记录段
+      - docs/api.md 记八个接口
       - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
@@ -2015,7 +2015,7 @@ tasks:
       - '令牌按设计的令牌文件状态表：Settings 加 monitor_token_file；未配置 404 不记日志；读不出、是目录、去空白后少于 32 个字符都 404 并记不含路径的 ERROR；每次请求重读；Bearer 用常量时间比较，不对就 401、不说明原因；401 / 404 也是纯文本（不套信封，401 带 WWW-Authenticate: Bearer）；令牌判定先于任何数据库查询'
       - docker-compose.yml 声明 billing_monitor_token（file ./secrets/monitor.token，注释照 smtp 那一把写明缺文件时的实测行为），把 BILLING_MONITOR_TOKEN_FILE=/run/secrets/billing_monitor_token 写进后端环境并挂给后端，否则 test_every_credential_file_setting_is_wired_into_compose 变红
       - 新建 tests/backend/test_internal_alerts.py，覆盖设计 §7「fx_fetch 维度」「fx_stale 维度」「告警接口访问控制」三行（冻结的吉隆坡日期，含跨月）
-      - docs/api.md 记告警接口（机器接口、不套信封、行格式、两层访问控制）；docs/TODO.md 新增 AIH-TASK-042 记录段
+      - docs/api.md 记告警接口（机器接口、不套信封、行格式、两层访问控制）
       - 测试里的 uuid 用全零占位值（secret-scan）；令牌用明显的测试值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
@@ -2070,7 +2070,7 @@ tasks:
       - nginx：location = /internal/alerts 的 allow 名单与 /readyz 相同、其余 deny、代理到 API；另加 location /internal/ { deny all; }；tests/backend/test_compose.py 钉住两份名单一致
       - monitor.sh 新增 check_alerts：令牌文件的宿主机路径取 .env 的 BILLING_MONITOR_TOKEN_HOST_FILE（字面解析，不 source）；令牌不进任何命令行参数，经 bash 内建 printf 写进标准输入交给 curl --config -；逐行解析，每个维度用 BILLING_HEALTHCHECK_ALERT_<维度大写>_URL 推一个检查；缺地址只记日志；接口不通或非 200 时不推；复核一并覆盖；tests/backend/test_deploy.py 静态钉住；按 monitor.sh 既有方式做设计 §7 的本地演练，结果写进任务记录，环境里跑不了就如实写明
       - config_snapshot.sh 的心跳地址自查改为从 .env 取所有匹配 ^BILLING_HEALTHCHECK_[A-Z0-9_]*_URL= 的键，删掉手写清单；自查仍在加密之前；test_deploy.py 的对应用例同步改
-      - docs/deployment.md 与 docs/runbook.md 写设计 §8 的合并后运维步骤（令牌文件属主 10001、属组为部署用户的主组、0440，与 .env 的 BILLING_MONITOR_TOKEN_HOST_FILE、两个检查及其 BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL / …_FX_STALE_URL、手工触发一次拉取、发布第一个汇率）与 FX 故障处理（拉取失败、无记录、过期、发布错了的退役与补发）；docs/adr/ADR-0005-fx-rate-source.md 收口条件旁注明两条告警已落地、过期阈值按 Kelvin 2026-09-29 的决定为 5 个日历日；docs/TODO.md 新增 AIH-TASK-043 记录段
+      - docs/deployment.md 与 docs/runbook.md 写设计 §8 的合并后运维步骤（令牌文件属主 10001、属组为部署用户的主组、0440，与 .env 的 BILLING_MONITOR_TOKEN_HOST_FILE、两个检查及其 BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL / …_FX_STALE_URL、手工触发一次拉取、发布第一个汇率）与 FX 故障处理（拉取失败、无记录、过期、发布错了的退役与补发）；docs/adr/ADR-0005-fx-rate-source.md 收口条件旁注明两条告警已落地、过期阈值按 Kelvin 2026-09-29 的决定为 5 个日历日
       - 不写任何真实主机名、IP、凭据或心跳地址；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
@@ -2131,7 +2131,7 @@ tasks:
       - '告警：在 app/services/alerts.py 注册 usage_event_conflicts 维度（最近 24 小时冲突行数与最早时刻，> 0 为 P2）；docs/runbook.md 写明「摄取中断」由现有 services / readyz 检查覆盖、以及部署后经 nginx 发 1 MiB + 1 字节的实测步骤（结果留在任务记录）'
       - 两个审计动作（USAGE_EVENT_SCOPE_MISMATCH、USAGE_EVENT_IDEMPOTENCY_CONFLICT）内容按设计 §2「审计」，不含载荷；新 entity_type usage_event 的 entity_id 是原事件的 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红；integration_credential 已分类，不动
       - 测试覆盖设计 §7 全部行；数据库约束、并发重复与并发冲突放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表枚举列加进 test_model_columns.py；本任务补齐 REQ-AUTH-001 的重放测试证据并在 docs/TODO.md 勾掉对应后移项
-      - docs/api.md 记端点、请求头补充（每次尝试换新 X-Acuven-Request-Id）、字段规则、错误表与 retryable、413 的 request_id 为 null；docs/database-schema.md 记两张表；docs/TODO.md 新增 AIH-TASK-029 记录段，记下两个审计动作对 §66 的补充、§79 列名与载荷字段一致的取名、按凭据限流仍是待办
+      - docs/api.md 记端点、请求头补充（每次尝试换新 X-Acuven-Request-Id）、字段规则、错误表与 retryable、413 的 request_id 为 null；docs/database-schema.md 记两张表；PR 描述的任务记录记下两个审计动作对 §66 的补充、§79 列名与载荷字段一致的取名、按凭据限流仍是待办
       - 不计费、不入队、不做批量端点；实现时把单条处理拆成 ingest_one（设计 AIH-TASK-030 要复用）
       - 测试里的 uuid 用全零占位值（secret-scan）；价格、汇率与金额一律用明显的虚构值
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
@@ -2208,7 +2208,7 @@ tasks:
       - 上限：BILLING_INGEST_BATCH_MAX（默认 100）与 BILLING_INGEST_BATCH_MAX_BYTES（默认 1 MiB）带配置校验；超条数 422 BATCH_TOO_LARGE；超大小 413；单个元素超 16 KiB 该条 PAYLOAD_TOO_LARGE；tests/backend/test_compose.py 钉住 nginx 集成前缀块的上限等于 BILLING_INGEST_BATCH_MAX_BYTES 默认值
       - 若 029 的实现没有拆出 ingest_one，在本任务拆出，且单条端点的行为与测试不变
       - 测试覆盖设计 §7 全部行；并发批放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑
-      - docs/api.md 记批量端点、响应形状与上限；docs/TODO.md 新增 AIH-TASK-030 记录段，并写明部署后经 nginx 发 1 MiB + 1 字节到批量端点的实测结果
+      - docs/api.md 记批量端点、响应形状与上限；PR 描述的任务记录写明部署后经 nginx 发 1 MiB + 1 字节到批量端点的实测结果
       - 不改 nginx、不改迁移
       - 测试里的 uuid 用全零占位值（secret-scan）；价格、汇率与金额一律用明显的虚构值
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
@@ -2267,7 +2267,7 @@ tasks:
       - 'resolve_charge_inputs(locking=True) 的取锁顺序：供应商（S，经 resolve_model）→ fx_rate_locks（S）→ pricing_rule_locks（S），价格、汇率、规则用加锁读；错误顺序与细分码（NO_PROVIDER_PRICE、MISSING_PROVIDER_COMPONENT、NO_PRICING_RULE、MISSING_RULE_COMPONENT）按设计；命中的 FIXED_RATE 规则缺分量不下落'
       - '试算接口的请求、响应（错误状态也 200 并给出部分结果、未舍入值为十进制字符串、tax_inclusive = true）、只读不写审计按设计；第一条语句 require_admin，加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；试算与计费共用同一套代码（只差 locking）'
       - 测试覆盖设计 §7 全部行（含只舍入一次、ROUND_HALF_UP 进位、未舍入链、上下文独立、确定性、不下落、客户隔离）
-      - docs/pricing-engine.md 写「计算」一节（027 已建文件；若未建则新建）；docs/api.md 记试算接口；docs/TODO.md 新增 AIH-TASK-031 记录段，记下设计 §2「对下游任务的契约」（尤其 0 元事件不写账本）
+      - docs/pricing-engine.md 写「计算」一节（027 已建文件；若未建则新建）；docs/api.md 记试算接口；PR 描述的任务记录记下设计 §2「对下游任务的契约」（尤其 0 元事件不写账本）
       - 不碰 usage_events、钱包与账本
       - 测试里的 uuid 用全零占位值（secret-scan）；价格、汇率与金额一律用明显的虚构值
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
@@ -2330,7 +2330,7 @@ tasks:
       - 重新入队两个接口（单个与批量，上限 1000，必填 reason）按设计；第一条语句 require_admin，加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；审计 USAGE_EVENT_REQUEUE，entity_type 用 usage_event、entity_id 是事件的 public_id（AIH-TASK-029 已把 usage_event 加进 PUBLIC_ENTITY_TYPES，本任务不新增 entity_type、不改 app/services/audit_query.py），否则 test_every_written_entity_type_is_classified 在 CI 变红；路径名用 requeue
       - 七个告警维度注册到 app/services/alerts.py，判定与分级按设计表，摘要不含租户与金额
       - 测试覆盖设计 §7 全部行（认领、防护令牌、卡住回收、回收不抢活、并发与崩溃、跨零停机、锁顺序与发布并发、各 CHECK 与触发器）；并发与数据库约束放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；Beat 条目加进 test_celery.py
-      - docs/database-schema.md 写全局锁顺序与新列；docs/runbook.md 写上线前步骤（至少一条全局默认规则、试点模型价格、USD 汇率、七个 Healthchecks 检查）、错误事件的排查与重新入队流程、卡住回收的含义；docs/api.md 记重新入队接口；docs/TODO.md 新增 AIH-TASK-032 记录段，并按设计勾选 Phase 2 清单里已满足的项（钱包扣费、负余额、停机、持久化 202 与异步处理等，逐项写依据），记下最热租户压测归 AIH-TASK-033
+      - docs/database-schema.md 写全局锁顺序与新列；docs/runbook.md 写上线前步骤（至少一条全局默认规则、试点模型价格、USD 汇率、七个 Healthchecks 检查）、错误事件的排查与重新入队流程、卡住回收的含义；docs/api.md 记重新入队接口；按设计勾选 docs/TODO.md Phase 2 清单里已满足的项（钱包扣费、负余额、停机、持久化 202 与异步处理等），逐项依据与「最热租户压测归 AIH-TASK-033」写在 PR 描述的任务记录里
       - 不做方案 C、不做 reprocess / rebill、不做查询接口与前端
       - 测试里的 uuid 用全零占位值（secret-scan）；价格、汇率与金额一律用明显的虚构值
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
@@ -2404,7 +2404,7 @@ tasks:
       - 事件通过真实的摄取与计费代码路径产生（经 AIH-TASK-029 的 ingest_one 或 HTTP 端点、经 AIH-TASK-032 的认领与处理函数），不直接写 usage_events 或账本；价格、规则、汇率在 billing_perf 里按脚本自建的虚构值发布
       - 'S3 的一致性核对：PROCESSED 数 = AI_USAGE 账本行数（不含 0 元事件）；每个租户期初余额 − Σ billable_cost = 期末余额；verify_wallet 全部通过；无 LEDGER_CONFLICT。任一不满足即整轮判失败'
       - tests/backend/test_perf_usage.py：只测脚本的护栏、参数解析、百分位计算与判据逻辑（不跑负载）
-      - docs/perf-baseline.md 新增一节：运行命令（照第 9 节在生产 VPS 上对 billing_perf 运行的写法）、结果表模板（留空待填）、判据；docs/TODO.md 新增 AIH-TASK-033 记录段，写明实测要在合并后由运维执行、结果回填到 docs/perf-baseline.md
+      - docs/perf-baseline.md 新增一节：运行命令（照第 9 节在生产 VPS 上对 billing_perf 运行的写法）、结果表模板（留空待填）、判据；PR 描述的任务记录写明实测要在合并后由运维执行、结果回填到 docs/perf-baseline.md
       - 不改 app/ 下任何文件；不装依赖；不改 .platform/
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 测量脚本，不改产品代码与数据；PR 正文要把这条理由写出来
     allowed_change_paths:
@@ -2456,7 +2456,7 @@ tasks:
       - 响应不含内部自增 id、载荷之外的任何内容、签名或凭据 secret；成本与毛利只在管理端（INV-7）
       - 每个处理函数第一条语句 require_admin，加进 EXPECTED_ADMIN_ROUTES；匿名 401、CUSTOMER 403
       - 测试：每个筛选条件单独与组合；分页与排序；时间段边界（半开、带时区换算）；详情各字段（MYR 原币时汇率字段为空、0 元事件无账本行、错误事件无快照）；客户隔离（筛选 A 不返回 B）；越权；uuid 用全零占位值
-      - docs/api.md 记两个接口；docs/TODO.md 新增 AIH-TASK-034 记录段
+      - docs/api.md 记两个接口
       - 不改迁移、模型与任何写路径；不装依赖；不改 .platform/
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 只读查询；PR 正文要把这条理由写出来
     allowed_change_paths:
@@ -2522,7 +2522,7 @@ tasks:
       - check_meter_types：从供应商页的链接进入计量类型页；表格里能看到迁移种子的 9 个计量类型代码（LLM_TOKEN、EMBEDDING_TOKEN、AUDIO_SECOND、AUDIO_MINUTE、TTS_CHARACTER、IMAGE_GENERATION、OCR_PAGE、DOCUMENT_PAGE、CUSTOM），其中 LLM_TOKEN 一行显示 4 个分量；后端值取页面自己发出的 GET /api/v1/admin/usage-meter-types 的响应体（被动观察，不自己发请求）
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，钱与状态机的规则都在后端（已过闸门）；PR 正文要把这条理由写出来
       - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把下面列出的新步骤加进这个脚本（文件名不变），已有步骤（login、open_customers、open_fixture、check_balance、open_audit、check_audit_entry 以及之前任务加的步骤）行为不变、照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素；沿用验收脚本已有的约束（见 AIH-TASK-024、AIH-TASK-023 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤。验收只读：只点导航链接与页内的只读入口，不点任何会写数据的按钮，不提交任何表单
-      - docs/TODO.md 新增 AIH-TASK-035 记录段；不改 planning-v1 块
+      - 不改 planning-v1 块
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminCatalog.ts
@@ -2610,7 +2610,7 @@ tasks:
       - open_fx_rates：点顶栏菜单进入汇率页，页面不是加载失败或无权限状态，拉取记录一节可见（空列表合法）
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，钱与状态机的规则都在后端（已过闸门）；PR 正文要把这条理由写出来
       - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把下面列出的新步骤加进这个脚本（文件名不变），已有步骤（login、open_customers、open_fixture、check_balance、open_audit、check_audit_entry 以及之前任务加的步骤）行为不变、照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素；沿用验收脚本已有的约束（见 AIH-TASK-024、AIH-TASK-023 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤。验收只读：只点导航链接与页内的只读入口，不点任何会写数据的按钮，不提交任何表单
-      - docs/TODO.md 新增 AIH-TASK-036 记录段；不改 planning-v1 块
+      - 不改 planning-v1 块
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminProviderPrices.ts
@@ -2703,7 +2703,7 @@ tasks:
       - open_pricing_preview：点顶栏菜单进入试算页，表单可见；不提交
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，钱与状态机的规则都在后端（已过闸门）；PR 正文要把这条理由写出来
       - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把下面列出的新步骤加进这个脚本（文件名不变），已有步骤（login、open_customers、open_fixture、check_balance、open_audit、check_audit_entry 以及之前任务加的步骤）行为不变、照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素；沿用验收脚本已有的约束（见 AIH-TASK-024、AIH-TASK-023 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤。验收只读：只点导航链接与页内的只读入口，不点任何会写数据的按钮，不提交任何表单
-      - docs/TODO.md 新增 AIH-TASK-037 记录段；不改 planning-v1 块
+      - 不改 planning-v1 块
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminPricingRules.ts
@@ -2792,7 +2792,7 @@ tasks:
       - open_usage_events：点顶栏菜单进入用量事件页，页面不是加载失败或无权限状态（空列表合法）
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，钱与状态机的规则都在后端（已过闸门）；PR 正文要把这条理由写出来
       - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把下面列出的新步骤加进这个脚本（文件名不变），已有步骤（login、open_customers、open_fixture、check_balance、open_audit、check_audit_entry 以及之前任务加的步骤）行为不变、照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素；沿用验收脚本已有的约束（见 AIH-TASK-024、AIH-TASK-023 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤。验收只读：只点导航链接与页内的只读入口，不点任何会写数据的按钮，不提交任何表单
-      - docs/TODO.md 新增 AIH-TASK-038 记录段，并按 Phase 2 清单说明管理端前端部分已齐；不改 planning-v1 块
+      - PR 描述的任务记录按 Phase 2 清单说明管理端前端部分已齐；不改 planning-v1 块
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminUsageEvents.ts
