@@ -5,6 +5,7 @@
 > **实现以本文件为准**；与 Issue 不一致时，以 Issue #183 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > 正文里的「T-C」即 [PHASE-2-plan.md](PHASE-2-plan.md) 的占位名；§11 的六个实现任务 F1–F6 登记为 `AIH-TASK-028`（F1）、`AIH-TASK-039`（F2）、`AIH-TASK-044`（F2b）、`AIH-TASK-040`（F3）、`AIH-TASK-041`（F4）、`AIH-TASK-042`（F5）、`AIH-TASK-043`（F6）。正文提到的其他占位名（T-A…T-L）对应的登记编号见 `docs/TODO.md` 的 Phase 2 一节。
 > 与 Issue 正文的唯一差别：一处链接目标由 GitHub 网页上的 `../blob/main/…` 改成仓库内的相对路径，链接文字与其余正文逐字相同。
+> 2026-09-30 补充：`fx_rate_locks` 拒绝 UPDATE 由设计闸门 #200（`APPROVED: design v1`）另行补上，见 [AIH-TASK-045-lock-tables-no-update.md](AIH-TASK-045-lock-tables-no-update.md)；本文件正文与批准不变。
 
 ---
 
