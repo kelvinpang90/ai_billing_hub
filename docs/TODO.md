@@ -23,23 +23,24 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-028` Phase 2 FX 汇率 1/6：迁移、模型与数据库触发器
-2. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
-3. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
-4. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
-5. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
-6. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
-7. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
-8. `AIH-TASK-029` Phase 2 用量摄取端点
-9. `AIH-TASK-030` Phase 2 批量用量摄取端点
-10. `AIH-TASK-031` Phase 2 计价引擎与试算预览
-11. `AIH-TASK-032` Phase 2 异步计费 worker
-12. `AIH-TASK-033` Phase 2 最热租户压测脚本
-13. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-14. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-15. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-16. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-17. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-045` Phase 2 锁表禁止 UPDATE（pricing_rule_locks 与 fx_rate_locks）
+2. `AIH-TASK-028` Phase 2 FX 汇率 1/6：迁移、模型与数据库触发器
+3. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
+4. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
+5. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
+6. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
+7. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
+8. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
+9. `AIH-TASK-029` Phase 2 用量摄取端点
+10. `AIH-TASK-030` Phase 2 批量用量摄取端点
+11. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+12. `AIH-TASK-032` Phase 2 异步计费 worker
+13. `AIH-TASK-033` Phase 2 最热租户压测脚本
+14. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+15. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+16. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+17. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+18. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -2085,6 +2086,7 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 > | T-B | 供应商价格版本 | #177 `APPROVED: design v4` | `AIH-TASK-026` |
 > | T-D | 定价规则 | #178 `APPROVED: design v4`（Kelvin 2026-09-30：保留全局默认第一条起点为空） | `AIH-TASK-027` |
 > | T-C | FX 汇率、BNM 拉取、告警接口 | #183 `APPROVED: design v3`（Kelvin 2026-09-29：从发布时刻起生效；过期阈值 5 个日历日。2026-09-30 v2：登记前预审后修正发布 / 退役规则与数据库兜底，按 BNM 实测改写适配器，按层拆分；v3：补拆分后预审指出的九处） | `AIH-TASK-028`（F1）、`AIH-TASK-039` 到 `AIH-TASK-044`（F2–F6 与 F2b） |
+> | —（T-C / T-D 的补充） | 两张锁表禁止 UPDATE | #200 `APPROVED: design v1`（#199 的 Codex 审查引出；Kelvin 2026-09-30：先修再收尾 028，新开一个闸门） | `AIH-TASK-045` |
 > | T-E | 用量摄取端点 | #176 `APPROVED: design v8` | `AIH-TASK-029` |
 > | T-F | 批量摄取 | #180 `APPROVED: design v3` | `AIH-TASK-030` |
 > | T-G | 计价引擎与试算 | #179 `APPROVED: design v1` | `AIH-TASK-031` |

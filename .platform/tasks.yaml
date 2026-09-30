@@ -1732,7 +1732,7 @@ tasks:
 
   # 028–043：Phase 2 其余任务（docs/design/PHASE-2-plan.md；占位名与编号的对照见 docs/TODO.md 的 Phase 2 一节）。
   # 028–032 过了设计闸门；033 / 034 与四个前端任务不走闸门。计划里的 T-K、T-L 各拆成两个前端任务（035 / 036、037 / 038），
-  # 免得单个 Worker run 的改动面过大。迁移串行：025 0012 → 026 0013 → 027 0014 → 028 0015 → 029 0016 → 032 0017。
+  # 免得单个 Worker run 的改动面过大。迁移串行：025 0012 → 026 0013 → 027 0014 → 028 0015 → 045 0016 → 029 0017 → 032 0018（045 是 2026-09-30 插进来的，029 / 032 各顺延一位）。
   # T-C（汇率）按设计闸门 #183 v3 §11 按层拆成七个任务（2026-09-30，登记前预审判 v1 的单个任务过大）：
   # 028 = F1 数据库、039 = F2 规则与仓储、044 = F2b 规则层的并发与性质测试、040 = F3 BNM 拉取与 Celery、
   # 041 = F4 管理端接口、042 = F5 告警接口、043 = F6 部署与告警接线。每一层合并后都能单独通过检查与 CI、单独部署（设计 §8）。
@@ -1758,6 +1758,60 @@ tasks:
       - tests/backend/test_fx_rates_db.py
       - tests/backend/test_migrations.py
       - tests/backend/test_model_columns.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 045：两张锁表禁止 UPDATE（设计闸门 #200 v1）。由 #199（收尾 028）的 Codex 审查引出，Kelvin 2026-09-30 选先修再收尾 028。
+  # 依赖写 027 而不是 028：迁移 0015 已随 #197 合并部署（e8b667b），028 的 status 要等本任务交付后由收尾 PR 改成 done。
+  - id: AIH-TASK-045
+    title: 'lock tables reject UPDATE (pricing_rule_locks and fx_rate_locks)'
+    purpose: >-
+      按 docs/design/AIH-TASK-045-lock-tables-no-update.md（设计闸门 #200 已批准 v1）新建迁移 0016，只给 pricing_rule_locks 与 fx_rate_locks 各加一个无条件拒绝的 BEFORE UPDATE 触发器，让两张单行锁表在 DML 范围内恒为 id = 1 那一行（此前只拒绝 INSERT 与 DELETE，UPDATE 能把锁行移走，版本表触发器的 FOR UPDATE 便静默锁不到行）。不改模型、服务与 0014 / 0015 的任何对象。
+    status: ready
+    depends_on:
+      - AIH-TASK-027
+    acceptance_criteria:
+      - 实现与设计 v1 §2「设计概要」、§5「失败与恢复矩阵」与 §8「迁移与上线」逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - "迁移文件名 alembic/versions/20260930_0016_lock_tables_no_update.py，revision 0016_lock_tables_no_update，down_revision 指向 0015_fx_rates；只建 trg_pricing_rule_locks_before_update 与 trg_fx_rate_locks_before_update 两个触发器，无条件 SIGNAL SQLSTATE '45000'，MESSAGE_TEXT 与同表 INSERT / DELETE 触发器相同（'<表名> holds exactly one row'）；0006 同款的触发器权限预检在任何 DDL 之前，--sql 离线模式跳过；文件头有 §132 第 13 条分析，写明两个触发器只建成一个时的清场步骤；downgrade 只删这两个触发器；不改 alembic/env.py、ORM 模型、服务与迁移 0014 / 0015"
+      - 新建 tests/backend/test_lock_tables_db.py，在 BILLING_TEST_DATABASE_URL 的真 MySQL 上两张表参数化，覆盖设计 §7 的「正常路径」「边界值」「不误杀」「其他写法」「迁移」五行（未设置时 skip、CI 必跑）；每条拒绝用例断言 SQLSTATE 与错误文本并配一条证明不误杀的通过用例；每个用例结束时锁表仍恰好是 [1]
+      - tests/backend/test_migrations.py 加 0016 一组（版本链、两个触发器的表 / 时机 / 事件、预检在任何 DDL 之前、downgrade 只删这两个）；既有用例里按「截至某版本的触发器或表集合」断言、会因 head 前进而变的，同步算上 0016；tests/backend/test_fx_rates_db.py 的升降用例（降到 0014 再升回 head）同步把 0016 的两个触发器算进去；其余既有测试一个不改
+      - docs/database-schema.md 在两张锁表的触发器表里各加一行 BEFORE UPDATE（迁移 0016，一律拒绝）；docs/TODO.md 在 Phase 2 新增 AIH-TASK-045 记录段（由 #199 的 Codex 审查引出、设计闸门 #200 v1）
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #200'
+    allowed_change_paths:
+      - alembic/versions/20260930_0016_lock_tables_no_update.py
+      - tests/backend/test_lock_tables_db.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_fx_rates_db.py
       - docs/database-schema.md
       - docs/TODO.md
     # MXC 里能跑的五项；tests.backend 只在 CI。
@@ -2116,13 +2170,13 @@ tasks:
   - id: AIH-TASK-029
     title: 'usage ingestion endpoint (signature, replay guard, durable 202, global idempotency)'
     purpose: >-
-      按 docs/design/AIH-TASK-029-usage-ingest.md（设计闸门 #176 已批准 v8）实现 POST /api/v1/integration/usage-events：读原始体 → 验签（AIH-TASK-012 的库）→ Redis nonce（不可用放行）→ 按校验顺序校验（event_id 限 UUIDv7 / ULID，usage_type 查表、未知 409 可重试，按上报形态校验）→ 归属比对 → 指纹 → 插入优先，RECEIVED 提交后才 202；合法重复 200，冲突 409 写只增冲突表与审计；每个错误响应带固定的 retryable。迁移 0016 建 usage_events（含可空的 provider_id / model_id）与 usage_event_conflicts；nginx 为集成前缀返回 JSON 413；冲突告警维度。不计费、不入队、无批量端点。
+      按 docs/design/AIH-TASK-029-usage-ingest.md（设计闸门 #176 已批准 v8）实现 POST /api/v1/integration/usage-events：读原始体 → 验签（AIH-TASK-012 的库）→ Redis nonce（不可用放行）→ 按校验顺序校验（event_id 限 UUIDv7 / ULID，usage_type 查表、未知 409 可重试，按上报形态校验）→ 归属比对 → 指纹 → 插入优先，RECEIVED 提交后才 202；合法重复 200，冲突 409 写只增冲突表与审计；每个错误响应带固定的 retryable。迁移 0017 建 usage_events（含可空的 provider_id / model_id）与 usage_event_conflicts；nginx 为集成前缀返回 JSON 413；冲突告警维度。不计费、不入队、无批量端点。
     status: ready
     depends_on:
       - AIH-TASK-043
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-029-usage-ingest.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
-      - '迁移文件名 alembic/versions/20260929_0016_usage_events.py，down_revision 指向 0015；usage_events 与 usage_event_conflicts 的列、NOT NULL（设计逐列列出）、CHECK（形态与字段组的显式条件、整数数量、非负）、复合外键（(integration_credential_id, project_id, tenant_id)、(project_id, tenant_id)、(usage_meter_type_id, payload_shape, unit, quantity_kind)、(model_id, provider_id)）、唯一约束、索引与冲突表只增触发器按设计 §2；给 integration_credentials 加 UNIQUE (id, project_id, tenant_id)、给 usage_meter_types 加 UNIQUE (id, payload_shape, unit, quantity_kind)（只新增索引，模型声明同步）；文件头有 §132 第 13 条分析；alembic/env.py 加 import'
+      - '迁移文件名 alembic/versions/20260929_0017_usage_events.py，down_revision 指向 0016；usage_events 与 usage_event_conflicts 的列、NOT NULL（设计逐列列出）、CHECK（形态与字段组的显式条件、整数数量、非负）、复合外键（(integration_credential_id, project_id, tenant_id)、(project_id, tenant_id)、(usage_meter_type_id, payload_shape, unit, quantity_kind)、(model_id, provider_id)）、唯一约束、索引与冲突表只增触发器按设计 §2；给 integration_credentials 加 UNIQUE (id, project_id, tenant_id)、给 usage_meter_types 加 UNIQUE (id, payload_shape, unit, quantity_kind)（只新增索引，模型声明同步）；文件头有 §132 第 13 条分析；alembic/env.py 加 import'
       - 端点、请求头、字段规则、校验顺序、响应与错误表（每个码的 HTTP 状态与 retryable）按设计 §2；集成端点的每一个错误响应（含 FastAPI 自身的 422 与未预期的 500）都在信封顶层带 retryable；验签用原始字节
       - 'nonce：验签之后 SET NX PXAT（时间戳 + 300 秒），键 nonce:{api_key}:{X-Acuven-Request-Id}；Redis 不可用放行并写 WARNING 日志；Redis 客户端为进程级连接池，超时 0.2 秒；若锁定版本的 redis-py 或生产 Redis 不支持 PXAT，按设计 §10 的退路用固定 TTL 660 秒并在 PR 里说明'
       - 解密缓存按设计（键含 credential.id、密文摘要与主密钥版本，LRU 1024，TTL 300 秒）；凭据行每请求都读，吊销即时生效；last_used_at 在响应后独立短事务节流更新（60 秒）
@@ -2137,7 +2191,7 @@ tasks:
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #176'
     allowed_change_paths:
-      - alembic/versions/20260929_0016_usage_events.py
+      - alembic/versions/20260929_0017_usage_events.py
       - alembic/env.py
       - app/models/usage.py
       - app/models/auth.py
@@ -2316,14 +2370,14 @@ tasks:
   - id: AIH-TASK-032
     title: 'async usage billing worker (claim, charge, negative balance, suspension, recovery)'
     purpose: >-
-      按 docs/design/AIH-TASK-032-usage-billing.md（设计闸门 #181 已批准 v2）实现计费 worker：Beat 每 10 秒扫描，短事务认领为 PROCESSING（令牌、租约、attempt_count），处理事务核对防护令牌后按锁顺序（事件 → 供应商 S → FX S → 规则 S → 钱包 → 租户）计价、经 post_transaction 扣费、写快照、PROCESSED；错误状态与细分码；失败退避与上限；每 60 秒的卡住回收；0 元事件不写账本；PROCESSED 由触发器保证不可变；管理端单个与批量重新入队（只对从未产生财务效果的错误事件）；七个告警维度。迁移 0017 给 usage_events 加快照与认领列。
+      按 docs/design/AIH-TASK-032-usage-billing.md（设计闸门 #181 已批准 v2）实现计费 worker：Beat 每 10 秒扫描，短事务认领为 PROCESSING（令牌、租约、attempt_count），处理事务核对防护令牌后按锁顺序（事件 → 供应商 S → FX S → 规则 S → 钱包 → 租户）计价、经 post_transaction 扣费、写快照、PROCESSED；错误状态与细分码；失败退避与上限；每 60 秒的卡住回收；0 元事件不写账本；PROCESSED 由触发器保证不可变；管理端单个与批量重新入队（只对从未产生财务效果的错误事件）；七个告警维度。迁移 0018 给 usage_events 加快照与认领列。
     status: ready
     depends_on:
       - AIH-TASK-030
       - AIH-TASK-031
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-032-usage-billing.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
-      - 迁移文件名 alembic/versions/20260929_0017_usage_billing.py，down_revision 指向 0016；新增列、CHECK（已处理 ⇒ 快照齐全且 MYR 与非 MYR 的汇率列规则、0 元与账本链接、认领字段与状态一致，逐列写不用布尔等式）、UNIQUE wallet_transaction_id、索引与三个触发器（PROCESSED 不可改、事件与账本对应、重新入队时账本无行）按设计 §2，写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析
+      - 迁移文件名 alembic/versions/20260929_0018_usage_billing.py，down_revision 指向 0017；新增列、CHECK（已处理 ⇒ 快照齐全且 MYR 与非 MYR 的汇率列规则、0 元与账本链接、认领字段与状态一致，逐列写不用布尔等式）、UNIQUE wallet_transaction_id、索引与三个触发器（PROCESSED 不可改、事件与账本对应、重新入队时账本无行）按设计 §2，写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析
       - 认领、处理、失败记录、卡住回收四条路径的事务边界、SKIP LOCKED、防护令牌、租约（BILLING_USAGE_LEASE_SECONDS 默认 120）、退避（2^n 封顶 300 秒）、上限（BILLING_USAGE_MAX_ATTEMPTS 默认 10）、会话级 innodb_lock_wait_timeout 10 秒，全部按设计 §2；三把共享锁拿到之后才取 now_r 并核对 occurred_at
       - '只经 post_transaction 写账本与改余额（AI_USAGE、金额 = -billable_cost、reference USAGE_EVENT / event_id）；billable_cost 为 0 不写账本、仍 PROCESSED；replayed 与 LedgerConflict 的处理按状态表；DISABLED 租户照常计费、CLOSED 判 FAILED_FINAL'
       - Celery：usage-billing-sweep（10 秒、expires 9）与 usage-stale-recovery（60 秒、expires 54）两个 Beat 条目，任务模块加进 TASK_MODULES
@@ -2336,7 +2390,7 @@ tasks:
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #181'
     allowed_change_paths:
-      - alembic/versions/20260929_0017_usage_billing.py
+      - alembic/versions/20260929_0018_usage_billing.py
       - app/models/usage.py
       - app/models/auth.py
       - app/services/usage_billing.py
