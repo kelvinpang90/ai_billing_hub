@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | [SPEC_REVIEW_v1.0.md](SPEC_REVIEW_v1.0.md) | v1.0 | 评审意见（P0×7 / P1×10 / P2×8） |
 | [REVIEW_FOLLOWUP_v1.1.md](REVIEW_FOLLOWUP_v1.1.md) | v1.1 | 25 条意见在 v1.1 的落实核对（20 解决 / 5 残留） |
-| [TODO_RECORDS_2026-09-30.md](TODO_RECORDS_2026-09-30.md) | —（`main` 为 `35fdfc1`） | 从 [docs/TODO.md](../TODO.md) 原样挪出的历史：已完成任务的记录段、Phase 0 的任务记录、已结的决策细节、流程接入过程 |
+| [TODO_RECORDS_2026-09-30.md](TODO_RECORDS_2026-09-30.md) | —（`main` 为 `83f927a`） | 从 [docs/TODO.md](../TODO.md) 原样挪出的历史：已完成任务的记录段、Phase 0 的任务记录、已结的决策细节、流程接入过程 |
 
 ⚠️ **这里的 `§N` 指的是当时那个版本的章节**。现行 spec 已退役若干章节、也改过若干条文，所以 `scripts/check_docs.py` 对本目录**不校验章节引用**（链接与约定串照查）。要查某条意见现在落在哪，以 [docs/REQUIREMENTS.md](../REQUIREMENTS.md) 的追溯表与 [docs/REVIEW-LOG.md](../REVIEW-LOG.md) 为准。
 
