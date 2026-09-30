@@ -1,9 +1,9 @@
-# AIH-TASK-028 设计：FX 汇率版本、BNM 拉取、审批与告警计数接口（已批准 v2）
+# AIH-TASK-028 设计：FX 汇率版本、BNM 拉取、审批与告警计数接口（已批准 v3）
 
-> **来源**：设计闸门 Issue #183。本文件是 `APPROVED: design v2` 那一版正文的**逐字副本**，审查者为 Codex。
+> **来源**：设计闸门 Issue #183。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**，审查者为 Codex。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #183 上被批准的 v2 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
-> 正文里的「T-C」即 [PHASE-2-plan.md](PHASE-2-plan.md) 的占位名；§11 的六个实现任务 F1–F6 登记为 `AIH-TASK-028`（F1）、`AIH-TASK-039`（F2）、`AIH-TASK-040`（F3）、`AIH-TASK-041`（F4）、`AIH-TASK-042`（F5）、`AIH-TASK-043`（F6）。正文提到的其他占位名（T-A…T-L）对应的登记编号见 `docs/TODO.md` 的 Phase 2 一节。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #183 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> 正文里的「T-C」即 [PHASE-2-plan.md](PHASE-2-plan.md) 的占位名；§11 的六个实现任务 F1–F6 登记为 `AIH-TASK-028`（F1）、`AIH-TASK-039`（F2）、`AIH-TASK-044`（F2b）、`AIH-TASK-040`（F3）、`AIH-TASK-041`（F4）、`AIH-TASK-042`（F5）、`AIH-TASK-043`（F6）。正文提到的其他占位名（T-A…T-L）对应的登记编号见 `docs/TODO.md` 的 Phase 2 一节。
 > 与 Issue 正文的唯一差别：一处链接目标由 GitHub 网页上的 `../blob/main/…` 改成仓库内的相对路径，链接文字与其余正文逐字相同。
 
 ---
@@ -23,7 +23,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v2`（v1 已批准。v2 修正登记前预审与人工核实发现的 §2 缺陷 —— 预约存在时不指定时刻的发布没有合法结果、撤销预约后下一次发布必然失败、撤销预约会把已退役的版本恢复成无尽头、数据库兜底缺 026 v4 / 027 v4 那几道 —— 按 2026-09-30 对 BNM 接口的实测改写适配器（v1 §10 假设 2「周末返回上一交易日」不成立；BNM 输出的是双精度字面量，按 v1 的精确解析每次拉取都会失败），写死 v1 留空的小决定，并把实现范围按层拆成六个任务，见 §12）
+**设计版本**：`v3`（v1、v2 已批准。v3 补登记前预审对拆分后六个任务指出的九处：§7 两处测试写法本身不成立、`monitor.sh` 把令牌放进进程参数、令牌文件的权限让宿主机的 cron 用户读不到，以及拉取记录的列类型、币种格式在哪一层校验、审计内容、拉取记录接口的形状、告警接口的错误响应与多币种汇总这些 v2 没写死的点；F2 的并发与性质用例拆成单独的测试任务。规则（P1–P4、R1–R5、数据库兜底）与 v2 相同，见 §12）
 对应需求：spec §5、§14、§17.1、§58、§74.2、§80、§95、§110、§113、§120；`REQ-FIN-001`、`REQ-FIN-002`；ADR-0005（FX 来源与取值规则）
 目标 PR：待开（批准后在 `.platform/tasks.yaml` 按 §11 登记六个实现任务，编号登记时分配）
 Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-C（含第 1 节第 2、3 条：BNM 适配器归 Phase 2；告警走计数接口 + `deploy/monitor.sh` + Healthchecks，计数接口与它的访问控制在本闸门定）
@@ -76,7 +76,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-C（含第 1 节第 2、3 �
 | 列 | 类型 | 说明 |
 | --- | --- | --- |
 | `id`、`public_id` | | |
-| `base_currency` | CHAR(3)，`^[A-Z]{3}$`，CHECK ≠ `MYR` | |
+| `base_currency` | CHAR(3)，CHECK ≠ `MYR` | 格式 `^[A-Z]{3}$` 在应用层校验（配置项、管理端请求），**数据库不做正则 CHECK**（v3 写明，与 026 的 `source_currency` 相同：MySQL 的 `REGEXP` 在默认排序规则下不分大小写，SQLite 没有 `REGEXP`） |
 | `quote_currency` | CHAR(3)，CHECK `= 'MYR'` | §17.1 |
 | `rate` | DECIMAL(24,10)，CHECK > 0 | **1 单位 `base_currency` = 多少 MYR**。BNM 按 `unit` 报价（某些币种按 100 单位），入库前除以 `unit`，要求结果在 10 位小数内精确（否则拉取记为 FAILED `UNIT_NOT_EXACT`，不写草稿）；BNM 报价数字怎么还原成十进制见「BNM 适配器」；手工录入同样最多 10 位小数，不舍入 |
 | `source` | VARCHAR(16)，CHECK `BNM` / `MANUAL` | ADR-0005 §1、§2 |
@@ -115,15 +115,21 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-C（含第 1 节第 2、3 �
 | 列 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | BIGINT PK | |
-| `base_currency` | CHAR(3) | |
-| `source` | VARCHAR(16) | `BNM` |
-| `requested_date` | DATE | v2：向 BNM 要的报价日（吉隆坡当天） |
-| `outcome` | CHECK `NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE` / `FAILED` | `NO_NEW_QUOTE`：取到报价，但该报价日已有 BNM 版本（同一天的第二、三次拉取，或并发拉取的输家）。`NO_QUOTE_FOR_DATE`（v2）：BNM 明确答「该日无记录」—— 周末、公众假期、或当天中午场尚未公布。三者都是**成功**，不计入失败 |
+| `base_currency` | CHAR(3) NOT NULL | |
+| `source` | VARCHAR(16) NOT NULL，CHECK `= 'BNM'` | |
+| `requested_date` | DATE NOT NULL | v2：向 BNM 要的报价日（吉隆坡当天） |
+| `outcome` | VARCHAR(32) NOT NULL，CHECK `NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE` / `FAILED` | v3 写明类型：`NO_QUOTE_FOR_DATE` 有 17 个字符，照抄 `status` 的 VARCHAR(16) 放不下。`NO_NEW_QUOTE`：取到报价，但该报价日已有 BNM 版本（同一天的第二、三次拉取，或并发拉取的输家）。`NO_QUOTE_FOR_DATE`（v2）：BNM 明确答「该日无记录」—— 周末、公众假期、或当天中午场尚未公布。三者都是**成功**，不计入失败 |
 | `quote_date` | DATE NULL | 取到报价时的报价日 |
 | `error_code` | VARCHAR(64) NULL | `FAILED` 时：`TIMEOUT` / `HTTP_<status>` / `BAD_PAYLOAD` / `UNIT_NOT_EXACT` / `NETWORK`；`NO_NEW_QUOTE` 时可为 `QUOTE_CHANGED`（见 §4）；不存响应体 |
-| `fx_rate_version_id` | FK NULL | `NEW_DRAFT` 时指向新草稿 |
-| `attempted_at` | DATETIME | |
+| `fx_rate_version_id` | BIGINT NULL，FK → `fx_rate_versions.id` RESTRICT | `NEW_DRAFT` 时指向新草稿 |
+| `attempted_at` | DATETIME NOT NULL | |
 
+- CHECK（v3 写明，按 `outcome` 的列组合）：
+  - `NEW_DRAFT`：`quote_date`、`fx_rate_version_id` 非空，`error_code` 为空
+  - `NO_NEW_QUOTE`：`quote_date` 非空，`fx_rate_version_id` 为空，`error_code` 为空或 `'QUOTE_CHANGED'`
+  - `NO_QUOTE_FOR_DATE`：`quote_date`、`fx_rate_version_id`、`error_code` 都为空
+  - `FAILED`：`error_code` 非空，`quote_date`、`fx_rate_version_id` 为空
+- 索引 `(base_currency, attempted_at)`：`fx_fetch` 维度按币种查最近 72 小时。
 - BEFORE UPDATE / DELETE 触发器拒绝（只增）。
 
 ### BNM 适配器（ADR-0005 §1；v2 按 2026-09-30 的实测改写）
@@ -250,10 +256,16 @@ MySQL 的 REPEATABLE READ 在事务里第一次普通读时建立快照，之后
 | `POST /api/v1/admin/fx-rates/{fx_rate_id}/publish` | 发布：可选 `effective_from` |
 | `POST /api/v1/admin/fx-rates/{fx_rate_id}/retire` | 退役：必填 `reason` |
 | `POST /api/v1/admin/fx-rates/{fx_rate_id}/discard` | 丢弃草稿 |
-| `GET /api/v1/admin/fx-rates/fetch-attempts` | 最近的拉取记录（§58「同步状态」）；路由须先于 `{fx_rate_id}` 注册，否则 `fetch-attempts` 被当成 id |
+| `GET /api/v1/admin/fx-rates/fetch-attempts` | 拉取记录（§58「同步状态」）；路由须先于 `{fx_rate_id}` 注册，否则 `fetch-attempts` 被当成 id。形状见下 |
 
 - 响应里的发布人、创建人用登录邮箱（`approved_by_email` / `created_by_email`），不返回内部用户 id（v2 写明，与 026 相同）。
 - 列表的 `status` / `source` 不是合法取值 → 422。
+- **v3 写明的接口细节**：
+  - 版本列表按 `id` 倒序（最新在前），筛选 `base_currency`、`status`、`source`；分页 §108。
+  - 手工草稿的 `observed_at` 与发布的 `effective_from` 同一规则：RFC 3339、必须带时区、换成 UTC 后必须整秒，否则 422；存 UTC。`base_currency` 可以是任何 `^[A-Z]{3}$` 且 ≠ `MYR` 的代码，**不限于** `BILLING_FX_CURRENCIES`（那是 BNM 自动拉取的范围；手工录入正是为 BNM 不覆盖的情形准备的）。
+  - 拉取记录列表：按 `attempted_at` 倒序、同一时刻按 `id` 倒序；筛选 `base_currency`、`outcome`；分页 §108。每行返回 `base_currency`、`source`、`requested_date`、`outcome`、`quote_date`、`error_code`、`fx_rate_id`（`NEW_DRAFT` 时为那条草稿的 `public_id`，否则 `null`）、`attempted_at`。拉取记录没有 `public_id`，也不返回内部 id：它只读、不可单条引用。
+  - **请求校验先于状态判断**：发布请求体里的 `effective_from` 格式不对（没有时区、不是整秒、不是合法时刻）一律 422，与版本当前状态无关；格式合法时才看状态 —— 已发布再发布 200 不写（此时即使 F < `t` 也不报 422，因为这个 F 被忽略），草稿才按「发布」一节判 422 / 409。
+- 读接口（列表、详情、拉取记录、用户邮箱）用普通读、不拿全局锁；它们只展示，不参与区间计算。
 
 错误码与价格版本同构：`FX_RATE_NOT_FOUND`（404）；`FX_RATE_NOT_DRAFT`、`FX_RATE_NOT_EDITABLE`（BNM 草稿）、`FX_RATE_NOT_RETIRABLE`、`FX_RATE_FINAL`、`EFFECTIVE_FROM_CONFLICT`（409）；`EFFECTIVE_FROM_IN_PAST`、`VALIDATION_ERROR`（422）。各自的触发条件见「状态」「发布」「退役」三张表。
 
@@ -272,9 +284,13 @@ MySQL 的 REPEATABLE READ 在事务里第一次普通读时建立快照，之后
   | 已配置 | 去首尾空白后为空或少于 32 个字符 | 404，同上记 ERROR |
   | 已配置 | 可用 | 缺 `Authorization`、不是 `Bearer`、令牌不对 → 401，不说明原因；对 → 200 |
 
+  **401 与 404 也是纯文本**（v3 写明）：`text/plain`，正文分别只有 `unauthorized` / `not found` 一行，不套 §107 信封（这个接口的所有响应都只给 `monitor.sh` 读）；401 带 `WWW-Authenticate: Bearer`。实现上直接返回纯文本响应，不抛会被全局错误处理套成信封的异常。
+
   每次请求重新读文件（轮换令牌不需要重启）。令牌判定先于任何数据库查询。配置错误的结果是接口 404 → `monitor.sh` 不推告警维度 → Healthchecks 宽限期后报「未上报」，所以不会静默。生成：`openssl rand -hex 32`（64 个字符）。
 - 响应只有计数、日期与币种，不含租户、金额或任何个人数据。
 - 维度注册表：`app/services/alerts.py` 里一个有序的维度列表，每个维度是一个只读查询函数；T-E、T-H 往里加，不改接口形状。
+- **一个维度一行，多个币种汇总进这一行**（v3 写明）：级别取各配置币种里最严重的；摘要先列不 OK 的币种各一小段（例如 `fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect`），都 OK 时列各币种最近的日期（例如 `fx_fetch OK USD last success 2026-09-29; EUR last success 2026-09-29`）。币种按 `BILLING_FX_CURRENCIES` 的顺序。
+- 维度查询用**普通读**、不拿 `fx_rate_locks`（v3 写明）：告警只是提示，不参与计费，不应让发布等它；`fx_stale` 找「覆盖当前时刻的版本」用与 `resolve_fx_rate` 相同的条件，但不加锁。
 
 ### 两个告警维度（ADR-0005 §6）
 
@@ -283,7 +299,7 @@ MySQL 的 REPEATABLE READ 在事务里第一次普通读时建立快照，之后
 | `fx_fetch` | 某个配置币种在最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT`、`NO_NEW_QUOTE` 或 `NO_QUOTE_FOR_DATE`），且至少有一条 `FAILED` —— 即「连续 3 天拉取失败」。周末、假期、中午场晚公布时 BNM 答「无记录」，记为 `NO_QUOTE_FOR_DATE`（成功），不会误报。72 小时内一条记录都没有 → OK（从未运行或 Beat 停了，由 `fx_stale` 负责） | P2 |
 | `fx_stale` | 某个配置币种**当前生效**的版本（覆盖当前时刻的那一个，与 `resolve_fx_rate` 同一规则），其报价日（`source_quote_date`，手工录入取 `observed_at` 的吉隆坡日期）距今超过 **5 个日历日**（按吉隆坡日期相减；§10 第 2 条，Kelvin 2026-09-29 选定）；或该币种根本没有生效的版本 | P2 |
 
-`monitor.sh`：新增 `check_alerts`（`curl -fsS -m 10 -H "Authorization: Bearer $(cat 令牌文件)"`，令牌文件的宿主机路径由 `.env` 的 `BILLING_MONITOR_TOKEN_HOST_FILE` 给出，字面解析、不 source），逐行解析，每个维度用 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL` 推一个检查；缺配置的维度只记日志（沿用 `heartbeat` 的做法）。接口不通时**不推**这些维度（readyz 维度已报同一个原因，避免双响），Healthchecks 的宽限期到了会自行报「未上报」。复核（`RECHECK_SECONDS`）一并覆盖。
+`monitor.sh`：新增 `check_alerts`（令牌文件的宿主机路径由 `.env` 的 `BILLING_MONITOR_TOKEN_HOST_FILE` 给出，字面解析、不 source。**令牌不进任何命令行参数**（v3：v2 写的 `-H "Authorization: Bearer $(cat …)"` 会把令牌展开进 curl 的 argv，同机任何用户用 `ps` 都看得到；仓库已有同一条规矩，见 `config_snapshot.sh` 给 aws 传凭据的写法）：用 bash 内建的 `printf` 把 `header = "Authorization: Bearer <令牌>"` 写进 curl 的标准输入，`curl -fsS -m 10 --config - <地址>` 从标准输入读这一行；令牌文件读不出或为空时只记日志、不推这些维度），逐行解析，每个维度用 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL` 推一个检查；缺配置的维度只记日志（沿用 `heartbeat` 的做法）。接口不通时**不推**这些维度（readyz 维度已报同一个原因，避免双响），Healthchecks 的宽限期到了会自行报「未上报」。复核（`RECHECK_SECONDS`）一并覆盖。
 
 **`deploy/config_snapshot.sh`**（v2，预审的 SCOPE_GAP）：它上传前的自查把每个心跳地址当凭据（知道地址就能伪造「成功」），但地址是**逐个列举**的；新增的 `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` / `…_FX_STALE_URL` 不会被查。改为从 `.env` 里取出所有匹配 `^BILLING_HEALTHCHECK_[A-Z0-9_]*_URL=` 的键逐个自查，不再手写清单 —— 于是 T-E、T-H 以后只在 `.env` 加地址（本节「对下游任务的契约」的约定），不必再改这个脚本，不会重演这个缺口。`tests/backend/test_deploy.py` 的对应用例同步改（它现在断言清单里有两个具体键名）。改动归 §11 的部署任务，路径加进它的 `allowed_change_paths`。
 
@@ -325,6 +341,16 @@ Healthchecks 用量：现有 8 个，本任务 +2，T-E +1，T-H 计划 +5，共
 | `FX_RATE_DISCARD` | 丢弃 |
 | `FX_RATE_PUBLISH` | 发布；前：被截断的前一个版本的 `public_id` 与原 `effective_to` |
 | `FX_RATE_RETIRE` | 退役；`reason`；被恢复的前一个版本（若有） |
+
+**审计内容**（v3 写明，照 026 的写法；不含内部 id，人用登录邮箱；时刻 ISO 8601 UTC；`rate` 是字符串）：
+
+| `action` | 前（before） | 后（after） |
+| --- | --- | --- |
+| `FX_RATE_CREATE` | — | `base_currency`、`rate`、`observed_at`、`source_reference`、`status` |
+| `FX_RATE_UPDATE` | 变化了的字段的旧值 | 同一组字段的新值（PATCH 无实际变化时 200、不写、不记审计） |
+| `FX_RATE_DISCARD` | `status` | `status` |
+| `FX_RATE_PUBLISH` | `status`；被截断的前一个版本的 `public_id` 与它原来的 `effective_to`（没有则省略） | `status`、`effective_from`、`effective_to`、`approved_by_email`、`approved_at`；被截断的前一个版本的新 `effective_to` |
+| `FX_RATE_RETIRE` | `status`、`effective_from`、`effective_to` | `status`、`effective_from`、`effective_to`、`reason`；被恢复的前一个版本的 `public_id`（没有则省略） |
 
 `entity_type = fx_rate_version`、`entity_id = public_id`，归进 `app/services/audit_query.py` 的 `PUBLIC_ENTITY_TYPES`（否则 `test_every_written_entity_type_is_classified` 在 CI 变红，与 026 / 027 同一情形）。五个动作都不在 §66 清单里，按先例补上并记进 `docs/TODO.md`。
 
@@ -389,7 +415,7 @@ Healthchecks 用量：现有 8 个，本任务 +2，T-E +1，T-H 计划 +5，共
 - **鉴权主体**：管理端接口只有 ADMIN；告警接口是 nginx 网段白名单 + Bearer 令牌（令牌不是管理员凭据，只能读告警行）。
 - **禁止返回的字段**：内部 id；告警行不含金额、租户与个人数据。
 - **日志 / 审计 / 异常**：拉取失败只记错误码，不记 BNM 响应体；令牌不进日志、不进 `.env`（`.env` 里只有令牌文件的宿主机路径）；令牌文件读不出时的日志不含路径。
-- **密钥**：监控令牌是新的密钥文件，属主 `10001`、权限 `0400`（与其他 secrets 同法）；宿主机上 `monitor.sh` 读同一份文件的宿主机路径。部署步骤写进 `docs/deployment.md` 与 `docs/runbook.md`。
+- **密钥**：监控令牌是新的密钥文件，属主 `10001`、**属组是部署用户的主组、权限 `0440`**（v3：其他 secrets 是 `10001:10001 0400`，但 `monitor.sh` 由 cron 以部署用户运行（`deploy/cron.d/ai_billing_hub` 的 `@DEPLOY_USER@`，不是 root），`0400` 它读不到，告警维度就永远推不出去。容器以 uid 10001 按属主读；宿主机部署用户按属组读；其他用户读不到。不为此让容器以 root 运行，也不复制第二份令牌 —— 两份要同步轮换）。宿主机上 `monitor.sh` 读同一份文件的宿主机路径。部署步骤写进 `docs/deployment.md` 与 `docs/runbook.md`。
 - **prompt / response**：不涉及。
 - **保留与删除**：汇率版本与拉取记录都不删除。
 - **公开仓库**：§10 录制的 BNM 响应是公开的汇率数据，可以进仓库；测试里自造的汇率与金额用明显的虚构值。
@@ -399,7 +425,7 @@ Healthchecks 用量：现有 8 个，本任务 +2，T-E +1，T-H 计划 +5，共
 | 风险/需求 | 测试层级 | 场景 | 预期结果 |
 | --- | --- | --- | --- |
 | 发布与退役的规则（v2） | integration（SQLite 与 MySQL 各一次） | §2 例子 E1–E16 **各一个用例**：经服务层、冻结时钟建「之前」的数据，执行「操作」，断言「之后」的每一行（状态、区间）与响应码；E9 ①、E13 另断言 `resolve_fx_rate` 对空档内 / 预约起点之后的时刻前后的结果 | 与例子逐字一致 |
-| BNM 解析 | unit（§10 的录制响应，不联网） | USD 中午场；JPY（`unit = 100`）；`1130` 场（`middle_rate` 为 `null`、`meta.session` 不符）；「无记录」404；由录制派生：`data.rate.date` / `currency_code` 不符、`middle_rate` 为 0 / 字符串 / 缺失、还原后超 6 位小数、`unit` 为 0 / 3（除不尽）、非 JSON（HTML）、其他形状的 404、HTTP 500、超时 | USD `rate = 4.083`、JPY `rate = 0.025936`；`None`（无记录）；其余各自的错误码 |
+| BNM 解析 | unit（§10 的录制响应，不联网） | USD 中午场；JPY（`unit = 100`）；`1130` 场（`middle_rate` 为 `null`、`meta.session` 不符）；「无记录」404；由录制派生：`data.rate.date` / `currency_code` 不符、`middle_rate` 为 0 / 字符串 / 缺失、还原后超 6 位小数、`unit` 为 0（`BAD_PAYLOAD`）/ 7（`4.083 / 7` 除不尽 → `UNIT_NOT_EXACT`；v3：v2 写的 3 除得尽，`4.083 / 3 = 1.361`）、非 JSON（HTML）、其他形状的 404、HTTP 500、超时 | USD `rate = 4.083`、JPY `rate = 0.025936`；`None`（无记录）；其余各自的错误码 |
 | 双精度还原（v2） | unit | 录制响应里六个币种的 `middle_rate` 字面量 | 还原为 4.083 / 2.5936 / 0.0227 / 3.1935 / 4.6387 / 5.4057；`json.loads(..., parse_float=Decimal)` 的写法被本用例判失败（防回退） |
 | 请求 | unit | 适配器发出的 URL 与请求头 | `/public/exchange-rate/USD/date/<吉隆坡今天>?session=1200&quote=rm`，`Accept: application/vnd.BNM.API.v1+json`；UTC 16:00 与 15:59 跨吉隆坡日期 |
 | 拉取幂等 | integration | 同一报价日拉三次；并发拉两次 | 一条草稿；其余 `NO_NEW_QUOTE` |
@@ -413,7 +439,7 @@ Healthchecks 用量：现有 8 个，本任务 +2，T-E +1，T-H 计划 +5，共
 | 快照读陷阱（计费侧） | integration（真 MySQL） | 计费事务先普通读、另一连接发布、再取汇率 | 取到新版本 |
 | 快照读陷阱（发布侧，v2） | integration（真 MySQL，两个连接） | 另一连接锁着 `fx_rate_locks`、发布一个版本；本连接发布等锁，它提交后继续 | 本次发布按新的 L 计算区间（P2 截断刚发布的那个，或 P3 的 409），复查通过 |
 | 触发器（MySQL） | integration | 改已发布版本的 `rate` / 起点；删版本；改拉取记录；删或再插锁表行；直接插入已发布的版本；草稿直接改为 `RETIRED`（v2）；改已退役版本的 `effective_to` 或任何列（v2）；已退役改回已发布 | 全部拒绝 |
-| `open_slot` 与唯一约束（MySQL，v2 第一轮审查后补） | integration | 同一币种对：A 发布、B 发布截断 A 之后，再建 BNM 草稿与手工草稿各一条；再丢弃一条、退役 B；此时共存多条 `DRAFT` / `DISCARDED` / 已截断 `PUBLISHED` / `RETIRED`；再直接写入第二条未截断的 `PUBLISHED` | 前面全部成功，非开放行的 `open_slot` 为 `NULL`；最后一步撞唯一约束 |
+| `open_slot` 与唯一约束（MySQL，v2 第一轮审查后补；v3 改写顺序） | integration | 同一币种对：① A 发布、B 发布截断 A，再建 BNM 草稿与手工草稿各一条、丢弃其中一条；② B 仍未截断时，把剩下那条草稿直接改为起点晚于 B、尽头为空的 `PUBLISHED`；③ 退役 B 之后，再建一条草稿 | ① 全部成功，非开放行（截断的 A、草稿、丢弃的）`open_slot` 为 `NULL`，只有 B 为 1；② 被拒绝 —— 两条尽头都为空的区间必然相交，重叠触发器先于唯一索引触发，**只断言被拒绝，不断言是哪一道**（v3：v2 在退役 B 之后才写第二条开放版本，那时没有第一条，这一步测不出任何东西）；③ 成功（`RETIRED`、截断的 `PUBLISHED`、`DISCARDED`、`DRAFT` 共存） |
 | 数据库兜底（MySQL，v2） | integration | 绕过服务直接写：已有时间线时把草稿改为起点为空的 `PUBLISHED`；把草稿改为带尽头的 `PUBLISHED`（插进退役空档）；`PUBLISHED` 改为 `RETIRED` 而不写尽头；空时间线（只有空区间行）时把草稿改为起点为空的 `PUBLISHED` | 前三种拒绝；第四种通过（证明不误杀）；服务层的正常路径不受影响 |
 | 区间不重叠（MySQL） | integration | 绕过服务直接写：同一币种两个已截断且相交的版本；首尾相接；空区间；空区间落在另一行区间内部 | 相交的被拒绝，其余通过；服务层正常路径通过 |
 | 精度 | integration | `rate` 10 / 11 位小数；0；负数；数字而非字符串 | 通过 / 422 |
@@ -432,7 +458,7 @@ Healthchecks 用量：现有 8 个，本任务 +2，T-E +1，T-H 计划 +5，共
 - **数据迁移步骤**：建 `fx_rate_locks`（写入一行）、`fx_rate_versions`、`fx_fetch_attempts`，约束与触发器（先做 0006 同款预检）。序号取实现时的下一个。
 - **部署顺序**：合并即自动部署，先迁移后代码。§11 的六个任务依次合并，每一步单独部署也安全：数据库任务之后只有空表；规则与接口任务之后管理员可以录入与发布，但还没有拉取；拉取任务之后开始每天生成草稿；告警任务之后接口可用（令牌文件建好之前是 404）；部署任务之后 `monitor.sh` 开始推维度。
 - **合并后的运维步骤**（写进 `docs/deployment.md` 与 `docs/runbook.md`，由 Kelvin 或经授权在 VPS 上执行）：
-  1. 生成监控令牌文件 `secrets/monitor.token`（`openssl rand -hex 32`，`10001:10001 0400`）；compose 已按固定的容器内路径挂好（告警任务合并时），`.env` 只加 `BILLING_MONITOR_TOKEN_HOST_FILE`（宿主机路径，给 `monitor.sh`）
+  1. 生成监控令牌文件 `secrets/monitor.token`（`openssl rand -hex 32`，属主 `10001`、属组为部署用户的主组、`0440`，见 §6）；compose 已按固定的容器内路径挂好（告警任务合并时），`.env` 只加 `BILLING_MONITOR_TOKEN_HOST_FILE`（宿主机路径，给 `monitor.sh`）
   2. Healthchecks 新建 `fx_fetch`、`fx_stale` 两个检查，地址写进 `.env`
   3. 在 worker 容器里手工触发一次拉取，确认 BNM 可达（周末或 12:30 前答「无记录」也算可达）
   4. 管理员发布第一个汇率版本
@@ -512,22 +538,24 @@ Healthchecks 用量：现有 8 个，本任务 +2，T-E +1，T-H 计划 +5，共
 - [ ] 没有未解决的阻断假设
 - [ ] 审批绑定到明确的设计版本
 
-### 实现范围（v2：按层拆成六个任务，批准后逐个登记为 Worker 任务）
+### 实现范围（v2：按层拆成六个任务，v3 再把 F2 的测试拆出 F2b；批准后逐个登记为 Worker 任务）
 
 v1 的实现范围是一个任务、39 个允许路径，横跨数据库、规则、接口、后台任务与部署。v2 按层拆开：每个任务只做一层，用 `depends_on` 串起来，每一层合并后都能单独通过检查与 CI、单独部署（§8）；规则多的部分先交付规则与 §2 例子对应的测试，再接接口。编号登记时分配，下表用 F1–F6 指代。
 
 | 任务 | 层 | 对应 v2 章节 | 依赖 | `allowed_change_paths` |
 | --- | --- | --- | --- | --- |
 | F1 | 数据库迁移与模型触发器 | §2「数据库」、§8 迁移 | AIH-TASK-027 | `alembic/versions/<日期>_0015_fx_rates.py`、`alembic/env.py`、`app/models/fx_rates.py`、`tests/backend/test_fx_rates_db.py`（新：CHECK、触发器、直接写库）、`tests/backend/test_migrations.py`、`tests/backend/test_model_columns.py`、`docs/database-schema.md`、`docs/TODO.md`（8） |
-| F2 | 业务规则服务与仓储 | §2「状态」「发布」「退役」「锁在前」「事务内复查」「审计」「时间语义」、§4 | F1 | `app/repositories/fx_rates.py`（含 `resolve_fx_rate` 与取共享锁的函数）、`app/services/fx_rates.py`、`app/models/auth.py`、`app/services/audit_query.py`、`tests/backend/test_fx_rates_service.py`（E1–E16、复查、回滚）、`tests/backend/test_fx_rates_resolve.py`（并发、快照读、性质用例）、`docs/currency-and-fx.md`（新，规则部分）、`docs/TODO.md`（8） |
+| F2 | 业务规则服务与仓储 | §2「状态」「发布」「退役」「锁在前」「事务内复查」「审计」「时间语义」、§4 | F1 | `app/repositories/fx_rates.py`（含 `resolve_fx_rate` 与取共享锁的函数）、`app/services/fx_rates.py`、`app/models/auth.py`、`app/services/audit_query.py`、`tests/backend/test_fx_rates_service.py`（E1–E16、复查、回滚）、`docs/currency-and-fx.md`（新，规则部分）、`docs/TODO.md`（7） |
+| F2b | 规则层的并发与性质测试（只加测试） | §7「时间稳定性」「发布与计费并发」「快照读陷阱」（两行） | F2 | `tests/backend/test_fx_rates_resolve.py`（新）、`docs/TODO.md`（2）。v3：v2 预留的拆法，登记前预审判 F2 过大后启用 |
 | F3 | 后台任务：BNM 拉取与 Celery | §2「BNM 适配器」、`fx_fetch_attempts`、§4 拉取并发、§10 录制 | F2 | `app/core/fx_source.py`、`app/core/config.py`（四个 FX 配置项）、`app/tasks/fx_fetch.py`、`app/core/celery_app.py`、`tests/backend/test_fx_source.py`（录制响应作字符串常量）、`tests/backend/test_fx_fetch.py`、`tests/backend/test_celery.py`、`tests/backend/test_config.py`、`docs/currency-and-fx.md`（BNM 一节）、`docs/TODO.md`（10） |
-| F4 | 管理端接口 | §2「接口」（管理端八个）、§6 | F2 | `app/schemas/fx_rates.py`、`app/api/admin_fx_rates.py`、`app/main.py`、`tests/backend/test_fx_rates_api.py`、`tests/backend/test_admin_customers_api.py`（路由枚举）、`docs/api.md`、`docs/TODO.md`（7） |
+| F4 | 管理端接口 | §2「接口」（管理端八个，含 v3 写明的细节）、§6 | F2 | `app/schemas/fx_rates.py`、`app/api/admin_fx_rates.py`、`app/main.py`、`app/repositories/fx_rates.py` 与 `app/services/fx_rates.py`（v3：只**新增**列表、详情、拉取记录与用户邮箱的只读查询，不改 F2 的规则代码）、`tests/backend/test_fx_rates_api.py`、`tests/backend/test_admin_customers_api.py`（路由枚举）、`docs/api.md`、`docs/TODO.md`（9） |
 | F5 | 内部告警接口与两个维度 | §2「内部告警接口」「两个告警维度」 | F3 | `app/services/alerts.py`、`app/api/internal_alerts.py`、`app/core/config.py`（`monitor_token_file`）、`app/main.py`、`docker-compose.yml`（令牌 secret 与容器内路径 —— 必须与配置项同一个任务：`test_every_credential_file_setting_is_wired_into_compose` 要求每个 `*_file` 配置项都在 compose 里挂好）、`tests/backend/test_internal_alerts.py`、`tests/backend/test_compose.py`、`docs/api.md`、`docs/TODO.md`（9） |
-| F6 | 部署与告警接线 | §2 nginx 两层中的第一层、`monitor.sh`、`config_snapshot.sh`、§8 运维步骤 | F5 | `deploy/nginx/billing.conf`、`deploy/monitor.sh`、`deploy/config_snapshot.sh`、`.env.example`、`tests/backend/test_compose.py`（nginx 规则）、`tests/backend/test_deploy.py`、`docs/deployment.md`、`docs/runbook.md`、`docs/adr/ADR-0005-fx-rate-source.md`（收口条件旁注明两条告警已落地、过期阈值按 Kelvin 2026-09-29 的决定为 5 个日历日）、`docs/TODO.md`（10） |
+| F6 | 部署与告警接线 | §2 nginx 两层中的第一层、`monitor.sh`、`config_snapshot.sh`、§8 运维步骤 | F5 | `deploy/nginx/billing.conf`、`deploy/monitor.sh`、`deploy/config_snapshot.sh`、`tests/backend/test_compose.py`（nginx 规则）、`tests/backend/test_deploy.py`、`docs/deployment.md`、`docs/runbook.md`、`docs/adr/ADR-0005-fx-rate-source.md`（收口条件旁注明两条告警已落地、过期阈值按 Kelvin 2026-09-29 的决定为 5 个日历日）、`docs/TODO.md`（9）。v3：不改 `.env.example` —— 现有的心跳地址都只记在 `docs/deployment.md`，`.env.example` 里一个都没有 |
 
 - F4 与 F3 都只依赖 F2，可以不分先后；F5 依赖 F3 是因为 `fx_fetch` 维度读拉取记录的 `outcome` 与配置的币种。
 - 下游：T-G（计价）只需要 F2；T-E、T-H 往注册表加维度需要 F5；前端 T-K 需要 F4。登记时同步它们的 `depends_on`。
-- 每个任务的验收标准不超过 8 条、预计改动不超过约 1500 行；F2 最大（服务 + 16 个例子用例 + 并发与性质用例），若登记前预审仍判过大，把 `test_fx_rates_resolve.py` 的并发与性质用例拆成 F2 之后的一个纯测试任务。
+- 每个任务的验收标准不超过 8 条、预计改动不超过约 1500 行。F2 最大；v3 已把 `test_fx_rates_resolve.py` 的并发与性质用例拆给 F2b。若 F2 仍超出，不再往下拆规则代码（发布与退役共用锁、复查与写入顺序，拆开后中间那一步无法单独验证），在登记 PR 里写明原因。
+- F2b 只依赖 F2；下游（T-G）不依赖 F2b。
 
 ## 12. 版本变更记录
 
@@ -535,6 +563,7 @@ v1 的实现范围是一个任务、39 个允许路径，横跨数据库、规�
 | --- | --- | --- | --- |
 | v1 | 2026-09-29 | 初稿 | — |
 | v2 | 2026-09-30 | ① 发布规则重写为 P1–P4：末尾版本未截断且尚未开始时不给时刻 → 409（v1 截成倒挂或空区间，没有合法结果）；「F = E 或 ≥ `t`」统一为「F ≥ `t`」。② 空区间不在时间线上：不当末尾版本、不算「有过版本」、不进复查排序；复查写明三条断言。③ 退役重写为 R1–R5：R1 / R2 界线「起点 > `t`」；撤销预约只恢复被它截断的 `PUBLISHED` 行。④ 数据库：CHECK 逐条写出并加「停用必有尽头」；触发器禁止 `DRAFT → RETIRED`、发布跃迁上尽头必须为空、`RETIRED` 不可改、空区间跳过重叠判定。⑤ 新增「锁在前」。⑥ 规则表每行配例子 E1–E16，§7 每个例子一个用例。⑦ BNM 适配器按实测改写：按日期取、逐字段核对、双精度字面量取最短往返表示、「无记录」404 → 新结果 `NO_QUOTE_FOR_DATE`（拉取记录加 `requested_date`）、一天三次；§10 附录制响应。⑧ 令牌文件每种状态的行为；`fx_stale` 例子改成日历日；compose 直接写容器内路径。⑨ `config_snapshot.sh` 按键名模式自查。⑩ §11 拆成六个任务。⑪ v2 第一轮设计审查（REQUEST_CHANGES）后补：`open_slot` 写明 `CASE … THEN 1 END`（其余为 `NULL`），§7 补「截断之后再建草稿」的约束用例；v2 尚未获批，按 027 v4 多轮审查的先例不另升版本 | 2026-09-30 OpenClaw 登记前预审（ACVDEV-TASK-059/062）对 v1 判 `NOT_READY`，九条发现逐条核实见下；另自查发现 v1 的复查排序与 026 v3 同一缺陷、「F = E」与「F ≥ `t`」矛盾、BNM 双精度字面量（被取消的 run `fcf9c426` 自编的夹具是干净小数、用 `parse_float=Decimal`，按真实响应上线后每次拉取都会判 `UNIT_NOT_EXACT`） |
+| v3 | 2026-09-30 | ① `fx_fetch_attempts` 写明列类型（`outcome` VARCHAR(32)）、非空、按 `outcome` 的列组合 CHECK 与索引；② `base_currency` 的格式只在应用层校验；③ 审计内容表；④ 管理端接口细节：列表排序、`observed_at` 格式、手工币种不限于配置、拉取记录接口的形状、请求校验先于状态判断、读接口不拿锁；⑤ 告警接口的 401 / 404 也是纯文本；一个维度一行、多币种汇总；维度查询不加锁；⑥ `monitor.sh` 令牌经标准输入交给 `curl --config -`，不进 argv；⑦ 令牌文件 `10001:<部署用户组> 0440`；⑧ §7 `open_slot` 一行改写顺序、`unit` 除不尽的例子由 3 改为 7；⑨ §11 F2 的并发与性质用例拆成 F2b，F4 可新增只读查询，F6 不改 `.env.example`。P1–P4、R1–R5、数据库兜底与 v2 相同 | v2 批准后，登记前预审（ACVDEV-TASK-059/062）对拆出的六个任务给出的发现，逐条核实见下 |
 
 ### v2 的触发：登记前预审九条逐条核实
 
@@ -551,3 +580,21 @@ v1 的实现范围是一个任务、39 个允许路径，横跨数据库、规�
 | 9 | TOO_LARGE：39 个路径、13 条标准 | **成立** | §11 拆成六个任务，每个 7–10 个路径 |
 
 **送审前的模型核对**（v2）：把 P1–P4、R1–R5 写成一个约 150 行的 Python 模型，随机生成 2 万个「发布（给 / 不给 F，F 在 `t` 前后）/ 退役 / 同一秒重复」序列，每一步后断言：CHECK 1–4、时间线不相交、至多一个未截断、事务内复查三条、对 `≤ now` 的每个时刻「一旦取到版本 V，之后永远是 V」、P4 的 E ≤ `t`、除 §2 列出的 409 / 422 外没有别的失败。v2 全部通过；把 v1 的三处写法分别放回去（P3 截断、空区间算末尾版本、无条件恢复），每一处都被断言抓到。这个模型只是送审前的自查，不进仓库；§7 的性质用例由 F2 按同样的断言写。
+
+### v3 的触发：拆分后六个任务的登记前预审逐条核实
+
+预审对象是 v2 与按 v2 §11 登记的六个任务（登记分支的干净导出）。028、040、041、043 判 `NOT_READY`，039、042 判 `READY` 但也有发现。
+
+| 任务 | 预审发现 | 核实 | v3 的处理 |
+| --- | --- | --- | --- |
+| F1 | DESIGN_DEFECT §7：`open_slot` 用例在退役 B 之后才写第二条开放版本，此时没有第一条；且重叠触发器总先于唯一索引触发，唯一约束冲突观察不到 | **成立** | §7 该行改写顺序，只断言「被拒绝」 |
+| F1 | UNDECIDED §2：`outcome` 的类型与宽度、拉取记录的非空与跨列 CHECK 未写；照抄 VARCHAR(16) 放不下 `NO_QUOTE_FOR_DATE` | **成立** | 列类型、非空、列组合 CHECK、索引 |
+| F1 | UNDECIDED §2：`^[A-Z]{3}$` 是否数据库 CHECK；MySQL `REGEXP` 默认不分大小写，SQLite 没有 `REGEXP` | **成立**（026 的迁移确实没有这条 CHECK） | 只在应用层校验 |
+| F2 | TOO_LARGE：并发、快照读与性质用例应拆成纯测试任务 | **成立**（v2 §11 已预留这个拆法） | 拆出 F2b |
+| F2 | UNDECIDED §2：审计内容未写 | **成立** | 审计内容表 |
+| F3 | DESIGN_DEFECT §7：`unit = 3` 的例子除得尽（`4.083 / 3 = 1.361`） | **成立** | 改为 7 |
+| F4 | SCOPE_GAP ×2：列表、详情、拉取记录、邮箱的查询按仓库惯例在服务 / 仓储层，F2 不提供、F4 又改不了那两个文件 | **成立** | F4 可在两个文件里只新增只读查询 |
+| F4 | UNDECIDED §2：拉取记录接口的分页、排序、筛选、字段；`observed_at` 格式；列表排序；手工币种是否限于配置；已发布再发布遇到非法 `effective_from` 时 200 与 422 谁先 | **成立**，五点都没写 | §2「接口」v3 细节 |
+| F5 | UNDECIDED §2：401 / 404 用纯文本还是信封；多币种怎么汇总成一行；`fx_stale` 加不加锁 | **成立** | 纯文本；一行汇总；普通读 |
+| F6 | DESIGN_DEFECT §2：`$(cat …)` 把令牌放进 curl 的 argv，`ps` 可见 | **成立** | 经标准输入交给 `curl --config -` |
+| F6 | UNDECIDED §6：令牌文件 `10001:10001 0400`，而 cron 以非 root 的部署用户跑 `monitor.sh`，读不到 | **成立** | `10001:<部署用户组> 0440` |
