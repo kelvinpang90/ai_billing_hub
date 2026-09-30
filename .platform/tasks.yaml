@@ -2041,7 +2041,7 @@ tasks:
       - 认领、处理、失败记录、卡住回收四条路径的事务边界、SKIP LOCKED、防护令牌、租约（BILLING_USAGE_LEASE_SECONDS 默认 120）、退避（2^n 封顶 300 秒）、上限（BILLING_USAGE_MAX_ATTEMPTS 默认 10）、会话级 innodb_lock_wait_timeout 10 秒，全部按设计 §2；三把共享锁拿到之后才取 now_r 并核对 occurred_at
       - '只经 post_transaction 写账本与改余额（AI_USAGE、金额 = -billable_cost、reference USAGE_EVENT / event_id）；billable_cost 为 0 不写账本、仍 PROCESSED；replayed 与 LedgerConflict 的处理按状态表；DISABLED 租户照常计费、CLOSED 判 FAILED_FINAL'
       - Celery：usage-billing-sweep（10 秒、expires 9）与 usage-stale-recovery（60 秒、expires 54）两个 Beat 条目，任务模块加进 TASK_MODULES
-      - 重新入队两个接口（单个与批量，上限 1000，必填 reason）按设计；第一条语句 require_admin，加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；审计 USAGE_EVENT_REQUEUE；路径名用 requeue
+      - 重新入队两个接口（单个与批量，上限 1000，必填 reason）按设计；第一条语句 require_admin，加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；审计 USAGE_EVENT_REQUEUE，entity_type 用 usage_event、entity_id 是事件的 public_id（AIH-TASK-029 已把 usage_event 加进 PUBLIC_ENTITY_TYPES，本任务不新增 entity_type、不改 app/services/audit_query.py），否则 test_every_written_entity_type_is_classified 在 CI 变红；路径名用 requeue
       - 七个告警维度注册到 app/services/alerts.py，判定与分级按设计表，摘要不含租户与金额
       - 测试覆盖设计 §7 全部行（认领、防护令牌、卡住回收、回收不抢活、并发与崩溃、跨零停机、锁顺序与发布并发、各 CHECK 与触发器）；并发与数据库约束放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；Beat 条目加进 test_celery.py
       - docs/database-schema.md 写全局锁顺序与新列；docs/runbook.md 写上线前步骤（至少一条全局默认规则、试点模型价格、USD 汇率、七个 Healthchecks 检查）、错误事件的排查与重新入队流程、卡住回收的含义；docs/api.md 记重新入队接口；docs/TODO.md 新增 AIH-TASK-032 记录段，并按设计勾选 Phase 2 清单里已满足的项（钱包扣费、负余额、停机、持久化 202 与异步处理等，逐项写依据），记下最热租户压测归 AIH-TASK-033
