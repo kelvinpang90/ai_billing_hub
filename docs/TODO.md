@@ -2369,11 +2369,27 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
   - 审计：`PRICING_PUBLISH` / `PRICING_RETIRE` 的后状态带范围四项（`priority_scope`、`customer_id`、`provider_code`、
     `model_code`），发布还带策略、倍数与分量；被截断 / 被恢复的前一条记为 `truncated_rule` / `restored_rule`
   - 列表排序：§16 的级别顺序，同一级里同一范围的聚在一起（按内部 id 排、不出库），再按 `effective_from`（`null` 在前）
-- [ ] **待处理：`pricing_rule` 这个审计 `entity_type` 还没有在 `app/services/audit_query.py` 归类**。
-  `tests/backend/test_admin_audit_api.py::test_every_written_entity_type_is_classified` 扫描全部写审计的地方，本任务写的
-  `pricing_rule` 不在 `PUBLIC_ENTITY_TYPES` 里，这条用例会红（它在 `tests.backend`，只在 CI 跑）。`audit_query.py` 不在
-  本任务的允许路径里（设计 v3 §11 的实现范围也没有列它；026 同一处缺口由 #190 补进契约），本任务没有改它。需要的改动是
-  把 `"pricing_rule"` 加进 `PUBLIC_ENTITY_TYPES`（`entity_id` 就是规则的 `public_id`），由契约修正或接手时补上
+- [x] **`pricing_rule` 归类**：`app/services/audit_query.py` 把 `pricing_rule` 归进 `PUBLIC_ENTITY_TYPES`（`entity_id`
+  是规则的 `public_id`）。Worker 的 run 当时没有这个文件的权限，如实记为待处理；契约由 #193 补进允许路径，接手时补上
+- [x] **交付：Claude 手工接手 run `20966ebc` 的 #192**（照 026 在 #188 的先例，不重发「开启」）：
+  - OpenClaw run `20966ebc` 基于 `b420d36` 实现、开出 Draft #192（head `15e7245`）。独立审查认为实现没有缺陷，唯一的
+    阻断是上一条的归类缺口（修复会话无权改），run 以 `review_repair_no_change` 结束。审查结束时 CI 还没跑完，实际
+    backend 5 failed / 2175 passed
+  - 5 个失败与处理：
+    1. `test_every_written_entity_type_is_classified`：上一条
+    2. `test_mixed_or_unknown_shapes_are_refused[unknown-strategy]`：测试自己的错，`strategy` 既按位置传又在
+       `**fields` 里（`TypeError`）。改成先按基准策略造请求体、再用参数覆盖，其他七个参数的请求体不变
+    3. 第 3–5 个，`test_pricing_rules_resolve.py` 里真 MySQL 的「发布与计费并发」两种顺序与「快照读陷阱」：**测试错，实现
+       无误**。三条用例照抄 026 的写法，先发布一条 `CUSTOMER` 规则当旧规则；026 的第一个版本起点为 `NULL`、立即生效，
+       但按设计 §2 只有 `GLOBAL` 的第一条可以「一直以来」，其余从 `t`（发布后的下一个整秒）起。于是旧规则在当前时刻还
+       解析不到（④ `found is None`）；同一秒里不指定时刻再发布，`t` 不晚于旧规则的起点，按设计 §2「F 必须大于末尾
+       规则的起点；未指定则取 `t`」是 409（③ 发布线程抛 `EffectiveFromConflict`，没走到暂停点，`written` 等不到；
+       ⑤ 直接抛）。修法：新增 `_started`，等旧规则按墙钟生效（至多约 1 秒）再往下走；断言一条没改
+  - 核对：在一次性 `mysql:8.4` 容器上，原测试文件复现这 3 个失败；修后 `test_pricing_rules_{resolve,api,service}.py`
+    与 `test_admin_audit_api.py` 共 270 个用例全过、无 skipped。变异核对：去掉发布 / 停用的规则锁，② 失败；把解析的
+    加锁读改成普通读，三条全失败 —— 修后的用例测到的仍是锁与加锁读本身
+  - 本地：六项检查全过；真 MySQL 上全量 `pytest` 2177 passed、3 skipped（两个要 Redis，一个是 Windows 上没有 POSIX
+    权限位；CI 上都跑）
 - [ ] **后续**：
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-L
     （AIH-TASK-037）补上

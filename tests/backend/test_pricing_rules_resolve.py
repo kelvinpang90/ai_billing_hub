@@ -24,6 +24,7 @@ import inspect
 import os
 import random
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -591,12 +592,27 @@ def _pause_inside_the_publish(monkeypatch) -> tuple[threading.Event, threading.E
     return written, release
 
 
+def _started(rule: PricingRuleView) -> PricingRuleView:
+    """Wait (wall clock) until `rule` is in effect, and return it.
+
+    Only a `GLOBAL` scope's first rule may start "always"; any other rule starts at `t`, the
+    whole second after its publish (design §2). Until then it resolves nothing, and publishing the
+    next rule without a time is a 409: `t` would not be later than the tail's start.
+    """
+    assert rule.effective_from is not None
+    deadline = time.monotonic() + 5
+    while utc_now() < rule.effective_from:
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    return rule
+
+
 def test_billing_waits_for_an_uncommitted_publish(mysql_factory, monkeypatch) -> None:
     """§7 "publishing and billing concurrently" ①: while a publish has written but not committed,
     a billing run (shared rule lock, `occurred_at ≥ t`) blocks until the commit and then selects
     the new rule."""
     rules = Rules(mysql_factory, utc_now)
-    old = rules.publish_new(CUSTOMER)
+    old = _started(rules.publish_new(CUSTOMER))
     draft = rules.draft(CUSTOMER)
     tenant_id = rules.tenant_id()
     written, release = _pause_inside_the_publish(monkeypatch)
@@ -622,7 +638,7 @@ def test_a_publish_waits_for_an_uncommitted_billing_run(mysql_factory) -> None:
     """§7 ②: a billing run holds the shared rule lock; the publish blocks until it commits, its
     `t` is later than the event, and resolving the moment again agrees with the billed one."""
     rules = Rules(mysql_factory, utc_now)
-    old = rules.publish_new(CUSTOMER)
+    old = _started(rules.publish_new(CUSTOMER))
     draft = rules.draft(CUSTOMER)
     tenant_id = rules.tenant_id()
     billing = mysql_factory()
@@ -672,7 +688,7 @@ def test_rule_resolution_reads_past_the_transaction_snapshot(mysql_factory) -> N
     REPEATABLE READ snapshot); another connection publishes and commits; resolution still finds
     the new rule — locking reads see the latest commit, not the snapshot."""
     rules = Rules(mysql_factory, utc_now)
-    rules.publish_new(CUSTOMER)
+    _started(rules.publish_new(CUSTOMER))
     draft = rules.draft(CUSTOMER)
     tenant_id = rules.tenant_id()
     occurred_at = utc_now() + DAY

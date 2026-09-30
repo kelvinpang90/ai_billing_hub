@@ -59,6 +59,8 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "ai_model_alias",
         # 价格版本的 public_id：app/services/provider_prices.py（AIH-TASK-026）。
         "provider_price_version",
+        # 定价规则的 public_id：app/services/pricing_rules.py（AIH-TASK-027）。
+        "pricing_rule",
     }
 )
 

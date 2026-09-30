@@ -476,7 +476,7 @@ def test_mixed_or_unknown_shapes_are_refused(
     client, app, admin, scope_ids, strategy, fields, removed
 ) -> None:
     """§7 "mixed strategies" through the API: 422, nothing written."""
-    body = rule_body(scope_ids, "GLOBAL", strategy, **fields)
+    body = {**rule_body(scope_ids, "GLOBAL", strategy), **fields}
     for name in removed:
         del body[name]
     before = snapshot(app)
