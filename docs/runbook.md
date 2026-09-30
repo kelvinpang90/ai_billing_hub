@@ -279,7 +279,7 @@ SELECT COUNT(*) FROM two_factor_settings;
 
 1. 观察一个完整周期：binlog 每分钟离机、巡检每 5 分钟、当晚 03:17 的全量与 03:47 的日志外送
 2. 下一个周日的自动恢复演练照常跑通（`ai_billing_hub restore drill` 变绿）
-3. 把这次的 RPO / RTO 实测值与偏差写进 [TODO](TODO.md) 的任务记录
+3. 把这次的 RPO / RTO 实测值与偏差写进收尾 PR 描述的任务记录（[TODO](TODO.md) 只改勾选项）
 
 ### 绝不能做什么
 

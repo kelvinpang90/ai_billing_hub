@@ -5,7 +5,7 @@
 | **状态** | **已接受**：决策人 2026-09-28 选定方案 A |
 | **修订** | 2026-09-28 补完：状态由「提议中」改为「已接受」（方案 A），收口条件按拍板结果勾选 |
 | **日期** | 2026-09-27 |
-| **来源** | spec §7 第 6–11 条、§24、§25、§27、§42、§48、§49、§75、§113、§120；评审残留项 R1（[TODO.md](../TODO.md) P-2，来源 `docs/archive/SPEC_REVIEW_v1.0.md`、`docs/archive/REVIEW_FOLLOWUP_v1.1.md` 第 4 条） |
+| **来源** | spec §7 第 6–11 条、§24、§25、§27、§42、§48、§49、§75、§113、§120；评审残留项 R1（TODO.md P-2（2026-09-30 起在 [归档](../archive/TODO_RECORDS_2026-09-30.md)），来源 `docs/archive/SPEC_REVIEW_v1.0.md`、`docs/archive/REVIEW_FOLLOWUP_v1.1.md` 第 4 条） |
 | **影响** | `app/repositories/wallet.py` 的 `billing_status_for` / `verify_wallet`、`tenants` 表、Phase 4 最小恢复额（§42）、Phase 6 通知 |
 | **相关** | Invariant 13（跃迁与钱包变动原子提交）、[ADR-0009](ADR-0009-notification-channels.md)（通知只在跃迁时发） |
 
@@ -73,6 +73,6 @@ V1 不做同步预扣（§7 第 6 条），新请求只被应用侧缓存的有�
 ## 收口条件
 
 - [x] 决策人在 A / B / C 中拍板，本 ADR「状态」改为「已接受」（或按拍板结果改写「决策」）
-- [x] [TODO.md](../TODO.md) P-2 的 R1 改为 `[x]`，写明依据本 ADR
+- [x] TODO.md P-2（2026-09-30 起在 [归档](../archive/TODO_RECORDS_2026-09-30.md)） 的 R1 改为 `[x]`，写明依据本 ADR
 - [x] 若选 A：Phase 4 §42 的设计闸门模板里带上「最小恢复额 = 欠款 + 可配置缓冲」这一条（记在 TODO 的 Phase 4 下）
 - [x] 若选 A：Phase 3 试点的观测项里加「停机时的余额」（记在 TODO 的 Phase 3 下）

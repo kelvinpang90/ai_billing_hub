@@ -47,7 +47,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | --- | --- | --- |
 | `docs/PROJECT.md`（本文件） | 项目总览、文档地图 | 第一次接触项目 |
 | [docs/HANDOFF.md](HANDOFF.md) | 现在在哪、下一步、未决问题、环境状态 | **每个 session 开始时** |
-| [docs/TODO.md](TODO.md) | Phase 0–8 任务清单与验收、前置决策 D1–D7、评审残留 R1–R7 | 每个 session 开始时 |
+| [docs/TODO.md](TODO.md) | 规划块、Phase 0–8 任务清单与验收、前置决策 D1–D7、仍未结清的后续项 | 每个 session 开始时 |
 
 ### B. 唯一事实来源
 
@@ -72,6 +72,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | --- | --- | --- |
 | [docs/SPEC_REVIEW_v1.0.md](archive/SPEC_REVIEW_v1.0.md) | 对 v1.0 的评审意见（P0×7 / P1×10 / P2×8） | 想知道某个设计为什么这么定 |
 | [docs/REVIEW_FOLLOWUP_v1.1.md](archive/REVIEW_FOLLOWUP_v1.1.md) | 25 条意见在 v1.1 的落实核对（20 解决 / 5 残留） | 想知道某条意见到底改没改 |
+| [docs/archive/TODO_RECORDS_2026-09-30.md](archive/TODO_RECORDS_2026-09-30.md) | 2026-09-30 从 TODO.md 挪出的历史：任务记录段、Phase 0 任务记录、评审残留 R1–R7、已结的决策细节 | 想知道某个已交付任务当时做了什么、偏离了什么 |
 
 ### E. 决策记录
 

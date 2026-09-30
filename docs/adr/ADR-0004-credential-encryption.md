@@ -10,7 +10,7 @@
 | **决策人** | Kelvin Peng |
 | **来源** | spec §36、§74.4、§96、§98.1 已定原则；本 ADR 定具体机制 |
 | **影响** | `integration_credentials` / `projects` 表（出站 webhook 密钥可能新增 `project_webhook_secrets`，见第 4a 节）、Phase 0 密钥方案、Phase 2/3 验签实现 |
-| **相关** | `REQ-AUTH-001`、[TODO.md](../TODO.md) 的 D4 与 R4 |
+| **相关** | `REQ-AUTH-001`、[TODO.md](../TODO.md) 的 D4 与 R4（R4 所在的 P-2 2026-09-30 起在 [归档](../archive/TODO_RECORDS_2026-09-30.md)） |
 
 ---
 
