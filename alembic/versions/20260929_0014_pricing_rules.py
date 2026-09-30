@@ -1,6 +1,6 @@
 """pricing rule lock, pricing rules and their FIXED_RATE components, with triggers
 
-照设计闸门 #178 v3（docs/design/AIH-TASK-027-pricing-rules.md）§2「数据库」与 §8。
+照设计闸门 #178 v4（docs/design/AIH-TASK-027-pricing-rules.md）§2「数据库」与 §8。
 
 步骤
 ----
@@ -14,7 +14,7 @@
    `provider_id` → `ai_providers.id`、复合外键 `(model_id, provider_id)` →
    `ai_models(id, provider_id)`、`created_by` / `approved_by` → `users.id`，都是 RESTRICT；
    STORED 生成列 `scope_key` 与 `open_slot`，唯一索引 `(scope_key, open_slot)`；
-   `(id, strategy)` 唯一（给分量表的复合外键用）；解析用的索引；八条 CHECK
+   `(id, strategy)` 唯一（给分量表的复合外键用）；解析用的索引；九条 CHECK（v4 加「停用必有尽头」）
 3. `create_table pricing_rule_components`：复合外键 `(pricing_rule_id, strategy)` →
    `pricing_rules(id, strategy)`（`strategy` 由 CHECK 钉成 `FIXED_RATE`：MARKUP 规则挂不上
    分量）、外键 → `usage_meter_components`，都是 RESTRICT；
@@ -22,8 +22,8 @@
 4. 8 个触发器：锁表的 BEFORE INSERT（已有一行时）/ BEFORE DELETE；规则的 BEFORE INSERT
    （只能以草稿插入）/ BEFORE UPDATE（丢弃的不可改、草稿只能改成草稿 / 已发布 / 已丢弃、
    发布后只许截断与停用、发布跃迁上 FIXED_RATE 的分量完整性、锁 `pricing_rule_locks` 后检查
-   同一范围的区间不重叠）/ BEFORE DELETE（一律拒绝）；分量的 BEFORE INSERT / UPDATE /
-   DELETE（所属规则不是草稿就拒绝）
+   同一范围的区间不重叠、再检查发布跃迁上的起点：为空只许 `GLOBAL` 的第一条（v4））/
+   BEFORE DELETE（一律拒绝）；分量的 BEFORE INSERT / UPDATE / DELETE（所属规则不是草稿就拒绝）
 
 §132 第 13 条分析
 -----------------
@@ -138,6 +138,7 @@ _CHECKS: dict[str, tuple[str, str]] = {
         "effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to"
         " OR (status = 'RETIRED' AND effective_from = effective_to)",
     ),
+    "ck_pricing_rules_retired_end": (_RULES, "status <> 'RETIRED' OR effective_to IS NOT NULL"),
     "ck_pricing_rule_components_strategy": (_COMPONENTS, "strategy = 'FIXED_RATE'"),
     "ck_pricing_rule_components_unit_quantity": (_COMPONENTS, "unit_quantity > 0"),
     "ck_pricing_rule_components_rate_amount": (_COMPONENTS, "rate_amount > 0"),
@@ -192,7 +193,10 @@ END
     # ② 发布过的行只许改 effective_to、PUBLISHED → RETIRED 与 updated_at（INV-6）；
     # ③ 「草稿 → 已发布」跃迁上，FIXED_RATE 规则：至少一个分量，出现的计量类型的全部分量都在；
     # ④ 发布过的行区间或状态有变化时：先锁 pricing_rule_locks（与服务层发布同一把锁），再查
-    #    同一范围里有没有另一个非空区间与本行相交。空区间（撤销的预约）不参与判定。
+    #    同一范围里有没有另一个非空区间与本行相交。空区间（撤销的预约）不参与判定；
+    # ⑤ 同一把锁内，「草稿 → 已发布」跃迁上起点为空（一直以来）只许 GLOBAL 范围、且该范围从没有
+    #    PUBLISHED / RETIRED 行（含撤销的预约留下的空区间），与服务层「该组从没有已发布规则」逐字
+    #    相同（设计 v4）。起点发布后不可改（②），所以「一直以来」只可能在这一步产生。
     # ⚠️ MySQL 的触发器不能用 NEW / OLD 引用生成列，所以「同一范围」按 scope_key 的定义现算
     # 出本行的值，与另一行存下的 `o.scope_key` 比较（即设计的 `o.scope_key = NEW.scope_key`）；
     # 不可变检查也不比两个生成列（它们只由被比较的列算出）。
@@ -282,6 +286,17 @@ BEGIN
                    < COALESCE(o.effective_to, '9999-12-31')) THEN
             SIGNAL SQLSTATE '45000'
                 SET MESSAGE_TEXT = 'pricing rule periods overlap';
+        END IF;
+        IF OLD.status = 'DRAFT' AND NEW.status = 'PUBLISHED' AND NEW.effective_from IS NULL
+           AND (NEW.priority_scope <> 'GLOBAL'
+                OR EXISTS (
+                    SELECT 1
+                      FROM pricing_rules o
+                     WHERE o.priority_scope = 'GLOBAL'
+                       AND o.id <> NEW.id
+                       AND o.status IN ('PUBLISHED', 'RETIRED'))) THEN
+            SIGNAL SQLSTATE '45000'
+                SET MESSAGE_TEXT = 'only the first global pricing rule starts with no time';
         END IF;
     END IF;
 END

@@ -5,7 +5,7 @@
 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md)。
 
 接口见 [api.md](api.md) 的「管理端定价规则」；表、触发器与锁顺序见 [database-schema.md](database-schema.md) 的「客户定价
-规则」；设计全文见 [design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（设计闸门 #178 v3）。
+规则」；设计全文见 [design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（设计闸门 #178 v4）。
 
 ## 规则
 

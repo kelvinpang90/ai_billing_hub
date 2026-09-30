@@ -1302,7 +1302,7 @@ SHA256(RAW_REQUEST_BODY)
 
 ## 管理端定价规则
 
-设计依据：设计闸门 #178 `APPROVED: design v3`，全文见
+设计依据：设计闸门 #178 `APPROVED: design v4`，全文见
 [design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（spec §14、§15、§15.1、§16、§59、§66、
 §74.3、§80、§89、§113；ADR-0008）。实现登记为 AIH-TASK-027。表结构见 [database-schema.md](database-schema.md) 的
 「客户定价规则」；五级顺序与下落语义见 [pricing-engine.md](pricing-engine.md) 的「规则」。

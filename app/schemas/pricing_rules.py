@@ -1,4 +1,4 @@
-"""Request and response shapes for customer pricing rules (design gate #178 v3 §2「接口」).
+"""Request and response shapes for customer pricing rules (design gate #178 v4 §2「接口」).
 
 ⚠️ **价格是 MYR 含税价（tax-inclusive，ADR-0008）。**FIXED_RATE 分量的 `rate_amount` 是含税
 单价；MARKUP 的倍数乘的是 MYR 估算成本，得到的就是含税计费额。本任务不存税额。

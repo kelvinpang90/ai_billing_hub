@@ -1,4 +1,4 @@
-"""Customer pricing rules: MARKUP and FIXED_RATE (design gate #178 v3, AIH-TASK-027).
+"""Customer pricing rules: MARKUP and FIXED_RATE (design gate #178 v4, AIH-TASK-027).
 
 spec §15、§16、§74.3；ADR-0008（含税定价）。三张表：
 
@@ -171,6 +171,9 @@ PERIOD_CHECK: Final = (
     "effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to"
     " OR (status = 'RETIRED' AND effective_from = effective_to)"
 )
+# 停用必有尽头（设计 v4）：没有尽头的 RETIRED 行会一直被解析命中，并让该范围之后的发布都撞上
+# 区间不重叠触发器。服务层的停用一律写尽头（截断于 `t`，或撤销预约留下的空区间）。
+RETIRED_END_CHECK: Final = "status <> 'RETIRED' OR effective_to IS NOT NULL"
 COMPONENT_STRATEGY_CHECK: Final = "strategy = 'FIXED_RATE'"
 UNIT_QUANTITY_CHECK: Final = "unit_quantity > 0"
 RATE_AMOUNT_CHECK: Final = "rate_amount > 0"
@@ -337,6 +340,7 @@ class PricingRule(Base):
         CheckConstraint(UNPUBLISHED_CHECK, name="ck_pricing_rules_unpublished"),
         CheckConstraint(APPROVED_CHECK, name="ck_pricing_rules_approved"),
         CheckConstraint(PERIOD_CHECK, name="ck_pricing_rules_period"),
+        CheckConstraint(RETIRED_END_CHECK, name="ck_pricing_rules_retired_end"),
     )
 
 
@@ -401,6 +405,7 @@ __all__ = [
     "PRICING_RULE_LOCK_ID",
     "PRIORITY_SCOPE_CHECK",
     "RATE_AMOUNT_CHECK",
+    "RETIRED_END_CHECK",
     "RULE_CURRENCY",
     "RULE_STATUS_CHECK",
     "SCOPE_COLUMNS_CHECK",

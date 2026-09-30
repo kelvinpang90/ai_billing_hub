@@ -1,4 +1,4 @@
-"""Customer pricing rules: drafts, publishing and retiring (design gate #178 v3, AIH-TASK-027).
+"""Customer pricing rules: drafts, publishing and retiring (design gate #178 v4, AIH-TASK-027).
 
 ⚠️ **价格是 MYR 含税价**（ADR-0008）：FIXED_RATE 分量的 `rate_amount` 是含税单价，MARKUP 的
 倍数乘出来的是含税计费额。本任务不做计费额计算、试算与税额（T-G / Phase 4）。

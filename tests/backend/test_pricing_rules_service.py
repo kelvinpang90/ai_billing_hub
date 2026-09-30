@@ -1,4 +1,4 @@
-"""Pricing rules over time, through the services (design gate #178 v3 §7).
+"""Pricing rules over time, through the services (design gate #178 v4 §7).
 
 Five groups:
 
@@ -14,7 +14,7 @@ Five groups:
   to `PUBLISHED`, a draft straight to `RETIRED`, the one-row lock table;
 - **constraints and database fallbacks** (real MySQL): scope and NULL combinations, mixed
   strategies, completeness on the publish transition, direct inserts, the open-slot unique
-  index, overlapping periods.
+  index, overlapping periods, an empty start and a retired rule's end (v4).
 
 Resolution, the property test and the concurrency cases are in test_pricing_rules_resolve.py;
 the HTTP contract in test_pricing_rules_api.py. Prices and multipliers are fictional; the
@@ -116,6 +116,7 @@ _STARTS_AS_DRAFT = "a pricing rule starts as a draft"
 _NO_COMPONENTS = "a fixed rate pricing rule needs at least one component"
 _MISSING_COMPONENT = "a fixed rate pricing rule misses a meter type component"
 _OVERLAP = "pricing rule periods overlap"
+_EMPTY_START = "only the first global pricing rule starts with no time"
 _ONE_LOCK_ROW = "pricing_rule_locks holds exactly one row"
 
 GLOBAL = PricingScope.GLOBAL
@@ -1477,9 +1478,10 @@ def test_the_database_checks_completeness_on_the_publish_transition(mysql_factor
         complete = _direct_draft(
             session, rules, (*llm_three, "LLM_CACHE_READ_TOKEN"), scope="CUSTOMER_PROVIDER"
         )
-        _publish_directly(session, rules, complete, (None, None))
+        # With a start: since v4 an empty start is for the first GLOBAL rule only.
+        _publish_directly(session, rules, complete, (T0, None))
         markup = _direct_draft(session, rules, scope="GLOBAL_PROVIDER_MODEL")
-        _publish_directly(session, rules, markup, (None, None))
+        _publish_directly(session, rules, markup, (T0, None))
         session.rollback()
 
 
@@ -1523,7 +1525,7 @@ def test_two_open_global_rules_are_refused(mysql_factory) -> None:
         (None, T0 + SECOND, False),
         (T0 - DAY, None, False),
         (T0 + 10 * SECOND, T0 + 20 * SECOND, True),
-        (None, T0, True),
+        (T0 - 10 * SECOND, T0, True),
         (T0 + 10 * SECOND, None, True),
     ],
     ids=[
@@ -1579,6 +1581,80 @@ def test_empty_periods_and_other_scopes_do_not_overlap(mysql_factory) -> None:
         move = {"tenant": tenant_b, "id": other_tenant}
         session.execute(_update_rule("tenant_id = :tenant"), move)
         _publish_directly(session, rules, other_tenant, (T0, None))
+        session.rollback()
+
+
+@pytest.mark.parametrize(
+    "scope", ["CUSTOMER_PROVIDER_MODEL", "CUSTOMER_PROVIDER", "CUSTOMER", "GLOBAL_PROVIDER_MODEL"]
+)
+def test_the_database_refuses_an_empty_start_below_the_global_scope(mysql_factory, scope) -> None:
+    """§7 "start and end enforced by the database" (v4): a draft of any other scope published
+    directly with an empty start is refused, even as the first rule of its scope; with a start
+    it passes (the check does not refuse more than it should)."""
+    rules = Rules(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        draft = _direct_draft(session, rules, scope=scope)
+        with pytest.raises(DBAPIError) as raised:
+            with session.begin_nested():
+                _publish_directly(session, rules, draft, (None, None))
+        assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _EMPTY_START)
+        _publish_directly(session, rules, draft, (T0, None))
+        session.rollback()
+
+
+def test_only_the_first_global_rule_starts_with_no_time(mysql_factory) -> None:
+    """§7 v4: an empty start passes for the first GLOBAL rule only. Once the global scope has any
+    PUBLISHED / RETIRED row — including the empty period of a withdrawn reservation, as the
+    service reads "never had a published rule" — a direct publish with an empty start is
+    refused. The candidates end where the existing rows start, so the overlap check passes and
+    it is the start check that refuses."""
+    rules = Rules(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        first = _direct_draft(session, rules)
+        _publish_directly(session, rules, first, (None, None))
+        session.rollback()
+
+        withdrawn = _direct_draft(session, rules)
+        _publish_directly(session, rules, withdrawn, (T0, None))
+        session.execute(
+            _update_rule("status = 'RETIRED', effective_to = effective_from"), {"id": withdrawn}
+        )
+        after_withdrawn = _direct_draft(session, rules)
+        with pytest.raises(DBAPIError) as raised:
+            with session.begin_nested():
+                _publish_directly(session, rules, after_withdrawn, (None, None))
+        assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _EMPTY_START)
+        session.rollback()
+
+        published = _direct_draft(session, rules)
+        _publish_directly(session, rules, published, (T0, None))
+        before_it = _direct_draft(session, rules)
+        with pytest.raises(DBAPIError) as raised:
+            with session.begin_nested():
+                _publish_directly(session, rules, before_it, (None, T0))
+        assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _EMPTY_START)
+        _publish_directly(session, rules, before_it, (T0 - DAY, T0))
+        session.rollback()
+
+
+def test_a_retired_rule_always_has_an_end(mysql_factory) -> None:
+    """§7 v4: retiring directly without writing `effective_to`, or clearing the end of a retired
+    rule, is refused by the CHECK; retiring with an end passes."""
+    rules = Rules(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        rule = _direct_draft(session, rules)
+        _publish_directly(session, rules, rule, (T0, None))
+        with pytest.raises(DBAPIError) as raised:
+            with session.begin_nested():
+                session.execute(_update_rule("status = 'RETIRED'"), {"id": rule})
+        assert _error(raised)[0] == _ER_CHECK_CONSTRAINT_VIOLATED
+        session.execute(
+            _update_rule("status = 'RETIRED', effective_to = :end"), {"id": rule, "end": T0 + DAY}
+        )
+        with pytest.raises(DBAPIError) as raised:
+            with session.begin_nested():
+                session.execute(_update_rule("effective_to = NULL"), {"id": rule})
+        assert _error(raised)[0] == _ER_CHECK_CONSTRAINT_VIOLATED
         session.rollback()
 
 

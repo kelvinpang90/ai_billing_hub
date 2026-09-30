@@ -2298,7 +2298,7 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 
 ### AIH-TASK-027 —— 客户定价规则 MARKUP 与 FIXED_RATE（T-D，2026-09-29）
 
-设计闸门 #178 `APPROVED: design v3`，全文在 [design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)。
+设计闸门 #178 `APPROVED: design v4`（v4 由本任务的实现审查触发，见下文「交付」），全文在 [design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)。
 接口记在 [api.md](api.md) 的「管理端定价规则」，表、触发器与锁顺序记在 [database-schema.md](database-schema.md) 的「客户
 定价规则」，五级顺序、下落语义与含税记在新建的 [pricing-engine.md](pricing-engine.md) 的「规则」。不含计费额计算、舍入、
 试算、税额与前端（T-G、Phase 4、T-L）。
@@ -2353,7 +2353,7 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     （`o.scope_key = CONCAT(NEW.priority_scope, ':', COALESCE(NEW.tenant_id, 0), …)`），语义相同；不可变检查也不比两个生成列
   - **草稿只能改成草稿 / 已发布 / 已丢弃**：设计 §2 的不可变清单只写了「`DRAFT` 可改」，但 §4 的状态表里草稿只有这三个
     去向，§3 又要求「混合或不完整的规则不可能处于已发布状态」（`RETIRED` 也参与解析）。触发器照 §4 拒绝直接
-    `DRAFT → RETIRED`（026 v4 同一处缺口的同一写法）；认为这超出了设计的话在 PR 里提
+    `DRAFT → RETIRED`（026 v4 同一处缺口的同一写法）；设计 v4 已写明
   - **「该组从没有已发布规则」按字面**：`GLOBAL` 范围里只要出现过 `PUBLISHED` / `RETIRED` 的行（包括被撤销的预约留下的
     空区间），之后不指定时刻的发布就从 `t` 起，不再「一直以来」。比 026 的「没有区间非空的版本」更严，回溯只可能少不会多
   - **SQLite 上的 `scope_key`**：`CONCAT` 要 SQLite 3.44 才有，单元测试的 SQLite 可能更老。生成列表达式是一个按方言编译
@@ -2388,7 +2388,19 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
   - 核对：在一次性 `mysql:8.4` 容器上，原测试文件复现这 3 个失败；修后 `test_pricing_rules_{resolve,api,service}.py`
     与 `test_admin_audit_api.py` 共 270 个用例全过、无 skipped。变异核对：去掉发布 / 停用的规则锁，② 失败；把解析的
     加锁读改成普通读，三条全失败 —— 修后的用例测到的仍是锁与加锁读本身
-  - 本地：六项检查全过；真 MySQL 上全量 `pytest` 2177 passed、3 skipped（两个要 Redis，一个是 Windows 上没有 POSIX
+  - 修完 CI 后的实现审查（Codex，`reviewed-head` `cf726d4`）`REQUEST_CHANGES`，两条阻断都是 v3 没有列的数据库兜底：
+    绕过服务可把非全局规则直接发布成起点为空（一直以来）；可把规则直接改为 `RETIRED` 而不写尽头，它仍被命中并卡住
+    该范围之后的发布。Worker 的实现与 v3 一致，所以回到设计闸门：#178 升 v4，前两轮判阻断「全局默认第一条起点
+    为空」，Kelvin 2026-09-30 裁定保留（`docs/REVIEW-LOG.md`），第三轮 `APPROVED: design v4`；#194 同步设计副本与契约。
+    026 的同类缺口另开任务（记在 AIH-TASK-026「后续」）
+  - 本分支按 v4：迁移 0014 加 CHECK `ck_pricing_rules_retired_end`（`status <> 'RETIRED' OR effective_to IS NOT NULL`，
+    模型同步）；规则的 BEFORE UPDATE 触发器在区间检查之后、同一把锁内加 ⑤「起点为空只许 `GLOBAL` 范围且该范围
+    没有任何 `PUBLISHED` / `RETIRED` 行」；§7「起点与尽头由数据库兜底」的直接写库用例（另外四级各一次的空起点、
+    全局范围已有规则或撤销的预约之后的空起点、不写尽头的停用、清掉已停用规则的尽头，以及对应的放行情形）；两条旧用例
+    里非全局规则的空起点改成具体起点（它们测的是完整性与首尾相接，起点无关；v4 后非全局规则不能起点为空）。服务层
+    代码不用改：它本来就只给全局默认第一条空起点、停用一律写尽头
+  - 变异核对（每次重建数据库，迁移才会重跑）：拿掉 ⑤，五个空起点用例失败；拿掉新 CHECK，尽头用例失败
+  - 本地：六项检查全过；真 MySQL 上全量 `pytest` 2183 passed、3 skipped（两个要 Redis，一个是 Windows 上没有 POSIX
     权限位；CI 上都跑）
 - [ ] **后续**：
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-L

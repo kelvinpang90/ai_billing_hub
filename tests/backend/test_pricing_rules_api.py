@@ -1,4 +1,4 @@
-"""Pricing rule endpoints end to end on SQLite (design gate #178 v3 §7).
+"""Pricing rule endpoints end to end on SQLite (design gate #178 v4 §7).
 
 The HTTP contract: the normal path on all five levels with MARKUP and FIXED_RATE and the audit of
 every step; scope fields that must match `priority_scope`; mixed strategies; precision (strings

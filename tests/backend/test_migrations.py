@@ -2652,7 +2652,7 @@ def test_0013_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
 
 
 # ---------------------------------------------------------------------------
-# 0014_pricing_rules（AIH-TASK-027，设计闸门 #178 v3）
+# 0014_pricing_rules（AIH-TASK-027，设计闸门 #178 v4）
 #
 # The first cases need no database: the revision chain; the migration's checks and generated
 # columns equal the models' (`scope_key` per dialect); triggers written like 0006 with the 0006
@@ -2790,8 +2790,8 @@ def test_0014_checks_and_generated_columns_are_the_ones_the_models_declare() -> 
     }
 
     assert from_migration == _rule_checks()
-    # Rules 8, components 4.
-    assert len(from_migration) == 12
+    # Rules 9 (v4 adds the retired rule's end), components 4.
+    assert len(from_migration) == 13
     columns = PricingRule.__table__.c
     for name in ("scope_key", "open_slot"):
         assert columns[name].computed is not None, name
@@ -2848,6 +2848,8 @@ def test_0014_triggers_are_the_eight_of_the_design_written_like_0006() -> None:
     update = _normalised(triggers["trg_pricing_rules_before_update"])
     locked = update.index("FROM pricing_rule_locks WHERE id = 1 FOR UPDATE")
     assert locked < update.index("pricing rule periods overlap")
+    # v4: an empty start only for the first GLOBAL rule, checked under the same lock.
+    assert locked < update.index("only the first global pricing rule starts with no time")
     assert "NEW.strategy = 'FIXED_RATE'" in update
     assert "NEW.status NOT IN ('DRAFT', 'PUBLISHED', 'DISCARDED')" in update
 

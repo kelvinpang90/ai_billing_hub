@@ -1,4 +1,4 @@
-"""Pricing rule data access and rule resolution (design gate #178 v3, AIH-TASK-027).
+"""Pricing rule data access and rule resolution (design gate #178 v4, AIH-TASK-027).
 
 ⚠️ **只 flush，不 commit。**规则、分量与它们的审计同一事务，事务边界归调用方的
 `session_scope()`（app/services/pricing_rules.py）。`lock_pricing_rules_shared` 与

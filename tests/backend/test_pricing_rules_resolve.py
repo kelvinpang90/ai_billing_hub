@@ -1,4 +1,4 @@
-"""`resolve_pricing_rule` and its serialisation with publishing (design gate #178 v3 §7).
+"""`resolve_pricing_rule` and its serialisation with publishing (design gate #178 v4 §7).
 
 Three groups:
 

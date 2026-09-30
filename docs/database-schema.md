@@ -500,7 +500,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 
 ## 客户定价规则（spec §15、§16、§74.3；ADR-0008；AIH-TASK-027，迁移 `0014_pricing_rules`）
 
-设计依据：[design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（设计闸门 #178 v3）
+设计依据：[design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（设计闸门 #178 v4）
 §2「数据库」。三张表：`pricing_rule_locks`、`pricing_rules`、`pricing_rule_components`。接口见 [api.md](api.md) 的
 「管理端定价规则」；五级顺序与下落语义见 [pricing-engine.md](pricing-engine.md)。
 
@@ -550,6 +550,8 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
   OR (strategy = 'FIXED_RATE' AND markup_multiplier IS NULL)`。
 - `ck_pricing_rules_unpublished` / `_approved` / `_period`：与 `provider_price_versions` 同一写法（草稿与丢弃的草稿没有
   区间与发布人；发布过的有发布人；区间不倒置，唯一的空区间 `[F, F)` 在 `RETIRED` 上）。
+- `ck_pricing_rules_retired_end`（v4）：`status <> 'RETIRED' OR effective_to IS NOT NULL`，停用必有尽头。没有尽头的
+  `RETIRED` 行会一直被解析命中，并让该范围之后的发布都撞上区间不重叠触发器。
 - **唯一索引 `(scope_key, open_slot)`**（`ux_pricing_rules_open_slot`）：同一范围至多一条未截断的已发布规则（全局
   范围也是：`scope_key` 非空）。
 - 唯一约束 `(id, strategy)`（`uq_pricing_rules_id_strategy`）：只为分量表的复合外键。
@@ -581,7 +583,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | `trg_pricing_rule_locks_before_insert` | 表里已有一行时拒绝 |
 | `trg_pricing_rule_locks_before_delete` | 一律拒绝 |
 | `trg_pricing_rules_before_insert` | `status` 不是 `DRAFT` 就拒绝：规则只能以草稿进入，发布跃迁上的检查因此绕不过去 |
-| `trg_pricing_rules_before_update` | ① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（设计 §4 的状态表；不许直接 `DRAFT → RETIRED` 绕过 ③）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；③ `DRAFT → PUBLISHED` 且 `FIXED_RATE` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁），再查同一 `scope_key` 里是否有另一个**非空区间**的已发布规则与本行相交，有就拒绝；空区间不参与判定 |
+| `trg_pricing_rules_before_update` | ① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（设计 §4 的状态表；不许直接 `DRAFT → RETIRED` 绕过 ③）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；③ `DRAFT → PUBLISHED` 且 `FIXED_RATE` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁），再查同一 `scope_key` 里是否有另一个**非空区间**的已发布规则与本行相交，有就拒绝；空区间不参与判定；⑤ 同一把锁内，`DRAFT → PUBLISHED` 且 `effective_from` 为空时：只许 `GLOBAL` 范围、且该范围没有任何 `PUBLISHED` / `RETIRED` 行（含撤销的预约留下的空区间），否则拒绝（v4：「一直以来」只给全局默认的第一条） |
 | `trg_pricing_rules_before_delete` | 一律拒绝 |
 | `trg_pricing_rule_components_before_insert` / `_before_update` / `_before_delete` | 所属规则（更新时新旧两个）不是 `DRAFT` 就拒绝 |
 

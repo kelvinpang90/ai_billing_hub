@@ -1,4 +1,4 @@
-"""Admin pricing rule endpoints: drafts, publish, retire, discard (design gate #178 v3).
+"""Admin pricing rule endpoints: drafts, publish, retire, discard (design gate #178 v4).
 
 契约见 [docs/api.md](../../docs/api.md)「管理端定价规则」。价格一律 MYR 含税（ADR-0008）。
 
