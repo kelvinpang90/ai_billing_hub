@@ -1796,7 +1796,7 @@ tasks:
     title: 'lock tables reject UPDATE (pricing_rule_locks and fx_rate_locks)'
     purpose: >-
       按 docs/design/AIH-TASK-045-lock-tables-no-update.md（设计闸门 #200 已批准 v1）新建迁移 0016，只给 pricing_rule_locks 与 fx_rate_locks 各加一个无条件拒绝的 BEFORE UPDATE 触发器，让两张单行锁表在 DML 范围内恒为 id = 1 那一行（此前只拒绝 INSERT 与 DELETE，UPDATE 能把锁行移走，版本表触发器的 FOR UPDATE 便静默锁不到行）。不改模型、服务与 0014 / 0015 的任何对象。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-027
     acceptance_criteria:
