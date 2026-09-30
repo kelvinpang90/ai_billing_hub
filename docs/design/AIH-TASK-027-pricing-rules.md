@@ -1,8 +1,8 @@
-# AIH-TASK-027 设计：定价规则 MARKUP 与 FIXED_RATE（已批准 v3）
+# AIH-TASK-027 设计：定价规则 MARKUP 与 FIXED_RATE（已批准 v4）
 
-> **来源**：设计闸门 Issue #178。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**，审查者为 Codex。
+> **来源**：设计闸门 Issue #178。本文件是 `APPROVED: design v4` 那一版正文的**逐字副本**，审查者为 Codex。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #178 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #178 上被批准的 v4 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > 正文里的「T-D」即 [PHASE-2-plan.md](PHASE-2-plan.md) 的占位名；写「编号登记时分配」的实现任务，登记为 `AIH-TASK-027`。正文提到的其他占位名（T-A…T-L）对应的登记编号见 `docs/TODO.md` 的 Phase 2 一节。
 > 与 Issue 正文的唯一差别：一处链接目标由 GitHub 网页上的 `../blob/main/…` 改成仓库内的相对路径，链接文字与其余正文逐字相同。
 
@@ -23,7 +23,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v3`（v1：FIXED_RATE 完整性只在服务层 → v2 发布跃迁触发器；v2：已截断区间的重叠数据库挡不住 → v3 区间不重叠触发器，见 §12）
+**设计版本**：`v4`（v1：FIXED_RATE 完整性只在服务层 → v2 发布跃迁触发器；v2：已截断区间的重叠数据库挡不住 → v3 区间不重叠触发器；v3：「起点为空只给全局默认第一条」与「停用必有尽头」数据库挡不住 → v4 发布跃迁上的起点检查与停用尽头 CHECK，见 §12）
 对应需求：spec §14、§15、§15.1、§16、§59、§66、§74.3、§80、§89、§113；`REQ-PRICE-001`、`REQ-FIN-001`、`REQ-FIN-002`、`REQ-PRIV-002`；ADR-0008（含税定价）
 目标 PR：待开（批准后在 `.platform/tasks.yaml` 登记实现任务，编号登记时分配）
 Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH-TASK-025-ai-catalog.md`（已批准 v4）
@@ -100,6 +100,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
   §16 没有的组合（例如「全局 + 供应商、不带模型」「客户 + 模型、不带供应商」）因此无法写入。
 - **策略与倍数**：`(strategy = 'MARKUP' AND markup_multiplier IS NOT NULL AND markup_multiplier > 0) OR (strategy = 'FIXED_RATE' AND markup_multiplier IS NULL)`。
 - 状态与区间、发布人同 T-B 的写法：`DRAFT` / `DISCARDED` ⇒ 区间与发布人为空；`PUBLISHED` / `RETIRED` ⇒ 发布人非空；`effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to OR (status = 'RETIRED' AND effective_from = effective_to)`。
+- **停用必有尽头**（v4）：`status <> 'RETIRED' OR effective_to IS NOT NULL`。服务层的停用一律写尽头（正在生效的截断于 `t`，预约写成空区间）；没有尽头的 `RETIRED` 行会一直参与解析，并让该范围之后的每一次发布都撞上区间不重叠触发器。
 - UNIQUE `(scope_key, open_slot)`：同一范围至多一条未截断的已发布规则。
 - UNIQUE `(id, strategy)`：给分量表的复合外键用。
 - 索引：`(priority_scope, tenant_id, provider_id, model_id, effective_from)`（解析时逐级查）。
@@ -121,7 +122,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
 
 **不可变（触发器，照 0006 的写法与权限预检）**：与价格版本相同的三条 ——
 
-- `pricing_rules` BEFORE UPDATE：`DRAFT` 可改；`DISCARDED` 不可改；`PUBLISHED` / `RETIRED` 只允许改 `effective_to`、`status`（仅 `PUBLISHED → RETIRED`）、`updated_at`。
+- `pricing_rules` BEFORE UPDATE：`DRAFT` 可改，但状态只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（v4 写明，与 §4 的状态表一致：直接 `DRAFT → RETIRED` 会绕过下面发布跃迁上的检查）；`DISCARDED` 不可改；`PUBLISHED` / `RETIRED` 只允许改 `effective_to`、`status`（仅 `PUBLISHED → RETIRED`）、`updated_at`。
 - `pricing_rules` BEFORE DELETE：一律拒绝。
 - `pricing_rule_components` BEFORE INSERT / UPDATE / DELETE：所属规则不是 `DRAFT` 就拒绝。
 - `pricing_rule_locks`：BEFORE INSERT（已有一行时）与 BEFORE DELETE 拒绝。
@@ -142,7 +143,8 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
      ) THEN SIGNAL …; END IF;
      ```
   服务层在发布前做同样的校验（给出 409 `PRICING_RULE_INCOMPLETE` 与缺失清单）；触发器是绕过服务路径时的最后一道。
-- **区间不重叠由数据库兜底**（`pricing_rules` BEFORE UPDATE，`NEW.status IN ('PUBLISHED','RETIRED')` 且 `effective_from`、`effective_to` 或 `status` 有变化时）：触发器先执行 `SELECT id INTO @lock_id FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁，把绕过服务的直接写入也串行起来），再检查同一 `scope_key`内是否存在另一行满足：状态为 `PUBLISHED` / `RETIRED`、区间非空（`effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to`）、且与本行区间相交 —— 相交判定 `COALESCE(o.effective_from, '1000-01-01') < COALESCE(NEW.effective_to, '9999-12-31') AND COALESCE(NEW.effective_from, '1000-01-01') < COALESCE(o.effective_to, '9999-12-31')`，另一行条件 `o.scope_key = NEW.scope_key AND o.id <> NEW.id`；存在即 SIGNAL。空区间（撤销的预约）不参与判定。
+- **区间不重叠由数据库兜底**（`pricing_rules` BEFORE UPDATE，`NEW.status IN ('PUBLISHED','RETIRED')` 且 `effective_from`、`effective_to` 或 `status` 有变化时）：触发器先执行 `SELECT id INTO @lock_id FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁，把绕过服务的直接写入也串行起来），再检查同一 `scope_key`内是否存在另一行满足：状态为 `PUBLISHED` / `RETIRED`、区间非空（`effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to`）、且与本行区间相交 —— 相交判定 `COALESCE(o.effective_from, '1000-01-01') < COALESCE(NEW.effective_to, '9999-12-31') AND COALESCE(NEW.effective_from, '1000-01-01') < COALESCE(o.effective_to, '9999-12-31')`，另一行条件 `o.scope_key = NEW.scope_key AND o.id <> NEW.id`；存在即 SIGNAL。空区间（撤销的预约）不参与判定。MySQL 的触发器不能用 `NEW` 引用生成列，实现按 `scope_key` 的定义现算本行的键、锁的结果用局部变量接，语义相同（v4 写明）。
+- **发布跃迁上的起点**（v4，`pricing_rules` BEFORE UPDATE，`OLD.status = 'DRAFT' AND NEW.status = 'PUBLISHED' AND NEW.effective_from IS NULL` 时，在上一条拿到 `pricing_rule_locks` 的锁之后检查）：必须 `NEW.priority_scope = 'GLOBAL'`，且 `GLOBAL` 范围里不存在另一行 `status IN ('PUBLISHED','RETIRED')`（含撤销的预约留下的空区间，与服务层「该组从没有已发布规则」逐字相同）；否则 SIGNAL。起点发布后不可改（第一条），所以「一直以来」只可能在这一步产生。
 - **服务层的写入顺序**（保证正常路径过得了上一条触发器）：发布时先截断前一个（`effective_to` 写入），再把本行从草稿改为已发布；撤销预约时先把被撤销的一行改成空区间，再把前一个恢复为未截断。
 - 完整性一经发布就保持成立：已发布规则的分量不可增删改（上一条触发器）；025 不允许给已有计量类型追加分量（`QUANTITY` 类型恰好一个分量由数据库保证，`LLM_TOKEN` 的四个分量是种子），所以「该类型的全部分量」这个集合不会在发布之后变大。
 
@@ -161,6 +163,14 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
 - 对任何一级 L 补一条对过去生效的规则，会让那些时刻原本在 L 以下某一级选中规则、**已经计过费**的事件，重新解析时改选 L —— 结果变了。
 - 只有最低一级 `GLOBAL` 没有「以下」：在它之前，未被更高级覆盖的时刻都解析不到规则（`PRICING_ERROR`，从未扣费），补上只把「无规则」变成「有规则」，更高级覆盖的时刻结果不变。
 - 所以：`GLOBAL` 范围且该组从没有已发布规则、且请求未给生效时刻 → `effective_from = NULL`（一直以来）；**其他一切情况 `effective_from ≥ t`**。
+- 「该组从没有已发布规则」按字面：出现过任何 `PUBLISHED` / `RETIRED` 行（包括撤销的预约留下的空区间）就不再「一直以来」（v4 写明）。起点为空的这条规则由数据库兜底（上文「发布跃迁上的起点」）；「≥ `t`」不由数据库兜底，见 §10 假设 3。
+
+**对 §16、§17 与 Phase 2 计划 T-D「不许回溯」的逐条回应**（v4 第一轮设计审查判阻断「起点为空可回溯」后补；规则本身 v1–v4 未变）：
+
+1. **非全局范围的规则永远不会起点为空**。服务层不指定时刻时取 `t`；数据库「发布跃迁上的起点」触发器拒绝一切非 `GLOBAL` 的空起点，也拒绝 `GLOBAL` 范围已有过规则之后的空起点。「发布一条新的客户级规则、起点留空、覆盖过去的事件」这条路径在服务层与数据库两层都不存在（§7「不许回溯」「起点与尽头由数据库兜底」两行）。
+2. **全局默认第一条的空起点只把「无规则」变成「有规则」**。`GLOBAL` 是最低一级，事件只有在更高四级都没有命中时才下落到它；在它之前这些事件是 `PRICING_ERROR`，从未扣费，快照里没有 `pricing_rule_id`。更高级命中过的时刻，结果不变。
+3. **§16 防的是已选定规则的事件在重试时换规则**。032 的自动重试只对事务已回滚的 `FAILED_RETRYABLE`；`PRICING_ERROR` 只经管理员重新入队回到 `RECEIVED`，这正是 032 设计里「补上规则之后」的恢复路径。§17 保护的是已经取到的历史版本，这里没有已取到的版本。
+4. **计划「不许回溯」针对从旧规则换到新规则**，该维度从没有规则时不适用。这与 Kelvin 2026-09-29 在 #177 对 T-B 的裁定是同一条判据（`docs/REVIEW-LOG.md`：发布允许对过去生效，只限该维度从未有过已发布版本；只要存在旧版本，就一律不早于发布时刻）。本设计比它更窄：只限最低一级 `GLOBAL`。
 
 **停用（§59 disable rule）**：与价格版本的退役同一套 ——
 
@@ -261,7 +271,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
 | INV-1 | 否 | — | — | — |
 | INV-2 事件不重复扣费 | 否（间接） | 规则变化触发重算 | 不提供重算入口 | — |
 | INV-3 / INV-4 / INV-5 | 否 | 不碰钱包与账本 | — | — |
-| INV-6 事件保留版本引用 | **是** | ① 已被引用的规则或分量被改；② 发布与计费交错；③ 回溯规则让已计费时刻改选另一级；④ 缺分量时下落，同一事件的选择取决于配置缺口；⑤ 不完整的 FIXED_RATE 规则被发布（绕过服务），命中它的事件全部 `PRICING_ERROR` | ① 触发器；② 单行锁串行、`t` 在锁后取、加锁读；③ 只有全局默认的第一条可回溯；④ 命中即停、缺分量判错不下落；⑤ 发布跃迁触发器 + 只能以草稿插入 | 触发器用例、并发用例、性质用例、完整性直接写库用例（§7） |
+| INV-6 事件保留版本引用 | **是** | ① 已被引用的规则或分量被改；② 发布与计费交错；③ 回溯规则让已计费时刻改选另一级；④ 缺分量时下落，同一事件的选择取决于配置缺口；⑤ 不完整的 FIXED_RATE 规则被发布（绕过服务），命中它的事件全部 `PRICING_ERROR`；⑥ 停用的规则没有尽头，停用后仍被命中（绕过服务） | ① 触发器；② 单行锁串行、`t` 在锁后取、加锁读；③ 只有全局默认的第一条可回溯（服务层；起点为空的由发布跃迁上的起点触发器兜底，v4）；④ 命中即停、缺分量判错不下落；⑤ 发布跃迁触发器 + 只能以草稿插入 + 草稿不能直接停用；⑥ 停用必有尽头的 CHECK（v4） | 触发器用例、并发用例、性质用例、完整性与起点 / 尽头直接写库用例（§7） |
 | INV-7 客户不可见成本毛利 | **是** | 倍数（即 markup）经客户接口泄露 | 只有管理端路由 | 越权用例 |
 | INV-8 租户不可互访 | **是** | 客户级规则挂错租户；A 的规则被用于 B 的事件 | 范围列有外键；解析按事件的 `tenant_id` 精确匹配 | 两个租户的解析用例 |
 | INV-9 | 否 | — | — | — |
@@ -328,13 +338,14 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
 | 完整性由数据库兜底（MySQL） | integration | 绕过服务：直接 `UPDATE pricing_rules SET status = 'PUBLISHED'`（零个分量；`LLM_TOKEN` 缺一个分量）；直接 `INSERT` 一条 `status = 'PUBLISHED'` 的规则 | 触发器 SIGNAL 拒绝；完整的 FIXED_RATE 与 MARKUP 规则直接改状态则通过（证明触发器不误杀） |
 | 目录停用 | integration | 停用的供应商 / 模型 / 计量类型 | 409 |
 | 预约与撤销预约 | integration | 预约未来生效；生效前停用 | 前一条截断于 F / 恢复为空；被撤销的规则永不命中 |
-| 不许回溯 | integration | F < `t`；非全局范围的第一条不给生效时刻 | 422；`effective_from = t`（不是空） |
-| 全局默认第一条回溯 | integration | 从没有全局默认时发布、不给生效时刻 | `effective_from` 为空；很久以前的时刻命中它；同一时刻原本被客户级命中的事件仍命中客户级 |
+| 不许回溯 | integration | F < `t`；非全局范围的第一条不给生效时刻（另外四级各一次） | 422；`effective_from = t`（不是空），发布前的时刻仍解析不到它 |
+| 全局默认第一条回溯 | integration | 从没有全局默认时发布、不给生效时刻 | `effective_from` 为空；很久以前、原本解析不到规则的时刻命中它；同一时刻原本被更高四级命中的事件仍命中原级；此后再发布的全局默认从 `t` 起 |
 | 停用后下落 | integration | 停用正在生效的客户级规则 | `t` 前命中客户级、`t` 起落到全局 |
 | 停用历史规则 | integration | 停用已被截断的规则 | 409 |
 | 触发器（MySQL） | integration | 改已发布规则的倍数 / 范围 / 起点；删规则；给已发布的 FIXED_RATE 增删分量；把 `RETIRED` 改回；删或再插锁表行 | SIGNAL 拒绝；只有 `effective_to` 与 `PUBLISHED → RETIRED` 通过 |
 | 唯一约束（MySQL） | integration | 同一范围两条未截断的已发布规则（含全局范围，验证 `scope_key` 绕开 NULL） | 拒绝 |
 | 区间不重叠（MySQL） | integration | 绕过服务直接写：同一范围两条**已截断**且相交的规则（部分相交、包含、起点相同）；一条未截断与一条起点更晚的已截断；首尾相接（`to = 下一条 from`）；空区间与任何区间；不同范围相交 | 相交的被拒绝；首尾相接、空区间、不同范围通过；服务层正常的发布 / 撤销预约路径通过 |
+| 起点与尽头由数据库兜底（MySQL，v4） | integration | 绕过服务直接写：非 `GLOBAL` 的草稿（另外四级各一次）改为 `PUBLISHED` 且 `effective_from` 为空；`GLOBAL` 范围已有 `PUBLISHED` / `RETIRED` 行（含空区间）时，再把一条草稿改为起点为空的 `PUBLISHED`；把 `PUBLISHED` 改为 `RETIRED` 而不写 `effective_to`；把已停用规则的 `effective_to` 改回空；草稿直接改为 `RETIRED` | SIGNAL 或 CHECK 拒绝；`GLOBAL` 第一条起点为空、非 `GLOBAL` 带起点的发布、写了尽头的停用直接写则通过（证明不误杀）；服务层的正常路径不受影响 |
 | 发布与计费并发 | integration（真 MySQL，两个连接） | ① 发布写完未提交时，计费取共享锁并解析（`occurred_at ≥ t`）② 反过来 | ① 计费阻塞到发布提交，选到新规则 ② 发布阻塞到计费提交，`t` 晚于事件；提交后再解析一致 |
 | 共享锁互不阻塞 | integration（真 MySQL） | 两个计费事务同时取共享锁 | 不阻塞 |
 | 快照读陷阱 | integration（真 MySQL） | 计费事务先普通读、另一连接发布并提交、再解析 | 选到新规则（加锁读） |
@@ -369,10 +380,11 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
 ## 10. 未决问题与假设
 
 - **未决问题**：无阻断项。
-- **需要谁拍板**：无。
+- **需要谁拍板**：已拍板。v4 前两轮设计审查都判阻断「全局默认第一条起点为空 = 回溯」，要求取消这个例外；升级后 **Kelvin 2026-09-30 裁定保留**，判据与 #177 对 T-B 的裁定相同（§2「逐条回应」第 4 条，记入 `docs/REVIEW-LOG.md`「升级给人的分歧」）。取消的代价：全局默认录入之前进来的用量永远解析不到规则，重新入队也无用，只能等 Phase 8 reprocess；029 上线到录入全局默认之间摄取的事件会卡住。
 - **尚未验证的假设**：
   1. MySQL 8.4 支持以 `CONCAT(…, COALESCE(…))` 定义的 STORED 生成列参与唯一约束 —— 支持（确定性表达式）；迁移测试在 CI 的 MySQL 上实跑。
   2. 复合外键 `(pricing_rule_id, strategy)` 引用 `pricing_rules(id, strategy)` 时，子表的 `strategy` 由 CHECK 固定为 `FIXED_RATE`，父行若为 MARKUP 则外键不成立 —— 这是本设计要的效果；父行 `strategy` 在草稿阶段可改（MARKUP ↔ FIXED_RATE），改成 MARKUP 前服务层先删分量（同一事务），否则外键拒绝更新（RESTRICT）。
+  3. 直接写库写入一个过去的**具体**起点（非空），数据库不拦（v4 写明）：拦它要比较应用时钟与数据库时钟，两者不同源，正常路径会在时钟偏差下误判。`t` 只由服务层在锁后取；绕过服务直接写库需要数据库凭据、不留审计，属于运维事故，而不是本设计的数据库兜底要覆盖的路径。数据库兜底的是不依赖时钟的结构性规则：只能以草稿插入、草稿不能直接停用、发布跃迁上的完整性与起点、区间不重叠、停用必有尽头、发布后不可变。
 - **如果假设错误**：1 → 改用 `scope_key` 普通列由服务层写入、触发器校验，不改语义。
 
 ## 11. 审查与版本绑定
@@ -396,7 +408,7 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
 ### 实现范围（批准后登记为 Worker 任务的 `allowed_change_paths`）
 
 - `alembic/versions/<日期>_<序号>_pricing_rules.py`、`alembic/env.py`
-- `app/models/pricing_rules.py`（新）、`app/models/auth.py`（审计动作）
+- `app/models/pricing_rules.py`（新）、`app/models/auth.py`（审计动作）、`app/services/audit_query.py`（`pricing_rule` 归进 `PUBLIC_ENTITY_TYPES`，v4 补：否则 `test_every_written_entity_type_is_classified` 在 CI 变红；契约已由 #193 补进）
 - `app/repositories/pricing_rules.py`（新，含 `resolve_pricing_rule` 与取共享锁的函数）
 - `app/services/pricing_rules.py`（新）、`app/schemas/pricing_rules.py`（新）
 - `app/api/admin_pricing_rules.py`（新）、`app/main.py`
@@ -411,3 +423,5 @@ Phase 2 计划：`docs/design/PHASE-2-plan.md` 的 T-D；依赖 `docs/design/AIH
 | v1 | 2026-09-29 | 初稿 | — |
 | v2 | 2026-09-29 | 加 `pricing_rules` 的 BEFORE INSERT（只能插入草稿）与「草稿 → 已发布」跃迁上的 FIXED_RATE 完整性触发器（至少一个分量、涉及的计量类型分量齐全）；说明发布后完整性为何保持成立；INV-6 与 §7 补对应控制与直接写库用例 | Codex 判 v1 REQUEST_CHANGES：FIXED_RATE 完整性只在服务层校验 |
 | v3 | 2026-09-29 | 加区间不重叠触发器（锁 `pricing_rule_locks` 后检查同一 `scope_key` 的非空区间相交）并规定服务层写入顺序；§7 补直接写库的重叠用例 | Codex 判 v2 REQUEST_CHANGES：已截断区间的重叠只靠服务层 |
+| v4 | 2026-09-30 | ① 发布跃迁上的起点触发器：起点为空只允许 `GLOBAL` 范围、且该范围从没有 `PUBLISHED` / `RETIRED` 行；② `pricing_rules` 加 CHECK「停用必有尽头」；③ INV-6 补 ③ 的数据库兜底与 ⑥；§7 补直接写库用例；§10 写明具体的过去起点为何不由数据库拦；④ 写明实现中已有的三个小决定：草稿不能直接停用、「从没有已发布规则」按字面、触发器现算 `scope_key`；⑤ §11 实现范围补 `app/services/audit_query.py` | 实现（OpenClaw run `20966ebc`，#192）的实现审查（Codex REQUEST_CHANGES）发现：绕过服务可把非全局规则直接发布为「一直以来」；可把规则直接改为已停用而不写尽头，它仍被命中并卡住该范围之后的发布。已批准的 T-B（#177 v4）有同类缺口，Kelvin 2026-09-30 决定另开任务补，不在本设计里改。v4 第一轮设计审查判阻断「起点为空可回溯」：按 `docs/REVIEW-LOG.md` 中 #177 的同类判据，§2 补逐条回应、§7「不许回溯」「全局默认第一条回溯」两行补断言；第二轮仍判阻断并要求取消例外，升级后 Kelvin 2026-09-30 裁定保留，记在 §10（规则本身与 v1–v3 相同，不另升版本） |
+
