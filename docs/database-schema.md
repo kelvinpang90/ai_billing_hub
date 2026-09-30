@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-09-29
+> 最后更新：2026-09-30
 
 ---
 
@@ -19,7 +19,8 @@
 - **金额**：一律 `DECIMAL(20,8)`（`Money`，`app/models/base.py`；spec §80），永远不用浮点。
   金额列：`tenants.low_balance_threshold`、`wallets.balance`、`wallet_transactions` 的
   `amount` / `balance_before` / `balance_after`；`provider_price_components` 的 `rate_amount`（原币种单价）与
-  `unit_quantity`（多少个计量单位）同一精度
+  `unit_quantity`（多少个计量单位）同一精度。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
+  #183 §2），同样不用浮点
 - **枚举列**：非原生 enum，`VARCHAR` 宽度写死（理由见 `app/models/auth.py` 的 `_ENUM_LENGTH`）
 
 ---
@@ -605,6 +606,121 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
   `effective_to`），再把本行从草稿改为已发布；撤销预约时先把被撤销的一行改成空区间，再把前一条恢复为未截断。改草稿：
   先删旧分量（改成 MARKUP 时复合外键要求分量先没了），再改策略与倍数（同一条 UPDATE，CHECK 要求两者一致），最后插入
   新分量。
+
+---
+
+## FX 汇率（spec §17.1、§74.2；ADR-0005；AIH-TASK-028，迁移 `0015_fx_rates`）
+
+设计依据：[design/AIH-TASK-028-fx-rates.md](design/AIH-TASK-028-fx-rates.md)（设计闸门 #183 v3）§2「数据库」与 §8。
+三张表：`fx_rate_locks`、`fx_rate_versions`、`fx_fetch_attempts`。AIH-TASK-028 是设计 §11 的 F1，只建表、约束与触发器；
+发布 / 退役规则与 `resolve_fx_rate`（AIH-TASK-039）、BNM 拉取（AIH-TASK-040）、管理端接口（AIH-TASK-041）、告警接口
+（AIH-TASK-042）都在后续任务里。
+
+共同的约定：
+
+- **`rate` 是 1 单位 `base_currency` 等于多少 MYR**，DECIMAL(24,10)，精确、不舍入（BNM 按 `unit` 报价，入库前除以
+  `unit`，要求 10 位小数内精确）。
+- **行永不删除**：版本由触发器拒绝 DELETE（丢弃的草稿也留痕），拉取记录只增；外键都是 `RESTRICT`。
+- **发布后不可变**：由下面的触发器保证，只在 MySQL 上。SQLite（单元测试）上没有触发器，服务层按同样的规则写。
+- **币种格式**（`^[A-Z]{3}$`）只在应用层校验，数据库不做正则 CHECK（设计 v3：MySQL 的 `REGEXP` 在默认排序规则下不分
+  大小写，SQLite 没有 `REGEXP`；与 `provider_price_versions.source_currency` 相同）。
+
+### `fx_rate_locks`（单行锁表）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | INT | 主键，不自增；迁移写入唯一一行 `id = 1` |
+
+没有业务字段。发布 / 退役对这一行 `SELECT … FOR UPDATE`（主事务的第一条语句），计费对它 `FOR SHARE`（见下「锁顺序」）；
+区间不重叠触发器同样先对它 `FOR UPDATE`，把绕过服务的直接写入也串行起来。触发器保证它恰好一行。单元测试的
+`Base.metadata.create_all` 同样写入这一行（`after_create` 事件，见 `app/models/fx_rates.py`）。
+
+### `fx_rate_versions`（§74.2）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库（T-H 把它写进事件快照 `fx_rate_version_id`，但不对外） |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_fx_rate_versions_public_id`） |
+| `base_currency` | CHAR(3) | 非空，`CHECK <> 'MYR'` |
+| `quote_currency` | CHAR(3) | 非空，`CHECK = 'MYR'`（§17.1） |
+| `rate` | DECIMAL(24,10) | 非空，`CHECK > 0` |
+| `source` | VARCHAR(16) | 非空，`CHECK IN ('BNM','MANUAL')`（ADR-0005 §1、§2） |
+| `source_reference` | VARCHAR(255) | 非空。BNM：`bnm:exchange-rate:<ccy>:<报价日>:session=1200:middle_rate:unit=<n>`；手工：录入者写出处 |
+| `source_quote_date` | DATE | 可空；BNM 的报价日（吉隆坡日期），手工录入可空 |
+| `observed_at` | DATETIME | 非空。BNM：报价日 12:00 吉隆坡 = 当日 04:00 UTC；手工：录入者给出的观测时刻 |
+| `status` | VARCHAR(16) | 非空，`CHECK IN ('DRAFT','PUBLISHED','RETIRED','DISCARDED')`；`DISCARDED` 是 §74.2 之外补的 |
+| `effective_from` | DATETIME | 可空；草稿为空。`NULL` 另一种含义：「一直以来」，只可能出现在该币种对时间线为空时的发布 |
+| `effective_to` | DATETIME | 可空；`NULL` = 仍生效（或尚未发布） |
+| `open_slot` | INT，STORED 生成列 | `CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END`：未截断的已发布版本为 1，**其余一律为 `NULL`**（不是 0，否则第二条非开放行就撞唯一索引）；只读 |
+| `created_by` | BIGINT | 可空（BNM 拉取为空，系统）；外键 → `users(id)` `RESTRICT`（`fk_fx_rate_versions_created_by`） |
+| `approved_by` | BIGINT | 可空；发布人；外键 → `users(id)` `RESTRICT`（`fk_fx_rate_versions_approved_by`） |
+| `approved_at` | DATETIME | 可空；发布时刻 |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+
+- **唯一索引 `(base_currency, quote_currency, open_slot)`**（`ux_fx_rate_versions_open_slot`）：一个币种对至多一个未截断
+  的已发布版本。
+- **唯一约束 `(base_currency, quote_currency, source, source_quote_date)`**（`uq_fx_rate_versions_quote_date`）：同一报价日
+  的 BNM 版本只有一条，并发拉取由它决出一条草稿（输家记 `NO_NEW_QUOTE`）；丢弃的 BNM 草稿也占着这个报价日。约束含
+  `source`，所以同日的手工版本不与 BNM 版本冲突；但带报价日的手工版本同样按（币种对、来源、报价日）唯一，两条同日的
+  手工版本会冲突。只有报价日为 `NULL` 的行不受限（MySQL 唯一约束不管 `NULL`；设计 §2 的手工录入接口不收报价日，写入的
+  就是 `NULL`）。
+- 设计 §2 的 CHECK 1–5：
+  1. `ck_fx_rate_versions_unpublished`：`DRAFT` / `DISCARDED` 没有区间、没有发布人与发布时刻
+  2. `ck_fx_rate_versions_approved`：`PUBLISHED` / `RETIRED` 必有发布人与发布时刻
+  3. `ck_fx_rate_versions_period`：区间不倒置；空区间 `[F, F)` 只能出现在 `RETIRED` 行上（撤销的预约、同一秒里发布又退役）
+  4. `ck_fx_rate_versions_retired_end`：`status <> 'RETIRED' OR effective_to IS NOT NULL`，停用必有尽头
+  5. `ck_fx_rate_versions_bnm_quote_date`：`source <> 'BNM' OR source_quote_date IS NOT NULL`
+
+### `fx_fetch_attempts`（只增）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `base_currency` | CHAR(3) | 非空 |
+| `source` | VARCHAR(16) | 非空，`CHECK = 'BNM'` |
+| `requested_date` | DATE | 非空；向 BNM 要的报价日（吉隆坡当天） |
+| `outcome` | VARCHAR(32) | 非空，`CHECK IN ('NEW_DRAFT','NO_NEW_QUOTE','NO_QUOTE_FOR_DATE','FAILED')`。`NO_QUOTE_FOR_DATE` 有 17 个字符，所以不是 16（设计 v3）。前三个都是成功 |
+| `quote_date` | DATE | 可空；取到报价时的报价日 |
+| `error_code` | VARCHAR(64) | 可空；`FAILED` 时 `TIMEOUT` / `HTTP_<status>` / `BAD_PAYLOAD` / `UNIT_NOT_EXACT` / `NETWORK`；`NO_NEW_QUOTE` 时可为 `QUOTE_CHANGED`。不存响应体 |
+| `fx_rate_version_id` | BIGINT | 可空；`NEW_DRAFT` 时指向新草稿；外键 → `fx_rate_versions(id)` `RESTRICT`（`fk_fx_fetch_attempts_version`） |
+| `attempted_at` | DATETIME | 非空 |
+
+- `ck_fx_fetch_attempts_outcome_columns`（设计 v3，按 `outcome` 的列组合）：`NEW_DRAFT` 有报价日与版本、无错误码；
+  `NO_NEW_QUOTE` 有报价日、无版本、错误码为空或 `QUOTE_CHANGED`；`NO_QUOTE_FOR_DATE` 三列都空；`FAILED` 有错误码、无
+  报价日与版本。
+- 索引 `ix_fx_fetch_attempts_currency_time (base_currency, attempted_at)`：`fx_fetch` 告警维度按币种查最近 72 小时。
+
+### 触发器（迁移 0015 建，只在 MySQL 上）
+
+写法与权限预检照迁移 0006。拒绝一律 `SIGNAL SQLSTATE '45000'`（MySQL 错误号 1644）。
+
+| 触发器 | 做什么 |
+| --- | --- |
+| `trg_fx_rate_locks_before_insert` | 表里已有一行时拒绝 |
+| `trg_fx_rate_locks_before_delete` | 一律拒绝 |
+| `trg_fx_rate_versions_before_insert` | `status` 不是 `DRAFT` 就拒绝：版本只能经「草稿 → 发布」进入已发布，发布跃迁上的检查因此绕不过去 |
+| `trg_fx_rate_versions_before_update` | ① `RETIRED`、`DISCARDED` 的行拒绝任何改动（v2 收紧：`RETIRED` 的尽头也不许改，否则能把已退役版本的尽头清空或改短）；② 草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（不许直接 `DRAFT → RETIRED`）；③ `DRAFT → PUBLISHED` 时 `effective_to` 必须为空（新发布的版本永远是时间线末尾、未截断）；④ `PUBLISHED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；⑤ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM fx_rate_locks WHERE id = 1 FOR UPDATE`，本行为空区间时到此为止，否则查同一币种对里是否有另一个**非空区间**的 `PUBLISHED` / `RETIRED` 版本与本行相交，有就拒绝 |
+| `trg_fx_rate_versions_before_delete` | 一律拒绝 |
+| `trg_fx_fetch_attempts_before_update` / `_before_delete` | 一律拒绝（只增） |
+
+③ 加 ⑤ 使**起点为空的版本只可能在该币种对的时间线为空时产生**（起点、尽头都为空的区间与任何非空区间都相交）：直接写库
+无法在已有版本之后发布一个「一直以来」的版本，也无法把版本插进时间线中间或退役留下的空档。⚠️ MySQL 的触发器不能用
+`NEW` / `OLD` 引用生成列，所以 ④ 不比 `open_slot`（它只由被比较的列算出）。锁的结果用局部变量接（设计写的是 `@lock_id`
+会话变量），语义相同、不污染会话。**数据库不拦的**（设计 §2）：直接写库写入一个过去的**具体**起点 —— 拦它要比较应用
+时钟与数据库时钟，两者不同源，`t` 只由服务层在锁后取。**残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器（与 0006
+相同）。
+
+### 锁顺序与写入顺序
+
+- **发布、退役**（AIH-TASK-039）：事务的第一条语句是 `SELECT … FROM fx_rate_locks WHERE id = 1 FOR UPDATE`，拿到锁之后
+  才取 `t`，之后全是加锁读。发布路径只拿这一把锁，不形成环。
+- **计费**（T-G / T-H 在计费事务里调用）：**供应商（S）→ FX（S）→ 定价规则（S）→ 钱包 → 租户**。`resolve_model` 对供应商
+  行 `FOR SHARE`；之后对 `fx_rate_locks` 取 `FOR SHARE`、`resolve_fx_rate` 加锁读，再对 `pricing_rule_locks` 取
+  `FOR SHARE`；都持有到计费事务提交。共享锁之间不冲突，计费事务彼此不阻塞；只有低频的发布 / 退役会让计费等一下。
+- **建草稿、改草稿、丢弃**：不拿全局锁（草稿不参与计费），只 `FOR UPDATE` 版本行。
+- **写入顺序**（区间触发器与 `open_slot` 唯一索引按行检查，服务层每一步立刻 flush）：发布时先截断前一个（写
+  `effective_to`），再把本行从草稿改为已发布；撤销预约时先把被撤销的一行改成空区间的 `RETIRED`，再把前一个恢复为
+  未截断（只有它仍是 `PUBLISHED`、尽头等于被撤销行的起点时）。
 
 ---
 

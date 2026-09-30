@@ -18,6 +18,7 @@ import pathlib
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from decimal import Decimal
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -27,6 +28,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     CheckConstraint,
+    Date,
     DateTime,
     Integer,
     Numeric,
@@ -58,6 +60,7 @@ from app.models.ai_catalog import (
 )
 from app.models.auth import AuditAction, AuditLog
 from app.models.base import Base
+from app.models.fx_rates import FxFetchAttempt, FxRateLock, FxRateVersion
 from app.models.integration import (
     API_KEY_COLLATION,
     IntegrationCredential,
@@ -675,7 +678,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         }
         assert checks == set(_model_checks())
         # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验；价格表上的
-        # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验。
+        # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验；
+        # 汇率的七个由 0015 建，在 test_0015_* 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -684,6 +688,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0010,
             *_EXPECTED_TRIGGERS_0013,
             *_EXPECTED_TRIGGERS_0014,
+            *_EXPECTED_TRIGGERS_0015,
         }
         assert set(triggers) == expected
     finally:
@@ -1683,8 +1688,9 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0014 的表随降级到 0009 一并删掉）。
-        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013 - _TABLES_0014
+        # 只删触发器：表与列都不动（0012–0015 的表随降级到 0009 一并删掉）。
+        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015
+        assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
         with _rolled_back_connection() as connection:
@@ -1779,8 +1785,9 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012–0014 的表随降级到 0010 一并删掉）。
-        assert _table_names() == tables - _TABLES_0012 - _TABLES_0013 - _TABLES_0014
+        # 只删索引：表、列与 0010 的触发器都不动（0012–0015 的表随降级到 0010 一并删掉）。
+        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015
+        assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
 
@@ -3050,5 +3057,427 @@ def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
         assert checks == set(_rule_checks())
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0014}
         assert ours == _EXPECTED_TRIGGERS_0014
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0015_fx_rates（AIH-TASK-028，设计闸门 #183 v3 §11 的 F1）
+#
+# The first cases need no database: the revision chain; the migration's checks and `open_slot`
+# equal the models'; triggers written like 0006 with the 0006 precheck before any DDL;
+# downgrade drops the tables in dependency order. On a real MySQL: the shapes, keys, foreign
+# keys and their rules, checks and triggers of the three tables, and that upgrade / downgrade
+# add and drop only these tables. What the triggers and constraints refuse or let through is in
+# test_fx_rates_db.py.
+# ---------------------------------------------------------------------------
+
+_REVISION_0015 = "0015_fx_rates"
+_MIGRATION_0015 = pathlib.Path("alembic/versions/20260929_0015_fx_rates.py")
+_FX_MODELS = (FxRateLock, FxRateVersion, FxFetchAttempt)
+_TABLES_0015 = {model.__tablename__ for model in _FX_MODELS}
+# Creation order; downgrade must be exactly the reverse (foreign keys).
+_CREATE_ORDER_0015 = ["fx_rate_locks", "fx_rate_versions", "fx_fetch_attempts"]
+
+# Trigger → (table, timing, event). The seven of design §2, no more, no fewer.
+_EXPECTED_TRIGGERS_0015 = {
+    "trg_fx_rate_locks_before_insert": ("fx_rate_locks", "BEFORE", "INSERT"),
+    "trg_fx_rate_locks_before_delete": ("fx_rate_locks", "BEFORE", "DELETE"),
+    "trg_fx_rate_versions_before_insert": ("fx_rate_versions", "BEFORE", "INSERT"),
+    "trg_fx_rate_versions_before_update": ("fx_rate_versions", "BEFORE", "UPDATE"),
+    "trg_fx_rate_versions_before_delete": ("fx_rate_versions", "BEFORE", "DELETE"),
+    "trg_fx_fetch_attempts_before_update": ("fx_fetch_attempts", "BEFORE", "UPDATE"),
+    "trg_fx_fetch_attempts_before_delete": ("fx_fetch_attempts", "BEFORE", "DELETE"),
+}
+
+_EXPECTED_0015_COLUMNS = {
+    "fx_rate_locks": {"id": False},
+    "fx_rate_versions": {
+        "id": False,
+        "public_id": False,
+        "base_currency": False,
+        "quote_currency": False,
+        "rate": False,
+        "source": False,
+        "source_reference": False,
+        # A manual version may have no quote date (CHECK 5 requires it for BNM).
+        "source_quote_date": True,
+        "observed_at": False,
+        "status": False,
+        "effective_from": True,
+        "effective_to": True,
+        "open_slot": True,
+        # A BNM draft has no creator (the system).
+        "created_by": True,
+        "approved_by": True,
+        "approved_at": True,
+        "created_at": False,
+        "updated_at": False,
+    },
+    "fx_fetch_attempts": {
+        "id": False,
+        "base_currency": False,
+        "source": False,
+        "requested_date": False,
+        "outcome": False,
+        "quote_date": True,
+        "error_code": True,
+        "fx_rate_version_id": True,
+        "attempted_at": False,
+    },
+}
+
+_EXPECTED_UNIQUE_0015 = {
+    "fx_rate_locks": set(),
+    "fx_rate_versions": {
+        ("public_id",),
+        ("base_currency", "quote_currency", "open_slot"),
+        ("base_currency", "quote_currency", "source", "source_quote_date"),
+    },
+    "fx_fetch_attempts": set(),
+}
+
+_EXPECTED_FOREIGN_KEYS_0015 = {
+    "fx_rate_locks": {},
+    "fx_rate_versions": {
+        "fk_fx_rate_versions_created_by": (["created_by"], "users", ["id"]),
+        "fk_fx_rate_versions_approved_by": (["approved_by"], "users", ["id"]),
+    },
+    "fx_fetch_attempts": {
+        "fk_fx_fetch_attempts_version": (["fx_rate_version_id"], "fx_rate_versions", ["id"]),
+    },
+}
+
+_FX_REFERENTIAL_RULES_QUERY = text(
+    "SELECT CONSTRAINT_NAME, DELETE_RULE"
+    " FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND TABLE_NAME IN ('fx_rate_locks', 'fx_rate_versions', 'fx_fetch_attempts')"
+)
+_FX_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME IN ('fx_rate_locks', 'fx_rate_versions', 'fx_fetch_attempts')"
+)
+
+
+def _load_0015() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0015", _MIGRATION_0015)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fx_checks() -> dict[str, tuple[str, str]]:
+    return {
+        str(constraint.name): (model.__tablename__, _normalised(str(constraint.sqltext)))
+        for model in _FX_MODELS
+        for constraint in model.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0015_follows_0014() -> None:
+    migration = _load_0015()
+
+    assert migration.revision == _REVISION_0015
+    assert migration.down_revision == _REVISION_0014
+
+
+def test_0015_checks_and_open_slot_are_the_ones_the_models_declare() -> None:
+    migration = _load_0015()
+    from_migration = {
+        name: (table, _normalised(condition))
+        for name, (table, condition) in migration._CHECKS.items()
+    }
+
+    assert from_migration == _fx_checks()
+    # Versions 10 (currencies two, rate, source, status, then design §2 CHECK 1–5), attempts 3.
+    assert len(from_migration) == 13
+    computed = FxRateVersion.__table__.c.open_slot.computed
+    assert computed is not None
+    assert computed.persisted is True
+    assert _normalised(str(computed.sqltext)) == _normalised(migration._OPEN_SLOT)
+    # The design writes the expression out (v2): 1 for an untruncated published version and
+    # NULL — not 0 — for every other row, the same as 0013's.
+    expected = "CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END"
+    assert _normalised(migration._OPEN_SLOT) == expected
+    assert migration._OPEN_SLOT == _load_0013()._OPEN_SLOT
+    # No format CHECK on the currency (v3): MySQL's REGEXP ignores case, SQLite has none.
+    assert not any("REGEXP" in condition for _, condition in from_migration.values())
+
+
+def test_0015_sqlite_tables_get_the_lock_row_and_the_open_slot() -> None:
+    """`create_all` (the unit tests) writes the one lock row like the migration does, and
+    SQLite computes `open_slot` as 1 only for an untruncated published version. SQLite does not
+    enforce foreign keys here, so the approver is a placeholder id."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            locks = connection.execute(select(FxRateLock.id)).scalars().all()
+            for number, (status, end, approved) in enumerate(
+                [
+                    ("DRAFT", None, False),
+                    ("PUBLISHED", None, True),
+                    ("PUBLISHED", _NOW, True),
+                    ("RETIRED", _NOW, True),
+                    ("DISCARDED", None, False),
+                ]
+            ):
+                connection.execute(
+                    insert(FxRateVersion).values(
+                        public_id=f"00000000-0000-0000-0000-{number:012d}",
+                        base_currency="USD",
+                        quote_currency="MYR",
+                        rate=Decimal("1.1111111111"),
+                        source="MANUAL",
+                        source_reference="fictional test rate",
+                        observed_at=_NOW,
+                        status=status,
+                        effective_from=_NOW - dt.timedelta(days=1) if approved else None,
+                        effective_to=end,
+                        approved_by=1 if approved else None,
+                        approved_at=_NOW if approved else None,
+                        created_at=_NOW,
+                        updated_at=_NOW,
+                    )
+                )
+            slots = connection.execute(
+                select(FxRateVersion.status, FxRateVersion.open_slot).order_by(FxRateVersion.id)
+            ).all()
+    finally:
+        engine.dispose()
+
+    assert locks == [1]
+    assert [slot for _, slot in slots] == [None, 1, None, None, None]
+
+
+def test_0015_triggers_are_the_seven_of_the_design_written_like_0006() -> None:
+    """Each is one complete CREATE TRIGGER that refuses with SIGNAL SQLSTATE '45000' (as 0006)."""
+    triggers = _load_0015()._TRIGGERS
+
+    assert set(triggers) == set(_EXPECTED_TRIGGERS_0015)
+    for name, (table, timing, event) in _EXPECTED_TRIGGERS_0015.items():
+        statement = _normalised(triggers[name])
+        assert statement.startswith(f"CREATE TRIGGER {name} {timing} {event} ON {table}"), name
+        assert "FOR EACH ROW" in statement, name
+        assert "SIGNAL SQLSTATE '45000'" in statement, name
+        # MySQL triggers cannot refer to generated columns through NEW / OLD.
+        assert "NEW.open_slot" not in statement, name
+        assert "OLD.open_slot" not in statement, name
+    update = _normalised(triggers["trg_fx_rate_versions_before_update"])
+    # No overlapping periods: lock fx_rate_locks first (the service's lock), then check.
+    locked = update.index("FROM fx_rate_locks WHERE id = 1 FOR UPDATE")
+    assert locked < update.index("fx rate periods overlap")
+    # v2: retired and discarded rows are final; no DRAFT → RETIRED; no end on the publish
+    # transition.
+    assert "OLD.status IN ('RETIRED', 'DISCARDED')" in update
+    assert "NEW.status NOT IN ('DRAFT', 'PUBLISHED', 'DISCARDED')" in update
+    assert "NEW.status = 'PUBLISHED' AND NEW.effective_to IS NOT NULL" in update
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0015_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    migration = _load_0015()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0015_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL DDL is not transactional: a failed precheck must not leave a table behind."""
+    migration = _load_0015()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    # The lock table, its one row, the two other tables, then seven triggers.
+    assert allowed.calls == ["create_table", "execute"] + ["create_table"] * 2 + ["execute"] * 7
+
+
+def test_0015_downgrade_drops_the_three_tables_in_dependency_order(monkeypatch) -> None:
+    migration = _load_0015()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert upgrade.first_args("create_table") == _CREATE_ORDER_0015
+    executed = upgrade.first_args("execute")
+    assert executed[0] == "INSERT INTO fx_rate_locks (id) VALUES (1)"
+    assert len(executed) == 1 + 7
+    # No rates are seeded (design §8: an administrator publishes the first version).
+    assert not upgrade.first_args("bulk_insert")
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.first_args("drop_table") == _CREATE_ORDER_0015[::-1]
+    assert [name for name, _ in downgrade.calls] == ["drop_table"] * 3
+
+
+@needs_mysql
+def test_0015_only_adds_and_drops_its_three_tables(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    try:
+        command.downgrade(alembic_config, _REVISION_0014)
+        without = _table_names()
+        assert "pricing_rules" in without, "0014's tables must be there"
+        assert not _TABLES_0015 & without
+
+        command.upgrade(alembic_config, _REVISION_0015)
+        assert _table_names() == without | _TABLES_0015
+
+        command.downgrade(alembic_config, _REVISION_0014)
+        assert _table_names() == without
+        # Triggers go with their tables.
+        assert not set(_EXPECTED_TRIGGERS_0015) & set(_all_triggers())
+    finally:
+        command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0015_the_lock_table_holds_exactly_one_row(alembic_config: Config) -> None:
+    """§7 "migration": after upgrade the lock table holds exactly the row `id = 1`."""
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(text("SELECT id FROM fx_rate_locks")).scalars().all()
+    finally:
+        engine.dispose()
+
+    assert rows == [1]
+
+
+@needs_mysql
+def test_0015_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        columns = {table: inspector.get_columns(table) for table in _EXPECTED_0015_COLUMNS}
+        for table, expected in _EXPECTED_0015_COLUMNS.items():
+            assert {c["name"]: c["nullable"] for c in columns[table]} == expected, table
+        types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
+
+        locks, versions, attempts = _CREATE_ORDER_0015
+        assert isinstance(types[(locks, "id")], Integer)
+        assert not isinstance(types[(locks, "id")], BigInteger)
+        for key in [(versions, "id"), (versions, "created_by"), (versions, "approved_by")]:
+            assert isinstance(types[key], BigInteger), key
+        for key in [(attempts, "id"), (attempts, "fx_rate_version_id")]:
+            assert isinstance(types[key], BigInteger), key
+        for key in [
+            (versions, "observed_at"),
+            (versions, "effective_from"),
+            (versions, "effective_to"),
+            (versions, "approved_at"),
+            (versions, "created_at"),
+            (versions, "updated_at"),
+            (attempts, "attempted_at"),
+        ]:
+            assert isinstance(types[key], DateTime), key
+        for key in [
+            (versions, "source_quote_date"),
+            (attempts, "requested_date"),
+            (attempts, "quote_date"),
+        ]:
+            assert isinstance(types[key], Date), key
+            assert not isinstance(types[key], DateTime), key
+        chars = {
+            (versions, "public_id"): 36,
+            (versions, "base_currency"): 3,
+            (versions, "quote_currency"): 3,
+            (attempts, "base_currency"): 3,
+        }
+        for key, width in chars.items():
+            assert isinstance(types[key], CHAR), key
+            assert types[key].length == width, key
+        widths = {
+            (versions, "source"): 16,
+            (versions, "source_reference"): 255,
+            (versions, "status"): 16,
+            (attempts, "source"): 16,
+            # v3: `NO_QUOTE_FOR_DATE` is 17 characters; VARCHAR(16) would not hold it.
+            (attempts, "outcome"): 32,
+            (attempts, "error_code"): 64,
+        }
+        for key, width in widths.items():
+            assert isinstance(types[key], String), key
+            assert types[key].length == width, key
+        rate = types[(versions, "rate")]
+        assert isinstance(rate, Numeric)
+        assert (rate.precision, rate.scale) == (24, 10)
+
+        # Exactly one generated column, STORED, an integer.
+        computed = {
+            (table, c["name"]): c.get("computed")
+            for table, found in columns.items()
+            for c in found
+            if c.get("computed")
+        }
+        assert set(computed) == {(versions, "open_slot")}
+        assert computed[(versions, "open_slot")]["persisted"] is True
+        assert "PUBLISHED" in str(computed[(versions, "open_slot")]["sqltext"])
+        assert isinstance(types[(versions, "open_slot")], Integer)
+        assert not isinstance(types[(versions, "open_slot")], BigInteger)
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0015_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        for table, expected in _EXPECTED_UNIQUE_0015.items():
+            assert _unique_sets(table) == expected, table
+            foreign_keys = {
+                str(fk["name"]): (
+                    fk["constrained_columns"],
+                    fk["referred_table"],
+                    fk["referred_columns"],
+                )
+                for fk in inspector.get_foreign_keys(table)
+            }
+            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0015[table], table
+
+        indexes = {i["name"]: i for i in inspector.get_indexes("fx_rate_versions")}
+        open_slot = indexes["ux_fx_rate_versions_open_slot"]
+        assert open_slot["column_names"] == ["base_currency", "quote_currency", "open_slot"]
+        assert open_slot["unique"]
+        by_time = {i["name"]: i for i in inspector.get_indexes("fx_fetch_attempts")}
+        assert by_time["ix_fx_fetch_attempts_currency_time"]["column_names"] == [
+            "base_currency",
+            "attempted_at",
+        ]
+
+        with engine.connect() as connection:
+            delete_rules = dict(connection.execute(_FX_REFERENTIAL_RULES_QUERY).all())
+            checks = set(connection.execute(_FX_CHECKS_QUERY).scalars())
+        # ⚠️ RESTRICT: versions and attempts are never deleted, nor the users they name (INV-6).
+        names = {name for keys in _EXPECTED_FOREIGN_KEYS_0015.values() for name in keys}
+        assert delete_rules == dict.fromkeys(names, "RESTRICT")
+        assert checks == set(_fx_checks())
+        ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0015}
+        assert ours == _EXPECTED_TRIGGERS_0015
     finally:
         engine.dispose()
