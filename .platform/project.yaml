@@ -57,7 +57,7 @@ deploy_workflow: deploy.yml
 # 端口、路径、通配符），契约即 invalid_contract。与 deploy_workflow 一样只能由运营者的 PR 改：Worker 改不了
 # `.platform/`，验收时读的是合并 commit 里的这份。
 #
-# ⚠️ 这是本仓库**唯一**写进来的真实主机名，是 ADR-0001「不提交真实主机名」的登记例外（见该 ADR 的派生要求）。
+# ⚠️ 这是 ADR-0001「不提交真实主机名」的第一个登记例外（见该 ADR 的派生要求；第二个是 BNM 公开汇率接口的地址）。
 #    不要照着这一行把主机名写到别处。
 acceptance_hosts:
   - aibilling.acuventech.com
