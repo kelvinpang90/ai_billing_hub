@@ -1297,3 +1297,240 @@ SHA256(RAW_REQUEST_BODY)
 （计费侧 `PRICING_ERROR`，缺价不按 0 算）。版本与分量都是加锁读（`FOR SHARE`），锁持有到**调用方**的事务提交；
 计费侧必须在同一个计费事务里**先** `resolve_model`（它对供应商行加共享锁）**再**调用它，并把返回的版本 id 写进事件
 快照。契约全文见设计 §2「对下游任务的契约」与 [TODO.md](TODO.md) 的 AIH-TASK-026 记录段。
+
+---
+
+## 管理端定价规则
+
+设计依据：设计闸门 #178 `APPROVED: design v4`，全文见
+[design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（spec §14、§15、§15.1、§16、§59、§66、
+§74.3、§80、§89、§113；ADR-0008）。实现登记为 AIH-TASK-027。表结构见 [database-schema.md](database-schema.md) 的
+「客户定价规则」；五级顺序与下落语义见 [pricing-engine.md](pricing-engine.md) 的「规则」。
+
+一条**定价规则**决定客户被扣多少钱：一个**范围**（spec §16 的五级之一）加一种**策略**（spec §15）——
+
+- `MARKUP`：MYR 估算成本 × `markup_multiplier`；
+- `FIXED_RATE`：Acuven 自定的 MYR 分量价（`components`），与供应商成本无关。
+
+**价格一律是 MYR 含税价（tax-inclusive，ADR-0008）**：FIXED_RATE 的 `rate_amount` 是含税单价；倍数乘出来的就是含税
+计费额（倍数本身没有「含税」与否之分）。本任务不存税额，录错不会报错（ADR-0008 已接受的代价）。
+
+状态 `DRAFT → PUBLISHED → RETIRED`，草稿也可以 `DISCARDED`。已发布的规则在 `[effective_from, effective_to)` 内生效；
+同一范围的区间首尾相接、不重叠，只在末尾追加；**只有 `GLOBAL` 范围的第一条可以对过去生效**。倍数（即 markup）只在
+管理端可见（INV-7）。**不含**计费额计算、舍入、试算、税额与前端。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/admin/pricing-rules` | — | 200，规则分页 | 401 / 403 / 404 / 422 / 503 |
+| `POST /api/v1/admin/pricing-rules` | 见下 | 201，规则（草稿） | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `GET /api/v1/admin/pricing-rules/{rule_id}` | — | 200，规则 | 401 / 403 / 404 / 503 |
+| `PATCH /api/v1/admin/pricing-rules/{rule_id}` | 见下 | 200，规则 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/pricing-rules/{rule_id}/publish` | 见下 | 200，规则 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/pricing-rules/{rule_id}/retire` | `{"reason": …}` | 200，规则 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/pricing-rules/{rule_id}/discard` | `{}` | 200，规则 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+
+只有 ADMIN 能调（处理函数第一条语句就是鉴权）。路径里的 `rule_id` 是规则的 `public_id`；客户用 `customer_id`（租户
+的 `public_id`）；响应里没有内部自增 id，人一律用登录邮箱表示。所有请求体都拒绝多余字段（422）。**没有删除接口**：
+草稿只能丢弃，规则行永不删除。spec §89 没有列发布接口（§66 有 `PRICING_PUBLISH`），这里按 §89「允许调整命名」补上。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `PRICING_RULE_NOT_FOUND` | 路径里的规则不存在 | 否 |
+| 404 | `CUSTOMER_NOT_FOUND` | 请求体或筛选里的客户不存在 | 否 |
+| 404 | `AI_PROVIDER_NOT_FOUND` | 请求体或筛选里的供应商不存在 | 否 |
+| 404 | `AI_MODEL_NOT_FOUND` | 模型不存在，或不属于那个供应商（两者一模一样） | 否 |
+| 404 | `USAGE_METER_COMPONENT_NOT_FOUND` | `component_code` 不是目录里的计价分量 | 否 |
+| 409 | `PRICING_RULE_NOT_DRAFT` | 编辑或丢弃一条已发布的规则 | 否 |
+| 409 | `PRICING_RULE_INCOMPLETE` | 发布 FIXED_RATE 规则时完整性不满足；`message` 列出缺的分量代码 | 否 |
+| 409 | `CATALOG_ITEM_RETIRED` | 规则引用的供应商、模型或某个分量所属的计量类型已停用（建草稿、改草稿、发布时检查） | 否 |
+| 409 | `PRICING_RULE_NOT_RETIRABLE` | 停用一条已被后继截断的历史规则，或停用草稿 | 否 |
+| 409 | `PRICING_RULE_FINAL` | 对已停用 / 已丢弃的规则做任何写操作 | 否 |
+| 409 | `EFFECTIVE_FROM_CONFLICT` | 生效时刻不晚于该范围末尾规则的起点，或早于它的尽头；不指定时刻而末尾规则尚未开始 | 否 |
+| 422 | `EFFECTIVE_FROM_IN_PAST` | 请求的生效时刻早于 `t`（不许回溯） | 否 |
+| 422 | `VALIDATION_ERROR` | 范围字段与 `priority_scope` 不匹配、策略与字段混合、格式、精度、正数、多余字段 | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误（含发布 / 停用后区间复查不通过、锁等待超时）；整个事务回滚 | 否 |
+
+### 范围（spec §16，从高到低）
+
+| `priority_scope` | `customer_id` | `provider_id` | `model_id` |
+| --- | --- | --- | --- |
+| `CUSTOMER_PROVIDER_MODEL` | 必填 | 必填 | 必填 |
+| `CUSTOMER_PROVIDER` | 必填 | 必填 | 不许给 |
+| `CUSTOMER` | 必填 | 不许给 | 不许给 |
+| `GLOBAL_PROVIDER_MODEL` | 不许给 | 必填 | 必填 |
+| `GLOBAL` | 不许给 | 不许给 | 不许给 |
+
+多给或少给都是 422 `VALIDATION_ERROR`（`null` 等同不给）；§16 之外的组合（例如全局 + 供应商不带模型）写不进去，数据库
+的 CHECK 也拒绝。模型必须属于给出的供应商。客户的账户状态不限：停用的客户也可以预先配置价格。
+
+### 字段规则
+
+| 字段 | 规则 |
+| --- | --- |
+| `strategy` | `MARKUP` 或 `FIXED_RATE` |
+| `markup_multiplier` | 只有 MARKUP 有，且必填；**乘 MYR 估算成本，得到含税计费额** |
+| `components` | 只有 FIXED_RATE 有，且必填（草稿可以是空列表：完整性在发布时校验）；0–64 个，`component_code` 不重复 |
+| `components[].component_code` | 目录里的计价分量代码，例如 `LLM_INPUT_TOKEN`、`AUDIO_SECOND` |
+| `components[].unit_quantity` | 多少个计量单位对应一个 `rate_amount`，例如 `"1000000"` |
+| `components[].rate_amount` | **MYR 含税单价**（tax-inclusive）；币种固定为 MYR，请求里不收 `currency` |
+
+MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍数、FIXED_RATE 不带 `components`：一律 422
+（混合的规则数据库也拒绝：CHECK 与复合外键）。`markup_multiplier`、`unit_quantity`、`rate_amount` **只收 JSON 字符串**，
+正数，`^[0-9]{1,12}(\.[0-9]{1,8})?$`：JSON 数字、`0`、负号、正号、指数写法、空白一律 422；**超过 8 位小数是 422，
+不舍入**。响应里都是恰好 8 位小数的字符串。
+
+### 规则对象
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000000",
+  "priority_scope": "CUSTOMER_PROVIDER_MODEL",
+  "customer_id": "00000000-0000-4000-8000-000000000000",
+  "provider_id": "00000000-0000-4000-8000-000000000000",
+  "provider_code": "anthropic",
+  "model_id": "00000000-0000-4000-8000-000000000000",
+  "model_code": "claude-x",
+  "strategy": "FIXED_RATE",
+  "markup_multiplier": null,
+  "status": "PUBLISHED",
+  "effective_from": "2026-09-29T08:30:01",
+  "effective_to": null,
+  "components": [
+    {
+      "component_code": "LLM_INPUT_TOKEN",
+      "meter_type_code": "LLM_TOKEN",
+      "unit": "TOKEN",
+      "unit_quantity": "1000000.00000000",
+      "rate_amount": "1.11111111",
+      "currency": "MYR",
+      "created_at": "2026-09-29T08:30:00"
+    }
+  ],
+  "created_by_email": "admin@example.com",
+  "approved_by_email": "admin@example.com",
+  "created_at": "2026-09-29T08:30:00",
+  "updated_at": "2026-09-29T08:30:00",
+  "approved_at": "2026-09-29T08:30:00"
+}
+```
+
+（示例里的价格是虚构值，MYR 含税。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `customer_id` / `provider_id` / `model_id` | 按 `priority_scope` 有值，其余为 `null`；`provider_code` / `model_code` 同理 |
+| `markup_multiplier` | MARKUP 的倍数；FIXED_RATE 为 `null` |
+| `status` | `DRAFT` / `PUBLISHED` / `RETIRED` / `DISCARDED` |
+| `effective_from` | 草稿为 `null`；已发布时 `null` 只有一种含义：`GLOBAL` 范围的第一条、未指定生效时刻 =「一直以来」 |
+| `effective_to` | `null` = 仍生效（或尚未发布）。`effective_from == effective_to` 是空区间（被撤销的预约，或同一秒里发布又停用），永不命中，只出现在 `RETIRED` 上 |
+| `components` | FIXED_RATE 的分量，`component_code` 升序；MARKUP 为空列表 |
+
+时间都是不带时区的 UTC，精确到秒。
+
+#### `GET /api/v1/admin/pricing-rules` —— 规则列表（spec §59「查看价格历史」）
+
+按范围（§16 的顺序，同一级里同一范围的聚在一起）、`effective_from`（`null` 在前，含草稿）排序，每项带分量。查询参数：
+`priority_scope`、`customer_id`、`provider_id`、`model_id`（`public_id`，最长 64）、
+`status=DRAFT|PUBLISHED|RETIRED|DISCARDED`，以及[分页](#分页spec-108)。筛选里的客户不存在 404 `CUSTOMER_NOT_FOUND`；
+供应商不存在 404 `AI_PROVIDER_NOT_FOUND`；模型不存在（或同时给了供应商而模型不属于它）404 `AI_MODEL_NOT_FOUND`。
+
+#### `POST /api/v1/admin/pricing-rules` —— 建草稿
+
+请求体：`priority_scope`、按范围给的 `customer_id` / `provider_id` / `model_id`、`strategy`、`markup_multiplier`
+（MARKUP）或 `components`（FIXED_RATE）。201；同一事务写规则、分量与一条 `PRICING_CREATE`。草稿**可以不完整**。
+供应商、模型或分量所属计量类型已停用：409 `CATALOG_ITEM_RETIRED`。不拿规则锁；重发会建出两个草稿（草稿不影响计费，
+丢弃多余的即可）。
+
+#### `PATCH /api/v1/admin/pricing-rules/{rule_id}` —— 改草稿（spec §89）
+
+只收 `strategy`、`markup_multiplier`、`components`，至少一个，都不许是 `null`；`components` 是**整体替换**。**范围
+字段不可改**（带 `priority_scope`、`customer_id`、`provider_id`、`model_id` 是 422；改范围请新建）。与规则现状合起来：
+
+- 改成（或仍是）MARKUP：倍数取请求里的，没给就沿用原来的（原本是 FIXED_RATE 而没给倍数：422）；带 `components` 422；
+  原有分量全部删掉；
+- 改成（或仍是）FIXED_RATE：带 `markup_multiplier` 422；倍数清空；分量取请求里的，没给就沿用原来的（原本是 MARKUP
+  则为空）。
+
+只对草稿：已发布 409 `PRICING_RULE_NOT_DRAFT`，已停用 / 已丢弃 409 `PRICING_RULE_FINAL`。目录检查同建草稿。**没有
+实际变化**（分量按代码与数值比较，`1.5` 与 `1.50000000` 相同）：200，什么都不写；有变化时写一条 `PRICING_UPDATE`。
+
+#### `POST /api/v1/admin/pricing-rules/{rule_id}/publish` —— 发布
+
+请求体：可选 `effective_from`，RFC 3339 且**必须带时区**；换算成 UTC 后必须是整秒。不带或 `null` = 不指定。
+
+在 `pricing_rule_locks` 那一行的排他锁（`SELECT … FOR UPDATE`）内完成：拿到锁之后取 `t` = 服务端当前时间**向上**取整
+到下一个整秒。每个范围（`scope_key`）是一条只在末尾追加的时间线；设该范围**区间非空**的已发布规则中 `effective_from`
+最晚的一条为末尾规则 L：
+
+| 情形 | 本规则的 `effective_from` | 对 L 做什么 |
+| --- | --- | --- |
+| `GLOBAL` 范围、该范围从没有已发布规则，不指定 | `null`（一直以来：此前未被更高级覆盖的时刻都没有规则、从未扣过钱） | — |
+| 其他范围（或 `GLOBAL` 已有过已发布规则）、没有 L，不指定 | `t`（**不回溯**：回溯会让已按更低一级计过费的时刻改选这一级） | — |
+| 没有 L，指定 F | F | — |
+| L 未截断且已开始，不指定 | `t` | L 截断于 `t` |
+| L 未截断且尚未开始，不指定 | 409 `EFFECTIVE_FROM_CONFLICT`，什么都不写 | — |
+| L 未截断，指定 F | F（必须晚于 L 的起点，否则 409） | L 截断于 F |
+| L 已截断或已停用，尽头 E | `max(E, F 或 t)`；F 早于 E 是 409 | —（停用留下的空档不回填） |
+
+- 指定的 F 早于 `t`：422 `EFFECTIVE_FROM_IN_PAST`。F 等于 `t` 可以。
+- FIXED_RATE 的完整性：至少一个分量；**出现的计量类型，它的全部分量都必须出现**（出现 `LLM_TOKEN` 就必须有输入、输出、
+  缓存写入、缓存读取四个价）。不满足：409 `PRICING_RULE_INCOMPLETE`。MARKUP 只需倍数（数据库已保证 > 0）。
+- 目录已停用：409 `CATALOG_ITEM_RETIRED`。已停用 / 已丢弃：409 `PRICING_RULE_FINAL`。
+- **已发布再发布**：200，返回当前规则，什么都不写（幂等）。
+- 成功时同一事务写：（需要时）截断 L、本规则改为已发布、复查该范围的区间、一条 `PRICING_PUBLISH`；复查不通过整体
+  回滚（500）。
+
+**一个（租户, 供应商, 模型, 时刻）一旦选到某条规则，以后永远选到同一条**（原本无规则的时刻除外）：发布只影响 `t` 及
+以后，只有全局默认的第一条把「无规则」变成「有规则」。
+
+#### `POST /api/v1/admin/pricing-rules/{rule_id}/retire` —— 停用（spec §59「disable rule」）
+
+请求体：`reason`，去首尾空白后 1–255（记在审计的 `reason` 上）。在规则锁内完成，`t` 取法同发布：
+
+| 被停用的规则 | 做什么 |
+| --- | --- |
+| 当前末尾、已开始生效（起点为 `null` 或 ≤ `t`） | `effective_to = t`、`RETIRED`：`t` 起该范围不再命中，事件**下落到更低一级**（或无规则 → 计费侧 `PRICING_ERROR`） |
+| 当前末尾、尚未开始（预约的，起点 > `t`） | `effective_to = effective_from`（空区间，永不命中）、`RETIRED`；前一条若仍是 `PUBLISHED` 且正是被它截断的，恢复为未截断（撤销预约） |
+| 已被后继截断的历史规则、草稿 | 409 `PRICING_RULE_NOT_RETIRABLE` |
+| 已停用 / 已丢弃 | 409 `PRICING_RULE_FINAL` |
+
+停用后的空档不回填：停用的意思就是「此后这一级不再适用」。停用的规则在它自己的区间里照样命中。
+
+#### `POST /api/v1/admin/pricing-rules/{rule_id}/discard` —— 丢弃草稿
+
+请求体是 `{}`。草稿 → `DISCARDED`，行留着（不删除），写一条 `PRICING_DISCARD`。已发布 409 `PRICING_RULE_NOT_DRAFT`；
+已停用 / 已丢弃 409 `PRICING_RULE_FINAL`。
+
+### 审计
+
+五个动作都与写入同一事务，不写 outbox；操作者带 ip 与 user agent。`entity_type` = `pricing_rule`，`entity_id` = 规则
+的 `id`。范围里客户用租户 `public_id`（`customer_id`），供应商、模型、分量一律用 `code`，被截断 / 被恢复的规则用
+`public_id`，发布人用邮箱；不含内部 id。审计里有倍数与单价：管理员可见的业务数据；应用日志不打印分量明细。
+
+| `action` | `before_state` | `after_state` |
+| --- | --- | --- |
+| `PRICING_CREATE` | — | `priority_scope`、`customer_id`、`provider_code`、`model_code`、`strategy`、`markup_multiplier`、`components`（每项 `component_code`、`unit_quantity`、`rate_amount`）、`status` |
+| `PRICING_UPDATE` | 变化的字段（`strategy` / `markup_multiplier` / `components`）的旧值 | 变化的字段的新值 |
+| `PRICING_DISCARD` | `status`（`DRAFT`） | `status`（`DISCARDED`） |
+| `PRICING_PUBLISH` | `status`（`DRAFT`）；截断了前一条时 `truncated_rule`：它的 `id` 与原 `effective_to`（`null`） | 范围四项、`strategy`、`markup_multiplier`、`components`、`status`、`effective_from`、`effective_to`、`approved_by_email`、`approved_at`；截断了前一条时 `truncated_rule`：它的 `id` 与新的 `effective_to` |
+| `PRICING_RETIRE` | `status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与原 `effective_to` | 范围四项、`status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与 `effective_to`（`null`）。`reason` 记在审计行的 `reason` 上 |
+
+「已发布再发布」与无变化的 PATCH 不写审计。`PRICING_CREATE` / `PRICING_UPDATE` / `PRICING_PUBLISH` 在 spec §66 的
+清单里；`PRICING_RETIRE`、`PRICING_DISCARD` 按先例补上（见 [TODO.md](TODO.md) 的 AIH-TASK-027 记录段）。
+
+### 解析（计费侧调用，本任务不接线）
+
+`app/repositories/pricing_rules.py`：
+
+- `lock_pricing_rules_shared(session)`：对 `pricing_rule_locks` 那一行取 `FOR SHARE`，持有到调用方的事务提交；
+- `resolve_pricing_rule(session, tenant_id, provider_id, model_id, occurred_at)`：参数是事件的内部 `tenant_id`、
+  `resolve_model` 返回的模型的内部 `provider_id` / `id`，以及不带时区的 UTC `occurred_at`。按
+  `CUSTOMER_PROVIDER_MODEL → CUSTOMER_PROVIDER → CUSTOMER → GLOBAL_PROVIDER_MODEL → GLOBAL` 逐级加锁读（`FOR SHARE`）
+  该级范围内状态为 `PUBLISHED` 或 `RETIRED`、`effective_from ≤ occurred_at < effective_to` 的规则，**第一级命中即返回**
+  （规则 + 分量；命中的 FIXED_RATE 规则缺事件所需分量也**不下落**），五级都没有返回 `None`（计费侧 `PRICING_ERROR`）。
+
+计费事务里的顺序：`resolve_model`（供应商 S）→ `lock_pricing_rules_shared` → 价格与规则的加锁读 → 钱包 → 租户；返回
+的规则内部 id 写进事件快照（`pricing_rule_id`）。契约全文见设计 §2「对下游任务的契约」与 [TODO.md](TODO.md) 的
+AIH-TASK-027 记录段。

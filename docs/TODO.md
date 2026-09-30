@@ -2300,6 +2300,117 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     `effective_to`，它仍被取价、并让之后的发布撞上区间不重叠触发器。Kelvin 2026-09-30 决定另开任务补（新迁移，
     碰定价，要先过设计闸门）
 
+### AIH-TASK-027 —— 客户定价规则 MARKUP 与 FIXED_RATE（T-D，2026-09-29）
+
+设计闸门 #178 `APPROVED: design v4`（v4 由本任务的实现审查触发，见下文「交付」），全文在 [design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)。
+接口记在 [api.md](api.md) 的「管理端定价规则」，表、触发器与锁顺序记在 [database-schema.md](database-schema.md) 的「客户
+定价规则」，五级顺序、下落语义与含税记在新建的 [pricing-engine.md](pricing-engine.md) 的「规则」。不含计费额计算、舍入、
+试算、税额与前端（T-G、Phase 4、T-L）。
+
+- [x] **做了什么（本分支，Draft PR 交付；PR 正文的「设计闸门」写 #178）**：
+  - `alembic/versions/20260929_0014_pricing_rules.py`：revision `0014_pricing_rules`，`down_revision` 是
+    `0013_provider_prices`。先做 0006 同款的触发器权限预检（在任何 DDL 之前）；建 `pricing_rule_locks` 并写入唯一一行
+    `id = 1`；建 `pricing_rules`（五级范围与 NULL 组合、策略与倍数、状态与区间 / 发布人共八条 CHECK；STORED 生成列
+    `scope_key`、`open_slot` 与 `(scope_key, open_slot)` 唯一索引；`(id, strategy)` 唯一；租户、供应商、复合模型、
+    建草稿人、发布人外键都是 `RESTRICT`；解析用索引）与 `pricing_rule_components`（`strategy = 'FIXED_RATE'`、两个
+    `> 0`、`currency = 'MYR'` 四条 CHECK；复合外键 `(pricing_rule_id, strategy)` → `pricing_rules(id, strategy)`
+    删与改都 `RESTRICT`；`(规则, 计价分量)` 唯一）；八个触发器（锁表恰好一行两个；规则只能以草稿插入、丢弃的不可改、
+    草稿只能改成草稿 / 已发布 / 已丢弃、发布后只许截断与 `PUBLISHED → RETIRED`、发布跃迁上 FIXED_RATE 分量完整、锁
+    `pricing_rule_locks` 后检查同一范围非空区间不重叠、规则禁止删除；分量只在草稿阶段可增删改）。`downgrade` 按外键依赖
+    倒序删表。文件头附 §132 第 13 条分析。`alembic/env.py` 加 import `app.models.pricing_rules`
+  - `app/models/pricing_rules.py`：三个模型、三个枚举（`PricingScope` 按 §16 从高到低声明、`PricingStrategy`、
+    `PricingRuleStatus`）、与迁移逐字一致的 CHECK / 生成列表达式常量
+  - `app/repositories/pricing_rules.py`：只 flush。`lock_pricing_rules`（`FOR UPDATE`）、`lock_pricing_rules_shared`
+    （`FOR SHARE`，给计费用）、`period_rules`（加锁读一个范围的全部已发布规则）、按写入顺序各自 flush 的截断 / 恢复 /
+    发布 / 停用 / 丢弃；`resolve_pricing_rule(session, tenant_id, provider_id, model_id, occurred_at)` 按五级逐级
+    `FOR SHARE` 读，第一级命中即返回规则与分量，没有接到任何计费路径
+  - `app/services/pricing_rules.py`：每个写一个 `session_scope`，规则、分量、前一条规则与审计同一事务，不写 outbox。
+    发布、停用的第一条语句是规则锁，**拿到锁之后**才调用时钟取 `t`（复用 025 的 `boundary_after`），之后的读全是加锁读；
+    写完在同一事务里加锁重读该范围并 `verify_periods` 复查，不满足抛 `PricingPeriodsBroken`（500，整体回滚）。时钟可注入
+  - `app/schemas/pricing_rules.py`、`app/api/admin_pricing_rules.py`（`app/main.py` 注册）：七个接口，请求体
+    `extra="forbid"`，范围字段必须与 `priority_scope` 恰好匹配，倍数与金额只收 JSON 字符串、超过 8 位小数 422；每个处理
+    函数第一条语句 `require_admin(request)`；响应是字段白名单；单价与倍数的字段说明写明 tax-inclusive
+  - `app/models/auth.py`：五个审计动作
+  - 测试：`test_pricing_rules_api.py`（SQLite 上的接口契约：五级 × 两种策略的正常路径、范围字段、混合策略、精度、404、
+    完整性与目录、生效时刻、状态机、列表、含税说明、AST 钉住第一条语句）、`test_pricing_rules_service.py`（冻结时钟下的
+    区间规则、复查与加锁顺序；事务中途失败在 SQLite 与 MySQL 各一次；真 MySQL 上的触发器、范围 / 策略 / 币种 CHECK、复合
+    外键、完整性、唯一索引、区间不重叠）、`test_pricing_rules_resolve.py`（五级下落、命中即停、租户隔离、时间稳定性性质
+    用例；真 MySQL 上发布与计费并发两种顺序、共享锁互不阻塞、快照读陷阱）；`test_migrations.py` 加 0014 的一组，并把
+    0006 的触发器集合、0010 / 0011 两条降级用例的表集合改成同时算上 0014；`test_model_columns.py` 加新表的四个枚举列与三个
+    DECIMAL(20,8) 列；`test_admin_customers_api.py` 的 `EXPECTED_ADMIN_ROUTES` / `VALID_BODIES` 加七个接口，鉴权用例预置
+    一份 FIXED_RATE 规则草稿（public_id 用全零占位值）并比对它没有被改。价格与倍数一律是虚构值
+- [x] **审计动作对 spec §66 的补充**：`PRICING_CREATE`、`PRICING_UPDATE`、`PRICING_PUBLISH` 在 §66 的清单里；
+  `PRICING_RETIRE`、`PRICING_DISCARD` 两个不在，按 `PROJECT_CREATE`、`PROVIDER_PRICE_*` 的先例补上（设计 §2「审计」）。
+  `entity_type` 是 `pricing_rule`，`entity_id` 是规则的 `public_id`
+- [x] **对下游任务的契约**（设计 §2「对下游任务的契约」，逐字要点）：
+  - **T-G**：MARKUP：未舍入的 MYR 估算成本 × 倍数，只乘一次，再按 §80 舍入一次；FIXED_RATE：按分量取数（025 的
+    `quantity_field`）× `rate_amount` / `unit_quantity` 求和，再舍入一次，与供应商成本无关；命中的 FIXED_RATE 规则缺
+    所需分量 → `PRICING_ERROR`，**不下落**；`resolve_pricing_rule` 返回 `None` → `PRICING_ERROR`
+  - **T-H**：计费事务里：`resolve_model`（供应商 S）→ 取 `pricing_rule_locks` 的 `FOR SHARE`
+    （`lock_pricing_rules_shared`）→ 价格、规则的加锁读 → 钱包 → 租户；`pricing_rule_id`（`ResolvedPricingRule.rule_id`）
+    写进事件快照。上线步骤要写「至少录一条全局默认规则，否则所有事件都会 `PRICING_ERROR`」（设计 §8，由 T-H 写进
+    runbook）
+  - **T-L**：界面标注「含税」；FIXED_RATE 按计量类型成组录入分量
+- [x] **实现定的细节**（审查时请看这几条）：
+  - ⚠️ **触发器里的「同一 `scope_key`」**：MySQL 的触发器不能用 `NEW` / `OLD` 引用生成列，设计写的
+    `o.scope_key = NEW.scope_key` 照抄会建不出触发器。实现按 `scope_key` 的定义现算本行的键
+    （`o.scope_key = CONCAT(NEW.priority_scope, ':', COALESCE(NEW.tenant_id, 0), …)`），语义相同；不可变检查也不比两个生成列
+  - **草稿只能改成草稿 / 已发布 / 已丢弃**：设计 §2 的不可变清单只写了「`DRAFT` 可改」，但 §4 的状态表里草稿只有这三个
+    去向，§3 又要求「混合或不完整的规则不可能处于已发布状态」（`RETIRED` 也参与解析）。触发器照 §4 拒绝直接
+    `DRAFT → RETIRED`（026 v4 同一处缺口的同一写法）；设计 v4 已写明
+  - **「该组从没有已发布规则」按字面**：`GLOBAL` 范围里只要出现过 `PUBLISHED` / `RETIRED` 的行（包括被撤销的预约留下的
+    空区间），之后不指定时刻的发布就从 `t` 起，不再「一直以来」。比 026 的「没有区间非空的版本」更严，回溯只可能少不会多
+  - **SQLite 上的 `scope_key`**：`CONCAT` 要 SQLite 3.44 才有，单元测试的 SQLite 可能更老。生成列表达式是一个按方言编译
+    的构造（`ScopeKeyExpression`）：MySQL 上是设计的 `CONCAT(…)`（与迁移逐字一致，`test_migrations.py` 比对），SQLite 上
+    是同一个键的 `||` 写法
+  - **锁表那一行在 SQLite 上**：`Base.metadata.create_all` 通过 `after_create` 事件同样写入 `id = 1`，服务层的
+    `lock_pricing_rules` 在单元测试里因此也有行可锁；生产只经迁移写入
+  - FIXED_RATE 草稿可以带空的 `components`（完整性在发布时校验，设计 §7 要「零个分量发布 → 409」的用例经接口可达）；
+    上限 64 个，与 026 一致
+  - PATCH 与规则现状合起来仍然矛盾（例如给 FIXED_RATE 草稿只带倍数、把 FIXED_RATE 改成 MARKUP 而不给倍数）是 422
+    `VALIDATION_ERROR`；改成 MARKUP 时原有分量先删（复合外键 `ON UPDATE RESTRICT` 要求），改成 FIXED_RATE 时倍数清空
+  - 分量表的复合外键显式写 `ON UPDATE RESTRICT`（设计 §10 假设 2 依赖它拒绝「有分量时把父行改成 MARKUP」）
+  - 审计：`PRICING_PUBLISH` / `PRICING_RETIRE` 的后状态带范围四项（`priority_scope`、`customer_id`、`provider_code`、
+    `model_code`），发布还带策略、倍数与分量；被截断 / 被恢复的前一条记为 `truncated_rule` / `restored_rule`
+  - 列表排序：§16 的级别顺序，同一级里同一范围的聚在一起（按内部 id 排、不出库），再按 `effective_from`（`null` 在前）
+- [x] **`pricing_rule` 归类**：`app/services/audit_query.py` 把 `pricing_rule` 归进 `PUBLIC_ENTITY_TYPES`（`entity_id`
+  是规则的 `public_id`）。Worker 的 run 当时没有这个文件的权限，如实记为待处理；契约由 #193 补进允许路径，接手时补上
+- [x] **交付：Claude 手工接手 run `20966ebc` 的 #192**（照 026 在 #188 的先例，不重发「开启」）：
+  - OpenClaw run `20966ebc` 基于 `b420d36` 实现、开出 Draft #192（head `15e7245`）。独立审查认为实现没有缺陷，唯一的
+    阻断是上一条的归类缺口（修复会话无权改），run 以 `review_repair_no_change` 结束。审查结束时 CI 还没跑完，实际
+    backend 5 failed / 2175 passed
+  - 5 个失败与处理：
+    1. `test_every_written_entity_type_is_classified`：上一条
+    2. `test_mixed_or_unknown_shapes_are_refused[unknown-strategy]`：测试自己的错，`strategy` 既按位置传又在
+       `**fields` 里（`TypeError`）。改成先按基准策略造请求体、再用参数覆盖，其他七个参数的请求体不变
+    3. 第 3–5 个，`test_pricing_rules_resolve.py` 里真 MySQL 的「发布与计费并发」两种顺序与「快照读陷阱」：**测试错，实现
+       无误**。三条用例照抄 026 的写法，先发布一条 `CUSTOMER` 规则当旧规则；026 的第一个版本起点为 `NULL`、立即生效，
+       但按设计 §2 只有 `GLOBAL` 的第一条可以「一直以来」，其余从 `t`（发布后的下一个整秒）起。于是旧规则在当前时刻还
+       解析不到（④ `found is None`）；同一秒里不指定时刻再发布，`t` 不晚于旧规则的起点，按设计 §2「F 必须大于末尾
+       规则的起点；未指定则取 `t`」是 409（③ 发布线程抛 `EffectiveFromConflict`，没走到暂停点，`written` 等不到；
+       ⑤ 直接抛）。修法：新增 `_started`，等旧规则按墙钟生效（至多约 1 秒）再往下走；断言一条没改
+  - 核对：在一次性 `mysql:8.4` 容器上，原测试文件复现这 3 个失败；修后 `test_pricing_rules_{resolve,api,service}.py`
+    与 `test_admin_audit_api.py` 共 270 个用例全过、无 skipped。变异核对：去掉发布 / 停用的规则锁，② 失败；把解析的
+    加锁读改成普通读，三条全失败 —— 修后的用例测到的仍是锁与加锁读本身
+  - 修完 CI 后的实现审查（Codex，`reviewed-head` `cf726d4`）`REQUEST_CHANGES`，两条阻断都是 v3 没有列的数据库兜底：
+    绕过服务可把非全局规则直接发布成起点为空（一直以来）；可把规则直接改为 `RETIRED` 而不写尽头，它仍被命中并卡住
+    该范围之后的发布。Worker 的实现与 v3 一致，所以回到设计闸门：#178 升 v4，前两轮判阻断「全局默认第一条起点
+    为空」，Kelvin 2026-09-30 裁定保留（`docs/REVIEW-LOG.md`），第三轮 `APPROVED: design v4`；#194 同步设计副本与契约。
+    026 的同类缺口另开任务（记在 AIH-TASK-026「后续」）
+  - 本分支按 v4：迁移 0014 加 CHECK `ck_pricing_rules_retired_end`（`status <> 'RETIRED' OR effective_to IS NOT NULL`，
+    模型同步）；规则的 BEFORE UPDATE 触发器在区间检查之后、同一把锁内加 ⑤「起点为空只许 `GLOBAL` 范围且该范围
+    没有任何 `PUBLISHED` / `RETIRED` 行」；§7「起点与尽头由数据库兜底」的直接写库用例（另外四级各一次的空起点、
+    全局范围已有规则或撤销的预约之后的空起点、不写尽头的停用、清掉已停用规则的尽头，以及对应的放行情形）；两条旧用例
+    里非全局规则的空起点改成具体起点（它们测的是完整性与首尾相接，起点无关；v4 后非全局规则不能起点为空）。服务层
+    代码不用改：它本来就只给全局默认第一条空起点、停用一律写尽头
+  - 变异核对（每次重建数据库，迁移才会重跑）：拿掉 ⑤，五个空起点用例失败；拿掉新 CHECK，尽头用例失败
+  - 本地：六项检查全过；真 MySQL 上全量 `pytest` 2183 passed、3 skipped（两个要 Redis，一个是 Windows 上没有 POSIX
+    权限位；CI 上都跑）
+- [ ] **后续**：
+  - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-L
+    （AIH-TASK-037）补上
+  - 「快照读陷阱」用例同时断言了陷阱本身，与 025 / 026 一样依赖 MySQL 默认的 REPEATABLE READ
+
 ---
 
 ## Phase 3 — Integrated Application Backend 试点（§126）

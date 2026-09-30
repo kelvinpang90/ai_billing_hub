@@ -40,6 +40,13 @@ from app.models.ai_catalog import (
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.integration import IntegrationCredential, ProjectWebhookSecret
+from app.models.pricing_rules import (
+    PricingRule,
+    PricingRuleComponent,
+    PricingRuleStatus,
+    PricingScope,
+    PricingStrategy,
+)
 from app.models.provider_prices import (
     PriceSourceType,
     PriceVersionStatus,
@@ -78,7 +85,7 @@ ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
 # 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态、
 # AIH-TASK-022 的审计日志查询、AIH-TASK-025 的十五个 AI 目录接口、AIH-TASK-026 的七个供应商价格
-# 接口。
+# 接口、AIH-TASK-027 的七个定价规则接口。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
@@ -90,6 +97,8 @@ MODELS_ROUTE = PROVIDER_ROUTE + "/models"
 ALIASES_ROUTE = PROVIDER_ROUTE + "/model-aliases"
 PRICES_ROUTE = "/api/v1/admin/provider-prices"
 PRICE_ROUTE = PRICES_ROUTE + "/{price_version_id}"
+RULES_ROUTE = "/api/v1/admin/pricing-rules"
+RULE_ROUTE = RULES_ROUTE + "/{rule_id}"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -131,6 +140,13 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", PRICE_ROUTE + "/publish"),
     ("POST", PRICE_ROUTE + "/retire"),
     ("POST", PRICE_ROUTE + "/discard"),
+    ("GET", RULES_ROUTE),
+    ("POST", RULES_ROUTE),
+    ("GET", RULE_ROUTE),
+    ("PATCH", RULE_ROUTE),
+    ("POST", RULE_ROUTE + "/publish"),
+    ("POST", RULE_ROUTE + "/retire"),
+    ("POST", RULE_ROUTE + "/discard"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -189,6 +205,19 @@ VALID_BODIES = {
     ("POST", PRICE_ROUTE + "/publish"): {},
     ("POST", PRICE_ROUTE + "/retire"): {"reason": "Probe"},
     ("POST", PRICE_ROUTE + "/discard"): {},
+    # 定价规则（AIH-TASK-027）：预置的是一份完整的 FIXED_RATE 草稿（分量是预置的 PROBE），
+    # 漏了鉴权的建、改、发布、丢弃会真的多出行或改掉它；停用草稿本应 409，同样过不了 401 / 403。
+    ("POST", RULES_ROUTE): {
+        "priority_scope": "GLOBAL_PROVIDER_MODEL",
+        "provider_id": PROBE_CATALOG_ID,
+        "model_id": PROBE_CATALOG_ID,
+        "strategy": "FIXED_RATE",
+        "components": [{"component_code": "PROBE", "unit_quantity": "1", "rate_amount": "1"}],
+    },
+    ("PATCH", RULE_ROUTE): {"strategy": "MARKUP", "markup_multiplier": "2"},
+    ("POST", RULE_ROUTE + "/publish"): {},
+    ("POST", RULE_ROUTE + "/retire"): {"reason": "Probe"},
+    ("POST", RULE_ROUTE + "/discard"): {},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -346,14 +375,16 @@ COUNTED_MODELS = (
     AiModelAlias,
     ProviderPriceVersion,
     ProviderPriceComponent,
+    PricingRule,
+    PricingRuleComponent,
 )
 
 
 def row_counts(application: FastAPI) -> dict[str, int]:
     """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。
 
-    凭据表（AIH-TASK-012）、出站签名密钥表（AIH-TASK-019）、AI 目录的五张表（AIH-TASK-025）与
-    供应商价格的两张表（AIH-TASK-026）同理。
+    凭据表（AIH-TASK-012）、出站签名密钥表（AIH-TASK-019）、AI 目录的五张表（AIH-TASK-025）、
+    供应商价格的两张表（AIH-TASK-026）与定价规则的两张表（AIH-TASK-027）同理。
     """
     with application.state.session_factory() as session:
         return {model.__tablename__: count_rows(session, model) for model in COUNTED_MODELS}
@@ -375,6 +406,8 @@ NO_ROWS = {
     "ai_model_aliases": 0,
     "provider_price_versions": 0,
     "provider_price_components": 0,
+    "pricing_rules": 0,
+    "pricing_rule_components": 0,
 }
 
 
@@ -521,6 +554,31 @@ def probe_catalog(application: FastAPI) -> None:
                 created_at=now,
             )
         )
+        # 一份完整的 FIXED_RATE 规则草稿（AIH-TASK-027）：漏了鉴权的改、发布、丢弃会真的改它。
+        rule = PricingRule(
+            public_id=PROBE_CATALOG_ID,
+            priority_scope=PricingScope.GLOBAL_PROVIDER_MODEL,
+            provider_id=provider.id,
+            model_id=model.id,
+            strategy=PricingStrategy.FIXED_RATE,
+            status=PricingRuleStatus.DRAFT,
+            created_by=version.created_by,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(rule)
+        session.flush()
+        session.add(
+            PricingRuleComponent(
+                pricing_rule_id=rule.id,
+                strategy=PricingStrategy.FIXED_RATE,
+                usage_meter_component_id=component.id,
+                unit_quantity=1,
+                rate_amount=1,
+                currency="MYR",
+                created_at=now,
+            )
+        )
         session.commit()
 
 
@@ -543,9 +601,19 @@ def stored_catalog(application: FastAPI) -> list[tuple]:
         ProviderPriceVersion.updated_at,
     ).order_by(ProviderPriceVersion.id)
     rates = select(ProviderPriceComponent.rate_amount).order_by(ProviderPriceComponent.id)
+    # 定价规则（AIH-TASK-027）：状态、策略、倍数、区间与 `updated_at`，以及分量的单价。
+    rules = select(
+        PricingRule.status,
+        PricingRule.strategy,
+        PricingRule.markup_multiplier,
+        PricingRule.effective_from,
+        PricingRule.effective_to,
+        PricingRule.updated_at,
+    ).order_by(PricingRule.id)
+    rule_rates = select(PricingRuleComponent.rate_amount).order_by(PricingRuleComponent.id)
     stored: list[tuple] = []
     with application.state.session_factory() as session:
-        for statement in [*editable, segments, versions, rates]:
+        for statement in [*editable, segments, versions, rates, rules, rule_rates]:
             stored += [tuple(row) for row in session.execute(statement)]
     return stored
 
@@ -666,7 +734,14 @@ def test_every_admin_route_refuses_non_admins(
         .replace("{api_key}", PROBE_API_KEY)
         .replace("{key_version}", "1")
     )
-    for name in ("meter_type_id", "provider_id", "model_id", "alias_id", "price_version_id"):
+    for name in (
+        "meter_type_id",
+        "provider_id",
+        "model_id",
+        "alias_id",
+        "price_version_id",
+        "rule_id",
+    ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)

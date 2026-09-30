@@ -178,6 +178,14 @@ class AuditAction(enum.StrEnum):
     PROVIDER_PRICE_DISCARD = "PROVIDER_PRICE_DISCARD"
     PROVIDER_PRICE_PUBLISH = "PROVIDER_PRICE_PUBLISH"
     PROVIDER_PRICE_RETIRE = "PROVIDER_PRICE_RETIRE"
+    # AIH-TASK-027（设计闸门 #178）：写入方都是 app/services/pricing_rules.py，与规则行同一
+    # 事务，不写 outbox。前三个在 spec §66 的清单里；`PRICING_RETIRE`、`PRICING_DISCARD` 按
+    # `PROJECT_CREATE` 的先例补上，记在 docs/TODO.md。前后状态里有倍数与单价（只在管理端可见）。
+    PRICING_CREATE = "PRICING_CREATE"
+    PRICING_UPDATE = "PRICING_UPDATE"
+    PRICING_PUBLISH = "PRICING_PUBLISH"
+    PRICING_RETIRE = "PRICING_RETIRE"
+    PRICING_DISCARD = "PRICING_DISCARD"
 
 
 class AuditLog(Base):

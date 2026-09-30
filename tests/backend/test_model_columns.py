@@ -39,6 +39,13 @@ from app.models.auth import (
     UserStatus,
 )
 from app.models.base import MONEY_PRECISION, MONEY_SCALE
+from app.models.pricing_rules import (
+    PricingRule,
+    PricingRuleComponent,
+    PricingRuleStatus,
+    PricingScope,
+    PricingStrategy,
+)
 from app.models.provider_prices import (
     PriceSourceType,
     PriceVersionStatus,
@@ -52,12 +59,14 @@ from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTran
 _CATALOG_MODELS = (UsageMeterType, UsageMeterComponent, AiProvider, AiModel)
 # 供应商价格版本（AIH-TASK-026）的两个枚举列：状态、来源类型。
 _PRICE_MODELS = (ProviderPriceVersion,)
+# 定价规则（AIH-TASK-027）的枚举列：规则的范围、策略、状态，分量的策略。
+_RULE_MODELS = (PricingRule, PricingRuleComponent)
 
 
 def enum_columns():
     """Every VARCHAR-backed enum column in the auth, tenant, ledger, catalog and price tables."""
     tables = (User, AuditLog, DomainOutbox, Tenant, WalletTransaction)
-    for model in (*tables, *_CATALOG_MODELS, *_PRICE_MODELS):
+    for model in (*tables, *_CATALOG_MODELS, *_PRICE_MODELS, *_RULE_MODELS):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
                 yield f"{model.__tablename__}.{column.name}", column
@@ -106,6 +115,23 @@ def test_the_price_enum_columns_are_collected() -> None:
     }
 
 
+def test_the_pricing_rule_enum_columns_are_collected() -> None:
+    """设计 §2 写死的列宽：范围 32、策略 16、状态 16（与迁移 0014 一致）。"""
+    tables = {model.__tablename__ for model in _RULE_MODELS}
+    widths = {
+        label: column.type.length
+        for label, column in _ENUM_COLUMNS
+        if label.split(".")[0] in tables
+    }
+
+    assert widths == {
+        "pricing_rules.priority_scope": 32,
+        "pricing_rules.strategy": 16,
+        "pricing_rules.status": 16,
+        "pricing_rule_components.strategy": 16,
+    }
+
+
 @pytest.mark.parametrize("label,column", _ENUM_COLUMNS, ids=[label for label, _ in _ENUM_COLUMNS])
 def test_every_enum_value_fits_its_column(label: str, column) -> None:
     """⚠️ 宽度必须装得下**所有**成员，包括以后加的。
@@ -135,6 +161,9 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
         QuantityKind,
         PriceVersionStatus,
         PriceSourceType,
+        PricingScope,
+        PricingStrategy,
+        PricingRuleStatus,
     ],
     ids=lambda cls: cls.__name__,
 )
@@ -153,6 +182,10 @@ _MONEY_COLUMNS = [
     # 供应商价格分量（AIH-TASK-026）：原币种单价与「多少个单位」，同一精度、都不经过 float。
     ProviderPriceComponent.__table__.c.unit_quantity,
     ProviderPriceComponent.__table__.c.rate_amount,
+    # 定价规则（AIH-TASK-027）：MYR 含税单价、「多少个单位」与 MARKUP 的倍数。
+    PricingRule.__table__.c.markup_multiplier,
+    PricingRuleComponent.__table__.c.unit_quantity,
+    PricingRuleComponent.__table__.c.rate_amount,
 ]
 
 
