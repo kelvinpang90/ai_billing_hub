@@ -2078,7 +2078,7 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
 > | --- | --- | --- | --- |
 > | T-A | 目录 | #163 `APPROVED: design v4` | `AIH-TASK-025` |
 > | T-B | 供应商价格版本 | #177 `APPROVED: design v4` | `AIH-TASK-026` |
-> | T-D | 定价规则 | #178 `APPROVED: design v3` | `AIH-TASK-027` |
+> | T-D | 定价规则 | #178 `APPROVED: design v4`（Kelvin 2026-09-30：保留全局默认第一条起点为空） | `AIH-TASK-027` |
 > | T-C | FX 汇率、BNM 拉取、告警接口 | #183 `APPROVED: design v1`（Kelvin 2026-09-29：从发布时刻起生效；过期阈值 5 个日历日） | `AIH-TASK-028` |
 > | T-E | 用量摄取端点 | #176 `APPROVED: design v8` | `AIH-TASK-029` |
 > | T-F | 批量摄取 | #180 `APPROVED: design v3` | `AIH-TASK-030` |
@@ -2295,6 +2295,10 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     （AIH-TASK-036）补上
   - 「快照读陷阱」用例同时断言了陷阱本身（同一事务里的普通读仍是旧快照），与 025 一样依赖 MySQL 默认的
     REPEATABLE READ
+  - 数据库兜底的两个缺口，与 027 在 #178 v4 补上的同类（#192 的实现审查发现）：绕过服务可把草稿直接发布为起点为空
+    （起点为空只该出现在该（供应商, 模型）没有区间非空的已发布版本时，设计 v4 §2）；可把版本直接改为 `RETIRED` 而不写
+    `effective_to`，它仍被取价、并让之后的发布撞上区间不重叠触发器。Kelvin 2026-09-30 决定另开任务补（新迁移，
+    碰定价，要先过设计闸门）
 
 ### AIH-TASK-027 —— 客户定价规则 MARKUP 与 FIXED_RATE（T-D，2026-09-29）
 
