@@ -39,6 +39,15 @@ from app.models.auth import (
     UserStatus,
 )
 from app.models.base import MONEY_PRECISION, MONEY_SCALE
+from app.models.fx_rates import (
+    RATE_PRECISION,
+    RATE_SCALE,
+    FxFetchAttempt,
+    FxFetchOutcome,
+    FxRateSourceType,
+    FxRateStatus,
+    FxRateVersion,
+)
 from app.models.pricing_rules import (
     PricingRule,
     PricingRuleComponent,
@@ -61,12 +70,15 @@ _CATALOG_MODELS = (UsageMeterType, UsageMeterComponent, AiProvider, AiModel)
 _PRICE_MODELS = (ProviderPriceVersion,)
 # 定价规则（AIH-TASK-027）的枚举列：规则的范围、策略、状态，分量的策略。
 _RULE_MODELS = (PricingRule, PricingRuleComponent)
+# FX 汇率（AIH-TASK-028）的枚举列：版本的来源、状态，拉取记录的来源、结果。
+_FX_MODELS = (FxRateVersion, FxFetchAttempt)
 
 
 def enum_columns():
-    """Every VARCHAR-backed enum column in the auth, tenant, ledger, catalog and price tables."""
+    """Every VARCHAR-backed enum column in the auth, tenant, ledger, catalog, price, pricing
+    rule and FX tables."""
     tables = (User, AuditLog, DomainOutbox, Tenant, WalletTransaction)
-    for model in (*tables, *_CATALOG_MODELS, *_PRICE_MODELS, *_RULE_MODELS):
+    for model in (*tables, *_CATALOG_MODELS, *_PRICE_MODELS, *_RULE_MODELS, *_FX_MODELS):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
                 yield f"{model.__tablename__}.{column.name}", column
@@ -132,6 +144,33 @@ def test_the_pricing_rule_enum_columns_are_collected() -> None:
     }
 
 
+def test_the_fx_enum_columns_are_collected() -> None:
+    """设计 §2 写死的列宽：来源 16、状态 16、结果 32（v3：`NO_QUOTE_FOR_DATE` 有 17 个字符，
+    照抄 16 放不下），与迁移 0015 一致。"""
+    tables = {model.__tablename__ for model in _FX_MODELS}
+    widths = {
+        label: column.type.length
+        for label, column in _ENUM_COLUMNS
+        if label.split(".")[0] in tables
+    }
+
+    assert widths == {
+        "fx_rate_versions.source": 16,
+        "fx_rate_versions.status": 16,
+        "fx_fetch_attempts.source": 16,
+        "fx_fetch_attempts.outcome": 32,
+    }
+
+
+def test_the_fx_rate_is_decimal_24_10() -> None:
+    """INV-10：汇率是 DECIMAL(24,10)（设计 §2，不是金额的 20,8），读出来是 Decimal。"""
+    column = FxRateVersion.__table__.c.rate
+
+    assert isinstance(column.type, Numeric)
+    assert (column.type.precision, column.type.scale) == (RATE_PRECISION, RATE_SCALE) == (24, 10)
+    assert column.type.asdecimal is True
+
+
 @pytest.mark.parametrize("label,column", _ENUM_COLUMNS, ids=[label for label, _ in _ENUM_COLUMNS])
 def test_every_enum_value_fits_its_column(label: str, column) -> None:
     """⚠️ 宽度必须装得下**所有**成员，包括以后加的。
@@ -164,6 +203,9 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
         PricingScope,
         PricingStrategy,
         PricingRuleStatus,
+        FxRateStatus,
+        FxRateSourceType,
+        FxFetchOutcome,
     ],
     ids=lambda cls: cls.__name__,
 )

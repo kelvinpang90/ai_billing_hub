@@ -20,6 +20,9 @@ from app.models import (
     auth as _auth_models,  # noqa: F401  (registers users/refresh_tokens/audit_logs)
 )
 from app.models import (
+    fx_rates as _fx_rate_models,  # noqa: F401  (registers the three fx rate tables)
+)
+from app.models import (
     integration as _integration_models,  # noqa: F401  (registers the two integration tables)
 )
 from app.models import (
