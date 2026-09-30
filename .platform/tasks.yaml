@@ -1746,7 +1746,7 @@ tasks:
     acceptance_criteria:
       - 实现与设计 v3 §2「数据库」（三张表、CHECK、触发器、服务层写入顺序对触发器的要求、「数据库不拦的」）与 §8「数据迁移步骤」逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - 迁移文件名 alembic/versions/20260929_0015_fx_rates.py，down_revision 指向 0014；写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；downgrade 删触发器与表；alembic/env.py 加 import
-      - "app/models/fx_rates.py 与迁移逐列一致（含 fx_fetch_attempts 的列类型、非空、按 outcome 的列组合 CHECK 与索引；base_currency 不做正则 CHECK）；open_slot 的表达式是 CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END（其余为 NULL，照迁移 0013）；新表枚举列加进 test_model_columns.py"
+      - "app/models/fx_rates.py 与迁移逐列一致（含 fx_fetch_attempts 的列类型、非空、按 outcome 的列组合 CHECK 与索引；base_currency 不做正则 CHECK）；照 app/models/pricing_rules.py 用 after_create 监听在 create_all 时写入 fx_rate_locks 的 id = 1 那一行（SQLite 测试靠它，生产由迁移写入）；open_slot 的表达式是 CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END（其余为 NULL，照迁移 0013）；新表枚举列加进 test_model_columns.py"
       - 新建 tests/backend/test_fx_rates_db.py，在 BILLING_TEST_DATABASE_URL 的真 MySQL 上覆盖设计 §7 的「触发器」「open_slot 与唯一约束」「数据库兜底」「区间不重叠」「迁移」五行（未设置时 skip、CI 必跑）；每条拒绝用例配一条证明不误杀的通过用例；本任务没有服务层，时间线用 SQL 按设计 §2 的例子直接构造
       - docs/database-schema.md 记三张表、约束、触发器与计费路径的锁顺序（供应商 S → FX S → 规则 S → 钱包 → 租户）；docs/TODO.md 新增 AIH-TASK-028 记录段，写明本任务是 v3 §11 的 F1，以及 039–044 的分工
       - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
@@ -1901,8 +1901,8 @@ tasks:
       - 实现与设计 v3 §2「BNM 适配器」、fx_fetch_attempts 一节、§4 的拉取并发与「相同 ID、不同载荷」、§10「已在 2026-09-30 实测的接口事实」逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - 请求与解析按设计：按日期的 URL、Accept 请求头、逐字段核对（币种、日期、meta.session、meta.quote、unit、middle_rate 类型）；middle_rate 取最短往返十进制表示（Decimal(repr(float))）、最多 6 位小数；除以 unit 精确到 10 位；「No records found.」的 404 返回 None；其余错误码按设计；只用标准库 urllib，只接受 HTTPS 的 base_url
       - 新建 tests/backend/test_fx_source.py：设计 §10 的录制响应逐字作为原样字符串常量（不另建夹具文件、不联网重录），覆盖设计 §7「BNM 解析」「双精度还原」「请求」三行；由录制派生的响应在用例里注明「派生自 2026-09-29 USD 录制」
-      - 拉取任务的四种结果（NEW_DRAFT、NO_NEW_QUOTE（含 QUOTE_CHANGED，按还原后的 rate 数值比较）、NO_QUOTE_FOR_DATE、FAILED）、BNM 草稿的 source_reference 与 observed_at、BNM 草稿不写审计，按设计；新建 tests/backend/test_fx_fetch.py 覆盖设计 §7「拉取幂等」「无记录」「BNM 更正同日价格」「不自动发布」四行与拉取记录写入抛错的回滚，并发拉取放在真 MySQL 上
-      - 配置 BILLING_FX_SOURCE、BILLING_FX_BNM_BASE_URL、BILLING_FX_CURRENCIES（逗号分隔、大写三字母、不含 MYR）、BILLING_FX_FETCH_TIMEOUT_SECONDS 带校验，test_config.py 有用例；新任务模块加进 TASK_MODULES，Beat 一个条目 crontab(minute=30, hour="4,6,9")、expires 3600，test_celery.py 钉住
+      - 拉取任务的四种结果（NEW_DRAFT、NO_NEW_QUOTE（含 QUOTE_CHANGED，按还原后的 rate 数值比较）、NO_QUOTE_FOR_DATE、FAILED）、BNM 草稿的 source_reference 与 observed_at、BNM 草稿不写审计，按设计；每个配置币种各自一次拉取、各自一个事务：某个币种写库失败只记日志、继续其余币种，全部处理完后任务以失败结束；新建 tests/backend/test_fx_fetch.py 覆盖设计 §7「拉取幂等」「无记录」「BNM 更正同日价格」「不自动发布」四行与拉取记录写入抛错的回滚，并发拉取放在真 MySQL 上；「无记录」一行里「fx_fetch 仍 OK」的断言归 AIH-TASK-042（本任务断言 NO_QUOTE_FOR_DATE 与无草稿）
+      - 配置 BILLING_FX_SOURCE、BILLING_FX_BNM_BASE_URL、BILLING_FX_CURRENCIES（逗号分隔、大写三字母、不含 MYR、不为空、不重复）、BILLING_FX_FETCH_TIMEOUT_SECONDS 带校验，test_config.py 有用例；新任务模块加进 TASK_MODULES，Beat 一个条目 crontab(minute=30, hour="4,6,9")、expires 3600，test_celery.py 钉住
       - docs/currency-and-fx.md 加 BNM 一节（端点与场次、双精度还原、「无记录」的含义、一天三次、在 worker 容器里手工触发的方法）；docs/TODO.md 新增 AIH-TASK-040 记录段
       - 测试里的 uuid 用全零占位值（secret-scan）；除设计 §10 的录制外，汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
@@ -2012,7 +2012,7 @@ tasks:
     acceptance_criteria:
       - 实现与设计 v3 §2「内部告警接口」（应用这一层）、「两个告警维度」、§5 令牌一行与 §6 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - GET /internal/alerts 不在 /api/ 下、不套 §107 信封，text/plain，每行「维度 OK|P1|P2 摘要」；维度注册表是 app/services/alerts.py 里的有序列表，每个维度一个只读查询函数（普通读，不拿 fx_rate_locks）；一个维度一行、多币种按设计汇总；摘要不含租户、金额与个人数据
-      - 令牌按设计的令牌文件状态表：Settings 加 monitor_token_file；未配置 404 不记日志；读不出、是目录、去空白后少于 32 个字符都 404 并记不含路径的 ERROR；每次请求重读；Bearer 用常量时间比较，不对就 401、不说明原因；401 / 404 也是纯文本（不套信封，401 带 WWW-Authenticate: Bearer）；令牌判定先于任何数据库查询
+      - '令牌按设计的令牌文件状态表：Settings 加 monitor_token_file；未配置 404 不记日志；读不出、是目录、去空白后少于 32 个字符都 404 并记不含路径的 ERROR；每次请求重读；Bearer 用常量时间比较，不对就 401、不说明原因；401 / 404 也是纯文本（不套信封，401 带 WWW-Authenticate: Bearer）；令牌判定先于任何数据库查询'
       - docker-compose.yml 声明 billing_monitor_token（file ./secrets/monitor.token，注释照 smtp 那一把写明缺文件时的实测行为），把 BILLING_MONITOR_TOKEN_FILE=/run/secrets/billing_monitor_token 写进后端环境并挂给后端，否则 test_every_credential_file_setting_is_wired_into_compose 变红
       - 新建 tests/backend/test_internal_alerts.py，覆盖设计 §7「fx_fetch 维度」「fx_stale 维度」「告警接口访问控制」三行（冻结的吉隆坡日期，含跨月）
       - docs/api.md 记告警接口（机器接口、不套信封、行格式、两层访问控制）；docs/TODO.md 新增 AIH-TASK-042 记录段
