@@ -1665,7 +1665,7 @@ tasks:
       由 CHECK 与复合外键拒绝；按范围只在末尾追加、可预约、只有全局默认的第一条可回溯；发布与停用在单行锁排他模式内；触发器保证
       不可变、只能以草稿插入、发布跃迁上 FIXED_RATE 分量完整、区间不重叠；管理端七个接口与五个审计动作；只读解析
       resolve_pricing_rule 按五级下落、命中即停。价格是 MYR 含税价（ADR-0008）。不含计费额计算、试算、税额与前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-026
     acceptance_criteria:
