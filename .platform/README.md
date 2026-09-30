@@ -177,10 +177,12 @@ Codex 审查通过，合并为 `9b63cfa` 并部署。
 
 `AIH-TASK-028` 是 Phase 2 第一个完全由 Worker 交付的任务：run `4df4c6cc` 首个提交的 CI backend 因测试自身的错误假设
 失败，Worker 的修复轮改对后 CI 全绿，独立受限审查通过，Kelvin「批准」，合并为 `e8b667b` 并部署（迁移 0015）。没有经过
-Codex 审查，PR #197 正文的「设计闸门」一行也没有改成 #183。收尾 PR #199 的 Codex 审查指出两张锁表可被 UPDATE 移走锁行，
+Codex 审查，PR #197 正文的「设计闸门」一行合并前也没有改成 #183（#203 事后补改）。收尾 PR #199 的 Codex 审查指出两张锁表可被 UPDATE 移走锁行，
 修复登记为 `AIH-TASK-045`（设计闸门 #200）；先收尾、后修复的裁定见 [docs/REVIEW-LOG.md](../docs/REVIEW-LOG.md)。
 `AIH-TASK-045` 由 Worker 交付：run `376e0811` 一个提交 `1b63af0`，CI 六项全绿，独立受限审查通过，Kelvin「批准」，
 合并为 `a7ada92` 并部署（迁移 0016）。PR #202 正文的「设计闸门」一行同样没有改成 #200，也没有经过 Codex 审查。
+收尾 PR #203 的 Codex 审查据此判阻断；Kelvin 裁定事后补改 #202 与 #197 的这一行，Worker 交付的任务以 Worker 的独立受限审查加
+「批准」代替 Codex 审查，以后「批准」前先改好这一行，见 [docs/REVIEW-LOG.md](../docs/REVIEW-LOG.md)。
 
 `AIH-TASK-015` 是第一个在 Worker 里跑前端检查的任务（#138 登记 `frontend.test` / `frontend.typecheck` / `frontend.lint`，
 控制面 ACVDEV-TASK-045 提供只读依赖目录）。前两次 run（`0bf98377` PR #133、`43dfa20c` PR #137）没有这三条检查，

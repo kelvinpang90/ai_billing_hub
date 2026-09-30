@@ -2477,7 +2477,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     同日手工草稿改成拒绝用例（配报价日为 `NULL` 的通过用例），并更正测试说明、`database-schema.md` 与本记录；CI 六项全绿
   - Worker 的独立受限审查 `REVIEW_VERDICT: APPROVE`（`REVIEWED_SHA` `9fca3b9`），Kelvin 在 Telegram「批准」，合并为
     `e8b667b`（合并时 head 即审查过的 `9fca3b9`）。没有走 Codex 审查；PR 正文的「设计闸门」一行仍是 Worker 的固定值
-    「不适用」，合并前没有改成 #183
+    「不适用」，合并前没有改成 #183；2026-09-30 由收尾 PR #203 按 Kelvin 的裁定事后补改为 #183（见
+    [REVIEW-LOG.md](REVIEW-LOG.md) 2026-09-30 #203 那一行）
   - main 上 Deploy（run `36701537552`）成功：迁移步骤通过（`alembic upgrade head` 执行 0015，失败会中止部署），健康检查
     与 `/healthz` 冒烟通过，`e8b667b` 记为最近一次成功部署
 - [ ] **后续**：F2–F6（上表）；上线步骤里「管理员发布第一个汇率版本」由 F2 / F4 落地后执行（设计 §8）
@@ -2517,7 +2518,8 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
   - run `376e0811`，PR #202，一个提交 `1b63af0`；Worker 的五项检查零退出，CI 六项首轮全绿（backend job 里
     `test_lock_tables_db.py` 14 个用例实际执行并通过，不是 skip）
   - Worker 的独立受限审查 `REVIEW_VERDICT: APPROVE`（`REVIEWED_SHA` `1b63af0`），Kelvin 在 Telegram「批准」，合并为
-    `a7ada92`。没有走 Codex 审查；PR 正文的「设计闸门」一行仍是 Worker 的固定值「不适用」，合并前没有改成 #200
+    `a7ada92`。没有走 Codex 审查；PR 正文的「设计闸门」一行仍是 Worker 的固定值「不适用」，合并前没有改成 #200；
+    2026-09-30 由本收尾 PR #203 按 Kelvin 的裁定事后补改为 #200（见 [REVIEW-LOG.md](REVIEW-LOG.md) 2026-09-30 #203 那一行）
   - main 上 Deploy（run `36722901922`）成功：迁移步骤通过（执行 0016，失败会中止部署），`/healthz` 冒烟通过，
     `a7ada92` 记为最近一次成功部署
 - [ ] **后续**：残余风险同 0006 / 0014 / 0015：`TRUNCATE` / `DROP TRIGGER` / `ALTER TABLE` 是 DDL，不经触发器，归
