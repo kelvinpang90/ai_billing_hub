@@ -1583,7 +1583,7 @@ tasks:
       - bypass_ci
       - bypass_review
 
-  # 026 / 027：Phase 2 的 T-B（供应商价格）与 T-D（定价规则），碰定价，分别过了设计闸门 #177（v4）与 #178（v3）。
+  # 026 / 027：Phase 2 的 T-B（供应商价格）与 T-D（定价规则），碰定价，分别过了设计闸门 #177（v4）与 #178（v4）。
   # 纯后端，不带 acceptance 块。迁移串行：025 的 0012 → 026 的 0013 → 027 的 0014。
   - id: AIH-TASK-026
     title: provider price versions and generalized price components
@@ -1660,7 +1660,7 @@ tasks:
   - id: AIH-TASK-027
     title: pricing rules MARKUP and FIXED_RATE
     purpose: >-
-      按 docs/design/AIH-TASK-027-pricing-rules.md（设计闸门 #178 已批准 v3）实现客户定价规则：迁移 0014 建 pricing_rule_locks
+      按 docs/design/AIH-TASK-027-pricing-rules.md（设计闸门 #178 已批准 v4）实现客户定价规则：迁移 0014 建 pricing_rule_locks
       （单行锁表）、pricing_rules、pricing_rule_components；五级范围（§16）由 CHECK 钉死 NULL 组合，MARKUP / FIXED_RATE 的混合
       由 CHECK 与复合外键拒绝；按范围只在末尾追加、可预约、只有全局默认的第一条可回溯；发布与停用在单行锁排他模式内；触发器保证
       不可变、只能以草稿插入、发布跃迁上 FIXED_RATE 分量完整、区间不重叠；管理端七个接口与五个审计动作；只读解析
@@ -1670,7 +1670,7 @@ tasks:
       - AIH-TASK-026
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-027-pricing-rules.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
-      - 迁移文件名 alembic/versions/20260929_0014_pricing_rules.py，down_revision 指向 0013；锁表恰好一行；两张规则表的列、scope_key 与 open_slot 生成列、范围与 NULL 组合的 CHECK、策略与倍数的 CHECK、(id, strategy) 唯一约束与分量表的复合外键、currency = MYR 按设计 §2「数据库」；触发器按设计（锁表恰好一行、只能以草稿插入、发布后只许截断与停用、分量只在草稿阶段可改、禁止删除、发布跃迁上 FIXED_RATE 完整性、锁 pricing_rule_locks 后检查同一 scope_key 区间不重叠），写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；alembic/env.py 加 import 新模型模块
+      - 迁移文件名 alembic/versions/20260929_0014_pricing_rules.py，down_revision 指向 0013；锁表恰好一行；两张规则表的列、scope_key 与 open_slot 生成列、范围与 NULL 组合的 CHECK、策略与倍数的 CHECK、(id, strategy) 唯一约束与分量表的复合外键、currency = MYR 按设计 §2「数据库」；触发器按设计（锁表恰好一行、只能以草稿插入、草稿只能改成草稿 / 已发布 / 已丢弃、发布后只许截断与停用、分量只在草稿阶段可改、禁止删除、发布跃迁上 FIXED_RATE 完整性、锁 pricing_rule_locks 后检查同一 scope_key 区间不重叠、发布跃迁上起点为空只许 GLOBAL 范围且该范围从没有 PUBLISHED / RETIRED 行）；CHECK「停用必有尽头」（status <> 'RETIRED' OR effective_to IS NOT NULL）；后两条是 v4 新增，§7「起点与尽头由数据库兜底」一行的直接写库用例在真 MySQL 上跑，写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；alembic/env.py 加 import 新模型模块
       - 管理端七个接口、请求字段（范围字段与 priority_scope 必须匹配）、错误码按设计 §2「接口」；单价与倍数一律 JSON 字符串精确解析、超过 8 位小数 422；每个处理函数第一条语句调用 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id；字段说明标注含税
       - 发布与停用在 pricing_rule_locks 行 SELECT … FOR UPDATE 内完成，t 在锁后取、向上取整到整秒；区间规则（只有 GLOBAL 的第一条可 effective_from 为空，其余一律 ≥ t）与写入顺序按设计；每次写后同一事务复查区间
       - resolve_pricing_rule 按 CUSTOMER_PROVIDER_MODEL → CUSTOMER_PROVIDER → CUSTOMER → GLOBAL_PROVIDER_MODEL → GLOBAL 依次加锁读，第一级命中即返回、不因缺分量下落；另提供对 pricing_rule_locks 取 FOR SHARE 的函数供计费使用；本任务不接到任何计费路径
