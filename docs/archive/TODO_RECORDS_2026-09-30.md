@@ -1,6 +1,6 @@
 # TODO 历史记录（2026-09-30 从 docs/TODO.md 挪出）
 
-> 本文件是 [docs/TODO.md](../TODO.md) 在 2026-09-30（`main` 为 `35fdfc1`）挪出来的历史部分：已完成任务的
+> 本文件是 [docs/TODO.md](../TODO.md) 在 2026-09-30（`main` 为 `83f927a`）挪出来的历史部分：已完成任务的
 > 记录段、Phase 0 的任务记录、已结的决策细节与流程接入过程。**正文原样搬运、不改写**，原标题全部保留，
 > 只做了两处机械调整：① 相对链接改成从 `docs/archive/` 出发（否则 `check_docs.py` 判死链）；
 > ② 记录里还没结清的勾选项留在 TODO.md 的「任务记录里仍未结清的后续项」，原位置留一行 ↪ 指向。
@@ -2137,6 +2137,111 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
   - 合并 main（#194）后 CI 六项全绿；Codex 复审 `VERDICT: APPROVE`（`reviewed-head` `fbc7c05`，无阻断、无建议），
     Kelvin 合并为 `3e8a950`。main 上 Deploy（run `36663670451`）成功：`alembic upgrade head` 执行了迁移 0014（失败会
     中止部署），健康检查与 `/healthz` 冒烟通过，`3e8a950` 记为最近一次成功部署
+- ↪ 这里原有一条未结清的勾选项，已原样留在 [TODO.md](../TODO.md) 的「任务记录里仍未结清的后续项」一节
+
+### AIH-TASK-028 —— FX 汇率 1/6：迁移、模型与数据库触发器（T-C 的 F1，2026-09-30）
+
+设计闸门 #183 `APPROVED: design v3`，全文在 [design/AIH-TASK-028-fx-rates.md](../design/AIH-TASK-028-fx-rates.md)。本任务是
+设计 v3 §11 的 **F1**，只做数据库层：迁移 0015、ORM 模型、CHECK、生成列、唯一约束与全部触发器。表、约束、触发器与锁顺序
+记在 [database-schema.md](../database-schema.md) 的「FX 汇率」。T-C 的其余部分按 §11 分给：
+
+| 设计 §11 | 登记 | 内容 |
+| --- | --- | --- |
+| F2 | `AIH-TASK-039` | 业务规则服务与仓储：发布 / 退役（P1–P4、R1–R5）、锁在前、事务内复查、审计、`resolve_fx_rate` 与取共享锁的函数 |
+| F2b | `AIH-TASK-044` | 规则层的并发与性质测试（时间稳定性、发布与计费并发、两侧的快照读陷阱），只加测试 |
+| F3 | `AIH-TASK-040` | BNM 适配器、拉取任务与 Celery Beat（写草稿与 `fx_fetch_attempts`） |
+| F4 | `AIH-TASK-041` | 管理端八个汇率接口 |
+| F5 | `AIH-TASK-042` | 内部告警接口 `GET /internal/alerts` 与 `fx_fetch` / `fx_stale` 两个维度 |
+| F6 | `AIH-TASK-043` | 部署与告警接线：nginx、`monitor.sh`、`config_snapshot.sh`、运维步骤 |
+
+不含服务、接口、拉取与告警；合并部署后只有三张空表（锁表一行）。
+
+- [x] **做了什么（本分支，Draft PR 交付；PR 正文的「设计闸门」写 #183）**：
+  - `alembic/versions/20260929_0015_fx_rates.py`：revision `0015_fx_rates`，`down_revision` 是 `0014_pricing_rules`。
+    先做 0006 同款的触发器权限预检（在任何 DDL 之前）；建 `fx_rate_locks` 并写入唯一一行 `id = 1`；建
+    `fx_rate_versions`（`base_currency <> 'MYR'`、`quote_currency = 'MYR'`、`rate > 0`、来源、状态五条 CHECK，加设计 §2 的
+    CHECK 1–5；STORED 生成列 `open_slot` = `CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END`（其余为
+    `NULL`，照 0013）与 `(base_currency, quote_currency, open_slot)` 唯一索引；`(base_currency, quote_currency, source,
+    source_quote_date)` 唯一约束；`created_by` / `approved_by` 外键 `RESTRICT`）与 `fx_fetch_attempts`（列类型照 v3，
+    `outcome` VARCHAR(32)；来源、结果与按结果的列组合三条 CHECK；`fx_rate_version_id` 外键 `RESTRICT`；
+    `(base_currency, attempted_at)` 索引）；七个触发器（锁表恰好一行两个；版本只能以草稿插入、`RETIRED` / `DISCARDED`
+    不可改、草稿只能改成草稿 / 已发布 / 已丢弃、发布跃迁上尽头为空、`PUBLISHED` 只许截断与退役、锁 `fx_rate_locks`
+    后判区间不重叠且空区间跳过、禁止删除；拉取记录禁止改与删）。`base_currency` 不做正则 CHECK（v3）。`downgrade` 按
+    外键依赖倒序删表，触发器随表删除。文件头附 §132 第 13 条分析。`alembic/env.py` 加 import `app.models.fx_rates`
+  - `app/models/fx_rates.py`：三个模型、三个枚举（`FxRateStatus`、`FxRateSourceType`、`FxFetchOutcome`）、与迁移逐字一致
+    的 CHECK / 生成列表达式常量；照 `app/models/pricing_rules.py` 用 `after_create` 监听在 `create_all` 时写入锁表那一行
+    （SQLite 单元测试靠它，生产由迁移写入）
+  - 测试：新建 `tests/backend/test_fx_rates_db.py`（真 MySQL，设计 §7 的「触发器」「`open_slot` 与唯一约束」「数据库兜底」
+    「区间不重叠」「迁移」五行；每条拒绝用例配一条证明不误杀的通过用例；没有服务层，时间线按设计 §2 的例子与服务层的
+    写入顺序直接用 SQL 构造；每个用例在一个回滚的事务里）；`test_migrations.py` 加 0015 的一组（版本链、CHECK 与
+    `open_slot` 与模型一致、SQLite 的锁表行与 `open_slot`、触发器写法与预检、升降只增删三张表、列形状、键与外键删除
+    规则、CHECK 与触发器集合），并把 0006 的触发器集合、0010 / 0011 两条降级用例的表集合改成同时算上 0015；
+    `test_model_columns.py` 加两张表的四个枚举列、三个枚举的宽度与 `rate` 的 DECIMAL(24,10)。测试里的 uuid 是全零
+    占位值（末尾带序号，`public_id` 唯一），汇率一律是虚构值
+- [x] **实现定的细节**（审查时请看这几条）：
+  - 区间不重叠触发器用局部变量 `locked_id` 接 `fx_rate_locks` 的锁（设计写的是 `@lock_id` 会话变量），语义相同、不污染
+    会话；与 0013 / 0014 同一写法
+  - BEFORE UPDATE 里各道检查的顺序：先「`RETIRED` / `DISCARDED` 是终态」，再「草稿的去向」「发布跃迁上尽头为空」
+    「`PUBLISHED` 的不可变与只许退役」，最后才锁 `fx_rate_locks` 判重叠。所以直接把草稿发布成带尽头的版本报的是
+    「尽头为空」那一条而不是重叠；两条尽头都为空的已发布版本总是重叠触发器先于 `open_slot` 唯一索引报错（设计 v3 §7
+    只断言被拒绝）
+  - 同一报价日唯一约束不含 `status`：丢弃了的 BNM 草稿仍占着那个报价日，同日再拉取记 `NO_NEW_QUOTE`（与设计 §4
+    「管理员看到后可丢弃旧草稿、手工录入」一致）。约束含 `source`，同日的手工版本不与 BNM 版本冲突；带报价日的手工版本
+    同样按（币种对、来源、报价日）唯一，只有报价日为 `NULL` 的行不受限（设计 §2 的手工录入接口不收报价日，写的是 `NULL`）
+  - `fx_rate_versions` 没有另建取汇率用的索引：设计 §2 只列了两条唯一约束；`(base_currency, quote_currency, …)` 开头的
+    两条唯一索引可供 `resolve_fx_rate` 按币种对查。F2 若实测需要按 `effective_from` 的索引，另走迁移
+- [x] **交付**：Worker 跑 `allowed_commands`、CI（`test_fx_rates_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、
+  审查、合并与部署（迁移 0015 在生产执行）
+  - run `4df4c6cc`，PR #197。首个提交 `071da45` 的 CI backend 失败：`test_one_bnm_version_per_quote_date` 假设带报价日
+    的手工版本不受同日唯一约束，与迁移（照设计 §2 的四列约束）不符，是测试与文档的说法错了。修复轮 `9fca3b9` 把第二条
+    同日手工草稿改成拒绝用例（配报价日为 `NULL` 的通过用例），并更正测试说明、`database-schema.md` 与本记录；CI 六项全绿
+  - Worker 的独立受限审查 `REVIEW_VERDICT: APPROVE`（`REVIEWED_SHA` `9fca3b9`），Kelvin 在 Telegram「批准」，合并为
+    `e8b667b`（合并时 head 即审查过的 `9fca3b9`）。没有走 Codex 审查；PR 正文的「设计闸门」一行仍是 Worker 的固定值
+    「不适用」，合并前没有改成 #183；2026-09-30 由收尾 PR #203 按 Kelvin 的裁定事后补改为 #183（见
+    [REVIEW-LOG.md](../REVIEW-LOG.md) 2026-09-30 #203 那一行）
+  - main 上 Deploy（run `36701537552`）成功：迁移步骤通过（`alembic upgrade head` 执行 0015，失败会中止部署），健康检查
+    与 `/healthz` 冒烟通过，`e8b667b` 记为最近一次成功部署
+- [ ] **后续**：F2–F6（上表）；上线步骤里「管理员发布第一个汇率版本」由 F2 / F4 落地后执行（设计 §8）
+  - Worker 审查的非阻断观察：`fx_rate_locks` 没有 BEFORE UPDATE 触发器，直接 `UPDATE fx_rate_locks SET id = 2` 会让
+    区间不重叠触发器的 `WHERE id = 1 FOR UPDATE` 静默锁不到行（设计 v3 只要求拒绝插入与删除，不算违约）；027 的 `pricing_rule_locks` 同样缺这一条。#199 的 Codex
+    审查据此判阻断，新开设计闸门 #200（`APPROVED: design v1`），由 `AIH-TASK-045` 修（#201 登记，排在「当前计划」第 1 条）；
+    先收尾 028、再由 045 修的裁定见 [REVIEW-LOG.md](../REVIEW-LOG.md)「升级给人的分歧」2026-09-30 #199 那一行
+
+### AIH-TASK-045 —— 两张锁表禁止 UPDATE（pricing_rule_locks 与 fx_rate_locks，2026-09-30）
+
+设计闸门 #200 `APPROVED: design v1`，全文在
+[design/AIH-TASK-045-lock-tables-no-update.md](../design/AIH-TASK-045-lock-tables-no-update.md)。`pricing_rule_locks`（0014）
+与 `fx_rate_locks`（0015）此前只拒绝 INSERT（已有一行时）与 DELETE，`UPDATE … SET id = 2` 能把锁行移走，版本表触发器的
+`WHERE id = 1 FOR UPDATE` 便静默锁不到行。本任务只加数据库兜底，不改模型、服务与 0014 / 0015 的任何对象。触发器记在
+[database-schema.md](../database-schema.md) 两张锁表的触发器表里。
+
+- [x] **做了什么（本分支，Draft PR 交付；PR 正文的「设计闸门」写 #200）**：
+  - `alembic/versions/20260930_0016_lock_tables_no_update.py`：revision `0016_lock_tables_no_update`，`down_revision` 是
+    `0015_fx_rates`。先做 0006 同款的触发器权限预检（在任何 DDL 之前，`--sql` 离线模式跳过）；再建
+    `trg_pricing_rule_locks_before_update` 与 `trg_fx_rate_locks_before_update`，写法照同表的 BEFORE DELETE：无条件
+    `SIGNAL SQLSTATE '45000'`，错误文本与同表 INSERT / DELETE 触发器相同（`<表名> holds exactly one row`）。`downgrade`
+    只删这两个触发器。文件头附 §132 第 13 条分析，写明两个触发器只建成一个时的清场步骤
+    （`DROP TRIGGER IF EXISTS trg_pricing_rule_locks_before_update` 后重新部署）
+  - 测试：新建 `tests/backend/test_lock_tables_db.py`（真 MySQL，两张表参数化；设计 §7 的「正常路径」「边界值」「不误杀」
+    「其他写法」「迁移」五行；拒绝用例断言错误号、错误文本与 SQLSTATE，并配一条证明不误杀的通过用例；每个用例结束时两张
+    锁表仍恰好是 `[1]`）；`test_migrations.py` 加 0016 的一组（版本链、两个触发器的表 / 时机 / 事件与写法、预检在任何 DDL
+    之前、离线模式跳过预检、`downgrade` 只删这两个、真 MySQL 上 head 的触发器与降级只少这两个），并把 0006 的触发器
+    集合、0014 / 0015 在 head 上的锁表触发器集合改成同时算上 0016；`test_fx_rates_db.py` 的升降用例（降到 0014 再升回
+    head）把 0016 的两个触发器算进去
+- [x] **实现定的细节**：
+  - 迁移序号：0016 本由 `.platform/tasks.yaml` 预留给用量摄取；按设计 §2，登记 PR 已把 029 / 032 顺延到 0017 / 0018，
+    本任务不改 `.platform/`
+  - `INSERT … ON DUPLICATE KEY UPDATE` 与 `REPLACE` 不需要新触发器：它们先经既有的 BEFORE INSERT，已有一行时被拒绝
+    （`test_lock_tables_db.py` 的「其他写法」覆盖）
+- [x] **交付**：Worker 跑 `allowed_commands`、CI（`test_lock_tables_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、
+  审查、合并与部署（迁移 0016 在生产执行）
+  - run `376e0811`，PR #202，一个提交 `1b63af0`；Worker 的五项检查零退出，CI 六项首轮全绿（backend job 里
+    `test_lock_tables_db.py` 14 个用例实际执行并通过，不是 skip）
+  - Worker 的独立受限审查 `REVIEW_VERDICT: APPROVE`（`REVIEWED_SHA` `1b63af0`），Kelvin 在 Telegram「批准」，合并为
+    `a7ada92`。没有走 Codex 审查；PR 正文的「设计闸门」一行仍是 Worker 的固定值「不适用」，合并前没有改成 #200；
+    2026-09-30 由本收尾 PR #203 按 Kelvin 的裁定事后补改为 #200（见 [REVIEW-LOG.md](../REVIEW-LOG.md) 2026-09-30 #203 那一行）
+  - main 上 Deploy（run `36722901922`）成功：迁移步骤通过（执行 0016，失败会中止部署），`/healthz` 冒烟通过，
+    `a7ada92` 记为最近一次成功部署
 - ↪ 这里原有一条未结清的勾选项，已原样留在 [TODO.md](../TODO.md) 的「任务记录里仍未结清的后续项」一节
 
 ---

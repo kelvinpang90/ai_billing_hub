@@ -25,23 +25,22 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-028` Phase 2 FX 汇率 1/6：迁移、模型与数据库触发器
-2. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
-3. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
-4. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
-5. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
-6. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
-7. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
-8. `AIH-TASK-029` Phase 2 用量摄取端点
-9. `AIH-TASK-030` Phase 2 批量用量摄取端点
-10. `AIH-TASK-031` Phase 2 计价引擎与试算预览
-11. `AIH-TASK-032` Phase 2 异步计费 worker
-12. `AIH-TASK-033` Phase 2 最热租户压测脚本
-13. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-14. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-15. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-16. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-17. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
+2. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
+3. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
+4. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
+5. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
+6. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
+7. `AIH-TASK-029` Phase 2 用量摄取端点
+8. `AIH-TASK-030` Phase 2 批量用量摄取端点
+9. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+10. `AIH-TASK-032` Phase 2 异步计费 worker
+11. `AIH-TASK-033` Phase 2 最热租户压测脚本
+12. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+13. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+14. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+15. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+16. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -241,6 +240,7 @@
 > | T-B | 供应商价格版本 | #177 `APPROVED: design v4` | `AIH-TASK-026` |
 > | T-D | 定价规则 | #178 `APPROVED: design v4`（Kelvin 2026-09-30：保留全局默认第一条起点为空） | `AIH-TASK-027` |
 > | T-C | FX 汇率、BNM 拉取、告警接口 | #183 `APPROVED: design v3`（Kelvin 2026-09-29：从发布时刻起生效；过期阈值 5 个日历日。2026-09-30 v2：登记前预审后修正发布 / 退役规则与数据库兜底，按 BNM 实测改写适配器，按层拆分；v3：补拆分后预审指出的九处） | `AIH-TASK-028`（F1）、`AIH-TASK-039` 到 `AIH-TASK-044`（F2–F6 与 F2b） |
+> | —（T-C / T-D 的补充） | 两张锁表禁止 UPDATE | #200 `APPROVED: design v1`（#199 的 Codex 审查引出；Kelvin 2026-09-30：先修再收尾 028，新开一个闸门） | `AIH-TASK-045` |
 > | T-E | 用量摄取端点 | #176 `APPROVED: design v8` | `AIH-TASK-029` |
 > | T-F | 批量摄取 | #180 `APPROVED: design v3` | `AIH-TASK-030` |
 > | T-G | 计价引擎与试算 | #179 `APPROVED: design v1` | `AIH-TASK-031` |
@@ -481,6 +481,14 @@ Phase 全做完还不能上，以下五条必须全过：
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-L
     （AIH-TASK-037）补上
   - 「快照读陷阱」用例同时断言了陷阱本身，与 025 / 026 一样依赖 MySQL 默认的 REPEATABLE READ
+
+### 来自「AIH-TASK-045 —— 两张锁表禁止 UPDATE（pricing_rule_locks 与 fx_rate_locks，2026-09-30）」
+
+- [ ] **后续**：残余风险同 0006 / 0014 / 0015：`TRUNCATE` / `DROP TRIGGER` / `ALTER TABLE` 是 DDL，不经触发器，归
+  「后续计划」里的数据库账号权限拆分
+  - Worker 审查的非阻断观察：`tests/backend/test_fx_rates_db.py` 升降用例上方的注释说 fx 的触发器随表删除、pricing 的
+    由 0016 的 downgrade 删除，实际是 0016 的 downgrade 先跑、两个都删；断言本身正确。只是注释，留给下一个改这个文件的
+    任务顺手改正
 
 ### 来自「流程加固 —— 审查流水线（2026-09-11）」
 
