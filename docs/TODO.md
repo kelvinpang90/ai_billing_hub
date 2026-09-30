@@ -2487,6 +2487,37 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     审查据此判阻断，新开设计闸门 #200（`APPROVED: design v1`），由 `AIH-TASK-045` 修（#201 登记，排在「当前计划」第 1 条）；
     先收尾 028、再由 045 修的裁定见 [REVIEW-LOG.md](REVIEW-LOG.md)「升级给人的分歧」2026-09-30 #199 那一行
 
+### AIH-TASK-045 —— 两张锁表禁止 UPDATE（pricing_rule_locks 与 fx_rate_locks，2026-09-30）
+
+设计闸门 #200 `APPROVED: design v1`，全文在
+[design/AIH-TASK-045-lock-tables-no-update.md](design/AIH-TASK-045-lock-tables-no-update.md)。`pricing_rule_locks`（0014）
+与 `fx_rate_locks`（0015）此前只拒绝 INSERT（已有一行时）与 DELETE，`UPDATE … SET id = 2` 能把锁行移走，版本表触发器的
+`WHERE id = 1 FOR UPDATE` 便静默锁不到行。本任务只加数据库兜底，不改模型、服务与 0014 / 0015 的任何对象。触发器记在
+[database-schema.md](database-schema.md) 两张锁表的触发器表里。
+
+- [x] **做了什么（本分支，Draft PR 交付；PR 正文的「设计闸门」写 #200）**：
+  - `alembic/versions/20260930_0016_lock_tables_no_update.py`：revision `0016_lock_tables_no_update`，`down_revision` 是
+    `0015_fx_rates`。先做 0006 同款的触发器权限预检（在任何 DDL 之前，`--sql` 离线模式跳过）；再建
+    `trg_pricing_rule_locks_before_update` 与 `trg_fx_rate_locks_before_update`，写法照同表的 BEFORE DELETE：无条件
+    `SIGNAL SQLSTATE '45000'`，错误文本与同表 INSERT / DELETE 触发器相同（`<表名> holds exactly one row`）。`downgrade`
+    只删这两个触发器。文件头附 §132 第 13 条分析，写明两个触发器只建成一个时的清场步骤
+    （`DROP TRIGGER IF EXISTS trg_pricing_rule_locks_before_update` 后重新部署）
+  - 测试：新建 `tests/backend/test_lock_tables_db.py`（真 MySQL，两张表参数化；设计 §7 的「正常路径」「边界值」「不误杀」
+    「其他写法」「迁移」五行；拒绝用例断言错误号、错误文本与 SQLSTATE，并配一条证明不误杀的通过用例；每个用例结束时两张
+    锁表仍恰好是 `[1]`）；`test_migrations.py` 加 0016 的一组（版本链、两个触发器的表 / 时机 / 事件与写法、预检在任何 DDL
+    之前、离线模式跳过预检、`downgrade` 只删这两个、真 MySQL 上 head 的触发器与降级只少这两个），并把 0006 的触发器
+    集合、0014 / 0015 在 head 上的锁表触发器集合改成同时算上 0016；`test_fx_rates_db.py` 的升降用例（降到 0014 再升回
+    head）把 0016 的两个触发器算进去
+- [x] **实现定的细节**：
+  - 迁移序号：0016 本由 `.platform/tasks.yaml` 预留给用量摄取；按设计 §2，登记 PR 已把 029 / 032 顺延到 0017 / 0018，
+    本任务不改 `.platform/`
+  - `INSERT … ON DUPLICATE KEY UPDATE` 与 `REPLACE` 不需要新触发器：它们先经既有的 BEFORE INSERT，已有一行时被拒绝
+    （`test_lock_tables_db.py` 的「其他写法」覆盖）
+- [ ] **交付**：Worker 跑 `allowed_commands`、CI（`test_lock_tables_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、
+  审查、合并与部署（迁移 0016 在生产执行）
+- [ ] **后续**：残余风险同 0006 / 0014 / 0015：`TRUNCATE` / `DROP TRIGGER` / `ALTER TABLE` 是 DDL，不经触发器，归
+  「后续计划」里的数据库账号权限拆分
+
 ---
 
 ## Phase 3 — Integrated Application Backend 试点（§126）

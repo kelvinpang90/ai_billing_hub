@@ -679,7 +679,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         assert checks == set(_model_checks())
         # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验；价格表上的
         # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验；
-        # 汇率的七个由 0015 建，在 test_0015_* 里验。
+        # 汇率的七个由 0015 建，在 test_0015_* 里验；两张锁表的 BEFORE UPDATE 由 0016 建，在
+        # test_0016_* 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -689,6 +690,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0013,
             *_EXPECTED_TRIGGERS_0014,
             *_EXPECTED_TRIGGERS_0015,
+            *_EXPECTED_TRIGGERS_0016,
         }
         assert set(triggers) == expected
     finally:
@@ -3056,7 +3058,8 @@ def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
         assert referential["fk_pricing_rule_components_rule"][1] == "RESTRICT"
         assert checks == set(_rule_checks())
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0014}
-        assert ours == _EXPECTED_TRIGGERS_0014
+        # At head the lock table also has 0016's BEFORE UPDATE.
+        assert ours == _EXPECTED_TRIGGERS_0014 | _triggers_0016_on(_TABLES_0014)
     finally:
         engine.dispose()
 
@@ -3478,6 +3481,170 @@ def test_0015_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
         assert delete_rules == dict.fromkeys(names, "RESTRICT")
         assert checks == set(_fx_checks())
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0015}
-        assert ours == _EXPECTED_TRIGGERS_0015
+        # At head the lock table also has 0016's BEFORE UPDATE.
+        assert ours == _EXPECTED_TRIGGERS_0015 | _triggers_0016_on(_TABLES_0015)
     finally:
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0016_lock_tables_no_update（AIH-TASK-045，设计闸门 #200 v1）
+#
+# The first cases need no database: the revision chain; the two triggers (table, timing,
+# event) written like the lock tables' BEFORE DELETE with the same message; the 0006 precheck
+# before any DDL and skipped in `--sql` mode; downgrade drops exactly these two. On a real
+# MySQL: the two triggers at head, and that downgrade to 0015 drops only them (tables, lock
+# rows and every other trigger unchanged). What they refuse or let through is in
+# test_lock_tables_db.py.
+# ---------------------------------------------------------------------------
+
+_REVISION_0016 = "0016_lock_tables_no_update"
+_MIGRATION_0016 = pathlib.Path("alembic/versions/20260930_0016_lock_tables_no_update.py")
+
+# Trigger → (table, timing, event). The two of design §2, no more, no fewer.
+_EXPECTED_TRIGGERS_0016 = {
+    "trg_pricing_rule_locks_before_update": ("pricing_rule_locks", "BEFORE", "UPDATE"),
+    "trg_fx_rate_locks_before_update": ("fx_rate_locks", "BEFORE", "UPDATE"),
+}
+
+
+def _triggers_0016_on(tables: set[str]) -> dict[str, tuple[str, str, str]]:
+    return {name: row for name, row in _EXPECTED_TRIGGERS_0016.items() if row[0] in tables}
+
+
+def _load_0016() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0016", _MIGRATION_0016)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0016_follows_0015() -> None:
+    migration = _load_0016()
+
+    assert migration.revision == _REVISION_0016
+    assert migration.down_revision == _REVISION_0015
+
+
+def test_0016_triggers_are_the_two_of_the_design_written_like_the_lock_delete_ones() -> None:
+    """Unconditional refusal, written like the same table's BEFORE DELETE (only the event
+    differs), with the message of the same table's INSERT / DELETE triggers."""
+    triggers = _load_0016()._TRIGGERS
+    earlier = {**_load_0014()._TRIGGERS, **_load_0015()._TRIGGERS}
+
+    assert set(triggers) == set(_EXPECTED_TRIGGERS_0016)
+    for name, (table, timing, event) in _EXPECTED_TRIGGERS_0016.items():
+        statement = _normalised(triggers[name])
+        assert statement.startswith(f"CREATE TRIGGER {name} {timing} {event} ON {table}"), name
+        assert "FOR EACH ROW" in statement, name
+        message = f"'{table} holds exactly one row'"
+        assert statement.endswith(f"SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = {message}"), name
+        # No condition: not even a `SET id = 1` that changes nothing passes.
+        assert "IF" not in statement.split(), name
+        delete = _normalised(earlier[f"trg_{table}_before_delete"])
+        as_update = delete.replace("before_delete", "before_update").replace("DELETE", "UPDATE")
+        assert statement == as_update, name
+        assert message in _normalised(earlier[f"trg_{table}_before_insert"]), name
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0016_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    migration = _load_0016()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0016_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL DDL is not transactional: a failed precheck must not leave a trigger behind."""
+    migration = _load_0016()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    # The other way round: with the switch on, the same upgrade does create the two triggers.
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    assert allowed.calls == ["execute", "execute"]
+
+
+def test_0016_offline_mode_skips_the_precheck_and_downgrade_drops_only_the_two(
+    monkeypatch,
+) -> None:
+    migration = _load_0016()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    # `--sql`: no bind asked for, only the two CREATE TRIGGER statements, in design §2 order.
+    assert [name for name, _ in upgrade.calls] == ["execute", "execute"]
+    assert upgrade.first_args("execute") == list(migration._TRIGGERS.values())
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.calls == [
+        ("execute", ("DROP TRIGGER trg_fx_rate_locks_before_update",)),
+        ("execute", ("DROP TRIGGER trg_pricing_rule_locks_before_update",)),
+    ]
+
+
+def _lock_rows() -> dict[str, list[int]]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            return {
+                table: list(connection.execute(text(f"SELECT id FROM {table}")).scalars())
+                for table in ("pricing_rule_locks", "fx_rate_locks")
+            }
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0016_triggers_exist_at_head(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+
+    triggers = _all_triggers()
+
+    found = {name: triggers.get(name) for name in _EXPECTED_TRIGGERS_0016}
+    assert found == _EXPECTED_TRIGGERS_0016
+
+
+@needs_mysql
+def test_0016_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    tables = _table_names()
+    triggers = _all_triggers()
+    assert _EXPECTED_TRIGGERS_0016.items() <= triggers.items()
+    assert _lock_rows() == {"pricing_rule_locks": [1], "fx_rate_locks": [1]}
+
+    try:
+        command.downgrade(alembic_config, _REVISION_0015)
+        without = {n: r for n, r in triggers.items() if n not in _EXPECTED_TRIGGERS_0016}
+        assert _all_triggers() == without
+        # Only the triggers: tables and the lock rows stay.
+        assert _table_names() == tables
+        assert _lock_rows() == {"pricing_rule_locks": [1], "fx_rate_locks": [1]}
+
+        command.upgrade(alembic_config, _REVISION_0016)
+        assert _all_triggers() == triggers
+        assert _table_names() == tables
+        assert _lock_rows() == {"pricing_rule_locks": [1], "fx_rate_locks": [1]}
+    finally:
+        command.upgrade(alembic_config, "head")
