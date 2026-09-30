@@ -1674,7 +1674,7 @@ tasks:
       - 管理端七个接口、请求字段（范围字段与 priority_scope 必须匹配）、错误码按设计 §2「接口」；单价与倍数一律 JSON 字符串精确解析、超过 8 位小数 422；每个处理函数第一条语句调用 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id；字段说明标注含税
       - 发布与停用在 pricing_rule_locks 行 SELECT … FOR UPDATE 内完成，t 在锁后取、向上取整到整秒；区间规则（只有 GLOBAL 的第一条可 effective_from 为空，其余一律 ≥ t）与写入顺序按设计；每次写后同一事务复查区间
       - resolve_pricing_rule 按 CUSTOMER_PROVIDER_MODEL → CUSTOMER_PROVIDER → CUSTOMER → GLOBAL_PROVIDER_MODEL → GLOBAL 依次加锁读，第一级命中即返回、不因缺分量下落；另提供对 pricing_rule_locks 取 FOR SHARE 的函数供计费使用；本任务不接到任何计费路径
-      - 五个审计动作（PRICING_CREATE / UPDATE / PUBLISH / RETIRE / DISCARD）与写入同一事务，内容按设计 §2「审计」
+      - 五个审计动作（PRICING_CREATE / UPDATE / PUBLISH / RETIRE / DISCARD）与写入同一事务，内容按设计 §2「审计」；新 entity_type pricing_rule 的 entity_id 是 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红
       - 测试覆盖设计 §7 全部行；触发器、约束、并发（发布与计费并发、共享锁互不阻塞、快照读陷阱）放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表的枚举列加进 test_model_columns.py；价格与倍数用虚构值；uuid 用全零占位值
       - 新建 docs/pricing-engine.md 的「规则」一节（写明五级顺序、下落语义、含税）；docs/api.md 记全部新接口；docs/database-schema.md 记三张表、触发器与锁顺序；docs/TODO.md 新增 AIH-TASK-027 记录段，记下两个 §66 之外补的审计动作与设计 §2「对下游任务的契约」
       - 不含计费额计算、试算、税额与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/
@@ -1686,6 +1686,7 @@ tasks:
       - app/models/auth.py
       - app/repositories/pricing_rules.py
       - app/services/pricing_rules.py
+      - app/services/audit_query.py
       - app/schemas/pricing_rules.py
       - app/api/admin_pricing_rules.py
       - app/main.py
@@ -1750,7 +1751,7 @@ tasks:
       - '告警接口：路径 /internal/alerts（不在 /api/ 下），text/plain 每行「维度 OK|P1|P2 摘要」；Bearer 令牌从 BILLING_MONITOR_TOKEN_FILE 读、常量时间比较，未配置返回 404、令牌错误 401；维度注册表在 app/services/alerts.py；fx_fetch（72 小时内无成功且有失败）与 fx_stale（最新生效版本的报价日距今超过 5 个日历日，或没有生效版本）两个维度；摘要不含租户与金额'
       - 'nginx：location = /internal/alerts 的 allow 名单与 /readyz 相同，另加 location /internal/ { deny all; }；tests/backend/test_compose.py 钉住两者一致；docker-compose.yml 声明监控令牌 secret 并挂进 api 容器'
       - 'deploy/monitor.sh 新增 check_alerts：按 .env 的 BILLING_MONITOR_TOKEN_HOST_FILE 读令牌（字面解析 .env，不 source），逐行解析，每个维度用 BILLING_HEALTHCHECK_ALERT_<维度大写>_URL 推一个检查；缺地址只记日志；接口不通时不推；复核一并覆盖；按 monitor.sh 既有方式做本地演练并把结果写进任务记录'
-      - 五个审计动作（FX_RATE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）与写入同一事务；BNM 草稿不写审计
+      - 五个审计动作（FX_RATE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）与写入同一事务；BNM 草稿不写审计；新 entity_type fx_rate_version 的 entity_id 是 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红
       - 测试覆盖设计 §7 全部行；触发器、约束、并发放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表枚举列加进 test_model_columns.py；Beat 条目加进 test_celery.py
       - 新建 docs/currency-and-fx.md；docs/api.md 记全部新接口与告警接口；docs/database-schema.md 记三张表与锁顺序；docs/deployment.md 与 docs/runbook.md 写设计 §8 的合并后运维步骤（令牌文件、Healthchecks 两个检查、手工触发一次拉取验证 BNM 可达、发布第一个汇率）与 FX 故障处理；docs/adr/ADR-0005-fx-rate-source.md 收口条件旁注明两条告警已落地、过期阈值按 Kelvin 2026-09-29 的决定为 5 个日历日；docs/TODO.md 新增 AIH-TASK-028 记录段
       - 测试里的 uuid 用全零占位值（secret-scan）；价格、汇率与金额一律用明显的虚构值
@@ -1763,6 +1764,7 @@ tasks:
       - app/models/auth.py
       - app/repositories/fx_rates.py
       - app/services/fx_rates.py
+      - app/services/audit_query.py
       - app/services/alerts.py
       - app/core/fx_source.py
       - app/core/config.py
@@ -1841,7 +1843,7 @@ tasks:
       - 指纹规范化、插入优先、按 api_key 比对归属、冲突去重（唯一约束撞了不写审计）、归属不符在独立事务写审计后 403，全部按设计；原事件在冲突时逐列不变
       - nginx：集成前缀块 client_max_body_size 1m + error_page 413 返回设计给出的 JSON 信封；tests/backend/test_compose.py 静态钉住；应用层单条上限 16 KiB
       - '告警：在 app/services/alerts.py 注册 usage_event_conflicts 维度（最近 24 小时冲突行数与最早时刻，> 0 为 P2）；docs/runbook.md 写明「摄取中断」由现有 services / readyz 检查覆盖、以及部署后经 nginx 发 1 MiB + 1 字节的实测步骤（结果留在任务记录）'
-      - 两个审计动作（USAGE_EVENT_SCOPE_MISMATCH、USAGE_EVENT_IDEMPOTENCY_CONFLICT）内容按设计 §2「审计」，不含载荷
+      - 两个审计动作（USAGE_EVENT_SCOPE_MISMATCH、USAGE_EVENT_IDEMPOTENCY_CONFLICT）内容按设计 §2「审计」，不含载荷；新 entity_type usage_event 的 entity_id 是原事件的 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红；integration_credential 已分类，不动
       - 测试覆盖设计 §7 全部行；数据库约束、并发重复与并发冲突放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表枚举列加进 test_model_columns.py；本任务补齐 REQ-AUTH-001 的重放测试证据并在 docs/TODO.md 勾掉对应后移项
       - docs/api.md 记端点、请求头补充（每次尝试换新 X-Acuven-Request-Id）、字段规则、错误表与 retryable、413 的 request_id 为 null；docs/database-schema.md 记两张表；docs/TODO.md 新增 AIH-TASK-029 记录段，记下两个审计动作对 §66 的补充、§79 列名与载荷字段一致的取名、按凭据限流仍是待办
       - 不计费、不入队、不做批量端点；实现时把单条处理拆成 ingest_one（设计 AIH-TASK-030 要复用）
@@ -1859,6 +1861,7 @@ tasks:
       - app/repositories/integration_access.py
       - app/services/usage_ingest.py
       - app/services/integration_auth.py
+      - app/services/audit_query.py
       - app/services/alerts.py
       - app/core/nonce.py
       - app/core/errors.py
