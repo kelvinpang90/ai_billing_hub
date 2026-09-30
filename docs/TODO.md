@@ -23,23 +23,22 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-045` Phase 2 锁表禁止 UPDATE（pricing_rule_locks 与 fx_rate_locks）
-2. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
-3. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
-4. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
-5. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
-6. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
-7. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
-8. `AIH-TASK-029` Phase 2 用量摄取端点
-9. `AIH-TASK-030` Phase 2 批量用量摄取端点
-10. `AIH-TASK-031` Phase 2 计价引擎与试算预览
-11. `AIH-TASK-032` Phase 2 异步计费 worker
-12. `AIH-TASK-033` Phase 2 最热租户压测脚本
-13. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-14. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-15. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-16. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-17. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
+2. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
+3. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
+4. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
+5. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
+6. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
+7. `AIH-TASK-029` Phase 2 用量摄取端点
+8. `AIH-TASK-030` Phase 2 批量用量摄取端点
+9. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+10. `AIH-TASK-032` Phase 2 异步计费 worker
+11. `AIH-TASK-033` Phase 2 最热租户压测脚本
+12. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+13. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+14. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+15. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+16. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -2513,10 +2512,19 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     本任务不改 `.platform/`
   - `INSERT … ON DUPLICATE KEY UPDATE` 与 `REPLACE` 不需要新触发器：它们先经既有的 BEFORE INSERT，已有一行时被拒绝
     （`test_lock_tables_db.py` 的「其他写法」覆盖）
-- [ ] **交付**：Worker 跑 `allowed_commands`、CI（`test_lock_tables_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、
+- [x] **交付**：Worker 跑 `allowed_commands`、CI（`test_lock_tables_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、
   审查、合并与部署（迁移 0016 在生产执行）
+  - run `376e0811`，PR #202，一个提交 `1b63af0`；Worker 的五项检查零退出，CI 六项首轮全绿（backend job 里
+    `test_lock_tables_db.py` 14 个用例实际执行并通过，不是 skip）
+  - Worker 的独立受限审查 `REVIEW_VERDICT: APPROVE`（`REVIEWED_SHA` `1b63af0`），Kelvin 在 Telegram「批准」，合并为
+    `a7ada92`。没有走 Codex 审查；PR 正文的「设计闸门」一行仍是 Worker 的固定值「不适用」，合并前没有改成 #200
+  - main 上 Deploy（run `36722901922`）成功：迁移步骤通过（执行 0016，失败会中止部署），`/healthz` 冒烟通过，
+    `a7ada92` 记为最近一次成功部署
 - [ ] **后续**：残余风险同 0006 / 0014 / 0015：`TRUNCATE` / `DROP TRIGGER` / `ALTER TABLE` 是 DDL，不经触发器，归
   「后续计划」里的数据库账号权限拆分
+  - Worker 审查的非阻断观察：`tests/backend/test_fx_rates_db.py` 升降用例上方的注释说 fx 的触发器随表删除、pricing 的
+    由 0016 的 downgrade 删除，实际是 0016 的 downgrade 先跑、两个都删；断言本身正确。只是注释，留给下一个改这个文件的
+    任务顺手改正
 
 ---
 
