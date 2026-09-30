@@ -2483,8 +2483,9 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     与 `/healthz` 冒烟通过，`e8b667b` 记为最近一次成功部署
 - [ ] **后续**：F2–F6（上表）；上线步骤里「管理员发布第一个汇率版本」由 F2 / F4 落地后执行（设计 §8）
   - Worker 审查的非阻断观察：`fx_rate_locks` 没有 BEFORE UPDATE 触发器，直接 `UPDATE fx_rate_locks SET id = 2` 会让
-    区间不重叠触发器的 `WHERE id = 1 FOR UPDATE` 静默锁不到行（设计 v3 只要求拒绝插入与删除，不算违约）。要补就是改设计，
-    先回设计闸门 #183；027 的 `pricing_rule_locks` 是否同样缺这一条一并看
+    区间不重叠触发器的 `WHERE id = 1 FOR UPDATE` 静默锁不到行（设计 v3 只要求拒绝插入与删除，不算违约）；027 的 `pricing_rule_locks` 同样缺这一条。#199 的 Codex
+    审查据此判阻断，新开设计闸门 #200（`APPROVED: design v1`），由 `AIH-TASK-045` 修（#201 登记，排在「当前计划」第 1 条）；
+    先收尾 028、再由 045 修的裁定见 [REVIEW-LOG.md](REVIEW-LOG.md)「升级给人的分歧」2026-09-30 #199 那一行
 
 ---
 
