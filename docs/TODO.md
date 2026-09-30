@@ -23,23 +23,22 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-028` Phase 2 FX 汇率 1/6：迁移、模型与数据库触发器
-2. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
-3. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
-4. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
-5. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
-6. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
-7. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
-8. `AIH-TASK-029` Phase 2 用量摄取端点
-9. `AIH-TASK-030` Phase 2 批量用量摄取端点
-10. `AIH-TASK-031` Phase 2 计价引擎与试算预览
-11. `AIH-TASK-032` Phase 2 异步计费 worker
-12. `AIH-TASK-033` Phase 2 最热租户压测脚本
-13. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-14. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-15. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-16. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-17. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-039` Phase 2 FX 汇率 2/6：发布与退役规则、resolve_fx_rate
+2. `AIH-TASK-044` Phase 2 FX 汇率 2b/6：规则层的并发与性质测试
+3. `AIH-TASK-040` Phase 2 FX 汇率 3/6：BNM 拉取与 Celery Beat
+4. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
+5. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
+6. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
+7. `AIH-TASK-029` Phase 2 用量摄取端点
+8. `AIH-TASK-030` Phase 2 批量用量摄取端点
+9. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+10. `AIH-TASK-032` Phase 2 异步计费 worker
+11. `AIH-TASK-033` Phase 2 最热租户压测脚本
+12. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+13. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+14. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+15. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+16. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -2470,9 +2469,20 @@ webhook。任务契约只允许改那个脚本，所以本记录由收尾 PR 补
     同样按（币种对、来源、报价日）唯一，只有报价日为 `NULL` 的行不受限（设计 §2 的手工录入接口不收报价日，写的是 `NULL`）
   - `fx_rate_versions` 没有另建取汇率用的索引：设计 §2 只列了两条唯一约束；`(base_currency, quote_currency, …)` 开头的
     两条唯一索引可供 `resolve_fx_rate` 按币种对查。F2 若实测需要按 `effective_from` 的索引，另走迁移
-- [ ] **交付**：Worker 跑 `allowed_commands`、CI（`test_fx_rates_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、
+- [x] **交付**：Worker 跑 `allowed_commands`、CI（`test_fx_rates_db.py` 与 `test_migrations.py` 的 MySQL 用例在 CI 必跑）、
   审查、合并与部署（迁移 0015 在生产执行）
+  - run `4df4c6cc`，PR #197。首个提交 `071da45` 的 CI backend 失败：`test_one_bnm_version_per_quote_date` 假设带报价日
+    的手工版本不受同日唯一约束，与迁移（照设计 §2 的四列约束）不符，是测试与文档的说法错了。修复轮 `9fca3b9` 把第二条
+    同日手工草稿改成拒绝用例（配报价日为 `NULL` 的通过用例），并更正测试说明、`database-schema.md` 与本记录；CI 六项全绿
+  - Worker 的独立受限审查 `REVIEW_VERDICT: APPROVE`（`REVIEWED_SHA` `9fca3b9`），Kelvin 在 Telegram「批准」，合并为
+    `e8b667b`（合并时 head 即审查过的 `9fca3b9`）。没有走 Codex 审查；PR 正文的「设计闸门」一行仍是 Worker 的固定值
+    「不适用」，合并前没有改成 #183
+  - main 上 Deploy（run `36701537552`）成功：迁移步骤通过（`alembic upgrade head` 执行 0015，失败会中止部署），健康检查
+    与 `/healthz` 冒烟通过，`e8b667b` 记为最近一次成功部署
 - [ ] **后续**：F2–F6（上表）；上线步骤里「管理员发布第一个汇率版本」由 F2 / F4 落地后执行（设计 §8）
+  - Worker 审查的非阻断观察：`fx_rate_locks` 没有 BEFORE UPDATE 触发器，直接 `UPDATE fx_rate_locks SET id = 2` 会让
+    区间不重叠触发器的 `WHERE id = 1 FOR UPDATE` 静默锁不到行（设计 v3 只要求拒绝插入与删除，不算违约）。要补就是改设计，
+    先回设计闸门 #183；027 的 `pricing_rule_locks` 是否同样缺这一条一并看
 
 ---
 
