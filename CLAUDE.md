@@ -21,7 +21,7 @@
 - 争论拍板后的结论写进 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，避免同一个问题吵第二次
 - `main` 已配分支保护：禁 force push、禁直推、必需检查 `docs` + `scripts` + `policy` + `backend` + `secret-scan`、分支必须最新
 
-⚠️ **仓库是公开的**：绝不提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。
+⚠️ **仓库是公开的**：绝不提交凭据、密钥、`.env`、真实主机名 / IP、客户数据、供应商合同价。主机名只有 [ADR-0001](docs/adr/ADR-0001-repository-visibility.md) 派生要求里登记的两处例外，别处一律不写。
 
 
 ## 沟通
