@@ -1730,72 +1730,311 @@ tasks:
       - bypass_ci
       - bypass_review
 
-  # 028–038：Phase 2 其余任务（docs/design/PHASE-2-plan.md；占位名与编号的对照见 docs/TODO.md 的 Phase 2 一节）。
+  # 028–043：Phase 2 其余任务（docs/design/PHASE-2-plan.md；占位名与编号的对照见 docs/TODO.md 的 Phase 2 一节）。
   # 028–032 过了设计闸门；033 / 034 与四个前端任务不走闸门。计划里的 T-K、T-L 各拆成两个前端任务（035 / 036、037 / 038），
   # 免得单个 Worker run 的改动面过大。迁移串行：025 0012 → 026 0013 → 027 0014 → 028 0015 → 029 0016 → 032 0017。
+  # T-C（汇率）按设计闸门 #183 v2 §11 按层拆成六个任务（2026-09-30，登记前预审判 v1 的单个任务过大）：
+  # 028 = F1 数据库、039 = F2 规则与仓储、040 = F3 BNM 拉取与 Celery、041 = F4 管理端接口、042 = F5 告警接口、
+  # 043 = F6 部署与告警接线。每一层合并后都能单独通过检查与 CI、单独部署（设计 §8）。
   - id: AIH-TASK-028
-    title: 'FX rate versions, BNM fetch, approval and the internal alert endpoint'
+    title: 'FX rates 1/6 - migration, models and database triggers'
     purpose: >-
-      按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v1）实现汇率：迁移 0015 建 fx_rate_locks（单行）、fx_rate_versions、fx_fetch_attempts；BNM 适配器（标准库 urllib、中间价、中午场）每天 UTC 04:30 拉成草稿；手工录入、发布（从发布时刻起生效，只在末尾追加，只有「无汇率 → 有汇率」可覆盖过去）、退役；触发器保证只能以草稿插入、发布后不可变、区间不重叠；只读 resolve_fx_rate 与计费串行；带令牌的内部告警接口 GET /internal/alerts（纯文本、维度注册表）与 fx_fetch、fx_stale 两个维度（过期阈值 5 个日历日）；monitor.sh 按行通用处理。不含换算与前端。
+      按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v2）§11 的 F1，只做数据库层：迁移 0015 建 fx_rate_locks（单行）、fx_rate_versions、fx_fetch_attempts 与 ORM 模型；CHECK 1–5、open_slot 生成列与两条唯一约束；全部触发器（锁表恰好一行、只能以草稿插入、禁止 DRAFT → RETIRED、发布跃迁上尽头为空、PUBLISHED 只许截断与退役、RETIRED / DISCARDED 不可改、锁 fx_rate_locks 后判区间不重叠且空区间跳过、禁止删除、拉取记录只增）。不含服务、接口、拉取与告警（F2–F6 即 AIH-TASK-039 到 AIH-TASK-043）。
     status: ready
     depends_on:
       - AIH-TASK-027
     acceptance_criteria:
-      - 实现与 docs/design/AIH-TASK-028-fx-rates.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
-      - '迁移文件名 alembic/versions/20260929_0015_fx_rates.py，down_revision 指向 0014；三张表的列、类型（rate 为 DECIMAL(24,10)）、CHECK、唯一约束（含 open_slot 与报价日唯一）、触发器（锁表恰好一行、只能以草稿插入、发布后只许截断与退役、锁 fx_rate_locks 后检查区间不重叠、拉取记录只增）按设计 §2，写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；alembic/env.py 加 import'
-      - 'BNM 适配器：FxRateSource Protocol + BNM 实现 + build_fx_source 工厂，按设计的 URL、请求头、session=1200、middle_rate / unit、超时与错误码；只接受 HTTPS base_url；测试用录制的 JSON 固定数据（tests/backend/fixtures/bnm_*.json），CI 不联网；新配置项 BILLING_FX_SOURCE、BILLING_FX_BNM_BASE_URL、BILLING_FX_CURRENCIES、BILLING_FX_FETCH_TIMEOUT_SECONDS、BILLING_MONITOR_TOKEN_FILE 带校验'
-      - 'Celery：新任务模块加进 TASK_MODULES，Beat 条目 crontab(hour=4, minute=30)、expires 3600；任务幂等（报价日唯一约束兜底）；外部调用在事务外，草稿与拉取记录同一事务'
-      - 管理端八个接口、错误码按设计 §2「接口」；rate 为 JSON 字符串、最多 10 位小数、不舍入；每个处理函数第一条语句 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id
-      - 发布与退役在 fx_rate_locks 行 FOR UPDATE 内，t 在锁后取、向上取整到整秒；区间规则（第一个版本 effective_from 为空、退役后的空档由下一个版本补上、预约、撤销预约）与写入顺序按设计；每次写后同一事务复查
-      - resolve_fx_rate 用加锁读，另提供对 fx_rate_locks 取 FOR SHARE 的函数；本任务不接到任何计费路径
-      - '告警接口：路径 /internal/alerts（不在 /api/ 下），text/plain 每行「维度 OK|P1|P2 摘要」；Bearer 令牌从 BILLING_MONITOR_TOKEN_FILE 读、常量时间比较，未配置返回 404、令牌错误 401；维度注册表在 app/services/alerts.py；fx_fetch（72 小时内无成功且有失败）与 fx_stale（最新生效版本的报价日距今超过 5 个日历日，或没有生效版本）两个维度；摘要不含租户与金额'
-      - 'nginx：location = /internal/alerts 的 allow 名单与 /readyz 相同，另加 location /internal/ { deny all; }；tests/backend/test_compose.py 钉住两者一致；docker-compose.yml 声明监控令牌 secret 并挂进 api 容器'
-      - 'deploy/monitor.sh 新增 check_alerts：按 .env 的 BILLING_MONITOR_TOKEN_HOST_FILE 读令牌（字面解析 .env，不 source），逐行解析，每个维度用 BILLING_HEALTHCHECK_ALERT_<维度大写>_URL 推一个检查；缺地址只记日志；接口不通时不推；复核一并覆盖；按 monitor.sh 既有方式做本地演练并把结果写进任务记录'
-      - 五个审计动作（FX_RATE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）与写入同一事务；BNM 草稿不写审计；新 entity_type fx_rate_version 的 entity_id 是 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红
-      - 测试覆盖设计 §7 全部行；触发器、约束、并发放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表枚举列加进 test_model_columns.py；Beat 条目加进 test_celery.py
-      - 新建 docs/currency-and-fx.md；docs/api.md 记全部新接口与告警接口；docs/database-schema.md 记三张表与锁顺序；docs/deployment.md 与 docs/runbook.md 写设计 §8 的合并后运维步骤（令牌文件、Healthchecks 两个检查、手工触发一次拉取验证 BNM 可达、发布第一个汇率）与 FX 故障处理；docs/adr/ADR-0005-fx-rate-source.md 收口条件旁注明两条告警已落地、过期阈值按 Kelvin 2026-09-29 的决定为 5 个日历日；docs/TODO.md 新增 AIH-TASK-028 记录段
-      - 测试里的 uuid 用全零占位值（secret-scan）；价格、汇率与金额一律用明显的虚构值
-      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
+      - 实现与设计 v2 §2「数据库」（三张表、CHECK、触发器、服务层写入顺序对触发器的要求、「数据库不拦的」）与 §8「数据迁移步骤」逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 迁移文件名 alembic/versions/20260929_0015_fx_rates.py，down_revision 指向 0014；写法与权限预检照迁移 0006；文件头有 §132 第 13 条分析；downgrade 删触发器与表；alembic/env.py 加 import
+      - "app/models/fx_rates.py 与迁移逐列一致（含 fx_fetch_attempts.requested_date 与四个 outcome 取值）；open_slot 的表达式是 CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END（其余为 NULL，照迁移 0013）；新表枚举列加进 test_model_columns.py"
+      - 新建 tests/backend/test_fx_rates_db.py，在 BILLING_TEST_DATABASE_URL 的真 MySQL 上覆盖设计 §7 的「触发器」「open_slot 与唯一约束」「数据库兜底」「区间不重叠」「迁移」五行（未设置时 skip、CI 必跑）；每条拒绝用例配一条证明不误杀的通过用例；本任务没有服务层，时间线用 SQL 按设计 §2 的例子直接构造
+      - docs/database-schema.md 记三张表、约束、触发器与计费路径的锁顺序（供应商 S → FX S → 规则 S → 钱包 → 租户）；docs/TODO.md 新增 AIH-TASK-028 记录段，写明本任务是 v2 §11 的 F1，以及 039–043 的分工
+      - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
     allowed_change_paths:
       - alembic/versions/20260929_0015_fx_rates.py
       - alembic/env.py
       - app/models/fx_rates.py
-      - app/models/auth.py
-      - app/repositories/fx_rates.py
-      - app/services/fx_rates.py
-      - app/services/audit_query.py
-      - app/services/alerts.py
-      - app/core/fx_source.py
-      - app/core/config.py
-      - app/core/celery_app.py
-      - app/tasks/fx_fetch.py
-      - app/schemas/fx_rates.py
-      - app/api/admin_fx_rates.py
-      - app/api/internal_alerts.py
-      - app/main.py
-      - deploy/nginx/billing.conf
-      - deploy/monitor.sh
-      - docker-compose.yml
-      - tests/backend/test_fx_rates_api.py
-      - tests/backend/test_fx_rates_service.py
-      - tests/backend/test_fx_source.py
-      - tests/backend/test_internal_alerts.py
-      - tests/backend/fixtures/bnm_usd_ok.json
-      - tests/backend/fixtures/bnm_usd_unit100.json
-      - tests/backend/fixtures/bnm_usd_bad_payload.json
-      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_fx_rates_db.py
       - tests/backend/test_migrations.py
       - tests/backend/test_model_columns.py
-      - tests/backend/test_compose.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-039
+    title: 'FX rates 2/6 - publish and retire rules, resolve_fx_rate'
+    purpose: >-
+      按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v2）§11 的 F2，只做业务规则层：app/services/fx_rates.py（手工草稿的建、改、丢弃；发布 P1–P4；退役 R1–R5；锁在前；事务内复查；五个审计动作）与 app/repositories/fx_rates.py（加锁读的 resolve_fx_rate、对 fx_rate_locks 取 FOR SHARE 的函数）。先交付规则与设计 §2 例子 E1–E16 一一对应的测试；接口、BNM 拉取与告警在 040–043。本任务不接到任何计费路径。
+    status: ready
+    depends_on:
+      - AIH-TASK-028
+    acceptance_criteria:
+      - 实现与设计 v2 §2「状态」「发布」「退役」「锁在前」「事务内复查」「审计」「时间语义」「金额精度」（手工录入部分）与 §4 逐条一致；错误以带设计错误码的领域异常抛出，HTTP 映射留给 AIH-TASK-041；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 发布与退役的主事务第一条语句是 fx_rate_locks 的 SELECT … FOR UPDATE；t 在锁后取，复用 app/services/ai_catalog.py 的 boundary_after（整秒也加 1 秒）；之后全是加锁读；写入顺序按设计；复查不通过回滚并按实现错误处理
+      - 新建 tests/backend/test_fx_rates_service.py：设计 §2 的 E1–E16 各一个用例（函数名带例子编号），经服务层、冻结时钟建「之前」的数据，执行「操作」，断言「之后」每一行的状态与区间以及结果（成功或错误码），SQLite 与 MySQL 各跑一次；另有设计 §7「事务内复查」的单元用例与「事务中途失败」里发布、撤销预约两种的回滚用例
+      - 新建 tests/backend/test_fx_rates_resolve.py：真 MySQL 上的「发布与计费并发」（两种顺序）、「快照读陷阱」计费侧与发布侧；「时间稳定性」性质用例按设计 §12「送审前的模型核对」列出的断言
+      - 五个审计动作（FX_RATE_CREATE / UPDATE / DISCARD / PUBLISH / RETIRE）加进 app/models/auth.py，与写入同一事务，内容按设计；entity_type fx_rate_version 的 entity_id 是 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红
+      - 新建 docs/currency-and-fx.md，写规则部分（rate 的含义、时间线术语、P1–P4 与 R1–R5、从发布时刻起生效、锁顺序、对下游的契约）；docs/TODO.md 新增 AIH-TASK-039 记录段，记下五个 §66 之外补的审计动作
+      - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
+    allowed_change_paths:
+      - app/repositories/fx_rates.py
+      - app/services/fx_rates.py
+      - app/models/auth.py
+      - app/services/audit_query.py
+      - tests/backend/test_fx_rates_service.py
+      - tests/backend/test_fx_rates_resolve.py
+      - docs/currency-and-fx.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-040
+    title: 'FX rates 3/6 - BNM fetch and Celery Beat'
+    purpose: >-
+      按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v2）§11 的 F3，只做后台任务：app/core/fx_source.py（FxRateSource Protocol、BNM 实现、build_fx_source 工厂）、四个 FX 配置项、app/tasks/fx_fetch.py（按吉隆坡当天日期拉取，外部调用在事务外，草稿与拉取记录同一事务）与一天三次的 Beat 条目。适配器按设计 §10 的 2026-09-30 实测写，测试用设计里录制的响应，CI 不联网。不含接口与告警。
+    status: ready
+    depends_on:
+      - AIH-TASK-039
+    acceptance_criteria:
+      - 实现与设计 v2 §2「BNM 适配器」、fx_fetch_attempts 一节、§4 的拉取并发与「相同 ID、不同载荷」、§10「已在 2026-09-30 实测的接口事实」逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 请求与解析按设计：按日期的 URL、Accept 请求头、逐字段核对（币种、日期、meta.session、meta.quote、unit、middle_rate 类型）；middle_rate 取最短往返十进制表示（Decimal(repr(float))）、最多 6 位小数；除以 unit 精确到 10 位；「No records found.」的 404 返回 None；其余错误码按设计；只用标准库 urllib，只接受 HTTPS 的 base_url
+      - 新建 tests/backend/test_fx_source.py：设计 §10 的录制响应逐字作为原样字符串常量（不另建夹具文件、不联网重录），覆盖设计 §7「BNM 解析」「双精度还原」「请求」三行；由录制派生的响应在用例里注明「派生自 2026-09-29 USD 录制」
+      - 拉取任务的四种结果（NEW_DRAFT、NO_NEW_QUOTE（含 QUOTE_CHANGED，按还原后的 rate 数值比较）、NO_QUOTE_FOR_DATE、FAILED）、BNM 草稿的 source_reference 与 observed_at、BNM 草稿不写审计，按设计；新建 tests/backend/test_fx_fetch.py 覆盖设计 §7「拉取幂等」「无记录」「BNM 更正同日价格」「不自动发布」四行与拉取记录写入抛错的回滚，并发拉取放在真 MySQL 上
+      - 配置 BILLING_FX_SOURCE、BILLING_FX_BNM_BASE_URL、BILLING_FX_CURRENCIES（逗号分隔、大写三字母、不含 MYR）、BILLING_FX_FETCH_TIMEOUT_SECONDS 带校验，test_config.py 有用例；新任务模块加进 TASK_MODULES，Beat 一个条目 crontab(minute=30, hour="4,6,9")、expires 3600，test_celery.py 钉住
+      - docs/currency-and-fx.md 加 BNM 一节（端点与场次、双精度还原、「无记录」的含义、一天三次、在 worker 容器里手工触发的方法）；docs/TODO.md 新增 AIH-TASK-040 记录段
+      - 测试里的 uuid 用全零占位值（secret-scan）；除设计 §10 的录制外，汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
+    allowed_change_paths:
+      - app/core/fx_source.py
+      - app/core/config.py
+      - app/tasks/fx_fetch.py
+      - app/core/celery_app.py
+      - tests/backend/test_fx_source.py
+      - tests/backend/test_fx_fetch.py
       - tests/backend/test_celery.py
       - tests/backend/test_config.py
       - docs/currency-and-fx.md
-      - docs/adr/ADR-0005-fx-rate-source.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-041
+    title: 'FX rates 4/6 - admin FX rate API'
+    purpose: >-
+      按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v2）§11 的 F4，只做接口层：把 AIH-TASK-039 的服务接成管理端八个接口（版本列表、手工草稿、详情、改草稿、发布、退役、丢弃、拉取记录）。不改服务里的规则。
+    status: ready
+    depends_on:
+      - AIH-TASK-039
+    acceptance_criteria:
+      - 实现与设计 v2 §2「接口」（管理端）、「状态」表里的错误码与 §6 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 八个接口的路径、请求字段与错误码（404 / 409 / 422）按设计；rate 是 JSON 字符串、正则精确解析、最多 10 位小数、不经 float；effective_from 是带时区的 RFC 3339、换成 UTC 后必须整秒；fetch-attempts 路由先于 {fx_rate_id} 注册；分页照 §108；已发布再发布 200 不写且忽略 effective_from
+      - 每个处理函数第一条语句调用 require_admin，新路由加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；响应不含内部自增 id，发布人与创建人用登录邮箱
+      - 新建 tests/backend/test_fx_rates_api.py，覆盖设计 §7「手工录入与编辑」「精度」「鉴权」三行，每个错误码至少一个经 HTTP 的用例，外加一次经 HTTP 的发布与撤销预约
+      - docs/api.md 记八个接口；docs/TODO.md 新增 AIH-TASK-041 记录段
+      - 测试里的 uuid 用全零占位值（secret-scan），汇率一律用明显的虚构值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
+    allowed_change_paths:
+      - app/schemas/fx_rates.py
+      - app/api/admin_fx_rates.py
+      - app/main.py
+      - tests/backend/test_fx_rates_api.py
+      - tests/backend/test_admin_customers_api.py
       - docs/api.md
-      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-042
+    title: 'FX rates 5/6 - internal alert endpoint, fx_fetch and fx_stale'
+    purpose: >-
+      按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v2）§11 的 F5：带令牌的内部告警接口 GET /internal/alerts（纯文本、维度注册表）与 fx_fetch、fx_stale 两个维度；监控令牌的配置项与 compose secret 同一个任务（compose 用例要求每个 *_file 配置项都挂好）。不改 nginx：F6 加 location 之前，这个路径经 nginx 落到前端、不可达。
+    status: ready
+    depends_on:
+      - AIH-TASK-040
+    acceptance_criteria:
+      - 实现与设计 v2 §2「内部告警接口」（应用这一层）、「两个告警维度」、§5 令牌一行与 §6 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - GET /internal/alerts 不在 /api/ 下、不套 §107 信封，text/plain，每行「维度 OK|P1|P2 摘要」；维度注册表是 app/services/alerts.py 里的有序列表，每个维度一个只读查询函数；摘要不含租户、金额与个人数据
+      - 令牌按设计的令牌文件状态表：Settings 加 monitor_token_file；未配置 404 不记日志；读不出、是目录、去空白后少于 32 个字符都 404 并记不含路径的 ERROR；每次请求重读；Bearer 用常量时间比较，不对就 401、不说明原因；令牌判定先于任何数据库查询
+      - docker-compose.yml 声明 billing_monitor_token（file ./secrets/monitor.token，注释照 smtp 那一把写明缺文件时的实测行为），把 BILLING_MONITOR_TOKEN_FILE=/run/secrets/billing_monitor_token 写进后端环境并挂给后端，否则 test_every_credential_file_setting_is_wired_into_compose 变红
+      - 新建 tests/backend/test_internal_alerts.py，覆盖设计 §7「fx_fetch 维度」「fx_stale 维度」「告警接口访问控制」三行（冻结的吉隆坡日期，含跨月）
+      - docs/api.md 记告警接口（机器接口、不套信封、行格式、两层访问控制）；docs/TODO.md 新增 AIH-TASK-042 记录段
+      - 测试里的 uuid 用全零占位值（secret-scan）；令牌用明显的测试值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
+    allowed_change_paths:
+      - app/services/alerts.py
+      - app/api/internal_alerts.py
+      - app/core/config.py
+      - app/main.py
+      - docker-compose.yml
+      - tests/backend/test_internal_alerts.py
+      - tests/backend/test_compose.py
+      - docs/api.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-043
+    title: 'FX rates 6/6 - nginx, monitor.sh, config snapshot and runbook'
+    purpose: >-
+      按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v2）§11 的 F6，只做部署与告警接线：nginx 放行 /internal/alerts（与 /readyz 同一份名单）并拒绝 /internal/ 其余路径；monitor.sh 按行推 Healthchecks；config_snapshot.sh 按键名模式自查心跳地址；部署与运维文档、ADR-0005 收口。不改应用代码。
+    status: ready
+    depends_on:
+      - AIH-TASK-042
+    acceptance_criteria:
+      - 实现与设计 v2 §2「内部告警接口」的 nginx 一层、「两个告警维度」里的 monitor.sh 一段、「deploy/config_snapshot.sh」一段与 §8「合并后的运维步骤」逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - nginx：location = /internal/alerts 的 allow 名单与 /readyz 相同、其余 deny、代理到 API；另加 location /internal/ { deny all; }；tests/backend/test_compose.py 钉住两份名单一致
+      - monitor.sh 新增 check_alerts：令牌文件的宿主机路径取 .env 的 BILLING_MONITOR_TOKEN_HOST_FILE（字面解析，不 source）；逐行解析，每个维度用 BILLING_HEALTHCHECK_ALERT_<维度大写>_URL 推一个检查；缺地址只记日志；接口不通或非 200 时不推；复核一并覆盖；tests/backend/test_deploy.py 静态钉住；按 monitor.sh 既有方式做设计 §7 的本地演练，结果写进任务记录，环境里跑不了就如实写明
+      - config_snapshot.sh 的心跳地址自查改为从 .env 取所有匹配 ^BILLING_HEALTHCHECK_[A-Z0-9_]*_URL= 的键，删掉手写清单；自查仍在加密之前；test_deploy.py 的对应用例同步改
+      - docs/deployment.md 与 docs/runbook.md 写设计 §8 的合并后运维步骤（令牌文件与 .env 的 BILLING_MONITOR_TOKEN_HOST_FILE、两个检查及其 BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL / …_FX_STALE_URL、手工触发一次拉取、发布第一个汇率）与 FX 故障处理（拉取失败、无记录、过期、发布错了的退役与补发）；docs/adr/ADR-0005-fx-rate-source.md 收口条件旁注明两条告警已落地、过期阈值按 Kelvin 2026-09-29 的决定为 5 个日历日；docs/TODO.md 新增 AIH-TASK-043 记录段
+      - 不写任何真实主机名、IP、凭据或心跳地址；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #183'
+    allowed_change_paths:
+      - deploy/nginx/billing.conf
+      - deploy/monitor.sh
+      - deploy/config_snapshot.sh
+      - tests/backend/test_compose.py
+      - tests/backend/test_deploy.py
       - docs/deployment.md
       - docs/runbook.md
+      - docs/adr/ADR-0005-fx-rate-source.md
       - docs/TODO.md
     # MXC 里能跑的五项；tests.backend 只在 CI。
     allowed_commands:
@@ -1833,7 +2072,7 @@ tasks:
       按 docs/design/AIH-TASK-029-usage-ingest.md（设计闸门 #176 已批准 v8）实现 POST /api/v1/integration/usage-events：读原始体 → 验签（AIH-TASK-012 的库）→ Redis nonce（不可用放行）→ 按校验顺序校验（event_id 限 UUIDv7 / ULID，usage_type 查表、未知 409 可重试，按上报形态校验）→ 归属比对 → 指纹 → 插入优先，RECEIVED 提交后才 202；合法重复 200，冲突 409 写只增冲突表与审计；每个错误响应带固定的 retryable。迁移 0016 建 usage_events（含可空的 provider_id / model_id）与 usage_event_conflicts；nginx 为集成前缀返回 JSON 413；冲突告警维度。不计费、不入队、无批量端点。
     status: ready
     depends_on:
-      - AIH-TASK-028
+      - AIH-TASK-043
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-029-usage-ingest.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - '迁移文件名 alembic/versions/20260929_0016_usage_events.py，down_revision 指向 0015；usage_events 与 usage_event_conflicts 的列、NOT NULL（设计逐列列出）、CHECK（形态与字段组的显式条件、整数数量、非负）、复合外键（(integration_credential_id, project_id, tenant_id)、(project_id, tenant_id)、(usage_meter_type_id, payload_shape, unit, quantity_kind)、(model_id, provider_id)）、唯一约束、索引与冲突表只增触发器按设计 §2；给 integration_credentials 加 UNIQUE (id, project_id, tenant_id)、给 usage_meter_types 加 UNIQUE (id, payload_shape, unit, quantity_kind)（只新增索引，模型声明同步）；文件头有 §132 第 13 条分析；alembic/env.py 加 import'
@@ -1974,7 +2213,7 @@ tasks:
       按 docs/design/AIH-TASK-031-pricing-engine.md（设计闸门 #179 已批准 v1）实现计价：专用 50 位 Decimal 上下文下的纯函数 price_event（MARKUP / FIXED_RATE、各存储值从未舍入值只舍入一次、MYR 原币不查汇率）、resolve_charge_inputs（按 025 / 026 / 027 / 028 的契约取模型、价格、汇率、规则与锁，错误按顺序给细分码）、reprice_from_snapshot，以及只读的 POST /api/v1/admin/pricing-preview。无迁移、不写库。
     status: ready
     depends_on:
-      - AIH-TASK-028
+      - AIH-TASK-039
     acceptance_criteria:
       - 实现与 docs/design/AIH-TASK-031-pricing-engine.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - '算法、上下文（prec = 50、ROUND_HALF_UP、陷阱全关、localcontext 包住）、舍入位置（只经 quantize_money）、MYR 原币、计费额可为 0、溢出抛 ChargeOverflow，全部按设计 §2；计价模块里没有 float(、没有 ROUND_HALF_EVEN（静态检查用例）'
@@ -2217,7 +2456,7 @@ tasks:
       管理端前端：AIH-TASK-025 目录接口的页面 —— 计量类型（列表含分量、新建 QUANTITY 类型、改名与停用）、供应商（列表、新建、改名与停用）、供应商详情（模型列表 / 新建 / 改名与停用；别名的当前与历史段、映射、撤销）。新建 features/catalog/，顶栏菜单加一项。只做前端，外加验收脚本的两个只读步骤。
     status: ready
     depends_on:
-      - AIH-TASK-028
+      - AIH-TASK-043
     acceptance_criteria:
       - 接口以 docs/api.md 对应小节为准（由后端任务写）；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件
       - API 函数写法沿用 frontend/src/api/adminCustomers.ts（client / apiGet / ApiError）；省略的可选参数不出现在查询串或请求体里
