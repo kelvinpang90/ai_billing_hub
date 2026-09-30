@@ -99,6 +99,9 @@ _TRIGGERS = {
     "trg_fx_fetch_attempts_before_update",
     "trg_fx_fetch_attempts_before_delete",
 }
+# Migration 0016 (AIH-TASK-045): the lock tables' BEFORE UPDATE. Downgrading to 0014 drops them
+# too — the fx one with its table, the pricing one by 0016's downgrade.
+_TRIGGERS_0016 = {"trg_pricing_rule_locks_before_update", "trg_fx_rate_locks_before_update"}
 
 _INSERT_VERSION = text(
     "INSERT INTO fx_rate_versions (public_id, base_currency, quote_currency, rate, source,"
@@ -1025,16 +1028,17 @@ def _tables_triggers_and_locks() -> tuple[set[str], set[str], list[int] | None]:
 
 
 def test_upgrade_and_downgrade(alembic_config: Config) -> None:
-    """Downgrading to 0014 drops the three tables and their triggers and nothing else;
-    upgrading again builds them with exactly one lock row."""
+    """Downgrading to 0014 drops the three tables and their triggers, and 0016's two lock
+    table triggers, and nothing else; upgrading again builds them with exactly one lock row."""
     try:
         tables, triggers, locks = _tables_triggers_and_locks()
         assert _TABLES <= tables
-        assert _TRIGGERS <= triggers
+        assert _TRIGGERS | _TRIGGERS_0016 <= triggers
         assert locks == [1]
 
         command.downgrade(alembic_config, "0014_pricing_rules")
-        assert _tables_triggers_and_locks() == (tables - _TABLES, triggers - _TRIGGERS, None)
+        dropped = _TRIGGERS | _TRIGGERS_0016
+        assert _tables_triggers_and_locks() == (tables - _TABLES, triggers - dropped, None)
 
         command.upgrade(alembic_config, "head")
         assert _tables_triggers_and_locks() == (tables, triggers, [1])

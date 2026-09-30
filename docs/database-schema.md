@@ -583,6 +583,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | --- | --- |
 | `trg_pricing_rule_locks_before_insert` | 表里已有一行时拒绝 |
 | `trg_pricing_rule_locks_before_delete` | 一律拒绝 |
+| `trg_pricing_rule_locks_before_update` | BEFORE UPDATE（迁移 0016，一律拒绝）：不许把锁行改走（改 `id`、`SET id = 1` 这种不改值的写法都拒绝），否则 ④ 的 `WHERE id = 1 FOR UPDATE` 会静默锁不到行（AIH-TASK-045，设计闸门 #200 v1）；错误文本与上两个相同。锁定读不是 UPDATE，不触发 |
 | `trg_pricing_rules_before_insert` | `status` 不是 `DRAFT` 就拒绝：规则只能以草稿进入，发布跃迁上的检查因此绕不过去 |
 | `trg_pricing_rules_before_update` | ① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（设计 §4 的状态表；不许直接 `DRAFT → RETIRED` 绕过 ③）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；③ `DRAFT → PUBLISHED` 且 `FIXED_RATE` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁），再查同一 `scope_key` 里是否有另一个**非空区间**的已发布规则与本行相交，有就拒绝；空区间不参与判定；⑤ 同一把锁内，`DRAFT → PUBLISHED` 且 `effective_from` 为空时：只许 `GLOBAL` 范围、且该范围没有任何 `PUBLISHED` / `RETIRED` 行（含撤销的预约留下的空区间），否则拒绝（v4：「一直以来」只给全局默认的第一条） |
 | `trg_pricing_rules_before_delete` | 一律拒绝 |
@@ -698,6 +699,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | --- | --- |
 | `trg_fx_rate_locks_before_insert` | 表里已有一行时拒绝 |
 | `trg_fx_rate_locks_before_delete` | 一律拒绝 |
+| `trg_fx_rate_locks_before_update` | BEFORE UPDATE（迁移 0016，一律拒绝）：不许把锁行改走（改 `id`、`SET id = 1` 这种不改值的写法都拒绝），否则 ⑤ 的 `WHERE id = 1 FOR UPDATE` 会静默锁不到行（AIH-TASK-045，设计闸门 #200 v1）；错误文本与上两个相同。锁定读不是 UPDATE，不触发 |
 | `trg_fx_rate_versions_before_insert` | `status` 不是 `DRAFT` 就拒绝：版本只能经「草稿 → 发布」进入已发布，发布跃迁上的检查因此绕不过去 |
 | `trg_fx_rate_versions_before_update` | ① `RETIRED`、`DISCARDED` 的行拒绝任何改动（v2 收紧：`RETIRED` 的尽头也不许改，否则能把已退役版本的尽头清空或改短）；② 草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（不许直接 `DRAFT → RETIRED`）；③ `DRAFT → PUBLISHED` 时 `effective_to` 必须为空（新发布的版本永远是时间线末尾、未截断）；④ `PUBLISHED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；⑤ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM fx_rate_locks WHERE id = 1 FOR UPDATE`，本行为空区间时到此为止，否则查同一币种对里是否有另一个**非空区间**的 `PUBLISHED` / `RETIRED` 版本与本行相交，有就拒绝 |
 | `trg_fx_rate_versions_before_delete` | 一律拒绝 |
