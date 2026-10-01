@@ -13,16 +13,22 @@ onto four rows of design §7:
   `E ≤ t` is asserted on the way. The seed is fixed: a failure replays the same sequence;
 - **发布与计费并发** — `test_billing_waits_for_an_uncommitted_publish` (publish first) and
   `test_a_publish_waits_for_an_uncommitted_billing_run` (billing first);
-- **快照读陷阱（计费侧）** — `test_billing_reads_past_its_transaction_snapshot`;
-- **快照读陷阱（发布侧）** — `test_a_waiting_publish_computes_from_the_version_it_waited_for`
-  (P2 truncates the version just published, or P3's 409).
+- **快照读陷阱（计费侧）** — `test_billing_reads_past_its_transaction_snapshot` (the publish
+  commits before billing asks for the lock) and
+  `test_a_publish_waits_for_a_billing_run_that_read_its_snapshot` (billing holds the lock first);
+- **快照读陷阱（发布侧）** — `test_a_waiting_publish_computes_from_the_version_it_waited_for`,
+  in both orders (`b-holds-the-lock`: P2 truncates the version just published, or P3's 409;
+  `c-holds-the-lock`: the other connection first, then P2 / P2 with F against it).
 
-The last four use two connections (plus a third that only looks at what is committed) on a real
-MySQL; each docstring states, for its order, who blocks until whose commit, which version is
-resolved, and that resolving again after the commit agrees.
+The serialisation cases use two connections (plus a third that only looks at what is committed)
+on a real MySQL; for each of the two orders of every row, a docstring states who blocks until
+whose commit (or that nothing blocks), which version is resolved, and that resolving again after
+the commit agrees.
 
 MySQL needs `BILLING_TEST_DATABASE_URL` pointing at a database that may be wiped; without it those
-cases skip — **a skip is not a pass**, CI sets it and treats a skip as a failure. Rates are
+cases skip — **a skip is not a pass**, CI sets it and treats a skip as a failure. As in every
+other MySQL test module here, the fixture brings that throwaway test database to alembic head
+before use; no other database is touched. Rates are
 fictional; no uuid literal is needed here (placeholders would be all zeros).
 """
 
@@ -40,6 +46,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import partial
 
 import pytest
 from alembic.config import Config
@@ -760,10 +767,14 @@ def test_a_publish_waits_for_an_uncommitted_billing_run(mysql_factory) -> None:
 def test_billing_reads_past_its_transaction_snapshot(mysql_factory) -> None:
     """Design §7「快照读陷阱（计费侧）」.
 
+    One order: the publish commits before billing asks for the lock (the other order is
+    `test_a_publish_waits_for_a_billing_run_that_read_its_snapshot`).
+
     The billing transaction first does plain reads — REPEATABLE READ fixes its snapshot there,
     with A `[NULL, NULL)` the only published version. Another connection publishes B and
     commits (A truncated at `t`). The billing transaction then takes the shared FX lock (it does
     not block: the publish has committed) and resolves. Expected:
+    - **blocking**: none — the publish has committed before the shared lock is asked for;
     - **the trap is real**: plain reads in the same transaction still show the snapshot (one
       published version, A untruncated);
     - **version**: resolving its `now` (past `t`) gives B, and the moment before the publish
@@ -802,6 +813,61 @@ def test_billing_reads_past_its_transaction_snapshot(mysql_factory) -> None:
     assert (fx.resolve(earlier), fx.resolve(now)) == (a, b)
 
 
+def test_a_publish_waits_for_a_billing_run_that_read_its_snapshot(mysql_factory) -> None:
+    """Design §7「快照读陷阱（计费侧）」, the other order: billing takes the lock first.
+
+    The billing transaction does plain reads first (snapshot: A `[NULL, NULL)` the only
+    published version), then takes the shared FX lock and resolves; only then does another
+    connection publish B. Expected:
+    - **blocking**: the publish blocks on the FX lock until the billing run commits; nothing of B
+      is committed meanwhile;
+    - **version**: the billing run resolves its `now` to A `[NULL, NULL)` — the latest commit,
+      which here is also its snapshot: plain and locking reads agree, before and while the
+      publish waits; B's `t` is later than the billing commit (taken after the lock), so the
+      billed moment stays A's;
+    - **again after the commit**: the billed moment still resolves to A (now ending at `t`), and
+      `t` to B.
+    """
+    fx = Fx(mysql_factory, utc_now)
+    a = fx.publish_new()
+    b = fx.draft()
+    is_published = FxRateVersion.status == FxRateStatus.PUBLISHED
+    counted = select(func.count()).select_from(FxRateVersion).where(is_published)
+    a_end = select(FxRateVersion.effective_to).where(FxRateVersion.public_id == a)
+    billing = mysql_factory()
+    try:
+        earlier = utc_now()
+        assert billing.execute(counted).scalar_one() == 1
+        assert billing.execute(a_end).scalar_one() is None
+
+        fx_repository.lock_fx_rates_shared(billing)
+        now = utc_now()
+        current = resolve_fx_rate(billing, "USD", now)
+        assert current is not None
+        assert (current.public_id, current.effective_from, current.effective_to) == (a, None, None)
+        assert public_id_of(resolve_fx_rate(billing, "USD", earlier)) == a
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            publishing = pool.submit(fx.publish, b)
+            with pytest.raises(TimeoutError):
+                publishing.result(timeout=2)
+            assert rows(mysql_factory) == {a: (PUBLISHED, None, None), b: (DRAFT, None, None)}
+            assert billing.execute(counted).scalar_one() == 1
+            assert billing.execute(a_end).scalar_one() is None
+            assert public_id_of(resolve_fx_rate(billing, "USD", now)) == a
+            before_commit = utc_now()
+            billing.commit()
+            new = publishing.result(timeout=30)
+    finally:
+        billing.close()
+
+    t = new.effective_from
+    assert t is not None
+    assert earlier <= now <= before_commit < t
+    assert rows(mysql_factory) == {a: (PUBLISHED, None, t), b: (PUBLISHED, t, None)}
+    assert (fx.resolve(earlier), fx.resolve(now), fx.resolve(t)) == (a, a, b)
+
+
 def snapshot_first(factory: sessionmaker[Session]) -> sessionmaker[Session]:
     """Sessions that fix their REPEATABLE READ snapshot with a plain read before anything else.
 
@@ -828,38 +894,61 @@ def publish_audit(factory: sessionmaker[Session], public_id: str) -> tuple[dict,
 
 
 @pytest.mark.parametrize("snapshot_before_the_lock", [False, True], ids=["as-is", "snapshot"])
-@pytest.mark.parametrize("first_reserves", [False, True], ids=["p2", "p3-409"])
+@pytest.mark.parametrize("b_reserves", [False, True], ids=["b-now", "b-reserves"])
+@pytest.mark.parametrize("b_first", [True, False], ids=["b-holds-the-lock", "c-holds-the-lock"])
 def test_a_waiting_publish_computes_from_the_version_it_waited_for(
-    mysql_factory, monkeypatch, first_reserves: bool, snapshot_before_the_lock: bool
+    mysql_factory, monkeypatch, b_first: bool, b_reserves: bool, snapshot_before_the_lock: bool
 ) -> None:
-    """Design §7「快照读陷阱（发布侧）」.
+    """Design §7「快照读陷阱（发布侧）」, both orders.
 
-    A `[NULL, NULL)` is in effect. Connection 1 publishes B — without a time (`p2`), or as a
-    reservation a day ahead (`p3-409`) — and holds the FX lock with its writes uncommitted.
-    Connection 2 then publishes C without a time; in `snapshot` its transaction has already
-    fixed a snapshot in which B is a draft and A is untruncated. Expected:
+    A `[NULL, NULL)` is in effect. Two connections publish: B — without a time (`b-now`), or as
+    a reservation a day ahead (`b-reserves`) — and C without a time. The first holds the FX lock
+    with its writes uncommitted while the second asks for it; in `snapshot` the second's
+    transaction has already fixed a snapshot in which the first's version is a draft and A is
+    untruncated.
+
+    `b-holds-the-lock` (B first, C waits). Expected:
     - **blocking**: C's publish blocks on the FX lock until B's commits; nothing is visible
       meanwhile;
-    - **version**: C is placed against the new L = B, never against A — `p2`: P2 truncates B at
-      C's `t` (≥ 2 s after B's), C `[t, NULL)`, and C's audit names B as the truncated version;
-      `p3-409`: L = B has not started, so 409 `EFFECTIVE_FROM_CONFLICT` and C stays a draft;
-    - **recheck**: the committed periods pass design §2「事务内复查」; resolving afterwards
-      agrees with the rows.
+    - **version**: C is placed against the new L = B, never against A — `b-now`: P2 truncates B
+      at C's `t` (≥ 2 s after B's), C `[t, NULL)`, and C's audit names B as the truncated
+      version; `b-reserves`: L = B has not started, so 409 `EFFECTIVE_FROM_CONFLICT` and C stays
+      a draft.
+
+    `c-holds-the-lock` (C first, B waits). Expected:
+    - **blocking**: B's publish blocks on the FX lock until C's commits; nothing is visible
+      meanwhile;
+    - **version**: B is placed against the new L = C (started, untruncated), never against A —
+      `b-now`: P2 truncates C at B's `t` (≥ 2 s after C's); `b-reserves`: P2 with F truncates C
+      at the reservation; B `[its start, NULL)` either way, and B's audit names C as the
+      truncated version.
+
+    Either order, **again after the commit**: the committed periods pass design §2「事务内复查」,
+    and resolving agrees with the rows — a moment before both publishes is still A's.
     """
     fx = Fx(mysql_factory, utc_now)
     a = fx.publish_new()
     b = fx.draft()
     c = fx.draft()
-    reservation = (utc_now() + DAY).replace(microsecond=0) if first_reserves else None
+    reservation = (utc_now() + DAY).replace(microsecond=0) if b_reserves else None
     waiting = snapshot_first(mysql_factory) if snapshot_before_the_lock else mysql_factory
     earlier = utc_now()
     pause = PauseFirstAudit(monkeypatch)
+    if b_first:
+        first_id, second_id = b, c
+        first_call = partial(fx.publish, b, reservation)
+        second_call = partial(fx.publish, c, None, factory=waiting)
+    else:
+        first_id, second_id = c, b
+        first_call = partial(fx.publish, c)
+        second_call = partial(fx.publish, b, reservation, factory=waiting)
+    refused = b_first and b_reserves
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         try:
-            first = pool.submit(fx.publish, b, reservation)
+            first = pool.submit(first_call)
             assert pause.written.wait(timeout=30)
-            second = pool.submit(fx.publish, c, None, factory=waiting)
+            second = pool.submit(second_call)
             with pytest.raises(TimeoutError):
                 second.result(timeout=2)
             assert rows(mysql_factory) == {
@@ -869,34 +958,41 @@ def test_a_waiting_publish_computes_from_the_version_it_waited_for(
             }
         finally:
             pause.release.set()
-        published_b = first.result(timeout=30)
-        if first_reserves:
+        published_first = first.result(timeout=30)
+        if refused:
             with pytest.raises(EffectiveFromConflict):
                 second.result(timeout=30)
         else:
-            published_c = second.result(timeout=30)
+            published_second = second.result(timeout=30)
 
-    b_start = published_b.effective_from
-    assert b_start is not None
-    if first_reserves:
-        assert b_start == reservation
+    first_start = published_first.effective_from
+    assert first_start is not None
+    if refused:
+        assert first_start == reservation
         assert rows(mysql_factory) == {
-            a: (PUBLISHED, None, b_start),
-            b: (PUBLISHED, b_start, None),
+            a: (PUBLISHED, None, first_start),
+            b: (PUBLISHED, first_start, None),
             c: (DRAFT, None, None),
         }
     else:
-        c_start = published_c.effective_from
-        assert c_start is not None
-        assert b_start + SECOND < c_start
+        second_start = published_second.effective_from
+        assert second_start is not None
+        assert first_start + SECOND < second_start
+        if b_reserves:
+            assert second_start == reservation
         assert rows(mysql_factory) == {
-            a: (PUBLISHED, None, b_start),
-            b: (PUBLISHED, b_start, c_start),
-            c: (PUBLISHED, c_start, None),
+            a: (PUBLISHED, None, first_start),
+            first_id: (PUBLISHED, first_start, second_start),
+            second_id: (PUBLISHED, second_start, None),
         }
-        before, after = publish_audit(mysql_factory, c)
-        assert before["truncated_version"] == {"id": b, "effective_to": None}
-        assert after["truncated_version"] == {"id": b, "effective_to": c_start.isoformat()}
-        assert (fx.resolve(b_start), fx.resolve(c_start)) == (b, c)
+        before, after = publish_audit(mysql_factory, second_id)
+        assert before["truncated_version"] == {"id": first_id, "effective_to": None}
+        assert after["truncated_version"] == {
+            "id": first_id,
+            "effective_to": second_start.isoformat(),
+        }
+        assert (fx.resolve(first_start), fx.resolve(second_start - MICRO)) == (first_id, first_id)
+        if not b_reserves:
+            assert fx.resolve(second_start) == second_id
     recheck(mysql_factory)
     assert fx.resolve(earlier) == a
