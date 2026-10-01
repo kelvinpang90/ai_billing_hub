@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import uuid
+from decimal import Decimal
 
 import pytest
 from fastapi import FastAPI
@@ -39,6 +40,7 @@ from app.models.ai_catalog import (
 )
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
+from app.models.fx_rates import FxFetchAttempt, FxRateSourceType, FxRateStatus, FxRateVersion
 from app.models.integration import IntegrationCredential, ProjectWebhookSecret
 from app.models.pricing_rules import (
     PricingRule,
@@ -85,7 +87,7 @@ ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
 # 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态、
 # AIH-TASK-022 的审计日志查询、AIH-TASK-025 的十五个 AI 目录接口、AIH-TASK-026 的七个供应商价格
-# 接口、AIH-TASK-027 的七个定价规则接口。
+# 接口、AIH-TASK-027 的七个定价规则接口、AIH-TASK-041 的八个汇率接口。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
@@ -99,6 +101,8 @@ PRICES_ROUTE = "/api/v1/admin/provider-prices"
 PRICE_ROUTE = PRICES_ROUTE + "/{price_version_id}"
 RULES_ROUTE = "/api/v1/admin/pricing-rules"
 RULE_ROUTE = RULES_ROUTE + "/{rule_id}"
+FX_RATES_ROUTE = "/api/v1/admin/fx-rates"
+FX_RATE_ROUTE = FX_RATES_ROUTE + "/{fx_rate_id}"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -147,6 +151,14 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", RULE_ROUTE + "/publish"),
     ("POST", RULE_ROUTE + "/retire"),
     ("POST", RULE_ROUTE + "/discard"),
+    ("GET", FX_RATES_ROUTE),
+    ("POST", FX_RATES_ROUTE),
+    ("GET", FX_RATES_ROUTE + "/fetch-attempts"),
+    ("GET", FX_RATE_ROUTE),
+    ("PATCH", FX_RATE_ROUTE),
+    ("POST", FX_RATE_ROUTE + "/publish"),
+    ("POST", FX_RATE_ROUTE + "/retire"),
+    ("POST", FX_RATE_ROUTE + "/discard"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -218,6 +230,18 @@ VALID_BODIES = {
     ("POST", RULE_ROUTE + "/publish"): {},
     ("POST", RULE_ROUTE + "/retire"): {"reason": "Probe"},
     ("POST", RULE_ROUTE + "/discard"): {},
+    # 汇率（AIH-TASK-041）：预置的是一份手工草稿，漏了鉴权的建、改、发布、丢弃会真的多出行或
+    # 改掉它；退役一份草稿本应 409，同样过不了 401 / 403。汇率是明显的虚构值。
+    ("POST", FX_RATES_ROUTE): {
+        "base_currency": "EUR",
+        "rate": "1.2345678901",
+        "observed_at": "2026-09-29T04:00:00Z",
+        "source_reference": "Probe",
+    },
+    ("PATCH", FX_RATE_ROUTE): {"source_reference": "Renamed"},
+    ("POST", FX_RATE_ROUTE + "/publish"): {},
+    ("POST", FX_RATE_ROUTE + "/retire"): {"reason": "Probe"},
+    ("POST", FX_RATE_ROUTE + "/discard"): {},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -377,6 +401,8 @@ COUNTED_MODELS = (
     ProviderPriceComponent,
     PricingRule,
     PricingRuleComponent,
+    FxRateVersion,
+    FxFetchAttempt,
 )
 
 
@@ -384,7 +410,8 @@ def row_counts(application: FastAPI) -> dict[str, int]:
     """账本与出站事件也数进来：调账接口漏了鉴权的话，这两张表会多行（AIH-TASK-011）。
 
     凭据表（AIH-TASK-012）、出站签名密钥表（AIH-TASK-019）、AI 目录的五张表（AIH-TASK-025）、
-    供应商价格的两张表（AIH-TASK-026）与定价规则的两张表（AIH-TASK-027）同理。
+    供应商价格的两张表（AIH-TASK-026）、定价规则的两张表（AIH-TASK-027）与汇率的两张表
+    （AIH-TASK-041）同理。
     """
     with application.state.session_factory() as session:
         return {model.__tablename__: count_rows(session, model) for model in COUNTED_MODELS}
@@ -408,6 +435,8 @@ NO_ROWS = {
     "provider_price_components": 0,
     "pricing_rules": 0,
     "pricing_rule_components": 0,
+    "fx_rate_versions": 0,
+    "fx_fetch_attempts": 0,
 }
 
 
@@ -579,6 +608,22 @@ def probe_catalog(application: FastAPI) -> None:
                 created_at=now,
             )
         )
+        # 一份手工汇率草稿（AIH-TASK-041）：漏了鉴权的改、发布、丢弃会真的改它。虚构的汇率。
+        session.add(
+            FxRateVersion(
+                public_id=PROBE_CATALOG_ID,
+                base_currency="EUR",
+                quote_currency="MYR",
+                rate=Decimal("1.2345678901"),
+                source=FxRateSourceType.MANUAL,
+                source_reference="Probe",
+                observed_at=now,
+                status=FxRateStatus.DRAFT,
+                created_by=version.created_by,
+                created_at=now,
+                updated_at=now,
+            )
+        )
         session.commit()
 
 
@@ -611,9 +656,18 @@ def stored_catalog(application: FastAPI) -> list[tuple]:
         PricingRule.updated_at,
     ).order_by(PricingRule.id)
     rule_rates = select(PricingRuleComponent.rate_amount).order_by(PricingRuleComponent.id)
+    # 汇率（AIH-TASK-041）：汇率、出处、状态、区间与 `updated_at`。
+    fx = select(
+        FxRateVersion.rate,
+        FxRateVersion.source_reference,
+        FxRateVersion.status,
+        FxRateVersion.effective_from,
+        FxRateVersion.effective_to,
+        FxRateVersion.updated_at,
+    ).order_by(FxRateVersion.id)
     stored: list[tuple] = []
     with application.state.session_factory() as session:
-        for statement in [*editable, segments, versions, rates, rules, rule_rates]:
+        for statement in [*editable, segments, versions, rates, rules, rule_rates, fx]:
             stored += [tuple(row) for row in session.execute(statement)]
     return stored
 
@@ -741,6 +795,7 @@ def test_every_admin_route_refuses_non_admins(
         "alias_id",
         "price_version_id",
         "rule_id",
+        "fx_rate_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     headers = {} if caller == "anonymous" else customer_headers(app)

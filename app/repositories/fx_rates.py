@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import Select, or_, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.auth import User
@@ -31,6 +31,8 @@ from app.models.fx_rates import (
     FX_RATE_LOCK_ID,
     PERIOD_STATUSES,
     QUOTE_CURRENCY,
+    FxFetchAttempt,
+    FxFetchOutcome,
     FxRateLock,
     FxRateSourceType,
     FxRateStatus,
@@ -119,6 +121,85 @@ def user_emails(
         return {}
     statement = select(User.id, User.email).where(User.id.in_(ids))
     return {row.id: row.email for row in session.execute(_locked(statement, lock))}
+
+
+# --- 管理端只读查询（AIH-TASK-041） -------------------------------------------------
+# 普通读，不拿 FX 锁：只展示，不参与区间计算（设计 §2「接口」）。
+
+
+def _page[T](
+    session: Session, statement: Select[tuple[T]], *, offset: int, limit: int
+) -> tuple[list[T], int]:
+    # 边界由接口层校验（422）；这里只挡住调用方写错。
+    if offset < 0:
+        raise ValueError("offset must not be negative")
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    total = session.execute(select(func.count()).select_from(statement.subquery())).scalar_one()
+    rows = session.execute(statement.offset(offset).limit(limit)).scalars().all()
+    return list(rows), int(total)
+
+
+def list_versions(
+    session: Session,
+    *,
+    base_currency: str | None,
+    status: FxRateStatus | None,
+    source: FxRateSourceType | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[FxRateVersion], int]:
+    """One page, newest first (`id` descending; 设计 v3); the total."""
+    statement = select(FxRateVersion)
+    if base_currency is not None:
+        statement = statement.where(FxRateVersion.base_currency == base_currency)
+    if status is not None:
+        statement = statement.where(FxRateVersion.status == status)
+    if source is not None:
+        statement = statement.where(FxRateVersion.source == source)
+    statement = statement.order_by(FxRateVersion.id.desc())
+    return _page(session, statement, offset=offset, limit=limit)
+
+
+@dataclass(frozen=True)
+class FetchAttemptRow:
+    """A fetch attempt with the `public_id` of the draft it wrote (`NEW_DRAFT` only)."""
+
+    attempt: FxFetchAttempt
+    fx_rate_public_id: str | None
+
+
+def list_fetch_attempts(
+    session: Session,
+    *,
+    base_currency: str | None,
+    outcome: FxFetchOutcome | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[FetchAttemptRow], int]:
+    """One page by `attempted_at`, then `id`, both descending (设计 v3); the total."""
+    statement = select(FxFetchAttempt)
+    if base_currency is not None:
+        statement = statement.where(FxFetchAttempt.base_currency == base_currency)
+    if outcome is not None:
+        statement = statement.where(FxFetchAttempt.outcome == outcome)
+    statement = statement.order_by(FxFetchAttempt.attempted_at.desc(), FxFetchAttempt.id.desc())
+    attempts, total = _page(session, statement, offset=offset, limit=limit)
+    version_ids = sorted(
+        {row.fx_rate_version_id for row in attempts if row.fx_rate_version_id is not None}
+    )
+    public_ids: dict[int, str] = {}
+    if version_ids:
+        found = select(FxRateVersion.id, FxRateVersion.public_id).where(
+            FxRateVersion.id.in_(version_ids)
+        )
+        public_ids = {row.id: row.public_id for row in session.execute(found)}
+    # 只有 `NEW_DRAFT` 指向草稿；其余的 `fx_rate_version_id` 为空，取到 None。
+    rows = [
+        FetchAttemptRow(attempt=row, fx_rate_public_id=public_ids.get(row.fx_rate_version_id))
+        for row in attempts
+    ]
+    return rows, total
 
 
 # --- 区间 -------------------------------------------------------------------------
@@ -307,9 +388,12 @@ def resolve_fx_rate(
 
 
 __all__ = [
+    "FetchAttemptRow",
     "ResolvedFxRate",
     "get_version",
     "insert_manual_draft",
+    "list_fetch_attempts",
+    "list_versions",
     "lock_fx_rates",
     "lock_fx_rates_shared",
     "mark_discarded",

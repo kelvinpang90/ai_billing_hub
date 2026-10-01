@@ -45,6 +45,7 @@ from app.models.fx_rates import (
     RATE_PRECISION,
     RATE_SCALE,
     SOURCE_REFERENCE_LENGTH,
+    FxFetchOutcome,
     FxRateSourceType,
     FxRateStatus,
     FxRateVersion,
@@ -642,11 +643,95 @@ def retire(
     return view
 
 
+# --- 查询（AIH-TASK-041）：普通读，不拿 FX 锁 -------------------------------------------
+
+
+@dataclass(frozen=True)
+class FxFetchAttemptView:
+    """One BNM fetch attempt. No id of its own: read-only, never referenced singly (设计 v3)."""
+
+    base_currency: str
+    source: FxRateSourceType
+    requested_date: dt.date
+    outcome: FxFetchOutcome
+    quote_date: dt.date | None
+    error_code: str | None
+    # `NEW_DRAFT` 时是那条草稿的 public_id，否则为空。
+    fx_rate_id: str | None
+    attempted_at: dt.datetime
+
+
+def _offset(page: int, page_size: int) -> int:
+    return (page - 1) * page_size
+
+
+def get_fx_rate(session_factory: sessionmaker[Session], fx_rate_id: str) -> FxRateVersionView:
+    """Unknown: 404 `FX_RATE_NOT_FOUND`. A plain read: no FX lock (设计 §2「接口」)."""
+    with session_factory() as session:
+        return _view(session, _require_version(session, fx_rate_id))
+
+
+def list_fx_rates(
+    session_factory: sessionmaker[Session],
+    *,
+    base_currency: str | None,
+    status: FxRateStatus | None,
+    source: FxRateSourceType | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[FxRateVersionView], int]:
+    """Versions newest first (`id` descending), one page, and the total. No FX lock."""
+    with session_factory() as session:
+        rows, total = rates.list_versions(
+            session,
+            base_currency=base_currency,
+            status=status,
+            source=source,
+            offset=_offset(page, page_size),
+            limit=page_size,
+        )
+        return [_view(session, row) for row in rows], total
+
+
+def list_fetch_attempts(
+    session_factory: sessionmaker[Session],
+    *,
+    base_currency: str | None,
+    outcome: FxFetchOutcome | None,
+    page: int,
+    page_size: int,
+) -> tuple[list[FxFetchAttemptView], int]:
+    """Attempts by `attempted_at`, then `id`, both descending; one page and the total."""
+    with session_factory() as session:
+        rows, total = rates.list_fetch_attempts(
+            session,
+            base_currency=base_currency,
+            outcome=outcome,
+            offset=_offset(page, page_size),
+            limit=page_size,
+        )
+        views = [
+            FxFetchAttemptView(
+                base_currency=row.attempt.base_currency,
+                source=FxRateSourceType(row.attempt.source),
+                requested_date=row.attempt.requested_date,
+                outcome=FxFetchOutcome(row.attempt.outcome),
+                quote_date=row.attempt.quote_date,
+                error_code=row.attempt.error_code,
+                fx_rate_id=row.fx_rate_public_id,
+                attempted_at=row.attempt.attempted_at,
+            )
+            for row in rows
+        ]
+        return views, total
+
+
 __all__ = [
     "ENTITY_FX_RATE_VERSION",
     "Clock",
     "EffectiveFromConflict",
     "EffectiveFromInPast",
+    "FxFetchAttemptView",
     "FxPeriodsBroken",
     "FxRateFinal",
     "FxRateInvalid",
@@ -657,7 +742,10 @@ __all__ = [
     "FxRateVersionView",
     "create_draft",
     "discard_draft",
+    "get_fx_rate",
     "is_empty_period",
+    "list_fetch_attempts",
+    "list_fx_rates",
     "publish",
     "rate_text",
     "retire",
