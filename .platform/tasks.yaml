@@ -1948,7 +1948,7 @@ tasks:
     title: 'FX rates 3/6 - BNM fetch and Celery Beat'
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F3，只做后台任务：app/core/fx_source.py（FxRateSource Protocol、BNM 实现、build_fx_source 工厂）、四个 FX 配置项、app/tasks/fx_fetch.py（按吉隆坡当天日期拉取，外部调用在事务外，草稿与拉取记录同一事务）与一天三次的 Beat 条目。适配器按设计 §10 的 2026-09-30 实测写，测试用设计里录制的响应，CI 不联网。不含接口与告警。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-039
     acceptance_criteria:
