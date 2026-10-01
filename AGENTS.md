@@ -632,6 +632,17 @@ Review 的目标是：
 
 ---
 
+# 23. 任务收尾
+
+任务完成后的收尾 PR 由 OpenClaw 自动开、CI 通过后自动合并、不触发部署，不经过你的审查（控制面 ACVDEV-TASK-066，2026-10-01 起）。
+
+- 收尾 PR 只含两处机械改动：`.platform/tasks.yaml` 里这个任务 `status: ready` 改成 `status: done`，从 `docs/TODO.md` planning-v1 的「当前计划」删掉这一项（其后序号减一）
+- `.platform/project.yaml` 的 `merge_owner: kelvin` 指 Worker 实现 PR 的合并由 Kelvin 在 Telegram「批准」；OpenClaw 的 run 仍然改不了 `.platform/`
+- 只有自动收尾失败（Telegram「自动收尾失败」通知）时才由人手工开收尾 PR；被要求审查这样的 PR 时，超出上面两处改动的内容作为阻断项指出
+- 交付不再另写记录：不要求 `.platform/README.md` 的状态句、`docs/TODO.md` 的交付记录或 `docs/REVIEW-LOG.md` 的交付行；交付事实以实现 PR、run 的「状态」时间线和收尾 PR 为准
+
+---
+
 # 核心原则
 
 **独立审查 · 只读验证 · 最小上下文 · 高信号 Finding · 证据充分即停止**

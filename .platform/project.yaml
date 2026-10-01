@@ -62,6 +62,10 @@ deploy_workflow: deploy.yml
 acceptance_hosts:
   - aibilling.acuventech.com
 
+# merge_owner：Worker 实现 PR 的合并由 Kelvin 在 Telegram「批准」。
+# 任务完成后的收尾 PR 不经这道批准：OpenClaw 自动开，只含 tasks.yaml 的 ready → done 与从 docs/TODO.md
+# 「当前计划」移除这一项两处机械改动，CI 通过后自动合并、不触发部署（ACVDEV-TASK-066）。OpenClaw 的 run
+# 仍然改不了 .platform/。只有自动收尾失败（Telegram「自动收尾失败」通知）时才由人手工开收尾 PR。
 roles:
   development_owner: claude_code
   independent_reviewer: codex
