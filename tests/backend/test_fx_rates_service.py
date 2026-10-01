@@ -30,6 +30,7 @@ import itertools
 import json
 import os
 import re
+import uuid
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 
@@ -60,7 +61,6 @@ OTHER_RATE = "2.2222222222"
 REFERENCE = "fictional rate for a service test"
 OBSERVED_AT = dt.datetime(2026, 9, 30, 4, 0, 0)
 MISSING_ID = "00000000-0000-0000-0000-000000000000"
-BNM_DRAFT_ID = "00000000-0000-0000-0000-000000000001"
 
 # Design §2: the examples' dates are all 2026-10-01 UTC; "次日 04:30" is 2026-10-02 04:30:00.
 NEXT_0430 = dt.datetime(2026, 10, 2, 4, 30, 0)
@@ -126,7 +126,7 @@ class Fx:
         assert isinstance(self.clock, Clock)
         self.clock.set(moment)
 
-    def draft(self, base: str = "USD", rate: str = FICTIONAL_RATE) -> str:
+    def create(self, base: str = "USD", rate: str = FICTIONAL_RATE) -> FxRateVersionView:
         return fx_rates.create_draft(
             self.factory,
             actor=self.admin,
@@ -136,7 +136,10 @@ class Fx:
             source_reference=REFERENCE,
             context=CONTEXT,
             clock=self.clock,
-        ).id
+        )
+
+    def draft(self, base: str = "USD", rate: str = FICTIONAL_RATE) -> str:
+        return self.create(base, rate).id
 
     def edit(
         self,
@@ -263,10 +266,11 @@ def refused(code: str, call: Callable[[], object]) -> None:
 def insert_bnm_draft(factory: sessionmaker[Session], base: str = "USD") -> str:
     """A draft as the BNM fetch (AIH-TASK-040) will write it: no creator, a quote date."""
     quote_date = dt.date(2026, 9, 30)
+    public_id = str(uuid.uuid4())
     with factory() as session:
         session.add(
             FxRateVersion(
-                public_id=BNM_DRAFT_ID,
+                public_id=public_id,
                 base_currency=base,
                 quote_currency="MYR",
                 rate=Decimal(FICTIONAL_RATE),
@@ -283,7 +287,7 @@ def insert_bnm_draft(factory: sessionmaker[Session], base: str = "USD") -> str:
             )
         )
         session.commit()
-    return BNM_DRAFT_ID
+    return public_id
 
 
 # --- the "before" of the examples ---------------------------------------------------------
@@ -771,7 +775,7 @@ def test_a_bnm_draft_cannot_be_edited_but_can_be_discarded(factory) -> None:
 def test_create_edit_and_discard_a_manual_draft(factory) -> None:
     fx = Fx(factory, Clock(at(9, 0, 0, 900_000)))
 
-    created = fx.draft("SGD", "1.1000000000")
+    created = fx.create("SGD", "1.1000000000")
 
     assert (created.status, created.source, created.base_currency) == (DRAFT, "MANUAL", "SGD")
     assert (created.quote_currency, created.rate, created.observed_at) == (
@@ -875,7 +879,7 @@ def test_a_manual_draft_outside_the_format_is_refused(factory, fields: dict) -> 
 def test_ten_decimal_places_are_kept_exactly(factory) -> None:
     fx = Fx(factory, Clock(at(9)))
 
-    created = fx.draft("JPY", "0.0259360001")
+    created = fx.create("JPY", "0.0259360001")
 
     assert created.rate == Decimal("0.0259360001")
 
