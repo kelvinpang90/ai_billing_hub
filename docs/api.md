@@ -11,6 +11,7 @@
 - [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥)与[状态 webhook 签名](#状态-webhook-签名)（AIH-TASK-019）
 - [管理端审计日志](#管理端审计日志)（AIH-TASK-022）
 - [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
+- [管理端汇率](#管理端汇率)（AIH-TASK-041）
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -1534,3 +1535,206 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
 计费事务里的顺序：`resolve_model`（供应商 S）→ `lock_pricing_rules_shared` → 价格与规则的加锁读 → 钱包 → 租户；返回
 的规则内部 id 写进事件快照（`pricing_rule_id`）。契约全文见设计 §2「对下游任务的契约」与 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的
 AIH-TASK-027 记录段。
+
+---
+
+## 管理端汇率
+
+设计依据：设计闸门 #183 `APPROVED: design v3`，全文见
+[design/AIH-TASK-028-fx-rates.md](design/AIH-TASK-028-fx-rates.md)（spec §17.1、§58、§74.2；ADR-0005）。规则层是
+AIH-TASK-039，接口层是 AIH-TASK-041（本节）。规则全文（时间线、P1–P4、R1–R5、锁顺序）见
+[currency-and-fx.md](currency-and-fx.md)。
+
+一个**汇率版本**是某个外币（`base_currency`）对 MYR 的一版汇率：`rate` = **1 单位 `base_currency` 等于多少 MYR**。
+来源是 BNM 自动拉取（每天三次，只写草稿）或管理员手工录入。状态 `DRAFT → PUBLISHED → RETIRED`，草稿也可以
+`DISCARDED`。已发布的版本在 `[effective_from, effective_to)` 内生效，同一币种的区间互不重叠、只在末尾追加；
+**汇率从发布时刻起生效，不从报价日起算**。自动拉取绝不发布：发布只经这里，由管理员手工做。**不含**用汇率算钱、
+内部告警接口与前端。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/admin/fx-rates` | — | 200，版本分页 | 401 / 403 / 422 / 503 |
+| `POST /api/v1/admin/fx-rates` | 见下 | 201，版本（草稿） | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/admin/fx-rates/fetch-attempts` | — | 200，拉取记录分页 | 401 / 403 / 422 / 503 |
+| `GET /api/v1/admin/fx-rates/{fx_rate_id}` | — | 200，版本 | 401 / 403 / 404 / 503 |
+| `PATCH /api/v1/admin/fx-rates/{fx_rate_id}` | 见下 | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/fx-rates/{fx_rate_id}/publish` | 见下 | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/fx-rates/{fx_rate_id}/retire` | `{"reason": …}` | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/fx-rates/{fx_rate_id}/discard` | `{}` | 200，版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+
+只有 ADMIN 能调（处理函数第一条语句就是鉴权）。路径里的 `fx_rate_id` 是版本的 `public_id`；响应里没有内部自增 id，
+人一律用登录邮箱表示。所有请求体都拒绝多余字段（422）。**没有删除接口**：草稿只能丢弃，版本行永不删除。
+`fetch-attempts` 先于 `{fx_rate_id}` 注册，不会被当成版本 id。
+
+**请求校验先于状态判断**：请求体与查询参数在看版本状态之前校验，格式不对一律 422，与版本是草稿、已发布还是不存在
+无关。**读接口（列表、详情、拉取记录）是普通读，不拿发布用的全局锁**：它们只展示，不参与区间计算，发布不必等它们。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `FX_RATE_NOT_FOUND` | 路径里的版本不存在 | 否 |
+| 409 | `FX_RATE_NOT_DRAFT` | 编辑或丢弃一个已发布的版本 | 否 |
+| 409 | `FX_RATE_NOT_EDITABLE` | 编辑 BNM 草稿（出处不同：要改就丢弃后手工录入） | 否 |
+| 409 | `FX_RATE_NOT_RETIRABLE` | 退役草稿（草稿用丢弃），或退役一个已被截断的已发布版本 | 否 |
+| 409 | `FX_RATE_FINAL` | 对已退役 / 已丢弃的版本做任何写操作 | 否 |
+| 409 | `EFFECTIVE_FROM_CONFLICT` | 末尾版本尚未开始时不指定时刻发布，或指定的时刻不晚于它的起点（见「发布」） | 否 |
+| 422 | `EFFECTIVE_FROM_IN_PAST` | 请求的生效时刻早于 `t`（不许回溯） | 否 |
+| 422 | `VALIDATION_ERROR` | 格式、精度、正数、时区、整秒、币种、多余字段；列表的 `status` / `source` / `outcome` 不是合法取值 | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误（含发布 / 退役后区间复查不通过、锁等待超时）；整个事务回滚 | 否 |
+
+### 字段规则
+
+| 字段 | 规则 |
+| --- | --- |
+| `base_currency` | 大写三字母 `^[A-Z]{3}$`（`usd` 是 422），不能是 `MYR`。**不限于** `BILLING_FX_CURRENCIES`：那是 BNM 自动拉取的范围，手工录入正是为 BNM 不覆盖的币种与日期准备的。建后不可改 |
+| `rate` | **只收 JSON 字符串**，正数，`^[0-9]{1,14}(\.[0-9]{1,10})?$`：JSON 数字、`0`、负号、正号、指数写法、逗号、空白一律 422；**超过 10 位小数是 422，不舍入**；精确解析，不经过浮点数 |
+| `observed_at` | 录入者给出的观测时刻。RFC 3339 且**必须带时区**（`2026-09-29T04:00:00Z`、`2026-09-29T12:00:00+08:00`）；换算成 UTC 后必须是整秒（`.000` 可以，`.5` 是 422）；存 UTC |
+| `source_reference` | 去首尾空白后 1–255：汇率出处（例如「某银行公告，查看于 2026-09-29」） |
+
+### 版本对象
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000000",
+  "base_currency": "USD",
+  "quote_currency": "MYR",
+  "rate": "1.2345678901",
+  "source": "MANUAL",
+  "source_reference": "Fictional bank notice, viewed 2026-09-29",
+  "source_quote_date": null,
+  "observed_at": "2026-09-29T04:00:00",
+  "status": "PUBLISHED",
+  "effective_from": "2026-09-29T08:30:01",
+  "effective_to": null,
+  "created_by_email": "admin@example.com",
+  "approved_by_email": "admin@example.com",
+  "approved_at": "2026-09-29T08:30:00",
+  "created_at": "2026-09-29T08:30:00",
+  "updated_at": "2026-09-29T08:30:00"
+}
+```
+
+（示例里的汇率是虚构值。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `rate` | 精确的十进制字符串，去掉末尾的 0（`"4.083"`，不是 `"4.0830000000"`），从不是 JSON 数字 |
+| `quote_currency` | 永远是 `MYR` |
+| `source` | `BNM`（自动拉取）或 `MANUAL`（手工录入） |
+| `source_reference` | BNM：`bnm:exchange-rate:<币种>:<报价日>:session=1200:middle_rate:unit=<n>`；手工：录入者写的出处 |
+| `source_quote_date` | BNM 的报价日（吉隆坡日期）；手工录入为 `null` |
+| `observed_at` | BNM：报价日 12:00 吉隆坡（= 04:00 UTC）；手工：录入者给出的时刻 |
+| `status` | `DRAFT` / `PUBLISHED` / `RETIRED` / `DISCARDED` |
+| `effective_from` | 草稿为 `null`；已发布时 `null` 只有一种含义：发布时该币种没有区间非空的已发布版本、且未指定生效时刻 =「一直以来」 |
+| `effective_to` | `null` = 仍生效（或尚未发布）。`effective_from == effective_to` 是空区间（被撤销的预约，或同一秒里发布又退役），永不生效，只出现在 `RETIRED` 上 |
+| `created_by_email` | 手工草稿的录入人；BNM 草稿为 `null`（系统写入） |
+| `approved_by_email` / `approved_at` | 发布人与发布时刻；未发布时为 `null` |
+
+时间都是不带时区的 UTC，精确到秒。
+
+#### `GET /api/v1/admin/fx-rates` —— 版本列表（spec §58 的草稿、审批与版本历史）
+
+按 `id` 倒序（最新建的在前）。查询参数：`base_currency`（`^[A-Z]{3}$`）、`status=DRAFT|PUBLISHED|RETIRED|DISCARDED`、
+`source=BNM|MANUAL`，以及[分页](#分页spec-108)。取值不合法（含小写）是 422。
+
+#### `POST /api/v1/admin/fx-rates` —— 手工建草稿
+
+请求体：`base_currency`、`rate`、`observed_at`、`source_reference`（都必填，都不许 `null`）。201；同一事务写版本
+（`source = MANUAL`、`source_quote_date = null`）与一条 `FX_RATE_CREATE`。不拿全局锁（草稿不参与计费）；重发会建出
+两个草稿，丢弃多余的即可。
+
+#### `PATCH /api/v1/admin/fx-rates/{fx_rate_id}` —— 改手工草稿
+
+只收 `rate`、`observed_at`、`source_reference`，至少一个，都不许是 `null`。带 `base_currency`、`status`、`source`、
+`effective_from` 或任何多余字段是 422。只对**手工来源的草稿**：BNM 草稿 409 `FX_RATE_NOT_EDITABLE`；已发布 409
+`FX_RATE_NOT_DRAFT`；已退役 / 已丢弃 409 `FX_RATE_FINAL`。**没有实际变化**（`rate` 按数值比较，`2.5` 与
+`2.5000000000` 相同；时刻换算成 UTC 后比较）：200，什么都不写；有变化时写一条 `FX_RATE_UPDATE`。
+
+#### `POST /api/v1/admin/fx-rates/{fx_rate_id}/publish` —— 发布
+
+请求体：可选 `effective_from`（预约时刻 F），格式规则同 `observed_at`。不带或 `null` = 不指定。
+
+在 `fx_rate_locks` 那一行的排他锁内完成：拿到锁之后取 `t` = 服务端当前时间**向上**取整到下一个整秒（恰好整秒时取
+下一秒），所以 `t` 严格晚于此刻。设该币种**区间非空**的已发布（`PUBLISHED` / `RETIRED`）版本中 `effective_from`
+最晚的一个为末尾版本 L（空区间不在时间线上）：
+
+| 情形 | 不指定时刻 | 指定 F |
+| --- | --- | --- |
+| P1 没有 L | `[null, null)`（一直以来：此前该币种一律取不到汇率、从未扣过钱） | `[F, null)` |
+| P2 L 未截断、已开始（起点为 `null` 或早于 `t`） | `[t, null)`；L 截断于 `t` | `[F, null)`；L 截断于 F |
+| P3 L 未截断、尚未开始（预约的，或同一秒里刚发布的） | 409 `EFFECTIVE_FROM_CONFLICT`，什么都不写：先撤销预约、指定晚于它起点的时刻，或下一秒再发 | F 晚于 L 起点：`[F, null)`，L 截断于 F；否则 409 `EFFECTIVE_FROM_CONFLICT` |
+| P4 L 有尽头 E（已退役，或它的后继被撤销） | `[E, null)`：补上退役留下的空档（那段时间此前一律取不到汇率） | `[F, null)`，`[E, F)` 保持无汇率 |
+
+- 指定的 F 早于 `t`：422 `EFFECTIVE_FROM_IN_PAST`，先于上表的任何判断。F 等于 `t` 可以。
+- 已退役 / 已丢弃：409 `FX_RATE_FINAL`。
+- **已发布再发布**：200，返回当前版本，什么都不写；请求体里的 `effective_from` 被忽略（只要格式合法，早于 `t` 也不
+  报 422）。格式不合法仍是 422（请求校验先于状态判断）。
+- 成功时同一事务写：（需要时）截断 L、本版本改为已发布（发布人与发布时刻）、复查该币种的区间、一条
+  `FX_RATE_PUBLISH`；复查不通过整体回滚（500）。
+
+**一个（币种, 时刻）一旦取到某个版本，以后永远取到同一个版本**：发布只影响 `t` 及以后，例外只有 P1 与 P4（不指定
+时刻）把「无汇率」变成「有汇率」。
+
+#### `POST /api/v1/admin/fx-rates/{fx_rate_id}/retire` —— 退役
+
+请求体：`reason`，去首尾空白后 1–255（记在审计的 `reason` 上）。在同一把锁内完成，`t` 取法同发布：
+
+| 被退役的版本 | 做什么 |
+| --- | --- |
+| R1 未截断、已开始生效（起点为 `null` 或 ≤ `t`） | `effective_to = t`、`RETIRED`：`t` 起该币种取不到汇率（计费侧 `FX_RATE_ERROR`），直到下一次发布按 P4 从 `t` 起补上。起点恰好是 `t` 时得到空区间 `[t, t)`，前一个版本不恢复 |
+| R2 未截断、尚未开始（预约的，起点 > `t`）：**撤销预约** | `effective_to = effective_from`（空区间，永不生效）、`RETIRED`；前一个版本若仍是 `PUBLISHED` 且正是被它截断的（尽头等于它的起点），恢复为未截断；以退役结束的不恢复 |
+| R3 已被截断的已发布版本、R4 草稿 | 409 `FX_RATE_NOT_RETIRABLE` |
+| R5 已退役 / 已丢弃 | 409 `FX_RATE_FINAL` |
+
+退役的版本在它自己的区间里照样取得到（已经发生的用量照样按它算）。要纠正已计费事件用的汇率走 Phase 8 的
+reprocess，不在这里。
+
+#### `POST /api/v1/admin/fx-rates/{fx_rate_id}/discard` —— 丢弃草稿
+
+请求体是 `{}`。草稿（手工与 BNM 都可以）→ `DISCARDED`，行留着（不删除），写一条 `FX_RATE_DISCARD`。已发布 409
+`FX_RATE_NOT_DRAFT`；已退役 / 已丢弃 409 `FX_RATE_FINAL`。
+
+#### `GET /api/v1/admin/fx-rates/fetch-attempts` —— BNM 拉取记录（spec §58「同步状态」）
+
+按 `attempted_at` 倒序，同一时刻按内部顺序倒序。查询参数：`base_currency`（`^[A-Z]{3}$`）、
+`outcome=NEW_DRAFT|NO_NEW_QUOTE|NO_QUOTE_FOR_DATE|FAILED`，以及[分页](#分页spec-108)。取值不合法是 422。每行：
+
+```json
+{
+  "base_currency": "USD",
+  "source": "BNM",
+  "requested_date": "2026-09-29",
+  "outcome": "NEW_DRAFT",
+  "quote_date": "2026-09-29",
+  "error_code": null,
+  "fx_rate_id": "00000000-0000-4000-8000-000000000000",
+  "attempted_at": "2026-09-29T04:30:00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `requested_date` | 向 BNM 要的报价日（吉隆坡当天） |
+| `outcome` | `NEW_DRAFT`：写了新草稿；`NO_NEW_QUOTE`：取到报价，但该报价日已有 BNM 版本；`NO_QUOTE_FOR_DATE`：BNM 答「该日无记录」（周末、公众假期、中午场尚未公布）；`FAILED`：失败。前三种都是成功 |
+| `quote_date` | 取到报价时的报价日；否则 `null` |
+| `error_code` | `FAILED` 时：`TIMEOUT` / `HTTP_<status>` / `BAD_PAYLOAD` / `UNIT_NOT_EXACT` / `NETWORK`；`NO_NEW_QUOTE` 时可为 `QUOTE_CHANGED`（BNM 更正了同日价格，已有版本不变）；否则 `null` |
+| `fx_rate_id` | `NEW_DRAFT` 时是那条草稿的 `id`（`public_id`），否则 `null` |
+
+拉取记录只读、不可单条引用，所以没有 `id`，也不返回内部 id。
+
+### 审计
+
+五个动作都与写入同一事务，不写 outbox；操作者带 ip 与 user agent。`entity_type` = `fx_rate_version`，
+`entity_id` = 版本的 `id`。被截断 / 被恢复的版本用 `public_id`，人用邮箱，时刻是 ISO 8601 UTC，`rate` 是字符串；
+不含内部 id。BNM 草稿不写审计：拉取记录就是它的来源证明。
+
+| `action` | `before_state` | `after_state` |
+| --- | --- | --- |
+| `FX_RATE_CREATE` | — | `base_currency`、`rate`、`observed_at`、`source_reference`、`status` |
+| `FX_RATE_UPDATE` | 变化的字段的旧值 | 同一组字段的新值 |
+| `FX_RATE_DISCARD` | `status`（`DRAFT`） | `status`（`DISCARDED`） |
+| `FX_RATE_PUBLISH` | `status`（`DRAFT`）；截断了前一个版本时 `truncated_version`：它的 `id` 与原 `effective_to`（`null`） | `status`、`effective_from`、`effective_to`、`approved_by_email`、`approved_at`；截断了前一个版本时 `truncated_version`：它的 `id` 与新的 `effective_to` |
+| `FX_RATE_RETIRE` | `status`、`effective_from`、`effective_to` | `status`、`effective_from`、`effective_to`、`reason`；恢复了前一个版本时 `restored_version`：它的 `id`。`reason` 也记在审计行的 `reason` 上 |
+
+「已发布再发布」与无变化的 PATCH 不写审计。
