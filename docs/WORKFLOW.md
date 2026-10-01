@@ -14,6 +14,8 @@
 | **审查者** | Codex（`codex exec -s read-only`） | 读设计与 diff、按清单审查、发判定 | **改任何文件、push、合并** |
 | **验收者** | Kelvin | 触发审查、裁决分歧、点 Squash and merge | — |
 
+> OpenClaw Worker 交付的任务：实现 PR 由 Kelvin 在 Telegram「批准」后合并；任务完成后的收尾 PR（只把 `.platform/tasks.yaml` 的 `ready` 改成 `done`、从 [TODO.md](TODO.md)「当前计划」移除这一项）由 OpenClaw 自动开、CI 通过后自动合并、不触发部署，自动收尾失败时才由人手工开。见 [.platform/README.md](../.platform/README.md)「Worker 的启用状态」。
+
 分工的意义在于**审查者没有实现时的思维定势**。所以审查者只读不写是硬规则——一旦 Codex 动手改，它就变成第二个开发者，独立性没了。
 
 > 「只读」现在是**沙箱强制的**，不是靠自觉：`codex exec -s read-only` 从机制上禁止写入。

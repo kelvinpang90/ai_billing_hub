@@ -8,6 +8,7 @@
 流程的唯一事实来源是 [docs/WORKFLOW.md](docs/WORKFLOW.md)，下面只是要点。
 
 - **你负责实现，Codex 负责独立审查，Kelvin 负责合并。** 你不合并自己的 PR。
+- **任务收尾由 OpenClaw 自动完成**：`.platform/project.yaml` 的 `merge_owner: kelvin` 指 Worker 实现 PR 的合并由 Kelvin 在 Telegram「批准」；OpenClaw 的 run 仍然改不了 `.platform/`。run 完成后 OpenClaw 自动开收尾 PR，只含 `tasks.yaml` 的 `ready → done` 与从 `docs/TODO.md`「当前计划」移除这一项两处机械改动，CI 通过后自动合并、不触发部署。**只有自动收尾失败**（Telegram 收到「自动收尾失败」通知，附原因与建议）时才手工开收尾 PR，也只做这两处改动。交付不再另写记录：不在 `.platform/README.md` 写状态句、不在 `docs/TODO.md` 写交付记录、不在 `docs/REVIEW-LOG.md` 为交付加行，交付事实以实现 PR、run 的「状态」时间线和收尾 PR 为准（细节见 [.platform/README.md](.platform/README.md)「Worker 的启用状态」）
 - **碰钱的任务先过设计闸门**：钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 —— 用 [design-gate 模板](.github/ISSUE_TEMPLATE/design-gate.md) 开 Issue，`scripts\codex-review.ps1 -Issue <N> -Post` 拿到 `APPROVED: design v<N>` 之后才动手写代码。前端 / 文档 / CI / 脚本不走闸门；既不碰钱、也不碰用量摄取 / 认证与会话 / Webhook 的后端改动同样不走（分档看主题，不看「是不是 API」）
 - **设计版本一变，之前的批准作废**，必须重新过闸门
 - 每个编号任务：`git checkout -b task/<编号>-<slug>` → 实现 + 写测试 → 在 `docs/TODO.md` 勾掉完成的勾选项（任务记录写在 PR 描述里，TODO 只改勾选项和规划块）→ 本地检查全过（命令清单只在 [WORKFLOW §7](docs/WORKFLOW.md) 一处）→ 开 **Draft PR**（用 `.github/pull_request_template.md`，结构不许改，**`TODO 影响` 一节必填**）→ CI 全绿后 `scripts\codex-review.ps1 -Pr <N> -Post`（脚本先查准入，不过不调 Codex）

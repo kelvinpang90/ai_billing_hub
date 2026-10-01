@@ -18,9 +18,19 @@ name: Deploy
 #
 # `workflow_dispatch` 保留：手工回滚（`ref` 填 `.last-good-deploy` 里那个 SHA，§9.5）
 # 与重新部署都走它。
+#
+# `paths-ignore`：只改这两个文件的合并不部署（OpenClaw 自动收尾的前置条件，控制面
+# ACVDEV-TASK-066 D7）。收尾 PR 只把任务从 `ready` 改成 `done`、从「当前计划」移出，
+# 不该换一次生产。只要合并里还有别的文件，照常部署。
+# ⚠️ Worker 合并收尾 PR 前会核对这段触发器的形状，**只认这一种写法**：`on` 下只有
+#    `push` 与 `workflow_dispatch`；`push` 里不加 `paths`、`branches-ignore`、`!` 开头的条目，
+#    不用锚点 / 别名。改了别的形状，自动收尾会拒绝合并。
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - .platform/tasks.yaml
+      - docs/TODO.md
   workflow_dispatch:
     inputs:
       ref:
