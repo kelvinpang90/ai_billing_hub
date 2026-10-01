@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from celery.schedules import crontab
 
 from app.core.celery_app import TASK_MODULES, RedisNotConfigured, create_celery_app
 from app.core.config import Settings
@@ -74,16 +75,42 @@ def test_schedule_runs_on_utc(celery_app) -> None:
     assert celery_app.conf.enable_utc is True
 
 
-def test_the_only_periodic_task_is_the_outbox_sweep(celery_app) -> None:
+def test_the_periodic_tasks_are_the_outbox_sweep_and_the_fx_fetch(celery_app) -> None:
     """周期条目只放**真的需要跑**的那些，不放示例条目（示例条目会被真的跑起来）。
 
-    ⚠️ T0.8d 之前这里断言的是「beat 为空」。现在有一条了，而它不是可选的：
+    ⚠️ T0.8d 之前这里断言的是「beat 为空」。outbox 那一条不是可选的：
     没有这个扫描，Redis 一丢、或者 worker 在触发之后挂掉，那些 outbox 行就
     **永远躺在库里**没人再看一眼（Invariant 14），而用户那边只表现为没收到信。
+    AIH-TASK-040 加了第二条：每天三次的 BNM 汇率拉取。
     """
-    assert set(celery_app.conf.beat_schedule) == {"outbox-recovery"}
+    assert set(celery_app.conf.beat_schedule) == {"outbox-recovery", "fx-fetch"}
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
     assert entry["task"] == "app.tasks.outbox.recover"
+
+
+def test_the_fx_fetch_runs_three_times_a_kuala_lumpur_afternoon(celery_app) -> None:
+    """设计闸门 #183 v3 §2：`crontab(minute=30, hour="4,6,9")`，expires 3600 秒。
+
+    Celery 的时区是 UTC，所以是吉隆坡（固定 UTC+8）12:30 / 14:30 / 17:30。中午场的公布时刻
+    没有公开的保证（2026-09-30 实测 12:11），一天只拉一次时，公布晚于 12:30 的那天拿不到草稿，
+    要等五天后 `fx_stale` 才发现。
+    """
+    entry = celery_app.conf.beat_schedule["fx-fetch"]
+
+    assert entry["task"] == "app.tasks.fx_fetch.fetch"
+    assert entry["schedule"] == crontab(minute=30, hour="4,6,9")
+    assert entry["schedule"].minute == {30}
+    assert entry["schedule"].hour == {4, 6, 9}
+    assert sorted((hour + 8) % 24 for hour in entry["schedule"].hour) == [12, 14, 17]
+    assert entry["options"] == {"expires": 3600}
+
+
+def test_the_fx_fetch_task_is_registered(celery_app) -> None:
+    """Beat 发出去的名字必须有人认领，否则 worker 只会报 NotRegistered。"""
+    # Importing the module registers its shared task, as the worker does through `include`.
+    import app.tasks.fx_fetch  # noqa: F401
+
+    assert "app.tasks.fx_fetch.fetch" in celery_app.tasks
 
 
 def test_the_sweep_does_not_pile_up_while_beat_is_down(celery_app) -> None:
@@ -99,7 +126,7 @@ def test_the_sweep_does_not_pile_up_while_beat_is_down(celery_app) -> None:
 
 def test_task_modules_are_listed_explicitly(celery_app) -> None:
     """不用 autodiscover：它靠约定扫包，改了包名时只是**安静地少注册一个任务**。"""
-    assert TASK_MODULES == ["app.tasks.ping", "app.tasks.outbox"]
+    assert TASK_MODULES == ["app.tasks.ping", "app.tasks.outbox", "app.tasks.fx_fetch"]
     assert celery_app.conf.include == TASK_MODULES
 
 

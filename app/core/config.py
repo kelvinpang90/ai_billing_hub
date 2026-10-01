@@ -3,17 +3,66 @@
 所有配置只有这一个入口。仓库是公开的，默认值里**不许**出现任何真实主机名、
 凭据或密钥 —— 需要密钥的配置项在用到它的那个任务里加，并走 Docker secrets
 文件注入（ADR-0004），不走环境变量。
+唯一的例外是 `fx_bnm_base_url` 的默认值：BNM 公开汇率接口的根地址，是 ADR-0001
+派生要求里登记的第二个主机名例外（第三方公开服务，不暴露本系统的部署信息）；
+只限这一项，不因此允许别的默认值写主机名。
 """
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
-from typing import Literal
+from typing import Final, Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "production"]
+FxSourceName = Literal["bnm"]
+
+_CURRENCY_CODE: Final = re.compile(r"[A-Z]{3}")
+# 汇率都换成 MYR（§17.1），MYR 自己不拉取。
+_QUOTE_CURRENCY: Final = "MYR"
+
+
+def require_https_base_url(value: str) -> str:
+    """An `https://` root without query, fragment or credentials, trailing `/` removed.
+
+    配置校验与 BNM 适配器（app/core/fx_source.py）都用它：只接受 HTTPS 的 `base_url`
+    （设计闸门 #183 v3 §2「BNM 适配器」）。
+    """
+    stripped = value.strip()
+    parts = urlsplit(stripped)
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError("must be an https:// root without query, fragment or credentials")
+    return stripped.rstrip("/")
+
+
+def parse_currency_codes(value: str) -> tuple[str, ...]:
+    """`USD,EUR` → `("USD", "EUR")`: upper-case three letters, not MYR, not empty, no repeats.
+
+    ⚠️ 不自动转大写、不跳过空项：配错的值让进程起不来，
+    而不是被悄悄改成「看起来能用」的另一个值。
+    """
+    codes = tuple(item.strip() for item in value.split(","))
+    if not value.strip():
+        raise ValueError("at least one currency is required")
+    for code in codes:
+        if not _CURRENCY_CODE.fullmatch(code):
+            raise ValueError("each currency must be three upper-case letters")
+        if code == _QUOTE_CURRENCY:
+            raise ValueError("MYR is the quote currency and is never fetched")
+    if len(set(codes)) != len(codes):
+        raise ValueError("a currency is listed twice")
+    return codes
 
 
 class Settings(BaseSettings):
@@ -30,7 +79,8 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
-    # 空串 = 未配置。默认值里**不许**出现任何真实主机名或凭据（仓库是公开的），
+    # 空串 = 未配置。默认值里**不许**出现任何真实主机名或凭据（仓库是公开的；唯一的
+    # 登记例外是下面 `fx_bnm_base_url` 的 BNM 公开地址，见 ADR-0001），
     # 所以这里不能给一个「看起来能用」的默认连接串。未配置时 `/readyz` 会明确
     # 报 DATABASE_NOT_CONFIGURED，而不是拿着假地址去连然后超时。
     database_url: str = ""
@@ -177,6 +227,34 @@ class Settings(BaseSettings):
     # 可配置、不写死。`0` 表示轮换即让旧版本立刻失效。只影响之后的轮换，已写入的
     # `valid_until` 不变。
     credential_rotation_overlap_seconds: int = Field(default=604_800, ge=0)
+
+    # --- FX 汇率：BNM 拉取（AIH-TASK-040，设计闸门 #183 v3 §2「BNM 适配器」） -------------
+
+    # 来源实现由 app/core/fx_source.py 的 `build_fx_source` 按它决定。V1 只有 BNM。
+    fx_source: FxSourceName = "bnm"
+    # BNM 公开接口的根地址，只接受 HTTPS。⚠️ 默认值里写了真实主机名：这是 ADR-0001 派生要求
+    # 登记的第二个例外（BNM 公开汇率接口，ADR-0005 选定的来源），只限这一项；其余默认值仍然
+    # **不许**出现任何真实主机名。
+    fx_bnm_base_url: str = "https://api.bnm.gov.my"
+    # 每天自动拉取的币种，逗号分隔（V1 只有 USD）。只管自动拉取的范围；手工录入不限于它们。
+    fx_currencies: str = "USD"
+    # ⚠️ 不能不设：外部接口卡住时 worker 的那个进程会一直占着（同 smtp_timeout_seconds）。
+    fx_fetch_timeout_seconds: int = Field(default=10, gt=0)
+
+    @field_validator("fx_bnm_base_url")
+    @classmethod
+    def _fx_base_url_is_https(cls, value: str) -> str:
+        return require_https_base_url(value)
+
+    @field_validator("fx_currencies")
+    @classmethod
+    def _fx_currencies_are_codes(cls, value: str) -> str:
+        return ",".join(parse_currency_codes(value))
+
+    @property
+    def fx_currency_codes(self) -> tuple[str, ...]:
+        """`fx_currencies` as a tuple, in the configured order."""
+        return parse_currency_codes(self.fx_currencies)
 
 
 @lru_cache(maxsize=1)
