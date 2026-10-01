@@ -1848,7 +1848,7 @@ tasks:
     title: 'FX rates 2/6 - publish and retire rules, resolve_fx_rate'
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F2，只做业务规则层：app/services/fx_rates.py（手工草稿的建、改、丢弃；发布 P1–P4；退役 R1–R5；锁在前；事务内复查；五个审计动作）与 app/repositories/fx_rates.py（加锁读的 resolve_fx_rate、对 fx_rate_locks 取 FOR SHARE 的函数）。先交付规则与设计 §2 例子 E1–E16 一一对应的测试；并发与性质用例在 AIH-TASK-044，接口、BNM 拉取与告警在 040–043。本任务不接到任何计费路径。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-028
     acceptance_criteria:
