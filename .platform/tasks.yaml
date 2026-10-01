@@ -1901,7 +1901,7 @@ tasks:
     title: 'FX rates 2b/6 - concurrency and property tests for the FX rules'
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F2b，只加测试：新建 tests/backend/test_fx_rates_resolve.py，在真 MySQL 上验证 AIH-TASK-039 的发布 / 退役与计费侧的 resolve_fx_rate 串行（两种顺序）、计费侧与发布侧的快照读陷阱，以及随机序列上的时间稳定性。不改任何产品代码；测试若揭示 039 的缺陷，停下并在 PR 里说明，不在本任务里修。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-039
     acceptance_criteria:
