@@ -186,6 +186,14 @@ class AuditAction(enum.StrEnum):
     PRICING_PUBLISH = "PRICING_PUBLISH"
     PRICING_RETIRE = "PRICING_RETIRE"
     PRICING_DISCARD = "PRICING_DISCARD"
+    # AIH-TASK-039（设计闸门 #183）：写入方都是 app/services/fx_rates.py，与版本行同一事务。
+    # 五个都不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。BNM 拉取的
+    # 草稿不写审计（拉取记录就是它的来源证明）。前后状态里有汇率（只在管理端可见）。
+    FX_RATE_CREATE = "FX_RATE_CREATE"
+    FX_RATE_UPDATE = "FX_RATE_UPDATE"
+    FX_RATE_DISCARD = "FX_RATE_DISCARD"
+    FX_RATE_PUBLISH = "FX_RATE_PUBLISH"
+    FX_RATE_RETIRE = "FX_RATE_RETIRE"
 
 
 class AuditLog(Base):
