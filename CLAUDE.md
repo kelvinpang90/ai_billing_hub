@@ -80,6 +80,20 @@
 
 本仓库已有的验收命令是 .platform/commands.yaml 里的 acceptance.browser（脚本 scripts/acceptance/admin_customers.mjs）。
 
+## 登记任务的约定：标题、预审与拆分
+
+完整说明在控制面仓库 `docs/ONBOARD-PROJECT.md` 的「登记任务之前」一节。
+
+- **`title` 用一句中文**说明这一项做什么：80 个字符以内、一行、首尾无空白；不用反引号、尖括号、「」『』【】〖〗，不带 emoji（带变体选择符的会被拒）、链接、路径、主机名。OpenClaw 的推荐行显示成「下一项：<编号>，内容：<标题>」
+- **按条件预审**：任务有设计闸门（碰钱、碰个人数据、状态机、改数据库结构或迁移），或 `contract_check` 对它给出拆分 WARN、预计改动接近约 1500 行时，登记为 `ready` 之前必须在控制面仓库运行
+
+  ```bash
+  python -m worker.design_precheck --repo <本仓库干净检出或 git archive 导出> --project-id ai_billing_hub --task <任务 id> --design <设计文件相对路径> --claude <claude 程序绝对路径>
+  ```
+
+  把完整输出贴进登记 PR；`NOT_READY` 的发现要么修掉，要么在 PR 里逐条写明为什么不成立。不满足条件的任务在登记 PR 里写一行「预审：不适用」并给出理由
+- **拆分规则**：一个任务只做一层（数据库 / 业务规则 / 接口 / 前端），用 `depends_on` 串起来，每层合并后都能单独通过检查与 CI；规则多的设计先交付规则和对应测试再接接口；`allowed_change_paths` 超过 12 个、验收标准超过 8 条、或预计改动超过约 1500 行先拆，拆不开在登记 PR 里写明原因；预审报出的 `SCOPE_GAP` 先改契约
+
 ## 核心
 **多想少动 · 知错即改 · 往正确的方向走**
 

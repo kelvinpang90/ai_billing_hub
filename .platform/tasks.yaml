@@ -2003,7 +2003,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-041
-    title: 'FX rates 4/6 - admin FX rate API'
+    title: 汇率第四刀：管理端八个汇率接口（版本、草稿、发布、退役与拉取记录）
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F4，只做接口层：把 AIH-TASK-039 的服务接成管理端八个接口（版本列表、手工草稿、详情、改草稿、发布、退役、丢弃、拉取记录）。可在服务与仓储里只新增列表、详情、拉取记录与用户邮箱的只读查询，不改 039 的规则代码。
     status: ready
@@ -2058,7 +2058,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-042
-    title: 'FX rates 5/6 - internal alert endpoint, fx_fetch and fx_stale'
+    title: 汇率第五刀：带令牌的内部告警接口，以及汇率拉取与汇率过期两个告警维度
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F5：带令牌的内部告警接口 GET /internal/alerts（纯文本、维度注册表）与 fx_fetch、fx_stale 两个维度；监控令牌的配置项与 compose secret 同一个任务（compose 用例要求每个 *_file 配置项都挂好）。不改 nginx：F6 加 location 之前，这个路径经 nginx 落到前端、不可达。
     status: ready
@@ -2114,7 +2114,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-043
-    title: 'FX rates 6/6 - nginx, monitor.sh, config snapshot and runbook'
+    title: 汇率第六刀：反向代理放行告警接口、监控推送、配置快照自查与运维文档
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F6，只做部署与告警接线：nginx 放行 /internal/alerts（与 /readyz 同一份名单）并拒绝 /internal/ 其余路径；monitor.sh 按行推 Healthchecks；config_snapshot.sh 按键名模式自查心跳地址；部署与运维文档、ADR-0005 收口。不改应用代码。
     status: ready
@@ -2169,7 +2169,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-029
-    title: 'usage ingestion endpoint (signature, replay guard, durable 202, global idempotency)'
+    title: 单条用量摄取接口：验签、防重放、持久化后受理与全局幂等
     purpose: >-
       按 docs/design/AIH-TASK-029-usage-ingest.md（设计闸门 #176 已批准 v8）实现 POST /api/v1/integration/usage-events：读原始体 → 验签（AIH-TASK-012 的库）→ Redis nonce（不可用放行）→ 按校验顺序校验（event_id 限 UUIDv7 / ULID，usage_type 查表、未知 409 可重试，按上报形态校验）→ 归属比对 → 指纹 → 插入优先，RECEIVED 提交后才 202；合法重复 200，冲突 409 写只增冲突表与审计；每个错误响应带固定的 retryable。迁移 0017 建 usage_events（含可空的 provider_id / model_id）与 usage_event_conflicts；nginx 为集成前缀返回 JSON 413；冲突告警维度。不计费、不入队、无批量端点。
     status: ready
@@ -2251,7 +2251,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-030
-    title: batch usage ingestion endpoint
+    title: 批量用量摄取接口：整批验签，逐条复用单条摄取并按顺序返回结果
     purpose: >-
       按 docs/design/AIH-TASK-030-usage-ingest-batch.md（设计闸门 #180 已批准 v3）实现 POST /api/v1/integration/usage-events/batch：整批一次签名与 nonce，顶层结构与条数上限（默认 100），逐条复用 AIH-TASK-029 的 ingest_one、各自一个事务、一条失败不回滚其他条，200 返回汇总与按顺序的逐条结果（retryable 以 029 的错误表为准）。无迁移。
     status: ready
@@ -2310,7 +2310,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-031
-    title: pricing engine and admin pricing preview
+    title: 计价引擎与管理端试算预览接口
     purpose: >-
       按 docs/design/AIH-TASK-031-pricing-engine.md（设计闸门 #179 已批准 v1）实现计价：专用 50 位 Decimal 上下文下的纯函数 price_event（MARKUP / FIXED_RATE、各存储值从未舍入值只舍入一次、MYR 原币不查汇率）、resolve_charge_inputs（按 025 / 026 / 027 / 028 的契约取模型、价格、汇率、规则与锁，错误按顺序给细分码）、reprice_from_snapshot，以及只读的 POST /api/v1/admin/pricing-preview。无迁移、不写库。
     status: ready
@@ -2369,7 +2369,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-032
-    title: 'async usage billing worker (claim, charge, negative balance, suspension, recovery)'
+    title: 异步计费任务：认领、扣费、负余额、自动停用与卡住回收
     purpose: >-
       按 docs/design/AIH-TASK-032-usage-billing.md（设计闸门 #181 已批准 v2）实现计费 worker：Beat 每 10 秒扫描，短事务认领为 PROCESSING（令牌、租约、attempt_count），处理事务核对防护令牌后按锁顺序（事件 → 供应商 S → FX S → 规则 S → 钱包 → 租户）计价、经 post_transaction 扣费、写快照、PROCESSED；错误状态与细分码；失败退避与上限；每 60 秒的卡住回收；0 元事件不写账本；PROCESSED 由触发器保证不可变；管理端单个与批量重新入队（只对从未产生财务效果的错误事件）；七个告警维度。迁移 0018 给 usage_events 加快照与认领列。
     status: ready
@@ -2447,7 +2447,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-033
-    title: hottest-tenant load test script and the section 119 usage baseline
+    title: 最热租户压测脚本与用量计费的性能基线
     purpose: >-
       实现 docs/design/AIH-TASK-032-usage-billing.md §2「最热租户」定义的 S1–S4 压测（ADR-0011 要求）：新脚本 scripts/perf_usage.py，只对独立的 billing_perf 库运行（与 scripts/perf_baseline.py 同一套护栏），报告 p50 / p95 / p99、回补速率与一致性核对，并在 docs/perf-baseline.md 加一节写运行方法与结果模板。脚本本身由 Worker 实现；在 VPS 上实际运行是合并后的运维步骤。不走设计闸门：只是测量脚本，不改任何产品代码与数据。
     status: ready
@@ -2498,7 +2498,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-034
-    title: admin usage event query API
+    title: 管理端用量事件查询接口（列表与详情）
     purpose: >-
       spec §61 / §89 的管理端用量查询：GET /api/v1/admin/usage-events（按客户、项目、会话、请求、供应商、模型、发生时间段、状态、错误码筛选，分页，最新在前）与 GET /api/v1/admin/usage-events/{usage_event_id}（全部快照、所用版本与规则的 public_id、成本、计费额、毛利、账本引用、冲突记录）。只读，加在 AIH-TASK-032 建的 app/api/admin_usage_events.py 里。不走设计闸门：只读，不碰钱、状态机、摄取、认证与 webhook。
     status: ready
@@ -2553,7 +2553,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-035
-    title: 'admin frontend - AI catalog (meter types, providers, models, aliases)'
+    title: 管理端前端：AI 目录页面（计量类型、供应商、模型与别名）
     purpose: >-
       管理端前端：AIH-TASK-025 目录接口的页面 —— 计量类型（列表含分量、新建 QUANTITY 类型、改名与停用）、供应商（列表、新建、改名与停用）、供应商详情（模型列表 / 新建 / 改名与停用；别名的当前与历史段、映射、撤销）。新建 features/catalog/，顶栏菜单加一项。只做前端，外加验收脚本的两个只读步骤。
     status: ready
@@ -2641,7 +2641,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-036
-    title: admin frontend - provider prices and FX rates
+    title: 管理端前端：供应商价格与汇率页面
     purpose: >-
       管理端前端：AIH-TASK-026 供应商价格与 AIH-TASK-028 汇率的页面 —— 价格版本列表 / 草稿（按计量类型成组录入分量）/ 发布（可预约）/ 退役 / 丢弃；汇率版本列表 / 手工草稿 / 发布 / 退役 / 丢弃与拉取记录。新建 features/pricing/ 与 features/fx/，顶栏菜单加两项。只做前端，外加验收脚本的两个只读步骤。
     status: ready
@@ -2733,7 +2733,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-037
-    title: admin frontend - pricing rules and pricing preview
+    title: 管理端前端：定价规则与试算页面
     purpose: >-
       管理端前端：AIH-TASK-027 定价规则与 AIH-TASK-031 试算的页面 —— 规则列表（即价格历史）/ 草稿（五级范围、MARKUP 或 FIXED_RATE）/ 发布（可预约）/ 停用 / 丢弃；试算页（客户、供应商、模型、用量、occurred_at → 每个分量、版本、未舍入与舍入结果或错误状态）。只做前端，外加验收脚本的两个只读步骤。
     status: ready
@@ -2823,7 +2823,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-038
-    title: admin frontend - usage events and requeue
+    title: 管理端前端：用量事件查询与重新入队页面
     purpose: >-
       管理端前端：AIH-TASK-034 用量查询与 AIH-TASK-032 重新入队的页面 —— 用量事件列表（筛选、分页）、事件详情（快照、版本、成本、计费额、毛利、账本引用、冲突记录）、单个与批量重新入队（只对错误状态，必填原因）。只做前端，外加验收脚本的一个只读步骤。
     status: ready
