@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
 from pydantic import ValidationError
 
@@ -96,3 +98,92 @@ def test_email_is_unconfigured_by_default() -> None:
     assert settings.smtp_host == ""
     assert settings.smtp_password_file == ""
     assert settings.frontend_base_url == ""
+
+
+# --- FX 拉取（AIH-TASK-040，设计闸门 #183 v3 §2「BNM 适配器」） -----------------------
+
+
+def test_the_fx_defaults_fetch_usd_from_bnm_over_https() -> None:
+    """默认：BNM、只拉 USD、超时 10 秒。
+
+    默认地址是 BNM 公开接口的根地址 —— ADR-0001 派生要求登记的第二个主机名例外，只限
+    app/core/config.py 那一项，所以这里不重写主机名，只断言它是一个 HTTPS 根地址。
+    """
+    settings = Settings()
+
+    assert settings.fx_source == "bnm"
+    default_url = urlsplit(settings.fx_bnm_base_url)
+    assert default_url.scheme == "https"
+    assert default_url.hostname
+    assert (default_url.path, default_url.query, default_url.fragment) == ("", "", "")
+    assert settings.fx_currencies == "USD"
+    assert settings.fx_currency_codes == ("USD",)
+    assert settings.fx_fetch_timeout_seconds == 10
+
+
+def test_the_fx_currencies_are_parsed_in_order() -> None:
+    settings = Settings(fx_currencies="USD, EUR,JPY")
+
+    assert settings.fx_currency_codes == ("USD", "EUR", "JPY")
+    assert settings.fx_currencies == "USD,EUR,JPY"
+
+
+def test_the_fx_currencies_reject_anything_but_distinct_upper_case_codes() -> None:
+    """逗号分隔、大写三字母、不含 MYR、不为空、不重复（设计 §2 配置）。
+
+    ⚠️ 配错的值必须让进程起不来：不转大写、不跳过空项。配错的项被悄悄跳过的话，
+    结果就是「每天都在跑、一个币种也没拉」，要等 `fx_stale` 五天后才发现。
+    """
+    for bad in (
+        "",
+        " ",
+        "usd",
+        "US",
+        "USDX",
+        "USD,",
+        ",USD",
+        "USD,,EUR",
+        "MYR",
+        "USD,MYR",
+        "USD,USD",
+        "U5D",
+        "USD;EUR",
+    ):
+        with pytest.raises(ValidationError):
+            Settings(fx_currencies=bad)
+
+
+def test_the_fx_currencies_come_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_FX_CURRENCIES", "USD,EUR")
+
+    assert Settings().fx_currency_codes == ("USD", "EUR")
+
+
+def test_the_bnm_base_url_must_be_https() -> None:
+    """只接受 HTTPS 的 `base_url`：汇率走明文就能被中间人改成任何数。"""
+    for bad in (
+        "http://bnm.example.com",
+        "ftp://bnm.example.com",
+        "bnm.example.com",
+        "https://",
+        "https://bnm.example.com?x=1",
+        "https://bnm.example.com#top",
+        "https://someone@bnm.example.com",
+        "",
+    ):
+        with pytest.raises(ValidationError):
+            Settings(fx_bnm_base_url=bad)
+
+    settings = Settings(fx_bnm_base_url="https://bnm.example.com/")
+    assert settings.fx_bnm_base_url == "https://bnm.example.com"
+
+
+def test_the_fx_source_and_timeout_are_checked() -> None:
+    """来源只有 `bnm`；超时 0 或负数等于不设超时，worker 会被一个卡住的连接永久占着。"""
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            Settings(fx_fetch_timeout_seconds=bad)
+    with pytest.raises(ValidationError):
+        Settings(fx_source="manual")
+
+    assert Settings(fx_fetch_timeout_seconds=3).fx_fetch_timeout_seconds == 3

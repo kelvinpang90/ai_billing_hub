@@ -21,12 +21,13 @@ source of truth」）。下面每一条默认值都是从这句话和 Invariant 
 from __future__ import annotations
 
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import Settings
 
 # 任务模块要显式列出来，不用 autodiscover：autodiscover 靠约定扫包，加错目录
 # 或改了包名时它只是**安静地少注册一个任务**，调用方拿到 NotRegistered 才发现。
-TASK_MODULES = ["app.tasks.ping", "app.tasks.outbox"]
+TASK_MODULES = ["app.tasks.ping", "app.tasks.outbox", "app.tasks.fx_fetch"]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
 # ⚠️ **这一条不是优化，是可恢复性本身。**没有它，「Redis 被清空」或者「worker 在
@@ -35,6 +36,13 @@ TASK_MODULES = ["app.tasks.ping", "app.tasks.outbox"]
 # 60 秒是与「用户点了忘记密码之后能接受等多久」对齐的 —— 正常路径由 API 直接
 # 触发，这一条是兜底。
 OUTBOX_RECOVERY_SECONDS = 60.0
+
+# BNM 汇率拉取（设计闸门 #183 v3 §2「BNM 适配器」，AIH-TASK-040）：一天三次，
+# UTC 04:30 / 06:30 / 09:30 = 吉隆坡 12:30 / 14:30 / 17:30。中午场的公布时刻没有公开的保证，
+# 只拉一次时，公布晚于 12:30 的那天就拿不到草稿；报价日唯一约束保证三次至多一条草稿。
+FX_FETCH_SCHEDULE = crontab(minute=30, hour="4,6,9")
+# 两次拉取至少隔两小时；beat 停了又起来时，过期一小时的那次不再补发（下一次调度照常）。
+FX_FETCH_EXPIRES_SECONDS = 3600
 
 
 class RedisNotConfigured(RuntimeError):
@@ -90,7 +98,12 @@ def create_celery_app(settings: Settings) -> Celery:
                 # 攒下的几十次触发一口气全放出去 —— 它们做的是同一件事，
                 # 只会让 worker 白白抢同一批行。
                 "options": {"expires": OUTBOX_RECOVERY_SECONDS * 0.9},
-            }
+            },
+            "fx-fetch": {
+                "task": "app.tasks.fx_fetch.fetch",
+                "schedule": FX_FETCH_SCHEDULE,
+                "options": {"expires": FX_FETCH_EXPIRES_SECONDS},
+            },
         },
     )
     return app
