@@ -25,19 +25,18 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-041` Phase 2 FX 汇率 4/6：管理端汇率接口
-2. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
-3. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
-4. `AIH-TASK-029` Phase 2 用量摄取端点
-5. `AIH-TASK-030` Phase 2 批量用量摄取端点
-6. `AIH-TASK-031` Phase 2 计价引擎与试算预览
-7. `AIH-TASK-032` Phase 2 异步计费 worker
-8. `AIH-TASK-033` Phase 2 最热租户压测脚本
-9. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-10. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-11. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-12. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-13. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-042` Phase 2 FX 汇率 5/6：内部告警接口与两个维度
+2. `AIH-TASK-043` Phase 2 FX 汇率 6/6：nginx、monitor.sh、配置快照与运维文档
+3. `AIH-TASK-029` Phase 2 用量摄取端点
+4. `AIH-TASK-030` Phase 2 批量用量摄取端点
+5. `AIH-TASK-031` Phase 2 计价引擎与试算预览
+6. `AIH-TASK-032` Phase 2 异步计费 worker
+7. `AIH-TASK-033` Phase 2 最热租户压测脚本
+8. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+9. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+10. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+11. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+12. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
