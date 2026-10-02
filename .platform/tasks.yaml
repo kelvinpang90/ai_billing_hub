@@ -2006,7 +2006,7 @@ tasks:
     title: 汇率第四刀：管理端八个汇率接口（版本、草稿、发布、退役与拉取记录）
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F4，只做接口层：把 AIH-TASK-039 的服务接成管理端八个接口（版本列表、手工草稿、详情、改草稿、发布、退役、丢弃、拉取记录）。可在服务与仓储里只新增列表、详情、拉取记录与用户邮箱的只读查询，不改 039 的规则代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-039
     acceptance_criteria:
