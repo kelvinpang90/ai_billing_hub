@@ -760,8 +760,11 @@ def test_the_monitor_confirms_a_problem_before_it_wakes_anyone() -> None:
     # 复核必须把三个检查**原样再跑一遍**，不能只重试失败的那一个：
     # 第一轮红、第二轮绿的服务如果不重跑，就会带着过期的结论去 ping。
     after = monitor.split('sleep "$RECHECK_SECONDS"', 1)[1]
-    for check in ("check_services", "check_readyz", "check_disk"):
+    for check in ("check_services", "check_readyz", "check_disk", "check_alerts"):
         assert f"$({check} || true)" in after
+    # 告警维度不是 OK 时同样触发复核（设计闸门 #183 v3：复核一并覆盖）。
+    before = monitor.split('sleep "$RECHECK_SECONDS"', 1)[0]
+    assert '$(alerts_problems "$ALERTS_OUT")' in before
 
 
 def test_the_monitor_never_sources_the_env_file() -> None:
@@ -770,6 +773,79 @@ def test_the_monitor_never_sources_the_env_file() -> None:
     assert 'sed -n "s/^${1}=//p" "$ENV_FILE"' in monitor
     assert "source " not in monitor
     assert not re.search(r"^\s*\.\s+\"?\$ENV_FILE", monitor, re.MULTILINE)
+
+
+# --- 应用的告警维度（设计闸门 #183 v3 §2「两个告警维度」；AIH-TASK-043）------------
+
+
+def monitor_function(name: str) -> str:
+    body = re.search(rf"^{name}\(\) \{{.*?^\}}", uncommented(MONITOR), re.M | re.S)
+    assert body is not None, f"monitor.sh 里找不到 {name}"
+    return body.group(0)
+
+
+def test_the_monitor_token_never_reaches_a_command_line() -> None:
+    """⚠️ 设计 v3 修的就是这一条：`-H "…Bearer $(cat …)"` 把令牌展开进 curl 的 argv。
+
+    同机任何用户 `ps` 都看得到（这台 VPS 上还跑着另外八个项目）。令牌必须经 bash 内建的
+    `printf` 写进标准输入，由 `curl --config -` 读；读文件也只用内建的 `read`。
+    """
+    body = monitor_function("check_alerts")
+    # 令牌文件的宿主机路径来自 `.env`（字面解析，不 source —— 见上一条用例）。
+    assert 'token_file="$(env_value BILLING_MONITOR_TOKEN_HOST_FILE)"' in body
+    assert 'IFS= read -r token < "$token_file"' in body
+    assert (
+        'printf \'header = "Authorization: Bearer %s"\\n\' "$token" '
+        '| curl -fsS -m 10 --config - "$ALERTS_URL"'
+    ) in body
+    # 任何能把令牌带进 argv 的写法都不许出现。
+    assert "cat " not in body
+    assert "-H " not in body and "--header" not in body
+    assert "Bearer $" not in body
+    # 令牌与 curl 只在同一行出现一次，而且令牌只交给 printf。
+    together = [line.strip() for line in body.splitlines() if "$token" in line and "curl" in line]
+    assert len(together) == 1
+    assert together[0].startswith('if ! body="$(printf '), together
+
+
+def test_the_monitor_does_not_report_alert_dimensions_it_could_not_read() -> None:
+    """接口不通（含 401 / 404）、令牌文件没配或读不出：只记日志、**不推**这些维度。
+
+    ⚠️ 不推而不是推 /fail：API 挂了时 readyz 维度已经报了同一个原因，再推就是双响；
+    Healthchecks 的宽限期到了会自行报「未上报」，所以不会静默。日志走 stderr ——
+    这个函数的 stdout 就是要推的行。
+    """
+    body = monitor_function("check_alerts")
+    for reason in (
+        "no BILLING_MONITOR_TOKEN_HOST_FILE configured",
+        "the monitor token file is unreadable or empty",
+        "alerts endpoint is not answering 200",
+    ):
+        start = body.index(reason)
+        branch = body[start : body.index("return 0", start)]
+        assert branch.rstrip().endswith(">&2"), reason
+    # `-f`：非 2xx 一律算接口不通。
+    assert "curl -fsS" in body
+
+
+def test_each_alert_dimension_gets_its_own_check() -> None:
+    """逐行解析，每个维度用 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL` 推一个检查。
+
+    ⚠️ 不写死维度名：T-E、T-H 往注册表加维度时只在 `.env` 加地址，不改这个脚本
+    （设计 §2「对下游任务的契约」）。缺地址只记日志。
+    """
+    monitor = uncommented(MONITOR)
+    body = monitor_function("publish_alerts")
+    assert "BILLING_HEALTHCHECK_ALERT_$(" in body
+    assert "tr '[:lower:]' '[:upper:]')_URL" in body
+    assert 'publish "$url_name" "$dimension"' in body
+    assert 'log "no ${url_name} configured' in body
+    for dimension in ("fx_fetch", "fx_stale", "FX_FETCH", "FX_STALE"):
+        assert dimension not in body
+    # 维度名要拼进 `.env` 的键名：只认小写字母、数字、下划线与三种级别。
+    assert "local pattern='^[a-z0-9_]+ (OK|P1|P2)( |$)'" in monitor_function("check_alerts")
+    # 推完告警维度才退出：它们和三个既有维度一样影响退出码。
+    assert monitor.rstrip().endswith('publish_alerts\nexit "$FAILED"')
 
 
 def test_the_cron_runs_the_monitor_unlocked() -> None:
@@ -1769,10 +1845,39 @@ def test_the_snapshot_checks_itself_for_secrets_before_uploading() -> None:
     assert "refusing to upload a snapshot that contains ${key}" in script
     for key in ("BILLING_MYSQL_ROOT_PASSWORD", "BILLING_BACKUP_PASSPHRASE", "R2_SECRET_ACCESS_KEY"):
         assert key in script
-    for key in ("BILLING_HEALTHCHECK_BACKUP_URL", "BILLING_HEALTHCHECK_CONFIG_URL"):
-        assert key in script
     # 自查必须排在加密与上传之前
     assert script.index("refusing to upload") < script.index("openssl enc -aes-256-cbc")
+
+
+def test_the_snapshot_checks_every_heartbeat_url_in_the_env_file() -> None:
+    """设计闸门 #183 v3 §2「deploy/config_snapshot.sh」：心跳地址按**键名模式**从 `.env` 取。
+
+    ⚠️ 原来是手写清单：新增的 `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` / `…_FX_STALE_URL`
+    不会被查，以后每加一个告警维度都得回来改这个脚本。现在 `.env` 里有什么就查什么。
+    """
+    script = uncommented(CONFIG_SNAPSHOT)
+    pattern = (
+        "for key in $(sed -n 's/^\\(BILLING_HEALTHCHECK_[A-Z0-9_]*_URL\\)=.*/\\1/p' "
+        '"$ENV_FILE" 2>/dev/null || true); do'
+    )
+    assert pattern in script
+    # 手写清单不许回来。`CONFIG_URL` 仍在 —— 本脚本自己的心跳要用它。
+    for key in (
+        "BILLING_HEALTHCHECK_BINLOG_URL",
+        "BILLING_HEALTHCHECK_BACKUP_URL",
+        "BILLING_HEALTHCHECK_DRILL_URL",
+        "BILLING_HEALTHCHECK_SERVICES_URL",
+        "BILLING_HEALTHCHECK_READYZ_URL",
+        "BILLING_HEALTHCHECK_DISK_URL",
+        "BILLING_HEALTHCHECK_LOGS_URL",
+    ):
+        assert key not in script, key
+    # 撞上就拒传；自查仍排在加密之前（快照一旦传上去就收不回来）。
+    loop = script[script.index(pattern) :]
+    checks = loop.index('grep -qF -- "$value" "$PLAIN"')
+    refuses = loop.index('die "refusing to upload a snapshot that contains ${key}"')
+    assert checks < refuses
+    assert script.index(pattern) < script.index("openssl enc -aes-256-cbc")
 
 
 def test_the_snapshot_round_trips_before_upload() -> None:

@@ -93,4 +93,11 @@ V1 由管理员手工发布。理由是发布这一步是「这个数字要开�
 - Phase 1 建 `fx_rate_versions` 表时，按本 ADR 落 `source` / `source_reference` 的语义
 - Phase 2 计费实现时，换算必须写入 `fx_rate_version_id` 快照，并有测试覆盖「同一事件重算得出相同 MYR」
 - 两条告警（连续拉取失败、PUBLISHED 版本过期）在 Phase 2 前落地
+  —— **已落地**（设计闸门 #183 v3；AIH-TASK-042 的告警接口与维度 + AIH-TASK-043 的 nginx、`deploy/monitor.sh` 接线）：
+  `fx_fetch`（某个币种 72 小时内没有成功的拉取且至少一次失败 = 连续 3 天失败）与 `fx_stale`，各推一个 Healthchecks
+  检查，见 [deployment.md](../deployment.md) §8.4 与 [runbook.md](../runbook.md)。生产上按 §8.4 的合并后运维步骤
+  （令牌文件、两个检查的地址）配好之后才开始推送。
+  ⚠️ **过期阈值调整为 5 个日历日**（Kelvin 2026-09-29 的决定，设计 #183 §10 第 2 条）：按吉隆坡日期，当前生效版本的
+  报价日距今超过 5 个日历日、或没有生效的版本即告警。第 6 条写的「超过 3 天」会在每个长周末误报；5 天覆盖
+  「周末 + 两到三天公众假期」，不维护公众假期表
 - markup 的 FX 缓冲比例作为定价策略单独决定，不属于本 ADR

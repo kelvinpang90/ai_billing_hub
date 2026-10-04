@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# 生产巡检：容器健康 + `/readyz` 降级 + 磁盘水位（spec §94 的磁盘告警、§95 的告警通道；T0.9）。
+# 生产巡检：容器健康 + `/readyz` 降级 + 磁盘水位（spec §94 的磁盘告警、§95 的告警通道；T0.9），
+# 外加应用自己报的告警维度（`GET /internal/alerts`，每行一个维度；设计闸门 #183 v3）。
 #
 # ⚠️ **这个脚本补的是三个「不会有人发现」的故障**，三个都不会让任何请求报错：
 #   1. celery-beat 停了 —— 周期任务全停，API 一切正常，日志里什么都没有
@@ -65,6 +66,8 @@ env_value() {
 # 而 `/readyz` 只放行回环与私有网段 —— 宿主机自己是唯一探得到它的地方。
 READYZ_PORT="$(env_value BILLING_HTTP_PORT)"
 READYZ_URL="${BILLING_MONITOR_READYZ_URL:-http://127.0.0.1:${READYZ_PORT:-8080}/readyz}"
+# 内部告警接口与 `/readyz` 同一个入口、同一份 nginx 名单（deploy/nginx/billing.conf）。
+ALERTS_URL="${BILLING_MONITOR_ALERTS_URL:-http://127.0.0.1:${READYZ_PORT:-8080}/internal/alerts}"
 
 # ⚠️ cron 那一行把输出整个以 info 级别送进 syslog。异常必须**另外**以 err 级别写一条，
 # 否则它和每 5 分钟一次的「all clear」混在一起，日志侧的告警规则无从区分。
@@ -179,18 +182,69 @@ check_disk() {
     check_binlog
 }
 
+# 应用报的告警维度（设计闸门 #183 v3 §2「两个告警维度」）。与上面三个不同，这里的
+# stdout 是接口的**原始行**（`<维度> <OK|P1|P2> <摘要>`，全绿时也有），由 publish_alerts
+# 逐行各推一个检查；接口不通时 stdout 为空 = **不推**这些维度。日志一律走 stderr。
+check_alerts() {
+    local token_file token="" body line
+    local pattern='^[a-z0-9_]+ (OK|P1|P2)( |$)'
+    # ⚠️ `.env` 里只有令牌文件的**宿主机路径**，令牌本身不进 `.env`（设计 §6）。
+    token_file="$(env_value BILLING_MONITOR_TOKEN_HOST_FILE)"
+    if [ -z "$token_file" ]; then
+        log "no BILLING_MONITOR_TOKEN_HOST_FILE configured: not reporting the alert dimensions" >&2
+        return 0
+    fi
+    # ⚠️ 用内建的 `read` 读，不用 `cat`：令牌从头到尾不进任何外部命令的参数。
+    { IFS= read -r token < "$token_file"; } 2>/dev/null || true
+    # 去首尾空白（与应用侧的 strip() 一致）。
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    if [ -z "$token" ]; then
+        log "the monitor token file is unreadable or empty: not reporting the alert dimensions" >&2
+        return 0
+    fi
+    # ⚠️ **令牌不进 curl 的 argv**：`-H "Authorization: Bearer $(cat …)"` 会把它展开进命令行，
+    # 同机任何用户 `ps` 都看得到（设计 v3 修的就是这一条）。`printf` 是 bash 内建，
+    # 把 header 那一行写进 curl 的标准输入，`--config -` 从标准输入读。
+    # `-f`：401 / 404 / 503 都算接口不通。
+    if ! body="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -fsS -m 10 --config - "$ALERTS_URL" 2>/dev/null)"; then
+        # ⚠️ 不推：readyz 维度已经报了同一个原因（API 挂了），这里再推 /fail 就是双响；
+        # 令牌配错导致的 404 / 401 也走这里 —— Healthchecks 宽限期到了会报「未上报」，不会静默。
+        log "alerts endpoint is not answering 200 ($ALERTS_URL): not reporting the alert dimensions" >&2
+        return 0
+    fi
+    printf '%s\n' "$body" | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # 只认 `<小写维度> <OK|P1|P2> …`：维度名要拼进 `.env` 的键名，不能带别的字符。
+        if [[ "$line" =~ $pattern ]]; then
+            printf '%s\n' "$line"
+        else
+            log "ignoring a malformed alert line" >&2
+        fi
+    done
+}
+
+# 只挑出不是 OK 的行 —— 用来决定要不要复核。
+alerts_problems() {
+    printf '%s\n' "$1" | awk '$2 != "OK" && NF > 0'
+}
+
 # --- 巡检一轮 ----------------------------------------------------------------
 
 SERVICES_OUT="$(check_services || true)"
 READYZ_OUT="$(check_readyz || true)"
 DISK_OUT="$(check_disk || true)"
+ALERTS_OUT="$(check_alerts || true)"
 
-if [ -n "${SERVICES_OUT}${READYZ_OUT}${DISK_OUT}" ] && [ "$RECHECK_SECONDS" -gt 0 ]; then
+# ⚠️ 复核一并覆盖告警维度：不是 OK 的维度同样先复核再叫人；复核时四个检查全部重跑，
+# 不能让告警维度带着第一轮的结论去 ping。
+if [ -n "${SERVICES_OUT}${READYZ_OUT}${DISK_OUT}$(alerts_problems "$ALERTS_OUT")" ] && [ "$RECHECK_SECONDS" -gt 0 ]; then
     log "problems found; re-checking in ${RECHECK_SECONDS}s (a deploy in flight looks exactly like this)"
     sleep "$RECHECK_SECONDS"
     SERVICES_OUT="$(check_services || true)"
     READYZ_OUT="$(check_readyz || true)"
     DISK_OUT="$(check_disk || true)"
+    ALERTS_OUT="$(check_alerts || true)"
 fi
 
 FAILED=0
@@ -211,5 +265,33 @@ publish BILLING_HEALTHCHECK_SERVICES_URL services "$SERVICES_OUT" \
 publish BILLING_HEALTHCHECK_READYZ_URL readyz "$READYZ_OUT" "readyz ok (database + redis)"
 publish BILLING_HEALTHCHECK_DISK_URL disk "$DISK_OUT" \
     "disk below ${DISK_WARN_PERCENT}% ($(df -P / | awk 'NR==2 {print $5}'))"
+
+# 告警维度：**每行一个维度、每个维度一个检查**，地址是 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL`
+# （fx_fetch → BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL）。⚠️ 按行通用处理，不写死维度名：
+# 以后的维度只要应用注册、`.env` 加地址，这个脚本不用改（设计 §2「对下游任务的契约」）。
+publish_alerts() {
+    local line dimension rest level summary url_name
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        dimension="${line%% *}"
+        rest="${line#* }"
+        level="${rest%% *}"
+        summary="${rest#"$level"}"
+        summary="${summary# }"
+        url_name="BILLING_HEALTHCHECK_ALERT_$(printf '%s' "$dimension" | tr '[:lower:]' '[:upper:]')_URL"
+        if [ -z "$(env_value "$url_name")" ]; then
+            # 沿用 heartbeat 的做法：缺地址只记日志，结论照常进 syslog。
+            log "no ${url_name} configured: the ${dimension} dimension is not reported"
+        fi
+        if [ "$level" = "OK" ]; then
+            publish "$url_name" "$dimension" "" "${summary:-ok}"
+        else
+            publish "$url_name" "$dimension" "${level} ${dimension}: ${summary}" ""
+        fi
+    done <<EOF
+$ALERTS_OUT
+EOF
+}
+publish_alerts
 
 exit "$FAILED"

@@ -149,10 +149,10 @@ done
 [ "$LEAKED" = "0" ] || die "refusing to upload a snapshot that contains secret values"
 
 # 心跳地址本身也是凭据（知道它的人能伪造「成功」），同样不许出现。
-for key in BILLING_HEALTHCHECK_BINLOG_URL BILLING_HEALTHCHECK_BACKUP_URL \
-           BILLING_HEALTHCHECK_DRILL_URL BILLING_HEALTHCHECK_SERVICES_URL \
-           BILLING_HEALTHCHECK_READYZ_URL BILLING_HEALTHCHECK_DISK_URL \
-           BILLING_HEALTHCHECK_LOGS_URL BILLING_HEALTHCHECK_CONFIG_URL; do
+# ⚠️ 键从 `.env` 里按**名字模式**取，不手写清单（设计闸门 #183 v3 §2）：手写清单时每加一个
+# 检查都要记得回来改这里，忘了就是一个不被自查的地址 —— 告警维度的地址
+# （`BILLING_HEALTHCHECK_ALERT_<维度>_URL`）以后只在 `.env` 里加，不会再改这个脚本。
+for key in $(sed -n 's/^\(BILLING_HEALTHCHECK_[A-Z0-9_]*_URL\)=.*/\1/p' "$ENV_FILE" 2>/dev/null || true); do
     value="$(env_value "$key")"
     [ -n "$value" ] || continue
     grep -qF -- "$value" "$PLAIN" && die "refusing to upload a snapshot that contains ${key}"

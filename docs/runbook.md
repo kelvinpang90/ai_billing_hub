@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-09-26
+> 最后更新：2026-10-04
 
 ---
 
@@ -368,6 +368,218 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 
 ---
 
+## FX 汇率：拉取失败（`fx_fetch` 告警）
+
+**首次编写：2026-10-04（AIH-TASK-043）。依据：设计闸门 #183 v3（[AIH-TASK-028-fx-rates.md](design/AIH-TASK-028-fx-rates.md) §2「两个告警维度」、§5）、
+[currency-and-fx.md](currency-and-fx.md)、[deployment.md](deployment.md) §8.4。**
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| Telegram：`ai_billing_hub fx_fetch` 变 DOWN，正文 `P2 fx_fetch: USD no successful fetch in 72 hours (<n> failed)` | **主信号**。判据：某个配置币种最近 72 小时没有任何成功的拉取（`NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE`），且至少一条 `FAILED` —— 即连续 3 天、9 次拉取全部失败 |
+| `GET /api/v1/admin/fx-rates/fetch-attempts?outcome=FAILED` | 每次失败一行，`error_code` 说明原因 |
+| worker 日志 | 某个币种写库失败时的 ERROR（那一次不留拉取记录，任务以失败结束） |
+
+⚠️ **周末、公众假期不会触发它**：BNM 那几天答「无记录」，记为 `NO_QUOTE_FOR_DATE`，算成功。
+72 小时里**一条记录都没有**（Beat 停了、worker 没起）也**不是**这条告警 —— 那由 `fx_stale` 与「celery-beat 停止调度」兜住。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 计费：已发布的版本照旧生效，`resolve_fx_rate` 只读库、**热路径从不调 BNM**（ADR-0005 第 6 条） | 没有新草稿：管理员没有新的 BNM 价可发布 |
+| 管理员手工录入、发布、退役 | 时间一长，`fx_stale` 会接着响（当前版本报价日超过 5 个日历日） |
+
+**没有数据丢失，也没有计费失败。**拉取失败只影响草稿与告警。
+
+### 立刻做什么
+
+1. 看失败原因：`GET /api/v1/admin/fx-rates/fetch-attempts?outcome=FAILED&base_currency=USD`
+
+   | `error_code` | 多半是 |
+   | --- | --- |
+   | `NETWORK` / `TIMEOUT` | worker 出不去或 BNM 不可达。在 worker 容器里试一次出站 HTTPS（SMTP 也走出站，可对比） |
+   | `HTTP_5xx` / `HTTP_429` | BNM 自己的问题，等它恢复 |
+   | `HTTP_404` | 404 但不是「无记录」那个响应体：BNM 改了路径 |
+   | `BAD_PAYLOAD` | BNM 改了响应形状（设计 §10 假设 2）—— 要改适配器，开任务 |
+   | `UNIT_NOT_EXACT` | `middle_rate / unit` 超过 10 位小数，同上 |
+
+2. 手工触发一次确认现状（幂等，拉的永远是吉隆坡当天）：
+   ```bash
+   docker compose exec celery-worker python -c "from app.tasks.fx_fetch import fetch; print(fetch())"
+   ```
+3. 短期内恢复不了、而当前版本又快过期：管理员按 BNM 网站公布的中午场中间价**手工录入**草稿
+   （`POST /api/v1/admin/fx-rates`，`source_reference` 写清出处）并发布 —— 这正是 ADR-0005 第 1 条留的通道
+
+### 恢复
+
+1. 下一次 Beat（吉隆坡 12:30 / 14:30 / 17:30）或手工触发出现成功记录，`fx_fetch` 下一轮巡检转绿
+2. 拿到 `NEW_DRAFT` 后，管理员核对并发布（见下面「过期」一节的发布步骤）
+3. 适配器要改（`BAD_PAYLOAD` / `UNIT_NOT_EXACT`）：开任务改 `app/core/fx_source.py`，不改设计语义；在那之前靠手工录入
+
+### 绝不能做什么
+
+- **不要在计费路径上加「拉不到就实时调 BNM」。**ADR-0005 第 6 条：外部接口的抖动不能变成计费失败
+- **不要为了让告警安静把 72 小时窗口调大、或删拉取记录。**拉取记录只增（触发器拒绝改删），它是草稿的来源证明
+- **不要让自动拉取直接发布**来「省掉人工那一步」。ADR-0005 第 3 条：发布是「这个数字要开始算钱了」的确认点
+
+---
+
+## FX 汇率：过期，或没有生效的汇率（`fx_stale` 告警）
+
+**首次编写：2026-10-04（AIH-TASK-043）。依据同上一节。**
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| Telegram：`ai_billing_hub fx_stale` 变 DOWN，正文 `P2 fx_stale: USD quoted <报价日> (<n> calendar days)` | 当前生效版本的报价日距今**超过 5 个日历日**（吉隆坡日期相减；Kelvin 2026-09-29 定，ADR-0005 收口条件旁有注明）。手工版本取 `observed_at` 的吉隆坡日期 |
+| 正文 `P2 fx_stale: USD no rate in effect` | 该币种**此刻没有任何生效的版本**：从没发布过、最后一个被退役了、或只有未来的预约 |
+| 业务侧：非 MYR 事件判 `FX_RATE_ERROR` | 只在「没有生效的版本」时出现，计费 worker 落地之后（T-H）才有这个信号 |
+
+三种常见原因：
+
+1. **忘了发布** —— 拉取一直成功（`fx_fetch` 是绿的），草稿堆着没人发布。最常见
+2. **BNM 持续「无记录」** —— 拉取记录全是 `NO_QUOTE_FOR_DATE`：长假（周末 + 两三天公众假期在 5 天内，偶尔会超）；
+   或者**币种配错**（BNM 对不存在的币种代码也答「无记录」，所以不会触发 `fx_fetch`）—— 后者的表现是 `no rate in effect`
+   且从来没有过该币种的 BNM 草稿，查 `BILLING_FX_CURRENCIES`
+3. **拉取一直失败** —— 那 `fx_fetch` 应当先响过，按上一节处理
+
+### 影响什么
+
+| 情形 | 影响 |
+| --- | --- |
+| 过期（有生效版本，只是旧） | 计费照常，按旧汇率算。偏差由定价规则 markup 的 FX 缓冲吸收（ADR-0005「负面」） |
+| 没有生效的版本 | 非 MYR 事件 `FX_RATE_ERROR`、**不扣费**；发布之后由 T-H 重新入队补算 |
+
+### 立刻做什么
+
+1. 看草稿：`GET /api/v1/admin/fx-rates?status=DRAFT&base_currency=USD`；看拉取：`GET /api/v1/admin/fx-rates/fetch-attempts?base_currency=USD`
+2. 有 BNM 草稿：与 BNM 网站上**同一报价日**的中午场中间价核对，`POST /api/v1/admin/fx-rates/{fx_rate_id}/publish`，
+   **不给 `effective_from`** —— 从发布那一刻（`t`）起生效，不从报价日回溯（Kelvin 2026-09-29）
+3. 没有草稿（长假、BNM 不覆盖的币种）：手工录入草稿（`source_reference` 写出处）再发布
+4. 币种配错：查容器里实际的值
+   `docker compose exec api python -c 'from app.core.config import get_settings; print(get_settings().fx_currency_codes)'`。
+   ⚠️ 截至 AIH-TASK-043，`docker-compose.yml` 的 `x-backend.environment` **没有转发** `BILLING_FX_CURRENCIES`，
+   只改 `.env` 进不了容器（理由同「配置项」一节）；要改币种得先在 compose 里加转发，另开任务
+
+发布返回 409 `EFFECTIVE_FROM_CONFLICT`：有一个尚未开始的预约版本（或同一秒刚发布过）。要么指定一个晚于预约起点的
+`effective_from`，要么先退役那条预约（撤销），要么下一秒重发。
+
+### 恢复
+
+1. 下一轮巡检（5 分钟内）`fx_stale` 转绿，正文变成 `OK USD quoted <新报价日> (<n> calendar days)`
+2. 「没有生效的版本」那种：时间线为空时不给时刻的发布得到 `[null, null)`、退役留下的空档由不给时刻的发布从退役时刻起补上
+   （设计 §2 P1 / P4）—— 这段时间里 `FX_RATE_ERROR` 的事件此后取得到汇率，由 T-H 重新入队补算；已取到汇率的时刻结果不变
+
+### 绝不能做什么
+
+- **不要把 5 天的阈值调大来「让它别响」。**它是「拉到了但忘了发布」唯一的信号（ADR-0005 第 6 条第二条告警）
+- **不要直接改库里的版本行**（改 `effective_from` / `rate`、把草稿 `UPDATE` 成 `PUBLISHED`）。触发器会拒绝大部分写法；
+  侥幸过去的会绕开锁、区间计算与审计
+- **不要不核对就发布 BNM 草稿。**发布之后这个数字就开始算钱，而且已被引用的版本不可修改
+
+---
+
+## FX 汇率：发布了错误的汇率（退役与补发）
+
+**首次编写：2026-10-04（AIH-TASK-043）。依据：设计闸门 #183 v3 §2「退役」「发布」、§5「发布了错误汇率」。**
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| 管理员核对时发现已发布版本的 `rate` 与出处不符 | 例如手工录入时小数点错位、把买入价当成中间价 |
+| 客户或财务对某段时间的 MYR 换算提出异议 | 查那段时间生效的版本：版本列表 `GET /api/v1/admin/fx-rates?base_currency=USD` 的 `effective_from` / `effective_to` |
+| 拉取记录出现 `QUOTE_CHANGED` | BNM 更正了同一报价日的价；已有版本**不会**跟着变 |
+
+### 影响什么
+
+- 错误版本生效期间计费的事件按错误汇率算。⚠️ **已经计费的事件不会因为退役而改变**：一个（币种, 时刻）一旦取到某个
+  版本，以后永远取到同一个（ADR-0005「同一事件重算得出相同 MYR」）。纠正已计费事件走 Phase 8 的 reprocess，不在这里
+- 退役之后到补发之前，该币种的新事件 `FX_RATE_ERROR`、不扣费；补发把这段空档补上（见下），不会永久丢
+
+### 立刻做什么
+
+先看错误版本处在哪种状态（`GET /api/v1/admin/fx-rates/{fx_rate_id}`）：
+
+| 错误版本 | 做法 |
+| --- | --- |
+| 还是草稿 | 丢弃：`POST …/{fx_rate_id}/discard`。BNM 草稿不可编辑，丢弃后手工录入 |
+| 已发布、**正在生效**（未截断，起点已过） | 1. **先**建好正确的草稿（手工录入，`source_reference` 写清出处与「更正 <错误版本 id>」）<br>2. 退役错误版本：`POST …/{fx_rate_id}/retire`，`reason` 写清原因 —— 从退役时刻 `t` 起该币种取不到汇率<br>3. **立刻**发布正确草稿，**不给 `effective_from`**：按 P4 从退役时刻起首尾相接补上空档（设计 §2 P4、E9 ①） |
+| 已发布、**尚未开始**（预约的） | 退役即撤销预约：它变成空区间、永不生效；前一个版本若仍是已发布、且正是被它截断的，恢复为未截断（R2；以退役结束的不恢复）。然后按需重新发布正确的版本 |
+| 已发布、**已被截断**（历史版本） | 409 `FX_RATE_NOT_RETIRABLE`：它的区间已经结束，不能退役。只能走 Phase 8 reprocess 纠正已计费事件 |
+
+先建草稿再退役，是为了把「退役 → 补发」之间无汇率的空档压到几秒；即使拖久了，补发不给时刻也会从退役时刻起补上。
+
+### 恢复
+
+1. 版本列表里：错误版本 `RETIRED [原起点, 退役时刻)`，正确版本 `PUBLISHED [退役时刻, null)`，两者首尾相接
+2. `fx_stale` 保持绿（正确版本的报价日在 5 天内）
+3. 审计里有 `FX_RATE_RETIRE`（带 `reason`）与 `FX_RATE_PUBLISH` 两条，按 `entity_type = fx_rate_version` 可查
+4. 错误版本生效期间已计费的事件：列出受影响的时间段与币种，留给 Phase 8 reprocess（记进当次事故记录）
+
+### 绝不能做什么
+
+- **不要直接 `UPDATE` 已发布版本的 `rate`。**触发器会拒绝；即使绕过去，已按它计费的事件与快照里的 `fx_rate_applied`
+  就对不上了 —— 这正是 INV-6 要防的
+- **不要用「给一个过去的 `effective_from`」来回溯纠正。**F 早于 `t` 一律 422 `EFFECTIVE_FROM_IN_PAST`：只有「无汇率 →
+  有汇率」可以覆盖过去，已取到汇率的时刻不许改
+- **不要退役一个正在生效的版本而不马上补发。**退役之后该币种的新事件全部 `FX_RATE_ERROR`、不扣费，直到下一次发布
+
+---
+
+## FX 告警维度不上报（Healthchecks 报 `fx_fetch` / `fx_stale`「未上报」）
+
+**首次编写：2026-10-04（AIH-TASK-043）。依据：设计闸门 #183 v3 §2「内部告警接口」、§5 最后两行；[deployment.md](deployment.md) §8.4。**
+
+### 怎么发现
+
+Telegram：`ai_billing_hub fx_fetch` 与 `ai_billing_hub fx_stale` **一起**变 DOWN，原因是「该到的 ping 没到」（Healthchecks
+宽限期 15 分钟过了），而不是收到 `/fail`。`monitor.sh` 在这几种情况下**刻意不推**告警维度：
+
+| 巡检日志（`journalctl -t billing-monitor`） | 原因 |
+| --- | --- |
+| `alerts endpoint is not answering 200` | API 挂了（`readyz` 维度应同时 DOWN）；或接口返回 404 / 401 / 503 |
+| `the monitor token file is unreadable or empty` | 宿主机上读不到令牌文件（权限、路径） |
+| `no BILLING_MONITOR_TOKEN_HOST_FILE configured` | `.env` 里没配宿主机路径 |
+| 只有一个维度 DOWN，日志 `no BILLING_HEALTHCHECK_ALERT_…_URL configured` | 那个维度的地址没写进 `.env` |
+| 所有检查一起 DOWN | cron 没跑或整台机器挂了 —— 按「celery-beat 停止调度」「整台 VPS 没了」处理 |
+
+### 影响什么
+
+只影响**告警**：两个 FX 维度此刻没人看着。计费、拉取、发布都不受影响。
+
+### 立刻做什么
+
+1. `readyz` 也 DOWN：先按 API / 数据库故障处理，告警维度会随之恢复
+2. 只有 FX 两个 DOWN：在宿主机上看状态码（不带令牌）：
+   `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<端口>/internal/alerts`
+
+   | 状态码 | 含义 | 处理 |
+   | --- | --- | --- |
+   | 401 | nginx 放行、应用的令牌可用 —— 问题在宿主机那一侧 | 查 `BILLING_MONITOR_TOKEN_HOST_FILE` 指向的是不是 `secrets/monitor.token`、部署用户能不能读（下面「配置项」） |
+   | 404 | 应用侧令牌不可用（文件读不出、少于 32 个字符）；应用日志每次请求一条 ERROR（不含路径与内容） | 修文件的属主 / 权限 / 内容 |
+   | 403 | nginx 拒绝 —— 名单与来源对不上 | 核对 `deploy/nginx/billing.conf` 里 `/internal/alerts` 与 `/readyz` 的名单（应完全相同） |
+   | 503 | 令牌通过但查库失败 | 看 API 日志 `Evaluating the alert dimensions failed` |
+
+3. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+两个检查收到成功 ping 即转绿（或 `/fail`，那就是真有 FX 问题，按上面两节处理）。
+
+### 绝不能做什么
+
+- **不要把令牌写进 `.env`、crontab 或命令行**（`curl -H "Authorization: Bearer …"`）：同机任何用户 `ps` 都看得到，
+  而这台 VPS 上还跑着另外八个项目。`.env` 里只放文件路径
+- **不要为了让部署用户读到而把文件改成 `0444` 或复制第二份。**属主 `10001`、属组部署用户的主组、`0440` 就够；
+  第二份要和第一份同步轮换，迟早对不上
+- **不要把 `/internal/alerts` 的 nginx 名单放宽**来「先通了再说」：它与 `/readyz` 同一份，测试钉着
+
+---
+
 ## 配置项
 
 **首次编写：2026-09-26（AIH-TASK-013）。**这一节收「运维会去改的配置项」，一项一小节。
@@ -473,3 +685,59 @@ API 进程本身是随容器重建的，所以两者一致 —— 前提是你�
   毫无缓冲 —— 集成方还没来得及换 `secret`，签名就开始被拒。要撤销一个版本，用吊销接口
 - **不要只改 `.env` 就当改好了。**不重建容器，线上还是旧值；而轮换的后果（旧版本何时失效）要到重叠期结束时才看得出来
 - **不要在集成方正在切换 `secret` 的时候缩短它再轮换。**上面那张表的最后一行：更老的版本也会被截短
+
+### `BILLING_MONITOR_TOKEN_HOST_FILE` —— 监控令牌文件的宿主机路径（及两个 FX 告警地址）
+
+**依据**：设计闸门 #183 v3（[AIH-TASK-028-fx-rates.md](design/AIH-TASK-028-fx-rates.md) §2「内部告警接口」「两个告警维度」、
+§6「密钥」、§8「合并后的运维步骤」）、`deploy/monitor.sh` 的 `check_alerts` / `publish_alerts`、`docker-compose.yml` 的
+`billing_monitor_token` secret、[deployment.md](deployment.md) §8.4（完整步骤与验证命令）。
+
+#### 含义
+
+`deploy/monitor.sh` 读 `GET /internal/alerts` 要带 Bearer 令牌；令牌在宿主机文件 `secrets/monitor.token` 里，容器经 compose
+secret 读**同一份**文件（容器内 `/run/secrets/billing_monitor_token`，compose 写死，不经 `.env`）。
+`.env` 里的这一项只告诉**宿主机上的** `monitor.sh` 那个文件在哪。
+
+| 属性 | 值 |
+| --- | --- |
+| 读它的 | 只有 `deploy/monitor.sh`（字面解析 `.env`，不 source）。应用不读它 |
+| 默认值 | 无。不配 = `monitor.sh` 只记 `no BILLING_MONITOR_TOKEN_HOST_FILE configured`，不推告警维度 |
+| 取值 | 令牌文件的**绝对路径**，例如 `<部署目录>/secrets/monitor.token` |
+| 令牌文件 | `openssl rand -hex 32`（64 个字符）；属主 `10001`、**属组为部署用户的主组**、`0440` |
+| 相关的两个键 | `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL`、`BILLING_HEALTHCHECK_ALERT_FX_STALE_URL`：两个 Healthchecks 检查的 Ping URL。通用规则 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL` |
+
+⚠️ **为什么是 `0440` 而不是其他 secrets 的 `0400`**：`monitor.sh` 由 cron 以部署用户（不是 root）运行，`0400` 它读不到，
+告警维度就永远推不出去。容器以 uid 10001 按属主读，部署用户按属组读，其他用户读不到。
+
+#### 怎么改（首次配置 = 设计 §8 的合并后运维步骤）
+
+1. 令牌文件：已有且不少于 32 个字符就不重新生成，只改属主与权限（`sudo chown 10001:"$(id -gn <部署用户>)"`、
+   `sudo chmod 0440`）；没有或过短才 `openssl rand -hex 32` 生成。`.env` 加
+   `BILLING_MONITOR_TOKEN_HOST_FILE=<部署目录>/secrets/monitor.token`
+2. Healthchecks 新建 `ai_billing_hub fx_fetch`、`ai_billing_hub fx_stale` 两个检查（Simple，5 分钟，宽限 15 分钟，Telegram），
+   Ping URL 写进 `.env` 的 `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` / `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL`
+3. 在 worker 容器里手工触发一次拉取，确认 BNM 可达（「无记录」也算可达）：
+   `docker compose exec celery-worker python -c "from app.tasks.fx_fetch import fetch; print(fetch())"`
+4. 管理员发布第一个汇率版本（见上面「FX 汇率：过期，或没有生效的汇率」的「立刻做什么」）
+
+逐条的命令、核对与验证在 [deployment.md](deployment.md) §8.4。
+
+**轮换令牌**：重新生成文件内容（属主与权限照旧）即可。
+
+#### 改完怎么生效
+
+- `.env` 的这几项**不需要重建任何容器**：`monitor.sh` 每一轮（5 分钟）重新读 `.env`
+- 令牌文件的内容**也不需要重启**：应用每次请求都重新读文件
+- 验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，日志里出现 `fx_fetch: …` / `fx_stale: …`，两个检查变绿
+
+#### 对已有数据的影响
+
+无。令牌与地址只决定告警能不能送达，不碰汇率版本、拉取记录或计费。
+
+#### 绝不能做什么
+
+- **不要把令牌本身写进 `.env`**，也不要 `cat` 它、贴进对话或截图。`.env` 里只放路径（设计 §6）
+- **不要改成 `0444` 或复制第二份令牌**给部署用户：两份要同步轮换，迟早对不上
+- **不要删掉文件来「停用」接口。**生产上 compose 的 `file:` secret 缺文件时**部署直接失败**（[deployment.md](deployment.md) §6）
+- **不要把心跳地址写进仓库或文档。**知道地址就能伪造「成功」；`config_snapshot.sh` 上传前按键名模式
+  `^BILLING_HEALTHCHECK_[A-Z0-9_]*_URL=` 自查，撞上就拒传
