@@ -634,7 +634,8 @@ Ubuntu 容器里用真 `flock`：锁被占且心跳 10 分钟前 → 跳过**并
 | `config_snapshot.sh`（§5.2.8） | `BILLING_HEALTHCHECK_CONFIG_URL` | 快照上传确认 | 任何失败（含**自查发现密钥**） | `--dry-run` |
 
 - **两个检查分开**：频率差 1440 倍，合成一个的话 binlog 每分钟的心跳会把「全量三天没跑」盖住
-- ⚠️ **生产巡检另有三个检查**（容器健康 / `/readyz` / 磁盘），同一个账号、同一条 Telegram，见 §8.1
+- ⚠️ **生产巡检另有三个检查**（容器健康 / `/readyz` / 磁盘），同一个账号、同一条 Telegram，见 §8.1；
+  应用自己报的告警维度（`fx_fetch` / `fx_stale`，以后还有更多）也由巡检推，每个维度一个检查，见 §8.4
 - ping 带 `-m 10` 超时，失败只记一行、不让本轮失败：数据已经离机，监控服务抖动不该变成「推送失败」；
   binlog 那边卡住的 ping 还会一直占着锁
 - 没配地址时照常运行，但失败时多打一行 `nobody will be told about this`
@@ -765,7 +766,10 @@ outbox 的投递语义本来就是 at-least-once，密码重置无害；**Phase 
    塞进环境变量再导出，输出里那个值出现 **0 次**
 2. **上传前拿 `.env` 里的真值自查一遍**：口令、R2 凭据、心跳地址逐个 `grep`，撞上就**拒传**。
    ⚠️ 这道自查是给**未来的改动**兜底的 —— 哪天有人把 `--no-interpolate` 去掉，
-   一份带口令的快照传上去就收不回来了
+   一份带口令的快照传上去就收不回来了。
+   心跳地址**不是手写清单**（AIH-TASK-043 起）：`.env` 里所有匹配 `^BILLING_HEALTHCHECK_[A-Z0-9_]*_URL=`
+   的键逐个自查。以后新增检查（例如 §8.4 的告警维度）只在 `.env` 加地址，不必回来改脚本 ——
+   按原来的手写清单，`BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` / `…_FX_STALE_URL` 根本不会被查（设计闸门 #183 v2 预审的发现）
 
 快照本身仍然加密之后才上传：键名与拓扑也算内部信息。
 
@@ -1011,6 +1015,125 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 - 日志聚合，以及基于日志内容的告警规则（§94 的异地留存也卡在这一条上）
 - 告警的**值班与升级路径**：现在只有一个人、一条 Telegram。`P1 30 分钟未响应升级`
   这类规则等有第二个人再谈 —— 写在 runbook 里而不是配置里
+
+### 8.4 应用的告警维度：FX 汇率（AIH-TASK-043，设计闸门 #183 v3）
+
+ADR-0005 第 6 条要的两条告警（连续拉取失败、已发布汇率过期）。判据在应用里算，`deploy/monitor.sh` 只负责读和推：
+
+```text
+app/services/alerts.py（维度注册表）→ GET /internal/alerts（纯文本，每行一个维度）
+  → deploy/monitor.sh 每 5 分钟读一次 → 每个维度一个 Healthchecks 检查 → Telegram
+```
+
+| 维度 | 何时 P2 | Healthchecks 检查 | `.env` 键 | runbook |
+| --- | --- | --- | --- | --- |
+| `fx_fetch` | 某个配置币种最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE`），且至少一条 `FAILED`（= 连续 3 天拉取失败）。周末、假期 BNM 答「无记录」算成功，不误报 | `ai_billing_hub fx_fetch` | `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` | [FX 拉取失败](runbook.md) |
+| `fx_stale` | 某个配置币种**当前生效**的版本，报价日距今超过 **5 个日历日**（吉隆坡日期相减；Kelvin 2026-09-29 定，见 ADR-0005 收口条件）；或根本没有生效的版本 | `ai_billing_hub fx_stale` | `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL` | [FX 汇率过期或没有生效的汇率](runbook.md) |
+
+行格式与接口细节见 [api.md](api.md)「内部告警接口」。地址规则是通用的：维度 `<名字>` 用
+`BILLING_HEALTHCHECK_ALERT_<名字大写>_URL`。以后 T-E、T-H 注册的维度**只在 `.env` 加地址**，`monitor.sh` 与
+`config_snapshot.sh` 都不用改（§5.2.8）。
+
+**两层访问控制**：
+
+1. nginx（`deploy/nginx/billing.conf`）：`location = /internal/alerts` 的 allow 名单与 `/readyz` **完全相同**
+   （回环、本栈网段、proxy_net），其余 deny；`location /internal/ { deny all; }` 让以后在 `/internal/` 下新增的
+   路径默认 403。`tests/backend/test_compose.py` 钉着两份名单一致
+2. 应用：`Authorization: Bearer <令牌>`。需要这一层是因为 proxy_net 上还有同机其他项目的容器
+
+**`monitor.sh` 的行为**（`check_alerts` / `publish_alerts`）：
+
+- 令牌文件的**宿主机路径**取 `.env` 的 `BILLING_MONITOR_TOKEN_HOST_FILE`（字面解析，不 source）。令牌本身不进 `.env`
+- ⚠️ **令牌不进任何命令行参数**：用 bash 内建的 `read` 读文件、内建的 `printf` 把 `header = "Authorization: Bearer …"`
+  写进 curl 的标准输入，`curl --config -` 从标准输入读。写成 `-H "Authorization: Bearer $(cat …)"` 的话，同机任何用户
+  `ps` 都看得到
+- 每行一个维度、各推一个检查：`OK` 推成功，`P1` / `P2` 推 `/fail`（正文 `P2 fx_stale: …`），并照常以 err 级别写 syslog
+- **接口不通（非 200，含令牌配错时的 401 / 404）、令牌文件没配或读不出：只记日志，不推这些维度。**API 挂了时
+  readyz 维度已经报了同一个原因，再推就是双响；Healthchecks 的宽限期到了会报「未上报」，所以不会静默
+- 缺某个维度的地址：只记一行 `no BILLING_HEALTHCHECK_ALERT_…_URL configured`，其余维度照推
+- 复核一并覆盖：有维度不是 `OK` 也先隔 45 秒复核，复核时四类检查全部重跑
+
+#### 合并后的运维步骤（设计 §8；Kelvin 或经授权在 VPS 上执行）
+
+⚠️ 下面的 `<部署目录>`、`<部署用户>`、`<端口>` 都是占位符：真实主机名、路径与心跳地址不进仓库。
+
+1. **监控令牌文件** `secrets/monitor.token`：属主 `10001`、**属组为部署用户的主组**、权限 `0440`。
+   ⚠️ 与其他 secrets 的 `10001:10001 0400` 不同：`monitor.sh` 由 cron 以**部署用户**（不是 root）运行，`0400` 它读不到，
+   告警维度就永远推不出去。容器以 uid 10001 按属主读，部署用户按属组读，其他用户读不到。**不复制第二份令牌**
+   （两份要同步轮换），也不为此让容器以 root 运行。
+
+   AIH-TASK-042 部署时这个文件已经建过（§6：缺文件时部署直接失败）。已有且内容不少于 32 个字符就不要重新生成，
+   只改属主与权限；没有或内容过短才生成：
+
+   ```bash
+   cd <部署目录>
+   wc -c secrets/monitor.token            # openssl rand -hex 32 生成的是 65 字节（64 个字符 + 换行）
+   # 只在文件不存在或过短时：
+   (umask 077; openssl rand -hex 32 > secrets/monitor.token.new) && mv secrets/monitor.token.new secrets/monitor.token
+   sudo chown 10001:"$(id -gn <部署用户>)" secrets/monitor.token
+   sudo chmod 0440 secrets/monitor.token
+   stat -c '%u:%G %a' secrets/monitor.token   # 期望 10001:<部署用户的主组> 440
+   ```
+
+   - 以部署用户确认读得到：`test -r secrets/monitor.token && echo readable`（`secrets/` 目录本身也要让部署用户进得去）
+   - ⚠️ **不要 `cat` 它**，也不要把内容贴进任何对话或文档；它只在这台主机上
+   - 应用每次请求都重新读这个文件：轮换就是重新生成，**不需要重启**
+   - `.env` 只加宿主机路径（绝对路径，cron 的工作目录不一定是部署目录）：
+     ```
+     BILLING_MONITOR_TOKEN_HOST_FILE=<部署目录>/secrets/monitor.token
+     ```
+   - compose 里的容器内路径（`/run/secrets/billing_monitor_token`）已由 AIH-TASK-042 写死，不经 `.env`
+
+2. **Healthchecks 新建两个检查**（与 §8.1 同一个账号、同样的周期）：Schedule **Simple**，Period **5 分钟**，
+   Grace **15 分钟**，勾上 Telegram；名字 `ai_billing_hub fx_fetch` / `ai_billing_hub fx_stale`。Ping URL 写进 `.env`：
+   ```
+   BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL=https://hc-ping.com/<fx_fetch 检查的 uuid>
+   BILLING_HEALTHCHECK_ALERT_FX_STALE_URL=https://hc-ping.com/<fx_stale 检查的 uuid>
+   ```
+   用量从 8 个变成 10 个（免费档上限 20；T-E +1、T-H 计划 +5 之后是 16 个）。地址同样是凭据，
+   `config_snapshot.sh` 按键名模式自查，会自动覆盖这两个新键。
+
+3. **在 worker 容器里手工触发一次拉取**，确认生产 worker 能经 HTTPS 访问 BNM（设计 §10 假设 3）：
+   ```bash
+   docker compose exec celery-worker python -c "from app.tasks.fx_fetch import fetch; print(fetch())"
+   ```
+   `NEW_DRAFT` / `NO_NEW_QUOTE` 是取到了；周末、公众假期或吉隆坡 12:30 之前答「无记录」（`NO_QUOTE_FOR_DATE`）
+   **也算可达**；`FAILED`（`NETWORK` / `TIMEOUT`）才是不可达 —— 按 runbook「FX 拉取失败」查出站网络。
+   细节见 [currency-and-fx.md](currency-and-fx.md)「在 worker 容器里手工触发」。
+
+4. **管理员发布第一个汇率版本**（管理端接口，[api.md](api.md)「管理端汇率」；前端页面归 AIH-TASK-036）：
+   - 有 BNM 草稿：`GET /api/v1/admin/fx-rates?status=DRAFT&base_currency=USD` 找到它，与 BNM 网站上同一报价日的
+     中午场中间价核对一遍，再 `POST /api/v1/admin/fx-rates/{fx_rate_id}/publish`，**不给 `effective_from`**
+   - 还没有 BNM 草稿（周末、假期）：`POST /api/v1/admin/fx-rates` 手工录入（`source_reference` 写出处），再发布
+   - 时间线为空时不给时刻的发布得到 `[null, null)`（「一直以来」）：此前非 MYR 的事件一律取不到汇率、从未扣过钱，
+     补上只是把「无汇率」变成「有汇率」（设计 §2 P1）
+
+5. **验证**：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh` 手工跑一次，日志里出现 `fx_fetch: …`、
+   `fx_stale: …` 两行，两个检查变绿。nginx 那一层可以不带令牌直接看状态码（部署时 `deploy.sh` 已 reload 过 nginx）：
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<端口>/internal/alerts   # 401：名单放行，应用要令牌
+   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<端口>/internal/other    # 403：/internal/ 其余一律拒绝
+   ```
+   - 第 4 步之前 `fx_stale` 是 `P2 USD no rate in effect`：这是**预期的**，它会发一条 Telegram；发布之后下一轮恢复
+   - 接口返回 404：令牌文件读不出或过短（应用每次请求记一条 ERROR），回到第 1 步；返回 401：`.env` 指向的不是
+     容器挂载的那一份文件
+   - cron 那一行不变（仍是 `*/5`），**不需要**重装 `/etc/cron.d/ai_billing_hub`
+
+**本地演练**（设计 §7 的 `monitor.sh` 一行；做法同 §8.1：假 docker + 假告警接口 + 一个记录请求的假心跳服务）：
+
+⚠️ **本地演练未执行**：AIH-TASK-043 的实现环境无法运行命令，下表七个场景**一个都还没跑过**，「实际结果」一栏因此全部是「未执行」。
+合并前（或合并后、第 5 步验证之前）要有人按 §8.1 的做法逐个手工跑一遍，把观察到的结果填进「实际结果」一栏；
+与「应有的结果」不符的，先修 `deploy/monitor.sh` 再上线。
+
+| 场景 | 应有的结果 | 实际结果 |
+| --- | --- | --- |
+| 接口返回两行 `OK` | `fx_fetch`、`fx_stale` 各一次成功 ping | 未执行 |
+| 接口返回 `fx_stale P2 …` | `fx_stale` 推 `/fail`（正文 `P2 fx_stale: …`），err 级 syslog，`fx_fetch` 照推成功；退出码 1 | 未执行 |
+| 接口不通（连接失败） | 两个维度都不推；记 `alerts endpoint is not answering 200` | 未执行 |
+| 接口 404（令牌文件不可用） | 同上，都不推 | 未执行 |
+| `.env` 缺 `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL` | 只记 `no BILLING_HEALTHCHECK_ALERT_FX_STALE_URL configured`，`fx_fetch` 照推 | 未执行 |
+| 第一轮 `P2`、复核时已 `OK` | 成功 ping | 未执行 |
+| 令牌只经标准输入 | 假 curl 记下的 argv 里没有令牌 | 未执行 |
 
 ---
 

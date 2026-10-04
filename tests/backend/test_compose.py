@@ -646,6 +646,35 @@ def test_readyz_is_not_open_to_every_private_address() -> None:
     assert "deny all;" in conf
 
 
+def allow_list(block: str) -> list[str]:
+    return [line.strip() for line in block.splitlines() if line.strip().startswith("allow ")]
+
+
+def test_the_alerts_endpoint_shares_the_readyz_allow_list() -> None:
+    """设计闸门 #183 v3 §2「内部告警接口」的第一层：与 `/readyz` 同一份名单，其余 deny。
+
+    ⚠️ 两份名单是**抄**的（nginx 没有变量能共用一个 allow 列表）。只改了一份的话，
+    要么宿主机的 monitor.sh 被 deny、告警维度推不出去，
+    要么告警接口比 `/readyz` 开得更宽。
+    """
+    readyz = nginx_location_block("= /readyz")
+    alerts = nginx_location_block("= /internal/alerts")
+
+    assert allow_list(alerts) == allow_list(readyz)
+    assert allow_list(alerts), "no allow line at all"
+    # deny 必须在所有 allow 之后：nginx 按顺序匹配，排在前面就把名单整个盖掉。
+    assert alerts.index("deny all;") > alerts.rindex("allow ")
+    assert "proxy_pass $billing_api$request_uri;" in alerts
+
+
+def test_everything_else_under_internal_is_denied() -> None:
+    """`/internal/` 下以后新增的路径默认 403，不会因为忘了写 location 而落到别处。"""
+    block = nginx_location_block("/internal/")
+    assert "deny all;" in block
+    assert "allow " not in block
+    assert "proxy_pass" not in block
+
+
 def test_the_stack_subnet_is_the_same_string_everywhere() -> None:
     """⚠️ nginx 的 conf 读不到环境变量，所以本栈网段在那边是**抄**过去的。
 
