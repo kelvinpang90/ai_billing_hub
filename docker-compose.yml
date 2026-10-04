@@ -372,8 +372,15 @@ secrets:
   # （10001 就是 Dockerfile 里的 APP_UID）。**不得为了读密钥把容器改回 root。**
   # 见 ADR-0004 第 2 节；宿主机那一半归 T0.9。
   #
-  # 文件不存在时 `docker compose up` 直接失败 —— 与密码留空同一种 fail-closed：
-  # 宁可起不来，也不要一个「认证看起来能用但密钥来路不明」的栈。
+  # ⚠️ **文件不存在时的行为取决于 Docker 跑在哪里**（下面四把都一样）：
+  #   - **Linux 上的 Docker Engine（生产）：创建容器直接失败**（`bind source path does
+  #     not exist`）。2026-10-04 实证：AIH-TASK-042 新增 monitor.token 时宿主机没有这个
+  #     文件，部署在迁移那一步失败、旧版本原样留着。与密码留空同一种 fail-closed。
+  #   - **Docker Desktop（本机开发）：栈照样起得来** —— 它在宿主机上把缺失的路径**建成
+  #     一个目录**再挂进去，读它抛 OSError。之后再想建文件会撞上「Is a directory」，得先删掉
+  #     那个目录。
+  # ⚠️ 所以**新增一个 secret 时，生产宿主机上的文件必须在合并之前建好** —— 合并到 main
+  # 就是部署，CI 只跑 `compose config` 和构建、不起容器，拦不住这一条。
   # 生成：openssl rand -base64 48 > secrets/jwt.key
   billing_jwt_key:
     file: ./secrets/jwt.key
@@ -390,10 +397,9 @@ secrets:
   # 空内容的语义是「没有密码」，而不是「没配好」—— 有些 relay 只认 IP 白名单，
   # 那时本来就不该有密码（见 app/core/mailer.py：用户名为空时根本不调 login）。
   #
-  # ⚠️ **文件不存在时栈照样起得来**（实测）：Docker 会把缺失的 `file:` secret
-  # 挂成一个**空目录**，读它抛 OSError，于是密码静默变成空串 —— 只在日志里留一条
-  # `Could not read the SMTP password file`。所以「忘了建文件」与「本来就不需要
-  # 密码」在行为上几乎一样，差别只在那一行日志。**别指望 compose 替你挡住。**
+  # ⚠️ 文件不存在时：生产（Linux）部署直接失败，见本节开头。Docker Desktop 下栈照样
+  # 起得来，读到的是目录、抛 OSError，于是密码静默变成空串 —— 只在日志里留一条
+  # `Could not read the SMTP password file`。
   billing_smtp_password:
     file: ./secrets/smtp.password
   # `GET /internal/alerts` 的 Bearer 令牌（设计闸门 #183 v3 §2「内部告警接口」、§6）。
@@ -403,10 +409,9 @@ secrets:
   # 容器以 uid 10001 按属主读；宿主机上 cron 以部署用户（不是 root）跑 monitor.sh，按属组读
   # 同一份文件 —— `0400` 它读不到，告警维度就永远推不出去。不复制第二份令牌（两份要同步轮换）。
   #
-  # ⚠️ **文件不存在时栈照样起得来**（与 smtp.password 同一个实测行为）：Docker 把缺失的
-  # `file:` secret 挂成一个**空目录**，读它抛 OSError。这里的后果是告警接口一律 404、每次请求
-  # 记一条 ERROR（`The monitor token file cannot be read`，不含路径）—— monitor.sh 推不出告警
-  # 维度，Healthchecks 宽限期后报「未上报」。所以不会静默，但**别指望 compose 替你挡住**。
+  # ⚠️ 文件不存在时：生产（Linux）部署直接失败，见本节开头（2026-10-04 就是这一把）。
+  # Docker Desktop 下栈照样起得来，读到的是目录、抛 OSError：告警接口一律 404、每次请求
+  # 记一条 ERROR（`The monitor token file cannot be read`，不含路径）。
   billing_monitor_token:
     file: ./secrets/monitor.token
 

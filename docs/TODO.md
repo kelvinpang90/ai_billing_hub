@@ -511,7 +511,9 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 
 ## 待办：缺失的 secret 文件不会让栈起不来（既有，与 compose 注释所写相反）
 
-- [ ] **`docker-compose.yml` 的 `secrets:` 注释说「文件不存在时 `docker compose up` 直接失败 —— 与密码留空同一种 fail-closed」，实测不成立**（T0.8d 复审时验证）：Docker 会把缺失的 `file:` secret 挂成一个**空目录**，栈照常起来。三把密钥都一样 ——
+- [x] **2026-10-04 更正：这一条只在 Docker Desktop 下成立，生产上不成立。** AIH-TASK-042 合并后的生产部署因宿主机缺 `secrets/monitor.token` 在创建容器时直接失败（`bind source path does not exist`，Linux 上的 Docker Engine），同一个 compose 在本机 Docker Desktop 下则把缺失路径建成目录、照常起栈。所以生产是 fail-closed 的，compose 原注释说得对；T0.8d 的「实测」是 Docker Desktop 的行为。compose、`.env.example`、deployment §6、runbook 已按两种环境改写。下面是原文，**只描述 Docker Desktop 下的情况**：
+
+  **`docker-compose.yml` 的 `secrets:` 注释说「文件不存在时 `docker compose up` 直接失败 —— 与密码留空同一种 fail-closed」，实测不成立**（T0.8d 复审时验证）：Docker 会把缺失的 `file:` secret 挂成一个**空目录**，栈照常起来。三把密钥都一样 ——
   - `jwt.key` 缺失 → `load_signing_key` 抛 `AuthNotConfigured`，认证端点 503（**这一条仍是 fail-closed，只是不在 compose 那一层**）
   - `master.key` 缺失 → 2FA 端点报 `ENCRYPTION_NOT_CONFIGURED`
   - `smtp.password` 缺失 → 密码**静默变成空串**，只留一条 error 日志（T0.8d 已在自己那条注释里写明实际行为）
