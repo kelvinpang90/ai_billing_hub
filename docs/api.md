@@ -12,6 +12,7 @@
 - [管理端审计日志](#管理端审计日志)（AIH-TASK-022）
 - [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
+- [内部告警接口](#内部告警接口)（AIH-TASK-042）：机器接口，**不套信封**，是下面通用约定的例外
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -1738,3 +1739,68 @@ reprocess，不在这里。
 | `FX_RATE_RETIRE` | `status`、`effective_from`、`effective_to` | `status`、`effective_from`、`effective_to`、`reason`；恢复了前一个版本时 `restored_version`：它的 `id`。`reason` 也记在审计行的 `reason` 上 |
 
 「已发布再发布」与无变化的 PATCH 不写审计。
+
+---
+
+## 内部告警接口
+
+设计依据：设计闸门 #183（[AIH-TASK-028-fx-rates.md](design/AIH-TASK-028-fx-rates.md) v3 第 2 节
+「内部告警接口」「两个告警维度」、第 5 节令牌一行、第 6 节）。实现在 `app/api/internal_alerts.py` 与
+`app/services/alerts.py`。
+
+`GET /internal/alerts` 是给宿主机上 `deploy/monitor.sh` 读的**机器接口**，不给浏览器、也不给集成方：
+
+- **不在 `/api/` 下，不套 §107 信封。**`monitor.sh` 是 bash，宿主机未必有 `jq`。所有响应（200、401、404、503）
+  都是 `text/plain; charset=utf-8`；响应头照常带 `X-Request-ID`。
+- 不在 OpenAPI 文档里。
+
+### 两层访问控制
+
+1. **nginx**：`location = /internal/alerts` 与 `/readyz` 同一份 allow 名单（回环、本栈网段、proxy_net），其余
+   deny；另有 `location /internal/ { deny all; }`。⚠️ 这一层归 AIH-TASK-043，**在它合并之前这个路径经 nginx
+   落到前端、外面不可达**。
+2. **应用**：`Authorization: Bearer <令牌>`，令牌从 `BILLING_MONITOR_TOKEN_FILE` 所指的文件读（compose 里固定为
+   `/run/secrets/billing_monitor_token`，宿主机文件 `secrets/monitor.token`），常量时间比较。需要第二层是因为
+   proxy_net 上还有同机其他项目的容器。令牌只能读告警行，不是管理员凭据。
+
+令牌文件的每种状态：
+
+| `BILLING_MONITOR_TOKEN_FILE` | 文件 | 响应 |
+| --- | --- | --- |
+| 空（未配置） | — | 404 `not found`，不记日志（等于未启用） |
+| 已配置 | 读不出：不存在、是目录（compose 缺 `file:` secret 时挂成空目录）、无权限 | 404 `not found`，每次请求一条 ERROR 日志 |
+| 已配置 | 去首尾空白后少于 32 个字符（含空文件） | 404 `not found`，每次请求一条 ERROR 日志 |
+| 已配置 | 可用 | 缺 `Authorization`、不是 `Bearer`、令牌不对 → 401 `unauthorized`（带 `WWW-Authenticate: Bearer`，不说明原因）；对 → 200 |
+
+- 401 / 404 的正文只有 `unauthorized` / `not found` 一行。
+- ERROR 日志不含文件路径与内容。
+- **每次请求重新读文件**：轮换令牌（改文件内容）不需要重启。生成：`openssl rand -hex 32`（64 个字符）。
+- **令牌判定先于任何数据库查询**：401 / 404 不碰数据库。
+- 令牌通过、但服务没有配置数据库或查询出错 → 503，正文一行（`database not configured` / `unavailable`）。
+  `monitor.sh` 把非 200 当成「接口不通」，不推告警维度，Healthchecks 宽限期后报「未上报」。
+
+### 行格式
+
+200 的正文每个维度一行，以换行结束，顺序固定（维度注册表 `app/services/alerts.py` 的 `DIMENSIONS`）：
+
+```text
+<维度> <OK|P1|P2> <一句摘要>
+```
+
+例如：
+
+```text
+fx_fetch OK USD last success 2026-09-29
+fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
+```
+
+- 一个维度一行。多个币种汇总进这一行：级别取各配置币种（`BILLING_FX_CURRENCIES`，按它的顺序）里最严重的；
+  有不 OK 的币种时摘要只列它们，各一小段、以 `; ` 分隔；都 OK 时列每个币种。
+- 摘要只有计数、日期与币种，**不含租户、金额（汇率本身也不写）或任何个人数据**。
+- 维度查询是普通读、不拿 `fx_rate_locks`：告警只是提示，不让汇率发布等它。
+- 以后的维度（幂等冲突、定价错误、汇率错误、未知模型、负余额、outbox 积压）追加到注册表里，行格式不变。
+
+| 维度 | 何时 `P2` | 摘要 |
+| --- | --- | --- |
+| `fx_fetch` | 某个配置币种在最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT`、`NO_NEW_QUOTE`、`NO_QUOTE_FOR_DATE` 都算成功），且至少有一条 `FAILED` —— 即连续 3 天拉取失败。72 小时内一条记录都没有是 OK（从未运行或 Beat 停了，由 `fx_stale` 报） | `P2`：`USD no successful fetch in 72 hours (3 failed)`；OK：`USD last success <吉隆坡日期>` 或 `USD no fetch in 72 hours` |
+| `fx_stale` | 某个配置币种**此刻生效**的版本（与 `resolve_fx_rate` 同一条件）的报价日距今**超过 5 个日历日**（吉隆坡日期相减；BNM 版本用报价日，手工录入用 `observed_at` 的吉隆坡日期）；或此刻没有生效的版本（包括只有未来的预约） | `P2`：`USD quoted 2026-09-24 (6 calendar days)` 或 `USD no rate in effect`；OK：`USD quoted 2026-09-29 (1 calendar day)` |

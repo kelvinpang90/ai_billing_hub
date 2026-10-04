@@ -228,6 +228,20 @@ def test_every_credential_file_setting_is_wired_into_compose(compose: dict) -> N
         assert name in mounted, f"{name} 定义了却没挂给后端，容器里那个路径不存在"
 
 
+def test_the_monitor_token_is_a_secret_at_a_fixed_container_path(compose: dict) -> None:
+    """设计闸门 #183 v3 §2「内部告警接口」、§8：容器内路径直接写进后端环境，不经 `.env`。
+
+    `.env` 里只有给宿主机 monitor.sh 用的 `BILLING_MONITOR_TOKEN_HOST_FILE`；
+    两边读的是同一份 `secrets/monitor.token`，不复制第二份令牌。
+    """
+    backend = compose["x-backend"]
+    env = backend["environment"]
+
+    assert env["BILLING_MONITOR_TOKEN_FILE"] == "/run/secrets/billing_monitor_token"
+    assert compose["secrets"]["billing_monitor_token"] == {"file": "./secrets/monitor.token"}
+    assert "billing_monitor_token" in backend["secrets"]
+
+
 def test_the_credential_rotation_overlap_reaches_the_backend(compose: dict) -> None:
     """AIH-TASK-012 设计 §2「配置」要求重叠期可配置；compose 不读 `.env`，不转发就改不动。
 

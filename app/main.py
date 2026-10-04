@@ -14,6 +14,7 @@ from app.api.admin_pricing_rules import router as admin_pricing_rules_router
 from app.api.admin_provider_prices import router as admin_provider_prices_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.api.internal_alerts import router as internal_alerts_router
 from app.api.two_factor import router as two_factor_router
 from app.core.celery_app import RedisNotConfigured, create_celery_app
 from app.core.clientip import parse_trusted_proxies
@@ -57,6 +58,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_provider_prices_router)
     app.include_router(admin_pricing_rules_router)
     app.include_router(admin_fx_rates_router)
+    # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。
+    app.include_router(internal_alerts_router)
 
     app.state.settings = settings
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。

@@ -102,10 +102,15 @@ x-backend: &backend
     # 集成 API 凭据轮换后旧版本还能用多久（秒，AIH-TASK-012 设计 §2「配置」）。
     # 本文件不读 .env，不在这里转发的话，改 .env 进不了容器。
     BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS: ${BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS:-604800}
+    # `GET /internal/alerts` 的监控令牌（设计闸门 #183 v3 §2「内部告警接口」）。同样只给路径，
+    # 而且**直接写容器内路径、不经 .env**：`.env` 里只有给宿主机 monitor.sh 用的
+    # `BILLING_MONITOR_TOKEN_HOST_FILE`。文件缺失或不可用时接口 404，见下面 secrets 的注释。
+    BILLING_MONITOR_TOKEN_FILE: /run/secrets/billing_monitor_token
   secrets:
     - billing_jwt_key
     - billing_master_key
     - billing_smtp_password
+    - billing_monitor_token
   # ⚠️ 只是启动顺序，**不是** service_healthy。API 被设计成依赖不可用时照样
   # 启动、由 /readyz 如实汇报（见 app/main.py 与 app/api/health.py）——
   # 让它等 MySQL 健康，等于 MySQL 坏了就连 /healthz 都拿不到，排障时手上空空。
@@ -391,6 +396,19 @@ secrets:
   # 密码」在行为上几乎一样，差别只在那一行日志。**别指望 compose 替你挡住。**
   billing_smtp_password:
     file: ./secrets/smtp.password
+  # `GET /internal/alerts` 的 Bearer 令牌（设计闸门 #183 v3 §2「内部告警接口」、§6）。
+  # 生成：openssl rand -hex 32 > secrets/monitor.token
+  #
+  # ⚠️ **属主与权限和上面三把不同**：`chown 10001:<部署用户的主组>` + `chmod 0440`。
+  # 容器以 uid 10001 按属主读；宿主机上 cron 以部署用户（不是 root）跑 monitor.sh，按属组读
+  # 同一份文件 —— `0400` 它读不到，告警维度就永远推不出去。不复制第二份令牌（两份要同步轮换）。
+  #
+  # ⚠️ **文件不存在时栈照样起得来**（与 smtp.password 同一个实测行为）：Docker 把缺失的
+  # `file:` secret 挂成一个**空目录**，读它抛 OSError。这里的后果是告警接口一律 404、每次请求
+  # 记一条 ERROR（`The monitor token file cannot be read`，不含路径）—— monitor.sh 推不出告警
+  # 维度，Healthchecks 宽限期后报「未上报」。所以不会静默，但**别指望 compose 替你挡住**。
+  billing_monitor_token:
+    file: ./secrets/monitor.token
 
 # ⚠️ **把本栈这张网的网段钉死**（T0.9 2026-09-16）。不钉的话 docker 每次按顺序
 # 随手分一个 172.x —— 于是「可信代理是谁」这件事在每台机器上、甚至每次重建之后
