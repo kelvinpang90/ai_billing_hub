@@ -241,6 +241,15 @@ class Settings(BaseSettings):
     # ⚠️ 不能不设：外部接口卡住时 worker 的那个进程会一直占着（同 smtp_timeout_seconds）。
     fx_fetch_timeout_seconds: int = Field(default=10, gt=0)
 
+    # --- 内部告警接口（AIH-TASK-042，设计闸门 #183 v3 §2「内部告警接口」） -------------
+
+    # `GET /internal/alerts` 的 Bearer 令牌所在的**文件路径**，不是令牌本身 —— 与
+    # smtp_password_file 同一条规矩（ADR-0004 第 2 节）。生产上由 Docker secret 挂成文件。
+    # 空串 = 未配置：接口 404（等于未启用）。**每次请求重新读文件**，轮换令牌不需要重启；
+    # 读不出、去首尾空白后少于 32 个字符同样 404，并记一条不含路径的 ERROR
+    # （见 app/api/internal_alerts.py）。
+    monitor_token_file: str = ""
+
     @field_validator("fx_bnm_base_url")
     @classmethod
     def _fx_base_url_is_https(cls, value: str) -> str:
