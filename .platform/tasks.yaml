@@ -2117,7 +2117,7 @@ tasks:
     title: 汇率第六刀：反向代理放行告警接口、监控推送、配置快照自查与运维文档
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F6，只做部署与告警接线：nginx 放行 /internal/alerts（与 /readyz 同一份名单）并拒绝 /internal/ 其余路径；monitor.sh 按行推 Healthchecks；config_snapshot.sh 按键名模式自查心跳地址；部署与运维文档、ADR-0005 收口。不改应用代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-042
     acceptance_criteria:
