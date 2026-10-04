@@ -2061,7 +2061,7 @@ tasks:
     title: 汇率第五刀：带令牌的内部告警接口，以及汇率拉取与汇率过期两个告警维度
     purpose: >-
       按 docs/design/AIH-TASK-028-fx-rates.md（设计闸门 #183 已批准 v3）§11 的 F5：带令牌的内部告警接口 GET /internal/alerts（纯文本、维度注册表）与 fx_fetch、fx_stale 两个维度；监控令牌的配置项与 compose secret 同一个任务（compose 用例要求每个 *_file 配置项都挂好）。不改 nginx：F6 加 location 之前，这个路径经 nginx 落到前端、不可达。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-040
     acceptance_criteria:
