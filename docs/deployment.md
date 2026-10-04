@@ -809,9 +809,16 @@ Kelvin 在 Cloudflare 加上 `config-366d`（前缀 `config/`、366 天）。建
 下生效、普通 compose 下被忽略** —— 宿主机文件的属主与权限原样带进容器。所以上面
 那条 `chown` 不是建议，是唯一的生效途径。
 
-⚠️ **还有一条 T0.8d 实测确认的**：文件不存在时 **`docker compose up` 照样起得来** ——
-Docker 把缺失的 `file:` secret 挂成一个**空目录**，读它抛 `OSError`，于是密钥静默变成
-空串。别指望 compose 替你挡住「忘了建文件」。
+⚠️ **文件不存在时的行为取决于 Docker 跑在哪里**：
+
+- **生产（Linux 上的 Docker Engine）：创建容器直接失败**（`bind source path does not exist`）。
+  2026-10-04 实证：AIH-TASK-042 新增 `secrets/monitor.token` 时宿主机还没有这个文件，部署在
+  迁移那一步失败、旧版本原样留着；在宿主机建好文件后重跑部署才成功。
+- **Docker Desktop（本机开发）：栈照样起得来** —— 它在宿主机上把缺失的路径建成一个**目录**再
+  挂进去，读它抛 `OSError`，于是密钥静默变成空串。T0.8d 当年的「实测」就是这种情况。
+
+所以**新增一个 `file:` secret 时，生产宿主机上的文件必须在合并之前建好** —— 合并到 `main`
+就是部署，CI 只跑 `compose config` 和构建、不起容器，拦不住这一条。
 
 ---
 

@@ -304,7 +304,8 @@ SELECT COUNT(*) FROM two_factor_settings;
 
 | 信号 | 说明 |
 | --- | --- |
-| 日志里 TOTP 解密失败 / 启动时读不到密钥 | 文件不存在时 Docker 把 secret 挂成一个**空目录**，读它抛 `OSError` —— 密钥静默变成空串 |
+| 部署失败：`bind source path does not exist` | 生产（Linux）上 secret 文件不存在时，创建容器直接失败，旧版本原样留着 |
+| 日志里 TOTP 解密失败 / 启动时读不到密钥 | Docker Desktop 下 secret 文件不存在时，它把路径建成一个**目录**挂进去，读它抛 `OSError` —— 密钥静默变成空串 |
 | 第二因子全体失效：密码对、验证码一律不通过 | 密文还在库里，只是解不开 |
 | 灾难恢复的第 5 步 | 这时不是「丢了」，而是**要把离线副本放回去** |
 

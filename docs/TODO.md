@@ -511,7 +511,7 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 
 ## 待办：缺失的 secret 文件不会让栈起不来（既有，与 compose 注释所写相反）
 
-- [ ] **`docker-compose.yml` 的 `secrets:` 注释说「文件不存在时 `docker compose up` 直接失败 —— 与密码留空同一种 fail-closed」，实测不成立**（T0.8d 复审时验证）：Docker 会把缺失的 `file:` secret 挂成一个**空目录**，栈照常起来。三把密钥都一样 ——
+- [x] **`docker-compose.yml` 的 `secrets:` 注释说「文件不存在时 `docker compose up` 直接失败 —— 与密码留空同一种 fail-closed」，实测不成立**（T0.8d 复审时验证）：Docker 会把缺失的 `file:` secret 挂成一个**空目录**，栈照常起来。三把密钥都一样 ——
   - `jwt.key` 缺失 → `load_signing_key` 抛 `AuthNotConfigured`，认证端点 503（**这一条仍是 fail-closed，只是不在 compose 那一层**）
   - `master.key` 缺失 → 2FA 端点报 `ENCRYPTION_NOT_CONFIGURED`
   - `smtp.password` 缺失 → 密码**静默变成空串**，只留一条 error 日志（T0.8d 已在自己那条注释里写明实际行为）

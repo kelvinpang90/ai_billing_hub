@@ -1768,7 +1768,7 @@ reprocess，不在这里。
 | `BILLING_MONITOR_TOKEN_FILE` | 文件 | 响应 |
 | --- | --- | --- |
 | 空（未配置） | — | 404 `not found`，不记日志（等于未启用） |
-| 已配置 | 读不出：不存在、是目录（compose 缺 `file:` secret 时挂成空目录）、无权限 | 404 `not found`，每次请求一条 ERROR 日志 |
+| 已配置 | 读不出：不存在、是目录（Docker Desktop 下 compose 缺 `file:` secret 时挂成目录；生产上缺文件则部署直接失败）、无权限 | 404 `not found`，每次请求一条 ERROR 日志 |
 | 已配置 | 去首尾空白后少于 32 个字符（含空文件） | 404 `not found`，每次请求一条 ERROR 日志 |
 | 已配置 | 可用 | 缺 `Authorization`、不是 `Bearer`、令牌不对 → 401 `unauthorized`（带 `WWW-Authenticate: Bearer`，不说明原因）；对 → 200 |
 
