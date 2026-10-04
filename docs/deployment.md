@@ -1119,17 +1119,21 @@ app/services/alerts.py（维度注册表）→ GET /internal/alerts（纯文本�
      容器挂载的那一份文件
    - cron 那一行不变（仍是 `*/5`），**不需要**重装 `/etc/cron.d/ai_billing_hub`
 
-**本地演练的场景**（设计 §7 的 `monitor.sh` 一行；做法同 §8.1：假 docker + 假告警接口 + 一个记录请求的假心跳服务）：
+**本地演练**（设计 §7 的 `monitor.sh` 一行；做法同 §8.1：假 docker + 假告警接口 + 一个记录请求的假心跳服务）：
 
-| 场景 | 应有的结果 |
-| --- | --- |
-| 接口返回两行 `OK` | `fx_fetch`、`fx_stale` 各一次成功 ping |
-| 接口返回 `fx_stale P2 …` | `fx_stale` 推 `/fail`（正文 `P2 fx_stale: …`），err 级 syslog，`fx_fetch` 照推成功；退出码 1 |
-| 接口不通（连接失败） | 两个维度都不推；记 `alerts endpoint is not answering 200` |
-| 接口 404（令牌文件不可用） | 同上，都不推 |
-| `.env` 缺 `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL` | 只记 `no BILLING_HEALTHCHECK_ALERT_FX_STALE_URL configured`，`fx_fetch` 照推 |
-| 第一轮 `P2`、复核时已 `OK` | 成功 ping |
-| 令牌只经标准输入 | 假 curl 记下的 argv 里没有令牌 |
+⚠️ **本地演练未执行**：AIH-TASK-043 的实现环境无法运行命令，下表七个场景**一个都还没跑过**，「实际结果」一栏因此全部是「未执行」。
+合并前（或合并后、第 5 步验证之前）要有人按 §8.1 的做法逐个手工跑一遍，把观察到的结果填进「实际结果」一栏；
+与「应有的结果」不符的，先修 `deploy/monitor.sh` 再上线。
+
+| 场景 | 应有的结果 | 实际结果 |
+| --- | --- | --- |
+| 接口返回两行 `OK` | `fx_fetch`、`fx_stale` 各一次成功 ping | 未执行 |
+| 接口返回 `fx_stale P2 …` | `fx_stale` 推 `/fail`（正文 `P2 fx_stale: …`），err 级 syslog，`fx_fetch` 照推成功；退出码 1 | 未执行 |
+| 接口不通（连接失败） | 两个维度都不推；记 `alerts endpoint is not answering 200` | 未执行 |
+| 接口 404（令牌文件不可用） | 同上，都不推 | 未执行 |
+| `.env` 缺 `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL` | 只记 `no BILLING_HEALTHCHECK_ALERT_FX_STALE_URL configured`，`fx_fetch` 照推 | 未执行 |
+| 第一轮 `P2`、复核时已 `OK` | 成功 ping | 未执行 |
+| 令牌只经标准输入 | 假 curl 记下的 argv 里没有令牌 | 未执行 |
 
 ---
 
