@@ -2504,7 +2504,7 @@ tasks:
     title: 管理端用量事件查询接口（列表与详情）
     purpose: >-
       spec §61 / §89 的管理端用量查询：GET /api/v1/admin/usage-events（按客户、项目、会话、请求、供应商、模型、发生时间段、状态、错误码筛选，分页，最新在前）与 GET /api/v1/admin/usage-events/{usage_event_id}（全部快照、所用版本与规则的 public_id、成本、计费额、毛利、账本引用、冲突记录）。只读，加在 AIH-TASK-032 建的 app/api/admin_usage_events.py 里。不走设计闸门：只读，不碰钱、状态机、摄取、认证与 webhook。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-032
     acceptance_criteria:
