@@ -1696,8 +1696,8 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015 的表随降级到 0009 一并删掉）。
-        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015
+        # 只删触发器：表与列都不动（0012–0015 与 0017 的表随降级到 0009 一并删掉）。
+        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -1793,8 +1793,8 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012–0015 的表随降级到 0010 一并删掉）。
-        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015
+        # 只删索引：表、列与 0010 的触发器都不动（0012–0015 与 0017 的表随降级到 0010 一并删掉）。
+        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010

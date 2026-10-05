@@ -883,15 +883,21 @@ def test_redis_down_lets_the_event_through_with_one_warning(
 
 # --- event_id 与字段校验 ---------------------------------------------------------------
 
+# 大小写用例必须真有字母，否则换大小写什么也没变、用例悄悄退化成合法值。
+_UUID7_UPPERCASE = "00000000-0000-7000-A000-000000000000"
+_ULID_LOWERCASE = "0" * 25 + "a"
+assert _UUID7_UPPERCASE != _UUID7_UPPERCASE.lower()
+assert _ULID_LOWERCASE != _ULID_LOWERCASE.upper()
+
 
 @pytest.mark.parametrize(
     ("event_id", "accepted"),
     [
         pytest.param(uuid7(27), True, id="uuid7"),
         pytest.param("0" * 25 + "1", True, id="ulid"),
-        pytest.param(uuid7(27).upper(), False, id="uuid7-uppercase"),
+        pytest.param(_UUID7_UPPERCASE, False, id="uuid7-uppercase"),
         pytest.param("0" * 27, False, id="ulid-too-long"),
-        pytest.param("0" * 25 + "a", False, id="ulid-lowercase"),
+        pytest.param(_ULID_LOWERCASE, False, id="ulid-lowercase"),
         pytest.param("00000000-0000-4000-8000-000000000027", False, id="uuid4"),
         pytest.param("00000000-0000-7000-c000-000000000027", False, id="uuid7-bad-variant"),
         pytest.param("8" + "0" * 25, False, id="ulid-overflow"),
