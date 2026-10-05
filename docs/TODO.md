@@ -250,15 +250,27 @@
 - [ ] `provider_price_versions` + 泛化价格分量（含缓存 token、非 token 单位）
 - [ ] FX 适配器 + 审批 + 版本历史
 - [ ] Pricing Rules：MARKUP 与 FIXED_RATE
-- [ ] 持久化 `202` 摄取 + 异步处理
+- [x] 持久化 `202` 摄取 + 异步处理
+  - 202 是 AIH-TASK-029 / 030；异步处理是 AIH-TASK-032：Beat 每 10 秒认领（`PROCESSING` + 防护令牌 + 租约）并计费，
+    每 60 秒回收卡住的 `PROCESSING`；摄取不入队，数据库状态就是待办清单（REQ-INGEST-002）
 - [ ] 全局 event 幂等 + 冲突检测
-- [ ] 估算供应商成本计算
-- [ ] 钱包扣费
-- [ ] 负余额处理
-- [ ] 停机
+- [x] 估算供应商成本计算
+  - 计算是 AIH-TASK-031（计价引擎）；AIH-TASK-032 在计费事务里把原币成本、汇率原值、MYR 估算成本与计费额连同版本引用
+    写进事件快照（§14 / §79），`PROCESSED` 之后由触发器保证不可改
+- [x] 钱包扣费
+  - AIH-TASK-032：每个计费额 > 0 的事件经 `post_transaction` 恰好一行 `AI_USAGE`（金额 = −计费额，`USAGE_EVENT / event_id`），
+    与快照、`PROCESSED` 同一事务；0 元事件不写账本；事件与账本的对应由迁移 0018 的触发器保证
+- [x] 负余额处理
+  - AIH-TASK-032：扣费照常（§7 第 7 条接受透支），告警维度 `wallet_negative_balance`（§120）
+- [x] 停机
   - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：用量事件摄取与扣费在 `PENDING_ACTIVATION` / `ENABLED` / `DISABLED`
     下**照常**（§112.1：在途的合法事件要处理完，停用不拦用量）；`CLOSED`（关户任务之后才会出现）的事件不入账，进人工复核
   - ADR-0011：用量扣费的设计闸门必须带最热租户压测（单租户 100 事件 / 秒突发、500 / 秒回补、worker 重试与崩溃下事件 / 账本 / 余额一致），以及压测不达标时切到「同租户批事务」的判据；ADR-0010：停机规则保持 `balance <= 0`
+  - AIH-TASK-032：余额从正变为 ≤ 0 的那一笔扣费与 `SUSPENDED` 跃迁、`status_version` +1、审计、outbox 同一事务（沿用
+    `post_transaction`）；`DISABLED` 照常计费，`CLOSED` 判 `FAILED_FINAL`（`ACCOUNT_CLOSED`）。压测方案与方案 C 判据写在
+    设计闸门 #181 v2 §2「最热租户」，**执行归 AIH-TASK-033**（T-I），本任务不跑压测、不做方案 C
+- 审计动作 `USAGE_EVENT_REQUEUE`（AIH-TASK-032，管理员把从未计费的错误事件重新入队）不在 spec §66 的清单里，按
+  `PROJECT_CREATE` 的先例补上（设计闸门 #181 v2 §2「审计」）；逐个事件的计费不写审计，事件行 + 账本行就是审计链
 
 **验收**：用量事件只计费一次 · 估算成本与 MYR 换算正确 · 客户计费额正确 · 钱包扣减 · 重复事件不双扣 · ID 冲突事件拒绝且不扣费 · 队列丢失后可从数据库状态恢复
 

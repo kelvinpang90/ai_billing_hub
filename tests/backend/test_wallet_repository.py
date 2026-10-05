@@ -122,7 +122,12 @@ def _clean(engine: Engine) -> None:
     能这样清场，本身就说明了为什么生产上要拆分迁移账号与运行账号。
     """
     with engine.begin() as connection:
-        connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        # 0018 起 usage_events 有外键引用账本：被引用的表要关掉外键检查才能 TRUNCATE。
+        connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        try:
+            connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        finally:
+            connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
         connection.execute(text("TRUNCATE TABLE audit_logs"))
     with engine.begin() as connection:
         connection.execute(delete(Wallet))
@@ -767,7 +772,12 @@ def test_a_truncated_ledger_is_reported(factory, engine) -> None:
         post(factory, tenant_id, TOPUP, amount)
 
     with engine.begin() as connection:
-        connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        # 0018 起 usage_events 有外键引用账本：被引用的表要关掉外键检查才能 TRUNCATE。
+        connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        try:
+            connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        finally:
+            connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
 
     with factory() as session:
         problems = verify_wallet(session, tenant_id)

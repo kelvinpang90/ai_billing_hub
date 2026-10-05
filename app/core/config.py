@@ -261,6 +261,17 @@ class Settings(BaseSettings):
     # （见 app/api/internal_alerts.py）。
     monitor_token_file: str = ""
 
+    # --- 异步计费（AIH-TASK-032，设计闸门 #181 v2 §2「认领、租约与防护令牌」） -----------
+
+    # 认领的租约（秒）：认领时写 `lease_expires_at = 认领时刻 + 它`，过期仍是 PROCESSING 的
+    # 事件由卡住回收任务改回可重试。⚠️ `gt=0`：0 让每次认领都立刻过期，回收会和正在处理的
+    # worker 抢同一批事件（防护令牌兜得住，但每条都白做一遍）。远大于一次处理的正常耗时
+    # （毫秒级）。
+    usage_lease_seconds: int = Field(default=120, gt=0)
+    # 一个事件最多被认领几次（认领时 +1）。达到后，失败记录与卡住回收都把它判 FAILED_FINAL。
+    # ⚠️ `gt=0`：0 让第一次失败就进 FAILED_FINAL，一次锁超时就要管理员重新入队。
+    usage_max_attempts: int = Field(default=10, gt=0)
+
     @field_validator("fx_bnm_base_url")
     @classmethod
     def _fx_base_url_is_https(cls, value: str) -> str:

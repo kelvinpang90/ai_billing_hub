@@ -681,7 +681,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验；价格表上的
         # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验；
         # 汇率的七个由 0015 建，在 test_0015_* 里验；两张锁表的 BEFORE UPDATE 由 0016 建，在
-        # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验。
+        # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验；用量事件上的三个由
+        # 0018 建，在 test_0018_* 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -693,6 +694,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0015,
             *_EXPECTED_TRIGGERS_0016,
             *_EXPECTED_TRIGGERS_0017,
+            *_EXPECTED_TRIGGERS_0018,
         }
         assert set(triggers) == expected
     finally:
@@ -3872,8 +3874,11 @@ def test_0017_checks_are_the_ones_the_models_declare() -> None:
         name: (table, _normalised(condition))
         for name, (table, condition) in migration._CHECKS.items()
     }
+    # 0018 加在 usage_events 上的七条由 test_0018_checks_are_the_ones_the_model_declares 比对。
+    later = set(_load_0018()._CHECKS)
+    declared = {name: check for name, check in _usage_checks().items() if name not in later}
 
-    assert from_migration == _usage_checks()
+    assert from_migration == declared
     # Events 9 (shape, integer quantity, four tokens, quantity, status, catalog), conflicts 1.
     assert len(from_migration) == 10
     # Explicit groups, not a chained `=` (design v2); the integer CHECK uses FLOOR (v3).
@@ -4008,8 +4013,10 @@ def test_0017_column_shape(alembic_config: Config) -> None:
         inspector = inspect(engine)
         columns = {table: inspector.get_columns(table) for table in _EXPECTED_0017_COLUMNS}
         # NOT NULL column by column (design v6): composite keys and CHECKs hold only then.
+        # At head `usage_events` also has 0018's columns (test_0018_column_shape).
         for table, expected in _EXPECTED_0017_COLUMNS.items():
-            assert {c["name"]: c["nullable"] for c in columns[table]} == expected, table
+            at_head = expected | _EXPECTED_0018_COLUMNS if table == "usage_events" else expected
+            assert {c["name"]: c["nullable"] for c in columns[table]} == at_head, table
         types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
 
         events, conflicts = _CREATE_ORDER_0017
@@ -4063,8 +4070,10 @@ def test_0017_keys_foreign_keys_indexes_checks_and_triggers(alembic_config: Conf
     engine = create_engine(TEST_DATABASE_URL)
     try:
         inspector = inspect(engine)
+        # At head `usage_events` also has 0018's unique key and foreign keys.
         for table, expected in _EXPECTED_UNIQUE_0017.items():
-            assert _unique_sets(table) == expected, table
+            later_unique = _EXPECTED_UNIQUE_0018 if table == "usage_events" else set()
+            assert _unique_sets(table) == expected | later_unique, table
             foreign_keys = {
                 str(fk["name"]): (
                     fk["constrained_columns"],
@@ -4073,7 +4082,8 @@ def test_0017_keys_foreign_keys_indexes_checks_and_triggers(alembic_config: Conf
                 )
                 for fk in inspector.get_foreign_keys(table)
             }
-            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0017[table], table
+            later_keys = _EXPECTED_FOREIGN_KEYS_0018 if table == "usage_events" else {}
+            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0017[table] | later_keys, table
 
         indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("usage_events")}
         for name, columns in _EXPECTED_INDEXES_0017.items():
@@ -4084,9 +4094,350 @@ def test_0017_keys_foreign_keys_indexes_checks_and_triggers(alembic_config: Conf
             checks = set(connection.execute(_USAGE_CHECKS_QUERY).scalars())
         # ⚠️ RESTRICT: events and conflicts are never deleted, nor what they point at.
         names = {name for keys in _EXPECTED_FOREIGN_KEYS_0017.values() for name in keys}
+        names |= set(_EXPECTED_FOREIGN_KEYS_0018)
         assert delete_rules == dict.fromkeys(names, "RESTRICT")
+        # The models declare 0017's and 0018's checks; both are at head.
         assert checks == set(_usage_checks())
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0017}
-        assert ours == _EXPECTED_TRIGGERS_0017
+        assert ours == _EXPECTED_TRIGGERS_0017 | _EXPECTED_TRIGGERS_0018
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0018_usage_billing（AIH-TASK-032，设计闸门 #181 v2）
+#
+# The first cases need no database: the revision chain; the migration's columns and seven checks
+# equal the model's, written column by column (no row constructor, no boolean equality); the three
+# triggers written like 0006's; the 0006 precheck before any DDL; downgrade undoes upgrade in
+# reverse. On a real MySQL: upgrade / downgrade add and drop only these columns and triggers; the
+# shapes, keys, foreign keys and their rules, indexes, checks and triggers at head. What the
+# checks and triggers refuse or let through is in test_usage_billing_concurrency.py.
+# ---------------------------------------------------------------------------
+
+_REVISION_0018 = "0018_usage_billing"
+_MIGRATION_0018 = pathlib.Path("alembic/versions/20260929_0018_usage_billing.py")
+
+# Column → nullable (design §2): the snapshot and claim columns are nullable, the count is not.
+_EXPECTED_0018_COLUMNS = {
+    "provider_price_version_id": True,
+    "pricing_rule_id": True,
+    "fx_rate_version_id": True,
+    "provider_source_currency": True,
+    "provider_source_cost": True,
+    "fx_rate_applied": True,
+    "estimated_provider_cost_myr": True,
+    "billable_cost": True,
+    "wallet_transaction_id": True,
+    "attempt_count": False,
+    "next_attempt_at": True,
+    "claim_token": True,
+    "claimed_at": True,
+    "lease_expires_at": True,
+}
+_EXPECTED_UNIQUE_0018 = {("wallet_transaction_id",)}
+_EXPECTED_FOREIGN_KEYS_0018 = {
+    "fk_usage_events_price_version": (
+        ["provider_price_version_id"],
+        "provider_price_versions",
+        ["id"],
+    ),
+    "fk_usage_events_pricing_rule": (["pricing_rule_id"], "pricing_rules", ["id"]),
+    "fk_usage_events_fx_rate_version": (["fx_rate_version_id"], "fx_rate_versions", ["id"]),
+    "fk_usage_events_wallet_transaction": (
+        ["wallet_transaction_id"],
+        "wallet_transactions",
+        ["id"],
+    ),
+}
+_EXPECTED_INDEXES_0018 = {
+    "ix_usage_events_claim": ["status", "next_attempt_at", "id"],
+    "ix_usage_events_lease": ["status", "lease_expires_at"],
+    "ix_usage_events_price_version_id": ["provider_price_version_id"],
+    "ix_usage_events_pricing_rule_id": ["pricing_rule_id"],
+    "ix_usage_events_fx_rate_version_id": ["fx_rate_version_id"],
+}
+_EXPECTED_CHECKS_0018 = {
+    "ck_usage_events_processed_snapshot",
+    "ck_usage_events_processed_ledger",
+    "ck_usage_events_unprocessed_ledger",
+    "ck_usage_events_billable_cost",
+    "ck_usage_events_provider_source_cost",
+    "ck_usage_events_estimated_cost",
+    "ck_usage_events_claim_fields",
+}
+# Trigger → (table, timing, event). The three of design §2, in creation order.
+_EXPECTED_TRIGGERS_0018 = {
+    "trg_usage_events_processed_immutable": ("usage_events", "BEFORE", "UPDATE"),
+    "trg_usage_events_ledger_link": ("usage_events", "BEFORE", "UPDATE"),
+    "trg_usage_events_requeue_unbilled": ("usage_events", "BEFORE", "UPDATE"),
+}
+
+
+def _load_0018() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0018", _MIGRATION_0018)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0018_follows_0017() -> None:
+    migration = _load_0018()
+
+    assert migration.revision == _REVISION_0018
+    assert migration.down_revision == _REVISION_0017
+
+
+def test_0018_checks_are_the_ones_the_model_declares() -> None:
+    migration = _load_0018()
+    from_migration = {name: _normalised(condition) for name, condition in migration._CHECKS.items()}
+    declared = {
+        name: condition
+        for name, (table, condition) in _usage_checks().items()
+        if name in _EXPECTED_CHECKS_0018 and table == "usage_events"
+    }
+
+    assert set(from_migration) == _EXPECTED_CHECKS_0018
+    assert from_migration == declared
+    for name, condition in from_migration.items():
+        # Column by column: no row constructor, no `(a) = (b)` between two conditions (design §2).
+        assert "(provider_id, model_id" not in condition, name
+        assert ") = (" not in condition, name
+    claim = from_migration["ck_usage_events_claim_fields"]
+    for column in ("claim_token", "claimed_at", "lease_expires_at"):
+        assert f"{column} IS NOT NULL" in claim and f"{column} IS NULL" in claim
+    assert "claimed_at < lease_expires_at" in claim
+    snapshot = from_migration["ck_usage_events_processed_snapshot"]
+    for column in (
+        "provider_id",
+        "model_id",
+        "provider_price_version_id",
+        "pricing_rule_id",
+        "provider_source_currency",
+        "provider_source_cost",
+        "estimated_provider_cost_myr",
+        "billable_cost",
+        "processed_at",
+    ):
+        assert f"{column} IS NOT NULL" in snapshot, column
+
+
+def test_0018_columns_are_the_ones_the_model_declares() -> None:
+    migration = _load_0018()
+    model = UsageEvent.__table__.c
+
+    columns = migration._columns()
+
+    assert {column.name: column.nullable for column in columns} == _EXPECTED_0018_COLUMNS
+    for column in columns:
+        declared = model[column.name]
+        assert declared.nullable == column.nullable, column.name
+        if isinstance(column.type, Numeric):
+            assert isinstance(declared.type, Numeric), column.name
+            pair = (column.type.precision, column.type.scale)
+            assert pair == (declared.type.precision, declared.type.scale), column.name
+        if isinstance(column.type, CHAR):
+            assert declared.type.length == column.type.length, column.name
+    assert str(model["attempt_count"].server_default.arg) == "0"
+
+
+def test_0018_triggers_are_the_three_of_the_design_written_like_0006() -> None:
+    triggers = _load_0018()._TRIGGERS
+
+    assert list(triggers) == list(_EXPECTED_TRIGGERS_0018)
+    for name, (table, timing, event) in _EXPECTED_TRIGGERS_0018.items():
+        statement = _normalised(triggers[name])
+        prefix = f"CREATE TRIGGER {name} {timing} {event} ON {table} FOR EACH ROW BEGIN IF "
+        assert statement.startswith(prefix), name
+        assert statement.endswith("END IF; END"), name
+        assert "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = " in statement, name
+    immutable = _normalised(triggers["trg_usage_events_processed_immutable"])
+    assert "IF OLD.status = 'PROCESSED' THEN SIGNAL" in immutable
+    link = _normalised(triggers["trg_usage_events_ledger_link"])
+    for condition in (
+        "NEW.status = 'PROCESSED' AND NEW.billable_cost > 0",
+        "id = NEW.wallet_transaction_id",
+        "reference_type = 'USAGE_EVENT'",
+        "reference_id = NEW.event_id",
+        "amount = -NEW.billable_cost",
+    ):
+        assert condition in link, condition
+    requeue = _normalised(triggers["trg_usage_events_requeue_unbilled"])
+    errors = "'MODEL_UNKNOWN', 'PRICING_ERROR', 'FX_RATE_ERROR', 'FAILED_FINAL'"
+    assert f"OLD.status IN ({errors})" in requeue
+    assert "NEW.status = 'RECEIVED' AND EXISTS" in requeue
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0018_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    migration = _load_0018()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0018_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL DDL is not transactional: a failed precheck must not leave a column behind."""
+    migration = _load_0018()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    # Columns, indexes, the unique key, foreign keys, checks, then the three triggers.
+    expected = (
+        ["add_column"] * 14
+        + ["create_index"] * 5
+        + ["create_unique_constraint"]
+        + ["create_foreign_key"] * 4
+        + ["create_check_constraint"] * 7
+        + ["execute"] * 3
+    )
+    assert allowed.calls == expected
+
+
+def test_0018_downgrade_undoes_upgrade_in_reverse(monkeypatch) -> None:
+    migration = _load_0018()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    # `--sql`: no bind asked for; the triggers are the last statements, in design §2 order.
+    assert upgrade.first_args("execute") == list(migration._TRIGGERS.values())
+    added = [args[1].name for name, args in upgrade.calls if name == "add_column"]
+    assert added == list(_EXPECTED_0018_COLUMNS)
+    assert upgrade.first_args("create_index") == list(_EXPECTED_INDEXES_0018)
+    assert upgrade.first_args("create_foreign_key") == list(_EXPECTED_FOREIGN_KEYS_0018)
+    assert upgrade.first_args("create_check_constraint") == list(migration._CHECKS)
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    drops = [f"DROP TRIGGER {name}" for name in reversed(_EXPECTED_TRIGGERS_0018)]
+    checks = reversed(migration._CHECKS)
+    drops += [f"ALTER TABLE usage_events DROP CHECK {name}" for name in checks]
+    assert downgrade.first_args("execute") == drops
+    assert downgrade.first_args("drop_constraint") == [
+        *reversed(_EXPECTED_FOREIGN_KEYS_0018),
+        "uq_usage_events_wallet_transaction_id",
+    ]
+    assert downgrade.first_args("drop_index") == list(reversed(_EXPECTED_INDEXES_0018))
+    dropped = [args[1] for name, args in downgrade.calls if name == "drop_column"]
+    assert dropped == list(reversed(_EXPECTED_0018_COLUMNS))
+    # Triggers and checks before what they refer to; foreign keys before their indexes.
+    order = [name for name, _ in downgrade.calls]
+    expected = ["execute"] * 10 + ["drop_constraint"] * 5 + ["drop_index"] * 5
+    assert order == expected + ["drop_column"] * 14
+
+
+@needs_mysql
+def test_0018_only_adds_and_drops_its_columns_keys_checks_and_triggers(
+    alembic_config: Config,
+) -> None:
+    command.upgrade(alembic_config, "head")
+    try:
+        command.downgrade(alembic_config, _REVISION_0017)
+        tables = _table_names()
+        columns = _column_names("usage_events")
+        triggers = _all_triggers()
+        assert not set(_EXPECTED_0018_COLUMNS) & columns
+        assert not set(_EXPECTED_TRIGGERS_0018) & set(triggers)
+        assert _unique_sets("usage_events") == _EXPECTED_UNIQUE_0017["usage_events"]
+
+        command.upgrade(alembic_config, _REVISION_0018)
+        assert _table_names() == tables
+        assert _column_names("usage_events") == columns | set(_EXPECTED_0018_COLUMNS)
+        assert _all_triggers() == triggers | _EXPECTED_TRIGGERS_0018
+
+        command.downgrade(alembic_config, _REVISION_0017)
+        assert _table_names() == tables
+        assert _column_names("usage_events") == columns
+        assert _all_triggers() == triggers
+        assert _unique_sets("usage_events") == _EXPECTED_UNIQUE_0017["usage_events"]
+    finally:
+        command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0018_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        found = {c["name"]: c for c in inspect(engine).get_columns("usage_events")}
+        nullable = {name: found[name]["nullable"] for name in _EXPECTED_0018_COLUMNS}
+        assert nullable == _EXPECTED_0018_COLUMNS
+        types = {name: found[name]["type"] for name in _EXPECTED_0018_COLUMNS}
+        for name in (
+            "provider_price_version_id",
+            "pricing_rule_id",
+            "fx_rate_version_id",
+            "wallet_transaction_id",
+        ):
+            assert isinstance(types[name], BigInteger), name
+        for name in ("provider_source_cost", "estimated_provider_cost_myr", "billable_cost"):
+            assert isinstance(types[name], Numeric), name
+            assert (types[name].precision, types[name].scale) == (20, 8), name
+        assert isinstance(types["fx_rate_applied"], Numeric)
+        assert (types["fx_rate_applied"].precision, types["fx_rate_applied"].scale) == (24, 10)
+        for name, width in (("provider_source_currency", 3), ("claim_token", 36)):
+            assert isinstance(types[name], CHAR), name
+            assert types[name].length == width, name
+        # Whole seconds, as every other server time.
+        for name in ("next_attempt_at", "claimed_at", "lease_expires_at"):
+            assert isinstance(types[name], DateTime), name
+            assert not getattr(types[name], "fsp", None), name
+        assert isinstance(types["attempt_count"], Integer)
+        assert "0" in str(found["attempt_count"]["default"])
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0018_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        assert _EXPECTED_UNIQUE_0018 <= _unique_sets("usage_events")
+        foreign_keys = {
+            str(fk["name"]): (
+                fk["constrained_columns"],
+                fk["referred_table"],
+                fk["referred_columns"],
+            )
+            for fk in inspector.get_foreign_keys("usage_events")
+        }
+        for name, expected in _EXPECTED_FOREIGN_KEYS_0018.items():
+            assert foreign_keys.get(name) == expected, name
+        indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("usage_events")}
+        for name, columns in _EXPECTED_INDEXES_0018.items():
+            assert indexes.get(name) == columns, name
+
+        with engine.connect() as connection:
+            delete_rules = dict(connection.execute(_USAGE_REFERENTIAL_RULES_QUERY).all())
+            checks = set(connection.execute(_USAGE_CHECKS_QUERY).scalars())
+        # ⚠️ RESTRICT: price versions, rules, FX versions and ledger rows are never deleted.
+        for name in _EXPECTED_FOREIGN_KEYS_0018:
+            assert delete_rules.get(name) == "RESTRICT", name
+        assert _EXPECTED_CHECKS_0018 <= checks
+        triggers = _all_triggers()
+        ours = {name: triggers.get(name) for name in _EXPECTED_TRIGGERS_0018}
+        assert ours == _EXPECTED_TRIGGERS_0018
     finally:
         engine.dispose()

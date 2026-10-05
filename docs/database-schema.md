@@ -738,7 +738,8 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 
 共同的约定：
 
-- **本任务只写 `RECEIVED`**，不计费、不入队；计价快照列（价格版本、规则、FX、成本、计费额）由计费任务（T-H）的迁移加。
+- **摄取只写 `RECEIVED`**，不计费、不入队；计价快照列（价格版本、规则、FX、成本、计费额）与认领列由计费任务
+  （AIH-TASK-032）的迁移 0018 加，见下「计费快照与认领（迁移 0018）」。
 - **行永不删除**：外键都是 `RESTRICT`；冲突表由触发器拒绝 UPDATE / DELETE（只在 MySQL 上）。
 - **必需列逐列 `NOT NULL`**（设计 v6）：MySQL 对任一组成列为 `NULL` 的外键不做检查、对结果为 UNKNOWN 的 CHECK 放行，
   所以复合外键与形态 CHECK 只有在组成列非空时才真正生效。
@@ -822,6 +823,87 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
   所以读到的一定是已提交的行。
 - 冲突：冲突行与审计同一事务；撞去重约束（并发的同一冲突）时整个事务回滚、不写第二条审计。
 - 不加任何行锁。
+
+### 计费快照与认领（AIH-TASK-032，迁移 `0018_usage_billing`）
+
+设计依据：[design/AIH-TASK-032-usage-billing.md](design/AIH-TASK-032-usage-billing.md)（设计闸门 #181 v2）§2「数据库」
+「认领、租约与防护令牌」「锁顺序」与 §8。`usage_events` 加 14 列，全部是纯新增列；上线时表里只有未计费的 `RECEIVED`
+事件，新列取默认值（快照与认领列为空、`attempt_count = 0`）。写入方只有计费 worker（app/services/usage_billing.py）
+与重新入队（app/services/usage_requeue.py）。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `provider_price_version_id` | BIGINT | 可空；外键 → `provider_price_versions(id)` `RESTRICT`（`fk_usage_events_price_version`） |
+| `pricing_rule_id` | BIGINT | 可空；外键 → `pricing_rules(id)` `RESTRICT`（`fk_usage_events_pricing_rule`） |
+| `fx_rate_version_id` | BIGINT | 可空，**MYR 原币时为空**；外键 → `fx_rate_versions(id)` `RESTRICT`（`fk_usage_events_fx_rate_version`） |
+| `provider_source_currency` | CHAR(3) | 可空；价格版本的原币 |
+| `provider_source_cost` | DECIMAL(20,8) | 可空；`CHECK IS NULL OR >= 0` |
+| `fx_rate_applied` | DECIMAL(24,10) | 可空，MYR 原币时为空；汇率原值（与 `fx_rate_versions.rate` 同精度，不舍入） |
+| `estimated_provider_cost_myr` | DECIMAL(20,8) | 可空；`CHECK IS NULL OR >= 0` |
+| `billable_cost` | DECIMAL(20,8) | 可空；含税（ADR-0008）；`CHECK IS NULL OR >= 0` |
+| `wallet_transaction_id` | BIGINT | 可空，**计费额为 0 时为空**；外键 → `wallet_transactions(id)` `RESTRICT`（`fk_usage_events_wallet_transaction`）；唯一（`uq_usage_events_wallet_transaction_id`：一行账本至多对应一个事件） |
+| `attempt_count` | INT | 非空，默认 0；认领时 +1，重新入队清零 |
+| `next_attempt_at` | DATETIME | 可空；失败退避后最早何时再认领（整秒） |
+| `claim_token` | CHAR(36) | 可空；当前认领的防护令牌（每次认领一个新 uuid4） |
+| `claimed_at` / `lease_expires_at` | DATETIME | 可空；认领时刻与租约到期（整秒；租约默认 120 秒，`BILLING_USAGE_LEASE_SECONDS`） |
+
+七条 CHECK（条件逐列写 `IS NOT NULL` / `IS NULL`，不用行构造器、不用布尔等式 —— `(a) = (b)` 遇到 `NULL` 得
+UNKNOWN，CHECK 会放行）：
+
+- `ck_usage_events_processed_snapshot`：`status <> 'PROCESSED'`，或目录引用、价格版本、规则、原币、原币成本、MYR 估算
+  成本、计费额、`processed_at` 全部非空，并且「原币是 MYR 时两个汇率列都为空」或「不是 MYR 时两个都非空」；
+- `ck_usage_events_processed_ledger`：`status <> 'PROCESSED' OR billable_cost = 0 OR wallet_transaction_id IS NOT NULL`
+  （0 元事件不写账本：账本 CHECK 要求 `AI_USAGE` 金额 < 0）；
+- `ck_usage_events_unprocessed_ledger`：`status = 'PROCESSED' OR wallet_transaction_id IS NULL`（未处理 ⇒ 没有财务链接）；
+- `ck_usage_events_billable_cost` / `_provider_source_cost` / `_estimated_cost`：三个成本列为空或非负；
+- `ck_usage_events_claim_fields`：`PROCESSING` 时 `claim_token`、`claimed_at`、`lease_expires_at` 都非空且
+  `claimed_at < lease_expires_at`；其余状态三列都为空。所有离开 `PROCESSING` 的跃迁都同时清空这三列。
+
+索引：`ix_usage_events_claim (status, next_attempt_at, id)`（认领扫描）、`ix_usage_events_lease (status,
+lease_expires_at)`（卡住回收），以及三个快照外键在子表上的索引 `ix_usage_events_price_version_id`、
+`ix_usage_events_pricing_rule_id`、`ix_usage_events_fx_rate_version_id`（显式建出来，不让 MySQL 自动起名）；
+`wallet_transaction_id` 的唯一约束同时服务它的外键。
+
+### 触发器（迁移 0018 建，只在 MySQL 上）
+
+写法与权限预检照迁移 0006。三个都是 `usage_events` 的 BEFORE UPDATE（MySQL 8 允许同一时机多个触发器，按创建顺序
+执行），拒绝一律 `SIGNAL SQLSTATE '45000'`（错误号 1644）。
+
+| 触发器 | 做什么 |
+| --- | --- |
+| `trg_usage_events_processed_immutable` | `OLD.status = 'PROCESSED'` 时任何 UPDATE 都拒绝（INV-6 / INV-11：已计费事件的快照与状态永不改变；Phase 8 的 rebill 另写调整行，不改原事件）。也挡住「把已处理的事件改回 `RECEIVED`」 |
+| `trg_usage_events_ledger_link` | `NEW.status = 'PROCESSED' AND NEW.billable_cost > 0` 时，`wallet_transaction_id` 指向的账本行必须 `reference_type = 'USAGE_EVENT'`、`reference_id = NEW.event_id`、`amount = -NEW.billable_cost`，否则拒绝（链接为空同样拒绝）：事件与账本的对应由数据库保证 |
+| `trg_usage_events_requeue_unbilled` | `OLD.status` 是 `MODEL_UNKNOWN` / `PRICING_ERROR` / `FX_RATE_ERROR` / `FAILED_FINAL` 且 `NEW.status = 'RECEIVED'`（重新入队）时，账本里若已有 `(USAGE_EVENT, NEW.event_id)` 的行就拒绝：重新入队只对从未产生财务效果的事件 |
+
+触发器里读 `wallet_transactions` 不额外加锁：校验的账本行要么由同一事务插入，要么由账本的唯一约束保证不存在（设计
+§10 第 2 条）。**残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器；直接 INSERT 一行 `PROCESSED` 的事件不经 BEFORE
+UPDATE 触发器（设计只要求 UPDATE 路径；快照齐全与有账本行仍由 CHECK 挡住）—— 摄取只插入 `RECEIVED`，计费只经
+UPDATE 写 `PROCESSED`。
+
+### 全局锁顺序（计费；设计闸门 #181 v2 §2「锁顺序」）
+
+**事件行（X）→ 供应商行（S）→ `fx_rate_locks`（S）→ `pricing_rule_locks`（S）→ 钱包（X）→ 租户（X）**
+
+- 事件行只有计费（认领、处理、失败记录、卡住回收）与重新入队会锁，都只锁事件行本身、且都先于其他锁，不会反向。
+- 三把共享锁的发布方（AIH-TASK-025 改映射 / AIH-TASK-026 价格发布锁供应商行；AIH-TASK-028 / 027 的汇率、规则发布锁各自
+  的单行表）各自只拿一把排他锁，不持有其他锁，不形成环。
+- 钱包 → 租户是 `post_transaction` 既有的顺序；账户状态变更（AIH-TASK-020）只锁租户、不锁钱包，不形成环。
+- 处理事务里读租户的 `account_status` 是普通读（只用于 `CLOSED` 判断，终态）。
+- **三把共享锁都拿到之后**才取当前时间 `now_r`，只计价 `occurred_at ≤ now_r` 的事件（认领时已过滤
+  `occurred_at ≤ now_c`，持锁后再核一次）：发布方在锁后取的边界永远晚于被计价事件的 `occurred_at`，同一个
+  `occurred_at` 的解析结果永不改变。
+- 计费事务把 `innodb_lock_wait_timeout` 设为会话级 10 秒（默认 50 秒）：发布方持排他锁超过 10 秒时计费回滚、按可重试
+  记一次（`LOCK_WAIT_TIMEOUT`，退避 2^n 秒、封顶 300），不长时间占着 worker。
+
+### 计费的事务边界（设计 §2「事务边界」）
+
+| 路径 | 事务 |
+| --- | --- |
+| 认领（每 10 秒的扫描） | 短事务：`SELECT id … FOR UPDATE SKIP LOCKED LIMIT 20`（`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`）→ 改为 `PROCESSING`、新令牌、租约、`attempt_count + 1` → 提交 |
+| 处理一个事件 | 一个事务：锁事件行并核对「仍是 `PROCESSING` 且令牌是自己的」（否则放弃）→ 按上面的锁顺序解析与计价 → 计费额 > 0 时 `post_transaction`（`AI_USAGE`、金额 = −计费额、`USAGE_EVENT / event_id`；钱包、账本、计费状态跃迁、审计、outbox 都在里面）→ 写快照、`PROCESSED`、`processed_at`、清认领 → 提交 |
+| 记一次失败 | 主事务回滚后另开短事务：锁事件行 → 仍是 `PROCESSING` 且令牌匹配才写 `FAILED_RETRYABLE` + 退避；`attempt_count` 达到 `BILLING_USAGE_MAX_ATTEMPTS`（默认 10）写 `FAILED_FINAL` |
+| 卡住回收（每 60 秒） | 短事务：`SELECT … WHERE status = 'PROCESSING' AND lease_expires_at < now FOR UPDATE SKIP LOCKED LIMIT 500` → 未达上限 `FAILED_RETRYABLE`（`STALE_PROCESSING`，立即可再认领），达到上限 `FAILED_FINAL`（`STALE_PROCESSING_EXHAUSTED`）→ 清认领 → 提交。仍被处理事务持有行锁的事件被 `SKIP LOCKED` 跳过，不会被回收 |
+| 重新入队 | 每个事件一个事务：锁事件行 → 四个错误状态之一、账本里没有它 → 改回 `RECEIVED`，清错误码、尝试次数与退避时刻 → 审计 `USAGE_EVENT_REQUEUE` → 提交 |
 
 ---
 

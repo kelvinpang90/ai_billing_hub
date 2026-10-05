@@ -200,6 +200,10 @@ class AuditAction(enum.StrEnum):
     # 记在 PR 描述里。内容里没有载荷。
     USAGE_EVENT_SCOPE_MISMATCH = "USAGE_EVENT_SCOPE_MISMATCH"
     USAGE_EVENT_IDEMPOTENCY_CONFLICT = "USAGE_EVENT_IDEMPOTENCY_CONFLICT"
+    # AIH-TASK-032（设计闸门 #181）：写入方是 app/services/usage_requeue.py，与事件改回 RECEIVED
+    # 同一事务。不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 docs/TODO.md。逐个
+    # 事件的计费不写审计（事件行 + 账本行就是审计链）。内容里没有金额。
+    USAGE_EVENT_REQUEUE = "USAGE_EVENT_REQUEUE"
 
 
 class AuditLog(Base):

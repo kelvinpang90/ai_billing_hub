@@ -104,6 +104,7 @@ RULE_ROUTE = RULES_ROUTE + "/{rule_id}"
 FX_RATES_ROUTE = "/api/v1/admin/fx-rates"
 FX_RATE_ROUTE = FX_RATES_ROUTE + "/{fx_rate_id}"
 PRICING_PREVIEW_ROUTE = "/api/v1/admin/pricing-preview"
+USAGE_EVENTS_ROUTE = "/api/v1/admin/usage-events"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -161,6 +162,8 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", FX_RATE_ROUTE + "/retire"),
     ("POST", FX_RATE_ROUTE + "/discard"),
     ("POST", PRICING_PREVIEW_ROUTE),
+    ("POST", USAGE_EVENTS_ROUTE + "/requeue"),
+    ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -255,6 +258,10 @@ VALID_BODIES = {
         "unit": "UNIT",
         "occurred_at": "2026-09-29T04:00:00Z",
     },
+    # 重新入队（AIH-TASK-032）：库里没有用量事件，漏了鉴权的处理函数会走到 404 或空的批量，
+    # 都过不了 401 / 403；请求体合法，保证 422 不会先出现。事件 id 是全零占位值。
+    ("POST", USAGE_EVENTS_ROUTE + "/requeue"): {"status": "PRICING_ERROR", "reason": "Probe"},
+    ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"): {"reason": "Probe"},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -809,6 +816,7 @@ def test_every_admin_route_refuses_non_admins(
         "price_version_id",
         "rule_id",
         "fx_rate_id",
+        "usage_event_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     headers = {} if caller == "anonymous" else customer_headers(app)

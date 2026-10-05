@@ -5,8 +5,8 @@
 按维度各推一个 Healthchecks 检查。
 
 **维度注册表**是下面的 `DIMENSIONS`：一个有序列表，每个维度一个只读查询函数。
-T-E（幂等冲突）、T-H（定价错误、汇率错误、未知模型、负余额、outbox 积压）
-往里加，不改接口形状。
+T-E（幂等冲突）、T-H（定价错误、汇率错误、未知模型、失败、处理积压、负余额、
+outbox 积压，设计闸门 #181 v2 §2「告警维度」，AIH-TASK-032）往里加，不改接口形状。
 
 ⚠️ **维度查询全是普通读，不拿 `fx_rate_locks`**（设计 v3）：告警只是提示，
 不参与计费，不应让发布等它。整次请求一个只读事务，从不提交。
@@ -27,10 +27,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.fx_source import kuala_lumpur_date
+from app.models.auth import DomainOutbox, OutboxStatus
 from app.models.fx_rates import (
     PERIOD_STATUSES,
     QUOTE_CURRENCY,
@@ -38,8 +39,12 @@ from app.models.fx_rates import (
     FxFetchOutcome,
     FxRateVersion,
 )
+from app.models.usage import UsageEvent, UsageEventStatus
+from app.models.wallet import Wallet
 from app.repositories.usage_events import count_conflicts_since
 from app.services.auth import utc_now
+from app.services.usage_billing import AMOUNT_OUT_OF_RANGE, LEDGER_CONFLICT
+from app.tasks import outbox as outbox_tasks
 
 type Clock = Callable[[], dt.datetime]
 
@@ -51,6 +56,21 @@ FX_STALE_DAYS: Final = 5
 # `usage_event_conflicts`：最近 24 小时里有任何一条幂等冲突即 P2
 # （设计闸门 #176 v8 §2「告警」；spec §23 要求的数据完整性告警）。
 CONFLICT_WINDOW: Final = dt.timedelta(hours=24)
+
+# 用量计费的维度（设计闸门 #181 v2 §2「告警维度」）。
+# `usage_failed`：FAILED_RETRYABLE 已重试这么多次即告警。
+RETRYING_ALERT_ATTEMPTS: Final = 3
+# 这两个错误码的 FAILED_FINAL 是缺陷或数据异常，P1；其余 P2。
+FAILED_P1_CODES: Final = (LEDGER_CONFLICT, AMOUNT_OUT_OF_RANGE)
+# `usage_processing_backlog`：最早的可处理事件等待超过 5 分钟（§119 p99）P2，超过 30 分钟 P1；
+# 租约已过期仍未回收的 PROCESSING（回收任务停了）P2，过期超过 10 分钟 P1。
+BACKLOG_P2_WAIT: Final = dt.timedelta(minutes=5)
+BACKLOG_P1_WAIT: Final = dt.timedelta(minutes=30)
+STALE_LEASE_P1_AGE: Final = dt.timedelta(minutes=10)
+# `outbox_backlog`：有处理器的事件类型超过 10 分钟仍 PENDING（§120）。
+OUTBOX_BACKLOG_AGE: Final = dt.timedelta(minutes=10)
+# 每行摘要最多列几个细分码（设计 §2）。
+MAX_CODES: Final = 3
 
 # 三种都是成功：BNM 答「无记录」不是失败（设计 §2 `fx_fetch_attempts`）。
 _SUCCESSFUL_OUTCOMES: Final = (
@@ -202,6 +222,165 @@ def usage_event_conflicts(session: Session, context: AlertContext) -> AlertResul
     return AlertResult(AlertLevel.P2, f"{count} {noun} in 24 hours, earliest {since}")
 
 
+# --- 用量计费（AIH-TASK-032）：摘要只有计数、最早时刻与至多 3 个细分码 --------------------
+
+
+def _stamp(moment: dt.datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _events(count: int) -> str:
+    return "1 event" if count == 1 else f"{count} events"
+
+
+def _codes(session: Session, *conditions: object) -> list[str]:
+    """At most `MAX_CODES` distinct error codes of the matching events, in alphabetical order."""
+    statement = (
+        select(UsageEvent.error_code)
+        .where(*conditions, UsageEvent.error_code.is_not(None))
+        .distinct()
+        .order_by(UsageEvent.error_code)
+        .limit(MAX_CODES)
+    )
+    return [str(code) for code in session.execute(statement).scalars().all()]
+
+
+def _with_codes(summary: str, codes: Sequence[str]) -> str:
+    return f"{summary}, codes {', '.join(codes)}" if codes else summary
+
+
+def _error_state(session: Session, status: UsageEventStatus) -> AlertResult:
+    """P2 when any event is in `status`: the count, the earliest `received_at`, the codes."""
+    in_state = UsageEvent.status == status
+    statement = select(func.count(), func.min(UsageEvent.received_at)).where(in_state)
+    count, earliest = session.execute(statement).one()
+    if not count or earliest is None:
+        return AlertResult(AlertLevel.OK, f"no {status.value} events")
+    summary = f"{_events(int(count))} {status.value}, earliest received {_stamp(earliest)}"
+    return AlertResult(AlertLevel.P2, _with_codes(summary, _codes(session, in_state)))
+
+
+def usage_pricing_error(session: Session, context: AlertContext) -> AlertResult:
+    """P2 when any event is in PRICING_ERROR (no price, no rule, or one lacks a component)."""
+    return _error_state(session, UsageEventStatus.PRICING_ERROR)
+
+
+def usage_fx_rate_error(session: Session, context: AlertContext) -> AlertResult:
+    """P2 when any event is in FX_RATE_ERROR (a non-MYR price without a rate in effect)."""
+    return _error_state(session, UsageEventStatus.FX_RATE_ERROR)
+
+
+def usage_model_unknown(session: Session, context: AlertContext) -> AlertResult:
+    """P2 when any event is in MODEL_UNKNOWN (§84: the reported model resolves to nothing)."""
+    return _error_state(session, UsageEventStatus.MODEL_UNKNOWN)
+
+
+def usage_failed(session: Session, context: AlertContext) -> AlertResult:
+    """FAILED_FINAL events, or FAILED_RETRYABLE ones retried 3 times or more.
+
+    P1 when a FAILED_FINAL carries `LEDGER_CONFLICT` or `AMOUNT_OUT_OF_RANGE`, otherwise P2.
+    """
+    final = UsageEvent.status == UsageEventStatus.FAILED_FINAL
+    retrying = and_(
+        UsageEvent.status == UsageEventStatus.FAILED_RETRYABLE,
+        UsageEvent.attempt_count >= RETRYING_ALERT_ATTEMPTS,
+    )
+    counted = select(func.count(), func.min(UsageEvent.received_at))
+    finals, final_since = session.execute(counted.where(final)).one()
+    retries, retry_since = session.execute(counted.where(retrying)).one()
+    if not finals and not retries:
+        return AlertResult(AlertLevel.OK, "no failed events")
+    severe = select(func.count()).where(final, UsageEvent.error_code.in_(FAILED_P1_CODES))
+    level = AlertLevel.P1 if session.execute(severe).scalar_one() else AlertLevel.P2
+    earliest = min(moment for moment in (final_since, retry_since) if moment is not None)
+    summary = (
+        f"{int(finals)} FAILED_FINAL, {int(retries)} FAILED_RETRYABLE with "
+        f"{RETRYING_ALERT_ATTEMPTS}+ attempts, earliest received {_stamp(earliest)}"
+    )
+    return AlertResult(level, _with_codes(summary, _codes(session, or_(final, retrying))))
+
+
+def usage_processing_backlog(session: Session, context: AlertContext) -> AlertResult:
+    """The oldest claimable event waiting, and PROCESSING whose lease expired unrecovered.
+
+    可处理：`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`。等待的起点是它
+    变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个（未来偏差的事件到点才可认领），
+    `FAILED_RETRYABLE` 取 `next_attempt_at`。等待超过 5 分钟 P2、超过 30 分钟 P1；存在租约已
+    过期的 `PROCESSING`（回收任务本身停了）P2，过期超过 10 分钟 P1。
+    """
+    now = context.now
+    happened = UsageEvent.occurred_at <= now
+    received_since = case(
+        (UsageEvent.occurred_at > UsageEvent.received_at, UsageEvent.occurred_at),
+        else_=UsageEvent.received_at,
+    )
+    received = select(func.count(), func.min(received_since)).where(
+        UsageEvent.status == UsageEventStatus.RECEIVED, happened
+    )
+    retry_since = func.coalesce(UsageEvent.next_attempt_at, UsageEvent.received_at)
+    retry_due = or_(UsageEvent.next_attempt_at.is_(None), UsageEvent.next_attempt_at <= now)
+    retrying = select(func.count(), func.min(retry_since)).where(
+        UsageEvent.status == UsageEventStatus.FAILED_RETRYABLE, retry_due, happened
+    )
+    processing = UsageEvent.status == UsageEventStatus.PROCESSING
+    claimed = select(func.count(), func.min(UsageEvent.claimed_at)).where(processing)
+    expired = select(func.count(), func.min(UsageEvent.lease_expires_at)).where(
+        processing, UsageEvent.lease_expires_at < now
+    )
+
+    due_received, received_oldest = session.execute(received).one()
+    due_retrying, retrying_oldest = session.execute(retrying).one()
+    in_progress, earliest_claim = session.execute(claimed).one()
+    stale, earliest_expiry = session.execute(expired).one()
+    due = int(due_received) + int(due_retrying)
+    waiting = [moment for moment in (received_oldest, retrying_oldest) if moment is not None]
+    oldest = min(waiting) if waiting else None
+
+    waited = now - oldest if oldest is not None else dt.timedelta(0)
+    expired_for = now - earliest_expiry if earliest_expiry is not None else dt.timedelta(0)
+    level = AlertLevel.OK
+    if waited > BACKLOG_P2_WAIT or stale:
+        level = AlertLevel.P2
+    if waited > BACKLOG_P1_WAIT or expired_for > STALE_LEASE_P1_AGE:
+        level = AlertLevel.P1
+
+    since = f", oldest since {_stamp(oldest)}" if oldest is not None else ""
+    first = f", earliest claimed {_stamp(earliest_claim)}" if earliest_claim is not None else ""
+    summary = f"{due} due{since}; {int(in_progress)} PROCESSING{first}; {int(stale)} lease expired"
+    return AlertResult(level, summary)
+
+
+def wallet_negative_balance(session: Session, context: AlertContext) -> AlertResult:
+    """P2 when any wallet is below zero (§120). The count only: no tenant, no amount."""
+    statement = select(func.count()).select_from(Wallet).where(Wallet.balance < 0)
+    count = int(session.execute(statement).scalar_one())
+    if not count:
+        return AlertResult(AlertLevel.OK, "no wallet below zero")
+    noun = "1 wallet" if count == 1 else f"{count} wallets"
+    return AlertResult(AlertLevel.P2, f"{noun} below zero")
+
+
+def outbox_backlog(session: Session, context: AlertContext) -> AlertResult:
+    """P2 when an outbox row of a type with a handler is still PENDING after 10 minutes (§120).
+
+    没有处理器的类型（`tenant.billing_status_changed`、`tenant.low_balance`，等以后的投递任务）
+    按设计持久等待，不计入（app/tasks/outbox.py 的 `_RENDERERS`，与 `recover` 同一份名单）。
+    """
+    handled = list(outbox_tasks._RENDERERS)
+    statement = select(func.count(), func.min(DomainOutbox.created_at)).where(
+        DomainOutbox.status == OutboxStatus.PENDING,
+        DomainOutbox.event_type.in_(handled),
+        DomainOutbox.created_at < context.now - OUTBOX_BACKLOG_AGE,
+    )
+    count, oldest = session.execute(statement).one()
+    if not count or oldest is None:
+        return AlertResult(AlertLevel.OK, "no handled outbox row pending over 10 minutes")
+    noun = "1 row" if count == 1 else f"{int(count)} rows"
+    return AlertResult(
+        AlertLevel.P2, f"{noun} pending over 10 minutes, oldest created {_stamp(oldest)}"
+    )
+
+
 # --- 注册表 -------------------------------------------------------------------------
 
 # ⚠️ 有序：接口按这个顺序逐行输出。新维度追加在末尾，名字用小写与下划线
@@ -210,6 +389,14 @@ DIMENSIONS: Final[list[Dimension]] = [
     Dimension("fx_fetch", fx_fetch),
     Dimension("fx_stale", fx_stale),
     Dimension("usage_event_conflicts", usage_event_conflicts),
+    # AIH-TASK-032（设计闸门 #181 v2 §2「告警维度」），按设计表的顺序。
+    Dimension("usage_pricing_error", usage_pricing_error),
+    Dimension("usage_fx_rate_error", usage_fx_rate_error),
+    Dimension("usage_model_unknown", usage_model_unknown),
+    Dimension("usage_failed", usage_failed),
+    Dimension("usage_processing_backlog", usage_processing_backlog),
+    Dimension("wallet_negative_balance", wallet_negative_balance),
+    Dimension("outbox_backlog", outbox_backlog),
 ]
 
 
@@ -236,10 +423,17 @@ def alert_lines(
 
 
 __all__ = [
+    "BACKLOG_P1_WAIT",
+    "BACKLOG_P2_WAIT",
     "CONFLICT_WINDOW",
     "DIMENSIONS",
+    "FAILED_P1_CODES",
     "FX_FETCH_WINDOW",
     "FX_STALE_DAYS",
+    "MAX_CODES",
+    "OUTBOX_BACKLOG_AGE",
+    "RETRYING_ALERT_ATTEMPTS",
+    "STALE_LEASE_P1_AGE",
     "AlertContext",
     "AlertLevel",
     "AlertResult",
@@ -248,7 +442,14 @@ __all__ = [
     "evaluate",
     "fx_fetch",
     "fx_stale",
+    "outbox_backlog",
     "quote_date_of",
     "render",
     "usage_event_conflicts",
+    "usage_failed",
+    "usage_fx_rate_error",
+    "usage_model_unknown",
+    "usage_pricing_error",
+    "usage_processing_backlog",
+    "wallet_negative_balance",
 ]

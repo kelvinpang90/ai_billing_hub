@@ -261,6 +261,13 @@ EMPTY_DATABASE_LINES = (
     "fx_fetch OK USD no fetch in 72 hours\n"
     "fx_stale P2 USD no rate in effect\n"
     "usage_event_conflicts OK no conflicts in 24 hours\n"
+    "usage_pricing_error OK no PRICING_ERROR events\n"
+    "usage_fx_rate_error OK no FX_RATE_ERROR events\n"
+    "usage_model_unknown OK no MODEL_UNKNOWN events\n"
+    "usage_failed OK no failed events\n"
+    "usage_processing_backlog OK 0 due; 0 PROCESSING; 0 lease expired\n"
+    "wallet_negative_balance OK no wallet below zero\n"
+    "outbox_backlog OK no handled outbox row pending over 10 minutes\n"
 )
 
 
@@ -271,7 +278,18 @@ def test_the_registry_is_ordered_and_one_line_per_dimension(
     factory: sessionmaker[Session],
 ) -> None:
     names = [dimension.name for dimension in alerts.DIMENSIONS]
-    assert names == ["fx_fetch", "fx_stale", "usage_event_conflicts"]
+    assert names == [
+        "fx_fetch",
+        "fx_stale",
+        "usage_event_conflicts",
+        "usage_pricing_error",
+        "usage_fx_rate_error",
+        "usage_model_unknown",
+        "usage_failed",
+        "usage_processing_backlog",
+        "wallet_negative_balance",
+        "outbox_backlog",
+    ]
 
     body = alerts.alert_lines(factory, ("USD",), clock=lambda: NOW)
 

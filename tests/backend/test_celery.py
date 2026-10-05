@@ -75,17 +75,55 @@ def test_schedule_runs_on_utc(celery_app) -> None:
     assert celery_app.conf.enable_utc is True
 
 
-def test_the_periodic_tasks_are_the_outbox_sweep_and_the_fx_fetch(celery_app) -> None:
+def test_the_periodic_tasks_are_the_outbox_sweep_the_fx_fetch_and_usage_billing(
+    celery_app,
+) -> None:
     """周期条目只放**真的需要跑**的那些，不放示例条目（示例条目会被真的跑起来）。
 
     ⚠️ T0.8d 之前这里断言的是「beat 为空」。outbox 那一条不是可选的：
     没有这个扫描，Redis 一丢、或者 worker 在触发之后挂掉，那些 outbox 行就
     **永远躺在库里**没人再看一眼（Invariant 14），而用户那边只表现为没收到信。
-    AIH-TASK-040 加了第二条：每天三次的 BNM 汇率拉取。
+    AIH-TASK-040 加了第二条：每天三次的 BNM 汇率拉取。AIH-TASK-032 加了用量计费的
+    扫描与卡住回收（摄取端不入队，没有它们事件永远停在 RECEIVED）。
     """
-    assert set(celery_app.conf.beat_schedule) == {"outbox-recovery", "fx-fetch"}
+    assert set(celery_app.conf.beat_schedule) == {
+        "outbox-recovery",
+        "fx-fetch",
+        "usage-billing-sweep",
+        "usage-stale-recovery",
+    }
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
     assert entry["task"] == "app.tasks.outbox.recover"
+
+
+@pytest.mark.parametrize(
+    ("name", "task", "every", "expires"),
+    [
+        ("usage-billing-sweep", "app.tasks.usage_billing.bill_pending_events", 10, 9),
+        ("usage-stale-recovery", "app.tasks.usage_billing.recover_stale_processing", 60, 54),
+    ],
+)
+def test_usage_billing_runs_every_10_seconds_and_recovers_every_60(
+    celery_app, name: str, task: str, every: int, expires: int
+) -> None:
+    """设计闸门 #181 v2 §2：扫描每 10 秒（expires 9），卡住回收每 60 秒（expires 54）。
+
+    `expires` 短于周期：beat 停摆后再起来，攒下的触发不一口气放出去
+    （重叠运行安全，但白抢同一批行）。
+    """
+    entry = celery_app.conf.beat_schedule[name]
+
+    assert entry["task"] == task
+    assert entry["schedule"] == every
+    assert entry["options"] == {"expires": expires}
+    assert entry["options"]["expires"] < entry["schedule"]
+
+
+def test_the_usage_billing_tasks_are_registered(celery_app) -> None:
+    import app.tasks.usage_billing  # noqa: F401
+
+    assert "app.tasks.usage_billing.bill_pending_events" in celery_app.tasks
+    assert "app.tasks.usage_billing.recover_stale_processing" in celery_app.tasks
 
 
 def test_the_fx_fetch_runs_three_times_a_kuala_lumpur_afternoon(celery_app) -> None:
@@ -126,7 +164,12 @@ def test_the_sweep_does_not_pile_up_while_beat_is_down(celery_app) -> None:
 
 def test_task_modules_are_listed_explicitly(celery_app) -> None:
     """不用 autodiscover：它靠约定扫包，改了包名时只是**安静地少注册一个任务**。"""
-    assert TASK_MODULES == ["app.tasks.ping", "app.tasks.outbox", "app.tasks.fx_fetch"]
+    assert TASK_MODULES == [
+        "app.tasks.ping",
+        "app.tasks.outbox",
+        "app.tasks.fx_fetch",
+        "app.tasks.usage_billing",
+    ]
     assert celery_app.conf.include == TASK_MODULES
 
 
