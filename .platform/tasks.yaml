@@ -2172,7 +2172,7 @@ tasks:
     title: 单条用量摄取接口：验签、防重放、持久化后受理与全局幂等
     purpose: >-
       按 docs/design/AIH-TASK-029-usage-ingest.md（设计闸门 #176 已批准 v8）实现 POST /api/v1/integration/usage-events：读原始体 → 验签（AIH-TASK-012 的库）→ Redis nonce（不可用放行）→ 按校验顺序校验（event_id 限 UUIDv7 / ULID，usage_type 查表、未知 409 可重试，按上报形态校验）→ 归属比对 → 指纹 → 插入优先，RECEIVED 提交后才 202；合法重复 200，冲突 409 写只增冲突表与审计；每个错误响应带固定的 retryable。迁移 0017 建 usage_events（含可空的 provider_id / model_id）与 usage_event_conflicts；nginx 为集成前缀返回 JSON 413；冲突告警维度。不计费、不入队、无批量端点。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-043
     acceptance_criteria:
