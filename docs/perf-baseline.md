@@ -5,6 +5,7 @@
 >
 > 测量工具：[`scripts/perf_baseline.py`](../scripts/perf_baseline.py)，可重复跑。
 > 最后一次测量：2026-09-12（开发机）、**2026-09-17（生产 VPS，见第 9 节）**。
+> Phase 2 的最热租户压测（用量计费 S1–S4）用 [`scripts/perf_usage.py`](../scripts/perf_usage.py)，见第 10 节（结果待运维回填）。
 
 ---
 
@@ -162,6 +163,9 @@ Argon2id 校验 p50 **35.9ms**，参数是 argon2-cffi 的默认值
 ⚠️ spec §119 还要求「**最热租户**的工作负载必须包含在测量里，因为钱包变更是按租户
 串行的」。那一条**在 Phase 1 建出钱包表之前无法满足**，必须在 Phase 1 的容量测量里
 补上 —— 它恰恰是最容易被漏掉的那一条，因为平均负载看起来一直很健康。
+
+> 用量摄取与计费在 Phase 2 落地之后，事件到扣费、回补速率与最热租户这三行由第 10 节的
+> S1–S4 来量。
 
 ---
 
@@ -333,3 +337,135 @@ argon2-cffi 默认 `parallelism=4`：四个线程**同时**烧 CPU，1.0 核的 
 | 限额默认值：api / worker **1.0 核 / 768 MiB**，mysql **0.8 核 / 1 GiB** | `docker-compose.yml`；理由与数字见 [deployment.md](deployment.md) §3.3 |
 | 守卫：api 的 CPU 配额默认值不许低于 1 核 | `tests/backend/test_compose.py` |
 | 后续项：Argon2 `parallelism` 与 CPU 配额的匹配（要设计闸门） | [TODO](TODO.md) |
+
+---
+
+## 10. Phase 2：最热租户压测与用量计费（AIH-TASK-033，ADR-0011）
+
+ADR-0011 要求用量扣费带一次最热租户压测，以及不达标时切到「同租户批事务」（方案 C）的判据。
+场景、通过线与判据由 [AIH-TASK-032 的设计](design/AIH-TASK-032-usage-billing.md) §2「最热租户」
+写定，下面逐字照抄；测量工具是 [`scripts/perf_usage.py`](../scripts/perf_usage.py)。
+
+⚠️ **脚本合并时这一节的结果是空的。**实测要在合并之后由运维在生产 VPS 上对 `billing_perf` 执行
+（10.4），结果回填到 10.5 的表里，再按 10.2 写出方案 C 的结论。
+
+### 10.1 场景与通过线（设计 §2 原文）
+
+| 场景 | 负载 | 通过线 |
+| --- | --- | --- |
+| S1 突发 | 单个租户，100 事件 / 秒持续 5 分钟（§119 突发），同时 3 个其他租户各 5 事件 / 秒 | 事件到扣费延迟 p95 ≤ 60 秒、p99 ≤ 5 分钟（§119）；报告 p50 / p95 / p99 |
+| S2 回补 | 单个租户预先积压 30 000 条 `RECEIVED` | 清空速率 ≥ 500 事件 / 秒（§119「≥ 峰值 5 倍」） |
+| S3 崩溃与重试 | S1 进行中随机杀掉 worker 进程 3 次、注入 1% 的意外异常 | 结束后：`PROCESSED` 事件数 = 账本 `AI_USAGE` 行数（不含 0 元事件）；每个租户 `期初余额 − Σ billable_cost = 期末余额`；`verify_wallet` 全部通过；无 `LEDGER_CONFLICT` |
+| S4 与发布并发 | S1 进行中每 10 秒发布一次价格 / 规则 / 汇率 | S1 的通过线仍满足；发布请求 p95 ≤ 5 秒；抽样事件用快照重算（T-G `reprice_from_snapshot`）与快照一致 |
+
+### 10.2 方案 C 的切换判据（设计 §2 原文）
+
+> S1 的 p95 或 p99 不达标、或 S2 的清空速率 < 500 / 秒，**且**瓶颈经测量是同一钱包行锁上的串行提交（最热租户的单事件事务平均持锁时间 × 目标速率 > 1 秒 / 秒）—— 则另开任务实现方案 C（同租户 N 个事件一个事务，每事件仍一行账本），另过设计闸门。若瓶颈在别处（例如数据库整体吞吐、worker 数量），先调那一处，不切方案 C。
+
+脚本怎么算这两个条件：
+
+| 条件 | 脚本的做法 |
+| --- | --- |
+| S1 不达标 | 全部 S1 事件（最热租户 + 其他租户）的延迟 p95 > 60 秒或 p99 > 300 秒；最热租户自己的 p50 / p95 / p99 另行报告 |
+| S2 不达标 | 清空速率 = 积压条数 ÷（第一次 Beat 派发 → 最后一条的处理事务提交）< 500 / 秒 |
+| 平均持锁时间 | worker 进程里给 `_lock_wallet` 包一层只记时刻的包装：钱包行锁拿到的那一刻 → `process_event` 返回（处理事务已提交）。只统计最热租户、只统计 `PROCESSED` 的事件 |
+| 目标速率 | S1 用最热租户的速率（100 / 秒），S2 用 500 / 秒；哪个场景不达标就用哪个场景的速率去乘 |
+| 结论 | 「需要方案 C」：至少一个不达标的场景是锁瓶颈；「不需要方案 C」：都达标，或不达标但乘积 ≤ 1（瓶颈在别处）；「无法判定」：场景无效（见下）或没量到持锁时间 |
+
+⚠️ 场景结论有四种：`PASS`、`FAIL`、`INVALID`、`NOT_RUN`。**`INVALID` 不是失败，是「这一轮量的不是设计说的那个负载」**：
+摄取的实际速率低于目标的 95%、有事件停在 `PRICING_ERROR` 之类的错误状态（造的价格 / 规则 / 汇率不对）、
+S2 没造够积压、S3 没杀够次数、S4 一次发布或重算都没做成。`INVALID` 的场景不参与方案 C 的判定。
+S3 在设计的四条之外还要求「事件都走完了」：核对一个还在处理中的中间态没有意义。脚本只要有一个场景是
+`FAIL` 或 `INVALID` 就以退出码 1 结束。
+
+### 10.3 脚本怎么产生负载
+
+| 环节 | 做法 |
+| --- | --- |
+| 造数据 | 每轮一个唯一前缀 `perf-usage-<10 位十六进制>`。ADMIN 账号（口令随机、不保存）、供应商、每个场景一个模型、每个场景自己的客户 / 项目 / 集成凭据，全部经对应的服务函数建立；充值走管理员调账（期初余额 1 000 000 MYR，虚构） |
+| 价格、规则、汇率 | 在 `billing_perf` 里按虚构值发布：USD 价格（每 1 000 token）、`GLOBAL_PROVIDER_MODEL` 范围的 MARKUP 规则（只挂在本场景的模型上）、USD→MYR 汇率。⚠️ 汇率是全局的，会截断 `billing_perf` 里上一轮留下的 USD 版本 |
+| 摄取 | 经 AIH-TASK-029 的 `ingest_one`（UUIDv7 的 `event_id`、`LLM_TOKEN`），按时间表在一个线程池里发；跳过的只有 HTTP 层的验签与 nonce。**不直接写** `usage_events` |
+| 计费 | `--workers` 个**子进程**（默认 2，等于 compose 的 `BILLING_CELERY_CONCURRENCY`），由主进程的一个线程按 Beat 的节奏派任务：每 10 秒一次扫描（9 秒过期）、每 60 秒一次卡住回收（54 秒过期），数值取自 `app/core/celery_app.py`。扫描循环与 `bill_pending_events` 相同（8 秒预算、每批 20 条），逐条调用 AIH-TASK-032 的 `claim_events` / `process_event`；回收调用 `recover_stale_processing`。**不直接写**账本或余额 |
+| S3 的崩溃 | 在负载的 10%–90% 之间随机挑 3 个时刻，对随机一个 worker 进程发 SIGKILL，随即补一个新进程 |
+| S3 的意外异常 | 每条事件以 1% 的概率换一个「第一次调用就抛异常」的时钟：异常落在处理事务中途（三把共享锁之后、扣费之前），事务回滚、按 `FAILED_RETRYABLE` + 退避记一次 |
+| S4 的发布 | 负载期间每 10 秒依次发布一次价格、规则、汇率（数值交替，让快照重算有区分度），只计**发布**那一次调用的耗时；结束后抽 200 条已处理事件做 `reprice_from_snapshot`，与快照逐列比对 |
+| 延迟 | `ingest_one` 返回（已提交）→ `process_event` 返回 PROCESSED（已提交），两端都是墙钟；结果没来得及回报的事件退回用库里的 `processed_at − received_at`（整秒）；没走到 `PROCESSED` 的记作无穷大 |
+
+⚠️ **脚本不删除任何行**（账本只增）。每轮结束时把造了哪些数据逐项打印出来（也写进 `--json-out`）。
+
+### 10.4 在生产 VPS 上运行（照第 9 节的做法）
+
+护栏与 `perf_baseline.py` 同一套，再加两条：
+
+| 护栏 | 挡什么 |
+| --- | --- |
+| `--database-url` 必填，不回落到 `BILLING_DATABASE_URL` | 「没给就用默认的」= 栈自己的库 |
+| 库名必须是 `billing_perf`（URL 里的库名，连上之后再问一次服务器 `DATABASE()`） | 脚本不清理，写错库无法挽回，所以只认一个名字 |
+| URL 归一化比对 + 连上后比 `@@server_uuid` 与 `DATABASE()` | 指向栈自己那个 schema（它的 celery worker 会去计费脚本写的事件） |
+| `BILLING_ENVIRONMENT=production` 时只允许指向 `billing_perf`；生产上栈的库连不上就拒绝 | 与第 9 节不同，**不需要**再把一次性容器的环境临时改成 `local` |
+
+第 9.1 节的顾虑照旧成立（binlog 会多出这几万行、`restore.sh` 只放行生产库），包装脚本的两个坑也照旧：
+**每条 docker 命令都带 `</dev/null`**；测量库地址**不要**塞进 `BILLING_DATABASE_URL`，走单独的变量。
+
+```bash
+# 在生产 VPS 的部署目录里（与第 9 节同一台机器、同一套 compose）
+PERF_URL='mysql+pymysql://root:<BILLING_MYSQL_ROOT_PASSWORD>@mysql:3306/billing_perf?charset=utf8mb4'
+
+docker compose exec -T mysql mysql -u root -p"$BILLING_MYSQL_ROOT_PASSWORD" \
+  -e 'CREATE DATABASE IF NOT EXISTS billing_perf' </dev/null
+docker compose run --rm -e BILLING_DATABASE_URL="$PERF_URL" api alembic upgrade head </dev/null
+
+mkdir -p perf-out
+docker compose run --rm \
+  -v "$PWD/scripts:/srv/billing/scripts:ro" \
+  -v "$PWD/perf-out:/srv/billing/perf-out" \
+  api python scripts/perf_usage.py --database-url "$PERF_URL" \
+    --json-out perf-out/perf_usage.json </dev/null
+```
+
+- 全部四个场景约 30–40 分钟（S1 / S3 / S4 各 5 分钟负载加等待清空，S2 先灌 3 万条再清空）。
+  `--scenarios S1,S2` 可以只跑一部分；**改过负载参数（`--hot-rate`、`--duration` 等）的结果不能回填为基线**
+- 集成凭据由 `create_credential` 签发，要读主密钥文件：在 api 容器里跑就有
+- ⚠️ 一次性容器沿用 api 服务的 CPU 配额，**摄取线程与计费 worker 共用这一份**；生产上两者是两个容器、各自一份。
+  所以 10.5 要记下容器配额，判方案 C 时把「CPU 配额」当作「瓶颈在别处」的候选之一
+- 回填结果之后，`billing_perf` 可以像第 9 节那样整库 `DROP`；要复核就先留着（每轮有唯一前缀，互不混淆）
+
+### 10.5 结果（待运维回填）
+
+**环境**
+
+| 项 | 值 |
+| --- | --- |
+| 日期 / 执行人 | |
+| 机器（核数 / 内存 / 同机负载） | |
+| 一次性容器的 CPU / 内存配额 | |
+| MySQL 版本与配额 | |
+| `--workers` / `--ingest-threads` | |
+| 运行前库内 `usage_events` / `wallet_transactions` 行数 | |
+| 本轮前缀 | |
+
+**场景**
+
+| 场景 | 实测 | 通过线 | 结论 |
+| --- | --- | --- | --- |
+| S1 摄取实际速率（最热 / 其他） | | 100 / 5 事件每秒（≥ 95% 才有效） | |
+| S1 延迟 p50 / p95 / p99（全部事件） | | p95 ≤ 60 秒、p99 ≤ 5 分钟 | |
+| S1 延迟 p50 / p95 / p99（最热租户） | | 只报告 | |
+| S1 最热租户平均持锁 | | 判据用 | |
+| S2 积压条数 / 清空用时 / 清空速率 | | ≥ 500 事件 / 秒 | |
+| S2 最热租户平均持锁 | | 判据用 | |
+| S3 杀 worker 次数 / 注入的意外异常数 | | 3 次 / 约 1% | |
+| S3 `PROCESSED`（不含 0 元）/ `AI_USAGE` 行数 | | 相等 | |
+| S3 每个租户 期初 − Σ billable_cost = 期末 | | 全部相等 | |
+| S3 `verify_wallet` / `LEDGER_CONFLICT` | | 全部通过 / 0 | |
+| S4 延迟 p95 / p99 | | S1 的通过线 | |
+| S4 发布 p95（价格 / 规则 / 汇率 / 合计） | | ≤ 5 秒 | |
+| S4 快照重算 抽样数 / 不一致数 | | 不一致 0 | |
+
+**方案 C**
+
+| 项 | 值 |
+| --- | --- |
+| 脚本的结论 | |
+| 依据（脚本输出原样贴） | |
+| 后续动作（另开方案 C 任务并过设计闸门 / 调哪一处 / 无） | |
