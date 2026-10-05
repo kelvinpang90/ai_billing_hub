@@ -12,6 +12,7 @@
 - [管理端审计日志](#管理端审计日志)（AIH-TASK-022）
 - [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
+- [管理端试算预览](#管理端试算预览)（AIH-TASK-031）
 - [内部告警接口](#内部告警接口)（AIH-TASK-042）：机器接口，**不套信封**，是下面通用约定的例外
 - [集成：用量事件摄取](#集成用量事件摄取)（AIH-TASK-029）：集成签名认证，错误信封多一个顶层 `retryable`
 
@@ -1537,6 +1538,112 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
 计费事务里的顺序：`resolve_model`（供应商 S）→ `lock_pricing_rules_shared` → 价格与规则的加锁读 → 钱包 → 租户；返回
 的规则内部 id 写进事件快照（`pricing_rule_id`）。契约全文见设计 §2「对下游任务的契约」与 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的
 AIH-TASK-027 记录段。
+
+---
+
+## 管理端试算预览
+
+设计依据：设计闸门 #179 `APPROVED: design v1`，全文见
+[design/AIH-TASK-031-pricing-engine.md](design/AIH-TASK-031-pricing-engine.md)（spec §14、§15、§15.1、§16、§17.1、§59、
+§80；ADR-0005、ADR-0008）。实现登记为 AIH-TASK-031。算法、舍入与错误顺序见 [pricing-engine.md](pricing-engine.md) 的
+「计算」。
+
+按显式的 `occurred_at` 试算一个用量：列出解析到的模型、价格版本、汇率版本、定价规则，每个分量的数量与未舍入的成本 /
+客户分量价，以及未舍入与舍入后的三个金额（spec §59「preview calculation」）。**与计费同一套解析与计算代码**，只是不取
+两张单行锁表的共享锁。**只读**：不写库、不写审计。只用已发布（`PUBLISHED` / `RETIRED`）的版本与规则，不能用草稿试算。
+响应里有供应商成本、汇率与倍数，只在管理端（INV-7）。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST /api/v1/admin/pricing-preview` | 见下 | 200，试算结果（含错误状态） | 401 / 403 / 404 / 422 / 500 / 503 |
+
+只有 ADMIN 能调（处理函数第一条语句就是鉴权）。
+
+### 请求体
+
+| 字段 | 规则 |
+| --- | --- |
+| `customer_id` | 客户（租户）的 `public_id`；不存在 404 `CUSTOMER_NOT_FOUND` |
+| `provider` | 供应商代码，`^[a-z0-9][a-z0-9_-]{0,63}$` |
+| `model` | 模型代码或别名，`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$`；按 `occurred_at` 解析（含别名段） |
+| `usage_type` | 计量类型 `code`；不存在 404 `USAGE_METER_TYPE_NOT_FOUND` |
+| `input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` | `LLM_TOKEN_FIELDS` 形态的类型（`LLM_TOKEN`）：四个都必填，JSON 整数，0–10¹²；其余类型不许出现 |
+| `quantity` / `unit` | `QUANTITY` 形态的类型：`quantity` 必填，**JSON 字符串** `^[0-9]{1,12}(\.[0-9]{1,8})?$`（整数类型不许有小数部分，`"3.0"` 也拒绝）；`unit` 必须等于该类型的单位；`LLM_TOKEN` 不许出现 |
+| `occurred_at` | 必填，RFC 3339 且**必须带时区**，最多 6 位小数秒；**可以是将来**（预约生效的价格与规则也能预览） |
+
+与摄取同一套字段写法（[集成：用量事件摄取](#集成用量事件摄取)）：严格类型（`true` 不是整数，数字不是字符串），多余
+字段 422。
+
+### 响应
+
+```json
+{
+  "status": "PRICED",
+  "error_code": null,
+  "model": {"provider": "anthropic", "model": "claude-x", "matched_via": "code"},
+  "provider_price_version": {
+    "id": "00000000-0000-4000-8000-000000000000",
+    "source_currency": "USD",
+    "effective_from": null,
+    "effective_to": null
+  },
+  "fx_rate_version": {
+    "id": "00000000-0000-4000-8000-000000000000",
+    "rate": "4.4444444444",
+    "observed_at": "2026-09-29T08:30:00"
+  },
+  "pricing_rule": {
+    "id": "00000000-0000-4000-8000-000000000000",
+    "priority_scope": "GLOBAL",
+    "strategy": "MARKUP",
+    "markup_multiplier": "2.00000000"
+  },
+  "components": [
+    {
+      "component_code": "LLM_CACHE_READ_TOKEN",
+      "quantity": "3000",
+      "provider_cost_unrounded": "0.00045",
+      "customer_price_unrounded": null
+    }
+  ],
+  "provider_source_cost_unrounded": "0.0177",
+  "provider_source_cost": "0.01770000",
+  "estimated_provider_cost_myr_unrounded": "0.07866666666588",
+  "estimated_provider_cost_myr": "0.07866667",
+  "billable_cost_unrounded": "0.15733333333176",
+  "billable_cost": "0.15733333",
+  "tax_inclusive": true
+}
+```
+
+（示例里的价格、汇率与倍数是虚构值；`components` 只列了一项。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `status` | `PRICED` / `MODEL_UNKNOWN` / `PRICING_ERROR` / `FX_RATE_ERROR` |
+| `error_code` | `PRICING_ERROR` 的细分码：`NO_PROVIDER_PRICE` / `MISSING_PROVIDER_COMPONENT` / `NO_PRICING_RULE` / `MISSING_RULE_COMPONENT`；其余状态为 `null` |
+| `model` | 解析到的模型：`model` 是模型自己的代码（用别名试算时也是），`matched_via` 是 `code` 或 `alias` |
+| `provider_price_version` | 生效的价格版本；`effective_from` / `effective_to` 为 `null` 表示「一直以来」/「仍生效」 |
+| `fx_rate_version` | 原币不是 MYR 时生效的汇率版本，`rate` 是原值（1 单位原币 = 多少 MYR，不舍入）；原币是 MYR 时为 `null`（不查汇率） |
+| `pricing_rule` | 命中的规则；`markup_multiplier` 只有 MARKUP 有 |
+| `components` | 该计量类型的全部分量，`component_code` 升序：数量、未舍入的供应商原币成本、未舍入的客户分量价（MYR 含税，只有 FIXED_RATE 有） |
+| `*_unrounded` | 未舍入的中间值，十进制字符串（最多 50 位有效数字），从不是 JSON 数字 |
+| `provider_source_cost` / `estimated_provider_cost_myr` / `billable_cost` | 存储值：恰好 8 位小数，各自由未舍入值 `ROUND_HALF_UP` 舍入一次。「`estimated_provider_cost_myr` × 倍数」与 `billable_cost` 可以差最后一位（见 [pricing-engine.md](pricing-engine.md)） |
+| `tax_inclusive` | 恒为 `true`：`billable_cost` 是含税金额（ADR-0008），不拆税 |
+
+**错误状态也是 200**，给出已解析到的部分，未解析到的为 `null`、`components` 为空、六个金额为 `null`。错误按「模型 →
+价格 → 汇率 → 规则」的顺序判定，先遇到哪个报哪个：例如同时缺价格与汇率时报 `PRICING_ERROR` / `NO_PROVIDER_PRICE`；
+模型与价格都有、缺汇率时 `model`、`provider_price_version` 有值，`fx_rate_version`、`pricing_rule` 为 `null`。命中的
+FIXED_RATE 规则缺该计量类型的分量时是 `MISSING_RULE_COMPONENT`，不下落到更低一级的规则。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | `customer_id` 不存在 | 否 |
+| 404 | `USAGE_METER_TYPE_NOT_FOUND` | `usage_type` 不是计量类型 | 否 |
+| 422 | `VALIDATION_ERROR` | 格式、类型、多余字段；用量字段与计量类型的形态不符；`occurred_at` 不是日历上存在的时刻 | 否 |
+| 422 | `AMOUNT_OUT_OF_RANGE` | 某个存储值超出 DECIMAL(20,8)（计费侧会把这样的事件标 `FAILED_FINAL`） | 否 |
 
 ---
 
