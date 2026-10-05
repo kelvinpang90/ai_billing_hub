@@ -2185,7 +2185,7 @@ tasks:
       - nginx：集成前缀块 client_max_body_size 1m + error_page 413 返回设计给出的 JSON 信封；tests/backend/test_compose.py 静态钉住；应用层单条上限 16 KiB
       - '告警：在 app/services/alerts.py 注册 usage_event_conflicts 维度（最近 24 小时冲突行数与最早时刻，> 0 为 P2）；docs/runbook.md 写明「摄取中断」由现有 services / readyz 检查覆盖、以及部署后经 nginx 发 1 MiB + 1 字节的实测步骤（结果留在任务记录）'
       - 两个审计动作（USAGE_EVENT_SCOPE_MISMATCH、USAGE_EVENT_IDEMPOTENCY_CONFLICT）内容按设计 §2「审计」，不含载荷；新 entity_type usage_event 的 entity_id 是原事件的 public_id，加进 app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES（带写入方注释），否则 test_every_written_entity_type_is_classified 在 CI 变红；integration_credential 已分类，不动
-      - 测试覆盖设计 §7 全部行；数据库约束、并发重复与并发冲突放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表枚举列加进 test_model_columns.py；本任务补齐 REQ-AUTH-001 的重放测试证据并在 docs/TODO.md 勾掉对应后移项
+      - 测试覆盖设计 §7 全部行；数据库约束、并发重复与并发冲突放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；事务中途失败的回滚用例在 SQLite 与 MySQL 上各跑一次；新表枚举列加进 test_model_columns.py；0017 让 tests/backend/test_fx_rates_db.py 的 test_upgrade_and_downgrade 从 head 降到 0014 时多删 usage_events、usage_event_conflicts 与两个只增触发器，照 0016 的先例只更新它的期望集合；本任务补齐 REQ-AUTH-001 的重放测试证据并在 docs/TODO.md 勾掉对应后移项
       - docs/api.md 记端点、请求头补充（每次尝试换新 X-Acuven-Request-Id）、字段规则、错误表与 retryable、413 的 request_id 为 null；docs/database-schema.md 记两张表；PR 描述的任务记录记下两个审计动作对 §66 的补充、§79 列名与载荷字段一致的取名、按凭据限流仍是待办
       - 不计费、不入队、不做批量端点；实现时把单条处理拆成 ingest_one（设计 AIH-TASK-030 要复用）
       - 测试里的 uuid 用全零占位值（secret-scan）；价格、汇率与金额一律用明显的虚构值
@@ -2213,6 +2213,7 @@ tasks:
       - tests/backend/test_usage_ingest_api.py
       - tests/backend/test_usage_ingest_service.py
       - tests/backend/test_migrations.py
+      - tests/backend/test_fx_rates_db.py
       - tests/backend/test_model_columns.py
       - tests/backend/test_compose.py
       - tests/backend/test_internal_alerts.py
