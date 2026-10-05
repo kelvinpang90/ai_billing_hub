@@ -2453,7 +2453,7 @@ tasks:
     title: 最热租户压测脚本与用量计费的性能基线
     purpose: >-
       实现 docs/design/AIH-TASK-032-usage-billing.md §2「最热租户」定义的 S1–S4 压测（ADR-0011 要求）：新脚本 scripts/perf_usage.py，只对独立的 billing_perf 库运行（与 scripts/perf_baseline.py 同一套护栏），报告 p50 / p95 / p99、回补速率与一致性核对，并在 docs/perf-baseline.md 加一节写运行方法与结果模板。脚本本身由 Worker 实现；在 VPS 上实际运行是合并后的运维步骤。不走设计闸门：只是测量脚本，不改任何产品代码与数据。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-032
     acceptance_criteria:
