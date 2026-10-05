@@ -102,6 +102,13 @@ _TRIGGERS = {
 # Migration 0016 (AIH-TASK-045): the lock tables' BEFORE UPDATE. Downgrading to 0014 drops them
 # too — the fx one with its table, the pricing one by 0016's downgrade.
 _TRIGGERS_0016 = {"trg_pricing_rule_locks_before_update", "trg_fx_rate_locks_before_update"}
+# Migration 0017 (AIH-TASK-029): the usage event tables and the conflict table's append-only
+# triggers. Downgrading to 0014 drops them too (the triggers with their table).
+_TABLES_0017 = {"usage_events", "usage_event_conflicts"}
+_TRIGGERS_0017 = {
+    "trg_usage_event_conflicts_before_update",
+    "trg_usage_event_conflicts_before_delete",
+}
 
 _INSERT_VERSION = text(
     "INSERT INTO fx_rate_versions (public_id, base_currency, quote_currency, rate, source,"
@@ -1028,17 +1035,19 @@ def _tables_triggers_and_locks() -> tuple[set[str], set[str], list[int] | None]:
 
 
 def test_upgrade_and_downgrade(alembic_config: Config) -> None:
-    """Downgrading to 0014 drops the three tables and their triggers, and 0016's two lock
-    table triggers, and nothing else; upgrading again builds them with exactly one lock row."""
+    """Downgrading to 0014 drops the three tables and their triggers, 0016's two lock table
+    triggers and 0017's two tables with their two triggers, and nothing else; upgrading again
+    builds them with exactly one lock row."""
     try:
         tables, triggers, locks = _tables_triggers_and_locks()
-        assert _TABLES <= tables
-        assert _TRIGGERS | _TRIGGERS_0016 <= triggers
+        assert _TABLES | _TABLES_0017 <= tables
+        assert _TRIGGERS | _TRIGGERS_0016 | _TRIGGERS_0017 <= triggers
         assert locks == [1]
 
         command.downgrade(alembic_config, "0014_pricing_rules")
-        dropped = _TRIGGERS | _TRIGGERS_0016
-        assert _tables_triggers_and_locks() == (tables - _TABLES, triggers - dropped, None)
+        dropped_tables = _TABLES | _TABLES_0017
+        dropped = _TRIGGERS | _TRIGGERS_0016 | _TRIGGERS_0017
+        assert _tables_triggers_and_locks() == (tables - dropped_tables, triggers - dropped, None)
 
         command.upgrade(alembic_config, "head")
         assert _tables_triggers_and_locks() == (tables, triggers, [1])

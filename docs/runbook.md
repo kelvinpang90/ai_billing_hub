@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-10-04
+> 最后更新：2026-10-05
 
 ---
 
@@ -577,6 +577,86 @@ Telegram：`ai_billing_hub fx_fetch` 与 `ai_billing_hub fx_stale` **一起**变
 - **不要为了让部署用户读到而把文件改成 `0444` 或复制第二份。**属主 `10001`、属组部署用户的主组、`0440` 就够；
   第二份要和第一份同步轮换，迟早对不上
 - **不要把 `/internal/alerts` 的 nginx 名单放宽**来「先通了再说」：它与 `/readyz` 同一份，测试钉着
+
+---
+
+## 用量摄取：幂等冲突（`usage_event_conflicts` 告警）与摄取中断
+
+**首次编写：2026-10-05（AIH-TASK-029）。依据：设计闸门 #176 v8（[AIH-TASK-029-usage-ingest.md](design/AIH-TASK-029-usage-ingest.md)
+§2「告警」「nginx」、§5）；接口契约见 [api.md](api.md#集成用量事件摄取)。**
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| Telegram：`ai_billing_hub usage_event_conflicts` 变 DOWN，正文 `P2 usage_event_conflicts: <n> conflicts in 24 hours, earliest <UTC 时刻>` | **主信号**（spec §23 要求的数据完整性告警，P2）。判据：最近 24 小时里记下了任何一条冲突行。`monitor.sh` 按维度名读 `.env` 的 `BILLING_HEALTHCHECK_ALERT_USAGE_EVENT_CONFLICTS_URL`，脚本不用改；没配这个地址时巡检日志会写 `no BILLING_HEALTHCHECK_ALERT_USAGE_EVENT_CONFLICTS_URL configured` |
+| 管理端审计：`GET /api/v1/admin/audit-logs?action=USAGE_EVENT_IDEMPOTENCY_CONFLICT` | 每条**新的**冲突一条审计（同一冲突请求重发不再加），`entity_id` 是被撞的原事件，`after_state` 有请求方的 `api_key`、`key_version` 与不符类型 |
+| 管理端审计：`action=USAGE_EVENT_SCOPE_MISMATCH` | 集成方在载荷里报的 `tenant_id` / `project_id` 与凭据不符（403）。不进告警维度，查冲突时顺带看一眼：常与配置串了有关 |
+| **摄取中断**（spec §120 的 Billing ingestion outage） | 平台侧能观测到的中断就是 API 或数据库不可用，**由现有的 `services`（`api` / `mysql` / `billing_nginx` 容器）与 `readyz` 两个检查覆盖**，不另设维度。应用侧「发不出去」由 Phase 3 的积压监控覆盖。⚠️ Redis 不可用**不是**摄取中断：nonce 层放行、事件照收（API 日志里每个请求一条 `nonce_store_unavailable` WARNING），按「Redis / Celery broker 不可用」处理 |
+
+### 影响什么
+
+| 情形 | 仍然正常 | 受影响 |
+| --- | --- | --- |
+| 幂等冲突 | 原事件一个字节都没改，照常计费；冲突请求**没有任何财务效果** | 冲突的那个请求被拒（409，`retryable = false`），在集成方那边进死信 |
+| 摄取中断 | 集成方的 outbox 退避重试，事件留在应用侧，不丢（REQ-AVAIL-001：AI 服务本身不受影响） | 中断期间没有新事件落库，计费随之推迟 |
+
+### 立刻做什么
+
+1. 看冲突明细（只读）：
+   ```bash
+   docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+     SELECT c.received_at, c.event_id, c.api_key, c.mismatch, e.public_id, e.received_at
+       FROM usage_event_conflicts c JOIN usage_events e ON e.id = c.usage_event_id
+      ORDER BY c.id DESC LIMIT 20"'
+   ```
+2. 按 `mismatch` 判断：
+
+   | `mismatch` | 多半是 |
+   | --- | --- |
+   | `FINGERPRINT` | 同一个 `api_key` 用同一个 `event_id` 发了不同的内容：集成方的 `event_id` 生成或 outbox 改写了已排队的载荷 |
+   | `OWNERSHIP` | 另一个 `api_key`（另一个项目）用了别人已用过的 `event_id`，内容相同：两套系统共用了 ID 来源，或复制了载荷 |
+   | `BOTH` | 同上，内容也不同 |
+
+3. 联系 `api_key` 对应的集成方修复。冲突的事件在他们那边是死信：修好之后用**新的** `event_id` 重投。
+4. 摄取中断：先按 `readyz` / `services` 的告警处理 API 或数据库故障；恢复后集成方自行补投，已经落库的事件重投得到
+   `200 already_received`，不会重复计费。
+
+### 恢复
+
+- 冲突维度在最后一条冲突行满 24 小时后自动转绿；冲突行本身永久保留（只增），不需要也不能清理。
+- 摄取中断随 API / 数据库恢复而结束，`readyz` 与 `services` 转绿即可。
+
+### 部署后检查：超大请求经 nginx 返回 JSON 413
+
+集成前缀 `/api/v1/integration/` 的 nginx 上限是 1 MiB，超过时由 nginx 返回与应用同一个 JSON 信封（`PAYLOAD_TOO_LARGE`、
+`retryable: false`、`request_id: null`），而不是默认的 HTML。静态配置由 `tests/backend/test_compose.py` 钉着，**经过 nginx 的
+行为只能部署后实测**：合并部署 AIH-TASK-029（以及以后每次改 `deploy/nginx/billing.conf` 的集成前缀块）之后，在 VPS 上：
+
+```bash
+head -c $((1024 * 1024 + 1)) /dev/zero \
+  | curl -s -X POST -H 'Content-Type: application/json' --data-binary @- \
+      -w '\nHTTP %{http_code}\n' http://127.0.0.1:<BILLING_HTTP_PORT>/api/v1/integration/usage-events
+```
+
+期望恰好是：
+
+```text
+{"success":false,"data":null,"error":{"code":"PAYLOAD_TOO_LARGE","message":"request body too large"},"retryable":false,"request_id":null}
+HTTP 413
+```
+
+把这两行原样写进该次任务记录（PR 描述）。得到 HTML 或别的状态码：集成前缀块没生效（`nginx -t`、`docker compose exec
+billing_nginx nginx -T | grep -A4 integration` 核对挂载的配置），按「绝不能做什么」最后一条处理，不要先调大上限。
+
+### 绝不能做什么
+
+- **不要删冲突行，也不要改原事件来「消告警」**：冲突表只增（触发器拒绝 UPDATE / DELETE），它是「这个 `event_id` 被别人
+  用过」的证据，也是告警的依据；原事件不变是 INV-11 的保证
+- **不要把原事件的状态改成 `IDEMPOTENCY_CONFLICT`**：冲突是那个请求的结果，不是原事件的状态；改了它，合法事件就不计费了
+- **不要让集成方「改了内容、沿用同一个 `event_id` 再发」**：永远是冲突。更正一律用新的 `event_id`
+- **不要为了「先通了再说」调大集成前缀的 `client_max_body_size`**：应用侧单条上限是 16 KiB、批量的另由批量摄取定，
+  两层的上限与返回的信封要一起改
 
 ---
 

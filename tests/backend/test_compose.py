@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import pytest
 import yaml
 
 from app.core.config import Settings
+from app.core.errors import INTEGRATION_PREFIX
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = REPO_ROOT / "docker-compose.yml"
@@ -267,6 +269,35 @@ def test_the_auth_endpoints_are_rate_limited_at_the_edge() -> None:
     assert "limit_req_zone" in conf
     block = nginx_location_block("/api/v1/auth/")
     assert "limit_req zone=" in block
+
+
+def test_the_integration_prefix_answers_an_oversized_body_with_the_json_envelope() -> None:
+    """设计闸门 #176 v8 §2「nginx」：nginx 默认的 413 是 HTML，集成方读不到 `retryable`。
+
+    集成前缀单独一块：上限 1m，413 交给命名 location，返回与应用同一个信封
+    （`PAYLOAD_TOO_LARGE`、`retryable: false`；请求没到应用，`request_id` 为 null）。
+    经过 nginx 的实测在部署后做（docs/runbook.md「用量摄取」一节）。
+    """
+    block = nginx_location_block(INTEGRATION_PREFIX)
+    assert "client_max_body_size 1m;" in block
+    assert "error_page 413 = @integration_too_large;" in block
+    assert "proxy_pass $billing_api$request_uri;" in block
+    assert "include /etc/nginx/conf.d/billing-proxy-headers.inc;" in block
+
+    named = nginx_location_block("@integration_too_large")
+    assert "default_type application/json;" in named
+    assert "proxy_pass" not in named
+    returned = re.search(r"return 413 '([^']*)';", named)
+    assert returned is not None, "the named location must return 413 with a quoted body"
+    body = returned.group(1)
+    assert '"retryable":false' in body
+    assert json.loads(body) == {
+        "success": False,
+        "data": None,
+        "error": {"code": "PAYLOAD_TOO_LARGE", "message": "request body too large"},
+        "retryable": False,
+        "request_id": None,
+    }
 
 
 def test_readiness_is_not_exposed_to_the_public_internet() -> None:

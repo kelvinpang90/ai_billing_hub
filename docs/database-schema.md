@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-09-30
+> 最后更新：2026-10-05
 
 ---
 
@@ -723,6 +723,105 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 - **写入顺序**（区间触发器与 `open_slot` 唯一索引按行检查，服务层每一步立刻 flush）：发布时先截断前一个（写
   `effective_to`），再把本行从草稿改为已发布；撤销预约时先把被撤销的一行改成空区间的 `RETIRED`，再把前一个恢复为
   未截断（只有它仍是 `PUBLISHED`、尽头等于被撤销行的起点时）。
+
+---
+
+## 用量事件（spec §23、§79、§83；AIH-TASK-029，迁移 `0017_usage_events`）
+
+设计依据：[design/AIH-TASK-029-usage-ingest.md](design/AIH-TASK-029-usage-ingest.md)（设计闸门 #176 v8）§2「数据库」与
+§8。两张表：`usage_events`、`usage_event_conflicts`；另给两张已有表各加一个唯一约束（只新增索引，不改列）：
+
+- `integration_credentials`：`uq_integration_credentials_id_scope (id, project_id, tenant_id)`；
+- `usage_meter_types`：`uq_usage_meter_types_id_shape_unit_kind (id, payload_shape, unit, quantity_kind)`。
+
+`id` 本来就唯一，这两个约束只为让下面的复合外键成立（先例：`uq_projects_id_tenant`）。
+
+共同的约定：
+
+- **本任务只写 `RECEIVED`**，不计费、不入队；计价快照列（价格版本、规则、FX、成本、计费额）由计费任务（T-H）的迁移加。
+- **行永不删除**：外键都是 `RESTRICT`；冲突表由触发器拒绝 UPDATE / DELETE（只在 MySQL 上）。
+- **必需列逐列 `NOT NULL`**（设计 v6）：MySQL 对任一组成列为 `NULL` 的外键不做检查、对结果为 UNKNOWN 的 CHECK 放行，
+  所以复合外键与形态 CHECK 只有在组成列非空时才真正生效。
+
+### `usage_events`（§79）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_usage_events_public_id`）；管理端以后用，冲突审计的 `entity_id` |
+| `event_id` | VARCHAR(64) `utf8mb4_0900_bin` | 非空，**全局唯一**（`uq_usage_events_event_id`，§23 的最终仲裁）。UUIDv7 或 ULID 的规范写法（应用层校验） |
+| `schema_version` | VARCHAR(8) | 非空 |
+| `tenant_id` / `project_id` | BIGINT | 非空；复合外键 `(project_id, tenant_id)` → `projects(id, tenant_id)` `RESTRICT`（`fk_usage_events_project`） |
+| `integration_credential_id` | BIGINT | 非空；接收时用的凭据行（含版本）。复合外键 `(integration_credential_id, project_id, tenant_id)` → `integration_credentials(id, project_id, tenant_id)` `RESTRICT`（`fk_usage_events_credential`）：**事件的租户与项目由数据库保证就是凭据所属的租户与项目**（INV-8） |
+| `request_id` | VARCHAR(128) `utf8mb4_0900_bin` | 非空；AI 调用的 id |
+| `conversation_id` | VARCHAR(128) `utf8mb4_0900_bin` | 可空 |
+| `provider_code_raw` | VARCHAR(64) `utf8mb4_0900_bin` | 非空；上报的原始字符串 |
+| `model_code_raw` | VARCHAR(128) `utf8mb4_0900_bin` | 非空；同上 |
+| `provider_id` / `model_id` | BIGINT | 可空；§79 的目录引用，摄取时为空，计费事务按 `occurred_at` 解析后写入（未知模型保持为空）。复合外键 `(model_id, provider_id)` → `ai_models(id, provider_id)`（`fk_usage_events_model`）与单列 `provider_id` → `ai_providers(id)`（`fk_usage_events_provider`），都是 `RESTRICT` |
+| `usage_meter_type_id` | BIGINT | 非空；接收时按 `usage_type` 查到的计量类型 |
+| `payload_shape` | VARCHAR(32) | 非空；与下面两列一起组成复合外键 `(usage_meter_type_id, payload_shape, unit, quantity_kind)` → `usage_meter_types(id, payload_shape, unit, quantity_kind)` `RESTRICT`（`fk_usage_events_meter_type`）：形态、单位、数量类型**由数据库保证**与所属计量类型一致 |
+| `quantity_kind` | VARCHAR(16) | 非空；复合外键的一部分 |
+| `input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` | BIGINT | 可空；各自 `CHECK IS NULL OR >= 0`。列名与载荷字段、与 `usage_meter_components.quantity_field` 一致（见下「取名」） |
+| `quantity` | DECIMAL(20,8) | 可空；`CHECK IS NULL OR >= 0`。用量不是金额，但同一精度、不经过浮点 |
+| `unit` | VARCHAR(16) `utf8mb4_0900_bin` | 非空；复合外键的一部分。`QUANTITY` 形态即上报的 `unit`，`LLM_TOKEN_FIELDS` 形态是类型的单位 `TOKEN` |
+| `payload_fingerprint` | CHAR(64) | 非空；规范化载荷的 SHA-256 |
+| `status` | VARCHAR(32) | 非空，默认 `RECEIVED`；`CHECK` §83 的九个取值。`IDEMPOTENCY_CONFLICT` 留在取值里但不写：冲突是请求的结果，不是原事件的状态 |
+| `error_code` / `error_message` | VARCHAR(64) / VARCHAR(255) | 可空；计费侧写 |
+| `occurred_at` | DATETIME(6) | 非空；保留微秒（别名与版本边界按 `[from, to)` 比较） |
+| `received_at` / `created_at` | DATETIME | 非空；整秒 |
+| `processed_at` | DATETIME | 可空；计费侧写 |
+
+- **形态 CHECK**（`ck_usage_events_shape_fields`，设计 v2，显式写出两组条件、不用链式比较）：`LLM_TOKEN_FIELDS` 四个
+  token 列都非空且 `quantity` 为空；`QUANTITY` 四个 token 列都为空且 `quantity` 非空。交错的空值（`1, NULL, 1, NULL`
+  之类）因此进不来。
+- `ck_usage_events_integer_quantity`：`quantity_kind <> 'INTEGER' OR quantity IS NULL OR quantity = FLOOR(quantity)`。
+  ⚠️ 只在 MySQL 上建（模型用 `ddl_if`）：单元测试的 SQLite 不一定编译了 `FLOOR`，服务层同样校验。
+- `ck_usage_events_catalog_reference`：`model_id IS NULL OR provider_id IS NOT NULL`。
+- 索引：`ix_usage_events_status_occurred (status, occurred_at)`（计费侧扫描 `RECEIVED`）、`tenant_id`、
+  `ix_usage_events_project_id (project_id, tenant_id)`、`ix_usage_events_model_id (model_id, provider_id)`、
+  `provider_id`、`conversation_id`、`request_id`、`occurred_at`，以及两个复合外键在子表上的索引
+  `ix_usage_events_credential`、`ix_usage_events_meter_type`。`project_id` 与 `model_id` 的索引取复合外键需要的形式
+  （首列就是该列），一个索引同时服务查询与外键，不让 MySQL 再自动建一个。
+- **取名**：spec §79 写的是 `cache_creation_tokens` / `cache_read_tokens`；§74 允许按仓库约定命名，这里取与上报载荷、
+  与 AIH-TASK-025 的 `quantity_field` 一致的 `cache_creation_input_tokens` / `cache_read_input_tokens`，免得三处各叫
+  一个名。
+
+### `usage_event_conflicts`（只增）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增 |
+| `usage_event_id` | BIGINT | 非空；被撞的原事件，外键 → `usage_events(id)` `RESTRICT`（`fk_usage_event_conflicts_event`） |
+| `event_id` | VARCHAR(64) `utf8mb4_0900_bin` | 非空 |
+| `integration_credential_id` | BIGINT | 非空；冲突请求用的凭据行，外键 → `integration_credentials(id)` `RESTRICT`（`fk_usage_event_conflicts_credential`） |
+| `api_key` | VARCHAR(64) `utf8mb4_0900_bin` | 非空；冲突请求的 `public_api_key` |
+| `payload_fingerprint` | CHAR(64) | 非空；冲突请求的指纹 |
+| `mismatch` | VARCHAR(32) | 非空，`CHECK IN ('OWNERSHIP','FINGERPRINT','BOTH')` |
+| `received_at` | DATETIME | 非空 |
+
+- **所有列 `NOT NULL`**：去重唯一约束遇到 `NULL` 会失效。
+- 唯一约束 `uq_usage_event_conflicts_dedupe (event_id, api_key, payload_fingerprint)`：同一冲突只记一次，客户端反复
+  重试同一个冲突请求不会刷爆这张表；撞了它的那次不写审计。
+- 告警维度 `usage_event_conflicts` 按 `received_at` 数最近 24 小时的行（[api.md](api.md#内部告警接口)）。
+
+### 触发器（迁移 0017 建，只在 MySQL 上）
+
+写法与权限预检照迁移 0010（`audit_logs`）。拒绝一律 `SIGNAL SQLSTATE '45000'`（MySQL 错误号 1644）。
+
+| 触发器 | 做什么 |
+| --- | --- |
+| `trg_usage_event_conflicts_before_update` | 一律拒绝（只增） |
+| `trg_usage_event_conflicts_before_delete` | 一律拒绝（只增） |
+
+**残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器（与 0006 / 0010 相同）。
+
+### 写入顺序与事务
+
+- 新事件：一个事务 `INSERT usage_events` → commit，之后才回 202。插入优先，不先查；撞 `uq_usage_events_event_id` 时
+  回滚，新事务读已有行比对归属（租户、项目、`api_key`）与指纹。MySQL 上撞唯一约束的 INSERT 会等先到的事务提交或回滚，
+  所以读到的一定是已提交的行。
+- 冲突：冲突行与审计同一事务；撞去重约束（并发的同一冲突）时整个事务回滚、不写第二条审计。
+- 不加任何行锁。
 
 ---
 

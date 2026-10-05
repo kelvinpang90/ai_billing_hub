@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.models.integration import CredentialStatus, IntegrationCredential
@@ -146,6 +146,30 @@ def revoke_version(session: Session, row: IntegrationCredential, *, now: dt.date
     session.flush()
 
 
+def touch_last_used(
+    session: Session, *, credential_id: int, now: dt.datetime, min_interval: dt.timedelta
+) -> bool:
+    """Set `last_used_at = now` unless it was set less than `min_interval` ago. True = written.
+
+    摄取端点在响应之后的短事务里调用（AIH-TASK-029 设计 §2「凭据与缓存」）：条件写在
+    `WHERE` 里，不先读、不锁行，每个凭据行每个间隔至多写一次。吊销过的行同样更新 ——
+    只有认证成功的请求会走到这里，而那一刻它还可用。
+    """
+    statement = (
+        update(IntegrationCredential)
+        .where(
+            IntegrationCredential.id == credential_id,
+            or_(
+                IntegrationCredential.last_used_at.is_(None),
+                IntegrationCredential.last_used_at < now - min_interval,
+            ),
+        )
+        .values(last_used_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    return session.execute(statement).rowcount == 1
+
+
 __all__ = [
     "count_credentials_for_project",
     "end_version_at",
@@ -154,4 +178,5 @@ __all__ = [
     "list_credentials_for_project",
     "lock_key_versions",
     "revoke_version",
+    "touch_last_used",
 ]

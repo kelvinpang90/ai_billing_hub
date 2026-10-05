@@ -63,6 +63,9 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "pricing_rule",
         # 汇率版本的 public_id：app/services/fx_rates.py（AIH-TASK-039）。
         "fx_rate_version",
+        # 被撞的原用量事件的 public_id：app/services/usage_ingest.py 的幂等冲突审计
+        # （AIH-TASK-029）。归属不符的审计记在 `integration_credential` 上（api_key）。
+        "usage_event",
     }
 )
 

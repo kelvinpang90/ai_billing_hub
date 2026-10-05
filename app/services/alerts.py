@@ -38,6 +38,7 @@ from app.models.fx_rates import (
     FxFetchOutcome,
     FxRateVersion,
 )
+from app.repositories.usage_events import count_conflicts_since
 from app.services.auth import utc_now
 
 type Clock = Callable[[], dt.datetime]
@@ -47,6 +48,9 @@ FX_FETCH_WINDOW: Final = dt.timedelta(hours=72)
 # `fx_stale`：报价日距今（吉隆坡日期相减）**超过** 5 个日历日。
 # Kelvin 2026-09-29 选定（设计 §10 第 2 条）。
 FX_STALE_DAYS: Final = 5
+# `usage_event_conflicts`：最近 24 小时里有任何一条幂等冲突即 P2
+# （设计闸门 #176 v8 §2「告警」；spec §23 要求的数据完整性告警）。
+CONFLICT_WINDOW: Final = dt.timedelta(hours=24)
 
 # 三种都是成功：BNM 答「无记录」不是失败（设计 §2 `fx_fetch_attempts`）。
 _SUCCESSFUL_OUTCOMES: Final = (
@@ -184,6 +188,20 @@ def fx_stale(session: Session, context: AlertContext) -> AlertResult:
     return _combine(results)
 
 
+# --- usage_event_conflicts ----------------------------------------------------------
+
+
+def usage_event_conflicts(session: Session, context: AlertContext) -> AlertResult:
+    """P2 when an idempotency conflict was recorded in the last 24 hours (the count and the
+    earliest one). 冲突表只增，同一冲突请求重发不加行，所以计数就是不同冲突的条数。"""
+    count, earliest = count_conflicts_since(session, context.now - CONFLICT_WINDOW)
+    if count == 0 or earliest is None:
+        return AlertResult(AlertLevel.OK, "no conflicts in 24 hours")
+    noun = "conflict" if count == 1 else "conflicts"
+    since = earliest.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return AlertResult(AlertLevel.P2, f"{count} {noun} in 24 hours, earliest {since}")
+
+
 # --- 注册表 -------------------------------------------------------------------------
 
 # ⚠️ 有序：接口按这个顺序逐行输出。新维度追加在末尾，名字用小写与下划线
@@ -191,6 +209,7 @@ def fx_stale(session: Session, context: AlertContext) -> AlertResult:
 DIMENSIONS: Final[list[Dimension]] = [
     Dimension("fx_fetch", fx_fetch),
     Dimension("fx_stale", fx_stale),
+    Dimension("usage_event_conflicts", usage_event_conflicts),
 ]
 
 
@@ -217,6 +236,7 @@ def alert_lines(
 
 
 __all__ = [
+    "CONFLICT_WINDOW",
     "DIMENSIONS",
     "FX_FETCH_WINDOW",
     "FX_STALE_DAYS",
@@ -230,4 +250,5 @@ __all__ = [
     "fx_stale",
     "quote_date_of",
     "render",
+    "usage_event_conflicts",
 ]

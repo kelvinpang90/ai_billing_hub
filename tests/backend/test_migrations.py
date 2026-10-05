@@ -75,6 +75,7 @@ from app.models.pricing_rules import (
 )
 from app.models.provider_prices import ProviderPriceComponent, ProviderPriceVersion
 from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
+from app.models.usage import TEXT_COLLATION, UsageEvent, UsageEventConflict
 from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
@@ -680,7 +681,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验；价格表上的
         # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验；
         # 汇率的七个由 0015 建，在 test_0015_* 里验；两张锁表的 BEFORE UPDATE 由 0016 建，在
-        # test_0016_* 里验。
+        # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -691,6 +692,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0014,
             *_EXPECTED_TRIGGERS_0015,
             *_EXPECTED_TRIGGERS_0016,
+            *_EXPECTED_TRIGGERS_0017,
         }
         assert set(triggers) == expected
     finally:
@@ -888,7 +890,11 @@ def test_0007_keys_indexes_and_checks(alembic_config: Config) -> None:
     try:
         inspector = inspect(engine)
         # (public_api_key, key_version)，不是 §74.4 字面的 public_api_key 单列唯一（设计 §2）。
-        assert _unique_sets(_CREDENTIALS_TABLE) == {("public_api_key", "key_version")}
+        # head 上另有 0017 加的 (id, project_id, tenant_id)，只为用量事件的复合外键。
+        assert _unique_sets(_CREDENTIALS_TABLE) == {
+            ("public_api_key", "key_version"),
+            ("id", "project_id", "tenant_id"),
+        }
         indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes(_CREDENTIALS_TABLE)}
         assert indexes["ix_integration_credentials_project_id"] == ["project_id"]
         foreign_keys = {
@@ -1690,8 +1696,8 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015 的表随降级到 0009 一并删掉）。
-        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015
+        # 只删触发器：表与列都不动（0012–0015 与 0017 的表随降级到 0009 一并删掉）。
+        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -1787,8 +1793,8 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012–0015 的表随降级到 0010 一并删掉）。
-        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015
+        # 只删索引：表、列与 0010 的触发器都不动（0012–0015 与 0017 的表随降级到 0010 一并删掉）。
+        later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
@@ -1911,8 +1917,14 @@ _CODE_COLUMNS_0012 = {
     ("ai_model_aliases", "alias"): 128,
 }
 
+# head 上的唯一约束：`usage_meter_types` 的最后一个由 0017 加，只为用量事件的复合外键。
 _EXPECTED_UNIQUE_0012 = {
-    "usage_meter_types": {("public_id",), ("code",), ("id", "payload_shape")},
+    "usage_meter_types": {
+        ("public_id",),
+        ("code",),
+        ("id", "payload_shape"),
+        ("id", "payload_shape", "unit", "quantity_kind"),
+    },
     "usage_meter_components": {("component_code",), ("meter_type_id", "quantity_field")},
     "ai_providers": {("public_id",), ("code",)},
     "ai_models": {("public_id",), ("provider_id", "code"), ("id", "provider_id")},
@@ -3628,7 +3640,9 @@ def test_0016_triggers_exist_at_head(alembic_config: Config) -> None:
 
 @needs_mysql
 def test_0016_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> None:
+    # Measured at 0016 itself: from head the downgrade would also drop 0017's tables.
     command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION_0016)
     tables = _table_names()
     triggers = _all_triggers()
     assert _EXPECTED_TRIGGERS_0016.items() <= triggers.items()
@@ -3648,3 +3662,431 @@ def test_0016_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
         assert _lock_rows() == {"pricing_rule_locks": [1], "fx_rate_locks": [1]}
     finally:
         command.upgrade(alembic_config, "head")
+
+
+# ---------------------------------------------------------------------------
+# 0017_usage_events（AIH-TASK-029，设计闸门 #176 v8）
+#
+# The first cases need no database: the revision chain; the migration's checks and the two
+# parent unique constraints equal the models'; the two triggers written like 0010's; the 0006
+# precheck before any DDL; downgrade drops the tables, then the two unique constraints. On a
+# real MySQL: the shapes (NOT NULL column by column), keys, foreign keys and their rules, checks,
+# indexes and triggers, and that upgrade / downgrade add and drop only these. What the
+# constraints and triggers refuse or let through is in test_usage_ingest_service.py.
+# ---------------------------------------------------------------------------
+
+_REVISION_0017 = "0017_usage_events"
+_MIGRATION_0017 = pathlib.Path("alembic/versions/20260929_0017_usage_events.py")
+_USAGE_MODELS = (UsageEvent, UsageEventConflict)
+_TABLES_0017 = {model.__tablename__ for model in _USAGE_MODELS}
+# Creation order; downgrade must be exactly the reverse (foreign keys).
+_CREATE_ORDER_0017 = ["usage_events", "usage_event_conflicts"]
+
+# Trigger → (table, timing, event). The two of design §2, no more, no fewer.
+_EXPECTED_TRIGGERS_0017 = {
+    "trg_usage_event_conflicts_before_update": ("usage_event_conflicts", "BEFORE", "UPDATE"),
+    "trg_usage_event_conflicts_before_delete": ("usage_event_conflicts", "BEFORE", "DELETE"),
+}
+
+# Column → nullable. Design §2 lists the nullable ones; every other column is NOT NULL.
+_EXPECTED_0017_COLUMNS = {
+    "usage_events": {
+        "id": False,
+        "public_id": False,
+        "event_id": False,
+        "schema_version": False,
+        "tenant_id": False,
+        "project_id": False,
+        "integration_credential_id": False,
+        "request_id": False,
+        "conversation_id": True,
+        "provider_code_raw": False,
+        "model_code_raw": False,
+        "provider_id": True,
+        "model_id": True,
+        "usage_meter_type_id": False,
+        "payload_shape": False,
+        "quantity_kind": False,
+        "input_tokens": True,
+        "output_tokens": True,
+        "cache_creation_input_tokens": True,
+        "cache_read_input_tokens": True,
+        "quantity": True,
+        "unit": False,
+        "payload_fingerprint": False,
+        "status": False,
+        "error_code": True,
+        "error_message": True,
+        "occurred_at": False,
+        "received_at": False,
+        "processed_at": True,
+        "created_at": False,
+    },
+    "usage_event_conflicts": {
+        "id": False,
+        "usage_event_id": False,
+        "event_id": False,
+        "integration_credential_id": False,
+        "api_key": False,
+        "payload_fingerprint": False,
+        "mismatch": False,
+        "received_at": False,
+    },
+}
+
+# (table, column) → width. Compared byte for byte (utf8mb4_0900_bin).
+_BINARY_COLUMNS_0017 = {
+    ("usage_events", "event_id"): 64,
+    ("usage_events", "request_id"): 128,
+    ("usage_events", "conversation_id"): 128,
+    ("usage_events", "provider_code_raw"): 64,
+    ("usage_events", "model_code_raw"): 128,
+    ("usage_events", "unit"): 16,
+    ("usage_event_conflicts", "event_id"): 64,
+    ("usage_event_conflicts", "api_key"): 64,
+}
+
+_EXPECTED_UNIQUE_0017 = {
+    "usage_events": {("public_id",), ("event_id",)},
+    "usage_event_conflicts": {("event_id", "api_key", "payload_fingerprint")},
+}
+
+_EXPECTED_FOREIGN_KEYS_0017 = {
+    "usage_events": {
+        "fk_usage_events_project": (
+            ["project_id", "tenant_id"],
+            "projects",
+            ["id", "tenant_id"],
+        ),
+        "fk_usage_events_credential": (
+            ["integration_credential_id", "project_id", "tenant_id"],
+            "integration_credentials",
+            ["id", "project_id", "tenant_id"],
+        ),
+        "fk_usage_events_meter_type": (
+            ["usage_meter_type_id", "payload_shape", "unit", "quantity_kind"],
+            "usage_meter_types",
+            ["id", "payload_shape", "unit", "quantity_kind"],
+        ),
+        "fk_usage_events_model": (["model_id", "provider_id"], "ai_models", ["id", "provider_id"]),
+        "fk_usage_events_provider": (["provider_id"], "ai_providers", ["id"]),
+    },
+    "usage_event_conflicts": {
+        "fk_usage_event_conflicts_event": (["usage_event_id"], "usage_events", ["id"]),
+        "fk_usage_event_conflicts_credential": (
+            ["integration_credential_id"],
+            "integration_credentials",
+            ["id"],
+        ),
+    },
+}
+
+# Index → columns, on `usage_events` (design §2 plus the two composite foreign keys').
+_EXPECTED_INDEXES_0017 = {
+    "ix_usage_events_status_occurred": ["status", "occurred_at"],
+    "ix_usage_events_tenant_id": ["tenant_id"],
+    "ix_usage_events_project_id": ["project_id", "tenant_id"],
+    "ix_usage_events_model_id": ["model_id", "provider_id"],
+    "ix_usage_events_provider_id": ["provider_id"],
+    "ix_usage_events_conversation_id": ["conversation_id"],
+    "ix_usage_events_request_id": ["request_id"],
+    "ix_usage_events_occurred_at": ["occurred_at"],
+    "ix_usage_events_credential": ["integration_credential_id", "project_id", "tenant_id"],
+    "ix_usage_events_meter_type": [
+        "usage_meter_type_id",
+        "payload_shape",
+        "unit",
+        "quantity_kind",
+    ],
+}
+
+# (table, column) of every BIGINT: each id and reference, and the four token counts.
+_BIGINT_COLUMNS_0017 = [
+    ("usage_events", "id"),
+    ("usage_events", "tenant_id"),
+    ("usage_events", "project_id"),
+    ("usage_events", "integration_credential_id"),
+    ("usage_events", "provider_id"),
+    ("usage_events", "model_id"),
+    ("usage_events", "usage_meter_type_id"),
+    ("usage_events", "input_tokens"),
+    ("usage_events", "output_tokens"),
+    ("usage_events", "cache_creation_input_tokens"),
+    ("usage_events", "cache_read_input_tokens"),
+    ("usage_event_conflicts", "id"),
+    ("usage_event_conflicts", "usage_event_id"),
+    ("usage_event_conflicts", "integration_credential_id"),
+]
+
+_USAGE_REFERENTIAL_RULES_QUERY = text(
+    "SELECT CONSTRAINT_NAME, DELETE_RULE"
+    " FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND TABLE_NAME IN ('usage_events', 'usage_event_conflicts')"
+)
+_USAGE_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME IN ('usage_events', 'usage_event_conflicts')"
+)
+
+# The two parent unique constraints 0017 adds: name → (table, columns).
+_PARENT_UNIQUES_0017 = {
+    "uq_integration_credentials_id_scope": (
+        "integration_credentials",
+        ("id", "project_id", "tenant_id"),
+    ),
+    "uq_usage_meter_types_id_shape_unit_kind": (
+        "usage_meter_types",
+        ("id", "payload_shape", "unit", "quantity_kind"),
+    ),
+}
+
+
+def _load_0017() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0017", _MIGRATION_0017)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _usage_checks() -> dict[str, tuple[str, str]]:
+    return {
+        str(constraint.name): (model.__tablename__, _normalised(str(constraint.sqltext)))
+        for model in _USAGE_MODELS
+        for constraint in model.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0017_follows_0016() -> None:
+    migration = _load_0017()
+
+    assert migration.revision == _REVISION_0017
+    assert migration.down_revision == _REVISION_0016
+
+
+def test_0017_checks_are_the_ones_the_models_declare() -> None:
+    migration = _load_0017()
+    from_migration = {
+        name: (table, _normalised(condition))
+        for name, (table, condition) in migration._CHECKS.items()
+    }
+
+    assert from_migration == _usage_checks()
+    # Events 9 (shape, integer quantity, four tokens, quantity, status, catalog), conflicts 1.
+    assert len(from_migration) == 10
+    # Explicit groups, not a chained `=` (design v2); the integer CHECK uses FLOOR (v3).
+    shape = from_migration["ck_usage_events_shape_fields"][1]
+    assert "=" not in shape.replace("payload_shape = ", "")
+    integer = from_migration["ck_usage_events_integer_quantity"][1]
+    assert "quantity = FLOOR(quantity)" in integer
+    assert migration._TEXT_COLLATION == TEXT_COLLATION == CODE_COLLATION
+
+
+def test_0017_parent_unique_constraints_are_the_ones_the_models_declare() -> None:
+    """Only new indexes on the two parent tables, declared on the models too (design §2)."""
+    migration = _load_0017()
+    declared = {
+        str(constraint.name): (model.__tablename__, tuple(constraint.columns.keys()))
+        for model in (IntegrationCredential, UsageMeterType)
+        for constraint in model.__table__.constraints
+        if str(constraint.name) in _PARENT_UNIQUES_0017
+    }
+    from_migration = {
+        name: (table, tuple(columns))
+        for name, (table, columns) in migration._PARENT_UNIQUES.items()
+    }
+
+    assert from_migration == _PARENT_UNIQUES_0017
+    assert declared == _PARENT_UNIQUES_0017
+
+
+def test_0017_triggers_are_the_two_of_the_design_written_like_0010() -> None:
+    """Unconditional refusals, written like `audit_logs`' (0010) with the table's own message."""
+    triggers = _load_0017()._TRIGGERS
+    audit = _load_0010()._TRIGGERS
+
+    assert set(triggers) == set(_EXPECTED_TRIGGERS_0017)
+    for name, (table, timing, event) in _EXPECTED_TRIGGERS_0017.items():
+        statement = _normalised(triggers[name])
+        assert statement.startswith(f"CREATE TRIGGER {name} {timing} {event} ON {table}"), name
+        assert "FOR EACH ROW" in statement, name
+        assert "IF" not in statement.split(), name
+        like_audit = _normalised(audit[name.replace(table, "audit_logs")])
+        assert statement == like_audit.replace("audit_logs", table), name
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0017_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    migration = _load_0017()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0017_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL DDL is not transactional: a failed precheck must not leave an index behind."""
+    migration = _load_0017()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    # Two parent unique constraints, the two tables, then the two triggers.
+    expected = ["create_unique_constraint"] * 2 + ["create_table"] * 2 + ["execute"] * 2
+    assert allowed.calls == expected
+
+
+def test_0017_downgrade_drops_the_tables_then_the_two_unique_constraints(monkeypatch) -> None:
+    migration = _load_0017()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert upgrade.first_args("create_unique_constraint") == list(_PARENT_UNIQUES_0017)
+    assert upgrade.first_args("create_table") == _CREATE_ORDER_0017
+    assert upgrade.first_args("execute") == list(migration._TRIGGERS.values())
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    # The foreign keys go with the tables; only then MySQL lets the referenced indexes go.
+    assert [name for name, _ in downgrade.calls] == ["drop_table"] * 2 + ["drop_constraint"] * 2
+    assert downgrade.first_args("drop_table") == _CREATE_ORDER_0017[::-1]
+    assert downgrade.first_args("drop_constraint") == list(_PARENT_UNIQUES_0017)[::-1]
+
+
+@needs_mysql
+def test_0017_only_adds_and_drops_its_two_tables_and_two_unique_constraints(
+    alembic_config: Config,
+) -> None:
+    command.upgrade(alembic_config, "head")
+    try:
+        command.downgrade(alembic_config, _REVISION_0016)
+        without = _table_names()
+        assert "fx_rate_versions" in without, "0016's tables must be there"
+        assert not _TABLES_0017 & without
+        parents = {table: _unique_sets(table) for table, _ in _PARENT_UNIQUES_0017.values()}
+        for table, columns in _PARENT_UNIQUES_0017.values():
+            assert columns not in parents[table], table
+
+        command.upgrade(alembic_config, _REVISION_0017)
+        assert _table_names() == without | _TABLES_0017
+        for table, columns in _PARENT_UNIQUES_0017.values():
+            assert _unique_sets(table) == parents[table] | {columns}, table
+
+        command.downgrade(alembic_config, _REVISION_0016)
+        assert _table_names() == without
+        assert {table: _unique_sets(table) for table in parents} == parents
+        # Triggers go with their table.
+        assert not set(_EXPECTED_TRIGGERS_0017) & set(_all_triggers())
+    finally:
+        command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0017_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        columns = {table: inspector.get_columns(table) for table in _EXPECTED_0017_COLUMNS}
+        # NOT NULL column by column (design v6): composite keys and CHECKs hold only then.
+        for table, expected in _EXPECTED_0017_COLUMNS.items():
+            assert {c["name"]: c["nullable"] for c in columns[table]} == expected, table
+        types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
+
+        events, conflicts = _CREATE_ORDER_0017
+        for key in _BIGINT_COLUMNS_0017:
+            assert isinstance(types[key], BigInteger), key
+        for key, width in _BINARY_COLUMNS_0017.items():
+            assert isinstance(types[key], String), key
+            assert types[key].length == width, key
+            assert types[key].collation == TEXT_COLLATION, key
+        # The meter type's shape and kind: same type and collation as in `usage_meter_types`.
+        for name, width in (("payload_shape", 32), ("quantity_kind", 16)):
+            assert isinstance(types[(events, name)], String), name
+            assert types[(events, name)].length == width, name
+            assert getattr(types[(events, name)], "collation", None) != TEXT_COLLATION, name
+        chars = {
+            (events, "public_id"): 36,
+            (events, "payload_fingerprint"): 64,
+            (conflicts, "payload_fingerprint"): 64,
+        }
+        for key, width in chars.items():
+            assert isinstance(types[key], CHAR), key
+            assert types[key].length == width, key
+        widths = {
+            (events, "schema_version"): 8,
+            (events, "status"): 32,
+            (events, "error_code"): 64,
+            (events, "error_message"): 255,
+            (conflicts, "mismatch"): 32,
+        }
+        for key, width in widths.items():
+            assert isinstance(types[key], String), key
+            assert types[key].length == width, key
+        quantity = types[(events, "quantity")]
+        assert isinstance(quantity, Numeric)
+        assert (quantity.precision, quantity.scale) == (20, 8)
+        # Microseconds kept on `occurred_at` only; the server times are whole seconds.
+        assert isinstance(types[(events, "occurred_at")], mysql.DATETIME)
+        assert types[(events, "occurred_at")].fsp == 6
+        for key in [(events, "received_at"), (events, "processed_at"), (events, "created_at")]:
+            assert isinstance(types[key], DateTime), key
+            assert not getattr(types[key], "fsp", None), key
+        [status] = [c for c in columns[events] if c["name"] == "status"]
+        assert "RECEIVED" in str(status["default"])
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0017_keys_foreign_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        for table, expected in _EXPECTED_UNIQUE_0017.items():
+            assert _unique_sets(table) == expected, table
+            foreign_keys = {
+                str(fk["name"]): (
+                    fk["constrained_columns"],
+                    fk["referred_table"],
+                    fk["referred_columns"],
+                )
+                for fk in inspector.get_foreign_keys(table)
+            }
+            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0017[table], table
+
+        indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes("usage_events")}
+        for name, columns in _EXPECTED_INDEXES_0017.items():
+            assert indexes.get(name) == columns, name
+
+        with engine.connect() as connection:
+            delete_rules = dict(connection.execute(_USAGE_REFERENTIAL_RULES_QUERY).all())
+            checks = set(connection.execute(_USAGE_CHECKS_QUERY).scalars())
+        # ⚠️ RESTRICT: events and conflicts are never deleted, nor what they point at.
+        names = {name for keys in _EXPECTED_FOREIGN_KEYS_0017.values() for name in keys}
+        assert delete_rules == dict.fromkeys(names, "RESTRICT")
+        assert checks == set(_usage_checks())
+        ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0017}
+        assert ours == _EXPECTED_TRIGGERS_0017
+    finally:
+        engine.dispose()
