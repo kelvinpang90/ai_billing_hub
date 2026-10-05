@@ -228,6 +228,17 @@ class Settings(BaseSettings):
     # `valid_until` 不变。
     credential_rotation_overlap_seconds: int = Field(default=604_800, ge=0)
 
+    # --- 批量用量摄取（AIH-TASK-030，设计闸门 #180 v3 §2） -------------------------
+
+    # 一批最多多少条（spec §39 默认 100）。超出整批 422 `BATCH_TOO_LARGE`，不写任何事件。
+    # ⚠️ `gt=0`：设成 0 时每一批都超限，批量端点等于关掉了，而症状只是「集成方一直收 422」。
+    ingest_batch_max: int = Field(default=100, gt=0)
+    # 批量请求体的应用层上限（字节），超出 413 `PAYLOAD_TOO_LARGE`。⚠️ 默认值必须等于
+    # deploy/nginx/billing.conf 集成前缀块的 `client_max_body_size`（1m）：两层给同一个码，
+    # 只改一边时 tests/backend/test_compose.py 会红。下界是单条上限 16 KiB：再小就连一个
+    # 合法的满长元素都装不下。
+    ingest_batch_max_bytes: int = Field(default=1_048_576, ge=16 * 1024)
+
     # --- FX 汇率：BNM 拉取（AIH-TASK-040，设计闸门 #183 v3 §2「BNM 适配器」） -------------
 
     # 来源实现由 app/core/fx_source.py 的 `build_fx_source` 按它决定。V1 只有 BNM。

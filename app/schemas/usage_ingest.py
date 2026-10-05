@@ -1,4 +1,5 @@
-"""Request and response shapes of `POST …/integration/usage-events` (design gate #176 v8 §2).
+"""Request and response shapes of `POST …/integration/usage-events` (design gate #176 v8 §2)
+and of its batch twin `…/usage-events/batch` (design gate #180 v3 §2).
 
 这里只做校验顺序的第 ④ 步：JSON 顶层结构、字段名（`extra="forbid"`）、各字段的类型与格式。
 **不含**按形态的字段组校验 —— 那要先查到 `usage_type` 的形态（第 ⑥、⑦ 步，
@@ -15,7 +16,7 @@ app/services/usage_ingest.py），否则未知类型会先被判成 `VALIDATION_
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -82,6 +83,46 @@ class UsageEventReceipt(BaseModel):
     processing_status: str
 
 
+# --- 批量（设计闸门 #180 v3，AIH-TASK-030） ---------------------------------------------
+
+
+class UsageEventBatch(BaseModel):
+    """`POST …/usage-events/batch` 的顶层结构：只有一个非空的 `events` 数组。
+
+    ⚠️ 元素是 `Any`：每个元素原样交给单条处理（`ingest_one`），在那里按单条端点的同一套规则
+    校验 —— 一个坏元素只让那一条 `rejected`，不让整批 422。条数上限是配置项
+    （`BILLING_INGEST_BATCH_MAX`），由服务层判、报 `BATCH_TOO_LARGE`，不在这里卡。
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    events: list[Any] = Field(min_length=1)
+
+
+class UsageEventBatchItem(BaseModel):
+    """One element's result, at the element's position in the request (design §2「响应」)."""
+
+    index: int
+    # 该元素里的 `event_id` 字符串；元素不是对象、缺这个字段或它不是字符串时为 null。
+    event_id: str | None
+    # `accepted` / `already_received` / `already_processed` / `rejected`
+    status: str
+    processing_status: str | None
+    error_code: str | None
+    # 取单条端点错误表里该码的固定值；成功的条为 false（不需要重试）。
+    retryable: bool
+
+
+class UsageEventBatchReceipt(BaseModel):
+    """`data` of the batch's 200. `accepted + duplicates + rejected` = the number of events."""
+
+    accepted: int
+    # `already_received` 与 `already_processed` 两种。
+    duplicates: int
+    rejected: int
+    results: list[UsageEventBatchItem]
+
+
 __all__ = [
     "EVENT_ID_PATTERN",
     "MAX_SCOPE_ID_LENGTH",
@@ -94,6 +135,9 @@ __all__ = [
     "SCHEMA_VERSION",
     "ULID_PATTERN",
     "UUID7_PATTERN",
+    "UsageEventBatch",
+    "UsageEventBatchItem",
+    "UsageEventBatchReceipt",
     "UsageEventPayload",
     "UsageEventReceipt",
 ]

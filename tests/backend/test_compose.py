@@ -300,6 +300,31 @@ def test_the_integration_prefix_answers_an_oversized_body_with_the_json_envelope
     }
 
 
+_NGINX_SIZE_UNITS = {"": 1, "k": 1024, "m": 1024 * 1024, "g": 1024 * 1024 * 1024}
+
+
+def nginx_size_in_bytes(value: str) -> int:
+    """nginx 的大小写法（`1m`、`512k`、`1048576`）换成字节；单位不区分大小写。"""
+    parsed = re.fullmatch(r"([0-9]+)([kKmMgG]?)", value)
+    assert parsed is not None, f"unexpected nginx size: {value}"
+    return int(parsed.group(1)) * _NGINX_SIZE_UNITS[parsed.group(2).lower()]
+
+
+def test_the_batch_limit_matches_the_integration_prefix_block() -> None:
+    """设计闸门 #180 v3 §2「请求体上限」、§8：两层给同一个 413 信封，上限必须相等。
+
+    ⚠️ nginx 的上限比应用小，恰在两者之间的批会被 nginx 拒掉（`request_id` 为 null），
+    应用层那条判定形同虚设；比应用大，则那一段由应用拒 —— 码相同，但「改了一边」本身就说明
+    另一边被忘了。所以钉住 `BILLING_INGEST_BATCH_MAX_BYTES` 的默认值与前缀块逐字节相等。
+    """
+    block = nginx_location_block(INTEGRATION_PREFIX)
+    sizes = re.findall(r"client_max_body_size\s+([^;\s]+);", block)
+    assert len(sizes) == 1, "the integration prefix block must set exactly one body limit"
+
+    default = Settings.model_fields["ingest_batch_max_bytes"].default
+    assert nginx_size_in_bytes(sizes[0]) == default
+
+
 def test_readiness_is_not_exposed_to_the_public_internet() -> None:
     """/readyz 的响应体逐个报出依赖状态，等于公开内部拓扑与故障窗口。"""
     block = nginx_location_block("= /readyz")

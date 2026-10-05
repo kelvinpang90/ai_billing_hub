@@ -8,6 +8,10 @@
 2. `ingest_one`：一个事件的校验、归属比对、指纹与落库。批量端点（AIH-TASK-030）逐个复用它。
 3. `record_use`：响应之后、独立短事务里节流地写 `last_used_at`，失败只记日志。
 
+批量端点（设计闸门 #180 v3）在 `authenticate` 之后调用 `parse_batch`（顶层结构与条数上限）与
+`ingest_batch`：按数组顺序逐条 `ingest_item` —— 即 `ingest_one` 加上「错误变成这一条的结果、
+不抛出」—— 每条各自一个事务，整批共用请求层取的那一个 `now`。
+
 **校验顺序**（决定一个请求报哪个码，设计 §2）：① 请求体大小（端点）→ ② 签名与凭据 →
 ③ nonce → ④ JSON 顶层结构与各字段的类型、格式 → ⑤ `schema_version` → ⑥ 查 `usage_type`
 （不在表里即 409 `UNKNOWN_USAGE_TYPE`，不再往下）→ ⑦ 按该类型的形态校验字段组、`unit`、
@@ -52,7 +56,7 @@ from app.core.config import Settings
 from app.core.crypto import EncryptionNotConfigured, load_keyring
 from app.core.database import session_scope
 from app.core.errors import AppError
-from app.core.logging import bind_log_context
+from app.core.logging import bind_log_context, clear_log_context, get_log_context
 from app.core.nonce import NonceStore, NonceStoreUnavailable
 from app.models.ai_catalog import TOKEN_FIELDS, PayloadShape, QuantityKind, UsageMeterType
 from app.models.auth import AuditAction
@@ -62,6 +66,9 @@ from app.repositories import usage_events
 from app.schemas.usage_ingest import (
     REQUEST_ID_PATTERN,
     SCHEMA_VERSION,
+    UsageEventBatch,
+    UsageEventBatchItem,
+    UsageEventBatchReceipt,
     UsageEventPayload,
     UsageEventReceipt,
 )
@@ -81,6 +88,8 @@ ENTITY_INTEGRATION_CREDENTIAL: Final = "integration_credential"
 ENTITY_USAGE_EVENT: Final = "usage_event"
 
 # 应用层单条上限（设计 §2）。nginx 对集成前缀另有 1 MiB 的上限与同一个 JSON 413。
+# 批量端点对每个元素用同一个上限（按元素重新序列化后的长度）；整批的上限是配置项
+# `ingest_batch_max_bytes`。
 MAX_BODY_BYTES: Final = 16 * 1024
 # `occurred_at` 最多晚于服务端当前时刻 300 秒；没有过去的下限（晚到事件是合法的）。
 FUTURE_TOLERANCE: Final = dt.timedelta(seconds=300)
@@ -98,6 +107,8 @@ HEADER_SIGNATURE: Final = "X-Acuven-Signature"
 STATUS_ACCEPTED: Final = "accepted"
 STATUS_ALREADY_RECEIVED: Final = "already_received"
 STATUS_ALREADY_PROCESSED: Final = "already_processed"
+# 只出现在批量响应的逐条结果里：错误表里的任何一个码（含可重试的）。
+STATUS_REJECTED: Final = "rejected"
 
 # 认证失败的原因码：只进服务端日志（签名库自己的三个码之外的部分）。
 _MISSING_HEADER: Final = "MISSING_HEADER"
@@ -212,6 +223,19 @@ class OccurredAtInFuture(AppError):
         )
 
 
+class BatchTooLarge(AppError):
+    """More events than `BILLING_INGEST_BATCH_MAX` (design gate #180 v3 §2 ④). Nothing written."""
+
+    retryable = False
+
+    def __init__(self, max_events: int) -> None:
+        super().__init__(
+            f"A batch holds at most {max_events} events.",
+            code="BATCH_TOO_LARGE",
+            http_status=422,
+        )
+
+
 class ServiceUnavailable(AppError):
     """The database (or the master key file) is not available. Retryable."""
 
@@ -264,6 +288,55 @@ class IngestOutcome:
             event_id=self.event_id,
             status=self.status,
             processing_status=self.processing_status,
+        )
+
+
+@dataclass(frozen=True)
+class ItemOutcome:
+    """One batch element's result (design gate #180 v3 §2). Never an exception."""
+
+    event_id: str | None
+    status: str
+    processing_status: str | None
+    error_code: str | None
+    retryable: bool
+
+    def item(self, index: int) -> UsageEventBatchItem:
+        return UsageEventBatchItem(
+            index=index,
+            event_id=self.event_id,
+            status=self.status,
+            processing_status=self.processing_status,
+            error_code=self.error_code,
+            retryable=self.retryable,
+        )
+
+
+@dataclass(frozen=True)
+class BatchOutcome:
+    """Every element's result, in request order, and the three counts."""
+
+    items: tuple[ItemOutcome, ...]
+
+    @property
+    def accepted(self) -> int:
+        return sum(1 for item in self.items if item.status == STATUS_ACCEPTED)
+
+    @property
+    def duplicates(self) -> int:
+        duplicate = {STATUS_ALREADY_RECEIVED, STATUS_ALREADY_PROCESSED}
+        return sum(1 for item in self.items if item.status in duplicate)
+
+    @property
+    def rejected(self) -> int:
+        return sum(1 for item in self.items if item.status == STATUS_REJECTED)
+
+    def receipt(self) -> UsageEventBatchReceipt:
+        return UsageEventBatchReceipt(
+            accepted=self.accepted,
+            duplicates=self.duplicates,
+            rejected=self.rejected,
+            results=[item.item(index) for index, item in enumerate(self.items)],
         )
 
 
@@ -747,6 +820,126 @@ def ingest_one(
     )
 
 
+# --- 批量（设计闸门 #180 v3，AIH-TASK-030） ---------------------------------------------
+
+
+def parse_batch(body: bytes, *, max_events: int) -> list[object]:
+    """Step ④ of a batch: `{"events": [ … ]}`, non-empty, at most `max_events` elements.
+
+    结构不合法 422 `VALIDATION_ERROR`，条数超限 422 `BATCH_TOO_LARGE`，都在写任何事件之前。
+    元素原样返回：每一个都交给 `ingest_item`，按单条端点的同一套规则校验。
+    """
+    try:
+        batch = UsageEventBatch.model_validate(parse_json_object(body), strict=True)
+    except ValidationError as error:
+        raise UsageValidationError(*_validation_fields(error)) from None
+    if len(batch.events) > max_events:
+        raise BatchTooLarge(max_events)
+    return batch.events
+
+
+def _event_id_of(raw_event: object) -> str | None:
+    """The element's `event_id` string, or `None` when there is none to give back."""
+    if isinstance(raw_event, dict):
+        event_id = raw_event.get("event_id")
+        if isinstance(event_id, str):
+            return event_id
+    return None
+
+
+def _encoded_size(raw_event: object) -> int:
+    """The element re-serialised compactly (design §2「请求体上限」): its bytes in UTF-8."""
+    text = json.dumps(raw_event, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-8"))
+
+
+def _retryable_of(error: AppError) -> bool:
+    # 单条端点的错误类都显式写了 retryable；没写的按全局规则：5xx 可重试
+    # （app/core/errors.py）。
+    if error.retryable is not None:
+        return error.retryable
+    return error.http_status >= 500
+
+
+def ingest_item(
+    session_factory: sessionmaker[Session],
+    credential: AuthenticatedCredential,
+    raw_event: object,
+    *,
+    context: RequestContext,
+    now: dt.datetime,
+) -> ItemOutcome:
+    """One element of a batch: `ingest_one` with its error turned into a result, never raised.
+
+    设计 §2「单条处理的复用」：批里的一条与单独发给单条端点结果相同 —— 同一个 `ingest_one`、
+    同一张错误表的码与 `retryable`；数据库不可用（`SERVICE_UNAVAILABLE`）同样只是这一条的
+    结果。错误表以外的异常（未预期的 500）照常上抛：整批 500、可重试，
+    已提交的条保留（设计 §5）。
+    """
+    event_id = _event_id_of(raw_event)
+    try:
+        if _encoded_size(raw_event) > MAX_BODY_BYTES:
+            # 单条端点的第 ① 步，对批里的每个元素同样适用。
+            raise PayloadTooLarge
+        outcome = ingest_one(session_factory, credential, raw_event, context=context, now=now)
+    except AppError as error:
+        return ItemOutcome(
+            event_id=event_id,
+            status=STATUS_REJECTED,
+            processing_status=None,
+            error_code=error.code,
+            retryable=_retryable_of(error),
+        )
+    return ItemOutcome(
+        event_id=outcome.event_id,
+        status=outcome.status,
+        processing_status=outcome.processing_status,
+        error_code=None,
+        retryable=False,
+    )
+
+
+def ingest_batch(
+    session_factory: sessionmaker[Session],
+    credential: AuthenticatedCredential,
+    raw_events: list[object],
+    *,
+    context: RequestContext,
+    now: dt.datetime,
+) -> BatchOutcome:
+    """Every element in request order, each in its own transaction; one `now` for all of them.
+
+    ⚠️ 没有外层事务、不预先去重（设计 §2）：批内重复的第二条走单条的冲突路径，与单独发一致；
+    某条失败（包括数据库不可用）不影响已提交的条，后面的条照常尝试。
+    ⚠️ 日志只记条数与汇总，不记请求体（设计 §6）。
+    """
+    base_context = get_log_context()
+    items: list[ItemOutcome] = []
+    try:
+        for raw_event in raw_events:
+            # `ingest_one` 把 event_id 绑进日志上下文：每条从请求层的上下文重新开始，
+            # 取不到 event_id 的那条不会带着上一条的。
+            clear_log_context()
+            bind_log_context(**base_context)
+            items.append(
+                ingest_item(session_factory, credential, raw_event, context=context, now=now)
+            )
+    finally:
+        clear_log_context()
+        bind_log_context(**base_context)
+    outcome = BatchOutcome(items=tuple(items))
+    logger.info(
+        "Usage event batch processed",
+        extra={
+            "events": len(items),
+            "accepted": outcome.accepted,
+            "duplicates": outcome.duplicates,
+            "rejected": outcome.rejected,
+        },
+    )
+    return outcome
+
+
 # --- ⑩ last_used_at -----------------------------------------------------------------
 
 
@@ -784,11 +977,15 @@ __all__ = [
     "STATUS_ACCEPTED",
     "STATUS_ALREADY_PROCESSED",
     "STATUS_ALREADY_RECEIVED",
+    "STATUS_REJECTED",
     "AuthenticatedCredential",
+    "BatchOutcome",
+    "BatchTooLarge",
     "CredentialScopeMismatch",
     "IdempotencyConflict",
     "IngestOutcome",
     "IntegrationAuthFailed",
+    "ItemOutcome",
     "OccurredAtInFuture",
     "PayloadTooLarge",
     "ServiceUnavailable",
@@ -797,7 +994,10 @@ __all__ = [
     "UnsupportedSchemaVersion",
     "UsageValidationError",
     "authenticate",
+    "ingest_batch",
+    "ingest_item",
     "ingest_one",
+    "parse_batch",
     "parse_json_object",
     "payload_fingerprint",
     "record_use",
