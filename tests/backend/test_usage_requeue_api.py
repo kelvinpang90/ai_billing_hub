@@ -690,8 +690,9 @@ def _handlers() -> list[ast.FunctionDef]:
 
 def test_every_handler_starts_with_require_admin() -> None:
     handlers = _handlers()
-    # Two endpoints; none would mean the AST scan found nothing.
-    assert len(handlers) == 2
+    # Two requeue endpoints and the two queries (AIH-TASK-034); none would mean the AST scan found
+    # nothing.
+    assert len(handlers) == 4
 
     for handler in handlers:
         body = handler.body
@@ -714,5 +715,7 @@ def test_the_paths_say_requeue_not_reprocess(app) -> None:
     # admin_routes）；OpenAPI 文档里能看到这两个接口。摄取端点也带 usage-events，只看管理端。
     paths = {path for path in app.openapi()["paths"] if "/admin/usage-events" in path}
 
-    assert paths == {SINGLE, BULK}
+    # 查询接口（AIH-TASK-034）不含 requeue：集合只比对含 requeue 的路径，
+    # reprocess 的检查照旧看全部。
+    assert {path for path in paths if "requeue" in path} == {SINGLE, BULK}
     assert not any("reprocess" in path for path in paths)
