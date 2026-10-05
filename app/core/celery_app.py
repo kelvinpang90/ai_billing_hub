@@ -27,7 +27,12 @@ from app.core.config import Settings
 
 # 任务模块要显式列出来，不用 autodiscover：autodiscover 靠约定扫包，加错目录
 # 或改了包名时它只是**安静地少注册一个任务**，调用方拿到 NotRegistered 才发现。
-TASK_MODULES = ["app.tasks.ping", "app.tasks.outbox", "app.tasks.fx_fetch"]
+TASK_MODULES = [
+    "app.tasks.ping",
+    "app.tasks.outbox",
+    "app.tasks.fx_fetch",
+    "app.tasks.usage_billing",
+]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
 # ⚠️ **这一条不是优化，是可恢复性本身。**没有它，「Redis 被清空」或者「worker 在
@@ -43,6 +48,15 @@ OUTBOX_RECOVERY_SECONDS = 60.0
 FX_FETCH_SCHEDULE = crontab(minute=30, hour="4,6,9")
 # 两次拉取至少隔两小时；beat 停了又起来时，过期一小时的那次不再补发（下一次调度照常）。
 FX_FETCH_EXPIRES_SECONDS = 3600
+
+# 用量计费（设计闸门 #181 v2 §2「外部系统与异步边界」，AIH-TASK-032）。⚠️ 与 outbox 恢复同理，
+# 这两条就是计费本身：摄取端不入队，没有它们事件永远停在 RECEIVED（REQ-INGEST-002）。
+# 扫描每 10 秒（§119 的 p95 ≤ 60 秒）、一轮预算 8 秒；卡住回收每 60 秒。`expires` 取周期的
+# 0.9：beat 停摆后再起来，攒下的触发不一口气放出去（重叠运行安全，但白抢同一批行）。
+USAGE_BILLING_SWEEP_SECONDS = 10.0
+USAGE_BILLING_SWEEP_EXPIRES_SECONDS = 9.0
+USAGE_STALE_RECOVERY_SECONDS = 60.0
+USAGE_STALE_RECOVERY_EXPIRES_SECONDS = 54.0
 
 
 class RedisNotConfigured(RuntimeError):
@@ -103,6 +117,16 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "app.tasks.fx_fetch.fetch",
                 "schedule": FX_FETCH_SCHEDULE,
                 "options": {"expires": FX_FETCH_EXPIRES_SECONDS},
+            },
+            "usage-billing-sweep": {
+                "task": "app.tasks.usage_billing.bill_pending_events",
+                "schedule": USAGE_BILLING_SWEEP_SECONDS,
+                "options": {"expires": USAGE_BILLING_SWEEP_EXPIRES_SECONDS},
+            },
+            "usage-stale-recovery": {
+                "task": "app.tasks.usage_billing.recover_stale_processing",
+                "schedule": USAGE_STALE_RECOVERY_SECONDS,
+                "options": {"expires": USAGE_STALE_RECOVERY_EXPIRES_SECONDS},
             },
         },
     )

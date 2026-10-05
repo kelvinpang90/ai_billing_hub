@@ -22,7 +22,14 @@ spec §20、§23、§79、§83。两张表：
 ⚠️ **行永不删除**：两张表都没有删除路径；冲突表由触发器拒绝 UPDATE / DELETE
 （迁移 0017，只在 MySQL 上）。
 
-⚠️ 条件文本与迁移 0017 逐字一致（空白除外），test_migrations.py 比对两边。
+AIH-TASK-032（设计闸门 #181 v2 §2「数据库」，迁移 0018）给 `usage_events` 加了计费快照
+（§14 / §79：价格版本、规则、汇率、原币成本、MYR 估算成本、计费额、账本行）与认领列
+（`attempt_count`、`next_attempt_at`、`claim_token`、`claimed_at`、`lease_expires_at`）。
+写入方只有 app/services/usage_billing.py（认领、处理、失败记录、卡住回收）与
+app/services/usage_requeue.py（重新入队）。⚠️ `PROCESSED` 是终态：MySQL 上由迁移 0018 的触发器
+拒绝对它的任何 UPDATE；事件与账本行的对应、「重新入队时账本无行」同样由触发器保证。
+
+⚠️ 条件文本与迁移 0017 / 0018 逐字一致（空白除外），test_migrations.py 比对两边。
 """
 
 from __future__ import annotations
@@ -50,8 +57,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 # 复合外键指向这些表：import 这些模块，表才在同一个 metadata 里。
 from app.models import ai_catalog as _ai_catalog_models  # noqa: F401
+from app.models import fx_rates as _fx_rate_models  # noqa: F401
 from app.models import integration as _integration_models  # noqa: F401
+from app.models import pricing_rules as _pricing_rule_models  # noqa: F401
+from app.models import provider_prices as _provider_price_models  # noqa: F401
 from app.models import tenancy as _tenancy_models  # noqa: F401
+from app.models import wallet as _wallet_models  # noqa: F401
 from app.models.ai_catalog import (
     MODEL_CODE_LENGTH,
     PAYLOAD_SHAPE_LENGTH,
@@ -62,12 +73,16 @@ from app.models.ai_catalog import (
     QuantityKind,
 )
 from app.models.base import MONEY_PRECISION, MONEY_SCALE, Base
+from app.models.fx_rates import RATE_PRECISION, RATE_SCALE
 
 # 与 app/models/auth.py 同一个写法（SQLite 只对 INTEGER PRIMARY KEY 自增）。
 _PrimaryKey = BigInteger().with_variant(Integer, "sqlite")
 _ForeignKeyInt = BigInteger().with_variant(Integer, "sqlite")
 
 _PUBLIC_ID_LENGTH = 36
+# 防护令牌：uuid4 的规范写法。
+CLAIM_TOKEN_LENGTH: Final = 36
+CURRENCY_LENGTH: Final = 3
 
 # ⚠️ 按字节比较（区分大小写、NO PAD）。只在 MySQL 上指定。`unit` 是复合外键的一部分，
 # 排序规则必须与 `usage_meter_types.unit` 相同。
@@ -98,10 +113,11 @@ def _mysql_only_check(condition: str, name: str) -> CheckConstraint:
 
 
 class UsageEventStatus(enum.StrEnum):
-    """spec §83 的九个取值。本任务只写 `RECEIVED`。
+    """spec §83 的九个取值。摄取（AIH-TASK-029）只写 `RECEIVED`；其余由计费 worker
+    （AIH-TASK-032，app/services/usage_billing.py）写，重新入队把错误状态改回 `RECEIVED`。
 
-    `IDEMPOTENCY_CONFLICT` 留在 CHECK 里但不由本任务写：冲突是**请求**的结果，
-    不是原事件的状态（设计 §2「幂等与冲突」）。
+    `IDEMPOTENCY_CONFLICT` 留在 CHECK 里但没有写入方：冲突是**请求**的结果，
+    不是原事件的状态（设计闸门 #176 §2「幂等与冲突」）。
     """
 
     RECEIVED = "RECEIVED"
@@ -156,6 +172,41 @@ EVENT_STATUS_CHECK: Final = (
 # 只知道模型而不知道供应商的行不可能出现（§79 的目录引用）。
 CATALOG_REFERENCE_CHECK: Final = "model_id IS NULL OR provider_id IS NOT NULL"
 MISMATCH_CHECK: Final = "mismatch IN ('OWNERSHIP', 'FINGERPRINT', 'BOTH')"
+
+# --- 迁移 0018（AIH-TASK-032，设计闸门 #181 v2 §2「数据库」）--------------------------------
+# 已处理 ⇒ 快照齐全；MYR 原币时两个汇率列都为空，否则都非空。逐列写 `IS NOT NULL`，不用行构造器。
+PROCESSED_SNAPSHOT_CHECK: Final = (
+    "status <> 'PROCESSED'"
+    " OR (provider_id IS NOT NULL AND model_id IS NOT NULL"
+    " AND provider_price_version_id IS NOT NULL AND pricing_rule_id IS NOT NULL"
+    " AND provider_source_currency IS NOT NULL AND provider_source_cost IS NOT NULL"
+    " AND estimated_provider_cost_myr IS NOT NULL AND billable_cost IS NOT NULL"
+    " AND processed_at IS NOT NULL"
+    " AND ((provider_source_currency = 'MYR'"
+    " AND fx_rate_version_id IS NULL AND fx_rate_applied IS NULL)"
+    " OR (provider_source_currency <> 'MYR'"
+    " AND fx_rate_version_id IS NOT NULL AND fx_rate_applied IS NOT NULL)))"
+)
+# 计费额大于 0 的已处理事件必有账本行；0 元事件不写账本（账本 CHECK 要求 AI_USAGE < 0）。
+PROCESSED_LEDGER_CHECK: Final = (
+    "status <> 'PROCESSED' OR billable_cost = 0 OR wallet_transaction_id IS NOT NULL"
+)
+# 未处理 ⇒ 没有财务链接。
+UNPROCESSED_LEDGER_CHECK: Final = "status = 'PROCESSED' OR wallet_transaction_id IS NULL"
+BILLABLE_COST_CHECK: Final = "billable_cost IS NULL OR billable_cost >= 0"
+PROVIDER_SOURCE_COST_CHECK: Final = "provider_source_cost IS NULL OR provider_source_cost >= 0"
+ESTIMATED_COST_CHECK: Final = (
+    "estimated_provider_cost_myr IS NULL OR estimated_provider_cost_myr >= 0"
+)
+# 认领字段与状态一致：PROCESSING 时三列齐全且租约晚于认领时刻，否则三列都为空。逐列写，
+# 不用布尔等式比较（`(a) = (b)` 遇到 NULL 得 UNKNOWN，CHECK 会放行）。
+CLAIM_FIELDS_CHECK: Final = (
+    "(status = 'PROCESSING'"
+    " AND claim_token IS NOT NULL AND claimed_at IS NOT NULL AND lease_expires_at IS NOT NULL"
+    " AND claimed_at < lease_expires_at)"
+    " OR (status <> 'PROCESSING'"
+    " AND claim_token IS NULL AND claimed_at IS NULL AND lease_expires_at IS NULL)"
+)
 
 
 class UsageEvent(Base):
@@ -221,6 +272,43 @@ class UsageEvent(Base):
     received_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     processed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+
+    # --- 计费快照（§14、§79；迁移 0018）。计价成功时写入，之后不再变（PROCESSED 不可改）。
+    provider_price_version_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
+    pricing_rule_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
+    # MYR 原币时为空。
+    fx_rate_version_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
+    provider_source_currency: Mapped[str | None] = mapped_column(
+        CHAR(CURRENCY_LENGTH), nullable=True
+    )
+    provider_source_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(MONEY_PRECISION, MONEY_SCALE, asdecimal=True), nullable=True
+    )
+    # 汇率原值，DECIMAL(24,10)（与 `fx_rate_versions.rate` 同精度）；MYR 原币时为空。
+    fx_rate_applied: Mapped[Decimal | None] = mapped_column(
+        Numeric(RATE_PRECISION, RATE_SCALE, asdecimal=True), nullable=True
+    )
+    estimated_provider_cost_myr: Mapped[Decimal | None] = mapped_column(
+        Numeric(MONEY_PRECISION, MONEY_SCALE, asdecimal=True), nullable=True
+    )
+    # 含税（ADR-0008）。
+    billable_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(MONEY_PRECISION, MONEY_SCALE, asdecimal=True), nullable=True
+    )
+    # 那一行 `AI_USAGE` 账本；计费额为 0 时为空。
+    wallet_transaction_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
+
+    # --- 认领（§82、§83、§110；迁移 0018）。离开 PROCESSING 时三列认领字段一起清空。
+    # 认领时 +1；重新入队清零。
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # 失败退避后最早何时再认领（整秒）。
+    next_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 当前认领的防护令牌：处理事务锁住事件行后核对它，不是自己的就放弃。
+    claim_token: Mapped[str | None] = mapped_column(CHAR(CLAIM_TOKEN_LENGTH), nullable=True)
+    claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         ForeignKeyConstraint(
@@ -305,6 +393,47 @@ class UsageEvent(Base):
         CheckConstraint(QUANTITY_CHECK, name="ck_usage_events_quantity"),
         CheckConstraint(EVENT_STATUS_CHECK, name="ck_usage_events_status"),
         CheckConstraint(CATALOG_REFERENCE_CHECK, name="ck_usage_events_catalog_reference"),
+        # --- 迁移 0018 ---
+        ForeignKeyConstraint(
+            ["provider_price_version_id"],
+            ["provider_price_versions.id"],
+            name="fk_usage_events_price_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["pricing_rule_id"],
+            ["pricing_rules.id"],
+            name="fk_usage_events_pricing_rule",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["fx_rate_version_id"],
+            ["fx_rate_versions.id"],
+            name="fk_usage_events_fx_rate_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["wallet_transaction_id"],
+            ["wallet_transactions.id"],
+            name="fk_usage_events_wallet_transaction",
+            ondelete="RESTRICT",
+        ),
+        # 一行账本至多对应一个事件（账本本身已对 (USAGE_EVENT, event_id) 唯一）。
+        UniqueConstraint("wallet_transaction_id", name="uq_usage_events_wallet_transaction_id"),
+        # 认领（Ⓐ）与卡住回收的扫描。
+        Index("ix_usage_events_claim", "status", "next_attempt_at", "id"),
+        Index("ix_usage_events_lease", "status", "lease_expires_at"),
+        # 三个快照外键在子表上的索引，显式建出来（不让 MySQL 自动起名）。
+        Index("ix_usage_events_price_version_id", "provider_price_version_id"),
+        Index("ix_usage_events_pricing_rule_id", "pricing_rule_id"),
+        Index("ix_usage_events_fx_rate_version_id", "fx_rate_version_id"),
+        CheckConstraint(PROCESSED_SNAPSHOT_CHECK, name="ck_usage_events_processed_snapshot"),
+        CheckConstraint(PROCESSED_LEDGER_CHECK, name="ck_usage_events_processed_ledger"),
+        CheckConstraint(UNPROCESSED_LEDGER_CHECK, name="ck_usage_events_unprocessed_ledger"),
+        CheckConstraint(BILLABLE_COST_CHECK, name="ck_usage_events_billable_cost"),
+        CheckConstraint(PROVIDER_SOURCE_COST_CHECK, name="ck_usage_events_provider_source_cost"),
+        CheckConstraint(ESTIMATED_COST_CHECK, name="ck_usage_events_estimated_cost"),
+        CheckConstraint(CLAIM_FIELDS_CHECK, name="ck_usage_events_claim_fields"),
     )
 
 
@@ -352,20 +481,29 @@ class UsageEventConflict(Base):
 
 
 __all__ = [
+    "BILLABLE_COST_CHECK",
     "CACHE_CREATION_TOKENS_CHECK",
     "CACHE_READ_TOKENS_CHECK",
     "CATALOG_REFERENCE_CHECK",
+    "CLAIM_FIELDS_CHECK",
+    "CLAIM_TOKEN_LENGTH",
+    "CURRENCY_LENGTH",
+    "ESTIMATED_COST_CHECK",
     "EVENT_ID_LENGTH",
     "EVENT_STATUS_CHECK",
     "INPUT_TOKENS_CHECK",
     "INTEGER_QUANTITY_CHECK",
     "MISMATCH_CHECK",
     "OUTPUT_TOKENS_CHECK",
+    "PROCESSED_LEDGER_CHECK",
+    "PROCESSED_SNAPSHOT_CHECK",
+    "PROVIDER_SOURCE_COST_CHECK",
     "QUANTITY_CHECK",
     "QUANTITY_PRECISION",
     "QUANTITY_SCALE",
     "SHAPE_FIELDS_CHECK",
     "TEXT_COLLATION",
+    "UNPROCESSED_LEDGER_CHECK",
     "ConflictMismatch",
     "UsageEvent",
     "UsageEventConflict",

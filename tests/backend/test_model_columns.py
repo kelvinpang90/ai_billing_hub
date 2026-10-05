@@ -201,10 +201,14 @@ def test_the_usage_quantity_is_decimal_20_8() -> None:
     assert column.type.asdecimal is True
 
 
-def test_the_fx_rate_is_decimal_24_10() -> None:
-    """INV-10：汇率是 DECIMAL(24,10)（设计 §2，不是金额的 20,8），读出来是 Decimal。"""
-    column = FxRateVersion.__table__.c.rate
-
+@pytest.mark.parametrize(
+    "column",
+    [FxRateVersion.__table__.c.rate, UsageEvent.__table__.c.fx_rate_applied],
+    ids=["fx_rate_versions.rate", "usage_events.fx_rate_applied"],
+)
+def test_the_fx_rate_is_decimal_24_10(column) -> None:
+    """INV-10：汇率是 DECIMAL(24,10)（设计 §2，不是金额的 20,8），读出来是 Decimal。用量事件
+    快照里的 `fx_rate_applied` 与它同精度（AIH-TASK-032）：原值写入，不舍入。"""
     assert isinstance(column.type, Numeric)
     assert (column.type.precision, column.type.scale) == (RATE_PRECISION, RATE_SCALE) == (24, 10)
     assert column.type.asdecimal is True
@@ -269,6 +273,10 @@ _MONEY_COLUMNS = [
     PricingRule.__table__.c.markup_multiplier,
     PricingRuleComponent.__table__.c.unit_quantity,
     PricingRuleComponent.__table__.c.rate_amount,
+    # 用量事件的计费快照（AIH-TASK-032）：原币成本、MYR 估算成本与计费额。
+    UsageEvent.__table__.c.provider_source_cost,
+    UsageEvent.__table__.c.estimated_provider_cost_myr,
+    UsageEvent.__table__.c.billable_cost,
 ]
 
 

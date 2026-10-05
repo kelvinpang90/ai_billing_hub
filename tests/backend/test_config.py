@@ -121,6 +121,34 @@ def test_the_ingest_batch_limits_reject_values_that_disable_the_endpoint() -> No
     assert (ok.ingest_batch_max, ok.ingest_batch_max_bytes) == (1, 16 * 1024)
 
 
+def test_the_usage_billing_lease_and_attempt_limit_default_to_120_seconds_and_10() -> None:
+    """设计闸门 #181 v2 §2：`BILLING_USAGE_LEASE_SECONDS` 默认 120，`BILLING_USAGE_MAX_ATTEMPTS`
+    默认 10。"""
+    settings = Settings()
+
+    assert (settings.usage_lease_seconds, settings.usage_max_attempts) == (120, 10)
+
+
+def test_the_usage_billing_settings_come_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_USAGE_LEASE_SECONDS", "300")
+    monkeypatch.setenv("BILLING_USAGE_MAX_ATTEMPTS", "5")
+
+    settings = Settings()
+
+    assert (settings.usage_lease_seconds, settings.usage_max_attempts) == (300, 5)
+
+
+def test_the_usage_billing_settings_reject_non_positive_values() -> None:
+    """租约 0 让每次认领立刻过期，回收与处理抢同一批事件；上限 0 让第一次失败就 FAILED_FINAL。"""
+    for field in ("usage_lease_seconds", "usage_max_attempts"):
+        for bad in (0, -1):
+            with pytest.raises(ValidationError):
+                Settings(**{field: bad})
+
+    ok = Settings(usage_lease_seconds=1, usage_max_attempts=1)
+    assert (ok.usage_lease_seconds, ok.usage_max_attempts) == (1, 1)
+
+
 def test_email_is_unconfigured_by_default() -> None:
     """ADR-0009：**空 host = 未配置，是合法状态** —— 开发与 CI 不需要真实凭据。
 

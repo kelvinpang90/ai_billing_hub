@@ -660,6 +660,161 @@ billing_nginx nginx -T | grep -A4 integration` 核对挂载的配置），按「
 
 ---
 
+## 用量计费：上线前步骤、错误事件、积压与卡住回收
+
+**首次编写：2026-10-05（AIH-TASK-032）。依据：设计闸门 #181 v2（[AIH-TASK-032-usage-billing.md](design/AIH-TASK-032-usage-billing.md)
+§2「状态机」「重新入队」「告警维度」「认领、租约与防护令牌」、§5、§8）；接口契约见
+[api.md](api.md#管理端用量事件重新入队)，表、触发器与锁顺序见 [database-schema.md](database-schema.md)。**
+
+计费 worker 由 celery-beat 的两个条目驱动：`usage-billing-sweep` 每 10 秒认领并计费到期的事件（`RECEIVED`，或退避
+到期的 `FAILED_RETRYABLE`），`usage-stale-recovery` 每 60 秒回收租约已过期的 `PROCESSING`。摄取端不入队：**数据库里的
+事件状态就是待办清单**，Redis / Celery / Beat 丢了、停了，恢复后第一轮扫描接着做，什么都不丢、不重复扣。
+
+### 上线前要做的（合并部署之前）
+
+不做的话，事件全部停在错误状态（不扣费、不丢，修好后重新入队即可，但告警会一直红）：
+
+1. **至少一条全局默认定价规则**：管理端定价规则发布一条 `GLOBAL` 的 MARKUP（或 FIXED_RATE）规则。没有任何规则时事件
+   进 `PRICING_ERROR` / `NO_PRICING_RULE`。
+2. **试点模型的供应商价格**：Phase 3 试点用到的每个 `(provider, model)` 先在 AI 目录里建好（含别名），再发布价格版本，
+   覆盖它们的全部计价分量（LLM 四个 token 分量、转写的 `AUDIO_SECOND` 等）。缺了进 `MODEL_UNKNOWN` 或 `PRICING_ERROR`。
+3. **USD 汇率**：价格以 USD 计时必须有生效的 USD → MYR 汇率（BNM 草稿由管理员发布，或手工录入），否则进
+   `FX_RATE_ERROR`。见上面「FX 汇率：过期，或没有生效的汇率」。
+4. **Healthchecks 新建七个检查**（Simple，5 分钟，宽限 15 分钟，Telegram），Ping URL 写进 `.env`（`monitor.sh` 按维度名
+   读，脚本不用改；规则见「配置项」里 `BILLING_MONITOR_TOKEN_HOST_FILE` 一节）：
+
+   | 检查 | `.env` 的键 |
+   | --- | --- |
+   | `ai_billing_hub usage_pricing_error` | `BILLING_HEALTHCHECK_ALERT_USAGE_PRICING_ERROR_URL` |
+   | `ai_billing_hub usage_fx_rate_error` | `BILLING_HEALTHCHECK_ALERT_USAGE_FX_RATE_ERROR_URL` |
+   | `ai_billing_hub usage_model_unknown` | `BILLING_HEALTHCHECK_ALERT_USAGE_MODEL_UNKNOWN_URL` |
+   | `ai_billing_hub usage_failed` | `BILLING_HEALTHCHECK_ALERT_USAGE_FAILED_URL` |
+   | `ai_billing_hub usage_processing_backlog` | `BILLING_HEALTHCHECK_ALERT_USAGE_PROCESSING_BACKLOG_URL` |
+   | `ai_billing_hub wallet_negative_balance` | `BILLING_HEALTHCHECK_ALERT_WALLET_NEGATIVE_BALANCE_URL` |
+   | `ai_billing_hub outbox_backlog` | `BILLING_HEALTHCHECK_ALERT_OUTBOX_BACKLOG_URL` |
+
+   之后 Healthchecks 用量 8 + 2 + 1 + 7 = 18（免费档上限 20）。验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，
+   日志里出现这七个维度的行，七个检查变绿。
+5. 迁移 0018 是纯加列与约束（文件头有 §132 第 13 条分析），部署顺序照常「先迁移、再换镜像」；一旦有事件被计费，**只能
+   前滚**（downgrade 会丢快照）。
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| `usage_pricing_error` / `usage_fx_rate_error` / `usage_model_unknown` 变 P2 | 有事件停在对应的错误状态。摘要有条数、最早接收时刻与至多 3 个细分码（`NO_PROVIDER_PRICE`、`MISSING_PROVIDER_COMPONENT`、`NO_PRICING_RULE`、`MISSING_RULE_COMPONENT`） |
+| `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
+| `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数 |
+| `wallet_negative_balance` 变 P2 | 有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010）。只有个数 |
+| `outbox_backlog` 变 P2 | 有处理器的 outbox 行（现在只有密码重置信）超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查 |
+| worker 日志 | `Recovered a usage event stuck in PROCESSING past its lease`（WARNING，带 `event_id`、`claimed_at`、`attempt_count`）；`A usage event's ledger reference was already posted with another amount`（ERROR，账本冲突）；`Billing a usage event failed; the attempt is recorded`（WARNING，带错误类型与码） |
+
+### 影响什么
+
+| 情形 | 仍然正常 | 受影响 |
+| --- | --- | --- |
+| 错误状态（`MODEL_UNKNOWN` / `PRICING_ERROR` / `FX_RATE_ERROR` / `FAILED_FINAL`） | AI 服务与摄取不受影响；事件留在库里、不丢；**没有扣费**，余额不动 | 这些事件迟迟不扣费：客户的余额偏高、停机来得晚（透支风险），直到修好配置、重新入队 |
+| 处理积压 / 回收停了 | 同上；积压的事件恢复后按顺序计费，每个事件至多一次 | 扣费延迟（§119：p95 ≤ 60 秒、p99 ≤ 5 分钟的目标不达标），停机判定随之推迟 |
+| 负余额 | 计费照常（§7 第 7 条接受透支），停机跃迁与那一笔扣费同事务 | 客户在停机前透支了多少，就是平台的信用风险 |
+| 账本冲突（缺陷） | 原账本行不动，没有第二次扣费 | 这一个事件没有计费，要人工排查 |
+
+### 立刻做什么
+
+先排查（只读）：
+
+```bash
+docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+  SELECT status, error_code, provider_code_raw, model_code_raw, COUNT(*), MIN(received_at), MAX(attempt_count)
+    FROM usage_events
+   WHERE status IN (\"MODEL_UNKNOWN\", \"PRICING_ERROR\", \"FX_RATE_ERROR\", \"FAILED_FINAL\", \"FAILED_RETRYABLE\")
+   GROUP BY status, error_code, provider_code_raw, model_code_raw"'
+```
+
+按状态与细分码修配置：
+
+| 状态 / `error_code` | 多半是 | 修什么 |
+| --- | --- | --- |
+| `MODEL_UNKNOWN` | 上报的 `provider` / `model` 在目录里没有，也没有在 `occurred_at` 生效的别名 | AI 目录建模型或映射别名（从 `occurred_at` 起生效的段） |
+| `PRICING_ERROR` / `NO_PROVIDER_PRICE` | 该模型在 `occurred_at` 没有已发布的价格版本 | 发布价格版本。生效区间要覆盖事件的 `occurred_at`：时间线为空时不指定时刻发布的第一个版本是「一直以来」；之后只在末尾追加、从发布时刻起生效，已经过去的空档补不上（见下「绝不能做什么」） |
+| `PRICING_ERROR` / `MISSING_PROVIDER_COMPONENT` | 价格版本缺该计量类型的某个分量 | 发布一个分量齐全的新版本 |
+| `PRICING_ERROR` / `NO_PRICING_RULE` | 没有任何一级规则覆盖（连全局默认都没有） | 发布全局默认规则 |
+| `PRICING_ERROR` / `MISSING_RULE_COMPONENT` | 命中的 FIXED_RATE 规则缺该计量类型的分量（**不下落**到更低一级） | 发布一条分量齐全的规则 |
+| `FX_RATE_ERROR` | 非 MYR 的价格在 `occurred_at` 没有生效的汇率 | 发布汇率 |
+| `FAILED_FINAL` / `STALE_PROCESSING_EXHAUSTED` | 认领了 10 次（`BILLING_USAGE_MAX_ATTEMPTS`）都没处理完：worker 反复崩在这一条上 | 查 worker 日志与这条事件，修好后重新入队 |
+| `FAILED_FINAL` / `LOCK_WAIT_TIMEOUT` / `DEADLOCK` / `UNEXPECTED_ERROR` | 意外异常重试用尽（`error_message` 是异常类型） | 查日志，修好后重新入队 |
+| `FAILED_FINAL` / `ACCOUNT_CLOSED` | 租户已关户（`CLOSED`）：不入账，进人工复核（AIH-TASK-020 的契约） | 人工复核；**不要**重新入队 |
+| `FAILED_FINAL` / `AMOUNT_OUT_OF_RANGE` | 计算结果超出 DECIMAL(20,8)：多半是价格或数量录错 | 核对价格版本与事件数量；修的是价格就发布新版本后重新入队 |
+| `FAILED_FINAL` / `LEDGER_CONFLICT` | **缺陷**：账本里已有这个 `event_id` 的行而金额不同 | 原账本行不动；按缺陷排查，用 `SYSTEM_CORRECTION` 记补偿行。重新入队会被拒（409 / 触发器） |
+| `FAILED_RETRYABLE` | 正在退避重试（2^n 秒、封顶 300 秒），会自动再认领 | 不用管；≥ 3 次时 `usage_failed` 告警，按 `error_code` 查 |
+
+修好配置之后**重新入队**。只对**从未产生财务效果**的错误事件（四个错误状态之一、账本里没有它的行）。每条一个事务、一条 `USAGE_EVENT_REQUEUE`
+审计，`reason` 必填。改回 `RECEIVED` 后下一轮扫描（10 秒内）照常计费。
+
+```bash
+# 一条：路径里是事件的 public_id
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"reason": "Published the missing price version"}' \
+  https://<主机>/api/v1/admin/usage-events/<usage_event_id>/requeue
+
+# 批量：同一状态（必填）与可选筛选，一次至多 1000 条，超过就再调一次
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"status": "PRICING_ERROR", "error_code": "NO_PRICING_RULE", "reason": "Published the global default rule"}' \
+  https://<主机>/api/v1/admin/usage-events/requeue
+```
+
+响应只有放回 / 跳过的条数与 `public_id`。放回后若又进同一错误状态，说明配置还没修对（例如价格版本的生效时刻没有
+覆盖 `occurred_at`）—— 不要反复重新入队，先查上面的表。
+
+积压或回收停了：先按「celery-beat 停止调度」「Redis / Celery broker 不可用」确认 beat 与 worker 在跑；不需要手工补投
+任何东西 —— 数据库就是待办清单。负余额：联系客户充值，或按流程调账（管理端手工调账接口）。
+
+### 恢复
+
+- 错误状态的维度在最后一条该状态的事件被重新入队（或修好后被计费）后自动转绿。
+- 积压维度在最早的可处理事件被认领、过期的 `PROCESSING` 被回收后转绿；beat / worker 恢复后第一轮（10 秒 / 60 秒内）
+  就会开始。
+- 核对：`SELECT status, COUNT(*) FROM usage_events GROUP BY status`；钱包与账本一致性用 `verify_wallet`（只报告不修复）。
+
+### 卡住回收是什么
+
+崩溃在「认领已提交、处理未提交」之间的事件停在 `PROCESSING`（处理事务已随连接断开回滚，没有扣费）。每 60 秒的回收任务
+只看**租约已过期**（认领 + `BILLING_USAGE_LEASE_SECONDS`，默认 120 秒）的行，并且用 `FOR UPDATE SKIP LOCKED`：仍被某个
+处理事务持有行锁的事件（即使已过租约，例如在等钱包锁）**不会被回收**，只有持有者已崩溃的孤儿才会。回收把它改成
+`FAILED_RETRYABLE`（`STALE_PROCESSING`，立即可再认领）；认领次数已达上限的改成 `FAILED_FINAL`
+（`STALE_PROCESSING_EXHAUSTED`）。原处理者若事后醒来，会在处理事务第一步看到令牌不是自己的而放弃；账本
+`(USAGE_EVENT, event_id)` 唯一约束是最后一道，所以**至多一次扣费**。
+
+- 偶尔几条回收（日志里的 WARNING）= worker 被重启或崩溃过，正常。
+- 持续出现、或同一事件反复回收直到 `STALE_PROCESSING_EXHAUSTED` = worker 处理这类事件时崩溃，查 worker 日志。
+- `usage_processing_backlog` 报「lease expired」且 > 10 分钟（P1）= **回收任务本身没在跑**：按「celery-beat 停止调度」
+  处理；beat 恢复后第一轮就会回收。
+
+### 绝不能做什么
+
+- **不要直接 UPDATE `usage_events` 把事件改回 `RECEIVED`**：用重新入队接口（有审计、会校验账本）。`PROCESSED` 的事件
+  任何 UPDATE 都会被触发器拒绝；有账本行的错误事件改回 `RECEIVED` 也会被拒
+- **不要重新入队 `ACCOUNT_CLOSED` 与 `LEDGER_CONFLICT`**：前者要人工复核，后者是缺陷，修数据要另写补偿行
+- **不要为了「让事件能计价」想办法回溯发布价格、规则或汇率**（例如直接写库改 `effective_from`）：除了时间线为空时的
+  第一个版本，发布只在末尾追加、从发布时刻起生效（不许回溯是价格、规则、汇率各自设计的约定）。`occurred_at` 落在空档
+  里的事件，要由那时生效的版本计价 —— 那时没有就是没有，留在错误状态，按 Phase 8 的调整流程处理或与客户另行结算
+- **不要手工把卡住的 `PROCESSING` 改状态**：等租约过期由回收任务处理；手工改会和仍在处理的 worker 抢
+- **不要为了消 `wallet_negative_balance` 去改余额**：余额只经账本变动（INV-4），充值或调账走管理端接口
+
+### 配置项：`BILLING_USAGE_LEASE_SECONDS`、`BILLING_USAGE_MAX_ATTEMPTS`
+
+| 属性 | `usage_lease_seconds` | `usage_max_attempts` |
+| --- | --- | --- |
+| 环境变量 | `BILLING_USAGE_LEASE_SECONDS` | `BILLING_USAGE_MAX_ATTEMPTS` |
+| 默认值 | `120` 秒 | `10` 次 |
+| 取值 | 正整数（`gt=0`，0 或负数进程起不来） | 正整数（同左） |
+| 含义 | 认领后多久仍是 `PROCESSING` 才算卡住、可被回收。远大于一次处理的正常耗时（毫秒级）；调小会让回收与正在处理的 worker 抢同一批事件（防护令牌兜得住，但白做） | 一个事件最多被认领几次；达到后，意外异常与卡住回收都判 `FAILED_FINAL`。退避是 2^n 秒、封顶 300 秒 |
+
+⚠️ 这两项目前**没有**在 `docker-compose.yml` 的 `x-backend.environment` 里转发（本任务不改 compose），所以容器里一律是
+代码默认值；只改 `.env` 不会生效。要改需另立任务在 compose 里加转发（照 `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS`
+的写法与 `test_compose.py` 的默认值比对）。
+
+---
+
 ## 配置项
 
 **首次编写：2026-09-26（AIH-TASK-013）。**这一节收「运维会去改的配置项」，一项一小节。

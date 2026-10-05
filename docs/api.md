@@ -13,6 +13,7 @@
 - [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
 - [管理端试算预览](#管理端试算预览)（AIH-TASK-031）
+- [管理端用量事件：重新入队](#管理端用量事件重新入队)（AIH-TASK-032）
 - [内部告警接口](#内部告警接口)（AIH-TASK-042）：机器接口，**不套信封**，是下面通用约定的例外
 - [集成：用量事件摄取](#集成用量事件摄取)（AIH-TASK-029）：集成签名认证，错误信封多一个顶层 `retryable`
 
@@ -1850,6 +1851,70 @@ reprocess，不在这里。
 
 ---
 
+## 管理端用量事件：重新入队
+
+设计依据：设计闸门 #181 `APPROVED: design v2`，全文见
+[design/AIH-TASK-032-usage-billing.md](design/AIH-TASK-032-usage-billing.md) 第 2 节「重新入队」（spec §83、§84）。
+实现在 `app/api/admin_usage_events.py` 与 `app/services/usage_requeue.py`。
+
+计费 worker 把无法计价的事件停在 `MODEL_UNKNOWN` / `PRICING_ERROR` / `FX_RATE_ERROR`（带细分码），把计算溢出、关户、
+账本冲突、重试用尽的停在 `FAILED_FINAL`。管理员修好目录、价格、规则或汇率之后，用这两个接口把**从未产生财务效果**
+的错误事件改回 `RECEIVED`，下一轮扫描（每 10 秒）照常计费。运维流程见 [runbook.md](runbook.md)「用量计费」。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST /api/v1/admin/usage-events/{usage_event_id}/requeue` | `{"reason": …}` | 200，`{"id", "status"}` | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/usage-events/requeue` | 见下 | 200，`{"requeued", "skipped", "ids"}` | 401 / 403 / 404 / 422 / 500 / 503 |
+
+- 只有 ADMIN 能调（处理函数第一条语句就是鉴权）。路径里的 `usage_event_id` 是事件的 `public_id`。
+- 路径名是 `requeue`，**不是** spec §89 的 `reprocess`：Phase 8 的 reprocess 专指「对已计费的事件重算并生成调整行」，
+  会改变已计费的金额；这里从不碰已计费的事件。
+- 可重新入队：状态是上面四个错误状态之一，**且账本里没有这个事件的行**（`LEDGER_CONFLICT` 的 `FAILED_FINAL` 有，
+  所以不行）。MySQL 上迁移 0018 的触发器同样拒绝把有账本行的事件改回 `RECEIVED`。
+- 每个事件一个事务：锁事件行 → 改回 `RECEIVED`，清空 `error_code`、`error_message`、`attempt_count`、`next_attempt_at`
+  → 写一条审计 `USAGE_EVENT_REQUEUE`（`entity_type` = `usage_event`，`entity_id` = 事件的 `public_id`，`reason`，
+  `before_state` 是原状态、原错误码与尝试次数，`after_state` 是 `{"status": "RECEIVED"}`）→ 提交。
+- **响应只含数量与事件的 `public_id`**，不含成本、金额或内部 id。没有自动重新入队：原因多样，自动放回可能反复失败。
+
+### 单个
+
+请求体 `{"reason": "…"}`：`reason` 必填，去首尾空白后 1–255；多余字段 422。成功：
+
+```json
+{ "id": "00000000-0000-4000-8000-000000000000", "status": "RECEIVED" }
+```
+
+### 批量
+
+| 字段 | 规则 |
+| --- | --- |
+| `status` | **必填**，`MODEL_UNKNOWN` / `PRICING_ERROR` / `FX_RATE_ERROR` / `FAILED_FINAL` 之一，其余取值 422 |
+| `error_code` | 可选，1–64；与事件的 `error_code` 逐字比较（`MODEL_UNKNOWN` / `FX_RATE_ERROR` 没有细分码） |
+| `customer_id` | 可选，客户的 `public_id`；不存在 404 `CUSTOMER_NOT_FOUND` |
+| `provider` / `model` | 可选，1–64 / 1–128；与上报的**原始字符串**逐字节比较（模型未知的事件没有目录引用） |
+| `occurred_from` / `occurred_to` | 可选；RFC 3339、必须带时区、整秒；按 `occurred_at` 取 `[occurred_from, occurred_to)`，`occurred_from` 必须早于 `occurred_to`（否则 422） |
+| `reason` | **必填**，去首尾空白后 1–255；写进每一条审计 |
+
+按事件的内部 id 升序（≈ 接收顺序）**至多取 1000 条**，逐条一个事务。选出之后状态变了（已被别人放回、已被处理）或
+账本里有它的行的事件跳过并计数，不写审计。超过 1000 条时再调一次即可（已放回的不会再被选中）。成功：
+
+```json
+{ "requeued": 2, "skipped": 1, "ids": ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"] }
+```
+
+`ids` 是放回了的事件的 `public_id`，按内部 id 升序。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `USAGE_EVENT_NOT_FOUND` | 单个：路径里的事件不存在 | 否 |
+| 404 | `CUSTOMER_NOT_FOUND` | 批量：`customer_id` 不存在 | 否 |
+| 409 | `USAGE_EVENT_NOT_REQUEUABLE` | 单个：事件不在四个错误状态之一（`RECEIVED`、`PROCESSING`、`PROCESSED`、`FAILED_RETRYABLE` 等），或账本里已有它的行 | 否 |
+| 422 | `VALIDATION_ERROR` | 缺 `reason`、`reason` 为空白或超长、批量的 `status` 不是四个错误状态之一、时间格式或区间不对、多余字段 | 否 |
+
+---
+
 ## 内部告警接口
 
 设计依据：设计闸门 #183（[AIH-TASK-028-fx-rates.md](design/AIH-TASK-028-fx-rates.md) v3 第 2 节
@@ -1906,13 +1971,21 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
   有不 OK 的币种时摘要只列它们，各一小段、以 `; ` 分隔；都 OK 时列每个币种。
 - 摘要只有计数、日期与币种，**不含租户、金额（汇率本身也不写）或任何个人数据**。
 - 维度查询是普通读、不拿 `fx_rate_locks`：告警只是提示，不让汇率发布等它。
-- 以后的维度（定价错误、汇率错误、未知模型、负余额、outbox 积压）追加到注册表里，行格式不变。
+- 用量计费的七个维度（AIH-TASK-032，设计闸门 #181 v2 §2「告警维度」）追加在注册表末尾，行格式不变；它们的摘要只有
+  计数、最早时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`）与至多 3 个细分码（字母序），不含租户与金额。
 
-| 维度 | 何时 `P2` | 摘要 |
+| 维度 | 何时告警 | 摘要 |
 | --- | --- | --- |
 | `fx_fetch` | 某个配置币种在最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT`、`NO_NEW_QUOTE`、`NO_QUOTE_FOR_DATE` 都算成功），且至少有一条 `FAILED` —— 即连续 3 天拉取失败。72 小时内一条记录都没有是 OK（从未运行或 Beat 停了，由 `fx_stale` 报） | `P2`：`USD no successful fetch in 72 hours (3 failed)`；OK：`USD last success <吉隆坡日期>` 或 `USD no fetch in 72 hours` |
 | `fx_stale` | 某个配置币种**此刻生效**的版本（与 `resolve_fx_rate` 同一条件）的报价日距今**超过 5 个日历日**（吉隆坡日期相减；BNM 版本用报价日，手工录入用 `observed_at` 的吉隆坡日期）；或此刻没有生效的版本（包括只有未来的预约） | `P2`：`USD quoted 2026-09-24 (6 calendar days)` 或 `USD no rate in effect`；OK：`USD quoted 2026-09-29 (1 calendar day)` |
 | `usage_event_conflicts`（AIH-TASK-029） | 最近 24 小时（含恰好 24 小时前）记下了任何一条用量事件幂等冲突（`usage_event_conflicts` 的行；同一冲突请求重发不加行） | `P2`：`2 conflicts in 24 hours, earliest 2026-09-30T04:30:00Z`（条数与其中最早一条的 UTC 时刻）；OK：`no conflicts in 24 hours` |
+| `usage_pricing_error`（AIH-TASK-032） | 存在 `PRICING_ERROR` 的事件：`P2` | `P2`：`3 events PRICING_ERROR, earliest received 2026-10-01T04:00:00Z, codes NO_PRICING_RULE, NO_PROVIDER_PRICE`；OK：`no PRICING_ERROR events` |
+| `usage_fx_rate_error`（AIH-TASK-032） | 存在 `FX_RATE_ERROR` 的事件：`P2` | `P2`：`1 event FX_RATE_ERROR, earliest received …`；OK：`no FX_RATE_ERROR events` |
+| `usage_model_unknown`（AIH-TASK-032） | 存在 `MODEL_UNKNOWN` 的事件：`P2` | `P2`：`2 events MODEL_UNKNOWN, earliest received …`；OK：`no MODEL_UNKNOWN events` |
+| `usage_failed`（AIH-TASK-032） | 存在 `FAILED_FINAL` 的事件，或有 `FAILED_RETRYABLE` 的事件已尝试 ≥ 3 次：`P2`；其中有 `FAILED_FINAL` 带 `LEDGER_CONFLICT` 或 `AMOUNT_OUT_OF_RANGE`：`P1` | `1 FAILED_FINAL, 2 FAILED_RETRYABLE with 3+ attempts, earliest received …, codes LEDGER_CONFLICT, LOCK_WAIT_TIMEOUT`；OK：`no failed events` |
+| `usage_processing_backlog`（AIH-TASK-032） | 最早的可处理事件（`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`）等待超过 5 分钟（§119 p99），或存在租约已过期仍未回收的 `PROCESSING`（回收任务本身停了）：`P2`；等待超过 30 分钟，或有 `PROCESSING` 过期超过 10 分钟：`P1`。等待的起点是事件变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个，`FAILED_RETRYABLE` 取 `next_attempt_at` | `3 due, oldest since 2026-10-01T04:20:00Z; 1 PROCESSING, earliest claimed 2026-10-01T04:29:50Z; 0 lease expired`；空库：`0 due; 0 PROCESSING; 0 lease expired` |
+| `wallet_negative_balance`（AIH-TASK-032） | 存在余额 < 0 的钱包（§120）：`P2` | `P2`：`2 wallets below zero`（只有个数）；OK：`no wallet below zero` |
+| `outbox_backlog`（AIH-TASK-032） | `domain_outbox` 里**有处理器**的事件类型（`app/tasks/outbox.py` 的处理器名单，与周期恢复同一份）存在创建超过 10 分钟仍 `PENDING` 的行（§120）：`P2`。没有处理器的类型（`tenant.billing_status_changed`、`tenant.low_balance`）按设计持久等待，不计入 | `P2`：`1 row pending over 10 minutes, oldest created …`；OK：`no handled outbox row pending over 10 minutes` |
 
 ---
 
