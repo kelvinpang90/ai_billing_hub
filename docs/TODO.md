@@ -25,13 +25,12 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-032` Phase 2 异步计费 worker
-2. `AIH-TASK-033` Phase 2 最热租户压测脚本
-3. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
-4. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-5. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-6. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-7. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+1. `AIH-TASK-033` Phase 2 最热租户压测脚本
+2. `AIH-TASK-034` Phase 2 管理端用量事件查询接口
+3. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
+4. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+5. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+6. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行

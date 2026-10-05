@@ -2373,7 +2373,7 @@ tasks:
     title: 异步计费任务：认领、扣费、负余额、自动停用与卡住回收
     purpose: >-
       按 docs/design/AIH-TASK-032-usage-billing.md（设计闸门 #181 已批准 v2）实现计费 worker：Beat 每 10 秒扫描，短事务认领为 PROCESSING（令牌、租约、attempt_count），处理事务核对防护令牌后按锁顺序（事件 → 供应商 S → FX S → 规则 S → 钱包 → 租户）计价、经 post_transaction 扣费、写快照、PROCESSED；错误状态与细分码；失败退避与上限；每 60 秒的卡住回收；0 元事件不写账本；PROCESSED 由触发器保证不可变；管理端单个与批量重新入队（只对从未产生财务效果的错误事件）；七个告警维度。迁移 0018 给 usage_events 加快照与认领列。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-030
       - AIH-TASK-031
