@@ -1817,7 +1817,7 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
 
 `POST /api/v1/integration/usage-events` 收一个用量事件。**只接受集成签名认证**（[集成请求签名](#集成请求签名)）：不读
 `Authorization`，管理员会话在这里等于没带签名。`202` 的意思是事件已经**持久**落库（状态 `RECEIVED`），不是已经计费：
-定价与扣费异步进行（REQ-INGEST-001）。本端点不计费、不入队；没有批量端点（另一个任务）。
+定价与扣费异步进行（REQ-INGEST-001）。本端点不计费、不入队；一次发多条用[批量端点](#批量摄取)。
 
 ### 请求头
 
@@ -1898,7 +1898,7 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 | 403 | `CREDENTIAL_SCOPE_MISMATCH` | 载荷里的 `tenant_id` / `project_id` 不是凭据所属的（服务端另写一条审计） | `false` | 死信并告警 |
 | 409 | `IDEMPOTENCY_CONFLICT` | 同一 `event_id`、归属或指纹不同。原事件不变；响应不透露原事件的任何信息 | `false` | 死信并告警 |
 | 409 | `UNKNOWN_USAGE_TYPE` | `usage_type` 不在目录里 | `true` | 保留事件，退避重试；管理员建好类型后自然成功 |
-| 413 | `PAYLOAD_TOO_LARGE` | 请求体超过 16 KiB（应用）或 1 MiB（nginx，见下） | `false` | 死信并告警 |
+| 413 | `PAYLOAD_TOO_LARGE` | 请求体超过 16 KiB（应用）或 1 MiB（nginx，见下）；批量端点见[批量摄取](#批量摄取) | `false` | 死信并告警 |
 | 422 | `VALIDATION_ERROR` / `UNSUPPORTED_SCHEMA_VERSION` / `OCCURRED_AT_IN_FUTURE` | 见上表。`message` 只列字段名，不回显值 | `false` | 死信并告警 |
 | 500 | `INTERNAL_ERROR` | 意外错误（含提交失败）；事件没有落库 | `true` | 退避重试 |
 | 503 | `SERVICE_UNAVAILABLE` | 数据库不可用或未配置（主密钥未配置同样） | `true` | 退避重试 |
@@ -1919,3 +1919,91 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
   `api_key`；`after_state` 只有 `key_version`、`event_id`、载荷给的两个 id 与凭据实际的两个 `public_id`），
   在独立事务里提交。
 - 成功（202 / 200）之后，凭据的 `last_used_at` 在独立短事务里节流更新：每个凭据版本每 60 秒至多写一次。
+
+### 批量摄取
+
+设计依据：设计闸门 #180（[AIH-TASK-030-usage-ingest-batch.md](design/AIH-TASK-030-usage-ingest-batch.md) v3 第 2 节）。
+spec §38、§39。
+
+`POST /api/v1/integration/usage-events/batch` 一次收多条用量事件。请求层与单条端点相同、**整批只做一次**：
+同样的五个签名头，签名覆盖**整个批的原始请求体字节**，整批一个 `X-Acuven-Request-Id`（同一个值再发一次是重放，401）。
+之后按数组顺序逐条处理，每一条走的就是单条端点的那一套处理（校验顺序 ④–⑨、指纹、合法重复与冲突），
+**结果与把它单独发给单条端点完全相同**（状态、`error_code`、`retryable`、写库效果）。
+
+请求体：
+
+```json
+{"events": [ {…单条端点的事件对象…}, {…} ]}
+```
+
+- 顶层只有 `events` 一个字段（多了 422），`events` 是**非空**数组。
+- 每个元素就是单条端点的请求体（字段规则见本节上面单条端点的「请求体」）。一个元素不合法只让**那一条** `rejected`，
+  不让整批 422。
+- 批内同一个 `event_id` 出现两次**不会预先去重**：按顺序处理，内容相同的第二条得 `already_received`，内容不同的
+  得 `IDEMPOTENCY_CONFLICT`（与先后单独发两次相同）。
+- 整批共用一个服务端时刻：签名时间窗、`occurred_at` 的 300 秒未来上界与每条的 `received_at` 口径一致。
+
+上限：
+
+| 上限 | 默认值 | 配置项 | 超出时 |
+| --- | --- | --- | --- |
+| 条数 | 100（spec §39） | `BILLING_INGEST_BATCH_MAX` | 整批 422 `BATCH_TOO_LARGE`，`retryable = false`，不写任何事件；拆小后重发 |
+| 请求体 | 1 MiB（1048576 字节） | `BILLING_INGEST_BATCH_MAX_BYTES` | 整批 413 `PAYLOAD_TOO_LARGE`，`retryable = false`；拆小后重发 |
+| 单个元素 | 16 KiB | 不可配（与单条端点相同） | 该条 `rejected` / `PAYLOAD_TOO_LARGE` / `retryable = false`，按元素**紧凑重新序列化**（无空白、UTF-8）后的长度判，其他条照常 |
+
+请求体上限与 nginx 集成前缀块的 `client_max_body_size 1m` 相同，两层给的是同一个信封：nginx 拒的 `request_id` 为
+`null`，应用拒的照常有值。两个配置项都必须是正数（请求体上限不小于 16 KiB），否则进程起不来。
+
+**批层面的失败整体拒绝、不写任何事件**，是带 `retryable` 的错误信封（同[错误与 `retryable`](#错误与-retryable)）：
+
+| HTTP | `error.code` | 什么时候 | `retryable` |
+| --- | --- | --- | --- |
+| 401 | `INTEGRATION_AUTH_FAILED` | 与单条端点相同（含整批的 Request-Id 重放） | `false` |
+| 413 | `PAYLOAD_TOO_LARGE` | 请求体超过 `BILLING_INGEST_BATCH_MAX_BYTES` | `false` |
+| 422 | `VALIDATION_ERROR` | 不是 JSON 对象、缺 `events`、多了顶层字段、`events` 不是数组或为空 | `false` |
+| 422 | `BATCH_TOO_LARGE` | 条数超过 `BILLING_INGEST_BATCH_MAX` | `false` |
+| 500 | `INTERNAL_ERROR` | 不属于单条错误表的意外错误；之前已提交的条保留，重发整批是安全的 | `true` |
+| 503 | `SERVICE_UNAVAILABLE` | 认证时数据库不可用或未配置 | `true` |
+
+否则一律 **200**，`data` 是汇总与按请求顺序排列的逐条结果：
+
+```json
+{
+  "success": true,
+  "data": {
+    "accepted": 1,
+    "duplicates": 1,
+    "rejected": 1,
+    "results": [
+      {"index": 0, "event_id": "00000000-0000-7000-8000-000000000001", "status": "accepted", "processing_status": "RECEIVED", "error_code": null, "retryable": false},
+      {"index": 1, "event_id": "00000000-0000-7000-8000-000000000002", "status": "already_received", "processing_status": "RECEIVED", "error_code": null, "retryable": false},
+      {"index": 2, "event_id": "00000000-0000-7000-8000-000000000003", "status": "rejected", "processing_status": null, "error_code": "IDEMPOTENCY_CONFLICT", "retryable": false}
+    ]
+  },
+  "error": null,
+  "request_id": "7d3c0b8e-..."
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `accepted` / `duplicates` / `rejected` | 三者之和等于条数；`duplicates` 数 `already_received` 与 `already_processed` 两种 |
+| `results[].index` | 该条在 `events` 里的位置（从 0 起） |
+| `results[].event_id` | 该元素里的 `event_id` 字符串，原样返回（格式不合法的也照样返回）；元素不是对象、缺这个字段或它不是字符串时为 `null`，按 `index` 对应 |
+| `results[].status` | `accepted`（新接收，行已提交）/ `already_received` / `already_processed`（合法重复，同单条端点）/ `rejected`（其余一切，包括可重试的） |
+| `results[].processing_status` | 成功的条是事件的当前状态（同单条端点）；`rejected` 为 `null` |
+| `results[].error_code` | `rejected` 的条是单条端点[错误表](#错误与-retryable)里的码（`VALIDATION_ERROR`、`UNSUPPORTED_SCHEMA_VERSION`、`OCCURRED_AT_IN_FUTURE`、`UNKNOWN_USAGE_TYPE`、`CREDENTIAL_SCOPE_MISMATCH`、`IDEMPOTENCY_CONFLICT`、`PAYLOAD_TOO_LARGE`、`SERVICE_UNAVAILABLE`）；成功为 `null` |
+| `results[].retryable` | 取该码在单条端点错误表里的固定值（例如 `UNKNOWN_USAGE_TYPE` 与 `SERVICE_UNAVAILABLE` 为 `true`，`IDEMPOTENCY_CONFLICT` 为 `false`）；成功的条为 `false`（不需要重试） |
+
+⚠️ **200 不代表每条都成功**：集成方只按每条的 `retryable` 决定该条是否重投（与单条端点同一规则），只重投需要的条。
+冲突条不回显原事件的任何信息。
+
+处理与写库：
+
+- 每条**各自一个事务**，批本身没有外层事务：一条失败不回滚其他条，每条的「已接收」只在它自己的行提交之后成立。
+- 处理某条时数据库不可用：该条 `SERVICE_UNAVAILABLE` / `retryable = true`，**后面的条照常尝试**（各自重连）；
+  已提交的条不受影响。
+- 写的东西与单条端点逐条相同（事件行、冲突行与审计、归属不符的审计）。
+- 响应之后，凭据的 `last_used_at` 按单条端点的节流规则更新一次（批被处理即算一次使用，哪怕每条都 `rejected`）。
+- 服务端日志只记条数与汇总（`Usage event batch processed`），不记请求体。
+- 重发整批（新签名、新 Request-Id）是安全的：已接收的条得到 `already_received`。

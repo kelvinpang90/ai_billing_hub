@@ -88,6 +88,39 @@ def test_the_smtp_port_must_be_a_real_port() -> None:
     assert Settings(smtp_port=465).smtp_port == 465
 
 
+def test_the_ingest_batch_limits_default_to_100_events_and_1_mib() -> None:
+    """设计闸门 #180 v3 §2：spec §39 的默认 100 条；请求体 1 MiB，与 nginx 集成前缀块相同。"""
+    settings = Settings()
+
+    assert settings.ingest_batch_max == 100
+    assert settings.ingest_batch_max_bytes == 1024 * 1024
+
+
+def test_the_ingest_batch_limits_come_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_INGEST_BATCH_MAX", "10")
+    monkeypatch.setenv("BILLING_INGEST_BATCH_MAX_BYTES", "65536")
+
+    settings = Settings()
+
+    assert (settings.ingest_batch_max, settings.ingest_batch_max_bytes) == (10, 65_536)
+
+
+def test_the_ingest_batch_limits_reject_values_that_disable_the_endpoint() -> None:
+    """0 条的上限让每一批都 `BATCH_TOO_LARGE`；小于单条上限 16 KiB 的请求体上限连一个满长的
+    元素都装不下。两种都是「端点在、却什么也收不了」，必须让进程起不来。
+    """
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            Settings(ingest_batch_max=bad)
+    for bad in (0, -1, 16 * 1024 - 1):
+        with pytest.raises(ValidationError):
+            Settings(ingest_batch_max_bytes=bad)
+
+    # 边界值照常通过 —— 少了这一句，上面的断言在「构造 Settings 本来就会炸」时也会全绿。
+    ok = Settings(ingest_batch_max=1, ingest_batch_max_bytes=16 * 1024)
+    assert (ok.ingest_batch_max, ok.ingest_batch_max_bytes) == (1, 16 * 1024)
+
+
 def test_email_is_unconfigured_by_default() -> None:
     """ADR-0009：**空 host = 未配置，是合法状态** —— 开发与 CI 不需要真实凭据。
 
