@@ -14,6 +14,9 @@ Rows of design §7 covered here:
   one ERROR line that does not contain the path; the right token: 200 plain text; new file
   content takes effect without a restart. 401 and 404 run no database statement at all.
 
+Plus the `usage_event_conflicts` dimension of design gate #176 v8 §2「告警」(AIH-TASK-029): the
+conflict rows of the last 24 hours (the edge included) and the earliest of them; > 0 is P2.
+
 SQLite only: the dimensions are plain reads with no locking (design v3), and the endpoint holds
 no state the database could disagree on. Rates are obviously fictional; tokens are obvious test
 values; no uuid literal is needed here (placeholders would be all zeros).
@@ -43,6 +46,7 @@ from app.main import create_app
 from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.fx_rates import FxFetchOutcome, FxRateVersion
+from app.models.usage import ConflictMismatch, UsageEventConflict
 from app.services import alerts, fx_rates
 from app.services.alerts import AlertContext, AlertLevel, AlertResult
 from app.services.auth import RequestContext
@@ -230,17 +234,48 @@ def fx_stale(
         return alerts.fx_stale(session, AlertContext(now=now, currencies=currencies))
 
 
+def record_conflict(factory: sessionmaker[Session], received_at: dt.datetime, number: int) -> None:
+    """One conflict row. SQLite does not enforce the foreign keys here: placeholder ids."""
+    with factory() as session:
+        session.add(
+            UsageEventConflict(
+                usage_event_id=1,
+                event_id=f"00000000-0000-7000-8000-{number:012d}",
+                integration_credential_id=1,
+                api_key="ak_" + "0" * 32,
+                payload_fingerprint="0" * 64,
+                mismatch=ConflictMismatch.FINGERPRINT,
+                received_at=received_at,
+            )
+        )
+        session.commit()
+
+
+def usage_event_conflicts(factory: sessionmaker[Session], now: dt.datetime = NOW) -> AlertResult:
+    with factory() as session:
+        return alerts.usage_event_conflicts(session, AlertContext(now=now, currencies=("USD",)))
+
+
+# The endpoint's body on an empty database at NOW, one line per registered dimension.
+EMPTY_DATABASE_LINES = (
+    "fx_fetch OK USD no fetch in 72 hours\n"
+    "fx_stale P2 USD no rate in effect\n"
+    "usage_event_conflicts OK no conflicts in 24 hours\n"
+)
+
+
 # --- the registry and the line format ---------------------------------------------
 
 
 def test_the_registry_is_ordered_and_one_line_per_dimension(
     factory: sessionmaker[Session],
 ) -> None:
-    assert [dimension.name for dimension in alerts.DIMENSIONS] == ["fx_fetch", "fx_stale"]
+    names = [dimension.name for dimension in alerts.DIMENSIONS]
+    assert names == ["fx_fetch", "fx_stale", "usage_event_conflicts"]
 
     body = alerts.alert_lines(factory, ("USD",), clock=lambda: NOW)
 
-    assert body == "fx_fetch OK USD no fetch in 72 hours\nfx_stale P2 USD no rate in effect\n"
+    assert body == EMPTY_DATABASE_LINES
 
 
 # --- fx_fetch -----------------------------------------------------------------------
@@ -370,6 +405,29 @@ def test_fx_stale_summarises_every_currency_in_one_line(
     )
 
 
+# --- usage_event_conflicts ----------------------------------------------------------
+
+
+def test_usage_event_conflicts_is_ok_without_a_conflict(factory: sessionmaker[Session]) -> None:
+    assert usage_event_conflicts(factory) == AlertResult(OK, "no conflicts in 24 hours")
+
+
+def test_usage_event_conflicts_counts_the_last_24_hours(factory: sessionmaker[Session]) -> None:
+    # Exactly 24 hours ago is inside the window; one second earlier is not.
+    record_conflict(factory, NOW - 24 * HOUR, 1)
+    record_conflict(factory, NOW - HOUR, 2)
+    record_conflict(factory, NOW - 24 * HOUR - SECOND, 3)
+
+    assert usage_event_conflicts(factory) == AlertResult(
+        P2, "2 conflicts in 24 hours, earliest 2026-09-30T04:30:00Z"
+    )
+    assert usage_event_conflicts(factory, now=NOW + 23 * HOUR) == AlertResult(
+        P2, "1 conflict in 24 hours, earliest 2026-10-01T03:30:00Z"
+    )
+    # Older conflicts alone are not an alert: the rows stay, the window moves on.
+    assert usage_event_conflicts(factory, now=NOW + 24 * HOUR).level is OK
+
+
 # --- access control -----------------------------------------------------------------
 
 
@@ -482,11 +540,7 @@ def test_the_right_token_gets_the_alert_lines(
 ) -> None:
     response = client.get("/internal/alerts", headers=bearer(TEST_TOKEN))
 
-    assert_plain(
-        response,
-        200,
-        "fx_fetch OK USD no fetch in 72 hours\nfx_stale P2 USD no rate in effect\n",
-    )
+    assert_plain(response, 200, EMPTY_DATABASE_LINES)
     # Plain reads: never the FX lock, never a write.
     assert statements
     assert not [sql for sql in statements if "fx_rate_locks" in sql]

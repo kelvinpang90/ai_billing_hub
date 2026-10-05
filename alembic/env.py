@@ -35,6 +35,9 @@ from app.models import (
     tenancy as _tenancy_models,  # noqa: F401  (registers tenants/projects)
 )
 from app.models import (
+    usage as _usage_models,  # noqa: F401  (registers usage_events/usage_event_conflicts)
+)
+from app.models import (
     wallet as _wallet_models,  # noqa: F401  (registers wallets/wallet_transactions)
 )
 from app.models.base import Base  # noqa: F401  (imported for metadata side effects)

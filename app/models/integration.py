@@ -95,7 +95,7 @@ class IntegrationCredential(Base):
     valid_from: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     # NULL = 没有截止；轮换时写入 `now + 重叠期`。
     valid_until: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
-    # 本任务不写（设计 §1），随摄取端点做。
+    # 摄取端点在响应之后节流写入（AIH-TASK-029：每个凭据行每 60 秒至多一次）。
     last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
@@ -112,6 +112,11 @@ class IntegrationCredential(Base):
             "public_api_key",
             "key_version",
             name="uq_integration_credentials_key_version",
+        ),
+        # `id` 本来就唯一；这个约束只为让 `usage_events` 的三列复合外键成立
+        # （AIH-TASK-029 迁移 0017，先例：`uq_projects_id_tenant`）。
+        UniqueConstraint(
+            "id", "project_id", "tenant_id", name="uq_integration_credentials_id_scope"
         ),
         Index("ix_integration_credentials_project_id", "project_id"),
         CheckConstraint(KEY_VERSION_CHECK, name="ck_integration_credentials_key_version"),

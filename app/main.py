@@ -14,6 +14,7 @@ from app.api.admin_pricing_rules import router as admin_pricing_rules_router
 from app.api.admin_provider_prices import router as admin_provider_prices_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.api.integration_usage import router as integration_usage_router
 from app.api.internal_alerts import router as internal_alerts_router
 from app.api.two_factor import router as two_factor_router
 from app.core.celery_app import RedisNotConfigured, create_celery_app
@@ -27,7 +28,9 @@ from app.core.database import (
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
+from app.core.nonce import NonceStore
 from app.core.ratelimit import TokenBucket
+from app.services.integration_auth import SecretCache
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_provider_prices_router)
     app.include_router(admin_pricing_rules_router)
     app.include_router(admin_fx_rates_router)
+    # 集成方的签名接口：错误信封多一个顶层 `retryable`（app/core/errors.py）。
+    app.include_router(integration_usage_router)
     # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。
     app.include_router(internal_alerts_router)
 
@@ -71,6 +76,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         per_minute=settings.auth_rate_limit_per_minute,
         burst=settings.auth_rate_limit_burst,
     )
+    # 摄取端点的两样进程级状态（设计闸门 #176 v8 §2）：解密结果缓存（只在内存，重启清空），
+    # 与 nonce 用的 Redis 连接池（超时 0.2 秒；没配 Redis 时每个请求放行并记 WARNING）。
+    app.state.secret_cache = SecretCache()
+    app.state.nonce_store = NonceStore.from_settings(settings)
     if not settings.jwt_secret_file.strip():
         # 与「没配数据库」同一种处置：照常启动让存活探针能应答，但把缺失说清楚。
         # 认证端点会明确返回 AUTH_NOT_CONFIGURED，而不是签出一个临时密钥——

@@ -220,6 +220,15 @@ class UsageMeterType(Base):
         # `id` 本来就唯一；这个约束只为让分量表的复合外键成立
         # （先例：`uq_projects_id_tenant`）。
         UniqueConstraint("id", "payload_shape", name="uq_usage_meter_types_id_shape"),
+        # 同上，为 `usage_events` 的四列复合外键（AIH-TASK-029 迁移 0017）：事件记下的
+        # 形态、单位、数量类型由数据库保证与所属类型一致。
+        UniqueConstraint(
+            "id",
+            "payload_shape",
+            "unit",
+            "quantity_kind",
+            name="uq_usage_meter_types_id_shape_unit_kind",
+        ),
         CheckConstraint(PAYLOAD_SHAPE_CHECK, name="ck_usage_meter_types_payload_shape"),
         CheckConstraint(QUANTITY_KIND_CHECK, name="ck_usage_meter_types_quantity_kind"),
         CheckConstraint(STATUS_CHECK, name="ck_usage_meter_types_status"),

@@ -62,6 +62,14 @@ from app.models.provider_prices import (
     ProviderPriceVersion,
 )
 from app.models.tenancy import BillingStatus, Tenant
+from app.models.usage import (
+    QUANTITY_PRECISION,
+    QUANTITY_SCALE,
+    ConflictMismatch,
+    UsageEvent,
+    UsageEventConflict,
+    UsageEventStatus,
+)
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 
 # AI 目录（AIH-TASK-025）的四张表各有枚举列：状态、上报形态、数量类型。
@@ -72,13 +80,16 @@ _PRICE_MODELS = (ProviderPriceVersion,)
 _RULE_MODELS = (PricingRule, PricingRuleComponent)
 # FX 汇率（AIH-TASK-028）的枚举列：版本的来源、状态，拉取记录的来源、结果。
 _FX_MODELS = (FxRateVersion, FxFetchAttempt)
+# 用量事件（AIH-TASK-029）的枚举列：事件的形态、数量类型、状态，冲突行的不符类型。
+_USAGE_MODELS = (UsageEvent, UsageEventConflict)
 
 
 def enum_columns():
     """Every VARCHAR-backed enum column in the auth, tenant, ledger, catalog, price, pricing
-    rule and FX tables."""
+    rule, FX and usage event tables."""
     tables = (User, AuditLog, DomainOutbox, Tenant, WalletTransaction)
-    for model in (*tables, *_CATALOG_MODELS, *_PRICE_MODELS, *_RULE_MODELS, *_FX_MODELS):
+    models = (*_CATALOG_MODELS, *_PRICE_MODELS, *_RULE_MODELS, *_FX_MODELS, *_USAGE_MODELS)
+    for model in (*tables, *models):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
                 yield f"{model.__tablename__}.{column.name}", column
@@ -162,6 +173,34 @@ def test_the_fx_enum_columns_are_collected() -> None:
     }
 
 
+def test_the_usage_event_enum_columns_are_collected() -> None:
+    """设计闸门 #176 v8 §2 写死的列宽：形态 32、数量类型 16（与 `usage_meter_types` 的同名列
+    一致，复合外键要求）、状态 32、不符类型 32，与迁移 0017 一致。"""
+    tables = {model.__tablename__ for model in _USAGE_MODELS}
+    widths = {
+        label: column.type.length
+        for label, column in _ENUM_COLUMNS
+        if label.split(".")[0] in tables
+    }
+
+    assert widths == {
+        "usage_events.payload_shape": 32,
+        "usage_events.quantity_kind": 16,
+        "usage_events.status": 32,
+        "usage_event_conflicts.mismatch": 32,
+    }
+
+
+def test_the_usage_quantity_is_decimal_20_8() -> None:
+    """`quantity` 是用量不是金额，但同样是 DECIMAL(20,8)、读出来是 Decimal（设计 §2）。"""
+    column = UsageEvent.__table__.c.quantity
+
+    assert isinstance(column.type, Numeric)
+    assert (column.type.precision, column.type.scale) == (QUANTITY_PRECISION, QUANTITY_SCALE)
+    assert (QUANTITY_PRECISION, QUANTITY_SCALE) == (20, 8)
+    assert column.type.asdecimal is True
+
+
 def test_the_fx_rate_is_decimal_24_10() -> None:
     """INV-10：汇率是 DECIMAL(24,10)（设计 §2，不是金额的 20,8），读出来是 Decimal。"""
     column = FxRateVersion.__table__.c.rate
@@ -206,6 +245,8 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
         FxRateStatus,
         FxRateSourceType,
         FxFetchOutcome,
+        UsageEventStatus,
+        ConflictMismatch,
     ],
     ids=lambda cls: cls.__name__,
 )

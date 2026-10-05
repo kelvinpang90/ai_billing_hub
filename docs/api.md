@@ -13,6 +13,7 @@
 - [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
 - [内部告警接口](#内部告警接口)（AIH-TASK-042）：机器接口，**不套信封**，是下面通用约定的例外
+- [集成：用量事件摄取](#集成用量事件摄取)（AIH-TASK-029）：集成签名认证，错误信封多一个顶层 `retryable`
 
 认证接口（`/api/v1/auth/*`）早于本文件，契约暂时只在代码与设计闸门 #32 里，之后补进来。
 
@@ -539,9 +540,9 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 ## 集成请求签名
 
-设计依据同上（设计 §2「校验库」；spec §37）。**本任务只提供校验库**（`app/services/integration_auth.py`），
-还没有任何端点按它校验；摄取端点随 Phase 2 / 3 接上。下面两条是 spec §37 没写死、由设计补的定义，
-**本节是它们的唯一出处**，Billing Client 与服务端都照这里实现。
+设计依据同上（设计 §2「校验库」；spec §37）。校验库在 `app/services/integration_auth.py`；第一个按它校验的
+端点是 [用量事件摄取](#集成用量事件摄取)（AIH-TASK-029），防重放与请求头格式的补充规则写在那一节。下面两条是
+spec §37 没写死、由设计补的定义，**本节是它们的唯一出处**，Billing Client 与服务端都照这里实现。
 
 ### 请求头
 
@@ -588,8 +589,8 @@ SHA256(RAW_REQUEST_BODY)
 4. `api_key` + `key_version` 必须对应一个此刻可用的版本：`ACTIVE`、已到 `valid_from`、`valid_until`
    为空或还没到。不存在、已吊销、已过期、版本号不是正整数，一律同样对待。
 
-以后的端点对以上所有拒绝给**同一个** 401，不让调用方区分原因；上面的码只在服务端内部使用。
-防重放（记住用过的请求 id）随摄取端点实现，本任务不做。
+端点对以上所有拒绝给**同一个** 401，不让调用方区分原因；上面的码只在服务端内部使用。
+防重放（记住用过的请求 id）由摄取端点实现，见[用量事件摄取](#集成用量事件摄取)的「防重放」。
 
 ---
 
@@ -1798,9 +1799,123 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
   有不 OK 的币种时摘要只列它们，各一小段、以 `; ` 分隔；都 OK 时列每个币种。
 - 摘要只有计数、日期与币种，**不含租户、金额（汇率本身也不写）或任何个人数据**。
 - 维度查询是普通读、不拿 `fx_rate_locks`：告警只是提示，不让汇率发布等它。
-- 以后的维度（幂等冲突、定价错误、汇率错误、未知模型、负余额、outbox 积压）追加到注册表里，行格式不变。
+- 以后的维度（定价错误、汇率错误、未知模型、负余额、outbox 积压）追加到注册表里，行格式不变。
 
 | 维度 | 何时 `P2` | 摘要 |
 | --- | --- | --- |
 | `fx_fetch` | 某个配置币种在最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT`、`NO_NEW_QUOTE`、`NO_QUOTE_FOR_DATE` 都算成功），且至少有一条 `FAILED` —— 即连续 3 天拉取失败。72 小时内一条记录都没有是 OK（从未运行或 Beat 停了，由 `fx_stale` 报） | `P2`：`USD no successful fetch in 72 hours (3 failed)`；OK：`USD last success <吉隆坡日期>` 或 `USD no fetch in 72 hours` |
 | `fx_stale` | 某个配置币种**此刻生效**的版本（与 `resolve_fx_rate` 同一条件）的报价日距今**超过 5 个日历日**（吉隆坡日期相减；BNM 版本用报价日，手工录入用 `observed_at` 的吉隆坡日期）；或此刻没有生效的版本（包括只有未来的预约） | `P2`：`USD quoted 2026-09-24 (6 calendar days)` 或 `USD no rate in effect`；OK：`USD quoted 2026-09-29 (1 calendar day)` |
+| `usage_event_conflicts`（AIH-TASK-029） | 最近 24 小时（含恰好 24 小时前）记下了任何一条用量事件幂等冲突（`usage_event_conflicts` 的行；同一冲突请求重发不加行） | `P2`：`2 conflicts in 24 hours, earliest 2026-09-30T04:30:00Z`（条数与其中最早一条的 UTC 时刻）；OK：`no conflicts in 24 hours` |
+
+---
+
+## 集成：用量事件摄取
+
+设计依据：设计闸门 #176（[AIH-TASK-029-usage-ingest.md](design/AIH-TASK-029-usage-ingest.md) v8 第 2 节）。
+实现在 `app/api/integration_usage.py`、`app/services/usage_ingest.py`（单条处理是 `ingest_one`，批量端点复用它）
+与 `app/core/nonce.py`。spec §20、§23、§37。
+
+`POST /api/v1/integration/usage-events` 收一个用量事件。**只接受集成签名认证**（[集成请求签名](#集成请求签名)）：不读
+`Authorization`，管理员会话在这里等于没带签名。`202` 的意思是事件已经**持久**落库（状态 `RECEIVED`），不是已经计费：
+定价与扣费异步进行（REQ-INGEST-001）。本端点不计费、不入队；没有批量端点（另一个任务）。
+
+### 请求头
+
+[集成请求签名](#集成请求签名)的五个头，另加两条格式规则（不符一律 401）：
+
+| 请求头 | 规则 |
+| --- | --- |
+| `X-Acuven-Request-Id` | `^[A-Za-z0-9._:-]{1,128}$`。⚠️ **每一次 HTTP 尝试都必须换一个新值，重试也要换**（时间戳本来就每次重新生成）：同一个值第二次出现就是重放，401 |
+| `X-Acuven-Key-Version` | 十进制正整数，不补零 |
+| `X-Acuven-Api-Key` | 1–64 个 `[A-Za-z0-9_]` 字符（签发的 key 是 `ak_` 加 32 个十六进制字符） |
+
+签名覆盖**原始请求体字节**的 SHA-256：服务端先按原始字节验签、再解析 JSON。请求体发出去之后不要再改写
+（重新序列化、加空格都会让签名失效）。
+
+### 防重放
+
+验签**通过之后**，服务端在 Redis 里写 `SET nonce:{api_key}:{X-Acuven-Request-Id} 1 NX PXAT (时间戳 + 300) × 1000`：
+键已存在 → 401。时间戳出窗的请求在验签时就被拒，不查 Redis。Redis 不可用（连不上、200 ms 超时、没配置）时
+**放行**并在服务端记一条 `WARNING`（`nonce_store_unavailable`）：财务上的安全网是 `event_id` 的全局唯一约束，
+被重放的请求最多得到一次「合法重复」。
+
+### 请求体
+
+JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JSON 的 `true` 不是整数，`1.0` 不是整数，数字不是字符串。
+客户计算的费用、成本以及任何 prompt / 回复内容都不是字段，出现即 422（spec §11）。
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `schema_version` | 是 | 只接受 `"1.0"`；别的字符串 422 `UNSUPPORTED_SCHEMA_VERSION`，不是字符串 422 `VALIDATION_ERROR` |
+| `event_id` | 是 | **UUIDv7 或 ULID 的规范写法**：UUIDv7 = 小写带连字符的 36 字符，`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`；ULID = 26 个大写 Crockford base32 字符，`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`。大写的 UUID、小写的 ULID、别的版本的 UUID 都是 422。全局唯一，按字节比较 |
+| `request_id` | 是 | AI 调用的 id，`^[A-Za-z0-9._:-]{1,128}$` |
+| `conversation_id` | 否 | 同上；可为 `null` |
+| `tenant_id` / `project_id` | 否 | 只作诊断：给出时必须等于凭据所属客户 / 项目的 `public_id`，否则 403。最长 64 个字符（更长 422） |
+| `provider` | 是 | `^[a-z0-9][a-z0-9_-]{0,63}$` |
+| `model` | 是 | `^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$`。目录里没有的模型照收，由计费侧标 `MODEL_UNKNOWN` |
+| `usage_type` | 是 | 必须是某个计量类型的 `code`（[AI 目录](#ai-目录计量类型供应商模型与别名)，停用的照收）。不在目录里：409 `UNKNOWN_USAGE_TYPE`，`retryable = true` |
+| `input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` | 按形态 | `LLM_TOKEN_FIELDS` 类型：四个都必填，JSON 整数，0 ≤ n ≤ 10^12；`QUANTITY` 类型：一个都不许出现（`null` 也不行） |
+| `quantity` | 按形态 | `QUANTITY` 类型：必填，JSON **字符串**，`^[0-9]{1,12}(\.[0-9]{1,8})?$`；类型的数量是整数（`INTEGER`）时不许有小数部分（`"3.0"` 也拒绝）。`LLM_TOKEN_FIELDS` 类型：不许出现 |
+| `unit` | 按形态 | `QUANTITY` 类型：必填，必须**逐字等于**该类型的 `unit`（区分大小写）。`LLM_TOKEN_FIELDS` 类型：不许出现 |
+| `occurred_at` | 是 | RFC 3339，必须带时区（`Z` 或 `±hh:mm`），最多 6 位小数秒，换算成 UTC。晚于服务端当前时刻**超过** 300 秒：422 `OCCURRED_AT_IN_FUTURE`；没有过去的下限 |
+
+**校验顺序**（决定一个请求报哪个码）：① 请求体大小 → ② 请求头、凭据与签名 → ③ nonce → ④ JSON 语法、顶层结构、
+字段名与各字段的类型和格式 → ⑤ `schema_version` → ⑥ 查 `usage_type`（不在目录里即 409，不再往下）→ ⑦ 按该类型的
+形态校验字段组、`unit`、整数数量 → ⑧ `occurred_at` 的未来上界 → ⑨ `tenant_id` / `project_id` 比对。未知的
+`usage_type` 因此永远报 `UNKNOWN_USAGE_TYPE`，不会先因为字段组被判成 `VALIDATION_ERROR`。
+
+### 响应
+
+| 情形 | HTTP | `data` |
+| --- | --- | --- |
+| 新事件，已持久接收 | 202 | `{"event_id", "status": "accepted", "processing_status": "RECEIVED"}` |
+| 同一事件再发，尚未处理完 | 200 | `{"event_id", "status": "already_received", "processing_status": <当前状态>}` |
+| 同一事件再发，已处理 | 200 | `{"event_id", "status": "already_processed", "processing_status": "PROCESSED"}` |
+
+「同一事件」= 同一个 `event_id`，归属（客户、项目、`api_key`）相同，指纹也相同。指纹按规范化之后的内容算：
+`"37.42"` 与 `"37.420"`、`…Z` 与等价的 `+08:00` 写法是同一个事件；`tenant_id` / `project_id` 不参与。同一个
+`api_key` 的新 `key_version`（轮换重叠期内）重发同一事件是合法重复，不是冲突。成功响应不带 `retryable`。
+
+### 错误与 `retryable`
+
+集成端点的**每一个**错误响应都在信封顶层多带一个布尔 `retryable`（包括框架自己的 404 / 405 / 422 与意外的 500）。
+**集成方只看 `retryable` 决定是否重试，不按 HTTP 状态码推断**：同一个 409 里既有该重试的、也有不该重试的。
+这是对[信封](#信封spec-107)的只增扩展，只用在 `/api/v1/integration/` 下，别的接口不变。
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": { "code": "UNKNOWN_USAGE_TYPE", "message": "usage_type is not a known meter type." },
+  "retryable": true,
+  "request_id": "7d3c0b8e-..."
+}
+```
+
+| HTTP | `error.code` | 什么时候 | `retryable` | 客户端该做什么 |
+| --- | --- | --- | --- | --- |
+| 401 | `INTEGRATION_AUTH_FAILED` | 请求头缺失或格式不对、凭据不存在 / 已吊销 / 已过期、签名错、时间戳出窗、Request-Id 重放 —— **一律同一个码**，原因只进服务端日志 | `false` | 停止重试该事件，进死信（保留）并告警；修好凭据、时钟或 Request-Id 生成后人工重投 |
+| 403 | `CREDENTIAL_SCOPE_MISMATCH` | 载荷里的 `tenant_id` / `project_id` 不是凭据所属的（服务端另写一条审计） | `false` | 死信并告警 |
+| 409 | `IDEMPOTENCY_CONFLICT` | 同一 `event_id`、归属或指纹不同。原事件不变；响应不透露原事件的任何信息 | `false` | 死信并告警 |
+| 409 | `UNKNOWN_USAGE_TYPE` | `usage_type` 不在目录里 | `true` | 保留事件，退避重试；管理员建好类型后自然成功 |
+| 413 | `PAYLOAD_TOO_LARGE` | 请求体超过 16 KiB（应用）或 1 MiB（nginx，见下） | `false` | 死信并告警 |
+| 422 | `VALIDATION_ERROR` / `UNSUPPORTED_SCHEMA_VERSION` / `OCCURRED_AT_IN_FUTURE` | 见上表。`message` 只列字段名，不回显值 | `false` | 死信并告警 |
+| 500 | `INTERNAL_ERROR` | 意外错误（含提交失败）；事件没有落库 | `true` | 退避重试 |
+| 503 | `SERVICE_UNAVAILABLE` | 数据库不可用或未配置（主密钥未配置同样） | `true` | 退避重试 |
+
+框架自己的 404 / 405（`HTTP_ERROR`）同样带 `retryable`：4xx 为 `false`。
+
+**超大请求在 nginx 就被拒**：`/api/v1/integration/` 前缀的上限是 1 MiB，超过时 nginx 直接返回 413，正文是同一个
+信封（`PAYLOAD_TOO_LARGE`、`retryable: false`），其中 **`request_id` 为 `null`** —— 请求没有到达应用，没有应用侧的
+请求 id。1 MiB 以内、超过 16 KiB 的由应用返回同一个码，`request_id` 照常有值。
+
+### 写了什么
+
+- 新事件：一行 `usage_events`（`RECEIVED`），归属（客户、项目、凭据行）**只来自凭据**，载荷里的诊断 id 从不写入。
+- 冲突：一行 `usage_event_conflicts`（同一 `event_id` + 请求方 `api_key` + 指纹只记一次）与一条审计
+  `USAGE_EVENT_IDEMPOTENCY_CONFLICT`（`entity_type = usage_event`，`entity_id` = 原事件的 `public_id`；
+  `after_state` 只有 `event_id`、请求方的 `api_key` 与 `key_version`、不符类型）。原事件一个字节都不改。
+- 归属不符：只写一条审计 `USAGE_EVENT_SCOPE_MISMATCH`（`entity_type = integration_credential`，`entity_id` =
+  `api_key`；`after_state` 只有 `key_version`、`event_id`、载荷给的两个 id 与凭据实际的两个 `public_id`），
+  在独立事务里提交。
+- 成功（202 / 200）之后，凭据的 `last_used_at` 在独立短事务里节流更新：每个凭据版本每 60 秒至多写一次。

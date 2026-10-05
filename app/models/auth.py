@@ -194,6 +194,12 @@ class AuditAction(enum.StrEnum):
     FX_RATE_DISCARD = "FX_RATE_DISCARD"
     FX_RATE_PUBLISH = "FX_RATE_PUBLISH"
     FX_RATE_RETIRE = "FX_RATE_RETIRE"
+    # AIH-TASK-029（设计闸门 #176）：写入方都是 app/services/usage_ingest.py，
+    # 操作者为空（系统）。归属不符在独立事务里写（随后 403）；冲突与冲突行同一事务，
+    # 撞去重约束时不写。两个都不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，
+    # 记在 PR 描述里。内容里没有载荷。
+    USAGE_EVENT_SCOPE_MISMATCH = "USAGE_EVENT_SCOPE_MISMATCH"
+    USAGE_EVENT_IDEMPOTENCY_CONFLICT = "USAGE_EVENT_IDEMPOTENCY_CONFLICT"
 
 
 class AuditLog(Base):
