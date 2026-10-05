@@ -1851,6 +1851,111 @@ reprocess，不在这里。
 
 ---
 
+## 管理端用量事件：查询
+
+spec §61「Usage Management」与 §89 的管理端用量查询（AIH-TASK-034）。不走设计闸门：只读，不碰钱、状态机、摄取、认证与
+webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_events.py` 与 `app/schemas/usage_events.py`。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/usage-events` | 200，`Page[事件列表项]` | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/admin/usage-events/{usage_event_id}` | 200，事件详情 | 401 / 403 / 404 / 500 / 503 |
+
+- 只有 ADMIN 能调（处理函数第一条语句就是鉴权）。路径里的 `usage_event_id` 是事件的 `public_id`。
+- 只读：不写任何行，也不写审计（与审计日志查询一样）。
+- **成本、计费额与毛利只出现在这两个管理端接口里**（INV-7）。响应不含内部自增 id、对话内容、签名或凭据 secret；
+  对外的引用一律是 `public_id`。
+
+### 列表的查询参数
+
+全部可选，省略即不筛，多个条件取 AND。分页照「分页（spec §108）」；按事件的内部 id **倒序**（≈ 最新接收的在前）。
+
+| 参数 | 规则 |
+| --- | --- |
+| `customer_id` | 客户的 `public_id`。不存在时是空页（`total` 为 0），不报 404 |
+| `project_id` | 项目的 `public_id`。不存在、或与 `customer_id` 不属同一客户时是空页 |
+| `conversation_id` / `request_id` | 与上报值逐字节比较。`request_id` 只在客户内有意义：不同客户可以上报同一个值，单独按它筛会把它们都列出来 |
+| `provider` / `model` | 与上报的**原始字符串**（`provider_code_raw` / `model_code_raw`）逐字节比较，模型未知的事件也筛得到 |
+| `occurred_from` / `occurred_to` | RFC 3339、**必须带时区**、整秒；换成 UTC 后按 `occurred_at` 取 `[occurred_from, occurred_to)`（含起点、不含终点）；`occurred_from` 必须早于 `occurred_to` |
+| `status` | spec §83 的九个取值之一，其余取值 422 |
+| `error_code` | 与事件的 `error_code` 逐字比较 |
+| `page` / `page_size` | 见「分页」 |
+
+`status` 与分页在鉴权**之前**校验（不合法就 422，与其他列表接口一致）；时间格式与区间在鉴权**之后**判，同样是 422
+`VALIDATION_ERROR`，文案只列字段名、不回显值。未知的查询参数不报错。
+
+用到的索引（迁移 0017 / 0018，本任务不加迁移）：客户 → `ix_usage_events_tenant_id`，项目 → `ix_usage_events_project_id`，
+会话 → `ix_usage_events_conversation_id`，请求 → `ix_usage_events_request_id`，状态（可带时间段）→
+`ix_usage_events_status_occurred`，只有时间段 → `ix_usage_events_occurred_at`。`provider` / `model` / `error_code` 没有
+专门的索引：与上面任一条件同用时是残余过滤；单独使用时按主键倒序扫描取一页，`total` 的 `COUNT` 要扫全表。
+
+### 列表项
+
+```json
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "event_id": "00000000-0000-7000-8000-000000000001",
+  "customer_id": "00000000-0000-4000-8000-000000000002",
+  "customer_company_name": "Fictional Sdn Bhd",
+  "project_id": "00000000-0000-4000-8000-000000000003",
+  "request_id": "call-1",
+  "conversation_id": null,
+  "provider": "openai",
+  "model": "whisper-x",
+  "usage_type": "AUDIO_SECOND",
+  "input_tokens": null,
+  "output_tokens": null,
+  "cache_creation_input_tokens": null,
+  "cache_read_input_tokens": null,
+  "quantity": "2.00000000",
+  "unit": "SECOND",
+  "status": "PROCESSED",
+  "error_code": null,
+  "occurred_at": "2026-09-29T09:30:00",
+  "received_at": "2026-09-29T08:30:00",
+  "processed_at": "2026-09-29T10:30:00",
+  "billable_cost": "0.12500000",
+  "estimated_provider_cost_myr": "0.06250000"
+}
+```
+
+- `id` 是事件的 `public_id`；`event_id` 是集成方上报的幂等键；`customer_id` / `project_id` 是 `public_id`。
+- `provider` / `model` 是上报的原始字符串；`usage_type` 是计量类型代码。
+- `LLM_TOKEN_FIELDS` 形态四个 token 数是整数、`quantity` 为 null；`QUANTITY` 形态相反。`quantity` 与金额一样是 8 位小数的字符串。
+- `occurred_at` 保留上报的小数秒（存在时）；其余时间整秒。全部是不带时区的 UTC。
+- `billable_cost`（含税、从钱包扣的额）与 `estimated_provider_cost_myr` 是 8 位小数的字符串；未计费的事件为 null。
+
+### 详情
+
+列表项的全部字段，再加：
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version` / `payload_shape` / `quantity_kind` / `payload_fingerprint` | 摄取时记下的载荷版本、形态、数量类型与指纹 |
+| `error_message` | 计费失败时 worker 记下的异常类型名（只是类型名，不含载荷）；否则 null |
+| `created_at` | 行的写入时刻 |
+| `provider_ref_id` / `model_ref_id` | 计费 worker 解析出的供应商、模型的 `public_id`（§79 的目录引用）；模型未知或未处理时 null |
+| `provider_price_version_id` / `pricing_rule_id` / `fx_rate_version_id` | 计费所用价格版本、定价规则、汇率版本的 `public_id`；MYR 原币时 `fx_rate_version_id` 为 null |
+| `fx_rate_applied` | 所用汇率原值（去掉尾零的精确十进制字符串，与汇率版本对象一致）；MYR 原币时 null |
+| `provider_source_currency` / `provider_source_cost` | 原币币种与原币成本（8 位小数） |
+| `gross_margin` / `gross_margin_basis` | 毛利 = `billable_cost − estimated_provider_cost_myr`（可为负），`basis` 恒为 `"estimated"`：V1 没有对账成本（spec §14）。未计费时两者都为 null |
+| `wallet_transaction` | 那一行 `AI_USAGE` 账本：`{"id": public_id, "amount": "-0.12500000"}`（金额 = −计费额）；0 元事件与未计费事件为 null |
+| `attempt_count` / `next_attempt_at` | 认领次数与最早再认领时刻 |
+| `claim_token` / `claimed_at` / `lease_expires_at` | 当前认领的防护令牌与租约；只有 `PROCESSING` 时非空 |
+| `conflicts` | 撞了这个 `event_id` 的冲突请求，按写入顺序：`[{"api_key", "mismatch", "received_at"}]`（`api_key` 是请求方的公开 key，`mismatch` 是 `OWNERSHIP` / `FINGERPRINT` / `BOTH`）；没有时 `[]` |
+
+错误状态的事件没有快照：价格、规则、汇率、成本、计费额、毛利与账本行全为 null（已解析到的 `provider_ref_id` /
+`model_ref_id` 照样给出，方便管理员看缺什么）。
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 404 | `USAGE_EVENT_NOT_FOUND` | 详情：路径里的事件不存在 |
+| 422 | `VALIDATION_ERROR` | 列表：`status` 不是九个取值之一、分页越界、时间不带时区 / 带小数秒 / 不是合法时间、`occurred_from` 不早于 `occurred_to` |
+
+---
+
 ## 管理端用量事件：重新入队
 
 设计依据：设计闸门 #181 `APPROVED: design v2`，全文见

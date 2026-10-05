@@ -164,6 +164,8 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", PRICING_PREVIEW_ROUTE),
     ("POST", USAGE_EVENTS_ROUTE + "/requeue"),
     ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"),
+    ("GET", USAGE_EVENTS_ROUTE),
+    ("GET", USAGE_EVENTS_ROUTE + "/{usage_event_id}"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
