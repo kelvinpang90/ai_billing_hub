@@ -10,6 +10,7 @@ from app.api.admin_ai_catalog import router as admin_ai_catalog_router
 from app.api.admin_audit import router as admin_audit_router
 from app.api.admin_customers import router as admin_customers_router
 from app.api.admin_fx_rates import router as admin_fx_rates_router
+from app.api.admin_pricing_preview import router as admin_pricing_preview_router
 from app.api.admin_pricing_rules import router as admin_pricing_rules_router
 from app.api.admin_provider_prices import router as admin_provider_prices_router
 from app.api.auth import router as auth_router
@@ -61,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_provider_prices_router)
     app.include_router(admin_pricing_rules_router)
     app.include_router(admin_fx_rates_router)
+    app.include_router(admin_pricing_preview_router)
     # 集成方的签名接口：错误信封多一个顶层 `retryable`（app/core/errors.py）。
     app.include_router(integration_usage_router)
     # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。

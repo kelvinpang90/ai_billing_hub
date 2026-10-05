@@ -87,7 +87,7 @@ ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
 # 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态、
 # AIH-TASK-022 的审计日志查询、AIH-TASK-025 的十五个 AI 目录接口、AIH-TASK-026 的七个供应商价格
-# 接口、AIH-TASK-027 的七个定价规则接口、AIH-TASK-041 的八个汇率接口。
+# 接口、AIH-TASK-027 的七个定价规则接口、AIH-TASK-041 的八个汇率接口、AIH-TASK-031 的试算接口。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
@@ -103,6 +103,7 @@ RULES_ROUTE = "/api/v1/admin/pricing-rules"
 RULE_ROUTE = RULES_ROUTE + "/{rule_id}"
 FX_RATES_ROUTE = "/api/v1/admin/fx-rates"
 FX_RATE_ROUTE = FX_RATES_ROUTE + "/{fx_rate_id}"
+PRICING_PREVIEW_ROUTE = "/api/v1/admin/pricing-preview"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -159,6 +160,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", FX_RATE_ROUTE + "/publish"),
     ("POST", FX_RATE_ROUTE + "/retire"),
     ("POST", FX_RATE_ROUTE + "/discard"),
+    ("POST", PRICING_PREVIEW_ROUTE),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -242,6 +244,17 @@ VALID_BODIES = {
     ("POST", FX_RATE_ROUTE + "/publish"): {},
     ("POST", FX_RATE_ROUTE + "/retire"): {"reason": "Probe"},
     ("POST", FX_RATE_ROUTE + "/discard"): {},
+    # 试算（AIH-TASK-031）：只读，漏了鉴权也不会写库；请求体用预置的目录（PROBE 类型是 QUANTITY、
+    # 单位 UNIT），保证 422 不会先于 401 / 403 出现。客户 id 是全零占位值。
+    ("POST", PRICING_PREVIEW_ROUTE): {
+        "customer_id": PROBE_CATALOG_ID,
+        "provider": "probe",
+        "model": "probe-model",
+        "usage_type": "PROBE",
+        "quantity": "1",
+        "unit": "UNIT",
+        "occurred_at": "2026-09-29T04:00:00Z",
+    },
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
