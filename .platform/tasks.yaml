@@ -2314,7 +2314,7 @@ tasks:
     title: 计价引擎与管理端试算预览接口
     purpose: >-
       按 docs/design/AIH-TASK-031-pricing-engine.md（设计闸门 #179 已批准 v1）实现计价：专用 50 位 Decimal 上下文下的纯函数 price_event（MARKUP / FIXED_RATE、各存储值从未舍入值只舍入一次、MYR 原币不查汇率）、resolve_charge_inputs（按 025 / 026 / 027 / 028 的契约取模型、价格、汇率、规则与锁，错误按顺序给细分码）、reprice_from_snapshot，以及只读的 POST /api/v1/admin/pricing-preview。无迁移、不写库。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-039
     acceptance_criteria:
