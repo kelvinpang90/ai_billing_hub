@@ -2512,7 +2512,7 @@ tasks:
       - 列表项字段：事件 public_id、event_id、客户 public_id 与公司名、项目 public_id、provider / model 原始字符串、usage_type、各数量、status、error_code、occurred_at、received_at、processed_at、billable_cost、estimated_provider_cost_myr；金额为 8 位定点字符串（沿用 money_text）
       - '详情额外包含：全部 §14 / §79 快照、价格版本 / 规则 / 汇率版本的 public_id、fx_rate_applied、毛利（billable_cost − estimated_provider_cost_myr，标明 basis = estimated）、账本行的 public_id 与金额（若有）、attempt_count、claim 字段、该 event_id 的冲突记录（请求方 api_key、mismatch、received_at）'
       - 响应不含内部自增 id、载荷之外的任何内容、签名或凭据 secret；成本与毛利只在管理端（INV-7）
-      - 每个处理函数第一条语句 require_admin，加进 EXPECTED_ADMIN_ROUTES；匿名 401、CUSTOMER 403
+      - 每个处理函数第一条语句 require_admin，加进 EXPECTED_ADMIN_ROUTES；匿名 401、CUSTOMER 403；tests/backend/test_usage_requeue_api.py 只更新钉死该文件恰有两个处理函数的计数（改为 4）与恰为两条 requeue 路径的集合断言（只比对含 requeue 的路径），保留不出现 reprocess 的检查
       - 测试：每个筛选条件单独与组合；分页与排序；时间段边界（半开、带时区换算）；详情各字段（MYR 原币时汇率字段为空、0 元事件无账本行、错误事件无快照）；客户隔离（筛选 A 不返回 B）；越权；uuid 用全零占位值
       - docs/api.md 记两个接口
       - 不改迁移、模型与任何写路径；不装依赖；不改 .platform/
@@ -2523,6 +2523,7 @@ tasks:
       - app/repositories/usage_events.py
       - tests/backend/test_admin_usage_events_api.py
       - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_usage_requeue_api.py
       - docs/api.md
       - docs/TODO.md
     # MXC 里能跑的五项；tests.backend 只在 CI。
