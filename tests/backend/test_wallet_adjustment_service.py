@@ -131,7 +131,12 @@ def _clean(engine: Engine) -> None:
     """⚠️ 库是共享的，每个用例前后都清场（与 test_wallet_repository.py 同一做法）。"""
     with engine.begin() as connection:
         # 账本拒绝 DELETE，只能 TRUNCATE；有账本行的钱包删不掉。
-        connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        # 0018 起 usage_events 有外键引用账本：被引用的表要关掉外键检查才能 TRUNCATE。
+        connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        try:
+            connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        finally:
+            connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
         # 审计表同理：0010 的触发器拒绝 DELETE，TRUNCATE 是 DDL、不经触发器。
         connection.execute(text("TRUNCATE TABLE audit_logs"))
     with engine.begin() as connection:

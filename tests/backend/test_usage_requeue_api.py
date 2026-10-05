@@ -710,7 +710,9 @@ def test_every_handler_starts_with_require_admin() -> None:
 
 
 def test_the_paths_say_requeue_not_reprocess(app) -> None:
-    paths = {route.path for route in app.routes if "usage-events" in getattr(route, "path", "")}
+    # ⚠️ 不读 `app.routes`：子路由延迟挂载，顶层只有壳子（见 test_admin_customers_api.py 的
+    # admin_routes）；OpenAPI 文档里能看到这两个接口。摄取端点也带 usage-events，只看管理端。
+    paths = {path for path in app.openapi()["paths"] if "/admin/usage-events" in path}
 
     assert paths == {SINGLE, BULK}
     assert not any("reprocess" in path for path in paths)

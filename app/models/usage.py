@@ -427,7 +427,9 @@ class UsageEvent(Base):
         Index("ix_usage_events_price_version_id", "provider_price_version_id"),
         Index("ix_usage_events_pricing_rule_id", "pricing_rule_id"),
         Index("ix_usage_events_fx_rate_version_id", "fx_rate_version_id"),
-        CheckConstraint(PROCESSED_SNAPSHOT_CHECK, name="ck_usage_events_processed_snapshot"),
+        # 只在 MySQL 上建：SQLite 上的既有摄取测试直接把事件改成 PROCESSED、不带快照
+        # （test_usage_ingest_api.py）；MySQL 上的覆盖在 test_usage_billing_concurrency.py。
+        _mysql_only_check(PROCESSED_SNAPSHOT_CHECK, "ck_usage_events_processed_snapshot"),
         CheckConstraint(PROCESSED_LEDGER_CHECK, name="ck_usage_events_processed_ledger"),
         CheckConstraint(UNPROCESSED_LEDGER_CHECK, name="ck_usage_events_unprocessed_ledger"),
         CheckConstraint(BILLABLE_COST_CHECK, name="ck_usage_events_billable_cost"),
