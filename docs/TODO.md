@@ -52,7 +52,8 @@
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
-- 待登记：Phase 4 客户认证与客户门户登录（需设计闸门）
+- 待登记：定价规则加项目作用域：同一客户的 AI Chatbot 与 AI API 分开定价，约定一个项目对应一条产品线下的一个模块（改 spec §16 的解析顺序，需设计闸门；2026-10-09 Kelvin：要分开）
+- 待登记：Phase 4 客户认证与客户门户登录（需设计闸门；2026-10-09 Kelvin：用计费平台自己的门户，不嵌入将来的统一门户）
 - 待登记：Phase 4 客户仪表盘与钱包页
 - 待登记：Phase 4 支付网关适配器与支付 Webhook（需设计闸门，依赖 D6）
 - 待登记：Phase 4 stale payment 对账与金额不符人工复核（需设计闸门）
