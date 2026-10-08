@@ -38,6 +38,7 @@
 - 待登记：Phase 4 前重新评估 Email 传输（事务邮件服务、退信与投诉抑制）｜阻塞：等 Kelvin 拍板
 
 ### 后续计划
+- 待登记：Phase 3 服务状态同步：出站状态 webhook 投递与重试，加 §30 周期对账查询（#236 的 effective-status 缺 `integration_status` / `reason_code`），acuven_ai_api 随之从每次实时查询改为本地版本化状态（需设计闸门，依赖 webhook 密钥表；2026-10-09 Kelvin：现在排，先写设计闸门）
 - 待登记：在生产 VPS 上对 billing_perf 运行 scripts/perf_usage.py（S1–S4），结果回填 docs/perf-baseline.md 第 10 节；判为需要方案 C 时另开任务并过设计闸门（运维，管理员执行）
 - 待登记：供应商价格版本的数据库兜底：起点为空只许在该（供应商, 模型）没有区间非空的已发布版本时出现、改为 `RETIRED` 必须同时写 `effective_to`（026 记录的后续，新迁移，需设计闸门）
 - 待登记：管理端前端：出站 webhook 签名密钥的签发、启用与退役
@@ -49,11 +50,10 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
-- 待登记：Phase 3 出站服务状态 webhook 投递与重试（需设计闸门，依赖 webhook 密钥表）
-- 待登记：Phase 3 服务状态查询接口，供集成方周期对账（需设计闸门）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
-- 待登记：Phase 3 ai_chatbot_demo 试点接入（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目）
-- 待登记：Phase 4 客户认证与客户门户登录（需设计闸门）
+- 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
+- 待登记：定价规则加项目作用域：同一客户的 AI Chatbot 与 AI API 分开定价，约定一个项目对应一条产品线下的一个模块（改 spec §16 的解析顺序，需设计闸门；2026-10-09 Kelvin：要分开）
+- 待登记：Phase 4 客户认证与客户门户登录（需设计闸门；2026-10-09 Kelvin：用计费平台自己的门户，不嵌入将来的统一门户）
 - 待登记：Phase 4 客户仪表盘与钱包页
 - 待登记：Phase 4 支付网关适配器与支付 Webhook（需设计闸门，依赖 D6）
 - 待登记：Phase 4 stale payment 对账与金额不符人工复核（需设计闸门）
@@ -276,7 +276,9 @@
 
 ## Phase 3 — Integrated Application Backend 试点（§126）
 
-试点目标：`E:\projects\ai_chatbot_demo`。**扩展它现有的窄接口，不要推倒重来**（§3.3）。
+试点目标：`acuven_ai_api`（2026-10-09 Kelvin 拍板，替换原定的 `ai_chatbot_demo`）。它已经有本地 outbox、独立投递 worker、HMAC 用量客户端和 `effective-status` 查询，接的是生产上的 Acuven 内部计量租户；项目群定了 `ai_chatbot_demo` 只做演示，不当第一条真实计费链路。
+
+`ai_chatbot_demo` 仍然接入，用量进同一个内部租户下的独立项目（与 AI API 的项目分开，参考价统计才不混）。AI API 没有会话，下面「OpenAI 转写用量」与「`conversation_id` + 完整会话生命周期」两项归 `ai_chatbot_demo`（以后是 `acuven_aichat`）验收；其余各项以 `acuven_ai_api` 验收。在 `ai_chatbot_demo` 里改时仍然**扩展它现有的窄接口，不要推倒重来**（§3.3）。
 
 - [ ] 供应商用量提取层
 - [ ] Anthropic 用量
@@ -297,6 +299,8 @@
   - ADR-0010：试点观测项加「每次停机时的余额（透支了多少）」，透支明显时再按新 ADR 评估提前停机
 
 **验收**：计费平台离线时 Claude 仍能回复 · 用量落本地 · 计费恢复后补投积压 · 无重复扣费 · 停机后不再发起 AI 调用 · 复机后恢复服务
+
+**扣费路径另验**：内部计量租户不扣钱包、不按余额停机，验证不了「无重复扣费 · 停机后不再发起 AI 调用 · 复机后恢复服务」三项，也看不到 ADR-0010 要观测的透支额。这三项与透支观测必须再用一个 `PREPAID` 测试租户下的项目跑一遍（例如生产上的测试专用验收租户）；内部租户与 `PREPAID` 两路都通过才算试点成功。
 
 > 试点成功之后才能推广到其他应用。
 

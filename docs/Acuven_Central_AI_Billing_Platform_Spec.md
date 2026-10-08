@@ -222,6 +222,8 @@ OpenAI is currently used for speech transcription without the official SDK.
 
 The first pilot is `E:\projects\ai_chatbot_demo`. It already has request-level Anthropic usage observations and a basic `conversation_id`, but those records are not a durable billing outbox and the conversation lifecycle is incomplete.
 
+**2026-10-09 addendum:** The product owner moved the first Phase 3 pilot to `acuven_ai_api`, which reports usage for Acuven's internal metered-only tenant. `ai_chatbot_demo` stays a demo and still integrates, as a separate project of the same internal tenant; it carries the conversation lifecycle and OpenAI transcription items of §126, which the conversation-less AI API does not have. See `docs/TODO.md` Phase 3. The list below still describes `ai_chatbot_demo`; `acuven_ai_api` already has a local outbox, its own delivery worker, signed usage delivery and a live status query, but no local versioned status or reconciliation.
+
 The pilot currently has:
 
 - no provider-neutral billing usage contract
@@ -4247,6 +4249,8 @@ Queue loss recoverable from database state
 # 126. Phase 3 — Existing Integrated Application Backend
 
 Modify `E:\projects\ai_chatbot_demo` as the first pilot.
+
+**2026-10-09 addendum:** The product owner moved the first Phase 3 pilot to `acuven_ai_api`, which reports usage for Acuven's internal metered-only tenant. `ai_chatbot_demo` stays a demo and still integrates, as a separate project of the same internal tenant; it carries the conversation lifecycle and OpenAI transcription items of §126, which the conversation-less AI API does not have. See `docs/TODO.md` Phase 3. Because the internal tenant is never debited or suspended for balance, the pilot also runs the no-double-debit, suspension and reactivation acceptance on a project of a `PREPAID` test tenant; it succeeds only when both paths pass.
 
 Implement:
 
