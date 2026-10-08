@@ -726,7 +726,7 @@ _SET_SNAPSHOT = (
     " provider_source_currency = :currency, provider_source_cost = 0,"
     " estimated_provider_cost_myr = 0, billable_cost = :billable,"
     " fx_rate_version_id = :fx, fx_rate_applied = :rate, wallet_transaction_id = :ledger,"
-    " processed_at = :now WHERE id = :id"
+    " billing_mode_snapshot = 'PREPAID', processed_at = :now WHERE id = :id"
 )
 
 

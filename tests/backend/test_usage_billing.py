@@ -64,7 +64,7 @@ from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole,
 from app.models.base import Base
 from app.models.integration import CredentialStatus, IntegrationCredential
 from app.models.pricing_rules import PricingScope, PricingStrategy
-from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingMode, BillingStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 from app.repositories import usage_events as event_repository
@@ -719,6 +719,32 @@ def test_an_llm_token_event_on_markup_in_usd_is_billed_once(world) -> None:
         row.event_id,
     )
     assert world.balance(tenant) == OPENING - MARKUP_BILLABLE
+    assert row.billing_mode_snapshot == BillingMode.PREPAID.value
+    assert row.reference_customer_price is None
+
+
+def test_internal_metered_tenant_preserves_both_prices_without_wallet_effect(both) -> None:
+    world = both
+    world.publish_markup_usd()
+    tenant = world.tenant()
+    with world.factory.begin() as session:
+        session.get(Tenant, tenant.id).billing_mode = BillingMode.INTERNAL_METERED_ONLY
+    event_id = world.event(tenant)
+
+    result = world.bill()
+
+    assert (result.claimed, result.outcomes) == (1, {Outcome.PROCESSED: 1})
+    row = world.row(event_id)
+    assert row.billing_mode_snapshot == BillingMode.INTERNAL_METERED_ONLY.value
+    assert row.estimated_provider_cost_myr == ESTIMATED_MYR
+    assert row.reference_customer_price == MARKUP_BILLABLE
+    assert row.billable_cost == 0
+    assert row.wallet_transaction_id is None
+    assert world.usage_rows(tenant) == []
+    assert world.balance(tenant) == 0
+    assert world.tenant_row(tenant).billing_status is BillingStatus.SUSPENDED
+    # A duplicate sweep cannot recalculate or create a wallet charge.
+    assert world.bill(NOW + dt.timedelta(minutes=1)).claimed == 0
 
 
 def test_a_processed_event_is_never_claimed_again(world) -> None:

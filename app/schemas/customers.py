@@ -27,7 +27,7 @@ from pydantic import (
 )
 
 from app.models.base import quantize_money
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import Project, Tenant, ai_service_enabled
 from app.models.wallet import Wallet
 
 # 分页边界（spec §108；设计 §2）。超出范围是 422，不静默截断。`page` 的上限防止
@@ -150,6 +150,14 @@ class ChangeAccountStatusRequest(BaseModel):
     reason: _Reason
 
 
+class EnableInternalMeteringRequest(BaseModel):
+    """One-way, audited conversion before any usage or wallet transaction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: _Reason
+
+
 class WalletView(BaseModel):
     currency: str
     # 恰好 8 位小数的定点字符串，永远不是浮点数。
@@ -166,6 +174,8 @@ class CustomerSummary(BaseModel):
     email: str
     phone: str | None
     billing_status: str
+    billing_mode: str
+    ai_service_enabled: bool
     account_status: str
     status_version: int
     created_at: dt.datetime
@@ -206,6 +216,8 @@ def _customer_fields(tenant: Tenant) -> dict[str, Any]:
         "email": tenant.email,
         "phone": tenant.phone,
         "billing_status": tenant.billing_status.value,
+        "billing_mode": tenant.billing_mode.value,
+        "ai_service_enabled": ai_service_enabled(tenant),
         "account_status": tenant.account_status.value,
         "status_version": tenant.status_version,
         "created_at": tenant.created_at,

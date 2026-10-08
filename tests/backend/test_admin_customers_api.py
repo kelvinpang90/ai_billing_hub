@@ -72,6 +72,8 @@ CUSTOMER_FIELDS = {
     "email",
     "phone",
     "billing_status",
+    "billing_mode",
+    "ai_service_enabled",
     # AIH-TASK-020（设计闸门 #136 v2 §2「客户对象」）。
     "account_status",
     "status_version",
@@ -123,6 +125,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/activate"),
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"),
     ("POST", "/api/v1/admin/customers/{customer_id}/account-status"),
+    ("POST", "/api/v1/admin/customers/{customer_id}/internal-metering"),
     ("GET", "/api/v1/admin/audit-logs"),
     ("GET", METER_TYPES_ROUTE),
     ("POST", METER_TYPES_ROUTE),
@@ -193,6 +196,9 @@ VALID_BODIES = {
     # 新客户是 ENABLED：漏了鉴权的处理函数会真的把它停用，而不是碰巧「没变化」。
     ("POST", "/api/v1/admin/customers/{customer_id}/account-status"): {
         "account_status": "DISABLED",
+        "reason": "Probe",
+    },
+    ("POST", "/api/v1/admin/customers/{customer_id}/internal-metering"): {
         "reason": "Probe",
     },
     # AI 目录（AIH-TASK-025）：预置的行都是 ACTIVE、别名段未截断，所以漏了鉴权的 PATCH 与
@@ -473,6 +479,51 @@ def new_customer(client: TestClient, headers: dict[str, str], **fields: object) 
     response = client.post(CUSTOMERS, json=body, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()["data"]
+
+
+def test_internal_metering_is_one_way_audited_and_ignores_only_balance(client, app, admin) -> None:
+    created = new_customer(client, admin)
+    url = f"{CUSTOMERS}/{created['id']}/internal-metering"
+
+    first = client.post(url, json={"reason": "Acuven internal AI validation"}, headers=admin)
+
+    assert first.status_code == 200, first.text
+    detail = first.json()["data"]
+    assert detail["billing_mode"] == "INTERNAL_METERED_ONLY"
+    assert detail["billing_status"] == "SUSPENDED"
+    assert detail["ai_service_enabled"] is True
+    assert detail["wallet"]["balance"] == "0.00000000"
+    assert detail["status_version"] == created["status_version"] + 1
+    assert len(audits(app, AuditAction.INTERNAL_BILLING_MODE_SET)) == 1
+
+    repeated = client.post(url, json={"reason": "Repeated request"}, headers=admin)
+    assert repeated.status_code == 200
+    assert len(audits(app, AuditAction.INTERNAL_BILLING_MODE_SET)) == 1
+
+    disabled = client.post(
+        f"{CUSTOMERS}/{created['id']}/account-status",
+        json={"account_status": "DISABLED", "reason": "Safety pause"},
+        headers=admin,
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["data"]["ai_service_enabled"] is False
+
+
+def test_internal_metering_refuses_a_tenant_with_issued_credentials(client, app, admin) -> None:
+    created = new_customer(client, admin)
+    project = new_project(client, admin, created["id"])
+    probe_credential(app, project["id"])
+
+    response = client.post(
+        f"{CUSTOMERS}/{created['id']}/internal-metering",
+        json={"reason": "Too late"},
+        headers=admin,
+    )
+
+    assert (response.status_code, error_code(response)) == (409, "INTERNAL_METERING_NOT_ELIGIBLE")
+    detail = client.get(f"{CUSTOMERS}/{created['id']}", headers=admin).json()["data"]
+    assert detail["billing_mode"] == "PREPAID"
+    assert audits(app, AuditAction.INTERNAL_BILLING_MODE_SET) == []
 
 
 def new_project(

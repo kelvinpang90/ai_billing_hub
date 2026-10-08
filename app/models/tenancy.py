@@ -60,6 +60,13 @@ class BillingStatus(enum.StrEnum):
     SUSPENDED = "SUSPENDED"
 
 
+class BillingMode(enum.StrEnum):
+    """How usage affects the wallet. Internal mode is assigned only by controlled provisioning."""
+
+    PREPAID = "PREPAID"
+    INTERNAL_METERED_ONLY = "INTERNAL_METERED_ONLY"
+
+
 class AccountStatus(enum.StrEnum):
     """管理员控制的账户生命周期（spec §24、§56；设计闸门 #136 v2）。
 
@@ -73,6 +80,14 @@ class AccountStatus(enum.StrEnum):
     ENABLED = "ENABLED"
     DISABLED = "DISABLED"
     CLOSED = "CLOSED"
+
+
+def ai_service_enabled(tenant: Tenant) -> bool:
+    """Internal tenants bypass balance suspension, never an admin or safety disable."""
+    return tenant.account_status is AccountStatus.ENABLED and (
+        tenant.billing_mode is BillingMode.INTERNAL_METERED_ONLY
+        or tenant.billing_status is BillingStatus.ACTIVE
+    )
 
 
 # 与迁移 0009 的列宽一致（设计 §2「数据库」）。
@@ -102,6 +117,12 @@ class Tenant(Base):
         nullable=False,
         default=BillingStatus.SUSPENDED,
     )
+    billing_mode: Mapped[BillingMode] = mapped_column(
+        Enum(BillingMode, native_enum=False, length=32),
+        nullable=False,
+        default=BillingMode.PREPAID,
+        server_default=BillingMode.PREPAID.value,
+    )
     # ⚠️ 只经 `app/services/account_status.py` 改变，在租户行锁内与 `status_version`、
     # 审计、outbox 同一事务（INV-13）。已有与新建的租户都是 ENABLED（设计 §9）。
     account_status: Mapped[AccountStatus] = mapped_column(
@@ -126,6 +147,10 @@ class Tenant(Base):
         CheckConstraint(
             "billing_status IN ('ACTIVE', 'SUSPENDED')",
             name="ck_tenants_billing_status",
+        ),
+        CheckConstraint(
+            "billing_mode IN ('PREPAID', 'INTERNAL_METERED_ONLY')",
+            name="ck_tenants_billing_mode",
         ),
         CheckConstraint(
             "account_status IN ('PENDING_ACTIVATION', 'ENABLED', 'DISABLED', 'CLOSED')",

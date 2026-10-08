@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, DomainOutbox, OutboxStatus, User
-from app.models.tenancy import AccountStatus, Tenant
+from app.models.tenancy import AccountStatus, Tenant, ai_service_enabled
 from app.repositories import tenancy
 from app.schemas.customers import CustomerDetail
 from app.services import customers
@@ -152,6 +152,8 @@ def _apply(
         "account_status": wanted.value,
         "previous_account_status": previous.value,
         "billing_status": tenant.billing_status.value,
+        "billing_mode": tenant.billing_mode.value,
+        "effective_status": "ALLOW_AI" if ai_service_enabled(tenant) else "BLOCK_AI",
         "status_version": tenant.status_version,
         "changed_at": now.isoformat(),
     }

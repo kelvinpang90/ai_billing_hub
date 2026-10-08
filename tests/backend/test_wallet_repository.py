@@ -1099,6 +1099,8 @@ def test_crossing_zero_suspends_with_one_audit_and_one_event(factory) -> None:
     assert len(payloads) == 2
     assert payloads[-1] == {
         "billing_status": "SUSPENDED",
+        "billing_mode": "PREPAID",
+        "effective_status": "BLOCK_AI",
         "status_version": 2,
         "reason": REASON_BALANCE_NON_POSITIVE,
         "balance": "-5.00000000",

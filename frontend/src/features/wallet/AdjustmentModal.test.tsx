@@ -58,6 +58,8 @@ function customer(): CustomerDetail {
     email: "ops@example.com",
     phone: null,
     billing_status: "ACTIVE",
+    billing_mode: "PREPAID",
+    ai_service_enabled: true,
     status_version: 3,
     created_at: "2026-09-20T08:30:00",
     updated_at: "2026-09-21T01:02:03",

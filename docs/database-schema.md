@@ -36,6 +36,7 @@
 | `email` | VARCHAR(320) | 非空，**不唯一**（联系邮箱不是登录账号；同一联系人可对应多家公司） |
 | `phone` | VARCHAR(32) | 可空 |
 | `billing_status` | VARCHAR(64) | 非空，默认 `SUSPENDED`，`CHECK IN ('ACTIVE','SUSPENDED')`（AIH-TASK-005） |
+| `billing_mode` | VARCHAR(32) | 非空，默认 `PREPAID`；仅受控初始化可改为 `INTERNAL_METERED_ONLY`（迁移 0019） |
 | `account_status` | VARCHAR(32) | 非空，服务端默认 `'ENABLED'`，`ck_tenants_account_status`：`CHECK IN ('PENDING_ACTIVATION','ENABLED','DISABLED','CLOSED')`；无索引（AIH-TASK-020，迁移 `0009_tenant_account_status`） |
 | `status_version` | BIGINT | 非空，默认 0，`CHECK >= 0`；只增不减，计费与账户两维共用（AIH-TASK-005 / 020） |
 | `low_balance_threshold` | DECIMAL(20,8) | 可空，`CHECK >= 0`；NULL 表示不发低余额事件（AIH-TASK-005） |
@@ -841,6 +842,8 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | `fx_rate_applied` | DECIMAL(24,10) | 可空，MYR 原币时为空；汇率原值（与 `fx_rate_versions.rate` 同精度，不舍入） |
 | `estimated_provider_cost_myr` | DECIMAL(20,8) | 可空；`CHECK IS NULL OR >= 0` |
 | `billable_cost` | DECIMAL(20,8) | 可空；含税（ADR-0008）；`CHECK IS NULL OR >= 0` |
+| `billing_mode_snapshot` | VARCHAR(32) | 可空；处理成功时记录实际模式。迁移 0019 将既有事件标为 `PREPAID` |
+| `reference_customer_price` | DECIMAL(20,8) | 可空；仅内部计量模式成功处理时写未来客户参考售价，不计入钱包或收入 |
 | `wallet_transaction_id` | BIGINT | 可空，**计费额为 0 时为空**；外键 → `wallet_transactions(id)` `RESTRICT`（`fk_usage_events_wallet_transaction`）；唯一（`uq_usage_events_wallet_transaction_id`：一行账本至多对应一个事件） |
 | `attempt_count` | INT | 非空，默认 0；认领时 +1，重新入队清零 |
 | `next_attempt_at` | DATETIME | 可空；失败退避后最早何时再认领（整秒） |

@@ -93,6 +93,8 @@ class UsageEventSummary(BaseModel):
     processed_at: dt.datetime | None
     billable_cost: str | None
     estimated_provider_cost_myr: str | None
+    billing_mode_snapshot: str | None
+    reference_customer_price: str | None
 
 
 class LedgerEntryView(BaseModel):
@@ -171,6 +173,8 @@ def _summary_fields(row: EventListRow) -> dict[str, object]:
         "processed_at": event.processed_at,
         "billable_cost": _decimal_text(event.billable_cost),
         "estimated_provider_cost_myr": _decimal_text(event.estimated_provider_cost_myr),
+        "billing_mode_snapshot": event.billing_mode_snapshot,
+        "reference_customer_price": _decimal_text(event.reference_customer_price),
     }
 
 
@@ -189,7 +193,11 @@ def _conflict_view(conflict: UsageEventConflict) -> UsageEventConflictView:
 def usage_event_detail(row: EventDetailRow) -> UsageEventDetail:
     event = row.listed.event
     margin = None
-    if event.billable_cost is not None and event.estimated_provider_cost_myr is not None:
+    if (
+        event.billing_mode_snapshot != "INTERNAL_METERED_ONLY"
+        and event.billable_cost is not None
+        and event.estimated_provider_cost_myr is not None
+    ):
         margin = money_text(event.billable_cost - event.estimated_provider_cost_myr)
     ledger = None
     if row.ledger_public_id is not None and row.ledger_amount is not None:

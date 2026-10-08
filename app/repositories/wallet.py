@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, OutboxStatus
 from app.models.base import MONEY_PRECISION, MONEY_SCALE
-from app.models.tenancy import BillingStatus, Tenant
+from app.models.tenancy import BillingStatus, Tenant, ai_service_enabled
 from app.models.wallet import (
     ADJUSTMENT_REFERENCE_TYPES,
     CREDIT_TYPES,
@@ -553,6 +553,8 @@ def _apply_billing_status(session: Session, tenant: Tenant, row: WalletTransacti
     )
     payload = {
         "billing_status": wanted.value,
+        "billing_mode": tenant.billing_mode.value,
+        "effective_status": "ALLOW_AI" if ai_service_enabled(tenant) else "BLOCK_AI",
         "status_version": tenant.status_version,
         "reason": reason,
         "balance": _money_text(row.balance_after),

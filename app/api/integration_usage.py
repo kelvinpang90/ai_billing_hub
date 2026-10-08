@@ -19,12 +19,14 @@ import datetime as dt
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from app.api.auth import request_context
 from app.core.logging import current_request_id
+from app.models.tenancy import Project, Tenant, ai_service_enabled
 from app.schemas.envelope import ApiResponse, success
 from app.schemas.usage_ingest import UsageEventBatchReceipt, UsageEventReceipt
 from app.services import usage_ingest
@@ -39,6 +41,72 @@ from app.services.usage_ingest import (
 )
 
 router = APIRouter(prefix="/api/v1/integration", tags=["integration"])
+
+
+class EffectiveServiceStatus(BaseModel):
+    tenant_id: str
+    project_id: str
+    billing_mode: str
+    billing_status: str
+    account_status: str
+    effective_status: str
+    status_version: int
+
+
+def _effective_status(
+    request: Request,
+    factory: sessionmaker[Session],
+    signed: SignedRequest,
+    now: dt.datetime,
+) -> tuple[EffectiveServiceStatus, int]:
+    state = request.app.state
+    credential = usage_ingest.authenticate(
+        factory,
+        state.settings,
+        secret_cache=state.secret_cache,
+        nonce_store=state.nonce_store,
+        request=signed,
+        now=now,
+    )
+    with factory() as session:
+        tenant = session.get(Tenant, credential.tenant_id)
+        project = session.get(Project, credential.project_id)
+        assert tenant is not None and project is not None
+        result = EffectiveServiceStatus(
+            tenant_id=tenant.public_id,
+            project_id=project.public_id,
+            billing_mode=tenant.billing_mode.value,
+            billing_status=tenant.billing_status.value,
+            account_status=tenant.account_status.value,
+            effective_status="ALLOW_AI" if ai_service_enabled(tenant) else "BLOCK_AI",
+            status_version=tenant.status_version,
+        )
+    return result, credential.id
+
+
+@router.get("/effective-status", response_model=ApiResponse[EffectiveServiceStatus])
+async def effective_service_status(request: Request) -> JSONResponse:
+    """HMAC-authenticated live access decision for the credential's tenant and project."""
+    body = await _read_body(request, 0)
+    factory: sessionmaker[Session] | None = getattr(request.app.state, "session_factory", None)
+    if factory is None:
+        raise ServiceUnavailable
+    signed = SignedRequest(
+        method=request.method,
+        path_and_query=_path_and_query(request),
+        body=body,
+        headers=request.headers,
+    )
+    now = utc_now()
+    status, credential_id = await run_in_threadpool(
+        _effective_status, request, factory, signed, now
+    )
+    envelope = success(status, request_id=current_request_id())
+    return JSONResponse(
+        status_code=200,
+        content=envelope.model_dump(),
+        background=BackgroundTask(usage_ingest.record_use, factory, credential_id, now),
+    )
 
 
 async def _read_body(request: Request, limit: int) -> bytes:

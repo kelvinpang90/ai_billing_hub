@@ -60,7 +60,9 @@ CUSTOMER_FIELDS = {
     "email",
     "phone",
     "billing_status",
+    "billing_mode",
     "account_status",
+    "ai_service_enabled",
     "status_version",
     "created_at",
     "updated_at",
@@ -74,6 +76,8 @@ PAYLOAD_FIELDS = {
     "account_status",
     "previous_account_status",
     "billing_status",
+    "billing_mode",
+    "effective_status",
     "status_version",
     "changed_at",
 }
@@ -278,6 +282,8 @@ def test_enabled_disabled_enabled(client, app, admin, admin_id) -> None:
             "account_status": target,
             "previous_account_status": previous,
             "billing_status": "SUSPENDED",
+            "billing_mode": "PREPAID",
+            "effective_status": "BLOCK_AI",
             "status_version": number,
             "changed_at": data["updated_at"],
         }

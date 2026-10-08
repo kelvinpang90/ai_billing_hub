@@ -36,6 +36,8 @@ function summary(overrides: Partial<CustomerSummary> = {}): CustomerSummary {
     email: "ops@example.com",
     phone: null,
     billing_status: "SUSPENDED",
+    billing_mode: "PREPAID",
+    ai_service_enabled: false,
     status_version: 0,
     created_at: "2026-09-20T08:30:00",
     updated_at: "2026-09-20T08:30:00",
