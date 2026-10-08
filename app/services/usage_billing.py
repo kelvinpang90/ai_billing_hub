@@ -52,7 +52,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.database import session_scope
 from app.models.ai_catalog import QUANTITY_FIELD, TOKEN_FIELDS, PayloadShape
-from app.models.tenancy import AccountStatus, Tenant
+from app.models.tenancy import AccountStatus, BillingMode, Tenant
 from app.models.usage import ERROR_MESSAGE_LENGTH, UsageEvent, UsageEventStatus
 from app.models.wallet import ReferenceType, TransactionType
 from app.repositories import ai_catalog as catalog
@@ -290,6 +290,7 @@ def _write_snapshot(
     event: UsageEvent,
     resolution: ChargeResolution,
     charge: ChargeResult,
+    billing_mode: BillingMode,
     wallet_transaction_id: int | None,
     processed_at: dt.datetime,
 ) -> None:
@@ -307,7 +308,13 @@ def _write_snapshot(
     event.provider_source_cost = charge.provider_source_cost
     event.fx_rate_applied = charge.fx_rate_applied
     event.estimated_provider_cost_myr = charge.estimated_provider_cost_myr
-    event.billable_cost = charge.billable_cost
+    event.billing_mode_snapshot = billing_mode.value
+    if billing_mode is BillingMode.INTERNAL_METERED_ONLY:
+        event.billable_cost = Decimal(0)
+        event.reference_customer_price = charge.billable_cost
+    else:
+        event.billable_cost = charge.billable_cost
+        event.reference_customer_price = None
     event.wallet_transaction_id = wallet_transaction_id
     event.status = UsageEventStatus.PROCESSED
     # ADR-0003：入账期间按 `processed_at`（本事务的服务端时刻，整秒）。
@@ -375,7 +382,7 @@ def _process(session: Session, claim: Claim, clock: Clock) -> Outcome:
     # ⑧ 扣费：钱包（X）→ 租户（X）。跃迁、status_version、审计、outbox、低余额事件都在里面。
     processed_at = _seconds(now)
     wallet_transaction_id: int | None = None
-    if charge.billable_cost > 0:
+    if tenant.billing_mode is BillingMode.PREPAID and charge.billable_cost > 0:
         try:
             posted = post_transaction(
                 session,
@@ -403,7 +410,9 @@ def _process(session: Session, claim: Claim, clock: Clock) -> Outcome:
         wallet_transaction_id = posted.transaction.id
 
     # ⑨ 快照、PROCESSED、processed_at、清认领。提交由调用方的 session_scope 做。
-    _write_snapshot(event, resolution, charge, wallet_transaction_id, processed_at)
+    _write_snapshot(
+        event, resolution, charge, tenant.billing_mode, wallet_transaction_id, processed_at
+    )
     return Outcome.PROCESSED
 
 

@@ -42,7 +42,7 @@ from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.integration import CredentialStatus, IntegrationCredential
 from app.models.pricing_rules import PricingScope, PricingStrategy
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import BillingMode, Project, Tenant
 from app.models.usage import ConflictMismatch, UsageEvent, UsageEventStatus
 from app.models.wallet import ReferenceType, TransactionType, WalletTransaction
 from app.repositories import usage_events as event_repository
@@ -111,6 +111,8 @@ SUMMARY_FIELDS = {
     "processed_at",
     "billable_cost",
     "estimated_provider_cost_myr",
+    "billing_mode_snapshot",
+    "reference_customer_price",
 }
 DETAIL_FIELDS = SUMMARY_FIELDS | {
     "schema_version",
@@ -145,6 +147,8 @@ SNAPSHOT_FIELDS = (
     "provider_source_currency",
     "provider_source_cost",
     "estimated_provider_cost_myr",
+    "billing_mode_snapshot",
+    "reference_customer_price",
     "billable_cost",
     "gross_margin",
     "gross_margin_basis",
@@ -853,6 +857,8 @@ def test_list_items_carry_the_documented_fields_only(client, admin, world) -> No
         # 2 s × 0.03125 = 0.0625 MYR; MARKUP 2.
         "billable_cost": "0.12500000",
         "estimated_provider_cost_myr": "0.06250000",
+        "billing_mode_snapshot": "PREPAID",
+        "reference_customer_price": None,
     }
     assert token_item["id"] == token_row.public_id
     assert (token_item["usage_type"], token_item["status"]) == ("LLM_TOKEN", "MODEL_UNKNOWN")
@@ -939,6 +945,38 @@ def test_a_zero_event_has_no_ledger_row(client, admin, world) -> None:
     )
     assert (data["gross_margin"], data["gross_margin_basis"]) == ("0.00000000", "estimated")
     assert data["wallet_transaction"] is None
+
+
+def test_internal_event_displays_reference_price_without_revenue_or_margin(
+    client, admin, world
+) -> None:
+    world.publish()
+    created = customers.create_customer(
+        world.factory,
+        actor=world.admin,
+        company_name="Internal example",
+        email="internal@usage-query-test.example.com",
+        context=CONTEXT,
+        now=T0,
+    )
+    with world.factory() as session:
+        tenant = session.execute(select(Tenant).where(Tenant.public_id == created.id)).scalar_one()
+        tenant.billing_mode = BillingMode.INTERNAL_METERED_ONLY
+        tenant_id = tenant.id
+        session.commit()
+    tenancy = world.project(created.id, tenant_id)
+    event_id = world.event(tenancy)
+    world.bill()
+
+    detail_event = detail(client, admin, world, event_id)
+    assert detail_event["billing_mode_snapshot"] == "INTERNAL_METERED_ONLY"
+    assert detail_event["estimated_provider_cost_myr"] == "0.06250000"
+    assert detail_event["reference_customer_price"] == "0.12500000"
+    assert detail_event["billable_cost"] == "0.00000000"
+    assert detail_event["wallet_transaction"] is None
+    assert (detail_event["gross_margin"], detail_event["gross_margin_basis"]) == (None, None)
+    item = client.get(LIST, headers=admin).json()["data"]["items"][0]
+    assert item["reference_customer_price"] == detail_event["reference_customer_price"]
 
 
 def test_an_error_event_has_no_snapshot(client, admin, world) -> None:

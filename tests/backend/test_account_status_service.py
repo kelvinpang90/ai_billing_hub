@@ -425,6 +425,8 @@ def test_a_transition_writes_state_version_audit_and_a_pending_event(sqlite_fact
         "account_status": "DISABLED",
         "previous_account_status": "ENABLED",
         "billing_status": "SUSPENDED",
+        "billing_mode": "PREPAID",
+        "effective_status": "BLOCK_AI",
         "status_version": 1,
         "changed_at": "2026-09-28T08:35:00",
     }

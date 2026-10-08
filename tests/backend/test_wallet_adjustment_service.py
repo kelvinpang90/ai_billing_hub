@@ -386,6 +386,8 @@ def test_a_credit_across_zero_resumes_billing_in_the_same_transaction(mysql_fact
     [event] = status_events(mysql_factory, public_id)
     assert event == {
         "billing_status": "ACTIVE",
+        "billing_mode": "PREPAID",
+        "effective_status": "ALLOW_AI",
         "status_version": 1,
         "reason": REASON_BALANCE_POSITIVE,
         "balance": "15.00000000",

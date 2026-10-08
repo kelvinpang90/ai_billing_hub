@@ -64,7 +64,7 @@ from app.models.ai_catalog import (
 from app.models.auth import AuditAction, AuditLog
 from app.models.base import Base
 from app.models.integration import CredentialStatus, IntegrationCredential
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import AccountStatus, BillingMode, Project, Tenant
 from app.models.usage import (
     ConflictMismatch,
     UsageEvent,
@@ -76,6 +76,7 @@ from app.services import usage_ingest
 from app.services.integration_auth import canonical_request, credential_aad, sign
 
 PATH = "/api/v1/integration/usage-events"
+STATUS_PATH = "/api/v1/integration/effective-status"
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 ERROR_FIELDS = ENVELOPE_FIELDS | {"retryable"}
 
@@ -383,6 +384,19 @@ def signed_headers(
     }
 
 
+def status_headers(credential: Credential, clock: Clock) -> dict[str, str]:
+    timestamp = str(epoch(clock.now))
+    attempt_id = f"status-{next(_REQUEST_NUMBERS)}"
+    canonical = canonical_request("GET", STATUS_PATH, timestamp, attempt_id, b"")
+    return {
+        "X-Acuven-Api-Key": credential.api_key,
+        "X-Acuven-Key-Version": str(credential.key_version),
+        "X-Acuven-Timestamp": timestamp,
+        "X-Acuven-Request-Id": attempt_id,
+        "X-Acuven-Signature": sign(credential.secret, canonical),
+    }
+
+
 def encode(event: object) -> bytes:
     return json.dumps(event).encode("utf-8")
 
@@ -400,6 +414,46 @@ def post(
     timestamp = signing.pop("timestamp", epoch(clock.now if clock else NOW))
     headers = signed_headers(credential, body, timestamp=timestamp, **signing)
     return client.post(PATH, content=body, headers=headers)
+
+
+def test_effective_status_uses_mode_but_never_bypasses_admin_disable(
+    client, app, credential, clock
+) -> None:
+    def read() -> dict:
+        response = client.get(STATUS_PATH, headers=status_headers(credential, clock))
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    initial = read()
+    assert initial == {
+        "tenant_id": credential.tenant_public_id,
+        "project_id": credential.project_public_id,
+        "billing_mode": "PREPAID",
+        "billing_status": "SUSPENDED",
+        "account_status": "ENABLED",
+        "effective_status": "BLOCK_AI",
+        "status_version": 0,
+    }
+    with app.state.session_factory() as session:
+        tenant = session.get(Tenant, credential.tenant_id)
+        tenant.billing_mode = BillingMode.INTERNAL_METERED_ONLY
+        tenant.status_version += 1
+        session.commit()
+    internal = read()
+    assert internal["billing_status"] == "SUSPENDED"
+    assert internal["effective_status"] == "ALLOW_AI"
+    assert internal["status_version"] == 1
+
+    with app.state.session_factory() as session:
+        tenant = session.get(Tenant, credential.tenant_id)
+        tenant.account_status = AccountStatus.DISABLED
+        tenant.status_version += 1
+        session.commit()
+    assert read()["effective_status"] == "BLOCK_AI"
+
+
+def test_effective_status_rejects_unsigned_request(client) -> None:
+    assert client.get(STATUS_PATH).status_code == 401
 
 
 def assert_accepted(response, event_id: str) -> None:

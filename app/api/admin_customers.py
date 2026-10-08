@@ -41,6 +41,7 @@ from app.schemas.customers import (
     CreateProjectRequest,
     CustomerDetail,
     CustomerSummary,
+    EnableInternalMeteringRequest,
     Page,
     ProjectView,
     UpdateCustomerRequest,
@@ -65,6 +66,7 @@ from app.services import (
     account_status,
     customers,
     integration_access,
+    internal_billing,
     wallet_adjustments,
     webhook_signing,
 )
@@ -148,6 +150,25 @@ def change_account_status(
         actor=admin,
         customer_id=customer_id,
         account_status=AccountStatus(payload.account_status),
+        reason=payload.reason,
+        context=request_context(request),
+    )
+    return success(detail, request_id=current_request_id())
+
+
+@router.post(
+    "/customers/{customer_id}/internal-metering",
+    response_model=ApiResponse[CustomerDetail],
+)
+def enable_internal_metering(
+    request: Request, customer_id: str, payload: EnableInternalMeteringRequest
+) -> ApiResponse[CustomerDetail]:
+    """One-way internal mode, only before usage or wallet activity; admin and audit required."""
+    admin = require_admin(request)
+    detail = internal_billing.enable_internal_metering(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
         reason=payload.reason,
         context=request_context(request),
     )

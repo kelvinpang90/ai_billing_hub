@@ -189,6 +189,7 @@ _EXPECTED_COLUMNS = {
         "created_at": False,
         "updated_at": False,
         "billing_status": False,
+        "billing_mode": False,
         "status_version": False,
         "low_balance_threshold": True,
         "account_status": False,
@@ -462,7 +463,7 @@ def test_0006_checks_are_the_ones_the_models_declare() -> None:
         for name, (table, condition) in migration._CHECKS.items()
     }
     # 0009 在 tenants 上加的那一条由 test_0009_checks_are_the_ones_the_model_declares 比对。
-    later = set(_load_0009()._CHECKS)
+    later = set(_load_0009()._CHECKS) | {"ck_tenants_billing_mode"}
     model = {name: check for name, check in _model_checks().items() if name not in later}
 
     assert from_migration == model
@@ -3875,7 +3876,7 @@ def test_0017_checks_are_the_ones_the_models_declare() -> None:
         for name, (table, condition) in migration._CHECKS.items()
     }
     # 0018 加在 usage_events 上的七条由 test_0018_checks_are_the_ones_the_model_declares 比对。
-    later = set(_load_0018()._CHECKS)
+    later = set(_load_0018()._CHECKS) | set(_load_0019()._EVENT_CHECKS)
     declared = {name: check for name, check in _usage_checks().items() if name not in later}
 
     assert from_migration == declared
@@ -4015,7 +4016,11 @@ def test_0017_column_shape(alembic_config: Config) -> None:
         # NOT NULL column by column (design v6): composite keys and CHECKs hold only then.
         # At head `usage_events` also has 0018's columns (test_0018_column_shape).
         for table, expected in _EXPECTED_0017_COLUMNS.items():
-            at_head = expected | _EXPECTED_0018_COLUMNS if table == "usage_events" else expected
+            at_head = (
+                expected | _EXPECTED_0018_COLUMNS | _EXPECTED_0019_COLUMNS
+                if table == "usage_events"
+                else expected
+            )
             assert {c["name"]: c["nullable"] for c in columns[table]} == at_head, table
         types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
 
@@ -4117,6 +4122,56 @@ def test_0017_keys_foreign_keys_indexes_checks_and_triggers(alembic_config: Conf
 
 _REVISION_0018 = "0018_usage_billing"
 _MIGRATION_0018 = pathlib.Path("alembic/versions/20260929_0018_usage_billing.py")
+
+_EXPECTED_0019_COLUMNS = {
+    "billing_mode_snapshot": True,
+    "reference_customer_price": True,
+}
+
+
+def _load_0019() -> ModuleType:
+    path = pathlib.Path("alembic/versions/20261008_0019_internal_metering.py")
+    spec = importlib.util.spec_from_file_location("migration_0019", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0019_mode_checks_match_the_models() -> None:
+    migration = _load_0019()
+    assert migration.revision == "0019_internal_metering"
+    assert migration.down_revision == _REVISION_0018
+    declared = {
+        name: condition
+        for name, (table, condition) in _usage_checks().items()
+        if name in migration._EVENT_CHECKS and table == "usage_events"
+    }
+    assert declared == {
+        name: _normalised(condition) for name, condition in migration._EVENT_CHECKS.items()
+    }
+    assert _model_checks()["ck_tenants_billing_mode"] == (
+        "tenants",
+        "billing_mode IN ('PREPAID', 'INTERNAL_METERED_ONLY')",
+    )
+
+
+@needs_mysql
+def test_0019_columns_and_defaults_at_head(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    inspector = inspect(create_engine(TEST_DATABASE_URL))
+    tenant = {c["name"]: c for c in inspector.get_columns("tenants")}
+    events = {c["name"]: c for c in inspector.get_columns("usage_events")}
+    assert tenant["billing_mode"]["nullable"] is False
+    assert tenant["billing_mode"]["default"] == "'PREPAID'"
+    assert {name: events[name]["nullable"] for name in _EXPECTED_0019_COLUMNS} == (
+        _EXPECTED_0019_COLUMNS
+    )
+    assert events["billing_mode_snapshot"]["default"] is None
+    reference = events["reference_customer_price"]["type"]
+    assert isinstance(reference, Numeric)
+    assert (reference.precision, reference.scale) == (20, 8)
+
 
 # Column → nullable (design §2): the snapshot and claim columns are nullable, the count is not.
 _EXPECTED_0018_COLUMNS = {

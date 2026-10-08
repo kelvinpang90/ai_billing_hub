@@ -327,6 +327,12 @@ Request-level detailed usage may show additional decimal places when necessary.
 
 # 7. Wallet Rules
 
+**2026-10-08 addendum:** The prepaid rules below apply to `billing_mode = PREPAID`.
+The explicitly provisioned Acuven internal `INTERNAL_METERED_ONLY` tenant is measured
+and priced without a wallet debit or balance-based AI suspension. Its hypothetical
+customer charge is separate from actual revenue. See
+[internal metered-only tenant addendum](design/INTERNAL-METERED-ONLY-2026-10-08.md).
+
 V1 wallet rules:
 
 1. Prepaid model.
@@ -1145,7 +1151,10 @@ ENABLED
 DISABLED
 ```
 
-The effective service status is computed by Central Billing:
+The effective service status is computed by Central Billing. For the Acuven internal
+tenant, the balance condition below is replaced by
+`tenant.billing_mode = INTERNAL_METERED_ONLY`; account, credential and safety disables
+still block AI. See the [2026-10-08 addendum](design/INTERNAL-METERED-ONLY-2026-10-08.md).
 
 ```text
 ALLOW_AI only when:

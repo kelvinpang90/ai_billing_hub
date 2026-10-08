@@ -25,6 +25,7 @@ export const MAX_PAGE = 10_000;
 
 /** 由余额驱动：余额 > 0 为 ACTIVE，≤ 0 为 SUSPENDED。前端只显示，从不发送。 */
 export type BillingStatus = "ACTIVE" | "SUSPENDED";
+export type BillingMode = "PREPAID" | "INTERNAL_METERED_ONLY";
 
 /** 客户列表项。时间是不带时区的 UTC（docs/api.md「时间」）。 */
 export interface CustomerSummary {
@@ -34,6 +35,8 @@ export interface CustomerSummary {
   email: string;
   phone: string | null;
   billing_status: BillingStatus;
+  billing_mode: BillingMode;
+  ai_service_enabled: boolean;
   status_version: number;
   created_at: string;
   updated_at: string;

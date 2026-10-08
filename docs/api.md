@@ -108,6 +108,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | `GET /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 503 |
 | `PATCH /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 422 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/account-status` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/customers/{customer_id}/internal-metering` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/projects` | 201，项目 | 401 / 403 / 404 / 422 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}/projects` | 200，项目分页 | 401 / 403 / 404 / 422 / 503 |
 
@@ -129,7 +130,9 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
   "email": "ops@example.com",
   "phone": "+60 3-0000 0000",
   "billing_status": "SUSPENDED",
+  "billing_mode": "PREPAID",
   "account_status": "ENABLED",
+  "ai_service_enabled": false,
   "status_version": 0,
   "created_at": "2026-09-20T08:30:00",
   "updated_at": "2026-09-20T08:30:00",
@@ -144,6 +147,8 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | `contact_name` / `phone` | 可为 `null` |
 | `email` | 联系邮箱，不是登录账号，不要求唯一 |
 | `billing_status` | 由余额驱动：`ACTIVE`（余额 > 0）或 `SUSPENDED`（余额 ≤ 0）。新客户余额为 0，所以是 `SUSPENDED` |
+| `billing_mode` | 默认为 `PREPAID`；Acuven 自用租户可在首次使用前受控设为 `INTERNAL_METERED_ONLY` |
+| `ai_service_enabled` | 按模式、余额和管理员账户状态计算的有效 AI 权限；内部模式免余额停用，但不免管理员禁用 |
 | `account_status` | 管理员控制的账户生命周期，与 `billing_status` 互相独立：`PENDING_ACTIVATION`、`ENABLED`、`DISABLED`、`CLOSED` 之一。新客户与迁移前已有的客户都是 `ENABLED`；现在只有 `ENABLED` / `DISABLED` 会出现（AIH-TASK-020） |
 | `status_version` | 计费状态或账户状态每真实跃迁一次 +1，两维共用、只增不减。新客户是 0 |
 | `wallet.currency` | V1 只有 `MYR` |
@@ -199,6 +204,15 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 ### `GET /api/v1/admin/customers/{customer_id}` —— 客户详情
 
 成功：**200**，`data` 是客户详情。客户不存在：404 `CUSTOMER_NOT_FOUND`。只读，不写审计。
+
+### `POST /api/v1/admin/customers/{customer_id}/internal-metering` —— 初始化内部计量租户
+
+仅 ADMIN 可调用；请求体为 `{"reason":"非空审计原因"}`。必须明确提供目标客户的 public ID，
+不会根据邮箱或公司名自动判定。只有尚无集成凭据、用量事件及钱包流水且余额为零的租户可启用；
+否则 409 `INTERNAL_METERING_NOT_ELIGIBLE`。成功后返回客户详情，模式为
+`INTERNAL_METERED_ONLY`，`status_version` 加一并写审计。重复调用幂等；本接口不支持切回预付。
+该模式的参考售价不计入收入、应收或钱包，详见
+[内部计量模式设计](design/INTERNAL-METERED-ONLY-2026-10-08.md)。
 
 ### `PATCH /api/v1/admin/customers/{customer_id}` —— 编辑客户
 
@@ -1915,7 +1929,9 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
   "received_at": "2026-09-29T08:30:00",
   "processed_at": "2026-09-29T10:30:00",
   "billable_cost": "0.12500000",
-  "estimated_provider_cost_myr": "0.06250000"
+  "estimated_provider_cost_myr": "0.06250000",
+  "billing_mode_snapshot": "PREPAID",
+  "reference_customer_price": null
 }
 ```
 
@@ -1924,6 +1940,7 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - `LLM_TOKEN_FIELDS` 形态四个 token 数是整数、`quantity` 为 null；`QUANTITY` 形态相反。`quantity` 与金额一样是 8 位小数的字符串。
 - `occurred_at` 保留上报的小数秒（存在时）；其余时间整秒。全部是不带时区的 UTC。
 - `billable_cost`（含税、从钱包扣的额）与 `estimated_provider_cost_myr` 是 8 位小数的字符串；未计费的事件为 null。
+- `billing_mode_snapshot` 是处理时的计费模式；`reference_customer_price` 仅内部计量事件有值。该参考价是模拟客户售价，不属于应收或收入。内部事件的 `billable_cost` 为零且不生成账本行。
 
 ### 详情
 
@@ -1938,7 +1955,7 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | `provider_price_version_id` / `pricing_rule_id` / `fx_rate_version_id` | 计费所用价格版本、定价规则、汇率版本的 `public_id`；MYR 原币时 `fx_rate_version_id` 为 null |
 | `fx_rate_applied` | 所用汇率原值（去掉尾零的精确十进制字符串，与汇率版本对象一致）；MYR 原币时 null |
 | `provider_source_currency` / `provider_source_cost` | 原币币种与原币成本（8 位小数） |
-| `gross_margin` / `gross_margin_basis` | 毛利 = `billable_cost − estimated_provider_cost_myr`（可为负），`basis` 恒为 `"estimated"`：V1 没有对账成本（spec §14）。未计费时两者都为 null |
+| `gross_margin` / `gross_margin_basis` | 预付事件毛利 = `billable_cost − estimated_provider_cost_myr`（可为负），`basis` 为 `"estimated"`。内部计量及未计费事件两者都为 null；参考价不得作为正式毛利计算依据 |
 | `wallet_transaction` | 那一行 `AI_USAGE` 账本：`{"id": public_id, "amount": "-0.12500000"}`（金额 = −计费额）；0 元事件与未计费事件为 null |
 | `attempt_count` / `next_attempt_at` | 认领次数与最早再认领时刻 |
 | `claim_token` / `claimed_at` / `lease_expires_at` | 当前认领的防护令牌与租约；只有 `PROCESSING` 时非空 |
@@ -2093,6 +2110,27 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
 | `outbox_backlog`（AIH-TASK-032） | `domain_outbox` 里**有处理器**的事件类型（`app/tasks/outbox.py` 的处理器名单，与周期恢复同一份）存在创建超过 10 分钟仍 `PENDING` 的行（§120）：`P2`。没有处理器的类型（`tenant.billing_status_changed`、`tenant.low_balance`）按设计持久等待，不计入 | `P2`：`1 row pending over 10 minutes, oldest created …`；OK：`no handled outbox row pending over 10 minutes` |
 
 ---
+
+## 集成：有效 AI 服务状态
+
+`GET /api/v1/integration/effective-status` 使用与用量摄取相同的五个 `X-Acuven-*`
+HMAC 请求头；签名覆盖 `GET`、完整路径、时间戳、唯一请求 ID 和空请求体的 SHA-256。
+请求体必须为空。成功返回 `data`：
+
+```json
+{
+  "tenant_id": "租户 public_id",
+  "project_id": "项目 public_id",
+  "billing_mode": "INTERNAL_METERED_ONLY",
+  "billing_status": "SUSPENDED",
+  "account_status": "ENABLED",
+  "effective_status": "ALLOW_AI",
+  "status_version": 1
+}
+```
+
+身份由签名凭据决定，请求方不可代填租户或项目。内部模式仅豁免余额导致的暂停；管理员禁用
+仍返回 `BLOCK_AI`。集成方须验证返回的租户、项目和版本；查询失败时停止新的模型调用。
 
 ## 集成：用量事件摄取
 

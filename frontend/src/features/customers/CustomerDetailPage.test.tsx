@@ -35,6 +35,9 @@ vi.mock("../../api/adminCustomers", async () => {
   return { ...actual, ...api };
 });
 
+const usage = vi.hoisted(() => ({ recentInternalUsage: vi.fn() }));
+vi.mock("../../api/adminUsageEvents", () => usage);
+
 // 手工调账（AIH-TASK-017）从钱包卡片打开；表单自己的用例在 wallet/AdjustmentModal.test.tsx。
 const wallet = vi.hoisted(() => ({
   postAdjustment: vi.fn(),
@@ -91,6 +94,8 @@ function customer(overrides: Partial<CustomerDetail> = {}): CustomerDetail {
     email: "ops@example.com",
     phone: "+60 3-0000 0000",
     billing_status: "ACTIVE",
+    billing_mode: "PREPAID",
+    ai_service_enabled: true,
     status_version: 3,
     created_at: "2026-09-20T08:30:00",
     updated_at: "2026-09-21T01:02:03",
@@ -147,6 +152,34 @@ describe("CustomerDetailPage", () => {
     expect(screen.getByText("MYR")).toBeInTheDocument();
     expect(screen.getByText("MYR 1,234,567.12345678")).toBeInTheDocument();
     expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it("shows estimated cost and simulated price for an internal tenant", async () => {
+    api.getCustomer.mockResolvedValue(customer({
+      billing_mode: "INTERNAL_METERED_ONLY",
+      billing_status: "SUSPENDED",
+      ai_service_enabled: true,
+    }));
+    usage.recentInternalUsage.mockResolvedValue({
+      total: 1,
+      items: [{
+        id: "event-1",
+        occurred_at: "2026-10-08T08:00:00",
+        model: "claude-fictional",
+        status: "PROCESSED",
+        estimated_provider_cost_myr: "0.06250000",
+        reference_customer_price: "0.12500000",
+        billable_cost: "0.00000000",
+      }],
+    });
+
+    renderDetail();
+
+    expect(await screen.findByText("Internal AI usage (latest 20 events)")).toBeInTheDocument();
+    expect(usage.recentInternalUsage).toHaveBeenCalledWith(CUSTOMER_ID, expect.anything());
+    expect(await screen.findByText("MYR 0.0625")).toBeInTheDocument();
+    expect(screen.getByText("MYR 0.125")).toBeInTheDocument();
+    expect(screen.getByText("MYR 0.00")).toBeInTheDocument();
   });
 
   it("says the customer does not exist on a 404, not that something went wrong", async () => {

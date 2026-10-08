@@ -207,6 +207,15 @@ CLAIM_FIELDS_CHECK: Final = (
     " OR (status <> 'PROCESSING'"
     " AND claim_token IS NULL AND claimed_at IS NULL AND lease_expires_at IS NULL)"
 )
+MODE_SNAPSHOT_CHECK: Final = "status <> 'PROCESSED' OR billing_mode_snapshot IS NOT NULL"
+INTERNAL_MODE_CHECK: Final = (
+    "billing_mode_snapshot <> 'INTERNAL_METERED_ONLY' OR status <> 'PROCESSED'"
+    " OR (billable_cost = 0 AND wallet_transaction_id IS NULL"
+    " AND reference_customer_price IS NOT NULL)"
+)
+PREPAID_REFERENCE_CHECK: Final = (
+    "billing_mode_snapshot <> 'PREPAID' OR reference_customer_price IS NULL"
+)
 
 
 class UsageEvent(Base):
@@ -293,6 +302,12 @@ class UsageEvent(Base):
     )
     # 含税（ADR-0008）。
     billable_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(MONEY_PRECISION, MONEY_SCALE, asdecimal=True), nullable=True
+    )
+    # Captured at processing time. PREPAID events have no reference price; internal events
+    # preserve the hypothetical customer price separately from the zero wallet charge.
+    billing_mode_snapshot: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reference_customer_price: Mapped[Decimal | None] = mapped_column(
         Numeric(MONEY_PRECISION, MONEY_SCALE, asdecimal=True), nullable=True
     )
     # 那一行 `AI_USAGE` 账本；计费额为 0 时为空。
@@ -436,6 +451,20 @@ class UsageEvent(Base):
         CheckConstraint(PROVIDER_SOURCE_COST_CHECK, name="ck_usage_events_provider_source_cost"),
         CheckConstraint(ESTIMATED_COST_CHECK, name="ck_usage_events_estimated_cost"),
         CheckConstraint(CLAIM_FIELDS_CHECK, name="ck_usage_events_claim_fields"),
+        # Migration 0019. Strict processing-mode checks are MySQL-only because older
+        # SQLite ingest tests create synthetic PROCESSED rows without billing snapshots.
+        _mysql_only_check(MODE_SNAPSHOT_CHECK, "ck_usage_events_mode_snapshot"),
+        _mysql_only_check(INTERNAL_MODE_CHECK, "ck_usage_events_internal_mode"),
+        CheckConstraint(PREPAID_REFERENCE_CHECK, name="ck_usage_events_prepaid_reference"),
+        CheckConstraint(
+            "billing_mode_snapshot IS NULL OR billing_mode_snapshot IN"
+            " ('PREPAID', 'INTERNAL_METERED_ONLY')",
+            name="ck_usage_events_mode_values",
+        ),
+        CheckConstraint(
+            "reference_customer_price IS NULL OR reference_customer_price >= 0",
+            name="ck_usage_events_reference_price",
+        ),
     )
 
 

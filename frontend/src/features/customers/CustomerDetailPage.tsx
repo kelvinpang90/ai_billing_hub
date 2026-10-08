@@ -52,6 +52,7 @@ import {
   type CustomerFormValues,
 } from "./CustomerForm";
 import { BillingStatusTag } from "./CustomerListPage";
+import { InternalUsagePanel } from "./InternalUsagePanel";
 import { ProjectsPanel } from "./ProjectsPanel";
 
 type Notice = "saved" | "unchanged" | null;
@@ -185,6 +186,10 @@ export function CustomerDetailPage() {
         <WalletDescriptions wallet={current.wallet} />
       </Card>
 
+      {current.billing_mode === "INTERNAL_METERED_ONLY" ? (
+        <InternalUsagePanel customerId={current.id} />
+      ) : null}
+
       {/* ⚠️ 只在打开时挂载、关闭即卸载：调账的幂等键在挂载时生成，这样每次打开才是新键。
           详见 AdjustmentModal 的文件头注释。 */}
       {adjusting ? (
@@ -225,6 +230,16 @@ function ProfileDescriptions({ customer }: { customer: CustomerDetail }) {
       key: "billing_status",
       label: t("customers.field.billingStatus"),
       children: <BillingStatusTag status={customer.billing_status} />,
+    },
+    {
+      key: "billing_mode",
+      label: t("customers.field.billingMode"),
+      children: customer.billing_mode,
+    },
+    {
+      key: "ai_service_enabled",
+      label: t("customers.field.aiService"),
+      children: customer.ai_service_enabled ? t("customers.aiService.enabled") : t("customers.aiService.disabled"),
     },
     {
       key: "status_version",
