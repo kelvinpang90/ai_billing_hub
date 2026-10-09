@@ -113,7 +113,7 @@ jobs:
         # 没人会注意到「迁移这轮没验」。所以这里显式把 skip 判成失败。
         run: |
           set -o pipefail
-          python -m pytest -ra | tee pytest-output.txt
+          python -m pytest -ra --durations=0 | tee pytest-output.txt
           if grep -qE '[0-9]+ skipped' pytest-output.txt; then
             echo "::error::Tests were skipped in CI; every test must run here."
             exit 1
