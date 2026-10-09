@@ -1610,7 +1610,7 @@ Minimum V1 endpoints:
 
 ```http
 POST /api/v1/integration/usage-events
-GET  /api/v1/integration/account-status
+GET  /api/v1/integration/effective-status
 GET  /api/v1/integration/health
 ```
 
@@ -3325,7 +3325,7 @@ Requirements:
 
 # 92. Central → Customer Status Webhook
 
-Status Webhooks carry a full status snapshot (§28), not typed events. The Integrated Application Backend acts on `effective_status` and `reason_code`; suspension, reactivation, account disablement and project disablement all arrive the same way. Low-balance alerts are customer notifications (Phase 6), not Status Webhooks.
+Status Webhooks carry a full status snapshot (§28), not typed events. The Integrated Application Backend acts on `effective_status` and `reason_code`; suspension, reactivation and account disablement all arrive the same way. A disabled project receives no Status Webhook (§25); its `BLOCK_AI` with `PROJECT_INTEGRATION_DISABLED` is learned only through periodic reconciliation (§30). Low-balance alerts are customer notifications (Phase 6), not Status Webhooks.
 
 ---
 
@@ -4055,7 +4055,7 @@ Five-minute burst ingestion: >= 100 events/second
 Single-event or batch durable-acceptance API latency: p95 <= 500 ms under sustained target load
 Healthy event-to-wallet processing latency: p95 <= 60 seconds, p99 <= 5 minutes
 Backlog recovery throughput: >= 5x documented peak normal ingestion rate
-Status Webhook enqueue after committed transition: p95 <= 60 seconds
+Status Webhook first delivery attempt after committed transition: p95 <= 60 seconds
 Status reconciliation safety bound: <= 5 minutes
 ```
 
