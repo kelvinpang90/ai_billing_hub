@@ -45,18 +45,51 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   globalThis.ResizeObserver = NoopResizeObserver;
 }
 
-afterEach(async () => {
+/**
+ * 记下每个测试排下、还没触发的 `setTimeout`，测试结束时一并取消（见下方 afterEach）。
+ * 只包一层登记，参数与返回值原样转给原来的实现。
+ */
+const pendingTimeouts = new Set<ReturnType<typeof setTimeout>>();
+const originalSetTimeout = globalThis.setTimeout;
+const originalClearTimeout = globalThis.clearTimeout;
+globalThis.setTimeout = ((handler: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+  const handle = originalSetTimeout(
+    (...callArgs: unknown[]) => {
+      pendingTimeouts.delete(handle);
+      handler(...callArgs);
+    },
+    ms,
+    ...args,
+  );
+  pendingTimeouts.add(handle);
+  return handle;
+}) as typeof setTimeout;
+globalThis.clearTimeout = ((handle?: ReturnType<typeof setTimeout>) => {
+  if (handle !== undefined) {
+    pendingTimeouts.delete(handle);
+  }
+  originalClearTimeout(handle);
+}) as typeof clearTimeout;
+
+afterEach(() => {
   cleanup();
 
-  // ⚠️ 光 `cleanup()` 不够：antd 的按钮 loading 走 `@rc-component/util` 的
-  // `useDelayState`，它排了一个 `setTimeout`，而**卸载并不会把它取消**。测试结束
-  // 得够快的话，那个回调会在 jsdom 已经拆掉之后才触发，抛
+  // ⚠️ 光 `cleanup()` 不够：`@rc-component/util` 的 `useDelayState` 排下的
+  // `setTimeout` **卸载时不会被取消**。最常见的是每个 `Form.Item` 都有的
+  // `ErrorList`：antd 的 `useDebounce` 在错误列表为空时排一个 **10ms** 的定时器，
+  // 挂载时就排。文件里最后一个测试若在 10ms 内跑完，回调会在 jsdom 已经拆掉之后
+  // 才触发，`setState` 进 react-dom 读 `window.event`，抛
   // `ReferenceError: window is not defined`。
   //
-  // 症状极具迷惑性：**所有测试都显示通过**，只在末尾多出几个 "Uncaught Exception"，
-  // 而且它指的文件常常不是真正排下那个定时器的地方。更糟的是它**取决于时序** ——
-  // 本地连跑几次都不出现，在 CI 上偶发（T0.10 的 CI 上真的中了一次）。
+  // 症状极具迷惑性：**所有测试都显示通过**，只在末尾多出几个 "Uncaught Exception"。
+  // 它**取决于时序** —— 本地连跑几次都不出现，在 CI 上偶发（T0.10 中过一次；
+  // 2026-10-09 #237、#238 合并后 main 连中两次，指向 ResetPasswordPage.test.tsx）。
   //
-  // 这里 await 一个 0ms 定时器：先前排下的那些会在它之前烧掉，而此刻 jsdom 还活着。
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  // 以前这里 await 一个 0ms 定时器，指望先前排下的先烧掉 —— 对 0ms 的有效，对 10ms
+  // 的无效。改成等更久只是换一个会被下一个组件打破的数字，所以直接取消：组件都已
+  // 卸载，这些回调剩下的只有对已卸载组件的 `setState`，取消不丢任何东西。
+  for (const handle of pendingTimeouts) {
+    originalClearTimeout(handle);
+  }
+  pendingTimeouts.clear();
 });
