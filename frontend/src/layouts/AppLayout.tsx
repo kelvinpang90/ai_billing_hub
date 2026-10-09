@@ -24,7 +24,17 @@ export function AppLayout() {
   const inCustomers =
     location.pathname === ROUTES.customers ||
     location.pathname.startsWith(`${ROUTES.customers}/`);
-  const selectedKey = inCustomers ? ROUTES.customers : location.pathname;
+  // 目录的三页（供应商、供应商详情、计量类型）都算在顶栏的「目录」这一项下面。
+  const inCatalog =
+    location.pathname === ROUTES.catalogProviders ||
+    location.pathname.startsWith(`${ROUTES.catalogProviders}/`) ||
+    location.pathname === ROUTES.catalogMeterTypes;
+  let selectedKey = location.pathname;
+  if (inCustomers) {
+    selectedKey = ROUTES.customers;
+  } else if (inCatalog) {
+    selectedKey = ROUTES.catalogProviders;
+  }
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -47,6 +57,10 @@ export function AppLayout() {
             {
               key: ROUTES.audit,
               label: <Link to={ROUTES.audit}>{t("nav.audit")}</Link>,
+            },
+            {
+              key: ROUTES.catalogProviders,
+              label: <Link to={ROUTES.catalogProviders}>{t("nav.catalog")}</Link>,
             },
           ]}
         />
