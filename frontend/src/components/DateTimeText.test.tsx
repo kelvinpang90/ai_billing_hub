@@ -10,7 +10,14 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import "../i18n";
-import { DateTimeText, displayTimeToUtc, formatDateTime, parseUtc } from "./DateTimeText";
+import {
+  DateTimeText,
+  displayTimeToRfc3339,
+  displayTimeToUtc,
+  formatDateTime,
+  parseUtc,
+  utcToDisplayInput,
+} from "./DateTimeText";
 
 describe("formatDateTime", () => {
   it("shifts a UTC timestamp to Kuala Lumpur time", () => {
@@ -72,6 +79,34 @@ describe("displayTimeToUtc", () => {
     expect(displayTimeToUtc("2026-09-20T08:30:00Z")).toBeNull();
     expect(displayTimeToUtc("2026-09-20 08:30:00")).toBeNull();
     expect(displayTimeToUtc("")).toBeNull();
+  });
+});
+
+describe("displayTimeToRfc3339", () => {
+  it("turns a Kuala Lumpur time into RFC 3339 with a zone, on a whole second", () => {
+    expect(displayTimeToRfc3339("2026-10-01T08:00")).toBe("2026-10-01T00:00:00Z");
+    expect(displayTimeToRfc3339("2026-10-01T07:59:59.000")).toBe("2026-09-30T23:59:59Z");
+    expect(displayTimeToRfc3339("2026-10-01T16:30:05.5")).toBe("2026-10-01T08:30:05Z");
+  });
+
+  it("refuses what displayTimeToUtc refuses", () => {
+    expect(displayTimeToRfc3339("2026-02-30T00:00")).toBeNull();
+    expect(displayTimeToRfc3339("")).toBeNull();
+  });
+});
+
+describe("utcToDisplayInput", () => {
+  it("turns naive UTC into the Kuala Lumpur value of a datetime-local input", () => {
+    expect(utcToDisplayInput("2026-09-29T04:00:00")).toBe("2026-09-29T12:00:00");
+    expect(utcToDisplayInput("2026-09-29T20:15:05")).toBe("2026-09-30T04:15:05");
+  });
+
+  it("round-trips through displayTimeToUtc", () => {
+    expect(displayTimeToUtc(utcToDisplayInput("2026-12-31T20:15:05"))).toBe("2026-12-31T20:15:05");
+  });
+
+  it("gives an empty value for anything it cannot read", () => {
+    expect(utcToDisplayInput("2026-09-29T04:00:00Z")).toBe("");
   });
 });
 

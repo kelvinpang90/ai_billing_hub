@@ -1,7 +1,7 @@
 /**
  * 部署后浏览器验收：管理端客户页（AIH-TASK-015），本任务为 AIH-TASK-024；AIH-TASK-023 加了审计页的两个只读步骤
- * （open_audit、check_audit_entry）；AIH-TASK-035 加了 AI 目录的两个只读步骤（open_catalog、check_meter_types）。
- * 文件名沿用，不改。
+ * （open_audit、check_audit_entry）；AIH-TASK-035 加了 AI 目录的两个只读步骤（open_catalog、check_meter_types）；
+ * AIH-TASK-036 加了供应商价格与汇率的两个只读步骤（open_provider_prices、open_fx_rates）。文件名沿用，不改。
  *
  * 谁在什么时候跑它
  * ----------------
@@ -50,10 +50,13 @@
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
- *   （href 为 /catalog/meter-types，不在顶栏里）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
+ *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
+ *   顶栏「Exchange rates」（href 为 /fx-rates）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
  *   会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。审计页不改每页条数、不翻页、
  *   不展开行、不点「Clear filters」。目录页不点「New provider」「New meter type」「Rename」「Retire」「Reactivate」
- *   或任何确认按钮、不点状态筛选、不翻页、不打开任何供应商的详情、不填也不提交任何表单。登录会在服务端留下会话与
+ *   或任何确认按钮、不点状态筛选、不翻页、不打开任何供应商的详情、不填也不提交任何表单。价格页与汇率页不点
+ *   「New draft」「New manual draft」「Edit」「Publish」「Retire」「Discard」或任何确认按钮、不动供应商 / 模型 /
+ *   状态筛选、不翻页、不打开任何价格版本的详情、不填也不提交任何表单。登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
  * - 每个步骤都真的检查它声称的东西；等待一律有上限（见下面的常量），总时长控制在 timeout_seconds（300 秒）内。
@@ -94,6 +97,14 @@
  *                   「Code」「Components ← quantity field」）的数据行与响应的 items 一一对应：同样的顺序与代码、每行
  *                   「Components」格里的 <li> 个数等于该项的分量数（LLM_TOKEN 那一行因此是 4 个）；报到前把 LLM_TOKEN
  *                   那一行滚动到视口中间
+ *   open_provider_prices
+ *                   点顶栏「Provider prices」（文案取 en.json 的 nav.providerPrices，href 为 paths.ts 的 providerPrices，
+ *                   即 /pricing/provider-prices）进价格页；页面落定且不是加载失败（任何错误提示）、无权限（pricing.forbidden）
+ *                   或路由兜底页。空列表合法（pricing.prices.empty），有表格时表头要有「Provider」「Model」两列
+ *   open_fx_rates   点顶栏「Exchange rates」（nav.fxRates，href 为 paths.ts 的 fxRates，即 /fx-rates）进汇率页；页面落定
+ *                   且不是加载失败、无权限或路由兜底页。版本列表为空（fx.empty）或有表格（表头有「Currency」「Rate (MYR)」）
+ *                   都合法；「BNM fetch attempts」一节（fx.attempts.title）可见，且它的表格（表头有「Attempted at」「Outcome」）
+ *                   或空状态（fx.attempts.empty）已经画出来，空列表合法；报到前把这一节的标题滚动到视口中间
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -149,6 +160,22 @@ const TEXT = {
   meterTypesLoading: "Loading meter types…", // catalog.meterTypes.loading
   meterTypesEmpty: "No meter types yet.", // catalog.meterTypes.empty
   meterTypesComponents: "Components ← quantity field", // catalog.meterTypes.field.components
+  navProviderPrices: "Provider prices", // nav.providerPrices —— 顶栏的价格项
+  navFxRates: "Exchange rates", // nav.fxRates —— 顶栏的汇率项
+  pricingForbidden: "Only administrators can manage prices and exchange rates.", // pricing.forbidden
+  pricingProvider: "Provider", // pricing.field.provider —— 价格表格的列头
+  pricingModel: "Model", // pricing.field.model
+  pricesLoading: "Loading provider prices…", // pricing.prices.loading
+  pricesEmpty: "No provider prices yet.", // pricing.prices.empty
+  fxCurrency: "Currency", // fx.field.currency —— 汇率版本表格的列头
+  fxRate: "Rate (MYR)", // fx.field.rate
+  fxLoading: "Loading exchange rates…", // fx.loading
+  fxEmpty: "No exchange rates yet.", // fx.empty
+  fxAttemptsTitle: "BNM fetch attempts", // fx.attempts.title —— 拉取记录一节的标题
+  fxAttemptedAt: "Attempted at", // fx.attempts.field.attemptedAt —— 拉取记录表格的列头
+  fxOutcome: "Outcome", // fx.attempts.field.outcome
+  fxAttemptsLoading: "Loading fetch attempts…", // fx.attempts.loading
+  fxAttemptsEmpty: "No fetch attempts yet.", // fx.attempts.empty
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -159,6 +186,8 @@ const TEXT = {
   auditPath: "/audit",
   catalogProvidersPath: "/catalog/providers",
   catalogMeterTypesPath: "/catalog/meter-types",
+  providerPricesPath: "/pricing/provider-prices",
+  fxRatesPath: "/fx-rates",
 };
 
 /** 夹具客户的公司名前缀。只看、只打开以它开头的客户。 */
@@ -1236,6 +1265,73 @@ function meterTypeInView(lib, { T, code }) {
   return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
 }
 
+/** 顶栏里文字为 text、href 恰好为 href 的链接（价格与汇率两项共用）。只点这一个。 */
+function clickNavLink(lib, { text, href }) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === text && a.getAttribute("href") === href) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 价格页的状态。错误提示（任何 role=alert）与无权限分开报；有表格时表头要有「Provider」「Model」。 */
+function probeProviderPrices(lib, T) {
+  const forbidden = lib.leaf(T.pricingForbidden) !== null;
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.pricesLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: lib.leaf(T.pricesEmpty) !== null,
+    table: lib.tableWith([T.pricingProvider, T.pricingModel]) !== null,
+  };
+}
+
+/**
+ * 汇率页的状态：版本列表（同上）与拉取记录一节（标题「BNM fetch attempts」在不在、它的表格或空状态出没出来）。
+ */
+function probeFxRates(lib, T) {
+  const forbidden = lib.leaf(T.pricingForbidden) !== null;
+  return {
+    ...lib.common(T),
+    busy:
+      document.querySelector('[aria-busy="true"]') !== null ||
+      lib.leaf(T.fxLoading) !== null ||
+      lib.leaf(T.fxAttemptsLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: lib.leaf(T.fxEmpty) !== null,
+    table: lib.tableWith([T.fxCurrency, T.fxRate]) !== null,
+    attemptsSection: lib.leaf(T.fxAttemptsTitle) !== null,
+    attemptsShown: lib.leaf(T.fxAttemptsEmpty) !== null || lib.tableWith([T.fxAttemptedAt, T.fxOutcome]) !== null,
+  };
+}
+
+/** 把拉取记录一节的标题滚到视口中间。只滚动，不点任何东西。 */
+function scrollFxAttemptsIntoView(lib, T) {
+  const title = lib.leaf(T.fxAttemptsTitle);
+  if (title === null) {
+    return false;
+  }
+  title.scrollIntoView({ block: "center", inline: "nearest" });
+  return true;
+}
+
+function fxAttemptsInView(lib, T) {
+  const title = lib.leaf(T.fxAttemptsTitle);
+  if (title === null) {
+    return false;
+  }
+  const rect = title.getBoundingClientRect();
+  return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+}
+
 // ---------------------------------------------------------------------------
 // 驱动页面
 // ---------------------------------------------------------------------------
@@ -1833,6 +1929,62 @@ async function stepCheckMeterTypes() {
   }
 }
 
+async function stepOpenProviderPrices() {
+  const link = { text: TEXT.navProviderPrices, href: TEXT.providerPricesPath };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同目录页（catalogSettled / rejectCatalogState 不看页面是哪一种，只看这几个状态位）。
+  const opened = await waitFor(
+    () => evaluate(probeProviderPrices, TEXT),
+    catalogSettled(TEXT.providerPricesPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  // 生产上可能还没有任何价格版本，空列表合法。
+  rejectCatalogState(opened.value, TEXT.providerPricesPath, true);
+}
+
+/** 汇率页落定：不在加载，且版本列表落在某一种终态、拉取记录一节也画出来了（或整页失败 / 无权限）。 */
+function fxSettled(s) {
+  return (
+    s.appError ||
+    s.notFound ||
+    (s.path === TEXT.fxRatesPath &&
+      !s.busy &&
+      (s.failed || s.forbidden || ((s.empty || s.table) && s.attemptsShown)))
+  );
+}
+
+async function stepOpenFxRates() {
+  const link = { text: TEXT.navFxRates, href: TEXT.fxRatesPath };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  const opened = await waitFor(() => evaluate(probeFxRates, TEXT), fxSettled, ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  // 空的版本列表与空的拉取记录都合法（生产上可能还没拉取过）。
+  rejectCatalogState(opened.value, TEXT.fxRatesPath, true);
+  if (!opened.value.attemptsSection || !opened.value.attemptsShown) {
+    throw fail("assertion_failed");
+  }
+
+  // Worker 在报到后截图：先把拉取记录一节滚进视口。
+  if ((await evaluate(scrollFxAttemptsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(fxAttemptsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
@@ -1842,6 +1994,8 @@ const STEPS = {
   check_audit_entry: stepCheckAuditEntry,
   open_catalog: stepOpenCatalog,
   check_meter_types: stepCheckMeterTypes,
+  open_provider_prices: stepOpenProviderPrices,
+  open_fx_rates: stepOpenFxRates,
 };
 
 // ---------------------------------------------------------------------------
