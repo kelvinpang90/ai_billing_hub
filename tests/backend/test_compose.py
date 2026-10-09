@@ -396,12 +396,33 @@ def test_ci_mysql_matches_production_for_triggers() -> None:
     的预检（开关关着就拒绝建表）会把 CI 上所有迁移用例拦下（Claude Code 审查 #91 发现）。
     """
     ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
-    steps = yaml.safe_load(ci.read_text(encoding="utf-8"))["jobs"]["backend"]["steps"]
+    steps = yaml.safe_load(ci.read_text(encoding="utf-8"))["jobs"]["backend-tests"]["steps"]
     names = [step.get("name", "") for step in steps]
     runs = [str(step.get("run", "")) for step in steps]
     wanted = "SET GLOBAL log_bin_trust_function_creators = ON"
     setter = next(i for i, run in enumerate(runs) if wanted in run)
     assert setter < names.index("Backend tests")
+
+
+def test_ci_backend_check_fails_when_any_backend_job_fails() -> None:
+    """分支保护只认名为 `backend` 的检查，而它只是汇总 `backend-*` 各 job 的结果。
+
+    ⚠️ 汇总 job 少了 `if: always()`，上游一失败它就被标成 skipped，而分支保护把 skipped 的
+    必需检查当成通过 —— 测试红着也能合并，而且没有任何东西变红。
+    """
+    ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+    jobs = yaml.safe_load(ci.read_text(encoding="utf-8"))["jobs"]
+    gate = jobs["backend"]
+    upstream = {name for name in jobs if name.startswith("backend-")}
+
+    assert gate["name"] == "backend"
+    assert set(gate["needs"]) == upstream
+    assert "always()" in gate["if"]
+    checks = yaml.safe_dump(gate["steps"])
+    for name in upstream:
+        assert f"needs.{name}.result" in checks, name
+    # 每个上游结果都要和 success 比，不是只打印出来
+    assert checks.count("= success") == len(upstream)
 
 
 def test_the_edge_resolves_the_real_client_address() -> None:

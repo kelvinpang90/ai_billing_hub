@@ -260,7 +260,7 @@ docker run -d --name ai-billing-hub-test-redis -p 16379:6379 redis:7-alpine
 BILLING_TEST_REDIS_URL="redis://127.0.0.1:16379/0" python -m pytest
 ```
 
-⚠️ **不要把 skipped 读成 passed。**SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上跑通的迁移证明不了生产上跑得通。CI 的 `backend` job 起了 MySQL service，并且**显式把「有任何 skipped」判成失败** —— 少了那一步，MySQL 起不来时 pytest 照样绿。
+⚠️ **不要把 skipped 读成 passed。**SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上跑通的迁移证明不了生产上跑得通。CI 的 `backend-tests` 各分片 job 都起了 MySQL service，并且**显式把「有任何 skipped」判成失败** —— 少了那一步，MySQL 起不来时 pytest 照样绿。必需检查 `backend` 是汇总 job，`backend-tests` 各片与 `backend-build`（lint、打包冒烟、compose 构建）全部成功它才通过。
 
 **这里是命令清单的唯一出处。**`CLAUDE.md`、`README.md`、PR 模板的自检行只链接到这里，不再各抄一份。
 
