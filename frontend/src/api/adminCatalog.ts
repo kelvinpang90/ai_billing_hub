@@ -12,7 +12,7 @@
  * 目录里没有金额、单价或数量字段；将来出现时照 MoneyText 的做法当字符串处理，不在这一层解析。
  */
 
-import type { Page } from "./adminCustomers";
+import { MAX_PAGE_SIZE, type Page } from "./adminCustomers";
 import { apiGet, client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
 
 const METER_TYPES_URL = "/api/v1/admin/usage-meter-types";
@@ -205,6 +205,11 @@ export function modelListQueryKey(
   return [...providerModelsQueryKey(providerId), filter, page, pageSize] as const;
 }
 
+/** 映射别名下拉用的全部模型；挂在同一前缀下，模型增改后随列表一起失效。 */
+export function allModelsQueryKey(providerId: string) {
+  return [...providerModelsQueryKey(providerId), "all"] as const;
+}
+
 /** 一个供应商的所有别名段列表页的前缀。 */
 export function providerAliasesQueryKey(providerId: string) {
   return [...providerDetailQueryKey(providerId), "aliases"] as const;
@@ -330,6 +335,21 @@ export function listModels(
 ): Promise<Page<Model>> {
   const query = listQuery(page, pageSize, { status: filter.status });
   return apiGet<Page<Model>>(`${modelsUrl(providerId)}?${query}`, signal);
+}
+
+/**
+ * 这个供应商的**全部**模型（含已停用的），按最大页长逐页取完再拼起来，`code` 升序。给映射别名的
+ * 下拉用：只取一页的话，第 101 个及之后的模型就选不到。取到空页或凑够 `total` 即停。
+ */
+export async function listAllModels(providerId: string, signal?: AbortSignal): Promise<Model[]> {
+  const models: Model[] = [];
+  for (let page = 1; ; page += 1) {
+    const result = await listModels(providerId, {}, page, MAX_PAGE_SIZE, signal);
+    models.push(...result.items);
+    if (result.items.length === 0 || models.length >= result.total) {
+      return models;
+    }
+  }
 }
 
 export function createModel(providerId: string, body: CreateModelBody): Promise<Model> {

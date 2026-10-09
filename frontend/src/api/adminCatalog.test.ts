@@ -22,6 +22,7 @@ import {
   getModel,
   getProvider,
   listMeterTypes,
+  listAllModels,
   listModelAliases,
   listModels,
   listProviders,
@@ -163,6 +164,34 @@ describe("model requests", () => {
       `${PROVIDERS}/${ID}/models?page=2&page_size=20&status=RETIRED`,
       {},
     );
+  });
+
+  it("collects every page of models at the largest page size, without a status filter", async () => {
+    const first = Array.from({ length: 100 }, (_, index) => ({ code: `model-${index}` }));
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValueOnce(envelope({ items: first, page: 1, page_size: 100, total: 101 }))
+      .mockResolvedValueOnce(
+        envelope({ items: [{ code: "model-100" }], page: 2, page_size: 100, total: 101 }),
+      );
+
+    const models = await listAllModels(ID);
+
+    expect(models).toHaveLength(101);
+    expect(models[100]).toEqual({ code: "model-100" });
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get).toHaveBeenNthCalledWith(1, `${PROVIDERS}/${ID}/models?page=1&page_size=100`, {});
+    expect(get).toHaveBeenNthCalledWith(2, `${PROVIDERS}/${ID}/models?page=2&page_size=100`, {});
+  });
+
+  it("stops at an empty page even if the total promised more", async () => {
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValueOnce(envelope({ items: [{ code: "a" }], page: 1, page_size: 100, total: 5 }))
+      .mockResolvedValueOnce(envelope({ items: [], page: 2, page_size: 100, total: 5 }));
+
+    expect(await listAllModels(ID)).toEqual([{ code: "a" }]);
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
   it("creates a model under the provider in the path, code exactly as typed", async () => {

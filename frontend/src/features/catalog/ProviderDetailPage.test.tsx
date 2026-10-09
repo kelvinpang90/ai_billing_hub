@@ -28,6 +28,7 @@ const api = vi.hoisted(() => ({
   getProvider: vi.fn(),
   updateProvider: vi.fn(),
   listModels: vi.fn(),
+  listAllModels: vi.fn(),
   createModel: vi.fn(),
   updateModel: vi.fn(),
   listModelAliases: vi.fn(),
@@ -155,6 +156,8 @@ function givenEmptyProvider(): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // 映射别名的模型下拉取的是全部模型（listAllModels 自己逐页取，分页逻辑在 adminCatalog.test.ts）。
+  api.listAllModels.mockResolvedValue([model()]);
 });
 
 describe("groupByAlias", () => {
@@ -424,8 +427,41 @@ describe("ProviderDetailPage aliases", SLOW, () => {
     expect(api.mapModelAlias).toHaveBeenCalledTimes(1);
     expect(api.mapModelAlias).toHaveBeenCalledWith(ID, { alias: "Claude-X-Latest", model_id: ID });
     await waitFor(() => expect(api.listModelAliases).toHaveBeenCalledTimes(2));
-    // 下拉要的是本供应商的前 100 个模型，不带状态筛选。
-    expect(api.listModels).toHaveBeenCalledWith(ID, {}, 1, 100, expect.anything());
+    // 下拉要的是本供应商的全部模型，不只是第一页。
+    expect(api.listAllModels).toHaveBeenCalledWith(ID, expect.anything());
+  });
+
+  it("maps to a model beyond the first page of 100", async () => {
+    const user = userEvent.setup();
+    // 101 个模型：最后一个只在第二页上，旧做法（只取一页）选不到它。id 只换末尾几位，仍是全零占位。
+    const models = Array.from({ length: 101 }, (_, index) =>
+      model({
+        id: `00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`,
+        code: `model-${String(index + 1).padStart(3, "0")}`,
+      }),
+    );
+    api.getProvider.mockResolvedValue(provider());
+    api.listModels.mockResolvedValue(page<Model>([]));
+    api.listAllModels.mockResolvedValue(models);
+    api.listModelAliases.mockResolvedValue(page<AliasSegment>([]));
+    api.mapModelAlias.mockResolvedValue(segment({ alias: "late-alias" }));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "Map an alias" }));
+    await user.click(screen.getByLabelText("Alias"));
+    await user.paste("late-alias");
+    // 下拉是虚拟列表，只渲染开头几项；按代码搜到第 101 个再点。
+    fireEvent.mouseDown(screen.getByLabelText("Model"));
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "model-101" } });
+    fireEvent.click(await screen.findByTitle("model-101"));
+    await user.click(buttonWithText("Review", topDialog()));
+    await user.click(await screen.findByText("Confirm and map"));
+
+    expect(await screen.findByText("Mapping saved.")).toBeInTheDocument();
+    expect(api.mapModelAlias).toHaveBeenCalledWith(ID, {
+      alias: "late-alias",
+      model_id: "00000000-0000-0000-0000-000000000101",
+    });
   });
 
   it("does not ask the backend before a model is chosen", async () => {

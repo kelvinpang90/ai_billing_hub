@@ -40,8 +40,10 @@ import {
   MODEL_CODE_PATTERN,
   PROVIDER_LISTS_QUERY_KEY,
   aliasListQueryKey,
+  allModelsQueryKey,
   createModel,
   getProvider,
+  listAllModels,
   listModelAliases,
   listModels,
   mapModelAlias,
@@ -668,8 +670,7 @@ interface MapFormValues {
 /**
  * 映射一个字符串到本供应商的某个模型。`alias` 非空时是给已有的字符串改映射，字符串不可改。
  *
- * 模型下拉列出本供应商的前 100 个模型（含已停用的：停用不影响解析，后端也不拦）。超过 100 个时
- * 下拉里写明只列了前 100 个。
+ * 模型下拉列出本供应商的全部模型（逐页取完，含已停用的：停用不影响解析，后端也不拦）。
  */
 function MapAliasModal({
   providerId,
@@ -687,18 +688,17 @@ function MapAliasModal({
   const [reviewing, setReviewing] = useState<(MapAliasBody & { model_code: string }) | null>(null);
 
   const models = useQuery({
-    queryKey: modelListQueryKey(providerId, {}, 1, MAX_PAGE_SIZE),
-    queryFn: ({ signal }) => listModels(providerId, {}, 1, MAX_PAGE_SIZE, signal),
+    queryKey: allModelsQueryKey(providerId),
+    queryFn: ({ signal }) => listAllModels(providerId, signal),
   });
 
-  const options = (models.data?.items ?? []).map((model) => ({
+  const options = (models.data ?? []).map((model) => ({
     value: model.id,
     label: model.code,
   }));
-  const truncated = models.data !== undefined && models.data.total > models.data.items.length;
 
   const review = (values: MapFormValues): void => {
-    const chosen = models.data?.items.find((model) => model.id === values.model_id);
+    const chosen = models.data?.find((model) => model.id === values.model_id);
     if (chosen === undefined) {
       return;
     }
@@ -745,7 +745,6 @@ function MapAliasModal({
           <Form.Item
             name="model_id"
             label={t("catalog.aliases.field.model")}
-            extra={truncated ? t("catalog.aliases.modelsTruncated") : undefined}
             rules={[{ required: true, message: t("catalog.aliases.modelRequired") }]}
           >
             <Select

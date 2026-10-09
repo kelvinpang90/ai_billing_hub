@@ -384,7 +384,6 @@
   "catalog.aliases.explanation": "Usage that already happened keeps the model it was matched to. The one exception is a string that has never been mapped before: its first mapping also covers earlier usage, which so far matched no model and was not charged.",
   "catalog.aliases.aliasHint": "The model string exactly as applications report it, including letter case, for example claude-sonnet-4-5-20250929.",
   "catalog.aliases.modelRequired": "Choose the model.",
-  "catalog.aliases.modelsTruncated": "Only the first 100 models of this provider are listed.",
   "catalog.aliases.noModels": "This provider has no models.",
   "catalog.aliases.confirmMap": "Save this mapping?",
   "catalog.aliases.confirmMapButton": "Confirm and map",
