@@ -490,6 +490,36 @@ describe("ProviderPriceDetailPage edit", SLOW, () => {
     expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
     // 分量没动（`1000000.00000000` 原样在框里），不出现在请求体里。
     expect(prices.updateProviderPrice).toHaveBeenCalledWith(ID, { source_reference: "Updated price sheet" });
+    await waitFor(() => expect(prices.getProviderPrice).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows the text and the request id when the backend refuses the edit, and does not refresh", async () => {
+    const user = userEvent.setup();
+    prices.getProviderPrice.mockResolvedValue(version());
+    prices.updateProviderPrice.mockRejectedValue(
+      new ApiError("PRICE_VERSION_NOT_DRAFT", "Not a draft.", "req-409"),
+    );
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const form = await waitFor(() => {
+      const dialog = topDialog();
+      expect(within(dialog).getByLabelText("Source reference")).toBeInTheDocument();
+      return dialog;
+    });
+    await user.clear(within(form).getByLabelText("Source reference"));
+    await user.paste("Updated price sheet");
+    await user.click(buttonWithText("Review", form));
+    await user.click(await screen.findByText("Confirm and save"));
+
+    expect(
+      await screen.findByText(
+        "This version has already been published, so it can no longer be edited or discarded.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("req-409")).toBeInTheDocument();
+    expect(screen.queryByText("Draft saved.")).not.toBeInTheDocument();
+    expect(prices.getProviderPrice).toHaveBeenCalledTimes(1);
   });
 
   it("does not offer to save a draft that did not change", async () => {

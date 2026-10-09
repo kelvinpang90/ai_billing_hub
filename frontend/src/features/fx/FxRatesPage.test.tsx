@@ -307,6 +307,21 @@ describe("FxRatesPage manual drafts", SLOW, () => {
     await waitFor(() => expect(api.listFxRates).toHaveBeenCalledTimes(2));
   });
 
+  it("shows the text and the request id when the backend refuses the new draft, and does not refresh", async () => {
+    const user = userEvent.setup();
+    api.listFxRates.mockResolvedValue(page([]));
+    api.createFxRate.mockRejectedValue(new ApiError("VALIDATION_ERROR", "rate: invalid.", "req-422"));
+
+    renderPage();
+    await fillManualDraft(user, "USD", "4.083");
+    await user.click(await screen.findByText("Confirm and create"));
+
+    expect(await screen.findByText("Some fields were not accepted.")).toBeInTheDocument();
+    expect(screen.getByText("req-422")).toBeInTheDocument();
+    expect(screen.queryByText("Draft created.")).not.toBeInTheDocument();
+    expect(api.listFxRates).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses a rate with more than 10 decimal places instead of rounding it", async () => {
     const user = userEvent.setup();
     api.listFxRates.mockResolvedValue(page([]));
@@ -371,6 +386,7 @@ describe("FxRatesPage manual drafts", SLOW, () => {
 
     expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
     expect(api.updateFxRate).toHaveBeenCalledWith(ID, { rate: "4.1000000000" });
+    await waitFor(() => expect(api.listFxRates).toHaveBeenCalledTimes(2));
   });
 
   it("does not offer to save when the rate only gained trailing zeros", async () => {
@@ -464,6 +480,26 @@ describe("FxRatesPage publish, retire and discard", SLOW, () => {
     expect(await screen.findByText("Retired.")).toBeInTheDocument();
     expect(api.retireFxRate).toHaveBeenCalledWith(ID, "Wrong rate entered");
     await waitFor(() => expect(api.listFxRates).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows the text and the request id for a rate that can no longer be retired, and does not refresh", async () => {
+    const user = userEvent.setup();
+    api.listFxRates.mockResolvedValue(page([PUBLISHED]));
+    api.retireFxRate.mockRejectedValue(new ApiError("FX_RATE_NOT_RETIRABLE", "Cannot retire.", "req-409"));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "Retire" }));
+    await user.click(screen.getByLabelText("Reason"));
+    await user.paste("Wrong rate entered");
+    await user.click(buttonWithText("Review", topDialog()));
+    await user.click(await screen.findByText("Confirm and retire"));
+
+    expect(
+      await screen.findByText("Only the latest published exchange rate can be retired. Drafts are discarded instead."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("req-409")).toBeInTheDocument();
+    expect(screen.queryByText("Retired.")).not.toBeInTheDocument();
+    expect(api.listFxRates).toHaveBeenCalledTimes(1);
   });
 
   it("discards only after the confirmation, and shows the text when it was already published", async () => {
