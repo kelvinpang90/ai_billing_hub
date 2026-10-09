@@ -96,7 +96,7 @@
  *                   IMAGE_GENERATION、OCR_PAGE、DOCUMENT_PAGE、CUSTOM），其中 LLM_TOKEN 恰好 4 个分量。表格（表头有
  *                   「Code」「Components ← quantity field」）的数据行与响应的 items 一一对应：同样的顺序与代码、每行
  *                   「Components」格里的 <li> 个数等于该项的分量数（LLM_TOKEN 那一行因此是 4 个）；报到前把 LLM_TOKEN
- *                   那一行滚动到视口中间
+ *                   那一行滚动到视口中间（窄视口下这一行可能比视口还高，那时改为行首对齐视口顶端，只要求行首在视口内）
  *   open_provider_prices
  *                   点顶栏「Provider prices」（文案取 en.json 的 nav.providerPrices，href 为 paths.ts 的 providerPrices，
  *                   即 /pricing/provider-prices）进价格页；页面落定且不是加载失败（任何错误提示）、无权限（pricing.forbidden）
@@ -1246,23 +1246,29 @@ function probeMeterTypes(lib, T) {
   };
 }
 
-/** 把代码为 code 的那一行滚到视口中间。只滚动，不点任何东西。 */
+/**
+ * 把代码为 code 的那一行滚到视口中间。只滚动，不点任何东西。
+ * 窄视口下分量格会断词换行，LLM_TOKEN 那一行可能比视口还高：居中会把行首推出视口，这时改为行首对齐视口顶端。
+ */
 function scrollMeterTypeIntoView(lib, { T, code }) {
   const tr = lib.meterTypeRow(T, code);
   if (tr === null) {
     return false;
   }
-  tr.scrollIntoView({ block: "center", inline: "nearest" });
+  const block = tr.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  tr.scrollIntoView({ block, inline: "nearest" });
   return true;
 }
 
+/** 放得下视口的行要整行在视口内；放不下的只要求行首在视口内。 */
 function meterTypeInView(lib, { T, code }) {
   const tr = lib.meterTypeRow(T, code);
   if (tr === null) {
     return false;
   }
   const rect = tr.getBoundingClientRect();
-  return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
 
 /** 顶栏里文字为 text、href 恰好为 href 的链接（价格与汇率两项共用）。只点这一个。 */
