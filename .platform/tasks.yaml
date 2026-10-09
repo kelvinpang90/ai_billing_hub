@@ -2560,7 +2560,7 @@ tasks:
     title: 管理端前端：AI 目录页面（计量类型、供应商、模型与别名）
     purpose: >-
       管理端前端：AIH-TASK-025 目录接口的页面 —— 计量类型（列表含分量、新建 QUANTITY 类型、改名与停用）、供应商（列表、新建、改名与停用）、供应商详情（模型列表 / 新建 / 改名与停用；别名的当前与历史段、映射、撤销）。新建 features/catalog/，顶栏菜单加一项。只做前端，外加验收脚本的两个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-043
     acceptance_criteria:
@@ -2670,6 +2670,7 @@ tasks:
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，钱与状态机的规则都在后端（已过闸门）；PR 正文要把这条理由写出来
       - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把下面列出的新步骤加进这个脚本（文件名不变），已有步骤（login、open_customers、open_fixture、check_balance、open_audit、check_audit_entry 以及之前任务加的步骤）行为不变、照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素；沿用验收脚本已有的约束（见 AIH-TASK-024、AIH-TASK-023 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤。验收只读：只点导航链接与页内的只读入口，不点任何会写数据的按钮，不提交任何表单
       - 不改 planning-v1 块
+      - 部署后浏览器验收另带 AIH-TASK-035 的两个已有步骤 open_catalog、check_meter_types：035 由人工接手交付，Worker 没有跑它的部署后验收，Kelvin 2026-10-09 定为随本任务一起跑。本任务不改这两个步骤，它们照跑应 PASS
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminProviderPrices.ts
@@ -2716,6 +2717,8 @@ tasks:
         - login
         - open_provider_prices
         - open_fx_rates
+        - open_catalog
+        - check_meter_types
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
@@ -2965,6 +2968,67 @@ tasks:
         - open_customers
         - open_fixture
         - check_webhook_signing
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-054
+    title: 管理端前端：审计页动作下拉补齐后端全部审计动作并防止再次漂移
+    purpose: >-
+      frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 是 app/models/auth.py 里 AuditAction 的手抄副本，AIH-TASK-022 之后后端新增的 27 个动作（内部计费模式、目录、供应商价格、定价规则、汇率、用量事件）都没有跟上，审计页的动作下拉选不到它们。补齐这份清单，并加一条测试直接比对后端枚举，以后后端再加动作而前端没跟上时测试就会失败。只做前端，不改页面与验收脚本。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - AUDIT_ACTIONS 与 app/models/auth.py 的 AuditAction 取值一一对应，顺序与枚举声明顺序一致；不多写后端没有的值（多写的值一选就是 422，见 adminAudit.ts 文件头）。不改任何后端文件
+      - frontend/src/api/adminAudit.test.ts 加一条用例：用 node:fs 读 app/models/auth.py，解析 AuditAction 类体里的全部取值，断言与 AUDIT_ACTIONS 完全相同（缺一个、多一个、顺序不同都失败）；另加防空转断言，解析到的取值个数不少于 48（与当前枚举一致），避免正则失效时在空列表上通过。读文件的写法参考 frontend/src/i18n/keys.test.ts
+      - 审计页沿用现有 ACTION_OPTIONS 的做法，下拉选项显示原样动作码，不加 i18n 文案，也不改 frontend/src/features/audit/AuditLogPage.tsx；adminAudit.ts 文件头注释同步写明有这条比对测试
+      - 不装依赖；不直接 import package.json 里没有声明的包；不改 .platform/、docs/TODO.md 与 planning-v1 块
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，只同步一份只读的筛选选项清单，审计的写入与校验都在后端；PR 正文要把这条理由写出来
+      - 部署后浏览器验收：沿用 scripts/acceptance/admin_customers.mjs 的已有步骤 login、open_audit、check_audit_entry，本任务不加新步骤、不改验收脚本；沿用验收脚本已有的约束，这三步照跑仍应 PASS
+    allowed_change_paths:
+      - frontend/src/api/adminAudit.ts
+      - frontend/src/api/adminAudit.test.ts
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    # 合并且部署成功后，Worker 用本机固定的浏览器与凭据跑一次 acceptance.browser（最多 3 次尝试）。
+    # acceptance.browser 不在上面的 allowed_commands 里：它只能被这个 acceptance 块引用。
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_audit
+        - check_audit_entry
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed

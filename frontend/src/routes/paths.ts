@@ -26,6 +26,14 @@ export const ROUTES = {
    * `scripts/acceptance/admin_customers.mjs` 的 `open_audit` 按这个 href 找顶栏链接，改了要同步那里。
    */
   audit: "/audit",
+  /**
+   * 管理端 AI 目录（AIH-TASK-035）。顶栏的目录项指向供应商页；验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `open_catalog` / `check_meter_types` 按这几个 href 找链接，
+   * 改了要同步那里。
+   */
+  catalogProviders: "/catalog/providers",
+  catalogProviderDetail: "/catalog/providers/:providerId",
+  catalogMeterTypes: "/catalog/meter-types",
 } as const;
 
 /**
@@ -36,6 +44,11 @@ export const ROUTES = {
  */
 export function customerDetailPath(customerId: string): string {
   return generatePath(ROUTES.customerDetail, { customerId });
+}
+
+/** 供应商详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
+export function catalogProviderDetailPath(providerId: string): string {
+  return generatePath(ROUTES.catalogProviderDetail, { providerId });
 }
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */

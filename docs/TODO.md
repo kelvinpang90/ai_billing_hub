@@ -25,11 +25,11 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-035` Phase 2 管理端前端：AI 目录
-2. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
-3. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
-4. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
-5. `AIH-TASK-046` 管理端前端：项目出站 webhook 签名密钥的签发、启用与退役
+1. `AIH-TASK-036` Phase 2 管理端前端：供应商价格与汇率
+2. `AIH-TASK-037` Phase 2 管理端前端：定价规则与试算
+3. `AIH-TASK-038` Phase 2 管理端前端：用量事件与重新入队
+4. `AIH-TASK-046` 管理端前端：项目出站 webhook 签名密钥的签发、启用与退役
+5. `AIH-TASK-054` 管理端前端：审计页动作下拉补齐后端全部审计动作
 6. `AIH-TASK-047` Phase 3 状态同步：迁移 0020 与投递行
 7. `AIH-TASK-048` Phase 3 状态同步：有效状态合成与状态版本递增收拢
 8. `AIH-TASK-049` Phase 3 状态同步：项目集成状态与 webhook 地址的业务规则
