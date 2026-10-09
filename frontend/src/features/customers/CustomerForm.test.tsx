@@ -83,6 +83,13 @@ function submitButton() {
   return screen.getByRole("button", { name: /Create customer/ });
 }
 
+// 点一下再粘贴，不逐字 user.type：antd 表单每敲一个字都重渲染一次，全量并行跑（尤其 OpenClaw
+// Worker 的沙箱里）会把用例拖过超时。做法与 #144 的 LoginPage / CustomerDetailPage 一致。
+async function fill(user: ReturnType<typeof userEvent.setup>, label: string, value: string) {
+  await user.click(screen.getByLabelText(label));
+  await user.paste(value);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -103,8 +110,8 @@ describe("CustomerCreatePage", () => {
     const user = userEvent.setup();
     renderCreatePage();
 
-    await user.type(screen.getByLabelText("Company name"), "   ");
-    await user.type(screen.getByLabelText("Email"), "not-an-email");
+    await fill(user, "Company name", "   ");
+    await fill(user, "Email", "not-an-email");
     await user.click(submitButton());
 
     expect(await screen.findByText("Enter the company name.")).toBeInTheDocument();
@@ -116,9 +123,9 @@ describe("CustomerCreatePage", () => {
     const user = userEvent.setup();
     renderCreatePage();
 
-    await user.type(screen.getByLabelText("Company name"), "Acme");
-    await user.type(screen.getByLabelText("Email"), "ops@example.com");
-    await user.type(screen.getByLabelText("Phone"), "0".repeat(33));
+    await fill(user, "Company name", "Acme");
+    await fill(user, "Email", "ops@example.com");
+    await fill(user, "Phone", "0".repeat(33));
     await user.click(submitButton());
 
     expect(
@@ -132,9 +139,9 @@ describe("CustomerCreatePage", () => {
     api.createCustomer.mockResolvedValue(customer({ contact_name: null }));
     renderCreatePage();
 
-    await user.type(screen.getByLabelText("Company name"), "  Acme Sdn Bhd  ");
-    await user.type(screen.getByLabelText("Email"), "ops@example.com");
-    await user.type(screen.getByLabelText("Phone"), "+60 3-0000 0000");
+    await fill(user, "Company name", "  Acme Sdn Bhd  ");
+    await fill(user, "Email", "ops@example.com");
+    await fill(user, "Phone", "+60 3-0000 0000");
     await user.click(submitButton());
 
     await waitFor(() => {
@@ -153,8 +160,8 @@ describe("CustomerCreatePage", () => {
     api.createCustomer.mockReturnValue(pending.promise);
     renderCreatePage();
 
-    await user.type(screen.getByLabelText("Company name"), "Acme Sdn Bhd");
-    await user.type(screen.getByLabelText("Email"), "ops@example.com");
+    await fill(user, "Company name", "Acme Sdn Bhd");
+    await fill(user, "Email", "ops@example.com");
     await user.dblClick(submitButton());
 
     await waitFor(() => {
@@ -178,8 +185,8 @@ describe("CustomerCreatePage", () => {
     );
     renderCreatePage();
 
-    await user.type(screen.getByLabelText("Company name"), "Acme Sdn Bhd");
-    await user.type(screen.getByLabelText("Email"), "ops@example.com");
+    await fill(user, "Company name", "Acme Sdn Bhd");
+    await fill(user, "Email", "ops@example.com");
     await user.click(submitButton());
 
     expect(await screen.findByText(/Invalid field: body\.email/)).toBeInTheDocument();
@@ -197,8 +204,8 @@ describe("CustomerCreatePage", () => {
     );
     renderCreatePage();
 
-    await user.type(screen.getByLabelText("Company name"), "Acme Sdn Bhd");
-    await user.type(screen.getByLabelText("Email"), "ops@example.com");
+    await fill(user, "Company name", "Acme Sdn Bhd");
+    await fill(user, "Email", "ops@example.com");
     await user.click(submitButton());
 
     expect(
