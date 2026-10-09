@@ -1,6 +1,7 @@
 /**
  * 部署后浏览器验收：管理端客户页（AIH-TASK-015），本任务为 AIH-TASK-024；AIH-TASK-023 加了审计页的两个只读步骤
- * （open_audit、check_audit_entry）。文件名沿用，不改。
+ * （open_audit、check_audit_entry）；AIH-TASK-035 加了 AI 目录的两个只读步骤（open_catalog、check_meter_types）。
+ * 文件名沿用，不改。
  *
  * 谁在什么时候跑它
  * ----------------
@@ -48,13 +49,16 @@
  *   与页面文字或接口响应的比较都在本进程内做，不打印。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
- *   新的筛选条件重新发 GET）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何会写数据的按钮；只打开
- *   公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。审计页不改每页条数、不翻页、不展开行、不点「Clear
- *   filters」。登录会在服务端留下会话与登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的
- *   正是这一条。若账号走到「首次启用 2FA」那一步，那会写数据，直接 login_failed，不继续。
+ *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
+ *   （href 为 /catalog/meter-types，不在顶栏里）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
+ *   会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。审计页不改每页条数、不翻页、
+ *   不展开行、不点「Clear filters」。目录页不点「New provider」「New meter type」「Rename」「Retire」「Reactivate」
+ *   或任何确认按钮、不点状态筛选、不翻页、不打开任何供应商的详情、不填也不提交任何表单。登录会在服务端留下会话与
+ *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
+ *   2FA」那一步，那会写数据，直接 login_failed，不继续。
  * - 每个步骤都真的检查它声称的东西；等待一律有上限（见下面的常量），总时长控制在 timeout_seconds（300 秒）内。
  * - 找元素只按可见文字（文案取自 frontend/src/i18n/locales/en.json）或语义结构（label→control、header、
- *   table/thead/th、th→td、role、title 属性），不依赖 antd 生成的类名哈希。文案与选择器集中在下面的常量里。
+ *   table/thead/th、th→td、li、role、title 属性），不依赖 antd 生成的类名哈希。文案与选择器集中在下面的常量里。
  *
  * 步骤
  * ----
@@ -78,6 +82,18 @@
  *                   login 步骤完成的时刻相差不超过 120 秒；本次运行没跑过 login 就 assertion_failed。表格的数据行
  *                   与响应的 items 一一对应（「Action」列全是 LOGIN），那条记录所在行的「Action」「Actor」两列文字与
  *                   它的 action / actor_email 一致；报到前把这一行滚动到视口中间
+ *   open_catalog    点顶栏「AI catalog」（文案取 en.json 的 nav.catalog，href 为 paths.ts 的 catalogProviders，即
+ *                   /catalog/providers）进供应商页；页面落定且不是加载失败（任何错误提示）、无权限或路由兜底页。
+ *                   空列表合法（生产上不预置供应商），有表格时表头要有「Code」「Display name」两列
+ *   check_meter_types
+ *                   在供应商页里点「Meter types」链接（href 为 /catalog/meter-types，不在顶栏里）进计量类型页，页面
+ *                   落定且不是加载失败、无权限、空列表。后端值取页面在点击之后自己发出的
+ *                   GET /api/v1/admin/usage-meter-types 的响应体（被动观察，不自己发请求、不拦截）：items 里有迁移
+ *                   种子的 9 个代码（LLM_TOKEN、EMBEDDING_TOKEN、AUDIO_SECOND、AUDIO_MINUTE、TTS_CHARACTER、
+ *                   IMAGE_GENERATION、OCR_PAGE、DOCUMENT_PAGE、CUSTOM），其中 LLM_TOKEN 恰好 4 个分量。表格（表头有
+ *                   「Code」「Components ← quantity field」）的数据行与响应的 items 一一对应：同样的顺序与代码、每行
+ *                   「Components」格里的 <li> 个数等于该项的分量数（LLM_TOKEN 那一行因此是 4 个）；报到前把 LLM_TOKEN
+ *                   那一行滚动到视口中间
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -123,6 +139,16 @@ const TEXT = {
   auditColumnActor: "Actor", // audit.column.actor
   auditFilterAction: "Action", // audit.filter.action —— 筛选表单里动作下拉的 label
   auditApply: "Apply filters", // audit.filter.apply
+  navCatalog: "AI catalog", // nav.catalog —— 顶栏的目录项
+  catalogForbidden: "Only administrators can manage the AI catalog.", // catalog.forbidden
+  catalogCode: "Code", // catalog.field.code —— 目录表格的列头
+  catalogDisplayName: "Display name", // catalog.field.displayName
+  providersLoading: "Loading providers…", // catalog.providers.loading
+  providersEmpty: "No providers yet.", // catalog.providers.empty
+  providersMeterTypesLink: "Meter types", // catalog.providers.meterTypesLink —— 供应商页里的链接
+  meterTypesLoading: "Loading meter types…", // catalog.meterTypes.loading
+  meterTypesEmpty: "No meter types yet.", // catalog.meterTypes.empty
+  meterTypesComponents: "Components ← quantity field", // catalog.meterTypes.field.components
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -131,6 +157,8 @@ const TEXT = {
   customersPath: "/customers",
   customerCreatePath: "/customers/new",
   auditPath: "/audit",
+  catalogProvidersPath: "/catalog/providers",
+  catalogMeterTypesPath: "/catalog/meter-types",
 };
 
 /** 夹具客户的公司名前缀。只看、只打开以它开头的客户。 */
@@ -156,6 +184,26 @@ const LOGIN_AUDIT_MAX_SKEW_MS = 120_000;
 const AUDIT_QUERY_PARAMS = new Set(["page", "page_size", "action"]);
 /** 后端的不带时区 UTC 时间（docs/api.md「时间」）。 */
 const NAIVE_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+
+/** 计量类型列表接口的路径（frontend/src/api/adminCatalog.ts 的 METER_TYPES_URL）。 */
+const METER_TYPES_API = /^\/api\/v1\/admin\/usage-meter-types$/;
+/**
+ * 迁移种子的 9 个计量类型（docs/design/AIH-TASK-025-ai-catalog.md §2「种子」）。LLM_TOKEN 是唯一的多字段形态，
+ * 4 个分量（input / output / cache write / cache read）。
+ */
+const SEED_METER_TYPES = [
+  "LLM_TOKEN",
+  "EMBEDDING_TOKEN",
+  "AUDIO_SECOND",
+  "AUDIO_MINUTE",
+  "TTS_CHARACTER",
+  "IMAGE_GENERATION",
+  "OCR_PAGE",
+  "DOCUMENT_PAGE",
+  "CUSTOM",
+];
+const LLM_TOKEN_CODE = "LLM_TOKEN";
+const LLM_TOKEN_COMPONENTS = 4;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -545,8 +593,28 @@ const network = {
   details: new Map(),
   /** 审计查询接口：requestId → { loginFirstPage, status, finished, failed, seq }。查询串本身不保存。 */
   audits: new Map(),
+  /** 计量类型列表接口：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
+  meterTypes: new Map(),
   seq: 0,
 };
+
+/** 三类被观察的接口里，requestId 对应的那一条记录。 */
+function trackedRequest(requestId) {
+  return network.details.get(requestId) ?? network.audits.get(requestId) ?? network.meterTypes.get(requestId);
+}
+
+/** 是不是计量类型列表接口（同源 https、路径恰好是列表，查询串不看）。 */
+function isMeterTypesList(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === network.host && METER_TYPES_API.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
 
 function detailCustomerId(url) {
   if (typeof url !== "string") {
@@ -620,6 +688,14 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        if (isMeterTypesList(params.request?.url) && params.request?.method === "GET") {
+          network.meterTypes.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -628,21 +704,21 @@ function observeNetwork(sessionId) {
           network.documents.set(params.loaderId, status);
           network.lastDocumentStatus = status;
         }
-        const tracked = network.details.get(params.requestId) ?? network.audits.get(params.requestId);
+        const tracked = trackedRequest(params.requestId);
         if (tracked !== undefined) {
           tracked.status = status;
         }
         break;
       }
       case "Network.loadingFinished": {
-        const tracked = network.details.get(params.requestId) ?? network.audits.get(params.requestId);
+        const tracked = trackedRequest(params.requestId);
         if (tracked !== undefined) {
           tracked.finished = true;
         }
         break;
       }
       case "Network.loadingFailed": {
-        const tracked = network.details.get(params.requestId) ?? network.audits.get(params.requestId);
+        const tracked = trackedRequest(params.requestId);
         if (tracked !== undefined) {
           tracked.failed = true;
         }
@@ -697,6 +773,23 @@ function loginAuditInFlight(afterSeq) {
     }
   }
   return false;
+}
+
+/** afterSeq 之后发出、成功读完的计量类型列表请求里最近的一次；还有在路上的就回 null，等它落定。 */
+function latestMeterTypesResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, request] of network.meterTypes) {
+    if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,7 +895,42 @@ function pageLib() {
     }
     return null;
   };
-  return { norm, leaf, control, button, alert, layout, valueCells, common, auditRows };
+  /**
+   * 表头恰好含 headTexts 每一列的第一张表：回 { index: 列名 → 第几列, rows: [{ tr, cells }] }，只认表格自己的
+   * thead / tbody，空状态那一行（只有一格）跳过。没有这张表时回 null。
+   */
+  const tableWith = (headTexts) => {
+    for (const table of document.querySelectorAll("table")) {
+      const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => norm(th.textContent));
+      if (!headTexts.every((text) => heads.includes(text))) {
+        continue;
+      }
+      const index = Object.fromEntries(headTexts.map((text) => [text, heads.indexOf(text)]));
+      const rows = [];
+      for (const tr of table.querySelectorAll(":scope > tbody > tr")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        const cells = [...tr.querySelectorAll(":scope > td")];
+        if (cells.length !== heads.length) {
+          continue;
+        }
+        rows.push({ tr, cells });
+      }
+      return { index, rows };
+    }
+    return null;
+  };
+  /** 计量类型表格（表头有「Code」「Components ← quantity field」）里代码为 code 的那一行的 <tr>；没有时 null。 */
+  const meterTypeRow = (T, code) => {
+    const table = tableWith([T.catalogCode, T.meterTypesComponents]);
+    if (table === null) {
+      return null;
+    }
+    const row = table.rows.find(({ cells }) => norm(cells[table.index[T.catalogCode]].textContent) === code);
+    return row === undefined ? null : row.tr;
+  };
+  return { norm, leaf, control, button, alert, layout, valueCells, common, auditRows, tableWith, meterTypeRow };
 }
 
 function probeLogin(lib, T) {
@@ -1023,6 +1151,88 @@ function auditRowInView(lib, { T, index }) {
     return false;
   }
   const rect = rows[index].tr.getBoundingClientRect();
+  return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+}
+
+function clickNavCatalog(lib, T) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === T.navCatalog && a.getAttribute("href") === T.catalogProvidersPath) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 供应商页的状态。错误提示（任何 role=alert）与无权限分开报。 */
+function probeProviders(lib, T) {
+  const forbidden = lib.leaf(T.catalogForbidden) !== null;
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.providersLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: lib.leaf(T.providersEmpty) !== null,
+    table: lib.tableWith([T.catalogCode, T.catalogDisplayName]) !== null,
+  };
+}
+
+/** 供应商页里（不在顶栏里）的「Meter types」链接。只点这一个。 */
+function clickMeterTypesLink(lib, T) {
+  for (const a of document.querySelectorAll("a")) {
+    if (
+      a.closest("header") === null &&
+      lib.norm(a.textContent) === T.providersMeterTypesLink &&
+      a.getAttribute("href") === T.catalogMeterTypesPath
+    ) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 计量类型页的状态与表格：每个数据行的代码与「Components」格里 <li> 的个数，按显示顺序。 */
+function probeMeterTypes(lib, T) {
+  const forbidden = lib.leaf(T.catalogForbidden) !== null;
+  const table = lib.tableWith([T.catalogCode, T.meterTypesComponents]);
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.meterTypesLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: lib.leaf(T.meterTypesEmpty) !== null,
+    table: table !== null,
+    rows:
+      table === null
+        ? []
+        : table.rows.map(({ cells }) => ({
+            code: lib.norm(cells[table.index[T.catalogCode]].textContent),
+            components: cells[table.index[T.meterTypesComponents]].querySelectorAll("li").length,
+          })),
+  };
+}
+
+/** 把代码为 code 的那一行滚到视口中间。只滚动，不点任何东西。 */
+function scrollMeterTypeIntoView(lib, { T, code }) {
+  const tr = lib.meterTypeRow(T, code);
+  if (tr === null) {
+    return false;
+  }
+  tr.scrollIntoView({ block: "center", inline: "nearest" });
+  return true;
+}
+
+function meterTypeInView(lib, { T, code }) {
+  const tr = lib.meterTypeRow(T, code);
+  if (tr === null) {
+    return false;
+  }
+  const rect = tr.getBoundingClientRect();
   return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
 }
 
@@ -1503,6 +1713,126 @@ async function stepCheckAuditEntry(ctx) {
   }
 }
 
+/** 目录页落定：不在加载，且是某一种终态（表格、错误提示、无权限、空列表），或者走到了别处。 */
+function catalogSettled(path) {
+  return (s) =>
+    s.appError ||
+    s.notFound ||
+    (s.path === path && !s.busy && (s.failed || s.forbidden || s.empty || s.table));
+}
+
+/** 目录页落在了不该落的状态上：各自的失败码。emptyAllowed 为真时空列表合法。 */
+function rejectCatalogState(s, path, emptyAllowed) {
+  if (s.appError || s.failed) {
+    throw fail("page_error");
+  }
+  if (s.notFound || s.path !== path) {
+    throw fail("navigation_failed");
+  }
+  if (s.forbidden || (s.empty && !emptyAllowed) || (!s.empty && !s.table)) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepOpenCatalog() {
+  const clicked = await waitFor(() => evaluate(clickNavCatalog, TEXT), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  const opened = await waitFor(
+    () => evaluate(probeProviders, TEXT),
+    catalogSettled(TEXT.catalogProvidersPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  // 生产上不预置任何供应商（设计 §8），空列表合法。
+  rejectCatalogState(opened.value, TEXT.catalogProvidersPath, true);
+}
+
+async function stepCheckMeterTypes() {
+  // 点链接之前的序号：只认在这之后页面自己发出的请求。
+  const beforeClick = network.seq;
+  const clicked = await waitFor(() => evaluate(clickMeterTypesLink, TEXT), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  const opened = await waitFor(
+    () => evaluate(probeMeterTypes, TEXT),
+    catalogSettled(TEXT.catalogMeterTypesPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(opened.value, TEXT.catalogMeterTypesPath, false);
+
+  // 后端值：页面自己发出的那次列表 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestMeterTypesResponse(beforeClick),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expected = items.map((item) => ({
+      code: typeof item?.code === "string" ? item.code : null,
+      components: Array.isArray(item?.components) ? item.components.length : -1,
+    }));
+    const codes = new Set(expected.map((item) => item.code));
+    const llm = expected.find((item) => item.code === LLM_TOKEN_CODE);
+    if (
+      expected.some((item) => item.code === null || item.components < 0) ||
+      !SEED_METER_TYPES.every((code) => codes.has(code)) ||
+      llm === undefined ||
+      llm.components !== LLM_TOKEN_COMPONENTS
+    ) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、缺种子、LLM_TOKEN 分量数不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 表格显示的就是这一份响应：行数、顺序、代码、每行的分量个数都一致。
+  const shown = await waitFor(
+    () => evaluate(probeMeterTypes, TEXT),
+    (s) =>
+      s.path === TEXT.catalogMeterTypesPath &&
+      !s.busy &&
+      s.rows.length === expected.length &&
+      s.rows.every((row, i) => row.code === expected[i].code && row.components === expected[i].components),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.table ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把 LLM_TOKEN 那一行滚进视口。
+  const arg = { T: TEXT, code: LLM_TOKEN_CODE };
+  if ((await evaluate(scrollMeterTypeIntoView, arg)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(meterTypeInView, arg), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
@@ -1510,6 +1840,8 @@ const STEPS = {
   check_balance: stepCheckBalance,
   open_audit: stepOpenAudit,
   check_audit_entry: stepCheckAuditEntry,
+  open_catalog: stepOpenCatalog,
+  check_meter_types: stepCheckMeterTypes,
 };
 
 // ---------------------------------------------------------------------------
