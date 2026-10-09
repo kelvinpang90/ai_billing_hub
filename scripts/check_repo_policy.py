@@ -146,12 +146,118 @@ def listed_paths(root: Path) -> list[str]:
     return git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
 
 
+TASKS_FILE = ".platform/tasks.yaml"
+TASK_LIST_FIELDS = {"depends_on", "allowed_change_paths", "acceptance_criteria"}
+# re.ASCII：否则 \w 会吃进紧跟路径的中文（「docs/api.md对应小节」）
+TASK_PATH_RE = re.compile(r"(?<![\w./-])(?:frontend|app|tests|scripts|docs|alembic)/[\w./-]+\.\w+", re.ASCII)
+
+
+def yaml_scalar(value: str, where: str) -> str:
+    value = value.strip()
+    if value[:1] == "'":
+        if len(value) < 2 or not value.endswith("'"):
+            raise PolicyError(f"{where}: unterminated single-quoted value")
+        return value[1:-1].replace("''", "'")
+    if value[:1] == '"':
+        if len(value) < 2 or not value.endswith('"') or "\\" in value:
+            raise PolicyError(f"{where}: double-quoted value must be closed and contain no escapes")
+        return value[1:-1]
+    return re.sub(r"\s+#.*$", "", value)
+
+
+def parse_tasks(text: str) -> dict[str, dict]:
+    """Read the few task fields the path check needs; any other shape is a PolicyError.
+
+    CI 的 policy job 不装依赖、Worker 里也不保证有 PyYAML，所以只认 tasks.yaml 现有的写法：
+    `  - id:` 开头的任务、四格缩进的字段、六格缩进的单行列表项。认不出就 fail closed。
+    """
+    tasks: dict[str, dict] = {}
+    task = field = None
+    in_tasks = False
+    for number, line in enumerate(text.splitlines(), 1):
+        where = f"{TASKS_FILE}:{number}"
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            in_tasks, task, field = line.rstrip() == "tasks:", None, None
+            continue
+        if not in_tasks:
+            continue
+        match = re.fullmatch(r"  - id: (.+)", line)
+        if match:
+            task_id = yaml_scalar(match[1], where)
+            if task_id in tasks:
+                raise PolicyError(f"{where}: duplicate task id {task_id}")
+            task = tasks[task_id] = {"status": None, "text": [], **{name: [] for name in TASK_LIST_FIELDS}}
+            field = None
+            continue
+        if task is None or not line.startswith("    "):
+            raise PolicyError(f"{where}: each task must start with '  - id:'")
+        match = re.fullmatch(r"    ([a-z_]+):(.*)", line)
+        if match:
+            field, value = match[1], match[2].strip()
+            if field == "status":
+                task["status"] = yaml_scalar(value, where)
+            elif field in TASK_LIST_FIELDS and value not in {"", "[]"}:
+                raise PolicyError(f"{where}: {field} must be a block list or []")
+            elif field == "purpose" and value not in {">-", ">", "|-", "|", ""}:
+                task["text"].append(yaml_scalar(value, where))
+            continue
+        if field in TASK_LIST_FIELDS:
+            match = re.fullmatch(r"      - (.+)", line)
+            if not match:
+                raise PolicyError(f"{where}: {field} items must be one-line '      - value' entries")
+            task[field].append(yaml_scalar(match[1], where))
+        elif field == "purpose":
+            if not line.startswith("      "):
+                raise PolicyError(f"{where}: purpose continuation must be indented six spaces")
+            task["text"].append(line.strip())
+    return tasks
+
+
+def check_task_paths(text: str, listed: set[str]) -> list[str]:
+    """Every file a ready task's purpose / acceptance criteria names must be reachable by its run.
+
+    放行三种：在本任务 allowed_change_paths 里；已在仓库里；在 depends_on 传递闭包中某个 ready
+    任务的 allowed_change_paths 里（那个任务会建它）。done 的上游列过却没建，不算。
+    """
+    tasks = parse_tasks(text)
+    errors = []
+    for task_id, task in tasks.items():
+        if task["status"] != "ready":
+            continue
+        upstream, stack = set(), list(task["depends_on"])
+        while stack:
+            dep = stack.pop()
+            if dep not in upstream and dep in tasks and dep != task_id:
+                upstream.add(dep)
+                stack.extend(tasks[dep]["depends_on"])
+        named = TASK_PATH_RE.findall("\n".join(task["text"] + task["acceptance_criteria"]))
+        for path in sorted(set(named)):
+            if path in task["allowed_change_paths"] or path in listed:
+                continue
+            creators = sorted(dep for dep in upstream if path in tasks[dep]["allowed_change_paths"])
+            if any(tasks[dep]["status"] == "ready" for dep in creators):
+                continue
+            message = (f"{TASKS_FILE}: {task_id} names {path}, which is not in the repository, "
+                       "not in its allowed_change_paths, and not in a ready upstream task's allowed_change_paths")
+            if creators:
+                stale = ", ".join(f"{dep} ({tasks[dep]['status']})" for dep in creators)
+                message += f"; listed by {stale} but never created"
+            errors.append(message)
+    return errors
+
+
 def check_local(root: Path = ROOT) -> list[str]:
     errors = []
-    for relative in sorted(set(listed_paths(root))):
+    listed = set(listed_paths(root))
+    for relative in sorted(listed):
         path = root / relative
         if relative and path.suffix.lower() == ".md" and path.is_file():
             errors.extend(check_checkboxes(path.read_text(encoding="utf-8-sig"), relative))
+    # 单测的临时仓库没有 tasks.yaml；真实仓库里删掉它，Worker 整个就不接任务了
+    if TASKS_FILE in listed:
+        errors.extend(check_task_paths((root / TASKS_FILE).read_text(encoding="utf-8-sig"), listed))
     return errors
 
 
