@@ -148,8 +148,9 @@ def listed_paths(root: Path) -> list[str]:
 
 TASKS_FILE = ".platform/tasks.yaml"
 TASK_LIST_FIELDS = {"depends_on", "allowed_change_paths", "acceptance_criteria"}
-# re.ASCII：否则 \w 会吃进紧跟路径的中文（「docs/api.md对应小节」）
-TASK_PATH_RE = re.compile(r"(?<![\w./-])(?:frontend|app|tests|scripts|docs|alembic)/[\w./-]+\.\w+", re.ASCII)
+# re.ASCII：否则 \w 会吃进紧跟路径的中文（「docs/api.md对应小节」）。
+# 可选的 `./` 前缀不进捕获组，提取出来的就是规范化后的仓库根相对路径
+TASK_PATH_RE = re.compile(r"(?<![\w./-])(?:\./)?((?:frontend|app|tests|scripts|docs|alembic)/[\w./-]+\.\w+)", re.ASCII)
 
 
 def yaml_scalar(value: str, where: str) -> str:

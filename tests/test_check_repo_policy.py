@@ -703,6 +703,12 @@ class TaskPathTests(unittest.TestCase):
         self.assertIn("T-036 names", errors[0])
         self.assertIn("listed by T-035 (done) but never created", errors[0])
 
+    def test_dot_slash_prefix_is_normalized_not_skipped(self):
+        errors = self.check(task("T-1", "ready", criteria=[f"在 ./{NEW_FILE} 里实现"]))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(f"T-1 names {NEW_FILE},", errors[0])
+        self.assertEqual(self.check(task("T-1", "ready", allowed=[NEW_FILE], criteria=[f"在 ./{NEW_FILE} 里实现"])), [])
+
     def test_purpose_is_scanned_too(self):
         errors = self.check(task("T-1", "ready", purpose=f"新建 {NEW_FILE}"))
         self.assertEqual(len(errors), 1, errors)
