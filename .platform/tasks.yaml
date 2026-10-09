@@ -2648,7 +2648,7 @@ tasks:
     title: 管理端前端：供应商价格与汇率页面
     purpose: >-
       管理端前端：AIH-TASK-026 供应商价格与 AIH-TASK-028 汇率的页面 —— 价格版本列表 / 草稿（按计量类型成组录入分量）/ 发布（可预约）/ 退役 / 丢弃；汇率版本列表 / 手工草稿 / 发布 / 退役 / 丢弃与拉取记录。新建 features/pricing/ 与 features/fx/，顶栏菜单加两项。只做前端，外加验收脚本的两个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-035
     acceptance_criteria:
