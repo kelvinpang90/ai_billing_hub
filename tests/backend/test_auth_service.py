@@ -568,10 +568,10 @@ def test_concurrent_refresh_lets_exactly_one_through(tmp_path) -> None:
     base_url = make_url(os.environ["BILLING_TEST_DATABASE_URL"])
     admin_engine = create_engine(base_url.set(database=""), isolation_level="AUTOCOMMIT")
     with admin_engine.connect() as conn:
-        conn.exec_driver_sql("CREATE DATABASE IF NOT EXISTS billing_test_concurrency")
+        conn.exec_driver_sql(f"CREATE DATABASE IF NOT EXISTS `{base_url.database}_concurrency`")
     admin_engine.dispose()
 
-    engine = create_engine(base_url.set(database="billing_test_concurrency"), pool_size=5)
+    engine = create_engine(base_url.set(database=f"{base_url.database}_concurrency"), pool_size=5)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     factory = create_session_factory(engine)

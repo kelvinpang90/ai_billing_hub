@@ -114,9 +114,12 @@ jobs:
         # **CI 里一条都不许 skip。**迁移用例靠 BILLING_TEST_DATABASE_URL 决定
         # 跑不跑：MySQL service 起不来时它们会安静地 skip，而 pytest 仍然绿 ——
         # 没人会注意到「迁移这轮没验」。所以这里显式把 skip 判成失败。
+        #
+        # `-n auto` 按 runner 的核数并行；每个 worker 用自己的 MySQL 库（tests/backend/conftest.py），
+        # 并行后汇总行里照样有 skipped 计数，上面的判定不受影响。
         run: |
           set -o pipefail
-          python -m pytest -ra --durations=0 | tee pytest-output.txt
+          python -m pytest -ra -n auto --durations=30 | tee pytest-output.txt
           if grep -qE '[0-9]+ skipped' pytest-output.txt; then
             echo "::error::Tests were skipped in CI; every test must run here."
             exit 1

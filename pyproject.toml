@@ -45,6 +45,8 @@ dev = [
     # 与上面 fastapi 的下界绑定，见那里的注释。
     "httpx2>=2.12",
     "pytest>=8.3",
+    # CI 的 backend 用 `-n auto` 并行跑；每个 worker 的独立 MySQL 库见 tests/backend/conftest.py。
+    "pytest-xdist>=3.6",
     "ruff>=0.8",
     # 只给 tests/backend/test_compose.py 用：把 docker-compose.yml 的若干条
     # 不变量钉成用例，这样不必在 CI 里起一整个栈也能挡住回退。
