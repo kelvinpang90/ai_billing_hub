@@ -2560,7 +2560,7 @@ tasks:
     title: 管理端前端：AI 目录页面（计量类型、供应商、模型与别名）
     purpose: >-
       管理端前端：AIH-TASK-025 目录接口的页面 —— 计量类型（列表含分量、新建 QUANTITY 类型、改名与停用）、供应商（列表、新建、改名与停用）、供应商详情（模型列表 / 新建 / 改名与停用；别名的当前与历史段、映射、撤销）。新建 features/catalog/，顶栏菜单加一项。只做前端，外加验收脚本的两个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-043
     acceptance_criteria:
