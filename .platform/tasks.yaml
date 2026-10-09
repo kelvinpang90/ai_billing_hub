@@ -2984,3 +2984,400 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-047
+    title: 状态同步第一层：迁移 0020 与模型，建项目时插入投递行
+    purpose: >-
+      按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 1 项：迁移 0020（projects 加 integration_status 与 status_webhook_url，tenants 加 status_changed_at，新建 project_status_deliveries 并给已有项目各回填一行），对应模型，以及建项目时在同一事务插入它的投递行。从本任务上线起，每个项目都恰好有一行投递行。不改任何状态跃迁、接口与投递。
+    status: ready
+    acceptance_criteria:
+      - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 迁移文件名 alembic/versions/20261009_0020_status_sync.py，down_revision 指向 0019；列、默认值、CHECK、复合外键、主键与 next_attempt_at 索引按设计 §2「数据库」；已有项目回填 ENABLED，并给每个已有项目插入一行投递行（next_attempt_at 取迁移时刻）；status_changed_at 旧行为空；文件头有 §132 第 13 条分析；downgrade 按设计 §8（会丢数据时抛错拒绝，照 0019）
+      - 模型：app/models/tenancy.py 加 IntegrationStatus 枚举、两列与 status_changed_at；app/models/integration.py 加投递表模型
+      - app/services/customers.py 的建项目在同一事务里插入该项目的投递行（delivered_version 为空、attempt_count 0、next_attempt_at 为 now）；建项目失败回滚时投递行也不在；tests/backend/test_usage_billing.py 与 test_usage_billing_concurrency.py 里删项目的 MySQL 清理代码先删投递行，其余不动
+      - 测试覆盖设计 §7「每个项目恰好一行」；迁移的升降级与新列、新表、约束（照 test_migrations.py 与 test_model_columns.py 已有写法）；MySQL 用例在 BILLING_TEST_DATABASE_URL 未设置时 skip、CI 必跑
+      - docs/database-schema.md 写新列、新表与「每个项目恰好一行投递行」；按设计勾选 docs/TODO.md 里已满足的项，依据写在 PR 描述的任务记录里
+      - 不做 status_version 收拢、项目集成状态跃迁、webhook 地址、接口、投递与前端
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #241'
+    allowed_change_paths:
+      - alembic/versions/20261009_0020_status_sync.py
+      - app/models/tenancy.py
+      - app/models/integration.py
+      - app/services/customers.py
+      - tests/backend/test_customer_service.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_model_columns.py
+      - tests/backend/test_usage_billing.py
+      - tests/backend/test_usage_billing_concurrency.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-048
+    title: 状态同步第二层：有效状态合成与状态版本递增收拢，每次跃迁写领域事件
+    purpose: >-
+      按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 2 项：app/models/tenancy.py 的纯函数 compose_effective_status；app/repositories/tenancy.py 的 bump_status_version —— 一次调用完成版本 +1、status_changed_at、写一条领域 outbox 事件、按主键作废该租户投递行的退避；现有三个递增点（余额、账户状态、内部计量）全部改走它，内部计量补上漏写的 tenant.billing_mode_changed 事件。
+    status: ready
+    depends_on:
+      - AIH-TASK-047
+    acceptance_criteria:
+      - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - compose_effective_status 放在 app/models/tenancy.py，按设计 §2 的五级判定顺序返回 effective_status 与 reason_code；ai_service_enabled 改为调用它（integration_status 传 ENABLED），对外签名不变；wallet.py 与 account_status.py 里 outbox payload 的 effective_status 改为调用它，取值不变
+      - bump_status_version 放在 app/repositories/tenancy.py，签名与四件事按设计 §2「status_version 递增点收拢」：make_event 必填、在版本 +1 之后调用；现有的事件构造函数（account_status._status_event、wallet 里的构造函数）签名不变，由调用方用闭包包装并在闭包里组装 payload；作废退避先经 ix_projects_tenant_id 取项目 id（没有项目就跳过）、再按主键条件 UPDATE（next_attempt_at 晚于 now 才改）；只在调用方已持有租户行锁的事务里调用
+      - 三个现有递增点改走 bump_status_version，已有两种事件的类型与 payload 逐字不变；internal_billing 新增 tenant.billing_mode_changed，payload、聚合、状态与构造函数位置按设计表；锁顺序不变（钱包 → 租户，或只锁租户）
+      - 测试（tests/backend/test_status_version.py）覆盖设计 §7 的「合成规则」「优先级」「公式只有一份」「只有一个递增入口」「退避重排只锁本租户」各行，四种维度全组合；三个递增点各断言恰好一条对应类型的 outbox 行、payload 版本等于新版本、status_changed_at 已写；bump 作废退避只改未来时间的行；审计或 outbox 写入失败时状态、版本、status_changed_at 全部回滚（SQLite 与 MySQL 各一次）；现有 test_account_status_service.py 对 _status_event 的替换照常生效；MySQL 用例在 BILLING_TEST_DATABASE_URL 未设置时 skip、CI 必跑
+      - docs/database-schema.md 写 status_version 的唯一入口与加锁顺序
+      - 不做项目集成状态跃迁、webhook 地址、接口、投递与前端
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #241'
+    allowed_change_paths:
+      - app/models/tenancy.py
+      - app/repositories/tenancy.py
+      - app/repositories/wallet.py
+      - app/services/account_status.py
+      - app/services/internal_billing.py
+      - tests/backend/test_status_version.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-049
+    title: 状态同步第三层：项目集成状态跃迁与状态 webhook 地址的业务规则
+    purpose: >-
+      按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 3 项的服务函数（不开接口）：项目集成状态跃迁（租户 → 项目行锁、bump_status_version、project.integration_status_changed 事件、审计）；设置、清除与读取项目的状态 webhook 地址（规范化与校验、更新投递行并清空游标与租约、只记主机名的审计）；启用一把 webhook 签名密钥时同一事务把该项目投递行的 next_attempt_at 置为 now 并清空租约。
+    status: ready
+    depends_on:
+      - AIH-TASK-048
+    acceptance_criteria:
+      - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 新增 app/services/project_integration.py：项目集成状态跃迁按设计 §4 的跃迁表与判定顺序（先查租户 CLOSED 返回 409 ACCOUNT_CLOSED，再查相同目标不写库；项目不属于该客户与不存在一样 404），先锁租户行、再锁项目行，经 bump_status_version 写 project.integration_status_changed（payload 与聚合按设计表，不含原因），审计字段按设计 §2「事务边界」
+      - 设置 webhook 地址：规范化与校验按设计 §2「URL 规范化与校验」各步（拆分前查原始输入的空格与控制字符、主机名非空且为 LDH 字符集、IP 字面量的各种简写、路径与查询串字符集），判定顺序按设计（422 → 404 → 409 → 相同值不写）；设为地址而租户 CLOSED 时 409、清除不受限；真实变化时按设计 §2「事务边界」的加锁顺序改地址、UPDATE 投递行并清空 delivered_version、attempted_version、租约与失败计数、next_attempt_at 置为 now；审计 PROJECT_STATUS_WEBHOOK_SET 的前后状态只有 status_webhook_host；另有只读的读取函数供 GET 使用
+      - app/services/webhook_signing.py 的启用路径在同一事务里把该项目投递行的 next_attempt_at 置为 now 并清空租约与 attempted_version；其余签名密钥行为与 AIH-TASK-019 的设计逐字不变
+      - AuditAction 新增两个动作名；entity_type 用 project（已在 PUBLIC_ENTITY_TYPES 里），不改 app/services/audit_query.py
+      - 测试覆盖设计 §7 的「URL 规范化」「同一地址」「清除从未设过的地址」「CLOSED 优先」各行，跃迁表每一行、跃迁后版本 +1 且恰好一条事件、审计或 outbox 写入失败时整体回滚（SQLite 与 MySQL 各一次）、改地址清空游标与租约、启用密钥重排投递并清租约、加锁顺序在 MySQL 上与 bump_status_version、记账并发不死锁、日志与审计里没有完整地址；MySQL 用例在 BILLING_TEST_DATABASE_URL 未设置时 skip、CI 必跑
+      - docs/database-schema.md 补加锁顺序（租户 → 项目 → 投递行、租户共享锁 → 项目 → 投递行、项目 → 投递行）
+      - '不开接口、不做投递与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #241'
+    allowed_change_paths:
+      - app/services/project_integration.py
+      - app/services/webhook_signing.py
+      - app/models/auth.py
+      - tests/backend/test_project_integration_service.py
+      - tests/backend/test_webhook_signing_service.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-050
+    title: 状态同步第四层：有效状态接口新字段与项目集成管理接口
+    purpose: >-
+      按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 4 项：GET /api/v1/integration/effective-status 增加 project_integration_status、reason_code、effective_at；新增三个管理接口 POST …/projects/{project_id}/integration-status 与 PUT、GET …/projects/{project_id}/status-webhook；项目对象增加 integration_status 与 status_webhook_configured；docs/api.md 写清集成方的接收与对账契约。
+    status: ready
+    depends_on:
+      - AIH-TASK-049
+    acceptance_criteria:
+      - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - effective-status 只增加三个字段，原有字段名与取值不变；reason_code 与 effective_status 都来自 compose_effective_status；effective_at 取 status_changed_at，为空时取租户 created_at；鉴权与身份来源不变
+      - 三个管理接口只有 ADMIN 能调，处理函数第一条语句是 require_admin，加进 EXPECTED_ADMIN_ROUTES 与 VALID_BODIES；请求体 extra 一律禁止；调用 AIH-TASK-049 的服务函数，不在接口层重写规则；请求体、响应形状、错误码与判定顺序按设计 §2「接口」
+      - 项目对象（列表与创建响应）增加 integration_status 与 status_webhook_configured；完整地址只出现在 status-webhook 的 PUT 与 GET 响应里
+      - docs/api.md：effective-status 的新字段；三个管理接口；「状态 webhook 签名」一节补上 payload 字段表、event_id 规则、时间窗（±300 秒）、按 status_version 应用（更大才应用、同版本幂等、旧版本回 2xx 后忽略）、reason_code 不得展示给终端用户；对账契约按设计 §2「时间」（4 分钟周期、10 秒超时、失败 30 秒重试、最坏滞后算式、连续失败时保留最后状态并告警）
+      - 测试：effective-status 原字段不变加三个新字段、各 reason_code 经接口可见；三个接口的成功、相同目标不写、404 越权（A 的客户 id 配 B 的项目 id）、409、422 校验、非 ADMIN 403，以及设计 §7「地址读取」一行；项目对象新字段；status_webhook_configured 不泄露地址
+      - '不做投递与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #241'
+    allowed_change_paths:
+      - app/api/integration_usage.py
+      - app/api/admin_customers.py
+      - app/schemas/customers.py
+      - tests/backend/test_usage_ingest_api.py
+      - tests/backend/test_project_integration_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-051
+    title: 状态同步第五层：状态 webhook 的领取、签名发送、结算与重试
+    purpose: >-
+      按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 5 项：Beat 每 15 秒的 dispatch 逐行循环（12 秒预算），领取（FOR UPDATE OF 投递行 SKIP LOCKED LIMIT 1、同一事务组装快照与 payload、单行租约令牌）、事务外签名发送（标准库 urllib、禁止重定向、可注入 transport、超时 5 秒）、结算（先对租户行加共享锁读当前版本，再带令牌条件更新投递行；成功、失败退避、有更新版本立即重排）；签名密钥缺失或解不开的判定顺序与结算；配置项。告警维度与运维文档由 AIH-TASK-052 做。
+    status: ready
+    depends_on:
+      - AIH-TASK-050
+    acceptance_criteria:
+      - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 新增 app/services/status_delivery.py：dispatch 循环（同一次循环可再领取结算后又到期的行）、领取条件（有地址、项目 ENABLED、COALESCE(delivered_version, -1) 小于租户版本、next_attempt_at 不晚于 now、租约空或过期）、单行租约 60 秒、12 秒预算，全部按设计 §2；payload 十一个字段与 event_id 规则按设计；签名用 sign_status_webhook；响应体最多读 1 KiB 后丢弃；只把 2xx 视为送达
+      - 结算按设计 §2「事务边界」与 §4「投递行」逐列写：先 SELECT … FOR SHARE 读租户当前版本，再带令牌条件 UPDATE；成功、失败、无 ACTIVE 密钥、主密钥未配置、解密失败五种结算的各列（attempt_count、退避的 n、next_attempt_at、租约与 attempted_version、last_http_status、last_error_code、last_attempt_at、delivered_at）按设计；密钥判定顺序固定为先查 ACTIVE 行、再加载主密钥、再解密；令牌不匹配不写
+      - 配置项按设计 §2「配置」（BILLING_ 前缀，带默认值）；Celery Beat 条目 status-webhook-dispatch（15 秒、expires 14），任务模块加进 TASK_MODULES
+      - 测试覆盖设计 §7 中投递相关的行（告警断言除外，归 AIH-TASK-052）：正常推送并按 api.md 验签、四个递增点各触发一次推送、失败退避序列与不设上限、缺密钥、密钥解不开、主密钥未配置、成功清除错误、改地址、首次送达、改地址与在途请求并发、停用不推、退避期间出现新版本、在途时出现新版本、发送期间版本变化、结算与跃迁并发两种提交顺序、领取并发 SKIP LOCKED、租约过期、dispatch 预算、加锁不成环、租户越权、日志脱敏、不经 Celery 直接调 dispatch；MySQL 用例在 BILLING_TEST_DATABASE_URL 未设置时 skip、CI 必跑
+      - 不做告警维度与运维文档（AIH-TASK-052）；不改接口与前端
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #241'
+    allowed_change_paths:
+      - app/services/status_delivery.py
+      - app/tasks/status_webhook.py
+      - app/core/celery_app.py
+      - app/core/config.py
+      - tests/backend/test_status_delivery.py
+      - tests/backend/test_celery.py
+      - tests/backend/test_config.py
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-052
+    title: 状态同步第六层：状态 webhook 健康告警维度与运维文档
+    purpose: >-
+      按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 6 项：一个健康告警维度 status_webhook（同时报 failing、missing secret、signing error 三个计数，级别取最严重），在 docs/api.md 的 GET /internal/alerts 一节列出，并在 docs/runbook.md 写处理步骤、新建 Healthchecks 检查的步骤与关闭推送的方法。只读统计，不改投递逻辑。
+    status: ready
+    depends_on:
+      - AIH-TASK-051
+    acceptance_criteria:
+      - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
+      - 维度 status_webhook 的统计范围（只计 ENABLED 且配了地址的项目）、阈值常量 6、级别规则与摘要逐字按设计 §2「健康告警维度」，注册到 app/services/alerts.py 的 DIMENSIONS，接在现有维度之后；不改 AlertContext、不读配置；摘要不含租户与项目 id
+      - tests/backend/test_internal_alerts.py 只更新钉死维度名单与空库输出 EMPTY_DATABASE_LINES；新维度的用例写在 tests/backend/test_status_webhook_alerts.py，覆盖设计 §7「告警范围」一行与 OK、P2、P1 三种输出
+      - docs/api.md 的 GET /internal/alerts 一节列出这个维度的三个计数、级别与摘要；docs/runbook.md 写三类问题的处理（签发并启用新密钥、补主密钥文件后重启、检查集成方地址与它的应答）、关闭推送的方法（清除项目地址），以及新建 Healthchecks 检查与 BILLING_HEALTHCHECK_ALERT_STATUS_WEBHOOK_URL 的步骤（用量 19）
+      - 不改投递、接口与前端；不改 deploy/monitor.sh
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #241'
+    allowed_change_paths:
+      - app/services/alerts.py
+      - tests/backend/test_status_webhook_alerts.py
+      - tests/backend/test_internal_alerts.py
+      - docs/api.md
+      - docs/runbook.md
+      - docs/TODO.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-053
+    title: 管理端前端：项目集成状态的启停与状态 webhook 地址设置
+    purpose: >-
+      管理端前端：在客户详情的项目区块里显示并修改项目的集成状态（ENABLED / DISABLED，带原因），读取、设置或清除状态 webhook 地址，调用 AIH-TASK-050 上线的三个接口（设计闸门 #241 已批准 v6）。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-046
+      - AIH-TASK-052
+    acceptance_criteria:
+      - 语义一律以 docs/api.md 与 docs/design/PHASE-3-status-sync.md 为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件与设计文件；不装依赖；不改 .platform/ 与 planning-v1 块
+      - 新增 frontend/src/api/projectIntegration.ts 封装三个接口（集成状态、读取与设置地址），写法沿用 frontend/src/api/integrationAccess.ts；frontend/src/api/adminCustomers.ts 的 Project 类型增加 integration_status 与 status_webhook_configured
+      - 新增 frontend/src/features/customers/ProjectIntegrationPanel.tsx，挂在 ProjectsPanel 每一行的展开区里，与已有面板并列、互不影响；显示集成状态与是否已配置地址，展开时经 GET 读取并显示当前地址；加载中、失败（带 request_id）两种状态都画出来
+      - 停用与启用都要二次确认并填 reason（去首尾空白后 1–255，提示不写个人数据）；停用的确认框写明停用后不再推送、集成方经对账得知；设置地址前端只做 https 前缀的提示，最终以后端 422 为准并显示字段错误；清除地址要二次确认；提交中禁用按钮，成功后只让项目列表与地址查询失效重取；409 ACCOUNT_CLOSED 显示对应文案与 request_id，未知码回落到后端 message
+      - 文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts。测试（vitest + Testing Library，放在被测文件旁边）覆盖：三个 api 函数的路径与请求体；面板两种状态；启停确认、reason 校验、成功重取与错误显示；地址读取、设置与清除；ProjectsPanel 展开区同时有各面板；地址示例用明显虚构的占位域名，uuid 全零
+      - check_project_integration：在夹具客户详情的项目列表里点第一行的展开按钮（已展开则不再点；只点展开，不点任何写按钮）；集成面板不是加载失败或无权限状态；后端值取页面自己发出的 GET 项目列表接口的响应体（被动观察，不自己发请求），第一行项目的 integration_status 与面板显示的状态文字一致。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，调用的接口已过闸门 #241，状态跃迁、地址校验与审计规则全在后端，前端不改任何一条；PR 正文要把这条理由写出来
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/projectIntegration.ts
+      - frontend/src/api/projectIntegration.test.ts
+      - frontend/src/api/adminCustomers.ts
+      - frontend/src/features/customers/ProjectIntegrationPanel.tsx
+      - frontend/src/features/customers/ProjectIntegrationPanel.test.tsx
+      - frontend/src/features/customers/ProjectsPanel.tsx
+      - frontend/src/features/customers/ProjectsPanel.test.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    # 合并且部署成功后，Worker 用本机固定的浏览器与凭据跑一次 acceptance.browser（最多 3 次尝试）。
+    # acceptance.browser 不在上面的 allowed_commands 里：它只能被这个 acceptance 块引用。
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_project_integration
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
