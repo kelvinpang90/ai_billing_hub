@@ -7,7 +7,8 @@
  * 显式补上 `Z`，再用 `Intl` 换算成 Asia/Kuala_Lumpur。不引入日期库。
  *
  * 反方向（用户按吉隆坡时间输入 → 发给后端的 UTC）也放在这里：`displayTimeToUtc`
- * （AIH-TASK-023 审计页的时间段筛选）。两个方向用同一个时区来源。
+ * （AIH-TASK-023 审计页的时间段筛选）。两个方向用同一个时区来源。AIH-TASK-036 加了带时区的
+ * 写法 `displayTimeToRfc3339`（价格与汇率的发布时刻）与编辑表单预填用的 `utcToDisplayInput`。
  */
 
 import { useTranslation } from "react-i18next";
@@ -118,6 +119,25 @@ export function displayTimeToUtc(value: string): string | null {
   const guess = wall - displayOffsetMs(wall);
   const instant = wall - displayOffsetMs(guess);
   return new Date(instant).toISOString().slice(0, 19);
+}
+
+/**
+ * 吉隆坡时间 → **带时区**的 RFC 3339，整秒：`"2026-10-01T08:00"` → `"2026-10-01T00:00:00Z"`。
+ *
+ * 发布的预约时刻与汇率的观测时刻要这种写法（docs/api.md「管理端供应商价格」「管理端汇率」：
+ * 不带时区或带小数秒都是 422）。换算同 {@link displayTimeToUtc}，只是补上 `Z`；换不出来返回 `null`。
+ */
+export function displayTimeToRfc3339(value: string): string | null {
+  const utc = displayTimeToUtc(value);
+  return utc === null ? null : `${utc}Z`;
+}
+
+/**
+ * 后端的不带时区 UTC → `<input type="datetime-local">` 的值（吉隆坡墙上时间，带秒）。编辑表单
+ * 预填用。认不出的形状返回空串，让人重新输入，不猜。
+ */
+export function utcToDisplayInput(value: string): string {
+  return parseUtc(value) === null ? "" : formatDateTime(value).replace(" ", "T");
 }
 
 export function DateTimeText({ value }: { value: string }) {

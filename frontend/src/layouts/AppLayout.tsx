@@ -29,11 +29,17 @@ export function AppLayout() {
     location.pathname === ROUTES.catalogProviders ||
     location.pathname.startsWith(`${ROUTES.catalogProviders}/`) ||
     location.pathname === ROUTES.catalogMeterTypes;
+  // 价格列表与价格版本详情都算在顶栏的「供应商价格」这一项下面。
+  const inProviderPrices =
+    location.pathname === ROUTES.providerPrices ||
+    location.pathname.startsWith(`${ROUTES.providerPrices}/`);
   let selectedKey = location.pathname;
   if (inCustomers) {
     selectedKey = ROUTES.customers;
   } else if (inCatalog) {
     selectedKey = ROUTES.catalogProviders;
+  } else if (inProviderPrices) {
+    selectedKey = ROUTES.providerPrices;
   }
 
   return (
@@ -61,6 +67,14 @@ export function AppLayout() {
             {
               key: ROUTES.catalogProviders,
               label: <Link to={ROUTES.catalogProviders}>{t("nav.catalog")}</Link>,
+            },
+            {
+              key: ROUTES.providerPrices,
+              label: <Link to={ROUTES.providerPrices}>{t("nav.providerPrices")}</Link>,
+            },
+            {
+              key: ROUTES.fxRates,
+              label: <Link to={ROUTES.fxRates}>{t("nav.fxRates")}</Link>,
             },
           ]}
         />

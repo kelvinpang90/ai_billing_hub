@@ -34,6 +34,14 @@ export const ROUTES = {
   catalogProviders: "/catalog/providers",
   catalogProviderDetail: "/catalog/providers/:providerId",
   catalogMeterTypes: "/catalog/meter-types",
+  /**
+   * 管理端供应商价格与汇率（AIH-TASK-036）。顶栏各有一项；验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `open_provider_prices` / `open_fx_rates` 按这两个 href 找顶栏链接，
+   * 改了要同步那里。
+   */
+  providerPrices: "/pricing/provider-prices",
+  providerPriceDetail: "/pricing/provider-prices/:priceVersionId",
+  fxRates: "/fx-rates",
 } as const;
 
 /**
@@ -49,6 +57,11 @@ export function customerDetailPath(customerId: string): string {
 /** 供应商详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
 export function catalogProviderDetailPath(providerId: string): string {
   return generatePath(ROUTES.catalogProviderDetail, { providerId });
+}
+
+/** 价格版本详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
+export function providerPriceDetailPath(priceVersionId: string): string {
+  return generatePath(ROUTES.providerPriceDetail, { priceVersionId });
 }
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */
