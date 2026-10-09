@@ -3167,12 +3167,13 @@ tasks:
     status: ready
     depends_on:
       - AIH-TASK-048
+      - AIH-TASK-054
     acceptance_criteria:
       - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - 新增 app/services/project_integration.py：项目集成状态跃迁按设计 §4 的跃迁表与判定顺序（先查租户 CLOSED 返回 409 ACCOUNT_CLOSED，再查相同目标不写库；项目不属于该客户与不存在一样 404），先锁租户行、再锁项目行，经 bump_status_version 写 project.integration_status_changed（payload 与聚合按设计表，不含原因），审计字段按设计 §2「事务边界」
       - 设置 webhook 地址：规范化与校验按设计 §2「URL 规范化与校验」各步（拆分前查原始输入的空格与控制字符、主机名非空且为 LDH 字符集、IP 字面量的各种简写、路径与查询串字符集），判定顺序按设计（422 → 404 → 409 → 相同值不写）；设为地址而租户 CLOSED 时 409、清除不受限；真实变化时按设计 §2「事务边界」的加锁顺序改地址、UPDATE 投递行并清空 delivered_version、attempted_version、租约与失败计数、next_attempt_at 置为 now；审计 PROJECT_STATUS_WEBHOOK_SET 的前后状态只有 status_webhook_host；另有只读的读取函数供 GET 使用
       - app/services/webhook_signing.py 的启用路径在同一事务里把该项目投递行的 next_attempt_at 置为 now 并清空租约与 attempted_version；其余签名密钥行为与 AIH-TASK-019 的设计逐字不变
-      - AuditAction 新增两个动作名；entity_type 用 project（已在 PUBLIC_ENTITY_TYPES 里），不改 app/services/audit_query.py
+      - AuditAction 新增两个动作名；entity_type 用 project（已在 PUBLIC_ENTITY_TYPES 里），不改 app/services/audit_query.py；两个新动作按枚举声明顺序同步加进 frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS（依赖的 AIH-TASK-054 已把清单补齐到与后端枚举一致，并加了逐个比对的 adminAudit.test.ts；本任务只在对应位置追加这两个值），前端其余文件不动
       - 测试覆盖设计 §7 的「URL 规范化」「同一地址」「清除从未设过的地址」「CLOSED 优先」各行，跃迁表每一行、跃迁后版本 +1 且恰好一条事件、审计或 outbox 写入失败时整体回滚（SQLite 与 MySQL 各一次）、改地址清空游标与租约、启用密钥重排投递并清租约、加锁顺序在 MySQL 上与 bump_status_version、记账并发不死锁、日志与审计里没有完整地址；MySQL 用例在 BILLING_TEST_DATABASE_URL 未设置时 skip、CI 必跑
       - docs/database-schema.md 补加锁顺序（租户 → 项目 → 投递行、租户共享锁 → 项目 → 投递行、项目 → 投递行）
       - '不开接口、不做投递与前端；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #241'
@@ -3182,15 +3183,17 @@ tasks:
       - app/models/auth.py
       - tests/backend/test_project_integration_service.py
       - tests/backend/test_webhook_signing_service.py
+      - frontend/src/api/adminAudit.ts
       - docs/database-schema.md
       - docs/TODO.md
-    # MXC 里能跑的五项；tests.backend 只在 CI。
+    # MXC 里能跑的五项加 frontend.test（核对 AUDIT_ACTIONS 与后端枚举一致）；tests.backend 只在 CI。
     allowed_commands:
       - docs.check
       - policy.check
       - tests.process
       - lint.check
       - format.check
+      - frontend.test
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1
