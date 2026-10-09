@@ -2910,3 +2910,77 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 046：管理端前端补上 019 的出站 webhook 签名密钥（后端已由 AIH-TASK-019 上线，设计闸门 #135）。
+  # 依赖 038 只为串行：两者都改 en.json 与验收脚本。文件名避开 Worker 的敏感路径规则，沿用 019 的 webhook_signing 叫法。
+  - id: AIH-TASK-046
+    title: 管理端前端：项目出站 webhook 签名密钥的签发、启用与退役
+    purpose: >-
+      管理端前端：在客户详情的项目区块里管理项目的出站 webhook 签名密钥 —— 签发、列表、启用、退役，调用 docs/api.md「管理端出站 webhook 签名密钥」的四个接口（已过设计闸门 #135、由 AIH-TASK-019 上线）。重点是 secret 只显示一次、启用会原子替换旧的 ACTIVE。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-038
+    acceptance_criteria:
+      - 语义一律以 docs/api.md「管理端出站 webhook 签名密钥」与 docs/design/AIH-TASK-019-webhook-signing.md 为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件与设计文件；不装依赖；不改 .platform/ 与 planning-v1 块
+      - 新增 frontend/src/api/webhookSigning.ts 封装四个接口，写法沿用 frontend/src/api/integrationAccess.ts；签发与启用的请求体是 {}；key_version 是路径里的正整数；退役的请求体只有 reason
+      - 新增 frontend/src/features/customers/WebhookSigningPanel.tsx，在 ProjectsPanel 每一行的展开区里挂在 IntegrationAccessPanel 下面（两个面板都在，互不影响）；列表分页，按后端顺序显示 key_version、status（三种状态颜色区分）、created_at、activated_at、retired_at（时间用 DateTimeText）；加载中、失败（带 request_id）、空列表三种状态都画出来
+      - secret 只显示一次，规则照搬 IntegrationAccessPanel 文件头那四条：只在签发结果对话框里显示，带复制按钮和关闭后无法再次查看的警告；不进查询缓存、浏览器存储、console、URL；对话框关闭即丢弃
+      - 写操作都要二次确认、提交中禁用按钮、成功后只让列表查询失效重取。启用的确认框写明原来的 ACTIVE 版本会同时退役、集成方须已配置成新旧两个版本都接受；退役要填 reason（去首尾空白后 1–255，提示不写个人数据），退役 ACTIVE 时确认框写明退役后项目没有签名密钥。409 WEBHOOK_SECRET_PENDING_EXISTS、409 WEBHOOK_SECRET_NOT_PENDING、503 ENCRYPTION_NOT_CONFIGURED 显示对应 i18n 文案与 request_id 并刷新列表（未知码回落到后端 message）；签发结果未知（网络错误、超时、5xx）不自动重试，提示按 docs/api.md 的恢复方式处理：看列表，退役那个 PENDING 再签发
+      - 文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts。测试（vitest + Testing Library，放在被测文件旁边）覆盖：四个 api 函数的路径与请求体；面板三种状态；secret 只在结果对话框出现、关闭后从 DOM 消失且查询缓存里没有它；每个写操作的确认、成功重取与上面三个错误码的显示；退役的 reason 校验；ProjectsPanel 展开区同时有两个面板。secret 示例一律用 docs/api.md 的全零占位值（whs_ 加 64 个 0），uuid 同样全零
+      - check_webhook_signing：在夹具客户详情的项目列表里点第一行的展开按钮（只点展开，不点任何写按钮）；签名密钥面板不是加载失败或无权限状态；后端值取页面自己发出的 GET 签名密钥列表接口的响应体（被动观察，不自己发请求），面板表格的数据行与响应的 items 一一对应（key_version、status 两列文字一致），items 为空时显示空状态。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明与只点清单同步补上新步骤与展开按钮；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤
+      - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，调用的接口已过闸门 #135，加密、状态跃迁与审计规则全在后端，前端不改任何一条；PR 正文要把这条理由写出来
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/webhookSigning.ts
+      - frontend/src/api/webhookSigning.test.ts
+      - frontend/src/features/customers/WebhookSigningPanel.tsx
+      - frontend/src/features/customers/WebhookSigningPanel.test.tsx
+      - frontend/src/features/customers/ProjectsPanel.tsx
+      - frontend/src/features/customers/ProjectsPanel.test.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    # 合并且部署成功后，Worker 用本机固定的浏览器与凭据跑一次 acceptance.browser（最多 3 次尝试）。
+    # acceptance.browser 不在上面的 allowed_commands 里：它只能被这个 acceptance 块引用。
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_webhook_signing
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
