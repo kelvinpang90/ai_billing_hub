@@ -21,3 +21,22 @@ describe("test setup", () => {
     expect(screen.getByRole("textbox")).toBeInTheDocument();
   });
 });
+
+describe("test setup timers", () => {
+  // ⚠️ 这两条**按顺序**依赖：第一条排下定时器就结束，第二条确认它没有在第一条的
+  // afterEach 之后触发。真实场景是 antd `Form.Item` 的 10ms 定时器在 jsdom 拆掉后
+  // 才触发（见 setup.ts）；这里用 20ms，旧的「等一个 0ms 定时器」挡不住它。
+  let leftoverFired = false;
+
+  it("may leave a timer behind when it finishes", () => {
+    setTimeout(() => {
+      leftoverFired = true;
+    }, 20);
+  });
+
+  it("never sees a timer the previous test left behind fire", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(leftoverFired).toBe(false);
+  });
+});
