@@ -2687,6 +2687,8 @@ tasks:
       - frontend/src/features/fx/FxRatesPage.test.tsx
       - frontend/src/components/DateTimeText.tsx
       - frontend/src/components/DateTimeText.test.tsx
+      - frontend/src/components/DecimalText.tsx
+      - frontend/src/components/DecimalText.test.tsx
       - frontend/src/routes/index.tsx
       - frontend/src/routes/paths.ts
       - frontend/src/layouts/AppLayout.tsx
