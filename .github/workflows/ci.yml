@@ -66,7 +66,10 @@ jobs:
           MYSQL_DATABASE: billing_test
         ports:
           - 3306:3306
+        # 数据目录放内存（--tmpfs）：迁移用例每条都 DDL 升降，时间几乎全花在 fsync 上。
+        # 只去掉落盘持久性，不改 SQL 语义 —— binlog 照开，触发器的建法仍与生产一致。
         options: >-
+          --tmpfs /var/lib/mysql
           --health-cmd="mysqladmin ping -h 127.0.0.1"
           --health-interval=5s
           --health-timeout=5s
