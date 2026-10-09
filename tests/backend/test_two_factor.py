@@ -88,10 +88,10 @@ def mysql_session_factory():
     base_url = make_url(url)
     admin = create_engine(base_url.set(database=""), isolation_level="AUTOCOMMIT")
     with admin.connect() as conn:
-        conn.exec_driver_sql("CREATE DATABASE IF NOT EXISTS billing_test_2fa")
+        conn.exec_driver_sql(f"CREATE DATABASE IF NOT EXISTS `{base_url.database}_2fa`")
     admin.dispose()
 
-    engine = create_engine(base_url.set(database="billing_test_2fa"), pool_size=5)
+    engine = create_engine(base_url.set(database=f"{base_url.database}_2fa"), pool_size=5)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     try:

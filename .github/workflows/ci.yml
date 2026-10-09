@@ -52,9 +52,19 @@ jobs:
       - name: Policy and verified-write regression tests
         run: python -m unittest discover -s tests -v
 
-  backend:
-    name: backend
+  # 后端检查拆成三类 job 并行，再由名为 `backend` 的汇总 job 给出一个结论：
+  #   backend-tests（分片 × N）：pytest。每片有自己的 runner 与 MySQL / Redis，按用例轮流分配
+  #   backend-build：lint、打包冒烟、compose 构建。不需要数据库，与测试同时跑
+  #   backend：只看前两类的结果。分支保护与 scripts/codex-review.ps1 的准入名单都按这个名字找它
+  backend-tests:
+    name: backend-tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
+    strategy:
+      # 一片失败不取消其他片：一轮里就能看到全部失败的用例
+      fail-fast: false
+      matrix:
+        # 改片数只改这一处：分片号与总片数取自 strategy.job-index / job-total（见下方 env）
+        shard: [1, 2, 3]
     services:
       # 迁移必须对着真 MySQL 跑。SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上
       # 跑通证明不了生产上跑得通 —— 而迁移跑不通是部署时才发现的那种故障。
@@ -66,7 +76,10 @@ jobs:
           MYSQL_DATABASE: billing_test
         ports:
           - 3306:3306
+        # 数据目录放内存（--tmpfs）：迁移用例每条都 DDL 升降，时间几乎全花在 fsync 上。
+        # 只去掉落盘持久性，不改 SQL 语义 —— binlog 照开，触发器的建法仍与生产一致。
         options: >-
+          --tmpfs /var/lib/mysql
           --health-cmd="mysqladmin ping -h 127.0.0.1"
           --health-interval=5s
           --health-timeout=5s
@@ -85,6 +98,9 @@ jobs:
     env:
       BILLING_TEST_DATABASE_URL: mysql+pymysql://root:ci-throwaway@127.0.0.1:3306/billing_test?charset=utf8mb4
       BILLING_TEST_REDIS_URL: redis://127.0.0.1:6379/0
+      # tests/backend/conftest.py 按这两个值只留下本片的用例（位置 % 总片数 == 本片号）
+      BILLING_TEST_SHARD_INDEX: ${{ strategy.job-index }}
+      BILLING_TEST_SHARD_TOTAL: ${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -94,10 +110,6 @@ jobs:
           python-version: "3.12"
       - name: Install backend and dev tooling
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
-      - name: Lint
-        run: |
-          python -m ruff check .
-          python -m ruff format --check .
       - name: Match production MySQL (app-account triggers under binlog)
         # 生产 compose 打开了 log_bin_trust_function_creators（#90）：钱包账本的触发器由应用账号
         # 在迁移里建，迁移 0006 的预检在开关关着时会拒绝执行（设计闸门 #88 §8）。service 容器
@@ -111,13 +123,32 @@ jobs:
         # **CI 里一条都不许 skip。**迁移用例靠 BILLING_TEST_DATABASE_URL 决定
         # 跑不跑：MySQL service 起不来时它们会安静地 skip，而 pytest 仍然绿 ——
         # 没人会注意到「迁移这轮没验」。所以这里显式把 skip 判成失败。
+        #
+        # `-n auto` 按 runner 的核数并行；每个 worker 用自己的 MySQL 库（tests/backend/conftest.py），
+        # 并行后汇总行里照样有 skipped 计数，上面的判定不受影响。分到别的片的用例是 deselected，
+        # 不是 skipped。
         run: |
           set -o pipefail
-          python -m pytest -ra | tee pytest-output.txt
+          python -m pytest -ra -n auto --durations=30 | tee pytest-output.txt
           if grep -qE '[0-9]+ skipped' pytest-output.txt; then
             echo "::error::Tests were skipped in CI; every test must run here."
             exit 1
           fi
+
+  backend-build:
+    name: backend-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend and dev tooling
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Lint
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
       - name: Packaging smoke
         # pytest 走 pythonpath = ["."]，跑的是源码树，发现不了 wheel 少打子包。
         # 装进一个独立 venv 再验一次；脚本自己会拒绝解析到源码树的情况。
@@ -139,6 +170,23 @@ jobs:
         run: |
           docker compose --env-file .env.example config --quiet
           docker compose build api frontend
+
+  backend:
+    name: backend
+    needs: [backend-tests, backend-build]
+    # ⚠️ 必须 always()：不加的话上游一失败，这个 job 就被标成 skipped，而分支保护把
+    # skipped 的必需检查当成通过 —— 测试红着也能合并。tests/backend/test_compose.py 钉住这一点。
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every backend job succeeded
+        env:
+          TESTS_RESULT: ${{ needs.backend-tests.result }}
+          BUILD_RESULT: ${{ needs.backend-build.result }}
+        run: |
+          echo "backend-tests: $TESTS_RESULT, backend-build: $BUILD_RESULT"
+          test "$TESTS_RESULT" = success
+          test "$BUILD_RESULT" = success
 
   frontend:
     name: frontend
