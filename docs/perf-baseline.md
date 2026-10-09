@@ -156,7 +156,7 @@ Argon2id 校验 p50 **35.9ms**，参数是 argon2-cffi 的默认值
 | Durable-acceptance API latency p95 <= 500ms | ⚠️ 部分 | S2 是形状最接近的写入路径：并发 8 时 p95 25ms。但真实摄取还要加鉴权、配额与定价 |
 | Event-to-wallet p95 <= 60s / p99 <= 5min | ❌ | 钱包 Phase 1、计费引擎 Phase 2 |
 | Backlog recovery >= 5x peak | ⚠️ 部分 | S3 量的正是将来承载它的那套 outbox 机制：单线程 98.4/s。⚠️ 恢复扫描现在是**单个 beat 任务串行投递**，5x 目标真到跟前时要重新量 |
-| Status Webhook enqueue p95 <= 60s | ❌ | Webhook 是 Phase 3 |
+| Status Webhook first delivery attempt p95 <= 60s | ❌ | Webhook 是 Phase 3 |
 | 99.5% 月度可用性 | ❌ | 要生产环境跑满一个月才谈得上 |
 | **最热租户的工作负载** | ❌ | `users` 表现在还没有 `tenant_id`（Phase 4 引入 CUSTOMER 时才有） |
 

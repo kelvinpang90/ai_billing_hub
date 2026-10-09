@@ -1191,9 +1191,9 @@ Within the same database transaction that commits the wallet mutation, Central B
 
 1. save the billing status and increment `status_version`
 2. create the audit record
-3. create durable notification and status-webhook Outbox records
+3. create a durable domain Outbox record for the transition
 
-Workers deliver notifications and Webhooks after commit. A periodic recovery task must recreate missing delivery tasks from database Outbox state. Only projects whose integration status is `ENABLED` receive delivery.
+Workers deliver notifications from the domain Outbox after commit. Status Webhook delivery is derived from committed state instead (§29): every project whose integration status is `ENABLED` and that has a status webhook URL must eventually receive its tenant's latest `status_version`. A periodic task finds projects whose delivered version is behind and delivers them, so no queue message has to carry the work. Only projects whose integration status is `ENABLED` receive delivery; a disabled project learns its `BLOCK_AI` status through reconciliation (§30).
 
 ---
 
@@ -1248,7 +1248,7 @@ Automatically:
 
 1. update tenant billing status and increment `status_version`
 2. create audit log
-3. create durable Reactivation Webhook delivery
+3. create a durable domain Outbox record; the Status Webhook then delivers the resulting latest status (§29)
 4. create durable customer notification
 5. Integrated Application Backend resumes AI only if the resulting effective status is `ALLOW_AI`
 
@@ -1258,14 +1258,7 @@ No Acuven manual approval required.
 
 # 28. Status Webhook
 
-Central Billing stores per-project:
-
-```text
-backend_base_url
-status_webhook_url
-encrypted_webhook_secret
-webhook_key_version
-```
+Central Billing stores per-project a `status_webhook_url` and versioned outbound signing secrets (`project_webhook_secrets`, ADR-0004 §4a).
 
 Example:
 
@@ -1277,18 +1270,21 @@ Payload:
 
 ```json
 {
-  "event_id": "status_evt_123",
+  "event_id": "sevt_<project_public_id>_42",
   "tenant_id": "tenant_123",
   "project_id": "project_123",
-  "tenant_account_status": "ENABLED",
-  "tenant_billing_status": "SUSPENDED",
+  "account_status": "ENABLED",
+  "billing_status": "SUSPENDED",
+  "billing_mode": "PREPAID",
   "project_integration_status": "ENABLED",
   "effective_status": "BLOCK_AI",
   "reason_code": "BALANCE_NOT_POSITIVE",
   "status_version": 42,
-  "effective_at": "2026-09-09T10:10:00Z"
+  "effective_at": "2026-09-09T10:10:00"
 }
 ```
+
+The payload is a full status snapshot with the same field names as the reconciliation response (§30). `event_id` is derived from the project and `status_version`, so a resend of the same version carries the same id.
 
 Webhook must be signed.
 
@@ -1315,11 +1311,9 @@ The Integrated Application Backend validates timestamp and signature, then atomi
 
 # 29. Webhook Retry
 
-Webhook failure must retry automatically.
+Webhook failure must retry automatically with exponential backoff and no permanent give-up.
 
-Store delivery record.
-
-Example statuses:
+Store one delivery record per project. Its status is one of:
 
 ```text
 PENDING
@@ -1328,9 +1322,9 @@ RETRYING
 FAILED
 ```
 
-Use exponential backoff.
+`FAILED` means the alert threshold was reached; retries continue at the backoff cap.
 
-Do not permanently lose status transitions.
+Delivery guarantees that each project's latest `status_version` is eventually delivered. Intermediate versions may be coalesced: the Integrated Application Backend ignores older versions anyway (§28), so its worst-case staleness is bounded by the reconciliation safety bound in §119, not by the number of transitions delivered. Every transition is still durably recorded by its `status_version`, audit record and domain Outbox record in the same transaction (§25, invariant 13).
 
 ---
 
@@ -1345,22 +1339,23 @@ Choose the polling interval against the status reconciliation safety bound in §
 Endpoint:
 
 ```http
-GET /api/v1/integration/account-status
+GET /api/v1/integration/effective-status
 ```
 
-Response:
+Response `data`:
 
 ```json
 {
   "tenant_id": "tenant_123",
   "project_id": "project_123",
-  "tenant_account_status": "ENABLED",
-  "tenant_billing_status": "ACTIVE",
+  "account_status": "ENABLED",
+  "billing_status": "ACTIVE",
+  "billing_mode": "PREPAID",
   "project_integration_status": "ENABLED",
   "effective_status": "ALLOW_AI",
   "reason_code": null,
   "status_version": 43,
-  "updated_at": "..."
+  "effective_at": "..."
 }
 ```
 
@@ -1615,7 +1610,7 @@ Minimum V1 endpoints:
 
 ```http
 POST /api/v1/integration/usage-events
-GET  /api/v1/integration/account-status
+GET  /api/v1/integration/effective-status
 GET  /api/v1/integration/health
 ```
 
@@ -3330,18 +3325,7 @@ Requirements:
 
 # 92. Central → Customer Status Webhook
 
-Webhook event types:
-
-```text
-customer.billing.suspended
-customer.billing.reactivated
-```
-
-Future:
-
-```text
-customer.billing.low_balance
-```
+Status Webhooks carry a full status snapshot (§28), not typed events. The Integrated Application Backend acts on `effective_status` and `reason_code`; suspension, reactivation and account disablement all arrive the same way. A disabled project receives no Status Webhook (§25); its `BLOCK_AI` with `PROJECT_INTEGRATION_DISABLED` is learned only through periodic reconciliation (§30). Low-balance alerts are customer notifications (Phase 6), not Status Webhooks.
 
 ---
 
@@ -4071,7 +4055,7 @@ Five-minute burst ingestion: >= 100 events/second
 Single-event or batch durable-acceptance API latency: p95 <= 500 ms under sustained target load
 Healthy event-to-wallet processing latency: p95 <= 60 seconds, p99 <= 5 minutes
 Backlog recovery throughput: >= 5x documented peak normal ingestion rate
-Status Webhook enqueue after committed transition: p95 <= 60 seconds
+Status Webhook first delivery attempt after committed transition: p95 <= 60 seconds
 Status reconciliation safety bound: <= 5 minutes
 ```
 

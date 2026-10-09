@@ -193,7 +193,7 @@ nonce 过期时刻 = 请求 timestamp + 时间窗（5 分钟）
 | --- | --- | --- | --- |
 | `POST /integration/usage-events` | 是 | `usage_events.event_id` UNIQUE（永久，无 TTL） | Redis |
 | `POST /integration/usage-events/batch` | 是 | 同上，逐条生效 | Redis |
-| `GET /integration/account-status` | 否 | 只读，重放无害 | Redis |
+| `GET /integration/effective-status` | 否 | 只读，重放无害 | Redis |
 | `GET /integration/health` | 否 | 只读，重放无害 | Redis |
 | **`POST` 支付 Webhook（§91）** | 是 | `(gateway, gateway_event_id)` UNIQUE | **数据库（持久）** |
 
