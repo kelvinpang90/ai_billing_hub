@@ -25,16 +25,15 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-046` 管理端前端：项目出站 webhook 签名密钥的签发、启用与退役
-2. `AIH-TASK-054` 管理端前端：审计页动作下拉补齐后端全部审计动作
-3. `AIH-TASK-055` Phase 2 用量计费单事件耗时剖析（只测量，承接 perf-baseline 10.5）
-4. `AIH-TASK-047` Phase 3 状态同步：迁移 0020 与投递行
-5. `AIH-TASK-048` Phase 3 状态同步：有效状态合成与状态版本递增收拢
-6. `AIH-TASK-049` Phase 3 状态同步：项目集成状态与 webhook 地址的业务规则
-7. `AIH-TASK-050` Phase 3 状态同步：有效状态新字段与项目集成管理接口
-8. `AIH-TASK-051` Phase 3 状态同步：状态 webhook 投递与重试
-9. `AIH-TASK-052` Phase 3 状态同步：状态 webhook 健康告警与运维文档
-10. `AIH-TASK-053` 管理端前端：项目集成状态与状态 webhook 地址
+1. `AIH-TASK-054` 管理端前端：审计页动作下拉补齐后端全部审计动作
+2. `AIH-TASK-055` Phase 2 用量计费单事件耗时剖析（只测量，承接 perf-baseline 10.5）
+3. `AIH-TASK-047` Phase 3 状态同步：迁移 0020 与投递行
+4. `AIH-TASK-048` Phase 3 状态同步：有效状态合成与状态版本递增收拢
+5. `AIH-TASK-049` Phase 3 状态同步：项目集成状态与 webhook 地址的业务规则
+6. `AIH-TASK-050` Phase 3 状态同步：有效状态新字段与项目集成管理接口
+7. `AIH-TASK-051` Phase 3 状态同步：状态 webhook 投递与重试
+8. `AIH-TASK-052` Phase 3 状态同步：状态 webhook 健康告警与运维文档
+9. `AIH-TASK-053` 管理端前端：项目集成状态与状态 webhook 地址
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行

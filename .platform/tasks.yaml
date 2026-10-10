@@ -2923,7 +2923,7 @@ tasks:
     title: 管理端前端：项目出站 webhook 签名密钥的签发、启用与退役
     purpose: >-
       管理端前端：在客户详情的项目区块里管理项目的出站 webhook 签名密钥 —— 签发、列表、启用、退役，调用 docs/api.md「管理端出站 webhook 签名密钥」的四个接口（已过设计闸门 #135、由 AIH-TASK-019 上线）。重点是 secret 只显示一次、启用会原子替换旧的 ACTIVE。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-038
     acceptance_criteria:
