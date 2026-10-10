@@ -37,6 +37,10 @@ export function AppLayout() {
   const inPricingRules =
     location.pathname === ROUTES.pricingRules ||
     location.pathname.startsWith(`${ROUTES.pricingRules}/`);
+  // 用量事件列表与事件详情都算在顶栏的「用量事件」这一项下面。
+  const inUsageEvents =
+    location.pathname === ROUTES.usageEvents ||
+    location.pathname.startsWith(`${ROUTES.usageEvents}/`);
   let selectedKey = location.pathname;
   if (inCustomers) {
     selectedKey = ROUTES.customers;
@@ -46,6 +50,8 @@ export function AppLayout() {
     selectedKey = ROUTES.providerPrices;
   } else if (inPricingRules) {
     selectedKey = ROUTES.pricingRules;
+  } else if (inUsageEvents) {
+    selectedKey = ROUTES.usageEvents;
   }
 
   return (
@@ -89,6 +95,10 @@ export function AppLayout() {
             {
               key: ROUTES.pricingPreview,
               label: <Link to={ROUTES.pricingPreview}>{t("nav.pricingPreview")}</Link>,
+            },
+            {
+              key: ROUTES.usageEvents,
+              label: <Link to={ROUTES.usageEvents}>{t("nav.usageEvents")}</Link>,
             },
           ]}
         />

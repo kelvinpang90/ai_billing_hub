@@ -50,6 +50,12 @@ export const ROUTES = {
   pricingRules: "/pricing/rules",
   pricingRuleDetail: "/pricing/rules/:ruleId",
   pricingPreview: "/pricing/preview",
+  /**
+   * 管理端用量事件与重新入队（AIH-TASK-038）。顶栏有一项；验收脚本 `scripts/acceptance/admin_customers.mjs` 的
+   * `open_usage_events` 按这个 href 找顶栏链接，改了要同步那里。
+   */
+  usageEvents: "/usage-events",
+  usageEventDetail: "/usage-events/:usageEventId",
 } as const;
 
 /**
@@ -75,6 +81,11 @@ export function providerPriceDetailPath(priceVersionId: string): string {
 /** 定价规则详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
 export function pricingRuleDetailPath(ruleId: string): string {
   return generatePath(ROUTES.pricingRuleDetail, { ruleId });
+}
+
+/** 用量事件详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
+export function usageEventDetailPath(usageEventId: string): string {
+  return generatePath(ROUTES.usageEventDetail, { usageEventId });
 }
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */
