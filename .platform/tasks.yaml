@@ -3452,13 +3452,13 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-055
-    title: 用量计费单事件耗时剖析脚本：找出每条事件锁外约 130 毫秒花在哪里
+    title: 用量计费单事件耗时剖析脚本：找出每条事件锁外约 85 毫秒花在哪里
     purpose: >-
-      只做测量。docs/perf-baseline.md 10.5 记录的 2026-10-09 压测里，2 个 worker 合计每秒只处理约 14 条事件，每条约 140 毫秒，其中持钱包锁只占 9–10 毫秒，锁远未饱和；按 10.2 的规则要先找出锁外的瓶颈，再决定是否做方案 C。本任务新写 scripts/perf_usage_profile.py，对 billing_perf 造一个租户的积压，按阶段拆开每条事件的耗时并输出报告；在 docs/perf-baseline.md 加 10.6 写方法与空结果模板。不改 app/ 下任何文件；脚本在生产 VPS 上的实际运行是合并后的运维步骤。
+      只做测量。docs/perf-baseline.md 10.5 记录的 2026-10-09 压测里，2 个 worker 合计每秒只处理约 21 条事件（按库里时间戳复核），每条约 95 毫秒，其中持钱包锁只占 9–10 毫秒，锁远未饱和；按 10.2 的规则要先找出锁外的瓶颈，再决定是否做方案 C。本任务新写 scripts/perf_usage_profile.py，对 billing_perf 造一个租户的积压，按阶段拆开每条事件的耗时并输出报告；在 docs/perf-baseline.md 加 10.6 写方法与空结果模板。不改 app/ 下任何文件；脚本在生产 VPS 上的实际运行是合并后的运维步骤。
     status: ready
     acceptance_criteria:
       - 护栏与造数据全部复用 scripts/perf_usage.py（与 tests/backend/test_perf_usage.py 一样用 importlib 按文件加载）：--database-url 必填、库名必须是 billing_perf、URL 比对加连上后比 @@server_uuid 与 DATABASE()、生产环境只允许 billing_perf；不复制一份护栏代码。数据经服务函数与 ingest_one 产生，不直接写 usage_events 或账本；每轮唯一前缀，不删除任何行，结束时逐项打印造了哪些数据
-      - 负载：单个租户预先积压 --events 条（默认 2000），依次在 --workers 1 与 2 两种配置下各清空一轮（每轮独立的租户与积压）；worker 是子进程，派发节奏与 perf_usage.py 相同（Beat 10 秒、8 秒预算、每批 20 条）；另提供 --continuous 选项：不等 Beat，扫描结束立即开下一轮，用来把「Beat 节奏造成的空转」与「单条处理成本」分开
+      - 负载：单个租户预先积压 --events 条（默认 2000），依次在 --workers 1 与 2 两种配置下各清空一轮（每轮独立的租户与积压）；worker 是子进程，派发节奏与 perf_usage.py 相同（Beat 10 秒、8 秒预算、每批 20 条）；另提供 --continuous 选项：不等 Beat，扫描结束立即开下一轮，用来把「Beat 节奏造成的空转」与「单条处理成本」分开。每轮开始前确认 billing_perf 里没有非终态的用量事件，有就报错退出、不开始负载（10.5 的复核发现 perf_usage.py 场景之间不隔离，worker 按接收先后跨租户处理，残留积压会混进测量）；本轮结束时同样核对本轮的事件全部走到终态，否则判为无效
       - 每条事件在 worker 子进程里记录：process_event 的墙钟时间；worker 进程的 CPU 时间（time.process_time 差值）；SQL 语句条数与数据库耗时合计（SQLAlchemy 引擎的 before_cursor_execute 与 after_cursor_execute 事件）；等钱包锁的时间与持锁时间（照 perf_usage.py 的 _instrument_wallet_lock 按模块全局名包装 _lock_wallet，另记调用前时刻）；计价耗时（按模块全局名包装 usage_billing 里的 resolve_charge_inputs 与 price_resolved）；记账耗时（包装 usage_billing 里的 post_transaction）。每次 claim_events 另记耗时与 SQL 条数。包装只记时刻与计数，返回值与异常原样交回
       - 整轮另记：清空用时与速率；worker 的忙碌占比（处理时间 ÷ 清空用时）；容器 CPU 节流（运行前后读 /sys/fs/cgroup/cpu.stat 的 nr_throttled 与 throttled_usec，文件不存在时报告「不可用」）；MySQL 侧 SHOW GLOBAL STATUS 的 Questions、Innodb_row_lock_waits、Innodb_row_lock_time 前后差值
       - 报告：每种配置一张表，逐阶段给 平均 / p50 / p95 毫秒，以及每条事件的 SQL 条数、数据库耗时占墙钟的比例、CPU 时间占墙钟的比例、锁外时间（墙钟 − 持锁）；最后按「数据库往返」「CPU 或节流」「Beat 节奏空转」「锁」四类各给一个占比，并写明哪一类最大。文字报告打到标准输出，--json-out 另存一份；--json-out 写不进去时在负载开始之前就报错退出，不要跑完才失败
