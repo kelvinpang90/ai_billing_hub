@@ -2743,7 +2743,7 @@ tasks:
     title: 管理端前端：定价规则与试算页面
     purpose: >-
       管理端前端：AIH-TASK-027 定价规则与 AIH-TASK-031 试算的页面 —— 规则列表（即价格历史）/ 草稿（五级范围、MARKUP 或 FIXED_RATE）/ 发布（可预约）/ 停用 / 丢弃；试算页（客户、供应商、模型、用量、occurred_at → 每个分量、版本、未舍入与舍入结果或错误状态）。只做前端，外加验收脚本的两个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-036
       - AIH-TASK-031
