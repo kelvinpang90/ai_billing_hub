@@ -248,6 +248,7 @@ gitleaks 逐个扫 PR 里的提交），实现改由只含一个提交的 #115 �
 - 不得包含任何 `.platform/` 路径（控制面 Worker 会拒绝）
 - 列表之外的任何改动都算越界，包括 rename / copy 的**源和目标**两端
 - `acceptance_criteria` 里的文件范围描述只是审查依据，不是强制手段
+- `status: ready` 的任务，`purpose` 与 `acceptance_criteria` 里点名的 `frontend/`、`app/`、`tests/`、`scripts/`、`docs/`、`alembic/` 下带扩展名的文件，必须在本任务的 `allowed_change_paths` 里、已在仓库里，或在 `depends_on` 传递闭包中某个 `ready` 任务的 `allowed_change_paths` 里（上游已 `done` 却没建这个文件的不算）。`scripts/check_repo_policy.py` 在登记 PR 的 CI 上机械检查；被连带变红的测试这类隐式依赖不在检查范围内
 
 ⚠️ 这个字段写在本仓库里**不会让它自动生效**。强制它的是控制面 Worker 经审查的
 parser 与 pipeline：必须在跑检查、commit、push、开 Draft PR 之前核对改动集合，
