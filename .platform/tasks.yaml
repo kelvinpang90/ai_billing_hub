@@ -2670,7 +2670,7 @@ tasks:
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，钱与状态机的规则都在后端（已过闸门）；PR 正文要把这条理由写出来
       - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把下面列出的新步骤加进这个脚本（文件名不变），已有步骤（login、open_customers、open_fixture、check_balance、open_audit、check_audit_entry 以及之前任务加的步骤）行为不变、照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素；沿用验收脚本已有的约束（见 AIH-TASK-024、AIH-TASK-023 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤。验收只读：只点导航链接与页内的只读入口，不点任何会写数据的按钮，不提交任何表单
       - 不改 planning-v1 块
-      - 部署后浏览器验收另带 AIH-TASK-035 的两个已有步骤 open_catalog、check_meter_types：035 由人工接手交付，Worker 没有跑它的部署后验收，Kelvin 2026-10-09 定为随本任务一起跑。本任务不改这两个步骤，它们照跑应 PASS
+      - AIH-TASK-035 的两个已有步骤 open_catalog、check_meter_types 原定随本任务跑（Kelvin 2026-10-09），本任务的 run 部署后在 check_meter_types 失败，原因是验收脚本的视口判断缺陷（#252 已修），页面功能经 2026-10-10 人工只读核对正常；Kelvin 2026-10-10 定为把这两步挪到 AIH-TASK-037 跑，本任务的部署后验收不再包含它们
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminProviderPrices.ts
@@ -2719,8 +2719,6 @@ tasks:
         - login
         - open_provider_prices
         - open_fx_rates
-        - open_catalog
-        - check_meter_types
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
@@ -2768,6 +2766,7 @@ tasks:
       - allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，钱与状态机的规则都在后端（已过闸门）；PR 正文要把这条理由写出来
       - 部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把下面列出的新步骤加进这个脚本（文件名不变），已有步骤（login、open_customers、open_fixture、check_balance、open_audit、check_audit_entry 以及之前任务加的步骤）行为不变、照跑仍应 PASS；文件头的步骤说明与「只点」清单同步补上新步骤与新点的元素；沿用验收脚本已有的约束（见 AIH-TASK-024、AIH-TASK-023 的验收标准与脚本文件头）；脚本只执行 stdin 里 steps 列出的步骤。验收只读：只点导航链接与页内的只读入口，不点任何会写数据的按钮，不提交任何表单
       - 不改 planning-v1 块
+      - 部署后浏览器验收另带 AIH-TASK-035 的两个已有步骤 open_catalog、check_meter_types：原定随 AIH-TASK-036 跑，因验收脚本的视口判断缺陷未能通过（#252 已修），Kelvin 2026-10-10 定为挪到本任务跑。本任务不改这两个步骤，它们照跑应 PASS
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/adminPricingRules.ts
@@ -2811,6 +2810,8 @@ tasks:
         - login
         - open_pricing_rules
         - open_pricing_preview
+        - open_catalog
+        - check_meter_types
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
