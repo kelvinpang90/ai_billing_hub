@@ -2,7 +2,8 @@
  * 部署后浏览器验收：管理端客户页（AIH-TASK-015），本任务为 AIH-TASK-024；AIH-TASK-023 加了审计页的两个只读步骤
  * （open_audit、check_audit_entry）；AIH-TASK-035 加了 AI 目录的两个只读步骤（open_catalog、check_meter_types）；
  * AIH-TASK-036 加了供应商价格与汇率的两个只读步骤（open_provider_prices、open_fx_rates）；AIH-TASK-037 加了定价规则
- * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）。文件名沿用，不改。open_catalog / check_meter_types
+ * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）；AIH-TASK-038 加了用量事件的一个只读步骤
+ * （open_usage_events）。文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
  * 谁在什么时候跑它
@@ -54,7 +55,7 @@
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
  *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
- *   「Pricing preview」（href 为 /pricing/preview）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
+ *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
  *   会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。审计页不改每页条数、不翻页、
  *   不展开行、不点「Clear filters」。目录页不点「New provider」「New meter type」「Rename」「Retire」「Reactivate」
  *   或任何确认按钮、不点状态筛选、不翻页、不打开任何供应商的详情、不填也不提交任何表单。价格页与汇率页不点
@@ -62,6 +63,8 @@
  *   状态筛选、不翻页、不打开任何价格版本的详情、不填也不提交任何表单。规则页不点「New draft」「Edit」「Publish」
  *   「Disable」「Discard」或任何确认按钮、不动范围 / 客户 / 供应商 / 模型 / 状态筛选、不翻页、不打开任何规则的详情、
  *   不填也不提交任何表单。试算页不选也不填任何字段、不点「Calculate」（试算本身只读，但「不提交任何表单」一视同仁）。
+ *   用量事件页不勾选任何行、不点「Requeue selected」「Requeue all matching…」「Requeue」或任何确认按钮、不填也不
+ *   提交筛选表单（不点「Apply filters」「Clear filters」）、不翻页、不打开任何事件的详情（「View」链接）。
  *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
@@ -121,6 +124,10 @@
  *                   label 都关联着控件、「Calculate」按钮在，且页面写着「Estimated cost, not visible to customers.」
  *                   （pricing.preview.estimateNote）。不是加载失败、无权限或路由兜底页；表单出现之后再看一小段时间
  *                   （PREVIEW_LOOKUP_SETTLE_MS），下拉要的客户、供应商、计量类型取不到（错误提示）或无权限同样算失败。不提交
+ *   open_usage_events
+ *                   点顶栏「Usage events」（nav.usageEvents，href 为 paths.ts 的 usageEvents，即 /usage-events）进用量事件页；
+ *                   页面落定且不是加载失败（任何错误提示）、无权限（usage.forbidden）或路由兜底页。空列表合法（usage.empty：
+ *                   生产上可能还没有用量事件），有表格时表头要有「Occurred at」「Billable amount」两列
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -204,6 +211,12 @@ const TEXT = {
   previewOccurredAt: "Occurred at (Kuala Lumpur time)", // pricing.preview.field.occurredAt
   previewSubmit: "Calculate", // pricing.preview.submit —— 只确认它在，不点
   previewEstimateNote: "Estimated cost, not visible to customers.", // pricing.preview.estimateNote
+  navUsageEvents: "Usage events", // nav.usageEvents —— 顶栏的用量事件项
+  usageForbidden: "Only administrators can view usage events.", // usage.forbidden
+  usageLoading: "Loading usage events…", // usage.loading
+  usageEmpty: "No usage events yet.", // usage.empty
+  usageOccurredAt: "Occurred at", // usage.field.occurredAt —— 用量事件表格的列头
+  usageBillableCost: "Billable amount", // usage.field.billableCost
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -218,6 +231,7 @@ const TEXT = {
   fxRatesPath: "/fx-rates",
   pricingRulesPath: "/pricing/rules",
   pricingPreviewPath: "/pricing/preview",
+  usageEventsPath: "/usage-events",
 };
 
 /** 夹具客户的公司名前缀。只看、只打开以它开头的客户。 */
@@ -1399,6 +1413,22 @@ function probePricingPreview(lib, T) {
   };
 }
 
+/**
+ * 用量事件页的状态。错误提示（任何 role=alert）与无权限分开报；有表格时表头要有「Occurred at」「Billable amount」。
+ * 页面上「成本与毛利仅管理员可见」的说明是普通段落，不是 role=alert。只读，不碰筛选表单与勾选框。
+ */
+function probeUsageEvents(lib, T) {
+  const forbidden = lib.leaf(T.usageForbidden) !== null;
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.usageLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: lib.leaf(T.usageEmpty) !== null,
+    table: lib.tableWith([T.usageOccurredAt, T.usageBillableCost]) !== null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 驱动页面
 // ---------------------------------------------------------------------------
@@ -2117,6 +2147,25 @@ async function stepOpenPricingPreview() {
   }
 }
 
+async function stepOpenUsageEvents() {
+  const link = { text: TEXT.navUsageEvents, href: TEXT.usageEventsPath };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同目录页、价格页与规则页。
+  const opened = await waitFor(
+    () => evaluate(probeUsageEvents, TEXT),
+    catalogSettled(TEXT.usageEventsPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  // 生产上可能还没有任何用量事件，空列表合法。
+  rejectCatalogState(opened.value, TEXT.usageEventsPath, true);
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
@@ -2130,6 +2179,7 @@ const STEPS = {
   open_fx_rates: stepOpenFxRates,
   open_pricing_rules: stepOpenPricingRules,
   open_pricing_preview: stepOpenPricingPreview,
+  open_usage_events: stepOpenUsageEvents,
 };
 
 // ---------------------------------------------------------------------------
