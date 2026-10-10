@@ -2,7 +2,7 @@
  * 路由表。
  *
  * 目前有落地页、认证相关的三页、管理端客户管理（AIH-TASK-015）、管理端审计日志（AIH-TASK-023）、
- * 管理端 AI 目录（AIH-TASK-035）与兜底页。
+ * 管理端 AI 目录（AIH-TASK-035）、管理端供应商价格与汇率（AIH-TASK-036）与兜底页。
  * **不预建 spec §101 列的其余 feature 目录** —— 空目录会让人以为「那块已经开工了」，
  * 和 runbook 不预留空标题是同一条道理。每个 feature 在它自己那个 Phase 落地时再建。
  *
@@ -58,6 +58,17 @@ const ProviderDetailPage = lazy(() =>
 const MeterTypesPage = lazy(() =>
   import("../features/catalog/MeterTypesPage").then((m) => ({ default: m.MeterTypesPage })),
 );
+const ProviderPricesPage = lazy(() =>
+  import("../features/pricing/ProviderPricesPage").then((m) => ({ default: m.ProviderPricesPage })),
+);
+const ProviderPriceDetailPage = lazy(() =>
+  import("../features/pricing/ProviderPriceDetailPage").then((m) => ({
+    default: m.ProviderPriceDetailPage,
+  })),
+);
+const FxRatesPage = lazy(() =>
+  import("../features/fx/FxRatesPage").then((m) => ({ default: m.FxRatesPage })),
+);
 const NotFoundPage = lazy(() =>
   import("./NotFoundPage").then((m) => ({ default: m.NotFoundPage })),
 );
@@ -99,6 +110,9 @@ export function AppRoutes() {
               <Route path={ROUTES.catalogProviders} element={<ProvidersPage />} />
               <Route path={ROUTES.catalogProviderDetail} element={<ProviderDetailPage />} />
               <Route path={ROUTES.catalogMeterTypes} element={<MeterTypesPage />} />
+              <Route path={ROUTES.providerPrices} element={<ProviderPricesPage />} />
+              <Route path={ROUTES.providerPriceDetail} element={<ProviderPriceDetailPage />} />
+              <Route path={ROUTES.fxRates} element={<FxRatesPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Route>
           </Route>
