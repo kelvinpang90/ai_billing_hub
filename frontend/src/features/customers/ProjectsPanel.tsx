@@ -9,8 +9,9 @@
  * 所有项目列表页过期、重新读，不在前端拼一行进去。
  *
  * `renderProjectDetails` 是每一行展开区的挂载点。不传时默认挂 AIH-TASK-018 的
- * `IntegrationAccessPanel`（集成凭据）；本组件自己不碰凭据，凭据接口只在某一行展开之后
- * 由那个面板去请求。
+ * `IntegrationAccessPanel`（集成凭据），下面是 AIH-TASK-046 的 `WebhookSigningPanel`
+ * （出站 webhook 签名密钥）；本组件自己不碰凭据与密钥，它们的接口只在某一行展开之后
+ * 由那两个面板去请求。
  */
 
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -44,6 +45,7 @@ import {
 import { DateTimeText } from "../../components/DateTimeText";
 import { CustomerErrorAlert } from "./CustomerForm";
 import { IntegrationAccessPanel } from "./IntegrationAccessPanel";
+import { WebhookSigningPanel } from "./WebhookSigningPanel";
 
 /** 与后端 `app/schemas/customers.py` 的上限一致。 */
 const NAME_MAX = 255;
@@ -206,12 +208,16 @@ export function ProjectsPanel({
     />
   ) : null;
 
-  // 展开区只在展开之后才渲染，所以凭据接口只为展开的那几个项目发请求。
+  // 展开区只在展开之后才渲染，所以凭据与签名密钥接口只为展开的那几个项目发请求。
   // `CustomerDetailPage` 不在 AIH-TASK-018 的可改路径里，默认值只能放在这里。
+  // 两个面板各管各的查询与状态，互不影响（AIH-TASK-046 把签名密钥挂在凭据下面）。
   const expandable = {
     expandedRowRender: (project: Project) =>
       renderProjectDetails === undefined ? (
-        <IntegrationAccessPanel customerId={customerId} project={project} />
+        <Space direction="vertical" size="middle" style={{ display: "flex" }}>
+          <IntegrationAccessPanel customerId={customerId} project={project} />
+          <WebhookSigningPanel customerId={customerId} project={project} />
+        </Space>
       ) : (
         renderProjectDetails(project)
       ),
