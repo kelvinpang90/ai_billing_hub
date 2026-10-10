@@ -219,15 +219,19 @@ function groupRows(rows: readonly RateRow[]): { code: string; unit: string; rows
  *
  * `meterTypes` 是目录里的全部计量类型（{@link useAllMeterTypes}），由调用方取好传进来：表单的校验
  * 也要用同一份。
+ *
+ * `rateTitle` 换掉「单价」一列的标题：定价规则（AIH-TASK-037）在那里写明「MYR，含税」。不给就是价格页的「Rate」。
  */
 export function ComponentRatesInput({
   value,
   onChange,
   meterTypes,
+  rateTitle,
 }: {
   value?: RateRow[];
   onChange?: (next: RateRow[]) => void;
   meterTypes: readonly MeterType[];
+  rateTitle?: string | undefined;
 }) {
   const { t } = useTranslation();
   const addId = useId();
@@ -290,7 +294,7 @@ export function ComponentRatesInput({
     },
     {
       key: "rate_amount",
-      title: t("pricing.components.rateAmount"),
+      title: rateTitle ?? t("pricing.components.rateAmount"),
       render: (_: unknown, row) => (
         <Input
           aria-label={t("pricing.components.rateAmountFor", { code: row.component_code })}

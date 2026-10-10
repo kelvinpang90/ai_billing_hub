@@ -42,6 +42,14 @@ export const ROUTES = {
   providerPrices: "/pricing/provider-prices",
   providerPriceDetail: "/pricing/provider-prices/:priceVersionId",
   fxRates: "/fx-rates",
+  /**
+   * 管理端定价规则与试算（AIH-TASK-037）。顶栏各有一项；验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `open_pricing_rules` / `open_pricing_preview` 按这两个 href 找顶栏
+   * 链接，改了要同步那里。
+   */
+  pricingRules: "/pricing/rules",
+  pricingRuleDetail: "/pricing/rules/:ruleId",
+  pricingPreview: "/pricing/preview",
 } as const;
 
 /**
@@ -62,6 +70,11 @@ export function catalogProviderDetailPath(providerId: string): string {
 /** 价格版本详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
 export function providerPriceDetailPath(priceVersionId: string): string {
   return generatePath(ROUTES.providerPriceDetail, { priceVersionId });
+}
+
+/** 定价规则详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
+export function pricingRuleDetailPath(ruleId: string): string {
+  return generatePath(ROUTES.pricingRuleDetail, { ruleId });
 }
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */
