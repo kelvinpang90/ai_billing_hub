@@ -646,5 +646,96 @@ class ToleranceTests(unittest.TestCase):
             self.assertEqual(policy.check_response(resp, root=repo.root, head=repo.head), [])
 
 
+# --------------------------------------------------------------------------
+# 登记时的可改路径：验收标准点名的文件 run 必须够得着。AIH-TASK-029 / 032 / 036 都以
+# contract_scope_insufficient 中断过；036 那次是上游 035 人工接手、没建 DecimalText.tsx。
+# 纯函数，不需要 Git，两种模式都跑。
+# --------------------------------------------------------------------------
+
+def task_yaml(*tasks: str) -> str:
+    return "schema_version: 1\ntasks:\n" + "".join(tasks) + "prohibited:\n  - x\n"
+
+
+def task(task_id: str, status: str, *, deps=(), allowed=(), criteria=(), purpose="只做前端") -> str:
+    lists = [("depends_on", deps), ("acceptance_criteria", criteria), ("allowed_change_paths", allowed)]
+    body = "".join(
+        f"    {name}:\n" + "".join(f"      - {item}\n" for item in items) if items else f"    {name}: []\n"
+        for name, items in lists
+    )
+    return f"  - id: {task_id}\n    title: t\n    purpose: >-\n      {purpose}\n    status: {status}\n{body}"
+
+
+NEW_FILE = "frontend/src/components/DecimalText.tsx"
+
+
+class TaskPathTests(unittest.TestCase):
+    def check(self, *tasks: str, listed=()) -> list[str]:
+        return policy.check_task_paths(task_yaml(*tasks), set(listed))
+
+    def test_path_in_own_allowed_change_paths_passes(self):
+        self.assertEqual(self.check(task("T-1", "ready", allowed=[NEW_FILE], criteria=[f"在 {NEW_FILE} 里实现"])), [])
+
+    def test_path_already_in_repository_passes(self):
+        criteria = ["沿用 frontend/src/api/adminCustomers.ts 的写法；接口以 docs/api.md 为准"]
+        listed = {"frontend/src/api/adminCustomers.ts", "docs/api.md"}
+        self.assertEqual(self.check(task("T-1", "ready", criteria=criteria), listed=listed), [])
+
+    def test_path_created_by_ready_upstream_passes_transitively(self):
+        # T-3 → T-2 → T-1：建文件的是隔了一层的 ready 上游
+        self.assertEqual(self.check(
+            task("T-1", "ready", allowed=[NEW_FILE]),
+            task("T-2", "ready", deps=["T-1"]),
+            task("T-3", "ready", deps=["T-2"], criteria=[f"复用 {NEW_FILE}"]),
+        ), [])
+
+    def test_path_nobody_can_create_is_rejected(self):
+        errors = self.check(task("T-1", "ready", criteria=[f"在 {NEW_FILE} 里实现并有单测"]))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(f"T-1 names {NEW_FILE}", errors[0])
+
+    def test_done_upstream_that_never_created_the_file_is_rejected(self):
+        # 036 run 67dfa805 的形态：035 登记时列了这个文件，但 done 了文件却不在仓库里
+        errors = self.check(
+            task("T-035", "done", allowed=[NEW_FILE]),
+            task("T-036", "ready", deps=["T-035"], criteria=[f"需要只显示数字的，在 {NEW_FILE} 里实现"]),
+        )
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("T-036 names", errors[0])
+        self.assertIn("listed by T-035 (done) but never created", errors[0])
+
+    def test_dot_slash_prefix_is_normalized_not_skipped(self):
+        errors = self.check(task("T-1", "ready", criteria=[f"在 ./{NEW_FILE} 里实现"]))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(f"T-1 names {NEW_FILE},", errors[0])
+        self.assertEqual(self.check(task("T-1", "ready", allowed=[NEW_FILE], criteria=[f"在 ./{NEW_FILE} 里实现"])), [])
+
+    def test_purpose_is_scanned_too(self):
+        errors = self.check(task("T-1", "ready", purpose=f"新建 {NEW_FILE}"))
+        self.assertEqual(len(errors), 1, errors)
+
+    def test_only_ready_tasks_are_checked(self):
+        self.assertEqual(self.check(task("T-1", "done", criteria=[f"在 {NEW_FILE} 里实现"])), [])
+
+    def test_adjacent_chinese_and_punctuation_are_not_part_of_the_path(self):
+        criteria = ["接口以 docs/api.md对应小节为准；见 docs/api.md。不改 features/pricing/ 目录"]
+        self.assertEqual(self.check(task("T-1", "ready", criteria=criteria), listed={"docs/api.md"}), [])
+
+    def test_unknown_list_shape_is_a_check_error(self):
+        text = task_yaml(task("T-1", "ready", allowed=[NEW_FILE])).replace(f"      - {NEW_FILE}", f"    - {NEW_FILE}")
+        with self.assertRaises(policy.PolicyError):
+            policy.check_task_paths(text, set())
+
+    def test_check_local_runs_the_task_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".platform").mkdir()
+            (root / ".platform" / "tasks.yaml").write_text(
+                task_yaml(task("T-1", "ready", criteria=[f"复用 {NEW_FILE}"])), encoding="utf-8")
+            with patch.object(policy, "listed_paths", return_value=[".platform/tasks.yaml"]):
+                errors = policy.check_local(root)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("T-1 names", errors[0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

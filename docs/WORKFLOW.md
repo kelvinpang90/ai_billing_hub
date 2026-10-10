@@ -207,7 +207,7 @@ python -m ruff format --check .
 python -m pytest
 ```
 
-六项分别管：链接与 `§N` 引用 + 约定串一致性 / 任务复选框与 PR 字段 / 策略脚本与回读脚本自身的回归 / 后端 lint / 后端格式 / 后端测试。
+六项分别管：链接与 `§N` 引用 + 约定串一致性 / 任务复选框、PR 字段与登记任务点名文件的可达性 / 策略脚本与回读脚本自身的回归 / 后端 lint / 后端格式 / 后端测试。
 PowerShell 侧另有 `pwsh -NoProfile -File scripts/tests/Test-ReviewVerdict.ps1`（CI 的 `scripts` 项跑它）。
 
 **动了 `frontend/` 就再加四项**（在 `frontend/` 目录下跑）：
