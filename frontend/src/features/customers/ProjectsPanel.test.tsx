@@ -25,8 +25,8 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   globalThis.ResizeObserver = NoopResizeObserver;
 }
 
-const CUSTOMER_ID ="00000000-0000-4000-8000-000000000000";
-const PROJECT_ID = "00000000-0000-4000-8000-000000000001";
+const CUSTOMER_ID = "00000000-0000-0000-0000-000000000000";
+const PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 
 const api = vi.hoisted(() => ({
   listProjects: vi.fn(),
@@ -43,6 +43,12 @@ vi.mock("../../api/adminCustomers", async () => {
 vi.mock("./IntegrationAccessPanel", () => ({
   IntegrationAccessPanel: ({ customerId, project }: { customerId: string; project: Project }) =>
     `credentials:${customerId}:${project.id}`,
+}));
+
+// 签名密钥面板同理：自己的用例在 WebhookSigningPanel.test.tsx。
+vi.mock("./WebhookSigningPanel", () => ({
+  WebhookSigningPanel: ({ customerId, project }: { customerId: string; project: Project }) =>
+    `webhook-signing:${customerId}:${project.id}`,
 }));
 
 function project(overrides: Partial<Project> = {}): Project {
@@ -345,6 +351,26 @@ describe("ProjectsPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("mounts the webhook signing secrets under the credentials in the same expanded row", async () => {
+    const user = userEvent.setup();
+    api.listProjects.mockResolvedValue(page([project()], 1));
+
+    renderPanel();
+
+    await screen.findByText("Chatbot");
+    expect(
+      screen.queryByText(`webhook-signing:${CUSTOMER_ID}:${PROJECT_ID}`),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Expand row" }));
+
+    const credentials = await screen.findByText(`credentials:${CUSTOMER_ID}:${PROJECT_ID}`);
+    const signing = screen.getByText(`webhook-signing:${CUSTOMER_ID}:${PROJECT_ID}`);
+    // 两个面板都在，签名密钥在凭据下面。
+    expect(
+      credentials.compareDocumentPosition(signing) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("shows what the caller renders into the mount point instead, when given", async () => {
     const user = userEvent.setup();
     api.listProjects.mockResolvedValue(page([project()], 1));
@@ -355,6 +381,7 @@ describe("ProjectsPanel", () => {
     await user.click(screen.getByRole("button", { name: "Expand row" }));
 
     expect(await screen.findByText(`mounted:${PROJECT_ID}`)).toBeInTheDocument();
+    expect(screen.queryByText(/^webhook-signing:/)).not.toBeInTheDocument();
   });
 });
 

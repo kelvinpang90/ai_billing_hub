@@ -3,7 +3,8 @@
  * （open_audit、check_audit_entry）；AIH-TASK-035 加了 AI 目录的两个只读步骤（open_catalog、check_meter_types）；
  * AIH-TASK-036 加了供应商价格与汇率的两个只读步骤（open_provider_prices、open_fx_rates）；AIH-TASK-037 加了定价规则
  * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）；AIH-TASK-038 加了用量事件的一个只读步骤
- * （open_usage_events）。文件名沿用，不改。open_catalog / check_meter_types
+ * （open_usage_events）；AIH-TASK-046 加了出站 webhook 签名密钥的一个只读步骤（check_webhook_signing）。
+ * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
  * 谁在什么时候跑它
@@ -55,8 +56,11 @@
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
  *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
- *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
- *   会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。审计页不改每页条数、不翻页、
+ *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、夹具客户详情里
+ *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。不点新建客户、编辑 / 保存、手工调账、
+ *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）
+ *   等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表不翻页、不展开
+ *   第一行以外的行；签名密钥面板与集成凭据面板里不点任何按钮、不翻页。审计页不改每页条数、不翻页、
  *   不展开行、不点「Clear filters」。目录页不点「New provider」「New meter type」「Rename」「Retire」「Reactivate」
  *   或任何确认按钮、不点状态筛选、不翻页、不打开任何供应商的详情、不填也不提交任何表单。价格页与汇率页不点
  *   「New draft」「New manual draft」「Edit」「Publish」「Retire」「Discard」或任何确认按钮、不动供应商 / 模型 /
@@ -70,7 +74,8 @@
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
  * - 每个步骤都真的检查它声称的东西；等待一律有上限（见下面的常量），总时长控制在 timeout_seconds（300 秒）内。
  * - 找元素只按可见文字（文案取自 frontend/src/i18n/locales/en.json）或语义结构（label→control、header、
- *   table/thead/th、th→td、li、role、title 属性），不依赖 antd 生成的类名哈希。文案与选择器集中在下面的常量里。
+ *   table/thead/th、th→td、li、role、title 与 aria-label 属性、表格行的 data-row-key），不依赖 antd 生成的类名哈希。
+ *   文案与选择器集中在下面的常量里。
  *
  * 步骤
  * ----
@@ -128,6 +133,19 @@
  *                   点顶栏「Usage events」（nav.usageEvents，href 为 paths.ts 的 usageEvents，即 /usage-events）进用量事件页；
  *                   页面落定且不是加载失败（任何错误提示）、无权限（usage.forbidden）或路由兜底页。空列表合法（usage.empty：
  *                   生产上可能还没有用量事件），有表格时表头要有「Occurred at」「Billable amount」两列
+ *   check_webhook_signing
+ *                   在夹具客户详情（open_fixture 打开的那一页）的项目列表（表头有「Project name」「Description」）里点
+ *                   第一行的展开按钮（aria-label 为「Expand row」，antd enUS 语言包；只点展开，不点任何写按钮）。项目列表
+ *                   加载失败是 page_error，没有项目是 assertion_failed。展开区里的签名密钥面板（role=region、aria-label
+ *                   为「Webhook signing secrets」，en.json 的 webhookSigning.title）落定且不是加载失败
+ *                   （webhookSigning.loadFailed）或无权限（customers.forbidden）。后端值取页面在点击之后自己发出的
+ *                   GET /api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets 的响应体（被动观察，
+ *                   不自己发请求、不拦截；customer_id 是夹具客户、project_id 是第一行的 data-row-key）。面板表格（表头有
+ *                   「Key version」「Status」「Activated」）的数据行与响应的 items 一一对应：同样的顺序，每行「Key version」
+ *                   列是该项的 key_version、「Status」列是该项 status 的文案（PENDING / ACTIVE / RETIRED →
+ *                   Pending / Active / Retired，webhookSigning.status.*）；items 为空时面板显示空状态
+ *                   （webhookSigning.empty 或 webhookSigning.emptyPage）、没有数据行。报到前把面板滚动到视口里（放得下时
+ *                   整块在视口内，放不下时面板顶端在视口内）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -217,9 +235,28 @@ const TEXT = {
   usageEmpty: "No usage events yet.", // usage.empty
   usageOccurredAt: "Occurred at", // usage.field.occurredAt —— 用量事件表格的列头
   usageBillableCost: "Billable amount", // usage.field.billableCost
+  customersForbidden: "Only administrators can manage customers.", // customers.forbidden —— 客户区块（含签名密钥面板）的无权限
+  projectName: "Project name", // customers.projects.field.name —— 项目表格的列头
+  projectDescription: "Description", // customers.projects.field.description
+  projectsLoading: "Loading projects…", // customers.projects.loading
+  projectsLoadFailed: "The projects could not be loaded.", // customers.projects.loadFailed
+  projectsEmpty: "This customer has no projects yet.", // customers.projects.empty
+  webhookTitle: "Webhook signing secrets", // webhookSigning.title —— 签名密钥面板的 aria-label
+  webhookLoading: "Loading webhook signing secrets…", // webhookSigning.loading
+  webhookLoadFailed: "The webhook signing secrets could not be loaded.", // webhookSigning.loadFailed
+  webhookEmpty: "This project has no webhook signing secrets yet.", // webhookSigning.empty
+  webhookEmptyPage: "There are no signing versions on this page.", // webhookSigning.emptyPage
+  webhookKeyVersion: "Key version", // webhookSigning.field.keyVersion —— 签名密钥表格的列头
+  webhookStatus: "Status", // webhookSigning.field.status
+  webhookActivatedAt: "Activated", // webhookSigning.field.activatedAt（集成凭据的表格没有这一列，靠它区分两张表）
+  // 签名版本状态 → 「Status」列的文案（webhookSigning.status.pending / active / retired）。
+  webhookStatusText: { PENDING: "Pending", ACTIVE: "Active", RETIRED: "Retired" },
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
+  // antd 表格展开 / 收起按钮的 aria-label，同样来自 antd 的 enUS 语言包（Table.expand / Table.collapse）。
+  expandRowLabel: "Expand row",
+  collapseRowLabel: "Collapse row",
   // 路由路径，取自 frontend/src/routes/paths.ts 的 ROUTES。
   loginPath: "/login",
   customersPath: "/customers",
@@ -277,6 +314,9 @@ const SEED_METER_TYPES = [
 ];
 const LLM_TOKEN_CODE = "LLM_TOKEN";
 const LLM_TOKEN_COMPONENTS = 4;
+
+/** 签名密钥列表接口的路径（frontend/src/api/webhookSigning.ts 的 secretsUrl）。 */
+const WEBHOOK_SECRETS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects\/([^/]+)\/webhook-secrets$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -670,12 +710,38 @@ const network = {
   audits: new Map(),
   /** 计量类型列表接口：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   meterTypes: new Map(),
+  /** 签名密钥列表接口：requestId → { customerId, projectId, status, finished, failed, seq }。查询串本身不保存。 */
+  webhookSecrets: new Map(),
   seq: 0,
 };
 
-/** 三类被观察的接口里，requestId 对应的那一条记录。 */
+/** 四类被观察的接口里，requestId 对应的那一条记录。 */
 function trackedRequest(requestId) {
-  return network.details.get(requestId) ?? network.audits.get(requestId) ?? network.meterTypes.get(requestId);
+  return (
+    network.details.get(requestId) ??
+    network.audits.get(requestId) ??
+    network.meterTypes.get(requestId) ??
+    network.webhookSecrets.get(requestId)
+  );
+}
+
+/** 是不是签名密钥列表接口（同源 https）：是的话回路径里的客户与项目 id，不是回 null。查询串不看、不保存。 */
+function webhookSecretsTarget(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host) {
+      return null;
+    }
+    const match = WEBHOOK_SECRETS_API.exec(parsed.pathname);
+    return match === null
+      ? null
+      : { customerId: decodeURIComponent(match[1]), projectId: decodeURIComponent(match[2]) };
+  } catch {
+    return null;
+  }
 }
 
 /** 是不是计量类型列表接口（同源 https、路径恰好是列表，查询串不看）。 */
@@ -771,6 +837,17 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const webhook = webhookSecretsTarget(params.request?.url);
+        if (webhook !== null && params.request?.method === "GET") {
+          network.webhookSecrets.set(params.requestId, {
+            customerId: webhook.customerId,
+            projectId: webhook.projectId,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -855,6 +932,26 @@ function latestMeterTypesResponse(afterSeq) {
   let best = null;
   for (const [requestId, request] of network.meterTypes) {
     if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/**
+ * afterSeq 之后发出、这个客户的这个项目的、成功读完的签名密钥列表请求里最近的一次；还有在路上的就回 null，
+ * 等它落定。
+ */
+function latestWebhookSecretsResponse(afterSeq, customerId, projectId) {
+  let best = null;
+  for (const [requestId, request] of network.webhookSecrets) {
+    if (request.seq <= afterSeq || request.customerId !== customerId || request.projectId !== projectId) {
       continue;
     }
     if (!request.finished && !request.failed) {
@@ -1005,7 +1102,43 @@ function pageLib() {
     const row = table.rows.find(({ cells }) => norm(cells[table.index[T.catalogCode]].textContent) === code);
     return row === undefined ? null : row.tr;
   };
-  return { norm, leaf, control, button, alert, layout, valueCells, common, auditRows, tableWith, meterTypeRow };
+  /** 客户详情里项目表格（表头有「Project name」「Description」）的第一个数据行；没有时 null。 */
+  const firstProjectRow = (T) => {
+    const table = tableWith([T.projectName, T.projectDescription]);
+    return table === null || table.rows.length === 0 ? null : table.rows[0].tr;
+  };
+  /**
+   * 第一个项目展开区里的签名密钥面板（role=region、aria-label 为面板标题）；没展开或没有时 null。
+   * antd 把展开区画成紧跟在那一行后面的 <tr>，只在这一行里找，不把别的项目的面板算进来。
+   */
+  const webhookRegion = (T) => {
+    const first = firstProjectRow(T);
+    const expanded = first === null ? null : first.nextElementSibling;
+    if (!expanded) {
+      return null;
+    }
+    for (const el of expanded.querySelectorAll('[role="region"]')) {
+      if (el.getAttribute("aria-label") === T.webhookTitle) {
+        return el;
+      }
+    }
+    return null;
+  };
+  return {
+    norm,
+    leaf,
+    control,
+    button,
+    alert,
+    layout,
+    valueCells,
+    common,
+    auditRows,
+    tableWith,
+    meterTypeRow,
+    firstProjectRow,
+    webhookRegion,
+  };
 }
 
 function probeLogin(lib, T) {
@@ -1427,6 +1560,121 @@ function probeUsageEvents(lib, T) {
     empty: lib.leaf(T.usageEmpty) !== null,
     table: lib.tableWith([T.usageOccurredAt, T.usageBillableCost]) !== null,
   };
+}
+
+/**
+ * 客户详情里项目区块的状态：第一行的项目 id（data-row-key）与它的展开按钮现在是展开还是收起。只读。
+ */
+function probeProjects(lib, T) {
+  const table = lib.tableWith([T.projectName, T.projectDescription]);
+  const first = lib.firstProjectRow(T);
+  let expand = null;
+  if (first !== null) {
+    for (const el of first.querySelectorAll("button[aria-label]")) {
+      const label = el.getAttribute("aria-label");
+      if (label === T.expandRowLabel) {
+        expand = "collapsed";
+      } else if (label === T.collapseRowLabel) {
+        expand = "expanded";
+      }
+    }
+  }
+  return {
+    ...lib.common(T),
+    busy: lib.leaf(T.projectsLoading) !== null,
+    failed: lib.leaf(T.projectsLoadFailed) !== null,
+    empty: lib.leaf(T.projectsEmpty) !== null,
+    table: table !== null,
+    projectId: first === null ? null : first.getAttribute("data-row-key"),
+    expand,
+  };
+}
+
+/** 点第一个项目那一行的展开按钮（aria-label 为「Expand row」）。只点这一个，不点任何别的。 */
+function clickExpandFirstProject(lib, T) {
+  const first = lib.firstProjectRow(T);
+  if (first === null) {
+    return false;
+  }
+  for (const el of first.querySelectorAll("button")) {
+    if (el.getAttribute("aria-label") === T.expandRowLabel && !el.disabled) {
+      el.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 第一个项目展开区里签名密钥面板的状态与表格：每个数据行「Key version」「Status」两列的文字，按显示顺序。
+ * 只在面板里面找（不看同一展开区里的集成凭据面板）。只读，不点面板里的任何按钮。
+ */
+function probeWebhookSigning(lib, T) {
+  const region = lib.webhookRegion(T);
+  const out = {
+    ...lib.common(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    forbidden: false,
+    empty: false,
+    table: false,
+    rows: [],
+  };
+  if (region === null) {
+    return out;
+  }
+  const has = (text) =>
+    [...region.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(T.webhookLoading);
+  out.failed = has(T.webhookLoadFailed);
+  out.forbidden = has(T.customersForbidden);
+  out.empty = has(T.webhookEmpty) || has(T.webhookEmptyPage);
+  const wanted = [T.webhookKeyVersion, T.webhookStatus, T.webhookActivatedAt];
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!wanted.every((text) => heads.includes(text))) {
+      continue;
+    }
+    const keyVersion = heads.indexOf(T.webhookKeyVersion);
+    const status = heads.indexOf(T.webhookStatus);
+    out.table = true;
+    for (const tr of table.querySelectorAll(":scope > tbody > tr")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      const cells = tr.querySelectorAll(":scope > td");
+      // 空状态那一行只有一格（colspan），不是数据行。
+      if (cells.length !== heads.length) {
+        continue;
+      }
+      out.rows.push({ keyVersion: lib.norm(cells[keyVersion].textContent), status: lib.norm(cells[status].textContent) });
+    }
+    break;
+  }
+  return out;
+}
+
+/** 把签名密钥面板滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollWebhookPanelIntoView(lib, T) {
+  const region = lib.webhookRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
+function webhookPanelInView(lib, T) {
+  const region = lib.webhookRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
 
 // ---------------------------------------------------------------------------
@@ -2166,6 +2414,135 @@ async function stepOpenUsageEvents() {
   rejectCatalogState(opened.value, TEXT.usageEventsPath, true);
 }
 
+async function stepCheckWebhookSigning(ctx) {
+  if (ctx.customerId === null || ctx.fixture === null) {
+    throw fail("assertion_failed");
+  }
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+
+  // 夹具客户详情里的项目区块落定。
+  const listed = await waitFor(
+    () => evaluate(probeProjects, TEXT),
+    (s) => s.appError || s.notFound || (s.path === href && !s.busy && (s.failed || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!listed.ok) {
+    throw fail("element_missing");
+  }
+  const projects = listed.value;
+  if (projects.appError || projects.failed) {
+    throw fail("page_error");
+  }
+  if (projects.notFound || projects.path !== href) {
+    throw fail("navigation_failed");
+  }
+  if (projects.empty || !projects.table || typeof projects.projectId !== "string" || projects.projectId === "") {
+    throw fail("assertion_failed");
+  }
+  const projectId = projects.projectId;
+
+  // 点展开之前的序号：只认在这之后页面自己发出的请求。已经展开着（不该发生）就认之前的请求。
+  const beforeClick = network.seq;
+  let afterSeq = 0;
+  if (projects.expand === "collapsed") {
+    if ((await evaluate(clickExpandFirstProject, TEXT)) !== true) {
+      throw fail("element_missing");
+    }
+    afterSeq = beforeClick;
+  } else if (projects.expand !== "expanded") {
+    throw fail("element_missing");
+  }
+
+  // 签名密钥面板落定：不在加载，且是某一种终态（表格、空状态、加载失败、无权限）。
+  const opened = await waitFor(
+    () => evaluate(probeWebhookSigning, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === href && s.region && !s.busy && (s.failed || s.forbidden || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const panel = opened.value;
+  if (panel.appError || panel.failed) {
+    throw fail("page_error");
+  }
+  if (panel.notFound || panel.path !== href) {
+    throw fail("navigation_failed");
+  }
+  if (panel.forbidden) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：面板自己发出的那次列表 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestWebhookSecretsResponse(afterSeq, customerId, projectId),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expected = items.map((item) => ({
+      keyVersion: Number.isInteger(item?.key_version) ? String(item.key_version) : null,
+      status:
+        typeof item?.status === "string" && Object.hasOwn(TEXT.webhookStatusText, item.status)
+          ? TEXT.webhookStatusText[item.status]
+          : null,
+    }));
+    if (expected.some((item) => item.keyVersion === null || item.status === null)) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、版本号或状态不认识：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 面板显示的就是这一份响应：items 为空时是空状态；否则行数、顺序、版本号与状态文案都一致。
+  const shown = await waitFor(
+    () => evaluate(probeWebhookSigning, TEXT),
+    (s) =>
+      s.path === href &&
+      s.region &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      (expected.length === 0
+        ? s.empty && s.rows.length === 0
+        : s.table &&
+          s.rows.length === expected.length &&
+          s.rows.every((row, i) => row.keyVersion === expected[i].keyVersion && row.status === expected[i].status)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把面板滚进视口。
+  if ((await evaluate(scrollWebhookPanelIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(webhookPanelInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
@@ -2180,6 +2557,7 @@ const STEPS = {
   open_pricing_rules: stepOpenPricingRules,
   open_pricing_preview: stepOpenPricingPreview,
   open_usage_events: stepOpenUsageEvents,
+  check_webhook_signing: stepCheckWebhookSigning,
 };
 
 // ---------------------------------------------------------------------------
