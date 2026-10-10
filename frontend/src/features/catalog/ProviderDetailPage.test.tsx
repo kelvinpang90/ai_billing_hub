@@ -348,7 +348,7 @@ describe("ProviderDetailPage models", SLOW, () => {
 
     renderPage();
     await screen.findByText("Claude X");
-    await user.click(within(rowWith("Claude X")).getByRole("button", { name: "Retire" }));
+    await user.click(buttonWithText("Retire", rowWith("Claude X")));
 
     expect(await screen.findByText("Retire claude-x?")).toBeInTheDocument();
     expect(api.updateModel).not.toHaveBeenCalled();
