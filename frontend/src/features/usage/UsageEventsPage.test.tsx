@@ -493,6 +493,36 @@ describe("UsageEventsPage requeue by filter", SLOW, () => {
     await waitFor(() => expect(api.listUsageEvents.mock.calls.length).toBeGreaterThan(callsBefore));
   });
 
+  it("keeps both requeue actions closed until the list for the new filters arrives", async () => {
+    const user = userEvent.setup();
+    let arrive: (value: Page<UsageEventSummary>) => void = () => undefined;
+    api.listUsageEvents.mockResolvedValueOnce(page([FAILED], 1)).mockReturnValueOnce(
+      new Promise<Page<UsageEventSummary>>((resolve) => {
+        arrive = resolve;
+      }),
+    );
+
+    renderPage();
+    await screen.findByText("PRICING_ERROR");
+    await pickStatus("PRICING_ERROR");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() =>
+      expect(api.listUsageEvents).toHaveBeenLastCalledWith({ status: "PRICING_ERROR" }, 1, 20, expect.anything()),
+    );
+
+    // 表里还是上一份：条数与行都属于旧条件。
+    expect(screen.getByRole("button", { name: "Requeue all matching…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Requeue selected (0)" })).toBeDisabled();
+    expect(within(row(0)).getByRole("checkbox")).toBeDisabled();
+
+    arrive(page([FAILED], 300));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Requeue all matching…" })).toBeEnabled());
+    expect(within(row(0)).getByRole("checkbox")).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Requeue all matching…" }));
+    expect(await screen.findByText("Up to 300 events will be requeued (at most 1000 per run).")).toBeInTheDocument();
+    expect(api.bulkRequeueUsageEvents).not.toHaveBeenCalled();
+  });
+
   it("caps the count shown at 1000", async () => {
     const user = userEvent.setup();
     api.listUsageEvents.mockResolvedValue(page([FAILED], 2500));

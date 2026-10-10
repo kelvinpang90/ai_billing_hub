@@ -299,6 +299,9 @@ export function UsageEventsPage() {
 
   const conditions = toBulkConditions(filters);
   const total = events.data?.total ?? 0;
+  // 换条件、翻页之后新的一页回来之前，表里留着的是上一份（keepPreviousData）：这时的 total 与各行都不属于
+  // 当前条件，重新入队的入口一律关掉，免得确认框里的条数、能勾的行与实际提交的条件对不上。
+  const stale = events.isPlaceholderData;
 
   let result: ReactNode;
   if (events.isPending) {
@@ -320,7 +323,7 @@ export function UsageEventsPage() {
         <Space wrap style={{ marginBottom: 16 }}>
           <Button
             danger
-            disabled={selected.length === 0}
+            disabled={stale || selected.length === 0}
             onClick={() => {
               setNotice(null);
               setActing({ kind: "selected", ids: selected });
@@ -330,7 +333,7 @@ export function UsageEventsPage() {
           </Button>
           <Button
             danger
-            disabled={conditions === null}
+            disabled={stale || conditions === null}
             onClick={() => {
               if (conditions !== null) {
                 setNotice(null);
@@ -356,7 +359,7 @@ export function UsageEventsPage() {
             selectedRowKeys: selected,
             onChange: (keys: Key[]) => setSelected(keys.map(String)),
             // 只有错误状态的行能勾：其余状态后端一律 409。
-            getCheckboxProps: (event) => ({ disabled: !isRequeuableStatus(event.status) }),
+            getCheckboxProps: (event) => ({ disabled: stale || !isRequeuableStatus(event.status) }),
           }}
           pagination={{
             current: paging.page,
