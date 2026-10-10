@@ -43,9 +43,9 @@ export default defineConfig({
     setupFiles: ["src/test/setup.ts"],
     // 默认 5 秒在 OpenClaw Worker 的沙箱里不够：antd 表单类用例本机最慢不到 2 秒，沙箱里多个
     // 文件并行抢 CPU，会被拖过 5 秒（AIH-TASK-035 那次 run：本机 357 个全过，沙箱里 6 个旧
-    // 用例连续几轮超时，每轮还不一样）。15 秒与 AdjustmentModal 等文件里单独给的值一致，
-    // 真卡死的用例照样会超时。
-    testTimeout: 15_000,
+    // 用例连续几轮超时，每轮还不一样）。AIH-TASK-037 那次 run 又有一个单独给了 15 秒的旧用例
+    // 在沙箱里超时，于是全局与各文件单独给的值统一提到 20 秒；真卡死的用例照样会超时。
+    testTimeout: 20_000,
     include: ["src/**/*.test.ts", "src/**/*.test.tsx", "eslint-rules/**/*.test.js"],
   },
 });

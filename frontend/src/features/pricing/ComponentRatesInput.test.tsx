@@ -158,7 +158,7 @@ describe("toComponentBodies", () => {
 });
 
 // antd 的下拉与表格在 jsdom 里渲染慢，全量并行时默认的时限不够（同目录页的用例）。
-const SLOW = { timeout: 15_000 };
+const SLOW = { timeout: 20_000 };
 configure({ asyncUtilTimeout: 5_000 });
 
 function Harness({ initial, onRows }: { initial: RateRow[]; onRows: (rows: RateRow[]) => void }) {

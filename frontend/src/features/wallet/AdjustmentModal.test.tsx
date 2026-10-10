@@ -179,7 +179,7 @@ afterEach(() => {
 
 // 每个用例都要走完一整遍填表 → 确认 → 发送；文件里第一个用例还要替 antd 生成全部组件的样式，
 // 全量并行时 5 秒不够。放宽的只是时间，断言一条没动。
-describe("AdjustmentModal", { timeout: 15_000 }, () => {
+describe("AdjustmentModal", { timeout: 20_000 }, () => {
   it.each(SIGNED)("sends %s with the amount as the string %j", async (type, expected) => {
     const user = userEvent.setup();
     api.postAdjustment.mockResolvedValue(adjustment());
