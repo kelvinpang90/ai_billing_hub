@@ -1,7 +1,9 @@
 /**
  * 部署后浏览器验收：管理端客户页（AIH-TASK-015），本任务为 AIH-TASK-024；AIH-TASK-023 加了审计页的两个只读步骤
  * （open_audit、check_audit_entry）；AIH-TASK-035 加了 AI 目录的两个只读步骤（open_catalog、check_meter_types）；
- * AIH-TASK-036 加了供应商价格与汇率的两个只读步骤（open_provider_prices、open_fx_rates）。文件名沿用，不改。
+ * AIH-TASK-036 加了供应商价格与汇率的两个只读步骤（open_provider_prices、open_fx_rates）；AIH-TASK-037 加了定价规则
+ * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）。文件名沿用，不改。open_catalog / check_meter_types
+ * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
  * 谁在什么时候跑它
  * ----------------
@@ -51,12 +53,16 @@
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
  *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
- *   顶栏「Exchange rates」（href 为 /fx-rates）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
+ *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
+ *   「Pricing preview」（href 为 /pricing/preview）。不点新建客户、编辑 / 保存、手工调账、建凭据、轮换、吊销等任何
  *   会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。审计页不改每页条数、不翻页、
  *   不展开行、不点「Clear filters」。目录页不点「New provider」「New meter type」「Rename」「Retire」「Reactivate」
  *   或任何确认按钮、不点状态筛选、不翻页、不打开任何供应商的详情、不填也不提交任何表单。价格页与汇率页不点
  *   「New draft」「New manual draft」「Edit」「Publish」「Retire」「Discard」或任何确认按钮、不动供应商 / 模型 /
- *   状态筛选、不翻页、不打开任何价格版本的详情、不填也不提交任何表单。登录会在服务端留下会话与
+ *   状态筛选、不翻页、不打开任何价格版本的详情、不填也不提交任何表单。规则页不点「New draft」「Edit」「Publish」
+ *   「Disable」「Discard」或任何确认按钮、不动范围 / 客户 / 供应商 / 模型 / 状态筛选、不翻页、不打开任何规则的详情、
+ *   不填也不提交任何表单。试算页不选也不填任何字段、不点「Calculate」（试算本身只读，但「不提交任何表单」一视同仁）。
+ *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
  * - 每个步骤都真的检查它声称的东西；等待一律有上限（见下面的常量），总时长控制在 timeout_seconds（300 秒）内。
@@ -105,6 +111,16 @@
  *                   且不是加载失败、无权限或路由兜底页。版本列表为空（fx.empty）或有表格（表头有「Currency」「Rate (MYR)」）
  *                   都合法；「BNM fetch attempts」一节（fx.attempts.title）可见，且它的表格（表头有「Attempted at」「Outcome」）
  *                   或空状态（fx.attempts.empty）已经画出来，空列表合法；报到前把这一节的标题滚动到视口中间
+ *   open_pricing_rules
+ *                   点顶栏「Pricing rules」（nav.pricingRules，href 为 paths.ts 的 pricingRules，即 /pricing/rules）进规则页；
+ *                   页面落定且不是加载失败（任何错误提示，含客户 / 供应商下拉取不到）、无权限（pricing.rules.forbidden）或
+ *                   路由兜底页。空列表合法（pricing.rules.empty），有表格时表头要有「Scope」「Strategy」两列
+ *   open_pricing_preview
+ *                   点顶栏「Pricing preview」（nav.pricingPreview，href 为 paths.ts 的 pricingPreview，即 /pricing/preview）进
+ *                   试算页；表单可见：「Customer」「Provider」「Model」「Usage type」「Occurred at (Kuala Lumpur time)」五个
+ *                   label 都关联着控件、「Calculate」按钮在，且页面写着「Estimated cost, not visible to customers.」
+ *                   （pricing.preview.estimateNote）。不是加载失败、无权限或路由兜底页；表单出现之后再看一小段时间
+ *                   （PREVIEW_LOOKUP_SETTLE_MS），下拉要的客户、供应商、计量类型取不到（错误提示）或无权限同样算失败。不提交
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -176,6 +192,18 @@ const TEXT = {
   fxOutcome: "Outcome", // fx.attempts.field.outcome
   fxAttemptsLoading: "Loading fetch attempts…", // fx.attempts.loading
   fxAttemptsEmpty: "No fetch attempts yet.", // fx.attempts.empty
+  navPricingRules: "Pricing rules", // nav.pricingRules —— 顶栏的规则项
+  navPricingPreview: "Pricing preview", // nav.pricingPreview —— 顶栏的试算项
+  rulesForbidden: "Only administrators can manage pricing rules and preview charges.", // pricing.rules.forbidden
+  rulesScope: "Scope", // pricing.rules.field.scope —— 规则表格的列头
+  rulesStrategy: "Strategy", // pricing.rules.field.strategy
+  rulesLoading: "Loading pricing rules…", // pricing.rules.loading
+  rulesEmpty: "No pricing rules yet.", // pricing.rules.empty
+  previewCustomer: "Customer", // pricing.rules.field.customer —— 试算表单的 label
+  previewUsageType: "Usage type", // pricing.preview.field.usageType
+  previewOccurredAt: "Occurred at (Kuala Lumpur time)", // pricing.preview.field.occurredAt
+  previewSubmit: "Calculate", // pricing.preview.submit —— 只确认它在，不点
+  previewEstimateNote: "Estimated cost, not visible to customers.", // pricing.preview.estimateNote
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -188,6 +216,8 @@ const TEXT = {
   catalogMeterTypesPath: "/catalog/meter-types",
   providerPricesPath: "/pricing/provider-prices",
   fxRatesPath: "/fx-rates",
+  pricingRulesPath: "/pricing/rules",
+  pricingPreviewPath: "/pricing/preview",
 };
 
 /** 夹具客户的公司名前缀。只看、只打开以它开头的客户。 */
@@ -251,6 +281,8 @@ const ELEMENT_WAIT_MS = 30_000;
 const LOGIN_WAIT_MS = 30_000;
 const RESPONSE_WAIT_MS = 20_000;
 const SCROLL_WAIT_MS = 3_000;
+/** 试算页的表单出现之后再看多久：下拉要的数据是之后才回来的，取不到时的错误提示也是之后才出现。 */
+const PREVIEW_LOOKUP_SETTLE_MS = 3_000;
 const POLL_MS = 250;
 /** 报到之后停一下再往下走：Worker 读到报到行后自己截图，不能让它截到下一步的页面。 */
 const STEP_SETTLE_MS = 1_000;
@@ -1338,6 +1370,35 @@ function fxAttemptsInView(lib, T) {
   return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
 }
 
+/** 规则页的状态。错误提示（任何 role=alert）与无权限分开报；有表格时表头要有「Scope」「Strategy」。 */
+function probePricingRules(lib, T) {
+  const forbidden = lib.leaf(T.rulesForbidden) !== null;
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.rulesLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: lib.leaf(T.rulesEmpty) !== null,
+    table: lib.tableWith([T.rulesScope, T.rulesStrategy]) !== null,
+  };
+}
+
+/** 试算页的状态：表单的五个 label 都关联着控件、「Calculate」在、「估算成本，客户不可见」在。只读，不碰表单。 */
+function probePricingPreview(lib, T) {
+  const forbidden = lib.leaf(T.rulesForbidden) !== null;
+  const labels = [T.previewCustomer, T.pricingProvider, T.pricingModel, T.previewUsageType, T.previewOccurredAt];
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    form:
+      labels.every((text) => lib.control(text) !== null) &&
+      lib.button(T.previewSubmit) !== null &&
+      lib.leaf(T.previewEstimateNote) !== null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 驱动页面
 // ---------------------------------------------------------------------------
@@ -1991,6 +2052,71 @@ async function stepOpenFxRates() {
   }
 }
 
+async function stepOpenPricingRules() {
+  const link = { text: TEXT.navPricingRules, href: TEXT.pricingRulesPath };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同目录页与价格页。
+  const opened = await waitFor(
+    () => evaluate(probePricingRules, TEXT),
+    catalogSettled(TEXT.pricingRulesPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  // 生产上可能还没有任何定价规则，空列表合法。
+  rejectCatalogState(opened.value, TEXT.pricingRulesPath, true);
+}
+
+/** 试算页落定：表单画出来了，或者错误提示、无权限、走到了别处。 */
+function previewSettled(s) {
+  return (
+    s.appError ||
+    s.notFound ||
+    (s.path === TEXT.pricingPreviewPath && !s.busy && (s.failed || s.forbidden || s.form))
+  );
+}
+
+/** 试算页落在了不该落的状态上：各自的失败码。 */
+function rejectPreviewState(s) {
+  if (s.appError || s.failed) {
+    throw fail("page_error");
+  }
+  if (s.notFound || s.path !== TEXT.pricingPreviewPath) {
+    throw fail("navigation_failed");
+  }
+  if (s.forbidden || !s.form) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepOpenPricingPreview() {
+  const link = { text: TEXT.navPricingPreview, href: TEXT.pricingPreviewPath };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  const opened = await waitFor(() => evaluate(probePricingPreview, TEXT), previewSettled, ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectPreviewState(opened.value);
+
+  // 表单先画出来，下拉要的客户、供应商、计量类型之后才回来：再看一小段时间，期间出现错误提示、无权限或离开了
+  // 这一页都算失败。到时什么都没出现就是正常（waitFor 以「没等到」结束）。
+  const late = await waitFor(
+    () => evaluate(probePricingPreview, TEXT),
+    (s) => s.appError || s.notFound || s.failed || s.forbidden || s.path !== TEXT.pricingPreviewPath || !s.form,
+    PREVIEW_LOOKUP_SETTLE_MS,
+  );
+  if (late.ok) {
+    rejectPreviewState(late.value);
+  }
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
@@ -2002,6 +2128,8 @@ const STEPS = {
   check_meter_types: stepCheckMeterTypes,
   open_provider_prices: stepOpenProviderPrices,
   open_fx_rates: stepOpenFxRates,
+  open_pricing_rules: stepOpenPricingRules,
+  open_pricing_preview: stepOpenPricingPreview,
 };
 
 // ---------------------------------------------------------------------------

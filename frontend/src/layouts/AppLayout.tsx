@@ -33,6 +33,10 @@ export function AppLayout() {
   const inProviderPrices =
     location.pathname === ROUTES.providerPrices ||
     location.pathname.startsWith(`${ROUTES.providerPrices}/`);
+  // 规则列表与规则详情都算在顶栏的「定价规则」这一项下面。
+  const inPricingRules =
+    location.pathname === ROUTES.pricingRules ||
+    location.pathname.startsWith(`${ROUTES.pricingRules}/`);
   let selectedKey = location.pathname;
   if (inCustomers) {
     selectedKey = ROUTES.customers;
@@ -40,6 +44,8 @@ export function AppLayout() {
     selectedKey = ROUTES.catalogProviders;
   } else if (inProviderPrices) {
     selectedKey = ROUTES.providerPrices;
+  } else if (inPricingRules) {
+    selectedKey = ROUTES.pricingRules;
   }
 
   return (
@@ -75,6 +81,14 @@ export function AppLayout() {
             {
               key: ROUTES.fxRates,
               label: <Link to={ROUTES.fxRates}>{t("nav.fxRates")}</Link>,
+            },
+            {
+              key: ROUTES.pricingRules,
+              label: <Link to={ROUTES.pricingRules}>{t("nav.pricingRules")}</Link>,
+            },
+            {
+              key: ROUTES.pricingPreview,
+              label: <Link to={ROUTES.pricingPreview}>{t("nav.pricingPreview")}</Link>,
             },
           ]}
         />
