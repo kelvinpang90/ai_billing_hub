@@ -158,7 +158,7 @@ beforeEach(() => {
 });
 
 // antd 的表格与对话框在 jsdom 里渲染慢，全量并行时 5 秒不够（同 AdjustmentModal.test.tsx）。
-const SLOW = { timeout: 15_000 };
+const SLOW = { timeout: 20_000 };
 // 同理，findBy / waitFor 默认只等 1 秒，不够 antd 重画；只改本文件（每个测试文件各自隔离）。
 configure({ asyncUtilTimeout: 5_000 });
 

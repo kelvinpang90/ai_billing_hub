@@ -174,7 +174,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("IntegrationAccessPanel", { timeout: 15_000 }, () => {
+describe("IntegrationAccessPanel", { timeout: 20_000 }, () => {
   it("shows a loading state while the list is on its way", () => {
     api.listCredentials.mockReturnValue(new Promise(() => undefined));
 
