@@ -4103,6 +4103,7 @@ Explicitly NOT required in V1:
 - central AI Gateway
 - storing AI conversation content
 - customer BYOK
+- usage reporting from a backend the customer operates (for example a customer-hosted AI API): §2.1 trusts only Acuven-managed Integrated Application Backends, and a customer-controlled machine could under-report usage that Central Billing cannot verify (product owner, 2026-10-11)
 - complex postpaid invoicing
 - Kubernetes
 - full distributed microservices architecture
@@ -4117,6 +4118,7 @@ Design V1 so later phases may support:
 
 ```text
 BYOK
+Customer-hosted usage reporting
 Auto Top-Up
 Postpaid Billing
 Credit Limit
