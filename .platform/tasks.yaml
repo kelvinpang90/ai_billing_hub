@@ -2995,7 +2995,7 @@ tasks:
     title: 管理端前端：审计页动作下拉补齐后端全部审计动作并防止再次漂移
     purpose: >-
       frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 是 app/models/auth.py 里 AuditAction 的手抄副本，AIH-TASK-022 之后后端新增的 27 个动作（内部计费模式、目录、供应商价格、定价规则、汇率、用量事件）都没有跟上，审计页的动作下拉选不到它们。补齐这份清单，并加一条测试直接比对后端枚举，以后后端再加动作而前端没跟上时测试就会失败。只做前端，不改页面与验收脚本。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - AUDIT_ACTIONS 与 app/models/auth.py 的 AuditAction 取值一一对应，顺序与枚举声明顺序一致；不多写后端没有的值（多写的值一选就是 422，见 adminAudit.ts 文件头）。不改任何后端文件
