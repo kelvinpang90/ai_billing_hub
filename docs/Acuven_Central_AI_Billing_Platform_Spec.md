@@ -4697,5 +4697,6 @@ The system-side AI API, formerly built as the separate `acuven_ai_api` service, 
 ## 141.6 Contract and Exposure
 
 - The `/v1/capabilities/{capability}` contract of `acuven_ai_api` (paths, request bodies, `200` bodies, and the meaning of each status code) carries over unchanged. Error bodies use the §107 envelope.
-- In V1 the AI Module is reachable only from the internal network. Public exposure, needed when a customer-hosted module backend calls it remotely, requires a separate design.
+- The AI Module is reachable over public HTTPS through the platform edge, so that a module backend on another host (for example a customer-hosted CRM) can call it remotely; callers on the same host may use the internal network instead (product owner, 2026-10-12). The public entry is protected by the AI client key and by a per-source request rate limit at the edge against abuse. That edge limit is not a per-client usage limit.
+- Each capability is enabled in production only after its own contract is approved; the capability allowlist (§141.2) then enables it per project.
 - What the AI Module does not do in V1 is listed in §121.

@@ -48,7 +48,7 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
-- 待登记：AI 模块：acuven_ai_api 并入本服务（spec §141、ADR-0012；设计闸门 #281 待 Kelvin 拍板 §10 并经 Codex 批准，之后按设计 §8 拆成十个任务登记）
+- 待登记：AI 模块：acuven_ai_api 并入本服务（spec §141、ADR-0012；设计闸门 #281 v2 已由 Kelvin 答复 §10，待 Codex 批准，之后按设计 §8 拆成十个任务登记）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
 - 待登记：定价规则加项目作用域：同一客户的 AI Chatbot 与 AI API 分开定价，约定一个项目对应一条产品线下的一个模块（改 spec §16 的解析顺序，需设计闸门；2026-10-09 Kelvin：要分开）
