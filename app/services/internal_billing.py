@@ -1,23 +1,34 @@
-"""Audited, one-way provisioning of an internal metered-only tenant."""
+"""Audited, one-way provisioning of an internal metered-only tenant.
+
+⚠️ 计费模式的跃迁与 `status_version` +1、`status_changed_at`、`tenant.billing_mode_changed`
+outbox、审计同一事务（INV-13；设计闸门 #241 v6 §2「`status_version` 递增点收拢」）。
+"""
 
 from __future__ import annotations
 
 import datetime as dt
+import json
+from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.database import session_scope
 from app.core.errors import AppError
-from app.models.auth import AuditAction, User, UserRole
+from app.models.auth import AuditAction, DomainOutbox, OutboxStatus, User, UserRole
 from app.models.integration import IntegrationCredential
-from app.models.tenancy import BillingMode, Tenant
+from app.models.tenancy import BillingMode, IntegrationStatus, Tenant, compose_effective_status
 from app.models.usage import UsageEvent
 from app.models.wallet import Wallet
-from app.repositories.tenancy import get_tenant_by_public_id
+from app.repositories.tenancy import bump_status_version, get_tenant_by_public_id
 from app.schemas.customers import CustomerDetail, customer_detail
 from app.services.auth import RequestContext, record_audit, utc_now
 from app.services.customers import CustomerNotFound
+
+# 出站事件（设计 #241 §2）。⚠️ 这个字符串是将来投递任务选处理器的键，改名等于让
+# 已经躺在 domain_outbox 里的行认不出自己。
+EVENT_BILLING_MODE_CHANGED: Final = "tenant.billing_mode_changed"
+AGGREGATE_TENANT: Final = "tenant"
 
 
 class InternalMeteringNotEligible(AppError):
@@ -83,8 +94,28 @@ def enable_internal_metering(
             or wallet.balance != 0
         ):
             raise InternalMeteringNotEligible
+        previous = tenant.billing_mode
+
+        def make_event(locked: Tenant) -> DomainOutbox:
+            # bump 在版本 +1 之后才调用：payload 里一定是新版本。按名字取 `_mode_event`。
+            effective, _reason = compose_effective_status(
+                locked.account_status,
+                locked.billing_status,
+                locked.billing_mode,
+                IntegrationStatus.ENABLED,
+            )
+            payload = {
+                "billing_mode": locked.billing_mode.value,
+                "previous_billing_mode": previous.value,
+                "effective_status": effective.value,
+                "status_version": locked.status_version,
+                "changed_at": moment.isoformat(),
+            }
+            return _mode_event(locked, payload, moment)
+
+        # 锁内刚读到的值 + 1（钱包 → 租户的锁都已拿到）。
         tenant.billing_mode = BillingMode.INTERNAL_METERED_ONLY
-        tenant.status_version += 1
+        bump_status_version(session, tenant, moment, make_event=make_event)
         tenant.updated_at = moment
         record_audit(
             session,
@@ -99,3 +130,19 @@ def enable_internal_metering(
             reason=reason,
         )
         return customer_detail(tenant, wallet)
+
+
+def _mode_event(tenant: Tenant, payload: dict[str, object], now: dt.datetime) -> DomainOutbox:
+    # ⚠️ payload 里没有原因、没有个人数据（设计 #241 §2）。以 PENDING 持久保存：
+    # app/tasks/outbox.py 的 recover 只重投有处理器的类型，这一类在接上投递之前
+    # 不会被重试成死信（INV-14）。
+    return DomainOutbox(
+        event_type=EVENT_BILLING_MODE_CHANGED,
+        aggregate_type=AGGREGATE_TENANT,
+        aggregate_id=tenant.public_id,
+        payload_json=json.dumps(payload, sort_keys=True),
+        status=OutboxStatus.PENDING,
+        attempt_count=0,
+        next_retry_at=now,
+        created_at=now,
+    )
