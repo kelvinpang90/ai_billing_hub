@@ -2,7 +2,7 @@
  * 管理端客户管理（契约见 docs/api.md「管理端客户管理」，设计闸门 #96）。
  *
  * 只收录前端已经用到的六个接口：建客户、列表、详情、编辑，以及某个客户的建项目与
- * 项目列表（AIH-TASK-016）。每个都要 ADMIN，
+ * 项目列表（AIH-TASK-016）；项目的集成状态与状态 webhook 地址在 `projectIntegration.ts`。每个都要 ADMIN，
  * 角色以后端数据库为准 —— 前端不做任何角色判断，403 原样交给页面显示。
  *
  * ⚠️ 金额是**字符串**（INV-10）。这里的类型刻意写成 `string`，不在这一层解析：
@@ -82,11 +82,21 @@ export interface CustomerPatch {
   phone?: string | null;
 }
 
+/** 项目的集成状态（AIH-TASK-050）。`DISABLED` 时 `effective-status` 返回 `BLOCK_AI`，且不推送状态 webhook。 */
+export type IntegrationStatus = "ENABLED" | "DISABLED";
+
 /** 项目。`description` 可为 `null`（后端把只含空白的描述也存成 `null`）。 */
 export interface Project {
   id: string;
   name: string;
   description: string | null;
+  /**
+   * 后端总会带这两个字段（docs/api.md「项目对象」）。类型上写成可选：缺了的时候前端显示「未知」，
+   * 不猜默认值 —— 猜成 `ENABLED` 就是在替后端说话。
+   */
+  integration_status?: IntegrationStatus;
+  /** 是否设了状态 webhook 地址。⚠️ 项目对象里没有地址本身，完整地址只在 `…/status-webhook` 里。 */
+  status_webhook_configured?: boolean;
   created_at: string;
   updated_at: string;
 }
