@@ -3056,7 +3056,7 @@ tasks:
     title: 状态同步第一层：迁移 0020 与模型，建项目时插入投递行
     purpose: >-
       按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 1 项：迁移 0020（projects 加 integration_status 与 status_webhook_url，tenants 加 status_changed_at，新建 project_status_deliveries 并给已有项目各回填一行），对应模型，以及建项目时在同一事务插入它的投递行。从本任务上线起，每个项目都恰好有一行投递行。不改任何状态跃迁、接口与投递。
-    status: ready
+    status: done
     acceptance_criteria:
       - 实现与 docs/design/PHASE-3-status-sync.md 逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计
       - 迁移文件名 alembic/versions/20261009_0020_status_sync.py，down_revision 指向 0019；列、默认值、CHECK、复合外键、主键与 next_attempt_at 索引按设计 §2「数据库」；已有项目回填 ENABLED，并给每个已有项目插入一行投递行（next_attempt_at 取迁移时刻）；status_changed_at 旧行为空；文件头有 §132 第 13 条分析；downgrade 按设计 §8（会丢数据时抛错拒绝，照 0019）
