@@ -3278,7 +3278,7 @@ tasks:
     title: 状态同步第五层：状态 webhook 的领取、签名发送、结算与重试
     purpose: >-
       按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 5 项：Beat 每 15 秒的 dispatch 逐行循环（12 秒预算），领取（FOR UPDATE OF 投递行 SKIP LOCKED LIMIT 1、同一事务组装快照与 payload、单行租约令牌）、事务外签名发送（标准库 urllib、禁止重定向、可注入 transport、超时 5 秒）、结算（先对租户行加共享锁读当前版本，再带令牌条件更新投递行；成功、失败退避、有更新版本立即重排）；签名密钥缺失或解不开的判定顺序与结算；配置项。告警维度与运维文档由 AIH-TASK-052 做。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-050
     acceptance_criteria:
