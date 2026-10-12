@@ -84,13 +84,15 @@ def test_the_periodic_tasks_are_the_outbox_sweep_the_fx_fetch_and_usage_billing(
     没有这个扫描，Redis 一丢、或者 worker 在触发之后挂掉，那些 outbox 行就
     **永远躺在库里**没人再看一眼（Invariant 14），而用户那边只表现为没收到信。
     AIH-TASK-040 加了第二条：每天三次的 BNM 汇率拉取。AIH-TASK-032 加了用量计费的
-    扫描与卡住回收（摄取端不入队，没有它们事件永远停在 RECEIVED）。
+    扫描与卡住回收（摄取端不入队，没有它们事件永远停在 RECEIVED）。AIH-TASK-051 加了
+    状态 webhook 的 dispatch（待推送的状态只在库里，没有它什么都不会发出去）。
     """
     assert set(celery_app.conf.beat_schedule) == {
         "outbox-recovery",
         "fx-fetch",
         "usage-billing-sweep",
         "usage-stale-recovery",
+        "status-webhook-dispatch",
     }
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
     assert entry["task"] == "app.tasks.outbox.recover"
@@ -124,6 +126,27 @@ def test_the_usage_billing_tasks_are_registered(celery_app) -> None:
 
     assert "app.tasks.usage_billing.bill_pending_events" in celery_app.tasks
     assert "app.tasks.usage_billing.recover_stale_processing" in celery_app.tasks
+
+
+def test_the_status_webhook_dispatch_runs_every_15_seconds(celery_app) -> None:
+    """设计闸门 #241 v6 §2「配置」：beat 间隔 15 秒、`expires = 14`。
+
+    一次 dispatch 的预算 12 秒（`BILLING_STATUS_WEBHOOK_DISPATCH_BUDGET_SECONDS`）小于间隔；
+    `expires` 短于周期：beat 停摆后再起来，攒下的触发不一口气放出去。
+    """
+    entry = celery_app.conf.beat_schedule["status-webhook-dispatch"]
+
+    assert entry["task"] == "app.tasks.status_webhook.dispatch"
+    assert entry["schedule"] == 15
+    assert entry["options"] == {"expires": 14}
+    assert entry["options"]["expires"] < entry["schedule"]
+    assert Settings().status_webhook_dispatch_budget_seconds < entry["schedule"]
+
+
+def test_the_status_webhook_task_is_registered(celery_app) -> None:
+    import app.tasks.status_webhook  # noqa: F401
+
+    assert "app.tasks.status_webhook.dispatch" in celery_app.tasks
 
 
 def test_the_fx_fetch_runs_three_times_a_kuala_lumpur_afternoon(celery_app) -> None:
@@ -169,6 +192,7 @@ def test_task_modules_are_listed_explicitly(celery_app) -> None:
         "app.tasks.outbox",
         "app.tasks.fx_fetch",
         "app.tasks.usage_billing",
+        "app.tasks.status_webhook",
     ]
     assert celery_app.conf.include == TASK_MODULES
 

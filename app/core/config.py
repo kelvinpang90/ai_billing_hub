@@ -15,7 +15,7 @@ from functools import lru_cache
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "production"]
@@ -271,6 +271,28 @@ class Settings(BaseSettings):
     # 一个事件最多被认领几次（认领时 +1）。达到后，失败记录与卡住回收都把它判 FAILED_FINAL。
     # ⚠️ `gt=0`：0 让第一次失败就进 FAILED_FINAL，一次锁超时就要管理员重新入队。
     usage_max_attempts: int = Field(default=10, gt=0)
+
+    # --- 状态 webhook 投递（AIH-TASK-051，设计闸门 #241 v6 §2「配置」） ----------------------
+
+    # 单次 POST 的超时。⚠️ `gt=0`：0 或负数等于不设超时，一个卡住的集成方会永久占着 worker。
+    status_webhook_timeout_seconds: int = Field(default=5, gt=0)
+    # 退避 = min(base × 2^(n−1), 上限)，n 是连续失败次数。重试**不设放弃上限**（spec §29）。
+    status_webhook_retry_base_seconds: int = Field(default=30, gt=0)
+    status_webhook_retry_cap_seconds: int = Field(default=3600, gt=0)
+    # 单行租约：从这一行被领取时算起，必须大于单次超时（加签名开销），否则请求还在路上，
+    # 租约就过期、被别人重复领取。
+    status_webhook_lease_seconds: int = Field(default=60, gt=0)
+    # 一次 dispatch 的时间预算，小于 beat 间隔 15 秒（app/core/celery_app.py）。
+    status_webhook_dispatch_budget_seconds: int = Field(default=12, gt=0)
+
+    @model_validator(mode="after")
+    def _status_webhook_timings_fit(self) -> Settings:
+        # ⚠️ 配反了不报错，只会让投递行为怪异：宁可进程起不来。
+        if self.status_webhook_lease_seconds <= self.status_webhook_timeout_seconds:
+            raise ValueError("status_webhook_lease_seconds must exceed the send timeout")
+        if self.status_webhook_retry_cap_seconds < self.status_webhook_retry_base_seconds:
+            raise ValueError("status_webhook_retry_cap_seconds must not be below the base")
+        return self
 
     @field_validator("fx_bnm_base_url")
     @classmethod

@@ -32,6 +32,7 @@ TASK_MODULES = [
     "app.tasks.outbox",
     "app.tasks.fx_fetch",
     "app.tasks.usage_billing",
+    "app.tasks.status_webhook",
 ]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
@@ -57,6 +58,13 @@ USAGE_BILLING_SWEEP_SECONDS = 10.0
 USAGE_BILLING_SWEEP_EXPIRES_SECONDS = 9.0
 USAGE_STALE_RECOVERY_SECONDS = 60.0
 USAGE_STALE_RECOVERY_EXPIRES_SECONDS = 54.0
+
+# 状态 webhook 投递（设计闸门 #241 v6 §2「配置」，AIH-TASK-051）。
+# ⚠️ 与用量计费同理，这一条就是推送本身：待推送的状态只在库里（版本差 + 投递行），
+# 没有它什么都不会发出去。每 15 秒一次（§119 的首次推送 p95 ≤ 60 秒），
+# 一次 dispatch 的预算 12 秒；`expires = 14`，beat 停摆后再起来不一口气放出去。
+STATUS_WEBHOOK_DISPATCH_SECONDS = 15.0
+STATUS_WEBHOOK_DISPATCH_EXPIRES_SECONDS = 14.0
 
 
 class RedisNotConfigured(RuntimeError):
@@ -127,6 +135,11 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "app.tasks.usage_billing.recover_stale_processing",
                 "schedule": USAGE_STALE_RECOVERY_SECONDS,
                 "options": {"expires": USAGE_STALE_RECOVERY_EXPIRES_SECONDS},
+            },
+            "status-webhook-dispatch": {
+                "task": "app.tasks.status_webhook.dispatch",
+                "schedule": STATUS_WEBHOOK_DISPATCH_SECONDS,
+                "options": {"expires": STATUS_WEBHOOK_DISPATCH_EXPIRES_SECONDS},
             },
         },
     )
