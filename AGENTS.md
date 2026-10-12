@@ -371,6 +371,14 @@ Claude 回应中的：
 
 不得声称“测试通过”。
 
+### SQL 文本断言要与方言无关
+
+审查后端测试时检查：断言 SQL 文本的地方有没有写死只在一种方言成立的字面量。同一个查询，SQLite 编译成 `JOIN`，MySQL 编译成 `INNER JOIN`；共享锁（`FOR SHARE` / `LOCK IN SHARE MODE`）、标识符引号、分页写法也不一样。合格的写法是只断言两种库相同的片段，或者比较前先归一，只有 MySQL 才有的断言放在 `engine.dialect.name == "mysql"` 分支里。
+
+发现了按 Non-blocking 报告，指出文件与行和对应的方言差异。
+
+来由：Worker 的沙箱跑不了 `tests.backend`，`[sqlite]` / `[mysql]` 参数化用例要到 CI 的 MySQL 分片才第一次真跑；AIH-TASK-051 run `7fe4822e` 就挂在这里。
+
 ---
 
 # 13. PowerShell 环境
