@@ -55,13 +55,15 @@ from app.models.tenancy import (
 from app.repositories import tenancy
 from app.schemas.customers import ProjectView, project_view
 from app.services.auth import RequestContext, record_audit, utc_now
-from app.services.customers import ENTITY_PROJECT, CustomerNotFound
+from app.services.customers import CustomerNotFound
 from app.services.integration_access import ProjectNotFound
 
 # 出站事件（设计 §2「`status_version` 递增点收拢」）。
 # ⚠️ 这个字符串是将来投递任务选处理器的键，改名等于让已经躺在 outbox 里的行认不出自己。
 EVENT_INTEGRATION_STATUS_CHANGED: Final = "project.integration_status_changed"
 AGGREGATE_PROJECT: Final = "project"
+# 审计的 entity_type 定义在本模块：审计归类的扫描测试只认本模块的字符串常量。
+ENTITY_PROJECT: Final = "project"
 
 # 原因：去首尾空白后 1–255，与审计 `reason` 列同宽（设计 §2「接口」）。
 REASON_MAX_LENGTH: Final = 255
