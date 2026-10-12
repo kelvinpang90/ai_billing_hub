@@ -64,7 +64,14 @@ from app.models.ai_catalog import (
 from app.models.auth import AuditAction, AuditLog
 from app.models.base import Base
 from app.models.integration import CredentialStatus, IntegrationCredential
-from app.models.tenancy import AccountStatus, BillingMode, Project, Tenant
+from app.models.tenancy import (
+    AccountStatus,
+    BillingMode,
+    BillingStatus,
+    IntegrationStatus,
+    Project,
+    Tenant,
+)
 from app.models.usage import (
     ConflictMismatch,
     UsageEvent,
@@ -416,15 +423,20 @@ def post(
     return client.post(PATH, content=body, headers=headers)
 
 
+def read_status(client: TestClient, credential: Credential, clock: Clock) -> dict:
+    response = client.get(STATUS_PATH, headers=status_headers(credential, clock))
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
 def test_effective_status_uses_mode_but_never_bypasses_admin_disable(
     client, app, credential, clock
 ) -> None:
     def read() -> dict:
-        response = client.get(STATUS_PATH, headers=status_headers(credential, clock))
-        assert response.status_code == 200, response.text
-        return response.json()["data"]
+        return read_status(client, credential, clock)
 
     initial = read()
+    # 原有七个字段原名原值，再加设计闸门 #241 v6 §2 的三个（AIH-TASK-050）。断言「恰好等于」。
     assert initial == {
         "tenant_id": credential.tenant_public_id,
         "project_id": credential.project_public_id,
@@ -433,6 +445,10 @@ def test_effective_status_uses_mode_but_never_bypasses_admin_disable(
         "account_status": "ENABLED",
         "effective_status": "BLOCK_AI",
         "status_version": 0,
+        "project_integration_status": "ENABLED",
+        "reason_code": "BALANCE_NOT_POSITIVE",
+        # 从未跃迁：`status_changed_at` 为空，取租户的 `created_at`。
+        "effective_at": NOW.isoformat(),
     }
     with app.state.session_factory() as session:
         tenant = session.get(Tenant, credential.tenant_id)
@@ -442,6 +458,7 @@ def test_effective_status_uses_mode_but_never_bypasses_admin_disable(
     internal = read()
     assert internal["billing_status"] == "SUSPENDED"
     assert internal["effective_status"] == "ALLOW_AI"
+    assert internal["reason_code"] is None
     assert internal["status_version"] == 1
 
     with app.state.session_factory() as session:
@@ -449,7 +466,98 @@ def test_effective_status_uses_mode_but_never_bypasses_admin_disable(
         tenant.account_status = AccountStatus.DISABLED
         tenant.status_version += 1
         session.commit()
-    assert read()["effective_status"] == "BLOCK_AI"
+    disabled = read()
+    assert disabled["effective_status"] == "BLOCK_AI"
+    assert disabled["reason_code"] == "ACCOUNT_DISABLED"
+
+
+# 设计 §2「有效状态合成」的每一行经接口各看一次：(账户, 计费状态, 计费模式, 项目) → 结果。
+_INTERNAL = "INTERNAL_METERED_ONLY"
+REASON_CASES = [
+    ("CLOSED", "ACTIVE", "PREPAID", "DISABLED", "BLOCK_AI", "ACCOUNT_CLOSED"),
+    ("DISABLED", "SUSPENDED", "PREPAID", "DISABLED", "BLOCK_AI", "ACCOUNT_DISABLED"),
+    (
+        "PENDING_ACTIVATION",
+        "ACTIVE",
+        _INTERNAL,
+        "ENABLED",
+        "BLOCK_AI",
+        "ACCOUNT_PENDING_ACTIVATION",
+    ),
+    # 管理员停用项目排在余额前面：充值不会让集成方误以为能解封（设计 §2）。
+    ("ENABLED", "SUSPENDED", "PREPAID", "DISABLED", "BLOCK_AI", "PROJECT_INTEGRATION_DISABLED"),
+    ("ENABLED", "ACTIVE", _INTERNAL, "DISABLED", "BLOCK_AI", "PROJECT_INTEGRATION_DISABLED"),
+    ("ENABLED", "SUSPENDED", "PREPAID", "ENABLED", "BLOCK_AI", "BALANCE_NOT_POSITIVE"),
+    ("ENABLED", "SUSPENDED", _INTERNAL, "ENABLED", "ALLOW_AI", None),
+    ("ENABLED", "ACTIVE", "PREPAID", "ENABLED", "ALLOW_AI", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("account", "billing", "mode", "integration", "effective", "reason"), REASON_CASES
+)
+def test_effective_status_shows_every_reason_code(
+    client,
+    app,
+    credential,
+    clock,
+    account: str,
+    billing: str,
+    mode: str,
+    integration: str,
+    effective: str,
+    reason: str | None,
+) -> None:
+    with app.state.session_factory() as session:
+        tenant = session.get(Tenant, credential.tenant_id)
+        tenant.account_status = AccountStatus(account)
+        tenant.billing_status = BillingStatus(billing)
+        tenant.billing_mode = BillingMode(mode)
+        project = session.get(Project, credential.project_id)
+        project.integration_status = IntegrationStatus(integration)
+        session.commit()
+
+    data = read_status(client, credential, clock)
+
+    assert (data["effective_status"], data["reason_code"]) == (effective, reason)
+    assert data["project_integration_status"] == integration
+    # 原有字段照旧是租户的三维原值。
+    assert (data["account_status"], data["billing_status"], data["billing_mode"]) == (
+        account,
+        billing,
+        mode,
+    )
+
+
+def test_effective_at_is_the_last_status_change(client, app, credential, clock) -> None:
+    changed = NOW + dt.timedelta(minutes=7)
+    with app.state.session_factory() as session:
+        tenant = session.get(Tenant, credential.tenant_id)
+        tenant.status_changed_at = changed
+        session.commit()
+
+    assert read_status(client, credential, clock)["effective_at"] == "2026-10-05T08:07:00"
+
+
+def test_effective_status_is_the_credentials_own_project(client, app, credential, clock) -> None:
+    """身份只来自凭据（INV-8）：别的租户的项目停用，不影响这一个凭据看到的结果。"""
+    other = make_credential(app, 2)
+    with app.state.session_factory() as session:
+        project = session.get(Project, other.project_id)
+        project.integration_status = IntegrationStatus.DISABLED
+        session.commit()
+
+    mine = read_status(client, credential, clock)
+    theirs = read_status(client, other, clock)
+
+    assert (mine["project_id"], mine["project_integration_status"]) == (
+        credential.project_public_id,
+        "ENABLED",
+    )
+    assert (theirs["project_id"], theirs["reason_code"]) == (
+        other.project_public_id,
+        "PROJECT_INTEGRATION_DISABLED",
+    )
 
 
 def test_effective_status_rejects_unsigned_request(client) -> None:

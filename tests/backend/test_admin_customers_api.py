@@ -82,7 +82,16 @@ CUSTOMER_FIELDS = {
 }
 DETAIL_FIELDS = CUSTOMER_FIELDS | {"wallet"}
 WALLET_FIELDS = {"currency", "balance", "version"}
-PROJECT_FIELDS = {"id", "name", "description", "created_at", "updated_at"}
+PROJECT_FIELDS = {
+    "id",
+    "name",
+    "description",
+    # AIH-TASK-050（设计闸门 #241 v6 §2「接口」）：只有布尔，没有地址本身。
+    "integration_status",
+    "status_webhook_configured",
+    "created_at",
+    "updated_at",
+}
 PAGE_FIELDS = {"items", "page", "page_size", "total"}
 ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 
@@ -107,6 +116,10 @@ FX_RATES_ROUTE = "/api/v1/admin/fx-rates"
 FX_RATE_ROUTE = FX_RATES_ROUTE + "/{fx_rate_id}"
 PRICING_PREVIEW_ROUTE = "/api/v1/admin/pricing-preview"
 USAGE_EVENTS_ROUTE = "/api/v1/admin/usage-events"
+# AIH-TASK-050 的三个接口（设计闸门 #241 v6 §2「接口」）。
+PROJECT_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}"
+INTEGRATION_STATUS_ROUTE = PROJECT_ROUTE + "/integration-status"
+STATUS_WEBHOOK_ROUTE = PROJECT_ROUTE + "/status-webhook"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -169,6 +182,9 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"),
     ("GET", USAGE_EVENTS_ROUTE),
     ("GET", USAGE_EVENTS_ROUTE + "/{usage_event_id}"),
+    ("POST", INTEGRATION_STATUS_ROUTE),
+    ("PUT", STATUS_WEBHOOK_ROUTE),
+    ("GET", STATUS_WEBHOOK_ROUTE),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -270,6 +286,10 @@ VALID_BODIES = {
     # 都过不了 401 / 403；请求体合法，保证 422 不会先出现。事件 id 是全零占位值。
     ("POST", USAGE_EVENTS_ROUTE + "/requeue"): {"status": "PRICING_ERROR", "reason": "Probe"},
     ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"): {"reason": "Probe"},
+    # 项目集成状态与地址（AIH-TASK-050）：新项目是 ENABLED、没有地址，漏了鉴权的处理函数会
+    # 真的把它停用、真的设上地址，而不是碰巧「没变化」。地址是虚构的。
+    ("POST", INTEGRATION_STATUS_ROUTE): {"integration_status": "DISABLED", "reason": "Probe"},
+    ("PUT", STATUS_WEBHOOK_ROUTE): {"url": "https://hooks.example.com/probe"},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -874,6 +894,7 @@ def test_every_admin_route_refuses_non_admins(
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
+    project = stored_project(app, project_id)
     credentials = stored_credentials(app)
     webhook_secrets = stored_webhook_secrets(app)
     catalog = stored_catalog(app)
@@ -885,6 +906,8 @@ def test_every_admin_route_refuses_non_admins(
     # 行数看不出 UPDATE，所以客户行逐列再比一次（编辑接口漏了鉴权会在这里红）。
     assert row_counts(app) == before
     assert stored_tenant(app, customer_id) == stored
+    # 项目行同理：集成状态与地址两个接口改的是已有行（AIH-TASK-050）。
+    assert stored_project(app, project_id) == project
     # 凭据行同理：吊销与轮换改的是已有行的状态与截止时间。
     assert stored_credentials(app) == credentials
     # 签名密钥行同理：启用与退役改的是已有行的状态与时间（AIH-TASK-019）。
@@ -1128,6 +1151,17 @@ def stored_tenant(application: FastAPI, customer_id: str) -> dict:
         }
 
 
+def stored_project(application: FastAPI, project_id: str) -> tuple:
+    """What the integration-status and status-webhook endpoints change (AIH-TASK-050)."""
+    statement = select(
+        Project.integration_status,
+        Project.status_webhook_url,
+        Project.updated_at,
+    ).where(Project.public_id == project_id)
+    with application.state.session_factory() as session:
+        return tuple(session.execute(statement).one())
+
+
 def test_an_admin_edits_a_customer_and_it_is_audited(client, app, admin, admin_id) -> None:
     created = new_customer(
         client, admin, company_name="Old Name", contact_name=PII_CONTACT, phone=PII_PHONE
@@ -1333,6 +1367,11 @@ def test_an_admin_creates_a_project_under_a_customer(client, app, admin, admin_i
     assert set(project) == PROJECT_FIELDS
     assert str(uuid.UUID(project["id"])) == project["id"]
     assert (project["name"], project["description"]) == ("Chatbot", None)
+    # 新项目是 ENABLED、没有地址（AIH-TASK-050）。
+    assert (project["integration_status"], project["status_webhook_configured"]) == (
+        "ENABLED",
+        False,
+    )
     assert row_counts(app) == {
         **before,
         "projects": before["projects"] + 1,

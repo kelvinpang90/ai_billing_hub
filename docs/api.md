@@ -9,6 +9,7 @@
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端集成 API 凭据](#管理端集成-api-凭据)与[集成请求签名](#集成请求签名)（AIH-TASK-012）
 - [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥)与[状态 webhook 签名](#状态-webhook-签名)（AIH-TASK-019）
+- [管理端项目集成状态与状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址)、[状态 webhook 的接收与对账契约](#状态-webhook-签名)与[集成：有效 AI 服务状态](#集成有效-ai-服务状态)的新字段（AIH-TASK-050）
 - [管理端审计日志](#管理端审计日志)（AIH-TASK-022）
 - [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
@@ -72,7 +73,7 @@
 
 ### 时间
 
-`created_at` / `updated_at` 是不带时区的 UTC，ISO 8601，精确到秒，例如 `"2026-09-20T08:30:00"`
+`created_at` / `updated_at`（以及 `effective_at`）是不带时区的 UTC，ISO 8601，精确到秒，例如 `"2026-09-20T08:30:00"`
 （spec §109）。展示层再换成 Asia/Kuala_Lumpur。
 
 ### 分页（spec §108）
@@ -150,7 +151,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | `billing_mode` | 默认为 `PREPAID`；Acuven 自用租户可在首次使用前受控设为 `INTERNAL_METERED_ONLY` |
 | `ai_service_enabled` | 按模式、余额和管理员账户状态计算的有效 AI 权限；内部模式免余额停用，但不免管理员禁用 |
 | `account_status` | 管理员控制的账户生命周期，与 `billing_status` 互相独立：`PENDING_ACTIVATION`、`ENABLED`、`DISABLED`、`CLOSED` 之一。新客户与迁移前已有的客户都是 `ENABLED`；现在只有 `ENABLED` / `DISABLED` 会出现（AIH-TASK-020） |
-| `status_version` | 计费状态或账户状态每真实跃迁一次 +1，两维共用、只增不减。新客户是 0 |
+| `status_version` | 计费状态、账户状态、计费模式或该客户任一项目的集成状态每真实跃迁一次 +1，各维共用、只增不减。新客户是 0 |
 | `wallet.currency` | V1 只有 `MYR` |
 | `wallet.balance` | 8 位小数的字符串 |
 | `wallet.version` | 钱包的账本序号，新钱包是 0 |
@@ -166,12 +167,18 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
   "id": "9b1d7e0c-5a2f-4d8e-b6c3-0e4f1a2b3c4d",
   "name": "Chatbot",
   "description": null,
+  "integration_status": "ENABLED",
+  "status_webhook_configured": false,
   "created_at": "2026-09-20T08:31:00",
   "updated_at": "2026-09-20T08:31:00"
 }
 ```
 
-`description` 可为 `null`。
+| 字段 | 说明 |
+| --- | --- |
+| `description` | 可为 `null` |
+| `integration_status` | `ENABLED` / `DISABLED`（AIH-TASK-050）。新项目与迁移前已有的项目都是 `ENABLED`；改它见[项目集成状态与状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址) |
+| `status_webhook_configured` | 布尔：项目是否设了状态 webhook 地址。⚠️ 项目对象里**没有地址本身**（路径里可能带集成方的令牌），完整地址只出现在 `…/status-webhook` 的 PUT 与 GET 响应里 |
 
 ### `POST /api/v1/admin/customers` —— 建客户
 
@@ -264,8 +271,8 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 ### 不在本批接口里
 
-低余额阈值配置、出站 webhook、删除客户与项目（财务记录永久保留）、关户（`→ CLOSED`，
-见下一节末尾）。账户状态、管理员调账与 API 凭据见后面几节。
+低余额阈值配置、删除客户与项目（财务记录永久保留）、关户（`→ CLOSED`，
+见下一节末尾）。账户状态、管理员调账、API 凭据、项目集成状态与状态 webhook 地址见后面几节。
 
 ---
 
@@ -721,12 +728,104 @@ SHA256(RAW_REQUEST_BODY)
 
 ---
 
+## 管理端项目集成状态与状态 webhook 地址
+
+设计依据：设计闸门 #241 `APPROVED: design v6`，全文见 [design/PHASE-3-status-sync.md](design/PHASE-3-status-sync.md) §2「接口」、§4（spec §24、§25、§28）。
+规则在 AIH-TASK-049 的服务函数里，接口登记为 AIH-TASK-050。投递（真正发出 webhook）归 AIH-TASK-051，还没有上线。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST …/integration-status` | `{"integration_status": str, "reason": str}` | 200，项目对象 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `PUT …/status-webhook` | `{"url": str 或 null}` | 200，地址对象 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `GET …/status-webhook` | — | 200，地址对象 | 401 / 403 / 404 / 503 |
+
+`…` 是 `/api/v1/admin/customers/{customer_id}/projects/{project_id}`。只有 ADMIN 能调。`{customer_id}`、`{project_id}` 是
+`public_id`；项目不属于路径里的客户时与不存在一样 404。本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | 路径里的客户不存在 | 否 |
+| 404 | `PROJECT_NOT_FOUND` | 项目不存在，或不属于路径里的客户（两者一模一样） | 否 |
+| 409 | `ACCOUNT_CLOSED` | 客户已关户（`CLOSED`）时改集成状态（任何目标，含与当前相同），或设为一个地址（清除不受限） | 否 |
+| 422 | `VALIDATION_ERROR` | 请求体不合法、有未声明的字段，或地址不合规。`message` 不回显地址的任何部分 | 否 |
+
+### `POST …/integration-status` —— 改项目集成状态
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `integration_status` | 是 | `ENABLED` 或 `DISABLED`，大小写敏感 |
+| `reason` | 是 | 去掉首尾空白后长度 1–255。只进审计的 `reason`；只写业务说明，不写个人数据 |
+
+其他字段一律 422。判定顺序：请求体（422）→ 客户与项目（404）→ 客户 `CLOSED`（409，**即使目标与当前相同**）→
+目标与当前相同（200，不写）→ 跃迁。
+
+- **跃迁**：200，`data` 是改后的[项目对象](#项目对象)。同一事务里：项目的 `integration_status` 与 `updated_at`；客户的
+  `status_version` +1 与状态跃迁时刻；一条 `project.integration_status_changed` 领域事件（payload 不带原因）；一条
+  `PROJECT_INTEGRATION_STATUS_CHANGED` 审计（`entity_type = project`、`entity_id` 是项目的 `public_id`，`before_state` /
+  `after_state` 只有 `integration_status` 与 `status_version`）。任何一步失败整体回滚。
+- **目标与当前相同**：200，返回当前项目对象，什么都不写（不加版本、不写事件与审计）。超时重发是安全的。
+- 停用项目**不吊销凭据、不拒绝摄取**：在途用量照常入账；`effective-status` 对它返回 `BLOCK_AI` /
+  `PROJECT_INTEGRATION_DISABLED`。停用的项目**不推送**状态 webhook（spec §25），使它停用的那一次也不推，集成方经
+  [周期对账](#对账)得知；重新启用时版本 +1，之后照常推送当前状态。
+
+### `PUT …/status-webhook` —— 设置或清除状态 webhook 地址
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `url` | 是（缺失 422） | 字符串：按下面的规则规范化并校验，不合规 422；显式 `null`：清除 |
+
+其他字段一律 422。地址规范化与校验（设计 §2「URL 规范化与校验」）：
+
+- 原始输入里有空格或控制字符（0x00–0x20、0x7F）、`@`、`#`（含空的用户信息与空的 fragment），或主机名后面跟着冒号却没有端口：422。
+- scheme 必须是 `https`（不分大小写）；端口省略或 443。
+- 主机名去掉末尾一个点、转小写、IDNA 编码成 ASCII；每个点分段是 LDH 形式（小写字母、数字、连字符，不以连字符开头或结尾，
+  长 1–63），整个主机名 ≤ 253。
+- **IP 字面量一律拒绝**：带方括号的 IPv6、能解析成 IP 的、每段都是十进制数字或 `0x` 十六进制的（`127.1`、`2130706433`、`0x7f.1`）。
+- 路径为空取 `/`；查询串为空（含只有一个 `?`）时去掉；路径与查询串只允许 0x21–0x7E，按原样保留、不做百分号编码的规范化。
+- 保存的是重新拼出的 `https://<规范化主机名><path>[?query]`（端口 443 省略），总长 ≤ 2048。
+
+判定顺序：请求体与地址规范化（422）→ 客户与项目（404）→ 设为地址而客户 `CLOSED`（409；清除不受限，关户的客户也能停止推送）→
+规范化后与当前值逐字节相同（200，不写）→ 写入。
+
+- **规范化后与当前值相同**（例如只差大小写，或两次都是 `null`、包括清除一个从未设过的地址）：200，什么都不写，不写审计。
+- **真实变化**：200。同一事务里改地址，并把该项目的投递游标清零（新地址会收到一次当前状态；发往旧地址的在途请求的结果作废）；
+  写一条 `PROJECT_STATUS_WEBHOOK_SET` 审计，`before_state` / `after_state` 只有 `status_webhook_host`（规范化主机名或 `null`），
+  **不记完整地址**。
+- 地址只能由 ADMIN 设置。平台不做 DNS 解析后的内网地址拦截（设计 §10）。
+
+### `GET …/status-webhook` —— 读取地址
+
+只读，不写审计。`data` 与 PUT 的响应相同。
+
+### 地址对象
+
+```json
+{
+  "status_webhook_url": "https://hooks.example.com/acuven/receive",
+  "status_webhook_configured": true
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `status_webhook_url` | 规范化后的地址；没设时为 `null` |
+| `status_webhook_configured` | `status_webhook_url` 不为 `null` |
+
+⚠️ 完整地址**只出现在这两个接口的响应里**；项目对象只有 `status_webhook_configured`，审计只有主机名。
+
+---
+
 ## 状态 webhook 签名
 
-设计依据同上（设计 §2「签名库」；spec §28、§37）。**本任务只提供签名库**（`app/services/webhook_signing.py`
-的 `signing_material` 与 `sign_status_webhook`），还没有任何发送方；投递随 Phase 3 接上。规范串与
+设计依据同上（设计 §2「签名库」；spec §28、§37）。签名库是 AIH-TASK-019 的（`app/services/webhook_signing.py`
+的 `signing_material` 与 `sign_status_webhook`）；请求体、接收规则与对账契约来自设计闸门 #241 v6
+（[design/PHASE-3-status-sync.md](design/PHASE-3-status-sync.md) §2「Webhook 请求」「时间」，AIH-TASK-050 写进这里）。
+发送方（投递）归 AIH-TASK-051，还没有上线。规范串与
 [集成请求签名](#集成请求签名)是**同一套规则、同一份实现**，只有第四行不同。**本节是那条差别的唯一出处**，
 集成方验签照这里实现。
+
+`POST <status_webhook_url>`：地址由管理员按项目设置（见[上一节](#管理端项目集成状态与状态-webhook-地址)）。只有
+`integration_status = ENABLED` 且设了地址的项目才收到推送，内容永远是该项目**当前**的有效状态。
 
 ### 请求头
 
@@ -759,8 +858,74 @@ SHA256(RAW_REQUEST_BODY)
 ### 集成方怎么验
 
 按 `X-Acuven-Key-Version` 选密钥，照上面的规则算出签名，与 `X-Acuven-Signature` 做常量时间比较。轮换期间
-同时接受新旧两个版本，确认新版本能通过后再停用旧版本（ADR-0004 §4a）。时间窗、重试与按事件 id 去重的约定
-随 Phase 3 投递设计闸门写进这里。
+同时接受新旧两个版本，确认新版本能通过后再停用旧版本（ADR-0004 §4a）。
+
+**时间窗**：`X-Acuven-Timestamp` 与集成方本机时间相差**不超过 300 秒**（含正负两个方向，恰好 300 秒算通过），与入站签名的
+`MAX_SKEW_SECONDS` 相同。超出就回非 2xx；平台按失败重试，每次重发都重新生成时间戳与签名。
+
+### 请求体
+
+`Content-Type: application/json`，按键排序、无多余空白；签名覆盖的就是这些原始字节。例：
+
+```json
+{"account_status":"ENABLED","billing_mode":"PREPAID","billing_status":"SUSPENDED","effective_at":"2026-10-09T10:10:00","effective_status":"BLOCK_AI","event_id":"sevt_9b1d7e0c-5a2f-4d8e-b6c3-0e4f1a2b3c4d_42","project_id":"9b1d7e0c-5a2f-4d8e-b6c3-0e4f1a2b3c4d","project_integration_status":"ENABLED","reason_code":"BALANCE_NOT_POSITIVE","status_version":42,"tenant_id":"3f0e6c1a-8d4b-4c6e-9a51-2b7f0d9c4e11"}
+```
+
+恰好这 11 个字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `event_id` | `sevt_<项目 public_id>_<status_version>`，见下 |
+| `tenant_id` | 租户（客户）的 `public_id` |
+| `project_id` | 项目的 `public_id` |
+| `account_status` | `PENDING_ACTIVATION` / `ENABLED` / `DISABLED` / `CLOSED` |
+| `billing_status` | `ACTIVE` / `SUSPENDED` |
+| `billing_mode` | `PREPAID` / `INTERNAL_METERED_ONLY` |
+| `project_integration_status` | `ENABLED` / `DISABLED` |
+| `effective_status` | `ALLOW_AI` / `BLOCK_AI` |
+| `reason_code` | `BLOCK_AI` 的原因，取值见[集成：有效 AI 服务状态](#集成有效-ai-服务状态)；`ALLOW_AI` 时为 `null` |
+| `status_version` | 租户的状态版本，整数，只增不减 |
+| `effective_at` | 最近一次状态跃迁的时刻，格式见[时间](#时间) |
+
+- 字段名与 [`effective-status`](#集成有效-ai-服务状态) 的响应**完全一致**，集成方只写一份解析。
+- 不带余额、阈值、成本、管理员原因，也不带 spec §92 的事件类型名：payload 是完整的状态快照，集成方按
+  `effective_status` 与 `reason_code` 处理。
+- ⚠️ **`reason_code` 只给集成方后端，不得展示给终端用户**（spec §26）。
+
+**`event_id` 规则**：由（项目, 版本）确定。同一版本重发时 `event_id` 不变；同一版本的状态快照也唯一（任何状态变化都会让
+版本 +1）。前缀 `sevt_` 与用量事件 id 区分，它没有任何财务效果。
+
+### 集成方怎么应用
+
+集成方本地按项目保存**最后一次接受的状态与 `status_version`**，按本地状态放行或拦截（spec §26）。收到验签与时间窗都通过的推送后：
+
+| 收到的 `status_version` 与本地相比 | 处理 | 回给平台 |
+| --- | --- | --- |
+| 更大（或本地还没有状态） | 应用：覆盖本地状态与版本 | 2xx |
+| 相同 | 幂等：不改本地状态（即使载荷不同也不覆盖已应用的状态） | 2xx |
+| 更小（旧版本） | 忽略 | **2xx**（确认收到，不让平台重试旧版本） |
+
+- 平台只把 2xx 视为送达；3xx（不跟随重定向）、4xx、5xx、超时、连接错误都会按指数退避重试，**不设放弃上限**，最终一定送达
+  最新版本。中间版本可以合并：投递停顿期间状态变了几次，恢复后只送最新的那一个。
+- 验签失败、时间窗外：回非 2xx，不应用。
+- 推送失败或 Billing Hub 不可用时，集成方**保留最后一次接受的状态**；从未拿到过状态就放行（不变量 1：中心计费故障不得
+  中断客户 AI 服务）。
+
+### 对账
+
+推送之外，集成方必须周期对账（spec §30），兜底推送的丢失与停用项目（停用项目不推送）。对账调
+[`GET /api/v1/integration/effective-status`](#集成有效-ai-服务状态)，用与推送**相同的版本规则**：版本更大才应用，
+同版本幂等，旧版本忽略。
+
+- **周期**：后台每 **4 分钟**调一次，不在 AI 调用路径上。
+- **单次超时**：**10 秒**。
+- **失败重试**：失败（超时、非 200、应答校验不过）后 **30 秒**重试一次，之后回到 4 分钟节奏。
+- **最坏滞后**（Billing Hub 可用时）：4 分钟 + 10 秒超时 + 30 秒重试 + 10 秒 = **4 分 50 秒 < 5 分钟**（spec §119；等于上限
+  不算满足），可以容忍一次偶发失败。
+- **连续失败**（Billing Hub 不可用）：任何设计都给不出 5 分钟上限。此时**保留最后一次接受的状态**，从未拿到过状态就放行；
+  最后一次成功对账早于 5 分钟时，集成方发出自己的健康告警。
+
+这些行为由集成方（`acuven_ai_api`）实现与测试，本仓库只交付契约与 `effective-status` 本身。
 
 ---
 
@@ -2125,12 +2290,37 @@ HMAC 请求头；签名覆盖 `GET`、完整路径、时间戳、唯一请求 ID
   "billing_status": "SUSPENDED",
   "account_status": "ENABLED",
   "effective_status": "ALLOW_AI",
-  "status_version": 1
+  "status_version": 1,
+  "project_integration_status": "ENABLED",
+  "reason_code": null,
+  "effective_at": "2026-10-09T10:10:00"
 }
 ```
 
+前七个字段的名字与取值不变（不改成 spec §30 示例里的 `tenant_account_status` 等写法）；后三个是 AIH-TASK-050 加的
+（设计闸门 #241 v6 §2「接口」），只增加字段，现有解析不受影响：
+
+| 字段 | 说明 |
+| --- | --- |
+| `project_integration_status` | 凭据所属项目的集成状态：`ENABLED` / `DISABLED` |
+| `reason_code` | `BLOCK_AI` 的原因（见下表）；`ALLOW_AI` 时为 `null`。⚠️ 只给集成方后端，**不得展示给终端用户**（spec §26） |
+| `effective_at` | 最近一次状态跃迁的时刻；旧数据没有记录时取客户的创建时刻。格式见[时间](#时间) |
+
+`effective_status` 与 `reason_code` 由同一个函数合成，判定顺序固定，第一条命中即 `BLOCK_AI`：
+
+| 顺序 | 条件 | `reason_code` |
+| --- | --- | --- |
+| 1 | `account_status = CLOSED` | `ACCOUNT_CLOSED` |
+| 2 | `account_status = DISABLED` | `ACCOUNT_DISABLED` |
+| 3 | `account_status = PENDING_ACTIVATION` | `ACCOUNT_PENDING_ACTIVATION` |
+| 4 | `project_integration_status = DISABLED` | `PROJECT_INTEGRATION_DISABLED` |
+| 5 | `billing_mode = PREPAID` 且 `billing_status ≠ ACTIVE` | `BALANCE_NOT_POSITIVE` |
+| — | 以上都不命中 | `ALLOW_AI`，`reason_code = null` |
+
+管理员动作（1–4）排在余额（5）前面：充值后集成方看到的仍是管理员停用的原因，不会误以为充值能解封。
+
 身份由签名凭据决定，请求方不可代填租户或项目。内部模式仅豁免余额导致的暂停；管理员禁用
-仍返回 `BLOCK_AI`。集成方须验证返回的租户、项目和版本；只有经校验的 `BLOCK_AI` 才拦截新的模型调用，查询失败或应答无法校验时照常放行（不变量 1：中心计费故障不得中断客户 AI 服务），用量仍写入集成方本地 outbox，恢复后补送（[设计](design/INTERNAL-METERED-ONLY-2026-10-08.md)）。
+（账户或项目）仍返回 `BLOCK_AI`。本接口也是集成方[周期对账](#对账)用的接口，版本规则与状态 webhook 相同。集成方须验证返回的租户、项目和版本；只有经校验的 `BLOCK_AI` 才拦截新的模型调用，查询失败或应答无法校验时照常放行（不变量 1：中心计费故障不得中断客户 AI 服务），用量仍写入集成方本地 outbox，恢复后补送（[设计](design/INTERNAL-METERED-ONLY-2026-10-08.md)）。
 
 ## 集成：用量事件摄取
 
