@@ -3167,7 +3167,7 @@ tasks:
     title: 状态同步第三层：项目集成状态跃迁与状态 webhook 地址的业务规则
     purpose: >-
       按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 3 项的服务函数（不开接口）：项目集成状态跃迁（租户 → 项目行锁、bump_status_version、project.integration_status_changed 事件、审计）；设置、清除与读取项目的状态 webhook 地址（规范化与校验、更新投递行并清空游标与租约、只记主机名的审计）；启用一把 webhook 签名密钥时同一事务把该项目投递行的 next_attempt_at 置为 now 并清空租约。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-048
       - AIH-TASK-054
