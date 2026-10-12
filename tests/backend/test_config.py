@@ -149,6 +149,62 @@ def test_the_usage_billing_settings_reject_non_positive_values() -> None:
     assert (ok.usage_lease_seconds, ok.usage_max_attempts) == (1, 1)
 
 
+STATUS_WEBHOOK_FIELDS = (
+    "status_webhook_timeout_seconds",
+    "status_webhook_retry_base_seconds",
+    "status_webhook_retry_cap_seconds",
+    "status_webhook_lease_seconds",
+    "status_webhook_dispatch_budget_seconds",
+)
+
+
+def test_the_status_webhook_settings_default_to_the_design_values() -> None:
+    """设计闸门 #241 v6 §2「配置」：超时 5、退避基数 30、上限 3600、租约 60、预算 12。"""
+    settings = Settings()
+
+    assert tuple(getattr(settings, name) for name in STATUS_WEBHOOK_FIELDS) == (
+        5,
+        30,
+        3600,
+        60,
+        12,
+    )
+
+
+def test_the_status_webhook_settings_come_from_the_environment(monkeypatch) -> None:
+    """`BILLING_` 前缀。"""
+    for name, value in zip(STATUS_WEBHOOK_FIELDS, ("3", "10", "600", "45", "9"), strict=True):
+        monkeypatch.setenv(f"BILLING_{name.upper()}", value)
+
+    settings = Settings()
+
+    assert tuple(getattr(settings, name) for name in STATUS_WEBHOOK_FIELDS) == (3, 10, 600, 45, 9)
+
+
+def test_the_status_webhook_settings_reject_values_that_break_delivery() -> None:
+    """超时 0 等于不设超时；退避 0 让失败的项目空转；租约 0 让每次领取立刻过期、被重复领取；
+    预算 0 让 dispatch 一行也不领。租约不大于超时、上限小于基数同样让进程起不来。
+    """
+    for name in STATUS_WEBHOOK_FIELDS:
+        for bad in (0, -1):
+            with pytest.raises(ValidationError):
+                Settings(**{name: bad})
+    with pytest.raises(ValidationError):
+        Settings(status_webhook_timeout_seconds=60, status_webhook_lease_seconds=60)
+    with pytest.raises(ValidationError):
+        Settings(status_webhook_retry_base_seconds=60, status_webhook_retry_cap_seconds=59)
+
+    # 边界值照常通过 —— 少了这一句，上面的断言在「构造 Settings 本来就会炸」时也会全绿。
+    ok = Settings(
+        status_webhook_timeout_seconds=1,
+        status_webhook_lease_seconds=2,
+        status_webhook_retry_base_seconds=7,
+        status_webhook_retry_cap_seconds=7,
+        status_webhook_dispatch_budget_seconds=1,
+    )
+    assert (ok.status_webhook_lease_seconds, ok.status_webhook_retry_cap_seconds) == (2, 7)
+
+
 def test_email_is_unconfigured_by_default() -> None:
     """ADR-0009：**空 host = 未配置，是合法状态** —— 开发与 CI 不需要真实凭据。
 
