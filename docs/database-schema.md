@@ -60,13 +60,14 @@
    再 `UPDATE project_status_deliveries SET next_attempt_at = now WHERE project_id IN (…) AND next_attempt_at > now`。
    每个项目恰好一行投递行，按主键命中已有记录：只加记录锁，不加间隙锁，不碰别的租户的行。
 
-调用方只有三处，各写一种领域事件，状态、版本、`status_changed_at`、审计与事件同一事务提交（INV-13）：
+调用方只有四处，各写一种领域事件，状态、版本、`status_changed_at`、审计与事件同一事务提交（INV-13）：
 
 | 调用方 | 事件类型 | 加锁顺序 |
 | --- | --- | --- |
 | `app/repositories/wallet.py` `_apply_billing_status`（余额跃迁） | `tenant.billing_status_changed` | 钱包 → 租户 → 投递行 |
 | `app/services/account_status.py` `_apply`（管理员启停） | `tenant.account_status_changed` | 租户 → 投递行 |
 | `app/services/internal_billing.py` `enable_internal_metering`（设为内部计量） | `tenant.billing_mode_changed` | 钱包 → 租户 → 投递行 |
+| `app/services/project_integration.py` `_apply`（项目集成状态跃迁，AIH-TASK-049） | `project.integration_status_changed`（聚合是项目 public_id） | 租户 → 项目 → 投递行 |
 
 ⚠️ **只在已持有租户行锁（`SELECT … FOR UPDATE`）的事务里调用**：锁内读到的版本 +1 才不会重复，各维度的
 跃迁交错时版本号严格递增。没有任何路径先锁投递行、再锁租户或钱包，所以不会成环。事件 payload 里的
@@ -292,10 +293,31 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
   `DELIVERED`；落后且 `attempt_count = 0` 为 `PENDING`；落后且 `1 ≤ attempt_count <` 告警阈值为 `RETRYING`；
   落后且 `attempt_count ≥` 告警阈值为 `FAILED`（仍按退避上限继续重试）。
 - 每次 `status_version` 跃迁时，`bump_status_version` 在租户行锁内按主键把该租户投递行晚于 now 的
-  `next_attempt_at` 提前到 now（AIH-TASK-048，见上面 `tenants` 一节）；启用密钥与改地址时的重排归 AIH-TASK-049，
-  领取、发送与结算归 AIH-TASK-051（设计 §8 拆分）。时间列一律服务端 now，
-  不带时区的 UTC，整秒。
+  `next_attempt_at` 提前到 now（AIH-TASK-048，见上面 `tenants` 一节）。领取、发送与结算归 AIH-TASK-051
+  （设计 §8 拆分）。时间列一律服务端 now，不带时区的 UTC，整秒。
+- **改地址**（`app/services/project_integration.py` 的 `set_status_webhook`，AIH-TASK-049）：地址真的变了（含清除）
+  时，同一事务按主键 UPDATE 该项目的投递行：`delivered_version`、`attempted_version`、`lease_token`、
+  `lease_expires_at` 置空，`attempt_count = 0`，`next_attempt_at = now`。清空令牌作废发往旧地址的在途租约，
+  它之后的结算什么都不写。规范化后与当前值相同时不碰这一行。
+- **启用 webhook 签名密钥**（`app/services/webhook_signing.py` 的 `activate_secret`，AIH-TASK-049）：真正切换
+  时同一事务按主键把该项目投递行的 `next_attempt_at` 置为 now，`lease_token`、`lease_expires_at`、
+  `attempted_version` 置空；`delivered_version`、`attempt_count` 与错误列不动。
 - 迁移部署窗口里旧代码建的项目会缺一行，补行语句见迁移 0020 文件头「失败处理」。
+
+### 加锁顺序（设计闸门 #241 v6 §4「加锁顺序」）
+
+| 路径 | 顺序 |
+| --- | --- |
+| 余额跃迁、设为内部计量（`bump_status_version`） | 钱包 → 租户 → 投递行 |
+| 账户状态跃迁（`bump_status_version`） | 租户 → 投递行 |
+| 项目集成状态跃迁（`change_integration_status`） | 租户（`FOR UPDATE`）→ 项目（`FOR UPDATE`）→ 投递行 |
+| 设置 / 清除状态 webhook 地址（`set_status_webhook`） | 租户（`FOR SHARE`）→ 项目（`FOR UPDATE`）→ 投递行 |
+| 启用 webhook 签名密钥（`activate_secret`） | 项目（`FOR UPDATE`）→ 投递行 |
+| 建项目（`create_project`） | 插入项目行与它的投递行 |
+
+没有任何路径先锁投递行、再锁租户或项目，也没有任何路径先锁项目、再锁租户，所以不成环。改地址只对租户行加
+共享锁：它与 `bump_status_version` 持有的排他锁互斥，两者严格串行；同一租户下改不同项目的地址互不阻塞。
+读取地址（`get_status_webhook`）不加锁。
 
 ---
 

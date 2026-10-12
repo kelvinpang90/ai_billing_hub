@@ -28,6 +28,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Final
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -36,7 +37,7 @@ from app.core.crypto import MasterKeyring, decrypt_secret, encrypt_secret, load_
 from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, User
-from app.models.integration import ProjectWebhookSecret, WebhookSecretStatus
+from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
 from app.models.tenancy import Project
 from app.repositories import tenancy
 from app.repositories import webhook_signing as webhook_secrets
@@ -166,6 +167,25 @@ def _state(row: ProjectWebhookSecret) -> dict[str, object]:
     return {"key_version": row.key_version, "status": WebhookSecretStatus(row.status).value}
 
 
+def _rearm_delivery(session: Session, project: Project, *, now: dt.datetime) -> None:
+    """启用新密钥时重排该项目的投递（设计闸门 #241 v6 §4「投递行」，AIH-TASK-049）。
+
+    同一事务里按主键把投递行的 `next_attempt_at` 置为 now，清空租约与 `attempted_version`：
+    缺密钥、解不开时积下的退避不再拖住恢复，下一轮即发送；在途结算令牌对不上，不写。
+    ⚠️ 加锁顺序是项目 → 投递行（调用方已锁项目行），不锁租户。每个项目恰好一行，不插入。
+    """
+    session.execute(
+        update(ProjectStatusDelivery)
+        .where(ProjectStatusDelivery.project_id == project.id)
+        .values(
+            next_attempt_at=now,
+            lease_token=None,
+            lease_expires_at=None,
+            attempted_version=None,
+        )
+    )
+
+
 def issue_secret(
     session_factory: sessionmaker[Session],
     settings: Settings,
@@ -235,6 +255,7 @@ def activate_secret(
 
     已是 ACTIVE：返回当前各版本，什么都不写（幂等）。RETIRED：409
     `WEBHOOK_SECRET_NOT_PENDING`。不需要主密钥。返回全部版本，`key_version` 从小到大。
+    真正切换时同一事务重排该项目的投递行（`_rearm_delivery`）。
     """
     moment = now or _now()
     with session_scope(session_factory) as session:
@@ -254,6 +275,7 @@ def activate_secret(
                 webhook_secrets.activate(session, target, now=moment)
             except IntegrityError:
                 raise WebhookSecretConflict from None
+            _rearm_delivery(session, project, now=moment)
             record_audit(
                 session,
                 action=AuditAction.WEBHOOK_SECRET_ACTIVATE,
