@@ -69,6 +69,11 @@
 - 记录结果：**任务记录写在 PR 描述里**（「改了什么」「如何验证」「已知未做 / 留给后续」三节）：做了什么、偏离了什么、验证到什么程度；`docs/TODO.md` 只改勾选项和规划块，不新增记录段（2026-09-30 起；之前的记录在 `docs/archive/TODO_RECORDS_2026-09-30.md`）
 - 记录教训：写进 PR 描述的任务记录里。**本仓库没有 `tasks/` 目录**，不要凭空创建 `tasks/todo.md` / `tasks/lessons.md` / `tasks/REVIEW.md`
 
+## 写后端测试的约定
+
+- **断言 SQL 文本时不写死方言相关的字面量。**同一个查询，SQLite 编译成 `JOIN`，MySQL 编译成 `INNER JOIN`；共享锁（`FOR SHARE` / `LOCK IN SHARE MODE`）、标识符引号、分页写法也不一样。只断言两种库相同的片段，或者比较前先归一（例如 `.replace("INNER JOIN", "JOIN")`）；只有 MySQL 才有的断言放进 `if engine.dialect.name == "mysql":` 分支
+- 原因：Worker 的沙箱跑不了 `tests.backend`，参数化成 `[sqlite]` / `[mysql]` 的用例要到 CI 的 MySQL 分片才第一次真跑；AIH-TASK-051 run `7fe4822e` 就挂在这里（评审通过，CI 不过）
+
 ## 登记任务时的浏览器验收约定
 
 登记任务时的浏览器验收约定（OpenClaw 浏览器验收契约）：
