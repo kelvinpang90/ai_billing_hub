@@ -349,7 +349,7 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 | 139 | Final Admin Experience | 管理端：端到端可审计的财务链路 |
 | 139.1 | Critical Requirement Traceability | 见本文件第 1.2 节 |
 | 140 | Overall Architectural Decision | 权威架构决策 |
-| 141 | AI Module (Co-located AI API) | spec v1.8：`acuven_ai_api` 并入本平台，同一进程、同一个库；边界、身份、用量自调、可用性含义与对外契约；见 [ADR-0012](adr/ADR-0012-ai-module-in-billing-process.md) |
+| 141 | AI Module (Co-located AI API) | spec v1.8：`acuven_ai_api` 并入本平台，同一进程、同一个库；只负责调用模型与计费，功能定义在调用方；边界、身份、功能标签、用量自调、可用性含义与 `/v1/messages`；见 [ADR-0012](adr/ADR-0012-ai-module-in-billing-process.md) |
 
 ---
 

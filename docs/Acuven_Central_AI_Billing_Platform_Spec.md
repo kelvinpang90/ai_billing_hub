@@ -20,7 +20,7 @@
 | 1.5 | 2026-09-11 | Errata only, no new normative decision. §30 applied reconciliation responses on `status_version >=` local while §28 applies webhooks on `>` and §30 claimed both used the same rule — §30 now states the §28 rule. §55 listed an undefined dashboard field "Actual AI Provider Cost"; it now uses the term defined in §14 (Estimated/Reconciled, with the basis shown). §30's bare "every 5 minutes" polling example sat exactly on the §119 reconciliation safety bound and did not reference it; replaced by the cross-reference. |
 | 1.6 | 2026-09-11 | Editorial only, no normative change. Second slimming batch: §2's generic flow diagram now defers to §20/§103; §55's filter list defers to §87; §134's 15-step block defers to §126; §135 keeps only the constraints with no other home and points the rest at theirs (retitled Implementation Constraints); §139's mock dashboard and drill-down defer to §86/§61/§87, keeping the auditable-trail requirement and the §139.1 table. **§72** (Customer Statements Page) retired — §46 and §90 already cover both items. |
 | 1.7 | 2026-09-21 | Traceability only, no normative change. Four rules that were already stated normatively now also carry an identifier so implementation, migrations, and tests can reference them: `REQ-PRIV-002` (§69, Invariant 7), `REQ-TXN-001` (§74.6, Invariant 13), `REQ-TAX-001` (§45.1, SST/accounting launch gate), and `REQ-LAUNCH-001` (§47, real-account integration launch gate). Each added paragraph restates the rule of the section it sits in; no existing sentence was moved, merged, or reworded, and no requirement was added, tightened, or relaxed. |
-| 1.8 | 2026-10-12 | Normative. Added **§141 AI Module**: the system-side AI API, formerly the separate `acuven_ai_api` service, runs inside this platform as one process, one deployment and one database, with the AI caller identity unified into the tenant project (product owner decisions of 2026-10-12; rationale and costs in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; implementation design in design gate #281). Amended to match: §2.1 (the AI Module is the one exception to the trust-domain separation), §3.3 and §126 (pilot addenda), §121 (two out-of-scope items, and the example in the customer-operated-backend item), §135 (the AI Module is not a central AI Gateway; its request path follows §141.5), §139.1 (`REQ-AVAIL-001` primary sections), and the scope of `REQ-AVAIL-001` / Invariant 1 for the AI Module in §1, §119 and §133. |
+| 1.8 | 2026-10-12 | Normative. Added **§141 AI Module**: the system-side AI API, formerly the separate `acuven_ai_api` service, runs inside this platform as one process, one deployment and one database, with the AI caller identity unified into the tenant project (product owner decisions of 2026-10-12; rationale and costs in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; implementation design in design gate #281). Amended to match: §2.1 (the AI Module is the one exception to the trust-domain separation), §3.3 and §126 (pilot addenda), §11 and §79 (optional `feature` label on usage events), §121 (two out-of-scope items, the example in the customer-operated-backend item, and the central AI Gateway item now scoped to Integrated Application Backends), §135 (the AI Module is a model-call API for Acuven's own module backends only; its request path follows §141.5), §139.1 (`REQ-AVAIL-001` primary sections), and the scope of `REQ-AVAIL-001` / Invariant 1 for the AI Module in §1, §119 and §133. |
 
 ## Document Navigation
 
@@ -112,7 +112,7 @@ This specification uses **Integrated Application Backend** for an Acuven-managed
 
 Integrated Application Backends and the Central Billing Platform are separate trust and failure domains even when both are operated by Acuven. They communicate only through authenticated REST APIs and signed Webhooks. They never share direct database access. Per-project credentials, tenant authorization, HMAC signing, and least-privilege isolation remain mandatory.
 
-**AI Module exception (v1.8).** The AI Module of §141 runs inside this platform's process and database. It is the only component that both calls AI providers and sits inside the Central Billing trust domain. It still reports usage only through the signed ingestion API, its request path is restricted as §141.1 states, and it is not a central AI Gateway. Every other Integrated Application Backend keeps the separation above.
+**AI Module exception (v1.8).** The AI Module of §141 runs inside this platform's process and database. It is the only component that both calls AI providers and sits inside the Central Billing trust domain. It still reports usage only through the signed ingestion API, its request path is restricted as §141.1 states, and it serves only Acuven's own module backends. Every other Integrated Application Backend keeps the separation above.
 
 ```text
                      ACUVEN CENTRAL AI BILLING PLATFORM
@@ -537,6 +537,8 @@ The API contract must define required, optional, and mutually exclusive fields p
 For `LLM_TOKEN`, token counts are non-negative integers. For non-token usage, `quantity` and `unit` are required and token fields are omitted unless that usage type explicitly defines them.
 
 Tenant and project identity are derived from the integration credential and must match any payload values supplied for diagnostics. A mismatch is rejected and audited.
+
+An optional `feature` label names the product feature that caused the usage (for example `crm.contact_summary`), so usage can be filtered and analysed per feature. It is a lowercase dotted identifier of at most 64 characters, chosen by the caller. It is part of the payload fingerprint only when present, so events without it keep their existing fingerprint. It never affects pricing. The AI Module (§141) always sends it; other integrators may omit it.
 
 Do NOT send calculated customer cost as authoritative input.
 
@@ -2915,6 +2917,7 @@ tenant_id
 project_id
 integration_credential_id
 payload_fingerprint
+feature nullable
 
 provider_id
 model_id
@@ -2960,6 +2963,7 @@ provider_id
 model_id
 occurred_at
 status
+feature (with tenant_id and occurred_at)
 ```
 
 The `event_id` unique constraint is global. Only a matching credential/tenant/project/payload fingerprint is a duplicate; all other collisions are `IDEMPOTENCY_CONFLICT`.
@@ -4106,7 +4110,7 @@ Explicitly NOT required in V1:
 - LHDN e-Invoice
 - multi-currency
 - automatic credit card auto-top-up
-- central AI Gateway
+- central AI Gateway for Integrated Application Backends: they keep calling AI providers directly (the AI Module of §141 serves only Acuven's own module backends)
 - storing AI conversation content
 - customer BYOK
 - usage reporting from a backend the customer operates: §2.1 trusts only Acuven-managed Integrated Application Backends, and a customer-controlled machine could under-report usage that Central Billing cannot verify (product owner, 2026-10-11)
@@ -4504,7 +4508,7 @@ These constraints bind every implementation phase.
 - Do not calculate customer selling price inside an Integrated Application Backend.
 - Do not trust monetary amount submitted by an Integrated Application Backend.
 - Do not put Provider API secrets in frontend.
-- Do not create a central AI Gateway in V1 (§121). The AI Module (§141) is a fixed-capability API for Acuven's own module backends, not a gateway.
+- Do not create a central AI Gateway in V1 (§121). The AI Module (§141) is a model-call API for Acuven's own module backends only; Integrated Application Backends such as Chatbot keep calling providers directly.
 - Prefer simple modular monolith architecture for Central Billing V1 rather than unnecessary microservices.
 - Work phase-by-phase (§123). All significant architecture decisions that differ from this specification must be documented as ADRs before implementation (§136).
 
@@ -4660,20 +4664,22 @@ Any implementation that violates these priorities should be treated as architect
 
 # 141. AI Module (Co-located AI API)
 
-Added in v1.8 (2026-10-12). The product owner's decisions are recorded in `acuven_hub/DECISIONS.md` (E-17 to E-20); the rationale and costs are in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; the implementation design is design gate #281.
+Added in v1.8 (2026-10-12; feature definitions moved to the calling module backends on 2026-10-13). The product owner's decisions are recorded in `acuven_hub/DECISIONS.md` (E-17 to E-20) and in design gate #281 §10; the rationale and costs are in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; the implementation design is design gate #281.
 
 The system-side AI API, formerly built as the separate `acuven_ai_api` service, runs inside this platform as the **AI Module**: one application, one deployment, one database. It stays a product line of its own, separate from AI Chatbot, and the two are priced separately per project. Chatbot backends remain external Integrated Application Backends that call AI providers directly; they never call providers through the AI Module.
 
 ## 141.1 Boundary
 
-- The AI Module is one code subpackage. Its request path reads only the AI client keys, the project capability allowlist, and the tenant and project status columns, and writes only its local usage outbox (§21).
+- The AI Module is one code subpackage. Its request path reads only the AI client keys, the AI model catalog, and the tenant and project status columns, and writes only its local usage outbox (§21).
 - The AI Module never imports wallet, ledger, pricing, FX, payment, usage-ingestion, or usage-billing code. An automated import test enforces this.
-- The AI Module is not a central AI Gateway (§121, §135). It serves fixed capabilities to Acuven's own module backends and gives no pass-through model access to other Integrated Application Backends.
+- The AI Module calls models and meters usage; it does not define product features. Each feature (prompt, input and output format, output parsing, quality evaluation, and defences against instructions hidden in business data) is defined and developed in the calling module backend, so adding a feature changes only that backend.
+- The AI Module serves only Acuven's own module backends. It is not a central AI Gateway for Integrated Application Backends (§121, §135): Chatbot and other integrators keep calling providers directly.
 
 ## 141.2 Identity
 
-- An AI caller is a tenant project. A project carries AI client keys (a public client identifier and a bearer token; only the token's SHA-256 digest is stored) and a capability allowlist. An ADMIN creates and revokes keys and edits the allowlist; each change is audited atomically with the change.
-- The capability allowlist belongs to the AI Module. The effective service status (§24) keeps expressing only money and account state.
+- An AI caller is a tenant project. A project carries AI client keys (a public client identifier and a bearer token; only the token's SHA-256 digest is stored). An ADMIN creates and revokes keys; each change is audited atomically with the change.
+- The effective service status (§24) keeps expressing only money and account state.
+- Every call carries a `feature` label (§11). The AI Module forwards it with the usage event, so usage of one project can still be told apart per feature.
 - A caller can never choose the tenant or project its usage is attributed to.
 
 ## 141.3 Request Path and Status
@@ -4696,7 +4702,7 @@ The system-side AI API, formerly built as the separate `acuven_ai_api` service, 
 
 ## 141.6 Contract and Exposure
 
-- The `/v1/capabilities/{capability}` contract of `acuven_ai_api` (paths, request bodies, `200` bodies, and the meaning of each status code) carries over unchanged. Error bodies use the §107 envelope.
+- The AI Module exposes one call endpoint, `POST /v1/messages`: a subset of the provider's Messages API (model, system prompt, messages, maximum output tokens, structured output settings) plus the required `feature` label. It returns the model text, the stop reason, token counts, and a request identifier; it never returns cost. Error bodies use the §107 envelope. The capability-specific endpoints of `acuven_ai_api` are not carried over; it never had a caller.
+- Guardrails: only models that are active in the AI model catalog may be called, and request size and maximum output tokens are capped by configuration.
 - The AI Module is reachable over public HTTPS through the platform edge, so that a module backend on another host (for example a customer-hosted CRM) can call it remotely; callers on the same host may use the internal network instead (product owner, 2026-10-12). The public entry is protected by the AI client key and by a per-source request rate limit at the edge against abuse. That edge limit is not a per-client usage limit.
-- Each capability is enabled in production only after its own contract is approved; the capability allowlist (§141.2) then enables it per project.
 - What the AI Module does not do in V1 is listed in §121.
