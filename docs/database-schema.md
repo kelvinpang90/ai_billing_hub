@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-10-05
+> 最后更新：2026-10-12
 
 ---
 
@@ -39,11 +39,15 @@
 | `billing_mode` | VARCHAR(32) | 非空，默认 `PREPAID`；仅受控初始化可改为 `INTERNAL_METERED_ONLY`（迁移 0019） |
 | `account_status` | VARCHAR(32) | 非空，服务端默认 `'ENABLED'`，`ck_tenants_account_status`：`CHECK IN ('PENDING_ACTIVATION','ENABLED','DISABLED','CLOSED')`；无索引（AIH-TASK-020，迁移 `0009_tenant_account_status`） |
 | `status_version` | BIGINT | 非空，默认 0，`CHECK >= 0`；只增不减，计费与账户两维共用（AIH-TASK-005 / 020） |
+| `status_changed_at` | DATETIME | 可空；最近一次状态跃迁的时刻（整秒 UTC）。迁移前的旧行为空，读取时回退到 `created_at`（AIH-TASK-047，迁移 `0020_status_sync`） |
 | `low_balance_threshold` | DECIMAL(20,8) | 可空，`CHECK >= 0`；NULL 表示不发低余额事件（AIH-TASK-005） |
 | `created_at` | DATETIME | 非空 |
 | `updated_at` | DATETIME | 非空 |
 
 `contact_name` / `email` / `phone` 是个人数据（`REQ-PRIV-001`）：不进日志、不进异常消息。
+
+`status_changed_at` 只有列（设计闸门 #241 v6 拆分第 1 项）：由 `bump_status_version` 在每次跃迁时写入归
+AIH-TASK-048，在那之前所有行都为空。
 
 **计费状态由余额驱动**（spec §7 第 8–10 条、§24；设计闸门 #88）：余额 > 0 为 `ACTIVE`，≤ 0 为
 `SUSPENDED`，**正好为 0 也是暂停**。新租户余额为 0，所以默认 `SUSPENDED`。`billing_status` 与
@@ -80,8 +84,14 @@
 | `tenant_id` | BIGINT | 非空，外键 → `tenants.id`，`ON DELETE RESTRICT`，有索引 |
 | `name` | VARCHAR(255) | 非空 |
 | `description` | VARCHAR(1000) | 可空 |
+| `integration_status` | VARCHAR(16) | 非空，服务端默认 `'ENABLED'`，`ck_projects_integration_status`：`CHECK IN ('ENABLED','DISABLED')`；已有项目回填 `ENABLED`（AIH-TASK-047，迁移 `0020_status_sync`） |
+| `status_webhook_url` | VARCHAR(2048) | 可空；出站状态 webhook 的地址，已有项目为空（AIH-TASK-047，迁移 0020） |
 | `created_at` | DATETIME | 非空 |
 | `updated_at` | DATETIME | 非空 |
+
+`integration_status` 与 `status_webhook_url` 依据设计闸门 #241 v6（[PHASE-3-status-sync.md](design/PHASE-3-status-sync.md)）
+§2「数据库」。本版只有列：项目集成状态的跃迁、地址的规范化与设置归 AIH-TASK-049，有效状态的合成归 AIH-TASK-048。
+⚠️ `status_webhook_url` 的路径里可能带集成方的令牌：不进日志、异常消息与审计（审计只记主机名，设计 §6）。
 
 按项目的读取**一律带 `tenant_id`**：给定 `(tenant_id, public_id)` 查不到就是查不到，
 不区分「不存在」与「属于别的租户」（spec §97、§115）。
@@ -224,6 +234,41 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 - **行不删除**：外键 `RESTRICT`，代码里没有删除路径；退役只改状态，不清密文（以后的投递记录要引用版本）。
 - 写路径先 `SELECT … FOR UPDATE` 锁项目行，同一项目的签发、启用、退役串行执行；启用在同一事务里把原 `ACTIVE`
   改为 `RETIRED`（先退旧、再启新）。
+
+---
+
+## `project_status_deliveries`（spec §29；AIH-TASK-047，迁移 `0020_status_sync`）
+
+设计依据：[design/PHASE-3-status-sync.md](design/PHASE-3-status-sync.md)（设计闸门 #241 v6）§2「数据库」。一行是
+**一个项目的出站状态 webhook 投递游标**：要推送什么由「`delivered_version` 落后于租户的 `status_version`」推导，
+不逐次记录跃迁。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `project_id` | BIGINT | 主键；`(project_id, tenant_id)` 复合外键 → `projects(id, tenant_id)`（`fk_project_status_deliveries_project`，引用 0007 的 `uq_projects_id_tenant`）`ON DELETE RESTRICT` |
+| `tenant_id` | BIGINT | 非空；领取时直接 JOIN `tenants` |
+| `delivered_version` | BIGINT | 可空，`CHECK (delivered_version IS NULL OR delivered_version >= 0)`；已确认送达的最大版本，空 = 从未送达 |
+| `attempted_version` | BIGINT | 可空；当前租约正在发送的版本 |
+| `attempt_count` | INT | 非空，默认 0，`CHECK (attempt_count >= 0)`；自上次成功以来的连续失败次数 |
+| `next_attempt_at` | DATETIME | 非空；索引 `ix_project_status_deliveries_next_attempt_at` |
+| `lease_token` | CHAR(36) | 可空；领取时写入的 uuid4，结算时作围栏 |
+| `lease_expires_at` | DATETIME | 可空 |
+| `last_attempt_at` / `delivered_at` | DATETIME | 可空 |
+| `last_http_status` | SMALLINT | 可空 |
+| `last_error_code` | VARCHAR(64) | 可空；只存错误码（`TIMEOUT`、`CONNECTION_ERROR`、`HTTP_STATUS`、`NO_ACTIVE_SECRET`、`SECRET_DECRYPT_FAILED`、`ENCRYPTION_NOT_CONFIGURED`），不存地址、响应体与异常文本 |
+
+- **每个项目恰好一行投递行**：迁移 0020 给已有项目各插一行（`delivered_version` 为空、`attempt_count` 0、
+  `next_attempt_at` = 迁移时刻）；以后建项目（`app/services/customers.py` 的 `create_project`）在同一事务里插入
+  该项目的一行（`next_attempt_at` = 建项目的 now），建项目失败回滚时这一行也不在。之后的所有路径只 UPDATE、不再
+  插入，所以没有「先查后插」的间隙锁死锁。主键保证至多一行。
+- **行从不删除**：外键 `RESTRICT`，项目本身也不能删；代码里没有删除路径。
+- **复合外键**保证行的 `tenant_id` 就是项目所属的租户（INV-8）。
+- **投递状态不另存列**，由数据推导（spec §29 的四个状态）：`delivered_version` = 租户 `status_version` 为
+  `DELIVERED`；落后且 `attempt_count = 0` 为 `PENDING`；落后且 `1 ≤ attempt_count <` 告警阈值为 `RETRYING`；
+  落后且 `attempt_count ≥` 告警阈值为 `FAILED`（仍按退避上限继续重试）。
+- 本版只建表与插行；领取、发送、结算与重排归 AIH-TASK-048 / 049 / 051（设计 §8 拆分）。时间列一律服务端 now，
+  不带时区的 UTC，整秒。
+- 迁移部署窗口里旧代码建的项目会缺一行，补行语句见迁移 0020 文件头「失败处理」。
 
 ---
 
@@ -916,13 +961,13 @@ AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants
 `status_version`、`low_balance_threshold`，AIH-TASK-020 加了 `account_status`（迁移 0009）。AIH-TASK-012 建了
 spec §74.4 的 `integration_credentials`（入站 API 凭据），没有给 `projects` 加列，只加了一个唯一约束。
 AIH-TASK-019 建了 `project_webhook_secrets`（出站签名密钥），也没有给 `projects` 加列：spec §76 的
-`encrypted_webhook_secret` / `webhook_key_version` 由这张表取代，**不再建**。下面这些 spec 列刻意留给后续任务，
-届时都是**纯新增列**：
+`encrypted_webhook_secret` / `webhook_key_version` 由这张表取代，**不再建**。AIH-TASK-047（设计闸门 #241 v6，
+迁移 0020）给 `projects` 加了 `integration_status`、`status_webhook_url`，给 `tenants` 加了 `status_changed_at`；
+spec §29 的逐事件 `webhook_deliveries` 由每项目一行的 `project_status_deliveries` 游标取代（设计 §9）。下面这些
+spec 列不建：
 
 | 表 | 列 | 留给谁 | 为什么现在不建 |
 | --- | --- | --- | --- |
 | `tenants` | `currency` | **不建** | 币种由 `wallets.currency` 承载，不在租户上重复（设计闸门 #88） |
-| `projects` | `integration_status` | 状态模型任务（走设计闸门） | §24 项目的集成状态，与有效状态合成（`ALLOW_AI` / `BLOCK_AI`）一起归「出站服务状态 webhook 投递」设计闸门（AIH-TASK-020 设计 §1 非目标）；碰状态机按 [WORKFLOW §3](WORKFLOW.md) 必须过设计闸门 |
-| `projects` | `status_webhook_url` | Phase 3「出站服务状态 webhook 投递」设计闸门 | 投递目标随投递 worker、重试与 `webhook_deliveries` 一起做（AIH-TASK-019 设计 §1 非目标） |
 | `projects` | `encrypted_webhook_secret`、`webhook_key_version` | **不建** | 由 `project_webhook_secrets` 表取代（[ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节方案 i，AIH-TASK-019）：多版本、签名版本与主密钥版本分列 |
-| `projects` | `backend_base_url` | Phase 3 | 应用后端集成（§35–§39） |
+| `projects` | `backend_base_url` | **不建** | 投递只需要 `status_webhook_url`，没有任何功能读它（设计闸门 #241 §1「明确不做什么」） |

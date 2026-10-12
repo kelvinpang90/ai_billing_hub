@@ -17,7 +17,7 @@ import enum
 
 import pytest
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.types import Numeric
+from sqlalchemy.types import CHAR, BigInteger, Integer, Numeric, SmallInteger, String
 
 from app.models.ai_catalog import (
     AiModel,
@@ -48,6 +48,7 @@ from app.models.fx_rates import (
     FxRateStatus,
     FxRateVersion,
 )
+from app.models.integration import ProjectStatusDelivery
 from app.models.pricing_rules import (
     PricingRule,
     PricingRuleComponent,
@@ -61,7 +62,7 @@ from app.models.provider_prices import (
     ProviderPriceComponent,
     ProviderPriceVersion,
 )
-from app.models.tenancy import BillingStatus, Tenant
+from app.models.tenancy import BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.usage import (
     QUANTITY_PRECISION,
     QUANTITY_SCALE,
@@ -85,9 +86,9 @@ _USAGE_MODELS = (UsageEvent, UsageEventConflict)
 
 
 def enum_columns():
-    """Every VARCHAR-backed enum column in the auth, tenant, ledger, catalog, price, pricing
-    rule, FX and usage event tables."""
-    tables = (User, AuditLog, DomainOutbox, Tenant, WalletTransaction)
+    """Every VARCHAR-backed enum column in the auth, tenant, project, ledger, catalog, price,
+    pricing rule, FX and usage event tables."""
+    tables = (User, AuditLog, DomainOutbox, Tenant, Project, WalletTransaction)
     models = (*_CATALOG_MODELS, *_PRICE_MODELS, *_RULE_MODELS, *_FX_MODELS, *_USAGE_MODELS)
     for model in (*tables, *models):
         for column in model.__table__.columns:
@@ -191,6 +192,44 @@ def test_the_usage_event_enum_columns_are_collected() -> None:
     }
 
 
+def test_the_project_integration_status_column_is_collected() -> None:
+    """设计闸门 #241 §2 写死的列宽 16（与迁移 0020 一致）。"""
+    widths = {
+        label: column.type.length
+        for label, column in _ENUM_COLUMNS
+        if label.split(".")[0] == "projects"
+    }
+
+    assert widths == {"projects.integration_status": 16}
+
+
+def test_the_status_delivery_columns_have_the_design_shape() -> None:
+    """设计闸门 #241 §2「数据库」：版本是 BIGINT、计数 INT 默认 0、令牌 CHAR(36)、错误码 64、
+    HTTP 状态 SMALLINT；地址列 2048。SQLite 不强制这些，所以在模型上钉住。"""
+    columns = ProjectStatusDelivery.__table__.c
+
+    for name in ("delivered_version", "attempted_version"):
+        assert isinstance(columns[name].type, BigInteger), name
+        assert columns[name].nullable is True, name
+    assert isinstance(columns.attempt_count.type, Integer)
+    assert not isinstance(columns.attempt_count.type, BigInteger)
+    assert columns.attempt_count.nullable is False
+    assert str(columns.attempt_count.server_default.arg) == "0"
+    assert columns.next_attempt_at.nullable is False
+    assert isinstance(columns.lease_token.type, CHAR)
+    assert columns.lease_token.type.length == 36
+    assert isinstance(columns.last_http_status.type, SmallInteger)
+    assert isinstance(columns.last_error_code.type, String)
+    assert columns.last_error_code.type.length == 64
+    primary_key = ProjectStatusDelivery.__table__.primary_key
+    assert [column.name for column in primary_key] == ["project_id"]
+    url = Project.__table__.c.status_webhook_url
+    assert isinstance(url.type, String)
+    assert url.type.length == 2048
+    assert url.nullable is True
+    assert Tenant.__table__.c.status_changed_at.nullable is True
+
+
 def test_the_usage_quantity_is_decimal_20_8() -> None:
     """`quantity` 是用量不是金额，但同样是 DECIMAL(20,8)、读出来是 Decimal（设计 §2）。"""
     column = UsageEvent.__table__.c.quantity
@@ -236,6 +275,7 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
         UserStatus,
         OutboxStatus,
         BillingStatus,
+        IntegrationStatus,
         TransactionType,
         ReferenceType,
         CatalogStatus,
