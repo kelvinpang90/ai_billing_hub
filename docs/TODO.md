@@ -25,12 +25,11 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-048` Phase 3 状态同步：有效状态合成与状态版本递增收拢
-2. `AIH-TASK-049` Phase 3 状态同步：项目集成状态与 webhook 地址的业务规则
-3. `AIH-TASK-050` Phase 3 状态同步：有效状态新字段与项目集成管理接口
-4. `AIH-TASK-051` Phase 3 状态同步：状态 webhook 投递与重试
-5. `AIH-TASK-052` Phase 3 状态同步：状态 webhook 健康告警与运维文档
-6. `AIH-TASK-053` 管理端前端：项目集成状态与状态 webhook 地址
+1. `AIH-TASK-049` Phase 3 状态同步：项目集成状态与 webhook 地址的业务规则
+2. `AIH-TASK-050` Phase 3 状态同步：有效状态新字段与项目集成管理接口
+3. `AIH-TASK-051` Phase 3 状态同步：状态 webhook 投递与重试
+4. `AIH-TASK-052` Phase 3 状态同步：状态 webhook 健康告警与运维文档
+5. `AIH-TASK-053` 管理端前端：项目集成状态与状态 webhook 地址
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
