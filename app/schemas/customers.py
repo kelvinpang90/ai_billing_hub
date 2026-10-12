@@ -186,12 +186,53 @@ class CustomerDetail(CustomerSummary):
     wallet: WalletView
 
 
+class ChangeIntegrationStatusRequest(BaseModel):
+    """改项目集成状态（AIH-TASK-050，设计闸门 #241 v6 §2「接口」）。
+
+    ⚠️ 多余字段一律拒绝：项目与客户只来自路径（INV-8），`status_version` 不能经这里带进来。
+    原因只进审计；服务函数按同一条规则再校验一次。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    integration_status: Literal["ENABLED", "DISABLED"]
+    reason: _Reason
+
+
+class SetStatusWebhookRequest(BaseModel):
+    """设置或清除状态 webhook 地址（AIH-TASK-050，设计闸门 #241 v6 §2「接口」）。
+
+    ⚠️ `url` 必填：缺失是 422，显式 `null` 表示清除。规范化与校验在服务层
+    （`normalize_status_webhook_url`），这里只管形状。多余字段一律拒绝。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str | None
+
+
 class ProjectView(BaseModel):
+    """⚠️ 只有 `status_webhook_configured`，没有地址本身：地址的路径里可能带集成方的令牌，
+    完整地址只出现在 `…/status-webhook` 的 PUT 与 GET 里（设计闸门 #241 v6 §2）。
+    """
+
     id: str
     name: str
     description: str | None
+    integration_status: str
+    status_webhook_configured: bool
     created_at: dt.datetime
     updated_at: dt.datetime
+
+
+class StatusWebhookSettings(BaseModel):
+    """The `data` of PUT / GET `…/status-webhook`: the normalized address, or `null`.
+
+    ⚠️ 只有这两个接口返回完整地址；项目对象只有 `status_webhook_configured`。
+    """
+
+    status_webhook_url: str | None
+    status_webhook_configured: bool
 
 
 class Page[T](BaseModel):
@@ -245,6 +286,8 @@ def project_view(project: Project) -> ProjectView:
         id=project.public_id,
         name=project.name,
         description=project.description,
+        integration_status=project.integration_status.value,
+        status_webhook_configured=project.status_webhook_url is not None,
         created_at=project.created_at,
         updated_at=project.updated_at,
     )

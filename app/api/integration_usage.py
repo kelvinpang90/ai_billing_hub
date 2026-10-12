@@ -26,7 +26,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.auth import request_context
 from app.core.logging import current_request_id
-from app.models.tenancy import Project, Tenant, ai_service_enabled
+from app.models.tenancy import Project, Tenant, compose_effective_status
 from app.schemas.envelope import ApiResponse, success
 from app.schemas.usage_ingest import UsageEventBatchReceipt, UsageEventReceipt
 from app.services import usage_ingest
@@ -44,6 +44,12 @@ router = APIRouter(prefix="/api/v1/integration", tags=["integration"])
 
 
 class EffectiveServiceStatus(BaseModel):
+    """原有七个字段保持原名与取值；后三个是设计闸门 #241 v6 §2「接口」加的（AIH-TASK-050）。
+
+    ⚠️ `effective_status` 与 `reason_code` 只来自 `compose_effective_status`，不在这里另写公式。
+    `reason_code` 只给集成方后端，不给终端用户（设计 §6）。
+    """
+
     tenant_id: str
     project_id: str
     billing_mode: str
@@ -51,6 +57,10 @@ class EffectiveServiceStatus(BaseModel):
     account_status: str
     effective_status: str
     status_version: int
+    project_integration_status: str
+    reason_code: str | None
+    # 最近一次状态跃迁：`status_changed_at`，旧数据为空时取租户的 `created_at`。
+    effective_at: dt.datetime
 
 
 def _effective_status(
@@ -72,14 +82,23 @@ def _effective_status(
         tenant = session.get(Tenant, credential.tenant_id)
         project = session.get(Project, credential.project_id)
         assert tenant is not None and project is not None
+        effective, reason_code = compose_effective_status(
+            tenant.account_status,
+            tenant.billing_status,
+            tenant.billing_mode,
+            project.integration_status,
+        )
         result = EffectiveServiceStatus(
             tenant_id=tenant.public_id,
             project_id=project.public_id,
             billing_mode=tenant.billing_mode.value,
             billing_status=tenant.billing_status.value,
             account_status=tenant.account_status.value,
-            effective_status="ALLOW_AI" if ai_service_enabled(tenant) else "BLOCK_AI",
+            effective_status=effective.value,
             status_version=tenant.status_version,
+            project_integration_status=project.integration_status.value,
+            reason_code=reason_code.value if reason_code is not None else None,
+            effective_at=tenant.status_changed_at or tenant.created_at,
         )
     return result, credential.id
 
@@ -104,7 +123,8 @@ async def effective_service_status(request: Request) -> JSONResponse:
     envelope = success(status, request_id=current_request_id())
     return JSONResponse(
         status_code=200,
-        content=envelope.model_dump(),
+        # JSON 模式：`effective_at` 输出成 ISO 8601 字符串（api.md「时间」）。
+        content=envelope.model_dump(mode="json"),
         background=BackgroundTask(usage_ingest.record_use, factory, credential_id, now),
     )
 

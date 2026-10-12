@@ -21,6 +21,10 @@
 
 改账户状态（AIH-TASK-020，设计闸门 #136 v2 §2）：目标只有 `ENABLED` / `DISABLED`，原因只进
 审计，这一层不记。
+
+项目集成状态与状态 webhook 地址（AIH-TASK-050，设计闸门 #241 v6 §2「接口」）：规则全在
+`app/services/project_integration.py`，这一层只做鉴权、请求体形状与转发。完整地址只出现在
+`…/status-webhook` 的 PUT 与 GET 响应里，这一层不记（路径里可能带集成方的令牌）。
 """
 
 from __future__ import annotations
@@ -31,12 +35,13 @@ from fastapi import APIRouter, Path, Query, Request, Response, status
 
 from app.api.auth import request_context, require_admin, require_session_factory
 from app.core.logging import current_request_id
-from app.models.tenancy import AccountStatus
+from app.models.tenancy import AccountStatus, IntegrationStatus
 from app.schemas.customers import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE,
     MAX_PAGE_SIZE,
     ChangeAccountStatusRequest,
+    ChangeIntegrationStatusRequest,
     CreateCustomerRequest,
     CreateProjectRequest,
     CustomerDetail,
@@ -44,6 +49,8 @@ from app.schemas.customers import (
     EnableInternalMeteringRequest,
     Page,
     ProjectView,
+    SetStatusWebhookRequest,
+    StatusWebhookSettings,
     UpdateCustomerRequest,
 )
 from app.schemas.envelope import ApiResponse, success
@@ -67,6 +74,7 @@ from app.services import (
     customers,
     integration_access,
     internal_billing,
+    project_integration,
     wallet_adjustments,
     webhook_signing,
 )
@@ -493,3 +501,68 @@ def retire_webhook_secret(
     )
     _no_store(response)
     return success(retired, request_id=current_request_id())
+
+
+# --- 项目集成状态与状态 webhook 地址（AIH-TASK-050） -------------------------------------
+
+_PROJECT = "/customers/{customer_id}/projects/{project_id}"
+
+
+def _webhook_settings(view: project_integration.StatusWebhookView) -> StatusWebhookSettings:
+    return StatusWebhookSettings(
+        status_webhook_url=view.status_webhook_url,
+        status_webhook_configured=view.status_webhook_configured,
+    )
+
+
+@router.post(_PROJECT + "/integration-status", response_model=ApiResponse[ProjectView])
+def change_integration_status(
+    request: Request,
+    customer_id: str,
+    project_id: str,
+    payload: ChangeIntegrationStatusRequest,
+) -> ApiResponse[ProjectView]:
+    """ENABLED ↔ DISABLED. Already at the target: 200 and nothing is written; CLOSED: 409."""
+    admin = require_admin(request)
+    project = project_integration.change_integration_status(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        integration_status=IntegrationStatus(payload.integration_status),
+        reason=payload.reason,
+        context=request_context(request),
+    )
+    return success(project, request_id=current_request_id())
+
+
+@router.put(_PROJECT + "/status-webhook", response_model=ApiResponse[StatusWebhookSettings])
+def set_status_webhook(
+    request: Request,
+    customer_id: str,
+    project_id: str,
+    payload: SetStatusWebhookRequest,
+) -> ApiResponse[StatusWebhookSettings]:
+    """Set (a string) or clear (`null`) the address; the same normalized value writes nothing."""
+    admin = require_admin(request)
+    view = project_integration.set_status_webhook(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        project_id=project_id,
+        url=payload.url,
+        context=request_context(request),
+    )
+    return success(_webhook_settings(view), request_id=current_request_id())
+
+
+@router.get(_PROJECT + "/status-webhook", response_model=ApiResponse[StatusWebhookSettings])
+def get_status_webhook(
+    request: Request, customer_id: str, project_id: str
+) -> ApiResponse[StatusWebhookSettings]:
+    """The stored address. Read-only, no audit."""
+    require_admin(request)
+    view = project_integration.get_status_webhook(
+        require_session_factory(request), customer_id=customer_id, project_id=project_id
+    )
+    return success(_webhook_settings(view), request_id=current_request_id())
