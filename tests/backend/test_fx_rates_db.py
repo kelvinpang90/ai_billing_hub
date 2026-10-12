@@ -116,6 +116,9 @@ _TRIGGERS_0018 = {
     "trg_usage_events_ledger_link",
     "trg_usage_events_requeue_unbilled",
 }
+# Migration 0020 (AIH-TASK-047): the status sync delivery table. Downgrading to 0014 drops it
+# too.
+_TABLES_0020 = {"project_status_deliveries"}
 
 _INSERT_VERSION = text(
     "INSERT INTO fx_rate_versions (public_id, base_currency, quote_currency, rate, source,"
@@ -1043,16 +1046,17 @@ def _tables_triggers_and_locks() -> tuple[set[str], set[str], list[int] | None]:
 
 def test_upgrade_and_downgrade(alembic_config: Config) -> None:
     """Downgrading to 0014 drops the three tables and their triggers, 0016's two lock table
-    triggers, 0017's two tables with their two triggers and 0018's three triggers on
-    `usage_events`, and nothing else; upgrading again builds them with exactly one lock row."""
+    triggers, 0017's two tables with their two triggers, 0018's three triggers on `usage_events`
+    and 0020's delivery table, and nothing else; upgrading again builds them with exactly one lock
+    row."""
     try:
         tables, triggers, locks = _tables_triggers_and_locks()
-        assert _TABLES | _TABLES_0017 <= tables
+        assert _TABLES | _TABLES_0017 | _TABLES_0020 <= tables
         assert _TRIGGERS | _TRIGGERS_0016 | _TRIGGERS_0017 | _TRIGGERS_0018 <= triggers
         assert locks == [1]
 
         command.downgrade(alembic_config, "0014_pricing_rules")
-        dropped_tables = _TABLES | _TABLES_0017
+        dropped_tables = _TABLES | _TABLES_0017 | _TABLES_0020
         dropped = _TRIGGERS | _TRIGGERS_0016 | _TRIGGERS_0017 | _TRIGGERS_0018
         assert _tables_triggers_and_locks() == (tables - dropped_tables, triggers - dropped, None)
 
