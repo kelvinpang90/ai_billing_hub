@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-10-05
+> 最后更新：2026-10-12
 
 ---
 
@@ -812,6 +812,119 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 ⚠️ 这两项目前**没有**在 `docker-compose.yml` 的 `x-backend.environment` 里转发（本任务不改 compose），所以容器里一律是
 代码默认值；只改 `.env` 不会生效。要改需另立任务在 compose 里加转发（照 `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS`
 的写法与 `test_compose.py` 的默认值比对）。
+
+---
+
+## 状态 webhook：推送连续失败、缺签名密钥、签名错误（`status_webhook` 告警）
+
+**首次编写：2026-10-12（AIH-TASK-052）。依据：设计闸门 #241 v6（[PHASE-3-status-sync.md](design/PHASE-3-status-sync.md)
+§2「健康告警维度」「配置」、§4「投递行」、§5、§8「回滚」「监控」）；接口契约见 [api.md](api.md#管理端项目集成状态与状态-webhook-地址)
+与 [api.md「内部告警接口」](api.md#内部告警接口)。**
+
+平台把每个项目**当前**的有效状态签名推送到管理员设置的 `status_webhook_url`。celery-beat 每 15 秒跑一次投递：
+项目的投递游标（`project_status_deliveries` 每个项目一行）落后于客户的 `status_version` 就发，只有 2xx 算送达，其余按
+`min(30 × 2^(n−1), 3600)` 秒退避重试，**不设放弃上限**。只有 `integration_status = ENABLED` 且设了地址的项目推送，
+告警也只统计这些项目。
+
+### 上线前要做的（合并部署之前）
+
+1. **Healthchecks 新建一个检查**（Simple，5 分钟，宽限 15 分钟，Telegram），Ping URL 写进 `.env`（`monitor.sh` 按维度名
+   读，脚本不用改；规则见「配置项」里 `BILLING_MONITOR_TOKEN_HOST_FILE` 一节）：
+
+   | 检查 | `.env` 的键 |
+   | --- | --- |
+   | `ai_billing_hub status_webhook` | `BILLING_HEALTHCHECK_ALERT_STATUS_WEBHOOK_URL` |
+
+   之后 Healthchecks 用量 18 + 1 = **19**（免费档上限 20，只剩 1 个）。三类问题合在这一个检查里，就是为了不超上限
+   （设计 §2）。验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，日志里出现这个维度的行，
+   检查变绿。没配这个键时巡检日志写 `no BILLING_HEALTHCHECK_ALERT_STATUS_WEBHOOK_URL configured`，Healthchecks 宽限期后报
+   「未上报」。
+2. ⚠️ 心跳地址**不要**写进仓库或文档（理由见「配置项」那一节的「绝不能做什么」）。
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| Telegram：`ai_billing_hub status_webhook` 变 DOWN，正文 `P1 status_webhook: failing <a>, missing secret <b>, signing error <c>` | **P1** = `signing error > 0`：有项目最近一次因 `SECRET_DECRYPT_FAILED`（密钥解不开：密文损坏、AAD 不符）或 `ENCRYPTION_NOT_CONFIGURED`（主密钥未配置）没有发送，且投递落后。加密配置坏了 |
+| 同上，正文以 `P2` 开头 | `failing > 0`：有项目投递落后且连续失败 ≥ 6 次（按默认退避，第一次失败后约 15 分钟）；或 `missing secret > 0`：有项目没有 `ACTIVE` 签名密钥（由数据推导，不看错误码），平台不会不签名就发送 |
+| worker 日志 `A status webhook was not sent: the signing secret could not be opened`（ERROR） | 带项目 `public_id`、`status_version`、`error_code`、`key_version`。不带地址、密钥 |
+| worker 日志 `A status webhook was not sent: the project has no active signing secret`（WARNING） | 带项目 `public_id`、`status_version`、`error_code = NO_ACTIVE_SECRET` |
+| worker 日志 `A status webhook was not delivered; it is retried with backoff`（WARNING） | 带项目 `public_id`、`status_version`、`http_status`、`error_code`（`TIMEOUT` / `CONNECTION_ERROR` / `HTTP_STATUS`） |
+
+摘要只有三个计数，不含客户与项目 id：是哪些项目要按下面「立刻做什么」查库。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 客户的 AI 服务：投递失败**不改任何状态**（不变量 1），集成方按最后一次接受的状态执行 | 集成方本地状态更新变慢：只能靠每 4 分钟一次的[周期对账](api.md#对账)拿到新状态（§119 的 5 分钟上限仍由对账兜住） |
+| 计费、摄取、余额、账户与项目状态本身 | 停机 / 复机传到集成方的时间从秒级变成对账周期；对账也失败时，集成方停在旧状态 |
+| 投递游标：待推送的版本全在 MySQL，修好后自动补发最新版本，不丢 | `signing error` 若是主密钥未配置，**所有**设了地址的项目一起停发 |
+
+### 立刻做什么
+
+先查是哪些项目（只读；**不要 SELECT `status_webhook_url`**，路径里可能带集成方的令牌）：
+
+```bash
+docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+  SELECT p.public_id AS project, t.public_id AS customer, t.status_version, d.delivered_version,
+         d.attempt_count, d.last_error_code, d.last_http_status, d.last_attempt_at, d.next_attempt_at,
+         EXISTS (SELECT 1 FROM project_webhook_secrets s
+                  WHERE s.project_id = p.id AND s.status = \"ACTIVE\") AS has_active_secret
+    FROM project_status_deliveries d
+    JOIN projects p ON p.id = d.project_id AND p.tenant_id = d.tenant_id
+    JOIN tenants t ON t.id = d.tenant_id
+   WHERE p.integration_status = \"ENABLED\" AND p.status_webhook_url IS NOT NULL
+     AND (COALESCE(d.delivered_version, -1) < t.status_version
+          OR NOT EXISTS (SELECT 1 FROM project_webhook_secrets s
+                          WHERE s.project_id = p.id AND s.status = \"ACTIVE\"))"'
+```
+
+然后按类别处理（`…` 是 `/api/v1/admin/customers/{customer_id}/projects/{project_id}`，都要 ADMIN）：
+
+| 类别 | 多半是 | 怎么处理 |
+| --- | --- | --- |
+| `signing error`，`last_error_code = SECRET_DECRYPT_FAILED` | 这个项目的 `ACTIVE` 密文解不开（损坏，或 AAD 对不上） | **签发并启用新密钥**：`POST …/webhook-secrets`（`{}`，响应里的 `secret` 只出现这一次，当场交给集成方）→ 集成方配置成新旧版本都接受 → `POST …/webhook-secrets/{key_version}/activate`（`{}`）。启用时旧 `ACTIVE` 同一事务退役，并把这个项目的投递重排到「立即」，下一轮（≤ 15 秒）就发。已有 `PENDING` 时签发会 409：集成方已拿到它就直接启用，拿不到就先退役它再签发 |
+| `signing error`，`last_error_code = ENCRYPTION_NOT_CONFIGURED` | worker 读不到主密钥：`master.key` 文件缺失、挂成了目录，或 `BILLING_MASTER_KEY_FILE` 没配 | **补主密钥文件后重启**：按上面「主密钥（`master.key`）丢失或要在新主机上重建」放回文件、核对指纹（**不要生成新的**），然后重启后端容器：只是文件内容的事用 `docker compose restart celery-worker`；改了 `.env` 里的键则要 `docker compose up -d` 重建（理由见「配置项」）。不用逐个项目处理：每行在自己的退避到期时（上限 1 小时）自动重发 |
+| `missing secret` | 项目设了地址，但从未启用过密钥，或 `ACTIVE` 被退役了（例如泄露时）而没有启用新的 | 同第一行：**签发并启用**一把密钥。启用后下一轮就发 |
+| `failing`，`last_error_code = TIMEOUT` / `CONNECTION_ERROR` | 集成方接收端不可达：宕机、DNS、证书、防火墙 | **检查集成方地址与它的应答**：`GET …/status-webhook` 看地址（只在终端里看，不要贴进工单、聊天或截图），请集成方确认接收端在跑、能从公网以 https:443 访问 |
+| `failing`，`HTTP_STATUS` 且 `last_http_status` 是 3xx | 地址变了，对方在做重定向；平台**不跟随重定向** | 向集成方要最终地址，`PUT …/status-webhook` 改成它（新地址会收到一次当前状态） |
+| `failing`，`HTTP_STATUS` 且 4xx | 多半是集成方验签不过：用错了 `key_version` 的密钥、规范串写错、本机时钟偏差超过 300 秒 | 请集成方按 [api.md「状态 webhook 签名」](api.md#状态-webhook-签名) 核对；轮换期间它要同时接受新旧版本 |
+| `failing`，`HTTP_STATUS` 且 5xx | 集成方接收端自身出错 | 请集成方查自己的日志；平台照常重试，不用管 |
+
+**关闭推送**（例如集成方要停机维护、或地址已经作废而新地址还没有）：清除项目的地址。
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"url": null}' \
+  https://<主机>/api/v1/admin/customers/<customer_id>/projects/<project_id>/status-webhook
+```
+
+- 清除后投递行保留但不再被领取，这个项目也不再计入告警；集成方经周期对账照常拿到状态。客户已关户（`CLOSED`）也能清除。
+- 一个地址都不推了也是这样逐个项目清除：**生产只前滚，关闭推送不需要回滚迁移**（设计 §8）。
+- 要恢复时再 `PUT` 一个地址：游标清零，新地址会收到一次当前状态。
+
+### 恢复
+
+维度在问题消失后的下一轮巡检（5 分钟内）自动转绿，不需要手工清除：
+
+- `failing`：这一行送达一次（`attempt_count` 归零），或追上了客户的版本。
+- `missing secret`：项目有了 `ACTIVE` 密钥。
+- `signing error`：这一行送达一次（成功结算清空 `last_error_code`）。只启用了新密钥还不够，要等它真的发出去并收到 2xx。
+
+核对：再跑一遍上面的查询，结果为空；worker 日志里不再有上面三种 WARNING / ERROR。
+
+### 绝不能做什么
+
+- **不要直接 UPDATE `project_status_deliveries`**（清 `attempt_count`、`last_error_code`，或改 `delivered_version`）来消告警。
+  改 `delivered_version` 等于宣布「已送达」，集成方就再也收不到那个版本；清计数只是把问题藏起来。要立刻重发，启用密钥或
+  重设地址都会合法地重排
+- **不要用停用项目（`integration-status` 改 `DISABLED`）来关闭推送。**那会让这个项目的有效状态变成 `BLOCK_AI`，集成方拦截
+  客户的 AI 调用。关闭推送只用清除地址
+- **不要为了消 `signing error` 生成一把新的主密钥覆盖上去。**所有已有密文（TOTP、集成凭据、webhook 密钥）会一起解不开；
+  主密钥只能放回原来那份（见「主密钥」一节）
+- **不要退役 `ACTIVE` 签名密钥却不启用新的**：项目立刻变成 `missing secret`，推送停止
+- **不要把完整地址写进工单、聊天、截图或日志查询结果**：路径里可能带集成方的令牌；审计里也只记主机名
 
 ---
 
