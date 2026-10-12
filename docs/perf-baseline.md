@@ -556,19 +556,17 @@ docker compose run --rm \
 **在生产 VPS 上运行**（照 10.4：同一台机器、同一套 compose，护栏相同；每条 docker 命令都带 `</dev/null`；
 测量库地址走单独的变量，不塞进 `BILLING_DATABASE_URL`）
 
-⚠️ 10.5 那一轮在 `billing_perf` 里留下了 38 796 条 `RECEIVED`，脚本会因此拒绝开始。要先由 Kelvin 确认 10.5 的
-排查不再需要那份库，再整库重建（下面第 0 步）；不确认就不跑。脚本不提供、也不该提供「把它们标成终态」的办法。
+**前提：`billing_perf` 里没有任何非终态的用量事件，且已迁移到当前版本。** 脚本每轮开始前自己核对，不满足就报错退出、
+不开始负载。⚠️ 10.5 那一轮在 `billing_perf` 里留下了 38 796 条 `RECEIVED`，10.5 的排查可能还要用，所以在那之前
+脚本会拒绝开始。怎么处理这份残留（保留、导出，还是重建库）**不在本节、也不在本脚本里做**：要另行授权的运维步骤
+或另开任务，由 Kelvin 确认后执行，并在结果的环境表里记下当时的库状态。脚本不提供、也不该提供删库、删行或
+「把它们标成终态」的办法；下面的命令也不含任何删库或迁移步骤。
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-# 在生产 VPS 的部署目录里
+# 在生产 VPS 的部署目录里；前提见上文（库已干净、已迁移），本脚本不建库、不迁移、不删任何东西
 PERF_URL='mysql+pymysql://root:<BILLING_MYSQL_ROOT_PASSWORD>@mysql:3306/billing_perf?charset=utf8mb4'
-
-# 0. （Kelvin 确认之后）整库重建 billing_perf，再迁移到当前版本
-docker compose exec -T mysql mysql -u root -p"$BILLING_MYSQL_ROOT_PASSWORD" \
-  -e 'DROP DATABASE IF EXISTS billing_perf; CREATE DATABASE billing_perf' </dev/null
-docker compose run --rm -e BILLING_DATABASE_URL="$PERF_URL" api alembic upgrade head </dev/null
 
 # 1. 输出目录：一次性容器以 uid 10001 运行，要能写宿主机挂进去的目录
 mkdir -p perf-out
@@ -582,7 +580,7 @@ for mode in beat continuous; do
   docker compose run --rm \
     -v "$PWD/scripts:/srv/billing/scripts:ro" \
     -v "$PWD/perf-out:/srv/billing/perf-out" \
-    api python scripts/perf_usage_profile.py --database-url "$PERF_URL" "${extra[@]}" \
+    api python scripts/perf_usage_profile.py --database-url "$PERF_URL" ${extra[@]+"${extra[@]}"} \
       --json-out "perf-out/profile-$mode.json" \
     </dev/null >"perf-out/profile-$mode.log" 2>&1 || code=$?
   echo "perf_usage_profile $mode exit=$code" >>"perf-out/profile-$mode.log"
@@ -591,6 +589,10 @@ done
 # 3. 看结果时滤掉噪声行：grep -v 一行都不剩时退出码是 1
 { grep -v 'WARN' perf-out/profile-beat.log || true; }
 ```
+
+- `${extra[@]+"${extra[@]}"}`：空数组在 `set -u` 下直接写 `"${extra[@]}"`，bash 4.4 之前会报未绑定变量
+- 中止的运行（库里有非终态事件、护栏拒绝、worker 起不来）也会留下 `--json-out` 文件：负载开始前的可写检查以追加方式
+  打开它，所以可能是个**空文件**。判断有没有结果以日志的退出行（`exit=0`）为准，不要看 json 文件在不在
 
 包装脚本的三个坑（10.5 那一轮踩过或差点踩到）：
 
