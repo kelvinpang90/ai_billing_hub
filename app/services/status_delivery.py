@@ -13,7 +13,7 @@ spec §25、§28、§29、§119；设计 §2「事务边界」「外部系统与
 - **发送**（`attempt`）：在任何事务之外。签名密钥的判定顺序固定：先查有没有 `ACTIVE` 行（只读、
   不解密），没有就 `NO_ACTIVE_SECRET`；有才加载主密钥（`ENCRYPTION_NOT_CONFIGURED`），再解密
   （`SECRET_DECRYPT_FAILED`）。三种都不发送。之后 `sign_status_webhook` → POST（超时 5 秒，不跟随
-  重定向）。响应体最多读 1 KiB 后丢弃；只有 2xx 算送达，3xx、4xx、5xx、超时、连接错误都是失败；
+  重定向）。响应体不读，拿到状态码就关连接；只有 2xx 算送达，3xx、4xx、5xx、超时、连接错误都是失败；
 - **结算**（`settle`）：一个事务，顺序固定。
   ① `SELECT status_version FROM tenants … FOR SHARE` 读当前已提交的版本；
   ② 带令牌的条件 UPDATE（`WHERE project_id = ? AND lease_token = ?`）；③ 提交。
@@ -91,8 +91,6 @@ PROCESSING_FAILED: Final = "PROCESSING_FAILED"
 
 EVENT_ID_PREFIX: Final = "sevt_"
 CONTENT_TYPE: Final = "application/json"
-# 响应体最多读这么多字节，读完丢弃：不存、不记日志（设计 §2「外部系统与异步边界」）。
-RESPONSE_READ_LIMIT: Final = 1024
 # 退避的指数先夹住：重试不设上限，计数会一直涨，不让它算出巨大的整数。
 # 2^32 早已超过任何上限。
 _MAX_BACKOFF_EXPONENT: Final = 32
@@ -102,8 +100,6 @@ _NEVER_DELIVERED: Final = -1
 
 class _ResponseLike(Protocol):
     status: int
-
-    def read(self, amount: int) -> bytes: ...
 
     def close(self) -> None: ...
 
@@ -351,13 +347,13 @@ def build_request(
 
 
 def _discard_body(response) -> None:
-    # 最多读 1 KiB 再丢弃：不让一个巨大的响应体占着 worker，也不存、不记它。
+    # 状态码已经拿到，响应体一个字节都不读，直接关（设计 §2「最多读 1 KiB」，不读也满足）。
+    # ⚠️ 不要改回 `read(n)`：超时是每次 recv 各 5 秒，对端慢慢吐响应体时总时长没有上限，
+    #    会拖过 60 秒租约、占住 worker（Codex 对 #277 的阻断项）。
     try:
-        response.read(RESPONSE_READ_LIMIT)
+        response.close()
     except (OSError, http.client.HTTPException):
         pass
-    finally:
-        response.close()
 
 
 def send(
@@ -591,7 +587,6 @@ __all__ = [
     "HTTP_STATUS",
     "NO_ACTIVE_SECRET",
     "PROCESSING_FAILED",
-    "RESPONSE_READ_LIMIT",
     "SECRET_DECRYPT_FAILED",
     "SUPERSEDED",
     "TIMEOUT",

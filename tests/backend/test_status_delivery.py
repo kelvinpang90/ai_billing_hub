@@ -246,7 +246,7 @@ class Clock:
 
 
 class FakeResponse:
-    """A response whose body is larger than the 1 KiB the sender may read."""
+    """A response with a large body, recording every read (the sender must make none)."""
 
     def __init__(self, status: int, body: bytes = b"x" * 4096) -> None:
         self.status = status
@@ -657,9 +657,9 @@ def test_a_balance_suspension_is_pushed_signed_per_api_md(factory, settings) -> 
     verify(request, scene.secret, LATER)
     with pytest.raises(SignatureRejected):
         verify(request, "whs_" + "1" * 64, LATER)
-    # 响应体最多读 1 KiB 后丢弃，连接关掉。
+    # 响应体不读，连接关掉。
     [response] = receiver.responses
-    assert response.reads == [1024]
+    assert response.reads == []
     assert response.closed
 
     assert scene.project.delivery() == {
@@ -820,14 +820,14 @@ def test_only_2xx_is_delivered(answer: Answer, status: int | None, code: str | N
 
 
 def test_a_non_2xx_response_object_is_a_failure() -> None:
-    """transport 直接返回（而不是抛出）非 2xx 时同样是失败，响应体同样只读 1 KiB。"""
+    """transport 直接返回（而不是抛出）非 2xx 时同样是失败，响应体同样不读。"""
     response = FakeResponse(302)
     request = urllib.request.Request(HOOK, data=b"{}", method="POST")
 
     result = status_delivery.send(request, transport=lambda _r, _t: response, timeout_seconds=5)
 
     assert result == Attempt(error_code=HTTP_STATUS, http_status=302)
-    assert (response.reads, response.closed) == ([1024], True)
+    assert (response.reads, response.closed) == ([], True)
 
 
 def test_the_real_transport_is_the_no_redirect_opener() -> None:
