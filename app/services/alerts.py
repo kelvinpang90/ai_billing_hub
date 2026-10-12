@@ -27,7 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import ColumnElement, and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.fx_source import kuala_lumpur_date
@@ -39,10 +39,13 @@ from app.models.fx_rates import (
     FxFetchOutcome,
     FxRateVersion,
 )
+from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
+from app.models.tenancy import IntegrationStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import Wallet
 from app.repositories.usage_events import count_conflicts_since
 from app.services.auth import utc_now
+from app.services.status_delivery import ENCRYPTION_NOT_CONFIGURED, SECRET_DECRYPT_FAILED
 from app.services.usage_billing import AMOUNT_OUT_OF_RANGE, LEDGER_CONFLICT
 from app.tasks import outbox as outbox_tasks
 
@@ -71,6 +74,12 @@ STALE_LEASE_P1_AGE: Final = dt.timedelta(minutes=10)
 OUTBOX_BACKLOG_AGE: Final = dt.timedelta(minutes=10)
 # 每行摘要最多列几个细分码（设计 §2）。
 MAX_CODES: Final = 3
+
+# 状态 webhook 的维度（设计闸门 #241 v6 §2「健康告警维度」，AIH-TASK-052）。
+# `failing`：落后且连续失败这么多次。按默认退避，第 6 次失败在第一次失败后约 15 分钟。
+STATUS_WEBHOOK_FAILING_ATTEMPTS: Final = 6
+# `signing error`：加密配置坏了（密钥解不开、主密钥未配置），P1。
+STATUS_WEBHOOK_SIGNING_ERRORS: Final = (SECRET_DECRYPT_FAILED, ENCRYPTION_NOT_CONFIGURED)
 
 # 三种都是成功：BNM 答「无记录」不是失败（设计 §2 `fx_fetch_attempts`）。
 _SUCCESSFUL_OUTCOMES: Final = (
@@ -381,6 +390,66 @@ def outbox_backlog(session: Session, context: AlertContext) -> AlertResult:
     )
 
 
+# --- status_webhook（AIH-TASK-052）：三类问题合在一行，摘要只有计数 ----------------------
+
+
+def _pushing() -> tuple[ColumnElement[bool], ...]:
+    """Projects that push: ENABLED and with an address. Disabled or address-less ones never do."""
+    return (
+        Project.integration_status == IntegrationStatus.ENABLED,
+        Project.status_webhook_url.is_not(None),
+    )
+
+
+def _lagging(session: Session, *conditions: ColumnElement[bool]) -> int:
+    """Pushing projects behind the tenant's `status_version` that match `conditions`."""
+    delivery = ProjectStatusDelivery
+    statement = (
+        select(func.count())
+        .select_from(delivery)
+        .join(
+            Project,
+            (Project.id == delivery.project_id) & (Project.tenant_id == delivery.tenant_id),
+        )
+        .join(Tenant, Tenant.id == delivery.tenant_id)
+        .where(
+            *_pushing(),
+            # 「从未送达」当作 -1，与投递的领取条件同一写法。
+            func.coalesce(delivery.delivered_version, -1) < Tenant.status_version,
+            *conditions,
+        )
+    )
+    return int(session.execute(statement).scalar_one())
+
+
+def status_webhook(session: Session, context: AlertContext) -> AlertResult:
+    """Status webhook problems among pushing projects: P1 on a signing error, P2 when failing or
+    missing a secret.
+
+    - `failing`：落后且 `attempt_count ≥ 6`；
+    - `missing secret`：由数据推导，没有 `ACTIVE` 签名密钥（不看 `last_error_code`）；
+    - `signing error`：落后且 `last_error_code` 为 `SECRET_DECRYPT_FAILED` /
+      `ENCRYPTION_NOT_CONFIGURED`。
+    """
+    delivery = ProjectStatusDelivery
+    failing = _lagging(session, delivery.attempt_count >= STATUS_WEBHOOK_FAILING_ATTEMPTS)
+    active_secret = exists().where(
+        ProjectWebhookSecret.project_id == Project.id,
+        ProjectWebhookSecret.status == WebhookSecretStatus.ACTIVE,
+    )
+    without_secret = select(func.count()).select_from(Project).where(*_pushing(), ~active_secret)
+    missing = int(session.execute(without_secret).scalar_one())
+    signing = _lagging(session, delivery.last_error_code.in_(STATUS_WEBHOOK_SIGNING_ERRORS))
+    if signing:
+        level = AlertLevel.P1
+    elif failing or missing:
+        level = AlertLevel.P2
+    else:
+        return AlertResult(AlertLevel.OK, "no status webhook problem")
+    summary = f"failing {failing}, missing secret {missing}, signing error {signing}"
+    return AlertResult(level, summary)
+
+
 # --- 注册表 -------------------------------------------------------------------------
 
 # ⚠️ 有序：接口按这个顺序逐行输出。新维度追加在末尾，名字用小写与下划线
@@ -397,6 +466,8 @@ DIMENSIONS: Final[list[Dimension]] = [
     Dimension("usage_processing_backlog", usage_processing_backlog),
     Dimension("wallet_negative_balance", wallet_negative_balance),
     Dimension("outbox_backlog", outbox_backlog),
+    # AIH-TASK-052（设计闸门 #241 v6 §2「健康告警维度」）。
+    Dimension("status_webhook", status_webhook),
 ]
 
 
@@ -434,6 +505,8 @@ __all__ = [
     "OUTBOX_BACKLOG_AGE",
     "RETRYING_ALERT_ATTEMPTS",
     "STALE_LEASE_P1_AGE",
+    "STATUS_WEBHOOK_FAILING_ATTEMPTS",
+    "STATUS_WEBHOOK_SIGNING_ERRORS",
     "AlertContext",
     "AlertLevel",
     "AlertResult",
@@ -445,6 +518,7 @@ __all__ = [
     "outbox_backlog",
     "quote_date_of",
     "render",
+    "status_webhook",
     "usage_event_conflicts",
     "usage_failed",
     "usage_fx_rate_error",

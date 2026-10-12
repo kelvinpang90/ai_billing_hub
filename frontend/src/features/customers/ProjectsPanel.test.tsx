@@ -51,11 +51,19 @@ vi.mock("./WebhookSigningPanel", () => ({
     `webhook-signing:${customerId}:${project.id}`,
 }));
 
+// 集成状态面板同理：自己的用例在 ProjectIntegrationPanel.test.tsx。带上状态，看它拿到的是列表里的这一行。
+vi.mock("./ProjectIntegrationPanel", () => ({
+  ProjectIntegrationPanel: ({ customerId, project }: { customerId: string; project: Project }) =>
+    `project-integration:${customerId}:${project.id}:${project.integration_status ?? "?"}`,
+}));
+
 function project(overrides: Partial<Project> = {}): Project {
   return {
     id: PROJECT_ID,
     name: "Chatbot",
     description: null,
+    integration_status: "ENABLED",
+    status_webhook_configured: false,
     created_at: "2026-09-20T08:31:00",
     updated_at: "2026-09-20T08:31:00",
     ...overrides,
@@ -371,6 +379,30 @@ describe("ProjectsPanel", () => {
     ).toBeTruthy();
   });
 
+  it("mounts the integration status panel after the other two in the same expanded row", async () => {
+    const user = userEvent.setup();
+    api.listProjects.mockResolvedValue(page([project({ integration_status: "DISABLED" })], 1));
+
+    renderPanel();
+
+    await screen.findByText("Chatbot");
+    // 没展开之前不挂：地址接口只为展开的项目请求。
+    expect(screen.queryByText(/^project-integration:/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Expand row" }));
+
+    const credentials = await screen.findByText(`credentials:${CUSTOMER_ID}:${PROJECT_ID}`);
+    const signing = screen.getByText(`webhook-signing:${CUSTOMER_ID}:${PROJECT_ID}`);
+    const integration = screen.getByText(`project-integration:${CUSTOMER_ID}:${PROJECT_ID}:DISABLED`);
+    // 三个面板都在，各挂一次，顺序是凭据、签名密钥、集成状态。
+    expect(screen.getAllByText(/^project-integration:/)).toHaveLength(1);
+    expect(
+      credentials.compareDocumentPosition(signing) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      signing.compareDocumentPosition(integration) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("shows what the caller renders into the mount point instead, when given", async () => {
     const user = userEvent.setup();
     api.listProjects.mockResolvedValue(page([project()], 1));
@@ -382,6 +414,7 @@ describe("ProjectsPanel", () => {
 
     expect(await screen.findByText(`mounted:${PROJECT_ID}`)).toBeInTheDocument();
     expect(screen.queryByText(/^webhook-signing:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^project-integration:/)).not.toBeInTheDocument();
   });
 });
 
