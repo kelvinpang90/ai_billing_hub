@@ -1385,7 +1385,10 @@ def test_claim_locks_only_the_delivery_row_and_settle_reads_the_tenant_first(
     )
 
     [select_sql] = [s for s in claim_sql if s.startswith("SELECT")]
-    assert "FROM PROJECT_STATUS_DELIVERIES JOIN PROJECTS" in select_sql
+    # MySQL 方言编译成 INNER JOIN，SQLite 编译成 JOIN。
+    assert "FROM PROJECT_STATUS_DELIVERIES JOIN PROJECTS" in select_sql.replace(
+        "INNER JOIN", "JOIN"
+    )
     assert "LIMIT" in select_sql
     assert not [s for s in claim_sql if "WALLET" in s]
     tenant = next(i for i, s in enumerate(settle_sql) if s.startswith("SELECT"))
