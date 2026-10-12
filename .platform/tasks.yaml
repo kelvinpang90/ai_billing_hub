@@ -3383,7 +3383,7 @@ tasks:
     title: 管理端前端：项目集成状态的启停与状态 webhook 地址设置
     purpose: >-
       管理端前端：在客户详情的项目区块里显示并修改项目的集成状态（ENABLED / DISABLED，带原因），读取、设置或清除状态 webhook 地址，调用 AIH-TASK-050 上线的三个接口（设计闸门 #241 已批准 v6）。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-046
       - AIH-TASK-052
