@@ -268,6 +268,7 @@ EMPTY_DATABASE_LINES = (
     "usage_processing_backlog OK 0 due; 0 PROCESSING; 0 lease expired\n"
     "wallet_negative_balance OK no wallet below zero\n"
     "outbox_backlog OK no handled outbox row pending over 10 minutes\n"
+    "status_webhook OK no status webhook problem\n"
 )
 
 
@@ -289,6 +290,7 @@ def test_the_registry_is_ordered_and_one_line_per_dimension(
         "usage_processing_backlog",
         "wallet_negative_balance",
         "outbox_backlog",
+        "status_webhook",
     ]
 
     body = alerts.alert_lines(factory, ("USD",), clock=lambda: NOW)

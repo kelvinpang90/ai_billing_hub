@@ -2260,6 +2260,8 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
 - 维度查询是普通读、不拿 `fx_rate_locks`：告警只是提示，不让汇率发布等它。
 - 用量计费的七个维度（AIH-TASK-032，设计闸门 #181 v2 §2「告警维度」）追加在注册表末尾，行格式不变；它们的摘要只有
   计数、最早时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`）与至多 3 个细分码（字母序），不含租户与金额。
+- 状态 webhook 的维度 `status_webhook`（AIH-TASK-052，设计闸门 #241 v6 §2「健康告警维度」）接在它们之后，三类问题合在
+  一行、级别取最严重的那类；摘要只有三个十进制计数，不含租户与项目 id。
 
 | 维度 | 何时告警 | 摘要 |
 | --- | --- | --- |
@@ -2273,6 +2275,7 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
 | `usage_processing_backlog`（AIH-TASK-032） | 最早的可处理事件（`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`）等待超过 5 分钟（§119 p99），或存在租约已过期仍未回收的 `PROCESSING`（回收任务本身停了）：`P2`；等待超过 30 分钟，或有 `PROCESSING` 过期超过 10 分钟：`P1`。等待的起点是事件变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个，`FAILED_RETRYABLE` 取 `next_attempt_at` | `3 due, oldest since 2026-10-01T04:20:00Z; 1 PROCESSING, earliest claimed 2026-10-01T04:29:50Z; 0 lease expired`；空库：`0 due; 0 PROCESSING; 0 lease expired` |
 | `wallet_negative_balance`（AIH-TASK-032） | 存在余额 < 0 的钱包（§120）：`P2` | `P2`：`2 wallets below zero`（只有个数）；OK：`no wallet below zero` |
 | `outbox_backlog`（AIH-TASK-032） | `domain_outbox` 里**有处理器**的事件类型（`app/tasks/outbox.py` 的处理器名单，与周期恢复同一份）存在创建超过 10 分钟仍 `PENDING` 的行（§120）：`P2`。没有处理器的类型（`tenant.billing_status_changed`、`tenant.low_balance`）按设计持久等待，不计入 | `P2`：`1 row pending over 10 minutes, oldest created …`；OK：`no handled outbox row pending over 10 minutes` |
+| `status_webhook`（AIH-TASK-052） | 只统计 `integration_status = ENABLED` 且设了[状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址)的项目（停用或没有地址的项目不推送，一律不计）。三个计数：**`failing`** = 投递落后（`delivered_version` 为空或小于客户的 `status_version`）且连续失败 ≥ 6 次（按默认退避约 15 分钟）的项目数；**`missing secret`** = 没有 `ACTIVE` [签名密钥](#管理端出站-webhook-签名密钥)的项目数（由数据推导，不看错误码）；**`signing error`** = 投递落后且最近一次因 `SECRET_DECRYPT_FAILED`（密钥解不开）或 `ENCRYPTION_NOT_CONFIGURED`（主密钥未配置）未发送的项目数。级别：`signing error > 0` 为 `P1`（加密配置坏了）；否则 `failing > 0` 或 `missing secret > 0` 为 `P2`；否则 OK | `P1` / `P2`：`failing 1, missing secret 0, signing error 2`（三个都是十进制整数，不做单复数变化）；OK：`no status webhook problem` |
 
 ---
 
