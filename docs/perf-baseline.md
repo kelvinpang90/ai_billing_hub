@@ -347,6 +347,7 @@ ADR-0011 要求用量扣费带一次最热租户压测，以及不达标时切�
 写定，下面逐字照抄；测量工具是 [`scripts/perf_usage.py`](../scripts/perf_usage.py)。
 
 第一轮实测于 2026-10-09 在生产 VPS 上对 `billing_perf` 执行（10.4），结果与方案 C 的结论见 10.5。
+10.5 的结论要求先找出锁外的瓶颈，剖析工具与方法见 10.6（AIH-TASK-055）。
 
 ### 10.1 场景与通过线（设计 §2 原文）
 
@@ -505,3 +506,155 @@ docker compose run --rm \
 但方案 C 不能就此排除：锁外的开销即使全部消掉，单租户串行提交的上限也只有约 1 / 8.79 ms ≈ 114 条每秒，
 达不到 S2 的 500 条每秒。所以顺序是：先找出锁外约 85 ms 花在哪（数据库往返次数、MySQL 0.8 核、
 一次性容器 1 核配额的节流，都是候选），调掉之后重测；重测后锁真的饱和了，再开方案 C 的设计闸门。
+
+### 10.6 单事件耗时剖析：锁外约 85 ms 花在哪里（AIH-TASK-055）
+
+**目的**：承接 10.5。那一轮 2 个 worker 合计约 21 条每秒，每条约 95 ms，持钱包锁只占 9–10 ms，锁远未饱和。
+按 10.2「瓶颈在别处时先调那一处」，先把每条事件的耗时按阶段拆开，找出锁外最大的那一块，再决定是否开方案 C
+的设计闸门。**只做测量**：不改 `app/`、不改 `scripts/perf_usage.py`，结论与后续改动另开任务。
+工具是 [`scripts/perf_usage_profile.py`](../scripts/perf_usage_profile.py)。
+
+**负载**
+
+| 项 | 做法 |
+| --- | --- |
+| 积压 | 单个租户预先积压 `--events` 条（默认 2 000），积压阶段没有 worker，事件全部停在 `RECEIVED` |
+| 配置 | 依次在 `--workers 1` 与 `--workers 2` 下各清空一轮（`--workers` 可给逗号列表）；每轮自己的模型、租户与积压 |
+| 派发 | worker 是子进程，派发节奏与 `perf_usage.py` 相同（Beat 每 10 秒一次扫描、9 秒过期；每 60 秒一次卡住回收；扫描 8 秒预算、每批 20 条）。等所有子进程启动完、装好包装才开始派发，进程启动不算进清空用时 |
+| `--continuous` | 不等 Beat：任何 worker 一空闲就立刻派下一次扫描。两种模式各跑一次，差值就是「Beat 节奏造成的空转」，剩下的是单条处理成本 |
+| 造数据 | 护栏、造数据、摄取全部复用 `perf_usage.py`（按文件加载，不复制）：ADMIN、供应商、模型、客户 / 项目 / 凭据、充值、价格 / 规则 / 汇率都经服务函数，事件经 `ingest_one`。每次运行一个唯一前缀，**不删除任何行**，结束时逐项打印 |
+| 隔离 | 每轮开始前查 `billing_perf` 里**所有租户**有没有非终态（`RECEIVED` / `PROCESSING` / `FAILED_RETRYABLE`）的用量事件，有就报错退出、不开始负载（10.5 的复核：worker 跨租户按接收先后处理，残留积压会混进测量）。本轮结束时核对本轮事件全部走到终态且全部 `PROCESSED`，否则这一轮判 `INVALID` |
+
+**测量项与包装位置**（全部在 worker 子进程里，包装只记时刻与计数，返回值与异常原样交回）
+
+| 测量项 | 位置 |
+| --- | --- |
+| 每条事件的墙钟 | `usage_billing.process_event` 调用前后（`perf_counter`） |
+| worker 进程 CPU 时间 | 同一区间的 `time.process_time()` 差值 |
+| SQL 条数与数据库耗时 | worker 引擎的 `before_cursor_execute` / `after_cursor_execute` 事件；调用 `_lock_wallet` 之后的语句另记一份「锁内」。⚠️ 驱动层的 `COMMIT` 不经游标，不在这里 |
+| 等钱包锁 / 持锁 | 按模块全局名包装 `app.repositories.wallet._lock_wallet`（照 `perf_usage.py` 的 `_instrument_wallet_lock`），另记调用前时刻：等锁 = 拿到 − 调用；持锁 = 拿到 → `process_event` 返回（含提交） |
+| 计价 | 按模块全局名包装 `app.services.usage_billing` 里的 `resolve_charge_inputs` 与 `price_resolved` |
+| 记账 | 包装 `app.services.usage_billing` 里的 `post_transaction`（含等钱包锁） |
+| 认领 | 每次 `claim_events` 的墙钟与 SQL 条数 |
+| 清空用时与速率 | 第一次派发 → 最后一条事件的 `process_event` 返回；速率 = `PROCESSED` 条数 ÷ 清空用时 |
+| worker 忙碌占比 | （认领 + 处理 + 卡住回收的墙钟之和）÷（清空用时 × worker 数） |
+| 容器 CPU 节流 | 清空前后读 `/sys/fs/cgroup/cpu.stat` 的 `nr_throttled` 与 `throttled_usec` 求差；文件不存在时报告「不可用」 |
+| MySQL | 清空前后 `SHOW GLOBAL STATUS` 的 `Questions`、`Innodb_row_lock_waits`、`Innodb_row_lock_time` 求差。⚠️ 是整个 MySQL 实例的计数，包括同一实例上栈自己的流量与脚本每 2 秒一次的进度查询 |
+
+**四类占比**：把清空用时 × worker 数切成互不重叠的四块，报告各自占比并写明最大的一类。
+
+| 类 | 算法 |
+| --- | --- |
+| 锁 | Σ（调用 `_lock_wallet` → `process_event` 返回）：等锁 + 持锁，锁内的 SQL 与提交也归这里 |
+| 数据库往返 | Σ 锁外的 SQL 耗时（认领、事件行锁、目录 / 价格 / 规则读取、卡住回收） |
+| CPU 或节流 | 忙碌时间 − 锁 − 数据库往返（Python 本身、cgroup 节流、调度；不经游标的提交也落在这里） |
+| Beat 节奏空转 | 清空用时 × worker 数 − 忙碌时间 |
+
+⚠️ 「数据库往返」量的是客户端看到的语句耗时：容器被节流时，等 CPU 的时间也会算进去。要和 CPU 节流的差值、
+`CPU 时间 / 墙钟` 一起读，不能单看一个数。
+
+**在生产 VPS 上运行**（照 10.4：同一台机器、同一套 compose，护栏相同；每条 docker 命令都带 `</dev/null`；
+测量库地址走单独的变量，不塞进 `BILLING_DATABASE_URL`）
+
+**前提：`billing_perf` 里没有任何非终态的用量事件，且已迁移到当前版本。** 脚本每轮开始前自己核对，不满足就报错退出、
+不开始负载。⚠️ 10.5 那一轮在 `billing_perf` 里留下了 38 796 条 `RECEIVED`，10.5 的排查可能还要用，所以在那之前
+脚本会拒绝开始。怎么处理这份残留（保留、导出，还是重建库）**不在本节、也不在本脚本里做**：要另行授权的运维步骤
+或另开任务，由 Kelvin 确认后执行，并在结果的环境表里记下当时的库状态。脚本不提供、也不该提供删库、删行或
+「把它们标成终态」的办法；下面的命令也不含任何删库或迁移步骤。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+# 在生产 VPS 的部署目录里；前提见上文（库已干净、已迁移），本脚本不建库、不迁移、不删任何东西
+PERF_URL='mysql+pymysql://root:<BILLING_MYSQL_ROOT_PASSWORD>@mysql:3306/billing_perf?charset=utf8mb4'
+
+# 1. 输出目录：一次性容器以 uid 10001 运行，要能写宿主机挂进去的目录
+mkdir -p perf-out
+sudo chown 10001 perf-out
+
+# 2. 两次：Beat 节奏、不等 Beat。退出码写进日志的最后一行
+for mode in beat continuous; do
+  extra=()
+  if [ "$mode" = continuous ]; then extra=(--continuous); fi
+  code=0
+  docker compose run --rm \
+    -v "$PWD/scripts:/srv/billing/scripts:ro" \
+    -v "$PWD/perf-out:/srv/billing/perf-out" \
+    api python scripts/perf_usage_profile.py --database-url "$PERF_URL" ${extra[@]+"${extra[@]}"} \
+      --json-out "perf-out/profile-$mode.json" \
+    </dev/null >"perf-out/profile-$mode.log" 2>&1 || code=$?
+  echo "perf_usage_profile $mode exit=$code" >>"perf-out/profile-$mode.log"
+done
+
+# 3. 看结果时滤掉噪声行：grep -v 一行都不剩时退出码是 1
+{ grep -v 'WARN' perf-out/profile-beat.log || true; }
+```
+
+- `${extra[@]+"${extra[@]}"}`：空数组在 `set -u` 下直接写 `"${extra[@]}"`，bash 4.4 之前会报未绑定变量
+- 中止的运行（库里有非终态事件、护栏拒绝、worker 起不来）也会留下 `--json-out` 文件：负载开始前的可写检查以追加方式
+  打开它，所以可能是个**空文件**。判断有没有结果以日志的退出行（`exit=0`）为准，不要看 json 文件在不在
+
+包装脚本的三个坑（10.5 那一轮踩过或差点踩到）：
+
+1. **一次性容器里的用户要能写挂载的输出目录**。容器以 uid 10001 运行，宿主机上 `mkdir` 出来的目录属主是部署用户，
+   10.5 的 `--json-out` 就是这样没写出来的。现在脚本在负载开始前就以追加方式打开一次 `--json-out`，写不进去立即退出；
+   但目录的属主仍要先改好（第 1 步）
+2. **判断是否跑完看日志的退出行，不要用 `pgrep -f`**。`pgrep -f perf_usage_profile` 会匹配到包装脚本自己、
+   `docker compose run` 的客户端进程乃至 ssh 的命令行，进程在不在与脚本跑没跑完对不上；以日志最后的
+   `perf_usage_profile <mode> exit=<码>` 为准，没有这一行就是还没跑完（或包装脚本自己先死了）
+3. **`set -e` 加 `pipefail` 下 `grep -v` 无输出会让包装脚本退出**：`grep` 一行都没选中时退出码是 1，
+   在管道里经 `pipefail` 传出来，`set -e` 就把整个包装脚本结束掉，后面的步骤（包括写退出行）都不执行。
+   凡是可能「什么都没选中」的 `grep`，都写成 `{ grep … || true; }`
+
+- 每轮 2 000 条，按 10.5 的约 21 条每秒，单 worker 一轮约 2–3 分钟；四轮（两种模式 × 两种 worker 数）连同造数据约 15 分钟
+- 退出码：全部轮次有效为 0；有一轮 `INVALID`，或因库里有非终态事件中止，为 1
+- 一次性容器沿用 api 服务的 CPU 配额（10.4）；这次积压阶段与清空阶段不重叠，摄取线程不和 worker 抢 CPU
+
+**结果**（待运行后回填；改过 `--events` 的结果要注明）
+
+环境
+
+| 项 | 值 |
+| --- | --- |
+| 日期 / 执行人 | |
+| 本次前缀（两种模式各一个） | |
+| 一次性容器 CPU / 内存配额 | |
+| MySQL 版本与配额 | |
+| `cpu.stat` 是否可用 | |
+| 运行前库内 `usage_events` / `wallet_transactions` 行数 | |
+
+每种配置一张（阶段单位毫秒）
+
+| 阶段 | w1 Beat 平均 / p50 / p95 | w2 Beat 平均 / p50 / p95 | w1 continuous 平均 / p50 / p95 | w2 continuous 平均 / p50 / p95 |
+| --- | --- | --- | --- | --- |
+| `process_event` 墙钟 | | | | |
+| CPU 时间 | | | | |
+| 数据库耗时（SQL 合计） | | | | |
+| 锁外的数据库耗时 | | | | |
+| 等钱包锁 | | | | |
+| 持钱包锁 | | | | |
+| 锁外（墙钟 − 持锁） | | | | |
+| 计价 `resolve_charge_inputs` | | | | |
+| 计价 `price_resolved` | | | | |
+| 记账 `post_transaction`（含等锁） | | | | |
+| `claim_events`（每次） | | | | |
+| 每条事件 SQL 条数 | | | | |
+| 数据库耗时 / 墙钟 | | | | |
+| CPU 时间 / 墙钟 | | | | |
+
+整轮
+
+| 项 | w1 Beat | w2 Beat | w1 continuous | w2 continuous |
+| --- | --- | --- | --- | --- |
+| 有效性（`VALID` / `INVALID` 与原因） | | | | |
+| 清空用时 / 速率 | | | | |
+| worker 忙碌占比 | | | | |
+| CPU 节流 `nr_throttled` / `throttled_usec` 增量 | | | | |
+| MySQL `Questions` / `Innodb_row_lock_waits` / `Innodb_row_lock_time` 增量 | | | | |
+| 数据库往返 | | | | |
+| CPU 或节流 | | | | |
+| Beat 节奏空转 | | | | |
+| 锁 | | | | |
+| 最大的一类 | | | | |
+
+结论（回填）：锁外的大头是哪一类、下一步调哪一处、调完之后是否重跑 10.5 并重新判方案 C。
