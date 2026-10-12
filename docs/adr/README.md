@@ -61,6 +61,7 @@
 | [0009](ADR-0009-notification-channels.md) | 通知通道：Email 自管 SMTP + Outbox 投递；WhatsApp 不自建但路径待定 | **部分接受**（WhatsApp 传输路径未定） | 2026-09-11 |
 | [0010](ADR-0010-suspension-threshold.md) | 停机 / 复机阈值：保持 `balance <= 0`，缓冲放进最小恢复额（R1） | 已接受 | 2026-09-28 |
 | [0011](ADR-0011-per-event-usage-ledger.md) | AI 用量入账粒度：每事件一行账本，不按窗口聚合（R3） | 已接受 | 2026-09-28 |
+| [0012](ADR-0012-ai-module-in-billing-process.md) | AI API 并入计费平台：同一进程、同一部署、同一个库 | **提议中**（决策已拍板，三处取舍待确认） | 2026-10-12 |
 
 ## 待写（spec §136 要求）
 
