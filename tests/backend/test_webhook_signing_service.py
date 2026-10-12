@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, func, insert, select, update
+from sqlalchemy import Engine, create_engine, delete, event, func, insert, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -45,13 +45,14 @@ from app.core.crypto import DecryptionFailed, decrypt_secret, load_keyring
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.integration import ProjectWebhookSecret, WebhookSecretStatus
+from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
 from app.models.tenancy import Project, Tenant
 from app.repositories import tenancy
 from app.repositories import webhook_signing as webhook_repository
 from app.schemas.webhook_signing import IssuedWebhookSecretView
 from app.services import webhook_signing
 from app.services.auth import RequestContext
+from app.services.customers import add_status_delivery
 from app.services.integration_access import ProjectNotFound
 from app.services.integration_auth import canonical_request, sign
 from app.services.webhook_signing import (
@@ -165,6 +166,10 @@ def _clean(engine: Engine) -> None:
     with engine.begin() as connection:
         connection.execute(
             delete(ProjectWebhookSecret).where(ProjectWebhookSecret.tenant_id.in_(ours))
+        )
+        # 投递行引用项目（RESTRICT），先删它（AIH-TASK-049 的用例会建）。
+        connection.execute(
+            delete(ProjectStatusDelivery).where(ProjectStatusDelivery.tenant_id.in_(ours))
         )
         connection.execute(delete(Project).where(Project.tenant_id.in_(ours)))
         connection.execute(delete(Tenant).where(Tenant.company_name == COMPANY))
@@ -848,6 +853,138 @@ def test_two_concurrent_activations_switch_exactly_once(mysql_factory, settings)
     assert statuses(mysql_factory, scene.project_id) == expected
     # 版本 1 的那一次，加上这一次；没有第三条。
     assert len(audits(mysql_factory, AuditAction.WEBHOOK_SECRET_ACTIVATE)) == 2
+
+
+# --- 启用密钥重排投递（设计闸门 #241 v6 §4「投递行」，AIH-TASK-049） -----------------------
+
+LATER = NOW + dt.timedelta(minutes=5)
+FUTURE = NOW + dt.timedelta(hours=1)
+DELIVERY_COLUMNS = (
+    "delivered_version",
+    "attempted_version",
+    "attempt_count",
+    "next_attempt_at",
+    "lease_token",
+    "lease_expires_at",
+    "last_attempt_at",
+    "delivered_at",
+    "last_http_status",
+    "last_error_code",
+)
+
+
+def add_delivery(scene: Scene) -> None:
+    """The project's one delivery row, mid-flight: leased, failing on the secret, backed off."""
+    with scene.factory() as session:
+        project = session.execute(
+            select(Project).where(Project.public_id == scene.project_id)
+        ).scalar_one()
+        delivery = add_status_delivery(session, project, now=NOW)
+        delivery.delivered_version = 4
+        delivery.attempted_version = 5
+        delivery.attempt_count = 7
+        delivery.next_attempt_at = FUTURE
+        delivery.lease_token = str(uuid.uuid4())
+        delivery.lease_expires_at = FUTURE
+        delivery.last_attempt_at = NOW
+        delivery.last_error_code = "SECRET_DECRYPT_FAILED"
+        session.commit()
+
+
+def delivery(scene: Scene) -> dict[str, object]:
+    project_pk = scene.internal_project_id
+    with scene.factory() as session:
+        row = session.get(ProjectStatusDelivery, project_pk)
+        assert row is not None
+        return {name: getattr(row, name) for name in DELIVERY_COLUMNS}
+
+
+def test_activation_rearms_the_delivery_and_clears_the_lease(factory, settings) -> None:
+    """设计 §4：启用新密钥时同一事务把 `next_attempt_at` 置为 now，清空租约与
+    `attempted_version`；游标、失败计数与错误码不动。别的项目的投递行不动。
+    """
+    scene = Scene(factory, settings)
+    other = Scene(factory, settings)
+    add_delivery(scene)
+    add_delivery(other)
+    scene.issue()
+    before = delivery(scene)
+    other_before = delivery(other)
+
+    scene.activate(1, now=LATER)
+
+    assert delivery(scene) == {
+        **before,
+        "next_attempt_at": LATER,
+        "lease_token": None,
+        "lease_expires_at": None,
+        "attempted_version": None,
+    }
+    assert delivery(other) == other_before
+
+
+def test_only_a_real_switch_rearms_the_delivery(sqlite_factory, settings) -> None:
+    """已是 ACTIVE 的重复启用、签发与退役都不碰投递行（其余密钥行为不变）。"""
+    scene = Scene(sqlite_factory, settings)
+    add_delivery(scene)
+    scene.issue()
+    before = delivery(scene)
+
+    scene.retire(1, now=LATER)
+    assert delivery(scene) == before
+    scene.issue(now=LATER)
+    assert delivery(scene) == before
+
+    scene.activate(2, now=LATER)
+    rearmed = delivery(scene)
+    assert rearmed["next_attempt_at"] == LATER
+    assert rearmed["lease_token"] is None
+
+    scene.activate(2, now=LATER + dt.timedelta(minutes=5))
+    assert delivery(scene) == rearmed
+
+
+def test_activation_rearms_in_order_project_then_delivery(sqlite_factory, settings) -> None:
+    """设计 §4「加锁顺序」：项目 → 投递行；按主键 UPDATE，不碰租户。"""
+    scene = Scene(sqlite_factory, settings)
+    add_delivery(scene)
+    scene.issue()
+    engine = sqlite_factory.kw["bind"]
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        statements.append(" ".join(statement.split()).upper())
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        scene.activate(1, now=LATER)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    # `lock_project` 只选 id；`_resolve_project` 那一次选整行，不算。
+    lock_prefix = "SELECT PROJECTS.ID FROM PROJECTS"
+    lock = next(i for i, s in enumerate(statements) if s.startswith(lock_prefix))
+    [rearm] = [i for i, s in enumerate(statements) if "PROJECT_STATUS_DELIVERIES" in s]
+    assert lock < rearm
+    assert statements[rearm].startswith("UPDATE PROJECT_STATUS_DELIVERIES")
+    assert "PROJECT_STATUS_DELIVERIES.PROJECT_ID =" in statements[rearm]
+    assert "TENANT_ID" not in statements[rearm]
+    assert not [s for s in statements if "TENANTS" in s and not s.startswith("SELECT")]
+
+
+def test_a_failed_activation_leaves_the_delivery_alone(factory, settings, monkeypatch) -> None:
+    """INV-13：启用的审计写入失败时，投递行与密钥一起回滚。SQLite 与 MySQL 各一次。"""
+    scene = Scene(factory, settings)
+    add_delivery(scene)
+    scene.issue()
+    before = delivery(scene)
+    break_the_audit(monkeypatch)
+
+    with pytest.raises(IntegrityError):
+        scene.activate(1, now=LATER)
+
+    assert delivery(scene) == before
+    assert statuses(factory, scene.project_id) == [(1, "PENDING")]
 
 
 # --- 签名库 ---------------------------------------------------------------------

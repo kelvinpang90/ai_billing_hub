@@ -205,6 +205,12 @@ class AuditAction(enum.StrEnum):
     # 同一事务。不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 docs/TODO.md。逐个
     # 事件的计费不写审计（事件行 + 账本行就是审计链）。内容里没有金额。
     USAGE_EVENT_REQUEUE = "USAGE_EVENT_REQUEUE"
+    # AIH-TASK-049（设计闸门 #241 v6）：写入方都是 app/services/project_integration.py，
+    # `entity_type = project`。集成状态跃迁与状态、`status_version`、outbox 同一事务；
+    # 改地址与投递行同一事务，前后状态里只有主机名、没有完整地址。两个都不在 spec §66 的
+    # 清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
+    PROJECT_INTEGRATION_STATUS_CHANGED = "PROJECT_INTEGRATION_STATUS_CHANGED"
+    PROJECT_STATUS_WEBHOOK_SET = "PROJECT_STATUS_WEBHOOK_SET"
 
 
 class AuditLog(Base):
