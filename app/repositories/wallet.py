@@ -30,7 +30,12 @@ from sqlalchemy.orm import Session
 
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, OutboxStatus
 from app.models.base import MONEY_PRECISION, MONEY_SCALE
-from app.models.tenancy import BillingStatus, Tenant, ai_service_enabled
+from app.models.tenancy import (
+    BillingStatus,
+    IntegrationStatus,
+    Tenant,
+    compose_effective_status,
+)
 from app.models.wallet import (
     ADJUSTMENT_REFERENCE_TYPES,
     CREDIT_TYPES,
@@ -42,6 +47,7 @@ from app.models.wallet import (
     Wallet,
     WalletTransaction,
 )
+from app.repositories.tenancy import bump_status_version
 
 # 出站事件（设计 §2）。⚠️ 这两个字符串是将来投递任务选处理器的键，改名等于让
 # 已经躺在 domain_outbox 里的行认不出自己。
@@ -525,13 +531,34 @@ def _apply_billing_status(session: Session, tenant: Tenant, row: WalletTransacti
         "billing_status": tenant.billing_status.value,
         "status_version": tenant.status_version,
     }
-    # 锁内刚读到的值 + 1。
-    tenant.billing_status = wanted
-    tenant.status_version = tenant.status_version + 1
     if wanted is BillingStatus.ACTIVE:
         reason = REASON_BALANCE_POSITIVE
     else:
         reason = REASON_BALANCE_NON_POSITIVE
+
+    def make_event(locked: Tenant) -> DomainOutbox:
+        # bump 在版本 +1 之后才调用：payload 里一定是新版本。按名字取 `_outbox_event`，
+        # 测试对它的替换照常生效。
+        effective, _reason = compose_effective_status(
+            locked.account_status,
+            locked.billing_status,
+            locked.billing_mode,
+            IntegrationStatus.ENABLED,
+        )
+        payload = {
+            "billing_status": wanted.value,
+            "billing_mode": locked.billing_mode.value,
+            "effective_status": effective.value,
+            "status_version": locked.status_version,
+            "reason": reason,
+            "balance": _money_text(row.balance_after),
+            "wallet_transaction": row.public_id,
+        }
+        return _outbox_event(EVENT_BILLING_STATUS_CHANGED, locked, payload, row.created_at)
+
+    # 锁内刚读到的值 + 1（调用方已按钱包 → 租户加锁）。
+    tenant.billing_status = wanted
+    bump_status_version(session, tenant, row.created_at, make_event=make_event)
     after_state = {
         "billing_status": wanted.value,
         "status_version": tenant.status_version,
@@ -551,16 +578,6 @@ def _apply_billing_status(session: Session, tenant: Tenant, row: WalletTransacti
             created_at=row.created_at,
         )
     )
-    payload = {
-        "billing_status": wanted.value,
-        "billing_mode": tenant.billing_mode.value,
-        "effective_status": "ALLOW_AI" if ai_service_enabled(tenant) else "BLOCK_AI",
-        "status_version": tenant.status_version,
-        "reason": reason,
-        "balance": _money_text(row.balance_after),
-        "wallet_transaction": row.public_id,
-    }
-    session.add(_outbox_event(EVENT_BILLING_STATUS_CHANGED, tenant, payload, row.created_at))
 
 
 def _adjustment_audit(

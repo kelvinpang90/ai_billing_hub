@@ -38,7 +38,7 @@
 | `billing_status` | VARCHAR(64) | 非空，默认 `SUSPENDED`，`CHECK IN ('ACTIVE','SUSPENDED')`（AIH-TASK-005） |
 | `billing_mode` | VARCHAR(32) | 非空，默认 `PREPAID`；仅受控初始化可改为 `INTERNAL_METERED_ONLY`（迁移 0019） |
 | `account_status` | VARCHAR(32) | 非空，服务端默认 `'ENABLED'`，`ck_tenants_account_status`：`CHECK IN ('PENDING_ACTIVATION','ENABLED','DISABLED','CLOSED')`；无索引（AIH-TASK-020，迁移 `0009_tenant_account_status`） |
-| `status_version` | BIGINT | 非空，默认 0，`CHECK >= 0`；只增不减，计费与账户两维共用（AIH-TASK-005 / 020） |
+| `status_version` | BIGINT | 非空，默认 0，`CHECK >= 0`；只增不减，各状态维度共用；唯一入口 `bump_status_version`（AIH-TASK-005 / 020 / 048） |
 | `status_changed_at` | DATETIME | 可空；最近一次状态跃迁的时刻（整秒 UTC）。迁移前的旧行为空，读取时回退到 `created_at`（AIH-TASK-047，迁移 `0020_status_sync`） |
 | `low_balance_threshold` | DECIMAL(20,8) | 可空，`CHECK >= 0`；NULL 表示不发低余额事件（AIH-TASK-005） |
 | `created_at` | DATETIME | 非空 |
@@ -46,19 +46,43 @@
 
 `contact_name` / `email` / `phone` 是个人数据（`REQ-PRIV-001`）：不进日志、不进异常消息。
 
-`status_changed_at` 只有列（设计闸门 #241 v6 拆分第 1 项）：由 `bump_status_version` 在每次跃迁时写入归
-AIH-TASK-048，在那之前所有行都为空。
+`status_changed_at` 由 `bump_status_version` 在每次跃迁时写入（AIH-TASK-048）；在那之前没有跃迁过的行仍为空。
+
+**`status_version` 的唯一入口**（设计闸门 #241 v6 §2「`status_version` 递增点收拢」，AIH-TASK-048）：
+`app/repositories/tenancy.py` 的 `bump_status_version(session, tenant, now, *, make_event)`。没有别的代码给
+它赋值（`tests/backend/test_status_version.py` 扫描 `app/` 源码守着这一条），也没有「只加版本、不写事件」的
+入口：`make_event` 必填。一次调用在调用方的事务里做完四件事：
+
+1. `status_version` +1；
+2. `status_changed_at = now`；
+3. 调用 `make_event(tenant)`（此时已是新版本），把返回的领域 outbox 事件加进同一个 session；
+4. 作废该租户投递行的退避：经 `ix_projects_tenant_id` 取该租户的项目 id（一致性读，不加锁；没有项目就跳过），
+   再 `UPDATE project_status_deliveries SET next_attempt_at = now WHERE project_id IN (…) AND next_attempt_at > now`。
+   每个项目恰好一行投递行，按主键命中已有记录：只加记录锁，不加间隙锁，不碰别的租户的行。
+
+调用方只有三处，各写一种领域事件，状态、版本、`status_changed_at`、审计与事件同一事务提交（INV-13）：
+
+| 调用方 | 事件类型 | 加锁顺序 |
+| --- | --- | --- |
+| `app/repositories/wallet.py` `_apply_billing_status`（余额跃迁） | `tenant.billing_status_changed` | 钱包 → 租户 → 投递行 |
+| `app/services/account_status.py` `_apply`（管理员启停） | `tenant.account_status_changed` | 租户 → 投递行 |
+| `app/services/internal_billing.py` `enable_internal_metering`（设为内部计量） | `tenant.billing_mode_changed` | 钱包 → 租户 → 投递行 |
+
+⚠️ **只在已持有租户行锁（`SELECT … FOR UPDATE`）的事务里调用**：锁内读到的版本 +1 才不会重复，各维度的
+跃迁交错时版本号严格递增。没有任何路径先锁投递行、再锁租户或钱包，所以不会成环。事件 payload 里的
+`effective_status` 一律由 `app/models/tenancy.py` 的 `compose_effective_status` 合成（租户级事件的项目
+维度按 `ENABLED`）。
 
 **计费状态由余额驱动**（spec §7 第 8–10 条、§24；设计闸门 #88）：余额 > 0 为 `ACTIVE`，≤ 0 为
-`SUSPENDED`，**正好为 0 也是暂停**。新租户余额为 0，所以默认 `SUSPENDED`。`billing_status` 与
-`status_version` 只经 `app/repositories/wallet.py` 的 `post_transaction` 改变，与账本行同一事务提交；
-只有真正跃迁时 `status_version` 才 +1。设置 `low_balance_threshold` 的管理入口（spec §56）归客户管理
+`SUSPENDED`，**正好为 0 也是暂停**。新租户余额为 0，所以默认 `SUSPENDED`。`billing_status` 只经
+`app/repositories/wallet.py` 的 `post_transaction` 改变，与账本行同一事务提交；只有真正跃迁时才经
+`bump_status_version` 给 `status_version` +1。设置 `low_balance_threshold` 的管理入口（spec §56）归客户管理
 服务任务。
 
 **账户状态由管理员控制**（spec §24、§56；设计闸门 #136 v2，AIH-TASK-020）：与计费状态互相独立，共用
 `status_version`。只经 `app/services/account_status.py` 改变：在租户行锁（`SELECT … FOR UPDATE`，不锁钱包）
-内改状态、`status_version` +1、`updated_at`，与一条 `TENANT_ACCOUNT_STATUS_CHANGED` 审计和一条
-`tenant.account_status_changed` outbox 事件同一事务提交。计费跃迁同样在租户行锁内 +1，所以两维交错时版本号
+内改状态、经 `bump_status_version` 给版本 +1 并写 `tenant.account_status_changed` outbox 事件、改 `updated_at`，
+与一条 `TENANT_ACCOUNT_STATUS_CHANGED` 审计同一事务提交。计费跃迁同样在租户行锁内 +1，所以两维交错时版本号
 严格递增、不重复。新租户与迁移前已有的租户都是 `ENABLED`（服务端默认值回填）。本任务只产生
 `ENABLED` / `DISABLED`：`PENDING_ACTIVATION` 没有产生路径（V1 没有自助注册），`CLOSED` 归关户任务；两者
 现在就是 CHECK 允许的取值，关户任务不必再改列。跃迁表见 [api.md](api.md) 的「管理端账户状态」。
@@ -90,7 +114,8 @@ AIH-TASK-048，在那之前所有行都为空。
 | `updated_at` | DATETIME | 非空 |
 
 `integration_status` 与 `status_webhook_url` 依据设计闸门 #241 v6（[PHASE-3-status-sync.md](design/PHASE-3-status-sync.md)）
-§2「数据库」。本版只有列：项目集成状态的跃迁、地址的规范化与设置归 AIH-TASK-049，有效状态的合成归 AIH-TASK-048。
+§2「数据库」。项目集成状态的跃迁、地址的规范化与设置归 AIH-TASK-049；有效状态由 `app/models/tenancy.py` 的
+`compose_effective_status` 合成（AIH-TASK-048），`integration_status` 是它的第四个维度。
 ⚠️ `status_webhook_url` 的路径里可能带集成方的令牌：不进日志、异常消息与审计（审计只记主机名，设计 §6）。
 
 按项目的读取**一律带 `tenant_id`**：给定 `(tenant_id, public_id)` 查不到就是查不到，
@@ -266,7 +291,9 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 - **投递状态不另存列**，由数据推导（spec §29 的四个状态）：`delivered_version` = 租户 `status_version` 为
   `DELIVERED`；落后且 `attempt_count = 0` 为 `PENDING`；落后且 `1 ≤ attempt_count <` 告警阈值为 `RETRYING`；
   落后且 `attempt_count ≥` 告警阈值为 `FAILED`（仍按退避上限继续重试）。
-- 本版只建表与插行；领取、发送、结算与重排归 AIH-TASK-048 / 049 / 051（设计 §8 拆分）。时间列一律服务端 now，
+- 每次 `status_version` 跃迁时，`bump_status_version` 在租户行锁内按主键把该租户投递行晚于 now 的
+  `next_attempt_at` 提前到 now（AIH-TASK-048，见上面 `tenants` 一节）；启用密钥与改地址时的重排归 AIH-TASK-049，
+  领取、发送与结算归 AIH-TASK-051（设计 §8 拆分）。时间列一律服务端 now，
   不带时区的 UTC，整秒。
 - 迁移部署窗口里旧代码建的项目会缺一行，补行语句见迁移 0020 文件头「失败处理」。
 

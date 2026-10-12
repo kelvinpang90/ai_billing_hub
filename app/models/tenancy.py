@@ -5,7 +5,8 @@ AIH-TASK-004 只建了身份与归属字段。AIH-TASK-005（设计闸门 #88）
 币种由 `wallets.currency` 承载，不在租户上重复。AIH-TASK-020（设计闸门 #136 v2）
 加了管理员控制的 `account_status`（迁移 0009）。AIH-TASK-047（设计闸门 #241 v6）加了
 项目的 `integration_status`、`status_webhook_url` 与租户的 `status_changed_at`（迁移 0020）；
-它们的写路径归后续任务。
+AIH-TASK-048 加了有效状态的唯一公式 `compose_effective_status`。集成状态与地址的写路径归
+后续任务。
 
 ⚠️ `backend_base_url` 不建（设计 #241 §1）；webhook 密钥列由 `project_webhook_secrets` 取代。
 清单与理由见 `docs/database-schema.md`「尚未建的列」。
@@ -94,12 +95,63 @@ class IntegrationStatus(enum.StrEnum):
     DISABLED = "DISABLED"
 
 
+class EffectiveStatus(enum.StrEnum):
+    """集成方据以放行或拦截 AI 调用的合成结果（spec §24；设计闸门 #241 v6 §2）。"""
+
+    ALLOW_AI = "ALLOW_AI"
+    BLOCK_AI = "BLOCK_AI"
+
+
+class ReasonCode(enum.StrEnum):
+    """`BLOCK_AI` 的原因（设计 #241 §2「有效状态合成」）；`ALLOW_AI` 时没有原因码。
+
+    ⚠️ 只给集成方后端，不给终端用户（设计 §6）。
+    """
+
+    ACCOUNT_CLOSED = "ACCOUNT_CLOSED"
+    ACCOUNT_DISABLED = "ACCOUNT_DISABLED"
+    ACCOUNT_PENDING_ACTIVATION = "ACCOUNT_PENDING_ACTIVATION"
+    PROJECT_INTEGRATION_DISABLED = "PROJECT_INTEGRATION_DISABLED"
+    BALANCE_NOT_POSITIVE = "BALANCE_NOT_POSITIVE"
+
+
+def compose_effective_status(
+    account_status: AccountStatus,
+    billing_status: BillingStatus,
+    billing_mode: BillingMode,
+    integration_status: IntegrationStatus,
+) -> tuple[EffectiveStatus, ReasonCode | None]:
+    """The one formula for the effective status (design #241 §2): first match blocks.
+
+    ⚠️ 判定顺序固定：管理员动作（账户 1–3、项目 4）排在余额（5）前面，充值后集成方看到的
+    仍是管理员停用的原因（spec §24：充值不得重开被管理员停用的租户 / 项目）。内部计量的
+    租户不受余额停用影响。
+    """
+    if account_status is AccountStatus.CLOSED:
+        return EffectiveStatus.BLOCK_AI, ReasonCode.ACCOUNT_CLOSED
+    if account_status is AccountStatus.DISABLED:
+        return EffectiveStatus.BLOCK_AI, ReasonCode.ACCOUNT_DISABLED
+    if account_status is AccountStatus.PENDING_ACTIVATION:
+        return EffectiveStatus.BLOCK_AI, ReasonCode.ACCOUNT_PENDING_ACTIVATION
+    if integration_status is IntegrationStatus.DISABLED:
+        return EffectiveStatus.BLOCK_AI, ReasonCode.PROJECT_INTEGRATION_DISABLED
+    if billing_mode is BillingMode.PREPAID and billing_status is not BillingStatus.ACTIVE:
+        return EffectiveStatus.BLOCK_AI, ReasonCode.BALANCE_NOT_POSITIVE
+    return EffectiveStatus.ALLOW_AI, None
+
+
 def ai_service_enabled(tenant: Tenant) -> bool:
-    """Internal tenants bypass balance suspension, never an admin or safety disable."""
-    return tenant.account_status is AccountStatus.ENABLED and (
-        tenant.billing_mode is BillingMode.INTERNAL_METERED_ONLY
-        or tenant.billing_status is BillingStatus.ACTIVE
+    """Internal tenants bypass balance suspension, never an admin or safety disable.
+
+    租户级：项目维度按 `ENABLED` 传入 `compose_effective_status`，不另写一份公式（设计 §2）。
+    """
+    effective, _reason = compose_effective_status(
+        tenant.account_status,
+        tenant.billing_status,
+        tenant.billing_mode,
+        IntegrationStatus.ENABLED,
     )
+    return effective is EffectiveStatus.ALLOW_AI
 
 
 # 与迁移 0009 的列宽一致（设计 §2「数据库」）。
@@ -146,7 +198,8 @@ class Tenant(Base):
         default=AccountStatus.ENABLED,
         server_default=AccountStatus.ENABLED.value,
     )
-    # 只增不减（spec §24）：计费与账户两维的每次真实跃迁都 +1。
+    # 只增不减（spec §24）：每次真实跃迁都 +1。⚠️ 唯一入口是
+    # `app/repositories/tenancy.py` 的 `bump_status_version`，只在租户行锁内调用。
     status_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     # 最近一次状态跃迁的时刻（迁移 0020）。旧行为空，读取时回退到 `created_at`。
     status_changed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)

@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from app.models.auth import DomainOutbox
+from app.models.integration import ProjectStatusDelivery
 from app.models.tenancy import Project, Tenant
 
 
@@ -93,6 +95,46 @@ def update_tenant_profile(
         tenant.updated_at = now
         session.flush()
     return changed
+
+
+def bump_status_version(
+    session: Session,
+    tenant: Tenant,
+    now: dt.datetime,
+    *,
+    make_event: Callable[[Tenant], DomainOutbox],
+) -> None:
+    """The only way to move `status_version` (design gate #241 v6 §2, INV-13).
+
+    一次调用做完四件事，与调用方的状态改动、审计同一事务：
+
+    1. `status_version` +1；
+    2. `status_changed_at = now`；
+    3. 调用 `make_event(tenant)`（此时已是新版本），把得到的领域 outbox 事件加进 session；
+    4. 作废该租户所有投递行的退避：先经 `ix_projects_tenant_id` 取项目 id（一致性读，不加锁；
+       没有项目就跳过），再按主键把晚于 `now` 的 `next_attempt_at` 提前到 `now`。每个项目恰好
+       一行投递行，IN 里的 id 都命中已有主键：只加记录锁，不加间隙锁，不碰其他租户的行。
+
+    ⚠️ **只在调用方已持有租户行锁（`FOR UPDATE`）的事务里调用**，锁内读到的版本 +1 才不会
+    重复。加锁顺序是（钱包 →）租户 → 投递行。`now` 是调用方给的整秒 UTC。没有「只加版本、
+    不写事件」的入口：`make_event` 必填。
+    """
+    tenant.status_version = tenant.status_version + 1
+    tenant.status_changed_at = now
+    session.add(make_event(tenant))
+    project_ids = list(
+        session.execute(select(Project.id).where(Project.tenant_id == tenant.id)).scalars()
+    )
+    if not project_ids:
+        return
+    session.execute(
+        update(ProjectStatusDelivery)
+        .where(
+            ProjectStatusDelivery.project_id.in_(project_ids),
+            ProjectStatusDelivery.next_attempt_at > now,
+        )
+        .values(next_attempt_at=now)
+    )
 
 
 def list_tenants(session: Session, *, offset: int, limit: int) -> tuple[list[Tenant], int]:

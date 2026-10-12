@@ -1,8 +1,9 @@
 """Admin-controlled tenant account status (spec §24, §25, §56, §66; design gate #136 v2).
 
-⚠️ **一次跃迁一个 `session_scope()`**（INV-13）：锁租户行 → 判定 → 改 `account_status`、
-`status_version` +1、`updated_at` → `TENANT_ACCOUNT_STATUS_CHANGED` 审计 →
-`tenant.account_status_changed` outbox → 提交。任何一步失败整体回滚。
+⚠️ **一次跃迁一个 `session_scope()`**（INV-13）：锁租户行 → 判定 → 改 `account_status` →
+`bump_status_version`（版本 +1、`status_changed_at`、`tenant.account_status_changed` outbox、
+作废投递退避）→ `updated_at` → `TENANT_ACCOUNT_STATUS_CHANGED` 审计 → 提交。任何一步失败
+整体回滚。
 
 ⚠️ **只锁租户行**（`SELECT … FOR UPDATE`），不读、不锁、不写钱包（设计 §2「事务边界」）。
 记账路径的加锁顺序是钱包 → 租户；这里只拿租户一把锁，不会与它成环。两条路径都在
@@ -25,7 +26,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, DomainOutbox, OutboxStatus, User
-from app.models.tenancy import AccountStatus, Tenant, ai_service_enabled
+from app.models.tenancy import (
+    AccountStatus,
+    IntegrationStatus,
+    Tenant,
+    compose_effective_status,
+)
 from app.repositories import tenancy
 from app.schemas.customers import CustomerDetail
 from app.services import customers
@@ -128,9 +134,30 @@ def _apply(
         "account_status": previous.value,
         "status_version": tenant.status_version,
     }
-    # 锁内刚读到的值 + 1。
+
+    def make_event(locked: Tenant) -> DomainOutbox:
+        # bump 在版本 +1 之后才调用：payload 里一定是新版本。按名字取 `_status_event`，
+        # 测试对它的替换照常生效。
+        effective, _reason = compose_effective_status(
+            locked.account_status,
+            locked.billing_status,
+            locked.billing_mode,
+            IntegrationStatus.ENABLED,
+        )
+        payload = {
+            "account_status": wanted.value,
+            "previous_account_status": previous.value,
+            "billing_status": locked.billing_status.value,
+            "billing_mode": locked.billing_mode.value,
+            "effective_status": effective.value,
+            "status_version": locked.status_version,
+            "changed_at": now.isoformat(),
+        }
+        return _status_event(locked, payload, now)
+
+    # 锁内刚读到的值 + 1（调用方只锁了租户行）。
     tenant.account_status = wanted
-    tenant.status_version = tenant.status_version + 1
+    tenancy.bump_status_version(session, tenant, now, make_event=make_event)
     tenant.updated_at = now
     record_audit(
         session,
@@ -148,16 +175,6 @@ def _apply(
         },
         reason=reason,
     )
-    payload = {
-        "account_status": wanted.value,
-        "previous_account_status": previous.value,
-        "billing_status": tenant.billing_status.value,
-        "billing_mode": tenant.billing_mode.value,
-        "effective_status": "ALLOW_AI" if ai_service_enabled(tenant) else "BLOCK_AI",
-        "status_version": tenant.status_version,
-        "changed_at": now.isoformat(),
-    }
-    session.add(_status_event(tenant, payload, now))
 
 
 def _status_event(tenant: Tenant, payload: dict[str, object], now: dt.datetime) -> DomainOutbox:
