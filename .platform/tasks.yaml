@@ -3224,7 +3224,7 @@ tasks:
     title: 状态同步第四层：有效状态接口新字段与项目集成管理接口
     purpose: >-
       按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 4 项：GET /api/v1/integration/effective-status 增加 project_integration_status、reason_code、effective_at；新增三个管理接口 POST …/projects/{project_id}/integration-status 与 PUT、GET …/projects/{project_id}/status-webhook；项目对象增加 integration_status 与 status_webhook_configured；docs/api.md 写清集成方的接收与对账契约。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-049
     acceptance_criteria:
