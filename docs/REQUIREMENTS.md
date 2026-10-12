@@ -323,7 +323,7 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 
 | § | 标题 | 说明 |
 | --- | --- | --- |
-| 121 | V1 Out of Scope | 明确不做的 11 项 |
+| 121 | V1 Out of Scope | 明确不做的 14 项 |
 | 122 | Future Architecture Compatibility | 为未来留路但现在不实现 |
 | 123 | Development Phases | Phase 0 — Foundation；见 [TODO.md](TODO.md) |
 | 124 | Phase 1 — Tenant, Project & Wallet Core | 见 [TODO.md](TODO.md) |
@@ -337,7 +337,7 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 | 132 | Definition of Done | 15 条 DoD + 5 条上线前跨功能闸门；**硬性要求来源之一**，见第 1.1 节 |
 | 133 | Critical Invariants | 14 条不变量，见 [ARCHITECTURE.md](ARCHITECTURE.md) 第 6 节；**硬性要求来源之一** |
 
-### P. 试点、开发规则与目标体验（§134–§140）
+### P. 试点、开发规则与目标体验（§134–§141）
 
 | § | 标题 | 说明 |
 | --- | --- | --- |
@@ -349,6 +349,7 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 | 139 | Final Admin Experience | 管理端：端到端可审计的财务链路 |
 | 139.1 | Critical Requirement Traceability | 见本文件第 1.2 节 |
 | 140 | Overall Architectural Decision | 权威架构决策 |
+| 141 | AI Module (Co-located AI API) | spec v1.8：`acuven_ai_api` 并入本平台，同一进程、同一个库；边界、身份、用量自调、可用性含义与对外契约；见 [ADR-0012](adr/ADR-0012-ai-module-in-billing-process.md) |
 
 ---
 
