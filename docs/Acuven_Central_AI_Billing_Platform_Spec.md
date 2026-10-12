@@ -4686,7 +4686,7 @@ The system-side AI API, formerly built as the separate `acuven_ai_api` service, 
 
 - Before calling a provider, the AI Module composes the effective service status in-process from the authoritative tenant and project columns, using the single formula of §24. `BLOCK_AI` means no provider call (§26).
 - Because the AI Module reads the authoritative state directly, the local versioned status, status webhook receiver, and periodic reconciliation that §26 and §28–§30 require of Integrated Application Backends do not apply to it.
-- After the provider returns usage, the AI Module persists the usage event to its local outbox and only then returns the response. If that commit fails, it returns `503` without the AI response and logs only allowed billing metadata for manual reconciliation. This deviates from §20 ("must still return the AI response") and is recorded in ADR-0012.
+- After the provider returns usage, the AI Module persists the usage event to its local outbox and only then returns the response. If that commit fails, it returns `503` without the AI response. This deviates from §20 ("must still return the AI response") and is recorded in ADR-0012. The rest of §20 still applies: the failure raises a highest-severity alert carrying only allowed billing metadata, and once persistence is available the event is recorded as held for an audited manual decision to bill or discard it.
 
 ## 141.4 Usage Reporting
 
