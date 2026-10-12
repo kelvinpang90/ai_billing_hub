@@ -43,7 +43,7 @@
 
 | ID | 规范性规则 | 主要章节 | 必需测试证据 |
 | --- | --- | --- | --- |
-| `REQ-AVAIL-001` | 中心计费故障绝不阻塞终端用户 AI 服务 | §1、§20–§22、§85 | 故障测试 + 试点 E2E |
+| `REQ-AVAIL-001` | 中心计费故障绝不阻塞终端用户 AI 服务（AI 模块的适用范围见 §141.5：共用的数据库或 api 进程不可用时 AI 模块也不可用） | §1、§20–§22、§85、§141.5 | 故障测试 + 试点 E2E |
 | `REQ-INGEST-001` | `202` 必须在持久化 `RECEIVED` 之后返回；定价异步 | §20、§38–§39、§82 | API / 崩溃 / 队列丢失测试 |
 | `REQ-INGEST-002` | 队列发布本身不构成确认；`RECEIVED` 数据库记录才是持久事实来源，worker 必须能靠扫库恢复 | §20、§82–§83、§110 | 队列丢失 / 崩溃恢复 + 扫库重建测试 |
 | `REQ-IDEMP-001` | 全局 `event_id` 至多一次财务效果；ID 复用不匹配即冲突 | §23、§79、§82 | 重复 / 冲突 / 并发测试 |
@@ -71,7 +71,7 @@
 
 | 硬性要求 | spec 原文（逐字） | 覆盖 | 缺口 / 不适用理由 |
 | --- | --- | --- | --- |
-| Invariant 1 | Central Billing failure must NOT stop customer AI service. | `REQ-AVAIL-001` | — |
+| Invariant 1 | Central Billing failure must NOT stop customer AI service. For the AI Module (§141), which shares this platform's process and database, the scope of this rule is defined in §141.5. | `REQ-AVAIL-001` | — |
 | Invariant 2 | Same Usage Event must never financially charge twice. | `REQ-IDEMP-001` | — |
 | Invariant 3 | Same Payment must never credit Wallet twice. | `REQ-PAY-001` | — |
 | Invariant 4 | Wallet balance changes only through ledger transactions. | `REQ-FIN-002` | — |

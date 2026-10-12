@@ -20,7 +20,7 @@
 | 1.5 | 2026-09-11 | Errata only, no new normative decision. §30 applied reconciliation responses on `status_version >=` local while §28 applies webhooks on `>` and §30 claimed both used the same rule — §30 now states the §28 rule. §55 listed an undefined dashboard field "Actual AI Provider Cost"; it now uses the term defined in §14 (Estimated/Reconciled, with the basis shown). §30's bare "every 5 minutes" polling example sat exactly on the §119 reconciliation safety bound and did not reference it; replaced by the cross-reference. |
 | 1.6 | 2026-09-11 | Editorial only, no normative change. Second slimming batch: §2's generic flow diagram now defers to §20/§103; §55's filter list defers to §87; §134's 15-step block defers to §126; §135 keeps only the constraints with no other home and points the rest at theirs (retitled Implementation Constraints); §139's mock dashboard and drill-down defer to §86/§61/§87, keeping the auditable-trail requirement and the §139.1 table. **§72** (Customer Statements Page) retired — §46 and §90 already cover both items. |
 | 1.7 | 2026-09-21 | Traceability only, no normative change. Four rules that were already stated normatively now also carry an identifier so implementation, migrations, and tests can reference them: `REQ-PRIV-002` (§69, Invariant 7), `REQ-TXN-001` (§74.6, Invariant 13), `REQ-TAX-001` (§45.1, SST/accounting launch gate), and `REQ-LAUNCH-001` (§47, real-account integration launch gate). Each added paragraph restates the rule of the section it sits in; no existing sentence was moved, merged, or reworded, and no requirement was added, tightened, or relaxed. |
-| 1.8 | 2026-10-12 | Normative. Added **§141 AI Module**: the system-side AI API, formerly the separate `acuven_ai_api` service, runs inside this platform as one process, one deployment and one database, with the AI caller identity unified into the tenant project (product owner decisions of 2026-10-12; rationale and costs in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; implementation design in design gate #281). Amended to match: §2.1 (the AI Module is the one exception to the trust-domain separation), §3.3 and §126 (pilot addenda), §121 (two out-of-scope items, and the example in the customer-operated-backend item), §135 (the AI Module is not a central AI Gateway), §139.1 (`REQ-AVAIL-001` primary sections). |
+| 1.8 | 2026-10-12 | Normative. Added **§141 AI Module**: the system-side AI API, formerly the separate `acuven_ai_api` service, runs inside this platform as one process, one deployment and one database, with the AI caller identity unified into the tenant project (product owner decisions of 2026-10-12; rationale and costs in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; implementation design in design gate #281). Amended to match: §2.1 (the AI Module is the one exception to the trust-domain separation), §3.3 and §126 (pilot addenda), §121 (two out-of-scope items, and the example in the customer-operated-backend item), §135 (the AI Module is not a central AI Gateway; its request path follows §141.5), §139.1 (`REQ-AVAIL-001` primary sections), and the scope of `REQ-AVAIL-001` / Invariant 1 for the AI Module in §1, §119 and §133. |
 
 ## Document Navigation
 
@@ -94,7 +94,7 @@ The billing system must remain operationally independent from each tenant-facing
 
 > Failure of the Central Billing Platform MUST NOT interrupt a customer's AI service.
 
-`REQ-AVAIL-001`: Central Billing network, API, worker, Redis, or database unavailability must not become a synchronous dependency in the end-user AI request path.
+`REQ-AVAIL-001`: Central Billing network, API, worker, Redis, or database unavailability must not become a synchronous dependency in the end-user AI request path. For the AI Module (§141), which shares this platform's process and database, the scope of this rule is defined in §141.5.
 
 Usage reporting and billing must therefore be asynchronous.
 
@@ -4067,7 +4067,7 @@ Status reconciliation safety bound: <= 5 minutes
 
 Measurements must include the hottest-tenant workload because wallet mutation is serialized per tenant. Report hardware, dataset size, concurrency, test duration, and observed p50/p95/p99. A short synthetic burst alone does not satisfy the acceptance test.
 
-The single-VPS V1 deployment targets 99.5% monthly Central Billing availability excluding approved maintenance. This target does not weaken `REQ-AVAIL-001`: an outage still must not interrupt Integrated Application AI responses.
+The single-VPS V1 deployment targets 99.5% monthly Central Billing availability excluding approved maintenance. This target does not weaken `REQ-AVAIL-001`: an outage still must not interrupt Integrated Application AI responses. A database or API-process outage does take the AI Module down (§141.5).
 
 ---
 
@@ -4427,7 +4427,7 @@ Codex MUST preserve these invariants throughout development.
 
 ## Invariant 1
 
-Central Billing failure must NOT stop customer AI service.
+Central Billing failure must NOT stop customer AI service. For the AI Module (§141), which shares this platform's process and database, the scope of this rule is defined in §141.5.
 
 ## Invariant 2
 
@@ -4500,7 +4500,7 @@ Implementation scope, order, and acceptance for the pilot are defined in §126. 
 These constraints bind every implementation phase.
 
 - Never remove working customer AI functionality merely to introduce Billing.
-- Do not add synchronous Central Billing dependency to the AI request path (§20, `REQ-AVAIL-001`).
+- Do not add synchronous Central Billing dependency to the AI request path (§20, `REQ-AVAIL-001`; for the AI Module, §141.5).
 - Do not calculate customer selling price inside an Integrated Application Backend.
 - Do not trust monetary amount submitted by an Integrated Application Backend.
 - Do not put Provider API secrets in frontend.
@@ -4598,7 +4598,7 @@ The complete financial trail must be auditable end to end: from AI request throu
 
 | Requirement | Normative rule | Primary sections | Required test evidence |
 | --- | --- | --- | --- |
-| `REQ-AVAIL-001` | Central Billing outage never blocks end-user AI service. | §1, §20–§22, §85, §141.5 | Failure and pilot E2E tests |
+| `REQ-AVAIL-001` | Central Billing outage never blocks end-user AI service (AI Module scope: §141.5). | §1, §20–§22, §85, §141.5 | Failure and pilot E2E tests |
 | `REQ-INGEST-001` | `202` follows durable `RECEIVED` persistence; pricing is asynchronous. | §20, §38–§39, §82 | API, crash, and queue-loss tests |
 | `REQ-IDEMP-001` | Global `event_id` produces at most one financial effect; mismatched reuse conflicts. | §23, §79, §82 | Duplicate, conflict, and concurrency tests |
 | `REQ-FIN-001` | Provider source cost, currency, FX, MYR estimate, and versions are historical snapshots. | §5, §14, §17 | FX/version/rounding tests |
