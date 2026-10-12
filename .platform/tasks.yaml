@@ -3332,7 +3332,7 @@ tasks:
     title: 状态同步第六层：状态 webhook 健康告警维度与运维文档
     purpose: >-
       按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 6 项：一个健康告警维度 status_webhook（同时报 failing、missing secret、signing error 三个计数，级别取最严重），在 docs/api.md 的 GET /internal/alerts 一节列出，并在 docs/runbook.md 写处理步骤、新建 Healthchecks 检查的步骤与关闭推送的方法。只读统计，不改投递逻辑。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-051
     acceptance_criteria:
