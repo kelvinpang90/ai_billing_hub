@@ -3,8 +3,8 @@
  * （open_audit、check_audit_entry）；AIH-TASK-035 加了 AI 目录的两个只读步骤（open_catalog、check_meter_types）；
  * AIH-TASK-036 加了供应商价格与汇率的两个只读步骤（open_provider_prices、open_fx_rates）；AIH-TASK-037 加了定价规则
  * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）；AIH-TASK-038 加了用量事件的一个只读步骤
- * （open_usage_events）；AIH-TASK-046 加了出站 webhook 签名密钥的一个只读步骤（check_webhook_signing）。
- * 文件名沿用，不改。open_catalog / check_meter_types
+ * （open_usage_events）；AIH-TASK-046 加了出站 webhook 签名密钥的一个只读步骤（check_webhook_signing）；AIH-TASK-053
+ * 加了项目集成状态的一个只读步骤（check_project_integration）。文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
  * 谁在什么时候跑它
@@ -58,9 +58,11 @@
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
  *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、夹具客户详情里
  *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。不点新建客户、编辑 / 保存、手工调账、
- *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）
- *   等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表不翻页、不展开
- *   第一行以外的行；签名密钥面板与集成凭据面板里不点任何按钮、不翻页。审计页不改每页条数、不翻页、
+ *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
+ *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
+ *   「Clear address」）等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表
+ *   不翻页、不展开第一行以外的行；签名密钥面板、集成凭据面板与集成状态面板里不点任何按钮、不翻页，集成状态面板里不填
+ *   地址输入框。审计页不改每页条数、不翻页、
  *   不展开行、不点「Clear filters」。目录页不点「New provider」「New meter type」「Rename」「Retire」「Reactivate」
  *   或任何确认按钮、不点状态筛选、不翻页、不打开任何供应商的详情、不填也不提交任何表单。价格页与汇率页不点
  *   「New draft」「New manual draft」「Edit」「Publish」「Retire」「Discard」或任何确认按钮、不动供应商 / 模型 /
@@ -146,6 +148,18 @@
  *                   Pending / Active / Retired，webhookSigning.status.*）；items 为空时面板显示空状态
  *                   （webhookSigning.empty 或 webhookSigning.emptyPage）、没有数据行。报到前把面板滚动到视口里（放得下时
  *                   整块在视口内，放不下时面板顶端在视口内）
+ *   check_project_integration
+ *                   在夹具客户详情（open_fixture 打开的那一页）的项目列表里点第一行的展开按钮（同 check_webhook_signing：
+ *                   aria-label 为「Expand row」；已经展开着就不再点；只点展开，不点任何写按钮）。项目列表加载失败是
+ *                   page_error，没有项目是 assertion_failed。展开区里的集成状态面板（role=region、aria-label 为
+ *                   「Integration status and status webhook」，en.json 的 projectIntegration.title）落定（地址读完，不再显示
+ *                   projectIntegration.webhook.loading）且不是加载失败（projectIntegration.webhook.loadFailed）或无权限
+ *                   （customers.forbidden）。后端值取页面自己发出的 GET /api/v1/admin/customers/{customer_id}/projects（查询串
+ *                   page=1）的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次成功读完的那一次）：items 的第一项的 id
+ *                   等于第一行的 data-row-key，它的 integration_status（ENABLED / DISABLED）对应的文案（Enabled / Disabled，
+ *                   projectIntegration.status.*）与面板「Integration status」一项（projectIntegration.field.status，面板里
+ *                   带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）的文字相同。报到前把面板滚动到视口里（规则同
+ *                   check_webhook_signing）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -251,6 +265,12 @@ const TEXT = {
   webhookActivatedAt: "Activated", // webhookSigning.field.activatedAt（集成凭据的表格没有这一列，靠它区分两张表）
   // 签名版本状态 → 「Status」列的文案（webhookSigning.status.pending / active / retired）。
   webhookStatusText: { PENDING: "Pending", ACTIVE: "Active", RETIRED: "Retired" },
+  integrationTitle: "Integration status and status webhook", // projectIntegration.title —— 集成状态面板的 aria-label
+  integrationStatusLabel: "Integration status", // projectIntegration.field.status —— 面板里 Descriptions 的一项
+  integrationLoading: "Loading the status webhook address…", // projectIntegration.webhook.loading
+  integrationLoadFailed: "The status webhook address could not be loaded.", // projectIntegration.webhook.loadFailed
+  // 项目集成状态 → 面板「Integration status」一项的文案（projectIntegration.status.enabled / disabled）。
+  integrationStatusText: { ENABLED: "Enabled", DISABLED: "Disabled" },
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -317,6 +337,9 @@ const LLM_TOKEN_COMPONENTS = 4;
 
 /** 签名密钥列表接口的路径（frontend/src/api/webhookSigning.ts 的 secretsUrl）。 */
 const WEBHOOK_SECRETS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects\/([^/]+)\/webhook-secrets$/;
+
+/** 项目列表接口的路径（frontend/src/api/adminCustomers.ts 的 listProjects）。 */
+const PROJECT_LIST_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -712,17 +735,47 @@ const network = {
   meterTypes: new Map(),
   /** 签名密钥列表接口：requestId → { customerId, projectId, status, finished, failed, seq }。查询串本身不保存。 */
   webhookSecrets: new Map(),
+  /** 项目列表接口：requestId → { customerId, firstPage, status, finished, failed, seq }。查询串本身不保存。 */
+  projectLists: new Map(),
   seq: 0,
 };
 
-/** 四类被观察的接口里，requestId 对应的那一条记录。 */
+/** 五类被观察的接口里，requestId 对应的那一条记录。 */
 function trackedRequest(requestId) {
   return (
     network.details.get(requestId) ??
     network.audits.get(requestId) ??
     network.meterTypes.get(requestId) ??
-    network.webhookSecrets.get(requestId)
+    network.webhookSecrets.get(requestId) ??
+    network.projectLists.get(requestId)
   );
+}
+
+/**
+ * 是不是项目列表接口（同源 https）：是的话回路径里的客户 id 与「查询串是不是第 1 页」，不是回 null。
+ * 只留这两样，不保存 URL。
+ */
+function projectListTarget(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host) {
+      return null;
+    }
+    const match = PROJECT_LIST_API.exec(parsed.pathname);
+    if (match === null) {
+      return null;
+    }
+    const query = parsed.searchParams;
+    return {
+      customerId: decodeURIComponent(match[1]),
+      firstPage: query.getAll("page").length === 1 && query.get("page") === "1",
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** 是不是签名密钥列表接口（同源 https）：是的话回路径里的客户与项目 id，不是回 null。查询串不看、不保存。 */
@@ -848,6 +901,17 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const projectList = projectListTarget(params.request?.url);
+        if (projectList !== null && params.request?.method === "GET") {
+          network.projectLists.set(params.requestId, {
+            customerId: projectList.customerId,
+            firstPage: projectList.firstPage,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -952,6 +1016,26 @@ function latestWebhookSecretsResponse(afterSeq, customerId, projectId) {
   let best = null;
   for (const [requestId, request] of network.webhookSecrets) {
     if (request.seq <= afterSeq || request.customerId !== customerId || request.projectId !== projectId) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/**
+ * 这个客户第 1 页的、成功读完的项目列表请求里最近的一次；还有在路上的就回 null，等它落定。列表是详情页打开时
+ * 自己发出的（重读时也是页面自己发），所以不按序号截断。
+ */
+function latestProjectListResponse(customerId) {
+  let best = null;
+  for (const [requestId, request] of network.projectLists) {
+    if (request.customerId !== customerId || !request.firstPage) {
       continue;
     }
     if (!request.finished && !request.failed) {
@@ -1124,6 +1208,20 @@ function pageLib() {
     }
     return null;
   };
+  /** 第一个项目展开区里的集成状态面板（role=region、aria-label 为面板标题）；规则同 webhookRegion。 */
+  const integrationRegion = (T) => {
+    const first = firstProjectRow(T);
+    const expanded = first === null ? null : first.nextElementSibling;
+    if (!expanded) {
+      return null;
+    }
+    for (const el of expanded.querySelectorAll('[role="region"]')) {
+      if (el.getAttribute("aria-label") === T.integrationTitle) {
+        return el;
+      }
+    }
+    return null;
+  };
   return {
     norm,
     leaf,
@@ -1138,6 +1236,7 @@ function pageLib() {
     meterTypeRow,
     firstProjectRow,
     webhookRegion,
+    integrationRegion,
   };
 }
 
@@ -1669,6 +1768,61 @@ function scrollWebhookPanelIntoView(lib, T) {
 /** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
 function webhookPanelInView(lib, T) {
   const region = lib.webhookRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 第一个项目展开区里集成状态面板的状态：加载中、加载失败、无权限，以及「Integration status」一项的文字（面板里
+ * 带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>；没有这一项时为 null）。只在面板里面找。只读，不点面板里的
+ * 任何按钮、不碰地址输入框。
+ */
+function probeProjectIntegration(lib, T) {
+  const region = lib.integrationRegion(T);
+  const out = {
+    ...lib.common(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    forbidden: false,
+    status: null,
+  };
+  if (region === null) {
+    return out;
+  }
+  const has = (text) =>
+    [...region.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(T.integrationLoading);
+  out.failed = has(T.integrationLoadFailed);
+  out.forbidden = has(T.customersForbidden);
+  for (const th of region.querySelectorAll("th")) {
+    const td = th.nextElementSibling;
+    if (lib.norm(th.textContent) === T.integrationStatusLabel && td && td.tagName === "TD") {
+      out.status = lib.norm(td.textContent);
+      break;
+    }
+  }
+  return out;
+}
+
+/** 把集成状态面板滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollIntegrationPanelIntoView(lib, T) {
+  const region = lib.integrationRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
+function integrationPanelInView(lib, T) {
+  const region = lib.integrationRegion(T);
   if (region === null) {
     return false;
   }
@@ -2543,6 +2697,119 @@ async function stepCheckWebhookSigning(ctx) {
   }
 }
 
+async function stepCheckProjectIntegration(ctx) {
+  if (ctx.customerId === null || ctx.fixture === null) {
+    throw fail("assertion_failed");
+  }
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+
+  // 夹具客户详情里的项目区块落定（与 check_webhook_signing 相同）。
+  const listed = await waitFor(
+    () => evaluate(probeProjects, TEXT),
+    (s) => s.appError || s.notFound || (s.path === href && !s.busy && (s.failed || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!listed.ok) {
+    throw fail("element_missing");
+  }
+  const projects = listed.value;
+  if (projects.appError || projects.failed) {
+    throw fail("page_error");
+  }
+  if (projects.notFound || projects.path !== href) {
+    throw fail("navigation_failed");
+  }
+  if (projects.empty || !projects.table || typeof projects.projectId !== "string" || projects.projectId === "") {
+    throw fail("assertion_failed");
+  }
+  const projectId = projects.projectId;
+
+  // 只点展开；已经展开着（例如 check_webhook_signing 刚展开过）就不再点。
+  if (projects.expand === "collapsed") {
+    if ((await evaluate(clickExpandFirstProject, TEXT)) !== true) {
+      throw fail("element_missing");
+    }
+  } else if (projects.expand !== "expanded") {
+    throw fail("element_missing");
+  }
+
+  // 集成状态面板落定：地址读完（不在加载），且是某一种终态（显示了状态、加载失败、无权限）。
+  const opened = await waitFor(
+    () => evaluate(probeProjectIntegration, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === href && s.region && !s.busy && (s.failed || s.forbidden || s.status !== null)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const panel = opened.value;
+  if (panel.appError || panel.failed) {
+    throw fail("page_error");
+  }
+  if (panel.notFound || panel.path !== href) {
+    throw fail("navigation_failed");
+  }
+  if (panel.forbidden) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：详情页自己发出的第 1 页项目列表 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestProjectListResponse(customerId),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    const first = Array.isArray(items) && items.length > 0 ? items[0] : null;
+    const status = first?.integration_status;
+    if (
+      first?.id !== projectId ||
+      typeof status !== "string" ||
+      !Object.hasOwn(TEXT.integrationStatusText, status)
+    ) {
+      throw fail("assertion_failed");
+    }
+    expected = TEXT.integrationStatusText[status];
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、第一项不是第一行的项目、状态不认识：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 面板显示的就是这一份响应里第一个项目的集成状态。
+  const shown = await waitFor(
+    () => evaluate(probeProjectIntegration, TEXT),
+    (s) => s.path === href && s.region && !s.busy && !s.failed && !s.forbidden && s.status === expected,
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把面板滚进视口。
+  if ((await evaluate(scrollIntegrationPanelIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(integrationPanelInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
@@ -2558,6 +2825,7 @@ const STEPS = {
   open_pricing_preview: stepOpenPricingPreview,
   open_usage_events: stepOpenUsageEvents,
   check_webhook_signing: stepCheckWebhookSigning,
+  check_project_integration: stepCheckProjectIntegration,
 };
 
 // ---------------------------------------------------------------------------
