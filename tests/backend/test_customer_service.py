@@ -25,7 +25,8 @@ from alembic import command
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.tenancy import BillingStatus, Project, Tenant
+from app.models.integration import ProjectStatusDelivery
+from app.models.tenancy import BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.wallet import Wallet
 from app.repositories import tenancy
 from app.repositories.wallet import get_wallet_for_tenant, verify_wallet
@@ -109,6 +110,8 @@ def _clean(engine: Engine) -> None:
         connection.execute(text("TRUNCATE TABLE audit_logs"))
     with engine.begin() as connection:
         connection.execute(delete(Wallet))
+        # 投递行引用项目（RESTRICT），先删它（迁移 0020）。
+        connection.execute(delete(ProjectStatusDelivery))
         connection.execute(delete(Project))
         connection.execute(delete(Tenant))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
@@ -164,10 +167,17 @@ def counts(factory) -> dict[str, int]:
         "tenants": select(func.count()).select_from(Tenant),
         "wallets": select(func.count()).select_from(Wallet),
         "projects": select(func.count()).select_from(Project),
+        "deliveries": select(func.count()).select_from(ProjectStatusDelivery),
         "audits": select(func.count()).select_from(AuditLog).where(ours),
     }
     with factory() as session:
         return {name: session.execute(query).scalar_one() for name, query in statements.items()}
+
+
+def deliveries(factory) -> list[ProjectStatusDelivery]:
+    statement = select(ProjectStatusDelivery).order_by(ProjectStatusDelivery.project_id)
+    with factory() as session:
+        return list(session.execute(statement).scalars())
 
 
 def audits(factory, action: AuditAction) -> list[AuditLog]:
@@ -176,7 +186,7 @@ def audits(factory, action: AuditAction) -> list[AuditLog]:
         return list(session.execute(statement).scalars())
 
 
-NOTHING = {"tenants": 0, "wallets": 0, "projects": 0, "audits": 0}
+NOTHING = {"tenants": 0, "wallets": 0, "projects": 0, "deliveries": 0, "audits": 0}
 
 
 def _boom(*_args: object, **_kwargs: object) -> None:
@@ -196,7 +206,7 @@ def test_create_customer_commits_tenant_wallet_and_audit_together(factory) -> No
 
     detail = create(factory, admin)
 
-    assert counts(factory) == {"tenants": 1, "wallets": 1, "projects": 0, "audits": 1}
+    assert counts(factory) == {**NOTHING, "tenants": 1, "wallets": 1, "audits": 1}
     assert detail.billing_status == "SUSPENDED"
     assert detail.status_version == 0
     view = detail.wallet
@@ -294,13 +304,35 @@ def test_create_project_commits_the_project_and_its_audit(factory) -> None:
 
     project = add_project(factory, admin, customer.id)
 
-    assert counts(factory) == {"tenants": 1, "wallets": 1, "projects": 1, "audits": 2}
+    assert counts(factory) == {
+        "tenants": 1,
+        "wallets": 1,
+        "projects": 1,
+        "deliveries": 1,
+        "audits": 2,
+    }
     with factory() as session:
         tenant = tenancy.get_tenant_by_public_id(session, customer.id)
         assert tenant is not None
         stored = tenancy.get_project_for_tenant(session, tenant.id, project.id)
         assert stored is not None
         assert (stored.name, stored.description) == ("Chatbot", None)
+        # 迁移 0020 的两列：新项目 ENABLED、没有地址（设计闸门 #241 §2）。
+        assert (stored.integration_status, stored.status_webhook_url) == (
+            IntegrationStatus.ENABLED,
+            None,
+        )
+        owner = (stored.id, tenant.id)
+
+    # 同一事务插入的投递行：从未送达、没有失败、`next_attempt_at` 就是建项目的 now。
+    [delivery] = deliveries(factory)
+    assert (delivery.project_id, delivery.tenant_id) == owner
+    assert (delivery.delivered_version, delivery.attempted_version) == (None, None)
+    assert delivery.attempt_count == 0
+    assert delivery.next_attempt_at == NOW
+    assert (delivery.lease_token, delivery.lease_expires_at) == (None, None)
+    assert (delivery.last_attempt_at, delivery.delivered_at) == (None, None)
+    assert (delivery.last_http_status, delivery.last_error_code) == (None, None)
 
     [audit] = audits(factory, AuditAction.PROJECT_CREATE)
     assert (audit.actor_user_id, audit.actor_role) == (admin.id, "ADMIN")
@@ -337,6 +369,123 @@ def test_a_failed_project_commit_leaves_no_project(factory, monkeypatch) -> None
 
     assert counts(factory) == before
     assert audits(factory, AuditAction.PROJECT_CREATE) == []
+
+
+def test_a_failed_delivery_row_leaves_no_project(factory, monkeypatch) -> None:
+    """设计闸门 #241 §7：项目与投递行同一事务，投递行写不进去，项目与审计也不留。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    before = counts(factory)
+    monkeypatch.setattr(customers, "add_status_delivery", _boom)
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        add_project(factory, admin, customer.id)
+
+    assert counts(factory) == before
+    assert deliveries(factory) == []
+    assert audits(factory, AuditAction.PROJECT_CREATE) == []
+
+
+def test_a_delivery_row_the_database_refuses_leaves_no_project(factory, monkeypatch) -> None:
+    """The real row with a negative attempt count: the CHECK of migration 0020 / the model
+    refuses it at flush, and the project goes with it."""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    before = counts(factory)
+    real = customers.add_status_delivery
+
+    def refused_delivery(
+        session: Session, project: Project, *, now: dt.datetime
+    ) -> ProjectStatusDelivery:
+        delivery = real(session, project, now=now)
+        delivery.attempt_count = -1
+        session.flush()
+        return delivery
+
+    monkeypatch.setattr(customers, "add_status_delivery", refused_delivery)
+
+    with pytest.raises(DBAPIError):
+        add_project(factory, admin, customer.id)
+
+    assert counts(factory) == before
+    assert deliveries(factory) == []
+
+
+def test_every_project_gets_exactly_one_delivery_row(factory) -> None:
+    """设计闸门 #241 §7「每个项目恰好一行」：每建一个项目多一行，归属它自己的项目与租户。"""
+    admin = make_admin(factory)
+    first = create(factory, admin, company_name="First Sdn Bhd")
+    second = create(factory, admin, company_name="Second Sdn Bhd")
+    add_project(factory, admin, first.id, name="One")
+    add_project(factory, admin, first.id, name="Two")
+    add_project(factory, admin, second.id, name="Three")
+
+    with factory() as session:
+        owners = session.execute(select(Project.id, Project.tenant_id).order_by(Project.id)).all()
+
+    assert len(owners) == 3
+    rows = [(row.project_id, row.tenant_id) for row in deliveries(factory)]
+    assert rows == [(row.id, row.tenant_id) for row in owners]
+
+
+def test_migration_0020_then_a_new_project_leaves_exactly_one_row_each(mysql_factory) -> None:
+    """设计闸门 #241 §7：迁移 0020 升级已有两个项目的库，之后经服务新建一个项目 —— 三个项目
+    各有一行投递行。MySQL 专有：回填是迁移里的 `INSERT … SELECT`。"""
+    from app.core.config import get_settings
+
+    config = Config("alembic.ini")
+    get_settings.cache_clear()
+    command.downgrade(config, "0019_internal_metering")
+    try:
+        with mysql_factory() as session:
+            # 0019 的表形状：模型已经多了新列，这里只能写裸 SQL。
+            for n in (1, 2):
+                tenant_public_id = str(uuid.uuid4())
+                session.execute(
+                    text(
+                        "INSERT INTO tenants (public_id, company_name, email, created_at,"
+                        " updated_at) VALUES (:public_id, :name, :email, :now, :now)"
+                    ),
+                    {
+                        "public_id": tenant_public_id,
+                        "name": f"Existing {n} Sdn Bhd",
+                        "email": EMAIL,
+                        "now": NOW,
+                    },
+                )
+                session.execute(
+                    text(
+                        "INSERT INTO projects (public_id, tenant_id, name, created_at, updated_at)"
+                        " SELECT :public_id, id, 'Existing', :now, :now"
+                        " FROM tenants WHERE public_id = :tenant"
+                    ),
+                    {"public_id": str(uuid.uuid4()), "tenant": tenant_public_id, "now": NOW},
+                )
+            session.commit()
+
+        command.upgrade(config, "head")
+        get_settings.cache_clear()
+        admin = make_admin(mysql_factory)
+        customer = create(mysql_factory, admin)
+        created = add_project(mysql_factory, admin, customer.id)
+    finally:
+        command.upgrade(config, "head")
+        get_settings.cache_clear()
+
+    with mysql_factory() as session:
+        owners = session.execute(
+            select(Project.id, Project.tenant_id, Project.public_id).order_by(Project.id)
+        ).all()
+    rows = deliveries(mysql_factory)
+
+    assert len(owners) == 3
+    expected = [(row.id, row.tenant_id) for row in owners]
+    assert [(row.project_id, row.tenant_id) for row in rows] == expected
+    for row in rows:
+        assert (row.delivered_version, row.attempt_count, row.lease_token) == (None, 0, None)
+    # 新项目的行由建项目写入，取建项目的 now；回填的两行取迁移时刻（迁移测试里核对）。
+    new_id = next(row.id for row in owners if row.public_id == created.id)
+    assert [row.next_attempt_at for row in rows if row.project_id == new_id] == [NOW]
 
 
 def test_a_project_for_an_unknown_customer_is_not_found_and_writes_nothing(factory) -> None:

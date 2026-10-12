@@ -62,7 +62,7 @@ from app.models.ai_catalog import (
 )
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.integration import CredentialStatus, IntegrationCredential
+from app.models.integration import CredentialStatus, IntegrationCredential, ProjectStatusDelivery
 from app.models.pricing_rules import PricingScope, PricingStrategy
 from app.models.tenancy import AccountStatus, BillingMode, BillingStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
@@ -605,6 +605,9 @@ def clean(engine: Engine) -> None:
         ours = select(Tenant.id).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}"))
         connection.execute(
             delete(IntegrationCredential).where(IntegrationCredential.tenant_id.in_(ours))
+        )
+        connection.execute(
+            delete(ProjectStatusDelivery).where(ProjectStatusDelivery.tenant_id.in_(ours))
         )
         connection.execute(delete(Project).where(Project.tenant_id.in_(ours)))
         connection.execute(delete(Wallet).where(Wallet.tenant_id.in_(ours)))

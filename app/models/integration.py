@@ -1,5 +1,6 @@
 """Integration API credentials (spec §36, §37, §74.4; design gate #118 v1, AIH-TASK-012),
-and outbound webhook signing secrets (spec §28; design gate #135 v1, AIH-TASK-019).
+outbound webhook signing secrets (spec §28; design gate #135 v1, AIH-TASK-019), and the
+per-project status webhook delivery cursor (spec §29; design gate #241 v6, AIH-TASK-047).
 
 一行是**一个 `api_key` 的一个签名版本**。轮换时 `api_key` 不变、新增一行（Kelvin
 2026-09-25 选的方案 A），所以唯一约束是 `(public_api_key, key_version)`，而不是 §74.4
@@ -24,6 +25,7 @@ import enum
 from typing import Final
 
 from sqlalchemy import (
+    CHAR,
     BigInteger,
     CheckConstraint,
     Computed,
@@ -32,6 +34,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -203,4 +206,66 @@ class ProjectWebhookSecret(Base):
         CheckConstraint(WEBHOOK_KEY_VERSION_CHECK, name="ck_project_webhook_secrets_key_version"),
         CheckConstraint(WEBHOOK_STATUS_CHECK, name="ck_project_webhook_secrets_status"),
         CheckConstraint(WEBHOOK_TIMES_CHECK, name="ck_project_webhook_secrets_times"),
+    )
+
+
+# --- 出站状态 webhook 的投递游标（AIH-TASK-047，设计闸门 #241 v6） -----------------------
+
+# ⚠️ 条件同迁移 0020 逐字一致（空白除外），test_migrations.py 比对两边。
+DELIVERY_ATTEMPT_COUNT_CHECK: Final = "attempt_count >= 0"
+DELIVERY_VERSION_CHECK: Final = "delivered_version IS NULL OR delivered_version >= 0"
+# uuid4 的规范字符串形式。
+_LEASE_TOKEN_LENGTH = 36
+_ERROR_CODE_LENGTH = 64
+
+
+class ProjectStatusDelivery(Base):
+    """The status webhook cursor of one project: **exactly one row per project** (design §2).
+
+    迁移 0020 给已有项目各插一行，建项目时在同一事务里插入（`app/services/customers.py`）。
+    之后的所有路径只 UPDATE、不再插入，所以没有「先查后插」的间隙锁。行从不删除：外键
+    `RESTRICT`，项目也不能删。
+
+    投递状态不另存列，由数据推导（§29 的四个状态）：`delivered_version` 等于租户的
+    `status_version` 是 `DELIVERED`；落后时按 `attempt_count` 分 `PENDING` / `RETRYING` /
+    `FAILED`。领取、发送与结算归投递任务（设计 §8 拆分第 5 项）。
+    """
+
+    __tablename__ = "project_status_deliveries"
+
+    project_id: Mapped[int] = mapped_column(_ForeignKeyInt, primary_key=True, autoincrement=False)
+    # 领取时直接 JOIN `tenants`；复合外键保证它就是项目所属的租户（INV-8）。
+    tenant_id: Mapped[int] = mapped_column(_ForeignKeyInt, nullable=False)
+    # 已确认送达的最大版本；空 = 从未送达。
+    delivered_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 当前租约正在发送的版本。
+    attempted_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 自上次成功以来的连续失败次数。
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    next_attempt_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    # 领取时写入的 uuid4，结算时作围栏。
+    lease_token: Mapped[str | None] = mapped_column(CHAR(_LEASE_TOKEN_LENGTH), nullable=True)
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    delivered_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    last_http_status: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # 只存错误码，不存地址、响应体与异常文本（设计 §6）。
+    last_error_code: Mapped[str | None] = mapped_column(String(_ERROR_CODE_LENGTH), nullable=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "tenant_id"],
+            ["projects.id", "projects.tenant_id"],
+            name="fk_project_status_deliveries_project",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_project_status_deliveries_next_attempt_at", "next_attempt_at"),
+        CheckConstraint(
+            DELIVERY_ATTEMPT_COUNT_CHECK, name="ck_project_status_deliveries_attempt_count"
+        ),
+        CheckConstraint(
+            DELIVERY_VERSION_CHECK, name="ck_project_status_deliveries_delivered_version"
+        ),
     )

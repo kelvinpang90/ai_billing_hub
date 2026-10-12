@@ -1,9 +1,9 @@
 """Admin customer management (spec §56, §57, §124; design gate #96 v3).
 
 ⚠️ **每个写操作一个 `session_scope()`**（INV-13）。建客户：租户、钱包、`CUSTOMER_CREATE`
-审计三行；建项目：项目与 `PROJECT_CREATE` 审计两行；改客户：租户行与 `CUSTOMER_UPDATE`
-审计（AIH-TASK-009）。要么全在、要么全不在。repository
-只 flush，提交与回滚都发生在这里的 `session_scope` 里。
+审计三行；建项目：项目、它的状态 webhook 投递行（AIH-TASK-047，设计闸门 #241 v6）与
+`PROJECT_CREATE` 审计三行；改客户：租户行与 `CUSTOMER_UPDATE` 审计（AIH-TASK-009）。
+要么全在、要么全不在。repository 只 flush，提交与回滚都发生在这里的 `session_scope` 里。
 
 ⚠️ **客户只从路径里的 `public_id` 解析**，项目的 `tenant_id` 取解析出来的内部 id，
 不来自请求体（INV-8）。查不到就是 `CUSTOMER_NOT_FOUND`。
@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, User
-from app.models.tenancy import Tenant
+from app.models.integration import ProjectStatusDelivery
+from app.models.tenancy import Project, Tenant
 from app.repositories import tenancy
 from app.repositories.wallet import WALLET_MISSING, create_wallet, get_wallet_for_tenant
 from app.schemas.customers import (
@@ -209,7 +210,10 @@ def create_project(
     description: str | None = None,
     now: dt.datetime | None = None,
 ) -> ProjectView:
-    """Project and `PROJECT_CREATE` audit in one commit. Unknown customer: 404, no writes."""
+    """Project, its delivery row and `PROJECT_CREATE` audit in one commit.
+
+    Unknown customer: 404, no writes.
+    """
     moment = now or _now()
     with session_scope(session_factory) as session:
         tenant = _require_tenant(session, customer_id)
@@ -220,6 +224,7 @@ def create_project(
             description=description,
             now=moment,
         )
+        add_status_delivery(session, project, now=moment)
         record_audit(
             session,
             action=AuditAction.PROJECT_CREATE,
@@ -236,6 +241,26 @@ def create_project(
         )
         view = project_view(project)
     return view
+
+
+def add_status_delivery(
+    session: Session, project: Project, *, now: dt.datetime
+) -> ProjectStatusDelivery:
+    """Insert and flush the one delivery row of a freshly flushed project (design #241 §2).
+
+    ⚠️ 只在建项目的事务里调用：每个项目恰好一行，之后的路径只 UPDATE 它。从未送达
+    （`delivered_version` 为空）、没有失败、`next_attempt_at = now` —— 没有地址时不会被领取。
+    """
+    delivery = ProjectStatusDelivery(
+        project_id=project.id,
+        tenant_id=project.tenant_id,
+        delivered_version=None,
+        attempt_count=0,
+        next_attempt_at=now,
+    )
+    session.add(delivery)
+    session.flush()
+    return delivery
 
 
 def list_projects(
@@ -259,6 +284,7 @@ __all__ = [
     "ENTITY_PROJECT",
     "ENTITY_TENANT",
     "CustomerNotFound",
+    "add_status_delivery",
     "create_customer",
     "create_project",
     "get_customer",

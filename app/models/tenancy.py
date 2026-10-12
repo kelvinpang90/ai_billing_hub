@@ -3,10 +3,11 @@
 AIH-TASK-004 只建了身份与归属字段。AIH-TASK-005（设计闸门 #88）在 `tenants` 上
 加了由余额驱动的 `billing_status`、`status_version` 与 `low_balance_threshold`；
 币种由 `wallets.currency` 承载，不在租户上重复。AIH-TASK-020（设计闸门 #136 v2）
-加了管理员控制的 `account_status`（迁移 0009）。
+加了管理员控制的 `account_status`（迁移 0009）。AIH-TASK-047（设计闸门 #241 v6）加了
+项目的 `integration_status`、`status_webhook_url` 与租户的 `status_changed_at`（迁移 0020）；
+它们的写路径归后续任务。
 
-⚠️ 其余 §75 / §76 列（`integration_status`、webhook 的 URL 与密钥列、
-`backend_base_url`）刻意不在这里 —— 它们各归一个后续任务，届时都是纯新增列。
+⚠️ `backend_base_url` 不建（设计 #241 §1）；webhook 密钥列由 `project_webhook_secrets` 取代。
 清单与理由见 `docs/database-schema.md`「尚未建的列」。
 
 对外只用 `public_id`（uuid4 字符串），内部自增 `id` 不出库（spec §115：猜不到
@@ -82,6 +83,17 @@ class AccountStatus(enum.StrEnum):
     CLOSED = "CLOSED"
 
 
+class IntegrationStatus(enum.StrEnum):
+    """项目的集成状态（spec §24、§25；设计闸门 #241 v6）。
+
+    已有与新建的项目都是 `ENABLED`。`DISABLED` 的项目不推送状态 webhook、有效状态为
+    `BLOCK_AI`；跃迁与合成归后续任务（设计 §8 拆分第 2、3 项）。
+    """
+
+    ENABLED = "ENABLED"
+    DISABLED = "DISABLED"
+
+
 def ai_service_enabled(tenant: Tenant) -> bool:
     """Internal tenants bypass balance suspension, never an admin or safety disable."""
     return tenant.account_status is AccountStatus.ENABLED and (
@@ -92,6 +104,9 @@ def ai_service_enabled(tenant: Tenant) -> bool:
 
 # 与迁移 0009 的列宽一致（设计 §2「数据库」）。
 _ACCOUNT_STATUS_LENGTH = 32
+# 与迁移 0020 的列宽一致（设计闸门 #241 §2「数据库」）。
+_INTEGRATION_STATUS_LENGTH = 16
+STATUS_WEBHOOK_URL_LENGTH = 2048
 
 
 class Tenant(Base):
@@ -133,6 +148,8 @@ class Tenant(Base):
     )
     # 只增不减（spec §24）：计费与账户两维的每次真实跃迁都 +1。
     status_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    # 最近一次状态跃迁的时刻（迁移 0020）。旧行为空，读取时回退到 `created_at`。
+    status_changed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     # 金额列，与 `Money` 同精度。NULL = 不发低余额事件。
     low_balance_threshold: Mapped[Decimal | None] = mapped_column(
         Numeric(MONEY_PRECISION, MONEY_SCALE, asdecimal=True),
@@ -178,6 +195,17 @@ class Project(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # 迁移 0020：已有项目回填 ENABLED。
+    integration_status: Mapped[IntegrationStatus] = mapped_column(
+        Enum(IntegrationStatus, native_enum=False, length=_INTEGRATION_STATUS_LENGTH),
+        nullable=False,
+        default=IntegrationStatus.ENABLED,
+        server_default=IntegrationStatus.ENABLED.value,
+    )
+    # ⚠️ 路径里可能带集成方的令牌：不进日志、审计与异常消息（设计 #241 §6）。
+    status_webhook_url: Mapped[str | None] = mapped_column(
+        String(STATUS_WEBHOOK_URL_LENGTH), nullable=True
+    )
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
@@ -185,6 +213,11 @@ class Project(Base):
     __table_args__ = (
         # 按租户列项目的查询走这条索引。
         Index("ix_projects_tenant_id", "tenant_id"),
+        # ⚠️ 条件文本与迁移 0020 逐字一致（空白除外），test_migrations.py 比对两边。
+        CheckConstraint(
+            "integration_status IN ('ENABLED', 'DISABLED')",
+            name="ck_projects_integration_status",
+        ),
         # `id` 本来就唯一；这个约束只为让 `integration_credentials` 的复合外键
         # `(project_id, tenant_id)` 成立：凭据行的租户与项目所属租户由数据库保证一致
         # （INV-8；AIH-TASK-012，迁移 0007）。

@@ -32,6 +32,7 @@ from sqlalchemy import (
     DateTime,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     create_engine,
@@ -64,6 +65,7 @@ from app.models.fx_rates import FxFetchAttempt, FxRateLock, FxRateVersion
 from app.models.integration import (
     API_KEY_COLLATION,
     IntegrationCredential,
+    ProjectStatusDelivery,
     ProjectWebhookSecret,
 )
 from app.models.pricing_rules import (
@@ -74,7 +76,7 @@ from app.models.pricing_rules import (
     PricingRuleLock,
 )
 from app.models.provider_prices import ProviderPriceComponent, ProviderPriceVersion
-from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.usage import TEXT_COLLATION, UsageEvent, UsageEventConflict
 from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
 
@@ -173,10 +175,10 @@ _BEFORE_0005 = "0004_password_reset_outbox"
 _REVISION_0005 = "0005_tenants_projects"
 _NOW = dt.datetime(2026, 9, 19, 8, 30, 0)
 
-# 列名 → 是否可空（head 上）。⚠️ 比的是**完整集合**：`integration_status`、webhook 列谁被
-# 顺手加进来，这里都会红 —— 它们各归一个后续任务（docs/database-schema.md「尚未建的列」）。
-# `billing_status` 起三列是 0006 加的（AIH-TASK-005），`account_status` 是 0009 加的
-# （AIH-TASK-020）。
+# 列名 → 是否可空（head 上）。⚠️ 比的是**完整集合**：`backend_base_url` 之类的列谁被顺手加进来，
+# 这里都会红（docs/database-schema.md「尚未建的列」）。`billing_status` 起三列是 0006 加的
+# （AIH-TASK-005），`account_status` 是 0009 加的（AIH-TASK-020），`status_changed_at`、
+# `integration_status`、`status_webhook_url` 是 0020 加的（AIH-TASK-047）。
 _TENANT_COLUMNS_0006 = {"billing_status", "status_version", "low_balance_threshold"}
 _EXPECTED_COLUMNS = {
     "tenants": {
@@ -193,6 +195,7 @@ _EXPECTED_COLUMNS = {
         "status_version": False,
         "low_balance_threshold": True,
         "account_status": False,
+        "status_changed_at": True,
     },
     "projects": {
         "id": False,
@@ -202,6 +205,8 @@ _EXPECTED_COLUMNS = {
         "description": True,
         "created_at": False,
         "updated_at": False,
+        "integration_status": False,
+        "status_webhook_url": True,
     },
 }
 
@@ -1699,8 +1704,9 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015 与 0017 的表随降级到 0009 一并删掉）。
+        # 只删触发器：表与列都不动（0012–0015、0017 与 0020 的表随降级到 0009 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
+        later |= {_DELIVERIES_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -1796,8 +1802,10 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012–0015 与 0017 的表随降级到 0010 一并删掉）。
+        # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017 与 0020 的表随降级到 0010
+        # 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
+        later |= {_DELIVERIES_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
@@ -4495,4 +4503,485 @@ def test_0018_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         ours = {name: triggers.get(name) for name in _EXPECTED_TRIGGERS_0018}
         assert ours == _EXPECTED_TRIGGERS_0018
     finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0020_status_sync（AIH-TASK-047，设计闸门 #241 v6）
+#
+# 设计 §7「每个项目恰好一行」的迁移那一半与 §8 的 downgrade 规则在这里验；建项目时插入投递行
+# 那一半在 test_customer_service.py。头几条不连库：钉住版本链、比对迁移与模型的 CHECK 与列宽、
+# upgrade 的步骤、downgrade 的拒绝条件与顺序。
+# ---------------------------------------------------------------------------
+
+_REVISION_0019 = "0019_internal_metering"
+_REVISION_0020 = "0020_status_sync"
+_MIGRATION_0020 = pathlib.Path("alembic/versions/20261009_0020_status_sync.py")
+_DELIVERIES_TABLE = "project_status_deliveries"
+
+# 列名 → 是否可空（设计 §2「数据库」）。
+_EXPECTED_0020_DELIVERY_COLUMNS = {
+    "project_id": False,
+    "tenant_id": False,
+    "delivered_version": True,
+    "attempted_version": True,
+    "attempt_count": False,
+    "next_attempt_at": False,
+    "lease_token": True,
+    "lease_expires_at": True,
+    "last_attempt_at": True,
+    "delivered_at": True,
+    "last_http_status": True,
+    "last_error_code": True,
+}
+
+_DELIVERY_DELETE_RULE_QUERY = text(
+    "SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS"
+    " WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND CONSTRAINT_NAME = 'fk_project_status_deliveries_project'"
+)
+_STATUS_SYNC_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME IN ('projects', 'project_status_deliveries')"
+)
+# 迁移时刻取数据库自己的时钟，与回填用的 `UTC_TIMESTAMP()` 同一个来源。
+_DATABASE_NOW = text("SELECT UTC_TIMESTAMP()")
+_ORPHAN_PROJECTS_QUERY = text(
+    "SELECT COUNT(*) FROM projects p LEFT JOIN project_status_deliveries d"
+    " ON d.project_id = p.id WHERE d.project_id IS NULL"
+)
+
+
+def _load_0020() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0020", _MIGRATION_0020)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _declared_checks(model: type) -> dict[str, str]:
+    return {
+        str(constraint.name): _normalised(str(constraint.sqltext))
+        for constraint in model.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0020_follows_0019() -> None:
+    migration = _load_0020()
+
+    assert migration.revision == _REVISION_0020
+    assert migration.down_revision == _REVISION_0019
+
+
+def test_0020_checks_widths_and_defaults_are_the_ones_the_models_declare() -> None:
+    migration = _load_0020()
+    project_checks = {name: _normalised(rule) for name, rule in migration._PROJECT_CHECKS.items()}
+    delivery_checks = {name: _normalised(rule) for name, rule in migration._DELIVERY_CHECKS.items()}
+
+    assert project_checks == _declared_checks(Project)
+    assert delivery_checks == _declared_checks(ProjectStatusDelivery)
+    assert set(delivery_checks) == {
+        "ck_project_status_deliveries_attempt_count",
+        "ck_project_status_deliveries_delivered_version",
+    }
+    # CHECK 的取值恰好是枚举的两个成员（设计 §2「数据库」）。
+    assert {status.value for status in IntegrationStatus} == {"ENABLED", "DISABLED"}
+    for status in IntegrationStatus:
+        assert f"'{status.value}'" in project_checks["ck_projects_integration_status"], status
+    column = Project.__table__.c.integration_status
+    assert column.type.length == 16
+    assert column.nullable is False
+    assert migration._DEFAULT == column.server_default.arg == IntegrationStatus.ENABLED.value
+    assert Project.__table__.c.status_webhook_url.type.length == 2048
+    assert Project.__table__.c.status_webhook_url.nullable is True
+    assert Tenant.__table__.c.status_changed_at.nullable is True
+    deliveries = ProjectStatusDelivery.__table__
+    assert {c.name: c.nullable for c in deliveries.columns} == _EXPECTED_0020_DELIVERY_COLUMNS
+    assert [c.name for c in deliveries.primary_key.columns] == ["project_id"]
+    assert str(deliveries.c.attempt_count.server_default.arg) == "0"
+
+
+def test_0020_upgrade_adds_the_columns_then_the_table_then_backfills(monkeypatch) -> None:
+    migration = _load_0020()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+
+    migration.upgrade()
+
+    assert [name for name, _ in upgrade.calls] == [
+        "add_column",
+        "add_column",
+        "create_check_constraint",
+        "add_column",
+        "create_table",
+        "create_index",
+        "execute",
+    ]
+    added = [(args[0], args[1].name) for name, args in upgrade.calls if name == "add_column"]
+    assert added == [
+        ("projects", "integration_status"),
+        ("projects", "status_webhook_url"),
+        ("tenants", "status_changed_at"),
+    ]
+    assert upgrade.first_args("create_check_constraint") == list(migration._PROJECT_CHECKS)
+    assert upgrade.first_args("create_table") == [_DELIVERIES_TABLE]
+    assert upgrade.first_args("create_index") == ["ix_project_status_deliveries_next_attempt_at"]
+    # 每个已有项目一行，`next_attempt_at` 取迁移时刻（设计 §2「数据库」）。
+    [backfill] = upgrade.first_args("execute")
+    assert _normalised(str(backfill)) == (
+        "INSERT INTO project_status_deliveries"
+        " (project_id, tenant_id, attempt_count, next_attempt_at)"
+        " SELECT id, tenant_id, 0, UTC_TIMESTAMP() FROM projects"
+    )
+
+
+class _DataBind:
+    """Answers the downgrade's data checks: a row only for the queries listed in `hits`."""
+
+    def __init__(self, hits: set[str]) -> None:
+        self.hits = hits
+        self.asked: list[str] = []
+
+    def execute(self, statement: object) -> SimpleNamespace:
+        query = str(statement)
+        self.asked.append(query)
+        row = (1,) if query in self.hits else None
+        return SimpleNamespace(first=lambda: row)
+
+
+class _OnlineArgsRecorder(_ArgsRecorder):
+    """`_ArgsRecorder` with a bind: the downgrade's data checks run against `_DataBind`."""
+
+    def __init__(self, bind: _DataBind) -> None:
+        super().__init__()
+        self.bind = bind
+
+    def get_context(self) -> SimpleNamespace:
+        return SimpleNamespace(as_sql=False)
+
+    def get_bind(self) -> _DataBind:
+        return self.bind
+
+
+_EXPECTED_0020_DOWNGRADE = [
+    ("drop_table", (_DELIVERIES_TABLE,)),
+    ("execute", ("ALTER TABLE projects DROP CHECK ck_projects_integration_status",)),
+    ("drop_column", ("projects", "status_webhook_url")),
+    ("drop_column", ("projects", "integration_status")),
+    ("drop_column", ("tenants", "status_changed_at")),
+]
+
+
+def test_0020_downgrade_checks_the_four_conditions_of_the_design() -> None:
+    """设计 §8：有项目 DISABLED、有项目设了地址、有投递行送达过、有租户有跃迁时刻，就拒绝。"""
+    lossy = [_normalised(query) for query in _load_0020()._LOSSY]
+
+    assert lossy == [
+        "SELECT 1 FROM projects WHERE integration_status <> 'ENABLED' LIMIT 1",
+        "SELECT 1 FROM projects WHERE status_webhook_url IS NOT NULL LIMIT 1",
+        "SELECT 1 FROM project_status_deliveries WHERE delivered_version IS NOT NULL LIMIT 1",
+        "SELECT 1 FROM tenants WHERE status_changed_at IS NOT NULL LIMIT 1",
+    ]
+
+
+@pytest.mark.parametrize("lossy", range(4))
+def test_0020_downgrade_refuses_before_any_ddl_when_it_would_lose_data(
+    monkeypatch, lossy: int
+) -> None:
+    """⚠️ MySQL 的 DDL 不参与事务：拒绝必须发生在第一条 DROP 之前。"""
+    migration = _load_0020()
+    recorder = _OnlineArgsRecorder(_DataBind({migration._LOSSY[lossy]}))
+    monkeypatch.setattr(migration, "op", recorder)
+
+    with pytest.raises(RuntimeError, match="Cannot downgrade status sync"):
+        migration.downgrade()
+
+    assert recorder.calls == []
+
+
+def test_0020_downgrade_without_such_data_undoes_upgrade_in_reverse(monkeypatch) -> None:
+    migration = _load_0020()
+    bind = _DataBind(set())
+    recorder = _OnlineArgsRecorder(bind)
+    monkeypatch.setattr(migration, "op", recorder)
+
+    migration.downgrade()
+
+    assert bind.asked == list(migration._LOSSY)
+    # 表先删（外键引用 projects），CHECK 先于它引用的列（MySQL 不许反过来）。
+    assert recorder.calls == _EXPECTED_0020_DOWNGRADE
+
+    # `--sql` 离线模式读不了数据：不问 bind，DDL 照旧。
+    offline = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", offline)
+    migration.downgrade()
+    assert offline.calls == _EXPECTED_0020_DOWNGRADE
+
+
+@needs_mysql
+def test_0020_column_shape_keys_indexes_and_checks(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        projects = {c["name"]: c for c in inspector.get_columns("projects")}
+        status = projects["integration_status"]
+        assert isinstance(status["type"], String)
+        assert status["type"].length == 16
+        assert status["nullable"] is False
+        assert "ENABLED" in str(status["default"])
+        url = projects["status_webhook_url"]
+        assert isinstance(url["type"], String)
+        assert url["type"].length == 2048
+        assert url["nullable"] is True
+        assert url["default"] is None
+        changed = {c["name"]: c for c in inspector.get_columns("tenants")}["status_changed_at"]
+        assert isinstance(changed["type"], DateTime)
+        assert changed["nullable"] is True
+        assert changed["default"] is None
+
+        columns = inspector.get_columns(_DELIVERIES_TABLE)
+        assert {c["name"]: c["nullable"] for c in columns} == _EXPECTED_0020_DELIVERY_COLUMNS
+        types = {c["name"]: c["type"] for c in columns}
+        for name in ("project_id", "tenant_id", "delivered_version", "attempted_version"):
+            assert isinstance(types[name], BigInteger), name
+        assert isinstance(types["attempt_count"], Integer)
+        assert not isinstance(types["attempt_count"], BigInteger)
+        assert "0" in str({c["name"]: c for c in columns}["attempt_count"]["default"])
+        assert isinstance(types["lease_token"], CHAR)
+        assert types["lease_token"].length == 36
+        assert isinstance(types["last_http_status"], SmallInteger)
+        assert isinstance(types["last_error_code"], String)
+        assert types["last_error_code"].length == 64
+        # 整秒，与服务端其余时间一致（设计 §2「时间」）。
+        for name in (
+            "next_attempt_at",
+            "lease_expires_at",
+            "last_attempt_at",
+            "delivered_at",
+        ):
+            assert isinstance(types[name], DateTime), name
+            assert not getattr(types[name], "fsp", None), name
+
+        primary_key = inspector.get_pk_constraint(_DELIVERIES_TABLE)
+        assert primary_key["constrained_columns"] == ["project_id"]
+        foreign_keys = {
+            str(fk["name"]): (
+                fk["constrained_columns"],
+                fk["referred_table"],
+                fk["referred_columns"],
+            )
+            for fk in inspector.get_foreign_keys(_DELIVERIES_TABLE)
+        }
+        assert foreign_keys == {
+            "fk_project_status_deliveries_project": (
+                ["project_id", "tenant_id"],
+                "projects",
+                ["id", "tenant_id"],
+            ),
+        }
+        indexes = {i["name"]: i["column_names"] for i in inspector.get_indexes(_DELIVERIES_TABLE)}
+        assert indexes["ix_project_status_deliveries_next_attempt_at"] == ["next_attempt_at"]
+
+        with engine.connect() as connection:
+            delete_rule = connection.execute(_DELIVERY_DELETE_RULE_QUERY).scalar_one()
+            checks = set(connection.execute(_STATUS_SYNC_CHECKS_QUERY).scalars())
+        assert delete_rule == "RESTRICT"
+        migration = _load_0020()
+        assert set(migration._PROJECT_CHECKS) | set(migration._DELIVERY_CHECKS) <= checks
+    finally:
+        engine.dispose()
+
+
+def _error_number(connection: Connection, statement: str, **values: object) -> int:
+    """Run in a savepoint; return the MySQL error number it was refused with."""
+    with pytest.raises(DBAPIError) as raised:
+        with connection.begin_nested():
+            connection.execute(text(statement), values)
+    return int(raised.value.orig.args[0])
+
+
+@needs_mysql
+def test_0020_gives_every_existing_project_one_delivery_row_and_downgrades(
+    alembic_config: Config,
+) -> None:
+    """设计 §7「每个项目恰好一行」的迁移那一半：升级已有两个项目的库，各得一行。
+
+    之后新建项目的那一半在 test_customer_service.py（经建项目服务）。
+    """
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION_0019)
+    tables = _table_names()
+    assert _DELIVERIES_TABLE not in tables
+    assert not {"integration_status", "status_webhook_url"} & _column_names("projects")
+    assert "status_changed_at" not in _column_names("tenants")
+    tenant_public_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    project_public_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.begin() as connection:
+            # 0019 的表形状：模型已经多了新列，这里只能写裸 SQL。
+            for tenant_public_id, project_public_id in zip(
+                tenant_public_ids, project_public_ids, strict=True
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO tenants (public_id, company_name, email, created_at,"
+                        " updated_at) VALUES (:public_id, 'Status Sync Sdn Bhd',"
+                        " 'ops@example.com', :now, :now)"
+                    ),
+                    {"public_id": tenant_public_id, "now": _NOW},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO projects (public_id, tenant_id, name, created_at, updated_at)"
+                        " SELECT :public_id, id, 'Status Sync Project', :now, :now"
+                        " FROM tenants WHERE public_id = :tenant"
+                    ),
+                    {"public_id": project_public_id, "tenant": tenant_public_id, "now": _NOW},
+                )
+            before = connection.execute(_DATABASE_NOW).scalar_one()
+
+        command.upgrade(alembic_config, _REVISION_0020)
+
+        assert _table_names() == tables | {_DELIVERIES_TABLE}
+        ours = Project.public_id.in_(project_public_ids)
+        with engine.connect() as connection:
+            after = connection.execute(_DATABASE_NOW).scalar_one()
+            projects = connection.execute(
+                select(
+                    Project.id,
+                    Project.tenant_id,
+                    Project.integration_status,
+                    Project.status_webhook_url,
+                ).where(ours)
+            ).all()
+            project_ids = [row.id for row in projects]
+            deliveries = connection.execute(
+                select(ProjectStatusDelivery.__table__).where(
+                    ProjectStatusDelivery.project_id.in_(project_ids)
+                )
+            ).all()
+            stamped = Tenant.public_id.in_(tenant_public_ids)
+            stamps = connection.execute(select(Tenant.status_changed_at).where(stamped)).all()
+            orphans = connection.execute(_ORPHAN_PROJECTS_QUERY).scalar_one()
+
+        # 已有项目回填 ENABLED、没有地址；旧租户的跃迁时刻为空。
+        expected = [(IntegrationStatus.ENABLED, None)] * 2
+        assert [(row.integration_status, row.status_webhook_url) for row in projects] == expected
+        assert [row.status_changed_at for row in stamps] == [None, None]
+        # 每个项目恰好一行（主键保证至多一行，这里看至少一行），归属与项目一致（INV-8）。
+        assert orphans == 0
+        owners = sorted((row.id, row.tenant_id) for row in projects)
+        assert sorted((row.project_id, row.tenant_id) for row in deliveries) == owners
+        for row in deliveries:
+            assert (
+                row.delivered_version,
+                row.attempted_version,
+                row.attempt_count,
+                row.lease_token,
+                row.lease_expires_at,
+                row.last_attempt_at,
+                row.delivered_at,
+                row.last_http_status,
+                row.last_error_code,
+            ) == (None, None, 0, None, None, None, None, None, None)
+            assert before <= row.next_attempt_at <= after
+            assert row.next_attempt_at.microsecond == 0
+
+        first, second = projects
+        with _rolled_back_connection() as connection:
+            for statement in (
+                "UPDATE projects SET integration_status = 'PAUSED' WHERE id = :id",
+                "UPDATE projects SET integration_status = '' WHERE id = :id",
+                "UPDATE project_status_deliveries SET attempt_count = -1 WHERE project_id = :id",
+                "UPDATE project_status_deliveries SET delivered_version = -1"
+                " WHERE project_id = :id",
+            ):
+                refused = _error_number(connection, statement, id=first.id)
+                assert refused == _ER_CHECK_CONSTRAINT_VIOLATED, statement
+            # 每个项目至多一行：主键。
+            duplicate = _error_number(
+                connection,
+                "INSERT INTO project_status_deliveries"
+                " (project_id, tenant_id, attempt_count, next_attempt_at)"
+                " VALUES (:id, :tenant, 0, :now)",
+                id=first.id,
+                tenant=first.tenant_id,
+                now=_NOW,
+            )
+            assert duplicate == _ER_DUP_ENTRY
+            # 复合外键：投递行的租户必须是项目所属的租户（INV-8）。
+            mismatched = _error_number(
+                connection,
+                "UPDATE project_status_deliveries SET tenant_id = :tenant WHERE project_id = :id",
+                id=first.id,
+                tenant=second.tenant_id,
+            )
+            assert mismatched == _ER_NO_REFERENCED_ROW_2
+            # RESTRICT：有投递行的项目删不掉。
+            in_use = _error_number(connection, "DELETE FROM projects WHERE id = :id", id=first.id)
+            assert in_use == _ER_ROW_IS_REFERENCED_2
+            # 合法值都放行。
+            connection.execute(
+                text("UPDATE projects SET integration_status = 'DISABLED' WHERE id = :id"),
+                {"id": first.id},
+            )
+            connection.execute(
+                text(
+                    "UPDATE project_status_deliveries SET delivered_version = 0,"
+                    " attempt_count = 3 WHERE project_id = :id"
+                ),
+                {"id": first.id},
+            )
+
+        # 设计 §8：会丢数据的四种情况各自让 downgrade 拒绝，库原样不动。
+        for applied, reverted in (
+            (
+                "UPDATE projects SET integration_status = 'DISABLED' WHERE id = :id",
+                "UPDATE projects SET integration_status = 'ENABLED' WHERE id = :id",
+            ),
+            (
+                "UPDATE projects SET status_webhook_url = 'https://hooks.example.com/status'"
+                " WHERE id = :id",
+                "UPDATE projects SET status_webhook_url = NULL WHERE id = :id",
+            ),
+            (
+                "UPDATE project_status_deliveries SET delivered_version = 0 WHERE project_id = :id",
+                "UPDATE project_status_deliveries SET delivered_version = NULL"
+                " WHERE project_id = :id",
+            ),
+            (
+                "UPDATE tenants SET status_changed_at = UTC_TIMESTAMP()"
+                " WHERE id = (SELECT tenant_id FROM projects WHERE id = :id)",
+                "UPDATE tenants SET status_changed_at = NULL"
+                " WHERE id = (SELECT tenant_id FROM projects WHERE id = :id)",
+            ),
+        ):
+            with engine.begin() as connection:
+                connection.execute(text(applied), {"id": second.id})
+            with pytest.raises(RuntimeError, match="Cannot downgrade status sync"):
+                command.downgrade(alembic_config, _REVISION_0019)
+            assert _DELIVERIES_TABLE in _table_names(), applied
+            assert "integration_status" in _column_names("projects"), applied
+            with engine.begin() as connection:
+                connection.execute(text(reverted), {"id": second.id})
+
+        # 没有会丢的数据：downgrade 删掉新表与三列，其余不动。
+        command.downgrade(alembic_config, _REVISION_0019)
+        assert _table_names() == tables
+        assert not {"integration_status", "status_webhook_url"} & _column_names("projects")
+        assert "status_changed_at" not in _column_names("tenants")
+    finally:
+        command.upgrade(alembic_config, "head")
+        with engine.begin() as connection:
+            owned = select(Project.id).where(Project.public_id.in_(project_public_ids))
+            connection.execute(
+                delete(ProjectStatusDelivery).where(ProjectStatusDelivery.project_id.in_(owned))
+            )
+            connection.execute(delete(Project).where(Project.public_id.in_(project_public_ids)))
+            connection.execute(delete(Tenant).where(Tenant.public_id.in_(tenant_public_ids)))
         engine.dispose()
