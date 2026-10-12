@@ -3112,7 +3112,7 @@ tasks:
     title: 状态同步第二层：有效状态合成与状态版本递增收拢，每次跃迁写领域事件
     purpose: >-
       按 docs/design/PHASE-3-status-sync.md（设计闸门 #241 已批准 v6）实现拆分第 2 项：app/models/tenancy.py 的纯函数 compose_effective_status；app/repositories/tenancy.py 的 bump_status_version —— 一次调用完成版本 +1、status_changed_at、写一条领域 outbox 事件、按主键作废该租户投递行的退避；现有三个递增点（余额、账户状态、内部计量）全部改走它，内部计量补上漏写的 tenant.billing_mode_changed 事件。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-047
     acceptance_criteria:
