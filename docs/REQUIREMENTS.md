@@ -43,7 +43,7 @@
 
 | ID | 规范性规则 | 主要章节 | 必需测试证据 |
 | --- | --- | --- | --- |
-| `REQ-AVAIL-001` | 中心计费故障绝不阻塞终端用户 AI 服务 | §1、§20–§22、§85 | 故障测试 + 试点 E2E |
+| `REQ-AVAIL-001` | 中心计费故障绝不阻塞终端用户 AI 服务（AI 模块的适用范围见 §141.5：共用的数据库或 api 进程不可用时 AI 模块也不可用） | §1、§20–§22、§85、§141.5 | 故障测试 + 试点 E2E |
 | `REQ-INGEST-001` | `202` 必须在持久化 `RECEIVED` 之后返回；定价异步 | §20、§38–§39、§82 | API / 崩溃 / 队列丢失测试 |
 | `REQ-INGEST-002` | 队列发布本身不构成确认；`RECEIVED` 数据库记录才是持久事实来源，worker 必须能靠扫库恢复 | §20、§82–§83、§110 | 队列丢失 / 崩溃恢复 + 扫库重建测试 |
 | `REQ-IDEMP-001` | 全局 `event_id` 至多一次财务效果；ID 复用不匹配即冲突 | §23、§79、§82 | 重复 / 冲突 / 并发测试 |
@@ -71,7 +71,7 @@
 
 | 硬性要求 | spec 原文（逐字） | 覆盖 | 缺口 / 不适用理由 |
 | --- | --- | --- | --- |
-| Invariant 1 | Central Billing failure must NOT stop customer AI service. | `REQ-AVAIL-001` | — |
+| Invariant 1 | Central Billing failure must NOT stop customer AI service. For the AI Module (§141), which shares this platform's process and database, the scope of this rule is defined in §141.5. | `REQ-AVAIL-001` | — |
 | Invariant 2 | Same Usage Event must never financially charge twice. | `REQ-IDEMP-001` | — |
 | Invariant 3 | Same Payment must never credit Wallet twice. | `REQ-PAY-001` | — |
 | Invariant 4 | Wallet balance changes only through ledger transactions. | `REQ-FIN-002` | — |
@@ -323,7 +323,7 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 
 | § | 标题 | 说明 |
 | --- | --- | --- |
-| 121 | V1 Out of Scope | 明确不做的 11 项 |
+| 121 | V1 Out of Scope | 明确不做的 14 项 |
 | 122 | Future Architecture Compatibility | 为未来留路但现在不实现 |
 | 123 | Development Phases | Phase 0 — Foundation；见 [TODO.md](TODO.md) |
 | 124 | Phase 1 — Tenant, Project & Wallet Core | 见 [TODO.md](TODO.md) |
@@ -337,7 +337,7 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 | 132 | Definition of Done | 15 条 DoD + 5 条上线前跨功能闸门；**硬性要求来源之一**，见第 1.1 节 |
 | 133 | Critical Invariants | 14 条不变量，见 [ARCHITECTURE.md](ARCHITECTURE.md) 第 6 节；**硬性要求来源之一** |
 
-### P. 试点、开发规则与目标体验（§134–§140）
+### P. 试点、开发规则与目标体验（§134–§141）
 
 | § | 标题 | 说明 |
 | --- | --- | --- |
@@ -349,6 +349,7 @@ spec 里每个一级编号章节（`# N.` 形式的标题）在本节**恰好一
 | 139 | Final Admin Experience | 管理端：端到端可审计的财务链路 |
 | 139.1 | Critical Requirement Traceability | 见本文件第 1.2 节 |
 | 140 | Overall Architectural Decision | 权威架构决策 |
+| 141 | AI Module (Co-located AI API) | spec v1.8：`acuven_ai_api` 并入本平台，同一进程、同一个库；只负责调用模型与计费，功能定义在调用方；边界、身份、功能标签、用量自调、可用性含义与 `/v1/messages`；见 [ADR-0012](adr/ADR-0012-ai-module-in-billing-process.md) |
 
 ---
 

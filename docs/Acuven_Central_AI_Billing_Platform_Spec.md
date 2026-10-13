@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.7  
+**Version:** 1.8  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -20,6 +20,7 @@
 | 1.5 | 2026-09-11 | Errata only, no new normative decision. §30 applied reconciliation responses on `status_version >=` local while §28 applies webhooks on `>` and §30 claimed both used the same rule — §30 now states the §28 rule. §55 listed an undefined dashboard field "Actual AI Provider Cost"; it now uses the term defined in §14 (Estimated/Reconciled, with the basis shown). §30's bare "every 5 minutes" polling example sat exactly on the §119 reconciliation safety bound and did not reference it; replaced by the cross-reference. |
 | 1.6 | 2026-09-11 | Editorial only, no normative change. Second slimming batch: §2's generic flow diagram now defers to §20/§103; §55's filter list defers to §87; §134's 15-step block defers to §126; §135 keeps only the constraints with no other home and points the rest at theirs (retitled Implementation Constraints); §139's mock dashboard and drill-down defer to §86/§61/§87, keeping the auditable-trail requirement and the §139.1 table. **§72** (Customer Statements Page) retired — §46 and §90 already cover both items. |
 | 1.7 | 2026-09-21 | Traceability only, no normative change. Four rules that were already stated normatively now also carry an identifier so implementation, migrations, and tests can reference them: `REQ-PRIV-002` (§69, Invariant 7), `REQ-TXN-001` (§74.6, Invariant 13), `REQ-TAX-001` (§45.1, SST/accounting launch gate), and `REQ-LAUNCH-001` (§47, real-account integration launch gate). Each added paragraph restates the rule of the section it sits in; no existing sentence was moved, merged, or reworded, and no requirement was added, tightened, or relaxed. |
+| 1.8 | 2026-10-12 | Normative. Added **§141 AI Module**: the system-side AI API, formerly the separate `acuven_ai_api` service, runs inside this platform as one process, one deployment and one database, with the AI caller identity unified into the tenant project (product owner decisions of 2026-10-12; rationale and costs in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; implementation design in design gate #281). Amended to match: §2.1 (the AI Module is the one exception to the trust-domain separation), §3.3 and §126 (pilot addenda), §11 and §79 (optional `feature` label on usage events), §121 (two out-of-scope items, the example in the customer-operated-backend item, and the central AI Gateway item now scoped to Integrated Application Backends), §135 (the AI Module is a model-call API for Acuven's own module backends only; its request path follows §141.5), §139.1 (`REQ-AVAIL-001` primary sections), and the scope of `REQ-AVAIL-001` / Invariant 1 for the AI Module in §1, §119 and §133. |
 
 ## Document Navigation
 
@@ -31,6 +32,7 @@
 - Data model and transaction processing: §74–§87
 - APIs, security, operations, and deployment: §88–§100
 - Repository structure, integration flow, testing, and delivery: §101–§140
+- AI Module (the system-side AI API co-located in this platform): §141
 
 The section number is the stable requirement reference for V1. Critical normative requirements additionally use `REQ-*` identifiers where implementation and test traceability are required.
 
@@ -92,7 +94,7 @@ The billing system must remain operationally independent from each tenant-facing
 
 > Failure of the Central Billing Platform MUST NOT interrupt a customer's AI service.
 
-`REQ-AVAIL-001`: Central Billing network, API, worker, Redis, or database unavailability must not become a synchronous dependency in the end-user AI request path.
+`REQ-AVAIL-001`: Central Billing network, API, worker, Redis, or database unavailability must not become a synchronous dependency in the end-user AI request path. For the AI Module (§141), which shares this platform's process and database, the scope of this rule is defined in §141.5.
 
 Usage reporting and billing must therefore be asynchronous.
 
@@ -109,6 +111,8 @@ Build one centralized billing platform.
 This specification uses **Integrated Application Backend** for an Acuven-managed application backend that serves one or more tenant projects and calls AI providers. It does not mean software operated by the paying customer.
 
 Integrated Application Backends and the Central Billing Platform are separate trust and failure domains even when both are operated by Acuven. They communicate only through authenticated REST APIs and signed Webhooks. They never share direct database access. Per-project credentials, tenant authorization, HMAC signing, and least-privilege isolation remain mandatory.
+
+**AI Module exception (v1.8).** The AI Module of §141 runs inside this platform's process and database. It is the only component that both calls AI providers and sits inside the Central Billing trust domain. It still reports usage only through the signed ingestion API, its request path is restricted as §141.1 states, and it serves only Acuven's own module backends. Every other Integrated Application Backend keeps the separation above.
 
 ```text
                      ACUVEN CENTRAL AI BILLING PLATFORM
@@ -223,6 +227,8 @@ OpenAI is currently used for speech transcription without the official SDK.
 The first pilot is `E:\projects\ai_chatbot_demo`. It already has request-level Anthropic usage observations and a basic `conversation_id`, but those records are not a durable billing outbox and the conversation lifecycle is incomplete.
 
 **2026-10-09 addendum:** The product owner moved the first Phase 3 pilot to `acuven_ai_api`, which reports usage for Acuven's internal metered-only tenant. `ai_chatbot_demo` stays a demo and still integrates, as a separate project of the same internal tenant; it carries the conversation lifecycle and OpenAI transcription items of §126, which the conversation-less AI API does not have. See `docs/TODO.md` Phase 3. The list below still describes `ai_chatbot_demo`; `acuven_ai_api` already has a local outbox, its own delivery worker, signed usage delivery and a live status query, but no local versioned status or reconciliation.
+
+**2026-10-12 addendum:** The product owner merged `acuven_ai_api` into this platform as the AI Module (§141). The first Phase 3 pilot is therefore the AI Module of this repository, which still reports usage through signed calls to this platform's own ingestion API. `acuven_aichat` is the second integrator and the first one on another host.
 
 The pilot currently has:
 
@@ -531,6 +537,8 @@ The API contract must define required, optional, and mutually exclusive fields p
 For `LLM_TOKEN`, token counts are non-negative integers. For non-token usage, `quantity` and `unit` are required and token fields are omitted unless that usage type explicitly defines them.
 
 Tenant and project identity are derived from the integration credential and must match any payload values supplied for diagnostics. A mismatch is rejected and audited.
+
+An optional `feature` label names the product feature that caused the usage (for example `crm.contact_summary`), so usage can be filtered and analysed per feature. It is a lowercase dotted identifier of at most 64 characters, chosen by the caller. It is part of the payload fingerprint only when present, so events without it keep their existing fingerprint. It never affects pricing. The AI Module (§141) always sends it; other integrators may omit it.
 
 Do NOT send calculated customer cost as authoritative input.
 
@@ -2909,6 +2917,7 @@ tenant_id
 project_id
 integration_credential_id
 payload_fingerprint
+feature nullable
 
 provider_id
 model_id
@@ -2954,6 +2963,7 @@ provider_id
 model_id
 occurred_at
 status
+feature (with tenant_id and occurred_at)
 ```
 
 The `event_id` unique constraint is global. Only a matching credential/tenant/project/payload fingerprint is a duplicate; all other collisions are `IDEMPOTENCY_CONFLICT`.
@@ -4061,7 +4071,7 @@ Status reconciliation safety bound: <= 5 minutes
 
 Measurements must include the hottest-tenant workload because wallet mutation is serialized per tenant. Report hardware, dataset size, concurrency, test duration, and observed p50/p95/p99. A short synthetic burst alone does not satisfy the acceptance test.
 
-The single-VPS V1 deployment targets 99.5% monthly Central Billing availability excluding approved maintenance. This target does not weaken `REQ-AVAIL-001`: an outage still must not interrupt Integrated Application AI responses.
+The single-VPS V1 deployment targets 99.5% monthly Central Billing availability excluding approved maintenance. This target does not weaken `REQ-AVAIL-001`: an outage still must not interrupt Integrated Application AI responses. A database or API-process outage does take the AI Module down (§141.5).
 
 ---
 
@@ -4100,12 +4110,14 @@ Explicitly NOT required in V1:
 - LHDN e-Invoice
 - multi-currency
 - automatic credit card auto-top-up
-- central AI Gateway
+- central AI Gateway for Integrated Application Backends: they keep calling AI providers directly (the AI Module of §141 serves only Acuven's own module backends)
 - storing AI conversation content
 - customer BYOK
-- usage reporting from a backend the customer operates (for example a customer-hosted AI API): §2.1 trusts only Acuven-managed Integrated Application Backends, and a customer-controlled machine could under-report usage that Central Billing cannot verify (product owner, 2026-10-11)
+- usage reporting from a backend the customer operates: §2.1 trusts only Acuven-managed Integrated Application Backends, and a customer-controlled machine could under-report usage that Central Billing cannot verify (product owner, 2026-10-11)
 - complex postpaid invoicing
 - Kubernetes
+- deploying the AI Module (§141, formerly `acuven_ai_api`) on customer machines: a customer-hosted module backend calls the Acuven-hosted AI Module remotely (product owner, 2026-10-12)
+- synchronous wallet debit, balance check, or price lookup in the AI Module request path: billing stays asynchronous (§20, §141.4)
 - full distributed microservices architecture
 
 Avoid scope creep.
@@ -4237,6 +4249,8 @@ Queue loss recoverable from database state
 Modify `E:\projects\ai_chatbot_demo` as the first pilot.
 
 **2026-10-09 addendum:** The product owner moved the first Phase 3 pilot to `acuven_ai_api`, which reports usage for Acuven's internal metered-only tenant. `ai_chatbot_demo` stays a demo and still integrates, as a separate project of the same internal tenant; it carries the conversation lifecycle and OpenAI transcription items of §126, which the conversation-less AI API does not have. See `docs/TODO.md` Phase 3. Because the internal tenant is never debited or suspended for balance, the pilot also runs the no-double-debit, suspension and reactivation acceptance on a project of a `PREPAID` test tenant; it succeeds only when both paths pass.
+
+**2026-10-12 addendum:** With the merge (§141) the pilot is the AI Module of this repository, accepted on both paths above plus the product owner's round-one success criteria (average tokens and estimated provider cost per summary are recorded as a pricing basis). For the AI Module, "Billing is offline" is exercised as the ingestion endpoint being unreachable from the delivery worker and as billing workers failing; a database or API-process outage takes the AI Module down by design (§141.5). The webhook receiver, local versioned effective service status, and periodic reconciliation items apply to external integrators only (§141.3), first `acuven_aichat`. The self-call cannot exercise cross-host networking or clock skew; the acceptance record must say so, and those are accepted with `acuven_aichat`.
 
 Implement:
 
@@ -4417,7 +4431,7 @@ Codex MUST preserve these invariants throughout development.
 
 ## Invariant 1
 
-Central Billing failure must NOT stop customer AI service.
+Central Billing failure must NOT stop customer AI service. For the AI Module (§141), which shares this platform's process and database, the scope of this rule is defined in §141.5.
 
 ## Invariant 2
 
@@ -4490,11 +4504,11 @@ Implementation scope, order, and acceptance for the pilot are defined in §126. 
 These constraints bind every implementation phase.
 
 - Never remove working customer AI functionality merely to introduce Billing.
-- Do not add synchronous Central Billing dependency to the AI request path (§20, `REQ-AVAIL-001`).
+- Do not add synchronous Central Billing dependency to the AI request path (§20, `REQ-AVAIL-001`; for the AI Module, §141.5).
 - Do not calculate customer selling price inside an Integrated Application Backend.
 - Do not trust monetary amount submitted by an Integrated Application Backend.
 - Do not put Provider API secrets in frontend.
-- Do not create a central AI Gateway in V1 (§121).
+- Do not create a central AI Gateway in V1 (§121). The AI Module (§141) is a model-call API for Acuven's own module backends only; Integrated Application Backends such as Chatbot keep calling providers directly.
 - Prefer simple modular monolith architecture for Central Billing V1 rather than unnecessary microservices.
 - Work phase-by-phase (§123). All significant architecture decisions that differ from this specification must be documented as ADRs before implementation (§136).
 
@@ -4588,7 +4602,7 @@ The complete financial trail must be auditable end to end: from AI request throu
 
 | Requirement | Normative rule | Primary sections | Required test evidence |
 | --- | --- | --- | --- |
-| `REQ-AVAIL-001` | Central Billing outage never blocks end-user AI service. | §1, §20–§22, §85 | Failure and pilot E2E tests |
+| `REQ-AVAIL-001` | Central Billing outage never blocks end-user AI service (AI Module scope: §141.5). | §1, §20–§22, §85, §141.5 | Failure and pilot E2E tests |
 | `REQ-INGEST-001` | `202` follows durable `RECEIVED` persistence; pricing is asynchronous. | §20, §38–§39, §82 | API, crash, and queue-loss tests |
 | `REQ-IDEMP-001` | Global `event_id` produces at most one financial effect; mismatched reuse conflicts. | §23, §79, §82 | Duplicate, conflict, and concurrency tests |
 | `REQ-FIN-001` | Provider source cost, currency, FX, MYR estimate, and versions are historical snapshots. | §5, §14, §17 | FX/version/rounding tests |
@@ -4645,3 +4659,50 @@ The system prioritizes:
 8. Future scalability
 
 Any implementation that violates these priorities should be treated as architecturally incorrect.
+
+---
+
+# 141. AI Module (Co-located AI API)
+
+Added in v1.8 (2026-10-12; feature definitions moved to the calling module backends on 2026-10-13). The product owner's decisions are recorded in `acuven_hub/DECISIONS.md` (E-17 to E-20) and in design gate #281 §10; the rationale and costs are in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; the implementation design is design gate #281.
+
+The system-side AI API, formerly built as the separate `acuven_ai_api` service, runs inside this platform as the **AI Module**: one application, one deployment, one database. It stays a product line of its own, separate from AI Chatbot, and the two are priced separately per project. Chatbot backends remain external Integrated Application Backends that call AI providers directly; they never call providers through the AI Module.
+
+## 141.1 Boundary
+
+- The AI Module is one code subpackage. Its request path reads only the AI client keys, the AI model catalog, and the tenant and project status columns, and writes only its local usage outbox (§21).
+- The AI Module never imports wallet, ledger, pricing, FX, payment, usage-ingestion, or usage-billing code. An automated import test enforces this.
+- The AI Module calls models and meters usage; it does not define product features. Each feature (prompt, input and output format, output parsing, quality evaluation, and defences against instructions hidden in business data) is defined and developed in the calling module backend, so adding a feature changes only that backend.
+- The AI Module serves only Acuven's own module backends. It is not a central AI Gateway for Integrated Application Backends (§121, §135): Chatbot and other integrators keep calling providers directly.
+
+## 141.2 Identity
+
+- An AI caller is a tenant project. A project carries AI client keys (a public client identifier and a bearer token; only the token's SHA-256 digest is stored). An ADMIN creates and revokes keys; each change is audited atomically with the change.
+- The effective service status (§24) keeps expressing only money and account state.
+- Every call carries a `feature` label (§11). The AI Module forwards it with the usage event, so usage of one project can still be told apart per feature.
+- A caller can never choose the tenant or project its usage is attributed to.
+
+## 141.3 Request Path and Status
+
+- Before calling a provider, the AI Module composes the effective service status in-process from the authoritative tenant and project columns, using the single formula of §24. `BLOCK_AI` means no provider call (§26).
+- Because the AI Module reads the authoritative state directly, the local versioned status, status webhook receiver, and periodic reconciliation that §26 and §28–§30 require of Integrated Application Backends do not apply to it.
+- After the provider returns usage, the AI Module persists the usage event to its local outbox and only then returns the response. If the commit reports an error, the AI Module first checks on a fresh connection whether the row was written after all; if it was, it returns the response normally. Only when the row is confirmed absent, or the check itself fails, does it return `503` without the AI response. This deviates from §20 ("must still return the AI response") and is recorded in ADR-0012. The rest of §20 still applies: the failure raises a highest-severity alert carrying only allowed billing metadata, and once persistence is available the event is recorded as held for an audited manual decision to bill or discard it. If the event turns out to have been written and already entered delivery, it is flagged for audited manual review instead, so a request that returned `503` is never billed without a human decision being recorded. A request cancelled during shutdown after the provider returned is handled the same way.
+
+## 141.4 Usage Reporting
+
+- The AI Module delivers its usage events asynchronously through the same signed ingestion API (§37, §38) that external integrators use, to this platform's own endpoint, signed with the project's integration credential (§36). Verification, idempotency, ingestion, and billing are the same code path as for any integrator; there is no in-process shortcut into ingestion.
+- Delivery is driven only from database state (Invariant 14). The AI request path never depends on Redis or Celery.
+- A self-call cannot exercise cross-host networking or clock skew between integrator and platform. Those are accepted with the first external integrator on another host (`acuven_aichat`).
+
+## 141.5 Availability
+
+- For the AI Module, the Central Billing failures that `REQ-AVAIL-001` and Invariant 1 forbid from blocking AI are the billing functions: the ingestion endpoints, pricing, wallet posting, billing workers, and Redis/Celery. Their failure must not fail an AI request. A CI test keeps this true: with ingestion and billing workers failing, AI calls still succeed and usage stays in the outbox.
+- Accepted coupling: the AI Module shares this platform's process and database. When the database or the API process is unavailable, the AI Module is unavailable, just as an Integrated Application Backend is unavailable when its own database is down.
+- Accepted release coupling, with mitigations: separate readiness checks `/healthz/ai` (used by the post-deploy smoke test) and `/healthz/billing`; graceful shutdown longer than the longest AI call; AI Module changes and wallet or payment changes never in the same pull request.
+
+## 141.6 Contract and Exposure
+
+- The AI Module exposes one call endpoint, `POST /v1/messages`: a subset of the provider's Messages API (model, system prompt, messages, maximum output tokens, structured output settings) plus the required `feature` label. It returns the model text, the stop reason, token counts, and a request identifier; it never returns cost. Error bodies use the §107 envelope. The capability-specific endpoints of `acuven_ai_api` are not carried over; it never had a caller.
+- Guardrails: only models that are active in the AI model catalog may be called, and request size and maximum output tokens are capped by configuration.
+- The AI Module is reachable over public HTTPS through the platform edge, so that a module backend on another host (for example a customer-hosted CRM) can call it remotely; callers on the same host may use the internal network instead (product owner, 2026-10-12). The public entry is protected by the AI client key and by a per-source request rate limit at the edge against abuse. That edge limit is not a per-client usage limit.
+- What the AI Module does not do in V1 is listed in §121.
