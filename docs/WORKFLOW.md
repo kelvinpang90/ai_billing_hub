@@ -132,6 +132,7 @@ Codex 逐条核对回应，并把与修复无关的范围扩张判为阻断。**
 - 分支名：`task/<TODO 编号>-<短 slug>`，例如 `task/phase1-wallet-ledger`
 - 非任务型改动用 `chore/` 或 `fix/` 前缀
 - **一个 PR 一个任务**，不夹带
+- AI 模块路径 `app/ai_api/` 不得与钱包、支付、定价、汇率或用量计费路径同一 PR 修改；`check_repo_policy.py` 会机械拒绝，规则来自 spec §141.5 的发布耦合缓解。
 - 合并方式只能是 **Squash**（`main` 要求线性历史）
 - ⚠️ **不要开 stacked PR**（base 指向另一个功能分支）。合并时基分支被删，GitHub 会自动关闭子 PR，**且关闭后既不能改 base 也不能重开**。这个坑踩过一次（PR #3）
 - ⚠️ **审查开始后不要 rebase / force-push。**审查评论里的 `reviewed-head` 必须留在分支历史里，复审靠它算增量；rebase 会让它消失，脚本从此对这个 PR 永远退出 2，没有重定基线的路。需要同步 base 用 `git merge origin/main`——反正最后是 Squash，分支历史不进 `main`

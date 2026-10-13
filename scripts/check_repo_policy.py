@@ -311,6 +311,37 @@ def location_exists(root: Path, commit: str, path: str, line: int) -> bool:
 
 def check_pr(body: str, changed_paths: set[str], *, root: Path = ROOT, head: str = "HEAD") -> list[str]:
     content, errors = sections(body)
+    ai_paths = sorted(path for path in changed_paths if path.startswith("app/ai_api/"))
+    billing_paths = sorted(
+        path for path in changed_paths
+        if path in {
+            "app/models/wallet.py",
+            "app/repositories/wallet.py",
+            "app/services/wallet_adjustments.py",
+            "app/services/usage_billing.py",
+            "app/services/internal_billing.py",
+            "app/services/pricing_engine.py",
+            "app/services/pricing_rules.py",
+            "app/repositories/pricing_rules.py",
+            "app/models/pricing_rules.py",
+            "app/services/provider_prices.py",
+            "app/repositories/provider_prices.py",
+            "app/models/provider_prices.py",
+            "app/services/fx_rates.py",
+            "app/repositories/fx_rates.py",
+            "app/models/fx_rates.py",
+            "app/core/fx_source.py",
+            "app/services/usage_requeue.py",
+            "app/tasks/usage_billing.py",
+            "app/tasks/fx_fetch.py",
+        }
+        or (path.startswith("app/") and "payment" in Path(path).name)
+    )
+    if ai_paths and billing_paths:
+        errors.append(
+            "AI module and billing paths must not be changed in the same PR: "
+            f"AI: {', '.join(ai_paths)}; billing: {', '.join(billing_paths)}"
+        )
     for section in SECTIONS:
         value = content.get(section, "")
         if section == "任务":
