@@ -240,6 +240,43 @@ class PrBodyTests(unittest.TestCase):
             self.assertTrue(any("PR body" in e for e in self.check(body, repo=repo)))
 
 
+class AiBillingPrIsolationTests(unittest.TestCase):
+    def check(self, *changed_paths: str) -> list[str]:
+        body = BODY.replace(
+            "TODO impact: updated\nTODO target: docs/TODO.md:12",
+            "TODO impact: none\nTODO reason: policy-only change",
+        )
+        return policy.check_pr(body, set(changed_paths))
+
+    def test_only_ai_paths_pass(self):
+        self.assertEqual(self.check("app/ai_api/routes/messages.py"), [])
+
+    def test_only_wallet_paths_pass(self):
+        self.assertEqual(self.check("app/models/wallet.py"), [])
+
+    def test_ai_and_wallet_paths_are_rejected(self):
+        errors = self.check("app/ai_api/routes/messages.py", "app/models/wallet.py")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("app/ai_api/routes/messages.py", errors[0])
+        self.assertIn("app/models/wallet.py", errors[0])
+
+    def test_ai_and_usage_billing_worker_are_rejected(self):
+        errors = self.check("app/ai_api/routes/messages.py", "app/tasks/usage_billing.py")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("app/tasks/usage_billing.py", errors[0])
+
+    def test_ai_and_payment_filename_are_rejected(self):
+        errors = self.check("app/ai_api/routes/messages.py", "app/services/payment_reconciliation.py")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("app/services/payment_reconciliation.py", errors[0])
+
+    def test_tests_payment_filename_is_ignored(self):
+        self.assertEqual(
+            self.check("app/ai_api/routes/messages.py", "tests/test_payment_reconciliation.py"),
+            [],
+        )
+
+
 # --------------------------------------------------------------------------
 # 回应证据：「已修」必须给 SHA · 文件:行 —— 「声称做了实际没做」出现过 3 次
 # --------------------------------------------------------------------------
