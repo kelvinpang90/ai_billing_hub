@@ -212,6 +212,11 @@ class AuditAction(enum.StrEnum):
     PROJECT_INTEGRATION_STATUS_CHANGED = "PROJECT_INTEGRATION_STATUS_CHANGED"
     PROJECT_STATUS_WEBHOOK_SET = "PROJECT_STATUS_WEBHOOK_SET"
 
+    # AI 密钥的签发与吊销：app/ai_api/admin.py（AIH-TASK-058，设计闸门 #281 v23 §2），
+    # `entity_type = ai_client_key`、`entity_id = client_id`。
+    AI_CLIENT_KEY_CREATE = "AI_CLIENT_KEY_CREATE"
+    AI_CLIENT_KEY_REVOKE = "AI_CLIENT_KEY_REVOKE"
+
 
 class AuditLog(Base):
     """spec §66. Append-only.
