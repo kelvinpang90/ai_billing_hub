@@ -1,9 +1,9 @@
-# AI 模块：acuven_ai_api 并入本服务（已批准 v5）
+# AI 模块：acuven_ai_api 并入本服务（已批准 v8）
 
-> **来源**：设计闸门 Issue #281。本文件是 `APPROVED: design v5` 那一版正文的**逐字副本**，审查者为 Codex。
+> **来源**：设计闸门 Issue #281。本文件是 `APPROVED: design v8` 那一版正文的**逐字副本**，审查者为 Codex。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #281 上被批准的 v5 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
-> §8「拆分」的十一项登记为十二个任务：第 1–5 项依次是 `AIH-TASK-056`（数据库）、`AIH-TASK-057`（摄取契约加 `feature`）、`AIH-TASK-058`（管理规则）、`AIH-TASK-059`（管理接口）、`AIH-TASK-060`（AI 纯规则）；第 6 项「请求路径」体量接近拆分上限，拆成 `AIH-TASK-061`（用量写入、提交结果核查与落库失败的暂存处置）与 `AIH-TASK-062`（调用接口、鉴权与状态、模型护栏、配置与公网入口）；第 7–10 项依次是 `AIH-TASK-063`（投递）、`AIH-TASK-064`（告警与运维）、`AIH-TASK-065`（健康检查与停机）、`AIH-TASK-066`（前端）；第 11 项是 `AIH-TASK-067`（CI 策略）。拆分只改交付批次，不改设计内容。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #281 上被批准的 v8 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> §8「拆分」的十一项登记为十二个任务：第 1–5 项依次是 `AIH-TASK-056`（数据库）、`AIH-TASK-057`（摄取契约加 `feature`）、`AIH-TASK-058`（管理规则）、`AIH-TASK-059`（管理接口）、`AIH-TASK-060`（AI 纯规则）；第 6 项「请求路径」体量接近拆分上限，拆成 `AIH-TASK-061`（用量写入、提交结果核查与落库失败的暂存处置）与 `AIH-TASK-062`（调用接口、鉴权与状态、模型护栏、配置、公网入口与优雅停机）；第 7–10 项依次是 `AIH-TASK-063`（投递）、`AIH-TASK-064`（告警与运维）、`AIH-TASK-065`（健康检查）、`AIH-TASK-066`（前端）；第 11 项是 `AIH-TASK-067`（CI 策略）。拆分只改交付批次，不改设计内容。
 > 要搬的 `acuven_ai_api` 源码与测试放在 [ai-module-reference/](ai-module-reference/README.md)（`b57c5b0` 的逐字副本）。
 > 正文与 Issue 逐字相同；正文里的相对链接按本文件在 `docs/design/` 下的位置书写，可直接点开。
 
@@ -17,7 +17,7 @@
 
 状态：`READY_FOR_REVIEW`（§10 的问题 Kelvin 2026-10-12、2026-10-13 已全部答复）
 负责人：Claude
-**设计版本**：`v5`（每次实质修改 +1，见 §12）
+**设计版本**：`v8`（每次实质修改 +1，见 §12）
 对应需求：spec §1 `REQ-AVAIL-001`、§2.1、§11、§20、§21、§22、§26、§36、§37、§38、§39、§79、§99、§121、§126、§133、§135；`REQ-AUTH-001`、`REQ-INGEST-001`、`REQ-IDEMP-001`、`REQ-PRIV-001`；[ADR-0002](../adr/ADR-0002-production-datastore-isolation.md)、[ADR-0004](../adr/ADR-0004-credential-encryption.md)；新增 spec §141 与 ADR-0012（规格 PR #283）；项目群决定 `acuven_hub/DECISIONS.md` E-17、E-18、E-19、E-20（Kelvin 2026-10-12，出处 MERGE 1–8）
 目标 PR：规格与 ADR 的文档 PR #283；实现 PR 待开（批准后按 §8「拆分」登记）
 
@@ -73,7 +73,7 @@ celery-beat（每 10 s）──▶ celery-worker：领取到期行（条件 UPDA
 ### 模块边界（E-17）
 
 - 新子包 `app/ai_api/`：`messages.py`（`/v1/messages` 请求 / 响应模型与纯校验规则，只用标准库与 pydantic）、`provider.py`（Anthropic 适配器，async，从 `acuven_ai_api/app/provider.py` 改写）、`access.py`（请求路径的只读查询：密钥、项目 / 租户状态、模型目录）、`routes.py`（`/v1/messages` 路由）、`outbox.py`（模型与写入）、`client_rules.py`（签名规范串、回执与错误判定，**从 `acuven_ai_api/app/billing_rules.py` 原样搬，不复用本仓库验签侧的 `canonical_request`**）、`delivery.py`（Celery 任务：领取、签名、发送、结算）、`admin.py`（AI 密钥的管理服务函数）。管理接口的路由放 `app/api/admin_ai_access.py`。
-- **AI 请求路径可 import 的白名单**（`routes.py`、`access.py`、`provider.py`、`messages.py`、`outbox.py`）：`app.ai_api.*`、`app.core.*`（配置、数据库、日志、错误）、`app.models.base`、`app.models.tenancy`（只用 `Tenant`、`Project` 与纯函数 `compose_effective_status`）、`app.models.ai_catalog`（只读 `AiProvider`、`AiModel`、`AiModelAlias`）。投递侧（`delivery.py`、`client_rules.py`）另可 import `app.models.integration`（读 `IntegrationCredential`）、`app.services.integration_auth.credential_aad` 与 `app.core.crypto`（解密）。其余一律不许，尤其 `app.services.{usage_ingest,usage_billing,pricing_*,provider_prices,fx_rates,wallet_adjustments,internal_billing}`、`app.repositories.{wallet,usage_events,pricing_rules,provider_prices,fx_rates}`、`app.models.{wallet,usage,pricing_rules,provider_prices,fx_rates}`。
+- **AI 请求路径可 import 的白名单**（`routes.py`、`access.py`、`provider.py`、`messages.py`、`outbox.py`）：`app.ai_api.*`、`app.core.*`（配置、数据库、日志、错误）、`app.models.base`、`app.models.tenancy`（只用 `Tenant`、`Project` 与纯函数 `compose_effective_status`）、`app.models.ai_catalog`（只读 `AiProvider`、`AiModel`、`AiModelAlias`）。投递侧（`delivery.py`、`client_rules.py`）另可 import `app.models.integration`（读 `IntegrationCredential`）、`app.services.integration_auth` 里的 `credential_aad` 与 `is_verifiable`、`app.core.crypto`（解密）。白名单只约束本仓库的 `app.*` 模块，第三方库（`celery`、`httpx2`、`sqlalchemy`、`pydantic` 等）不受限。其余 `app.*` 模块一律不许，尤其 `app.services.{usage_ingest,usage_billing,pricing_*,provider_prices,fx_rates,wallet_adjustments,internal_billing}`、`app.repositories.{wallet,usage_events,pricing_rules,provider_prices,fx_rates}`、`app.models.{wallet,usage,pricing_rules,provider_prices,fx_rates}`。
 - **反向**：本仓库原有模块不许 import `app.ai_api`，例外只有 `app/main.py`（挂路由）、`app/api/admin_ai_access.py`、`app/api/health.py`（`/healthz/ai`）、`app/core/celery_app.py`（注册 beat 任务）、`app/services/alerts.py`（告警维度）、`app/cli.py`（死信重投）与迁移所需的模型汇总处。
 - 签名侧独立实现是刻意的：自调时签名方与验签方若共用同一段规范串代码，两边同时写错也会互相验过，自调就什么都没验。另加签名交叉测试（§7）。
 - 模型目录的检查只读 `ai_models` 是否存在且 `ACTIVE`，**不读供应商价格**（价格属于定价，不进 AI 请求路径）。模型在目录里但还没发布价格时，用量照常记录，摄取后计价得到 `PRICING_ERROR` 并进现有告警（spec §16「不丢事件」）。
@@ -131,7 +131,7 @@ celery-beat（每 10 s）──▶ celery-worker：领取到期行（条件 UPDA
 - `ai_client_keys`：`id` BIGINT PK；`tenant_id`、`project_id`（复合外键 → `projects(id, tenant_id)`，`RESTRICT`，INV-8）；`client_id` VARCHAR(40) **唯一**（`aic_` + 32 位小写十六进制，非机密，MySQL 用 `utf8mb4_0900_bin`）；`token_sha256` CHAR(64)；`status`（`ACTIVE` / `REVOKED`，CHECK）；`created_at`、`revoked_at`（CHECK：`(status = 'REVOKED') = (revoked_at IS NOT NULL)`）。索引 `(project_id)`。行不删除。**不建 `last_used_at`**：AI 请求路径只写 outbox。
 - `ai_usage_outbox`：`id` BIGINT PK；`event_id` CHAR(26) **唯一**；`request_id` CHAR(26)；`tenant_id`、`project_id`（复合外键同上）；`feature` VARCHAR(64)（冗余一份，便于运维按功能查积压）；`payload_json` TEXT；`status`（`PENDING` / `SENDING` / `DELIVERED` / `DEAD` / `HELD` / `DISCARDED`，CHECK）；`attempts` INT ≥ 0；`next_attempt_at` **`DATETIME(6)`**（`acuven_ai_api` 2026-10-09 在 MySQL 8.0 实测：秒级 `DATETIME` 四舍五入会让「到期时间 = 现在」的行被舍到未来、当轮领不到）；`claim_id` CHAR(26) NULL；`last_error` VARCHAR(64) NULL；`created_at`、`delivered_at`；`resolved_at` NULL（`HELD` 被人工处置的时刻）；`review_required_at` NULL 与 `reviewed_at` NULL（「请求已回 503、用量却已进入投递」的复核标记，见「提交结果不确定」）。索引 `(status, next_attempt_at)`。行不删除（V1 不做清理）。
 - `usage_events`：加可空列 `feature` 与索引（见上）。MySQL 8.4 对可空列走 INSTANT，索引走 INPLACE，不锁写。
-- 审计动作新增 `AI_CLIENT_KEY_CREATE`、`AI_CLIENT_KEY_REVOKE`、`AI_USAGE_REQUEUE`、`AI_USAGE_HELD_RELEASE`、`AI_USAGE_HELD_DISCARD`、`AI_USAGE_REVIEW_ACK`；`entity_type` 用 `ai_client_key`、`ai_usage_outbox`，在各自模块内定义为本地 `Final` 常量（`test_every_written_entity_type_is_classified` 只认本模块字面量），并在 `audit_query.py` 归类为公开 ID 类。`audit_logs.action` 是非原生枚举的 VARCHAR(64)、没有 CHECK（迁移 0003），新增成员不需要迁移。
+- 审计动作新增 `AI_CLIENT_KEY_CREATE`、`AI_CLIENT_KEY_REVOKE`、`AI_USAGE_REQUEUE`、`AI_USAGE_HELD_RELEASE`、`AI_USAGE_HELD_DISCARD`、`AI_USAGE_HELD_IMPORT`、`AI_USAGE_REVIEW_ACK`；`entity_type` 用 `ai_client_key`、`ai_usage_outbox`，在各自模块内定义为本地 `Final` 常量（`test_every_written_entity_type_is_classified` 只认本模块字面量），并在 `audit_query.py` 归类为公开 ID 类。`audit_logs.action` 是非原生枚举的 VARCHAR(64)、没有 CHECK（迁移 0003），新增成员不需要迁移。
 - 下行迁移：只在两张新表都为空、且 `usage_events` 没有任何非空 `feature` 时执行，否则抛错拒绝（照 0019 / 0020 的写法）。
 
 ### 用量载荷（`payload_json`）
@@ -161,7 +161,7 @@ celery-beat（每 10 s）──▶ celery-worker：领取到期行（条件 UPDA
    - 查不了（库仍不可用）：结果未知 → 503，按「用量落库失败的处置」，`CRITICAL` 日志里注明 `commit_outcome=unknown`。
 2. **暂存落库时再核一次**（「用量落库失败的处置」第 3 步）：INSERT `HELD` 撞上 `event_id` 唯一约束，说明当时其实写进去了。这时：
    - `UPDATE ai_usage_outbox SET status='HELD' WHERE event_id=? AND status='PENDING'` 受影响 1 行 → 还没被投递领走，转成 `HELD`，照常等人工 `release` / `discard`。这条 UPDATE 与投递的领取 UPDATE 是同一行上的两个条件更新，数据库行锁保证只有一个生效。
-   - 受影响 0 行 → 投递已经领走（`SENDING`）或已送达 / 进死信：写 `review_required_at = now`，记 `CRITICAL`（固定文案 `AI usage entered billing although the request returned 503`），告警维度把「`review_required_at` 非空且 `reviewed_at` 为空」计为严重。人工复核后决定保留这笔费用，或用现有的管理端手工调账退回（AIH-TASK-010，带审计），然后 `ai-usage-held ack <event_id> --reason …` 写 `reviewed_at` 与审计 `AI_USAGE_REVIEW_ACK`。
+   - 受影响 0 行 → 投递已经领走（`SENDING`）或已送达 / 进死信：写 `review_required_at = now`，记 `CRITICAL`（固定文案 `AI usage entered billing although the request returned 503`），告警维度把「`review_required_at` 非空且 `reviewed_at` 为空」计为严重。人工复核后决定保留这笔费用，或用现有的管理端手工调账退回（AIH-TASK-010，带审计），然后 `ai-usage-held ack <event_id> --reason …` 写 `reviewed_at` 与审计 `AI_USAGE_REVIEW_ACK`。`ack` 也用于 `DEAD` 行（见「告警维度」）：对「`review_required_at` 非空」或「状态为 `DEAD`」且 `reviewed_at` 为空的行生效，其余拒绝。
 3. 两条路最后都是确定的、被告警的、经人工处置并留审计的状态；不存在「回了 503 却悄悄计费」的路径。
 
 ### 用量落库失败的处置（spec §20：最高级告警 + 可审计的人工对账）
@@ -176,15 +176,15 @@ celery-beat（每 10 s）──▶ celery-worker：领取到期行（条件 UPDA
    - `ai-usage-held release <event_id> --reason …`：`HELD → PENDING`，照常投递计费（token 确实花了；适合内部租户或与客户约定照收的情况）。审计 `AI_USAGE_HELD_RELEASE`。
    - `ai-usage-held discard <event_id> --reason …`：`HELD → DISCARDED`（终态，不计费；调用方没拿到结果，可以选择不收）。审计 `AI_USAGE_HELD_DISCARD`。
    - 两者都写 `resolved_at`；只对 `HELD` 行生效，其他状态拒绝。
-   - 进程在暂存落库之前就重启了：这次用量只剩第 1 步的日志。运维按日志里的元数据判断要不要补；补的话用 `ai-usage-held import --from-log-line …` 把那条日志的字段原样写成一行 `HELD`，再走上面两条之一（同一个 `event_id` 已存在则拒绝）。
+   - 进程在暂存落库之前就重启了：这次用量只剩第 1 步的日志。运维按日志里的元数据判断要不要补；补的话用 `ai-usage-held import --from-log-line …`：日志里的 `event_id` 在库里**不存在**时，把那条日志的字段原样写成一行 `HELD`，再走上面两条之一；**已存在**时（提交其实成功了、当场核查没查到、暂存又随进程丢了）不新写、也不拒绝了事，而是照「提交结果不确定」第 2 步处理那一行：仍是 `PENDING` 就转 `HELD`，已进入投递就写 `review_required_at` 并记那句 `CRITICAL`；已经带复核标记或已是 `HELD` 的不重复处理，只回报现状。三种结果都写审计 `AI_USAGE_HELD_IMPORT`，打印处理结果。
 
 ### 投递（`app/ai_api/delivery.py`，Celery）
 
-- beat 每 `BILLING_AI_DELIVERY_SWEEP_SECONDS`（默认 10）秒发一次 `ai_api.deliver_due`。任务循环领取，直到没有到期行或本轮处理满 `BILLING_AI_DELIVERY_BATCH`（默认 20）行。
+- beat 每 `BILLING_AI_DELIVERY_SWEEP_SECONDS`（默认 10）秒发一次 `ai_api.deliver_due`。注册方式照现有任务：`celery.shared_task`，模块名 `app.ai_api.delivery` 加进 `app/core/celery_app.py` 的 `TASK_MODULES`。任务循环领取，直到没有到期行或本轮处理满 `BILLING_AI_DELIVERY_BATCH`（默认 20）行。
 - **领取**：选 `status='PENDING' AND next_attempt_at <= now` 或 `status='SENDING' AND next_attempt_at <= now`（租约过期）的行，逐行条件 UPDATE：`status='SENDING'`、新 `claim_id`、`attempts+1`、`next_attempt_at = now + 租约 60 秒`，WHERE 带同样的资格条件；受影响行数 = 1 才算领到（照 `acuven_ai_api/app/worker.py:claim_one`）。
-- **签名凭据**：取该项目 `integration_credentials` 里当前可验签（`ACTIVE`、在有效窗口内）的最高 `key_version`，用 `app.core.crypto` 与 `credential_aad` 在 worker 进程内解密；明文只在内存。没有可用凭据 → `SIGNING_CREDENTIAL_MISSING`，**可重试**（管理员补签后自动恢复），进告警。解密失败 → `SIGNING_CREDENTIAL_UNREADABLE`，可重试，进告警。
+- **签名凭据**：在该项目 `integration_credentials` 里按 `is_verifiable` 判定为可验签的行中，取 `valid_from` 最晚的一行，并列时取 `id` 最大（一个项目可以有多个 `api_key`，`key_version` 只在同一个 `api_key` 内有序，不能跨 key 比较），用 `app.core.crypto` 与 `credential_aad` 在 worker 进程内解密；明文只在内存。没有可用凭据 → `SIGNING_CREDENTIAL_MISSING`，**可重试**（管理员补签后自动恢复），进告警。解密失败 → `SIGNING_CREDENTIAL_UNREADABLE`，可重试，进告警。
 - **发送**：`urllib` 同步 POST（不跟随重定向），目标 `BILLING_AI_INGEST_BASE_URL`（默认 `http://api:8000`，compose 内网直连 api）+ `/api/v1/integration/usage-events`，超时 10 秒（< 租约 60 秒）。每次尝试新的 `X-Acuven-Request-Id`、当前时间戳，**body 与 `event_id` 永不变**。
-- **判定**（原样搬 `client_rules.py`）：202 `accepted` 或 200 `already_received` / `already_processed` 且回执 `event_id` 匹配 → `DELIVERED`；网络错误、回执不匹配、错误信封 `retryable=true` → `PENDING`，`next_attempt_at = now + min(3600, 2^min(attempts,12))` 秒；其余错误 → `DEAD`，`last_error` 存错误码。
+- **判定**（原样搬 `client_rules.py`）：202 `accepted` 或 200 `already_received` / `already_processed` 且回执 `event_id` 匹配 → `DELIVERED`；网络错误、回执不匹配、错误信封 `retryable=true` → `PENDING`，`next_attempt_at = now + 退避`；**退避 = `min(3600, 2^min(attempts,12))` 秒乘以 [0.5, 1.0] 内均匀分布的随机系数**（spec §22「exponential backoff + jitter」：同一次故障里一起失败的事件错开重试，摄取端恢复时不会集中涌入；随机源可注入，测试用固定值）；**响应不是错误信封**（不是 JSON，或没有布尔 `retryable`）时先看状态码，再交给 `error_outcome`：5xx → `PENDING`（错误码 `BILLING_UNAVAILABLE`，摄取端挂了不能把用量判死），其他 → `DEAD`（`INVALID_BILLING_RESPONSE`）；其余错误 → `DEAD`，`last_error` 存错误码。
 - **结算**：条件 UPDATE，WHERE `id` 且 `status='SENDING'` 且 `claim_id = 本次领取的 claim_id`。租约已被别人收回时受影响行数为 0，什么也不改。
 - 进 `DEAD` 记 ERROR 日志（`event_id`、错误码）。
 
@@ -217,8 +217,8 @@ celery-beat（每 10 s）──▶ celery-worker：领取到期行（条件 UPDA
 - 新增 `GET /healthz/ai`：数据库可连且 Anthropic key 文件可读非空 → 200；否则 503 信封（只说哪一项不行，不回 key）。**不调 Anthropic、不查 Redis**。
 - 新增 `GET /healthz/billing`：与 `/readyz` 同一组检查（数据库不通 503；Redis 不通 200 `degraded`）。`/readyz` 保留不变。
 - 两个健康检查路径在 nginx 上与 `/readyz` 同一份 allow 名单。
-- `deploy/deploy.sh` 冒烟在现有检查之后加：`GET /healthz/ai` 必须 200，否则按现有逻辑回滚。
-- `Dockerfile` 的 `uvicorn` 加 `--timeout-graceful-shutdown 85`（≥ 请求总时限 75 秒 + 10 秒余量）；compose `api` 加 `stop_grace_period: 100s`（再给 uvicorn 15 秒完成强制取消与退出）。正常情况下所有在途调用都在总时限内结束；万一优雅期到点，被取消的调用走「取消」那一步留下告警与暂存，不会无声丢失。代价：单容器「先停后起」，排空期间新请求拿 502，最坏约 85 秒（Kelvin 2026-10-12 接受约 75 秒；为给总时限留余量调到 85 秒）。
+- `deploy/deploy.sh` 冒烟在现有检查之后加：`GET /healthz/ai` 必须 200，**且**响应正文是 JSON、信封里 `data.status` 为 `ok`，否则按现有逻辑回滚。只看 200 不够：边缘 nginx 没有这条 location 时，请求会落到前端 SPA，也回 200。
+- （随 §8 第 6 项上线）`Dockerfile` 的 `uvicorn` 加 `--timeout-graceful-shutdown 85`（≥ 请求总时限 75 秒 + 10 秒余量）；compose `api` 加 `stop_grace_period: 100s`（再给 uvicorn 15 秒完成强制取消与退出）。正常情况下所有在途调用都在总时限内结束；万一优雅期到点，被取消的调用走「取消」那一步留下告警与暂存，不会无声丢失。代价：单容器「先停后起」，排空期间新请求拿 502，最坏约 85 秒（Kelvin 2026-10-12 接受约 75 秒；为给总时限留余量调到 85 秒）。
 
 ### 配置（`BILLING_` 前缀，带默认值；compose 显式转发）
 
@@ -239,7 +239,7 @@ celery-beat（每 10 s）──▶ celery-worker：领取到期行（条件 UPDA
 
 ### 告警维度（`GET /internal/alerts`，接在现有维度之后）
 
-`ai_usage_outbox`：`DEAD` 行数 > 0 → 严重；`HELD` 行数 > 0 → 严重；`review_required_at` 非空且 `reviewed_at` 为空的行数 > 0 → 严重；最老的 `PENDING` / `SENDING` 行的 `created_at` 早于 `BILLING_AI_PENDING_ALERT_SECONDS` → 警告。摘要只有计数与秒数。
+`ai_usage_outbox`：`DEAD` 且 `reviewed_at` 为空的行数 > 0 → 严重（行不删除、部分错误码不能重投，只按「`DEAD` 总数」计会让告警永远停在严重；运维处理完——重投，或判定不重投并按 runbook 报给 Kelvin——之后用 `ai-usage-held ack` 写 `reviewed_at`，告警才消）；`HELD` 行数 > 0 → 严重；`review_required_at` 非空且 `reviewed_at` 为空的行数 > 0 → 严重；最老的 `PENDING` / `SENDING` 行的 `created_at` 早于 `BILLING_AI_PENDING_ALERT_SECONDS` → 警告。摘要只有计数与秒数。
 
 ### 死信重投（`python -m app.cli ai-usage-requeue <event_id>… [--include-delivered] --reason <文字>`）
 
@@ -284,7 +284,7 @@ AI 模块不算任何金额，不写任何金额列，响应里只有 token 数�
 | — | 暂存条目在库恢复后写入 | `event_id` 尚不存在 | `HELD` | 从暂存队列移除 | `event_id` 已存在 → 见下两行 |
 | `PENDING` | 暂存条目撞上已存在的行 | 行仍是 `PENDING` | `HELD` | 条件 UPDATE；从暂存队列移除 | 行已不是 `PENDING` → 下一行 |
 | `SENDING` / `DELIVERED` / `DEAD` | 暂存条目撞上已存在的行 | — | 不变 | 写 `review_required_at`、`CRITICAL`；从暂存队列移除 | — |
-| 任意（`review_required_at` 非空） | CLI `ack` | `reviewed_at` 为空 | 不变 | 写 `reviewed_at`、审计 | 已复核 → 拒绝 |
+| 任意（`review_required_at` 非空），或 `DEAD` | CLI `ack` | `reviewed_at` 为空 | 不变 | 写 `reviewed_at`、审计 | 已复核 → 拒绝 |
 | `HELD` | CLI `release` | — | `PENDING` | `resolved_at`、`next_attempt_at=now`、审计 | 非 `HELD` → 拒绝 |
 | `HELD` | CLI `discard` | — | `DISCARDED`（终态） | `resolved_at`、审计 | 非 `HELD` → 拒绝 |
 | `PENDING` | 领取 | `next_attempt_at <= now` | `SENDING` | 新 `claim_id`、`attempts+1`、租约 60 s | 条件不满足 → 受影响 0 行，跳过 |
@@ -292,7 +292,7 @@ AI 模块不算任何金额，不写任何金额列，响应里只有 token 数�
 | `SENDING` | 结算：合法回执 | `claim_id` 匹配 | `DELIVERED` | `delivered_at`、清 `claim_id` | `claim_id` 不匹配 → 0 行，不改 |
 | `SENDING` | 结算：可重试 | `claim_id` 匹配 | `PENDING` | 退避、`last_error` | 同上 |
 | `SENDING` | 结算：不可重试 | `claim_id` 匹配 | `DEAD` | `last_error`、ERROR 日志 | 同上 |
-| `DEAD` | CLI 重投 | 错误码在白名单 | `PENDING` | `next_attempt_at=now`、审计 | 其他错误码 → 拒绝，不改 |
+| `DEAD` | CLI 重投 | 错误码在白名单 | `PENDING` | `next_attempt_at=now`、清 `reviewed_at`（再死一次要重新告警）、审计 | 其他错误码 → 拒绝，不改 |
 | `DELIVERED` | CLI 重投 `--include-delivered` | — | `PENDING` | 同上 | — |
 
 `DELIVERED` 只表示摄取端持久接收（`REQ-INGEST-001`），不表示计价完成。
@@ -328,7 +328,8 @@ AI 模块不算任何金额，不写任何金额列，响应里只有 token 数�
 | celery-beat / worker 停摆 | AI 照常 200 | 积压 `PENDING` | 是 | 恢复后扫描 | 积压告警 |
 | worker 领取后崩溃 | — | `SENDING`，租约 60 s 后可重领 | 是 | 租约过期重领 | 无 |
 | 摄取端不可达 / 超时 / 5xx `retryable` | — | `PENDING` + 退避（封顶 1 小时） | 是 | 下一轮扫描 | 超过 15 分钟进积压告警 |
-| 摄取端非 `retryable` 错误（含 `feature` 校验失败） | — | `DEAD` | 白名单码可 CLI 重投 | 人工 | `DEAD > 0` 严重 |
+| 摄取端非 `retryable` 错误（含 `feature` 校验失败） | — | `DEAD` | 白名单码可 CLI 重投 | 人工；处理完 `ack` | 未复核的 `DEAD > 0` 严重 |
+| 摄取端回非信封的 5xx | — | `PENDING` + 退避（`BILLING_UNAVAILABLE`） | 是 | 下一轮扫描 | 超过 15 分钟进积压告警 |
 | 项目无可用签名凭据 / 解不开 | — | `PENDING` + 退避 | 是 | 补签 / 修主密钥后自动 | 积压告警 |
 | 同一事件重复送达 | — | `DELIVERED` | — | 摄取端 200 `already_*` | 无 |
 | 外部接入方带了不合规的 `feature` | 摄取端 422 `VALIDATION_ERROR`（`retryable=false`） | 无事件 | 接入方改载荷 | — | 接入方自己的死信 |
@@ -375,14 +376,19 @@ AI 模块不算任何金额，不写任何金额列，响应里只有 token 数�
 | 事务中途失败 | integration | outbox 提交抛错；签发时审计写入抛错 | 503 且无 `PENDING` 行；签发整体回滚 |
 | 提交结果不确定 | integration（MySQL） | 让 `commit()` 真正提交后再抛错：① 当场核查查到；② 核查也失败，之后暂存落库时行仍 `PENDING`；③ 同②但投递已先把它送达 | ① 200；② 503 → 行转 `HELD`，投递扫描不再碰它；③ 503 → 行保持 `DELIVERED`、写 `review_required_at`、告警严重，`ack` 后写 `reviewed_at` 与审计、告警消失；②与投递领取并发时只有一个条件更新生效 |
 | 时限与取消 | integration | 鉴权读库挂住；供应商挂住；在模型返回后、提交前取消请求任务 | 读库 5 秒内 503；整个请求在 75 秒总时限内结束；取消时留下固定文案的 `CRITICAL`（只有元数据）并进暂存队列，停机前落成 `HELD` |
-| 用量落库失败的处置 | integration | outbox 提交抛错 → 恢复数据库 → 跑一次暂存循环；再分别 `release`、`discard`；同一 `event_id` 暂存两次；暂存队列满；`import` 一条日志字段 | 第一次失败立即有 `CRITICAL`（文案固定、只有元数据）；恢复后一行 `HELD`、告警严重；`release` 后变 `PENDING` 并送达、`discard` 后 `DISCARDED` 且永不送达，各一条审计；重复的只写一次；满时丢最旧并再记 `CRITICAL`；`import` 已存在的 `event_id` 被拒 |
+| 用量落库失败的处置 | integration | outbox 提交抛错 → 恢复数据库 → 跑一次暂存循环；再分别 `release`、`discard`；同一 `event_id` 暂存两次；暂存队列满；`import` 一条日志字段（`event_id` 不存在；已存在且仍 `PENDING`；已存在且已送达；已是 `HELD`） | 第一次失败立即有 `CRITICAL`（文案固定、只有元数据）；恢复后一行 `HELD`、告警严重；`release` 后变 `PENDING` 并送达、`discard` 后 `DISCARDED` 且永不送达，各一条审计；重复的只写一次；满时丢最旧并再记 `CRITICAL`；`import` 四种情况依次得到新 `HELD` 行、转 `HELD`、写 `review_required_at` 与 `CRITICAL` 且告警严重、只回报现状，每次一条审计 |
+| 重启后补录（组合） | integration（MySQL） | 提交其实成功 → 当场核查失败 → 返回 503 → 暂存随进程丢失（清空队列模拟重启）→ 投递把原行送达 → 从那条 `CRITICAL` 日志 `import` | 原行写上 `review_required_at`，告警严重；`ack` 后写 `reviewed_at` 与审计，告警消失；全程只有一次财务效果 |
+| 退避抖动 | unit | 注入随机系数 0.5 与 1.0；`attempts` 为 1、12、20 | 退避落在 [0.5 × 基数, 基数] 内，基数封顶 3600 秒 |
 | Redis/Celery 丢失 | integration | 领取后不结算；broker 不可达期间连续调用 | 租约过期后送达；AI 全 200，恢复后全部送达 |
-| 签名凭据 | integration | 无 `ACTIVE` 凭据；主密钥缺失；轮换重叠期 | 可重试并进告警；取最高可用版本 |
+| 签名凭据 | integration | 无 `ACTIVE` 凭据；主密钥缺失；轮换重叠期；同一项目两个 `api_key`、各自 `key_version` 不同 | 可重试并进告警；取 `valid_from` 最晚的可验签行，并列取 `id` 最大，与 `key_version` 大小无关 |
+| 非信封响应 | integration | 摄取端回非 JSON 的 502、回非 JSON 的 400 | 前者 `PENDING`（`BILLING_UNAVAILABLE`），后者 `DEAD`（`INVALID_BILLING_RESPONSE`） |
+| 死信告警可复核 | integration | 一行进 `DEAD` → `ack` → 重投后再进 `DEAD` | 严重 → 消失 → 再次严重 |
 | 签名交叉验证 | unit（Worker 沙箱可跑） | AI 侧 `client_rules` 生成的头交给验签侧 `verify_signature`；另用标准库 `hmac` 手算固定向量 | 验签通过；向量逐字相同 |
 | 租户越权 | integration | A 的密钥调用；跨客户管理接口；伪造诊断 ID | 只有 A 的行；404；`CREDENTIAL_SCOPE_MISMATCH` 进 `DEAD` |
 | 内容不落地（INV-9） | integration | `system`、`messages`、模型输出各带哨兵，跑调用 + 投递 + 422 + 502 + 供应商 400 | 新表、审计、`caplog`、所有响应信封里都没有哨兵 |
 | 请求路径只写 outbox | integration | `before_cursor_execute` 记录一次调用期间的语句 | 写语句只有一条 `INSERT INTO ai_usage_outbox` |
 | 健康检查 | integration | key 文件缺失；数据库不可达；Redis 不可达 | `/healthz/ai` 503 / 503 / 200；`/healthz/billing` 200 / 503 / 200 degraded；`/healthz` 始终 200 |
+| 部署冒烟 | unit（`test_deploy.py`） | `/healthz/ai` 回 200 且 `data.status=ok`；回 200 但正文是 HTML（SPA 兜底）；回 503 | 通过 / 回滚 / 回滚 |
 | 部署配置 | unit（`test_compose.py`） | 读 compose 与 nginx | `stop_grace_period: 100s`；`--timeout-graceful-shutdown 85`；两者与 `BILLING_AI_REQUEST_DEADLINE_SECONDS` 的关系（总时限 + 10 ≤ 优雅期 < 停机宽限）；健康检查 allow 名单与 `/readyz` 相同；`/v1/messages` 无 `deny all`、有 `billing_ai` 限速、`proxy_read_timeout` ≥ 75s、`client_max_body_size 80k`；`/v1/` 其他路径不转给 api |
 | 金额精度 | — | AI 模块无金额 | 不适用 |
 
@@ -392,7 +398,7 @@ AI 模块不算任何金额，不写任何金额列，响应里只有 token 数�
 
 - **数据迁移：不需要**（`acuven_ai_api` 的 outbox 为空、0 绑定）。
 - **表结构迁移**：一次新迁移建两张新表、给 `usage_events` 加可空列与索引。凡是「从 head 降到固定版本、断言字面表集合 / 列集合」的迁移测试（`test_migrations.py`、`test_fx_rates_db.py` 等）都要一并更新并写进任务的 `allowed_change_paths`。
-- **部署顺序**：每个任务合并即部署（迁移 → api → worker / beat）。摄取端先接受 `feature`，AI 路由后上线，所以 AI 模块发出的第一条带 `feature` 的事件一定被接受。没有签发 AI 密钥之前 `/v1/messages` 是惰性的。
+- **部署顺序**：每个任务合并即部署（迁移 → api → worker / beat）。摄取端先接受 `feature`，AI 路由后上线，所以 AI 模块发出的第一条带 `feature` 的事件一定被接受。没有签发 AI 密钥之前 `/v1/messages` 是惰性的。**AI 密钥要等第 8 项（告警与运维：`HELD` / 待复核 / `DEAD` 的告警与处置命令）合并后才签发**：在那之前请求路径与投递虽已上线，但没有调用方，落库失败的记录也就无从产生；`docs/deployment.md` 与第 4 项的管理接口说明（`docs/api.md`）都写明这一条。
 - **合并「请求路径」那个任务之前**，Kelvin 在 VPS 的 `secrets/` 下建好 `anthropic.key`（建议沿用 `acuven_ai_api` 部署目录 `.env` 里那把）。
 - **兼容窗口**：摄取契约只加可选字段，现有调用方不受影响；`/v1` 没有旧调用方。
 - **回滚 / 前滚**：生产只前滚。关掉 AI = 吊销密钥，立即生效。迁移 downgrade 条件见 §2。
@@ -403,11 +409,11 @@ AI 模块不算任何金额，不写任何金额列，响应里只有 token 数�
   2. **摄取契约加 `feature`**：单条与批量 schema、校验、指纹（有才加键）、入库；`docs/api.md` 摄取一节。
   3. **管理规则**：签发、吊销（锁、上限、审计），只写服务函数与测试。
   4. **管理接口**：`ai-access` 三个接口；用量事件列表的 `feature` 筛选与列表 / 详情字段；`docs/api.md`。
-  5. **AI 纯规则**：`/v1/messages` 请求校验、`client_rules.py`、假供应商下的 provider 适配器、签名交叉测试；全部可在 Worker 沙箱跑（不开路由）。
-  6. **请求路径**：路由、鉴权与进程内状态、模型护栏、outbox 写入、AI 模块独立 engine 与时限、提交结果核查、取消处理、落库失败的 `CRITICAL` 日志与暂存队列及其后台循环（含撞上已存在行时的转 `HELD` / 标复核）、配置与 compose secret、nginx `location = /v1/messages`、`httpx2` 升为运行时依赖（打包冒烟）、import 白名单测试、「计费全挂 AI 仍成功」测试、`docs/api.md` 的 `/v1/messages` 契约。⚠️ 合并前 Kelvin 建好 key 文件。
+  5. **AI 纯规则**：`/v1/messages` 请求校验、`client_rules.py`、假供应商下的 provider 适配器、签名交叉测试、`httpx2` 升为运行时依赖（打包冒烟）；全部可在 Worker 沙箱跑（不开路由）。
+  6. **请求路径**：路由、鉴权与进程内状态、模型护栏、outbox 写入、AI 模块独立 engine 与时限、提交结果核查、取消处理、落库失败的 `CRITICAL` 日志与暂存队列及其后台循环（含撞上已存在行时的转 `HELD` / 标复核）、配置与 compose secret、nginx `location = /v1/messages`、**优雅停机**（`Dockerfile` 的 `--timeout-graceful-shutdown 85` 与 api 的 `stop_grace_period: 100s`，以及 `test_compose.py` 钉住它们与请求总时限的关系；必须与请求路径同一次上线，否则请求路径上线后、优雅停机上线前的部署会在 Docker 默认的 10 秒后强杀在途调用，用量不留记录）、import 白名单测试、「计费全挂 AI 仍成功」测试、`docs/api.md` 的 `/v1/messages` 契约。⚠️ 合并前 Kelvin 建好 key 文件。
   7. **投递**：beat 任务、领取 / 签名 / 发送 / 结算、配置项。
   8. **告警与运维**：`ai_usage_outbox` 告警维度（含 `HELD`；`tests/backend/test_internal_alerts.py` 钉着维度名）、CLI 重投与 `ai-usage-held`（`release` / `discard` / `import` / `ack`）、`docs/runbook.md` 与 `docs/deployment.md`。
-  9. **健康检查与停机**：`/healthz/ai`、`/healthz/billing`、nginx allow、`deploy.sh` 冒烟、优雅停机、`test_compose.py`。
+  9. **健康检查**：`/healthz/ai`、`/healthz/billing`、nginx allow、`deploy.sh` 冒烟、`test_compose.py`（优雅停机已随第 6 项上线）。
   10. **前端**（不走闸门）：项目详情里的「AI API」面板（签发时 token 只显示一次、吊销）；用量事件页加「功能」列与筛选。
   11. **CI 策略**（不走闸门）：`check_repo_policy.py` 拒绝同时改 `app/ai_api/` 与钱包 / 支付 / 定价路径的 PR。
 - **上线后的试点验收**（人工；第 3 阶段 + E-13）：
@@ -501,3 +507,6 @@ AI 模块不算任何金额，不写任何金额列，响应里只有 token 数�
 | v3 | 2026-10-13 | 去掉能力注册表、能力白名单与每功能专用接口，改为通用 `POST /v1/messages`（Messages API 子集 + 必填 `feature`），功能定义移到业务系统；新增模型护栏（目录内 `ACTIVE`）与单次上限；摄取契约加可选 `feature`（指纹只在有值时加键）、`usage_events` 加列与索引、后台按功能筛选；表结构从三张新表改为两张新表 + 一列；拒答 / 截断改为 200 由调用方判断；供应商 400 类映射 422；§3–§10 跟着改；拆分从 10 项改为 11 项 | Kelvin 2026-10-13：功能定义放 CRM，AI 模块只负责调用与计费；功能标签现在就加；护栏与接口形状按推荐 |
 | v4 | 2026-10-13 | 补 outbox 落库失败的处置：固定文案的 `CRITICAL` 日志、进程内暂存队列与后台循环、库恢复后落成 `HELD` 行、`HELD > 0` 严重告警、CLI `release` / `discard` / `import` 与审计；outbox 状态加 `HELD`、`DISCARDED` 与 `resolved_at`；补 MySQL 并发签发测试 | Codex 对 v3 的两个阻断项（spec §20 的告警与对账未闭合；密钥上限缺并发测试） |
 | v5 | 2026-10-13 | 提交报错时先核查再定结果；暂存落库撞上已存在的行时，`PENDING` 转 `HELD`、已进入投递的标 `review_required_at` 并告警、`ack` 复核留审计；AI 模块独立 engine 与 5 秒库超时、75 秒请求总时限、优雅停机 85 秒 / 停机宽限 100 秒、取消时也记 `CRITICAL` 并暂存；outbox 加两列；补对应状态行、失败矩阵与测试 | Codex 对 v4 的两个阻断项（提交结果不确定时会绕过人工处置自动计费；停机超时会无声丢失用量） |
+| v6 | 2026-10-13 | 签名凭据改为「可验签行里 `valid_from` 最晚、并列取 `id` 最大」；非信封的 5xx 可重试、其他非信封响应进 `DEAD`；`DEAD` 告警只计未复核的行，`ack` 扩到 `DEAD`、重投清 `reviewed_at`；部署冒烟同时校验正文 `data.status`；写明 import 白名单只约束 `app.*`、投递任务照现有写法注册；补对应状态行、失败矩阵与测试 | 登记前预审（另一会话按 v2 登记时的核对结论，代码已核实）：`key_version` 跨 `api_key` 不可比；非信封 5xx 会把用量判死；`DEAD` 总数告警会永久报警；SPA 兜底让冒烟误判成功 |
+| v7 | 2026-10-13 | 日志 `import` 遇到已存在的 `event_id` 时不再拒绝，改为照「提交结果不确定」第 2 步转 `HELD` 或写复核标记，新增审计 `AI_USAGE_HELD_IMPORT`；投递退避加 [0.5, 1.0] 随机系数；补重启后补录的组合测试与退避抖动测试 | Codex 对 v6 的两个阻断项（重启后补录无法建立复核状态；退避缺 spec §22 要求的 jitter） |
+| v8 | 2026-10-13 | 优雅停机从第 9 项挪到第 6 项（与请求路径同一次上线）；`httpx2` 升运行时依赖挪到第 5 项；写明 AI 密钥要等第 8 项合并后才签发；第 9 项改名「健康检查」 | Codex 对 v7 的阻断项（分批上线时，请求路径已上线、优雅停机未上线的那段部署会强杀在途调用、不留记录） |

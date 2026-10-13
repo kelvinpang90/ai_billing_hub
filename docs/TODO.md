@@ -35,7 +35,7 @@
 8. `AIH-TASK-062` AI 模块第七层：调用接口、进程内鉴权与状态、模型护栏与公网入口
 9. `AIH-TASK-063` AI 模块第八层：用量 outbox 的领取、签名上报、结算与重试
 10. `AIH-TASK-064` AI 模块第九层：用量 outbox 告警维度、死信重投与待处置用量命令、运维文档
-11. `AIH-TASK-065` AI 模块第十层：AI 与计费两个就绪检查、部署冒烟与优雅停机
+11. `AIH-TASK-065` AI 模块第十层：AI 与计费两个就绪检查与部署冒烟
 12. `AIH-TASK-066` 管理端前端：项目的 AI 密钥面板与用量事件按功能筛选
 
 ### 已阻塞
@@ -58,6 +58,7 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
+- 待登记：`.env.example` 补 AI 模块的配置项（Worker 不能改 `.env` 类文件；AIH-TASK-063 合并后由管理员补，内容以 `docs/deployment.md` 为准）
 - 待登记：用量按功能（`feature`）汇总：每个功能的调用次数、平均 token 与成本（依赖设计闸门 #281 给用量事件加的 `feature`；归 Phase 5 用量分析）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
