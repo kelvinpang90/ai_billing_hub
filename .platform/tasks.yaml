@@ -3500,3 +3500,861 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AI 模块（acuven_ai_api 并入，设计闸门 #281 已批准 v23，docs/design/AI-MODULE.md）。
+  # 设计 §8 拆分 11 项：第 1–5 项为 056–060；第 6 项分四批为 061（用量写入与落库失败处置）、062（配置、key 文件、
+  # 公网入口与优雅停机）、063（调用接口）、064（模块边界与计费全挂测试、调用接口文档）；第 7 项为 065；
+  # 第 8 项分三批为 066（告警）、067（重投与死信确认）、068（待处置用量命令与运维文档）；第 9、10、11 项为 069、070、071。
+  - id: AIH-TASK-056
+    title: AI 模块第一层：迁移 0021、两张新表与用量事件的功能标签列
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 1 项：迁移 0021 新建 ai_client_keys、ai_usage_outbox，给 usage_events 加可空列 feature 与索引；新子包 app/ai_api/ 与两张表的模型，UsageEvent 模型加 feature 列。不写服务函数、接口、请求路径与投递，也不加审计动作（设计 §2「数据库」：由写它们的任务各自加）。
+    status: ready
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '迁移文件名 alembic/versions/20261013_0021_ai_module.py，revision 0021_ai_module，down_revision 0020_status_sync；两张表的列、类型、可空、宽度、排序规则、CHECK、唯一约束、复合外键与索引逐列按设计 §2「数据库」（复合外键照 integration_credentials 的写法指向 projects(id, tenant_id)、ON DELETE RESTRICT；next_attempt_at 在 MySQL 用 DATETIME(6)；含 first_attempted_at、dead_acked_at、review_required_at、reviewed_at、resolved_at 五个可空时间列；各列类型、DATETIME 精度与排序规则按设计）；usage_events 加 feature VARCHAR(64) NULL（utf8mb4_0900_bin）与索引 ix_usage_events_tenant_feature_occurred (tenant_id, feature, occurred_at)；文件头照 0020 的结构写 §132 第 13 条分析；downgrade 条件按设计（两张新表都为空且 usage_events 没有非空 feature，否则抛错拒绝），--sql 离线模式不做这项检查'
+      - '模型：新建 app/ai_api/__init__.py；app/ai_api/models.py 放 ai_client_keys 的模型，app/ai_api/outbox.py 放 ai_usage_outbox 的模型（本任务只放模型）；app/models/usage.py 的 UsageEvent 加 feature 列；alembic/env.py 照现有写法 import 两个新模块；app/ai_api/ 下的文件只 import 设计 §2「AI 请求路径可 import 的白名单」内的 app.* 模块'
+      - '测试：迁移升降级可逆；两张表与新列的列、宽度、可空、约束与索引（照 test_migrations.py 与 test_model_columns.py 已有写法）；复合外键拒绝项目与租户错配的插入；CHECK 拒绝越界的 status、REVOKED 与 revoked_at 不一致、attempts 小于 0；client_id 与 event_id 唯一；任一张新表非空或已有非空 feature 时 downgrade 抛错拒绝；tests/backend/test_fx_rates_db.py 等降到固定版本后断言字面表集合的用例补上新表；MySQL 用例在 BILLING_TEST_DATABASE_URL 未设置时 skip、CI 必跑'
+      - 'docs/database-schema.md 写两张新表、usage_events.feature、行不删除、AI 请求路径只写 ai_usage_outbox、每个项目至多 2 把 ACTIVE 密钥由服务函数在项目行锁内保证（数据库不强制）'
+      - '不改摄取契约、计价与任何服务函数；不做接口、请求路径、投递与前端；不加审计动作'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - alembic/versions/20261013_0021_ai_module.py
+      - alembic/env.py
+      - app/ai_api/__init__.py
+      - app/ai_api/models.py
+      - app/ai_api/outbox.py
+      - app/models/usage.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_fx_rates_db.py
+      - tests/backend/test_model_columns.py
+      - docs/database-schema.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-057
+    title: AI 模块第二层：用量摄取契约加可选的功能标签
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 2 项：单条与批量用量摄取接受可选字段 feature（格式按设计 §2「功能标签 feature 的落点」），指纹只在事件带 feature 时加键，入库写 usage_events.feature。定价、扣费与内部计量不读 feature；不改后台接口。
+    status: ready
+    depends_on:
+      - AIH-TASK-056
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/schemas/usage_ingest.py：单条与批量里每一条的 schema 加可选 feature，正则与长度按设计；显式的 JSON null 等同于不带；不合规时 422 VALIDATION_ERROR，与其他字段同一套错误与 retryable；批量里一条非法只影响那一条（沿用批量现有的逐条语义）'
+      - 'app/services/usage_ingest.py 的 payload_fingerprint 只在事件带非空 feature 时把 feature 键加入规范对象；app/repositories/usage_events.py 入库时写 feature；定价规则解析、扣费与内部计量一概不读 feature'
+      - '测试：指纹兼容（不带 feature 与 feature 为 null 的事件，指纹都与改动前代码算出的固定向量逐字相同，向量写死在测试里）；同一 event_id 先不带后带、或两次取不同值，得到 IDEMPOTENCY_CONFLICT 且没有第二次财务效果；单条与批量带合法值入库、不带为空、非法 422；两个只差 feature 的事件（不同 event_id）计价结果相同'
+      - 'docs/api.md 的用量摄取一节加 feature：可选、null 等同不带、格式、只用于统计、不参与计价、指纹规则'
+      - '不改后台接口、AI 模块代码与前端'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/schemas/usage_ingest.py
+      - app/services/usage_ingest.py
+      - app/repositories/usage_events.py
+      - tests/backend/test_usage_ingest_service.py
+      - tests/backend/test_usage_ingest_api.py
+      - tests/backend/test_usage_ingest_batch_api.py
+      - tests/backend/test_usage_billing.py
+      - docs/api.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-058
+    title: AI 模块第三层：AI 密钥的签发与吊销规则
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 3 项的服务函数（不开接口）：app/ai_api/admin.py 的列出、签发、吊销，含项目行锁、每个项目至多 2 把 ACTIVE、审计与数据改动同一事务；新增两个审计动作。
+    status: ready
+    depends_on:
+      - AIH-TASK-056
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/ai_api/admin.py 按设计 §2「管理」表与表后一段：client_id 与 token 的生成格式（256 位随机）；库里只存 token 的 SHA-256；token 只出现在签发的返回值里一次；列出含已吊销、按 created_at 倒序、同一秒按 id 倒序；客户或项目不存在时沿用 integration_access 的 CUSTOMER_NOT_FOUND / PROJECT_NOT_FOUND，client_id 不存在或不属于该项目时 404 AI_CLIENT_KEY_NOT_FOUND；已有 2 把 ACTIVE 时签发得到 409 AI_CLIENT_KEY_LIMIT；吊销已吊销的得到 409 AI_CLIENT_KEY_REVOKED；错误码按设计 §2「细节约定」，CUSTOMER_NOT_FOUND / PROJECT_NOT_FOUND 在 admin.py 里用 app.core.errors 定义，不 import integration_access；签发锁项目行、吊销锁该密钥行'
+      - '审计：app/models/auth.py 的 AuditAction 末尾新增 AI_CLIENT_KEY_CREATE、AI_CLIENT_KEY_REVOKE，并按同一顺序追加到 frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS（adminAudit.test.ts 逐个比对后端枚举），前端其余文件不动；用 app.services.auth.record_audit 写；entity_type ai_client_key 在 admin.py 里定义为本地 Final 常量、entity_id 是 client_id，app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES 加上它并注明写入方；before 与 after 只含 client_id 与状态，不含 token 与摘要；数据改动与审计同一事务'
+      - '测试：签发返回值格式、库里只有摘要；列出不含摘要、含已吊销、顺序；第三把 409；吊销与重复吊销；三种 404；审计写入失败时整体回滚；MySQL 并发签发（两个连接，用屏障让两边都过了参数校验再进事务，项目已有 1 把）恰好一个成功一个 409、最终 ACTIVE 恰为 2、只有一条 AI_CLIENT_KEY_CREATE；token 不出现在审计、日志与异常里'
+      - '不开接口，不做请求路径与前端面板'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/ai_api/admin.py
+      - app/models/auth.py
+      - app/services/audit_query.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_ai_admin_service.py
+    # MXC 里能跑的五项加 frontend.test（AUDIT_ACTIONS 与后端枚举逐个比对）；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - frontend.test
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-059
+    title: AI 模块第四层：AI 密钥的三个管理接口与用量事件按功能筛选
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 4 项：app/api/admin_ai_access.py 的三个 ai-access 接口并挂到 app/main.py；管理端用量事件列表增加 feature 查询参数，列表与详情返回 feature；docs/api.md 补两节。
+    status: ready
+    depends_on:
+      - AIH-TASK-057
+      - AIH-TASK-058
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '三个接口的路径、方法、请求体（签发与吊销都没有请求体）、响应字段与状态码按设计 §2「管理」表，调用 AIH-TASK-058 的服务函数；鉴权与 2FA 要求与现有管理接口相同；签发 201 的响应只这一次含 token 并带 Cache-Control: no-store，列出不含；错误走 §107 信封；请求与响应模型放 app/schemas/ai_access.py'
+      - 'tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES 加上三条新路由，401 / 403 探测补上 {client_id} 的替换值与需要的探测数据'
+      - '用量事件：app/api/admin_usage_events.py 加查询参数 feature（精确匹配；格式校验在管理员鉴权之后，与时间范围参数同一顺序）；app/schemas/usage_events.py 的列表与详情加 feature；app/repositories/usage_events.py 的查询加这个条件'
+      - 'docs/api.md：AI 密钥三个接口一节（写明 AI 密钥要等 AIH-TASK-068 合并后才签发，设计 §8「部署顺序」）；用量事件列表与详情的 feature 字段与筛选参数'
+      - '测试：未登录与非 ADMIN 被拒；三个接口的正常与错误路径（三种 404、AI_CLIENT_KEY_LIMIT 与 AI_CLIENT_KEY_REVOKED 两种 409，列表顺序含同一秒的并列）；签发响应含 token、列出不含；按 feature 筛选只返回该功能，列表与详情含 feature，未登录时非法值先得 401、登录后非法值 422'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/api/admin_ai_access.py
+      - app/schemas/ai_access.py
+      - app/main.py
+      - app/api/admin_usage_events.py
+      - app/schemas/usage_events.py
+      - app/repositories/usage_events.py
+      - tests/backend/test_admin_ai_access_api.py
+      - tests/backend/test_admin_usage_events_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-060
+    title: AI 模块第五层：调用接口的请求校验、上报签名规则与供应商适配器
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 5 项，全部是纯规则，不开路由、不读写数据库：app/ai_api/messages.py（调用接口的请求与响应模型与校验）、client_rules.py（签名规范串、回执与错误判定、用量载荷）、provider.py（Anthropic 适配器，async），签名交叉测试，以及 httpx2 升为运行时依赖。搬代码以 docs/design/ai-module-reference/ 下 acuven_ai_api b57c5b0 的逐字副本为准。
+    status: ready
+    depends_on:
+      - AIH-TASK-056
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。搬代码的来源只有 docs/design/ai-module-reference/ 下的副本（见 docs/design/ai-module-reference/README.md），不凭记忆重写；「逐字搬」只允许为满足 ruff 改空白与换行'
+      - 'messages.py：调用接口的请求与响应模型及纯校验按设计 §2「调用接口」表（feature 正则、model 长度、system、messages 条数与首条角色、max_tokens 范围、output_config 子集、未列出字段一律拒绝），以及按原始字节判请求体上限的纯函数；模型 strict=True（max_tokens 只收 JSON 整数）；两个上限以参数传入（配置项在 AIH-TASK-062）'
+      - 'client_rules.py：逐字搬 docs/design/ai-module-reference/app_billing_rules.py.txt 的 canonical_request、sign、receipt_acknowledges、error_outcome（status_allows_ai 不搬）；另加 signed_headers（由 app_billing.py.txt 改成不依赖 ClientBinding）、照 app_ids.py.txt 的 ULID 生成，以及按设计 §2「用量载荷」生成载荷的纯函数（含 feature 与公开 UUID）；不 import app.services.integration_auth 的 canonical_request 或 sign'
+      - 'provider.py：照 app_provider.py.txt 改成 async，用 httpx2 的 AsyncClient，transport 可注入，超时由调用方传入；只转发设计列出的子集字段，不加任何系统提示；text 块以一个换行符拼接；返回 text、stop_reason、实际模型名与四类 token；错误按设计 §2 错误表与「细节约定」的「供应商响应」一段分两类（供应商拒绝请求，只带合格的里层 error.type、否则 unknown；供应商不可用，含超时、网络、429、5xx、401、403、其他非 2xx、2xx 但不是 JSON 或缺 model 或缺可读 usage）；「可读的 usage」（含 10¹² 上限）与 model 格式按设计 §2「细节约定」（model 正则与 MAX_TOKENS 在 client_rules.py 里抄一份摄取端的，测试断言两边相同）；content 与 stop_reason 的异常形状按「供应商响应」一段；调用接收一个墙钟预算参数并在内部用 asyncio.timeout 截断，慢速逐段返回也按时结束；异常消息不拼接供应商响应体；另加读取 Anthropic key 文件的函数（文件不存在、为空或只有空白都算未配置）'
+      - 'pyproject.toml 把 httpx2 从 dev 依赖升为运行时依赖（版本下界照 dev 依赖，设计 §8 第 5 项）；scripts/packaging_smoke.py 加 import app.ai_api.provider，证明装好的那一份带着 httpx2；app/main.py 与其他已有模块都不 import 本任务的新模块'
+      - '测试（tests/backend/test_ai_rules.py）：搬 tests_test_billing_rules.py.txt 的用例（status_allows_ai 的除外）；请求校验的每种 422 与边界（max_tokens 4000 与 4001、请求体 65536 与 65537 字节）；provider 在假 transport 下的请求形状（只含子集字段、没有额外系统提示）、换行拼接、各错误分类（含其他非 2xx、缺 model、content 不是列表）、慢速逐段返回在预算到点时截断、拒答与截断原样返回、空文本；设计 §7「签名交叉验证」一行（client_rules 生成的头交给 app.services.integration_auth.verify_signature 验通过，另用标准库 hmac 手算一个固定向量逐字相同，只在测试里同时 import 两边）'
+      - '不做路由、数据库读写、outbox 写入、投递与配置项'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/ai_api/messages.py
+      - app/ai_api/client_rules.py
+      - app/ai_api/provider.py
+      - tests/backend/test_ai_rules.py
+      - pyproject.toml
+      - scripts/packaging_smoke.py
+    # MXC 里能跑的五项；tests.backend 与打包冒烟只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-061
+    title: AI 模块第六层：用量写入 outbox、提交结果核查与落库失败的暂存处置
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的第一批（设计 §8：第 6 项分三批交付）：AI 模块独立的数据库 engine 与三个超时、用量写入 outbox、提交报错后的当场核查、取消时的处理、落库失败的 CRITICAL 日志、暂存队列与把它落成 HELD 行的后台循环（含撞行规则）。只写函数与测试，不开路由、不接入应用生命周期、不加配置项。
+    status: ready
+    depends_on:
+      - AIH-TASK-060
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/ai_api/database.py：AI 模块自己的 engine 与 session 工厂（同一个数据库 URL、独立连接池），取连接等待、建连接、单次读写三个超时按设计 §2「请求路径」的「时限」一段，连接池 pool_size 等于线程数、max_overflow 为 0（「AI 模块的连接池」一段）；以及 AI 模块专用的固定大小 ThreadPoolExecutor 与「提交到它、用 asyncio.wrap_future 等结果、外包 asyncio.timeout」的 async 辅助函数（超时只撤掉排队中的任务），外加准入计数（上限 = 线程数 + 排队上限，底层任务结束才释放，满了立刻失败）；超时与线程数都以参数传入（配置项在 AIH-TASK-062）'
+      - 'app/ai_api/outbox.py：写入一行 PENDING 的同步函数，提交报错时按设计 §2「提交结果不确定」第 1 步从池里另取连接核查，只返回 written、written_after_error、absent、unknown 四种结果之一，不记日志、不碰队列；另提供协程 persist_usage：经专用线程池调用它，按设计 §2「细节约定」的「谁记 CRITICAL、谁放进暂存」一段（它是取消的唯一处理点），written_after_error 记 WARNING，absent、unknown、墙钟到点、被取消四种情况下用「已记录」标记保证只记一次 CRITICAL（消息文本与字段名逐字按设计：ai_request_id、四类用量字段名不含 token）并放进暂存，墙钟到点后线程才返回的结果丢弃；暂存条目的字段按「暂存条目的内容」'
+      - 'app/ai_api/held.py：有上限的暂存队列（满了丢最旧的一条，另记一条文案为 AI usage held buffer overflow 的 CRITICAL）；一次落库的函数：逐条 INSERT HELD（初值按设计），撞上 event_id 唯一约束时按「提交结果不确定」第 2 步的三条规则（只碰 resolved_at 为空的行；只有 first_attempted_at 为空的 PENDING 转 HELD，尝试过投递的写复核标记并记设计给出字段的 CRITICAL），取出、放回与各类错误的处理按「暂存后台循环每一步的时限」（先从队列头取出再处理；到点或连接类错误放回队列头并停这一轮；锁等待、死锁与其他错误记 ERROR、放回队列尾、接着处理下一条）；撞上已带复核标记且未复核的行时照样再记一次复核 CRITICAL；后台循环（周期、停机前最后一次尝试且包在 5 秒墙钟里，库访问同样走专用线程池）以 async 函数提供，由 AIH-TASK-063 接到应用生命周期'
+      - '测试（tests/backend/test_ai_outbox.py，MySQL；只测本任务交付的函数，设计 §7 那几行里属于投递、告警、ack、import 的部分不测，需要「行已被投递」时直接用 SQL 造数据）：设计 §7「提交结果不确定」「撞行规则」「日志字段」三行，「时限与取消」与「用量落库失败的处置」两行里不需要路由的部分：commit 真正提交后再抛错时核查查到、核查也失败；暂存条目撞上各种状态的行；转 HELD 的条件更新与投递领取并发只有一个生效；同一 event_id 暂存两次只写一次；队列满丢最旧；一轮遇连接错误即停；取消时留下固定文案的 CRITICAL 与暂存条目；用现有 JsonFormatter 输出后四个 usage_ 字段没有被脱敏'
+      - '不开路由、不改 app/main.py 与配置，不做 CLI 与告警维度'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/ai_api/database.py
+      - app/ai_api/outbox.py
+      - app/ai_api/held.py
+      - tests/backend/test_ai_outbox.py
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-062
+    title: AI 模块第七层：AI 配置项、只挂给 api 的 Anthropic key 文件、公网入口与优雅停机
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的第二批：api 用到的 AI 配置项、只挂给 api 的 Anthropic key 文件、nginx 的 /v1/messages 入口（按来源限速、超限 413 的 JSON 信封）、uvicorn 优雅停机与 api 的停机宽限。设计 §8：优雅停机必须不晚于路由上线，所以本任务排在路由（AIH-TASK-063）之前。不写路由。
+    status: ready
+    depends_on:
+      - AIH-TASK-056
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/core/config.py 加设计 §2「配置」表里 api 用到的各项并带默认值：BILLING_AI_ANTHROPIC_KEY_FILE、BILLING_AI_PROVIDER_TIMEOUT_SECONDS、BILLING_AI_REQUEST_DEADLINE_SECONDS、三个库超时、BILLING_AI_DB_THREADS、BILLING_AI_DB_QUEUE_MAX、BILLING_AI_MAX_REQUEST_BYTES、BILLING_AI_MAX_OUTPUT_TOKENS、暂存队列两项'
+      - 'docker-compose.yml：只给 api 挂 billing_anthropic_key 这个 secret（宿主机 ./secrets/anthropic.key），BILLING_AI_ANTHROPIC_KEY_FILE 只给 api，其余新变量经 x-backend 的 environment 转发；docker-compose.yml 里的 <<: *backend 是浅合并：服务里一写 environment 或 secrets 就整个替换继承来的那份，所以新变量加在 x-backend 的 environment 里，需要只给某个服务的键时先给 x-backend 的 environment 加锚点再合并，secrets 列表照抄全部已有条目再加新的一条；api 加 stop_grace_period: 100s，容器健康检查仍只探 /healthz；Dockerfile 的 uvicorn 加 --timeout-graceful-shutdown 85'
+      - 'deploy/nginx/billing.conf 按设计 §2「网络入口」新增 location = /v1/messages（不设 allow 名单、billing_ai 按来源限速与 429 JSON 信封、超限 413 换成 JSON 信封（429 与 413 的信封形状按设计 §2「细节约定」，不带 retryable）、proxy_read_timeout 90s、client_max_body_size 80k），/v1/ 下其他路径不转给 api'
+      - 'tests/backend/test_compose.py：钉住上面的 nginx 值与两个 JSON 信封、secret 只挂给 api、停机时长与请求总时限的关系（总时限加 10 不超过优雅期，优雅期小于停机宽限）；test_every_credential_file_setting_is_wired_into_compose 改成允许显式列出的、只挂给 api 的例外（只有这一项），其余 *_file 仍必须接进 x-backend；tests/backend/test_config.py 覆盖新配置项的默认值、类型（五个时长是 float）与设计 §2「细节约定」里的配置校验（全部为正、总时限 ≥ 由三个库超时推出的鉴权读上限 + 写入上限 + 1、请求体上限 ≤ 81920），含把三个库超时调大或调小时下限跟着变'
+      - 'PR 正文「已知未做」写明：合并前 Kelvin 须在 VPS 部署目录的 secrets/ 下建好 anthropic.key，否则 compose 起不来、部署失败；本任务不创建也不读取该文件；.env.example 不改（Worker 不能改 .env 类文件，由管理员另补）'
+      - '不写路由、不改 app/main.py 与 app/ai_api/ 下的文件'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/core/config.py
+      - docker-compose.yml
+      - Dockerfile
+      - deploy/nginx/billing.conf
+      - tests/backend/test_compose.py
+      - tests/backend/test_config.py
+    # MXC 里能跑的五项；tests.backend 与 compose 构建只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-063
+    title: AI 模块第八层：调用接口、进程内鉴权与状态、模型护栏
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的第三批：调用接口路由挂到 app/main.py，access.py 的只读查询（AI 密钥、租户与项目状态、模型目录），请求顺序与时限，调 AIH-TASK-060 的适配器与 AIH-TASK-061 的写入，暂存后台循环接到应用生命周期。模块边界与计费全挂两条测试及 docs/api.md 的调用接口一节在 AIH-TASK-064。
+    status: ready
+    depends_on:
+      - AIH-TASK-061
+      - AIH-TASK-062
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/ai_api/routes.py 与 access.py 按设计 §2「请求路径」「调用接口」：校验 → 鉴权 → 状态 → 模型 → key 的固定顺序，状态码与错误码按设计 §2「细节约定」的错误码表；模型与别名的判定按「细节约定」，别名在转发前解析成目标模型 code，发给供应商的只有模型 code；读库失败 503 不调模型；同步库访问一律经 AIH-TASK-061 的专用线程池（max_workers 取 BILLING_AI_DB_THREADS），不用 run_in_threadpool 与 anyio 的 CapacityLimiter；三个阶段的墙钟上限按「时限」一段用 asyncio.timeout 实现（鉴权读超时 503；模型调用超时 502；写 outbox 与核查超时按结果未知走 AIH-TASK-061 的 CRITICAL 与暂存并 503）；供应商错误按错误表映射；模型返回后立即调用 AIH-TASK-061 的 persist_usage（两者之间没有 await），按它的结果返回 200 或 503；200 响应形状与 request_id 的含义按设计、不套信封；key 文件只缓存读成功的；各阶段时限由配置推出（「细节约定」）；请求路径不碰 Redis'
+      - 'app/main.py 挂路由，在应用生命周期里创建 AI 模块的 engine、专用线程池与准入计数并挂在 app.state.ai_runtime 上（路由与健康检查都从那里取；没配数据库时为空，/v1/messages 一律 503 AI_STORE_UNAVAILABLE），并启停 AIH-TASK-061 的暂存后台循环（参数取 AIH-TASK-062 的配置项；停机前最后一次落库 5 秒上限）'
+      - '测试 tests/backend/test_ai_messages_api.py 覆盖设计 §7 的正常路径、请求校验、模型护栏、供应商错误映射、供应商 200 但用量或模型不可用、拒答与截断、状态拦截、鉴权、租户越权（调用那一半）、内容不落地、请求路径只写 outbox、设计 §7「时限与取消」一行（读库挂住、供应商挂住、供应商慢速逐段返回、写 outbox 挂住、同步库调用永不返回、持续卡住时存活线程与已提交任务都不超过上限、超额请求立刻 503、计费接口照常应答、放开后恢复，用缩小的时限）、key 未配置 503 的位置'
+      - '模块边界测试、「计费全挂 AI 仍成功」测试与 docs/api.md 的调用接口一节在 AIH-TASK-064'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/ai_api/routes.py
+      - app/ai_api/access.py
+      - app/main.py
+      - tests/backend/test_ai_messages_api.py
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-064
+    title: AI 模块第九层：模块边界测试、计费全挂时 AI 仍成功的测试与调用接口文档
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的最后一批：设计 §7「模块边界」的 AST 白名单测试、「计费全挂 AI 仍成功」的请求那一半，以及 docs/api.md 的调用接口一节。只加测试与文档，不改 app/ 下的代码；测试发现代码不符时停下并在 PR 里说明。
+    status: ready
+    depends_on:
+      - AIH-TASK-063
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'tests/backend/test_ai_module_boundary.py：按设计 §2「细节约定」的三组文件分别检查 import（只约束 app.* 模块，第三方库不受限；按模块检查，不按名字；app.core 只许 config、logging、errors 三个，投递侧另加 crypto；app/ai_api/ 下不在任何一组的 .py 文件让测试失败，组里列了但还没建的文件跳过）；另按设计 §2「模块边界」的「反向」一条检查：扫描 app/（不含 app/ai_api/）、alembic/ 与 scripts/，不含 tests/，只有列出的七处例外可以 import app.ai_api'
+      - 'tests/backend/test_ai_billing_down.py：设计 §7「计费全挂 AI 仍成功」一行的请求那一半——摄取端点一律 503 或抛异常、计费 worker 抛异常、broker 不可达三种情况下 AI 调用都 200，outbox 行留在 PENDING；投递那一半在 AIH-TASK-065'
+      - 'docs/api.md 新增调用接口一节：请求字段与 strict 规则、200 响应、request_id 与 HTTP 关联 ID 的区别、错误码表（含 nginx 的 413 与 429 信封）、feature、模型与别名的判定、护栏与上限、同机与公网两个入口、AI 密钥要等 AIH-TASK-068 合并后才签发；并把原文「这些行为由集成方（acuven_ai_api）实现与测试」一句改为指向外部接入方'
+      - '不改 app/ 下任何文件'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - tests/backend/test_ai_module_boundary.py
+      - tests/backend/test_ai_billing_down.py
+      - docs/api.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-065
+    title: AI 模块第十层：用量 outbox 的领取、签名上报、结算与重试
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 7 项：app/ai_api/delivery.py 的 Celery 任务（领取、取签名凭据并在进程内解密、按 HMAC 契约 POST 到本服务的摄取端点、按回执结算、带抖动的退避、运行时间预算），注册为 celery-beat 周期任务，配置项接入 worker 与 beat。
+    status: ready
+    depends_on:
+      - AIH-TASK-063
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'delivery.py 按设计 §2「投递」逐条：领取的资格条件与条件 UPDATE、claim_id 与 60 秒租约、签名凭据的选取（用 is_verifiable 判定可验签的行里 valid_from 最晚、并列取 id 最大）与解密、凭据缺失与解不开（含 EncryptionNotConfigured）两种错误可重试、urllib POST 不跟随重定向、每次发送 10 秒墙钟上限（定时器到点从外部关 socket）与 64 KiB 正文上限、每次运行开头领取之前在子进程里解析服务名（2 秒到点杀掉回收；失败就不领取、记 WARNING、结束本次运行；成功则本次运行直连该地址、Host 头写服务名）、预算从运行开始计、任务注册 time_limit=59 与 soft_time_limit=57、配置校验预算 + 10 < 57 且 59 < 租约、每次尝试新的请求 ID 而 body 与 event_id 不变、判定的先后与错误码按设计 §2「投递」（先看状态码：200 / 202 只看回执，不是 JSON 或不匹配记 INVALID_BILLING_RECEIPT 可重试；其他状态是信封就交给 client_rules 的 error_outcome，不是信封则 5xx 记 BILLING_UNAVAILABLE 可重试、其余记 INVALID_BILLING_RESPONSE 进 DEAD；网络错误与超时记 NETWORK_ERROR 可重试）、带 [0.5, 1.0] 随机系数的退避（随机源可注入）、运行时间预算、同一时刻只有一次运行（锁名带库名的 MySQL 命名锁，拿不到就立刻结束）、领取时写 first_attempted_at（为空才写）、结算以 claim_id 为围栏且三种结果都清 claim_id、DELIVERED 同时清 last_error、进 DEAD 记 ERROR；HELD 与 DISCARDED 永远不被领取'
+      - '任务用 celery.shared_task(name="ai_api.deliver_due") 注册，app/core/celery_app.py 的 TASK_MODULES 加 app.ai_api.delivery，beat_schedule 加同名条目（周期取 BILLING_AI_DELIVERY_SWEEP_SECONDS，expires 取周期的 0.9 倍，照现有条目）；app/core/config.py 加设计 §2「配置」表里 worker 与 beat 用到的各项（BILLING_AI_INGEST_BASE_URL 与四个 BILLING_AI_DELIVERY_*）并带默认值，BILLING_AI_INGEST_BASE_URL 只收明文 http 协议（设计 §2「配置」表），其他协议在配置校验时报错；投递用 app/ai_api/database.py 的 engine 工厂在每个 worker 进程里建一次自己的 engine；docker-compose.yml 经 x-backend 的 environment 转发（docker-compose.yml 里的 <<: *backend 是浅合并：服务里一写 environment 或 secrets 就整个替换继承来的那份，所以新变量加在 x-backend 的 environment 里，需要只给某个服务的键时先给 x-backend 的 environment 加锚点再合并，secrets 列表照抄全部已有条目再加新的一条）'
+      - '测试（tests/backend/test_ai_delivery.py，MySQL，发送函数可注入，用 TestClient 接到本服务真实的摄取端点）：设计 §7「并发领取」「幂等重放」「旧 claim 不覆盖」「Redis/Celery 丢失」「签名凭据」「非信封响应」「慢速回执」「解析卡住与恢复」「退避抖动」各行，以及「计费全挂 AI 仍成功」的投递那一半（投递一轮后行仍 PENDING、attempts 为 1）；回执 event_id 不匹配算可重试；HELD 行不被领取；预算用完后不再领新行；两个运行并发时只有一个拿到命名锁；「幂等重放」里的重投在测试里直接用 SQL 把行改回 PENDING（CLI 在 AIH-TASK-067）；凭据错误只断言错误码与可重试，告警在 AIH-TASK-066；tests/backend/test_celery.py 钉着的任务与 beat 清单同步补上'
+      - '不做告警维度、CLI 与运维文档'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/ai_api/delivery.py
+      - app/core/celery_app.py
+      - app/core/config.py
+      - docker-compose.yml
+      - tests/backend/test_ai_delivery.py
+      - tests/backend/test_celery.py
+      - tests/backend/test_config.py
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-066
+    title: AI 模块第十一层：用量 outbox 的告警维度与阈值
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 8 项的第一批：告警维度 ai_usage_outbox（未处理的 DEAD、HELD、待复核为 P1，积压超时为 P2），阈值配置经 AlertContext 传入，docs/api.md 的告警维度表加一行。
+    status: ready
+    depends_on:
+      - AIH-TASK-065
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/alerts.py 的 DIMENSIONS 末尾加 ai_usage_outbox，判定按设计 §2「告警维度」（DEAD 只计 dead_acked_at 为空的行；严重 = P1、警告 = P2，与 status_webhook 同一用法），摘要只有计数与秒数；AlertContext 新加的阈值字段带默认值，现有构造不受影响；app/api/internal_alerts.py 构造 AlertContext 时从配置读阈值'
+      - 'app/core/config.py 加 BILLING_AI_PENDING_ALERT_SECONDS 并带默认值；docker-compose.yml 经 x-backend 的 environment 转发（docker-compose.yml 里的 <<: *backend 是浅合并：服务里一写 environment 或 secrets 就整个替换继承来的那份，所以新变量加在 x-backend 的 environment 里，需要只给某个服务的键时先给 x-backend 的 environment 加锚点再合并，secrets 列表照抄全部已有条目再加新的一条）'
+      - 'tests/backend/test_internal_alerts.py 钉着的维度名与空库响应、tests/backend/test_status_webhook_alerts.py 里「status_webhook 是最后一行」的断言同步更新；新测试覆盖 DEAD（已处理与未处理）、HELD、待复核（已复核与未复核）、积压超时与不超时各种数据下的级别与摘要'
+      - 'docs/api.md 的 GET /internal/alerts 一节的维度表加 ai_usage_outbox 一行（统计口径、级别、摘要样例）'
+      - '不做 CLI、运维文档与前端'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/services/alerts.py
+      - app/api/internal_alerts.py
+      - app/core/config.py
+      - docker-compose.yml
+      - tests/backend/test_internal_alerts.py
+      - tests/backend/test_status_webhook_alerts.py
+      - tests/backend/test_config.py
+      - docs/api.md
+    # MXC 里能跑的五项；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-067
+    title: AI 模块第十二层：死信重投与死信处理确认两个命令
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 8 项的第二批：app/cli.py 的 ai-usage-requeue 与 ai-usage-dead-ack，命令逻辑在 app/ai_api/ops.py，两个审计动作。
+    status: ready
+    depends_on:
+      - AIH-TASK-066
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/ai_api/ops.py 按设计 §2「死信重投」：重投的错误码白名单、--include-delivered、各字段的重置（first_attempted_at、reviewed_at、review_required_at 不动）；ai-usage-dead-ack 只对 dead_acked_at 为空的 DEAD 行；输入、输出、退出码、--reason 校验、审计内容与事务边界按设计 §2「细节约定」的「人工命令的输入与输出」「人工命令的事务边界」；不合规的一律拒绝；app/cli.py 只解析参数并调用'
+      - '审计：app/models/auth.py 的 AuditAction 末尾依次新增 AI_USAGE_REQUEUE、AI_USAGE_DEAD_ACK，并按同一顺序追加到 frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS；用 app.services.auth.record_audit 写，每改一行一条；entity_type ai_usage_outbox 在 ops.py 里定义为本地 Final 常量、entity_id 是 event_id，app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES 加上它并注明写入方'
+      - '测试（tests/backend/test_ai_ops_requeue.py，MySQL）：重投白名单内外的错误码、--include-delivered、重投的字段重置与不动的列；dead-ack 后告警消失、重投后再死又告警；多个 event_id 时部分失败的输出与退出码 1；--reason 为空或超过 255 字符时一个都不处理、退出码 2；设计 §7「事务中途失败」一行里这两个命令在审计写入时抛错的情况'
+      - '不做待处置用量的子命令与运维文档（AIH-TASK-068）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/ai_api/ops.py
+      - app/cli.py
+      - app/models/auth.py
+      - app/services/audit_query.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_ai_ops_requeue.py
+    # MXC 里能跑的五项加 frontend.test（AUDIT_ACTIONS 与后端枚举逐个比对）；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - frontend.test
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-068
+    title: AI 模块第十三层：待处置用量的四个子命令与运维文档
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 8 项的第三批：app/cli.py 的 ai-usage-held（release、discard、import、ack），逻辑接着写在 app/ai_api/ops.py，四个审计动作；docs/runbook.md 与 docs/deployment.md 的 AI 模块部分。本任务合并后才签发 AI 密钥（设计 §8「部署顺序」）。
+    status: ready
+    depends_on:
+      - AIH-TASK-067
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'ops.py 按设计 §2「用量落库失败的处置」第 5 步与「提交结果不确定」第 2 步：release、discard 只对 HELD 行；import 的逐字段校验、被拒行的输出与审计、处理结果的输出按设计 §2「细节约定」的「import 的输入校验与输出」，身份核对按「import 的身份核对」，event_id 不存在时写 HELD、已存在时与暂存撞行同一套规则；ack 只对待复核的行；输入、输出、退出码、--reason 校验、审计内容与事务边界按「人工命令的输入与输出」「人工命令的事务边界」；app/cli.py 只解析参数并调用'
+      - '审计：AuditAction 末尾依次新增 AI_USAGE_HELD_RELEASE、AI_USAGE_HELD_DISCARD、AI_USAGE_HELD_IMPORT、AI_USAGE_REVIEW_ACK，并按同一顺序追加到 frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS；沿用 AIH-TASK-067 定义的 entity_type'
+      - '测试（tests/backend/test_ai_ops_held.py，MySQL）：release 后变 PENDING、discard 后 DISCARDED；import 的四种情况与设计 §7「重启后补录（组合）」一行，以及每一种不合规字段、身份不符时被拒（打印 rejected、不写审计、退出码 1），只回报现状时不算失败；ack 写 reviewed_at 且已复核再 ack 被拒；设计 §7「事务中途失败」一行里这四个命令在审计写入时抛错的情况（release 那一种，行仍 HELD、投递领不到）；每个动作一条审计'
+      - 'docs/runbook.md 加 AI 模块场景：DEAD、HELD、待复核、积压各怎么查、怎么处置（含复核后用管理端手工调账退回、从日志 import）；docs/deployment.md 加 Anthropic key 文件、全部 BILLING_AI_ 配置项、部署时的排空窗口、AI 密钥要等本任务合并后才签发，以及 Healthchecks 要为新维度多建一个检查（现有 19 个，免费档上限 20，这一项之后到顶）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/ai_api/ops.py
+      - app/cli.py
+      - app/models/auth.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_ai_ops_held.py
+      - docs/runbook.md
+      - docs/deployment.md
+    # MXC 里能跑的五项加 frontend.test（AUDIT_ACTIONS 与后端枚举逐个比对）；tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - frontend.test
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-069
+    title: AI 模块第十四层：AI 与计费两个就绪检查与部署冒烟
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 9 项：/healthz/ai 与 /healthz/billing、nginx 访问名单、deploy.sh 冒烟加 /healthz/ai（校验状态码与正文）。优雅停机已随 AIH-TASK-062 上线。
+    status: ready
+    depends_on:
+      - AIH-TASK-063
+    acceptance_criteria:
+      - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/health.py 新增两个检查，判定与响应按设计 §2「健康检查与优雅停机」；/healthz 与 /readyz 行为不变；/healthz/ai 从 app.state.ai_runtime 取 AI 模块自己的 engine，经 AI 专用线程池查库（9 秒上限）、每次重读 key 文件、不调 Anthropic、不查 Redis，先库后 key、错误码与 200 的 data 按设计 §2「细节约定」，响应里不出现 key'
+      - 'deploy/nginx/billing.conf 给两个新路径加与 /readyz 完全相同的 allow 名单；deploy/deploy.sh 冒烟在现有检查之后要求 /healthz/ai 返回 200 且正文含固定字符串 "data":{"status":"ok"}（应用输出紧凑 JSON；部署主机不假设有 jq 或 Python；只看 200 会被前端 SPA 兜底骗过），否则走现有回滚；不改 Dockerfile 与停机配置'
+      - '测试：tests/backend/test_health.py 覆盖设计 §7「健康检查」一行；tests/backend/test_compose.py 钉住两个新路径的 allow 名单与 /readyz 一致；tests/backend/test_deploy.py 覆盖设计 §7「部署冒烟」一行（含 200 但正文是 HTML 时回滚）'
+      - 'docs/deployment.md 写两个检查的用途、部署冒烟以 /healthz/ai 为准'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - app/api/health.py
+      - deploy/nginx/billing.conf
+      - deploy/deploy.sh
+      - tests/backend/test_health.py
+      - tests/backend/test_compose.py
+      - tests/backend/test_deploy.py
+      - docs/deployment.md
+    # MXC 里能跑的五项；tests.backend 与 compose 构建只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-070
+    title: 管理端前端：项目的 AI 密钥面板与用量事件按功能筛选
+    purpose: >-
+      管理端前端：在客户详情的项目区块里加 AI 密钥面板（列出、签发时 token 只显示一次、吊销），调用 AIH-TASK-059 的三个接口；用量事件页加「功能」一列与筛选框（设计闸门 #281 已批准 v23 §8 第 10 项）。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-059
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 与 docs/design/AI-MODULE.md 为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件与设计文件；不装依赖；不改 .platform/ 与 planning-v1 块'
+      - '新增 frontend/src/api/aiAccess.ts 封装三个接口，写法沿用 frontend/src/api/integrationAccess.ts；frontend/src/api/adminUsageEvents.ts 的类型与列表查询加 feature'
+      - '新增 frontend/src/features/customers/AiAccessPanel.tsx，挂在 ProjectsPanel 每一行的展开区里，与已有面板并列、互不影响：列出密钥（client_id、状态、时间，含已吊销），加载中与失败（带 request_id）两种状态都画出来；签发后在一次性弹窗里显示 client_id 与 token，写明只显示这一次、关掉后无法再看；吊销要二次确认；第三把的 409 显示对应文案与 request_id，未知码回落到后端 message；提交中禁用按钮，成功后只让该项目的密钥查询失效重取；面板写明 AI 密钥要等运维命令上线（AIH-TASK-068）后才签发'
+      - 'frontend/src/features/usage/UsageEventsPage.tsx 加「功能」一列与按功能精确筛选的输入框，空值显示占位符；筛选值进查询参数'
+      - '文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts。测试（vitest + Testing Library，放在被测文件旁边）覆盖：三个 api 函数的路径与请求体；面板两种状态；签发弹窗只出现一次 token、关闭后列表不含 token；吊销确认与错误显示；用量事件页的功能列与筛选参数；示例 uuid 全零，token 用明显虚构的占位值'
+      - 'check_ai_access：在夹具客户详情的项目列表里点第一行的展开按钮（已展开则不再点；只点展开，不点签发或吊销）；AI 密钥面板不是加载失败或无权限状态；后端值取页面自己发出的 GET ai-access 接口的响应体（被动观察，不自己发请求），面板显示的密钥行数与响应里的条数一致。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，调用的接口已过闸门 #281，签发、吊销与上限规则全在后端，前端不改任何一条；PR 正文要把这条理由写出来'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/aiAccess.ts
+      - frontend/src/api/aiAccess.test.ts
+      - frontend/src/api/adminUsageEvents.ts
+      - frontend/src/api/adminUsageEvents.test.ts
+      - frontend/src/features/customers/AiAccessPanel.tsx
+      - frontend/src/features/customers/AiAccessPanel.test.tsx
+      - frontend/src/features/customers/ProjectsPanel.tsx
+      - frontend/src/features/customers/ProjectsPanel.test.tsx
+      - frontend/src/features/usage/UsageEventsPage.tsx
+      - frontend/src/features/usage/UsageEventsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    # MXC 里能跑的五项加前端三项；前端 build 与 tests.backend 只在 CI。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    # 合并且部署成功后，Worker 用本机固定的浏览器与凭据跑一次 acceptance.browser（最多 3 次尝试）。
+    # acceptance.browser 不在上面的 allowed_commands 里：它只能被这个 acceptance 块引用。
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_ai_access
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-071
+    title: 仓库策略检查：拒绝同时改 AI 模块与钱包、支付、定价代码的 PR
+    purpose: >-
+      按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）拆分第 11 项，对应 spec §141.5 的发布耦合缓解：scripts/check_repo_policy.py 的 PR 检查新增一条规则，同一个 PR 的改动文件里既有 app/ai_api/ 下的文件、又有钱包、账本、支付、定价、汇率或用量计费的代码时报错。只改策略脚本、它的测试与 WORKFLOW 的说明。
+    status: ready
+    acceptance_criteria:
+      - '规则与设计 §1 完成标准 7、§8 第 11 项一致；不改其他已有规则的行为'
+      - 'AI 一侧：路径以 app/ai_api/ 开头。钱包与支付一侧：app/models/wallet.py、app/repositories/wallet.py、app/services/wallet_adjustments.py、app/services/usage_billing.py、app/services/internal_billing.py、app/services/pricing_engine.py、app/services/pricing_rules.py、app/repositories/pricing_rules.py、app/models/pricing_rules.py、app/services/provider_prices.py、app/repositories/provider_prices.py、app/models/provider_prices.py、app/services/fx_rates.py、app/repositories/fx_rates.py、app/models/fx_rates.py、app/core/fx_source.py、app/services/usage_requeue.py、app/tasks/usage_billing.py、app/tasks/fx_fetch.py，以及 app/ 下文件名含 payment 的任何文件；两侧同时出现就报错，报错信息列出两侧各自命中的文件'
+      - '规则放在 check_pr 里、走现有的 changed_paths，与其他 PR 规则同一种报错与退出码；只有一侧或两侧都没有时不报'
+      - '测试（tests/test_check_repo_policy.py，unittest）：只改 AI、只改钱包、两侧都改、计费一侧是 app/tasks/usage_billing.py（计费 worker）、文件名含 payment、改 tests/ 下同名测试文件不算（只看 app/）六种情况'
+      - 'docs/WORKFLOW.md §5「分支与 PR 约定」加一条，写明这条规则与它来自 spec §141.5'
+      - '不改 app/ 下任何文件'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
+    allowed_change_paths:
+      - scripts/check_repo_policy.py
+      - tests/test_check_repo_policy.py
+      - docs/WORKFLOW.md
+    # MXC 里能跑的五项。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
