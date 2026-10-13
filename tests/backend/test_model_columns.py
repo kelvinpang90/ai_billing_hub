@@ -17,8 +17,11 @@ import enum
 
 import pytest
 from sqlalchemy import Enum as SAEnum
+from sqlalchemy.dialects import mysql
 from sqlalchemy.types import CHAR, BigInteger, Integer, Numeric, SmallInteger, String
 
+from app.ai_api.models import AiClientKey, AiClientKeyStatus
+from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
 from app.models.ai_catalog import (
     AiModel,
     AiProvider,
@@ -228,6 +231,50 @@ def test_the_status_delivery_columns_have_the_design_shape() -> None:
     assert url.type.length == 2048
     assert url.nullable is True
     assert Tenant.__table__.c.status_changed_at.nullable is True
+
+
+def test_the_ai_module_columns_have_the_design_shape() -> None:
+    """设计闸门 #281 v23 §2：AI 密钥与 outbox 的长度、可空性及微秒时间不可漂移。"""
+    key = AiClientKey.__table__.c
+    assert key.client_id.type.length == 40
+    assert key.token_sha256.type.length == 64
+    assert key.status.type.length == 16
+    assert key.revoked_at.nullable is True
+    assert [column.name for column in AiClientKey.__table__.primary_key] == ["id"]
+
+    outbox = AiUsageOutbox.__table__.c
+    for name in ("event_id", "request_id", "claim_id"):
+        assert isinstance(outbox[name].type, CHAR), name
+        assert outbox[name].type.length == 26, name
+    assert outbox.feature.type.length == 64
+    assert outbox.payload_json.nullable is False
+    assert outbox.status.type.length == 16
+    assert outbox.attempts.nullable is False
+    for name in (
+        "next_attempt_at",
+        "first_attempted_at",
+        "created_at",
+        "delivered_at",
+        "resolved_at",
+        "review_required_at",
+        "reviewed_at",
+        "dead_acked_at",
+    ):
+        assert getattr(outbox[name].type.dialect_impl(mysql.dialect()), "fsp", None) == 6, name
+    assert UsageEvent.__table__.c.feature.type.length == 64
+    assert UsageEvent.__table__.c.feature.nullable is True
+
+
+def test_the_ai_module_enum_values_have_the_pinned_widths() -> None:
+    assert {item.value for item in AiClientKeyStatus} == {"ACTIVE", "REVOKED"}
+    assert {item.value for item in AiUsageOutboxStatus} == {
+        "PENDING",
+        "SENDING",
+        "DELIVERED",
+        "DEAD",
+        "HELD",
+        "DISCARDED",
+    }
 
 
 def test_the_usage_quantity_is_decimal_20_8() -> None:

@@ -98,6 +98,7 @@ ERROR_CODE_LENGTH: Final = 64
 ERROR_MESSAGE_LENGTH: Final = 255
 API_KEY_LENGTH: Final = 64
 MISMATCH_LENGTH: Final = 32
+FEATURE_LENGTH: Final = 64
 # `quantity` 是用量不是金额，但同一个精度、同样不经过 float（设计 §2「金额精度」）。
 QUANTITY_PRECISION: Final = MONEY_PRECISION
 QUANTITY_SCALE: Final = MONEY_SCALE
@@ -273,6 +274,7 @@ class UsageEvent(Base):
     )
     error_code: Mapped[str | None] = mapped_column(String(ERROR_CODE_LENGTH), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(ERROR_MESSAGE_LENGTH), nullable=True)
+    feature: Mapped[str | None] = mapped_column(_text(FEATURE_LENGTH), nullable=True)
     # 保留微秒：别名与版本边界按 `[from, to)` 比较（025 §7「边界时刻」）。
     occurred_at: Mapped[dt.datetime] = mapped_column(
         DateTime().with_variant(mysql.DATETIME(fsp=6), "mysql"), nullable=False
@@ -383,6 +385,7 @@ class UsageEvent(Base):
         Index("ix_usage_events_conversation_id", "conversation_id"),
         Index("ix_usage_events_request_id", "request_id"),
         Index("ix_usage_events_occurred_at", "occurred_at"),
+        Index("ix_usage_events_tenant_feature_occurred", "tenant_id", "feature", "occurred_at"),
         # 另外两个复合外键在子表上的索引，显式建出来（不让 MySQL 自动起名）。
         Index(
             "ix_usage_events_credential",
@@ -522,6 +525,7 @@ __all__ = [
     "ESTIMATED_COST_CHECK",
     "EVENT_ID_LENGTH",
     "EVENT_STATUS_CHECK",
+    "FEATURE_LENGTH",
     "INPUT_TOKENS_CHECK",
     "INTEGER_QUANTITY_CHECK",
     "MISMATCH_CHECK",
