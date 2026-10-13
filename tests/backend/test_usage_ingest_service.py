@@ -328,9 +328,13 @@ def test_the_fingerprint_is_the_sha256_of_the_canonical_object() -> None:
         '"unit":"SECOND","usage_type":"AUDIO_SECOND"}'
     )
     canonical = template.replace("EVENT", uuid7(1))
-    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    # Fixed pre-feature vector: absent and explicit JSON null must keep historic fingerprints.
+    expected = "fc40f002909a9a1e5d033d029bf804ed42a49a286ab353297049a86c727dd53a"
 
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == expected
     assert fingerprint_of(audio_payload(), AUDIO_SECOND) == expected
+    assert fingerprint_of(audio_payload(feature=None), AUDIO_SECOND) == expected
+    assert fingerprint_of(audio_payload(feature="crm.contact_summary"), AUDIO_SECOND) != expected
 
 
 def test_equivalent_spellings_have_one_fingerprint() -> None:

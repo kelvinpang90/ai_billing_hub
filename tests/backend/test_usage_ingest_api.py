@@ -816,6 +816,34 @@ def test_a_different_fingerprint_is_a_conflict_that_changes_nothing(
     }
 
 
+@pytest.mark.parametrize(
+    ("first_feature", "second_feature"),
+    [
+        (None, "crm.contact_summary"),
+        ("crm.contact_summary", "shop.order_summary"),
+    ],
+    ids=["absent-then-feature", "different-features"],
+)
+def test_a_feature_change_is_an_idempotency_conflict_without_a_second_event(
+    client,
+    factory,
+    credential,
+    first_feature: str | None,
+    second_feature: str | None,
+) -> None:
+    first = llm_event(44)
+    if first_feature is not None:
+        first["feature"] = first_feature
+    assert_accepted(post(client, credential, first), uuid7(44))
+
+    response = post(client, credential, llm_event(44, feature=second_feature))
+
+    assert_error(response, 409, "IDEMPOTENCY_CONFLICT", False)
+    [row] = events(factory)
+    assert row.feature == first_feature
+    assert len(events(factory)) == 1
+
+
 def test_another_api_key_is_an_ownership_conflict_that_reveals_nothing(
     app,
     client,
@@ -1130,6 +1158,11 @@ FIELD_CASES = [
     ("event-id-missing", "llm", {"event_id": MISSING}, False),
     ("schema-version-number", "llm", {"schema_version": 1.0}, False),
     ("tenant-id-65", "llm", {"tenant_id": "t" * 65}, False),
+    ("feature-null", "llm", {"feature": None}, True),
+    ("feature-valid", "llm", {"feature": "crm.contact_summary"}, True),
+    ("feature-one-part", "llm", {"feature": "crm"}, False),
+    ("feature-uppercase", "llm", {"feature": "crm.Contact_summary"}, False),
+    ("feature-too-long", "llm", {"feature": "a." + "b" * 63}, False),
     ("unknown-field", "llm", {"note": "hello"}, False),
     ("customer-cost", "llm", {"customer_cost": "0.00000001"}, False),
     ("prompt", "llm", {"prompt": "fictional prompt text"}, False),
@@ -1154,7 +1187,8 @@ def test_field_rules(
 
     if accepted:
         assert_accepted(response, uuid7(28))
-        assert len(events(factory)) == 1
+        [row] = events(factory)
+        assert row.feature == changes.get("feature")
     else:
         assert_error(response, 422, "VALIDATION_ERROR", False)
         assert events(factory) == []

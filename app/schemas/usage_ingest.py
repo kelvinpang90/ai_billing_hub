@@ -33,6 +33,10 @@ REQUEST_ID_PATTERN: Final = r"^[A-Za-z0-9._:-]{1,128}$"
 # AIH-TASK-025 的供应商代码与模型代码 / 别名写法。
 PROVIDER_PATTERN: Final = r"^[a-z0-9][a-z0-9_-]{0,63}$"
 MODEL_PATTERN: Final = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$"
+# A caller-defined statistics label. It has 2--4 dot-separated components; each component
+# starts with a lowercase letter and is at most 32 characters long (design #281 v23 §2).
+FEATURE_PATTERN: Final = r"^[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){1,3}$"
+MAX_FEATURE_LENGTH: Final = 64
 # 最多 12 位整数、8 位小数，没有正负号（所以总是 ≥ 0）。
 QUANTITY_PATTERN: Final = r"^[0-9]{1,12}(?:\.[0-9]{1,8})?$"
 # RFC 3339，必须带时区，最多 6 位小数秒。日历上是否存在由服务层换算时判。
@@ -61,6 +65,9 @@ class UsageEventPayload(BaseModel):
     project_id: str | None = Field(default=None, max_length=MAX_SCOPE_ID_LENGTH)
     provider: str = Field(pattern=PROVIDER_PATTERN)
     model: str = Field(pattern=MODEL_PATTERN)
+    feature: str | None = Field(
+        default=None, pattern=FEATURE_PATTERN, max_length=MAX_FEATURE_LENGTH
+    )
     # 必须是 `usage_meter_types.code` 之一：查表（第 ⑥ 步），不在这里写死清单。
     usage_type: str
     # 按形态（第 ⑦ 步）：`LLM_TOKEN_FIELDS` 四个都必填，`QUANTITY` 一个都不许出现。
@@ -125,6 +132,8 @@ class UsageEventBatchReceipt(BaseModel):
 
 __all__ = [
     "EVENT_ID_PATTERN",
+    "FEATURE_PATTERN",
+    "MAX_FEATURE_LENGTH",
     "MAX_SCOPE_ID_LENGTH",
     "MAX_TOKENS",
     "MODEL_PATTERN",

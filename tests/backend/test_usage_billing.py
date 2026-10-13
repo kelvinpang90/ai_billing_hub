@@ -378,6 +378,7 @@ class World:
         seconds: str | None = None,
         provider: str = "anthropic",
         model: str = "claude-x",
+        feature: str | None = None,
         occurred_at: dt.datetime = EVENT_AT,
     ) -> int:
         """One RECEIVED event; LLM_TOKEN unless `seconds` is given (then AUDIO_SECOND)."""
@@ -409,6 +410,7 @@ class World:
                 payload_fingerprint="0" * 64,
                 occurred_at=occurred_at,
                 now=T0,
+                feature=feature,
             )
             session.commit()
             return row.id
@@ -724,6 +726,24 @@ def test_an_llm_token_event_on_markup_in_usd_is_billed_once(world) -> None:
     assert world.balance(tenant) == OPENING - MARKUP_BILLABLE
     assert row.billing_mode_snapshot == BillingMode.PREPAID.value
     assert row.reference_customer_price is None
+
+
+def test_feature_does_not_change_the_priced_or_debited_amount(world) -> None:
+    world.publish_markup_usd()
+    tenant = world.tenant()
+    world.fund(tenant, OPENING)
+    without_feature = world.event(tenant)
+    with_feature = world.event(tenant, feature="crm.contact_summary")
+
+    result = world.bill()
+
+    assert (result.claimed, result.outcomes) == (2, {Outcome.PROCESSED: 2})
+    plain, labelled = world.row(without_feature), world.row(with_feature)
+    assert (plain.feature, labelled.feature) == (None, "crm.contact_summary")
+    assert plain.provider_source_cost == labelled.provider_source_cost
+    assert plain.estimated_provider_cost_myr == labelled.estimated_provider_cost_myr
+    assert plain.billable_cost == labelled.billable_cost
+    assert world.balance(tenant) == OPENING - plain.billable_cost - labelled.billable_cost
 
 
 def test_internal_metered_tenant_preserves_both_prices_without_wallet_effect(both) -> None:

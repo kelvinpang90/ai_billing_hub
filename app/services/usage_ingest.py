@@ -592,6 +592,8 @@ def payload_fingerprint(event: _Event, measures: _Measures) -> str:
         assert measures.quantity is not None
         canonical["quantity"] = format(measures.quantity.quantize(_QUANTUM), "f")
         canonical["unit"] = measures.unit
+    if payload.feature is not None:
+        canonical["feature"] = payload.feature
     text = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -796,6 +798,7 @@ def ingest_one(
                 payload_fingerprint=fingerprint,
                 occurred_at=event.occurred_at,
                 now=moment,
+                feature=event.payload.feature,
             )
     except _ScopeMismatch as mismatch:
         with _database_errors():

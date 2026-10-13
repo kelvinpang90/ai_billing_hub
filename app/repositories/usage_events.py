@@ -88,6 +88,7 @@ def insert_event(
     payload_fingerprint: str,
     occurred_at: dt.datetime,
     now: dt.datetime,
+    feature: str | None = None,
 ) -> UsageEvent:
     """Insert and flush one `RECEIVED` event. `now` is naive UTC, whole seconds.
 
@@ -121,6 +122,7 @@ def insert_event(
         status=UsageEventStatus.RECEIVED,
         error_code=None,
         error_message=None,
+        feature=feature,
         occurred_at=occurred_at,
         received_at=now,
         processed_at=None,
