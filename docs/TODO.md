@@ -290,11 +290,11 @@
 
 ## Phase 3 — Integrated Application Backend 试点（§126）
 
-试点目标：`acuven_ai_api`（2026-10-09 Kelvin 拍板，替换原定的 `ai_chatbot_demo`）。它已经有本地 outbox、独立投递 worker、HMAC 用量客户端和 `effective-status` 查询，接的是生产上的 Acuven 内部计量租户；项目群定了 `ai_chatbot_demo` 只做演示，不当第一条真实计费链路。
+试点目标：原定 `acuven_ai_api`（2026-10-09 Kelvin 拍板，替换原定的 `ai_chatbot_demo`），2026-10-12 起改为本仓库的 AI 模块（见下一段）。`acuven_ai_api` 当时已经有本地 outbox、独立投递 worker、HMAC 用量客户端和 `effective-status` 查询，接的是生产上的 Acuven 内部计量租户；项目群定了 `ai_chatbot_demo` 只做演示，不当第一条真实计费链路。
 
 **2026-10-12 起**：`acuven_ai_api` 并入本服务，试点改为本仓库的 AI 模块（spec §141、设计闸门 #281，任务 AIH-TASK-056–071）。AI 模块在进程内直接读状态，下面「Webhook 接收端」「本地版本化的有效服务状态」「周期性状态对账」三项只对外部接入方（`acuven_aichat`）适用；验收要写明自调验不到跨主机网络与时钟偏差。
 
-`ai_chatbot_demo` 仍然接入，用量进同一个内部租户下的独立项目（与 AI API 的项目分开，参考价统计才不混）。AI API 没有会话，下面「OpenAI 转写用量」与「`conversation_id` + 完整会话生命周期」两项归 `ai_chatbot_demo`（以后是 `acuven_aichat`）验收；其余各项以 `acuven_ai_api` 验收。在 `ai_chatbot_demo` 里改时仍然**扩展它现有的窄接口，不要推倒重来**（§3.3）。
+`ai_chatbot_demo` 仍然接入，用量进同一个内部租户下的独立项目（与 AI API 的项目分开，参考价统计才不混）。AI API 没有会话，下面「OpenAI 转写用量」与「`conversation_id` + 完整会话生命周期」两项归 `ai_chatbot_demo`（以后是 `acuven_aichat`）验收；其余各项以本仓库的 AI 模块验收。在 `ai_chatbot_demo` 里改时仍然**扩展它现有的窄接口，不要推倒重来**（§3.3）。
 
 - [ ] 供应商用量提取层
 - [ ] Anthropic 用量

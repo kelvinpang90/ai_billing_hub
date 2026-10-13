@@ -4319,9 +4319,9 @@ tasks:
     status: ready
     acceptance_criteria:
       - '规则与设计 §1 完成标准 7、§8 第 11 项一致；不改其他已有规则的行为'
-      - 'AI 一侧：路径以 app/ai_api/ 开头。钱包与支付一侧：app/models/wallet.py、app/repositories/wallet.py、app/services/wallet_adjustments.py、app/services/usage_billing.py、app/services/internal_billing.py、app/services/pricing_engine.py、app/services/pricing_rules.py、app/repositories/pricing_rules.py、app/models/pricing_rules.py、app/services/provider_prices.py、app/repositories/provider_prices.py、app/models/provider_prices.py、app/services/fx_rates.py、app/repositories/fx_rates.py、app/models/fx_rates.py，以及 app/ 下文件名含 payment 的任何文件；两侧同时出现就报错，报错信息列出两侧各自命中的文件'
+      - 'AI 一侧：路径以 app/ai_api/ 开头。钱包与支付一侧：app/models/wallet.py、app/repositories/wallet.py、app/services/wallet_adjustments.py、app/services/usage_billing.py、app/services/internal_billing.py、app/services/pricing_engine.py、app/services/pricing_rules.py、app/repositories/pricing_rules.py、app/models/pricing_rules.py、app/services/provider_prices.py、app/repositories/provider_prices.py、app/models/provider_prices.py、app/services/fx_rates.py、app/repositories/fx_rates.py、app/models/fx_rates.py、app/core/fx_source.py、app/services/usage_requeue.py、app/tasks/usage_billing.py、app/tasks/fx_fetch.py，以及 app/ 下文件名含 payment 的任何文件；两侧同时出现就报错，报错信息列出两侧各自命中的文件'
       - '规则放在 check_pr 里、走现有的 changed_paths，与其他 PR 规则同一种报错与退出码；只有一侧或两侧都没有时不报'
-      - '测试（tests/test_check_repo_policy.py，unittest）：只改 AI、只改钱包、两侧都改、文件名含 payment、改 tests/ 下同名测试文件不算（只看 app/）五种情况'
+      - '测试（tests/test_check_repo_policy.py，unittest）：只改 AI、只改钱包、两侧都改、计费一侧是 app/tasks/usage_billing.py（计费 worker）、文件名含 payment、改 tests/ 下同名测试文件不算（只看 app/）六种情况'
       - 'docs/WORKFLOW.md §5「分支与 PR 约定」加一条，写明这条规则与它来自 spec §141.5'
       - '不改 app/ 下任何文件'
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #281'
