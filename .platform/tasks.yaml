@@ -3509,7 +3509,7 @@ tasks:
     title: AI 模块第一层：迁移 0021、两张新表与用量事件的功能标签列
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 1 项：迁移 0021 新建 ai_client_keys、ai_usage_outbox，给 usage_events 加可空列 feature 与索引；新子包 app/ai_api/ 与两张表的模型，UsageEvent 模型加 feature 列。不写服务函数、接口、请求路径与投递，也不加审计动作（设计 §2「数据库」：由写它们的任务各自加）。
-    status: ready
+    status: done
     acceptance_criteria:
       - '实现与 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）逐条一致；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '迁移文件名 alembic/versions/20261013_0021_ai_module.py，revision 0021_ai_module，down_revision 0020_status_sync；两张表的列、类型、可空、宽度、排序规则、CHECK、唯一约束、复合外键与索引逐列按设计 §2「数据库」（复合外键照 integration_credentials 的写法指向 projects(id, tenant_id)、ON DELETE RESTRICT；next_attempt_at 在 MySQL 用 DATETIME(6)；含 first_attempted_at、dead_acked_at、review_required_at、reviewed_at、resolved_at 五个可空时间列；各列类型、DATETIME 精度与排序规则按设计）；usage_events 加 feature VARCHAR(64) NULL（utf8mb4_0900_bin）与索引 ix_usage_events_tenant_feature_occurred (tenant_id, feature, occurred_at)；文件头照 0020 的结构写 §132 第 13 条分析；downgrade 条件按设计（两张新表都为空且 usage_events 没有非空 feature，否则抛错拒绝），--sql 离线模式不做这项检查'
