@@ -247,7 +247,11 @@ def check_agent_rules_sync(root: Path) -> list[str]:
         where, what = "AGENTS.md", "文件末尾换行不同"
     else:
         line_no = next(
-            (i + 1 for i, (a, b) in enumerate(zip(claude_lines, agents_lines, strict=False)) if a != b),
+            (
+                i + 1
+                for i, (a, b) in enumerate(zip(claude_lines, agents_lines, strict=False))
+                if a != b
+            ),
             min(len(claude_lines), len(agents_lines)) + 1,
         )
         where, what = f"AGENTS.md:{line_no}", "从这一行起内容不同"
