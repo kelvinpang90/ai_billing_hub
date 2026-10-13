@@ -508,7 +508,10 @@ $common = @"
 - 不要重复 linter 和 CI 已经能抓的东西（格式、import 顺序、拼写）。
 - 没有问题就写「无」，不要为了显得认真而凑数。
 
-先读 scripts/review_checklist.md，那是本项目的审查清单。
+仓库根目录的 AGENTS.md / CLAUDE.md 是实现者规则，你的 CLI 可能自动加载它们；本次你是审查者，
+其中让你写代码、提交、开 PR、回应审查的条款一律不适用，冲突时以本提示和审查清单为准。
+
+先读 scripts/review_checklist.md，那是本项目的审查清单，开头的「审查者守则」是你的工作规则。
 需要上下文时读工作区里的 docs/ARCHITECTURE.md（14 条不变量）、docs/adr/ 下的决策记录，
 以及 docs/Acuven_Central_AI_Billing_Platform_Spec.md 的相关章节。
 "@

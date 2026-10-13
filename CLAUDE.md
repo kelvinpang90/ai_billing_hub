@@ -1,13 +1,15 @@
 # 全局工作原则
 
-> ⚠️ 本仓库的 `CLAUDE.md`（Claude，开发者）与 `AGENTS.md`（Codex，审查者）**是两份各自独立的指令文件**，不再共享任何章节。
-> 两边必须一致的只有一样：评论署名前缀与判定行的写法——那由 `scripts/check_docs.py` 的约定串规则机械保证。
+> 本文件与同目录 `AGENTS.md` 是同一份内容的两个副本（分别给 Claude Code / Codex），改一个必须同步另一个（2026-10-13 起；此前 `AGENTS.md` 是 Codex 审查者规则）。
+> 两份都是**实现者规则**。审查者的规则不在这里，在 [scripts/review_checklist.md](scripts/review_checklist.md)「审查者守则」，由 `scripts/codex-review.ps1` 的提示词带给审查者。
 
-## 角色：主力开发
+## 角色：实现
 
 流程的唯一事实来源是 [docs/WORKFLOW.md](docs/WORKFLOW.md)，下面只是要点。
 
-- **你负责实现，Codex 负责独立审查，Kelvin 负责合并。** 你不合并自己的 PR。
+- **Claude Code 与 Codex 一个实现、另一个独立审查，Kelvin 负责合并。** 读到本文件的你就是实现者；你不审查、不合并自己的 PR。
+  人手动开发时默认 Claude Code 实现、Codex 审查；OpenClaw Worker 里谁实现谁审查由控制面的提供方开关决定（Kelvin 2026-10-13 定为 Codex 实现、Claude Code 审查）
+- 下文的 `scripts\codex-review.ps1` 是审查入口（`-Reviewer codex|claude` 选审查者）；`## 🔧 CLAUDE RESPONSE` 是机器校验的固定回应前缀，不论实现者是谁都照写
 - **任务收尾由 OpenClaw 自动完成**：`.platform/project.yaml` 的 `merge_owner: kelvin` 指 Worker 实现 PR 的合并由 Kelvin 在 Telegram「批准」；OpenClaw 的 run 仍然改不了 `.platform/`。run 完成后 OpenClaw 自动开收尾 PR，只含 `tasks.yaml` 的 `ready → done` 与从 `docs/TODO.md`「当前计划」移除这一项两处机械改动，CI 通过后自动合并、不触发部署。**只有自动收尾失败**（Telegram 收到「自动收尾失败」通知，附原因与建议）时才手工开收尾 PR，也只做这两处改动。交付不再另写记录：不在 `.platform/README.md` 写状态句、不在 `docs/TODO.md` 写交付记录、不在 `docs/REVIEW-LOG.md` 为交付加行，交付事实以实现 PR、run 的「状态」时间线和收尾 PR 为准（细节见 [.platform/README.md](.platform/README.md)「Worker 的启用状态」）
 - **碰钱的任务先过设计闸门**：钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 —— 用 [design-gate 模板](.github/ISSUE_TEMPLATE/design-gate.md) 开 Issue，`scripts\codex-review.ps1 -Issue <N> -Post` 拿到 `APPROVED: design v<N>` 之后才动手写代码。前端 / 文档 / CI / 脚本不走闸门；既不碰钱、也不碰用量摄取 / 认证与会话 / Webhook 的后端改动同样不走（分档看主题，不看「是不是 API」）
 - **设计版本一变，之前的批准作废**，必须重新过闸门
