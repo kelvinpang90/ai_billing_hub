@@ -13,7 +13,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai_api.models import AiClientKey, AiClientKeyStatus
@@ -146,15 +146,17 @@ def issue_client_key(
     moment = now or _now()
     with session_factory.begin() as session:
         tenant, project = _locked_project(session, customer_id, project_id)
+        # 加锁读：MySQL 的 REPEATABLE READ 下，普通 SELECT 读的是锁前那次普通读建立的快照，
+        # 看不到在我们等锁期间提交的那一把；加锁读总是读最新提交的版本。
         active = session.execute(
-            select(func.count())
-            .select_from(AiClientKey)
+            select(AiClientKey.id)
             .where(
                 AiClientKey.project_id == project.id,
                 AiClientKey.status == AiClientKeyStatus.ACTIVE,
             )
-        ).scalar_one()
-        if active >= MAX_ACTIVE_KEYS:
+            .with_for_update()
+        ).all()
+        if len(active) >= MAX_ACTIVE_KEYS:
             raise AiClientKeyLimit
 
         client_id = CLIENT_ID_PREFIX + secrets.token_hex(16)

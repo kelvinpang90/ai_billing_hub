@@ -345,14 +345,17 @@ def test_mysql_concurrent_issue_allows_exactly_one_second_key(mysql_factory, mon
             .select_from(AuditLog)
             .where(AuditLog.action == AuditAction.AI_CLIENT_KEY_CREATE)
         ).scalar_one()
+    # 屏障放在锁前的普通读之后：两边都已在 REPEATABLE READ 下建立了只看得到 1 把的快照，
+    # 再去抢项目行锁。后拿到锁的一方必须用加锁读看到先提交的那一把，否则会签出第三把。
     barrier = threading.Barrier(2)
-    original = admin._locked_project
+    original = admin._resolve_project
 
-    def synchronized_lock(*args, **kwargs):
+    def resolve_then_wait(*args, **kwargs):
+        resolved = original(*args, **kwargs)
         barrier.wait(timeout=5)
-        return original(*args, **kwargs)
+        return resolved
 
-    monkeypatch.setattr(admin, "_locked_project", synchronized_lock)
+    monkeypatch.setattr(admin, "_resolve_project", resolve_then_wait)
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
             executor.submit(issue, mysql_factory, actor, customer_id, project_id) for _ in range(2)
