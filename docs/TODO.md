@@ -25,18 +25,20 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-067` 仓库策略检查：拒绝同时改 AI 模块与钱包、支付、定价代码的 PR
+1. `AIH-TASK-069` 仓库策略检查：拒绝同时改 AI 模块与钱包、支付、定价代码的 PR
 2. `AIH-TASK-056` AI 模块第一层：迁移 0021、两张新表与用量事件的功能标签列
 3. `AIH-TASK-057` AI 模块第二层：用量摄取契约加可选的功能标签
 4. `AIH-TASK-058` AI 模块第三层：AI 密钥的签发与吊销规则
 5. `AIH-TASK-059` AI 模块第四层：AI 密钥的三个管理接口与用量事件按功能筛选
 6. `AIH-TASK-060` AI 模块第五层：调用接口的请求校验、上报签名规则与供应商适配器
 7. `AIH-TASK-061` AI 模块第六层：用量写入 outbox、提交结果核查与落库失败的暂存处置
-8. `AIH-TASK-062` AI 模块第七层：调用接口、进程内鉴权与状态、模型护栏与公网入口
-9. `AIH-TASK-063` AI 模块第八层：用量 outbox 的领取、签名上报、结算与重试
-10. `AIH-TASK-064` AI 模块第九层：用量 outbox 告警维度、死信重投与待处置用量命令、运维文档
-11. `AIH-TASK-065` AI 模块第十层：AI 与计费两个就绪检查与部署冒烟
-12. `AIH-TASK-066` 管理端前端：项目的 AI 密钥面板与用量事件按功能筛选
+8. `AIH-TASK-062` AI 模块第七层：AI 配置项、只挂给 api 的 Anthropic key 文件、公网入口与优雅停机
+9. `AIH-TASK-063` AI 模块第八层：调用接口、进程内鉴权与状态、模型护栏
+10. `AIH-TASK-064` AI 模块第九层：用量 outbox 的领取、签名上报、结算与重试
+11. `AIH-TASK-065` AI 模块第十层：用量 outbox 的告警维度与阈值
+12. `AIH-TASK-066` AI 模块第十一层：死信重投、死信处理确认与待处置用量命令、运维文档
+13. `AIH-TASK-067` AI 模块第十二层：AI 与计费两个就绪检查与部署冒烟
+14. `AIH-TASK-068` 管理端前端：项目的 AI 密钥面板与用量事件按功能筛选
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -58,7 +60,7 @@
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
-- 待登记：`.env.example` 补 AI 模块的配置项（Worker 不能改 `.env` 类文件；AIH-TASK-063 合并后由管理员补，内容以 `docs/deployment.md` 为准）
+- 待登记：`.env.example` 补 AI 模块的配置项（Worker 不能改 `.env` 类文件；AIH-TASK-064 合并后由管理员补，内容以 `docs/deployment.md` 为准）
 - 待登记：用量按功能（`feature`）汇总：每个功能的调用次数、平均 token 与成本（依赖设计闸门 #281 给用量事件加的 `feature`；归 Phase 5 用量分析）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
@@ -288,7 +290,7 @@
 
 试点目标：`acuven_ai_api`（2026-10-09 Kelvin 拍板，替换原定的 `ai_chatbot_demo`）。它已经有本地 outbox、独立投递 worker、HMAC 用量客户端和 `effective-status` 查询，接的是生产上的 Acuven 内部计量租户；项目群定了 `ai_chatbot_demo` 只做演示，不当第一条真实计费链路。
 
-**2026-10-12 起**：`acuven_ai_api` 并入本服务，试点改为本仓库的 AI 模块（spec §141、设计闸门 #281，任务 AIH-TASK-056–067）。AI 模块在进程内直接读状态，下面「Webhook 接收端」「本地版本化的有效服务状态」「周期性状态对账」三项只对外部接入方（`acuven_aichat`）适用；验收要写明自调验不到跨主机网络与时钟偏差。
+**2026-10-12 起**：`acuven_ai_api` 并入本服务，试点改为本仓库的 AI 模块（spec §141、设计闸门 #281，任务 AIH-TASK-056–069）。AI 模块在进程内直接读状态，下面「Webhook 接收端」「本地版本化的有效服务状态」「周期性状态对账」三项只对外部接入方（`acuven_aichat`）适用；验收要写明自调验不到跨主机网络与时钟偏差。
 
 `ai_chatbot_demo` 仍然接入，用量进同一个内部租户下的独立项目（与 AI API 的项目分开，参考价统计才不混）。AI API 没有会话，下面「OpenAI 转写用量」与「`conversation_id` + 完整会话生命周期」两项归 `ai_chatbot_demo`（以后是 `acuven_aichat`）验收；其余各项以 `acuven_ai_api` 验收。在 `ai_chatbot_demo` 里改时仍然**扩展它现有的窄接口，不要推倒重来**（§3.3）。
 
