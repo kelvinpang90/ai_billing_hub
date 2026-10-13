@@ -66,6 +66,8 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         # 被撞的原用量事件的 public_id：app/services/usage_ingest.py 的幂等冲突审计
         # （AIH-TASK-029）。归属不符的审计记在 `integration_credential` 上（api_key）。
         "usage_event",
+        # AI 密钥的 client_id：app/ai_api/admin.py 的签发与吊销审计（AIH-TASK-058）。
+        "ai_client_key",
     }
 )
 
