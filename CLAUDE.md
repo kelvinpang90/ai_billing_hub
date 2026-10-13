@@ -1,6 +1,6 @@
 # 全局工作原则
 
-> 本文件与同目录 `AGENTS.md` 是同一份内容的两个副本（分别给 Claude Code / Codex），改一个必须同步另一个（2026-10-13 起；此前 `AGENTS.md` 是 Codex 审查者规则）。
+> 本文件与同目录 `AGENTS.md` 是同一份内容的两个副本（分别给 Claude Code / Codex），改一个必须同步另一个，`scripts/check_docs.py` 会逐字节比对（2026-10-13 起；此前 `AGENTS.md` 是 Codex 审查者规则）。
 > 两份都是**实现者规则**。审查者的规则不在这里，在 [scripts/review_checklist.md](scripts/review_checklist.md)「审查者守则」，由 `scripts/codex-review.ps1` 的提示词带给审查者。
 
 ## 角色：实现
