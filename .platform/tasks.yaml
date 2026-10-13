@@ -4316,7 +4316,7 @@ tasks:
     title: 仓库策略检查：拒绝同时改 AI 模块与钱包、支付、定价代码的 PR
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）拆分第 11 项，对应 spec §141.5 的发布耦合缓解：scripts/check_repo_policy.py 的 PR 检查新增一条规则，同一个 PR 的改动文件里既有 app/ai_api/ 下的文件、又有钱包、账本、支付、定价、汇率或用量计费的代码时报错。只改策略脚本、它的测试与 WORKFLOW 的说明。
-    status: ready
+    status: done
     acceptance_criteria:
       - '规则与设计 §1 完成标准 7、§8 第 11 项一致；不改其他已有规则的行为'
       - 'AI 一侧：路径以 app/ai_api/ 开头。钱包与支付一侧：app/models/wallet.py、app/repositories/wallet.py、app/services/wallet_adjustments.py、app/services/usage_billing.py、app/services/internal_billing.py、app/services/pricing_engine.py、app/services/pricing_rules.py、app/repositories/pricing_rules.py、app/models/pricing_rules.py、app/services/provider_prices.py、app/repositories/provider_prices.py、app/models/provider_prices.py、app/services/fx_rates.py、app/repositories/fx_rates.py、app/models/fx_rates.py、app/core/fx_source.py、app/services/usage_requeue.py、app/tasks/usage_billing.py、app/tasks/fx_fetch.py，以及 app/ 下文件名含 payment 的任何文件；两侧同时出现就报错，报错信息列出两侧各自命中的文件'
