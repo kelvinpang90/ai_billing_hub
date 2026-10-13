@@ -89,11 +89,11 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 | --- | --- | --- |
 | [docs/WORKFLOW.md](WORKFLOW.md) | **流程的唯一事实来源**：两个闸门、评论格式、回应表、写后回读、退出码契约 | 开 PR、审查、回应意见时 |
 | [docs/REVIEW-LOG.md](REVIEW-LOG.md) | 审查记账：反复出现的问题、已达成的约定、机械化对照表 | 想知道某个做法为什么定成这样 |
-| [scripts/review_checklist.md](../scripts/review_checklist.md) | Codex 审查时逐条走的清单（A 不变量 / B DoD / C 财务 / D 通用 / E 文档CI脚本 / F 复审） | 审查时；写代码时可当自查表 |
-| [CLAUDE.md](../CLAUDE.md) | **Claude（开发者）的指令文件** | 由 Claude Code 自动加载 |
-| [AGENTS.md](../AGENTS.md) | **Codex（审查者）的指令文件** | 由 Codex 自动加载 |
+| [scripts/review_checklist.md](../scripts/review_checklist.md) | 审查者的工作规则与清单（审查者守则 / A 不变量 / B DoD / C 财务 / D 通用 / E 文档CI脚本 / F 复审 / G 登记与收尾），由 `codex-review.ps1` 的提示词带给审查者 | 审查时；写代码时可当自查表 |
+| [CLAUDE.md](../CLAUDE.md) | **实现者的指令文件** | 由 Claude Code 自动加载 |
+| [AGENTS.md](../AGENTS.md) | **实现者的指令文件**（与 `CLAUDE.md` 同一份内容） | 由 Codex 自动加载 |
 
-> ⚠️ `CLAUDE.md` 与 `AGENTS.md` **不是同一内容的两个副本**（2026-09-11 起各自独立）。两边必须一致的只有评论署名前缀与判定行，由 `check_docs.py` 的约定串规则机械保证。
+> ⚠️ `CLAUDE.md` 与 `AGENTS.md` **是同一份内容的两个副本**（2026-10-13 起；2026-09-11 至 2026-10-12 期间 `AGENTS.md` 是 Codex 审查者规则），改一个必须同步另一个。审查者规则在审查清单开头的「审查者守则」。
 
 ### G. GitHub 模板（机器可读，结构不要改）
 

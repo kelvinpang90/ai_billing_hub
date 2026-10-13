@@ -229,6 +229,35 @@ def check_conventions(path: Path) -> list[str]:
     return errors
 
 
+def check_agent_rules_sync(root: Path) -> list[str]:
+    """AGENTS.md 与 CLAUDE.md 是同一份实现者规则的两个副本（2026-10-13 起），必须逐字相同。
+
+    比较前把 CRLF 归一成 LF：本机 core.autocrlf=true，工作区里一份刚被检出（CRLF）、
+    一份刚被编辑器写回（LF）是常态，提交后 Git 存的是同一份内容，不该在本地报错。
+    """
+    paths = [root / "CLAUDE.md", root / "AGENTS.md"]
+    missing = [p.name for p in paths if not p.is_file()]
+    if missing:
+        return [f"{name}  缺失：AGENTS.md 与 CLAUDE.md 必须同时存在且内容相同" for name in missing]
+    claude, agents = (p.read_bytes().replace(b"\r\n", b"\n") for p in paths)
+    if claude == agents:
+        return []
+    claude_lines, agents_lines = claude.splitlines(), agents.splitlines()
+    if claude_lines == agents_lines:
+        where, what = "AGENTS.md", "文件末尾换行不同"
+    else:
+        line_no = next(
+            (
+                i + 1
+                for i, (a, b) in enumerate(zip(claude_lines, agents_lines, strict=False))
+                if a != b
+            ),
+            min(len(claude_lines), len(agents_lines)) + 1,
+        )
+        where, what = f"AGENTS.md:{line_no}", "从这一行起内容不同"
+    return [f"{where}  与 CLAUDE.md 不一致（{what}）：两份是同一份规则的副本，改一个必须同步另一个"]
+
+
 def main() -> int:
     # Windows 控制台默认不是 UTF-8，§ 会打成乱码。
     if hasattr(sys.stdout, "reconfigure"):
@@ -254,6 +283,8 @@ def main() -> int:
         if path.suffix not in CONSISTENCY_SUFFIXES or path == SPEC:
             continue
         errors.extend(check_conventions(path))
+
+    errors.extend(check_agent_rules_sync(ROOT))
 
     if errors:
         print(f"docs check failed ({len(errors)} problem(s)):\n")

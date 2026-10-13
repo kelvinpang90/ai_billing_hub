@@ -1,8 +1,8 @@
 # WORKFLOW — 双 agent 开发流程
 
-> Claude Code 主力开发 · Codex 独立审查 · Kelvin 最终验收。
+> Claude Code 与 Codex 一个实现、另一个独立审查 · Kelvin 最终验收。
 > **这份是流程的唯一事实来源**，`CLAUDE.md` 与 `AGENTS.md` 里的角色说明都指回这里。
-> 最后更新：2026-09-11
+> 最后更新：2026-10-13
 
 ---
 
@@ -10,9 +10,11 @@
 
 | 角色 | 是谁 | 能做 | 不能做 |
 | --- | --- | --- | --- |
-| **开发者** | Claude Code（本机） | 写设计、写代码与测试、开 PR、按审查意见修改 | 自己合并 |
-| **审查者** | Codex（`codex exec -s read-only`） | 读设计与 diff、按清单审查、发判定 | **改任何文件、push、合并** |
+| **开发者** | 人手动开发：Claude Code（本机）；OpenClaw Worker：由控制面的提供方开关决定（2026-10-13 起 Codex） | 写设计、写代码与测试、开 PR、按审查意见修改 | 自己合并 |
+| **审查者** | 人手动开发：`scripts/codex-review.ps1`，默认 Codex（`codex exec -s read-only`），`-Reviewer claude` 为只读 Claude Code；OpenClaw Worker：开发者以外的另一个（2026-10-13 起 Claude Code） | 读设计与 diff、按清单审查、发判定 | **改任何文件、push、合并** |
 | **验收者** | Kelvin | 触发审查、裁决分歧、点 Squash and merge | — |
+
+> 下文的「Claude」「Codex」按人手动开发的默认分工分别指开发者、审查者；Worker 里分工对调时规则不变，署名前缀 `## 🔧 CLAUDE RESPONSE` / `## 🔍 CODEX REVIEW` 是机器校验的固定写法，不随实际是谁而改。开发者读根目录的 `CLAUDE.md` / `AGENTS.md`（同一份实现者规则），审查者的规则在 [审查清单](../scripts/review_checklist.md)「审查者守则」。
 
 > OpenClaw Worker 交付的任务：实现 PR 由 Kelvin 在 Telegram「批准」后合并；任务完成后的收尾 PR（只把 `.platform/tasks.yaml` 的 `ready` 改成 `done`、从 [TODO.md](TODO.md)「当前计划」移除这一项）由 OpenClaw 自动开、CI 通过后自动合并、不触发部署，自动收尾失败时才由人手工开。见 [.platform/README.md](../.platform/README.md)「Worker 的启用状态」。
 
