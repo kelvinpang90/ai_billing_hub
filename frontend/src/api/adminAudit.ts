@@ -78,6 +78,8 @@ export const AUDIT_ACTIONS = [
   "USAGE_EVENT_REQUEUE",
   "PROJECT_INTEGRATION_STATUS_CHANGED",
   "PROJECT_STATUS_WEBHOOK_SET",
+  "AI_CLIENT_KEY_CREATE",
+  "AI_CLIENT_KEY_REVOKE",
 ] as const;
 
 /** 系统动作（计费状态跃迁）的 `actor_role`。 */
