@@ -568,6 +568,29 @@ def test_valid_conflicting_and_invalid_events_in_one_batch(client, factory, cred
     assert conflict.mismatch is ConflictMismatch.FINGERPRINT
 
 
+def test_feature_is_stored_per_valid_item_and_an_invalid_feature_is_rejected(
+    client, factory, credential
+) -> None:
+    data = batch_data(
+        post_batch(
+            client,
+            credential,
+            [
+                llm_event(31, feature="crm.contact_summary"),
+                llm_event(32),
+                llm_event(33, feature="invalid"),
+            ],
+        )
+    )
+
+    assert (data["accepted"], data["duplicates"], data["rejected"]) == (2, 0, 1)
+    assert outcomes(data) == [ACCEPTED, ACCEPTED, ("rejected", "VALIDATION_ERROR", False)]
+    assert [(row.event_id, row.feature) for row in events(factory)] == [
+        (uuid7(31), "crm.contact_summary"),
+        (uuid7(32), None),
+    ]
+
+
 def test_the_same_event_twice_in_a_batch_is_a_duplicate(client, factory, credential) -> None:
     """Not deduplicated beforehand (design §2): the second goes the single endpoint's way."""
     data = batch_data(post_batch(client, credential, [llm_event(1), llm_event(1)]))

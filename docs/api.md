@@ -2327,7 +2327,8 @@ HMAC 请求头；签名覆盖 `GET`、完整路径、时间戳、唯一请求 ID
 
 ## 集成：用量事件摄取
 
-设计依据：设计闸门 #176（[AIH-TASK-029-usage-ingest.md](design/AIH-TASK-029-usage-ingest.md) v8 第 2 节）。
+设计依据：设计闸门 #176（[AIH-TASK-029-usage-ingest.md](design/AIH-TASK-029-usage-ingest.md) v8 第 2 节）；
+可选 `feature` 依据设计闸门 #281 `APPROVED: design v23`。
 实现在 `app/api/integration_usage.py`、`app/services/usage_ingest.py`（单条处理是 `ingest_one`，批量端点复用它）
 与 `app/core/nonce.py`。spec §20、§23、§37。
 
@@ -2369,6 +2370,7 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 | `tenant_id` / `project_id` | 否 | 只作诊断：给出时必须等于凭据所属客户 / 项目的 `public_id`，否则 403。最长 64 个字符（更长 422） |
 | `provider` | 是 | `^[a-z0-9][a-z0-9_-]{0,63}$` |
 | `model` | 是 | `^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$`。目录里没有的模型照收，由计费侧标 `MODEL_UNKNOWN` |
+| `feature` | 否 | 可选功能标签；`null` 等同不带。`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){1,3}$` 且最长 64 字符，例如 `crm.contact_summary`。只用于统计，不参与计价 |
 | `usage_type` | 是 | 必须是某个计量类型的 `code`（[AI 目录](#ai-目录计量类型供应商模型与别名)，停用的照收）。不在目录里：409 `UNKNOWN_USAGE_TYPE`，`retryable = true` |
 | `input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` | 按形态 | `LLM_TOKEN_FIELDS` 类型：四个都必填，JSON 整数，0 ≤ n ≤ 10^12；`QUANTITY` 类型：一个都不许出现（`null` 也不行） |
 | `quantity` | 按形态 | `QUANTITY` 类型：必填，JSON **字符串**，`^[0-9]{1,12}(\.[0-9]{1,8})?$`；类型的数量是整数（`INTEGER`）时不许有小数部分（`"3.0"` 也拒绝）。`LLM_TOKEN_FIELDS` 类型：不许出现 |
@@ -2390,7 +2392,9 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 
 「同一事件」= 同一个 `event_id`，归属（客户、项目、`api_key`）相同，指纹也相同。指纹按规范化之后的内容算：
 `"37.42"` 与 `"37.420"`、`…Z` 与等价的 `+08:00` 写法是同一个事件；`tenant_id` / `project_id` 不参与。同一个
-`api_key` 的新 `key_version`（轮换重叠期内）重发同一事件是合法重复，不是冲突。成功响应不带 `retryable`。
+`api_key` 的新 `key_version`（轮换重叠期内）重发同一事件是合法重复，不是冲突。成功响应不带 `retryable`。规范对象只在事件带非空
+`feature` 时加入该键，因此不带或 `feature: null` 的历史指纹保持不变；同一 `event_id` 的 `feature` 有无或值不同会造成
+`IDEMPOTENCY_CONFLICT`。
 
 ### 错误与 `retryable`
 
