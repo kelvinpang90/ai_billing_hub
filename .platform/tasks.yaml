@@ -3563,7 +3563,7 @@ tasks:
     title: AI 模块第二层：用量摄取契约加可选的功能标签
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 2 项：单条与批量用量摄取接受可选字段 feature（格式按设计 §2「功能标签 feature 的落点」），指纹只在事件带 feature 时加键，入库写 usage_events.feature。定价、扣费与内部计量不读 feature；不改后台接口。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-056
     acceptance_criteria:
