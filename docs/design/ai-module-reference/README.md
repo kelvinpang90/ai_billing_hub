@@ -1,6 +1,6 @@
 # acuven_ai_api 源文件参考副本（b57c5b0）
 
-设计 [AI-MODULE.md](../AI-MODULE.md)（设计闸门 #281 已批准 v16）要把 `acuven_ai_api` 的一部分代码与测试搬进本仓库的 `app/ai_api/`。OpenClaw Worker 在沙箱里不联网、读不到那个仓库，所以把要参考的文件按 **`b57c5b0`**（生产上最后运行的那一版，2026-10-12 下线）原样放在这里。
+设计 [AI-MODULE.md](../AI-MODULE.md)（设计闸门 #281 已批准 v17）要把 `acuven_ai_api` 的一部分代码与测试搬进本仓库的 `app/ai_api/`。OpenClaw Worker 在沙箱里不联网、读不到那个仓库，所以把要参考的文件按 **`b57c5b0`**（生产上最后运行的那一版，2026-10-12 下线）原样放在这里。
 
 - **只读参考，不是本仓库的代码**：扩展名一律加 `.txt`，不会被 import、不会被 pytest 收集、不进 ruff。不要改这些文件。
 - 搬进 `app/ai_api/` 时按设计改：import 换成本仓库的、调模型改成 async、身份从 `ClientBinding` 换成「租户 × 项目」、错误换成本仓库的信封。设计与副本冲突时**以设计为准**。
