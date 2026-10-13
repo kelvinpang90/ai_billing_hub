@@ -9,6 +9,8 @@ from __future__ import annotations
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+from app.ai_api import models as _ai_client_key_models  # noqa: F401  (registers AI client keys)
+from app.ai_api import outbox as _ai_outbox_models  # noqa: F401  (registers AI usage outbox)
 from app.core.config import get_settings
 
 # 必须 import 所有模型模块，`Base.metadata` 才是完整的；否则 autogenerate 会把

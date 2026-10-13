@@ -48,6 +48,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
+from app.ai_api.models import AiClientKey
+from app.ai_api.outbox import AiUsageOutbox
 from app.models import auth as _auth_models  # noqa: F401 - 让 Base.metadata 装上这些表
 from app.models.ai_catalog import (
     CODE_COLLATION,
@@ -221,6 +223,233 @@ def _table_names() -> set[str]:
     engine = create_engine(TEST_DATABASE_URL)
     try:
         return set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0021_ai_module（AIH-TASK-056，设计闸门 #281 v23）
+# ---------------------------------------------------------------------------
+
+_REVISION_0021 = "0021_ai_module"
+_MIGRATION_0021 = pathlib.Path("alembic/versions/20261013_0021_ai_module.py")
+_AI_TABLES_0021 = {"ai_client_keys", "ai_usage_outbox"}
+
+
+def _load_0021() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0021", _MIGRATION_0021)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0021_follows_0020_and_matches_model_checks() -> None:
+    migration = _load_0021()
+    assert (migration.revision, migration.down_revision) == (_REVISION_0021, _REVISION_0020)
+    assert {name: _normalised(rule) for name, rule in migration._CLIENT_KEY_CHECKS.items()} == (
+        _declared_checks(AiClientKey)
+    )
+    assert {name: _normalised(rule) for name, rule in migration._OUTBOX_CHECKS.items()} == (
+        _declared_checks(AiUsageOutbox)
+    )
+
+
+def test_0021_upgrade_and_offline_downgrade_have_the_design_order(monkeypatch) -> None:
+    migration = _load_0021()
+    recorder = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", recorder)
+    migration.upgrade()
+    assert [name for name, _ in recorder.calls] == [
+        "create_table",
+        "create_index",
+        "create_table",
+        "create_index",
+        "add_column",
+        "create_index",
+    ]
+    assert recorder.first_args("create_table") == ["ai_client_keys", "ai_usage_outbox"]
+    assert recorder.first_args("add_column") == ["usage_events"]
+
+    downgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+    assert [name for name, _ in downgrade.calls] == [
+        "drop_index",
+        "drop_column",
+        "drop_table",
+        "drop_table",
+    ]
+
+
+def test_0021_downgrade_refuses_lossy_data_before_ddl(monkeypatch) -> None:
+    migration = _load_0021()
+    for lossy in migration._LOSSY:
+        recorder = _OnlineArgsRecorder(_DataBind({lossy}))
+        monkeypatch.setattr(migration, "op", recorder)
+        with pytest.raises(RuntimeError, match="Cannot downgrade AI module"):
+            migration.downgrade()
+        assert recorder.calls == []
+
+
+@needs_mysql
+def test_0021_schema_constraints_and_safe_downgrade(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        assert _AI_TABLES_0021 <= set(inspector.get_table_names())
+        key_columns = {column["name"]: column for column in inspector.get_columns("ai_client_keys")}
+        outbox_columns = {
+            column["name"]: column for column in inspector.get_columns("ai_usage_outbox")
+        }
+        assert {name: column["nullable"] for name, column in key_columns.items()} == {
+            "id": False,
+            "tenant_id": False,
+            "project_id": False,
+            "client_id": False,
+            "token_sha256": False,
+            "status": False,
+            "created_at": False,
+            "revoked_at": True,
+        }
+        assert key_columns["client_id"]["type"].length == 40
+        assert key_columns["token_sha256"]["type"].length == 64
+        assert outbox_columns["feature"]["type"].length == 64
+        for name in (
+            "next_attempt_at",
+            "first_attempted_at",
+            "created_at",
+            "delivered_at",
+            "resolved_at",
+            "review_required_at",
+            "reviewed_at",
+            "dead_acked_at",
+        ):
+            assert getattr(outbox_columns[name]["type"], "fsp", None) == 6
+        key_indexes = {
+            item["name"]: item["column_names"] for item in inspector.get_indexes("ai_client_keys")
+        }
+        outbox_indexes = {
+            item["name"]: item["column_names"] for item in inspector.get_indexes("ai_usage_outbox")
+        }
+        usage_indexes = {
+            item["name"]: item["column_names"] for item in inspector.get_indexes("usage_events")
+        }
+        assert key_indexes["ix_ai_client_keys_project_id"] == ["project_id"]
+        assert outbox_indexes["ix_ai_usage_outbox_status_next_attempt_at"] == [
+            "status",
+            "next_attempt_at",
+        ]
+        assert usage_indexes["ix_usage_events_tenant_feature_occurred"] == [
+            "tenant_id",
+            "feature",
+            "occurred_at",
+        ]
+        assert _unique_sets("ai_client_keys") == {("client_id",)}
+        assert _unique_sets("ai_usage_outbox") == {("event_id",)}
+
+        with _rolled_back_connection() as connection:
+            owner, project = _new_project(connection)
+            stranger = _insert_tenant(connection, str(uuid.uuid4()))
+            now = _NOW
+            key = (
+                "INSERT INTO ai_client_keys (tenant_id, project_id, client_id, token_sha256,"
+                " status, created_at, revoked_at) VALUES (:tenant, :project, :client, :digest,"
+                " :status, :now, :revoked)"
+            )
+            outbox = (
+                "INSERT INTO ai_usage_outbox (event_id, request_id, tenant_id, project_id, feature,"
+                " payload_json, status, attempts, next_attempt_at, created_at) VALUES (:event,"
+                " :request, :tenant, :project, 'crm.summary', '{}', :status, :attempts, :now, :now)"
+            )
+            values = {
+                "tenant": owner,
+                "project": project,
+                "client": "aic_" + "a" * 32,
+                "digest": "a" * 64,
+                "status": "ACTIVE",
+                "now": now,
+                "revoked": None,
+            }
+            connection.execute(text(key), values)
+            for statement, parameters in (
+                (key, {**values, "tenant": stranger, "client": "aic_" + "b" * 32}),
+                (key, {**values, "client": "aic_" + "c" * 32, "status": "BAD", "revoked": None}),
+                (
+                    key,
+                    {
+                        **values,
+                        "client": "aic_" + "d" * 32,
+                        "status": "REVOKED",
+                        "revoked": None,
+                    },
+                ),
+                (
+                    key,
+                    {
+                        **values,
+                        "client": "aic_" + "e" * 32,
+                        "status": "ACTIVE",
+                        "revoked": now,
+                    },
+                ),
+                (
+                    outbox,
+                    {
+                        "event": "0" * 26,
+                        "request": "1" * 26,
+                        "tenant": owner,
+                        "project": project,
+                        "status": "BAD",
+                        "attempts": 0,
+                        "now": now,
+                    },
+                ),
+                (
+                    outbox,
+                    {
+                        "event": "7" * 26,
+                        "request": "8" * 26,
+                        "tenant": stranger,
+                        "project": project,
+                        "status": "PENDING",
+                        "attempts": 0,
+                        "now": now,
+                    },
+                ),
+                (
+                    outbox,
+                    {
+                        "event": "2" * 26,
+                        "request": "3" * 26,
+                        "tenant": owner,
+                        "project": project,
+                        "status": "PENDING",
+                        "attempts": -1,
+                        "now": now,
+                    },
+                ),
+            ):
+                with pytest.raises(DBAPIError):
+                    with connection.begin_nested():
+                        connection.execute(text(statement), parameters)
+            with pytest.raises(DBAPIError):
+                with connection.begin_nested():
+                    connection.execute(text(key), values)
+            first_outbox = {
+                "event": "4" * 26,
+                "request": "5" * 26,
+                "tenant": owner,
+                "project": project,
+                "status": "PENDING",
+                "attempts": 0,
+                "now": now,
+            }
+            connection.execute(text(outbox), first_outbox)
+            with pytest.raises(DBAPIError):
+                with connection.begin_nested():
+                    connection.execute(text(outbox), {**first_outbox, "request": "6" * 26})
     finally:
         engine.dispose()
 
@@ -1704,9 +1933,9 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015、0017 与 0020 的表随降级到 0009 一并删掉）。
+        # 只删触发器：表与列都不动（0012–0015、0017、0020 与 0021 的表随降级到 0009 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
-        later |= {_DELIVERIES_TABLE}
+        later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -1802,10 +2031,10 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017 与 0020 的表随降级到 0010
-        # 一并删掉）。
+        # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020 与 0021 的表随降级到
+        # 0010 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
-        later |= {_DELIVERIES_TABLE}
+        later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
@@ -4022,10 +4251,11 @@ def test_0017_column_shape(alembic_config: Config) -> None:
         inspector = inspect(engine)
         columns = {table: inspector.get_columns(table) for table in _EXPECTED_0017_COLUMNS}
         # NOT NULL column by column (design v6): composite keys and CHECKs hold only then.
-        # At head `usage_events` also has 0018's columns (test_0018_column_shape).
+        # At head `usage_events` also has 0018's columns (test_0018_column_shape), 0019's
+        # and 0021's nullable `feature`.
         for table, expected in _EXPECTED_0017_COLUMNS.items():
             at_head = (
-                expected | _EXPECTED_0018_COLUMNS | _EXPECTED_0019_COLUMNS
+                expected | _EXPECTED_0018_COLUMNS | _EXPECTED_0019_COLUMNS | {"feature": True}
                 if table == "usage_events"
                 else expected
             )

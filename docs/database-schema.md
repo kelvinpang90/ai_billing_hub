@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-10-12
+> 最后更新：2026-10-13
 
 ---
 
@@ -821,6 +821,40 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 
 ---
 
+## AI 模块（AIH-TASK-056，迁移 `0021_ai_module`）
+
+### `ai_client_keys`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增 |
+| `tenant_id` / `project_id` | BIGINT | 非空；复合外键 → `projects(id, tenant_id)`，`RESTRICT` |
+| `client_id` | VARCHAR(40) `utf8mb4_0900_bin` | 非空，唯一；非机密调用方标识 |
+| `token_sha256` | CHAR(64) `ascii_bin` | 非空；Bearer token 的 SHA-256 摘要，不存明文 |
+| `status` | VARCHAR(16) | 非空；`ACTIVE` / `REVOKED`，CHECK |
+| `created_at` / `revoked_at` | DATETIME | 前者非空，后者可空；CHECK 保证仅 `REVOKED` 有吊销时刻 |
+
+索引：`ix_ai_client_keys_project_id (project_id)`。行不删除，吊销只改状态。每个项目至多两把
+`ACTIVE` 密钥由服务函数在项目行锁内保证，数据库不强制。
+
+### `ai_usage_outbox`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增 |
+| `event_id` | CHAR(26) `ascii_bin` | 非空，唯一 |
+| `request_id` / `claim_id` | CHAR(26) `ascii_bin` | 前者非空；后者可空 |
+| `tenant_id` / `project_id` | BIGINT | 非空；复合外键 → `projects(id, tenant_id)`，`RESTRICT` |
+| `feature` | VARCHAR(64) `utf8mb4_0900_bin` | 非空 |
+| `payload_json` | TEXT | 非空；只存用量元数据 |
+| `status` | VARCHAR(16) | 非空；`PENDING` / `SENDING` / `DELIVERED` / `DEAD` / `HELD` / `DISCARDED`，CHECK |
+| `attempts` | INT | 非空，CHECK `>= 0` |
+| `next_attempt_at` / `first_attempted_at` / `created_at` / `delivered_at` / `resolved_at` / `review_required_at` / `reviewed_at` / `dead_acked_at` | DATETIME(6) | 除 `next_attempt_at`、`created_at` 外可空 |
+| `last_error` | VARCHAR(64) | 可空 |
+
+索引：`ix_ai_usage_outbox_status_next_attempt_at (status, next_attempt_at)`。行不删除；AI 请求路径只写
+`ai_usage_outbox`。
+
 ## 用量事件（spec §23、§79、§83；AIH-TASK-029，迁移 `0017_usage_events`）
 
 设计依据：[design/AIH-TASK-029-usage-ingest.md](design/AIH-TASK-029-usage-ingest.md)（设计闸门 #176 v8）§2「数据库」与
@@ -863,6 +897,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | `payload_fingerprint` | CHAR(64) | 非空；规范化载荷的 SHA-256 |
 | `status` | VARCHAR(32) | 非空，默认 `RECEIVED`；`CHECK` §83 的九个取值。`IDEMPOTENCY_CONFLICT` 留在取值里但不写：冲突是请求的结果，不是原事件的状态 |
 | `error_code` / `error_message` | VARCHAR(64) / VARCHAR(255) | 可空；计费侧写 |
+| `feature` | VARCHAR(64) `utf8mb4_0900_bin` | 可空；AI 调用的功能标签（迁移 0021） |
 | `occurred_at` | DATETIME(6) | 非空；保留微秒（别名与版本边界按 `[from, to)` 比较） |
 | `received_at` / `created_at` | DATETIME | 非空；整秒 |
 | `processed_at` | DATETIME | 可空；计费侧写 |
@@ -878,6 +913,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
   `provider_id`、`conversation_id`、`request_id`、`occurred_at`，以及两个复合外键在子表上的索引
   `ix_usage_events_credential`、`ix_usage_events_meter_type`。`project_id` 与 `model_id` 的索引取复合外键需要的形式
   （首列就是该列），一个索引同时服务查询与外键，不让 MySQL 再自动建一个。
+- `ix_usage_events_tenant_feature_occurred (tenant_id, feature, occurred_at)` 供按功能查询。
 - **取名**：spec §79 写的是 `cache_creation_tokens` / `cache_read_tokens`；§74 允许按仓库约定命名，这里取与上报载荷、
   与 AIH-TASK-025 的 `quantity_field` 一致的 `cache_creation_input_tokens` / `cache_read_input_tokens`，免得三处各叫
   一个名。
