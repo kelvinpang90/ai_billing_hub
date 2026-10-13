@@ -3617,7 +3617,7 @@ tasks:
     title: AI 模块第三层：AI 密钥的签发与吊销规则
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 3 项的服务函数（不开接口）：app/ai_api/admin.py 的列出、签发、吊销，含项目行锁、每个项目至多 2 把 ACTIVE、审计与数据改动同一事务；新增两个审计动作。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-056
     acceptance_criteria:
