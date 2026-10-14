@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import enum
-from typing import Final
+import json
+import logging
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from sqlalchemy import (
     CHAR,
@@ -18,12 +22,20 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    select,
 )
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
 
+from app.ai_api.database import AiDatabaseCapacityExceeded, AiDatabaseExecutor
 from app.models import tenancy as _tenancy_models  # noqa: F401
 from app.models.base import Base
+
+logger = logging.getLogger(__name__)
+CommitOutcome = Literal["written", "written_after_error", "absent", "unknown"]
+
+if TYPE_CHECKING:
+    from app.ai_api.held import HeldBuffer, HeldUsage
 
 _PrimaryKey = BigInteger().with_variant(Integer, "sqlite")
 _ForeignKeyInt = BigInteger().with_variant(Integer, "sqlite")
@@ -100,3 +112,141 @@ class AiUsageOutbox(Base):
         CheckConstraint(OUTBOX_STATUS_CHECK, name="ck_ai_usage_outbox_status"),
         CheckConstraint(OUTBOX_ATTEMPTS_CHECK, name="ck_ai_usage_outbox_attempts"),
     )
+
+
+def _pending_row(payload: dict[str, Any], tenant_id: int, project_id: int) -> AiUsageOutbox:
+    now = dt.datetime.now(dt.UTC)
+    return AiUsageOutbox(
+        event_id=payload["event_id"],
+        request_id=payload["request_id"],
+        claim_id=None,
+        tenant_id=tenant_id,
+        project_id=project_id,
+        feature=payload["feature"],
+        payload_json=json.dumps(payload, separators=(",", ":")),
+        status=AiUsageOutboxStatus.PENDING,
+        attempts=0,
+        next_attempt_at=now,
+        last_error=None,
+        first_attempted_at=None,
+        created_at=now,
+        delivered_at=None,
+        resolved_at=None,
+        review_required_at=None,
+        reviewed_at=None,
+        dead_acked_at=None,
+    )
+
+
+def write_pending(
+    factory: sessionmaker[Session],
+    *,
+    payload: dict[str, Any],
+    internal_tenant_id: int,
+    internal_project_id: int,
+) -> CommitOutcome:
+    """Write PENDING; a failed commit acknowledgement is checked on a fresh session."""
+    try:
+        session = factory()
+    except Exception:
+        return "unknown"
+    try:
+        try:
+            session.add(_pending_row(payload, internal_tenant_id, internal_project_id))
+            session.commit()
+            return "written"
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+    try:
+        check = factory()
+        try:
+            found = check.scalar(
+                select(AiUsageOutbox.status).where(AiUsageOutbox.event_id == payload["event_id"])
+            )
+            return "written_after_error" if found is not None else "absent"
+        finally:
+            try:
+                check.close()
+            except Exception:
+                pass
+    except Exception:
+        return "unknown"
+
+
+async def persist_usage(
+    executor: AiDatabaseExecutor,
+    factory: sessionmaker[Session],
+    held_buffer: HeldBuffer,
+    held_item: HeldUsage,
+    *,
+    timeout_seconds: float,
+) -> CommitOutcome:
+    """The only owner of cancellation, critical logging and the held buffer."""
+    recorded = False
+
+    def record(outcome: Literal["absent", "unknown"]) -> None:
+        nonlocal recorded
+        if recorded:
+            return
+        recorded = True
+        item = replace(held_item, commit_outcome=outcome)
+        payload = item.payload
+        logger.critical(
+            "AI usage not persisted",
+            extra={
+                "event_id": payload["event_id"],
+                "ai_request_id": item.ai_request_id,
+                "feature": payload["feature"],
+                "tenant_public_id": payload["tenant_id"],
+                "project_public_id": payload["project_id"],
+                "model": payload["model"],
+                "usage_input": payload["input_tokens"],
+                "usage_output": payload["output_tokens"],
+                "usage_cache_write": payload["cache_creation_input_tokens"],
+                "usage_cache_read": payload["cache_read_input_tokens"],
+                "occurred_at": payload["occurred_at"],
+                "commit_outcome": outcome,
+            },
+        )
+        held_buffer.put(item)
+
+    try:
+        outcome = await executor.run_with_timeout(
+            timeout_seconds,
+            write_pending,
+            factory,
+            payload=held_item.payload,
+            internal_tenant_id=held_item.internal_tenant_id,
+            internal_project_id=held_item.internal_project_id,
+        )
+    except asyncio.CancelledError:
+        record("unknown")
+        raise
+    except AiDatabaseCapacityExceeded:
+        record("absent")
+        return "absent"
+    except TimeoutError:
+        record("unknown")
+        return "unknown"
+    except Exception:
+        record("unknown")
+        return "unknown"
+    if outcome == "written_after_error":
+        logger.warning(
+            "AI usage commit acknowledgement failed but row was written",
+            extra={
+                "event_id": held_item.payload["event_id"],
+                "ai_request_id": held_item.ai_request_id,
+            },
+        )
+    elif outcome in {"absent", "unknown"}:
+        record(outcome)
+    return outcome
