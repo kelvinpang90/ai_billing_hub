@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.ai_api.database import (
+    AiDatabaseExecutor,
+    create_ai_database_engine,
+    create_ai_session_factory,
+)
+from app.ai_api.held import HeldBuffer, final_held_attempt, held_retry_loop
+from app.ai_api.routes import AiRuntime
+from app.ai_api.routes import router as ai_router
 from app.api.admin_ai_access import router as admin_ai_access_router
 from app.api.admin_ai_catalog import router as admin_ai_catalog_router
 from app.api.admin_audit import router as admin_audit_router
@@ -47,9 +57,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
 
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        runtime: AiRuntime | None = getattr(application.state, "ai_runtime", None)
+        task: asyncio.Task[None] | None = None
+        if runtime is not None:
+            task = asyncio.create_task(
+                held_retry_loop(
+                    runtime.held_buffer,
+                    runtime.executor,
+                    runtime.session_factory,
+                    retry_seconds=settings.ai_held_retry_seconds,
+                    timeout_seconds=(
+                        2
+                        * (
+                            settings.ai_db_pool_timeout_seconds
+                            + settings.ai_db_connect_timeout_seconds
+                        )
+                        + 3 * settings.ai_db_rw_timeout_seconds
+                    ),
+                )
+            )
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                await final_held_attempt(
+                    runtime.held_buffer,
+                    runtime.executor,
+                    runtime.session_factory,
+                    timeout_seconds=(
+                        2
+                        * (
+                            settings.ai_db_pool_timeout_seconds
+                            + settings.ai_db_connect_timeout_seconds
+                        )
+                        + 3 * settings.ai_db_rw_timeout_seconds
+                    ),
+                )
+                runtime.executor.shutdown()
+
     app = FastAPI(
         title="Acuven Central AI Billing Platform",
         debug=settings.debug,
+        lifespan=lifespan,
     )
     # 中间件要在异常处理器之前装：处理器要读中间件绑上的 request_id，
     # 才能把它写进 §107 的信封。
@@ -72,6 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(integration_usage_router)
     # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。
     app.include_router(internal_alerts_router)
+    app.include_router(ai_router)
 
     app.state.settings = settings
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。
@@ -104,6 +161,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.engine = engine
         app.state.session_factory = create_session_factory(engine)
+    if app.state.engine is None:
+        app.state.ai_runtime = None
+    else:
+        ai_engine = create_ai_database_engine(
+            settings.database_url,
+            threads=settings.ai_db_threads,
+            pool_timeout_seconds=settings.ai_db_pool_timeout_seconds,
+            connect_timeout_seconds=settings.ai_db_connect_timeout_seconds,
+            rw_timeout_seconds=settings.ai_db_rw_timeout_seconds,
+        )
+        app.state.ai_runtime = AiRuntime(
+            engine=ai_engine,
+            session_factory=create_ai_session_factory(ai_engine),
+            executor=AiDatabaseExecutor(
+                threads=settings.ai_db_threads, queue_max=settings.ai_db_queue_max
+            ),
+            held_buffer=HeldBuffer(settings.ai_held_buffer_max),
+        )
 
     # ⚠️ 这个 Celery 实例在 API 进程里**只用来发投递触发**，一个任务也不执行。
     # 没有 broker 时它是 None，而那**不是**故障：outbox 行已经在库里，周期恢复
