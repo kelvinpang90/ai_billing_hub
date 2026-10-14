@@ -17,6 +17,7 @@ RFC 3339、必须带时区、整秒（与发布的 `effective_from` 同一个 `M
 from __future__ import annotations
 
 import datetime as dt
+import re
 from decimal import Decimal
 from typing import Literal
 
@@ -27,6 +28,7 @@ from app.models.usage import UsageEventConflict, UsageEventStatus
 from app.repositories.usage_events import EventDetailRow, EventListRow
 from app.schemas.customers import money_text
 from app.schemas.provider_prices import Moment
+from app.schemas.usage_ingest import FEATURE_PATTERN, MAX_FEATURE_LENGTH
 from app.services.fx_rates import rate_text
 
 _MOMENT: TypeAdapter[dt.datetime | None] = TypeAdapter(Moment)
@@ -65,6 +67,15 @@ def parse_period(
     return start, end
 
 
+def parse_feature(feature: str | None) -> str | None:
+    """Validate the exact feature-label grammar after administrator authentication."""
+    if feature is None:
+        return None
+    if len(feature) > MAX_FEATURE_LENGTH or re.fullmatch(FEATURE_PATTERN, feature) is None:
+        raise InvalidUsageEventQuery("feature")
+    return feature
+
+
 class UsageEventSummary(BaseModel):
     """列表项（spec §61 的请求表）。`id` 是事件的 `public_id`。"""
 
@@ -78,6 +89,7 @@ class UsageEventSummary(BaseModel):
     # 上报的原始字符串。
     provider: str
     model: str
+    feature: str | None
     usage_type: str
     # `LLM_TOKEN_FIELDS` 形态四个 token 数非空、`quantity` 为空；`QUANTITY` 形态相反。
     input_tokens: int | None
@@ -159,6 +171,7 @@ def _summary_fields(row: EventListRow) -> dict[str, object]:
         "conversation_id": event.conversation_id,
         "provider": event.provider_code_raw,
         "model": event.model_code_raw,
+        "feature": event.feature,
         "usage_type": row.usage_type,
         "input_tokens": event.input_tokens,
         "output_tokens": event.output_tokens,
@@ -241,6 +254,7 @@ __all__ = [
     "UsageEventDetail",
     "UsageEventSummary",
     "parse_period",
+    "parse_feature",
     "usage_event_detail",
     "usage_event_summary",
 ]

@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text, update
 from sqlalchemy.pool import StaticPool
 
+from app.ai_api.models import AiClientKey, AiClientKeyStatus
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.logging import JsonFormatter
@@ -116,6 +117,7 @@ FX_RATES_ROUTE = "/api/v1/admin/fx-rates"
 FX_RATE_ROUTE = FX_RATES_ROUTE + "/{fx_rate_id}"
 PRICING_PREVIEW_ROUTE = "/api/v1/admin/pricing-preview"
 USAGE_EVENTS_ROUTE = "/api/v1/admin/usage-events"
+AI_ACCESS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/ai-access"
 # AIH-TASK-050 的三个接口（设计闸门 #241 v6 §2「接口」）。
 PROJECT_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}"
 INTEGRATION_STATUS_ROUTE = PROJECT_ROUTE + "/integration-status"
@@ -182,6 +184,9 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"),
     ("GET", USAGE_EVENTS_ROUTE),
     ("GET", USAGE_EVENTS_ROUTE + "/{usage_event_id}"),
+    ("GET", AI_ACCESS_ROUTE),
+    ("POST", AI_ACCESS_ROUTE + "/client-keys"),
+    ("POST", AI_ACCESS_ROUTE + "/client-keys/{client_id}/revoke"),
     ("POST", INTEGRATION_STATUS_ROUTE),
     ("PUT", STATUS_WEBHOOK_ROUTE),
     ("GET", STATUS_WEBHOOK_ROUTE),
@@ -286,6 +291,8 @@ VALID_BODIES = {
     # 都过不了 401 / 403；请求体合法，保证 422 不会先出现。事件 id 是全零占位值。
     ("POST", USAGE_EVENTS_ROUTE + "/requeue"): {"status": "PRICING_ERROR", "reason": "Probe"},
     ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"): {"reason": "Probe"},
+    ("POST", AI_ACCESS_ROUTE + "/client-keys"): None,
+    ("POST", AI_ACCESS_ROUTE + "/client-keys/{client_id}/revoke"): None,
     # 项目集成状态与地址（AIH-TASK-050）：新项目是 ENABLED、没有地址，漏了鉴权的处理函数会
     # 真的把它停用、真的设上地址，而不是碰巧「没变化」。地址是虚构的。
     ("POST", INTEGRATION_STATUS_ROUTE): {"integration_status": "DISABLED", "reason": "Probe"},
@@ -294,6 +301,7 @@ VALID_BODIES = {
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
 PROBE_API_KEY = "ak_" + "0" * 32
+PROBE_AI_CLIENT_ID = "aic_" + "0" * 32
 
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}
@@ -451,6 +459,7 @@ COUNTED_MODELS = (
     PricingRuleComponent,
     FxRateVersion,
     FxFetchAttempt,
+    AiClientKey,
 )
 
 
@@ -485,6 +494,7 @@ NO_ROWS = {
     "pricing_rule_components": 0,
     "fx_rate_versions": 0,
     "fx_fetch_attempts": 0,
+    "ai_client_keys": 0,
 }
 
 
@@ -594,6 +604,26 @@ def probe_webhook_secret(application: FastAPI, project_id: str) -> None:
             encrypted_secret="not-a-real-ciphertext",
             encryption_key_version=1,
             now=utc_now().replace(microsecond=0),
+        )
+        session.commit()
+
+
+def probe_ai_client_key(application: FastAPI, project_id: str) -> None:
+    """An ACTIVE key makes an unauthenticated revoke observably destructive if auth is omitted."""
+    with application.state.session_factory() as session:
+        project = session.execute(
+            select(Project).where(Project.public_id == project_id)
+        ).scalar_one()
+        session.add(
+            AiClientKey(
+                tenant_id=project.tenant_id,
+                project_id=project.id,
+                client_id=PROBE_AI_CLIENT_ID,
+                token_sha256="0" * 64,
+                status=AiClientKeyStatus.ACTIVE,
+                created_at=utc_now().replace(microsecond=0),
+                revoked_at=None,
+            )
         )
         session.commit()
 
@@ -776,6 +806,14 @@ def stored_webhook_secrets(application: FastAPI) -> list[tuple]:
         return [tuple(row) for row in session.execute(statement)]
 
 
+def stored_ai_client_keys(application: FastAPI) -> list[tuple]:
+    statement = select(AiClientKey.client_id, AiClientKey.status, AiClientKey.revoked_at).order_by(
+        AiClientKey.id
+    )
+    with application.state.session_factory() as session:
+        return [tuple(row) for row in session.execute(statement)]
+
+
 def stored_credentials(application: FastAPI) -> list[tuple]:
     statement = select(
         IntegrationCredential.public_api_key,
@@ -874,11 +912,13 @@ def test_every_admin_route_refuses_non_admins(
     project_id = new_project(client, admin, customer_id)["id"]
     probe_credential(app, project_id)
     probe_webhook_secret(app, project_id)
+    probe_ai_client_key(app, project_id)
     probe_catalog(app)
     url = (
         path.replace("{customer_id}", customer_id)
         .replace("{project_id}", project_id)
         .replace("{api_key}", PROBE_API_KEY)
+        .replace("{client_id}", PROBE_AI_CLIENT_ID)
         .replace("{key_version}", "1")
     )
     for name in (
@@ -897,6 +937,7 @@ def test_every_admin_route_refuses_non_admins(
     project = stored_project(app, project_id)
     credentials = stored_credentials(app)
     webhook_secrets = stored_webhook_secrets(app)
+    ai_client_keys = stored_ai_client_keys(app)
     catalog = stored_catalog(app)
 
     response = client.request(method, url, json=VALID_BODIES.get((method, path)), headers=headers)
@@ -912,6 +953,7 @@ def test_every_admin_route_refuses_non_admins(
     assert stored_credentials(app) == credentials
     # 签名密钥行同理：启用与退役改的是已有行的状态与时间（AIH-TASK-019）。
     assert stored_webhook_secrets(app) == webhook_secrets
+    assert stored_ai_client_keys(app) == ai_client_keys
     # AI 目录同理：PATCH 改状态与名字，撤销改段的终点（AIH-TASK-025）；价格草稿的改、发布、
     # 丢弃改版本行（AIH-TASK-026）。
     assert stored_catalog(app) == catalog

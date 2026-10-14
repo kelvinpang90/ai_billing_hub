@@ -265,6 +265,7 @@ def list_events(
     request_id: str | None = None,
     provider: str | None = None,
     model: str | None = None,
+    feature: str | None = None,
     occurred_from: dt.datetime | None = None,
     occurred_to: dt.datetime | None = None,
     status: UsageEventStatus | None = None,
@@ -273,14 +274,15 @@ def list_events(
     """One page of events, newest first by row id, and the total. Filters combine with AND.
 
     `customer_id` / `project_id` 是 `public_id`，不存在就是空页（与「存在但没有事件」一样）；
-    `provider` / `model` 与上报的原始字符串逐字节比较；时间段按 `occurred_at` 取
+    `provider` / `model` / `feature` 与上报的原始字符串逐字节比较；时间段按 `occurred_at` 取
     `[occurred_from, occurred_to)`（不带时区的 UTC）。
 
     索引（迁移 0017 / 0018）：客户 → `ix_usage_events_tenant_id`；项目 →
     `ix_usage_events_project_id`；会话 → `ix_usage_events_conversation_id`；请求 →
     `ix_usage_events_request_id`；状态（可带时间段）→ `ix_usage_events_status_occurred`；
-    只有时间段 → `ix_usage_events_occurred_at`。`provider` / `model` / `error_code` 没有专门的
-    索引，与上面任一条件组合时是残余过滤；单独使用时按主键倒序扫（`ORDER BY id DESC LIMIT`）。
+    只有时间段 → `ix_usage_events_occurred_at`。`provider` / `model` / `feature` /
+    `error_code` 没有专门的索引，与上面任一条件组合时是残余过滤；单独使用时按主键倒序扫
+    （`ORDER BY id DESC LIMIT`）。
     三表连接都是主键点查（内连接不丢行：三个外键列都 `NOT NULL`），`COUNT` 不连接。
     """
     conditions: list[ColumnElement[bool]] = []
@@ -306,6 +308,8 @@ def list_events(
         conditions.append(UsageEvent.provider_code_raw == provider)
     if model is not None:
         conditions.append(UsageEvent.model_code_raw == model)
+    if feature is not None:
+        conditions.append(UsageEvent.feature == feature)
     if occurred_from is not None:
         conditions.append(UsageEvent.occurred_at >= occurred_from)
     if occurred_to is not None:
