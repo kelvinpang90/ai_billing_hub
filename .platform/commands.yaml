@@ -80,7 +80,11 @@ constraints:
 #   none  —— 不写工作区任何文件
 #   cache —— 只写构建/测试缓存（__pycache__ / .ruff_cache / .pytest_cache），
 #            这些路径已被 .gitignore 忽略，不产生工作区 diff
-#   repo  —— 会改动仓库内被跟踪的文件。**本文件里一条都没有，也不许有。**
+#   format —— 格式化器（控制面 ACVDEV-TASK-095）：只由 Worker 在每轮检查之前按任务列出的顺序运行，
+#            只许原地改写本次任务 allowed_change_paths 内已有文件的内容（新建、删除、改名或改到可改路径
+#            之外，run 一律以 unexpected_changes 失败）；输出丢弃、不进任何会话，不占检查修复次数。
+#            任务的 allowed_commands 不能只列格式化器，至少要有一条检查。
+#   repo  —— 会任意改动仓库内被跟踪的文件。**本文件里一条都没有，也不许有。**
 commands:
   - id: docs.check
     description: 校验文档相对链接、spec 章节引用与跨文件约定串一致性
@@ -128,6 +132,7 @@ commands:
   # 放在 sys.path 最前面，worktree 里的 ruff.py 能顶替真正的包。控制面 ACVDEV-TASK-017 只给固定了完整定义、
   # 且首参数是 `-I` 的检查放开 MXC 的 Win32k 缓解（ruff.exe 需要），并逐字比对这里的 executable + args ——
   # 改这两条的写法，本机 Worker 配置里固定的定义必须同步改，否则 run 以 policy_violation 失败。
+  # 后面的 lint.fix / format.apply 同样被本机逐字固定（控制面 ACVDEV-TASK-096），改写法也必须同步改 Worker 配置。
   - id: lint.check
     description: 后端 lint（ruff check，只报告不改写）
     executable: python
@@ -147,6 +152,29 @@ commands:
     timeout_seconds: 300
     network: false
     writes: cache
+
+  # 两条格式化器（writes: format，口径见文件头）。Kelvin 2026-10-14 定：lint 修复只用 `--select I`（只修导入排序），
+  # 不用整套规则的 --fix（会删未使用的 import、改写语法）。作用于整个仓库，所以默认分支必须保持
+  # lint.check / format.check 干净（CI 保证），否则可改路径之外的文件被改写，run 以 unexpected_changes 结束。
+  - id: lint.fix
+    description: 导入排序（ruff check --fix --select I：重排 import 块，配了 required-imports 时插入 import；归类规则与 lint.check 相同）
+    executable: python
+    args: ["-I", "-m", "ruff", "check", "--fix", "--select", "I", "."]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 300
+    network: false
+    writes: format
+
+  - id: format.apply
+    description: 后端格式化（ruff format，只改写本次任务可改路径内已有文件的内容；规则见 pyproject.toml [tool.ruff]）
+    executable: python
+    args: ["-I", "-m", "ruff", "format", "."]
+    working_directory: repository_root
+    risk: low
+    timeout_seconds: 300
+    network: false
+    writes: format
 
   - id: tests.backend
     description: 后端产品代码测试（pytest，testpaths 指向 tests/backend）

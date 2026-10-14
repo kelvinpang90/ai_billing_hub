@@ -395,6 +395,12 @@ process_boundary_required` 要求它在进程边界上真的被强制（作业�
 loopback、文件系统、capabilities 都不变。所以 `commands.yaml` 里这两条写成 `python -I -m ruff ...`，本机配置
 里固定的定义必须与之逐字一致 —— 改其中一边不改另一边，run 在任何检查之前以 `policy_violation` 失败。
 
+**两条格式化器（控制面 ACVDEV-TASK-095 / 096）**：`lint.fix`（`ruff check --fix --select I`，只修导入排序）与
+`format.apply`（`ruff format`）是 `writes: format`，由 Worker 在每轮检查之前按 `allowed_commands` 里的顺序运行，
+输出丢弃、不占检查修复次数，只许原地改写任务可改路径内已有文件的内容，越界即 `unexpected_changes`。本机配置
+同样逐字固定了这两条的定义（2026-10-14），改写法要两边一起改。它们作用于整个仓库，所以默认分支必须保持
+`lint.check` / `format.check` 干净（CI 保证）。
+
 ⚠️ 这件事**要等下面几样都成立**才能把 `lint.check` / `format.check` 加进会写仓库任务的 `allowed_commands`：
 控制面 ACVDEV-TASK-017 已合并、本机 Worker 部署副本已更新到该提交、本机配置已固定这两条定义、并在本机
 MXC 里实测过一次两条都零退出。**2026-09-19 这四样都已成立**（控制面 #17 合并、部署副本更新、本机配置固定两条定义、MXC 实测零退出），`AIH-TASK-005` 是第一个带上这两条的任务。

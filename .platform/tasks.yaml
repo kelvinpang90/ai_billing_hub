@@ -3696,6 +3696,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -3749,6 +3751,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -3799,6 +3803,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -3852,6 +3858,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -3902,6 +3910,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -3950,6 +3960,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -4002,6 +4014,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -4056,6 +4070,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -4107,6 +4123,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
       - frontend.test
@@ -4160,6 +4178,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
       - frontend.test
@@ -4213,6 +4233,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
     execution: sequential
@@ -4271,6 +4293,8 @@ tasks:
       - docs.check
       - policy.check
       - tests.process
+      - lint.fix
+      - format.apply
       - lint.check
       - format.check
       - frontend.test
