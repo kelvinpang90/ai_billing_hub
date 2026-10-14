@@ -13,6 +13,79 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 
+AI_DURATION_FIELDS = (
+    "ai_provider_timeout_seconds",
+    "ai_request_deadline_seconds",
+    "ai_db_pool_timeout_seconds",
+    "ai_db_connect_timeout_seconds",
+    "ai_db_rw_timeout_seconds",
+)
+
+
+def test_the_ai_settings_default_to_the_approved_design_values() -> None:
+    settings = Settings()
+
+    assert settings.ai_anthropic_key_file == "/run/secrets/billing_anthropic_key"
+    assert tuple(getattr(settings, field) for field in AI_DURATION_FIELDS) == (
+        60.0,
+        75.0,
+        2.0,
+        2.0,
+        5.0,
+    )
+    assert all(isinstance(getattr(settings, field), float) for field in AI_DURATION_FIELDS)
+    assert (
+        settings.ai_db_threads,
+        settings.ai_db_queue_max,
+        settings.ai_max_request_bytes,
+        settings.ai_max_output_tokens,
+        settings.ai_held_buffer_max,
+        settings.ai_held_retry_seconds,
+    ) == (10, 20, 65_536, 4_000, 1_000, 30)
+
+
+def test_the_ai_settings_reject_invalid_limits_and_infeasible_deadlines() -> None:
+    for field in (
+        *AI_DURATION_FIELDS,
+        "ai_db_threads",
+        "ai_db_queue_max",
+        "ai_max_request_bytes",
+        "ai_max_output_tokens",
+        "ai_held_buffer_max",
+        "ai_held_retry_seconds",
+    ):
+        for bad in (0, -1):
+            with pytest.raises(ValidationError):
+                Settings(**{field: bad})
+    with pytest.raises(ValidationError):
+        Settings(ai_max_request_bytes=81_921)
+
+    with pytest.raises(ValidationError):
+        Settings(ai_request_deadline_seconds=32)
+    assert Settings(ai_request_deadline_seconds=33).ai_request_deadline_seconds == 33
+
+
+def test_the_ai_deadline_lower_bound_tracks_database_timeouts() -> None:
+    database_timeouts = {
+        "ai_db_pool_timeout_seconds": 1,
+        "ai_db_connect_timeout_seconds": 1,
+        "ai_db_rw_timeout_seconds": 1,
+    }
+    assert (
+        Settings(ai_request_deadline_seconds=11, **database_timeouts).ai_request_deadline_seconds
+        == 11
+    )
+    with pytest.raises(ValidationError):
+        Settings(ai_request_deadline_seconds=10, **database_timeouts)
+
+    database_timeouts["ai_db_rw_timeout_seconds"] = 10
+    assert (
+        Settings(ai_request_deadline_seconds=47, **database_timeouts).ai_request_deadline_seconds
+        == 47
+    )
+    with pytest.raises(ValidationError):
+        Settings(ai_request_deadline_seconds=46, **database_timeouts)
+
 
 def test_pending_token_ttls_must_be_positive(tmp_path) -> None:
     """非正值**必须让进程起不来**，不能签出一张立即过期的令牌。

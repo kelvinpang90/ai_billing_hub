@@ -216,18 +216,110 @@ def test_every_credential_file_setting_is_wired_into_compose(compose: dict) -> N
     backend = compose["x-backend"]
     env = backend["environment"]
     mounted = set(backend["secrets"])
+    api_only = {"ai_anthropic_key_file"}
 
     file_fields = [name for name in Settings.model_fields if name.endswith("_file")]
     assert file_fields, "Settings 一个 *_file 字段都没有，这条用例在空集合上空转"
 
     for field in file_fields:
         key = f"BILLING_{field.upper()}"
+        if field in api_only:
+            api = compose["services"]["api"]
+            value = str(api["environment"][key])
+            assert value.startswith("/run/secrets/"), f"{key} 应当指向挂载进来的 secret"
+            name = value.removeprefix("/run/secrets/")
+            assert name in compose["secrets"], f"{key} 指向 {name}，但 secrets: 里没有它"
+            assert name in api["secrets"], f"{name} 没有只挂给 api"
+            mounted_elsewhere = {
+                service_name
+                for service_name, service in compose["services"].items()
+                if service_name != "api" and name in service.get("secrets", [])
+            }
+            assert mounted_elsewhere == set()
+            continue
         assert key in env, f"Settings.{field} 走文件注入，但 compose 没给它配 {key}"
         value = str(env[key])
         assert value.startswith("/run/secrets/"), f"{key} 应当指向挂载进来的 secret"
         name = value.removeprefix("/run/secrets/")
         assert name in compose["secrets"], f"{key} 指向 {name}，但 secrets: 里没有它"
         assert name in mounted, f"{name} 定义了却没挂给后端，容器里那个路径不存在"
+
+    assert api_only == {"ai_anthropic_key_file"}
+
+
+def test_the_anthropic_key_is_mounted_only_for_api(compose: dict) -> None:
+    api = compose["services"]["api"]
+
+    assert (
+        api["environment"]["BILLING_AI_ANTHROPIC_KEY_FILE"] == "/run/secrets/billing_anthropic_key"
+    )
+    assert compose["secrets"]["billing_anthropic_key"] == {"file": "./secrets/anthropic.key"}
+    assert "billing_anthropic_key" in api["secrets"]
+    assert all(
+        "billing_anthropic_key" not in service.get("secrets", [])
+        for service_name, service in compose["services"].items()
+        if service_name != "api"
+    )
+
+
+def test_the_ai_request_settings_reach_backend_services(compose: dict) -> None:
+    env = compose["x-backend"]["environment"]
+    expected = {
+        "BILLING_AI_PROVIDER_TIMEOUT_SECONDS": "${BILLING_AI_PROVIDER_TIMEOUT_SECONDS:-60}",
+        "BILLING_AI_REQUEST_DEADLINE_SECONDS": "${BILLING_AI_REQUEST_DEADLINE_SECONDS:-75}",
+        "BILLING_AI_DB_POOL_TIMEOUT_SECONDS": "${BILLING_AI_DB_POOL_TIMEOUT_SECONDS:-2}",
+        "BILLING_AI_DB_CONNECT_TIMEOUT_SECONDS": "${BILLING_AI_DB_CONNECT_TIMEOUT_SECONDS:-2}",
+        "BILLING_AI_DB_RW_TIMEOUT_SECONDS": "${BILLING_AI_DB_RW_TIMEOUT_SECONDS:-5}",
+        "BILLING_AI_DB_THREADS": "${BILLING_AI_DB_THREADS:-10}",
+        "BILLING_AI_DB_QUEUE_MAX": "${BILLING_AI_DB_QUEUE_MAX:-20}",
+        "BILLING_AI_MAX_REQUEST_BYTES": "${BILLING_AI_MAX_REQUEST_BYTES:-65536}",
+        "BILLING_AI_MAX_OUTPUT_TOKENS": "${BILLING_AI_MAX_OUTPUT_TOKENS:-4000}",
+        "BILLING_AI_HELD_BUFFER_MAX": "${BILLING_AI_HELD_BUFFER_MAX:-1000}",
+        "BILLING_AI_HELD_RETRY_SECONDS": "${BILLING_AI_HELD_RETRY_SECONDS:-30}",
+    }
+    assert {key: env[key] for key in expected} == expected
+
+
+def test_ai_edge_entrypoint_has_the_approved_limits_and_error_envelopes() -> None:
+    conf = instructions(NGINX_CONF)
+    messages = nginx_location_block("= /v1/messages")
+
+    assert "limit_req_zone $binary_remote_addr zone=billing_ai:10m rate=120r/m;" in conf
+    assert "limit_req zone=billing_ai burst=60 nodelay;" in messages
+    assert "proxy_read_timeout 90s;" in messages
+    assert "client_max_body_size 80k;" in messages
+    assert "allow " not in messages
+    assert "error_page 413 = @ai_too_large;" in messages
+    assert "error_page 429 = @ai_rate_limited;" in messages
+    assert (
+        'return 413 \'{"success":false,"data":null,"error":'
+        '{"code":"PAYLOAD_TOO_LARGE","message":"request body too large"},'
+        '"request_id":null}\';' in nginx_location_block("@ai_too_large")
+    )
+    assert (
+        'return 429 \'{"success":false,"data":null,"error":'
+        '{"code":"RATE_LIMITED","message":"too many requests"},'
+        '"request_id":null}\';' in nginx_location_block("@ai_rate_limited")
+    )
+    assert "retryable" not in nginx_location_block("@ai_too_large")
+    assert "retryable" not in nginx_location_block("@ai_rate_limited")
+
+
+def test_other_v1_paths_are_not_proxied_to_api() -> None:
+    block = nginx_location_block("^~ /v1/")
+
+    assert "return 404;" in block
+    assert "proxy_pass" not in block
+
+
+def test_api_shutdown_grace_contains_the_ai_request_deadline(compose: dict) -> None:
+    dockerfile = instructions(DOCKERFILE)
+    api = compose["services"]["api"]
+    settings = Settings()
+
+    assert '"--timeout-graceful-shutdown", "85"' in dockerfile
+    assert api["stop_grace_period"] == "100s"
+    assert settings.ai_request_deadline_seconds + 10 <= 85 < 100
 
 
 def test_the_monitor_token_is_a_secret_at_a_fixed_container_path(compose: dict) -> None:

@@ -70,4 +70,4 @@ EXPOSE 8000
 # ⚠️ 这里**不做** `alembic upgrade head`。多个 API 实例同时启动会同时迁移
 # （spec §100 要求 API 可水平扩展），而 §98 要求迁移有明确顺序、可回滚、
 # 并发部署串行化。迁移是一条显式命令，不是启动副作用。
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "85"]
