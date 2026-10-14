@@ -3782,7 +3782,7 @@ tasks:
     title: AI 模块第六层：用量写入 outbox、提交结果核查与落库失败的暂存处置
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的第一批（设计 §8：第 6 项分三批交付）：AI 模块独立的数据库 engine 与三个超时、用量写入 outbox、提交报错后的当场核查、取消时的处理、落库失败的 CRITICAL 日志、暂存队列与把它落成 HELD 行的后台循环（含撞行规则）。只写函数与测试，不开路由、不接入应用生命周期、不加配置项。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-060
     acceptance_criteria:
