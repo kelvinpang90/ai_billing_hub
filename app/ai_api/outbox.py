@@ -8,7 +8,7 @@ import enum
 import json
 import logging
 from dataclasses import replace
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from sqlalchemy import (
     CHAR,
@@ -33,6 +33,9 @@ from app.models.base import Base
 
 logger = logging.getLogger(__name__)
 CommitOutcome = Literal["written", "written_after_error", "absent", "unknown"]
+
+if TYPE_CHECKING:
+    from app.ai_api.held import HeldBuffer, HeldUsage
 
 _PrimaryKey = BigInteger().with_variant(Integer, "sqlite")
 _ForeignKeyInt = BigInteger().with_variant(Integer, "sqlite")
@@ -153,9 +156,15 @@ def write_pending(
             session.commit()
             return "written"
         except Exception:
-            session.rollback()
+            try:
+                session.rollback()
+            except Exception:
+                pass
     finally:
-        session.close()
+        try:
+            session.close()
+        except Exception:
+            pass
     try:
         check = factory()
         try:
@@ -164,7 +173,10 @@ def write_pending(
             )
             return "written_after_error" if found is not None else "absent"
         finally:
-            check.close()
+            try:
+                check.close()
+            except Exception:
+                pass
     except Exception:
         return "unknown"
 
@@ -172,8 +184,8 @@ def write_pending(
 async def persist_usage(
     executor: AiDatabaseExecutor,
     factory: sessionmaker[Session],
-    held_buffer: Any,
-    held_item: Any,
+    held_buffer: HeldBuffer,
+    held_item: HeldUsage,
     *,
     timeout_seconds: float,
 ) -> CommitOutcome:
@@ -207,14 +219,14 @@ async def persist_usage(
         held_buffer.put(item)
 
     try:
-        async with asyncio.timeout(timeout_seconds):
-            outcome = await executor.run(
-                write_pending,
-                factory,
-                payload=held_item.payload,
-                internal_tenant_id=held_item.internal_tenant_id,
-                internal_project_id=held_item.internal_project_id,
-            )
+        outcome = await executor.run_with_timeout(
+            timeout_seconds,
+            write_pending,
+            factory,
+            payload=held_item.payload,
+            internal_tenant_id=held_item.internal_tenant_id,
+            internal_project_id=held_item.internal_project_id,
+        )
     except asyncio.CancelledError:
         record("unknown")
         raise
@@ -222,6 +234,9 @@ async def persist_usage(
         record("absent")
         return "absent"
     except TimeoutError:
+        record("unknown")
+        return "unknown"
+    except Exception:
         record("unknown")
         return "unknown"
     if outcome == "written_after_error":

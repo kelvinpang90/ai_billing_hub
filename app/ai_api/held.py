@@ -195,8 +195,7 @@ async def drain_held_once(
         if item is None:
             return
         try:
-            async with asyncio.timeout(timeout_seconds):
-                await executor.run(persist_held_once, factory, item)
+            await executor.run_with_timeout(timeout_seconds, persist_held_once, factory, item)
         except (TimeoutError, AiDatabaseCapacityExceeded):
             buffer.put_front(item)
             return
@@ -206,6 +205,12 @@ async def drain_held_once(
                 return
             logger.error("AI usage held persistence failed", exc_info=True)
             buffer.put_back(item)
+        except BaseException:
+            # An outer shutdown wall clock can cancel this coroutine while the database
+            # worker is still running.  The worker owns no queue state, so retain the
+            # item for the next process-lifetime attempt before propagating cancellation.
+            buffer.put_front(item)
+            raise
 
 
 async def held_retry_loop(
