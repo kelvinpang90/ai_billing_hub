@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, delete, insert, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
@@ -115,6 +116,7 @@ def _insert_existing(
     *,
     status: AiUsageOutboxStatus,
     first_attempted: bool = False,
+    attempts: int | None = None,
     resolved: bool = False,
     review_required: bool = False,
 ) -> None:
@@ -131,7 +133,7 @@ def _insert_existing(
                 feature=p["feature"],
                 payload_json=json.dumps(p, separators=(",", ":")),
                 status=status,
-                attempts=int(first_attempted),
+                attempts=int(first_attempted) if attempts is None else attempts,
                 next_attempt_at=now,
                 last_error=None,
                 first_attempted_at=now if first_attempted else None,
@@ -217,46 +219,105 @@ def test_commit_check_failure_returns_unknown_on_mysql(mysql_world, monkeypatch)
     )
 
 
+REVIEW_MESSAGE = "AI usage entered billing although the request returned 503"
+P, H = AiUsageOutboxStatus.PENDING, AiUsageOutboxStatus.HELD
+
+
+# Design §7 "撞行规则": each existing row state, in the design's order, plus the
+# other two delivery states (SENDING, DEAD) that the second UPDATE also covers.
 @pytest.mark.parametrize(
-    "status,first_attempted,resolved,review_required,expected",
+    "number,status,first_attempted,attempts,resolved,review_required,expected,flags",
     [
-        (AiUsageOutboxStatus.PENDING, False, False, False, AiUsageOutboxStatus.HELD),
-        (AiUsageOutboxStatus.PENDING, True, False, False, AiUsageOutboxStatus.PENDING),
-        (AiUsageOutboxStatus.SENDING, True, False, False, AiUsageOutboxStatus.SENDING),
-        (AiUsageOutboxStatus.DELIVERED, True, False, False, AiUsageOutboxStatus.DELIVERED),
-        (AiUsageOutboxStatus.DEAD, True, False, False, AiUsageOutboxStatus.DEAD),
-        (AiUsageOutboxStatus.HELD, False, False, False, AiUsageOutboxStatus.HELD),
-        (AiUsageOutboxStatus.PENDING, True, True, False, AiUsageOutboxStatus.PENDING),
-        (AiUsageOutboxStatus.SENDING, True, False, True, AiUsageOutboxStatus.SENDING),
+        (10, P, False, 0, False, False, H, False),  # never claimed
+        (11, P, True, 1, False, False, P, True),  # returned after a failed send
+        (12, P, True, 0, False, False, P, True),  # redelivered: attempts reset to 0
+        (13, P, False, 0, True, False, P, False),  # released by a person
+        (14, H, False, 0, False, False, H, False),  # the same item held twice
+        (15, AiUsageOutboxStatus.DISCARDED, False, 0, True, False, None, False),
+        (16, AiUsageOutboxStatus.DELIVERED, True, 1, False, False, None, True),
+        (17, AiUsageOutboxStatus.DELIVERED, True, 1, False, True, None, False),  # flagged
+        (18, AiUsageOutboxStatus.SENDING, True, 1, False, False, None, True),
+        (19, AiUsageOutboxStatus.DEAD, True, 1, False, False, None, True),
     ],
 )
 def test_held_collision_follows_each_row_state(
-    mysql_world, caplog, status, first_attempted, resolved, review_required, expected
+    mysql_world,
+    caplog,
+    number,
+    status,
+    first_attempted,
+    attempts,
+    resolved,
+    review_required,
+    expected,
+    flags,
 ) -> None:
-    item = _for(mysql_world, 10 + len(caplog.records))
+    item = _for(mysql_world, number)
     _insert_existing(
         mysql_world,
         item,
         status=status,
         first_attempted=first_attempted,
+        attempts=attempts,
         resolved=resolved,
         review_required=review_required,
     )
     with caplog.at_level(logging.CRITICAL):
         persist_held_once(mysql_world.factory, item)
     row = _outbox(mysql_world, item)
-    assert row.status is expected
-    needs_review = not resolved and (
-        status
-        in {AiUsageOutboxStatus.SENDING, AiUsageOutboxStatus.DELIVERED, AiUsageOutboxStatus.DEAD}
-        or (status is AiUsageOutboxStatus.PENDING and first_attempted)
+    assert row.status is (status if expected is None else expected)
+    assert (row.review_required_at is not None) is (flags or review_required)
+    review_logs = [r for r in caplog.records if r.message == REVIEW_MESSAGE]
+    # A new flag logs once; an existing unreviewed flag is logged again (design §2).
+    if flags or review_required:
+        assert len(review_logs) == 1
+        assert review_logs[0].event_id == item.payload["event_id"]
+        assert review_logs[0].ai_request_id == item.ai_request_id
+        assert review_logs[0].outbox_status == status.value
+    else:
+        assert not review_logs
+
+
+def test_non_duplicate_integrity_error_is_not_a_collision(mysql_world, caplog) -> None:
+    item = _for(mysql_world, 20)
+    orphan = HeldUsage(
+        item.payload,
+        mysql_world.tenant_id,
+        mysql_world.project_id + 1_000_000,
+        item.ai_request_id,
+        item.commit_outcome,
     )
-    assert (row.review_required_at is not None) is needs_review
-    if review_required:
-        assert any(
-            r.message == "AI usage entered billing although the request returned 503"
-            for r in caplog.records
-        )
+    with caplog.at_level(logging.CRITICAL), pytest.raises(IntegrityError):
+        persist_held_once(mysql_world.factory, orphan)
+    assert _outbox(mysql_world, item) is None
+    assert not [r for r in caplog.records if r.message == REVIEW_MESSAGE]
+
+
+def test_held_round_requeues_other_errors_at_tail_and_continues(mysql_world, caplog) -> None:
+    good = _for(mysql_world, 21)
+    bad_source = _for(mysql_world, 22)
+    bad = HeldUsage(
+        bad_source.payload,
+        mysql_world.tenant_id,
+        mysql_world.project_id + 1_000_000,
+        bad_source.ai_request_id,
+        bad_source.commit_outcome,
+    )
+    buffer, executor = HeldBuffer(3), AiDatabaseExecutor(threads=1, queue_max=0)
+    buffer.put(bad)
+    buffer.put(good)
+    try:
+        with caplog.at_level(logging.ERROR):
+            asyncio.run(drain_held_once(buffer, executor, mysql_world.factory, timeout_seconds=5))
+    finally:
+        executor.shutdown()
+    assert _outbox(mysql_world, good).status is AiUsageOutboxStatus.HELD
+    assert _outbox(mysql_world, bad) is None
+    assert (len(buffer), buffer.take()) == (1, bad)
+    assert any(
+        r.levelno == logging.ERROR and r.message == "AI usage held persistence failed"
+        for r in caplog.records
+    )
 
 
 def test_pending_to_held_and_delivery_claim_have_one_winner(mysql_world, caplog) -> None:

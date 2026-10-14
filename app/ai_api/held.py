@@ -114,6 +114,13 @@ def _review_log(item: HeldUsage, status: AiUsageOutboxStatus) -> None:
     )
 
 
+def _duplicate_event_id(error: IntegrityError) -> bool:
+    # Only MySQL 1062 on the event_id key is a collision; any other integrity error
+    # (foreign key, NOT NULL, CHECK) must reach the drain loop as an ordinary failure.
+    args = getattr(error.orig, "args", ())
+    return len(args) >= 2 and args[0] == 1062 and "uq_ai_usage_outbox_event_id" in str(args[1])
+
+
 def persist_held_once(factory: sessionmaker[Session], item: HeldUsage) -> None:
     """Persist one HELD row, including the uncertain-commit collision rules."""
     event_id, session = str(item.payload["event_id"]), factory()
@@ -122,7 +129,9 @@ def persist_held_once(factory: sessionmaker[Session], item: HeldUsage) -> None:
         try:
             session.commit()
             return
-        except IntegrityError:
+        except IntegrityError as error:
+            if not _duplicate_event_id(error):
+                raise
             session.rollback()
         result = session.execute(
             update(AiUsageOutbox)

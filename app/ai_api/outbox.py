@@ -240,7 +240,13 @@ async def persist_usage(
         record("unknown")
         return "unknown"
     if outcome == "written_after_error":
-        logger.warning("AI usage commit acknowledgement failed but row was written")
+        logger.warning(
+            "AI usage commit acknowledgement failed but row was written",
+            extra={
+                "event_id": held_item.payload["event_id"],
+                "ai_request_id": held_item.ai_request_id,
+            },
+        )
     elif outcome in {"absent", "unknown"}:
         record(outcome)
     return outcome
