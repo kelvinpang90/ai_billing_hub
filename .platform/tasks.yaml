@@ -3834,7 +3834,7 @@ tasks:
     title: AI 模块第七层：AI 配置项、只挂给 api 的 Anthropic key 文件、公网入口与优雅停机
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的第二批：api 用到的 AI 配置项、只挂给 api 的 Anthropic key 文件、nginx 的 /v1/messages 入口（按来源限速、超限 413 的 JSON 信封）、uvicorn 优雅停机与 api 的停机宽限。设计 §8：优雅停机必须不晚于路由上线，所以本任务排在路由（AIH-TASK-063）之前。不写路由。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-056
     acceptance_criteria:
