@@ -3668,7 +3668,7 @@ tasks:
     title: AI 模块第四层：AI 密钥的三个管理接口与用量事件按功能筛选
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 4 项：app/api/admin_ai_access.py 的三个 ai-access 接口并挂到 app/main.py；管理端用量事件列表增加 feature 查询参数，列表与详情返回 feature；docs/api.md 补两节。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-057
       - AIH-TASK-058

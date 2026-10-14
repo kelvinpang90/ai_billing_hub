@@ -97,6 +97,7 @@ SUMMARY_FIELDS = {
     "conversation_id",
     "provider",
     "model",
+    "feature",
     "usage_type",
     "input_tokens",
     "output_tokens",
@@ -429,6 +430,7 @@ class World:
         occurred_at: dt.datetime = EVENT_AT,
         seconds: str = "2",
         tokens: dict[str, int] | None = None,
+        feature: str | None = None,
     ) -> int:
         """One RECEIVED event: AUDIO_SECOND, or LLM_TOKEN when `tokens` is given."""
         number = next(_NUMBERS)
@@ -456,6 +458,7 @@ class World:
                 payload_fingerprint="0" * 64,
                 occurred_at=occurred_at,
                 now=T0,
+                feature=feature,
             )
             session.commit()
             return row.id
@@ -539,6 +542,7 @@ class Corpus:
             "conversation": world.event(self.a, conversation_id="conv-1"),
             "provider": world.event(self.a, provider="anthropic"),
             "model": world.event(self.a, model="whisper-y"),
+            "feature": world.event(self.a, feature="crm.contact_summary"),
             "later": world.event(self.a, occurred_at=later),
             "pricing": world.event(self.a),
             "closed": world.event(self.a),
@@ -564,6 +568,7 @@ ALL = (
     "conversation",
     "provider",
     "model",
+    "feature",
     "later",
     "pricing",
     "closed",
@@ -581,6 +586,7 @@ SINGLE_FILTERS: list[tuple[str, Callable[[Corpus], dict[str, str]], tuple[str, .
     ("request", lambda c: {"request_id": "shared-call"}, ("shared", "b")),
     ("provider", lambda c: {"provider": "anthropic"}, ("provider",)),
     ("model", lambda c: {"model": "whisper-y"}, ("model",)),
+    ("feature", lambda c: {"feature": "crm.contact_summary"}, ("feature",)),
     ("occurred-from", lambda c: {"occurred_from": "2026-09-29T10:00:00Z"}, ("later",)),
     (
         "occurred-to",
@@ -651,7 +657,7 @@ COMBINED_FILTERS: list[tuple[str, Callable[[Corpus], dict[str, str]], tuple[str,
             "occurred_to": "2026-09-29T10:00:00Z",
             "customer_id": c.a.public_id,
         },
-        ("shared", "conversation", "pricing", "closed", "second_project"),
+        ("shared", "conversation", "feature", "pricing", "closed", "second_project"),
     ),
     (
         "conversation-and-status",
@@ -773,6 +779,7 @@ def test_the_period_is_half_open_in_utc(
         {"status": "DONE"},
         {"page": 0},
         {"page_size": 101},
+        {"feature": "invalid"},
     ],
     ids=[
         "no-time-zone",
@@ -785,6 +792,7 @@ def test_the_period_is_half_open_in_utc(
         "unknown-status",
         "page-zero",
         "page-too-large",
+        "invalid-feature",
     ],
 )
 def test_query_validation(client, admin, world, params) -> None:
@@ -801,6 +809,27 @@ def test_the_period_is_checked_after_authentication(client, world) -> None:
     response = client.get(LIST, params={"occurred_from": "yesterday"})
 
     assert (response.status_code, error_code(response)) == (401, "TOKEN_INVALID")
+
+
+def test_feature_is_checked_after_authentication(client, world) -> None:
+    response = client.get(LIST, params={"feature": "invalid"})
+
+    assert (response.status_code, error_code(response)) == (401, "TOKEN_INVALID")
+
+
+def test_feature_filter_and_response_fields(client, admin, world) -> None:
+    tenant = world.tenant()
+    matching = world.event(tenant, feature="crm.contact_summary")
+    unmatched = world.event(tenant, feature="crm.draft_reply")
+    without_feature = world.event(tenant)
+
+    data = client.get(LIST, params={"feature": "crm.contact_summary"}, headers=admin).json()["data"]
+
+    assert [item["id"] for item in data["items"]] == [world.public_id(matching)]
+    assert data["items"][0]["feature"] == "crm.contact_summary"
+    assert detail(client, admin, world, matching)["feature"] == "crm.contact_summary"
+    assert world.public_id(unmatched) not in [item["id"] for item in data["items"]]
+    assert world.public_id(without_feature) not in [item["id"] for item in data["items"]]
 
 
 # --- the list: fields --------------------------------------------------------------------
@@ -842,6 +871,7 @@ def test_list_items_carry_the_documented_fields_only(client, admin, world) -> No
         "conversation_id": "conv-7",
         "provider": "openai",
         "model": "whisper-x",
+        "feature": None,
         "usage_type": "AUDIO_SECOND",
         "input_tokens": None,
         "output_tokens": None,

@@ -31,6 +31,7 @@ from app.schemas.envelope import ApiResponse, success
 from app.schemas.usage_events import (
     UsageEventDetail,
     UsageEventSummary,
+    parse_feature,
     parse_period,
     usage_event_detail,
     usage_event_summary,
@@ -63,6 +64,7 @@ def list_usage_events(
     request_id: str | None = None,
     provider: str | None = None,
     model: str | None = None,
+    feature: str | None = None,
     occurred_from: str | None = None,
     occurred_to: str | None = None,
     status: UsageEventStatus | None = None,
@@ -70,6 +72,7 @@ def list_usage_events(
 ) -> ApiResponse[Page[UsageEventSummary]]:
     """Newest first by row id; every filter optional, combined with AND."""
     require_admin(request)
+    feature = parse_feature(feature)
     start, end = parse_period(occurred_from, occurred_to)
     with require_session_factory(request)() as session:
         rows, total = event_repository.list_events(
@@ -82,6 +85,7 @@ def list_usage_events(
             request_id=request_id,
             provider=provider,
             model=model,
+            feature=feature,
             occurred_from=start,
             occurred_to=end,
             status=status,
