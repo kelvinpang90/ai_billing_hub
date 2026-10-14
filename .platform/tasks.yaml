@@ -3727,7 +3727,7 @@ tasks:
     title: AI 模块第五层：调用接口的请求校验、上报签名规则与供应商适配器
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 5 项，全部是纯规则，不开路由、不读写数据库：app/ai_api/messages.py（调用接口的请求与响应模型与校验）、client_rules.py（签名规范串、回执与错误判定、用量载荷）、provider.py（Anthropic 适配器，async），签名交叉测试，以及 httpx2 升为运行时依赖。搬代码以 docs/design/ai-module-reference/ 下 acuven_ai_api b57c5b0 的逐字副本为准。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-056
     acceptance_criteria:
