@@ -54,7 +54,7 @@ x-backend: &backend
   # （tests/backend/test_compose.py 钉着）。每次哈希还要 64 MiB。
   mem_limit: ${BILLING_BACKEND_MEM_LIMIT:-768m}
   cpus: ${BILLING_BACKEND_CPUS:-1.0}
-  environment:
+  environment: &backend-environment
     BILLING_ENVIRONMENT: local
     BILLING_DEBUG: "false"
     BILLING_LOG_LEVEL: ${BILLING_LOG_LEVEL:-INFO}
@@ -106,6 +106,17 @@ x-backend: &backend
     # 而且**直接写容器内路径、不经 .env**：`.env` 里只有给宿主机 monitor.sh 用的
     # `BILLING_MONITOR_TOKEN_HOST_FILE`。文件缺失或不可用时接口 404，见下面 secrets 的注释。
     BILLING_MONITOR_TOKEN_FILE: /run/secrets/billing_monitor_token
+    BILLING_AI_PROVIDER_TIMEOUT_SECONDS: ${BILLING_AI_PROVIDER_TIMEOUT_SECONDS:-60}
+    BILLING_AI_REQUEST_DEADLINE_SECONDS: ${BILLING_AI_REQUEST_DEADLINE_SECONDS:-75}
+    BILLING_AI_DB_POOL_TIMEOUT_SECONDS: ${BILLING_AI_DB_POOL_TIMEOUT_SECONDS:-2}
+    BILLING_AI_DB_CONNECT_TIMEOUT_SECONDS: ${BILLING_AI_DB_CONNECT_TIMEOUT_SECONDS:-2}
+    BILLING_AI_DB_RW_TIMEOUT_SECONDS: ${BILLING_AI_DB_RW_TIMEOUT_SECONDS:-5}
+    BILLING_AI_DB_THREADS: ${BILLING_AI_DB_THREADS:-10}
+    BILLING_AI_DB_QUEUE_MAX: ${BILLING_AI_DB_QUEUE_MAX:-20}
+    BILLING_AI_MAX_REQUEST_BYTES: ${BILLING_AI_MAX_REQUEST_BYTES:-65536}
+    BILLING_AI_MAX_OUTPUT_TOKENS: ${BILLING_AI_MAX_OUTPUT_TOKENS:-4000}
+    BILLING_AI_HELD_BUFFER_MAX: ${BILLING_AI_HELD_BUFFER_MAX:-1000}
+    BILLING_AI_HELD_RETRY_SECONDS: ${BILLING_AI_HELD_RETRY_SECONDS:-30}
   secrets:
     - billing_jwt_key
     - billing_master_key
@@ -205,6 +216,16 @@ services:
 
   api:
     <<: *backend
+    environment:
+      <<: *backend-environment
+      BILLING_AI_ANTHROPIC_KEY_FILE: /run/secrets/billing_anthropic_key
+    secrets:
+      - billing_jwt_key
+      - billing_master_key
+      - billing_smtp_password
+      - billing_monitor_token
+      - billing_anthropic_key
+    stop_grace_period: 100s
     healthcheck:
       # ⚠️ 探的必须是 /healthz，**绝不能是 /readyz**。/readyz 在数据库不可用时
       # 返回 503，用它做容器健康检查会让一次可恢复的数据库故障变成 API 的
@@ -414,6 +435,8 @@ secrets:
   # 记一条 ERROR（`The monitor token file cannot be read`，不含路径）。
   billing_monitor_token:
     file: ./secrets/monitor.token
+  billing_anthropic_key:
+    file: ./secrets/anthropic.key
 
 # ⚠️ **把本栈这张网的网段钉死**（T0.9 2026-09-16）。不钉的话 docker 每次按顺序
 # 随手分一个 172.x —— 于是「可信代理是谁」这件事在每台机器上、甚至每次重建之后

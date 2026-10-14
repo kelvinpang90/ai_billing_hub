@@ -261,6 +261,22 @@ class Settings(BaseSettings):
     # （见 app/api/internal_alerts.py）。
     monitor_token_file: str = ""
 
+    # --- AI API（AIH-TASK-062，设计闸门 #281 v23） -----------------------------
+
+    # Anthropic key 只由 api 使用，走 Docker secret 文件而非环境变量。
+    ai_anthropic_key_file: str = "/run/secrets/billing_anthropic_key"
+    ai_provider_timeout_seconds: float = Field(default=60.0, gt=0)
+    ai_request_deadline_seconds: float = Field(default=75.0, gt=0)
+    ai_db_pool_timeout_seconds: float = Field(default=2.0, gt=0)
+    ai_db_connect_timeout_seconds: float = Field(default=2.0, gt=0)
+    ai_db_rw_timeout_seconds: float = Field(default=5.0, gt=0)
+    ai_db_threads: int = Field(default=10, gt=0)
+    ai_db_queue_max: int = Field(default=20, gt=0)
+    ai_max_request_bytes: int = Field(default=65_536, gt=0, le=81_920)
+    ai_max_output_tokens: int = Field(default=4_000, gt=0)
+    ai_held_buffer_max: int = Field(default=1_000, gt=0)
+    ai_held_retry_seconds: int = Field(default=30, gt=0)
+
     # --- 异步计费（AIH-TASK-032，设计闸门 #181 v2 §2「认领、租约与防护令牌」） -----------
 
     # 认领的租约（秒）：认领时写 `lease_expires_at = 认领时刻 + 它`，过期仍是 PROCESSING 的
@@ -292,6 +308,17 @@ class Settings(BaseSettings):
             raise ValueError("status_webhook_lease_seconds must exceed the send timeout")
         if self.status_webhook_retry_cap_seconds < self.status_webhook_retry_base_seconds:
             raise ValueError("status_webhook_retry_cap_seconds must not be below the base")
+        auth_read_limit = (
+            self.ai_db_pool_timeout_seconds
+            + self.ai_db_connect_timeout_seconds
+            + self.ai_db_rw_timeout_seconds
+        )
+        write_limit = (
+            2 * (self.ai_db_pool_timeout_seconds + self.ai_db_connect_timeout_seconds)
+            + 3 * self.ai_db_rw_timeout_seconds
+        )
+        if self.ai_request_deadline_seconds < auth_read_limit + write_limit + 1:
+            raise ValueError("ai_request_deadline_seconds is too short for database timeouts")
         return self
 
     @field_validator("fx_bnm_base_url")
