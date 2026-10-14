@@ -219,10 +219,7 @@ def test_provider_classifies_rejected_requests(status: int) -> None:
         lambda _request: httpx2.Response(
             200, json={"usage": {"input_tokens": 1, "output_tokens": 1}}
         ),
-        lambda _request: httpx2.Response(
-            200,
-            json={"model": "claude-sonnet-4-6", "usage": {"input_tokens": 1, "output_tokens": 1}},
-        ),
+        lambda _request: httpx2.Response(200, json={"model": "claude-sonnet-4-6", "content": []}),
     ],
 )
 def test_provider_classifies_unavailable_responses(response) -> None:
