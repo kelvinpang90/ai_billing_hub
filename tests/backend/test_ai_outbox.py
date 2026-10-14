@@ -259,7 +259,7 @@ def test_held_collision_follows_each_row_state(
         )
 
 
-def test_pending_to_held_and_delivery_claim_have_one_winner(mysql_world) -> None:
+def test_pending_to_held_and_delivery_claim_have_one_winner(mysql_world, caplog) -> None:
     item = _for(mysql_world, 30)
     _insert_existing(mysql_world, item, status=AiUsageOutboxStatus.PENDING)
     barrier = threading.Barrier(2)
@@ -281,15 +281,29 @@ def test_pending_to_held_and_delivery_claim_have_one_winner(mysql_world) -> None
             session.commit()
             return result.rowcount
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with caplog.at_level(logging.CRITICAL), ThreadPoolExecutor(max_workers=2) as pool:
         held = pool.submit(lambda: (barrier.wait(), persist_held_once(mysql_world.factory, item)))
         claimed = pool.submit(claim)
         held.result()
-        assert claimed.result() in {0, 1}
-    assert _outbox(mysql_world, item).status in {
-        AiUsageOutboxStatus.HELD,
-        AiUsageOutboxStatus.SENDING,
-    }
+        claim_count = claimed.result()
+
+    row = _outbox(mysql_world, item)
+    review_logs = [
+        record
+        for record in caplog.records
+        if record.message == "AI usage entered billing although the request returned 503"
+    ]
+    if claim_count == 1:
+        assert row.status is AiUsageOutboxStatus.SENDING
+        assert row.first_attempted_at is not None
+        assert row.review_required_at is not None
+        assert len(review_logs) == 1
+    else:
+        assert claim_count == 0
+        assert row.status is AiUsageOutboxStatus.HELD
+        assert row.first_attempted_at is None
+        assert row.review_required_at is None
+        assert not review_logs
 
 
 def test_same_held_item_writes_once(mysql_world) -> None:
