@@ -34,6 +34,7 @@ def main() -> int:
 
     # 子包必须真的在 wheel 里。只 import 根包发现不了缺子包。
     import app.api.health  # noqa: F401
+    import app.ai_api.provider  # noqa: F401
     import app.core.config  # noqa: F401
 
     # ⚠️ 数据文件默认**不进 wheel**（`packages.find` 只收 Python 包），要靠
