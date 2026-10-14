@@ -10,6 +10,7 @@
 - [管理端集成 API 凭据](#管理端集成-api-凭据)与[集成请求签名](#集成请求签名)（AIH-TASK-012）
 - [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥)与[状态 webhook 签名](#状态-webhook-签名)（AIH-TASK-019）
 - [管理端项目集成状态与状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址)、[状态 webhook 的接收与对账契约](#状态-webhook-签名)与[集成：有效 AI 服务状态](#集成有效-ai-服务状态)的新字段（AIH-TASK-050）
+- [管理端 AI 密钥](#管理端-ai-密钥)（AIH-TASK-059）
 - [管理端审计日志](#管理端审计日志)（AIH-TASK-022）
 - [管理端供应商价格](#管理端供应商价格)（AIH-TASK-026）
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
@@ -2055,17 +2056,18 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | `project_id` | 项目的 `public_id`。不存在、或与 `customer_id` 不属同一客户时是空页 |
 | `conversation_id` / `request_id` | 与上报值逐字节比较。`request_id` 只在客户内有意义：不同客户可以上报同一个值，单独按它筛会把它们都列出来 |
 | `provider` / `model` | 与上报的**原始字符串**（`provider_code_raw` / `model_code_raw`）逐字节比较，模型未知的事件也筛得到 |
+| `feature` | 精确匹配调用方上报的功能标签；格式与用量摄取的 `feature` 相同 |
 | `occurred_from` / `occurred_to` | RFC 3339、**必须带时区**、整秒；换成 UTC 后按 `occurred_at` 取 `[occurred_from, occurred_to)`（含起点、不含终点）；`occurred_from` 必须早于 `occurred_to` |
 | `status` | spec §83 的九个取值之一，其余取值 422 |
 | `error_code` | 与事件的 `error_code` 逐字比较 |
 | `page` / `page_size` | 见「分页」 |
 
-`status` 与分页在鉴权**之前**校验（不合法就 422，与其他列表接口一致）；时间格式与区间在鉴权**之后**判，同样是 422
+`status` 与分页在鉴权**之前**校验（不合法就 422，与其他列表接口一致）；`feature`、时间格式与区间在鉴权**之后**判，同样是 422
 `VALIDATION_ERROR`，文案只列字段名、不回显值。未知的查询参数不报错。
 
 用到的索引（迁移 0017 / 0018，本任务不加迁移）：客户 → `ix_usage_events_tenant_id`，项目 → `ix_usage_events_project_id`，
 会话 → `ix_usage_events_conversation_id`，请求 → `ix_usage_events_request_id`，状态（可带时间段）→
-`ix_usage_events_status_occurred`，只有时间段 → `ix_usage_events_occurred_at`。`provider` / `model` / `error_code` 没有
+`ix_usage_events_status_occurred`，只有时间段 → `ix_usage_events_occurred_at`。`provider` / `model` / `feature` / `error_code` 没有
 专门的索引：与上面任一条件同用时是残余过滤；单独使用时按主键倒序扫描取一页，`total` 的 `COUNT` 要扫全表。
 
 ### 列表项
@@ -2081,6 +2083,7 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
   "conversation_id": null,
   "provider": "openai",
   "model": "whisper-x",
+  "feature": null,
   "usage_type": "AUDIO_SECOND",
   "input_tokens": null,
   "output_tokens": null,
@@ -2102,6 +2105,7 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 
 - `id` 是事件的 `public_id`；`event_id` 是集成方上报的幂等键；`customer_id` / `project_id` 是 `public_id`。
 - `provider` / `model` 是上报的原始字符串；`usage_type` 是计量类型代码。
+- `feature` 是调用方的可选功能标签；带值时为 2–4 个小写字母开头、以点分隔的段，每段可含小写字母、数字与下划线，最多 64 个字符。
 - `LLM_TOKEN_FIELDS` 形态四个 token 数是整数、`quantity` 为 null；`QUANTITY` 形态相反。`quantity` 与金额一样是 8 位小数的字符串。
 - `occurred_at` 保留上报的小数秒（存在时）；其余时间整秒。全部是不带时区的 UTC。
 - `billable_cost`（含税、从钱包扣的额）与 `estimated_provider_cost_myr` 是 8 位小数的字符串；未计费的事件为 null。
@@ -2134,7 +2138,25 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | HTTP | `error.code` | 什么时候 |
 | --- | --- | --- |
 | 404 | `USAGE_EVENT_NOT_FOUND` | 详情：路径里的事件不存在 |
-| 422 | `VALIDATION_ERROR` | 列表：`status` 不是九个取值之一、分页越界、时间不带时区 / 带小数秒 / 不是合法时间、`occurred_from` 不早于 `occurred_to` |
+| 422 | `VALIDATION_ERROR` | 列表：`status` 不是九个取值之一、`feature` 格式不合法、分页越界、时间不带时区 / 带小数秒 / 不是合法时间、`occurred_from` 不早于 `occurred_to` |
+
+---
+
+## 管理端 AI 密钥
+
+设计依据：设计闸门 #281 `APPROVED: design v23`，全文见 [design/AI-MODULE.md](design/AI-MODULE.md) §2「管理」。实现登记为 AIH-TASK-059。
+
+| 方法与路径 | 请求体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/admin/customers/{customer_id}/projects/{project_id}/ai-access` | — | 200，项目的全部 AI 密钥 | 401 / 403 / 404 / 503 |
+| `POST …/ai-access/client-keys` | 无 | 201，刚签发的密钥 | 401 / 403 / 404 / 409 / 500 / 503 |
+| `POST …/ai-access/client-keys/{client_id}/revoke` | 无 | 200，已吊销的密钥 | 401 / 403 / 404 / 409 / 500 / 503 |
+
+只有 ADMIN 能调。`customer_id`、`project_id` 是公开 ID；客户不存在为 `CUSTOMER_NOT_FOUND`，项目不存在或不属于客户为 `PROJECT_NOT_FOUND`，不存在或不属于项目的 `client_id` 为 `AI_CLIENT_KEY_NOT_FOUND`。所有成功响应走 §107 信封。
+
+列表按 `created_at` 倒序，同一秒按内部创建顺序倒序；每项仅含 `client_id`、`status`（`ACTIVE` 或 `REVOKED`）、`created_at`、`revoked_at`。签发响应仅这一次额外含 256 位随机 `token`；响应带 `Cache-Control: no-store`，列表和吊销响应绝不返回 token。每项目最多两把 `ACTIVE` 密钥，达到上限为 409 `AI_CLIENT_KEY_LIMIT`；吊销已吊销密钥为 409 `AI_CLIENT_KEY_REVOKED`。
+
+AI 密钥须等 AIH-TASK-068 合并后才签发，见设计 §8「部署顺序」。
 
 ---
 
