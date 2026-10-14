@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import os
 import re
 import uuid
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
+from app.ai_api.models import AiClientKey
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.tokens import issue_access_token
@@ -121,6 +123,17 @@ def test_issue_list_revoke_and_order(client, app) -> None:
     assert re.fullmatch(r"aic_[0-9a-f]{32}", first_data["client_id"])
     assert re.fullmatch(r"ait_[0-9a-f]{64}", first_data["token"])
 
+    with app.state.session_factory() as session:
+        keys = (
+            session.query(AiClientKey)
+            .filter(AiClientKey.client_id.in_([first_data["client_id"], second_data["client_id"]]))
+            .all()
+        )
+        assert len(keys) == 2
+        for key in keys:
+            key.created_at = dt.datetime(2026, 10, 14, 12, 0, 0)
+        session.commit()
+
     listed = client.get(url, headers=admin)
     assert listed.status_code == 200
     assert [item["client_id"] for item in listed.json()["data"]] == [
@@ -132,12 +145,11 @@ def test_issue_list_revoke_and_order(client, app) -> None:
     revoked = client.post(url + f"/client-keys/{first_data['client_id']}/revoke", headers=admin)
     assert (revoked.status_code, revoked.json()["data"]["status"]) == (200, "REVOKED")
     repeated = client.post(url + f"/client-keys/{first_data['client_id']}/revoke", headers=admin)
-    assert repeated.status_code == 409
+    assert (repeated.status_code, error_code(repeated)) == (409, "AI_CLIENT_KEY_REVOKED")
     third = client.post(url + "/client-keys", headers=admin)
     assert third.status_code == 201
-    assert client.post(url + "/client-keys", headers=admin).status_code == 409
     limit = client.post(url + "/client-keys", headers=admin)
-    assert error_code(limit) == "AI_CLIENT_KEY_LIMIT"
+    assert (limit.status_code, error_code(limit)) == (409, "AI_CLIENT_KEY_LIMIT")
 
 
 def test_not_found_and_non_admin_paths(client, app) -> None:
@@ -150,10 +162,17 @@ def test_not_found_and_non_admin_paths(client, app) -> None:
     assert client.post(url + "/client-keys").status_code == 401
     assert client.get(url, headers=user_headers(app, UserRole.CUSTOMER)).status_code == 403
     missing_customer = client.get(endpoint(unknown, project_id), headers=admin)
-    assert error_code(missing_customer) == "CUSTOMER_NOT_FOUND"
+    assert (missing_customer.status_code, error_code(missing_customer)) == (
+        404,
+        "CUSTOMER_NOT_FOUND",
+    )
     missing_project = client.get(endpoint(customer_id, unknown), headers=admin)
-    assert error_code(missing_project) == "PROJECT_NOT_FOUND"
+    assert (missing_project.status_code, error_code(missing_project)) == (404, "PROJECT_NOT_FOUND")
+    missing_key = client.post(url + "/client-keys/aic_missing/revoke", headers=admin)
     assert (
-        error_code(client.post(url + "/client-keys/aic_missing/revoke", headers=admin))
-        == "AI_CLIENT_KEY_NOT_FOUND"
+        missing_key.status_code,
+        error_code(missing_key),
+    ) == (
+        404,
+        "AI_CLIENT_KEY_NOT_FOUND",
     )
