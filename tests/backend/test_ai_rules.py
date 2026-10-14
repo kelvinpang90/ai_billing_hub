@@ -5,6 +5,8 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import re
+import time
 
 import httpx2
 import pytest
@@ -81,9 +83,9 @@ def test_message_request_rejects_invalid_shapes(body: dict[str, object]) -> None
 
 
 def test_max_tokens_and_raw_body_boundaries() -> None:
-    request().validate_max_tokens(4000)
+    request(max_tokens=4000).validate_max_tokens(4000)
     with pytest.raises(ValueError):
-        request().validate_max_tokens(3999)
+        request(max_tokens=4001).validate_max_tokens(4000)
     assert request_body_is_within_limit(b"x" * 65536, 65536)
     assert not request_body_is_within_limit(b"x" * 65537, 65536)
 
@@ -147,6 +149,88 @@ def test_receipts_errors_and_usage_payload() -> None:
     assert payload["feature"] == "crm.contact_summary"
     assert payload["tenant_id"] == "tenant-public"
     assert payload["project_id"] == "project-public"
+
+
+# Ported from docs/design/ai-module-reference/tests_test_billing_rules.py.txt
+# (status_allows_ai excluded).
+EVENT_ID = "01J00000000000000000000000"
+
+
+def receipt(event_id: str = EVENT_ID, status: object = "accepted") -> dict[str, object]:
+    return {"data": {"event_id": event_id, "status": status}}
+
+
+def test_empty_body_hashes_the_empty_string() -> None:
+    # The status query is a GET with an empty body; the hash still occupies the fifth line.
+    line = canonical_request("GET", "/p", "1", "a", b"").split("\n")[4]
+    assert line == hashlib.sha256(b"").hexdigest()
+
+
+def test_signature_is_lowercase_hex_hmac_sha256_of_the_canonical_request() -> None:
+    canonical = canonical_request("POST", "/p", "1", "a", b"{}")
+    signature = sign("sk_test_only", canonical)
+    assert signature == hmac.new(b"sk_test_only", canonical.encode(), hashlib.sha256).hexdigest()
+    assert re.fullmatch(r"[0-9a-f]{64}", signature)
+
+
+def test_a_retry_with_a_new_attempt_id_changes_the_signature() -> None:
+    # Billing Hub treats a reused request id as a replay, so every attempt is signed afresh.
+    first = sign("s", canonical_request("POST", "/p", "1", "attempt-1", b"{}"))
+    second = sign("s", canonical_request("POST", "/p", "1", "attempt-2", b"{}"))
+    assert first != second
+
+
+def test_accepted_and_duplicate_receipts_for_this_event_acknowledge() -> None:
+    assert receipt_acknowledges(202, receipt(), EVENT_ID)
+    assert receipt_acknowledges(200, receipt(status="already_received"), EVENT_ID)
+    assert receipt_acknowledges(200, receipt(status="already_processed"), EVENT_ID)
+
+
+def test_a_receipt_for_another_event_does_not_acknowledge() -> None:
+    # Otherwise a misrouted receipt would mark an undelivered event as billed.
+    assert not receipt_acknowledges(202, receipt(event_id="01JOTHER"), EVENT_ID)
+
+
+def test_status_must_match_the_http_code() -> None:
+    assert not receipt_acknowledges(200, receipt(status="accepted"), EVENT_ID)
+    assert not receipt_acknowledges(202, receipt(status="already_processed"), EVENT_ID)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [None, [], {}, {"data": None}, {"data": {"event_id": EVENT_ID}}, receipt(status=["accepted"])],
+)
+def test_malformed_receipts_do_not_acknowledge(document: object) -> None:
+    assert not receipt_acknowledges(202, document, EVENT_ID)
+
+
+def test_only_an_explicit_true_retryable_authorizes_a_retry() -> None:
+    # docs/api.md: integrators decide from retryable alone, never from the HTTP status.
+    assert error_outcome({"error": {"code": "SERVICE_UNAVAILABLE"}, "retryable": True}) == (
+        "SERVICE_UNAVAILABLE",
+        True,
+    )
+    assert error_outcome({"error": {"code": "IDEMPOTENCY_CONFLICT"}, "retryable": False}) == (
+        "IDEMPOTENCY_CONFLICT",
+        False,
+    )
+    for retryable in (None, "true", 1):
+        assert not error_outcome({"error": {"code": "X"}, "retryable": retryable})[1]
+
+
+def test_missing_retryable_goes_dead_rather_than_retrying_forever() -> None:
+    assert error_outcome({"error": {"code": "X"}}) == ("X", False)
+
+
+def test_unreadable_error_bodies_are_not_retried() -> None:
+    assert error_outcome(None) == ("INVALID_BILLING_RESPONSE", False)
+    assert error_outcome(["x"]) == ("INVALID_BILLING_RESPONSE", False)
+    assert error_outcome({"error": "x"}) == ("INVALID_BILLING_RESPONSE", False)
+
+
+def test_error_code_is_a_bounded_string() -> None:
+    assert error_outcome({"error": {"code": 7}, "retryable": True}) == ("BILLING_ERROR", True)
+    assert len(error_outcome({"error": {"code": "E" * 100}})[0]) == 64
 
 
 def run(coroutine):
@@ -284,6 +368,31 @@ def test_provider_wall_clock_budget_cuts_off_slow_transport() -> None:
 
     with pytest.raises(ProviderUnavailable):
         run(provider_with(slow).generate(request(), timeout=1, wall_clock_budget=0.001))
+
+
+def test_provider_wall_clock_budget_cuts_off_a_body_trickling_in_chunks() -> None:
+    # Each chunk arrives well inside the per-read timeout; only the total budget can stop it.
+    # The finished body is a valid response, so without the budget the call would succeed.
+    class Trickle(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                yield b" "
+            yield json.dumps(
+                {
+                    "model": "claude-sonnet-4-6",
+                    "content": [],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            ).encode()
+
+    def respond(_request):
+        return httpx2.Response(200, stream=Trickle())
+
+    started = time.monotonic()
+    with pytest.raises(ProviderUnavailable):
+        run(provider_with(respond).generate(request(), timeout=1, wall_clock_budget=0.2))
+    assert time.monotonic() - started < 1
 
 
 def test_provider_constants_match_ingestion_contract() -> None:
