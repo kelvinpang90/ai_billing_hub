@@ -6,6 +6,7 @@ import logging
 
 from fastapi import FastAPI
 
+from app.api.admin_ai_access import router as admin_ai_access_router
 from app.api.admin_ai_catalog import router as admin_ai_catalog_router
 from app.api.admin_audit import router as admin_audit_router
 from app.api.admin_customers import router as admin_customers_router
@@ -60,6 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_customers_router)
     app.include_router(admin_audit_router)
     app.include_router(admin_ai_catalog_router)
+    app.include_router(admin_ai_access_router)
     app.include_router(admin_provider_prices_router)
     app.include_router(admin_pricing_rules_router)
     app.include_router(admin_fx_rates_router)
