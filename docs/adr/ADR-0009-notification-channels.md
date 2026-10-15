@@ -2,8 +2,8 @@
 
 | | |
 | --- | --- |
-| **状态** | **已接受**。Email 与投递模型 2026-09-11 已定（决策人拍板「Email 参考 rs-roof-pms、WhatsApp 复用既有网关」）；WhatsApp 传输路径 2026-10-15 补完：计费平台用独立 Meta App 直连（决策人确认），见第 5 节。**第 2 节「Email 传输层借 `rs-roof-pms`」已被 [ADR-0013](ADR-0013-email-api-service.md) 取代**，备选方案 A 的「未选」与收口条件里 Email「无阻塞条件」一句随之失效（以 ADR-0013 为准）；其余各节不变 |
-| **修订** | 2026-10-15 补完：WhatsApp 传输路径定为计费平台独立 Meta App 直连（第 5 节、收口条件）；第 2 节被 ADR-0013 取代（PR #308） |
+| **状态** | **已接受**。Email 与投递模型 2026-09-11 已定（决策人拍板「Email 参考 rs-roof-pms、WhatsApp 复用既有网关」）；WhatsApp 传输路径 2026-10-15 补完：计费平台用独立 Meta App 直连（决策人确认），见第 5 节。第 2 节曾被 [ADR-0013](ADR-0013-email-api-service.md) 取代，同日 ADR-0013 又被 [ADR-0014](ADR-0014-email-smtp-for-now.md) 取代：**Email 现阶段继续走 SMTP，第 2 节、备选方案 A 与收口条件恢复有效**，何时重新评估 API 服务见 ADR-0014 |
+| **修订** | 2026-10-15 补完：WhatsApp 传输路径定为计费平台独立 Meta App 直连（第 5 节、收口条件）；第 2 节被 ADR-0013 取代（PR #308）；同日 ADR-0014 取代 ADR-0013，第 2 节恢复有效（PR #N） |
 | **日期** | 2026-09-11 |
 | **来源** | spec §47（客户通知）、§48（低余额告警）、§25（通知与 Webhook 的 Outbox 投递及周期恢复）、§74.6（`domain_outbox` 表）、§98.1（队列丢失后从数据库重建） |
 | **影响** | `notifications` 表、Notification Adapter、Phase 6 通知与状态自动化；[TODO.md](../TODO.md) 的 D7 |

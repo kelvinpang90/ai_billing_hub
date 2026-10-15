@@ -66,7 +66,7 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
 | 5 | ~~**R1 停机/复机阈值**~~ | Phase 2 | **已定**：2026-09-28 方案 A，见 [ADR-0010](adr/ADR-0010-suspension-threshold.md) | — |
 | 6 | ~~**R3 账本膨胀权衡**~~ | Phase 1–2 性能 | **已定**：2026-09-28 方案 A（每事件一行），见 [ADR-0011](adr/ADR-0011-per-event-usage-ledger.md)；量级在 Phase 2 压测 | — |
 | 7 | **R5 `REQ-*` 覆盖度**：只有 13 条，未覆盖每条硬性要求 | 可追溯性 | 待补 | Phase 1 前 |
-| 8 | **Email 服务商选哪家**：传输层已定改用 API 服务 | Phase 4 收据邮件、Phase 6 Email 通道 | 需拍板 | Phase 4 开工前，见 [ADR-0013](adr/ADR-0013-email-api-service.md) |
+| 8 | ~~**Email 服务商**~~ | Phase 4 收据邮件、Phase 6 Email 通道 | **已定**：2026-10-15 现阶段继续走 SMTP，见 [ADR-0014](adr/ADR-0014-email-smtp-for-now.md) | — |
 
 **D2（第 1 条）与 WhatsApp（第 4 条）的背景已经整理好**，分别见 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md) 与 [ADR-0009](adr/ADR-0009-notification-channels.md)，可以直接拿去问会计 / 做评估。
 
