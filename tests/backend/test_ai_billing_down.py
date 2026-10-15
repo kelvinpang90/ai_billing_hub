@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 from test_ai_messages_api import _build_world
 
@@ -27,7 +29,7 @@ def test_ai_request_succeeds_and_leaves_pending_outbox_when_billing_is_down(
             lambda settings: (_ for _ in ()).throw(RedisNotConfigured("broker unavailable")),
         )
 
-    with _build_world("sqlite", tmp_path, monkeypatch) as world:
+    with contextmanager(_build_world)("sqlite", tmp_path, monkeypatch) as world:
         response = world.post()
 
         assert response.status_code == 200

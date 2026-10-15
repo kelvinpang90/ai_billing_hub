@@ -22,7 +22,8 @@ REQUEST_FILES = {
     "__init__.py",
 }
 DELIVERY_FILES = {"delivery.py", "client_rules.py"}
-ADMIN_OPS_FILES = {"admin.py", "ops.py"}
+ADMIN_FILES = {"admin.py"}
+OPS_FILES = {"ops.py"}
 
 REQUEST_ALLOWLIST = {
     "app.ai_api",
@@ -38,10 +39,11 @@ DELIVERY_ALLOWLIST = REQUEST_ALLOWLIST | {
     "app.services.integration_auth",
     "app.core.crypto",
 }
-ADMIN_OPS_ALLOWLIST = DELIVERY_ALLOWLIST | {
+ADMIN_ALLOWLIST = REQUEST_ALLOWLIST | {
     "app.models.auth",
     "app.services.auth",
 }
+OPS_ALLOWLIST = ADMIN_ALLOWLIST | DELIVERY_ALLOWLIST
 REVERSE_EXCEPTIONS = {
     Path("app/main.py"),
     Path("app/api/admin_ai_access.py"),
@@ -65,11 +67,11 @@ def _app_imports(path: Path) -> set[str]:
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names if alias.name.startswith("app."))
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            if not node.module.startswith("app"):
+            if node.module != "app" and not node.module.startswith("app."):
                 continue
-            candidates = [f"{node.module}.{alias.name}" for alias in node.names]
-            resolved = [candidate for candidate in candidates if _module_exists(candidate)]
-            modules.update(resolved or [node.module])
+            for alias in node.names:
+                candidate = f"{node.module}.{alias.name}"
+                modules.add(candidate if _module_exists(candidate) else node.module)
     return modules
 
 
@@ -82,7 +84,8 @@ def _permitted(module: str, allowlist: set[str]) -> bool:
     [
         (REQUEST_FILES, REQUEST_ALLOWLIST),
         (DELIVERY_FILES, DELIVERY_ALLOWLIST),
-        (ADMIN_OPS_FILES, ADMIN_OPS_ALLOWLIST),
+        (ADMIN_FILES, ADMIN_ALLOWLIST),
+        (OPS_FILES, OPS_ALLOWLIST),
     ],
 )
 def test_ai_api_files_import_only_their_group_allowlist(
@@ -99,7 +102,7 @@ def test_ai_api_files_import_only_their_group_allowlist(
 
 
 def test_ai_api_contains_only_files_assigned_to_a_boundary_group() -> None:
-    grouped = REQUEST_FILES | DELIVERY_FILES | ADMIN_OPS_FILES
+    grouped = REQUEST_FILES | DELIVERY_FILES | ADMIN_FILES | OPS_FILES
     actual = {path.name for path in AI_API.glob("*.py")}
     assert actual <= grouped, f"ungrouped app/ai_api files: {sorted(actual - grouped)}"
 
