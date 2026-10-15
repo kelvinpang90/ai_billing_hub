@@ -249,7 +249,14 @@ def test_ai_delivery_settings_reject_invalid_timing_and_ingest_protocol() -> Non
     for name in AI_DELIVERY_FIELDS:
         with pytest.raises(ValidationError):
             Settings(**{name: 0})
-    for invalid in ("https://api", "http://api/path", "http://user:pass@api"):
+    for invalid in (
+        "https://api",
+        "http://api/path",
+        "http://user:pass@api",
+        "http://api:bad",
+        "http://api:70000",
+        "http://api:0",
+    ):
         with pytest.raises(ValidationError):
             Settings(ai_ingest_base_url=invalid)
     with pytest.raises(ValidationError):

@@ -50,16 +50,23 @@ def require_http_base_url(value: str) -> str:
     """An internal plain-HTTP root without credentials or URL suffixes."""
     stripped = value.strip()
     parts = urlsplit(stripped)
+    try:
+        port = parts.port
+    except ValueError:  # not a number, or outside 0-65535
+        port = 0
     if (
         parts.scheme != "http"
         or not parts.hostname
+        or port == 0
         or parts.username is not None
         or parts.password is not None
         or parts.path not in ("", "/")
         or parts.query
         or parts.fragment
     ):
-        raise ValueError("must be an http:// root without path, query, fragment or credentials")
+        raise ValueError(
+            "must be an http:// root with a valid port and no path, query, fragment or credentials"
+        )
     return stripped.rstrip("/")
 
 
