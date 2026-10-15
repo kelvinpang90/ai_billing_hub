@@ -187,15 +187,17 @@ def _resolve(base_url: str) -> tuple[str, str, int] | None:
 
 class _SocketCloser:
     def __init__(self) -> None:
-        self.connection: http.client.HTTPConnection | None = None
+        # The socket itself, not the connection: on `Connection: close` getresponse() hands the
+        # socket to the response and sets `connection.sock` to None before the body is read.
+        self.sock: socket.socket | None = None
         self.expired = False
 
     def close(self) -> None:
         self.expired = True
-        connection = self.connection
-        if connection is not None and connection.sock is not None:
+        sock = self.sock
+        if sock is not None:
             try:
-                connection.sock.shutdown(socket.SHUT_RDWR)
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
 
@@ -210,8 +212,8 @@ class _DirectHandler(urllib.request.HTTPHandler):
 
         class Connection(http.client.HTTPConnection):
             def connect(self) -> None:
-                handler.closer.connection = self
                 super().connect()
+                handler.closer.sock = self.sock
                 if handler.closer.expired:
                     handler.closer.close()
 
