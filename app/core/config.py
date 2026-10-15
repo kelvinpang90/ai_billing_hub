@@ -305,6 +305,7 @@ class Settings(BaseSettings):
     ai_delivery_batch: int = Field(default=20, gt=0)
     ai_delivery_lease_seconds: float = Field(default=60.0, gt=0)
     ai_delivery_run_budget_seconds: float = Field(default=45.0, gt=0)
+    ai_pending_alert_seconds: int = Field(default=900, gt=0)
 
     # --- 异步计费（AIH-TASK-032，设计闸门 #181 v2 §2「认领、租约与防护令牌」） -----------
 

@@ -2348,6 +2348,8 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
   计数、最早时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`）与至多 3 个细分码（字母序），不含租户与金额。
 - 状态 webhook 的维度 `status_webhook`（AIH-TASK-052，设计闸门 #241 v6 §2「健康告警维度」）接在它们之后，三类问题合在
   一行、级别取最严重的那类；摘要只有三个十进制计数，不含租户与项目 id。
+- AI 用量 outbox 维度 `ai_usage_outbox`（AIH-TASK-066，设计闸门 #281 v23 §2「告警维度」）接在其后；摘要只有计数与秒数，
+  不含租户、项目或事件 id。
 
 | 维度 | 何时告警 | 摘要 |
 | --- | --- | --- |
@@ -2362,6 +2364,7 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
 | `wallet_negative_balance`（AIH-TASK-032） | 存在余额 < 0 的钱包（§120）：`P2` | `P2`：`2 wallets below zero`（只有个数）；OK：`no wallet below zero` |
 | `outbox_backlog`（AIH-TASK-032） | `domain_outbox` 里**有处理器**的事件类型（`app/tasks/outbox.py` 的处理器名单，与周期恢复同一份）存在创建超过 10 分钟仍 `PENDING` 的行（§120）：`P2`。没有处理器的类型（`tenant.billing_status_changed`、`tenant.low_balance`）按设计持久等待，不计入 | `P2`：`1 row pending over 10 minutes, oldest created …`；OK：`no handled outbox row pending over 10 minutes` |
 | `status_webhook`（AIH-TASK-052） | 只统计 `integration_status = ENABLED` 且设了[状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址)的项目（停用或没有地址的项目不推送，一律不计）。三个计数：**`failing`** = 投递落后（`delivered_version` 为空或小于客户的 `status_version`）且连续失败 ≥ 6 次（按默认退避约 15 分钟）的项目数；**`missing secret`** = 没有 `ACTIVE` [签名密钥](#管理端出站-webhook-签名密钥)的项目数（由数据推导，不看错误码）；**`signing error`** = 投递落后且最近一次因 `SECRET_DECRYPT_FAILED`（密钥解不开）或 `ENCRYPTION_NOT_CONFIGURED`（主密钥未配置）未发送的项目数。级别：`signing error > 0` 为 `P1`（加密配置坏了）；否则 `failing > 0` 或 `missing secret > 0` 为 `P2`；否则 OK | `P1` / `P2`：`failing 1, missing secret 0, signing error 2`（三个都是十进制整数，不做单复数变化）；OK：`no status webhook problem` |
+| `ai_usage_outbox`（AIH-TASK-066） | 未处理的 `DEAD`（`dead_acked_at` 为空）、`HELD`，或待复核（`review_required_at` 非空且 `reviewed_at` 为空）任一计数 > 0：`P1`；否则最老 `PENDING` / `SENDING` 行的 `created_at` 超过 `BILLING_AI_PENDING_ALERT_SECONDS`（默认 900 秒）：`P2`；否则 OK | `P1` / `P2` / OK：`dead 1, held 0, review required 0, oldest pending 901 seconds` |
 
 ---
 

@@ -38,6 +38,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.fx_source import FxQuote, bnm_reference, divide_exactly, kuala_lumpur_date
@@ -269,6 +270,7 @@ EMPTY_DATABASE_LINES = (
     "wallet_negative_balance OK no wallet below zero\n"
     "outbox_backlog OK no handled outbox row pending over 10 minutes\n"
     "status_webhook OK no status webhook problem\n"
+    "ai_usage_outbox OK dead 0, held 0, review required 0, oldest pending 0 seconds\n"
 )
 
 
@@ -291,11 +293,174 @@ def test_the_registry_is_ordered_and_one_line_per_dimension(
         "wallet_negative_balance",
         "outbox_backlog",
         "status_webhook",
+        "ai_usage_outbox",
     ]
 
     body = alerts.alert_lines(factory, ("USD",), clock=lambda: NOW)
 
     assert body == EMPTY_DATABASE_LINES
+
+
+def add_ai_usage_outbox(
+    factory: sessionmaker[Session],
+    number: int,
+    *,
+    status: AiUsageOutboxStatus,
+    created_at: dt.datetime = NOW,
+    dead_acked_at: dt.datetime | None = None,
+    review_required_at: dt.datetime | None = None,
+    reviewed_at: dt.datetime | None = None,
+) -> None:
+    with factory() as session:
+        session.add(
+            AiUsageOutbox(
+                event_id=f"{number:026d}",
+                request_id=f"{number + 100:026d}",
+                claim_id=None,
+                tenant_id=1,
+                project_id=1,
+                feature="crm.contact_summary",
+                payload_json="{}",
+                status=status,
+                attempts=0,
+                next_attempt_at=created_at,
+                last_error=None,
+                first_attempted_at=None,
+                created_at=created_at,
+                delivered_at=None,
+                resolved_at=None,
+                review_required_at=review_required_at,
+                reviewed_at=reviewed_at,
+                dead_acked_at=dead_acked_at,
+            )
+        )
+        session.commit()
+
+
+def ai_usage_outbox(
+    factory: sessionmaker[Session], *, pending_alert_seconds: int = 900
+) -> AlertResult:
+    with factory() as session:
+        return alerts.ai_usage_outbox(
+            session,
+            AlertContext(
+                now=NOW,
+                currencies=("USD",),
+                ai_pending_alert_seconds=pending_alert_seconds,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "dead_acked_at", "review_required_at", "reviewed_at", "expected"),
+    [
+        (
+            AiUsageOutboxStatus.DEAD,
+            None,
+            None,
+            None,
+            AlertResult(
+                AlertLevel.P1, "dead 1, held 0, review required 0, oldest pending 0 seconds"
+            ),
+        ),
+        (
+            AiUsageOutboxStatus.DEAD,
+            NOW,
+            None,
+            None,
+            AlertResult(OK, "dead 0, held 0, review required 0, oldest pending 0 seconds"),
+        ),
+        (
+            AiUsageOutboxStatus.HELD,
+            None,
+            None,
+            None,
+            AlertResult(
+                AlertLevel.P1,
+                "dead 0, held 1, review required 0, oldest pending 0 seconds",
+            ),
+        ),
+        (
+            AiUsageOutboxStatus.DELIVERED,
+            None,
+            NOW,
+            None,
+            AlertResult(
+                AlertLevel.P1,
+                "dead 0, held 0, review required 1, oldest pending 0 seconds",
+            ),
+        ),
+        (
+            AiUsageOutboxStatus.DELIVERED,
+            None,
+            NOW,
+            NOW,
+            AlertResult(OK, "dead 0, held 0, review required 0, oldest pending 0 seconds"),
+        ),
+    ],
+)
+def test_ai_usage_outbox_manual_incidents_are_p1_or_cleared(
+    factory: sessionmaker[Session],
+    status: AiUsageOutboxStatus,
+    dead_acked_at: dt.datetime | None,
+    review_required_at: dt.datetime | None,
+    reviewed_at: dt.datetime | None,
+    expected: AlertResult,
+) -> None:
+    add_ai_usage_outbox(
+        factory,
+        1,
+        status=status,
+        dead_acked_at=dead_acked_at,
+        review_required_at=review_required_at,
+        reviewed_at=reviewed_at,
+    )
+
+    assert ai_usage_outbox(factory) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "created_at", "expected_level", "expected_seconds"),
+    [
+        (AiUsageOutboxStatus.PENDING, NOW - dt.timedelta(seconds=900), OK, 900),
+        (AiUsageOutboxStatus.PENDING, NOW - dt.timedelta(seconds=901), P2, 901),
+        (AiUsageOutboxStatus.SENDING, NOW - dt.timedelta(seconds=901), P2, 901),
+    ],
+)
+def test_ai_usage_outbox_pending_and_sending_backlog_threshold(
+    factory: sessionmaker[Session],
+    status: AiUsageOutboxStatus,
+    created_at: dt.datetime,
+    expected_level: AlertLevel,
+    expected_seconds: int,
+) -> None:
+    add_ai_usage_outbox(factory, 1, status=status, created_at=created_at)
+
+    assert ai_usage_outbox(factory) == AlertResult(
+        expected_level,
+        f"dead 0, held 0, review required 0, oldest pending {expected_seconds} seconds",
+    )
+
+
+def test_the_internal_endpoint_passes_the_configured_ai_pending_threshold(
+    app: FastAPI, client: TestClient, factory: sessionmaker[Session], token_file: Path
+) -> None:
+    add_ai_usage_outbox(
+        factory,
+        1,
+        status=AiUsageOutboxStatus.PENDING,
+        created_at=NOW - dt.timedelta(seconds=2),
+    )
+    app.state.settings = Settings(
+        database_url="",
+        fx_currencies="USD",
+        monitor_token_file=str(token_file),
+        ai_pending_alert_seconds=1,
+    )
+
+    response = client.get("/internal/alerts", headers=bearer(TEST_TOKEN))
+
+    assert "ai_usage_outbox P2 dead 0, held 0, review required 0, oldest pending" in response.text
 
 
 # --- fx_fetch -----------------------------------------------------------------------

@@ -41,7 +41,8 @@ def test_the_ai_settings_default_to_the_approved_design_values() -> None:
         settings.ai_max_output_tokens,
         settings.ai_held_buffer_max,
         settings.ai_held_retry_seconds,
-    ) == (10, 20, 65_536, 4_000, 1_000, 30)
+        settings.ai_pending_alert_seconds,
+    ) == (10, 20, 65_536, 4_000, 1_000, 30, 900)
 
 
 def test_the_ai_settings_reject_invalid_limits_and_infeasible_deadlines() -> None:
@@ -53,6 +54,7 @@ def test_the_ai_settings_reject_invalid_limits_and_infeasible_deadlines() -> Non
         "ai_max_output_tokens",
         "ai_held_buffer_max",
         "ai_held_retry_seconds",
+        "ai_pending_alert_seconds",
     ):
         for bad in (0, -1):
             with pytest.raises(ValidationError):
@@ -63,6 +65,12 @@ def test_the_ai_settings_reject_invalid_limits_and_infeasible_deadlines() -> Non
     with pytest.raises(ValidationError):
         Settings(ai_request_deadline_seconds=32)
     assert Settings(ai_request_deadline_seconds=33).ai_request_deadline_seconds == 33
+
+
+def test_the_ai_pending_alert_threshold_comes_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_AI_PENDING_ALERT_SECONDS", "123")
+
+    assert Settings().ai_pending_alert_seconds == 123
 
 
 def test_the_ai_deadline_lower_bound_tracks_database_timeouts() -> None:
