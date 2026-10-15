@@ -58,10 +58,11 @@
 | [0006](ADR-0006-payment-gateway-contract.md) | 支付网关：先定准入契约，供应商延到 Phase 4 前 | 已接受 | 2026-09-10 |
 | [0007](ADR-0007-concurrent-pending-payments.md) | 并发 PENDING 支付：允许并存，都付都入账 | 已接受 | 2026-09-10 |
 | [0008](ADR-0008-sst-tax-treatment.md) | SST 税务口径：对客户展示的金额一律含税 | **部分接受**（§45.1 尚缺五项会计意见） | 2026-09-11 |
-| [0009](ADR-0009-notification-channels.md) | 通知通道：Email 自管 SMTP + Outbox 投递；WhatsApp 不自建但路径待定 | **部分接受**（WhatsApp 传输路径未定） | 2026-09-11 |
+| [0009](ADR-0009-notification-channels.md) | 通知通道：Outbox 投递 + Adapter；WhatsApp 由计费平台独立 App 直连 | 已接受（第 2 节 Email 传输层已被 ADR-0013 取代） | 2026-09-11 |
 | [0010](ADR-0010-suspension-threshold.md) | 停机 / 复机阈值：保持 `balance <= 0`，缓冲放进最小恢复额（R1） | 已接受 | 2026-09-28 |
 | [0011](ADR-0011-per-event-usage-ledger.md) | AI 用量入账粒度：每事件一行账本，不按窗口聚合（R3） | 已接受 | 2026-09-28 |
 | [0012](ADR-0012-ai-module-in-billing-process.md) | AI API 并入计费平台：同一进程、同一部署、同一个库 | 已接受 | 2026-10-12 |
+| [0013](ADR-0013-email-api-service.md) | Email 传输层：改用带退信与投诉回调的 API 服务 | 已接受（服务商未选） | 2026-10-15 |
 
 ## 待写（spec §136 要求）
 
@@ -70,6 +71,6 @@
 - [x] 凭据加密方案（密钥管理、轮换、恢复）→ [ADR-0004](ADR-0004-credential-encryption.md)
 - [x] 生产数据库隔离 → [ADR-0002](ADR-0002-production-datastore-isolation.md)
 - [x] FX 数据源 → [ADR-0005](ADR-0005-fx-rate-source.md)
-- [ ] 支付网关选型（准入契约已定，供应商未选）→ [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**具体供应商仍未选定，硬截止在 Phase 4 开工前**
+- [ ] 支付网关选型（准入契约已定，供应商 2026-10-15 选 Stripe）→ [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**H1–H4 沙箱实测与选型 ADR 还没做，硬截止在 Phase 4 开工前**
 - [ ] SST 税务口径（含税已定，其余五项待会计）→ [ADR-0008](ADR-0008-sst-tax-treatment.md) 定了「对客户展示的金额一律含税」与税额反算规则；**spec §45.1 其余五项未齐，Phase 4 不得开工**
-- [ ] 通知通道（Email 已定，WhatsApp 传输路径未定）→ [ADR-0009](ADR-0009-notification-channels.md) 定了 Adapter 抽象、Email 传输层与 Outbox 投递模型；**WhatsApp 需在「扩建既有网关」与「独立 App / 号码」之间拍板，Phase 6 的 WhatsApp 部分不得开工**
+- [x] 通知通道 → [ADR-0009](ADR-0009-notification-channels.md) 定了 Adapter 抽象与 Outbox 投递模型，WhatsApp 由计费平台独立 Meta App 直连（2026-10-15）；Email 传输层改用 API 服务，见 [ADR-0013](ADR-0013-email-api-service.md)（服务商未选，Phase 4 开工前选定并实测 E1–E5）
