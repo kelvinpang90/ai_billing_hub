@@ -13,6 +13,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from functools import lru_cache
 from time import monotonic
@@ -34,6 +35,9 @@ from app.services.integration_auth import credential_aad, is_verifiable
 logger = logging.getLogger(__name__)
 _SEND_LIMIT_SECONDS = 10.0
 _MAX_RESPONSE_BYTES = 64 * 1024
+type Send = Callable[
+    [AiUsageOutbox, IntegrationCredential, str, tuple[str, str, int]], tuple[int, bytes]
+]
 
 
 @lru_cache(maxsize=1)
@@ -236,6 +240,8 @@ def urllib_transport(
             response = error
         with response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
+            if closer.expired:
+                raise TimeoutError("delivery wall-clock limit exceeded")
             if len(body) > _MAX_RESPONSE_BYTES:
                 raise OSError("response exceeds delivery limit")
             status = response.status if hasattr(response, "status") else response.code
@@ -297,12 +303,18 @@ def _delivery_lock(factory: sessionmaker[Session]):
     engine = factory.kw["bind"]
     assert engine is not None
     connection: Connection = engine.connect()
+    acquired = False
     try:
-        acquired = connection.scalar(
-            text("SELECT GET_LOCK(CONCAT('ai_usage_delivery:', DATABASE()), 0)")
+        acquired = (
+            connection.scalar(text("SELECT GET_LOCK(CONCAT('ai_usage_delivery:', DATABASE()), 0)"))
+            == 1
         )
-        yield acquired == 1
+        yield acquired
     finally:
+        if acquired:
+            connection.execute(
+                text("SELECT RELEASE_LOCK(CONCAT('ai_usage_delivery:', DATABASE()))")
+            )
         connection.close()
 
 
@@ -312,6 +324,7 @@ def deliver_due(
     settings: Settings | None = None,
     *,
     random_source=random.uniform,
+    send: Send = _request,
 ) -> int:
     settings = settings or get_settings()
     factory = factory or _session_factory()
@@ -352,7 +365,7 @@ def deliver_due(
                             credential.public_api_key, credential.key_version
                         ),
                     )
-                    status, body = _request(row, credential, secret, endpoint)
+                    status, body = send(row, credential, secret, endpoint)
                     accepted, retryable, error = _outcome(status, body, row.event_id)
                 except (DecryptionFailed, EncryptionNotConfigured):
                     accepted, retryable, error = False, True, "SIGNING_CREDENTIAL_UNREADABLE"
