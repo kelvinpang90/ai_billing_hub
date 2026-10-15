@@ -225,6 +225,8 @@ def test_provider_errors_are_mapped(
 def test_provider_refusal_and_truncation_remain_successful(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, stop_reason: str
 ) -> None:
+    install_success(monkeypatch)
+
     class Provider:
         def __init__(self, key: str) -> None:
             pass
