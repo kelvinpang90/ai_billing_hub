@@ -75,7 +75,7 @@ def test_schedule_runs_on_utc(celery_app) -> None:
     assert celery_app.conf.enable_utc is True
 
 
-def test_the_periodic_tasks_are_the_outbox_sweep_the_fx_fetch_and_usage_billing(
+def test_the_periodic_tasks_include_the_ai_usage_delivery_sweep(
     celery_app,
 ) -> None:
     """周期条目只放**真的需要跑**的那些，不放示例条目（示例条目会被真的跑起来）。
@@ -93,6 +93,7 @@ def test_the_periodic_tasks_are_the_outbox_sweep_the_fx_fetch_and_usage_billing(
         "usage-billing-sweep",
         "usage-stale-recovery",
         "status-webhook-dispatch",
+        "ai_api.deliver_due",
     }
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
     assert entry["task"] == "app.tasks.outbox.recover"
@@ -149,6 +150,20 @@ def test_the_status_webhook_task_is_registered(celery_app) -> None:
     assert "app.tasks.status_webhook.dispatch" in celery_app.tasks
 
 
+def test_the_ai_usage_delivery_task_is_registered_and_expires_before_its_next_sweep(
+    celery_app,
+) -> None:
+    import app.ai_api.delivery  # noqa: F401
+
+    entry = celery_app.conf.beat_schedule["ai_api.deliver_due"]
+    assert entry == {
+        "task": "ai_api.deliver_due",
+        "schedule": 10,
+        "options": {"expires": 9},
+    }
+    assert "ai_api.deliver_due" in celery_app.tasks
+
+
 def test_the_fx_fetch_runs_three_times_a_kuala_lumpur_afternoon(celery_app) -> None:
     """设计闸门 #183 v3 §2：`crontab(minute=30, hour="4,6,9")`，expires 3600 秒。
 
@@ -193,6 +208,7 @@ def test_task_modules_are_listed_explicitly(celery_app) -> None:
         "app.tasks.fx_fetch",
         "app.tasks.usage_billing",
         "app.tasks.status_webhook",
+        "app.ai_api.delivery",
     ]
     assert celery_app.conf.include == TASK_MODULES
 

@@ -46,6 +46,30 @@ def require_https_base_url(value: str) -> str:
     return stripped.rstrip("/")
 
 
+def require_http_base_url(value: str) -> str:
+    """An internal plain-HTTP root without credentials or URL suffixes."""
+    stripped = value.strip()
+    parts = urlsplit(stripped)
+    try:
+        port = parts.port
+    except ValueError:  # not a number, or outside 0-65535
+        port = 0
+    if (
+        parts.scheme != "http"
+        or not parts.hostname
+        or port == 0
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(
+            "must be an http:// root with a valid port and no path, query, fragment or credentials"
+        )
+    return stripped.rstrip("/")
+
+
 def parse_currency_codes(value: str) -> tuple[str, ...]:
     """`USD,EUR` → `("USD", "EUR")`: upper-case three letters, not MYR, not empty, no repeats.
 
@@ -276,6 +300,11 @@ class Settings(BaseSettings):
     ai_max_output_tokens: int = Field(default=4_000, gt=0)
     ai_held_buffer_max: int = Field(default=1_000, gt=0)
     ai_held_retry_seconds: int = Field(default=30, gt=0)
+    ai_ingest_base_url: str = "http://api:8000"
+    ai_delivery_sweep_seconds: float = Field(default=10.0, gt=0)
+    ai_delivery_batch: int = Field(default=20, gt=0)
+    ai_delivery_lease_seconds: float = Field(default=60.0, gt=0)
+    ai_delivery_run_budget_seconds: float = Field(default=45.0, gt=0)
 
     # --- 异步计费（AIH-TASK-032，设计闸门 #181 v2 §2「认领、租约与防护令牌」） -----------
 
@@ -319,7 +348,18 @@ class Settings(BaseSettings):
         )
         if self.ai_request_deadline_seconds < auth_read_limit + write_limit + 1:
             raise ValueError("ai_request_deadline_seconds is too short for database timeouts")
+        if self.ai_delivery_run_budget_seconds + 10 >= 57:
+            raise ValueError(
+                "ai_delivery_run_budget_seconds must leave room before the soft time limit"
+            )
+        if 59 >= self.ai_delivery_lease_seconds:
+            raise ValueError("ai_delivery_lease_seconds must exceed the hard time limit")
         return self
+
+    @field_validator("ai_ingest_base_url")
+    @classmethod
+    def _ai_ingest_base_url_is_http(cls, value: str) -> str:
+        return require_http_base_url(value)
 
     @field_validator("fx_bnm_base_url")
     @classmethod
