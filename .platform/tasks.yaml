@@ -3941,7 +3941,7 @@ tasks:
     title: AI 模块第九层：模块边界测试、计费全挂时 AI 仍成功的测试与调用接口文档
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的最后一批：设计 §7「模块边界」的 AST 白名单测试、「计费全挂 AI 仍成功」的请求那一半，以及 docs/api.md 的调用接口一节。只加测试与文档，不改 app/ 下的代码；测试发现代码不符时停下并在 PR 里说明。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-063
     acceptance_criteria:
