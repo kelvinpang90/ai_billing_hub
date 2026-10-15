@@ -316,6 +316,9 @@ def test_the_line_carries_no_tenant_or_project_id(factory: sessionmaker[Session]
     body = alerts.alert_lines(factory, ("USD",), clock=lambda: NOW)
 
     line = "status_webhook P1 failing 1, missing secret 1, signing error 1\n"
-    assert body.endswith(line)
+    assert body.splitlines()[-2] == line.rstrip("\n")
+    assert body.splitlines()[-1] == (
+        "ai_usage_outbox OK dead 0, held 0, review required 0, oldest pending 0 seconds"
+    )
     assert tenant not in body
     assert project not in body

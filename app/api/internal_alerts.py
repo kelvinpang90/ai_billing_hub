@@ -104,7 +104,11 @@ def internal_alerts(request: Request) -> PlainTextResponse:
     if factory is None:
         return _text("database not configured\n", 503)
     try:
-        body = alerts.alert_lines(factory, settings.fx_currency_codes)
+        body = alerts.alert_lines(
+            factory,
+            settings.fx_currency_codes,
+            ai_pending_alert_seconds=settings.ai_pending_alert_seconds,
+        )
     except Exception:
         # 查不出来就是「接口不通」：monitor.sh 不推这些维度，
         # Healthchecks 宽限期后报「未上报」。

@@ -30,6 +30,7 @@ from typing import Final
 from sqlalchemy import ColumnElement, and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
 from app.core.fx_source import kuala_lumpur_date
 from app.models.auth import DomainOutbox, OutboxStatus
 from app.models.fx_rates import (
@@ -74,6 +75,8 @@ STALE_LEASE_P1_AGE: Final = dt.timedelta(minutes=10)
 OUTBOX_BACKLOG_AGE: Final = dt.timedelta(minutes=10)
 # 每行摘要最多列几个细分码（设计 §2）。
 MAX_CODES: Final = 3
+# `ai_usage_outbox`：PENDING / SENDING 超过此秒数 P2；人工处置项一律 P1。
+AI_PENDING_ALERT_SECONDS: Final = 900
 
 # 状态 webhook 的维度（设计闸门 #241 v6 §2「健康告警维度」，AIH-TASK-052）。
 # `failing`：落后且连续失败这么多次。按默认退避，第 6 次失败在第一次失败后约 15 分钟。
@@ -107,6 +110,7 @@ class AlertContext:
     # 不带时区的 UTC。
     now: dt.datetime
     currencies: tuple[str, ...]
+    ai_pending_alert_seconds: int = AI_PENDING_ALERT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -450,6 +454,56 @@ def status_webhook(session: Session, context: AlertContext) -> AlertResult:
     return AlertResult(level, summary)
 
 
+# --- ai_usage_outbox（AIH-TASK-066）：人工处置项 P1，投递积压 P2 ----------------------
+
+
+def ai_usage_outbox(session: Session, context: AlertContext) -> AlertResult:
+    """The AI usage delivery incidents, without tenant, project, or event identifiers."""
+    dead = int(
+        session.execute(
+            select(func.count())
+            .select_from(AiUsageOutbox)
+            .where(
+                AiUsageOutbox.status == AiUsageOutboxStatus.DEAD,
+                AiUsageOutbox.dead_acked_at.is_(None),
+            )
+        ).scalar_one()
+    )
+    held = int(
+        session.execute(
+            select(func.count())
+            .select_from(AiUsageOutbox)
+            .where(AiUsageOutbox.status == AiUsageOutboxStatus.HELD)
+        ).scalar_one()
+    )
+    review = int(
+        session.execute(
+            select(func.count())
+            .select_from(AiUsageOutbox)
+            .where(
+                AiUsageOutbox.review_required_at.is_not(None),
+                AiUsageOutbox.reviewed_at.is_(None),
+            )
+        ).scalar_one()
+    )
+    oldest = session.execute(
+        select(func.min(AiUsageOutbox.created_at)).where(
+            AiUsageOutbox.status.in_((AiUsageOutboxStatus.PENDING, AiUsageOutboxStatus.SENDING))
+        )
+    ).scalar_one()
+    age_seconds = int((context.now - oldest).total_seconds()) if oldest is not None else 0
+    summary = (
+        f"dead {dead}, held {held}, review required {review}, oldest pending {age_seconds} seconds"
+    )
+    if dead or held or review:
+        return AlertResult(AlertLevel.P1, summary)
+    if oldest is not None and oldest < context.now - dt.timedelta(
+        seconds=context.ai_pending_alert_seconds
+    ):
+        return AlertResult(AlertLevel.P2, summary)
+    return AlertResult(AlertLevel.OK, summary)
+
+
 # --- 注册表 -------------------------------------------------------------------------
 
 # ⚠️ 有序：接口按这个顺序逐行输出。新维度追加在末尾，名字用小写与下划线
@@ -468,6 +522,8 @@ DIMENSIONS: Final[list[Dimension]] = [
     Dimension("outbox_backlog", outbox_backlog),
     # AIH-TASK-052（设计闸门 #241 v6 §2「健康告警维度」）。
     Dimension("status_webhook", status_webhook),
+    # AIH-TASK-066（设计闸门 #281 v23 §2「告警维度」）。
+    Dimension("ai_usage_outbox", ai_usage_outbox),
 ]
 
 
@@ -482,10 +538,18 @@ def render(results: Sequence[tuple[str, AlertResult]]) -> str:
 
 
 def alert_lines(
-    factory: sessionmaker[Session], currencies: tuple[str, ...], *, clock: Clock = utc_now
+    factory: sessionmaker[Session],
+    currencies: tuple[str, ...],
+    *,
+    ai_pending_alert_seconds: int = AI_PENDING_ALERT_SECONDS,
+    clock: Clock = utc_now,
 ) -> str:
     """The body of `GET /internal/alerts`: one read-only transaction, never committed."""
-    context = AlertContext(now=clock(), currencies=currencies)
+    context = AlertContext(
+        now=clock(),
+        currencies=currencies,
+        ai_pending_alert_seconds=ai_pending_alert_seconds,
+    )
     with factory() as session:
         try:
             return render(evaluate(session, context))
@@ -512,6 +576,7 @@ __all__ = [
     "AlertResult",
     "Dimension",
     "alert_lines",
+    "ai_usage_outbox",
     "evaluate",
     "fx_fetch",
     "fx_stale",
