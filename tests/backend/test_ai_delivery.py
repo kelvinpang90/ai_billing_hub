@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 from alembic.config import Config
@@ -26,9 +27,12 @@ from app.core.crypto import DecryptionFailed, encrypt_secret, load_keyring
 from app.main import create_app
 from app.models.integration import CredentialStatus, IntegrationCredential
 from app.models.tenancy import Project, Tenant
+from app.models.usage import UsageEvent
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
-_DEFAULT_CREDENTIAL = object()
+_DEFAULT_CREDENTIAL = SimpleNamespace(
+    public_api_key="ak_delivery_stub", key_version=1, encrypted_secret="stub"
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,7 @@ def mysql_world(monkeypatch) -> Iterator[World]:
             connection.execute(
                 delete(AiUsageOutbox).where(AiUsageOutbox.tenant_id == world.tenant_id)
             )
+            connection.execute(delete(UsageEvent).where(UsageEvent.tenant_id == world.tenant_id))
             connection.execute(
                 delete(IntegrationCredential).where(
                     IntegrationCredential.tenant_id == world.tenant_id
@@ -154,6 +159,7 @@ def settings(**changes: object) -> Settings:
 def wire_delivery(monkeypatch, credential=_DEFAULT_CREDENTIAL) -> None:
     monkeypatch.setattr(delivery, "_resolve", lambda _url: ("127.0.0.1", "api", 8000))
     monkeypatch.setattr(delivery, "_credential", lambda *_args: credential)
+    monkeypatch.setattr(delivery, "load_keyring", lambda _settings: None)
     monkeypatch.setattr(delivery, "decrypt_secret", lambda *_args, **_kwargs: "secret")
 
 
@@ -284,7 +290,7 @@ def test_budget_exhaustion_does_not_claim_a_new_row(mysql_world, monkeypatch) ->
 @pytest.mark.parametrize("missing", [True, False])
 def test_credential_errors_are_retryable(mysql_world, monkeypatch, missing: bool) -> None:
     row_id = add_row(mysql_world, 10 + int(missing))
-    wire_delivery(monkeypatch, None if missing else object())
+    wire_delivery(monkeypatch, None if missing else _DEFAULT_CREDENTIAL)
     if not missing:
         monkeypatch.setattr(
             delivery,
@@ -396,7 +402,7 @@ def test_delivery_sender_reaches_the_real_ingestion_endpoint(
     application = create_app(endpoint_settings)
     application.state.session_factory = mysql_world.factory
     application.state.engine = mysql_world.factory.kw["bind"]
-    wire_delivery(monkeypatch)
+    monkeypatch.setattr(delivery, "_resolve", lambda _url: ("127.0.0.1", "api", 8000))
     with TestClient(application, raise_server_exceptions=False) as client:
 
         def send(row, credential, secret, _endpoint):
