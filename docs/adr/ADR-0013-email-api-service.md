@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| **状态** | **已接受**：方向由决策人 2026-10-15 拍板（在「SMTP + 自建抑制列表」与「API 服务」之间选后者）；**具体服务商未选**，硬截止见「收口条件」 |
+| **状态** | **已被 [ADR-0014](ADR-0014-email-smtp-for-now.md) 取代**（2026-10-15 决策人改为现阶段只用 SMTP） |
 | **日期** | 2026-10-15 |
 | **来源** | spec §47（客户通知）、`REQ-LAUNCH-001`；[ADR-0009](ADR-0009-notification-channels.md) 第 2 节与备选方案 A；[TODO.md](../TODO.md)「已阻塞」里「Phase 4 前重新评估 Email 传输」一项 |
 | **影响** | Email 的 Notification Adapter 实现、通知 Outbox 行上的投递状态、新增一个入站投递事件回调；取代 ADR-0009 第 2 节「Email 传输层借 `rs-roof-pms`」 |
