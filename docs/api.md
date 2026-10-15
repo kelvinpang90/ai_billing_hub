@@ -926,7 +926,7 @@ SHA256(RAW_REQUEST_BODY)
 - **连续失败**（Billing Hub 不可用）：任何设计都给不出 5 分钟上限。此时**保留最后一次接受的状态**，从未拿到过状态就放行；
   最后一次成功对账早于 5 分钟时，集成方发出自己的健康告警。
 
-这些行为由集成方（`acuven_ai_api`）实现与测试，本仓库只交付契约与 `effective-status` 本身。
+这些行为由外部接入方实现与测试；本仓库只交付契约与 `effective-status` 本身。
 
 ---
 
@@ -2139,6 +2139,70 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | --- | --- | --- |
 | 404 | `USAGE_EVENT_NOT_FOUND` | 详情：路径里的事件不存在 |
 | 422 | `VALIDATION_ERROR` | 列表：`status` 不是九个取值之一、`feature` 格式不合法、分页越界、时间不带时区 / 带小数秒 / 不是合法时间、`occurred_from` 不早于 `occurred_to` |
+
+---
+
+## AI 调用接口
+
+设计依据：设计闸门 #281 `APPROVED: design v23`，全文见 [design/AI-MODULE.md](design/AI-MODULE.md) §2「调用接口 `POST /v1/messages`」。此接口供业务后端调用模型；提示词、输入输出格式、输出解析与质量评测都由调用方负责。AI 密钥须等 AIH-TASK-068 合并后才签发。
+
+### 入口与鉴权
+
+- 同机业务后端经同机的 `billing_nginx` 入口调用 `POST /v1/messages`，不绕行公网。
+- 公网业务后端经公网 HTTPS 的 nginx 入口调用同一路径；nginx 按来源限速。
+- 每个请求带 `X-Acuven-Client-Id: aic_…` 与 `Authorization: Bearer ait_…`。这是项目级 AI 密钥，不可与管理员会话或集成 HMAC 凭据互用。
+
+### 请求
+
+请求体是严格 JSON 对象：`strict=True`、`extra="forbid"`；未知字段一律 422，JSON 的 `true`、`4000.0` 与 `"4000"` 都不是可接受的 `max_tokens`。应用按原始 UTF-8 字节限制请求体 ≤ `BILLING_AI_MAX_REQUEST_BYTES`（默认 65536）；nginx 的外层上限是 80 KiB。
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `feature` | 是 | 功能标签，`^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){1,3}$`，最多 64 字符，例如 `crm.contact_summary`。调用方自行命名，只用于统计，不影响调用或计价 |
+| `model` | 是 | 最多 128 字符；必须是供应商 `anthropic` 下 `ACTIVE` 模型的 `code`，或当前生效且指向 `ACTIVE` 模型的别名 |
+| `system` | 否 | 字符串 |
+| `messages` | 是 | 1–50 条；每条为 `{"role":"user" \| "assistant","content":非空字符串}`，第一条必须为 `user` |
+| `max_tokens` | 是 | 整数，范围为 1 至 `BILLING_AI_MAX_OUTPUT_TOKENS`（默认 4000） |
+| `output_config` | 否 | 严格对象；可含 `format`（`{"type":"json_schema","schema":对象}`）与 `effort`（`low` / `medium` / `high`），原样转给供应商 |
+
+模型目录中供应商也必须为 `ACTIVE`。直接给模型 `code` 时转发该 `code`；给生效别名时先解析为目标模型 `code` 再转发；同一个字符串同时为模型 `code` 与别名时按模型 `code` 处理。目录外、已停用或别名已失效的模型均为 422 `MODEL_NOT_ALLOWED`。请求路径不读取供应商价格。
+
+### 成功响应
+
+成功为 200，响应不套通用错误信封：
+
+```json
+{
+  "request_id": "01J…",
+  "model": "供应商返回的实际模型名",
+  "text": "按顺序用换行拼接的 text 块",
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}
+```
+
+`request_id` 是 AI 模块生成的 26 位 ULID，也是对应使用量事件的 `request_id`，供调用方对账。它不同于 HTTP 关联 ID：中间件仍会在 `X-Request-ID` 响应头和错误信封中提供关联 ID，两者无关。`usage` 仅含 token 数，不含金额。供应商拒答、截断或输出不符合调用方预期时仍可为 200；调用方应按 `stop_reason` 与自身 schema 处理。
+
+### 错误
+
+除 nginx 在请求到达应用前返回的错误外，错误均使用 §107 信封，且 `/v1/messages` 的信封不含 `retryable`：
+
+| HTTP | 错误码 | 情形 |
+| --- | --- | --- |
+| 401 | `AI_AUTH_FAILED` | 缺头、未知 client、token 错误或密钥已吊销 |
+| 403 | `AI_SERVICE_BLOCKED` | 租户或项目有效状态为 `BLOCK_AI`；不透露原因 |
+| 413 | `PAYLOAD_TOO_LARGE` | nginx 拒绝超过 80 KiB 的请求；信封的 `request_id` 为 `null` |
+| 422 | `VALIDATION_ERROR` / `REQUEST_TOO_LARGE` / `MODEL_NOT_ALLOWED` / `PROVIDER_REJECTED_REQUEST` | 请求不合规、应用侧原始字节超限、模型不允许，或供应商以 400 / 404 / 413 / 422 拒绝；最后一种只返回供应商错误 `type`，不回显 `message` |
+| 429 | `RATE_LIMITED` | nginx 按来源限速；请求未到应用，信封 `request_id` 为 `null` |
+| 502 | `AI_PROVIDER_UNAVAILABLE` | 供应商超时、网络错误、429、5xx、401 / 403，或响应没有可读的 `usage` |
+| 503 | `AI_STORE_UNAVAILABLE` / `AI_PROVIDER_NOT_CONFIGURED` / `AI_USAGE_NOT_PERSISTED` | 鉴权读库失败或超时、AI 库访问已满、未配置模型 key，或用量无法确认落库 |
+
+每次成功推理会先写本地 `ai_usage_outbox` 的 `PENDING` 行再返回 200；摄取、计费 worker 或 broker 不可用不阻断调用，恢复后由投递扫描补送。
 
 ---
 
