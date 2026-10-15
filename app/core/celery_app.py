@@ -33,6 +33,7 @@ TASK_MODULES = [
     "app.tasks.fx_fetch",
     "app.tasks.usage_billing",
     "app.tasks.status_webhook",
+    "app.ai_api.delivery",
 ]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
@@ -140,6 +141,11 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "app.tasks.status_webhook.dispatch",
                 "schedule": STATUS_WEBHOOK_DISPATCH_SECONDS,
                 "options": {"expires": STATUS_WEBHOOK_DISPATCH_EXPIRES_SECONDS},
+            },
+            "ai_api.deliver_due": {
+                "task": "ai_api.deliver_due",
+                "schedule": settings.ai_delivery_sweep_seconds,
+                "options": {"expires": settings.ai_delivery_sweep_seconds * 0.9},
             },
         },
     )

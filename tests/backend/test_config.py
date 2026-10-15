@@ -230,6 +230,33 @@ STATUS_WEBHOOK_FIELDS = (
     "status_webhook_dispatch_budget_seconds",
 )
 
+AI_DELIVERY_FIELDS = (
+    "ai_delivery_sweep_seconds",
+    "ai_delivery_batch",
+    "ai_delivery_lease_seconds",
+    "ai_delivery_run_budget_seconds",
+)
+
+
+def test_ai_delivery_settings_default_to_the_approved_design_values() -> None:
+    settings = Settings()
+
+    assert settings.ai_ingest_base_url == "http://api:8000"
+    assert tuple(getattr(settings, name) for name in AI_DELIVERY_FIELDS) == (10, 20, 60, 45)
+
+
+def test_ai_delivery_settings_reject_invalid_timing_and_ingest_protocol() -> None:
+    for name in AI_DELIVERY_FIELDS:
+        with pytest.raises(ValidationError):
+            Settings(**{name: 0})
+    for invalid in ("https://api", "http://api/path", "http://user:pass@api"):
+        with pytest.raises(ValidationError):
+            Settings(ai_ingest_base_url=invalid)
+    with pytest.raises(ValidationError):
+        Settings(ai_delivery_run_budget_seconds=47)
+    with pytest.raises(ValidationError):
+        Settings(ai_delivery_lease_seconds=59)
+
 
 def test_the_status_webhook_settings_default_to_the_design_values() -> None:
     """设计闸门 #241 v6 §2「配置」：超时 5、退避基数 30、上限 3600、租约 60、预算 12。"""
