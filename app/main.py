@@ -109,10 +109,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         runtime.held_buffer,
                         runtime.executor,
                         runtime.session_factory,
-                        timeout_seconds=(
+                        timeout_seconds=min(
+                            5,
                             settings.ai_db_pool_timeout_seconds
                             + settings.ai_db_connect_timeout_seconds
-                            + settings.ai_db_rw_timeout_seconds
+                            + settings.ai_db_rw_timeout_seconds,
                         ),
                     )
                 finally:

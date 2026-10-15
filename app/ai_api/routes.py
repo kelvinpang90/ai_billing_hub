@@ -92,15 +92,14 @@ def _validate(body: bytes, maximum: int, output_maximum: int) -> MessageRequest:
 
 @router.post("/v1/messages", response_model=MessageResponse)
 async def messages(request: Request) -> JSONResponse:
-    async with asyncio.timeout(request.app.state.settings.ai_request_deadline_seconds):
-        return await _messages(request)
+    return await _messages(request)
 
 
 async def _messages(request: Request) -> JSONResponse:
     settings = request.app.state.settings
+    runtime = _runtime(request)
     body = await request.body()
     message = _validate(body, settings.ai_max_request_bytes, settings.ai_max_output_tokens)
-    runtime = _runtime(request)
     auth_limit, write_limit = _read_limits(settings)
     started = time.monotonic()
     try:
