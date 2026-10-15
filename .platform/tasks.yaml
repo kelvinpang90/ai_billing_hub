@@ -3889,7 +3889,7 @@ tasks:
     title: AI 模块第八层：调用接口、进程内鉴权与状态、模型护栏
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 6 项的第三批：调用接口路由挂到 app/main.py，access.py 的只读查询（AI 密钥、租户与项目状态、模型目录），请求顺序与时限，调 AIH-TASK-060 的适配器与 AIH-TASK-061 的写入，暂存后台循环接到应用生命周期。模块边界与计费全挂两条测试及 docs/api.md 的调用接口一节在 AIH-TASK-064。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-061
       - AIH-TASK-062
