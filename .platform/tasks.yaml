@@ -4045,7 +4045,7 @@ tasks:
     title: AI 模块第十一层：用量 outbox 的告警维度与阈值
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 8 项的第一批：告警维度 ai_usage_outbox（未处理的 DEAD、HELD、待复核为 P1，积压超时为 P2），阈值配置经 AlertContext 传入，docs/api.md 的告警维度表加一行。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-065
     acceptance_criteria:
