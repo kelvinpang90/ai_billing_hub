@@ -121,7 +121,7 @@ Acuven 目前运营多个面向租户的 AI 应用（`acuven_aichat`、`ai_chatb
 
 - **首个试点**：`E:\projects\ai_chatbot_demo`（Phase 3）。它已有请求级 Anthropic 用量观测和基础 `conversation_id`，但**没有**持久化 outbox、没有计费凭据与签名、没有本地状态同步。Phase 3 是**扩展现有窄接口**，不是推倒重来。
 - **共享基建**：`vps_infra` 提供 `infra_nginx` / `infra_mysql` / `infra_redis`。本平台跑的是钱包余额和财务账本，spec §98 已定案：**使用专用 MySQL / Redis 容器，不与现有应用共享实例**，即不接 `infra_mysql` / `infra_redis`。只剩落成 ADR 记录理由。
-- **WhatsApp 通知**：复用 `whatsapp_gateway` 还是自建出站通道，未定（TODO 的 D7）。
+- **WhatsApp 通知**：不经 `whatsapp_gateway`（已停用），计费平台用独立 Meta App 直连（2026-10-15，ADR-0009 第 5 节）。
 
 ## 命名
 
