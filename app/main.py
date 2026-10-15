@@ -116,6 +116,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             + settings.ai_db_rw_timeout_seconds,
                         ),
                     )
+                except TimeoutError:
+                    # 设计 §2「停机前最后一次落库」：5 秒到点就放弃，剩下的条目只留 CRITICAL 日志。
+                    pass
                 finally:
                     runtime.executor.shutdown()
                     runtime.engine.dispose()

@@ -81,6 +81,7 @@ def resolve_access(
             .join(AiProvider, AiProvider.id == AiModel.provider_id)
             .where(
                 AiProvider.code == "anthropic",
+                AiProvider.status == CatalogStatus.ACTIVE,
                 AiModel.code == model,
                 AiModel.status == CatalogStatus.ACTIVE,
             )
@@ -98,6 +99,7 @@ def resolve_access(
                 )
                 .where(
                     AiProvider.code == "anthropic",
+                    AiProvider.status == CatalogStatus.ACTIVE,
                     AiModelAlias.alias == model,
                     AiModel.status == CatalogStatus.ACTIVE,
                     or_(AiModelAlias.effective_from.is_(None), AiModelAlias.effective_from <= now),
