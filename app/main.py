@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.ai_api.database import (
+    AiDatabaseExecutor,
+    create_ai_database_engine,
+    create_ai_session_factory,
+)
+from app.ai_api.held import HeldBuffer, final_held_attempt, held_retry_loop
+from app.ai_api.routes import AiRuntime
+from app.ai_api.routes import router as ai_messages_router
 from app.api.admin_ai_access import router as admin_ai_access_router
 from app.api.admin_ai_catalog import router as admin_ai_catalog_router
 from app.api.admin_audit import router as admin_audit_router
@@ -47,9 +57,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
 
+    @asynccontextmanager
+    async def ai_lifespan(application: FastAPI):
+        runtime: AiRuntime | None = None
+        retry_task: asyncio.Task[None] | None = None
+        if settings.database_url:
+            engine = create_ai_database_engine(
+                settings.database_url,
+                threads=settings.ai_db_threads,
+                pool_timeout_seconds=settings.ai_db_pool_timeout_seconds,
+                connect_timeout_seconds=settings.ai_db_connect_timeout_seconds,
+                rw_timeout_seconds=settings.ai_db_rw_timeout_seconds,
+            )
+            runtime = AiRuntime(
+                engine=engine,
+                session_factory=create_ai_session_factory(engine),
+                executor=AiDatabaseExecutor(
+                    threads=settings.ai_db_threads, queue_max=settings.ai_db_queue_max
+                ),
+                held_buffer=HeldBuffer(settings.ai_held_buffer_max),
+                key_file=settings.ai_anthropic_key_file,
+            )
+            application.state.ai_runtime = runtime
+            retry_task = asyncio.create_task(
+                held_retry_loop(
+                    runtime.held_buffer,
+                    runtime.executor,
+                    runtime.session_factory,
+                    retry_seconds=settings.ai_held_retry_seconds,
+                    timeout_seconds=(
+                        settings.ai_db_pool_timeout_seconds
+                        + settings.ai_db_connect_timeout_seconds
+                        + settings.ai_db_rw_timeout_seconds
+                    ),
+                )
+            )
+        else:
+            application.state.ai_runtime = None
+        try:
+            yield
+        finally:
+            if retry_task is not None:
+                retry_task.cancel()
+                try:
+                    await retry_task
+                except asyncio.CancelledError:
+                    pass
+            if runtime is not None:
+                try:
+                    await final_held_attempt(
+                        runtime.held_buffer,
+                        runtime.executor,
+                        runtime.session_factory,
+                        timeout_seconds=min(
+                            5,
+                            settings.ai_db_pool_timeout_seconds
+                            + settings.ai_db_connect_timeout_seconds
+                            + settings.ai_db_rw_timeout_seconds,
+                        ),
+                    )
+                except TimeoutError:
+                    # 设计 §2「停机前最后一次落库」：5 秒到点就放弃，剩下的条目只留 CRITICAL 日志。
+                    pass
+                finally:
+                    runtime.executor.shutdown()
+                    runtime.engine.dispose()
+
     app = FastAPI(
         title="Acuven Central AI Billing Platform",
         debug=settings.debug,
+        lifespan=ai_lifespan,
     )
     # 中间件要在异常处理器之前装：处理器要读中间件绑上的 request_id，
     # 才能把它写进 §107 的信封。
@@ -72,6 +149,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(integration_usage_router)
     # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。
     app.include_router(internal_alerts_router)
+    app.include_router(ai_messages_router)
 
     app.state.settings = settings
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。
