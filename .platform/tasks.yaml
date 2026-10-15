@@ -3991,7 +3991,7 @@ tasks:
     title: AI 模块第十层：用量 outbox 的领取、签名上报、结算与重试
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 7 项：app/ai_api/delivery.py 的 Celery 任务（领取、取签名凭据并在进程内解密、按 HMAC 契约 POST 到本服务的摄取端点、按回执结算、带抖动的退避、运行时间预算），注册为 celery-beat 周期任务，配置项接入 worker 与 beat。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-063
     acceptance_criteria:
