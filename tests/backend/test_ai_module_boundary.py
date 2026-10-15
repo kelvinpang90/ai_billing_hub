@@ -60,18 +60,27 @@ def _module_exists(module: str) -> bool:
     return path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()
 
 
+def _absolute_module(path: Path, node: ast.ImportFrom) -> str | None:
+    if node.level == 0:
+        return node.module
+    package = path.relative_to(ROOT).parent.parts
+    base = package[: len(package) - (node.level - 1)]
+    return ".".join([*base, *([node.module] if node.module else [])]) or None
+
+
 def _app_imports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.update(alias.name for alias in node.names if alias.name.startswith("app."))
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            if node.module != "app" and not node.module.startswith("app."):
+        elif isinstance(node, ast.ImportFrom):
+            module = _absolute_module(path, node)
+            if module is None or (module != "app" and not module.startswith("app.")):
                 continue
             for alias in node.names:
-                candidate = f"{node.module}.{alias.name}"
-                modules.add(candidate if _module_exists(candidate) else node.module)
+                candidate = f"{module}.{alias.name}"
+                modules.add(candidate if _module_exists(candidate) else module)
     return modules
 
 
@@ -103,7 +112,7 @@ def test_ai_api_files_import_only_their_group_allowlist(
 
 def test_ai_api_contains_only_files_assigned_to_a_boundary_group() -> None:
     grouped = REQUEST_FILES | DELIVERY_FILES | ADMIN_FILES | OPS_FILES
-    actual = {path.name for path in AI_API.glob("*.py")}
+    actual = {path.relative_to(AI_API).as_posix() for path in AI_API.rglob("*.py")}
     assert actual <= grouped, f"ungrouped app/ai_api files: {sorted(actual - grouped)}"
 
 
