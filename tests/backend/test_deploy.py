@@ -335,6 +335,82 @@ def test_the_smoke_test_fails_when_the_edge_runs_a_stale_configuration() -> None
     assert "not sending its security headers" in smoke
 
 
+def run_ai_health_smoke(tmp_path, body: str, curl_exit: int = 0) -> str:
+    """用可控的 curl 跑部署脚本中的冒烟片段。"""
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    script = SCRIPT.read_text(encoding="utf-8")
+    start = script.index('SMOKE=0\nif [ "$HEALTHY" = "1" ]; then')
+    end = script.index('if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then', start)
+    smoke = script[start:end]
+
+    work = tmp_path / "smoke"
+    (work / "bin").mkdir(parents=True)
+    (work / "run.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'export PATH="$PWD/bin:$PATH"\n'
+        'SMOKE_URL="http://edge"\n'
+        "HEALTHY=1\n"
+        "log() { printf 'LOG %s\\n' \"$*\"; }\n"
+        "sleep() { :; }\n"
+        f"{smoke}"
+        "printf 'RESULT SMOKE=%s\\n' \"$SMOKE\"\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    curl = work / "bin" / "curl"
+    curl.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'url="${!#}"\n'
+        'if [[ "$url" == */healthz/ai ]]; then\n'
+        "    printf '%s' \"${AI_CURL_BODY:-}\"\n"
+        '    exit "${AI_CURL_EXIT:-0}"\n'
+        "fi\n"
+        'if [[ "$*" == *" -D - "* ]]; then\n'
+        "    printf 'x-frame-options: DENY\\r\\n'\n"
+        "fi\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    curl.chmod(0o755)
+
+    done = subprocess.run(
+        [bash, str(work / "run.sh")],
+        cwd=work,
+        env={**os.environ, "AI_CURL_BODY": body, "AI_CURL_EXIT": str(curl_exit)},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout
+
+
+@pytest.mark.parametrize(
+    ("body", "curl_exit", "smoke", "failed"),
+    [
+        ("<!doctype html><html>SPA fallback</html>", 0, "0", True),
+        ('{"data":{"status":"ok"},"error":null}', 0, "1", False),
+        ("", 22, "0", True),
+    ],
+)
+def test_the_smoke_test_accepts_only_the_ai_ok_envelope(
+    tmp_path, body: str, curl_exit: int, smoke: str, failed: bool
+) -> None:
+    """200 的 SPA HTML 与非 200 都必须让部署进入既有回滚路径。"""
+    output = run_ai_health_smoke(tmp_path, body, curl_exit)
+
+    assert f"RESULT SMOKE={smoke}" in output
+    assert ("AI readiness did not return its ok envelope" in output) is failed
+
+    script = uncommented(SCRIPT)
+    gate = 'if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then'
+    assert gate in script
+    assert script.index(gate) < script.index('log "rolling back to $PREVIOUS_IMAGE"')
+
+
 def test_the_dispatch_ref_is_validated_before_any_shell_sees_it() -> None:
     """⚠️ `${{ inputs.ref }}` 写进 `run:` 是**先原样替换进脚本再交给 bash**（阻断项 2）。
 

@@ -15,7 +15,12 @@ import logging
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.ai_api.database import AiDatabaseCapacityExceeded
+from app.ai_api.provider import read_anthropic_key
+from app.ai_api.routes import AiRequestError, AiRuntime
 from app.core.broker import BrokerStatus, check_broker
 from app.core.database import check_database
 from app.core.logging import current_request_id
@@ -78,3 +83,41 @@ def readyz(request: Request) -> ApiResponse[ReadinessStatus]:
         ),
         request_id=current_request_id(),
     )
+
+
+def _check_ai_database(runtime: AiRuntime) -> None:
+    try:
+        with runtime.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        logger.exception("AI readiness database probe failed")
+        raise AiRequestError("AI_STORE_UNAVAILABLE", 503, "AI storage is unavailable.") from None
+
+
+@router.get("/healthz/ai", response_model=ApiResponse[HealthStatus])
+async def ai_healthz(request: Request) -> ApiResponse[HealthStatus]:
+    """Check only the resources required by the AI request path."""
+    runtime = getattr(request.app.state, "ai_runtime", None)
+    if runtime is None:
+        raise AiRequestError("AI_STORE_UNAVAILABLE", 503, "AI storage is unavailable.")
+
+    settings = request.app.state.settings
+    timeout_seconds = (
+        settings.ai_db_pool_timeout_seconds
+        + settings.ai_db_connect_timeout_seconds
+        + settings.ai_db_rw_timeout_seconds
+    )
+    try:
+        await runtime.executor.run_with_timeout(timeout_seconds, _check_ai_database, runtime)
+    except (AiDatabaseCapacityExceeded, TimeoutError):
+        raise AiRequestError("AI_STORE_UNAVAILABLE", 503, "AI storage is unavailable.") from None
+
+    if read_anthropic_key(runtime.key_file) is None:
+        raise AiRequestError("AI_PROVIDER_NOT_CONFIGURED", 503, "AI provider is not configured.")
+    return success(HealthStatus(status="ok"), request_id=current_request_id())
+
+
+@router.get("/healthz/billing", response_model=ApiResponse[ReadinessStatus])
+def billing_healthz(request: Request) -> ApiResponse[ReadinessStatus]:
+    """Expose the existing billing readiness contract under its scoped path."""
+    return readyz(request)

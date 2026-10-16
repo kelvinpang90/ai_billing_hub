@@ -395,6 +395,15 @@ if [ "$HEALTHY" = "1" ]; then
             sleep 2
         done
         [ "$SMOKE" = "1" ] || log "smoke test failed: the edge proxy is not sending its security headers"
+
+        if [ "$SMOKE" = "1" ]; then
+            log "smoke: GET ${SMOKE_URL}/healthz/ai"
+            AI_HEALTH_BODY="$(curl -fsS --max-time 10 "${SMOKE_URL}/healthz/ai")" || SMOKE=0
+            if [ "$SMOKE" = "1" ] && [[ "$AI_HEALTH_BODY" != *'"data":{"status":"ok"}'* ]]; then
+                SMOKE=0
+            fi
+            [ "$SMOKE" = "1" ] || log "smoke test failed: AI readiness did not return its ok envelope"
+        fi
     else
         log "smoke test failed"
     fi

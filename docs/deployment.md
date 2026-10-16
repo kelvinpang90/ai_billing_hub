@@ -155,6 +155,12 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 `.env`、镜像或文档。部署时 api 的优雅排空窗口最长 85 秒（容器宽限 100 秒），合并人须选择能接受
 新请求暂时失败的窗口，并等待 `/healthz/ai` 返回 `data.status=ok` 后再签发第一把 AI 密钥。
 
+`/healthz/ai` 是 AI 请求路径的就绪检查：它验证 AI 专用数据库连接和 Anthropic key 文件，
+不访问 Anthropic 或 Redis。`/healthz/billing` 是计费路径的就绪检查，与 `/readyz` 使用相同的
+数据库与 Redis 判定；`/healthz` 仍只是存活检查。两条就绪检查只对与 `/readyz` 相同的内部
+访问名单开放。部署冒烟以 `/healthz/ai` 为准，必须同时收到 200 和 `data.status=ok` 的 JSON
+信封，避免未知路径被前端 SPA 兜底成 200。
+
 配置均以 `BILLING_AI_` 开头：
 
 | 配置 | 默认值 |
