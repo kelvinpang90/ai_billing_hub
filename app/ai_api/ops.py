@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai_api.database import create_ai_database_engine, create_ai_session_factory
+from app.ai_api.messages import MAX_FEATURE_LENGTH
 from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
 from app.core.config import get_settings
 from app.models.auth import AuditAction
@@ -376,7 +377,11 @@ def _parse_import(line: str) -> tuple[ImportItem | None, str, str | None]:
     if not isinstance(request_id, str) or _ULID.fullmatch(request_id) is None:
         return None, "invalid ai_request_id", event_id
     feature, model = document["feature"], document["model"]
-    if not isinstance(feature, str) or _FEATURE.fullmatch(feature) is None:
+    if (
+        not isinstance(feature, str)
+        or len(feature) > MAX_FEATURE_LENGTH
+        or _FEATURE.fullmatch(feature) is None
+    ):
         return None, "invalid feature", event_id
     if not isinstance(model, str) or _MODEL.fullmatch(model) is None:
         return None, "invalid model", event_id

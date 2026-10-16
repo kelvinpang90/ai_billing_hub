@@ -145,6 +145,22 @@ def test_import_rejects_each_invalid_field_without_audit(mysql_world) -> None:
     assert len(audits(mysql_world)) == before
 
 
+def test_import_rejects_an_over_long_feature_and_leaves_the_pending_row(mysql_world) -> None:
+    row = add_row(mysql_world, 8)
+    event_id = read(mysql_world, row).event_id
+    feature = "a" * 32 + "." + "b" * 32
+    before = len(audits(mysql_world))
+    result = held_import(
+        mysql_world.factory,
+        [log_line(mysql_world, event_id, feature=feature)],
+        reason="recover",
+        clock=lambda: NOW,
+    )
+    assert result[0].operation.startswith("rejected")
+    assert read(mysql_world, row).status is AiUsageOutboxStatus.PENDING
+    assert len(audits(mysql_world)) == before
+
+
 def test_import_identity_mismatch_is_rejected_and_review_ack_is_once(mysql_world) -> None:
     row = add_row(mysql_world, 5)
     event_id = read(mysql_world, row).event_id
