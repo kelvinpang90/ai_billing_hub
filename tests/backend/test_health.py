@@ -177,3 +177,58 @@ def test_liveness_stays_up_when_the_database_is_down() -> None:
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
         assert client.get("/readyz").status_code == 503
+
+
+def test_ai_healthz_requires_its_database_and_key_file(tmp_path) -> None:
+    key_file = tmp_path / "anthropic.key"
+    app = create_app(
+        Settings(database_url="sqlite+pysqlite:///:memory:", ai_anthropic_key_file=str(key_file))
+    )
+
+    with TestClient(app) as client:
+        missing_key = client.get("/healthz/ai")
+        key_file.write_text("test-key", encoding="utf-8")
+        ready = client.get("/healthz/ai")
+
+    assert missing_key.status_code == 503
+    assert missing_key.json()["error"]["code"] == "AI_PROVIDER_NOT_CONFIGURED"
+    assert ready.status_code == 200
+    assert ready.json()["data"] == {"status": "ok"}
+
+
+def test_ai_healthz_reports_missing_ai_runtime_as_store_unavailable() -> None:
+    with TestClient(create_app(Settings(database_url=""))) as client:
+        response = client.get("/healthz/ai")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "AI_STORE_UNAVAILABLE"
+
+
+def test_ai_healthz_checks_its_database_before_the_key_file() -> None:
+    app = create_app(
+        Settings(
+            database_url="sqlite+pysqlite:////nonexistent-dir-for-tests/ai-health.db",
+            ai_anthropic_key_file="/also-missing-anthropic.key",
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/healthz/ai")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "AI_STORE_UNAVAILABLE"
+
+
+def test_billing_healthz_has_the_readyz_contract() -> None:
+    app = create_app(Settings(database_url="", redis_url=""))
+    app.state.engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    with TestClient(app) as client:
+        response = client.get("/healthz/billing")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "status": "degraded",
+        "database": "ok",
+        "redis": "not_configured",
+    }

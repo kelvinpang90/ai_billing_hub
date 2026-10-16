@@ -335,6 +335,19 @@ def test_the_smoke_test_fails_when_the_edge_runs_a_stale_configuration() -> None
     assert "not sending its security headers" in smoke
 
 
+def test_the_smoke_test_rolls_back_when_ai_healthz_returns_html_with_200() -> None:
+    """`curl -f` 只验证状态码，HTML 的 SPA 兜底必须再被正文断言挡住。"""
+    script = uncommented(SCRIPT)
+    start = script.index('log "smoke: GET')
+    smoke = script[start : script.index('if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]', start)]
+
+    assert '"${SMOKE_URL}/healthz/ai"' in smoke
+    assert "curl -fsS --max-time 10" in smoke
+    assert '"data":{"status":"ok"}' in smoke
+    assert "AI_HEALTH_BODY" in smoke
+    assert "AI readiness did not return its ok envelope" in smoke
+
+
 def test_the_dispatch_ref_is_validated_before_any_shell_sees_it() -> None:
     """⚠️ `${{ inputs.ref }}` 写进 `run:` 是**先原样替换进脚本再交给 bash**（阻断项 2）。
 

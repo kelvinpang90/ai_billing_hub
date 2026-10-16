@@ -836,6 +836,16 @@ def test_the_alerts_endpoint_shares_the_readyz_allow_list() -> None:
     assert "proxy_pass $billing_api$request_uri;" in alerts
 
 
+def test_ai_and_billing_healthz_share_the_readyz_allow_list() -> None:
+    readyz = nginx_location_block("= /readyz")
+    for path in ("= /healthz/ai", "= /healthz/billing"):
+        block = nginx_location_block(path)
+        assert allow_list(block) == allow_list(readyz)
+        assert "deny all;" in block
+        assert block.index("deny all;") > block.rindex("allow ")
+        assert "proxy_pass $billing_api$request_uri;" in block
+
+
 def test_everything_else_under_internal_is_denied() -> None:
     """`/internal/` 下以后新增的路径默认 403，不会因为忘了写 location 而落到别处。"""
     block = nginx_location_block("/internal/")
