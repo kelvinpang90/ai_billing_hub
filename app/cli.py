@@ -126,6 +126,16 @@ def main(argv: list[str] | None = None) -> int:
     dead_ack.add_argument("event_ids", nargs="+")
     dead_ack.add_argument("--reason", required=True)
 
+    held = sub.add_parser("ai-usage-held", help="Resolve or reconstruct held AI usage.")
+    held_sub = held.add_subparsers(dest="held_command", required=True)
+    for name in ("release", "discard", "ack"):
+        command = held_sub.add_parser(name)
+        command.add_argument("event_ids", nargs="+")
+        command.add_argument("--reason", required=True)
+    held_import = held_sub.add_parser("import")
+    held_import.add_argument("--from-log-line", action="append", required=True)
+    held_import.add_argument("--reason", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "create-admin":
         return create_admin(args.email, args.password)
@@ -139,6 +149,12 @@ def main(argv: list[str] | None = None) -> int:
         from app.ai_api.ops import run_dead_ack
 
         return run_dead_ack(args.event_ids, reason=args.reason)
+    if args.command == "ai-usage-held":
+        from app.ai_api.ops import run_held
+
+        if args.held_command == "import":
+            return run_held("import", args.from_log_line, reason=args.reason)
+        return run_held(args.held_command, args.event_ids, reason=args.reason)
     parser.error(f"unknown command: {args.command}")
     return 2
 

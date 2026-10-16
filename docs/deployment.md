@@ -148,6 +148,34 @@ inode 不是路径 —— `git checkout` 用新文件替换旧文件后，容器
 
 ---
 
+## AI 模块部署前置与配置
+
+AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创建 Anthropic key 文件，并让 api 容器的
+运行用户只读。该文件是 compose secret 挂载源，缺失会令容器创建失败；密钥只放文件，绝不写进
+`.env`、镜像或文档。部署时 api 的优雅排空窗口最长 85 秒（容器宽限 100 秒），合并人须选择能接受
+新请求暂时失败的窗口，并等待 `/healthz/ai` 返回 `data.status=ok` 后再签发第一把 AI 密钥。
+
+配置均以 `BILLING_AI_` 开头：
+
+| 配置 | 默认值 |
+| --- | --- |
+| `BILLING_AI_ANTHROPIC_KEY_FILE` | `/run/secrets/billing_anthropic_key` |
+| `BILLING_AI_PROVIDER_TIMEOUT_SECONDS` / `BILLING_AI_REQUEST_DEADLINE_SECONDS` | `60` / `75` |
+| `BILLING_AI_MAX_REQUEST_BYTES` / `BILLING_AI_MAX_OUTPUT_TOKENS` | `65536` / `4000` |
+| `BILLING_AI_INGEST_BASE_URL` | `http://api:8000` |
+| `BILLING_AI_DELIVERY_SWEEP_SECONDS` / `_BATCH` / `_LEASE_SECONDS` / `_RUN_BUDGET_SECONDS` | `10` / `20` / `60` / `45` |
+| `BILLING_AI_DB_POOL_TIMEOUT_SECONDS` / `_CONNECT_TIMEOUT_SECONDS` / `_RW_TIMEOUT_SECONDS` | `2` / `2` / `5` |
+| `BILLING_AI_DB_THREADS` / `BILLING_AI_DB_QUEUE_MAX` | `10` / `20` |
+| `BILLING_AI_PENDING_ALERT_SECONDS` | `900` |
+| `BILLING_AI_HELD_BUFFER_MAX` / `BILLING_AI_HELD_RETRY_SECONDS` | `1000` / `30` |
+
+为 `ai_usage_outbox` 新建一个 Healthchecks 检查，读取应用告警维度后按现有的每维度一检查规则
+推送；现有 19 个检查加这一项正好达到免费档 20 个上限。检查名使用 `ai_billing_hub ai_usage_outbox`，
+地址写入宿主机 `.env` 的 `BILLING_HEALTHCHECK_ALERT_AI_USAGE_OUTBOX_URL`，周期 5 分钟、宽限 15 分钟，
+绑定既有 Telegram 通知。超过免费档上限前必须先调整监控方案，不能静默省略此检查。
+
+---
+
 ## 3. 进程模型（T0.10 基线的直接输出）
 
 现状：`Dockerfile` 的 CMD 是 `uvicorn app.main:app`，**没有 `--workers`**，也就是单进程。
