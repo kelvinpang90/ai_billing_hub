@@ -4210,7 +4210,7 @@ tasks:
     title: AI 模块第十四层：AI 与计费两个就绪检查与部署冒烟
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 9 项：/healthz/ai 与 /healthz/billing、nginx 访问名单、deploy.sh 冒烟加 /healthz/ai（校验状态码与正文）。优雅停机已随 AIH-TASK-062 上线。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-063
     acceptance_criteria:
