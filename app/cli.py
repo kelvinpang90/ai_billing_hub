@@ -115,9 +115,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Avoid this outside automation: it lands in shell history and `ps` output.",
     )
 
+    requeue = sub.add_parser("ai-usage-requeue", help="Requeue eligible AI usage dead letters.")
+    requeue.add_argument("event_ids", nargs="+")
+    requeue.add_argument("--include-delivered", action="store_true")
+    requeue.add_argument("--reason", required=True)
+
+    dead_ack = sub.add_parser(
+        "ai-usage-dead-ack", help="Acknowledge handled AI usage dead letters."
+    )
+    dead_ack.add_argument("event_ids", nargs="+")
+    dead_ack.add_argument("--reason", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "create-admin":
         return create_admin(args.email, args.password)
+    if args.command == "ai-usage-requeue":
+        from app.ai_api.ops import run_requeue
+
+        return run_requeue(
+            args.event_ids, reason=args.reason, include_delivered=args.include_delivered
+        )
+    if args.command == "ai-usage-dead-ack":
+        from app.ai_api.ops import run_dead_ack
+
+        return run_dead_ack(args.event_ids, reason=args.reason)
     parser.error(f"unknown command: {args.command}")
     return 2
 

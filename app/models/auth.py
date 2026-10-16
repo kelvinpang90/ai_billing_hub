@@ -216,6 +216,10 @@ class AuditAction(enum.StrEnum):
     # `entity_type = ai_client_key`、`entity_id = client_id`。
     AI_CLIENT_KEY_CREATE = "AI_CLIENT_KEY_CREATE"
     AI_CLIENT_KEY_REVOKE = "AI_CLIENT_KEY_REVOKE"
+    # AIH-TASK-067（设计闸门 #281 v23 §2）：写入方是 app/ai_api/ops.py，每个 outbox
+    # 行的状态改变与一条审计同一事务；entity_type 是 ai_usage_outbox，entity_id 是 event_id。
+    AI_USAGE_REQUEUE = "AI_USAGE_REQUEUE"
+    AI_USAGE_DEAD_ACK = "AI_USAGE_DEAD_ACK"
 
 
 class AuditLog(Base):
