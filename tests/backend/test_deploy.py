@@ -335,8 +335,11 @@ def test_the_smoke_test_fails_when_the_edge_runs_a_stale_configuration() -> None
     assert "not sending its security headers" in smoke
 
 
-def run_ai_health_smoke(tmp_path, body: str, curl_exit: int = 0) -> str:
-    """用可控的 curl 跑部署脚本中的冒烟片段。"""
+def run_ai_health_smoke(tmp_path, body: str, curl_exit: int = 0, stale_calls: int = 0) -> str:
+    """用可控的 curl 跑部署脚本中的冒烟片段。
+
+    前 `stale_calls` 次 /healthz/ai 返回旧配置下的 SPA 页，模拟 reload 尚未生效的边缘。
+    """
     bash = shutil.which("bash")
     assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
 
@@ -366,6 +369,12 @@ def run_ai_health_smoke(tmp_path, body: str, curl_exit: int = 0) -> str:
         "set -euo pipefail\n"
         'url="${!#}"\n'
         'if [[ "$url" == */healthz/ai ]]; then\n'
+        "    calls=$(( $(cat ai_calls 2>/dev/null || echo 0) + 1 ))\n"
+        '    echo "$calls" > ai_calls\n'
+        '    if [ "$calls" -le "${AI_STALE_CALLS:-0}" ]; then\n'
+        "        printf '<!doctype html><html>SPA fallback</html>'\n"
+        "        exit 0\n"
+        "    fi\n"
         "    printf '%s' \"${AI_CURL_BODY:-}\"\n"
         '    exit "${AI_CURL_EXIT:-0}"\n'
         "fi\n"
@@ -380,7 +389,12 @@ def run_ai_health_smoke(tmp_path, body: str, curl_exit: int = 0) -> str:
     done = subprocess.run(
         [bash, str(work / "run.sh")],
         cwd=work,
-        env={**os.environ, "AI_CURL_BODY": body, "AI_CURL_EXIT": str(curl_exit)},
+        env={
+            **os.environ,
+            "AI_CURL_BODY": body,
+            "AI_CURL_EXIT": str(curl_exit),
+            "AI_STALE_CALLS": str(stale_calls),
+        },
         capture_output=True,
         text=True,
     )
@@ -409,6 +423,19 @@ def test_the_smoke_test_accepts_only_the_ai_ok_envelope(
     gate = 'if [ "$HEALTHY" = "1" ] && [ "$SMOKE" = "1" ]; then'
     assert gate in script
     assert script.index(gate) < script.index('log "rolling back to $PREVIOUS_IMAGE"')
+
+
+def test_the_ai_smoke_waits_for_the_reloaded_edge(tmp_path) -> None:
+    """reload 是异步的：旧 worker 先把 /healthz/ai 交给前端，几秒后新配置才接手。
+
+    AIH-TASK-069 的首次部署就是这样被误判失败并回滚的；重试窗口内拿到 ok 就算通过，
+    超出窗口仍是 SPA 页则照旧失败。
+    """
+    ok = '{"data":{"status":"ok"},"error":null}'
+    assert "RESULT SMOKE=1" in run_ai_health_smoke(tmp_path / "late", ok, stale_calls=2)
+    output = run_ai_health_smoke(tmp_path / "never", ok, stale_calls=5)
+    assert "RESULT SMOKE=0" in output
+    assert "AI readiness did not return its ok envelope" in output
 
 
 def test_the_dispatch_ref_is_validated_before_any_shell_sees_it() -> None:
