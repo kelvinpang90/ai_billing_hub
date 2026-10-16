@@ -4155,7 +4155,7 @@ tasks:
     title: AI 模块第十三层：待处置用量的四个子命令与运维文档
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 8 项的第三批：app/cli.py 的 ai-usage-held（release、discard、import、ack），逻辑接着写在 app/ai_api/ops.py，四个审计动作；docs/runbook.md 与 docs/deployment.md 的 AI 模块部分。本任务合并后才签发 AI 密钥（设计 §8「部署顺序」）。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-067
     acceptance_criteria:
