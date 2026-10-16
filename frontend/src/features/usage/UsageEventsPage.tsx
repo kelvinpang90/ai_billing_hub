@@ -88,6 +88,7 @@ export interface UsageFilterValues {
   request_id?: string | undefined;
   provider?: string | undefined;
   model?: string | undefined;
+  feature?: string | undefined;
   occurred_from?: string | undefined;
   occurred_to?: string | undefined;
   status?: string | undefined;
@@ -101,6 +102,7 @@ const TEXT_FILTERS = [
   "request_id",
   "provider",
   "model",
+  "feature",
   "status",
   "error_code",
 ] as const;
@@ -266,6 +268,11 @@ export function UsageEventsPage() {
       render: (_: unknown, event) => <CodeText code={event.usage_type} />,
     },
     {
+      key: "feature",
+      title: t("usage.field.feature"),
+      render: (_: unknown, event) => (event.feature == null ? EMPTY : <CodeText code={event.feature} />),
+    },
+    {
       key: "quantity",
       title: t("usage.field.quantity"),
       render: (_: unknown, event) => <QuantityText event={event} />,
@@ -402,6 +409,9 @@ export function UsageEventsPage() {
           <Input autoComplete="off" spellCheck={false} />
         </Form.Item>
         <Form.Item name="model" label={t("usage.filter.model")}>
+          <Input autoComplete="off" spellCheck={false} />
+        </Form.Item>
+        <Form.Item name="feature" label={t("usage.filter.feature")}>
           <Input autoComplete="off" spellCheck={false} />
         </Form.Item>
         <Form.Item name="occurred_from" label={t("usage.filter.occurredFrom")} rules={[timeRule]}>

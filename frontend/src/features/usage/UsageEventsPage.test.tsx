@@ -46,6 +46,7 @@ function event(overrides: Partial<UsageEventSummary> = {}): UsageEventSummary {
     conversation_id: null,
     provider: "openai",
     model: "whisper-x",
+    feature: null,
     usage_type: "AUDIO_SECOND",
     input_tokens: null,
     output_tokens: null,
@@ -144,6 +145,16 @@ const SLOW = { timeout: 20_000 };
 configure({ asyncUtilTimeout: 5_000 });
 
 describe("UsageEventsPage states", SLOW, () => {
+  it("shows a feature column and sends its exact filter value", async () => {
+    const user = userEvent.setup();
+    api.listUsageEvents.mockResolvedValue(page([event({ feature: "crm.contact_summary" })], 1));
+    renderPage();
+    expect(await screen.findByText("crm.contact_summary")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Feature"), "crm.contact_summary");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() => expect(api.listUsageEvents).toHaveBeenLastCalledWith({ feature: "crm.contact_summary" }, 1, 20, expect.anything()));
+  });
+
   it("shows a loading state while the first page is on its way", () => {
     api.listUsageEvents.mockReturnValue(new Promise(() => undefined));
 

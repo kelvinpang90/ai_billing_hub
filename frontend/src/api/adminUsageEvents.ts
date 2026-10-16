@@ -73,6 +73,7 @@ export interface UsageEventSummary {
   /** 上报的原始字符串（模型未知的事件也有）。 */
   provider: string;
   model: string;
+  feature?: string | null;
   usage_type: string;
   /** `LLM_TOKEN_FIELDS` 形态四个 token 数是整数、`quantity` 为 null；`QUANTITY` 形态相反。 */
   input_tokens: number | null;
@@ -163,6 +164,7 @@ const FILTER_PARAMS = [
   "request_id",
   "provider",
   "model",
+  "feature",
   "occurred_from",
   "occurred_to",
   "status",

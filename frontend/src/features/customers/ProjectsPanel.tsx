@@ -11,7 +11,8 @@
  * `renderProjectDetails` 是每一行展开区的挂载点。不传时默认挂 AIH-TASK-018 的
  * `IntegrationAccessPanel`（集成凭据），下面是 AIH-TASK-046 的 `WebhookSigningPanel`
  * （出站 webhook 签名密钥），再下面是 AIH-TASK-053 的 `ProjectIntegrationPanel`（集成状态与
- * 状态 webhook 地址）；本组件自己不碰凭据、密钥与地址，它们的接口只在某一行展开之后由那三个
+ * 状态 webhook 地址）；AIH-TASK-070 的 `AiAccessPanel` 也在展开区。本组件自己不碰凭据、密钥与地址，
+ * 它们的接口只在某一行展开之后由四个
  * 面板去请求。
  */
 
@@ -45,6 +46,7 @@ import {
 } from "../../api/adminCustomers";
 import { DateTimeText } from "../../components/DateTimeText";
 import { CustomerErrorAlert } from "./CustomerForm";
+import { AiAccessPanel } from "./AiAccessPanel";
 import { IntegrationAccessPanel } from "./IntegrationAccessPanel";
 import { ProjectIntegrationPanel } from "./ProjectIntegrationPanel";
 import { WebhookSigningPanel } from "./WebhookSigningPanel";
@@ -212,13 +214,14 @@ export function ProjectsPanel({
 
   // 展开区只在展开之后才渲染，所以凭据与签名密钥接口只为展开的那几个项目发请求。
   // `CustomerDetailPage` 不在 AIH-TASK-018 的可改路径里，默认值只能放在这里。
-  // 三个面板各管各的查询与状态，互不影响（AIH-TASK-046 把签名密钥挂在凭据下面，AIH-TASK-053 把
-  // 集成状态与地址挂在最后）。集成状态面板拿到的是列表里的这一行：启停之后列表重读，它跟着更新。
+  // 四个面板各管各的查询与状态，互不影响。集成状态面板拿到的是列表里的这一行：启停之后列表重读，
+  // 它跟着更新。
   const expandable = {
     expandedRowRender: (project: Project) =>
       renderProjectDetails === undefined ? (
         <Space direction="vertical" size="middle" style={{ display: "flex" }}>
           <IntegrationAccessPanel customerId={customerId} project={project} />
+          <AiAccessPanel customerId={customerId} project={project} />
           <WebhookSigningPanel customerId={customerId} project={project} />
           <ProjectIntegrationPanel customerId={customerId} project={project} />
         </Space>
