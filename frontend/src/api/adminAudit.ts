@@ -82,6 +82,10 @@ export const AUDIT_ACTIONS = [
   "AI_CLIENT_KEY_REVOKE",
   "AI_USAGE_REQUEUE",
   "AI_USAGE_DEAD_ACK",
+  "AI_USAGE_HELD_RELEASE",
+  "AI_USAGE_HELD_DISCARD",
+  "AI_USAGE_HELD_IMPORT",
+  "AI_USAGE_REVIEW_ACK",
 ] as const;
 
 /** 系统动作（计费状态跃迁）的 `actor_role`。 */

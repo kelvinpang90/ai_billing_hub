@@ -18,6 +18,47 @@
 
 ---
 
+## AI 模块用量 outbox：死信、暂存、待复核与积压
+
+告警维度 `ai_usage_outbox` 的 `dead`、`held`、`review required` 任一非零都是 P1；最老的
+`PENDING` / `SENDING` 超过 `BILLING_AI_PENDING_ALERT_SECONDS`（默认 900 秒）是 P2。先从
+`/internal/alerts` 的计数确认类别，再查只含元数据的应用日志；不要把提示词、模型回答或密钥复制到工单。
+
+### DEAD
+
+查 `ai_usage_outbox` 的 `status='DEAD'`、`last_error` 与 `dead_acked_at`。只有
+`INTEGRATION_AUTH_FAILED` 与 `INVALID_BILLING_RESPONSE` 可以在根因修好后用
+`python -m app.cli ai-usage-requeue <event_id> --reason '<原因>'` 重投；其余错误不能反复重投。
+已处理且决定不重投的死信，用 `ai-usage-dead-ack` 留审计并解除该条告警。
+
+### HELD
+
+`HELD` 表示模型已经消耗用量，但请求路径未能确认写入；它不会被投递 worker 领取。核对客户约定后：
+
+- 照收：`python -m app.cli ai-usage-held release <event_id> --reason '<决定依据>'`，变为 `PENDING`；
+- 不收：`python -m app.cli ai-usage-held discard <event_id> --reason '<决定依据>'`，变为终态 `DISCARDED`。
+
+绝不直接更新数据库状态。两条命令与审计在同一事务中提交。
+
+### 待复核
+
+`review_required_at` 有值而 `reviewed_at` 为空，表示请求曾返回 503、但同一 `event_id` 可能已进入投递。
+先在管理端核对摄取、计费与客户影响；决定保留费用，或先用管理端的手工调账退回。完成该业务决定后运行
+`python -m app.cli ai-usage-held ack <event_id> --reason '<核对结果>'`。不要用 `discard` 代替复核：该行可能已送达。
+
+### 积压与从日志补录
+
+`PENDING` / `SENDING` 积压先确认 api、celery-beat、celery-worker 与摄取端可用；恢复后扫描会自行补投。
+不要手工改 `next_attempt_at` 或多开 worker。若 API 在暂存落库前重启，只能从消息恰为
+`AI usage not persisted` 的 JSON 日志行补录：
+
+`python -m app.cli ai-usage-held import --from-log-line '<完整 JSON 行>' --reason '<事故编号>'`
+
+命令会逐字段校验、核对日志中的租户与项目归属，并打印 `created`、`held`、`review_marked` 或
+`unchanged:<状态>`；`rejected` 必须按输出修正输入或升级事故，不会写审计。每次成功补录都留下审计。
+
+---
+
 ## Redis / Celery broker 不可用
 
 **首次编写：2026-09-12（T0.5）。这是 §136 的 18 个场景里第一个落地的。**

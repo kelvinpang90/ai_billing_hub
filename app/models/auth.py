@@ -220,6 +220,10 @@ class AuditAction(enum.StrEnum):
     # 行的状态改变与一条审计同一事务；entity_type 是 ai_usage_outbox，entity_id 是 event_id。
     AI_USAGE_REQUEUE = "AI_USAGE_REQUEUE"
     AI_USAGE_DEAD_ACK = "AI_USAGE_DEAD_ACK"
+    AI_USAGE_HELD_RELEASE = "AI_USAGE_HELD_RELEASE"
+    AI_USAGE_HELD_DISCARD = "AI_USAGE_HELD_DISCARD"
+    AI_USAGE_HELD_IMPORT = "AI_USAGE_HELD_IMPORT"
+    AI_USAGE_REVIEW_ACK = "AI_USAGE_REVIEW_ACK"
 
 
 class AuditLog(Base):
