@@ -11,7 +11,6 @@ import json
 import re
 
 import pytest
-import test_ai_delivery
 from sqlalchemy import func, select, update
 from test_ai_delivery import add_row, read, settings, wire_delivery
 
@@ -24,7 +23,6 @@ from app.services import alerts
 from app.services.alerts import AlertContext, AlertLevel
 
 # The delivery tests' MySQL world (tenant, project, cleanup), registered here as a fixture.
-mysql_world = test_ai_delivery.mysql_world
 
 MOMENT = dt.datetime(2026, 10, 16, 1, 2, 3, 456789)
 NOW = dt.datetime(2026, 10, 16, 2, 0, 0, 123456)
