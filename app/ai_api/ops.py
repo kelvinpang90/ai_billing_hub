@@ -6,14 +6,14 @@ import datetime as dt
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal, TextIO
+from typing import Final, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.ai_api.database import create_ai_database_engine, create_ai_session_factory
 from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
 from app.core.config import get_settings
-from app.core.database import create_database_engine, create_session_factory, session_scope
 from app.models.auth import AuditAction
 from app.services.auth import RequestContext, record_audit, utc_now
 
@@ -131,33 +131,24 @@ def _operate(
     results: list[OperationResult] = []
     for event_id in event_ids:
         try:
-            with session_scope(session_factory) as session:
+            with session_factory.begin() as session:
                 row = _lock(session, event_id)
-                changed = (
-                    _ack_one(session, row, reason=cleaned, now=clock())
-                    if acknowledge and row is not None
-                    else _requeue_one(
+                if row is None:
+                    changed = False
+                elif acknowledge:
+                    changed = _ack_one(session, row, reason=cleaned, now=clock())
+                else:
+                    changed = _requeue_one(
                         session,
                         row,
                         reason=cleaned,
                         include_delivered=include_delivered,
                         now=clock(),
                     )
-                    if row is not None
-                    else False
-                )
-            results.append(
-                OperationResult(
-                    event_id,
-                    "acknowledged"
-                    if acknowledge and changed
-                    else "requeued"
-                    if changed
-                    else "failed",
-                )
-            )
         except Exception:
-            results.append(OperationResult(event_id, "failed"))
+            changed = False
+        done: Operation = "acknowledged" if acknowledge else "requeued"
+        results.append(OperationResult(event_id, done if changed else "failed"))
     return tuple(results)
 
 
@@ -194,22 +185,32 @@ def _run(
     reason: str,
     include_delivered: bool = False,
     acknowledge: bool = False,
-    output: TextIO = sys.stdout,
-    error: TextIO = sys.stderr,
 ) -> int:
     if _reason(reason) is None:
-        print("--reason must be 1 to 255 characters after trimming.", file=error)
+        print("--reason must be 1 to 255 characters after trimming.", file=sys.stderr)
         return 2
-    factory = create_session_factory(create_database_engine(get_settings()))
-    results = (
-        dead_ack(factory, event_ids, reason=reason)
-        if acknowledge
-        else requeue(factory, event_ids, reason=reason, include_delivered=include_delivered)
+    settings = get_settings()
+    # 设计 §2「API 进程之外的库访问」：每次执行建一个自己的 engine，结束时 dispose。
+    engine = create_ai_database_engine(
+        settings.database_url,
+        threads=1,
+        pool_timeout_seconds=settings.ai_db_pool_timeout_seconds,
+        connect_timeout_seconds=settings.ai_db_connect_timeout_seconds,
+        rw_timeout_seconds=settings.ai_db_rw_timeout_seconds,
     )
+    try:
+        factory = create_ai_session_factory(engine)
+        results = (
+            dead_ack(factory, event_ids, reason=reason)
+            if acknowledge
+            else requeue(factory, event_ids, reason=reason, include_delivered=include_delivered)
+        )
+    finally:
+        engine.dispose()
     for result in results:
-        print(f"{result.event_id} {result.operation}", file=output)
+        print(f"{result.event_id} {result.operation}")
     changed = sum(result.operation != "failed" for result in results)
-    print(f"Changed {changed} / {len(results)}", file=output)
+    print(f"Changed {changed} / {len(results)}")
     return 0 if changed == len(results) else 1
 
 
