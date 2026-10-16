@@ -4101,7 +4101,7 @@ tasks:
     title: AI 模块第十二层：死信重投与死信处理确认两个命令
     purpose: >-
       按 docs/design/AI-MODULE.md（设计闸门 #281 已批准 v23）实现拆分第 8 项的第二批：app/cli.py 的 ai-usage-requeue 与 ai-usage-dead-ack，命令逻辑在 app/ai_api/ops.py，两个审计动作。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-066
     acceptance_criteria:
