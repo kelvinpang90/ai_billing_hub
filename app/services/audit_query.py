@@ -68,6 +68,8 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "usage_event",
         # AI 密钥的 client_id：app/ai_api/admin.py 的签发与吊销审计（AIH-TASK-058）。
         "ai_client_key",
+        # outbox 的 event_id：app/ai_api/ops.py 的死信重投与处理确认（AIH-TASK-067）。
+        "ai_usage_outbox",
     }
 )
 
