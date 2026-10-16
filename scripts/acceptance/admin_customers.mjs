@@ -4,7 +4,8 @@
  * AIH-TASK-036 加了供应商价格与汇率的两个只读步骤（open_provider_prices、open_fx_rates）；AIH-TASK-037 加了定价规则
  * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）；AIH-TASK-038 加了用量事件的一个只读步骤
  * （open_usage_events）；AIH-TASK-046 加了出站 webhook 签名密钥的一个只读步骤（check_webhook_signing）；AIH-TASK-053
- * 加了项目集成状态的一个只读步骤（check_project_integration）。文件名沿用，不改。open_catalog / check_meter_types
+ * 加了项目集成状态的一个只读步骤（check_project_integration）；AIH-TASK-070 加了 AI 密钥的一个只读步骤
+ * （check_ai_access）。文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
  * 谁在什么时候跑它
@@ -148,6 +149,11 @@
  *                   Pending / Active / Retired，webhookSigning.status.*）；items 为空时面板显示空状态
  *                   （webhookSigning.empty 或 webhookSigning.emptyPage）、没有数据行。报到前把面板滚动到视口里（放得下时
  *                   整块在视口内，放不下时面板顶端在视口内）
+ *   check_ai_access
+ *                   在夹具客户详情的项目列表里点第一行展开按钮（已展开则不再点；只点展开，不点签发或吊销）。AI 密钥
+ *                   面板（role=region、aria-label 为「AI client keys」）落定且不是加载失败或无权限。后端值取页面自己发出的
+ *                   GET /api/v1/admin/customers/{customer_id}/projects/{project_id}/ai-access 响应体（被动观察，不自己发请求）；
+ *                   面板的密钥行数、client_id 与状态文案和响应数组一致，空数组显示空状态；报到前把面板滚进视口。
  *   check_project_integration
  *                   在夹具客户详情（open_fixture 打开的那一页）的项目列表里点第一行的展开按钮（同 check_webhook_signing：
  *                   aria-label 为「Expand row」；已经展开着就不再点；只点展开，不点任何写按钮）。项目列表加载失败是
@@ -264,7 +270,14 @@ const TEXT = {
   webhookStatus: "Status", // webhookSigning.field.status
   webhookActivatedAt: "Activated", // webhookSigning.field.activatedAt（集成凭据的表格没有这一列，靠它区分两张表）
   // 签名版本状态 → 「Status」列的文案（webhookSigning.status.pending / active / retired）。
-  webhookStatusText: { PENDING: "Pending", ACTIVE: "Active", RETIRED: "Retired" },
+ webhookStatusText: { PENDING: "Pending", ACTIVE: "Active", RETIRED: "Retired" },
+  aiAccessTitle: "AI client keys", // aiAccess.title
+  aiAccessLoading: "Loading AI client keys…", // aiAccess.loading
+  aiAccessLoadFailed: "The AI client keys could not be loaded.", // aiAccess.loadFailed
+  aiAccessEmpty: "This project has no AI client keys yet.", // aiAccess.empty
+  aiAccessClientId: "Client ID", // aiAccess.field.clientId
+  aiAccessStatus: "Status", // aiAccess.field.status
+  aiAccessStatusText: { ACTIVE: "Active", REVOKED: "Revoked" },
   integrationTitle: "Integration status and status webhook", // projectIntegration.title —— 集成状态面板的 aria-label
   integrationStatusLabel: "Integration status", // projectIntegration.field.status —— 面板里 Descriptions 的一项
   integrationLoading: "Loading the status webhook address…", // projectIntegration.webhook.loading
@@ -337,6 +350,7 @@ const LLM_TOKEN_COMPONENTS = 4;
 
 /** 签名密钥列表接口的路径（frontend/src/api/webhookSigning.ts 的 secretsUrl）。 */
 const WEBHOOK_SECRETS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects\/([^/]+)\/webhook-secrets$/;
+const AI_ACCESS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects\/([^/]+)\/ai-access$/;
 
 /** 项目列表接口的路径（frontend/src/api/adminCustomers.ts 的 listProjects）。 */
 const PROJECT_LIST_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects$/;
@@ -735,6 +749,7 @@ const network = {
   meterTypes: new Map(),
   /** 签名密钥列表接口：requestId → { customerId, projectId, status, finished, failed, seq }。查询串本身不保存。 */
   webhookSecrets: new Map(),
+  aiAccess: new Map(),
   /** 项目列表接口：requestId → { customerId, firstPage, status, finished, failed, seq }。查询串本身不保存。 */
   projectLists: new Map(),
   seq: 0,
@@ -747,6 +762,7 @@ function trackedRequest(requestId) {
     network.audits.get(requestId) ??
     network.meterTypes.get(requestId) ??
     network.webhookSecrets.get(requestId) ??
+    network.aiAccess.get(requestId) ??
     network.projectLists.get(requestId)
   );
 }
@@ -795,6 +811,16 @@ function webhookSecretsTarget(url) {
   } catch {
     return null;
   }
+}
+
+function aiAccessTarget(url) {
+  if (typeof url !== "string") return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host) return null;
+    const match = AI_ACCESS_API.exec(parsed.pathname);
+    return match === null ? null : { customerId: decodeURIComponent(match[1]), projectId: decodeURIComponent(match[2]) };
+  } catch { return null; }
 }
 
 /** 是不是计量类型列表接口（同源 https、路径恰好是列表，查询串不看）。 */
@@ -895,6 +921,17 @@ function observeNetwork(sessionId) {
           network.webhookSecrets.set(params.requestId, {
             customerId: webhook.customerId,
             projectId: webhook.projectId,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
+        const aiAccess = aiAccessTarget(params.request?.url);
+        if (aiAccess !== null && params.request?.method === "GET") {
+          network.aiAccess.set(params.requestId, {
+            customerId: aiAccess.customerId,
+            projectId: aiAccess.projectId,
             status: null,
             finished: false,
             failed: false,
@@ -1024,6 +1061,16 @@ function latestWebhookSecretsResponse(afterSeq, customerId, projectId) {
     if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
       best = { requestId, seq: request.seq };
     }
+  }
+  return best;
+}
+
+function latestAiAccessResponse(afterSeq, customerId, projectId) {
+  let best = null;
+  for (const [requestId, request] of network.aiAccess) {
+    if (request.seq <= afterSeq || request.customerId !== customerId || request.projectId !== projectId) continue;
+    if (!request.finished && !request.failed) return null;
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) best = { requestId, seq: request.seq };
   }
   return best;
 }
@@ -1222,6 +1269,15 @@ function pageLib() {
     }
     return null;
   };
+  const aiAccessRegion = (T) => {
+    const first = firstProjectRow(T);
+    const expanded = first === null ? null : first.nextElementSibling;
+    if (!expanded) return null;
+    for (const el of expanded.querySelectorAll('[role="region"]')) {
+      if (el.getAttribute("aria-label") === T.aiAccessTitle) return el;
+    }
+    return null;
+  };
   return {
     norm,
     leaf,
@@ -1237,6 +1293,7 @@ function pageLib() {
     firstProjectRow,
     webhookRegion,
     integrationRegion,
+    aiAccessRegion,
   };
 }
 
@@ -1752,6 +1809,44 @@ function probeWebhookSigning(lib, T) {
     break;
   }
   return out;
+}
+
+function probeAiAccess(lib, T) {
+  const region = lib.aiAccessRegion(T);
+  const out = { ...lib.common(T), region: region !== null, busy: false, failed: false, forbidden: false, empty: false, table: false, rows: [] };
+  if (region === null) return out;
+  const has = (text) => [...region.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(T.aiAccessLoading);
+  out.failed = has(T.aiAccessLoadFailed);
+  out.forbidden = has(T.customersForbidden);
+  out.empty = has(T.aiAccessEmpty);
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.aiAccessClientId) || !heads.includes(T.aiAccessStatus)) continue;
+    const clientId = heads.indexOf(T.aiAccessClientId);
+    const status = heads.indexOf(T.aiAccessStatus);
+    out.table = true;
+    for (const tr of table.querySelectorAll(":scope > tbody > tr")) {
+      const cells = tr.querySelectorAll(":scope > td");
+      if (cells.length === heads.length) out.rows.push({ clientId: lib.norm(cells[clientId].textContent), status: lib.norm(cells[status].textContent) });
+    }
+    break;
+  }
+  return out;
+}
+
+function scrollAiAccessPanelIntoView(lib, T) {
+  const region = lib.aiAccessRegion(T);
+  if (region === null) return false;
+  region.scrollIntoView({ block: region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start", inline: "nearest" });
+  return true;
+}
+
+function aiAccessPanelInView(lib, T) {
+  const region = lib.aiAccessRegion(T);
+  if (region === null) return false;
+  const rect = region.getBoundingClientRect();
+  return rect.height > 0 && rect.top >= 0 && rect.top < window.innerHeight && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
 
 /** 把签名密钥面板滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
@@ -2697,6 +2792,65 @@ async function stepCheckWebhookSigning(ctx) {
   }
 }
 
+async function stepCheckAiAccess(ctx) {
+  if (ctx.customerId === null || ctx.fixture === null) throw fail("assertion_failed");
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+  const listed = await waitFor(
+    () => evaluate(probeProjects, TEXT),
+    (s) => s.appError || s.notFound || (s.path === href && !s.busy && (s.failed || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!listed.ok) throw fail("element_missing");
+  const projects = listed.value;
+  if (projects.appError || projects.failed) throw fail("page_error");
+  if (projects.notFound || projects.path !== href) throw fail("navigation_failed");
+  if (projects.empty || !projects.table || typeof projects.projectId !== "string" || projects.projectId === "") throw fail("assertion_failed");
+  const beforeClick = network.seq;
+  let afterSeq = 0;
+  if (projects.expand === "collapsed") {
+    if ((await evaluate(clickExpandFirstProject, TEXT)) !== true) throw fail("element_missing");
+    afterSeq = beforeClick;
+  } else if (projects.expand !== "expanded") throw fail("element_missing");
+  const opened = await waitFor(
+    () => evaluate(probeAiAccess, TEXT),
+    (s) => s.appError || s.notFound || (s.path === href && s.region && !s.busy && (s.failed || s.forbidden || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) throw fail("element_missing");
+  const panel = opened.value;
+  if (panel.appError || panel.failed) throw fail("page_error");
+  if (panel.notFound || panel.path !== href) throw fail("navigation_failed");
+  if (panel.forbidden) throw fail("assertion_failed");
+  const observed = await waitFor(
+    async () => latestAiAccessResponse(afterSeq, customerId, projects.projectId),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) throw fail("assertion_failed");
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send("Network.getResponseBody", { requestId: observed.value.requestId }, sessionId);
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data : null;
+    if (!Array.isArray(items)) throw fail("assertion_failed");
+    expected = items.map((item) => ({
+      clientId: typeof item?.client_id === "string" ? item.client_id : null,
+      status: typeof item?.status === "string" && Object.hasOwn(TEXT.aiAccessStatusText, item.status) ? TEXT.aiAccessStatusText[item.status] : null,
+    }));
+    if (expected.some((item) => item.clientId === null || item.status === null)) throw fail("assertion_failed");
+  } catch { throw fail("assertion_failed"); }
+  const shown = await waitFor(
+    () => evaluate(probeAiAccess, TEXT),
+    (s) => s.path === href && s.region && !s.busy && !s.failed && !s.forbidden && (expected.length === 0 ? s.empty && s.rows.length === 0 : s.table && s.rows.length === expected.length && s.rows.every((row, i) => row.clientId === expected[i].clientId && row.status === expected[i].status)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  if ((await evaluate(scrollAiAccessPanelIntoView, TEXT)) !== true) throw fail("element_missing");
+  const visible = await waitFor(() => evaluate(aiAccessPanelInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) throw fail("assertion_failed");
+}
+
 async function stepCheckProjectIntegration(ctx) {
   if (ctx.customerId === null || ctx.fixture === null) {
     throw fail("assertion_failed");
@@ -2824,7 +2978,8 @@ const STEPS = {
   open_pricing_rules: stepOpenPricingRules,
   open_pricing_preview: stepOpenPricingPreview,
   open_usage_events: stepOpenUsageEvents,
-  check_webhook_signing: stepCheckWebhookSigning,
+ check_webhook_signing: stepCheckWebhookSigning,
+  check_ai_access: stepCheckAiAccess,
   check_project_integration: stepCheckProjectIntegration,
 };
 

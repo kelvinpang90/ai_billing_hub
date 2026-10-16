@@ -45,6 +45,11 @@ vi.mock("./IntegrationAccessPanel", () => ({
     `credentials:${customerId}:${project.id}`,
 }));
 
+vi.mock("./AiAccessPanel", () => ({
+  AiAccessPanel: ({ customerId, project }: { customerId: string; project: Project }) =>
+    `ai-access:${customerId}:${project.id}`,
+}));
+
 // 签名密钥面板同理：自己的用例在 WebhookSigningPanel.test.tsx。
 vi.mock("./WebhookSigningPanel", () => ({
   WebhookSigningPanel: ({ customerId, project }: { customerId: string; project: Project }) =>
@@ -110,6 +115,15 @@ beforeEach(() => {
 });
 
 describe("ProjectsPanel", () => {
+  it("mounts the AI access panel in an expanded project row", async () => {
+    const user = userEvent.setup();
+    api.listProjects.mockResolvedValue(page([project()], 1));
+    renderPanel();
+    await screen.findByText("Chatbot");
+    await user.click(screen.getByRole("button", { name: "Expand row" }));
+    expect(await screen.findByText(`ai-access:${CUSTOMER_ID}:${PROJECT_ID}`)).toBeInTheDocument();
+  });
+
   it("shows a loading state while the first page is on its way", () => {
     api.listProjects.mockReturnValue(new Promise(() => undefined));
 

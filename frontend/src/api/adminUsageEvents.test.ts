@@ -62,6 +62,7 @@ describe("listing", () => {
         occurred_to: "2026-09-30T00:00:00Z",
         occurred_from: "2026-09-29T00:00:00Z",
         model: "whisper-x",
+        feature: "crm.contact_summary",
         provider: "openai",
         request_id: "call-1",
         conversation_id: "conv-1",
@@ -81,6 +82,7 @@ describe("listing", () => {
       request_id: "call-1",
       provider: "openai",
       model: "whisper-x",
+      feature: "crm.contact_summary",
       occurred_from: "2026-09-29T00:00:00Z",
       occurred_to: "2026-09-30T00:00:00Z",
       status: "PRICING_ERROR",
@@ -95,6 +97,12 @@ describe("listing", () => {
     await listUsageEvents({ request_id: "", provider: "   ", model: " gpt-x " }, 1, 20);
 
     expect(get).toHaveBeenCalledWith(`${EVENTS}?page=1&page_size=20&model=gpt-x`, {});
+  });
+
+  it("sends feature as an exact list filter", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+    await listUsageEvents({ feature: "crm.contact_summary" }, 1, 20);
+    expect(get).toHaveBeenCalledWith(`${EVENTS}?page=1&page_size=20&feature=crm.contact_summary`, {});
   });
 
   it("keeps the customer panel's request as it was", async () => {
