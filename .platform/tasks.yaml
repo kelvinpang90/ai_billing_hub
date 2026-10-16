@@ -4382,3 +4382,233 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-072
+    title: 把 scripts 目录与 tests 下的流程测试纳入 ruff 检查与格式化
+    purpose: >-
+      清理 docs/TODO.md 后续计划里的 chore：pyproject.toml 的 [tool.ruff] 去掉对 scripts 与 tests/test_*.py 的排除，让 CI 的 ruff check 与 ruff format --check 也覆盖这 11 个流程工具文件；按现有规则（select 与 line-length 不变）格式化并修掉剩下的告警。只做格式与 lint 修正，不改任何脚本的行为。
+    status: ready
+    acceptance_criteria:
+      - 'pyproject.toml：[tool.ruff] 的 extend-exclude 只保留 "*.md"，删去 "scripts" 与 "tests/test_*.py" 两项，并删掉上方解释这两项为什么排除的两行注释；"*.md" 的注释原样保留；[tool.ruff.lint] 的 select、line-length、target-version 不变'
+      - '纳入范围的 11 个文件：scripts/check_docs.py、scripts/check_repo_policy.py、scripts/gh_verified_write.py、scripts/packaging_smoke.py、scripts/perf_baseline.py、scripts/perf_usage.py、scripts/perf_usage_profile.py、tests/test_check_docs.py、tests/test_check_repo_policy.py、tests/test_gh_verified_write.py、tests/test_requirements_coverage.py；全部经 ruff format 格式化'
+      - '格式化之后剩下的告警（预计十余处，以超长行为主）逐个手改：超长字符串拆成相邻字面量或括号续行，不改字符串拼接后的值；不加 per-file-ignores，不放宽规则；只有确实必须在模块顶部之后导入的地方（例如先改 sys.path 再导入）才允许 # noqa: E402，并在同一行注明原因'
+      - '不改行为：不改任何脚本的输出文案、退出码、命令行参数与判定逻辑；tests.process（python -m unittest discover -s tests）全部通过，用例数与改动前相同'
+      - 'python -m ruff check . 与 python -m ruff format --check . 在仓库根零退出（覆盖 app、tests/backend 与新纳入的 11 个文件）'
+      - '不改 app/、tests/backend/、frontend/ 下任何文件；不改 .github/workflows/（CI 已经对 . 跑 ruff，去掉排除即自动覆盖）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 只改格式与 lint，不碰钱、用量摄取、认证或 Webhook；PR 正文要把这条理由写出来'
+    allowed_change_paths:
+      - pyproject.toml
+      - scripts/check_docs.py
+      - scripts/check_repo_policy.py
+      - scripts/gh_verified_write.py
+      - scripts/packaging_smoke.py
+      - scripts/perf_baseline.py
+      - scripts/perf_usage.py
+      - scripts/perf_usage_profile.py
+      - tests/test_check_docs.py
+      - tests/test_check_repo_policy.py
+      - tests/test_gh_verified_write.py
+      - tests/test_requirements_coverage.py
+    # lint.fix / format.apply 先跑，导入顺序与格式交给 ruff 自动改；剩下的告警手改。
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-073
+    title: 管理端用量分析接口：按供应商、模型、客户、项目或功能汇总次数、token、成本与毛利
+    purpose: >-
+      合并 docs/TODO.md 后续计划里的两项（用量按功能汇总；Phase 5 管理端内部成本、毛利与供应商模型分析，spec §128 与 §87）：新增只读接口 GET /api/v1/admin/usage-analytics，在新文件 app/api/admin_usage_analytics.py、app/repositories/usage_analytics.py、app/schemas/usage_analytics.py 里实现，路由挂到 app/main.py。只读 usage_events，不写任何表，不加迁移。
+    status: ready
+    acceptance_criteria:
+      - '参数：group_by 必填，取 provider、model、customer、project、feature 之一；occurred_from 与 occurred_to 必填，复用 app/schemas/usage_events.py 的 parse_period（左闭右开，按 occurred_at），跨度不超过 366 天；可选筛选 customer_id、project_id、provider、model、feature，语义与管理端用量事件列表的同名参数相同（feature 复用 parse_feature）；分页沿用列表接口的 page / page_size 与 Page 信封，按事件数倒序、再按分组键升序；参数校验在 require_admin 之后，非法值 422 走 §107 信封'
+      - '只统计 status 为 PROCESSED 的事件。分组键：provider 为已解析的供应商代码，model 为供应商代码加模型代码，customer 与 project 为 public_id 加名称，feature 为标签本身，空值单独成一组、键为 null'
+      - '每组返回：事件数；token 形态事件数；input、output、cache_creation_input、cache_read_input 四类 token 合计；平均输入 token 与平均输出 token（分母是 token 形态事件数，QUANTITY 形态的事件不进平均）。按计费模式分两块：PREPAID 给事件数、计费额合计（billable_cost）、估算成本合计（estimated_provider_cost_myr）、毛利与毛利率（计费额合计为 0 时毛利率为 null）；INTERNAL_METERED_ONLY 只给事件数、估算成本合计与参考售价合计（reference_customer_price），不给毛利（内部租户的参考售价不是收入，见 docs/design/INTERNAL-METERED-ONLY-2026-10-08.md）。响应顶层带 cost_basis，固定为 estimated'
+      - '金额一律 Decimal，输出沿用 money_text 的 8 位小数字符串；平均值与毛利率输出为十进制字符串，全程不经 float；分母为 0 时为 null'
+      - '新接口放新文件，不改 app/api/admin_usage_events.py（tests/backend/test_usage_requeue_api.py 写死了那个路由器的处理函数个数）；处理函数第一条语句是 require_admin；路由加进 tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES，401 / 403 探测补上需要的参数；不加迁移，PR 正文说明查询用到的现有索引'
+      - '测试（tests/backend/test_admin_usage_analytics_api.py）：五种分组各一例；时间段两端边界；非 PROCESSED 不计入；INTERNAL_METERED_ONLY 不进毛利；QUANTITY 事件不进平均 token；筛选组合与客户隔离；未登录 401、非 ADMIN 403、登录后非法参数 422（含跨度超过 366 天）；金额精确：测试金额都能精确表示，MySQL 分支逐位断言，SQL 断言不写死方言字面量；示例 uuid 全零'
+      - 'docs/api.md 在「管理端用量事件：查询」一节之后新增一节，写清口径：按 occurred_at、只统计 PROCESSED、成本是估算值、不含网关手续费、不是财务毛利（Phase 7）、内部计量租户不算收入'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 只读报表，不写钱包、账本、定价、汇率与状态，不碰用量摄取、认证与 Webhook；PR 正文要把这条理由写出来'
+    allowed_change_paths:
+      - app/api/admin_usage_analytics.py
+      - app/repositories/usage_analytics.py
+      - app/schemas/usage_analytics.py
+      - app/main.py
+      - tests/backend/test_admin_usage_analytics_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-074
+    title: 管理端前端：用量分析页，按维度查看次数、token、成本与毛利
+    purpose: >-
+      管理端前端：调用 AIH-TASK-073 的用量分析接口，新建用量分析页并加进顶栏导航；勾掉 docs/TODO.md Phase 5 的「管理端内部成本 / 毛利视图」与「供应商 / 模型分析」两个勾选项。只做前端，外加验收脚本的两个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-073
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的用量分析一节为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块'
+      - '新增 frontend/src/api/adminUsageAnalytics.ts 封装该接口，写法沿用 frontend/src/api/adminUsageEvents.ts；省略的可选参数不进查询串'
+      - '新增 frontend/src/features/usage/UsageAnalyticsPage.tsx：分组维度选择、时间段（按吉隆坡时间输入，带时区偏移提交）、可选筛选；默认最近 30 天、按供应商分组；PREPAID 与内部计量分两组列显示；页面注明成本是估算值、不含网关手续费、仅管理员可见；加载中、失败（带 request_id）、空列表、无权限四种状态都画出来；分页沿用现有列表页的写法'
+      - '金额、平均值与毛利率按接口返回的十进制字符串显示，不转成 number 参与计算或格式化'
+      - '路由在 frontend/src/routes/paths.ts 登记（usageAnalytics，路径 /usage-analytics），在 frontend/src/routes/index.tsx 里懒加载；frontend/src/layouts/AppLayout.tsx 的顶栏加一项；文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library，放在被测文件旁边）：api 函数的路径与查询串；四种状态；切换维度与时间段后的请求参数；十进制字符串原样显示、不经 number；示例 uuid 全零'
+      - 'open_usage_analytics：点顶栏进入用量分析页，页面不是加载失败、无权限或路由兜底页，空表也算通过。check_usage_analytics：后端值取页面自己发出的 GET usage-analytics 接口的响应体（被动观察，不自己发请求），表格行数与响应 items 条数一致；不改筛选、不翻页。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这两个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 只勾 Phase 5 的「管理端内部成本 / 毛利视图」与「供应商 / 模型分析」两项。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，只读展示后端算好的值；PR 正文要把这条理由写出来'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminUsageAnalytics.ts
+      - frontend/src/api/adminUsageAnalytics.test.ts
+      - frontend/src/features/usage/UsageAnalyticsPage.tsx
+      - frontend/src/features/usage/UsageAnalyticsPage.test.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/layouts/AppLayout.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_usage_analytics
+        - check_usage_analytics
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-075
+    title: 生产巡检定期探测 AI 就绪检查并并入 readyz 告警维度
+    purpose: >-
+      Phase 6 健康告警的第一项（spec §95、§129）：AIH-TASK-069 的 /healthz/ai 目前只在部署冒烟时探测，Anthropic key 文件或 AI 专用库坏了没有告警。deploy/monitor.sh 每轮在检查 /readyz 之后再读 /healthz/ai，失败时在 readyz 维度报 P1。Healthchecks 免费档已用满 20 个检查，所以不新增检查；不改应用代码。
+    status: ready
+    acceptance_criteria:
+      - 'deploy/monitor.sh 的 check_readyz 在现有判定之后请求 /healthz/ai（默认与 READYZ_URL 同一入口，可由 BILLING_MONITOR_AI_READY_URL 覆盖，写法照 READYZ_URL）；非 2xx，或正文不含 "status":"ok"（与现有 readyz 判定同一写法）时输出一行 P1 billing_ai_readiness_failed，附 URL 与是否 2xx；不回显响应正文；告警名是稳定契约，照现有注释写明'
+      - '结果随 readyz 维度推送，复用 BILLING_HEALTHCHECK_READYZ_URL；不新增 Healthchecks 检查，不新增 .env 必填键；现有的「先隔一段时间复核一次」逻辑同样覆盖这一行；不改 cron 行；readyz 全绿时的成功文案补上 AI 一项'
+      - '部署主机不假设有 jq 或 Python；只看状态码不够（入口的前端兜底也会回 200），必须同时看正文'
+      - '测试（tests/backend/test_deploy.py，沿用该文件对 monitor.sh 的现有测法）：200 且正文 ok 不报；200 但正文是 HTML 报 P1；503 报 P1；覆盖变量生效；告警名与现有告警名不冲突'
+      - 'docs/deployment.md §8.1 的监控表 readyz 一行补上 AI 就绪判据，并写明因为免费档已满才并入 readyz、同一个检查已经红着时 AI 故障不会再单独通知；docs/runbook.md 加「AI 就绪检查失败」的处置：先查 key 文件，再查 AI 专用库连接，按 AIH-TASK-068 写的 AI 运维部分排查'
+      - '不改 app/、deploy/nginx/ 与 deploy/cron.d/ 下任何文件'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 只读运维巡检，不碰钱、用量摄取、认证或 Webhook；PR 正文要把这条理由写出来'
+    allowed_change_paths:
+      - deploy/monitor.sh
+      - tests/backend/test_deploy.py
+      - docs/deployment.md
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review

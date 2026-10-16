@@ -25,6 +25,10 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
+1. `AIH-TASK-072` 把 scripts 目录与 tests 下的流程测试纳入 ruff 检查与格式化
+2. `AIH-TASK-073` 管理端用量分析接口：按供应商、模型、客户、项目或功能汇总次数、token、成本与毛利
+3. `AIH-TASK-074` 管理端前端：用量分析页，按维度查看次数、token、成本与毛利
+4. `AIH-TASK-075` 生产巡检定期探测 AI 就绪检查并并入 readyz 告警维度
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -43,10 +47,8 @@
 - 待登记：关户（§112.1：先停用、余额为 0、无未结用量事件与支付，依赖 Phase 2 与 Phase 4）（需设计闸门）
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
-- 待登记：scripts/ 与 tests/test_*.py 纳入 ruff（chore）
 - 待登记：spec §47 的「复用既有 WhatsApp 服务」措辞与 ADR-0009 第 5 节同步（spec 修订）
 - 待登记：`.env.example` 补 AI 模块的配置项（Worker 不能改 `.env` 类文件；AIH-TASK-065 合并后由管理员补，内容以 `docs/deployment.md` 为准）
-- 待登记：用量按功能（`feature`）汇总：每个功能的调用次数、平均 token 与成本（依赖设计闸门 #281 给用量事件加的 `feature`；归 Phase 5 用量分析）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
 - 待登记：定价规则加项目作用域：同一客户的 AI Chatbot 与 AI API 分开定价，约定一个项目对应一条产品线下的一个模块（改 spec §16 的解析顺序，需设计闸门；2026-10-09 Kelvin：要分开）
@@ -58,11 +60,11 @@
 - 待登记：Phase 4 支付收据与下载
 - 待登记：Phase 5 会话摘要、请求级明细与用量筛选
 - 待登记：Phase 5 客户端用量导出
-- 待登记：Phase 5 管理端内部成本、毛利与供应商模型分析
 - 待登记：Phase 6 Notification Adapter 抽象与 Email adapter
 - 待登记：Phase 6 低余额、停机、复机通知与门户内通知（需设计闸门）
 - 待登记：Phase 6 WhatsApp adapter（依赖 D7）
-- 待登记：Phase 6 健康告警
+- 待登记：修正 app/services/alerts.py 的 AlertLevel 严重度顺序：枚举按「OK、P1、P2」递增，与 P1 比 P2 更严重的约定相反；目前只有 FX 维度的合并用到且只产出 OK / P2，尚未触发（2026-10-17 登记 075 时发现）
+- 待登记：Phase 6 健康告警的其余信号（通知死信、TLS 证书到期、时钟漂移等）；AI 就绪检查已由 AIH-TASK-075 并入 readyz。Healthchecks 免费档已用满 20 个检查，新增维度前要先定监控方案（升级付费档或合并维度）
 - 待登记：Phase 7 月度对账单、T+1 cut-off 与上期调整（需设计闸门）
 - 待登记：Phase 7 对账单 PDF 下载
 - 待登记：Phase 7 收入、成本、手续费、毛利分析与 CSV / Excel 导出
