@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 
-import test_ai_delivery
 from sqlalchemy import select
 from test_ai_delivery import add_row, read
 
@@ -14,7 +13,6 @@ from app.ai_api.ops import held_discard, held_import, held_release, review_ack
 from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
 from app.models.auth import AuditAction, AuditLog
 
-mysql_world = test_ai_delivery.mysql_world
 NOW = dt.datetime(2026, 10, 16, 2, 0, 0, 123456)
 
 

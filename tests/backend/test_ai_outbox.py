@@ -61,7 +61,7 @@ def _held(number: int) -> HeldUsage:
 
 
 @pytest.fixture
-def mysql_world(monkeypatch) -> Iterator[World]:
+def outbox_world(monkeypatch) -> Iterator[World]:
     if not TEST_DATABASE_URL:
         pytest.skip("BILLING_TEST_DATABASE_URL is not set; these cases need real MySQL")
     monkeypatch.setenv("BILLING_DATABASE_URL", TEST_DATABASE_URL)
@@ -155,8 +155,8 @@ def _outbox(world: World, item: HeldUsage) -> AiUsageOutbox:
         )
 
 
-def test_commit_acknowledgement_error_is_checked_on_mysql(mysql_world, monkeypatch) -> None:
-    item, original_factory, calls = _for(mysql_world, 1), mysql_world.factory, 0
+def test_commit_acknowledgement_error_is_checked_on_mysql(outbox_world, monkeypatch) -> None:
+    item, original_factory, calls = _for(outbox_world, 1), outbox_world.factory, 0
 
     def factory() -> Session:
         nonlocal calls
@@ -184,11 +184,11 @@ def test_commit_acknowledgement_error_is_checked_on_mysql(mysql_world, monkeypat
         )
         == "written_after_error"
     )
-    assert _outbox(mysql_world, item).status is AiUsageOutboxStatus.PENDING
+    assert _outbox(outbox_world, item).status is AiUsageOutboxStatus.PENDING
 
 
-def test_commit_check_failure_returns_unknown_on_mysql(mysql_world, monkeypatch) -> None:
-    item, original_factory, calls = _for(mysql_world, 2), mysql_world.factory, 0
+def test_commit_check_failure_returns_unknown_on_mysql(outbox_world, monkeypatch) -> None:
+    item, original_factory, calls = _for(outbox_world, 2), outbox_world.factory, 0
 
     def factory() -> Session:
         nonlocal calls
@@ -241,7 +241,7 @@ P, H = AiUsageOutboxStatus.PENDING, AiUsageOutboxStatus.HELD
     ],
 )
 def test_held_collision_follows_each_row_state(
-    mysql_world,
+    outbox_world,
     caplog,
     number,
     status,
@@ -252,9 +252,9 @@ def test_held_collision_follows_each_row_state(
     expected,
     flags,
 ) -> None:
-    item = _for(mysql_world, number)
+    item = _for(outbox_world, number)
     _insert_existing(
-        mysql_world,
+        outbox_world,
         item,
         status=status,
         first_attempted=first_attempted,
@@ -263,8 +263,8 @@ def test_held_collision_follows_each_row_state(
         review_required=review_required,
     )
     with caplog.at_level(logging.CRITICAL):
-        persist_held_once(mysql_world.factory, item)
-    row = _outbox(mysql_world, item)
+        persist_held_once(outbox_world.factory, item)
+    row = _outbox(outbox_world, item)
     assert row.status is (status if expected is None else expected)
     assert (row.review_required_at is not None) is (flags or review_required)
     review_logs = [r for r in caplog.records if r.message == REVIEW_MESSAGE]
@@ -278,28 +278,28 @@ def test_held_collision_follows_each_row_state(
         assert not review_logs
 
 
-def test_non_duplicate_integrity_error_is_not_a_collision(mysql_world, caplog) -> None:
-    item = _for(mysql_world, 20)
+def test_non_duplicate_integrity_error_is_not_a_collision(outbox_world, caplog) -> None:
+    item = _for(outbox_world, 20)
     orphan = HeldUsage(
         item.payload,
-        mysql_world.tenant_id,
-        mysql_world.project_id + 1_000_000,
+        outbox_world.tenant_id,
+        outbox_world.project_id + 1_000_000,
         item.ai_request_id,
         item.commit_outcome,
     )
     with caplog.at_level(logging.CRITICAL), pytest.raises(IntegrityError):
-        persist_held_once(mysql_world.factory, orphan)
-    assert _outbox(mysql_world, item) is None
+        persist_held_once(outbox_world.factory, orphan)
+    assert _outbox(outbox_world, item) is None
     assert not [r for r in caplog.records if r.message == REVIEW_MESSAGE]
 
 
-def test_held_round_requeues_other_errors_at_tail_and_continues(mysql_world, caplog) -> None:
-    good = _for(mysql_world, 21)
-    bad_source = _for(mysql_world, 22)
+def test_held_round_requeues_other_errors_at_tail_and_continues(outbox_world, caplog) -> None:
+    good = _for(outbox_world, 21)
+    bad_source = _for(outbox_world, 22)
     bad = HeldUsage(
         bad_source.payload,
-        mysql_world.tenant_id,
-        mysql_world.project_id + 1_000_000,
+        outbox_world.tenant_id,
+        outbox_world.project_id + 1_000_000,
         bad_source.ai_request_id,
         bad_source.commit_outcome,
     )
@@ -308,11 +308,11 @@ def test_held_round_requeues_other_errors_at_tail_and_continues(mysql_world, cap
     buffer.put(good)
     try:
         with caplog.at_level(logging.ERROR):
-            asyncio.run(drain_held_once(buffer, executor, mysql_world.factory, timeout_seconds=5))
+            asyncio.run(drain_held_once(buffer, executor, outbox_world.factory, timeout_seconds=5))
     finally:
         executor.shutdown()
-    assert _outbox(mysql_world, good).status is AiUsageOutboxStatus.HELD
-    assert _outbox(mysql_world, bad) is None
+    assert _outbox(outbox_world, good).status is AiUsageOutboxStatus.HELD
+    assert _outbox(outbox_world, bad) is None
     assert (len(buffer), buffer.take()) == (1, bad)
     assert any(
         r.levelno == logging.ERROR and r.message == "AI usage held persistence failed"
@@ -320,13 +320,13 @@ def test_held_round_requeues_other_errors_at_tail_and_continues(mysql_world, cap
     )
 
 
-def test_pending_to_held_and_delivery_claim_have_one_winner(mysql_world, caplog) -> None:
-    item = _for(mysql_world, 30)
-    _insert_existing(mysql_world, item, status=AiUsageOutboxStatus.PENDING)
+def test_pending_to_held_and_delivery_claim_have_one_winner(outbox_world, caplog) -> None:
+    item = _for(outbox_world, 30)
+    _insert_existing(outbox_world, item, status=AiUsageOutboxStatus.PENDING)
     barrier = threading.Barrier(2)
 
     def claim() -> int:
-        with mysql_world.factory() as session:
+        with outbox_world.factory() as session:
             barrier.wait()
             result = session.execute(
                 update(AiUsageOutbox)
@@ -343,12 +343,12 @@ def test_pending_to_held_and_delivery_claim_have_one_winner(mysql_world, caplog)
             return result.rowcount
 
     with caplog.at_level(logging.CRITICAL), ThreadPoolExecutor(max_workers=2) as pool:
-        held = pool.submit(lambda: (barrier.wait(), persist_held_once(mysql_world.factory, item)))
+        held = pool.submit(lambda: (barrier.wait(), persist_held_once(outbox_world.factory, item)))
         claimed = pool.submit(claim)
         held.result()
         claim_count = claimed.result()
 
-    row = _outbox(mysql_world, item)
+    row = _outbox(outbox_world, item)
     review_logs = [
         record
         for record in caplog.records
@@ -367,11 +367,11 @@ def test_pending_to_held_and_delivery_claim_have_one_winner(mysql_world, caplog)
         assert not review_logs
 
 
-def test_same_held_item_writes_once(mysql_world) -> None:
-    item = _for(mysql_world, 31)
-    persist_held_once(mysql_world.factory, item)
-    persist_held_once(mysql_world.factory, item)
-    with mysql_world.factory() as session:
+def test_same_held_item_writes_once(outbox_world) -> None:
+    item = _for(outbox_world, 31)
+    persist_held_once(outbox_world.factory, item)
+    persist_held_once(outbox_world.factory, item)
+    with outbox_world.factory() as session:
         assert (
             session.query(AiUsageOutbox).filter_by(event_id=item.payload["event_id"]).count() == 1
         )
@@ -389,9 +389,9 @@ def test_held_buffer_discards_oldest_and_records_its_metadata(caplog) -> None:
     )
 
 
-def test_cancelled_persistence_is_logged_and_held(mysql_world, caplog, monkeypatch) -> None:
+def test_cancelled_persistence_is_logged_and_held(outbox_world, caplog, monkeypatch) -> None:
     item, buffer, executor = (
-        _for(mysql_world, 50),
+        _for(outbox_world, 50),
         HeldBuffer(2),
         AiDatabaseExecutor(threads=1, queue_max=0),
     )
@@ -401,16 +401,16 @@ def test_cancelled_persistence_is_logged_and_held(mysql_world, caplog, monkeypat
 
     monkeypatch.setattr(executor, "run_with_timeout", cancelled)
     with caplog.at_level(logging.CRITICAL), pytest.raises(asyncio.CancelledError):
-        asyncio.run(persist_usage(executor, mysql_world.factory, buffer, item, timeout_seconds=1))
+        asyncio.run(persist_usage(executor, outbox_world.factory, buffer, item, timeout_seconds=1))
     assert buffer.take().commit_outcome == "unknown"
     assert any(r.message == "AI usage not persisted" for r in caplog.records)
     executor.shutdown()
 
 
-def test_held_round_stops_and_restores_head_on_connection_error(mysql_world, monkeypatch) -> None:
+def test_held_round_stops_and_restores_head_on_connection_error(outbox_world, monkeypatch) -> None:
     first, second, buffer, executor = (
-        _for(mysql_world, 60),
-        _for(mysql_world, 61),
+        _for(outbox_world, 60),
+        _for(outbox_world, 61),
         HeldBuffer(3),
         AiDatabaseExecutor(threads=1, queue_max=0),
     )
@@ -423,14 +423,14 @@ def test_held_round_stops_and_restores_head_on_connection_error(mysql_world, mon
         raise SATimeoutError("pool unavailable")
 
     monkeypatch.setattr(executor, "run_with_timeout", unavailable)
-    asyncio.run(drain_held_once(buffer, executor, mysql_world.factory, timeout_seconds=1))
+    asyncio.run(drain_held_once(buffer, executor, outbox_world.factory, timeout_seconds=1))
     assert (buffer.take(), buffer.take()) == (first, second)
     executor.shutdown()
 
 
-def test_cancelled_held_round_restores_inflight_item(mysql_world, monkeypatch) -> None:
+def test_cancelled_held_round_restores_inflight_item(outbox_world, monkeypatch) -> None:
     item, buffer, executor = (
-        _for(mysql_world, 62),
+        _for(outbox_world, 62),
         HeldBuffer(2),
         AiDatabaseExecutor(threads=1, queue_max=0),
     )
@@ -441,7 +441,7 @@ def test_cancelled_held_round_restores_inflight_item(mysql_world, monkeypatch) -
 
     monkeypatch.setattr(executor, "run_with_timeout", cancelled)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(drain_held_once(buffer, executor, mysql_world.factory, timeout_seconds=1))
+        asyncio.run(drain_held_once(buffer, executor, outbox_world.factory, timeout_seconds=1))
     assert buffer.take() == item
     executor.shutdown()
 

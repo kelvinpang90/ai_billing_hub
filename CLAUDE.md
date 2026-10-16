@@ -75,6 +75,7 @@
 
 - **断言 SQL 文本时不写死方言相关的字面量。**同一个查询，SQLite 编译成 `JOIN`，MySQL 编译成 `INNER JOIN`；共享锁（`FOR SHARE` / `LOCK IN SHARE MODE`）、标识符引号、分页写法也不一样。只断言两种库相同的片段，或者比较前先归一（例如 `.replace("INNER JOIN", "JOIN")`）；只有 MySQL 才有的断言放进 `if engine.dialect.name == "mysql":` 分支
 - 原因：Worker 的沙箱跑不了 `tests.backend`，参数化成 `[sqlite]` / `[mysql]` 的用例要到 CI 的 MySQL 分片才第一次真跑；AIH-TASK-051 run `7fe4822e` 就挂在这里（评审通过，CI 不过）
+- **跨文件共用的 fixture 在 `tests/backend/conftest.py` 里注册**，定义放在不以 `test_` 开头的辅助模块（例如 `tests/backend/ai_mysql_world.py`）。不要在用例模块里写 `mysql_world = test_xxx.mysql_world` 这种转引用：漏写一行就是 `fixture 'mysql_world' not found`，同样只在 CI 才暴露（AIH-TASK-067 run `9e7e38aa`）。辅助模块被 conftest 导入时还没执行 `pytest_configure`（xdist 换库名），环境变量要在 fixture 里读，不能在模块顶层读
 
 ## 登记任务时的浏览器验收约定
 

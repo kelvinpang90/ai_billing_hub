@@ -1,6 +1,8 @@
 """CI-only test plumbing: one MySQL database per pytest-xdist worker, and sharding across jobs.
 
 两件事都只在对应环境变量存在时生效；本地直接 `python -m pytest` 时什么都不做。
+
+另外在这里注册跨文件共用的 fixture（定义在不以 `test_` 开头的辅助模块里），用例模块直接按名字用。
 """
 
 from __future__ import annotations
@@ -8,6 +10,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from ai_mysql_world import mysql_world  # noqa: F401  (registers the shared fixture)
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
