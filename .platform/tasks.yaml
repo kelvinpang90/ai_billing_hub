@@ -4264,7 +4264,7 @@ tasks:
     title: 管理端前端：项目的 AI 密钥面板与用量事件按功能筛选
     purpose: >-
       管理端前端：在客户详情的项目区块里加 AI 密钥面板（列出、签发时 token 只显示一次、吊销），调用 AIH-TASK-059 的三个接口；用量事件页加「功能」一列与筛选框（设计闸门 #281 已批准 v23 §8 第 10 项）。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-059
     acceptance_criteria:
