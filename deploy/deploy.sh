@@ -398,10 +398,18 @@ if [ "$HEALTHY" = "1" ]; then
 
         if [ "$SMOKE" = "1" ]; then
             log "smoke: GET ${SMOKE_URL}/healthz/ai"
-            AI_HEALTH_BODY="$(curl -fsS --max-time 10 "${SMOKE_URL}/healthz/ai")" || SMOKE=0
-            if [ "$SMOKE" = "1" ] && [[ "$AI_HEALTH_BODY" != *'"data":{"status":"ok"}'* ]]; then
-                SMOKE=0
-            fi
+            # ⚠️ 上面的安全头旧配置里也有，那个循环等不到**新**配置生效。这次 reload 才加上
+            # `/healthz/ai` 的 location 时，旧 worker 会把它交给 `location /` 的前端（200 的
+            # SPA HTML），单发一次就会误判失败并回滚（AIH-TASK-069 的首次部署）。同样给几秒重试。
+            SMOKE=0
+            for _ in 1 2 3 4 5; do
+                AI_HEALTH_BODY="$(curl -fsS --max-time 10 "${SMOKE_URL}/healthz/ai")" || AI_HEALTH_BODY=""
+                if [[ "$AI_HEALTH_BODY" == *'"data":{"status":"ok"}'* ]]; then
+                    SMOKE=1
+                    break
+                fi
+                sleep 2
+            done
             [ "$SMOKE" = "1" ] || log "smoke test failed: AI readiness did not return its ok envelope"
         fi
     else
