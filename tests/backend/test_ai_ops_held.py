@@ -23,7 +23,7 @@ def audits(world) -> list[AuditLog]:
         return list(session.scalars(select(AuditLog).order_by(AuditLog.id)))
 
 
-def log_line(world, event_id: str, **overrides: object) -> str:
+def log_line(world, event_id: str, /, **overrides: object) -> str:
     with world.factory() as session:
         row = session.scalar(select(AiUsageOutbox).where(AiUsageOutbox.event_id == event_id))
         tenant = row.tenant_id
