@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.8  
+**Version:** 1.9  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -21,6 +21,7 @@
 | 1.6 | 2026-09-11 | Editorial only, no normative change. Second slimming batch: §2's generic flow diagram now defers to §20/§103; §55's filter list defers to §87; §134's 15-step block defers to §126; §135 keeps only the constraints with no other home and points the rest at theirs (retitled Implementation Constraints); §139's mock dashboard and drill-down defer to §86/§61/§87, keeping the auditable-trail requirement and the §139.1 table. **§72** (Customer Statements Page) retired — §46 and §90 already cover both items. |
 | 1.7 | 2026-09-21 | Traceability only, no normative change. Four rules that were already stated normatively now also carry an identifier so implementation, migrations, and tests can reference them: `REQ-PRIV-002` (§69, Invariant 7), `REQ-TXN-001` (§74.6, Invariant 13), `REQ-TAX-001` (§45.1, SST/accounting launch gate), and `REQ-LAUNCH-001` (§47, real-account integration launch gate). Each added paragraph restates the rule of the section it sits in; no existing sentence was moved, merged, or reworded, and no requirement was added, tightened, or relaxed. |
 | 1.8 | 2026-10-12 | Normative. Added **§141 AI Module**: the system-side AI API, formerly the separate `acuven_ai_api` service, runs inside this platform as one process, one deployment and one database, with the AI caller identity unified into the tenant project (product owner decisions of 2026-10-12; rationale and costs in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; implementation design in design gate #281). Amended to match: §2.1 (the AI Module is the one exception to the trust-domain separation), §3.3 and §126 (pilot addenda), §11 and §79 (optional `feature` label on usage events), §121 (two out-of-scope items, the example in the customer-operated-backend item, and the central AI Gateway item now scoped to Integrated Application Backends), §135 (the AI Module is a model-call API for Acuven's own module backends only; its request path follows §141.5), §139.1 (`REQ-AVAIL-001` primary sections), and the scope of `REQ-AVAIL-001` / Invariant 1 for the AI Module in §1, §119 and §133. |
+| 1.9 | 2026-10-17 | Normative, one rule. §45.1 previously required accounting/tax advice before Phase 4. It now also allows the decision maker to approve the tax treatment directly when Acuven has no accounting or tax adviser engaged; the ADR must state that no adviser was consulted, and the treatment must be re-reviewed once an adviser is engaged or when taxable turnover approaches the SST registration threshold. The six questions, the approval requirement, `REQ-TAX-001`, and the ban on inventing a tax rate are unchanged. See ADR-0008 §5. |
 
 ## Document Navigation
 
@@ -1893,7 +1894,7 @@ Future e-Invoice integration should be possible without replacing payment archit
 
 ## 45.1 Tax and Compliance Decision Gate
 
-LHDN e-Invoice being out of scope does not determine SST treatment. Before Phase 4 implementation, Acuven must obtain and document accounting/tax advice covering:
+LHDN e-Invoice being out of scope does not determine SST treatment. Before Phase 4 implementation, Acuven must obtain and document accounting/tax advice covering the points below. When Acuven has no accounting or tax adviser engaged, the decision maker may approve the treatment directly instead; the ADR must then state that no adviser was consulted, and the treatment must be re-reviewed once an adviser is engaged or when taxable turnover approaches the SST registration threshold. The points are:
 
 - whether Acuven is registered or required to register for SST
 - classification of the AI service and applicable exemptions
