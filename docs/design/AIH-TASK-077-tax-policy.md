@@ -1,9 +1,9 @@
-# AIH-TASK-077 / 078 / 079 设计：税务政策版本表与首条 PUBLISHED 税务政策（已批准 v2）
+# AIH-TASK-077 / 078 / 079 / 080 设计：税务政策版本表与首条 PUBLISHED 税务政策（已批准 v3）
 
-> **来源**：设计闸门 Issue #332。本文件是 `APPROVED: design v2` 那一版正文的**逐字副本**，审查者为 Codex。
+> **来源**：设计闸门 Issue #332。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**，审查者为 Codex。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #332 上被批准的 v2 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
-> §11 的三个实现任务登记为 `AIH-TASK-077`（数据库迁移与模型）、`AIH-TASK-078`（仓储与服务）、`AIH-TASK-079`（运维 CLI 与文档）。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #332 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> §11 的四个实现任务登记为 `AIH-TASK-077`（迁移与模型）、`AIH-TASK-080`（MySQL 行为测试与表结构文档）、`AIH-TASK-078`（仓储与服务）、`AIH-TASK-079`（运维 CLI 与文档），按这个顺序依赖。
 
 ---
 
@@ -22,7 +22,7 @@
 
 状态：`待审`（`READY_FOR_REVIEW`）
 负责人：Claude
-**设计版本**：`v2`
+**设计版本**：`v3`
 对应需求：spec §45（收据须带 tax-policy 快照字段）、§45.1（税务与合规闸门）、§74.7（`payments.tax_policy_version_id` / `tax_amount`）、§74.9（`tax_policy_versions`，含「No tax policy may be published until the §45.1 decision gate is approved」）、§132 第 13 条；`REQ-TAX-001`；ADR-0008（第 5 节与收口条件，2026-10-17 由决策人补完，PR #328）
 目标 PR：待开（批准后按 §11 登记；`docs/TODO.md`「待登记」里的「Phase 4 第一个任务：`tax_policy_versions` 建表并写入第一条 `PUBLISHED`」即本闸门）
 
@@ -51,7 +51,7 @@
 运维（077、078、079 都合并并自动部署之后，在生产 api 容器里执行一次）：
   python -m app.cli publish-initial-tax-policy --approved-by-email <管理员邮箱>
     → normalise_email（app/core/emails.py:28；格式不对 → 退出码 2，不连库）
-    → services.tax_policy.publish_initial_tax_policy(session_factory, approver_email=…)
+    → services.tax_policy.publish_initial_tax_policy(session_factory, approver_email=…, context=RequestContext(None, "cli"))
        事务外：parse_treatment(INITIAL_TREATMENT) + 校验 rate 与 treatment 一致（失败是代码缺陷，抛错，不连库）
        一个事务（session_scope）：
         ① SELECT … FROM tax_policy_locks WHERE id = 1 FOR UPDATE        ← 第一条语句
@@ -200,7 +200,7 @@ class ResolvedTaxPolicy:
 
 ### 服务层（`app/services/tax_policy.py`）
 
-- `publish_initial_tax_policy(session_factory, *, approver_email: str, clock: Clock = utc_now) -> str`：按本节开头的数据流 ①–⑩，返回新行的 `public_id`。`approver_email` 由调用方先经 `normalise_email`；服务层只按归一后的值精确匹配。
+- `publish_initial_tax_policy(session_factory, *, approver_email: str, context: RequestContext, clock: Clock = utc_now) -> str`（v3：`context` 是必填参数，原样传给两次 `record_audit`；服务不自造上下文，CLI 传 `RequestContext(ip_address=None, user_agent="cli")`）：按本节开头的数据流 ①–⑩，返回新行的 `public_id`。`approver_email` 由调用方先经 `normalise_email`；服务层只按归一后的值精确匹配。
 - 错误（`AppError` 子类，照 `app/services/fx_rates.py:72` 起的写法；今天没有 HTTP 映射，`http_status` 按仓库惯例照填）：
   - `TaxPolicyAlreadyExists`：`TAX_POLICY_EXISTS`（409）—— 表里已有任何一行（无论什么状态）
   - `TaxPolicyApproverInvalid`：`TAX_POLICY_APPROVER_INVALID`（422）—— 邮箱没有账号、角色不是 `ADMIN`、或状态不是 `ACTIVE`；三种不区分（CLI 的提示文字也不区分，见 §6）
@@ -222,7 +222,7 @@ class ResolvedTaxPolicy:
   | 缺 `--approved-by-email` | 2（argparse） | 空 | argparse 用法 |
   | 数据库错误 | 非零（异常） | 空 | 异常（引擎 `hide_parameters=True`，`app/core/database.py:63`，不带 SQL 参数），外加一句固定提示（v2）：`If the error happened at commit, the policy may already be published; run the same command again to find out.` |
 
-- 审计的 `context` 是 `RequestContext(ip_address=None, user_agent="cli")`（`app/cli.py:84` 的先例）。
+- 审计的 `context` 由 CLI 构造为 `RequestContext(ip_address=None, user_agent="cli")`（`app/cli.py:84` 的先例），作为服务的 `context` 参数传入（v3）。
 
 ### 事务边界
 
@@ -372,7 +372,8 @@ class ResolvedTaxPolicy:
 | 触发器：已发布允许的改动 | 同上 | 只改 `updated_at`；截断（写 `effective_to`）；`PUBLISHED → RETIRED` 带尽头；`PUBLISHED → RETIRED` 不带尽头 | 通过、通过、通过、3819（`retired_end`） |
 | 触发器：终态与删除 | 同上 | 已退役行改 `effective_to` / `updated_at`；删已发布行；删草稿 | 1644 ×4 |
 | 锁表 | 同上 | 迁移后行集合；再插一行；`UPDATE … SET id = 2`；删那一行 | `{1}`；1644 ×3 |
-| CHECK | 同上 | `rate` 为 `1.000000` / `-0.000001` / `8` / `0` / `0.999999` / `NULL`；`jurisdiction = 'SG'`；`policy_type = 'GST'`；`status = 'DISCARDED'`；草稿带 `approved_by`；草稿带 `effective_from`；`DRAFT → PUBLISHED` 缺 `approved_at`；`DRAFT → PUBLISHED` 起点为空 | 3819、3819、3819、通过、通过、通过；3819 ×7（每条都断言约束名） |
+| CHECK | 同上 | `rate` 为 `1.000000` / `-0.000001` / `8` / `0` / `0.999999` / `NULL`；`jurisdiction = 'SG'`；`policy_type = 'GST'`；草稿带 `approved_by`；草稿带 `effective_from`；`DRAFT → PUBLISHED` 缺 `approved_at`；`DRAFT → PUBLISHED` 起点为空；`status = 'DISCARDED'`（直接插入；插入草稿后改为 `DISCARDED`） | 3819、3819、3819、通过、通过、通过；3819 ×6（每条都断言约束名）；`DISCARDED` 两种写法都是 1644 —— MySQL 上 BEFORE INSERT 与 BEFORE UPDATE 规则 2 先于 CHECK 拒绝，`ck_tax_policy_versions_status` 经 DML 不可达（v3） |
+| status CHECK（v3） | integration（SQLite，无触发器，`test_tax_policy_service.py`） | ORM 直接插入一条 `status = 'DISCARDED'` 的行（绕过枚举，用文本 SQL） | `IntegrityError`（CHECK）；MySQL 上这条 CHECK 由触发器先行拦住，其文本由 `test_migrations.py` 与模型常量比对 |
 | `open_slot` 与唯一索引 | integration（SQLite 无触发器：唯一索引是唯一的拦截；MySQL 只断言「被拒绝」） | 已有一条未截断的已发布行，再把第二条草稿改为 `PUBLISHED [更晚, NULL)` | SQLite：`IntegrityError`（唯一索引）；MySQL：被拒绝（重叠触发器先于唯一索引，**不断言是哪一道**，照汇率设计 v3 的写法）。另断言：草稿、截断的已发布行 `open_slot` 为 `NULL`，未截断的为 1 |
 | 区间不重叠 | integration（MySQL） | A `[d1, NULL)` 已发布；B 草稿直接改为 `PUBLISHED [d2, NULL)`（d2 > d1）不先截断 A；先截断 A 于 d2 再发布 B（首尾相接）；A 截断于 d3 > d2 时发布 B（相交） | 1644；通过；1644 |
 | 触发器拿锁 | integration（MySQL，两个连接，`innodb_lock_wait_timeout = 1`） | 连接 1 持 `tax_policy_locks FOR UPDATE` 不提交；连接 2 直接把草稿改为已发布 | 连接 2 锁等待超时（errno 1205）；连接 1 提交后连接 2 重试通过 |
@@ -408,6 +409,7 @@ class ResolvedTaxPolicy:
 - **兼容窗口**：无。新表没有旧读者；没有改既有列。
 - **部署顺序**（合并即按提交 SHA 自动部署生产，每一步单独部署都安全）：
   1. 077 合并 → 两张空表（锁表一行）。没有写入方。
+  1b. 080 合并 → 只加 MySQL 行为测试与表结构文档，不改任何运行代码（v3）。
   2. 078 合并 → 服务函数存在，但没有入口；行为不变。
   3. 079 合并 → CLI 可用；表仍为空，直到有人运行它。
   4. **运维步骤（只做一次，由 Kelvin 或经 Kelvin 授权的会话在 VPS 上执行；写进 `docs/deployment.md` 与 `docs/runbook.md`）**：
@@ -444,7 +446,7 @@ class ResolvedTaxPolicy:
 ## 10. 未决问题与假设
 
 - **未决问题**（需要 Kelvin 拍板，都不阻断设计本身）：
-  1. **任务拆分与编号**：决策人原定两个任务（数据库 + 业务规则一个、CLI 一个）。按 CLAUDE.md「一个任务只做一层」且数据库 + 业务规则需要 13 个路径（> 12），§11 拆成三个：077（数据库）、078（业务规则）、079（CLI，依赖 078）。若决策人坚持两个任务，077 与 078 合为一个、13 个路径，需要在登记 PR 里写明超限理由；设计内容不变。
+  1. **任务拆分与编号**：决策人原定两个任务（数据库 + 业务规则一个、CLI 一个）。按 CLAUDE.md「一个任务只做一层」、路径不超过 12 个、改动不超过约 1500 行，§11 拆成四个：077（迁移与模型）→ 080（MySQL 行为测试与表结构文档）→ 078（业务规则）→ 079（CLI）。设计内容不因拆分而变。
   2. **审批人账号**：假设生产上存在决策人自己的 `ACTIVE` ADMIN 账号（不是验收专用管理员）。若没有，运维步骤之前先用 `create-admin` 建一个并完成 2FA 注册。
   3. **消费方的共享锁**：本任务不提供 `lock_tax_policies_shared`（没有调用方）。是否由 Phase 4 第一个消费方的闸门加，还是本任务现在就加（与 `resolve_tax_policy` 配套，汇率是一起交付的）—— 审查若认为应现在加，078 加一个函数、一条并发用例，不改其他设计。
 - **v1 自行写定、未另请 Kelvin 拍板的小决定**（审查若认为需要人拍板请指出）：`jurisdiction` / `policy_type` 用只含一个值的枚举 + CHECK；`rate` 精度 DECIMAL(9,6)；`treatment_json` 的四个键名与 `schema_version`；`PUBLISHED_START_CHECK`；`created_by` 非空；审批人不要求已注册 2FA；审计 `reason = "INITIAL_POLICY"`；CLI 退出码（格式错 2、被拒绝 1）与输出文字；`source_reference` 的措辞。
@@ -480,22 +482,24 @@ class ResolvedTaxPolicy:
 
 ### 实现范围（批准后逐个登记为 Worker 任务）
 
-**为什么拆成三个**：决策人原定两个任务（数据库 + 业务规则一个、CLI 一个）。前者横跨数据库与业务规则两层，`allowed_change_paths` 数下来是 13 个（迁移、`alembic/env.py`、模型、仓储、服务、`app/models/auth.py`、`app/services/audit_query.py`、`frontend/src/api/adminAudit.ts`、两个测试模块、`test_migrations.py`、`test_model_columns.py`、`docs/database-schema.md`，外加 `docs/TODO.md`），超过 12 个的上限，也违反「一个任务只做一层」。按层拆成 077 / 078，CLI 顺延为 079，每一层合并后都能单独通过检查与 CI、单独部署（§8）。编号见 §10 未决 1。
+**为什么拆成四个**（v3：预审估计原 077 约 2000 行，超过约 1500 行的上限，把 MySQL 行为测试与表结构文档拆成 080；原 077 漏了 `tests/backend/test_fx_rates_db.py` —— 它的降级用例断言降级时删掉哪些表与触发器，0022 之后必须同步）：决策人原定两个任务（数据库 + 业务规则一个、CLI 一个）。前者横跨数据库与业务规则两层，`allowed_change_paths` 数下来是 13 个（迁移、`alembic/env.py`、模型、仓储、服务、`app/models/auth.py`、`app/services/audit_query.py`、`frontend/src/api/adminAudit.ts`、两个测试模块、`test_migrations.py`、`test_model_columns.py`、`docs/database-schema.md`，外加 `docs/TODO.md`），超过 12 个的上限，也违反「一个任务只做一层」。按层拆成 077 / 078，CLI 顺延为 079，每一层合并后都能单独通过检查与 CI、单独部署（§8）。编号见 §10 未决 1。
 
 | 任务 | 层 | 对应章节 | 依赖 | `allowed_change_paths` |
 | --- | --- | --- | --- | --- |
-| 077（`AIH-TASK-077`） | 数据库迁移与模型 | §2「数据库」、§8 迁移 | — | `alembic/versions/20261017_0022_tax_policy.py`（新）、`alembic/env.py`（注册模型模块）、`app/models/tax_policy.py`（新：两张表、三个枚举、九个 CHECK 常量、`OPEN_SLOT_EXPRESSION`、锁行的 `after_create`）、`tests/backend/test_tax_policy_db.py`（新，MySQL：触发器、CHECK、`open_slot`、区间、锁、外键）、`tests/backend/test_migrations.py`、`tests/backend/test_model_columns.py`、`docs/database-schema.md`（新增一节）、`docs/TODO.md`（8） |
-| 078（`AIH-TASK-078`） | 业务规则：仓储与服务 | §2「`treatment_json` 的形状」「首条政策的内容」「仓储层」「服务层」「事务边界」「审计」「对下游任务的契约」、§4 | 077 | `app/repositories/tax_policy.py`（新，含 `parse_treatment` 与 `resolve_tax_policy`）、`app/services/tax_policy.py`（新）、`app/models/auth.py`（`AuditAction` 末尾两个值）、`app/services/audit_query.py`（`PUBLIC_ENTITY_TYPES`）、`frontend/src/api/adminAudit.ts`（`AUDIT_ACTIONS` 同序追加两项；只为让现有的 `adminAudit.test.ts` 比对通过，没有页面变化，**不带浏览器验收块**）、`tests/backend/test_tax_policy_service.py`（新，SQLite 与 MySQL）、`docs/TODO.md`（7） |
+| 077（`AIH-TASK-077`） | 数据库迁移与模型 | §2「数据库」、§8 迁移 | — | `alembic/versions/20261017_0022_tax_policy.py`（新）、`alembic/env.py`（注册模型模块）、`app/models/tax_policy.py`（新：两张表、三个枚举、九个 CHECK 常量、`OPEN_SLOT_EXPRESSION`、锁行的 `after_create`）、`tests/backend/test_migrations.py`、`tests/backend/test_fx_rates_db.py`（降级用例的表与触发器集合，v3）、`tests/backend/test_model_columns.py`、`docs/TODO.md`（7） |
+| 080（`AIH-TASK-080`，v3） | 数据库：MySQL 行为测试与表结构文档 | §7「触发器」「锁表」「CHECK」「`open_slot`」「区间不重叠」「触发器拿锁」「外键」各行、§2「数据库」 | 077 | `tests/backend/test_tax_policy_db.py`（新，MySQL）、`docs/database-schema.md`（新增一节）、`docs/TODO.md`（3）。不改任何运行代码；行为测试发现迁移或模型有缺陷时停下、在 PR 里说明，由人决定另开修复任务 |
+| 078（`AIH-TASK-078`） | 业务规则：仓储与服务 | §2「`treatment_json` 的形状」「首条政策的内容」「仓储层」「服务层」「事务边界」「审计」「对下游任务的契约」、§4 | 080（v3：触发器的行为测试先过，才建写入方） | `app/repositories/tax_policy.py`（新，含 `parse_treatment` 与 `resolve_tax_policy`）、`app/services/tax_policy.py`（新）、`app/models/auth.py`（`AuditAction` 末尾两个值）、`app/services/audit_query.py`（`PUBLIC_ENTITY_TYPES`）、`frontend/src/api/adminAudit.ts`（`AUDIT_ACTIONS` 同序追加两项；只为让现有的 `adminAudit.test.ts` 比对通过，没有页面变化，**不带浏览器验收块**）、`tests/backend/test_tax_policy_service.py`（新，SQLite 与 MySQL）、`docs/TODO.md`（7） |
 | 079（`AIH-TASK-079`） | 接口：运维 CLI 与文档 | §2「接口：CLI」、§5、§8 运维步骤 | 078 | `app/cli.py`、`tests/backend/test_tax_policy_cli.py`（新，SQLite 文件库与 MySQL）、`docs/deployment.md`（部署后运维步骤一节）、`docs/runbook.md`（「税务政策：首条政策的发布（只做一次）」一节：怎么做、失败了怎么办、绝不能做什么）、`docs/TODO.md`（5） |
 
-- 三个任务都不碰 `app/ai_api/`，也不碰钱包 / 支付 / 定价文件（`scripts/check_repo_policy.py` 的 AIH-TASK-071 规则不相关）。
+- 四个任务都不碰 `app/ai_api/`，也不碰钱包 / 支付 / 定价文件（`scripts/check_repo_policy.py` 的 AIH-TASK-071 规则不相关）。
 - **验收标准草案**（登记时细化，每个不超过 8 条）：
-  - 077：① 0022 接在 `0021_ai_module` 之后，建两张表、九条 CHECK、生成列与唯一索引、六个触发器，锁表恰好一行；② 权限预检先于任何 DDL；③ 模型常量与迁移字面量逐字一致；④ 触发器每条规则（含发布跃迁上的税务一致性 3b）在真 MySQL 上拒绝（1644）、允许的写入通过；⑤ 每条 CHECK 拒绝（3819）、边界值通过；⑥ 降级有行时在 DDL 前拒绝、空表时只删两张表；⑦ SQLite `create_all` 写入锁行；⑧ `docs/database-schema.md` 新增一节。
-  - 078：① 一个事务写一条内容如 §2 的 `PUBLISHED` 行与两条审计；② 锁是第一条语句、之后全是加锁读；③ 表非空 → `TaxPolicyAlreadyExists`、不写；④ 审批人不合格 → `TaxPolicyApproverInvalid`、不写；⑤ `parse_treatment` 与 `check_rate_consistency` 如 §2，写入前与读出时都查；⑥ `resolve_tax_policy` 的边界与读出时校验如 §7；⑦ 中途失败整体回滚，提交结果不明时重调得到 `TaxPolicyAlreadyExists`；⑧ 两个 `AuditAction`、`PUBLIC_ENTITY_TYPES` 与前端 `AUDIT_ACTIONS` 同步。
+  - 077：① 0022 接在 `0021_ai_module` 之后，建两张表、九条 CHECK、生成列与唯一索引、六个触发器，锁表恰好一行；② 权限预检先于任何 DDL；③ 模型常量与迁移字面量逐字一致；④ 降级有行时在 DDL 前拒绝、空表时只删两张表；⑤ `test_fx_rates_db.py` 与 `test_migrations.py` 既有降级用例的表 / 触发器集合同步；⑥ SQLite `create_all` 写入锁行；⑦ 枚举列宽与 `rate` 精度。
+  - 080：① §7 列出的每条触发器规则（含 3b）在真 MySQL 上拒绝（1644）、允许的写入通过；② 每条 CHECK 拒绝（3819，断言约束名）、边界值通过，`DISCARDED` 按 §7 断言 1644；③ `open_slot`、区间不重叠、触发器拿锁、外键各行；④ `docs/database-schema.md` 新增一节；⑤ 不改任何运行代码。
+  - 078：⓪ `publish_initial_tax_policy` 带必填的 `context` 参数（v3）；① 一个事务写一条内容如 §2 的 `PUBLISHED` 行与两条审计；② 锁是第一条语句、之后全是加锁读；③ 表非空 → `TaxPolicyAlreadyExists`、不写；④ 审批人不合格 → `TaxPolicyApproverInvalid`、不写；⑤ `parse_treatment` 与 `check_rate_consistency` 如 §2，写入前与读出时都查；⑥ `resolve_tax_policy` 的边界与读出时校验如 §7；⑦ 中途失败整体回滚，提交结果不明时重调得到 `TaxPolicyAlreadyExists`；⑧ 两个 `AuditAction`、`PUBLIC_ENTITY_TYPES` 与前端 `AUDIT_ACTIONS` 同步。
   - 079：① 子命令与参数如 §2；② 成功退出 0、stdout 只有 `public_id`；③ 第二次运行退出 1、不写；④ 邮箱格式错退出 2 且不连库、审批人不合格退出 1、数据库错误时 stderr 提示原样重跑；⑤ 从不提示输入；⑥ SQLite 与 MySQL 各跑一遍；⑦ `docs/deployment.md` 与 `docs/runbook.md` 写明 §8 的运维步骤与「绝不能做」。
-- **登记前预审**：三个任务都有设计闸门、077 改数据库结构，按 CLAUDE.md「登记任务的约定」在控制面仓库对每个任务运行 `python -m worker.design_precheck …`，完整输出贴进登记 PR；`NOT_READY` 的发现逐条处理。
+- **登记前预审**：四个任务都有设计闸门、077 改数据库结构，按 CLAUDE.md「登记任务的约定」在控制面仓库对每个任务运行 `python -m worker.design_precheck …`，完整输出贴进登记 PR；`NOT_READY` 的发现逐条处理。
 - **设计正文进仓库**：批准后，登记 PR 把被批准那一版的 Issue 正文逐字放进 `docs/design/AIH-TASK-077-tax-policy.md`（Worker 沙箱读不到 Issue，照 `docs/design/AIH-TASK-028-fx-rates.md` 文件头的先例）。
-- **Phase 4 的闸门不随这三个任务的合并解除**，见 §8 部署顺序第 4、5 步。
+- **Phase 4 的闸门不随这四个任务的合并解除**，见 §8 部署顺序第 4、5 步。
 
 ## 12. 版本变更记录
 
@@ -503,4 +507,5 @@ class ResolvedTaxPolicy:
 | --- | --- | --- | --- |
 | v1 | 2026-10-17 | 初稿 | ADR-0008 第 5 节与收口条件于 2026-10-17 补完（PR #328），收口第 2 步需要建表并发布首条政策 |
 | v2 | 2026-10-17 | ① 新增 MySQL 发布跃迁触发器规则 3b：`sst_registered` / `tax_charged` 必须是 JSON 布尔、未注册不得收税、不收税 ⇔ `rate IS NULL`；② 这条一致性规则收进仓储层 `check_rate_consistency`，写入前与 `resolve_tax_policy` 读出时都查；③ §5 把「连接断」拆成「提交之前失败」（整体回滚）与「提交结果不明」（原样重跑即可判定），CLI 在数据库错误时提示重跑，runbook 第 3 步同步；④ §3、§7、§10、§11 相应补充 | Codex v1 两个阻断项：矛盾政策可被发布并正常解析；提交确认丢失被误判为必然回滚 |
+| v3 | 2026-10-17 | ① §7 CHECK 行：`status = 'DISCARDED'` 在 MySQL 上由触发器先拒绝（1644），CHECK 经 DML 不可达，改断言 1644，另加 SQLite 上断言该 CHECK 的用例；② 服务 `publish_initial_tax_policy` 增加必填 `context: RequestContext` 参数，由 CLI 构造；③ §11 把原 077 拆成 077（迁移与模型）与 080（MySQL 行为测试与表结构文档），078 依赖 080；077 的路径补上 `tests/backend/test_fx_rates_db.py`；§8 部署顺序与 §10 未决 1 同步 | 控制面预审：077 NOT_READY（DESIGN_DEFECT、SCOPE_GAP、TOO_LARGE），078 UNDECIDED（审计上下文） |
 
