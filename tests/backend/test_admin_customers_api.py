@@ -934,6 +934,10 @@ def test_every_admin_route_refuses_non_admins(
         "usage_event_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
+    if path == USAGE_ANALYTICS_ROUTE:
+        url += (
+            "?group_by=provider&occurred_from=2026-01-01T00:00:00Z&occurred_to=2026-01-02T00:00:00Z"
+        )
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
     project = stored_project(app, project_id)

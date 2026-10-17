@@ -110,10 +110,14 @@ def list_usage_analytics(
         else cast(None, String).label("group_name"),
         event_count.label("event_count"),
         token_count.label("token_event_count"),
-        _sum(UsageEvent.input_tokens).label("input_tokens"),
-        _sum(UsageEvent.output_tokens).label("output_tokens"),
-        _sum(UsageEvent.cache_creation_input_tokens).label("cache_creation_input_tokens"),
-        _sum(UsageEvent.cache_read_input_tokens).label("cache_read_input_tokens"),
+        _sum(case((token, UsageEvent.input_tokens), else_=0)).label("input_tokens"),
+        _sum(case((token, UsageEvent.output_tokens), else_=0)).label("output_tokens"),
+        _sum(case((token, UsageEvent.cache_creation_input_tokens), else_=0)).label(
+            "cache_creation_input_tokens"
+        ),
+        _sum(case((token, UsageEvent.cache_read_input_tokens), else_=0)).label(
+            "cache_read_input_tokens"
+        ),
         _sum(case((prepaid, 1), else_=0)).label("prepaid_event_count"),
         _sum(case((prepaid, UsageEvent.billable_cost), else_=0)).label("prepaid_billable_cost"),
         _sum(case((prepaid, UsageEvent.estimated_provider_cost_myr), else_=0)).label(
@@ -129,8 +133,27 @@ def list_usage_analytics(
     ).select_from(UsageEvent)
     for table, onclause in joins:
         statement = statement.outerjoin(table, onclause)
-    statement = statement.where(*conditions).group_by(group_key, group_name)
+    group_columns = (group_key,) if group_name is None else (group_key, group_name)
+    statement = statement.where(*conditions).group_by(*group_columns)
     count_statement = select(func.count()).select_from(statement.subquery())
     statement = statement.order_by(event_count.desc(), group_key.asc()).offset(offset).limit(limit)
-    rows = [UsageAnalyticsRow(*row) for row in session.execute(statement).all()]
+    rows = [
+        UsageAnalyticsRow(
+            group_key=row.group_key,
+            group_name=row.group_name,
+            event_count=int(row.event_count),
+            token_event_count=int(row.token_event_count),
+            input_tokens=int(row.input_tokens),
+            output_tokens=int(row.output_tokens),
+            cache_creation_input_tokens=int(row.cache_creation_input_tokens),
+            cache_read_input_tokens=int(row.cache_read_input_tokens),
+            prepaid_event_count=int(row.prepaid_event_count),
+            prepaid_billable_cost=Decimal(row.prepaid_billable_cost),
+            prepaid_estimated_cost=Decimal(row.prepaid_estimated_cost),
+            internal_event_count=int(row.internal_event_count),
+            internal_estimated_cost=Decimal(row.internal_estimated_cost),
+            internal_reference_price=Decimal(row.internal_reference_price),
+        )
+        for row in session.execute(statement).all()
+    ]
     return rows, int(session.execute(count_statement).scalar_one())
