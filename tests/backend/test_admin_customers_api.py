@@ -117,6 +117,7 @@ FX_RATES_ROUTE = "/api/v1/admin/fx-rates"
 FX_RATE_ROUTE = FX_RATES_ROUTE + "/{fx_rate_id}"
 PRICING_PREVIEW_ROUTE = "/api/v1/admin/pricing-preview"
 USAGE_EVENTS_ROUTE = "/api/v1/admin/usage-events"
+USAGE_ANALYTICS_ROUTE = "/api/v1/admin/usage-analytics"
 AI_ACCESS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/ai-access"
 # AIH-TASK-050 的三个接口（设计闸门 #241 v6 §2「接口」）。
 PROJECT_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}"
@@ -184,6 +185,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", USAGE_EVENTS_ROUTE + "/{usage_event_id}/requeue"),
     ("GET", USAGE_EVENTS_ROUTE),
     ("GET", USAGE_EVENTS_ROUTE + "/{usage_event_id}"),
+    ("GET", USAGE_ANALYTICS_ROUTE),
     ("GET", AI_ACCESS_ROUTE),
     ("POST", AI_ACCESS_ROUTE + "/client-keys"),
     ("POST", AI_ACCESS_ROUTE + "/client-keys/{client_id}/revoke"),
@@ -932,6 +934,10 @@ def test_every_admin_route_refuses_non_admins(
         "usage_event_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
+    if path == USAGE_ANALYTICS_ROUTE:
+        url += (
+            "?group_by=provider&occurred_from=2026-01-01T00:00:00Z&occurred_to=2026-01-02T00:00:00Z"
+        )
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
     project = stored_project(app, project_id)

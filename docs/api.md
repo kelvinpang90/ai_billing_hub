@@ -2142,6 +2142,25 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 
 ---
 
+## 管理端用量分析
+
+`GET /api/v1/admin/usage-analytics`（AIH-TASK-073）是仅 ADMIN 可用的只读报表。`group_by` 必填，可为
+`provider`、`model`、`customer`、`project` 或 `feature`；`occurred_from` 与 `occurred_to` 必填，按
+`occurred_at` 取左闭右开的 RFC 3339 区间，最大跨度 366 天。它支持与管理端用量事件列表相同语义的
+`customer_id`、`project_id`、`provider`、`model`、`feature` 筛选及 `page` / `page_size` 分页。
+
+- 只统计 `PROCESSED` 事件，按事件数倒序、分组键升序；供应商和模型使用已解析目录代码，未解析值单列为
+  `null` 组，客户和项目返回 public id 与名称。
+- 响应的 `cost_basis` 固定为 `estimated`。金额是 8 位小数的十进制字符串；平均 token 与毛利率也是十进制
+  字符串，全程不经 float。成本为处理时保存的估算供应商成本，**不含网关手续费，也不是 Phase 7 财务毛利**。
+- `PREPAID` 块包含计费额、估算成本、毛利和毛利率；`INTERNAL_METERED_ONLY` 只包含事件数、估算成本和参考售价。
+  内部计量租户的参考售价不是收入，因此不进入毛利。
+
+查询使用已有的 `ix_usage_events_status_occurred`（状态与时间段）、`ix_usage_events_tenant_id`、
+`ix_usage_events_project_id` 与 `ix_usage_events_tenant_feature_occurred`；没有新增迁移或索引。
+
+---
+
 ## AI 调用接口
 
 设计依据：设计闸门 #281 `APPROVED: design v23`，全文见 [design/AI-MODULE.md](design/AI-MODULE.md) §2「调用接口 `POST /v1/messages`」。此接口供业务后端调用模型；提示词、输入输出格式、输出解析与质量评测都由调用方负责。AI 密钥须等 AIH-TASK-068 合并后才签发。
