@@ -12,6 +12,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
+from test_usage_billing import (
+    _SQLITE_LEDGER_TRIGGER,
+    EVENT_AT,
+    TEST_EMAIL_DOMAIN,
+    _mysql_factory,
+    seed_meter_types,
+)
+from test_usage_billing import World as BillingWorld
 
 from app.core.config import Settings
 from app.core.database import create_session_factory
@@ -22,6 +30,7 @@ from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.tenancy import BillingMode, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
+from app.repositories.usage_analytics import list_usage_analytics
 from app.services.auth import utc_now
 
 PATH = "/api/v1/admin/usage-analytics"
@@ -58,10 +67,12 @@ def client(app) -> TestClient:
     return TestClient(app)
 
 
-def headers(app, role: UserRole = UserRole.ADMIN) -> dict[str, str]:
+def headers(
+    app, role: UserRole = UserRole.ADMIN, domain: str = "@analytics-test.example.com"
+) -> dict[str, str]:
     with app.state.session_factory() as session:
         user = User(
-            email=f"{role.value.lower()}@analytics-test.example.com",
+            email=f"{role.value.lower()}{domain}",
             password_hash="not-a-real-hash",
             role=role,
             status=UserStatus.ACTIVE,
@@ -126,7 +137,7 @@ def add_event(
     *,
     occurred_at: dt.datetime = T0,
     status: UsageEventStatus = UsageEventStatus.PROCESSED,
-    feature: str | None = "chat",
+    feature: str | None = "crm.chat",
     token: bool = True,
     billing_mode: BillingMode = BillingMode.PREPAID,
 ) -> None:
@@ -222,7 +233,7 @@ def test_each_grouping_uses_resolved_keys_and_keeps_null_separate(
             "model": "provider-1:model-1",
             "customer": tenant.public_id,
             "project": project.public_id,
-            "feature": "chat",
+            "feature": "crm.chat",
         }[group_by]
     )
     assert resolved["group_name"] == ({"customer": "Customer 1", "project": "Alpha"}.get(group_by))
@@ -233,7 +244,9 @@ def test_period_status_modes_tokens_filters_order_paging_and_money(app, client) 
         first, first_project, provider, model = seed_scope(session, 1)
         second, second_project, provider_two, model_two = seed_scope(session, 2)
         add_event(session, 1, first, first_project, provider, model)
-        add_event(session, 2, first, first_project, provider, model, feature="other", token=False)
+        add_event(
+            session, 2, first, first_project, provider, model, feature="crm.other", token=False
+        )
         add_event(
             session,
             3,
@@ -285,7 +298,7 @@ def test_period_status_modes_tokens_filters_order_paging_and_money(app, client) 
         admin,
         customer_id=first.public_id,
         project_id=first_project.public_id,
-        feature="other",
+        feature="crm.other",
     )
     assert (
         filtered["total"],
@@ -314,3 +327,124 @@ def test_authentication_precedes_validation_and_invalid_admin_queries_use_envelo
     )
     response = client.get(PATH, params=params, headers=headers(app))
     assert (response.status_code, response.json()["error"]["code"]) == (422, "VALIDATION_ERROR")
+
+
+# 整秒的窗口，包住 test_usage_billing 的 EVENT_AT（09:30:00.25）。
+WINDOW_FROM = dt.datetime(2026, 9, 29, 9, 0, 0)
+WINDOW_TO = dt.datetime(2026, 9, 29, 10, 0, 0)
+assert WINDOW_FROM <= EVENT_AT < WINDOW_TO
+
+
+def _sqlite_static_factory():
+    """test_usage_billing 的 SQLite 世界，但用 StaticPool：TestClient 在另一个线程里跑端点。"""
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(_SQLITE_LEDGER_TRIGGER)
+    factory = create_session_factory(engine)
+    seed_meter_types(factory)
+    yield factory
+    engine.dispose()
+
+
+@pytest.fixture(params=["sqlite", "mysql"])
+def billed(request, monkeypatch, tmp_path):
+    """Events priced and posted by the real billing worker (test_usage_billing.World), on both
+    databases, with the analytics app reading the same database."""
+    factories = (
+        _mysql_factory(monkeypatch) if request.param == "mysql" else _sqlite_static_factory()
+    )
+    factory = next(factories)
+    try:
+        application = create_app(settings_for(tmp_path))
+        application.state.engine = factory.kw["bind"]
+        application.state.session_factory = factory
+        yield application, BillingWorld(factory)
+    finally:
+        for _ in factories:
+            pass
+
+
+def test_billed_sums_are_exact_on_both_databases_and_ties_sort_by_group_key(billed) -> None:
+    app, world = billed
+    world.publish_markup_usd()
+    first, second = world.tenant("first"), world.tenant("second")
+    for tenant in (first, second):
+        world.fund(tenant, "100")
+    events = [world.event(first), world.event(first), world.event(second), world.event(second)]
+    assert world.bill().claimed == 4
+    rows = [world.row(event_id) for event_id in events]
+    assert {row.status for row in rows} == {UsageEventStatus.PROCESSED}
+    assert all(row.billable_cost > 0 for row in rows)
+
+    def expected(tenant) -> tuple[Decimal, Decimal]:
+        mine = [row for row in rows if row.tenant_id == tenant.id]
+        return (
+            sum((row.billable_cost for row in mine), Decimal(0)),
+            sum((row.estimated_provider_cost_myr for row in mine), Decimal(0)),
+        )
+
+    with world.factory() as session:
+        analytics, total = list_usage_analytics(
+            session,
+            group_by="customer",
+            offset=0,
+            limit=10,
+            customer_id=None,
+            project_id=None,
+            provider=None,
+            model=None,
+            feature=None,
+            occurred_from=WINDOW_FROM,
+            occurred_to=WINDOW_TO,
+        )
+    assert total == 2
+    # MySQL 的 SUM 对整数 CASE 返回 DECIMAL：仓储层必须交出 int；金额交出逐位精确的 Decimal。
+    for row in analytics:
+        assert all(
+            type(value) is int
+            for value in (
+                row.event_count,
+                row.token_event_count,
+                row.input_tokens,
+                row.output_tokens,
+                row.prepaid_event_count,
+                row.internal_event_count,
+            )
+        )
+        assert isinstance(row.prepaid_billable_cost, Decimal)
+        assert isinstance(row.prepaid_estimated_cost, Decimal)
+    by_key = {row.group_key: row for row in analytics}
+    for tenant in (first, second):
+        billable, estimated = expected(tenant)
+        assert (
+            by_key[tenant.public_id].prepaid_billable_cost,
+            by_key[tenant.public_id].prepaid_estimated_cost,
+        ) == (billable, estimated)
+
+    data = query(
+        client=TestClient(app),
+        admin=headers(app, domain=TEST_EMAIL_DOMAIN),
+        group_by="customer",
+        occurred_from="2026-09-29T09:00:00Z",
+        occurred_to="2026-09-29T10:00:00Z",
+    )
+    # 两组事件数相同：按分组键（public_id）升序。
+    assert [item["group_key"] for item in data["items"]] == sorted(
+        (first.public_id, second.public_id)
+    )
+    for item in data["items"]:
+        tenant = first if item["group_key"] == first.public_id else second
+        billable, estimated = expected(tenant)
+        margin = billable - estimated
+        assert item["prepaid"] == {
+            "event_count": 2,
+            "billable_cost": f"{billable:.8f}",
+            "estimated_provider_cost_myr": f"{estimated:.8f}",
+            "gross_margin": f"{margin:.8f}",
+            "gross_margin_rate": format((margin / billable).normalize(), "f"),
+        }
