@@ -17,7 +17,8 @@
 `@@server_uuid` 与 `DATABASE()`、生产环境只允许 `billing_perf`。数据经服务函数与 `ingest_one` 产生，
 每轮唯一前缀，**不删除任何行**，结束时逐项打印造了哪些数据。
 
-⚠️ 每轮开始前要求 `billing_perf` 里**没有任何**非终态的用量事件：worker 认领不分租户、按接收先后处理，
+⚠️ 每轮开始前要求 `billing_perf` 里**没有任何**非终态的用量事件：\
+worker 认领不分租户、按接收先后处理，
 残留积压会混进测量（10.5 的复核）。有就报错退出、不开始负载。
 
 用法（`scripts/` 不在镜像里，要挂进去；命令见 docs/perf-baseline.md 10.6）：
@@ -161,9 +162,7 @@ def stage_table(samples: Sequence[dict], claims: Sequence[dict]) -> dict[str, ob
         "process_event 墙钟": summarize_ms(column("wall")),
         "CPU 时间": summarize_ms(column("cpu")),
         "数据库耗时（SQL 合计）": summarize_ms(column("sql_seconds")),
-        "锁外的数据库耗时": summarize_ms(
-            [row["sql_seconds"] - row["sql_in_lock"] for row in done]
-        ),
+        "锁外的数据库耗时": summarize_ms([row["sql_seconds"] - row["sql_in_lock"] for row in done]),
         "等钱包锁": summarize_ms(column("lock_wait", locked)),
         "持钱包锁": summarize_ms(column("lock_hold", locked)),
         "锁外（墙钟 − 持锁）": summarize_ms([row["wall"] - row["lock_hold"] for row in locked]),
@@ -211,7 +210,7 @@ def parse_cpu_stat(content: str) -> dict[str, int]:
 
 
 def read_throttle(path: Path = CPU_STAT_PATH) -> dict[str, int] | None:
-    """`nr_throttled` 与 `throttled_usec`；文件不存在、读不了或缺键时返回 None（报告「不可用」）。"""
+    "`nr_throttled` 与 `throttled_usec`；文件不存在、读不了或缺键时返回 None（报告「不可用」）。"
     try:
         content = Path(path).read_text(encoding="utf-8")
     except OSError:
@@ -239,7 +238,9 @@ def _worker_counts(value: str) -> tuple[int, ...]:
     try:
         counts = tuple(dict.fromkeys(int(part) for part in value.split(",") if part.strip()))
     except ValueError as error:
-        raise argparse.ArgumentTypeError(f"workers are a comma list of integers: {value}") from error
+        raise argparse.ArgumentTypeError(
+            f"workers are a comma list of integers: {value}"
+        ) from error
     if not counts or any(count <= 0 for count in counts):
         raise argparse.ArgumentTypeError(f"workers are a comma list of positive integers: {value}")
     return counts
@@ -250,7 +251,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--database-url",
         default="",
-        help=f"测量专用的库。⚠️ 必填，库名必须是 {perf.PERF_DATABASE}，不回落到 BILLING_DATABASE_URL",
+        help=(
+            f"测量专用的库。⚠️ 必填，库名必须是 {perf.PERF_DATABASE}，不回落到 BILLING_DATABASE_URL"
+        ),
     )
     parser.add_argument(
         "--events", type=perf._positive_int, default=DEFAULT_EVENTS, help="每轮预先积压的条数"
@@ -270,7 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--drain-timeout", type=perf._positive_float, default=900.0, help="每轮等清空的上限（秒）"
     )
-    parser.add_argument("--json-out", default=None, help="把结果另存成 JSON（负载开始前先确认可写）")
+    parser.add_argument(
+        "--json-out", default=None, help="把结果另存成 JSON（负载开始前先确认可写）"
+    )
     return parser
 
 
@@ -351,7 +356,14 @@ _PROBE: dict[str, float] = {}
 
 def _reset_probe() -> None:
     _PROBE.clear()
-    _PROBE.update(sql_count=0, sql_seconds=0.0, sql_in_lock=0.0, resolve=0.0, price=0.0, posting=0.0)
+    _PROBE.update(
+        sql_count=0,
+        sql_seconds=0.0,
+        sql_in_lock=0.0,
+        resolve=0.0,
+        price=0.0,
+        posting=0.0,
+    )
 
 
 def _instrument_sql(engine) -> None:
@@ -604,12 +616,15 @@ def summarize_round(pool: ProfilePool, workers: int, drain_end: float) -> dict[s
     def inside(rows: Sequence[dict]) -> list[dict]:
         return [row for row in rows if row["finished"] <= drain_end]
 
-    samples, claims, recoveries = inside(pool.samples), inside(pool.claims), inside(pool.recoveries)
+    samples, claims, recoveries = (
+        inside(pool.samples),
+        inside(pool.claims),
+        inside(pool.recoveries),
+    )
     busy = sum(row["wall"] for row in (*samples, *claims, *recoveries))
     lock = sum(row["lock_window"] for row in samples if row["lock_window"] is not None)
-    db_outside = (
-        sum(row["sql_seconds"] - row["sql_in_lock"] for row in samples)
-        + sum(row["sql_seconds"] for row in (*claims, *recoveries))
+    db_outside = sum(row["sql_seconds"] - row["sql_in_lock"] for row in samples) + sum(
+        row["sql_seconds"] for row in (*claims, *recoveries)
     )
     return {
         "drain_seconds": window,
@@ -707,7 +722,9 @@ def print_round(result: RoundResult, continuous: bool) -> None:
         f"  积压 {measured['backlog']} 条，清空用时 {measured['drain_seconds']:.1f} s，"
         f"速率 {rate_text} 条/秒"
     )
-    print(f"  worker 忙碌占比（处理时间 ÷ 清空用时 × worker 数）：{_percent(measured['busy_share'])}")
+    print(
+        f"  worker 忙碌占比（处理时间 ÷ 清空用时 × worker 数）：{_percent(measured['busy_share'])}"
+    )
     print(f"  {'阶段（毫秒）':<34}{'平均':>8} {'p50':>8} {'p95':>8}   样本")
     for name, stats in table["stages"].items():
         if stats is None:
@@ -717,12 +734,13 @@ def print_round(result: RoundResult, continuous: bool) -> None:
             f"  {name:<36}{_ms(stats['mean_ms'])} {_ms(stats['p50_ms'])} "
             f"{_ms(stats['p95_ms'])}   {stats['n']}"
         )
-    for name, key in (("每条事件 SQL 条数", "sql_per_event"), ("每次认领 SQL 条数", "sql_per_claim")):
+    for name, key in (
+        ("每条事件 SQL 条数", "sql_per_event"),
+        ("每次认领 SQL 条数", "sql_per_claim"),
+    ):
         stats = table[key]
         if stats is not None:
-            print(
-                f"  {name:<36}{stats['mean']:8.2f} {stats['p50']:8.0f} {stats['p95']:8.0f}"
-            )
+            print(f"  {name:<36}{stats['mean']:8.2f} {stats['p50']:8.0f} {stats['p95']:8.0f}")
     print(f"  数据库耗时 / 墙钟：{_percent(table['db_share_of_wall'])}")
     print(f"  CPU 时间 / 墙钟：{_percent(table['cpu_share_of_wall'])}")
     print(f"  认领 {table['claims']} 次，其中空认领 {table['empty_claims']} 次")
@@ -818,7 +836,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"这一轮造的数据（前缀 {prefix}；脚本不删除任何行，账本只增）：")
     for line in world.created:
         print(f"  - {line}")
-    print(f"  - 经 ingest_one 接收的用量事件 {len(ingestor.accepted)} 条，被拒 {dict(ingestor.rejected)}")
+    print(
+        f"  - 经 ingest_one 接收的用量事件 {len(ingestor.accepted)} 条，"
+        f"被拒 {dict(ingestor.rejected)}"
+    )
 
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as handle:
