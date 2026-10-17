@@ -4387,7 +4387,7 @@ tasks:
     title: 把 scripts 目录与 tests 下的流程测试纳入 ruff 检查与格式化
     purpose: >-
       清理 docs/TODO.md 后续计划里的 chore：pyproject.toml 的 [tool.ruff] 去掉对 scripts 与 tests/test_*.py 的排除，让 CI 的 ruff check 与 ruff format --check 也覆盖这 11 个流程工具文件；按现有规则（select 与 line-length 不变）格式化并修掉剩下的告警。只做格式与 lint 修正，不改任何脚本的行为。
-    status: ready
+    status: done
     acceptance_criteria:
       - 'pyproject.toml：[tool.ruff] 的 extend-exclude 只保留 "*.md"，删去 "scripts" 与 "tests/test_*.py" 两项，并删掉上方解释这两项为什么排除的两行注释；"*.md" 的注释原样保留；[tool.ruff.lint] 的 select、line-length、target-version 不变'
       - '纳入范围的 11 个文件：scripts/check_docs.py、scripts/check_repo_policy.py、scripts/gh_verified_write.py、scripts/packaging_smoke.py、scripts/perf_baseline.py、scripts/perf_usage.py、scripts/perf_usage_profile.py、tests/test_check_docs.py、tests/test_check_repo_policy.py、tests/test_gh_verified_write.py、tests/test_requirements_coverage.py；全部经 ruff format 格式化'
