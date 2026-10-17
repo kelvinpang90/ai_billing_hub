@@ -4658,3 +4658,216 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-077
+    title: 税务政策第一层：版本表与锁表的迁移和模型，含数据库触发器
+    purpose: >-
+      按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 077：迁移 alembic/versions/20261017_0022_tax_policy.py（revision 0022_tax_policy，接在 0021_ai_module 之后）建 tax_policy_locks 与 tax_policy_versions 两张表、九条 CHECK、open_slot 生成列与唯一索引、六个 MySQL 触发器；模型 app/models/tax_policy.py 并在 alembic/env.py 注册。只建结构，不写任何政策；MySQL 行为测试与表结构文档属于 AIH-TASK-080，仓储与服务属于 AIH-TASK-078。
+    status: ready
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）逐条一致，以 §2「数据库」与 §8「迁移与上线」为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '迁移 0022：先做权限预检（任何 DDL 之前），再建 tax_policy_locks 并写入 id = 1，再建 tax_policy_versions（列、两个外键、public_id 唯一、open_slot 生成列与 ux_tax_policy_versions_open_slot、九条 CHECK），最后建六个触发器（含 BEFORE UPDATE 的规则 1–5 与发布跃迁上的税务一致性 3b）；不写任何政策；文件头写 §132 第 13 条的六段分析；降级在有任何版本行时于 DDL 之前拒绝，空表时只删这两张表'
+      - '模型 app/models/tax_policy.py：两张表、三个只含一个值的枚举（TaxJurisdiction、TaxPolicyType 只含 MY、SST，TaxPolicyStatus 为 DRAFT / PUBLISHED / RETIRED，不加 DISCARDED）、九个 CHECK 常量与 open_slot 表达式常量；SQLite create_all 经 after_create 写入锁表的 id = 1；alembic/env.py 注册该模块'
+      - 'tests/backend/test_fx_rates_db.py 与 tests/backend/test_migrations.py 里既有的降级用例：降级时被删掉的表与触发器集合补上 0022 的两张表与六个触发器（设计 §11 的 v3 补充），用例照旧通过'
+      - 'tests/backend/test_migrations.py：0022 接在 0021 之后；九条 CHECK 与生成列表达式归一空白后与模型常量相等；触发器恰好六个；建表与降级顺序；_TABLES_0022 加进既有降级用例的表集合；权限预检四种组合；降级有行拒绝、空表删表、--sql 离线只出 DDL；SQLite create_all 后锁表恰好一行'
+      - 'tests/backend/test_model_columns.py：三个枚举列宽 16，rate 是 Numeric(9, 6) 且 asdecimal'
+      - '不写 MySQL 触发器与约束的行为测试、不改表结构文档（属于 AIH-TASK-080）；不建税务政策的仓储与服务模块（属于 AIH-TASK-078）；不改 app/models/auth.py、app/cli.py；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #332'
+    allowed_change_paths:
+      - alembic/versions/20261017_0022_tax_policy.py
+      - alembic/env.py
+      - app/models/tax_policy.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_model_columns.py
+      - tests/backend/test_fx_rates_db.py
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-078
+    title: 税务政策第二层：首条政策的发布服务与按时刻解析的读取函数
+    purpose: >-
+      按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 078：仓储 app/repositories/tax_policy.py（锁、加锁读、草稿与发布、parse_treatment、check_rate_consistency、resolve_tax_policy）与服务 app/services/tax_policy.py（publish_initial_tax_policy：锁内建草稿并发布，同一事务写两条审计）；新增两个审计动作并同步审计分类与前端审计动作清单。没有任何入口调用它，入口是 AIH-TASK-079 的 CLI。
+    status: ready
+    depends_on:
+      - AIH-TASK-080
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）逐条一致，以 §2「treatment_json 的形状」「首条政策的内容」「仓储层」「服务层」「事务边界」「审计」「对下游任务的契约」与 §4、§5 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'publish_initial_tax_policy 带必填的 context 参数（原样传给两次 record_audit，服务不自造上下文），按设计 §2 数据流 ①–⑩ 在一个事务里完成：锁是第一条语句、之后全是加锁读；表里有任何一行 → TaxPolicyAlreadyExists；审批人没有账号、不是 ADMIN 或不是 ACTIVE → TaxPolicyApproverInvalid；两种情形都不写；成功时一条内容如设计「首条政策的内容」的 PUBLISHED 行加 TAX_POLICY_CREATE、TAX_POLICY_PUBLISH 两条审计，返回 public_id；任何一步抛错整体回滚'
+      - 'parse_treatment 按设计的五条规则显式检查（不用 Pydantic）；check_rate_consistency 只写一份（不收税 ⇔ rate 为空、未注册不得收税），服务写入前与 resolve_tax_policy 读出时都调用；resolve_tax_policy 按设计返回冻结的 ResolvedTaxPolicy 或 None，加锁读，读出校验失败抛错；本任务不提供 lock_tax_policies_shared'
+      - '审计：app/models/auth.py 的 AuditAction 末尾追加 TAX_POLICY_CREATE、TAX_POLICY_PUBLISH；app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES 加 tax_policy_version；frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 同序追加两项（只为现有比对测试，不改页面）；前后状态按设计「审计」表，不含内部 id'
+      - 'tests/backend/test_tax_policy_service.py（SQLite 与 MySQL）：设计 §7 的正常路径、审计、幂等重放、已有非预期的行、审批人、事务中途失败、提交结果不明（服务层）、并发、锁在前、treatment_json 解析、rate 与 tax_charged 一致、说明文字不漂移、起点换算、resolve_tax_policy 边界与其他状态、读出时校验、读出时一致性、区间重叠的数据损坏、status CHECK（SQLite）各行；该模块自带 fixture，不改 conftest.py'
+      - '不改 app/cli.py（属于 AIH-TASK-079）；不改迁移与模型（AIH-TASK-077 与 080 已交付；发现需要改时停下并在 PR 里说明）；不碰 app/ai_api/ 与钱包、支付、定价文件；SQL 断言不写死方言字面量'
+      - 'CI 的 frontend job 必须全绿（adminAudit.test.ts 逐项比对 AuditAction）；frontend.test 与 frontend.typecheck 在本任务的检查里跑'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #332'
+    allowed_change_paths:
+      - app/repositories/tax_policy.py
+      - app/services/tax_policy.py
+      - app/models/auth.py
+      - app/services/audit_query.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_tax_policy_service.py
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-079
+    title: 税务政策第三层：一次性发布首条政策的运维命令与运维文档
+    purpose: >-
+      按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 079：app/cli.py 新增子命令 publish-initial-tax-policy（唯一参数 --approved-by-email，调用 AIH-TASK-078 的 publish_initial_tax_policy）；docs/deployment.md 与 docs/runbook.md 写明部署后只做一次的运维步骤、失败处理与绝不能做的事。命令合并部署后由运维在生产上执行一次，本任务不执行它。
+    status: ready
+    depends_on:
+      - AIH-TASK-078
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）逐条一致，以 §2「接口：CLI」、§5 与 §8 运维步骤为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '子命令与函数结构照 app/cli.py 已有的 create-admin：get_settings → normalise_email（格式错退出码 2，且不建数据库引擎）→ 建引擎与会话工厂 → 调服务；审计上下文 user_agent 为 cli；从不提示输入，不调用 input 或 getpass，不读标准输入'
+      - '退出码与输出按设计 §2 的表：成功 0、stdout 只有一行 public_id、stderr 一句成功说明；已有政策与审批人不合格都是 1、stdout 为空、stderr 为设计里的固定句子、什么都不写；缺参数 2；数据库错误非零退出，stderr 带设计里那句「可能已提交，原样再运行一次」的固定提示'
+      - 'tests/backend/test_tax_policy_cli.py（SQLite 文件库加 create_all、MySQL 加 alembic upgrade head 各跑一遍；照设计 §7 用 cli.main 加 capsys）：正常路径、第二次运行、提交结果不明（CLI 层）、四种拒绝（含不连库的证明）、从不提示；该模块自带 fixture，不改 conftest.py'
+      - 'docs/deployment.md 新增部署后运维步骤一节，docs/runbook.md 新增「税务政策：首条政策的发布（只做一次）」一节，内容按设计 §8 部署顺序第 4、5 步：执行前逐字核对审批人邮箱、不得用验收专用管理员、期望结果、非零退出时原样重跑的判定方法、核对查询、绝不能做的事，以及发布后由文档 PR 更新 ADR-0008 收口条件才解除 Phase 4 闸门；文档用占位符，不写真实邮箱、主机名与目录'
+      - '不改服务、仓储、迁移与模型（AIH-TASK-077、078 已交付；发现需要改时停下并在 PR 里说明）；不在任何环境执行这条命令'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #332'
+    allowed_change_paths:
+      - app/cli.py
+      - tests/backend/test_tax_policy_cli.py
+      - docs/deployment.md
+      - docs/runbook.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-080
+    title: 税务政策第一层补充：MySQL 触发器与约束的行为测试和表结构文档
+    purpose: >-
+      按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 080：在真 MySQL 上逐条验证 AIH-TASK-077 建的触发器、CHECK、open_slot 唯一索引、区间不重叠、锁与外键（新文件 tests/backend/test_tax_policy_db.py），并在 docs/database-schema.md 新增两张表一节。只加测试与文档，不改任何运行代码。
+    status: ready
+    depends_on:
+      - AIH-TASK-077
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）逐条一致，以 §7 与 §2「数据库」为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'tests/backend/test_tax_policy_db.py（MySQL，没有 BILLING_TEST_DATABASE_URL 时 skip，照 tests/backend/test_fx_rates_db.py 的写法：每例一个回滚的事务、断言 DBAPIError 的 errno 与 MESSAGE_TEXT）覆盖设计 §7 的「触发器：插入」「触发器：草稿」「触发器：已发布不可变」「触发器：已发布允许的改动」「触发器：终态与删除」「触发器：发布时税务一致性」各行'
+      - '同一文件覆盖 §7 的「锁表」「CHECK」（每条断言约束名；status = DISCARDED 的两种写法断言 1644）「open_slot 与唯一索引」（MySQL 只断言被拒绝、不断言是哪一道）「区间不重叠」「触发器拿锁」（两个连接、innodb_lock_wait_timeout = 1）「外键」各行'
+      - '用例前后 TRUNCATE tax_policy_versions 与 audit_logs，不碰 tax_policy_locks；该模块自带 fixture，不改 conftest.py；SQL 断言不写死方言字面量（CLAUDE.md「写后端测试的约定」）'
+      - 'docs/database-schema.md 新增 tax_policy_locks 与 tax_policy_versions 一节：字段、约束、索引、触发器规则摘要（含发布跃迁上的税务一致性），写法照该文件里汇率表一节'
+      - '不改 app/、alembic/ 下任何文件；行为测试发现迁移或模型与设计不符时停下，在 PR 里写明是哪一条，不在本任务里修'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #332'
+    allowed_change_paths:
+      - tests/backend/test_tax_policy_db.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
