@@ -4445,7 +4445,7 @@ tasks:
     title: 管理端用量分析接口：按供应商、模型、客户、项目或功能汇总次数、token、成本与毛利
     purpose: >-
       合并 docs/TODO.md 后续计划里的两项（用量按功能汇总；Phase 5 管理端内部成本、毛利与供应商模型分析，spec §128 与 §87）：新增只读接口 GET /api/v1/admin/usage-analytics，在新文件 app/api/admin_usage_analytics.py、app/repositories/usage_analytics.py、app/schemas/usage_analytics.py 里实现，路由挂到 app/main.py。只读 usage_events，不写任何表，不加迁移。
-    status: ready
+    status: done
     acceptance_criteria:
       - '参数：group_by 必填，取 provider、model、customer、project、feature 之一；occurred_from 与 occurred_to 必填，复用 app/schemas/usage_events.py 的 parse_period（左闭右开，按 occurred_at），跨度不超过 366 天；可选筛选 customer_id、project_id、provider、model、feature，语义与管理端用量事件列表的同名参数相同（feature 复用 parse_feature）；分页沿用列表接口的 page / page_size 与 Page 信封，按事件数倒序、再按分组键升序；参数校验在 require_admin 之后，非法值 422 走 §107 信封'
       - '只统计 status 为 PROCESSED 的事件。分组键：provider 为已解析的供应商代码，model 为供应商代码加模型代码，customer 与 project 为 public_id 加名称，feature 为标签本身，空值单独成一组、键为 null'
