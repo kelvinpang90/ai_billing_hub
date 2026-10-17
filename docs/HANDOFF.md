@@ -59,7 +59,7 @@ spec §137 的起步指令：**不要先写前端页面**，先立域模型与�
 
 | # | 问题 | 卡住什么 | 谁来定 | 死线 |
 | --- | --- | --- | --- | --- |
-| 1 | **SST 六项里的五项**：是否需注册、AI 服务税务分类与豁免、充值属储值/押金/服务预付、税的确认时点与税率、receipt/statement 强制字段 | 生产环境充值、收据、对账单 schema（spec §45.1 闸门） | **会计** | Phase 4 开工前 |
+| 1 | ~~**SST 六项里的五项**~~ | 生产环境充值、收据、对账单 schema（spec §45.1 闸门） | **已定**：2026-10-17 决策人拍板，未注册、不收税，见 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md) 第 5 节 | — |
 | 2 | **出站 webhook 密钥的 schema**：新建 `project_webhook_secrets` 表，还是 `projects` 加暂存列 | 密钥轮换重叠期无处安放 | 需拍板，**且要走设计闸门** | Phase 1 开工前 |
 | 3 | **支付网关**：2026-10-15 已选 Stripe；剩沙箱实测 H1–H4 与选型 ADR | Phase 4 全部 | 实测 + 写 ADR | Phase 4 开工前 |
 | 4 | ~~**WhatsApp 传输路径**~~ | Phase 6 的 WhatsApp 通道 | **已定**：2026-10-15 计费平台独立 Meta App 直连，见 [ADR-0009](adr/ADR-0009-notification-channels.md) 第 5 节 | — |

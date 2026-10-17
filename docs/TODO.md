@@ -33,7 +33,6 @@
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
 - 待登记：D6 Stripe 沙箱实测 H1–H4 并补写选型 ADR（Phase 4 支付开工前；供应商 2026-10-15 已选 Stripe）｜阻塞：等 Stripe 测试模式密钥放到本机（不进仓库）
-- 待登记：D2 SST 其余五项（Phase 4 上生产前）｜阻塞：等会计意见
 
 ### 后续计划
 - 待登记：方案 C —— 同租户 N 个用量事件一个事务、每事件仍一行账本（需设计闸门）。docs/perf-baseline.md 10.5 的判据成立（S2：8.79 ms × 500 / 秒 = 4.4 > 1）；Kelvin 2026-10-10 决定先完成 AIH-TASK-055 的锁外瓶颈测量，设计闸门等它的结果出来再开
@@ -58,6 +57,7 @@
 - 待登记：Phase 4 stale payment 对账与金额不符人工复核（需设计闸门）
 - 待登记：Phase 4 充值 UI 与充值入账（需设计闸门）
 - 待登记：Phase 4 支付收据与下载
+- 待登记：Phase 4 `tax_policy_versions` 建表并写入第一条 `PUBLISHED`（未注册、不收税，内容见 ADR-0008 第 5 节；随收据或充值入账一起做，需设计闸门）
 - 待登记：Phase 5 会话摘要、请求级明细与用量筛选
 - 待登记：Phase 5 客户端用量导出
 - 待登记：Phase 6 Notification Adapter 抽象与 Email adapter
@@ -83,7 +83,7 @@
 这些是 [SPEC_REVIEW_v1.0.md](archive/SPEC_REVIEW_v1.0.md) 的「建议的处理顺序」，即使 v1.1 已修订，落地前仍需确认结论并落成 ADR。
 
 - [x] **D1 — 汇率来源与版本化策略** —— 已收口。BNM openAPI 每日拉取落 `DRAFT`，需显式发布为 `PUBLISHED` 才可用于计算；按用量事件的 `occurred_at` 取版本（不是结算日）；`provider_price_versions` 存供应商原币种原价，MYR 换算结果连同 `fx_rate_version_id` 快照进用量事件。计费热路径不实时调用 BNM。见 [ADR-0005](adr/ADR-0005-fx-rate-source.md)。⚠️ BNM 是中间价且周末无新价，偏差须由 markup 的 FX 缓冲吸收
-- [ ] **D2 — SST 税务口径** —— **部分收口**。已定：**对客户展示的金额一律含税**（充值 RM100 → 钱包 +RM100，税嵌在消费价里；spec 第 359 行禁止税静默减少钱包额度）。字段语义因此确定，Phase 0–3 不再被阻塞。见 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md)。⚠️ **spec §45.1 六项里其余五项仍需会计意见**：是否需注册 SST、AI 服务的税务分类与豁免、充值属储值 / 押金 / 服务预付、税的确认时点与税率、receipt / statement 强制字段。**五项齐备前 Phase 4 不得开工**，`tax_policy_versions` 只能有 `DRAFT` 行
+- [x] **D2 — SST 税务口径** —— 已收口（2026-10-17）。已定：**对客户展示的金额一律含税**（充值 RM100 → 钱包 +RM100，税嵌在消费价里；spec 第 359 行禁止税静默减少钱包额度）。字段语义因此确定，Phase 0–3 不再被阻塞。见 [ADR-0008](adr/ADR-0008-sst-tax-treatment.md)。⚠️ **spec §45.1 六项里其余五项仍需会计意见**：是否需注册 SST、AI 服务的税务分类与豁免、充值属储值 / 押金 / 服务预付、税的确认时点与税率、receipt / statement 强制字段。**五项齐备前 Phase 4 不得开工**，`tax_policy_versions` 只能有 `DRAFT` 行 → 2026-10-17 Kelvin 拍板其余五项（没有会计书面意见）：Acuven 未注册、也不需要注册 SST；服务分类与税率不适用；充值属服务预付；价格是最终价、不拆税额；收据与对账单不出现税额栏，印「价格为最终价，已包含所有费用，不另收任何税费」。见 ADR-0008 第 5 节。⚠️ 剩下的是落地项：`tax_policy_versions` 建表并写入第一条 `PUBLISHED`（随 Phase 4，需设计闸门）；营业额接近注册门槛时回头
 - [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
 - [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节） → **2026-09-25 已选定方案 i**（Kelvin），ADR-0004 第 4a 节已补完；它自己的设计闸门还没开，D4 因此仍不勾 → 2026-09-28：设计闸门 #135 已批准 v1，AIH-TASK-019 实现了表、管理端与签名库，ADR-0004「收口条件」的第 4a 节那一项随合并满足（勾选要改 ADR-0004，不在 019 的可改路径里，留给下一次改 ADR 的任务）。**D4 仍不勾**：ADR-0004「收口条件」还有五项未满足 —— ① Phase 0 的「备份、恢复、加密密钥方案设计」验收（T0.9）；② `docs/runbook.md` 写入主密钥恢复流程（脱敏）与私有附录；③ 季度恢复演练含主密钥恢复；④ §113 的 secret-leak tests 覆盖日志、审计、API 响应、异常栈四条路径（入站凭据与出站签名密钥各自的用例已覆盖这四条，但收口条件指的是整体，要有人对照 ADR 判定）；⑤ D6 选型时确认支付网关回调的幂等标识
 - [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ T+1（24h）覆盖不了 §31 举例的 31 小时积压，所以上期调整**是预期会出现的**；但 §31 那个数字是**告警阈值示例，不是日常状态**——每一笔都应能追溯到一次具体延迟事件，**不是会计常态**。笔数与金额占比必须进 §95 监控，占比走高要查根因
