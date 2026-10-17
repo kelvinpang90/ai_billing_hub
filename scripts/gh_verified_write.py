@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 
 class WriteError(Exception):
@@ -27,8 +27,13 @@ def api(method: str, endpoint: str, body: str | None = None) -> dict:
         payload = json.dumps({"body": body}, ensure_ascii=False)
     try:
         result = subprocess.run(
-            command, input=payload, capture_output=True, text=True,
-            encoding="utf-8", errors="strict", check=False,
+            command,
+            input=payload,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            check=False,
         )
     except (OSError, UnicodeError) as exc:
         raise WriteError(f"GitHub {method} invocation failed") from exc
@@ -52,7 +57,9 @@ def verify_fields(response: dict, expected: dict) -> None:
 
 
 def verified_write(repo: str, number: int, kind: str, body: str) -> str:
-    if not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo):
+    if not isinstance(repo, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo
+    ):
         raise WriteError("Repository must use owner/repo format")
     if type(number) is not int or number <= 0:
         raise WriteError("Target number must be a positive integer")
@@ -67,14 +74,25 @@ def verified_write(repo: str, number: int, kind: str, body: str) -> str:
     print(f"Target: {target}; do not retry automatically if verification fails", file=sys.stderr)
     if kind == "pr-body":
         endpoint = f"{prefix}/pulls/{number}"
-        expected = {"number": number, "url": f"https://api.github.com/{endpoint}", "html_url": target}
+        expected = {
+            "number": number,
+            "url": f"https://api.github.com/{endpoint}",
+            "html_url": target,
+        }
         written = api("PATCH", endpoint, body)
         verify_fields(written, expected)
     else:
         # Resolve PR-vs-Issue identity before a comment mutation.
         endpoint = f"{prefix}/{'pulls' if is_pr else 'issues'}/{number}"
         identity = api("GET", endpoint)
-        verify_fields(identity, {"number": number, "url": f"https://api.github.com/{endpoint}", "html_url": target})
+        verify_fields(
+            identity,
+            {
+                "number": number,
+                "url": f"https://api.github.com/{endpoint}",
+                "html_url": target,
+            },
+        )
         written = api("POST", f"{prefix}/issues/{number}/comments", body)
         comment_id = written.get("id")
         if type(comment_id) is not int or comment_id <= 0:
@@ -83,8 +101,10 @@ def verified_write(repo: str, number: int, kind: str, body: str) -> str:
         target = f"{target}#issuecomment-{comment_id}"
         print(f"Created comment id: {comment_id}; expected URL: {target}", file=sys.stderr)
         expected = {
-            "id": comment_id, "url": f"https://api.github.com/{endpoint}",
-            "html_url": target, "issue_url": f"https://api.github.com/{prefix}/issues/{number}",
+            "id": comment_id,
+            "url": f"https://api.github.com/{endpoint}",
+            "html_url": target,
+            "issue_url": f"https://api.github.com/{prefix}/issues/{number}",
         }
         verify_fields(written, expected)
     actual = api("GET", endpoint)

@@ -7,8 +7,10 @@
   S2 回补          单个租户预先积压 30 000 条 `RECEIVED`
                    通过线：清空速率 ≥ 500 事件 / 秒（§119「≥ 峰值 5 倍」）
   S3 崩溃与重试    S1 进行中随机杀掉 worker 进程 3 次、注入 1% 的意外异常
-                   通过线：结束后：`PROCESSED` 事件数 = 账本 `AI_USAGE` 行数（不含 0 元事件）；每个租户
-                   `期初余额 − Σ billable_cost = 期末余额`；`verify_wallet` 全部通过；无 `LEDGER_CONFLICT`
+                   通过线：结束后：`PROCESSED` 事件数 = 账本 `AI_USAGE`\n\
+                   行数（不含 0 元事件）；每个租户\n\
+                   `期初余额 − Σ billable_cost = 期末余额`；`verify_wallet` 全部通过；无\n\
+                   `LEDGER_CONFLICT`
   S4 与发布并发    S1 进行中每 10 秒发布一次价格 / 规则 / 汇率
                    通过线：S1 的通过线仍满足；发布请求 p95 ≤ 5 秒；抽样事件用快照重算
                    （T-G `reprice_from_snapshot`）与快照一致
@@ -246,7 +248,9 @@ def s2_verdict(
     rate = processed / drain_seconds if drain_seconds > 0 else math.inf
     measured.update({"drain_seconds": drain_seconds, "events_per_second": rate})
     if rate < S2_DRAIN_RATE_FLOOR:
-        return Verdict("S2", FAIL, measured, [f"清空速率 {rate:.1f}/s < {S2_DRAIN_RATE_FLOOR:.0f}/s"])
+        return Verdict(
+            "S2", FAIL, measured, [f"清空速率 {rate:.1f}/s < {S2_DRAIN_RATE_FLOOR:.0f}/s"]
+        )
     return Verdict("S2", PASS, measured)
 
 
@@ -298,7 +302,8 @@ def consistency_reasons(check: Consistency) -> list[str]:
     reasons = []
     if check.processed_billable != check.ai_usage_rows:
         reasons.append(
-            f"PROCESSED（不含 0 元）{check.processed_billable} ≠ AI_USAGE 账本行 {check.ai_usage_rows}"
+            f"PROCESSED（不含 0 元）{check.processed_billable} ≠ AI_USAGE 账本行 "
+            f"{check.ai_usage_rows}"
         )
     for item in check.balances:
         if not item.consistent:
@@ -383,7 +388,10 @@ def plan_c(
     needed = False
     undecided = False
     judged = 0
-    for verdict, hold, rate in ((s1, s1_hold_mean, s1_target_rate), (s2, s2_hold_mean, s2_target_rate)):
+    for verdict, hold, rate in (
+        (s1, s1_hold_mean, s1_target_rate),
+        (s2, s2_hold_mean, s2_target_rate),
+    ):
         if verdict is None or verdict.status == NOT_RUN:
             continue
         name = verdict.scenario
@@ -409,7 +417,8 @@ def plan_c(
         else:
             basis.append(
                 f"{name} 不达标；最热租户平均持锁 {hold * 1000:.2f} ms × {rate:.0f}/s = "
-                f"{product:.3f} 秒/秒 ≤ 1 → 瓶颈不在钱包行锁（先调数据库整体吞吐、worker 数量等那一处）"
+                f"{product:.3f} 秒/秒 ≤ 1 → 瓶颈不在钱包行锁"
+                "（先调数据库整体吞吐、worker 数量等那一处）"
             )
     if needed:
         return PlanC(PLAN_C_NEEDED, tuple(basis))
@@ -575,7 +584,9 @@ def _assert_measurement_server(measurement_engine, stack_settings) -> None:
     if measured is None:
         raise SystemExit("cannot connect to the measurement database")
     if measured[1] != PERF_DATABASE:
-        raise SystemExit(f"the server says the current schema is {measured[1]!r}, not {PERF_DATABASE}")
+        raise SystemExit(
+            f"the server says the current schema is {measured[1]!r}, not {PERF_DATABASE}"
+        )
     if not stack_settings.database_url:
         return
     stack_engine = create_engine(stack_settings.database_url, pool_pre_ping=True)
@@ -696,7 +707,11 @@ class World:
         factor = Decimal(1 + model.publications % 2)
         components = [
             ComponentInput.model_validate(
-                {"component_code": code, "unit_quantity": PER_THOUSAND, "rate_amount": str(rate * factor)}
+                {
+                    "component_code": code,
+                    "unit_quantity": PER_THOUSAND,
+                    "rate_amount": str(rate * factor),
+                }
             )
             for code, rate in USD_RATES.items()
         ]
@@ -836,7 +851,9 @@ class World:
 
 def _balance(factory, tenant_id: int) -> Decimal:
     with factory() as session:
-        return session.execute(select(Wallet.balance).where(Wallet.tenant_id == tenant_id)).scalar_one()
+        return session.execute(
+            select(Wallet.balance).where(Wallet.tenant_id == tenant_id)
+        ).scalar_one()
 
 
 # --------------------------------------------------------------------------
@@ -1026,7 +1043,14 @@ def _worker_main(
         if message[0] == "stop":
             return
         if message[0] == "sweep":
-            _sweep(factory, connection, lease=lease, attempts=attempts, rng=rng, fault_rate=fault_rate)
+            _sweep(
+                factory,
+                connection,
+                lease=lease,
+                attempts=attempts,
+                rng=rng,
+                fault_rate=fault_rate,
+            )
         elif message[0] == "recover":
             recovered = usage_billing.recover_stale_processing(factory, max_attempts=attempts)
             connection.send(("recovered", recovered))
@@ -1552,7 +1576,11 @@ def run_s4(world: World, ingestor: Ingestor, args, report: Report) -> None:
         if samples:
             by_kind[kind] = {"n": len(samples), "p95_seconds": percentile(samples, 0.95)}
     report.verdicts["S4"] = verdict
-    report.details["S4"] = {**detail, "publish_by_kind": by_kind, "publish_failures": dict(failures)}
+    report.details["S4"] = {
+        **detail,
+        "publish_by_kind": by_kind,
+        "publish_failures": dict(failures),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1673,7 +1701,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"这一轮造的数据（前缀 {prefix}；脚本不删除任何行，账本只增）：")
     for line in world.created:
         print(f"  - {line}")
-    print(f"  - 经 ingest_one 接收的用量事件 {len(ingestor.accepted)} 条，被拒 {dict(ingestor.rejected)}")
+    print(
+        f"  - 经 ingest_one 接收的用量事件 {len(ingestor.accepted)} 条，"
+        f"被拒 {dict(ingestor.rejected)}"
+    )
 
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as handle:
@@ -1691,7 +1722,10 @@ def main(argv: list[str] | None = None) -> int:
                         },
                         "details": report.details,
                         "hot_tenant_lock_hold_mean_seconds": report.holds,
-                        "plan_c": {"conclusion": decision.conclusion, "basis": list(decision.basis)},
+                        "plan_c": {
+                            "conclusion": decision.conclusion,
+                            "basis": list(decision.basis),
+                        },
                         "created": world.created,
                         "events_accepted": len(ingestor.accepted),
                         "events_rejected": dict(ingestor.rejected),

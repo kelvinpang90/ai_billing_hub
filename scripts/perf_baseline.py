@@ -128,7 +128,9 @@ class Timings:
             "p95_ms": round(self.percentile(0.95) * 1000, 2),
             "p99_ms": round(self.percentile(0.99) * 1000, 2),
             "max_ms": round(max(self.seconds) * 1000, 2),
-            "per_second": round(self.samples / self.wall_seconds, 1) if self.wall_seconds else None,
+            "per_second": (
+                round(self.samples / self.wall_seconds, 1) if self.wall_seconds else None
+            ),
             "notes": self.notes,
         }
 

@@ -21,8 +21,13 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 MANIFEST_ENV = "ACUVEN_GIT_LS_FILES_MANIFEST"
 MANIFEST_MAX_BYTES = 1_000_000
 SECTIONS = (
-    "任务", "改了什么", "触碰的不变量 / REQ", "如何验证", "自检",
-    "已知未做 / 留给后续", "TODO 影响",
+    "任务",
+    "改了什么",
+    "触碰的不变量 / REQ",
+    "如何验证",
+    "自检",
+    "已知未做 / 留给后续",
+    "TODO 影响",
 )
 
 
@@ -32,8 +37,11 @@ class PolicyError(Exception):
 
 def git(root: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True,
-        encoding="utf-8", errors="strict", check=False,
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
     )
     if result.returncode:
         raise PolicyError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
@@ -48,7 +56,12 @@ def visible_lines(body: str) -> list[tuple[int, str]]:
     for number, line in enumerate(body.splitlines(), 1):
         match = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
         if fence:
-            if match and match[1][0] == fence[0] and len(match[1]) >= len(fence) and not match[2].strip():
+            if (
+                match
+                and match[1][0] == fence[0]
+                and len(match[1]) >= len(fence)
+                and not match[2].strip()
+            ):
                 fence = None
             continue
         if match:
@@ -93,14 +106,21 @@ def read_manifest(value: str) -> list[str]:
     读不懂就 fail closed，绝不退化成「当作没有文件」—— 那等于检查静默通过。
     报错不回显路径或记录内容：两者都来自宿主机。
     """
-    if (not value or any(unicodedata.category(char) == "Cc" for char in value)
-            or not Path(value).is_absolute() or os.path.normpath(value) != value):
+    if (
+        not value
+        or any(unicodedata.category(char) == "Cc" for char in value)
+        or not Path(value).is_absolute()
+        or os.path.normpath(value) != value
+    ):
         raise PolicyError(f"{MANIFEST_ENV} must be an absolute, normalized path")
     try:
         info = os.lstat(value)
     except (OSError, ValueError):
         raise PolicyError("manifest is missing or unreadable") from None
-    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    ):
         raise PolicyError("manifest must not be a link or reparse point")
     if not stat.S_ISREG(info.st_mode):
         raise PolicyError("manifest must be a regular file")
@@ -150,7 +170,9 @@ TASKS_FILE = ".platform/tasks.yaml"
 TASK_LIST_FIELDS = {"depends_on", "allowed_change_paths", "acceptance_criteria"}
 # re.ASCII：否则 \w 会吃进紧跟路径的中文（「docs/api.md对应小节」）。
 # 可选的 `./` 前缀不进捕获组，提取出来的就是规范化后的仓库根相对路径
-TASK_PATH_RE = re.compile(r"(?<![\w./-])(?:\./)?((?:frontend|app|tests|scripts|docs|alembic)/[\w./-]+\.\w+)", re.ASCII)
+TASK_PATH_RE = re.compile(
+    r"(?<![\w./-])(?:\./)?((?:frontend|app|tests|scripts|docs|alembic)/[\w./-]+\.\w+)", re.ASCII
+)
 
 
 def yaml_scalar(value: str, where: str) -> str:
@@ -189,7 +211,11 @@ def parse_tasks(text: str) -> dict[str, dict]:
             task_id = yaml_scalar(match[1], where)
             if task_id in tasks:
                 raise PolicyError(f"{where}: duplicate task id {task_id}")
-            task = tasks[task_id] = {"status": None, "text": [], **{name: [] for name in TASK_LIST_FIELDS}}
+            task = tasks[task_id] = {
+                "status": None,
+                "text": [],
+                **{name: [] for name in TASK_LIST_FIELDS},
+            }
             field = None
             continue
         if task is None or not line.startswith("    "):
@@ -207,7 +233,9 @@ def parse_tasks(text: str) -> dict[str, dict]:
         if field in TASK_LIST_FIELDS:
             match = re.fullmatch(r"      - (.+)", line)
             if not match:
-                raise PolicyError(f"{where}: {field} items must be one-line '      - value' entries")
+                raise PolicyError(
+                    f"{where}: {field} items must be one-line '      - value' entries"
+                )
             task[field].append(yaml_scalar(match[1], where))
         elif field == "purpose":
             if not line.startswith("      "):
@@ -240,8 +268,11 @@ def check_task_paths(text: str, listed: set[str]) -> list[str]:
             creators = sorted(dep for dep in upstream if path in tasks[dep]["allowed_change_paths"])
             if any(tasks[dep]["status"] == "ready" for dep in creators):
                 continue
-            message = (f"{TASKS_FILE}: {task_id} names {path}, which is not in the repository, "
-                       "not in its allowed_change_paths, and not in a ready upstream task's allowed_change_paths")
+            message = (
+                f"{TASKS_FILE}: {task_id} names {path}, which is not in the repository, "
+                "not in its allowed_change_paths, and not in a ready upstream task's "
+                "allowed_change_paths"
+            )
             if creators:
                 stale = ", ".join(f"{dep} ({tasks[dep]['status']})" for dep in creators)
                 message += f"; listed by {stale} but never created"
@@ -266,7 +297,10 @@ def meaningful(value: str) -> bool:
     value = value.strip().strip("`*_ ")
     if not value:
         return False
-    if re.fullmatch(r"(?i)(?:tbd|todo|n/?a|pending|\.\.\.|…+|待填(?:写)?|待补(?:充)?|请填写|占位|<[^>]*>)", value):
+    if re.fullmatch(
+        r"(?i)(?:tbd|todo|n/?a|pending|\.\.\.|…+|待填(?:写)?|待补(?:充)?|请填写|占位|<[^>]*>)",
+        value,
+    ):
         return False
     return True
 
@@ -290,7 +324,12 @@ def sections(body: str) -> tuple[dict[str, str], list[str]]:
 def git_diff_paths(root: Path, base: str, head: str) -> set[str]:
     validate_commit(root, base)
     validate_commit(root, head)
-    return set(filter(None, git(root, "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}").split("\0")))
+    return set(
+        filter(
+            None,
+            git(root, "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}").split("\0"),
+        )
+    )
 
 
 def validate_commit(root: Path, commit: str) -> None:
@@ -304,17 +343,24 @@ def location_exists(root: Path, commit: str, path: str, line: int) -> bool:
         return False
     result = subprocess.run(
         ["git", "-C", str(root), "show", f"{commit}:{path}"],
-        capture_output=True, encoding="utf-8", errors="strict", check=False,
+        capture_output=True,
+        encoding="utf-8",
+        errors="strict",
+        check=False,
     )
     return result.returncode == 0 and 0 < line <= len(result.stdout.splitlines())
 
 
-def check_pr(body: str, changed_paths: set[str], *, root: Path = ROOT, head: str = "HEAD") -> list[str]:
+def check_pr(
+    body: str, changed_paths: set[str], *, root: Path = ROOT, head: str = "HEAD"
+) -> list[str]:
     content, errors = sections(body)
     ai_paths = sorted(path for path in changed_paths if path.startswith("app/ai_api/"))
     billing_paths = sorted(
-        path for path in changed_paths
-        if path in {
+        path
+        for path in changed_paths
+        if path
+        in {
             "app/models/wallet.py",
             "app/repositories/wallet.py",
             "app/services/wallet_adjustments.py",
@@ -367,14 +413,20 @@ def check_pr(body: str, changed_paths: set[str], *, root: Path = ROOT, head: str
             errors.append("TODO target does not exist at the PR head")
     else:
         reasons = re.findall(r"(?m)^TODO reason: (.*)$", todo)
-        if len(reasons) != 1 or not meaningful(reasons[0]) or reasons[0].strip() in {"无", "不适用", "none"}:
+        if (
+            len(reasons) != 1
+            or not meaningful(reasons[0])
+            or reasons[0].strip() in {"无", "不适用", "none"}
+        ):
             errors.append("TODO impact none requires a concrete TODO reason")
     errors.extend(check_checkboxes(body, "PR body"))
     return errors
 
 
 def is_ancestor(root: Path, commit: str, head: str) -> bool:
-    result = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", commit, head], capture_output=True)
+    result = subprocess.run(
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", commit, head], capture_output=True
+    )
     if result.returncode not in {0, 1}:
         raise PolicyError("git could not verify evidence ancestry")
     return result.returncode == 0
@@ -389,7 +441,9 @@ def check_response(body: str, *, root: Path = ROOT, head: str = "HEAD") -> list[
     if first != "## 🔧 CLAUDE RESPONSE":
         errors.append("response must start with ## 🔧 CLAUDE RESPONSE")
     # 整行匹配：`> reviewed-head: …` 这种引用上轮的写法自然不算，不需要额外排除
-    reviewed = [m[1] for line in lines for m in [re.fullmatch(r"reviewed-head: ([0-9a-f]{40})", line)] if m]
+    reviewed = [
+        m[1] for line in lines for m in [re.fullmatch(r"reviewed-head: ([0-9a-f]{40})", line)] if m
+    ]
     if len(reviewed) != 1:
         errors.append("response requires one full reviewed-head SHA")
     else:
@@ -471,10 +525,18 @@ def main(argv: list[str] | None = None) -> int:
             elif "ref" not in event or "after" not in event:
                 raise PolicyError("event is neither a pull_request nor a push payload")
         elif args.body_file:
-            errors.extend(check_pr(args.body_file.read_text(encoding="utf-8-sig"), git_diff_paths(ROOT, args.base, args.head), head=args.head))
+            errors.extend(
+                check_pr(
+                    args.body_file.read_text(encoding="utf-8-sig"),
+                    git_diff_paths(ROOT, args.base, args.head),
+                    head=args.head,
+                )
+            )
         elif args.response_file:
             validate_commit(ROOT, args.head)
-            errors.extend(check_response(args.response_file.read_text(encoding="utf-8-sig"), head=args.head))
+            errors.extend(
+                check_response(args.response_file.read_text(encoding="utf-8-sig"), head=args.head)
+            )
         if errors:
             for error in errors:
                 print(f"ERROR: {error}", file=sys.stderr)

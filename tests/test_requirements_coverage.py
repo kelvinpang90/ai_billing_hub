@@ -244,9 +244,7 @@ class SectionIndexTests(unittest.TestCase):
         for row in self.rows:
             text = " ".join(row)
             if self._retired(row) and not RETIRED_VERSION_RE.search(text):
-                problems.append(
-                    f"索引里 {row[0]} 标成{RETIRED_MARKER}但没写退役版本（形如 v1.4）"
-                )
+                problems.append(f"索引里 {row[0]} 标成{RETIRED_MARKER}但没写退役版本（形如 v1.4）")
         if problems:
             self.fail("\n".join(problems))
 
@@ -380,8 +378,7 @@ class CoverageTableTests(unittest.TestCase):
             ids = REQ_ID_RE.findall(cell)
             if not ids:
                 problems.append(
-                    f"「{req_id}」的覆盖列既不是固定串「{markers}」，也没有任何 "
-                    f"REQ-* ID：[{cell}]"
+                    f"「{req_id}」的覆盖列既不是固定串「{markers}」，也没有任何 REQ-* ID：[{cell}]"
                 )
                 continue
             unknown = [req for req in ids if req not in in_spec]
