@@ -403,6 +403,39 @@ def test_billed_sums_are_exact_on_both_databases_and_ties_sort_by_group_key(bill
             occurred_to=WINDOW_TO,
         )
     assert total == 2
+
+    def analytics_for(group_by: str, **filters):
+        arguments = {"customer_id": None, "project_id": None, "provider": None, "model": None}
+        arguments.update(filters)
+        with world.factory() as session:
+            return list_usage_analytics(
+                session,
+                group_by=group_by,
+                offset=0,
+                limit=10,
+                feature=None,
+                occurred_from=WINDOW_FROM,
+                occurred_to=WINDOW_TO,
+                **arguments,
+            )
+
+    # model 分组的键是方言编译的字符串拼接（SQLite `||`、MySQL `concat()`），
+    # GROUP BY 与 ORDER BY 用同一个表达式：在两种库上都要能跑、结果相同。
+    model_rows, model_total = analytics_for("model")
+    assert (model_total, [(row.group_key, row.event_count) for row in model_rows]) == (
+        1,
+        [("anthropic:claude-x", 4)],
+    )
+    # provider / model 筛选按上报的原始代码，与列表接口同一口径。
+    for filters, expected_events in (
+        ({"provider": "anthropic"}, 4),
+        ({"model": "claude-x"}, 4),
+        ({"provider": "anthropic", "model": "claude-x"}, 4),
+        ({"provider": "no-such-provider"}, 0),
+        ({"model": "no-such-model"}, 0),
+    ):
+        filtered_rows, _ = analytics_for("provider", **filters)
+        assert sum(row.event_count for row in filtered_rows) == expected_events, filters
     # MySQL 的 SUM 对整数 CASE 返回 DECIMAL：仓储层必须交出 int；金额交出逐位精确的 Decimal。
     for row in analytics:
         assert all(
