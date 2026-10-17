@@ -29,6 +29,7 @@
 2. `AIH-TASK-073` 管理端用量分析接口：按供应商、模型、客户、项目或功能汇总次数、token、成本与毛利
 3. `AIH-TASK-074` 管理端前端：用量分析页，按维度查看次数、token、成本与毛利
 4. `AIH-TASK-075` 生产巡检定期探测 AI 就绪检查并并入 readyz 告警维度
+5. `AIH-TASK-076` 修正告警等级的严重度顺序，让 P1 比 P2 更严重
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -63,8 +64,7 @@
 - 待登记：Phase 6 Notification Adapter 抽象与 Email adapter
 - 待登记：Phase 6 低余额、停机、复机通知与门户内通知（需设计闸门）
 - 待登记：Phase 6 WhatsApp adapter（依赖 D7）
-- 待登记：修正 app/services/alerts.py 的 AlertLevel 严重度顺序：枚举按「OK、P1、P2」递增，与 P1 比 P2 更严重的约定相反；目前只有 FX 维度的合并用到且只产出 OK / P2，尚未触发（2026-10-17 登记 075 时发现）
-- 待登记：Phase 6 健康告警的其余信号（通知死信、TLS 证书到期、时钟漂移等）；AI 就绪检查已由 AIH-TASK-075 并入 readyz。Healthchecks 免费档已用满 20 个检查，新增维度前要先定监控方案（升级付费档或合并维度）
+- 待登记：Phase 6 健康告警的其余信号（通知死信、TLS 证书到期、时钟漂移等）；AI 就绪检查已由 AIH-TASK-075 并入 readyz。Healthchecks 免费档已用满 20 个检查，2026-10-17 Kelvin 定：不升级付费档，新信号并进已有维度、不新增检查；登记时每项写明并进哪个维度，并同步改 docs/deployment.md §8 第 1 条「各自一个检查」与 ai_usage_outbox 一节的配额说明
 - 待登记：Phase 7 月度对账单、T+1 cut-off 与上期调整（需设计闸门）
 - 待登记：Phase 7 对账单 PDF 下载
 - 待登记：Phase 7 收入、成本、手续费、毛利分析与 CSV / Excel 导出
