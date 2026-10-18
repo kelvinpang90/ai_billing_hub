@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-10-12
+> 最后更新：2026-10-18
 
 ---
 
@@ -56,6 +56,70 @@
 
 命令会逐字段校验、核对日志中的租户与项目归属，并打印 `created`、`held`、`review_marked` 或
 `unchanged:<状态>`；`rejected` 必须按输出修正输入或升级事故，不会写审计。每次成功补录都留下审计。
+
+---
+
+## AI 就绪检查失败（`billing_ai_readiness_failed` 告警）
+
+**首次编写：2026-10-18（AIH-TASK-075）。依据：[deployment.md](deployment.md) §8.1、「AI 模块部署前置与配置」（AIH-TASK-068 / 069）。**
+
+### 怎么发现
+
+```text
+名称：billing_ai_readiness_failed
+条件：宿主机每 5 分钟在 /readyz 之后 GET /healthz/ai（BILLING_MONITOR_AI_READY_URL 可覆盖），
+     非 2xx，或正文不含 "status":"ok"（前端兜底的 200 HTML 也算）
+分级：P1（AI 请求路径不可用）
+通知：并在 Healthchecks.io 检查 `ai_billing_hub readyz` 里 → Telegram；状态翻转才发，恢复再发一次
+正文：P1 billing_ai_readiness_failed: <URL> (2xx: yes|no) —— 不带响应体
+```
+
+⚠️ **它没有自己的检查**（免费档 20 个已用满）。`readyz` 已经因为别的原因红着时，AI 就绪坏掉**不会再通知一次**；
+收到 readyz 的通知后要看 `journalctl -t billing-monitor -p err` 里的**全部**行。`2xx: yes` 表示拿到的是 200 但不是
+就绪信封 —— 多半是 nginx 没把 `/healthz/ai` 交给 API（配置没 reload 上），走前端兜底了。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 计费路径、`/readyz`、用量摄取、管理端 | AI 请求路径：key 文件读不出时上游调用发不出去；AI 专用库不通时请求无法落库 |
+| 已经落库的 AI 用量 outbox（投递 worker 照常） | 新签发的 AI 密钥没法用 —— 部署前置要求先等 `/healthz/ai` 变绿 |
+
+### 立刻做什么
+
+先在宿主机上看错误码（只读，回环地址；**不要**把响应贴进工单以外的地方）：
+
+```bash
+curl -sS -w '\n%{http_code}\n' http://127.0.0.1:<端口>/healthz/ai
+```
+
+| 现象 | 先查 |
+| --- | --- |
+| 503，`AI_PROVIDER_NOT_CONFIGURED` | **key 文件**（第 1 步） |
+| 503，`AI_STORE_UNAVAILABLE` | **AI 专用库连接**（第 2 步） |
+| 200 但是 HTML / 403 / 404 | nginx：`deploy/nginx/billing.conf` 的 `location = /healthz/ai` 与名单，是否 reload 过 |
+| 连不上（`000`）、502 | API 挂了 —— `readyz` 那一行应同时是 P1，先按 API 故障处理 |
+
+1. **key 文件**：宿主机 `secrets/anthropic.key` 是否存在、非空、属主 `10001`、权限 `0400`（与其它 secret 同一条，ADR-0004）；
+   容器里 `BILLING_AI_ANTHROPIC_KEY_FILE`（默认 `/run/secrets/billing_anthropic_key`）是否指向它。
+   ⚠️ 只看 `ls -l` 与 `sha256sum secrets/anthropic.key | cut -c1-8`，**不要打印内容**。修好文件后要重建 api 容器
+   （secret 走 bind mount，Docker Desktop 下缺文件会被建成目录 —— 见「主密钥」一节）
+2. **AI 专用库连接**：看 API 日志 `AI readiness database probe failed`（带脱敏异常栈）；`mysql` 容器与 `readyz` 的
+   `database` 若都正常，问题在 AI 专用的连接池与线程：核对 `BILLING_AI_DB_*` 超时与并发（`BILLING_AI_DB_THREADS` /
+   `BILLING_AI_DB_QUEUE_MAX`）—— 池子被慢查询占满、排队超限时也报 `AI_STORE_UNAVAILABLE`
+3. 其余按 [deployment.md](deployment.md)「AI 模块部署前置与配置」与本文件「AI 模块用量 outbox」一节排查
+4. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. `curl` 拿到 200 且 `data.status` 为 `ok`；下一轮巡检 `ai_billing_hub readyz` 转绿（前提是同一维度没有别的行）
+2. 故障期间被 `HELD` 或待复核的 AI 用量，按「AI 模块用量 outbox」一节处理
+
+### 绝不能做什么
+
+- **不要把 key 写进 `.env`、镜像或命令行**来「先让它绿」。key 只放文件
+- **不要为了让告警安静去改 `BILLING_MONITOR_AI_READY_URL`** 指向别的路径（例如 `/healthz`）：那条只是存活检查，永远是绿的
+- **不要放宽 `/healthz/ai` 的 nginx 名单**：它与 `/readyz` 同一份
 
 ---
 

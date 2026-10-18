@@ -963,6 +963,132 @@ def test_the_cron_runs_the_monitor_unlocked() -> None:
     assert "logger -t billing-monitor" in lines[0]
 
 
+# --- AI 就绪并入 readyz 维度（spec §95、§129；AIH-TASK-075）--------------------
+#
+# 静态断言看不出「200 的 HTML 有没有被放过」，所以把 check_readyz 原样抠出来，对着假 curl 跑。
+
+FAKE_MONITOR_CURL = """#!/usr/bin/env bash
+url="${!#}"
+printf '%s\\n' "$url" >> calls
+if [[ "$url" == */readyz ]]; then
+    printf '{"data":{"status":"ok","database":"ok","redis":"ok"},"error":null}'
+    exit 0
+fi
+printf '%s' "${AI_BODY:-}"
+case " $* " in *" -w "*) printf '\\n%s' "${AI_CODE:-000}" ;; esac
+[ "${AI_CODE:-000}" != "000" ] || exit 7
+exit 0
+"""
+
+AI_OK = '{"data":{"status":"ok"},"error":null}'
+AI_DEFAULT_URL = "http://127.0.0.1:8080/healthz/ai"
+
+
+def run_check_readyz(tmp_path, ai_code: str, ai_body: str, **env) -> tuple[str, list[str]]:
+    """把 monitor.sh 的 AI_READY_URL 与 check_readyz 原样抠出来跑，返回 (stdout, 请求过的 URL)。"""
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    url_line = re.search(r"^AI_READY_URL=.*$", uncommented(MONITOR), re.M)
+    assert url_line is not None
+    work = tmp_path / "monitor"
+    (work / "bin").mkdir(parents=True)
+    (work / "run.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'export PATH="$PWD/bin:$PATH"\n'
+        "READYZ_PORT=8080\n"
+        'READYZ_URL="http://127.0.0.1:8080/readyz"\n'
+        f"{url_line.group(0)}\n"
+        f"{monitor_function('check_readyz')}\n"
+        "check_readyz\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    curl = work / "bin" / "curl"
+    curl.write_text(FAKE_MONITOR_CURL, encoding="utf-8", newline="\n")
+    curl.chmod(0o755)
+
+    full = {k: v for k, v in os.environ.items() if k != "BILLING_MONITOR_AI_READY_URL"}
+    full.update({"AI_CODE": ai_code, "AI_BODY": ai_body, **env})
+    done = subprocess.run(
+        [bash, str(work / "run.sh")], cwd=work, env=full, capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    calls = (work / "calls").read_text(encoding="utf-8").splitlines()
+    return done.stdout, calls
+
+
+def test_a_ready_ai_path_raises_nothing(tmp_path) -> None:
+    """readyz 与 AI 都是 200 且正文 ok：stdout 为空 = 这个维度全绿。"""
+    out, calls = run_check_readyz(tmp_path, "200", AI_OK)
+    assert out == ""
+    # 先 readyz、后 AI：AI 是在现有判定**之后**补的。
+    assert calls == ["http://127.0.0.1:8080/readyz", AI_DEFAULT_URL]
+
+
+@pytest.mark.parametrize(
+    ("ai_code", "ai_body", "is_2xx"),
+    [
+        # ⚠️ 入口的前端兜底对未知路径回 200 的 SPA 页：只看状态码会把它当成就绪。
+        ("200", "<!doctype html><html>SPA fallback</html>", "yes"),
+        ("503", '{"data":null,"error":{"code":"AI_STORE_UNAVAILABLE"}}', "no"),
+        # 正文碰巧带着 ok、状态码却不是 2xx：同样算失败，两样都要看。
+        ("503", AI_OK, "no"),
+        ("000", "", "no"),
+    ],
+)
+def test_a_failed_ai_readiness_is_a_p1_on_the_readyz_dimension(
+    tmp_path, ai_code: str, ai_body: str, is_2xx: str
+) -> None:
+    """非 2xx 或正文不是 ok 信封：恰好一行 P1，带 URL 与是否 2xx，**不回显响应体**。"""
+    out, _ = run_check_readyz(tmp_path, ai_code, ai_body)
+    assert out.splitlines() == [f"P1 billing_ai_readiness_failed: {AI_DEFAULT_URL} (2xx: {is_2xx})"]
+    for leaked in ("html", "SPA", "AI_STORE_UNAVAILABLE", '"data"'):
+        assert leaked not in out
+
+
+def test_the_ai_readiness_url_can_be_overridden(tmp_path) -> None:
+    """`BILLING_MONITOR_AI_READY_URL` 覆盖默认入口，写法与 `READYZ_URL` 相同。"""
+    override = "http://10.201.0.5:9000/healthz/ai"
+    out, calls = run_check_readyz(tmp_path, "503", "", BILLING_MONITOR_AI_READY_URL=override)
+    assert calls[-1] == override
+    assert AI_DEFAULT_URL not in calls
+    assert out.splitlines() == [f"P1 billing_ai_readiness_failed: {override} (2xx: no)"]
+    assert (
+        'AI_READY_URL="${BILLING_MONITOR_AI_READY_URL:-http://127.0.0.1:${READYZ_PORT:-8080}/healthz/ai}"'
+        in uncommented(MONITOR)
+    )
+
+
+def test_the_ai_readiness_rides_on_the_readyz_check() -> None:
+    """免费档已满：不新增检查、不新增 `.env` 键；告警名与现有的不冲突，runbook 认得它。
+
+    部署主机不假设有 jq 或 Python —— 判据只用 bash 与 curl。
+    """
+    monitor = uncommented(MONITOR)
+    names = re.findall(r'echo "P[12] (billing_[a-z0-9_]+):', monitor)
+    assert sorted(names) == ["billing_ai_readiness_failed", "billing_readiness_degraded_redis"]
+    first, second = names
+    assert not first.startswith(second) and not second.startswith(first)
+    # 应用告警维度的正文是 `<级别> <维度>: …`，维度名不带 billing_ 前缀，撞不上。
+    assert "billing_ai_readiness_failed" not in monitor_function("publish_alerts")
+
+    assert set(re.findall(r"BILLING_HEALTHCHECK_[A-Z_]+_URL", monitor)) == {
+        "BILLING_HEALTHCHECK_SERVICES_URL",
+        "BILLING_HEALTHCHECK_READYZ_URL",
+        "BILLING_HEALTHCHECK_DISK_URL",
+    }
+    assert (
+        "publish BILLING_HEALTHCHECK_READYZ_URL readyz "
+        '"$READYZ_OUT" "readyz ok (database + redis + ai)"' in monitor
+    )
+    assert not re.search(r"\b(jq|python3?)\b", monitor)
+
+    runbook = (REPO_ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+    assert "billing_ai_readiness_failed" in runbook
+
+
 # --- 旧镜像的保留窗口（§94 磁盘；2026-09-16 生产实测）-------------------------
 
 
