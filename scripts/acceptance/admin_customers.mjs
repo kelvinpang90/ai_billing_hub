@@ -5,7 +5,8 @@
  * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）；AIH-TASK-038 加了用量事件的一个只读步骤
  * （open_usage_events）；AIH-TASK-046 加了出站 webhook 签名密钥的一个只读步骤（check_webhook_signing）；AIH-TASK-053
  * 加了项目集成状态的一个只读步骤（check_project_integration）；AIH-TASK-070 加了 AI 密钥的一个只读步骤
- * （check_ai_access）。文件名沿用，不改。open_catalog / check_meter_types
+ * （check_ai_access）；AIH-TASK-074 加了用量分析的两个只读步骤（open_usage_analytics、check_usage_analytics）。
+ * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
  * 谁在什么时候跑它
@@ -57,7 +58,8 @@
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
  *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
- *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、夹具客户详情里
+ *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏
+ *   「Usage analytics」（href 为 /usage-analytics）、夹具客户详情里
  *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。不点新建客户、编辑 / 保存、手工调账、
  *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
  *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
@@ -72,6 +74,7 @@
  *   不填也不提交任何表单。试算页不选也不填任何字段、不点「Calculate」（试算本身只读，但「不提交任何表单」一视同仁）。
  *   用量事件页不勾选任何行、不点「Requeue selected」「Requeue all matching…」「Requeue」或任何确认按钮、不填也不
  *   提交筛选表单（不点「Apply filters」「Clear filters」）、不翻页、不打开任何事件的详情（「View」链接）。
+ *   用量分析页不改分组维度、时间段或任何筛选、不点「Apply filters」「Reset to last 30 days」、不翻页、不改每页条数。
  *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
@@ -166,6 +169,19 @@
  *                   projectIntegration.status.*）与面板「Integration status」一项（projectIntegration.field.status，面板里
  *                   带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）的文字相同。报到前把面板滚动到视口里（规则同
  *                   check_webhook_signing）
+ *   open_usage_analytics
+ *                   点顶栏「Usage analytics」（nav.usageAnalytics，href 为 paths.ts 的 usageAnalytics，即 /usage-analytics）
+ *                   进用量分析页；页面落定且不是加载失败（任何错误提示）、无权限（usageAnalytics.forbidden）或路由兜底页。
+ *                   空列表合法（usageAnalytics.empty：所选时间段里可能还没有已处理的用量），有表格时表头要有
+ *                   「Prepaid (MYR)」「Internal metering only (MYR)」两组列（usageAnalytics.prepaid.title /
+ *                   usageAnalytics.internal.title）
+ *   check_usage_analytics
+ *                   用量分析页（open_usage_analytics 打开的那一页）落定且不是加载失败、无权限或路由兜底页。后端值取页面
+ *                   自己发出的 GET /api/v1/admin/usage-analytics 的响应体（被动观察，不自己发请求、不拦截；本次运行跑过
+ *                   open_usage_analytics 时只认点顶栏之后发出的，取成功读完的最近一次）：表格（表头有上面两组列）里带
+ *                   data-row-key 的数据行数与响应 data.items 的条数一致；items 为空时页面显示空状态（usageAnalytics.empty
+ *                   或 usageAnalytics.emptyPage）、没有数据行。不改筛选、不翻页。有数据行时报到前把表格滚动到视口里
+ *                   （放得下时整张在视口内，放不下时表格顶端在视口内）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -255,6 +271,13 @@ const TEXT = {
   usageEmpty: "No usage events yet.", // usage.empty
   usageOccurredAt: "Occurred at", // usage.field.occurredAt —— 用量事件表格的列头
   usageBillableCost: "Billable amount", // usage.field.billableCost
+  navUsageAnalytics: "Usage analytics", // nav.usageAnalytics —— 顶栏的用量分析项
+  analyticsForbidden: "Only administrators can view usage analytics.", // usageAnalytics.forbidden
+  analyticsLoading: "Loading usage analytics…", // usageAnalytics.loading
+  analyticsEmpty: "No processed usage matches these conditions.", // usageAnalytics.empty
+  analyticsEmptyPage: "There are no groups on this page.", // usageAnalytics.emptyPage
+  analyticsPrepaid: "Prepaid (MYR)", // usageAnalytics.prepaid.title —— 分析表格的列组表头
+  analyticsInternal: "Internal metering only (MYR)", // usageAnalytics.internal.title
   customersForbidden: "Only administrators can manage customers.", // customers.forbidden —— 客户区块（含签名密钥面板）的无权限
   projectName: "Project name", // customers.projects.field.name —— 项目表格的列头
   projectDescription: "Description", // customers.projects.field.description
@@ -302,6 +325,7 @@ const TEXT = {
   pricingRulesPath: "/pricing/rules",
   pricingPreviewPath: "/pricing/preview",
   usageEventsPath: "/usage-events",
+  usageAnalyticsPath: "/usage-analytics",
 };
 
 /** 夹具客户的公司名前缀。只看、只打开以它开头的客户。 */
@@ -354,6 +378,9 @@ const AI_ACCESS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects\/([^/]+)\
 
 /** 项目列表接口的路径（frontend/src/api/adminCustomers.ts 的 listProjects）。 */
 const PROJECT_LIST_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects$/;
+
+/** 用量分析接口的路径（frontend/src/api/adminUsageAnalytics.ts 的 USAGE_ANALYTICS_URL）。 */
+const USAGE_ANALYTICS_API = /^\/api\/v1\/admin\/usage-analytics$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -752,10 +779,12 @@ const network = {
   aiAccess: new Map(),
   /** 项目列表接口：requestId → { customerId, firstPage, status, finished, failed, seq }。查询串本身不保存。 */
   projectLists: new Map(),
+  /** 用量分析接口：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
+  usageAnalytics: new Map(),
   seq: 0,
 };
 
-/** 五类被观察的接口里，requestId 对应的那一条记录。 */
+/** 各类被观察的接口里，requestId 对应的那一条记录。 */
 function trackedRequest(requestId) {
   return (
     network.details.get(requestId) ??
@@ -763,8 +792,22 @@ function trackedRequest(requestId) {
     network.meterTypes.get(requestId) ??
     network.webhookSecrets.get(requestId) ??
     network.aiAccess.get(requestId) ??
-    network.projectLists.get(requestId)
+    network.projectLists.get(requestId) ??
+    network.usageAnalytics.get(requestId)
   );
+}
+
+/** 是不是用量分析接口（同源 https、路径恰好是这个接口，查询串不看、不保存）。 */
+function isUsageAnalytics(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === network.host && USAGE_ANALYTICS_API.test(parsed.pathname);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -949,6 +992,14 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        if (isUsageAnalytics(params.request?.url) && params.request?.method === "GET") {
+          network.usageAnalytics.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1083,6 +1134,23 @@ function latestProjectListResponse(customerId) {
   let best = null;
   for (const [requestId, request] of network.projectLists) {
     if (request.customerId !== customerId || !request.firstPage) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/** afterSeq 之后发出、成功读完的用量分析请求里最近的一次；还有在路上的就回 null，等它落定。 */
+function latestUsageAnalyticsResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, request] of network.usageAnalytics) {
+    if (request.seq <= afterSeq) {
       continue;
     }
     if (!request.finished && !request.failed) {
@@ -1278,6 +1346,19 @@ function pageLib() {
     }
     return null;
   };
+  /**
+   * 用量分析表格：表头（两行，含列组表头）里有「Prepaid (MYR)」「Internal metering only (MYR)」两组列的那张表；
+   * 没有时 null。表头是两行，单元格数与表头格数对不上，所以不用 tableWith。
+   */
+  const analyticsTable = (T) => {
+    for (const table of document.querySelectorAll("table")) {
+      const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => norm(th.textContent));
+      if (heads.includes(T.analyticsPrepaid) && heads.includes(T.analyticsInternal)) {
+        return table;
+      }
+    }
+    return null;
+  };
   return {
     norm,
     leaf,
@@ -1294,6 +1375,7 @@ function pageLib() {
     webhookRegion,
     integrationRegion,
     aiAccessRegion,
+    analyticsTable,
   };
 }
 
@@ -1716,6 +1798,54 @@ function probeUsageEvents(lib, T) {
     empty: lib.leaf(T.usageEmpty) !== null,
     table: lib.tableWith([T.usageOccurredAt, T.usageBillableCost]) !== null,
   };
+}
+
+/**
+ * 用量分析页的状态。错误提示（任何 role=alert）与无权限分开报；有表格时回带 data-row-key 的数据行数（不含 antd
+ * 的测量行与空状态行）。页面上的估算说明是普通段落，不是 role=alert。只读，不碰筛选表单与分页。
+ */
+function probeUsageAnalytics(lib, T) {
+  const forbidden = lib.leaf(T.analyticsForbidden) !== null;
+  const table = lib.analyticsTable(T);
+  let rows = 0;
+  if (table !== null) {
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") !== "true") {
+        rows += 1;
+      }
+    }
+  }
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.analyticsLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: lib.leaf(T.analyticsEmpty) !== null || lib.leaf(T.analyticsEmptyPage) !== null,
+    table: table !== null,
+    rows,
+  };
+}
+
+/** 把分析表格滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollAnalyticsTableIntoView(lib, T) {
+  const table = lib.analyticsTable(T);
+  if (table === null) {
+    return false;
+  }
+  const block = table.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  table.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的表格要整张在视口内；放不下的只要求顶端在视口内。 */
+function analyticsTableInView(lib, T) {
+  const table = lib.analyticsTable(T);
+  if (table === null) {
+    return false;
+  }
+  const rect = table.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
 
 /**
@@ -2663,6 +2793,96 @@ async function stepOpenUsageEvents() {
   rejectCatalogState(opened.value, TEXT.usageEventsPath, true);
 }
 
+async function stepOpenUsageAnalytics(ctx) {
+  // 点顶栏之前的序号：check_usage_analytics 只认在这之后页面自己发出的请求。
+  const beforeClick = network.seq;
+  const link = { text: TEXT.navUsageAnalytics, href: TEXT.usageAnalyticsPath };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  ctx.usageAnalyticsAfterSeq = beforeClick;
+  // 落定的判断与失败码同目录页、价格页、规则页与用量事件页。
+  const opened = await waitFor(
+    () => evaluate(probeUsageAnalytics, TEXT),
+    catalogSettled(TEXT.usageAnalyticsPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  // 默认时间段（最近 30 天）里可能还没有已处理的用量，空列表合法。
+  rejectCatalogState(opened.value, TEXT.usageAnalyticsPath, true);
+}
+
+async function stepCheckUsageAnalytics(ctx) {
+  const ready = await waitFor(
+    () => evaluate(probeUsageAnalytics, TEXT),
+    catalogSettled(TEXT.usageAnalyticsPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!ready.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(ready.value, TEXT.usageAnalyticsPath, true);
+
+  // 后端值：页面自己发出的那次分析 GET 的响应体。有还在路上的就等它落定。本次运行没跑过 open_usage_analytics
+  // 时认这一页上已经观察到的请求。
+  const afterSeq = ctx.usageAnalyticsAfterSeq ?? 0;
+  const observed = await waitFor(
+    async () => latestUsageAnalyticsResponse(afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expected = items.length;
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 表格显示的就是这一份响应：数据行数与 items 条数一致；items 为空时是空状态、没有数据行。
+  const shown = await waitFor(
+    () => evaluate(probeUsageAnalytics, TEXT),
+    (s) =>
+      s.path === TEXT.usageAnalyticsPath &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      (expected === 0 ? s.empty && s.rows === 0 : s.table && s.rows === expected),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && (shown.value.table || shown.value.empty) ? "assertion_failed" : "element_missing");
+  }
+
+  if (expected === 0) {
+    return;
+  }
+  // Worker 在报到后截图：先把表格滚进视口。
+  if ((await evaluate(scrollAnalyticsTableIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(analyticsTableInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckWebhookSigning(ctx) {
   if (ctx.customerId === null || ctx.fixture === null) {
     throw fail("assertion_failed");
@@ -2981,6 +3201,8 @@ const STEPS = {
  check_webhook_signing: stepCheckWebhookSigning,
   check_ai_access: stepCheckAiAccess,
   check_project_integration: stepCheckProjectIntegration,
+  open_usage_analytics: stepOpenUsageAnalytics,
+  check_usage_analytics: stepCheckUsageAnalytics,
 };
 
 // ---------------------------------------------------------------------------
@@ -3009,6 +3231,8 @@ async function main() {
     customerId: null,
     /** login 步骤完成的时刻（毫秒）；本次运行没跑过 login 时为 null。 */
     loginCompletedAt: null,
+    /** open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null。 */
+    usageAnalyticsAfterSeq: null,
   };
 
   try {

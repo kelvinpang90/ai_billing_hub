@@ -56,6 +56,11 @@ export const ROUTES = {
    */
   usageEvents: "/usage-events",
   usageEventDetail: "/usage-events/:usageEventId",
+  /**
+   * 管理端用量分析（AIH-TASK-074）。顶栏有一项；验收脚本 `scripts/acceptance/admin_customers.mjs` 的
+   * `open_usage_analytics` 按这个 href 找顶栏链接，改了要同步那里。
+   */
+  usageAnalytics: "/usage-analytics",
 } as const;
 
 /**

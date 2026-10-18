@@ -100,6 +100,10 @@ export function AppLayout() {
               key: ROUTES.usageEvents,
               label: <Link to={ROUTES.usageEvents}>{t("nav.usageEvents")}</Link>,
             },
+            {
+              key: ROUTES.usageAnalytics,
+              label: <Link to={ROUTES.usageAnalytics}>{t("nav.usageAnalytics")}</Link>,
+            },
           ]}
         />
         {/* 登出必须调后端：只清本地令牌的话，那张刷新 cookie 还活着，
