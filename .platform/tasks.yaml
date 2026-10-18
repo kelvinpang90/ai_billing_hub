@@ -4568,7 +4568,7 @@ tasks:
     title: 生产巡检定期探测 AI 就绪检查并并入 readyz 告警维度
     purpose: >-
       Phase 6 健康告警的第一项（spec §95、§129）：AIH-TASK-069 的 /healthz/ai 目前只在部署冒烟时探测，Anthropic key 文件或 AI 专用库坏了没有告警。deploy/monitor.sh 每轮在检查 /readyz 之后再读 /healthz/ai，失败时在 readyz 维度报 P1。Healthchecks 免费档已用满 20 个检查，所以不新增检查；不改应用代码。
-    status: ready
+    status: done
     acceptance_criteria:
       - 'deploy/monitor.sh 的 check_readyz 在现有判定之后请求 /healthz/ai（默认与 READYZ_URL 同一入口，可由 BILLING_MONITOR_AI_READY_URL 覆盖，写法照 READYZ_URL）；非 2xx，或正文不含 "status":"ok"（与现有 readyz 判定同一写法）时输出一行 P1 billing_ai_readiness_failed，附 URL 与是否 2xx；不回显响应正文；告警名是稳定契约，照现有注释写明'
       - '结果随 readyz 维度推送，复用 BILLING_HEALTHCHECK_READYZ_URL；不新增 Healthchecks 检查，不新增 .env 必填键；现有的「先隔一段时间复核一次」逻辑同样覆盖这一行；不改 cron 行；readyz 全绿时的成功文案补上 AI 一项'
