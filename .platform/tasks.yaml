@@ -4986,3 +4986,179 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-083
+    title: 钱包流水第一层：账本按来源分页用的索引迁移
+    purpose: >-
+      按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「数据库」与 §8 第 1 步：迁移 alembic/versions/20261018_0023_wallet_ledger_reference_index.py（revision 0023_wallet_ledger_reference_index，接在 0022_tax_policy 之后）给 wallet_transactions 加非唯一索引 ix_wallet_transactions_tenant_reference_sequence (tenant_id, reference_type, wallet_sequence)，模型同步，表结构文档补上。只加这一个索引，不改列、约束、触发器与数据；查询与接口属于 AIH-TASK-084，前端属于 AIH-TASK-085。
+    status: ready
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）逐条一致，以 §2「数据库」、§7 最后两行与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '迁移 0023：upgrade 只建这一个索引（列顺序 tenant_id、reference_type、wallet_sequence，非唯一），downgrade 只删它；不改列、约束、触发器，不动数据；文件头写 §132 第 13 条分析（写法照 0022 的文件头，说明 MySQL 8 在线加索引不阻塞写入）'
+      - '模型 app/models/wallet.py 的 WalletTransaction.__table_args__ 加同名 Index，注释写明用途（按来源筛选时的键集分页）；原 ix_wallet_transactions_tenant_sequence 不动'
+      - 'tests/backend/test_migrations.py：0023 接在 0022 之后；SQLite 与 MySQL 升级到 head 后新索引存在、列顺序正确、非唯一，原索引不变；升级、降级到 0022、再升级的往返里新索引随之删、建，其余表结构不变；模型与迁移的比对照常通过；MySQL 上对带 reference_type 条件、按 wallet_sequence 倒序的 SELECT 做 EXPLAIN，possible_keys 含新索引（不断言优化器最终选中哪个）；既有降级用例照旧通过'
+      - 'docs/database-schema.md 的 wallet_transactions 一节加上这个索引与用途'
+      - '不改 repository、schema、接口与前端；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #351'
+    allowed_change_paths:
+      - alembic/versions/20261018_0023_wallet_ledger_reference_index.py
+      - app/models/wallet.py
+      - tests/backend/test_migrations.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-084
+    title: 钱包流水第二层：管理端按客户查看账本的只读接口
+    purpose: >-
+      按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「接口」「查询」与 §8 第 2 步：app/repositories/wallet.py 的 list_transactions_for_tenant 支持按 reference_type 筛选，并带出用量事件的 public_id 与操作者邮箱；新增 GET /api/v1/admin/customers/{customer_id}/wallet/transactions（游标 before_sequence、page_size、可选 reference_type，最新在前）；docs/api.md 记新接口。只读，不写任何表；索引由 AIH-TASK-083 加，前端属于 AIH-TASK-085。
+    status: ready
+    depends_on:
+      - AIH-TASK-083
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）逐条一致，以 §2「接口」「查询」「事务边界、时间、金额」、§3、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '接口：查询参数的范围与取值按设计 §2，非法时 422 VALIDATION_ERROR、文案只列字段名不回显值（参数由 FastAPI 在处理函数之前校验）；处理函数第一条语句调用 require_admin；客户不存在 404 CUSTOMER_NOT_FOUND；成功时 data 恰好 items、page_size、next_before_sequence 三个键，每项恰好设计 §2 的 12 个键；取 page_size + 1 行判断有没有下一页'
+      - 'repository：取一页是一条 SELECT，租户只来自路径客户；LEFT JOIN usage_events（经 wallet_transaction_id）与 users；按 wallet_sequence 倒序；不加锁、不写；不读不返回 metadata_json 与成本、毛利；函数内 200 的硬上限保留；金额经现有 money_text 格式化成 8 位小数字符串，不经 float'
+      - '新接口加进 tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES，该文件路由枚举用例需要的其余登记照现有写法补；匿名 401、CUSTOMER 403，都不查账本'
+      - '测试（新增 tests/backend/test_wallet_transactions_api.py，更新 tests/backend/test_wallet_repository.py 里 list_transactions_for_tenant 的既有用例）：覆盖设计 §7 除最后两行（索引与迁移属于 AIH-TASK-083）之外的全部行；另加审查提出的一条：USAGE_EVENT 来源的账本行查不到对应用量事件时 usage_event_id 为 null、该行其余字段照常、不被丢掉；只读断言：调用前后 wallet_transactions、wallets、tenants、audit_logs、domain_outbox 的行数与余额不变；并发翻页与金额精度场景放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑；示例 uuid 用全零占位值'
+      - 'docs/api.md 新增「管理端钱包流水」一节：接口、查询参数、响应示例、字段说明、错误码，以及为什么用序号游标而不是「分页（spec §108）」的 page / total（设计 §9）'
+      - '不改迁移与模型、不改前端；不改 AI 模块；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #351'
+    allowed_change_paths:
+      - app/repositories/wallet.py
+      - app/schemas/wallet_transactions.py
+      - app/api/admin_customers.py
+      - tests/backend/test_wallet_repository.py
+      - tests/backend/test_wallet_transactions_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-085
+    title: 钱包流水第三层：管理端客户详情页的钱包流水面板
+    purpose: >-
+      按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「前端」：调用 AIH-TASK-084 的接口，在管理端客户详情页加钱包流水面板（来源筛选、按序号游标往旧翻页、AI 用量行跳到用量事件详情）；勾掉 docs/TODO.md Phase 1 的「Wallet」。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-082
+      - AIH-TASK-084
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端钱包流水」一节为准（AIH-TASK-084 写入）；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/routes/paths.ts'
+      - '新增 frontend/src/api/walletTransactions.ts 封装该接口，路径编码沿用 frontend/src/api/adminCustomers.ts；省略的可选参数不进查询串；导出一个按客户的流水查询 key 前缀函数，各页、各筛选的 key 都以它开头'
+      - '新增 frontend/src/features/wallet/WalletTransactionsPanel.tsx 并挂到 CustomerDetailPage：列为时间、序号、类型、金额、余额（后）、来源、原因、操作者；来源下拉（全部加五个取值）；「Older」用 next_before_sequence 取更早一页、「Newest」回到最新一页，切换来源时回到最新一页；AI 用量行有 usage_event_id 时链接到 usageEventDetailPath，为 null 时不出链接；加载中、失败（带 request_id）、空列表三种状态都画出来；frontend/src/features/wallet/AdjustmentModal.tsx 调账成功后另外按该前缀失效这位客户的流水查询，既有的两条失效（客户详情的 exact 失效与客户列表）原样保留，项目列表仍不被连带失效'
+      - '金额与余额按接口返回的十进制字符串原样显示，不转成 number 参与计算或格式化；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library，放在被测文件旁边）：api 函数的路径、查询串与路径编码；三种状态；切换来源与翻页后的请求参数（含回到最新一页）；用量行有无链接；十进制字符串原样显示、不经 number；AdjustmentModal 成功后这位客户的流水查询被失效、别的客户的流水与项目列表不被失效（写进 AdjustmentModal.test.tsx）；示例 uuid 全零'
+      - 'check_wallet_transactions：沿用 open_fixture 打开的夹具客户详情页；后端值取面板自己发出的 GET wallet/transactions 接口的响应体（被动观察，不自己发请求），表格行数与响应 items 条数一致，items 非空时第一行的序号与 items 第一项的 wallet_sequence 一致，空表也算通过；不改筛选、不翻页。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 只勾 Phase 1 的「Wallet」一项。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #351（本任务是纯前端，引用它只为让审查拿到 §2 的接口契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/walletTransactions.ts
+      - frontend/src/api/walletTransactions.test.ts
+      - frontend/src/features/wallet/WalletTransactionsPanel.tsx
+      - frontend/src/features/wallet/WalletTransactionsPanel.test.tsx
+      - frontend/src/features/wallet/AdjustmentModal.tsx
+      - frontend/src/features/wallet/AdjustmentModal.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_wallet_transactions
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
