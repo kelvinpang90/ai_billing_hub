@@ -954,8 +954,15 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 | 告警 | 判据 | 阈值 / 分级 | 通知 | 抑制 | runbook |
 | --- | --- | --- | --- | --- | --- |
 | 容器不健康（含 **celery-beat 停止调度**） | `docker compose ps` 的 `State` / `Health`，七个服务逐个查 | 非 `running` 或非 `healthy`；`mysql` / `api` / `billing_nginx` / `frontend` = **P1**，`redis` / `celery-worker` / `celery-beat` = **P2** | Telegram（检查 `ai_billing_hub services`） | 状态翻转才通知，红着的期间不重复 | [celery-beat 停止调度](runbook.md) |
-| **`billing_readiness_degraded_redis`** | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"` | P2；非 2xx（数据库不通 / API 挂）= **P1** | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md) |
+| **`billing_readiness_degraded_redis`**；同一维度另有 **`billing_ai_readiness_failed`**（AIH-TASK-075） | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"`；之后再 `GET /healthz/ai`（默认同一入口，`BILLING_MONITOR_AI_READY_URL` 可覆盖），**状态码与响应体都看**：非 2xx，或正文不含 `"status":"ok"`（前端兜底的 200 HTML 也算失败） | readyz：P2；非 2xx（数据库不通 / API 挂）= **P1**。AI 就绪失败 = **P1**，正文只带 URL 与是否 2xx，不带响应体 | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md)；[AI 就绪检查失败](runbook.md) |
 | 磁盘水位（§94 点名的那条）**与 binlog 总量预算** | `df -P` 查根文件系统与部署目录（按设备去重）；另外进 mysql 容器量一次 binlog 占用 | 磁盘 ≥ **80%** = P2、≥ **90%** = P1；binlog ≥ **2 GB** = P2（三个阈值都可调） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7（日志）、§5.2.2 末尾（binlog） |
+
+⚠️ **AI 就绪为什么并进 readyz、而不是自己一个检查**：Healthchecks 免费档的 20 个检查已经用满
+（见「AI 模块部署前置与配置」末段），不新增检查，也不新增 `.env` 键，复用 `BILLING_HEALTHCHECK_READYZ_URL`。
+代价正是上面第 1 条取舍要避免的那种：**`ai_billing_hub readyz` 已经红着时（例如 Redis 降级），AI 就绪
+随后坏掉不会再单独通知** —— 检查不会再翻转一次。反过来也一样。所以收到 readyz 的通知后，要看
+`journalctl -t billing-monitor -p err` 里**每一行**，不能只看第一行就当作唯一原因；修好一个之后检查仍红，
+就是另一行还在。复核（45 秒）同样覆盖 AI 那一行。
 
 ⚠️ **分级只体现在通知正文的前缀里**（`P1 mysql is not running`）。通道只有一条，
 它没有分级概念 —— P1 与 P2 的区别是**人该多快起身**，不是消息走哪条路。

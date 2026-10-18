@@ -8,6 +8,7 @@
 #      （探针早就有了，见 docker-compose.yml；缺的一直是**把 unhealthy 送到人手里**）
 #   2. Redis 不可用 —— `/readyz` **刻意**返回 200（app/api/health.py 写了理由），
 #      所以负载均衡不会发现，告警名 `billing_readiness_degraded_redis`（docs/runbook.md）
+#      —— AI 就绪（`/healthz/ai`）并在同一个维度里，告警名 `billing_ai_readiness_failed`
 #   3. 磁盘被日志 / binlog 撑满 —— §94 明写：必须在**威胁到 MySQL / 文档存储之前**告警
 #
 # 由 cron 每 5 分钟跑一次（deploy/cron.d/ai_billing_hub）。
@@ -68,6 +69,8 @@ READYZ_PORT="$(env_value BILLING_HTTP_PORT)"
 READYZ_URL="${BILLING_MONITOR_READYZ_URL:-http://127.0.0.1:${READYZ_PORT:-8080}/readyz}"
 # 内部告警接口与 `/readyz` 同一个入口、同一份 nginx 名单（deploy/nginx/billing.conf）。
 ALERTS_URL="${BILLING_MONITOR_ALERTS_URL:-http://127.0.0.1:${READYZ_PORT:-8080}/internal/alerts}"
+# AI 就绪（AIH-TASK-069 的 `/healthz/ai`）：同一个入口，nginx 同样只放行回环与私有网段。
+AI_READY_URL="${BILLING_MONITOR_AI_READY_URL:-http://127.0.0.1:${READYZ_PORT:-8080}/healthz/ai}"
 
 # ⚠️ cron 那一行把输出整个以 info 级别送进 syslog。异常必须**另外**以 err 级别写一条，
 # 否则它和每 5 分钟一次的「all clear」混在一起，日志侧的告警规则无从区分。
@@ -123,20 +126,35 @@ check_services() {
 }
 
 check_readyz() {
-    local body redis
+    local body redis response code ai_2xx=no
     if ! body="$(curl -fsS -m 10 "$READYZ_URL" 2>/dev/null)"; then
         # `/readyz` 在数据库不通时返回 503，`curl -f` 会失败；API 整个挂了也走这里。
         echo "P1 readyz is not answering 2xx ($READYZ_URL)"
-        return 0
+    else
+        case "$body" in
+            *'"status":"ok"'*) ;;
+            *)
+                # ⚠️ 告警名是**稳定契约**：runbook 与 Telegram 里按它认这个故障。
+                redis="$(printf '%s' "$body" | grep -o '"redis"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 || true)"
+                echo "P2 billing_readiness_degraded_redis: ${redis:-redis status unknown}"
+                ;;
+        esac
     fi
-    case "$body" in
-        *'"status":"ok"'*) ;;
-        *)
-            # ⚠️ 告警名是**稳定契约**：runbook 与 Telegram 里按它认这个故障。
-            redis="$(printf '%s' "$body" | grep -o '"redis"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 || true)"
-            echo "P2 billing_readiness_degraded_redis: ${redis:-redis status unknown}"
-            ;;
-    esac
+
+    # AI 就绪（AIH-TASK-075）：key 文件或 AI 专用库坏了，`/readyz` 照样是绿的。
+    # Healthchecks 免费档已用满，所以并进 readyz 维度，不单开一个检查。
+    # ⚠️ 状态码与正文**都要看**：入口的前端兜底对未知路径也回 200 的 SPA HTML。
+    # 不用 `-f`，状态码由 `-w` 追加在正文后面的最后一行；连不上时 curl 写的是 000。
+    response="$(curl -sS -m 10 -w '\n%{http_code}' "$AI_READY_URL" 2>/dev/null || true)"
+    code="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    case "$code" in 2[0-9][0-9]) ai_2xx=yes ;; esac
+    if [ "$ai_2xx" = yes ]; then
+        case "$body" in *'"status":"ok"'*) return 0 ;; esac
+    fi
+    # ⚠️ 告警名是**稳定契约**：runbook 与 Telegram 里按它认这个故障。
+    # ⚠️ 不回显响应正文：它可能是整页 HTML，也可能带着内部报错。
+    echo "P1 billing_ai_readiness_failed: $AI_READY_URL (2xx: $ai_2xx)"
 }
 
 check_binlog() {
@@ -262,7 +280,7 @@ publish() {
 
 publish BILLING_HEALTHCHECK_SERVICES_URL services "$SERVICES_OUT" \
     "all containers healthy ($(echo "$SERVICES_P1 $SERVICES_P2" | wc -w) services)"
-publish BILLING_HEALTHCHECK_READYZ_URL readyz "$READYZ_OUT" "readyz ok (database + redis)"
+publish BILLING_HEALTHCHECK_READYZ_URL readyz "$READYZ_OUT" "readyz ok (database + redis + ai)"
 publish BILLING_HEALTHCHECK_DISK_URL disk "$DISK_OUT" \
     "disk below ${DISK_WARN_PERCENT}% ($(df -P / | awk 'NR==2 {print $5}'))"
 
