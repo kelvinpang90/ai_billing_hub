@@ -70,6 +70,8 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "ai_client_key",
         # outbox 的 event_id：app/ai_api/ops.py 的死信重投与处理确认（AIH-TASK-067）。
         "ai_usage_outbox",
+        # 税务政策版本的 public_id：app/services/tax_policy.py（AIH-TASK-078）。
+        "tax_policy_version",
     }
 )
 
