@@ -86,6 +86,8 @@ export const AUDIT_ACTIONS = [
   "AI_USAGE_HELD_DISCARD",
   "AI_USAGE_HELD_IMPORT",
   "AI_USAGE_REVIEW_ACK",
+  "TAX_POLICY_CREATE",
+  "TAX_POLICY_PUBLISH",
 ] as const;
 
 /** 系统动作（计费状态跃迁）的 `actor_role`。 */

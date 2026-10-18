@@ -224,6 +224,11 @@ class AuditAction(enum.StrEnum):
     AI_USAGE_HELD_DISCARD = "AI_USAGE_HELD_DISCARD"
     AI_USAGE_HELD_IMPORT = "AI_USAGE_HELD_IMPORT"
     AI_USAGE_REVIEW_ACK = "AI_USAGE_REVIEW_ACK"
+    # AIH-TASK-078（设计闸门 #332 v3）：写入方都是 app/services/tax_policy.py，与版本行同一
+    # 事务；`entity_type = tax_policy_version`、`entity_id = public_id`。两个都不在 spec §66 的
+    # 清单里，按 `PROJECT_CREATE` / `FX_RATE_*` 的先例补上，记在 PR 描述里。
+    TAX_POLICY_CREATE = "TAX_POLICY_CREATE"
+    TAX_POLICY_PUBLISH = "TAX_POLICY_PUBLISH"
 
 
 class AuditLog(Base):

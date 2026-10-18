@@ -4716,7 +4716,7 @@ tasks:
     title: 税务政策第二层：首条政策的发布服务与按时刻解析的读取函数
     purpose: >-
       按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 078：仓储 app/repositories/tax_policy.py（锁、加锁读、草稿与发布、parse_treatment、check_rate_consistency、resolve_tax_policy）与服务 app/services/tax_policy.py（publish_initial_tax_policy：锁内建草稿并发布，同一事务写两条审计）；新增两个审计动作并同步审计分类与前端审计动作清单。没有任何入口调用它，入口是 AIH-TASK-079 的 CLI。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-080
     acceptance_criteria:
@@ -4918,6 +4918,75 @@ tasks:
       - bypass_ci
       - bypass_review
 
+  - id: AIH-TASK-082
+    title: 管理端前端：客户账户状态的显示与启用停用操作
+    purpose: >-
+      补 Phase 1「管理端客户管理」缺的账户状态前端：AIH-TASK-020（设计闸门 #136 已批准 v2）已经提供客户对象的 account_status 字段与 POST /api/v1/admin/customers/{customer_id}/account-status 接口，前端既不显示、也没有入口。客户列表加一列、详情页显示账户状态并提供启用 / 停用操作（必填原因、停用二次确认）。只做前端，外加验收脚本的一个只读步骤。不含低余额阈值、钱包流水与关户。
+    status: ready
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端账户状态」一节与客户对象的 account_status 字段说明为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/、planning-v1 块与 docs/TODO.md'
+      - 'frontend/src/api/adminCustomers.ts：CustomerSummary 加 account_status（PENDING_ACTIVATION、ENABLED、DISABLED、CLOSED 四个取值的联合类型）；新增 postAccountStatus(customerId, body)，请求体只有 account_status（类型上只收 ENABLED / DISABLED）与 reason，客户 id 的路径编码沿用同文件现有函数；不自动重试'
+      - '客户列表加账户状态一列，详情页资料卡显示账户状态；四个取值各有标签，导出一个 AccountStatusTag，写法沿用 BillingStatusTag；后端返回未知取值时原样显示、不崩'
+      - '新增 frontend/src/features/customers/AccountStatusModal.tsx：详情页按当前状态显示停用或启用按钮（PENDING_ACTIVATION 与 CLOSED 不显示按钮）；弹窗里原因必填（去首尾空白后 1–255），并提示原因只写业务说明、不写联系人、电话、邮箱等个人数据；停用要二次确认，并写明停用后该客户的 AI 服务会被拒（docs/api.md 有效状态里的 ACCOUNT_DISABLED）；提交中按钮禁用防重复提交；成功后关闭弹窗，让该客户详情与客户列表的查询失效重取；404、409、422 显示后端的 error.code 与 request_id；5xx 与网络错误提示可以原样重试并保留表单内容（目标等于当前状态时后端不写，见 docs/api.md 的语义一节）'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library，放在被测文件旁边）：postAccountStatus 的路径、请求体与路径编码；列表与详情的标签（含未知取值）；按钮随四种状态显示与隐藏；原因为空、全空白或超过 255 时不能提交；停用要经过二次确认；成功后查询失效；404、409、422、5xx 与网络错误的显示；示例 uuid 全零'
+      - 'check_account_status：沿用 open_fixture 打开的夹具客户详情页；后端值取详情页自己发出的 GET 客户详情接口的响应体（被动观察，不自己发请求），页面显示的账户状态与响应里的 account_status 一致，且页面上有与之对应的那一个操作按钮（ENABLED 对应停用、DISABLED 对应启用）；不点这个按钮、不打开弹窗。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤，并在只读点击清单里写明这个按钮只查不点；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。设计闸门：不适用 —— 纯前端，只调用设计闸门 #136 已批准、AIH-TASK-020 已实现的接口，跃迁规则全在后端，前端不新增规则；PR 正文要把这条理由写出来'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminCustomers.ts
+      - frontend/src/api/adminCustomers.test.ts
+      - frontend/src/features/customers/AccountStatusModal.tsx
+      - frontend/src/features/customers/AccountStatusModal.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/features/customers/CustomerListPage.tsx
+      - frontend/src/features/customers/CustomerListPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_account_status
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
   - id: AIH-TASK-083
     title: 钱包流水第一层：账本按来源分页用的索引迁移
     purpose: >-
@@ -5028,6 +5097,7 @@ tasks:
       按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「前端」：调用 AIH-TASK-084 的接口，在管理端客户详情页加钱包流水面板（来源筛选、按序号游标往旧翻页、AI 用量行跳到用量事件详情）；勾掉 docs/TODO.md Phase 1 的「Wallet」。只做前端，外加验收脚本的一个只读步骤。
     status: ready
     depends_on:
+      - AIH-TASK-082
       - AIH-TASK-084
     acceptance_criteria:
       - '语义一律以 docs/api.md 的「管理端钱包流水」一节为准（AIH-TASK-084 写入）；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/routes/paths.ts'
