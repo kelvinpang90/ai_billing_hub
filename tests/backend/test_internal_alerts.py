@@ -463,6 +463,28 @@ def test_the_internal_endpoint_passes_the_configured_ai_pending_threshold(
     assert "ai_usage_outbox P2 dead 0, held 0, review required 0, oldest pending" in response.text
 
 
+# --- combining levels (AIH-TASK-076) ----------------------------------------------
+
+
+def piece(level: AlertLevel, text: str) -> alerts._CurrencyResult:
+    return alerts._CurrencyResult(level, text)
+
+
+def test_combine_takes_p1_as_worse_than_p2() -> None:
+    results = [piece(OK, "USD fine"), piece(P2, "EUR minor"), piece(AlertLevel.P1, "SGD severe")]
+
+    assert alerts._combine(results) == AlertResult(AlertLevel.P1, "EUR minor; SGD severe")
+
+
+def test_combine_takes_p2_over_ok_and_ok_when_all_ok() -> None:
+    assert alerts._combine([piece(OK, "USD fine"), piece(P2, "EUR minor")]) == AlertResult(
+        P2, "EUR minor"
+    )
+    assert alerts._combine([piece(OK, "USD fine"), piece(OK, "EUR fine")]) == AlertResult(
+        OK, "USD fine; EUR fine"
+    )
+
+
 # --- fx_fetch -----------------------------------------------------------------------
 
 
