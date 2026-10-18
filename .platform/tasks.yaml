@@ -4617,7 +4617,7 @@ tasks:
     title: 修正告警等级的严重度顺序，让 P1 比 P2 更严重
     purpose: >-
       修一个潜在缺陷：app/services/alerts.py 的 AlertLevel 注释写「成员按严重度递增」，实际成员顺序是 OK、P1、P2，而 _SEVERITY 由成员顺序生成，于是 P2 被当成比 P1 更严重，与仓库里 P1 更严重的约定（docs/deployment.md 的磁盘 90% 报 P1、80% 报 P2）相反。_combine 取最坏等级时会因此选错；目前只有 fx_fetch 与 fx_stale 两个维度经过 _combine，且只产出 OK 与 P2，所以还没触发。只改这一处顺序与注释，不改任何维度的判定。
-    status: ready
+    status: done
     acceptance_criteria:
       - '先写能重现的测试：tests/backend/test_internal_alerts.py 新增用例，直接调用 app.services.alerts 的 _combine，传入同时含 P1 与 P2 的结果，断言返回 P1、且摘要只含非 OK 的片段；再断言 OK 与 P2 混合时返回 P2、全 OK 时返回 OK。修复前第一条断言失败，PR 正文写明这一点'
       - '修法：_SEVERITY 改为显式写出 OK、P2、P1 三级的递增顺序，不再依赖枚举成员的声明顺序；AlertLevel 的注释改成与事实一致；不改枚举的成员名与取值（P1、P2 的字符串值是 /internal/alerts 输出与 Healthchecks 正文的一部分，属于稳定契约）'
