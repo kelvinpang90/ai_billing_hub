@@ -4663,7 +4663,7 @@ tasks:
     title: 税务政策第一层：版本表与锁表的迁移和模型，含数据库触发器
     purpose: >-
       按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 077：迁移 alembic/versions/20261017_0022_tax_policy.py（revision 0022_tax_policy，接在 0021_ai_module 之后）建 tax_policy_locks 与 tax_policy_versions 两张表、九条 CHECK、open_slot 生成列与唯一索引、六个 MySQL 触发器；模型 app/models/tax_policy.py 并在 alembic/env.py 注册。只建结构，不写任何政策；MySQL 行为测试与表结构文档属于 AIH-TASK-080，仓储与服务属于 AIH-TASK-078。
-    status: ready
+    status: done
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）逐条一致，以 §2「数据库」与 §8「迁移与上线」为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '迁移 0022：先做权限预检（任何 DDL 之前），再建 tax_policy_locks 并写入 id = 1，再建 tax_policy_versions（列、两个外键、public_id 唯一、open_slot 生成列与 ux_tax_policy_versions_open_slot、九条 CHECK），最后建六个触发器（含 BEFORE UPDATE 的规则 1–5 与发布跃迁上的税务一致性 3b）；不写任何政策；文件头写 §132 第 13 条的六段分析；降级在有任何版本行时于 DDL 之前拒绝，空表时只删这两张表'
