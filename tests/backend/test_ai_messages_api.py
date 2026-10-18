@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import datetime as dt
 import hashlib
 import inspect
@@ -34,7 +35,11 @@ from app.ai_api.access import (
     ServiceBlocked,
     resolve_access,
 )
-from app.ai_api.database import AiDatabaseExecutor, create_ai_session_factory
+from app.ai_api.database import (
+    AiDatabaseCapacityExceeded,
+    AiDatabaseExecutor,
+    create_ai_session_factory,
+)
 from app.ai_api.held import HeldBuffer
 from app.ai_api.models import AiClientKey, AiClientKeyStatus
 from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus, write_pending
@@ -1039,7 +1044,8 @@ def test_hung_outbox_write_holds_usage_within_its_limit(
 def test_a_stuck_database_caps_threads_rejects_overflow_and_recovers(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 读时限 1 秒：被接纳的请求等满 1 秒才 503，超额的请求应远早于此返回。
+    # 读时限 1 秒：被接纳的请求等满读时限才 503，超额的请求在准入处就被拒绝。
+    # 不比较绝对耗时（整个事件循环一卡，12 个请求一起变慢），只看准入计数与完成先后。
     built = _build_world(
         "sqlite",
         tmp_path,
@@ -1054,52 +1060,77 @@ def test_a_stuck_database_caps_threads_rejects_overflow_and_recovers(
     limit = 2 + 2
     blocker = Blocker(resolve_access)
     monkeypatch.setattr("app.ai_api.routes.resolve_access", blocker)
-    samples: list[int] = []
+    tag: contextvars.ContextVar[str] = contextvars.ContextVar("tag", default="")
+    refused: list[str] = []
+    entered: list[str] = []
+    occupied: list[int] = []
+    real_submit = executor.submit
 
-    async def wave(client: httpx2.AsyncClient, count: int) -> list[tuple[int, str, float]]:
-        async def one() -> tuple[int, str, float]:
-            started = time.monotonic()
+    def submit(function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        request = tag.get()
+
+        def traced(*inner_args: Any, **inner_kwargs: Any) -> Any:
+            entered.append(request)
+            return function(*inner_args, **inner_kwargs)
+
+        try:
+            future = real_submit(traced, *args, **kwargs)
+        except AiDatabaseCapacityExceeded:
+            refused.append(request)
+            raise
+        occupied.append(executor._active)
+        return future
+
+    monkeypatch.setattr(executor, "submit", submit)
+
+    async def wave(client: httpx2.AsyncClient, name: str) -> list[tuple[str, int, str]]:
+        finished: list[tuple[str, int, str]] = []
+
+        async def one(index: int) -> None:
+            request = f"{name}-{index}"
+            tag.set(request)
             response = await client.post(
                 "/v1/messages", headers=key_headers(TENANT_A), json=body(model=MODEL)
             )
-            elapsed = time.monotonic() - started
-            return response.status_code, response.json()["error"]["code"], elapsed
+            finished.append((request, response.status_code, response.json()["error"]["code"]))
 
-        return list(await asyncio.gather(*(one() for _ in range(count))))
+        await asyncio.gather(*(one(index) for index in range(12)))
+        return finished
 
-    async def sample(stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            samples.append(executor._active)
-            await asyncio.sleep(0.005)
-
-    async def scenario() -> tuple[list, list, float, int]:
+    async def scenario() -> tuple[list, list, tuple[int, int, int]]:
         transport = httpx2.ASGITransport(app=world.app)
         async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
-            stop = asyncio.Event()
-            sampler = asyncio.create_task(sample(stop))
-            first = await wave(client, 12)
-            health_started = time.monotonic()
+            first = await wave(client, "first")
+            submitted = len(occupied) + len(refused)
             health = await client.get("/healthz")
-            health_elapsed = time.monotonic() - health_started
-            second = await wave(client, 12)
-            stop.set()
-            await sampler
-            return first, second, health_elapsed, health.status_code
+            health_view = (
+                health.status_code,
+                blocker.running,
+                len(occupied) + len(refused) - submitted,
+            )
+            second = await wave(client, "second")
+            return first, second, health_view
 
     try:
-        first, second, health_elapsed, health_status = asyncio.run(scenario())
+        first, second, health_view = asyncio.run(scenario())
 
-        for results in (first, second):
-            assert {(status, code) for status, code, _ in results} == {
+        for name, finished in (("first", first), ("second", second)):
+            assert {(status, code) for _, status, code in finished} == {
                 (503, "AI_STORE_UNAVAILABLE")
             }
-            assert all(elapsed < 5.0 for _, _, elapsed in results)
-            # 超额的请求立刻 503（不排队），被接纳的等满读时限。
-            assert sum(elapsed < 0.5 for _, _, elapsed in results) >= 12 - limit
-        assert max(samples) <= limit
+            order = [request for request, _, _ in finished]
+            rejected = {request for request in refused if request.startswith(f"{name}-")}
+            # 计数：至少 12 - limit 个请求被准入上限拒绝，且一个也没进过 resolve_access。
+            assert len(rejected) >= 12 - limit
+            assert rejected.isdisjoint(entered)
+            # 先后：被拒绝的请求（不排队）全部在本轮第一个被接纳的请求（等满读时限）返回之前完成。
+            assert len(rejected) < len(order)
+            assert set(order[: len(rejected)]) == rejected
+        assert max(occupied) <= limit
         assert blocker.peak <= 2
         assert blocker.running == 2
-        assert (health_status, health_elapsed < 0.5) == (200, True)
+        # 数据库卡住时健康检查照常 200，且不经过 AI 执行器。
+        assert health_view == (200, 2, 0)
         assert world.provider_bodies == []
 
         blocker.release.set()
@@ -1109,8 +1140,13 @@ def test_a_stuck_database_caps_threads_rejects_overflow_and_recovers(
         assert len(world.rows()) == 1
     finally:
         blocker.release.set()
-        for _ in built:
-            pass
+        # 先等执行器的线程真正结束再拆 world：放出来的线程会去读同一条 StaticPool 连接，
+        # 与 _clean / engine.dispose() 并发会弄崩 worker 进程。
+        try:
+            executor._executor.shutdown(wait=True, cancel_futures=True)
+        finally:
+            for _ in built:
+                pass
 
 
 # --- 应用生命周期（app/main.py） ---
