@@ -4826,7 +4826,7 @@ tasks:
     title: 税务政策第一层补充：MySQL 触发器与约束的行为测试和表结构文档
     purpose: >-
       按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 080：在真 MySQL 上逐条验证 AIH-TASK-077 建的触发器、CHECK、open_slot 唯一索引、区间不重叠、锁与外键（新文件 tests/backend/test_tax_policy_db.py），并在 docs/database-schema.md 新增两张表一节。只加测试与文档，不改任何运行代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-077
     acceptance_criteria:
