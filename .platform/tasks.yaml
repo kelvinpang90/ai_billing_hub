@@ -4876,7 +4876,7 @@ tasks:
     title: 修好 AI 接口过载测试的偶发失败，不再依赖 CI 机器速度
     purpose: >-
       tests/backend/test_ai_messages_api.py 的 test_a_stuck_database_caps_threads_rejects_overflow_and_recovers 在 CI 上偶发失败，最近 60 次里 3 次：两次在 main 上让 pytest-xdist 的 worker 进程崩溃（run 38881302260、38858025848，报 worker gw2 crashed），一次在 PR #334 上断言 sum(elapsed < 0.5) >= 12 - limit 得到 0 >= 8（12 个请求没有一个在 0.5 秒内返回）。先找出两种失败的根因，再只改这个测试，让它验证同样的行为（超额请求立即 503 不排队、占用的线程不超过上限、健康检查不受影响、解除阻塞后恢复），但不依赖机器速度、不会拖垮 worker 进程。
-    status: ready
+    status: done
     acceptance_criteria:
       - '先分析根因并写进 PR 正文：读 app/ai_api/database.py 的 AiDatabaseExecutor（准入计数在线程真正结束时才释放）、app/ai_api/routes.py 里该路径的调用顺序与测试里的 Blocker、_drain、_build_world，说明 ① 为什么一轮 12 个请求可能全部超过 0.5 秒 ② 为什么 xdist worker 会崩溃（例如被阻塞的线程在用例结束或进程退出时仍未释放）；每条结论引用文件与行号。Worker 沙箱跑不了 tests.backend，结论以读代码为准，由 CI 的后端分片验证'
       - '如果根因在被测代码（app/ 下任何文件）而不是测试本身：停下，不改 app/，在 PR 正文写明是哪一处、为什么，并把 PR 留作只含分析的 Draft（AI 模块的行为受设计闸门 #281 约束，要改得另开任务）'
