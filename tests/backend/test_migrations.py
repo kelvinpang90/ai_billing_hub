@@ -919,7 +919,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验；
         # 汇率的七个由 0015 建，在 test_0015_* 里验；两张锁表的 BEFORE UPDATE 由 0016 建，在
         # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验；用量事件上的三个由
-        # 0018 建，在 test_0018_* 里验。
+        # 0018 建，在 test_0018_* 里验；税务政策两张表的六个由 0022 建，在 test_0022_* 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -932,6 +932,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0016,
             *_EXPECTED_TRIGGERS_0017,
             *_EXPECTED_TRIGGERS_0018,
+            *_EXPECTED_TRIGGERS_0022,
         }
         assert set(triggers) == expected
     finally:
