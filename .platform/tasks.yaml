@@ -5101,10 +5101,10 @@ tasks:
       - AIH-TASK-084
     acceptance_criteria:
       - '语义一律以 docs/api.md 的「管理端钱包流水」一节为准（AIH-TASK-084 写入）；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/routes/paths.ts'
-      - '新增 frontend/src/api/walletTransactions.ts 封装该接口，路径编码沿用 frontend/src/api/adminCustomers.ts；省略的可选参数不进查询串；查询 key 挂在该客户的 customerDetailQueryKey 之下，使手工调账成功后既有的失效逻辑一并刷新流水'
-      - '新增 frontend/src/features/wallet/WalletTransactionsPanel.tsx 并挂到 CustomerDetailPage：列为时间、序号、类型、金额、余额（后）、来源、原因、操作者；来源下拉（全部加五个取值）；「Older」用 next_before_sequence 取更早一页、「Newest」回到最新一页，切换来源时回到最新一页；AI 用量行有 usage_event_id 时链接到 usageEventDetailPath，为 null 时不出链接；加载中、失败（带 request_id）、空列表三种状态都画出来'
+      - '新增 frontend/src/api/walletTransactions.ts 封装该接口，路径编码沿用 frontend/src/api/adminCustomers.ts；省略的可选参数不进查询串；导出一个按客户的流水查询 key 前缀函数，各页、各筛选的 key 都以它开头'
+      - '新增 frontend/src/features/wallet/WalletTransactionsPanel.tsx 并挂到 CustomerDetailPage：列为时间、序号、类型、金额、余额（后）、来源、原因、操作者；来源下拉（全部加五个取值）；「Older」用 next_before_sequence 取更早一页、「Newest」回到最新一页，切换来源时回到最新一页；AI 用量行有 usage_event_id 时链接到 usageEventDetailPath，为 null 时不出链接；加载中、失败（带 request_id）、空列表三种状态都画出来；frontend/src/features/wallet/AdjustmentModal.tsx 调账成功后另外按该前缀失效这位客户的流水查询，既有的两条失效（客户详情的 exact 失效与客户列表）原样保留，项目列表仍不被连带失效'
       - '金额与余额按接口返回的十进制字符串原样显示，不转成 number 参与计算或格式化；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
-      - '测试（vitest + Testing Library，放在被测文件旁边）：api 函数的路径、查询串与路径编码；三种状态；切换来源与翻页后的请求参数（含回到最新一页）；用量行有无链接；十进制字符串原样显示、不经 number；调账成功后流水查询被失效；示例 uuid 全零'
+      - '测试（vitest + Testing Library，放在被测文件旁边）：api 函数的路径、查询串与路径编码；三种状态；切换来源与翻页后的请求参数（含回到最新一页）；用量行有无链接；十进制字符串原样显示、不经 number；AdjustmentModal 成功后这位客户的流水查询被失效、别的客户的流水与项目列表不被失效（写进 AdjustmentModal.test.tsx）；示例 uuid 全零'
       - 'check_wallet_transactions：沿用 open_fixture 打开的夹具客户详情页；后端值取面板自己发出的 GET wallet/transactions 接口的响应体（被动观察，不自己发请求），表格行数与响应 items 条数一致，items 非空时第一行的序号与 items 第一项的 wallet_sequence 一致，空表也算通过；不改筛选、不翻页。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
       - 'docs/TODO.md 只勾 Phase 1 的「Wallet」一项。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #351（本任务是纯前端，引用它只为让审查拿到 §2 的接口契约）'
     allowed_change_paths:
@@ -5113,6 +5113,8 @@ tasks:
       - frontend/src/api/walletTransactions.test.ts
       - frontend/src/features/wallet/WalletTransactionsPanel.tsx
       - frontend/src/features/wallet/WalletTransactionsPanel.test.tsx
+      - frontend/src/features/wallet/AdjustmentModal.tsx
+      - frontend/src/features/wallet/AdjustmentModal.test.tsx
       - frontend/src/features/customers/CustomerDetailPage.tsx
       - frontend/src/features/customers/CustomerDetailPage.test.tsx
       - frontend/src/i18n/locales/en.json
