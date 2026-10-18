@@ -93,14 +93,16 @@ _SUCCESSFUL_OUTCOMES: Final = (
 
 
 class AlertLevel(enum.StrEnum):
-    """Severity of one dimension. Members are in increasing severity."""
+    """Severity of one dimension. P1 is more severe than P2; the order is `_SEVERITY`, not the
+    declaration order of the members."""
 
     OK = "OK"
     P1 = "P1"
     P2 = "P2"
 
 
-_SEVERITY: Final = {level: rank for rank, level in enumerate(AlertLevel)}
+# 递增严重度：OK < P2 < P1（docs/deployment.md：磁盘 90% 报 P1、80% 报 P2）。
+_SEVERITY: Final = {AlertLevel.OK: 0, AlertLevel.P2: 1, AlertLevel.P1: 2}
 
 
 @dataclass(frozen=True)
