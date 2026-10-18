@@ -65,6 +65,14 @@ from app.models.provider_prices import (
     ProviderPriceComponent,
     ProviderPriceVersion,
 )
+from app.models.tax_policy import RATE_PRECISION as TAX_RATE_PRECISION
+from app.models.tax_policy import RATE_SCALE as TAX_RATE_SCALE
+from app.models.tax_policy import (
+    TaxJurisdiction,
+    TaxPolicyStatus,
+    TaxPolicyType,
+    TaxPolicyVersion,
+)
 from app.models.tenancy import BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.usage import (
     QUANTITY_PRECISION,
@@ -86,13 +94,22 @@ _RULE_MODELS = (PricingRule, PricingRuleComponent)
 _FX_MODELS = (FxRateVersion, FxFetchAttempt)
 # 用量事件（AIH-TASK-029）的枚举列：事件的形态、数量类型、状态，冲突行的不符类型。
 _USAGE_MODELS = (UsageEvent, UsageEventConflict)
+# 税务政策（AIH-TASK-077）的枚举列：辖区、政策类型、状态。
+_TAX_MODELS = (TaxPolicyVersion,)
 
 
 def enum_columns():
     """Every VARCHAR-backed enum column in the auth, tenant, project, ledger, catalog, price,
-    pricing rule, FX and usage event tables."""
+    pricing rule, FX, usage event and tax policy tables."""
     tables = (User, AuditLog, DomainOutbox, Tenant, Project, WalletTransaction)
-    models = (*_CATALOG_MODELS, *_PRICE_MODELS, *_RULE_MODELS, *_FX_MODELS, *_USAGE_MODELS)
+    models = (
+        *_CATALOG_MODELS,
+        *_PRICE_MODELS,
+        *_RULE_MODELS,
+        *_FX_MODELS,
+        *_USAGE_MODELS,
+        *_TAX_MODELS,
+    )
     for model in (*tables, *models):
         for column in model.__table__.columns:
             if isinstance(column.type, SAEnum):
@@ -193,6 +210,40 @@ def test_the_usage_event_enum_columns_are_collected() -> None:
         "usage_events.status": 32,
         "usage_event_conflicts.mismatch": 32,
     }
+
+
+def test_the_tax_policy_enum_columns_are_collected() -> None:
+    """设计闸门 #332 v3 §2 写死的列宽：辖区、政策类型、状态都是 16（与迁移 0022 一致）。"""
+    tables = {model.__tablename__ for model in _TAX_MODELS}
+    widths = {
+        label: column.type.length
+        for label, column in _ENUM_COLUMNS
+        if label.split(".")[0] in tables
+    }
+
+    assert widths == {
+        "tax_policy_versions.jurisdiction": 16,
+        "tax_policy_versions.policy_type": 16,
+        "tax_policy_versions.status": 16,
+    }
+
+
+def test_the_tax_policy_enums_hold_only_the_design_values() -> None:
+    """没有写入方的取值不预先加；状态是 spec §74.9 的三个，不加 `DISCARDED`（设计 §9）。"""
+    assert [item.value for item in TaxJurisdiction] == ["MY"]
+    assert [item.value for item in TaxPolicyType] == ["SST"]
+    assert [item.value for item in TaxPolicyStatus] == ["DRAFT", "PUBLISHED", "RETIRED"]
+
+
+def test_the_tax_rate_is_decimal_9_6() -> None:
+    """INV-10：税率是 DECIMAL(9,6)（设计 §2），可空，读出来是 Decimal。"""
+    column = TaxPolicyVersion.__table__.c.rate
+
+    assert isinstance(column.type, Numeric)
+    assert (column.type.precision, column.type.scale) == (TAX_RATE_PRECISION, TAX_RATE_SCALE)
+    assert (TAX_RATE_PRECISION, TAX_RATE_SCALE) == (9, 6)
+    assert column.type.asdecimal is True
+    assert column.nullable is True
 
 
 def test_the_project_integration_status_column_is_collected() -> None:
@@ -338,6 +389,9 @@ def test_every_enum_value_fits_its_column(label: str, column) -> None:
         FxFetchOutcome,
         UsageEventStatus,
         ConflictMismatch,
+        TaxJurisdiction,
+        TaxPolicyType,
+        TaxPolicyStatus,
     ],
     ids=lambda cls: cls.__name__,
 )

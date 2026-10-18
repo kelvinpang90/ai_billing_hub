@@ -15,6 +15,7 @@ import datetime as dt
 import importlib.util
 import os
 import pathlib
+import re
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -78,6 +79,7 @@ from app.models.pricing_rules import (
     PricingRuleLock,
 )
 from app.models.provider_prices import ProviderPriceComponent, ProviderPriceVersion
+from app.models.tax_policy import TaxPolicyLock, TaxPolicyVersion
 from app.models.tenancy import AccountStatus, BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.usage import TEXT_COLLATION, UsageEvent, UsageEventConflict
 from app.models.wallet import REFERENCE_ID_COLLATION, Wallet, WalletTransaction
@@ -1933,9 +1935,10 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015、0017、0020 与 0021 的表随降级到 0009 一并删掉）。
+        # 只删触发器：表与列都不动（0012–0015、0017、0020、0021 与 0022 的表随降级到 0009
+        # 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
-        later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021
+        later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -2031,10 +2034,10 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
     try:
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
-        # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020 与 0021 的表随降级到
-        # 0010 一并删掉）。
+        # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020、0021 与 0022 的表随
+        # 降级到 0010 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
-        later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021
+        later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
@@ -5215,3 +5218,549 @@ def test_0020_gives_every_existing_project_one_delivery_row_and_downgrades(
             connection.execute(delete(Project).where(Project.public_id.in_(project_public_ids)))
             connection.execute(delete(Tenant).where(Tenant.public_id.in_(tenant_public_ids)))
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0022_tax_policy（AIH-TASK-077，设计闸门 #332 v3）
+#
+# The first cases need no database: the revision chain; the nine checks and the generated column
+# equal the model's constants and the design's text; the six triggers (table, timing, event) and
+# the order of the BEFORE UPDATE rules; the 0006 precheck before any DDL and skipped in `--sql`
+# mode; downgrade refuses before any DDL while a version exists and otherwise drops only the two
+# tables; `create_all` on SQLite writes the lock row. On a real MySQL: the shapes, keys, foreign
+# keys and their rules, checks and triggers, and that upgrade / downgrade add and drop only these.
+# What the triggers and checks refuse or let through is AIH-TASK-080 (test_tax_policy_db.py).
+# ---------------------------------------------------------------------------
+
+_REVISION_0022 = "0022_tax_policy"
+_MIGRATION_0022 = pathlib.Path("alembic/versions/20261017_0022_tax_policy.py")
+_TAX_MODELS = (TaxPolicyLock, TaxPolicyVersion)
+_TABLES_0022 = {model.__tablename__ for model in _TAX_MODELS}
+# Creation order; downgrade must be exactly the reverse (foreign keys).
+_CREATE_ORDER_0022 = ["tax_policy_locks", "tax_policy_versions"]
+
+# Trigger → (table, timing, event). The six of design §2, no more, no fewer.
+_EXPECTED_TRIGGERS_0022 = {
+    "trg_tax_policy_locks_before_insert": ("tax_policy_locks", "BEFORE", "INSERT"),
+    "trg_tax_policy_locks_before_update": ("tax_policy_locks", "BEFORE", "UPDATE"),
+    "trg_tax_policy_locks_before_delete": ("tax_policy_locks", "BEFORE", "DELETE"),
+    "trg_tax_policy_versions_before_insert": ("tax_policy_versions", "BEFORE", "INSERT"),
+    "trg_tax_policy_versions_before_update": ("tax_policy_versions", "BEFORE", "UPDATE"),
+    "trg_tax_policy_versions_before_delete": ("tax_policy_versions", "BEFORE", "DELETE"),
+}
+
+# Design §2 "CHECK（九条）", written out as the design writes them.
+_DESIGN_CHECKS_0022 = {
+    "ck_tax_policy_versions_jurisdiction": "jurisdiction IN ('MY')",
+    "ck_tax_policy_versions_policy_type": "policy_type IN ('SST')",
+    "ck_tax_policy_versions_rate": "rate IS NULL OR (rate >= 0 AND rate < 1)",
+    "ck_tax_policy_versions_status": "status IN ('DRAFT', 'PUBLISHED', 'RETIRED')",
+    "ck_tax_policy_versions_unpublished": "status <> 'DRAFT' OR (effective_from IS NULL AND"
+    " effective_to IS NULL AND approved_by IS NULL AND approved_at IS NULL)",
+    "ck_tax_policy_versions_approved": "status NOT IN ('PUBLISHED', 'RETIRED') OR"
+    " (approved_by IS NOT NULL AND approved_at IS NOT NULL)",
+    "ck_tax_policy_versions_published_start": "status NOT IN ('PUBLISHED', 'RETIRED') OR"
+    " effective_from IS NOT NULL",
+    "ck_tax_policy_versions_period": "effective_from IS NULL OR effective_to IS NULL OR"
+    " effective_from < effective_to OR (status = 'RETIRED' AND effective_from = effective_to)",
+    "ck_tax_policy_versions_retired_end": "status <> 'RETIRED' OR effective_to IS NOT NULL",
+}
+
+# Rule 4: every column but `effective_to`, `status`, `updated_at` (and the generated
+# `open_slot`, which a MySQL trigger cannot name) is compared on a published row.
+_IMMUTABLE_COLUMNS_0022 = [
+    "id",
+    "public_id",
+    "jurisdiction",
+    "policy_type",
+    "rate",
+    "treatment_json",
+    "source_reference",
+    "effective_from",
+    "created_by",
+    "approved_by",
+    "approved_at",
+    "created_at",
+]
+
+_EXPECTED_0022_COLUMNS = {
+    "tax_policy_locks": {"id": False},
+    "tax_policy_versions": {
+        "id": False,
+        "public_id": False,
+        "jurisdiction": False,
+        "policy_type": False,
+        # NULL for the first policy: not registered, no rate.
+        "rate": True,
+        "treatment_json": False,
+        "status": False,
+        "effective_from": True,
+        "effective_to": True,
+        "open_slot": True,
+        "source_reference": False,
+        # Unlike the FX versions: a policy is only ever created by a person.
+        "created_by": False,
+        "approved_by": True,
+        "approved_at": True,
+        "created_at": False,
+        "updated_at": False,
+    },
+}
+
+_EXPECTED_UNIQUE_0022 = {
+    "tax_policy_locks": set(),
+    "tax_policy_versions": {("public_id",), ("jurisdiction", "policy_type", "open_slot")},
+}
+
+_EXPECTED_FOREIGN_KEYS_0022 = {
+    "tax_policy_locks": {},
+    "tax_policy_versions": {
+        "fk_tax_policy_versions_created_by": (["created_by"], "users", ["id"]),
+        "fk_tax_policy_versions_approved_by": (["approved_by"], "users", ["id"]),
+    },
+}
+
+_EXPECTED_0022_DOWNGRADE = [
+    ("drop_table", ("tax_policy_versions",)),
+    ("drop_table", ("tax_policy_locks",)),
+]
+
+_TAX_REFERENTIAL_RULES_QUERY = text(
+    "SELECT CONSTRAINT_NAME, DELETE_RULE"
+    " FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND TABLE_NAME IN ('tax_policy_locks', 'tax_policy_versions')"
+)
+_TAX_CHECKS_QUERY = text(
+    "SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+    " AND TABLE_NAME IN ('tax_policy_locks', 'tax_policy_versions')"
+)
+
+
+def _load_0022() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0022", _MIGRATION_0022)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _tax_checks() -> dict[str, str]:
+    return {
+        str(constraint.name): _normalised(str(constraint.sqltext))
+        for model in _TAX_MODELS
+        for constraint in model.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+
+
+def test_0022_follows_0021() -> None:
+    migration = _load_0022()
+
+    assert migration.revision == _REVISION_0022
+    assert migration.down_revision == _REVISION_0021
+
+
+def test_0022_checks_and_open_slot_are_the_ones_the_model_declares() -> None:
+    migration = _load_0022()
+    from_migration = {name: _normalised(condition) for name, condition in migration._CHECKS.items()}
+
+    assert from_migration == _tax_checks()
+    assert from_migration == {name: _normalised(rule) for name, rule in _DESIGN_CHECKS_0022.items()}
+    assert len(from_migration) == 9
+    # Every check is on the versions table; the lock table has none.
+    assert not [c for c in TaxPolicyLock.__table__.constraints if isinstance(c, CheckConstraint)]
+    # `PERIOD_CHECK` and `RETIRED_END_CHECK` are word for word the FX ones (design §2).
+    fx = _load_0015()._CHECKS
+    for suffix in ("period", "retired_end"):
+        fx_condition = _normalised(fx[f"ck_fx_rate_versions_{suffix}"][1])
+        assert from_migration[f"ck_tax_policy_versions_{suffix}"] == fx_condition, suffix
+    # No DISCARDED anywhere (design §9).
+    assert not any("DISCARDED" in condition for condition in from_migration.values())
+
+    computed = TaxPolicyVersion.__table__.c.open_slot.computed
+    assert computed is not None
+    assert computed.persisted is True
+    assert _normalised(str(computed.sqltext)) == _normalised(migration._OPEN_SLOT)
+    # Word for word 0015's (design §2).
+    assert migration._OPEN_SLOT == _load_0015()._OPEN_SLOT
+
+
+def test_0022_sqlite_tables_get_the_lock_row_and_the_open_slot() -> None:
+    """`create_all` (the unit tests) writes the one lock row like the migration does, and
+    SQLite computes `open_slot` as 1 only for an untruncated published version. SQLite does not
+    enforce foreign keys here, so the creator and approver are a placeholder id."""
+    treatment = {"schema_version": 1, "sst_registered": False, "tax_charged": False}
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            locks = connection.execute(select(TaxPolicyLock.id)).scalars().all()
+            for number, (status, end, approved) in enumerate(
+                [
+                    ("DRAFT", None, False),
+                    ("PUBLISHED", None, True),
+                    ("PUBLISHED", _NOW, True),
+                    ("RETIRED", _NOW, True),
+                ]
+            ):
+                connection.execute(
+                    insert(TaxPolicyVersion).values(
+                        public_id=f"00000000-0000-0000-0000-{number:012d}",
+                        jurisdiction="MY",
+                        policy_type="SST",
+                        rate=None,
+                        treatment_json=treatment,
+                        status=status,
+                        effective_from=_NOW - dt.timedelta(days=1) if approved else None,
+                        effective_to=end,
+                        source_reference="fictional test policy",
+                        created_by=1,
+                        approved_by=1 if approved else None,
+                        approved_at=_NOW if approved else None,
+                        created_at=_NOW,
+                        updated_at=_NOW,
+                    )
+                )
+            slots = connection.execute(
+                select(TaxPolicyVersion.open_slot).order_by(TaxPolicyVersion.id)
+            ).all()
+            stored = connection.execute(
+                select(TaxPolicyVersion.treatment_json).order_by(TaxPolicyVersion.id).limit(1)
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert locks == [1]
+    assert [slot for (slot,) in slots] == [None, 1, None, None]
+    assert stored == treatment
+
+
+def test_0022_triggers_are_the_six_of_the_design() -> None:
+    """Each is one complete CREATE TRIGGER that refuses with SIGNAL SQLSTATE '45000' (as 0006);
+    the lock table ones are 0015 / 0016's, the version ones follow 0015's and add rule 3b."""
+    triggers = _load_0022()._TRIGGERS
+
+    assert list(triggers) == list(_EXPECTED_TRIGGERS_0022)
+    for name, (table, timing, event) in _EXPECTED_TRIGGERS_0022.items():
+        statement = _normalised(triggers[name])
+        assert statement.startswith(f"CREATE TRIGGER {name} {timing} {event} ON {table}"), name
+        assert "FOR EACH ROW" in statement, name
+        assert "SIGNAL SQLSTATE '45000'" in statement, name
+        # MySQL triggers cannot refer to generated columns through NEW / OLD.
+        assert "NEW.open_slot" not in statement, name
+        assert "OLD.open_slot" not in statement, name
+        assert "DISCARDED" not in statement, name
+
+    # The lock table: 0015's BEFORE INSERT / DELETE and 0016's BEFORE UPDATE, renamed.
+    fx = {**_load_0015()._TRIGGERS, **_load_0016()._TRIGGERS}
+    for event in ("insert", "update", "delete"):
+        expected = fx[f"trg_fx_rate_locks_before_{event}"].replace(
+            "fx_rate_locks", "tax_policy_locks"
+        )
+        assert _normalised(triggers[f"trg_tax_policy_locks_before_{event}"]) == _normalised(
+            expected
+        ), event
+    insert_trigger = _normalised(triggers["trg_tax_policy_versions_before_insert"])
+    assert "IF NOT (NEW.status <=> 'DRAFT') THEN" in insert_trigger
+    delete_trigger = _normalised(triggers["trg_tax_policy_versions_before_delete"])
+    assert "IF" not in delete_trigger.split()
+
+    update = _normalised(triggers["trg_tax_policy_versions_before_update"])
+    # Rules 1–5 in the design's order.
+    rules = [
+        "IF OLD.status = 'RETIRED' THEN",
+        "IF OLD.status = 'DRAFT' AND NEW.status NOT IN ('DRAFT', 'PUBLISHED') THEN",
+        "IF OLD.status = 'DRAFT' AND NEW.status = 'PUBLISHED' AND NEW.effective_to IS NOT NULL",
+        "IF OLD.status = 'DRAFT' AND NEW.status = 'PUBLISHED' THEN",
+        "IF OLD.status = 'PUBLISHED' THEN",
+        "FROM tax_policy_locks WHERE id = 1 FOR UPDATE",
+        "'tax policy periods overlap'",
+    ]
+    positions = [update.index(rule) for rule in rules]
+    assert positions == sorted(positions)
+    # 3b (v2): both flags are JSON booleans, unregistered means no tax, no tax ⇔ no rate.
+    tax = update[positions[3] : positions[4]]
+    for fragment in (
+        "JSON_EXTRACT(NEW.treatment_json, '$.sst_registered')",
+        "JSON_EXTRACT(NEW.treatment_json, '$.tax_charged')",
+        "NOT (JSON_TYPE(reg) <=> 'BOOLEAN')",
+        "NOT (JSON_TYPE(chg) <=> 'BOOLEAN')",
+        "JSON_UNQUOTE(reg) = 'false' AND JSON_UNQUOTE(chg) = 'true'",
+        "(JSON_UNQUOTE(chg) = 'false') <> (NEW.rate IS NULL)",
+        "SIGNAL SQLSTATE '45000'",
+    ):
+        assert fragment in tax, fragment
+    # Rule 4: exactly these columns are compared, and status may only become RETIRED.
+    published = update[positions[4] : positions[5]]
+    immutable = published[: published.index("'a published tax policy version is immutable'")]
+    compared = re.findall(r"NOT \(NEW\.(\w+) <=> OLD\.(\w+)\)", immutable)
+    assert [new for new, _ in compared] == _IMMUTABLE_COLUMNS_0022
+    assert all(new == old for new, old in compared)
+    assert "NOT (NEW.status <=> OLD.status) AND NOT (NEW.status <=> 'RETIRED')" in published
+    # Rule 5: the same intersection test as 0015, per (jurisdiction, policy_type).
+    overlap = update[positions[5] :]
+    assert "o.jurisdiction = NEW.jurisdiction AND o.policy_type = NEW.policy_type" in overlap
+    assert "o.status IN ('PUBLISHED', 'RETIRED')" in overlap
+    assert (
+        "COALESCE(o.effective_from, '1000-01-01') < COALESCE(NEW.effective_to, '9999-12-31')"
+        in overlap
+    )
+    assert (
+        "COALESCE(NEW.effective_from, '1000-01-01') < COALESCE(o.effective_to, '9999-12-31')"
+        in overlap
+    )
+
+
+@pytest.mark.parametrize(
+    ("log_bin", "trusted", "refused"),
+    [(1, 0, True), (1, 1, False), (0, 0, False), (0, 1, False)],
+)
+def test_0022_precheck_refuses_only_binlog_without_the_switch(
+    log_bin: int, trusted: int, refused: bool
+) -> None:
+    migration = _load_0022()
+    if refused:
+        with pytest.raises(RuntimeError, match="log_bin_trust_function_creators"):
+            migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+    else:
+        migration._require_trigger_privilege(_FakeBind(log_bin, trusted))
+
+
+def test_0022_precheck_runs_before_any_ddl(monkeypatch) -> None:
+    """⚠️ MySQL DDL is not transactional: a failed precheck must not leave a table behind."""
+    migration = _load_0022()
+    refused = _RecordingOp(_FakeBind(log_bin=1, trusted=0))
+    monkeypatch.setattr(migration, "op", refused)
+
+    with pytest.raises(RuntimeError):
+        migration.upgrade()
+
+    assert refused.calls == []
+
+    allowed = _RecordingOp(_FakeBind(log_bin=1, trusted=1))
+    monkeypatch.setattr(migration, "op", allowed)
+    migration.upgrade()
+
+    # The lock table, its one row, the versions table, then six triggers.
+    assert allowed.calls == ["create_table", "execute", "create_table"] + ["execute"] * 6
+
+
+def test_0022_offline_upgrade_has_the_design_order_and_seeds_no_policy(monkeypatch) -> None:
+    migration = _load_0022()
+    upgrade = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    # `--sql`: no bind asked for; the lock row before the triggers, the triggers last.
+    assert [name for name, _ in upgrade.calls] == (
+        ["create_table", "execute", "create_table"] + ["execute"] * 6
+    )
+    assert upgrade.first_args("create_table") == _CREATE_ORDER_0022
+    executed = upgrade.first_args("execute")
+    assert executed == ["INSERT INTO tax_policy_locks (id) VALUES (1)"] + list(
+        migration._TRIGGERS.values()
+    )
+    # No policy is seeded (design §9): nothing touches tax_policy_versions but its triggers.
+    assert not upgrade.first_args("bulk_insert")
+    assert not any("INSERT INTO tax_policy_versions" in statement for statement in executed)
+
+
+def test_0022_downgrade_refuses_before_any_ddl_while_a_version_exists(monkeypatch) -> None:
+    """⚠️ MySQL DDL is not transactional: the refusal comes before the first DROP."""
+    migration = _load_0022()
+    assert _normalised(migration._LOSSY) == "SELECT 1 FROM tax_policy_versions LIMIT 1"
+    recorder = _OnlineArgsRecorder(_DataBind({migration._LOSSY}))
+    monkeypatch.setattr(migration, "op", recorder)
+
+    with pytest.raises(RuntimeError, match="Cannot downgrade tax policy"):
+        migration.downgrade()
+
+    assert recorder.calls == []
+
+
+def test_0022_downgrade_on_an_empty_table_drops_only_the_two_tables(monkeypatch) -> None:
+    migration = _load_0022()
+    bind = _DataBind(set())
+    recorder = _OnlineArgsRecorder(bind)
+    monkeypatch.setattr(migration, "op", recorder)
+
+    migration.downgrade()
+
+    assert bind.asked == [migration._LOSSY]
+    assert recorder.calls == _EXPECTED_0022_DOWNGRADE
+
+    # `--sql` cannot read data: the check is skipped, the DDL is the same.
+    offline = _OfflineArgsRecorder()
+    monkeypatch.setattr(migration, "op", offline)
+    migration.downgrade()
+    assert offline.calls == _EXPECTED_0022_DOWNGRADE
+
+
+def _lock_ids_0022() -> list[int]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            return list(connection.execute(select(TaxPolicyLock.id)).scalars())
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0022_only_adds_and_drops_its_two_tables(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    try:
+        command.downgrade(alembic_config, _REVISION_0021)
+        without = _table_names()
+        triggers = _all_triggers()
+        assert "ai_client_keys" in without, "0021's tables must be there"
+        assert not _TABLES_0022 & without
+        assert not set(_EXPECTED_TRIGGERS_0022) & set(triggers)
+
+        command.upgrade(alembic_config, _REVISION_0022)
+        assert _table_names() == without | _TABLES_0022
+        assert _all_triggers() == triggers | _EXPECTED_TRIGGERS_0022
+        assert _lock_ids_0022() == [1]
+
+        command.downgrade(alembic_config, _REVISION_0021)
+        assert _table_names() == without
+        # Triggers go with their tables.
+        assert _all_triggers() == triggers
+    finally:
+        command.upgrade(alembic_config, "head")
+
+
+@needs_mysql
+def test_0022_downgrade_refuses_while_a_version_exists(alembic_config: Config) -> None:
+    """Design §8 "回滚": with a version row the downgrade refuses before any DDL and both tables
+    stay. The row is a draft written with foreign key checks off (no user is needed for this);
+    versions refuse DELETE, so it is removed with TRUNCATE, which is DDL and skips the
+    triggers."""
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+            connection.execute(
+                insert(TaxPolicyVersion).values(
+                    public_id=str(uuid.uuid4()),
+                    jurisdiction="MY",
+                    policy_type="SST",
+                    treatment_json={"schema_version": 1},
+                    status="DRAFT",
+                    source_reference="fictional test policy",
+                    created_by=0,
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            )
+            connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        tables = _table_names()
+        triggers = _all_triggers()
+
+        with pytest.raises(RuntimeError, match="Cannot downgrade tax policy"):
+            command.downgrade(alembic_config, _REVISION_0021)
+
+        assert _table_names() == tables
+        assert _all_triggers() == triggers
+        assert _lock_ids_0022() == [1]
+    finally:
+        command.upgrade(alembic_config, "head")
+        with engine.begin() as connection:
+            connection.execute(text("TRUNCATE TABLE tax_policy_versions"))
+        engine.dispose()
+
+
+@needs_mysql
+def test_0022_column_shape(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        columns = {table: inspector.get_columns(table) for table in _EXPECTED_0022_COLUMNS}
+        for table, expected in _EXPECTED_0022_COLUMNS.items():
+            assert {c["name"]: c["nullable"] for c in columns[table]} == expected, table
+        types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
+
+        locks, versions = _CREATE_ORDER_0022
+        assert isinstance(types[(locks, "id")], Integer)
+        assert not isinstance(types[(locks, "id")], BigInteger)
+        for key in [(versions, "id"), (versions, "created_by"), (versions, "approved_by")]:
+            assert isinstance(types[key], BigInteger), key
+        for key in [
+            (versions, "effective_from"),
+            (versions, "effective_to"),
+            (versions, "approved_at"),
+            (versions, "created_at"),
+            (versions, "updated_at"),
+        ]:
+            assert isinstance(types[key], DateTime), key
+        assert isinstance(types[(versions, "public_id")], CHAR)
+        assert types[(versions, "public_id")].length == 36
+        widths = {
+            (versions, "jurisdiction"): 16,
+            (versions, "policy_type"): 16,
+            (versions, "status"): 16,
+            (versions, "source_reference"): 255,
+        }
+        for key, width in widths.items():
+            assert isinstance(types[key], String), key
+            assert types[key].length == width, key
+        rate = types[(versions, "rate")]
+        assert isinstance(rate, Numeric)
+        assert (rate.precision, rate.scale) == (9, 6)
+        assert isinstance(types[(versions, "treatment_json")], JSON)
+
+        # Exactly one generated column, STORED, an integer.
+        computed = {
+            (table, c["name"]): c.get("computed")
+            for table, found in columns.items()
+            for c in found
+            if c.get("computed")
+        }
+        assert set(computed) == {(versions, "open_slot")}
+        assert computed[(versions, "open_slot")]["persisted"] is True
+        assert "PUBLISHED" in str(computed[(versions, "open_slot")]["sqltext"])
+        assert isinstance(types[(versions, "open_slot")], Integer)
+        assert not isinstance(types[(versions, "open_slot")], BigInteger)
+    finally:
+        engine.dispose()
+
+
+@needs_mysql
+def test_0022_keys_foreign_keys_checks_triggers_and_the_lock_row(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        for table, expected in _EXPECTED_UNIQUE_0022.items():
+            assert _unique_sets(table) == expected, table
+            foreign_keys = {
+                str(fk["name"]): (
+                    fk["constrained_columns"],
+                    fk["referred_table"],
+                    fk["referred_columns"],
+                )
+                for fk in inspector.get_foreign_keys(table)
+            }
+            assert foreign_keys == _EXPECTED_FOREIGN_KEYS_0022[table], table
+
+        indexes = {i["name"]: i for i in inspector.get_indexes("tax_policy_versions")}
+        open_slot = indexes["ux_tax_policy_versions_open_slot"]
+        assert open_slot["column_names"] == ["jurisdiction", "policy_type", "open_slot"]
+        assert open_slot["unique"]
+
+        with engine.connect() as connection:
+            delete_rules = dict(connection.execute(_TAX_REFERENTIAL_RULES_QUERY).all())
+            checks = set(connection.execute(_TAX_CHECKS_QUERY).scalars())
+        # ⚠️ RESTRICT: versions are never deleted, nor the users they name (INV-6).
+        names = {name for keys in _EXPECTED_FOREIGN_KEYS_0022.values() for name in keys}
+        assert delete_rules == dict.fromkeys(names, "RESTRICT")
+        assert checks == set(_tax_checks())
+        ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0022}
+        assert ours == _EXPECTED_TRIGGERS_0022
+    finally:
+        engine.dispose()
+
+    # §7 "迁移": the lock table holds exactly the row `id = 1`.
+    assert _lock_ids_0022() == [1]
