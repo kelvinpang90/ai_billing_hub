@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-10-13
+> 最后更新：2026-10-18
 
 ---
 
@@ -818,6 +818,94 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 - **写入顺序**（区间触发器与 `open_slot` 唯一索引按行检查，服务层每一步立刻 flush）：发布时先截断前一个（写
   `effective_to`），再把本行从草稿改为已发布；撤销预约时先把被撤销的一行改成空区间的 `RETIRED`，再把前一个恢复为
   未截断（只有它仍是 `PUBLISHED`、尽头等于被撤销行的起点时）。
+
+---
+
+## 税务政策（spec §45、§45.1、§74.9；ADR-0008；AIH-TASK-077，迁移 `0022_tax_policy`）
+
+设计依据：[design/AIH-TASK-077-tax-policy.md](design/AIH-TASK-077-tax-policy.md)（设计闸门 #332 v3）§2「数据库」与 §8。
+两张表：`tax_policy_locks`、`tax_policy_versions`，写法照 FX 汇率的表。AIH-TASK-077 只建表、约束与触发器，迁移**不写任何
+政策**；首条政策的发布服务与 `resolve_tax_policy`（AIH-TASK-078）、一次性发布的运维命令（AIH-TASK-079）都在后续任务里。
+MySQL 上的行为由 `tests/backend/test_tax_policy_db.py`（AIH-TASK-080）逐条验证。
+
+共同的约定：
+
+- **`rate` 是小数**（0.08 = 8%），DECIMAL(9,6)，可空：未注册 SST、不收税时为 `NULL`（首条政策就是 `NULL`，ADR-0008 第 5
+  节）。整数部分留 3 位，是为了让「把 8% 录成 `8`」落在有名字的 CHECK 上（MySQL 3819），而不是列宽错误。
+- **行永不删除**：版本由触发器拒绝 DELETE；外键都是 `RESTRICT`，被引用的审批人账号只能停用、不能删除。
+- **发布后不可变**：由下面的触发器保证，只在 MySQL 上。SQLite（单元测试）上没有触发器，服务层按同样的规则写。
+- **`treatment_json` 的形状**（四个键、`document_notice` 两句话）只在应用层校验（设计 §2、§9）：MySQL 与 SQLite 写不出同一条
+  JSON CHECK。数据库只保证是合法 JSON，外加发布跃迁上触发器 ③b 的税务一致性。
+
+### `tax_policy_locks`（单行锁表）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | INT | 主键，不自增；迁移写入唯一一行 `id = 1` |
+
+没有业务字段。服务层发布对这一行 `SELECT … FOR UPDATE`（主事务的第一条语句）；版本表的区间不重叠触发器同样先对它
+`FOR UPDATE`，把绕过服务的直接写入也串行起来。三个触发器保证它恰好一行、不被改写。单元测试的
+`Base.metadata.create_all` 同样写入这一行（`after_create` 事件，见 `app/models/tax_policy.py`）。
+
+### `tax_policy_versions`（§74.9）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库（Phase 4 的 `payments.tax_policy_version_id` 引用它，但不对外） |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_tax_policy_versions_public_id`） |
+| `jurisdiction` | VARCHAR(16) | 非空，`CHECK IN ('MY')`（`ck_tax_policy_versions_jurisdiction`）；没有写入方的取值不预先加 |
+| `policy_type` | VARCHAR(16) | 非空，`CHECK IN ('SST')`（`ck_tax_policy_versions_policy_type`） |
+| `rate` | DECIMAL(9,6) | 可空，`CHECK rate IS NULL OR (rate >= 0 AND rate < 1)`（`ck_tax_policy_versions_rate`） |
+| `treatment_json` | JSON | 非空；`schema_version`、`sst_registered`、`tax_charged`、`document_notice`（`zh` / `en`），形状在应用层校验 |
+| `status` | VARCHAR(16) | 非空，`CHECK IN ('DRAFT','PUBLISHED','RETIRED')`（`ck_tax_policy_versions_status`）；spec §74.9 的三个值，**没有 `DISCARDED`**（设计 §9） |
+| `effective_from` | DATETIME | 可空；草稿为空。与汇率不同，**发布过的必有具体起点**，没有「一直以来」 |
+| `effective_to` | DATETIME | 可空；`NULL` = 仍生效（或尚未发布）。区间半开 `[from, to)`，不带时区的 UTC |
+| `open_slot` | INT，STORED 生成列 | `CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END`（与 `fx_rate_versions` 逐字相同）：未截断的已发布版本为 1，**其余一律为 `NULL`**；只读 |
+| `source_reference` | VARCHAR(255) | 非空；政策出处，纯文本，不写链接 |
+| `created_by` | BIGINT | **非空**（政策只能由人建，没有系统写入方）；外键 → `users(id)` `RESTRICT`（`fk_tax_policy_versions_created_by`） |
+| `approved_by` | BIGINT | 可空；发布人；外键 → `users(id)` `RESTRICT`（`fk_tax_policy_versions_approved_by`） |
+| `approved_at` | DATETIME | 可空；发布时刻 |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+
+- **唯一索引 `(jurisdiction, policy_type, open_slot)`**（`ux_tax_policy_versions_open_slot`）：一个（辖区, 政策类型）至多一个
+  未截断的已发布版本。前缀也服务按时刻解析的查询，不另建索引（表永远只有个位数的行）。
+- 九条 CHECK（条件文本是 `app/models/tax_policy.py` 的常量，迁移里逐字冻结一份，`test_migrations.py` 比对两边）：前四条见上表，
+  另外五条：
+  1. `ck_tax_policy_versions_unpublished`：`DRAFT` 没有区间、没有发布人与发布时刻
+  2. `ck_tax_policy_versions_approved`：`PUBLISHED` / `RETIRED` 必有发布人与发布时刻
+  3. `ck_tax_policy_versions_published_start`：`PUBLISHED` / `RETIRED` 必有起点
+  4. `ck_tax_policy_versions_period`：区间不倒置；空区间 `[F, F)` 只能出现在 `RETIRED` 行上（与汇率逐字相同）
+  5. `ck_tax_policy_versions_retired_end`：`status <> 'RETIRED' OR effective_to IS NOT NULL`，停用必有尽头
+- ⚠️ `ck_tax_policy_versions_status` 在 MySQL 上**经 DML 不可达**：写入 `DISCARDED` 之类的状态时，BEFORE INSERT 触发器与
+  BEFORE UPDATE 的 ② 先拒绝（1644）。它在 SQLite 上是唯一的拦截。
+
+### 触发器（迁移 0022 建，只在 MySQL 上）
+
+写法与权限预检照迁移 0015（预检在任何 DDL 之前）。拒绝一律 `SIGNAL SQLSTATE '45000'`（MySQL 错误号 1644）。
+
+| 触发器 | 做什么 |
+| --- | --- |
+| `trg_tax_policy_locks_before_insert` | 表里已有一行时拒绝 |
+| `trg_tax_policy_locks_before_update` | 一律拒绝（照 0016：不许把锁行改走，否则 ⑤ 的 `WHERE id = 1 FOR UPDATE` 会静默锁不到行）；锁定读不是 UPDATE，不触发 |
+| `trg_tax_policy_locks_before_delete` | 一律拒绝 |
+| `trg_tax_policy_versions_before_insert` | `status` 不是 `DRAFT` 就拒绝：版本只能经「草稿 → 发布」进入已发布，发布跃迁上的检查因此绕不过去 |
+| `trg_tax_policy_versions_before_update` | 按顺序：① `RETIRED` 的行拒绝任何改动（终态，尽头也不许改）；② 草稿只能改成 `DRAFT` / `PUBLISHED`（不许 `DRAFT → RETIRED`）；③ `DRAFT → PUBLISHED` 时 `effective_to` 必须为空（新发布的版本永远是时间线末尾、未截断）；③b **发布跃迁上的税务一致性**（设计 v2）：`treatment_json` 的 `sst_registered`、`tax_charged` 必须都是 JSON 布尔，未注册（`sst_registered = false`）不得收税（`tax_charged = true`），不收税 ⇔ `rate IS NULL`，任一不满足就拒绝；④ `PUBLISHED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝（`treatment_json` 按 JSON 值比较，键顺序不同而值相同不算改动）；⑤ 新状态是 `PUBLISHED` / `RETIRED` 且起点、尽头或状态有变化时：先 `SELECT … FROM tax_policy_locks WHERE id = 1 FOR UPDATE`，本行为空区间时到此为止，否则查同一（辖区, 政策类型）里是否有另一个**非空区间**的 `PUBLISHED` / `RETIRED` 版本与本行相交，有就拒绝 |
+| `trg_tax_policy_versions_before_delete` | 一律拒绝：版本会被支付、收据、对账单的快照永久引用（INV-6） |
+
+③b 只查两个标志与 `rate` 的关系，不查 `document_notice` 等其余形状（那些在应用层）；已发布行之后不能再改这三处（④），所以只在
+发布跃迁上查一次就覆盖了全部已发布行。⚠️ MySQL 的触发器不能用 `NEW` / `OLD` 引用生成列，所以 ④ 不比 `open_slot`（它只由被
+比较的列算出）。锁的结果用局部变量接。截断、退役与空区间今天没有写入方（服务层只走「插入草稿 → 发布」），与汇率表同构地
+写进触发器，留给以后的管理端路径。**数据库不拦的**（设计 §2）：直接写库把政策发布成一个任意的过去起点。**残余风险**：
+`TRUNCATE` / `DROP` 是 DDL，不经触发器（与 0006 / 0015 / 0016 相同）。
+
+### 锁与写入顺序
+
+- **发布首条政策**（AIH-TASK-078）：一个事务，第一条语句是 `SELECT … FROM tax_policy_locks WHERE id = 1 FOR UPDATE`，之后全是
+  加锁读；表里已有任何一行就拒绝。插入草稿、写审计、草稿改为 `PUBLISHED [2026-10-16T16:00:00, NULL)`、事务内复查、再写审计，
+  同一事务提交。发布路径只拿这一把锁。
+- **读取**（Phase 4 的消费方）：在调用方的事务里对版本行加锁读（`FOR SHARE`）；消费方与发布之间是否另取共享锁，由第一个消费方的
+  设计闸门决定（设计 §2「对下游任务的契约」）。
+- **降级**：版本表有任何一行时，迁移 0022 的 `downgrade` 在任何 DDL 之前拒绝；生产只前滚。
 
 ---
 
