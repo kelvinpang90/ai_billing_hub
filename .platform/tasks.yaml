@@ -4716,7 +4716,7 @@ tasks:
     title: 税务政策第二层：首条政策的发布服务与按时刻解析的读取函数
     purpose: >-
       按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 078：仓储 app/repositories/tax_policy.py（锁、加锁读、草稿与发布、parse_treatment、check_rate_consistency、resolve_tax_policy）与服务 app/services/tax_policy.py（publish_initial_tax_policy：锁内建草稿并发布，同一事务写两条审计）；新增两个审计动作并同步审计分类与前端审计动作清单。没有任何入口调用它，入口是 AIH-TASK-079 的 CLI。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-080
     acceptance_criteria:
