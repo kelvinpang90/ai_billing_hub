@@ -237,14 +237,22 @@
 >
 > 审查中的教训（写给后面的闸门与实现）：① 凡是「只在末尾追加的版本序列」都要数据库层的三道保护 —— 只能以草稿插入、发布跃迁上校验完整性、锁住同一把锁后检查区间不重叠；只靠服务层会被 Codex 判阻断（T-B、T-C、T-D 都补了）。② 复合外键与 CHECK 只在组成列非空时生效，必需列要逐列写 NOT NULL（T-E）。③ 跑 `codex-review.ps1` 期间**不要改工作区**：脚本检测到改动会作废判定、不发布（本次踩过一次）。
 
-- [ ] Provider / Model / Usage Meter
+- [x] Provider / Model / Usage Meter
+  - AIH-TASK-025：供应商、模型（含按 `occurred_at` 分段的别名）、计量类型目录与管理端接口、审计，只停用不删除；前端 AIH-TASK-035
 - [ ] `provider_price_versions` + 泛化价格分量（含缓存 token、非 token 单位）
-- [ ] FX 适配器 + 审批 + 版本历史
-- [ ] Pricing Rules：MARKUP 与 FIXED_RATE
+  - 实现与前端已交付（AIH-TASK-026 / 036）。**不勾**：AIH-TASK-026 记录的两处数据库兜底缺口（起点为空的版本、改为 `RETIRED` 不写
+    `effective_to`）仍只靠服务层拦，补它的任务在「后续计划」（需设计闸门），合并后再勾
+- [x] FX 适配器 + 审批 + 版本历史
+  - AIH-TASK-028 / 039 / 044（版本表与触发器、发布与退役规则、并发与性质测试）、040（BNM 拉取与 Beat，只落 `DRAFT`）、
+    041（管理端审批发布与版本历史）、042 / 043（告警与运维）、045（锁表禁止 UPDATE）；前端 AIH-TASK-036；文档 `docs/currency-and-fx.md`
+- [x] Pricing Rules：MARKUP 与 FIXED_RATE
+  - AIH-TASK-027（含 #178 v4 的数据库兜底）、045（锁表禁止 UPDATE）；前端 AIH-TASK-037
 - [x] 持久化 `202` 摄取 + 异步处理
   - 202 是 AIH-TASK-029 / 030；异步处理是 AIH-TASK-032：Beat 每 10 秒认领（`PROCESSING` + 防护令牌 + 租约）并计费，
     每 60 秒回收卡住的 `PROCESSING`；摄取不入队，数据库状态就是待办清单（REQ-INGEST-002）
-- [ ] 全局 event 幂等 + 冲突检测
+- [x] 全局 event 幂等 + 冲突检测
+  - AIH-TASK-029：插入优先 + 指纹比较，一致回 `already_received`，不一致回 409 `IDEMPOTENCY_CONFLICT`、写审计
+    `USAGE_EVENT_IDEMPOTENCY_CONFLICT`，告警维度 `usage_event_conflicts`；AIH-TASK-030 批量逐条复用
 - [x] 估算供应商成本计算
   - 计算是 AIH-TASK-031（计价引擎）；AIH-TASK-032 在计费事务里把原币成本、汇率原值、MYR 估算成本与计费额连同版本引用
     写进事件快照（§14 / §79），`PROCESSED` 之后由触发器保证不可改
@@ -275,14 +283,18 @@
 
 `ai_chatbot_demo` 仍然接入，用量进同一个内部租户下的独立项目（与 AI API 的项目分开，参考价统计才不混）。AI API 没有会话，下面「OpenAI 转写用量」与「`conversation_id` + 完整会话生命周期」两项归 `ai_chatbot_demo`（以后是 `acuven_aichat`）验收；其余各项以本仓库的 AI 模块验收。在 `ai_chatbot_demo` 里改时仍然**扩展它现有的窄接口，不要推倒重来**（§3.3）。
 
-- [ ] 供应商用量提取层
-- [ ] Anthropic 用量
+- [x] 供应商用量提取层
+- [x] Anthropic 用量
+  - 两项都是 AIH-TASK-060（供应商适配器从 Anthropic 响应取 input / output / 缓存写入 / 缓存读取四类 token）与 063（调用接口）
 - [ ] OpenAI 转写用量
 - [ ] `conversation_id` + 完整会话生命周期（关闭原因、可配置空闲超时）
-- [ ] 本地事务性 Outbox
-- [ ] Celery 投递
+- [x] 本地事务性 Outbox
+  - AIH-TASK-056 / 061：`ai_usage_outbox` 表，用量写入 outbox、提交结果核查、落库失败暂存与处置（067 / 068）
+- [x] Celery 投递
+  - AIH-TASK-065：Celery 任务 `ai_api.deliver_due` 领取、签名上报、结算与重试
 - [ ] Billing Client
-- [ ] 集成认证 + HMAC 签名
+- [x] 集成认证 + HMAC 签名
+  - 接收端 AIH-TASK-012（凭据）与 029（验签、防重放）；AI 模块上报端 AIH-TASK-065 按同一 HMAC 契约签名
 - [ ] Webhook 接收端
 - [ ] 本地版本化的有效服务状态
   - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：新的 AI 调用在账户状态 `PENDING_ACTIVATION` / `DISABLED` / `CLOSED` 下
@@ -290,7 +302,9 @@
     outbox 事件合成有效状态（`ALLOW_AI` / `BLOCK_AI` 与 `reason_code`）、扇出到各项目；两维共用的 `status_version` 就是
     集成方按版本丢弃旧状态的依据。`projects.integration_status` 也归那个设计闸门
 - [ ] 周期性状态对账
-- [ ] 积压监控
+- [x] 积压监控
+  - AIH-TASK-066：告警维度 `ai_usage_outbox`（积压超阈值 P2、人工处置项 P1）；计费侧另有 `usage_processing_backlog`。下面
+    ADR-0010 的透支观测要在试点验收的 `PREPAID` 路径上跑，不随本项勾选
   - ADR-0010：试点观测项加「每次停机时的余额（透支了多少）」，透支明显时再按新 ADR 评估提前停机
 
 **验收**：计费平台离线时 Claude 仍能回复 · 用量落本地 · 计费恢复后补投积压 · 无重复扣费 · 停机后不再发起 AI 调用 · 复机后恢复服务
@@ -533,7 +547,7 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 - [ ] `docs/database-schema.md`（Phase 1 起维护）
 - [x] `projects` 表结构裁决（Phase 1 建表前）：spec §57 的 UI 字段有 `project_id` 与 `description`，§76 的表却是 `id` + `public_id`、没有 `description`。两节不一致，建表前定下来并写进 `docs/database-schema.md`；改 spec 的话走一次勘误 —— **已裁决（Kelvin，2026-09-19）**：§57 的 `project_id` 就是 §76 的 `public_id`；加可空 `description`。§74 说表定义是最低要求，多一列不冲突，**不需要勘误**。见 [database-schema.md](database-schema.md)
 - [ ] `docs/api.md`（Phase 1 起维护）—— [已新建](api.md)（AIH-TASK-006），目前只有管理端客户管理的五个接口；认证接口的契约还没补进去
-- [ ] `docs/pricing-engine.md`、`docs/currency-and-fx.md`（Phase 2）
+- [x] `docs/pricing-engine.md`、`docs/currency-and-fx.md`（Phase 2）（AIH-TASK-027 / 031 与 039 / 040 交付）
 - [ ] `docs/integrated-application-backend.md`（Phase 3）
 - [ ] `docs/payment-flow.md`（Phase 4）
 - [ ] `docs/data-governance.md`、`docs/runbook.md`（Phase 0 起补，runbook 需覆盖 §136 列的 18 个故障场景）；[`docs/deployment.md`](deployment.md) **已起草，七件决策已定案** —— T0.9 的方案文档；落地部分仍待生产主机
