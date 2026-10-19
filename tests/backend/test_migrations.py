@@ -45,7 +45,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects import mysql, sqlite
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from alembic import command
@@ -5765,3 +5765,193 @@ def test_0022_keys_foreign_keys_checks_triggers_and_the_lock_row(alembic_config:
 
     # §7 "迁移": the lock table holds exactly the row `id = 1`.
     assert _lock_ids_0022() == [1]
+
+
+# ---------------------------------------------------------------------------
+# 0023_wallet_ledger_reference_index（AIH-TASK-083，设计闸门 #351 v1）
+#
+# The first cases need no database: the revision chain; the index in the migration equals the
+# model's and the design's (name, column order, not unique) and the old one is untouched; upgrade
+# creates only it and downgrade drops only it; `create_all` on SQLite (what the unit tests run)
+# builds it. On a real MySQL: it exists at head, the round trip to 0022 drops and recreates only
+# it, and EXPLAIN lists it among the possible keys for a by-source page (design §7, last rows).
+# ---------------------------------------------------------------------------
+
+_REVISION_0023 = "0023_wallet_ledger_reference_index"
+_MIGRATION_0023 = pathlib.Path("alembic/versions/20261018_0023_wallet_ledger_reference_index.py")
+_LEDGER_TABLE = "wallet_transactions"
+_INDEX_0023 = "ix_wallet_transactions_tenant_reference_sequence"
+_COLUMNS_0023 = ["tenant_id", "reference_type", "wallet_sequence"]
+# 0006's index; 0023 must leave it as it is.
+_INDEX_BEFORE_0023 = "ix_wallet_transactions_tenant_sequence"
+_COLUMNS_BEFORE_0023 = ["tenant_id", "wallet_sequence"]
+
+# Design §2 "查询" with the source filter and the cursor; MySQL only (the EXPLAIN case).
+_LEDGER_PAGE_EXPLAIN = text(
+    "EXPLAIN SELECT * FROM wallet_transactions"
+    " WHERE tenant_id = :tenant_id AND reference_type = :reference_type"
+    " AND wallet_sequence < :before_sequence"
+    " ORDER BY wallet_sequence DESC LIMIT 21"
+)
+
+
+def _load_0023() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0023", _MIGRATION_0023)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _reflected_ledger_indexes(engine: Engine) -> dict[str, tuple[list[str], bool]]:
+    indexes = inspect(engine).get_indexes(_LEDGER_TABLE)
+    return {str(i["name"]): (list(i["column_names"]), bool(i["unique"])) for i in indexes}
+
+
+def _schema_snapshot(engine: Engine) -> dict[str, dict[str, object]]:
+    """Every table's columns, indexes, unique constraints and foreign keys, plus the triggers."""
+    inspector = inspect(engine)
+    snapshot: dict[str, dict[str, object]] = {}
+    for table in sorted(inspector.get_table_names()):
+        snapshot[table] = {
+            "columns": [
+                (c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(table)
+            ],
+            "indexes": sorted(
+                (str(i["name"]), tuple(i["column_names"]), bool(i["unique"]))
+                for i in inspector.get_indexes(table)
+            ),
+            "unique": sorted(
+                (str(u["name"]), tuple(u["column_names"]))
+                for u in inspector.get_unique_constraints(table)
+            ),
+            "foreign_keys": sorted(
+                (str(fk["name"]), tuple(fk["constrained_columns"]), fk["referred_table"])
+                for fk in inspector.get_foreign_keys(table)
+            ),
+        }
+    return snapshot
+
+
+def test_0023_follows_0022() -> None:
+    migration = _load_0023()
+
+    assert migration.revision == _REVISION_0023
+    assert migration.down_revision == _REVISION_0022
+
+
+def test_0023_index_is_the_one_the_model_declares() -> None:
+    """The migration's frozen literal, the model's `__table_args__` and design §2 agree."""
+    migration = _load_0023()
+    model = {
+        str(index.name): ([column.name for column in index.columns], bool(index.unique))
+        for index in WalletTransaction.__table__.indexes
+    }
+
+    assert migration._TABLE == _LEDGER_TABLE
+    assert (migration._INDEX, migration._COLUMNS) == (_INDEX_0023, _COLUMNS_0023)
+    assert model == {
+        _INDEX_BEFORE_0023: (_COLUMNS_BEFORE_0023, False),
+        _INDEX_0023: (_COLUMNS_0023, False),
+    }
+
+
+def test_0023_upgrade_creates_and_downgrade_drops_only_the_index(monkeypatch) -> None:
+    migration = _load_0023()
+    upgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert upgrade.calls == [("create_index", (_INDEX_0023, _LEDGER_TABLE, _COLUMNS_0023))]
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.calls == [("drop_index", (_INDEX_0023,))]
+
+
+def test_0023_sqlite_tables_get_the_index_in_order_and_not_unique() -> None:
+    """The unit tests build SQLite with `create_all` from the models, not with the migrations
+    (0006's precheck and triggers are MySQL's); this is the SQLite side of design §7."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        Base.metadata.create_all(engine)
+        indexes = _reflected_ledger_indexes(engine)
+    finally:
+        engine.dispose()
+
+    assert indexes[_INDEX_0023] == (_COLUMNS_0023, False)
+    assert indexes[_INDEX_BEFORE_0023] == (_COLUMNS_BEFORE_0023, False)
+
+
+@needs_mysql
+def test_0023_index_exists_at_head_in_order_and_not_unique(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        indexes = _reflected_ledger_indexes(engine)
+    finally:
+        engine.dispose()
+
+    assert indexes[_INDEX_0023] == (_COLUMNS_0023, False)
+    assert indexes[_INDEX_BEFORE_0023] == (_COLUMNS_BEFORE_0023, False)
+
+
+@needs_mysql
+def test_0023_round_trip_drops_and_recreates_only_the_index(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        at_head = _schema_snapshot(engine)
+        triggers = _all_triggers()
+        ledger_at_head = _reflected_ledger_indexes(engine)
+        assert _INDEX_0023 in ledger_at_head
+
+        command.downgrade(alembic_config, _REVISION_0022)
+        without = _schema_snapshot(engine)
+        ledger_without = _reflected_ledger_indexes(engine)
+        assert _INDEX_0023 not in ledger_without
+        assert ledger_without[_INDEX_BEFORE_0023] == (_COLUMNS_BEFORE_0023, False)
+        # Only the one index is gone: every other table, column, key and trigger is the same.
+        expected = {table: dict(shape) for table, shape in at_head.items()}
+        expected[_LEDGER_TABLE]["indexes"] = [
+            index for index in at_head[_LEDGER_TABLE]["indexes"] if index[0] != _INDEX_0023
+        ]
+        assert without == expected
+        assert _all_triggers() == triggers
+
+        command.upgrade(alembic_config, _REVISION_0023)
+        assert _schema_snapshot(engine) == at_head
+        assert _reflected_ledger_indexes(engine) == ledger_at_head
+        assert _all_triggers() == triggers
+    finally:
+        command.upgrade(alembic_config, "head")
+        engine.dispose()
+
+
+@needs_mysql
+def test_0023_explain_lists_the_index_for_a_page_by_source(alembic_config: Config) -> None:
+    """Design §7: the index is a possible key for the by-source page. Which key the optimizer
+    finally picks is not asserted: on a near-empty table that is not stable (design §10)."""
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        if engine.dialect.name != "mysql":
+            pytest.skip("EXPLAIN's possible_keys is MySQL's")
+        with engine.connect() as connection:
+            plan = (
+                connection.execute(
+                    _LEDGER_PAGE_EXPLAIN,
+                    {"tenant_id": 1, "reference_type": "ADMIN_ADJUSTMENT", "before_sequence": 100},
+                )
+                .mappings()
+                .all()
+            )
+    finally:
+        engine.dispose()
+
+    rows = [row for row in plan if row["table"] == _LEDGER_TABLE]
+    assert len(rows) == 1
+    possible_keys = str(rows[0]["possible_keys"] or "").split(",")
+    assert _INDEX_0023 in possible_keys
