@@ -5040,7 +5040,7 @@ tasks:
     title: 钱包流水第二层：管理端按客户查看账本的只读接口
     purpose: >-
       按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v2）§2「接口」「查询」与 §8 第 2 步：app/repositories/wallet.py 的 list_transactions_for_tenant 支持按 reference_type 筛选，并带出用量事件的 public_id 与操作者邮箱；新增 GET /api/v1/admin/customers/{customer_id}/wallet/transactions（游标 before_sequence、page_size、可选 reference_type，最新在前）；docs/api.md 记新接口。只读，不写任何表；索引由 AIH-TASK-083 加，前端属于 AIH-TASK-085。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-083
     acceptance_criteria:
