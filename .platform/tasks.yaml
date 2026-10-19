@@ -5167,7 +5167,7 @@ tasks:
     title: 改密码吊销会话第一层：用户与刷新令牌的密码版本号迁移
     purpose: >-
       按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2「数据库（迁移）」、§8 与 §11 的 P1：迁移 alembic/versions/20261019_0024_session_revocation.py（revision 0024_password_version，down_revision 0023_wallet_ledger_ref_index；文件名不含 password，是为了避开 Worker 的敏感路径规则）给 users 与 refresh_tokens 各加 password_version INT NOT NULL DEFAULT 0 与 CHECK (password_version >= 0)；模型同步；表结构文档补上。只改表结构与模型，不改任何服务、令牌与接口；P3（reset_password 递增）由管理员 PR 完成，P2 属于 AIH-TASK-087。
-    status: ready
+    status: done
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）逐条一致，以 §2「数据库（迁移）」、§7「数据库兜底」「迁移」两行与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '迁移 0024：upgrade 给 users 与 refresh_tokens 各加 password_version（INT NOT NULL，服务器端默认 0，已有行取 0）与 CHECK（名为 ck_users_password_version、ck_refresh_tokens_password_version，表达式 password_version >= 0），不加索引；downgrade 逐项撤回；文件头写 §132 第 13 条分析（写法照 0022、0023 的文件头）'
