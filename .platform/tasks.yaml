@@ -4991,7 +4991,7 @@ tasks:
     title: 钱包流水第一层：账本按来源分页用的索引迁移
     purpose: >-
       按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「数据库」与 §8 第 1 步：迁移 alembic/versions/20261018_0023_wallet_ledger_reference_index.py（revision 0023_wallet_ledger_reference_index，接在 0022_tax_policy 之后）给 wallet_transactions 加非唯一索引 ix_wallet_transactions_tenant_reference_sequence (tenant_id, reference_type, wallet_sequence)，模型同步，表结构文档补上。只加这一个索引，不改列、约束、触发器与数据；查询与接口属于 AIH-TASK-084，前端属于 AIH-TASK-085。
-    status: ready
+    status: done
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）逐条一致，以 §2「数据库」、§7 最后两行与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '迁移 0023：upgrade 只建这一个索引（列顺序 tenant_id、reference_type、wallet_sequence，非唯一），downgrade 只删它；不改列、约束、触发器，不动数据；文件头写 §132 第 13 条分析（写法照 0022 的文件头，说明 MySQL 8 在线加索引不阻塞写入）'
