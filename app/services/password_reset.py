@@ -305,6 +305,11 @@ def reset_password(
             raise InvalidResetToken
 
         user.password_hash = hash_password(new_password)
+        # ⚠️ 版本号与新哈希**同一事务**递增（设计闸门 #369 v6 §2）：使用点拿令牌上的
+        # 版本比较它，这里漏掉或单独提交，改完密码旧会话就照旧有效。写成 SQL 表达式
+        # （`UPDATE … SET password_version = password_version + 1`），只增不减不依赖
+        # 内存里那份值是否最新。
+        user.password_version = User.password_version + 1
         user.updated_at = moment
 
         # ⚠️ **锁定一并解除。**旧密码此刻已经作废，继续锁着没有任何安全收益，
