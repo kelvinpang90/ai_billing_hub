@@ -5664,7 +5664,7 @@ tasks:
       - '新增 app/api/admin_portal_accounts.py：六个接口的处理函数第一条语句调用 require_admin；客户不存在 404 CUSTOMER_NOT_FOUND，未开通 404 PORTAL_ACCOUNT_NOT_FOUND；成功响应恰好设计 §2 的七个键，由 AIH-TASK-091 与 098 的服务返回的 PortalAccountView 序列化（invited_at 与 invitation_expires_at 已在服务里按设计 §2 取好，本任务不另写查询）；开通与重发成功后用服务返回的 outbox 行 id 调用 app/api/auth.py 现有的 _trigger_outbox 立即触发投递（与忘记密码同一做法，触发失败不影响响应，定期扫描兜底）；reset-2fa 的 reason 用与 app/schemas/customers.py 相同的 _Reason 约束（1–255）；错误码照设计 §2 的表。路由在 app/main.py 注册，新路由加进 tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES（CUSTOMER 令牌 403、匿名 401 由该文件的枚举用例覆盖）'
       - 'app/tasks/outbox.py 新增 PORTAL_INVITATION_REQUESTED 的渲染并登记进 _RENDERERS：链接 {frontend_base_url}/accept-invitation?token=…（路径与参数名取自前端 routes/paths.ts 已登记的 acceptInvitation 与 ACCEPT_INVITATION_TOKEN_PARAM，由 AIH-TASK-092 加）；正文只用 payload 里的 expires_at 写到期时刻（马来西亚时间 UTC+8 精确到分钟，括号附 UTC，固定偏移不依赖 tzdata），不读当前配置、不写相对时长，并提示没收到请查垃圾箱；frontend_base_url 为空时与重置邮件同样处理'
       - '测试：新增 tests/backend/test_portal_accounts_api.py 覆盖设计 §7 中属于管理端接口的行（开通、查看、重发含改邮箱、停用、启用、重置 2FA 含 255 / 256 个字符的原因与从未开启 409 的响应与错误码，重复开通 409，开通后 outbox 有一行且审计无邮箱值，「邀请字段」一行）；tests/backend/test_outbox.py 加邀请邮件渲染、「邮件到期时刻」一行与「Redis/Celery 丢失」的接口层部分（渲染器登记后，现有恢复扫描能领到 PORTAL_INVITATION_REQUESTED 行）；新增 tests/backend/test_invitation_link.py，照 test_password_reset_link.py 的做法核对邀请链接（那个文件名含 password，Worker 不能改，所以另起一个文件、不从它导入）：后端真实渲染出的链接路径在 paths.ts 登记、查询参数名一致、routes/index.tsx 中该路由不在 RequireAuth 元素之内（把路由挪进 RequireAuth 的变异必须让用例变红）'
-      - 'docs/api.md 新增「管理端门户账号」一节；docs/runbook.md 新增「客户门户账号」一节：怎么开通与重发、邀请没收到怎么办、重置客户 2FA 前如何线下核实身份（设计 §2：用客户登记的联系电话回拨或当面确认，不凭邮件或即时消息里的自称）与原因怎么写，以及门户前端（AIH-TASK-095 到 097）全部合并部署之前不为真实客户开通（设计 §8）'
+      - 'docs/api.md 新增「管理端门户账号」一节；docs/runbook.md 新增「客户门户账号」一节：怎么开通与重发、邀请没收到怎么办、重置客户 2FA 前如何线下核实身份（设计 §2：用客户登记的联系电话回拨或当面确认，不凭邮件或即时消息里的自称）与原因怎么写，以及门户前端（AIH-TASK-095 到 097）全部合并部署之前不为真实客户开通（设计 §8）；另写「验收夹具客户门户账号」一小节：本任务部署后，由管理员给生产上的验收夹具租户开通门户账号并完成激活（邀请令牌从 VPS 上该租户的 outbox 行读取、不经邮件），凭据只放在 VPS 上仓库外的 0600 文件里（照验收夹具管理员的做法），再由运营者把 customer_email、customer_password 两个字段用 cmdkey 录入 Worker 的凭据管理器并加进本机配置里 acceptance.browser 的字段清单；该账号不开启 2FA；值与账号标识都不写进本仓库'
       - '不改服务层规则（属于 AIH-TASK-090、091、098）、不改客户端接口（属于 AIH-TASK-093）、不改迁移与前端；不改 AI 模块；示例 uuid 用全零占位值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368'
     allowed_change_paths:
@@ -5859,8 +5859,10 @@ tasks:
       - '新增 frontend/src/features/portal/EnableTwoFactor.tsx：仅在 /api/v1/me 的 two_factor_enabled 为 false 时出现；重验密码后显示密钥与 otpauth 二维码（复用 frontend/src/features/auth/QrCode.tsx，不新增依赖），输入验证码确认后展示一次恢复码并提示妥善保存、丢失时联系 Acuven；密钥、otpauth_uri 与恢复码只在组件状态里，不写入日志与任何存储，离开页面即丢弃；密码错（401 INVALID_CREDENTIALS）、验证码错（401 INVALID_TOTP）、409 各有文案'
       - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
       - '测试（vitest + Testing Library）：customer.test.ts 覆盖三个封装，以及 self 两个接口遇到 401 TOKEN_INVALID 时刷新一次并重试、刷新失败转登录页、遇到 INVALID_CREDENTIALS 与 INVALID_TOTP 不刷新；PortalHomePage.test.tsx 覆盖正常、只读、加载、失败（带 request_id）四种状态与不出现内部字段；EnableTwoFactor.test.tsx 覆盖完整开启流程、已开启时不出现、密码错、验证码错、恢复码只展示一次'
-      - '不带浏览器验收：门户页面只有 CUSTOMER 账号能看到，生产上没有客户验收夹具账号（登记 PR 说明，待 Kelvin 确认这一项不验）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368（纯前端，引用它只为让审查拿到契约）'
+      - 'login_customer 与 check_portal_home：login_customer 用标准输入 credentials 里的 customer_email、customer_password 在登录页登录（字段缺失或类型不对时 ACCEPTANCE_VERDICT: FAIL login_customer login_failed，不打印收到的内容；已有的 login 步骤与 email、password、totp_secret 字段的处理不变，两个新字段对其余步骤没有影响），断言登录后落在门户首页而不是管理端；check_portal_home 的后端值取页面自己发出的 GET /api/v1/customer/me 的响应（被动观察，不自己发请求），断言页面显示的 company_name、account_status 与响应一致、页面上没有任何管理端菜单项；不点开启 2FA、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这两个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的输入说明与步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤。前提：验收夹具客户的门户账号已按 docs/runbook.md「验收夹具客户门户账号」建好、两个字段已录入（运营者在开启本任务之前完成）'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368（纯前端，引用它只为让审查拿到契约）'
     allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
       - frontend/src/api/customer.ts
       - frontend/src/api/customer.test.ts
       - frontend/src/features/portal/PortalHomePage.tsx
@@ -5882,6 +5884,15 @@ tasks:
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_home
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
