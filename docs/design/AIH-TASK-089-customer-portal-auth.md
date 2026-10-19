@@ -1,13 +1,13 @@
-# AIH-TASK-088 到 095 设计：客户门户认证（已批准 v8）
+# AIH-TASK-089 到 097 设计：客户门户认证（已批准 v10）
 
-> **来源**：设计闸门 Issue #368。本文件是 `APPROVED: design v8` 那一版正文的**逐字副本**（审查：v1–v5 由 Codex，v6–v8 在 Codex 额度用完期间由 Claude Code 审查；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v8`）。
+> **来源**：设计闸门 Issue #368。本文件是 `APPROVED: design v10` 那一版正文的**逐字副本**（审查：v1–v5 由 Codex，v6–v10 在 Codex 额度用完期间由 Claude Code 审查；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v10`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #368 上被批准的 v8 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
-> **前置**：设计闸门 #369（[AIH-TASK-086-session-revocation.md](AIH-TASK-086-session-revocation.md)）的实现 `AIH-TASK-086`、管理员 PR、`AIH-TASK-087` 必须先全部合并。
-> §11 的五个实现任务登记成八个编号（任务 D 拆成两个、E 拆成三个，只为让每个任务的可改路径不超过 12 个；拆分不改变范围、顺序约束与验收）：
-> `AIH-TASK-088`（A 数据库）→ `089`（B 业务规则）→ `090`（C 接受邀请页）→ `091`（D 的前一半：接受邀请、`/auth/me`、`/2fa/self/*`、`/customer/me` 与客户鉴权依赖）→ `092`（D 的后一半：管理端门户账号六个接口与邀请邮件）→ `093`（E：管理端门户账号面板）→ `094`（E：按角色分流与门户外壳）→ `095`（E：门户首页与开启 2FA）。
-> 设计 §8 的顺序约束照旧成立：接受邀请页（090）与接受邀请接口（091）都先于能发出邀请的 092 上线。
-> 设计 §2「邀请邮件与重置的隔离」要求 `reset_password` 只认 `PASSWORD_RESET` 用途：该文件名含 password、Worker 不能改，由管理员在 `AIH-TASK-088` 合并之后、`089` 开启之前以 PR 完成。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #368 上被批准的 v10 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **前置**：设计闸门 #369（[AIH-TASK-086-session-revocation.md](AIH-TASK-086-session-revocation.md)）的实现 `AIH-TASK-086`、管理员 PR、`AIH-TASK-087`、`AIH-TASK-088` 必须先全部合并。
+> §11 的五个实现任务登记成九个编号（任务 B、D 各拆成两个，E 拆成三个，只为让每个任务的规模与可改路径符合登记规则；拆分不改变范围、顺序约束与验收）：
+> `AIH-TASK-089`（A 数据库）→ `090`（B 的一半：登录状态判断、2FA 注册要求 `ACTIVE`、写权限锁、配置与审计动作）→ `091`（B 的另一半：门户账号服务）→ `092`（C 接受邀请页）→ `093`（D 的前一半：接受邀请、`/api/v1/me`、`/2fa/self/*`、`/customer/me` 与客户鉴权依赖）→ `094`（D 的后一半：管理端门户账号六个接口与邀请邮件）→ `095`（E：管理端门户账号面板）→ `096`（E：按角色分流与门户外壳）→ `097`（E：门户首页与开启 2FA）。
+> 设计 §8 的顺序约束照旧成立：接受邀请页（092）与接受邀请接口（093）都先于能发出邀请的 094 上线。
+> 设计 §2「邀请邮件与重置的隔离」要求 `reset_password` 只认 `PASSWORD_RESET` 用途：该文件名含 password、Worker 不能改，由管理员在 `AIH-TASK-089` 合并之后、`091` 开启之前以 PR 完成。
 
 ---
 
@@ -28,7 +28,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v8`
+**设计版本**：`v10`
 对应需求：前置设计闸门 #369（改密码吊销全部会话，须先实现）；spec §51、§52、§53、§54、§66、§88、§90、§96、§97、§112、§127（Customer authentication）；`REQ-PRIV-001`；AIH-TASK-020 设计 #136 v2 §2 末尾的账户状态契约
 目标 PR：待开（实现拆成五个任务，见 §11「实现拆分」）
 
@@ -94,7 +94,7 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 以后的客户写接口 → require_customer_writable → 租户 account_status ∈ {DISABLED, CLOSED} 时 403 ACCOUNT_READ_ONLY
 ```
 
-### 数据库（迁移 0024，接在 0023 之后）
+### 数据库（迁移 0025，接在 #369 的 `0024_password_version` 之后）
 
 `users`：
 - `tenant_id BIGINT NULL`：外键 `fk_users_tenant` 指向 `tenants.id`，`ON DELETE RESTRICT`（租户本来就只停用、不删除）
@@ -122,7 +122,6 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 | 方法 | 路径 | 主体 | 请求 | 成功 | 错误 |
 | --- | --- | --- | --- | --- | --- |
 | POST | `/invitation/accept` | 匿名，凭令牌 | `{token, password}` | 200 `{}` | 400 `INVALID_INVITATION_TOKEN`（令牌不存在、已用、过期、用途不对，或账号不是 `INVITED`，统一一个码）；409 `ACCOUNT_CLOSED`（租户已关户）；400 `WEAK_PASSWORD`（密码强度，与重置同一个错误）。判定顺序见 §4 |
-| GET | `/me` | 任一已登录用户 | — | 200 `{role, email, two_factor_enabled}` | 401 |
 | POST | `/2fa/self/enrol` | `require_customer` + 重验密码 | `{password}` | 200 `{secret, otpauth_uri}`（只返回一次） | 401 `INVALID_CREDENTIALS`（密码错）；403 `CUSTOMER_REQUIRED`；409 已启用 |
 | POST | `/2fa/self/confirm` | `require_customer` | `{code}` | 200 `{recovery_codes}`（只返回一次） | 401 `INVALID_TOTP`（验证码错，沿用 `confirm_enrolment` 的现有错误）；403；409 |
 
@@ -143,12 +142,15 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 | --- | --- | --- | --- | --- | --- |
 | GET | `/me` | `require_customer` | — | 200 `{customer_id, company_name, account_status, read_only}` | 401 / 403 `CUSTOMER_REQUIRED` |
 
+**当前用户（`GET /api/v1/me`，任一已登录用户）**：200 `{role, email, two_factor_enabled}`；401 `TOKEN_INVALID`。
+- 刻意**不**放在 `/api/v1/auth/` 下：前端对那个前缀下的 401 不触发刷新，访问令牌一过期，每次打开页面都会被直接踢回登录；而且那个前缀受登录限流（nginx 每分钟 10 次），每次进页面都调它会撞上限流。放在 `/api/v1/me`，过期时照常走刷新，也不进认证限流区
+
 - `customer_id` 是租户的 `public_id`。客户请求里**不接受**任何租户标识（spec §90）
 - **管理端 GET 的两个邀请字段**没有专门的列，取自该用户最新一行 `purpose = 'INVITATION'` 的令牌（按 `created_at`、再按 `id` 取最大）：
   - `invited_at` = 那一行的 `created_at`；从未发过邀请时为 null
   - `invitation_expires_at` = 账号是 `INVITED` 且那一行未用、未过期时取它的 `expires_at`，否则为 null（已激活、已停用、重新启用后旧令牌已作废，都是 null，表示需要重发）
 - **客户开启 2FA 的两个接口放在 `/api/v1/auth/2fa/self/` 下**，不放在 `/api/v1/customer/` 下：
-  - 这样落在 nginx 的认证限流区和进程内令牌桶里（重验密码是一个可以拿来猜密码的入口）
+  - 这样落在 nginx 的认证限流区（重验密码是一个可以拿来猜密码的入口）；进程内令牌桶只在处理函数显式调用 `_rate_limit(request)` 时生效，所以 `/2fa/self/enrol` 的处理函数第一步就调用它（`/2fa/recovery-codes` 现在没有调用，不在本设计范围）
   - 前端对 `/api/v1/auth/` 下的 401 不触发令牌刷新（`frontend/src/api/client.ts`），密码错、验证码错的 401 是业务结果，可以直接沿用现有错误码
   - 重验密码失败的处理照现有 `/2fa/recovery-codes` 的先例：返回 401 `INVALID_CREDENTIALS`，不计入登录锁定、不写审计（调用方已持有有效访问令牌）；成功开启时由 `confirm_enrolment` 照常写 `TWO_FACTOR_ENABLED` 审计
   - 只允许 CUSTOMER（ADMIN 在登录时强制注册，不走这里）；复用现有的 `start_enrolment` / `confirm_enrolment` 服务，不另写一套；这两个服务本身按「登录流程的改动」一节加上状态检查，按 #369 加上版本号复查
@@ -172,7 +174,7 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 ### 登录流程的改动（`app/services/auth.py`）
 
 - 三处状态判断从 `status is DISABLED` 改为 `status is not ACTIVE`：登录、TOTP 第二步、刷新
-- 2FA 注册的两个服务函数 `start_enrolment`、`confirm_enrolment`（`app/services/two_factor.py`）在各自的事务里先 `SELECT users … FOR UPDATE`，用户不是 `ACTIVE` 时抛 401 `INVALID_TOKEN`，不写任何 2FA 行
+- 2FA 注册的两个服务函数 `start_enrolment`、`confirm_enrolment`（`app/services/two_factor.py`）在各自的事务里先 `SELECT users … FOR UPDATE`，用户不是 `ACTIVE` 时抛 401 `TOKEN_INVALID`，不写任何 2FA 行
   - 现在它们只凭 pending 令牌就动手，不看用户状态。登录时拿到 `ENROL_2FA` 令牌（ADMIN，或 `customer_2fa_required` 为 True 时的 CUSTOMER）之后被停用的账号，在令牌 600 秒有效期内仍能注册自己的验证器；重新启用时就可能被一个管理员不知道的验证器锁在门外，而本设计不提供重置 2FA
   - 锁用户行让它与停用（锁租户行、再锁用户行）排队：停用先提交则注册被拒；注册先提交，停用照常生效，之后的登录被状态检查挡住
   - `/2fa/self/*` 两个接口走同样的服务，所以 `require_customer` 之后才被停用的竞态也被这一步挡住
@@ -204,7 +206,7 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 - 现有 `reset_password` 查令牌时加上 `purpose = 'PASSWORD_RESET'`，`accept_invitation` 只认 `purpose = 'INVITATION'`。两种令牌互相用不了
 - `request_reset` 本来就只给 `ACTIVE` 用户发，`INVITED` 的客户点「忘记密码」仍返回同一个 200、不发信。没收到邀请就由管理员重发，不开第二条通道
 - 邀请邮件：outbox 事件 `PORTAL_INVITATION_REQUESTED`，payload 是 `{to, token, expires_at}`，链接是 `{frontend_base_url}/accept-invitation?token=…`
-  - `expires_at` 是写入令牌行时的同一个值（不带时区的 UTC，ISO 8601 字符串），渲染时只用它，不读当前配置。这样 outbox 重试、配置改动之后，信里写的到期时刻仍然和令牌真实的到期时刻一致
+  - `expires_at` 是写入令牌行时的同一个值（不带时区的 UTC，**截到整秒**：取 `now` 去掉微秒再加有效期，因为 MySQL 的 `DATETIME` 只存到秒，不截就会出现「信里的时刻与库里差几分之一秒」；ISO 8601 字符串），渲染时只用它，不读当前配置。这样 outbox 重试、配置改动之后，信里写的到期时刻仍然和令牌真实的到期时刻一致
   - 文案写明到期时刻：马来西亚时间（UTC+8，固定偏移，不依赖 tzdata）精确到分钟，后面括号附 UTC；另提示「没收到请查垃圾箱」。不写「72 小时」这类相对时长
   - 链接路径由前端 `routes/paths.ts` 登记，并纳入现有「后端拼的链接对得上前端路由」的守卫
 
@@ -254,7 +256,7 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 | （无） | 管理员开通 | 租户存在且不是 `CLOSED`；该租户没有门户账号；邮箱没有被任何用户占用 | `INVITED` | 新邀请令牌、outbox、审计 `PORTAL_ACCOUNT_CREATED` | 409 `PORTAL_ACCOUNT_EXISTS` / `EMAIL_IN_USE` / `ACCOUNT_CLOSED` |
 | `INVITED` | 管理员重发（可改邮箱） | 租户不是 `CLOSED`；给了新邮箱且归一后与当前邮箱不同时，新邮箱没有被任何用户占用 | `INVITED` | 作废该用户全部未用邀请令牌，签发新令牌、outbox，审计 `PORTAL_INVITATION_RESENT` | 409 `PORTAL_ACCOUNT_NOT_INVITED` / `EMAIL_IN_USE` / `ACCOUNT_CLOSED` |
 | `INVITED` | 客户接受邀请 | 令牌是 `INVITATION` 用途、未用、未过期；租户不是 `CLOSED`；密码强度合格 | `ACTIVE` | 写密码哈希和 `activated_at`，作废其余邀请令牌，审计 `PORTAL_INVITATION_ACCEPTED` | 400 `INVALID_INVITATION_TOKEN` / 409 `ACCOUNT_CLOSED` / 400 `WEAK_PASSWORD` |
-| `INVITED` / `ACTIVE` | 管理员停用 | — | `DISABLED` | 吊销全部刷新令牌，作废全部未用令牌（两种用途都作废），审计 `PORTAL_ACCOUNT_DISABLED` | 409 `PORTAL_ACCOUNT_ALREADY_DISABLED` |
+| `INVITED` / `ACTIVE` | 管理员停用 | — | `DISABLED` | 吊销全部刷新令牌，作废全部未用令牌（两种用途都作废），`password_version + 1`（#369：停用前签发的访问令牌与 pending 令牌永久失效，之后重新启用也不会复活它们），审计 `PORTAL_ACCOUNT_DISABLED` | 409 `PORTAL_ACCOUNT_ALREADY_DISABLED` |
 | `DISABLED` | 管理员启用 | 租户不是 `CLOSED` | `activated_at` 为空回到 `INVITED`，否则回到 `ACTIVE` | 审计 `PORTAL_ACCOUNT_ENABLED`。不自动重发邀请，需要时管理员再点重发 | 409 `PORTAL_ACCOUNT_NOT_DISABLED` / `ACCOUNT_CLOSED` |
 | `ACTIVE` / `DISABLED` | 管理员重置 2FA | 该账号有已确认或待确认的 2FA；必须写原因 | 不变 | 删除 `two_factor_settings` 行与全部恢复码；`password_version + 1`（#369，吊销该用户全部会话）；审计 `PORTAL_2FA_RESET`（`reason` 原样记入，`after_state` 只放 `tenant_public_id`）| 409 `PORTAL_2FA_NOT_ENABLED` |
 
@@ -337,7 +339,7 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 
 **客户侧禁止返回的字段**
 - `/customer/me` 只返回 `customer_id`、`company_name`、`account_status`、`read_only` 四个字段：不返回任何金额、成本、毛利、内部 id、`billing_mode`
-- `/auth/me` 不返回 `tenant_id`、内部用户 id、哈希、锁定信息
+- `/api/v1/me` 不返回 `tenant_id`、内部用户 id、哈希、锁定信息
 
 **日志、审计、异常**
 - 以下内容绝不进日志、审计、异常文本或响应（spec §94）：
@@ -379,7 +381,7 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | 正常路径 | integration（SQLite + MySQL） | 开通 → outbox 渲染出链接 → 用令牌接受 → 登录 → `/customer/me` | 用户 `INVITED`→`ACTIVE`，`tenant_id` 正确；`/customer/me` 四个键逐字；审计依次是 `PORTAL_ACCOUNT_CREATED`、`PORTAL_INVITATION_ACCEPTED`、`LOGIN`（`actor_role=CUSTOMER`） |
 | 正常路径 | integration | 客户开启 2FA：`/2fa/self/enrol`（重验密码）→ `/2fa/self/confirm` → 退出 → 登录 | 第二次登录得到 `TOTP_REQUIRED`；输对验证码后签发会话；ADMIN 调这两个接口 403 `CUSTOMER_REQUIRED`；密码错 401 `INVALID_CREDENTIALS` 且失败计数不变、不写审计；验证码错 401 `INVALID_TOTP` |
 | 正常路径 | integration | `customer_2fa_required=True` 时，未注册 2FA 的客户登录 | 得到 `ENROL_2FA`；配置为 False 时直接签发会话 |
-| 正常路径 | integration | 停用 → 启用：一个从未激活的账号、一个已激活的账号 | 分别回到 `INVITED`、`ACTIVE`；停用期间访问令牌立即 401，刷新令牌已吊销 |
+| 正常路径 | integration | 停用 → 启用：一个从未激活的账号、一个已激活的账号 | 分别回到 `INVITED`、`ACTIVE`；停用期间访问令牌立即 401，刷新令牌已吊销；停用后 `password_version` 比停用前大 1；**重新启用之后**，用停用前签发的访问令牌调任一已登录接口仍是 401 `TOKEN_INVALID`（不会因启用而复活），重新登录签发的新令牌可用 |
 | 边界值 | integration | 令牌在 `expires_at` 前一秒接受、`expires_at` 当刻接受 | 前一秒成功；当刻 400（`expires_at > now` 才有效，与重置一致） |
 | 边界值 | integration | 邮箱大小写、首尾空白不同但实为同一地址 | 归一后判同一个，409 `EMAIL_IN_USE`；与某个 ADMIN 的邮箱相同时也是 409 |
 | 边界值 | integration | 租户为 `CLOSED` 时开通、重发、启用、接受邀请 | 全部 409 `ACCOUNT_CLOSED`，不写行 |
@@ -390,23 +392,23 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | 并发 | integration（MySQL） | 同一邀请令牌并发提交两次、密码不同 | 一个 200、一个 400；最终的密码哈希能验证成功那一次的密码 |
 | 并发 | integration（MySQL） | 停用与接受同时到达（用两个连接、屏障控制先后，两种顺序各跑一次） | 只出现 §4 写的两种结果之一，不会出现停用之后账号仍是 `ACTIVE` |
 | 幂等重放 | integration | 重复开通、用已用过的令牌接受、重发之后用旧链接接受 | 409；400；400 |
-| 令牌隔离 | integration | 重置令牌提交到 `/invitation/accept`；邀请令牌提交到 `/password/reset` | 都是 400，且不改密码、不改状态 |
+| 令牌隔离 | integration | 测试里绕过服务直接造「状态对、用途错」的令牌行：给 `INVITED` 客户插一行 `PASSWORD_RESET` 令牌交给接受邀请；给 `ACTIVE` 用户插一行 `INVITATION` 令牌交给 `reset_password`（只有这样，删掉任一边的用途条件用例才会变红；用正常途径造的令牌会先被状态检查拦下，证明不了用途过滤） | 都是 400，且不改密码、不改状态、不消费令牌 |
 | 令牌隔离 | integration | `INVITED` 客户调 `/password/forgot` | 同一个 200，不写重置令牌，不写 outbox |
 | 判定顺序 | integration | 接受邀请：已用的令牌配弱密码；有效令牌配弱密码后再配强密码；有效令牌但租户 `CLOSED` 配弱密码 | 依次 400 `INVALID_INVITATION_TOKEN`；先 400 `WEAK_PASSWORD`、令牌未消费，再 200；409 `ACCOUNT_CLOSED` |
 | 重发邮箱比较 | integration | 重发时不给邮箱、给与当前邮箱仅大小写和首尾空白不同的邮箱、给一个被别的用户占用的邮箱、给一个新邮箱 | 前两种成功且审计 `email_changed: false`；第三种 409 `EMAIL_IN_USE`；第四种成功、邮箱更新、`email_changed: true` |
 | 邀请字段 | integration | 管理端 GET：刚开通、重发之后、接受之后、停用后再启用（回到 `INVITED`）、令牌过期之后 | `invited_at` 依次为首个与最新邀请的时刻、保持最新邀请时刻；`invitation_expires_at` 依次为令牌到期时刻、新令牌到期时刻、null、null、null |
 | 邮件到期时刻 | unit | 用 payload 里的 `expires_at` 渲染邮件，再把配置的有效期改掉重新渲染 | 两次正文的到期时刻相同，都等于 payload 的值换算到 UTC+8，并附 UTC |
 | 唯一冲突映射 | integration（MySQL） | 让开通在检查之后、插入之前撞上另一个事务刚提交的同租户账号或同邮箱用户 | 分别 409 `PORTAL_ACCOUNT_EXISTS`、`EMAIL_IN_USE`，不出现 500，库里没有多出的行 |
-| 停用后的 2FA 注册 | integration | 用户登录拿到 `ENROL_2FA` 的 pending 令牌后被停用（ADMIN 与开启强制的 CUSTOMER 各一次），再用该令牌调 `/2fa/enrol`、`/2fa/confirm`；客户在 `/2fa/self/enrol` 之后被停用，再调 `/2fa/self/confirm` | 都是 401 `INVALID_TOKEN`，`two_factor_settings` 与恢复码都没有新行；重新启用后照常登录、照常走注册 |
-| 写权限并发 | integration（MySQL） | 测试专用写操作在事务里调 `lock_tenant_for_customer_write` 后写一行；另一个连接同时把租户改成 `DISABLED`，用屏障控制两种先后各跑一次 | 写先拿到锁：写入成功，停用随后生效；停用先提交：写入方拿到锁后抛 `ACCOUNT_READ_ONLY`，测试表没有新行。另断言：只用 `require_customer_writable` 而不调辅助函数时，停用在两者之间提交，写入会成功（证明依赖本身不是保证，用例写明这是刻意的） |
+| 停用后的 2FA 注册 | integration | 用户登录拿到 `ENROL_2FA` 的 pending 令牌后被停用（ADMIN 与开启强制的 CUSTOMER 各一次），再用该令牌调 `/2fa/enrol`、`/2fa/confirm`；客户在 `/2fa/self/enrol` 之后被停用，再调 `/2fa/self/confirm` | 都是 401 `TOKEN_INVALID`，`two_factor_settings` 与恢复码都没有新行；客户账号**重新启用之后**，用停用前拿到的 `ENROL_2FA` pending 令牌调 `/2fa/enrol`、`/2fa/confirm` 仍是 401 `TOKEN_INVALID`（版本号已在停用时 +1）；重新登录后照常走注册。ADMIN 没有停用接口，重新启用的断言只针对门户账号 |
+| 写权限并发 | integration（MySQL） | 测试专用写操作在事务里调 `lock_tenant_for_customer_write` 后写一行；另一个连接同时把租户改成 `DISABLED`，用屏障控制两种先后各跑一次 | 写先拿到锁：写入成功，停用随后生效；停用先提交：写入方拿到锁后抛 `ACCOUNT_READ_ONLY`，测试表没有新行。另断言：只做一次不加锁的状态读取（与 `require_customer_writable` 的行为等价；服务层任务里还没有这个依赖，用等价读取代替）而不调辅助函数时，停用在两者之间提交，写入会成功（证明提前拒绝本身不是保证，用例写明这是刻意的） |
 | 关户与接受并发 | integration（MySQL） | 一个连接锁住租户行并把 `account_status` 改为 `CLOSED`（模拟关户任务，测试里直接写），另一个连接同时接受邀请；先接受后普通读一次以建立快照的写法也跑一遍；屏障控制两种先后 | 关户先提交：409 `ACCOUNT_CLOSED`，账号仍是 `INVITED`、令牌未消费；接受先提交：200，账号 `ACTIVE` |
-| 改密码后的旧会话（客户路径） | integration | 客户 `/2fa/self/enrol` 之后重置密码，再用旧访问令牌调 `/2fa/self/confirm`；接受邀请之后，接受前用于别处的同一用户令牌（测试里手工签发版本 0 的访问令牌）调 `/auth/me` | 都是 401 `INVALID_TOKEN`，不写任何 2FA 行；接受邀请后库里 `password_version` 为 1。其余改密码与令牌的场景由 #369 的测试覆盖 |
+| 改密码后的旧会话（客户路径） | integration | 客户 `/2fa/self/enrol` 之后重置密码，再用旧访问令牌调 `/2fa/self/confirm`；接受邀请之后，接受前用于别处的同一用户令牌（测试里手工签发版本 0 的访问令牌）调 `/api/v1/me` | 都是 401 `TOKEN_INVALID`，不写任何 2FA 行；接受邀请后库里 `password_version` 为 1。其余改密码与令牌的场景由 #369 的测试覆盖 |
 | 重置客户 2FA | integration | 客户已开启 2FA 并持有会话；管理员调 `/reset-2fa`；另测只有待确认注册、从未开启、原因为空、原因恰好 255 个字符、原因 256 个字符五种 | 成功时 `two_factor_settings` 与恢复码都没有了，`password_version` +1，客户原来的访问令牌与刷新令牌都 401，审计 `PORTAL_2FA_RESET` 带原因、不含邮箱；客户随后用密码登录不再要求 TOTP；待确认注册同样被清除；从未开启 409 `PORTAL_2FA_NOT_ENABLED`；原因为空 422；255 个字符成功且审计里的原因逐字相同（SQLite 与真 MySQL 都跑）；256 个字符 422，不写任何行 |
 | 重置 2FA 与客户确认 2FA 并发 | integration（MySQL） | 客户 `/2fa/self/confirm` 与管理员 `/reset-2fa` 同时进行，屏障控制两种先后 | 确认先提交：2FA 启用，随后重置把它删掉并吊销会话；重置先提交：确认在锁用户行后读到新版本号，401，不启用 |
 | 无租户的 CUSTOMER | integration | 测试里直接插一个 `tenant_id` 为空的 CUSTOMER 用户并签发访问令牌，调 `/customer/me` 与 `/2fa/self/enrol` | 403 `CUSTOMER_REQUIRED`，不读任何租户数据 |
 | 事务中途失败 | integration | 开通时在插入 outbox 那一步注入 `OperationalError` | 500 带 `request_id`；users、令牌、outbox、审计都没有新行 |
 | 事务中途失败 | integration | 接受时在写审计那一步注入异常 | 500；令牌未消费，账号仍是 `INVITED`，原链接还能用 |
-| Redis/Celery 丢失 | integration | 开通后不跑 worker | outbox 行留在 `PENDING`，现有恢复扫描能领到它 |
+| Redis/Celery 丢失 | integration | 开通后不跑 worker | 服务层（任务 B）：outbox 行留在 `PENDING`；接口层（任务 D，邀请邮件渲染已登记之后）：现有恢复扫描能领到它（恢复扫描只选有渲染器的事件类型） |
 | 租户越权 | integration | 客户 A 调 `/customer/me?tenant_id=<B>`、带 B 的 `public_id` 作查询参数和请求体 | 返回的始终是 A |
 | 租户越权 | integration | CUSTOMER 令牌枚举调用全部 `/api/v1/admin/*` 路由 | 全部 403 `ADMIN_REQUIRED`（扩展现有路由枚举用例） |
 | 租户越权 | integration | ADMIN 令牌枚举调用全部 `/api/v1/customer/*` 路由；匿名调用 | 403 `CUSTOMER_REQUIRED`；401 |
@@ -417,12 +419,12 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | 邀请链接匿名可达 | 前端 route（Vitest，任务 C） | 以匿名状态渲染 `/accept-invitation?token=x` | 渲染接受邀请表单，**不**跳转登录页；同一用例以「已登录 ADMIN」状态渲染也显示表单 |
 | 邀请链接匿名可达 | integration（任务 D，扩展 `test_password_reset_link.py`） | 取后端邀请邮件真实渲染出的链接，核对 `paths.ts` 登记了该路径，且 `routes/index.tsx` 中该路由不在 `RequireAuth` 元素之内（与重置链接同一份守卫） | 三项都成立；把路由挪进 `RequireAuth` 的变异必须让用例变红 |
 | 上线顺序 | 契约（`.platform/tasks.yaml`） | D 的 `depends_on` 含 C | 登记 PR 里核对 |
-| 迁移 | integration（MySQL） | `upgrade` 到 0024：已有重置令牌回填 `PASSWORD_RESET`、已有 ADMIN 满足新 CHECK；`downgrade` 在没有 CUSTOMER 和 INVITATION 行时成功，有这类行时拒绝 | 与预期一致 |
+| 迁移 | integration（MySQL） | `upgrade` 到 0025（接在 0024 之后）：已有重置令牌回填 `PASSWORD_RESET`、已有 ADMIN 满足新 CHECK；`downgrade` 在没有 CUSTOMER 和 INVITATION 行时成功，有这类行时拒绝 | 与预期一致 |
 | 金额精度 | — | 不适用：本设计没有金额 | — |
 
 ## 8. 迁移与上线
 
-- **数据迁移步骤**：迁移 0024
+- **数据迁移步骤**：迁移 0025（`down_revision` 是 #369 的 `0024_password_version`，保证只有一个 alembic head）
   1. `users` 加两列，都可为 NULL，不回填
   2. `users` 加外键 `fk_users_tenant`、唯一约束和三条 CHECK。现有行都是 ADMIN、`ACTIVE` 或 `DISABLED`、`tenant_id` 为 NULL，全部满足
   3. `password_reset_tokens` 加 `purpose` 列（带默认值）与 CHECK；索引不动
@@ -438,7 +440,7 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
   - E 门户其余前端：只是体验，缺它时客户已经能接受邀请并登录（登录后落在现有的兜底页，见下）
 - **回滚或前滚**：
   - 生产只前滚
-  - 0024 的 `downgrade` 在存在 CUSTOMER 用户或 `INVITATION` 令牌时拒绝执行，避免丢掉租户关联
+  - 0025 的 `downgrade` 在存在 CUSTOMER 用户或 `INVITATION` 令牌时拒绝执行，避免丢掉租户关联
   - 代码回滚到旧版本时，CUSTOMER 用户依然存在，旧代码会把 `INVITED` 当作「不是 `DISABLED`」放过状态检查。这时它的密码哈希不可用（§6），仍然登录不了
 - **部分部署时的行为**：
   - 前端现有的兜底路由在 `RequireAuth` 之内（`frontend/src/routes/index.tsx`），匿名访问一个没登记的路径会被送到登录页，而 `INVITED` 账号没有可用密码 —— 这就是死链。所以**接受邀请页（匿名可达、不在 `RequireAuth` 之内）必须先于任何能发出邀请的代码上线**：它是任务 C，能发出邀请的管理端开通 / 重发接口与邀请邮件渲染都在任务 D，D `depends_on` C
@@ -493,11 +495,11 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 
 | 任务 | 层 | 内容 | 依赖 |
 | --- | --- | --- | --- |
-| A | 数据库 | 迁移 0024；模型改动：`UserStatus.INVITED`、`User.tenant_id` / `activated_at`、`PasswordResetToken.purpose`；数据库兜底与迁移测试；`docs/database-schema.md` 补 `users` 一节 | — |
+| A | 数据库 | 迁移 0025（接在 #369 的 0024 之后）；模型改动：`UserStatus.INVITED`、`User.tenant_id` / `activated_at`、`PasswordResetToken.purpose`；数据库兜底与迁移测试；`docs/database-schema.md` 补 `users` 一节 | — |
 | B | 业务规则 | `app/services/portal_accounts.py`：开通、重发、停用、启用、接受邀请、重置 2FA；登录、TOTP、刷新三处改为 `is not ACTIVE`；2FA 注册两个服务函数锁用户行并要求 `ACTIVE`；接受邀请递增 `password_version`（#369）；`lock_tenant_for_customer_write`；重置服务限定用途；`customer_2fa_required`、`customer_invitation_ttl_seconds` 配置；新审计动作；对应的服务层与并发测试 | A |
 | C | 前端（不走闸门） | 接受邀请页：`routes/paths.ts` 登记 `/accept-invitation`，路由放在 `RequireAuth` 之外（与重置密码页同级），表单提交 `POST /api/v1/auth/invitation/accept`，成功后转登录页；§7「邀请链接匿名可达」的前端用例。先于 D 上线，此时后端接口尚不存在，页面对任何令牌都显示「链接无效或已过期」 | B（只为排序；不依赖 B 的代码） |
-| D | 接口 | 管理端六个、认证四个（接受邀请、`/auth/me`、`/2fa/self/enrol`、`/2fa/self/confirm`）、客户端一个（`/customer/me`）接口；`require_customer` / `require_customer_writable`；邀请邮件渲染；扩展链接守卫（路径已登记、路由在 `RequireAuth` 之外）；路由枚举与越权用例；`docs/api.md`；`docs/runbook.md` 写「E 上线前不为真实客户开通」 | B、C |
-| E | 前端（不走闸门） | 管理端客户详情页的门户账号面板；登录后按 `/auth/me` 的角色跳转；门户外壳和 `/portal` 首页（显示 `/customer/me`、只读提示、开启 2FA） | D |
+| D | 接口 | 管理端六个、认证四个（接受邀请、`/api/v1/me`、`/2fa/self/enrol`、`/2fa/self/confirm`）、客户端一个（`/customer/me`）接口；`require_customer` / `require_customer_writable`；邀请邮件渲染；扩展链接守卫（路径已登记、路由在 `RequireAuth` 之外）；路由枚举与越权用例；`docs/api.md`；`docs/runbook.md` 写「E 上线前不为真实客户开通」 | B、C |
+| E | 前端（不走闸门） | 管理端客户详情页的门户账号面板；登录后按 `/api/v1/me` 的角色跳转；门户外壳和 `/portal` 首页（显示 `/customer/me`、只读提示、开启 2FA） | D |
 
 ### 设计闸门判定
 
@@ -521,3 +523,5 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | v6 | 2026-10-19 | 去掉 v5 的 `password_changed_at` 与 `iat` 比较，改为依赖前置设计 #369（密码版本号）：接受邀请递增 `password_version`，`/2fa/self/*` 把令牌版本号传给服务；§7 只保留客户路径的用例，其余移到 #369；§8、§11 写明 #369 先实现 | Codex 审查 v5（REQUEST_CHANGES）：登录在重置提交前用旧密码通过校验，`iat` 晚于改密时刻而被放行。Kelvin 2026-10-19 决定把「改密码吊销会话」拆成前置设计闸门 #369 |
 | v7 | 2026-10-19 | ① 新增管理员「重置客户 2FA」：`POST …/portal-account/reset-2fa`（必填原因），删除 2FA 设置与恢复码、`password_version + 1` 吊销全部会话、审计 `PORTAL_2FA_RESET`，管理员先线下核实身份（§1、§2、§4、§5、§6、§7、§11）。② §2 数据流与「事务边界」里接受邀请的加锁写法改成与 §4 一致（先锁租户行） | Claude 审查 v6（REQUEST_CHANGES）：客户能开启 2FA 却没有任何恢复路径，丢失或被抢先注册后账号永久不可用；§2 两处仍写「先锁 user 行」，与 §4 矛盾 |
 | v8 | 2026-10-19 | 重置 2FA 的原因上限从 500 改为 255 个字符，与 `audit_logs.reason` 列宽和现有 `_Reason` 一致（§2）；§5 加「DB 提交失败（重置 2FA）」；§7 加 255 / 256 个字符的边界用例 | Claude 审查 v7（REQUEST_CHANGES）：500 字的原因在生产 MySQL 上会报 Data too long 回滚或被静默截断 |
+| v9 | 2026-10-19 | ① 停用门户账号时 `password_version + 1`，停用前的访问令牌与 pending 令牌不会因重新启用而复活（§4）。② 当前用户接口从 `/api/v1/auth/me` 移到 `/api/v1/me`：避开前端对 `/api/v1/auth/` 不刷新的规则与认证限流（§2）。③ `/2fa/self/enrol` 显式调用 `_rate_limit`（§2）。④ 邀请令牌的 `expires_at` 截到整秒（§2）。⑤ §7「令牌隔离」改为造「状态对、用途错」的令牌行，「Redis/Celery 丢失」按任务 B / D 分开断言，「写权限并发」的对照断言用等价的不加锁读取。⑥ 错误码名称更正：设计里的 `INVALID_TOKEN` 是现有 `InvalidToken` 的错误码，实际为 `TOKEN_INVALID`，全文改正 | 登记前预审（`worker.design_precheck`）对 v8 的发现：089 的三条 DESIGN_DEFECT 与两条 UNDECIDED、091 的一条 DESIGN_DEFECT 与一条 UNDECIDED、087 的错误码 DESIGN_DEFECT |
+| v10 | 2026-10-19 | ① 本设计的迁移编号改为 0025、接在 #369 的 `0024_password_version` 之后（§2、§7、§8、§11），避免两个 alembic head。② §7「停用 → 启用」与「停用后的 2FA 注册」各加断言：重新启用后，停用前的访问令牌与 pending 令牌仍是 401，版本号比停用前大 1 | Claude 审查 v9（REQUEST_CHANGES）：迁移编号与 #369 冲突；v9 新增的停用 +1 没有对应的测试断言 |

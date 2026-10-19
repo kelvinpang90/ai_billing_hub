@@ -3,7 +3,8 @@
 > **来源**：设计闸门 Issue #369。本文件是 `APPROVED: design v6` 那一版正文的**逐字副本**（审查：v1–v4 由 Codex，v5–v6 在 Codex 额度用完期间由 Claude Code 审查；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v6`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
 > **实现以本文件为准**；与 Issue 不一致时，以 Issue #369 上被批准的 v6 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
-> §11 的三步：P1 登记为 `AIH-TASK-086`（迁移），P3 是管理员 PR，P2 登记为 `AIH-TASK-087`（使用点与加锁顺序）。顺序 P1 → P3 → P2。
+> §11 的三步：P1 登记为 `AIH-TASK-086`（迁移），P3 是管理员 PR，P2 登记为 `AIH-TASK-087`（使用点与加锁顺序，含非并发测试）与 `AIH-TASK-088`（§7 的并发测试；按登记前预审的规模提示拆出）。顺序 P1 → P3 → 087 → 088。
+> 勘误：正文里写的 401 `INVALID_TOKEN` 指现有的 `InvalidToken`，错误码实际是 `TOKEN_INVALID`（`app/core/tokens.py`），实现沿用它、不新增错误码；两个任务的契约里写明了这一点。
 > 管理员 PR 除了 P3（`reset_password` 递增版本号）之外，还承担 P2 里 `app/core/tokens.py` 那一部分：`issue_access_token`、`issue_pending_2fa_token` 新增 `password_version` 参数（默认 0）并写入 claim `pwv`，`decode_token` 不强制要求它。原因是这两个文件名含 password / tokens，OpenClaw Worker 的路径规则不许改；默认 0 只是让这一步单独合并时不改变任何行为，`AIH-TASK-087` 要求所有签发调用都显式传值。
 > 审查 v6 的不阻断提醒：`app/cli.py` 用 `User(..., password_hash=...)` 构造新用户、按设计不递增版本号，P2 的守卫用例只扫描属性赋值 `.password_hash =`（或明确豁免构造新用户的写法），见 `AIH-TASK-087` 契约。
 
