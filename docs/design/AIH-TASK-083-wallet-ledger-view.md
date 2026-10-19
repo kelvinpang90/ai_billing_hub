@@ -1,8 +1,8 @@
-# AIH-TASK-083 / 084 / 085 设计：管理端查看钱包流水（已批准 v1）
+# AIH-TASK-083 / 084 / 085 设计：管理端查看钱包流水（已批准 v2）
 
-> **来源**：设计闸门 Issue #351。本文件是 `APPROVED: design v1` 那一版正文的**逐字副本**，审查者为 Claude Code（Codex 额度不可用期间临时替代）。
+> **来源**：设计闸门 Issue #351。本文件是 `APPROVED: design v2` 那一版正文的**逐字副本**，审查者为 Claude Code（Codex 额度不可用期间临时替代）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #351 上被批准的 v1 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #351 上被批准的 v2 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > §8 的三个实现任务登记为 `AIH-TASK-083`（迁移加索引）、`AIH-TASK-084`（仓储与接口）、`AIH-TASK-085`（前端面板），按这个顺序依赖。
 
 ---
@@ -22,7 +22,7 @@
 
 状态：`待审`（`READY_FOR_REVIEW`）
 负责人：Claude
-**设计版本**：`v1`
+**设计版本**：`v2`
 对应需求：spec §60「Admin sees: Current balance / Ledger / Top-ups / Usage charges / Adjustments / Rebill corrections」、§78（`wallet_transactions`）、§108（分页：大表优先用游标）、`REQ-PRIV-002`（客户侧不得暴露成本与毛利，本接口只给管理员）
 目标 PR：待开（批准后按 §8 拆三个任务登记；`docs/TODO.md`「后续计划」里的「管理端查看钱包流水（需设计闸门）」与「管理端前端：低余额阈值与钱包流水」的流水部分即本闸门）
 
@@ -86,7 +86,7 @@ GET（管理员令牌）→ 查询参数校验（FastAPI，鉴权之前，422）
     }
   ],
   "page_size": 20,
-  "next_before_sequence": 22
+  "next_before_sequence": 23
 }
 ```
 
@@ -99,7 +99,7 @@ GET（管理员令牌）→ 查询参数校验（FastAPI，鉴权之前，422）
 | `description` | 库里的原因（调账、系统更正必有，AI 用量为空） |
 | `created_by_email` | 操作者（`created_by` → `users.email`）；系统写入的行是 `null`。审计接口的 `actor_email` 已经对管理员给出同一信息 |
 | `created_at` | UTC，不带时区（`docs/api.md`「时间」） |
-| `next_before_sequence` | 还有更早的行时 = 本页最后一行的 `wallet_sequence`，原样作为下一页的 `before_sequence`；没有更多时 `null` |
+| `next_before_sequence` | 还有更早的行时 = 本页最后一行（`items` 的最后一项）的 `wallet_sequence`，原样作为下一页的 `before_sequence`（下一页只取比它小的行）；没有更多时 `null`。多取的第 `page_size + 1` 行只用来判断有没有下一页，不返回、也不当游标。带筛选时序号不连续，所以游标只能取本页最后一行，不能用「最后一行 − 1」之类推算 |
 
 **没有 `total`**：带筛选时总数要额外 COUNT 扫全部匹配行，正是游标分页要避免的。不带筛选时总行数等于钱包的 `version`（客户详情已返回），前端需要时自己取。
 
@@ -196,7 +196,7 @@ LIMIT :page_size + 1
 
 | 风险/需求 | 测试层级 | 场景 | 预期结果 |
 | --- | --- | --- | --- |
-| 正常路径 | API（SQLite + MySQL） | 客户有 5 行账本（充值以外的四种来源各至少一行，用量行有对应事件、调账行有操作者），`page_size=2` 连翻三页 | 依次得到序号 5,4 / 3,2 / 1；`next_before_sequence` 依次 3、1、`null`；每行字段逐字等于库里的行；用量行 `usage_event_id` 等于事件 `public_id`，调账行 `created_by_email` 等于管理员邮箱，系统行两者为 `null` |
+| 正常路径 | API（SQLite + MySQL） | 客户有 5 行账本（充值以外的四种来源各至少一行，用量行有对应事件、调账行有操作者），`page_size=2` 连翻三页 | 依次得到序号 5,4 / 3,2 / 1；`next_before_sequence` 依次 4、2、`null`（每页最后一行的序号）；每行字段逐字等于库里的行；用量行 `usage_event_id` 等于事件 `public_id`，调账行 `created_by_email` 等于管理员邮箱，系统行两者为 `null` |
 | 空账本 | API | 新建客户、没有任何账本行 | `items` 为空、`next_before_sequence` 为 `null` |
 | 筛选 | API | 同一客户交错写入 `USAGE_EVENT` 与 `ADMIN_ADJUSTMENT`，`reference_type=ADMIN_ADJUSTMENT&page_size=1` 翻到底 | 只出现调账行，按序号倒序、不重不漏 |
 | 边界值 | API | `page_size` = 0 / 101 / 非整数；`before_sequence` = 0 / -1 / 2^63；`reference_type` = 小写 / 未知值 | 422 `VALIDATION_ERROR`，文案不回显值；`page_size=100`、`before_sequence=1`（空页）为 200 |
@@ -273,4 +273,5 @@ SQL 文本断言遵守仓库约定：不写死方言字面量（`JOIN` / `INNER 
 | 版本 | 日期 | 改了什么 | 触发原因 |
 | --- | --- | --- | --- |
 | v1 | 2026-10-18 | 初稿 | — |
+| v2 | 2026-10-19 | 游标规则统一为 §2 文字与查询的写法（本页最后一行的序号，下一页取 `<`）：§7「正常路径」的 `next_before_sequence` 由 3、1、`null` 改为 4、2、`null`；§2 JSON 示例的 `next_before_sequence` 由 22 改为 23；§2 字段说明写明多取的一行不返回、不当游标，带筛选时不能推算游标 | AIH-TASK-084 run `70b1cfb2` 实现时发现：v1 的 §7 与 JSON 示例按「游标 = 多取的那一行、`≤`」写，与 §2 文字和查询（最后一行、`<`）矛盾，照 §2 实现 §7 过不了，照 §7 的值翻页会漏掉序号 3 |
 
