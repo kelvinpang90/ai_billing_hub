@@ -131,6 +131,8 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers/{customer_id}/projects"),
     ("GET", "/api/v1/admin/customers/{customer_id}/projects"),
     ("POST", "/api/v1/admin/customers/{customer_id}/wallet/adjustments"),
+    # AIH-TASK-084 的钱包流水（设计闸门 #351 v2 §2「接口」）。
+    ("GET", "/api/v1/admin/customers/{customer_id}/wallet/transactions"),
     ("POST", CREDENTIALS_ROUTE),
     ("GET", CREDENTIALS_ROUTE),
     ("POST", CREDENTIALS_ROUTE + "/{api_key}/rotate"),

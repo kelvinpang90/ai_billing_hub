@@ -25,6 +25,9 @@
 项目集成状态与状态 webhook 地址（AIH-TASK-050，设计闸门 #241 v6 §2「接口」）：规则全在
 `app/services/project_integration.py`，这一层只做鉴权、请求体形状与转发。完整地址只出现在
 `…/status-webhook` 的 PUT 与 GET 响应里，这一层不记（路径里可能带集成方的令牌）。
+
+钱包流水（AIH-TASK-084，设计闸门 #351 v2 §2「接口」）：只读，一个普通会话两条 SELECT（找客户、
+取一页），不提交、不写审计。没有服务层：这一层直接调 repository，与用量事件查询的写法一致。
 """
 
 from __future__ import annotations
@@ -36,6 +39,9 @@ from fastapi import APIRouter, Path, Query, Request, Response, status
 from app.api.auth import request_context, require_admin, require_session_factory
 from app.core.logging import current_request_id
 from app.models.tenancy import AccountStatus, IntegrationStatus
+from app.models.wallet import ReferenceType
+from app.repositories import wallet as wallet_repository
+from app.repositories.tenancy import get_tenant_by_public_id
 from app.schemas.customers import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE,
@@ -62,6 +68,11 @@ from app.schemas.integration_access import (
     RotateCredentialRequest,
 )
 from app.schemas.wallet_adjustments import AdjustmentView, CreateAdjustmentRequest
+from app.schemas.wallet_transactions import (
+    MAX_WALLET_SEQUENCE,
+    WalletTransactionPage,
+    wallet_transaction_page,
+)
 from app.schemas.webhook_signing import (
     ActivateWebhookSecretRequest,
     IssuedWebhookSecretView,
@@ -84,6 +95,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 # 超出范围是 422，不静默截断（spec §108）。
 PageNumber = Annotated[int, Query(ge=1, le=MAX_PAGE)]
 PageSize = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)]
+BeforeSequence = Annotated[int | None, Query(ge=1, le=MAX_WALLET_SEQUENCE)]
 
 
 @router.post(
@@ -249,6 +261,38 @@ def post_wallet_adjustment(
         # 重放不入账：200 加 `replayed: true`，调用方看得出这次没有新的财务效果。
         response.status_code = status.HTTP_200_OK
     return success(adjustment, request_id=current_request_id())
+
+
+@router.get(
+    "/customers/{customer_id}/wallet/transactions",
+    response_model=ApiResponse[WalletTransactionPage],
+)
+def list_wallet_transactions(
+    request: Request,
+    customer_id: str,
+    page_size: PageSize = DEFAULT_PAGE_SIZE,
+    before_sequence: BeforeSequence = None,
+    reference_type: ReferenceType | None = None,
+) -> ApiResponse[WalletTransactionPage]:
+    """Newest first by `wallet_sequence`; pass `next_before_sequence` back for the next page.
+
+    租户只来自路径（INV-8）；游标是本租户内的序号，拿别的客户的序号来也只会翻到本客户的行。
+    """
+    require_admin(request)
+    with require_session_factory(request)() as session:
+        tenant = get_tenant_by_public_id(session, customer_id)
+        if tenant is None:
+            raise customers.CustomerNotFound
+        # 多取一行，只用来判断还有没有下一页（设计 §2）。
+        rows = wallet_repository.list_transactions_for_tenant(
+            session,
+            tenant.id,
+            limit=page_size + 1,
+            before_sequence=before_sequence,
+            reference_type=reference_type,
+        )
+        page = wallet_transaction_page(rows, page_size=page_size)
+    return success(page, request_id=current_request_id())
 
 
 # --- 集成 API 凭据（AIH-TASK-012） ------------------------------------------------
