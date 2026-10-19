@@ -5162,3 +5162,753 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-086
+    title: 改密码吊销会话第一层：用户与刷新令牌的密码版本号迁移
+    purpose: >-
+      按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2「数据库（迁移）」、§8 与 §11 的 P1：迁移 alembic/versions/20261019_0024_session_revocation.py（revision 0024_password_version，down_revision 0023_wallet_ledger_ref_index；文件名不含 password，是为了避开 Worker 的敏感路径规则）给 users 与 refresh_tokens 各加 password_version INT NOT NULL DEFAULT 0 与 CHECK (password_version >= 0)；模型同步；表结构文档补上。只改表结构与模型，不改任何服务、令牌与接口；P3（reset_password 递增）由管理员 PR 完成，P2 属于 AIH-TASK-087。
+    status: ready
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）逐条一致，以 §2「数据库（迁移）」、§7「数据库兜底」「迁移」两行与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '迁移 0024：upgrade 给 users 与 refresh_tokens 各加 password_version（INT NOT NULL，服务器端默认 0，已有行取 0）与 CHECK（名为 ck_users_password_version、ck_refresh_tokens_password_version，表达式 password_version >= 0），不加索引；downgrade 逐项撤回；文件头写 §132 第 13 条分析（写法照 0022、0023 的文件头）'
+      - '模型 app/models/auth.py：User 与 RefreshToken 加 password_version（Python 侧默认 0）与上述 CHECK；注释写明它的含义与「只在由本人设置新密码时 +1」（设计 §2「核心规则」）'
+      - '测试：tests/backend/test_migrations.py 覆盖 0024 接在 0023 之后、升级后两列与 CHECK 存在、已有行为 0、往返（升到 0024、降到 0023、再升）其余表结构不变，模型与迁移比对照常通过；新增 tests/backend/test_session_revocation_db.py 覆盖设计 §7「数据库兜底」：绕过服务写 password_version = -1（两张表各一次）在 SQLite 与 BILLING_TEST_DATABASE_URL 的真 MySQL 上都被拒（未设置时 MySQL 部分 skip、CI 必跑）'
+      - 'docs/database-schema.md：users 与 refresh_tokens 的列说明补上 password_version 与用途（没有 users 一节就新增，只写本任务涉及的列与约束及一句「其余列见模型」）'
+      - '不改服务、令牌、接口与前端；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #369'
+    allowed_change_paths:
+      - alembic/versions/20261019_0024_session_revocation.py
+      - app/models/auth.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_session_revocation_db.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-087
+    title: 改密码吊销会话第二层：令牌带密码版本号并在各使用点比较，统一认证加锁顺序
+    purpose: >-
+      按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2 全部与 §11 的 P2：访问令牌与 pending 令牌加 pwv claim，刷新令牌行写 password_version；签发点按 §2 盘点表取版本号，使用点（require_current_user、complete_second_factor、2FA 注册与确认、重新生成恢复码、refresh_session）按 §2 比较；统一加锁顺序（refresh_session 先锁用户行）；刷新令牌不可用时的判别表；守卫用例。前提：管理员 PR 已合并到 main，它包含 P3（reset_password 在同一事务里递增 password_version）与 app/core/tokens.py 的 issue_access_token、issue_pending_2fa_token 新增 password_version 参数（默认 0）并写入 claim pwv（这两个文件名含 password / tokens，Worker 不能改）。
+    status: ready
+    depends_on:
+      - AIH-TASK-086
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）逐条一致，以 §2 的「核心规则」「令牌盘点」「统一加锁顺序」「刷新令牌不可用时的判别」「在途请求的语义」「令牌格式」「事务边界」与 §5 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。勘误（优先于设计）：设计里写的 401 INVALID_TOKEN 指现有的 InvalidToken，错误码实际是 TOKEN_INVALID，沿用它、不新增错误码'
+      - '前提核对（管理员 PR；app/services/password_reset.py、app/core/tokens.py 与 tests/backend/test_tokens.py 的文件名含 password / tokens，Worker 的敏感路径规则不许改）：reset_password 已在写新哈希的同一事务里递增 password_version；issue_access_token、issue_pending_2fa_token 已有 password_version 参数并写入 claim pwv，decode_token 不强制要求 pwv。动手前逐项核对，缺任何一项就停下并在 PR 里说明，不自行绕过'
+      - '所有签发调用都显式传 password_version（不依赖默认值 0），使用点按缺省为 0 取 pwv。app/services/auth.py：_issue_session 新增 password_version 参数、不在函数里重读用户；authenticate、complete_second_factor、refresh_session 按设计 §2 盘点表取值与比较；complete_second_factor 在事务开头 SELECT users FOR UPDATE，锁内依次：用户存在且状态检查 → 比较 pending 令牌的 pwv 与当前版本（不等即回滚，不提交任何改动，包括已清掉的过期锁）→ 清过期锁与锁定检查（沿用现有写法）→ 验证第二因子 → 签发；第二因子失败时保持先提交再写失败计数；refresh_session 改为不加锁读出旧行取 user_id → 锁用户行 → 条件 UPDATE，入口检查与条件更新失败共用设计 §2 的判别表（只有 used_at 非空才走 _treat_as_replay）'
+      - 'app/services/two_factor.py：start_enrolment、confirm_enrolment、regenerate_recovery_codes 新增参数接收所用令牌的版本号，在各自写事务里先 SELECT users FOR UPDATE 再比较，不等时 401 TOKEN_INVALID、不写任何 2FA 行或恢复码。app/api/auth.py 的 require_current_user 读库时比较 pwv；app/api/two_factor.py 的 enrol、confirm 把 pending 令牌的 pwv 传给服务，regenerate 传 require_current_user 返回的 user.password_version（require_current_user 读库时已核对它等于访问令牌的 pwv，两者等价，不改 require_current_user 的返回类型）'
+      - '测试：新增 tests/backend/test_session_revocation.py 覆盖设计 §7 的非并发各行（正常路径、改密码后的旧令牌五个使用点、改密码之后的普通刷新、登出之后的刷新、真正的重放不受影响、_issue_session 不重读用户、兼容、版本单调、事务中途失败），以及守卫用例：用 ast 扫描 app/ 下目标为属性 password_hash 的赋值（Assign 与 AugAssign），要求同一函数体内同时出现对 password_version 的赋值（属性赋值、增量赋值，或 update(...).values(password_version=...)）；用 User(...) 关键字参数构造新用户的写法不是属性赋值，明确豁免并写明理由（设计审查 v6 的提醒）'
+      - '设计 §7 的并发各行（含「真正的重放不受影响」里两个并发刷新抢同一行的那一半）属于 AIH-TASK-088，本任务不写并发用例。既有测试因签名变化需要改的，只改 tests/backend/test_auth_service.py、test_two_factor.py 两个文件里的调用方式，不改它们断言的行为（刷新令牌被吊销后不再写重放审计这一处除外，按设计改并在 PR 里列出）'
+      - 'docs/api.md 的认证说明补一段：改密码使之前的全部会话失效（版本号规则）、刷新令牌被吊销与被重放的区别，以及「以后新增任何设置密码的入口都必须在同一事务里递增 password_version」（设计 §10 A1）'
+      - '不改迁移与模型（属于 AIH-TASK-086）、不改前端；不改 AI 模块；SQL 断言不写死方言字面量；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #369'
+    allowed_change_paths:
+      - app/services/auth.py
+      - app/services/two_factor.py
+      - app/api/auth.py
+      - app/api/two_factor.py
+      - tests/backend/test_session_revocation.py
+      - tests/backend/test_auth_service.py
+      - tests/backend/test_two_factor.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-088
+    title: 改密码吊销会话第三层：改密码与登录、刷新、二次验证及认证材料写入的并发测试
+    purpose: >-
+      按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§7 与 §11 的 P2：AIH-TASK-087 的并发部分，只写测试。新增 tests/backend/test_session_revocation_concurrency.py，在真 MySQL 上用两个连接与屏障验证设计 §7 的全部并发行。只改这一个测试文件；测试暴露实现缺陷时停下说明，不改产品代码。
+    status: ready
+    depends_on:
+      - AIH-TASK-087
+    acceptance_criteria:
+      - '用例与 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§7 的并发各行逐条对应，场景、屏障位置与预期结果以设计为准：登录与改密码并发、第二因子消耗与改密码并发（①锁前暂停，②持锁时重置等待，两种先后）、第二因子失败与锁、刷新与改密码并发（屏障在锁用户行之前，两种先后）、刷新持锁时改密码（原死锁交错）、刷新与登出并发、认证材料写入与改密码并发（含恢复码重新生成在鉴权之后、进服务之前的屏障）、死锁兜底。另加「真正的重放不受影响」里两个并发刷新抢同一行的那一半（预期与现在一致：一个成功、另一个走 _treat_as_replay）。勘误（优先于设计）：设计里写的 401 INVALID_TOKEN 是现有错误码 TOKEN_INVALID；「第二因子消耗与改密码并发」②（重置在 /login/totp 持有用户行锁期间开始）只可能出现 /login/totp 先提交这一种先后，只跑这一种，另一种先后由 ① 覆盖'
+      - '只在 BILLING_TEST_DATABASE_URL 设置时运行，未设置时 skip 并写明原因，CI 必跑。暂停点不改产品代码：用 SQLAlchemy 的 before_cursor_execute / after_cursor_execute 或 Session 的 before_commit 事件，在匹配到目标语句（例如对 users 的 SELECT … FOR UPDATE、对 refresh_tokens 的条件 UPDATE、写 2FA 行的 INSERT）时等待 threading.Event。确认对方事务确实在等行锁：轮询 information_schema.INNODB_TRX 中 trx_state 为 LOCK WAIT 的行（间隔 50 毫秒、最多 10 秒，超时即失败），这是只在 MySQL 上跑的用例，可以用 MySQL 专有 SQL。认证材料写入与改密码的两种先后：改密码先提交——写入方在锁用户行的语句之前暂停，重置提交后放行，预期 401、不写；写入先提交——写入方在提交之前暂停，此时开始重置并用 INNODB_TRX 确认它在等锁，再放行写入，预期写入成立、之后旧会话 401。每个等待都设超时，超时即失败并报出停在哪一步，不允许无限等待；需要调 reset_password 的用例直接调用服务；跨用例共用的 fixture 若要放进 conftest，停下说明（本任务只许改一个文件）'
+      - '每个用例都断言设计写明的最终状态：对外结果（状态码与错误码）、令牌行与版本号、2FA 设置与恢复码、审计行（尤其是「没有 TOKEN_REUSED 审计」的那几条）；不出现死锁错误的用例同时断言没有抛 OperationalError'
+      - '测试若暴露实现缺陷（例如死锁、行为与设计不符），停下并在 PR 里写明现象与复现方式，不修改任何产品代码，也不放宽断言让它通过'
+      - 'SQL 断言不写死方言字面量（CLAUDE.md「写后端测试的约定」）；示例 uuid 用全零占位值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #369'
+    allowed_change_paths:
+      - tests/backend/test_session_revocation_concurrency.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-089
+    title: 客户门户认证第一层：用户挂租户、邀请状态与令牌用途的迁移
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2「数据库」、§8 与 §11 任务 A：迁移 alembic/versions/20261019_0025_customer_portal_accounts.py（revision 0025_customer_portal_accounts，down_revision 0024_password_version）给 users 加 tenant_id（外键 fk_users_tenant）、activated_at、唯一约束 uq_users_tenant 与三条 CHECK，给 password_reset_tokens 加 purpose 列与 CHECK（索引不动）；模型同步（UserStatus 加 INVITED）；表结构文档补上。只改表结构与模型；业务规则属于 AIH-TASK-090 与 091。前提：设计闸门 #369 的实现（AIH-TASK-086、管理员 PR、AIH-TASK-087、AIH-TASK-088）已全部合并。
+    status: ready
+    depends_on:
+      - AIH-TASK-088
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）逐条一致，以 §2「数据库」、§7「数据库兜底」「迁移」两行与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '迁移 0025 upgrade：users 加 tenant_id（可空，外键 fk_users_tenant 指向 tenants.id，ON DELETE RESTRICT）与 activated_at（可空）；加 uq_users_tenant (tenant_id)；加 ck_users_admin_no_tenant、ck_users_status、ck_users_invited_customer 三条 CHECK，表达式照设计 §2（不加「CUSTOMER 必须有 tenant_id」的约束，设计 §9 备选 F）；password_reset_tokens 加 purpose VARCHAR(32) NOT NULL DEFAULT PASSWORD_RESET 与 CHECK（PASSWORD_RESET、INVITATION），已有行取默认值；ix_password_reset_tokens_user 不动。文件头写 §132 第 13 条分析（写法照 0022、0023 的文件头）'
+      - '迁移 0025 downgrade：存在 role 为 CUSTOMER 的用户或 purpose 为 INVITATION 的令牌时拒绝执行并给出原因（照 0022 在有数据时拒绝降级的写法）；否则逐项撤回'
+      - '模型 app/models/auth.py：UserStatus 加 INVITED；User 加 tenant_id、activated_at 与上述约束；PasswordResetToken 加 purpose 与 CHECK；新增用途常量（PASSWORD_RESET、INVITATION），注释写明两种令牌必须按用途隔离（设计 §2「邀请邮件与重置的隔离」）。UserRole 类注释里「CUSTOMER 现在建不出来」改为指向本设计'
+      - '测试：tests/backend/test_migrations.py 覆盖 0025 接在 0024 之后、升级后的列与约束、往返与有 CUSTOMER 或 INVITATION 行时降级被拒，模型与迁移比对照常通过；新增 tests/backend/test_portal_accounts_db.py 覆盖设计 §7「数据库兜底」一行：五种绕过服务的写入在 SQLite 与真 MySQL 上都被拒，另断言不挂租户的 CUSTOMER 插入被允许并写明这是刻意的（未设置 BILLING_TEST_DATABASE_URL 时 MySQL 部分 skip、CI 必跑）；现有测试里造不挂租户的 CUSTOMER 的写法因此不受影响'
+      - 'docs/database-schema.md 的 users 一节补 tenant_id、activated_at、状态取值与 ADMIN / CUSTOMER 的区别，password_reset_tokens 一节补 purpose'
+      - '不改服务、接口、配置与前端；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支；跨文件共用的 fixture 在 conftest 注册'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368'
+    allowed_change_paths:
+      - alembic/versions/20261019_0025_customer_portal_accounts.py
+      - app/models/auth.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_portal_accounts_db.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-090
+    title: 客户门户认证第二层：登录状态判断、两步验证注册要求启用、写权限锁、配置与审计动作
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2「依赖」「登录流程的改动」与 §11 任务 B 的一半：登录、TOTP 第二步、刷新三处状态判断改为不是 ACTIVE 就拒；customer_2fa_required 配置；2FA 注册两个服务函数要求 ACTIVE；新增 lock_tenant_for_customer_write；新增两个配置与六个审计动作。不含门户账号服务（属于 AIH-TASK-091），没有任何 HTTP 入口。
+    status: ready
+    depends_on:
+      - AIH-TASK-089
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）逐条一致，以 §2「依赖」「登录流程的改动」、§4、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。勘误（优先于设计 §7「状态判定」一行）：INVITED 账号在三条路径上各自沿用该路径现有的失败形态——登录（authenticate）：401 INVALID_CREDENTIALS，写 LOGIN_FAILED 审计，reason 为 NOT_ACTIVE（同时处于锁定时沿用现有优先级，记 LOCKED）；TOTP 第二步（complete_second_factor）：401 INVALID_CREDENTIALS，与现在对 DISABLED 一样不写审计；刷新（refresh_session）：与现在对 DISABLED 一样回滚并返回 401 TOKEN_REUSED，不写审计。DISABLED 在三条路径上的行为不变'
+      - 'app/services/auth.py：authenticate、complete_second_factor、refresh_session 三处由 status is DISABLED 改为 status is not ACTIVE，审计 LOGIN_FAILED 对非 ACTIVE 非 DISABLED 记 reason NOT_ACTIVE、对外仍是 INVALID_CREDENTIALS；customer_2fa_required 为 True 时未注册 2FA 的 CUSTOMER 得到 ENROL_2FA（pending 令牌的 TTL 与 ADMIN 注册路径相同）；登录不看租户 account_status'
+      - 'app/services/two_factor.py：start_enrolment、confirm_enrolment 在已锁用户行之后（AIH-TASK-087 已加锁）用户不是 ACTIVE 时 401 TOKEN_INVALID，不写任何 2FA 行。app/services/account_status.py 新增 AccountReadOnly（AppError，403 ACCOUNT_READ_ONLY；接口层 AIH-TASK-093 复用这一个类，不另建）与 lock_tenant_for_customer_write(session, tenant_id)（设计 §2「依赖」：在调用方写事务里 SELECT tenants FOR UPDATE 并重查，DISABLED 或 CLOSED 抛 AccountReadOnly，否则返回锁住的租户；租户不存在时抛 app/services/customers.py 的 CustomerNotFound）'
+      - 'app/core/config.py 新增 customer_2fa_required（默认 False）与 customer_invitation_ttl_seconds（默认 259200，gt=0）；app/models/auth.py 的 AuditAction 末尾依次加 PORTAL_ACCOUNT_CREATED、PORTAL_INVITATION_RESENT、PORTAL_INVITATION_ACCEPTED、PORTAL_ACCOUNT_DISABLED、PORTAL_ACCOUNT_ENABLED、PORTAL_2FA_RESET，frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 按同一顺序补上（adminAudit.test.ts 逐项比对）'
+      - '测试：tests/backend/test_auth_service.py 加 INVITED 在登录、TOTP、刷新三处都被拒（审计 reason NOT_ACTIVE；把三处改回 is DISABLED 的变异必须让它变红）与 customer_2fa_required 两种取值；tests/backend/test_two_factor.py 加用户不是 ACTIVE 时两个注册函数被拒、不写行；tests/backend/test_config.py 加两个新配置的默认值与下界；新增 tests/backend/test_customer_write_lock.py 覆盖设计 §7「写权限并发」（「测试专用写操作」写入一张只在测试里定义、建表与删表都由该测试负责的表，不写任何产品表）：非并发部分（四种 account_status 下的返回与抛错）在 SQLite 与 MySQL 上跑，两种先后与「只做一次不加锁读取时停用在中间提交会写成功」的对照断言在真 MySQL 上用两个连接与屏障跑（未设置 BILLING_TEST_DATABASE_URL 时 skip、CI 必跑）'
+      - '不改门户账号服务、接口、schema、路由、outbox 渲染与迁移；不改 AI 模块；SQL 断言不写死方言字面量；示例 uuid 用全零占位值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job 必须全绿（adminAudit.test.ts）；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368'
+    allowed_change_paths:
+      - app/services/auth.py
+      - app/services/two_factor.py
+      - app/services/account_status.py
+      - app/core/config.py
+      - app/models/auth.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_auth_service.py
+      - tests/backend/test_two_factor.py
+      - tests/backend/test_config.py
+      - tests/backend/test_customer_write_lock.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-091
+    title: 客户门户认证第三层：门户账号的查看、开通、重发邀请与接受邀请服务
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2、§4、§5、§6 与 §11 任务 B 的另一半：新增 app/services/portal_accounts.py 的查看、开通、重发邀请、接受邀请四个函数；停用、启用、重置 2FA 属于 AIH-TASK-098（按登记前预审的规模提示拆出）。没有任何 HTTP 入口，接口属于 AIH-TASK-093 与 094。重置服务只认 PASSWORD_RESET 用途那一处在 app/services/password_reset.py，文件名含 password、Worker 不能改，由管理员在 AIH-TASK-089 合并之后、本任务开启之前以 PR 完成。
+    status: ready
+    depends_on:
+      - AIH-TASK-090
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）逐条一致，以 §2「改密码让旧会话失效（依赖设计闸门 #369）」「管理员重置客户 2FA」「邀请邮件与重置的隔离」「事务边界」、§4 全部、§5、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '前提核对：app/services/password_reset.py 的 reset_password 令牌查询已带 purpose 为 PASSWORD_RESET 的条件、request_reset 写入时显式写 purpose（管理员 PR；该文件与 tests/backend/test_password_reset*.py 的文件名含 password，Worker 的敏感路径规则不许改）。动手前核对，若没有就停下并在 PR 里说明，不自行绕过'
+      - '服务接口：get_portal_account(session_factory, *, customer_id, now=None) 只读；create_portal_account、resend_invitation 的参数是 session_factory、settings（取 customer_invitation_ttl_seconds）、actor（ADMIN 用户）、customer_id（租户 public_id）、context、各自的请求字段与可选的 now（照 password_reset 服务的写法，供测试冻结时钟）；accept_invitation(session_factory, *, token, password, context, now=None)。开通与重发返回视图与本次写入的 outbox 行 id（供 AIH-TASK-094 像忘记密码那样立即触发投递），查看只返回视图；视图是只读对象 PortalAccountView，恰好设计 §2 管理端 GET 的七个字段，invited_at 与 invitation_expires_at 按设计 §2 在服务里取自最新的邀请令牌（AIH-TASK-094 只做序列化）；客户不存在抛 app/services/customers.py 的 CustomerNotFound，未开通抛 PortalAccountNotFound（404 PORTAL_ACCOUNT_NOT_FOUND，定义在本模块）'
+      - '四个函数中会写库的三个各一个事务，加锁顺序一律租户 → 用户 → 令牌（设计 §4 与 #369「统一加锁顺序」）；用户行、令牌、domain_outbox（事件类型 PORTAL_INVITATION_REQUESTED，payload {to, token, expires_at}）、审计同一事务；邀请令牌的 expires_at 截到整秒（now 去掉微秒再加有效期），payload 用同一个值；接受邀请按 §4「接受邀请的判定顺序」七步走（弱密码 400 WEAK_PASSWORD 且不消费令牌；第 7 步 password_version + 1）；重发按 §4「重发时的邮箱比较」；INVITED 用户的密码哈希是随机 32 字节秘密的 Argon2id 哈希、秘密不保留'
+      - '租户 CLOSED 时开通、重发、接受一律拒绝；唯一约束冲突按 §4「数据库唯一性」映射（回滚后在新事务里查，不解析报错文本）；门户审计的 after_state 不放邮箱值'
+      - '测试：新增 tests/backend/test_portal_accounts_service.py 覆盖设计 §7 中属于服务层的行：正常路径的状态与审计、「邀请字段」一行（停用、启用的那几步属于 AIH-TASK-098）、令牌边界、邮箱归一与占用、租户 CLOSED（开通、重发、接受）、令牌隔离（按设计 v10 绕过服务造「状态对、用途错」的令牌行，直接调用 password_reset 服务；INVITED 客户申请重置不写行）、判定顺序、重发邮箱比较、事务中途失败、Redis/Celery 丢失（只断言 outbox 行写入为 PENDING，恢复扫描属于 AIH-TASK-094）、泄漏'
+      - '新增 tests/backend/test_portal_accounts_concurrency.py 在 BILLING_TEST_DATABASE_URL 的真 MySQL 上用两个连接与屏障跑：并发开通（同租户、同邮箱）、同一邀请令牌并发提交、关户与接受、唯一冲突映射（停用与接受、重置 2FA 与确认 2FA 两行属于 AIH-TASK-098）；未设置时 skip、CI 必跑，每个等待都设超时'
+      - '不改认证服务、接口、schema、路由、outbox 渲染、迁移与前端；不改 AI 模块；SQL 断言不写死方言字面量；示例 uuid 用全零占位值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368'
+    allowed_change_paths:
+      - app/services/portal_accounts.py
+      - tests/backend/test_portal_accounts_service.py
+      - tests/backend/test_portal_accounts_concurrency.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-098
+    title: 客户门户认证第三层之二：门户账号停用、启用与重置两步验证服务
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2「管理员重置客户 2FA」、§4 与 §11 任务 B：在 app/services/portal_accounts.py 加停用、启用、重置 2FA 三个函数（AIH-TASK-091 按登记前预审的规模提示拆出的后一半）。没有任何 HTTP 入口，接口属于 AIH-TASK-094。
+    status: ready
+    depends_on:
+      - AIH-TASK-091
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）逐条一致，以 §2「管理员重置客户 2FA」「事务边界」、§4 状态表的停用、启用、重置 2FA 三行、§5、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '服务接口：disable_portal_account、enable_portal_account、reset_portal_two_factor 的参数是 session_factory、actor（ADMIN 用户）、customer_id（租户 public_id）、context，重置另有 reason；返回 AIH-TASK-091 的 PortalAccountView；客户不存在抛 CustomerNotFound，未开通抛 PortalAccountNotFound；各一个事务，加锁顺序租户 → 用户 → 令牌'
+      - '停用：INVITED 或 ACTIVE → DISABLED，吊销全部刷新令牌、作废全部未用令牌（两种用途）、password_version + 1、审计 PORTAL_ACCOUNT_DISABLED；已停用 409 PORTAL_ACCOUNT_ALREADY_DISABLED。启用：DISABLED → activated_at 为空回到 INVITED，否则 ACTIVE，审计 PORTAL_ACCOUNT_ENABLED，不自动重发邀请；不是 DISABLED 409 PORTAL_ACCOUNT_NOT_DISABLED；租户 CLOSED 409 ACCOUNT_CLOSED'
+      - '重置 2FA：账号有已确认或待确认的 2FA 时删除 two_factor_settings 行与全部恢复码、password_version + 1、审计 PORTAL_2FA_RESET（reason 记入去首尾空白后的值，after_state 只放 tenant_public_id，以设计 §4 那一行为准）；没有 2FA 时 409 PORTAL_2FA_NOT_ENABLED；reason 在服务里同样校验（去首尾空白后 1–255 个字符，否则 422 VALIDATION_ERROR，与接口层的 _Reason 一致）。启用的判定顺序：先看账号状态（不是 DISABLED 即 409 PORTAL_ACCOUNT_NOT_DISABLED），再看租户（CLOSED 即 409 ACCOUNT_CLOSED）'
+      - '测试：在 tests/backend/test_portal_accounts_service.py 增加设计 §7 的「停用 → 启用」（含重新启用后停用前的访问令牌仍 401 TOKEN_INVALID、版本号比停用前大 1）、「邀请字段」中停用与启用的那几步、「重置客户 2FA」（含原因为空、255 个字符成功且审计逐字相同、256 个字符 422 不写行）、改密码后的旧会话（客户路径）中服务层的部分、事务中途失败（停用、启用、重置 2FA 各一次，在写审计那一步注入 OperationalError，断言整体回滚：状态、令牌、2FA 行、版本号都不变）；在 tests/backend/test_portal_accounts_concurrency.py 增加停用与接受、重置 2FA 与客户确认 2FA 两组并发（真 MySQL、两个连接、屏障、两种先后，等待都设超时；未设置 BILLING_TEST_DATABASE_URL 时 skip、CI 必跑）'
+      - '不改认证服务、接口、schema、路由、outbox 渲染、迁移与前端；不改 AI 模块；SQL 断言不写死方言字面量；示例 uuid 用全零占位值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368'
+    allowed_change_paths:
+      - app/services/portal_accounts.py
+      - tests/backend/test_portal_accounts_service.py
+      - tests/backend/test_portal_accounts_concurrency.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-092
+    title: 客户门户认证第四层：匿名可达的接受邀请页
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§8「部分部署时的行为」与 §11 任务 C：前端新增接受邀请页，路径 /accept-invitation 登记在 routes/paths.ts，路由放在 RequireAuth 之外、与重置密码页同级；表单提交 POST /api/v1/auth/invitation/accept，成功后转登录页。必须先于能发出邀请的 AIH-TASK-094 上线；此时后端接口尚不存在，页面对任何令牌都显示链接无效或已过期。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-098
+    acceptance_criteria:
+      - '契约以设计 §2 的接受邀请一行为准：请求 {token, password}；200 成功；400 INVALID_INVITATION_TOKEN、409 ACCOUNT_CLOSED、400 WEAK_PASSWORD（密码强度，与重置同一个错误）三种失败各有文案，404（接口尚未上线）按链接无效处理。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块'
+      - 'frontend/src/routes/paths.ts 登记 acceptInvitation 路径 /accept-invitation，并照 RESET_TOKEN_PARAM 的写法导出查询参数名常量 ACCEPT_INVITATION_TOKEN_PARAM（值为 token，AIH-TASK-094 的链接守卫按这个常量核对）；frontend/src/routes/index.tsx 把它登记在 RequireAuth 之外，与 login、forgotPassword、resetPassword 同级，并在那段注释里补上它为什么必须在守卫外'
+      - '新增 frontend/src/features/auth/AcceptInvitationPage.tsx：读查询串 token，缺失时直接显示链接无效；两次输入密码且一致才可提交，长度规则照重置密码页；成功后转登录页并提示可以登录；不把令牌写进日志、localStorage 或 sessionStorage。frontend/src/api/auth.ts 新增 acceptInvitation 封装'
+      - '测试（vitest + Testing Library）：AcceptInvitationPage.test.tsx 覆盖设计 §7「邀请链接匿名可达」前端那一行：以匿名状态挂载完整路由渲染 /accept-invitation?token=x 显示表单而不跳登录页，以已登录 ADMIN 状态同样显示表单；缺 token、两次密码不一致、400 INVALID_INVITATION_TOKEN、400 WEAK_PASSWORD、409、404、成功转登录页；auth.test.ts 覆盖新封装的路径与请求体'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - 'check_accept_invitation_page：在 login 之前执行（浏览器刚启动、没有任何会话，正是邀请链接的匿名场景；验收脚本不得新建浏览器上下文，所以靠步骤顺序保证匿名），打开 /accept-invitation?token= 后接一个全零占位令牌，断言页面渲染出接受邀请表单（两个密码输入框与提交按钮），且地址没有被重定向到登录页；不提交表单、不发写请求；断言完成后调用脚本现有的 openEntry（重新打开 https://<hosts[0]>/ 并等到被送回 /login），把页面交还到与第一步开始前完全相同的状态（未登录、停在 /login），因为随后的 login 步骤不会自己导航、只认当前页面是登录页（scripts/acceptance/admin_customers.mjs 的 stepLogin）。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368（本任务是纯前端，引用它只为让审查拿到 §2、§8 的契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/features/auth/AcceptInvitationPage.tsx
+      - frontend/src/features/auth/AcceptInvitationPage.test.tsx
+      - frontend/src/api/auth.ts
+      - frontend/src/api/auth.test.ts
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - check_accept_invitation_page
+        - login
+        - open_customers
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-093
+    title: 客户门户认证第五层：接受邀请、当前用户、自助两步验证与客户端接口
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2「API」「依赖」与 §11 任务 D 的前一半：新增 POST /api/v1/auth/invitation/accept、GET /api/v1/me、POST /api/v1/auth/2fa/self/enrol、POST /api/v1/auth/2fa/self/confirm、GET /api/v1/customer/me；新增 require_customer、require_customer_writable。接受邀请的接口必须先于能发出邀请的 AIH-TASK-094 上线。管理端门户账号接口与邀请邮件属于 AIH-TASK-094。
+    status: ready
+    depends_on:
+      - AIH-TASK-092
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）逐条一致，以 §2「API」的认证与客户端两张表及其说明、「依赖」、§3 INV-7 与 INV-8、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/auth.py：新增 invitation/accept（调用 AIH-TASK-091 的服务；令牌类错误一律 400 INVALID_INVITATION_TOKEN 不细分，另有 409 ACCOUNT_CLOSED 与 400 WEAK_PASSWORD）；新增 CustomerRequired（403 CUSTOMER_REQUIRED）、CustomerPrincipal、require_customer、require_customer_writable：tenant_id 取自库里的 user 行、不取自令牌与请求，tenant_id 为空的 CUSTOMER 一律 403 CUSTOMER_REQUIRED；require_customer_writable 抛的是 AIH-TASK-090 在 app/services/account_status.py 定义的 AccountReadOnly（403 ACCOUNT_READ_ONLY），不另建'
+      - '新增 app/api/me.py（GET /api/v1/me，任一已登录用户，恰好 role、email、two_factor_enabled 三个键；刻意不放在 /api/v1/auth/ 下，设计 §2）。app/api/two_factor.py 新增 self/enrol 与 self/confirm（设计 §2：只给 CUSTOMER；self/enrol 处理函数第一步调用 _rate_limit(request)，再 require_customer、重验密码，失败 401 INVALID_CREDENTIALS、不计锁定、不写审计，照同文件 recovery-codes 的写法；复用 start_enrolment 与 confirm_enrolment 并把 require_current_user 返回的 user.password_version 传给服务（等价于访问令牌的 pwv，#369），验证码错沿用 401 INVALID_TOTP；只读状态下仍允许）。新增 app/api/customer.py（前缀 /api/v1/customer）：me 恰好 customer_id、company_name、account_status、read_only 四个键，处理函数第一条语句显式调用 require_customer；两个新路由在 app/main.py 注册'
+      - '测试：新增 tests/backend/test_invitation_accept_api.py（正常、令牌错误五种情况同一个 400、弱密码 400 WEAK_PASSWORD、租户 CLOSED 409、路径前缀为 /api/v1/auth/ 落在限流区）与 tests/backend/test_customer_api.py：覆盖设计 §7「只读契约」整行（测试里临时挂一个用 require_customer_writable 的测试专用路由，四种 account_status 逐一断言）、「租户越权」中关于客户端的两行、「路由守卫」一行、「无租户的 CUSTOMER」一行、「停用后的 2FA 注册」（含重新启用后的断言）与「改密码后的旧会话（客户路径）」中经 HTTP 的部分、2FA self 两个接口的正常、ADMIN 403、密码错、验证码错（设计 §7 正常路径第二行），/customer/me 与 /api/v1/me 的响应键集合逐字断言（/api/v1/me 的访问令牌过期时返回 401 TOKEN_INVALID，路径不在 /api/v1/auth/ 下），泄漏检查'
+      - 'docs/api.md 新增「客户门户认证」一节：三个认证接口、当前用户接口与一个客户端接口的请求、响应示例、错误码，客户请求不接受任何租户标识（spec §90），以及「客户写操作必须在自己的写事务里先调用 lock_tenant_for_customer_write，require_customer_writable 只是提前拒绝」这条约定（设计 §2「依赖」）'
+      - '不改服务层规则（属于 AIH-TASK-087、090、091，发现缺口停下说明）、不改管理端接口与 outbox 渲染、不改迁移与前端；不改 AI 模块；SQL 断言不写死方言字面量；示例 uuid 用全零占位值'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368'
+    allowed_change_paths:
+      - app/api/auth.py
+      - app/api/two_factor.py
+      - app/api/customer.py
+      - app/api/me.py
+      - app/schemas/auth.py
+      - app/schemas/customer.py
+      - app/main.py
+      - tests/backend/test_invitation_accept_api.py
+      - tests/backend/test_customer_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-094
+    title: 客户门户认证第六层：管理端门户账号六个接口与邀请邮件
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2「API」管理端一张表、「管理员重置客户 2FA」「邀请邮件与重置的隔离」与 §11 任务 D 的后一半：新增 /api/v1/admin/customers/{customer_id}/portal-account 下的 GET、POST、resend-invitation、disable、enable、reset-2fa 六个接口；outbox 渲染 PORTAL_INVITATION_REQUESTED 邀请邮件；新增邀请链接守卫；runbook 写明开通与重置 2FA 的做法，以及门户前端全部上线前不为真实客户开通。从本任务起管理员才可能发出邀请，接受页（AIH-TASK-092）与接受接口（AIH-TASK-093）都已在线。
+    status: ready
+    depends_on:
+      - AIH-TASK-093
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）逐条一致，以 §2「API」管理端表及其说明、「管理员重置客户 2FA」、「邀请邮件与重置的隔离」、§5、§6、§8「部分部署时的行为」为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 app/api/admin_portal_accounts.py：六个接口的处理函数第一条语句调用 require_admin；客户不存在 404 CUSTOMER_NOT_FOUND，未开通 404 PORTAL_ACCOUNT_NOT_FOUND；成功响应恰好设计 §2 的七个键，由 AIH-TASK-091 与 098 的服务返回的 PortalAccountView 序列化（invited_at 与 invitation_expires_at 已在服务里按设计 §2 取好，本任务不另写查询）；开通与重发成功后用服务返回的 outbox 行 id 调用 app/api/auth.py 现有的 _trigger_outbox 立即触发投递（与忘记密码同一做法，触发失败不影响响应，定期扫描兜底）；reset-2fa 的 reason 用与 app/schemas/customers.py 相同的 _Reason 约束（1–255）；错误码照设计 §2 的表。路由在 app/main.py 注册，新路由加进 tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES（CUSTOMER 令牌 403、匿名 401 由该文件的枚举用例覆盖）'
+      - 'app/tasks/outbox.py 新增 PORTAL_INVITATION_REQUESTED 的渲染并登记进 _RENDERERS：链接 {frontend_base_url}/accept-invitation?token=…（路径与参数名取自前端 routes/paths.ts 已登记的 acceptInvitation 与 ACCEPT_INVITATION_TOKEN_PARAM，由 AIH-TASK-092 加）；正文只用 payload 里的 expires_at 写到期时刻（马来西亚时间 UTC+8 精确到分钟，括号附 UTC，固定偏移不依赖 tzdata），不读当前配置、不写相对时长，并提示没收到请查垃圾箱；frontend_base_url 为空时与重置邮件同样处理'
+      - '测试：新增 tests/backend/test_portal_accounts_api.py 覆盖设计 §7 中属于管理端接口的行（开通、查看、重发含改邮箱、停用、启用、重置 2FA 含 255 / 256 个字符的原因与从未开启 409 的响应与错误码，重复开通 409，开通后 outbox 有一行且审计无邮箱值，「邀请字段」一行）；tests/backend/test_outbox.py 加邀请邮件渲染、「邮件到期时刻」一行与「Redis/Celery 丢失」的接口层部分（渲染器登记后，现有恢复扫描能领到 PORTAL_INVITATION_REQUESTED 行）；新增 tests/backend/test_invitation_link.py，照 test_password_reset_link.py 的做法核对邀请链接（那个文件名含 password，Worker 不能改，所以另起一个文件、不从它导入）：后端真实渲染出的链接路径在 paths.ts 登记、查询参数名一致、routes/index.tsx 中该路由不在 RequireAuth 元素之内（把路由挪进 RequireAuth 的变异必须让用例变红）'
+      - 'docs/api.md 新增「管理端门户账号」一节；docs/runbook.md 新增「客户门户账号」一节：怎么开通与重发、邀请没收到怎么办、重置客户 2FA 前如何线下核实身份（设计 §2：用客户登记的联系电话回拨或当面确认，不凭邮件或即时消息里的自称）与原因怎么写，以及门户前端（AIH-TASK-095 到 097）全部合并部署之前不为真实客户开通（设计 §8）；另写「验收夹具客户门户账号」一小节：本任务部署后，由管理员给生产上的验收夹具租户开通门户账号并完成激活（邀请令牌从 VPS 上该租户的 outbox 行读取、不经邮件），凭据只放在 VPS 上仓库外的 0600 文件里（照验收夹具管理员的做法），再由运营者把 customer_email、customer_password 两个字段用 cmdkey 录入 Worker 的凭据管理器并加进本机配置里 acceptance.browser 的字段清单；该账号不开启 2FA；值与账号标识都不写进本仓库'
+      - '不改服务层规则（属于 AIH-TASK-090、091、098）、不改客户端接口（属于 AIH-TASK-093）、不改迁移与前端；不改 AI 模块；示例 uuid 用全零占位值；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368'
+    allowed_change_paths:
+      - app/api/admin_portal_accounts.py
+      - app/schemas/portal_accounts.py
+      - app/main.py
+      - app/tasks/outbox.py
+      - tests/backend/test_portal_accounts_api.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_outbox.py
+      - tests/backend/test_invitation_link.py
+      - docs/api.md
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-095
+    title: 客户门户前端第一刀：管理端客户详情页的门户账号面板
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§11 任务 E 的第一部分：调用 AIH-TASK-094 的六个接口，在管理端客户详情页加门户账号面板（未开通时开通；已开通时显示状态、邀请时间与有效期、最后登录、2FA，按状态给出重发邀请、停用、启用、重置 2FA）。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-094
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端门户账号」一节为准（AIH-TASK-094 写入）；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/routes/paths.ts'
+      - '新增 frontend/src/api/portalAccounts.ts 封装六个接口，路径编码沿用 frontend/src/api/adminCustomers.ts；404 PORTAL_ACCOUNT_NOT_FOUND 映射为未开通状态，不当作错误'
+      - '新增 frontend/src/features/customers/PortalAccountPanel.tsx 并挂到 CustomerDetailPage：未开通时给出开通表单（登录邮箱默认带出客户联系邮箱、可改）；已开通时显示设计 §2 的字段；按钮按状态出现（INVITED 有重发邀请与停用，ACTIVE 有停用，DISABLED 有启用；two_factor_enabled 为 true 时有重置 2FA）；重发可改邮箱；停用、启用与重置 2FA 需要确认，重置 2FA 的确认框必须填原因（1–255 个字符）并提示先线下核实身份；租户 CLOSED 时不出开通、重发、启用；409 的各错误码都有可读文案；加载中、失败（带 request_id）两种状态都画出来；成功后刷新面板'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library，放在被测文件旁边）：api 函数的路径、请求体与路径编码；未开通、INVITED、ACTIVE（2FA 开与不开）、DISABLED、租户 CLOSED 各状态下出现的字段与按钮；开通、重发（含改邮箱）、停用、启用、重置 2FA（原因为空不可提交、255 个字符可提交）的请求与成功后刷新；各 409 文案；CustomerDetailPage.test.tsx 断言面板被挂上；示例 uuid 全零'
+      - 'check_portal_account：沿用 open_fixture 打开的夹具客户详情页；后端值取面板自己发出的 GET portal-account 接口的响应（被动观察，不自己发请求），响应为 404 PORTAL_ACCOUNT_NOT_FOUND 时面板显示未开通状态，为 200 时面板显示的状态与响应的 status 一致；不点开通、不点任何按钮。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368（本任务是纯前端，引用它只为让审查拿到 §2 的接口契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/portalAccounts.ts
+      - frontend/src/api/portalAccounts.test.ts
+      - frontend/src/features/customers/PortalAccountPanel.tsx
+      - frontend/src/features/customers/PortalAccountPanel.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_portal_account
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-096
+    title: 客户门户前端第二刀：登录后按角色分流与门户外壳
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§11 任务 E 的第二部分：前端调用 GET /api/v1/me 取角色；新增 RequireRole，管理端路由只给 ADMIN（CUSTOMER 转到门户首页），门户路由只给 CUSTOMER（ADMIN 转到管理端首页）；新增门户外壳 PortalLayout 与 /portal 首页占位。首页内容属于 AIH-TASK-097。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-095
+    acceptance_criteria:
+      - '语义以 docs/api.md 的「客户门户认证」一节为准（AIH-TASK-093 写入）；不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块'
+      - 'frontend/src/api/auth.ts 新增 getMe（GET /api/v1/me，不在 /api/v1/auth/ 下，过期时照常走令牌刷新）；新增 frontend/src/routes/RequireRole.tsx：在 RequireAuth 之内按 /api/v1/me 的 role 放行或转向，等待态与 RequireAuth 的等待态一致，/api/v1/me 失败时显示错误态（带 request_id），不默认放行'
+      - 'frontend/src/routes/paths.ts 登记 portalHome 路径 /portal；frontend/src/routes/index.tsx 把现有管理端路由包进 RequireRole（ADMIN），新增 RequireRole（CUSTOMER）包着的 PortalLayout 与 portalHome；login、forgotPassword、resetPassword、acceptInvitation 四条仍在 RequireAuth 之外、位置不变'
+      - '新增 frontend/src/layouts/PortalLayout.tsx（门户页头、退出登录，不出现任何管理端菜单）与 frontend/src/features/portal/PortalHomePage.tsx（本任务只放欢迎占位，内容属于 AIH-TASK-097）'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：RequireRole.test.tsx 覆盖 ADMIN 访问管理端放行、CUSTOMER 访问管理端被转到 /portal、ADMIN 访问 /portal 被转到管理端首页、/api/v1/me 失败显示错误态、等待态；PortalHomePage.test.tsx 断言门户外壳里没有管理端菜单项；auth.test.ts 覆盖 getMe；既有的 RequireAuth 与各管理端页面测试照常通过'
+      - '部署后浏览器验收：沿用已有的 login、open_customers 两个步骤，确认 ADMIN 登录后仍落在管理端、客户列表照常打开（RequireRole 不误伤管理员）；不新增步骤、不改验收脚本；沿用验收脚本已有的约束。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368（纯前端，引用它只为让审查拿到契约）'
+    allowed_change_paths:
+      - frontend/src/api/auth.ts
+      - frontend/src/api/auth.test.ts
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/routes/RequireRole.tsx
+      - frontend/src/routes/RequireRole.test.tsx
+      - frontend/src/layouts/PortalLayout.tsx
+      - frontend/src/features/portal/PortalHomePage.tsx
+      - frontend/src/features/portal/PortalHomePage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-097
+    title: 客户门户前端第三刀：门户首页的账户信息、只读提示与开启两步验证
+    purpose: >-
+      按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§11 任务 E 的第三部分：门户首页调用 GET /api/v1/customer/me 显示公司名与账户状态，read_only 为 true 时显示只读提示；未开启 2FA 时提供开启流程（调用 POST /api/v1/auth/2fa/self/enrol 重验密码、显示密钥与二维码，调用 /api/v1/auth/2fa/self/confirm 输入验证码确认，展示一次恢复码）。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-096
+    acceptance_criteria:
+      - '语义以 docs/api.md 的「客户门户认证」一节为准（AIH-TASK-093 写入）；不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/routes/ 下任何文件'
+      - '新增 frontend/src/api/customer.ts 封装 GET /api/v1/customer/me、POST /api/v1/auth/2fa/self/enrol、POST /api/v1/auth/2fa/self/confirm（后两个在 /api/v1/auth/ 下，前端拦截器对这个前缀的 401 不刷新令牌。所以这两个调用遇到 401 TOKEN_INVALID（访问令牌过期）时，由封装或组件自己调用一次现有的 refreshAccessToken，拿到新令牌后重试一次；刷新失败或重试仍 401 TOKEN_INVALID 时按会话过期处理、转登录页；INVALID_CREDENTIALS、INVALID_TOTP 是业务结果，不刷新）'
+      - 'PortalHomePage 显示 company_name、account_status，read_only 为 true 时显示只读提示（说明账单与收据仍可查看，新操作被暂停）；页面不显示也不请求任何成本、毛利或内部字段'
+      - '新增 frontend/src/features/portal/EnableTwoFactor.tsx：仅在 /api/v1/me 的 two_factor_enabled 为 false 时出现；重验密码后显示密钥与 otpauth 二维码（复用 frontend/src/features/auth/QrCode.tsx，不新增依赖），输入验证码确认后展示一次恢复码并提示妥善保存、丢失时联系 Acuven；密钥、otpauth_uri 与恢复码只在组件状态里，不写入日志与任何存储，离开页面即丢弃；密码错（401 INVALID_CREDENTIALS）、验证码错（401 INVALID_TOTP）、409 各有文案'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：customer.test.ts 覆盖三个封装，以及 self 两个接口遇到 401 TOKEN_INVALID 时刷新一次并重试、刷新失败转登录页、遇到 INVALID_CREDENTIALS 与 INVALID_TOTP 不刷新；PortalHomePage.test.tsx 覆盖正常、只读、加载、失败（带 request_id）四种状态与不出现内部字段；EnableTwoFactor.test.tsx 覆盖完整开启流程、已开启时不出现、密码错、验证码错、恢复码只展示一次'
+      - 'login_customer 与 check_portal_home：login_customer 用标准输入 credentials 里的 customer_email、customer_password 在登录页登录（字段缺失或类型不对时 ACCEPTANCE_VERDICT: FAIL login_customer login_failed，不打印收到的内容；已有的 login 步骤与 email、password、totp_secret 字段的处理不变，两个新字段对其余步骤没有影响），断言登录后落在门户首页而不是管理端；check_portal_home 的后端值取页面自己发出的 GET /api/v1/customer/me 的响应（被动观察，不自己发请求），断言页面显示的 company_name、account_status 与响应一致、页面上没有任何管理端菜单项；不点开启 2FA、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这两个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的输入说明与步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤。前提：验收夹具客户的门户账号已按 docs/runbook.md「验收夹具客户门户账号」建好、两个字段已录入（运营者在开启本任务之前完成）'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368（纯前端，引用它只为让审查拿到契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customer.ts
+      - frontend/src/api/customer.test.ts
+      - frontend/src/features/portal/PortalHomePage.tsx
+      - frontend/src/features/portal/PortalHomePage.test.tsx
+      - frontend/src/features/portal/EnableTwoFactor.tsx
+      - frontend/src/features/portal/EnableTwoFactor.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_home
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
