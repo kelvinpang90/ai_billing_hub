@@ -4774,7 +4774,7 @@ tasks:
     title: 税务政策第三层：一次性发布首条政策的运维命令与运维文档
     purpose: >-
       按 docs/design/AIH-TASK-077-tax-policy.md（设计闸门 #332 已批准 v3）§11 的 079：app/cli.py 新增子命令 publish-initial-tax-policy（唯一参数 --approved-by-email，调用 AIH-TASK-078 的 publish_initial_tax_policy）；docs/deployment.md 与 docs/runbook.md 写明部署后只做一次的运维步骤、失败处理与绝不能做的事。命令合并部署后由运维在生产上执行一次，本任务不执行它。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-078
     acceptance_criteria:
