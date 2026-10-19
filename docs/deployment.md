@@ -1432,6 +1432,44 @@ BILLING_FRONTEND_IMAGE=ghcr.io/<owner>/<repo>-frontend:<SHA>
   镜像，手工起栈会悄悄退回去，那时要重跑 `deploy.sh`
 - **灾难恢复的新主机上没有这两行**，起应用仍然只走 `deploy/deploy.sh`（[runbook](runbook.md) 第 9 步）
 
+### 9.8 部署后运维步骤：首条税务政策（只做一次；AIH-TASK-079，设计闸门 #332 v3 §8）
+
+合并即按提交 SHA 自动部署，但**部署不写入任何税务政策**：迁移 `0022_tax_policy` 只建表（`tax_policy_locks` 一行、
+`tax_policy_versions` 空表），AIH-TASK-078 的服务没有别的入口。首条 `PUBLISHED` 政策只能由运维在部署之后执行一次
+CLI 写入。部署顺序（设计 §8，每一步单独部署都安全）：
+
+| 步骤 | 合并 / 动作 | 生产上的结果 |
+| --- | --- | --- |
+| 1 | AIH-TASK-077（迁移与模型） | 两张表，版本表为空；没有写入方 |
+| 1b | AIH-TASK-080（MySQL 行为测试与表结构文档） | 不改运行代码 |
+| 2 | AIH-TASK-078（仓储与服务） | 服务函数存在，没有入口；行为不变 |
+| 3 | AIH-TASK-079（本 CLI） | `publish-initial-tax-policy` 可用；表仍为空，直到有人运行它 |
+| 4 | **运维步骤（只做一次）**：Kelvin 或经 Kelvin 授权的会话在 VPS 上执行 | 一条 MY / SST `PUBLISHED` 政策 + 两条审计 |
+| 5 | 文档 PR：ADR-0008 收口条件第 2、3 步标为完成 | **合并后** Phase 4 其余任务才可登记为 `ready` |
+
+⚠️ 下面的 `<部署目录>`、`<管理员邮箱>` 都是占位符：真实主机名、目录与邮箱不进仓库。
+
+**第 4 步**（完整的判定表、核对查询与「绝不能做」见 [runbook](runbook.md)「税务政策：首条政策的发布（只做一次）」）：
+
+1. **核对审批人**：决策人自己的 ADMIN 账号、`ACTIVE`；⚠️ **不是**生产上的验收专用管理员（它的 `approved_by` 会永远
+   留在这条政策上）。邮箱**逐字**核对 —— 填成另一个有效 ADMIN 时命令照样成功，而已发布的政策不可改
+2. 执行（从不提示输入，`-T` 能跑）：
+   ```bash
+   cd <部署目录> && docker compose exec -T api python -m app.cli publish-initial-tax-policy --approved-by-email '<管理员邮箱>'
+   ```
+3. **期望**退出码 0、stdout 一行 `public_id`。退出码 1 且提示已存在 → 已经发布过，**不要再做任何事**。
+   **因数据库错误非零退出时，原样再运行一次**：退出码 1 且提示已存在 = 上次其实已提交，按第 4 条核对并取 `public_id`；
+   退出码 0 = 这次发布成功。审批人不合格（退出码 1，`No active ADMIN account …`）或邮箱格式不对（退出码 2）时什么都没写，
+   改正后重跑
+4. **核对**：`tax_policy_versions` 恰好一行（`MY`、`SST`、`rate` 为空、`PUBLISHED`、`[2026-10-16 16:00:00, NULL)`）；
+   管理端审计日志按 `entity_type = tax_policy_version` 恰好两条（`TAX_POLICY_CREATE`、`TAX_POLICY_PUBLISH`）
+5. ⚠️ **绝不能做**：用 SQL 直接插入 / 改写这张表；`TRUNCATE` 后重跑（政策会换一个 `public_id` 与 `approved_at`，而且
+   绕过了所有触发器）；为「换审批人」重跑（会被拒绝，本来也不该）
+
+**第 5 步**：运维步骤完成后开一个文档 PR（不走闸门）：ADR-0008「收口条件」2026-10-17 进度里把第 2、3 步标为完成，
+写上日期与 `public_id`（不是秘密，可以进公开仓库）；`docs/TODO.md` D2 一行与 Phase 4 一节去掉「不得开工」的阻塞句。
+**仅 079 合并部署不解除 Phase 4 闸门，这个 PR 合并之后才解除**（Phase 4 支付部分另外还要等 D6）。
+
 ## 10. 七件事的决定（Kelvin，2026-09-13）
 
 | # | 问题 | 决定 | 落在哪一节 |

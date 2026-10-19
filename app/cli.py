@@ -5,6 +5,9 @@
 
 T0.8d（忘记密码 / 重置密码）落地之前，**管理员密码重置也走这里**。那是一条带
 期限的临时路径，写在 TODO 的 T0.9 上线前置里。
+
+**首条税务政策也只能在这里发布**（`publish-initial-tax-policy`，设计闸门 #332 v3 §2），
+部署后由运维执行一次，步骤见 docs/runbook.md「税务政策：首条政策的发布（只做一次）」。
 """
 
 from __future__ import annotations
@@ -13,12 +16,22 @@ import argparse
 import getpass
 import sys
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core.config import get_settings
 from app.core.database import create_database_engine, create_session_factory
 from app.core.emails import InvalidEmail, normalise_email
 from app.core.passwords import WeakPassword, hash_password, validate_password_strength
 from app.models.auth import AuditAction, User, UserRole, UserStatus
+from app.services import tax_policy
 from app.services.auth import RequestContext, record_audit, utc_now
+
+# 设计 §5「提交结果不明」：COMMIT 已发出、确认丢了时，这里分不清提交了没有。原样重跑就是核对：
+# 「表里有任何一行就拒绝」，退出码 1 = 上次已提交，退出码 0 = 上次没提交、这次发布了。
+COMMIT_UNKNOWN_HINT = (
+    "If the error happened at commit, the policy may already be published; "
+    "run the same command again to find out."
+)
 
 
 def _read_password(supplied: str | None) -> str:
@@ -103,6 +116,53 @@ def create_admin(email: str, password: str | None) -> int:
     return 0
 
 
+def publish_initial_tax_policy(email: str) -> int:
+    """Publish the first MY / SST tax policy once; stdout gets its `public_id` and nothing else.
+
+    ⚠️ **从不提示输入**：不调 `input()` / `getpass`、不读标准输入，`docker compose exec -T`
+    也能跑。防手滑靠 runbook 的核对步骤，不靠交互确认（设计 §9）。
+    """
+    settings = get_settings()
+    try:
+        # 与 `create_admin` 同一个函数；格式不对就不连库。
+        normalised = normalise_email(email)
+    except InvalidEmail as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+
+    engine = create_database_engine(settings)
+    session_factory = create_session_factory(engine)
+    try:
+        public_id = tax_policy.publish_initial_tax_policy(
+            session_factory,
+            approver_email=normalised,
+            # 这条不是 HTTP 请求，没有来源地址（同 `create_admin`）。
+            context=RequestContext(ip_address=None, user_agent="cli"),
+        )
+    except tax_policy.TaxPolicyAlreadyExists:
+        print("A tax policy version already exists; nothing was written.", file=sys.stderr)
+        return 1
+    except tax_policy.TaxPolicyApproverInvalid:
+        # 不存在 / 不是 ADMIN / 已停用三种不区分（设计 §6）。
+        print(f"No active ADMIN account for {normalised}; nothing was written.", file=sys.stderr)
+        return 1
+    except SQLAlchemyError:
+        # 异常照常抛出（引擎 hide_parameters=True，不带 SQL 参数），非零退出。
+        print(COMMIT_UNKNOWN_HINT, file=sys.stderr)
+        raise
+    finally:
+        engine.dispose()
+
+    print(public_id)
+    print(
+        f"Published tax policy {tax_policy.INITIAL_JURISDICTION.value}/"
+        f"{tax_policy.INITIAL_POLICY_TYPE.value} effective from "
+        f"{tax_policy.INITIAL_EFFECTIVE_FROM.isoformat()} UTC.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -114,6 +174,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Avoid this outside automation: it lands in shell history and `ps` output.",
     )
+
+    tax = sub.add_parser(
+        "publish-initial-tax-policy",
+        help="Publish the first tax policy (MY/SST). Run once, after deployment.",
+    )
+    tax.add_argument("--approved-by-email", required=True)
 
     requeue = sub.add_parser("ai-usage-requeue", help="Requeue eligible AI usage dead letters.")
     requeue.add_argument("event_ids", nargs="+")
@@ -139,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "create-admin":
         return create_admin(args.email, args.password)
+    if args.command == "publish-initial-tax-policy":
+        return publish_initial_tax_policy(args.approved_by_email)
     if args.command == "ai-usage-requeue":
         from app.ai_api.ops import run_requeue
 
