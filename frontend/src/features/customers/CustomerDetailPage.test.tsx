@@ -27,6 +27,8 @@ const api = vi.hoisted(() => ({
   // 项目区块（AIH-TASK-016）挂在详情页上；它自己的用例在 ProjectsPanel.test.tsx。
   listProjects: vi.fn(),
   createProject: vi.fn(),
+  // 启用 / 停用账户（AIH-TASK-082）；弹窗自己的用例在 AccountStatusModal.test.tsx。
+  postAccountStatus: vi.fn(),
 }));
 
 vi.mock("../../api/adminCustomers", async () => {
@@ -94,6 +96,7 @@ function customer(overrides: Partial<CustomerDetail> = {}): CustomerDetail {
     email: "ops@example.com",
     phone: "+60 3-0000 0000",
     billing_status: "ACTIVE",
+    account_status: "ENABLED",
     billing_mode: "PREPAID",
     ai_service_enabled: true,
     status_version: 3,
@@ -115,6 +118,16 @@ function renderDetail() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+/** 资料卡里「Account status」一项的值（带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）。 */
+async function accountStatusCell(): Promise<HTMLElement> {
+  const label = await screen.findByText("Account status");
+  const cell = label.closest("th")?.nextElementSibling;
+  if (!(cell instanceof HTMLElement)) {
+    throw new Error("the account status has no value cell");
+  }
+  return cell;
 }
 
 async function openEditor(user: ReturnType<typeof userEvent.setup>) {
@@ -152,6 +165,71 @@ describe("CustomerDetailPage", () => {
     expect(screen.getByText("MYR")).toBeInTheDocument();
     expect(screen.getByText("MYR 1,234,567.12345678")).toBeInTheDocument();
     expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it.each([
+    { status: "ENABLED", label: "Enabled" },
+    { status: "DISABLED", label: "Disabled" },
+    { status: "PENDING_ACTIVATION", label: "Pending activation" },
+    { status: "CLOSED", label: "Closed" },
+    // 后端以后加了新值：原样显示，不崩。
+    { status: "FROZEN", label: "FROZEN" },
+  ])("shows the account status $status on the profile card", async ({ status, label }) => {
+    api.getCustomer.mockResolvedValue({ ...customer(), account_status: status });
+
+    renderDetail();
+
+    const cell = await accountStatusCell();
+    expect(cell).toHaveTextContent(label);
+  });
+
+  it.each([
+    { status: "ENABLED", shown: "Disable account", hidden: ["Enable account"] },
+    { status: "DISABLED", shown: "Enable account", hidden: ["Disable account"] },
+    { status: "PENDING_ACTIVATION", shown: null, hidden: ["Disable account", "Enable account"] },
+    { status: "CLOSED", shown: null, hidden: ["Disable account", "Enable account"] },
+  ])("offers only the matching account action for $status", async ({ status, shown, hidden }) => {
+    api.getCustomer.mockResolvedValue({ ...customer(), account_status: status });
+
+    renderDetail();
+
+    await screen.findByRole("button", { name: "Edit" });
+    if (shown !== null) {
+      expect(screen.getByRole("button", { name: shown })).toBeInTheDocument();
+    }
+    for (const name of hidden) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+  });
+
+  it("disables the account after confirmation and shows the status read back from the backend", async () => {
+    const user = userEvent.setup();
+    api.getCustomer
+      .mockResolvedValueOnce(customer())
+      .mockResolvedValue(customer({ account_status: "DISABLED", status_version: 4 }));
+    api.postAccountStatus.mockResolvedValue(customer({ account_status: "DISABLED", status_version: 4 }));
+    renderDetail();
+
+    await user.click(await screen.findByRole("button", { name: "Disable account" }));
+    await user.click(screen.getByLabelText("Reason"));
+    await user.paste("Contract paused");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(api.postAccountStatus).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "Confirm and disable" }));
+
+    await waitFor(() => {
+      expect(api.postAccountStatus).toHaveBeenCalledWith(CUSTOMER_ID, {
+        account_status: "DISABLED",
+        reason: "Contract paused",
+      });
+    });
+    // 详情重读了一次；资料卡换成后端给的新状态，按钮也跟着换。
+    await waitFor(() => {
+      expect(api.getCustomer).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByRole("button", { name: "Enable account" })).toBeInTheDocument();
+    expect(await accountStatusCell()).toHaveTextContent("Disabled");
+    expect(screen.queryByRole("button", { name: "Disable account" })).not.toBeInTheDocument();
   });
 
   it("shows estimated cost and simulated price for an internal tenant", async () => {
