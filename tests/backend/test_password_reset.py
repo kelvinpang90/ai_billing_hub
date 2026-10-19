@@ -326,6 +326,78 @@ def test_resetting_changes_the_password(session_factory, settings: Settings) -> 
     assert audit_actions(session_factory)[-1] == AuditAction.PASSWORD_RESET
 
 
+def password_version(session_factory, user_id: int) -> int:
+    with session_factory() as session:
+        stored = session.get(User, user_id)
+        assert stored is not None
+        return stored.password_version
+
+
+def test_each_reset_bumps_the_password_version(session_factory, settings: Settings) -> None:
+    """版本号是改密码吊销已发出令牌的依据（设计闸门 #369 v6 §2）：每次重置 +1，只增不减。"""
+    user = make_user(session_factory)
+    assert password_version(session_factory, user.id) == 0
+
+    for expected in (1, 2, 3):
+        raw = issue_token(session_factory, settings)
+        reset_password(
+            session_factory,
+            settings,
+            token=raw,
+            new_password=f"{NEW_PASSWORD}-{expected}",
+            context=CONTEXT,
+        )
+        assert password_version(session_factory, user.id) == expected
+
+
+def test_a_refused_reset_leaves_the_password_version_alone(
+    session_factory, settings: Settings
+) -> None:
+    """密码没换成，版本号就不能动 —— 否则一次失败的重置会把用户的会话全踢掉。"""
+    user = make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+
+    with pytest.raises(WeakPassword):
+        reset_password(session_factory, settings, token=raw, new_password="短", context=CONTEXT)
+    with pytest.raises(InvalidResetToken):
+        reset_password(
+            session_factory,
+            settings,
+            token="not-a-token",
+            new_password=NEW_PASSWORD,
+            context=CONTEXT,
+        )
+    assert password_version(session_factory, user.id) == 0
+
+
+def test_the_password_version_rolls_back_with_the_reset(
+    session_factory, settings: Settings, monkeypatch
+) -> None:
+    """⚠️ 版本号必须与新哈希**同一事务**：中途失败时哈希、版本号、会话一起回滚。
+
+    版本号要是先单独提交，失败的重置也会让该用户已发出的令牌全部失效，而密码其实没换。
+    """
+    user = make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the audit write failed")
+
+    monkeypatch.setattr("app.services.password_reset.record_audit", explode)
+
+    with pytest.raises(RuntimeError):
+        reset_password(
+            session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT
+        )
+
+    with session_factory() as session:
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert stored.password_version == 0
+        assert verify_password(stored.password_hash, PASSWORD)
+    assert token_rows(session_factory)[0].used_at is None
+
+
 def test_a_token_cannot_be_used_twice(session_factory, settings: Settings) -> None:
     """⚠️ 单用靠**条件更新的受影响行数**，不靠先读后写。"""
     make_user(session_factory)

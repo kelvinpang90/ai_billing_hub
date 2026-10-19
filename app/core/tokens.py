@@ -97,8 +97,21 @@ def _epoch(moment: dt.datetime) -> int:
     return int(moment.timestamp())
 
 
+# `pwv` 是签发时用户的 `password_version`（设计闸门 #369 v6 §2）：使用点拿它
+# 与 `users.password_version` 比较，不等即无效，改密码因此能吊销已发出的 JWT。
+# ⚠️ 默认 0 **只为让本参数先于使用点单独合并**而不改变任何行为（§11 P3）；
+# AIH-TASK-087 要求所有签发调用显式传值，不要依赖这个默认值。
+CLAIM_PASSWORD_VERSION: Final = "pwv"
+
+
 def issue_access_token(
-    settings: Settings, *, user_id: int, role: str, session_id: str, now: dt.datetime
+    settings: Settings,
+    *,
+    user_id: int,
+    role: str,
+    session_id: str,
+    now: dt.datetime,
+    password_version: int = 0,
 ) -> str:
     """Sign a short-lived access token."""
     payload: dict[str, Any] = {
@@ -107,6 +120,7 @@ def issue_access_token(
         # sid 把访问令牌绑到一次登录（刷新令牌家族）上，排障时能把两边对起来。
         "sid": session_id,
         "typ": TOKEN_TYPE_ACCESS,
+        CLAIM_PASSWORD_VERSION: password_version,
         "iat": _epoch(now),
         "exp": _epoch(now + dt.timedelta(seconds=settings.access_token_ttl_seconds)),
         "jti": uuid.uuid4().hex,
@@ -115,7 +129,12 @@ def issue_access_token(
 
 
 def issue_pending_2fa_token(
-    settings: Settings, *, user_id: int, now: dt.datetime, ttl_seconds: int
+    settings: Settings,
+    *,
+    user_id: int,
+    now: dt.datetime,
+    ttl_seconds: int,
+    password_version: int = 0,
 ) -> str:
     """Sign the short-lived token that carries a half-finished login (T0.8b uses it).
 
@@ -130,6 +149,7 @@ def issue_pending_2fa_token(
     payload: dict[str, Any] = {
         "sub": str(user_id),
         "typ": TOKEN_TYPE_PENDING_2FA,
+        CLAIM_PASSWORD_VERSION: password_version,
         "iat": _epoch(now),
         "exp": _epoch(now + dt.timedelta(seconds=ttl_seconds)),
         "jti": uuid.uuid4().hex,
@@ -149,6 +169,7 @@ def decode_token(settings: Settings, token: str, *, expected_type: str) -> dict[
             token,
             load_signing_key(settings),
             algorithms=[ALGORITHM],
+            # ⚠️ 不要求 `pwv`：部署前签发的令牌没有它，由使用点按缺省 0 取值（§2 兼容）。
             options={"require": ["exp", "iat", "sub", "typ"]},
         )
     except jwt.PyJWTError:

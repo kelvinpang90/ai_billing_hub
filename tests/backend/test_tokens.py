@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 
+import jwt
 import pytest
 
 from app.core.config import Settings
 from app.core.tokens import (
+    ALGORITHM,
+    CLAIM_PASSWORD_VERSION,
     TOKEN_TYPE_ACCESS,
     TOKEN_TYPE_PENDING_2FA,
     AuthNotConfigured,
@@ -17,6 +20,7 @@ from app.core.tokens import (
     hash_refresh_token,
     issue_access_token,
     issue_pending_2fa_token,
+    load_signing_key,
 )
 
 
@@ -75,6 +79,48 @@ def test_access_token_round_trips(settings: Settings) -> None:
     assert payload["sub"] == "7"
     assert payload["role"] == "ADMIN"
     assert payload["sid"] == "fam"
+
+
+def test_both_token_kinds_carry_the_password_version(settings: Settings) -> None:
+    """`pwv` 是改密码吊销旧会话的依据（设计闸门 #369 v6 §2）：传什么就写什么。"""
+    now = _now()
+    access = issue_access_token(
+        settings, user_id=7, role="ADMIN", session_id="fam", now=now, password_version=3
+    )
+    pending = issue_pending_2fa_token(
+        settings, user_id=7, now=now, ttl_seconds=120, password_version=3
+    )
+    assert decode_token(settings, access, expected_type=TOKEN_TYPE_ACCESS)["pwv"] == 3
+    assert decode_token(settings, pending, expected_type=TOKEN_TYPE_PENDING_2FA)["pwv"] == 3
+    assert CLAIM_PASSWORD_VERSION == "pwv"
+
+
+def test_the_password_version_defaults_to_zero(settings: Settings) -> None:
+    """默认 0 让这一步单独合并时不改变任何行为（§11 P3）。"""
+    now = _now()
+    access = issue_access_token(settings, user_id=7, role="ADMIN", session_id="fam", now=now)
+    pending = issue_pending_2fa_token(settings, user_id=7, now=now, ttl_seconds=120)
+    assert decode_token(settings, access, expected_type=TOKEN_TYPE_ACCESS)["pwv"] == 0
+    assert decode_token(settings, pending, expected_type=TOKEN_TYPE_PENDING_2FA)["pwv"] == 0
+
+
+def test_a_token_without_the_password_version_still_decodes(settings: Settings) -> None:
+    """⚠️ 部署前签发的令牌没有 `pwv`。`decode_token` 要求了它，那一刻所有人都会被踢下线；
+    缺省按 0 处理是使用点的事（§2 兼容）。"""
+    now = _now()
+    for typ in (TOKEN_TYPE_ACCESS, TOKEN_TYPE_PENDING_2FA):
+        legacy = jwt.encode(
+            {
+                "sub": "7",
+                "typ": typ,
+                "iat": int(now.timestamp()),
+                "exp": int((now + dt.timedelta(seconds=120)).timestamp()),
+            },
+            load_signing_key(settings),
+            algorithm=ALGORITHM,
+        )
+        payload = decode_token(settings, legacy, expected_type=typ)
+        assert "pwv" not in payload
 
 
 def test_a_pending_2fa_token_is_not_accepted_as_an_access_token(settings: Settings) -> None:
