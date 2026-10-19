@@ -15,15 +15,17 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
-import type { CustomerDetail } from "../../api/adminCustomers";
+import { projectListQueryKey, type CustomerDetail } from "../../api/adminCustomers";
 import {
   AdjustmentError,
   type Adjustment,
   type AdjustmentType,
 } from "../../api/walletAdjustments";
+import { walletTransactionListQueryKey } from "../../api/walletTransactions";
 import { AdjustmentModal } from "./AdjustmentModal";
 
 const CUSTOMER_ID = "00000000-0000-4000-8000-000000000000";
+const OTHER_CUSTOMER_ID = "00000000-0000-4000-8000-000000000009";
 const KEY = "00000000-0000-4000-8000-000000000000";
 const ROW_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -86,8 +88,9 @@ function adjustment(overrides: Partial<Adjustment> = {}): Adjustment {
   };
 }
 
-function renderModal() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderModal(
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   const invalidate = vi.spyOn(queryClient, "invalidateQueries");
   const onClose = vi.fn();
   render(
@@ -398,6 +401,40 @@ describe("AdjustmentModal", { timeout: 20_000 }, () => {
 
     await user.click(screen.getByRole("button", { name: "Done" }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates this customer's wallet transactions, and not another customer's or the projects", async () => {
+    const user = userEvent.setup();
+    api.postAdjustment.mockResolvedValue(adjustment());
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const empty = { items: [], page_size: 20, next_before_sequence: null };
+    const newest = walletTransactionListQueryKey(CUSTOMER_ID, null, null, 20);
+    const olderFiltered = walletTransactionListQueryKey(CUSTOMER_ID, "ADMIN_ADJUSTMENT", 23, 20);
+    const otherCustomer = walletTransactionListQueryKey(OTHER_CUSTOMER_ID, null, null, 20);
+    const projects = projectListQueryKey(CUSTOMER_ID, 1, 20);
+    for (const key of [newest, olderFiltered, otherCustomer]) {
+      queryClient.setQueryData(key, empty);
+    }
+    queryClient.setQueryData(projects, { items: [], page: 1, page_size: 20, total: 0 });
+    const { invalidate } = renderModal(queryClient);
+
+    await fillAndReview(user);
+    await confirmPosting(user);
+
+    expect(await screen.findByText("Adjustment posted.")).toBeInTheDocument();
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["admin", "wallet-transactions", CUSTOMER_ID],
+    });
+    // 既有的两条失效原样保留。
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["admin", "customers", "detail", CUSTOMER_ID],
+      exact: true,
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin", "customers", "list"] });
+    expect(queryClient.getQueryState(newest)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(olderFiltered)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(otherCustomer)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryState(projects)?.isInvalidated).toBe(false);
   });
 
   it("says plainly that a replay was not posted a second time", async () => {

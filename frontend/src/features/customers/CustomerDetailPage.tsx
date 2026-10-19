@@ -10,6 +10,9 @@
  * 钱包卡片上的「Adjust balance」打开手工调账表单（`features/wallet/AdjustmentModal`，
  * AIH-TASK-017）。调账成功后由表单让这里的详情过期重读，余额与计费状态以后端为准。
  *
+ * 钱包卡片下面是钱包流水面板（`features/wallet/WalletTransactionsPanel`，AIH-TASK-085）；调账成功后
+ * 表单也让这位客户的流水过期重读。
+ *
  * 资料卡显示账户状态（AIH-TASK-082），并按当前状态给「Disable account」或「Enable account」：
  * 打开 `AccountStatusModal`，成功后由弹窗让这里的详情过期重读。`PENDING_ACTIVATION` 与 `CLOSED`
  * 不给按钮；跃迁规则全在后端。
@@ -49,6 +52,7 @@ import { DateTimeText } from "../../components/DateTimeText";
 import { MoneyText } from "../../components/MoneyText";
 import { ROUTES } from "../../routes/paths";
 import { AdjustmentModal } from "../wallet/AdjustmentModal";
+import { WalletTransactionsPanel } from "../wallet/WalletTransactionsPanel";
 import { AccountStatusModal, accountStatusTarget } from "./AccountStatusModal";
 import {
   CustomerErrorAlert,
@@ -207,6 +211,9 @@ export function CustomerDetailPage() {
       >
         <WalletDescriptions wallet={current.wallet} />
       </Card>
+
+      {/* key：换了客户，游标与来源筛选都从头来。 */}
+      <WalletTransactionsPanel key={`wallet-${current.id}`} customerId={current.id} />
 
       {current.billing_mode === "INTERNAL_METERED_ONLY" ? (
         <InternalUsagePanel customerId={current.id} />
