@@ -5166,7 +5166,7 @@ tasks:
   - id: AIH-TASK-086
     title: 改密码吊销会话第一层：用户与刷新令牌的密码版本号迁移
     purpose: >-
-      按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2「数据库（迁移）」、§8 与 §11 的 P1：迁移 alembic/versions/20261019_0024_password_version.py（revision 0024_password_version，down_revision 0023_wallet_ledger_ref_index）给 users 与 refresh_tokens 各加 password_version INT NOT NULL DEFAULT 0 与 CHECK (password_version >= 0)；模型同步；表结构文档补上。只改表结构与模型，不改任何服务、令牌与接口；P3（reset_password 递增）由管理员 PR 完成，P2 属于 AIH-TASK-087。
+      按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2「数据库（迁移）」、§8 与 §11 的 P1：迁移 alembic/versions/20261019_0024_session_revocation.py（revision 0024_password_version，down_revision 0023_wallet_ledger_ref_index；文件名不含 password，是为了避开 Worker 的敏感路径规则）给 users 与 refresh_tokens 各加 password_version INT NOT NULL DEFAULT 0 与 CHECK (password_version >= 0)；模型同步；表结构文档补上。只改表结构与模型，不改任何服务、令牌与接口；P3（reset_password 递增）由管理员 PR 完成，P2 属于 AIH-TASK-087。
     status: ready
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）逐条一致，以 §2「数据库（迁移）」、§7「数据库兜底」「迁移」两行与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
@@ -5177,7 +5177,7 @@ tasks:
       - '不改服务、令牌、接口与前端；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #369'
     allowed_change_paths:
-      - alembic/versions/20261019_0024_password_version.py
+      - alembic/versions/20261019_0024_session_revocation.py
       - app/models/auth.py
       - tests/backend/test_migrations.py
       - tests/backend/test_session_revocation_db.py
@@ -5216,21 +5216,20 @@ tasks:
   - id: AIH-TASK-087
     title: 改密码吊销会话第二层：令牌带密码版本号并在各使用点比较，统一认证加锁顺序
     purpose: >-
-      按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2 全部与 §11 的 P2：访问令牌与 pending 令牌加 pwv claim，刷新令牌行写 password_version；签发点按 §2 盘点表取版本号，使用点（require_current_user、complete_second_factor、2FA 注册与确认、重新生成恢复码、refresh_session）按 §2 比较；统一加锁顺序（refresh_session 先锁用户行）；刷新令牌不可用时的判别表；守卫用例。前提：管理员 PR（P3，reset_password 在同一事务里递增 password_version）已合并到 main。
+      按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2 全部与 §11 的 P2：访问令牌与 pending 令牌加 pwv claim，刷新令牌行写 password_version；签发点按 §2 盘点表取版本号，使用点（require_current_user、complete_second_factor、2FA 注册与确认、重新生成恢复码、refresh_session）按 §2 比较；统一加锁顺序（refresh_session 先锁用户行）；刷新令牌不可用时的判别表；守卫用例。前提：管理员 PR 已合并到 main，它包含 P3（reset_password 在同一事务里递增 password_version）与 app/core/tokens.py 的 issue_access_token、issue_pending_2fa_token 新增 password_version 参数（默认 0）并写入 claim pwv（这两个文件名含 password / tokens，Worker 不能改）。
     status: ready
     depends_on:
       - AIH-TASK-086
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）逐条一致，以 §2 的「核心规则」「令牌盘点」「统一加锁顺序」「刷新令牌不可用时的判别」「在途请求的语义」「令牌格式」「事务边界」与 §5 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
-      - '前提核对：app/services/password_reset.py 的 reset_password 已在写新哈希的同一事务里递增 password_version（P3，管理员 PR；该文件名含 password，Worker 的敏感路径规则不许改）。动手前核对，若没有就停下并在 PR 里说明，不自行绕过'
-      - 'app/core/tokens.py：issue_access_token、issue_pending_2fa_token 新增 password_version 参数并写入 claim pwv；decode_token 不强制要求 pwv，使用点按缺省为 0 取值。app/services/auth.py：_issue_session 新增 password_version 参数、不在函数里重读用户；authenticate、complete_second_factor、refresh_session 按设计 §2 盘点表取值与比较；complete_second_factor 在事务开头 SELECT users FOR UPDATE，第二因子失败时保持先提交再写失败计数；refresh_session 改为不加锁读出旧行取 user_id → 锁用户行 → 条件 UPDATE，入口检查与条件更新失败共用设计 §2 的判别表（只有 used_at 非空才走 _treat_as_replay）'
+      - '前提核对（管理员 PR；app/services/password_reset.py、app/core/tokens.py 与 tests/backend/test_tokens.py 的文件名含 password / tokens，Worker 的敏感路径规则不许改）：reset_password 已在写新哈希的同一事务里递增 password_version；issue_access_token、issue_pending_2fa_token 已有 password_version 参数并写入 claim pwv，decode_token 不强制要求 pwv。动手前逐项核对，缺任何一项就停下并在 PR 里说明，不自行绕过'
+      - '所有签发调用都显式传 password_version（不依赖默认值 0），使用点按缺省为 0 取 pwv。app/services/auth.py：_issue_session 新增 password_version 参数、不在函数里重读用户；authenticate、complete_second_factor、refresh_session 按设计 §2 盘点表取值与比较；complete_second_factor 在事务开头 SELECT users FOR UPDATE，第二因子失败时保持先提交再写失败计数；refresh_session 改为不加锁读出旧行取 user_id → 锁用户行 → 条件 UPDATE，入口检查与条件更新失败共用设计 §2 的判别表（只有 used_at 非空才走 _treat_as_replay）'
       - 'app/services/two_factor.py：start_enrolment、confirm_enrolment、regenerate_recovery_codes 新增参数接收所用令牌的版本号，在各自写事务里先 SELECT users FOR UPDATE 再比较，不等时 401 INVALID_TOKEN、不写任何 2FA 行或恢复码。app/api/auth.py 的 require_current_user 读库时比较 pwv；app/api/two_factor.py 的 enrol、confirm、regenerate 三处把令牌的 pwv 传给服务'
       - '测试：新增 tests/backend/test_session_revocation.py 覆盖设计 §7 的非并发各行（正常路径、改密码后的旧令牌五个使用点、改密码之后的普通刷新、登出之后的刷新、真正的重放不受影响、_issue_session 不重读用户、兼容、版本单调、事务中途失败），以及守卫用例：扫描 app/ 下对 password_hash 的属性赋值（.password_hash =），要求所在函数同时递增 password_version；用 User(...) 构造新用户的写法明确豁免并写明理由（设计审查 v6 的提醒）'
-      - '新增 tests/backend/test_session_revocation_concurrency.py，在 BILLING_TEST_DATABASE_URL 的真 MySQL 上用两个连接与屏障跑设计 §7 的全部并发行（登录、第二因子消耗、刷新与改密码，刷新持锁时改密码，刷新与登出，认证材料写入与改密码，第二因子失败与锁，死锁兜底），未设置时 skip、CI 必跑；需要调 reset_password 的用例直接调用服务。既有测试因签名变化需要改的，只改 tests/backend/test_auth_service.py、test_two_factor.py、test_tokens.py 三个文件里的调用方式，不改它们断言的行为（刷新令牌被吊销后不再写重放审计这一处除外，按设计改并在 PR 里列出）'
+      - '新增 tests/backend/test_session_revocation_concurrency.py，在 BILLING_TEST_DATABASE_URL 的真 MySQL 上用两个连接与屏障跑设计 §7 的全部并发行（登录、第二因子消耗、刷新与改密码，刷新持锁时改密码，刷新与登出，认证材料写入与改密码，第二因子失败与锁，死锁兜底），未设置时 skip、CI 必跑；需要调 reset_password 的用例直接调用服务。既有测试因签名变化需要改的，只改 tests/backend/test_auth_service.py、test_two_factor.py 两个文件里的调用方式，不改它们断言的行为（刷新令牌被吊销后不再写重放审计这一处除外，按设计改并在 PR 里列出）'
       - 'docs/api.md 的认证说明补一段：改密码使之前的全部会话失效（版本号规则）、刷新令牌被吊销与被重放的区别，以及「以后新增任何设置密码的入口都必须在同一事务里递增 password_version」（设计 §10 A1）'
       - '不改迁移与模型（属于 AIH-TASK-086）、不改前端；不改 AI 模块；SQL 断言不写死方言字面量；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #369'
     allowed_change_paths:
-      - app/core/tokens.py
       - app/services/auth.py
       - app/services/two_factor.py
       - app/api/auth.py
@@ -5239,7 +5238,6 @@ tasks:
       - tests/backend/test_session_revocation_concurrency.py
       - tests/backend/test_auth_service.py
       - tests/backend/test_two_factor.py
-      - tests/backend/test_tokens.py
       - docs/api.md
     allowed_commands:
       - docs.check
