@@ -5768,7 +5768,7 @@ def test_0022_keys_foreign_keys_checks_triggers_and_the_lock_row(alembic_config:
 
 
 # ---------------------------------------------------------------------------
-# 0023_wallet_ledger_reference_index（AIH-TASK-083，设计闸门 #351 v1）
+# 0023_wallet_ledger_ref_index（AIH-TASK-083，设计闸门 #351 v1）
 #
 # The first cases need no database: the revision chain; the index in the migration equals the
 # model's and the design's (name, column order, not unique) and the old one is untouched; upgrade
@@ -5777,7 +5777,7 @@ def test_0022_keys_foreign_keys_checks_triggers_and_the_lock_row(alembic_config:
 # it, and EXPLAIN lists it among the possible keys for a by-source page (design §7, last rows).
 # ---------------------------------------------------------------------------
 
-_REVISION_0023 = "0023_wallet_ledger_reference_index"
+_REVISION_0023 = "0023_wallet_ledger_ref_index"
 _MIGRATION_0023 = pathlib.Path("alembic/versions/20261018_0023_wallet_ledger_reference_index.py")
 _LEDGER_TABLE = "wallet_transactions"
 _INDEX_0023 = "ix_wallet_transactions_tenant_reference_sequence"
@@ -5838,6 +5838,17 @@ def test_0023_follows_0022() -> None:
 
     assert migration.revision == _REVISION_0023
     assert migration.down_revision == _REVISION_0022
+
+
+def test_every_revision_id_fits_alembic_version() -> None:
+    """Alembic creates `alembic_version.version_num` as VARCHAR(32); a longer ID fails on MySQL."""
+    for path in sorted(pathlib.Path("alembic/versions").glob("*.py")):
+        spec = importlib.util.spec_from_file_location(f"revision_{path.stem}", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert len(module.revision) <= 32, (path.name, module.revision)
 
 
 def test_0023_index_is_the_one_the_model_declares() -> None:

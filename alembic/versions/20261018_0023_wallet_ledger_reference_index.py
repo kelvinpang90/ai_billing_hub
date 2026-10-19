@@ -30,15 +30,16 @@
 **部署顺序**：`deploy.sh` 先迁移、再换镜像。本任务不带查询与接口（AIH-TASK-084），部署后只多
 一个没人用的索引；旧代码不读它。先迁移后换镜像、或反过来都安全。
 
-**失败处理**：⚠️ MySQL 的 DDL **不参与事务**，但这里只有一条 DDL：失败即索引不存在、
-`alembic_version` 仍是 `0022_tax_policy`，修好后重新部署。进程恰好在索引建成之后、版本前进
-之前被杀时，重跑会撞 "Duplicate key name"：确认版本仍是 0022 后
+**失败处理**：⚠️ MySQL 的 DDL **不参与事务**，但这里只有一条 DDL：建索引失败即索引不存在、
+`alembic_version` 仍是 `0022_tax_policy`，修好后重新部署。索引建成之后、版本前进之前出事
+（进程被杀，或写 `alembic_version` 本身失败）时，索引已留下而版本仍是 0022，重跑会撞
+"Duplicate key name"：确认版本仍是 0022 后
 `DROP INDEX ix_wallet_transactions_tenant_reference_sequence ON wallet_transactions`，再重新部署。
 本版不写数据，所以「清场重跑」始终安全。
 
 **回滚**：`downgrade` 只删这个索引，表、列、约束、数据与触发器都不动；没有写入方依赖它。
 
-Revision ID: 0023_wallet_ledger_reference_index
+Revision ID: 0023_wallet_ledger_ref_index
 Revises: 0022_tax_policy
 Create Date: 2026-10-18
 """
@@ -49,7 +50,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0023_wallet_ledger_reference_index"
+# `alembic_version.version_num` 是 VARCHAR(32)，ID 必须不超过 32 个字符（设计 §2 编号登记时定）。
+revision: str = "0023_wallet_ledger_ref_index"
 down_revision: str | None = "0022_tax_policy"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
