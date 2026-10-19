@@ -719,11 +719,50 @@ def test_reads_are_scoped_to_the_tenant(factory) -> None:
         assert [row.wallet_sequence for row in page] == [3, 2]
         rest = list_transactions_for_tenant(session, first, limit=2, before_sequence=2)
         assert [row.wallet_sequence for row in rest] == [1]
-        assert all(row.tenant_id == first for row in page + rest)
+        # 页里的行没有 tenant_id 列（设计闸门 #351 v2 §2「查询」只选必要的列），按 public_id 比。
+        assert {row.public_id for row in page + rest} == {
+            row.public_id for row in ledger_rows(factory, first)
+        }
         theirs = list_transactions_for_tenant(session, second, limit=50)
         assert [row.amount for row in theirs] == [Decimal("99")]
         assert verify_wallet(session, first) == []
         assert verify_wallet(session, second) == []
+
+
+def test_a_page_filters_by_source_and_carries_the_operator(factory) -> None:
+    """设计闸门 #351 v2 §2：按来源筛选只出该来源的行；调账带操作者邮箱，其余为空。
+
+    用量行没有对应的用量事件（这里直接记账），所以 `usage_event_public_id` 是 `None`，行照常返回。
+    """
+    tenant_id = make_tenant(factory)
+    admin_id = make_admin(factory)
+    reason = {"created_by": admin_id, "description": "Fictional credit", "actor_role": "ADMIN"}
+    post(factory, tenant_id, TransactionType.ADJUSTMENT_CREDIT, "10", **reason)
+    post(factory, tenant_id, AI_USAGE, "-1")
+    post(factory, tenant_id, TransactionType.ADJUSTMENT_CREDIT, "10", **reason)
+    post(factory, tenant_id, AI_USAGE, "-1")
+
+    with factory() as session:
+        email = session.execute(select(User.email).where(User.id == admin_id)).scalar_one()
+        credits = list_transactions_for_tenant(
+            session, tenant_id, limit=10, reference_type=ReferenceType.ADMIN_ADJUSTMENT
+        )
+        usage = list_transactions_for_tenant(
+            session, tenant_id, limit=10, reference_type=ReferenceType.USAGE_EVENT
+        )
+        older = list_transactions_for_tenant(
+            session,
+            tenant_id,
+            limit=10,
+            before_sequence=3,
+            reference_type=ReferenceType.ADMIN_ADJUSTMENT,
+        )
+
+    assert [row.wallet_sequence for row in credits] == [3, 1]
+    assert [row.wallet_sequence for row in usage] == [4, 2]
+    assert [row.wallet_sequence for row in older] == [1]
+    assert {(row.created_by_email, row.usage_event_public_id) for row in credits} == {(email, None)}
+    assert {(row.created_by_email, row.usage_event_public_id) for row in usage} == {(None, None)}
 
 
 def test_a_page_is_capped_and_a_limit_below_one_is_refused(factory) -> None:
