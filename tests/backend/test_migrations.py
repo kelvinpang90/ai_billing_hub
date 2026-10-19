@@ -62,7 +62,7 @@ from app.models.ai_catalog import (
     UsageMeterComponent,
     UsageMeterType,
 )
-from app.models.auth import AuditAction, AuditLog
+from app.models.auth import AuditAction, AuditLog, RefreshToken, User
 from app.models.base import Base
 from app.models.fx_rates import FxFetchAttempt, FxRateLock, FxRateVersion
 from app.models.integration import (
@@ -5914,6 +5914,8 @@ def test_0023_round_trip_drops_and_recreates_only_the_index(alembic_config: Conf
     command.upgrade(alembic_config, "head")
     engine = create_engine(TEST_DATABASE_URL)
     try:
+        # Later revisions (0024's columns) are not this round trip's: compare at 0023.
+        command.downgrade(alembic_config, _REVISION_0023)
         at_head = _schema_snapshot(engine)
         triggers = _all_triggers()
         ledger_at_head = _reflected_ledger_indexes(engine)
@@ -5966,3 +5968,273 @@ def test_0023_explain_lists_the_index_for_a_page_by_source(alembic_config: Confi
     assert len(rows) == 1
     possible_keys = str(rows[0]["possible_keys"] or "").split(",")
     assert _INDEX_0023 in possible_keys
+
+
+# ---------------------------------------------------------------------------
+# 0024_password_version（AIH-TASK-086，设计闸门 #369 v6）
+#
+# The first cases need no database: the revision chain; the two columns and checks in the
+# migration equal the models' and design §2's (INT NOT NULL, server default 0, `>= 0`, no index);
+# upgrade adds each column then its check and downgrade undoes them in reverse. On a real MySQL:
+# both columns and checks exist at head; rows written before 0024 read 0 after it; the round trip
+# 0024 → 0023 → 0024 changes nothing but the two columns and their checks (design §7 "迁移").
+# What the checks refuse is test_session_revocation_db.py (design §7 "数据库兜底").
+# ---------------------------------------------------------------------------
+
+_REVISION_0024 = "0024_password_version"
+_MIGRATION_0024 = pathlib.Path("alembic/versions/20261019_0024_session_revocation.py")
+_COLUMN_0024 = "password_version"
+# Upgrade order; downgrade is the reverse.
+_TABLES_0024 = ["users", "refresh_tokens"]
+_MODELS_0024 = {"users": User, "refresh_tokens": RefreshToken}
+
+# Design §2 "数据库（迁移）": table → (check name, condition).
+_DESIGN_CHECKS_0024 = {
+    "users": ("ck_users_password_version", "password_version >= 0"),
+    "refresh_tokens": ("ck_refresh_tokens_password_version", "password_version >= 0"),
+}
+
+_EXPECTED_0024_UPGRADE = [
+    ("add_column", "users"),
+    ("create_check_constraint", "ck_users_password_version"),
+    ("add_column", "refresh_tokens"),
+    ("create_check_constraint", "ck_refresh_tokens_password_version"),
+]
+
+# The check before the column it names (MySQL refuses the other order), refresh_tokens first.
+_EXPECTED_0024_DOWNGRADE = [
+    ("execute", ("ALTER TABLE refresh_tokens DROP CHECK ck_refresh_tokens_password_version",)),
+    ("drop_column", ("refresh_tokens", "password_version")),
+    ("execute", ("ALTER TABLE users DROP CHECK ck_users_password_version",)),
+    ("drop_column", ("users", "password_version")),
+]
+
+_ALL_CHECKS_QUERY = text(
+    "SELECT TABLE_NAME, CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS"
+    " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
+)
+
+# Rows written at 0023 the way the code before 0024 writes them: no `password_version`.
+_EMAIL_0024 = "migration-0024@session-revocation-test.example.com"
+_TOKEN_HASH_0024 = "24" * 32
+_INSERT_USER_0024 = text(
+    "INSERT INTO users (email, password_hash, role, status, failed_login_count, lockout_level,"
+    " created_at, updated_at) VALUES (:email, 'not-a-real-hash', 'ADMIN', 'ACTIVE', 0, 0,"
+    " :now, :now)"
+)
+_INSERT_REFRESH_TOKEN_0024 = text(
+    "INSERT INTO refresh_tokens (user_id, family_id, token_hash, issued_at, expires_at)"
+    " SELECT id, :family_id, :token_hash, :now, :expires_at FROM users WHERE email = :email"
+)
+
+
+def _load_0024() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0024", _MIGRATION_0024)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_0024_follows_0023() -> None:
+    migration = _load_0024()
+
+    assert migration.revision == _REVISION_0024
+    assert migration.down_revision == _REVISION_0023
+
+
+def test_0024_columns_and_checks_are_the_ones_the_models_declare() -> None:
+    migration = _load_0024()
+    from_migration = {
+        table: (name, _normalised(condition))
+        for table, (name, condition) in migration._CHECKS.items()
+    }
+
+    assert list(migration._CHECKS) == _TABLES_0024
+    assert from_migration == _DESIGN_CHECKS_0024
+    assert migration._COLUMN == _COLUMN_0024
+    assert migration._DEFAULT == "0"
+    for table, model in _MODELS_0024.items():
+        name, condition = _DESIGN_CHECKS_0024[table]
+        assert _declared_checks(model)[name] == condition, table
+        column = model.__table__.c.password_version
+        assert isinstance(column.type, Integer), table
+        assert not isinstance(column.type, BigInteger), table
+        assert column.nullable is False, table
+        # Python side and server side both 0.
+        assert column.default.arg == 0, table
+        assert str(column.server_default.arg) == migration._DEFAULT, table
+        # No index: every comparison is on a row read by its primary key (design §2).
+        indexed = [
+            index.name
+            for index in model.__table__.indexes
+            if _COLUMN_0024 in [c.name for c in index.columns]
+        ]
+        assert indexed == [], table
+
+
+def test_0024_upgrade_adds_each_column_then_its_check_and_downgrade_reverses(
+    monkeypatch,
+) -> None:
+    migration = _load_0024()
+    upgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert [(name, args[0]) for name, args in upgrade.calls] == _EXPECTED_0024_UPGRADE
+    for name, args in upgrade.calls:
+        if name == "add_column":
+            table, column = args
+            assert column.name == _COLUMN_0024, table
+            assert isinstance(column.type, Integer), table
+            assert not isinstance(column.type, BigInteger), table
+            assert column.nullable is False, table
+            assert str(column.server_default.arg) == "0", table
+        else:
+            check, table, condition = args
+            assert (check, _normalised(condition)) == _DESIGN_CHECKS_0024[table]
+
+    downgrade = _ArgsRecorder()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.calls == _EXPECTED_0024_DOWNGRADE
+
+
+def _all_checks() -> set[tuple[str, str]]:
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(_ALL_CHECKS_QUERY).all()
+    finally:
+        engine.dispose()
+    return {(str(table), str(name)) for table, name in rows}
+
+
+def _checks_0024() -> set[tuple[str, str]]:
+    return {(table, name) for table, (name, _) in _DESIGN_CHECKS_0024.items()}
+
+
+def _without_password_version(
+    snapshot: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    stripped = {table: dict(shape) for table, shape in snapshot.items()}
+    for table in _TABLES_0024:
+        columns = snapshot[table]["columns"]
+        assert isinstance(columns, list)
+        stripped[table]["columns"] = [c for c in columns if c[0] != _COLUMN_0024]
+    return stripped
+
+
+def _clean_0024(engine: Engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM refresh_tokens WHERE token_hash = :token_hash"),
+            {"token_hash": _TOKEN_HASH_0024},
+        )
+        connection.execute(text("DELETE FROM users WHERE email = :email"), {"email": _EMAIL_0024})
+
+
+def _password_versions_0024(engine: Engine) -> tuple[list[int], list[int], int]:
+    """Ours in each table, and how many rows in either table are not 0."""
+    with engine.connect() as connection:
+        users = connection.execute(
+            text("SELECT password_version FROM users WHERE email = :email"),
+            {"email": _EMAIL_0024},
+        ).scalars()
+        tokens = connection.execute(
+            text("SELECT password_version FROM refresh_tokens WHERE token_hash = :token_hash"),
+            {"token_hash": _TOKEN_HASH_0024},
+        ).scalars()
+        ours = (list(users), list(tokens))
+        others = sum(
+            int(
+                connection.execute(
+                    text(f"SELECT COUNT(*) FROM {table} WHERE password_version <> 0")
+                ).scalar_one()
+            )
+            for table in _TABLES_0024
+        )
+    return ours[0], ours[1], others
+
+
+@needs_mysql
+def test_0024_columns_and_checks_exist_at_head(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        for table in _TABLES_0024:
+            [column] = [c for c in inspector.get_columns(table) if c["name"] == _COLUMN_0024]
+            assert isinstance(column["type"], Integer), table
+            assert not isinstance(column["type"], BigInteger), table
+            assert column["nullable"] is False, table
+            assert str(column["default"]).strip("'") == "0", table
+            indexed = [
+                i["name"] for i in inspector.get_indexes(table) if _COLUMN_0024 in i["column_names"]
+            ]
+            assert indexed == [], table
+    finally:
+        engine.dispose()
+
+    assert _checks_0024() <= _all_checks()
+
+
+@needs_mysql
+def test_0024_backfills_zero_and_round_trip_changes_only_its_columns(
+    alembic_config: Config,
+) -> None:
+    """Design §7 "迁移": rows that exist before 0024 read 0 after it; 0024 → 0023 → 0024 leaves
+    every other table, column, key, check and trigger as it was."""
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    _clean_0024(engine)
+    try:
+        command.downgrade(alembic_config, _REVISION_0023)
+        without = _schema_snapshot(engine)
+        checks_without = _all_checks()
+        triggers = _all_triggers()
+        for table in _TABLES_0024:
+            columns = without[table]["columns"]
+            assert isinstance(columns, list)
+            assert _COLUMN_0024 not in [c[0] for c in columns], table
+        assert not _checks_0024() & checks_without
+
+        with engine.begin() as connection:
+            connection.execute(_INSERT_USER_0024, {"email": _EMAIL_0024, "now": _NOW})
+            connection.execute(
+                _INSERT_REFRESH_TOKEN_0024,
+                {
+                    "email": _EMAIL_0024,
+                    "family_id": str(uuid.uuid4()),
+                    "token_hash": _TOKEN_HASH_0024,
+                    "now": _NOW,
+                    "expires_at": _NOW + dt.timedelta(days=30),
+                },
+            )
+
+        command.upgrade(alembic_config, _REVISION_0024)
+        at_0024 = _schema_snapshot(engine)
+        for table in _TABLES_0024:
+            columns = at_0024[table]["columns"]
+            assert isinstance(columns, list)
+            assert _COLUMN_0024 in [c[0] for c in columns], table
+        assert _without_password_version(at_0024) == without
+        assert _all_checks() == checks_without | _checks_0024()
+        assert _all_triggers() == triggers
+        assert _password_versions_0024(engine) == ([0], [0], 0)
+
+        command.downgrade(alembic_config, _REVISION_0023)
+        assert _schema_snapshot(engine) == without
+        assert _all_checks() == checks_without
+        assert _all_triggers() == triggers
+
+        command.upgrade(alembic_config, _REVISION_0024)
+        assert _schema_snapshot(engine) == at_0024
+        assert _all_checks() == checks_without | _checks_0024()
+        assert _all_triggers() == triggers
+        assert _password_versions_0024(engine) == ([0], [0], 0)
+    finally:
+        command.upgrade(alembic_config, "head")
+        _clean_0024(engine)
+        engine.dispose()

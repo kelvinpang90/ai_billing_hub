@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-10-18
+> 最后更新：2026-10-19
 
 ---
 
@@ -323,6 +323,37 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 没有任何路径先锁投递行、再锁租户或项目，也没有任何路径先锁项目、再锁租户，所以不成环。改地址只对租户行加
 共享锁：它与 `bump_status_version` 持有的排他锁互斥，两者严格串行；同一租户下改不同项目的地址互不阻塞。
 读取地址（`get_status_webhook`）不加锁。
+
+---
+
+## `users`（spec §53；T0.8a 迁移 `0002_auth_tables` 建表，AIH-TASK-086 迁移 `0024_password_version` 加 `password_version`）
+
+这里只写本任务涉及的列与约束，其余列见模型 `app/models/auth.py` 的 `User`。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `password_version` | INT | 非空，服务器端默认 0（迁移时已有行取 0），`CHECK (password_version >= 0)`（`ck_users_password_version`）；不建索引 |
+
+用途（设计闸门 #369 v6 §2「核心规则」）：密码版本号。签发任何令牌时把验证密码时读到的这一行上的值写进令牌
+（访问令牌与 pending 令牌的 claim `pwv`、`refresh_tokens.password_version`），使用时与这里的当前值比较，
+不等即无效，所以改密码让之前的全部会话失效。⚠️ **只在由本人设置新密码时 +1**：在已经 `SELECT … FOR UPDATE`
+锁住本行的事务里 `password_version = password_version + 1`，与写新哈希同一事务；只增不减，`create-admin`
+建出的新用户为 0。比较都发生在按主键读到的行上，所以不需要索引。
+
+## `refresh_tokens`（spec §53；T0.8a 迁移 `0002_auth_tables` 建表，AIH-TASK-086 迁移 `0024_password_version` 加 `password_version`）
+
+这里只写本任务涉及的列与约束，其余列见模型 `app/models/auth.py` 的 `RefreshToken`。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `password_version` | INT | 非空，服务器端默认 0（迁移时已有行取 0），`CHECK (password_version >= 0)`（`ck_refresh_tokens_password_version`）；不建索引 |
+
+用途：签发这一行时用户的 `password_version`，取自验证密码时读到的用户行或被轮换的上一行，不在签发时重新读用户。
+与 `users.password_version` 不等即视为无效。旧代码插入的行不写这一列，取默认值 0，与旧代码签发、没有 `pwv`
+的 JWT 按 0 处理同一口径（设计 §8「兼容窗口」）。
+
+0024 只加列与 CHECK：递增（P3，`reset_password`）与签发、比较（P2，AIH-TASK-087）不在本迁移里。
+迁移的锁表、失败处理与回滚分析见迁移文件头。
 
 ---
 

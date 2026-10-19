@@ -14,7 +14,17 @@ from __future__ import annotations
 import datetime as dt
 import enum
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -84,10 +94,23 @@ class User(Base):
     lockout_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_login_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # 密码版本号（设计闸门 #369 v6 §2「核心规则」，迁移 0024）。
+    # 签发令牌时写进令牌（JWT 的 `pwv`、刷新令牌行的同名列），使用时
+    # 与这里的当前值比较，不等即无效 —— 改密码因此让之前的全部会话失效。
+    # ⚠️ **只在由本人设置新密码时 +1**：在已经 `SELECT … FOR UPDATE`
+    # 锁住本行的事务里 `password_version = password_version + 1`。
+    # 只增不减；新建用户为 0。
+    password_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
 
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(back_populates="user")
+
+    # ⚠️ 条件文本与迁移 0024 逐字一致（空白除外），test_migrations.py 比对两边。
+    __table_args__ = (CheckConstraint("password_version >= 0", name="ck_users_password_version"),)
 
 
 class RefreshToken(Base):
@@ -110,10 +133,21 @@ class RefreshToken(Base):
     # 非空 = 已经被换过一次。再被提交就是重放。
     used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 签发这一行时用户的 `password_version`（设计闸门 #369 v6 §2，迁移 0024）：
+    # 取自验证密码时读到的用户行，或被轮换的上一行，不在签发时重新读用户。
+    # 与 `users.password_version` 不等即无效；那边只在由本人设置新密码时 +1。
+    # 已有行与旧代码插入的行取 0。
+    password_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     user: Mapped[User] = relationship(back_populates="refresh_tokens")
 
-    __table_args__ = (Index("ix_refresh_tokens_family", "user_id", "family_id"),)
+    __table_args__ = (
+        Index("ix_refresh_tokens_family", "user_id", "family_id"),
+        # ⚠️ 条件文本与迁移 0024 一致（空白除外），test_migrations.py 比对两边。
+        CheckConstraint("password_version >= 0", name="ck_refresh_tokens_password_version"),
+    )
 
 
 class AuditAction(enum.StrEnum):
