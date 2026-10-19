@@ -24,6 +24,7 @@
  *      改了再发，仍用这个键。409 说明这个键已经记过别的东西，只能关闭。
  *
  * 成功（含重放）后让客户详情与客户列表过期重读：余额与计费状态以后端为准，不在前端推算。
+ * 这位客户的钱包流水（AIH-TASK-085）也按前缀整体过期；项目列表不受影响。
  */
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -61,6 +62,7 @@ import {
   type AdjustmentType,
   type AmountProblem,
 } from "../../api/walletAdjustments";
+import { walletTransactionsQueryKey } from "../../api/walletTransactions";
 import { MoneyText } from "../../components/MoneyText";
 import { RequestReference } from "../../components/RequestReference";
 import { CustomerErrorAlert } from "../customers/CustomerForm";
@@ -147,6 +149,8 @@ export function AdjustmentModal({
       });
       // 计费状态也显示在客户列表里。
       void queryClient.invalidateQueries({ queryKey: CUSTOMER_LISTS_QUERY_KEY });
+      // 这一笔记进了账本：这位客户的流水（各页、各筛选）都要重读。按前缀失效，不碰别的客户。
+      void queryClient.invalidateQueries({ queryKey: walletTransactionsQueryKey(customer.id) });
     },
     onError: (error) => {
       if (isOutcomeUnknown(error)) {

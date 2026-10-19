@@ -167,7 +167,12 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 | `created_by` | BIGINT | 可空，外键 → `users.id` `ON DELETE RESTRICT`；NULL 表示系统 |
 | `created_at` | DATETIME | 非空 |
 
-索引 `ix_wallet_transactions_tenant_sequence (tenant_id, wallet_sequence)`：按租户倒序分页查流水。
+索引（都非唯一）：
+
+- `ix_wallet_transactions_tenant_sequence (tenant_id, wallet_sequence)`：按租户倒序分页查流水。
+- `ix_wallet_transactions_tenant_reference_sequence (tenant_id, reference_type, wallet_sequence)`：
+  按来源（`reference_type`）筛选时的键集分页，等值前缀加有序的序号，倒序取一页即停；稀有来源
+  （调账、系统更正）不必倒着扫过全部用量行。迁移 0023 加（AIH-TASK-083，设计闸门 #351 v1 §2）。
 
 其余 `CHECK`（与模型上的定义逐条一致，`tests/backend/test_migrations.py` 比对两边）：
 

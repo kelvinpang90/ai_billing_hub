@@ -59,6 +59,28 @@ export function BillingStatusTag({ status }: { status: string }) {
   return <Tag>{status}</Tag>;
 }
 
+/**
+ * 账户状态由管理员控制（docs/api.md「管理端账户状态」），与计费状态互相独立。认不出的值原样显示，
+ * 不猜；字段缺了显示「未知」。
+ */
+export function AccountStatusTag({ status }: { status: string | undefined }) {
+  const { t } = useTranslation();
+  switch (status) {
+    case undefined:
+      return <Tag>{t("customers.accountStatus.unknown")}</Tag>;
+    case "PENDING_ACTIVATION":
+      return <Tag color="gold">{t("customers.accountStatus.pendingActivation")}</Tag>;
+    case "ENABLED":
+      return <Tag color="green">{t("customers.accountStatus.enabled")}</Tag>;
+    case "DISABLED":
+      return <Tag color="red">{t("customers.accountStatus.disabled")}</Tag>;
+    case "CLOSED":
+      return <Tag>{t("customers.accountStatus.closed")}</Tag>;
+    default:
+      return <Tag>{status}</Tag>;
+  }
+}
+
 export function CustomerListPage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -95,6 +117,11 @@ export function CustomerListPage() {
       key: "billing_status",
       title: t("customers.field.billingStatus"),
       render: (_: unknown, customer) => <BillingStatusTag status={customer.billing_status} />,
+    },
+    {
+      key: "account_status",
+      title: t("customers.field.accountStatus"),
+      render: (_: unknown, customer) => <AccountStatusTag status={customer.account_status} />,
     },
     {
       key: "created_at",

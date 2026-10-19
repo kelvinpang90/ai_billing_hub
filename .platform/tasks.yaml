@@ -4922,7 +4922,7 @@ tasks:
     title: 管理端前端：客户账户状态的显示与启用停用操作
     purpose: >-
       补 Phase 1「管理端客户管理」缺的账户状态前端：AIH-TASK-020（设计闸门 #136 已批准 v2）已经提供客户对象的 account_status 字段与 POST /api/v1/admin/customers/{customer_id}/account-status 接口，前端既不显示、也没有入口。客户列表加一列、详情页显示账户状态并提供启用 / 停用操作（必填原因、停用二次确认）。只做前端，外加验收脚本的一个只读步骤。不含低余额阈值、钱包流水与关户。
-    status: ready
+    status: done
     acceptance_criteria:
       - '语义一律以 docs/api.md 的「管理端账户状态」一节与客户对象的 account_status 字段说明为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/、planning-v1 块与 docs/TODO.md'
       - 'frontend/src/api/adminCustomers.ts：CustomerSummary 加 account_status（PENDING_ACTIVATION、ENABLED、DISABLED、CLOSED 四个取值的联合类型）；新增 postAccountStatus(customerId, body)，请求体只有 account_status（类型上只收 ENABLED / DISABLED）与 reason，客户 id 的路径编码沿用同文件现有函数；不自动重试'
@@ -4991,7 +4991,7 @@ tasks:
     title: 钱包流水第一层：账本按来源分页用的索引迁移
     purpose: >-
       按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「数据库」与 §8 第 1 步：迁移 alembic/versions/20261018_0023_wallet_ledger_reference_index.py（revision 0023_wallet_ledger_reference_index，接在 0022_tax_policy 之后）给 wallet_transactions 加非唯一索引 ix_wallet_transactions_tenant_reference_sequence (tenant_id, reference_type, wallet_sequence)，模型同步，表结构文档补上。只加这一个索引，不改列、约束、触发器与数据；查询与接口属于 AIH-TASK-084，前端属于 AIH-TASK-085。
-    status: ready
+    status: done
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）逐条一致，以 §2「数据库」、§7 最后两行与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '迁移 0023：upgrade 只建这一个索引（列顺序 tenant_id、reference_type、wallet_sequence，非唯一），downgrade 只删它；不改列、约束、触发器，不动数据；文件头写 §132 第 13 条分析（写法照 0022 的文件头，说明 MySQL 8 在线加索引不阻塞写入）'
@@ -5039,12 +5039,12 @@ tasks:
   - id: AIH-TASK-084
     title: 钱包流水第二层：管理端按客户查看账本的只读接口
     purpose: >-
-      按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「接口」「查询」与 §8 第 2 步：app/repositories/wallet.py 的 list_transactions_for_tenant 支持按 reference_type 筛选，并带出用量事件的 public_id 与操作者邮箱；新增 GET /api/v1/admin/customers/{customer_id}/wallet/transactions（游标 before_sequence、page_size、可选 reference_type，最新在前）；docs/api.md 记新接口。只读，不写任何表；索引由 AIH-TASK-083 加，前端属于 AIH-TASK-085。
-    status: ready
+      按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v2）§2「接口」「查询」与 §8 第 2 步：app/repositories/wallet.py 的 list_transactions_for_tenant 支持按 reference_type 筛选，并带出用量事件的 public_id 与操作者邮箱；新增 GET /api/v1/admin/customers/{customer_id}/wallet/transactions（游标 before_sequence、page_size、可选 reference_type，最新在前）；docs/api.md 记新接口。只读，不写任何表；索引由 AIH-TASK-083 加，前端属于 AIH-TASK-085。
+    status: done
     depends_on:
       - AIH-TASK-083
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）逐条一致，以 §2「接口」「查询」「事务边界、时间、金额」、§3、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v2）逐条一致，以 §2「接口」「查询」「事务边界、时间、金额」、§3、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '接口：查询参数的范围与取值按设计 §2，非法时 422 VALIDATION_ERROR、文案只列字段名不回显值（参数由 FastAPI 在处理函数之前校验）；处理函数第一条语句调用 require_admin；客户不存在 404 CUSTOMER_NOT_FOUND；成功时 data 恰好 items、page_size、next_before_sequence 三个键，每项恰好设计 §2 的 12 个键；取 page_size + 1 行判断有没有下一页'
       - 'repository：取一页是一条 SELECT，租户只来自路径客户；LEFT JOIN usage_events（经 wallet_transaction_id）与 users；按 wallet_sequence 倒序；不加锁、不写；不读不返回 metadata_json 与成本、毛利；函数内 200 的硬上限保留；金额经现有 money_text 格式化成 8 位小数字符串，不经 float'
       - '新接口加进 tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES，该文件路由枚举用例需要的其余登记照现有写法补；匿名 401、CUSTOMER 403，都不查账本'
@@ -5094,8 +5094,8 @@ tasks:
   - id: AIH-TASK-085
     title: 钱包流水第三层：管理端客户详情页的钱包流水面板
     purpose: >-
-      按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v1）§2「前端」：调用 AIH-TASK-084 的接口，在管理端客户详情页加钱包流水面板（来源筛选、按序号游标往旧翻页、AI 用量行跳到用量事件详情）；勾掉 docs/TODO.md Phase 1 的「Wallet」。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+      按 docs/design/AIH-TASK-083-wallet-ledger-view.md（设计闸门 #351 已批准 v2）§2「前端」：调用 AIH-TASK-084 的接口，在管理端客户详情页加钱包流水面板（来源筛选、按序号游标往旧翻页、AI 用量行跳到用量事件详情）；勾掉 docs/TODO.md Phase 1 的「Wallet」。只做前端，外加验收脚本的一个只读步骤。
+    status: done
     depends_on:
       - AIH-TASK-082
       - AIH-TASK-084

@@ -28,7 +28,7 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.auth import AuditAction, AuditLog, DomainOutbox, OutboxStatus
+from app.models.auth import AuditAction, AuditLog, DomainOutbox, OutboxStatus, User
 from app.models.base import MONEY_PRECISION, MONEY_SCALE
 from app.models.tenancy import (
     BillingStatus,
@@ -36,6 +36,7 @@ from app.models.tenancy import (
     Tenant,
     compose_effective_status,
 )
+from app.models.usage import UsageEvent
 from app.models.wallet import (
     ADJUSTMENT_REFERENCE_TYPES,
     CREDIT_TYPES,
@@ -425,22 +426,70 @@ def post_transaction(
     return PostResult(transaction=row, replayed=False)
 
 
+@dataclass(frozen=True)
+class LedgerRow:
+    """One ledger row as the admin ledger view reads it (design gate #351 v2 §2「查询」).
+
+    只有选出来的这几列：不读 `metadata_json`，也不碰用量事件的成本与毛利（INV-7）。
+    `usage_event_public_id` 经 `usage_events.wallet_transaction_id`（唯一）反查，查不到是
+    `None`；`created_by_email` 是操作者的邮箱，系统写入的行是 `None`。
+    """
+
+    public_id: str
+    wallet_sequence: int
+    transaction_type: str
+    amount: Decimal
+    balance_before: Decimal
+    balance_after: Decimal
+    reference_type: str
+    reference_id: str
+    usage_event_public_id: str | None
+    description: str | None
+    created_by_email: str | None
+    created_at: dt.datetime
+
+
 def list_transactions_for_tenant(
     session: Session,
     tenant_id: int,
     *,
     limit: int,
     before_sequence: int | None = None,
-) -> list[WalletTransaction]:
-    """Newest first. Keyset paging: pass the last sequence seen as `before_sequence`."""
+    reference_type: ReferenceType | None = None,
+) -> list[LedgerRow]:
+    """Newest first. Keyset paging: pass the last sequence seen as `before_sequence`.
+
+    一条 SELECT，不加锁、不写。两个 LEFT JOIN 都按唯一键各查一行，所以行数不会变多。
+    """
     if limit < 1:
         raise ValueError("limit must be at least 1")
-    statement = select(WalletTransaction).where(WalletTransaction.tenant_id == tenant_id)
+    statement = (
+        select(
+            WalletTransaction.public_id,
+            WalletTransaction.wallet_sequence,
+            WalletTransaction.transaction_type,
+            WalletTransaction.amount,
+            WalletTransaction.balance_before,
+            WalletTransaction.balance_after,
+            WalletTransaction.reference_type,
+            WalletTransaction.reference_id,
+            UsageEvent.public_id.label("usage_event_public_id"),
+            WalletTransaction.description,
+            User.email.label("created_by_email"),
+            WalletTransaction.created_at,
+        )
+        .select_from(WalletTransaction)
+        .outerjoin(UsageEvent, UsageEvent.wallet_transaction_id == WalletTransaction.id)
+        .outerjoin(User, User.id == WalletTransaction.created_by)
+        .where(WalletTransaction.tenant_id == tenant_id)
+    )
+    if reference_type is not None:
+        statement = statement.where(WalletTransaction.reference_type == reference_type)
     if before_sequence is not None:
         statement = statement.where(WalletTransaction.wallet_sequence < before_sequence)
     newest_first = WalletTransaction.wallet_sequence.desc()
     statement = statement.order_by(newest_first).limit(min(limit, MAX_PAGE_SIZE))
-    return list(session.execute(statement).scalars().all())
+    return [LedgerRow(**row._mapping) for row in session.execute(statement)]
 
 
 def verify_wallet(session: Session, tenant_id: int) -> list[str]:

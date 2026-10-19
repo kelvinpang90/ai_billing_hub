@@ -10,7 +10,14 @@
  * 钱包卡片上的「Adjust balance」打开手工调账表单（`features/wallet/AdjustmentModal`，
  * AIH-TASK-017）。调账成功后由表单让这里的详情过期重读，余额与计费状态以后端为准。
  *
- * 没有账户状态、低余额阈值、成本或毛利 —— 后端没有这些字段，这里也不预留。
+ * 钱包卡片下面是钱包流水面板（`features/wallet/WalletTransactionsPanel`，AIH-TASK-085）；调账成功后
+ * 表单也让这位客户的流水过期重读。
+ *
+ * 资料卡显示账户状态（AIH-TASK-082），并按当前状态给「Disable account」或「Enable account」：
+ * 打开 `AccountStatusModal`，成功后由弹窗让这里的详情过期重读。`PENDING_ACTIVATION` 与 `CLOSED`
+ * 不给按钮；跃迁规则全在后端。
+ *
+ * 没有低余额阈值、成本或毛利 —— 后端没有这些字段，这里也不预留。
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -35,6 +42,7 @@ import {
   customerDetailQueryKey,
   getCustomer,
   updateCustomer,
+  type AccountStatusTarget,
   type CustomerDetail,
   type CustomerPatch,
   type Wallet,
@@ -44,6 +52,8 @@ import { DateTimeText } from "../../components/DateTimeText";
 import { MoneyText } from "../../components/MoneyText";
 import { ROUTES } from "../../routes/paths";
 import { AdjustmentModal } from "../wallet/AdjustmentModal";
+import { WalletTransactionsPanel } from "../wallet/WalletTransactionsPanel";
+import { AccountStatusModal, accountStatusTarget } from "./AccountStatusModal";
 import {
   CustomerErrorAlert,
   CustomerForm,
@@ -51,7 +61,7 @@ import {
   toPatch,
   type CustomerFormValues,
 } from "./CustomerForm";
-import { BillingStatusTag } from "./CustomerListPage";
+import { AccountStatusTag, BillingStatusTag } from "./CustomerListPage";
 import { InternalUsagePanel } from "./InternalUsagePanel";
 import { ProjectsPanel } from "./ProjectsPanel";
 
@@ -67,6 +77,7 @@ export function CustomerDetailPage() {
   const [editing, setEditing] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   const [adjusting, setAdjusting] = useState(false);
+  const [changingStatus, setChangingStatus] = useState<AccountStatusTarget | null>(null);
   // 与建客户同一个理由：双击时两次 onFinish 可能都赶在按钮禁用之前。
   const inFlight = useRef(false);
 
@@ -126,6 +137,7 @@ export function CustomerDetailPage() {
   }
 
   const current = customer.data;
+  const statusTarget = accountStatusTarget(current.account_status);
 
   const startEditing = (): void => {
     update.reset();
@@ -173,7 +185,21 @@ export function CustomerDetailPage() {
       ) : (
         <Card
           title={current.company_name}
-          extra={<Button onClick={startEditing}>{t("customers.detail.edit")}</Button>}
+          extra={
+            <Space>
+              {statusTarget === "DISABLED" ? (
+                <Button danger onClick={() => setChangingStatus("DISABLED")}>
+                  {t("customers.accountStatus.disable")}
+                </Button>
+              ) : null}
+              {statusTarget === "ENABLED" ? (
+                <Button onClick={() => setChangingStatus("ENABLED")}>
+                  {t("customers.accountStatus.enable")}
+                </Button>
+              ) : null}
+              <Button onClick={startEditing}>{t("customers.detail.edit")}</Button>
+            </Space>
+          }
         >
           <ProfileDescriptions customer={current} />
         </Card>
@@ -186,6 +212,9 @@ export function CustomerDetailPage() {
         <WalletDescriptions wallet={current.wallet} />
       </Card>
 
+      {/* key：换了客户，游标与来源筛选都从头来。 */}
+      <WalletTransactionsPanel key={`wallet-${current.id}`} customerId={current.id} />
+
       {current.billing_mode === "INTERNAL_METERED_ONLY" ? (
         <InternalUsagePanel customerId={current.id} />
       ) : null}
@@ -194,6 +223,15 @@ export function CustomerDetailPage() {
           详见 AdjustmentModal 的文件头注释。 */}
       {adjusting ? (
         <AdjustmentModal customer={current} onClose={() => setAdjusting(false)} />
+      ) : null}
+
+      {/* 只在打开时挂载、关闭即卸载：每次打开都是空表单。 */}
+      {changingStatus !== null ? (
+        <AccountStatusModal
+          customer={current}
+          target={changingStatus}
+          onClose={() => setChangingStatus(null)}
+        />
       ) : null}
 
       {/* key：换了客户，页码与建项目表单都从头来。 */}
@@ -230,6 +268,11 @@ function ProfileDescriptions({ customer }: { customer: CustomerDetail }) {
       key: "billing_status",
       label: t("customers.field.billingStatus"),
       children: <BillingStatusTag status={customer.billing_status} />,
+    },
+    {
+      key: "account_status",
+      label: t("customers.field.accountStatus"),
+      children: <AccountStatusTag status={customer.account_status} />,
     },
     {
       key: "billing_mode",

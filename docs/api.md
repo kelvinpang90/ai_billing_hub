@@ -7,6 +7,7 @@
 
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
+- [管理端钱包流水](#管理端钱包流水)（AIH-TASK-084）：序号游标分页，是下面「分页」的例外
 - [管理端集成 API 凭据](#管理端集成-api-凭据)与[集成请求签名](#集成请求签名)（AIH-TASK-012）
 - [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥)与[状态 webhook 签名](#状态-webhook-签名)（AIH-TASK-019）
 - [管理端项目集成状态与状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址)、[状态 webhook 的接收与对账契约](#状态-webhook-签名)与[集成：有效 AI 服务状态](#集成有效-ai-服务状态)的新字段（AIH-TASK-050）
@@ -93,6 +94,8 @@
 ```
 
 `total` 是总条数。页码超过末页时 `items` 为空，`total` 照报。
+
+例外：[管理端钱包流水](#管理端钱包流水)用序号游标（`before_sequence`），没有 `page` 与 `total`，理由见那一节。
 
 ---
 
@@ -434,6 +437,97 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
   响应里没有第一次那一笔的任何字段。
 - 任何一步失败（包括提交失败）整个事务回滚，账本、审计、计费状态、出站事件都不留下。
   带同一个幂等键重发即可：若其实已经提交，重发走重放。
+
+---
+
+## 管理端钱包流水
+
+设计依据：设计闸门 #351 `APPROVED: design v2`，全文见 [design/AIH-TASK-083-wallet-ledger-view.md](design/AIH-TASK-083-wallet-ledger-view.md)（spec §60、§78、§108）。实现登记为 AIH-TASK-084。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/customers/{customer_id}/wallet/transactions` | 200，一页账本行 | 401 / 403 / 404 / 422 / 500 / 503 |
+
+只有 ADMIN 能调。`{customer_id}` 是客户的 `id`（`public_id`），租户只来自路径。只读：不写账本、不动余额、不写审计。
+
+### 查询参数
+
+| 参数 | 规则 |
+| --- | --- |
+| `page_size` | 1–100，默认 20；超出 422（与「分页」同一范围） |
+| `before_sequence` | 可选，整数 1 – 9 223 372 036 854 775 807；只返回 `wallet_sequence < before_sequence` 的行。省略 = 从最新一行开始。超出 422 |
+| `reference_type` | 可选，`USAGE_EVENT` / `PAYMENT` / `ADMIN_ADJUSTMENT` / `REBILL` / `SYSTEM` 之一，大小写敏感；其余 422 |
+
+未知查询参数不报错（与其他列表接口一致）。参数由框架在鉴权**之前**校验，所以没带令牌、参数又不合法的请求拿到 422；文案只列字段名、不回显值。
+
+`reference_type` 是来源，对应 spec §60 的分类：`PAYMENT` = 充值，`USAGE_EVENT` = 用量扣费，`ADMIN_ADJUSTMENT` = 调账（`ADJUSTMENT_CREDIT`、`ADJUSTMENT_DEBIT`、`BONUS`、`REFUND_ADJUSTMENT` 四种类型），`REBILL` = rebill 更正，`SYSTEM` = 系统更正。
+
+### 响应
+
+```json
+{
+  "items": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "wallet_sequence": 42,
+      "transaction_type": "AI_USAGE",
+      "amount": "-0.04120000",
+      "balance_before": "12.50000000",
+      "balance_after": "12.45880000",
+      "reference_type": "USAGE_EVENT",
+      "reference_id": "00000000-0000-7000-8000-000000000002",
+      "usage_event_id": "00000000-0000-4000-8000-000000000003",
+      "description": null,
+      "created_by_email": null,
+      "created_at": "2026-10-18T08:30:00"
+    }
+  ],
+  "page_size": 20,
+  "next_before_sequence": 23
+}
+```
+
+（示例只列了一页 20 行里的第一行；这一页最后一行的序号是 23。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `items` | 最新在前，按 `wallet_sequence` 倒序 |
+| `id` | 账本行的 `public_id`（与调账响应的 `id` 同一个值） |
+| `wallet_sequence` | 这一笔在钱包账本里的序号，从 1 起、连续递增 |
+| `transaction_type` | 九种类型之一（`TOPUP`、`AI_USAGE`、`ADJUSTMENT_CREDIT`、`ADJUSTMENT_DEBIT`、`REBILL_CREDIT`、`REBILL_DEBIT`、`REFUND_ADJUSTMENT`、`BONUS`、`SYSTEM_CORRECTION`） |
+| `amount` / `balance_before` / `balance_after` | 恰好 8 位小数的字符串，带符号，原样来自 `DECIMAL(20,8)` 列，不经浮点 |
+| `reference_type` | 来源，见上 |
+| `reference_id` | 库里的原值：用量扣费是上报的 `event_id`，调账是幂等键 |
+| `usage_event_id` | 对应用量事件的 `public_id`，可直接用于 `GET /api/v1/admin/usage-events/{usage_event_id}`。只有 `USAGE_EVENT` 来源有；查不到对应事件（数据缺陷）时为 `null`，该行其余字段照常返回 |
+| `description` | 库里的原因（调账、系统更正必有，AI 用量为空） |
+| `created_by_email` | 操作者的邮箱；系统写入的行为 `null` |
+| `created_at` | 记账时刻，UTC，不带时区 |
+| `page_size` | 本次请求的 `page_size` |
+| `next_before_sequence` | 还有更早的行时 = 本页**最后一行**的 `wallet_sequence`，原样作为下一页的 `before_sequence`；没有更多时 `null` |
+
+每项恰好上面 12 个键。响应里没有内部自增 id、`tenant_id`、`wallet_id`、`created_by`（内部用户 id）、`metadata_json`，也没有任何成本或毛利。
+
+### 翻页
+
+1. 第一页不带 `before_sequence`。
+2. 下一页把上一页的 `next_before_sequence` 原样作为 `before_sequence`；`next_before_sequence` 为 `null` 就是最后一页。
+3. 带 `reference_type` 时序号不连续，游标照样只取本页最后一行的序号，不要用「最后一行 − 1」之类自己推算。
+4. 「回到最新」= 不带 `before_sequence` 重新取第一页。
+
+翻页之间新记的账序号都更大，只会出现在最新那一端；往旧翻的页不重复、不遗漏。
+
+**为什么不用「分页」的 `page` / `total`**（设计 §9）：每个 AI 请求一行账本，大客户的账本是 spec §108 说的大表。`OFFSET` 要先扫过前面所有行，`total` 每次要数全部匹配行；新行插入时按页码翻还会重复上一页的末尾几行。序号游标在任意深度、带不带筛选都是索引上的范围扫描。不带筛选时总行数等于钱包的 `version`（客户详情已返回），需要时从那里取。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌或令牌无效 |
+| 403 | `ADMIN_REQUIRED` | 不是管理员 |
+| 404 | `CUSTOMER_NOT_FOUND` | 路径里的客户不存在 |
+| 422 | `VALIDATION_ERROR` | 查询参数超出上面的规则 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 503 | `DATABASE_UNAVAILABLE` 等 | 数据库不可用，沿用通用处理 |
 
 ---
 

@@ -27,6 +27,8 @@ const api = vi.hoisted(() => ({
   // 项目区块（AIH-TASK-016）挂在详情页上；它自己的用例在 ProjectsPanel.test.tsx。
   listProjects: vi.fn(),
   createProject: vi.fn(),
+  // 启用 / 停用账户（AIH-TASK-082）；弹窗自己的用例在 AccountStatusModal.test.tsx。
+  postAccountStatus: vi.fn(),
 }));
 
 vi.mock("../../api/adminCustomers", async () => {
@@ -48,6 +50,18 @@ vi.mock("../../api/walletAdjustments", async () => {
     "../../api/walletAdjustments",
   );
   return { ...actual, ...wallet };
+});
+
+// 钱包流水（AIH-TASK-085）挂在钱包卡片下面；面板自己的用例在 wallet/WalletTransactionsPanel.test.tsx。
+const transactions = vi.hoisted(() => ({
+  listWalletTransactions: vi.fn(),
+}));
+
+vi.mock("../../api/walletTransactions", async () => {
+  const actual = await vi.importActual<typeof import("../../api/walletTransactions")>(
+    "../../api/walletTransactions",
+  );
+  return { ...actual, ...transactions };
 });
 
 const FIRST_KEY = "00000000-0000-4000-8000-000000000001";
@@ -94,6 +108,7 @@ function customer(overrides: Partial<CustomerDetail> = {}): CustomerDetail {
     email: "ops@example.com",
     phone: "+60 3-0000 0000",
     billing_status: "ACTIVE",
+    account_status: "ENABLED",
     billing_mode: "PREPAID",
     ai_service_enabled: true,
     status_version: 3,
@@ -117,6 +132,16 @@ function renderDetail() {
   );
 }
 
+/** 资料卡里「Account status」一项的值（带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）。 */
+async function accountStatusCell(): Promise<HTMLElement> {
+  const label = await screen.findByText("Account status");
+  const cell = label.closest("th")?.nextElementSibling;
+  if (!(cell instanceof HTMLElement)) {
+    throw new Error("the account status has no value cell");
+  }
+  return cell;
+}
+
 async function openEditor(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole("button", { name: "Edit" }));
   return screen.getByRole("button", { name: /Save changes/ });
@@ -125,6 +150,11 @@ async function openEditor(user: ReturnType<typeof userEvent.setup>) {
 beforeEach(() => {
   vi.clearAllMocks();
   api.listProjects.mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 });
+  transactions.listWalletTransactions.mockResolvedValue({
+    items: [],
+    page_size: 20,
+    next_before_sequence: null,
+  });
 });
 
 afterEach(() => {
@@ -152,6 +182,71 @@ describe("CustomerDetailPage", () => {
     expect(screen.getByText("MYR")).toBeInTheDocument();
     expect(screen.getByText("MYR 1,234,567.12345678")).toBeInTheDocument();
     expect(screen.getByText("7")).toBeInTheDocument();
+  });
+
+  it.each([
+    { status: "ENABLED", label: "Enabled" },
+    { status: "DISABLED", label: "Disabled" },
+    { status: "PENDING_ACTIVATION", label: "Pending activation" },
+    { status: "CLOSED", label: "Closed" },
+    // 后端以后加了新值：原样显示，不崩。
+    { status: "FROZEN", label: "FROZEN" },
+  ])("shows the account status $status on the profile card", async ({ status, label }) => {
+    api.getCustomer.mockResolvedValue({ ...customer(), account_status: status });
+
+    renderDetail();
+
+    const cell = await accountStatusCell();
+    expect(cell).toHaveTextContent(label);
+  });
+
+  it.each([
+    { status: "ENABLED", shown: "Disable account", hidden: ["Enable account"] },
+    { status: "DISABLED", shown: "Enable account", hidden: ["Disable account"] },
+    { status: "PENDING_ACTIVATION", shown: null, hidden: ["Disable account", "Enable account"] },
+    { status: "CLOSED", shown: null, hidden: ["Disable account", "Enable account"] },
+  ])("offers only the matching account action for $status", async ({ status, shown, hidden }) => {
+    api.getCustomer.mockResolvedValue({ ...customer(), account_status: status });
+
+    renderDetail();
+
+    await screen.findByRole("button", { name: "Edit" });
+    if (shown !== null) {
+      expect(screen.getByRole("button", { name: shown })).toBeInTheDocument();
+    }
+    for (const name of hidden) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+  });
+
+  it("disables the account after confirmation and shows the status read back from the backend", async () => {
+    const user = userEvent.setup();
+    api.getCustomer
+      .mockResolvedValueOnce(customer())
+      .mockResolvedValue(customer({ account_status: "DISABLED", status_version: 4 }));
+    api.postAccountStatus.mockResolvedValue(customer({ account_status: "DISABLED", status_version: 4 }));
+    renderDetail();
+
+    await user.click(await screen.findByRole("button", { name: "Disable account" }));
+    await user.click(screen.getByLabelText("Reason"));
+    await user.paste("Contract paused");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(api.postAccountStatus).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "Confirm and disable" }));
+
+    await waitFor(() => {
+      expect(api.postAccountStatus).toHaveBeenCalledWith(CUSTOMER_ID, {
+        account_status: "DISABLED",
+        reason: "Contract paused",
+      });
+    });
+    // 详情重读了一次；资料卡换成后端给的新状态，按钮也跟着换。
+    await waitFor(() => {
+      expect(api.getCustomer).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByRole("button", { name: "Enable account" })).toBeInTheDocument();
+    expect(await accountStatusCell()).toHaveTextContent("Disabled");
+    expect(screen.queryByRole("button", { name: "Disable account" })).not.toBeInTheDocument();
   });
 
   it("shows estimated cost and simulated price for an internal tenant", async () => {
@@ -319,6 +414,35 @@ describe("CustomerDetailPage", () => {
     expect(api.listProjects).toHaveBeenCalledWith(CUSTOMER_ID, 1, 20, expect.anything());
   });
 
+  it("shows the customer's wallet transactions below the wallet", async () => {
+    api.getCustomer.mockResolvedValue(customer());
+
+    renderDetail();
+
+    expect(
+      await screen.findByRole("region", { name: "Wallet transactions" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("This customer has no wallet transactions yet."),
+    ).toBeInTheDocument();
+    expect(transactions.listWalletTransactions).toHaveBeenCalledWith(
+      CUSTOMER_ID,
+      { pageSize: 20, beforeSequence: null, referenceType: null },
+      expect.anything(),
+    );
+  });
+
+  it("does not ask for the wallet transactions of a customer that does not exist", async () => {
+    api.getCustomer.mockRejectedValue(
+      new ApiError("CUSTOMER_NOT_FOUND", "The customer does not exist.", "req-404"),
+    );
+
+    renderDetail();
+
+    expect(await screen.findByText("Customer not found")).toBeInTheDocument();
+    expect(transactions.listWalletTransactions).not.toHaveBeenCalled();
+  });
+
   it("does not ask for projects of a customer that does not exist", async () => {
     api.getCustomer.mockRejectedValue(
       new ApiError("CUSTOMER_NOT_FOUND", "The customer does not exist.", "req-404"),
@@ -353,6 +477,10 @@ describe("CustomerDetailPage", () => {
     // 详情重读了一次，钱包卡片换成后端给的新余额。
     await waitFor(() => {
       expect(api.getCustomer).toHaveBeenCalledTimes(2);
+    });
+    // 流水也重读了一次：新的一笔要出现在最新一页。
+    await waitFor(() => {
+      expect(transactions.listWalletTransactions).toHaveBeenCalledTimes(2);
     });
     await user.click(screen.getByRole("button", { name: "Done" }));
     expect(await screen.findByText("MYR 1,234,546.62345678")).toBeInTheDocument();

@@ -244,6 +244,14 @@ class WalletTransaction(Base):
         ),
         # 按租户分页查流水（keyset，按序号倒序）。
         Index("ix_wallet_transactions_tenant_sequence", "tenant_id", "wallet_sequence"),
+        # 按来源（reference_type）筛选时的键集分页：等值前缀加有序的序号，倒序取一页即停
+        # （迁移 0023，设计闸门 #351 v1 §2）。
+        Index(
+            "ix_wallet_transactions_tenant_reference_sequence",
+            "tenant_id",
+            "reference_type",
+            "wallet_sequence",
+        ),
         CheckConstraint(ARITHMETIC_CHECK, name="ck_wallet_transactions_arithmetic"),
         CheckConstraint(SIGN_CHECK, name="ck_wallet_transactions_sign"),
         CheckConstraint(REFERENCE_CHECK, name="ck_wallet_transactions_reference_type"),

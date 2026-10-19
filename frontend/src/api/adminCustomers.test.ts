@@ -10,11 +10,13 @@ import { AxiosError, AxiosHeaders, type AxiosResponse } from "axios";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  AccountStatusError,
   createCustomer,
   createProject,
   getCustomer,
   listCustomers,
   listProjects,
+  postAccountStatus,
   updateCustomer,
 } from "./adminCustomers";
 import { ApiError, client } from "./client";
@@ -151,6 +153,75 @@ describe("admin customer requests", () => {
       message: "The customer does not exist.",
       requestId: "req-404",
     });
+  });
+
+  it("posts the account status change to the customer's account-status path with exactly the body", async () => {
+    const post = vi
+      .spyOn(client, "post")
+      .mockResolvedValue({ ...envelope({ id: CUSTOMER_ID }), status: 200 });
+
+    await postAccountStatus(CUSTOMER_ID, { account_status: "DISABLED", reason: "Contract paused" });
+
+    // 请求体只有这两个字段：客户只来自路径，没有 status_version 之类。
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith(`/api/v1/admin/customers/${CUSTOMER_ID}/account-status`, {
+      account_status: "DISABLED",
+      reason: "Contract paused",
+    });
+  });
+
+  it("escapes the customer id in the account-status path too", async () => {
+    const post = vi
+      .spyOn(client, "post")
+      .mockResolvedValue({ ...envelope({ id: CUSTOMER_ID }), status: 200 });
+
+    await postAccountStatus("a/../b", { account_status: "ENABLED", reason: "Paid up" });
+
+    expect(post).toHaveBeenCalledWith("/api/v1/admin/customers/a%2F..%2Fb/account-status", {
+      account_status: "ENABLED",
+      reason: "Paid up",
+    });
+  });
+
+  it("keeps the HTTP status of a rejected account status change and does not retry", async () => {
+    const response = {
+      data: {
+        success: false,
+        data: null,
+        error: { code: "ACCOUNT_STATUS_TRANSITION_INVALID", message: "The account is closed." },
+        request_id: "req-409",
+      },
+      status: 409,
+      statusText: "Conflict",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    } satisfies AxiosResponse;
+    const post = vi
+      .spyOn(client, "post")
+      .mockRejectedValue(
+        new AxiosError("Request failed", "ERR_BAD_REQUEST", undefined, undefined, response),
+      );
+
+    const failure = postAccountStatus(CUSTOMER_ID, { account_status: "ENABLED", reason: "Paid up" });
+
+    await expect(failure).rejects.toBeInstanceOf(AccountStatusError);
+    await expect(failure).rejects.toMatchObject({
+      code: "ACCOUNT_STATUS_TRANSITION_INVALID",
+      requestId: "req-409",
+      status: 409,
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a network failure of the account status change with no HTTP status", async () => {
+    const post = vi
+      .spyOn(client, "post")
+      .mockRejectedValue(new AxiosError("Network Error", "ERR_NETWORK"));
+
+    const failure = postAccountStatus(CUSTOMER_ID, { account_status: "DISABLED", reason: "Paused" });
+
+    await expect(failure).rejects.toMatchObject({ code: "NETWORK_ERROR", status: null });
+    expect(post).toHaveBeenCalledTimes(1);
   });
 
   it("turns a 422 envelope into an ApiError carrying the backend message", async () => {
