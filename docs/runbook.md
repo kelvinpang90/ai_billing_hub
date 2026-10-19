@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-10-18
+> 最后更新：2026-10-19
 
 ---
 
@@ -1030,6 +1030,102 @@ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/j
   主密钥只能放回原来那份（见「主密钥」一节）
 - **不要退役 `ACTIVE` 签名密钥却不启用新的**：项目立刻变成 `missing secret`，推送停止
 - **不要把完整地址写进工单、聊天、截图或日志查询结果**：路径里可能带集成方的令牌；审计里也只记主机名
+
+---
+
+## 税务政策：首条政策的发布（只做一次）
+
+**首次编写：2026-10-19（AIH-TASK-079）。依据：设计闸门 #332 v3 §2「接口：CLI」、§5、§6、§8 部署顺序第 4、5 步；
+[ADR-0008](adr/ADR-0008-sst-tax-treatment.md) 第 5 节与「收口条件」。**
+
+这一节不是故障场景，是一次性的运维步骤，所以不套五节，写 **什么时候做 · 执行前核对 · 怎么做 · 期望结果与失败处理 ·
+核对 · 做完之后 · 绝不能做什么**。部署侧的位置见 [deployment.md](deployment.md) §9.8。
+
+⚠️ 下面的 `<部署目录>`、`<管理员邮箱>` 都是占位符：真实主机名、目录与邮箱不进仓库。
+
+### 什么时候做
+
+AIH-TASK-077、080、078、079 都已合并并自动部署到生产之后，**整个生产生命周期只做一次**。由 Kelvin 或经 Kelvin
+授权的会话在 VPS 上执行。部署本身不会写入任何政策：合并之后 `tax_policy_versions` 一直是空表，直到有人运行这条命令。
+
+它写入的是 MY / SST 的第一条 `PUBLISHED` 政策：未注册 SST、不收税、`rate` 为空，生效起点固定为
+`2026-10-16T16:00:00` UTC（= 吉隆坡 2026-10-17 00:00），说明文字照 ADR-0008 第 5 节。内容是代码里的常量，命令没有
+任何参数能改它。
+
+### 执行前核对
+
+1. **审批人是决策人自己的 ADMIN 账号**，状态 `ACTIVE`。账号还没有的话，先用 `create-admin` 建好并完成 2FA 注册。
+2. ⚠️ **不得用生产上的验收专用管理员**（浏览器验收沿用的那个夹具 ADMIN 账号，见 `docs/TODO.md`「已阻塞」第一条）：
+   `approved_by` 会永远留在这条政策上，而那个账号在第一个真实客户进生产之前就要降权或撤销。
+3. **邮箱逐字核对**，对着决策人登录管理端时用的邮箱一个字一个字比。⚠️ **写错不可改**：填成另一个有效的 ADMIN
+   时命令照样成功，`approved_by` 就是错的人，已发布的政策永远不能改（INV-6）；只能等以后的管理端路径退役并重发
+   （另一个设计闸门）。填成不存在 / 非 ADMIN / 已停用的账号时命令会拒绝、什么都不写，改正后重跑即可。
+
+### 怎么做
+
+```bash
+cd <部署目录>
+docker compose exec -T api python -m app.cli publish-initial-tax-policy --approved-by-email '<管理员邮箱>'
+echo "exit=$?"
+```
+
+- 命令**从不提示输入**，也不读标准输入，所以 `-T` 能跑；没有「确认吗？」这一步 —— 防手滑全靠上面的核对
+- 唯一的参数是 `--approved-by-email`；邮箱先去首尾空白、转小写（与登录同一个规则）再匹配
+- stdout 只有一行 `public_id`；说明与错误都在 stderr
+
+### 期望结果与失败处理
+
+| 退出码与输出 | 含义 | 下一步 |
+| --- | --- | --- |
+| **0**，stdout 一行 `public_id`，stderr `Published tax policy MY/SST effective from 2026-10-16T16:00:00 UTC.` | 发布成功：一条政策 + `TAX_POLICY_CREATE`、`TAX_POLICY_PUBLISH` 两条审计，同一事务 | 记下 `public_id`，做下面的「核对」 |
+| **1**，stderr `A tax policy version already exists; nothing was written.` | 表里已经有政策（无论什么状态），这次什么都没写 | 已经发布过：**不要再做任何事**，按「核对」取 `public_id`。核对发现表里那一行不是预期的已发布政策（例如有人绕过服务写了草稿）→ 停下人工排查，**不得 `TRUNCATE`** |
+| **1**，stderr `No active ADMIN account for <归一后的邮箱>; nothing was written.` | 邮箱没有账号、不是 ADMIN 或不是 `ACTIVE`（三种不区分），什么都没写 | 回到「执行前核对」，改正后重跑 |
+| **2**，stderr 是邮箱格式的原因，或 argparse 用法 | 邮箱格式不对 / 漏了 `--approved-by-email`；没有连库 | 改参数后重跑 |
+| **其他非零**，stderr 是数据库异常（不带 SQL 参数），外加 `If the error happened at commit, the policy may already be published; run the same command again to find out.` | 数据库错误。若出在 `COMMIT` 之前，整体回滚、什么都没写；若 `COMMIT` 已发出而确认丢了，**无法确定**是否已提交 —— 两者之一，不会出现半个 | **原样再运行一次**（同一条命令、同一个邮箱），见下 |
+| 非零，异常不是数据库错误（例如复查失败 `TaxPolicyRecheckFailed`、`ValueError`） | 代码缺陷，事务已回滚或根本没连库 | 不要重试，开缺陷任务 |
+
+**因数据库错误非零退出时，原样再运行一次即可判定**（「表里有任何一行就拒绝」让重跑本身就是核对，不需要人去猜）：
+
+- 重跑得到 **退出码 1 且提示已存在** = 上次其实已经提交了。stdout 这次为空，按「核对」从库里或审计日志取 `public_id`
+- 重跑得到 **退出码 0** = 上次没有提交，这次发布成功，`public_id` 就是这次 stdout 的那一行
+- 重跑仍是数据库错误：先按 API / 数据库故障处理（`readyz`、MySQL 状态），恢复后再原样运行一次
+
+进程在打印之前被杀（终端断开、容器重启，stdout 为空）也同样处理：原样重跑，退出码 1 证明已发布。
+
+### 核对
+
+1. 库里恰好一行，内容如设计 §2：
+   ```bash
+   cd <部署目录>
+   docker compose exec -T mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+     SELECT public_id, jurisdiction, policy_type, rate, status, effective_from, effective_to
+     FROM tax_policy_versions"'
+   ```
+   期望：一行，`MY`、`SST`、`rate` 为 `NULL`、`PUBLISHED`、`effective_from = 2026-10-16 16:00:00`、`effective_to` 为 `NULL`。
+   `public_id` 与命令打印的一致
+2. 管理端审计日志 `GET /api/v1/admin/audit-logs?entity_type=tax_policy_version` 恰好两条：`TAX_POLICY_CREATE`、
+   `TAX_POLICY_PUBLISH`，`entity_id` 都是这个 `public_id`，操作者是审批人、`user_agent` 是 `cli`、`reason` 是
+   `INITIAL_POLICY`。说明文字的中文要走接口核对（`mysql` 客户端的默认字符集可能把中文显示成 `????`）
+
+### 做完之后：解除 Phase 4 闸门
+
+**仅代码合并、仅运行成功都不算解除。**运维步骤完成后开一个文档 PR（不走设计闸门）：
+
+- ADR-0008「收口条件」2026-10-17 进度里把第 2、3 步标为完成，写上发布日期与 `public_id`（`public_id` 不是秘密，可以进
+  公开仓库）
+- `docs/TODO.md` D2 一行与 Phase 4 一节去掉「不得开工」的阻塞句
+
+**这个 PR 合并之后，Phase 4 其余任务（充值、收据、对账单、支付）才可以登记为 `ready`**（支付部分另外还要等 D6）。
+
+### 绝不能做什么
+
+- **不要用 SQL 直接插入或改写 `tax_policy_versions`。**触发器会拒绝；即使绕过去，也绕过了服务层的校验、审计与事务内
+  复查，政策一经发布就被以后的支付、收据、对账单永久引用
+- **不要 `TRUNCATE` 后重跑。**`TRUNCATE` 是 DDL、不经触发器；重跑会让政策换一个 `public_id` 与 `approved_at`，审计里留下
+  两次发布、库里只剩一次。迁移降级同理：表里有行时 `downgrade` 会拒绝，**生产只前滚**
+- **不要为「换审批人」重跑。**会被拒绝（退出码 1），本来也不该：已发布的政策不可改
+- **不要用验收专用管理员当审批人**，也不要在不确定邮箱时「先跑了再说」：成功之后没有撤销
+- **不要把真实邮箱、主机名或部署目录写进工单、PR 或本仓库的文档**；`public_id` 可以
 
 ---
 
