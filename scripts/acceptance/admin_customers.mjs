@@ -6,7 +6,8 @@
  * （open_usage_events）；AIH-TASK-046 加了出站 webhook 签名密钥的一个只读步骤（check_webhook_signing）；AIH-TASK-053
  * 加了项目集成状态的一个只读步骤（check_project_integration）；AIH-TASK-070 加了 AI 密钥的一个只读步骤
  * （check_ai_access）；AIH-TASK-074 加了用量分析的两个只读步骤（open_usage_analytics、check_usage_analytics）；
- * AIH-TASK-082 加了客户账户状态的一个只读步骤（check_account_status）。
+ * AIH-TASK-082 加了客户账户状态的一个只读步骤（check_account_status）；AIH-TASK-085 加了钱包流水的一个只读步骤
+ * （check_wallet_transactions）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -63,7 +64,8 @@
  *   「Usage analytics」（href 为 /usage-analytics）、夹具客户详情里
  *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。夹具客户详情资料卡上的「Disable account」
  *   「Enable account」按钮（check_account_status）**只查不点**：只确认对应的那一个在，不点它、不打开启用 / 停用弹窗、
- *   不填原因。不点新建客户、编辑 / 保存、手工调账、
+ *   不填原因。夹具客户详情里的钱包流水面板（check_wallet_transactions）只看不点：不动「Source」下拉、不点「Older」
+ *   「Newest」、不点 AI 用量行的「View usage event」链接。不点新建客户、编辑 / 保存、手工调账、
  *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
  *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
  *   「Clear address」）等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表
@@ -195,6 +197,16 @@
  *                   对应「Disable account」（customers.accountStatus.disable）、DISABLED 对应「Enable account」
  *                   （customers.accountStatus.enable），另一个不在；PENDING_ACTIVATION 与 CLOSED 两个都不在。这个按钮
  *                   只查不点、不打开弹窗。报到前把「Account status」这一行滚动到视口中间
+ *   check_wallet_transactions
+ *                   在夹具客户详情（open_fixture 打开的那一页）上，钱包流水面板（role=region、aria-label 为「Wallet
+ *                   transactions」，en.json 的 wallet.transactions.title）落定且不是加载失败（wallet.transactions.loadFailed）
+ *                   或无权限（customers.forbidden）。后端值取面板自己发出的
+ *                   GET /api/v1/admin/customers/{customer_id}/wallet/transactions 的响应体（被动观察，不自己发请求、不拦截；
+ *                   只认不带 before_sequence 与 reference_type 的最新一页，取这个客户最近一次成功读完的那一次）。面板表格
+ *                   （表头有「Sequence」「Balance after」）里带 data-row-key 的数据行数与响应 data.items 的条数一致；items 非空
+ *                   时第一行「Sequence」列的文字等于 items 第一项的 wallet_sequence；items 为空时面板显示空状态
+ *                   （wallet.transactions.empty）、没有数据行，同样算通过。不改筛选、不翻页、不点任何链接。报到前把面板滚动到
+ *                   视口里（放得下时整块在视口内，放不下时面板顶端在视口内）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -330,6 +342,12 @@ const TEXT = {
   integrationLoadFailed: "The status webhook address could not be loaded.", // projectIntegration.webhook.loadFailed
   // 项目集成状态 → 面板「Integration status」一项的文案（projectIntegration.status.enabled / disabled）。
   integrationStatusText: { ENABLED: "Enabled", DISABLED: "Disabled" },
+  walletTxTitle: "Wallet transactions", // wallet.transactions.title —— 钱包流水面板的 aria-label
+  walletTxLoading: "Loading wallet transactions…", // wallet.transactions.loading
+  walletTxLoadFailed: "The wallet transactions could not be loaded.", // wallet.transactions.loadFailed
+  walletTxEmpty: "This customer has no wallet transactions yet.", // wallet.transactions.empty
+  walletTxSequence: "Sequence", // wallet.transactions.field.sequence —— 流水表格的列头
+  walletTxBalanceAfter: "Balance after", // wallet.transactions.field.balanceAfter
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -404,6 +422,9 @@ const PROJECT_LIST_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects$/;
 
 /** 用量分析接口的路径（frontend/src/api/adminUsageAnalytics.ts 的 USAGE_ANALYTICS_URL）。 */
 const USAGE_ANALYTICS_API = /^\/api\/v1\/admin\/usage-analytics$/;
+
+/** 钱包流水接口的路径（frontend/src/api/walletTransactions.ts 的 listWalletTransactions）。 */
+const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/transactions$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -804,6 +825,8 @@ const network = {
   projectLists: new Map(),
   /** 用量分析接口：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   usageAnalytics: new Map(),
+  /** 钱包流水接口：requestId → { customerId, newest, status, finished, failed, seq }。查询串本身不保存。 */
+  walletTransactions: new Map(),
   seq: 0,
 };
 
@@ -816,8 +839,36 @@ function trackedRequest(requestId) {
     network.webhookSecrets.get(requestId) ??
     network.aiAccess.get(requestId) ??
     network.projectLists.get(requestId) ??
-    network.usageAnalytics.get(requestId)
+    network.usageAnalytics.get(requestId) ??
+    network.walletTransactions.get(requestId)
   );
+}
+
+/**
+ * 是不是钱包流水接口（同源 https）：是的话回路径里的客户 id 与「是不是不带游标、不带来源筛选的最新一页」，
+ * 不是回 null。只留这两样，不保存 URL。
+ */
+function walletTransactionsTarget(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host) {
+      return null;
+    }
+    const match = WALLET_TRANSACTIONS_API.exec(parsed.pathname);
+    if (match === null) {
+      return null;
+    }
+    const query = parsed.searchParams;
+    return {
+      customerId: decodeURIComponent(match[1]),
+      newest: !query.has("before_sequence") && !query.has("reference_type"),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** 是不是用量分析接口（同源 https、路径恰好是这个接口，查询串不看、不保存）。 */
@@ -1023,6 +1074,17 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const walletTransactions = walletTransactionsTarget(params.request?.url);
+        if (walletTransactions !== null && params.request?.method === "GET") {
+          network.walletTransactions.set(params.requestId, {
+            customerId: walletTransactions.customerId,
+            newest: walletTransactions.newest,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1174,6 +1236,26 @@ function latestUsageAnalyticsResponse(afterSeq) {
   let best = null;
   for (const [requestId, request] of network.usageAnalytics) {
     if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/**
+ * 这个客户不带游标、不带来源筛选的、成功读完的钱包流水请求里最近的一次；还有在路上的就回 null，等它落定。
+ * 请求是详情页打开时面板自己发出的（重读时也是面板自己发），所以不按序号截断。
+ */
+function latestWalletTransactionsResponse(customerId) {
+  let best = null;
+  for (const [requestId, request] of network.walletTransactions) {
+    if (request.customerId !== customerId || !request.newest) {
       continue;
     }
     if (!request.finished && !request.failed) {
@@ -1382,6 +1464,15 @@ function pageLib() {
     }
     return null;
   };
+  /** 客户详情里的钱包流水面板（role=region、aria-label 为面板标题）；没有时 null。 */
+  const walletTxRegion = (T) => {
+    for (const el of document.querySelectorAll('[role="region"]')) {
+      if (el.getAttribute("aria-label") === T.walletTxTitle) {
+        return el;
+      }
+    }
+    return null;
+  };
   return {
     norm,
     leaf,
@@ -1399,6 +1490,7 @@ function pageLib() {
     integrationRegion,
     aiAccessRegion,
     analyticsTable,
+    walletTxRegion,
   };
 }
 
@@ -2106,6 +2198,79 @@ function scrollIntegrationPanelIntoView(lib, T) {
 /** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
 function integrationPanelInView(lib, T) {
   const region = lib.integrationRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 钱包流水面板的状态与表格：带 data-row-key 的数据行数（不含 antd 的测量行与空状态行）与第一行「Sequence」列的
+ * 文字。只在面板里面找。只读，不碰下拉、按钮与链接。
+ */
+function probeWalletTransactions(lib, T) {
+  const region = lib.walletTxRegion(T);
+  const out = {
+    ...lib.common(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    forbidden: false,
+    empty: false,
+    table: false,
+    rows: 0,
+    firstSequence: null,
+  };
+  if (region === null) {
+    return out;
+  }
+  const has = (text) =>
+    [...region.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(T.walletTxLoading);
+  out.failed = has(T.walletTxLoadFailed);
+  out.forbidden = has(T.customersForbidden);
+  out.empty = has(T.walletTxEmpty);
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.walletTxSequence) || !heads.includes(T.walletTxBalanceAfter)) {
+      continue;
+    }
+    const sequence = heads.indexOf(T.walletTxSequence);
+    out.table = true;
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      const cells = tr.querySelectorAll(":scope > td");
+      if (cells.length !== heads.length) {
+        continue;
+      }
+      if (out.rows === 0) {
+        out.firstSequence = lib.norm(cells[sequence].textContent);
+      }
+      out.rows += 1;
+    }
+    break;
+  }
+  return out;
+}
+
+/** 把钱包流水面板滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollWalletTxPanelIntoView(lib, T) {
+  const region = lib.walletTxRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
+function walletTxPanelInView(lib, T) {
+  const region = lib.walletTxRegion(T);
   if (region === null) {
     return false;
   }
@@ -3319,6 +3484,99 @@ async function stepCheckProjectIntegration(ctx) {
   }
 }
 
+async function stepCheckWalletTransactions(ctx) {
+  if (ctx.customerId === null || ctx.fixture === null) {
+    throw fail("assertion_failed");
+  }
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+
+  // 面板落定：不在加载，且是某一种终态（表格、空状态、加载失败、无权限）。
+  const opened = await waitFor(
+    () => evaluate(probeWalletTransactions, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === href && s.region && !s.busy && (s.failed || s.forbidden || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const panel = opened.value;
+  if (panel.appError || panel.failed) {
+    throw fail("page_error");
+  }
+  if (panel.notFound || panel.path !== href) {
+    throw fail("navigation_failed");
+  }
+  if (panel.forbidden) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：面板自己发出的最新一页 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestWalletTransactionsResponse(customerId),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expectedRows;
+  let expectedFirst;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expectedRows = items.length;
+    expectedFirst = null;
+    if (items.length > 0) {
+      if (!Number.isInteger(items[0]?.wallet_sequence)) {
+        throw fail("assertion_failed");
+      }
+      expectedFirst = String(items[0].wallet_sequence);
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、序号不是整数：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 面板显示的就是这一份响应：数据行数一致、第一行的序号一致；items 为空时是空状态、没有数据行。
+  const shown = await waitFor(
+    () => evaluate(probeWalletTransactions, TEXT),
+    (s) =>
+      s.path === href &&
+      s.region &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      (expectedRows === 0
+        ? s.empty && s.rows === 0
+        : s.table && s.rows === expectedRows && s.firstSequence === expectedFirst),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把面板滚进视口。
+  if ((await evaluate(scrollWalletTxPanelIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(walletTxPanelInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   login: stepLogin,
   open_customers: stepOpenCustomers,
@@ -3339,6 +3597,7 @@ const STEPS = {
   open_usage_analytics: stepOpenUsageAnalytics,
   check_usage_analytics: stepCheckUsageAnalytics,
   check_account_status: stepCheckAccountStatus,
+  check_wallet_transactions: stepCheckWalletTransactions,
 };
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,18 @@ vi.mock("../../api/walletAdjustments", async () => {
   return { ...actual, ...wallet };
 });
 
+// 钱包流水（AIH-TASK-085）挂在钱包卡片下面；面板自己的用例在 wallet/WalletTransactionsPanel.test.tsx。
+const transactions = vi.hoisted(() => ({
+  listWalletTransactions: vi.fn(),
+}));
+
+vi.mock("../../api/walletTransactions", async () => {
+  const actual = await vi.importActual<typeof import("../../api/walletTransactions")>(
+    "../../api/walletTransactions",
+  );
+  return { ...actual, ...transactions };
+});
+
 const FIRST_KEY = "00000000-0000-4000-8000-000000000001";
 const SECOND_KEY = "00000000-0000-4000-8000-000000000002";
 
@@ -138,6 +150,11 @@ async function openEditor(user: ReturnType<typeof userEvent.setup>) {
 beforeEach(() => {
   vi.clearAllMocks();
   api.listProjects.mockResolvedValue({ items: [], page: 1, page_size: 20, total: 0 });
+  transactions.listWalletTransactions.mockResolvedValue({
+    items: [],
+    page_size: 20,
+    next_before_sequence: null,
+  });
 });
 
 afterEach(() => {
@@ -397,6 +414,35 @@ describe("CustomerDetailPage", () => {
     expect(api.listProjects).toHaveBeenCalledWith(CUSTOMER_ID, 1, 20, expect.anything());
   });
 
+  it("shows the customer's wallet transactions below the wallet", async () => {
+    api.getCustomer.mockResolvedValue(customer());
+
+    renderDetail();
+
+    expect(
+      await screen.findByRole("region", { name: "Wallet transactions" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("This customer has no wallet transactions yet."),
+    ).toBeInTheDocument();
+    expect(transactions.listWalletTransactions).toHaveBeenCalledWith(
+      CUSTOMER_ID,
+      { pageSize: 20, beforeSequence: null, referenceType: null },
+      expect.anything(),
+    );
+  });
+
+  it("does not ask for the wallet transactions of a customer that does not exist", async () => {
+    api.getCustomer.mockRejectedValue(
+      new ApiError("CUSTOMER_NOT_FOUND", "The customer does not exist.", "req-404"),
+    );
+
+    renderDetail();
+
+    expect(await screen.findByText("Customer not found")).toBeInTheDocument();
+    expect(transactions.listWalletTransactions).not.toHaveBeenCalled();
+  });
+
   it("does not ask for projects of a customer that does not exist", async () => {
     api.getCustomer.mockRejectedValue(
       new ApiError("CUSTOMER_NOT_FOUND", "The customer does not exist.", "req-404"),
@@ -431,6 +477,10 @@ describe("CustomerDetailPage", () => {
     // 详情重读了一次，钱包卡片换成后端给的新余额。
     await waitFor(() => {
       expect(api.getCustomer).toHaveBeenCalledTimes(2);
+    });
+    // 流水也重读了一次：新的一笔要出现在最新一页。
+    await waitFor(() => {
+      expect(transactions.listWalletTransactions).toHaveBeenCalledTimes(2);
     });
     await user.click(screen.getByRole("button", { name: "Done" }));
     expect(await screen.findByText("MYR 1,234,546.62345678")).toBeInTheDocument();
