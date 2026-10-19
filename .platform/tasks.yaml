@@ -5541,7 +5541,7 @@ tasks:
       - '新增 frontend/src/features/auth/AcceptInvitationPage.tsx：读查询串 token，缺失时直接显示链接无效；两次输入密码且一致才可提交，长度规则照重置密码页；成功后转登录页并提示可以登录；不把令牌写进日志、localStorage 或 sessionStorage。frontend/src/api/auth.ts 新增 acceptInvitation 封装'
       - '测试（vitest + Testing Library）：AcceptInvitationPage.test.tsx 覆盖设计 §7「邀请链接匿名可达」前端那一行：以匿名状态挂载完整路由渲染 /accept-invitation?token=x 显示表单而不跳登录页，以已登录 ADMIN 状态同样显示表单；缺 token、两次密码不一致、400 INVALID_INVITATION_TOKEN、400 WEAK_PASSWORD、409、404、成功转登录页；auth.test.ts 覆盖新封装的路径与请求体'
       - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
-      - 'check_accept_invitation_page：打开 /accept-invitation?token= 后接一个全零占位令牌，断言页面渲染出接受邀请表单（两个密码输入框与提交按钮），且地址没有被重定向到登录页；不提交表单、不发写请求。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'check_accept_invitation_page：在 login 之前执行（浏览器刚启动、没有任何会话，正是邀请链接的匿名场景；验收脚本不得新建浏览器上下文，所以靠步骤顺序保证匿名），打开 /accept-invitation?token= 后接一个全零占位令牌，断言页面渲染出接受邀请表单（两个密码输入框与提交按钮），且地址没有被重定向到登录页；不提交表单、不发写请求。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上新步骤；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
       - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #368（本任务是纯前端，引用它只为让审查拿到 §2、§8 的契约）'
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
@@ -5572,9 +5572,9 @@ tasks:
       timeout_seconds: 300
       writes: false
       steps:
+        - check_accept_invitation_page
         - login
         - open_customers
-        - check_accept_invitation_page
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
