@@ -5,7 +5,8 @@
  * 与试算的两个只读步骤（open_pricing_rules、open_pricing_preview）；AIH-TASK-038 加了用量事件的一个只读步骤
  * （open_usage_events）；AIH-TASK-046 加了出站 webhook 签名密钥的一个只读步骤（check_webhook_signing）；AIH-TASK-053
  * 加了项目集成状态的一个只读步骤（check_project_integration）；AIH-TASK-070 加了 AI 密钥的一个只读步骤
- * （check_ai_access）；AIH-TASK-074 加了用量分析的两个只读步骤（open_usage_analytics、check_usage_analytics）。
+ * （check_ai_access）；AIH-TASK-074 加了用量分析的两个只读步骤（open_usage_analytics、check_usage_analytics）；
+ * AIH-TASK-082 加了客户账户状态的一个只读步骤（check_account_status）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -60,7 +61,9 @@
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
  *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏
  *   「Usage analytics」（href 为 /usage-analytics）、夹具客户详情里
- *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。不点新建客户、编辑 / 保存、手工调账、
+ *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。夹具客户详情资料卡上的「Disable account」
+ *   「Enable account」按钮（check_account_status）**只查不点**：只确认对应的那一个在，不点它、不打开启用 / 停用弹窗、
+ *   不填原因。不点新建客户、编辑 / 保存、手工调账、
  *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
  *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
  *   「Clear address」）等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表
@@ -182,6 +185,16 @@
  *                   data-row-key 的数据行数与响应 data.items 的条数一致；items 为空时页面显示空状态（usageAnalytics.empty
  *                   或 usageAnalytics.emptyPage）、没有数据行。不改筛选、不翻页。有数据行时报到前把表格滚动到视口里
  *                   （放得下时整张在视口内，放不下时表格顶端在视口内）
+ *   check_account_status
+ *                   在夹具客户详情（open_fixture 打开的那一页）上，后端值取详情页自己发出的
+ *                   GET /api/v1/admin/customers/{customer_id} 的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次
+ *                   成功读完的那一次）里的 account_status（PENDING_ACTIVATION / ENABLED / DISABLED / CLOSED，认不出的值
+ *                   是 assertion_failed）。资料卡「Account status」一项（customers.field.accountStatus，带边框的
+ *                   Descriptions：label 在 <th>，值在紧跟的 <td>）的文字与它的文案（Pending activation / Enabled /
+ *                   Disabled / Closed，customers.accountStatus.*）相同；页面上恰好有与之对应的那一个操作按钮：ENABLED
+ *                   对应「Disable account」（customers.accountStatus.disable）、DISABLED 对应「Enable account」
+ *                   （customers.accountStatus.enable），另一个不在；PENDING_ACTIVATION 与 CLOSED 两个都不在。这个按钮
+ *                   只查不点、不打开弹窗。报到前把「Account status」这一行滚动到视口中间
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -215,6 +228,16 @@ const TEXT = {
   detailLoadFailed: "The customer could not be loaded.", // customers.detail.loadFailed
   detailNotFound: "Customer not found", // customers.detail.notFound
   walletBalance: "Balance", // customers.wallet.balance
+  accountStatusLabel: "Account status", // customers.field.accountStatus —— 资料卡 Descriptions 的一项
+  // 账户状态 → 「Account status」一项的文案（customers.accountStatus.pendingActivation / enabled / disabled / closed）。
+  accountStatusText: {
+    PENDING_ACTIVATION: "Pending activation",
+    ENABLED: "Enabled",
+    DISABLED: "Disabled",
+    CLOSED: "Closed",
+  },
+  accountDisable: "Disable account", // customers.accountStatus.disable —— 只查它在，不点
+  accountEnable: "Enable account", // customers.accountStatus.enable —— 只查它在，不点
   navAudit: "Audit log", // nav.audit
   auditLoading: "Loading audit records…", // audit.loading
   auditLoadFailed: "The audit log could not be loaded.", // audit.loadFailed
@@ -1537,6 +1560,41 @@ function balanceInView(lib, T) {
   return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
 }
 
+/**
+ * 资料卡「Account status」一项的文字，以及「Disable account」「Enable account」两个按钮各有几个。
+ * 只读 DOM：按钮只数、不点。
+ */
+function readAccountStatus(lib, T) {
+  const cells = lib.valueCells(T.accountStatusLabel);
+  const buttons = [...document.querySelectorAll("button")].map((el) => lib.norm(el.textContent));
+  return {
+    ...lib.common(T),
+    count: cells.length,
+    text: cells.length === 1 ? lib.norm(cells[0].textContent) : null,
+    disableButtons: buttons.filter((text) => text === T.accountDisable).length,
+    enableButtons: buttons.filter((text) => text === T.accountEnable).length,
+  };
+}
+
+/** 把「Account status」这一行滚到视口中间。只滚动，不点任何东西。 */
+function scrollAccountStatusIntoView(lib, T) {
+  const cells = lib.valueCells(T.accountStatusLabel);
+  if (cells.length !== 1) {
+    return false;
+  }
+  (cells[0].closest("tr") ?? cells[0]).scrollIntoView({ block: "center", inline: "nearest" });
+  return true;
+}
+
+function accountStatusInView(lib, T) {
+  const cells = lib.valueCells(T.accountStatusLabel);
+  if (cells.length !== 1) {
+    return false;
+  }
+  const rect = (cells[0].closest("tr") ?? cells[0]).getBoundingClientRect();
+  return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+}
+
 function clickNavAudit(lib, T) {
   const header = document.querySelector("header");
   if (!header) {
@@ -2389,6 +2447,83 @@ async function stepCheckBalance(ctx) {
   }
 }
 
+async function stepCheckAccountStatus(ctx) {
+  if (ctx.customerId === null || ctx.fixture === null) {
+    throw fail("assertion_failed");
+  }
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+
+  // 后端值：详情页自己发出的那次 GET 的响应体（与 check_balance 同一个来源）。
+  const observed = await waitFor(
+    async () => latestDetailResponse(customerId),
+    () => true,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let status;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const data = envelope?.success === true ? envelope.data : null;
+    status = data?.account_status;
+    if (data?.id !== customerId || typeof status !== "string" || !Object.hasOwn(TEXT.accountStatusText, status)) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、不是这个客户、状态不认识：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+  const expectedText = TEXT.accountStatusText[status];
+  // ENABLED 对应停用、DISABLED 对应启用；另两个状态两个按钮都不该在。
+  const expectedDisable = status === "ENABLED" ? 1 : 0;
+  const expectedEnable = status === "DISABLED" ? 1 : 0;
+
+  const shown = await waitFor(
+    () => evaluate(readAccountStatus, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === href &&
+        s.count === 1 &&
+        s.text === expectedText &&
+        s.disableButtons === expectedDisable &&
+        s.enableButtons === expectedEnable),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    const s = shown.value;
+    if (s === null || s.path !== href || s.count !== 1) {
+      throw fail("element_missing");
+    }
+    // 状态文字不对，或者该在的按钮不在、不该在的按钮在了。
+    throw fail(s.text === expectedText && s.disableButtons + s.enableButtons < expectedDisable + expectedEnable
+      ? "element_missing"
+      : "assertion_failed");
+  }
+  if (shown.value.appError) {
+    throw fail("page_error");
+  }
+  if (shown.value.notFound) {
+    throw fail("navigation_failed");
+  }
+
+  // Worker 在报到后截图：先把「Account status」这一行滚进视口。只滚动，不点按钮。
+  if ((await evaluate(scrollAccountStatusIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(accountStatusInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 /** 审计页落定：不在加载，且是某一种终态（表格、失败、无权限、筛选被拒、空列表）。 */
 function auditSettled(s) {
   return (
@@ -3203,6 +3338,7 @@ const STEPS = {
   check_project_integration: stepCheckProjectIntegration,
   open_usage_analytics: stepOpenUsageAnalytics,
   check_usage_analytics: stepCheckUsageAnalytics,
+  check_account_status: stepCheckAccountStatus,
 };
 
 // ---------------------------------------------------------------------------

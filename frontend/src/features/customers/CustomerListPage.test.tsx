@@ -36,6 +36,7 @@ function summary(overrides: Partial<CustomerSummary> = {}): CustomerSummary {
     email: "ops@example.com",
     phone: null,
     billing_status: "SUSPENDED",
+    account_status: "ENABLED",
     billing_mode: "PREPAID",
     ai_service_enabled: false,
     status_version: 0,
@@ -141,6 +142,57 @@ describe("CustomerListPage", () => {
     // 创建时间按吉隆坡时间显示：UTC 20:00 已经是第二天。
     expect(rows[1]).toHaveTextContent("2026-09-20 04:00:00");
     expect(api.listCustomers).toHaveBeenCalledWith(1, 20, expect.anything());
+  });
+
+  it("shows each customer's account status in its own column, unknown values as they are", async () => {
+    // 后端以后加了新值：原样显示，不崩。
+    const future = {
+      ...summary({ id: "00000000-0000-4000-8000-000000000005", company_name: "Echo Sdn Bhd" }),
+      account_status: "FROZEN",
+    } as unknown as CustomerSummary;
+    // 字段缺了：显示「未知」，不猜。
+    const missing = summary({
+      id: "00000000-0000-4000-8000-000000000006",
+      company_name: "Foxtrot Sdn Bhd",
+    });
+    delete missing.account_status;
+    api.listCustomers.mockResolvedValue(
+      page(
+        [
+          summary({ company_name: "Alpha Sdn Bhd", account_status: "ENABLED" }),
+          summary({
+            id: "00000000-0000-4000-8000-000000000002",
+            company_name: "Bravo Sdn Bhd",
+            account_status: "DISABLED",
+          }),
+          summary({
+            id: "00000000-0000-4000-8000-000000000003",
+            company_name: "Charlie Sdn Bhd",
+            account_status: "PENDING_ACTIVATION",
+          }),
+          summary({
+            id: "00000000-0000-4000-8000-000000000004",
+            company_name: "Delta Sdn Bhd",
+            account_status: "CLOSED",
+          }),
+          future,
+          missing,
+        ],
+        6,
+      ),
+    );
+
+    renderList();
+
+    expect(await screen.findByRole("columnheader", { name: "Account status" })).toBeInTheDocument();
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("Alpha Sdn Bhd");
+    expect(rows[0]).toHaveTextContent("Enabled");
+    expect(rows[1]).toHaveTextContent("Disabled");
+    expect(rows[2]).toHaveTextContent("Pending activation");
+    expect(rows[3]).toHaveTextContent("Closed");
+    expect(rows[4]).toHaveTextContent("FROZEN");
+    expect(rows[5]).toHaveTextContent("Unknown");
   });
 
   it("asks the backend for the page the user moves to", async () => {
