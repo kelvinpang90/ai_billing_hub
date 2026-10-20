@@ -19,7 +19,12 @@ from sqlalchemy import create_engine, select
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.passwords import hash_password
-from app.core.tokens import TOKEN_TYPE_ACCESS, TOKEN_TYPE_PENDING_2FA, decode_token
+from app.core.tokens import (
+    TOKEN_TYPE_ACCESS,
+    TOKEN_TYPE_PENDING_2FA,
+    decode_token,
+    hash_refresh_token,
+)
 from app.models.auth import AuditAction, AuditLog, RefreshToken, User, UserRole, UserStatus
 from app.models.base import Base
 from app.services.auth import (
@@ -137,10 +142,9 @@ def make_user(session_factory, *, email: str = "admin@example.com", **overrides)
         user = User(
             email=email,
             password_hash=hash_password(PASSWORD),
-            role=UserRole.ADMIN,
             created_at=now,
             updated_at=now,
-            **{"status": UserStatus.ACTIVE, **overrides},
+            **{"role": UserRole.ADMIN, "status": UserStatus.ACTIVE, **overrides},
         )
         session.add(user)
         session.commit()
@@ -214,6 +218,36 @@ def test_login_issues_a_session_and_audits_it(session_factory, settings: Setting
     payload = decode_token(settings, issued.access_token, expected_type=TOKEN_TYPE_ACCESS)
     assert payload["role"] == "ADMIN"
     assert AuditAction.LOGIN in audit_actions(session_factory)
+
+
+def test_a_customer_without_2fa_login_is_committed(session_factory, settings: Settings) -> None:
+    """客户、未启用 2FA 的那条分支直接签发：令牌行、LOGIN 审计与失败计数清零都必须落库。
+
+    ⚠️ 这条分支曾经漏了 commit：令牌照常返回，整笔写入随会话关闭回滚，刷新必然失败
+    （AIH-TASK-088 run `d56365f0` 的并发用例暴露）。
+    """
+    user = make_user(
+        session_factory, email="customer@example.com", role=UserRole.CUSTOMER, failed_login_count=2
+    )
+    outcome = authenticate(
+        session_factory, settings, email="customer@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert outcome.issued is not None
+
+    with session_factory() as session:
+        rows = list(session.execute(select(RefreshToken)).scalars())
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert [row.token_hash for row in rows] == [
+            hash_refresh_token(outcome.issued.refresh_token)
+        ]
+        assert (stored.failed_login_count, stored.last_login_at is not None) == (0, True)
+    assert audit_actions(session_factory) == [AuditAction.LOGIN]
+
+    rotated = refresh_session(
+        session_factory, settings, raw_token=outcome.issued.refresh_token, context=CONTEXT
+    )
+    assert rotated.refresh_token != outcome.issued.refresh_token
 
 
 def test_email_matching_is_case_insensitive(session_factory, settings: Settings) -> None:
