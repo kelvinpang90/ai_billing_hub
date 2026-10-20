@@ -25,7 +25,7 @@ from app.schemas.auth import (
     RegenerateRecoveryCodesRequest,
 )
 from app.schemas.envelope import ApiResponse, success
-from app.services.auth import InvalidCredentials
+from app.services.auth import InvalidCredentials, token_password_version
 from app.services.two_factor import (
     confirm_enrolment,
     regenerate_recovery_codes,
@@ -36,10 +36,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth/2fa", tags=["auth"])
 
 
-def _pending_user_id(request: Request, token: str) -> int:
+def _pending_subject(request: Request, token: str) -> tuple[int, int]:
+    """`(user_id, pwv)` of a pending token.
+
+    ⚠️ `pwv` 交给服务层，由它在写 2FA 行的事务里锁用户行后比较（设计闸门 #369
+    v6 §2）。在这里比较不够：比较与写入之间改密码提交，写入照样成立。
+    """
     settings = request.app.state.settings
     payload = decode_token(settings, token, expected_type=TOKEN_TYPE_PENDING_2FA)
-    return int(payload["sub"])
+    return int(payload["sub"]), token_password_version(payload)
 
 
 @router.post("/enrol", response_model=ApiResponse[EnrolResponse])
@@ -49,9 +54,12 @@ def enrol(request: Request, payload: EnrolRequest) -> ApiResponse[EnrolResponse]
     ⚠️ 已确认过的账号会拿到 409，而且**不会重新发一把密钥** —— 否则任何能调
     这个端点的人都可以把别人已启用的 2FA 换成自己的。
     """
-    user_id = _pending_user_id(request, payload.pending_token)
+    user_id, password_version = _pending_subject(request, payload.pending_token)
     enrolment = start_enrolment(
-        require_session_factory(request), request.app.state.settings, user_id=user_id
+        require_session_factory(request),
+        request.app.state.settings,
+        user_id=user_id,
+        password_version=password_version,
     )
     # ⚠️ 不记 access log 之外的任何东西：`otpauth_uri` 的查询串里就是密钥本身。
     # T0.3 的脱敏已按 `otpauth` 键名兜住，但这里首先就不该往日志里写。
@@ -64,11 +72,12 @@ def enrol(request: Request, payload: EnrolRequest) -> ApiResponse[EnrolResponse]
 @router.post("/confirm", response_model=ApiResponse[RecoveryCodesResponse])
 def confirm(request: Request, payload: ConfirmEnrolRequest) -> ApiResponse[RecoveryCodesResponse]:
     """Verify the first code, enable 2FA, and hand out recovery codes **once**."""
-    user_id = _pending_user_id(request, payload.pending_token)
+    user_id, password_version = _pending_subject(request, payload.pending_token)
     codes = confirm_enrolment(
         require_session_factory(request),
         request.app.state.settings,
         user_id=user_id,
+        password_version=password_version,
         code=payload.code,
         context=request_context(request),
     )
@@ -95,6 +104,10 @@ def regenerate(
     codes = regenerate_recovery_codes(
         require_session_factory(request),
         user_id=user.id,
+        # `require_current_user` 读库时已核对它等于访问令牌的 `pwv`，两者等价。
+        # 服务层在替换恢复码的事务里锁用户行后再比较一次：鉴权之后、进事务之前
+        # 改密码提交的话，那次比较才拦得住。
+        password_version=user.password_version,
         context=request_context(request),
     )
     logger.info(

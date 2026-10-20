@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -25,6 +25,7 @@ from app.core.config import Settings
 from app.core.errors import AppError
 from app.core.passwords import spend_dummy_verification, verify_password
 from app.core.tokens import (
+    CLAIM_PASSWORD_VERSION,
     TOKEN_TYPE_ACCESS,
     TOKEN_TYPE_PENDING_2FA,
     decode_token,
@@ -116,6 +117,15 @@ class RequestContext:
 def utc_now() -> dt.datetime:
     """Naive UTC, matching how the columns are stored (spec §109)."""
     return dt.datetime.now(dt.UTC).replace(tzinfo=None)
+
+
+def token_password_version(payload: dict[str, Any]) -> int:
+    """The `password_version` a decoded JWT was issued under (设计闸门 #369 v6 §2).
+
+    ⚠️ 没有 `pwv` 的令牌按 0 处理：部署前签发的令牌在该用户第一次改密码之前
+    照常可用（§2「兼容」）。每个使用点都经这里取值，缺省规则只写一份。
+    """
+    return int(payload.get(CLAIM_PASSWORD_VERSION, 0))
 
 
 def record_audit(
@@ -236,12 +246,18 @@ def _issue_session(
     user: User,
     context: RequestContext,
     now: dt.datetime,
+    password_version: int,
     family_id: str | None = None,
 ) -> IssuedSession:
     """Create one refresh-token row and a matching access token, and audit it.
 
     ⚠️ 令牌行与审计行**同一个事务**（Invariant 13）。分开提交会出现「发了令牌
     但没有登录记录」或反过来，两种都让审计不可信。
+
+    ⚠️ `password_version` 由调用方传入，**不在这里重新读用户**（设计闸门 #369
+    v6 §2「令牌盘点」）：重新读到的可能是改密码之后的新值，会给旧密码换来的
+    会话盖上新版本号。它来自验证密码时读到的那一行、被消费的 pending 令牌，
+    或被轮换的上一行刷新令牌。
     """
     family = family_id or uuid.uuid4().hex
     raw = generate_refresh_token()
@@ -253,10 +269,16 @@ def _issue_session(
             token_hash=hash_refresh_token(raw),
             issued_at=now,
             expires_at=expires_at,
+            password_version=password_version,
         )
     )
     access = issue_access_token(
-        settings, user_id=user.id, role=user.role.value, session_id=family, now=now
+        settings,
+        user_id=user.id,
+        role=user.role.value,
+        session_id=family,
+        now=now,
+        password_version=password_version,
     )
     return IssuedSession(access_token=access, refresh_token=raw, refresh_expires_at=expires_at)
 
@@ -329,6 +351,12 @@ def authenticate(
             )
             raise InvalidCredentials
 
+        # ⚠️ 版本号取自 `verify_password` 用的这一行，**现在就记下来**
+        # （设计闸门 #369 v6 §2「签发点」）。下面两条 pending 分支先 commit 再签发，
+        # commit 会让 ORM 对象过期，之后再读 `user.password_version` 是重新查库 ——
+        # 读到的可能是改密码之后的新值，旧密码换来的令牌就盖上了新版本号。
+        password_version = user.password_version
+
         # ⚠️ **密码正确不等于认证成功。**这里**绝不清零失败计数** —— 清了的话，
         # 知道密码但不知道验证码的人可以无限次猜 TOTP，每猜一次都顺手把计数
         # 清掉。清零的唯一触发点是 `_complete_login()`：令牌真的发出去那一刻。
@@ -342,6 +370,7 @@ def authenticate(
                     now=moment,
                     # 已经有验证器了，只需输 6 位数。
                     ttl_seconds=settings.pending_token_ttl_seconds,
+                    password_version=password_version,
                 ),
             )
 
@@ -358,13 +387,21 @@ def authenticate(
                     # ⚠️ 这条路径要扫码 + 抄下 10 个恢复码，寿命刻意更长
                     # （设计闸门 #37；120 秒实测不够，见 config.py 的说明）。
                     ttl_seconds=settings.enrolment_pending_token_ttl_seconds,
+                    password_version=password_version,
                 ),
             )
 
         # CUSTOMER 且未启用 2FA：spec §54 说客户侧「supported」，是否强制由配置
         # 决定（Phase 4 的事）。现在直接发令牌。
         return LoginOutcome(
-            issued=_complete_login(session, settings, user=user, context=context, now=moment)
+            issued=_complete_login(
+                session,
+                settings,
+                user=user,
+                context=context,
+                now=moment,
+                password_version=password_version,
+            )
         )
 
 
@@ -375,6 +412,7 @@ def _complete_login(
     user: User,
     context: RequestContext,
     now: dt.datetime,
+    password_version: int,
 ) -> IssuedSession:
     """The one place a session is actually handed out. Caller commits.
 
@@ -390,7 +428,14 @@ def _complete_login(
     user.lockout_level = 0
     user.last_login_at = now
     user.updated_at = now
-    issued = _issue_session(session, settings, user=user, context=context, now=now)
+    issued = _issue_session(
+        session,
+        settings,
+        user=user,
+        context=context,
+        now=now,
+        password_version=password_version,
+    )
     record_audit(
         session,
         action=AuditAction.LOGIN,
@@ -420,10 +465,23 @@ def complete_second_factor(
     # ⚠️ `expected_type` 必须是 pending —— 拿访问令牌来走这一步就等于跳过第一步。
     payload = decode_token(settings, pending_token, expected_type=TOKEN_TYPE_PENDING_2FA)
     user_id = int(payload["sub"])
+    password_version = token_password_version(payload)
 
     with session_factory() as session:
-        user = session.get(User, user_id)
+        # ⚠️ **事务开头就锁用户行**（设计闸门 #369 v6 §2「使用点」）：这一步会消耗
+        # 一次性认证材料（TOTP 计数器、恢复码），锁一直持有到签发后提交。
+        # `reset_password` 锁的是同一行，两者因此排队 —— 改密码先提交，这里读到
+        # 新版本号而拒绝；这里先提交，登录成立，随后改密码让它失效。
+        # 加锁顺序是「用户 → 2FA 设置 / 恢复码 → 插入刷新令牌」（§2「统一加锁顺序」）。
+        user = session.execute(
+            select(User).where(User.id == user_id).with_for_update()
+        ).scalar_one_or_none()
         if user is None or user.status is UserStatus.DISABLED:
+            raise InvalidCredentials
+        if user.password_version != password_version:
+            # 与「用户不存在或停用」同一个对外结果。回滚、**什么都不提交**：
+            # 不验证第二因子、不发会话，也不落下面那步清过期锁。
+            session.rollback()
             raise InvalidCredentials
         _clear_lock_if_expired(session, user, moment)
         if user.locked_until is not None and user.locked_until > moment:
@@ -435,7 +493,10 @@ def complete_second_factor(
         try:
             result = verify_second_factor(session, settings, user_id=user_id, code=code, now=moment)
         except InvalidTotp:
-            session.commit()  # 先落下解锁后的清零
+            # 先落下解锁后的清零。⚠️ 这次提交同时释放用户行锁，**必须排在**
+            # `_register_failure` 之前：那个独立事务要写同一行，持锁时调它会
+            # 等待本事务自己的锁（§2「锁与失败计数」）。
+            session.commit()
             # ⚠️ TOTP 失败与密码失败**共用同一个计数器**。分开计数只会多一个
             # 能被分别耗尽的额度 —— 知道密码的人照样有无限次机会猜验证码。
             _register_failure(
@@ -448,7 +509,15 @@ def complete_second_factor(
             )
             raise
 
-        issued = _complete_login(session, settings, user=user, context=context, now=moment)
+        # 版本号用 pending 令牌上的那个：上面已在锁内核对它等于当前值。
+        issued = _complete_login(
+            session,
+            settings,
+            user=user,
+            context=context,
+            now=moment,
+            password_version=password_version,
+        )
         session.commit()
         return issued, result.remaining_recovery_codes
 
@@ -466,24 +535,34 @@ def refresh_session(
     重放检测的价值在于：攻击者偷到刷新令牌后一旦使用，真正的用户下次刷新就会
     撞上「已使用」，**整条链被吊销**，双方都被踢出去。代价是真用户要重新登录，
     但那远好过两边共用一个会话而谁都不知道。
+
+    ⚠️ 加锁顺序是「用户 → 刷新令牌」，与 `reset_password` 相同（设计闸门 #369 v6
+    §2「统一加锁顺序」）。原先先条件更新旧行、插入新行时才因外键检查碰到用户行，
+    与重置正好相反，两者并发会死锁。
     """
     moment = now or utc_now()
     token_hash = hash_refresh_token(raw_token)
 
     with session_factory() as session:
+        # 第一次读**不加锁**：只用来拿 `user_id`（不变），加锁读会把顺序变成
+        # 「先令牌、后用户」。
         row = session.execute(
             select(RefreshToken).where(RefreshToken.token_hash == token_hash)
         ).scalar_one_or_none()
         if row is None:
             raise TokenReused
 
-        if row.used_at is not None or row.revoked_at is not None:
-            _treat_as_replay(
-                session, row=row, context=context, now=moment, reason="REPLAY_DETECTED"
-            )
+        user = session.execute(
+            select(User).where(User.id == row.user_id).with_for_update()
+        ).scalar_one_or_none()
 
-        idle_deadline = row.issued_at + dt.timedelta(seconds=settings.refresh_token_idle_seconds)
-        if row.expires_at <= moment or idle_deadline <= moment:
+        # 入口检查：按不加锁读到的行判定。
+        _refuse_if_unusable(
+            session, settings, row=row, context=context, now=moment, replay_reason="REPLAY_DETECTED"
+        )
+
+        if user is None or user.status is UserStatus.DISABLED:
+            session.rollback()
             raise TokenReused
 
         # ⚠️ 判定来自受影响行数，不是上面那次 SELECT。两个请求同时拿着同一个
@@ -498,26 +577,80 @@ def refresh_session(
             .values(used_at=moment)
         )
         if marked.rowcount != 1:
-            # ⚠️ **竞争失败就是重放**，和上面那条早期检测走完全同一条处置。
+            # 条件更新落空：加锁重读这一行，与入口检查**同一张判别表**。
+            # ⚠️ `populate_existing` 不能少，否则 SQLAlchemy 把 identity map 里的
+            # 旧对象原样还回来，重读等于没做（password_reset.py 实测踩过）。
+            row = session.execute(
+                select(RefreshToken)
+                .where(RefreshToken.id == row.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).scalar_one()
+            _refuse_if_unusable(
+                session, settings, row=row, context=context, now=moment, replay_reason="RACE_LOST"
+            )
+            # ⚠️ 重读之后仍是「都为空、未过期」：理论上不会出现（条件更新失败却
+            # 读到可用的行）。宁可多踢一次也不放行，按重放处理。
             #
-            # 第一版这里只 rollback 后抛错、不吊销家族（实现闸门判为阻断项，
-            # 判得对）。后果很具体：攻击者与真用户并发提交同一个令牌，**赢的
-            # 那一方拿到有效的新令牌，而家族没有被吊销** —— 会话继续可用，
-            # 失败的一方只是被拒，整个重放检测等于没生效。
-            #
-            # 两条路径共用一个函数，是为了让它们不可能再分叉。
+            # 第一版竞争失败这一支只 rollback 后抛错、不吊销家族（实现闸门判为
+            # 阻断项）：攻击者与真用户并发提交同一个令牌，赢的一方拿到有效的新
+            # 令牌而家族没被吊销，重放检测等于没生效。
             _treat_as_replay(session, row=row, context=context, now=moment, reason="RACE_LOST")
 
-        user = session.get(User, row.user_id)
-        if user is None or user.status is UserStatus.DISABLED:
+        # 版本号在锁住用户行之后比较；不等按「已被吊销」处理：那条链已被改密码
+        # 作废，不是重放（§2「刷新令牌不可用时的判别」）。回滚连同上面的标记已用。
+        if row.password_version != user.password_version:
             session.rollback()
             raise TokenReused
 
+        # 新行沿用旧行的版本号（使用点刚核对过它等于当前值），不重新读用户。
         issued = _issue_session(
-            session, settings, user=user, context=context, now=moment, family_id=row.family_id
+            session,
+            settings,
+            user=user,
+            context=context,
+            now=moment,
+            password_version=row.password_version,
+            family_id=row.family_id,
         )
         session.commit()
         return issued
+
+
+def _refuse_if_unusable(
+    session: Session,
+    settings: Settings,
+    *,
+    row: RefreshToken,
+    context: RequestContext,
+    now: dt.datetime,
+    replay_reason: str,
+) -> None:
+    """Refuse a refresh token that cannot be rotated; return if it still can.
+
+    入口检查与条件更新失败**共用这一张表**（设计闸门 #369 v6 §2「刷新令牌
+    不可用时的判别」）：
+
+    | 行的状态 | 判定 | 副作用 |
+    | --- | --- | --- |
+    | `used_at` 非空 | 重放或并发抢占 | `_treat_as_replay` |
+    | `used_at` 为空、`revoked_at` 非空 | 已被吊销（改密码、登出、整链吊销） | 回滚，无 |
+    | 都为空、已过绝对或闲置期限 | 过期 | 回滚，无 |
+    | 都为空、未过期 | 可用 | 返回 |
+
+    ⚠️ 「已吊销、从未用过」**不是**重放。原先它也进 `_treat_as_replay`，于是每次
+    正常改密码之后另一台设备的下一次刷新、以及登出之后的刷新，都会触发盗用告警。
+    对外结果一样是 `TOKEN_REUSED`，只是不写审计、不记 warning、不再吊销整条链。
+    """
+    if row.used_at is not None:
+        _treat_as_replay(session, row=row, context=context, now=now, reason=replay_reason)
+    if row.revoked_at is not None:
+        session.rollback()
+        raise TokenReused
+    idle_deadline = row.issued_at + dt.timedelta(seconds=settings.refresh_token_idle_seconds)
+    if row.expires_at <= now or idle_deadline <= now:
+        session.rollback()
+        raise TokenReused
 
 
 def _treat_as_replay(
@@ -621,6 +754,7 @@ __all__ = [
     "logout",
     "record_audit",
     "refresh_session",
+    "token_password_version",
     "two_factor_confirmed",
     "utc_now",
 ]

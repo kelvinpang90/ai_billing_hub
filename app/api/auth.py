@@ -35,6 +35,7 @@ from app.services.auth import (
     complete_second_factor,
     logout,
     refresh_session,
+    token_password_version,
 )
 from app.services.password_reset import request_reset, reset_password
 
@@ -271,6 +272,10 @@ def require_current_user(request: Request) -> User:
 
     ⚠️ `expected_type` 显式写成访问令牌：2FA 的 pending 令牌拿到这里必须被拒，
     否则第二因子等于不存在。
+
+    ⚠️ 令牌上的 `pwv` 必须等于库里当前的 `password_version`（设计闸门 #369 v6
+    §2「使用点」）：改密码之前签发的访问令牌从改密码提交那一刻起被拒，不等过期。
+    返回的 `user.password_version` 因此等于这张令牌的 `pwv`，调用方可以直接用它。
     """
     header = request.headers.get("authorization", "")
     scheme, _, token = header.partition(" ")
@@ -283,6 +288,9 @@ def require_current_user(request: Request) -> User:
         user = session.get(User, int(payload["sub"]))
         if user is None or user.status is not UserStatus.ACTIVE:
             # 停用的账号必须立刻失效，不能等访问令牌自然过期。
+            raise InvalidToken
+        if user.password_version != token_password_version(payload):
+            # 改过密码：之前的全部会话失效。
             raise InvalidToken
         session.expunge(user)
         return user

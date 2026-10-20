@@ -51,11 +51,45 @@
 - 管理端接口（`/api/v1/admin/*`）只有 ADMIN 能调。**角色以数据库为准**：令牌里的 `role`
   不被信任，把账号降成 CUSTOMER 或停用都立即生效，不等令牌过期。
 
+### 改密码使之前的全部会话失效
+
+设计依据：设计闸门 #369 v6（`docs/design/AIH-TASK-086-session-revocation.md`）。
+
+- 每个用户有一个密码版本号 `users.password_version`，从 0 开始，每次改密码在同一事务里加 1，只增不减。
+- 签发令牌时把**验证密码时读到的那个版本号**写进去：访问令牌与 2FA 的 pending 令牌带整数 claim `pwv`，
+  刷新令牌行带 `password_version`。刷新沿用旧行的版本号，二次验证沿用 pending 令牌的版本号。
+- 使用令牌时拿它的版本号与库里当前值比较，不等就是无效：
+  - 访问令牌调任何已登录接口：401 `TOKEN_INVALID`
+  - pending 令牌调 `/api/v1/auth/login/totp`：401 `INVALID_CREDENTIALS`，不消耗 TOTP 或恢复码
+  - pending 令牌调 `/api/v1/auth/2fa/enrol`、`/2fa/confirm`，访问令牌调 `/2fa/recovery-codes`：
+    401 `TOKEN_INVALID`，什么都不写。这三个接口与 `/login/totp` 在自己的写事务里锁住用户行后再比较一次，
+    所以鉴权之后、写入之前提交的改密码同样拦得住
+  - 刷新令牌调 `/api/v1/auth/refresh`：401 `TOKEN_REUSED`
+- 没有 `pwv` 的旧令牌按 0 处理：用户第一次改密码之前照常可用。
+- 改密码之前已经通过鉴权的普通业务请求可以完成（与停用的语义相同）。
+- ⚠️ **以后新增任何设置密码的入口，都必须在写新哈希的同一事务里、锁住用户行之后递增
+  `password_version`**（设计 §10 A1）。漏掉的话那个入口改了密码却不加 1，旧会话照旧有效，
+  而且不会让任何请求报错。`tests/backend/test_session_revocation.py` 的守卫用例扫描 `app/` 下
+  每一处给 `.password_hash` 赋值的地方，要求同一函数里也给 `password_version` 赋值；
+  用 `User(..., password_hash=...)` 建新用户的写法不受它管（新用户版本号是 0，没有会话可吊销）。
+
+**刷新令牌被吊销与被重放是两回事**。对外都是 401 `TOKEN_REUSED`，客户端的处置相同（回到登录页），
+服务端的处置不同：
+
+| 刷新令牌行 | 判定 | 服务端副作用 |
+| --- | --- | --- |
+| 已用过（`used_at` 非空） | 重放或并发抢占，按被盗处理 | 吊销整条令牌链、写 `TOKEN_REUSED` 审计、记 `Refresh token reuse detected` warning（盗用告警挂在它上面） |
+| 没用过、已吊销（改密码、登出、整条链被吊销） | 已失效 | 无：不写审计、不记 warning、不再吊销 |
+| 没用过、没吊销、版本号与库里不等 | 已失效（改过密码） | 无，同上 |
+| 没用过、没吊销、已过绝对期限或闲置期限 | 过期 | 无 |
+
+所以正常改密码之后另一台设备的下一次刷新、登出之后同一令牌再来刷新，都不再触发盗用告警。
+
 ### 通用错误码
 
 | HTTP | `error.code` | 什么时候 |
 | --- | --- | --- |
-| 401 | `TOKEN_INVALID` | 没有令牌、令牌格式不对、签名或有效期不对、拿 2FA 的 pending 令牌来调、账号不存在或已停用 |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌格式不对、签名或有效期不对、拿 2FA 的 pending 令牌来调、账号不存在或已停用、令牌签发于最近一次改密码之前 |
 | 403 | `ADMIN_REQUIRED` | 令牌有效，但调用者在数据库里不是 ADMIN |
 | 422 | `VALIDATION_ERROR` | 请求体、查询参数不合法，或请求体里有未声明的字段。`message` 只列字段名，不回显值 |
 | 503 | `DATABASE_NOT_CONFIGURED` | 服务没有配置数据库 |
