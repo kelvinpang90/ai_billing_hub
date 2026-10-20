@@ -30,6 +30,7 @@ from app.core.config import Settings
 from app.core.crypto import decrypt_secret, encrypt_secret, load_keyring
 from app.core.errors import AppError
 from app.core.passwords import hash_password, verify_password
+from app.core.tokens import InvalidToken
 from app.models.auth import AuditAction, RecoveryCode, TwoFactorSetting, User
 from app.services.auth import RequestContext, record_audit, utc_now
 
@@ -101,13 +102,39 @@ def is_enrolled(session: Session, user_id: int) -> bool:
     return row is not None and row.confirmed_at is not None
 
 
+def _lock_user_at_version(session: Session, *, user_id: int, password_version: int) -> User | None:
+    """Lock the user row, then refuse a token issued before the current password.
+
+    ⚠️ 注册、确认、重新生成恢复码都写入认证材料，效果延续到改密码之后、能把主人
+    锁在门外，所以**在自己的写事务里**锁用户行再复查版本号（设计闸门 #369 v6 §2
+    「在途请求的语义」）。`reset_password` 锁的是同一行，两者排队：改密码先提交，
+    这里读到新版本号而拒绝、什么都不写；这里先提交，写入成立，随后旧会话失效。
+
+    ⚠️ 必须在碰任何 2FA 行或恢复码之前调用：加锁顺序统一是「用户 → 认证令牌表」
+    （§2「统一加锁顺序」）。用户不存在时返回 None，由调用方沿用各自原来的处置。
+    """
+    user = session.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    ).scalar_one_or_none()
+    if user is not None and user.password_version != password_version:
+        session.rollback()
+        raise InvalidToken
+    return user
+
+
 def start_enrolment(
-    session_factory: sessionmaker[Session], settings: Settings, *, user_id: int
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    *,
+    user_id: int,
+    password_version: int,
 ) -> Enrolment:
     """Generate a fresh TOTP secret and store it as `PENDING`.
 
     ⚠️ 返回的明文密钥（与内含它的 `otpauth://` URI）是**它唯一一次离开服务端**。
     之后库里只有密文，服务端也不再回显。
+
+    `password_version` 是所用 pending 令牌上的 `pwv`。
     """
     keyring = load_keyring(settings)
     secret = pyotp.random_base32()
@@ -115,7 +142,7 @@ def start_enrolment(
     moment = utc_now()
 
     with session_factory() as session:
-        user = session.get(User, user_id)
+        user = _lock_user_at_version(session, user_id=user_id, password_version=password_version)
         if user is None:
             raise TwoFactorNotEnrolled
 
@@ -168,6 +195,7 @@ def confirm_enrolment(
     settings: Settings,
     *,
     user_id: int,
+    password_version: int,
     code: str,
     context: RequestContext,
 ) -> list[str]:
@@ -176,11 +204,14 @@ def confirm_enrolment(
     ⚠️ **确认与生成恢复码必须在同一个事务里，且只发生在条件更新命中的那一支。**
     并发两个 `confirm` 各生成 10 个的话，用户手上会有 20 个有效码 —— 而他只
     抄了 10 个，另外 10 个躺在库里没人知道。
+
+    `password_version` 是所用 pending 令牌上的 `pwv`。
     """
     keyring = load_keyring(settings)
     moment = utc_now()
 
     with session_factory() as session:
+        _lock_user_at_version(session, user_id=user_id, password_version=password_version)
         row = session.get(TwoFactorSetting, user_id)
         if row is None:
             raise TwoFactorNotEnrolled
@@ -226,11 +257,16 @@ def regenerate_recovery_codes(
     session_factory: sessionmaker[Session],
     *,
     user_id: int,
+    password_version: int,
     context: RequestContext,
 ) -> list[str]:
-    """Revoke every live code and issue a fresh batch."""
+    """Revoke every live code and issue a fresh batch.
+
+    `password_version` 是所用访问令牌上的 `pwv`。
+    """
     moment = utc_now()
     with session_factory() as session:
+        _lock_user_at_version(session, user_id=user_id, password_version=password_version)
         if not is_enrolled(session, user_id):
             raise TwoFactorNotEnrolled
         codes = _replace_recovery_codes(session, user_id=user_id, now=moment)

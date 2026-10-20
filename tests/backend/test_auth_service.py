@@ -90,11 +90,12 @@ def sign_in(session_factory, settings: Settings, *, user_id: int) -> IssuedSessi
     per_user = _ENROLLED.setdefault(session_factory, {})
     entry = per_user.get(user_id)
     if entry is None:
-        enrolment = start_enrolment(session_factory, settings, user_id=user_id)
+        enrolment = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
         codes = confirm_enrolment(
             session_factory,
             settings,
             user_id=user_id,
+            password_version=0,
             code=pyotp.TOTP(enrolment.secret).now(),
             context=CONTEXT,
         )
@@ -792,11 +793,12 @@ def test_a_correct_password_alone_does_not_reset_the_lockout_counter(
     """
     user = make_user(session_factory)
     # 先注册并确认 2FA，让登录停在第二因子那一步。
-    enrolment = start_enrolment(session_factory, settings, user_id=user.id)
+    enrolment = start_enrolment(session_factory, settings, user_id=user.id, password_version=0)
     confirm_enrolment(
         session_factory,
         settings,
         user_id=user.id,
+        password_version=0,
         code=pyotp.TOTP(enrolment.secret).now(),
         context=CONTEXT,
     )

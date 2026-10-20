@@ -136,11 +136,12 @@ def user_id(session_factory) -> int:
 
 
 def enrol_and_confirm(session_factory, settings, user_id: int) -> tuple[str, list[str]]:
-    enrolment = start_enrolment(session_factory, settings, user_id=user_id)
+    enrolment = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
     codes = confirm_enrolment(
         session_factory,
         settings,
         user_id=user_id,
+        password_version=0,
         code=pyotp.TOTP(enrolment.secret).now(),
         context=CONTEXT,
     )
@@ -156,7 +157,7 @@ def test_a_pending_enrolment_does_not_count_as_enabled(session_factory, settings
     算成已启用的话，用户既进不去（没有能用的验证器），也没法重新注册 ——
     直接被锁在门外。
     """
-    start_enrolment(session_factory, settings, user_id=user_id)
+    start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
     with session_factory() as session:
         assert is_enrolled(session, user_id) is False
 
@@ -172,7 +173,7 @@ def test_confirming_enables_it_and_mints_recovery_codes(session_factory, setting
 
 def test_the_stored_secret_is_encrypted(session_factory, settings, user_id) -> None:
     """⚠️ 库里绝不能有明文 —— 数据库泄露不该等于所有人的第二因子泄露。"""
-    enrolment = start_enrolment(session_factory, settings, user_id=user_id)
+    enrolment = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
     with session_factory() as session:
         row = session.get(TwoFactorSetting, user_id)
         assert row is not None
@@ -192,10 +193,15 @@ def test_recovery_codes_are_stored_hashed(session_factory, settings, user_id) ->
 def test_a_wrong_code_leaves_the_enrolment_pending(session_factory, settings, user_id) -> None:
     """⚠️ 确认失败**不能**生成恢复码 —— 那会让用户拿到一批他以为可用、
     但 2FA 其实没启用的码。"""
-    start_enrolment(session_factory, settings, user_id=user_id)
+    start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
     with pytest.raises(InvalidTotp):
         confirm_enrolment(
-            session_factory, settings, user_id=user_id, code="000000", context=CONTEXT
+            session_factory,
+            settings,
+            user_id=user_id,
+            password_version=0,
+            code="000000",
+            context=CONTEXT,
         )
     with session_factory() as session:
         assert is_enrolled(session, user_id) is False
@@ -209,13 +215,13 @@ def test_enrolling_again_after_confirmation_is_refused(session_factory, settings
     """
     enrol_and_confirm(session_factory, settings, user_id)
     with pytest.raises(TwoFactorAlreadyEnrolled):
-        start_enrolment(session_factory, settings, user_id=user_id)
+        start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
 
 
 def test_an_abandoned_enrolment_can_be_restarted(session_factory, settings, user_id) -> None:
     """没确认过的可以重来 —— 否则扫码扫坏一次就再也注册不了。"""
-    first = start_enrolment(session_factory, settings, user_id=user_id)
-    second = start_enrolment(session_factory, settings, user_id=user_id)
+    first = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
+    second = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
     assert second.secret != first.secret
     assert second.secret_version > first.secret_version
 
@@ -310,7 +316,9 @@ def test_a_recovery_code_works_and_is_single_use(session_factory, settings, user
 def test_regenerating_invalidates_the_old_codes(session_factory, settings, user_id) -> None:
     """⚠️ 不作废旧码的话，重新生成一次就多十个有效码，而用户以为旧的已经失效。"""
     _, old_codes = enrol_and_confirm(session_factory, settings, user_id)
-    new_codes = regenerate_recovery_codes(session_factory, user_id=user_id, context=CONTEXT)
+    new_codes = regenerate_recovery_codes(
+        session_factory, user_id=user_id, password_version=0, context=CONTEXT
+    )
     assert set(new_codes).isdisjoint(old_codes)
 
     with session_factory() as session, pytest.raises(InvalidTotp):
@@ -397,12 +405,19 @@ def test_concurrent_confirm_mints_only_one_batch(
     两个 `confirm` 并发各生成 10 个的话，用户手上会有 **20 个**有效码 ——
     而他只抄了 10 个，另外 10 个躺在库里没人知道。
     """
-    enrolment = start_enrolment(mysql_session_factory, settings, user_id=mysql_user_id)
+    enrolment = start_enrolment(
+        mysql_session_factory, settings, user_id=mysql_user_id, password_version=0
+    )
     code = pyotp.TOTP(enrolment.secret).now()
 
     outcomes = _run_concurrently(
         lambda: confirm_enrolment(
-            mysql_session_factory, settings, user_id=mysql_user_id, code=code, context=CONTEXT
+            mysql_session_factory,
+            settings,
+            user_id=mysql_user_id,
+            password_version=0,
+            code=code,
+            context=CONTEXT,
         )
     )
     assert outcomes.count("ok") == 1, f"只能确认一次，得到 {outcomes}"
@@ -447,16 +462,23 @@ def test_a_reenrolment_between_verify_and_confirm_invalidates_the_confirmation(
     校验之后、置位之前若有人重新 `enrol` 换了密钥，这次确认必须落空 ——
     否则会把一个**从未被验证过的密钥**标成已确认，用户的验证器从此对不上。
     """
-    first = start_enrolment(session_factory, settings, user_id=user_id)
+    first = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
     code = pyotp.TOTP(first.secret).now()
 
     # 模拟交错：确认之前又注册了一次。
-    second = start_enrolment(session_factory, settings, user_id=user_id)
+    second = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
     assert second.secret != first.secret
 
     with pytest.raises(InvalidTotp):
         # 旧密钥算出来的码对新密钥无效 —— 第一道就挡住了。
-        confirm_enrolment(session_factory, settings, user_id=user_id, code=code, context=CONTEXT)
+        confirm_enrolment(
+            session_factory,
+            settings,
+            user_id=user_id,
+            password_version=0,
+            code=code,
+            context=CONTEXT,
+        )
     with session_factory() as session:
         assert is_enrolled(session, user_id) is False
 
