@@ -5217,7 +5217,7 @@ tasks:
     title: 改密码吊销会话第二层：令牌带密码版本号并在各使用点比较，统一认证加锁顺序
     purpose: >-
       按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§2 全部与 §11 的 P2：访问令牌与 pending 令牌加 pwv claim，刷新令牌行写 password_version；签发点按 §2 盘点表取版本号，使用点（require_current_user、complete_second_factor、2FA 注册与确认、重新生成恢复码、refresh_session）按 §2 比较；统一加锁顺序（refresh_session 先锁用户行）；刷新令牌不可用时的判别表；守卫用例。前提：管理员 PR 已合并到 main，它包含 P3（reset_password 在同一事务里递增 password_version）与 app/core/tokens.py 的 issue_access_token、issue_pending_2fa_token 新增 password_version 参数（默认 0）并写入 claim pwv（这两个文件名含 password / tokens，Worker 不能改）。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-086
     acceptance_criteria:
