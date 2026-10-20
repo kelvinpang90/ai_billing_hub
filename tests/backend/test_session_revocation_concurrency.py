@@ -41,7 +41,12 @@
 之后才开始，所以另一方执行同样的语句时钩子已经解除，不会被误停。
 「对方确实在等行锁」不靠睡眠猜：轮询 `information_schema.INNODB_TRX` 里本库连接中
 `trx_state = 'LOCK WAIT'` 的事务（MySQL 专有，这个文件只在 MySQL 上跑）。
-每一处等待都有超时，超时即失败并写明停在哪一步。
+每一处等待都有超时，超时即失败并写明停在哪一步；被等的一方若已经结束（返回或抛错），
+立即失败并带上它的结果，而不是空等到超时。每个用例收尾时先放开所有暂停点、把后台线程
+全部等完（有上限），再清库：上一个用例的线程不能活到下一个用例里去抢同一个邮箱的行。
+
+刷新各行与角色无关，会话一律取自 `/login/totp`（两步登录）；只有「登录与改密码并发」
+一行要 `/login` 本身签发会话，所以用未启用 2FA 的 CUSTOMER。
 
 ⚠️ 行锁、`FOR UPDATE`、锁等待在 SQLite 上都不存在，所以这里只对着真 MySQL 跑：需要
 `BILLING_TEST_DATABASE_URL`，CI 的 MySQL 分片设了它；本地没设时整个文件 skip ——
@@ -57,6 +62,7 @@ import os
 import re
 import threading
 import time
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -125,8 +131,8 @@ REFRESH = "/api/v1/auth/refresh"
 ENROL = "/api/v1/auth/2fa/enrol"
 CONFIRM = "/api/v1/auth/2fa/confirm"
 RECOVERY_CODES = "/api/v1/auth/2fa/recovery-codes"
-# 任何一个已登录接口都经过 `require_current_user`；挑一个只读的。CUSTOMER 的有效令牌在
-# 这里拿 403（过了鉴权、不是管理员），失效的令牌在鉴权那一步就是 401。
+# 任何一个已登录接口都经过 `require_current_user`；挑一个只读的。ADMIN 的有效令牌在
+# 这里拿 200，失效的令牌在鉴权那一步就是 401。
 LOGGED_IN = "/api/v1/admin/audit-logs"
 
 REUSE_WARNING = "Refresh token reuse detected"
@@ -277,14 +283,19 @@ def logs(client: TestClient) -> Iterator[Logs]:
 
 
 @pytest.fixture
-def admin(engine: Engine, probe: Engine, client: TestClient, logs: Logs) -> World:
-    return World(engine, probe, client, logs, role=UserRole.ADMIN)
+def admin(engine: Engine, probe: Engine, client: TestClient, logs: Logs) -> Iterator[World]:
+    world = World(engine, probe, client, logs, role=UserRole.ADMIN)
+    yield world
+    # 先于 `engine` 的收尾（清库）执行：线程都结束了才清。
+    world.finish_backgrounds()
 
 
 @pytest.fixture
-def customer(engine: Engine, probe: Engine, client: TestClient, logs: Logs) -> World:
+def customer(engine: Engine, probe: Engine, client: TestClient, logs: Logs) -> Iterator[World]:
     """A CUSTOMER without 2FA: login hands out a session in one step."""
-    return World(engine, probe, client, logs, role=UserRole.CUSTOMER)
+    world = World(engine, probe, client, logs, role=UserRole.CUSTOMER)
+    yield world
+    world.finish_backgrounds()
 
 
 # --- barriers ----------------------------------------------------------------------------
@@ -318,9 +329,20 @@ class Pause:
         if not self._released.wait(RELEASE_SECONDS):
             raise TimeoutError(f"{self.name}：停在暂停点上 {RELEASE_SECONDS} 秒没有被放行")
 
-    def wait_reached(self) -> None:
-        if not self._reached.wait(REACH_SECONDS):
-            pytest.fail(f"{self.name}：{REACH_SECONDS} 秒内没有走到暂停点")
+    def wait_reached(self, side: Background) -> None:
+        """Wait for `side` to stop here; fail at once if it ends without getting here."""
+        deadline = time.monotonic() + REACH_SECONDS
+        while not self._reached.wait(LOCK_WAIT_POLL_INTERVAL):
+            if side.finished:
+                pytest.fail(
+                    f"{self.name}：没有走到暂停点就结束了 —— {side.describe()}\n"
+                    f"暂停之前经过的语句：{self.before}"
+                )
+            if time.monotonic() >= deadline:
+                pytest.fail(
+                    f"{self.name}：{REACH_SECONDS} 秒内没有走到暂停点 —— {side.describe()}\n"
+                    f"暂停之前经过的语句：{self.before}"
+                )
 
     def release(self) -> None:
         self._released.set()
@@ -329,11 +351,14 @@ class Pause:
 class Background:
     """Run one side of the race on its own thread (and its own connection)."""
 
-    def __init__(self, name: str, target: Callable[[], object]) -> None:
+    def __init__(self, name: str, target: Callable[[], object], peers: list[Background]) -> None:
         self.name = name
         self._outcome: object = None
+        self._trace = ""
         self._done = threading.Event()
-        # daemon：编排出错时卡住的线程不拖住整个 pytest 进程。
+        # 同一个用例里的其他后台线程：超时时一并报出它们在做什么。
+        self._peers = peers
+        # daemon：编排出错时卡住的线程不拖住整个 pytest 进程（收尾仍会等它、等不到即失败）。
         self._thread = threading.Thread(target=self._run, args=(target,), name=name, daemon=True)
         self._thread.start()
 
@@ -342,6 +367,7 @@ class Background:
             self._outcome = target()
         except BaseException as error:  # noqa: BLE001 - 结果由用例断言
             self._outcome = error
+            self._trace = "".join(traceback.format_exception(error))
         finally:
             self._done.set()
 
@@ -349,10 +375,24 @@ class Background:
     def finished(self) -> bool:
         return self._done.is_set()
 
+    def join(self, seconds: float) -> bool:
+        return self._done.wait(seconds)
+
+    def describe(self) -> str:
+        if not self.finished:
+            return f"{self.name}：仍在运行"
+        if isinstance(self._outcome, BaseException):
+            return f"{self.name}：抛出 {self._outcome!r}\n{self._trace}"
+        text_body = getattr(self._outcome, "text", None)
+        if text_body is not None:
+            return f"{self.name}：返回 {self._outcome!r} {text_body}"
+        return f"{self.name}：返回 {self._outcome!r}"
+
     def outcome(self) -> object:
         """Its return value, or the exception it raised."""
         if not self._done.wait(FINISH_SECONDS):
-            pytest.fail(f"{self.name}：{FINISH_SECONDS} 秒内没有结束")
+            others = "；".join(peer.describe() for peer in self._peers if peer is not self)
+            pytest.fail(f"{self.name}：{FINISH_SECONDS} 秒内没有结束（其他线程：{others or '无'}）")
         return self._outcome
 
 
@@ -399,6 +439,9 @@ class World:
         self.logs = logs
         self.settings: Settings = client.app.state.settings
         self.factory = client.app.state.session_factory
+        # 本用例开过的暂停点与后台线程：收尾时全部放开、全部等完。
+        self._pauses: list[Pause] = []
+        self._backgrounds: list[Background] = []
         now = utc_now()
         with self.factory() as session:
             user = User(
@@ -419,6 +462,7 @@ class World:
     def pause(self, pattern: re.Pattern[str], name: str, *, after: bool = False) -> Iterator[Pause]:
         """Stop the first statement matching `pattern` before it runs (or after it, if `after`)."""
         pause = Pause(name)
+        self._pauses.append(pause)
         identifier = "after_cursor_execute" if after else "before_cursor_execute"
 
         def hook(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
@@ -436,6 +480,7 @@ class World:
     def pause_before_commit(self, name: str) -> Iterator[Pause]:
         """Stop the first session of the app's factory that commits, just before it does."""
         pause = Pause(name)
+        self._pauses.append(pause)
 
         def hook(session) -> None:  # noqa: ANN001 - Session
             if pause.take(None, None):
@@ -472,8 +517,11 @@ class World:
         finally:
             event.remove(self.engine, "before_cursor_execute", hook)
 
-    def wait_for_lock_wait(self, step: str) -> list[str]:
-        """Poll INNODB_TRX until a transaction of this database waits for the users row lock."""
+    def wait_for_lock_wait(self, step: str, waiter: Background) -> list[str]:
+        """Poll INNODB_TRX until a transaction of this database waits for the users row lock.
+
+        `waiter` is the side expected to wait: if it has already ended, it never waited.
+        """
         deadline = time.monotonic() + LOCK_WAIT_POLL_SECONDS
         with self.probe.connect() as connection:
             while True:
@@ -481,10 +529,12 @@ class World:
                 connection.rollback()
                 if any(LOCK_USER.search(query) for query in waiting):
                     return waiting
+                if waiter.finished:
+                    pytest.fail(f"{step}：等锁的一方已经结束，没有在等锁 —— {waiter.describe()}")
                 if time.monotonic() >= deadline:
                     pytest.fail(
                         f"{step}：{LOCK_WAIT_POLL_SECONDS} 秒内没有在 INNODB_TRX 里看到"
-                        f"等 users 行锁的 LOCK WAIT（看到的：{waiting}）"
+                        f"等 users 行锁的 LOCK WAIT（看到的：{waiting}）—— {waiter.describe()}"
                     )
                 time.sleep(LOCK_WAIT_POLL_INTERVAL)
 
@@ -501,7 +551,29 @@ class World:
                 connection.rollback()
 
     def background(self, name: str, target: Callable[[], object]) -> Background:
-        return Background(name, target)
+        started = Background(name, target, self._backgrounds)
+        self._backgrounds.append(started)
+        return started
+
+    def finish_backgrounds(self) -> None:
+        """Teardown: let every pause go, then wait (bounded) for every thread this case started.
+
+        ⚠️ 用例中途失败时 `with pause` 已经放行，但后台线程还会接着跑；不等它结束就清库、
+        给下一个用例建同一个邮箱的用户，它手上的行锁与写入会落到下一个用例里。
+        """
+        for pause in self._pauses:
+            pause.release()
+        deadline = time.monotonic() + FINISH_SECONDS
+        stuck = [
+            started
+            for started in self._backgrounds
+            if not started.join(max(deadline - time.monotonic(), 0))
+        ]
+        if stuck:
+            pytest.fail(
+                f"收尾：{FINISH_SECONDS} 秒内这些后台线程没有结束："
+                + "；".join(started.describe() for started in stuck)
+            )
 
     # -- HTTP --
 
@@ -539,10 +611,9 @@ class World:
             access_token=second.json()["data"]["access_token"], refresh_token=self.cookie()
         )
 
-    def sign_in_customer(self) -> SignedIn:
-        data = self.login()
-        assert data["access_token"]
-        return SignedIn(access_token=data["access_token"], refresh_token=self.cookie())
+    def sign_in(self) -> SignedIn:
+        """A fresh ADMIN session for the refresh rows: enrol, then both steps."""
+        return self.sign_in_admin(self.enrol())
 
     def cookie(self) -> str:
         raw = self.client.cookies.get(REFRESH_COOKIE_NAME)
@@ -681,7 +752,7 @@ def test_a_login_that_checked_the_old_password_before_a_reset_issues_dead_tokens
         login = w.background(
             "登录", lambda: w.client.post(LOGIN, json={"email": EMAIL, "password": PASSWORD})
         )
-        pause.wait_reached()
+        pause.wait_reached(login)
         reset = w.background("重置", lambda: w.reset(link)).outcome()
         assert reset is None, f"重置应当成功：{reset!r}"
         pause.release()
@@ -737,7 +808,7 @@ def test_a_second_factor_paused_before_its_transaction_is_refused_after_a_reset(
             "/login/totp",
             lambda: w.client.post(LOGIN_TOTP, json={"pending_token": pending, "code": code}),
         )
-        pause.wait_reached()
+        pause.wait_reached(second)
         reset = w.background("重置", lambda: w.reset(link)).outcome()
         assert reset is None, f"重置应当成功：{reset!r}"
         pause.release()
@@ -776,9 +847,9 @@ def test_a_reset_waits_for_a_second_factor_that_holds_the_user_row(
             "/login/totp",
             lambda: w.client.post(LOGIN_TOTP, json={"pending_token": pending, "code": code}),
         )
-        pause.wait_reached()
+        pause.wait_reached(second)
         reset = w.background("重置", lambda: w.reset(link))
-        w.wait_for_lock_wait("重置在等 /login/totp 持有的用户行锁")
+        w.wait_for_lock_wait("重置在等 /login/totp 持有的用户行锁", reset)
         assert not reset.finished, "重置应当在等锁"
         pause.release()
         response = second.outcome()
@@ -842,7 +913,7 @@ def test_a_wrong_second_factor_releases_the_user_row_before_counting_the_failure
             "/login/totp",
             lambda: w.client.post(LOGIN_TOTP, json={"pending_token": pending, "code": wrong}),
         )
-        pause.wait_reached()
+        pause.wait_reached(second)
         w.assert_user_row_unlocked("失败计数开始写之前")
         pause.release()
         response = second.outcome()
@@ -861,14 +932,14 @@ def test_a_wrong_second_factor_releases_the_user_row_before_counting_the_failure
 # --- 刷新与改密码并发 ----------------------------------------------------------------------
 
 
-def test_a_reset_that_commits_while_a_refresh_waits_before_the_user_lock(customer: World) -> None:
+def test_a_reset_that_commits_while_a_refresh_waits_before_the_user_lock(admin: World) -> None:
     """刷新与改密码并发 ①。
 
     `refresh_session` 在不加锁读出令牌行之后、锁用户行之前停住；重置提交后放行刷新。
     401 `TOKEN_REUSED`，**没有** `TOKEN_REUSED` 审计，同一家族的其他行不被额外吊销。
     """
-    w = customer
-    first = w.sign_in_customer()
+    w = admin
+    first = w.sign_in()
     # 先轮换一次，让家族里有一条「其他行」（已用过的旧行）。
     rotated = w.refresh(first.refresh_token)
     current = rotated.refresh_token
@@ -876,7 +947,7 @@ def test_a_reset_that_commits_while_a_refresh_waits_before_the_user_lock(custome
 
     with w.pause(LOCK_USER, "刷新：读出令牌行之后、锁用户行之前") as pause:
         refresh = w.background("刷新", lambda: w.refresh(current))
-        pause.wait_reached()
+        pause.wait_reached(refresh)
         reset = w.background("重置", lambda: w.reset(link)).outcome()
         assert reset is None, f"重置应当成功：{reset!r}"
         after_reset = {row.id: (row.used_at, row.revoked_at) for row in w.refresh_rows()}
@@ -893,28 +964,29 @@ def test_a_reset_that_commits_while_a_refresh_waits_before_the_user_lock(custome
     w.assert_no_replay_alarm()
 
 
-def test_a_refresh_released_before_a_reset_issues_tokens_the_reset_ends(customer: World) -> None:
+def test_a_refresh_released_before_a_reset_issues_tokens_the_reset_ends(admin: World) -> None:
     """刷新与改密码并发 ②。
 
     同一个暂停点，先放行刷新、刷新提交后再重置：刷新照常返回新令牌，重置提交后新的
     访问令牌与刷新令牌都 401。
     """
-    w = customer
-    first = w.sign_in_customer()
+    w = admin
+    first = w.sign_in()
     rotated = w.refresh(first.refresh_token)
     current = rotated.refresh_token
     link = w.reset_link()
 
     with w.pause(LOCK_USER, "刷新：读出令牌行之后、锁用户行之前") as pause:
         refresh = w.background("刷新", lambda: w.refresh(current))
-        pause.wait_reached()
+        pause.wait_reached(refresh)
         pause.release()
         issued = refresh.outcome()
 
     assert isinstance(issued, IssuedSession), f"刷新应当成功：{issued!r}"
     fresh = SignedIn(access_token=issued.access_token, refresh_token=issued.refresh_token)
-    # 重置之前这一对令牌是有效的：过了鉴权，只是不是管理员。
-    assert_error(w.client.get(LOGGED_IN, headers=bearer(fresh.access_token)), 403, "ADMIN_REQUIRED")
+    # 重置之前这一对令牌是有效的。
+    response = w.client.get(LOGGED_IN, headers=bearer(fresh.access_token))
+    assert response.status_code == 200, response.text
 
     reset = w.background("重置", lambda: w.reset(link)).outcome()
     assert reset is None, f"重置应当成功：{reset!r}"
@@ -926,24 +998,24 @@ def test_a_refresh_released_before_a_reset_issues_tokens_the_reset_ends(customer
     w.assert_no_replay_alarm()
 
 
-def test_a_reset_waits_for_a_refresh_that_holds_the_user_row(customer: World) -> None:
+def test_a_reset_waits_for_a_refresh_that_holds_the_user_row(admin: World) -> None:
     """刷新持锁时改密码（原死锁交错）。
 
     刷新已锁用户行并条件 UPDATE 了旧令牌行、尚未插入新行时停住；重置开始并等用户行锁；
     放行刷新。原先的加锁顺序（先令牌行、插入新行时才碰用户行）在这里会死锁；现在不出现
     死锁错误：刷新先提交并返回新令牌，重置随后拿到锁并提交，新的一对令牌都 401。
     """
-    w = customer
-    session = w.sign_in_customer()
+    w = admin
+    session = w.sign_in()
     link = w.reset_link()
 
     with w.pause(
         MARK_REFRESH_USED, "刷新：已锁用户行、已条件更新旧行、未插入新行", after=True
     ) as pause:
         refresh = w.background("刷新", lambda: w.refresh(session.refresh_token))
-        pause.wait_reached()
+        pause.wait_reached(refresh)
         reset = w.background("重置", lambda: w.reset(link))
-        w.wait_for_lock_wait("重置在等刷新持有的用户行锁")
+        w.wait_for_lock_wait("重置在等刷新持有的用户行锁", reset)
         assert not reset.finished, "重置应当在等锁"
         pause.release()
         issued = refresh.outcome()
@@ -967,14 +1039,14 @@ def test_a_reset_waits_for_a_refresh_that_holds_the_user_row(customer: World) ->
 # --- 死锁兜底 ----------------------------------------------------------------------------
 
 
-def test_a_deadlock_while_inserting_the_new_row_rolls_the_refresh_back(customer: World) -> None:
+def test_a_deadlock_while_inserting_the_new_row_rolls_the_refresh_back(admin: World) -> None:
     """刷新事务插入新行时抛 MySQL 1213 对应的 `OperationalError`。
 
     500 带 `request_id`；旧令牌未被标记已用、没有新行、没有重放审计；同一个刷新令牌
     重试成功。
     """
-    w = customer
-    session = w.sign_in_customer()
+    w = admin
+    session = w.sign_in()
     rows_before = [(row.id, row.used_at, row.revoked_at) for row in w.refresh_rows()]
 
     with w.deadlock_once(INSERT_REFRESH) as fired:
@@ -1006,17 +1078,17 @@ def test_a_deadlock_while_inserting_the_new_row_rolls_the_refresh_back(customer:
 # --- 刷新与登出并发 ----------------------------------------------------------------------
 
 
-def test_a_logout_while_a_refresh_holds_the_user_row_is_not_a_replay(customer: World) -> None:
+def test_a_logout_while_a_refresh_holds_the_user_row_is_not_a_replay(admin: World) -> None:
     """刷新在锁用户行之后、条件 UPDATE 之前停住，另一个连接登出同一家族后放行刷新。
 
     401 `TOKEN_REUSED`，没有重放审计（修正既有误报）。
     """
-    w = customer
-    session = w.sign_in_customer()
+    w = admin
+    session = w.sign_in()
 
     with w.pause(MARK_REFRESH_USED, "刷新：已锁用户行、条件更新之前") as pause:
         refresh = w.background("刷新", lambda: w.refresh(session.refresh_token))
-        pause.wait_reached()
+        pause.wait_reached(refresh)
         logged_out = w.background(
             "登出", lambda: logout(w.factory, raw_token=session.refresh_token, context=CONTEXT)
         ).outcome()
@@ -1037,21 +1109,21 @@ def test_a_logout_while_a_refresh_holds_the_user_row_is_not_a_replay(customer: W
 # --- 真正的重放不受影响（两个并发刷新抢同一行） --------------------------------------------
 
 
-def test_two_refreshes_racing_for_one_row_still_count_as_a_replay(customer: World) -> None:
+def test_two_refreshes_racing_for_one_row_still_count_as_a_replay(admin: World) -> None:
     """两个并发刷新抢同一行：与现在一致，一个成功，另一个走 `_treat_as_replay`。
 
     第一个持有用户行锁时停住；第二个此时读到的令牌行快照还没被用过，然后等用户行锁。
     放行第一个，它提交；第二个拿到锁后条件更新落空、加锁重读看到 `used_at` 已置，
     按重放处理：整条链吊销、写 `TOKEN_REUSED` 审计、记 warning。
     """
-    w = customer
-    session = w.sign_in_customer()
+    w = admin
+    session = w.sign_in()
 
     with w.pause(LOCK_USER, "第一个刷新：已锁用户行", after=True) as pause:
         first = w.background("第一个刷新", lambda: w.refresh(session.refresh_token))
-        pause.wait_reached()
+        pause.wait_reached(first)
         second = w.background("第二个刷新", lambda: w.refresh(session.refresh_token))
-        w.wait_for_lock_wait("第二个刷新在等用户行锁")
+        w.wait_for_lock_wait("第二个刷新在等用户行锁", second)
         assert not second.finished, "第二个刷新应当在等锁"
         pause.release()
         winner = first.outcome()
@@ -1223,7 +1295,7 @@ def test_a_reset_that_commits_first_stops_the_write(admin: World, name: str) -> 
 
     with w.pause(LOCK_USER, f"{name}：锁用户行之前") as pause:
         write = w.background(name, writer.write)
-        pause.wait_reached()
+        pause.wait_reached(write)
         reset = w.background("重置", lambda: w.reset(link)).outcome()
         assert reset is None, f"重置应当成功：{reset!r}"
         pause.release()
@@ -1248,9 +1320,9 @@ def test_a_write_that_commits_first_stands_and_the_reset_ends_its_session(
 
     with w.pause_before_commit(f"{name}：提交之前") as pause:
         write = w.background(name, writer.write)
-        pause.wait_reached()
+        pause.wait_reached(write)
         reset = w.background("重置", lambda: w.reset(link))
-        w.wait_for_lock_wait(f"重置在等 {name} 持有的用户行锁")
+        w.wait_for_lock_wait(f"重置在等 {name} 持有的用户行锁", reset)
         assert not reset.finished, "重置应当在等锁"
         pause.release()
         outcome = write.outcome()
@@ -1286,7 +1358,7 @@ def test_regenerating_codes_after_authentication_but_before_the_service_is_refus
                 RECOVERY_CODES, json={"password": PASSWORD}, headers=bearer(session.access_token)
             ),
         )
-        pause.wait_reached()
+        pause.wait_reached(regenerate)
         # 鉴权确实已经过了：它那次不加锁的读用户发生在暂停之前。
         assert any(READ_USER.search(statement) for statement in pause.before), pause.before
         reset = w.background("重置", lambda: w.reset(link)).outcome()
