@@ -393,16 +393,16 @@ def authenticate(
 
         # CUSTOMER 且未启用 2FA：spec §54 说客户侧「supported」，是否强制由配置
         # 决定（Phase 4 的事）。现在直接发令牌。
-        return LoginOutcome(
-            issued=_complete_login(
-                session,
-                settings,
-                user=user,
-                context=context,
-                now=moment,
-                password_version=password_version,
-            )
+        issued = _complete_login(
+            session,
+            settings,
+            user=user,
+            context=context,
+            now=moment,
+            password_version=password_version,
         )
+        session.commit()
+        return LoginOutcome(issued=issued)
 
 
 def _complete_login(
