@@ -23,6 +23,7 @@ from app.models.auth import (
     OutboxStatus,
     PasswordResetToken,
     RefreshToken,
+    TokenPurpose,
     User,
     UserRole,
     UserStatus,
@@ -309,6 +310,16 @@ def test_the_token_expires_at_the_configured_ttl(session_factory) -> None:
     assert token_rows(session_factory)[0].expires_at == moment + dt.timedelta(seconds=60)
 
 
+def test_the_token_is_written_as_a_password_reset_token(
+    session_factory, settings: Settings
+) -> None:
+    """用途由签发方写明，不靠列默认值（设计闸门 #368 v10 §2）。"""
+    make_user(session_factory)
+    issue_token(session_factory, settings)
+
+    assert [row.purpose for row in token_rows(session_factory)] == [TokenPurpose.PASSWORD_RESET]
+
+
 # --- 重置：单用、并发、会话吊销 -------------------------------------------------
 
 
@@ -477,6 +488,45 @@ def test_an_unknown_token_is_refused(session_factory, settings: Settings) -> Non
             new_password=NEW_PASSWORD,
             context=CONTEXT,
         )
+
+
+@pytest.mark.parametrize("new_password", [NEW_PASSWORD, "短"])
+def test_an_invitation_token_cannot_reset_a_password(
+    session_factory, settings: Settings, new_password: str
+) -> None:
+    """⚠️ 两种用途互相用不了（设计闸门 #368 v10 §2「邀请邮件与重置的隔离」）。
+
+    绕过服务直接造一张「状态对、用途错」的令牌：用户是 `ACTIVE`、令牌未用未过期，
+    只有用途是 `INVITATION`。它必须和不存在的令牌一样被拒（弱密码也一样，错误码
+    不取决于密码内容），而且不消费令牌、不动密码与版本号、不写审计。
+    """
+    user = make_user(session_factory)
+    raw = "an-invitation-token"
+    moment = utc_now()
+    with session_factory() as session:
+        session.add(
+            PasswordResetToken(
+                user_id=user.id,
+                token_hash=hash_opaque_token(raw),
+                expires_at=moment + dt.timedelta(hours=72),
+                created_at=moment,
+                purpose=TokenPurpose.INVITATION,
+            )
+        )
+        session.commit()
+
+    with pytest.raises(InvalidResetToken):
+        reset_password(
+            session_factory, settings, token=raw, new_password=new_password, context=CONTEXT
+        )
+
+    assert [row.used_at for row in token_rows(session_factory)] == [None]
+    with session_factory() as session:
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert verify_password(stored.password_hash, PASSWORD)
+        assert stored.password_version == 0
+    assert audit_actions(session_factory) == []
 
 
 def test_resetting_revokes_every_live_session(session_factory, settings: Settings) -> None:
