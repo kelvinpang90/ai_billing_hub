@@ -36,6 +36,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
     delete,
     func,
@@ -62,7 +63,15 @@ from app.models.ai_catalog import (
     UsageMeterComponent,
     UsageMeterType,
 )
-from app.models.auth import AuditAction, AuditLog, RefreshToken, User
+from app.models.auth import (
+    AuditAction,
+    AuditLog,
+    PasswordResetToken,
+    RefreshToken,
+    TokenPurpose,
+    User,
+    UserStatus,
+)
 from app.models.base import Base
 from app.models.fx_rates import FxFetchAttempt, FxRateLock, FxRateVersion
 from app.models.integration import (
@@ -6237,4 +6246,443 @@ def test_0024_backfills_zero_and_round_trip_changes_only_its_columns(
     finally:
         command.upgrade(alembic_config, "head")
         _clean_0024(engine)
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0025_customer_portal_accounts（AIH-TASK-089，设计闸门 #368 v10）
+#
+# The first cases need no database: the revision chain; the columns, unique constraint, foreign
+# key and checks in the migration equal the models' and design §2's; upgrade runs in the design
+# order (the unique index before the foreign key) and downgrade undoes it in reverse; the
+# downgrade refuses before any DDL while a CUSTOMER or an INVITATION token exists. On a real MySQL:
+# all of it exists at head; rows written before 0025 read their defaults after it; the round trip
+# 0025 → 0024 → 0025 changes nothing else; the downgrade with such a row is refused and changes
+# nothing (design §7 "迁移"). What the constraints refuse is test_portal_accounts_db.py
+# (design §7 "数据库兜底").
+# ---------------------------------------------------------------------------
+
+_REVISION_0025 = "0025_customer_portal_accounts"
+_MIGRATION_0025 = pathlib.Path("alembic/versions/20261019_0025_customer_portal_accounts.py")
+_USERS_0025 = "users"
+_TOKENS_0025 = "password_reset_tokens"
+_USER_COLUMNS_0025 = ("tenant_id", "activated_at")
+_PURPOSE_0025 = "purpose"
+_UNIQUE_0025 = "uq_users_tenant"
+_FK_0025 = "fk_users_tenant"
+# 0004's index; 0025 must leave it as it is (design §2).
+_TOKENS_INDEX_0025 = "ix_password_reset_tokens_user"
+
+# Design §2 "数据库": name → condition, in upgrade order. No "a CUSTOMER has a tenant" check
+# (design §9 alternative F).
+_DESIGN_USER_CHECKS_0025 = {
+    "ck_users_admin_no_tenant": "role = 'CUSTOMER' OR tenant_id IS NULL",
+    "ck_users_status": "status IN ('ACTIVE', 'INVITED', 'DISABLED')",
+    "ck_users_invited_customer": "status <> 'INVITED' OR role = 'CUSTOMER'",
+}
+_DESIGN_TOKEN_CHECKS_0025 = {
+    "ck_password_reset_tokens_purpose": "purpose IN ('PASSWORD_RESET', 'INVITATION')",
+}
+
+# Design §8 "回滚或前滚": the downgrade refuses while either exists.
+_DESIGN_LOSSY_0025 = [
+    "SELECT 1 FROM users WHERE role = 'CUSTOMER' LIMIT 1",
+    "SELECT 1 FROM password_reset_tokens WHERE purpose = 'INVITATION' LIMIT 1",
+]
+
+_EXPECTED_0025_UPGRADE = [
+    ("add_column", "users"),
+    ("add_column", "users"),
+    ("create_unique_constraint", "uq_users_tenant"),
+    ("create_foreign_key", "fk_users_tenant"),
+    ("create_check_constraint", "ck_users_admin_no_tenant"),
+    ("create_check_constraint", "ck_users_status"),
+    ("create_check_constraint", "ck_users_invited_customer"),
+    ("add_column", "password_reset_tokens"),
+    ("create_check_constraint", "ck_password_reset_tokens_purpose"),
+]
+
+# Checks before the columns they name (MySQL refuses the other order); the foreign key before
+# the unique index it uses; password_reset_tokens first.
+_EXPECTED_0025_DOWNGRADE = [
+    (
+        "execute",
+        ("ALTER TABLE password_reset_tokens DROP CHECK ck_password_reset_tokens_purpose",),
+        {},
+    ),
+    ("drop_column", ("password_reset_tokens", "purpose"), {}),
+    ("execute", ("ALTER TABLE users DROP CHECK ck_users_invited_customer",), {}),
+    ("execute", ("ALTER TABLE users DROP CHECK ck_users_status",), {}),
+    ("execute", ("ALTER TABLE users DROP CHECK ck_users_admin_no_tenant",), {}),
+    ("drop_constraint", ("fk_users_tenant", "users"), {"type_": "foreignkey"}),
+    ("drop_constraint", ("uq_users_tenant", "users"), {"type_": "unique"}),
+    ("drop_column", ("users", "activated_at"), {}),
+    ("drop_column", ("users", "tenant_id"), {}),
+]
+
+_USERS_FK_DELETE_RULE_0025 = text(
+    "SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS"
+    " WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'users'"
+    " AND CONSTRAINT_NAME = 'fk_users_tenant'"
+)
+_ALEMBIC_VERSION = text("SELECT version_num FROM alembic_version")
+
+# Rows written at 0024 the way the code before 0025 writes them: no tenant, no purpose.
+_EMAIL_0025 = "migration-0025@portal-accounts-test.example.com"
+_TOKEN_HASH_0025 = "25" * 32
+_INSERT_USER_0025 = text(
+    "INSERT INTO users (email, password_hash, role, status, failed_login_count, lockout_level,"
+    " created_at, updated_at) VALUES (:email, 'not-a-real-hash', :role, 'ACTIVE', 0, 0,"
+    " :now, :now)"
+)
+_INSERT_TOKEN_0025 = text(
+    "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, created_at)"
+    " SELECT id, :token_hash, :expires_at, :now FROM users WHERE email = :email"
+)
+
+
+def _load_0025() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0025", _MIGRATION_0025)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _CallRecorder0025:
+    """Stands in for `alembic.op` and keeps each call's positional and keyword arguments.
+
+    `bind` answers the downgrade's data checks; without one the migration is in `--sql` mode."""
+
+    def __init__(self, bind: _DataBind | None = None) -> None:
+        self.bind = bind
+        self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    def get_context(self) -> SimpleNamespace:
+        return SimpleNamespace(as_sql=self.bind is None)
+
+    def get_bind(self) -> _DataBind | None:
+        return self.bind
+
+    def __getattr__(self, name: str):
+        def record(*args: object, **kwargs: object) -> None:
+            self.calls.append((name, args, kwargs))
+
+        return record
+
+
+def test_0025_follows_0024() -> None:
+    migration = _load_0025()
+
+    assert migration.revision == _REVISION_0025
+    assert migration.down_revision == _REVISION_0024
+
+
+def test_0025_checks_and_columns_are_the_ones_the_models_declare() -> None:
+    migration = _load_0025()
+    user_checks = {name: _normalised(rule) for name, rule in migration._USER_CHECKS.items()}
+    token_checks = {name: _normalised(rule) for name, rule in migration._TOKEN_CHECKS.items()}
+
+    assert list(user_checks.items()) == list(_DESIGN_USER_CHECKS_0025.items())
+    assert token_checks == _DESIGN_TOKEN_CHECKS_0025
+    declared_user = _declared_checks(User)
+    assert {name: declared_user[name] for name in user_checks} == user_checks
+    assert _declared_checks(PasswordResetToken) == token_checks
+    # The two of 0024 and the three of 0025, and nothing that forces a CUSTOMER onto a tenant.
+    assert set(declared_user) == {"ck_users_password_version"} | set(user_checks)
+
+    # The status check lists exactly the enum; the purpose check exactly the purposes.
+    assert {member.value for member in UserStatus} == {"ACTIVE", "INVITED", "DISABLED"}
+    assert {member.value for member in TokenPurpose} == {"PASSWORD_RESET", "INVITATION"}
+
+    columns = User.__table__.c
+    assert isinstance(columns.tenant_id.type.dialect_impl(mysql.dialect()), BigInteger)
+    assert columns.tenant_id.nullable is True
+    [foreign_key] = columns.tenant_id.foreign_keys
+    assert (foreign_key.name, foreign_key.target_fullname) == (_FK_0025, "tenants.id")
+    assert foreign_key.ondelete == "RESTRICT"
+    assert isinstance(columns.activated_at.type, DateTime)
+    assert columns.activated_at.nullable is True
+    unique = {
+        str(constraint.name): [column.name for column in constraint.columns]
+        for constraint in User.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    assert unique[_UNIQUE_0025] == ["tenant_id"]
+
+    purpose = PasswordResetToken.__table__.c.purpose
+    assert purpose.type.length == migration._PURPOSE_LENGTH == 32
+    assert purpose.nullable is False
+    assert purpose.default.arg == TokenPurpose.PASSWORD_RESET
+    assert str(purpose.server_default.arg) == migration._PURPOSE_DEFAULT == "PASSWORD_RESET"
+    # Indexes unchanged (design §2): still only 0004's, and none on `purpose`.
+    indexes = {
+        str(index.name): [column.name for column in index.columns]
+        for index in PasswordResetToken.__table__.indexes
+    }
+    assert indexes == {_TOKENS_INDEX_0025: ["user_id", "used_at"]}
+
+
+def test_0025_upgrade_has_the_design_order_and_downgrade_reverses(monkeypatch) -> None:
+    migration = _load_0025()
+    upgrade = _CallRecorder0025()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert [(name, args[0]) for name, args, _ in upgrade.calls] == [
+        (name, target) for name, target in _EXPECTED_0025_UPGRADE
+    ]
+    added = [args for name, args, _ in upgrade.calls if name == "add_column"]
+    assert [(table, column.name) for table, column in added] == [
+        ("users", "tenant_id"),
+        ("users", "activated_at"),
+        ("password_reset_tokens", "purpose"),
+    ]
+    (_, tenant_id), (_, activated_at), (_, purpose) = added
+    assert isinstance(tenant_id.type, BigInteger) and tenant_id.nullable is True
+    assert isinstance(activated_at.type, DateTime) and activated_at.nullable is True
+    assert isinstance(purpose.type, String) and purpose.type.length == 32
+    assert purpose.nullable is False
+    assert str(purpose.server_default.arg) == "PASSWORD_RESET"
+    for name, args, kwargs in upgrade.calls:
+        if name == "create_unique_constraint":
+            assert args == (_UNIQUE_0025, "users", ["tenant_id"])
+        elif name == "create_foreign_key":
+            assert args == (_FK_0025, "users", "tenants", ["tenant_id"], ["id"])
+            assert kwargs == {"ondelete": "RESTRICT"}
+        elif name == "create_check_constraint":
+            check, table, condition = args
+            design = _DESIGN_USER_CHECKS_0025 if table == "users" else _DESIGN_TOKEN_CHECKS_0025
+            assert _normalised(condition) == design[check], check
+    # No index is built or dropped (design §2), and nothing is backfilled.
+    assert not [name for name, _, _ in upgrade.calls if "index" in name or name == "execute"]
+
+    bind = _DataBind(set())
+    downgrade = _CallRecorder0025(bind)
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.calls == _EXPECTED_0025_DOWNGRADE
+    assert [_normalised(query) for query in bind.asked] == _DESIGN_LOSSY_0025
+
+    # `--sql` cannot read data: the checks are skipped, the DDL is the same.
+    offline = _CallRecorder0025()
+    monkeypatch.setattr(migration, "op", offline)
+    migration.downgrade()
+    assert offline.calls == _EXPECTED_0025_DOWNGRADE
+
+
+@pytest.mark.parametrize("lossy", range(len(_DESIGN_LOSSY_0025)))
+def test_0025_downgrade_refuses_before_any_ddl_with_a_customer_or_an_invitation(
+    monkeypatch, lossy: int
+) -> None:
+    """⚠️ MySQL DDL is not transactional: the refusal comes before the first DROP."""
+    migration = _load_0025()
+    queries = list(migration._LOSSY)
+    assert [_normalised(query) for query in queries] == _DESIGN_LOSSY_0025
+    recorder = _CallRecorder0025(_DataBind({queries[lossy]}))
+    monkeypatch.setattr(migration, "op", recorder)
+
+    with pytest.raises(RuntimeError, match="Cannot downgrade customer portal accounts") as raised:
+        migration.downgrade()
+
+    # The reason names what was found.
+    assert ("CUSTOMER user", "INVITATION token")[lossy] in str(raised.value)
+    assert recorder.calls == []
+
+
+def _checks_0025() -> set[tuple[str, str]]:
+    return {("users", name) for name in _DESIGN_USER_CHECKS_0025} | {
+        ("password_reset_tokens", name) for name in _DESIGN_TOKEN_CHECKS_0025
+    }
+
+
+def _without_0025(snapshot: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    """`snapshot` with 0025's columns, unique index and foreign key taken out."""
+    stripped = {table: dict(shape) for table, shape in snapshot.items()}
+    dropped_columns = {_USERS_0025: set(_USER_COLUMNS_0025), _TOKENS_0025: {_PURPOSE_0025}}
+    for table, names in dropped_columns.items():
+        shape = stripped[table]
+        for key in ("columns", "indexes", "unique", "foreign_keys"):
+            entries = shape[key]
+            assert isinstance(entries, list)
+            if key == "columns":
+                shape[key] = [entry for entry in entries if entry[0] not in names]
+            else:
+                shape[key] = [
+                    entry for entry in entries if entry[0] not in (_UNIQUE_0025, _FK_0025)
+                ]
+    return stripped
+
+
+def _clean_0025(engine: Engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM password_reset_tokens WHERE token_hash = :token_hash"),
+            {"token_hash": _TOKEN_HASH_0025},
+        )
+        connection.execute(text("DELETE FROM users WHERE email = :email"), {"email": _EMAIL_0025})
+
+
+def _write_rows_0025(engine: Engine, role: str) -> None:
+    with engine.begin() as connection:
+        connection.execute(_INSERT_USER_0025, {"email": _EMAIL_0025, "role": role, "now": _NOW})
+        connection.execute(
+            _INSERT_TOKEN_0025,
+            {
+                "email": _EMAIL_0025,
+                "token_hash": _TOKEN_HASH_0025,
+                "now": _NOW,
+                "expires_at": _NOW + dt.timedelta(hours=1),
+            },
+        )
+
+
+def _rows_0025(engine: Engine) -> tuple[tuple[object, ...], str]:
+    """Our user's tenant and activation time, and our token's purpose."""
+    with engine.connect() as connection:
+        user = connection.execute(
+            text("SELECT tenant_id, activated_at FROM users WHERE email = :email"),
+            {"email": _EMAIL_0025},
+        ).one()
+        purpose = connection.execute(
+            text("SELECT purpose FROM password_reset_tokens WHERE token_hash = :token_hash"),
+            {"token_hash": _TOKEN_HASH_0025},
+        ).scalar_one()
+    return tuple(user), str(purpose)
+
+
+def _alembic_version(engine: Engine) -> str:
+    with engine.connect() as connection:
+        return str(connection.execute(_ALEMBIC_VERSION).scalar_one())
+
+
+@needs_mysql
+def test_0025_columns_and_constraints_exist_at_head(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        inspector = inspect(engine)
+        users = {c["name"]: c for c in inspector.get_columns("users")}
+        assert isinstance(users["tenant_id"]["type"], BigInteger)
+        assert users["tenant_id"]["nullable"] is True
+        assert isinstance(users["activated_at"]["type"], DateTime)
+        assert users["activated_at"]["nullable"] is True
+        assert (_UNIQUE_0025, ["tenant_id"]) in [
+            (u["name"], u["column_names"]) for u in inspector.get_unique_constraints("users")
+        ]
+        # The foreign key uses the unique index: no second index on `tenant_id`.
+        assert [
+            (i["name"], bool(i["unique"]))
+            for i in inspector.get_indexes("users")
+            if "tenant_id" in i["column_names"]
+        ] == [(_UNIQUE_0025, True)]
+        foreign_keys = [fk for fk in inspector.get_foreign_keys("users") if fk["name"] == _FK_0025]
+        assert [
+            (fk["constrained_columns"], fk["referred_table"], fk["referred_columns"])
+            for fk in foreign_keys
+        ] == [(["tenant_id"], "tenants", ["id"])]
+        with engine.connect() as connection:
+            assert connection.execute(_USERS_FK_DELETE_RULE_0025).scalar_one() == "RESTRICT"
+
+        tokens = {c["name"]: c for c in inspector.get_columns("password_reset_tokens")}
+        assert isinstance(tokens["purpose"]["type"], String)
+        assert tokens["purpose"]["type"].length == 32
+        assert tokens["purpose"]["nullable"] is False
+        assert str(tokens["purpose"]["default"]).strip("'") == "PASSWORD_RESET"
+        # Indexes unchanged: 0004's is there as it was, none on `purpose`.
+        token_indexes = {
+            str(i["name"]): (tuple(i["column_names"]), bool(i["unique"]))
+            for i in inspector.get_indexes("password_reset_tokens")
+        }
+        assert token_indexes[_TOKENS_INDEX_0025] == (("user_id", "used_at"), False)
+        assert not [name for name, (cols, _) in token_indexes.items() if "purpose" in cols]
+    finally:
+        engine.dispose()
+
+    assert _checks_0025() <= _all_checks()
+
+
+@needs_mysql
+def test_0025_backfills_defaults_and_round_trip_changes_only_its_own(
+    alembic_config: Config,
+) -> None:
+    """Design §7 "迁移": a reset token written before 0025 reads `PASSWORD_RESET` after it and an
+    existing ADMIN satisfies the new checks; 0025 → 0024 → 0025 leaves every other table, column,
+    key, check and trigger as it was."""
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    _clean_0025(engine)
+    try:
+        command.downgrade(alembic_config, _REVISION_0024)
+        without = _schema_snapshot(engine)
+        checks_without = _all_checks()
+        triggers = _all_triggers()
+        assert not _checks_0025() & checks_without
+        assert _without_0025(without) == without
+
+        _write_rows_0025(engine, "ADMIN")
+
+        command.upgrade(alembic_config, _REVISION_0025)
+        at_0025 = _schema_snapshot(engine)
+        assert _without_0025(at_0025) == without
+        assert at_0025 != without
+        assert _all_checks() == checks_without | _checks_0025()
+        assert _all_triggers() == triggers
+        assert _rows_0025(engine) == ((None, None), "PASSWORD_RESET")
+
+        command.downgrade(alembic_config, _REVISION_0024)
+        assert _schema_snapshot(engine) == without
+        assert _all_checks() == checks_without
+        assert _all_triggers() == triggers
+
+        command.upgrade(alembic_config, _REVISION_0025)
+        assert _schema_snapshot(engine) == at_0025
+        assert _all_checks() == checks_without | _checks_0025()
+        assert _all_triggers() == triggers
+        assert _rows_0025(engine) == ((None, None), "PASSWORD_RESET")
+    finally:
+        command.upgrade(alembic_config, "head")
+        _clean_0025(engine)
+        engine.dispose()
+
+
+@needs_mysql
+@pytest.mark.parametrize("found", ["customer", "invitation"])
+def test_0025_downgrade_refuses_with_a_customer_or_an_invitation(
+    alembic_config: Config, found: str
+) -> None:
+    """Design §8 "回滚或前滚": with a CUSTOMER user, or with an INVITATION token, the downgrade
+    refuses before any DDL; the schema and `alembic_version` stay at 0025."""
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION_0025)
+    engine = create_engine(TEST_DATABASE_URL)
+    _clean_0025(engine)
+    try:
+        # A CUSTOMER without a tenant is allowed (design §9 alternative F); the token is an
+        # ordinary row made an invitation.
+        _write_rows_0025(engine, "CUSTOMER" if found == "customer" else "ADMIN")
+        if found == "invitation":
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE password_reset_tokens SET purpose = 'INVITATION'"
+                        " WHERE token_hash = :token_hash"
+                    ),
+                    {"token_hash": _TOKEN_HASH_0025},
+                )
+        before = _schema_snapshot(engine)
+        checks = _all_checks()
+        triggers = _all_triggers()
+
+        with pytest.raises(RuntimeError, match="Cannot downgrade customer portal accounts"):
+            command.downgrade(alembic_config, _REVISION_0024)
+
+        assert _alembic_version(engine) == _REVISION_0025
+        assert _schema_snapshot(engine) == before
+        assert _all_checks() == checks
+        assert _all_triggers() == triggers
+    finally:
+        _clean_0025(engine)
+        command.upgrade(alembic_config, "head")
         engine.dispose()
