@@ -5319,7 +5319,7 @@ tasks:
     title: 客户门户认证第一层：用户挂租户、邀请状态与令牌用途的迁移
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2「数据库」、§8 与 §11 任务 A：迁移 alembic/versions/20261019_0025_customer_portal_accounts.py（revision 0025_customer_portal_accounts，down_revision 0024_password_version）给 users 加 tenant_id（外键 fk_users_tenant）、activated_at、唯一约束 uq_users_tenant 与三条 CHECK，给 password_reset_tokens 加 purpose 列与 CHECK（索引不动）；模型同步（UserStatus 加 INVITED）；表结构文档补上。只改表结构与模型；业务规则属于 AIH-TASK-090 与 091。前提：设计闸门 #369 的实现（AIH-TASK-086、管理员 PR、AIH-TASK-087、AIH-TASK-088）已全部合并。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-088
     acceptance_criteria:
