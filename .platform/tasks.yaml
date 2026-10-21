@@ -5273,7 +5273,7 @@ tasks:
     title: 改密码吊销会话第三层：改密码与登录、刷新、二次验证及认证材料写入的并发测试
     purpose: >-
       按 docs/design/AIH-TASK-086-session-revocation.md（设计闸门 #369 已批准 v6）§7 与 §11 的 P2：AIH-TASK-087 的并发部分，只写测试。新增 tests/backend/test_session_revocation_concurrency.py，在真 MySQL 上用两个连接与屏障验证设计 §7 的全部并发行。只改这一个测试文件；测试暴露实现缺陷时停下说明，不改产品代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-087
     acceptance_criteria:
