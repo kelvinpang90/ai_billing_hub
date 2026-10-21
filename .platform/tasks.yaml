@@ -5432,7 +5432,7 @@ tasks:
     title: 客户门户认证第三层：门户账号的查看、开通、重发邀请与接受邀请服务
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2、§4、§5、§6 与 §11 任务 B 的另一半：新增 app/services/portal_accounts.py 的查看、开通、重发邀请、接受邀请四个函数；停用、启用、重置 2FA 属于 AIH-TASK-098（按登记前预审的规模提示拆出）。没有任何 HTTP 入口，接口属于 AIH-TASK-093 与 094。重置服务只认 PASSWORD_RESET 用途那一处在 app/services/password_reset.py，文件名含 password、Worker 不能改，由管理员在 AIH-TASK-089 合并之后、本任务开启之前以 PR 完成。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-090
     acceptance_criteria:
