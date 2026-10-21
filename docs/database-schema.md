@@ -326,13 +326,36 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 
 ---
 
-## `users`（spec §53；T0.8a 迁移 `0002_auth_tables` 建表，AIH-TASK-086 迁移 `0024_password_version` 加 `password_version`）
+## `users`（spec §53；T0.8a 迁移 `0002_auth_tables` 建表，AIH-TASK-086 迁移 `0024_password_version` 加 `password_version`，AIH-TASK-089 迁移 `0025_customer_portal_accounts` 加 `tenant_id`、`activated_at` 与门户账号的约束）
 
-这里只写本任务涉及的列与约束，其余列见模型 `app/models/auth.py` 的 `User`。
+这里只写这几个任务涉及的列与约束，其余列见模型 `app/models/auth.py` 的 `User`。
 
 | 列 | 类型 | 约束 |
 | --- | --- | --- |
+| `status` | VARCHAR(64) | 非空，`UserStatus` 之一（非原生 enum）；0025 起 `CHECK (status IN ('ACTIVE', 'INVITED', 'DISABLED'))`（`ck_users_status`） |
 | `password_version` | INT | 非空，服务器端默认 0（迁移时已有行取 0），`CHECK (password_version >= 0)`（`ck_users_password_version`）；不建索引 |
+| `tenant_id` | BIGINT | 可空；外键 `fk_users_tenant` → `tenants.id`，`ON DELETE RESTRICT`；`UNIQUE (tenant_id)`（`uq_users_tenant`，外键用的就是这个索引）。迁移时已有行为 NULL |
+| `activated_at` | DATETIME | 可空；客户第一次接受邀请的时刻。迁移时已有行为 NULL |
+
+### ADMIN 与 CUSTOMER（设计闸门 #368 v10 §2「数据库」、§4）
+
+| | ADMIN | CUSTOMER（门户账号） |
+| --- | --- | --- |
+| `tenant_id` | 一定为 NULL（`ck_users_admin_no_tenant`：`role = 'CUSTOMER' OR tenant_id IS NULL`） | 开通时写入所属租户，之后没有任何接口能改；一个租户最多一个（`uq_users_tenant`，spec §52） |
+| `status` | `ACTIVE` / `DISABLED` | `INVITED` → `ACTIVE` ⇄ `DISABLED`；`INVITED` 只属于 CUSTOMER（`ck_users_invited_customer`：`status <> 'INVITED' OR role = 'CUSTOMER'`） |
+| `activated_at` | 不用，NULL | 第一次接受邀请时写入；重新启用时为空回到 `INVITED`，否则回到 `ACTIVE` |
+| 创建入口 | `create-admin` CLI | 管理员开通门户账号（AIH-TASK-091 / 094） |
+
+状态取值：
+
+- `ACTIVE`：可以登录。
+- `INVITED`：已开通、还没接受邀请。密码哈希是一个丢弃了原文的随机秘密，不可能凭密码登录。
+- `DISABLED`：已停用，不能登录。
+
+- ⚠️ 「CUSTOMER 一定属于某个租户」**刻意不是**数据库约束（设计 §9 备选 F）：唯一的创建入口总是写
+  `tenant_id`，`require_customer` 拒绝没有租户的 CUSTOMER。现有测试造的不挂租户的 CUSTOMER 因此照常可插入。
+- MySQL 与 SQLite 的唯一索引都允许多个 NULL，所以任意多个 ADMIN 不受 `uq_users_tenant` 限制。
+- 租户只停用、不删除；`RESTRICT` 让挂着门户账号的租户删不掉。
 
 用途（设计闸门 #369 v6 §2「核心规则」）：密码版本号。签发任何令牌时把验证密码时读到的这一行上的值写进令牌
 （访问令牌与 pending 令牌的 claim `pwv`、`refresh_tokens.password_version`），使用时与这里的当前值比较，
@@ -354,6 +377,25 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 
 0024 只加列与 CHECK：递增（P3，`reset_password`）与签发、比较（P2，AIH-TASK-087）不在本迁移里。
 迁移的锁表、失败处理与回滚分析见迁移文件头。
+
+## `password_reset_tokens`（spec §53；T0.8d 迁移 `0004_password_reset_outbox` 建表，AIH-TASK-089 迁移 `0025_customer_portal_accounts` 加 `purpose`）
+
+这里只写本任务涉及的列与约束，其余列见模型 `app/models/auth.py` 的 `PasswordResetToken`。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `purpose` | VARCHAR(32) | 非空，服务器端默认 `PASSWORD_RESET`（迁移时已有行取它），`CHECK (purpose IN ('PASSWORD_RESET', 'INVITATION'))`（`ck_password_reset_tokens_purpose`）；不建索引 |
+
+用途（设计闸门 #368 v10 §2）：一张表装两种一次性令牌，`PASSWORD_RESET` 是重置密码，`INVITATION` 是门户账号
+邀请。⚠️ **两种令牌必须按用途隔离**（设计 §2「邀请邮件与重置的隔离」）：重置只认 `PASSWORD_RESET`，接受邀请只认
+`INVITATION`，按令牌查找或消费的查询都带上用途条件。旧代码插入时不写这一列，取默认值，所以「新迁移 + 旧代码」
+窗口里重置照常。
+
+索引不变：按令牌查找走 `token_hash` 的唯一索引，按用户作废走 `ix_password_reset_tokens_user (user_id, used_at)`，
+它同时是 `user_id` 外键在 MySQL 上依赖的索引。
+
+0025 只改表结构：开通、接受邀请与重置的用途过滤属于 AIH-TASK-090 / 091 与管理员的重置 PR。`downgrade` 在存在
+CUSTOMER 用户或 `INVITATION` 令牌时拒绝执行；锁表、失败处理与回滚分析见迁移文件头。
 
 ---
 

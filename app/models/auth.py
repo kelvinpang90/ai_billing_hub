@@ -24,9 +24,11 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.models import tenancy as _tenancy_models  # noqa: F401 - users.tenant_id 指向 tenants
 from app.models.base import Base
 
 # ⚠️ SQLite 只对 `INTEGER PRIMARY KEY` 做自增 —— `BIGINT` 主键在 SQLite 上拿不到
@@ -52,8 +54,9 @@ class UserRole(enum.StrEnum):
     """spec §51：一套认证同时服务 ADMIN 与 CUSTOMER，角色只决定可见的路由。
 
     ⚠️ **授权必须由后端独立强制执行**，前端藏菜单不构成任何访问控制。
-    CUSTOMER 现在建不出来（Customer Portal 是 Phase 4），但列先留着，
-    免得 Phase 4 要改一次已有数据的表。
+    CUSTOMER 是客户门户账号，挂在某个租户上（`User.tenant_id`），唯一的创建入口是
+    管理员开通门户账号：见设计闸门 #368 v10（docs/design/AIH-TASK-089-customer-portal-auth.md）。
+    ADMIN 不属于任何租户，由 `ck_users_admin_no_tenant` 强制。
     """
 
     ADMIN = "ADMIN"
@@ -61,7 +64,12 @@ class UserRole(enum.StrEnum):
 
 
 class UserStatus(enum.StrEnum):
+    """账号状态。ADMIN 只有 `ACTIVE` / `DISABLED`；`INVITED` 只属于 CUSTOMER（已开通、
+    未接受邀请，`ck_users_invited_customer`），状态机见设计闸门 #368 v10 §4。
+    """
+
     ACTIVE = "ACTIVE"
+    INVITED = "INVITED"
     DISABLED = "DISABLED"
 
 
@@ -104,13 +112,33 @@ class User(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
 
+    # 门户账号所属的租户（设计闸门 #368 v10 §2，迁移 0025）。ADMIN 为 NULL；
+    # CUSTOMER 只在开通时写，之后没有任何接口能改它。⚠️ 「CUSTOMER 必须有租户」
+    # 刻意不是数据库约束（设计 §9 备选 F）：`require_customer` 拒绝没有租户的 CUSTOMER。
+    tenant_id: Mapped[int | None] = mapped_column(
+        _ForeignKeyInt,
+        ForeignKey("tenants.id", ondelete="RESTRICT", name="fk_users_tenant"),
+        nullable=True,
+    )
+    # 客户第一次接受邀请的时刻。重新启用时据此回到 `INVITED`（为空）或 `ACTIVE`。
+    activated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
 
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(back_populates="user")
 
-    # ⚠️ 条件文本与迁移 0024 逐字一致（空白除外），test_migrations.py 比对两边。
-    __table_args__ = (CheckConstraint("password_version >= 0", name="ck_users_password_version"),)
+    # ⚠️ 条件文本与迁移 0024 / 0025 逐字一致（空白除外），test_migrations.py 比对两边。
+    __table_args__ = (
+        CheckConstraint("password_version >= 0", name="ck_users_password_version"),
+        # spec §52「一个客户一个门户账号」的数据库兜底；ADMIN 的 NULL 不受限。
+        UniqueConstraint("tenant_id", name="uq_users_tenant"),
+        CheckConstraint("role = 'CUSTOMER' OR tenant_id IS NULL", name="ck_users_admin_no_tenant"),
+        CheckConstraint("status IN ('ACTIVE', 'INVITED', 'DISABLED')", name="ck_users_status"),
+        CheckConstraint(
+            "status <> 'INVITED' OR role = 'CUSTOMER'", name="ck_users_invited_customer"
+        ),
+    )
 
 
 class RefreshToken(Base):
@@ -358,6 +386,23 @@ class RecoveryCode(Base):
     __table_args__ = (Index("ix_recovery_codes_user", "user_id", "used_at", "revoked_at"),)
 
 
+class TokenPurpose(enum.StrEnum):
+    """`password_reset_tokens.purpose`（设计闸门 #368 v10 §2，迁移 0025）。
+
+    一张表装两种一次性令牌：重置密码与门户账号邀请。⚠️ **两种令牌必须按用途隔离**
+    （设计 §2「邀请邮件与重置的隔离」）：重置只认 `PASSWORD_RESET`，接受邀请只认
+    `INVITATION`，每个按令牌查找或消费的查询都必须带上用途条件 —— 漏写一处，一张
+    邀请令牌就能被拿去重置密码，反之亦然。
+    """
+
+    PASSWORD_RESET = "PASSWORD_RESET"
+    INVITATION = "INVITATION"
+
+
+# 与迁移 0025 的列宽一致。
+_PURPOSE_LENGTH = 32
+
+
 class PasswordResetToken(Base):
     """One row per reset request (spec §53; design gate Issue #32 v5).
 
@@ -380,8 +425,23 @@ class PasswordResetToken(Base):
     # 中间那一瞬就是 TOCTOU 窗口，同一张令牌会被两个并发请求各用一次。
     used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    # 令牌用途，见 `TokenPurpose`。已有行与不写这一列的插入（旧代码）取 `PASSWORD_RESET`。
+    purpose: Mapped[TokenPurpose] = mapped_column(
+        Enum(TokenPurpose, native_enum=False, length=_PURPOSE_LENGTH),
+        nullable=False,
+        default=TokenPurpose.PASSWORD_RESET,
+        server_default=TokenPurpose.PASSWORD_RESET.value,
+    )
 
-    __table_args__ = (Index("ix_password_reset_tokens_user", "user_id", "used_at"),)
+    __table_args__ = (
+        # 0004 建；0025 不动它：它同时是 `user_id` 外键在 MySQL 上依赖的索引。
+        Index("ix_password_reset_tokens_user", "user_id", "used_at"),
+        # ⚠️ 条件文本与迁移 0025 一致（空白除外），test_migrations.py 比对两边。
+        CheckConstraint(
+            "purpose IN ('PASSWORD_RESET', 'INVITATION')",
+            name="ck_password_reset_tokens_purpose",
+        ),
+    )
 
 
 class OutboxStatus(enum.StrEnum):
