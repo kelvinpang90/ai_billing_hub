@@ -419,3 +419,33 @@ def test_the_fx_source_and_timeout_are_checked() -> None:
         Settings(fx_source="manual")
 
     assert Settings(fx_fetch_timeout_seconds=3).fx_fetch_timeout_seconds == 3
+
+
+def test_the_customer_portal_settings_default_to_the_design_values() -> None:
+    """设计闸门 #368 v10 §2：客户 2FA 默认不强制；邀请令牌默认 72 小时。"""
+    settings = Settings()
+
+    assert settings.customer_2fa_required is False
+    assert settings.customer_invitation_ttl_seconds == 259_200
+
+
+def test_the_customer_portal_settings_come_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_CUSTOMER_2FA_REQUIRED", "true")
+    monkeypatch.setenv("BILLING_CUSTOMER_INVITATION_TTL_SECONDS", "3600")
+
+    settings = Settings()
+
+    assert (settings.customer_2fa_required, settings.customer_invitation_ttl_seconds) == (
+        True,
+        3600,
+    )
+
+
+def test_the_customer_invitation_ttl_must_be_positive() -> None:
+    """0 或负数让邀请签发即过期，每个新客户都接受不了邀请。"""
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            Settings(customer_invitation_ttl_seconds=bad)
+
+    # 下界本身照常通过。
+    assert Settings(customer_invitation_ttl_seconds=1).customer_invitation_ttl_seconds == 1

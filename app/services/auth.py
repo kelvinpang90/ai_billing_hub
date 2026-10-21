@@ -213,6 +213,19 @@ def _register_failure(
         session.commit()
 
 
+def _inactive_reason(user: User, *, locked: bool) -> str:
+    """The `LOGIN_FAILED` reason for a refused-before-password attempt.
+
+    锁定优先于状态（沿用原有优先级）；`DISABLED` 照旧记 `DISABLED`，其余非 `ACTIVE`
+    （`INVITED`）记 `NOT_ACTIVE`（设计闸门 #368 v10 §2）。对外一律 `INVALID_CREDENTIALS`。
+    """
+    if locked:
+        return "LOCKED"
+    if user.status is UserStatus.DISABLED:
+        return "DISABLED"
+    return "NOT_ACTIVE"
+
+
 def two_factor_confirmed(session: Session, user_id: int) -> bool:
     """True when this account has a **confirmed** TOTP enrolment.
 
@@ -325,7 +338,9 @@ def authenticate(
         _clear_lock_if_expired(session, user, moment)
         locked = user.locked_until is not None and user.locked_until > moment
 
-        if locked or user.status is UserStatus.DISABLED:
+        # ⚠️ 是「不是 ACTIVE」而不是「是 DISABLED」（设计闸门 #368 v10 §2「登录流程的
+        # 改动」）：`INVITED` 的门户账号还没设过密码，同样不能登录。将来再加状态也默认拒绝。
+        if locked or user.status is not UserStatus.ACTIVE:
             # 仍然跑一次哈希校验：锁定与未锁定的耗时差别同样能被测出来。
             spend_dummy_verification()
             record_audit(
@@ -334,7 +349,7 @@ def authenticate(
                 context=context,
                 now=moment,
                 actor=user,
-                reason="LOCKED" if locked else "DISABLED",
+                reason=_inactive_reason(user, locked=locked),
             )
             session.commit()
             raise InvalidCredentials
@@ -374,9 +389,10 @@ def authenticate(
                 ),
             )
 
-        if user.role is UserRole.ADMIN:
+        if user.role is UserRole.ADMIN or settings.customer_2fa_required:
             # spec §54：ADMIN 的 2FA 是**强制**的。没注册过就先去注册，
-            # 不发访问令牌 —— 否则「强制」只是一句话。
+            # 不发访问令牌 —— 否则「强制」只是一句话。CUSTOMER 是否强制由
+            # `customer_2fa_required` 决定（设计闸门 #368 v10 §2），走同一条注册路径。
             session.commit()
             return LoginOutcome(
                 stage=STAGE_ENROL_2FA,
@@ -391,8 +407,8 @@ def authenticate(
                 ),
             )
 
-        # CUSTOMER 且未启用 2FA：spec §54 说客户侧「supported」，是否强制由配置
-        # 决定（Phase 4 的事）。现在直接发令牌。
+        # CUSTOMER、未启用 2FA、配置不强制：直接发令牌。⚠️ 登录**不看**租户的
+        # `account_status`：四种状态都能登录，只读限制在写接口那一层（设计 §2）。
         issued = _complete_login(
             session,
             settings,
@@ -476,7 +492,7 @@ def complete_second_factor(
         user = session.execute(
             select(User).where(User.id == user_id).with_for_update()
         ).scalar_one_or_none()
-        if user is None or user.status is UserStatus.DISABLED:
+        if user is None or user.status is not UserStatus.ACTIVE:
             raise InvalidCredentials
         if user.password_version != password_version:
             # 与「用户不存在或停用」同一个对外结果。回滚、**什么都不提交**：
@@ -561,7 +577,7 @@ def refresh_session(
             session, settings, row=row, context=context, now=moment, replay_reason="REPLAY_DETECTED"
         )
 
-        if user is None or user.status is UserStatus.DISABLED:
+        if user is None or user.status is not UserStatus.ACTIVE:
             session.rollback()
             raise TokenReused
 

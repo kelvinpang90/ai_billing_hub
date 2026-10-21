@@ -206,6 +206,15 @@ class Settings(BaseSettings):
     # 躺在收件箱里的旧信长期是一把可用的钥匙。
     password_reset_ttl_seconds: int = Field(default=1_800, gt=0)
 
+    # --- 客户门户认证（AIH-TASK-090，设计闸门 #368 v10 §2） -------------------
+
+    # 为 True 时，未注册 2FA 的 CUSTOMER 和 ADMIN 一样拿到 `ENROL_2FA`（spec §54 客户侧
+    # 「supported」，是否强制由这里决定）。默认 False：客户可在门户里自行开启。
+    customer_2fa_required: bool = False
+    # 门户账号邀请令牌的寿命，默认 72 小时。⚠️ `gt=0`：0 或负数让邀请签发即过期，
+    # 每个新客户都接受不了邀请，而症状只是「链接无效或已过期」。
+    customer_invitation_ttl_seconds: int = Field(default=259_200, gt=0)
+
     # 重置链接的基址，例如 `https://billing.example.com`。**空 = 未配置**，
     # 此时信里拼不出可点的链接，投递任务会判为失败并重试（配上就自动补投）。
     #

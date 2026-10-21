@@ -20,6 +20,7 @@ from sqlalchemy.pool import StaticPool
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.passwords import hash_password
+from app.core.tokens import InvalidToken
 from app.models.auth import (
     AuditAction,
     AuditLog,
@@ -216,6 +217,79 @@ def test_enrolling_again_after_confirmation_is_refused(session_factory, settings
     enrol_and_confirm(session_factory, settings, user_id)
     with pytest.raises(TwoFactorAlreadyEnrolled):
         start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
+
+
+_NOT_ACTIVE = [status for status in UserStatus if status is not UserStatus.ACTIVE]
+
+
+def _make_inactive(session_factory, user_id: int, status: UserStatus) -> None:
+    # `INVITED` 只属于 CUSTOMER（`ck_users_invited_customer`），两种状态都用 CUSTOMER。
+    with session_factory() as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        user.role = UserRole.CUSTOMER
+        user.status = status
+        session.commit()
+
+
+def _two_factor_snapshot(session_factory) -> tuple[list[tuple], list[int], list[AuditAction]]:
+    with session_factory() as session:
+        settings_rows = [
+            (row.user_id, row.encrypted_totp_secret, row.secret_version, row.confirmed_at)
+            for row in session.execute(select(TwoFactorSetting)).scalars()
+        ]
+        codes = list(session.execute(select(RecoveryCode.id)).scalars())
+        actions = list(session.execute(select(AuditLog.action)).scalars())
+    return settings_rows, codes, actions
+
+
+@pytest.mark.parametrize("status", _NOT_ACTIVE)
+def test_start_enrolment_refuses_a_user_who_is_not_active(
+    session_factory, settings, user_id, status: UserStatus
+) -> None:
+    """停用（或尚未接受邀请）之后，手里的 `ENROL_2FA` 令牌不能再注册验证器
+    （设计闸门 #368 v10 §2「登录流程的改动」）：401 `TOKEN_INVALID`，不写任何 2FA 行。"""
+    _make_inactive(session_factory, user_id, status)
+    with pytest.raises(InvalidToken) as caught:
+        start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
+    assert (caught.value.code, caught.value.http_status) == ("TOKEN_INVALID", 401)
+    assert _two_factor_snapshot(session_factory) == ([], [], [])
+
+
+@pytest.mark.parametrize("status", _NOT_ACTIVE)
+def test_restarting_an_enrolment_is_refused_once_not_active(
+    session_factory, settings, user_id, status: UserStatus
+) -> None:
+    """已有待确认注册时同样被拒：密钥与 `secret_version` 都不变。"""
+    start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
+    _make_inactive(session_factory, user_id, status)
+    before = _two_factor_snapshot(session_factory)
+    with pytest.raises(InvalidToken):
+        start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
+    assert _two_factor_snapshot(session_factory) == before
+
+
+@pytest.mark.parametrize("status", _NOT_ACTIVE)
+def test_confirm_enrolment_refuses_a_user_who_is_not_active(
+    session_factory, settings, user_id, status: UserStatus
+) -> None:
+    """注册之后才被停用：用**正确的验证码**确认也被拒，注册仍是待确认、没有恢复码、没有审计。"""
+    enrolment = start_enrolment(session_factory, settings, user_id=user_id, password_version=0)
+    _make_inactive(session_factory, user_id, status)
+    before = _two_factor_snapshot(session_factory)
+    with pytest.raises(InvalidToken) as caught:
+        confirm_enrolment(
+            session_factory,
+            settings,
+            user_id=user_id,
+            password_version=0,
+            code=pyotp.TOTP(enrolment.secret).now(),
+            context=CONTEXT,
+        )
+    assert (caught.value.code, caught.value.http_status) == ("TOKEN_INVALID", 401)
+    assert _two_factor_snapshot(session_factory) == before
+    with session_factory() as session:
+        assert is_enrolled(session, user_id) is False
 
 
 def test_an_abandoned_enrolment_can_be_restarted(session_factory, settings, user_id) -> None:
