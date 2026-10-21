@@ -1,10 +1,10 @@
-"""Customer portal accounts: view, create, resend invitation, accept (design gate #368 v10).
+"""Customer portal accounts: invite, accept, disable, enable, reset 2FA (design gate #368 v10).
 
-设计 §11 任务 B 的另一半（AIH-TASK-091）：只有服务函数，没有 HTTP 入口（接口归 AIH-TASK-093
-与 094）。停用、启用、重置 2FA 归 AIH-TASK-098。
+设计 §11 任务 B 的后两部分：查看、开通、重发、接受（AIH-TASK-091），停用、启用、重置 2FA
+（AIH-TASK-098）。只有服务函数，没有 HTTP 入口（接口归 AIH-TASK-093 与 094）。
 
-⚠️ **会写库的三个函数各一个事务**（INV-13）：用户行、邀请令牌、`PORTAL_INVITATION_REQUESTED`
-outbox 行与审计同一事务提交，任何一步失败整体回滚（设计 §2「事务边界」）。
+⚠️ **会写库的函数各一个事务**（INV-13）：用户行、令牌、`PORTAL_INVITATION_REQUESTED` outbox
+行、2FA 行与审计同一事务提交，任何一步失败整体回滚（设计 §2「事务边界」）。
 
 ⚠️ **加锁顺序一律「租户 → 用户 → 令牌」**（设计 §4「串行化」、#369「统一加锁顺序」），与改账户
 状态、停用、启用一致，不会成环：
@@ -15,6 +15,8 @@ outbox 行与审计同一事务提交，任何一步失败整体回滚（设计 
 - 重发：锁租户行 → 锁门户用户行 → 作废旧邀请令牌 → 签发新令牌。
 - 接受：不加锁读令牌与用户的 `tenant_id` → 锁租户行 → 锁用户行 → 加锁重读令牌 → 条件
   UPDATE 消费（设计 §4「接受邀请的判定顺序」）。
+- 停用、启用、重置 2FA：锁租户行 → 锁门户用户行 → 刷新令牌、重置令牌、2FA 行与恢复码。2FA
+  注册服务锁同一用户行（`app/services/two_factor.py`），与停用、重置排队。
 
 ⚠️ **唯一约束冲突不解析报错文本**（设计 §4「数据库唯一性」）：捕获 `IntegrityError`、回滚，在
 新事务里查是哪一条成立；都不成立就原样抛出（500）。
@@ -32,7 +34,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -47,7 +49,10 @@ from app.models.auth import (
     DomainOutbox,
     OutboxStatus,
     PasswordResetToken,
+    RecoveryCode,
+    RefreshToken,
     TokenPurpose,
+    TwoFactorSetting,
     User,
     UserRole,
     UserStatus,
@@ -67,6 +72,9 @@ ENTITY_USERS: Final = "users"
 
 # `INVITED` 账号的不可用密码：随机 32 字节秘密的 Argon2id 哈希，秘密随即丢弃（设计 §6「密钥」）。
 _UNUSABLE_SECRET_BYTES: Final = 32
+# 重置 2FA 的原因：去首尾空白后 1–255 个字符，与接口层的 `_Reason`、
+# `audit_logs.reason` 的列宽一致。
+_REASON_MAX_LENGTH: Final = 255
 
 
 class PortalAccountNotFound(AppError):
@@ -127,6 +135,53 @@ class InvalidInvitationToken(AppError):
             "That invitation link is no longer valid. Please ask for a new one.",
             code="INVALID_INVITATION_TOKEN",
             http_status=400,
+        )
+
+
+class PortalAccountAlreadyDisabled(AppError):
+    """Disable on an account that is already `DISABLED`."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The portal account is already disabled.",
+            code="PORTAL_ACCOUNT_ALREADY_DISABLED",
+            http_status=409,
+        )
+
+
+class PortalAccountNotDisabled(AppError):
+    """Enable is only possible while the account is `DISABLED`."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The portal account is not disabled.",
+            code="PORTAL_ACCOUNT_NOT_DISABLED",
+            http_status=409,
+        )
+
+
+class PortalTwoFactorNotEnabled(AppError):
+    """Reset 2FA on an account with neither a confirmed nor a pending enrolment."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Two-factor authentication is not set up for this portal account.",
+            code="PORTAL_2FA_NOT_ENABLED",
+            http_status=409,
+        )
+
+
+class InvalidResetReason(AppError):
+    """The reset reason is empty or longer than 255 characters after trimming.
+
+    ⚠️ 消息里不回显原因：它是管理员写的自由文本。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"A reason of 1 to {_REASON_MAX_LENGTH} characters is required.",
+            code="VALIDATION_ERROR",
+            http_status=422,
         )
 
 
@@ -540,18 +595,180 @@ def accept_invitation(
         )
 
 
+def _lock_portal_account(session: Session, customer_id: str) -> tuple[Tenant, User]:
+    """Lock the tenant row, then the portal user row (design §2「事务边界」).
+
+    客户不存在 404 `CUSTOMER_NOT_FOUND`，未开通 404 `PORTAL_ACCOUNT_NOT_FOUND`。
+    """
+    tenant = _require_tenant(session, customer_id, for_update=True)
+    user = _portal_user(session, tenant.id, for_update=True)
+    if user is None:
+        raise PortalAccountNotFound
+    return tenant, user
+
+
+def disable_portal_account(
+    session_factory: sessionmaker[Session],
+    *,
+    actor: User,
+    customer_id: str,
+    context: RequestContext,
+    now: dt.datetime | None = None,
+) -> PortalAccountView:
+    """`INVITED` / `ACTIVE` → `DISABLED`, and end every way back in (design §4 状态表).
+
+    ⚠️ 租户 `CLOSED` 也允许停用（状态表的前置条件是「—」）。已停用 409
+    `PORTAL_ACCOUNT_ALREADY_DISABLED`。
+    """
+    moment = _moment(now)
+    with session_scope(session_factory) as session:
+        tenant, user = _lock_portal_account(session, customer_id)
+        if user.status is UserStatus.DISABLED:
+            raise PortalAccountAlreadyDisabled
+        session.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=moment)
+        )
+        # 两种用途都作废：重新启用后旧邀请链接、旧重置链接都不能再用，需要时管理员重发。
+        session.execute(
+            update(PasswordResetToken)
+            .where(PasswordResetToken.user_id == user.id, PasswordResetToken.used_at.is_(None))
+            .values(used_at=moment)
+        )
+        # ⚠️ 版本号 +1（#369）：停用前签发的访问令牌与 pending 令牌永久失效，重新启用也不会
+        # 让它们复活。写成 SQL 表达式只增不减。
+        user.password_version = User.password_version + 1
+        user.status = UserStatus.DISABLED
+        user.updated_at = moment
+        record_audit(
+            session,
+            action=AuditAction.PORTAL_ACCOUNT_DISABLED,
+            context=context,
+            now=moment,
+            actor=actor,
+            entity_type=ENTITY_USERS,
+            entity_id=str(user.id),
+            after_state=_audit_state(tenant, user),
+        )
+        session.flush()
+        view = _view(session, user, now=moment)
+    return view
+
+
+def enable_portal_account(
+    session_factory: sessionmaker[Session],
+    *,
+    actor: User,
+    customer_id: str,
+    context: RequestContext,
+    now: dt.datetime | None = None,
+) -> PortalAccountView:
+    """`DISABLED` → `INVITED` (never accepted) or `ACTIVE` (design §4 状态表).
+
+    判定顺序：客户不存在 404 → 未开通 404 → 不是 `DISABLED` 409 `PORTAL_ACCOUNT_NOT_DISABLED` →
+    租户 `CLOSED` 409 `ACCOUNT_CLOSED`。不自动重发邀请：停用时旧邀请已作废，需要时管理员
+    再点重发。
+    """
+    moment = _moment(now)
+    with session_scope(session_factory) as session:
+        tenant, user = _lock_portal_account(session, customer_id)
+        if user.status is not UserStatus.DISABLED:
+            raise PortalAccountNotDisabled
+        if tenant.account_status is AccountStatus.CLOSED:
+            raise AccountClosed
+        user.status = UserStatus.INVITED if user.activated_at is None else UserStatus.ACTIVE
+        user.updated_at = moment
+        record_audit(
+            session,
+            action=AuditAction.PORTAL_ACCOUNT_ENABLED,
+            context=context,
+            now=moment,
+            actor=actor,
+            entity_type=ENTITY_USERS,
+            entity_id=str(user.id),
+            after_state=_audit_state(tenant, user),
+        )
+        session.flush()
+        view = _view(session, user, now=moment)
+    return view
+
+
+def _clean_reason(reason: str) -> str:
+    """Trim, then require 1–255 characters, as the API layer's `_Reason` does."""
+    cleaned = reason.strip()
+    if not 1 <= len(cleaned) <= _REASON_MAX_LENGTH:
+        raise InvalidResetReason
+    return cleaned
+
+
+def reset_portal_two_factor(
+    session_factory: sessionmaker[Session],
+    *,
+    actor: User,
+    customer_id: str,
+    reason: str,
+    context: RequestContext,
+    now: dt.datetime | None = None,
+) -> PortalAccountView:
+    """Delete the account's 2FA (confirmed or pending) and its recovery codes; end its sessions.
+
+    设计 §2「管理员重置客户 2FA」：管理员已在线下核实身份。原因不合格 422 `VALIDATION_ERROR`，
+    在任何读写之前；没有 2FA 409 `PORTAL_2FA_NOT_ENABLED`。账号状态不变，不发通知邮件。
+    """
+    cleaned = _clean_reason(reason)
+    moment = _moment(now)
+    with session_scope(session_factory) as session:
+        tenant, user = _lock_portal_account(session, customer_id)
+        # 锁读：读最新已提交版本。客户的确认排在用户行锁上，先提交的那次确认这里一定看得见。
+        enrolled = session.execute(
+            select(TwoFactorSetting.user_id)
+            .where(TwoFactorSetting.user_id == user.id)
+            .with_for_update()
+        ).first()
+        if enrolled is None:
+            raise PortalTwoFactorNotEnabled
+        session.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user.id))
+        session.execute(delete(TwoFactorSetting).where(TwoFactorSetting.user_id == user.id))
+        # ⚠️ 版本号 +1（#369）：吊销该用户全部会话，包括抢先注册验证器的人手里的那一个。
+        user.password_version = User.password_version + 1
+        user.updated_at = moment
+        record_audit(
+            session,
+            action=AuditAction.PORTAL_2FA_RESET,
+            context=context,
+            now=moment,
+            actor=actor,
+            entity_type=ENTITY_USERS,
+            entity_id=str(user.id),
+            # 设计 §4 状态表这一行：只放 `tenant_public_id`。
+            after_state={"tenant_public_id": tenant.public_id},
+            reason=cleaned,
+        )
+        session.flush()
+        view = _view(session, user, now=moment)
+    return view
+
+
 __all__ = [
     "ENTITY_USERS",
     "EVENT_PORTAL_INVITATION",
     "EmailInUse",
     "InvalidInvitationToken",
+    "InvalidResetReason",
     "InvitationIssued",
+    "PortalAccountAlreadyDisabled",
     "PortalAccountExists",
+    "PortalAccountNotDisabled",
     "PortalAccountNotFound",
     "PortalAccountNotInvited",
     "PortalAccountView",
+    "PortalTwoFactorNotEnabled",
     "accept_invitation",
     "create_portal_account",
+    "disable_portal_account",
+    "enable_portal_account",
     "get_portal_account",
+    "reset_portal_two_factor",
     "resend_invitation",
 ]
