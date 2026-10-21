@@ -36,6 +36,7 @@ from app.models.auth import (
     OutboxStatus,
     PasswordResetToken,
     RefreshToken,
+    TokenPurpose,
     User,
     UserStatus,
 )
@@ -176,6 +177,9 @@ def _start_reset(
                 token_hash=hash_opaque_token(raw_token),
                 expires_at=expires_at,
                 created_at=moment,
+                # 显式写用途，不靠列默认值（设计闸门 #368 v10 §2）：同一张表还装着
+                # 邀请令牌，用途只能由签发方说清楚。
+                purpose=TokenPurpose.PASSWORD_RESET,
             )
         )
         outbox = DomainOutbox(
@@ -237,8 +241,15 @@ def reset_password(
         # ⚠️ 第一次读**刻意不加锁**：它只用来拿 `user_id`，而 `user_id` 是不变的。
         # 加锁读会把加锁顺序变成「先令牌、后用户」，与下面那两条 UPDATE 的顺序
         # 相反 —— 那正是死锁的配方（见下一段）。
+        #
+        # ⚠️ **只认 `PASSWORD_RESET` 用途**（设计闸门 #368 v10 §2「邀请邮件与重置的
+        # 隔离」）：同一张表里还有门户邀请令牌，漏掉这个条件，一张邀请令牌就能拿来
+        # 直接设密码、绕过接受邀请。用错用途的令牌与不存在的令牌同一个结果。
         row = session.execute(
-            select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
+            select(PasswordResetToken).where(
+                PasswordResetToken.token_hash == token_hash,
+                PasswordResetToken.purpose == TokenPurpose.PASSWORD_RESET,
+            )
         ).scalar_one_or_none()
         if row is None:
             raise InvalidResetToken
@@ -293,6 +304,7 @@ def reset_password(
             update(PasswordResetToken)
             .where(
                 PasswordResetToken.id == token_id,
+                PasswordResetToken.purpose == TokenPurpose.PASSWORD_RESET,
                 PasswordResetToken.used_at.is_(None),
                 PasswordResetToken.expires_at > moment,
             )
