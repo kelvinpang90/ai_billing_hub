@@ -27,6 +27,8 @@ from app.core.tokens import (
 )
 from app.models.auth import AuditAction, AuditLog, RefreshToken, User, UserRole, UserStatus
 from app.models.base import Base
+from app.models.tenancy import AccountStatus
+from app.repositories import tenancy
 from app.services.auth import (
     STAGE_ENROL_2FA,
     STAGE_TOTP_REQUIRED,
@@ -814,6 +816,218 @@ def test_audit_rows_never_contain_credentials(session_factory, settings: Setting
     assert issued.refresh_token not in blob
     assert issued.access_token not in blob
     assert "$argon2" not in blob
+
+
+def test_an_invited_customer_cannot_log_in_even_with_the_right_password(
+    session_factory, settings: Settings
+) -> None:
+    """`INVITED` 被登录拒绝（设计闸门 #368 v10 §2「登录流程的改动」与任务勘误）。
+
+    ⚠️ 用的是**正确密码**、客户未启用 2FA：把判断改回 `is DISABLED`，这一步就直接签发
+    会话、用例变红。对外与密码错一样是 `INVALID_CREDENTIALS`，审计 reason `NOT_ACTIVE`。
+    """
+    make_user(
+        session_factory,
+        email="customer@example.com",
+        role=UserRole.CUSTOMER,
+        status=UserStatus.INVITED,
+    )
+    with pytest.raises(InvalidCredentials):
+        authenticate(
+            session_factory,
+            settings,
+            email="customer@example.com",
+            password=PASSWORD,
+            context=CONTEXT,
+        )
+
+    with session_factory() as session:
+        rows = list(session.execute(select(AuditLog)).scalars())
+        assert [(row.action, row.reason, row.actor_role) for row in rows] == [
+            (AuditAction.LOGIN_FAILED, "NOT_ACTIVE", "CUSTOMER")
+        ]
+        assert list(session.execute(select(RefreshToken)).scalars()) == []
+
+
+def test_a_disabled_account_still_audits_disabled(session_factory, settings: Settings) -> None:
+    """`DISABLED` 的行为不变：reason 仍是 `DISABLED`，不并进 `NOT_ACTIVE`。"""
+    make_user(session_factory, status=UserStatus.DISABLED)
+    with pytest.raises(InvalidCredentials):
+        authenticate(
+            session_factory, settings, email="admin@example.com", password=PASSWORD, context=CONTEXT
+        )
+    with session_factory() as session:
+        reasons = list(session.execute(select(AuditLog.reason)).scalars())
+    assert reasons == ["DISABLED"]
+
+
+def test_a_locked_invited_customer_is_audited_as_locked(
+    session_factory, settings: Settings
+) -> None:
+    """同时处于锁定时沿用现有优先级：reason 记 `LOCKED`。"""
+    make_user(
+        session_factory,
+        email="customer@example.com",
+        role=UserRole.CUSTOMER,
+        status=UserStatus.INVITED,
+        locked_until=utc_now() + dt.timedelta(minutes=5),
+    )
+    with pytest.raises(InvalidCredentials):
+        authenticate(
+            session_factory,
+            settings,
+            email="customer@example.com",
+            password=PASSWORD,
+            context=CONTEXT,
+        )
+    with session_factory() as session:
+        reasons = list(session.execute(select(AuditLog.reason)).scalars())
+    assert reasons == ["LOCKED"]
+
+
+def _set_status(session_factory, user_id: int, status: UserStatus) -> None:
+    with session_factory() as session:
+        stored = session.get(User, user_id)
+        assert stored is not None
+        stored.status = status
+        session.commit()
+
+
+def test_an_invited_customer_cannot_complete_the_second_factor(
+    session_factory, settings: Settings
+) -> None:
+    """拿到 pending 令牌之后变成 `INVITED`，第二步被拒、不写审计、不发会话（任务勘误）。
+
+    ⚠️ 提交的是**有效的恢复码**：把判断改回 `is DISABLED`，这一步就签发会话、用例变红。
+    """
+    user = make_user(session_factory, email="customer@example.com", role=UserRole.CUSTOMER)
+    enrolment = start_enrolment(session_factory, settings, user_id=user.id, password_version=0)
+    codes = confirm_enrolment(
+        session_factory,
+        settings,
+        user_id=user.id,
+        password_version=0,
+        code=pyotp.TOTP(enrolment.secret).now(),
+        context=CONTEXT,
+    )
+    outcome = authenticate(
+        session_factory, settings, email="customer@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert outcome.stage == STAGE_TOTP_REQUIRED
+    assert outcome.pending_token is not None
+    before = audit_actions(session_factory)
+
+    _set_status(session_factory, user.id, UserStatus.INVITED)
+    with pytest.raises(InvalidCredentials):
+        complete_second_factor(
+            session_factory,
+            settings,
+            pending_token=outcome.pending_token,
+            code=codes[0],
+            context=CONTEXT,
+        )
+
+    assert audit_actions(session_factory) == before
+    with session_factory() as session:
+        assert list(session.execute(select(RefreshToken)).scalars()) == []
+
+
+def test_an_invited_customer_cannot_refresh(session_factory, settings: Settings) -> None:
+    """持有刷新令牌之后变成 `INVITED`：回滚、`TOKEN_REUSED`、不写审计（任务勘误）。
+
+    ⚠️ 令牌本身完全可用：把判断改回 `is DISABLED`，这一步就轮换成功、用例变红。
+    """
+    user = make_user(session_factory, email="customer@example.com", role=UserRole.CUSTOMER)
+    outcome = authenticate(
+        session_factory, settings, email="customer@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert outcome.issued is not None
+    before = audit_actions(session_factory)
+
+    _set_status(session_factory, user.id, UserStatus.INVITED)
+    with pytest.raises(TokenReused):
+        refresh_session(
+            session_factory, settings, raw_token=outcome.issued.refresh_token, context=CONTEXT
+        )
+
+    assert audit_actions(session_factory) == before
+    with session_factory() as session:
+        rows = list(session.execute(select(RefreshToken)).scalars())
+        # 回滚：旧行没被标成已用、没被吊销，也没有插入新行。
+        assert [(row.used_at, row.revoked_at) for row in rows] == [(None, None)]
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_customer_2fa_required_decides_the_customer_login_stage(
+    session_factory, settings: Settings, required: bool
+) -> None:
+    """`customer_2fa_required`：True 时未注册 2FA 的客户与 ADMIN 一样拿到 `ENROL_2FA`
+    （pending 令牌寿命同 ADMIN 注册路径）；False 时直接签发会话。"""
+    local = settings.model_copy(update={"customer_2fa_required": required})
+    make_user(session_factory, email="customer@example.com", role=UserRole.CUSTOMER)
+    outcome = authenticate(
+        session_factory, local, email="customer@example.com", password=PASSWORD, context=CONTEXT
+    )
+
+    if not required:
+        assert (outcome.stage, outcome.pending_token) == (None, None)
+        assert outcome.issued is not None
+        assert audit_actions(session_factory) == [AuditAction.LOGIN]
+        return
+
+    assert outcome.stage == STAGE_ENROL_2FA
+    assert outcome.issued is None
+    assert outcome.pending_token is not None
+    payload = decode_token(local, outcome.pending_token, expected_type=TOKEN_TYPE_PENDING_2FA)
+    assert payload["exp"] - payload["iat"] == local.enrolment_pending_token_ttl_seconds
+    assert audit_actions(session_factory) == []
+    with session_factory() as session:
+        assert list(session.execute(select(RefreshToken)).scalars()) == []
+
+
+def test_customer_2fa_required_does_not_skip_a_confirmed_enrolment(
+    session_factory, settings: Settings
+) -> None:
+    """已注册 2FA 的客户在强制开启时仍走 `TOTP_REQUIRED`，不会被送回去重新注册。"""
+    local = settings.model_copy(update={"customer_2fa_required": True})
+    user = make_user(session_factory, email="customer@example.com", role=UserRole.CUSTOMER)
+    enrolment = start_enrolment(session_factory, local, user_id=user.id, password_version=0)
+    confirm_enrolment(
+        session_factory,
+        local,
+        user_id=user.id,
+        password_version=0,
+        code=pyotp.TOTP(enrolment.secret).now(),
+        context=CONTEXT,
+    )
+    outcome = authenticate(
+        session_factory, local, email="customer@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert outcome.stage == STAGE_TOTP_REQUIRED
+
+
+@pytest.mark.parametrize("account_status", list(AccountStatus))
+def test_login_ignores_the_tenant_account_status(
+    session_factory, settings: Settings, account_status: AccountStatus
+) -> None:
+    """登录**不看**租户 `account_status`：四种状态都能登录，只读限制在写接口那一层。"""
+    with session_factory() as session:
+        tenant = tenancy.create_tenant(
+            session, company_name="Example Sdn Bhd", email="contact@example.com", now=utc_now()
+        )
+        tenant.account_status = account_status
+        session.commit()
+        tenant_id = tenant.id
+    make_user(
+        session_factory,
+        email="customer@example.com",
+        role=UserRole.CUSTOMER,
+        tenant_id=tenant_id,
+    )
+    outcome = authenticate(
+        session_factory, settings, email="customer@example.com", password=PASSWORD, context=CONTEXT
+    )
+    assert outcome.issued is not None
 
 
 def test_a_correct_password_alone_does_not_reset_the_lockout_counter(

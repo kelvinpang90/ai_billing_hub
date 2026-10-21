@@ -21,6 +21,7 @@ import datetime as dt
 import json
 from typing import Final
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.database import session_scope
@@ -64,6 +65,49 @@ class AccountStatusTransitionInvalid(AppError):
             code="ACCOUNT_STATUS_TRANSITION_INVALID",
             http_status=409,
         )
+
+
+class AccountReadOnly(AppError):
+    """The tenant is `DISABLED` or `CLOSED`: customer writes are refused (design gate #368 v10 §2).
+
+    服务层的 `lock_tenant_for_customer_write` 与接口层的 `require_customer_writable` 共用这一个类。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This account is read-only.",
+            code="ACCOUNT_READ_ONLY",
+            http_status=403,
+        )
+
+
+# 客户写入被拒的账户状态（设计闸门 #368 v10 §2「依赖」）。
+READ_ONLY_STATUSES: Final = frozenset({AccountStatus.DISABLED, AccountStatus.CLOSED})
+
+
+def lock_tenant_for_customer_write(session: Session, tenant_id: int) -> Tenant:
+    """Lock the tenant row in the caller's write transaction and re-check its account status.
+
+    ⚠️ **每个客户写操作都必须在自己的写事务里、写入之前调用它**（设计闸门 #368 v10 §2
+    「依赖」）。`require_customer_writable` 读完状态就结束了事务，只是提前拒绝；之后管理员
+    仍可能停用租户。`change_account_status` 同样先锁这一行，所以两者排队：写先拿到锁就在
+    停用之前完成；停用先提交，这里锁到后读到 `DISABLED` 而拒绝。
+
+    `DISABLED` / `CLOSED`：`AccountReadOnly`。租户不存在：`CustomerNotFound`。不提交、不回滚，
+    事务归调用方。
+    """
+    tenant = session.execute(
+        select(Tenant)
+        .where(Tenant.id == tenant_id)
+        .with_for_update()
+        # 锁读之前本事务可能已读过这一行：不加它，identity map 会把旧值原样还回来。
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if tenant is None:
+        raise CustomerNotFound
+    if tenant.account_status in READ_ONLY_STATUSES:
+        raise AccountReadOnly
+    return tenant
 
 
 def _now() -> dt.datetime:
@@ -195,8 +239,11 @@ def _status_event(tenant: Tenant, payload: dict[str, object], now: dt.datetime) 
 
 __all__ = [
     "EVENT_ACCOUNT_STATUS_CHANGED",
+    "READ_ONLY_STATUSES",
     "TRANSITIONS",
+    "AccountReadOnly",
     "AccountStatusTransitionInvalid",
     "change_account_status",
+    "lock_tenant_for_customer_write",
     "transition",
 ]

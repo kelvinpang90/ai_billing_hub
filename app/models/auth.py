@@ -291,6 +291,15 @@ class AuditAction(enum.StrEnum):
     # 清单里，按 `PROJECT_CREATE` / `FX_RATE_*` 的先例补上，记在 PR 描述里。
     TAX_POLICY_CREATE = "TAX_POLICY_CREATE"
     TAX_POLICY_PUBLISH = "TAX_POLICY_PUBLISH"
+    # AIH-TASK-089 到 098（设计闸门 #368 v10 §6）：门户账号的开通、重发、接受、停用、启用与
+    # 重置 2FA，`entity_type = users`。`after_state` 只放 `tenant_public_id`、`status`（重发另加
+    # `email_changed`），不放邮箱值。六个都不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上。
+    PORTAL_ACCOUNT_CREATED = "PORTAL_ACCOUNT_CREATED"
+    PORTAL_INVITATION_RESENT = "PORTAL_INVITATION_RESENT"
+    PORTAL_INVITATION_ACCEPTED = "PORTAL_INVITATION_ACCEPTED"
+    PORTAL_ACCOUNT_DISABLED = "PORTAL_ACCOUNT_DISABLED"
+    PORTAL_ACCOUNT_ENABLED = "PORTAL_ACCOUNT_ENABLED"
+    PORTAL_2FA_RESET = "PORTAL_2FA_RESET"
 
 
 class AuditLog(Base):

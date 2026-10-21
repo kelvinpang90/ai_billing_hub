@@ -31,7 +31,7 @@ from app.core.crypto import decrypt_secret, encrypt_secret, load_keyring
 from app.core.errors import AppError
 from app.core.passwords import hash_password, verify_password
 from app.core.tokens import InvalidToken
-from app.models.auth import AuditAction, RecoveryCode, TwoFactorSetting, User
+from app.models.auth import AuditAction, RecoveryCode, TwoFactorSetting, User, UserStatus
 from app.services.auth import RequestContext, record_audit, utc_now
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,18 @@ def _lock_user_at_version(session: Session, *, user_id: int, password_version: i
     return user
 
 
+def _refuse_unless_active(session: Session, user: User | None) -> None:
+    """Refuse enrolment for a user who is no longer `ACTIVE` (设计闸门 #368 v10 §2).
+
+    ⚠️ 只在 `_lock_user_at_version` 锁住用户行之后调用：停用同样锁这一行，两者排队。
+    停用先提交，这里读到非 `ACTIVE` 而拒绝、不写任何 2FA 行；否则停用前拿到的
+    `ENROL_2FA` 令牌在有效期内仍能注册一个管理员不知道的验证器。
+    """
+    if user is not None and user.status is not UserStatus.ACTIVE:
+        session.rollback()
+        raise InvalidToken
+
+
 def start_enrolment(
     session_factory: sessionmaker[Session],
     settings: Settings,
@@ -145,6 +157,7 @@ def start_enrolment(
         user = _lock_user_at_version(session, user_id=user_id, password_version=password_version)
         if user is None:
             raise TwoFactorNotEnrolled
+        _refuse_unless_active(session, user)
 
         existing = session.get(TwoFactorSetting, user_id)
         if existing is None:
@@ -211,7 +224,8 @@ def confirm_enrolment(
     moment = utc_now()
 
     with session_factory() as session:
-        _lock_user_at_version(session, user_id=user_id, password_version=password_version)
+        user = _lock_user_at_version(session, user_id=user_id, password_version=password_version)
+        _refuse_unless_active(session, user)
         row = session.get(TwoFactorSetting, user_id)
         if row is None:
             raise TwoFactorNotEnrolled
