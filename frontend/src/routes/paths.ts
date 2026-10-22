@@ -17,6 +17,13 @@ export const ROUTES = {
    * 所以由 `tests/backend/test_password_reset_link.py` 机械比对这两处。
    */
   resetPassword: "/reset-password",
+  /**
+   * 门户账号的接受邀请页（AIH-TASK-092）。⚠️ 同样**不只是前端的事**：邀请邮件里的链接由后端拼
+   * （设计 AIH-TASK-089 §2：`{frontend_base_url}/accept-invitation?token=…`，AIH-TASK-094 落地），
+   * 那边的链接守卫按这一条与 {@link ACCEPT_INVITATION_TOKEN_PARAM} 核对。验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `check_accept_invitation_page` 也按这个路径打开，改了要同步那里。
+   */
+  acceptInvitation: "/accept-invitation",
   customers: "/customers",
   /** 静态段比 `:customerId` 优先匹配（react-router 按具体程度排序），所以 `new` 不会被当成 id。 */
   customerCreate: "/customers/new",
@@ -95,3 +102,6 @@ export function usageEventDetailPath(usageEventId: string): string {
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */
 export const RESET_TOKEN_PARAM = "token";
+
+/** 邀请链接里装令牌的查询参数名。AIH-TASK-094 的链接守卫按这个常量核对后端拼的链接。 */
+export const ACCEPT_INVITATION_TOKEN_PARAM = "token";

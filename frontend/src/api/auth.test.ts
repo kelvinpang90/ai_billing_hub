@@ -11,16 +11,46 @@
  * 确实是这个形状」。
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { AxiosError, type AxiosResponse } from "axios";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { login, requestPasswordReset, resetPassword } from "./auth";
-import { client } from "./client";
+import {
+  INVITATION_ENDPOINT_NOT_FOUND,
+  acceptInvitation,
+  login,
+  requestPasswordReset,
+  resetPassword,
+} from "./auth";
+import { ApiError, client } from "./client";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /** 让 `client.post` 回一个 §107 的成功信封，不真的发请求。 */
 function stubPost() {
   return vi.spyOn(client, "post").mockResolvedValue({
     data: { success: true, data: {}, error: null, request_id: "req-1" },
   });
+}
+
+/** 让 `client.post` 像后端对一个没人服务的路径那样回 404（框架异常也走 §107 信封，码是 HTTP_ERROR）。 */
+function stubFrameworkNotFound() {
+  const response = {
+    status: 404,
+    statusText: "Not Found",
+    headers: {},
+    config: {},
+    data: {
+      success: false,
+      data: null,
+      error: { code: "HTTP_ERROR", message: "Not Found" },
+      request_id: "req-404",
+    },
+  } as unknown as AxiosResponse;
+  return vi
+    .spyOn(client, "post")
+    .mockRejectedValue(new AxiosError("Not Found", "ERR_BAD_REQUEST", undefined, undefined, response));
 }
 
 describe("auth requests", () => {
@@ -45,6 +75,44 @@ describe("auth requests", () => {
       token: "reset-token-1",
       new_password: "a much longer passphrase",
     });
+  });
+
+  it("accepts an invitation with the token and a field called password", async () => {
+    const post = stubPost();
+
+    await acceptInvitation("invite-token-1", "a much longer passphrase");
+
+    // ⚠️ 这里是 `password`，**不是**重置那边的 `new_password`（设计 AIH-TASK-089 §2）。
+    // 两个表单长得一样，照抄 resetPassword 最容易抄错的就是这一个字段名。
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/invitation/accept", {
+      token: "invite-token-1",
+      password: "a much longer passphrase",
+    });
+  });
+
+  it("reports a missing invitation endpoint under its own code", async () => {
+    // 页面先于接口上线（设计 §8）：那段时间里这个端点是框架的 404，信封里的码是笼统的
+    // HTTP_ERROR，与 405 分不开，所以按 HTTP 状态认。
+    stubFrameworkNotFound();
+
+    const caught = await acceptInvitation("invite-token-1", "a much longer passphrase").catch(
+      (error: unknown) => error,
+    );
+
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).code).toBe(INVITATION_ENDPOINT_NOT_FOUND);
+    expect((caught as ApiError).requestId).toBe("req-404");
+  });
+
+  it("leaves a 404 from the other auth endpoints as the backend reported it", async () => {
+    // 回归：404 的改码只给接受邀请，共用的 `post` 不该悄悄改掉别的端点的错误。
+    stubFrameworkNotFound();
+
+    const caught = await resetPassword("reset-token-1", "a much longer passphrase").catch(
+      (error: unknown) => error,
+    );
+
+    expect((caught as ApiError).code).toBe("HTTP_ERROR");
   });
 
   it("still sends login the way it always did", async () => {
