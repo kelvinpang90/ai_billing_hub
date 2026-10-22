@@ -1,13 +1,14 @@
-# AIH-TASK-089 到 098 设计：客户门户认证（已批准 v10）
+# AIH-TASK-089 到 098 设计：客户门户认证（已批准 v12）
 
-> **来源**：设计闸门 Issue #368。本文件是 `APPROVED: design v10` 那一版正文的**逐字副本**（审查：v1–v5 由 Codex，v6–v10 在 Codex 额度用完期间由 Claude Code 审查；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v10`）。
+> **来源**：设计闸门 Issue #368。本文件是 `APPROVED: design v12` 那一版正文的**逐字副本**（审查：v1–v5 由 Codex，v6–v10 在 Codex 额度用完期间由 Claude Code 审查，v11–v12 由 Codex；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v12`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #368 上被批准的 v10 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #368 上被批准的 v12 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：设计闸门 #369（[AIH-TASK-086-session-revocation.md](AIH-TASK-086-session-revocation.md)）的实现 `AIH-TASK-086`、管理员 PR、`AIH-TASK-087`、`AIH-TASK-088` 必须先全部合并。
 > §11 的五个实现任务登记成十个编号（任务 B 拆成三个、D 拆成两个、E 拆成三个，只为让每个任务的规模与可改路径符合登记规则；拆分不改变范围、顺序约束与验收）：
 > `AIH-TASK-089`（A 数据库）→ `090`（B：登录状态判断、2FA 注册要求 `ACTIVE`、写权限锁、配置与审计动作）→ `091`（B：门户账号的查看、开通、重发、接受）→ `098`（B：停用、启用、重置 2FA；编号在后，顺序在 091 与 092 之间）→ `092`（C 接受邀请页）→ `093`（D 的前一半：接受邀请、`/api/v1/me`、`/2fa/self/*`、`/customer/me` 与客户鉴权依赖）→ `094`（D 的后一半：管理端门户账号六个接口与邀请邮件）→ `095`（E：管理端门户账号面板）→ `096`（E：按角色分流与门户外壳）→ `097`（E：门户首页与开启 2FA）。
 > 设计 §8 的顺序约束照旧成立：接受邀请页（092）与接受邀请接口（093）都先于能发出邀请的 094 上线。
 > 设计 §2「邀请邮件与重置的隔离」要求 `reset_password` 只认 `PASSWORD_RESET` 用途：该文件名含 password、Worker 不能改，由管理员在 `AIH-TASK-089` 合并之后、`091` 开启之前以 PR 完成。
+> 设计 v11–v12 要求 `request_reset` 签发重置令牌前按主键锁用户行、在锁内复查 `ACTIVE` 与邮箱（§2「邀请邮件与重置的隔离」）：同样因为文件名含 password，由管理员以 PR 完成，必须先于 `AIH-TASK-094` 合并部署；094 的契约前置条件与它的 CI 用例强制这个先后（§8「部署顺序」、§11）。
 
 ---
 
@@ -28,7 +29,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v10`
+**设计版本**：`v12`
 对应需求：前置设计闸门 #369（改密码吊销全部会话，须先实现）；spec §51、§52、§53、§54、§66、§88、§90、§96、§97、§112、§127（Customer authentication）；`REQ-PRIV-001`；AIH-TASK-020 设计 #136 v2 §2 末尾的账户状态契约
 目标 PR：待开（实现拆成五个任务，见 §11「实现拆分」）
 
@@ -205,6 +206,7 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 
 - 现有 `reset_password` 查令牌时加上 `purpose = 'PASSWORD_RESET'`，`accept_invitation` 只认 `purpose = 'INVITATION'`。两种令牌互相用不了
 - `request_reset` 本来就只给 `ACTIVE` 用户发，`INVITED` 的客户点「忘记密码」仍返回同一个 200、不发信。没收到邀请就由管理员重发，不开第二条通道
+- `request_reset` 签发令牌前锁用户行并在锁内复查状态（v11）：先按邮箱**不加锁**读出 `user_id`，再 `SELECT users … FOR UPDATE`（`populate_existing`）按主键锁住该行，锁内仍要求 `status = ACTIVE` 且邮箱等于归一后的请求邮箱，否则按「账号不存在或不可用」处理（同一个 200，不写令牌、outbox、审计）。令牌、outbox、审计照旧同一事务提交。这样签发与停用（§4「串行化」）按同一用户行排队：停用一旦提交，不会再有新的 `PASSWORD_RESET` 令牌落库。不直接按邮箱加锁读：MySQL 对唯一索引上不存在的值加锁读会留下间隙锁，这是匿名端点，任何人都能用随机邮箱制造锁等待，还会挡住开通时插入相邻邮箱的用户
 - 邀请邮件：outbox 事件 `PORTAL_INVITATION_REQUESTED`，payload 是 `{to, token, expires_at}`，链接是 `{frontend_base_url}/accept-invitation?token=…`
   - `expires_at` 是写入令牌行时的同一个值（不带时区的 UTC，**截到整秒**：取 `now` 去掉微秒再加有效期，因为 MySQL 的 `DATETIME` 只存到秒，不截就会出现「信里的时刻与库里差几分之一秒」；ISO 8601 字符串），渲染时只用它，不读当前配置。这样 outbox 重试、配置改动之后，信里写的到期时刻仍然和令牌真实的到期时刻一致
   - 文案写明到期时刻：马来西亚时间（UTC+8，固定偏移，不依赖 tzdata）精确到分钟，后面括号附 UTC；另提示「没收到请查垃圾箱」。不写「72 小时」这类相对时长
@@ -215,6 +217,7 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
 - 开通、重发、停用、启用：各自一个事务。先 `SELECT … FOR UPDATE` 锁租户行，再锁门户用户行（如果有）。业务写入、令牌、outbox、审计同一事务提交
 - 接受邀请：一个事务。先 `SELECT tenants … FOR UPDATE` 锁租户行，再锁 user 行，再加锁重读并条件 UPDATE 消费令牌（以受影响行数判定，与现有重置同一手法）；租户状态看锁住的那一行，不用普通读（§4「接受邀请的判定顺序」）
 - 重置客户 2FA：一个事务。锁租户行 → 锁 user 行 → 删除 2FA 设置与恢复码 → `password_version + 1` → 审计
+- 忘记密码（`request_reset`，v11）：一个事务。锁 user 行 → 复查 `ACTIVE` 与邮箱 → 写令牌、outbox、审计。只锁用户行、不锁租户行：现有重置流程的加锁顺序就是「用户 → 令牌」，管理端门户操作是「租户 → 用户 → 令牌」，两者都在用户行之后才碰令牌，不会成环
 
 ### 外部系统与异步
 
@@ -288,6 +291,11 @@ Phase 4 的客户门户（仪表盘、钱包、充值、收据）需要客户能
   - 停用先提交：令牌已作废，接受返回 400
   - 接受先提交：停用把 `ACTIVE` 改成 `DISABLED`
 - 「关户」与「接受」同理：关户先提交，接受拿到租户锁后读到 `CLOSED`，409；接受先提交，账号变为 `ACTIVE`，随后关户生效，账号只读
+- 「停用」与「忘记密码」（v11）：`request_reset` 在锁住的用户行上复查 `ACTIVE` 后才写令牌，停用也要锁同一行，结果是两种确定顺序之一：
+  - 停用先提交：`request_reset` 拿到锁后读到 `DISABLED`，不写令牌，对外仍是同一个 200
+  - 忘记密码先提交：令牌已在库里，停用随后把它连同其他未用令牌一起作废
+  - 两种顺序下，停用提交之后该用户都没有可用的 `PASSWORD_RESET` 令牌，之后重新启用也不会有
+  - 等锁只在同一用户正被管理员操作时发生，等待落在 `request_reset` 现有的固定耗时下限之内或略超出；只在这一刻、只对这一个账号可观察，不构成可用的枚举通道
 
 ### 数据库唯一性
 
@@ -391,6 +399,8 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | 并发 | integration（MySQL） | 两个租户并发用同一邮箱开通 | 一个 201，一个 409 `EMAIL_IN_USE` |
 | 并发 | integration（MySQL） | 同一邀请令牌并发提交两次、密码不同 | 一个 200、一个 400；最终的密码哈希能验证成功那一次的密码 |
 | 并发 | integration（MySQL） | 停用与接受同时到达（用两个连接、屏障控制先后，两种顺序各跑一次） | 只出现 §4 写的两种结果之一，不会出现停用之后账号仍是 `ACTIVE` |
+| 并发（v11） | integration（MySQL） | 停用与 `request_reset` 同时到达：用两个连接、屏障控制先后，两种顺序各跑一次；「停用先提交」那一次要让 `request_reset` 在停用提交前已经完成按邮箱的不加锁读取（读到 `ACTIVE`），再等用户行锁 | 停用先提交：`request_reset` 不写令牌、outbox、审计；忘记密码先提交：它写的令牌被停用作废（`used_at` 非空）。两种顺序下都断言：停用提交后该用户没有 `used_at IS NULL` 的 `PASSWORD_RESET` 令牌；重新启用后用忘记密码先提交那次邮件里的令牌调 `reset_password` 得到 400 `INVALID_RESET_TOKEN`、密码不变。去掉锁或锁内复查的变异必须让「停用先提交」那一次变红 |
+| 并发（v12，任务 D 的准入） | integration（MySQL） | 上一行的两种顺序在任务 D 里经接口再跑一遍：停用走管理端 `POST …/portal-account/disable`，忘记密码走 `POST /api/v1/auth/password/forgot` | 与上一行相同。`request_reset` 未加锁时「停用先提交」那一次必然变红（原因见 §8「部署顺序」），所以 v11 的修复没合并，D 的 CI 就过不了 |
 | 幂等重放 | integration | 重复开通、用已用过的令牌接受、重发之后用旧链接接受 | 409；400；400 |
 | 令牌隔离 | integration | 测试里绕过服务直接造「状态对、用途错」的令牌行：给 `INVITED` 客户插一行 `PASSWORD_RESET` 令牌交给接受邀请；给 `ACTIVE` 用户插一行 `INVITATION` 令牌交给 `reset_password`（只有这样，删掉任一边的用途条件用例才会变红；用正常途径造的令牌会先被状态检查拦下，证明不了用途过滤） | 都是 400，且不改密码、不改状态、不消费令牌 |
 | 令牌隔离 | integration | `INVITED` 客户调 `/password/forgot` | 同一个 200，不写重置令牌，不写 outbox |
@@ -437,6 +447,11 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
   - B 业务层：没有入口
   - C 前端接受邀请页：页面先上线，此时还没有任何邀请令牌，提交只会得到 400 或 404，不影响任何人
   - D 接口层：管理员开通、发出邀请从这一刻起才可能；这时接受页已经在线
+  - v11 的 `request_reset` 改动（§11「管理员 PR」）必须在**管理端停用 / 启用接口上线之前**合并部署。在那之前停用与启用没有任何入口，§4「停用」与「忘记密码」的竞态在生产上触发不到
+  - 这个先后由两道可检查的条件保证（v12），不只靠文字约定：
+    1. **CI**：任务 D 的契约要求它的接口测试包含 §7「并发（v12，任务 D 的准入）」。修复没合并时，「停用先提交」那一次必然变红：旧实现不加锁读到 `ACTIVE` 后插入令牌，插入时外键检查要对用户行加共享锁，于是等到停用提交后照样落库，断言「停用提交后没有 `used_at IS NULL` 的 `PASSWORD_RESET` 令牌」失败。`main` 要求 MySQL 分片所在的 `backend` 检查通过，D 因此合并不了。D 由 Worker 实现，Worker 不能改文件名含 password 的文件，没法在 D 里自己把它弄绿
+    2. **契约**：任务 D 的契约写明前置条件「`app/services/password_reset.py` 的 `request_reset` 已按 §2 锁用户行并复查」；开启时不满足，实现者停下、以 `contract_scope_insufficient` 退出
+  - 恢复：D 上线之前停用没有任何入口，生产上不可能已有漏网令牌，没有需要清理的行
   - E 门户其余前端：只是体验，缺它时客户已经能接受邀请并登录（登录后落在现有的兜底页，见下）
 - **回滚或前滚**：
   - 生产只前滚
@@ -459,6 +474,7 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | 备选 D：门户登录另起一组接口（`/api/v1/customer/auth/*`） | 两端可以分开调参 | 锁定、限流、重放检测等安全控制要维护两份 | spec §51 要求一套认证；Kelvin 2026-10-19 同意共用登录入口 |
 | 备选 E：租户 `DISABLED` / `CLOSED` 时直接拒绝登录 | 实现最简单 | 客户看不到账单和收据 | 违反 020 契约（Kelvin 2026-09-28 确认的只读） |
 | 备选 F：数据库同时强制「CUSTOMER 必须有 `tenant_id`」（v2 的 `ck_users_role_tenant`） | 少依赖一处应用代码 | 现有 12 个后端测试文件（`grep -l UserRole.CUSTOMER tests/backend` 实数）各自用本地的 `make_user` 造不挂租户的 CUSTOMER 来断言 403，`test_admin_customers_api.py` 还把 ADMIN 原地改成 CUSTOMER 测降级；约束一加它们全部失败，只能在同一个 PR 里一起改，单个任务的可改路径远超 12 个 | 不挂租户的 CUSTOMER 只能经直接写库出现（唯一的创建入口总是写 `tenant_id`），出现了也只会被 `require_customer` 拒在所有客户接口之外，拿不到任何租户数据。数据库仍然强制「ADMIN 不挂租户」与「一个租户最多一个门户账号」这两条真正关乎越权的约束 |
+| 备选 G（v11）：不改 `request_reset`，改为管理员启用时再作废一次该用户的全部未用令牌 | 不碰匿名端点的耗时 | 停用期间库里仍可能有一张「漏网」的未用令牌，安全性要靠以后每一条把账号恢复成可用的路径都记得作废；ADMIN 账号的停用 / 启用（CLI）同样要补 | 采用锁用户行后复查：在签发处把「停用提交后不再有新令牌」变成随时成立的事实，与 `reset_password` 已有的用户行串行化同一手法；Kelvin 2026-10-22 选定 |
 
 ## 10. 未决问题与假设
 
@@ -498,8 +514,9 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | A | 数据库 | 迁移 0025（接在 #369 的 0024 之后）；模型改动：`UserStatus.INVITED`、`User.tenant_id` / `activated_at`、`PasswordResetToken.purpose`；数据库兜底与迁移测试；`docs/database-schema.md` 补 `users` 一节 | — |
 | B | 业务规则 | `app/services/portal_accounts.py`：开通、重发、停用、启用、接受邀请、重置 2FA；登录、TOTP、刷新三处改为 `is not ACTIVE`；2FA 注册两个服务函数锁用户行并要求 `ACTIVE`；接受邀请递增 `password_version`（#369）；`lock_tenant_for_customer_write`；重置服务限定用途；`customer_2fa_required`、`customer_invitation_ttl_seconds` 配置；新审计动作；对应的服务层与并发测试 | A |
 | C | 前端（不走闸门） | 接受邀请页：`routes/paths.ts` 登记 `/accept-invitation`，路由放在 `RequireAuth` 之外（与重置密码页同级），表单提交 `POST /api/v1/auth/invitation/accept`，成功后转登录页；§7「邀请链接匿名可达」的前端用例。先于 D 上线，此时后端接口尚不存在，页面对任何令牌都显示「链接无效或已过期」 | B（只为排序；不依赖 B 的代码） |
-| D | 接口 | 管理端六个、认证四个（接受邀请、`/api/v1/me`、`/2fa/self/enrol`、`/2fa/self/confirm`）、客户端一个（`/customer/me`）接口；`require_customer` / `require_customer_writable`；邀请邮件渲染；扩展链接守卫（路径已登记、路由在 `RequireAuth` 之外）；路由枚举与越权用例；`docs/api.md`；`docs/runbook.md` 写「E 上线前不为真实客户开通」 | B、C |
+| D | 接口 | 管理端六个、认证四个（接受邀请、`/api/v1/me`、`/2fa/self/enrol`、`/2fa/self/confirm`）、客户端一个（`/customer/me`）接口；`require_customer` / `require_customer_writable`；邀请邮件渲染；扩展链接守卫（路径已登记、路由在 `RequireAuth` 之外）；路由枚举与越权用例；`docs/api.md`；`docs/runbook.md` 写「E 上线前不为真实客户开通」；§7「并发（v12，任务 D 的准入）」 | B、C；管理员 PR（v12：契约前置条件 + 上面那条用例在 CI 上强制，§8） |
 | E | 前端（不走闸门） | 管理端客户详情页的门户账号面板；登录后按 `/api/v1/me` 的角色跳转；门户外壳和 `/portal` 首页（显示 `/customer/me`、只读提示、开启 2FA） | D |
+| 管理员 PR（v11） | 业务规则 | `app/services/password_reset.py` 的 `request_reset`：锁用户行后复查 `ACTIVE` 与邮箱（§2「邀请邮件与重置的隔离」）；§7 的「停用与 `request_reset`」并发用例。文件名含 password，Worker 不能改，由管理员以 PR 完成；不另登记编号 | B 的停用（`AIH-TASK-098`）；必须先于 D 中管理端停用 / 启用接口（`AIH-TASK-094`）部署；这个先后由 D 的契约前置条件与 D 的 CI 用例强制（§8，v12） |
 
 ### 设计闸门判定
 
@@ -525,3 +542,5 @@ SQL 断言不写死方言相关的字面量。只有 MySQL 才有的断言放进
 | v8 | 2026-10-19 | 重置 2FA 的原因上限从 500 改为 255 个字符，与 `audit_logs.reason` 列宽和现有 `_Reason` 一致（§2）；§5 加「DB 提交失败（重置 2FA）」；§7 加 255 / 256 个字符的边界用例 | Claude 审查 v7（REQUEST_CHANGES）：500 字的原因在生产 MySQL 上会报 Data too long 回滚或被静默截断 |
 | v9 | 2026-10-19 | ① 停用门户账号时 `password_version + 1`，停用前的访问令牌与 pending 令牌不会因重新启用而复活（§4）。② 当前用户接口从 `/api/v1/auth/me` 移到 `/api/v1/me`：避开前端对 `/api/v1/auth/` 不刷新的规则与认证限流（§2）。③ `/2fa/self/enrol` 显式调用 `_rate_limit`（§2）。④ 邀请令牌的 `expires_at` 截到整秒（§2）。⑤ §7「令牌隔离」改为造「状态对、用途错」的令牌行，「Redis/Celery 丢失」按任务 B / D 分开断言，「写权限并发」的对照断言用等价的不加锁读取。⑥ 错误码名称更正：设计里的 `INVALID_TOKEN` 是现有 `InvalidToken` 的错误码，实际为 `TOKEN_INVALID`，全文改正 | 登记前预审（`worker.design_precheck`）对 v8 的发现：089 的三条 DESIGN_DEFECT 与两条 UNDECIDED、091 的一条 DESIGN_DEFECT 与一条 UNDECIDED、087 的错误码 DESIGN_DEFECT |
 | v10 | 2026-10-19 | ① 本设计的迁移编号改为 0025、接在 #369 的 `0024_password_version` 之后（§2、§7、§8、§11），避免两个 alembic head。② §7「停用 → 启用」与「停用后的 2FA 注册」各加断言：重新启用后，停用前的访问令牌与 pending 令牌仍是 401，版本号比停用前大 1 | Claude 审查 v9（REQUEST_CHANGES）：迁移编号与 #369 冲突；v9 新增的停用 +1 没有对应的测试断言 |
+| v11 | 2026-10-22 | `request_reset` 签发重置令牌前按主键锁用户行、在锁内复查 `ACTIVE` 与邮箱（§2「邀请邮件与重置的隔离」「事务边界」，§4「串行化」）；§7 加「停用与 `request_reset`」并发用例；§8 写明该改动先于停用 / 启用接口上线；§9 加备选 G；§11 加管理员 PR。状态机、表结构、接口、错误码与对外响应都不变 | Codex 审查 AIH-TASK-098 实现 PR #388（REQUEST_CHANGES）：停用只作废已有令牌，`request_reset` 不加锁读到 `ACTIVE` 后才插入令牌，停用先提交时新令牌躲过作废，30 分钟有效期内重新启用后仍可用来改密码。Kelvin 2026-10-22 拍板：#388 照常合并，按本版修 `request_reset` |
+| v12 | 2026-10-22 | 把「管理员 PR 先于任务 D 部署」变成可检查的条件：§7 加「并发（v12，任务 D 的准入）」，D 经接口重跑 v11 的并发用例，修复没合并时 CI 必然变红；D 的契约写明前置条件，不满足时实现者以 `contract_scope_insufficient` 停下（§8、§11）；§8 写明 D 上线前不可能已有漏网令牌、无需清理 | Codex 审查 v11（REQUEST_CHANGES）：文字要求管理员 PR 先于 D 部署，但 D 的 `depends_on` 只有 B、C，管理员 PR 也不登记编号，没有可检查的准入条件 |
