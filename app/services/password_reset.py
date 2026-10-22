@@ -154,14 +154,36 @@ def _start_reset(
         return None
 
     with session_factory() as session:
+        # ⚠️ 第一次读**刻意不加锁**，只用来拿 `user_id`：这是匿名端点，按邮箱加锁读一个不存在的
+        # 值，MySQL 会在唯一索引上留下间隙锁 —— 任何人都能用随机邮箱制造锁等待，还会挡住开通时
+        # 插入相邻邮箱的用户（设计闸门 #368 v12 §2「邀请邮件与重置的隔离」）。
         user = session.execute(select(User).where(User.email == address)).scalar_one_or_none()
+        account_exists = user is not None
+        if user is not None:
+            # ⚠️ **签发前按主键锁用户行，在锁内复查。**没有这一把锁：这里读到 `ACTIVE` 之后，
+            # 门户停用先提交、把当时已有的令牌全部作废，下面的令牌才落库 —— 它躲过了作废，账号
+            # 在有效期内被重新启用后仍能拿它改密码（#388 Codex 阻断项，设计 #368 v12 §4
+            # 「串行化」）。
+            # 停用锁的是同一行，两者于是排成一队：停用一旦提交，这里锁到的就是 `DISABLED`。
+            # 邮箱也放进条件里，用与上面同一个数据库比较规则复查。
+            #
+            # `populate_existing=True` 不能少：identity map 里已有上面读出的对象，没有它，
+            # 锁读拿到的新值会被丢掉（见 `reset_password` 里同一处说明）。
+            # SQLite 下 `FOR UPDATE` 被静默忽略，这一条只能对着真 MySQL 验
+            # （tests/backend/test_portal_accounts_concurrency.py）。
+            user = session.execute(
+                select(User)
+                .where(User.id == user.id, User.email == address)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).scalar_one_or_none()
         if user is None or user.status is not UserStatus.ACTIVE:
             # 停用的账号也不发信：给一个已被停用的账号重置密码，等于给它一条
             # 重新可用的路。⚠️ 但对外的响应仍然一模一样。
             #
             logger.info(
                 "Password reset requested for an unknown or inactive account",
-                extra={"account_exists": user is not None},
+                extra={"account_exists": account_exists},
             )
             return None
 

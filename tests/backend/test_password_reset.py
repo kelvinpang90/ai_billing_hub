@@ -10,7 +10,7 @@ import datetime as dt
 import json
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select, update
 
 from app.core.config import Settings
 from app.core.database import create_session_factory
@@ -271,6 +271,55 @@ def test_a_disabled_account_gets_no_reset_email(session_factory, settings: Setti
     assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT) is None
     assert outbox_rows(session_factory) == []
     assert audit_actions(session_factory) == []
+
+
+def _change_before_the_locked_read(session_factory, **values) -> list[bool]:
+    """Change the user row right before the locked re-read (design gate #368 v12 §2).
+
+    在同一个会话里改：SQLite 没有行锁，这里验的只是「锁读拿到的是新值，并在锁内复查」——
+    去掉复查、或去掉 `populate_existing` 让旧对象原样回来，用例都会变红。锁本身对着真 MySQL 验
+    （tests/backend/test_portal_accounts_concurrency.py）。
+    """
+    fired: list[bool] = []
+
+    def before_locked_read(state) -> None:
+        mappers = {mapper.class_ for mapper in state.all_mappers}
+        if fired or User not in mappers or not state.execution_options.get("populate_existing"):
+            return
+        fired.append(True)
+        # 不同步会话里的对象：留着普通读拿到的旧值，才能验出锁读必须 `populate_existing`。
+        state.session.execute(
+            update(User).where(User.email == EMAIL).values(**values),
+            execution_options={"synchronize_session": False},
+        )
+
+    event.listen(session_factory, "do_orm_execute", before_locked_read)
+    return fired
+
+
+def test_the_status_is_rechecked_on_the_locked_read(session_factory, settings: Settings) -> None:
+    """普通读看到 `ACTIVE`，锁读前账号已被停用：不签发，对外仍是同一个结果。"""
+    make_user(session_factory)
+    fired = _change_before_the_locked_read(session_factory, status=UserStatus.DISABLED)
+
+    assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT) is None
+
+    assert fired == [True]
+    assert token_rows(session_factory) == []
+    assert outbox_rows(session_factory) == []
+    assert audit_actions(session_factory) == []
+
+
+def test_the_address_is_rechecked_on_the_locked_read(session_factory, settings: Settings) -> None:
+    """锁读前邮箱已不是请求里那个：不签发，不把信寄给新地址。"""
+    make_user(session_factory)
+    fired = _change_before_the_locked_read(session_factory, email="moved@example.com")
+
+    assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT) is None
+
+    assert fired == [True]
+    assert token_rows(session_factory) == []
+    assert outbox_rows(session_factory) == []
 
 
 def test_the_outbox_payload_carries_nothing_beyond_what_the_email_needs(

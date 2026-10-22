@@ -3,6 +3,7 @@
 设计 §7 的并发行。AIH-TASK-091：并发开通（同租户、同邮箱）、同一邀请令牌并发提交、关户与接受、
 唯一冲突映射。AIH-TASK-098：停用与接受、重置 2FA 与客户确认 2FA（各两种先后），以及「重置客户
 2FA」里 255 个字符的原因在真 MySQL 上逐字保存。
+设计 #368 v12（管理员 PR）：停用与忘记密码（两种先后），停用提交后不留可用的重置令牌。
 
 ⚠️ **只能对着真 MySQL 跑**：SQLite 方言下 SQLAlchemy 静默忽略 `FOR UPDATE`，没有行锁、间隙锁与
 死锁检测，把服务里的加锁全部删掉，SQLite 上的用例照样全绿。
@@ -39,6 +40,7 @@ from app.models.auth import (
     DomainOutbox,
     PasswordResetToken,
     RecoveryCode,
+    TokenPurpose,
     TwoFactorSetting,
     User,
     UserRole,
@@ -47,8 +49,9 @@ from app.models.auth import (
 from app.models.base import Base
 from app.models.tenancy import AccountStatus, Tenant
 from app.repositories import tenancy
-from app.services import portal_accounts, two_factor
+from app.services import password_reset, portal_accounts, two_factor
 from app.services.auth import RequestContext
+from app.services.password_reset import InvalidResetToken, request_reset, reset_password
 from app.services.portal_accounts import (
     EmailInUse,
     InvalidInvitationToken,
@@ -57,6 +60,7 @@ from app.services.portal_accounts import (
     accept_invitation,
     create_portal_account,
     disable_portal_account,
+    enable_portal_account,
     reset_portal_two_factor,
 )
 from app.services.project_integration import AccountClosed
@@ -774,3 +778,136 @@ def test_a_255_character_reason_is_kept_verbatim_on_mysql(factory, admin) -> Non
         ).scalar_one()
     assert stored == reason
     assert count(factory, TwoFactorSetting) == 0
+
+
+# --- 停用与忘记密码（设计 #368 v12 §4「串行化」、§7「并发（v11）」） -----------------
+
+
+def forgot(factory, settings) -> int | None:
+    return request_reset(factory, settings, email=PORTAL_EMAIL, context=CONTEXT, now=NOW)
+
+
+def reset_token_of(factory, outbox_id: int) -> str:
+    with factory() as session:
+        row = session.get(DomainOutbox, outbox_id)
+        assert row is not None
+        return str(json.loads(row.payload_json or "{}")["token"])
+
+
+def live_reset_tokens(factory) -> int:
+    return count(
+        factory,
+        PasswordResetToken,
+        PasswordResetToken.purpose == TokenPurpose.PASSWORD_RESET,
+        PasswordResetToken.used_at.is_(None),
+    )
+
+
+def test_a_disable_between_the_plain_read_and_the_lock_issues_no_reset_token(
+    factory, settings, admin
+) -> None:
+    """忘记密码的普通读看到 `ACTIVE`，停用随即完整提交，忘记密码再去锁用户行。
+
+    锁读看到 `DISABLED`：不写令牌、outbox、审计，对外仍是同一个结果。旧实现读到 `ACTIVE` 就直接
+    插入，这张令牌躲过停用的作废 —— 去掉锁读或锁内复查，这条都会变红。停用在锁读那条查询发出之前
+    插进来（会话事件钩子，只触发一次）。
+    """
+    tenant = make_tenant(factory)
+    make_active_customer(factory, tenant)
+    fired = threading.Event()
+    failures: list[BaseException] = []
+
+    def go_disable() -> None:
+        try:
+            disable(factory, admin, tenant)
+        except BaseException as exc:  # noqa: BLE001 - 在主线程断言
+            failures.append(exc)
+
+    def before_locked_read(state) -> None:
+        mappers = {mapper.class_ for mapper in state.all_mappers}
+        if (
+            fired.is_set()
+            or User not in mappers
+            or not state.execution_options.get("populate_existing")
+        ):
+            return
+        fired.set()
+        disabler = threading.Thread(target=go_disable)
+        disabler.start()
+        disabler.join(timeout=JOIN_TIMEOUT)
+        assert not disabler.is_alive(), "the disable never finished"
+
+    event.listen(factory, "do_orm_execute", before_locked_read)
+    try:
+        assert forgot(factory, settings) is None
+    finally:
+        event.remove(factory, "do_orm_execute", before_locked_read)
+
+    assert fired.is_set()
+    assert failures == []
+    assert portal_user(factory, tenant).status is UserStatus.DISABLED
+    assert count(factory, PasswordResetToken) == 0
+    assert count(factory, DomainOutbox) == 0
+    assert audit_actions(factory) == [AuditAction.PORTAL_ACCOUNT_DISABLED]
+
+
+def test_a_reset_request_holding_the_lock_is_then_voided_by_the_disable(
+    factory, settings, admin, monkeypatch
+) -> None:
+    """忘记密码先锁到用户行：停用排在它后面，等它提交后才继续，并把它刚写的令牌一起作废。
+
+    重新启用之后，那封信里的令牌仍然用不了。去掉 `FOR UPDATE` 的话，停用不必等、在令牌落库前
+    就提交完，令牌于是躲过作废 —— 这条会变红。
+    """
+    tenant = make_tenant(factory)
+    make_active_customer(factory, tenant)
+    disabled = threading.Event()
+    failures: list[BaseException] = []
+    events: list[str] = []
+    real_generate = password_reset.generate_opaque_token
+
+    def go_disable() -> None:
+        try:
+            disable(factory, admin, tenant)
+            events.append("disable committed")
+            disabled.set()
+        except BaseException as exc:  # noqa: BLE001 - 在主线程断言
+            failures.append(exc)
+
+    disabler = threading.Thread(target=go_disable)
+
+    def staged_generate() -> str:
+        # 忘记密码已持用户行锁、复查通过，令牌还没写。停用这时出发，必须撞上这把锁。
+        disabler.start()
+        time.sleep(HOLD_SECONDS)
+        events.append("disable still waiting" if not disabled.is_set() else "disable got through")
+        return real_generate()
+
+    monkeypatch.setattr(password_reset, "generate_opaque_token", staged_generate)
+
+    outbox_id = forgot(factory, settings)
+    events.append("reset request committed")
+    disabler.join(timeout=JOIN_TIMEOUT)
+    assert not disabler.is_alive(), "the disable never finished"
+
+    assert failures == []
+    assert outbox_id is not None
+    assert events == ["disable still waiting", "reset request committed", "disable committed"]
+    assert portal_user(factory, tenant).status is UserStatus.DISABLED
+    assert count(factory, PasswordResetToken) == 1
+    assert live_reset_tokens(factory) == 0
+
+    enable_portal_account(
+        factory, actor=admin, customer_id=tenant.public_id, context=CONTEXT, now=NOW
+    )
+    assert portal_user(factory, tenant).status is UserStatus.ACTIVE
+    with pytest.raises(InvalidResetToken):
+        reset_password(
+            factory,
+            settings,
+            token=reset_token_of(factory, outbox_id),
+            new_password=OTHER_PASSWORD,
+            context=CONTEXT,
+            now=NOW,
+        )
+    assert verify_password(portal_user(factory, tenant).password_hash, PASSWORD)
