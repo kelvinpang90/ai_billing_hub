@@ -1,7 +1,8 @@
 """Portal account services under concurrency (design gate #368 v10 §4, §7).
 
-设计 §7 里属于本任务（AIH-TASK-091）的并发行：并发开通（同租户、同邮箱）、同一邀请令牌并发提交、
-关户与接受、唯一冲突映射。停用与接受、重置 2FA 与确认 2FA 两行归 AIH-TASK-098。
+设计 §7 的并发行。AIH-TASK-091：并发开通（同租户、同邮箱）、同一邀请令牌并发提交、关户与接受、
+唯一冲突映射。AIH-TASK-098：停用与接受、重置 2FA 与客户确认 2FA（各两种先后），以及「重置客户
+2FA」里 255 个字符的原因在真 MySQL 上逐字保存。
 
 ⚠️ **只能对着真 MySQL 跑**：SQLite 方言下 SQLAlchemy 静默忽略 `FOR UPDATE`，没有行锁、间隙锁与
 死锁检测，把服务里的加锁全部删掉，SQLite 上的用例照样全绿。
@@ -14,6 +15,7 @@
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import json
 import os
@@ -21,6 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 
+import pyotp
 import pytest
 from sqlalchemy import Engine, create_engine, event, func, select
 from sqlalchemy.engine import make_url
@@ -29,10 +32,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.passwords import hash_password, verify_password
+from app.core.tokens import InvalidToken
 from app.models.auth import (
+    AuditAction,
     AuditLog,
     DomainOutbox,
     PasswordResetToken,
+    RecoveryCode,
+    TwoFactorSetting,
     User,
     UserRole,
     UserStatus,
@@ -40,7 +47,7 @@ from app.models.auth import (
 from app.models.base import Base
 from app.models.tenancy import AccountStatus, Tenant
 from app.repositories import tenancy
-from app.services import portal_accounts
+from app.services import portal_accounts, two_factor
 from app.services.auth import RequestContext
 from app.services.portal_accounts import (
     EmailInUse,
@@ -49,8 +56,11 @@ from app.services.portal_accounts import (
     PortalAccountExists,
     accept_invitation,
     create_portal_account,
+    disable_portal_account,
+    reset_portal_two_factor,
 )
 from app.services.project_integration import AccountClosed
+from app.services.two_factor import confirm_enrolment, start_enrolment
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
 CONTEXT = RequestContext(ip_address="10.0.0.1", user_agent="pytest")
@@ -59,6 +69,7 @@ ADMIN_EMAIL = "admin@example.com"
 PORTAL_EMAIL = "portal@example.com"
 PASSWORD = "a-customer-perfectly-fine-passphrase"
 OTHER_PASSWORD = "another-customer-fine-passphrase"
+REASON = "Lost phone; identity confirmed by a call-back to the registered number."
 
 # 持锁的一方在屏障之后多等这么久再继续，给另一方时间撞上行锁。断言看的是结果与事件先后，
 # 这段时间只让「没加锁」的实现有机会抢到前面、从而让用例变红。
@@ -68,8 +79,11 @@ JOIN_TIMEOUT = 30
 
 
 @pytest.fixture
-def settings() -> Settings:
-    return Settings(customer_invitation_ttl_seconds=259_200)
+def settings(tmp_path) -> Settings:
+    # 主密钥只给重置 2FA 与确认 2FA 那两条用例注册 2FA 用。
+    master = tmp_path / "master.key"
+    master.write_text(f"1:{base64.b64encode(os.urandom(32)).decode()}\n", encoding="utf-8")
+    return Settings(customer_invitation_ttl_seconds=259_200, master_key_file=str(master))
 
 
 @pytest.fixture
@@ -496,3 +510,267 @@ def test_a_same_address_committed_after_the_check_maps_to_email_in_use(
     assert count(factory, User, User.tenant_id == tenant.id) == 0
     assert (count(factory, PasswordResetToken), count(factory, DomainOutbox)) == (0, 0)
     assert count(factory, AuditLog) == 0
+
+
+# --- 停用、重置 2FA 的帮手（AIH-TASK-098） --------------------------------------
+
+
+def disable(factory, admin, tenant) -> None:
+    disable_portal_account(
+        factory, actor=admin, customer_id=tenant.public_id, context=CONTEXT, now=NOW
+    )
+
+
+def reset_2fa(factory, admin, tenant, reason: str = REASON) -> None:
+    reset_portal_two_factor(
+        factory,
+        actor=admin,
+        customer_id=tenant.public_id,
+        reason=reason,
+        context=CONTEXT,
+        now=NOW,
+    )
+
+
+def make_active_customer(factory, tenant: Tenant) -> User:
+    """An `ACTIVE` portal account at `password_version` 0, written directly."""
+    with factory() as session:
+        user = User(
+            email=PORTAL_EMAIL,
+            password_hash=hash_password(PASSWORD),
+            role=UserRole.CUSTOMER,
+            status=UserStatus.ACTIVE,
+            tenant_id=tenant.id,
+            activated_at=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        session.expunge(user)
+        return user
+
+
+def audit_actions(factory) -> list[AuditAction]:
+    with factory() as session:
+        return list(session.execute(select(AuditLog.action).order_by(AuditLog.id)).scalars())
+
+
+# --- 停用与接受 -----------------------------------------------------------------
+
+
+def test_a_disable_that_commits_first_refuses_the_accept(
+    factory, settings, admin, monkeypatch
+) -> None:
+    """停用先拿到锁：令牌已作废、账号 `DISABLED`，接受锁到后 400，账号不会变成 `ACTIVE`。
+
+    接受方第 1 步的普通读在停用提交之前就建立了快照：只有锁读才看得到作废与停用。
+    """
+    tenant = make_tenant(factory)
+    token = token_of(factory, create(factory, settings, admin, tenant))
+    barrier = threading.Barrier(2, timeout=WAIT_TIMEOUT)
+    events: list[str] = []
+    real_portal_user = portal_accounts._portal_user
+
+    def staged(session: Session, tenant_id: int, *, for_update: bool) -> User | None:
+        user = real_portal_user(session, tenant_id, for_update=for_update)
+        if for_update:
+            barrier.wait()  # 停用方已持租户、用户两把锁，尚未改任何东西
+            time.sleep(HOLD_SECONDS)
+            events.append("disable proceeding")
+        return user
+
+    monkeypatch.setattr(portal_accounts, "_portal_user", staged)
+
+    def attempt() -> None:
+        barrier.wait()
+        try:
+            accept(factory, token)
+        except InvalidInvitationToken:
+            events.append("accept refused")
+            raise
+
+    outcomes = run_pair(disable=lambda: disable(factory, admin, tenant), accept=attempt)
+
+    assert outcomes["disable"] is None
+    assert isinstance(outcomes["accept"], InvalidInvitationToken), outcomes
+    assert events == ["disable proceeding", "accept refused"]
+    user = portal_user(factory, tenant)
+    assert (user.status, user.password_version, user.activated_at) == (
+        UserStatus.DISABLED,
+        1,
+        None,
+    )
+    assert count(factory, PasswordResetToken, PasswordResetToken.used_at.is_(None)) == 0
+
+
+def test_an_accept_that_takes_the_lock_first_is_then_disabled(
+    factory, settings, admin, monkeypatch
+) -> None:
+    """接受先拿到锁：200，账号 `ACTIVE`；停用排在它后面，锁到时看到的已是 `ACTIVE`。
+
+    停用照常生效：最终是 `DISABLED`，不会出现停用之后账号仍是 `ACTIVE`。
+    """
+    tenant = make_tenant(factory)
+    token = token_of(factory, create(factory, settings, admin, tenant))
+    barrier = threading.Barrier(2, timeout=WAIT_TIMEOUT)
+    real_validate = portal_accounts.validate_password_strength
+    real_portal_user = portal_accounts._portal_user
+    seen_by_disable: list[UserStatus] = []
+
+    def staged_validate(password: str, *, email: str | None = None) -> None:
+        barrier.wait()  # 接受方已持租户、用户、令牌三把锁（判定顺序第 5 步）
+        time.sleep(HOLD_SECONDS)
+        real_validate(password, email=email)
+
+    def watched(session: Session, tenant_id: int, *, for_update: bool) -> User | None:
+        user = real_portal_user(session, tenant_id, for_update=for_update)
+        if for_update and user is not None:
+            seen_by_disable.append(user.status)
+        return user
+
+    monkeypatch.setattr(portal_accounts, "validate_password_strength", staged_validate)
+    monkeypatch.setattr(portal_accounts, "_portal_user", watched)
+
+    def go_disable() -> None:
+        barrier.wait()
+        disable(factory, admin, tenant)
+
+    outcomes = run_pair(accept=lambda: accept(factory, token), disable=go_disable)
+
+    assert outcomes == {"accept": None, "disable": None}
+    # 不加锁的实现里，停用在接受方等待期间就读到了 INVITED。
+    assert seen_by_disable == [UserStatus.ACTIVE]
+    user = portal_user(factory, tenant)
+    # 接受 +1、停用 +1；停用之后账号不会是 ACTIVE。
+    assert (user.status, user.password_version) == (UserStatus.DISABLED, 2)
+    assert user.activated_at == NOW
+    assert count(factory, PasswordResetToken, PasswordResetToken.used_at.is_(None)) == 0
+
+
+# --- 重置 2FA 与客户确认 2FA ---------------------------------------------------
+
+
+def test_a_confirm_that_commits_first_is_then_reset(factory, settings, admin, monkeypatch) -> None:
+    """确认先提交：2FA 启用，随后重置把它与恢复码删掉，版本号 +1。"""
+    tenant = make_tenant(factory)
+    user = make_active_customer(factory, tenant)
+    enrolment = start_enrolment(factory, settings, user_id=user.id, password_version=0)
+    code = pyotp.TOTP(enrolment.secret).now()
+    barrier = threading.Barrier(2, timeout=WAIT_TIMEOUT)
+    events: list[str] = []
+    real_replace = two_factor._replace_recovery_codes
+
+    def staged_replace(session: Session, *, user_id: int, now: dt.datetime) -> list[str]:
+        barrier.wait()  # 确认方已锁用户行、置位 confirmed_at，尚未提交
+        time.sleep(HOLD_SECONDS)
+        events.append("confirm committing")
+        return real_replace(session, user_id=user_id, now=now)
+
+    monkeypatch.setattr(two_factor, "_replace_recovery_codes", staged_replace)
+
+    def go_confirm() -> None:
+        confirm_enrolment(
+            factory,
+            settings,
+            user_id=user.id,
+            password_version=0,
+            code=code,
+            context=CONTEXT,
+        )
+
+    def go_reset() -> None:
+        barrier.wait()
+        reset_2fa(factory, admin, tenant)
+        events.append("reset done")
+
+    outcomes = run_pair(confirm=go_confirm, reset=go_reset)
+
+    assert outcomes == {"confirm": None, "reset": None}
+    assert events == ["confirm committing", "reset done"]
+    assert (count(factory, TwoFactorSetting), count(factory, RecoveryCode)) == (0, 0)
+    assert portal_user(factory, tenant).password_version == 1
+    actions = audit_actions(factory)
+    assert actions.index(AuditAction.TWO_FACTOR_ENABLED) < actions.index(
+        AuditAction.PORTAL_2FA_RESET
+    )
+
+
+def test_a_reset_that_commits_first_refuses_the_confirm(
+    factory, settings, admin, monkeypatch
+) -> None:
+    """重置先提交：确认在锁用户行后读到新版本号，401 `TOKEN_INVALID`，不启用、不写恢复码。"""
+    tenant = make_tenant(factory)
+    user = make_active_customer(factory, tenant)
+    enrolment = start_enrolment(factory, settings, user_id=user.id, password_version=0)
+    code = pyotp.TOTP(enrolment.secret).now()
+    barrier = threading.Barrier(2, timeout=WAIT_TIMEOUT)
+    events: list[str] = []
+    real_audit = portal_accounts.record_audit
+
+    def staged_audit(session: Session, **kwargs) -> None:
+        barrier.wait()  # 重置方已锁租户、用户行并删了 2FA 行，尚未提交
+        time.sleep(HOLD_SECONDS)
+        events.append("reset committing")
+        real_audit(session, **kwargs)
+
+    monkeypatch.setattr(portal_accounts, "record_audit", staged_audit)
+
+    def go_confirm() -> None:
+        barrier.wait()
+        try:
+            confirm_enrolment(
+                factory,
+                settings,
+                user_id=user.id,
+                password_version=0,
+                code=code,
+                context=CONTEXT,
+            )
+        except InvalidToken:
+            events.append("confirm refused")
+            raise
+
+    outcomes = run_pair(reset=lambda: reset_2fa(factory, admin, tenant), confirm=go_confirm)
+
+    assert outcomes["reset"] is None
+    refused = outcomes["confirm"]
+    assert isinstance(refused, InvalidToken), outcomes
+    assert (refused.code, refused.http_status) == ("TOKEN_INVALID", 401)
+    assert events == ["reset committing", "confirm refused"]
+    assert (count(factory, TwoFactorSetting), count(factory, RecoveryCode)) == (0, 0)
+    assert portal_user(factory, tenant).password_version == 1
+    assert AuditAction.TWO_FACTOR_ENABLED not in audit_actions(factory)
+
+
+# --- 重置 2FA 的原因长度（真 MySQL） --------------------------------------------
+
+
+def test_a_255_character_reason_is_kept_verbatim_on_mysql(factory, admin) -> None:
+    """`audit_logs.reason` 是 `String(255)`：恰好 255 个字符在真 MySQL 上不报错、不截断。"""
+    tenant = make_tenant(factory)
+    user = make_active_customer(factory, tenant)
+    with factory() as session:
+        session.add(
+            TwoFactorSetting(
+                user_id=user.id,
+                encrypted_totp_secret="not-a-real-ciphertext",
+                key_version=1,
+                secret_version=1,
+                confirmed_at=NOW,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        session.commit()
+    reason = ("0123456789" * 26)[:255]
+
+    reset_2fa(factory, admin, tenant, reason=reason)
+
+    with factory() as session:
+        stored = session.execute(
+            select(AuditLog.reason).where(AuditLog.action == AuditAction.PORTAL_2FA_RESET)
+        ).scalar_one()
+    assert stored == reason
+    assert count(factory, TwoFactorSetting) == 0
