@@ -5483,7 +5483,7 @@ tasks:
     title: 客户门户认证第三层之二：门户账号停用、启用与重置两步验证服务
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v10）§2「管理员重置客户 2FA」、§4 与 §11 任务 B：在 app/services/portal_accounts.py 加停用、启用、重置 2FA 三个函数（AIH-TASK-091 按登记前预审的规模提示拆出的后一半）。没有任何 HTTP 入口，接口属于 AIH-TASK-094。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-091
     acceptance_criteria:
