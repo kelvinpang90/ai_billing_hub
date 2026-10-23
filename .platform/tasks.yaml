@@ -5929,6 +5929,7 @@ tasks:
       - '测试：新增 tests/backend/test_customer_wallet_api.py，覆盖设计 §7 后端表格除「路由守卫」「单条快照」两行之外的全部行（SQLite 与 MySQL 参数化，客户登录夹具照 AIH-TASK-093 的写法；并发翻页与金额精度放在 BILLING_TEST_DATABASE_URL 的真 MySQL 上，未设置时 skip、CI 必跑）；「单条快照」写进 tests/backend/test_wallet_repository.py；「路由守卫」：tests/backend/test_customer_api.py 的路由枚举用例若是自动枚举则不改该文件，若用显式清单则只把两个新路由加进清单、别的不动；泄漏检查断言原始响应文本里不出现成本、汇率、参考价的哨兵值、调账 description 的哨兵串、管理员邮箱与调账幂等键；示例 uuid 用全零占位值'
       - 'docs/api.md：在「客户门户认证」一节之后新增「客户钱包」一节：两个接口的请求、响应示例、字段说明、错误码，写明客户请求不接受任何租户标识、两个接口在只读状态下照常可读、没有 total 的理由（设计 §2、§9）'
       - '不改迁移与模型、不改前端、不改管理端接口与 app/schemas/wallet_transactions.py；不改 AI 模块；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '契约对设计的勘误（只澄清现有代码的事实，不放松任何检查）：设计 #393 §2「错误」、§5、§7「鉴权」 把「非 ACTIVE 用户」与「门户账号被停用后的旧令牌」写成 403 CUSTOMER_REQUIRED，但 require_customer 先调用的 require_current_user（app/api/auth.py）对非 ACTIVE 用户抛 InvalidToken，现有测试也断言如此；沿用现有行为：这两种情况是 401 TOKEN_INVALID，403 CUSTOMER_REQUIRED 只用于 ADMIN 令牌与 tenant_id 为空的 CUSTOMER；不改 app/api/auth.py'
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #393'
     allowed_change_paths:
       - app/repositories/wallet.py
@@ -6222,6 +6223,7 @@ tasks:
       - '测试：新增 tests/backend/test_customer_usage_api.py，覆盖设计 §7 后端表格中除「索引存在且可用」「迁移原子性」「迁移可重跑」「迁移往返」（属于 AIH-TASK-103）与「路由守卫」之外的全部行，含「扫描上限」（MySQL 上 30 000 条事件、测试专用 1 毫秒超时得 QueryTooBroad、默认超时得空页、编译出的 SQL 在 MySQL 带提示而 SQLite 不带）与「日期极值」；SQLite 与 MySQL 参数化，客户登录夹具照 tests/backend/test_customer_api.py 的写法；MySQL 用例用 BILLING_TEST_DATABASE_URL 的真 MySQL，未设置时 skip、CI 必跑；「路由守卫」：tests/backend/test_customer_api.py 的路由枚举用例若是自动枚举则不改该文件，若用显式清单则只把两个新路由加进清单；泄漏检查断言原始响应文本里不出现成本、原币成本、汇率、参考价、项目 status_webhook_url 与 description、冲突记录 api_key 的哨兵值；示例 uuid 用全零占位值'
       - 'docs/api.md：在「客户钱包」一节之后新增「客户用量」一节：两个接口的请求、响应示例、参数与组合规则、字段说明、刻意不返回的字段、营业时区换算、游标不得解析、QUERY_TOO_BROAD 的含义与处理、错误码（设计 §2）'
       - '不改迁移与模型、不改前端、不改管理端接口与 app/schemas/usage_events.py 既有内容；不改 AI 模块；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '契约对设计的勘误（只澄清现有代码的事实，不放松任何检查）：设计 #398 §2「错误」、§5、§7「鉴权」 把「非 ACTIVE 用户」与「门户账号被停用后的旧令牌」写成 403 CUSTOMER_REQUIRED，但 require_customer 先调用的 require_current_user（app/api/auth.py）对非 ACTIVE 用户抛 InvalidToken，现有测试也断言如此；沿用现有行为：这两种情况是 401 TOKEN_INVALID，403 CUSTOMER_REQUIRED 只用于 ADMIN 令牌与 tenant_id 为空的 CUSTOMER；不改 app/api/auth.py'
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #398'
     allowed_change_paths:
       - app/repositories/usage_events.py
