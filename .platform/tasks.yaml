@@ -5532,7 +5532,7 @@ tasks:
     title: 客户门户认证第四层：匿名可达的接受邀请页
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v12）§8「部分部署时的行为」与 §11 任务 C：前端新增接受邀请页，路径 /accept-invitation 登记在 routes/paths.ts，路由放在 RequireAuth 之外、与重置密码页同级；表单提交 POST /api/v1/auth/invitation/accept，成功后转登录页。必须先于能发出邀请的 AIH-TASK-094 上线；此时后端接口尚不存在，页面对任何令牌都显示链接无效或已过期。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-098
     acceptance_criteria:
