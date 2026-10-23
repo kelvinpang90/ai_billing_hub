@@ -1083,5 +1083,11 @@
   "aiAccess.issued.title": "AI client key issued",
   "aiAccess.issued.warning": "Copy this token now. It is shown only this once and cannot be viewed after this dialog is closed.",
   "aiAccess.issued.token": "Token",
-  "aiAccess.issued.close": "I have copied the token"
+  "aiAccess.issued.close": "I have copied the token",
+  "requireRole.loadFailed": "We could not confirm which account you are signed in with.",
+  "requireRole.unknownRole": "This account has a role this app does not recognise.",
+  "requireRole.retry": "Try again",
+  "portal.title": "Customer portal",
+  "portal.home.title": "Welcome",
+  "portal.home.intro": "You are signed in to the customer portal. Your account details will appear here."
 }

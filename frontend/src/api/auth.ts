@@ -7,7 +7,7 @@
 
 import { AxiosError } from "axios";
 
-import { ApiError, client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
+import { ApiError, apiGet, client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
 
 export const STAGE_TOTP_REQUIRED = "TOTP_REQUIRED";
 export const STAGE_ENROL_2FA = "ENROL_2FA";
@@ -103,6 +103,34 @@ export const WEAK_PASSWORD = "WEAK_PASSWORD";
 export const INVITATION_ENDPOINT_NOT_FOUND = "INVITATION_ENDPOINT_NOT_FOUND";
 
 const HTTP_NOT_FOUND = 404;
+
+export const ROLE_ADMIN = "ADMIN";
+export const ROLE_CUSTOMER = "CUSTOMER";
+export type Role = typeof ROLE_ADMIN | typeof ROLE_CUSTOMER;
+
+/**
+ * `GET /api/v1/me` 的响应（docs/api.md「客户门户认证」）。
+ *
+ * `role` 刻意写成 `string`：后端将来多一种角色时，类型上不该假装它只可能是这两个值，
+ * 调用方必须自己处理「都不是」那一支。
+ */
+export interface Me {
+  role: string;
+  email: string;
+  two_factor_enabled: boolean;
+}
+
+export const ME_QUERY_KEY = ["auth", "me"] as const;
+
+/**
+ * 当前登录的是谁、什么角色。
+ *
+ * ⚠️ 路径是 `/api/v1/me`，**不在** `/api/v1/auth/` 下（设计 AIH-TASK-089 §2）：拦截器对那个前缀下的
+ * 401 不触发刷新，访问令牌一过期每次进页面都会被踢回登录；那个前缀还受登录限流。放在这里，过期时照常走刷新。
+ */
+export function getMe(signal?: AbortSignal): Promise<Me> {
+  return apiGet<Me>("/api/v1/me", signal);
+}
 
 /** 用邀请邮件里那张令牌给门户账号设密码（设计 §2）。成功后账号变为 `ACTIVE`，用现有登录即可。 */
 export async function acceptInvitation(token: string, password: string): Promise<unknown> {
