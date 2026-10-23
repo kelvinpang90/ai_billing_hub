@@ -48,7 +48,17 @@ from app.core.database import create_session_factory
 from app.core.passwords import hash_password
 from app.core.tokens import issue_access_token
 from app.main import create_app
-from app.models.auth import AuditLog, DomainOutbox, User, UserRole, UserStatus
+from app.models.auth import (
+    AuditLog,
+    DomainOutbox,
+    PasswordResetToken,
+    RecoveryCode,
+    RefreshToken,
+    TwoFactorSetting,
+    User,
+    UserRole,
+    UserStatus,
+)
 from app.models.base import Base
 from app.models.tenancy import AccountStatus, BillingMode, Tenant
 from app.models.usage import UsageEvent
@@ -341,14 +351,19 @@ def _portal(factories: Iterator[sessionmaker[Session]], tmp_path) -> Iterator[Po
     try:
         yield Portal(factory, tmp_path)
     finally:
-        # 门户账号挂在租户上（`fk_users_tenant` 是 RESTRICT）：
-        # 先删掉它们，MySQL 清场才删得掉租户。
+        # 门户账号挂在租户上（`fk_users_tenant` 是 RESTRICT）：先删掉它们，MySQL 清场才删得掉
+        # 租户；也不给迁移用例的降级留下 CUSTOMER。先删登录留下的、指向它们的行，不依赖外键的
+        # 级联。审计与 outbox 由清场 TRUNCATE。管理员留给清场：账本行还指向它。
+        # id 先取出来：MySQL 不许在删 `users` 的同一条语句里再查 `users`（1093）。
         with factory() as session:
-            session.execute(
-                delete(User).where(
-                    User.tenant_id.is_not(None), User.email.like(f"%{TEST_EMAIL_DOMAIN}")
-                )
+            portal_users = select(User.id).where(
+                User.role == UserRole.CUSTOMER, User.email.like(f"%{TEST_EMAIL_DOMAIN}")
             )
+            ids = list(session.execute(portal_users).scalars())
+            if ids:
+                for model in (RefreshToken, RecoveryCode, TwoFactorSetting, PasswordResetToken):
+                    session.execute(delete(model).where(model.user_id.in_(ids)))
+                session.execute(delete(User).where(User.id.in_(ids)))
             session.commit()
         for _ in factories:
             pass
@@ -492,9 +507,8 @@ def test_out_of_range_parameters_are_422_without_echoing_the_value(
     response = portal.get_page(headers, **{name: value})
 
     assert error_of(response) == (422, "VALIDATION_ERROR")
-    message = response.json()["error"]["message"]
-    assert name in message
-    assert value not in message
+    # 逐字比对 app/core/errors.py 的文案：只有字段名，没有收到的值。
+    assert response.json()["error"]["message"] == f"Invalid request fields: query.{name}"
 
 
 def test_the_largest_page_and_the_edges_of_the_cursor_are_200(portal: Portal) -> None:

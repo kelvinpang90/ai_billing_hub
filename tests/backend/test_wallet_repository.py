@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import threading
 import uuid
 from collections.abc import Iterator
@@ -779,7 +780,9 @@ def test_the_wallet_summary_is_one_unlocked_select(factory, engine) -> None:
     statements: list[str] = []
 
     def record(_conn, _cursor, statement, *_args) -> None:
-        statements.append(statement)
+        # 驱动可能发的连接维护语句不是 repository 的（照 test_fx_rates_service.py）。
+        if not re.match(r"^\s*(SET|SHOW|SELECT @@)", statement, re.IGNORECASE):
+            statements.append(statement)
 
     with factory() as session:
         event.listen(engine, "before_cursor_execute", record)
