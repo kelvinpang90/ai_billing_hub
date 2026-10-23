@@ -11,18 +11,23 @@
  * 确实是这个形状」。
  */
 
-import { AxiosError, AxiosHeaders } from "axios";
+import { AxiosError, AxiosHeaders, type AxiosAdapter } from "axios";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { resetRefreshState } from "../auth/refresh";
+import { resetTokenStore, setAccessToken } from "../auth/tokenStore";
 import {
   INVALID_INVITATION_TOKEN,
   INVITATION_ENDPOINT_NOT_FOUND,
   acceptInvitation,
+  getMe,
   login,
   requestPasswordReset,
   resetPassword,
 } from "./auth";
 import { client } from "./client";
+
+const realAdapter = client.defaults.adapter;
 
 /** 让 `client.post` 回一个 §107 的成功信封，不真的发请求。 */
 function stubPost() {
@@ -34,6 +39,15 @@ function stubPost() {
 afterEach(() => {
   // 下面有的用例让 `client.post` 抛错；不还原的话会漏到后面的用例里。
   vi.restoreAllMocks();
+  // `getMe` 的刷新用例换掉了 adapter。axios 默认没设 adapter，所以只能删，不能赋 undefined
+  // （`exactOptionalPropertyTypes`，同 interceptors.test.ts）。
+  if (realAdapter === undefined) {
+    delete client.defaults.adapter;
+  } else {
+    client.defaults.adapter = realAdapter;
+  }
+  resetTokenStore();
+  resetRefreshState();
 });
 
 describe("auth requests", () => {
@@ -115,6 +129,60 @@ describe("auth requests", () => {
       code: INVALID_INVITATION_TOKEN,
       requestId: "req-400",
     });
+  });
+
+  it("asks who is signed in at /api/v1/me and returns the role", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue({
+      data: {
+        success: true,
+        data: { role: "CUSTOMER", email: "ops@example.com", two_factor_enabled: false },
+        error: null,
+        request_id: "req-me",
+      },
+    });
+
+    await expect(getMe()).resolves.toEqual({
+      role: "CUSTOMER",
+      email: "ops@example.com",
+      two_factor_enabled: false,
+    });
+
+    // ⚠️ **不在** `/api/v1/auth/` 下（设计 AIH-TASK-089 §2）：那个前缀下的 401 不触发刷新。
+    expect(get).toHaveBeenCalledWith("/api/v1/me", {});
+  });
+
+  it("refreshes an expired access token and asks /api/v1/me again", async () => {
+    // 换 adapter 而不是打桩 `client.get`：要测的正是拦截器对这个路径会不会刷新。
+    setAccessToken("token-expired");
+    const seen: string[] = [];
+    const adapter: AxiosAdapter = (config) => {
+      const url = config.url ?? "";
+      seen.push(`${url} ${String(config.headers.get("Authorization"))}`);
+      const expired = url === "/api/v1/me" && config.headers.get("Authorization") === "Bearer token-expired";
+      const data =
+        url === "/api/v1/auth/refresh"
+          ? { success: true, data: { access_token: "token-new" }, error: null, request_id: "req-r" }
+          : {
+              success: !expired,
+              data: expired ? null : { role: "ADMIN", email: "admin@example.com", two_factor_enabled: true },
+              error: expired ? { code: "TOKEN_INVALID", message: "The access token is invalid." } : null,
+              request_id: "req-me",
+            };
+      const response = { data, status: expired ? 401 : 200, statusText: "", headers: {}, config };
+      if (expired) {
+        return Promise.reject(new AxiosError("Unauthorized", "ERR_BAD_REQUEST", config, undefined, response));
+      }
+      return Promise.resolve(response);
+    };
+    client.defaults.adapter = adapter;
+
+    await expect(getMe()).resolves.toMatchObject({ role: "ADMIN" });
+
+    expect(seen).toEqual([
+      "/api/v1/me Bearer token-expired",
+      "/api/v1/auth/refresh undefined",
+      "/api/v1/me Bearer token-new",
+    ]);
   });
 
   it("still sends login the way it always did", async () => {

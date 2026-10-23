@@ -69,6 +69,11 @@ export const ROUTES = {
    * `open_usage_analytics` 按这个 href 找顶栏链接，改了要同步那里。
    */
   usageAnalytics: "/usage-analytics",
+  /**
+   * 客户门户首页（AIH-TASK-096，设计 AIH-TASK-089 §11 任务 E）。只给 CUSTOMER：`RequireRole` 把 ADMIN 转回
+   * {@link ROUTES.dashboard}，管理端各页同样把 CUSTOMER 转到这里。
+   */
+  portalHome: "/portal",
 } as const;
 
 /**
