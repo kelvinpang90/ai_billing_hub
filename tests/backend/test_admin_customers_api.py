@@ -123,6 +123,8 @@ AI_ACCESS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/a
 PROJECT_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}"
 INTEGRATION_STATUS_ROUTE = PROJECT_ROUTE + "/integration-status"
 STATUS_WEBHOOK_ROUTE = PROJECT_ROUTE + "/status-webhook"
+# AIH-TASK-094 的六个门户账号接口（设计闸门 #368 v12 §2「API」管理端）。
+PORTAL_ACCOUNT_ROUTE = "/api/v1/admin/customers/{customer_id}/portal-account"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -194,6 +196,12 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", INTEGRATION_STATUS_ROUTE),
     ("PUT", STATUS_WEBHOOK_ROUTE),
     ("GET", STATUS_WEBHOOK_ROUTE),
+    ("GET", PORTAL_ACCOUNT_ROUTE),
+    ("POST", PORTAL_ACCOUNT_ROUTE),
+    ("POST", PORTAL_ACCOUNT_ROUTE + "/resend-invitation"),
+    ("POST", PORTAL_ACCOUNT_ROUTE + "/disable"),
+    ("POST", PORTAL_ACCOUNT_ROUTE + "/enable"),
+    ("POST", PORTAL_ACCOUNT_ROUTE + "/reset-2fa"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -301,6 +309,12 @@ VALID_BODIES = {
     # 真的把它停用、真的设上地址，而不是碰巧「没变化」。地址是虚构的。
     ("POST", INTEGRATION_STATUS_ROUTE): {"integration_status": "DISABLED", "reason": "Probe"},
     ("PUT", STATUS_WEBHOOK_ROUTE): {"url": "https://hooks.example.com/probe"},
+    # 门户账号（AIH-TASK-094）：客户是真实的、还没有门户账号，
+    # 漏了鉴权的开通会真的建出账号并写 outbox 与审计；
+    # 其余几个会走到 404 `PORTAL_ACCOUNT_NOT_FOUND`，同样过不了 401 / 403。
+    ("POST", PORTAL_ACCOUNT_ROUTE): {"email": "portal-probe@example.com"},
+    ("POST", PORTAL_ACCOUNT_ROUTE + "/resend-invitation"): {},
+    ("POST", PORTAL_ACCOUNT_ROUTE + "/reset-2fa"): {"reason": "Probe"},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
