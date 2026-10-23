@@ -24,7 +24,7 @@ from itertools import pairwise
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, insert, select, text, update
+from sqlalchemy import Engine, create_engine, delete, event, insert, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -39,7 +39,7 @@ from app.models.auth import (
     UserRole,
     UserStatus,
 )
-from app.models.tenancy import BillingStatus, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingMode, BillingStatus, Project, Tenant
 from app.models.wallet import (
     REFERENCE_TYPE_FOR,
     ReferenceType,
@@ -63,9 +63,11 @@ from app.repositories.wallet import (
     LedgerConflict,
     PostResult,
     WalletNotFound,
+    WalletSummary,
     billing_status_for,
     create_wallet,
     get_wallet_for_tenant,
+    get_wallet_summary,
     list_transactions_for_tenant,
     post_transaction,
     verify_wallet,
@@ -763,6 +765,46 @@ def test_a_page_filters_by_source_and_carries_the_operator(factory) -> None:
     assert [row.wallet_sequence for row in older] == [1]
     assert {(row.created_by_email, row.usage_event_public_id) for row in credits} == {(email, None)}
     assert {(row.created_by_email, row.usage_event_public_id) for row in usage} == {(None, None)}
+
+
+def test_the_wallet_summary_is_one_unlocked_select(factory, engine) -> None:
+    """设计闸门 #393 v3 §3 INV-13、§7「单条快照」：余额与三个状态出自同一条 SELECT。
+
+    不加锁、不写。
+
+    只断言两种方言相同的片段（CLAUDE.md「写后端测试的约定」）。
+    """
+    tenant_id = make_tenant(factory)
+    post(factory, tenant_id, TOPUP, "12.5")
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, *_args) -> None:
+        statements.append(statement)
+
+    with factory() as session:
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            summary = get_wallet_summary(session, tenant_id)
+            missing = get_wallet_summary(session, tenant_id + 1_000_000)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        assert not session.new and not session.dirty
+
+    assert summary == WalletSummary(
+        currency="MYR",
+        balance=Decimal("12.50000000"),
+        billing_mode=BillingMode.PREPAID,
+        billing_status=BillingStatus.ACTIVE,
+        account_status=AccountStatus.ENABLED,
+    )
+    assert missing is None
+    assert len(statements) == 2
+    for statement in statements:
+        normalized = " ".join(statement.upper().split())
+        assert normalized.startswith("SELECT ")
+        assert "FOR UPDATE" not in normalized and "FOR SHARE" not in normalized
+        assert " JOIN WALLETS " in normalized
+    assert state(factory, tenant_id)[:2] == (Decimal("12.50000000"), 1)
 
 
 def test_a_page_is_capped_and_a_limit_below_one_is_refused(factory) -> None:

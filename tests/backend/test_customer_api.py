@@ -513,7 +513,11 @@ def test_a_customer_is_refused_by_the_admin_endpoints(app, client) -> None:
 
 def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
     """既防枚举落空（下面的参数化用例一条都不跑也是绿的），也逼新增接口补进来。"""
-    assert set(CUSTOMER_ROUTES) == {("GET", CUSTOMER_ME)}
+    assert set(CUSTOMER_ROUTES) == {
+        ("GET", CUSTOMER_ME),
+        ("GET", f"{CUSTOMER_PREFIX}/wallet"),
+        ("GET", f"{CUSTOMER_PREFIX}/wallet/transactions"),
+    }
 
 
 @pytest.mark.parametrize(("method", "path"), CUSTOMER_ROUTES)

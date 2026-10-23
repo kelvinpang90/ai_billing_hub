@@ -31,6 +31,8 @@ from sqlalchemy.orm import Session
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, OutboxStatus, User
 from app.models.base import MONEY_PRECISION, MONEY_SCALE
 from app.models.tenancy import (
+    AccountStatus,
+    BillingMode,
     BillingStatus,
     IntegrationStatus,
     Tenant,
@@ -328,6 +330,39 @@ def create_wallet(session: Session, *, tenant_id: int, now: dt.datetime) -> Wall
 def get_wallet_for_tenant(session: Session, tenant_id: int) -> Wallet | None:
     statement = select(Wallet).where(Wallet.tenant_id == tenant_id)
     return session.execute(statement).scalar_one_or_none()
+
+
+@dataclass(frozen=True)
+class WalletSummary:
+    """What the customer wallet card reads (design gate #393 v3 §2「接口一」).
+
+    余额与三个状态出自同一条 SELECT：同一个一致性读快照，不会读到「余额已变、状态未变」的组合
+    （INV-13）。
+    """
+
+    currency: str
+    balance: Decimal
+    billing_mode: BillingMode
+    billing_status: BillingStatus
+    account_status: AccountStatus
+
+
+def get_wallet_summary(session: Session, tenant_id: int) -> WalletSummary | None:
+    """One `tenants JOIN wallets` SELECT, no lock, no write; `None` when there is no wallet."""
+    statement = (
+        select(
+            Wallet.currency,
+            Wallet.balance,
+            Tenant.billing_mode,
+            Tenant.billing_status,
+            Tenant.account_status,
+        )
+        .select_from(Tenant)
+        .join(Wallet, Wallet.tenant_id == Tenant.id)
+        .where(Tenant.id == tenant_id)
+    )
+    row = session.execute(statement).one_or_none()
+    return None if row is None else WalletSummary(**row._mapping)
 
 
 def post_transaction(

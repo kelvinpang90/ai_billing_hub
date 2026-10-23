@@ -6,6 +6,7 @@
 目前收录：
 
 - [客户门户认证](#客户门户认证)（AIH-TASK-093）：接受邀请、当前用户、客户自己开启 2FA、客户端 `/customer/me`
+- [客户钱包](#客户钱包)（AIH-TASK-099）：客户自己的余额与钱包流水，流水用序号游标分页
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端钱包流水](#管理端钱包流水)（AIH-TASK-084）：序号游标分页，是下面「分页」的例外
@@ -130,7 +131,7 @@
 
 `total` 是总条数。页码超过末页时 `items` 为空，`total` 照报。
 
-例外：[管理端钱包流水](#管理端钱包流水)用序号游标（`before_sequence`），没有 `page` 与 `total`，理由见那一节。
+例外：[管理端钱包流水](#管理端钱包流水)与[客户钱包](#客户钱包)的流水接口用序号游标（`before_sequence`），没有 `page` 与 `total`，理由见那两节。
 
 ---
 
@@ -275,6 +276,119 @@
 
 - `customer_id` 是客户的 `public_id`。恰好这四个键：没有任何金额、成本、毛利、内部 id、`billing_mode`（INV-7）。
 - `read_only` 在 `account_status` 为 `DISABLED` 或 `CLOSED` 时为 `true`。
+
+---
+
+## 客户钱包
+
+设计依据：设计闸门 #393 `APPROVED: design v3`，全文见 [design/AIH-TASK-099-customer-wallet.md](design/AIH-TASK-099-customer-wallet.md)（§2、§6、§9；spec §67、§70、§90）。实现登记为 AIH-TASK-099。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/customer/wallet` | CUSTOMER 的访问令牌 | 200，钱包摘要（6 个键） | 401 / 403 / 500 / 503 |
+| `GET /api/v1/customer/wallet/transactions` | CUSTOMER 的访问令牌 | 200，一页账本行（每项 7 个键） | 401 / 403 / 422 / 500 / 503 |
+
+- **客户请求不接受任何租户标识**（spec §90，见上文[客户请求的约定](#客户请求的约定)）：租户只取自访问令牌对应的、库里的 user 行。两个接口都不定义租户、客户、钱包标识参数；带了 `customer_id`、`tenant_id` 也只会被当作未知参数忽略，返回的仍是自己的钱包。
+- **两个接口在只读状态下照常可读**：`account_status` 为 `PENDING_ACTIVATION`、`ENABLED`、`DISABLED`、`CLOSED` 时都返回 200（停用、关户后仍能看账）。它们用 `require_customer`，不用 `require_customer_writable`，所以没有 403 `ACCOUNT_READ_ONLY`。
+- 只读：不写账本、不动余额、不改任何状态、不写审计，不加锁。
+- ADMIN 不能调；管理员看客户的流水用[管理端钱包流水](#管理端钱包流水)。
+
+### `GET /api/v1/customer/wallet` —— 客户自己的钱包
+
+没有查询参数（未知参数忽略）。
+
+```json
+{
+  "success": true,
+  "data": {
+    "currency": "MYR",
+    "balance": "12.45880000",
+    "billing_mode": "PREPAID",
+    "billing_status": "ACTIVE",
+    "ai_service": "ALLOW_AI",
+    "ai_service_reason": null
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `currency` | 钱包币种，V1 恒为 `MYR` |
+| `balance` | 恰好 8 位小数的有符号字符串，原样来自 `wallets.balance`，可为负 |
+| `billing_mode` | `PREPAID` / `INTERNAL_METERED_ONLY` |
+| `billing_status` | `ACTIVE`（余额 > 0）/ `SUSPENDED`（余额 ≤ 0，恰好为 0 也是 `SUSPENDED`） |
+| `ai_service` | `ALLOW_AI` / `BLOCK_AI`：AI 服务现在是否可用。与集成方的[有效 AI 服务状态](#集成有效-ai-服务状态)同一公式，在客户级算（项目维度按 `ENABLED` 代入） |
+| `ai_service_reason` | `ai_service` 为 `BLOCK_AI` 时是 `ACCOUNT_CLOSED` / `ACCOUNT_DISABLED` / `ACCOUNT_PENDING_ACTIVATION` / `BALANCE_NOT_POSITIVE` 之一，`ALLOW_AI` 时为 `null`。管理员动作排在余额之前：被停用且余额为负时是 `ACCOUNT_DISABLED`。不会出现 `PROJECT_INTEGRATION_DISABLED`：单个项目被停用不在这里体现 |
+
+- 恰好这 6 个键：没有钱包 `version`、`low_balance_threshold`、`status_version`、任何内部 id。账户状态与只读标志见 `/customer/me`，这里不重复。
+- `INTERNAL_METERED_ONLY` 的客户余额通常为 0、`billing_status` 为 `SUSPENDED`，但 `ai_service` 照常是 `ALLOW_AI`：判断 AI 能不能用看 `ai_service`，不要只看 `billing_status`。
+- 余额与三个状态出自同一条查询，不会读到「余额已变、状态未变」的组合。
+
+### `GET /api/v1/customer/wallet/transactions` —— 客户自己的钱包流水
+
+| 参数 | 规则 |
+| --- | --- |
+| `page_size` | 1–100，默认 20；超出 422 |
+| `before_sequence` | 可选，整数 1 – 9 223 372 036 854 775 807；只返回 `wallet_sequence < before_sequence` 的行。省略 = 从最新一行开始。超出 422 |
+
+不接受 `reference_type` 或任何其他筛选；未知参数忽略。参数由框架在鉴权**之前**校验，所以没带令牌、参数又不合法的请求拿到 422；文案只列字段名、不回显值。
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "wallet_sequence": 42,
+        "transaction_type": "AI_USAGE",
+        "amount": "-0.04120000",
+        "balance_after": "12.45880000",
+        "event_id": "00000000-0000-7000-8000-000000000002",
+        "created_at": "2026-10-18T08:30:00"
+      }
+    ],
+    "page_size": 20,
+    "next_before_sequence": 23
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+（示例只列了一页 20 行里的第一行；这一页最后一行的序号是 23。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `items` | 最新在前，按 `wallet_sequence` 倒序 |
+| `id` | 账本行的 `public_id` |
+| `wallet_sequence` | 这一笔在钱包账本里的序号，从 1 起、连续递增，也是翻页游标 |
+| `transaction_type` | 九种类型之一（`TOPUP`、`AI_USAGE`、`ADJUSTMENT_CREDIT`、`ADJUSTMENT_DEBIT`、`REBILL_CREDIT`、`REBILL_DEBIT`、`REFUND_ADJUSTMENT`、`BONUS`、`SYSTEM_CORRECTION`），原值。前端按它显示固定文案 |
+| `amount` / `balance_after` | 恰好 8 位小数的有符号字符串，原样来自 `DECIMAL(20,8)` 列，不经浮点、不舍入 |
+| `event_id` | 只有 AI 用量扣费行有：接入方上报的 `event_id`（或 AI 模块代为生成的 ULID），用于和自己的系统对账。其余行一律 `null` |
+| `created_at` | 记账时刻，UTC，不带时区 |
+| `page_size` | 本次请求的 `page_size` |
+| `next_before_sequence` | 还有更早的行时 = 本页**最后一行**的 `wallet_sequence`，原样作为下一页的 `before_sequence`；没有更多时 `null` |
+
+- 每项恰好上面 7 个键。与[管理端钱包流水](#管理端钱包流水)相比**刻意不返回**：`description`（管理员写的调账原因，可能含内部备注）、`reference_type`、调账的 `reference_id`（管理端幂等键）、`created_by_email`、`balance_before`、`usage_event_id`、`metadata_json`、任何成本 / 汇率 / 参考价 / 毛利与内部 id（INV-7）。
+- 翻页规则与管理端钱包流水相同：第一页不带 `before_sequence`；下一页把 `next_before_sequence` 原样传回；为 `null` 就是最后一页；「回到最新」= 不带 `before_sequence` 重取。翻页之间新记的账只出现在最新那一端，往旧翻不重复、不遗漏。拿别的客户的序号当游标，也只会翻到自己的行。
+- 余额卡与流水是两次请求，中间可能有新记账：页面上的余额可能比流水第一行的 `balance_after` 更新，这是预期行为。
+
+**为什么没有 `total`**（设计 §2、§9，与管理端钱包流水同一理由）：每个 AI 请求一行账本，大客户的账本是 spec §108 说的大表。`total` 每次要数全部行，`OFFSET` 要先扫过前面所有行，新行插入时按页码翻还会重复上一页的末尾几行；序号游标在任意深度都是索引上的范围扫描。客户不需要总行数，所以本接口不返回它。
+
+### 错误（两个接口相同）
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期（前端照常走刷新）；门户账号已停用或不是 `ACTIVE`（停用后的旧令牌下一个请求即失效） |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 422 | `VALIDATION_ERROR` | 仅流水接口：查询参数超出上面的规则 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id`；包括客户缺钱包这种数据不一致（流水接口也是 500，不返回空页） |
+| 503 | `DATABASE_UNAVAILABLE` 等 | 数据库不可用，沿用通用处理 |
+
+没有 404（客户来自会话，不存在「找不到客户」），也没有 403 `ACCOUNT_READ_ONLY`（两个接口都是读）。
 
 ---
 
