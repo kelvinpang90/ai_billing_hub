@@ -5714,7 +5714,7 @@ tasks:
     title: 客户门户前端第一刀：管理端客户详情页的门户账号面板
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v12）§11 任务 E 的第一部分：调用 AIH-TASK-094 的六个接口，在管理端客户详情页加门户账号面板（未开通时开通；已开通时显示状态、邀请时间与有效期、最后登录、2FA，按状态给出重发邀请、停用、启用、重置 2FA）。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-094
     acceptance_criteria:
