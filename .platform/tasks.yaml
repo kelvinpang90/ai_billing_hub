@@ -6392,3 +6392,125 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-107
+    title: 客户本月用量第一层：本月计费额、请求数、对话数与按日用量的只读接口
+    purpose: >-
+      按 docs/design/AIH-TASK-107-customer-usage-summary.md（设计闸门 #403 已批准 v1）§2 与 §8 第 1 步：新增 GET /api/v1/customer/usage-summary（可选 month=YYYY-MM，默认当前马来西亚日历月），返回该月已计费事件的计费额合计、请求数、不同的非空 conversation_id 个数，以及该月每一天的请求数与计费额；读时在 usage_events 上实时汇总，两条 SELECT 同一个只读事务，沿用 2 秒执行预算；docs/api.md 记新接口。只读，不写任何表、不改表结构；前端属于 AIH-TASK-108。
+    status: ready
+    depends_on:
+      - AIH-TASK-104
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-107-customer-usage-summary.md（设计闸门 #403 已批准 v1）逐条一致，以 §2 全部小节（「前端」除外）、§3 INV-1、INV-7、INV-8、INV-10、INV-13、§4、§5、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 AIH-TASK-104 已交付 CUSTOMER_USAGE_QUERY_TIMEOUT_MS、QueryTooBroad 与 422 QUERY_TOO_BROAD 的映射、马来西亚日历日到 UTC 的换算与 app/schemas/customer_usage.py；任何一项缺失或形状不同时停下说明，不自行补'
+      - 'app/api/customer.py：处理函数第一条语句显式调用 require_customer，租户只取 CustomerPrincipal.tenant_id，不定义任何租户或客户标识参数。month 可选、YYYY-MM、必须在 2020-01 到 2099-12 之间且在任何日期运算之前判，越界或格式错 422 VALIDATION_ERROR 且文案不回显值；省略时取请求时刻（UTC）加 8 小时后的年月，同一请求只取一次现在；未来月份照常 200、全为 0。月份区间 [当月 1 日 00:00 − 8 小时, 次月 1 日 00:00 − 8 小时) 按 occurred_at 取，复用 AIH-TASK-104 的换算与 KUALA_LUMPUR_OFFSET'
+      - 'app/repositories/usage_events.py：新增汇总函数，在同一个只读事务、同一个连接里发两条 SELECT（按马来西亚日分组的 COUNT 与 SUM(billable_cost)；COUNT(DISTINCT conversation_id)），WHERE tenant_id 与 status = PROCESSED 与月份区间恒在，不加锁、不写、不读任何成本列；马来西亚日期表达式按方言生成（MySQL DATE(DATE_ADD(occurred_at, INTERVAL 8 HOUR))，SQLite date(occurred_at, +8 hours)）；MySQL 上两条都带 MAX_EXECUTION_TIME 提示并复用 AIH-TASK-104 的常量与只给测试用的超时参数，超时转 QueryTooBroad、接口 422 QUERY_TOO_BROAD 并记 customer_usage_query_timeout 日志（不带参数值），SQLite 上不带提示；没有事件的日子在 Python 里补 0；合计 = 各日 Decimal 相加，经现有 money_text 格式化，不经 float'
+      - 'app/schemas/customer_usage.py 新增汇总模型：data 恰好 month、charged_amount、request_count、conversation_count、days 五个键，days 是该月每一天各一项（28 到 31 项、日期升序），每项恰好 date、request_count、charged_amount 三个键；不返回成本、原币成本、汇率、参考价、毛利、token 合计与任何内部 id'
+      - '测试：新增 tests/backend/test_customer_usage_summary_api.py，覆盖设计 §7 后端表格除「路由守卫」之外的全部行（SQLite 与 MySQL 参数化；「扫描上限」在 MySQL 上写入 30 000 条当月事件并用测试专用 1 毫秒超时；「同一快照」断言两条 SELECT 在同一个连接、同一个事务里发出；「与用量页一致」调用 AIH-TASK-104 的用量接口翻完同一个月）；另按设计闸门 #403 审查的建议加一条只在 MySQL 上跑的精度用例：同一天 1234567890.12345678 与 0.00000001 两条事件，当日与合计都恰好是 1234567890.12345679（float 往返会得到别的值），设计 §7「金额精度」里 999999999999.99999999 加 0.00000001 那一例也只在 MySQL 上跑（SQLite 的 Numeric 存成 REAL，大值在 SQLite 上判别不了 float），SQLite 上只保留三条 0.00000001 合计为 0.00000003 的小值用例；「路由守卫」：tests/backend/test_customer_api.py 的路由枚举用例若是自动枚举则不改该文件，若用显式清单则只把新路由加进清单；泄漏检查断言原始响应文本里没有成本、原币成本、汇率、参考价的哨兵值；MySQL 用例用 BILLING_TEST_DATABASE_URL 的真 MySQL，未设置时 skip、CI 必跑；示例 uuid 用全零占位值'
+      - 'docs/api.md：在「客户用量」一节里新增 usage-summary 小节：请求、响应示例、字段说明（含对话数的口径、按 occurred_at 归月、与钱包流水按记账时间合计可能不同、数字会随晚到事件变化）、错误码（设计 §2）'
+      - '不改迁移与模型、不改前端、不改管理端接口与 app/schemas/usage_events.py；不改 AIH-TASK-104 已有的两个客户接口的行为；不改 AI 模块；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #403'
+    allowed_change_paths:
+      - app/repositories/usage_events.py
+      - app/schemas/customer_usage.py
+      - app/api/customer.py
+      - tests/backend/test_customer_usage_summary_api.py
+      - tests/backend/test_customer_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-108
+    title: 客户本月用量第二层：门户首页的本月用量卡与按日请求数柱状图
+    purpose: >-
+      按 docs/design/AIH-TASK-107-customer-usage-summary.md（设计闸门 #403 已批准 v1）§2「前端」「金额」与 §8 第 2 步：调用 AIH-TASK-107 的接口，在门户首页加本月用量卡（计费额、请求数、对话数）与按日请求数柱状图（纯 CSS 或 SVG，不引入依赖），链到用量页。只做前端，外加验收脚本的一个只读步骤。低余额提示与最小恢复额不在本任务。
+    status: ready
+    depends_on:
+      - AIH-TASK-106
+      - AIH-TASK-107
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的 usage-summary 小节为准（AIH-TASK-107 写入），显示规则以设计 §2「金额」「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/routes/、frontend/src/layouts/ 与 frontend/src/components/MoneyText.tsx'
+      - 'frontend/src/api/customerUsage.ts 新增 usage-summary 的封装（省略 month 时不进查询串，不传任何租户或客户标识），既有两个封装不变；新增 frontend/src/features/portal/UsageSummaryCard.tsx：月份标题、计费额（AIH-TASK-102 的 formatAmountRounded 按 6 位）、请求数、对话数（旁注只计带对话标识的请求）；按日柱状图的柱高按 request_count 相对当月最大值的比例，最大值为 0 时所有柱高为 0、不除以零，金额不转成 number；每根柱的提示显示当天日期、请求数与计费额（6 位）；附一个到 portalUsage 的链接（不带参数）'
+      - 'frontend/src/features/portal/PortalHomePage.tsx 在既有的账户信息、只读提示、开启 2FA、余额卡与最近流水之外加 UsageSummaryCard；它的加载中、失败（带 request_id）与 QUERY_TOO_BROAD（专门文案：本月用量暂时算不出，可在用量页按较短区间查看）三种状态都不影响首页其余部分'
+      - '页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：customerUsage.test.ts 补 usage-summary 封装的路径与查询串；PortalHomePage.test.tsx 在既有用例之外覆盖设计 §7 前端一行的全部场景（三个数字与月份标题、计费额 6 位显示、柱高比例与全零不除以零、提示内容、三种状态且任一状态下余额卡与开启 2FA 照常显示、不请求 /api/v1/admin/ 路径）；AIH-TASK-097、101、106 的既有用例照常通过；示例 uuid 全零'
+      - 'check_portal_usage_summary：在 login_customer 之后停留在门户首页；后端值取页面自己发出的 GET /api/v1/customer/usage-summary 的响应体（被动观察，不自己发请求），断言页面显示的请求数、对话数与响应一致、计费额等于 charged_amount 按 6 位 ROUND_HALF_UP 舍入后的值（脚本用字符串运算舍入，不经浮点）、柱子个数等于 days 的项数；响应是 QUERY_TOO_BROAD 时判 FAIL 并说明；不点链接、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤（含 check_portal_home 与 check_portal_dashboard）行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不勾任何项（Phase 4「客户仪表盘」还缺低余额提示与最小恢复额）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #403（本任务是纯前端，引用它只为让审查拿到接口与显示契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerUsage.ts
+      - frontend/src/api/customerUsage.test.ts
+      - frontend/src/features/portal/UsageSummaryCard.tsx
+      - frontend/src/features/portal/PortalHomePage.tsx
+      - frontend/src/features/portal/PortalHomePage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_home
+        - check_portal_usage_summary
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
