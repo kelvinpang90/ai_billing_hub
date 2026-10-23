@@ -95,3 +95,42 @@ class RegenerateRecoveryCodesRequest(BaseModel):
     """
 
     password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+
+class AcceptInvitationRequest(BaseModel):
+    """接受门户邀请（设计闸门 #368 v12 §2）。
+
+    字段名是 `password`，与重置的 `new_password` 不同。
+
+    ⚠️ 下限同样不在这里查：强度只在 `validate_password_strength` 一处，且排在令牌与租户状态
+    之后判定（设计 §4「接受邀请的判定顺序」），错误码因此不取决于密码的内容。
+    """
+
+    token: str = Field(min_length=1, max_length=512)
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+
+class SelfEnrolRequest(BaseModel):
+    """客户自己开启 2FA 的第一步要**重新验证密码**（设计 §2）。
+
+    ⚠️ 与重新生成恢复码同一个理由：光有一张被偷走的访问令牌，不能给账号挂上别人的验证器。
+    """
+
+    password: str = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+
+class SelfConfirmRequest(BaseModel):
+    """客户自己开启 2FA 的第二步：只有验证码，主体来自访问令牌。"""
+
+    code: str = Field(min_length=1, max_length=64)
+
+
+class CurrentUserResponse(BaseModel):
+    """`GET /api/v1/me`：恰好三个键（设计 §6）。
+
+    ⚠️ 不放 `tenant_id`、内部用户 id、哈希、锁定信息。
+    """
+
+    role: str
+    email: str
+    two_factor_enabled: bool

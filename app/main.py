@@ -27,9 +27,11 @@ from app.api.admin_provider_prices import router as admin_provider_prices_router
 from app.api.admin_usage_analytics import router as admin_usage_analytics_router
 from app.api.admin_usage_events import router as admin_usage_events_router
 from app.api.auth import router as auth_router
+from app.api.customer import router as customer_router
 from app.api.health import router as health_router
 from app.api.integration_usage import router as integration_usage_router
 from app.api.internal_alerts import router as internal_alerts_router
+from app.api.me import router as me_router
 from app.api.two_factor import router as two_factor_router
 from app.core.celery_app import RedisNotConfigured, create_celery_app
 from app.core.clientip import parse_trusted_proxies
@@ -136,6 +138,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(two_factor_router)
+    # 当前用户与客户门户（设计闸门 #368 v12 §2）：`/api/v1/me` 刻意不在 `/api/v1/auth/` 下。
+    app.include_router(me_router)
+    app.include_router(customer_router)
     app.include_router(admin_customers_router)
     app.include_router(admin_audit_router)
     app.include_router(admin_ai_catalog_router)

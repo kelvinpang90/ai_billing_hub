@@ -6,6 +6,10 @@
 
 ⚠️ 反过来说，pending 令牌**只能**用来走这条路：它的 `typ` 与访问令牌不同，
 拿它去调业务端点会被 `decode_token(expected_type=...)` 直接拒掉。
+
+**客户自己开启 2FA**（`/self/enrol`、`/self/confirm`，设计闸门 #368 v12 §2）收的是访问令牌：
+客户的 2FA 可选，他是登录之后才来开的。只给 CUSTOMER（ADMIN 在登录时强制注册，不走这里），
+复用同一对服务；只读状态下仍然允许 —— 保护账号的操作不该被账户停用挡住。
 """
 
 from __future__ import annotations
@@ -14,8 +18,16 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from app.api.auth import client_ip, request_context, require_session_factory
+from app.api.auth import (
+    _rate_limit,
+    client_ip,
+    request_context,
+    require_current_user,
+    require_customer,
+    require_session_factory,
+)
 from app.core.logging import current_request_id
+from app.core.passwords import verify_password
 from app.core.tokens import TOKEN_TYPE_PENDING_2FA, decode_token
 from app.schemas.auth import (
     ConfirmEnrolRequest,
@@ -23,6 +35,8 @@ from app.schemas.auth import (
     EnrolResponse,
     RecoveryCodesResponse,
     RegenerateRecoveryCodesRequest,
+    SelfConfirmRequest,
+    SelfEnrolRequest,
 )
 from app.schemas.envelope import ApiResponse, success
 from app.services.auth import InvalidCredentials, token_password_version
@@ -93,9 +107,6 @@ def regenerate(
     ⚠️ 光有访问令牌不够。恢复码等价于第二因子，一张被偷走的访问令牌就能换出
     十个新的 —— 那等于把 2FA 绕过了。所以这里**重新验一次密码**。
     """
-    from app.api.auth import require_current_user
-    from app.core.passwords import verify_password
-
     user = require_current_user(request)
     if not verify_password(user.password_hash, payload.password):
         # 复用同一个错误：这里没有枚举问题，但保持一种失败形状更省事。
@@ -113,5 +124,56 @@ def regenerate(
     logger.info(
         "Recovery codes regenerated",
         extra={"component": "auth", "user_id": user.id, "client": client_ip(request)},
+    )
+    return success(RecoveryCodesResponse(recovery_codes=codes), request_id=current_request_id())
+
+
+@router.post("/self/enrol", response_model=ApiResponse[EnrolResponse])
+def self_enrol(request: Request, payload: SelfEnrolRequest) -> ApiResponse[EnrolResponse]:
+    """A customer starts their own TOTP enrolment; the secret is returned **once**.
+
+    ⚠️ 重验密码是一个可以拿来猜密码的入口，所以**第一步**就过进程内令牌桶（nginx 的认证限流区
+    是主控）。密码错照 `/recovery-codes` 的先例：401 `INVALID_CREDENTIALS`，不计入登录锁定、
+    不写审计 —— 调用方已经持有有效的访问令牌。
+    """
+    _rate_limit(request)
+    principal = require_customer(request)
+    user = principal.user
+    if not verify_password(user.password_hash, payload.password):
+        raise InvalidCredentials
+
+    enrolment = start_enrolment(
+        require_session_factory(request),
+        request.app.state.settings,
+        user_id=user.id,
+        # `require_current_user` 读库时已核对它等于访问令牌的 `pwv`（#369）。服务层锁用户行后
+        # 再比较一次，并要求 `ACTIVE`：鉴权之后才改密码或被停用，也拦得住。
+        password_version=user.password_version,
+    )
+    # ⚠️ 不记日志：`otpauth_uri` 的查询串里就是密钥本身。
+    return success(
+        EnrolResponse(secret=enrolment.secret, otpauth_uri=enrolment.otpauth_uri),
+        request_id=current_request_id(),
+    )
+
+
+@router.post("/self/confirm", response_model=ApiResponse[RecoveryCodesResponse])
+def self_confirm(
+    request: Request, payload: SelfConfirmRequest
+) -> ApiResponse[RecoveryCodesResponse]:
+    """Verify the first code of a customer's own enrolment; recovery codes are returned **once**.
+
+    验证码错沿用 `confirm_enrolment` 的 401 `INVALID_TOTP`；成功时由它写
+    `TWO_FACTOR_ENABLED` 审计。
+    """
+    principal = require_customer(request)
+    user = principal.user
+    codes = confirm_enrolment(
+        require_session_factory(request),
+        request.app.state.settings,
+        user_id=user.id,
+        password_version=user.password_version,
+        code=payload.code,
+        context=request_context(request),
     )
     return success(RecoveryCodesResponse(recovery_codes=codes), request_id=current_request_id())

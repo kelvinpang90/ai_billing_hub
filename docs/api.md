@@ -5,6 +5,7 @@
 
 目前收录：
 
+- [客户门户认证](#客户门户认证)（AIH-TASK-093）：接受邀请、当前用户、客户自己开启 2FA、客户端 `/customer/me`
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端钱包流水](#管理端钱包流水)（AIH-TASK-084）：序号游标分页，是下面「分页」的例外
@@ -130,6 +131,150 @@
 `total` 是总条数。页码超过末页时 `items` 为空，`total` 照报。
 
 例外：[管理端钱包流水](#管理端钱包流水)用序号游标（`before_sequence`），没有 `page` 与 `total`，理由见那一节。
+
+---
+
+## 客户门户认证
+
+设计依据：设计闸门 #368 `APPROVED: design v12`，全文见 [design/AIH-TASK-089-customer-portal-auth.md](design/AIH-TASK-089-customer-portal-auth.md)（§2「API」「依赖」、§6；spec §51–§54、§90）。
+
+客户（CUSTOMER）与管理员共用 `/api/v1/auth/login`、`/login/totp`、`/refresh`、`/logout` 与忘记密码。本节是客户门户
+新增的五个接口；管理端的门户账号接口不在本节。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST /api/v1/auth/invitation/accept` | 匿名，凭邀请令牌 | 200 `{}` | 400 `INVALID_INVITATION_TOKEN` / `WEAK_PASSWORD`；409 `ACCOUNT_CLOSED`；422；429 |
+| `POST /api/v1/auth/2fa/self/enrol` | CUSTOMER 的访问令牌 + 重验密码 | 200 `{secret, otpauth_uri}` | 401 `INVALID_CREDENTIALS` / `TOKEN_INVALID`；403 `CUSTOMER_REQUIRED`；409 `ALREADY_ENROLLED`；422；429 |
+| `POST /api/v1/auth/2fa/self/confirm` | CUSTOMER 的访问令牌 | 200 `{recovery_codes}` | 401 `INVALID_TOTP` / `TOKEN_INVALID`；403 `CUSTOMER_REQUIRED`；409 `ALREADY_ENROLLED` / `NOT_ENROLLED`；422 |
+| `GET /api/v1/me` | 任一已登录用户 | 200 `{role, email, two_factor_enabled}` | 401 `TOKEN_INVALID` |
+| `GET /api/v1/customer/me` | CUSTOMER 的访问令牌 | 200 `{customer_id, company_name, account_status, read_only}` | 401 `TOKEN_INVALID`；403 `CUSTOMER_REQUIRED` |
+
+本节专有的错误码：
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 400 | `INVALID_INVITATION_TOKEN` | 邀请令牌不存在、已用、已过期、用途不对，或账号不在 `INVITED`。**统一一个码、一句文案，不细分** |
+| 400 | `WEAK_PASSWORD` | 密码强度不合格，与重置密码同一个错误 |
+| 409 | `ACCOUNT_CLOSED` | 接受邀请时客户已关户 |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者在数据库里不是 CUSTOMER，或是一个不属于任何客户的 CUSTOMER |
+| 403 | `ACCOUNT_READ_ONLY` | 客户写接口：客户的 `account_status` 是 `DISABLED` 或 `CLOSED`。本节没有写接口，以后的客户写接口沿用 |
+
+### 客户请求的约定
+
+- **客户请求不接受任何租户标识**（spec §90）。客户是谁、属于哪个客户，只取自访问令牌对应的、库里的 user 行；
+  `/api/v1/customer/*` 的路径、查询串、请求体里都没有租户参数，带了也不读。带别的客户的 `customer_id` 来调，
+  返回的仍是自己的。
+- 每个 `/api/v1/customer/*` 处理函数的第一条语句是 `require_customer` 或 `require_customer_writable`。ADMIN 调
+  `/api/v1/customer/*` 一律 403 `CUSTOMER_REQUIRED`；CUSTOMER 调 `/api/v1/admin/*` 一律 403 `ADMIN_REQUIRED`。
+- 客户的四种 `account_status` 都能登录、都能读。`DISABLED` / `CLOSED` 时 `read_only` 为 `true`，客户写接口返回
+  403 `ACCOUNT_READ_ONLY`；`PENDING_ACTIVATION` 与 `ENABLED` 一样可以完整使用。开启 2FA 在只读状态下仍然允许。
+- ⚠️ **客户写操作必须在自己的写事务里、写入之前先调用 `lock_tenant_for_customer_write`**
+  （`app/services/account_status.py`），由它锁客户行并重查 `account_status`。`require_customer_writable` 只是
+  **提前拒绝**：它读完状态就结束了，之后管理员仍可能把客户停用。以后每个客户写接口的设计闸门都要引用这一条
+  （设计 §2「依赖」）。
+
+### `POST /api/v1/auth/invitation/accept` —— 接受邀请
+
+邀请邮件里的链接是 `{frontend_base_url}/accept-invitation?token=…`，前端把令牌与客户设置的密码提交到这里。
+
+```json
+{ "token": "<邀请邮件里的令牌>", "password": "a-customer-perfectly-fine-passphrase" }
+```
+
+成功：
+
+```json
+{ "success": true, "data": {}, "error": null, "request_id": "00000000-0000-0000-0000-000000000000" }
+```
+
+- 账号从 `INVITED` 变为 `ACTIVE`，该账号其余未用的邀请令牌一并作废。**不自动登录**：没有访问令牌、不设刷新
+  cookie，前端转登录页。
+- 判定顺序：令牌与账号状态（400 `INVALID_INVITATION_TOKEN`）→ 客户是否关户（409 `ACCOUNT_CLOSED`）→ 密码强度
+  （400 `WEAK_PASSWORD`）。错误码只取决于「链接还能不能用」与客户状态，不取决于密码的内容。弱密码不消耗令牌，
+  换个密码可以用同一个链接重试。
+- 同一个令牌提交第二次得到 400 `INVALID_INVITATION_TOKEN`，不覆盖第一次设置的密码。提交确认丢失后重试得到 400 时，
+  前端提示「可能已设置，请直接登录」。
+- 设置密码使之前的全部会话失效（见[上文](#改密码使之前的全部会话失效)）：接受之前为这个账号签发的令牌一律无效。
+- 路径在 `/api/v1/auth/` 下：受 nginx 的认证限流与进程内令牌桶限流（429 `TOO_MANY_REQUESTS`）。
+
+### `POST /api/v1/auth/2fa/self/enrol` 与 `/2fa/self/confirm` —— 客户自己开启 2FA
+
+只给 CUSTOMER；ADMIN 在登录时强制注册（`/2fa/enrol`、`/2fa/confirm`，收 pending 令牌），调这两个接口 403
+`CUSTOMER_REQUIRED`。两个接口都收 `Authorization: Bearer <访问令牌>`。
+
+第一步重验密码：
+
+```json
+{ "password": "a-customer-perfectly-fine-passphrase" }
+```
+
+```json
+{
+  "success": true,
+  "data": { "secret": "<base32 密钥>", "otpauth_uri": "otpauth://totp/..." },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+第二步提交验证器上的六位数：
+
+```json
+{ "code": "123456" }
+```
+
+```json
+{
+  "success": true,
+  "data": { "recovery_codes": ["XXXX-XXXX-XXXX", "..."] },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+- 密钥与恢复码都**只返回这一次**，之后服务端不再回显。开启之后登录走 `TOTP_REQUIRED`。
+- 密码错：401 `INVALID_CREDENTIALS`，不计入登录锁定、不写审计（调用方已持有有效的访问令牌）。验证码错：401
+  `INVALID_TOTP`。已开启过：409 `ALREADY_ENROLLED`，不重发密钥。
+- 两个接口都在 `/api/v1/auth/` 下，受认证限流；`/self/enrol` 第一步就过进程内令牌桶。前端对这个前缀下的 401
+  不触发令牌刷新，所以密码错、验证码错的 401 直接展示给用户。
+- 第一步之后账号被停用、改了密码或被重置 2FA，第二步得到 401 `TOKEN_INVALID`，什么都不写。
+- 成功开启写 `TWO_FACTOR_ENABLED` 审计。
+
+### `GET /api/v1/me` —— 当前用户
+
+任一已登录用户（ADMIN 或 CUSTOMER），前端据 `role` 分流。
+
+```json
+{
+  "success": true,
+  "data": { "role": "CUSTOMER", "email": "portal@example.com", "two_factor_enabled": false },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+- 恰好这三个键：没有内部用户 id、`tenant_id`、哈希、锁定信息。`two_factor_enabled` 只算已确认的注册。
+- 刻意**不**在 `/api/v1/auth/` 下：访问令牌过期时返回 401 `TOKEN_INVALID`，前端照常走刷新；也不进认证限流区，
+  每次进页面调它不会撞上限流。
+
+### `GET /api/v1/customer/me` —— 客户自己的摘要
+
+```json
+{
+  "success": true,
+  "data": {
+    "customer_id": "00000000-0000-0000-0000-000000000000",
+    "company_name": "Example Sdn Bhd",
+    "account_status": "ENABLED",
+    "read_only": false
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+- `customer_id` 是客户的 `public_id`。恰好这四个键：没有任何金额、成本、毛利、内部 id、`billing_mode`（INV-7）。
+- `read_only` 在 `account_status` 为 `DISABLED` 或 `CLOSED` 时为 `true`。
 
 ---
 
