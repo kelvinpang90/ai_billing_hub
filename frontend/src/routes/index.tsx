@@ -1,7 +1,7 @@
 /**
  * 路由表。
  *
- * 目前有落地页、认证相关的三页、管理端客户管理（AIH-TASK-015）、管理端审计日志（AIH-TASK-023）、
+ * 目前有落地页、认证相关的三页、客户门户接受邀请页（AIH-TASK-092）、管理端客户管理（AIH-TASK-015）、管理端审计日志（AIH-TASK-023）、
  * 管理端 AI 目录（AIH-TASK-035）、管理端供应商价格与汇率（AIH-TASK-036）、管理端定价规则与试算
  * （AIH-TASK-037）、管理端用量事件与重新入队（AIH-TASK-038）、管理端用量分析（AIH-TASK-074）与兜底页。
  * **不预建 spec §101 列的其余 feature 目录** —— 空目录会让人以为「那块已经开工了」，
@@ -30,6 +30,11 @@ const ForgotPasswordPage = lazy(() =>
 );
 const ResetPasswordPage = lazy(() =>
   import("../features/auth/ResetPasswordPage").then((m) => ({ default: m.ResetPasswordPage })),
+);
+const AcceptInvitationPage = lazy(() =>
+  import("../features/auth/AcceptInvitationPage").then((m) => ({
+    default: m.AcceptInvitationPage,
+  })),
 );
 const DashboardPage = lazy(() =>
   import("../features/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })),
@@ -119,10 +124,14 @@ export function AppRoutes() {
               忘记 / 重置密码同理，而且更硬：走到这两页的人按定义就是进不去的那些人。
               ⚠️ 它们必须在守卫外面**显式登记**。少了这两条，重置邮件里的链接会落到
               守卫里的 `*` 兜底上，被当成未登录直接重定向去登录页 —— 用户点开链接
-              看到的是一张登录表单，而他来这儿正是因为登不进去。 */}
+              看到的是一张登录表单，而他来这儿正是因为登不进去。
+              接受邀请页（AIH-TASK-092）同理且更硬：点邀请链接的客户账号还是 `INVITED`，**根本没有
+              可用的密码**，被送去登录页就是一条死链（设计 AIH-TASK-089 §8）。它也必须在守卫外面
+              显式登记，而且要先于任何能发出邀请的代码上线。 */}
           <Route path={ROUTES.login} element={<LoginPage />} />
           <Route path={ROUTES.forgotPassword} element={<ForgotPasswordPage />} />
           <Route path={ROUTES.resetPassword} element={<ResetPasswordPage />} />
+          <Route path={ROUTES.acceptInvitation} element={<AcceptInvitationPage />} />
           <Route element={<RequireAuth />}>
             <Route element={<AppLayout />}>
               <Route path={ROUTES.dashboard} element={<DashboardPage />} />

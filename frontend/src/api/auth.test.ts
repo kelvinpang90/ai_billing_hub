@@ -11,9 +11,17 @@
  * 确实是这个形状」。
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { AxiosError, AxiosHeaders } from "axios";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { login, requestPasswordReset, resetPassword } from "./auth";
+import {
+  INVALID_INVITATION_TOKEN,
+  INVITATION_ENDPOINT_NOT_FOUND,
+  acceptInvitation,
+  login,
+  requestPasswordReset,
+  resetPassword,
+} from "./auth";
 import { client } from "./client";
 
 /** 让 `client.post` 回一个 §107 的成功信封，不真的发请求。 */
@@ -22,6 +30,11 @@ function stubPost() {
     data: { success: true, data: {}, error: null, request_id: "req-1" },
   });
 }
+
+afterEach(() => {
+  // 下面有的用例让 `client.post` 抛错；不还原的话会漏到后面的用例里。
+  vi.restoreAllMocks();
+});
 
 describe("auth requests", () => {
   it("asks for a reset link at the endpoint the backend serves", async () => {
@@ -44,6 +57,63 @@ describe("auth requests", () => {
     expect(post).toHaveBeenCalledWith("/api/v1/auth/password/reset", {
       token: "reset-token-1",
       new_password: "a much longer passphrase",
+    });
+  });
+
+  it("accepts an invitation with the token and the password under the names the backend reads", async () => {
+    const post = stubPost();
+
+    await acceptInvitation("invitation-token-1", "a much longer passphrase");
+
+    // ⚠️ 设计 AIH-TASK-089 §2 的契约是 `{token, password}` —— 与重置不同，**不是** `new_password`。
+    expect(post).toHaveBeenCalledWith("/api/v1/auth/invitation/accept", {
+      token: "invitation-token-1",
+      password: "a much longer passphrase",
+    });
+  });
+
+  it("turns a 404 from the not-yet-deployed endpoint into its own code", async () => {
+    // 这一页先于接口上线（设计 §8）。框架的 404 信封是通用的 `HTTP_ERROR`，页面认不出来。
+    vi.spyOn(client, "post").mockRejectedValue(
+      new AxiosError("Not Found", "ERR_BAD_REQUEST", undefined, undefined, {
+        status: 404,
+        statusText: "Not Found",
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+        data: {
+          success: false,
+          data: null,
+          error: { code: "HTTP_ERROR", message: "Not Found" },
+          request_id: "req-404",
+        },
+      }),
+    );
+
+    await expect(acceptInvitation("invitation-token-1", "a much longer passphrase")).rejects.toMatchObject({
+      code: INVITATION_ENDPOINT_NOT_FOUND,
+      requestId: "req-404",
+    });
+  });
+
+  it("passes the backend's invitation errors through unchanged", async () => {
+    vi.spyOn(client, "post").mockRejectedValue(
+      new AxiosError("Bad Request", "ERR_BAD_REQUEST", undefined, undefined, {
+        status: 400,
+        statusText: "Bad Request",
+        headers: {},
+        config: { headers: new AxiosHeaders() },
+        data: {
+          success: false,
+          data: null,
+          error: { code: INVALID_INVITATION_TOKEN, message: "The invitation is no longer valid." },
+          request_id: "req-400",
+        },
+      }),
+    );
+
+    await expect(acceptInvitation("invitation-token-1", "a much longer passphrase")).rejects.toMatchObject({
+      code: INVALID_INVITATION_TOKEN,
+      requestId: "req-400",
     });
   });
 

@@ -7,7 +7,8 @@
  * 加了项目集成状态的一个只读步骤（check_project_integration）；AIH-TASK-070 加了 AI 密钥的一个只读步骤
  * （check_ai_access）；AIH-TASK-074 加了用量分析的两个只读步骤（open_usage_analytics、check_usage_analytics）；
  * AIH-TASK-082 加了客户账户状态的一个只读步骤（check_account_status）；AIH-TASK-085 加了钱包流水的一个只读步骤
- * （check_wallet_transactions）。
+ * （check_wallet_transactions）；AIH-TASK-092 加了客户门户接受邀请页的一个只读步骤（check_accept_invitation_page），
+ * 它排在 login **之前**跑。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -43,7 +44,8 @@
  * - 入口：从 hosts[0] 的 https 首页开始。起始时浏览器里应恰好有一个 type 为 page、URL 为 about:blank 的目标；
  *   在 cdp（浏览器级地址）上用 Target.getTargets 找到它、Target.attachToTarget（flatten）接管。找不到恰好一个就
  *   `FAIL <第一个步骤> navigation_failed`。不新建目标或浏览器上下文。本文件不写任何主机名 —— 主机只写在
- *   .platform/project.yaml 的 acceptance_hosts。
+ *   .platform/project.yaml 的 acceptance_hosts。除首页外，只有 check_accept_invitation_page 会用 Page.navigate 打开
+ *   同一主机上的 /accept-invitation（带全零占位令牌），并在断言之后用 openEntry 重新打开首页。
  * - 只经 cdp 操作那一个已有的页面目标。本脚本不自己联网（没有 fetch / http / https / net / dns），页面里执行的
  *   脚本只读 DOM、聚焦、点击、滚动，不发请求。不用 Target.createBrowserContext / Target.createTarget、不改代理、
  *   不拦截或伪造请求（不用 Fetch.*、Network.setRequestInterception、Network.emulateNetworkConditions）、不读写
@@ -64,7 +66,8 @@
  *   「Usage analytics」（href 为 /usage-analytics）、夹具客户详情里
  *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。夹具客户详情资料卡上的「Disable account」
  *   「Enable account」按钮（check_account_status）**只查不点**：只确认对应的那一个在，不点它、不打开启用 / 停用弹窗、
- *   不填原因。夹具客户详情里的钱包流水面板（check_wallet_transactions）只看不点：不动「Source」下拉、不点「Older」
+ *   不填原因。接受邀请页（check_accept_invitation_page）不填密码、不点「Activate my account」、不提交表单，
+ *   不发任何写请求。夹具客户详情里的钱包流水面板（check_wallet_transactions）只看不点：不动「Source」下拉、不点「Older」
  *   「Newest」、不点 AI 用量行的「View usage event」链接。不点新建客户、编辑 / 保存、手工调账、
  *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
  *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
@@ -90,7 +93,17 @@
  *
  * 步骤
  * ----
- *   login           登录表单填邮箱、密码 → Continue → 验证码（TOTP）→ Verify；以离开 /login、出现管理端顶栏
+ *   check_accept_invitation_page
+ *                   必须排在 login **之前**（本次运行跑过 login 就 assertion_failed）：浏览器刚启动、没有任何会话，
+ *                   正是客户点邀请链接时的匿名场景；本脚本不新建浏览器上下文，所以匿名只能靠步骤顺序保证。打开
+ *                   /accept-invitation?token=<全零占位令牌>（frontend/src/routes/paths.ts 的 acceptInvitation 与
+ *                   ACCEPT_INVITATION_TOKEN_PARAM），断言页面渲染出接受邀请表单：「Choose a password」「Confirm your
+ *                   password」两个 label 都关联着 type 为 password 的输入框、「Activate my account」按钮在；地址没有被
+ *                   重定向（仍是 /accept-invitation，不是 /login），表单出现之后再看一小段时间（ACCEPT_INVITATION_SETTLE_MS）
+ *                   仍然如此。不填、不点、不提交，不发写请求。断言完成后调用 openEntry 重新打开首页，等到被 RequireAuth
+ *                   送回 /login 且登录表单在，把页面交还到与第一步开始前相同的状态（未登录、停在 /login）—— 随后的
+ *                   login 步骤不自己导航，只认当前页面是登录页
+ *   login          登录表单填邮箱、密码 → Continue → 验证码（TOTP）→ Verify；以离开 /login、出现管理端顶栏
  *                   （header 里有「Sign out」与「Customers」）为准
  *   open_customers  点顶栏「Customers」，在客户列表里按公司名找到夹具客户那一行；分页时逐页点「Next Page」，
  *                   不改每页条数或任何其他设置
@@ -354,8 +367,12 @@ const TEXT = {
   // antd 表格展开 / 收起按钮的 aria-label，同样来自 antd 的 enUS 语言包（Table.expand / Table.collapse）。
   expandRowLabel: "Expand row",
   collapseRowLabel: "Collapse row",
+  acceptInvitationPassword: "Choose a password", // acceptInvitation.password —— 接受邀请表单的 label
+  acceptInvitationConfirm: "Confirm your password", // acceptInvitation.confirmPassword
+  acceptInvitationSubmit: "Activate my account", // acceptInvitation.submit —— 只确认它在，不点
   // 路由路径，取自 frontend/src/routes/paths.ts 的 ROUTES。
   loginPath: "/login",
+  acceptInvitationPath: "/accept-invitation",
   customersPath: "/customers",
   customerCreatePath: "/customers/new",
   auditPath: "/audit",
@@ -368,6 +385,11 @@ const TEXT = {
   usageEventsPath: "/usage-events",
   usageAnalyticsPath: "/usage-analytics",
 };
+
+/** 邀请链接里装令牌的查询参数名（frontend/src/routes/paths.ts 的 ACCEPT_INVITATION_TOKEN_PARAM）。 */
+const ACCEPT_INVITATION_TOKEN_PARAM = "token";
+/** check_accept_invitation_page 用的占位令牌：全零，不对应任何真实邀请；表单不提交，它也不会发给后端。 */
+const PLACEHOLDER_INVITATION_TOKEN = "0".repeat(64);
 
 /** 夹具客户的公司名前缀。只看、只打开以它开头的客户。 */
 const FIXTURE_PREFIX = "[TEST] Acceptance Fixture";
@@ -445,6 +467,8 @@ const RESPONSE_WAIT_MS = 20_000;
 const SCROLL_WAIT_MS = 3_000;
 /** 试算页的表单出现之后再看多久：下拉要的数据是之后才回来的，取不到时的错误提示也是之后才出现。 */
 const PREVIEW_LOOKUP_SETTLE_MS = 3_000;
+/** 接受邀请表单出现之后再看多久：确认它没有随后被送去登录页、也没有被收走。 */
+const ACCEPT_INVITATION_SETTLE_MS = 2_000;
 const POLL_MS = 250;
 /** 报到之后停一下再往下走：Worker 读到报到行后自己截图，不能让它截到下一步的页面。 */
 const STEP_SETTLE_MS = 1_000;
@@ -1509,6 +1533,19 @@ function probeLogin(lib, T) {
   };
 }
 
+/** 接受邀请页：两个密码框（label 关联着 type 为 password 的输入框）与提交按钮都在才算表单在。只读，不点。 */
+function probeAcceptInvitation(lib, T) {
+  const isPassword = (el) => el !== null && el.tagName === "INPUT" && el.type === "password";
+  return {
+    ...lib.common(T),
+    form:
+      isPassword(lib.control(T.acceptInvitationPassword)) &&
+      isPassword(lib.control(T.acceptInvitationConfirm)) &&
+      lib.button(T.acceptInvitationSubmit) !== null,
+    loginForm: lib.control(T.loginEmail) !== null && lib.button(T.loginSubmit) !== null,
+  };
+}
+
 function focusField(lib, labelText) {
   const el = lib.control(labelText);
   if (!el || el.disabled) {
@@ -2372,9 +2409,19 @@ async function attachToBlankPage(cdpUrl) {
 
 /** 打开 https://<hosts[0]>/，按主文档有没有 HTTP 响应、状态码几何来判。 */
 async function openEntry(host) {
+  await openPath(host, "/");
+}
+
+/** 打开 https://<host><pathAndQuery>，判法同 openEntry。地址（含查询串）不打印。 */
+async function openPath(host, pathAndQuery) {
   let navigation = null;
   try {
-    navigation = await cdp.send("Page.navigate", { url: `https://${host}/` }, sessionId, NAVIGATION_TIMEOUT_MS);
+    navigation = await cdp.send(
+      "Page.navigate",
+      { url: `https://${host}${pathAndQuery}` },
+      sessionId,
+      NAVIGATION_TIMEOUT_MS,
+    );
   } catch {
     navigation = null;
   }
@@ -2406,6 +2453,64 @@ async function openEntry(host) {
 // ---------------------------------------------------------------------------
 // 步骤
 // ---------------------------------------------------------------------------
+
+async function stepCheckAcceptInvitationPage(ctx) {
+  // 匿名只靠步骤顺序保证（不新建浏览器上下文）：登录过之后再跑，测的就不是邀请链接的场景了。
+  if (ctx.loginCompletedAt !== null) {
+    throw fail("assertion_failed");
+  }
+  await openPath(
+    ctx.host,
+    `${TEXT.acceptInvitationPath}?${ACCEPT_INVITATION_TOKEN_PARAM}=${PLACEHOLDER_INVITATION_TOKEN}`,
+  );
+
+  // 路由若落进 RequireAuth，页面先转圈、再被送去 /login —— 地址一变就停下来判。
+  const shown = await waitFor(
+    () => evaluate(probeAcceptInvitation, TEXT),
+    (s) => s.appError || s.notFound || s.path !== TEXT.acceptInvitationPath || s.form,
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail("element_missing");
+  }
+  const page = shown.value;
+  if (page.appError) {
+    throw fail("page_error");
+  }
+  if (page.path !== TEXT.acceptInvitationPath || page.loginForm) {
+    throw fail("assertion_failed");
+  }
+  if (page.notFound) {
+    throw fail("navigation_failed");
+  }
+
+  // 表单出现之后再看一小段时间：这段时间里地址变了或表单没了都算失败。
+  const changed = await waitFor(
+    () => evaluate(probeAcceptInvitation, TEXT),
+    (s) => s.path !== TEXT.acceptInvitationPath || !s.form,
+    ACCEPT_INVITATION_SETTLE_MS,
+  );
+  if (changed.ok) {
+    throw fail("assertion_failed");
+  }
+
+  // 交还页面：重新打开首页，等 RequireAuth 把匿名访问送回 /login。随后的 login 步骤不自己导航。
+  await openEntry(ctx.host);
+  const back = await waitFor(
+    () => evaluate(probeLogin, TEXT),
+    (s) => s.appError || s.notFound || s.layout || (s.path === TEXT.loginPath && s.form),
+    ELEMENT_WAIT_MS,
+  );
+  if (!back.ok) {
+    throw fail("element_missing");
+  }
+  if (back.value.appError) {
+    throw fail("page_error");
+  }
+  if (back.value.notFound || back.value.layout) {
+    throw fail("assertion_failed");
+  }
+}
 
 async function stepLogin(ctx) {
   // 首页未登录时由 RequireAuth 送到 /login。
@@ -3578,6 +3683,7 @@ async function stepCheckWalletTransactions(ctx) {
 }
 
 const STEPS = {
+  check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
   open_customers: stepOpenCustomers,
   open_fixture: stepOpenFixture,
@@ -3619,6 +3725,8 @@ async function main() {
   currentStep = input.steps[0];
   network.host = input.host;
   const ctx = {
+    /** hosts[0]；check_accept_invitation_page 打开接受邀请页、再用 openEntry 交还页面时用。 */
+    host: input.host,
     email: input.email,
     password: input.password,
     totpKey: input.totpKey,

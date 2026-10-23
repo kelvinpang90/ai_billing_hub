@@ -5,7 +5,9 @@
  * 换会话。ADMIN 的 2FA 是强制的，所以没注册过的管理员会先被送去 `/2fa/enrol`。
  */
 
-import { client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
+import { AxiosError } from "axios";
+
+import { ApiError, client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
 
 export const STAGE_TOTP_REQUIRED = "TOTP_REQUIRED";
 export const STAGE_ENROL_2FA = "ENROL_2FA";
@@ -84,3 +86,37 @@ export function resetPassword(token: string, newPassword: string): Promise<unkno
 
 /** 后端 `InvalidResetToken` 的错误码（`app/services/password_reset.py`）。 */
 export const INVALID_RESET_TOKEN = "INVALID_RESET_TOKEN";
+
+/** 接受邀请的错误码（设计 AIH-TASK-089 §2）：令牌不存在、已用、过期、用途不对，或账号不是 `INVITED`。 */
+export const INVALID_INVITATION_TOKEN = "INVALID_INVITATION_TOKEN";
+/** 接受邀请时租户已关户（409）。 */
+export const ACCOUNT_CLOSED = "ACCOUNT_CLOSED";
+/** 密码强度不合格（400），与重置密码同一个错误。 */
+export const WEAK_PASSWORD = "WEAK_PASSWORD";
+/**
+ * **前端自己的**错误码：接受邀请接口回了 404。
+ *
+ * ⚠️ 这一页先于接口上线（设计 §8）：那段窗口里后端没有这条路由，框架的 404 走的是通用信封
+ * `HTTP_ERROR`，与 405 等别的框架错误同码，`ApiError` 上又不带 HTTP 状态。所以由这一层按状态码
+ * 换成一个能认出来的码，页面按「链接无效」处理，而不是把一句「Not Found」摆给客户。
+ */
+export const INVITATION_ENDPOINT_NOT_FOUND = "INVITATION_ENDPOINT_NOT_FOUND";
+
+const HTTP_NOT_FOUND = 404;
+
+/** 用邀请邮件里那张令牌给门户账号设密码（设计 §2）。成功后账号变为 `ACTIVE`，用现有登录即可。 */
+export async function acceptInvitation(token: string, password: string): Promise<unknown> {
+  try {
+    const response = await client.post<ApiEnvelope<unknown>>("/api/v1/auth/invitation/accept", {
+      token,
+      password,
+    });
+    return unwrapEnvelope<unknown>(response.data);
+  } catch (error) {
+    const apiError = toApiError(error);
+    if (error instanceof AxiosError && error.response?.status === HTTP_NOT_FOUND) {
+      throw new ApiError(INVITATION_ENDPOINT_NOT_FOUND, apiError.message, apiError.requestId);
+    }
+    throw apiError;
+  }
+}
