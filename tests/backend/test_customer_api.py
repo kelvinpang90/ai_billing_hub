@@ -35,6 +35,7 @@ from sqlalchemy import create_engine, event, select, update
 from sqlalchemy.pool import StaticPool
 
 from app.api.auth import require_customer_writable
+from app.api.customer import router as customer_router
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.logging import JsonFormatter
@@ -269,13 +270,20 @@ def served_routes() -> set[tuple[str, str]]:
     return found
 
 
-def customer_handlers() -> list:
-    application = create_app(Settings(database_url="", jwt_secret_file=""))
-    return [
-        route.endpoint
-        for route in _walk(application.routes, set())
-        if isinstance(route, APIRoute) and route.path.startswith(f"{CUSTOMER_PREFIX}/")
-    ]
+def customer_handlers() -> tuple[set[tuple[str, str]], list]:
+    """(method, path) pairs and handlers, straight from the customer router.
+
+    不走 app 的路由树：子路由延迟挂载时那里可能一条都找不到。路由器带前缀，`route.path` 已是完整
+    路径；守卫用例再把这些 (method, path) 与 `CUSTOMER_ROUTES` 对齐，app 新挂的客户接口不在
+    这个路由器上也会失败。
+    """
+    pairs: set[tuple[str, str]] = set()
+    handlers = []
+    for route in customer_router.routes:
+        if isinstance(route, APIRoute):
+            pairs |= {(method, route.path) for method in route.methods}
+            handlers.append(route.endpoint)
+    return pairs, handlers
 
 
 def _walk(routes, seen: set[int]):
@@ -493,6 +501,16 @@ def test_a_customer_always_sees_its_own_tenant_whatever_the_request_says(app, cl
     assert "Theirs Sdn Bhd" not in forged.text
 
 
+def test_a_customer_is_refused_by_the_admin_endpoints(app, client) -> None:
+    make_customer(app, make_tenant(app))
+    headers = customer_login(client)
+
+    response = client.get("/api/v1/admin/customers", headers=headers)
+
+    assert error_of(response) == (403, "ADMIN_REQUIRED")
+    assert response.json()["data"] is None
+
+
 def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
     """既防枚举落空（下面的参数化用例一条都不跑也是绿的），也逼新增接口补进来。"""
     assert set(CUSTOMER_ROUTES) == {("GET", CUSTOMER_ME)}
@@ -519,8 +537,9 @@ def test_every_customer_route_refuses_admins_and_anonymous_callers(
 def test_every_customer_handler_calls_the_customer_dependency_first() -> None:
     """设计 §2「依赖」：函数体第一条语句（跳过 docstring）是对 `require_customer` 或
     `require_customer_writable` 的调用。与管理端 `require_admin` 的守卫同一写法。"""
-    handlers = customer_handlers()
+    pairs, handlers = customer_handlers()
     assert handlers, "枚举落空"
+    assert pairs == set(CUSTOMER_ROUTES)
     for handler in handlers:
         source = textwrap.dedent(inspect.getsource(handler))
         function = ast.parse(source).body[0]
