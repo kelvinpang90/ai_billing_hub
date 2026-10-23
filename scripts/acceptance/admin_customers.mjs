@@ -8,7 +8,8 @@
  * （check_ai_access）；AIH-TASK-074 加了用量分析的两个只读步骤（open_usage_analytics、check_usage_analytics）；
  * AIH-TASK-082 加了客户账户状态的一个只读步骤（check_account_status）；AIH-TASK-085 加了钱包流水的一个只读步骤
  * （check_wallet_transactions）；AIH-TASK-092 加了客户门户接受邀请页的一个只读步骤（check_accept_invitation_page），
- * 它排在 login **之前**跑；AIH-TASK-095 加了客户门户账号面板的一个只读步骤（check_portal_account）。
+ * 它排在 login **之前**跑；AIH-TASK-095 加了客户门户账号面板的一个只读步骤（check_portal_account）；AIH-TASK-097 加了
+ * 客户门户的两个步骤（login_customer 用夹具客户的门户账号登录，check_portal_home 只读核对门户首页）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -25,8 +26,13 @@
  *   attempt      第几次尝试（正整数）
  *   cdp          浏览器级 DevTools WebSocket 地址
  *   hosts        项目声明的主机，顺序同 .platform/project.yaml 的 acceptance_hosts；入口取 hosts[0]
- *   credentials  { email, password, totp_secret }
- * 缺字段或类型不对：`ACCEPTANCE_VERDICT: FAIL <第一个步骤> login_failed`，不打印收到的内容。
+ *   credentials  { email, password, totp_secret, customer_email, customer_password }
+ *                email、password、totp_secret 是夹具管理员的（login 用）；customer_email、customer_password 是夹具客户
+ *                门户账号的（login_customer 用，按 docs/runbook.md「验收夹具客户门户账号」建好并录入）
+ * 缺字段或类型不对：`ACCEPTANCE_VERDICT: FAIL <第一个步骤> login_failed`，不打印收到的内容。customer_email、
+ * customer_password 不在这条规则里：它们只在执行 login_customer 时检查，缺失或不是非空字符串时
+ * `ACCEPTANCE_VERDICT: FAIL login_customer login_failed`（同样不打印收到的内容）；不跑 login_customer 时有没有它们
+ * 都不影响其余步骤。
  *
  * 输出（标准输出只有这两类行）
  * ----------------------------
@@ -56,7 +62,10 @@
  *   HMAC-SHA1、30 秒步长、6 位），base32 解码在本文件里自己写。Input.insertText 另外只用于往审计页「Action」
  *   下拉的搜索框里输入动作值 `LOGIN`（常量，不是凭据）。
  * - 夹具管理员的邮箱（credentials.email）只填进登录表单：不填进审计页的任何筛选框、不进页面脚本源码；
- *   与页面文字或接口响应的比较都在本进程内做，不打印。
+ *   与页面文字或接口响应的比较都在本进程内做，不打印。夹具客户门户账号的邮箱与密码（credentials.customer_email、
+ *   customer_password）同样只经 Input.insertText 填进登录表单，不进页面脚本源码、不打印。
+ * - 门户首页（check_portal_home）只看不点：不点「Set up two-factor authentication」「Turn on two-factor
+ *   authentication」或任何按钮与链接，不填「Current password」也不提交任何表单（开启 2FA 会写数据）。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
@@ -96,7 +105,7 @@
  * 步骤
  * ----
  *   check_accept_invitation_page
- *                   必须排在 login **之前**（本次运行跑过 login 就 assertion_failed）：浏览器刚启动、没有任何会话，
+ *                   必须排在 login 与 login_customer **之前**（本次运行跑过其中任一个就 assertion_failed）：浏览器刚启动、没有任何会话，
  *                   正是客户点邀请链接时的匿名场景；本脚本不新建浏览器上下文，所以匿名只能靠步骤顺序保证。打开
  *                   /accept-invitation?token=<全零占位令牌>（frontend/src/routes/paths.ts 的 acceptInvitation 与
  *                   ACCEPT_INVITATION_TOKEN_PARAM），断言页面渲染出接受邀请表单：「Choose a password」「Confirm your
@@ -233,6 +242,26 @@
  *                   认不出的值是 assertion_failed）的文案（Invited / Active / Disabled，portalAccount.status.*），且不显示未开通。
  *                   其余响应（别的状态码、别的错误码、不是信封）是 assertion_failed。不点开通、不点任何按钮、不填表单。报到前把
  *                   面板滚动到视口里（规则同 check_wallet_transactions）
+ *   login_customer  用 credentials.customer_email / customer_password 登录。与 login 一样不自己导航，只认当前页面是
+ *                   登录页（浏览器刚启动时首页被 RequireAuth 送到 /login；本次运行已经以管理员或客户登录过就没有登录表单，
+ *                   报 element_missing），所以它要排在 login 之前、或单独跑。两个字段缺失或类型不对：login_failed，不打印
+ *                   收到的内容。登录表单填邮箱、密码 → Continue；落定后必须在门户首页：地址是 /portal（paths.ts 的
+ *                   portalHome），门户外壳（header 里有「Sign out」与「Customer portal」，en.json 的 nav.signOut、
+ *                   portal.title）在，管理端顶栏（header 里有「Customers」）不在。出现管理端顶栏或停在别的已登录页面是
+ *                   assertion_failed；还在 /login 且有错误提示、或走到验证码（门户账号已开启 2FA，本脚本没有它的 TOTP 密钥）
+ *                   或「首次启用 2FA」那一步是 login_failed，不继续
+ *   check_portal_home
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。门户首页落定（不再显示 portal.home.loading）
+ *                   且不是加载失败（portal.home.loadFailed）。后端值取页面自己发出的 GET /api/v1/customer/me 的响应体（被动
+ *                   观察，不自己发请求、不拦截；取最近一次读完的那一次，不是 200 就是 assertion_failed）里的 company_name、
+ *                   account_status（PENDING_ACTIVATION / ENABLED / DISABLED / CLOSED，认不出的值是 assertion_failed）与
+ *                   read_only。页面「Company name」「Account status」两项（portal.home.field.*，带边框的 Descriptions：label
+ *                   在 <th>，值在紧跟的 <td>）各恰好一项，文字分别等于 company_name（空白折叠后）与它的文案（Pending
+ *                   activation / Enabled / Disabled / Closed，portal.home.accountStatus.*）；只读提示（portal.home.readOnly.title）
+ *                   在且仅在 read_only 为 true 时出现。页面上没有任何管理端菜单项：没有 role 为 menu / menuitem 的元素，没有
+ *                   文字是管理端顶栏任一项（nav.dashboard、nav.customers 等）的链接，也没有指向管理端路径（paths.ts 的
+ *                   dashboard、customers、audit 等）的链接。不点开启 2FA、不填也不提交任何表单。报到前把「Company name」这一行
+ *                   滚动到视口中间
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -381,6 +410,34 @@ const TEXT = {
   portalStatusLabel: "Portal status", // portalAccount.field.status —— 面板里 Descriptions 的一项
   // 门户账号状态 → 面板「Portal status」一项的文案（portalAccount.status.invited / active / disabled）。
   portalStatusText: { INVITED: "Invited", ACTIVE: "Active", DISABLED: "Disabled" },
+  portalShellTitle: "Customer portal", // portal.title —— 门户外壳 header 里的标题
+  portalHomeLoading: "Loading your account…", // portal.home.loading
+  portalHomeLoadFailed: "Your account details could not be loaded.", // portal.home.loadFailed
+  portalHomeCompanyName: "Company name", // portal.home.field.companyName —— 门户首页 Descriptions 的一项
+  portalHomeAccountStatus: "Account status", // portal.home.field.accountStatus
+  // 客户账户状态 → 门户首页「Account status」一项的文案（portal.home.accountStatus.pendingActivation / enabled / disabled / closed）。
+  portalHomeAccountStatusText: {
+    PENDING_ACTIVATION: "Pending activation",
+    ENABLED: "Enabled",
+    DISABLED: "Disabled",
+    CLOSED: "Closed",
+  },
+  portalHomeReadOnly: "Your account is read-only", // portal.home.readOnly.title —— 只读提示的标题
+  // 管理端顶栏的全部项（frontend/src/layouts/AppLayout.tsx；nav.dashboard、nav.customers、nav.audit、nav.catalog、
+  // nav.providerPrices、nav.fxRates、nav.pricingRules、nav.pricingPreview、nav.usageEvents、nav.usageAnalytics）。
+  // 门户首页上一项都不许出现。
+  adminNavTexts: [
+    "Dashboard",
+    "Customers",
+    "Audit log",
+    "AI catalog",
+    "Provider prices",
+    "Exchange rates",
+    "Pricing rules",
+    "Pricing preview",
+    "Usage events",
+    "Usage analytics",
+  ],
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -404,6 +461,22 @@ const TEXT = {
   pricingPreviewPath: "/pricing/preview",
   usageEventsPath: "/usage-events",
   usageAnalyticsPath: "/usage-analytics",
+  portalHomePath: "/portal",
+  // 管理端顶栏各项指向的路径（paths.ts 的 dashboard、customers、audit、catalogProviders、catalogMeterTypes、
+  // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics）。门户首页上不许有指向它们的链接。
+  adminPaths: [
+    "/",
+    "/customers",
+    "/audit",
+    "/catalog/providers",
+    "/catalog/meter-types",
+    "/pricing/provider-prices",
+    "/fx-rates",
+    "/pricing/rules",
+    "/pricing/preview",
+    "/usage-events",
+    "/usage-analytics",
+  ],
 };
 
 /** 邀请链接里装令牌的查询参数名（frontend/src/routes/paths.ts 的 ACCEPT_INVITATION_TOKEN_PARAM）。 */
@@ -472,6 +545,9 @@ const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/
 const PORTAL_ACCOUNT_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/portal-account$/;
 /** 还没开通时 GET 的错误码（docs/api.md「管理端门户账号」）。 */
 const PORTAL_ACCOUNT_NOT_FOUND = "PORTAL_ACCOUNT_NOT_FOUND";
+
+/** 客户自己的摘要接口的路径（frontend/src/api/customer.ts 的 getCustomerMe）。 */
+const CUSTOMER_ME_API = /^\/api\/v1\/customer\/me$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -624,7 +700,7 @@ function finishFail(step, code) {
 
 /** 等待超时时各步骤报的码。 */
 function timeoutCode(step) {
-  return step === "login" ? "login_failed" : "element_missing";
+  return step === "login" || step === "login_customer" ? "login_failed" : "element_missing";
 }
 
 // ---------------------------------------------------------------------------
@@ -722,8 +798,15 @@ function parseInput(line) {
   if (totpKey === null) {
     return invalid;
   }
+  // 夹具客户门户账号的两个字段只给 login_customer 用：这里不因它们缺失而判输入不合法（其余步骤不受影响），
+  // 只把「不是非空字符串」记成 null，由 login_customer 自己报 login_failed。
+  const { customer_email: customerEmail, customer_password: customerPassword } = credentials;
+  const customerCredentials =
+    isNonEmptyString(customerEmail) && isNonEmptyString(customerPassword)
+      ? { email: customerEmail, password: customerPassword }
+      : null;
   // writes 为 true 时同样只做只读步骤，所以这里不再往下传它。
-  return { ok: true, steps, cdpUrl, host: hosts[0], email, password, totpKey };
+  return { ok: true, steps, cdpUrl, host: hosts[0], email, password, totpKey, customerCredentials };
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +961,8 @@ const network = {
   walletTransactions: new Map(),
   /** 门户账号接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
   portalAccounts: new Map(),
+  /** 客户自己的摘要接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
+  customerMe: new Map(),
   seq: 0,
 };
 
@@ -892,8 +977,22 @@ function trackedRequest(requestId) {
     network.projectLists.get(requestId) ??
     network.usageAnalytics.get(requestId) ??
     network.walletTransactions.get(requestId) ??
-    network.portalAccounts.get(requestId)
+    network.portalAccounts.get(requestId) ??
+    network.customerMe.get(requestId)
   );
+}
+
+/** 是不是客户自己的摘要接口（同源 https、路径恰好是 /api/v1/customer/me，查询串不看、不保存）。 */
+function isCustomerMe(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === network.host && CUSTOMER_ME_API.test(parsed.pathname);
+  } catch {
+    return false;
+  }
 }
 
 /** 是不是门户账号接口（同源 https、路径恰好是 …/portal-account）：是的话回路径里的客户 id，不是回 null。 */
@@ -1164,6 +1263,14 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        if (isCustomerMe(params.request?.url) && params.request?.method === "GET") {
+          network.customerMe.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1366,6 +1473,26 @@ function latestPortalAccountResponse(customerId) {
       !request.failed &&
       (best === null || request.seq > best.seq)
     ) {
+      best = { requestId, status: request.status, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/**
+ * afterSeq 之后发出、读完的 GET /api/v1/customer/me 里最近的一次（任何状态码，由调用方判）；还有在路上的就回 null，
+ * 等它落定。
+ */
+function latestCustomerMeResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, request] of network.customerMe) {
+    if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.finished && !request.failed && (best === null || request.seq > best.seq)) {
       best = { requestId, status: request.status, seq: request.seq };
     }
   }
@@ -2465,6 +2592,103 @@ function portalPanelInView(lib, T) {
   return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
 
+/**
+ * 客户登录各阶段：在 probeLogin 之外，再看门户外壳（frontend/src/layouts/PortalLayout.tsx：<header> 里有「Sign out」
+ * 按钮与「Customer portal」标题）在不在。只读 DOM。
+ */
+function probeCustomerLogin(lib, T) {
+  const header = document.querySelector("header");
+  const portalShell =
+    header !== null &&
+    lib.button(T.navSignOut, header) !== null &&
+    [...header.querySelectorAll("*")].some(
+      (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+    );
+  const base = lib.common(T);
+  return {
+    ...base,
+    form:
+      lib.control(T.loginEmail) !== null &&
+      lib.control(T.loginPassword) !== null &&
+      lib.button(T.loginSubmit) !== null,
+    code: lib.control(T.loginCode) !== null && lib.button(T.loginVerify) !== null,
+    enrol: lib.control(T.enrolCode) !== null || lib.leaf(T.enrolIntro) !== null,
+    alert: lib.alert(),
+    adminLayout: base.path !== T.loginPath && lib.layout(T),
+    portalShell: base.path !== T.loginPath && portalShell,
+  };
+}
+
+/**
+ * 门户首页的状态：门户外壳、在加载、加载失败、「Company name」「Account status」两项的文字（带边框的 Descriptions：
+ * label 在 <th>，值在紧跟的 <td>；不是恰好一项时为 null）、只读提示在不在，以及页面上有没有管理端菜单项。
+ * 只读 DOM，不点、不填。
+ */
+function probePortalHome(lib, T) {
+  const header = document.querySelector("header");
+  const has = (text) => lib.leaf(text) !== null;
+  const single = (label) => {
+    const cells = lib.valueCells(label);
+    return { count: cells.length, text: cells.length === 1 ? lib.norm(cells[0].textContent) : null };
+  };
+  const company = single(T.portalHomeCompanyName);
+  const status = single(T.portalHomeAccountStatus);
+  let adminMenu = document.querySelector('[role="menu"], [role="menuitem"]') !== null;
+  for (const a of document.querySelectorAll("a")) {
+    let path = null;
+    try {
+      path = new URL(a.href, location.href).pathname;
+    } catch {
+      path = null;
+    }
+    if (T.adminNavTexts.includes(lib.norm(a.textContent)) || (path !== null && T.adminPaths.includes(path))) {
+      adminMenu = true;
+    }
+  }
+  return {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    busy: has(T.portalHomeLoading),
+    failed: has(T.portalHomeLoadFailed),
+    companyCount: company.count,
+    companyText: company.text,
+    statusCount: status.count,
+    statusText: status.text,
+    readOnly: has(T.portalHomeReadOnly),
+    adminMenu,
+  };
+}
+
+/**
+ * 把「Company name」这一行（<td> 所在的 <tr>）滚动到视口中间。只滚动，不点任何东西。
+ * ⚠️ 这些函数各自 toString() 后送进页面，彼此不能互相调用，所以找行的那几句在下面两个函数里各写一遍。
+ */
+function scrollPortalHomeIntoView(lib, T) {
+  const cells = lib.valueCells(T.portalHomeCompanyName);
+  const row = cells.length === 1 ? cells[0].closest("tr") : null;
+  if (row === null) {
+    return false;
+  }
+  row.scrollIntoView({ block: "center", inline: "nearest" });
+  return true;
+}
+
+function portalHomeInView(lib, T) {
+  const cells = lib.valueCells(T.portalHomeCompanyName);
+  const row = cells.length === 1 ? cells[0].closest("tr") : null;
+  if (row === null) {
+    return false;
+  }
+  const rect = row.getBoundingClientRect();
+  return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+}
+
 // ---------------------------------------------------------------------------
 // 驱动页面
 // ---------------------------------------------------------------------------
@@ -2605,7 +2829,7 @@ async function openPath(host, pathAndQuery) {
 
 async function stepCheckAcceptInvitationPage(ctx) {
   // 匿名只靠步骤顺序保证（不新建浏览器上下文）：登录过之后再跑，测的就不是邀请链接的场景了。
-  if (ctx.loginCompletedAt !== null) {
+  if (ctx.loginCompletedAt !== null || ctx.customerLoginSeq !== null) {
     throw fail("assertion_failed");
   }
   await openPath(
@@ -3924,6 +4148,173 @@ async function stepCheckPortalAccount(ctx) {
   }
 }
 
+async function stepLoginCustomer(ctx) {
+  // 字段缺失或类型不对：不打印收到的内容，直接 login_failed。
+  if (ctx.customerCredentials === null) {
+    throw fail("login_failed");
+  }
+  // 与 login 一样不自己导航：浏览器刚启动时首页被 RequireAuth 送到 /login。
+  const form = await waitFor(
+    () => evaluate(probeCustomerLogin, TEXT),
+    (s) => s.form || s.adminLayout || s.portalShell || s.appError || s.notFound,
+    ELEMENT_WAIT_MS,
+  );
+  if (form.ok && form.value.appError) {
+    throw fail("page_error");
+  }
+  if (!form.ok || !form.value.form) {
+    throw fail("element_missing");
+  }
+
+  await typeInto(TEXT.loginEmail, ctx.customerCredentials.email);
+  await typeInto(TEXT.loginPassword, ctx.customerCredentials.password);
+  const beforeSubmitSeq = network.seq;
+  if ((await evaluate(clickButton, TEXT.loginSubmit)) !== true) {
+    throw fail("element_missing");
+  }
+
+  // 登录页先跳到管理端首页，RequireRole 问过 /api/v1/me 之后再把 CUSTOMER 转到 /portal：等到落定在某一边。
+  const landed = await waitFor(
+    () => evaluate(probeCustomerLogin, TEXT),
+    (s) =>
+      s.appError ||
+      s.adminLayout ||
+      s.code ||
+      s.enrol ||
+      (s.path === TEXT.loginPath && s.alert) ||
+      (s.path === TEXT.portalHomePath && s.portalShell),
+    LOGIN_WAIT_MS,
+  );
+  if (!landed.ok) {
+    // 还在登录页（或停在 RequireRole 的错误态）：没登进门户。
+    const stuck = landed.value;
+    if (stuck !== null && stuck.path !== TEXT.loginPath && stuck.alert) {
+      throw fail("page_error");
+    }
+    throw fail(stuck !== null && stuck.path !== TEXT.loginPath ? "assertion_failed" : "login_failed");
+  }
+  const page = landed.value;
+  if (page.appError) {
+    throw fail("page_error");
+  }
+  // 门户账号走到验证码或「首次启用 2FA」：本脚本没有客户的 TOTP 密钥，后者还会写数据，都不往下走。
+  if (page.code || page.enrol || page.path === TEXT.loginPath) {
+    throw fail("login_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 落在门户首页之后再看一小段时间：不能随后又被转去管理端或别处。
+  const moved = await waitFor(
+    () => evaluate(probeCustomerLogin, TEXT),
+    (s) => s.adminLayout || s.path !== TEXT.portalHomePath || !s.portalShell,
+    ACCEPT_INVITATION_SETTLE_MS,
+  );
+  if (moved.ok) {
+    throw fail("assertion_failed");
+  }
+  ctx.customerLoginSeq = beforeSubmitSeq;
+}
+
+/** 后端值里 company_name 与页面文字比较前的归一：与页面脚本的 norm 相同（空白折叠、去首尾空白）。 */
+function normText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+async function stepCheckPortalHome(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+  const afterSeq = ctx.customerLoginSeq;
+
+  // 首页落定：门户外壳在，不在加载，且是某一种终态（显示了摘要，或加载失败）。
+  const opened = await waitFor(
+    () => evaluate(probePortalHome, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalHomePath && s.portalShell && !s.busy && (s.failed || s.companyCount > 0)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalHomePath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout || page.adminMenu) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面自己发出的 GET /api/v1/customer/me。有还在路上的就等它落定。
+  const observed = await waitFor(async () => latestCustomerMeResponse(afterSeq), (v) => v !== null, RESPONSE_WAIT_MS);
+  if (!observed.ok || observed.value.status !== 200) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const data = envelope?.success === true ? envelope.data : null;
+    if (
+      typeof data?.company_name !== "string" ||
+      typeof data?.account_status !== "string" ||
+      typeof data?.read_only !== "boolean" ||
+      !Object.hasOwn(TEXT.portalHomeAccountStatusText, data.account_status)
+    ) {
+      throw fail("assertion_failed");
+    }
+    expected = {
+      company: normText(data.company_name),
+      status: TEXT.portalHomeAccountStatusText[data.account_status],
+      readOnly: data.read_only,
+    };
+  } catch {
+    // 读不到、不是 JSON、不是信封、字段缺失、状态不认识：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这一份响应：两项各恰好一项且文字一致，只读提示与 read_only 一致，没有管理端菜单项。
+  const shown = await waitFor(
+    () => evaluate(probePortalHome, TEXT),
+    (s) =>
+      s.path === TEXT.portalHomePath &&
+      s.portalShell &&
+      !s.busy &&
+      !s.failed &&
+      !s.adminLayout &&
+      !s.adminMenu &&
+      s.companyCount === 1 &&
+      s.companyText === expected.company &&
+      s.statusCount === 1 &&
+      s.statusText === expected.status &&
+      s.readOnly === expected.readOnly,
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.companyCount > 0 ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把「Company name」这一行滚到视口中间。只滚动，不点任何按钮。
+  if ((await evaluate(scrollPortalHomeIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(portalHomeInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -3947,6 +4338,8 @@ const STEPS = {
   check_account_status: stepCheckAccountStatus,
   check_wallet_transactions: stepCheckWalletTransactions,
   check_portal_account: stepCheckPortalAccount,
+  login_customer: stepLoginCustomer,
+  check_portal_home: stepCheckPortalHome,
 };
 
 // ---------------------------------------------------------------------------
@@ -3973,6 +4366,13 @@ async function main() {
     email: input.email,
     password: input.password,
     totpKey: input.totpKey,
+    /** 夹具客户门户账号的 { email, password }；输入里缺失或类型不对时为 null（login_customer 报 login_failed）。 */
+    customerCredentials: input.customerCredentials,
+    /**
+     * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home 只认这之后发出的请求。
+     * 本次运行没跑过 login_customer、或它没成功时为 null。
+     */
+    customerLoginSeq: null,
     fixture: null,
     customerId: null,
     /** login 步骤完成的时刻（毫秒）；本次运行没跑过 login 时为 null。 */
