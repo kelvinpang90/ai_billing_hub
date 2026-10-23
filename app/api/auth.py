@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Request, Response
 
@@ -17,7 +18,9 @@ from app.core.logging import current_request_id
 from app.core.ratelimit import RateLimited, TokenBucket
 from app.core.tokens import TOKEN_TYPE_ACCESS, AuthNotConfigured, InvalidToken, decode_token
 from app.models.auth import User, UserRole, UserStatus
+from app.models.tenancy import Tenant
 from app.schemas.auth import (
+    AcceptInvitationRequest,
     ForgotPasswordRequest,
     LoginRequest,
     LoginResponse,
@@ -25,6 +28,7 @@ from app.schemas.auth import (
     SecondFactorRequest,
 )
 from app.schemas.envelope import ApiResponse, success
+from app.services.account_status import READ_ONLY_STATUSES, AccountReadOnly
 from app.services.auth import (
     REFRESH_COOKIE_NAME,
     REFRESH_COOKIE_PATH,
@@ -38,6 +42,7 @@ from app.services.auth import (
     token_password_version,
 )
 from app.services.password_reset import request_reset, reset_password
+from app.services.portal_accounts import accept_invitation
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -263,6 +268,28 @@ def reset_password_endpoint(request: Request, payload: ResetPasswordRequest) -> 
     return success({}, request_id=current_request_id())
 
 
+@router.post("/invitation/accept", response_model=ApiResponse[dict])
+def accept_invitation_endpoint(
+    request: Request, payload: AcceptInvitationRequest
+) -> ApiResponse[dict]:
+    """Set the first password of an invited portal account (design gate #368 v12 §2).
+
+    令牌类错误一律 400 `INVALID_INVITATION_TOKEN`，不细分（设计 §6「限流与枚举」）；租户已关户
+    409 `ACCOUNT_CLOSED`；强度不合格 400 `WEAK_PASSWORD`。判定顺序全在服务层。不自动登录：
+    前端转登录页。
+
+    ⚠️ 路径在 `/api/v1/auth/` 下，落在 nginx 的认证限流区；进程内令牌桶只在这里显式调用时生效。
+    """
+    _rate_limit(request)
+    accept_invitation(
+        require_session_factory(request),
+        token=payload.token,
+        password=payload.password,
+        context=request_context(request),
+    )
+    return success({}, request_id=current_request_id())
+
+
 def require_current_user(request: Request) -> User:
     """Resolve the caller from the `Authorization: Bearer` header.
 
@@ -326,14 +353,77 @@ def require_admin(request: Request) -> User:
     return user
 
 
+class CustomerRequired(AppError):
+    """A valid, active caller who is not a CUSTOMER attached to a tenant."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Customer access is required.",
+            code="CUSTOMER_REQUIRED",
+            http_status=403,
+        )
+
+
+@dataclass(frozen=True)
+class CustomerPrincipal:
+    """The caller of a customer endpoint and the one tenant it may see (INV-8).
+
+    ⚠️ 客户侧所有查询的租户条件都来自这里的 `tenant_id`（设计 §6「租户过滤」）。
+    """
+
+    user: User
+    tenant_id: int
+
+
+def require_customer(request: Request) -> CustomerPrincipal:
+    """Resolve the caller; require an `ACTIVE` CUSTOMER with a tenant (design gate #368 v12 §2).
+
+    ⚠️ **`tenant_id` 取自库里的 user 行**，不取自令牌，也不取自请求的路径、查询串或请求体
+    （spec §90）：客户请求里根本没有租户参数，带了也不读。
+
+    ⚠️ `tenant_id` 为空的 CUSTOMER 一律 403 `CUSTOMER_REQUIRED`。数据库刻意不强制「CUSTOMER
+    必须有租户」（设计 §9 备选 F），这一处是它的兜底：这样的用户拿不到任何租户数据。
+
+    ⚠️ 每个 `/api/v1/customer` 处理函数都要**显式**调用它（或 `require_customer_writable`），
+    与 `require_admin` 的用法一致；漏调由 `tests/backend/test_customer_api.py` 的路由守卫兜底。
+    """
+    user = require_current_user(request)
+    if user.role is not UserRole.CUSTOMER or user.tenant_id is None:
+        raise CustomerRequired
+    return CustomerPrincipal(user=user, tenant_id=user.tenant_id)
+
+
+def require_customer_writable(request: Request) -> CustomerPrincipal:
+    """`require_customer`, then refuse early when the tenant is `DISABLED` or `CLOSED`.
+
+    ⚠️ **只是提前拒绝，不是保证**（设计 §2「依赖」）：读完状态这个会话就结束了，之后管理员
+    仍可能停用租户。每个客户写操作都必须在自己的写事务里、写入之前调用
+    `app.services.account_status.lock_tenant_for_customer_write`，由它锁租户行后重查。
+    """
+    principal = require_customer(request)
+    factory = require_session_factory(request)
+    with factory() as session:
+        tenant = session.get(Tenant, principal.tenant_id)
+        if tenant is None:
+            # 外键保证不会发生；真发生了也不放行到写接口。
+            raise CustomerRequired
+        if tenant.account_status in READ_ONLY_STATUSES:
+            raise AccountReadOnly
+    return principal
+
+
 __all__ = [
     "AdminRequired",
     "AuthNotConfigured",
+    "CustomerPrincipal",
+    "CustomerRequired",
     "RateLimited",
     "client_ip",
     "request_context",
     "require_admin",
     "require_current_user",
+    "require_customer",
+    "require_customer_writable",
     "require_session_factory",
     "router",
 ]
