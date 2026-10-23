@@ -5918,7 +5918,7 @@ tasks:
     title: 客户钱包第一层：客户查看自己余额与钱包流水的两个只读接口
     purpose: >-
       按 docs/design/AIH-TASK-099-customer-wallet.md（设计闸门 #393 已批准 v3）§2 与 §8 第 1 步：新增 GET /api/v1/customer/wallet（币种、余额、计费模式、计费状态、AI 服务是否可用及原因，恰好 6 个键）与 GET /api/v1/customer/wallet/transactions（序号游标、最新在前，每项恰好 7 个键）；app/repositories/wallet.py 新增 get_wallet_summary；新文件 app/schemas/customer_wallet.py 是客户侧白名单；docs/api.md 记两个接口。只读，不写任何表，不改表结构；前端属于 AIH-TASK-100 与 101。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-093
     acceptance_criteria:
