@@ -5599,7 +5599,7 @@ tasks:
     title: 客户门户认证第五层：接受邀请、当前用户、自助两步验证与客户端接口
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v12）§2「API」「依赖」与 §11 任务 D 的前一半：新增 POST /api/v1/auth/invitation/accept、GET /api/v1/me、POST /api/v1/auth/2fa/self/enrol、POST /api/v1/auth/2fa/self/confirm、GET /api/v1/customer/me；新增 require_customer、require_customer_writable。接受邀请的接口必须先于能发出邀请的 AIH-TASK-094 上线。管理端门户账号接口与邀请邮件属于 AIH-TASK-094。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-092
     acceptance_criteria:
