@@ -821,7 +821,11 @@ def test_non_customers_are_refused_before_the_wallet_is_read(
 
 
 def test_no_cost_margin_internal_note_operator_or_idempotency_key_leaks(portal: Portal) -> None:
-    """§7「无成本毛利、无内部说明」（INV-7）：哨兵值写进库里，两个接口的响应文本里都没有。"""
+    """§7「无成本毛利、无内部说明」（INV-7）：哨兵值写进库里，两个接口的响应文本里都没有。
+
+    `ck_usage_events_prepaid_reference` 不许 PREPAID 事件带参考价，所以参考价的哨兵写在一个
+    内部计量客户、由真实 worker 计过的用量事件上；成本与汇率的哨兵两个客户的事件上都写。
+    """
     tenant = portal.tenant()
     portal.adjust(
         tenant,
@@ -832,30 +836,50 @@ def test_no_cost_margin_internal_note_operator_or_idempotency_key_leaks(portal: 
     )
     usage_row_id, reported = portal.bill_one(tenant)
     portal.post(tenant, TransactionType.SYSTEM_CORRECTION, "-0.5", description=SENTINEL_DESCRIPTION)
+    internal = portal.tenant()
+    portal.set_billing_mode(internal, BillingMode.INTERNAL_METERED_ONLY)
+    portal.adjust(
+        internal, TransactionType.ADJUSTMENT_CREDIT, "5", description=SENTINEL_DESCRIPTION
+    )
+    internal_row_id = portal.world.event(internal)
+    assert portal.world.bill().claimed == 1
+    internal_row = portal.world.row(internal_row_id)
+    assert internal_row.billing_mode_snapshot == BillingMode.INTERNAL_METERED_ONLY.value
+    assert internal_row.wallet_transaction_id is None
+    costs = {
+        "provider_source_cost": SENTINEL_SOURCE_COST,
+        "estimated_provider_cost_myr": SENTINEL_ESTIMATED_MYR,
+        "fx_rate_applied": SENTINEL_FX_RATE,
+    }
     with portal.factory() as session:
+        session.execute(update(UsageEvent).where(UsageEvent.id == usage_row_id).values(**costs))
         session.execute(
             update(UsageEvent)
-            .where(UsageEvent.id == usage_row_id)
-            .values(
-                provider_source_cost=SENTINEL_SOURCE_COST,
-                estimated_provider_cost_myr=SENTINEL_ESTIMATED_MYR,
-                fx_rate_applied=SENTINEL_FX_RATE,
-                reference_customer_price=SENTINEL_REFERENCE_PRICE,
-            )
+            .where(UsageEvent.id == internal_row_id)
+            .values(**costs, reference_customer_price=SENTINEL_REFERENCE_PRICE)
         )
         session.commit()
         usage_public_id = session.get(UsageEvent, usage_row_id).public_id
+        internal_public_id = session.get(UsageEvent, internal_row_id).public_id
     headers = portal.customer(tenant)
+    internal_headers = portal.customer(internal)
 
     wallet = portal.get_wallet(headers)
     page = portal.get_page(headers, page_size=100)
+    internal_wallet = portal.get_wallet(internal_headers)
+    internal_page = portal.get_page(internal_headers, page_size=100)
 
     assert (wallet.status_code, page.status_code) == (200, 200)
+    assert (internal_wallet.status_code, internal_page.status_code) == (200, 200)
     assert set(wallet.json()["data"]) == WALLET_FIELDS
+    assert set(internal_wallet.json()["data"]) == WALLET_FIELDS
     items = page.json()["data"]["items"]
     assert len(items) == 3
     assert all(set(item) == ITEM_FIELDS for item in items)
     assert [item["event_id"] for item in items] == [None, reported, None]
+    internal_items = internal_page.json()["data"]["items"]
+    assert [item["transaction_type"] for item in internal_items] == ["ADJUSTMENT_CREDIT"]
+    assert all(set(item) == ITEM_FIELDS for item in internal_items)
     forbidden = (
         money_text(SENTINEL_SOURCE_COST),
         money_text(SENTINEL_ESTIMATED_MYR),
@@ -865,6 +889,7 @@ def test_no_cost_margin_internal_note_operator_or_idempotency_key_leaks(portal: 
         SENTINEL_IDEMPOTENCY_KEY,
         portal.world.admin.email,
         usage_public_id,
+        internal_public_id,
         "description",
         "reference_type",
         "reference_id",
@@ -879,7 +904,7 @@ def test_no_cost_margin_internal_note_operator_or_idempotency_key_leaks(portal: 
         "cost",
         "margin",
     )
-    for response_text in (wallet.text, page.text):
+    for response_text in (wallet.text, page.text, internal_wallet.text, internal_page.text):
         for value in forbidden:
             assert value not in response_text, value
 
