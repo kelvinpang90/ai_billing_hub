@@ -5850,7 +5850,7 @@ tasks:
     title: 客户门户前端第三刀：门户首页的账户信息、只读提示与开启两步验证
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v12）§11 任务 E 的第三部分：门户首页调用 GET /api/v1/customer/me 显示公司名与账户状态，read_only 为 true 时显示只读提示；未开启 2FA 时提供开启流程（调用 POST /api/v1/auth/2fa/self/enrol 重验密码、显示密钥与二维码，调用 /api/v1/auth/2fa/self/confirm 输入验证码确认，展示一次恢复码）。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-096
     acceptance_criteria:
