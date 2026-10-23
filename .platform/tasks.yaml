@@ -5656,7 +5656,7 @@ tasks:
     title: 客户门户认证第六层：管理端门户账号六个接口与邀请邮件
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v12）§2「API」管理端一张表、「管理员重置客户 2FA」「邀请邮件与重置的隔离」与 §11 任务 D 的后一半：新增 /api/v1/admin/customers/{customer_id}/portal-account 下的 GET、POST、resend-invitation、disable、enable、reset-2fa 六个接口；outbox 渲染 PORTAL_INVITATION_REQUESTED 邀请邮件；新增邀请链接守卫；runbook 写明开通与重置 2FA 的做法，以及门户前端全部上线前不为真实客户开通。从本任务起管理员才可能发出邀请，接受页（AIH-TASK-092）与接受接口（AIH-TASK-093）都已在线。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-093
     acceptance_criteria:
