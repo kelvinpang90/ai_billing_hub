@@ -5782,7 +5782,7 @@ tasks:
     title: 客户门户前端第二刀：登录后按角色分流与门户外壳
     purpose: >-
       按 docs/design/AIH-TASK-089-customer-portal-auth.md（设计闸门 #368 已批准 v12）§11 任务 E 的第二部分：前端调用 GET /api/v1/me 取角色；新增 RequireRole，管理端路由只给 ADMIN（CUSTOMER 转到门户首页），门户路由只给 CUSTOMER（ADMIN 转到管理端首页）；新增门户外壳 PortalLayout 与 /portal 首页占位。首页内容属于 AIH-TASK-097。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-095
     acceptance_criteria:
