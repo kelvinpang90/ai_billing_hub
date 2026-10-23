@@ -1,10 +1,10 @@
-# AIH-TASK-099 / 100 / 101 设计：客户门户仪表盘与钱包页（已批准 v1）
+# AIH-TASK-099 / 100 / 101 设计：客户门户仪表盘与钱包页（已批准 v3）
 
-> **来源**：设计闸门 Issue #393。本文件是 `APPROVED: design v1` 那一版正文的**逐字副本**（审查者 Codex；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v1`）。
+> **来源**：设计闸门 Issue #393。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**（审查者 Codex；v1 批准后，v2 按 spec §80 改前端金额显示精度、v3 补流水接口的缺钱包检查，均重新过闸门；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v3`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #393 上被批准的 v1 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #393 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：设计闸门 #368（[AIH-TASK-089-customer-portal-auth.md](AIH-TASK-089-customer-portal-auth.md)）的 `AIH-TASK-093`（`require_customer` 与 `app/api/customer.py`）与 `AIH-TASK-097`（门户首页）；翻页规则沿用 #351（[AIH-TASK-083-wallet-ledger-view.md](AIH-TASK-083-wallet-ledger-view.md)）。
-> §8 的三个实现任务登记为 `AIH-TASK-099`（接口）→ `AIH-TASK-100`（门户钱包页）→ `AIH-TASK-101`（门户首页的余额卡与最近流水），按这个顺序依赖。
+> §8 的任务登记为 `AIH-TASK-099`（接口）→ `AIH-TASK-102`（前端金额显示的舍入函数，§8 第 2 步下的独立前端任务）→ `AIH-TASK-100`（门户钱包页）→ `AIH-TASK-101`（门户首页的余额卡与最近流水），按这个顺序依赖。
 
 ---
 
@@ -23,7 +23,7 @@
 
 状态：`待审`（`READY_FOR_REVIEW`）
 负责人：Claude
-**设计版本**：`v1`
+**设计版本**：`v3`
 对应需求：spec §67「Customer Dashboard」（Wallet Balance、Current account status、recent transactions；「Do NOT show internal Acuven costs.」）、§70「Customer Wallet Page」（Current Balance、Transaction History；「Ledger visible to Customer includes relevant customer-facing transaction descriptions.」）、§90（`GET /api/v1/customer/wallet`、`/wallet/transactions`；租户只取自会话）、§127 Phase 4「Customer dashboard」「Wallet」、`REQ-PRIV-001`（INV-8）、`REQ-PRIV-002`（客户侧不得暴露成本与毛利）
 前置设计：#368 v12（客户门户认证：`require_customer`、`CustomerPrincipal`、只读契约），#351 v2（管理端钱包流水：序号游标与 `list_transactions_for_tenant`）
 目标 PR：待开（批准后按 §8 拆三个任务登记；`docs/TODO.md`「后续计划」里的「Phase 4 客户仪表盘与钱包页」即本闸门）
@@ -36,7 +36,7 @@
   2. `GET /api/v1/customer/wallet/transactions` 返回登录客户自己租户的账本行，最新在前，序号游标分页；每行恰好 7 个键：`id`、`wallet_sequence`、`transaction_type`、`amount`、`balance_after`、`event_id`、`created_at`。
   3. 客户流水**不含**：库里的 `description`（管理员写的调账原因）、调账的幂等键、操作者、用量事件的成本 / 汇率 / 参考价、`metadata_json`、`balance_before`、任何内部 id。AI 用量行带接入方上报的 `event_id`，其余行 `event_id = null`。
   4. 两个接口在账户 `PENDING_ACTIVATION`、`ENABLED`、`DISABLED`、`CLOSED` 下都可读（#368 只读契约：停用后仍能看账）。
-  5. 门户有一个钱包页（余额卡 + 流水表，「Older」翻页），门户首页有余额卡与最近 5 条流水、链到钱包页；页面不请求、不显示任何成本、毛利或内部字段。
+  5. 门户有一个钱包页（余额卡 + 流水表，「Older」翻页），门户首页有余额卡与最近 5 条流水、链到钱包页；页面不请求、不显示任何成本、毛利或内部字段；金额按 spec §80 的显示精度显示（§2「事务边界、时间、金额」）。
 - **明确不做什么**（Kelvin 2026-10-23 逐项确认）：
   - **不显示库里的 `description`**：调账原因是写给内部看的，可能含内部备注。客户看到的说明是前端按 `transaction_type` 显示的固定文案（spec §70 的「customer-facing transaction descriptions」）。将来要给客户看具体说明，在调账时另加「客户可见说明」字段，另开任务。
   - **不做最小恢复额**（spec §7 第 10 条、§42、ADR-0010：欠款 + 可配置缓冲）：缓冲的配置项属于「充值 UI 与充值入账」的设计闸门（`docs/TODO.md` Phase 4「充值 UI」下已写明），没有充值入口时显示一个算不准的数字没有用。本设计只显示「余额不足、AI 服务已暂停」。
@@ -55,7 +55,7 @@
 ```text
 GET（客户访问令牌）→ 查询参数校验（FastAPI，处理函数之前，422）→ require_customer（第一条语句：401 / 403 CUSTOMER_REQUIRED）
 → tenant_id = CustomerPrincipal.tenant_id（取自库里的 user 行，不取自令牌与请求）
-→ 一条 SELECT → 白名单投影 → 200
+→ 钱包接口：一条 SELECT；流水接口：先确认钱包存在（一次唯一键点查），再一条 SELECT → 白名单投影 → 200
 （无状态变化、无财务效果、无出站事件、无审计）
 ```
 
@@ -136,6 +136,8 @@ WHERE t.id = :tenant_id
 
 **没有 `total`**（与 #351 同一理由；不带筛选时总行数就是钱包 `version`，但本接口不返回它，客户不需要）。
 
+缺钱包：流水接口在取流水之前先用现有的 `get_wallet_for_tenant(session, tenant_id)` 确认钱包存在（按 `uq_wallets_tenant_id` 点查一次）；查不到与钱包接口同一处理——抛 `RuntimeError(WALLET_MISSING)`，走全局 500，不返回 200 空页。否则「没有钱包、也没有账本行」的数据不一致会被一个看似正常的空流水掩盖。
+
 查询：复用 `list_transactions_for_tenant(session, principal.tenant_id, limit=page_size + 1, before_sequence=…)`，`reference_type` 恒为 `None`，所以走现有 `ix_wallet_transactions_tenant_sequence` 倒序范围扫描。函数不改。它读出的 `description`、`created_by_email`、`usage_event_public_id` 在客户 schema 的投影函数里**丢弃**：客户 schema 是一个新的 7 键白名单模型（新文件 `app/schemas/customer_wallet.py`），不继承、不复用管理端的 `WalletTransactionView`，避免管理端加字段时客户端跟着出现。
 
 ### 错误（两个接口相同）
@@ -144,13 +146,19 @@ WHERE t.id = :tenant_id
 
 ### 事务边界、时间、金额
 
-- 只读：每个请求一个会话、一条 SELECT（`require_customer` 自己读用户行的那一次除外），不加锁（不用 `FOR UPDATE` / `FOR SHARE`），不提交任何写。
+- 只读：每个请求一个会话；钱包接口一条 SELECT，流水接口一次钱包存在性点查加一条取页的 SELECT（`require_customer` 自己读用户行的那一次都除外）；不加锁（不用 `FOR UPDATE` / `FOR SHARE`），不提交任何写。钱包存在性检查与取页之间不需要同一快照：钱包只在建客户时插入、从不删除。
 - 时间：只返回 `created_at`（记账时刻），排序只按 `wallet_sequence`；不涉及 `occurred_at` 与版本生效时间。
-- 金额：只做 `Decimal` → 8 位小数字符串的格式化（`money_text`），不做任何运算、不换算币种、不舍入到 2 位。spec §70 示例里的 6 位小数只是示例，客户看到的是账本原值；前端按字符串原样显示，不经 `Number` / `parseFloat`。
+- 金额（接口）：只做 `Decimal` → 8 位小数字符串的格式化（`money_text`），不做任何运算、不换算币种、不舍入；接口返回的是账本原值。
+- 金额（前端显示，spec §80「MYR normal display → 2 decimals」「Detailed usage may display up to 6 decimals」「Display rounding never changes persisted financial values」，Kelvin 2026-10-23 定对齐）：
+  - 余额（`balance`）、流水的 `balance_after`、以及 `transaction_type` 不是 `AI_USAGE` 的流水 `amount`：显示 **2 位小数**。
+  - `AI_USAGE` 行的 `amount`：显示**最多 6 位小数**（spec §70 示例 `AI_USAGE -RM0.041200`），与 #398 用量页的计费额同一规则，所以同一笔扣费在两页显示相同。
+  - 舍入一律是对十进制**字符串**做 `ROUND_HALF_UP`，再去掉末尾多余的 0、至少留 2 位、整数部分加千分位；`-0.00` 显示为 `0.00`。不经 `Number` / `parseFloat` / `Intl.NumberFormat`。例：`"12.45880000"` 按 2 位 → `12.46`，`"-0.04123457"` 按 6 位 → `-0.041235`，`"-0.00000049"` 按 6 位 → `0.00`，`"0.995"` 按 2 位 → `1.00`。
+  - 这个函数是 `frontend/src/components/MoneyText.tsx` 里新增的一个导出（例如 `formatAmountRounded(amount, places)`），由一个独立的前端任务先交付（§8），钱包页、首页与 #398 的用量页共用；既有的 `formatAmount` / `MoneyText`（管理端用，不舍入）不改。
+  - 页面上余额与 `balance_after` 都是各自舍入的显示值，不在前端做加减；所以「上一行余额 − 本行金额」的显示值可能与本行余额的显示值差一分，这是显示舍入的预期结果，持久值不变。
 
 ### 前端（第二、三个任务，不在闸门范围内，写在这里只为说明接口够用）
 
-- 钱包页 `/portal/wallet`（门户外壳 AIH-TASK-096 的导航加一项）：余额卡（余额、`PREPAID` 时的计费状态、AI 服务状态与原因的固定文案）+ 流水表（时间、类型文案、金额、余额（后）、`event_id`）；「Older」用 `next_before_sequence` 翻下一页、「Newest」回第一页。
+- 钱包页 `/portal/wallet`（门户外壳 AIH-TASK-096 的导航加一项）：余额卡（余额、`PREPAID` 时的计费状态、AI 服务状态与原因的固定文案）+ 流水表（时间、类型文案、金额、余额（后）、`event_id`）；「Older」用 `next_before_sequence` 翻下一页、「Newest」回第一页；金额按上面「金额（前端显示）」的规则显示。
 - 门户首页（AIH-TASK-097 的 `PortalHomePage`）：加同一张余额卡和 `page_size=5` 的最近流水，链到钱包页。
 - 九种 `transaction_type` 与四种 `ai_service_reason` 的文案进 `en.json`；未知值显示原值，不报错。
 - 浏览器验收：用验收夹具的客户账号（AIH-TASK-094 部署后由管理员建，AIH-TASK-097 已依赖它）各加一个只读步骤。
@@ -168,7 +176,7 @@ WHERE t.id = :tenant_id
 | INV-7 客户不可见成本毛利 | **是** | ① 响应带出用量事件的 `provider_source_cost`、`estimated_provider_cost_myr`、`fx_rate_applied`、`reference_customer_price`、毛利；② 管理端 schema 以后加字段，客户端跟着出现；③ 调账原因里写了内部成本信息，经 `description` 给客户看到 | ① 查询不 JOIN 用量事件的任何成本列（复用的函数只取 `usage_events.public_id`，客户 schema 再丢弃）；② 客户 schema 是独立的 7 键 / 6 键白名单模型，不继承管理端模型；③ 不返回 `description` | 测试：用量事件的成本、汇率、参考价写成哨兵值（如 `"0.13579246"`），调账 `description` 写成哨兵串，断言两个接口的**原始响应文本**里都没有出现；键集合逐字断言恰好 7 / 6 个 |
 | INV-8 租户不可互访 | **是** | ① 从请求里取租户；② 漏掉租户过滤；③ 拿别的租户的序号当游标 | ① 租户只来自 `CustomerPrincipal.tenant_id`（库里的 user 行），接口不定义任何租户参数，传了也被忽略；② 两条查询都 `WHERE tenant_id = :tenant_id`（钱包查询按 `t.id`）；③ 游标是本钱包内的序号，只用于 `<` 比较，过滤条件仍是本租户 | 测试：客户 A、B 各有账本与余额；A 的令牌带 `?customer_id=<B>&tenant_id=<B 的内部 id>` 仍只得到 A；A 用 B 的最大序号 + 1 当 `before_sequence` 只得到 A 的行；A 的任何页都不含 B 的 `id` |
 | INV-9 对话内容不入库 | 否 | 不新增存储，不读 prompt / response | — | — |
-| INV-10 金额用 Decimal | 是 | 序列化或前端显示经 float 丢精度 | 复用 `money_text`；前端按字符串显示 | 测试：`-0.00000001`、`999999999999.99999999`、负余额原样往返；前端测试断言 `"0.00000001"` 原样渲染 |
+| INV-10 金额用 Decimal | 是 | 序列化或前端显示经 float 丢精度；显示舍入改了持久值 | 复用 `money_text`，接口返回原值；前端舍入只做字符串运算、只在显示层 | 测试：`-0.00000001`、`999999999999.99999999`、负余额原样往返；舍入函数的前端测试覆盖进位（`"0.995"` 按 2 位 → `1.00`、`"999999999999.99999999"` 按 2 位 → `1,000,000,000,000.00`）、舍去、负号、`-0` 与非十进制字符串原样返回 |
 | INV-11 event_id 至多一次财务效果 | 否 | 不写；`event_id` 只读出显示 | — | — |
 | INV-12 定稿对账单不可变 | 否 | 对账单还不存在，不读不写 | — | — |
 | INV-13 状态与事件原子提交 | 否 | 没有状态变化与出站事件；余额与计费状态在同一条 SELECT 里读，不会读到「余额已变、状态未变」的组合（记账在同一事务里写两者） | 一条 JOIN 查询 | 测试：单元层断言 `get_wallet_summary` 只发一条 SELECT（照现有 SQL 计数用例的写法） |
@@ -192,7 +200,7 @@ WHERE t.id = :tenant_id
 | 未登录 / 令牌过期 | 401 `TOKEN_INVALID`，前端走刷新 | 不变 | 是（刷新后） | 刷新令牌 | 无 |
 | ADMIN、无租户 CUSTOMER、账号非 `ACTIVE` | 403 `CUSTOMER_REQUIRED` | 不变 | 否 | 管理员修账号 | 无 |
 | 租户 `DISABLED` / `CLOSED` | 200 照常返回（只读契约） | 不变 | — | — | 无 |
-| 缺钱包（数据不一致） | 500 带 `request_id`，消息只有 `WALLET_MISSING` | 不变 | 否 | 人工修数据 | 现有 500 日志；余额核对告警是另一个闸门 |
+| 缺钱包（数据不一致） | 两个接口都 500 带 `request_id`，消息只有 `WALLET_MISSING`（流水接口在取页之前检查，有没有账本行都一样） | 不变 | 否 | 人工修数据 | 现有 500 日志；余额核对告警是另一个闸门 |
 | DB 不可用 / 查询失败 | 503 / 500（沿用全局处理） | 不变 | 是 | 数据库恢复后重查 | 现有 readyz 巡检 |
 | Redis/Celery 丢失 | 无影响 | 不变 | — | — | 无 |
 | 外部服务超时 | 不适用（不调外部服务） | — | — | — | — |
@@ -227,7 +235,7 @@ WHERE t.id = :tenant_id
 | 单条快照 | unit | `get_wallet_summary` | 只发一条 SELECT，且不含 `FOR UPDATE` / `FOR SHARE`（归一后比较） |
 | 幂等重放 | API | 同一请求连发两次 | 两次响应相同 |
 | 事务中途失败 | API | repository 查询抛数据库异常 | 500 / 503 带 `request_id`；账本、钱包、租户、审计、outbox 行数不变 |
-| 缺钱包 | API | 测试里删掉该租户的钱包行（SQLite） | 500，响应不含任何客户数据 |
+| 缺钱包 | API | 测试里删掉该租户的钱包行（SQLite），分别在该租户没有账本行、有账本行两种情况下调**两个**接口 | 四种组合都 500，消息只有 `WALLET_MISSING`，响应不含任何客户数据；流水接口不返回 200 空页 |
 | Redis/Celery 丢失 | — | 不使用 | 不适用 |
 | 租户越权 | API | 客户 A、B 各有余额与账本；A 的令牌带 `?customer_id=<B 的 public_id>&tenant_id=<B 的内部 id>`；A 用 B 的最大序号 + 1 做 `before_sequence` | 钱包与流水都只是 A 的；A 的任何页都不含 B 的 `id`；B 的余额字符串不出现在 A 的响应里 |
 | 鉴权 | API | 无令牌、坏令牌、ADMIN 令牌、门户账号被停用后旧令牌 | 401 `TOKEN_INVALID` / 401 / 403 `CUSTOMER_REQUIRED` / 403 `CUSTOMER_REQUIRED`，且不发账本查询 |
@@ -236,7 +244,7 @@ WHERE t.id = :tenant_id
 | 金额精度 | API（SQLite + MySQL） | 金额 `-0.00000001`、`999999999999.99999999`、负余额 | 响应字符串与库值逐字相等，8 位小数 |
 | 无写入 | API | 每个用例前后 | `wallet_transactions`、`wallets`、`tenants`、`audit_logs`、`domain_outbox` 行数与余额不变 |
 
-前端（Vitest，钱包页与首页各自的测试文件）：金额字符串原样渲染（`"0.00000001"`、负数）；`INTERNAL_METERED_ONLY` 不显示「已暂停」；`BLOCK_AI` 四种原因各有文案；未知类型显示原值；「Older」带上 `before_sequence`、最后一页没有「Older」；页面不请求 `/api/v1/admin/*`。
+前端（Vitest，钱包页与首页各自的测试文件）：余额、`balance_after` 与非 `AI_USAGE` 行金额显示 2 位，`AI_USAGE` 行金额显示最多 6 位（同一笔 `"-0.04123457"` 显示 `-0.041235`），负数与 `-0` 的显示；`INTERNAL_METERED_ONLY` 不显示「已暂停」；`BLOCK_AI` 四种原因各有文案；未知类型显示原值；「Older」带上 `before_sequence`、最后一页没有「Older」；页面不请求 `/api/v1/admin/*`。
 
 ## 8. 迁移与上线
 
@@ -246,6 +254,7 @@ WHERE t.id = :tenant_id
 - **部署顺序与拆分**（批准后登记为三个任务，`depends_on` 串起来，每个都能单独过检查与 CI）：
   1. 接口：`get_wallet_summary` + `app/schemas/customer_wallet.py` + `app/api/customer.py` 两个路由 + `tests/backend/test_customer_wallet_api.py` + `docs/api.md`（依赖 AIH-TASK-093：`require_customer` 与 `app/api/customer.py` 由它交付）。
   2. 前端钱包页：API 封装、余额卡组件、钱包页、门户导航与路由、文案、测试、验收脚本一个只读步骤（依赖 1 与 AIH-TASK-097）。
+     - 金额显示用的舍入函数由一个**独立的前端任务**先交付（只改 `frontend/src/components/MoneyText.tsx` 与它的测试），钱包页依赖它；#398 的用量页复用它。
   3. 前端门户首页：余额卡与最近 5 条流水、文案、测试、验收脚本一个只读步骤（依赖 2）。
 - **回滚或前滚方式**：回滚到上一个镜像即可（无数据变化、无迁移）。
 - **部分部署时的行为**：只部署 1 → 接口可用、页面没有入口；只部署到 2 → 有钱包页、首页还没有余额卡。都不影响现有功能。
@@ -261,7 +270,7 @@ WHERE t.id = :tenant_id
 | 备选 C：返回 `reference_type` 并支持按来源筛选 | 与管理端一致，客户能只看调账 | 多一个参数和一组错误；客户现在只有用量和调账两种来源，没有充值时筛选价值小 | 等 Phase 4 充值上线、来源变多时再加（复用现有索引，不需要迁移） |
 | 备选 D：一个 `/customer/dashboard` 聚合接口（余额 + 最近流水 + 本月用量） | 首页一次请求 | 「本月」要先定月份边界与时区（Phase 5 / 7）；与钱包接口字段重复 | 首页直接调两个接口（`page_size=5`）；本月用量归 Phase 5 |
 | 备选 E：只返回 `billing_status`，不返回 `ai_service` | 字段少 | 内部计量租户余额 0 → `SUSPENDED`，页面会误报「AI 已暂停」；管理员停用时只看余额也解释不了为什么不能用 | 复用 `compose_effective_status` 一处公式，客户看到的「能不能用、为什么」与集成方 `effective-status` 一致 |
-| 备选 F：金额按 spec §70 示例舍入到 6 位或 2 位 | 显示更短 | 舍入位置是财务规则，余额与流水各自舍入后会出现「加起来对不上」 | 返回账本原值，显示层原样；要短显示时另议并写进 spec |
+| 备选 F：前端按 8 位原样显示（v1 的做法） | 与接口、管理端的 `MoneyText` 一致；不会出现显示值「差一分」 | 与 spec §80「MYR normal display → 2 decimals」「Detailed usage may display up to 6 decimals」冲突；#398 的用量页按 §80 显示 6 位后，同一笔扣费在两页显示不同 | Kelvin 2026-10-23 定对齐 spec §80；舍入只在显示层，持久值与接口不变 |
 
 ## 10. 未决问题与假设
 
@@ -302,3 +311,5 @@ WHERE t.id = :tenant_id
 | 版本 | 日期 | 改了什么 | 触发原因 |
 | --- | --- | --- | --- |
 | v1 | 2026-10-23 | 初稿 | — |
+| v2 | 2026-10-23 | 前端金额显示改为对齐 spec §80：余额、`balance_after`、非 `AI_USAGE` 行金额显示 2 位，`AI_USAGE` 行金额最多 6 位，字符串 `ROUND_HALF_UP`；舍入函数由独立前端任务先交付并与 #398 用量页共用；接口不变。改 §1 第 5 条、§2「事务边界、时间、金额」与「前端」、§3 INV-10、§7 前端测试、§8 拆分、§9 备选 F | #398 审查指出用量明细按 spec §80 最多显示 6 位；v1 的 8 位原样显示与 §80 冲突，且同一笔扣费在钱包页与用量页显示不同。Kelvin 2026-10-23 定对齐 |
+| v3 | 2026-10-23 | 流水接口在取页之前先用 `get_wallet_for_tenant` 确认钱包存在，缺钱包时与钱包接口同样 500 `WALLET_MISSING`；改 §2 流程图、接口二、事务边界，§5「缺钱包」，§7「缺钱包」改为两个接口、有无账本行四种组合 | Codex 审查 v2 的阻断项：流水接口只查账本，缺钱包且无账本时返回 200 空页，与 §5 的 500 矛盾并掩盖数据不一致 |
