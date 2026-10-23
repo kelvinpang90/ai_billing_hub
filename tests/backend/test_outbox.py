@@ -15,19 +15,25 @@ from sqlalchemy import create_engine, select
 
 from app.core.config import Settings
 from app.core.database import create_session_factory
-from app.models.auth import DomainOutbox, OutboxStatus
+from app.models.auth import DomainOutbox, OutboxStatus, User, UserRole, UserStatus
 from app.models.base import Base
+from app.repositories import tenancy
 from app.repositories.wallet import (
     AGGREGATE_TENANT,
     EVENT_BILLING_STATUS_CHANGED,
     EVENT_LOW_BALANCE,
 )
-from app.services.auth import utc_now
+from app.services.auth import RequestContext, utc_now
 from app.services.password_reset import AGGREGATE_USERS, EVENT_PASSWORD_RESET
+from app.services.portal_accounts import EVENT_PORTAL_INVITATION, create_portal_account
 from app.tasks import outbox as outbox_task
-from app.tasks.outbox import _backoff_seconds
+from app.tasks.outbox import _backoff_seconds, _render_portal_invitation
 
 TOKEN = "a-token-that-looks-like-the-real-thing"
+# 邀请令牌的到期时刻：与服务写进 payload 的形状相同（不带时区的 UTC、整秒、ISO 8601）。
+# 换算到马来西亚时间（UTC+8）是同一天 16:00。
+EXPIRES_AT = "2026-10-24T08:00:00"
+INVITATION_PAYLOAD = {"to": "portal@example.com", "token": TOKEN, "expires_at": EXPIRES_AT}
 
 
 @pytest.fixture
@@ -393,3 +399,163 @@ def test_every_pending_row_is_eventually_visible_to_recovery(wired) -> None:
             )
         ).scalars()
         assert tried in list(visible)
+
+
+# --- 门户邀请邮件（AIH-TASK-094，设计闸门 #368 v12 §2「邀请邮件与重置的隔离」） ----------
+
+
+def add_invitation(session_factory, payload: dict[str, object] | None = None, **overrides) -> int:
+    return add_row(
+        session_factory,
+        event_type=EVENT_PORTAL_INVITATION,
+        payload_json=json.dumps(payload or INVITATION_PAYLOAD, sort_keys=True),
+        **overrides,
+    )
+
+
+def test_an_invitation_is_delivered_with_a_link_to_the_accept_page(
+    wired, transport: FakeTransport
+) -> None:
+    outbox_id = add_invitation(wired)
+
+    assert outbox_task.deliver(outbox_id) == "sent"
+
+    [message] = transport.sent
+    assert message.to == "portal@example.com"
+    assert f"https://billing.example.com/accept-invitation?token={TOKEN}" in message.body
+    assert "reset-password" not in message.body
+    # 令牌明文同样在投递完成时清掉。
+    assert read(wired, outbox_id).payload_json is None
+
+
+def test_the_invitation_states_the_deadline_in_malaysia_time_with_utc() -> None:
+    """设计 §2：马来西亚时间（UTC+8）精确到分钟，括号附 UTC。
+
+    另提示查垃圾箱；不写「72 小时」这类相对时长。
+    """
+    message = _render_portal_invitation(
+        Settings(frontend_base_url="https://billing.example.com"), INVITATION_PAYLOAD
+    )
+
+    assert message is not None
+    assert "2026-10-24 16:00 Malaysia time, UTC+8 (2026-10-24 08:00 UTC)" in message.body
+    assert "spam" in message.body
+    for relative in ("72", "hour", "day"):
+        assert relative not in message.body.lower()
+
+
+def test_the_deadline_crosses_midnight_in_malaysia_time() -> None:
+    """换算在日期上也要对：UTC 20:30 是马来西亚第二天 04:30。"""
+    payload = {**INVITATION_PAYLOAD, "expires_at": "2026-12-31T20:30:00"}
+
+    message = _render_portal_invitation(
+        Settings(frontend_base_url="https://billing.example.com"), payload
+    )
+
+    assert message is not None
+    assert "2027-01-01 04:30 Malaysia time, UTC+8 (2026-12-31 20:30 UTC)" in message.body
+
+
+def test_the_deadline_comes_from_the_payload_not_from_the_current_setting() -> None:
+    """设计 §7「邮件到期时刻」：把有效期配置改掉重新渲染，两次正文的到期时刻相同。
+
+    outbox 重试时配置可能已经变了，信里的时刻仍须与令牌行真实的 `expires_at` 一致。
+    """
+    first = _render_portal_invitation(
+        Settings(
+            frontend_base_url="https://billing.example.com",
+            customer_invitation_ttl_seconds=259_200,
+        ),
+        INVITATION_PAYLOAD,
+    )
+    second = _render_portal_invitation(
+        Settings(
+            frontend_base_url="https://billing.example.com",
+            customer_invitation_ttl_seconds=3_600,
+        ),
+        INVITATION_PAYLOAD,
+    )
+
+    assert first is not None and second is not None
+    assert first.body == second.body
+    assert "2026-10-24 16:00 Malaysia time, UTC+8 (2026-10-24 08:00 UTC)" in second.body
+
+
+def test_an_invitation_without_a_front_end_base_url_is_not_sent(
+    wired, monkeypatch, transport: FakeTransport
+) -> None:
+    """与重置邮件同一处理：不发一封带半截 URL 的信，走普通失败、等配置补上后重试。"""
+    monkeypatch.setattr(outbox_task, "get_settings", lambda: Settings(frontend_base_url=""))
+    outbox_id = add_invitation(wired)
+
+    assert outbox_task.deliver(outbox_id) == "retry-later"
+    assert transport.sent == []
+    assert read(wired, outbox_id).payload_json is not None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"to": "portal@example.com", "token": TOKEN},
+        {**INVITATION_PAYLOAD, "expires_at": "not-a-moment"},
+        {**INVITATION_PAYLOAD, "token": ""},
+        {**INVITATION_PAYLOAD, "to": ""},
+    ],
+    ids=["no-expiry", "bad-expiry", "no-token", "no-recipient"],
+)
+def test_an_invitation_missing_a_field_is_not_sent(
+    wired, transport: FakeTransport, payload: dict[str, object]
+) -> None:
+    """缺到期时刻时不能退回去读当前配置：那样写出来的时刻可能与令牌不一致。"""
+    outbox_id = add_invitation(wired, payload)
+
+    assert outbox_task.deliver(outbox_id) == "retry-later"
+    assert transport.sent == []
+
+
+def test_recovery_picks_up_an_invitation_left_behind_by_a_lost_trigger(
+    wired, monkeypatch, settings: Settings, transport: FakeTransport
+) -> None:
+    """设计 §7「Redis/Celery 丢失」的接口层部分：开通后没有任何触发，行留在 `PENDING`。
+
+    渲染器登记之后，现有恢复扫描能领到它（扫描只选有渲染器的事件类型），投出去的信里就是
+    这次开通签发的那张令牌。
+    """
+    now = utc_now().replace(microsecond=0)
+    with wired() as session:
+        tenant = tenancy.create_tenant(
+            session, company_name="Portal Sdn Bhd", email="ops@example.com", now=now
+        )
+        admin = User(
+            email="admin@example.com",
+            password_hash="not-a-real-hash",
+            role=UserRole.ADMIN,
+            status=UserStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(admin)
+        session.commit()
+        session.refresh(tenant)
+        session.refresh(admin)
+        session.expunge_all()
+    issued = create_portal_account(
+        wired,
+        settings,
+        actor=admin,
+        customer_id=tenant.public_id,
+        email="portal@example.com",
+        context=RequestContext(ip_address="10.0.0.1", user_agent="pytest"),
+    )
+    row = read(wired, issued.outbox_id)
+    assert (row.event_type, row.status) == (EVENT_PORTAL_INVITATION, OutboxStatus.PENDING)
+    token = json.loads(row.payload_json or "{}")["token"]
+
+    queued: list[int] = []
+    monkeypatch.setattr(outbox_task.deliver, "delay", lambda outbox_id: queued.append(outbox_id))
+    assert outbox_task.recover() == 1
+    assert queued == [issued.outbox_id]
+
+    assert outbox_task.deliver(issued.outbox_id) == "sent"
+    [message] = transport.sent
+    assert f"https://billing.example.com/accept-invitation?token={token}" in message.body

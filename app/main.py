@@ -21,6 +21,7 @@ from app.api.admin_ai_catalog import router as admin_ai_catalog_router
 from app.api.admin_audit import router as admin_audit_router
 from app.api.admin_customers import router as admin_customers_router
 from app.api.admin_fx_rates import router as admin_fx_rates_router
+from app.api.admin_portal_accounts import router as admin_portal_accounts_router
 from app.api.admin_pricing_preview import router as admin_pricing_preview_router
 from app.api.admin_pricing_rules import router as admin_pricing_rules_router
 from app.api.admin_provider_prices import router as admin_provider_prices_router
@@ -142,6 +143,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(me_router)
     app.include_router(customer_router)
     app.include_router(admin_customers_router)
+    # 管理端门户账号（AIH-TASK-094，设计闸门 #368 v12 §2）。
+    app.include_router(admin_portal_accounts_router)
     app.include_router(admin_audit_router)
     app.include_router(admin_ai_catalog_router)
     app.include_router(admin_ai_access_router)

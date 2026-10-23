@@ -33,6 +33,7 @@ from app.core.mailer import OutgoingEmail, build_transport
 from app.models.auth import DomainOutbox, OutboxStatus
 from app.services.auth import utc_now
 from app.services.password_reset import EVENT_PASSWORD_RESET
+from app.services.portal_accounts import EVENT_PORTAL_INVITATION
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,68 @@ def _render_password_reset(settings: Settings, payload: dict[str, object]) -> Ou
     return OutgoingEmail(to=to, subject="Reset your Acuven Billing password", body=body)
 
 
+# 马来西亚时间：固定偏移 UTC+8，不依赖 tzdata
+# （设计闸门 #368 v12 §2「邀请邮件」）。马来西亚不实行夏令时，
+# 固定偏移就是它的全部规则；worker 镜像里有没有 tzdata 不该决定信能不能发出去。
+_MALAYSIA = dt.timezone(dt.timedelta(hours=8))
+
+
+def _invitation_deadline(raw: object) -> str | None:
+    """`expires_at` from the payload, as Malaysia time to the minute plus UTC; None if unusable.
+
+    ⚠️ **只用 payload 里的值，不读当前配置、不写相对时长**（设计 §2）：
+    它与令牌行的 `expires_at` 是同一个值（不带时区的 UTC、整秒），
+    outbox 重试或有效期配置改动之后，信里的到期时刻仍与令牌真实的到期时刻一致。
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.UTC)
+    utc = moment.astimezone(dt.UTC)
+    local = moment.astimezone(_MALAYSIA)
+    return f"{local:%Y-%m-%d %H:%M} Malaysia time, UTC+8 ({utc:%Y-%m-%d %H:%M} UTC)"
+
+
+def _render_portal_invitation(
+    settings: Settings, payload: dict[str, object]
+) -> OutgoingEmail | None:
+    """Build the portal invitation email, or None when we cannot (which counts as a failure)."""
+    base = settings.frontend_base_url.strip().rstrip("/")
+    if not base:
+        # 与重置邮件同一处理：拼不出可点的链接就不发。
+        # 客户的账号是 `INVITED`、没有可用密码，一封点不动的邀请信等于一条死路。
+        logger.error("BILLING_FRONTEND_BASE_URL is not configured; cannot build an invitation link")
+        return None
+
+    to = str(payload.get("to") or "")
+    token = str(payload.get("token") or "")
+    deadline = _invitation_deadline(payload.get("expires_at"))
+    if not to or not token or deadline is None:
+        logger.error("A portal invitation outbox row is missing its recipient, token or expiry")
+        return None
+
+    # 路径与参数名由前端 `routes/paths.ts` 登记
+    # （`acceptInvitation`、`ACCEPT_INVITATION_TOKEN_PARAM`），
+    # 由 tests/backend/test_invitation_link.py 机械比对。
+    link = f"{base}/accept-invitation?token={quote(token, safe='')}"
+    body = (
+        "You have been invited to the Acuven Billing customer portal.\n\n"
+        f"Open this link to set your password and activate your account:\n{link}\n\n"
+        f"The link can be used once, and expires at {deadline}. "
+        "If it has expired, ask your Acuven contact to send a new invitation.\n\n"
+        "If you are waiting for another email from us and cannot find it, "
+        "please check your spam or junk folder.\n\n"
+        "If you were not expecting this invitation, you can ignore this email."
+    )
+    return OutgoingEmail(
+        to=to, subject="Your invitation to the Acuven Billing customer portal", body=body
+    )
+
+
 # event_type → 渲染函数。
 #
 # ⚠️ 认不出来的事件类型走**普通失败**（重试，最终进死信），不是立刻死信。
@@ -87,7 +150,13 @@ def _render_password_reset(settings: Settings, payload: dict[str, object]) -> Ou
 # ⚠️ `recover` 只重投这里有的类型（设计闸门 #88 §2）。`tenant.billing_status_changed`
 # 与 `tenant.low_balance` 现在还没有处理器：它们以 PENDING 持久躺在库里，等以后的
 # webhook / 通知任务在这里加上处理器再接手，不会被反复重投、退避成死信（INV-14）。
-_RENDERERS = {EVENT_PASSWORD_RESET: _render_password_reset}
+#
+# 门户邀请（AIH-TASK-094）登记之后，恢复扫描才会领
+# `PORTAL_INVITATION_REQUESTED` 行；在那之前它们以 PENDING 躺在库里，等的就是这一行。
+_RENDERERS = {
+    EVENT_PASSWORD_RESET: _render_password_reset,
+    EVENT_PORTAL_INVITATION: _render_portal_invitation,
+}
 
 
 @shared_task(name="app.tasks.outbox.deliver")

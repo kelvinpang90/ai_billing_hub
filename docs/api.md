@@ -139,7 +139,7 @@
 设计依据：设计闸门 #368 `APPROVED: design v12`，全文见 [design/AIH-TASK-089-customer-portal-auth.md](design/AIH-TASK-089-customer-portal-auth.md)（§2「API」「依赖」、§6；spec §51–§54、§90）。
 
 客户（CUSTOMER）与管理员共用 `/api/v1/auth/login`、`/login/totp`、`/refresh`、`/logout` 与忘记密码。本节是客户门户
-新增的五个接口；管理端的门户账号接口不在本节。
+新增的五个接口；管理端的门户账号接口见[管理端门户账号](#管理端门户账号)。
 
 | 方法与路径 | 主体 | 成功 | 错误 |
 | --- | --- | --- | --- |
@@ -532,6 +532,128 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 不在本接口里：关户（`→ CLOSED`，要等用量事件与支付落地后另立任务）、有效状态（`ALLOW_AI` /
 `BLOCK_AI`）与 `reason_code`、项目的 `integration_status`。各状态下摄取、充值、客户登录的行为
 是对以后功能的契约，记在 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-020 一节。
+
+---
+
+## 管理端门户账号
+
+设计依据：设计闸门 #368 `APPROVED: design v12`，全文见 [design/AIH-TASK-089-customer-portal-auth.md](design/AIH-TASK-089-customer-portal-auth.md)（§2「API」管理端、「管理员重置客户 2FA」、「邀请邮件与重置的隔离」，§4、§6；spec §52、§53）。实现登记为 AIH-TASK-094。
+
+一个客户至多一个门户账号（spec §52）。六个接口都在 `/api/v1/admin/customers/{customer_id}/portal-account` 下，
+都要 ADMIN（每个处理函数的第一条语句是 `require_admin`）；`{customer_id}` 是客户的 `id`（`public_id`）。
+运维做法（开通、重发、重置 2FA 前的身份核实）见 [runbook.md「客户门户账号」](runbook.md#客户门户账号)。
+
+| 方法与路径后缀 | 请求体 | 成功 | 专有错误 |
+| --- | --- | --- | --- |
+| `GET` | — | 200，门户账号 | 404 `CUSTOMER_NOT_FOUND` / `PORTAL_ACCOUNT_NOT_FOUND` |
+| `POST` | `{email}` | 201，门户账号 | 409 `PORTAL_ACCOUNT_EXISTS` / `EMAIL_IN_USE` / `ACCOUNT_CLOSED`；422 邮箱格式 |
+| `POST /resend-invitation` | `{email?}`，可省略 | 200，门户账号 | 409 `PORTAL_ACCOUNT_NOT_INVITED` / `EMAIL_IN_USE` / `ACCOUNT_CLOSED` |
+| `POST /disable` | — | 200，门户账号 | 409 `PORTAL_ACCOUNT_ALREADY_DISABLED` |
+| `POST /enable` | — | 200，门户账号 | 409 `PORTAL_ACCOUNT_NOT_DISABLED` / `ACCOUNT_CLOSED` |
+| `POST /reset-2fa` | `{reason}` | 200，门户账号（`two_factor_enabled` 为 `false`） | 409 `PORTAL_2FA_NOT_ENABLED`；422 原因为空或过长 |
+
+六个接口另外都可能返回 401 / 403（不是 ADMIN）、404 `CUSTOMER_NOT_FOUND`（客户不存在），除开通外都可能返回
+404 `PORTAL_ACCOUNT_NOT_FOUND`（还没开通），以及 500 / 503。
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 404 | `PORTAL_ACCOUNT_NOT_FOUND` | 客户存在，但还没有门户账号 | 否 |
+| 409 | `PORTAL_ACCOUNT_EXISTS` | 开通时该客户已有门户账号。响应里不带邮箱，前端据此刷新 GET | 否 |
+| 409 | `EMAIL_IN_USE` | 开通或重发改邮箱时，这个地址已被任何用户（包括 ADMIN）占用；按归一后的地址比较 | 否 |
+| 409 | `ACCOUNT_CLOSED` | 客户已关户时开通、重发、启用 | 否 |
+| 409 | `PORTAL_ACCOUNT_NOT_INVITED` | 重发时账号不在 `INVITED` | 否 |
+| 409 | `PORTAL_ACCOUNT_ALREADY_DISABLED` | 停用一个已停用的账号 | 否 |
+| 409 | `PORTAL_ACCOUNT_NOT_DISABLED` | 启用一个不在 `DISABLED` 的账号 | 否 |
+| 409 | `PORTAL_2FA_NOT_ENABLED` | 重置 2FA 时，账号既没有已确认的 2FA，也没有待确认的注册 | 否 |
+
+### 门户账号对象
+
+六个接口成功时的 `data` 都是这个对象，恰好七个键：
+
+```json
+{
+  "email": "portal@example.com",
+  "status": "INVITED",
+  "invited_at": "2026-10-23T08:00:00",
+  "invitation_expires_at": "2026-10-26T08:00:00",
+  "activated_at": null,
+  "last_login_at": null,
+  "two_factor_enabled": false
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `email` | 登录邮箱，已归一（去首尾空白、转小写）。与客户对象的联系邮箱是两回事，可以不同 |
+| `status` | `INVITED`（已开通、尚未接受邀请）、`ACTIVE`、`DISABLED` 之一 |
+| `invited_at` | 最近一次邀请的签发时刻；从未发过邀请时为 `null` |
+| `invitation_expires_at` | 账号是 `INVITED` 且最近一次邀请未用、未过期时，为它的到期时刻；否则为 `null`（已接受、已停用、重新启用后旧邀请已作废、已过期，都是 `null`，表示需要重发） |
+| `activated_at` | 客户第一次接受邀请的时刻；从未接受时为 `null` |
+| `last_login_at` | 最近一次登录的时刻；可为 `null` |
+| `two_factor_enabled` | 是否有已确认的 2FA；只有待确认的注册时为 `false` |
+
+没有内部用户 id、`tenant_id`、哈希、锁定信息。时间都是不带时区的 UTC。
+
+### 开通与重发
+
+开通：
+
+```json
+{ "email": "portal@example.com" }
+```
+
+- 同一事务里建出 `INVITED` 的 CUSTOMER 用户（不可用的随机密码，凭密码登录不了）、一张邀请令牌（有效期由
+  `BILLING_CUSTOMER_INVITATION_TTL_SECONDS` 决定，默认 72 小时）、一行 `PORTAL_INVITATION_REQUESTED` 出站事件与
+  `PORTAL_ACCOUNT_CREATED` 审计。提交之后立即触发投递；触发失败不影响响应，周期恢复会补投。
+- 邮箱先去首尾空白再校验格式（422），存之前转小写。不接受其他字段（422），客户只来自路径。
+- 开通不是幂等的：第二次得到 409 `PORTAL_ACCOUNT_EXISTS`。
+
+重发（只在 `INVITED` 时）：
+
+```json
+{ "email": "corrected@example.com" }
+```
+
+- 请求体可以省略，也可以是 `{}` 或 `{"email": null}`：都表示不改邮箱。给了邮箱、归一后与当前相同，同样不算改。
+- 作废该账号全部未用的邀请令牌（旧链接立即失效），签发新令牌、写出站事件与 `PORTAL_INVITATION_RESENT` 审计，
+  立即触发投递。
+- 改邮箱时新地址被任何用户占用得到 409 `EMAIL_IN_USE`，什么都不写。
+
+### 邀请邮件
+
+- 链接是 `{BILLING_FRONTEND_BASE_URL}/accept-invitation?token=…`，前端的接受页匿名可达（不在登录守卫之内），
+  提交到 [`POST /api/v1/auth/invitation/accept`](#post-apiv1authinvitationaccept--接受邀请)。路径与参数名由前端
+  `routes/paths.ts` 登记，`tests/backend/test_invitation_link.py` 机械比对。
+- 正文写明到期时刻：马来西亚时间（UTC+8）精确到分钟，括号附 UTC。只用出站事件 payload 里的 `expires_at`（与令牌行
+  同一个值），不读当前配置、不写相对时长，所以重试或改了有效期配置之后，信里的时刻仍与令牌一致。正文另提示查垃圾箱。
+- `BILLING_FRONTEND_BASE_URL` 为空时与重置邮件同样处理：不发一封带半截链接的信，按普通失败重试。
+- 出站事件 payload 是 `{to, token, expires_at}`，含令牌原文；投递成功或进死信时置空。
+- 邀请令牌与重置令牌互相用不了；`INVITED` 的客户点「忘记密码」得到同一个 200、不发信，没收到邀请由管理员重发。
+
+### 停用与启用
+
+- 停用（`INVITED` / `ACTIVE` → `DISABLED`）：吊销全部刷新令牌，作废全部未用的邀请与重置令牌，使之前签发的全部
+  访问令牌与 pending 令牌永久失效（重新启用也不会复活），写 `PORTAL_ACCOUNT_DISABLED` 审计。客户已关户时也允许停用。
+- 启用（`DISABLED` →）：从未接受过邀请的回到 `INVITED`，接受过的回到 `ACTIVE`；写 `PORTAL_ACCOUNT_ENABLED` 审计。
+  **不自动重发邀请**：停用时旧邀请已作废，需要时再调重发。客户已关户时 409 `ACCOUNT_CLOSED`。
+- 停用与客户的忘记密码按同一用户行排队：停用一旦提交，该账号不会再有可用的重置令牌。
+
+### 重置 2FA
+
+```json
+{ "reason": "Lost phone; identity confirmed by a call-back to the registered number." }
+```
+
+- ⚠️ **调用前必须在线下核实对方确实是该客户**（runbook「客户门户账号」）。原因必填，去掉首尾空白后 1–255 个
+  字符（与改账户状态同一条规则），存的是去掉首尾空白后的值；为空或超过 255 个字符 422，什么都不写。
+- 删除该账号的 2FA（已确认或待确认）与全部恢复码，使该账号全部会话失效，写 `PORTAL_2FA_RESET` 审计（带原因）。
+  账号状态不变，不发通知邮件。客户之后用密码登录，可以重新开启 2FA。
+
+### 审计
+
+`entity_type = users`、`entity_id` 是门户用户的内部 id（审计查询接口按既有规则把它显示为邮箱，只对 ADMIN 可见）。
+`after_state` 只放 `tenant_public_id` 与 `status`，重发另加 `email_changed`，重置 2FA 只放 `tenant_public_id`；
+**不放邮箱值**（REQ-PRIV-001）。⚠️ 原因只写业务说明，不写客户的联系人、电话、邮箱等个人数据。
 
 ---
 
