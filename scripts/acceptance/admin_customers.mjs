@@ -8,7 +8,7 @@
  * （check_ai_access）；AIH-TASK-074 加了用量分析的两个只读步骤（open_usage_analytics、check_usage_analytics）；
  * AIH-TASK-082 加了客户账户状态的一个只读步骤（check_account_status）；AIH-TASK-085 加了钱包流水的一个只读步骤
  * （check_wallet_transactions）；AIH-TASK-092 加了客户门户接受邀请页的一个只读步骤（check_accept_invitation_page），
- * 它排在 login **之前**跑。
+ * 它排在 login **之前**跑；AIH-TASK-095 加了客户门户账号面板的一个只读步骤（check_portal_account）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -68,7 +68,9 @@
  *   「Enable account」按钮（check_account_status）**只查不点**：只确认对应的那一个在，不点它、不打开启用 / 停用弹窗、
  *   不填原因。接受邀请页（check_accept_invitation_page）不填密码、不点「Activate my account」、不提交表单，
  *   不发任何写请求。夹具客户详情里的钱包流水面板（check_wallet_transactions）只看不点：不动「Source」下拉、不点「Older」
- *   「Newest」、不点 AI 用量行的「View usage event」链接。不点新建客户、编辑 / 保存、手工调账、
+ *   「Newest」、不点 AI 用量行的「View usage event」链接。夹具客户详情里的门户账号面板（check_portal_account）只看
+ *   不点：不点「Create portal account」「Resend invitation」「Disable portal access」「Enable portal access」「Reset 2FA」
+ *   或任何确认按钮，不填也不提交开通表单里的「Login email」。不点新建客户、编辑 / 保存、手工调账、
  *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
  *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
  *   「Clear address」）等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表
@@ -220,6 +222,17 @@
  *                   时第一行「Sequence」列的文字等于 items 第一项的 wallet_sequence；items 为空时面板显示空状态
  *                   （wallet.transactions.empty）、没有数据行，同样算通过。不改筛选、不翻页、不点任何链接。报到前把面板滚动到
  *                   视口里（放得下时整块在视口内，放不下时面板顶端在视口内）
+ *   check_portal_account
+ *                   在夹具客户详情（open_fixture 打开的那一页）上，门户账号面板（role=region、aria-label 为「Customer portal
+ *                   account」，en.json 的 portalAccount.title）落定（不再显示 portalAccount.loading）且不是加载失败
+ *                   （portalAccount.loadFailed）或无权限（customers.forbidden）。后端值取面板自己发出的
+ *                   GET /api/v1/admin/customers/{customer_id}/portal-account 的响应（被动观察，不自己发请求、不拦截；取这个
+ *                   客户最近一次读完的那一次，只认 200 与 404）。响应为 404、错误码 PORTAL_ACCOUNT_NOT_FOUND 时，面板显示未开通
+ *                   （portalAccount.none）、没有「Portal status」一项；为 200 时，面板「Portal status」一项（portalAccount.field.status，
+ *                   面板里带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）的文字是响应 status（INVITED / ACTIVE / DISABLED，
+ *                   认不出的值是 assertion_failed）的文案（Invited / Active / Disabled，portalAccount.status.*），且不显示未开通。
+ *                   其余响应（别的状态码、别的错误码、不是信封）是 assertion_failed。不点开通、不点任何按钮、不填表单。报到前把
+ *                   面板滚动到视口里（规则同 check_wallet_transactions）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -361,6 +374,13 @@ const TEXT = {
   walletTxEmpty: "This customer has no wallet transactions yet.", // wallet.transactions.empty
   walletTxSequence: "Sequence", // wallet.transactions.field.sequence —— 流水表格的列头
   walletTxBalanceAfter: "Balance after", // wallet.transactions.field.balanceAfter
+  portalTitle: "Customer portal account", // portalAccount.title —— 门户账号面板的 aria-label
+  portalLoading: "Loading the portal account…", // portalAccount.loading
+  portalLoadFailed: "The portal account could not be loaded.", // portalAccount.loadFailed
+  portalNone: "This customer has no portal account yet.", // portalAccount.none
+  portalStatusLabel: "Portal status", // portalAccount.field.status —— 面板里 Descriptions 的一项
+  // 门户账号状态 → 面板「Portal status」一项的文案（portalAccount.status.invited / active / disabled）。
+  portalStatusText: { INVITED: "Invited", ACTIVE: "Active", DISABLED: "Disabled" },
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
   nextPageTitle: "Next Page",
@@ -447,6 +467,11 @@ const USAGE_ANALYTICS_API = /^\/api\/v1\/admin\/usage-analytics$/;
 
 /** 钱包流水接口的路径（frontend/src/api/walletTransactions.ts 的 listWalletTransactions）。 */
 const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/transactions$/;
+
+/** 门户账号接口的路径（frontend/src/api/portalAccounts.ts 的 portalAccountUrl）。 */
+const PORTAL_ACCOUNT_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/portal-account$/;
+/** 还没开通时 GET 的错误码（docs/api.md「管理端门户账号」）。 */
+const PORTAL_ACCOUNT_NOT_FOUND = "PORTAL_ACCOUNT_NOT_FOUND";
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -851,6 +876,8 @@ const network = {
   usageAnalytics: new Map(),
   /** 钱包流水接口：requestId → { customerId, newest, status, finished, failed, seq }。查询串本身不保存。 */
   walletTransactions: new Map(),
+  /** 门户账号接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
+  portalAccounts: new Map(),
   seq: 0,
 };
 
@@ -864,8 +891,26 @@ function trackedRequest(requestId) {
     network.aiAccess.get(requestId) ??
     network.projectLists.get(requestId) ??
     network.usageAnalytics.get(requestId) ??
-    network.walletTransactions.get(requestId)
+    network.walletTransactions.get(requestId) ??
+    network.portalAccounts.get(requestId)
   );
+}
+
+/** 是不是门户账号接口（同源 https、路径恰好是 …/portal-account）：是的话回路径里的客户 id，不是回 null。 */
+function portalAccountCustomerId(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host) {
+      return null;
+    }
+    const match = PORTAL_ACCOUNT_API.exec(parsed.pathname);
+    return match === null ? null : decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1109,6 +1154,16 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const portalCustomerId = portalAccountCustomerId(params.request?.url);
+        if (portalCustomerId !== null && params.request?.method === "GET") {
+          network.portalAccounts.set(params.requestId, {
+            customerId: portalCustomerId,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1287,6 +1342,31 @@ function latestWalletTransactionsResponse(customerId) {
     }
     if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
       best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/**
+ * 这个客户的、读完的门户账号 GET 里最近的一次（200 是已开通，404 可能是未开通，由调用方看错误码）；还有在路上的
+ * 就回 null，等它落定。请求是详情页打开时面板自己发出的，所以不按序号截断。
+ */
+function latestPortalAccountResponse(customerId) {
+  let best = null;
+  for (const [requestId, request] of network.portalAccounts) {
+    if (request.customerId !== customerId) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (
+      (request.status === 200 || request.status === 404) &&
+      request.finished &&
+      !request.failed &&
+      (best === null || request.seq > best.seq)
+    ) {
+      best = { requestId, status: request.status, seq: request.seq };
     }
   }
   return best;
@@ -1497,6 +1577,15 @@ function pageLib() {
     }
     return null;
   };
+  /** 客户详情里的门户账号面板（role=region、aria-label 为面板标题）；没有时 null。 */
+  const portalRegion = (T) => {
+    for (const el of document.querySelectorAll('[role="region"]')) {
+      if (el.getAttribute("aria-label") === T.portalTitle) {
+        return el;
+      }
+    }
+    return null;
+  };
   return {
     norm,
     leaf,
@@ -1515,6 +1604,7 @@ function pageLib() {
     aiAccessRegion,
     analyticsTable,
     walletTxRegion,
+    portalRegion,
   };
 }
 
@@ -2308,6 +2398,65 @@ function scrollWalletTxPanelIntoView(lib, T) {
 /** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
 function walletTxPanelInView(lib, T) {
   const region = lib.walletTxRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 门户账号面板的状态：在加载、加载失败、无权限、未开通，以及「Portal status」一项的文字（面板里带边框的
+ * Descriptions：label 在 <th>，值在紧跟的 <td>；没有这一项时 null）。只在面板里面找。只读，不碰按钮与表单。
+ */
+function probePortalAccount(lib, T) {
+  const region = lib.portalRegion(T);
+  const out = {
+    ...lib.common(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    forbidden: false,
+    none: false,
+    statusCount: 0,
+    statusText: null,
+  };
+  if (region === null) {
+    return out;
+  }
+  const has = (text) =>
+    [...region.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(T.portalLoading);
+  out.failed = has(T.portalLoadFailed);
+  out.forbidden = has(T.customersForbidden);
+  out.none = has(T.portalNone);
+  const cells = [];
+  for (const th of region.querySelectorAll("th")) {
+    const td = th.nextElementSibling;
+    if (lib.norm(th.textContent) === T.portalStatusLabel && td && td.tagName === "TD") {
+      cells.push(td);
+    }
+  }
+  out.statusCount = cells.length;
+  out.statusText = cells.length === 1 ? lib.norm(cells[0].textContent) : null;
+  return out;
+}
+
+/** 把门户账号面板滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollPortalPanelIntoView(lib, T) {
+  const region = lib.portalRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
+function portalPanelInView(lib, T) {
+  const region = lib.portalRegion(T);
   if (region === null) {
     return false;
   }
@@ -3682,6 +3831,99 @@ async function stepCheckWalletTransactions(ctx) {
   }
 }
 
+async function stepCheckPortalAccount(ctx) {
+  if (ctx.customerId === null || ctx.fixture === null) {
+    throw fail("assertion_failed");
+  }
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+
+  // 面板落定：不在加载，且是某一种终态（已开通的详情、未开通、加载失败、无权限）。
+  const opened = await waitFor(
+    () => evaluate(probePortalAccount, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === href && s.region && !s.busy && (s.failed || s.forbidden || s.none || s.statusCount > 0)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const panel = opened.value;
+  if (panel.appError || panel.failed) {
+    throw fail("page_error");
+  }
+  if (panel.notFound || panel.path !== href) {
+    throw fail("navigation_failed");
+  }
+  if (panel.forbidden) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：面板自己发出的 GET 的响应（200 或 404）。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestPortalAccountResponse(customerId),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  // null 表示未开通；否则是「Portal status」一项应有的文案。
+  let expectedText;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    if (observed.value.status === 404) {
+      if (envelope?.success !== false || envelope?.error?.code !== PORTAL_ACCOUNT_NOT_FOUND) {
+        throw fail("assertion_failed");
+      }
+      expectedText = null;
+    } else {
+      const status = envelope?.success === true ? envelope.data?.status : null;
+      if (typeof status !== "string" || !Object.hasOwn(TEXT.portalStatusText, status)) {
+        throw fail("assertion_failed");
+      }
+      expectedText = TEXT.portalStatusText[status];
+    }
+  } catch {
+    // 读不到、不是 JSON、不是信封、404 却不是「未开通」、状态不认识：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 面板显示的就是这一份响应：未开通时显示未开通、没有状态一项；已开通时状态一项的文字一致、不显示未开通。
+  const shown = await waitFor(
+    () => evaluate(probePortalAccount, TEXT),
+    (s) =>
+      s.path === href &&
+      s.region &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      (expectedText === null
+        ? s.none && s.statusCount === 0
+        : !s.none && s.statusCount === 1 && s.statusText === expectedText),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把面板滚进视口。只滚动，不点任何按钮。
+  if ((await evaluate(scrollPortalPanelIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(portalPanelInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -3704,6 +3946,7 @@ const STEPS = {
   check_usage_analytics: stepCheckUsageAnalytics,
   check_account_status: stepCheckAccountStatus,
   check_wallet_transactions: stepCheckWalletTransactions,
+  check_portal_account: stepCheckPortalAccount,
 };
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,18 @@ vi.mock("../../api/walletTransactions", async () => {
   return { ...actual, ...transactions };
 });
 
+// 门户账号面板（AIH-TASK-095）挂在资料卡下面；面板自己的用例在 PortalAccountPanel.test.tsx。
+const portal = vi.hoisted(() => ({
+  getPortalAccount: vi.fn(),
+}));
+
+vi.mock("../../api/portalAccounts", async () => {
+  const actual = await vi.importActual<typeof import("../../api/portalAccounts")>(
+    "../../api/portalAccounts",
+  );
+  return { ...actual, ...portal };
+});
+
 const FIRST_KEY = "00000000-0000-4000-8000-000000000001";
 const SECOND_KEY = "00000000-0000-4000-8000-000000000002";
 
@@ -155,6 +167,7 @@ beforeEach(() => {
     page_size: 20,
     next_before_sequence: null,
   });
+  portal.getPortalAccount.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -430,6 +443,29 @@ describe("CustomerDetailPage", () => {
       { pageSize: 20, beforeSequence: null, referenceType: null },
       expect.anything(),
     );
+  });
+
+  it("shows the customer's portal account panel", async () => {
+    api.getCustomer.mockResolvedValue(customer());
+
+    renderDetail();
+
+    expect(
+      await screen.findByRole("region", { name: "Customer portal account" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("This customer has no portal account yet.")).toBeInTheDocument();
+    expect(portal.getPortalAccount).toHaveBeenCalledWith(CUSTOMER_ID, expect.anything());
+  });
+
+  it("does not ask for the portal account of a customer that does not exist", async () => {
+    api.getCustomer.mockRejectedValue(
+      new ApiError("CUSTOMER_NOT_FOUND", "The customer does not exist.", "req-404"),
+    );
+
+    renderDetail();
+
+    expect(await screen.findByText("Customer not found")).toBeInTheDocument();
+    expect(portal.getPortalAccount).not.toHaveBeenCalled();
   });
 
   it("does not ask for the wallet transactions of a customer that does not exist", async () => {

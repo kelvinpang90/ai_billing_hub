@@ -17,6 +17,9 @@
  * 打开 `AccountStatusModal`，成功后由弹窗让这里的详情过期重读。`PENDING_ACTIVATION` 与 `CLOSED`
  * 不给按钮；跃迁规则全在后端。
  *
+ * 资料卡下面是门户账号面板（`PortalAccountPanel`，AIH-TASK-095）：未开通时开通，已开通时显示状态并按
+ * 状态给重发邀请、停用、启用、重置 2FA。客户已关户时面板不给开通、重发、启用。
+ *
  * 没有低余额阈值、成本或毛利 —— 后端没有这些字段，这里也不预留。
  */
 
@@ -63,6 +66,7 @@ import {
 } from "./CustomerForm";
 import { AccountStatusTag, BillingStatusTag } from "./CustomerListPage";
 import { InternalUsagePanel } from "./InternalUsagePanel";
+import { PortalAccountPanel } from "./PortalAccountPanel";
 import { ProjectsPanel } from "./ProjectsPanel";
 
 type Notice = "saved" | "unchanged" | null;
@@ -204,6 +208,9 @@ export function CustomerDetailPage() {
           <ProfileDescriptions customer={current} />
         </Card>
       )}
+
+      {/* key：换了客户，开通表单与确认框都从头来。 */}
+      <PortalAccountPanel key={`portal-${current.id}`} customer={current} />
 
       <Card
         title={t("customers.wallet.title")}
