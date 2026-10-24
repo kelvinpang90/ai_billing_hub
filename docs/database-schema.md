@@ -1080,6 +1080,14 @@ MySQL 上的行为由 `tests/backend/test_tax_policy_db.py`（AIH-TASK-080）逐
   `ix_usage_events_credential`、`ix_usage_events_meter_type`。`project_id` 与 `model_id` 的索引取复合外键需要的形式
   （首列就是该列），一个索引同时服务查询与外键，不让 MySQL 再自动建一个。
 - `ix_usage_events_tenant_feature_occurred (tenant_id, feature, occurred_at)` 供按功能查询。
+- 客户用量明细按日期与按项目取页（AIH-TASK-103，设计闸门 #398 v4 §2「数据库」，迁移
+  `0026_usage_customer_indexes` 加，都非唯一）。两个都与 `ORDER BY occurred_at DESC, public_id DESC` 一致，
+  键集分页倒序取 `page_size + 1` 行即停：
+  - `ix_usage_events_tenant_occurred (tenant_id, occurred_at, public_id)`：只带日期区间（以及只带供应商 / 模型）时用；
+  - `ix_usage_events_project_occurred (project_id, occurred_at, public_id)`：带项目时用（项目先在本租户内查出
+    内部 id）。
+  - 迁移在 MySQL 上用**一条**原子 `ALTER TABLE` 加缺的那几个，之前先检查同名索引：形状正确的跳过、形状不对
+    （列、唯一性或前缀长度不同）的报错且不发 DDL，所以 upgrade 可以安全重跑；downgrade 只删存在的。
 - **取名**：spec §79 写的是 `cache_creation_tokens` / `cache_read_tokens`；§74 允许按仓库约定命名，这里取与上报载荷、
   与 AIH-TASK-025 的 `quantity_field` 一致的 `cache_creation_input_tokens` / `cache_read_input_tokens`，免得三处各叫
   一个名。
