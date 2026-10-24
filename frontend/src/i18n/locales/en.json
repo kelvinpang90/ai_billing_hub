@@ -1100,6 +1100,8 @@
   "portal.home.accountStatus.closed": "Closed",
   "portal.home.readOnly.title": "Your account is read-only",
   "portal.home.readOnly.body": "You can still view your bills and receipts. New actions are paused while the account is in this status. Contact Acuven if you have questions.",
+  "portal.home.recentTransactions.title": "Recent transactions",
+  "portal.home.recentTransactions.viewAll": "View all transactions",
   "portal.twoFactor.title": "Two-factor authentication",
   "portal.twoFactor.intro": "Two-factor authentication is off. Turn it on so that signing in also needs a code from your authenticator app. Confirm your password to begin.",
   "portal.twoFactor.password": "Current password",
