@@ -33,6 +33,48 @@ export function formatAmount(amount: string): string {
   return `${isZero ? "" : sign}${grouped}.${trimmed}`;
 }
 
+const ROUNDED_PLACES = [2, 3, 4, 5, 6, 7, 8];
+const DIGITS = "0123456789";
+
+/** 十进制数字串加一：`"0999"` → `"1000"`，`"999"` → `"1000"`。 */
+function incrementDigits(digits: string): string {
+  const carryFrom = digits.search(/9*$/);
+  const tail = "0".repeat(digits.length - carryFrom);
+  if (carryFrom === 0) {
+    return `1${tail}`;
+  }
+  const head = digits.slice(0, carryFrom - 1);
+  const bumped = DIGITS.charAt(DIGITS.indexOf(digits.charAt(carryFrom - 1)) + 1);
+  return `${head}${bumped}${tail}`;
+}
+
+/**
+ * 客户门户的显示金额（docs/design/AIH-TASK-099-customer-wallet.md §2「金额（前端显示）」）：
+ * 对字符串做 `ROUND_HALF_UP` 到 `places` 位，再按 `formatAmount` 的规则展示。
+ * `"0.995"` 按 2 位 → `"1.00"`，`"-0.00000049"` 按 6 位 → `"0.00"`。
+ *
+ * 只改显示，不改持久值；`places` 只接受 2 到 8 的整数，其余抛 `RangeError`。
+ * 不是十进制字符串的输入原样返回，与 `formatAmount` 相同。
+ */
+export function formatAmountRounded(amount: string, places: number): string {
+  if (!ROUNDED_PLACES.includes(places)) {
+    throw new RangeError(`places must be an integer from 2 to 8, got ${places}`);
+  }
+  const match = DECIMAL.exec(amount);
+  if (match === null) {
+    return amount;
+  }
+  const [, sign = "", integer = "", fraction = ""] = match;
+
+  const padded = fraction.padEnd(places + 1, "0");
+  const kept = `${integer}${padded.slice(0, places)}`;
+  // 只看紧跟着的那一位：HALF_UP 下它 ≥ 5 就进位，更后面的位不影响结果。
+  const rounded = padded.charAt(places) >= "5" ? incrementDigits(kept) : kept;
+  const split = rounded.length - places;
+
+  return formatAmount(`${sign}${rounded.slice(0, split)}.${rounded.slice(split)}`);
+}
+
 /** 币种在前：`MYR 1,234,567.12345678`。 */
 export function formatMoney(amount: string, currency: string): string {
   return `${currency} ${formatAmount(amount)}`;

@@ -7,7 +7,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { MoneyText, formatAmount, formatMoney } from "./MoneyText";
+import { MoneyText, formatAmount, formatAmountRounded, formatMoney } from "./MoneyText";
 
 describe("formatAmount", () => {
   it("shows a zero balance with two decimals", () => {
@@ -41,6 +41,47 @@ describe("formatAmount", () => {
   it("leaves anything that is not a decimal string untouched", () => {
     expect(formatAmount("1e3")).toBe("1e3");
     expect(formatAmount("")).toBe("");
+  });
+});
+
+/**
+ * 客户门户的显示舍入（docs/design/AIH-TASK-099-customer-wallet.md §2「金额（前端显示）」）：
+ * 对字符串做 ROUND_HALF_UP，不经浮点。
+ */
+describe("formatAmountRounded", () => {
+  it("rounds half up to the requested places", () => {
+    expect(formatAmountRounded("12.45880000", 2)).toBe("12.46");
+    expect(formatAmountRounded("-0.04123457", 6)).toBe("-0.041235");
+    expect(formatAmountRounded("0.04123450", 6)).toBe("0.041235");
+    expect(formatAmountRounded("0.00000050", 6)).toBe("0.000001");
+    expect(formatAmountRounded("-0.005", 2)).toBe("-0.01");
+  });
+
+  it("does not print a negative zero after rounding", () => {
+    expect(formatAmountRounded("-0.00000049", 6)).toBe("0.00");
+  });
+
+  it("carries all the way into the integer part", () => {
+    expect(formatAmountRounded("0.995", 2)).toBe("1.00");
+    expect(formatAmountRounded("0.99999950", 6)).toBe("1.00");
+    // ⚠️ 走一遍浮点的话，这个值早就不是它自己了。
+    expect(formatAmountRounded("999999999999.99999999", 2)).toBe("1,000,000,000,000.00");
+  });
+
+  it("drops trailing zeros but keeps two decimals", () => {
+    expect(formatAmountRounded("12.50000000", 6)).toBe("12.50");
+    expect(formatAmountRounded("7", 2)).toBe("7.00");
+  });
+
+  it("leaves anything that is not a decimal string untouched", () => {
+    expect(formatAmountRounded("1e3", 2)).toBe("1e3");
+    expect(formatAmountRounded("", 2)).toBe("");
+  });
+
+  it("rejects places outside the integers 2 to 8", () => {
+    expect(() => formatAmountRounded("1.00", 1)).toThrow(RangeError);
+    expect(() => formatAmountRounded("1.00", 9)).toThrow(RangeError);
+    expect(() => formatAmountRounded("1.00", 2.5)).toThrow(RangeError);
   });
 });
 
