@@ -6211,7 +6211,7 @@ tasks:
     title: 客户用量第二层：客户项目列表与已计费用量明细两个只读接口
     purpose: >-
       按 docs/design/AIH-TASK-103-customer-usage.md（设计闸门 #398 已批准 v4）§2 与 §8 第 2 步：新增 GET /api/v1/customer/projects（每项恰好 id、name）与 GET /api/v1/customer/usage-events（只列 PROCESSED，按 occurred_at 倒序、不透明游标，马来西亚日历日区间与项目、供应商、模型、conversation_id、event_id 筛选，每项恰好 18 个键，MySQL 上每条查询最多执行 2 秒、超时 422 QUERY_TOO_BROAD）；docs/api.md 记两个接口。只读，不写任何表；索引由 AIH-TASK-103 加，前端属于 AIH-TASK-105 与 106。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-099
       - AIH-TASK-103
