@@ -238,8 +238,11 @@ describe("PortalHomePage in the portal shell", () => {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
     const hrefs = screen.getAllByRole("link").map((link) => link.getAttribute("href"));
-    // 唯一的链接是门户自己的首页。
-    expect(hrefs).toEqual([ROUTES.portalHome]);
+    // 每个链接都在门户自己的路径之下（首页、钱包，以及之后任务加的门户页）。
+    expect(hrefs.length).toBeGreaterThan(0);
+    for (const href of hrefs) {
+      expect(href?.startsWith(ROUTES.portalHome)).toBe(true);
+    }
     for (const path of ADMIN_PATHS) {
       expect(hrefs).not.toContain(path);
     }
