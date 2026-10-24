@@ -386,6 +386,10 @@ class UsageEvent(Base):
         Index("ix_usage_events_request_id", "request_id"),
         Index("ix_usage_events_occurred_at", "occurred_at"),
         Index("ix_usage_events_tenant_feature_occurred", "tenant_id", "feature", "occurred_at"),
+        # 客户用量明细按日期与按项目取页（设计闸门 #398 v4 §2「数据库」；迁移 0026）：
+        # 与 `ORDER BY occurred_at DESC, public_id DESC` 一致，取到一页即停。
+        Index("ix_usage_events_tenant_occurred", "tenant_id", "occurred_at", "public_id"),
+        Index("ix_usage_events_project_occurred", "project_id", "occurred_at", "public_id"),
         # 另外两个复合外键在子表上的索引，显式建出来（不让 MySQL 自动起名）。
         Index(
             "ix_usage_events_credential",
