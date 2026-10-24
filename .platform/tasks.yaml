@@ -6109,7 +6109,7 @@ tasks:
     title: 客户门户金额显示：按 spec 精度四舍五入的金额格式化函数
     purpose: >-
       按 docs/design/AIH-TASK-099-customer-wallet.md（设计闸门 #393 已批准 v3）§2「金额（前端显示）」与 §8 第 2 步下的独立前端任务：在 frontend/src/components/MoneyText.tsx 新增一个导出 formatAmountRounded(amount, places)，对十进制字符串做 ROUND_HALF_UP 到指定位数，供客户门户的钱包页、首页（AIH-TASK-100、101）与用量页（AIH-TASK-105，设计闸门 #398）共用。只做这个函数与它的测试，不改任何页面。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '语义以 docs/design/AIH-TASK-099-customer-wallet.md（设计闸门 #393 已批准 v3）§2「金额（前端显示）」为准，docs/design/AIH-TASK-103-customer-usage.md（设计闸门 #398 已批准 v4）§2「金额」是同一规则；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块'
