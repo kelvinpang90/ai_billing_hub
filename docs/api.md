@@ -131,7 +131,7 @@
 
 `total` 是总条数。页码超过末页时 `items` 为空，`total` 照报。
 
-例外：[管理端钱包流水](#管理端钱包流水)与[客户钱包](#客户钱包)的流水接口用序号游标（`before_sequence`），没有 `page` 与 `total`，理由见那两节。
+例外：[管理端钱包流水](#管理端钱包流水)与[客户钱包](#客户钱包)的流水接口用序号游标（`before_sequence`），没有 `page` 与 `total`，理由见那两节；[客户用量](#客户用量)的用量接口用不透明游标（`cursor`），同样没有 `page` 与 `total`。
 
 ---
 
@@ -389,6 +389,131 @@
 | 503 | `DATABASE_UNAVAILABLE` 等 | 数据库不可用，沿用通用处理 |
 
 没有 404（客户来自会话，不存在「找不到客户」），也没有 403 `ACCOUNT_READ_ONLY`（两个接口都是读）。
+
+---
+
+## 客户用量
+
+设计依据：设计闸门 #398 `APPROVED: design v4`，全文见 [design/AIH-TASK-103-customer-usage.md](design/AIH-TASK-103-customer-usage.md)（§2、§6；spec §68、§69、§90、§108、§109）。实现登记为 AIH-TASK-104。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/customer/projects` | CUSTOMER 的访问令牌 | 200，自己的全部项目（每项 2 个键） | 401 / 403 / 500 / 503 |
+| `GET /api/v1/customer/usage-events` | CUSTOMER 的访问令牌 | 200，一页已计费的用量事件（每项 18 个键） | 401 / 403 / 422 / 500 / 503 |
+
+- **客户请求不接受任何租户标识**（spec §90，见上文[客户请求的约定](#客户请求的约定)）：租户只取自访问令牌对应的、库里的 user 行。两个接口都不定义租户、客户标识参数；带了 `customer_id`、`tenant_id` 也只会被当作未知参数忽略。
+- **两个接口在只读状态下照常可读**：四种 `account_status` 都返回 200。它们用 `require_customer`，没有 403 `ACCOUNT_READ_ONLY`。
+- 只读：不写任何表、不加锁、不写审计。ADMIN 不能调；管理员看用量用[管理端用量事件：查询](#管理端用量事件查询)。
+
+### `GET /api/v1/customer/projects` —— 客户自己的项目
+
+没有查询参数（未知参数忽略）。返回该客户的**全部**项目，按创建先后，不分页（项目只由管理员创建，数量很少）。
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      { "id": "00000000-0000-4000-8000-000000000001", "name": "Customer service bot" }
+    ]
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+- 每项恰好 `id`（项目 `public_id`，可作用量接口的 `project_id` 筛选）与 `name` 两个键。**不返回** `description`、`integration_status`、`status_webhook_url`（可能带集成方令牌）、凭据与任何内部 id。
+
+### `GET /api/v1/customer/usage-events` —— 客户自己的已计费用量
+
+只列**已计费**（`PROCESSED`）的事件：还在排队、计费中或停在错误状态的事件没有计费额，由管理端处理，这里看不到。每一行都有确定的计费额，与钱包流水对得上。
+
+| 参数 | 规则 |
+| --- | --- |
+| `from_date` / `to_date` | `YYYY-MM-DD`，**马来西亚日历日**，含两端；每个都必须在 `2020-01-01` 到 `2099-12-31` 之间。没有 `event_id` 时**两个都必填**；`to_date` 不得早于 `from_date`；区间最多 92 天（`to_date − from_date ≤ 91`）。换算见下文「营业时区」 |
+| `project_id` | 可选，项目 `public_id`（来自上面的项目列表）。不是自己的项目（不存在或属于别的客户）时得到空页，不报错 |
+| `provider` / `model` | 可选，与上报的原始字符串逐字节比较；格式同[用量事件摄取](#集成用量事件摄取)的 `provider`、`model` |
+| `conversation_id` | 可选，逐字节比较；格式 `^[A-Za-z0-9._:-]{1,128}$` |
+| `event_id` | 可选，逐字节比较；格式同用量摄取的 `event_id`（UUIDv7 或 ULID 规范写法）。给出时日期可省略（给了仍照常生效、照常校验）：用于从钱包流水的 `event_id` 跳过来查那一条 |
+| `page_size` | 1–100，默认 20 |
+| `cursor` | 可选，上一页响应的 `next_cursor` **原样**传回；省略 = 从最新开始 |
+
+- 各筛选之间是 AND。未知参数忽略。
+- 校验分两步，所有 422 都是 `VALIDATION_ERROR`，文案只列字段名（如 `Invalid request fields: query.from_date, query.to_date`），不回显收到的值：
+  - 类型、范围与格式（`page_size`、日期的 `YYYY-MM-DD` 形状、`provider`、`model`、`conversation_id`、`event_id`）由框架在鉴权**之前**判；
+  - 日期是否真实存在、是否在 2020-01-01 到 2099-12-31 之间、必填、先后、92 天与游标在鉴权**之后**判。日期范围在任何日期运算之前判，所以 `0001-01-01`、`9999-12-31` 这类极值得到 422。
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "event_id": "00000000-0000-7000-8000-000000000003",
+        "request_id": "req_0001",
+        "conversation_id": "conv_0001",
+        "feature": "crm.contact_summary",
+        "project_id": "00000000-0000-4000-8000-000000000001",
+        "project_name": "Customer service bot",
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5",
+        "usage_type": "LLM_TOKEN",
+        "input_tokens": 1200,
+        "output_tokens": 340,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "quantity": null,
+        "unit": "TOKEN",
+        "charged_amount": "0.04120000",
+        "occurred_at": "2026-10-18T08:30:00.123456"
+      }
+    ],
+    "page_size": 20,
+    "next_cursor": "MjAyNi0xMC0xOFQwODozMDowMC4xMjM0NTZ8MDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAy"
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+（示例只列了一页里的第一行。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `items` | 最新在前，按 `occurred_at` 倒序；同一时刻的按 `id` 倒序 |
+| `id` | 用量事件的 `public_id` |
+| `event_id` / `request_id` / `conversation_id` / `feature` | 集成方上报的原值。AI 模块代为上报的事件 `conversation_id` 为 `null`、`feature` 为功能标签 |
+| `project_id` / `project_name` | 该事件所属项目的 `public_id` 与名称 |
+| `provider` / `model` | 上报的原始字符串（筛选用的也是它） |
+| `usage_type` | 计量类型的 `code` |
+| `input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` / `quantity` / `unit` | 上报的用量原值。token 形态的四个 token 字段非空、`quantity` 为 `null`；数量形态相反。`quantity` 是恰好 8 位小数的字符串 |
+| `charged_amount` | 本次请求向客户收的金额（`billable_cost`），恰好 8 位小数的字符串，**含税**，不经浮点、不舍入。预付费客户的它等于钱包流水里同一 `event_id` 那一行 `amount` 的绝对值；为 0 的事件不记账，钱包流水里没有它；内部计量客户恒为 `"0.00000000"` |
+| `occurred_at` | 调用发生时刻，不带时区的 UTC，**保留微秒**（[时间](#时间)约定的例外，与管理端用量事件一致） |
+| `page_size` | 本次请求的 `page_size` |
+| `next_cursor` | 还有更旧的行时是一个不透明字符串，否则 `null` |
+
+- 每项恰好上面 18 个键。与[管理端用量事件](#管理端用量事件查询)相比**刻意不返回**：`status`（恒为 `PROCESSED`）、`error_code`、`error_message`、`received_at`、`processed_at`、`schema_version`、`payload_fingerprint`、`provider_id` / `model_id`、`estimated_provider_cost_myr`、`provider_source_currency`、`provider_source_cost`、`fx_rate_applied`、`reference_customer_price`、`billing_mode_snapshot`、价格版本 / 定价规则 / 汇率版本引用、账本行、凭据、认领字段、冲突记录（含 `api_key`）、毛利与任何内部 id（INV-7）。
+- 拿别的客户的项目 id、`event_id`、`conversation_id` 或游标来调，只会得到自己的行或空页（INV-8）。
+
+**营业时区**：客户侧的日期一律按马来西亚时间（`Asia/Kuala_Lumpur`，固定 UTC+8，没有夏令时）理解。`from_date`..`to_date` 换成 UTC 的 `[from_date 00:00 − 8 小时, (to_date + 1 天) 00:00 − 8 小时)`，按 `occurred_at` 取。例：`from_date = to_date = 2026-10-01` → `[2026-09-30 16:00:00, 2026-10-01 16:00:00)` UTC。响应里的时间仍是 UTC，前端显示时 +8 小时。晚到或晚计费的事件出现在它**发生**的那一天，所以同一个查询隔一段时间再看可能多出旧日期的行。
+
+**翻页**：第一页不带 `cursor`；下一页把 `next_cursor` 原样传回；为 `null` 就是最后一页；「回到最新」= 不带 `cursor` 重取。⚠️ **游标是不透明的**：客户端不得解析、拼接或修改它，后端以后可以改它的编码；被改过或解不开的游标得到 422 `VALIDATION_ERROR`（`query.cursor`）。翻页之间新计费的事件不会让已返回的行重复出现：比游标新的只出现在最新那一端，比游标旧的（晚计费）出现在后面的页里。
+
+**`QUERY_TOO_BROAD`**：每次查询在数据库里最多执行 2 秒。按很少出现（甚至不存在）的供应商、模型筛一个很长的区间时，数据库要扫过区间内的全部事件才知道凑不满一页，超过预算就中止并返回 422 `QUERY_TOO_BROAD`，没有部分结果。这不是故障：缩小日期区间，或换（加）一个更具体的条件（项目、`conversation_id`、`event_id`）后重试。服务端为每次超时记一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id，不带查询参数的值）。
+
+### 错误（两个接口相同，项目列表没有 422）
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期（前端照常走刷新）；门户账号已停用或不是 `ACTIVE`（停用后的旧令牌下一个请求即失效） |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 422 | `VALIDATION_ERROR` | 仅用量接口：查询参数违反上面的规则 |
+| 422 | `QUERY_TOO_BROAD` | 仅用量接口：查询超过 2 秒执行预算；缩小日期区间或换筛选条件后重试 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 503 | `DATABASE_UNAVAILABLE` 等 | 数据库不可用，沿用通用处理 |
+
+没有 404（客户来自会话；项目与事件筛不到就是空页），也没有 403 `ACCOUNT_READ_ONLY`（两个接口都是读）。
 
 ---
 

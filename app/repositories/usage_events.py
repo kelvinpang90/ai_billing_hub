@@ -13,6 +13,10 @@ alone is insufficient」）。
 筛选条件里的客户与项目先换成内部 id（两次按唯一列的点查），之后的条件都是字面常量，
 每个筛选都落在 AIH-TASK-029 / 032 建的索引上（见 `list_events` 的说明）。
 
+客户用量查询（AIH-TASK-104，设计闸门 #398 v4 §2「查询」）：`list_processed_events_for_customer`
+只读、不加锁，只 SELECT 设计列出的列（不复用管理端的 `EventListRow`：它读出成本列，INV-7）；
+MySQL 上每条语句带 `MAX_EXECUTION_TIME` 提示，超时（错误 3024）转成 `QueryTooBroad`。
+
 ⚠️ 这一层不写日志。
 """
 
@@ -21,9 +25,10 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from decimal import Decimal
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
-from sqlalchemy import ColumnElement, Select, func, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.models.ai_catalog import (
@@ -45,6 +50,7 @@ from app.models.usage import (
     UsageEventStatus,
 )
 from app.models.wallet import WalletTransaction
+from app.repositories.tenancy import get_project_for_tenant
 
 
 def find_meter_type(session: Session, code: str) -> UsageMeterType | None:
@@ -374,16 +380,185 @@ def get_event_detail(session: Session, public_id: str) -> EventDetailRow | None:
     )
 
 
+# --- 客户用量查询（AIH-TASK-104，只读） -------------------------------------------------
+
+# 每条客户用量查询在 MySQL 上最多执行这么久（设计 §2「查询」）。不做成配置项。
+CUSTOMER_USAGE_QUERY_TIMEOUT_MS: Final = 2000
+# MySQL 的 ER_QUERY_TIMEOUT：语句超过 MAX_EXECUTION_TIME 被中止，已读的行不会部分返回。
+_ER_QUERY_TIMEOUT: Final = 3024
+
+
+class QueryTooBroad(Exception):
+    """MySQL stopped the customer usage query at its execution-time budget (error 3024)."""
+
+
+class CustomerUsageRow(NamedTuple):
+    """Exactly the columns design §2「查询」 selects; no cost, rate or internal id."""
+
+    public_id: str
+    event_id: str
+    request_id: str
+    conversation_id: str | None
+    feature: str | None
+    project_public_id: str
+    project_name: str
+    provider: str
+    model: str
+    usage_type: str
+    input_tokens: int | None
+    output_tokens: int | None
+    cache_creation_input_tokens: int | None
+    cache_read_input_tokens: int | None
+    quantity: Decimal | None
+    unit: str
+    billable_cost: Decimal
+    occurred_at: dt.datetime
+
+
+def customer_usage_statement(
+    tenant_id: int,
+    *,
+    limit: int,
+    project_row_id: int | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    conversation_id: str | None = None,
+    event_id: str | None = None,
+    occurred_from: dt.datetime | None = None,
+    occurred_to: dt.datetime | None = None,
+    before: tuple[dt.datetime, str] | None = None,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> Select[tuple[object, ...]]:
+    """The one SELECT of a customer usage page; the hint is rendered on MySQL only.
+
+    `project_row_id` 是已在本租户内查出的项目内部 id；`before` 是游标 `(occurred_at, public_id)`，
+    只取严格更旧的行。租户与 `PROCESSED` 两个条件恒在，其余筛选都是附加条件（INV-8）。
+    """
+    conditions: list[ColumnElement[bool]] = [
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.status == UsageEventStatus.PROCESSED,
+    ]
+    if occurred_from is not None:
+        conditions.append(UsageEvent.occurred_at >= occurred_from)
+    if occurred_to is not None:
+        conditions.append(UsageEvent.occurred_at < occurred_to)
+    if project_row_id is not None:
+        conditions.append(UsageEvent.project_id == project_row_id)
+    if provider is not None:
+        conditions.append(UsageEvent.provider_code_raw == provider)
+    if model is not None:
+        conditions.append(UsageEvent.model_code_raw == model)
+    if conversation_id is not None:
+        conditions.append(UsageEvent.conversation_id == conversation_id)
+    if event_id is not None:
+        conditions.append(UsageEvent.event_id == event_id)
+    if before is not None:
+        before_at, before_public_id = before
+        conditions.append(
+            or_(
+                UsageEvent.occurred_at < before_at,
+                and_(
+                    UsageEvent.occurred_at == before_at,
+                    UsageEvent.public_id < before_public_id,
+                ),
+            )
+        )
+    return (
+        select(
+            UsageEvent.public_id,
+            UsageEvent.event_id,
+            UsageEvent.request_id,
+            UsageEvent.conversation_id,
+            UsageEvent.feature,
+            Project.public_id,
+            Project.name,
+            UsageEvent.provider_code_raw,
+            UsageEvent.model_code_raw,
+            UsageMeterType.code,
+            UsageEvent.input_tokens,
+            UsageEvent.output_tokens,
+            UsageEvent.cache_creation_input_tokens,
+            UsageEvent.cache_read_input_tokens,
+            UsageEvent.quantity,
+            UsageEvent.unit,
+            UsageEvent.billable_cost,
+            UsageEvent.occurred_at,
+        )
+        .join(Project, Project.id == UsageEvent.project_id)
+        .join(UsageMeterType, UsageMeterType.id == UsageEvent.usage_meter_type_id)
+        .where(*conditions)
+        .order_by(UsageEvent.occurred_at.desc(), UsageEvent.public_id.desc())
+        .limit(limit)
+        # 优化器提示紧跟 SELECT 关键字；SQLite（只在测试里用）不渲染。
+        .prefix_with(f"/*+ MAX_EXECUTION_TIME({int(timeout_ms)}) */", dialect="mysql")
+    )
+
+
+def list_processed_events_for_customer(
+    session: Session,
+    tenant_id: int,
+    *,
+    limit: int,
+    project_id: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    conversation_id: str | None = None,
+    event_id: str | None = None,
+    occurred_from: dt.datetime | None = None,
+    occurred_to: dt.datetime | None = None,
+    before: tuple[dt.datetime, str] | None = None,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> list[CustomerUsageRow]:
+    """Up to `limit` billed events of the tenant, newest first by `(occurred_at, public_id)`.
+
+    `project_id` 是项目 `public_id`：先在本租户内查出内部 id，查不到（不存在或属于别的客户）
+    直接返回空列表，不发用量查询。`timeout_ms` 只给测试用。MySQL 超时抛 `QueryTooBroad`；
+    其他数据库错误原样抛出。
+    """
+    project_row_id: int | None = None
+    if project_id is not None:
+        project = get_project_for_tenant(session, tenant_id, project_id)
+        if project is None:
+            return []
+        project_row_id = project.id
+    statement = customer_usage_statement(
+        tenant_id,
+        limit=limit,
+        project_row_id=project_row_id,
+        provider=provider,
+        model=model,
+        conversation_id=conversation_id,
+        event_id=event_id,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+        before=before,
+        timeout_ms=timeout_ms,
+    )
+    try:
+        found = session.execute(statement).all()
+    except DBAPIError as error:
+        arguments = getattr(error.orig, "args", ()) if error.orig is not None else ()
+        if arguments and arguments[0] == _ER_QUERY_TIMEOUT:
+            raise QueryTooBroad from error
+        raise
+    return [CustomerUsageRow(*row) for row in found]
+
+
 __all__ = [
+    "CUSTOMER_USAGE_QUERY_TIMEOUT_MS",
+    "CustomerUsageRow",
     "EventDetailRow",
     "EventListRow",
+    "QueryTooBroad",
     "conflict_recorded",
     "count_conflicts_since",
+    "customer_usage_statement",
     "find_event",
     "find_meter_type",
     "get_event_detail",
     "insert_conflict",
     "insert_event",
     "list_events",
+    "list_processed_events_for_customer",
     "scope_public_ids",
 ]
