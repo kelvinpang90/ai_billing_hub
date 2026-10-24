@@ -9,7 +9,8 @@
  * AIH-TASK-082 加了客户账户状态的一个只读步骤（check_account_status）；AIH-TASK-085 加了钱包流水的一个只读步骤
  * （check_wallet_transactions）；AIH-TASK-092 加了客户门户接受邀请页的一个只读步骤（check_accept_invitation_page），
  * 它排在 login **之前**跑；AIH-TASK-095 加了客户门户账号面板的一个只读步骤（check_portal_account）；AIH-TASK-097 加了
- * 客户门户的两个步骤（login_customer 用夹具客户的门户账号登录，check_portal_home 只读核对门户首页）。
+ * 客户门户的两个步骤（login_customer 用夹具客户的门户账号登录，check_portal_home 只读核对门户首页）；AIH-TASK-100
+ * 加了门户钱包页的一个只读步骤（check_portal_wallet）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -66,6 +67,8 @@
  *   customer_password）同样只经 Input.insertText 填进登录表单，不进页面脚本源码、不打印。
  * - 门户首页（check_portal_home）只看不点：不点「Set up two-factor authentication」「Turn on two-factor
  *   authentication」或任何按钮与链接，不填「Current password」也不提交任何表单（开启 2FA 会写数据）。
+ * - 门户钱包页（check_portal_wallet）只点门户导航里的「Wallet」（href 为 /portal/wallet）这一个链接：不点「Older」
+ *   「Newest」（不翻页）、不点任何别的按钮与链接、不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
@@ -262,6 +265,22 @@
  *                   文字是管理端顶栏任一项（nav.dashboard、nav.customers 等）的链接，也没有指向管理端路径（paths.ts 的
  *                   dashboard、customers、audit 等）的链接。不点开启 2FA、不填也不提交任何表单。报到前把「Company name」这一行
  *                   滚动到视口中间
+ *   check_portal_wallet
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Wallet」链接（en.json 的
+ *                   portal.nav.wallet，href 为 paths.ts 的 portalWallet，即 /portal/wallet）进钱包页；页面落定：地址是
+ *                   /portal/wallet，门户外壳在、管理端顶栏不在，余额卡（role=region、aria-label 为「Your wallet」，
+ *                   portal.wallet.summary.title）不再显示 portal.wallet.summary.loading、流水一块（role=region、aria-label 为
+ *                   「Transactions」，portal.wallet.transactions.title）不再显示 portal.wallet.transactions.loading，且两块都不是
+ *                   加载失败（portal.wallet.summary.loadFailed / portal.wallet.transactions.loadFailed，page_error）。后端值取
+ *                   页面在点击之后自己发出的 GET /api/v1/customer/wallet 与不带 before_sequence 的
+ *                   GET /api/v1/customer/wallet/transactions 的响应体（被动观察，不自己发请求、不拦截；各取最近一次读完的那一次，
+ *                   不是 200 就是 assertion_failed）。余额卡「Balance」一项（portal.wallet.field.balance，带边框的 Descriptions：
+ *                   label 在 <th>，值在紧跟的 <td>）恰好一项，文字以响应 currency 加一个空格开头，去掉这个前缀、空白与千分位逗号后
+ *                   等于响应 balance 按 2 位 ROUND_HALF_UP 舍入后的值（本文件的 roundHalfUp2：字符串运算、不经浮点，舍入结果为
+ *                   -0.00 时按 0.00 比较）。流水表格（表头有「Balance after」「Event ID」）里带 data-row-key 的数据行数与响应
+ *                   data.items 的条数一致；items 非空时第一行「Event ID」列的文字等于 items 第一项的 event_id（为 null 时该列为空）；
+ *                   items 为空时显示空状态（portal.wallet.transactions.empty）、没有数据行，同样算通过。不翻页、不提交任何表单。
+ *                   报到前把余额卡滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -423,6 +442,17 @@ const TEXT = {
     CLOSED: "Closed",
   },
   portalHomeReadOnly: "Your account is read-only", // portal.home.readOnly.title —— 只读提示的标题
+  portalNavWallet: "Wallet", // portal.nav.wallet —— 门户导航的钱包项
+  portalWalletTitle: "Your wallet", // portal.wallet.summary.title —— 余额卡的 aria-label
+  portalWalletLoading: "Loading your wallet…", // portal.wallet.summary.loading
+  portalWalletLoadFailed: "Your wallet could not be loaded.", // portal.wallet.summary.loadFailed
+  portalWalletBalance: "Balance", // portal.wallet.field.balance —— 余额卡 Descriptions 的一项
+  portalTxTitle: "Transactions", // portal.wallet.transactions.title —— 流水一块的 aria-label
+  portalTxLoading: "Loading your transactions…", // portal.wallet.transactions.loading
+  portalTxLoadFailed: "Your transactions could not be loaded.", // portal.wallet.transactions.loadFailed
+  portalTxEmpty: "You have no transactions yet.", // portal.wallet.transactions.empty
+  portalTxBalanceAfter: "Balance after", // portal.wallet.transactions.field.balanceAfter —— 流水表格的列头
+  portalTxEventId: "Event ID", // portal.wallet.transactions.field.eventId
   // 管理端顶栏的全部项（frontend/src/layouts/AppLayout.tsx；nav.dashboard、nav.customers、nav.audit、nav.catalog、
   // nav.providerPrices、nav.fxRates、nav.pricingRules、nav.pricingPreview、nav.usageEvents、nav.usageAnalytics）。
   // 门户首页上一项都不许出现。
@@ -462,6 +492,7 @@ const TEXT = {
   usageEventsPath: "/usage-events",
   usageAnalyticsPath: "/usage-analytics",
   portalHomePath: "/portal",
+  portalWalletPath: "/portal/wallet",
   // 管理端顶栏各项指向的路径（paths.ts 的 dashboard、customers、audit、catalogProviders、catalogMeterTypes、
   // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics）。门户首页上不许有指向它们的链接。
   adminPaths: [
@@ -548,6 +579,10 @@ const PORTAL_ACCOUNT_NOT_FOUND = "PORTAL_ACCOUNT_NOT_FOUND";
 
 /** 客户自己的摘要接口的路径（frontend/src/api/customer.ts 的 getCustomerMe）。 */
 const CUSTOMER_ME_API = /^\/api\/v1\/customer\/me$/;
+
+/** 客户自己的钱包与流水接口的路径（frontend/src/api/customerWallet.ts 的两个 URL 常量）。 */
+const CUSTOMER_WALLET_API = /^\/api\/v1\/customer\/wallet$/;
+const CUSTOMER_WALLET_TRANSACTIONS_API = /^\/api\/v1\/customer\/wallet\/transactions$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -652,6 +687,41 @@ function formatAmount(amount) {
 
 function formatMoney(amount, currency) {
   return `${currency} ${formatAmount(amount)}`;
+}
+
+/**
+ * check_portal_wallet 的期望值：十进制字符串按 2 位 ROUND_HALF_UP 舍入，纯字符串运算（不经浮点），不加千分位；
+ * 舍入结果为 -0.00 时回 0.00。规则同 frontend/src/components/MoneyText.tsx 的 formatAmountRounded，但这里是
+ * 独立算一遍、不照抄它的代码。不是十进制字符串时回 null。
+ */
+const BALANCE_PLACES = 2;
+
+function roundHalfUp2(amount) {
+  const match = typeof amount === "string" ? DECIMAL.exec(amount) : null;
+  if (match === null) {
+    return null;
+  }
+  const [, sign = "", integer = "", fraction = ""] = match;
+  const padded = fraction.padEnd(BALANCE_PLACES + 1, "0");
+  let digits = `${integer}${padded.slice(0, BALANCE_PLACES)}`.split("").map(Number);
+  if (padded.charCodeAt(BALANCE_PLACES) >= "5".charCodeAt(0)) {
+    // 从最低位往上进位；最高位也进位时在前面补一个 1。
+    let index = digits.length - 1;
+    while (index >= 0 && digits[index] === 9) {
+      digits[index] = 0;
+      index -= 1;
+    }
+    if (index < 0) {
+      digits = [1, ...digits];
+    } else {
+      digits[index] += 1;
+    }
+  }
+  const text = digits.join("");
+  const whole = text.slice(0, text.length - BALANCE_PLACES).replace(/^0+(?=\d)/, "");
+  const rounded = `${whole}.${text.slice(text.length - BALANCE_PLACES)}`;
+  const isZero = /^0+$/.test(text);
+  return `${isZero ? "" : sign}${rounded}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -963,6 +1033,10 @@ const network = {
   portalAccounts: new Map(),
   /** 客户自己的摘要接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
   customerMe: new Map(),
+  /** 客户自己的钱包接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
+  customerWallet: new Map(),
+  /** 客户自己的流水接口（只记 GET）：requestId → { newest, status, finished, failed, seq }。查询串本身不保存。 */
+  customerTransactions: new Map(),
   seq: 0,
 };
 
@@ -978,8 +1052,35 @@ function trackedRequest(requestId) {
     network.usageAnalytics.get(requestId) ??
     network.walletTransactions.get(requestId) ??
     network.portalAccounts.get(requestId) ??
-    network.customerMe.get(requestId)
+    network.customerMe.get(requestId) ??
+    network.customerWallet.get(requestId) ??
+    network.customerTransactions.get(requestId)
   );
+}
+
+/**
+ * 是不是客户自己的钱包或流水接口（同源 https）：钱包回 { kind: "wallet" }，流水回 { kind: "transactions", newest }
+ * （newest：不带 before_sequence 的最新一页），都不是回 null。只留这些，不保存 URL。
+ */
+function customerWalletTarget(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host) {
+      return null;
+    }
+    if (CUSTOMER_WALLET_API.test(parsed.pathname)) {
+      return { kind: "wallet" };
+    }
+    if (CUSTOMER_WALLET_TRANSACTIONS_API.test(parsed.pathname)) {
+      return { kind: "transactions", newest: !parsed.searchParams.has("before_sequence") };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** 是不是客户自己的摘要接口（同源 https、路径恰好是 /api/v1/customer/me，查询串不看、不保存）。 */
@@ -1271,6 +1372,25 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const customerWallet = customerWalletTarget(params.request?.url);
+        if (customerWallet !== null && params.request?.method === "GET") {
+          if (customerWallet.kind === "wallet") {
+            network.customerWallet.set(params.requestId, {
+              status: null,
+              finished: false,
+              failed: false,
+              seq: ++network.seq,
+            });
+          } else {
+            network.customerTransactions.set(params.requestId, {
+              newest: customerWallet.newest,
+              status: null,
+              finished: false,
+              failed: false,
+              seq: ++network.seq,
+            });
+          }
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1487,6 +1607,27 @@ function latestCustomerMeResponse(afterSeq) {
   let best = null;
   for (const [requestId, request] of network.customerMe) {
     if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, status: request.status, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/**
+ * afterSeq 之后发出、读完的 GET /api/v1/customer/wallet（requests 为 network.customerWallet）或最新一页的
+ * GET /api/v1/customer/wallet/transactions（network.customerTransactions，只认 newest）里最近的一次（任何状态码，
+ * 由调用方判）；还有在路上的就回 null，等它落定。
+ */
+function latestCustomerWalletResponse(requests, afterSeq) {
+  let best = null;
+  for (const [requestId, request] of requests) {
+    if (request.seq <= afterSeq || request.newest === false) {
       continue;
     }
     if (!request.finished && !request.failed) {
@@ -2687,6 +2828,126 @@ function portalHomeInView(lib, T) {
   }
   const rect = row.getBoundingClientRect();
   return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
+}
+
+/**
+ * 门户钱包页的状态：门户外壳、管理端顶栏在不在；余额卡（role=region、aria-label 为「Your wallet」）在加载、加载失败、
+ * 「Balance」一项的文字（带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>；不是恰好一项时为 null）；流水一块
+ * （role=region、aria-label 为「Transactions」）在加载、加载失败、空状态，以及表格（表头有「Balance after」「Event ID」）
+ * 里带 data-row-key 的数据行数与第一行「Event ID」列的文字。只读 DOM，不点、不填。
+ */
+function probePortalWallet(lib, T) {
+  const header = document.querySelector("header");
+  const regionOf = (label) =>
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === label) ?? null;
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const card = regionOf(T.portalWalletTitle);
+  const transactions = regionOf(T.portalTxTitle);
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    card: card !== null,
+    cardBusy: false,
+    cardFailed: false,
+    balanceCount: 0,
+    balanceText: null,
+    transactions: transactions !== null,
+    txBusy: false,
+    txFailed: false,
+    txEmpty: false,
+    table: false,
+    rows: 0,
+    firstEventId: null,
+  };
+  if (card !== null) {
+    out.cardBusy = card.querySelector('[aria-busy="true"]') !== null || has(card, T.portalWalletLoading);
+    out.cardFailed = has(card, T.portalWalletLoadFailed);
+    const cells = [];
+    for (const th of card.querySelectorAll("th")) {
+      const td = th.nextElementSibling;
+      if (lib.norm(th.textContent) === T.portalWalletBalance && td && td.tagName === "TD") {
+        cells.push(td);
+      }
+    }
+    out.balanceCount = cells.length;
+    out.balanceText = cells.length === 1 ? lib.norm(cells[0].textContent) : null;
+  }
+  if (transactions !== null) {
+    out.txBusy = transactions.querySelector('[aria-busy="true"]') !== null || has(transactions, T.portalTxLoading);
+    out.txFailed = has(transactions, T.portalTxLoadFailed);
+    out.txEmpty = has(transactions, T.portalTxEmpty);
+    for (const table of transactions.querySelectorAll("table")) {
+      const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+      if (!heads.includes(T.portalTxBalanceAfter) || !heads.includes(T.portalTxEventId)) {
+        continue;
+      }
+      const eventId = heads.indexOf(T.portalTxEventId);
+      out.table = true;
+      for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        const cells = tr.querySelectorAll(":scope > td");
+        if (cells.length !== heads.length) {
+          continue;
+        }
+        if (out.rows === 0) {
+          out.firstEventId = lib.norm(cells[eventId].textContent);
+        }
+        out.rows += 1;
+      }
+      break;
+    }
+  }
+  return out;
+}
+
+/** 门户导航里文字为「Wallet」、href 恰好为 /portal/wallet 的链接。只点这一个。 */
+function clickPortalNavWallet(lib, T) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === T.portalNavWallet && a.getAttribute("href") === T.portalWalletPath) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 把余额卡滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollPortalWalletIntoView(lib, T) {
+  const card = [...document.querySelectorAll('[role="region"]')].find(
+    (el) => el.getAttribute("aria-label") === T.portalWalletTitle,
+  );
+  if (card === undefined) {
+    return false;
+  }
+  const block = card.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  card.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的余额卡要整块在视口内；放不下的只要求顶端在视口内。 */
+function portalWalletInView(lib, T) {
+  const card = [...document.querySelectorAll('[role="region"]')].find(
+    (el) => el.getAttribute("aria-label") === T.portalWalletTitle,
+  );
+  if (card === undefined) {
+    return false;
+  }
+  const rect = card.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
 
 // ---------------------------------------------------------------------------
@@ -4315,6 +4576,142 @@ async function stepCheckPortalHome(ctx) {
   }
 }
 
+/** 读一个被观察的请求的响应体并解析成信封；读不到或不是 JSON 时抛（调用方把它当成 assertion_failed）。 */
+async function readEnvelope(requestId) {
+  const { body, base64Encoded } = await cdp.send("Network.getResponseBody", { requestId }, sessionId);
+  return JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+}
+
+async function stepCheckPortalWallet(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开钱包页：只点「Wallet」这一个链接。
+  const afterSeq = network.seq;
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavWallet, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 钱包页落定：门户外壳在，余额卡与流水一块都不在加载，且各是某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalWallet, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalWalletPath &&
+        s.portalShell &&
+        s.card &&
+        s.transactions &&
+        !s.cardBusy &&
+        !s.txBusy &&
+        (s.cardFailed || s.balanceCount > 0) &&
+        (s.txFailed || s.txEmpty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.cardFailed || page.txFailed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalWalletPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面在点击之后自己发出的两个 GET 的响应体（被动观察，不自己发请求）。有还在路上的就等它落定。
+  const walletSeen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerWallet, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  const transactionsSeen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerTransactions, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (
+    !walletSeen.ok ||
+    walletSeen.value.status !== 200 ||
+    !transactionsSeen.ok ||
+    transactionsSeen.value.status !== 200
+  ) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const walletEnvelope = await readEnvelope(walletSeen.value.requestId);
+    const data = walletEnvelope?.success === true ? walletEnvelope.data : null;
+    const balance = roundHalfUp2(data?.balance);
+    if (typeof data?.currency !== "string" || data.currency === "" || balance === null) {
+      throw fail("assertion_failed");
+    }
+    const transactionsEnvelope = await readEnvelope(transactionsSeen.value.requestId);
+    const items = transactionsEnvelope?.success === true ? transactionsEnvelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    let firstEventId = null;
+    if (items.length > 0) {
+      const eventId = items[0]?.event_id;
+      if (eventId !== null && typeof eventId !== "string") {
+        throw fail("assertion_failed");
+      }
+      // event_id 为 null 的行在表里留空。
+      firstEventId = normText(eventId ?? "");
+    }
+    expected = { currency: data.currency, balance, rows: items.length, firstEventId };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、余额不是十进制字符串、没有 items、event_id 类型不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这两份响应：余额去掉币种前缀、空格与千分位逗号后等于舍入后的值；数据行数一致，第一行的
+  // event_id 一致；items 为空时是空状态、没有数据行。
+  const prefix = `${expected.currency} `;
+  const shownBalance = (text) =>
+    typeof text === "string" && text.startsWith(prefix) ? text.slice(prefix.length).replace(/[\s,]/g, "") : null;
+  const shown = await waitFor(
+    () => evaluate(probePortalWallet, TEXT),
+    (s) =>
+      s.path === TEXT.portalWalletPath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.cardBusy &&
+      !s.cardFailed &&
+      !s.txBusy &&
+      !s.txFailed &&
+      s.balanceCount === 1 &&
+      shownBalance(s.balanceText) === expected.balance &&
+      (expected.rows === 0
+        ? s.txEmpty && s.rows === 0
+        : s.table && s.rows === expected.rows && s.firstEventId === expected.firstEventId),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.card ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把余额卡滚进视口。只滚动，不点任何按钮（不点「Older」「Newest」）。
+  if ((await evaluate(scrollPortalWalletIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(portalWalletInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -4340,6 +4737,7 @@ const STEPS = {
   check_portal_account: stepCheckPortalAccount,
   login_customer: stepLoginCustomer,
   check_portal_home: stepCheckPortalHome,
+  check_portal_wallet: stepCheckPortalWallet,
 };
 
 // ---------------------------------------------------------------------------
@@ -4369,7 +4767,8 @@ async function main() {
     /** 夹具客户门户账号的 { email, password }；输入里缺失或类型不对时为 null（login_customer 报 login_failed）。 */
     customerCredentials: input.customerCredentials,
     /**
-     * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home 只认这之后发出的请求。
+     * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home 只认这之后发出的请求，
+     * check_portal_wallet 要求它不为 null（自己再按点击「Wallet」之前的序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,

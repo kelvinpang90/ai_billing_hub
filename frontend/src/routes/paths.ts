@@ -74,6 +74,12 @@ export const ROUTES = {
    * {@link ROUTES.dashboard}，管理端各页同样把 CUSTOMER 转到这里。
    */
   portalHome: "/portal",
+  /**
+   * 客户门户钱包页（AIH-TASK-100，设计闸门 #393 v3 §2「前端」）。在 {@link ROUTES.portalHome} 之下：门户外壳的链接都以
+   * 它开头。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `check_portal_wallet` 按这个 href 找门户导航的链接，
+   * 改了要同步那里。
+   */
+  portalWallet: "/portal/wallet",
 } as const;
 
 /**
