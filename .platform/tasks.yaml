@@ -6159,7 +6159,7 @@ tasks:
     title: 客户用量第一层：用量事件按租户与按项目的时间索引迁移
     purpose: >-
       按 docs/design/AIH-TASK-103-customer-usage.md（设计闸门 #398 已批准 v4）§2「数据库」与 §8 第 1 步：新迁移 0026 在一条原子 ALTER TABLE 里给 usage_events 加 ix_usage_events_tenant_occurred (tenant_id, occurred_at, public_id) 与 ix_usage_events_project_occurred (project_id, occurred_at, public_id)，upgrade 先检查、可以安全重跑；模型同步声明；docs/database-schema.md 记两个索引。不加接口，接口属于 AIH-TASK-104。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-103-customer-usage.md（设计闸门 #398 已批准 v4）逐条一致，以 §2「数据库」、§5 的三行迁移失败、§7「迁移可重跑」「索引存在且可用」「迁移往返」与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
