@@ -441,6 +441,36 @@ describe("WalletPage transaction rows", () => {
     expect(cellsOf(container, "00000000-0000-0000-0000-000000000002")[EVENT]).toBe("");
   });
 
+  it("links the event id to the usage page with only event_id in the query, and has no link without one", async () => {
+    serve(wallet(), () =>
+      page([
+        row({ id: "00000000-0000-0000-0000-000000000001" }),
+        row({
+          id: "00000000-0000-0000-0000-000000000002",
+          wallet_sequence: 41,
+          transaction_type: "BONUS",
+          amount: "1.00000000",
+          event_id: null,
+        }),
+      ]),
+    );
+
+    const { container } = renderPage();
+    await screen.findByText("Bonus");
+
+    const usageRow = container.querySelector<HTMLElement>('tr[data-row-key="00000000-0000-0000-0000-000000000001"]');
+    const bonusRow = container.querySelector<HTMLElement>('tr[data-row-key="00000000-0000-0000-0000-000000000002"]');
+    if (usageRow === null || bonusRow === null) {
+      throw new Error("rows missing");
+    }
+    const link = within(usageRow).getByRole("link", { name: EVENT_ID });
+    const href = new URL(link.getAttribute("href") ?? "", "https://portal.example");
+    expect(href.pathname).toBe(ROUTES.portalUsage);
+    expect(Array.from(href.searchParams.entries())).toEqual([["event_id", EVENT_ID]]);
+    expect(link).toHaveAttribute("href", `${ROUTES.portalUsage}?event_id=${EVENT_ID}`);
+    expect(within(bonusRow).queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it("shows the columns a customer needs and no internal one", async () => {
     serve(wallet(), () => page([row()]));
 

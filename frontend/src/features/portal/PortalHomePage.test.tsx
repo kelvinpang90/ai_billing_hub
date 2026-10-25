@@ -342,6 +342,33 @@ describe("PortalHomePage wallet summary and recent transactions", () => {
     expect(screen.queryByRole("button", { name: "Newest" })).not.toBeInTheDocument();
   });
 
+  it("links the event id of a recent transaction to the usage page, and has no link without one", async () => {
+    customerApi.getCustomerMe.mockResolvedValue(account());
+    const bonusId = "00000000-0000-0000-0000-000000000001";
+    serve(
+      wallet(),
+      page([
+        row(),
+        row({ id: bonusId, wallet_sequence: 41, transaction_type: "BONUS", amount: "1.00000000", event_id: null }),
+      ]),
+    );
+
+    const { container } = renderPortal();
+    await within(recent()).findByText("Bonus");
+
+    const usageRow = container.querySelector<HTMLElement>(`tr[data-row-key="${ZERO_UUID}"]`);
+    const bonusRow = container.querySelector<HTMLElement>(`tr[data-row-key="${bonusId}"]`);
+    if (usageRow === null || bonusRow === null) {
+      throw new Error("rows missing");
+    }
+    const link = within(usageRow).getByRole("link", { name: ZERO_UUID });
+    const href = new URL(link.getAttribute("href") ?? "", "https://portal.example");
+    expect(href.pathname).toBe(ROUTES.portalUsage);
+    expect(Array.from(href.searchParams.entries())).toEqual([["event_id", ZERO_UUID]]);
+    expect(link).toHaveAttribute("href", `${ROUTES.portalUsage}?event_id=${ZERO_UUID}`);
+    expect(within(bonusRow).queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it("links to the wallet page", async () => {
     customerApi.getCustomerMe.mockResolvedValue(account());
 
