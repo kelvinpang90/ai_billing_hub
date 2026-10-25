@@ -4,13 +4,15 @@
  * 显示 `GET /api/v1/customer/me` 的公司名与账户状态；`read_only` 为 `true`（`DISABLED` / `CLOSED`）时加一条只读提示；
  * 下面是余额卡与最近 5 条流水（AIH-TASK-101，设计闸门 #393 v3 §2「前端」、§8 第 3 步），复用钱包页的
  * `WalletSummaryCard` 与 `CustomerTransactionsTable`，附一个到钱包页的链接；最近流水不翻页。
- * 还没开启 2FA 时最下面是开启流程（`EnableTwoFactor`，它自己看 `/api/v1/me`）。
+ * 余额卡之后是本月用量卡（`UsageSummaryCard`，AIH-TASK-108，设计闸门 #403 v1 §2「前端」）：计费额、请求数、对话数与
+ * 按日请求数柱状图，链到用量页。还没开启 2FA 时最下面是开启流程（`EnableTwoFactor`，它自己看 `/api/v1/me`）。
  *
- * 各块各自请求、各自画加载中与失败（带 request_id）：哪一块读失败都不影响首页其余部分。
+ * 各块各自请求、各自画加载中与失败（带 request_id）：哪一块读失败（含本月用量的 `QUERY_TOO_BROAD`）都不影响首页
+ * 其余部分。
  *
- * ⚠️ 这一页只请求 `/api/v1/customer/me`、`/api/v1/customer/wallet` 与 `/api/v1/customer/wallet/transactions`，
- * 不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。金额的显示精度在两个复用的组件里，这里
- * 不碰金额。`customer_id` 是内部用来对账的标识，客户用不上，也不显示。
+ * ⚠️ 这一页只请求 `/api/v1/customer/me`、`/api/v1/customer/wallet`、`/api/v1/customer/wallet/transactions` 与
+ * `/api/v1/customer/usage-summary`，不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。金额的
+ * 显示精度在复用的组件里，这里不碰金额。`customer_id` 是内部用来对账的标识，客户用不上，也不显示。
  */
 
 import { useQuery } from "@tanstack/react-query";
@@ -25,6 +27,7 @@ import { RequestReference } from "../../components/RequestReference";
 import { ROUTES } from "../../routes/paths";
 import { CustomerTransactionsTable } from "./CustomerTransactionsTable";
 import { EnableTwoFactor } from "./EnableTwoFactor";
+import { UsageSummaryCard } from "./UsageSummaryCard";
 import { WalletSummaryCard } from "./WalletSummaryCard";
 
 /** 首页只看最近几条：设计 §2「前端」定为 `page_size=5`，不翻页，完整流水在钱包页。 */
@@ -159,8 +162,9 @@ export function PortalHomePage() {
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <AccountSummary />
-      {/* 每一块各自请求、各自报错：摘要、余额或流水读失败都不影响其余几块，也不影响开启 2FA。 */}
+      {/* 每一块各自请求、各自报错：摘要、余额、本月用量或流水读失败都不影响其余几块，也不影响开启 2FA。 */}
       <WalletSummaryCard />
+      <UsageSummaryCard />
       <RecentTransactions />
       <EnableTwoFactor />
     </Space>

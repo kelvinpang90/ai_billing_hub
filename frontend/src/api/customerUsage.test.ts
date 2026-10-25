@@ -11,13 +11,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { client } from "./client";
 import {
   CUSTOMER_USAGE_QUERY_KEY,
+  CUSTOMER_USAGE_SUMMARY_QUERY_KEY,
   customerUsageListQueryKey,
+  customerUsageSummaryQueryKey,
+  getCustomerUsageSummary,
   listCustomerProjects,
   listCustomerUsageEvents,
 } from "./customerUsage";
 
 const PROJECTS_URL = "/api/v1/customer/projects";
 const USAGE_URL = "/api/v1/customer/usage-events";
+const SUMMARY_URL = "/api/v1/customer/usage-summary";
+
+const SUMMARY = {
+  month: "2026-10",
+  charged_amount: "0.41200000",
+  request_count: 10,
+  conversation_count: 2,
+  days: [{ date: "2026-10-01", request_count: 10, charged_amount: "0.41200000" }],
+};
 
 const PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const EVENT_ID = "00000000-0000-0000-0000-000000000000";
@@ -172,5 +184,68 @@ describe("listCustomerUsageEvents", () => {
       expect(key.slice(0, prefix.length)).toEqual(prefix);
     }
     expect(first).not.toEqual(older);
+  });
+});
+
+describe("getCustomerUsageSummary", () => {
+  it("leaves the month out of the query string when it is not given", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(SUMMARY));
+
+    await expect(getCustomerUsageSummary()).resolves.toEqual(SUMMARY);
+
+    expect(get).toHaveBeenCalledWith(SUMMARY_URL, {});
+  });
+
+  it("treats null and an empty month like an omitted one", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(SUMMARY));
+
+    await getCustomerUsageSummary(null);
+    await getCustomerUsageSummary("");
+
+    expect(get.mock.calls).toEqual([
+      [SUMMARY_URL, {}],
+      [SUMMARY_URL, {}],
+    ]);
+  });
+
+  it("sends the month under the name the backend reads, and nothing else", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(SUMMARY));
+
+    await getCustomerUsageSummary("2026-10");
+
+    const [url] = get.mock.calls[0] ?? [];
+    expect(parse(String(url))).toEqual({ path: SUMMARY_URL, params: [["month", "2026-10"]] });
+    expect(get).toHaveBeenCalledWith(`${SUMMARY_URL}?month=2026-10`, {});
+  });
+
+  it("never sends a tenant or customer identifier", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(SUMMARY));
+
+    await getCustomerUsageSummary();
+    await getCustomerUsageSummary("2026-10");
+
+    for (const [url] of get.mock.calls) {
+      expect(url).not.toMatch(/tenant|customer_id|\/admin\//);
+    }
+  });
+
+  it("passes the abort signal through", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(SUMMARY));
+    const controller = new AbortController();
+
+    await getCustomerUsageSummary(null, controller.signal);
+
+    expect(get).toHaveBeenCalledWith(SUMMARY_URL, { signal: controller.signal });
+  });
+
+  it("keys each month apart, under its own prefix", () => {
+    const prefix = [...CUSTOMER_USAGE_SUMMARY_QUERY_KEY];
+    const current = customerUsageSummaryQueryKey();
+    const october = customerUsageSummaryQueryKey("2026-10");
+    for (const key of [current, october]) {
+      expect(key.slice(0, prefix.length)).toEqual(prefix);
+    }
+    expect(current).not.toEqual(october);
+    expect(prefix).not.toEqual([...CUSTOMER_USAGE_QUERY_KEY]);
   });
 });
