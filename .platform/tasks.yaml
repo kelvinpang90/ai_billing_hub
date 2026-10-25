@@ -6398,7 +6398,7 @@ tasks:
     title: 客户本月用量第一层：本月计费额、请求数、对话数与按日用量的只读接口
     purpose: >-
       按 docs/design/AIH-TASK-107-customer-usage-summary.md（设计闸门 #403 已批准 v1）§2 与 §8 第 1 步：新增 GET /api/v1/customer/usage-summary（可选 month=YYYY-MM，默认当前马来西亚日历月），返回该月已计费事件的计费额合计、请求数、不同的非空 conversation_id 个数，以及该月每一天的请求数与计费额；读时在 usage_events 上实时汇总，两条 SELECT 同一个只读事务，沿用 2 秒执行预算；docs/api.md 记新接口。只读，不写任何表、不改表结构；前端属于 AIH-TASK-108。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-104
     acceptance_criteria:
