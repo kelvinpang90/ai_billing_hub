@@ -6266,7 +6266,7 @@ tasks:
     title: 客户用量第三层：门户用量页，按日期项目模型筛选与请求详情
     purpose: >-
       按 docs/design/AIH-TASK-103-customer-usage.md（设计闸门 #398 已批准 v4）§2「前端」「金额」「时间」与 §8 第 3 步：调用 AIH-TASK-104 的两个接口，新增门户用量页 /portal/usage（默认马来西亚时间本月、日期项目供应商模型 conversation_id 筛选、按 next_cursor 往旧翻页、点一行展开请求详情、查询串带 event_id 时只按它查），门户导航加一项；勾掉 docs/TODO.md Phase 5 的「请求级明细」与「用量筛选」。只做前端，外加验收脚本的一个只读步骤。钱包流水链到用量页属于 AIH-TASK-106。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-100
       - AIH-TASK-102
