@@ -80,6 +80,12 @@ export const ROUTES = {
    * 改了要同步那里。
    */
   portalWallet: "/portal/wallet",
+  /**
+   * 客户门户用量页（AIH-TASK-105，设计闸门 #398 v4 §2「前端」）。在 {@link ROUTES.portalHome} 之下；查询串可带
+   * `event_id`（`features/portal/UsagePage.tsx` 的 `EVENT_ID_PARAM`）只看那一条。验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `check_portal_usage` 按这个 href 找门户导航的链接，改了要同步那里。
+   */
+  portalUsage: "/portal/usage",
 } as const;
 
 /**

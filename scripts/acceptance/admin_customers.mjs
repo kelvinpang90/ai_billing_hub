@@ -11,7 +11,7 @@
  * 它排在 login **之前**跑；AIH-TASK-095 加了客户门户账号面板的一个只读步骤（check_portal_account）；AIH-TASK-097 加了
  * 客户门户的两个步骤（login_customer 用夹具客户的门户账号登录，check_portal_home 只读核对门户首页）；AIH-TASK-100
  * 加了门户钱包页的一个只读步骤（check_portal_wallet）；AIH-TASK-101 加了门户首页余额卡与最近流水的一个只读步骤
- * （check_portal_dashboard）。
+ * （check_portal_dashboard）；AIH-TASK-105 加了门户用量页的一个只读步骤（check_portal_usage）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -72,6 +72,9 @@
  *   「Newest」（不翻页）、不点任何别的按钮与链接、不提交任何表单。
  * - 门户首页的余额卡与最近流水（check_portal_dashboard）只看不点：停留在门户首页，不点「View all transactions」或任何
  *   别的链接与按钮（含开启 2FA），不填也不提交任何表单。
+ * - 门户用量页（check_portal_usage）只点门户导航里的「Usage」（href 为 /portal/usage）这一个链接：用页面默认的日期区间，
+ *   不动日期、项目、供应商、模型、会话筛选，不点「Apply filters」「Reset」（不提交任何表单）、不点「Older」「Newest」
+ *   （不翻页）、不点表格的任何一行或展开按钮（不展开详情）、不点任何别的按钮与链接。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
@@ -299,6 +302,21 @@
  *                   表格（表头有「Balance after」「Event ID」）里带 data-row-key 的数据行数与 items 条数一致；items 为空时显示
  *                   空状态（portal.wallet.transactions.empty）、没有数据行，同样算通过。不点链接、不翻页、不提交任何表单。
  *                   报到前把余额卡滚动到视口里（规则同 check_portal_wallet）
+ *   check_portal_usage
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Usage」链接（en.json 的
+ *                   portal.nav.usage，href 为 paths.ts 的 portalUsage，即 /portal/usage）进用量页，用页面默认的日期区间（马来西亚
+ *                   时间本月 1 日到今天），不改任何筛选。页面落定：地址是 /portal/usage，门户外壳在、管理端顶栏不在，用量一块
+ *                   （role=region、aria-label 为「Usage」，portal.usage.title）不再显示 portal.usage.loading。显示
+ *                   portal.usage.queryTooBroad（默认区间的查询超过了后端 2 秒的执行预算，设计闸门 #398 §2「查询」）是
+ *                   assertion_failed，显示 portal.usage.loadFailed 是 page_error。后端值取页面在点击之后自己发出的、不带 cursor 与
+ *                   event_id 的 GET /api/v1/customer/usage-events 的响应体（被动观察，不自己发请求、不拦截；取最近一次读完的那一次）：
+ *                   响应是 422、错误码 QUERY_TOO_BROAD 时同样是 assertion_failed（原因同上：默认区间都查不完，用量页对这个客户
+ *                   不可用），其余不是 200 的响应也是 assertion_failed。用量表格（表头有「Time (MYT)」「Charged (MYR)」）里带
+ *                   data-row-key 的数据行数与响应 data.items 的条数一致；items 非空时第一行「Charged (MYR)」列的文字去掉空白与
+ *                   千分位逗号后，与 items 第一项 charged_amount 按 6 位 ROUND_HALF_UP 舍入后的值（本文件的 roundHalfUp：字符串
+ *                   运算、不经浮点）数值相同 —— 两边都按页面的写法规范成「去掉末尾多余的 0、至少留 2 位小数」再逐字比较；items 为空
+ *                   时显示空状态（portal.usage.empty）、没有数据行，同样算通过。不翻页、不展开、不提交任何表单。报到前把用量一块
+ *                   滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -472,6 +490,16 @@ const TEXT = {
   portalTxBalanceAfter: "Balance after", // portal.wallet.transactions.field.balanceAfter —— 流水表格的列头
   portalTxEventId: "Event ID", // portal.wallet.transactions.field.eventId
   portalRecentTitle: "Recent transactions", // portal.home.recentTransactions.title —— 门户首页最近流水一块的 aria-label
+  portalNavUsage: "Usage", // portal.nav.usage —— 门户导航的用量项
+  portalUsageTitle: "Usage", // portal.usage.title —— 用量一块的 aria-label
+  portalUsageLoading: "Loading your usage…", // portal.usage.loading
+  portalUsageLoadFailed: "Your usage could not be loaded.", // portal.usage.loadFailed
+  // portal.usage.queryTooBroad
+  portalUsageTooBroad:
+    "This search covers too much usage to finish in time. Narrow the date range or change the filters, then try again.",
+  portalUsageEmpty: "No billed usage matches these filters.", // portal.usage.empty
+  portalUsageTime: "Time (MYT)", // portal.usage.field.occurredAt —— 用量表格的列头
+  portalUsageCharged: "Charged (MYR)", // portal.usage.field.chargedAmount
   // 管理端顶栏的全部项（frontend/src/layouts/AppLayout.tsx；nav.dashboard、nav.customers、nav.audit、nav.catalog、
   // nav.providerPrices、nav.fxRates、nav.pricingRules、nav.pricingPreview、nav.usageEvents、nav.usageAnalytics）。
   // 门户首页上一项都不许出现。
@@ -512,6 +540,7 @@ const TEXT = {
   usageAnalyticsPath: "/usage-analytics",
   portalHomePath: "/portal",
   portalWalletPath: "/portal/wallet",
+  portalUsagePath: "/portal/usage",
   // 管理端顶栏各项指向的路径（paths.ts 的 dashboard、customers、audit、catalogProviders、catalogMeterTypes、
   // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics）。门户首页上不许有指向它们的链接。
   adminPaths: [
@@ -604,6 +633,13 @@ const CUSTOMER_WALLET_API = /^\/api\/v1\/customer\/wallet$/;
 const CUSTOMER_WALLET_TRANSACTIONS_API = /^\/api\/v1\/customer\/wallet\/transactions$/;
 /** 门户首页最近流水的条数（frontend/src/features/portal/PortalHomePage.tsx 的 RECENT_TRANSACTIONS_PAGE_SIZE）。 */
 const RECENT_TRANSACTIONS_PAGE_SIZE = 5;
+
+/** 客户自己的用量接口的路径（frontend/src/api/customerUsage.ts 的 CUSTOMER_USAGE_EVENTS_URL）。 */
+const CUSTOMER_USAGE_EVENTS_API = /^\/api\/v1\/customer\/usage-events$/;
+/** 查询超过执行预算时的错误码（docs/api.md「客户用量」）。 */
+const QUERY_TOO_BROAD = "QUERY_TOO_BROAD";
+/** 用量页计费额的显示位数（设计闸门 #398 §2「金额」：最多 6 位小数）。 */
+const USAGE_PLACES = 6;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -713,19 +749,24 @@ function formatMoney(amount, currency) {
 /**
  * check_portal_wallet 的期望值：十进制字符串按 2 位 ROUND_HALF_UP 舍入，纯字符串运算（不经浮点），不加千分位；
  * 舍入结果为 -0.00 时回 0.00。规则同 frontend/src/components/MoneyText.tsx 的 formatAmountRounded，但这里是
- * 独立算一遍、不照抄它的代码。不是十进制字符串时回 null。
+ * 独立算一遍、不照抄它的代码。不是十进制字符串时回 null。check_portal_usage 用同一个函数按 6 位舍入（roundHalfUp）。
  */
 const BALANCE_PLACES = 2;
 
 function roundHalfUp2(amount) {
+  return roundHalfUp(amount, BALANCE_PLACES);
+}
+
+/** 按 places 位 ROUND_HALF_UP 舍入，结果恰好 places 位小数；其余规则见 roundHalfUp2。 */
+function roundHalfUp(amount, places) {
   const match = typeof amount === "string" ? DECIMAL.exec(amount) : null;
   if (match === null) {
     return null;
   }
   const [, sign = "", integer = "", fraction = ""] = match;
-  const padded = fraction.padEnd(BALANCE_PLACES + 1, "0");
-  let digits = `${integer}${padded.slice(0, BALANCE_PLACES)}`.split("").map(Number);
-  if (padded.charCodeAt(BALANCE_PLACES) >= "5".charCodeAt(0)) {
+  const padded = fraction.padEnd(places + 1, "0");
+  let digits = `${integer}${padded.slice(0, places)}`.split("").map(Number);
+  if (padded.charCodeAt(places) >= "5".charCodeAt(0)) {
     // 从最低位往上进位；最高位也进位时在前面补一个 1。
     let index = digits.length - 1;
     while (index >= 0 && digits[index] === 9) {
@@ -739,10 +780,23 @@ function roundHalfUp2(amount) {
     }
   }
   const text = digits.join("");
-  const whole = text.slice(0, text.length - BALANCE_PLACES).replace(/^0+(?=\d)/, "");
-  const rounded = `${whole}.${text.slice(text.length - BALANCE_PLACES)}`;
+  const whole = text.slice(0, text.length - places).replace(/^0+(?=\d)/, "");
+  const rounded = `${whole}.${text.slice(text.length - places)}`;
   const isZero = /^0+$/.test(text);
   return `${isZero ? "" : sign}${rounded}`;
+}
+
+/**
+ * check_portal_usage 比较前的规范写法：十进制字符串去掉小数末尾多余的 0、至少留 2 位（页面 formatAmount 的写法，
+ * 不加千分位）。`"0.041200"` → `"0.0412"`，`"12.500000"` → `"12.50"`。不是十进制字符串时回 null。
+ */
+function trimFraction(amount) {
+  const match = typeof amount === "string" ? DECIMAL.exec(amount) : null;
+  if (match === null) {
+    return null;
+  }
+  const [, sign = "", integer = "", fraction = ""] = match;
+  return `${sign}${integer}.${fraction.replace(/0+$/, "").padEnd(MIN_FRACTION_DIGITS, "0")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1112,8 @@ const network = {
   customerWallet: new Map(),
   /** 客户自己的流水接口（只记 GET）：requestId → { newest, recent, status, finished, failed, seq }。查询串本身不保存。 */
   customerTransactions: new Map(),
+  /** 客户自己的用量接口（只记 GET）：requestId → { newest, status, finished, failed, seq }。查询串本身不保存。 */
+  customerUsage: new Map(),
   seq: 0,
 };
 
@@ -1075,8 +1131,33 @@ function trackedRequest(requestId) {
     network.portalAccounts.get(requestId) ??
     network.customerMe.get(requestId) ??
     network.customerWallet.get(requestId) ??
-    network.customerTransactions.get(requestId)
+    network.customerTransactions.get(requestId) ??
+    network.customerUsage.get(requestId)
   );
+}
+
+/**
+ * 是不是客户自己的用量接口（同源 https、路径恰好是 /api/v1/customer/usage-events）：是的话回 { newest }（不带 cursor
+ * 与 event_id 的最新一页，即页面按日期区间查的第一页），不是回 null。只留这一个布尔，不保存 URL。
+ */
+function customerUsageTarget(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== network.host ||
+      !CUSTOMER_USAGE_EVENTS_API.test(parsed.pathname)
+    ) {
+      return null;
+    }
+    const query = parsed.searchParams;
+    return { newest: !query.has("cursor") && !query.has("event_id") };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1418,6 +1499,16 @@ function observeNetwork(sessionId) {
             });
           }
         }
+        const customerUsage = customerUsageTarget(params.request?.url);
+        if (customerUsage !== null && params.request?.method === "GET") {
+          network.customerUsage.set(params.requestId, {
+            newest: customerUsage.newest,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1649,7 +1740,8 @@ function latestCustomerMeResponse(afterSeq) {
 /**
  * afterSeq 之后发出、读完的 GET /api/v1/customer/wallet（requests 为 network.customerWallet）或最新一页的
  * GET /api/v1/customer/wallet/transactions（network.customerTransactions，只认 newest）里最近的一次（任何状态码，
- * 由调用方判）；还有在路上的就回 null，等它落定。
+ * 由调用方判）；还有在路上的就回 null，等它落定。check_portal_usage 拿它取不带 cursor 与 event_id 的
+ * GET /api/v1/customer/usage-events（network.customerUsage，同样只认 newest）。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -2993,6 +3085,109 @@ function portalWalletInView(lib, T) {
     return false;
   }
   const rect = card.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 门户用量页的状态：门户外壳、管理端顶栏在不在；用量一块（role=region、aria-label 为「Usage」）在加载、加载失败、
+ * 查询过宽、空状态，以及表格（表头有「Time (MYT)」「Charged (MYR)」）里带 data-row-key 的数据行数与第一行
+ * 「Charged (MYR)」列的文字。展开出来的详情行不带 data-row-key、单元格数也对不上表头，不计入。只读 DOM，不点、不填。
+ */
+function probePortalUsage(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === T.portalUsageTitle) ??
+    null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    tooBroad: false,
+    empty: false,
+    table: false,
+    rows: 0,
+    firstCharged: null,
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(region, T.portalUsageLoading);
+  out.failed = has(region, T.portalUsageLoadFailed);
+  out.tooBroad = has(region, T.portalUsageTooBroad);
+  out.empty = has(region, T.portalUsageEmpty);
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.portalUsageTime) || !heads.includes(T.portalUsageCharged)) {
+      continue;
+    }
+    const charged = heads.indexOf(T.portalUsageCharged);
+    out.table = true;
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      const cells = tr.querySelectorAll(":scope > td");
+      if (cells.length !== heads.length) {
+        continue;
+      }
+      if (out.rows === 0) {
+        out.firstCharged = lib.norm(cells[charged].textContent);
+      }
+      out.rows += 1;
+    }
+    break;
+  }
+  return out;
+}
+
+/** 门户导航里文字为「Usage」、href 恰好为 /portal/usage 的链接。只点这一个。 */
+function clickPortalNavUsage(lib, T) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === T.portalNavUsage && a.getAttribute("href") === T.portalUsagePath) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 把用量一块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollPortalUsageIntoView(lib, T) {
+  const region = [...document.querySelectorAll('[role="region"]')].find(
+    (el) => el.getAttribute("aria-label") === T.portalUsageTitle,
+  );
+  if (region === undefined) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的用量一块要整块在视口内；放不下的只要求顶端在视口内。 */
+function portalUsageInView(lib, T) {
+  const region = [...document.querySelectorAll('[role="region"]')].find(
+    (el) => el.getAttribute("aria-label") === T.portalUsageTitle,
+  );
+  if (region === undefined) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
   const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
   return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
@@ -4874,6 +5069,118 @@ async function stepCheckPortalDashboard(ctx) {
   }
 }
 
+async function stepCheckPortalUsage(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开用量页：只点「Usage」这一个链接，之后用页面默认的日期区间，不碰筛选表单。
+  const afterSeq = network.seq;
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavUsage, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 用量页落定：门户外壳在，用量一块不在加载，且是某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalUsage, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalUsagePath &&
+        s.portalShell &&
+        s.region &&
+        !s.busy &&
+        (s.failed || s.tooBroad || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalUsagePath) {
+    throw fail("navigation_failed");
+  }
+  // 默认区间（本月）都超出后端的执行预算：页面对这个客户不可用，判失败（不是页面坏了，是查询过宽）。
+  if (page.adminLayout || page.tooBroad) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面在点击之后自己发出的、不带 cursor 与 event_id 的 GET 的响应体（被动观察，不自己发请求）。
+  const usageSeen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerUsage, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!usageSeen.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(usageSeen.value.requestId);
+    if (envelope?.error?.code === QUERY_TOO_BROAD) {
+      // 422 QUERY_TOO_BROAD：默认区间（本月）的查询超出后端 2 秒的执行预算，用量页对这个客户不可用。
+      throw fail("assertion_failed");
+    }
+    if (usageSeen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    const items = envelope.data?.items;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    let firstCharged = null;
+    if (items.length > 0) {
+      firstCharged = trimFraction(roundHalfUp(items[0]?.charged_amount, USAGE_PLACES));
+      if (firstCharged === null) {
+        throw fail("assertion_failed");
+      }
+    }
+    expected = { rows: items.length, firstCharged };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封（含 QUERY_TOO_BROAD）、没有 items、计费额不是十进制字符串：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：数据行数一致，第一行的计费额去掉空白与千分位逗号后与 6 位舍入的值数值相同；
+  // items 为空时是空状态、没有数据行。
+  const shownCharged = (text) => (typeof text === "string" ? trimFraction(text.replace(/[\s,]/g, "")) : null);
+  const shown = await waitFor(
+    () => evaluate(probePortalUsage, TEXT),
+    (s) =>
+      s.path === TEXT.portalUsagePath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.busy &&
+      !s.failed &&
+      !s.tooBroad &&
+      (expected.rows === 0
+        ? s.empty && s.rows === 0
+        : s.table && s.rows === expected.rows && shownCharged(s.firstCharged) === expected.firstCharged),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把用量一块滚进视口。只滚动，不点任何按钮（不翻页、不展开）。
+  if ((await evaluate(scrollPortalUsageIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(portalUsageInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -4901,6 +5208,7 @@ const STEPS = {
   check_portal_home: stepCheckPortalHome,
   check_portal_wallet: stepCheckPortalWallet,
   check_portal_dashboard: stepCheckPortalDashboard,
+  check_portal_usage: stepCheckPortalUsage,
 };
 
 // ---------------------------------------------------------------------------
@@ -4931,7 +5239,8 @@ async function main() {
     customerCredentials: input.customerCredentials,
     /**
      * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home 与 check_portal_dashboard 只认
-     * 这之后发出的请求，check_portal_wallet 要求它不为 null（自己再按点击「Wallet」之前的序号截断）。
+     * 这之后发出的请求，check_portal_wallet 与 check_portal_usage 要求它不为 null（各自再按点击「Wallet」「Usage」之前的
+     * 序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,

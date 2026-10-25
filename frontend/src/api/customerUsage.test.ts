@@ -1,0 +1,176 @@
+/**
+ * 客户项目与用量两个请求发到哪个地址、带什么查询参数。
+ *
+ * 用量页的用例按路径回应 `client.get`，但参数名写错时页面照样显示一页（后端忽略未知参数）：`conversation_id`
+ * 打成 `conversationId` 在浏览器里不报错，只是筛选永远不生效。所以这里逐个钉住参数名、省略的参数不进查询串、
+ * 游标原样传回，以及两个请求都**不带**任何租户或客户标识。
+ */
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { client } from "./client";
+import {
+  CUSTOMER_USAGE_QUERY_KEY,
+  customerUsageListQueryKey,
+  listCustomerProjects,
+  listCustomerUsageEvents,
+} from "./customerUsage";
+
+const PROJECTS_URL = "/api/v1/customer/projects";
+const USAGE_URL = "/api/v1/customer/usage-events";
+
+const PROJECT_ID = "00000000-0000-0000-0000-000000000000";
+const EVENT_ID = "00000000-0000-0000-0000-000000000000";
+/** 像后端给的那样：base64url，可能带 `-`、`_` 与填充的 `=`。前端只原样传回。 */
+const CURSOR = "MjAyNi0xMC0xOFQwODozMDowMC4xMjM0NTZ8MDAw-_==";
+
+const PROJECTS = { items: [{ id: PROJECT_ID, name: "Customer service bot" }] };
+const EMPTY_PAGE = { items: [], page_size: 20, next_cursor: null };
+
+function envelope(data: unknown) {
+  return { data: { success: true, data, error: null, request_id: "req-1" } };
+}
+
+/** 被调用的地址拆成路径与查询参数（按出现顺序）。 */
+function parse(url: string): { path: string; params: [string, string][] } {
+  const parsed = new URL(url, "https://portal.example");
+  return { path: parsed.pathname, params: [...parsed.searchParams.entries()] };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("listCustomerProjects", () => {
+  it("reads /api/v1/customer/projects without any query string", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(PROJECTS));
+
+    await expect(listCustomerProjects()).resolves.toEqual(PROJECTS);
+
+    expect(get).toHaveBeenCalledWith(PROJECTS_URL, {});
+  });
+
+  it("passes the abort signal through", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(PROJECTS));
+    const controller = new AbortController();
+
+    await listCustomerProjects(controller.signal);
+
+    expect(get).toHaveBeenCalledWith(PROJECTS_URL, { signal: controller.signal });
+  });
+});
+
+describe("listCustomerUsageEvents", () => {
+  it("leaves every omitted parameter out of the query string", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+
+    const page = await listCustomerUsageEvents();
+
+    expect(get).toHaveBeenCalledWith(USAGE_URL, {});
+    expect(page).toEqual(EMPTY_PAGE);
+  });
+
+  it("treats null and empty values like omitted ones", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+
+    await listCustomerUsageEvents({
+      fromDate: "2026-10-01",
+      toDate: "2026-10-25",
+      projectId: null,
+      provider: "",
+      model: null,
+      conversationId: "",
+      eventId: null,
+      cursor: null,
+    });
+
+    expect(get).toHaveBeenCalledWith(`${USAGE_URL}?from_date=2026-10-01&to_date=2026-10-25`, {});
+  });
+
+  it("sends every filter under the name the backend reads", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+
+    await listCustomerUsageEvents({
+      fromDate: "2026-10-01",
+      toDate: "2026-10-25",
+      projectId: PROJECT_ID,
+      provider: "anthropic",
+      model: "claude-sonnet-5-5",
+      conversationId: "conv_0001",
+      eventId: EVENT_ID,
+      pageSize: 20,
+      cursor: CURSOR,
+    });
+
+    const [url] = get.mock.calls[0] ?? [];
+    expect(parse(String(url))).toEqual({
+      path: USAGE_URL,
+      params: [
+        ["from_date", "2026-10-01"],
+        ["to_date", "2026-10-25"],
+        ["project_id", PROJECT_ID],
+        ["provider", "anthropic"],
+        ["model", "claude-sonnet-5-5"],
+        ["conversation_id", "conv_0001"],
+        ["event_id", EVENT_ID],
+        ["page_size", "20"],
+        ["cursor", CURSOR],
+      ],
+    });
+  });
+
+  it("sends only event_id when that is all it is given", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+
+    await listCustomerUsageEvents({ eventId: EVENT_ID });
+
+    expect(get).toHaveBeenCalledWith(`${USAGE_URL}?event_id=${EVENT_ID}`, {});
+  });
+
+  it("passes the cursor back exactly as it was given", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+
+    await listCustomerUsageEvents({ cursor: CURSOR });
+
+    const [url] = get.mock.calls[0] ?? [];
+    expect(parse(String(url)).params).toEqual([["cursor", CURSOR]]);
+  });
+
+  it("never sends a tenant or customer identifier", async () => {
+    const get = vi.spyOn(client, "get").mockImplementation((url: string) =>
+      Promise.resolve(envelope(url.startsWith(PROJECTS_URL) ? PROJECTS : EMPTY_PAGE)),
+    );
+
+    await listCustomerUsageEvents({
+      fromDate: "2026-10-01",
+      toDate: "2026-10-25",
+      projectId: PROJECT_ID,
+      pageSize: 20,
+      cursor: CURSOR,
+    });
+    await listCustomerProjects();
+
+    for (const [url] of get.mock.calls) {
+      expect(url).not.toMatch(/tenant|customer_id|\/admin\//);
+    }
+  });
+
+  it("passes the abort signal through", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+    const controller = new AbortController();
+
+    await listCustomerUsageEvents({}, controller.signal);
+
+    expect(get).toHaveBeenCalledWith(USAGE_URL, { signal: controller.signal });
+  });
+
+  it("starts every page key with the same prefix and tells pages apart", () => {
+    const prefix = [...CUSTOMER_USAGE_QUERY_KEY];
+    const first = customerUsageListQueryKey({ fromDate: "2026-10-01", toDate: "2026-10-25", cursor: null });
+    const older = customerUsageListQueryKey({ fromDate: "2026-10-01", toDate: "2026-10-25", cursor: CURSOR });
+    for (const key of [first, older]) {
+      expect(key.slice(0, prefix.length)).toEqual(prefix);
+    }
+    expect(first).not.toEqual(older);
+  });
+});
