@@ -6338,7 +6338,7 @@ tasks:
     title: 客户用量第四层：钱包流水里的事件编号链到用量页
     purpose: >-
       按 docs/design/AIH-TASK-103-customer-usage.md（设计闸门 #398 已批准 v4）§2「前端」与 §8 第 4 步：AIH-TASK-100 的流水表里 event_id 不为 null 的行，把 event_id 显示成到 /portal/usage?event_id=… 的链接，钱包页与门户首页的最近流水同时生效。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-101
       - AIH-TASK-105
