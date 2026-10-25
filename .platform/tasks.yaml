@@ -6452,7 +6452,7 @@ tasks:
     title: 客户本月用量第二层：门户首页的本月用量卡与按日请求数柱状图
     purpose: >-
       按 docs/design/AIH-TASK-107-customer-usage-summary.md（设计闸门 #403 已批准 v1）§2「前端」「金额」与 §8 第 2 步：调用 AIH-TASK-107 的接口，在门户首页加本月用量卡（计费额、请求数、对话数）与按日请求数柱状图（纯 CSS 或 SVG，不引入依赖），链到用量页。只做前端，外加验收脚本的一个只读步骤。低余额提示与最小恢复额不在本任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-106
       - AIH-TASK-107
