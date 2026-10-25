@@ -325,6 +325,10 @@ def customer_usage_summary_view(
             )
         )
         day += dt.timedelta(days=1)
+    # 查询按区间取数、按日分组；落在本月之外的日子说明归日与区间不一致，不能悄悄丢掉。
+    stray = sorted(set(found) - {item.date for item in days})
+    if stray:
+        raise ValueError(f"usage summary days outside {first_day:%Y-%m}: {stray}")
     return CustomerUsageSummaryView(
         month=f"{first_day.year:04d}-{first_day.month:02d}",
         charged_amount=money_text(charged),

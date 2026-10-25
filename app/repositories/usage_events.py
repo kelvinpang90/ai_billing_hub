@@ -567,7 +567,8 @@ class MalaysiaDay(FunctionElement[dt.date]):
     """The Malaysian calendar day of a naive-UTC datetime column, rendered per dialect.
 
     MySQL：`DATE(DATE_ADD(col, INTERVAL 8 HOUR))`；SQLite（只在测试里用）：
-    `date(col, '+8 hours')`。结果类型是 `Date`：SQLite 返回的文本也读成 `datetime.date`。
+    `date(substr(col, 1, 19), '+8 hours')`。
+    结果类型是 `Date`：SQLite 返回的文本也读成 `datetime.date`。
     """
 
     type = Date()
@@ -578,7 +579,9 @@ class MalaysiaDay(FunctionElement[dt.date]):
 @compiles(MalaysiaDay)
 def _malaysia_day_sqlite(element: MalaysiaDay, compiler: SQLCompiler, **kw: Any) -> str:
     column = compiler.process(element.clauses, **kw)
-    return f"date({column}, '+{_KUALA_LUMPUR_HOURS} hours')"
+    # SQLite 的日期函数按毫秒取整，会把 `15:59:59.999999` 进成 `16:00:00.000` 而落到次日；
+    # 先截到整秒再加 8 小时，与 MySQL `DATE_ADD` 保留微秒的归日结果一致。
+    return f"date(substr({column}, 1, 19), '+{_KUALA_LUMPUR_HOURS} hours')"
 
 
 @compiles(MalaysiaDay, "mysql")

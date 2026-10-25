@@ -4,7 +4,7 @@
 test_customer_api.py（显式清单里加了新路由），不在这里。
 
 用量事件照 test_customer_usage_api 的 `UsageEventPortal.put` 直接按库里的约束写成各种状态；
-计费额都是精确的二进制小数（SQLite 把 NUMERIC 存成浮点）。
+记账的计费额尽量用精确的二进制小数（SQLite 把 NUMERIC 存成浮点）；做不到的那条见它自己的说明。
 - SQLite：`create_all` 建表；
 - MySQL：表与触发器都走迁移，需要 `BILLING_TEST_DATABASE_URL`，没设时 MySQL 那一半 skip ——
   **不要把 skipped 读成 passed**，CI 里不许 skip。
@@ -28,7 +28,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import event, update
 from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.exc import OperationalError
 from test_customer_usage_api import (
@@ -45,6 +45,7 @@ import app.api.customer as customer_api
 from app.core.logging import JsonFormatter
 from app.models.auth import UserRole
 from app.models.tenancy import AccountStatus, BillingMode
+from app.models.usage import UsageEvent
 from app.repositories import usage_events as usage_repository
 from app.repositories.usage_events import (
     CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
@@ -454,7 +455,9 @@ def test_the_hint_and_the_day_expression_are_rendered_per_dialect() -> None:
                 assert column not in text
             assert "tenant_id" in text and "status" in text and "occurred_at" in text
     daily = customer_usage_daily_statement(1, **OCTOBER)
-    assert "date(usage_events.occurred_at, '+8 hours')" in compiled(daily, sqlite.dialect())
+    assert "date(substr(usage_events.occurred_at, 1, 19), '+8 hours')" in compiled(
+        daily, sqlite.dialect()
+    )
     assert "DATE(DATE_ADD(usage_events.occurred_at, INTERVAL 8 HOUR))" in compiled(
         daily, mysql.dialect()
     )
@@ -596,10 +599,26 @@ def test_both_selects_run_on_one_connection_in_one_transaction(both: UsageEventP
 
 
 def test_tiny_amounts_add_up_exactly(both: UsageEventPortal) -> None:
-    """§7「金额精度」（INV-10）：三条 `0.00000001` 合计 `"0.00000003"`。"""
+    """§7「金额精度」（INV-10）：三条 `0.00000001` 合计 `"0.00000003"`。
+
+    SQLite 把 NUMERIC 存成浮点：钱包连扣三笔 `0.00000001` 时余额的浮点加法不精确，过不了
+    `ck_wallet_transactions_arithmetic`。那里先按精确的二进制小数记账，再把事件的计费额直接改成
+    `0.00000001`（汇总只读 `usage_events`）；MySQL 上照常记账。
+    """
     tenant = both.tenant()
     for number in range(3):
-        both.put(tenant, occurred_at=OCT_1 + number * MINUTE, billable="0.00000001")
+        occurred_at = OCT_1 + number * MINUTE
+        if is_mysql(both):
+            both.put(tenant, occurred_at=occurred_at, billable="0.00000001")
+            continue
+        stored = both.put(tenant, occurred_at=occurred_at)
+        with both.factory() as session:
+            session.execute(
+                update(UsageEvent)
+                .where(UsageEvent.id == stored.row_id)
+                .values(billable_cost=Decimal("0.00000001"))
+            )
+            session.commit()
     headers = both.customer(tenant)
 
     data = summary(both, headers, month=MONTH)
