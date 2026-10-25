@@ -8,15 +8,19 @@
  * - 金额按设计 §2「金额（前端显示）」：`balance_after` 与非 `AI_USAGE` 行的 `amount` 2 位小数，`AI_USAGE` 行的
  *   `amount` 最多 6 位（与用量页同一规则，同一笔扣费两页显示相同）。一律经 `formatAmountRounded`，不转成 number、
  *   不在前端做加减：「上一行余额 − 本行金额」与本行余额的显示值可能差一分，这是显示舍入的预期结果。
- * - `event_id` 只有 AI 用量行有；为 `null` 时留空。
+ * - `event_id` 只有 AI 用量行有；为 `null` 时留空。有值时链到用量页、查询串只带 `event_id`（AIH-TASK-106；设计闸门
+ *   #398 v4 §2「前端」），用量页据此只显示那一条。
  */
 
 import { Table, type TableColumnsType } from "antd";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router";
 
 import type { CustomerTransaction } from "../../api/customerWallet";
 import { DateTimeText } from "../../components/DateTimeText";
 import { formatAmountRounded } from "../../components/MoneyText";
+import { ROUTES } from "../../routes/paths";
+import { EVENT_ID_PARAM } from "./UsagePage";
 
 /** spec §80「MYR normal display → 2 decimals」。 */
 const NORMAL_PLACES = 2;
@@ -50,6 +54,11 @@ function TransactionTypeText({ type }: { type: string }) {
     default:
       return type;
   }
+}
+
+/** 用量页只看这一条事件的地址。 */
+function usageEventPath(eventId: string): string {
+  return `${ROUTES.portalUsage}?${new URLSearchParams({ [EVENT_ID_PARAM]: eventId }).toString()}`;
 }
 
 function Amount({ value, places }: { value: string; places: number }) {
@@ -94,7 +103,8 @@ export function CustomerTransactionsTable({
     {
       key: "event_id",
       title: t("portal.wallet.transactions.field.eventId"),
-      render: (_: unknown, row) => row.event_id ?? "",
+      render: (_: unknown, row) =>
+        row.event_id === null ? "" : <Link to={usageEventPath(row.event_id)}>{row.event_id}</Link>,
     },
   ];
 
