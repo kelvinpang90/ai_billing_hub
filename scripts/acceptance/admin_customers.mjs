@@ -11,7 +11,8 @@
  * 它排在 login **之前**跑；AIH-TASK-095 加了客户门户账号面板的一个只读步骤（check_portal_account）；AIH-TASK-097 加了
  * 客户门户的两个步骤（login_customer 用夹具客户的门户账号登录，check_portal_home 只读核对门户首页）；AIH-TASK-100
  * 加了门户钱包页的一个只读步骤（check_portal_wallet）；AIH-TASK-101 加了门户首页余额卡与最近流水的一个只读步骤
- * （check_portal_dashboard）；AIH-TASK-105 加了门户用量页的一个只读步骤（check_portal_usage）。
+ * （check_portal_dashboard）；AIH-TASK-105 加了门户用量页的一个只读步骤（check_portal_usage）；AIH-TASK-108 加了
+ * 门户首页本月用量卡的一个只读步骤（check_portal_usage_summary）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -72,6 +73,8 @@
  *   「Newest」（不翻页）、不点任何别的按钮与链接、不提交任何表单。
  * - 门户首页的余额卡与最近流水（check_portal_dashboard）只看不点：停留在门户首页，不点「View all transactions」或任何
  *   别的链接与按钮（含开启 2FA），不填也不提交任何表单。
+ * - 门户首页的本月用量卡（check_portal_usage_summary）只看不点：停留在门户首页，不点卡上的「View usage details」、
+ *   「Try again」或任何别的链接与按钮（含开启 2FA），不填也不提交任何表单。
  * - 门户用量页（check_portal_usage）只点门户导航里的「Usage」（href 为 /portal/usage）这一个链接：用页面默认的日期区间，
  *   不动日期、项目、供应商、模型、会话筛选，不点「Apply filters」「Reset」（不提交任何表单）、不点「Older」「Newest」
  *   （不翻页）、不点表格的任何一行或展开按钮（不展开详情）、不点任何别的按钮与链接。
@@ -317,6 +320,24 @@
  *                   运算、不经浮点）数值相同 —— 两边都按页面的写法规范成「去掉末尾多余的 0、至少留 2 位小数」再逐字比较；items 为空
  *                   时显示空状态（portal.usage.empty）、没有数据行，同样算通过。不翻页、不展开、不提交任何表单。报到前把用量一块
  *                   滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   check_portal_usage_summary
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
+ *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
+ *                   门户外壳在、管理端顶栏不在，本月用量卡（role=region、aria-label 为「This month's usage」，
+ *                   portal.home.usageSummary.title）不再显示 portal.home.usageSummary.loading。显示
+ *                   portal.home.usageSummary.queryTooBroad（整月汇总超过了后端 2 秒的执行预算，设计闸门 #403 §2「查询」）是
+ *                   assertion_failed，显示 portal.home.usageSummary.loadFailed 是 page_error。后端值取页面在 login_customer 点
+ *                   「Continue」之后自己发出的、不带 month 的 GET /api/v1/customer/usage-summary 的响应体（被动观察，不自己发请求、
+ *                   不拦截；取最近一次读完的那一次）：响应是 422、错误码 QUERY_TOO_BROAD 时同样是 assertion_failed（原因同上：本月
+ *                   用量对这个客户算不出，首页这一块不可用），其余不是 200 的响应、字段缺失或类型不对也是 assertion_failed。卡里
+ *                   「Charged (MYR)」「Requests」「Conversations」三项（portal.home.usageSummary.field.*，带边框的 Descriptions：
+ *                   label 在 <th>，值在紧跟的 <td>）各恰好一项：「Requests」「Conversations」去掉空白与千分位逗号后分别等于响应的
+ *                   request_count、conversation_count；「Charged (MYR)」去掉空白与千分位逗号后，与响应 charged_amount 按 6 位
+ *                   ROUND_HALF_UP 舍入后的值（本文件的 roundHalfUp：字符串运算、不经浮点）数值相同 —— 两边都按页面的写法规范成
+ *                   「去掉末尾多余的 0、至少留 2 位小数」再逐字比较。月份标题（portal.home.usageSummary.month）是响应的 month 加
+ *                   「 (Malaysia time)」。按日柱状图（role=list、aria-label 为「Requests per day (Malaysia time)」，
+ *                   portal.home.usageSummary.chart.caption）里 role=listitem 的柱子个数等于响应 days 的项数。不点链接、不提交
+ *                   任何表单。报到前把本月用量卡滚动到视口里（规则同 check_portal_wallet）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -500,6 +521,18 @@ const TEXT = {
   portalUsageEmpty: "No billed usage matches these filters.", // portal.usage.empty
   portalUsageTime: "Time (MYT)", // portal.usage.field.occurredAt —— 用量表格的列头
   portalUsageCharged: "Charged (MYR)", // portal.usage.field.chargedAmount
+  portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
+  portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
+  portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
+  // portal.home.usageSummary.queryTooBroad
+  portalUsageSummaryTooBroad:
+    "This month's usage cannot be worked out right now. You can view it on the Usage page with a shorter date range.",
+  // portal.home.usageSummary.month 是「{{month}} (Malaysia time)」：月份标题是响应的 month 加这个后缀。
+  portalUsageSummaryMonthSuffix: " (Malaysia time)",
+  portalUsageSummaryCharged: "Charged (MYR)", // portal.home.usageSummary.field.chargedAmount —— 卡里 Descriptions 的一项
+  portalUsageSummaryRequests: "Requests", // portal.home.usageSummary.field.requestCount
+  portalUsageSummaryConversations: "Conversations", // portal.home.usageSummary.field.conversationCount
+  portalUsageSummaryChart: "Requests per day (Malaysia time)", // portal.home.usageSummary.chart.caption —— 柱状图的 aria-label
   // 管理端顶栏的全部项（frontend/src/layouts/AppLayout.tsx；nav.dashboard、nav.customers、nav.audit、nav.catalog、
   // nav.providerPrices、nav.fxRates、nav.pricingRules、nav.pricingPreview、nav.usageEvents、nav.usageAnalytics）。
   // 门户首页上一项都不许出现。
@@ -638,8 +671,11 @@ const RECENT_TRANSACTIONS_PAGE_SIZE = 5;
 const CUSTOMER_USAGE_EVENTS_API = /^\/api\/v1\/customer\/usage-events$/;
 /** 查询超过执行预算时的错误码（docs/api.md「客户用量」）。 */
 const QUERY_TOO_BROAD = "QUERY_TOO_BROAD";
-/** 用量页计费额的显示位数（设计闸门 #398 §2「金额」：最多 6 位小数）。 */
+/** 用量页计费额的显示位数（设计闸门 #398 §2「金额」：最多 6 位小数）。门户首页本月用量卡同一规则（#403 §2「金额」）。 */
 const USAGE_PLACES = 6;
+
+/** 客户自己的用量汇总接口的路径（frontend/src/api/customerUsage.ts 的 CUSTOMER_USAGE_SUMMARY_URL）。 */
+const CUSTOMER_USAGE_SUMMARY_API = /^\/api\/v1\/customer\/usage-summary$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -1114,6 +1150,8 @@ const network = {
   customerTransactions: new Map(),
   /** 客户自己的用量接口（只记 GET）：requestId → { newest, status, finished, failed, seq }。查询串本身不保存。 */
   customerUsage: new Map(),
+  /** 客户自己的用量汇总接口（只记 GET）：requestId → { newest, status, finished, failed, seq }。查询串本身不保存。 */
+  customerUsageSummary: new Map(),
   seq: 0,
 };
 
@@ -1132,8 +1170,32 @@ function trackedRequest(requestId) {
     network.customerMe.get(requestId) ??
     network.customerWallet.get(requestId) ??
     network.customerTransactions.get(requestId) ??
-    network.customerUsage.get(requestId)
+    network.customerUsage.get(requestId) ??
+    network.customerUsageSummary.get(requestId)
   );
+}
+
+/**
+ * 是不是客户自己的用量汇总接口（同源 https、路径恰好是 /api/v1/customer/usage-summary）：是的话回 { newest }（不带
+ * month，即后端按请求时刻取的当月，门户首页发的就是这一种），不是回 null。只留这一个布尔，不保存 URL。
+ */
+function customerUsageSummaryTarget(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== network.host ||
+      !CUSTOMER_USAGE_SUMMARY_API.test(parsed.pathname)
+    ) {
+      return null;
+    }
+    return { newest: !parsed.searchParams.has("month") };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1509,6 +1571,16 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const customerUsageSummary = customerUsageSummaryTarget(params.request?.url);
+        if (customerUsageSummary !== null && params.request?.method === "GET") {
+          network.customerUsageSummary.set(params.requestId, {
+            newest: customerUsageSummary.newest,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1741,7 +1813,8 @@ function latestCustomerMeResponse(afterSeq) {
  * afterSeq 之后发出、读完的 GET /api/v1/customer/wallet（requests 为 network.customerWallet）或最新一页的
  * GET /api/v1/customer/wallet/transactions（network.customerTransactions，只认 newest）里最近的一次（任何状态码，
  * 由调用方判）；还有在路上的就回 null，等它落定。check_portal_usage 拿它取不带 cursor 与 event_id 的
- * GET /api/v1/customer/usage-events（network.customerUsage，同样只认 newest）。
+ * GET /api/v1/customer/usage-events（network.customerUsage，同样只认 newest）；check_portal_usage_summary 拿它取
+ * 不带 month 的 GET /api/v1/customer/usage-summary（network.customerUsageSummary，同样只认 newest）。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -3190,6 +3263,86 @@ function portalUsageInView(lib, T) {
   const rect = region.getBoundingClientRect();
   const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
   return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 门户首页本月用量卡的状态：门户外壳、管理端顶栏在不在；卡（role=region、aria-label 为「This month's usage」）在加载、
+ * 加载失败、查询过宽；「Charged (MYR)」「Requests」「Conversations」三项各有几项、恰好一项时的文字（带边框的
+ * Descriptions：label 在 <th>，值在紧跟的 <td>）；以月份标题后缀结尾的叶子文字（月份标题与柱状图说明都以它结尾，
+ * 由调用方逐字比较）；柱状图（role=list、aria-label 为图的说明）在不在、里面 role=listitem 的柱子个数。
+ * 只读 DOM，不点、不填。
+ */
+function probePortalUsageSummary(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const card =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalUsageSummaryTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    card: card !== null,
+    busy: false,
+    failed: false,
+    tooBroad: false,
+    monthTexts: [],
+    chargedCount: 0,
+    charged: null,
+    requestsCount: 0,
+    requests: null,
+    conversationsCount: 0,
+    conversations: null,
+    chart: false,
+    bars: 0,
+  };
+  if (card === null) {
+    return out;
+  }
+  out.busy = card.querySelector('[aria-busy="true"]') !== null || has(card, T.portalUsageSummaryLoading);
+  out.failed = has(card, T.portalUsageSummaryLoadFailed);
+  out.tooBroad = has(card, T.portalUsageSummaryTooBroad);
+  const single = (label) => {
+    const cells = [];
+    for (const th of card.querySelectorAll("th")) {
+      const td = th.nextElementSibling;
+      if (lib.norm(th.textContent) === label && td && td.tagName === "TD") {
+        cells.push(td);
+      }
+    }
+    return { count: cells.length, text: cells.length === 1 ? lib.norm(cells[0].textContent) : null };
+  };
+  const charged = single(T.portalUsageSummaryCharged);
+  const requests = single(T.portalUsageSummaryRequests);
+  const conversations = single(T.portalUsageSummaryConversations);
+  out.chargedCount = charged.count;
+  out.charged = charged.text;
+  out.requestsCount = requests.count;
+  out.requests = requests.text;
+  out.conversationsCount = conversations.count;
+  out.conversations = conversations.text;
+  for (const el of card.querySelectorAll("*")) {
+    const text = lib.norm(el.textContent);
+    if (el.childElementCount === 0 && text.endsWith(T.portalUsageSummaryMonthSuffix)) {
+      out.monthTexts.push(text);
+    }
+  }
+  const chart =
+    [...card.querySelectorAll('[role="list"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalUsageSummaryChart,
+    ) ?? null;
+  if (chart !== null) {
+    out.chart = true;
+    out.bars = chart.querySelectorAll(':scope > [role="listitem"]').length;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -5181,6 +5334,128 @@ async function stepCheckPortalUsage(ctx) {
   }
 }
 
+/**
+ * 把本月用量卡滚进视口用 scrollPortalWalletIntoView / portalWalletInView：规则相同，只是找的那张卡的 aria-label 是
+ * 「This month's usage」。换掉这一个文案再送进页面，不另写一份同样的滚动函数。
+ */
+const PORTAL_USAGE_SUMMARY_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalUsageSummaryTitle };
+
+async function stepCheckPortalUsageSummary(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+  const afterSeq = ctx.customerLoginSeq;
+
+  // 不导航、不点：停留在 login_customer 落定的门户首页，等本月用量卡落定在某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalUsageSummary, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalHomePath ||
+      (s.portalShell && s.card && !s.busy && (s.failed || s.tooBroad || s.chart)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalHomePath) {
+    throw fail("navigation_failed");
+  }
+  // 本月的整月汇总超出后端的执行预算：首页这一块对这个客户不可用，判失败（不是页面坏了，是查询过宽）。
+  if (page.adminLayout || page.tooBroad) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面自己发出的、不带 month 的 GET 的响应体（被动观察，不自己发请求）。有还在路上的就等它落定。
+  const summarySeen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerUsageSummary, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!summarySeen.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(summarySeen.value.requestId);
+    if (envelope?.error?.code === QUERY_TOO_BROAD) {
+      // 422 QUERY_TOO_BROAD：本月的整月汇总超出后端 2 秒的执行预算，首页这一块对这个客户不可用。
+      throw fail("assertion_failed");
+    }
+    if (summarySeen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    const data = envelope.data;
+    // 计费额按 6 位 ROUND_HALF_UP 舍入（字符串运算，不经浮点），再规范成页面的写法。
+    const charged = trimFraction(roundHalfUp(data?.charged_amount, USAGE_PLACES));
+    if (
+      typeof data?.month !== "string" ||
+      !Number.isInteger(data?.request_count) ||
+      !Number.isInteger(data?.conversation_count) ||
+      !Array.isArray(data?.days) ||
+      charged === null
+    ) {
+      throw fail("assertion_failed");
+    }
+    expected = {
+      monthText: `${data.month}${TEXT.portalUsageSummaryMonthSuffix}`,
+      charged,
+      requests: String(data.request_count),
+      conversations: String(data.conversation_count),
+      bars: data.days.length,
+    };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封（含 QUERY_TOO_BROAD）、字段缺失或类型不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：月份标题一致；请求数、对话数去掉空白与千分位逗号后与响应相同；计费额去掉空白与千分位逗号
+  // 后与 6 位舍入的值数值相同；柱子个数等于 days 的项数。
+  const plain = (text) => (typeof text === "string" ? text.replace(/[\s,]/g, "") : null);
+  const shown = await waitFor(
+    () => evaluate(probePortalUsageSummary, TEXT),
+    (s) =>
+      s.path === TEXT.portalHomePath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.busy &&
+      !s.failed &&
+      !s.tooBroad &&
+      s.monthTexts.includes(expected.monthText) &&
+      s.chargedCount === 1 &&
+      trimFraction(plain(s.charged)) === expected.charged &&
+      s.requestsCount === 1 &&
+      plain(s.requests) === expected.requests &&
+      s.conversationsCount === 1 &&
+      plain(s.conversations) === expected.conversations &&
+      s.chart &&
+      s.bars === expected.bars,
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.card ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把本月用量卡滚进视口。只滚动，不点任何链接或按钮。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_USAGE_SUMMARY_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_USAGE_SUMMARY_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -5209,6 +5484,7 @@ const STEPS = {
   check_portal_wallet: stepCheckPortalWallet,
   check_portal_dashboard: stepCheckPortalDashboard,
   check_portal_usage: stepCheckPortalUsage,
+  check_portal_usage_summary: stepCheckPortalUsageSummary,
 };
 
 // ---------------------------------------------------------------------------
@@ -5238,8 +5514,8 @@ async function main() {
     /** 夹具客户门户账号的 { email, password }；输入里缺失或类型不对时为 null（login_customer 报 login_failed）。 */
     customerCredentials: input.customerCredentials,
     /**
-     * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home 与 check_portal_dashboard 只认
-     * 这之后发出的请求，check_portal_wallet 与 check_portal_usage 要求它不为 null（各自再按点击「Wallet」「Usage」之前的
+     * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home、check_portal_dashboard 与
+     * check_portal_usage_summary 只认这之后发出的请求，check_portal_wallet 与 check_portal_usage 要求它不为 null（各自再按点击「Wallet」「Usage」之前的
      * 序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
