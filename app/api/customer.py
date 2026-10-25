@@ -22,6 +22,11 @@ repository。
 存在、必填与先后、92 天与游标在鉴权之后判（422）。MySQL 上查询超过执行时间预算是 422
 `QUERY_TOO_BROAD`，另记一条 `customer_usage_query_timeout` 日志：只带 `request_id` 与客户
 `public_id`，不带任何查询参数的值（设计 §6）。
+
+本月用量（AIH-TASK-107，设计闸门 #403 v1 §2）：同样只读、用 `require_customer`。`month` 的形状
+由 FastAPI 在处理函数之前判，范围（2020-01 到 2099-12）在鉴权之后、任何日期运算之前判（422）；
+省略时取请求时刻（UTC）加 8 小时后的年月，同一请求只取一次「现在」。超时与用量页同一个 422 与
+同一条日志。
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Request
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.auth import require_customer, require_session_factory
 from app.core.logging import current_request_id
@@ -40,12 +46,16 @@ from app.repositories import wallet as wallet_repository
 from app.schemas.customer import CustomerMe
 from app.schemas.customer_usage import (
     USAGE_DATE_PATTERN,
+    USAGE_MONTH_PATTERN,
     CustomerProjectList,
     CustomerUsageEventPage,
     CustomerUsageQueryTooBroad,
+    CustomerUsageSummaryView,
     customer_project_list,
     customer_usage_event_page,
+    customer_usage_summary_view,
     decode_cursor,
+    usage_month,
     usage_period,
 )
 from app.schemas.customer_wallet import (
@@ -64,6 +74,7 @@ from app.schemas.usage_ingest import (
 )
 from app.schemas.wallet_transactions import MAX_WALLET_SEQUENCE
 from app.services.account_status import READ_ONLY_STATUSES
+from app.services.auth import utc_now
 from app.services.customers import CustomerNotFound
 
 logger = logging.getLogger(__name__)
@@ -79,6 +90,8 @@ ProviderFilter = Annotated[str | None, Query(pattern=PROVIDER_PATTERN)]
 ModelFilter = Annotated[str | None, Query(pattern=MODEL_PATTERN)]
 ConversationFilter = Annotated[str | None, Query(pattern=REQUEST_ID_PATTERN)]
 EventIdFilter = Annotated[str | None, Query(pattern=EVENT_ID_PATTERN)]
+# 本月用量的月份（设计 #403 §2）：形状在鉴权之前判，范围在鉴权之后判。
+UsageMonthParam = Annotated[str | None, Query(pattern=USAGE_MONTH_PATTERN)]
 
 
 @router.get("/me", response_model=ApiResponse[CustomerMe])
@@ -198,13 +211,47 @@ def customer_usage_events(
             )
             page = customer_usage_event_page(rows, page_size=page_size)
     except usage_repository.QueryTooBroad:
-        with factory() as session:
-            tenant = session.get(Tenant, principal.tenant_id)
-            customer_id = None if tenant is None else tenant.public_id
-        # 不带任何查询参数的值（日期、项目、`event_id`、`conversation_id`）。
-        logger.warning(
-            "customer_usage_query_timeout",
-            extra={"request_id": current_request_id(), "customer_id": customer_id},
-        )
+        _log_query_timeout(factory, principal.tenant_id)
         raise CustomerUsageQueryTooBroad from None
     return success(page, request_id=current_request_id())
+
+
+@router.get("/usage-summary", response_model=ApiResponse[CustomerUsageSummaryView])
+def customer_usage_summary(
+    request: Request, month: UsageMonthParam = None
+) -> ApiResponse[CustomerUsageSummaryView]:
+    """The caller's billed usage in one Malaysian calendar month (default: the current one).
+
+    两条 SELECT 在同一个会话里、不提交（同一快照）；没有事件的日子补 0。未来的月份照常 200、全为 0。
+    """
+    principal = require_customer(request)
+    # 「现在」只取这一次；先判 `month` 的范围，再做任何日期运算。
+    period = usage_month(month, now=utc_now())
+    factory = require_session_factory(request)
+    try:
+        with factory() as session:
+            summary = usage_repository.summarize_processed_events_for_customer(
+                session,
+                principal.tenant_id,
+                occurred_from=period.from_utc,
+                occurred_to=period.to_utc,
+            )
+    except usage_repository.QueryTooBroad:
+        _log_query_timeout(factory, principal.tenant_id)
+        raise CustomerUsageQueryTooBroad from None
+    view = customer_usage_summary_view(period.first_day, summary)
+    return success(view, request_id=current_request_id())
+
+
+def _log_query_timeout(factory: sessionmaker[Session], tenant_id: int) -> None:
+    """One `customer_usage_query_timeout` warning with only `request_id` and the customer.
+
+    不带任何查询参数的值（日期、月份、项目、`event_id`、`conversation_id`）。
+    """
+    with factory() as session:
+        tenant = session.get(Tenant, tenant_id)
+        customer_id = None if tenant is None else tenant.public_id
+    logger.warning(
+        "customer_usage_query_timeout",
+        extra={"request_id": current_request_id(), "customer_id": customer_id},
+    )

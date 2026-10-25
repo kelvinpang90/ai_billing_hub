@@ -400,9 +400,10 @@
 | --- | --- | --- | --- |
 | `GET /api/v1/customer/projects` | CUSTOMER 的访问令牌 | 200，自己的全部项目（每项 2 个键） | 401 / 403 / 500 / 503 |
 | `GET /api/v1/customer/usage-events` | CUSTOMER 的访问令牌 | 200，一页已计费的用量事件（每项 18 个键） | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/usage-summary` | CUSTOMER 的访问令牌 | 200，一个马来西亚日历月的计费额、请求数、对话数与按日用量（每天各一项，见下文） | 401 / 403 / 422 / 500 / 503 |
 
-- **客户请求不接受任何租户标识**（spec §90，见上文[客户请求的约定](#客户请求的约定)）：租户只取自访问令牌对应的、库里的 user 行。两个接口都不定义租户、客户标识参数；带了 `customer_id`、`tenant_id` 也只会被当作未知参数忽略。
-- **两个接口在只读状态下照常可读**：四种 `account_status` 都返回 200。它们用 `require_customer`，没有 403 `ACCOUNT_READ_ONLY`。
+- **客户请求不接受任何租户标识**（spec §90，见上文[客户请求的约定](#客户请求的约定)）：租户只取自访问令牌对应的、库里的 user 行。这些接口都不定义租户、客户标识参数；带了 `customer_id`、`tenant_id` 也只会被当作未知参数忽略。
+- **这些接口在只读状态下照常可读**：四种 `account_status` 都返回 200。它们用 `require_customer`，没有 403 `ACCOUNT_READ_ONLY`。
 - 只读：不写任何表、不加锁、不写审计。ADMIN 不能调；管理员看用量用[管理端用量事件：查询](#管理端用量事件查询)。
 
 ### `GET /api/v1/customer/projects` —— 客户自己的项目
@@ -514,6 +515,66 @@
 | 503 | `DATABASE_UNAVAILABLE` 等 | 数据库不可用，沿用通用处理 |
 
 没有 404（客户来自会话；项目与事件筛不到就是空页），也没有 403 `ACCOUNT_READ_ONLY`（两个接口都是读）。
+
+### `GET /api/v1/customer/usage-summary` —— 客户自己某月的用量汇总
+
+设计依据：设计闸门 #403 `APPROVED: design v1`，全文见 [design/AIH-TASK-107-customer-usage-summary.md](design/AIH-TASK-107-customer-usage-summary.md)（§2、§6；spec §67、§87、§90、§109、§111）。实现登记为 AIH-TASK-107。
+
+口径与上面的用量接口相同：只算**已计费**（`PROCESSED`）的事件，按 `occurred_at` 的马来西亚日历日归属。读时在用量事件上实时汇总，不建聚合表、不缓存。
+
+| 参数 | 规则 |
+| --- | --- |
+| `month` | 可选，`YYYY-MM`，**马来西亚日历月**；省略 = 请求时刻所在的马来西亚日历月（服务端时刻 UTC 加 8 小时后的年月，同一请求只取一次）。必须在 `2020-01` 到 `2099-12` 之间（含两端）。未来的月份照常 200，全为 0 |
+
+- 未知参数忽略；不接受任何租户、客户标识。
+- 校验分两步，所有 422 都是 `VALIDATION_ERROR`，文案只列字段名（`Invalid request fields: query.month`），不回显收到的值：`YYYY-MM` 的形状（如 `2026-1`、`abc`）由框架在鉴权**之前**判；月份是否在 01–12、是否在 `2020-01` 到 `2099-12` 之间（如 `2026-13`、`2019-12`、`2100-01`）在鉴权**之后**、任何日期运算之前判。
+
+```json
+{
+  "success": true,
+  "data": {
+    "month": "2026-10",
+    "charged_amount": "12.34567800",
+    "request_count": 1234,
+    "conversation_count": 56,
+    "days": [
+      { "date": "2026-10-01", "request_count": 10, "charged_amount": "0.41200000" },
+      { "date": "2026-10-02", "request_count": 0, "charged_amount": "0.00000000" }
+    ]
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+（示例只列了 `days` 的前两项；实际是该月的每一天。）
+
+| 字段 | 说明 |
+| --- | --- |
+| `month` | 实际统计的月份（省略参数时就是当月），`YYYY-MM` |
+| `charged_amount` | 该月已计费事件的 `billable_cost` 之和，恰好 8 位小数的字符串，**含税**，不经浮点、不舍入；等于 `days` 里各日 `charged_amount` 之和。内部计量客户恒为 `"0.00000000"` |
+| `request_count` | 该月已计费事件的条数（一次供应商调用一条）；等于各日 `request_count` 之和 |
+| `conversation_count` | 该月已计费事件中**不同的非空** `conversation_id` 的个数。同一个对话跨月时，在它有事件的每个月各计一次；没有 `conversation_id` 的事件（例如 AI 模块代为上报的调用）不计入。不是各日去重数之和 |
+| `days` | 该月的**每一天**各一项（28–31 项），按日期升序；每项恰好 `date`（马来西亚日历日，`YYYY-MM-DD`）、`request_count`、`charged_amount` 三个键。没有事件的日子 `request_count = 0`、`charged_amount = "0.00000000"` |
+
+- `data` 恰好上面 5 个键。**刻意不返回**：成本、原币成本、汇率、参考价、毛利、token 合计、按项目 / 供应商 / 模型的拆分与任何内部 id（INV-7）。`conversation_id` 只参与计数，不返回。
+- **月份区间**：`[当月 1 日 00:00 − 8 小时, 次月 1 日 00:00 − 8 小时)` UTC，按 `occurred_at` 取。例：`month = 2026-10` → `[2026-09-30 16:00:00, 2026-10-31 16:00:00)` UTC。与用量接口按同一个月的首末日查到的条数与计费额之和一致。
+- **按发生时间归月，不按记账时间**：月末发生、次月才计费的事件计入它发生的月；钱包流水按记账时间。所以本月 `charged_amount` 与本月钱包流水里 `AI_USAGE` 的合计可能差在跨月的几笔，两者不要并列比较。
+- **数字会变**：晚到或晚计费的事件计入它**发生**的那一天，同一个月的数字会随时间变大；这不是对账单。
+- 两条汇总查询在同一个只读事务里执行，合计、按日与对话数来自同一组行。
+
+**`QUERY_TOO_BROAD`**：每条汇总查询在数据库里最多执行 2 秒（与用量接口同一预算）。该月事件太多、超过预算时中止并返回 422 `QUERY_TOO_BROAD`，没有部分结果；可以在用量接口按较短区间查看。服务端记一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id，不带参数值）。
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 422 | `VALIDATION_ERROR` | `month` 格式错或越界 |
+| 422 | `QUERY_TOO_BROAD` | 任一条汇总查询超过 2 秒执行预算 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 503 | `DATABASE_UNAVAILABLE` 等 | 数据库不可用，沿用通用处理 |
+
+没有 404，也没有 403 `ACCOUNT_READ_ONLY`（读接口，只读状态下照常可读）。
 
 ---
 

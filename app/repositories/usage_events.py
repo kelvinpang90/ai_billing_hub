@@ -17,6 +17,11 @@ alone is insufficient」）。
 只读、不加锁，只 SELECT 设计列出的列（不复用管理端的 `EventListRow`：它读出成本列，INV-7）；
 MySQL 上每条语句带 `MAX_EXECUTION_TIME` 提示，超时（错误 3024）转成 `QueryTooBroad`。
 
+客户本月用量（AIH-TASK-107，设计闸门 #403 v1 §2「查询」）：`summarize_processed_events_for_customer`
+在同一个会话里发两条 SELECT（按马来西亚日分组、对话去重），同样的租户、`PROCESSED`、区间条件与
+执行时间预算；只读 `billable_cost`、`conversation_id`、`occurred_at`、`status`，
+不读成本列（INV-7）。
+
 ⚠️ 这一层不写日志。
 """
 
@@ -25,12 +30,16 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from decimal import Decimal
-from typing import Final, NamedTuple
+from typing import Any, Final, NamedTuple
 
-from sqlalchemy import ColumnElement, Select, and_, func, or_, select
+from sqlalchemy import ColumnElement, Date, Row, Select, and_, func, or_, select
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.compiler import SQLCompiler
+from sqlalchemy.sql.functions import FunctionElement
 
+from app.core.fx_source import KUALA_LUMPUR_OFFSET
 from app.models.ai_catalog import (
     AiModel,
     AiProvider,
@@ -534,24 +543,152 @@ def list_processed_events_for_customer(
         before=before,
         timeout_ms=timeout_ms,
     )
+    return [CustomerUsageRow(*row) for row in _run_bounded(session, statement)]
+
+
+def _run_bounded(session: Session, statement: Select[tuple[object, ...]]) -> list[Row[Any]]:
+    """Execute a customer usage statement; MySQL's timeout (3024) becomes `QueryTooBroad`."""
     try:
-        found = session.execute(statement).all()
+        return list(session.execute(statement).all())
     except DBAPIError as error:
         arguments = getattr(error.orig, "args", ()) if error.orig is not None else ()
         if arguments and arguments[0] == _ER_QUERY_TIMEOUT:
             raise QueryTooBroad from error
         raise
-    return [CustomerUsageRow(*row) for row in found]
+
+
+# --- 客户本月用量（AIH-TASK-107，设计闸门 #403 v1 §2「查询」，只读） ---------------------
+
+# 马来西亚日期表达式里的小时数，与日期换算同一个偏移（固定 UTC+8）。
+_KUALA_LUMPUR_HOURS: Final = int(KUALA_LUMPUR_OFFSET.total_seconds()) // 3600
+
+
+class MalaysiaDay(FunctionElement[dt.date]):
+    """The Malaysian calendar day of a naive-UTC datetime column, rendered per dialect.
+
+    MySQL：`DATE(DATE_ADD(col, INTERVAL 8 HOUR))`；SQLite（只在测试里用）：
+    `date(col, '+8 hours')`。结果类型是 `Date`：SQLite 返回的文本也读成 `datetime.date`。
+    """
+
+    type = Date()
+    name = "malaysia_day"
+    inherit_cache = True
+
+
+@compiles(MalaysiaDay)
+def _malaysia_day_sqlite(element: MalaysiaDay, compiler: SQLCompiler, **kw: Any) -> str:
+    column = compiler.process(element.clauses, **kw)
+    return f"date({column}, '+{_KUALA_LUMPUR_HOURS} hours')"
+
+
+@compiles(MalaysiaDay, "mysql")
+def _malaysia_day_mysql(element: MalaysiaDay, compiler: SQLCompiler, **kw: Any) -> str:
+    column = compiler.process(element.clauses, **kw)
+    return f"DATE(DATE_ADD({column}, INTERVAL {_KUALA_LUMPUR_HOURS} HOUR))"
+
+
+class CustomerUsageDay(NamedTuple):
+    """One Malaysian day that has billed events: how many, and their `billable_cost` sum."""
+
+    day: dt.date
+    request_count: int
+    charged_amount: Decimal
+
+
+class CustomerUsageSummary(NamedTuple):
+    """Days that have events, ascending (the others are absent), and distinct conversations."""
+
+    days: list[CustomerUsageDay]
+    conversation_count: int
+
+
+def _summary_conditions(
+    tenant_id: int, occurred_from: dt.datetime, occurred_to: dt.datetime
+) -> list[ColumnElement[bool]]:
+    # 租户、`PROCESSED` 与区间三个条件恒在（INV-8）。
+    return [
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.status == UsageEventStatus.PROCESSED,
+        UsageEvent.occurred_at >= occurred_from,
+        UsageEvent.occurred_at < occurred_to,
+    ]
+
+
+def customer_usage_daily_statement(
+    tenant_id: int,
+    *,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> Select[tuple[object, ...]]:
+    """① Per Malaysian day: `COUNT(*)` and `SUM(billable_cost)`. No cost column is read."""
+    day = MalaysiaDay(UsageEvent.occurred_at)
+    return (
+        select(
+            day.label("day"),
+            func.count().label("request_count"),
+            func.coalesce(func.sum(UsageEvent.billable_cost), 0).label("charged_amount"),
+        )
+        .where(*_summary_conditions(tenant_id, occurred_from, occurred_to))
+        .group_by(day)
+        .order_by(day)
+        .prefix_with(f"/*+ MAX_EXECUTION_TIME({int(timeout_ms)}) */", dialect="mysql")
+    )
+
+
+def customer_usage_conversation_statement(
+    tenant_id: int,
+    *,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> Select[tuple[object, ...]]:
+    """② Distinct non-null `conversation_id` over the whole period (NULL is not counted)."""
+    return (
+        select(func.count(UsageEvent.conversation_id.distinct()))
+        .where(*_summary_conditions(tenant_id, occurred_from, occurred_to))
+        .prefix_with(f"/*+ MAX_EXECUTION_TIME({int(timeout_ms)}) */", dialect="mysql")
+    )
+
+
+def summarize_processed_events_for_customer(
+    session: Session,
+    tenant_id: int,
+    *,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> CustomerUsageSummary:
+    """Billed events of the tenant in `[occurred_from, occurred_to)`, per day and conversations.
+
+    两条 SELECT 用同一个会话、不提交：同一个连接、同一个事务（MySQL `REPEATABLE READ` 下同一个
+    快照），不加锁、不写。`timeout_ms` 只给测试用。任一条在 MySQL 上超时抛 `QueryTooBroad`；
+    其他数据库错误原样抛出。
+    """
+    period = {"occurred_from": occurred_from, "occurred_to": occurred_to, "timeout_ms": timeout_ms}
+    daily = _run_bounded(session, customer_usage_daily_statement(tenant_id, **period))
+    [(conversations,)] = _run_bounded(
+        session, customer_usage_conversation_statement(tenant_id, **period)
+    )
+    return CustomerUsageSummary(
+        days=[CustomerUsageDay(day, int(count), Decimal(amount)) for day, count, amount in daily],
+        conversation_count=int(conversations),
+    )
 
 
 __all__ = [
     "CUSTOMER_USAGE_QUERY_TIMEOUT_MS",
+    "CustomerUsageDay",
     "CustomerUsageRow",
+    "CustomerUsageSummary",
     "EventDetailRow",
     "EventListRow",
+    "MalaysiaDay",
     "QueryTooBroad",
     "conflict_recorded",
     "count_conflicts_since",
+    "customer_usage_conversation_statement",
+    "customer_usage_daily_statement",
     "customer_usage_statement",
     "find_event",
     "find_meter_type",
@@ -561,4 +698,5 @@ __all__ = [
     "list_events",
     "list_processed_events_for_customer",
     "scope_public_ids",
+    "summarize_processed_events_for_customer",
 ]
