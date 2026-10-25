@@ -6515,3 +6515,250 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-109
+    title: 低余额阈值第一层：管理员读取与设置客户低余额阈值的两个接口
+    purpose: >-
+      按 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）§2 接口一、接口二、低余额事件只对预付客户、数据库、事务边界、审计与 §8 第 1 步：新增 GET 与 PUT /api/v1/admin/customers/{customer_id}/low-balance-threshold，只有管理员可调；PUT 锁客户行、与现值比较，真实改动时阈值与一条 TENANT_LOW_BALANCE_THRESHOLD_SET 审计同一事务提交，同值不写；不改余额、不写账本与出站事件、不动 status_version；post_transaction 写低余额事件的条件加 billing_mode 为 PREPAID。docs/api.md 记新接口。不改表结构；客户侧字段属于 AIH-TASK-110，前端属于 AIH-TASK-111 与 112。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）逐条一致，以 §2 接口一、接口二、低余额事件只对预付客户、数据库、事务边界、外部系统与异步边界、时间、金额、审计，§3 INV-4、INV-8、INV-10、INV-13，§4，§5，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/admin_customers.py：两个处理函数第一条语句显式调用 require_admin，客户只来自路径；app/schemas/customers.py 新增请求模型（extra=forbid，必填键 low_balance_threshold，JSON 字符串匹配 [0-9]{1,12}(\.[0-9]{1,2})? 且大于 0，或显式 null；JSON 数字、0、负数、超位数、空白一律 422 且不回显值）与恰好一个键 low_balance_threshold 的响应模型（8 位小数字符串或 null，经 money_text）'
+      - 'app/repositories/tenancy.py 新增 set_low_balance_threshold（值相同返回 False、不碰 updated_at、不 flush；不同则赋值、改 updated_at、flush、返回 True），PROFILE_FIELDS 与 update_tenant_profile 不变；app/services/customers.py 新增读取与设置两个函数：设置在一个 session_scope 里用 _require_tenant(for_update=True) 锁客户行（不锁钱包），真实改动时写一条审计，before_state 与 after_state 都恰好是 public_id 与 low_balance_threshold 两个键；客户不存在 404 CUSTOMER_NOT_FOUND 且不写；app/repositories/wallet.py：post_transaction 里写 tenant.low_balance 的条件改为 tenant.billing_mode is BillingMode.PREPAID 且 crosses_low_balance(...) 为真，tenant 仍是 _lock_tenant 刷新过的行；crosses_low_balance 纯函数与 post_transaction 别的逻辑不改，tests/backend/test_wallet_rules.py 与 test_wallet_repository.py 的既有低余额用例照常通过'
+      - 'app/models/auth.py：AuditAction 在枚举末尾新增 TENANT_LOW_BALANCE_THRESHOLD_SET，注释写明设计闸门 #433 与写入方；frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 按同一声明顺序在末尾补上这一项（adminAudit.test.ts 会逐项比对后端枚举，缺了前端 CI 必红），该文件别的不动'
+      - '测试：新增 tests/backend/test_low_balance_threshold_api.py，覆盖设计 §7 第一张表除「鉴权」之外的全部行；契约对设计的勘误（只澄清任务切分，不放松任何检查）：「改阈值不补发」与「租户越权」两行里断言客户钱包 low_balance、low_balance_threshold 的那一半归 AIH-TASK-110（那两个键是它加的），本任务只断言这两行的事件与管理端 GET 部分（SQLite 与 MySQL 参数化；两条并发用例只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑，与记账的并发用例用 performance_schema.data_lock_waits 确认记账线程在等锁之后才提交设置事务，未设置时 skip、CI 必跑）；「鉴权」：tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES 加两条路由、VALID_BODIES 加 PUT 的合法请求体，别的不动；示例 uuid 用全零占位值'
+      - 'docs/api.md：在管理端客户相关小节之后新增「管理端低余额阈值」一节（请求、响应示例、字段规则、错误码、同值不写、不补发事件、与记账的先后关系），并把「编辑客户」与「不在本批接口里」里关于低余额阈值的过时说法改为指向新小节；docs/database-schema.md 把设置 low_balance_threshold 的管理入口归属说明改为指向新接口'
+      - '不改迁移与模型的列、不改 app/repositories/wallet.py 中上一条之外的任何代码、不改客户端接口与 app/schemas/customer_wallet.py；不改前端除 adminAudit.ts 之外的任何文件；不改 AI 模块；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #433'
+    allowed_change_paths:
+      - app/models/auth.py
+      - app/repositories/tenancy.py
+      - app/services/customers.py
+      - app/schemas/customers.py
+      - app/api/admin_customers.py
+      - app/repositories/wallet.py
+      - tests/backend/test_low_balance_threshold_api.py
+      - tests/backend/test_admin_customers_api.py
+      - frontend/src/api/adminAudit.ts
+      - docs/api.md
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-110
+    title: 低余额阈值第二层：客户钱包接口返回阈值与是否处于低余额
+    purpose: >-
+      按 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）§2 接口三与 §8 第 2 步：GET /api/v1/customer/wallet 在既有 6 个键之外加 low_balance_threshold 与 low_balance，恰好 8 个键；阈值与余额出自同一条 SELECT，low_balance 在后端用 Decimal 算出。docs/api.md 的客户钱包小节同步。只读，不改表结构；门户显示属于 AIH-TASK-112。
+    status: ready
+    depends_on:
+      - AIH-TASK-109
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）逐条一致，以 §2 接口三、金额，§3 INV-7、INV-8、INV-10，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/wallet.py：get_wallet_summary 仍是一条 tenants JOIN wallets 的 SELECT（不加锁、不写），多选 tenants.low_balance_threshold，WalletSummary 多一个字段；post_transaction、crosses_low_balance 与别的函数不改'
+      - 'app/schemas/customer_wallet.py：CustomerWalletView 恰好 currency、balance、billing_mode、billing_status、ai_service、ai_service_reason、low_balance_threshold、low_balance 八个键；low_balance_threshold 经 money_text 为 8 位小数字符串或 null；low_balance 只在 billing_mode 为 PREPAID、阈值非空且余额小于等于阈值时为 true，用 Decimal 比较，不经 float、不在 SQL 里算；流水模型与流水接口不改；app/api/customer.py 只在需要时改钱包处理函数的投影调用，鉴权与租户来源不变'
+      - '测试：tests/backend/test_customer_wallet_api.py 把既有恰好 6 个键的断言改为 8 个键，并覆盖设计 §7 客户钱包表除「同一快照」之外的全部行，另补设计 §7 第一张表「改阈值不补发」（余额 30、阈值 50 时 low_balance 为 true）与「租户越权」（只给 A 设阈值时 B 的钱包 low_balance_threshold 为 null）两行的客户钱包断言（SQLite 与 MySQL 参数化，阈值直接写库准备数据，不依赖 AIH-TASK-109 的接口）；「同一快照」写进 tests/backend/test_wallet_repository.py；泄漏检查继续断言钱包 version、status_version 与内部 id 不出现；既有用例照常通过'
+      - 'docs/api.md：客户钱包小节的响应示例、字段表与「恰好 N 个键」说明同步为 8 个键，写明 low_balance 的判定规则（PREPAID 才算、等号算低余额、内部计量恒为 false）与阈值只能由管理员设置'
+      - '不改迁移与模型、不改管理端接口、不改前端；不改 AI 模块；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #433'
+    allowed_change_paths:
+      - app/repositories/wallet.py
+      - app/schemas/customer_wallet.py
+      - app/api/customer.py
+      - tests/backend/test_customer_wallet_api.py
+      - tests/backend/test_wallet_repository.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-111
+    title: 低余额阈值第三层：管理端客户详情页查看与修改低余额阈值
+    purpose: >-
+      按 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）§2「前端」管理端一条与 §8 第 3 步：调用 AIH-TASK-109 的两个接口，在客户详情页加低余额阈值面板（显示当前值、修改、清除）。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-109
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端低余额阈值」一节为准（AIH-TASK-109 写入），显示规则以设计 §2「金额」「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/adminAudit.ts（审计动作已由 AIH-TASK-109 补上）与 frontend/src/components/MoneyText.tsx'
+      - 'frontend/src/api/adminCustomers.ts 新增读取与设置阈值的两个封装（设置时请求体恰好 low_balance_threshold 一个键，值为字符串或 null），既有封装不变；新增 frontend/src/features/customers/LowBalanceThresholdPanel.tsx：显示当前值（formatAmountRounded 按 2 位，未设置显示未设置）、修改（字符串输入，客户端按与后端相同的正则与大于 0 先校验，金额不转成 number）、清除（提交 null），保存成功后重读，失败显示 request_id'
+      - 'frontend/src/features/customers/CustomerDetailPage.tsx 在钱包卡附近挂上面板（按客户 id 重挂），其余区块不变；面板的加载中与失败不影响详情页其余部分'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts；页面不显示也不请求任何成本、毛利字段'
+      - '测试（vitest + Testing Library）：adminCustomers.test.ts 补两个封装的方法、路径与请求体；新增 LowBalanceThresholdPanel.test.tsx 覆盖显示（有值 2 位、未设置）、修改成功后重读、清除提交 null、客户端校验拦下 0、负数、3 位小数与非数字且不发请求、失败带 request_id；CustomerDetailPage.test.tsx 断言面板出现，既有用例照常通过；示例 uuid 全零'
+      - 'check_low_balance_threshold：排在 open_fixture 之后，在夹具客户详情页上找到低余额阈值面板；后端值取页面自己发出的 GET …/low-balance-threshold 的响应体（被动观察，不自己发请求），断言面板显示与响应一致（null 时显示未设置，否则等于按 2 位 ROUND_HALF_UP 舍入的值，脚本用字符串运算舍入）；不点修改或清除、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不勾任何项。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #433（本任务是纯前端，引用它只为让审查拿到接口与显示契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminCustomers.ts
+      - frontend/src/api/adminCustomers.test.ts
+      - frontend/src/features/customers/LowBalanceThresholdPanel.tsx
+      - frontend/src/features/customers/LowBalanceThresholdPanel.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_low_balance_threshold
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-112
+    title: 低余额阈值第四层：门户余额卡在低余额时显示提示与阈值金额
+    purpose: >-
+      按 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）§2「前端」门户一条与 §8 第 4 步：门户余额卡（钱包页与首页共用的 WalletSummaryCard）读 AIH-TASK-110 新增的 low_balance 与 low_balance_threshold，处于低余额时在卡内显示警告并带阈值金额（2 位）。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-110
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的客户钱包小节为准（AIH-TASK-110 写入），显示规则以设计 §2「金额」「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/routes/、frontend/src/layouts/ 与 frontend/src/components/MoneyText.tsx'
+      - 'frontend/src/api/customerWallet.ts 的 CustomerWallet 类型补 low_balance_threshold（字符串或 null）与 low_balance（布尔），封装与查询键不变；frontend/src/features/portal/WalletSummaryCard.tsx 只在 low_balance 为 true 时在卡内显示警告（文案说明余额已不高于提醒线，并带 formatAmountRounded 按 2 位显示的阈值与币种，请客户尽快充值；没有充值按钮），false 时不显示；判定只看 low_balance，不自己比较金额；卡的其余字段、加载中与失败状态不变'
+      - '页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：customerWallet.test.ts 的响应样例补两个键；WalletPage.test.tsx 覆盖 low_balance 为 true 时显示警告且阈值按 2 位显示、为 false（含阈值非空与 INTERNAL_METERED_ONLY）时不显示；PortalHomePage.test.tsx 的钱包样例补两个键并断言首页余额卡在 low_balance 为 true 时同样显示警告；AIH-TASK-100、101、106、108 的既有用例照常通过；示例 uuid 全零'
+      - 'check_portal_low_balance：在 login_customer 之后停留在门户首页；后端值取页面自己发出的 GET /api/v1/customer/wallet 的响应体（被动观察，不自己发请求），断言余额卡里的低余额警告在 low_balance 为 true 时存在且显示的阈值等于 low_balance_threshold 按 2 位 ROUND_HALF_UP 舍入后的值（脚本用字符串运算舍入，不经浮点），为 false 时不存在；不点链接、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤（含 check_portal_home、check_portal_dashboard 与 check_portal_wallet）行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不勾任何项（Phase 4「客户仪表盘」还缺最小恢复额）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #433（本任务是纯前端，引用它只为让审查拿到接口与显示契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerWallet.ts
+      - frontend/src/api/customerWallet.test.ts
+      - frontend/src/features/portal/WalletSummaryCard.tsx
+      - frontend/src/features/portal/WalletPage.test.tsx
+      - frontend/src/features/portal/PortalHomePage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_home
+        - check_portal_low_balance
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
