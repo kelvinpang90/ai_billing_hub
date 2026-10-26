@@ -6979,7 +6979,7 @@ tasks:
     title: 客户导出第五层：门户用量页的导出 CSV 按钮与下载辅助函数
     purpose: >-
       按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）§2「前端」与 §8 第 4 步：新增带令牌的文件下载辅助函数（axios blob、对象 URL、失败时从 blob 解析 JSON 信封），在门户用量页加导出 CSV 按钮，用当前已应用的筛选调用 AIH-TASK-115 的接口。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-115
     acceptance_criteria:
