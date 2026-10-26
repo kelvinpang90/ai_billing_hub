@@ -300,6 +300,11 @@ class AuditAction(enum.StrEnum):
     PORTAL_ACCOUNT_DISABLED = "PORTAL_ACCOUNT_DISABLED"
     PORTAL_ACCOUNT_ENABLED = "PORTAL_ACCOUNT_ENABLED"
     PORTAL_2FA_RESET = "PORTAL_2FA_RESET"
+    # AIH-TASK-109（设计闸门 #433 v2 §2「审计」）：写入方是 app/services/customers.py 的
+    # set_low_balance_threshold，与租户行的阈值同一事务，只在真实改动时写；`entity_type = tenant`。
+    # 不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。前后状态只有
+    # `public_id` 与 `low_balance_threshold`。
+    TENANT_LOW_BALANCE_THRESHOLD_SET = "TENANT_LOW_BALANCE_THRESHOLD_SET"
 
 
 class AuditLog(Base):

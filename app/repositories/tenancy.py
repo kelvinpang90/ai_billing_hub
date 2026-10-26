@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Callable, Mapping
+from decimal import Decimal
 from typing import Final
 
 from sqlalchemy import func, select, update
@@ -95,6 +96,22 @@ def update_tenant_profile(
         tenant.updated_at = now
         session.flush()
     return changed
+
+
+def set_low_balance_threshold(
+    session: Session, tenant: Tenant, *, threshold: Decimal | None, now: dt.datetime
+) -> bool:
+    """Set (or clear with `None`) the threshold; return whether it really changed.
+
+    设计闸门 #433 v2 §2「数据库」：值相同不碰 `updated_at`、不 flush。不动余额、钱包、
+    `status_version` 与 outbox；调用方须已持有租户行锁。`threshold` 由调用方 quantize 到 8 位。
+    """
+    if tenant.low_balance_threshold == threshold:
+        return False
+    tenant.low_balance_threshold = threshold
+    tenant.updated_at = now
+    session.flush()
+    return True
 
 
 def bump_status_version(

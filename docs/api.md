@@ -718,7 +718,8 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 - 空请求体 `{}` 返回 422。
 - 其他字段一律 422，包括 `billing_status`、`account_status`、`status_version`、`public_id`、`id`、
   `low_balance_threshold` 和余额。计费状态只随余额变化；账户状态只走
-  [`POST …/account-status`](#管理端账户状态)；低余额阈值、调账不走这个接口。
+  [`POST …/account-status`](#管理端账户状态)；低余额阈值走
+  [`PUT …/low-balance-threshold`](#管理端低余额阈值)；调账不走这个接口。
 - 客户不存在：404 `CUSTOMER_NOT_FOUND`，什么都不写。
 
 成功：**200**，`data` 是改后的客户详情。钱包只读不写。客户行与一条 `CUSTOMER_UPDATE`
@@ -754,8 +755,80 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 ### 不在本批接口里
 
-低余额阈值配置、删除客户与项目（财务记录永久保留）、关户（`→ CLOSED`，
-见下一节末尾）。账户状态、管理员调账、API 凭据、项目集成状态与状态 webhook 地址见后面几节。
+删除客户与项目（财务记录永久保留）、关户（`→ CLOSED`，见[管理端账户状态](#管理端账户状态)末尾）。
+低余额阈值见[下一节](#管理端低余额阈值)；账户状态、管理员调账、API 凭据、项目集成状态与状态 webhook
+地址见后面几节。
+
+---
+
+## 管理端低余额阈值
+
+设计依据：设计闸门 #433 `APPROVED: design v2`，全文见 [design/AIH-TASK-109-low-balance-threshold.md](design/AIH-TASK-109-low-balance-threshold.md)（spec §48、§56、§7 第 11 条）。实现登记为 AIH-TASK-109。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/customers/{customer_id}/low-balance-threshold` | 200，阈值对象 | 401 / 403 / 404 / 503 |
+| `PUT /api/v1/admin/customers/{customer_id}/low-balance-threshold` | 200，阈值对象 | 401 / 403 / 404 / 422 / 500 / 503 |
+
+两个接口都只有 ADMIN 能调；客户只来自路径里的 `{customer_id}`（`public_id`）。客户不存在：404
+`CUSTOMER_NOT_FOUND`，什么都不写。客户的账户状态（含 `DISABLED`）与计费模式（含 `INTERNAL_METERED_ONLY`）
+都不拦。客户自己只读，门户没有修改入口。
+
+### 阈值对象
+
+`data` 恰好一个键：
+
+```json
+{ "low_balance_threshold": "50.00000000" }
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `low_balance_threshold` | 恰好 8 位小数的字符串；未设置（不提醒）为 `null`。新客户与现有客户默认都是 `null` |
+
+### `GET …/low-balance-threshold` —— 读取
+
+成功：**200**，`data` 是阈值对象。只读，不加锁，不写审计。
+
+### `PUT …/low-balance-threshold` —— 设置或清除
+
+请求体 `{"low_balance_threshold": "50.00"}`，或 `{"low_balance_threshold": null}` 表示清除。
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `low_balance_threshold` | 是（可为 `null`） | JSON 字符串，匹配 `[0-9]{1,12}(\.[0-9]{1,2})?`（整数最多 12 位、小数最多 2 位），且大于 0；或显式 `null` |
+
+- 键缺失、JSON 数字、负数、`"0"` / `"0.00"`、超过 2 位小数、超过 12 位整数、空串、前后带空白、`"5."`、
+  `".5"`、全角数字：一律 422 `VALIDATION_ERROR`，文案只列字段名、不回显值。不舍入，超出直接 422。
+- 不收 0：余额 ≤ 0 已经是 `SUSPENDED`；不想提醒用 `null`。
+- 其他字段一律 422：请求体不能带 `tenant_id`、`customer_id` 之类。
+- 不要求 `reason`：前后值都进审计。
+
+成功：**200**，`data` 是改后的阈值对象。客户行在事务内加锁（只锁客户行，不锁钱包），与现值比较：
+
+- **真实改动**：阈值与 `updated_at` 的 UPDATE 和一条 `TENANT_LOW_BALANCE_THRESHOLD_SET` 审计同一事务提交，
+  要么都在、要么都不在（审计写入失败时 500 带 `request_id`，阈值不变）。审计 `entity_type = tenant`、
+  `entity_id` 为客户 `public_id`，带 IP 与 UA；`before_state` / `after_state` 都恰好是
+  `{"public_id": …, "low_balance_threshold": "50.00000000" 或 null}`。
+- **同值不写**：与现值相同（含 `"50"` 与 `"50.00"`、两边都是 `null`）时返回 200 与当前值，不写库、不写审计，
+  `updated_at` 不变。PUT 是设置语义，重放天然幂等，没有幂等键。
+
+不改余额、不写账本、不写 `domain_outbox`、不动 `status_version`（阈值不在状态快照里，不发状态 webhook）。
+
+### 低余额事件
+
+- **不补发**：把阈值调到当前余额之上（例如余额 30、阈值改成 50）**不**写 `tenant.low_balance`。这个事件只由
+  记账跨越触发：某一笔记账把余额从阈值之上（`>`）压到阈值及以下（`≤`）时写恰好一条；余额回到阈值之上后，
+  下一次跌破再写一条（重新武装）。
+- **只对 `PREPAID` 客户**：`INTERNAL_METERED_ONLY` 客户无论阈值如何都不写这个事件（管理员调账照样记账，但不触发）。
+- 事件仍无处理器，以 `PENDING` 持久等待，不计入告警的 `outbox_backlog`。
+
+### 与记账的先后关系
+
+记账（`post_transaction`）按钱包 → 客户行的顺序加锁，在客户行锁内读阈值与计费模式；设置只锁客户行，二者串行、
+不成环。设置先拿到锁：记账等它提交，按新值判定；记账先拿到锁：设置等记账提交，那一笔按旧值判定。提交即生效，
+没有生效时间，已提交的记账不回溯。同一客户的两次设置按锁顺序串行，最后提交的为准，每条审计的前后值对应它
+自己那一次改动。锁等待超时或死锁：500 `INTERNAL_ERROR` 带 `request_id`，整体回滚，管理员重新提交即可。
 
 ---
 
