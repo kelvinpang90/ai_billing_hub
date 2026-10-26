@@ -13,6 +13,9 @@
  * 本月用量卡（AIH-TASK-108，设计闸门 #403 v1 §7 前端一行）同样在 `client.get` 上按路径回应：三个数字与月份标题、
  * 计费额 6 位、柱高比例（全零时不除以零）、柱的提示、加载中 / 失败 / `QUERY_TOO_BROAD` 三种状态下余额卡与开启
  * 2FA 照常显示、请求不带查询串也不碰 `/api/v1/admin/`。
+ *
+ * 低余额警告（AIH-TASK-112，设计闸门 #433 v2）：首页的余额卡与钱包页是同一张卡，`low_balance` 为 `true` 时同样
+ * 在卡内显示警告。显示规则的其余用例在 `WalletPage.test.tsx`。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -106,6 +109,8 @@ function wallet(overrides: Partial<CustomerWallet> = {}): CustomerWallet {
     billing_status: "ACTIVE",
     ai_service: "ALLOW_AI",
     ai_service_reason: null,
+    low_balance_threshold: null,
+    low_balance: false,
     ...overrides,
   };
 }
@@ -481,6 +486,33 @@ describe("PortalHomePage wallet summary and recent transactions", () => {
     expect(await screen.findByText("Your transactions could not be loaded.")).toBeInTheDocument();
     expect(await screen.findByText("MYR 12.46")).toBeInTheDocument();
     expect(screen.getByText("Example Sdn Bhd")).toBeInTheDocument();
+  });
+
+  it("warns inside the balance card on the home page too when the balance is low", async () => {
+    customerApi.getCustomerMe.mockResolvedValue(account());
+    serve(wallet({ low_balance_threshold: "50.00000000", low_balance: true }), page([]));
+
+    renderPortal();
+
+    const card = await screen.findByRole("region", { name: "Your wallet" });
+    const alert = await within(card).findByRole("alert");
+    expect(within(alert).getByText("Low balance")).toBeInTheDocument();
+    expect(alert).toHaveTextContent("Your balance is at or below your low balance alert of MYR 50.00. Please top up soon.");
+    expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(alert).queryByRole("link")).not.toBeInTheDocument();
+    expect(valueOf("Balance")).toBe("MYR 12.46");
+  });
+
+  it("shows no low balance warning on the home page when low_balance is false", async () => {
+    customerApi.getCustomerMe.mockResolvedValue(account());
+    serve(wallet({ balance: "80.00000000", low_balance_threshold: "50.00000000", low_balance: false }), page([]));
+
+    renderPortal();
+
+    const card = await screen.findByRole("region", { name: "Your wallet" });
+    await within(card).findByText("MYR 80.00");
+    expect(within(card).queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("Low balance")).not.toBeInTheDocument();
   });
 
   it("shows no internal field in the wallet blocks either", async () => {
