@@ -6762,3 +6762,351 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-113
+    title: 客户导出第一层：钱包流水按租户与记账时间的索引迁移
+    purpose: >-
+      按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）§2「数据库」与 §8 第 1 步：新迁移 0027 给 wallet_transactions 加非唯一索引 ix_wallet_transactions_tenant_created (tenant_id, created_at, wallet_sequence)，写法照 0026：upgrade 先检查、可以安全重跑；模型同步声明；docs/database-schema.md 记索引。不加接口，接口属于 AIH-TASK-116。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）逐条一致，以 §2「数据库」、§3 INV-4 与 INV-5、§5 的迁移失败一行、§7 迁移表与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261026_0027_wallet_transactions_created_index.py，revision 为 0027_wallet_tx_created_index，down_revision 为 0026_usage_customer_indexes；文件头按 0026 迁移的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理的三个窗口、回滚），并写明建索引不改行、不碰 wallet_transactions 的触发器'
+      - 'upgrade：先用 SQLAlchemy inspector 读 wallet_transactions 的索引，目标名判为不存在、形状正确（非唯一、列恰好按序为 tenant_id、created_at、wallet_sequence、没有前缀长度）或形状不对；形状不对就抛错（消息点名该索引与处理方法）且不发任何 DDL；MySQL 上缺时经 op.execute 发一条 ALTER TABLE wallet_transactions ADD INDEX，已存在且形状正确时不发 DDL；SQLite 用 op.create_index。downgrade 只在存在时删，MySQL 上一条 ALTER TABLE wallet_transactions DROP INDEX，不存在时不发 DDL'
+      - 'app/models/wallet.py 的 WalletTransaction.__table_args__ 同步声明这个 Index（名称与列顺序与迁移一致），不改任何列、约束、触发器与既有索引；tests/backend/test_migrations.py 的模型与迁移比对照常通过'
+      - '测试：新增 tests/backend/test_wallet_created_index_migration.py，覆盖设计 §7 迁移表全部行，写法照 tests/backend/test_usage_customer_index_migration.py：迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑；0006 起的迁移先查 @@log_bin，迁移链在 SQLite 上跑不起来），SQLite 上只用模型 metadata 建表后断言索引存在、列顺序正确、非唯一；「迁移往返」另断言 wallet_transactions 的触发器仍在、流水与钱包行不变；捕获执行语句的断言不写死方言字面量以外的格式（CLAUDE.md「写后端测试的约定」）'
+      - 'docs/database-schema.md 的 wallet_transactions 一节补这个索引（名称、列、用途：客户按记账日期导出钱包流水，设计闸门 #435）'
+      - '不改接口、schema、repository 与前端；不改 AI 模块；不改既有迁移文件'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #435'
+    allowed_change_paths:
+      - alembic/versions/20261026_0027_wallet_transactions_created_index.py
+      - app/models/wallet.py
+      - tests/backend/test_wallet_created_index_migration.py
+      - tests/backend/test_migrations.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-114
+    title: 客户导出第二层：CSV 格式模块、导出租约中间件与代理不缓冲配置
+    purpose: >-
+      按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）§2「CSV 格式」「上限与资源边界」与 §8 第 2 步的前一半：新模块 app/core/csv_export.py（RFC 4180、BOM、公式注入防护、行数上限 20 000、进程级导出租约、分段发送的 ExportCsvResponse、三个导出错误、最外层释放租约的纯 ASGI 中间件 ExportLeaseMiddleware），app/main.py 把中间件挂在最外层，deploy/nginx/billing.conf 让导出响应不经代理缓冲，docs/deployment.md 记资源与代理说明。不加接口：用量导出接口属于 AIH-TASK-115，钱包导出属于 AIH-TASK-116，前端属于 AIH-TASK-117 与 118。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）逐条一致，以 §2「CSV 格式」「上限与资源边界」（「所有错误响应都在租约内发出」里处理函数的写法除外，那属于 AIH-TASK-115）、§3 INV-1、§6「留存」为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计；tracemalloc 测得峰值超过 128 MiB 时停下说明，不自行调低上限或行数。本任务与 AIH-TASK-115 合起来是设计 §8 第 2 步：登记前预审估计第 2 步约 2 000 行，按拆分规则拆成两层，本任务只交付模块、中间件、代理配置与它们的单元测试，接口一属于 AIH-TASK-115。契约对设计的勘误（只澄清设计内部的措辞与实现位置，不放松任何检查）：①设计 §2「CSV 格式」末条「模块只有纯函数，不碰数据库、不打日志」指写 CSV 与构造附件响应的函数；同一模块里的导出租约按 §2「上限与资源边界」记 customer_export_lease_held_long 警告日志，两者不冲突；②BOM 只在编码成字节时加（例如 encode 时用 utf-8-sig，或在编码后的字节前拼上 BOM 的三个字节），不写进 StringIO：U+FEFF 是非 Latin-1 字符，写进去会让整段文本按双字节存储，20 000 行的峰值会超过 128 MiB（登记前预审的估算）'
+      - 'app/core/csv_export.py：只有纯函数与常量，不碰数据库、不打日志；EXPORT_MAX_ROWS = 20000、EXPORT_MAX_CONCURRENT = 1、EXPORT_LEASE_WARN_SECONDS = 120 与进程级导出租约（threading.Lock 保护的当前 token 与获取时刻；不阻塞获取，被占用就返回 None，没有按时间的过期与接管；被占用超过 120 秒时获取失败记一条 customer_export_lease_held_long 警告日志，只带 request_id、每个持有者只记一次；释放只认当前 token）；纯 ASGI 中间件 ExportLeaseMiddleware 对每个 HTTP 请求在 scope 里放一个租约槽（键 acuven.export_lease），在 try / finally 里等待内层应用，finally 里释放槽里的 token（没有就无操作）；写 CSV 的函数（签名 write_csv(columns, rows, text_columns) -> bytes：columns 是表头列名序列，rows 是可迭代的行、每行是与 columns 等长、按同一顺序排好的单元格，单元格只能是 str 或 None；把时间、整数、金额变成字符串，以及 occurred_at 到 occurred_at_utc、created_at 到 created_at_utc 的改名，都由调用方 AIH-TASK-115、116 用白名单视图按 JSON 序列化后的值完成，本模块不做类型转换，遇到 str 与 None 之外的值抛 TypeError）按给定列顺序输出 BOM、表头与各行（QUOTE_MINIMAL、行尾 CRLF、空值为空字段），只对调用方声明的文本列在值以 =、+、-、@、制表符、回车开头时前加单引号；构造附件响应的函数返回 ExportCsvResponse：覆写 ASGI __call__，先发带 Content-Length 的 http.response.start，再把字节按 EXPORT_SEND_CHUNK_BYTES = 65536 用 memoryview 切片逐条发 body（只有最后一条 more_body 为 False，空文件也走同一路径），响应头为 text/csv; charset=utf-8、Content-Disposition attachment（文件名只含 ASCII 字母、数字、-、_、.）、Cache-Control: no-store 与 X-Accel-Buffering: no；EXPORT_TOO_LARGE（422）、EXPORT_BUSY（503，Retry-After: 5）与 CustomerExportFailed（500，code 为 INTERNAL_ERROR）三个错误按现有 AppError 写法定义，文案固定、不回显值'
+      - 'app/main.py：把 ExportLeaseMiddleware 作为最后一个 add_middleware（最外层），既有中间件、异常处理器与路由的注册与顺序不变；本任务不新增任何路由，ExportLeaseMiddleware 对没有放进 token 的请求什么都不做'
+      - 'deploy/nginx/billing.conf 的 location /api/ 块加一行 proxy_pass_header X-Accel-Buffering;（让本层与外层共享代理都对导出响应关闭缓冲、不写临时文件），别的不动；tests/backend/test_compose.py 只改 test_every_proxied_location_forwards_the_correlation_id 的计数：只数 proxy_pass 指令本身（不把 proxy_pass_header 算进去），断言含义不变，别的用例不动；docs/deployment.md §3.3 的资源限额说明补一句（API 进程里同一时刻至多一个客户导出、峰值 ≤ 128 MiB，改成多进程时按进程数重算；导出依赖两层 nginx 照 X-Accel-Buffering 关闭缓冲，改外层代理时要核对），别的不动'
+      - '测试：新增 tests/backend/test_csv_export.py，覆盖设计 §7 用量导出表里 unit 层的行：CSV 转义、公式注入六种前缀与非前缀、上限常量（EXPORT_MAX_ROWS 为 20 000；查询的 limit 是它 + 1 那一句属于 AIH-TASK-115）、并发上限的单元部分（获取、被占返回 None、释放后可再获取）、中间件顺序（检查 create_app() 的 user_middleware）、不接管、槽只释放自己的 token、分段发送、代理配置、tracemalloc 内存上界（20 000 个最长形态 CustomerUsageRow 经 app/schemas/customer_usage.py 现有的 18 键投影走完 write_csv 与编码；投影函数只调用、不改）；CustomerExportFailed 的「抛出的错误不链回原异常」属于 AIH-TASK-115；示例 uuid 用全零占位值'
+      - '不改 app/api/、app/schemas/、app/repositories/、迁移与模型，不加路由，不改前端、不改 AI 模块；不装依赖（只用标准库 csv、io、threading、time、tracemalloc 与已有的 Starlette）；deploy/nginx/billing.conf 与 tests/backend/test_compose.py 只做上一条写明的改动'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #435'
+    allowed_change_paths:
+      - app/core/csv_export.py
+      - app/main.py
+      - tests/backend/test_csv_export.py
+      - deploy/nginx/billing.conf
+      - tests/backend/test_compose.py
+      - docs/deployment.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-115
+    title: 客户导出第三层：客户已计费用量的 CSV 导出接口
+    purpose: >-
+      按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）§2 接口一、「所有错误响应都在租约内发出」与 §8 第 2 步的后一半：新增 GET /api/v1/customer/usage-events/export，筛选与用量页相同、日期恒必填，复用 list_processed_events_for_customer 与 18 键白名单，用 AIH-TASK-114 的 CSV 模块、导出租约与 ExportCsvResponse。docs/api.md 新增「客户导出」一节。只读；钱包导出属于 AIH-TASK-116，前端属于 AIH-TASK-117。
+    status: ready
+    depends_on:
+      - AIH-TASK-114
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）逐条一致，以 §2 接口一、「上限与资源边界」里「所有错误响应都在租约内发出」一条、事务边界、时间、金额，§3 INV-1、INV-7、INV-8、INV-10，§5，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 AIH-TASK-114 已交付 app/core/csv_export.py（写 CSV、ExportCsvResponse、三个导出错误、导出租约与 ExportLeaseMiddleware）且 app/main.py 已把中间件挂在最外层；任何一项缺失或形状不同时停下说明，不自行补。契约对设计的勘误（只澄清设计内部的措辞，不放松任何检查）：②§2「所有错误响应都在租约内发出」里转成 CustomerExportFailed 的「其他任何 Exception」不含 AppError：EXPORT_TOO_LARGE、CustomerUsageQueryTooBroad 等 AppError 先 except AppError 原样重新抛出，照旧得到各自的 422 / 503；③设计 §5「数据库不可用 → 503（现有处理）」与现有代码不符：客户接口没有把查询时的连接错误映射成 503（DatabaseUnavailable 只用于 /readyz 的就绪检查），导出里它与其他意外错误一样得到 500 CustomerExportFailed，照此实现，docs/api.md 的错误码表也写 500'
+      - 'app/api/customer.py：处理函数第一条语句显式调用 require_customer，租户只取 CustomerPrincipal.tenant_id；参数与校验复用用量页的类型与 usage_period，但 from_date、to_date 恒必填（带 event_id 也要），没有 page_size 与 cursor；在任何查询之前不阻塞地获取导出租约，拿不到 503 EXPORT_BUSY 且不发查询；拿到后只把 token 放进 request.scope 里的租约槽，之后不在任何地方释放（唯一的释放点是最外层中间件的 finally）；从拿到租约起查询、投影、拼 CSV 放进一个 try：QueryTooBroad 照旧转换，其他 Exception 在 except 里记 customer_export_failed（带栈、不带参数值）并只设标志，离开 except 块、置空持有数据的局部变量后抛 CustomerExportFailed（AppError，500 INTERNAL_ERROR，信封与通用 500 相同），不捕获 BaseException；调用现有 list_processed_events_for_customer(limit=EXPORT_MAX_ROWS + 1)，多于 20 000 行 422 EXPORT_TOO_LARGE，QueryTooBroad 沿用现有转换与 customer_usage_query_timeout 日志；app/schemas/customer_usage.py 只在需要时补导出用的列清单，值一律经 #398 的 18 键白名单投影得到，时间列名为 occurred_at_utc、值同 occurred_at；文件名 usage-events_<from_date>_<to_date>.csv；既有三个客户用量接口行为不变'
+      - '测试：新增 tests/backend/test_customer_usage_export_api.py 覆盖设计 §7 用量导出表里 integration 层的行（SQLite 与 MySQL 参数化；「扫描上限」在 MySQL 上写入 30 000 条事件并用测试专用 1 毫秒超时；「上限常量」里查询的 limit 是 EXPORT_MAX_ROWS + 1 那一句；并发上限的接口部分断言占住租约时 503 且未发用量查询；「发送阶段持有租约（经真实中间件栈）」「断开与取消」「意外错误的 500 在租约内发出」用 create_app 建的真实应用以 ASGI 方式直接调用，暂停或打断最外层 send；「抛出的错误不链回原异常」；「慢读连接持有租约（真实 uvicorn）」在测试线程里起 uvicorn.Server 绑本机随机端口、用原始 socket 慢读，测试结束关闭服务）；MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 用全零占位值'
+      - 'tests/backend/test_customer_api.py：只把新路由加进显式的客户路由清单，别的不动；匿名 401、ADMIN 403 的守卫用例照常通过'
+      - 'docs/api.md：新增「客户导出」一节：CSV 格式（编码、BOM、表头、空值、金额 8 位、时间为 UTC、公式注入前缀规则）、行数上限与 EXPORT_TOO_LARGE、同一时刻只有一个导出在生成或下载与 EXPORT_BUSY（导出响应带 X-Accel-Buffering: no、不经代理缓冲，所以租约一直占到客户端读完）、用量导出的参数与列、与用量页的差别（日期恒必填）、错误码（数据库连接错误为 500）；不写主机名'
+      - '不改 app/core/csv_export.py 与 app/main.py（模块与中间件已由 AIH-TASK-114 交付，发现它们有缺陷时停下说明）、不改迁移与模型、不改钱包相关代码、不改前端、不改管理端接口、不改 nginx 配置；不改 AI 模块；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #435'
+    allowed_change_paths:
+      - app/api/customer.py
+      - app/schemas/customer_usage.py
+      - tests/backend/test_customer_usage_export_api.py
+      - tests/backend/test_customer_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-116
+    title: 客户导出第四层：客户钱包流水按记账日期的 CSV 导出接口
+    purpose: >-
+      按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）§2 接口二与 §8 第 3 步：新增 GET /api/v1/customer/wallet/transactions/export（from_date、to_date 必填，马来西亚日期按 created_at 取，最多 92 天），app/repositories/wallet.py 新增 list_transactions_for_customer_export（一条 SELECT、按 wallet_sequence 倒序、不 JOIN 用户表、2 秒预算），复用 AIH-TASK-114 的 CSV 模块（与 AIH-TASK-115 用量导出接口的写法）与并发上限、#393 的 7 键白名单。docs/api.md 补钱包导出。只读；前端属于 AIH-TASK-118。
+    status: ready
+    depends_on:
+      - AIH-TASK-113
+      - AIH-TASK-115
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）逐条一致，以 §2 接口二、CSV 格式、上限与资源边界、事务边界、时间、金额，§3 INV-1、INV-7、INV-8、INV-10，§5，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。契约对设计的勘误（澄清设计没写定的顺序与投影接口，不放松任何检查）：①get_wallet_for_tenant 的钱包存在性检查在获取导出租约之前做，查不到照 #393 抛 RuntimeError(WALLET_MISSING)，不经 CustomerExportFailed；②导出 SELECT 的结果用 app/repositories/wallet.py 新增的 NamedTuple（只含所选的 8 列），app/schemas/customer_wallet.py 抽出一个只读 public_id、wallet_sequence、transaction_type、amount、balance_after、reference_type、reference_id、created_at 这 8 个属性的共用映射，既有的 customer_wallet_transaction_view 改为调用它、行为与输出不变，导出与流水接口只有这一份 7 键白名单映射；③设计 §5「数据库不可用 → 503（现有处理）」与现有代码不符：客户接口没有把查询时的连接错误映射成 503（DatabaseUnavailable 只用于 /readyz 的就绪检查），导出里它与其他意外错误一样得到 500 CustomerExportFailed，照此实现，docs/api.md 的错误码表也写 500。开工前核对 AIH-TASK-113 的索引与 AIH-TASK-114 的 app/core/csv_export.py（写 CSV、附件响应、两个错误、导出租约与 ExportLeaseMiddleware）已交付；任何一项缺失或形状不同时停下说明，不自行补'
+      - 'app/repositories/wallet.py：新增 list_transactions_for_customer_export(session, tenant_id, *, created_from, created_to, limit, timeout_ms)：一条 SELECT，WHERE tenant_id 与 created_at 区间恒在，ORDER BY wallet_sequence DESC，LIMIT limit，只选 public_id、wallet_sequence、transaction_type、amount、balance_after、reference_type、reference_id、created_at，不 JOIN users、不选 description、metadata_json、balance_before，不加锁；MySQL 上带 MAX_EXECUTION_TIME 提示，常量、QueryTooBroad 与 3024 转换复用 app/repositories/usage_events.py 的（必要时只把转换函数改为可被导入，行为不变），SQLite 上不带提示；既有函数不改'
+      - 'app/api/customer.py：处理函数第一条语句显式调用 require_customer；from_date、to_date 必填、规则同用量导出，经 usage_period(has_event_id=False) 换成 UTC 区间；先用现有 get_wallet_for_tenant 确认钱包存在，查不到抛 RuntimeError(WALLET_MISSING)；导出租约（获取后放进租约槽、不自行释放）、意外错误转 CustomerExportFailed 的写法、行数上限、QUERY_TOO_BROAD 与 customer_usage_query_timeout 日志的处理与用量导出相同；app/schemas/customer_wallet.py 只在需要时补导出用的列清单与映射，值与流水接口每项的同名键相同（event_id 只在 reference_type 为 USAGE_EVENT 时有值），时间列名 created_at_utc；文件名 wallet-transactions_<from_date>_<to_date>.csv；既有钱包接口行为不变'
+      - '测试：新增 tests/backend/test_customer_wallet_export_api.py 覆盖设计 §7 钱包导出表全部行（SQLite 与 MySQL 参数化；「扫描上限」在 MySQL 上写入 30 000 笔流水并用测试专用 1 毫秒超时；「不读敏感列」只断言方言无关的片段）；MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 用全零占位值'
+      - 'tests/backend/test_customer_api.py：只把新路由加进显式的客户路由清单，别的不动'
+      - 'docs/api.md：在「客户导出」一节补钱包流水导出的参数、列、按记账时间取（与用量导出按发生时间取的区别）、排序按序号、错误码'
+      - '不改迁移与模型、不改 app/core/csv_export.py 的对外行为、不改前端、不改管理端接口；不改 AI 模块；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #435'
+    allowed_change_paths:
+      - app/repositories/wallet.py
+      - app/repositories/usage_events.py
+      - app/schemas/customer_wallet.py
+      - app/api/customer.py
+      - tests/backend/test_customer_wallet_export_api.py
+      - tests/backend/test_customer_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-117
+    title: 客户导出第五层：门户用量页的导出 CSV 按钮与下载辅助函数
+    purpose: >-
+      按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）§2「前端」与 §8 第 4 步：新增带令牌的文件下载辅助函数（axios blob、对象 URL、失败时从 blob 解析 JSON 信封），在门户用量页加导出 CSV 按钮，用当前已应用的筛选调用 AIH-TASK-115 的接口。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-115
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「客户导出」一节为准（AIH-TASK-115 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/routes/、frontend/src/layouts/'
+      - '新增 frontend/src/api/download.ts：经现有 client（拦截器负责令牌与刷新）以 responseType blob 取文件；成功时用对象 URL 触发下载并在之后释放 URL，文件名取自 Content-Disposition，取不到时用调用方给的文件名；失败时把 blob 读成文本按 JSON 信封解析出 error.code 与 request_id，抛出与 toApiError 同形的 ApiError，解析不了时为 MALFORMED_RESPONSE；不打日志'
+      - 'frontend/src/api/customerUsage.ts 新增导出封装（只带已应用的筛选，空值不进查询串，不传任何租户或客户标识），既有封装不变；frontend/src/features/portal/UsagePage.tsx 加导出 CSV 按钮：用页面当前已应用的筛选，日期区间无效时不可用，导出中显示加载且不可重复点击，EXPORT_TOO_LARGE、QUERY_TOO_BROAD、EXPORT_BUSY 各有专门文案，其余失败显示 request_id；列表、筛选与翻页行为不变'
+      - '页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：新增 download.test.ts 覆盖成功（对象 URL 创建与释放、文件名两种来源）与失败（blob 里的信封解析出错误码与 request_id、坏 JSON 为 MALFORMED_RESPONSE）；customerUsage.test.ts 补导出封装的路径与查询串；UsagePage.test.tsx 覆盖按钮用当前筛选、日期无效不可用、加载状态、三种专门文案与 request_id；AIH-TASK-105、106 的既有用例照常通过；示例 uuid 全零'
+      - 'check_portal_usage_export：排在 check_portal_usage 之后，在门户用量页上找到导出 CSV 按钮，断言它存在且处于可用状态；不点击、不下载、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不勾任何项。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #435（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/download.ts
+      - frontend/src/api/download.test.ts
+      - frontend/src/api/customerUsage.ts
+      - frontend/src/api/customerUsage.test.ts
+      - frontend/src/features/portal/UsagePage.tsx
+      - frontend/src/features/portal/UsagePage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_home
+        - check_portal_usage
+        - check_portal_usage_export
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-118
+    title: 客户导出第六层：门户钱包页按日期区间导出流水 CSV
+    purpose: >-
+      按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v8）§2「前端」与 §8 第 5 步：门户钱包页在流水上方加导出区（日期区间默认本马来西亚月 1 日到今天，导出 CSV 按钮），调用 AIH-TASK-116 的接口，复用 AIH-TASK-117 的下载辅助函数。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-116
+      - AIH-TASK-117
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「客户导出」一节为准（AIH-TASK-115、116 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts、frontend/src/routes/、frontend/src/layouts/'
+      - 'frontend/src/api/customerWallet.ts 新增导出封装（只带 from_date、to_date，不传任何租户或客户标识），既有封装不变；frontend/src/features/portal/WalletPage.tsx 在流水上方加导出区：日期区间（默认本马来西亚月 1 日到今天，按 UTC 加 8 小时取今天）与导出 CSV 按钮，区间无效或超过 92 天时不可用，导出中显示加载且不可重复点击，EXPORT_TOO_LARGE、QUERY_TOO_BROAD、EXPORT_BUSY 各有专门文案，其余失败显示 request_id；余额卡与流水列表、翻页行为不变'
+      - '页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：customerWallet.test.ts 补导出封装的路径与查询串；WalletPage.test.tsx 覆盖默认日期（固定系统时间，含 UTC 与马来西亚跨日的时刻）、区间无效与超过 92 天不可用、加载状态、三种专门文案与 request_id；AIH-TASK-100、112 的既有用例照常通过；示例 uuid 全零'
+      - 'check_portal_wallet_export：排在 check_portal_wallet 之后，在门户钱包页上找到导出区与导出 CSV 按钮，断言按钮存在且处于可用状态；不点击、不下载、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不勾任何项（Phase 5「客户端用量导出」还缺 Excel、会话摘要与月度汇总导出）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #435（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerWallet.ts
+      - frontend/src/api/customerWallet.test.ts
+      - frontend/src/features/portal/WalletPage.tsx
+      - frontend/src/features/portal/WalletPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_home
+        - check_portal_wallet
+        - check_portal_wallet_export
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
