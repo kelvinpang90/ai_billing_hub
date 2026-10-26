@@ -37,6 +37,7 @@ from app.api.two_factor import router as two_factor_router
 from app.core.celery_app import RedisNotConfigured, create_celery_app
 from app.core.clientip import parse_trusted_proxies
 from app.core.config import Settings, get_settings
+from app.core.csv_export import ExportLeaseMiddleware
 from app.core.database import (
     DatabaseNotConfigured,
     create_database_engine,
@@ -160,6 +161,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。
     app.include_router(internal_alerts_router)
     app.include_router(ai_messages_router)
+    # ⚠️ 必须是最后一个 add_middleware（最外层）：客户导出的租约只在这里、整个请求结束时释放
+    # （设计闸门 #435 v10 §2「上限与资源边界」）。没有放进 token 的请求它什么都不做。
+    app.add_middleware(ExportLeaseMiddleware)
 
     app.state.settings = settings
     # 进程内限流兜底（主控是 nginx 的 limit_req，见 deploy/nginx/billing.conf）。

@@ -166,8 +166,9 @@ def test_every_proxied_location_forwards_the_correlation_id() -> None:
     assert "proxy_set_header X-Request-ID" in instructions(NGINX_HEADERS)
 
     # 每个 proxy_pass 都必须配一条 include，否则那个 location 少转发头。
+    # 只数 proxy_pass 指令本身，`proxy_pass_header` 不算。
     conf = instructions(NGINX_CONF)
-    assert conf.count("proxy_pass") == conf.count(
+    assert len(re.findall(r"\bproxy_pass\s", conf)) == conf.count(
         "include /etc/nginx/conf.d/billing-proxy-headers.inc;"
     )
 
