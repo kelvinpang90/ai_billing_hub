@@ -77,8 +77,10 @@
 **计费状态由余额驱动**（spec §7 第 8–10 条、§24；设计闸门 #88）：余额 > 0 为 `ACTIVE`，≤ 0 为
 `SUSPENDED`，**正好为 0 也是暂停**。新租户余额为 0，所以默认 `SUSPENDED`。`billing_status` 只经
 `app/repositories/wallet.py` 的 `post_transaction` 改变，与账本行同一事务提交；只有真正跃迁时才经
-`bump_status_version` 给 `status_version` +1。设置 `low_balance_threshold` 的管理入口（spec §56）归客户管理
-服务任务。
+`bump_status_version` 给 `status_version` +1。设置 `low_balance_threshold` 的管理入口（spec §56）是
+`PUT /api/v1/admin/customers/{customer_id}/low-balance-threshold`（AIH-TASK-109，设计闸门 #433 v2），见
+[api.md「管理端低余额阈值」](api.md#管理端低余额阈值)；它只写这一列与 `updated_at`，不动余额与 `status_version`。
+「大于 0、最多 2 位小数」只在接口层校验，库约束仍是 `NULL` 或 `>= 0`。
 
 **账户状态由管理员控制**（spec §24、§56；设计闸门 #136 v2，AIH-TASK-020）：与计费状态互相独立，共用
 `status_version`。只经 `app/services/account_status.py` 改变：在租户行锁（`SELECT … FOR UPDATE`，不锁钱包）

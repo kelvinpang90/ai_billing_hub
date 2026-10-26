@@ -447,7 +447,11 @@ def post_transaction(
         )
         session.add(audit)
     _apply_billing_status(session, tenant, row)
-    if crosses_low_balance(tenant.low_balance_threshold, before, after):
+    # 低余额事件只对预付客户（设计闸门 #433 v2 §2）：与客户侧 `low_balance` 同一规则。
+    # `tenant` 是锁内刚刷新的行，`billing_mode` 与阈值都是已提交的最新值。
+    if tenant.billing_mode is BillingMode.PREPAID and crosses_low_balance(
+        tenant.low_balance_threshold, before, after
+    ):
         payload = {
             "balance": _money_text(after),
             "threshold": _money_text(tenant.low_balance_threshold),

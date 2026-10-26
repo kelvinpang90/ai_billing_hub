@@ -2,7 +2,8 @@
 
 ⚠️ **每个写操作一个 `session_scope()`**（INV-13）。建客户：租户、钱包、`CUSTOMER_CREATE`
 审计三行；建项目：项目、它的状态 webhook 投递行（AIH-TASK-047，设计闸门 #241 v6）与
-`PROJECT_CREATE` 审计三行；改客户：租户行与 `CUSTOMER_UPDATE` 审计（AIH-TASK-009）。
+`PROJECT_CREATE` 审计三行；改客户：租户行与 `CUSTOMER_UPDATE` 审计（AIH-TASK-009）；
+设低余额阈值：租户行与 `TENANT_LOW_BALANCE_THRESHOLD_SET` 审计（AIH-TASK-109）。
 要么全在、要么全不在。repository 只 flush，提交与回滚都发生在这里的 `session_scope` 里。
 
 ⚠️ **客户只从路径里的 `public_id` 解析**，项目的 `tenant_id` 取解析出来的内部 id，
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Final
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,6 +26,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, User
+from app.models.base import quantize_money
 from app.models.integration import ProjectStatusDelivery
 from app.models.tenancy import Project, Tenant
 from app.repositories import tenancy
@@ -31,10 +34,12 @@ from app.repositories.wallet import WALLET_MISSING, create_wallet, get_wallet_fo
 from app.schemas.customers import (
     CustomerDetail,
     CustomerSummary,
+    LowBalanceThresholdView,
     Page,
     ProjectView,
     customer_detail,
     customer_summary,
+    low_balance_threshold_view,
     project_view,
 )
 from app.services.auth import RequestContext, record_audit, utc_now
@@ -184,6 +189,62 @@ def update_customer(
     return detail
 
 
+def get_low_balance_threshold(
+    session_factory: sessionmaker[Session], customer_id: str
+) -> LowBalanceThresholdView:
+    """The stored threshold of the customer. Read-only, no lock, no audit (design gate #433 v2)."""
+    with session_factory() as session:
+        tenant = _require_tenant(session, customer_id)
+        return low_balance_threshold_view(tenant.low_balance_threshold)
+
+
+def set_low_balance_threshold(
+    session_factory: sessionmaker[Session],
+    *,
+    actor: User,
+    customer_id: str,
+    threshold: Decimal | None,
+    context: RequestContext,
+    now: dt.datetime | None = None,
+) -> LowBalanceThresholdView:
+    """Set or clear the threshold; the tenant row and its audit commit together.
+
+    设计闸门 #433 v2 §2「接口二」「事务边界」：只锁租户行（`FOR UPDATE`），**不锁钱包**；
+    `post_transaction` 的加锁顺序是钱包 → 租户，这里只锁租户，没有锁环。锁内读 before，
+    审计的前后值就是这一次改动真正的前后。与现值相同（含两边都是 `null`）什么都不写。
+
+    不改余额、不写账本与 outbox、不动 `status_version`（阈值不在状态快照里）；也不补发
+    `tenant.low_balance`：那个事件只由记账跨越触发。
+    """
+    moment = now or _now()
+    value = quantize_money(threshold) if threshold is not None else None
+    with session_scope(session_factory) as session:
+        tenant = _require_tenant(session, customer_id, for_update=True)
+        before = low_balance_threshold_view(tenant.low_balance_threshold)
+        changed = tenancy.set_low_balance_threshold(session, tenant, threshold=value, now=moment)
+        after = low_balance_threshold_view(tenant.low_balance_threshold)
+        if changed:
+            record_audit(
+                session,
+                action=AuditAction.TENANT_LOW_BALANCE_THRESHOLD_SET,
+                context=context,
+                now=moment,
+                actor=actor,
+                entity_type=ENTITY_TENANT,
+                entity_id=tenant.public_id,
+                # ⚠️ 字段白名单：恰好这两个键，不 dump 整行。
+                before_state={
+                    "public_id": tenant.public_id,
+                    "low_balance_threshold": before.low_balance_threshold,
+                },
+                after_state={
+                    "public_id": tenant.public_id,
+                    "low_balance_threshold": after.low_balance_threshold,
+                },
+            )
+    return after
+
+
 def list_customers(
     session_factory: sessionmaker[Session], *, page: int, page_size: int
 ) -> Page[CustomerSummary]:
@@ -288,7 +349,9 @@ __all__ = [
     "create_customer",
     "create_project",
     "get_customer",
+    "get_low_balance_threshold",
     "list_customers",
     "list_projects",
+    "set_low_balance_threshold",
     "update_customer",
 ]

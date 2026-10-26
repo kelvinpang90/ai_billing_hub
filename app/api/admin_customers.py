@@ -28,6 +28,9 @@
 
 钱包流水（AIH-TASK-084，设计闸门 #351 v2 §2「接口」）：只读，一个普通会话两条 SELECT（找客户、
 取一页），不提交、不写审计。没有服务层：这一层直接调 repository，与用量事件查询的写法一致。
+
+低余额阈值（AIH-TASK-109，设计闸门 #433 v2 §2「接口一」「接口二」）：GET 只读、不写审计；
+PUT 的锁、比较与审计全在 `app/services/customers.py`，这一层只做鉴权、请求体形状与转发。
 """
 
 from __future__ import annotations
@@ -53,8 +56,10 @@ from app.schemas.customers import (
     CustomerDetail,
     CustomerSummary,
     EnableInternalMeteringRequest,
+    LowBalanceThresholdView,
     Page,
     ProjectView,
+    SetLowBalanceThresholdRequest,
     SetStatusWebhookRequest,
     StatusWebhookSettings,
     UpdateCustomerRequest,
@@ -154,6 +159,41 @@ def update_customer(
         context=request_context(request),
     )
     return success(detail, request_id=current_request_id())
+
+
+@router.get(
+    "/customers/{customer_id}/low-balance-threshold",
+    response_model=ApiResponse[LowBalanceThresholdView],
+)
+def get_low_balance_threshold(
+    request: Request, customer_id: str
+) -> ApiResponse[LowBalanceThresholdView]:
+    """The stored threshold, or `null` when unset. Read-only, no audit."""
+    require_admin(request)
+    view = customers.get_low_balance_threshold(require_session_factory(request), customer_id)
+    return success(view, request_id=current_request_id())
+
+
+@router.put(
+    "/customers/{customer_id}/low-balance-threshold",
+    response_model=ApiResponse[LowBalanceThresholdView],
+)
+def set_low_balance_threshold(
+    request: Request, customer_id: str, payload: SetLowBalanceThresholdRequest
+) -> ApiResponse[LowBalanceThresholdView]:
+    """Set (a string) or clear (`null`) the threshold; the same value writes nothing.
+
+    客户只来自路径（INV-8）。不改余额、不写账本与出站事件、不补发 `tenant.low_balance`。
+    """
+    admin = require_admin(request)
+    view = customers.set_low_balance_threshold(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
+        threshold=payload.low_balance_threshold,
+        context=request_context(request),
+    )
+    return success(view, request_id=current_request_id())
 
 
 @router.post(

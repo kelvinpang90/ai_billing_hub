@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import (
     BaseModel,
@@ -22,6 +23,7 @@ from pydantic import (
     ConfigDict,
     EmailStr,
     StringConstraints,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -211,6 +213,62 @@ class SetStatusWebhookRequest(BaseModel):
     url: str | None
 
 
+# 低余额阈值（AIH-TASK-109，设计闸门 #433 v2 §2「接口二」）：整数最多 12 位、小数最多 2 位。
+# ⚠️ 用 [0-9] 而不是 \d，理由同调账金额：\d 还认全角与其他文字的数字。
+_THRESHOLD_PATTERN: Final = re.compile(r"[0-9]{1,12}(\.[0-9]{1,2})?")
+
+
+def _parse_threshold(value: object) -> Decimal | None:
+    """A positive decimal string with at most 2 fraction digits → `Decimal`, or `null`.
+
+    不经 float（INV-10），不舍入：超出就是 422。存库前由服务层 `quantize_money` 到 8 位。
+    """
+    # 422 只列字段名，不回显值（app/core/errors.py），所以这里的文案里也不放值。
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("low_balance_threshold must be a JSON string or null")
+    if _THRESHOLD_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "low_balance_threshold is not a decimal with at most 12 integer and 2 fraction digits"
+        )
+    threshold = Decimal(value)
+    if threshold <= 0:
+        # 余额 ≤ 0 已经是 SUSPENDED；不想提醒用 null（设计 §2）。
+        raise ValueError("low_balance_threshold must be greater than zero")
+    return threshold
+
+
+_Threshold = Annotated[
+    Decimal | None,
+    BeforeValidator(_parse_threshold),
+    WithJsonSchema(
+        {"anyOf": [{"type": "string", "pattern": _THRESHOLD_PATTERN.pattern}, {"type": "null"}]}
+    ),
+]
+
+
+class SetLowBalanceThresholdRequest(BaseModel):
+    """设置或清除低余额阈值（AIH-TASK-109，设计闸门 #433 v2 §2「接口二」）。
+
+    ⚠️ `low_balance_threshold` 必填：缺失是 422，显式 `null` 表示清除（不提醒）。多余字段
+    一律拒绝：客户只来自路径（INV-8），`tenant_id` / `customer_id` 之类进不来。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    low_balance_threshold: _Threshold
+
+
+class LowBalanceThresholdView(BaseModel):
+    """The `data` of GET / PUT `…/low-balance-threshold`: exactly this one key.
+
+    恰好 8 位小数的字符串（`money_text`），未设置为 `null`。
+    """
+
+    low_balance_threshold: str | None
+
+
 class ProjectView(BaseModel):
     """⚠️ 只有 `status_webhook_configured`，没有地址本身：地址的路径里可能带集成方的令牌，
     完整地址只出现在 `…/status-webhook` 的 PUT 与 GET 里（设计闸门 #241 v6 §2）。
@@ -264,6 +322,12 @@ def _customer_fields(tenant: Tenant) -> dict[str, Any]:
         "created_at": tenant.created_at,
         "updated_at": tenant.updated_at,
     }
+
+
+def low_balance_threshold_view(threshold: Decimal | None) -> LowBalanceThresholdView:
+    return LowBalanceThresholdView(
+        low_balance_threshold=money_text(threshold) if threshold is not None else None
+    )
 
 
 def customer_summary(tenant: Tenant) -> CustomerSummary:

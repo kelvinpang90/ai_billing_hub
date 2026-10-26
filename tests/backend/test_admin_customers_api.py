@@ -146,6 +146,9 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"),
     ("POST", "/api/v1/admin/customers/{customer_id}/account-status"),
     ("POST", "/api/v1/admin/customers/{customer_id}/internal-metering"),
+    # AIH-TASK-109 的低余额阈值（设计闸门 #433 v2 §2「接口一」「接口二」）。
+    ("GET", "/api/v1/admin/customers/{customer_id}/low-balance-threshold"),
+    ("PUT", "/api/v1/admin/customers/{customer_id}/low-balance-threshold"),
     ("GET", "/api/v1/admin/audit-logs"),
     ("GET", METER_TYPES_ROUTE),
     ("POST", METER_TYPES_ROUTE),
@@ -233,6 +236,10 @@ VALID_BODIES = {
     },
     ("POST", "/api/v1/admin/customers/{customer_id}/internal-metering"): {
         "reason": "Probe",
+    },
+    # 新客户的阈值是 NULL：漏了鉴权的处理函数会真的把它改成 50。
+    ("PUT", "/api/v1/admin/customers/{customer_id}/low-balance-threshold"): {
+        "low_balance_threshold": "50.00",
     },
     # AI 目录（AIH-TASK-025）：预置的行都是 ACTIVE、别名段未截断，所以漏了鉴权的 PATCH 与
     # 撤销会真的改它们，建与映射会真的多出行。
