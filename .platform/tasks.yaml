@@ -6767,7 +6767,7 @@ tasks:
     title: 客户导出第一层：钱包流水按租户与记账时间的索引迁移
     purpose: >-
       按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）§2「数据库」与 §8 第 1 步：新迁移 0027 给 wallet_transactions 加非唯一索引 ix_wallet_transactions_tenant_created (tenant_id, created_at, wallet_sequence)，写法照 0026：upgrade 先检查、可以安全重跑；模型同步声明；docs/database-schema.md 记索引。不加接口，接口属于 AIH-TASK-116。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）逐条一致，以 §2「数据库」、§3 INV-4 与 INV-5、§5 的迁移失败一行、§7 迁移表与 §8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
