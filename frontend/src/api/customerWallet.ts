@@ -10,12 +10,17 @@
  * `next_before_sequence` 原样作为 `before_sequence` 发回去，它为 `null` 时没有更早的行。
  *
  * ⚠️ 金额与余额是**字符串**（INV-10），类型刻意写成 `string`，不在这一层解析。
+ *
+ * 流水导出（`GET /api/v1/customer/wallet/transactions/export`，AIH-TASK-118；设计闸门 #435 v10）的语义以
+ * docs/api.md「客户导出」为准：只带 `from_date`、`to_date`，同样不带任何租户或客户标识。
  */
 
 import { apiGet } from "./client";
+import { downloadFile } from "./download";
 
 export const CUSTOMER_WALLET_URL = "/api/v1/customer/wallet";
 export const CUSTOMER_WALLET_TRANSACTIONS_URL = "/api/v1/customer/wallet/transactions";
+export const CUSTOMER_WALLET_TRANSACTIONS_EXPORT_URL = "/api/v1/customer/wallet/transactions/export";
 
 /** 钱包摘要。恰好这 8 个键（docs/api.md）：没有钱包 `version`、`status_version`、任何内部 id。 */
 export interface CustomerWallet {
@@ -98,4 +103,32 @@ export function listCustomerTransactions(
     search === "" ? CUSTOMER_WALLET_TRANSACTIONS_URL : `${CUSTOMER_WALLET_TRANSACTIONS_URL}?${search}`,
     signal,
   );
+}
+
+/**
+ * 导出的日期区间：`YYYY-MM-DD` 马来西亚日历日，含两端，**两个都必填**（docs/api.md「客户导出」）。没有分页、
+ * 游标与任何筛选 —— 一次导出整个区间。
+ */
+export interface CustomerTransactionExportQuery {
+  fromDate: string;
+  toDate: string;
+}
+
+/** 导出的地址（含查询串）：只有 `from_date` 与 `to_date`。 */
+export function customerTransactionExportUrl(query: CustomerTransactionExportQuery): string {
+  const params = new URLSearchParams({ from_date: query.fromDate, to_date: query.toDate });
+  return `${CUSTOMER_WALLET_TRANSACTIONS_EXPORT_URL}?${params.toString()}`;
+}
+
+/** 后端取不到文件名时的兜底，与后端同一规则：`wallet-transactions_<from_date>_<to_date>.csv`。 */
+export function customerTransactionExportFilename(query: CustomerTransactionExportQuery): string {
+  return `wallet-transactions_${query.fromDate}_${query.toDate}.csv`;
+}
+
+/**
+ * 把区间内记账的全部流水导出成一个 CSV 并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 行）、
+ * `QUERY_TOO_BROAD`（超过执行时间预算）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带 `request_id`。
+ */
+export function exportCustomerTransactions(query: CustomerTransactionExportQuery, signal?: AbortSignal): Promise<void> {
+  return downloadFile(customerTransactionExportUrl(query), customerTransactionExportFilename(query), signal);
 }
