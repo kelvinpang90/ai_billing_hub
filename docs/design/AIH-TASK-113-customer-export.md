@@ -1,8 +1,8 @@
-# AIH-TASK-113 .. 118 设计：客户用量与钱包流水 CSV 导出（已批准 v8）
+# AIH-TASK-113 .. 118 设计：客户用量与钱包流水 CSV 导出（已批准 v10）
 
-> **来源**：设计闸门 Issue #435。本文件是 `APPROVED: design v8` 那一版正文的**逐字副本**（审查者为 Codex；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v8`）。
+> **来源**：设计闸门 Issue #435。本文件是 `APPROVED: design v10` 那一版正文的**逐字副本**（审查者为 Codex；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v10`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #435 上被批准的 v8 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #435 上被批准的 v10 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：设计闸门 #398（[AIH-TASK-103-customer-usage.md](AIH-TASK-103-customer-usage.md)）的客户用量查询、18 键白名单、2 秒执行预算与 `QUERY_TOO_BROAD`；设计闸门 #393（[AIH-TASK-099-customer-wallet.md](AIH-TASK-099-customer-wallet.md)）的客户流水 7 键白名单。
 > §8 的五步登记为六个实现任务：第 1 步 `AIH-TASK-113`（迁移）；第 2 步按登记前预审的拆分建议（约 2 000 行）拆成 `AIH-TASK-114`（CSV 模块、导出租约中间件、代理不缓冲配置）与 `AIH-TASK-115`（用量导出接口，依赖 114）；第 3 步 `AIH-TASK-116`（钱包导出，依赖 113、115）；第 4 步 `AIH-TASK-117`（用量页按钮，依赖 115）；第 5 步 `AIH-TASK-118`（钱包页导出区，依赖 116、117）。
 
@@ -21,9 +21,9 @@
 
 ---
 
-状态：`待审`（`READY_FOR_REVIEW`，v8）
+状态：`待审`（`READY_FOR_REVIEW`，v10）
 负责人：Claude
-**设计版本**：`v8`
+**设计版本**：`v10`
 对应需求：spec §73「Export Functionality」（V1 支持 CSV 与 Excel；至少请求级用量、会话摘要、钱包流水、月度用量汇总；「Customer export MUST exclude internal costs」；大导出必要时异步）、§128（Phase 5「customer usage exports」）、§69（请求级字段）、§70（客户流水）、§80（金额精度）、§109（展示时区）、§112（导出需要明确的留存、安全删除与容量限制）、`REQ-PRIV-002`（INV-7）、`REQ-PRIV-001`（INV-8）
 前置设计：#398 v4（客户用量明细：18 键白名单、马来西亚日历日、92 天、`ix_usage_events_tenant_occurred` / `ix_usage_events_project_occurred`、2 秒执行预算与 `QUERY_TOO_BROAD`，AIH-TASK-103..106）、#393 v3（客户钱包流水：7 键白名单，AIH-TASK-099..101）
 目标 PR：待开（批准后按 §8 拆五个任务登记；`docs/TODO.md`「后续计划」里的「Phase 5 客户端用量导出」即本闸门）
@@ -193,7 +193,7 @@ GET …/export（客户访问令牌）→ 查询参数校验（FastAPI，处理�
 | 超过 20 000 行 | 422 `EXPORT_TOO_LARGE`，不返回任何行 | 不变 | 缩短区间或加筛选后重试 | — | 无 |
 | 查询超过 2 秒预算 | 422 `QUERY_TOO_BROAD`；一条 `customer_usage_query_timeout` 日志 | 不变 | 缩短区间后重试 | — | 日志（常见时考虑聚合或异步，§9） |
 | 钱包缺失（仅接口二） | 500 `INTERNAL_ERROR`（`RuntimeError(WALLET_MISSING)`，沿用 #393） | 不变 | 否 | 运维 | 现有错误日志 |
-| 数据库不可用 | 503（现有处理） | 不变 | 是 | — | 现有告警 |
+| 数据库不可用（查询时连接失败、连接中断） | 500 `INTERNAL_ERROR`（`CustomerExportFailed`），带 `request_id`；与现有客户接口一致：查询时的连接错误不映射成 503，`DatabaseUnavailable`（503）只用于 `/readyz` 的就绪检查；数据库根本没配置时 `require_session_factory` 照旧在获取租约之前给出 503 `DATABASE_NOT_CONFIGURED` | 不变 | 是 | — | `customer_export_failed` 错误日志（带栈）与现有数据库告警 |
 | 鉴权失败 | 401 `TOKEN_INVALID` / 403 `CUSTOMER_REQUIRED`（现有） | 不变 | — | — | 无 |
 | 查询、投影或生成 CSV 时意外出错 | 500 `INTERNAL_ERROR`（`CustomerExportFailed`，信封与通用 500 相同），带 `request_id`；文件尚未开始发送；这个 500 在租约内由内层异常处理发出，发完后租约才在最外层中间件的 `finally` 里释放 | 不变 | 是 | — | `customer_export_failed` 错误日志（带栈） |
 | 发送中客户端断开 / 请求被取消 | 客户端下载失败 | 不变；租约在最外层中间件的 `finally` 里释放 | 是，重新导出 | — | 无 |
@@ -237,6 +237,7 @@ GET …/export（客户访问令牌）→ 查询参数校验（FastAPI，处理�
 | 断开与取消 | integration | 同上的真实应用：一例最外层 `send` 在 body 消息上抛 `OSError`；一例在暂停时取消调用 `app(...)` 的任务 | 两种情况下 `app(...)` 结束后租约都空闲，下一次导出 200 |
 | 意外错误的 500 在租约内发出 | integration | 同上的真实应用：monkeypatch 投影函数在第 N 行抛 `RuntimeError`；最外层 `send` 在收到这个请求的 `http.response.start` 时暂停；暂停期间再发一个导出请求；然后放行 | 第一个请求的响应是 500、`error.code = INTERNAL_ERROR`、带 `request_id`，与通用 500 的信封形状相同；暂停期间第二个请求 503 `EXPORT_BUSY`；放行后租约空闲；日志里有一条 `customer_export_failed`，且这条 500 **不是**由 `handle_unexpected_error` 生成（断言那条 `Unhandled exception` 日志没有出现） |
 | 抛出的错误不链回原异常 | unit | 直接调用导出处理逻辑、让投影抛错，捕获抛出的 `CustomerExportFailed` | `__context__` 与 `__cause__` 都是 `None` |
+| 数据库断连（用量导出） | integration | 拿到租约之后，让用量查询抛 `sqlalchemy.exc.OperationalError`（monkeypatch `list_processed_events_for_customer`，模拟连接中断；SQLite 与 MySQL 都跑） | 500、`error.code = INTERNAL_ERROR`、带 `request_id`，信封形状与通用 500 相同（不是 503）；有一条 `customer_export_failed`，没有 `Unhandled exception`（这个 500 由内层处理器在租约内发出）；之后租约空闲，下一次导出 200 |
 | 中间件顺序 | unit | 检查 `create_app()` 的 `user_middleware` | `ExportLeaseMiddleware` 是第一个（最外层），`RequestContextMiddleware` 在它里面 |
 | 不接管 | unit | 持有 token A，把时钟（monkeypatch 时间函数）推过 120 秒，再获取两次 | 两次都返回 `None`；只记一条 `customer_export_lease_held_long`；释放 A 后获取成功 |
 | 槽只释放自己的 token | unit | 槽里没有 token 时 `release()`；槽 hold A 后释放两次 | 前者无副作用；后者第二次无副作用，不影响之后别的持有者 |
@@ -264,6 +265,7 @@ GET …/export（客户访问令牌）→ 查询参数校验（FastAPI，处理�
 | 泄漏 | integration | 调账带 `description` 哨兵串、操作者是管理员、幂等键已知 | 文件里不出现哨兵串、管理员邮箱、幂等键 |
 | 金额精度 | integration | 余额到 `999999999999.99999999` 的一笔 | `amount`、`balance_after` 原样 |
 | 缺钱包 | integration | 删掉钱包行（测试里绕过触发器的现有写法） | 500 `INTERNAL_ERROR` |
+| 数据库断连（钱包导出） | integration | 钱包存在性检查通过、拿到租约之后，让 `list_transactions_for_customer_export` 抛 `sqlalchemy.exc.OperationalError` | 同用量导出的「数据库断连」：500 `INTERNAL_ERROR`、带 `request_id`、有 `customer_export_failed`、没有 `Unhandled exception`、之后租约空闲 |
 | 租户越权 | integration | A、B 各有流水 | A 的文件里只有 A 的行 |
 | 鉴权 | integration | 路由守卫 | 同上 |
 
@@ -360,3 +362,5 @@ GET …/export（客户访问令牌）→ 查询参数校验（FastAPI，处理�
 | v6 | 2026-10-26 | ① 单个导出内存上界由 64 MiB 改为 128 MiB，行数上限仍为 20 000（Kelvin 选择）；`tracemalloc` 测试的「最长形态」写定：模型列宽的 ASCII 字符串、每行每列独立对象、token 取 `2^63 − 1`、金额与 `quantity` 取最大 Decimal、建行在 `tracemalloc.start()` 之后、BOM 与 `encode` 计入。② 公式注入的文本列改为逐个列出，`quantity` 不在其中（它是数值列）。③ §10 的多进程说明由 AIH-TASK-114 写进 `docs/deployment.md` §3.3，§8 第 2 步同步 | 登记前预审（`worker.design_precheck`，导出 `aa43a0a`）对 AIH-TASK-114 的四条发现：64 MiB 按最长形态估算会被突破；`quantity` 同时被算作文本列与数值列；`docs/deployment.md` 无任务负责；最长形态未定义 |
 | v7 | 2026-10-26 | 导出响应加 `X-Accel-Buffering: no`，`deploy/nginx/billing.conf` 的 `location /api/` 加 `proxy_pass_header X-Accel-Buffering;`，让本项目与外层共享代理两层都不缓冲、不写临时文件；租约因此持有到下载结束，慢客户端由 nginx `send_timeout` 兜底。§2「代理不缓冲」「慢客户端」、§5 一行、§6「留存」、§7 两处（响应头断言、代理配置用例）、§8 第 2 步、§9 备选 M、§10 一条假设同步 | Codex 设计审查 v6 的阻断项（该轮因审查期间工作区被改动未发布，结论成立）：依赖 nginx 代理缓冲会把约 8 MB 的导出写进代理临时文件，`Cache-Control: no-store` 不阻止，客户明细明文落盘且慢下载累积占用磁盘 |
 | v8 | 2026-10-26 | 响应体改由 `ExportCsvResponse` 按 64 KiB 分段（`memoryview`，不复制）发送，每段之前 uvicorn 按流控等排空，最后一段返回时缓冲至多约 128 KiB，租约之后才释放；更正「客户端断开时 `send` 抛错」为「断开后 `send` 直接返回」。§2 三处、§2「CSV 格式」响应类、§7 两行（分段发送、真实 uvicorn 慢读连接）、§9 备选 N、§10 一条假设同步 | Codex 设计审查 v7 的阻断项：uvicorn 的 `send` 先等排空再写，整份 8 MB 作为一条消息写进传输缓冲后立刻返回，租约释放时文件仍在缓冲，慢连接上可叠加 |
+| v9 | 2026-10-26 | §5「数据库不可用」一行由「503（现有处理）」改为 500 `INTERNAL_ERROR`（`CustomerExportFailed`）：现有客户接口不把查询时的连接错误映射成 503（`DatabaseUnavailable` 只用于 `/readyz`），导出按 §2「所有错误响应都在租约内发出」也得到 500；数据库未配置的 503 不变。其他章节不变 | 登记前预审（`worker.design_precheck`，导出 `4254116`）对 AIH-TASK-114 的发现；PR #440 Codex 审查阻断项：v8 写 503 而登记契约用勘误改成 500，失败语义的变化须升版重审，不能由契约勘误替代 |
+| v10 | 2026-10-26 | §7 两张后端表各加一行「数据库断连」：拿到租约之后查询抛 `OperationalError`，断言 500 `INTERNAL_ERROR`（不是 503）、带 `request_id`、由内层处理器在租约内发出（有 `customer_export_failed`、没有 `Unhandled exception`）、之后租约空闲 | Codex 设计审查 v9 的阻断项：v9 改了数据库断连的对外结果，却没有对应的测试场景 |
