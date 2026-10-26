@@ -20,7 +20,10 @@
  * 资料卡下面是门户账号面板（`PortalAccountPanel`，AIH-TASK-095）：未开通时开通，已开通时显示状态并按
  * 状态给重发邀请、停用、启用、重置 2FA。客户已关户时面板不给开通、重发、启用。
  *
- * 没有低余额阈值、成本或毛利 —— 后端没有这些字段，这里也不预留。
+ * 钱包卡片下面是低余额阈值面板（`LowBalanceThresholdPanel`，AIH-TASK-111）：自己读写
+ * `…/low-balance-threshold`，加载中与失败只画在面板里，不影响详情页其余区块。
+ *
+ * 没有成本或毛利 —— 后端没有这些字段，这里也不预留。
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -66,6 +69,7 @@ import {
 } from "./CustomerForm";
 import { AccountStatusTag, BillingStatusTag } from "./CustomerListPage";
 import { InternalUsagePanel } from "./InternalUsagePanel";
+import { LowBalanceThresholdPanel } from "./LowBalanceThresholdPanel";
 import { PortalAccountPanel } from "./PortalAccountPanel";
 import { ProjectsPanel } from "./ProjectsPanel";
 
@@ -218,6 +222,9 @@ export function CustomerDetailPage() {
       >
         <WalletDescriptions wallet={current.wallet} />
       </Card>
+
+      {/* key：换了客户，修改表单与清除确认都从头来。 */}
+      <LowBalanceThresholdPanel key={`low-balance-${current.id}`} customerId={current.id} />
 
       {/* key：换了客户，游标与来源筛选都从头来。 */}
       <WalletTransactionsPanel key={`wallet-${current.id}`} customerId={current.id} />

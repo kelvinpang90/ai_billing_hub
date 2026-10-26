@@ -12,7 +12,8 @@
  * 客户门户的两个步骤（login_customer 用夹具客户的门户账号登录，check_portal_home 只读核对门户首页）；AIH-TASK-100
  * 加了门户钱包页的一个只读步骤（check_portal_wallet）；AIH-TASK-101 加了门户首页余额卡与最近流水的一个只读步骤
  * （check_portal_dashboard）；AIH-TASK-105 加了门户用量页的一个只读步骤（check_portal_usage）；AIH-TASK-108 加了
- * 门户首页本月用量卡的一个只读步骤（check_portal_usage_summary）。
+ * 门户首页本月用量卡的一个只读步骤（check_portal_usage_summary）；AIH-TASK-111 加了客户详情低余额阈值面板的一个只读
+ * 步骤（check_low_balance_threshold）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -91,7 +92,9 @@
  *   不发任何写请求。夹具客户详情里的钱包流水面板（check_wallet_transactions）只看不点：不动「Source」下拉、不点「Older」
  *   「Newest」、不点 AI 用量行的「View usage event」链接。夹具客户详情里的门户账号面板（check_portal_account）只看
  *   不点：不点「Create portal account」「Resend invitation」「Disable portal access」「Enable portal access」「Reset 2FA」
- *   或任何确认按钮，不填也不提交开通表单里的「Login email」。不点新建客户、编辑 / 保存、手工调账、
+ *   或任何确认按钮，不填也不提交开通表单里的「Login email」。夹具客户详情里的低余额阈值面板
+ *   （check_low_balance_threshold）只看不点：不点「Change」「Clear」「Save threshold」「Clear threshold」或任何按钮，
+ *   不打开修改表单或清除确认框，不填也不提交「New threshold」。不点新建客户、编辑 / 保存、手工调账、
  *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
  *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
  *   「Clear address」）等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表
@@ -254,6 +257,17 @@
  *                   认不出的值是 assertion_failed）的文案（Invited / Active / Disabled，portalAccount.status.*），且不显示未开通。
  *                   其余响应（别的状态码、别的错误码、不是信封）是 assertion_failed。不点开通、不点任何按钮、不填表单。报到前把
  *                   面板滚动到视口里（规则同 check_wallet_transactions）
+ *   check_low_balance_threshold
+ *                   要排在 open_fixture 之后（本次运行没打开夹具客户详情就 assertion_failed）。在夹具客户详情（open_fixture
+ *                   打开的那一页）上，低余额阈值面板（role=region、aria-label 为「Low balance threshold」，en.json 的
+ *                   lowBalance.title）落定（不再显示 lowBalance.loading）且不是加载失败（lowBalance.loadFailed，page_error）
+ *                   或无权限（customers.forbidden）。后端值取面板自己发出的
+ *                   GET /api/v1/admin/customers/{customer_id}/low-balance-threshold 的响应体（被动观察，不自己发请求、不拦截；
+ *                   取这个客户最近一次成功读完的那一次，不是成功信封是 assertion_failed）里的 low_balance_threshold：恰好 8 位
+ *                   小数的字符串或 null，别的形状是 assertion_failed。面板「Threshold」一项（lowBalance.field.threshold，面板里
+ *                   带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）恰好一项：null 时文字是「Not set」（lowBalance.notSet）；
+ *                   否则文字去掉空白与千分位逗号后，等于响应值按 2 位 ROUND_HALF_UP 舍入后的值（roundHalfUp2：字符串运算、不经
+ *                   浮点）。不点修改或清除、不填也不提交任何表单。报到前把面板滚动到视口里（规则同 check_wallet_transactions）
  *   login_customer  用 credentials.customer_email / customer_password 登录。与 login 一样不自己导航，只认当前页面是
  *                   登录页（浏览器刚启动时首页被 RequireAuth 送到 /login；本次运行已经以管理员或客户登录过就没有登录表单，
  *                   报 element_missing），所以它要排在 login 之前、或单独跑。两个字段缺失或类型不对：login_failed，不打印
@@ -486,6 +500,11 @@ const TEXT = {
   portalStatusLabel: "Portal status", // portalAccount.field.status —— 面板里 Descriptions 的一项
   // 门户账号状态 → 面板「Portal status」一项的文案（portalAccount.status.invited / active / disabled）。
   portalStatusText: { INVITED: "Invited", ACTIVE: "Active", DISABLED: "Disabled" },
+  lowBalanceTitle: "Low balance threshold", // lowBalance.title —— 低余额阈值面板的 aria-label
+  lowBalanceLoading: "Loading the low balance threshold…", // lowBalance.loading
+  lowBalanceLoadFailed: "The low balance threshold could not be loaded.", // lowBalance.loadFailed
+  lowBalanceLabel: "Threshold", // lowBalance.field.threshold —— 面板里 Descriptions 的一项
+  lowBalanceNotSet: "Not set", // lowBalance.notSet
   portalShellTitle: "Customer portal", // portal.title —— 门户外壳 header 里的标题
   portalHomeLoading: "Loading your account…", // portal.home.loading
   portalHomeLoadFailed: "Your account details could not be loaded.", // portal.home.loadFailed
@@ -657,6 +676,11 @@ const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/
 const PORTAL_ACCOUNT_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/portal-account$/;
 /** 还没开通时 GET 的错误码（docs/api.md「管理端门户账号」）。 */
 const PORTAL_ACCOUNT_NOT_FOUND = "PORTAL_ACCOUNT_NOT_FOUND";
+
+/** 低余额阈值接口的路径（frontend/src/api/adminCustomers.ts 的 lowBalanceThresholdUrl）。 */
+const LOW_BALANCE_THRESHOLD_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/low-balance-threshold$/;
+/** 阈值对象里的金额：恰好 8 位小数的字符串（docs/api.md「管理端低余额阈值」）。 */
+const THRESHOLD_AMOUNT = /^[0-9]+\.[0-9]{8}$/;
 
 /** 客户自己的摘要接口的路径（frontend/src/api/customer.ts 的 getCustomerMe）。 */
 const CUSTOMER_ME_API = /^\/api\/v1\/customer\/me$/;
@@ -1142,6 +1166,8 @@ const network = {
   walletTransactions: new Map(),
   /** 门户账号接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
   portalAccounts: new Map(),
+  /** 低余额阈值接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
+  lowBalanceThresholds: new Map(),
   /** 客户自己的摘要接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
   customerMe: new Map(),
   /** 客户自己的钱包接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
@@ -1167,6 +1193,7 @@ function trackedRequest(requestId) {
     network.usageAnalytics.get(requestId) ??
     network.walletTransactions.get(requestId) ??
     network.portalAccounts.get(requestId) ??
+    network.lowBalanceThresholds.get(requestId) ??
     network.customerMe.get(requestId) ??
     network.customerWallet.get(requestId) ??
     network.customerTransactions.get(requestId) ??
@@ -1276,6 +1303,23 @@ function portalAccountCustomerId(url) {
       return null;
     }
     const match = PORTAL_ACCOUNT_API.exec(parsed.pathname);
+    return match === null ? null : decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+/** 是不是低余额阈值接口（同源 https、路径恰好是 …/low-balance-threshold）：是的话回路径里的客户 id，不是回 null。 */
+function lowBalanceThresholdCustomerId(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" || parsed.hostname !== network.host) {
+      return null;
+    }
+    const match = LOW_BALANCE_THRESHOLD_API.exec(parsed.pathname);
     return match === null ? null : decodeURIComponent(match[1]);
   } catch {
     return null;
@@ -1533,6 +1577,16 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const thresholdCustomerId = lowBalanceThresholdCustomerId(params.request?.url);
+        if (thresholdCustomerId !== null && params.request?.method === "GET") {
+          network.lowBalanceThresholds.set(params.requestId, {
+            customerId: thresholdCustomerId,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         if (isCustomerMe(params.request?.url) && params.request?.method === "GET") {
           network.customerMe.set(params.requestId, {
             status: null,
@@ -1784,6 +1838,26 @@ function latestPortalAccountResponse(customerId) {
       (best === null || request.seq > best.seq)
     ) {
       best = { requestId, status: request.status, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/**
+ * 这个客户的、成功读完的低余额阈值 GET 里最近的一次；还有在路上的就回 null，等它落定。请求是详情页打开时面板
+ * 自己发出的，所以不按序号截断。
+ */
+function latestLowBalanceThresholdResponse(customerId) {
+  let best = null;
+  for (const [requestId, request] of network.lowBalanceThresholds) {
+    if (request.customerId !== customerId) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
     }
   }
   return best;
@@ -2066,6 +2140,15 @@ function pageLib() {
     }
     return null;
   };
+  /** 客户详情里的低余额阈值面板（role=region、aria-label 为面板标题）；没有时 null。 */
+  const lowBalanceRegion = (T) => {
+    for (const el of document.querySelectorAll('[role="region"]')) {
+      if (el.getAttribute("aria-label") === T.lowBalanceTitle) {
+        return el;
+      }
+    }
+    return null;
+  };
   return {
     norm,
     leaf,
@@ -2085,6 +2168,7 @@ function pageLib() {
     analyticsTable,
     walletTxRegion,
     portalRegion,
+    lowBalanceRegion,
   };
 }
 
@@ -2937,6 +3021,63 @@ function scrollPortalPanelIntoView(lib, T) {
 /** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
 function portalPanelInView(lib, T) {
   const region = lib.portalRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 低余额阈值面板的状态：在加载、加载失败、无权限，以及「Threshold」一项（面板里带边框的 Descriptions：label 在
+ * <th>，值在紧跟的 <td>）的个数与文字（不是恰好一项时文字为 null）。只在面板里面找。只读，不碰按钮与表单。
+ */
+function probeLowBalanceThreshold(lib, T) {
+  const region = lib.lowBalanceRegion(T);
+  const out = {
+    ...lib.common(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    forbidden: false,
+    valueCount: 0,
+    valueText: null,
+  };
+  if (region === null) {
+    return out;
+  }
+  const has = (text) =>
+    [...region.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(T.lowBalanceLoading);
+  out.failed = has(T.lowBalanceLoadFailed);
+  out.forbidden = has(T.customersForbidden);
+  const cells = [];
+  for (const th of region.querySelectorAll("th")) {
+    const td = th.nextElementSibling;
+    if (lib.norm(th.textContent) === T.lowBalanceLabel && td && td.tagName === "TD") {
+      cells.push(td);
+    }
+  }
+  out.valueCount = cells.length;
+  out.valueText = cells.length === 1 ? lib.norm(cells[0].textContent) : null;
+  return out;
+}
+
+/** 把低余额阈值面板滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollLowBalancePanelIntoView(lib, T) {
+  const region = lib.lowBalanceRegion(T);
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的面板要整块在视口内；放不下的只要求顶端在视口内。 */
+function lowBalancePanelInView(lib, T) {
+  const region = lib.lowBalanceRegion(T);
   if (region === null) {
     return false;
   }
@@ -4804,6 +4945,100 @@ async function stepCheckPortalAccount(ctx) {
   }
 }
 
+async function stepCheckLowBalanceThreshold(ctx) {
+  // 要排在 open_fixture 之后：没打开夹具客户详情就没有可看的面板。
+  if (ctx.customerId === null || ctx.fixture === null) {
+    throw fail("assertion_failed");
+  }
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+
+  // 面板落定：不在加载，且是某一种终态（「Threshold」一项、加载失败、无权限）。
+  const opened = await waitFor(
+    () => evaluate(probeLowBalanceThreshold, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === href && s.region && !s.busy && (s.failed || s.forbidden || s.valueCount > 0)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const panel = opened.value;
+  if (panel.appError || panel.failed) {
+    throw fail("page_error");
+  }
+  if (panel.notFound || panel.path !== href) {
+    throw fail("navigation_failed");
+  }
+  if (panel.forbidden) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：面板自己发出的 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestLowBalanceThresholdResponse(customerId),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  // null 表示未设置；否则是「Threshold」一项应有的、按 2 位舍入后的值（不带千分位）。
+  let expected;
+  try {
+    const envelope = await readEnvelope(observed.value.requestId);
+    const data = envelope?.success === true ? envelope.data : null;
+    if (data === null || typeof data !== "object" || !Object.hasOwn(data, "low_balance_threshold")) {
+      throw fail("assertion_failed");
+    }
+    const value = data.low_balance_threshold;
+    if (value === null) {
+      expected = null;
+    } else {
+      if (typeof value !== "string" || !THRESHOLD_AMOUNT.test(value)) {
+        throw fail("assertion_failed");
+      }
+      expected = roundHalfUp2(value);
+      if (expected === null) {
+        throw fail("assertion_failed");
+      }
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有这个键、金额形状不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 面板显示的就是这一份响应：null 时显示未设置；否则去掉空白与千分位逗号后等于舍入后的值。
+  const shown = await waitFor(
+    () => evaluate(probeLowBalanceThreshold, TEXT),
+    (s) =>
+      s.path === href &&
+      s.region &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      s.valueCount === 1 &&
+      (expected === null
+        ? s.valueText === TEXT.lowBalanceNotSet
+        : s.valueText !== null && s.valueText.replace(/[\s,]/g, "") === expected),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把面板滚进视口。只滚动，不点任何按钮。
+  if ((await evaluate(scrollLowBalancePanelIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(lowBalancePanelInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepLoginCustomer(ctx) {
   // 字段缺失或类型不对：不打印收到的内容，直接 login_failed。
   if (ctx.customerCredentials === null) {
@@ -5479,6 +5714,7 @@ const STEPS = {
   check_account_status: stepCheckAccountStatus,
   check_wallet_transactions: stepCheckWalletTransactions,
   check_portal_account: stepCheckPortalAccount,
+  check_low_balance_threshold: stepCheckLowBalanceThreshold,
   login_customer: stepLoginCustomer,
   check_portal_home: stepCheckPortalHome,
   check_portal_wallet: stepCheckPortalWallet,

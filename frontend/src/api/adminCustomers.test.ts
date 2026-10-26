@@ -14,14 +14,18 @@ import {
   createCustomer,
   createProject,
   getCustomer,
+  getLowBalanceThreshold,
   listCustomers,
   listProjects,
   postAccountStatus,
+  setLowBalanceThreshold,
   updateCustomer,
 } from "./adminCustomers";
 import { ApiError, client } from "./client";
 
 const CUSTOMER_ID = "00000000-0000-4000-8000-000000000000";
+/** 低余额阈值用例的示例客户 id：全零占位。 */
+const ZERO_CUSTOMER_ID = "00000000-0000-0000-0000-000000000000";
 
 function envelope(data: unknown) {
   return { data: { success: true, data, error: null, request_id: "req-1" } };
@@ -222,6 +226,91 @@ describe("admin customer requests", () => {
 
     await expect(failure).rejects.toMatchObject({ code: "NETWORK_ERROR", status: null });
     expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the low balance threshold with GET on the customer's low-balance-threshold path", async () => {
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValue(envelope({ low_balance_threshold: "50.00000000" }));
+
+    const threshold = await getLowBalanceThreshold(ZERO_CUSTOMER_ID);
+
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith(
+      `/api/v1/admin/customers/${ZERO_CUSTOMER_ID}/low-balance-threshold`,
+      {},
+    );
+    // 原样交回字符串，不解析。
+    expect(threshold).toEqual({ low_balance_threshold: "50.00000000" });
+  });
+
+  it("sets the low balance threshold with PUT and a body of exactly that one key", async () => {
+    const put = vi
+      .spyOn(client, "put")
+      .mockResolvedValue(envelope({ low_balance_threshold: "50.00000000" }));
+
+    await setLowBalanceThreshold(ZERO_CUSTOMER_ID, "50.00");
+
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).toHaveBeenCalledWith(
+      `/api/v1/admin/customers/${ZERO_CUSTOMER_ID}/low-balance-threshold`,
+      { low_balance_threshold: "50.00" },
+    );
+    // 恰好一个键，值是字符串（不是 number）：后端对 JSON 数字与多余字段都回 422。
+    const body = put.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(["low_balance_threshold"]);
+    expect(typeof body.low_balance_threshold).toBe("string");
+  });
+
+  it("clears the low balance threshold by sending null explicitly", async () => {
+    const put = vi.spyOn(client, "put").mockResolvedValue(envelope({ low_balance_threshold: null }));
+
+    await setLowBalanceThreshold(ZERO_CUSTOMER_ID, null);
+
+    // ⚠️ `null` 是「清除」，必须原样发出去；键缺失后端回 422。
+    const body = put.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(["low_balance_threshold"]);
+    expect(body.low_balance_threshold).toBeNull();
+    expect(put).toHaveBeenCalledWith(
+      `/api/v1/admin/customers/${ZERO_CUSTOMER_ID}/low-balance-threshold`,
+      { low_balance_threshold: null },
+    );
+  });
+
+  it("escapes the customer id in the low-balance-threshold path too", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope({ low_balance_threshold: null }));
+    const put = vi.spyOn(client, "put").mockResolvedValue(envelope({ low_balance_threshold: null }));
+
+    await getLowBalanceThreshold("a/../b");
+    await setLowBalanceThreshold("a/../b", null);
+
+    expect(get).toHaveBeenCalledWith("/api/v1/admin/customers/a%2F..%2Fb/low-balance-threshold", {});
+    expect(put).toHaveBeenCalledWith("/api/v1/admin/customers/a%2F..%2Fb/low-balance-threshold", {
+      low_balance_threshold: null,
+    });
+  });
+
+  it("turns a rejected threshold into an ApiError carrying the request id", async () => {
+    const response = {
+      data: {
+        success: false,
+        data: null,
+        error: { code: "VALIDATION_ERROR", message: "Invalid field: body.low_balance_threshold" },
+        request_id: "req-422",
+      },
+      status: 422,
+      statusText: "Unprocessable Entity",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    } satisfies AxiosResponse;
+    vi.spyOn(client, "put").mockRejectedValue(
+      new AxiosError("Request failed", "ERR_BAD_REQUEST", undefined, undefined, response),
+    );
+
+    const failure = setLowBalanceThreshold(ZERO_CUSTOMER_ID, "50.00");
+
+    await expect(failure).rejects.toBeInstanceOf(ApiError);
+    await expect(failure).rejects.toMatchObject({ code: "VALIDATION_ERROR", requestId: "req-422" });
   });
 
   it("turns a 422 envelope into an ApiError carrying the backend message", async () => {
