@@ -6819,7 +6819,7 @@ tasks:
     title: 客户导出第二层：CSV 格式模块、导出租约中间件与代理不缓冲配置
     purpose: >-
       按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）§2「CSV 格式」「上限与资源边界」与 §8 第 2 步的前一半：新模块 app/core/csv_export.py（RFC 4180、BOM、公式注入防护、行数上限 20 000、进程级导出租约、分段发送的 ExportCsvResponse、三个导出错误、最外层释放租约的纯 ASGI 中间件 ExportLeaseMiddleware），app/main.py 把中间件挂在最外层，deploy/nginx/billing.conf 让导出响应不经代理缓冲，docs/deployment.md 记资源与代理说明。不加接口：用量导出接口属于 AIH-TASK-115，钱包导出属于 AIH-TASK-116，前端属于 AIH-TASK-117 与 118。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）逐条一致，以 §2「CSV 格式」「上限与资源边界」（「所有错误响应都在租约内发出」里处理函数的写法除外，那属于 AIH-TASK-115）、§3 INV-1、§6「留存」为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计；tracemalloc 测得峰值超过 128 MiB 时停下说明，不自行调低上限或行数。本任务与 AIH-TASK-115 合起来是设计 §8 第 2 步：登记前预审估计第 2 步约 2 000 行，按拆分规则拆成两层，本任务只交付模块、中间件、代理配置与它们的单元测试，接口一属于 AIH-TASK-115。契约对设计的勘误（只澄清设计内部的措辞与实现位置，不放松任何检查）：①设计 §2「CSV 格式」末条「模块只有纯函数，不碰数据库、不打日志」指写 CSV 与构造附件响应的函数；同一模块里的导出租约按 §2「上限与资源边界」记 customer_export_lease_held_long 警告日志，两者不冲突；②BOM 只在编码成字节时加（例如 encode 时用 utf-8-sig，或在编码后的字节前拼上 BOM 的三个字节），不写进 StringIO：U+FEFF 是非 Latin-1 字符，写进去会让整段文本按双字节存储，20 000 行的峰值会超过 128 MiB（登记前预审的估算）'
