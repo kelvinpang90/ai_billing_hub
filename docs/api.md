@@ -281,11 +281,11 @@
 
 ## 客户钱包
 
-设计依据：设计闸门 #393 `APPROVED: design v3`，全文见 [design/AIH-TASK-099-customer-wallet.md](design/AIH-TASK-099-customer-wallet.md)（§2、§6、§9；spec §67、§70、§90）。实现登记为 AIH-TASK-099。
+设计依据：设计闸门 #393 `APPROVED: design v3`，全文见 [design/AIH-TASK-099-customer-wallet.md](design/AIH-TASK-099-customer-wallet.md)（§2、§6、§9；spec §67、§70、§90）。实现登记为 AIH-TASK-099。钱包摘要的 `low_balance_threshold` 与 `low_balance` 两个键依据设计闸门 #433 `APPROVED: design v2`（[design/AIH-TASK-109-low-balance-threshold.md](design/AIH-TASK-109-low-balance-threshold.md) §2「接口三」；spec §48、§67），实现登记为 AIH-TASK-110。
 
 | 方法与路径 | 主体 | 成功 | 错误 |
 | --- | --- | --- | --- |
-| `GET /api/v1/customer/wallet` | CUSTOMER 的访问令牌 | 200，钱包摘要（6 个键） | 401 / 403 / 500 / 503 |
+| `GET /api/v1/customer/wallet` | CUSTOMER 的访问令牌 | 200，钱包摘要（8 个键） | 401 / 403 / 500 / 503 |
 | `GET /api/v1/customer/wallet/transactions` | CUSTOMER 的访问令牌 | 200，一页账本行（每项 7 个键） | 401 / 403 / 422 / 500 / 503 |
 
 - **客户请求不接受任何租户标识**（spec §90，见上文[客户请求的约定](#客户请求的约定)）：租户只取自访问令牌对应的、库里的 user 行。两个接口都不定义租户、客户、钱包标识参数；带了 `customer_id`、`tenant_id` 也只会被当作未知参数忽略，返回的仍是自己的钱包。
@@ -306,7 +306,9 @@
     "billing_mode": "PREPAID",
     "billing_status": "ACTIVE",
     "ai_service": "ALLOW_AI",
-    "ai_service_reason": null
+    "ai_service_reason": null,
+    "low_balance_threshold": "50.00000000",
+    "low_balance": true
   },
   "error": null,
   "request_id": "00000000-0000-0000-0000-000000000000"
@@ -321,10 +323,18 @@
 | `billing_status` | `ACTIVE`（余额 > 0）/ `SUSPENDED`（余额 ≤ 0，恰好为 0 也是 `SUSPENDED`） |
 | `ai_service` | `ALLOW_AI` / `BLOCK_AI`：AI 服务现在是否可用。与集成方的[有效 AI 服务状态](#集成有效-ai-服务状态)同一公式，在客户级算（项目维度按 `ENABLED` 代入） |
 | `ai_service_reason` | `ai_service` 为 `BLOCK_AI` 时是 `ACCOUNT_CLOSED` / `ACCOUNT_DISABLED` / `ACCOUNT_PENDING_ACTIVATION` / `BALANCE_NOT_POSITIVE` 之一，`ALLOW_AI` 时为 `null`。管理员动作排在余额之前：被停用且余额为负时是 `ACCOUNT_DISABLED`。不会出现 `PROJECT_INTEGRATION_DISABLED`：单个项目被停用不在这里体现 |
+| `low_balance_threshold` | 管理员给这个客户设的低余额提醒线：恰好 8 位小数的字符串，原样来自 `tenants.low_balance_threshold`；未设置（不提醒）为 `null` |
+| `low_balance` | 布尔：`billing_mode` 为 `PREPAID`、阈值非空、且 `balance ≤ low_balance_threshold` 时为 `true`，否则 `false` |
 
-- 恰好这 6 个键：没有钱包 `version`、`low_balance_threshold`、`status_version`、任何内部 id。账户状态与只读标志见 `/customer/me`，这里不重复。
+- 恰好这 8 个键：没有钱包 `version`、`status_version`、任何内部 id。账户状态与只读标志见 `/customer/me`，这里不重复。
 - `INTERNAL_METERED_ONLY` 的客户余额通常为 0、`billing_status` 为 `SUSPENDED`，但 `ai_service` 照常是 `ALLOW_AI`：判断 AI 能不能用看 `ai_service`，不要只看 `billing_status`。
-- 余额与三个状态出自同一条查询，不会读到「余额已变、状态未变」的组合。
+- 余额、三个状态与阈值出自同一条查询，不会读到「余额已变、状态未变」的组合。
+- `low_balance` 的判定在后端用十进制精确比较算出（不经浮点、不在 SQL 里算），前端只看这个布尔，不自己比较金额：
+  - **只有 `PREPAID` 才算**：`INTERNAL_METERED_ONLY` 恒为 `false`（阈值照常返回），与[低余额事件](#低余额事件)只对预付客户同一口径。
+  - **等号算低余额**：余额恰好等于阈值时为 `true`（spec §48「at-or-below」）；高出最小单位（`0.00000001`）就是 `false`。
+  - 余额 ≤ 0（`SUSPENDED`）且设了阈值时也是 `true`。
+  - 按当前余额实时判断：管理员把阈值调到当前余额之上时这里立刻是 `true`，但不会补发低余额事件。
+- 阈值只能由管理员设置或清除（见[管理端低余额阈值](#管理端低余额阈值)）；客户只读，没有修改入口。
 
 ### `GET /api/v1/customer/wallet/transactions` —— 客户自己的钱包流水
 

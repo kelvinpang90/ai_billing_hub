@@ -4,6 +4,10 @@
 只读、租户只取自会话。§7 后端表格里「路由守卫」在 test_customer_api.py，
 「单条快照」在 test_wallet_repository.py，不在这里。
 
+AIH-TASK-110（设计闸门 #433 v2 §2「接口三」、§7）：钱包多 `low_balance_threshold` 与 `low_balance`
+两个键。阈值直接写库准备数据，不经 AIH-TASK-109 的管理端接口；「同一快照」同样在
+test_wallet_repository.py。
+
 账本行由真实的 `post_transaction` 与计费 worker 写入（test_usage_billing.World）：
 - SQLite：`create_all` 建表，再装上 test_usage_billing 那条代替触发器推进钱包的测试触发器；
 - MySQL：表与触发器都走迁移，需要 `BILLING_TEST_DATABASE_URL`，没设时 MySQL 那一半 skip ——
@@ -81,7 +85,8 @@ PASSWORD = "a-customer-perfectly-fine-passphrase"
 PLACEHOLDER_SESSION = "00000000-0000-0000-0000-000000000000"
 CONTEXT = RequestContext(ip_address="10.0.0.1", user_agent="pytest")
 
-# 设计 §2：钱包恰好 6 个键；流水 `data` 恰好 3 个键，每项恰好 7 个键。多一个就红。
+# 设计 §2：钱包恰好 8 个键（#393 v3 的 6 个加 #433 v2 的 2 个）；流水 `data` 恰好 3 个键，
+# 每项恰好 7 个键。多一个就红。
 WALLET_FIELDS = {
     "currency",
     "balance",
@@ -89,6 +94,8 @@ WALLET_FIELDS = {
     "billing_status",
     "ai_service",
     "ai_service_reason",
+    "low_balance_threshold",
+    "low_balance",
 }
 PAGE_FIELDS = {"items", "page_size", "next_before_sequence"}
 ITEM_FIELDS = {
@@ -271,6 +278,25 @@ class Portal:
             session.execute(update(Tenant).where(Tenant.id == tenant.id).values(billing_mode=mode))
             session.commit()
 
+    def set_threshold(self, tenant: Tenancy, threshold: str | None) -> None:
+        """Write the column directly: this task does not depend on AIH-TASK-109's endpoint."""
+        value = None if threshold is None else Decimal(threshold)
+        with self.factory() as session:
+            session.execute(
+                update(Tenant).where(Tenant.id == tenant.id).values(low_balance_threshold=value)
+            )
+            session.commit()
+
+    def low_balance_events(self, tenant: Tenancy) -> int:
+        with self.factory() as session:
+            statement = (
+                select(func.count())
+                .select_from(DomainOutbox)
+                .where(DomainOutbox.event_type == wallet_repository.EVENT_LOW_BALANCE)
+                .where(DomainOutbox.aggregate_id == tenant.public_id)
+            )
+            return int(session.execute(statement).scalar_one())
+
     # -- reading --
 
     def get_wallet(self, headers: dict[str, str], **params):
@@ -411,7 +437,10 @@ def error_of(response) -> tuple[int, str]:
 
 
 def test_the_wallet_of_a_funded_prepaid_customer(both: Portal) -> None:
-    """§7「正常路径（钱包）」：PREPAID、余额 12.5、ENABLED。"""
+    """§7「正常路径（钱包）」：PREPAID、余额 12.5、ENABLED。
+
+    #433 v2 §7「未设置」：阈值 `NULL` → `low_balance_threshold = null`、`low_balance = false`。
+    """
     tenant = both.tenant()
     both.adjust(tenant, TransactionType.ADJUSTMENT_CREDIT, "12.5")
     headers = both.customer(tenant)
@@ -426,6 +455,8 @@ def test_the_wallet_of_a_funded_prepaid_customer(both: Portal) -> None:
         "billing_status": "ACTIVE",
         "ai_service": "ALLOW_AI",
         "ai_service_reason": None,
+        "low_balance_threshold": None,
+        "low_balance": False,
     }
     # 只读（INV-2/3/4）：调用前后账本、钱包、租户、审计、outbox 的行数与每个钱包的余额、版本不变。
     assert both.footprint() == before
@@ -567,6 +598,8 @@ def test_a_zero_or_negative_balance_blocks_ai(
         "billing_status": "SUSPENDED",
         "ai_service": "BLOCK_AI",
         "ai_service_reason": "BALANCE_NOT_POSITIVE",
+        "low_balance_threshold": None,
+        "low_balance": False,
     }
 
 
@@ -599,7 +632,120 @@ def test_an_internal_metered_tenant_is_allowed_at_a_zero_balance(both: Portal) -
         "billing_status": "SUSPENDED",
         "ai_service": "ALLOW_AI",
         "ai_service_reason": None,
+        "low_balance_threshold": None,
+        "low_balance": False,
     }
+
+
+# --- 低余额（设计闸门 #433 v2 §2「接口三」、§7） ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "amount", "balance", "low"),
+    [
+        (TransactionType.ADJUSTMENT_CREDIT, "50.01000001", "50.01000001", False),
+        (TransactionType.ADJUSTMENT_CREDIT, "50.01", "50.01000000", True),
+        (TransactionType.AI_USAGE, "-5", "-5.00000000", True),
+    ],
+)
+def test_low_balance_compares_the_exact_decimal_at_or_below_the_threshold(
+    both: Portal, kind: TransactionType, amount: str, balance: str, low: bool
+) -> None:
+    """§7「金额精度」（INV-10）：阈值 50.01。
+
+    余额高一个最小单位为 false，恰好相等与负余额为 true。
+    """
+    tenant = both.tenant()
+    if kind is TransactionType.AI_USAGE:
+        both.post(tenant, kind, amount)
+    else:
+        both.adjust(tenant, kind, amount)
+    both.set_threshold(tenant, "50.01")
+    headers = both.customer(tenant)
+    before = both.footprint()
+
+    data = both.wallet(headers)
+
+    assert data["balance"] == balance
+    assert data["billing_mode"] == "PREPAID"
+    assert data["low_balance_threshold"] == "50.01000000"
+    assert data["low_balance"] is low
+    assert both.footprint() == before
+
+
+def test_an_internal_metered_tenant_is_never_low_but_still_sees_its_threshold(
+    both: Portal,
+) -> None:
+    """§7「内部计量」：INTERNAL_METERED_ONLY、余额 0、阈值 50。
+
+    `low_balance = false`，阈值照常返回。
+    """
+    tenant = both.tenant()
+    both.set_billing_mode(tenant, BillingMode.INTERNAL_METERED_ONLY)
+    both.set_threshold(tenant, "50")
+    headers = both.customer(tenant)
+
+    data = both.wallet(headers)
+
+    assert data == {
+        "currency": "MYR",
+        "balance": "0.00000000",
+        "billing_mode": "INTERNAL_METERED_ONLY",
+        "billing_status": "SUSPENDED",
+        "ai_service": "ALLOW_AI",
+        "ai_service_reason": None,
+        "low_balance_threshold": "50.00000000",
+        "low_balance": False,
+    }
+
+
+def test_raising_the_threshold_above_the_balance_shows_low_without_an_event(both: Portal) -> None:
+    """§7 第一张表「改阈值不补发」：余额 30、阈值改成 50。
+
+    钱包 `low_balance = true`，没有新事件。
+    """
+    tenant = both.tenant()
+    both.adjust(tenant, TransactionType.ADJUSTMENT_CREDIT, "30")
+    headers = both.customer(tenant)
+    assert both.wallet(headers)["low_balance"] is False
+    both.set_threshold(tenant, "50")
+    before = both.footprint()
+
+    data = both.wallet(headers)
+
+    assert data["balance"] == "30.00000000"
+    assert data["low_balance_threshold"] == "50.00000000"
+    assert data["low_balance"] is True
+    assert both.low_balance_events(tenant) == 0
+    assert both.footprint() == before
+
+
+def test_a_customer_never_sees_another_customers_threshold(both: Portal) -> None:
+    """§7 第一张表「租户越权」（INV-8）。
+
+    只给 A（theirs）设阈值，B（mine）的钱包 `low_balance_threshold` 为 null。
+    """
+    mine = both.tenant()
+    theirs = both.tenant()
+    both.adjust(mine, TransactionType.ADJUSTMENT_CREDIT, "10")
+    both.adjust(theirs, TransactionType.ADJUSTMENT_CREDIT, "10")
+    both.set_threshold(theirs, "50")
+    headers = both.customer(mine)
+    their_headers = both.customer(theirs)
+    forged = {"customer_id": theirs.public_id, "tenant_id": str(theirs.id)}
+
+    response = both.get_wallet(headers, **forged)
+    theirs_data = both.wallet(their_headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert set(data) == WALLET_FIELDS
+    assert (data["low_balance_threshold"], data["low_balance"]) == (None, False)
+    assert "50.00000000" not in response.text
+    assert (theirs_data["low_balance_threshold"], theirs_data["low_balance"]) == (
+        "50.00000000",
+        True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -880,6 +1026,8 @@ def test_no_cost_margin_internal_note_operator_or_idempotency_key_leaks(portal: 
     internal_items = internal_page.json()["data"]["items"]
     assert [item["transaction_type"] for item in internal_items] == ["ADJUSTMENT_CREDIT"]
     assert all(set(item) == ITEM_FIELDS for item in internal_items)
+    # `low_balance_threshold` 自 #433 v2 起是钱包白名单里的键，不再列在这里；钱包 `version`、
+    # `status_version` 与内部 id 仍然不许出现。
     forbidden = (
         money_text(SENTINEL_SOURCE_COST),
         money_text(SENTINEL_ESTIMATED_MYR),
@@ -898,7 +1046,6 @@ def test_no_cost_margin_internal_note_operator_or_idempotency_key_leaks(portal: 
         "metadata",
         "tenant_id",
         "wallet_id",
-        "low_balance_threshold",
         "status_version",
         '"version"',
         "cost",

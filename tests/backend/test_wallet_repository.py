@@ -771,11 +771,11 @@ def test_a_page_filters_by_source_and_carries_the_operator(factory) -> None:
 def test_the_wallet_summary_is_one_unlocked_select(factory, engine) -> None:
     """设计闸门 #393 v3 §3 INV-13、§7「单条快照」：余额与三个状态出自同一条 SELECT。
 
-    不加锁、不写。
+    不加锁、不写。设计闸门 #433 v2 §7「同一快照」：低余额阈值也出自这同一条，语句数不变。
 
     只断言两种方言相同的片段（CLAUDE.md「写后端测试的约定」）。
     """
-    tenant_id = make_tenant(factory)
+    tenant_id = make_tenant(factory, threshold="50.01")
     post(factory, tenant_id, TOPUP, "12.5")
     statements: list[str] = []
 
@@ -799,14 +799,17 @@ def test_the_wallet_summary_is_one_unlocked_select(factory, engine) -> None:
         billing_mode=BillingMode.PREPAID,
         billing_status=BillingStatus.ACTIVE,
         account_status=AccountStatus.ENABLED,
+        low_balance_threshold=Decimal("50.01000000"),
     )
     assert missing is None
+    # 每次调用恰好一条语句：阈值没有另起一条查询。
     assert len(statements) == 2
     for statement in statements:
         normalized = " ".join(statement.upper().split())
         assert normalized.startswith("SELECT ")
         assert "FOR UPDATE" not in normalized and "FOR SHARE" not in normalized
         assert " JOIN WALLETS " in normalized
+        assert "LOW_BALANCE_THRESHOLD" in normalized
     assert state(factory, tenant_id)[:2] == (Decimal("12.50000000"), 1)
 
 
