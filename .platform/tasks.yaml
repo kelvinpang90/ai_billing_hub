@@ -6923,7 +6923,7 @@ tasks:
     title: 客户导出第四层：客户钱包流水按记账日期的 CSV 导出接口
     purpose: >-
       按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）§2 接口二与 §8 第 3 步：新增 GET /api/v1/customer/wallet/transactions/export（from_date、to_date 必填，马来西亚日期按 created_at 取，最多 92 天），app/repositories/wallet.py 新增 list_transactions_for_customer_export（一条 SELECT、按 wallet_sequence 倒序、不 JOIN 用户表、2 秒预算），复用 AIH-TASK-114 的 CSV 模块（与 AIH-TASK-115 用量导出接口的写法）与并发上限、#393 的 7 键白名单。docs/api.md 补钱包导出。只读；前端属于 AIH-TASK-118。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-113
       - AIH-TASK-115
