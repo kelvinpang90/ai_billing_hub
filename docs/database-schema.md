@@ -175,6 +175,13 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 - `ix_wallet_transactions_tenant_reference_sequence (tenant_id, reference_type, wallet_sequence)`：
   按来源（`reference_type`）筛选时的键集分页，等值前缀加有序的序号，倒序取一页即停；稀有来源
   （调账、系统更正）不必倒着扫过全部用量行。迁移 0023 加（AIH-TASK-083，设计闸门 #351 v1 §2）。
+- `ix_wallet_transactions_tenant_created (tenant_id, created_at, wallet_sequence)`：客户按记账日期
+  （`created_at` 的马来西亚日历日换成的 UTC 区间）导出钱包流水，租户等值加 `created_at` 范围扫描，
+  不必扫这个租户的全部流水；导出仍按 `wallet_sequence` 倒序排（`created_at` 不保证与序号同序）。
+  迁移 `0027_wallet_tx_created_index` 加（AIH-TASK-113，设计闸门 #435 v10 §2「数据库」）。写法同 0026：
+  先检查同名索引，形状正确（非唯一、列恰好按序、没有前缀长度）的跳过，形状不对的报错且不发 DDL，所以
+  upgrade 可以安全重跑；MySQL 上缺时发一条 `ALTER TABLE … ADD INDEX`，downgrade 只在存在时删。建索引
+  不改行，账本的触发器不受影响。
 
 其余 `CHECK`（与模型上的定义逐条一致，`tests/backend/test_migrations.py` 比对两边）：
 

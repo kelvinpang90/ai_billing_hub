@@ -252,6 +252,14 @@ class WalletTransaction(Base):
             "reference_type",
             "wallet_sequence",
         ),
+        # 客户按记账日期导出流水：租户等值加 `created_at` 区间扫描，再按序号排序
+        # （迁移 0027，设计闸门 #435 v10 §2「数据库」）。
+        Index(
+            "ix_wallet_transactions_tenant_created",
+            "tenant_id",
+            "created_at",
+            "wallet_sequence",
+        ),
         CheckConstraint(ARITHMETIC_CHECK, name="ck_wallet_transactions_arithmetic"),
         CheckConstraint(SIGN_CHECK, name="ck_wallet_transactions_sign"),
         CheckConstraint(REFERENCE_CHECK, name="ck_wallet_transactions_reference_type"),
