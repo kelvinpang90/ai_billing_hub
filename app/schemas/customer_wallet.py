@@ -1,6 +1,6 @@
-"""Response shapes for the customer wallet (design gate #393 v3 §2, §6).
+"""Response shapes for the customer wallet (design gate #393 v3 §2, §6; #433 v2 §2「接口三」).
 
-⚠️ **这是客户侧的字段白名单**（INV-7）：钱包恰好 6 个键，流水每项恰好 7 个键。刻意不继承、不复用
+⚠️ **这是客户侧的字段白名单**（INV-7）：钱包恰好 8 个键，流水每项恰好 7 个键。刻意不继承、不复用
 app/schemas/wallet_transactions.py 的管理端模型：管理端以后加字段，客户端不会跟着出现。库里的
 `description`（管理员写的调账原因）、`reference_type`、调账的 `reference_id`（幂等键）、
 操作者邮箱、`balance_before`、用量事件的 `public_id`、钱包 `version` 与任何内部 id 一律不出这里。
@@ -16,7 +16,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel
 
-from app.models.tenancy import IntegrationStatus, compose_effective_status
+from app.models.tenancy import BillingMode, IntegrationStatus, compose_effective_status
 from app.models.wallet import ReferenceType, TransactionType
 from app.repositories.wallet import LedgerRow, WalletSummary
 from app.schemas.customers import money_text
@@ -32,6 +32,9 @@ class CustomerWalletView(BaseModel):
     ai_service: str
     # `ai_service` 为 `BLOCK_AI` 时才有。
     ai_service_reason: str | None
+    # 管理员设的提醒线，未设置为 `None`。
+    low_balance_threshold: str | None
+    low_balance: bool
 
 
 class CustomerWalletTransactionView(BaseModel):
@@ -63,6 +66,7 @@ def customer_wallet_view(summary: WalletSummary) -> CustomerWalletView:
         summary.billing_mode,
         IntegrationStatus.ENABLED,
     )
+    threshold = summary.low_balance_threshold
     return CustomerWalletView(
         currency=summary.currency,
         balance=money_text(summary.balance),
@@ -70,6 +74,22 @@ def customer_wallet_view(summary: WalletSummary) -> CustomerWalletView:
         billing_status=summary.billing_status.value,
         ai_service=effective.value,
         ai_service_reason=None if reason is None else reason.value,
+        low_balance_threshold=None if threshold is None else money_text(threshold),
+        low_balance=is_low_balance(summary),
+    )
+
+
+def is_low_balance(summary: WalletSummary) -> bool:
+    """设计闸门 #433 v2 §2「接口三」：PREPAID、阈值非空、且余额 ≤ 阈值（等号算低余额）。
+
+    与 `post_transaction` 写 `tenant.low_balance` 同一规则。两边都是 `Decimal`，不经 float
+    （INV-10）。内部计量恒为 `False`：它的余额通常为 0、AI 照常可用，显示低余额就是误报。
+    """
+    threshold = summary.low_balance_threshold
+    return (
+        summary.billing_mode is BillingMode.PREPAID
+        and threshold is not None
+        and summary.balance <= threshold
     )
 
 

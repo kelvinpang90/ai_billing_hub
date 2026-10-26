@@ -337,7 +337,7 @@ class WalletSummary:
     """What the customer wallet card reads (design gate #393 v3 §2「接口一」).
 
     余额与三个状态出自同一条 SELECT：同一个一致性读快照，不会读到「余额已变、状态未变」的组合
-    （INV-13）。
+    （INV-13）。低余额阈值也出自这一条（设计闸门 #433 v2 §2「接口三」）。
     """
 
     currency: str
@@ -345,6 +345,8 @@ class WalletSummary:
     billing_mode: BillingMode
     billing_status: BillingStatus
     account_status: AccountStatus
+    # `None` = 管理员没设，不提醒。
+    low_balance_threshold: Decimal | None
 
 
 def get_wallet_summary(session: Session, tenant_id: int) -> WalletSummary | None:
@@ -356,6 +358,7 @@ def get_wallet_summary(session: Session, tenant_id: int) -> WalletSummary | None
             Tenant.billing_mode,
             Tenant.billing_status,
             Tenant.account_status,
+            Tenant.low_balance_threshold,
         )
         .select_from(Tenant)
         .join(Wallet, Wallet.tenant_id == Tenant.id)
