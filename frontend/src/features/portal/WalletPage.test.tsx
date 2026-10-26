@@ -768,7 +768,7 @@ describe("WalletPage export", () => {
       wallet(),
       (query) =>
         query.has("before_sequence")
-          ? page([row({ id: "00000000-0000-0000-0000-000000000004", wallet_sequence: 22, transaction_type: "BONUS", amount: "1.00000000", event_id: null })])
+          ? page([row({ id: EVENT_ID, wallet_sequence: 22, transaction_type: "BONUS", amount: "1.00000000", event_id: null })])
           : page([row()], 23),
       () => PENDING,
     );
