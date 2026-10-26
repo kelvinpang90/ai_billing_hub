@@ -5794,6 +5794,9 @@ _COLUMNS_0023 = ["tenant_id", "reference_type", "wallet_sequence"]
 # 0006's index; 0023 must leave it as it is.
 _INDEX_BEFORE_0023 = "ix_wallet_transactions_tenant_sequence"
 _COLUMNS_BEFORE_0023 = ["tenant_id", "wallet_sequence"]
+# 0027's index; the model declares it too.
+_INDEX_AFTER_0023 = "ix_wallet_transactions_tenant_created"
+_COLUMNS_AFTER_0023 = ["tenant_id", "created_at", "wallet_sequence"]
 
 # Design §2 "查询" with the source filter and the cursor; MySQL only (the EXPLAIN case).
 _LEDGER_PAGE_EXPLAIN = text(
@@ -5873,6 +5876,8 @@ def test_0023_index_is_the_one_the_model_declares() -> None:
     assert model == {
         _INDEX_BEFORE_0023: (_COLUMNS_BEFORE_0023, False),
         _INDEX_0023: (_COLUMNS_0023, False),
+        # 0027's (设计闸门 #435): test_wallet_created_index_migration.py.
+        _INDEX_AFTER_0023: (_COLUMNS_AFTER_0023, False),
     }
 
 
