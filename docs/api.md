@@ -590,11 +590,12 @@
 
 ## 客户导出
 
-设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115。
+设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。
 
 | 方法与路径 | 主体 | 成功 | 错误 |
 | --- | --- | --- | --- |
 | `GET /api/v1/customer/usage-events/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内全部已计费用量事件，每行一条、18 列 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/wallet/transactions/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内记账的全部钱包流水，每行一条、7 列 | 401 / 403 / 422 / 500 / 503 |
 
 - 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，不接受任何租户、客户标识；四种 `account_status` 都能导出（导出是读）；ADMIN 不能调。
 - 同步生成、不落盘：请求时查询一次，在内存里拼好整份文件后再开始发送。服务器不保存任何导出文件，没有导出任务、没有异步。只读：不写任何表、不加锁、不写审计。
@@ -606,8 +607,8 @@
 - **行**：RFC 4180。第一行是表头，之后每行一条记录；行尾 `\r\n`；含逗号、双引号或换行的字段加双引号，值里的双引号写成两个双引号。
 - **空值**：JSON 接口里为 `null` 的值写成空字段。
 - **整数**原样（十进制）。**金额与 `quantity`** 是恰好 8 位小数的字符串，与 JSON 接口逐字相同，**不按页面的 2 / 6 位舍入**、不经浮点、不加千分位、不带币种（币种恒为 MYR）：导出是对账用的数据，舍入后加总会与账本差几分。
-- **时间**一律是不带时区的 UTC，保留微秒，列名带 `_utc`，免得在表格软件里被当成本地时间。
-- **公式注入防护**：文本列的值若以 `=`、`+`、`-`、`@`、制表符或回车开头，前面加一个单引号 `'`（例：`=1+1` 写成 `'=1+1`）。这些值有的来自集成方上报或管理员，用 Excel 打开时以这些字符开头的单元格会被当成公式执行。数值列（token、`quantity`、`charged_amount`）与时间列不加：负金额必须保持是数。哪些是文本列见下文的列表。
+- **时间**一律是不带时区的 UTC，与 JSON 接口的同名时间逐字相同（库里有微秒就保留微秒），列名带 `_utc`，免得在表格软件里被当成本地时间。
+- **公式注入防护**：文本列的值若以 `=`、`+`、`-`、`@`、制表符或回车开头，前面加一个单引号 `'`（例：`=1+1` 写成 `'=1+1`）。这些值有的来自集成方上报或管理员，用 Excel 打开时以这些字符开头的单元格会被当成公式执行。数值列（token、`quantity`、`charged_amount`、`wallet_sequence`、`amount`、`balance_after`）与时间列不加：负金额必须保持是数。哪些是文本列见下文各接口的列表。
 - **响应头**：`Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment; filename="<文件名>"`、`Cache-Control: no-store`（文件不留在浏览器缓存里）、`X-Accel-Buffering: no`（见下文「同一时刻只有一个导出」）。文件名只由校验过的日期拼出，只含 ASCII 字母、数字、`-`、`_`、`.`。
 - **错误响应不是 CSV**：仍是 JSON 信封（`{success:false, error, request_id}`），HTTP 状态码照常。整份文件拼好才开始发送，所以不会出现「已经收到 200 和半个文件、之后才失败」。下载前端用 `responseType: "blob"` 时，失败的 blob 按 JSON 信封解析。
 
@@ -652,7 +653,36 @@
 - **与钱包流水的口径**：用量按 `occurred_at`（调用发生时间）的马来西亚日归属，钱包流水按记账时间；同一个日期区间两边可能差在跨日的几笔（例如月末发生、次月计费）。
 - **`QUERY_TOO_BROAD`**：查询沿用用量页的 2 秒执行预算，超过时 422 `QUERY_TOO_BROAD`，没有部分结果；缩短区间或换更具体的筛选条件后重试。服务端记一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id，不带查询参数的值）。
 
-### 错误
+### `GET /api/v1/customer/wallet/transactions/export` —— 导出客户自己的钱包流水
+
+与[钱包流水](#get-apiv1customerwallettransactions--客户自己的钱包流水)相同的白名单：每行就是流水接口的一项。一条 SELECT 取出整份文件，文件里的行来自同一个快照。
+
+| 参数 | 规则 |
+| --- | --- |
+| `from_date` / `to_date` | **必填**。`YYYY-MM-DD`，马来西亚日历日，含两端；规则与用量导出相同：`2020-01-01` 到 `2099-12-31` 之间、`to_date` 不早于 `from_date`、最多 92 天 |
+
+- **按记账时间取**：一笔流水归哪一天，看它的 `created_at`（记账时间）落在哪个马来西亚日历日（`[from_date 00:00, to_date + 1 天 00:00)`，UTC+8）。**与用量导出不同**：用量导出按 `occurred_at`（调用发生时间）取，一次调用的扣费流水在计费时才记账，所以同一个日期区间两边可能差在跨日的几笔（例如月末发生、次月计费）。
+- **排序按序号**：`wallet_sequence` 倒序（最新的一笔在前），这是账本的真实顺序，相邻两行的 `balance_after` 逐行接得上。不按 `created_at` 排：记账时间不保证与序号同序。
+- 没有其他参数：没有分页、`before_sequence`、来源筛选（给了按未知参数忽略），一次返回整个区间；校验、文案与时序与用量导出相同，所有 422 只列字段名、不回显值。
+- **文件名**：`wallet-transactions_<from_date>_<to_date>.csv`，例 `wallet-transactions_2026-10-01_2026-10-31.csv`。
+- **列**：表头恰好这 7 列，按这个顺序。每列的值与[钱包流水](#get-apiv1customerwallettransactions--客户自己的钱包流水)每项的同名键逐字相同；唯一改名的是时间列。
+
+| 列 | 文本列（防公式注入） | 说明 |
+| --- | --- | --- |
+| `id` | 是 | 流水的 `public_id` |
+| `wallet_sequence` | 否 | 本钱包内从 1 连续递增的序号 |
+| `transaction_type` | 是 | 流水类型，如 `AI_USAGE`、`ADJUSTMENT_CREDIT` |
+| `amount` | 否 | 本笔金额，恰好 8 位小数，扣费为负 |
+| `balance_after` | 否 | 本笔之后的余额，恰好 8 位小数，可以为负 |
+| `event_id` | 是 | 只有 AI 用量扣费的行有：集成方上报（或 AI 模块代为生成）的 `event_id`；其余来源为空 |
+| `created_at_utc` | 否 | 值与 JSON 的 `created_at` 相同：记账时间，不带时区的 UTC |
+
+- 文件里**没有**调账原因（`description`）、来源类型、调账 / 系统更正 / rebill 的幂等键、操作者邮箱、`balance_before`、`metadata_json` 与任何内部 id（INV-7），与流水接口刻意不返回的那些相同。查询本身就不读这些列，也不关联用户表。
+- 租户只取自访问令牌；带别的客户的标识来导出，只得到自己的行（INV-8）。
+- **钱包缺失**（数据不一致，不应发生）：500 `INTERNAL_ERROR`，与流水接口相同；在占用导出名额之前就判出。
+- **`QUERY_TOO_BROAD`**：查询同样有 2 秒执行预算；区间内流水很多、排序超过预算时 422 `QUERY_TOO_BROAD`，没有部分结果，缩短区间后重试。服务端记同一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id）。
+
+### 错误（两个导出接口相同）
 
 | HTTP | `error.code` | 什么时候 |
 | --- | --- | --- |
@@ -661,7 +691,7 @@
 | 422 | `VALIDATION_ERROR` | 查询参数违反上面的规则（包括缺 `from_date` 或 `to_date`） |
 | 422 | `EXPORT_TOO_LARGE` | 超过 20 000 行 |
 | 422 | `QUERY_TOO_BROAD` | 查询超过 2 秒执行预算 |
-| 500 | `INTERNAL_ERROR` | 意外错误，**包括查询时数据库连接失败或中断**（与其他客户接口一致：查询时的连接错误不是 503），带 `request_id`；信封与通用 500 相同 |
+| 500 | `INTERNAL_ERROR` | 意外错误，**包括查询时数据库连接失败或中断**（与其他客户接口一致：查询时的连接错误不是 503），带 `request_id`；信封与通用 500 相同。钱包流水导出另有一种：客户的钱包缺失 |
 | 503 | `EXPORT_BUSY` | 已有一个导出在生成或下载；响应头 `Retry-After: 5`，几秒后重试 |
 | 503 | `DATABASE_NOT_CONFIGURED` | 服务端根本没有配置数据库 |
 

@@ -7,12 +7,19 @@ app/schemas/wallet_transactions.py 的管理端模型：管理端以后加字段
 
 ⚠️ 金额是恰好 8 位小数的字符串（`money_text`），原样来自 `DECIMAL(20,8)` 列，不经 float、不舍入
 （INV-10）。显示精度是前端的事（设计 §2「金额（前端显示）」）。
+
+钱包流水导出（AIH-TASK-116，设计闸门 #435 v10 §2「接口二」）：列恰好是流水每项的
+7 个键，只有时间列改名为 `created_at_utc`（值同 `created_at`）。流水接口与导出共用
+`customer_ledger_line_view` 这一份映射，它只读 `CustomerLedgerLine` 的 8 个属性：
+白名单只有一份。
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Sequence
+from decimal import Decimal
+from typing import Final, Protocol
 
 from pydantic import BaseModel
 
@@ -20,6 +27,42 @@ from app.models.tenancy import BillingMode, IntegrationStatus, compose_effective
 from app.models.wallet import ReferenceType, TransactionType
 from app.repositories.wallet import LedgerRow, WalletSummary
 from app.schemas.customers import money_text
+
+# 钱包流水导出的表头（设计 #435 §2「接口二」），按这个顺序。
+WALLET_EXPORT_COLUMNS: Final = (
+    "id",
+    "wallet_sequence",
+    "transaction_type",
+    "amount",
+    "balance_after",
+    "event_id",
+    "created_at_utc",
+)
+# 加公式注入前缀的文本列（设计 #435 §2「CSV 格式」）；序号、金额与时间列不加。
+WALLET_EXPORT_TEXT_COLUMNS: Final = frozenset({"id", "transaction_type", "event_id"})
+# 唯一改名的列：导出列名 → 白名单视图的键。
+_WALLET_EXPORT_RENAMED: Final = {"created_at_utc": "created_at"}
+
+
+class CustomerLedgerLine(Protocol):
+    """The only attributes of a ledger row the customer whitelist may read."""
+
+    @property
+    def public_id(self) -> str: ...
+    @property
+    def wallet_sequence(self) -> int: ...
+    @property
+    def transaction_type(self) -> str: ...
+    @property
+    def amount(self) -> Decimal: ...
+    @property
+    def balance_after(self) -> Decimal: ...
+    @property
+    def reference_type(self) -> str: ...
+    @property
+    def reference_id(self) -> str: ...
+    @property
+    def created_at(self) -> dt.datetime: ...
 
 
 class CustomerWalletView(BaseModel):
@@ -94,6 +137,11 @@ def is_low_balance(summary: WalletSummary) -> bool:
 
 
 def customer_wallet_transaction_view(row: LedgerRow) -> CustomerWalletTransactionView:
+    return customer_ledger_line_view(row)
+
+
+def customer_ledger_line_view(row: CustomerLedgerLine) -> CustomerWalletTransactionView:
+    """The 7-key whitelist, shared by the ledger page and the ledger export."""
     # 调账、系统更正、rebill 的 `reference_id` 是内部的幂等键，不给客户（设计 §2「接口二」）。
     usage = ReferenceType(row.reference_type) is ReferenceType.USAGE_EVENT
     return CustomerWalletTransactionView(
@@ -118,3 +166,17 @@ def customer_wallet_transaction_page(
         page_size=page_size,
         next_before_sequence=shown[-1].wallet_sequence if more else None,
     )
+
+
+def customer_wallet_export_cells(row: CustomerLedgerLine) -> list[str | None]:
+    """One CSV row in `WALLET_EXPORT_COLUMNS` order: the JSON values of the 7-key view as text.
+
+    时间与 JSON 接口的 `created_at` 逐字相同（不带时区的 UTC）；序号变成十进制字符串，
+    金额是原样的 8 位小数字符串；`null`（非用量行的 `event_id`）留给 CSV 层写成空字段。
+    """
+    view = customer_ledger_line_view(row).model_dump(mode="json")
+    cells: list[str | None] = []
+    for name in WALLET_EXPORT_COLUMNS:
+        value = view[_WALLET_EXPORT_RENAMED.get(name, name)]
+        cells.append(None if value is None else str(value))
+    return cells

@@ -517,6 +517,7 @@ def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
         ("GET", CUSTOMER_ME),
         ("GET", f"{CUSTOMER_PREFIX}/wallet"),
         ("GET", f"{CUSTOMER_PREFIX}/wallet/transactions"),
+        ("GET", f"{CUSTOMER_PREFIX}/wallet/transactions/export"),
         ("GET", f"{CUSTOMER_PREFIX}/projects"),
         ("GET", f"{CUSTOMER_PREFIX}/usage-events"),
         ("GET", f"{CUSTOMER_PREFIX}/usage-events/export"),
