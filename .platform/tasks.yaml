@@ -6871,7 +6871,7 @@ tasks:
     title: 客户导出第三层：客户已计费用量的 CSV 导出接口
     purpose: >-
       按 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）§2 接口一、「所有错误响应都在租约内发出」与 §8 第 2 步的后一半：新增 GET /api/v1/customer/usage-events/export，筛选与用量页相同、日期恒必填，复用 list_processed_events_for_customer 与 18 键白名单，用 AIH-TASK-114 的 CSV 模块、导出租约与 ExportCsvResponse。docs/api.md 新增「客户导出」一节。只读；钱包导出属于 AIH-TASK-116，前端属于 AIH-TASK-117。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-114
     acceptance_criteria:
