@@ -3,7 +3,7 @@
  * （`GET /api/v1/customer/usage-summary`）。
  *
  * 语义以 docs/api.md「客户用量」为准（AIH-TASK-104，设计闸门 #398 v4）；按月汇总以同一节的 usage-summary 小节为准
- * （AIH-TASK-107，设计闸门 #403 v1）。只读。
+ * （AIH-TASK-107，设计闸门 #403 v1）；用量导出以 docs/api.md「客户导出」为准（AIH-TASK-117，设计闸门 #435 v10）。只读。
  *
  * ⚠️ **不带任何租户或客户标识**：客户是谁只取自访问令牌（spec §90）。这一层也不接受这类参数 —— 不给调用方
  * 留下「顺手带上 customer_id」的口子。
@@ -15,9 +15,11 @@
  */
 
 import { apiGet } from "./client";
+import { downloadFile } from "./download";
 
 export const CUSTOMER_PROJECTS_URL = "/api/v1/customer/projects";
 export const CUSTOMER_USAGE_EVENTS_URL = "/api/v1/customer/usage-events";
+export const CUSTOMER_USAGE_EXPORT_URL = "/api/v1/customer/usage-events/export";
 export const CUSTOMER_USAGE_SUMMARY_URL = "/api/v1/customer/usage-summary";
 
 /** 查询超过后端的执行时间预算（2 秒）：请客户缩小日期区间或换筛选条件（docs/api.md「客户用量」）。 */
@@ -110,11 +112,8 @@ const TEXT_PARAMS = [
   ["event_id", "eventId"],
 ] as const;
 
-/** 一页已计费的用量事件，最新在前（顺序由后端决定，前端不重排）。 */
-export function listCustomerUsageEvents(
-  query: CustomerUsageQuery = {},
-  signal?: AbortSignal,
-): Promise<CustomerUsagePage> {
+/** 按 {@link TEXT_PARAMS} 的顺序放进查询串；不带（`undefined`、`null` 或空串）的不放。 */
+function textParams(query: Omit<CustomerUsageQuery, "pageSize" | "cursor">): URLSearchParams {
   const params = new URLSearchParams();
   for (const [name, field] of TEXT_PARAMS) {
     const value = query[field];
@@ -122,6 +121,15 @@ export function listCustomerUsageEvents(
       params.set(name, value);
     }
   }
+  return params;
+}
+
+/** 一页已计费的用量事件，最新在前（顺序由后端决定，前端不重排）。 */
+export function listCustomerUsageEvents(
+  query: CustomerUsageQuery = {},
+  signal?: AbortSignal,
+): Promise<CustomerUsagePage> {
+  const params = textParams(query);
   if (query.pageSize !== undefined) {
     params.set("page_size", String(query.pageSize));
   }
@@ -133,6 +141,39 @@ export function listCustomerUsageEvents(
     search === "" ? CUSTOMER_USAGE_EVENTS_URL : `${CUSTOMER_USAGE_EVENTS_URL}?${search}`,
     signal,
   );
+}
+
+/**
+ * 导出的筛选：与用量页相同的参数名，**两个日期恒必填**（带 `eventId` 也要，docs/api.md「客户导出」）；没有
+ * `pageSize` 与 `cursor` —— 一次导出整个区间。其余可选，不带（`undefined`、`null` 或空串）的不进查询串。
+ */
+export interface CustomerUsageExportQuery {
+  fromDate: string;
+  toDate: string;
+  projectId?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  conversationId?: string | null;
+  eventId?: string | null;
+}
+
+/** 导出的地址（含查询串）。 */
+export function customerUsageExportUrl(query: CustomerUsageExportQuery): string {
+  const search = textParams(query).toString();
+  return search === "" ? CUSTOMER_USAGE_EXPORT_URL : `${CUSTOMER_USAGE_EXPORT_URL}?${search}`;
+}
+
+/** 后端取不到文件名时的兜底，与后端同一规则：`usage-events_<from_date>_<to_date>.csv`。 */
+export function customerUsageExportFilename(query: CustomerUsageExportQuery): string {
+  return `usage-events_${query.fromDate}_${query.toDate}.csv`;
+}
+
+/**
+ * 把区间内全部已计费用量导出成一个 CSV 并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 行）、
+ * `QUERY_TOO_BROAD`（超过执行时间预算）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带 `request_id`。
+ */
+export function exportCustomerUsageEvents(query: CustomerUsageExportQuery, signal?: AbortSignal): Promise<void> {
+  return downloadFile(customerUsageExportUrl(query), customerUsageExportFilename(query), signal);
 }
 
 /** 按月汇总里的一天。恰好这 3 个键。 */

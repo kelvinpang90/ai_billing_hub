@@ -6,11 +6,16 @@
  * `/api/v1/admin/` 路径。写错不会报错，页面照样显示一页，只是哪一页不对、或者问了不该问的接口。
  *
  * 「现在」用 `vi.useFakeTimers({ toFake: ["Date"] })` 固定：只假 `Date`，定时器照常走，界面交互与请求不受影响。
+ *
+ * 「Export CSV」（AIH-TASK-117）同样在 `client.get` 上按路径回应：成功回一个 blob 文件，失败回一个响应体是 blob 的
+ * `AxiosError`（与浏览器里 `responseType: "blob"` 的失败同形）。jsdom 没有对象 URL，也不会真下载：装上替身、拦下
+ * 链接的点击，只记录下载的文件名。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { AxiosError, AxiosHeaders, type AxiosResponse } from "axios";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -22,6 +27,7 @@ import { UsagePage, dateRangeProblem, defaultDateRange, type DateRangeProblem } 
 
 const PROJECTS_URL = "/api/v1/customer/projects";
 const USAGE_URL = "/api/v1/customer/usage-events";
+const EXPORT_URL = "/api/v1/customer/usage-events/export";
 
 const PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const OTHER_PROJECT_ID = "00000000-0000-0000-0000-000000000009";
@@ -75,12 +81,24 @@ function envelope(data: unknown) {
 }
 
 /**
- * 按路径回应 `client.get`：项目接口回 `projects`，用量接口按查询串交给 `usage`。别的路径一律当成失败 —— 页面不该
- * 问它们，下面也会逐条断言没有问。
+ * 按路径回应 `client.get`：项目接口回 `projects`，用量接口按查询串交给 `usage`，导出接口回 `exported()` 的结果
+ * （文件响应原样、不包信封；默认当成失败 —— 不点「Export CSV」的用例里页面不该问它）。别的路径一律当成失败 ——
+ * 页面不该问它们，下面也会逐条断言没有问。
  */
-function serve(usage: (query: URLSearchParams) => unknown, projects: unknown = PROJECTS) {
+function serve(
+  usage: (query: URLSearchParams) => unknown,
+  projects: unknown = PROJECTS,
+  exported: () => unknown = () => new ApiError("NOT_FOUND", "Unexpected request.", null),
+) {
   return vi.spyOn(client, "get").mockImplementation((url: string) => {
     const parsed = new URL(url, "https://portal.example");
+    if (parsed.pathname === EXPORT_URL) {
+      const file = exported();
+      if (file === PENDING) {
+        return new Promise(() => undefined);
+      }
+      return file instanceof Error ? Promise.reject(file) : Promise.resolve(file);
+    }
     let reply: unknown;
     if (parsed.pathname === PROJECTS_URL) {
       reply = projects;
@@ -96,9 +114,14 @@ function serve(usage: (query: URLSearchParams) => unknown, projects: unknown = P
   });
 }
 
-/** 发给用量接口的全部地址，按发出顺序。 */
+/** 发给用量列表接口的全部地址，按发出顺序（不含导出）。 */
 function usageUrls(get: ReturnType<typeof serve>): string[] {
-  return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(USAGE_URL));
+  return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(`${USAGE_URL}?`));
+}
+
+/** 发给导出接口的全部地址，按发出顺序。 */
+function exportUrls(get: ReturnType<typeof serve>): string[] {
+  return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(EXPORT_URL));
 }
 
 function renderPage(entry: string = ROUTES.portalUsage) {
@@ -641,5 +664,210 @@ describe("UsagePage requests", () => {
 
     const region = await screen.findByRole("region", { name: "Usage" });
     expect(await within(region).findByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+  });
+});
+
+describe("UsagePage export", () => {
+  const EXPORT_NAME = /Export CSV/;
+  const FILE_NAME = "usage-events_2026-10-01_2026-10-25.csv";
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的下载链接的文件名，按点击顺序。 */
+  let downloads: string[];
+
+  beforeEach(() => {
+    downloads = [];
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: () => "blob:https://portal.example/00000000-0000-0000-0000-000000000000",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: () => undefined });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
+  });
+
+  afterEach(() => {
+    for (const [name, descriptor] of [
+      ["createObjectURL", originalCreate],
+      ["revokeObjectURL", originalRevoke],
+    ] as const) {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(URL, name);
+      } else {
+        Object.defineProperty(URL, name, descriptor);
+      }
+    }
+  });
+
+  function file() {
+    return {
+      data: new Blob(["﻿id,event_id\r\n"], { type: "text/csv" }),
+      status: 200,
+      statusText: "",
+      headers: { "content-disposition": `attachment; filename="${FILE_NAME}"` },
+    };
+  }
+
+  /** 后端的失败：响应体是装着 JSON 信封的 blob。 */
+  function failure(status: number, code: string, requestId: string) {
+    const body = JSON.stringify({ success: false, data: null, error: { code, message: "Safe message." }, request_id: requestId });
+    const response = {
+      data: new Blob([body], { type: "application/json" }),
+      status,
+      statusText: "",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    } satisfies AxiosResponse;
+    return new AxiosError("Request failed", "ERR_BAD_REQUEST", undefined, undefined, response);
+  }
+
+  it("exports with the applied filters, not the ones still being typed, and leaves the list alone", async () => {
+    const user = userEvent.setup();
+    const get = serve(() => page([event()]), PROJECTS, file);
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await choose("Project", "Sales assistant");
+    await user.type(screen.getByLabelText("Provider"), " anthropic ");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() => {
+      expect(usageUrls(get).at(-1)).toBe(
+        `${USAGE_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${OTHER_PROJECT_ID}&provider=anthropic&page_size=20`,
+      );
+    });
+    // 填了但没点「Apply filters」：不算数。
+    await user.type(screen.getByLabelText("Model"), "claude-sonnet-5-5");
+    const listed = usageUrls(get).length;
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => {
+      expect(downloads).toEqual([FILE_NAME]);
+    });
+    expect(exportUrls(get)).toEqual([
+      `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${OTHER_PROJECT_ID}&provider=anthropic`,
+    ]);
+    const [, config] = get.mock.calls.find(([url]) => url.startsWith(EXPORT_URL)) ?? [];
+    expect(config).toMatchObject({ responseType: "blob" });
+    // 导出不重新请求列表，也不清空表格。
+    expect(usageUrls(get)).toHaveLength(listed);
+    expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+    for (const url of exportUrls(get)) {
+      expect(url).not.toMatch(/page_size|cursor/);
+    }
+    for (const [url] of get.mock.calls) {
+      expect(url).not.toContain("/api/v1/admin/");
+      expect(url).not.toMatch(/tenant|customer_id/);
+    }
+  });
+
+  it("exports the default range when nothing was changed", async () => {
+    const user = userEvent.setup();
+    const get = serve(() => page([event()]), PROJECTS, file);
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => {
+      expect(downloads).toEqual([FILE_NAME]);
+    });
+    expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25`]);
+  });
+
+  it.each<[string, string, string]>([
+    ["reversed", "2026-10-20", "2026-10-10"],
+    ["longer than 92 days", "2026-07-01", "2026-10-01"],
+    ["incomplete", "", "2026-10-10"],
+  ])("cannot export when the applied range is %s", async (_, from, to) => {
+    const user = userEvent.setup();
+    const get = serve(() => page([event()]), PROJECTS, file);
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+    expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+
+    setDate("From (Malaysia time)", from);
+    setDate("To (Malaysia time)", to);
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: EXPORT_NAME }));
+    expect(exportUrls(get)).toEqual([]);
+  });
+
+  it("cannot export while showing a single event, which has no date range", async () => {
+    const get = serve(() => page([event()]), PROJECTS, file);
+
+    renderPage(`${ROUTES.portalUsage}?event_id=${EVENT_ID}`);
+
+    await screen.findByText("Customer service bot", { selector: "td" });
+    expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: EXPORT_NAME }));
+    expect(exportUrls(get)).toEqual([]);
+  });
+
+  it("shows the button loading while exporting and does not export twice", async () => {
+    const user = userEvent.setup();
+    const get = serve(() => page([event()]), PROJECTS, () => PENDING);
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+    });
+    const button = screen.getByRole("button", { name: EXPORT_NAME });
+    expect(within(button).getByRole("img", { name: "loading" })).toBeInTheDocument();
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(exportUrls(get)).toHaveLength(1);
+    expect(downloads).toEqual([]);
+    // 列表照常可用。
+    expect(screen.getByRole("button", { name: "Apply filters" })).toBeEnabled();
+  });
+
+  it.each<[number, string, string]>([
+    [422, "EXPORT_TOO_LARGE", "This export has more than 20,000 rows. Narrow the date range or add filters, then try again."],
+    [
+      422,
+      "QUERY_TOO_BROAD",
+      "This export covers too much usage to finish in time. Narrow the date range or change the filters, then try again.",
+    ],
+    [503, "EXPORT_BUSY", "Another export is in progress. Wait a few seconds, then try again."],
+  ])("explains a %s %s in its own words", async (status, code, text) => {
+    const user = userEvent.setup();
+    serve(() => page([event()]), PROJECTS, () => failure(status, code, "req-export-specific"));
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(screen.queryByText("Your usage could not be exported.")).not.toBeInTheDocument();
+    expect(screen.queryByText("req-export-specific")).not.toBeInTheDocument();
+    // 列表不受影响，按钮可以再点。
+    expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+    expect(downloads).toEqual([]);
+  });
+
+  it("shows any other failure with its request id", async () => {
+    const user = userEvent.setup();
+    serve(() => page([event()]), PROJECTS, () => failure(500, "INTERNAL_ERROR", "req-export-500"));
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    expect(await screen.findByText("Your usage could not be exported.")).toBeInTheDocument();
+    expect(screen.getByText("req-export-500")).toBeInTheDocument();
+    expect(screen.queryByText("Your usage could not be loaded.")).not.toBeInTheDocument();
+    expect(downloads).toEqual([]);
   });
 });

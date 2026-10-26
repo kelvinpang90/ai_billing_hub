@@ -13,7 +13,8 @@
  * 加了门户钱包页的一个只读步骤（check_portal_wallet）；AIH-TASK-101 加了门户首页余额卡与最近流水的一个只读步骤
  * （check_portal_dashboard）；AIH-TASK-105 加了门户用量页的一个只读步骤（check_portal_usage）；AIH-TASK-108 加了
  * 门户首页本月用量卡的一个只读步骤（check_portal_usage_summary）；AIH-TASK-111 加了客户详情低余额阈值面板的一个只读
- * 步骤（check_low_balance_threshold）；AIH-TASK-112 加了门户首页余额卡低余额警告的一个只读步骤（check_portal_low_balance）。
+ * 步骤（check_low_balance_threshold）；AIH-TASK-112 加了门户首页余额卡低余额警告的一个只读步骤（check_portal_low_balance）；
+ * AIH-TASK-117 加了门户用量页导出按钮的一个只读步骤（check_portal_usage_export），排在 check_portal_usage 之后。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -81,6 +82,8 @@
  * - 门户用量页（check_portal_usage）只点门户导航里的「Usage」（href 为 /portal/usage）这一个链接：用页面默认的日期区间，
  *   不动日期、项目、供应商、模型、会话筛选，不点「Apply filters」「Reset」（不提交任何表单）、不点「Older」「Newest」
  *   （不翻页）、不点表格的任何一行或展开按钮（不展开详情）、不点任何别的按钮与链接。
+ * - 门户用量页的导出按钮（check_portal_usage_export）只查不点：停留在 check_portal_usage 打开的用量页，不点「Export CSV」
+ *   （验收不下载文件）、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
@@ -336,6 +339,14 @@
  *                   运算、不经浮点）数值相同 —— 两边都按页面的写法规范成「去掉末尾多余的 0、至少留 2 位小数」再逐字比较；items 为空
  *                   时显示空状态（portal.usage.empty）、没有数据行，同样算通过。不翻页、不展开、不提交任何表单。报到前把用量一块
  *                   滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   check_portal_usage_export
+ *                   本次运行跑过 login_customer 且 check_portal_usage 已成功跑完才能跑（否则 assertion_failed），所以要排在
+ *                   check_portal_usage 之后：它不自己导航、不点任何链接，只认当前页面是用量页（地址是 /portal/usage，否则
+ *                   navigation_failed）。页面落定：门户外壳在、管理端顶栏不在，用量一块（role=region、aria-label 为「Usage」）
+ *                   不再显示 portal.usage.loading；一块里文字为「Export CSV」（en.json 的 portal.usage.export.button）的按钮
+ *                   恰好一个，且处于可用状态（没有 disabled 属性、aria-disabled 不是 true；页面用默认的日期区间，按钮应当可用）。
+ *                   找不到按钮是 element_missing，按钮在但一直不可用或不止一个是 assertion_failed。**不点**这个按钮（验收不
+ *                   下载文件）、不改筛选、不提交任何表单。报到前把用量一块滚动到视口里（规则同 check_portal_usage）
  *   check_portal_usage_summary
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
  *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
@@ -560,6 +571,7 @@ const TEXT = {
   portalUsageEmpty: "No billed usage matches these filters.", // portal.usage.empty
   portalUsageTime: "Time (MYT)", // portal.usage.field.occurredAt —— 用量表格的列头
   portalUsageCharged: "Charged (MYR)", // portal.usage.field.chargedAmount
+  portalUsageExport: "Export CSV", // portal.usage.export.button —— 用量页的导出按钮，只查不点
   portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
   portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
   portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
@@ -3432,6 +3444,47 @@ function probePortalUsage(lib, T) {
   return out;
 }
 
+/**
+ * 门户用量页导出按钮的状态：门户外壳、管理端顶栏在不在；用量一块（role=region、aria-label 为「Usage」）在不在、在不在
+ * 加载；一块里文字为「Export CSV」的按钮有几个，恰好一个时它是否可用（没有 disabled 属性、aria-disabled 不是 true）。
+ * 按钮在导出中会多一个 loading 图标，图标没有文字，不影响按文字找。只读 DOM，不点、不填。
+ */
+function probePortalUsageExport(lib, T) {
+  const header = document.querySelector("header");
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === T.portalUsageTitle) ??
+    null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    buttons: 0,
+    enabled: false,
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy =
+    region.querySelector('[aria-busy="true"]') !== null ||
+    [...region.querySelectorAll("*")].some(
+      (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalUsageLoading,
+    );
+  const buttons = [...region.querySelectorAll("button")].filter((el) => lib.norm(el.textContent) === T.portalUsageExport);
+  out.buttons = buttons.length;
+  if (buttons.length === 1) {
+    const button = buttons[0];
+    out.enabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  }
+  return out;
+}
+
 /** 门户导航里文字为「Usage」、href 恰好为 /portal/usage 的链接。只点这一个。 */
 function clickPortalNavUsage(lib, T) {
   const header = document.querySelector("header");
@@ -5738,6 +5791,49 @@ async function stepCheckPortalUsage(ctx) {
   if (!visible.ok) {
     throw fail("assertion_failed");
   }
+  ctx.portalUsageChecked = true;
+}
+
+async function stepCheckPortalUsageExport(ctx) {
+  // 不自己导航：只认 check_portal_usage 在本次运行里已经打开并核对过的用量页。
+  if (ctx.customerLoginSeq === null || !ctx.portalUsageChecked) {
+    throw fail("assertion_failed");
+  }
+
+  // 停留在用量页（默认日期区间，筛选没动过），等用量一块落定、导出按钮恰好一个且可用。只查不点。
+  const settled = await waitFor(
+    () => evaluate(probePortalUsageExport, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalUsagePath ||
+      (s.portalShell && s.region && !s.busy && s.buttons === 1 && s.enabled),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    // 按钮在但一直不可用（或不止一个）是断言失败；找不到按钮或用量一块是元素缺失。
+    throw fail(settled.value !== null && settled.value.buttons > 0 ? "assertion_failed" : "element_missing");
+  }
+  const page = settled.value;
+  if (page.appError) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalUsagePath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // Worker 在报到后截图：把用量一块（按钮在它的工具栏里）滚进视口。只滚动，不点导出按钮或任何别的东西。
+  if ((await evaluate(scrollPortalUsageIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(portalUsageInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
 }
 
 /**
@@ -5891,6 +5987,7 @@ const STEPS = {
   check_portal_wallet: stepCheckPortalWallet,
   check_portal_dashboard: stepCheckPortalDashboard,
   check_portal_usage: stepCheckPortalUsage,
+  check_portal_usage_export: stepCheckPortalUsageExport,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
   check_portal_low_balance: stepCheckPortalLowBalance,
 };
@@ -5934,6 +6031,8 @@ async function main() {
     loginCompletedAt: null,
     /** open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null。 */
     usageAnalyticsAfterSeq: null,
+    /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */
+    portalUsageChecked: false,
   };
 
   try {
