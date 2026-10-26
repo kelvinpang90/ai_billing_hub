@@ -3,7 +3,7 @@
  *
  * 用量页的用例按路径回应 `client.get`，但参数名写错时页面照样显示一页（后端忽略未知参数）：`conversation_id`
  * 打成 `conversationId` 在浏览器里不报错，只是筛选永远不生效。所以这里逐个钉住参数名、省略的参数不进查询串、
- * 游标原样传回，以及两个请求都**不带**任何租户或客户标识。
+ * 游标原样传回，以及两个请求都**不带**任何租户或客户标识。用量导出（AIH-TASK-117）同样钉住路径、参数名与省略规则。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,8 +12,11 @@ import { client } from "./client";
 import {
   CUSTOMER_USAGE_QUERY_KEY,
   CUSTOMER_USAGE_SUMMARY_QUERY_KEY,
+  customerUsageExportFilename,
+  customerUsageExportUrl,
   customerUsageListQueryKey,
   customerUsageSummaryQueryKey,
+  exportCustomerUsageEvents,
   getCustomerUsageSummary,
   listCustomerProjects,
   listCustomerUsageEvents,
@@ -21,6 +24,7 @@ import {
 
 const PROJECTS_URL = "/api/v1/customer/projects";
 const USAGE_URL = "/api/v1/customer/usage-events";
+const EXPORT_URL = "/api/v1/customer/usage-events/export";
 const SUMMARY_URL = "/api/v1/customer/usage-summary";
 
 const SUMMARY = {
@@ -184,6 +188,102 @@ describe("listCustomerUsageEvents", () => {
       expect(key.slice(0, prefix.length)).toEqual(prefix);
     }
     expect(first).not.toEqual(older);
+  });
+});
+
+describe("exportCustomerUsageEvents", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+
+  /** jsdom 没有对象 URL，也不会真的下载：装上替身、拦下链接的点击，只看请求发到了哪里。 */
+  function stubDownload(): void {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: () => "blob:https://portal.example/00000000-0000-0000-0000-000000000000",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: () => undefined });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  }
+
+  afterEach(() => {
+    for (const [name, descriptor] of [
+      ["createObjectURL", originalCreate],
+      ["revokeObjectURL", originalRevoke],
+    ] as const) {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(URL, name);
+      } else {
+        Object.defineProperty(URL, name, descriptor);
+      }
+    }
+  });
+
+  function file() {
+    return { data: new Blob(["﻿id\r\n"], { type: "text/csv" }), status: 200, statusText: "", headers: {} };
+  }
+
+  it("downloads from /api/v1/customer/usage-events/export as a blob with only the dates", async () => {
+    stubDownload();
+    const get = vi.spyOn(client, "get").mockResolvedValue(file());
+
+    await exportCustomerUsageEvents({ fromDate: "2026-10-01", toDate: "2026-10-25" });
+
+    expect(get).toHaveBeenCalledTimes(1);
+    const [url, config] = get.mock.calls[0] ?? [];
+    expect(url).toBe(`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25`);
+    expect(config).toMatchObject({ responseType: "blob" });
+  });
+
+  it("sends every filter under the name the backend reads", () => {
+    const url = customerUsageExportUrl({
+      fromDate: "2026-10-01",
+      toDate: "2026-10-25",
+      projectId: PROJECT_ID,
+      provider: "anthropic",
+      model: "claude-sonnet-5-5",
+      conversationId: "conv_0001",
+      eventId: EVENT_ID,
+    });
+
+    expect(parse(url)).toEqual({
+      path: EXPORT_URL,
+      params: [
+        ["from_date", "2026-10-01"],
+        ["to_date", "2026-10-25"],
+        ["project_id", PROJECT_ID],
+        ["provider", "anthropic"],
+        ["model", "claude-sonnet-5-5"],
+        ["conversation_id", "conv_0001"],
+        ["event_id", EVENT_ID],
+      ],
+    });
+  });
+
+  it("treats null and empty values like omitted ones", () => {
+    const url = customerUsageExportUrl({
+      fromDate: "2026-10-01",
+      toDate: "2026-10-25",
+      projectId: null,
+      provider: "",
+      model: null,
+      conversationId: "",
+      eventId: null,
+    });
+
+    expect(url).toBe(`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25`);
+  });
+
+  it("has no page_size or cursor, and never a tenant or customer identifier", () => {
+    const url = customerUsageExportUrl({ fromDate: "2026-10-01", toDate: "2026-10-25", projectId: PROJECT_ID });
+
+    expect(url).not.toMatch(/page_size|cursor|tenant|customer_id|\/admin\//);
+  });
+
+  it("falls back to the backend's file name rule", () => {
+    expect(customerUsageExportFilename({ fromDate: "2026-10-01", toDate: "2026-10-31" })).toBe(
+      "usage-events_2026-10-01_2026-10-31.csv",
+    );
   });
 });
 

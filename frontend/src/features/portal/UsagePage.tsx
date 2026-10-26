@@ -16,10 +16,16 @@
  * 三种状态都画出来（spec §132 DoD 第 8 条）：加载中、失败（带 request_id）、空列表。`QUERY_TOO_BROAD`（查询超过
  * 后端的执行时间预算）显示专门文案，请客户缩小日期区间或换筛选条件。点一行展开请求详情（`UsageDetail`）。
  *
+ * 「Export CSV」（AIH-TASK-117；设计闸门 #435 v10 §2「前端」，语义以 docs/api.md「客户导出」为准）用页面**当前已应用**
+ * 的筛选（不是表单里还没点「Apply filters」的值）调 `GET /api/v1/customer/usage-events/export`，交给浏览器下载。导出
+ * 的日期恒必填：日期区间无效时、以及按 `event_id` 点查时（那时没有生效的日期区间）按钮不可用。导出中按钮转为加载
+ * 状态、不可重复点。`EXPORT_TOO_LARGE`、`QUERY_TOO_BROAD`、`EXPORT_BUSY` 各有专门文案，其余失败带 request_id。
+ * 导出不影响列表、筛选与翻页。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。
  */
 
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import {
   Alert,
   Button,
@@ -43,11 +49,14 @@ import {
   CUSTOMER_PROJECTS_QUERY_KEY,
   QUERY_TOO_BROAD,
   customerUsageListQueryKey,
+  exportCustomerUsageEvents,
   listCustomerProjects,
   listCustomerUsageEvents,
   type CustomerUsageEvent,
+  type CustomerUsageExportQuery,
   type CustomerUsageQuery,
 } from "../../api/customerUsage";
+import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
 import { RequestReference } from "../../components/RequestReference";
 import { ChargedAmount, EMPTY, UsageDetail, UsageTime, UsageTypeText, tokenCount } from "./UsageDetail";
 
@@ -149,6 +158,29 @@ function RangeProblemText({ problem }: { problem: DateRangeProblem }) {
   }
 }
 
+/** 导出失败的说明：三种可以由客户自己处理的错误各有专门文案，其余是通用文案（request_id 另外显示）。 */
+function ExportFailureText({ error }: { error: Error }) {
+  const { t } = useTranslation();
+  const code = error instanceof ApiError ? error.code : null;
+  switch (code) {
+    case EXPORT_TOO_LARGE:
+      return t("portal.usage.export.tooLarge");
+    case QUERY_TOO_BROAD:
+      return t("portal.usage.export.tooBroad");
+    case EXPORT_BUSY:
+      return t("portal.usage.export.busy");
+    default:
+      return t("portal.usage.export.failed");
+  }
+}
+
+const SPECIFIC_EXPORT_FAILURES: ReadonlySet<string> = new Set([EXPORT_TOO_LARGE, QUERY_TOO_BROAD, EXPORT_BUSY]);
+
+/** 三种专门文案之外的失败：要显示 request_id。 */
+function isGenericExportFailure(error: Error): boolean {
+  return !(error instanceof ApiError) || !SPECIFIC_EXPORT_FAILURES.has(error.code);
+}
+
 export function UsagePage() {
   const { t } = useTranslation();
   const [form] = Form.useForm<UsageFilterValues>();
@@ -180,6 +212,19 @@ export function UsagePage() {
   const scope = JSON.stringify(base);
   const cursor = paging !== null && paging.scope === scope ? paging.cursor : null;
 
+  // 导出用已应用的筛选（与列表同一份），不带 pageSize 与 cursor。点查时没有生效的日期区间，导出不可用。
+  let exportQuery: CustomerUsageExportQuery | null = null;
+  if (!byEvent && problem === null) {
+    exportQuery = {
+      fromDate: filters.fromDate,
+      toDate: filters.toDate,
+      projectId: trimmed(filters.projectId) ?? null,
+      provider: trimmed(filters.provider) ?? null,
+      model: trimmed(filters.model) ?? null,
+      conversationId: trimmed(filters.conversationId) ?? null,
+    };
+  }
+
   const projects = useQuery({
     queryKey: CUSTOMER_PROJECTS_QUERY_KEY,
     queryFn: ({ signal }) => listCustomerProjects(signal),
@@ -197,8 +242,28 @@ export function UsagePage() {
     gcTime: 0,
   });
 
+  const exporting = useMutation({
+    mutationFn: (query: CustomerUsageExportQuery) => exportCustomerUsageEvents(query),
+  });
+
+  const startExport = (): void => {
+    // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
+    if (exportQuery === null || exporting.isPending) {
+      return;
+    }
+    exporting.mutate(exportQuery);
+  };
+
+  // 上一次导出的失败说的是旧的筛选条件，换条件时收起。只收失败：导出中 reset 会让按钮提前恢复可点。
+  const clearExportFailure = (): void => {
+    if (exporting.isError) {
+      exporting.reset();
+    }
+  };
+
   const apply = (values: UsageFilterValues): void => {
     setFilters({ ...values, fromDate: values.fromDate.trim(), toDate: values.toDate.trim() });
+    clearExportFailure();
   };
 
   const reset = (): void => {
@@ -206,6 +271,7 @@ export function UsagePage() {
     form.resetFields();
     form.setFieldsValue(range);
     setFilters(range);
+    clearExportFailure();
   };
 
   const showAll = (): void => {
@@ -305,19 +371,39 @@ export function UsagePage() {
     );
   }
 
-  const toolbar =
-    problem === null ? (
-      <Space wrap style={{ marginBottom: 16 }}>
+  const toolbar = (
+    <Space wrap style={{ marginBottom: 16 }}>
+      {problem === null ? (
         <Button onClick={() => setPaging(null)} disabled={cursor === null}>
           {t("portal.usage.newest")}
         </Button>
-        {next !== null && !usage.isError ? (
-          <Button onClick={() => setPaging({ scope, cursor: next })} disabled={!settled}>
-            {t("portal.usage.older")}
-          </Button>
-        ) : null}
-      </Space>
-    ) : null;
+      ) : null}
+      {problem === null && next !== null && !usage.isError ? (
+        <Button onClick={() => setPaging({ scope, cursor: next })} disabled={!settled}>
+          {t("portal.usage.older")}
+        </Button>
+      ) : null}
+      <Button
+        onClick={startExport}
+        loading={exporting.isPending}
+        disabled={exportQuery === null || exporting.isPending}
+      >
+        {t("portal.usage.export.button")}
+      </Button>
+    </Space>
+  );
+
+  const exportFailure = exporting.error ? (
+    <Alert
+      type="error"
+      showIcon
+      closable
+      onClose={() => exporting.reset()}
+      style={{ marginBottom: 16 }}
+      message={<ExportFailureText error={exporting.error} />}
+      description={isGenericExportFailure(exporting.error) ? <RequestReference error={exporting.error} /> : null}
+    />
+  ) : null;
 
   return (
     // role + aria-label：部署后验收脚本按语义结构找到这一块（不依赖 antd 的类名）。
@@ -385,6 +471,7 @@ export function UsagePage() {
         </Form.Item>
       </Form>
       {toolbar}
+      {exportFailure}
       {body}
     </Card>
   );
