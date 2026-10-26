@@ -7,7 +7,7 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +29,9 @@ const api = vi.hoisted(() => ({
   createProject: vi.fn(),
   // 启用 / 停用账户（AIH-TASK-082）；弹窗自己的用例在 AccountStatusModal.test.tsx。
   postAccountStatus: vi.fn(),
+  // 低余额阈值面板（AIH-TASK-111）挂在钱包卡片下面；面板自己的用例在 LowBalanceThresholdPanel.test.tsx。
+  getLowBalanceThreshold: vi.fn(),
+  setLowBalanceThreshold: vi.fn(),
 }));
 
 vi.mock("../../api/adminCustomers", async () => {
@@ -168,6 +171,7 @@ beforeEach(() => {
     next_before_sequence: null,
   });
   portal.getPortalAccount.mockResolvedValue(null);
+  api.getLowBalanceThreshold.mockResolvedValue({ low_balance_threshold: null });
 });
 
 afterEach(() => {
@@ -455,6 +459,48 @@ describe("CustomerDetailPage", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("This customer has no portal account yet.")).toBeInTheDocument();
     expect(portal.getPortalAccount).toHaveBeenCalledWith(CUSTOMER_ID, expect.anything());
+  });
+
+  it("shows the customer's low balance threshold panel next to the wallet", async () => {
+    api.getCustomer.mockResolvedValue(customer());
+    api.getLowBalanceThreshold.mockResolvedValue({ low_balance_threshold: "50.00000000" });
+
+    renderDetail();
+
+    const panel = await screen.findByRole("region", { name: "Low balance threshold" });
+    expect(await within(panel).findByText("50.00")).toBeInTheDocument();
+    expect(api.getLowBalanceThreshold).toHaveBeenCalledWith(CUSTOMER_ID, expect.anything());
+    expect(api.setLowBalanceThreshold).not.toHaveBeenCalled();
+  });
+
+  it("keeps the rest of the page when the low balance threshold cannot be loaded", async () => {
+    api.getCustomer.mockResolvedValue(customer());
+    api.getLowBalanceThreshold.mockRejectedValue(
+      new ApiError("DATABASE_NOT_CONFIGURED", "The database is not configured.", "req-503"),
+    );
+
+    renderDetail();
+
+    const panel = await screen.findByRole("region", { name: "Low balance threshold" });
+    expect(
+      await within(panel).findByText("The low balance threshold could not be loaded."),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("req-503")).toBeInTheDocument();
+    // 详情页其余区块照常。
+    expect(screen.getByText("MYR 1,234,567.12345678")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Adjust balance" })).toBeInTheDocument();
+    expect(screen.queryByText("The customer could not be loaded.")).not.toBeInTheDocument();
+  });
+
+  it("does not ask for the low balance threshold of a customer that does not exist", async () => {
+    api.getCustomer.mockRejectedValue(
+      new ApiError("CUSTOMER_NOT_FOUND", "The customer does not exist.", "req-404"),
+    );
+
+    renderDetail();
+
+    expect(await screen.findByText("Customer not found")).toBeInTheDocument();
+    expect(api.getLowBalanceThreshold).not.toHaveBeenCalled();
   });
 
   it("does not ask for the portal account of a customer that does not exist", async () => {
