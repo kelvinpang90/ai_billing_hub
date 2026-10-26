@@ -3,14 +3,15 @@
  *
  * 只收录前端已经用到的七个接口：建客户、列表、详情、编辑、改账户状态（AIH-TASK-082，契约见
  * docs/api.md「管理端账户状态」），以及某个客户的建项目与项目列表（AIH-TASK-016）；项目的集成状态与
- * 状态 webhook 地址在 `projectIntegration.ts`。每个都要 ADMIN，
+ * 状态 webhook 地址在 `projectIntegration.ts`。另有某个客户低余额阈值的读取与设置（AIH-TASK-111，契约见
+ * docs/api.md「管理端低余额阈值」）。每个都要 ADMIN，
  * 角色以后端数据库为准 —— 前端不做任何角色判断，403 原样交给页面显示。
  *
  * ⚠️ 金额是**字符串**（INV-10）。这里的类型刻意写成 `string`，不在这一层解析：
  * 一旦变成 `number`，`"0.10000001"` 这类值就已经不是后端给的那个数了。
  */
 
-import { AxiosError } from "axios";
+import { AxiosError, type AxiosResponse } from "axios";
 
 import { ApiError, apiGet, client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
 
@@ -154,6 +155,14 @@ export class AccountStatusError extends ApiError {
   }
 }
 
+/**
+ * 阈值对象：`data` 恰好这一个键。恰好 8 位小数的字符串（例如 `"50.00000000"`），未设置（不提醒）为 `null`。
+ * 与钱包余额一样只当字符串用，不解析（INV-10）。
+ */
+export interface LowBalanceThreshold {
+  low_balance_threshold: string | null;
+}
+
 export const CUSTOMERS_QUERY_KEY = ["admin", "customers"] as const;
 /** 所有列表页的前缀：建客户、改客户之后让它们整体过期。 */
 export const CUSTOMER_LISTS_QUERY_KEY = [...CUSTOMERS_QUERY_KEY, "list"] as const;
@@ -175,17 +184,26 @@ export function projectListQueryKey(customerId: string, page: number, pageSize: 
   return [...customerProjectsQueryKey(customerId), page, pageSize] as const;
 }
 
+/** 不挂在详情的 key 下面：详情过期（调账、改状态）时不必跟着重读阈值。 */
+export function lowBalanceThresholdQueryKey(customerId: string) {
+  return [...CUSTOMERS_QUERY_KEY, "low-balance-threshold", customerId] as const;
+}
+
 function customerUrl(customerId: string): string {
   // id 来自地址栏，不能信它只含 uuid 的字符：不转义的话 `a/b` 会变成另一条路径。
   return `${CUSTOMERS_URL}/${encodeURIComponent(customerId)}`;
 }
 
-async function send<T>(method: "post" | "patch", url: string, body: unknown): Promise<T> {
+async function send<T>(method: "post" | "patch" | "put", url: string, body: unknown): Promise<T> {
   try {
-    const response =
-      method === "post"
-        ? await client.post<ApiEnvelope<T>>(url, body)
-        : await client.patch<ApiEnvelope<T>>(url, body);
+    let response: AxiosResponse<ApiEnvelope<T>>;
+    if (method === "post") {
+      response = await client.post<ApiEnvelope<T>>(url, body);
+    } else if (method === "patch") {
+      response = await client.patch<ApiEnvelope<T>>(url, body);
+    } else {
+      response = await client.put<ApiEnvelope<T>>(url, body);
+    }
     return unwrapEnvelope<T>(response.data);
   } catch (error) {
     throw toApiError(error);
@@ -258,4 +276,30 @@ export function listProjects(
 /** ⚠️ **不幂等**：提交两次就是两个项目。防双击是调用方的责任。 */
 export function createProject(customerId: string, body: CreateProjectBody): Promise<Project> {
   return send<Project>("post", `${customerUrl(customerId)}/projects`, body);
+}
+
+function lowBalanceThresholdUrl(customerId: string): string {
+  return `${customerUrl(customerId)}/low-balance-threshold`;
+}
+
+/** 读这个客户的低余额阈值。只读，后端不写审计。 */
+export function getLowBalanceThreshold(
+  customerId: string,
+  signal?: AbortSignal,
+): Promise<LowBalanceThreshold> {
+  return apiGet<LowBalanceThreshold>(lowBalanceThresholdUrl(customerId), signal);
+}
+
+/**
+ * 设置（字符串，最多 12 位整数、2 位小数且大于 0）或清除（`null`）这个客户的低余额阈值。请求体恰好
+ * `low_balance_threshold` 一个键：别的字段后端一律 422。设置语义，与现值相同时后端 200、什么都不写，
+ * 所以原样重发是安全的。字符串原样发出，不在这里规范化或转成数。
+ */
+export function setLowBalanceThreshold(
+  customerId: string,
+  threshold: string | null,
+): Promise<LowBalanceThreshold> {
+  return send<LowBalanceThreshold>("put", lowBalanceThresholdUrl(customerId), {
+    low_balance_threshold: threshold,
+  });
 }
