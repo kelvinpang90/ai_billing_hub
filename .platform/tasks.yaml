@@ -6579,7 +6579,7 @@ tasks:
     title: 低余额阈值第二层：客户钱包接口返回阈值与是否处于低余额
     purpose: >-
       按 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）§2 接口三与 §8 第 2 步：GET /api/v1/customer/wallet 在既有 6 个键之外加 low_balance_threshold 与 low_balance，恰好 8 个键；阈值与余额出自同一条 SELECT，low_balance 在后端用 Decimal 算出。docs/api.md 的客户钱包小节同步。只读，不改表结构；门户显示属于 AIH-TASK-112。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-109
     acceptance_criteria:
