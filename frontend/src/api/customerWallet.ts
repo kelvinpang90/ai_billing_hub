@@ -17,7 +17,7 @@ import { apiGet } from "./client";
 export const CUSTOMER_WALLET_URL = "/api/v1/customer/wallet";
 export const CUSTOMER_WALLET_TRANSACTIONS_URL = "/api/v1/customer/wallet/transactions";
 
-/** 钱包摘要。恰好这 6 个键（docs/api.md）：没有钱包 `version`、低余额阈值、任何内部 id。 */
+/** 钱包摘要。恰好这 8 个键（docs/api.md）：没有钱包 `version`、`status_version`、任何内部 id。 */
 export interface CustomerWallet {
   /** V1 恒为 `MYR`。 */
   currency: string;
@@ -31,6 +31,13 @@ export interface CustomerWallet {
   ai_service: string;
   /** `BLOCK_AI` 时是四种原因之一，`ALLOW_AI` 时为 `null`。 */
   ai_service_reason: string | null;
+  /** 管理员设的低余额提醒线：恰好 8 位小数的字符串；未设置（不提醒）为 `null`（AIH-TASK-110，设计闸门 #433 v2）。 */
+  low_balance_threshold: string | null;
+  /**
+   * `PREPAID`、阈值非空且余额 ≤ 阈值时为 `true`。规则只在后端算：前端只看它，不自己比较余额与阈值。
+   * `INTERNAL_METERED_ONLY` 恒为 `false`。
+   */
+  low_balance: boolean;
 }
 
 /** 一行账本。每项恰好这 7 个键：没有 `description`、来源、操作者、成本。 */

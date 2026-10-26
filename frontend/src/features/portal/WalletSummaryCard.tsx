@@ -7,6 +7,8 @@
  * - 计费状态只在 `billing_mode` 为 `PREPAID` 时显示。`INTERNAL_METERED_ONLY` 的客户余额通常为 0、`billing_status`
  *   为 `SUSPENDED`，但 AI 照常可用 —— 显示出来就是误报「已暂停」。AI 能不能用看 `ai_service`。
  * - `ai_service` 与四种 `ai_service_reason` 各有固定文案；认不出的值原样显示，不猜成某一种。
+ * - 低余额警告（AIH-TASK-112，设计闸门 #433 v2 §2「前端」）：只在 `low_balance` 为 `true` 时显示，带按 2 位显示的
+ *   阈值与币种，请客户尽快充值；没有充值按钮。判定只看 `low_balance`，不自己比较余额与阈值（规则只在后端）。
  *
  * ⚠️ 只显示这几个字段：没有成本、毛利或任何内部字段（INV-7）。
  */
@@ -102,8 +104,22 @@ export function WalletSummaryCard() {
   } else {
     const { currency, balance, billing_mode: billingMode, billing_status: billingStatus } = wallet.data;
     const { ai_service: aiService, ai_service_reason: aiServiceReason } = wallet.data;
+    const { low_balance: lowBalance, low_balance_threshold: lowBalanceThreshold } = wallet.data;
     body = (
-      <Descriptions bordered column={1} size="small">
+      <Space direction="vertical" style={{ width: "100%" }}>
+        {lowBalance ? (
+          <Alert
+            type="warning"
+            showIcon
+            message={t("portal.wallet.lowBalance.title")}
+            description={
+              lowBalanceThreshold !== null
+                ? t("portal.wallet.lowBalance.message", { threshold: formatBalance(lowBalanceThreshold, currency) })
+                : t("portal.wallet.lowBalance.messageWithoutThreshold")
+            }
+          />
+        ) : null}
+        <Descriptions bordered column={1} size="small">
         <Descriptions.Item label={t("portal.wallet.field.balance")}>
           <span style={{ fontVariantNumeric: "tabular-nums" }}>{formatBalance(balance, currency)}</span>
         </Descriptions.Item>
@@ -120,7 +136,8 @@ export function WalletSummaryCard() {
             <AiServiceReasonText reason={aiServiceReason} />
           </Descriptions.Item>
         ) : null}
-      </Descriptions>
+        </Descriptions>
+      </Space>
     );
   }
 

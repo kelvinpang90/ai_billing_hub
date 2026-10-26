@@ -36,6 +36,8 @@ function wallet(overrides: Partial<CustomerWallet> = {}): CustomerWallet {
     billing_status: "ACTIVE",
     ai_service: "ALLOW_AI",
     ai_service_reason: null,
+    low_balance_threshold: null,
+    low_balance: false,
     ...overrides,
   };
 }
@@ -381,6 +383,89 @@ describe("WalletPage wallet summary", () => {
     expect(valueOf("Billing status")).toBe("FROZEN");
     expect(valueOf("AI services")).toBe("THROTTLE_AI");
     expect(valueOf("Reason")).toBe("PROJECT_INTEGRATION_DISABLED");
+  });
+});
+
+describe("WalletPage low balance warning", () => {
+  /** 余额卡（role=region，aria-label 为「Your wallet」）。 */
+  function card(): HTMLElement {
+    return screen.getByRole("region", { name: "Your wallet" });
+  }
+
+  it.each([
+    ["50.00000000", "MYR 50.00"],
+    ["1234.50500000", "MYR 1,234.51"],
+  ])("warns inside the balance card when the balance is low, with a threshold of %s shown as %s", async (threshold, shown) => {
+    serve(wallet({ balance: "12.45880000", low_balance_threshold: threshold, low_balance: true }), () => page([]));
+
+    renderPage();
+
+    await screen.findByText("MYR 12.46");
+    const alert = within(card()).getByRole("alert");
+    expect(within(alert).getByText("Low balance")).toBeInTheDocument();
+    expect(alert.textContent ?? "").toContain(
+      `Your balance is at or below your low balance alert of ${shown}. Please top up soon.`,
+    );
+    expect(alert.textContent ?? "").not.toContain(threshold);
+    // 只说请充值，没有充值按钮或链接。
+    expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(alert).queryByRole("link")).not.toBeInTheDocument();
+    // 卡的其余字段照常。
+    expect(valueOf("Balance")).toBe("MYR 12.46");
+    expect(valueOf("Billing status")).toBe("Active");
+    expect(valueOf("AI services")).toBe("Available");
+  });
+
+  it("goes by low_balance alone, not by comparing the balance with the threshold", async () => {
+    // 余额高于阈值，但后端说是低余额：照样提示（规则只在后端算）。
+    serve(wallet({ balance: "80.00000000", low_balance_threshold: "50.00000000", low_balance: true }), () => page([]));
+
+    renderPage();
+
+    await screen.findByText("MYR 80.00");
+    expect(within(card()).getByRole("alert")).toHaveTextContent("MYR 50.00");
+  });
+
+  it.each([
+    ["no threshold is set", wallet({ low_balance_threshold: null, low_balance: false })],
+    [
+      "the threshold is set but the balance is above it",
+      wallet({ balance: "80.00000000", low_balance_threshold: "50.00000000", low_balance: false }),
+    ],
+    [
+      "the customer is internally metered",
+      wallet({
+        balance: "0.00000000",
+        billing_mode: "INTERNAL_METERED_ONLY",
+        billing_status: "SUSPENDED",
+        low_balance_threshold: "50.00000000",
+        low_balance: false,
+      }),
+    ],
+  ])("shows no warning when %s", async (_, reply) => {
+    serve(reply, () => page([]));
+
+    const { container } = renderPage();
+    await screen.findByText("You have no transactions yet.");
+    await within(card()).findByText("Balance");
+
+    expect(within(card()).queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("Low balance")).not.toBeInTheDocument();
+    expect(container.textContent ?? "").not.toMatch(/low balance alert|top up|50\.00/i);
+  });
+
+  it("still asks only the two customer wallet endpoints when the balance is low", async () => {
+    const get = serve(wallet({ low_balance_threshold: "50.00000000", low_balance: true }), () => page([]));
+
+    renderPage();
+    await screen.findByText("You have no transactions yet.");
+    await within(card()).findByRole("alert");
+
+    const urls = get.mock.calls.map(([url]) => url);
+    for (const url of urls) {
+      expect(url).not.toContain("/api/v1/admin/");
+      expect(url === WALLET_URL || url.startsWith(TRANSACTIONS_URL)).toBe(true);
+    }
   });
 });
 

@@ -13,7 +13,7 @@
  * 加了门户钱包页的一个只读步骤（check_portal_wallet）；AIH-TASK-101 加了门户首页余额卡与最近流水的一个只读步骤
  * （check_portal_dashboard）；AIH-TASK-105 加了门户用量页的一个只读步骤（check_portal_usage）；AIH-TASK-108 加了
  * 门户首页本月用量卡的一个只读步骤（check_portal_usage_summary）；AIH-TASK-111 加了客户详情低余额阈值面板的一个只读
- * 步骤（check_low_balance_threshold）。
+ * 步骤（check_low_balance_threshold）；AIH-TASK-112 加了门户首页余额卡低余额警告的一个只读步骤（check_portal_low_balance）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -76,6 +76,8 @@
  *   别的链接与按钮（含开启 2FA），不填也不提交任何表单。
  * - 门户首页的本月用量卡（check_portal_usage_summary）只看不点：停留在门户首页，不点卡上的「View usage details」、
  *   「Try again」或任何别的链接与按钮（含开启 2FA），不填也不提交任何表单。
+ * - 门户首页余额卡里的低余额警告（check_portal_low_balance）只看不点：停留在门户首页，不点任何链接与按钮（含开启
+ *   2FA），不填也不提交任何表单。
  * - 门户用量页（check_portal_usage）只点门户导航里的「Usage」（href 为 /portal/usage）这一个链接：用页面默认的日期区间，
  *   不动日期、项目、供应商、模型、会话筛选，不点「Apply filters」「Reset」（不提交任何表单）、不点「Older」「Newest」
  *   （不翻页）、不点表格的任何一行或展开按钮（不展开详情）、不点任何别的按钮与链接。
@@ -352,6 +354,20 @@
  *                   「 (Malaysia time)」。按日柱状图（role=list、aria-label 为「Requests per day (Malaysia time)」，
  *                   portal.home.usageSummary.chart.caption）里 role=listitem 的柱子个数等于响应 days 的项数。不点链接、不提交
  *                   任何表单。报到前把本月用量卡滚动到视口里（规则同 check_portal_wallet）
+ *   check_portal_low_balance
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
+ *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
+ *                   门户外壳在、管理端顶栏不在，余额卡（role=region、aria-label 为「Your wallet」，portal.wallet.summary.title）不再
+ *                   显示 portal.wallet.summary.loading，且不是加载失败（portal.wallet.summary.loadFailed，page_error）。后端值取页面在
+ *                   login_customer 点「Continue」之后自己发出的 GET /api/v1/customer/wallet 的响应体（被动观察，不自己发请求、不拦截；
+ *                   取最近一次读完的那一次，不是 200 就是 assertion_failed）里的 currency、low_balance（布尔）与 low_balance_threshold
+ *                   （十进制字符串或 null）；字段缺失、类型不对，或 low_balance 为 true 而阈值为 null，都是 assertion_failed。
+ *                   low_balance 为 true 时，余额卡里恰好一个低余额警告（role=alert，含文字为「Low balance」的叶子元素，
+ *                   portal.wallet.lowBalance.title），它的说明文字是 portal.wallet.lowBalance.message：{{threshold}} 那一段以响应
+ *                   currency 加一个空格开头，去掉这个前缀、空白与千分位逗号后等于响应 low_balance_threshold 按 2 位 ROUND_HALF_UP
+ *                   舍入后的值（roundHalfUp2：字符串运算、不经浮点）；为 false 时余额卡里没有低余额警告。余额卡「Balance」一项
+ *                   恰好一项（卡的其余部分照常画出）。不点链接、不提交任何表单。报到前把余额卡滚动到视口里（规则同
+ *                   check_portal_wallet）
  * 不认识的步骤名：`FAIL <该步骤> assertion_failed`。
  */
 
@@ -523,6 +539,10 @@ const TEXT = {
   portalWalletLoading: "Loading your wallet…", // portal.wallet.summary.loading
   portalWalletLoadFailed: "Your wallet could not be loaded.", // portal.wallet.summary.loadFailed
   portalWalletBalance: "Balance", // portal.wallet.field.balance —— 余额卡 Descriptions 的一项
+  portalLowBalanceTitle: "Low balance", // portal.wallet.lowBalance.title —— 余额卡里低余额警告（role=alert）的标题
+  // portal.wallet.lowBalance.message 在 {{threshold}} 前后的两段文字；中间是「币种 + 空格 + 2 位阈值」。
+  portalLowBalancePrefix: "Your balance is at or below your low balance alert of ",
+  portalLowBalanceSuffix: ". Please top up soon.",
   portalTxTitle: "Transactions", // portal.wallet.transactions.title —— 流水一块的 aria-label
   portalTxLoading: "Loading your transactions…", // portal.wallet.transactions.loading
   portalTxLoadFailed: "Your transactions could not be loaded.", // portal.wallet.transactions.loadFailed
@@ -3304,6 +3324,53 @@ function portalWalletInView(lib, T) {
 }
 
 /**
+ * 门户余额卡里的低余额警告：门户外壳、管理端顶栏在不在；余额卡（role=region、aria-label 为「Your wallet」）在加载、
+ * 加载失败、「Balance」一项有几项；卡里 role=alert 且有一个叶子元素文字为「Low balance」的警告有几个，恰好一个时
+ * 它里面以 portal.wallet.lowBalance.message 前一段开头的那个叶子元素的文字。只读 DOM，不点、不填。
+ */
+function probePortalLowBalance(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const card =
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === T.portalWalletTitle) ??
+    null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    card: card !== null,
+    cardBusy: false,
+    cardFailed: false,
+    balanceCount: 0,
+    warnings: 0,
+    messageText: null,
+  };
+  if (card === null) {
+    return out;
+  }
+  out.cardBusy = card.querySelector('[aria-busy="true"]') !== null || has(card, T.portalWalletLoading);
+  out.cardFailed = has(card, T.portalWalletLoadFailed);
+  out.balanceCount = [...card.querySelectorAll("th")].filter(
+    (th) => lib.norm(th.textContent) === T.portalWalletBalance && th.nextElementSibling?.tagName === "TD",
+  ).length;
+  const warnings = [...card.querySelectorAll('[role="alert"]')].filter((el) => has(el, T.portalLowBalanceTitle));
+  out.warnings = warnings.length;
+  if (warnings.length === 1) {
+    const message = [...warnings[0].querySelectorAll("*")].find(
+      (el) => el.childElementCount === 0 && lib.norm(el.textContent).startsWith(lib.norm(T.portalLowBalancePrefix)),
+    );
+    out.messageText = message === undefined ? null : lib.norm(message.textContent);
+  }
+  return out;
+}
+
+/**
  * 门户用量页的状态：门户外壳、管理端顶栏在不在；用量一块（role=region、aria-label 为「Usage」）在加载、加载失败、
  * 查询过宽、空状态，以及表格（表头有「Time (MYT)」「Charged (MYR)」）里带 data-row-key 的数据行数与第一行
  * 「Charged (MYR)」列的文字。展开出来的详情行不带 data-row-key、单元格数也对不上表头，不计入。只读 DOM，不点、不填。
@@ -5457,6 +5524,110 @@ async function stepCheckPortalDashboard(ctx) {
   }
 }
 
+async function stepCheckPortalLowBalance(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+  const afterSeq = ctx.customerLoginSeq;
+
+  // 不导航、不点：停留在 login_customer 落定的门户首页，等余额卡落定在某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalLowBalance, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalHomePath ||
+      (s.portalShell && s.card && !s.cardBusy && (s.cardFailed || s.balanceCount > 0)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.cardFailed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalHomePath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面自己发出的 GET /api/v1/customer/wallet 的响应体（被动观察，不自己发请求）。有还在路上的就等它落定。
+  const walletSeen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerWallet, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!walletSeen.ok || walletSeen.value.status !== 200) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(walletSeen.value.requestId);
+    const data = envelope?.success === true ? envelope.data : null;
+    const threshold = data?.low_balance_threshold;
+    if (
+      typeof data?.currency !== "string" ||
+      data.currency === "" ||
+      typeof data?.low_balance !== "boolean" ||
+      (threshold !== null && roundHalfUp2(threshold) === null)
+    ) {
+      throw fail("assertion_failed");
+    }
+    // low_balance 为 true 时阈值必然非空（docs/api.md「客户钱包」）；为 null 就没有可比的阈值。
+    if (data.low_balance && threshold === null) {
+      throw fail("assertion_failed");
+    }
+    expected = {
+      low: data.low_balance,
+      currency: data.currency,
+      // 阈值按 2 位 ROUND_HALF_UP 舍入（字符串运算，不经浮点）。
+      threshold: data.low_balance ? roundHalfUp2(threshold) : null,
+    };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、字段缺失或类型不对、阈值不是十进制字符串：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：low_balance 为 true 时卡里恰好一个低余额警告，文案中间的阈值以币种加一个空格开头，
+  // 去掉这个前缀、空白与千分位逗号后等于舍入后的值；为 false 时卡里没有低余额警告。
+  const prefix = `${expected.currency} `;
+  const shownThreshold = (text) => {
+    if (typeof text !== "string" || !text.startsWith(TEXT.portalLowBalancePrefix) || !text.endsWith(TEXT.portalLowBalanceSuffix)) {
+      return null;
+    }
+    const amount = text.slice(TEXT.portalLowBalancePrefix.length, text.length - TEXT.portalLowBalanceSuffix.length);
+    return amount.startsWith(prefix) ? amount.slice(prefix.length).replace(/[\s,]/g, "") : null;
+  };
+  const shown = await waitFor(
+    () => evaluate(probePortalLowBalance, TEXT),
+    (s) =>
+      s.path === TEXT.portalHomePath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.cardBusy &&
+      !s.cardFailed &&
+      s.balanceCount === 1 &&
+      (expected.low ? s.warnings === 1 && shownThreshold(s.messageText) === expected.threshold : s.warnings === 0),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.card ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把余额卡滚进视口。只滚动，不点任何链接或按钮。
+  if ((await evaluate(scrollPortalWalletIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(portalWalletInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckPortalUsage(ctx) {
   if (ctx.customerLoginSeq === null) {
     throw fail("assertion_failed");
@@ -5721,6 +5892,7 @@ const STEPS = {
   check_portal_dashboard: stepCheckPortalDashboard,
   check_portal_usage: stepCheckPortalUsage,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
+  check_portal_low_balance: stepCheckPortalLowBalance,
 };
 
 // ---------------------------------------------------------------------------
@@ -5750,8 +5922,8 @@ async function main() {
     /** 夹具客户门户账号的 { email, password }；输入里缺失或类型不对时为 null（login_customer 报 login_failed）。 */
     customerCredentials: input.customerCredentials,
     /**
-     * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home、check_portal_dashboard 与
-     * check_portal_usage_summary 只认这之后发出的请求，check_portal_wallet 与 check_portal_usage 要求它不为 null（各自再按点击「Wallet」「Usage」之前的
+     * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home、check_portal_dashboard、
+     * check_portal_usage_summary 与 check_portal_low_balance 只认这之后发出的请求，check_portal_wallet 与 check_portal_usage 要求它不为 null（各自再按点击「Wallet」「Usage」之前的
      * 序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */

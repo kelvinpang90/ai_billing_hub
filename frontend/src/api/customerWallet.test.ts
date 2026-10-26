@@ -25,6 +25,8 @@ const WALLET = {
   billing_status: "ACTIVE",
   ai_service: "ALLOW_AI",
   ai_service_reason: null,
+  low_balance_threshold: "50.00000000",
+  low_balance: true,
 };
 
 const EMPTY_PAGE = { items: [], page_size: 20, next_before_sequence: null };
