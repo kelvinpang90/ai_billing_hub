@@ -14,7 +14,8 @@
  * （check_portal_dashboard）；AIH-TASK-105 加了门户用量页的一个只读步骤（check_portal_usage）；AIH-TASK-108 加了
  * 门户首页本月用量卡的一个只读步骤（check_portal_usage_summary）；AIH-TASK-111 加了客户详情低余额阈值面板的一个只读
  * 步骤（check_low_balance_threshold）；AIH-TASK-112 加了门户首页余额卡低余额警告的一个只读步骤（check_portal_low_balance）；
- * AIH-TASK-117 加了门户用量页导出按钮的一个只读步骤（check_portal_usage_export），排在 check_portal_usage 之后。
+ * AIH-TASK-117 加了门户用量页导出按钮的一个只读步骤（check_portal_usage_export），排在 check_portal_usage 之后；
+ * AIH-TASK-118 加了门户钱包页导出区的一个只读步骤（check_portal_wallet_export），排在 check_portal_wallet 之后。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -84,6 +85,8 @@
  *   （不翻页）、不点表格的任何一行或展开按钮（不展开详情）、不点任何别的按钮与链接。
  * - 门户用量页的导出按钮（check_portal_usage_export）只查不点：停留在 check_portal_usage 打开的用量页，不点「Export CSV」
  *   （验收不下载文件）、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
+ * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
+ *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
@@ -309,6 +312,15 @@
  *                   data.items 的条数一致；items 非空时第一行「Event ID」列的文字等于 items 第一项的 event_id（为 null 时该列为空）；
  *                   items 为空时显示空状态（portal.wallet.transactions.empty）、没有数据行，同样算通过。不翻页、不提交任何表单。
  *                   报到前把余额卡滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   check_portal_wallet_export
+ *                   本次运行跑过 login_customer 且 check_portal_wallet 已成功跑完才能跑（否则 assertion_failed），所以要排在
+ *                   check_portal_wallet 之后：它不自己导航、不点任何链接，只认当前页面是钱包页（地址是 /portal/wallet，否则
+ *                   navigation_failed）。页面落定：门户外壳在、管理端顶栏不在，导出区（role=region、aria-label 为「Export
+ *                   transactions」，en.json 的 portal.wallet.export.title）在；区里文字为「Export CSV」（portal.wallet.export.button）
+ *                   的按钮恰好一个，且处于可用状态（没有 disabled 属性、aria-disabled 不是 true；导出区用默认的日期区间，即马来西亚
+ *                   时间本月 1 日到今天，按钮应当可用）。找不到按钮或导出区是 element_missing，按钮在但一直不可用或不止一个是
+ *                   assertion_failed。**不点**这个按钮（验收不下载文件）、不动日期、不提交任何表单。报到前把导出区滚动到视口里
+ *                   （规则同 check_portal_wallet）
  *   check_portal_dashboard
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 之前：它不自己
  *                   导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：门户外壳
@@ -560,6 +572,8 @@ const TEXT = {
   portalTxEmpty: "You have no transactions yet.", // portal.wallet.transactions.empty
   portalTxBalanceAfter: "Balance after", // portal.wallet.transactions.field.balanceAfter —— 流水表格的列头
   portalTxEventId: "Event ID", // portal.wallet.transactions.field.eventId
+  portalWalletExportTitle: "Export transactions", // portal.wallet.export.title —— 钱包页导出区的 aria-label
+  portalWalletExport: "Export CSV", // portal.wallet.export.button —— 钱包页导出区的导出按钮，只查不点
   portalRecentTitle: "Recent transactions", // portal.home.recentTransactions.title —— 门户首页最近流水一块的 aria-label
   portalNavUsage: "Usage", // portal.nav.usage —— 门户导航的用量项
   portalUsageTitle: "Usage", // portal.usage.title —— 用量一块的 aria-label
@@ -3322,6 +3336,42 @@ function scrollPortalWalletIntoView(lib, T) {
   return true;
 }
 
+/**
+ * 门户钱包页导出区的状态：门户外壳、管理端顶栏在不在；导出区（role=region、aria-label 为「Export transactions」）在不在；
+ * 区里文字为「Export CSV」的按钮有几个，恰好一个时它是否可用（没有 disabled 属性、aria-disabled 不是 true）。
+ * 按钮在导出中会多一个 loading 图标，图标没有文字，不影响按文字找。只读 DOM，不点、不填。
+ */
+function probePortalWalletExport(lib, T) {
+  const header = document.querySelector("header");
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalWalletExportTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    buttons: 0,
+    enabled: false,
+  };
+  if (region === null) {
+    return out;
+  }
+  const buttons = [...region.querySelectorAll("button")].filter((el) => lib.norm(el.textContent) === T.portalWalletExport);
+  out.buttons = buttons.length;
+  if (buttons.length === 1) {
+    const button = buttons[0];
+    out.enabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  }
+  return out;
+}
+
 /** 放得下视口的余额卡要整块在视口内；放不下的只要求顶端在视口内。 */
 function portalWalletInView(lib, T) {
   const card = [...document.querySelectorAll('[role="region"]')].find(
@@ -5460,6 +5510,59 @@ async function stepCheckPortalWallet(ctx) {
   if (!visible.ok) {
     throw fail("assertion_failed");
   }
+  ctx.portalWalletChecked = true;
+}
+
+/**
+ * 把钱包页导出区滚进视口用 scrollPortalWalletIntoView / portalWalletInView：规则相同，只是找的那一块的 aria-label 是
+ * 「Export transactions」。换掉这一个文案再送进页面，不另写一份同样的滚动函数。
+ */
+const PORTAL_WALLET_EXPORT_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalWalletExportTitle };
+
+async function stepCheckPortalWalletExport(ctx) {
+  // 不自己导航：只认 check_portal_wallet 在本次运行里已经打开并核对过的钱包页。
+  if (ctx.customerLoginSeq === null || !ctx.portalWalletChecked) {
+    throw fail("assertion_failed");
+  }
+
+  // 停留在钱包页（导出区用默认的日期区间，没动过），等导出区出现、导出按钮恰好一个且可用。只查不点。
+  const settled = await waitFor(
+    () => evaluate(probePortalWalletExport, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalWalletPath ||
+      (s.portalShell && s.region && s.buttons === 1 && s.enabled),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    // 按钮在但一直不可用（或不止一个）是断言失败；找不到按钮或导出区是元素缺失。
+    throw fail(settled.value !== null && settled.value.buttons > 0 ? "assertion_failed" : "element_missing");
+  }
+  const page = settled.value;
+  if (page.appError) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalWalletPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // Worker 在报到后截图：把导出区滚进视口。只滚动，不点导出按钮或任何别的东西。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_WALLET_EXPORT_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_WALLET_EXPORT_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
 }
 
 /**
@@ -5985,6 +6088,7 @@ const STEPS = {
   login_customer: stepLoginCustomer,
   check_portal_home: stepCheckPortalHome,
   check_portal_wallet: stepCheckPortalWallet,
+  check_portal_wallet_export: stepCheckPortalWalletExport,
   check_portal_dashboard: stepCheckPortalDashboard,
   check_portal_usage: stepCheckPortalUsage,
   check_portal_usage_export: stepCheckPortalUsageExport,
@@ -6033,6 +6137,8 @@ async function main() {
     usageAnalyticsAfterSeq: null,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */
     portalUsageChecked: false,
+    /** check_portal_wallet 成功跑完后为 true：check_portal_wallet_export 只在这之后、停在钱包页上跑。 */
+    portalWalletChecked: false,
   };
 
   try {

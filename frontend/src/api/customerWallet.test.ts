@@ -10,13 +10,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { client } from "./client";
 import {
   CUSTOMER_TRANSACTIONS_QUERY_KEY,
+  customerTransactionExportFilename,
+  customerTransactionExportUrl,
   customerTransactionListQueryKey,
+  exportCustomerTransactions,
   getCustomerWallet,
   listCustomerTransactions,
 } from "./customerWallet";
 
 const WALLET_URL = "/api/v1/customer/wallet";
 const TRANSACTIONS_URL = "/api/v1/customer/wallet/transactions";
+const EXPORT_URL = "/api/v1/customer/wallet/transactions/export";
 
 const WALLET = {
   currency: "MYR",
@@ -118,5 +122,97 @@ describe("listCustomerTransactions", () => {
       expect(key.slice(0, prefix.length)).toEqual(prefix);
     }
     expect(customerTransactionListQueryKey(null, 20)).not.toEqual(customerTransactionListQueryKey(23, 20));
+  });
+});
+
+describe("exportCustomerTransactions", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的下载链接的文件名，按点击顺序。 */
+  let downloads: string[];
+
+  /** jsdom 没有对象 URL，也不会真的下载：装上替身、拦下链接的点击，只记录文件名。 */
+  function stubDownload(): void {
+    downloads = [];
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: () => "blob:https://portal.example/00000000-0000-0000-0000-000000000000",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: () => undefined });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
+  }
+
+  afterEach(() => {
+    for (const [name, descriptor] of [
+      ["createObjectURL", originalCreate],
+      ["revokeObjectURL", originalRevoke],
+    ] as const) {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(URL, name);
+      } else {
+        Object.defineProperty(URL, name, descriptor);
+      }
+    }
+  });
+
+  function file(headers: Record<string, string> = {}) {
+    return { data: new Blob(["﻿id\r\n"], { type: "text/csv" }), status: 200, statusText: "", headers };
+  }
+
+  it("downloads from /api/v1/customer/wallet/transactions/export as a blob with only the dates", async () => {
+    stubDownload();
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValue(file({ "content-disposition": 'attachment; filename="wallet-transactions_2026-10-01_2026-10-26.csv"' }));
+
+    await exportCustomerTransactions({ fromDate: "2026-10-01", toDate: "2026-10-26" });
+
+    expect(get).toHaveBeenCalledTimes(1);
+    const [url, config] = get.mock.calls[0] ?? [];
+    expect(url).toBe(`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-26`);
+    expect(config).toMatchObject({ responseType: "blob" });
+    expect(downloads).toEqual(["wallet-transactions_2026-10-01_2026-10-26.csv"]);
+  });
+
+  it("falls back to the backend's file name rule when the response has none", async () => {
+    stubDownload();
+    vi.spyOn(client, "get").mockResolvedValue(file());
+
+    await exportCustomerTransactions({ fromDate: "2026-09-01", toDate: "2026-09-30" });
+
+    expect(downloads).toEqual(["wallet-transactions_2026-09-01_2026-09-30.csv"]);
+    expect(customerTransactionExportFilename({ fromDate: "2026-09-01", toDate: "2026-09-30" })).toBe(
+      "wallet-transactions_2026-09-01_2026-09-30.csv",
+    );
+  });
+
+  it("sends from_date and to_date under the names the backend reads, and nothing else", () => {
+    const parsed = new URL(customerTransactionExportUrl({ fromDate: "2026-10-01", toDate: "2026-10-26" }), "https://portal.example");
+
+    expect(parsed.pathname).toBe(EXPORT_URL);
+    expect(Array.from(parsed.searchParams.entries())).toEqual([
+      ["from_date", "2026-10-01"],
+      ["to_date", "2026-10-26"],
+    ]);
+  });
+
+  it("has no paging and never a tenant or customer identifier", () => {
+    const url = customerTransactionExportUrl({ fromDate: "2026-10-01", toDate: "2026-10-26" });
+
+    expect(url).not.toMatch(/page_size|before_sequence|reference_type|tenant|customer_id|\/admin\//);
+  });
+
+  it("passes the abort signal through", async () => {
+    stubDownload();
+    const get = vi.spyOn(client, "get").mockResolvedValue(file());
+    const controller = new AbortController();
+
+    await exportCustomerTransactions({ fromDate: "2026-10-01", toDate: "2026-10-26" }, controller.signal);
+
+    const [, config] = get.mock.calls[0] ?? [];
+    expect(config).toMatchObject({ signal: controller.signal });
   });
 });
