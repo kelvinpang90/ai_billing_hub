@@ -6520,7 +6520,7 @@ tasks:
     title: 低余额阈值第一层：管理员读取与设置客户低余额阈值的两个接口
     purpose: >-
       按 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）§2 接口一、接口二、低余额事件只对预付客户、数据库、事务边界、审计与 §8 第 1 步：新增 GET 与 PUT /api/v1/admin/customers/{customer_id}/low-balance-threshold，只有管理员可调；PUT 锁客户行、与现值比较，真实改动时阈值与一条 TENANT_LOW_BALANCE_THRESHOLD_SET 审计同一事务提交，同值不写；不改余额、不写账本与出站事件、不动 status_version；post_transaction 写低余额事件的条件加 billing_mode 为 PREPAID。docs/api.md 记新接口。不改表结构；客户侧字段属于 AIH-TASK-110，前端属于 AIH-TASK-111 与 112。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）逐条一致，以 §2 接口一、接口二、低余额事件只对预付客户、数据库、事务边界、外部系统与异步边界、时间、金额、审计，§3 INV-4、INV-8、INV-10、INV-13，§4，§5，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
