@@ -16,6 +16,10 @@
 ⚠️ 游标是本页最后一行 `occurred_at` 与 `public_id` 的 base64url（不带填充），客户端只能原样传回。
 解码失败或内容不合规都是 422 `VALIDATION_ERROR`；所有 422 文案只列字段名，不回显值。
 
+用量导出（AIH-TASK-115，设计闸门 #435 v10 §2「接口一」）：列恰好是上面 18 个键，只有时间列改名为
+`occurred_at_utc`（值同 `occurred_at`）。每个单元格都取自 `customer_usage_event_view`
+的 JSON 值，不直接读查询结果：白名单只有一份。
+
 本月用量（AIH-TASK-107，设计闸门 #403 v1 §2）：`data` 恰好 `month`、`charged_amount`、
 `request_count`、`conversation_count`、`days` 五个键，`days` 每项恰好 `date`、`request_count`、
 `charged_amount` 三个键。月份按马来西亚日历月，`[当月 1 日 00:00 − 8h, 次月 1 日 00:00 − 8h)`；
@@ -53,6 +57,46 @@ USAGE_DATE_PATTERN: Final = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 USAGE_MONTH_PATTERN: Final = r"^[0-9]{4}-[0-9]{2}$"
 MIN_USAGE_MONTH: Final = (2020, 1)
 MAX_USAGE_MONTH: Final = (2099, 12)
+
+# 用量导出的表头（设计 #435 §2「接口一」），按这个顺序。
+USAGE_EXPORT_COLUMNS: Final = (
+    "id",
+    "event_id",
+    "request_id",
+    "conversation_id",
+    "feature",
+    "project_id",
+    "project_name",
+    "provider",
+    "model",
+    "usage_type",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "quantity",
+    "unit",
+    "charged_amount",
+    "occurred_at_utc",
+)
+# 加公式注入前缀的文本列（设计 #435 §2「CSV 格式」）；token、`quantity`、金额与时间列不加。
+USAGE_EXPORT_TEXT_COLUMNS: Final = frozenset(
+    {
+        "id",
+        "event_id",
+        "request_id",
+        "conversation_id",
+        "feature",
+        "project_id",
+        "project_name",
+        "provider",
+        "model",
+        "usage_type",
+        "unit",
+    }
+)
+# 唯一改名的列：导出列名 → 白名单视图的键。
+_USAGE_EXPORT_RENAMED: Final = {"occurred_at_utc": "occurred_at"}
 
 _CURSOR_TIME_FORMAT: Final = "%Y-%m-%dT%H:%M:%S.%f"
 # 编码后最长约 84 个字符；放宽一些，超出即不合规。
@@ -304,6 +348,21 @@ def customer_usage_event_page(
     )
 
 
+def customer_usage_export_cells(row: CustomerUsageRow) -> list[str | None]:
+    """One CSV row in `USAGE_EXPORT_COLUMNS` order: the JSON values of the 18-key view as text.
+
+    时间与 JSON 接口的 `occurred_at` 逐字相同（不带时区的 UTC、保留微秒）；
+    整数变成十进制字符串，金额与 `quantity` 是原样的 8 位小数字符串；
+    `null` 留给 CSV 层写成空字段。
+    """
+    view = customer_usage_event_view(row).model_dump(mode="json")
+    cells: list[str | None] = []
+    for name in USAGE_EXPORT_COLUMNS:
+        value = view[_USAGE_EXPORT_RENAMED.get(name, name)]
+        cells.append(None if value is None else str(value))
+    return cells
+
+
 def customer_usage_summary_view(
     first_day: dt.date, summary: CustomerUsageSummary
 ) -> CustomerUsageSummaryView:
@@ -345,6 +404,8 @@ __all__ = [
     "MIN_USAGE_DATE",
     "MIN_USAGE_MONTH",
     "USAGE_DATE_PATTERN",
+    "USAGE_EXPORT_COLUMNS",
+    "USAGE_EXPORT_TEXT_COLUMNS",
     "USAGE_MONTH_PATTERN",
     "CustomerProjectList",
     "CustomerProjectView",
@@ -358,6 +419,7 @@ __all__ = [
     "customer_project_list",
     "customer_usage_event_page",
     "customer_usage_event_view",
+    "customer_usage_export_cells",
     "customer_usage_summary_view",
     "decode_cursor",
     "encode_cursor",

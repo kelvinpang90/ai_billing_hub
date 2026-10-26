@@ -27,6 +27,20 @@ repository。
 由 FastAPI 在处理函数之前判，范围（2020-01 到 2099-12）在鉴权之后、任何日期运算之前判（422）；
 省略时取请求时刻（UTC）加 8 小时后的年月，同一请求只取一次「现在」。超时与用量页同一个 422 与
 同一条日志。
+
+用量导出（AIH-TASK-115，设计闸门 #435 v10 §2「接口一」）：筛选与用量页相同，但日期恒必填（带
+`event_id` 也要），没有 `page_size` 与 `cursor`。
+
+⚠️ **导出租约**（INV-1）：在任何查询之前不阻塞地获取，拿不到 503 `EXPORT_BUSY`
+且不发查询；拿到后只放进 `request.scope` 的租约槽，**之后不在任何地方释放**——
+唯一的释放点是最外层 `ExportLeaseMiddleware` 的 `finally`（app/core/csv_export.py）。
+
+⚠️ **所有错误响应都在租约内发出**：`Exception` 的处理器挂在租约中间件外面，
+未处理的异常会让租约先于 500 释放。所以从拿到租约起，查询、投影、拼 CSV 在一个
+`try` 里：`AppError`（`EXPORT_TOO_LARGE`、`QUERY_TOO_BROAD`）原样抛出；其他
+`Exception` 记 `customer_export_failed`（带栈、不带参数值）后只设标志，离开 `except`
+块、置空持有数据的局部变量再抛 `CustomerExportFailed`，新异常不链回原异常。
+不捕获 `BaseException`。
 """
 
 from __future__ import annotations
@@ -38,6 +52,18 @@ from fastapi import APIRouter, Query, Request
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.auth import require_customer, require_session_factory
+from app.core.csv_export import (
+    EXPORT_LEASE_SCOPE_KEY,
+    EXPORT_MAX_ROWS,
+    CustomerExportFailed,
+    ExportBusy,
+    ExportCsvResponse,
+    ExportTooLarge,
+    csv_response,
+    try_acquire_export_lease,
+    write_csv,
+)
+from app.core.errors import AppError
 from app.core.logging import current_request_id
 from app.models.tenancy import Tenant
 from app.repositories import tenancy as tenancy_repository
@@ -46,6 +72,8 @@ from app.repositories import wallet as wallet_repository
 from app.schemas.customer import CustomerMe
 from app.schemas.customer_usage import (
     USAGE_DATE_PATTERN,
+    USAGE_EXPORT_COLUMNS,
+    USAGE_EXPORT_TEXT_COLUMNS,
     USAGE_MONTH_PATTERN,
     CustomerProjectList,
     CustomerUsageEventPage,
@@ -53,6 +81,7 @@ from app.schemas.customer_usage import (
     CustomerUsageSummaryView,
     customer_project_list,
     customer_usage_event_page,
+    customer_usage_export_cells,
     customer_usage_summary_view,
     decode_cursor,
     usage_month,
@@ -214,6 +243,80 @@ def customer_usage_events(
         _log_query_timeout(factory, principal.tenant_id)
         raise CustomerUsageQueryTooBroad from None
     return success(page, request_id=current_request_id())
+
+
+@router.get("/usage-events/export", response_class=ExportCsvResponse)
+def customer_usage_events_export(
+    request: Request,
+    from_date: UsageDate = None,
+    to_date: UsageDate = None,
+    project_id: str | None = None,
+    provider: ProviderFilter = None,
+    model: ModelFilter = None,
+    conversation_id: ConversationFilter = None,
+    event_id: EventIdFilter = None,
+) -> ExportCsvResponse:
+    """The caller's billed usage events as one CSV attachment, newest first, at most 20 000 rows.
+
+    筛选与 `GET /usage-events` 相同；日期恒必填，所以 `has_event_id` 恒为假。
+    拿别的客户的项目、`event_id`、`conversation_id` 来只会得到只有表头的文件（INV-8）。
+    """
+    principal = require_customer(request)
+    occurred_from, occurred_to = usage_period(from_date, to_date, has_event_id=False)
+    # 数据库没配置时在这里 503，早于获取租约。
+    factory = require_session_factory(request)
+    token = try_acquire_export_lease()
+    if token is None:
+        raise ExportBusy
+    # 只 hold，不在这里释放：最外层中间件在整个响应发完后释放。
+    request.scope[EXPORT_LEASE_SCOPE_KEY].hold(token)
+    rows = None
+    body = None
+    response = None
+    failed = False
+    try:
+        try:
+            with factory() as session:
+                # 多取一行，只用来判「超了」。
+                rows = usage_repository.list_processed_events_for_customer(
+                    session,
+                    principal.tenant_id,
+                    limit=EXPORT_MAX_ROWS + 1,
+                    project_id=project_id,
+                    provider=provider,
+                    model=model,
+                    conversation_id=conversation_id,
+                    event_id=event_id,
+                    occurred_from=occurred_from,
+                    occurred_to=occurred_to,
+                )
+        except usage_repository.QueryTooBroad:
+            _log_query_timeout(factory, principal.tenant_id)
+            raise CustomerUsageQueryTooBroad from None
+        if len(rows) > EXPORT_MAX_ROWS:
+            raise ExportTooLarge
+        body = write_csv(
+            USAGE_EXPORT_COLUMNS,
+            (customer_usage_export_cells(row) for row in rows),
+            USAGE_EXPORT_TEXT_COLUMNS,
+        )
+        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+        rows = None
+        response = csv_response(f"usage-events_{from_date}_{to_date}.csv", body)
+        body = None
+    except AppError:
+        raise
+    except Exception:
+        # 与 handle_unexpected_error 同一口径：栈进日志，不带参数值与文件内容。
+        logger.exception("customer_export_failed", extra={"path": request.url.path})
+        failed = True
+    if failed:
+        # 在 except 块之外抛：新异常没有 `__context__`，原异常与它引用的数据此时已可回收。
+        rows = None
+        body = None
+        response = None
+        raise CustomerExportFailed
+    return response
 
 
 @router.get("/usage-summary", response_model=ApiResponse[CustomerUsageSummaryView])

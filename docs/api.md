@@ -588,6 +588,87 @@
 
 ---
 
+## 客户导出
+
+设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/customer/usage-events/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内全部已计费用量事件，每行一条、18 列 | 401 / 403 / 422 / 500 / 503 |
+
+- 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，不接受任何租户、客户标识；四种 `account_status` 都能导出（导出是读）；ADMIN 不能调。
+- 同步生成、不落盘：请求时查询一次，在内存里拼好整份文件后再开始发送。服务器不保存任何导出文件，没有导出任务、没有异步。只读：不写任何表、不加锁、不写审计。
+- 只做 CSV；`.xlsx`、会话摘要导出、月度用量汇总导出不在这里。
+
+### CSV 格式
+
+- **编码**：UTF-8，文件开头带 BOM（`EF BB BF`），Excel 才能正确识别非 ASCII 的项目名。
+- **行**：RFC 4180。第一行是表头，之后每行一条记录；行尾 `\r\n`；含逗号、双引号或换行的字段加双引号，值里的双引号写成两个双引号。
+- **空值**：JSON 接口里为 `null` 的值写成空字段。
+- **整数**原样（十进制）。**金额与 `quantity`** 是恰好 8 位小数的字符串，与 JSON 接口逐字相同，**不按页面的 2 / 6 位舍入**、不经浮点、不加千分位、不带币种（币种恒为 MYR）：导出是对账用的数据，舍入后加总会与账本差几分。
+- **时间**一律是不带时区的 UTC，保留微秒，列名带 `_utc`，免得在表格软件里被当成本地时间。
+- **公式注入防护**：文本列的值若以 `=`、`+`、`-`、`@`、制表符或回车开头，前面加一个单引号 `'`（例：`=1+1` 写成 `'=1+1`）。这些值有的来自集成方上报或管理员，用 Excel 打开时以这些字符开头的单元格会被当成公式执行。数值列（token、`quantity`、`charged_amount`）与时间列不加：负金额必须保持是数。哪些是文本列见下文的列表。
+- **响应头**：`Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment; filename="<文件名>"`、`Cache-Control: no-store`（文件不留在浏览器缓存里）、`X-Accel-Buffering: no`（见下文「同一时刻只有一个导出」）。文件名只由校验过的日期拼出，只含 ASCII 字母、数字、`-`、`_`、`.`。
+- **错误响应不是 CSV**：仍是 JSON 信封（`{success:false, error, request_id}`），HTTP 状态码照常。整份文件拼好才开始发送，所以不会出现「已经收到 200 和半个文件、之后才失败」。下载前端用 `responseType: "blob"` 时，失败的 blob 按 JSON 信封解析。
+
+### 行数上限与 `EXPORT_TOO_LARGE`
+
+一个文件最多 **20 000 行**。查询多取一行判断是否超出；超出时 422 `EXPORT_TOO_LARGE`，**不返回任何行**（没有部分文件），文案固定（超过 20 000 行，请缩短日期区间或加筛选条件），不回显参数值、不报实际行数。超过上限也不转异步：缩短区间或加筛选条件后重试。
+
+### 同一时刻只有一个导出与 `EXPORT_BUSY`
+
+每个 API 进程同一时刻**最多一个导出在生成或在下载**（客户导出共用这一个名额，所有客户之间也共用）。从发查询之前起，到整个响应交给服务器之后才释放；第二个导出立刻得到 503 `EXPORT_BUSY`，带 `Retry-After: 5`，不排队、不等待、也不发任何查询；几秒后重试即可。
+
+导出响应带 `X-Accel-Buffering: no`，反向代理对它不缓冲（不把文件写进代理的临时文件），边读边转发给客户端。所以名额**一直占到客户端把文件读完**：下载很慢的客户端会让其他导出在这段时间里得到 `EXPORT_BUSY`。客户端停住不读时，代理的发送超时到点关闭连接，名额随之释放。下载中途断开或请求被取消同样释放，不留下任何状态。非导出请求不受影响。
+
+### `GET /api/v1/customer/usage-events/export` —— 导出客户自己的已计费用量
+
+与[用量页](#get-apiv1customerusage-events--客户自己的已计费用量)相同的口径：只含已计费（`PROCESSED`）的事件，按 `occurred_at` 的马来西亚日历日取，最新在前（`occurred_at` 倒序，同一时刻按 `id` 倒序）。一条 SELECT 取出整份文件，文件里的行来自同一个快照。
+
+| 参数 | 规则 |
+| --- | --- |
+| `from_date` / `to_date` | **恒为必填**（带 `event_id` 也要）。`YYYY-MM-DD`，马来西亚日历日，含两端；其余规则与用量页相同：`2020-01-01` 到 `2099-12-31` 之间、`to_date` 不早于 `from_date`、最多 92 天 |
+| `project_id` / `provider` / `model` / `conversation_id` / `event_id` | 可选，规则与用量页相同。不是自己的项目时得到只有表头的文件，不报错 |
+
+- **与用量页的差别**：日期恒必填（用量页带 `event_id` 时可省略）；没有 `page_size` 与 `cursor`（给了按未知参数忽略），一次返回整个区间。其余的校验、文案与时序完全相同：形状由框架在鉴权之前判，日期是否存在、必填、先后与 92 天在鉴权之后判，所有 422 只列字段名、不回显值。
+- **文件名**：`usage-events_<from_date>_<to_date>.csv`，例 `usage-events_2026-10-01_2026-10-31.csv`。
+- **列**：表头恰好这 18 列，按这个顺序。每列的值与[用量页](#get-apiv1customerusage-events--客户自己的已计费用量)每项的同名键逐字相同；唯一改名的是时间列。
+
+| 列 | 文本列（防公式注入） | 说明 |
+| --- | --- | --- |
+| `id` | 是 | 用量事件的 `public_id` |
+| `event_id` / `request_id` / `conversation_id` / `feature` | 是 | 集成方上报的原值；`conversation_id`、`feature` 可能为空 |
+| `project_id` / `project_name` | 是 | 项目的 `public_id` 与名称 |
+| `provider` / `model` | 是 | 上报的原始字符串 |
+| `usage_type` | 是 | 计量类型的 `code` |
+| `input_tokens` / `output_tokens` / `cache_creation_input_tokens` / `cache_read_input_tokens` | 否 | 整数；数量形态的事件为空 |
+| `quantity` | 否 | 恰好 8 位小数；token 形态的事件为空 |
+| `unit` | 是 | 计量单位 |
+| `charged_amount` | 否 | 本次请求向客户收的金额（`billable_cost`），恰好 8 位小数，含税 |
+| `occurred_at_utc` | 否 | 值与 JSON 的 `occurred_at` 相同：不带时区的 UTC，保留微秒 |
+
+- 文件里**没有**成本、原币成本、汇率、参考价、毛利、计费模式快照、状态、错误信息、`received_at` / `processed_at`、指纹、价格版本与规则引用与任何内部 id（INV-7），与用量页刻意不返回的那些相同。
+- 拿别的客户的项目 id、`event_id`、`conversation_id` 来导出，只得到只有表头的文件（INV-8）。
+- **与钱包流水的口径**：用量按 `occurred_at`（调用发生时间）的马来西亚日归属，钱包流水按记账时间；同一个日期区间两边可能差在跨日的几笔（例如月末发生、次月计费）。
+- **`QUERY_TOO_BROAD`**：查询沿用用量页的 2 秒执行预算，超过时 422 `QUERY_TOO_BROAD`，没有部分结果；缩短区间或换更具体的筛选条件后重试。服务端记一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id，不带查询参数的值）。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 422 | `VALIDATION_ERROR` | 查询参数违反上面的规则（包括缺 `from_date` 或 `to_date`） |
+| 422 | `EXPORT_TOO_LARGE` | 超过 20 000 行 |
+| 422 | `QUERY_TOO_BROAD` | 查询超过 2 秒执行预算 |
+| 500 | `INTERNAL_ERROR` | 意外错误，**包括查询时数据库连接失败或中断**（与其他客户接口一致：查询时的连接错误不是 503），带 `request_id`；信封与通用 500 相同 |
+| 503 | `EXPORT_BUSY` | 已有一个导出在生成或下载；响应头 `Retry-After: 5`，几秒后重试 |
+| 503 | `DATABASE_NOT_CONFIGURED` | 服务端根本没有配置数据库 |
+
+所有错误都是 JSON 信封，不是 CSV。没有 404，也没有 403 `ACCOUNT_READ_ONLY`。
+
+---
+
 ## 管理端客户管理
 
 设计依据：设计闸门 #96 `APPROVED: design v3`，全文见 [design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)（spec §56、§57、§124）。
