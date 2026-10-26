@@ -31,6 +31,12 @@ repository。
 用量导出（AIH-TASK-115，设计闸门 #435 v10 §2「接口一」）：筛选与用量页相同，但日期恒必填（带
 `event_id` 也要），没有 `page_size` 与 `cursor`。
 
+钱包流水导出（AIH-TASK-116，设计闸门 #435 v10 §2「接口二」）：只有必填的
+`from_date`、`to_date`，按流水的 `created_at`（记账时间）的马来西亚日取，按
+`wallet_sequence` 倒序。先确认钱包存在，**早于获取租约**：缺钱包照 #393 抛
+`RuntimeError(WALLET_MISSING)`，不经 `CustomerExportFailed`。之后的租约、错误处理与
+行数上限与用量导出相同。
+
 ⚠️ **导出租约**（INV-1）：在任何查询之前不阻塞地获取，拿不到 503 `EXPORT_BUSY`
 且不发查询；拿到后只放进 `request.scope` 的租约槽，**之后不在任何地方释放**——
 唯一的释放点是最外层 `ExportLeaseMiddleware` 的 `finally`（app/core/csv_export.py）。
@@ -88,8 +94,11 @@ from app.schemas.customer_usage import (
     usage_period,
 )
 from app.schemas.customer_wallet import (
+    WALLET_EXPORT_COLUMNS,
+    WALLET_EXPORT_TEXT_COLUMNS,
     CustomerWalletTransactionPage,
     CustomerWalletView,
+    customer_wallet_export_cells,
     customer_wallet_transaction_page,
     customer_wallet_view,
 )
@@ -188,6 +197,76 @@ def customer_wallet_transactions(
         )
         page = customer_wallet_transaction_page(rows, page_size=page_size)
     return success(page, request_id=current_request_id())
+
+
+@router.get("/wallet/transactions/export", response_class=ExportCsvResponse)
+def customer_wallet_transactions_export(
+    request: Request,
+    from_date: UsageDate = None,
+    to_date: UsageDate = None,
+) -> ExportCsvResponse:
+    """The caller's own ledger rows booked in the period as one CSV attachment, at most 20 000.
+
+    按 `created_at`（记账时间）的马来西亚日取，按 `wallet_sequence` 倒序
+    （账本的真实顺序，`balance_after` 逐行连得上）。租户只取自会话（INV-8）。
+    """
+    principal = require_customer(request)
+    created_from, created_to = usage_period(from_date, to_date, has_event_id=False)
+    # 日期恒必填：`usage_period` 已对缺失的抛 422，这里两端都有值。
+    assert created_from is not None and created_to is not None
+    # 数据库没配置时在这里 503，早于获取租约。
+    factory = require_session_factory(request)
+    # 先确认钱包存在，早于获取租约：缺钱包不能被一个只有表头的文件掩盖（#393 v3）。
+    with factory() as session:
+        if wallet_repository.get_wallet_for_tenant(session, principal.tenant_id) is None:
+            raise RuntimeError(wallet_repository.WALLET_MISSING)
+    token = try_acquire_export_lease()
+    if token is None:
+        raise ExportBusy
+    # 只 hold，不在这里释放：最外层中间件在整个响应发完后释放。
+    request.scope[EXPORT_LEASE_SCOPE_KEY].hold(token)
+    rows = None
+    body = None
+    response = None
+    failed = False
+    try:
+        try:
+            with factory() as session:
+                # 多取一行，只用来判「超了」。
+                rows = wallet_repository.list_transactions_for_customer_export(
+                    session,
+                    principal.tenant_id,
+                    created_from=created_from,
+                    created_to=created_to,
+                    limit=EXPORT_MAX_ROWS + 1,
+                )
+        except usage_repository.QueryTooBroad:
+            _log_query_timeout(factory, principal.tenant_id)
+            raise CustomerUsageQueryTooBroad from None
+        if len(rows) > EXPORT_MAX_ROWS:
+            raise ExportTooLarge
+        body = write_csv(
+            WALLET_EXPORT_COLUMNS,
+            (customer_wallet_export_cells(row) for row in rows),
+            WALLET_EXPORT_TEXT_COLUMNS,
+        )
+        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+        rows = None
+        response = csv_response(f"wallet-transactions_{from_date}_{to_date}.csv", body)
+        body = None
+    except AppError:
+        raise
+    except Exception:
+        # 与 handle_unexpected_error 同一口径：栈进日志，不带参数值与文件内容。
+        logger.exception("customer_export_failed", extra={"path": request.url.path})
+        failed = True
+    if failed:
+        # 在 except 块之外抛：新异常没有 `__context__`，原异常与它引用的数据此时已可回收。
+        rows = None
+        body = None
+        response = None
+        raise CustomerExportFailed
+    return response
 
 
 @router.get("/projects", response_model=ApiResponse[CustomerProjectList])

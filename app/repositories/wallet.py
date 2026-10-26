@@ -13,6 +13,10 @@ BEFORE UPDATE 触发器拒绝。也没有任何更新或删除账本的函数（
 后决定是否重试 —— 幂等键保证重试只有一次效果。
 
 ⚠️ 这里不写日志。异常消息只含问题码，不含 `description` 或 `metadata_json`。
+
+客户钱包流水导出（AIH-TASK-116，设计闸门 #435 v10 §2「接口二」）：
+`list_transactions_for_customer_export` 只读、不加锁，只 SELECT 客户白名单需要的 8 列；
+MySQL 上的执行预算、`QueryTooBroad` 与 3024 转换复用 app/repositories/usage_events.py 的。
 """
 
 from __future__ import annotations
@@ -23,9 +27,9 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, OutboxStatus, User
@@ -51,6 +55,7 @@ from app.models.wallet import (
     WalletTransaction,
 )
 from app.repositories.tenancy import bump_status_version
+from app.repositories.usage_events import CUSTOMER_USAGE_QUERY_TIMEOUT_MS, run_bounded
 
 # 出站事件（设计 §2）。⚠️ 这两个字符串是将来投递任务选处理器的键，改名等于让
 # 已经躺在 domain_outbox 里的行认不出自己。
@@ -532,6 +537,83 @@ def list_transactions_for_tenant(
     newest_first = WalletTransaction.wallet_sequence.desc()
     statement = statement.order_by(newest_first).limit(min(limit, MAX_PAGE_SIZE))
     return [LedgerRow(**row._mapping) for row in session.execute(statement)]
+
+
+class CustomerLedgerExportRow(NamedTuple):
+    """Exactly the eight columns the customer ledger export selects (design gate #435 v10 §2).
+
+    不读 `description`、`metadata_json`、`balance_before`，不 JOIN 用户表（不读操作者邮箱）：
+    INV-7。`reference_type` 与 `reference_id` 只用来判 `event_id`，不出客户白名单。
+    """
+
+    public_id: str
+    wallet_sequence: int
+    transaction_type: str
+    amount: Decimal
+    balance_after: Decimal
+    reference_type: str
+    reference_id: str
+    created_at: dt.datetime
+
+
+def customer_ledger_export_statement(
+    tenant_id: int,
+    *,
+    created_from: dt.datetime,
+    created_to: dt.datetime,
+    limit: int,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> Select[Any]:
+    """The one SELECT of a customer ledger export; the hint is rendered on MySQL only.
+
+    租户与 `created_at` 区间两个条件恒在（INV-8）；按序号倒序（账本的真实顺序），不按
+    `created_at`：它是写入时取的时间，不保证与序号同序。不加锁。
+    """
+    return (
+        select(
+            WalletTransaction.public_id,
+            WalletTransaction.wallet_sequence,
+            WalletTransaction.transaction_type,
+            WalletTransaction.amount,
+            WalletTransaction.balance_after,
+            WalletTransaction.reference_type,
+            WalletTransaction.reference_id,
+            WalletTransaction.created_at,
+        )
+        .where(
+            WalletTransaction.tenant_id == tenant_id,
+            WalletTransaction.created_at >= created_from,
+            WalletTransaction.created_at < created_to,
+        )
+        .order_by(WalletTransaction.wallet_sequence.desc())
+        .limit(limit)
+        # 优化器提示紧跟 SELECT 关键字；SQLite（只在测试里用）不渲染。
+        .prefix_with(f"/*+ MAX_EXECUTION_TIME({int(timeout_ms)}) */", dialect="mysql")
+    )
+
+
+def list_transactions_for_customer_export(
+    session: Session,
+    tenant_id: int,
+    *,
+    created_from: dt.datetime,
+    created_to: dt.datetime,
+    limit: int,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> list[CustomerLedgerExportRow]:
+    """Up to `limit` ledger rows booked in `[created_from, created_to)`, newest sequence first.
+
+    一条 SELECT，不加锁、不写。`timeout_ms` 只给测试用。MySQL 超时（3024）抛
+    `QueryTooBroad`（与客户用量查询同一个异常、同一个转换）；其他数据库错误原样抛出。
+    """
+    statement = customer_ledger_export_statement(
+        tenant_id,
+        created_from=created_from,
+        created_to=created_to,
+        limit=limit,
+        timeout_ms=timeout_ms,
+    )
+    return [CustomerLedgerExportRow(*row) for row in run_bounded(session, statement)]
 
 
 def verify_wallet(session: Session, tenant_id: int) -> list[str]:

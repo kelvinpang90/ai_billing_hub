@@ -543,11 +543,14 @@ def list_processed_events_for_customer(
         before=before,
         timeout_ms=timeout_ms,
     )
-    return [CustomerUsageRow(*row) for row in _run_bounded(session, statement)]
+    return [CustomerUsageRow(*row) for row in run_bounded(session, statement)]
 
 
-def _run_bounded(session: Session, statement: Select[tuple[object, ...]]) -> list[Row[Any]]:
-    """Execute a customer usage statement; MySQL's timeout (3024) becomes `QueryTooBroad`."""
+def run_bounded(session: Session, statement: Select[tuple[object, ...]]) -> list[Row[Any]]:
+    """Execute a customer usage statement; MySQL's timeout (3024) becomes `QueryTooBroad`.
+
+    客户钱包流水导出（app/repositories/wallet.py）也经这里执行，同一个转换只有一份。
+    """
     try:
         return list(session.execute(statement).all())
     except DBAPIError as error:
@@ -669,8 +672,8 @@ def summarize_processed_events_for_customer(
     其他数据库错误原样抛出。
     """
     period = {"occurred_from": occurred_from, "occurred_to": occurred_to, "timeout_ms": timeout_ms}
-    daily = _run_bounded(session, customer_usage_daily_statement(tenant_id, **period))
-    [(conversations,)] = _run_bounded(
+    daily = run_bounded(session, customer_usage_daily_statement(tenant_id, **period))
+    [(conversations,)] = run_bounded(
         session, customer_usage_conversation_statement(tenant_id, **period)
     )
     return CustomerUsageSummary(
@@ -700,6 +703,7 @@ __all__ = [
     "insert_event",
     "list_events",
     "list_processed_events_for_customer",
+    "run_bounded",
     "scope_public_ids",
     "summarize_processed_events_for_customer",
 ]
