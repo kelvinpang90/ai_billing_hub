@@ -6701,7 +6701,7 @@ tasks:
     title: 低余额阈值第四层：门户余额卡在低余额时显示提示与阈值金额
     purpose: >-
       按 docs/design/AIH-TASK-109-low-balance-threshold.md（设计闸门 #433 已批准 v2）§2「前端」门户一条与 §8 第 4 步：门户余额卡（钱包页与首页共用的 WalletSummaryCard）读 AIH-TASK-110 新增的 low_balance 与 low_balance_threshold，处于低余额时在卡内显示警告并带阈值金额（2 位）。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-110
     acceptance_criteria:
