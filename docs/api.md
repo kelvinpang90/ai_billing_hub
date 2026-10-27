@@ -686,17 +686,18 @@
 
 ## 客户导出
 
-设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。月度用量汇总导出依据设计闸门 #457 `APPROVED: design v1`（[design/AIH-TASK-119-customer-usage-summary-export.md](design/AIH-TASK-119-customer-usage-summary-export.md)），接口登记为 AIH-TASK-119。
+设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。月度用量汇总导出依据设计闸门 #457 `APPROVED: design v1`（[design/AIH-TASK-119-customer-usage-summary-export.md](design/AIH-TASK-119-customer-usage-summary-export.md)），接口登记为 AIH-TASK-119。会话摘要导出依据设计闸门 #460 `APPROVED: design v2`（[design/AIH-TASK-121-customer-conversations.md](design/AIH-TASK-121-customer-conversations.md) §2「接口二」），接口登记为 AIH-TASK-122。
 
 | 方法与路径 | 主体 | 成功 | 错误 |
 | --- | --- | --- | --- |
 | `GET /api/v1/customer/usage-events/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内全部已计费用量事件，每行一条、18 列 | 401 / 403 / 422 / 500 / 503 |
 | `GET /api/v1/customer/wallet/transactions/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内记账的全部钱包流水，每行一条、7 列 | 401 / 403 / 422 / 500 / 503 |
 | `GET /api/v1/customer/usage-summary/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：一个马来西亚日历月每天一行，末尾一行合计，4 列 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/conversations/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内的全部会话，每行一个会话、9 列 | 401 / 403 / 422 / 500 / 503 |
 
 - 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，不接受任何租户、客户标识；四种 `account_status` 都能导出（导出是读）；ADMIN 不能调。
 - 同步生成、不落盘：请求时查询一次，在内存里拼好整份文件后再开始发送。服务器不保存任何导出文件，没有导出任务、没有异步。只读：不写任何表、不加锁、不写审计。
-- 只做 CSV；`.xlsx` 与会话摘要导出不在这里。
+- 只做 CSV；`.xlsx` 不在这里。
 
 ### CSV 格式
 
@@ -715,7 +716,7 @@
 
 ### 同一时刻只有一个导出与 `EXPORT_BUSY`
 
-每个 API 进程同一时刻**最多一个导出在生成或在下载**（用量导出与钱包流水导出共用这一个名额，所有客户之间也共用）。**月度汇总导出不占这个名额**：它的文件恒为一个月、约 2 KB，内存与数据库代价与 `GET /usage-summary` 相同，所以别人在下载大文件时它照常 200，也不会挡住别人的导出。从发查询之前起，到整个响应交给服务器之后才释放；第二个导出立刻得到 503 `EXPORT_BUSY`，带 `Retry-After: 5`，不排队、不等待、也不发任何查询；几秒后重试即可。
+每个 API 进程同一时刻**最多一个导出在生成或在下载**（用量导出、钱包流水导出与会话摘要导出共用这一个名额，所有客户之间也共用）。**月度汇总导出不占这个名额**：它的文件恒为一个月、约 2 KB，内存与数据库代价与 `GET /usage-summary` 相同，所以别人在下载大文件时它照常 200，也不会挡住别人的导出。从发查询之前起，到整个响应交给服务器之后才释放；第二个导出立刻得到 503 `EXPORT_BUSY`，带 `Retry-After: 5`，不排队、不等待、也不发任何查询；几秒后重试即可。
 
 导出响应带 `X-Accel-Buffering: no`，反向代理对它不缓冲（不把文件写进代理的临时文件），边读边转发给客户端。所以名额**一直占到客户端把文件读完**：下载很慢的客户端会让其他导出在这段时间里得到 `EXPORT_BUSY`。客户端停住不读时，代理的发送超时到点关闭连接，名额随之释放。下载中途断开或请求被取消同样释放，不留下任何状态。非导出请求不受影响。
 
@@ -817,7 +818,39 @@
 
 **没有** `EXPORT_TOO_LARGE`（行数恒有界）与 `EXPORT_BUSY`（不占导出名额）；没有 404，也没有 403 `ACCOUNT_READ_ONLY`。错误都是 JSON 信封，不是 CSV。
 
-### 错误（用量导出与钱包流水导出相同）
+### `GET /api/v1/customer/conversations/export` —— 导出客户自己的会话摘要
+
+与[会话列表](#get-apiv1customerconversations--客户自己的会话)同一个查询、同一份白名单与同一口径：每个（项目, `conversation_id`）一行，只算区间内已计费（`PROCESSED`）、`conversation_id` 非空的请求，跨区间边界的会话只计区间内的部分。一条 SELECT 取出整份文件，文件里的行来自同一个快照。
+
+| 参数 | 规则 |
+| --- | --- |
+| `from_date` / `to_date` | **必填**，规则与会话列表相同：`YYYY-MM-DD` 马来西亚日历日，含两端；`2020-01-01` 到 `2099-12-31` 之间、`to_date` 不早于 `from_date`、最多 92 天 |
+| `project_id` | 可选，项目 `public_id`。不是自己的项目（不存在或属于别的客户）时得到只有表头的文件，不报错 |
+
+- **与会话列表的差别**：没有 `page_size` 与 `cursor`（给了按未知参数忽略），一次返回整个区间。其余的校验、文案与时序完全相同：形状由框架在鉴权之前判，日期是否存在、必填、先后与 92 天在鉴权之后判，所有 422 只列字段名、不回显值。
+- **排序**：与会话列表相同，按 `last_occurred_at` 倒序；相同时按项目 `public_id` 倒序，再按 `conversation_id` 倒序（按字节）。
+- **行数上限**：最多 20 000 个**会话**（不是请求）；超过时 422 `EXPORT_TOO_LARGE`，见上文「行数上限」。
+- **占导出名额**：与用量导出、钱包流水导出共用，见上文「同一时刻只有一个导出」；名额被占时 503 `EXPORT_BUSY`，不发查询。
+- **文件名**：`conversations_<from_date>_<to_date>.csv`，例 `conversations_2026-10-01_2026-10-31.csv`。
+- **列**：表头恰好这 9 列，按这个顺序。每列的值与会话列表每项的同名键逐字相同；唯一改名的是两个时间列。
+
+| 列 | 文本列（防公式注入） | 说明 |
+| --- | --- | --- |
+| `conversation_id` | 是 | 集成方上报的原值 |
+| `project_id` / `project_name` | 是 | 该会话所属项目的 `public_id` 与名称 |
+| `first_occurred_at_utc` | 否 | 值与 JSON 的 `first_occurred_at` 相同：区间内该会话第一条已计费请求的 `occurred_at`，不带时区的 UTC，保留微秒 |
+| `last_occurred_at_utc` | 否 | 值与 JSON 的 `last_occurred_at` 相同：区间内最后一条已计费请求的 `occurred_at` |
+| `request_count` | 否 | 区间内该会话已计费的请求数（整数） |
+| `input_tokens` / `output_tokens` | 否 | 这些请求的 token 之和（整数）；数量形态的请求不计入，全是数量形态时为 `0` |
+| `charged_amount` | 否 | 这些请求的计费额（`billable_cost`）之和，恰好 8 位小数，含税，不舍入；内部计量客户恒为 `0.00000000` |
+
+- 文件里**没有**成本、原币成本、汇率、参考价、毛利、计费模式、状态、版本与规则引用、按供应商 / 模型的拆分、缓存 token 与 `quantity` 合计与任何内部 id（INV-7），与会话列表刻意不返回的那些相同。项目只出 `public_id` 与名称。
+- 拿别的客户的项目 id 来导出，只得到只有表头的文件；两个客户用同一个 `conversation_id` 值也不会被并成一行（INV-8）。
+- **合计会变大**：与会话列表相同，晚到或晚计费的请求计入它**发生**的时刻；这不是对账单。逐条核对时，用[用量导出](#get-apiv1customerusage-eventsexport--导出客户自己的已计费用量)带同一个日期区间与该行的 `project_id`、`conversation_id`。
+- **`QUERY_TOO_BROAD`**：查询沿用会话列表的 2 秒执行预算，超过时 422 `QUERY_TOO_BROAD`，没有部分文件；缩短区间或选一个项目后重试。服务端记一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id，不带参数值）。
+- 错误码与用量导出相同，见下表；没有 404，也没有 403 `ACCOUNT_READ_ONLY`。
+
+### 错误（用量导出、钱包流水导出与会话摘要导出相同）
 
 | HTTP | `error.code` | 什么时候 |
 | --- | --- | --- |
