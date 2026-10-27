@@ -3,7 +3,8 @@
  * （`GET /api/v1/customer/usage-summary`）。
  *
  * 语义以 docs/api.md「客户用量」为准（AIH-TASK-104，设计闸门 #398 v4）；按月汇总以同一节的 usage-summary 小节为准
- * （AIH-TASK-107，设计闸门 #403 v1）；用量导出以 docs/api.md「客户导出」为准（AIH-TASK-117，设计闸门 #435 v10）。只读。
+ * （AIH-TASK-107，设计闸门 #403 v1）；用量导出以 docs/api.md「客户导出」为准（AIH-TASK-117，设计闸门 #435 v10）；月度汇总
+ * 导出以同一节的 usage-summary/export 小节为准（AIH-TASK-120，设计闸门 #457 v1）。只读。
  *
  * ⚠️ **不带任何租户或客户标识**：客户是谁只取自访问令牌（spec §90）。这一层也不接受这类参数 —— 不给调用方
  * 留下「顺手带上 customer_id」的口子。
@@ -21,6 +22,7 @@ export const CUSTOMER_PROJECTS_URL = "/api/v1/customer/projects";
 export const CUSTOMER_USAGE_EVENTS_URL = "/api/v1/customer/usage-events";
 export const CUSTOMER_USAGE_EXPORT_URL = "/api/v1/customer/usage-events/export";
 export const CUSTOMER_USAGE_SUMMARY_URL = "/api/v1/customer/usage-summary";
+export const CUSTOMER_USAGE_SUMMARY_EXPORT_URL = "/api/v1/customer/usage-summary/export";
 
 /** 查询超过后端的执行时间预算（2 秒）：请客户缩小日期区间或换筛选条件（docs/api.md「客户用量」）。 */
 export const QUERY_TOO_BROAD = "QUERY_TOO_BROAD";
@@ -219,4 +221,27 @@ export function getCustomerUsageSummary(
   }
   const params = new URLSearchParams({ month });
   return apiGet<CustomerUsageSummary>(`${CUSTOMER_USAGE_SUMMARY_URL}?${params.toString()}`, signal);
+}
+
+/**
+ * 月度汇总导出的地址（含查询串）：只带 `month`（`YYYY-MM`，后端必填），没有任何筛选，也不带租户或客户标识
+ * （docs/api.md「客户导出」，AIH-TASK-119，设计闸门 #457 v1）。
+ */
+export function customerUsageSummaryExportUrl(month: string): string {
+  const params = new URLSearchParams({ month });
+  return `${CUSTOMER_USAGE_SUMMARY_EXPORT_URL}?${params.toString()}`;
+}
+
+/** 后端取不到文件名时的兜底，与后端同一规则：`usage-summary_<YYYY-MM>.csv`。 */
+export function customerUsageSummaryExportFilename(month: string): string {
+  return `usage-summary_${month}.csv`;
+}
+
+/**
+ * 把一个马来西亚日历月的用量汇总（每天一行加 `TOTAL` 行）导出成 CSV 并交给浏览器下载。失败抛 `ApiError`：
+ * `QUERY_TOO_BROAD`（超过执行时间预算），其余照常带 `request_id`。不占导出名额，所以没有 `EXPORT_BUSY`；行数恒有界，
+ * 所以没有 `EXPORT_TOO_LARGE`。
+ */
+export function exportCustomerUsageSummary(month: string, signal?: AbortSignal): Promise<void> {
+  return downloadFile(customerUsageSummaryExportUrl(month), customerUsageSummaryExportFilename(month), signal);
 }
