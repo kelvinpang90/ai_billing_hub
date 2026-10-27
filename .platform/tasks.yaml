@@ -7229,3 +7229,249 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-121
+    title: 会话摘要第一层：客户会话列表接口，按会话聚合区间内的已计费请求
+    purpose: >-
+      按 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）§2 与 §8 第 1 步：新增 GET /api/v1/customer/conversations，读时一条聚合 SELECT（派生表按项目与 conversation_id 分组、外层 JOIN 项目），只算所选马来西亚日期区间内 PROCESSED 且 conversation_id 非空的请求，按最后活动倒序、会话游标往旧翻页，2 秒执行预算；新文件 app/schemas/customer_conversations.py 放 9 键白名单视图与游标。docs/api.md 新增「客户会话」一节。只读；导出属于 AIH-TASK-122，前端属于 AIH-TASK-123。
+    status: ready
+    depends_on:
+      - AIH-TASK-119
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）逐条一致，以 §2 接口一、查询、游标、时间、金额、错误，§3 INV-1、INV-7、INV-8、INV-10，§4，§5，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对设计 §1「现有行为」列出的函数与常量（run_bounded、CUSTOMER_USAGE_QUERY_TIMEOUT_MS、get_project_for_tenant、usage_period、InvalidCustomerUsageQuery、CustomerUsageQueryTooBroad、money_text、_log_query_timeout）形状如所述；任何一项缺失或形状不同时停下说明，不自行补'
+      - 'app/repositories/usage_events.py：新增 CustomerConversationRow（恰好设计 §2「查询」外层的 9 列）、customer_conversation_statement 与 list_conversations_for_customer；派生表内只按 usage_events 的 project_id、conversation_id 分组，只读设计列出的 8 列、不读任何成本列；租户、PROCESSED、区间与 conversation_id IS NOT NULL 四个条件恒在；项目先用 get_project_for_tenant 在本租户内查出，查不到返回空列表且不发聚合查询；排序 last_occurred_at、项目 public_id、conversation_id 均倒序，游标只取严格更旧的键；MAX_EXECUTION_TIME 提示只在最外层 SELECT 且只在 MySQL 渲染；经 run_bounded 执行。既有函数不改'
+      - '新文件 app/schemas/customer_conversations.py：9 键白名单视图与分页模型（不继承、不复用管理端模型），金额用 money_text 原样 8 位，时间格式与 GET /usage-events 的 occurred_at 相同；encode_conversation_cursor 与 decode_conversation_cursor 按设计 §2「游标」：三段以 | 连接后 base64url 不带填充，解码前长度上限 512，任何不合规（含把事件游标拿来用）抛 InvalidCustomerUsageQuery("cursor")'
+      - 'app/api/customer.py：新增 GET /api/v1/customer/conversations，处理函数第一条语句显式调用 require_customer，租户只取 CustomerPrincipal.tenant_id；from_date 与 to_date 用现有 UsageDate 并经 usage_period(..., has_event_id=False)；page_size 用现有 PageSize；多取一行判断下一页；QueryTooBroad 与 GET /usage-events 相同：_log_query_timeout 后抛 CustomerUsageQueryTooBroad；既有客户接口行为不变'
+      - '测试：新增 tests/backend/test_customer_conversations_api.py 覆盖设计 §7 后端表里属于接口一的每一行（SQLite 与 MySQL 参数化；「与请求级明细对账」对每一行调 GET /usage-events 并逐字比较；「分组键」含同一 id 跨项目与大小写两种；「翻页中有新活动」在 MySQL 上用另一个事务插入；「扫描上限」在 MySQL 上写入 30 000 条事件并用测试专用 1 毫秒超时，另断言提示恰好一次且在最外层；「游标」含 128 字符 conversation_id 的往返与事件游标被拒）；MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 用全零占位值；tests/backend/test_customer_api.py 只把新路由加进显式的客户路由清单，别的不动'
+      - 'docs/api.md 新增「客户会话」一节：参数与规则、9 个字段及含义（会话键是项目加 conversation_id、只算区间内、没有 conversation_id 的请求不计入、QUANTITY 形态不计 token）、排序与游标、翻页途中有新活动的会话会回到最新一端但不会重复（设计 §4）、合计随晚到计费变大、点进会话用 GET /usage-events 带 conversation_id 与 project_id 与同一区间、错误码；不写主机名'
+      - '不改 app/core/csv_export.py、app/main.py、迁移与模型、钱包相关代码、前端、管理端接口与 AI 模块；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #460'
+    allowed_change_paths:
+      - app/repositories/usage_events.py
+      - app/schemas/customer_conversations.py
+      - app/api/customer.py
+      - tests/backend/test_customer_conversations_api.py
+      - tests/backend/test_customer_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-122
+    title: 会话摘要第二层：客户会话摘要的 CSV 导出接口
+    purpose: >-
+      按 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）§2「接口二」与 §8 第 2 步：新增 GET /api/v1/customer/conversations/export，复用 AIH-TASK-121 的聚合查询与白名单视图，9 列 CSV，至多 20 000 行，与用量导出共用导出租约、行数上限与错误语义。docs/api.md「客户导出」补这一节。只读；前端属于 AIH-TASK-124。
+    status: ready
+    depends_on:
+      - AIH-TASK-121
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）逐条一致，以 §2 接口二、时间、金额、错误，§3 INV-1、INV-7、INV-8、INV-10，§5，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 AIH-TASK-121 交付的 list_conversations_for_customer 与会话视图、app/core/csv_export.py 的租约与 write_csv、csv_response，以及 app/api/customer.py 里 customer_usage_events_export 的租约与错误处理写法形状如设计所述；不同时停下说明，不自行补'
+      - 'app/schemas/customer_conversations.py：新增导出列清单（恰好 conversation_id、project_id、project_name、first_occurred_at_utc、last_occurred_at_utc、request_count、input_tokens、output_tokens、charged_amount，按这个顺序）、文本列（只有前三列）与单元格转换函数：每个单元格取自会话白名单视图的 JSON 值，时间两列对应去掉 _utc 的键，不直接读查询结果'
+      - 'app/api/customer.py：新增 GET /api/v1/customer/conversations/export，流程与 customer_usage_events_export 逐步相同：第一条语句 require_customer；usage_period(..., has_event_id=False)；require_session_factory 早于租约；不阻塞地获取导出租约，拿不到 503 EXPORT_BUSY 且不发查询，只 hold 进 request.scope 的租约槽、不在处理函数里释放；查询 limit 为 EXPORT_MAX_ROWS + 1、无游标，超过上限抛 ExportTooLarge；QueryTooBroad 记日志后 422 QUERY_TOO_BROAD；其他 Exception 记 customer_export_failed 后在 except 块之外抛 CustomerExportFailed；文件名 conversations_<from_date>_<to_date>.csv；既有客户接口行为不变'
+      - '测试：新增 tests/backend/test_customer_conversations_export_api.py 覆盖设计 §7 后端表里属于接口二的每一行（SQLite 与 MySQL 参数化；「导出正常路径」逐单元格对比接口一同一批数据的结果；「导出行数上限」照 tests/backend/test_customer_usage_export_api.py 的写法断言 limit 为 EXPORT_MAX_ROWS + 1 并 monkeypatch 返回 20 000 与 20 001 行；「导出租约」先占住租约；「公式注入」用项目名；「内存上界」在 tracemalloc 下用 20 000 行最长形态会话行，峰值不超过 128 MiB，超了停下说明、不自行调上限）；MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 全零；tests/backend/test_customer_api.py 只把新路由加进显式的客户路由清单'
+      - 'docs/api.md「客户导出」：接口表加一行；删去「会话摘要导出不在这里」的说法；共用名额那一句写明用量导出、钱包流水导出与会话摘要导出共用、月度汇总导出不占；新增本接口一节：参数、9 列与含义（同「客户会话」）、排序、20 000 行上限、错误码；不写主机名'
+      - '不改 app/core/csv_export.py、app/main.py、app/repositories/（AIH-TASK-121 已交付查询，发现缺陷时停下说明）、迁移与模型、钱包相关代码、前端、管理端接口、nginx 配置与 AI 模块；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #460'
+    allowed_change_paths:
+      - app/schemas/customer_conversations.py
+      - app/api/customer.py
+      - tests/backend/test_customer_conversations_export_api.py
+      - tests/backend/test_customer_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-123
+    title: 会话摘要第三层：门户会话页，点一行跳到用量页看这次会话的请求
+    purpose: >-
+      按 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）§2「前端」与 §8 第 3 步：新增门户会话页 /portal/conversations（日期区间与项目筛选、按 next_cursor 往旧翻页、没有会话 ID 的请求的说明），门户导航加一项；点一行跳到用量页并带上 conversation_id、project_id 与已应用的日期区间，用量页进页面时读这四个查询参数作初始筛选；勾掉 docs/TODO.md Phase 5 的「会话摘要」。只做前端，外加验收脚本的一个只读步骤。导出按钮属于 AIH-TASK-124。
+    status: ready
+    depends_on:
+      - AIH-TASK-120
+      - AIH-TASK-121
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「客户会话」一节为准（AIH-TASK-121 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts、frontend/src/components/MoneyText.tsx'
+      - '新增 frontend/src/api/customerConversations.ts 封装会话列表接口：省略的可选参数不进查询串，不传任何租户或客户标识，不带供应商、模型或 conversation_id 筛选；next_cursor 只原样传回、不解析'
+      - '新增 frontend/src/features/portal/ConversationsPage.tsx：日期区间与用量页同一套规则（默认马来西亚时间本月 1 日到今天、2020-01-01 到 2099-12-31、超过 92 天不发请求并提示），复用 UsagePage.tsx 的日期函数（需要时把它们导出），不另写一份；项目下拉来自项目列表接口；表格列为会话 ID、项目、区间内首次请求与最后活动（按 +8 显示并标 MYT）、请求数、输入与输出 token、计费额（formatAmountRounded 按 6 位）；「Older」与「Newest」；表格上方说明只列有会话 ID 的请求、没有会话 ID 的在用量页看、合计只算所选区间；点一行跳到 /portal/usage 并恰好带 conversation_id、project_id、from_date、to_date 四个参数，日期取已应用的区间；加载中、失败（带 request_id）、空列表三种状态，QUERY_TOO_BROAD 专门文案'
+      - 'frontend/src/features/portal/UsagePage.tsx：进页面时查询串带 conversation_id 且不带 event_id 时，以 conversation_id、project_id 与 from_date、to_date 作初始的已应用筛选与表单值，日期缺一或不合规时日期用默认区间、其余照用；之后的筛选不写回地址栏；带 event_id 时行为不变；不带这些参数时行为与现在相同，列表、筛选、翻页、请求级导出与月度汇总导出不变'
+      - 'frontend/src/routes/paths.ts 登记 portalConversations 路径 /portal/conversations，frontend/src/routes/index.tsx 把它挂在 RequireRole（CUSTOMER）与 PortalLayout 之下；frontend/src/layouts/PortalLayout.tsx 的导航在用量之后加会话一项；页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：customerConversations.test.ts 覆盖路径与查询串；ConversationsPage.test.tsx 与 UsagePage.test.tsx 覆盖设计 §7 前端一段里属于会话页与用量页的全部场景（默认日期用固定的现在测 UTC 16:00 前后两侧、超过 92 天不发请求、筛选与翻页的查询串、时间与计费额显示、点一行的跳转地址、说明文字、三种状态与 QUERY_TOO_BROAD、用量页读四个查询参数及日期缺一或不合规、同时带 event_id、不带参数时不变、不请求 /api/v1/admin/ 路径）；AIH-TASK-105、106、117、120 的既有用例照常通过；示例 uuid 全零'
+      - 'check_portal_conversations：在 login_customer 之后经门户导航打开会话页（href 为 /portal/conversations，默认日期区间，不改筛选）；后端值取页面自己发出的 GET /api/v1/customer/conversations 的响应体（被动观察，不自己发请求），断言表格行数与 items 条数一致，items 非空时第一行显示的计费额等于 items 第一项 charged_amount 按 6 位 ROUND_HALF_UP 舍入后的值（字符串运算，不经浮点），空表也算通过；响应是 QUERY_TOO_BROAD 时判 FAIL 并说明；不点行、不翻页、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 只勾 Phase 5 的「会话摘要」一项，「客户端用量导出」不勾。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #460（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerConversations.ts
+      - frontend/src/api/customerConversations.test.ts
+      - frontend/src/features/portal/ConversationsPage.tsx
+      - frontend/src/features/portal/ConversationsPage.test.tsx
+      - frontend/src/features/portal/UsagePage.tsx
+      - frontend/src/features/portal/UsagePage.test.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/layouts/PortalLayout.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_conversations
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-124
+    title: 会话摘要第四层：门户会话页的导出按钮
+    purpose: >-
+      按 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）§2「前端」与 §8 第 4 步：会话页加「Export CSV」按钮，用已应用的筛选经 AIH-TASK-117 的下载辅助函数调用 AIH-TASK-122 的导出接口。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-122
+      - AIH-TASK-123
+    acceptance_criteria:
+      - '语义一律以 docs/api.md「客户导出」里会话摘要导出一节为准（AIH-TASK-122 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts、frontend/src/routes/、frontend/src/layouts/、frontend/src/features/portal/UsagePage.tsx'
+      - 'frontend/src/api/customerConversations.ts 新增导出的地址常量、拼地址（只带 from_date、to_date 与可选的 project_id，不带 page_size 与 cursor，不传任何租户或客户标识）、兜底文件名 conversations_<from_date>_<to_date>.csv 与下载函数（经现有 downloadFile），既有封装不变'
+      - 'frontend/src/features/portal/ConversationsPage.tsx 加「Export CSV」按钮：用页面当前已应用的筛选（不是表单里还没点 Apply filters 的值）；日期区间无效时不可用；导出中显示加载且不可重复点击；EXPORT_TOO_LARGE、QUERY_TOO_BROAD、EXPORT_BUSY 各有专门文案，其余失败显示 request_id；换筛选时收起上一次的失败；导出不影响列表、筛选与翻页'
+      - '页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：customerConversations.test.ts 补导出的路径、查询串与兜底文件名；ConversationsPage.test.tsx 覆盖设计 §7 前端一段里属于导出按钮的场景（请求地址带已应用的筛选、不带 page_size 与 cursor、未应用的表单值不生效、区间无效时不可用、加载状态、三种专门文案与带 request_id 的通用失败、失败不影响列表）；AIH-TASK-123 的既有用例照常通过；示例 uuid 全零'
+      - 'check_portal_conv_export：排在 check_portal_conversations 之后，停留在会话页，断言「Export CSV」按钮恰好一个且可用；不点击、不下载、不改筛选、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不勾任何项（Phase 5「客户端用量导出」等 Excel 交付后再勾）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #460（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerConversations.ts
+      - frontend/src/api/customerConversations.test.ts
+      - frontend/src/features/portal/ConversationsPage.tsx
+      - frontend/src/features/portal/ConversationsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_conversations
+        - check_portal_conv_export
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
