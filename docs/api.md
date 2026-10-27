@@ -588,6 +588,102 @@
 
 ---
 
+## 客户会话
+
+设计依据：设计闸门 #460 `APPROVED: design v2`，全文见 [design/AIH-TASK-121-customer-conversations.md](design/AIH-TASK-121-customer-conversations.md)（§2、§4、§6；spec §10、§68、§90、§108、§109、§111）。会话列表接口登记为 AIH-TASK-121。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/customer/conversations` | CUSTOMER 的访问令牌 | 200，一页会话（每项 9 个键） | 401 / 403 / 422 / 500 / 503 |
+
+- 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，不接受任何租户、客户标识（带了 `customer_id`、`tenant_id` 也只会被当作未知参数忽略）；四种 `account_status` 都返回 200（用 `require_customer`，没有 403 `ACCOUNT_READ_ONLY`）；ADMIN 不能调。
+- 只读：不写任何表、不加锁、不写审计。读时在用量事件上实时聚合，不建聚合表、不缓存。
+
+### `GET /api/v1/customer/conversations` —— 客户自己的会话
+
+**会话的键是（项目, `conversation_id`）**：`conversation_id` 由集成方在自己的项目里生成，平台不保证跨项目唯一，所以同一个 `conversation_id` 出现在两个项目里是两行；按字节比较，`conv_A` 与 `conv_a` 是两个会话。
+
+**口径**：只算所选日期区间内**已计费**（`PROCESSED`）、`conversation_id` 非空的请求。
+
+- **只算区间内**：跨区间边界的会话只计区间内的那部分；`first_occurred_at` 是「区间内的第一条请求」，不是会话真正的开始。
+- **没有 `conversation_id` 的请求不计入**（例如 AI 模块代为上报的调用）：它们不出现在任何一行里，在[用量接口](#get-apiv1customerusage-events--客户自己的已计费用量)看。
+- **数量形态（`QUANTITY`，例如按秒计的转写）的请求**计入请求数与计费额，不计 token。
+
+| 参数 | 规则 |
+| --- | --- |
+| `from_date` / `to_date` | **必填**，规则与[用量接口](#get-apiv1customerusage-events--客户自己的已计费用量)没有 `event_id` 时完全相同：`YYYY-MM-DD` 马来西亚日历日，含两端；每个都在 `2020-01-01` 到 `2099-12-31` 之间；`to_date` 不得早于 `from_date`；区间最多 92 天。换算同用量接口的「营业时区」 |
+| `project_id` | 可选，项目 `public_id`（来自[项目列表](#get-apiv1customerprojects--客户自己的项目)）。不是自己的项目（不存在或属于别的客户）时得到空页，不报错 |
+| `page_size` | 1–100，默认 20 |
+| `cursor` | 可选，上一页响应的 `next_cursor` **原样**传回；省略 = 从最新开始 |
+
+- 未知参数忽略；不按供应商、模型或 `conversation_id` 筛选，没有排序选项，没有 `total`。
+- 校验分两步，所有 422 都是 `VALIDATION_ERROR`，文案只列字段名，不回显收到的值：`page_size` 的类型与范围、日期的 `YYYY-MM-DD` 形状由框架在鉴权**之前**判；日期是否真实存在、范围、必填、先后、92 天与游标在鉴权**之后**判。
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "conversation_id": "conv_0001",
+        "project_id": "00000000-0000-4000-8000-000000000001",
+        "project_name": "Customer service bot",
+        "first_occurred_at": "2026-10-18T08:30:00.123456",
+        "last_occurred_at": "2026-10-18T08:41:12.000001",
+        "request_count": 7,
+        "input_tokens": 8400,
+        "output_tokens": 2380,
+        "charged_amount": "0.28840000"
+      }
+    ],
+    "page_size": 20,
+    "next_cursor": null
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `items` | 按 `last_occurred_at` 倒序；相同时按项目 `public_id` 倒序，再按 `conversation_id` 倒序（按字节） |
+| `conversation_id` | 集成方上报的原值（标识，不是内容） |
+| `project_id` / `project_name` | 该会话所属项目的 `public_id` 与名称 |
+| `first_occurred_at` / `last_occurred_at` | 区间内该会话已计费请求 `occurred_at` 的最小 / 最大值；不带时区的 UTC，**保留微秒**，与用量接口的 `occurred_at` 同一格式 |
+| `request_count` | 区间内该会话已计费的请求数 |
+| `input_tokens` / `output_tokens` | 这些请求 `input_tokens` / `output_tokens` 之和，整数；数量形态的请求不计入，全是数量形态时为 0 |
+| `charged_amount` | 这些请求的计费额（`billable_cost`）之和，恰好 8 位小数的字符串，**含税**，不经浮点、不舍入；内部计量客户恒为 `"0.00000000"` |
+| `page_size` | 本次请求的 `page_size` |
+| `next_cursor` | 还有更旧的会话时是一个不透明字符串，否则 `null` |
+
+- 每项恰好上面 9 个键。**刻意不返回**：成本（估算与对账）、原币成本、汇率、参考价、毛利、计费模式、状态、版本与规则引用、按供应商 / 模型的拆分、缓存 token 与 `quantity` 合计、任何内部 id、总行数（INV-7）。项目只出 `public_id` 与名称。
+- 拿别的客户的项目 id 或游标来调，只会得到自己的行或空页；两个客户用同一个 `conversation_id` 值也不会被并成一行（INV-8）。
+
+**点进会话看请求**：用[用量接口](#get-apiv1customerusage-events--客户自己的已计费用量)带 `conversation_id`（该行的会话）、`project_id`（该行的项目）与**同一个** `from_date` / `to_date`。同一时刻，那里返回的全部行的条数、token 之和、`charged_amount` 之和与这一行逐字相等，`occurred_at` 的最小 / 最大值就是这一行的 `first_occurred_at` / `last_occurred_at`。没有单独的 `GET /conversations/{id}`：单凭 `conversation_id` 定位不到一次会话。
+
+**合计会变大**：晚到或晚计费的请求计入它**发生**的时刻，同一区间隔一段时间再看，会话的合计可能变大，甚至多出会话；这不是对账单。
+
+**翻页**：第一页不带 `cursor`；下一页把 `next_cursor` 原样传回；为 `null` 就是最后一页；「回到最新」= 不带 `cursor` 重取。⚠️ **游标是不透明的**：客户端不得解析、拼接或修改它，后端以后可以改它的编码；被改过或解不开的游标得到 422 `VALIDATION_ERROR`（`query.cursor`）。会话游标与用量接口的游标是两种格式，互相拿来用也是 422。每一页都重新聚合一次：
+
+- 已经返回过的会话不会在后面的页里再出现——**不重复**。
+- 还没返回的会话在翻页途中有了新活动（`last_occurred_at` 变新、越过了游标）时，**不会出现在后面的页里，而是回到最新的一端**：「回到最新」重取就能看到它，合计已含新请求。这是读时聚合加游标分页的已知行为，不会出现重复或错数。
+- 还没返回的会话收到发生时刻更早的晚到请求时，排序位置不变，出现它的那一页的合计已包含该请求（若那时已计费）。
+
+**`QUERY_TOO_BROAD`**：每次查询在数据库里最多执行 2 秒（与用量接口同一预算）。聚合要扫完整个区间才能排序，区间内请求太多、超过预算时中止并返回 422 `QUERY_TOO_BROAD`，没有部分结果。缩小日期区间或选一个项目后重试。服务端记一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id，不带参数值）。
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 422 | `VALIDATION_ERROR` | 查询参数违反上面的规则（含游标不合规） |
+| 422 | `QUERY_TOO_BROAD` | 查询超过 2 秒执行预算；缩小日期区间或选项目后重试 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 |
+
+没有 404（项目不属于本客户就是空页），也没有 403 `ACCOUNT_READ_ONLY`（读接口）。
+
+---
+
 ## 客户导出
 
 设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。月度用量汇总导出依据设计闸门 #457 `APPROVED: design v1`（[design/AIH-TASK-119-customer-usage-summary-export.md](design/AIH-TASK-119-customer-usage-summary-export.md)），接口登记为 AIH-TASK-119。

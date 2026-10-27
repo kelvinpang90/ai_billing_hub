@@ -51,6 +51,10 @@ repository。
 月度汇总导出（AIH-TASK-119，设计闸门 #457 v1 §2）：与 `GET /usage-summary` 同一个
 repository 函数、同一个 5 键视图，唯一的差别是 `month` 必填。文件恒为一个月、约 2 KB，
 所以**不获取、不持有导出租约**，也不用 `CustomerExportFailed`：意外错误照常由通用 500 处理。
+
+会话列表（AIH-TASK-121，设计闸门 #460 v2 §2「接口一」）：只读、用 `require_customer`。日期规则与
+用量页相同（恒必填），游标是会话游标（与用量事件的游标不通用）；超时与用量页同一个 422 与同一条
+日志。
 """
 
 from __future__ import annotations
@@ -80,6 +84,11 @@ from app.repositories import tenancy as tenancy_repository
 from app.repositories import usage_events as usage_repository
 from app.repositories import wallet as wallet_repository
 from app.schemas.customer import CustomerMe
+from app.schemas.customer_conversations import (
+    CustomerConversationPage,
+    customer_conversation_page,
+    decode_conversation_cursor,
+)
 from app.schemas.customer_usage import (
     USAGE_DATE_PATTERN,
     USAGE_EXPORT_COLUMNS,
@@ -465,6 +474,45 @@ def customer_usage_summary_export(
         USAGE_SUMMARY_EXPORT_TEXT_COLUMNS,
     )
     return csv_response(f"usage-summary_{view.month}.csv", body)
+
+
+@router.get("/conversations", response_model=ApiResponse[CustomerConversationPage])
+def customer_conversations(
+    request: Request,
+    page_size: PageSize = DEFAULT_PAGE_SIZE,
+    from_date: UsageDate = None,
+    to_date: UsageDate = None,
+    project_id: str | None = None,
+    cursor: str | None = None,
+) -> ApiResponse[CustomerConversationPage]:
+    """The caller's conversations in the period, latest activity first; `next_cursor` for older.
+
+    每个（项目, `conversation_id`）一行，只算区间内已计费、`conversation_id` 非空的请求。
+    项目与游标都只是租户条件之上的附加条件：拿别的客户的值来只会得到空页（INV-8）。
+    """
+    principal = require_customer(request)
+    occurred_from, occurred_to = usage_period(from_date, to_date, has_event_id=False)
+    # 日期恒必填：`usage_period` 已对缺失的抛 422，这里两端都有值。
+    assert occurred_from is not None and occurred_to is not None
+    before = None if cursor is None else decode_conversation_cursor(cursor)
+    factory = require_session_factory(request)
+    try:
+        with factory() as session:
+            # 多取一行，只用来判断还有没有下一页。
+            rows = usage_repository.list_conversations_for_customer(
+                session,
+                principal.tenant_id,
+                occurred_from=occurred_from,
+                occurred_to=occurred_to,
+                limit=page_size + 1,
+                project_id=project_id,
+                before=before,
+            )
+            page = customer_conversation_page(rows, page_size=page_size)
+    except usage_repository.QueryTooBroad:
+        _log_query_timeout(factory, principal.tenant_id)
+        raise CustomerUsageQueryTooBroad from None
+    return success(page, request_id=current_request_id())
 
 
 def _log_query_timeout(factory: sessionmaker[Session], tenant_id: int) -> None:

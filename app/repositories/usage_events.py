@@ -22,6 +22,11 @@ MySQL 上每条语句带 `MAX_EXECUTION_TIME` 提示，超时（错误 3024）�
 执行时间预算；只读 `billable_cost`、`conversation_id`、`occurred_at`、`status`，
 不读成本列（INV-7）。
 
+客户会话列表（AIH-TASK-121，设计闸门 #460 v2 §2「查询」）：`list_conversations_for_customer`
+一条聚合 SELECT（派生表按项目与 `conversation_id` 分组、外层 JOIN 项目）。
+同样的租户、`PROCESSED`、区间条件与执行时间预算，另加 `conversation_id IS NOT NULL`；
+只读设计列出的 8 列，不读成本列（INV-7）。
+
 ⚠️ 这一层不写日志。
 """
 
@@ -682,8 +687,171 @@ def summarize_processed_events_for_customer(
     )
 
 
+# --- 客户会话列表（AIH-TASK-121，设计闸门 #460 v2 §2「查询」，只读） ---------------------
+
+
+class CustomerConversationRow(NamedTuple):
+    """Exactly the 9 outer columns of design §2「查询」; no cost, rate or internal id."""
+
+    conversation_id: str
+    project_public_id: str
+    project_name: str
+    first_occurred_at: dt.datetime
+    last_occurred_at: dt.datetime
+    request_count: int
+    input_tokens: int
+    output_tokens: int
+    charged_amount: Decimal
+
+
+def customer_conversation_statement(
+    tenant_id: int,
+    *,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+    limit: int,
+    project_row_id: int | None = None,
+    before: tuple[dt.datetime, str, str] | None = None,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> Select[tuple[object, ...]]:
+    """The one SELECT of a customer conversation page; the hint is rendered on MySQL only.
+
+    派生表只按 `usage_events` 的 `project_id`、`conversation_id` 分组，只读设计列出的 8 列
+    （不读任何成本列，INV-7）；租户、`PROCESSED`、区间与 `conversation_id IS NOT NULL` 四个
+    条件恒在（INV-8）。项目名与 `public_id` 在外层按主键 JOIN，不依赖 `ONLY_FULL_GROUP_BY`
+    的函数依赖推断。`before` 是游标 `(last_occurred_at, project public_id, conversation_id)`，
+    只取严格更旧的键。执行时间提示只在最外层 SELECT（MySQL 只认顶层语句的提示）。
+    """
+    conditions: list[ColumnElement[bool]] = [
+        UsageEvent.tenant_id == tenant_id,
+        UsageEvent.status == UsageEventStatus.PROCESSED,
+        UsageEvent.occurred_at >= occurred_from,
+        UsageEvent.occurred_at < occurred_to,
+        UsageEvent.conversation_id.is_not(None),
+    ]
+    if project_row_id is not None:
+        conditions.append(UsageEvent.project_id == project_row_id)
+    grouped = (
+        select(
+            UsageEvent.project_id.label("project_id"),
+            UsageEvent.conversation_id.label("conversation_id"),
+            func.min(UsageEvent.occurred_at).label("first_occurred_at"),
+            func.max(UsageEvent.occurred_at).label("last_occurred_at"),
+            func.count().label("request_count"),
+            func.coalesce(func.sum(UsageEvent.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(UsageEvent.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(UsageEvent.billable_cost), 0).label("charged_amount"),
+        )
+        .where(*conditions)
+        .group_by(UsageEvent.project_id, UsageEvent.conversation_id)
+        .subquery("g")
+    )
+    statement = (
+        select(
+            grouped.c.conversation_id,
+            Project.public_id,
+            Project.name,
+            grouped.c.first_occurred_at,
+            grouped.c.last_occurred_at,
+            grouped.c.request_count,
+            grouped.c.input_tokens,
+            grouped.c.output_tokens,
+            grouped.c.charged_amount,
+        )
+        .select_from(grouped)
+        .join(Project, Project.id == grouped.c.project_id)
+    )
+    if before is not None:
+        before_at, before_project, before_conversation = before
+        statement = statement.where(
+            or_(
+                grouped.c.last_occurred_at < before_at,
+                and_(
+                    grouped.c.last_occurred_at == before_at,
+                    or_(
+                        Project.public_id < before_project,
+                        and_(
+                            Project.public_id == before_project,
+                            grouped.c.conversation_id < before_conversation,
+                        ),
+                    ),
+                ),
+            )
+        )
+    return (
+        statement.order_by(
+            grouped.c.last_occurred_at.desc(),
+            Project.public_id.desc(),
+            grouped.c.conversation_id.desc(),
+        )
+        .limit(limit)
+        # 优化器提示紧跟最外层的 SELECT 关键字；SQLite（只在测试里用）不渲染。
+        .prefix_with(f"/*+ MAX_EXECUTION_TIME({int(timeout_ms)}) */", dialect="mysql")
+    )
+
+
+def list_conversations_for_customer(
+    session: Session,
+    tenant_id: int,
+    *,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+    limit: int,
+    project_id: str | None = None,
+    before: tuple[dt.datetime, str, str] | None = None,
+    timeout_ms: int = CUSTOMER_USAGE_QUERY_TIMEOUT_MS,
+) -> list[CustomerConversationRow]:
+    """Up to `limit` conversations of the tenant in the period, latest activity first.
+
+    `project_id` 是项目 `public_id`：先在本租户内查出内部 id，查不到（不存在或属于别的客户）
+    直接返回空列表，不发聚合查询。`timeout_ms` 只给测试用。MySQL 超时抛 `QueryTooBroad`；
+    其他数据库错误原样抛出。
+    """
+    project_row_id: int | None = None
+    if project_id is not None:
+        project = get_project_for_tenant(session, tenant_id, project_id)
+        if project is None:
+            return []
+        project_row_id = project.id
+    statement = customer_conversation_statement(
+        tenant_id,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+        limit=limit,
+        project_row_id=project_row_id,
+        before=before,
+        timeout_ms=timeout_ms,
+    )
+    # MySQL 的 `SUM` 对整数列也返回 DECIMAL：token 与条数一律转成 int；金额转 `Decimal`。
+    return [
+        CustomerConversationRow(
+            conversation_id,
+            project_public_id,
+            project_name,
+            first_occurred_at,
+            last_occurred_at,
+            int(request_count),
+            int(input_tokens),
+            int(output_tokens),
+            Decimal(charged_amount),
+        )
+        for (
+            conversation_id,
+            project_public_id,
+            project_name,
+            first_occurred_at,
+            last_occurred_at,
+            request_count,
+            input_tokens,
+            output_tokens,
+            charged_amount,
+        ) in run_bounded(session, statement)
+    ]
+
+
 __all__ = [
     "CUSTOMER_USAGE_QUERY_TIMEOUT_MS",
+    "CustomerConversationRow",
     "CustomerUsageDay",
     "CustomerUsageRow",
     "CustomerUsageSummary",
@@ -693,6 +861,7 @@ __all__ = [
     "QueryTooBroad",
     "conflict_recorded",
     "count_conflicts_since",
+    "customer_conversation_statement",
     "customer_usage_conversation_statement",
     "customer_usage_daily_statement",
     "customer_usage_statement",
@@ -701,6 +870,7 @@ __all__ = [
     "get_event_detail",
     "insert_conflict",
     "insert_event",
+    "list_conversations_for_customer",
     "list_events",
     "list_processed_events_for_customer",
     "run_bounded",
