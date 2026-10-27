@@ -145,6 +145,17 @@ def json_summary(portal: UsageEventPortal, headers: dict[str, str], month: str) 
     return response.json()["data"]
 
 
+def without_volatile_fields(lines: list[dict]) -> list[dict]:
+    """Log lines minus `timestamp` and `request_id`.
+
+    Today's date or a random UUID may contain a month string.
+    """
+    return [
+        {key: value for key, value in line.items() if key not in {"timestamp", "request_id"}}
+        for line in lines
+    ]
+
+
 def assert_json_envelope(response) -> None:
     """Errors are the JSON envelope, never a CSV."""
     assert response.headers["content-type"].startswith("application/json")
@@ -476,7 +487,8 @@ def test_a_scan_past_the_budget_is_query_too_broad(
     [timeout] = timeout_lines(lines)
     assert timeout["request_id"] == response.json()["request_id"]
     assert timeout["customer_id"] == tenant.public_id
-    assert MONTH not in json.dumps(timeout)
+    assert set(timeout) == {"timestamp", "level", "logger", "message", "request_id", "customer_id"}
+    assert MONTH not in json.dumps(without_volatile_fields([timeout]))
 
 
 def test_query_too_broad_is_a_422_with_one_warning_and_no_parameter_values(
@@ -500,7 +512,7 @@ def test_query_too_broad_is_a_422_with_one_warning_and_no_parameter_values(
     assert timeout["level"] == "WARNING"
     assert timeout["request_id"] == response.json()["request_id"]
     assert timeout["customer_id"] == tenant.public_id
-    assert "2026-07" not in json.dumps(lines)
+    assert "2026-07" not in json.dumps(without_volatile_fields(lines))
     assert portal.tables() == before
 
 
