@@ -3,7 +3,8 @@
  *
  * 用量页的用例按路径回应 `client.get`，但参数名写错时页面照样显示一页（后端忽略未知参数）：`conversation_id`
  * 打成 `conversationId` 在浏览器里不报错，只是筛选永远不生效。所以这里逐个钉住参数名、省略的参数不进查询串、
- * 游标原样传回，以及两个请求都**不带**任何租户或客户标识。用量导出（AIH-TASK-117）同样钉住路径、参数名与省略规则。
+ * 游标原样传回，以及两个请求都**不带**任何租户或客户标识。用量导出（AIH-TASK-117）同样钉住路径、参数名与省略规则；
+ * 月度汇总导出（AIH-TASK-120）钉住路径、只带 `month` 与兜底文件名。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,8 +16,11 @@ import {
   customerUsageExportFilename,
   customerUsageExportUrl,
   customerUsageListQueryKey,
+  customerUsageSummaryExportFilename,
+  customerUsageSummaryExportUrl,
   customerUsageSummaryQueryKey,
   exportCustomerUsageEvents,
+  exportCustomerUsageSummary,
   getCustomerUsageSummary,
   listCustomerProjects,
   listCustomerUsageEvents,
@@ -26,6 +30,7 @@ const PROJECTS_URL = "/api/v1/customer/projects";
 const USAGE_URL = "/api/v1/customer/usage-events";
 const EXPORT_URL = "/api/v1/customer/usage-events/export";
 const SUMMARY_URL = "/api/v1/customer/usage-summary";
+const SUMMARY_EXPORT_URL = "/api/v1/customer/usage-summary/export";
 
 const SUMMARY = {
   month: "2026-10",
@@ -347,5 +352,64 @@ describe("getCustomerUsageSummary", () => {
     }
     expect(current).not.toEqual(october);
     expect(prefix).not.toEqual([...CUSTOMER_USAGE_QUERY_KEY]);
+  });
+});
+
+describe("exportCustomerUsageSummary", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+
+  afterEach(() => {
+    for (const [name, descriptor] of [
+      ["createObjectURL", originalCreate],
+      ["revokeObjectURL", originalRevoke],
+    ] as const) {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(URL, name);
+      } else {
+        Object.defineProperty(URL, name, descriptor);
+      }
+    }
+  });
+
+  it("downloads from /api/v1/customer/usage-summary/export as a blob with only the month", async () => {
+    // jsdom 没有对象 URL，也不会真的下载：装上替身、拦下链接的点击，记下文件名。
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: () => "blob:https://portal.example/00000000-0000-0000-0000-000000000000",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: () => undefined });
+    const downloads: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
+    const get = vi.spyOn(client, "get").mockResolvedValue({
+      data: new Blob(["\ufeffdate_myt\r\n"], { type: "text/csv" }),
+      status: 200,
+      statusText: "",
+      headers: {},
+    });
+
+    await exportCustomerUsageSummary("2026-10");
+
+    expect(get).toHaveBeenCalledTimes(1);
+    const [url, config] = get.mock.calls[0] ?? [];
+    expect(parse(String(url))).toEqual({ path: SUMMARY_EXPORT_URL, params: [["month", "2026-10"]] });
+    expect(config).toMatchObject({ responseType: "blob" });
+    // 响应头没有文件名：用兜底的文件名。
+    expect(downloads).toEqual(["usage-summary_2026-10.csv"]);
+  });
+
+  it("sends only the month, never a tenant or customer identifier", () => {
+    const url = customerUsageSummaryExportUrl("2026-10");
+
+    expect(url).toBe(`${SUMMARY_EXPORT_URL}?month=2026-10`);
+    expect(url).not.toMatch(/tenant|customer_id|from_date|to_date|project_id|\/admin\//);
+  });
+
+  it("falls back to the backend's file name rule", () => {
+    expect(customerUsageSummaryExportFilename("2026-10")).toBe("usage-summary_2026-10.csv");
+    expect(customerUsageSummaryExportFilename("2020-01")).toBe("usage-summary_2020-01.csv");
   });
 });

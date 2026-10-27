@@ -22,6 +22,13 @@
  * 状态、不可重复点。`EXPORT_TOO_LARGE`、`QUERY_TOO_BROAD`、`EXPORT_BUSY` 各有专门文案，其余失败带 request_id。
  * 导出不影响列表、筛选与翻页。
  *
+ * 用量一块下面是「Monthly summary」月度汇总导出区（AIH-TASK-120；设计闸门 #457 v1 §2「前端」，语义以 docs/api.md
+ * 「客户导出」的 usage-summary/export 小节为准）：一个月份输入（默认与上限都是当前马来西亚月，下限 2020-01）与一个
+ * 按钮，调 `GET /api/v1/customer/usage-summary/export?month=` 交给浏览器下载整月、全部项目、每天一行加合计的 CSV。
+ * 它**不受**上面筛选的影响，与「Export CSV」分开处理状态。月份为空、不是 `YYYY-MM`、早于 2020-01 或晚于当前月时
+ * 按钮不可用并提示（不支持 `type="month"` 的浏览器会退回文本框）；导出中按钮转为加载状态、不可重复点。
+ * `QUERY_TOO_BROAD` 有专门文案，其余失败带 request_id。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。
  */
 
@@ -50,6 +57,7 @@ import {
   QUERY_TOO_BROAD,
   customerUsageListQueryKey,
   exportCustomerUsageEvents,
+  exportCustomerUsageSummary,
   listCustomerProjects,
   listCustomerUsageEvents,
   type CustomerUsageEvent,
@@ -104,6 +112,22 @@ function dayNumber(value: string): number | null {
 export function defaultDateRange(now: Date): { fromDate: string; toDate: string } {
   const today = new Date(now.getTime() + MYT_OFFSET_MS).toISOString().slice(0, 10);
   return { fromDate: `${today.slice(0, 8)}01`, toDate: today };
+}
+
+/** 月度汇总导出可选的最早月份（接口接受 2020-01 到 2099-12，页面再把上限收到当前马来西亚月）。 */
+export const MIN_MONTH = "2020-01";
+
+const MONTH_SHAPE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/** 当前马来西亚月 `YYYY-MM`：与默认日期区间同一算法（浏览器时间加 8 小时）。 */
+export function currentMalaysiaMonth(now: Date): string {
+  return defaultDateRange(now).toDate.slice(0, 7);
+}
+
+/** 月度汇总能不能导出：形如 `YYYY-MM`（月份数 01–12），且在 2020-01 到 `maxMonth` 之间（含两端）。 */
+export function exportableMonth(month: string, maxMonth: string): boolean {
+  // 形状一致（YYYY-MM）时可以按字符串比较先后。
+  return MONTH_SHAPE.test(month) && month >= MIN_MONTH && month <= maxMonth;
 }
 
 export type DateRangeProblem = "missing" | "outOfRange" | "reversed" | "tooLong";
@@ -181,7 +205,7 @@ function isGenericExportFailure(error: Error): boolean {
   return !(error instanceof ApiError) || !SPECIFIC_EXPORT_FAILURES.has(error.code);
 }
 
-export function UsagePage() {
+function UsageSection() {
   const { t } = useTranslation();
   const [form] = Form.useForm<UsageFilterValues>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -474,5 +498,87 @@ export function UsagePage() {
       {exportFailure}
       {body}
     </Card>
+  );
+}
+
+/** 月度汇总导出区的表单值：`<input type="month">` 的 `YYYY-MM`（退回文本框时是客户输入的原文）。 */
+interface MonthlyExportValues {
+  month: string;
+}
+
+function MonthlySummaryExport() {
+  const { t } = useTranslation();
+  // 进页面那一刻的当前马来西亚月：既是默认值也是上限。停在页面上跨月不会自己变（与用量一块的默认日期区间相同）。
+  const [maxMonth] = useState(() => currentMalaysiaMonth(new Date()));
+  const [month, setMonth] = useState(maxMonth);
+  const chosen = month.trim();
+  const valid = exportableMonth(chosen, maxMonth);
+
+  const exporting = useMutation({
+    mutationFn: (value: string) => exportCustomerUsageSummary(value),
+  });
+
+  const startExport = (): void => {
+    // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
+    if (!valid || exporting.isPending) {
+      return;
+    }
+    exporting.mutate(chosen);
+  };
+
+  const changeMonth = (_: Partial<MonthlyExportValues>, values: Partial<MonthlyExportValues>): void => {
+    setMonth(values.month ?? "");
+    // 上一次导出的失败说的是旧的月份，换月份时收起。只收失败：导出中 reset 会让按钮提前恢复可点。
+    if (exporting.isError) {
+      exporting.reset();
+    }
+  };
+
+  const tooBroad = exporting.error instanceof ApiError && exporting.error.code === QUERY_TOO_BROAD;
+
+  return (
+    // role + aria-label：部署后验收脚本按语义结构找到这一块（不依赖 antd 的类名）。
+    <Card role="region" aria-label={t("portal.usage.monthly.title")} title={t("portal.usage.monthly.title")}>
+      <Typography.Paragraph type="secondary">{t("portal.usage.monthly.description")}</Typography.Paragraph>
+      <Form<MonthlyExportValues>
+        name="customerUsageMonthlyExport"
+        layout="vertical"
+        initialValues={{ month: maxMonth }}
+        onValuesChange={changeMonth}
+        style={{ display: "flex", flexWrap: "wrap", columnGap: 16, alignItems: "flex-end" }}
+      >
+        <Form.Item name="month" label={t("portal.usage.monthly.month")}>
+          <Input type="month" min={MIN_MONTH} max={maxMonth} />
+        </Form.Item>
+        <Form.Item>
+          <Button onClick={startExport} loading={exporting.isPending} disabled={!valid || exporting.isPending}>
+            {t("portal.usage.monthly.button")}
+          </Button>
+        </Form.Item>
+      </Form>
+      {valid ? null : (
+        <Alert type="warning" showIcon message={t("portal.usage.monthly.invalid", { min: MIN_MONTH, max: maxMonth })} />
+      )}
+      {exporting.error ? (
+        <Alert
+          type="error"
+          showIcon
+          closable
+          onClose={() => exporting.reset()}
+          message={tooBroad ? t("portal.usage.monthly.tooBroad") : t("portal.usage.monthly.failed")}
+          description={tooBroad ? null : <RequestReference error={exporting.error} />}
+        />
+      ) : null}
+    </Card>
+  );
+}
+
+export function UsagePage() {
+  return (
+    <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <UsageSection />
+      {/* 月度汇总导出区在用量一块下面，自己管自己的月份与失败：不受上面的筛选影响，也不碰列表与「Export CSV」。 */}
+      <MonthlySummaryExport />
+    </Space>
   );
 }
