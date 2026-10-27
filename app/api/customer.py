@@ -47,6 +47,10 @@ repository。
 `Exception` 记 `customer_export_failed`（带栈、不带参数值）后只设标志，离开 `except`
 块、置空持有数据的局部变量再抛 `CustomerExportFailed`，新异常不链回原异常。
 不捕获 `BaseException`。
+
+月度汇总导出（AIH-TASK-119，设计闸门 #457 v1 §2）：与 `GET /usage-summary` 同一个
+repository 函数、同一个 5 键视图，唯一的差别是 `month` 必填。文件恒为一个月、约 2 KB，
+所以**不获取、不持有导出租约**，也不用 `CustomerExportFailed`：意外错误照常由通用 500 处理。
 """
 
 from __future__ import annotations
@@ -81,13 +85,17 @@ from app.schemas.customer_usage import (
     USAGE_EXPORT_COLUMNS,
     USAGE_EXPORT_TEXT_COLUMNS,
     USAGE_MONTH_PATTERN,
+    USAGE_SUMMARY_EXPORT_COLUMNS,
+    USAGE_SUMMARY_EXPORT_TEXT_COLUMNS,
     CustomerProjectList,
     CustomerUsageEventPage,
     CustomerUsageQueryTooBroad,
     CustomerUsageSummaryView,
+    InvalidCustomerUsageQuery,
     customer_project_list,
     customer_usage_event_page,
     customer_usage_export_cells,
+    customer_usage_summary_export_cells,
     customer_usage_summary_view,
     decode_cursor,
     usage_month,
@@ -423,6 +431,40 @@ def customer_usage_summary(
         raise CustomerUsageQueryTooBroad from None
     view = customer_usage_summary_view(period.first_day, summary)
     return success(view, request_id=current_request_id())
+
+
+@router.get("/usage-summary/export", response_class=ExportCsvResponse)
+def customer_usage_summary_export(
+    request: Request, month: UsageMonthParam = None
+) -> ExportCsvResponse:
+    """The caller's billed usage in one Malaysian calendar month as a CSV: a row a day, then TOTAL.
+
+    与 `GET /usage-summary` 同一个函数、同一个视图，只是 `month` 必填。不占导出租约。
+    """
+    principal = require_customer(request)
+    # 文件用于对账：月份由客户明确选择，不默认当月。
+    if month is None:
+        raise InvalidCustomerUsageQuery("month")
+    period = usage_month(month, now=utc_now())
+    factory = require_session_factory(request)
+    try:
+        with factory() as session:
+            summary = usage_repository.summarize_processed_events_for_customer(
+                session,
+                principal.tenant_id,
+                occurred_from=period.from_utc,
+                occurred_to=period.to_utc,
+            )
+    except usage_repository.QueryTooBroad:
+        _log_query_timeout(factory, principal.tenant_id)
+        raise CustomerUsageQueryTooBroad from None
+    view = customer_usage_summary_view(period.first_day, summary)
+    body = write_csv(
+        USAGE_SUMMARY_EXPORT_COLUMNS,
+        customer_usage_summary_export_cells(view),
+        USAGE_SUMMARY_EXPORT_TEXT_COLUMNS,
+    )
+    return csv_response(f"usage-summary_{view.month}.csv", body)
 
 
 def _log_query_timeout(factory: sessionmaker[Session], tenant_id: int) -> None:

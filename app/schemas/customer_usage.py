@@ -25,6 +25,9 @@
 `charged_amount` 三个键。月份按马来西亚日历月，`[当月 1 日 00:00 − 8h, 次月 1 日 00:00 − 8h)`；
 `month` 先判是否在 2020-01 到 2099-12 之间，再做任何日期运算。没有事件的日子在这里补 0；合计是
 各日 Decimal 相加，不经 float。
+
+月度汇总导出（AIH-TASK-119，设计闸门 #457 v1 §2「投影」）：每个单元格只取自上面的 5 键视图，
+每天一行、末行 `TOTAL`；合计行直接取视图的合计字段，这里不做任何算术：合计只有一处来源。
 """
 
 from __future__ import annotations
@@ -97,6 +100,17 @@ USAGE_EXPORT_TEXT_COLUMNS: Final = frozenset(
 )
 # 唯一改名的列：导出列名 → 白名单视图的键。
 _USAGE_EXPORT_RENAMED: Final = {"occurred_at_utc": "occurred_at"}
+
+# 月度汇总导出的表头（设计 #457 §2「文件」），按这个顺序。日期列写明是马来西亚日。
+USAGE_SUMMARY_EXPORT_COLUMNS: Final = (
+    "date_myt",
+    "request_count",
+    "charged_amount",
+    "conversation_count",
+)
+# 值只可能是程序生成的日期或 `TOTAL`，仍按「文本列一律防护」声明。
+USAGE_SUMMARY_EXPORT_TEXT_COLUMNS: Final = frozenset({"date_myt"})
+USAGE_SUMMARY_EXPORT_TOTAL_LABEL: Final = "TOTAL"
 
 _CURSOR_TIME_FORMAT: Final = "%Y-%m-%dT%H:%M:%S.%f"
 # 编码后最长约 84 个字符；放宽一些，超出即不合规。
@@ -397,6 +411,29 @@ def customer_usage_summary_view(
     )
 
 
+def customer_usage_summary_export_cells(
+    view: CustomerUsageSummaryView,
+) -> list[list[str | None]]:
+    """CSV rows in `USAGE_SUMMARY_EXPORT_COLUMNS` order: one per day of `view`, then `TOTAL`.
+
+    日行的对话数留空（各日去重数相加不等于整月去重数）；合计行的三个数直接取视图的合计字段，
+    不在这里再加一遍。整数变成十进制字符串，金额是视图里的 8 位小数字符串原样。
+    """
+    rows: list[list[str | None]] = [
+        [day.date.isoformat(), str(day.request_count), day.charged_amount, None]
+        for day in view.days
+    ]
+    rows.append(
+        [
+            USAGE_SUMMARY_EXPORT_TOTAL_LABEL,
+            str(view.request_count),
+            view.charged_amount,
+            str(view.conversation_count),
+        ]
+    )
+    return rows
+
+
 __all__ = [
     "MAX_USAGE_DATE",
     "MAX_USAGE_MONTH",
@@ -407,6 +444,9 @@ __all__ = [
     "USAGE_EXPORT_COLUMNS",
     "USAGE_EXPORT_TEXT_COLUMNS",
     "USAGE_MONTH_PATTERN",
+    "USAGE_SUMMARY_EXPORT_COLUMNS",
+    "USAGE_SUMMARY_EXPORT_TEXT_COLUMNS",
+    "USAGE_SUMMARY_EXPORT_TOTAL_LABEL",
     "CustomerProjectList",
     "CustomerProjectView",
     "CustomerUsageEventPage",
@@ -420,6 +460,7 @@ __all__ = [
     "customer_usage_event_page",
     "customer_usage_event_view",
     "customer_usage_export_cells",
+    "customer_usage_summary_export_cells",
     "customer_usage_summary_view",
     "decode_cursor",
     "encode_cursor",
