@@ -7171,12 +7171,12 @@ tasks:
     depends_on:
       - AIH-TASK-119
     acceptance_criteria:
-      - '语义一律以 docs/api.md「客户导出」里月度汇总导出一节为准（AIH-TASK-119 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts、frontend/src/routes/、frontend/src/layouts/'
+      - '语义一律以 docs/api.md「客户导出」里月度汇总导出一节为准（AIH-TASK-119 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。契约对设计的勘误（只改名字，不改步骤验什么）：设计 §2「前端」里的步骤名 check_portal_usage_summary_export 有 33 个字符，超过 OpenClaw 验收步骤名的 32 字符上限，本任务的步骤名为 check_portal_monthly_export。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts、frontend/src/routes/、frontend/src/layouts/'
       - 'frontend/src/api/customerUsage.ts 新增月度汇总导出的地址常量、拼地址（只带 month，不传任何租户或客户标识）、兜底文件名 usage-summary_<YYYY-MM>.csv 与下载函数（经现有 downloadFile），既有封装不变'
       - 'frontend/src/features/portal/UsagePage.tsx 加月度汇总导出区：月份输入（type month，min 2020-01，max 与默认值都是当前马来西亚月，按浏览器时间加 8 小时算），说明整月、全部项目、每天一行加合计；月份为空、不是 YYYY-MM、早于 2020-01 或晚于当前月时按钮不可用；导出中显示加载且不可重复点击；QUERY_TOO_BROAD 有专门文案，其余失败显示 request_id；不受用量页筛选影响，与请求级 Export CSV 分开处理状态；列表、筛选、翻页与请求级导出行为不变'
       - '页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
       - '测试（vitest + Testing Library）：customerUsage.test.ts 补月度汇总导出的路径、查询串与兜底文件名；UsagePage.test.tsx 覆盖设计 §7 前端一段：默认月份在 UTC 2026-10-31 15:59:59 与 16:00:00 分别为 2026-10 与 2026-11、min 与 max、四种无效月份时不可用、请求地址恰好只带 month 不带用量页筛选、加载状态、QUERY_TOO_BROAD 文案与 request_id、失败不影响用量列表与请求级导出；AIH-TASK-105、106、117 的既有用例照常通过；示例 uuid 全零'
-      - 'check_portal_usage_summary_export：排在 check_portal_usage_export 之后，停留在门户用量页，断言月度汇总导出区存在、月份输入的值形如 YYYY-MM、导出按钮恰好一个且可用；不点击、不下载、不改月份、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'check_portal_monthly_export：排在 check_portal_usage_export 之后，停留在门户用量页，断言月度汇总导出区存在、月份输入的值形如 YYYY-MM、导出按钮恰好一个且可用；不点击、不下载、不改月份、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
       - 'docs/TODO.md 不勾任何项。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #457（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
@@ -7210,7 +7210,7 @@ tasks:
         - check_portal_home
         - check_portal_usage
         - check_portal_usage_export
-        - check_portal_usage_summary_export
+        - check_portal_monthly_export
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
