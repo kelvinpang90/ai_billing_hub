@@ -7115,7 +7115,7 @@ tasks:
     title: 月度汇总导出第一层：客户月度用量汇总的 CSV 导出接口
     purpose: >-
       按 docs/design/AIH-TASK-119-customer-usage-summary-export.md（设计闸门 #457 已批准 v1）§2 与 §8 第 1 步：新增 GET /api/v1/customer/usage-summary/export，month 必填，复用 AIH-TASK-107 的 summarize_processed_events_for_customer 与 customer_usage_summary_view，把视图转成每天一行加末尾 TOTAL 合计行的 CSV，用 AIH-TASK-114 的 write_csv 与 csv_response；不占导出租约。docs/api.md「客户导出」补这一节。只读；前端属于 AIH-TASK-120。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-119-customer-usage-summary-export.md（设计闸门 #457 已批准 v1）逐条一致，以 §2 接口、查询、投影、文件、不占导出租约、错误、时间、金额，§3 INV-1、INV-7、INV-8、INV-10，§5，§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 app/repositories/usage_events.py 的 summarize_processed_events_for_customer、app/schemas/customer_usage.py 的 usage_month 与 customer_usage_summary_view、app/core/csv_export.py 的 write_csv 与 csv_response 形状如设计 §1「现有行为」所述；任何一项缺失或形状不同时停下说明，不自行补'
