@@ -590,16 +590,17 @@
 
 ## 客户导出
 
-设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。
+设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。月度用量汇总导出依据设计闸门 #457 `APPROVED: design v1`（[design/AIH-TASK-119-customer-usage-summary-export.md](design/AIH-TASK-119-customer-usage-summary-export.md)），接口登记为 AIH-TASK-119。
 
 | 方法与路径 | 主体 | 成功 | 错误 |
 | --- | --- | --- | --- |
 | `GET /api/v1/customer/usage-events/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内全部已计费用量事件，每行一条、18 列 | 401 / 403 / 422 / 500 / 503 |
 | `GET /api/v1/customer/wallet/transactions/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内记账的全部钱包流水，每行一条、7 列 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/usage-summary/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：一个马来西亚日历月每天一行，末尾一行合计，4 列 | 401 / 403 / 422 / 500 / 503 |
 
 - 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，不接受任何租户、客户标识；四种 `account_status` 都能导出（导出是读）；ADMIN 不能调。
 - 同步生成、不落盘：请求时查询一次，在内存里拼好整份文件后再开始发送。服务器不保存任何导出文件，没有导出任务、没有异步。只读：不写任何表、不加锁、不写审计。
-- 只做 CSV；`.xlsx`、会话摘要导出、月度用量汇总导出不在这里。
+- 只做 CSV；`.xlsx` 与会话摘要导出不在这里。
 
 ### CSV 格式
 
@@ -618,7 +619,7 @@
 
 ### 同一时刻只有一个导出与 `EXPORT_BUSY`
 
-每个 API 进程同一时刻**最多一个导出在生成或在下载**（客户导出共用这一个名额，所有客户之间也共用）。从发查询之前起，到整个响应交给服务器之后才释放；第二个导出立刻得到 503 `EXPORT_BUSY`，带 `Retry-After: 5`，不排队、不等待、也不发任何查询；几秒后重试即可。
+每个 API 进程同一时刻**最多一个导出在生成或在下载**（用量导出与钱包流水导出共用这一个名额，所有客户之间也共用）。**月度汇总导出不占这个名额**：它的文件恒为一个月、约 2 KB，内存与数据库代价与 `GET /usage-summary` 相同，所以别人在下载大文件时它照常 200，也不会挡住别人的导出。从发查询之前起，到整个响应交给服务器之后才释放；第二个导出立刻得到 503 `EXPORT_BUSY`，带 `Retry-After: 5`，不排队、不等待、也不发任何查询；几秒后重试即可。
 
 导出响应带 `X-Accel-Buffering: no`，反向代理对它不缓冲（不把文件写进代理的临时文件），边读边转发给客户端。所以名额**一直占到客户端把文件读完**：下载很慢的客户端会让其他导出在这段时间里得到 `EXPORT_BUSY`。客户端停住不读时，代理的发送超时到点关闭连接，名额随之释放。下载中途断开或请求被取消同样释放，不留下任何状态。非导出请求不受影响。
 
@@ -682,7 +683,45 @@
 - **钱包缺失**（数据不一致，不应发生）：500 `INTERNAL_ERROR`，与流水接口相同；在占用导出名额之前就判出。
 - **`QUERY_TOO_BROAD`**：查询同样有 2 秒执行预算；区间内流水很多、排序超过预算时 422 `QUERY_TOO_BROAD`，没有部分结果，缩短区间后重试。服务端记同一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id）。
 
-### 错误（两个导出接口相同）
+### `GET /api/v1/customer/usage-summary/export` —— 导出客户自己某月的用量汇总
+
+与[本月用量](#get-apiv1customerusage-summary--客户自己某月的用量汇总)同一个查询、同一份白名单：只含已计费（`PROCESSED`）的事件，按 `occurred_at` 的马来西亚日历日归属，两条汇总查询在同一个只读事务里执行。
+
+| 参数 | 规则 |
+| --- | --- |
+| `month` | **必填**。`YYYY-MM`，马来西亚日历月，`2020-01` 到 `2099-12`（含两端）。形状由框架在鉴权之前判；缺失、月份数不在 1..12、越界在鉴权之后判，422 `VALIDATION_ERROR` 只列字段名 `month`、不回显值。未来的月份照常 200，全为 0 |
+
+- **与 `GET /usage-summary` 的唯一差别**：`month` 必填，不默认当月。文件用于对账，月份由客户明确选择，文件名与内容恒为请求里的那个月。未知参数忽略；不接受任何租户、客户标识。
+- **文件名**：`usage-summary_<YYYY-MM>.csv`，例 `usage-summary_2026-10.csv`。
+- **行**：表头一行；该月**每一天**一行（28–31 行），按日期升序，没有事件的日子也有；最后一行是合计，`date_myt` 列写 `TOTAL`。共 30–33 行。
+- **列**：表头恰好这 4 列，按这个顺序。
+
+| 列 | 文本列（防公式注入） | 每天的行 | `TOTAL` 行 |
+| --- | --- | --- | --- |
+| `date_myt` | 是 | 马来西亚日历日 `YYYY-MM-DD` | `TOTAL` |
+| `request_count` | 否 | 当天已计费的请求数（整数） | 当月请求数，等于各日之和 |
+| `charged_amount` | 否 | 当天计费额（`billable_cost` 之和，含税），恰好 8 位小数；没有事件的日子 `0.00000000` | 当月计费额，等于各日之和 |
+| `conversation_count` | 否 | 空 | 当月**不同的非空** `conversation_id` 个数 |
+
+- **对话数只在 `TOTAL` 行**，而且**不是各日之和**：同一个对话在几天里都有事件时只计一次，各日去重数相加会大于它，所以每天的行留空；没有 `conversation_id` 的请求不计入。
+- **`date_myt` 是马来西亚日**（UTC+8），不是 UTC 日期：与用量导出的 `occurred_at_utc` 对照时先加 8 小时。JSON 接口里同一个值的键名仍是 `date`。
+- **与 `GET /usage-summary` 逐字一致**：每天的 `date_myt` / `request_count` / `charged_amount` 与同一时刻、同一个月 JSON 接口 `days` 的同序同名值逐字相同；`TOTAL` 行的三个数与 JSON 的 `request_count` / `charged_amount` / `conversation_count` 逐字相同。金额原样 8 位小数，不舍入、不加千分位、不带币种（恒为 MYR）。
+- **不是对账单**：晚到或晚计费的事件计入它**发生**的那一天，同一个月过几天再导出，数字可能变大。文件是导出那一刻「已计费的」。
+- 文件里**没有**成本、原币成本、汇率、参考价、毛利、token 合计、按项目 / 供应商 / 模型的拆分、`conversation_id` 值与任何内部 id（INV-7）；内部计量客户的计费额恒为 `0.00000000`，请求数照常。
+- **`QUERY_TOO_BROAD`**：两条汇总查询各有 2 秒执行预算（与 `GET /usage-summary` 相同），超过时 422 `QUERY_TOO_BROAD`，没有部分文件；稍后重试，或按较短区间导出请求明细。服务端记一条 `customer_usage_query_timeout` 日志（只带 `request_id` 与客户 id，不带 `month` 的值）。
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 422 | `VALIDATION_ERROR` | `month` 缺失、格式错、月份数不在 1..12 或越界 |
+| 422 | `QUERY_TOO_BROAD` | 任一条汇总查询超过 2 秒执行预算 |
+| 500 | `INTERNAL_ERROR` | 意外错误，包括查询时数据库连接失败或中断，带 `request_id`；与 `GET /usage-summary` 同一形状 |
+| 503 | `DATABASE_NOT_CONFIGURED` | 服务端根本没有配置数据库 |
+
+**没有** `EXPORT_TOO_LARGE`（行数恒有界）与 `EXPORT_BUSY`（不占导出名额）；没有 404，也没有 403 `ACCOUNT_READ_ONLY`。错误都是 JSON 信封，不是 CSV。
+
+### 错误（用量导出与钱包流水导出相同）
 
 | HTTP | `error.code` | 什么时候 |
 | --- | --- | --- |
