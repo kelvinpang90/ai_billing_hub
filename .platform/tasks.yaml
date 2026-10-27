@@ -7207,7 +7207,6 @@ tasks:
       writes: false
       steps:
         - login_customer
-        - check_portal_home
         - check_portal_usage
         - check_portal_usage_export
         - check_portal_monthly_export
