@@ -3,7 +3,8 @@
  *
  * 用量页的用例按路径回应 `client.get`，但参数名写错时页面照样显示一页（后端忽略未知参数）：`conversation_id`
  * 打成 `conversationId` 在浏览器里不报错，只是筛选永远不生效。所以这里逐个钉住参数名、省略的参数不进查询串、
- * 游标原样传回，以及两个请求都**不带**任何租户或客户标识。用量导出（AIH-TASK-117）同样钉住路径、参数名与省略规则。
+ * 游标原样传回，以及两个请求都**不带**任何租户或客户标识。用量导出（AIH-TASK-117）同样钉住路径、参数名与省略规则；
+ * 月度汇总导出（AIH-TASK-120）钉住路径、查询串只有 `month` 与兜底文件名。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,8 +16,11 @@ import {
   customerUsageExportFilename,
   customerUsageExportUrl,
   customerUsageListQueryKey,
+  customerUsageSummaryExportFilename,
+  customerUsageSummaryExportUrl,
   customerUsageSummaryQueryKey,
   exportCustomerUsageEvents,
+  exportCustomerUsageSummary,
   getCustomerUsageSummary,
   listCustomerProjects,
   listCustomerUsageEvents,
@@ -26,6 +30,7 @@ const PROJECTS_URL = "/api/v1/customer/projects";
 const USAGE_URL = "/api/v1/customer/usage-events";
 const EXPORT_URL = "/api/v1/customer/usage-events/export";
 const SUMMARY_URL = "/api/v1/customer/usage-summary";
+const SUMMARY_EXPORT_URL = "/api/v1/customer/usage-summary/export";
 
 const SUMMARY = {
   month: "2026-10",
@@ -284,6 +289,74 @@ describe("exportCustomerUsageEvents", () => {
     expect(customerUsageExportFilename({ fromDate: "2026-10-01", toDate: "2026-10-31" })).toBe(
       "usage-events_2026-10-01_2026-10-31.csv",
     );
+  });
+});
+
+describe("exportCustomerUsageSummary", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的下载链接的文件名，按点击顺序。 */
+  let downloads: string[];
+
+  /** jsdom 没有对象 URL，也不会真的下载：装上替身、拦下链接的点击，只记录文件名。 */
+  function stubDownload(): void {
+    downloads = [];
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: () => "blob:https://portal.example/00000000-0000-0000-0000-000000000000",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: () => undefined });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
+  }
+
+  afterEach(() => {
+    for (const [name, descriptor] of [
+      ["createObjectURL", originalCreate],
+      ["revokeObjectURL", originalRevoke],
+    ] as const) {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(URL, name);
+      } else {
+        Object.defineProperty(URL, name, descriptor);
+      }
+    }
+  });
+
+  it("downloads from /api/v1/customer/usage-summary/export as a blob with only the month", async () => {
+    stubDownload();
+    // 响应头里没有文件名：用兜底的那一个。
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValue({ data: new Blob(["﻿date_myt\r\n"], { type: "text/csv" }), status: 200, statusText: "", headers: {} });
+
+    await exportCustomerUsageSummary("2026-10");
+
+    expect(get).toHaveBeenCalledTimes(1);
+    const [url, config] = get.mock.calls[0] ?? [];
+    expect(url).toBe(`${SUMMARY_EXPORT_URL}?month=2026-10`);
+    expect(config).toMatchObject({ responseType: "blob" });
+    expect(downloads).toEqual(["usage-summary_2026-10.csv"]);
+  });
+
+  it("sends the month under the name the backend reads, and nothing else", () => {
+    expect(parse(customerUsageSummaryExportUrl("2026-09"))).toEqual({
+      path: SUMMARY_EXPORT_URL,
+      params: [["month", "2026-09"]],
+    });
+  });
+
+  it("never sends a filter, a tenant or a customer identifier", () => {
+    expect(customerUsageSummaryExportUrl("2026-10")).not.toMatch(
+      /from_date|to_date|project_id|provider|model|conversation_id|event_id|page_size|cursor|tenant|customer_id|\/admin\//,
+    );
+  });
+
+  it("falls back to the backend's file name rule", () => {
+    expect(customerUsageSummaryExportFilename("2026-10")).toBe("usage-summary_2026-10.csv");
+    expect(customerUsageSummaryExportFilename("2020-01")).toBe("usage-summary_2020-01.csv");
   });
 });
 

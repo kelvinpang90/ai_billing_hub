@@ -15,7 +15,9 @@
  * 门户首页本月用量卡的一个只读步骤（check_portal_usage_summary）；AIH-TASK-111 加了客户详情低余额阈值面板的一个只读
  * 步骤（check_low_balance_threshold）；AIH-TASK-112 加了门户首页余额卡低余额警告的一个只读步骤（check_portal_low_balance）；
  * AIH-TASK-117 加了门户用量页导出按钮的一个只读步骤（check_portal_usage_export），排在 check_portal_usage 之后；
- * AIH-TASK-118 加了门户钱包页导出区的一个只读步骤（check_portal_wallet_export），排在 check_portal_wallet 之后。
+ * AIH-TASK-118 加了门户钱包页导出区的一个只读步骤（check_portal_wallet_export），排在 check_portal_wallet 之后；
+ * AIH-TASK-120 加了门户用量页月度汇总导出区的一个只读步骤（check_portal_monthly_export），排在 check_portal_usage_export
+ * 之后（设计闸门 #457 §2「前端」写的步骤名 check_portal_usage_summary_export 超过 32 字符上限，按任务契约改为此名）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -85,6 +87,8 @@
  *   （不翻页）、不点表格的任何一行或展开按钮（不展开详情）、不点任何别的按钮与链接。
  * - 门户用量页的导出按钮（check_portal_usage_export）只查不点：停留在 check_portal_usage 打开的用量页，不点「Export CSV」
  *   （验收不下载文件）、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
+ * - 门户用量页的月度汇总导出区（check_portal_monthly_export）只查不点：停留在 check_portal_usage 打开的用量页，不点
+ *   「Export monthly summary」（验收不下载文件）、不改月份输入、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
  * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
  *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
@@ -359,6 +363,17 @@
  *                   恰好一个，且处于可用状态（没有 disabled 属性、aria-disabled 不是 true；页面用默认的日期区间，按钮应当可用）。
  *                   找不到按钮是 element_missing，按钮在但一直不可用或不止一个是 assertion_failed。**不点**这个按钮（验收不
  *                   下载文件）、不改筛选、不提交任何表单。报到前把用量一块滚动到视口里（规则同 check_portal_usage）
+ *   check_portal_monthly_export
+ *                   本次运行跑过 login_customer 且 check_portal_usage、check_portal_usage_export 都已成功跑完才能跑（否则
+ *                   assertion_failed），所以要排在 check_portal_usage_export 之后：它不自己导航、不点任何链接，只认当前页面是
+ *                   用量页（地址是 /portal/usage，否则 navigation_failed）。页面落定：门户外壳在、管理端顶栏不在，月度汇总导出区
+ *                   （role=region、aria-label 为「Monthly summary」，en.json 的 portal.usage.monthly.title）在；区里 label 为
+ *                   「Month (Malaysia time)」（portal.usage.monthly.month）的月份输入恰好一个，它的值形如 YYYY-MM（四位年、
+ *                   01–12 的月；页面默认是当前马来西亚月）；区里文字为「Export monthly summary」（portal.usage.monthly.button）的
+ *                   按钮恰好一个，且处于可用状态（没有 disabled 属性、aria-disabled 不是 true；默认月份有效，按钮应当可用）。
+ *                   找不到导出区、月份输入或按钮是 element_missing；月份输入的值不形如 YYYY-MM、按钮在但一直不可用或不止一个是
+ *                   assertion_failed。**不点**这个按钮（验收不下载文件）、不改月份、不提交任何表单。报到前把导出区滚动到视口里
+ *                   （规则同 check_portal_wallet）
  *   check_portal_usage_summary
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
  *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
@@ -586,6 +601,9 @@ const TEXT = {
   portalUsageTime: "Time (MYT)", // portal.usage.field.occurredAt —— 用量表格的列头
   portalUsageCharged: "Charged (MYR)", // portal.usage.field.chargedAmount
   portalUsageExport: "Export CSV", // portal.usage.export.button —— 用量页的导出按钮，只查不点
+  portalMonthlyTitle: "Monthly summary", // portal.usage.monthly.title —— 用量页月度汇总导出区的 aria-label
+  portalMonthlyMonth: "Month (Malaysia time)", // portal.usage.monthly.month —— 导出区月份输入的 label，只读不改
+  portalMonthlyExport: "Export monthly summary", // portal.usage.monthly.button —— 导出区的导出按钮，只查不点
   portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
   portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
   portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
@@ -3535,6 +3553,52 @@ function probePortalUsageExport(lib, T) {
   return out;
 }
 
+/**
+ * 门户用量页月度汇总导出区的状态：门户外壳、管理端顶栏在不在；导出区（role=region、aria-label 为「Monthly summary」）
+ * 在不在；区里文字为「Month (Malaysia time)」的 label 关联着的输入框有几个，恰好一个时它的值是否形如 YYYY-MM；区里
+ * 文字为「Export monthly summary」的按钮有几个，恰好一个时它是否可用（没有 disabled 属性、aria-disabled 不是 true）。
+ * 按钮在导出中会多一个 loading 图标，图标没有文字，不影响按文字找。只读 DOM，不点、不填、不改月份。
+ */
+function probePortalMonthlyExport(lib, T) {
+  const header = document.querySelector("header");
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === T.portalMonthlyTitle) ??
+    null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    inputs: 0,
+    monthShaped: false,
+    buttons: 0,
+    enabled: false,
+  };
+  if (region === null) {
+    return out;
+  }
+  const inputs = [...region.querySelectorAll("label")]
+    .filter((label) => lib.norm(label.textContent) === T.portalMonthlyMonth)
+    .map((label) => label.control)
+    .filter((control) => control instanceof HTMLInputElement && region.contains(control));
+  out.inputs = inputs.length;
+  if (inputs.length === 1) {
+    out.monthShaped = /^\d{4}-(0[1-9]|1[0-2])$/.test(inputs[0].value);
+  }
+  const buttons = [...region.querySelectorAll("button")].filter((el) => lib.norm(el.textContent) === T.portalMonthlyExport);
+  out.buttons = buttons.length;
+  if (buttons.length === 1) {
+    const button = buttons[0];
+    out.enabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  }
+  return out;
+}
+
 /** 门户导航里文字为「Usage」、href 恰好为 /portal/usage 的链接。只点这一个。 */
 function clickPortalNavUsage(lib, T) {
   const header = document.querySelector("header");
@@ -5937,6 +6001,61 @@ async function stepCheckPortalUsageExport(ctx) {
   if (!visible.ok) {
     throw fail("assertion_failed");
   }
+  ctx.portalUsageExportChecked = true;
+}
+
+/**
+ * 把月度汇总导出区滚进视口用 scrollPortalWalletIntoView / portalWalletInView：规则相同，只是找的那一块的 aria-label 是
+ * 「Monthly summary」。换掉这一个文案再送进页面，不另写一份同样的滚动函数。
+ */
+const PORTAL_MONTHLY_EXPORT_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalMonthlyTitle };
+
+async function stepCheckPortalMonthlyExport(ctx) {
+  // 不自己导航：只认 check_portal_usage 打开、check_portal_usage_export 核对过的用量页。
+  if (ctx.customerLoginSeq === null || !ctx.portalUsageChecked || !ctx.portalUsageExportChecked) {
+    throw fail("assertion_failed");
+  }
+
+  // 停留在用量页（月份是页面默认的当前马来西亚月，没动过），等导出区出现、月份输入恰好一个且形如 YYYY-MM、导出按钮
+  // 恰好一个且可用。只查不点。
+  const settled = await waitFor(
+    () => evaluate(probePortalMonthlyExport, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalUsagePath ||
+      (s.portalShell && s.region && s.inputs === 1 && s.monthShaped && s.buttons === 1 && s.enabled),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    // 输入与按钮都在、但月份不形如 YYYY-MM 或按钮一直不可用（或不止一个）是断言失败；找不到导出区、输入或按钮是元素缺失。
+    const last = settled.value;
+    throw fail(last !== null && last.inputs > 0 && last.buttons > 0 ? "assertion_failed" : "element_missing");
+  }
+  const page = settled.value;
+  if (page.appError) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalUsagePath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // Worker 在报到后截图：把导出区滚进视口。只滚动，不点导出按钮、不改月份或任何别的东西。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_MONTHLY_EXPORT_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_MONTHLY_EXPORT_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
 }
 
 /**
@@ -6092,6 +6211,7 @@ const STEPS = {
   check_portal_dashboard: stepCheckPortalDashboard,
   check_portal_usage: stepCheckPortalUsage,
   check_portal_usage_export: stepCheckPortalUsageExport,
+  check_portal_monthly_export: stepCheckPortalMonthlyExport,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
   check_portal_low_balance: stepCheckPortalLowBalance,
 };
@@ -6137,6 +6257,8 @@ async function main() {
     usageAnalyticsAfterSeq: null,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */
     portalUsageChecked: false,
+    /** check_portal_usage_export 成功跑完后为 true：check_portal_monthly_export 只在这之后、停在用量页上跑。 */
+    portalUsageExportChecked: false,
     /** check_portal_wallet 成功跑完后为 true：check_portal_wallet_export 只在这之后、停在钱包页上跑。 */
     portalWalletChecked: false,
   };

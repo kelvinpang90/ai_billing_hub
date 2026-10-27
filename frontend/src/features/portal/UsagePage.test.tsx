@@ -10,6 +10,10 @@
  * 「Export CSV」（AIH-TASK-117）同样在 `client.get` 上按路径回应：成功回一个 blob 文件，失败回一个响应体是 blob 的
  * `AxiosError`（与浏览器里 `responseType: "blob"` 的失败同形）。jsdom 没有对象 URL，也不会真下载：装上替身、拦下
  * 链接的点击，只记录下载的文件名。
+ *
+ * 「Monthly summary」导出区（AIH-TASK-120）覆盖设计闸门 #457 v1 §7 前端一段：默认月份在马来西亚跨月那一刻的取值、
+ * `min` / `max`、无效月份时按钮不可用、请求地址恰好只带 `month`（不带用量页筛选）、加载、`QUERY_TOO_BROAD` 与通用
+ * 失败，以及失败不影响用量列表与「Export CSV」。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -23,11 +27,19 @@ import "../../i18n";
 import { ApiError, client } from "../../api/client";
 import type { CustomerProjectList, CustomerUsageEvent, CustomerUsagePage } from "../../api/customerUsage";
 import { ROUTES } from "../../routes/paths";
-import { UsagePage, dateRangeProblem, defaultDateRange, type DateRangeProblem } from "./UsagePage";
+import {
+  UsagePage,
+  currentMalaysiaMonth,
+  dateRangeProblem,
+  defaultDateRange,
+  isExportableMonth,
+  type DateRangeProblem,
+} from "./UsagePage";
 
 const PROJECTS_URL = "/api/v1/customer/projects";
 const USAGE_URL = "/api/v1/customer/usage-events";
 const EXPORT_URL = "/api/v1/customer/usage-events/export";
+const SUMMARY_EXPORT_URL = "/api/v1/customer/usage-summary/export";
 
 const PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const OTHER_PROJECT_ID = "00000000-0000-0000-0000-000000000009";
@@ -81,19 +93,20 @@ function envelope(data: unknown) {
 }
 
 /**
- * 按路径回应 `client.get`：项目接口回 `projects`，用量接口按查询串交给 `usage`，导出接口回 `exported()` 的结果
- * （文件响应原样、不包信封；默认当成失败 —— 不点「Export CSV」的用例里页面不该问它）。别的路径一律当成失败 ——
- * 页面不该问它们，下面也会逐条断言没有问。
+ * 按路径回应 `client.get`：项目接口回 `projects`，用量接口按查询串交给 `usage`，导出接口回 `exported()` 的结果、
+ * 月度汇总导出接口回 `summarized()` 的结果（文件响应原样、不包信封；默认当成失败 —— 不点导出按钮的用例里页面不该
+ * 问它们）。别的路径一律当成失败 —— 页面不该问它们，下面也会逐条断言没有问。
  */
 function serve(
   usage: (query: URLSearchParams) => unknown,
   projects: unknown = PROJECTS,
   exported: () => unknown = () => new ApiError("NOT_FOUND", "Unexpected request.", null),
+  summarized: () => unknown = () => new ApiError("NOT_FOUND", "Unexpected request.", null),
 ) {
   return vi.spyOn(client, "get").mockImplementation((url: string) => {
     const parsed = new URL(url, "https://portal.example");
-    if (parsed.pathname === EXPORT_URL) {
-      const file = exported();
+    if (parsed.pathname === EXPORT_URL || parsed.pathname === SUMMARY_EXPORT_URL) {
+      const file = parsed.pathname === EXPORT_URL ? exported() : summarized();
       if (file === PENDING) {
         return new Promise(() => undefined);
       }
@@ -122,6 +135,11 @@ function usageUrls(get: ReturnType<typeof serve>): string[] {
 /** 发给导出接口的全部地址，按发出顺序。 */
 function exportUrls(get: ReturnType<typeof serve>): string[] {
   return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(EXPORT_URL));
+}
+
+/** 发给月度汇总导出接口的全部地址，按发出顺序。 */
+function summaryExportUrls(get: ReturnType<typeof serve>): string[] {
+  return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(SUMMARY_EXPORT_URL));
 }
 
 function renderPage(entry: string = ROUTES.portalUsage) {
@@ -179,12 +197,14 @@ afterEach(() => {
 });
 
 describe("UsagePage default dates", () => {
-  it.each<[string, string, string]>([
+  // 月度汇总导出区（AIH-TASK-120）的默认月份、min 与 max 也在这两次渲染里一并断言：每多渲染一次整页，沙箱里并行的
+  // 别的测试文件就更容易被拖到超时。
+  it.each<[string, string, string, string]>([
     // UTC 16:00 之前：马来西亚时间还是 10 月 31 日。
-    ["2026-10-31T15:59:59.999Z", "2026-10-01", "2026-10-31"],
+    ["2026-10-31T15:59:59.999Z", "2026-10-01", "2026-10-31", "2026-10"],
     // UTC 16:00 起：马来西亚时间已是 11 月 1 日，本月只有这一天。
-    ["2026-10-31T16:00:00.000Z", "2026-11-01", "2026-11-01"],
-  ])("at %s asks for %s to %s", async (now, from, to) => {
+    ["2026-10-31T16:00:00.000Z", "2026-11-01", "2026-11-01", "2026-11"],
+  ])("at %s asks for %s to %s and defaults the monthly summary to %s, which is also the latest month", async (now, from, to, month) => {
     vi.setSystemTime(new Date(now));
     const get = serve(() => page([event()]));
 
@@ -194,6 +214,14 @@ describe("UsagePage default dates", () => {
     expect(usageUrls(get)).toEqual([`${USAGE_URL}?from_date=${from}&to_date=${to}&page_size=20`]);
     expect(screen.getByLabelText("From (Malaysia time)")).toHaveValue(from);
     expect(screen.getByLabelText("To (Malaysia time)")).toHaveValue(to);
+
+    const monthly = screen.getByRole("region", { name: "Monthly summary" });
+    const monthInput = within(monthly).getByLabelText("Month (Malaysia time)");
+    expect(monthInput).toHaveAttribute("type", "month");
+    expect(monthInput).toHaveValue(month);
+    expect(monthInput).toHaveAttribute("min", "2020-01");
+    expect(monthInput).toHaveAttribute("max", month);
+    expect(within(monthly).getByRole("button", { name: /Export monthly summary/ })).toBeEnabled();
   });
 
   it.each<[string, string, string]>([
@@ -869,5 +897,213 @@ describe("UsagePage export", () => {
     expect(screen.getByText("req-export-500")).toBeInTheDocument();
     expect(screen.queryByText("Your usage could not be loaded.")).not.toBeInTheDocument();
     expect(downloads).toEqual([]);
+  });
+
+  describe("monthly summary", () => {
+    const MONTHLY_NAME = /Export monthly summary/;
+    const MONTH_LABEL = "Month (Malaysia time)";
+    const MONTHLY_TOO_BROAD =
+      "The summary for this month cannot be worked out right now. Try again later, or export the request details above for a shorter date range.";
+    const MONTHLY_FAILED = "The monthly summary could not be exported.";
+
+    /** 月度汇总文件；`name` 为 `null` 时响应头里没有文件名（页面用兜底的文件名）。 */
+    function summaryFile(name: string | null = "usage-summary_2026-10.csv") {
+      return {
+        data: new Blob(["﻿date_myt,request_count,charged_amount,conversation_count\r\n"], { type: "text/csv" }),
+        status: 200,
+        statusText: "",
+        headers: name === null ? {} : { "content-disposition": `attachment; filename="${name}"` },
+      };
+    }
+
+    function monthlyRegion(): HTMLElement {
+      return screen.getByRole("region", { name: "Monthly summary" });
+    }
+
+    function monthInput(): HTMLElement {
+      return within(monthlyRegion()).getByLabelText(MONTH_LABEL);
+    }
+
+    function monthlyButton(): HTMLElement {
+      return within(monthlyRegion()).getByRole("button", { name: MONTHLY_NAME });
+    }
+
+    // 默认月份、min 与 max 在页头「UsagePage default dates」的两次渲染里断言（跨月那一刻 UTC 15:59:59 与 16:00:00）。
+
+    it.each<[string, string]>([
+      ["2026-10-31T15:59:59.999Z", "2026-10"],
+      ["2026-10-31T16:00:00.000Z", "2026-11"],
+      ["2026-12-31T16:00:00.000Z", "2027-01"],
+      ["2026-10-25T04:00:00.000Z", "2026-10"],
+    ])("computes the Malaysia-time month at %s", (now, month) => {
+      expect(currentMalaysiaMonth(new Date(now))).toBe(month);
+    });
+
+    it.each<[string, boolean]>([
+      ["", false],
+      ["2026-1", false],
+      ["2026-13", false],
+      ["2026-00", false],
+      ["abc", false],
+      ["2026-10-01", false],
+      ["2019-12", false],
+      ["2026-11", false],
+      ["2020-01", true],
+      ["2026-09", true],
+      ["2026-10", true],
+    ])("judges %j as exportable: %s, when the current month is 2026-10", (month, exportable) => {
+      expect(isExportableMonth(month, "2026-10")).toBe(exportable);
+    });
+
+    // 四种无效月份在同一次渲染里逐个试：每种都渲染一次整页的话，沙箱里并行的别的文件会被拖到超时。
+    it("cannot export when the month is empty, not YYYY-MM, before 2020-01 or after the current month", async () => {
+      const get = serve(() => page([event()]), PROJECTS, file, () => summaryFile());
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+      expect(monthlyButton()).toBeEnabled();
+
+      for (const value of ["", "2026-1", "2019-12", "2026-11"]) {
+        fireEvent.change(monthInput(), { target: { value: "2026-10" } });
+        await waitFor(() => {
+          expect(monthlyButton()).toBeEnabled();
+        });
+
+        fireEvent.change(monthInput(), { target: { value } });
+
+        await waitFor(() => {
+          expect(monthlyButton()).toBeDisabled();
+        });
+        expect(
+          within(monthlyRegion()).getByText("Choose a month from 2020-01 to 2026-10, written as YYYY-MM."),
+        ).toBeInTheDocument();
+        fireEvent.click(monthlyButton());
+        expect(summaryExportUrls(get)).toEqual([]);
+      }
+      // 请求级导出与用量列表不受影响。
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+      expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+    });
+
+    // 默认月份与带筛选两次导出在同一次渲染里做（理由同上）：第一次回带文件名的文件，第二次回不带文件名的。
+    it("exports the default month with only month in the query string, ignores the usage filters, and falls back to its own file name", async () => {
+      const replies = [summaryFile(), summaryFile(null)];
+      const get = serve(() => page([event()]), PROJECTS, file, () => replies.shift());
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      fireEvent.click(monthlyButton());
+
+      await waitFor(() => {
+        expect(downloads).toEqual(["usage-summary_2026-10.csv"]);
+      });
+      expect(summaryExportUrls(get)).toEqual([`${SUMMARY_EXPORT_URL}?month=2026-10`]);
+      const [, config] = get.mock.calls.find(([url]) => url.startsWith(SUMMARY_EXPORT_URL)) ?? [];
+      expect(config).toMatchObject({ responseType: "blob" });
+      expect(exportUrls(get)).toEqual([]);
+      await waitFor(() => {
+        expect(monthlyButton()).toBeEnabled();
+      });
+      downloads.length = 0;
+      get.mockClear();
+
+      setDate("From (Malaysia time)", "2026-10-02");
+      await choose("Project", "Sales assistant");
+      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "anthropic" } });
+      fireEvent.change(screen.getByLabelText("Conversation ID"), { target: { value: "conv_0001" } });
+      fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+      await waitFor(() => {
+        expect(usageUrls(get).at(-1)).toBe(
+          `${USAGE_URL}?from_date=2026-10-02&to_date=2026-10-25&project_id=${OTHER_PROJECT_ID}` +
+            "&provider=anthropic&conversation_id=conv_0001&page_size=20",
+        );
+      });
+      const listed = usageUrls(get).length;
+
+      fireEvent.change(monthInput(), { target: { value: "2026-09" } });
+      fireEvent.click(monthlyButton());
+
+      await waitFor(() => {
+        expect(downloads).toEqual(["usage-summary_2026-09.csv"]);
+      });
+      // 恰好只带 month：没有日期、项目、供应商、模型、会话或事件筛选，也没有分页参数。
+      expect(summaryExportUrls(get)).toEqual([`${SUMMARY_EXPORT_URL}?month=2026-09`]);
+      expect(exportUrls(get)).toEqual([]);
+      expect(usageUrls(get)).toHaveLength(listed);
+      expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+      expect(monthlyButton()).toBeEnabled();
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+      for (const [url] of get.mock.calls) {
+        expect(url).not.toContain("/api/v1/admin/");
+        expect(url).not.toMatch(/tenant|customer_id/);
+      }
+    });
+
+    // 加载、QUERY_TOO_BROAD 与通用失败在同一次渲染里先后出现（理由同上）：第一次导出先挂着，看完加载状态再以
+    // QUERY_TOO_BROAD 失败。
+    it("shows the button loading while exporting and does not export twice, explains QUERY_TOO_BROAD in its own words, shows any other failure with its request id, and Export CSV still works", async () => {
+      let rejectPending: (reason: unknown) => void = () => undefined;
+      const pending = new Promise((_, reject) => {
+        rejectPending = reject;
+      });
+      const replies: unknown[] = [pending, failure(500, "INTERNAL_ERROR", "req-monthly-500")];
+      const get = serve(() => page([event()]), PROJECTS, file, () => replies.shift());
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      fireEvent.click(monthlyButton());
+
+      await waitFor(() => {
+        expect(monthlyButton()).toBeDisabled();
+      });
+      expect(within(monthlyButton()).getByRole("img", { name: "loading" })).toBeInTheDocument();
+      fireEvent.click(monthlyButton());
+      fireEvent.click(monthlyButton());
+      expect(summaryExportUrls(get)).toHaveLength(1);
+      expect(downloads).toEqual([]);
+      // 两个导出分开处理状态：请求级导出照常可点，列表照常可用。
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Apply filters" })).toBeEnabled();
+
+      rejectPending(failure(422, "QUERY_TOO_BROAD", "req-monthly-422"));
+
+      expect(await within(monthlyRegion()).findByText(MONTHLY_TOO_BROAD)).toBeInTheDocument();
+      expect(screen.queryByText(MONTHLY_FAILED)).not.toBeInTheDocument();
+      expect(screen.queryByText("req-monthly-422")).not.toBeInTheDocument();
+      // 请求级导出的文案不出现，列表与两个按钮都不受影响。
+      expect(
+        screen.queryByText(
+          "This export covers too much usage to finish in time. Narrow the date range or change the filters, then try again.",
+        ),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+      expect(monthlyButton()).toBeEnabled();
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+      expect(downloads).toEqual([]);
+
+      fireEvent.click(monthlyButton());
+
+      expect(await within(monthlyRegion()).findByText(MONTHLY_FAILED)).toBeInTheDocument();
+      expect(screen.queryByText(MONTHLY_TOO_BROAD)).not.toBeInTheDocument();
+      expect(screen.getByText("req-monthly-500")).toBeInTheDocument();
+      expect(screen.queryByText("Your usage could not be exported.")).not.toBeInTheDocument();
+      expect(screen.queryByText("Your usage could not be loaded.")).not.toBeInTheDocument();
+      expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+      expect(downloads).toEqual([]);
+
+      fireEvent.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+      await waitFor(() => {
+        expect(downloads).toEqual([FILE_NAME]);
+      });
+      expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25`]);
+      // 请求级导出不收起月度汇总的失败；换月份才收起。
+      expect(screen.getByText(MONTHLY_FAILED)).toBeInTheDocument();
+
+      fireEvent.change(monthInput(), { target: { value: "2026-09" } });
+
+      await waitFor(() => {
+        expect(screen.queryByText(MONTHLY_FAILED)).not.toBeInTheDocument();
+      });
+    });
   });
 });
