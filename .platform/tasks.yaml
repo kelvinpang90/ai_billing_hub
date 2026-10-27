@@ -7351,7 +7351,7 @@ tasks:
       - 'frontend/src/features/portal/UsagePage.tsx：进页面时查询串带 conversation_id 且不带 event_id 时，以 conversation_id、project_id 与 from_date、to_date 作初始的已应用筛选与表单值，日期缺一或不合规时日期用默认区间、其余照用；之后的筛选不写回地址栏；带 event_id 时行为不变；不带这些参数时行为与现在相同，列表、筛选、翻页、请求级导出与月度汇总导出不变'
       - 'frontend/src/routes/paths.ts 登记 portalConversations 路径 /portal/conversations，frontend/src/routes/index.tsx 把它挂在 RequireRole（CUSTOMER）与 PortalLayout 之下；frontend/src/layouts/PortalLayout.tsx 的导航在用量之后加会话一项；页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
       - '测试（vitest + Testing Library）：customerConversations.test.ts 覆盖路径与查询串；ConversationsPage.test.tsx 与 UsagePage.test.tsx 覆盖设计 §7 前端一段里属于会话页与用量页的全部场景（默认日期用固定的现在测 UTC 16:00 前后两侧、超过 92 天不发请求、筛选与翻页的查询串、时间与计费额显示、点一行的跳转地址、说明文字、三种状态与 QUERY_TOO_BROAD、用量页读四个查询参数及日期缺一或不合规、同时带 event_id、不带参数时不变、不请求 /api/v1/admin/ 路径）；AIH-TASK-105、106、117、120 的既有用例照常通过；示例 uuid 全零'
-      - 'check_portal_conversations：在 login_customer 之后经门户导航打开会话页（href 为 /portal/conversations，默认日期区间，不改筛选）；后端值取页面自己发出的 GET /api/v1/customer/conversations 的响应体（被动观察，不自己发请求），断言表格行数与 items 条数一致，items 非空时第一行显示的计费额等于 items 第一项 charged_amount 按 6 位 ROUND_HALF_UP 舍入后的值（字符串运算，不经浮点），空表也算通过；响应是 QUERY_TOO_BROAD 时判 FAIL 并说明；不点行、不翻页、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'check_portal_conversations：在 login_customer 之后经门户导航打开会话页（href 为 /portal/conversations，默认日期区间，不改筛选）；后端值取页面自己发出的 GET /api/v1/customer/conversations 的响应体（被动观察，不自己发请求），断言表格行数与 items 条数一致，items 非空时第一行显示的计费额等于 items 第一项 charged_amount 按 6 位 ROUND_HALF_UP 舍入后的值（字符串运算，不经浮点），空表也算通过；响应是 QUERY_TOO_BROAD 时判 FAIL 并说明；不点行、不翻页、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤。部署后浏览器验收另带 AIH-TASK-105、117、120 的三个已有步骤 check_portal_usage、check_portal_usage_export、check_portal_monthly_export，排在 check_portal_conversations 之后（check_portal_usage 经门户导航自己进用量页）：AIH-TASK-120 由人接手交付（run 873f126a 只因任务范围外的既有用例在沙箱里超时而 checks_failed），没有 Worker run 跑它的部署后验收，Kelvin 2026-10-27 定为挪到本任务跑。本任务不改这三个步骤，它们照跑应 PASS'
       - 'docs/TODO.md 只勾 Phase 5 的「会话摘要」一项，「客户端用量导出」不勾。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #460（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
     allowed_change_paths:
       - scripts/acceptance/admin_customers.mjs
@@ -7389,6 +7389,9 @@ tasks:
       steps:
         - login_customer
         - check_portal_conversations
+        - check_portal_usage
+        - check_portal_usage_export
+        - check_portal_monthly_export
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
