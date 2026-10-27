@@ -7288,7 +7288,7 @@ tasks:
     title: 会话摘要第二层：客户会话摘要的 CSV 导出接口
     purpose: >-
       按 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）§2「接口二」与 §8 第 2 步：新增 GET /api/v1/customer/conversations/export，复用 AIH-TASK-121 的聚合查询与白名单视图，9 列 CSV，至多 20 000 行，与用量导出共用导出租约、行数上限与错误语义。docs/api.md「客户导出」补这一节。只读；前端属于 AIH-TASK-124。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-121
     acceptance_criteria:
