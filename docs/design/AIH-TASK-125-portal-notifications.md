@@ -1,8 +1,8 @@
-# AIH-TASK-125 / 126 / 127 / 128 设计：门户内通知（已批准 v3）
+# AIH-TASK-125 / 126 / 127 / 128 设计：门户内通知（已批准 v5）
 
-> **来源**：设计闸门 Issue #471。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**（v1、v2 由 Codex 审查、被要求修改，见 §12；v3 由 Codex 审查通过；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v3`）。
+> **来源**：设计闸门 Issue #471。本文件是 `APPROVED: design v5` 那一版正文的**逐字副本**（v1、v2、v4 由 Codex 审查、被要求修改；v3 曾获 Codex 批准，登记前预审又查出五处须写明的契约，改为 v4，批准随版本作废；见 §12。v5 由 Codex 审查通过；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v5`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #471 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #471 上被批准的 v5 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：设计闸门 #433（[AIH-TASK-109-low-balance-threshold.md](AIH-TASK-109-low-balance-threshold.md)）写 `tenant.low_balance` 的规则；设计闸门 #368（[AIH-TASK-089-customer-portal-auth.md](AIH-TASK-089-customer-portal-auth.md)）的客户鉴权与 `lock_tenant_for_customer_write`；设计闸门 #460（[AIH-TASK-121-customer-conversations.md](AIH-TASK-121-customer-conversations.md)）的 `AIH-TASK-122..124`（改同几个前端文件与验收脚本，排在它们之后）。
 > §11「任务拆分」的四个实现任务登记为 `AIH-TASK-125`（通知表迁移与模型）→ `AIH-TASK-126`（事件转通知）→ `AIH-TASK-127`（客户通知接口）→ `AIH-TASK-128`（门户通知页），按这个顺序依赖。
 
@@ -24,7 +24,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v3`
+**设计版本**：`v5`
 对应需求：spec §7 第 11 条、§25、§27 第 4 步、§47、§48、§49、§50、§74（`notifications`）、§74.6、§98.1、§129「Portal notifications」；ADR-0009 第 1、3、4 节
 目标 PR：待开（登记 PR）；实现为 AIH-TASK-125..128
 
@@ -74,11 +74,11 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 | --- | --- | --- | --- |
 | `id` | BIGINT 自增主键 | 否 | 与其他表同一 `_PrimaryKey` 写法 |
 | `public_id` | CHAR(36) | 否 | uuid4，**唯一**；客户侧唯一可见的标识 |
-| `tenant_id` | BIGINT | 否 | 外键 `tenants.id`，`ON DELETE RESTRICT` |
-| `notification_type` | VARCHAR(32) | 否 | `LOW_BALANCE` / `SUSPENDED` / `REACTIVATED`；CHECK 约束限定这三个值；模型用 `Enum(native_enum=False, length=32)` |
+| `tenant_id` | BIGINT | 否 | 外键 `fk_notifications_tenant` → `tenants.id`，`ON DELETE RESTRICT` |
+| `notification_type` | VARCHAR(32) | 否 | `LOW_BALANCE` / `SUSPENDED` / `REACTIVATED`；CHECK 约束 `ck_notifications_type` 限定这三个值；模型用 `Enum(native_enum=False, length=32)` |
 | `source_outbox_id` | BIGINT | 否 | 产生它的 `domain_outbox.id`，**唯一**（幂等键，见 §4）；不建外键（§9 方案取舍 B） |
 | `balance` | DECIMAL(20,8) | 否 | 事件 payload 的 `balance`：触发事件那笔流水之后的余额 |
-| `threshold` | DECIMAL(20,8) | 是 | 只有 `LOW_BALANCE` 非空：事件 payload 的 `threshold`。CHECK：`(notification_type = 'LOW_BALANCE') = (threshold IS NOT NULL)`，写成两条分支的 OR，两库同义 |
+| `threshold` | DECIMAL(20,8) | 是 | 只有 `LOW_BALANCE` 非空：事件 payload 的 `threshold`。CHECK `ck_notifications_threshold`：`(notification_type = 'LOW_BALANCE') = (threshold IS NOT NULL)`，写成两条分支的 OR，两库同义 |
 | `occurred_at` | DATETIME | 否 | 事件发生时刻 = outbox 行的 `created_at`（= 账本行的 `created_at`，不带时区的 UTC） |
 | `created_at` | DATETIME | 否 | 通知行写入时刻（UTC，取整到秒） |
 | `read_at` | DATETIME | 是 | 首次标已读的时刻；NULL = 未读 |
@@ -93,7 +93,7 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 
 ### 通知规则（AIH-TASK-126，`app/services/notifications.py`）
 
-一个纯函数：输入 outbox 行的 `event_type`、`payload_json`、`created_at`，输出「一条通知草稿」「不出通知」或「payload 无效」三者之一。
+一个纯函数：输入 outbox 行的 `event_type`、`aggregate_type`、`payload_json`、`created_at`，输出「一条通知草稿」「不出通知」或「payload 无效」三者之一。它不读数据库：租户查找在投递分支里做（§2「投递」第 2 步）。
 
 | `event_type` | payload 条件 | 结果 |
 | --- | --- | --- |
@@ -106,7 +106,7 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 - 金额必须是字符串，且整串匹配 `^-?[0-9]{1,12}(\.[0-9]{1,8})?$`（写入方 `_money_text` 用定点格式，余额可以为负；`threshold` 另要求不为负），再用 `Decimal(str)` 解析，不经 float。不是字符串、指数写法、`NaN` / `Infinity`、超过 8 位小数或 12 位整数都无效。
 - **计费模式为预付**：payload 有 `billing_mode` 键时，它必须是 `"PREPAID"`（预付）或 `"INTERNAL_METERED_ONLY"`（不出通知），其他值无效；**没有这个键时按预付处理**。理由：`billing_mode` 列与这个 payload 键是同一个提交加的（#236 `e950f97`，2026-10-08，迁移 0019），此后 `_apply_billing_status` 写的每一行都带它；没有这个键的行只能写于 0019 之前，那时还没有内部计量模式，所有租户都是预付。生产现有的 2 行积压（2026-09-24）正是这种行：键为 `balance`、`billing_status`、`reason`、`status_version`、`wallet_transaction`，租户当前都是预付（2026-10-27 只读核对）。`billing_mode` 键存在但值为 `null` 或非字符串 → 无效。
 - `low_balance` 不再检查计费模式：写入方已只对预付客户写这类事件（设计闸门 #433 v2 §2），payload 里也没有计费模式。
-- 租户由 outbox 行的 `aggregate_type == "tenant"` 与 `aggregate_id`（租户 `public_id`）查 `tenants.id`。`aggregate_type` 不是 `tenant`、或查不到租户（租户从不删除，不应发生）→ 无效。
+- `aggregate_type` 不是 `"tenant"` → 规则直接判无效。租户由投递分支在结算事务里按 outbox 行的 `aggregate_id`（租户 `public_id`）查 `tenants.id`，只在规则给出草稿时查；查不到（租户从不删除，不应发生）→ 与 payload 无效同样处理（回滚、走失败分支）。
 - 判定只看 payload（事件发生时的快照），不读租户当前的计费模式或余额：通知说的是当时发生了什么。
 
 ### 投递（AIH-TASK-126，`app/tasks/outbox.py`）
@@ -114,11 +114,11 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 - 新增一份「通知类事件」名单：`tenant.low_balance`、`tenant.billing_status_changed`。`recover` 的扫描与 `alerts.outbox_backlog` 的计数都改用「邮件类 ∪ 通知类」的同一个函数（例如 `handled_event_types()`），两处不再各自引用 `_RENDERERS`。
 - `deliver(id)` 的领取一步不变（带完整前置条件的 UPDATE，`attempt_count` 当乐观锁，同时推后 `next_retry_at`，先提交）。
 - 领取成功后，通知类事件走新分支，**一个事务**内：
-  1. `UPDATE domain_outbox SET status = 'SENT', processed_at = :now WHERE id = :id AND status = 'PENDING'`；受影响行数不是 1 → 回滚，返回 `already-settled`（另一个 worker 已结算）。
-  2. 调通知规则：草稿 → `INSERT notifications`（`public_id` 新 uuid4，`source_outbox_id = id`，`created_at = now`）；不出通知 → 不插入；无效 → 回滚，走下面的失败分支。
+  1. `UPDATE domain_outbox SET status = 'SENT', processed_at = :now WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt`（`:attempt` 是本次领取写入的 `attempt_count`）；受影响行数不是 1 → 回滚，返回 `already-settled`（另一个 worker 已结算，或这一行已被更晚的一次领取接手）。
+  2. 调通知规则：草稿 → 按 `aggregate_id` 查租户 `id`（查不到即无效）→ `INSERT notifications`（`public_id` 新 uuid4，`source_outbox_id = id`，`created_at = now`）；不出通知 → 不插入；无效 → 回滚，走下面的失败分支。
   3. 提交。①② 同一事务：通知行存在 ⇔ outbox 行是 `SENT` 且规则给出了草稿。
 - **payload 不清空**：通知类事件的 payload 只有余额、阈值、状态与流水 `public_id`，不含令牌或个人数据（`wallet.py` `_outbox_event` 的注释），留着供排查。邮件类事件结算时仍清空（不变）。
-- 失败（payload 无效、事务内任何异常）：回滚这个事务；之后与邮件类同一套逻辑——`attempt < outbox_max_attempts` 记 warning 等下次领取，否则置 `FAILED`（死信，记 error 日志）。死信结算对通知类事件同样**不清空** payload。异常不向外抛（与 `_attempt_send` 一样「never raises」）：任务返回值说明发生了什么。
+- 失败（payload 无效、事务内任何异常）：回滚这个事务；之后 `attempt < outbox_max_attempts` 记 warning 等下次领取，否则置 `FAILED`（死信，记 error 日志）。通知类事件的死信结算是 `UPDATE … SET status = 'FAILED', processed_at = :now WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt`，**同样受本次领取的次数约束**，并且**不清空** payload：受影响 0 行说明这一行已被更晚的一次领取接手（或已结算），什么都不做，不记 error，返回 `superseded`。**规则：只有当前领取者能结算这一行**——成功与死信两种结算都带 `attempt_count = :attempt`。异常不向外抛（与 `_attempt_send` 一样「never raises」）：任务返回值说明发生了什么。
 - 通知类事件不调 SMTP，`build_transport` 不参与；不需要 `BILLING_FRONTEND_BASE_URL`。
 - `post_transaction` 不 `delay()` 这两类事件（不改钱包代码）：触发只靠 `recover` 的 60 秒周期，通知最多晚约一个周期出现。
 
@@ -128,9 +128,9 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 
 **`GET /api/v1/customer/notifications`**（只读，`require_customer`，四种账户状态都能读）
 
-- 查询参数：`page_size`（1–100，缺省 20，同 `app/schemas/customers.py` 的常量）、`cursor`（可选，上一页返回的 `next_cursor`）。
+- 查询参数：`page_size`（1–100，缺省 20，同 `app/schemas/customers.py` 的常量）、`cursor`（可选，上一页返回的 `next_cursor`；类型是普通字符串，在鉴权之后才校验）。
 - 排序：`occurred_at` 倒序，同一时刻按 `id` 倒序。
-- 游标：就是上一页最后一条的 `notification_id`（`public_id`）。服务端在**本租户**内按 `public_id` 查出它的 `(occurred_at, id)`，再取 `(occurred_at, id) < (c_occ, c_id)` 的行。格式不是 UUID（FastAPI 422），或本租户查不到（包括别的租户的通知）→ 422 `VALIDATION_ERROR`（字段名 `cursor`，与用量页游标无效同一个错误类）。
+- 游标：就是上一页最后一条的 `notification_id`（`public_id`）。服务端在**本租户**内按 `public_id` 查出它的 `(occurred_at, id)`，再取 `(occurred_at, id) < (c_occ, c_id)` 的行。不是小写规范 UUID 形状（36 字符、8-4-4-4-12），或本租户查不到（包括别的租户的通知）→ 422 `VALIDATION_ERROR`（`InvalidCustomerUsageQuery("cursor")`，与用量页游标无效同一个错误类）；两种情况不区分，都在 `require_customer` 之后判。
 - 多取一行判断有没有下一页；`next_cursor` 没有下一页时为 `null`；不返回总数。
 - 响应：
 
@@ -140,7 +140,7 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
       {
         "notification_id": "uuid",
         "notification_type": "LOW_BALANCE | SUSPENDED | REACTIVATED",
-        "occurred_at": "2026-10-27T05:12:09Z",
+        "occurred_at": "2026-10-27T05:12:09",
         "balance": "12.50000000",
         "threshold": "50.00000000 或 null",
         "read_at": "时间或 null"
@@ -151,12 +151,12 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
   }
   ```
 
-  时间格式与客户钱包流水的 `created_at` 相同；金额是 8 位小数的定点字符串（与客户钱包视图同一 `money_text`）。条目恰好这 6 个键：不返回内部 `id`、`tenant_id`、`source_outbox_id`、`created_at`，也不返回 outbox payload 里的其他字段（`status_version`、`reason`、`effective_status`、流水 `public_id`）。
+  时间格式与客户钱包流水的 `created_at` 相同：不带时区的 UTC，ISO 8601、精确到秒、不带 `Z`（示例即此格式）；金额是 8 位小数的定点字符串（与客户钱包视图同一 `money_text`）。条目恰好这 6 个键：不返回内部 `id`、`tenant_id`、`source_outbox_id`、`created_at`，也不返回 outbox payload 里的其他字段（`status_version`、`reason`、`effective_status`、流水 `public_id`）。
 - `unread_count` 是本租户 `read_at IS NULL` 的行数，与列表在同一个会话里读，不受分页影响。
 
 **`POST /api/v1/customer/notifications/{notification_id}/read`**（写，`require_customer_writable`）
 
-- 路径参数是 UUID 形状（否则 422）。
+- 路径参数 `notification_id` 的类型是普通字符串（不在 FastAPI 层校验形状：路由守卫用例 `tests/backend/test_customer_api.py` 用字面路径请求每个客户接口，期望 401 / 403，形状校验若在鉴权之前就会先返回 422）。在 `require_customer_writable` 之后判：不是小写规范 UUID 形状 → 404 `NOTIFICATION_NOT_FOUND`（与查不到同一个结果，不另设 422）。
 - 写事务：先 `lock_tenant_for_customer_write(session, tenant_id)`（`DISABLED` / `CLOSED` → 403 `ACCOUNT_READ_ONLY`）；再 `UPDATE notifications SET read_at = :now WHERE tenant_id = :tenant AND public_id = :id AND read_at IS NULL`；再按 `(tenant_id, public_id)` 读回这一行；读不到 → 404 `NOTIFICATION_NOT_FOUND`（别的租户的通知同样 404，不区分）；提交。
 - 幂等：已读的再标一次不改 `read_at`（保留首次时刻），照样 200。
 - 响应：这一条（与列表条目同样的 6 个键）。
@@ -209,9 +209,9 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 | 当前状态 | 事件 | 前置条件 | 新状态 | 副作用 | 非法时结果 |
 | --- | --- | --- | --- | --- | --- |
 | `PENDING` | 领取 | `next_retry_at <= now`、`attempt_count` 未变 | `PENDING`（`attempt_count + 1`，`next_retry_at` 推后） | 无 | 受影响 0 行 → `not-claimed` |
-| `PENDING` | 结算成功 | 规则给出草稿或「不出通知」 | `SENT`（`processed_at`） | 草稿时同事务插入一条通知 | 受影响 0 行 → 回滚，`already-settled` |
+| `PENDING` | 结算成功 | 规则给出草稿或「不出通知」；`attempt_count` 仍等于本次领取的值 | `SENT`（`processed_at`） | 草稿时同事务插入一条通知 | 受影响 0 行 → 回滚，`already-settled` |
 | `PENDING` | 规则判无效或事务异常，次数未用尽 | — | `PENDING`（不变） | 回滚，warning 日志 | — |
-| `PENDING` | 同上，次数用尽 | `attempt >= outbox_max_attempts` | `FAILED` | error 日志；payload 保留 | — |
+| `PENDING` | 同上，次数用尽 | `attempt >= outbox_max_attempts`；`attempt_count` 仍等于本次领取的值 | `FAILED` | error 日志；payload 保留 | 受影响 0 行（已被更晚的领取接手）→ 不变，`superseded` |
 | `SENT` / `FAILED` | 任何 | — | 不变 | 无 | `already-settled` |
 
 **通知的已读状态**
@@ -223,7 +223,7 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 
 没有「已读 → 未读」。
 
-- **串行化**：两个 worker 同时投同一行：领取靠 `attempt_count` 乐观锁只有一个成功；领取后崩溃、行重新到期被另一个 worker 领走时，两次结算的 `UPDATE … WHERE status = 'PENDING'` 由 InnoDB 行锁排队，后到的读到 `SENT`、受影响 0 行、回滚，不插入。
+- **串行化**：两个 worker 同时投同一行：领取靠 `attempt_count` 乐观锁只有一个成功。领取后停顿、行重新到期被另一个 worker 领走（`attempt_count` 又 +1）时，旧领取者手里的 `:attempt` 已经过期：它的成功结算与死信结算都带 `attempt_count = :attempt`，受影响 0 行（成功分支回滚、不插入；死信分支什么都不做），这一行只由新领取者结算。结算 UPDATE 由 InnoDB 行锁排队，所以「旧领取者结算」与「新领取者领取」谁先提交都只有一方生效：旧的先提交则行已 `SENT` / `FAILED`，新领取的前置条件 `status = 'PENDING'` 不成立；新的先提交则旧的结算条件不成立。
 - **数据库的唯一性保证**：`source_outbox_id` 唯一，是「一条 outbox 行最多一条通知」的兜底；`public_id` 唯一。
 - **幂等键**：`domain_outbox.id`。同一个 id 不会有不同的 payload（outbox 行写入后 payload 只会被邮件类结算清空，通知类不改）。
 - **重试层**：只在 outbox 层（`attempt_count`、`next_retry_at`、`recover`）。
@@ -236,6 +236,8 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 | --- | --- | --- | --- | --- | --- |
 | payload 无效（缺字段、金额不合法、未知状态） | 客户看不到这条通知 | 重试至上限后 outbox 行 `FAILED`，payload 保留；无通知行 | 自动重试到上限；之后人工 | 人工看 `FAILED` 行与 error 日志 | 次数用尽时 error 日志；未用尽前超过 10 分钟仍 `PENDING` → `outbox_backlog` P2 |
 | 结算事务提交失败（DB 断开、死锁） | 晚出现 | 回滚：outbox 仍 `PENDING`，无通知行 | 是 | `next_retry_at` 到期后 `recover` 重投 | 同上 |
+| 旧领取者停顿，行被更晚的领取接手后，旧领取者失败（包括最后一次） | 不影响 | 旧领取者的死信结算受影响 0 行；行仍 `PENDING`，由新领取者结算（成功则 `SENT` 加一条通知） | 是 | 新领取者；它也失败时由 `recover` 继续 | 无（新领取者用尽次数时照常记 error） |
+| 旧领取者停顿，行被更晚的领取接手后，旧领取者成功 | 不重复 | 旧领取者的成功结算受影响 0 行、回滚、不插入；新领取者结算并插入一条 | — | — | 无 |
 | worker 在领取之后、结算之前崩溃 | 晚出现 | outbox `PENDING`（已占一次 `attempt_count`），无通知行 | 是 | 同上 | 同上 |
 | Redis/Celery 丢失 | 晚出现 | 数据库里的 `PENDING` 行不受影响 | 是 | broker 恢复后 `recover` 每 60 秒扫库重建 | `outbox_backlog` |
 | 外部服务超时 | 不适用 | 通知类事件不调任何外部服务 | — | — | — |
@@ -273,12 +275,16 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 | payload 无效 | unit + integration | 缺 `balance`、金额 `"1e3"`、9 位小数、13 位整数、`"NaN"`、数字而非字符串、`threshold` 为 `"-1.00"`、未知 `billing_status`、未知 `billing_mode`、payload 是数组、`aggregate_type` 不是 `tenant`、租户查不到 | 规则返回无效；`attempt < max` 时行仍 `PENDING`，用尽时 `FAILED` 且 payload 保留；都没有通知行 |
 | 幂等重放 | integration | 同一行 `deliver` 两次；已 `SENT` 的行再 `deliver` | 一条通知；第二次 `already-settled` |
 | 并发 | integration（MySQL） | 同一行领取后让 `next_retry_at` 到期，两个会话同时走结算分支（一个在结算 UPDATE 后、提交前暂停） | 只有一条通知；另一方受影响 0 行、回滚 |
+| 旧领取者最后一次失败与新领取交错 | integration | `outbox_max_attempts` 设为 2；worker A 以 `attempt_count` 2 领取后暂停；把 `next_retry_at` 拨到过去，让 worker B 以 `attempt_count` 3 领取（直接执行领取 UPDATE）；A 以 payload 无效走死信结算；B 再以有效规则结算 | A 的死信结算受影响 0 行、返回 `superseded`、不记 error；之后行由 B 结算为 `SENT`，恰好一条通知 |
+| 旧领取者成功与新领取交错 | integration | 同上的领取顺序，A 走成功结算，B 随后结算 | A 受影响 0 行、回滚、没有插入；B 结算为 `SENT`；恰好一条通知 |
 | 事务中途失败 | integration | 让通知 INSERT 抛错（例如替换插入函数） | outbox 仍 `PENDING`（结算 UPDATE 被回滚），没有通知行 |
 | Redis/Celery 丢失 | integration | 不调 `delay`，只调 `recover` | 到期的两类行被重新触发并结算；未到期的不触发 |
 | recover 与告警名单 | unit | 名单函数 | 含两类通知事件与两类邮件事件；`outbox_backlog` 数超过 10 分钟仍 `PENDING` 的 `tenant.billing_status_changed`（改写 `test_usage_alerts.py` 里「不计入」的那条） |
-| 邮件类不回归 | integration | 现有 `test_outbox.py` 全部用例 | 照旧通过；邮件类结算仍清空 payload |
+| 邮件类不回归 | integration | 现有 `test_outbox.py` 用例 | 除下一行改写的那一条外照旧通过；邮件类结算仍清空 payload |
+| 仍无处理器的类型不重投 | integration | 改写 `test_outbox.py` 的 `test_recovery_leaves_events_without_a_handler_pending`：等待中的类型换成仍没有处理器的 `tenant.account_status_changed` 与 `tenant.billing_mode_changed`，另加两条通知类事件 | `recover` 重投密码重置行与两条通知类行；两条仍无处理器的行保持 `PENDING`、`attempt_count` 0、payload 不变 |
 | 列表 | integration | 25 条通知、`page_size` 10 | 三页 10/10/5，时间倒序，同一 `occurred_at` 按 `id` 倒序；`next_cursor` 最后为 `null`；每页 `unread_count` 相同；条目恰好 6 个键 |
-| 游标 | integration | 非 UUID、不存在的 UUID | 前者 FastAPI 422，后者 422 `VALIDATION_ERROR` |
+| 游标 | integration | 非 UUID 字符串、大写 UUID、不存在的 UUID | 都是 422 `VALIDATION_ERROR`（字段 `cursor`）；未登录带非法游标仍是 401 |
+| 路径参数 | integration | 标已读用非 UUID 字符串、未登录用字面路径 `{notification_id}` | 前者 404 `NOTIFICATION_NOT_FOUND`；后者 401（路由守卫照常通过） |
 | 标已读 | integration | 标一条；再标一次；全部已读；再全部已读 | `read_at` 首次写入后不变；`unread_count` 递减；`marked` 依次为 N、0 |
 | 只读账户 | integration | 租户 `DISABLED` 后列表、标已读、全部已读 | 列表 200；两个写接口 403 `ACCOUNT_READ_ONLY`，`read_at` 不变 |
 | 租户越权 | integration | A 用 B 的通知 id 标已读；A 用 B 的通知 id 当游标；A 全部已读；A 的列表 | 404；422；B 的 `read_at` 不变；A 的列表里没有 B 的行 |
@@ -310,6 +316,7 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 ## 10. 未决问题与假设
 
 - **未决问题**：无。三项范围问题已由 Kelvin 2026-10-27 拍板：要已读 / 未读与未读角标；内部计量租户不出停机 / 复机通知；生产积压照常转成通知。
+- **范围外的已知缺口**：邮件类事件的 `_settle` 仍只带 `status = 'PENDING'`，同样可能出现「旧领取者死信覆盖新领取」。邮件投递本来就是至少一次（见 `app/tasks/outbox.py` 模块说明），后果是该封信不再重试；本设计不改邮件路径，在登记 PR 的「已知未做 / 留给后续」里记一条后续任务。
 - **接受的行为**：「全部已读」只标记当时已提交的未读行；客户打开页面之后、点「全部已读」之前新出的通知会一起被标成已读（它仍在列表里，只是不加粗）。状态跃迁本身很少，这个窗口只有几秒，接受。
 - **尚未验证的假设**：
   1. `recover` 的 60 秒周期在生产 beat 上正常运行（`celery_app.py` `OUTBOX_RECOVERY_SECONDS`，邮件投递已依赖它）。
@@ -355,3 +362,5 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 | v1 | 2026-10-27 | 初稿 | — |
 | v2 | 2026-10-27 | 0028 降级只在表为空时删表，表非空时抛错、不发 DDL；§8 生产回滚只回滚应用镜像、不降级 0028；§5 加「表非空时降级」一行；§7 加「带数据降级」用例 | Codex v1 REQUEST_CHANGES：先回滚 126 再降级 125 会删掉已交付的通知，来源 outbox 已 `SENT`，无法重建 |
 | v3 | 2026-10-27 | §8 写明 0028 判「形状」逐项比哪些（10 列、两个唯一索引、租户时间索引、外键 RESTRICT、两条 CHECK）及这条分支的用途；§7 加「表已存在且形状正确」「表已存在但形状不对」（四个子场景）两行 MySQL 用例 | Codex v2 REQUEST_CHANGES：表已存在的两个升级分支没有测试 |
+| v4 | 2026-10-27 | 定下外键与两条 CHECK 的名称；规则输入加 `aggregate_type`、租户查找放进投递分支；`test_outbox.py` 里「无处理器不重投」那一条改用仍无处理器的两类事件；时间示例去掉 `Z`、写明格式；游标与路径参数按普通字符串接收、在鉴权之后校验（非法路径参数 404） | 登记前预审（`worker.design_precheck`）对 125–127 的五条发现 |
+| v5 | 2026-10-27 | 通知类事件的成功与死信结算都带 `attempt_count = :attempt`（只有当前领取者能结算），旧领取者受影响 0 行时不做任何事（死信分支返回 `superseded`）；§4、§5 补交错的跃迁与失败行；§7 加两条交错用例；§10 记邮件路径的同类缺口为范围外 | Codex v4 REQUEST_CHANGES：旧 worker 最后一次失败可把已被新 worker 领取的行置为 `FAILED`，通知永久缺失 |
