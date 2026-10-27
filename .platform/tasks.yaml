@@ -7234,7 +7234,7 @@ tasks:
     title: 会话摘要第一层：客户会话列表接口，按会话聚合区间内的已计费请求
     purpose: >-
       按 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）§2 与 §8 第 1 步：新增 GET /api/v1/customer/conversations，读时一条聚合 SELECT（派生表按项目与 conversation_id 分组、外层 JOIN 项目），只算所选马来西亚日期区间内 PROCESSED 且 conversation_id 非空的请求，按最后活动倒序、会话游标往旧翻页，2 秒执行预算；新文件 app/schemas/customer_conversations.py 放 9 键白名单视图与游标。docs/api.md 新增「客户会话」一节。只读；导出属于 AIH-TASK-122，前端属于 AIH-TASK-123。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-119
     acceptance_criteria:
