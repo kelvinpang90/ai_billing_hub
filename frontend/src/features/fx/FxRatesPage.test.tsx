@@ -106,6 +106,15 @@ function buttonWithText(text: string, container: HTMLElement = document.body): H
   return button;
 }
 
+/**
+ * 等到文字为 `text` 的按钮出现再取它。antd 页面上 `findByRole("button", { name })` 单次要 1 秒以上，全量并行时
+ * 在沙箱里会被挤过超时。
+ */
+async function findButtonWithText(text: string): Promise<HTMLElement> {
+  await screen.findByText(text);
+  return buttonWithText(text);
+}
+
 /** 版本表里带这个操作按钮的那一行。 */
 function actionRow(text: string): HTMLElement {
   const row = buttonWithText(text).closest("tr");
@@ -140,7 +149,7 @@ type User = ReturnType<typeof userEvent.setup>;
 
 /** 填手工草稿表单并点「Review」。观测时刻按吉隆坡时间。 */
 async function fillManualDraft(user: User, currency: string, value: string): Promise<void> {
-  await user.click(await screen.findByRole("button", { name: "New manual draft" }));
+  await user.click(await findButtonWithText("New manual draft"));
   const form = topDialog();
   await user.click(within(form).getByLabelText("Currency"));
   await user.paste(currency);
@@ -371,7 +380,7 @@ describe("FxRatesPage manual drafts", SLOW, () => {
     api.updateFxRate.mockResolvedValue(rate({ rate: "4.1" }));
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(await findButtonWithText("Edit"));
     const form = topDialog();
     // 编辑时观测时刻预填成吉隆坡时间（jsdom 会把整分的秒省掉）；币种不可改，不在表单里。
     const observed = within(form).getByLabelText("Observed at (Kuala Lumpur time)");
@@ -394,7 +403,7 @@ describe("FxRatesPage manual drafts", SLOW, () => {
     api.listFxRates.mockResolvedValue(page([rate()]));
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(await findButtonWithText("Edit"));
     const form = topDialog();
     await user.clear(within(form).getByLabelText("Rate (MYR)"));
     await user.paste("4.0830000000");
@@ -410,7 +419,7 @@ describe("FxRatesPage manual drafts", SLOW, () => {
     api.updateFxRate.mockRejectedValue(new ApiError("FX_RATE_NOT_EDITABLE", "BNM drafts cannot be edited.", "req-409"));
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.click(await findButtonWithText("Edit"));
     const form = topDialog();
     await user.clear(within(form).getByLabelText("Rate (MYR)"));
     await user.paste("4.2");
@@ -431,7 +440,7 @@ describe("FxRatesPage publish, retire and discard", SLOW, () => {
     api.publishFxRate.mockResolvedValue(PUBLISHED);
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Publish" }));
+    await user.click(await findButtonWithText("Publish"));
     await user.click(buttonWithText("Review", topDialog()));
 
     expect(await screen.findByText("Publish this version?")).toBeInTheDocument();
@@ -449,7 +458,7 @@ describe("FxRatesPage publish, retire and discard", SLOW, () => {
     api.publishFxRate.mockRejectedValue(new ApiError("EFFECTIVE_FROM_CONFLICT", "Conflict.", "req-409"));
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Publish" }));
+    await user.click(await findButtonWithText("Publish"));
     await user.click(buttonWithText("Review", topDialog()));
     await user.click(await screen.findByText("Confirm and publish"));
 
@@ -468,7 +477,7 @@ describe("FxRatesPage publish, retire and discard", SLOW, () => {
     api.retireFxRate.mockResolvedValue({ ...PUBLISHED, status: "RETIRED" });
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Retire" }));
+    await user.click(await findButtonWithText("Retire"));
     await user.click(screen.getByLabelText("Reason"));
     await user.paste("Wrong rate entered");
     await user.click(buttonWithText("Review", topDialog()));
@@ -488,7 +497,7 @@ describe("FxRatesPage publish, retire and discard", SLOW, () => {
     api.retireFxRate.mockRejectedValue(new ApiError("FX_RATE_NOT_RETIRABLE", "Cannot retire.", "req-409"));
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Retire" }));
+    await user.click(await findButtonWithText("Retire"));
     await user.click(screen.getByLabelText("Reason"));
     await user.paste("Wrong rate entered");
     await user.click(buttonWithText("Review", topDialog()));
@@ -508,7 +517,7 @@ describe("FxRatesPage publish, retire and discard", SLOW, () => {
     api.discardFxRate.mockRejectedValue(new ApiError("FX_RATE_NOT_DRAFT", "Not a draft.", "req-409"));
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Discard" }));
+    await user.click(await findButtonWithText("Discard"));
 
     expect(await screen.findByText("Discard this draft?")).toBeInTheDocument();
     expect(api.discardFxRate).not.toHaveBeenCalled();
@@ -529,7 +538,7 @@ describe("FxRatesPage publish, retire and discard", SLOW, () => {
     api.discardFxRate.mockResolvedValue({ ...BNM_DRAFT, status: "DISCARDED" });
 
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "Discard" }));
+    await user.click(await findButtonWithText("Discard"));
     await user.click(buttonWithText("Confirm and discard", topDialog()));
 
     expect(await screen.findByText("Draft discarded.")).toBeInTheDocument();

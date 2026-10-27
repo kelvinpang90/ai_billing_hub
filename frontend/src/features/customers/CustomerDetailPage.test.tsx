@@ -101,18 +101,35 @@ function adjustment(overrides: Partial<Adjustment> = {}): Adjustment {
   };
 }
 
+/**
+ * 文字为 `text` 的按钮。点击路径上按文字找、不按 role 加名字找：这个页面上 `getByRole("button", { name })` 单次
+ * 要 0.4–1 秒，全量并行时在沙箱里会被挤过超时。
+ */
+function buttonWithText(text: string): HTMLElement {
+  const button = screen.getByText(text).closest("button");
+  if (button === null) {
+    throw new Error(`"${text}" is not inside a button`);
+  }
+  return button;
+}
+
+/** 等到文字为 `text` 的按钮出现再取它（理由同 {@link buttonWithText}）。 */
+async function findButtonWithText(text: string): Promise<HTMLElement> {
+  await screen.findByText(text);
+  return buttonWithText(text);
+}
+
 /** 打开调账表单，填一笔借方 20.5，确认并发送。 */
 async function postDebit(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "Adjust balance" }));
-  await user.click(
-    await screen.findByRole("radio", { name: "Adjustment debit (takes from the balance)" }),
-  );
+  await user.click(await findButtonWithText("Adjust balance"));
+  // 按钮样式的单选项：真人点的是选项文字所在的 `<label>`。
+  await user.click(await screen.findByText("Adjustment debit (takes from the balance)"));
   await user.click(screen.getByLabelText("Amount"));
   await user.paste("20.5");
   await user.click(screen.getByLabelText("Reason"));
   await user.paste("Refund for outage");
-  await user.click(screen.getByRole("button", { name: "Review" }));
-  await user.click(await screen.findByRole("button", { name: "Confirm and post" }));
+  await user.click(buttonWithText("Review"));
+  await user.click(await findButtonWithText("Confirm and post"));
 }
 
 function customer(overrides: Partial<CustomerDetail> = {}): CustomerDetail {
@@ -244,12 +261,12 @@ describe("CustomerDetailPage", () => {
     api.postAccountStatus.mockResolvedValue(customer({ account_status: "DISABLED", status_version: 4 }));
     renderDetail();
 
-    await user.click(await screen.findByRole("button", { name: "Disable account" }));
+    await user.click(await findButtonWithText("Disable account"));
     await user.click(screen.getByLabelText("Reason"));
     await user.paste("Contract paused");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(buttonWithText("Continue"));
     expect(api.postAccountStatus).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "Confirm and disable" }));
+    await user.click(await findButtonWithText("Confirm and disable"));
 
     await waitFor(() => {
       expect(api.postAccountStatus).toHaveBeenCalledWith(CUSTOMER_ID, {
@@ -588,7 +605,7 @@ describe("CustomerDetailPage", () => {
     expect(
       await screen.findByText("We could not confirm whether the adjustment was posted."),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Close this form" }));
+    await user.click(buttonWithText("Close this form"));
     expect(screen.queryByText("Manual wallet adjustment")).not.toBeInTheDocument();
 
     // 再打开：表单是新的、可编辑，发出去的是新键。
