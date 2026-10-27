@@ -22,6 +22,13 @@
  * 状态、不可重复点。`EXPORT_TOO_LARGE`、`QUERY_TOO_BROAD`、`EXPORT_BUSY` 各有专门文案，其余失败带 request_id。
  * 导出不影响列表、筛选与翻页。
  *
+ * 「Monthly summary」导出区（AIH-TASK-120；设计闸门 #457 v1 §2「前端」，语义以 docs/api.md「客户导出」的
+ * usage-summary/export 小节为准）是用量一块之外的另一块：选一个马来西亚日历月（默认当前马来西亚月，按浏览器时间加
+ * 8 小时算，与默认日期区间同一算法），调 `GET /api/v1/customer/usage-summary/export?month=` 下载整月、全部项目、每天
+ * 一行加合计的 CSV。它**不受**用量页筛选的影响，与「Export CSV」分开处理状态。月份为空、不是 `YYYY-MM`（不支持
+ * `type="month"` 的浏览器会退回文本框）、早于 2020-01 或晚于当前月时按钮不可用并提示格式。`QUERY_TOO_BROAD` 有专门
+ * 文案，其余失败带 request_id。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。
  */
 
@@ -50,6 +57,7 @@ import {
   QUERY_TOO_BROAD,
   customerUsageListQueryKey,
   exportCustomerUsageEvents,
+  exportCustomerUsageSummary,
   listCustomerProjects,
   listCustomerUsageEvents,
   type CustomerUsageEvent,
@@ -104,6 +112,22 @@ function dayNumber(value: string): number | null {
 export function defaultDateRange(now: Date): { fromDate: string; toDate: string } {
   const today = new Date(now.getTime() + MYT_OFFSET_MS).toISOString().slice(0, 10);
   return { fromDate: `${today.slice(0, 8)}01`, toDate: today };
+}
+
+/** 月度汇总能选的最早月份（接口接受 2020-01 起）。 */
+export const MIN_MONTH = "2020-01";
+
+const MONTH_SHAPE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/** 马来西亚时间的当前月份 `YYYY-MM`：月度汇总导出的默认值与上限。 */
+export function currentMalaysiaMonth(now: Date): string {
+  return defaultDateRange(now).toDate.slice(0, 7);
+}
+
+/** 月份能不能导出：`YYYY-MM`、月份数 1..12，且在 {@link MIN_MONTH} 到 `maxMonth`（当前马来西亚月）之间。 */
+export function isExportableMonth(month: string, maxMonth: string): boolean {
+  // 形状一致（YYYY-MM）时可以按字符串比较边界。
+  return MONTH_SHAPE.test(month) && month >= MIN_MONTH && month <= maxMonth;
 }
 
 export type DateRangeProblem = "missing" | "outOfRange" | "reversed" | "tooLong";
@@ -179,6 +203,84 @@ const SPECIFIC_EXPORT_FAILURES: ReadonlySet<string> = new Set([EXPORT_TOO_LARGE,
 /** 三种专门文案之外的失败：要显示 request_id。 */
 function isGenericExportFailure(error: Error): boolean {
   return !(error instanceof ApiError) || !SPECIFIC_EXPORT_FAILURES.has(error.code);
+}
+
+/** 月度汇总导出的月份输入框的 id（label 用它关联）。 */
+const MONTHLY_MONTH_INPUT_ID = "customerUsageMonthlyMonth";
+
+/**
+ * 月度汇总导出区：只有一个月份与一个按钮，不读用量页的筛选，状态与「Export CSV」各管各的。月份的默认值与上限都是进页面
+ * 那一刻的马来西亚月（停在页面上跨月不会自己换）。
+ */
+function MonthlySummaryExport() {
+  const { t } = useTranslation();
+  const [maxMonth] = useState(() => currentMalaysiaMonth(new Date()));
+  const [month, setMonth] = useState(maxMonth);
+  const chosen = month.trim();
+  const valid = isExportableMonth(chosen, maxMonth);
+
+  const exporting = useMutation({
+    mutationFn: (value: string) => exportCustomerUsageSummary(value),
+  });
+
+  const startExport = (): void => {
+    // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
+    if (!valid || exporting.isPending) {
+      return;
+    }
+    exporting.mutate(chosen);
+  };
+
+  const changeMonth = (value: string): void => {
+    setMonth(value);
+    // 上一次的失败说的是旧的月份。只收失败：导出中 reset 会让按钮提前恢复可点。
+    if (exporting.isError) {
+      exporting.reset();
+    }
+  };
+
+  const tooBroad = exporting.error instanceof ApiError && exporting.error.code === QUERY_TOO_BROAD;
+
+  return (
+    // role + aria-label：部署后验收脚本（check_portal_monthly_export）按语义结构找到这一块。
+    <Card role="region" aria-label={t("portal.usage.monthly.title")} title={t("portal.usage.monthly.title")}>
+      <Typography.Paragraph type="secondary">{t("portal.usage.monthly.description")}</Typography.Paragraph>
+      <Space wrap align="end" style={{ marginBottom: 8 }}>
+        <Space direction="vertical" size={4}>
+          <label htmlFor={MONTHLY_MONTH_INPUT_ID}>{t("portal.usage.monthly.month")}</label>
+          <Input
+            id={MONTHLY_MONTH_INPUT_ID}
+            type="month"
+            min={MIN_MONTH}
+            max={maxMonth}
+            value={month}
+            onChange={(event) => changeMonth(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            status={valid ? "" : "error"}
+          />
+        </Space>
+        <Button onClick={startExport} loading={exporting.isPending} disabled={!valid || exporting.isPending}>
+          {t("portal.usage.monthly.button")}
+        </Button>
+      </Space>
+      {valid ? null : (
+        <Typography.Paragraph type="warning">
+          {t("portal.usage.monthly.invalid", { min: MIN_MONTH, max: maxMonth })}
+        </Typography.Paragraph>
+      )}
+      {exporting.error ? (
+        <Alert
+          type="error"
+          showIcon
+          closable
+          onClose={() => exporting.reset()}
+          message={tooBroad ? t("portal.usage.monthly.tooBroad") : t("portal.usage.monthly.failed")}
+          description={tooBroad ? null : <RequestReference error={exporting.error} />}
+        />
+      ) : null}
+    </Card>
+  );
 }
 
 export function UsagePage() {
@@ -406,73 +508,76 @@ export function UsagePage() {
   ) : null;
 
   return (
-    // role + aria-label：部署后验收脚本按语义结构找到这一块（不依赖 antd 的类名）。
-    <Card role="region" aria-label={t("portal.usage.title")} title={t("portal.usage.title")}>
-      {byEvent ? (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message={t("portal.usage.byEvent.title")}
-          description={
-            <Typography.Text>
-              {t("portal.usage.byEvent.body")} <Typography.Text code>{eventId}</Typography.Text>
-            </Typography.Text>
-          }
-          action={
-            <Button size="small" onClick={showAll}>
-              {t("portal.usage.byEvent.clear")}
-            </Button>
-          }
-        />
-      ) : null}
-      <Form<UsageFilterValues>
-        form={form}
-        name="customerUsageFilters"
-        layout="vertical"
-        initialValues={initialRange}
-        onFinish={apply}
-        disabled={byEvent}
-        style={{ display: "flex", flexWrap: "wrap", columnGap: 16, alignItems: "flex-end" }}
-      >
-        <Form.Item name="fromDate" label={t("portal.usage.filter.fromDate")}>
-          <Input type="date" min={MIN_DATE} max={MAX_DATE} />
-        </Form.Item>
-        <Form.Item name="toDate" label={t("portal.usage.filter.toDate")}>
-          <Input type="date" min={MIN_DATE} max={MAX_DATE} />
-        </Form.Item>
-        <Form.Item name="projectId" label={t("portal.usage.filter.project")} style={{ minWidth: 220 }}>
-          {/* ⚠️ `virtual={false}`：项目很少，全部渲染出来，测试才找得到每一项。 */}
-          <Select
-            allowClear
-            virtual={false}
-            loading={projects.isPending}
-            options={(projects.data?.items ?? []).map((project) => ({ value: project.id, label: project.name }))}
-            placeholder={projects.isError ? t("portal.usage.filter.projectsFailed") : t("portal.usage.filter.anyProject")}
-            status={projects.isError ? "error" : ""}
+    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {/* role + aria-label：部署后验收脚本按语义结构找到这一块（不依赖 antd 的类名）。 */}
+      <Card role="region" aria-label={t("portal.usage.title")} title={t("portal.usage.title")}>
+        {byEvent ? (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={t("portal.usage.byEvent.title")}
+            description={
+              <Typography.Text>
+                {t("portal.usage.byEvent.body")} <Typography.Text code>{eventId}</Typography.Text>
+              </Typography.Text>
+            }
+            action={
+              <Button size="small" onClick={showAll}>
+                {t("portal.usage.byEvent.clear")}
+              </Button>
+            }
           />
-        </Form.Item>
-        <Form.Item name="provider" label={t("portal.usage.filter.provider")}>
-          <Input autoComplete="off" spellCheck={false} />
-        </Form.Item>
-        <Form.Item name="model" label={t("portal.usage.filter.model")}>
-          <Input autoComplete="off" spellCheck={false} />
-        </Form.Item>
-        <Form.Item name="conversationId" label={t("portal.usage.filter.conversationId")}>
-          <Input autoComplete="off" spellCheck={false} />
-        </Form.Item>
-        <Form.Item>
-          <Space>
-            <Button type="primary" htmlType="submit">
-              {t("portal.usage.filter.apply")}
-            </Button>
-            <Button onClick={reset}>{t("portal.usage.filter.reset")}</Button>
-          </Space>
-        </Form.Item>
-      </Form>
-      {toolbar}
-      {exportFailure}
-      {body}
-    </Card>
+        ) : null}
+        <Form<UsageFilterValues>
+          form={form}
+          name="customerUsageFilters"
+          layout="vertical"
+          initialValues={initialRange}
+          onFinish={apply}
+          disabled={byEvent}
+          style={{ display: "flex", flexWrap: "wrap", columnGap: 16, alignItems: "flex-end" }}
+        >
+          <Form.Item name="fromDate" label={t("portal.usage.filter.fromDate")}>
+            <Input type="date" min={MIN_DATE} max={MAX_DATE} />
+          </Form.Item>
+          <Form.Item name="toDate" label={t("portal.usage.filter.toDate")}>
+            <Input type="date" min={MIN_DATE} max={MAX_DATE} />
+          </Form.Item>
+          <Form.Item name="projectId" label={t("portal.usage.filter.project")} style={{ minWidth: 220 }}>
+            {/* ⚠️ `virtual={false}`：项目很少，全部渲染出来，测试才找得到每一项。 */}
+            <Select
+              allowClear
+              virtual={false}
+              loading={projects.isPending}
+              options={(projects.data?.items ?? []).map((project) => ({ value: project.id, label: project.name }))}
+              placeholder={projects.isError ? t("portal.usage.filter.projectsFailed") : t("portal.usage.filter.anyProject")}
+              status={projects.isError ? "error" : ""}
+            />
+          </Form.Item>
+          <Form.Item name="provider" label={t("portal.usage.filter.provider")}>
+            <Input autoComplete="off" spellCheck={false} />
+          </Form.Item>
+          <Form.Item name="model" label={t("portal.usage.filter.model")}>
+            <Input autoComplete="off" spellCheck={false} />
+          </Form.Item>
+          <Form.Item name="conversationId" label={t("portal.usage.filter.conversationId")}>
+            <Input autoComplete="off" spellCheck={false} />
+          </Form.Item>
+          <Form.Item>
+            <Space>
+              <Button type="primary" htmlType="submit">
+                {t("portal.usage.filter.apply")}
+              </Button>
+              <Button onClick={reset}>{t("portal.usage.filter.reset")}</Button>
+            </Space>
+          </Form.Item>
+        </Form>
+        {toolbar}
+        {exportFailure}
+        {body}
+      </Card>
+      <MonthlySummaryExport />
+    </Space>
   );
 }
