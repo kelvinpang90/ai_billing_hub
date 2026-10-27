@@ -55,6 +55,10 @@ repository 函数、同一个 5 键视图，唯一的差别是 `month` 必填。
 会话列表（AIH-TASK-121，设计闸门 #460 v2 §2「接口一」）：只读、用 `require_customer`。日期规则与
 用量页相同（恒必填），游标是会话游标（与用量事件的游标不通用）；超时与用量页同一个 422 与同一条
 日志。
+
+会话摘要导出（AIH-TASK-122，设计闸门 #460 v2 §2「接口二」）：与会话列表同一个 repository 函数、
+同一个 9 键视图，只有 `from_date`、`to_date`、`project_id`，没有 `page_size` 与 `cursor`。行数可达
+20 000，所以**占导出租约**；租约、错误处理与行数上限与用量导出逐步相同。
 """
 
 from __future__ import annotations
@@ -85,7 +89,10 @@ from app.repositories import usage_events as usage_repository
 from app.repositories import wallet as wallet_repository
 from app.schemas.customer import CustomerMe
 from app.schemas.customer_conversations import (
+    CONVERSATION_EXPORT_COLUMNS,
+    CONVERSATION_EXPORT_TEXT_COLUMNS,
     CustomerConversationPage,
+    customer_conversation_export_cells,
     customer_conversation_page,
     decode_conversation_cursor,
 )
@@ -513,6 +520,74 @@ def customer_conversations(
         _log_query_timeout(factory, principal.tenant_id)
         raise CustomerUsageQueryTooBroad from None
     return success(page, request_id=current_request_id())
+
+
+@router.get("/conversations/export", response_class=ExportCsvResponse)
+def customer_conversations_export(
+    request: Request,
+    from_date: UsageDate = None,
+    to_date: UsageDate = None,
+    project_id: str | None = None,
+) -> ExportCsvResponse:
+    """The caller's conversations in the period as one CSV attachment, at most 20 000 rows.
+
+    口径与排序同 `GET /conversations`（最后活动倒序），一次取完、没有游标。拿别的客户的项目来
+    只会得到只有表头的文件（INV-8）。
+    """
+    principal = require_customer(request)
+    occurred_from, occurred_to = usage_period(from_date, to_date, has_event_id=False)
+    # 日期恒必填：`usage_period` 已对缺失的抛 422，这里两端都有值。
+    assert occurred_from is not None and occurred_to is not None
+    # 数据库没配置时在这里 503，早于获取租约。
+    factory = require_session_factory(request)
+    token = try_acquire_export_lease()
+    if token is None:
+        raise ExportBusy
+    # 只 hold，不在这里释放：最外层中间件在整个响应发完后释放。
+    request.scope[EXPORT_LEASE_SCOPE_KEY].hold(token)
+    rows = None
+    body = None
+    response = None
+    failed = False
+    try:
+        try:
+            with factory() as session:
+                # 多取一行，只用来判「超了」。
+                rows = usage_repository.list_conversations_for_customer(
+                    session,
+                    principal.tenant_id,
+                    occurred_from=occurred_from,
+                    occurred_to=occurred_to,
+                    limit=EXPORT_MAX_ROWS + 1,
+                    project_id=project_id,
+                )
+        except usage_repository.QueryTooBroad:
+            _log_query_timeout(factory, principal.tenant_id)
+            raise CustomerUsageQueryTooBroad from None
+        if len(rows) > EXPORT_MAX_ROWS:
+            raise ExportTooLarge
+        body = write_csv(
+            CONVERSATION_EXPORT_COLUMNS,
+            (customer_conversation_export_cells(row) for row in rows),
+            CONVERSATION_EXPORT_TEXT_COLUMNS,
+        )
+        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+        rows = None
+        response = csv_response(f"conversations_{from_date}_{to_date}.csv", body)
+        body = None
+    except AppError:
+        raise
+    except Exception:
+        # 与 handle_unexpected_error 同一口径：栈进日志，不带参数值与文件内容。
+        logger.exception("customer_export_failed", extra={"path": request.url.path})
+        failed = True
+    if failed:
+        # 在 except 块之外抛：新异常没有 `__context__`，原异常与它引用的数据此时已可回收。
+        rows = None
+        body = None
+        response = None
+        raise CustomerExportFailed
+    return response
 
 
 def _log_query_timeout(factory: sessionmaker[Session], tenant_id: int) -> None:

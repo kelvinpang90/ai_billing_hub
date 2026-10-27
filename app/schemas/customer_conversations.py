@@ -14,6 +14,9 @@ UTC，保留微秒。
 base64url（不带填充），客户端只能原样传回。与用量事件的游标是两种格式、两个函数：拿事件游标来翻
 会话得到 422，不会错位。解码失败或内容不合规都是 422 `VALIDATION_ERROR`（字段名 `cursor`），
 文案不回显值。
+
+⚠️ 会话摘要导出（AIH-TASK-122，§2「接口二」）的每个单元格都取自上面 9 键视图的
+JSON 值，不直接读查询结果：白名单只有这一份。两个时间列改名加 `_utc`。
 """
 
 from __future__ import annotations
@@ -41,6 +44,28 @@ _CURSOR_TIME: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:
 _CURSOR_PROJECT: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 # 与摄取同一个格式；字符集不含 `|`，三段可以无歧义地切开。
 _CURSOR_CONVERSATION: Final = re.compile(REQUEST_ID_PATTERN)
+
+# 会话摘要导出的表头（设计 §2「接口二」），按这个顺序。
+CONVERSATION_EXPORT_COLUMNS: Final = (
+    "conversation_id",
+    "project_id",
+    "project_name",
+    "first_occurred_at_utc",
+    "last_occurred_at_utc",
+    "request_count",
+    "input_tokens",
+    "output_tokens",
+    "charged_amount",
+)
+# 加公式注入前缀的文本列；时间、整数与金额列不加。
+CONVERSATION_EXPORT_TEXT_COLUMNS: Final = frozenset(
+    {"conversation_id", "project_id", "project_name"}
+)
+# 改名的列：导出列名 → 白名单视图的键。
+_CONVERSATION_EXPORT_RENAMED: Final = {
+    "first_occurred_at_utc": "first_occurred_at",
+    "last_occurred_at_utc": "last_occurred_at",
+}
 
 
 class CustomerConversationView(BaseModel):
@@ -146,9 +171,26 @@ def customer_conversation_page(
     )
 
 
+def customer_conversation_export_cells(row: CustomerConversationRow) -> list[str | None]:
+    """One CSV row in `CONVERSATION_EXPORT_COLUMNS` order: the JSON values of the 9-key view.
+
+    时间与 JSON 接口的 `first_occurred_at` / `last_occurred_at` 逐字相同（不带时区的 UTC、保留
+    微秒）；整数变成十进制字符串，金额是原样的 8 位小数字符串。
+    """
+    view = customer_conversation_view(row).model_dump(mode="json")
+    cells: list[str | None] = []
+    for name in CONVERSATION_EXPORT_COLUMNS:
+        value = view[_CONVERSATION_EXPORT_RENAMED.get(name, name)]
+        cells.append(None if value is None else str(value))
+    return cells
+
+
 __all__ = [
+    "CONVERSATION_EXPORT_COLUMNS",
+    "CONVERSATION_EXPORT_TEXT_COLUMNS",
     "CustomerConversationPage",
     "CustomerConversationView",
+    "customer_conversation_export_cells",
     "customer_conversation_page",
     "customer_conversation_view",
     "decode_conversation_cursor",
