@@ -1,8 +1,8 @@
-# AIH-TASK-125 / 126 / 127 / 128 设计：门户内通知（已批准 v5）
+# AIH-TASK-125 / 126 / 127 / 128 设计：门户内通知（已批准 v7）
 
-> **来源**：设计闸门 Issue #471。本文件是 `APPROVED: design v5` 那一版正文的**逐字副本**（v1、v2、v4 由 Codex 审查、被要求修改；v3 曾获 Codex 批准，登记前预审又查出五处须写明的契约，改为 v4，批准随版本作废；见 §12。v5 由 Codex 审查通过；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v5`）。
+> **来源**：设计闸门 Issue #471。本文件是 `APPROVED: design v7` 那一版正文的**逐字副本**（v1、v2、v4、v6 由 Codex 审查、被要求修改；v3、v5 曾获 Codex 批准，登记前预审又查出须写明或须修正的契约，分别改为 v4、v6，批准随版本作废；见 §12。v7 由 Codex 审查通过；送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v7`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #471 上被批准的 v5 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #471 上被批准的 v7 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：设计闸门 #433（[AIH-TASK-109-low-balance-threshold.md](AIH-TASK-109-low-balance-threshold.md)）写 `tenant.low_balance` 的规则；设计闸门 #368（[AIH-TASK-089-customer-portal-auth.md](AIH-TASK-089-customer-portal-auth.md)）的客户鉴权与 `lock_tenant_for_customer_write`；设计闸门 #460（[AIH-TASK-121-customer-conversations.md](AIH-TASK-121-customer-conversations.md)）的 `AIH-TASK-122..124`（改同几个前端文件与验收脚本，排在它们之后）。
 > §11「任务拆分」的四个实现任务登记为 `AIH-TASK-125`（通知表迁移与模型）→ `AIH-TASK-126`（事件转通知）→ `AIH-TASK-127`（客户通知接口）→ `AIH-TASK-128`（门户通知页），按这个顺序依赖。
 
@@ -24,7 +24,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v5`
+**设计版本**：`v7`
 对应需求：spec §7 第 11 条、§25、§27 第 4 步、§47、§48、§49、§50、§74（`notifications`）、§74.6、§98.1、§129「Portal notifications」；ADR-0009 第 1、3、4 节
 目标 PR：待开（登记 PR）；实现为 AIH-TASK-125..128
 
@@ -87,7 +87,7 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 
 - `uq_notifications_public_id (public_id)`
 - `uq_notifications_source_outbox (source_outbox_id)`
-- `ix_notifications_tenant_occurred (tenant_id, occurred_at, id)`：列表按租户、时间倒序翻页；未读数 `WHERE tenant_id = ? AND read_at IS NULL` 也走它的前缀（每个租户的通知只在状态跃迁时产生，量很小）。
+- `ix_notifications_tenant_occurred (tenant_id, source_outbox_id)`：列表按租户、记账顺序倒序翻页（见 §2「客户接口」排序；索引名沿用，不含 `occurred_at`）；未读数 `WHERE tenant_id = ? AND read_at IS NULL` 也走它的前缀（每个租户的通知只在状态跃迁时产生，量很小）。
 
 模型放 `app/models/notifications.py`，在 `alembic/env.py` 登记。迁移只建这一张表，不改任何已有表、不回填；降级只在表为空时删表（§8）；表结构写进 `docs/database-schema.md`。
 
@@ -129,8 +129,12 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 **`GET /api/v1/customer/notifications`**（只读，`require_customer`，四种账户状态都能读）
 
 - 查询参数：`page_size`（1–100，缺省 20，同 `app/schemas/customers.py` 的常量）、`cursor`（可选，上一页返回的 `next_cursor`；类型是普通字符串，在鉴权之后才校验）。
-- 排序：`occurred_at` 倒序，同一时刻按 `id` 倒序。
-- 游标：就是上一页最后一条的 `notification_id`（`public_id`）。服务端在**本租户**内按 `public_id` 查出它的 `(occurred_at, id)`，再取 `(occurred_at, id) < (c_occ, c_id)` 的行。不是小写规范 UUID 形状（36 字符、8-4-4-4-12），或本租户查不到（包括别的租户的通知）→ 422 `VALIDATION_ERROR`（`InvalidCustomerUsageQuery("cursor")`，与用量页游标无效同一个错误类）；两种情况不区分，都在 `require_customer` 之后判。
+- 排序：**只按 `source_outbox_id` 倒序**（唯一，所以是全序），不按时间、也不按通知行自己的 `id`。理由：
+  - 通知行的 `id` 是投递（结算）顺序，重试会打乱它。
+  - `occurred_at`（= 账本行 `created_at`）也不保证与记账顺序一致：调账服务在取得钱包锁**之前**取时间（`app/services/wallet_adjustments.py`），`app/repositories/wallet.py` 的流水查询注释也写明 `created_at` 不保证与 `wallet_sequence` 同序。一笔先取时间的充值等锁时，后取时间的扣款先入账并停机，充值随后入账并复机——按时间排会把「已停机」显示为最新，与当前状态相反。
+  - `source_outbox_id` 与记账顺序一致：一个租户只有一个钱包，`post_transaction` 在钱包锁内插入账本行与 outbox 行，后一笔要等前一笔提交、放锁后才能插入，所以后记账的事件拿到更大的自增 `id`（InnoDB 在插入时分配自增值，且单调递增）。两条来自同一笔流水的事件（低余额与停机）也各有不同的 `id`，次序固定。
+  - 代价：极少数并发调账下，相邻两条显示的 `occurred_at` 不单调（较新的一条时间略早）。列表的次序反映的是记账先后，接受。
+- 游标：就是上一页最后一条的 `notification_id`（`public_id`）。服务端在**本租户**内按 `public_id` 查出它的 `source_outbox_id`，再取 `source_outbox_id < c_src` 的行。不是小写规范 UUID 形状（36 字符、8-4-4-4-12），或本租户查不到（包括别的租户的通知）→ 422 `VALIDATION_ERROR`（`InvalidCustomerUsageQuery("cursor")`，与用量页游标无效同一个错误类）；两种情况不区分，都在 `require_customer` 之后判。
 - 多取一行判断有没有下一页；`next_cursor` 没有下一页时为 `null`；不返回总数。
 - 响应：
 
@@ -282,7 +286,10 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 | recover 与告警名单 | unit | 名单函数 | 含两类通知事件与两类邮件事件；`outbox_backlog` 数超过 10 分钟仍 `PENDING` 的 `tenant.billing_status_changed`（改写 `test_usage_alerts.py` 里「不计入」的那条） |
 | 邮件类不回归 | integration | 现有 `test_outbox.py` 用例 | 除下一行改写的那一条外照旧通过；邮件类结算仍清空 payload |
 | 仍无处理器的类型不重投 | integration | 改写 `test_outbox.py` 的 `test_recovery_leaves_events_without_a_handler_pending`：等待中的类型换成仍没有处理器的 `tenant.account_status_changed` 与 `tenant.billing_mode_changed`，另加两条通知类事件 | `recover` 重投密码重置行与两条通知类行；两条仍无处理器的行保持 `PENDING`、`attempt_count` 0、payload 不变 |
-| 列表 | integration | 25 条通知、`page_size` 10 | 三页 10/10/5，时间倒序，同一 `occurred_at` 按 `id` 倒序；`next_cursor` 最后为 `null`；每页 `unread_count` 相同；条目恰好 6 个键 |
+| 列表 | integration | 25 条通知、`page_size` 10 | 三页 10/10/5，按 `source_outbox_id` 倒序；`next_cursor` 最后为 `null`；每页 `unread_count` 相同；条目恰好 6 个键 |
+| 投递顺序与记账顺序相反 | integration | 两条通知：`SUSPENDED`（`source_outbox_id` 10、通知 `id` 较大）与 `REACTIVATED`（`source_outbox_id` 11、通知 `id` 较小），同一 `occurred_at`；`page_size` 1 翻两页 | 第一页是 `REACTIVATED`，第二页是 `SUSPENDED`；游标跨这一对不重复、不遗漏 |
+| 时间与记账顺序相反（跨秒） | integration | 两条通知：`SUSPENDED`（`source_outbox_id` 10、`occurred_at` 10:00:05）与 `REACTIVATED`（`source_outbox_id` 11、`occurred_at` 10:00:03，模拟先取时间的充值后入账）；`page_size` 1 翻两页 | 第一页是 `REACTIVATED`（显示 10:00:03），第二页是 `SUSPENDED`；不按时间重排 |
+| 记账顺序即 outbox 顺序 | integration（MySQL） | 同一预付租户：会话 A 取时间后等钱包锁，会话 B 先记一笔扣款触发停机并提交，A 再记一笔充值触发复机 | `REACTIVATED` 的 `source_outbox_id` 大于 `SUSPENDED` 的；投递后列表第一条是 `REACTIVATED` |
 | 游标 | integration | 非 UUID 字符串、大写 UUID、不存在的 UUID | 都是 422 `VALIDATION_ERROR`（字段 `cursor`）；未登录带非法游标仍是 401 |
 | 路径参数 | integration | 标已读用非 UUID 字符串、未登录用字面路径 `{notification_id}` | 前者 404 `NOTIFICATION_NOT_FOUND`；后者 401（路由守卫照常通过） |
 | 标已读 | integration | 标一条；再标一次；全部已读；再全部已读 | `read_at` 首次写入后不变；`unread_count` 递减；`marked` 依次为 N、0 |
@@ -364,3 +371,5 @@ deliver：领取（已有：attempt_count +1、next_retry_at 推后，提交）
 | v3 | 2026-10-27 | §8 写明 0028 判「形状」逐项比哪些（10 列、两个唯一索引、租户时间索引、外键 RESTRICT、两条 CHECK）及这条分支的用途；§7 加「表已存在且形状正确」「表已存在但形状不对」（四个子场景）两行 MySQL 用例 | Codex v2 REQUEST_CHANGES：表已存在的两个升级分支没有测试 |
 | v4 | 2026-10-27 | 定下外键与两条 CHECK 的名称；规则输入加 `aggregate_type`、租户查找放进投递分支；`test_outbox.py` 里「无处理器不重投」那一条改用仍无处理器的两类事件；时间示例去掉 `Z`、写明格式；游标与路径参数按普通字符串接收、在鉴权之后校验（非法路径参数 404） | 登记前预审（`worker.design_precheck`）对 125–127 的五条发现 |
 | v5 | 2026-10-27 | 通知类事件的成功与死信结算都带 `attempt_count = :attempt`（只有当前领取者能结算），旧领取者受影响 0 行时不做任何事（死信分支返回 `superseded`）；§4、§5 补交错的跃迁与失败行；§7 加两条交错用例；§10 记邮件路径的同类缺口为范围外 | Codex v4 REQUEST_CHANGES：旧 worker 最后一次失败可把已被新 worker 领取的行置为 `FAILED`，通知永久缺失 |
+| v6 | 2026-10-27 | 列表同一时刻的次序改按 `source_outbox_id` 倒序（不再按通知 `id`），游标比较键与 `ix_notifications_tenant_occurred` 的第三列随之改为 `source_outbox_id`；§7 加「同一秒、投递顺序与事件顺序相反」用例 | 登记前预审：通知 `id` 是投递顺序，重试后同一秒的停机与复机会倒序显示 |
+| v7 | 2026-10-27 | 列表只按 `source_outbox_id` 倒序（不按 `occurred_at`），游标只比较 `source_outbox_id`，`ix_notifications_tenant_occurred` 改为 `(tenant_id, source_outbox_id)`；写明相邻两条显示时间可能不单调；§7 改写同序用例并加「时间与记账顺序相反（跨秒）」「记账顺序即 outbox 顺序」两行 | Codex v6 REQUEST_CHANGES：`created_at` 在取钱包锁之前取，与记账顺序可能相反，按时间排会把停机显示为最新 |
