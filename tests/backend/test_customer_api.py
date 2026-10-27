@@ -522,6 +522,7 @@ def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
         ("GET", f"{CUSTOMER_PREFIX}/usage-events"),
         ("GET", f"{CUSTOMER_PREFIX}/usage-events/export"),
         ("GET", f"{CUSTOMER_PREFIX}/usage-summary"),
+        ("GET", f"{CUSTOMER_PREFIX}/usage-summary/export"),
     }
 
 
