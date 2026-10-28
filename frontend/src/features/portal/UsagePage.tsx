@@ -10,6 +10,11 @@
  *
  * 查询串带 `event_id` 时（钱包流水跳过来的点查）只按它查：日期与其余筛选都不生效、表单禁用，并有提示与清除入口。
  *
+ * 查询串带 `conversation_id`（且不带 `event_id`）时（会话页点一行跳过来，AIH-TASK-123；设计闸门 #460 v2 §2「前端」），
+ * 进页面那一刻把 `conversation_id`、`project_id` 与 `from_date` / `to_date` 当作初始的已应用筛选与表单值：两个日期缺一
+ * 或不合规时日期用默认区间，其余照用。只在进页面时读一次；之后改筛选照旧只在组件状态里，不写回地址栏。不带
+ * `conversation_id` 时这几个参数都不读，页面与以前完全相同。
+ *
  * 分页是不透明游标，没有页码与总数：「Older」把响应的 `next_cursor` 原样作为下一次的 `cursor`，它为 `null`（没有
  * 更早的行）时按钮不出现；「Newest」回到不带游标的最新一页。换了筛选条件游标自动作废。
  *
@@ -66,6 +71,7 @@ import {
 } from "../../api/customerUsage";
 import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
 import { RequestReference } from "../../components/RequestReference";
+import { ROUTES } from "../../routes/paths";
 import { ChargedAmount, EMPTY, UsageDetail, UsageTime, UsageTypeText, tokenCount } from "./UsageDetail";
 
 /** 每页行数：与接口的默认值相同（docs/api.md：1–100，默认 20）。 */
@@ -73,6 +79,27 @@ export const USAGE_PAGE_SIZE = 20;
 
 /** 查询串里点查用的参数名（AIH-TASK-106 的钱包流水链接用同一个名字）。 */
 export const EVENT_ID_PARAM = "event_id";
+
+/** 会话页跳过来时带的四个参数（与接口的查询参数同名）。只在带 {@link CONVERSATION_ID_PARAM} 时读另外三个。 */
+export const CONVERSATION_ID_PARAM = "conversation_id";
+export const PROJECT_ID_PARAM = "project_id";
+export const FROM_DATE_PARAM = "from_date";
+export const TO_DATE_PARAM = "to_date";
+
+/** 用量页按一次会话看请求的地址：恰好带四个参数，日期是调用方已应用的区间。 */
+export function conversationUsagePath(conversation: {
+  conversationId: string;
+  projectId: string;
+  fromDate: string;
+  toDate: string;
+}): string {
+  const params = new URLSearchParams();
+  params.set(CONVERSATION_ID_PARAM, conversation.conversationId);
+  params.set(PROJECT_ID_PARAM, conversation.projectId);
+  params.set(FROM_DATE_PARAM, conversation.fromDate);
+  params.set(TO_DATE_PARAM, conversation.toDate);
+  return `${ROUTES.portalUsage}?${params.toString()}`;
+}
 
 /** 接口接受的日期范围（含两端）。 */
 export const MIN_DATE = "2020-01-01";
@@ -168,7 +195,25 @@ function trimmed(value: string | undefined): string | undefined {
   return text === "" ? undefined : text;
 }
 
-function RangeProblemText({ problem }: { problem: DateRangeProblem }) {
+/**
+ * 进页面时的已应用筛选与表单值。查询串带 `event_id`、或不带 `conversation_id` 时是默认区间（与以前相同）；带
+ * `conversation_id`（且不带 `event_id`）时另带上会话与项目，日期两个都在且合规时用它们，否则用默认区间。
+ */
+function initialUsageFilters(searchParams: URLSearchParams, now: Date): UsageFilterValues {
+  const range = defaultDateRange(now);
+  const conversationId = trimmed(searchParams.get(CONVERSATION_ID_PARAM) ?? undefined);
+  if (trimmed(searchParams.get(EVENT_ID_PARAM) ?? undefined) !== undefined || conversationId === undefined) {
+    return range;
+  }
+  const fromDate = (searchParams.get(FROM_DATE_PARAM) ?? "").trim();
+  const toDate = (searchParams.get(TO_DATE_PARAM) ?? "").trim();
+  const dates = dateRangeProblem(fromDate, toDate) === null ? { fromDate, toDate } : range;
+  const projectId = trimmed(searchParams.get(PROJECT_ID_PARAM) ?? undefined);
+  return { ...dates, conversationId, ...(projectId === undefined ? {} : { projectId }) };
+}
+
+/** 日期区间不能发给后端的原因（会话页用同一套文案）。 */
+export function RangeProblemText({ problem }: { problem: DateRangeProblem }) {
   const { t } = useTranslation();
   switch (problem) {
     case "missing":
@@ -287,9 +332,10 @@ export function UsagePage() {
   const { t } = useTranslation();
   const [form] = Form.useForm<UsageFilterValues>();
   const [searchParams, setSearchParams] = useSearchParams();
-  // 进页面那一刻的「今天」：停在页面上跨过午夜不会自己换区间，点「Reset」会按新的今天重算。
-  const [initialRange] = useState(() => defaultDateRange(new Date()));
-  const [filters, setFilters] = useState<UsageFilterValues>(initialRange);
+  // 进页面那一刻的「今天」：停在页面上跨过午夜不会自己换区间，点「Reset」会按新的今天重算。会话页跳过来时另带上
+  // 会话、项目与它已应用的区间（只读这一次，之后不写回地址栏）。
+  const [initialFilters] = useState(() => initialUsageFilters(searchParams, new Date()));
+  const [filters, setFilters] = useState<UsageFilterValues>(initialFilters);
   // 游标连同它所属的条件一起记：条件一变，旧条件下的游标自动作废，回到最新一页。
   const [paging, setPaging] = useState<{ scope: string; cursor: string } | null>(null);
 
@@ -371,7 +417,8 @@ export function UsagePage() {
   const reset = (): void => {
     const range = defaultDateRange(new Date());
     form.resetFields();
-    form.setFieldsValue(range);
+    // 初始值里可能有会话页带来的会话与项目：「Reset」回到不带任何筛选的默认区间，把它们也清掉。
+    form.setFieldsValue({ ...range, projectId: undefined, conversationId: undefined });
     setFilters(range);
     clearExportFailure();
   };
@@ -533,7 +580,7 @@ export function UsagePage() {
           form={form}
           name="customerUsageFilters"
           layout="vertical"
-          initialValues={initialRange}
+          initialValues={initialFilters}
           onFinish={apply}
           disabled={byEvent}
           style={{ display: "flex", flexWrap: "wrap", columnGap: 16, alignItems: "flex-end" }}

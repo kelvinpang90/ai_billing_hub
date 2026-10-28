@@ -86,6 +86,13 @@ export const ROUTES = {
    * `scripts/acceptance/admin_customers.mjs` 的 `check_portal_usage` 按这个 href 找门户导航的链接，改了要同步那里。
    */
   portalUsage: "/portal/usage",
+  /**
+   * 客户门户会话页（AIH-TASK-123，设计闸门 #460 v2 §2「前端」）。在 {@link ROUTES.portalHome} 之下；点一行跳到
+   * {@link ROUTES.portalUsage} 并带上 `conversation_id`、`project_id`、`from_date`、`to_date`（`features/portal/UsagePage.tsx`
+   * 的 `conversationUsagePath`）。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `check_portal_conversations` 按这个
+   * href 找门户导航的链接，改了要同步那里。
+   */
+  portalConversations: "/portal/conversations",
 } as const;
 
 /**
