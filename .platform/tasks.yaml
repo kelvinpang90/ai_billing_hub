@@ -7982,7 +7982,7 @@ tasks:
       - '新文件 app/schemas/wallet_reconciliation.py：运行视图恰好 run_id、run_date、status、started_at、finished_at、wallets_checked、wallets_inconsistent 七个键；不一致视图恰好 customer_id、company_name、problem_codes（字符串数组，按存储顺序拆开）、balance（money_text 或 null）、wallet_version、ledger_rows、checked_at 七个键；不继承、不复用别的模型；新错误 ReconciliationRunNotFound（404 RECONCILIATION_RUN_NOT_FOUND）'
       - '新文件 app/api/admin_wallet_reconciliation.py：两个处理函数第一条语句显式调用 require_admin；page 与 page_size 用与 admin_audit.py 相同的别名与范围；运行列表按 started_at 倒序、同一时刻按 id 倒序；findings 的 run_id 是普通字符串路径参数（不在 FastAPI 层校验形状，路由守卫用字面路径请求），鉴权之后不是小写规范 UUID 或查不到时 404，按 tenant_id 升序、JOIN tenants 取 public_id 与 company_name；只读：一个普通会话、不提交、不写审计与日志；路由器按现有方式挂进应用'
       - '测试：新增 tests/backend/test_admin_wallet_reconciliation_api.py 覆盖设计 §7 管理端列表、管理端 findings、路径参数、鉴权各行（运行与 findings 直接用模型插入，不经核对任务）；SQLite 与 MySQL 参数化，MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 全零；tests/backend/test_admin_customers_api.py 只把两个新路由加进 EXPECTED_ADMIN_ROUTES，别的不动'
-      - 'docs/api.md 新增「钱包核对」一节：两个接口的参数、响应键及含义（运行状态三种、一天至多一次、findings 只记不一致的钱包、问题码清单与含义、balance 与 wallet_version 为 null 的情形）、排序与分页、错误码；不写主机名'
+      - 'docs/api.md 新增「钱包核对」一节：两个接口的参数、响应键及含义（运行状态三种；同一时刻至多一条 RUNNING，一天通常一次完成的运行，但同一 run_date 可能有多条——被收尾的 ABANDONED 行不挡住当天再开始，极少数并发下同一天会多完成一次，照设计 §2「数据库」与「核对运行」第 1 步写；findings 只记不一致的钱包、问题码清单与含义、balance 与 wallet_version 为 null 的情形）、排序与分页、错误码；不写主机名'
       - '不改 app/repositories/wallet.py、app/services/、app/tasks/、迁移与模型、客户接口、前端与 AI 模块（AIH-TASK-130 到 133 已交付判定、核对与告警，发现缺陷时停下说明）；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支'
       - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474'
     allowed_change_paths:
