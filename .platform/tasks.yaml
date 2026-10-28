@@ -7491,7 +7491,7 @@ tasks:
       - '新增 alembic/versions/20261028_0028_notifications.py，revision 为 0028_notifications，down_revision 为 0027_wallet_tx_created_index；文件头按 0027 迁移的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明只建新表、不改任何已有表、不回填'
       - 'upgrade：先用 SQLAlchemy inspector 判 notifications 表：不存在 → 建表；存在且列、可空性、唯一索引、索引列顺序、外键都与设计一致 → 跳过、不发 DDL；其余 → 抛错（消息点名该表与处理方法）且不发任何 DDL。列、类型、可空性、约束名与索引名逐个照设计 §2 的表：public_id 唯一、source_outbox_id 唯一且不建外键、tenant_id 外键 fk_notifications_tenant 到 tenants.id 且 ON DELETE RESTRICT、ix_notifications_tenant_occurred 列顺序为 tenant_id、source_outbox_id；两条 CHECK（ck_notifications_type：类型只许三个值；ck_notifications_threshold：threshold 非空当且仅当类型为 LOW_BALANCE）的条件文本两库同义。downgrade 只在表为空时删表：先查表里有没有任何一行，有就抛错（消息点名这张表、处理方法是保留表只回滚应用镜像）且不发任何 DDL、不删任何行；表不存在时什么都不做。离线 --sql 模式下无法判断表是否为空，downgrade 直接抛错（消息说明须在线执行），不输出 DROP TABLE；upgrade 的离线行为照 0027 的写法'
       - '新增 app/models/notifications.py：Notification 模型与 NotificationType 枚举（LOW_BALANCE、SUSPENDED、REACTIVATED），金额列用 app/models/base.py 的 Money，枚举列 Enum(native_enum=False, length=32)，__table_args__ 声明与迁移同名同序的索引与两条 CHECK（条件文本与迁移一致，空白除外）；alembic/env.py 照现有写法登记这个模块；不改任何既有模型'
-      - '测试：新增 tests/backend/test_notifications_migration.py，覆盖设计 §7 迁移形状与 CHECK 两行，写法照 tests/backend/test_wallet_created_index_migration.py：迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑；0006 起的迁移先查 @@log_bin），含空表的 0027 → 0028 → 0027 → 0028 往返、表已存在且形状正确时重跑升级不发 DDL 且版本号到 0028、表已存在但形状不对的四个子场景（缺一条 CHECK、缺租户时间索引、外键不是 RESTRICT、多一列）各自抛错且不发 DDL 且版本号仍为 0027、带数据降级（两条通知其一已读）抛错且不发 DDL、行与 read_at 原样、alembic_version 仍为 0028、离线 --sql 模式的降级抛错且输出里没有 DROP TABLE、重跑 upgrade 不发 DDL、形状不对时抛错且不发 DDL、降级后其余表的结构快照与升级前相同；CHECK 三种非法插入在 SQLite（模型 metadata 建表）与 MySQL 上都被拒；tests/backend/test_migrations.py 的模型与迁移列宽比对照常通过，需要时只在它的显式清单里补这张表'
+      - '测试：新增 tests/backend/test_notifications_migration.py，覆盖设计 §7 迁移形状与 CHECK 两行，写法照 tests/backend/test_wallet_created_index_migration.py：迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑；0006 起的迁移先查 @@log_bin），含空表的 0027 → 0028 → 0027 → 0028 往返、表已存在且形状正确时重跑升级不发 DDL 且版本号到 0028、表已存在但形状不对的四个子场景（缺一条 CHECK、缺租户时间索引、外键不是 RESTRICT、多一列）各自抛错且不发 DDL 且版本号仍为 0027、带数据降级（两条通知其一已读）抛错且不发 DDL、行与 read_at 原样、alembic_version 仍为 0028、离线 --sql 模式的降级抛错且输出里没有 DROP TABLE、重跑 upgrade 不发 DDL、形状不对时抛错且不发 DDL、降级后其余表的结构快照与升级前相同；CHECK 三种非法插入在 SQLite（模型 metadata 建表）与 MySQL 上都被拒；tests/backend/test_migrations.py 的模型与迁移列宽比对照常通过，需要时只在它的显式清单里补这张表；tests/backend/test_fx_rates_db.py 的 test_upgrade_and_downgrade 只在降级到 0014 后的表集合的显式清单里补这张表，其余不动'
       - 'docs/database-schema.md 新增 notifications 一节：10 列及含义、约束与索引及用途、source_outbox_id 为什么不建外键（设计 §9 B）、表非空时降级被拒与生产只回滚镜像不降级（设计 §8）、行由谁写（AIH-TASK-126 的 outbox 投递）'
       - '不改接口、schema、repository、服务、outbox 任务与前端；不改钱包与账本代码；不改既有迁移文件；不改 AI 模块'
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #471'
@@ -7501,6 +7501,7 @@ tasks:
       - alembic/env.py
       - tests/backend/test_notifications_migration.py
       - tests/backend/test_migrations.py
+      - tests/backend/test_fx_rates_db.py
       - docs/database-schema.md
     allowed_commands:
       - docs.check
