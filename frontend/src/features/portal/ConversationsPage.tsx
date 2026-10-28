@@ -19,10 +19,16 @@
  *
  * 三种状态都画出来：加载中、失败（带 request_id）、空列表；`QUERY_TOO_BROAD` 显示专门文案。
  *
+ * 「Export CSV」（AIH-TASK-124；设计闸门 #460 v2 §2「前端」，语义以 docs/api.md「客户导出」的 conversations/export
+ * 小节为准）用页面**当前已应用**的筛选（日期与项目，不是表单里还没点「Apply filters」的值）调
+ * `GET /api/v1/customer/conversations/export`，交给浏览器下载；不带 `page_size` 与 `cursor`。日期区间无效时按钮不可用；
+ * 导出中按钮转为加载状态、不可重复点。`EXPORT_TOO_LARGE`、`QUERY_TOO_BROAD`、`EXPORT_BUSY` 各有专门文案，其余失败带
+ * request_id；换筛选时收起上一次的失败。导出不影响列表、筛选与翻页。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。
  */
 
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import {
   Alert,
   Button,
@@ -44,11 +50,14 @@ import { Link, useNavigate } from "react-router";
 import { ApiError } from "../../api/client";
 import {
   customerConversationListQueryKey,
+  exportCustomerConversations,
   listCustomerConversations,
   type CustomerConversation,
+  type CustomerConversationExportQuery,
   type CustomerConversationQuery,
 } from "../../api/customerConversations";
 import { CUSTOMER_PROJECTS_QUERY_KEY, QUERY_TOO_BROAD, listCustomerProjects } from "../../api/customerUsage";
+import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
 import { RequestReference } from "../../components/RequestReference";
 import { ChargedAmount, UsageTime, tokenCount } from "./UsageDetail";
 import {
@@ -73,6 +82,29 @@ interface ConversationFilterValues {
 /** 一行的 key：会话的键是（项目, `conversation_id`），同一个 id 可以出现在两个项目里。 */
 function rowKey(row: CustomerConversation): string {
   return `${row.project_id}|${row.conversation_id}`;
+}
+
+/** 导出失败的说明：三种可以由客户自己处理的错误各有专门文案，其余是通用文案（request_id 另外显示）。 */
+function ExportFailureText({ error }: { error: Error }) {
+  const { t } = useTranslation();
+  const code = error instanceof ApiError ? error.code : null;
+  switch (code) {
+    case EXPORT_TOO_LARGE:
+      return t("portal.conversations.export.tooLarge");
+    case QUERY_TOO_BROAD:
+      return t("portal.conversations.export.tooBroad");
+    case EXPORT_BUSY:
+      return t("portal.conversations.export.busy");
+    default:
+      return t("portal.conversations.export.failed");
+  }
+}
+
+const SPECIFIC_EXPORT_FAILURES: ReadonlySet<string> = new Set([EXPORT_TOO_LARGE, QUERY_TOO_BROAD, EXPORT_BUSY]);
+
+/** 三种专门文案之外的失败：要显示 request_id。 */
+function isGenericExportFailure(error: Error): boolean {
+  return !(error instanceof ApiError) || !SPECIFIC_EXPORT_FAILURES.has(error.code);
 }
 
 export function ConversationsPage() {
@@ -100,6 +132,12 @@ export function ConversationsPage() {
   const scope = JSON.stringify(base);
   const cursor = paging !== null && paging.scope === scope ? paging.cursor : null;
 
+  // 导出用已应用的筛选（与列表同一份），不带 pageSize 与 cursor。区间不合规时没有可导出的条件，按钮不可用。
+  let exportQuery: CustomerConversationExportQuery | null = null;
+  if (base !== null) {
+    exportQuery = { fromDate: base.fromDate, toDate: base.toDate, projectId: base.projectId ?? null };
+  }
+
   const projects = useQuery({
     queryKey: CUSTOMER_PROJECTS_QUERY_KEY,
     queryFn: ({ signal }) => listCustomerProjects(signal),
@@ -126,8 +164,28 @@ export function ConversationsPage() {
       toDate: filters.toDate,
     });
 
+  const exporting = useMutation({
+    mutationFn: (query: CustomerConversationExportQuery) => exportCustomerConversations(query),
+  });
+
+  const startExport = (): void => {
+    // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
+    if (exportQuery === null || exporting.isPending) {
+      return;
+    }
+    exporting.mutate(exportQuery);
+  };
+
+  // 上一次导出的失败说的是旧的筛选条件，换条件时收起。只收失败：导出中 reset 会让按钮提前恢复可点。
+  const clearExportFailure = (): void => {
+    if (exporting.isError) {
+      exporting.reset();
+    }
+  };
+
   const apply = (values: ConversationFilterValues): void => {
     setFilters({ ...values, fromDate: values.fromDate.trim(), toDate: values.toDate.trim() });
+    clearExportFailure();
   };
 
   const reset = (): void => {
@@ -135,6 +193,7 @@ export function ConversationsPage() {
     form.resetFields();
     form.setFieldsValue(range);
     setFilters(range);
+    clearExportFailure();
   };
 
   const next = conversations.data?.next_cursor ?? null;
@@ -274,17 +333,31 @@ export function ConversationsPage() {
         </Form.Item>
       </Form>
       <Typography.Paragraph type="secondary">{t("portal.conversations.note")}</Typography.Paragraph>
-      {problem === null ? (
-        <Space wrap style={{ marginBottom: 16 }}>
+      <Space wrap style={{ marginBottom: 16 }}>
+        {problem === null ? (
           <Button onClick={() => setPaging(null)} disabled={cursor === null}>
             {t("portal.usage.newest")}
           </Button>
-          {next !== null && !conversations.isError ? (
-            <Button onClick={() => setPaging({ scope, cursor: next })} disabled={!settled}>
-              {t("portal.usage.older")}
-            </Button>
-          ) : null}
-        </Space>
+        ) : null}
+        {problem === null && next !== null && !conversations.isError ? (
+          <Button onClick={() => setPaging({ scope, cursor: next })} disabled={!settled}>
+            {t("portal.usage.older")}
+          </Button>
+        ) : null}
+        <Button onClick={startExport} loading={exporting.isPending} disabled={exportQuery === null || exporting.isPending}>
+          {t("portal.conversations.export.button")}
+        </Button>
+      </Space>
+      {exporting.error ? (
+        <Alert
+          type="error"
+          showIcon
+          closable
+          onClose={() => exporting.reset()}
+          style={{ marginBottom: 16 }}
+          message={<ExportFailureText error={exporting.error} />}
+          description={isGenericExportFailure(exporting.error) ? <RequestReference error={exporting.error} /> : null}
+        />
       ) : null}
       {body}
     </Card>

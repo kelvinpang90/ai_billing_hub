@@ -18,7 +18,8 @@
  * AIH-TASK-118 加了门户钱包页导出区的一个只读步骤（check_portal_wallet_export），排在 check_portal_wallet 之后；
  * AIH-TASK-120 加了门户用量页月度汇总导出区的一个只读步骤（check_portal_monthly_export），排在 check_portal_usage_export
  * 之后（设计闸门 #457 §2「前端」写的步骤名 check_portal_usage_summary_export 超过 32 字符上限，按任务契约改为此名）；
- * AIH-TASK-123 加了门户会话页的一个只读步骤（check_portal_conversations），排在 login_customer 之后，经门户导航自己进会话页。
+ * AIH-TASK-123 加了门户会话页的一个只读步骤（check_portal_conversations），排在 login_customer 之后，经门户导航自己进会话页；
+ * AIH-TASK-124 加了门户会话页导出按钮的一个只读步骤（check_portal_conv_export），排在 check_portal_conversations 之后。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -93,6 +94,8 @@
  * - 门户会话页（check_portal_conversations）只点门户导航里的「Conversations」（href 为 /portal/conversations）这一个链接：
  *   用页面默认的日期区间，不动日期、项目筛选，不点「Apply filters」「Reset」（不提交任何表单）、不点「Older」「Newest」
  *   （不翻页）、不点表格的任何一行或会话 ID 链接（不跳到用量页）、不点任何别的按钮与链接。
+ * - 门户会话页的导出按钮（check_portal_conv_export）只查不点：停留在 check_portal_conversations 打开的会话页，不点
+ *   「Export CSV」（验收不下载文件）、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
  * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
  *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
@@ -393,6 +396,15 @@
  *                   字符串运算、不经浮点）数值相同 —— 比较规则同 check_portal_usage；items 为空时显示空状态
  *                   （portal.conversations.empty）、没有数据行，同样算通过。不点行、不翻页、不提交任何表单。报到前把会话一块滚动到
  *                   视口里（规则同 check_portal_wallet）
+ *   check_portal_conv_export
+ *                   本次运行跑过 login_customer 且 check_portal_conversations 已成功跑完才能跑（否则 assertion_failed），所以要排在
+ *                   check_portal_conversations 之后：它不自己导航、不点任何链接，只认当前页面是会话页（地址是 /portal/conversations，
+ *                   否则 navigation_failed）。页面落定：门户外壳在、管理端顶栏不在，会话一块（role=region、aria-label 为
+ *                   「Conversations」）不再显示 portal.conversations.loading；一块里文字为「Export CSV」（en.json 的
+ *                   portal.conversations.export.button）的按钮恰好一个，且处于可用状态（没有 disabled 属性、aria-disabled 不是 true；
+ *                   页面用默认的日期区间，按钮应当可用）。找不到按钮是 element_missing，按钮在但一直不可用或不止一个是
+ *                   assertion_failed。**不点**这个按钮（验收不下载文件）、不改筛选、不提交任何表单。报到前把会话一块滚动到视口里
+ *                   （规则同 check_portal_wallet）
  *   check_portal_usage_summary
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
  *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
@@ -633,6 +645,7 @@ const TEXT = {
   portalConversationsEmpty: "No conversations match these filters.", // portal.conversations.empty
   portalConversationsId: "Conversation ID", // portal.conversations.field.conversationId —— 会话表格的列头
   portalConversationsCharged: "Charged (MYR)", // portal.conversations.field.chargedAmount
+  portalConversationsExport: "Export CSV", // portal.conversations.export.button —— 会话页的导出按钮，只查不点
   portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
   portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
   portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
@@ -3748,6 +3761,50 @@ function probePortalConversations(lib, T) {
   return out;
 }
 
+/**
+ * 门户会话页导出按钮的状态：门户外壳、管理端顶栏在不在；会话一块（role=region、aria-label 为「Conversations」）在不在、
+ * 在不在加载；一块里文字为「Export CSV」的按钮有几个，恰好一个时它是否可用（没有 disabled 属性、aria-disabled 不是
+ * true）。按钮在导出中会多一个 loading 图标，图标没有文字，不影响按文字找。只读 DOM，不点、不填。
+ */
+function probePortalConvExport(lib, T) {
+  const header = document.querySelector("header");
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalConversationsTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    buttons: 0,
+    enabled: false,
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy =
+    region.querySelector('[aria-busy="true"]') !== null ||
+    [...region.querySelectorAll("*")].some(
+      (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalConversationsLoading,
+    );
+  const buttons = [...region.querySelectorAll("button")].filter(
+    (el) => lib.norm(el.textContent) === T.portalConversationsExport,
+  );
+  out.buttons = buttons.length;
+  if (buttons.length === 1) {
+    const button = buttons[0];
+    out.enabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  }
+  return out;
+}
+
 /** 门户导航里文字为「Conversations」、href 恰好为 /portal/conversations 的链接。只点这一个。 */
 function clickPortalNavConversations(lib, T) {
   const header = document.querySelector("header");
@@ -6450,6 +6507,53 @@ async function stepCheckPortalConversations(ctx) {
   if (!visible.ok) {
     throw fail("assertion_failed");
   }
+  ctx.portalConversationsChecked = true;
+}
+
+async function stepCheckPortalConvExport(ctx) {
+  // 不自己导航：只认 check_portal_conversations 在本次运行里已经打开并核对过的会话页。
+  if (ctx.customerLoginSeq === null || !ctx.portalConversationsChecked) {
+    throw fail("assertion_failed");
+  }
+
+  // 停留在会话页（默认日期区间，筛选没动过），等会话一块落定、导出按钮恰好一个且可用。只查不点。
+  const settled = await waitFor(
+    () => evaluate(probePortalConvExport, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalConversationsPath ||
+      (s.portalShell && s.region && !s.busy && s.buttons === 1 && s.enabled),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    // 按钮在但一直不可用（或不止一个）是断言失败；找不到按钮或会话一块是元素缺失。
+    throw fail(settled.value !== null && settled.value.buttons > 0 ? "assertion_failed" : "element_missing");
+  }
+  const page = settled.value;
+  if (page.appError) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalConversationsPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // Worker 在报到后截图：把会话一块（按钮在它的工具栏里）滚进视口。只滚动，不点导出按钮或任何别的东西。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_CONVERSATIONS_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_CONVERSATIONS_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
 }
 
 const STEPS = {
@@ -6485,6 +6589,7 @@ const STEPS = {
   check_portal_usage_export: stepCheckPortalUsageExport,
   check_portal_monthly_export: stepCheckPortalMonthlyExport,
   check_portal_conversations: stepCheckPortalConversations,
+  check_portal_conv_export: stepCheckPortalConvExport,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
   check_portal_low_balance: stepCheckPortalLowBalance,
 };
@@ -6534,6 +6639,8 @@ async function main() {
     portalUsageExportChecked: false,
     /** check_portal_wallet 成功跑完后为 true：check_portal_wallet_export 只在这之后、停在钱包页上跑。 */
     portalWalletChecked: false,
+    /** check_portal_conversations 成功跑完后为 true：check_portal_conv_export 只在这之后、停在会话页上跑。 */
+    portalConversationsChecked: false,
   };
 
   try {
