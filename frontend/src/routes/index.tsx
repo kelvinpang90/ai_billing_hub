@@ -5,7 +5,7 @@
  * 管理端 AI 目录（AIH-TASK-035）、管理端供应商价格与汇率（AIH-TASK-036）、管理端定价规则与试算
  * （AIH-TASK-037）、管理端用量事件与重新入队（AIH-TASK-038）、管理端用量分析（AIH-TASK-074）、
  * 客户门户首页（AIH-TASK-096，管理端与门户按 `RequireRole` 分流）、客户门户钱包页（AIH-TASK-100）、客户门户用量页
- * （AIH-TASK-105）与兜底页。
+ * （AIH-TASK-105）、客户门户会话页（AIH-TASK-123）与兜底页。
  * **不预建 spec §101 列的其余 feature 目录** —— 空目录会让人以为「那块已经开工了」，
  * 和 runbook 不预留空标题是同一条道理。每个 feature 在它自己那个 Phase 落地时再建。
  *
@@ -111,6 +111,9 @@ const WalletPage = lazy(() =>
 const UsagePage = lazy(() =>
   import("../features/portal/UsagePage").then((m) => ({ default: m.UsagePage })),
 );
+const ConversationsPage = lazy(() =>
+  import("../features/portal/ConversationsPage").then((m) => ({ default: m.ConversationsPage })),
+);
 const NotFoundPage = lazy(() =>
   import("./NotFoundPage").then((m) => ({ default: m.NotFoundPage })),
 );
@@ -177,6 +180,7 @@ export function AppRoutes() {
                 <Route path={ROUTES.portalHome} element={<PortalHomePage />} />
                 <Route path={ROUTES.portalWallet} element={<WalletPage />} />
                 <Route path={ROUTES.portalUsage} element={<UsagePage />} />
+                <Route path={ROUTES.portalConversations} element={<ConversationsPage />} />
               </Route>
             </Route>
           </Route>

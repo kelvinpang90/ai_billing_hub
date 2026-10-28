@@ -17,7 +17,8 @@
  * AIH-TASK-117 加了门户用量页导出按钮的一个只读步骤（check_portal_usage_export），排在 check_portal_usage 之后；
  * AIH-TASK-118 加了门户钱包页导出区的一个只读步骤（check_portal_wallet_export），排在 check_portal_wallet 之后；
  * AIH-TASK-120 加了门户用量页月度汇总导出区的一个只读步骤（check_portal_monthly_export），排在 check_portal_usage_export
- * 之后（设计闸门 #457 §2「前端」写的步骤名 check_portal_usage_summary_export 超过 32 字符上限，按任务契约改为此名）。
+ * 之后（设计闸门 #457 §2「前端」写的步骤名 check_portal_usage_summary_export 超过 32 字符上限，按任务契约改为此名）；
+ * AIH-TASK-123 加了门户会话页的一个只读步骤（check_portal_conversations），排在 login_customer 之后，经门户导航自己进会话页。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -89,6 +90,9 @@
  *   （验收不下载文件）、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
  * - 门户用量页的月度汇总导出区（check_portal_monthly_export）只查不点：停留在 check_portal_usage 打开的用量页，不点
  *   「Export monthly summary」（验收不下载文件）、不改月份输入、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
+ * - 门户会话页（check_portal_conversations）只点门户导航里的「Conversations」（href 为 /portal/conversations）这一个链接：
+ *   用页面默认的日期区间，不动日期、项目筛选，不点「Apply filters」「Reset」（不提交任何表单）、不点「Older」「Newest」
+ *   （不翻页）、不点表格的任何一行或会话 ID 链接（不跳到用量页）、不点任何别的按钮与链接。
  * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
  *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
@@ -374,6 +378,21 @@
  *                   找不到导出区、月份输入或按钮是 element_missing；月份输入的值不形如 YYYY-MM、按钮在但一直不可用或不止一个是
  *                   assertion_failed。**不点**这个按钮（验收不下载文件）、不改月份、不提交任何表单。报到前把导出区滚动到视口里
  *                   （规则同 check_portal_wallet）
+ *   check_portal_conversations
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Conversations」链接（en.json 的
+ *                   portal.nav.conversations，href 为 paths.ts 的 portalConversations，即 /portal/conversations）进会话页，用页面
+ *                   默认的日期区间（马来西亚时间本月 1 日到今天），不改任何筛选。页面落定：地址是 /portal/conversations，门户外壳
+ *                   在、管理端顶栏不在，会话一块（role=region、aria-label 为「Conversations」，portal.conversations.title）不再显示
+ *                   portal.conversations.loading。显示 portal.conversations.queryTooBroad（默认区间的会话聚合超过了后端 2 秒的执行
+ *                   预算，设计闸门 #460 §2）是 assertion_failed，显示 portal.conversations.loadFailed 是 page_error。后端值取页面在
+ *                   点击之后自己发出的、不带 cursor 的 GET /api/v1/customer/conversations 的响应体（被动观察，不自己发请求、不拦截；
+ *                   取最近一次读完的那一次）：响应是 422、错误码 QUERY_TOO_BROAD 时同样是 assertion_failed（默认区间都聚合不完，
+ *                   会话页对这个客户不可用），其余不是 200 的响应也是 assertion_failed。会话表格（表头有「Conversation ID」
+ *                   「Charged (MYR)」）里带 data-row-key 的数据行数与响应 data.items 的条数一致；items 非空时第一行「Charged (MYR)」
+ *                   列的文字去掉空白与千分位逗号后，与 items 第一项 charged_amount 按 6 位 ROUND_HALF_UP 舍入后的值（roundHalfUp：
+ *                   字符串运算、不经浮点）数值相同 —— 比较规则同 check_portal_usage；items 为空时显示空状态
+ *                   （portal.conversations.empty）、没有数据行，同样算通过。不点行、不翻页、不提交任何表单。报到前把会话一块滚动到
+ *                   视口里（规则同 check_portal_wallet）
  *   check_portal_usage_summary
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
  *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
@@ -604,6 +623,16 @@ const TEXT = {
   portalMonthlyTitle: "Monthly summary", // portal.usage.monthly.title —— 用量页月度汇总导出区的 aria-label
   portalMonthlyMonth: "Month (Malaysia time)", // portal.usage.monthly.month —— 导出区月份输入的 label，只读不改
   portalMonthlyExport: "Export monthly summary", // portal.usage.monthly.button —— 导出区的导出按钮，只查不点
+  portalNavConversations: "Conversations", // portal.nav.conversations —— 门户导航的会话项
+  portalConversationsTitle: "Conversations", // portal.conversations.title —— 会话一块的 aria-label
+  portalConversationsLoading: "Loading your conversations…", // portal.conversations.loading
+  portalConversationsLoadFailed: "Your conversations could not be loaded.", // portal.conversations.loadFailed
+  // portal.conversations.queryTooBroad
+  portalConversationsTooBroad:
+    "This search covers too much usage to finish in time. Narrow the date range or choose a project, then try again.",
+  portalConversationsEmpty: "No conversations match these filters.", // portal.conversations.empty
+  portalConversationsId: "Conversation ID", // portal.conversations.field.conversationId —— 会话表格的列头
+  portalConversationsCharged: "Charged (MYR)", // portal.conversations.field.chargedAmount
   portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
   portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
   portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
@@ -657,6 +686,7 @@ const TEXT = {
   portalHomePath: "/portal",
   portalWalletPath: "/portal/wallet",
   portalUsagePath: "/portal/usage",
+  portalConversationsPath: "/portal/conversations",
   // 管理端顶栏各项指向的路径（paths.ts 的 dashboard、customers、audit、catalogProviders、catalogMeterTypes、
   // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics）。门户首页上不许有指向它们的链接。
   adminPaths: [
@@ -764,6 +794,9 @@ const USAGE_PLACES = 6;
 
 /** 客户自己的用量汇总接口的路径（frontend/src/api/customerUsage.ts 的 CUSTOMER_USAGE_SUMMARY_URL）。 */
 const CUSTOMER_USAGE_SUMMARY_API = /^\/api\/v1\/customer\/usage-summary$/;
+
+/** 客户自己的会话接口的路径（frontend/src/api/customerConversations.ts 的 CUSTOMER_CONVERSATIONS_URL）。 */
+const CUSTOMER_CONVERSATIONS_API = /^\/api\/v1\/customer\/conversations$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -1242,6 +1275,8 @@ const network = {
   customerUsage: new Map(),
   /** 客户自己的用量汇总接口（只记 GET）：requestId → { newest, status, finished, failed, seq }。查询串本身不保存。 */
   customerUsageSummary: new Map(),
+  /** 客户自己的会话接口（只记 GET）：requestId → { newest, status, finished, failed, seq }。查询串本身不保存。 */
+  customerConversations: new Map(),
   seq: 0,
 };
 
@@ -1262,8 +1297,32 @@ function trackedRequest(requestId) {
     network.customerWallet.get(requestId) ??
     network.customerTransactions.get(requestId) ??
     network.customerUsage.get(requestId) ??
-    network.customerUsageSummary.get(requestId)
+    network.customerUsageSummary.get(requestId) ??
+    network.customerConversations.get(requestId)
   );
+}
+
+/**
+ * 是不是客户自己的会话接口（同源 https、路径恰好是 /api/v1/customer/conversations）：是的话回 { newest }（不带 cursor
+ * 的最新一页，即页面按日期区间查的第一页），不是回 null。只留这一个布尔，不保存 URL。
+ */
+function customerConversationsTarget(url) {
+  if (typeof url !== "string") {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== network.host ||
+      !CUSTOMER_CONVERSATIONS_API.test(parsed.pathname)
+    ) {
+      return null;
+    }
+    return { newest: !parsed.searchParams.has("cursor") };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1699,6 +1758,16 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        const customerConversations = customerConversationsTarget(params.request?.url);
+        if (customerConversations !== null && params.request?.method === "GET") {
+          network.customerConversations.set(params.requestId, {
+            newest: customerConversations.newest,
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -1952,7 +2021,9 @@ function latestCustomerMeResponse(afterSeq) {
  * GET /api/v1/customer/wallet/transactions（network.customerTransactions，只认 newest）里最近的一次（任何状态码，
  * 由调用方判）；还有在路上的就回 null，等它落定。check_portal_usage 拿它取不带 cursor 与 event_id 的
  * GET /api/v1/customer/usage-events（network.customerUsage，同样只认 newest）；check_portal_usage_summary 拿它取
- * 不带 month 的 GET /api/v1/customer/usage-summary（network.customerUsageSummary，同样只认 newest）。
+ * 不带 month 的 GET /api/v1/customer/usage-summary（network.customerUsageSummary，同样只认 newest）；
+ * check_portal_conversations 拿它取不带 cursor 的 GET /api/v1/customer/conversations（network.customerConversations，
+ * 同样只认 newest）。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -3607,6 +3678,84 @@ function clickPortalNavUsage(lib, T) {
   }
   for (const a of header.querySelectorAll("a")) {
     if (lib.norm(a.textContent) === T.portalNavUsage && a.getAttribute("href") === T.portalUsagePath) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 门户会话页的状态：门户外壳、管理端顶栏在不在；会话一块（role=region、aria-label 为「Conversations」）在加载、加载失败、
+ * 查询过宽、空状态，以及表格（表头有「Conversation ID」「Charged (MYR)」）里带 data-row-key 的数据行数与第一行
+ * 「Charged (MYR)」列的文字。只读 DOM，不点、不填。
+ */
+function probePortalConversations(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalConversationsTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    tooBroad: false,
+    empty: false,
+    table: false,
+    rows: 0,
+    firstCharged: null,
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(region, T.portalConversationsLoading);
+  out.failed = has(region, T.portalConversationsLoadFailed);
+  out.tooBroad = has(region, T.portalConversationsTooBroad);
+  out.empty = has(region, T.portalConversationsEmpty);
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.portalConversationsId) || !heads.includes(T.portalConversationsCharged)) {
+      continue;
+    }
+    const charged = heads.indexOf(T.portalConversationsCharged);
+    out.table = true;
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      const cells = tr.querySelectorAll(":scope > td");
+      if (cells.length !== heads.length) {
+        continue;
+      }
+      if (out.rows === 0) {
+        out.firstCharged = lib.norm(cells[charged].textContent);
+      }
+      out.rows += 1;
+    }
+    break;
+  }
+  return out;
+}
+
+/** 门户导航里文字为「Conversations」、href 恰好为 /portal/conversations 的链接。只点这一个。 */
+function clickPortalNavConversations(lib, T) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === T.portalNavConversations && a.getAttribute("href") === T.portalConversationsPath) {
       a.click();
       return true;
     }
@@ -6180,6 +6329,129 @@ async function stepCheckPortalUsageSummary(ctx) {
   }
 }
 
+/**
+ * 把会话一块滚进视口用 scrollPortalWalletIntoView / portalWalletInView：规则相同，只是找的那一块的 aria-label 是
+ * 「Conversations」。换掉这一个文案再送进页面，不另写一份同样的滚动函数。
+ */
+const PORTAL_CONVERSATIONS_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalConversationsTitle };
+
+async function stepCheckPortalConversations(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开会话页：只点「Conversations」这一个链接，之后用页面默认的日期区间，不碰筛选表单。
+  const afterSeq = network.seq;
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavConversations, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 会话页落定：门户外壳在，会话一块不在加载，且是某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalConversations, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalConversationsPath &&
+        s.portalShell &&
+        s.region &&
+        !s.busy &&
+        (s.failed || s.tooBroad || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalConversationsPath) {
+    throw fail("navigation_failed");
+  }
+  // 默认区间（本月）的会话聚合超出后端的执行预算：会话页对这个客户不可用，判失败（不是页面坏了，是查询过宽）。
+  if (page.adminLayout || page.tooBroad) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面在点击之后自己发出的、不带 cursor 的 GET 的响应体（被动观察，不自己发请求）。
+  const seen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerConversations, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!seen.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(seen.value.requestId);
+    if (envelope?.error?.code === QUERY_TOO_BROAD) {
+      // 422 QUERY_TOO_BROAD：默认区间（本月）的会话聚合超出后端 2 秒的执行预算，会话页对这个客户不可用。
+      throw fail("assertion_failed");
+    }
+    if (seen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    const items = envelope.data?.items;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    let firstCharged = null;
+    if (items.length > 0) {
+      // 计费额按 6 位 ROUND_HALF_UP 舍入（字符串运算，不经浮点），再规范成页面的写法。
+      firstCharged = trimFraction(roundHalfUp(items[0]?.charged_amount, USAGE_PLACES));
+      if (firstCharged === null) {
+        throw fail("assertion_failed");
+      }
+    }
+    expected = { rows: items.length, firstCharged };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封（含 QUERY_TOO_BROAD）、没有 items、计费额不是十进制字符串：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：数据行数一致，第一行的计费额去掉空白与千分位逗号后与 6 位舍入的值数值相同；
+  // items 为空时是空状态、没有数据行。
+  const shownCharged = (text) => (typeof text === "string" ? trimFraction(text.replace(/[\s,]/g, "")) : null);
+  const shown = await waitFor(
+    () => evaluate(probePortalConversations, TEXT),
+    (s) =>
+      s.path === TEXT.portalConversationsPath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.busy &&
+      !s.failed &&
+      !s.tooBroad &&
+      (expected.rows === 0
+        ? s.empty && s.rows === 0
+        : s.table && s.rows === expected.rows && shownCharged(s.firstCharged) === expected.firstCharged),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把会话一块滚进视口。只滚动，不点任何按钮或行（不翻页、不跳到用量页）。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_CONVERSATIONS_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_CONVERSATIONS_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -6212,6 +6484,7 @@ const STEPS = {
   check_portal_usage: stepCheckPortalUsage,
   check_portal_usage_export: stepCheckPortalUsageExport,
   check_portal_monthly_export: stepCheckPortalMonthlyExport,
+  check_portal_conversations: stepCheckPortalConversations,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
   check_portal_low_balance: stepCheckPortalLowBalance,
 };
@@ -6244,8 +6517,8 @@ async function main() {
     customerCredentials: input.customerCredentials,
     /**
      * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home、check_portal_dashboard、
-     * check_portal_usage_summary 与 check_portal_low_balance 只认这之后发出的请求，check_portal_wallet 与 check_portal_usage 要求它不为 null（各自再按点击「Wallet」「Usage」之前的
-     * 序号截断）。
+     * check_portal_usage_summary 与 check_portal_low_balance 只认这之后发出的请求，check_portal_wallet、check_portal_usage 与 check_portal_conversations 要求它不为 null（各自再按点击
+     * 「Wallet」「Usage」「Conversations」之前的序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,

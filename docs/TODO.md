@@ -346,7 +346,7 @@
 
 ## Phase 5 — Usage Portal（§128）
 
-- [ ] 会话摘要
+- [x] 会话摘要（AIH-TASK-121、123，设计闸门 #460 v2：门户 `/portal/conversations` 按（项目, `conversation_id`）列出所选马来西亚日历日区间内的会话合计，按游标往旧翻页，点一行跳到用量页看这次会话的请求）
 - [x] 请求级明细（AIH-TASK-105，设计闸门 #398 v4：门户 `/portal/usage` 按游标往旧翻页的用量表，点一行展开请求详情）
 - [x] 用量筛选（AIH-TASK-105：马来西亚日历日区间、项目、供应商、模型、`conversation_id`；查询串带 `event_id` 时只按它查）
 - [ ] 客户端用量导出

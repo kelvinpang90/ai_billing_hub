@@ -14,13 +14,17 @@
  * 「Monthly summary」导出区（AIH-TASK-120）覆盖设计闸门 #457 v1 §7 前端一段：默认月份在马来西亚跨月那一刻的取值、
  * `min` / `max`、无效月份时按钮不可用、请求地址恰好只带 `month`（不带用量页筛选）、加载、`QUERY_TOO_BROAD` 与通用
  * 失败，以及失败不影响用量列表与「Export CSV」。
+ *
+ * 会话页跳过来的地址（AIH-TASK-123）覆盖设计闸门 #460 v2 §7 前端一段里属于用量页的场景：带 `conversation_id` 等四个
+ * 参数时首个请求就带这四个筛选、表单显示它们、之后的筛选不写回地址栏；日期缺一或不合规时用默认区间、其余照用；同时带
+ * `event_id` 时只按 `event_id` 查。不带这些参数时的行为由上面的既有用例覆盖（不改）。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AxiosError, AxiosHeaders, type AxiosResponse } from "axios";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
@@ -652,6 +656,104 @@ describe("UsagePage event_id", () => {
     });
     expect(screen.queryByText("Showing a single usage event")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Provider")).toBeEnabled();
+  });
+});
+
+describe("UsagePage conversation link", () => {
+  /** 页面旁边只显示当前地址：之后的筛选有没有写回地址栏。 */
+  function LocationProbe() {
+    const location = useLocation();
+    // testid 而不是 aria-label：`no-hardcoded-jsx-text` 把 aria-label 的字面量当成文案。
+    return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
+  }
+
+  function renderWithLocation(entry: string) {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[entry]}>
+          <UsagePage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  const LINK =
+    `${ROUTES.portalUsage}?conversation_id=conv_0001&project_id=${OTHER_PROJECT_ID}` +
+    "&from_date=2026-10-02&to_date=2026-10-20";
+
+  it("starts with the conversation, its project and its dates, shows them in the form, and never writes filters back", async () => {
+    const user = userEvent.setup();
+    const get = serve(() => page([event()]));
+
+    renderWithLocation(LINK);
+
+    await screen.findByText("Customer service bot", { selector: "td" });
+    // 第一个请求就带这四个筛选。
+    expect(usageUrls(get)).toEqual([
+      `${USAGE_URL}?from_date=2026-10-02&to_date=2026-10-20&project_id=${OTHER_PROJECT_ID}` +
+        "&conversation_id=conv_0001&page_size=20",
+    ]);
+    expect(screen.getByLabelText("From (Malaysia time)")).toHaveValue("2026-10-02");
+    expect(screen.getByLabelText("To (Malaysia time)")).toHaveValue("2026-10-20");
+    expect(screen.getByLabelText("Conversation ID")).toHaveValue("conv_0001");
+    expect(await screen.findByTitle("Sales assistant")).toBeInTheDocument();
+    expect(screen.getByLabelText("Provider")).toBeEnabled();
+    expect(screen.queryByText("Showing a single usage event")).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Provider"), "anthropic");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => {
+      expect(usageUrls(get).at(-1)).toBe(
+        `${USAGE_URL}?from_date=2026-10-02&to_date=2026-10-20&project_id=${OTHER_PROJECT_ID}` +
+          "&provider=anthropic&conversation_id=conv_0001&page_size=20",
+      );
+    });
+    // 地址栏还是进来时那一个。
+    expect(screen.getByTestId("location")).toHaveTextContent(LINK);
+
+    // 「Reset」回到不带任何筛选的默认区间：会话与项目也清掉。
+    await user.click(screen.getByRole("button", { name: "Reset" }));
+
+    await waitFor(() => {
+      expect(usageUrls(get).at(-1)).toBe(`${USAGE_URL}?${DEFAULT_QUERY}`);
+    });
+    expect(screen.getByLabelText("Conversation ID")).toHaveValue("");
+    expect(screen.getByLabelText("From (Malaysia time)")).toHaveValue("2026-10-01");
+    expect(screen.getByTestId("location")).toHaveTextContent(LINK);
+  });
+
+  it.each<[string, string]>([
+    ["only one date", "&from_date=2026-10-02"],
+    ["a date that does not exist", "&from_date=2026-02-30&to_date=2026-03-01"],
+    ["a range longer than 92 days", "&from_date=2026-07-01&to_date=2026-10-01"],
+  ])("uses the default dates but keeps the conversation and project when given %s", async (_, dates) => {
+    const get = serve(() => page([event()]));
+
+    renderPage(`${ROUTES.portalUsage}?conversation_id=conv_0001&project_id=${OTHER_PROJECT_ID}${dates}`);
+
+    await screen.findByText("Customer service bot", { selector: "td" });
+    expect(usageUrls(get)).toEqual([
+      `${USAGE_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${OTHER_PROJECT_ID}` +
+        "&conversation_id=conv_0001&page_size=20",
+    ]);
+    expect(screen.getByLabelText("From (Malaysia time)")).toHaveValue("2026-10-01");
+    expect(screen.getByLabelText("To (Malaysia time)")).toHaveValue("2026-10-25");
+    expect(screen.getByLabelText("Conversation ID")).toHaveValue("conv_0001");
+  });
+
+  it("asks only by event_id when the link also has one", async () => {
+    const get = serve(() => page([event()]));
+
+    renderPage(`${LINK}&event_id=${EVENT_ID}`);
+
+    await screen.findByText("Customer service bot", { selector: "td" });
+    expect(usageUrls(get)).toEqual([`${USAGE_URL}?event_id=${EVENT_ID}&page_size=20`]);
+    expect(screen.getByText("Showing a single usage event")).toBeInTheDocument();
+    expect(screen.getByLabelText("Conversation ID")).toHaveValue("");
+    expect(screen.getByLabelText("From (Malaysia time)")).toHaveValue("2026-10-01");
   });
 });
 
