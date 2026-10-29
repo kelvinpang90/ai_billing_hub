@@ -20,7 +20,8 @@
  * 之后（设计闸门 #457 §2「前端」写的步骤名 check_portal_usage_summary_export 超过 32 字符上限，按任务契约改为此名）；
  * AIH-TASK-123 加了门户会话页的一个只读步骤（check_portal_conversations），排在 login_customer 之后，经门户导航自己进会话页；
  * AIH-TASK-124 加了门户会话页导出按钮的一个只读步骤（check_portal_conv_export），排在 check_portal_conversations 之后；
- * AIH-TASK-128 加了门户通知页的一个只读步骤（check_portal_notifications），排在 login_customer 之后，经门户导航自己进通知页。
+ * AIH-TASK-128 加了门户通知页的一个只读步骤（check_portal_notifications），排在 login_customer 之后，经门户导航自己进通知页；
+ * AIH-TASK-135 加了管理端钱包核对页的一个只读步骤（open_wallet_reconciliation），排在 login 之后，经顶栏自己进核对页。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -108,7 +109,7 @@
  *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
  *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏
- *   「Usage analytics」（href 为 /usage-analytics）、夹具客户详情里
+ *   「Usage analytics」（href 为 /usage-analytics）、顶栏「Wallet reconciliation」（href 为 /wallet-reconciliation）、夹具客户详情里
  *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。夹具客户详情资料卡上的「Disable account」
  *   「Enable account」按钮（check_account_status）**只查不点**：只确认对应的那一个在，不点它、不打开启用 / 停用弹窗、
  *   不填原因。接受邀请页（check_accept_invitation_page）不填密码、不点「Activate my account」、不提交表单，
@@ -132,6 +133,8 @@
  *   用量事件页不勾选任何行、不点「Requeue selected」「Requeue all matching…」「Requeue」或任何确认按钮、不填也不
  *   提交筛选表单（不点「Apply filters」「Clear filters」）、不翻页、不打开任何事件的详情（「View」链接）。
  *   用量分析页不改分组维度、时间段或任何筛选、不点「Apply filters」「Reset to last 30 days」、不翻页、不改每页条数。
+ *   钱包核对页（open_wallet_reconciliation）不点运行表的任何一行（不打开不一致列表）、不翻页、不改每页条数、不点
+ *   「Try again」或任何别的按钮与链接，不填也不提交任何表单（页面本身没有写操作入口）。
  *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
@@ -249,6 +252,18 @@
  *                   data-row-key 的数据行数与响应 data.items 的条数一致；items 为空时页面显示空状态（usageAnalytics.empty
  *                   或 usageAnalytics.emptyPage）、没有数据行。不改筛选、不翻页。有数据行时报到前把表格滚动到视口里
  *                   （放得下时整张在视口内，放不下时表格顶端在视口内）
+ *   open_wallet_reconciliation
+ *                   要排在 login 之后。点顶栏「Wallet reconciliation」（en.json 的 nav.walletReconciliation，href 为 paths.ts 的
+ *                   walletReconciliation，即 /wallet-reconciliation）进钱包核对页；页面落定：地址是 /wallet-reconciliation，运行表
+ *                   一块（role=region、aria-label 为「Reconciliation runs」，walletReconciliation.runs.title）不再显示
+ *                   walletReconciliation.runs.loading，且不是加载失败（任何错误提示，page_error）、无权限
+ *                   （walletReconciliation.forbidden，assertion_failed）或路由兜底页。后端值取页面在点击之后自己发出的
+ *                   GET /api/v1/admin/wallet-reconciliation/runs 的响应体（被动观察，不自己发请求、不拦截；取成功读完的最近一次），
+ *                   不是成功信封或没有 items 数组是 assertion_failed。运行表（表头有「Run date」「Wallets checked」）里带
+ *                   data-row-key 的数据行数与 items 的条数一致；items 非空时第一行「Wallets checked」列的文字等于 items 第一项的
+ *                   wallets_checked（不是非负整数是 assertion_failed）；items 为空时显示空状态（walletReconciliation.runs.empty 或
+ *                   walletReconciliation.runs.emptyPage）、没有数据行，同样算通过。不点行、不翻页、不提交任何表单。报到前把运行表
+ *                   一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
  *   check_account_status
  *                   在夹具客户详情（open_fixture 打开的那一页）上，后端值取详情页自己发出的
  *                   GET /api/v1/admin/customers/{customer_id} 的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次
@@ -560,6 +575,14 @@ const TEXT = {
   analyticsEmptyPage: "There are no groups on this page.", // usageAnalytics.emptyPage
   analyticsPrepaid: "Prepaid (MYR)", // usageAnalytics.prepaid.title —— 分析表格的列组表头
   analyticsInternal: "Internal metering only (MYR)", // usageAnalytics.internal.title
+  navWalletReconciliation: "Wallet reconciliation", // nav.walletReconciliation —— 顶栏的钱包核对项
+  reconRunsTitle: "Reconciliation runs", // walletReconciliation.runs.title —— 运行表一块的 aria-label
+  reconForbidden: "Only administrators can view wallet reconciliation.", // walletReconciliation.forbidden
+  reconLoading: "Loading reconciliation runs…", // walletReconciliation.runs.loading
+  reconEmpty: "No reconciliation runs yet.", // walletReconciliation.runs.empty
+  reconEmptyPage: "There are no reconciliation runs on this page.", // walletReconciliation.runs.emptyPage
+  reconRunDate: "Run date", // walletReconciliation.runs.field.runDate —— 运行表的列头
+  reconWalletsChecked: "Wallets checked", // walletReconciliation.runs.field.walletsChecked
   customersForbidden: "Only administrators can manage customers.", // customers.forbidden —— 客户区块（含签名密钥面板）的无权限
   projectName: "Project name", // customers.projects.field.name —— 项目表格的列头
   projectDescription: "Description", // customers.projects.field.description
@@ -684,8 +707,8 @@ const TEXT = {
   portalUsageSummaryConversations: "Conversations", // portal.home.usageSummary.field.conversationCount
   portalUsageSummaryChart: "Requests per day (Malaysia time)", // portal.home.usageSummary.chart.caption —— 柱状图的 aria-label
   // 管理端顶栏的全部项（frontend/src/layouts/AppLayout.tsx；nav.dashboard、nav.customers、nav.audit、nav.catalog、
-  // nav.providerPrices、nav.fxRates、nav.pricingRules、nav.pricingPreview、nav.usageEvents、nav.usageAnalytics）。
-  // 门户首页上一项都不许出现。
+  // nav.providerPrices、nav.fxRates、nav.pricingRules、nav.pricingPreview、nav.usageEvents、nav.usageAnalytics、
+  // nav.walletReconciliation）。门户首页上一项都不许出现。
   adminNavTexts: [
     "Dashboard",
     "Customers",
@@ -697,6 +720,7 @@ const TEXT = {
     "Pricing preview",
     "Usage events",
     "Usage analytics",
+    "Wallet reconciliation",
   ],
   // antd 分页「下一页」那个 <li> 的 title。不在 en.json 里：来自 antd 自带的 enUS 语言包
   // （frontend/src/App.tsx 的 <ConfigProvider locale={enUS}>）。
@@ -721,13 +745,15 @@ const TEXT = {
   pricingPreviewPath: "/pricing/preview",
   usageEventsPath: "/usage-events",
   usageAnalyticsPath: "/usage-analytics",
+  walletReconciliationPath: "/wallet-reconciliation",
   portalHomePath: "/portal",
   portalWalletPath: "/portal/wallet",
   portalUsagePath: "/portal/usage",
   portalConversationsPath: "/portal/conversations",
   portalNotificationsPath: "/portal/notifications",
   // 管理端顶栏各项指向的路径（paths.ts 的 dashboard、customers、audit、catalogProviders、catalogMeterTypes、
-  // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics）。门户首页上不许有指向它们的链接。
+  // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics、walletReconciliation）。门户首页上不许有
+  // 指向它们的链接。
   adminPaths: [
     "/",
     "/customers",
@@ -740,6 +766,7 @@ const TEXT = {
     "/pricing/preview",
     "/usage-events",
     "/usage-analytics",
+    "/wallet-reconciliation",
   ],
 };
 
@@ -801,6 +828,9 @@ const PROJECT_LIST_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/projects$/;
 
 /** 用量分析接口的路径（frontend/src/api/adminUsageAnalytics.ts 的 USAGE_ANALYTICS_URL）。 */
 const USAGE_ANALYTICS_API = /^\/api\/v1\/admin\/usage-analytics$/;
+
+/** 钱包核对运行列表接口的路径（frontend/src/api/adminWalletReconciliation.ts 的 RUNS_URL）。 */
+const RECONCILIATION_RUNS_API = /^\/api\/v1\/admin\/wallet-reconciliation\/runs$/;
 
 /** 钱包流水接口的路径（frontend/src/api/walletTransactions.ts 的 listWalletTransactions）。 */
 const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/transactions$/;
@@ -1305,6 +1335,8 @@ const network = {
   projectLists: new Map(),
   /** 用量分析接口：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   usageAnalytics: new Map(),
+  /** 钱包核对运行列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
+  reconciliationRuns: new Map(),
   /** 钱包流水接口：requestId → { customerId, newest, status, finished, failed, seq }。查询串本身不保存。 */
   walletTransactions: new Map(),
   /** 门户账号接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
@@ -1338,6 +1370,7 @@ function trackedRequest(requestId) {
     network.aiAccess.get(requestId) ??
     network.projectLists.get(requestId) ??
     network.usageAnalytics.get(requestId) ??
+    network.reconciliationRuns.get(requestId) ??
     network.walletTransactions.get(requestId) ??
     network.portalAccounts.get(requestId) ??
     network.lowBalanceThresholds.get(requestId) ??
@@ -1563,6 +1596,21 @@ function isUsageAnalytics(url) {
   }
 }
 
+/** 是不是钱包核对运行列表接口（同源 https、路径恰好是这个接口，查询串不看、不保存）。 */
+function isReconciliationRuns(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" && parsed.hostname === network.host && RECONCILIATION_RUNS_API.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 是不是项目列表接口（同源 https）：是的话回路径里的客户 id 与「查询串是不是第 1 页」，不是回 null。
  * 只留这两样，不保存 URL。
@@ -1747,6 +1795,14 @@ function observeNetwork(sessionId) {
         }
         if (isUsageAnalytics(params.request?.url) && params.request?.method === "GET") {
           network.usageAnalytics.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
+        if (isReconciliationRuns(params.request?.url) && params.request?.method === "GET") {
+          network.reconciliationRuns.set(params.requestId, {
             status: null,
             finished: false,
             failed: false,
@@ -2002,6 +2058,23 @@ function latestProjectListResponse(customerId) {
 function latestUsageAnalyticsResponse(afterSeq) {
   let best = null;
   for (const [requestId, request] of network.usageAnalytics) {
+    if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/** afterSeq 之后发出、成功读完的钱包核对运行列表请求里最近的一次；还有在路上的就回 null，等它落定。 */
+function latestReconciliationRunsResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, request] of network.reconciliationRuns) {
     if (request.seq <= afterSeq) {
       continue;
     }
@@ -2905,6 +2978,94 @@ function analyticsTableInView(lib, T) {
     return false;
   }
   const rect = table.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 钱包核对页的状态：运行表一块（role=region、aria-label 为「Reconciliation runs」）里的表格（表头有「Run date」
+ * 「Wallets checked」）带 data-row-key 的数据行数与第一行「Wallets checked」列的文字。错误提示（任何 role=alert）与
+ * 无权限分开报。只读，不点行、不碰分页。
+ */
+function probeWalletReconciliation(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.reconRunsTitle) {
+      region = el;
+      break;
+    }
+  }
+  let table = false;
+  let rows = 0;
+  let firstChecked = null;
+  if (region !== null) {
+    for (const el of region.querySelectorAll("table")) {
+      const heads = [...el.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+      const checked = heads.indexOf(T.reconWalletsChecked);
+      if (!heads.includes(T.reconRunDate) || checked < 0) {
+        continue;
+      }
+      table = true;
+      for (const tr of el.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        if (rows === 0) {
+          const cells = tr.querySelectorAll(":scope > td");
+          firstChecked = cells.length === heads.length ? lib.norm(cells[checked].textContent) : null;
+        }
+        rows += 1;
+      }
+      break;
+    }
+  }
+  const forbidden = lib.leaf(T.reconForbidden) !== null;
+  return {
+    ...lib.common(T),
+    region: region !== null,
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.reconLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: region !== null && (lib.leaf(T.reconEmpty) !== null || lib.leaf(T.reconEmptyPage) !== null),
+    table,
+    rows,
+    firstChecked,
+  };
+}
+
+/**
+ * 把运行表一块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。
+ * 页面函数逐个序列化进页面执行，不能引用本文件的其他函数，所以找 region 的几行在这里与下一个函数里各写一遍。
+ */
+function scrollReconRunsIntoView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.reconRunsTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的一块要整块在视口内；放不下的只要求顶端在视口内。 */
+function reconRunsInView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.reconRunsTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
   const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
   return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
@@ -5048,6 +5209,87 @@ async function stepCheckUsageAnalytics(ctx) {
   }
 }
 
+async function stepOpenWalletReconciliation(ctx) {
+  if (ctx.loginCompletedAt === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.walletReconciliationPath;
+  // 点顶栏之前的序号：只认在这之后页面自己发出的运行列表请求。
+  const beforeClick = network.seq;
+  const link = { text: TEXT.navWalletReconciliation, href: path };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同目录页、价格页、规则页与用量事件页。还没有任何核对运行时空列表合法。
+  const opened = await waitFor(() => evaluate(probeWalletReconciliation, TEXT), catalogSettled(path), ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(opened.value, path, true);
+
+  // 后端值：页面自己发出的那次运行列表 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestReconciliationRunsResponse(beforeClick),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expectedRows;
+  let expectedChecked = null;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expectedRows = items.length;
+    if (expectedRows > 0) {
+      const checked = items[0]?.wallets_checked;
+      if (!Number.isInteger(checked) || checked < 0) {
+        throw fail("assertion_failed");
+      }
+      expectedChecked = String(checked);
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、核对数不是非负整数：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 表格显示的就是这一份响应：数据行数与 items 条数一致，第一行的核对数与 items[0] 一致；items 为空时是空状态。
+  const shown = await waitFor(
+    () => evaluate(probeWalletReconciliation, TEXT),
+    (s) =>
+      s.path === path &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      (expectedRows === 0
+        ? s.empty && s.rows === 0
+        : s.table && s.rows === expectedRows && s.firstChecked === expectedChecked),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && (shown.value.table || shown.value.empty) ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把运行表一块滚进视口。只滚动，不点任何行。
+  if ((await evaluate(scrollReconRunsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(reconRunsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckWebhookSigning(ctx) {
   if (ctx.customerId === null || ctx.fixture === null) {
     throw fail("assertion_failed");
@@ -6836,6 +7078,7 @@ const STEPS = {
   check_project_integration: stepCheckProjectIntegration,
   open_usage_analytics: stepOpenUsageAnalytics,
   check_usage_analytics: stepCheckUsageAnalytics,
+  open_wallet_reconciliation: stepOpenWalletReconciliation,
   check_account_status: stepCheckAccountStatus,
   check_wallet_transactions: stepCheckWalletTransactions,
   check_portal_account: stepCheckPortalAccount,
