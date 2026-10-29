@@ -7718,7 +7718,7 @@ tasks:
     title: 余额核对第一层：核对运行与不一致记录两张表的迁移与模型
     purpose: >-
       按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「数据库」与 §8：新迁移 0029 建 wallet_reconciliation_runs 与 wallet_reconciliation_findings 两张表（唯一索引、两个普通索引（含显式声明的 ix_wallet_reconciliation_findings_tenant）、外键 RESTRICT 与六条 CHECK 照设计的表，runs 表含租约两列 lease_owner、lease_until 与 running_slot 及其唯一索引，同一时刻至多一条 RUNNING 由数据库保证；run_date 只建普通索引、不唯一），写法照 0027 与设计闸门 #471 的 0028：upgrade 先检查形状、可以安全重跑，downgrade 只在两表为空时删表；新模型 app/models/wallet_reconciliation.py 并在 alembic/env.py 登记；docs/database-schema.md 记表结构。不写核对逻辑、不加接口：判定与核对属于 AIH-TASK-130 到 132，告警属于 AIH-TASK-133，接口属于 AIH-TASK-134。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-128
     acceptance_criteria:
