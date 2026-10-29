@@ -7975,7 +7975,7 @@ tasks:
     title: 余额核对第六层：管理端核对运行与不一致记录的只读接口
     purpose: >-
       按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「管理端接口」与 §8：新文件 app/api/admin_wallet_reconciliation.py 提供 GET /api/v1/admin/wallet-reconciliation/runs 与 GET /api/v1/admin/wallet-reconciliation/runs/{run_id}/findings，分页与现有管理端列表相同；新文件 app/schemas/wallet_reconciliation.py 放两个白名单视图；docs/api.md 新增「钱包核对」一节。只读、不写审计；前端属于 AIH-TASK-135。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-133
     acceptance_criteria:
