@@ -8028,7 +8028,7 @@ tasks:
     title: 余额核对第七层：管理端钱包核对页
     purpose: >-
       按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「前端」与 §8：新增管理端页 /wallet-reconciliation（核对运行表、点一行看这次运行的不一致钱包、两张表分页、空状态），顶栏加一项；勾掉 docs/TODO.md Phase 1 的「不可变钱包账本」。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-134
     acceptance_criteria:
