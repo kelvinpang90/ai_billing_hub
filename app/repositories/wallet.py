@@ -17,6 +17,10 @@ BEFORE UPDATE 触发器拒绝。也没有任何更新或删除账本的函数（
 客户钱包流水导出（AIH-TASK-116，设计闸门 #435 v10 §2「接口二」）：
 `list_transactions_for_customer_export` 只读、不加锁，只 SELECT 客户白名单需要的 8 列；
 MySQL 上的执行预算、`QueryTooBroad` 与 3024 转换复用 app/repositories/usage_events.py 的。
+
+余额核对的流式判定（AIH-TASK-130，设计闸门 #474 v13 §2「钱包判定」）：
+`check_wallet_snapshot` 在调用方的事务里只用普通读，按键集分块读账本、逐行喂给
+`ledger_problems_in_order`，内存与账本行数无关；`ledger_problems` 排序后委托它，规则只有一份。
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Final, NamedTuple
@@ -96,6 +100,9 @@ SEQUENCE_GAP: Final = "SEQUENCE_GAP"
 CHAIN_BROKEN: Final = "CHAIN_BROKEN"
 ROW_ARITHMETIC_BROKEN: Final = "ROW_ARITHMETIC_BROKEN"
 BILLING_STATUS_MISMATCH: Final = "BILLING_STATUS_MISMATCH"
+
+# `check_wallet_snapshot` 每块账本 SELECT 在 MySQL 上的执行上限（毫秒，设计闸门 #474 v13 §2）。
+LEDGER_CHUNK_TIMEOUT_MS: Final = 60000
 
 _QUANTUM = Decimal(1).scaleb(-MONEY_SCALE)
 # DECIMAL(20,8) 装得下的绝对值上限（不含）：整数部分 12 位。
@@ -282,25 +289,54 @@ def ledger_problems(
 ) -> list[str]:
     """Compare a wallet with its ledger. An empty list means they agree."""
     ordered = sorted(lines, key=lambda line: line.wallet_sequence)
-    problems = []
-    if version > 0 and not ordered:
-        # `TRUNCATE` 不经触发器（设计 §10 的残余风险），会表现成这样。
-        problems.append(LEDGER_MISSING)
-    if balance != sum((line.amount for line in ordered), Decimal(0)):
-        problems.append(BALANCE_NOT_LEDGER_SUM)
-    if ordered and balance != ordered[-1].balance_after:
-        problems.append(BALANCE_NOT_LAST_BALANCE_AFTER)
-    if version != (ordered[-1].wallet_sequence if ordered else 0):
-        problems.append(VERSION_NOT_LAST_SEQUENCE)
-    if [line.wallet_sequence for line in ordered] != list(range(1, len(ordered) + 1)):
-        problems.append(SEQUENCE_GAP)
+    return ledger_problems_in_order(
+        balance=balance,
+        version=version,
+        billing_status=billing_status,
+        lines=ordered,
+    )
+
+
+def ledger_problems_in_order(
+    *,
+    balance: Decimal,
+    version: int,
+    billing_status: BillingStatus,
+    lines: Iterable[LedgerLine],
+) -> list[str]:
+    """`ledger_problems` for lines already in ascending `wallet_sequence`, consumed one by one.
+
+    ⚠️ 不排序、不留行：只累加合计、行数、上一行的 `balance_after`、序号是否恰为 1..n 与
+    链、算术两个标志，所以内存与行数无关。问题码与顺序和 `ledger_problems` 完全相同。
+    """
+    total = Decimal(0)
+    count = 0
+    last: LedgerLine | None = None
+    numbered = True
     # 钱包从空开始，所以第一行的前余额必须是 0。
     previous = Decimal(0)
     chained = arithmetic = True
-    for line in ordered:
+    for line in lines:
+        count += 1
+        total += line.amount
+        # 第 k 行（从 1 起）的序号必须是 k：与「序号列表 == 1..n」等价。
+        numbered = numbered and line.wallet_sequence == count
         chained = chained and line.balance_before == previous
         arithmetic = arithmetic and line.balance_after == line.balance_before + line.amount
         previous = line.balance_after
+        last = line
+    problems = []
+    if version > 0 and last is None:
+        # `TRUNCATE` 不经触发器（设计 §10 的残余风险），会表现成这样。
+        problems.append(LEDGER_MISSING)
+    if balance != total:
+        problems.append(BALANCE_NOT_LEDGER_SUM)
+    if last is not None and balance != last.balance_after:
+        problems.append(BALANCE_NOT_LAST_BALANCE_AFTER)
+    if version != (last.wallet_sequence if last is not None else 0):
+        problems.append(VERSION_NOT_LAST_SEQUENCE)
+    if not numbered:
+        problems.append(SEQUENCE_GAP)
     if not chained:
         problems.append(CHAIN_BROKEN)
     if not arithmetic:
@@ -616,40 +652,112 @@ def list_transactions_for_customer_export(
     return [CustomerLedgerExportRow(*row) for row in run_bounded(session, statement)]
 
 
-def verify_wallet(session: Session, tenant_id: int) -> list[str]:
-    """Problem codes for this tenant's wallet; an empty list means it is consistent.
+class WalletCheck(NamedTuple):
+    """What `check_wallet_snapshot` saw (design gate #474 v13 §2「钱包判定」).
 
-    只报告，不修复：不一致由人工核查，用 `SYSTEM_CORRECTION` 记补偿行。
+    ⚠️ 字段名与顺序是 AIH-TASK-131 的契约：核对运行按这几个名字取值写进 findings。
     """
-    # 刷新会话里可能已有的旧对象，核对的是库里的值。
-    wallet_query = select(Wallet).where(Wallet.tenant_id == tenant_id)
-    wallet = session.execute(
-        wallet_query.execution_options(populate_existing=True)
-    ).scalar_one_or_none()
-    if wallet is None:
-        return [WALLET_MISSING]
-    tenant_query = select(Tenant).where(Tenant.id == tenant_id)
-    tenant = session.execute(tenant_query.execution_options(populate_existing=True)).scalar_one()
+
+    problem_codes: list[str]
+    # 快照里的钱包行；钱包不存在时两者都是 `None`。
+    balance: Decimal | None
+    version: int | None
+    # 实际读到的账本行数。
+    ledger_rows: int
+
+
+def _ledger_chunk_statement(
+    wallet_id: int,
+    tenant_id: int,
+    *,
+    after_sequence: int | None,
+    chunk_rows: int,
+) -> Select[Any]:
+    """One keyset chunk of a wallet's ledger, the four `LedgerLine` columns in sequence order.
+
+    `after_sequence` 为 `None`（第一块）时不设序号下界，任何序号的行都不会被跳过。优化器
+    提示紧跟 SELECT 关键字，只在 MySQL 上渲染；SQLite（只在测试里用）不渲染。不加锁。
+    """
     # 列的顺序即 LedgerLine 的字段顺序。
-    columns = (
+    statement = select(
         WalletTransaction.wallet_sequence,
         WalletTransaction.amount,
         WalletTransaction.balance_before,
         WalletTransaction.balance_after,
+    ).where(
+        WalletTransaction.wallet_id == wallet_id,
+        WalletTransaction.tenant_id == tenant_id,
     )
-    rows_query = (
-        select(*columns)
-        .where(WalletTransaction.wallet_id == wallet.id)
-        .where(WalletTransaction.tenant_id == tenant_id)
-        .order_by(WalletTransaction.wallet_sequence)
+    if after_sequence is not None:
+        statement = statement.where(WalletTransaction.wallet_sequence > after_sequence)
+    return (
+        statement.order_by(WalletTransaction.wallet_sequence)
+        .limit(chunk_rows)
+        .prefix_with(f"/*+ MAX_EXECUTION_TIME({LEDGER_CHUNK_TIMEOUT_MS}) */", dialect="mysql")
     )
-    lines = [LedgerLine(*row) for row in session.execute(rows_query).all()]
-    return ledger_problems(
+
+
+def check_wallet_snapshot(
+    session: Session,
+    tenant_id: int,
+    *,
+    chunk_rows: int = 5000,
+    on_chunk: Callable[[], None] | None = None,
+) -> WalletCheck:
+    """Judge one wallet against its ledger, read in keyset chunks inside the caller's transaction.
+
+    ⚠️ 只用普通读：不加锁、不提交、不开新事务。在 REPEATABLE READ 下调用方事务里的几次读
+    看到同一个快照，并发记账既不被阻塞、也不会被误判为不一致（设计 §2「要点」）。
+    每块一条 SELECT（不用 `yield_per`），读完一块、逐行喂给判定之后调用一次 `on_chunk`
+    （给了的话）；读到空块才停。MySQL 上单块超时的数据库错误原样抛给调用方。
+    """
+    if chunk_rows < 1:
+        raise ValueError("chunk_rows must be at least 1")
+    # 只选列，不经身份映射：读到的一定是库里（快照里）的值。
+    wallet_query = select(Wallet.id, Wallet.balance, Wallet.version).where(
+        Wallet.tenant_id == tenant_id
+    )
+    wallet = session.execute(wallet_query).one_or_none()
+    if wallet is None:
+        return WalletCheck([WALLET_MISSING], None, None, 0)
+    tenant_query = select(Tenant.billing_status).where(Tenant.id == tenant_id)
+    billing_status = session.execute(tenant_query).scalar_one()
+    wallet_id = wallet.id
+    read = 0
+
+    def stream() -> Iterator[LedgerLine]:
+        nonlocal read
+        after: int | None = None
+        while True:
+            statement = _ledger_chunk_statement(
+                wallet_id, tenant_id, after_sequence=after, chunk_rows=chunk_rows
+            )
+            chunk = session.execute(statement).all()
+            if not chunk:
+                return
+            for row in chunk:
+                read += 1
+                yield LedgerLine(*row)
+            # 生成器在判定取下一行时才走到这里：这一块已全部喂完。
+            if on_chunk is not None:
+                on_chunk()
+            after = chunk[-1].wallet_sequence
+
+    problems = ledger_problems_in_order(
         balance=wallet.balance,
         version=wallet.version,
-        billing_status=tenant.billing_status,
-        lines=lines,
+        billing_status=billing_status,
+        lines=stream(),
     )
+    return WalletCheck(problems, wallet.balance, wallet.version, read)
+
+
+def verify_wallet(session: Session, tenant_id: int) -> list[str]:
+    """Problem codes for this tenant's wallet; an empty list means it is consistent.
+
+    只报告，不修复：不一致按数据事故处理（设计闸门 #474 v13 §1）。
+    """
+    return check_wallet_snapshot(session, tenant_id).problem_codes
 
 
 # --- 内部 -------------------------------------------------------------------------
