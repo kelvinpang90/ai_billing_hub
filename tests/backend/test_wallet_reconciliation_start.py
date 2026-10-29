@@ -609,9 +609,14 @@ def test_a_failed_release_inside_claim_still_raises_claim_error(both, caplog) ->
 
 # --- MySQL：锁读、锁等待超时、并发 ----------------------------------------------------------
 
+# ⚠️ 不用 information_schema.INNODB_TRX：它是不满 0.1 秒不刷新的缓存，而且不分库（见
+# test_session_revocation_concurrency.py）。这里只数本库运行表上的锁等待。
 _LOCK_WAITS = text(
-    "SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_state = 'LOCK WAIT'"
-)
+    "SELECT COUNT(*) FROM performance_schema.data_lock_waits AS w"
+    " JOIN performance_schema.data_locks AS l"
+    " ON l.ENGINE = w.ENGINE AND l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
+    " WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = :table_name"
+).bindparams(table_name=Run.__tablename__)
 _ER_DUP_ENTRY = 1062
 _ER_LOCK_WAIT_TIMEOUT = 1205
 
