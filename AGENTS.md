@@ -76,6 +76,7 @@
 - **断言 SQL 文本时不写死方言相关的字面量。**同一个查询，SQLite 编译成 `JOIN`，MySQL 编译成 `INNER JOIN`；共享锁（`FOR SHARE` / `LOCK IN SHARE MODE`）、标识符引号、分页写法也不一样。只断言两种库相同的片段，或者比较前先归一（例如 `.replace("INNER JOIN", "JOIN")`）；只有 MySQL 才有的断言放进 `if engine.dialect.name == "mysql":` 分支
 - 原因：Worker 的沙箱跑不了 `tests.backend`，参数化成 `[sqlite]` / `[mysql]` 的用例要到 CI 的 MySQL 分片才第一次真跑；AIH-TASK-051 run `7fe4822e` 就挂在这里（评审通过，CI 不过）
 - **跨文件共用的 fixture 在 `tests/backend/conftest.py` 里注册**，定义放在不以 `test_` 开头的辅助模块（例如 `tests/backend/ai_mysql_world.py`）。不要在用例模块里写 `mysql_world = test_xxx.mysql_world` 这种转引用：漏写一行就是 `fixture 'mysql_world' not found`，同样只在 CI 才暴露（AIH-TASK-067 run `9e7e38aa`）。辅助模块被 conftest 导入时还没执行 `pytest_configure`（xdist 换库名），环境变量要在 fixture 里读，不能在模块顶层读
+- **要确认「对方确实在等行锁」时查 `performance_schema.data_lock_waits`，不查 `information_schema.INNODB_TRX`。**INNODB_TRX 是一份不满 0.1 秒不刷新的缓存，而且不分库（xdist 各 worker 的库在同一台 MySQL 上），50 毫秒轮询可能一直读到旧快照、也可能数到别的 worker 的等待。联 `performance_schema.data_locks`，按 `DATABASE()` 与表名过滤（需要区分等待方时再经 `performance_schema.threads` 对上它的 `CONNECTION_ID()`），写法见 `tests/backend/test_session_revocation_concurrency.py` 的 `_WAITING_ON_TABLE`。AIH-TASK-131 run `07489d13` 的测试用 INNODB_TRX 等锁：Worker 的 PR 上碰巧过了，换一次 CI 就在 10 秒内一直没看到等待而失败（#496）
 
 ## 登记任务时的浏览器验收约定
 
