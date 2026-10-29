@@ -1280,6 +1280,92 @@ UPDATE 写 `PROCESSED`。
 
 ---
 
+## 钱包余额核对（spec §78；AIH-TASK-129，迁移 `0029_wallet_reconciliation`）
+
+设计依据：[design/AIH-TASK-129-wallet-reconciliation.md](design/AIH-TASK-129-wallet-reconciliation.md)（设计闸门 #474 v13）
+§2「数据库」与 §8。每天一次的核对运行逐个租户按序读钱包与账本，判定与 `ledger_problems` 相同；这两张表记下每次运行的
+进度与发现的不一致。核对只读 `wallets` 与 `wallet_transactions`，不写、不修复（INV-4、INV-5），这两张表是它唯一写的地方。
+
+**行由谁写**：只有核对运行——AIH-TASK-131 的步骤函数（收尾、开始、领租约）与 AIH-TASK-132 的扫描与进度提交
+（`app/services/wallet_reconciliation.py`、Celery 任务 `app.tasks.wallet_reconciliation.step`）。告警（AIH-TASK-133）与
+管理端接口（AIH-TASK-134）只读。AIH-TASK-129 只建表，部署后两张表是空的、没有写入方。行不删除。
+
+### `wallet_reconciliation_runs`（一次核对运行一行）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；插入顺序，告警按它取「最近一次完成」（不按墙上时钟） |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_wallet_reconciliation_runs_public_id`）；uuid4，管理端接口里的 `run_id` |
+| `run_date` | DATE | 非空；运行所属的马来西亚日历日（`kuala_lumpur_date(started_at)`）。**不唯一**（见下） |
+| `status` | VARCHAR(16) | 非空，`RUNNING` / `COMPLETED` / `ABANDONED`（`ck_wallet_reconciliation_runs_status`）；模型 `Enum(native_enum=False, length=16)` |
+| `started_at` | DATETIME | 非空；开始时刻 |
+| `finished_at` | DATETIME | 可空；`COMPLETED` / `ABANDONED` 的时刻；`RUNNING` 时为 NULL（`ck_wallet_reconciliation_runs_finished`） |
+| `cursor_tenant_id` | BIGINT | 非空，库级缺省 0；已核对到的最大 `tenants.id`，新运行为 0。是游标，不建外键 |
+| `wallets_checked` | INT | 非空，库级缺省 0；已核对的租户数（每个租户一个钱包） |
+| `wallets_inconsistent` | INT | 非空，库级缺省 0；其中有问题码的租户数；`0 <= wallets_inconsistent <= wallets_checked`（`ck_wallet_reconciliation_runs_counts`） |
+| `lease_owner` | CHAR(36) | 可空；当前持有推进权的 worker 令牌（每次 step 新生成的 uuid4），没有持有者时为 NULL |
+| `lease_until` | DATETIME | 可空；租约到期时刻；与 `lease_owner` 同为 NULL 或同非 NULL（`ck_wallet_reconciliation_runs_lease`） |
+| `running_slot` | SMALLINT | 可空；`RUNNING` 时恒为 1，其余状态恒为 NULL（`ck_wallet_reconciliation_runs_running_slot`），唯一（见下） |
+
+三列计数的库级缺省只是兜底：写入方插入新运行时显式给出这三个值；模型同时写 `default=0` 与 `server_default='0'`。
+
+约束与索引：
+
+- `uq_wallet_reconciliation_runs_running_slot (running_slot)`：**同一时刻至多一条 `RUNNING`，由数据库保证**，不论
+  `run_date` 是哪天。NULL 可有多行（结束的运行都是 NULL），1 只能有一行；两个 worker 同时开始时，后插入的一方唯一冲突。
+- `ck_wallet_reconciliation_runs_running_slot`：`(status = 'RUNNING' AND running_slot IS NOT NULL AND running_slot = 1)
+  OR (status <> 'RUNNING' AND running_slot IS NULL)`。⚠️ `running_slot IS NOT NULL` 不能省：SQL 是三值逻辑，少了它
+  「`RUNNING` 且 NULL」整条得 UNKNOWN，而 CHECK 只拒绝 FALSE，会把这种行放进来，唯一约束也就保证不了单一 `RUNNING`。
+- `ix_wallet_reconciliation_runs_run_date (run_date)`：**普通索引，不唯一**。一天可能有多行：被收尾的 `ABANDONED` 行
+  不挡住当天再开始；「一天通常只有一次完成的运行」由开始规则保证，不由数据库保证。
+- `ix_wallet_reconciliation_runs_status_finished (status, finished_at)`：告警取最近一次 `COMPLETED`。
+- `uq_wallet_reconciliation_runs_public_id (public_id)`：管理端按它找运行。
+- `ck_wallet_reconciliation_runs_finished`（`finished_at` 为 NULL 当且仅当 `RUNNING`）与 `ck_wallet_reconciliation_runs_lease`
+  （两列租约同空同非空）都写成两条分支的 OR，两库同义。
+
+### `wallet_reconciliation_findings`（一次运行里一个不一致的钱包一行）
+
+**只记不一致的钱包**：一致的钱包不写行，`wallets_checked - wallets_inconsistent` 就是一致的个数。值都取自这个钱包自己的
+只读快照事务。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `run_id` | BIGINT | 非空；外键 → `wallet_reconciliation_runs(id)` `ON DELETE RESTRICT`（`fk_wallet_reconciliation_findings_run`） |
+| `tenant_id` | BIGINT | 非空；外键 → `tenants(id)` `ON DELETE RESTRICT`（`fk_wallet_reconciliation_findings_tenant`） |
+| `problem_codes` | VARCHAR(255) | 非空、不为空串（`ck_wallet_reconciliation_findings_codes`）；问题码按 `ledger_problems` 的输出顺序以英文逗号连接（`WALLET_MISSING` 单独一个） |
+| `balance` | DECIMAL(20,8) | 可空；快照里的 `wallets.balance`；钱包不存在时为 NULL |
+| `wallet_version` | BIGINT | 可空；快照里的 `wallets.version`；钱包不存在时为 NULL |
+| `ledger_rows` | BIGINT | 非空；快照里读到的账本行数 |
+| `checked_at` | DATETIME | 非空；这个钱包的快照事务开始前取的时刻 |
+
+约束与索引：
+
+- `uq_wallet_reconciliation_findings_run_tenant (run_id, tenant_id)`：一次运行一个租户至多一行（进度 CAS 之外的数据库兜底）；
+  也是管理端按运行列出的索引，同时满足 `run_id` 外键对索引的要求。
+- `ix_wallet_reconciliation_findings_tenant (tenant_id)`，非唯一：**显式声明**（模型与迁移都写），供 `tenant_id` 外键使用。
+  MySQL 已有以外键列开头的索引时不再自动建索引，所以表上恰好是这两个索引加主键，迁移重跑时的形状比对不会遇到隐式索引。
+- 两个外键都是 `RESTRICT`：删运行或删租户不许连带删掉记录。
+
+时间一律不带时区的 UTC、取整到秒。六条 CHECK 的条件文本是 `app/models/wallet_reconciliation.py` 的常量，迁移里冻结一份，
+`tests/backend/test_wallet_reconciliation_migration.py` 比对两边；设计 §7「CHECK」列出的非法插入在 SQLite 与 MySQL 上都被拒绝。
+
+**迁移与回滚**（设计 §2「迁移写法」、§8）：
+
+- 0029 只建这两张表，不改任何已有表、不回填、不读钱包与账本。MySQL 上每张表是**一条**原子的 `CREATE TABLE`（索引、外键与
+  CHECK 都在里面），先 runs 后 findings；之前用 inspector 判两张表：都不存在 → 建两张；都存在且形状逐项一致（列名、类型与
+  宽度、可空性，唯一与普通索引的名称与列序，外键的引用与 `RESTRICT`——删除规则读 `information_schema`——，CHECK 名称；不比
+  缺省值）→ 跳过、不发 DDL；只存在 runs 且形状正确、为空 → 只建 findings（补完两条 `CREATE TABLE` 之间中断的升级）；其余
+  （只存在 findings、只存在的 runs 有行或形状不对、任一项缺失多出不同）→ 报错点名表、不发 DDL。处理方法：先确认表没有任何
+  行，为空则手工删掉（先 findings 后 runs）再重跑升级；有行则停下，按数据事故处理。
+- **表非空时降级被拒**：`downgrade` 先对存在的每张表查 `SELECT 1 … LIMIT 1`，任一张有行就抛错，不发 DDL、不删行，
+  `alembic_version` 仍是 0029——运行与 findings 是过去核对的记录，删了无法重建。都为空时先删 findings 再删 runs；只存在
+  其中一张且为空时删掉它（补完两条 `DROP TABLE` 之间中断的降级）；都不存在时什么都不做；`--sql` 离线模式判断不了是否
+  为空，直接拒绝、不输出 `DROP TABLE`。
+- **生产只回滚应用镜像，不降级 0029**：旧镜像不核对，运行与 findings 原样留在表里。需要修复时一律前滚。
+
+---
+
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、

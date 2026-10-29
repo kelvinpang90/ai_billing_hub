@@ -1075,6 +1075,7 @@ def test_upgrade_and_downgrade(alembic_config: Config) -> None:
         command.downgrade(alembic_config, "0014_pricing_rules")
         dropped_tables = _TABLES | _TABLES_0017 | _TABLES_0020 | _TABLES_0021 | _TABLES_0022
         dropped_tables |= {"notifications"}
+        dropped_tables |= {"wallet_reconciliation_runs", "wallet_reconciliation_findings"}
         dropped = _TRIGGERS | _TRIGGERS_0016 | _TRIGGERS_0017 | _TRIGGERS_0018 | _TRIGGERS_0022
         assert _tables_triggers_and_locks() == (tables - dropped_tables, triggers - dropped, None)
 
