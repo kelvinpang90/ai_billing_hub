@@ -1223,6 +1223,63 @@ UPDATE 写 `PROCESSED`。
 
 ---
 
+## `notifications`（spec §25、§27 第 4 步、§47–§50、§74；AIH-TASK-125，迁移 `0028_notifications`）
+
+设计依据：[design/AIH-TASK-125-portal-notifications.md](design/AIH-TASK-125-portal-notifications.md)（设计闸门 #471 v7）
+§2「数据库」与 §8。门户内的逻辑通知：一行 = 一条通知，由一条 `domain_outbox` 行（`tenant.low_balance` 或
+`tenant.billing_status_changed`）派生。以后的 Email / WhatsApp 通道挂在它下面另立任务。
+
+**行由谁写**：只有 AIH-TASK-126 的 outbox 投递（`app/tasks/outbox.py` 的通知分支）写入，结算 outbox 行（`SENT`）与
+插入通知在同一事务里（INV-13）；客户接口（AIH-TASK-127）只读，以及写 `read_at`。AIH-TASK-125 只建表，部署后表是空的、
+没有写入方。行不删除。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_notifications_public_id`）；uuid4，客户侧唯一可见的标识（接口里的 `notification_id`） |
+| `tenant_id` | BIGINT | 非空；外键 → `tenants(id)` `ON DELETE RESTRICT`（`fk_notifications_tenant`）。由 outbox 行的 `aggregate_id`（租户 `public_id`）决定 |
+| `notification_type` | VARCHAR(32) | 非空，`CHECK IN ('LOW_BALANCE','SUSPENDED','REACTIVATED')`（`ck_notifications_type`）；文案在前端，后端不存 |
+| `source_outbox_id` | BIGINT | 非空，**唯一**（`uq_notifications_source_outbox`）；产生它的 `domain_outbox.id`，幂等键。**不建外键**（见下） |
+| `balance` | DECIMAL(20,8) | 非空；事件 payload 的 `balance`：触发事件那笔流水之后的余额，可以为负 |
+| `threshold` | DECIMAL(20,8) | 可空；只有 `LOW_BALANCE` 非空，是事件 payload 的 `threshold`（`ck_notifications_threshold`，见下） |
+| `occurred_at` | DATETIME | 非空；事件发生时刻 = outbox 行的 `created_at`（= 账本行的 `created_at`），不是处理时刻：重试晚几分钟不改变它 |
+| `created_at` | DATETIME | 非空；通知行写入时刻，取整到秒 |
+| `read_at` | DATETIME | 可空；首次标已读的时刻，之后不变；`NULL` = 未读。没有「已读 → 未读」 |
+
+时间一律不带时区的 UTC。金额只存与回显，不做任何运算（INV-10：payload 的定点字符串 → `Decimal` → DECIMAL(20,8)）。
+
+约束与索引：
+
+- `uq_notifications_source_outbox (source_outbox_id)`：「一条 outbox 行最多一条通知」的数据库兜底（spec §48：重试不产生第二条
+  逻辑通知）。
+- `uq_notifications_public_id (public_id)`：客户按它标已读、当游标。
+- `ix_notifications_tenant_occurred (tenant_id, source_outbox_id)`，非唯一：列表按租户、`source_outbox_id` 倒序翻页
+  （`source_outbox_id` 与记账顺序一致，`occurred_at` 与通知 `id` 都不是，见设计 §2「客户接口」）；未读数
+  `WHERE tenant_id = ? AND read_at IS NULL` 走它的前缀。名字沿用设计 v7，**不含 `occurred_at`**。它同时是租户外键在 MySQL
+  上用的索引，MySQL 不另建。
+- `ck_notifications_threshold`：`threshold` 非空当且仅当类型为 `LOW_BALANCE`，写成两条分支的 OR
+  （`(notification_type = 'LOW_BALANCE' AND threshold IS NOT NULL) OR (notification_type <> 'LOW_BALANCE' AND threshold IS NULL)`），
+  两库同义。
+- 两条 CHECK 的条件文本是 `app/models/notifications.py` 的常量，迁移里冻结一份，`tests/backend/test_notifications_migration.py`
+  比对两边；三种非法插入（`LOW_BALANCE` 不带阈值、`SUSPENDED` 带阈值、未知类型）在 SQLite 与 MySQL 上都被拒绝。
+
+**`source_outbox_id` 为什么不建外键**（设计 §9 方案取舍 B）：`domain_outbox` 是投递机制表，日后按时间清理时会被通知表挡住，
+只能级联删除或先删通知——而通知是要长期给客户看的。幂等由上面的唯一约束保证，引用来源只用于排查。日后清理 outbox 的方案
+必须保留「已结算」语义（已 `SENT` 的行不被重新领取）。
+
+**迁移与回滚**（设计 §8）：
+
+- 0028 只建这一张表，不改任何已有表、不回填。MySQL 上是**一条**原子的 `CREATE TABLE`（索引、外键与 CHECK 都在里面）；之前用
+  inspector 判一次：表不存在 → 建；存在且形状与设计一致（恰好 10 列的名称、类型与宽度、可空性，三个索引，外键 `RESTRICT`，
+  两条 CHECK 的名称）→ 跳过、不发 DDL（建表成功后写 `alembic_version` 失败时的重跑）；形状不对 → 报错点名这张表、不发 DDL。
+- **表非空时降级被拒**：`downgrade` 先查 `SELECT 1 FROM notifications LIMIT 1`，有任何一行就抛错，不发 DDL、不删行，
+  `alembic_version` 仍是 0028 —— 已交付的通知（含已读状态）的来源 outbox 行已是 `SENT`，删了无法重建。只在表为空时删表；
+  表不存在时什么都不做；`--sql` 离线模式判断不了是否为空，直接拒绝、不输出 `DROP TABLE`。
+- **生产只回滚应用镜像，不降级 0028**：旧 worker 不认这两类事件，已写的通知原样留在表里，新产生的 outbox 行以 `PENDING`
+  等再次前滚，不会重复通知。需要修复时一律前滚。
+
+---
+
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、
