@@ -7594,7 +7594,7 @@ tasks:
     title: 门户通知第三层：客户通知列表与标已读接口
     purpose: >-
       按 docs/design/AIH-TASK-125-portal-notifications.md（设计闸门 #471 已批准 v7）§2「客户接口」与 §8：新增 GET /api/v1/customer/notifications（只按 source_outbox_id 即记账顺序倒序、不按时间，以通知 id 为游标往旧翻页、带未读数）、POST /api/v1/customer/notifications/{notification_id}/read 与 POST /api/v1/customer/notifications/read-all（客户写接口：require_customer_writable 加事务内锁租户重查）；新文件 app/repositories/notifications.py 与 app/schemas/customer_notifications.py；docs/api.md 新增「客户通知」一节。前端属于 AIH-TASK-128。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-126
     acceptance_criteria:
