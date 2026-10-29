@@ -7922,7 +7922,7 @@ tasks:
     title: 余额核对第五层：核对结果并入钱包健康告警
     purpose: >-
       按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「告警」与 §8：app/services/alerts.py 的 wallet_negative_balance 并入核对结果（待判运行集有不一致即 P1；负余额、30 小时没完成或从未完成、时钟异常的行为 P2），摘要逐字照设计；docs/api.md 告警表与 docs/runbook.md 同步，runbook 新增「钱包核对发现不一致」的数据事故处置。只读；管理端接口属于 AIH-TASK-134。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-132
     acceptance_criteria:
