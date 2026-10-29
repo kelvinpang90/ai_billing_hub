@@ -525,6 +525,9 @@ def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
         ("GET", f"{CUSTOMER_PREFIX}/usage-summary/export"),
         ("GET", f"{CUSTOMER_PREFIX}/conversations"),
         ("GET", f"{CUSTOMER_PREFIX}/conversations/export"),
+        ("GET", f"{CUSTOMER_PREFIX}/notifications"),
+        ("POST", f"{CUSTOMER_PREFIX}/notifications/{{notification_id}}/read"),
+        ("POST", f"{CUSTOMER_PREFIX}/notifications/read-all"),
     }
 
 

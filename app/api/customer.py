@@ -59,6 +59,12 @@ repository 函数、同一个 5 键视图，唯一的差别是 `month` 必填。
 会话摘要导出（AIH-TASK-122，设计闸门 #460 v2 §2「接口二」）：与会话列表同一个 repository 函数、
 同一个 9 键视图，只有 `from_date`、`to_date`、`project_id`，没有 `page_size` 与 `cursor`。行数可达
 20 000，所以**占导出租约**；租约、错误处理与行数上限与用量导出逐步相同。
+
+通知（AIH-TASK-127，设计闸门 #471 v7 §2「客户接口」）：列表只读、用 `require_customer`，只按
+`source_outbox_id`（记账顺序）倒序，游标是通知 id，在鉴权之后判（不是小写 UUID 或本租户查不到
+都是 422 `cursor`）。标已读与全部已读是**第一批客户写接口**：`require_customer_writable`，
+在自己的写事务里先 `lock_tenant_for_customer_write` 再写；路径参数在鉴权之后判，不是小写 UUID
+与查不到同是 404 `NOTIFICATION_NOT_FOUND`。不写审计：已读只影响客户自己的显示（设计 §6）。
 """
 
 from __future__ import annotations
@@ -69,7 +75,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Request
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.auth import require_customer, require_session_factory
+from app.api.auth import require_customer, require_customer_writable, require_session_factory
 from app.core.csv_export import (
     EXPORT_LEASE_SCOPE_KEY,
     EXPORT_MAX_ROWS,
@@ -81,9 +87,11 @@ from app.core.csv_export import (
     try_acquire_export_lease,
     write_csv,
 )
+from app.core.database import session_scope
 from app.core.errors import AppError
 from app.core.logging import current_request_id
 from app.models.tenancy import Tenant
+from app.repositories import notifications as notifications_repository
 from app.repositories import tenancy as tenancy_repository
 from app.repositories import usage_events as usage_repository
 from app.repositories import wallet as wallet_repository
@@ -95,6 +103,15 @@ from app.schemas.customer_conversations import (
     customer_conversation_export_cells,
     customer_conversation_page,
     decode_conversation_cursor,
+)
+from app.schemas.customer_notifications import (
+    CustomerNotificationPage,
+    CustomerNotificationsMarked,
+    CustomerNotificationView,
+    NotificationNotFound,
+    customer_notification_page,
+    customer_notification_view,
+    is_notification_id,
 )
 from app.schemas.customer_usage import (
     USAGE_DATE_PATTERN,
@@ -135,7 +152,7 @@ from app.schemas.usage_ingest import (
     REQUEST_ID_PATTERN,
 )
 from app.schemas.wallet_transactions import MAX_WALLET_SEQUENCE
-from app.services.account_status import READ_ONLY_STATUSES
+from app.services.account_status import READ_ONLY_STATUSES, lock_tenant_for_customer_write
 from app.services.auth import utc_now
 from app.services.customers import CustomerNotFound
 
@@ -588,6 +605,83 @@ def customer_conversations_export(
         response = None
         raise CustomerExportFailed
     return response
+
+
+@router.get("/notifications", response_model=ApiResponse[CustomerNotificationPage])
+def customer_notifications(
+    request: Request,
+    page_size: PageSize = DEFAULT_PAGE_SIZE,
+    cursor: str | None = None,
+) -> ApiResponse[CustomerNotificationPage]:
+    """The caller's notifications, newest booking first, with the unread count.
+
+    只按 `source_outbox_id` 倒序（记账顺序），不按时间。游标是上一页最后一条的
+    `notification_id`，只在本租户内查：别的客户的通知 id 与不存在的一样是 422（INV-8）。
+    """
+    principal = require_customer(request)
+    if cursor is not None and not is_notification_id(cursor):
+        raise InvalidCustomerUsageQuery("cursor")
+    with require_session_factory(request)() as session:
+        before = None
+        if cursor is not None:
+            before = notifications_repository.source_outbox_id_for(
+                session, principal.tenant_id, cursor
+            )
+            if before is None:
+                raise InvalidCustomerUsageQuery("cursor")
+        # 多取一行，只用来判断还有没有下一页。
+        rows = notifications_repository.list_for_tenant(
+            session,
+            principal.tenant_id,
+            limit=page_size + 1,
+            before_source_outbox_id=before,
+        )
+        # 与列表同一个会话里读。
+        unread = notifications_repository.count_unread(session, principal.tenant_id)
+        page = customer_notification_page(rows, page_size=page_size, unread_count=unread)
+    return success(page, request_id=current_request_id())
+
+
+@router.post(
+    "/notifications/{notification_id}/read",
+    response_model=ApiResponse[CustomerNotificationView],
+)
+def customer_notification_read(
+    request: Request, notification_id: str
+) -> ApiResponse[CustomerNotificationView]:
+    """Mark one of the caller's notifications read; return it.
+
+    已读的再标一次不改 `read_at`，照样 200。不是小写 UUID、不存在或属于别的客户都是 404。
+    """
+    principal = require_customer_writable(request)
+    if not is_notification_id(notification_id):
+        raise NotificationNotFound
+    now = utc_now().replace(microsecond=0)
+    with session_scope(require_session_factory(request)) as session:
+        # 写入之前锁租户行重查账户状态：依赖只是提前拒绝。
+        lock_tenant_for_customer_write(session, principal.tenant_id)
+        row = notifications_repository.mark_read(
+            session, principal.tenant_id, notification_id, now=now
+        )
+        if row is None:
+            raise NotificationNotFound
+        view = customer_notification_view(row)
+    return success(view, request_id=current_request_id())
+
+
+@router.post("/notifications/read-all", response_model=ApiResponse[CustomerNotificationsMarked])
+def customer_notifications_read_all(request: Request) -> ApiResponse[CustomerNotificationsMarked]:
+    """Mark every unread notification of the caller read; `marked` is how many (0 when none).
+
+    之后才提交的通知仍是未读。
+    """
+    principal = require_customer_writable(request)
+    now = utc_now().replace(microsecond=0)
+    with session_scope(require_session_factory(request)) as session:
+        # 写入之前锁租户行重查账户状态：依赖只是提前拒绝。
+        lock_tenant_for_customer_write(session, principal.tenant_id)
+        marked = notifications_repository.mark_all_read(session, principal.tenant_id, now=now)
+    return success(CustomerNotificationsMarked(marked=marked), request_id=current_request_id())
 
 
 def _log_query_timeout(factory: sessionmaker[Session], tenant_id: int) -> None:
