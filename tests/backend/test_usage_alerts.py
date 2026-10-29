@@ -30,6 +30,7 @@ from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import Wallet
 from app.repositories.wallet import EVENT_BILLING_STATUS_CHANGED
 from app.services import alerts
+from app.services.account_status import EVENT_ACCOUNT_STATUS_CHANGED
 from app.services.alerts import AlertContext, AlertLevel, AlertResult
 from app.services.password_reset import EVENT_PASSWORD_RESET
 
@@ -343,8 +344,8 @@ def add_outbox(
 
 
 def test_only_handled_outbox_rows_pending_over_10_minutes_count(factory) -> None:
-    # No handler yet: waits by design. Sent: done. Pending for exactly 10 minutes: not yet.
-    add_outbox(factory, EVENT_BILLING_STATUS_CHANGED, NOW - 60 * MINUTE)
+    # Still no handler: waits by design. Sent: done. Pending for exactly 10 minutes: not yet.
+    add_outbox(factory, EVENT_ACCOUNT_STATUS_CHANGED, NOW - 60 * MINUTE)
     add_outbox(factory, EVENT_PASSWORD_RESET, NOW - 60 * MINUTE, OutboxStatus.SENT)
     add_outbox(factory, EVENT_PASSWORD_RESET, NOW - 10 * MINUTE)
     assert check(factory, alerts.outbox_backlog) == AlertResult(
@@ -356,6 +357,18 @@ def test_only_handled_outbox_rows_pending_over_10_minutes_count(factory) -> None
     result = check(factory, alerts.outbox_backlog)
     assert result == AlertResult(
         P2, f"1 row pending over 10 minutes, oldest created {stamp(NOW - 11 * MINUTE)}"
+    )
+    assert TENANT_PUBLIC_ID not in result.summary
+
+
+def test_a_billing_status_changed_row_pending_over_10_minutes_counts(factory) -> None:
+    """设计闸门 #471 v7 §7「recover 与告警名单」：
+    通知投递接上之后，这类事件有处理器，计入。"""
+    add_outbox(factory, EVENT_BILLING_STATUS_CHANGED, NOW - 60 * MINUTE)
+
+    result = check(factory, alerts.outbox_backlog)
+    assert result == AlertResult(
+        P2, f"1 row pending over 10 minutes, oldest created {stamp(NOW - 60 * MINUTE)}"
     )
     assert TENANT_PUBLIC_ID not in result.summary
 

@@ -23,7 +23,10 @@ from app.repositories.wallet import (
     EVENT_BILLING_STATUS_CHANGED,
     EVENT_LOW_BALANCE,
 )
+from app.services import alerts
+from app.services.account_status import EVENT_ACCOUNT_STATUS_CHANGED
 from app.services.auth import RequestContext, utc_now
+from app.services.internal_billing import EVENT_BILLING_MODE_CHANGED
 from app.services.password_reset import AGGREGATE_USERS, EVENT_PASSWORD_RESET
 from app.services.portal_accounts import EVENT_PORTAL_INVITATION, create_portal_account
 from app.tasks import outbox as outbox_task
@@ -303,11 +306,12 @@ def test_recovery_requeues_every_due_row(wired, monkeypatch, settings: Settings)
 def test_recovery_leaves_events_without_a_handler_pending(wired, monkeypatch) -> None:
     """INV-14（设计闸门 #88 §2）：没有处理器的事件**不重投**，原样等着。
 
-    ⚠️ 计费状态与低余额事件现在还没有投递方。重投它们只会失败、退避，几轮之后
-    成为 `FAILED` 死信 —— 等以后的 webhook / 通知任务接上处理器时，它们已经没了。
+    ⚠️ 账户状态与计费模式事件现在还没有投递方。重投它们只会失败、退避，几轮之后
+    成为 `FAILED` 死信 —— 等以后的任务接上处理器时，它们已经没了。
+    两类通知事件（设计闸门 #471 v7）已有处理器，照常重投。
     """
     reset = add_row(wired)
-    waiting = [
+    notifications = [
         add_row(
             wired,
             event_type=event_type,
@@ -316,16 +320,53 @@ def test_recovery_leaves_events_without_a_handler_pending(wired, monkeypatch) ->
         )
         for event_type in (EVENT_BILLING_STATUS_CHANGED, EVENT_LOW_BALANCE)
     ]
+    payload = json.dumps({"account_status": "DISABLED"})
+    waiting = [
+        add_row(
+            wired,
+            event_type=event_type,
+            aggregate_type=AGGREGATE_TENANT,
+            payload_json=payload,
+        )
+        for event_type in (EVENT_ACCOUNT_STATUS_CHANGED, EVENT_BILLING_MODE_CHANGED)
+    ]
     queued: list[int] = []
     monkeypatch.setattr(outbox_task.deliver, "delay", lambda outbox_id: queued.append(outbox_id))
 
-    assert outbox_task.recover() == 1
-    assert queued == [reset], "既有的密码重置事件照常重投，只有它"
+    assert outbox_task.recover() == 3
+    assert queued == [reset, *notifications], "密码重置与两类通知事件重投，只有它们"
     for outbox_id in waiting:
         row = read(wired, outbox_id)
         assert row.status is OutboxStatus.PENDING
         assert row.attempt_count == 0
-        assert row.payload_json is not None
+        assert row.payload_json == payload
+
+
+def test_the_handled_types_are_the_email_and_the_notification_events() -> None:
+    """设计闸门 #471 v7 §7「recover 与告警名单」：一个函数，邮件类并通知类。"""
+    assert set(outbox_task.handled_event_types()) == {
+        EVENT_PASSWORD_RESET,
+        EVENT_PORTAL_INVITATION,
+        EVENT_LOW_BALANCE,
+        EVENT_BILLING_STATUS_CHANGED,
+    }
+    assert outbox_task.NOTIFICATION_EVENTS == {EVENT_LOW_BALANCE, EVENT_BILLING_STATUS_CHANGED}
+    for still_waiting in (EVENT_ACCOUNT_STATUS_CHANGED, EVENT_BILLING_MODE_CHANGED):
+        assert still_waiting not in outbox_task.handled_event_types()
+
+
+def test_recovery_and_the_backlog_alert_read_the_same_list(wired, monkeypatch) -> None:
+    """两处不再各自引用 `_RENDERERS`：换掉名单函数，两边一起跟着变。"""
+    row = add_row(wired, event_type=EVENT_ACCOUNT_STATUS_CHANGED, aggregate_type=AGGREGATE_TENANT)
+    monkeypatch.setattr(outbox_task, "handled_event_types", lambda: [EVENT_ACCOUNT_STATUS_CHANGED])
+    queued: list[int] = []
+    monkeypatch.setattr(outbox_task.deliver, "delay", lambda outbox_id: queued.append(outbox_id))
+
+    assert outbox_task.recover() == 1
+    assert queued == [row]
+    context = alerts.AlertContext(now=utc_now() + dt.timedelta(hours=1), currencies=())
+    with wired() as session:
+        assert alerts.outbox_backlog(session, context).level is alerts.AlertLevel.P2
 
 
 def test_recovery_takes_at_most_one_batch(wired, monkeypatch) -> None:

@@ -13,6 +13,10 @@
 崩掉」会导致同一封信发第二遍。对密码重置这是无害的：两封信里是**同一张令牌**，
 用掉一次另一封自然失效。ADR-0009 说的「重试不得产生第二条逻辑通知」指的是不
 产生第二行 outbox —— 那一条这里是满足的。
+
+**通知类事件**（`tenant.low_balance`、`tenant.billing_status_changed`，
+设计闸门 #471 v7 §2「投递」）不发信：领取之后在一个事务里结算这一行并插入一条门户通知，
+二者原子提交，所以同一行不论投递几次最多一条通知。
 """
 
 from __future__ import annotations
@@ -20,7 +24,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import uuid
+from dataclasses import dataclass
 from functools import lru_cache
+from typing import Final
 from urllib.parse import quote
 
 from celery import shared_task
@@ -31,7 +38,11 @@ from app.core.config import Settings, get_settings
 from app.core.database import create_database_engine, create_session_factory
 from app.core.mailer import OutgoingEmail, build_transport
 from app.models.auth import DomainOutbox, OutboxStatus
+from app.models.notifications import Notification
+from app.models.tenancy import Tenant
+from app.repositories.wallet import EVENT_BILLING_STATUS_CHANGED, EVENT_LOW_BALANCE
 from app.services.auth import utc_now
+from app.services.notifications import InvalidPayload, NotificationDraft, notification_for
 from app.services.password_reset import EVENT_PASSWORD_RESET
 from app.services.portal_accounts import EVENT_PORTAL_INVITATION
 
@@ -147,9 +158,10 @@ def _render_portal_invitation(
 # 旧的。这种行在 worker 更新后就能正常投出去 —— 立刻判死信等于把它们永久丢掉，
 # 而它们本来只需要等几分钟。重试上限兜住了「真的没人认识它」那种情况。
 #
-# ⚠️ `recover` 只重投这里有的类型（设计闸门 #88 §2）。`tenant.billing_status_changed`
-# 与 `tenant.low_balance` 现在还没有处理器：它们以 PENDING 持久躺在库里，等以后的
-# webhook / 通知任务在这里加上处理器再接手，不会被反复重投、退避成死信（INV-14）。
+# ⚠️ `recover` 只重投有处理器的类型（`handled_event_types()`，设计闸门 #88 §2）。
+# 仍没有处理器的类型（`tenant.account_status_changed`、`tenant.billing_mode_changed`）
+# 以 PENDING 持久躺在库里，等以后的任务加上处理器再接手，
+# 不会被反复重投、退避成死信（INV-14）。
 #
 # 门户邀请（AIH-TASK-094）登记之后，恢复扫描才会领
 # `PORTAL_INVITATION_REQUESTED` 行；在那之前它们以 PENDING 躺在库里，等的就是这一行。
@@ -157,6 +169,33 @@ _RENDERERS = {
     EVENT_PASSWORD_RESET: _render_password_reset,
     EVENT_PORTAL_INVITATION: _render_portal_invitation,
 }
+
+# 通知类事件（设计闸门 #471 v7 §2「投递」）：不调 SMTP、不需要前端基址，
+# 规则在 app/services/notifications.py。
+NOTIFICATION_EVENTS: Final = frozenset({EVENT_LOW_BALANCE, EVENT_BILLING_STATUS_CHANGED})
+
+
+def handled_event_types() -> list[str]:
+    """Every event type with a handler: the email ones and the notification ones.
+
+    ⚠️ `recover` 的扫描与 `alerts.outbox_backlog` 的计数用这同一份名单：
+    两处各自维护时，一边加了类型另一边忘了，就是「投了却不报积压」或「报积压却没人投」。
+    """
+    return sorted(set(_RENDERERS) | NOTIFICATION_EVENTS)
+
+
+@dataclass(frozen=True)
+class _Claim:
+    """What `deliver` read from the row before claiming it, and the attempt it claimed."""
+
+    outbox_id: int
+    # 本次领取写入的 `attempt_count`：结算的前置条件，只有当前领取者能结算这一行。
+    attempt: int
+    event_type: str
+    aggregate_type: str
+    aggregate_id: str
+    payload_json: str | None
+    created_at: dt.datetime
 
 
 @shared_task(name="app.tasks.outbox.deliver")
@@ -177,6 +216,15 @@ def deliver(outbox_id: int) -> str:
         attempt = row.attempt_count + 1
         event_type = row.event_type
         raw_payload = row.payload_json
+        claim = _Claim(
+            outbox_id=outbox_id,
+            attempt=attempt,
+            event_type=event_type,
+            aggregate_type=row.aggregate_type,
+            aggregate_id=row.aggregate_id,
+            payload_json=raw_payload,
+            created_at=row.created_at,
+        )
 
         # ⚠️ 领取 = 一条带完整前置条件的 UPDATE。`attempt_count` 同时充当乐观锁：
         # 两个 worker 同时被触发时，只有一个的受影响行数是 1。
@@ -201,6 +249,9 @@ def deliver(outbox_id: int) -> str:
             # 还没到重试时刻，或者被另一个 worker 抢走了。
             return "not-claimed"
         session.commit()
+
+    if event_type in NOTIFICATION_EVENTS:
+        return _deliver_notification(factory, settings, claim)
 
     sent = _attempt_send(settings, event_type=event_type, raw_payload=raw_payload)
 
@@ -262,6 +313,167 @@ def _attempt_send(settings: Settings, *, event_type: str, raw_payload: str | Non
     return build_transport(settings).send(message)
 
 
+# --- 通知类事件（设计闸门 #471 v7 §2「投递」、§4、§5） ------------------------------------
+#
+# ⚠️ 日志只带 `outbox_id`、`event_type` 与尝试次数（设计 §6）：
+# 不带余额、阈值、租户标识，也不带 exc_info —— 数据库异常的消息里有绑定参数。
+# 排查看 `domain_outbox` 里保留的 payload。
+
+
+def _now() -> dt.datetime:
+    """`utc_now()` truncated to whole seconds, as in app/services/account_status.py."""
+    return utc_now().replace(microsecond=0)
+
+
+def _deliver_notification(factory: sessionmaker[Session], settings: Settings, claim: _Claim) -> str:
+    """Settle one claimed notification row. **Never raises** — the return value says what
+    happened."""
+    try:
+        settled = _settle_notification(factory, claim)
+    except Exception:
+        # 事务已随会话关闭回滚：行仍 PENDING，没有通知行。
+        settled = None
+    if settled is not None:
+        return settled
+
+    if claim.attempt < settings.outbox_max_attempts:
+        logger.warning(
+            "Outbox notification failed; it will be retried",
+            extra={
+                "outbox_id": claim.outbox_id,
+                "event_type": claim.event_type,
+                "attempt": claim.attempt,
+            },
+        )
+        return "retry-later"
+
+    try:
+        dead = _dead_letter_notification(factory, claim)
+    except Exception:
+        logger.error(
+            "Could not dead-letter an outbox notification; it will be retried",
+            extra={
+                "outbox_id": claim.outbox_id,
+                "event_type": claim.event_type,
+                "attempts": claim.attempt,
+            },
+        )
+        return "retry-later"
+    if not dead:
+        # 这一行已被更晚的一次领取接手（或已结算）：由那一方结算，这里不记 error。
+        return "superseded"
+    # ⚠️ **error 级别**：没有别人会再碰这一行了，只能靠人。payload 保留着供排查。
+    logger.error(
+        "Giving up on an outbox notification after repeated failures",
+        extra={
+            "outbox_id": claim.outbox_id,
+            "event_type": claim.event_type,
+            "attempts": claim.attempt,
+        },
+    )
+    return "dead-lettered"
+
+
+def _settle_notification(factory: sessionmaker[Session], claim: _Claim) -> str | None:
+    """One transaction: settle the row as SENT and insert its notification (INV-13).
+
+    返回值：
+    - `notified`：插入了一条；
+    - `no-notification`：规则判不出通知，行照常 SENT；
+    - `already-settled`：结算 UPDATE 受影响行数不是 1
+      （另一个 worker 已结算，或这一行已被更晚的一次领取接手）；
+    - None：payload 无效、租户查不到，已回滚，由调用方走失败分支。
+
+    事务内的异常照常抛出，会话关闭时回滚。
+    """
+    now = _now()
+    with factory() as session:
+        settled = session.execute(
+            update(DomainOutbox)
+            .where(
+                DomainOutbox.id == claim.outbox_id,
+                DomainOutbox.status == OutboxStatus.PENDING,
+                DomainOutbox.attempt_count == claim.attempt,
+            )
+            # ⚠️ 不清空 payload：通知类 payload 只有余额、阈值、状态与流水 `public_id`，
+            # 不含令牌或个人数据，留着供排查（设计 §2）。
+            .values(status=OutboxStatus.SENT, processed_at=now)
+        )
+        if int(settled.rowcount) != 1:
+            session.rollback()
+            return "already-settled"
+
+        outcome = notification_for(
+            event_type=claim.event_type,
+            aggregate_type=claim.aggregate_type,
+            payload_json=claim.payload_json,
+            created_at=claim.created_at,
+        )
+        if isinstance(outcome, InvalidPayload):
+            session.rollback()
+            return None
+        if not isinstance(outcome, NotificationDraft):
+            session.commit()
+            return "no-notification"
+
+        tenant_id = session.execute(
+            select(Tenant.id).where(Tenant.public_id == claim.aggregate_id)
+        ).scalar_one_or_none()
+        if tenant_id is None:
+            # 租户从不删除，不应发生；与 payload 无效同样处理。
+            session.rollback()
+            return None
+        _insert_notification(session, claim=claim, tenant_id=int(tenant_id), draft=outcome, now=now)
+        session.commit()
+        return "notified"
+
+
+def _insert_notification(
+    session: Session,
+    *,
+    claim: _Claim,
+    tenant_id: int,
+    draft: NotificationDraft,
+    now: dt.datetime,
+) -> None:
+    """Add the notification row in the settling transaction. `source_outbox_id` is unique: the
+    database's own guarantee of one notification per outbox row."""
+    session.add(
+        Notification(
+            public_id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            notification_type=draft.notification_type,
+            source_outbox_id=claim.outbox_id,
+            balance=draft.balance,
+            threshold=draft.threshold,
+            occurred_at=draft.occurred_at,
+            created_at=now,
+        )
+    )
+    session.flush()
+
+
+def _dead_letter_notification(factory: sessionmaker[Session], claim: _Claim) -> bool:
+    """FAILED, only if this claim is still the current one. Keeps the payload.
+
+    ⚠️ 与成功结算一样带 `attempt_count = :attempt`：
+    旧领取者停顿期间行被更晚的一次领取接手时，它的死信结算受影响 0 行，
+    不会把新领取者正在处理的行置为 FAILED（设计 §4「串行化」）。
+    """
+    with factory() as session:
+        result = session.execute(
+            update(DomainOutbox)
+            .where(
+                DomainOutbox.id == claim.outbox_id,
+                DomainOutbox.status == OutboxStatus.PENDING,
+                DomainOutbox.attempt_count == claim.attempt,
+            )
+            .values(status=OutboxStatus.FAILED, processed_at=_now())
+        )
+        session.commit()
+        return int(result.rowcount) == 1
+
+
 @shared_task(name="app.tasks.outbox.recover")
 def recover() -> int:
     """Re-trigger every due row. **This is the Invariant 14 half.**
@@ -270,8 +482,9 @@ def recover() -> int:
     之前挂掉」都会让那些行**永远躺在库里**：状态是 PENDING、谁也不会再看它们
     一眼，而用户那边的表现只是「没收到信」。
 
-    ⚠️ 只捡有渲染器的事件类型。没有处理器的行重投了也只会失败、退避，最后成为
-    死信 —— 而它们本来只是在等以后的任务来处理（见 `_RENDERERS` 上方的注释）。
+    ⚠️ 只捡有处理器的事件类型（`handled_event_types()`：邮件类与通知类）。没有处理器的行
+    重投了也只会失败、退避，最后成为死信 —— 而它们本来只是在等以后的任务来处理
+    （见 `_RENDERERS` 上方的注释）。
 
     返回重新触发了多少行（给日志与将来的积压告警用，T0.9）。
     """
@@ -284,7 +497,7 @@ def recover() -> int:
                 .where(
                     DomainOutbox.status == OutboxStatus.PENDING,
                     DomainOutbox.next_retry_at <= now,
-                    DomainOutbox.event_type.in_(list(_RENDERERS)),
+                    DomainOutbox.event_type.in_(handled_event_types()),
                 )
                 .order_by(DomainOutbox.id)
                 .limit(settings.outbox_recovery_batch)
@@ -300,4 +513,4 @@ def recover() -> int:
     return len(due)
 
 
-__all__ = ["deliver", "recover"]
+__all__ = ["NOTIFICATION_EVENTS", "deliver", "handled_event_types", "recover"]
