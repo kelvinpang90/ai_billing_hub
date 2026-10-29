@@ -96,6 +96,8 @@ function me(twoFactorEnabled: boolean): Me {
 const WALLET_URL = "/api/v1/customer/wallet";
 const TRANSACTIONS_URL = "/api/v1/customer/wallet/transactions";
 const SUMMARY_URL = "/api/v1/customer/usage-summary";
+/** 门户导航进入门户时读一次未读数（AIH-TASK-128），不带查询串。 */
+const NOTIFICATIONS_URL = "/api/v1/customer/notifications";
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 
 /** 让请求一直挂着（加载中）。 */
@@ -178,6 +180,8 @@ function serve(walletReply: unknown, transactionsReply: unknown, summaryReply: u
       reply = transactionsReply;
     } else if (parsed.pathname === SUMMARY_URL) {
       reply = summaryReply;
+    } else if (parsed.pathname === NOTIFICATIONS_URL) {
+      reply = { items: [], next_cursor: null, unread_count: 0 };
     } else {
       reply = new ApiError("NOT_FOUND", "Unexpected request.", null);
     }
@@ -361,7 +365,12 @@ describe("PortalHomePage wallet summary and recent transactions", () => {
     for (const url of urls) {
       expect(url).not.toContain("/api/v1/admin/");
       // 本月用量卡（AIH-TASK-108）也在首页上：它的请求不带查询串。
-      expect(url === WALLET_URL || url === `${TRANSACTIONS_URL}?page_size=5` || url === SUMMARY_URL).toBe(true);
+      expect(
+        url === WALLET_URL ||
+          url === `${TRANSACTIONS_URL}?page_size=5` ||
+          url === SUMMARY_URL ||
+          url === NOTIFICATIONS_URL,
+      ).toBe(true);
     }
   });
 
