@@ -28,6 +28,9 @@ from app.models import (
     integration as _integration_models,  # noqa: F401  (registers the two integration tables)
 )
 from app.models import (
+    notifications as _notification_models,  # noqa: F401  (registers notifications)
+)
+from app.models import (
     pricing_rules as _pricing_rule_models,  # noqa: F401  (registers the three pricing rule tables)
 )
 from app.models import (
