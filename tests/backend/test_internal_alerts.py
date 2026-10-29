@@ -267,7 +267,7 @@ EMPTY_DATABASE_LINES = (
     "usage_model_unknown OK no MODEL_UNKNOWN events\n"
     "usage_failed OK no failed events\n"
     "usage_processing_backlog OK 0 due; 0 PROCESSING; 0 lease expired\n"
-    "wallet_negative_balance OK no wallet below zero\n"
+    "wallet_negative_balance P2 no wallet below zero; reconciliation never completed\n"
     "outbox_backlog OK no handled outbox row pending over 10 minutes\n"
     "status_webhook OK no status webhook problem\n"
     "ai_usage_outbox OK dead 0, held 0, review required 0, oldest pending 0 seconds\n"

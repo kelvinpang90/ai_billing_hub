@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-10-23
+> 最后更新：2026-10-29
 
 ---
 
@@ -810,7 +810,7 @@ billing_nginx nginx -T | grep -A4 integration` 核对挂载的配置），按「
 | `usage_pricing_error` / `usage_fx_rate_error` / `usage_model_unknown` 变 P2 | 有事件停在对应的错误状态。摘要有条数、最早接收时刻与至多 3 个细分码（`NO_PROVIDER_PRICE`、`MISSING_PROVIDER_COMPONENT`、`NO_PRICING_RULE`、`MISSING_RULE_COMPONENT`） |
 | `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
 | `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数 |
-| `wallet_negative_balance` 变 P2 | 有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010）。只有个数 |
+| `wallet_negative_balance` 变 P2 / **P1** | 一行合并负余额与钱包核对（设计闸门 #474 v13 §2「告警」），摘要恰好 `<负余额部分>; <核对部分>`，只有计数与日期。P2：有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010；摘要 `<n> wallets below zero`）；或核对从未完成（`reconciliation never completed`）、最近一次完成超过 30 小时（末尾 `stale`）；或有时钟异常的运行（`clock anomaly <行数>`）。**P1** = 核对发现余额与账本不一致（`inconsistent <M>` 或 `later inconsistent <K>` 大于 0），按下面「钱包核对发现不一致」处理 |
 | `outbox_backlog` 变 P2 | 有处理器的 outbox 行（密码重置信、门户邀请信与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。通知类行进死信（`FAILED`）时 payload 保留：看 `domain_outbox` 里这一行的 `payload_json` 与 worker 的 error 日志（`Giving up on an outbox notification`，带 `outbox_id`） |
 | worker 日志 | `Recovered a usage event stuck in PROCESSING past its lease`（WARNING，带 `event_id`、`claimed_at`、`attempt_count`）；`A usage event's ledger reference was already posted with another amount`（ERROR，账本冲突）；`Billing a usage event failed; the attempt is recorded`（WARNING，带错误类型与码） |
 
@@ -917,6 +917,123 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 ⚠️ 这两项目前**没有**在 `docker-compose.yml` 的 `x-backend.environment` 里转发（本任务不改 compose），所以容器里一律是
 代码默认值；只改 `.env` 不会生效。要改需另立任务在 compose 里加转发（照 `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS`
 的写法与 `test_compose.py` 的默认值比对）。
+
+---
+
+## 钱包核对发现不一致（`wallet_negative_balance` 告警 P1）
+
+**首次编写：2026-10-29（AIH-TASK-133）。依据：设计闸门 #474 v13（[AIH-TASK-129-wallet-reconciliation.md](design/AIH-TASK-129-wallet-reconciliation.md)
+§1「明确不做什么」、§2「告警」、§5、§8）；问题码的判定见 AIH-TASK-005（[AIH-TASK-005-wallet-ledger.md](design/AIH-TASK-005-wallet-ledger.md)），
+告警接口见 [api.md「内部告警接口」](api.md#内部告警接口)。**
+
+钱包余额由账本插入触发器维护，正常写路径不会不一致。celery-beat 每 300 秒跑一次 `wallet-reconciliation-step`，每个马来西亚
+日历日通常完成一次全量核对（03:00 之后开始），逐个钱包在只读事务里把 `wallets` 与按序的 `wallet_transactions` 对一遍，
+不一致的钱包写进 `wallet_reconciliation_findings`。核对**只读、不修复**：发现不一致说明有东西绕过了触发器
+（`TRUNCATE`、手工 SQL、触发器被删或被改），**按数据事故处理**。
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| Telegram：`ai_billing_hub wallet_negative_balance` 变 DOWN，正文 `P1 wallet_negative_balance: … reconciliation <日期> checked <N> inconsistent <M>…` | **P1** = 「待判运行集」（最近一次完成的核对运行，加上它之后插入的全部运行：进行中、已放弃、已完成）里有运行记下了不一致。`inconsistent <M>` 是最近一次完成运行的不一致数；`later inconsistent <K>` 是之后的运行里不一致数的最大值。不一致一经提交**立即** P1，不等运行完成 |
+| 同上，正文以 `P2` 开头，带 `never completed` 或 `stale` | 核对从未完成，或最近一次完成已超过 30 小时：beat / worker 停了，或某个钱包每次都读不完（worker 日志 `wallet_reconciliation_failed`，带 `stage`、`run_id`、`error_type`）。先按「celery-beat 停止调度」「Redis / Celery broker 不可用」排查 |
+| 同上，带 `clock anomaly <行数>` | 有 `run_date` 晚于马来西亚今天、或 `finished_at` 晚于此刻 10 分钟以上的运行：见下「时钟异常的 P2」 |
+
+摘要只有计数与日期，不含客户与金额：是哪些客户要到管理端核对页或按下面的查询看。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| AI 服务、摄取与计费照常；核对不加锁、不阻塞记账 | 不一致的钱包余额**不可信**：停机判定（`balance <= 0`）、低余额提醒、对账单都基于这个余额 |
+| 其他钱包（不一致按钱包逐个判定） | 账本被清空或篡改时，按账本重放出的余额与钱包缓存对不上，之后对这个钱包的每一笔记账都在错误的基础上累加 |
+
+### 立刻做什么
+
+**1. 找到客户与问题码。**管理端核对页（顶栏「钱包核对」，`/wallet-reconciliation`，AIH-TASK-134、135 上线后）：运行表里不一致数
+大于 0 的那一行，点开看客户、问题码、快照里的余额、版本、账本行数与核对时刻。页面上线之前用只读查询：
+
+```bash
+docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+  SELECT r.id, r.run_date, r.status, r.finished_at, t.public_id AS customer, f.problem_codes,
+         f.balance, f.wallet_version, f.ledger_rows, f.checked_at
+    FROM wallet_reconciliation_findings f
+    JOIN wallet_reconciliation_runs r ON r.id = f.run_id
+    JOIN tenants t ON t.id = f.tenant_id
+   ORDER BY r.id DESC, f.tenant_id
+   LIMIT 50"'
+```
+
+**2. 看懂问题码**（一个钱包可同时有几个，按下表顺序存储）：
+
+| 问题码 | 含义 | 多半是 |
+| --- | --- | --- |
+| `WALLET_MISSING` | 租户没有钱包行 | 钱包行被删（单独出现，不再判其他码） |
+| `LEDGER_MISSING` | 钱包版本 > 0，账本一行都没有 | 账本被 `TRUNCATE` 或整批删除 |
+| `BALANCE_NOT_LEDGER_SUM` | 钱包余额不等于账本 `amount` 之和 | 钱包余额被直接改写，或账本行被删、被改 |
+| `BALANCE_NOT_LAST_BALANCE_AFTER` | 钱包余额不等于最后一行的 `balance_after` | 同上 |
+| `VERSION_NOT_LAST_SEQUENCE` | 钱包版本不等于最后一行的 `wallet_sequence` | 钱包版本被直接改写，或末尾的账本行被删 |
+| `SEQUENCE_GAP` | 账本序号不是从 1 起连续的 1..n | 中间的账本行被删 |
+| `CHAIN_BROKEN` | 某行的 `balance_before` 不等于上一行的 `balance_after`（第一行不是 0） | 历史账本行被篡改，或中间有行被删 |
+| `ROW_ARITHMETIC_BROKEN` | 某行 `balance_after` 不等于 `balance_before + amount` | 绕过 CHECK 改了账本行（正常情况下数据库写不进去） |
+| `BILLING_STATUS_MISMATCH` | 客户的 `billing_status` 与余额不符（余额 > 0 应为 `ACTIVE`，≤ 0 应为 `SUSPENDED`） | 租户行或钱包余额被直接改写 |
+
+**3. 按数据事故流程处置**（只读排查在前，任何修复都要在流程内、有审计）：
+
+1. **冻结排查**：通知负责人，停止对这个客户的人工调账与充值，直到查清；需要时经管理端账户状态把客户停用（`DISABLED`），
+   集成方随之拦截 AI 调用，不再产生新的扣费。在工单里记下运行日期、客户 `public_id` 与问题码（不贴余额截图到聊天）。
+2. **核对触发器与审计**：确认账本与钱包的触发器还在、没有被改（只读）：
+
+   ```bash
+   docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+     SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, CREATED
+       FROM information_schema.TRIGGERS
+      WHERE TRIGGER_SCHEMA = DATABASE()
+        AND EVENT_OBJECT_TABLE IN (\"wallets\", \"wallet_transactions\")"'
+   ```
+
+   与 [database-schema.md](database-schema.md) 列出的触发器逐个比对；再查 `audit_logs` 里这段时间的管理操作、MySQL 的
+   慢日志或通用日志里有没有绕过应用的 `TRUNCATE` / `UPDATE` / `DELETE`，以及最近一次发布与迁移。先找到原因，再修数据。
+3. **修复**，二选一：
+   - **从备份恢复**：按「整台 VPS 没了（灾难恢复）」的恢复与「恢复后对账」步骤，恢复到出问题之前的备份，再补回之后的
+     合法变动；
+   - **在维护窗口内人工修复**：由管理员在维护窗口内按事故工单与本 runbook 修复，修复前先备份，修复本身记审计（谁、何时、
+     为什么、改了哪些行）。
+4. **验证**：修好后等下一次核对（或在次日 03:00 之后的运行完成后）确认这个客户不再出现在 findings 里。
+
+**为什么 `SYSTEM_CORRECTION` 修不好**：账本插入触发器要求新行的 `balance_before` 等于钱包当前余额、`wallet_sequence` 等于钱包
+版本 + 1。账本被清空、历史行被篡改或钱包缓存被直接改写之后，补记一行只会在已经坏掉的链后面再接一环：`LEDGER_MISSING`、
+`SEQUENCE_GAP`、`CHAIN_BROKEN` 这些问题一个都消不掉，还会让账本更难还原。`SYSTEM_CORRECTION` 只能在账本与钱包本身一致的前提下
+调整余额（例如给客户补偿），不是修复数据损坏的工具。
+
+**时钟异常的 P2 如何核查**：摘要里的 `clock anomaly <行数>` 来自 `run_date` 晚于马来西亚今天、或 `finished_at` 晚于此刻
+10 分钟以上的运行（时钟偏快时插入，或有人手工插入）。只读查出这些行：
+
+```bash
+docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+  SELECT id, run_date, status, started_at, finished_at, wallets_checked, wallets_inconsistent
+    FROM wallet_reconciliation_runs
+   WHERE run_date > DATE(UTC_TIMESTAMP() + INTERVAL 8 HOUR)
+      OR finished_at > UTC_TIMESTAMP() + INTERVAL 10 MINUTE"'
+```
+
+再核对主机与容器的时钟（`date -u`、`timedatectl` 的 NTP 同步状态）。时钟修好后，未来日期的行在那个日期到来时变回正常行，
+P2 随之消失；这些行记下的不一致照样算 P1、照样要处理。
+
+### 恢复
+
+- **P1 一直持续到出现一次没有不一致的完成运行**：那时待判运行集只剩它和之后的运行。修复后最晚在次日 03:00 之后的运行完成时
+  转绿。这是有意的：数据没真正修好，告警就不消。
+- `stale` / `never completed`：beat 与 worker 恢复后核对从库里的游标继续，下一次完成即转绿。
+- 核对：管理端核对页最新一次完成运行的不一致数为 0；或上面的 findings 查询里最新的完成运行没有行。
+
+### 绝不能做什么
+
+- **不得在流程之外直接改 `wallets` 或 `wallet_transactions`**（包括为了消告警改余额、改版本、删或补账本行）：余额只经账本变动
+  （INV-4），历史账本不可变（INV-5）；人工修复只在维护窗口内、按事故工单、记审计
+- **不要用 `SYSTEM_CORRECTION` 或手工调账「抹平」不一致**：理由见上，它修不好这些问题码，只会把损坏埋得更深
+- **不要删 `wallet_reconciliation_runs` / `wallet_reconciliation_findings` 的行来消 P1**：它们是事故的证据（外键也是 `RESTRICT`）
+- **不要为了消 `clock anomaly` 手工改运行的 `run_date` 或 `finished_at`**：修的是时钟，不是记录
 
 ---
 

@@ -28,6 +28,7 @@ from app.models.auth import DomainOutbox, OutboxStatus
 from app.models.base import Base
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import Wallet
+from app.models.wallet_reconciliation import ReconciliationRunStatus, WalletReconciliationRun
 from app.repositories.wallet import EVENT_BILLING_STATUS_CHANGED
 from app.services import alerts
 from app.services.account_status import EVENT_ACCOUNT_STATUS_CHANGED
@@ -294,6 +295,9 @@ def test_processing_past_its_lease_means_recovery_has_stopped(
 
 
 def test_negative_wallets_are_counted_without_tenant_or_amount(factory) -> None:
+    """负余额仍 P2；核对部分在 tests/backend/test_wallet_reconciliation_alerts.py。
+    一条一致、未过期的完成运行，让核对部分本身是 OK（设计闸门 #474 v13 §2「告警」）。"""
+
     def wallet(tenant_id: int, balance: str) -> Wallet:
         return Wallet(
             tenant_id=tenant_id,
@@ -306,15 +310,30 @@ def test_negative_wallets_are_counted_without_tenant_or_amount(factory) -> None:
 
     with factory() as session:
         session.add_all([wallet(1, "0"), wallet(2, "0.0625")])
+        session.add(
+            WalletReconciliationRun(
+                public_id="00000000-0000-4000-8000-000000000001",
+                run_date=dt.date(2026, 10, 1),
+                status=ReconciliationRunStatus.COMPLETED,
+                started_at=NOW - 2 * MINUTE,
+                finished_at=NOW - MINUTE,
+                cursor_tenant_id=4,
+                wallets_checked=4,
+                wallets_inconsistent=0,
+            )
+        )
         session.commit()
-    assert check(factory, alerts.wallet_negative_balance) == AlertResult(OK, "no wallet below zero")
+    reconciled = "reconciliation 2026-10-01 checked 4 inconsistent 0"
+    assert check(factory, alerts.wallet_negative_balance) == AlertResult(
+        OK, f"no wallet below zero; {reconciled}"
+    )
 
     with factory() as session:
         session.add_all([wallet(3, "-0.0625"), wallet(4, "-12.5")])
         session.commit()
 
     result = check(factory, alerts.wallet_negative_balance)
-    assert result == AlertResult(P2, "2 wallets below zero")
+    assert result == AlertResult(P2, f"2 wallets below zero; {reconciled}")
     assert "0.0625" not in result.summary and "12.5" not in result.summary
 
 
