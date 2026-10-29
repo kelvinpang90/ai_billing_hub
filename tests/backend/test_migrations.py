@@ -242,6 +242,10 @@ def _table_names() -> set[str]:
 # 它之前时随之删掉（空表）。迁移本身由 test_notifications_migration.py 验。
 _NOTIFICATIONS_TABLE = "notifications"
 
+# 0029_wallet_reconciliation（AIH-TASK-129，设计闸门 #474 v13）建的两张表：从 head
+# 降级到它之前时随之删掉（空表）。迁移本身由 test_wallet_reconciliation_migration.py 验。
+_RECONCILIATION_TABLES = {"wallet_reconciliation_runs", "wallet_reconciliation_findings"}
+
 
 # ---------------------------------------------------------------------------
 # 0021_ai_module（AIH-TASK-056，设计闸门 #281 v23）
@@ -1950,10 +1954,11 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022 与 0028
+        # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022、0028 与 0029
         # 的表随降级到 0009 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
+        later |= _RECONCILIATION_TABLES
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -2050,9 +2055,10 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
         # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020、0021、
-        # 0022 与 0028 的表随降级到 0010 一并删掉）。
+        # 0022、0028 与 0029 的表随降级到 0010 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
+        later |= _RECONCILIATION_TABLES
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
@@ -5676,8 +5682,8 @@ def test_0022_downgrade_refuses_while_a_version_exists(alembic_config: Config) -
         with pytest.raises(RuntimeError, match="Cannot downgrade tax policy"):
             command.downgrade(alembic_config, _REVISION_0021)
 
-        # 0028 的空表在走到 0022 之前已被删掉（MySQL 的 DDL 不随拒绝回滚）。
-        assert _table_names() == tables - {_NOTIFICATIONS_TABLE}
+        # 0029 与 0028 的空表在走到 0022 之前已被删掉（MySQL 的 DDL 不随拒绝回滚）。
+        assert _table_names() == tables - {_NOTIFICATIONS_TABLE} - _RECONCILIATION_TABLES
         assert _all_triggers() == triggers
         assert _lock_ids_0022() == [1]
     finally:

@@ -48,6 +48,9 @@ from app.models import (
 from app.models import (
     wallet as _wallet_models,  # noqa: F401  (registers wallets/wallet_transactions)
 )
+from app.models import (
+    wallet_reconciliation as _reconciliation_models,  # noqa: F401  (registers runs/findings)
+)
 from app.models.base import Base  # noqa: F401  (imported for metadata side effects)
 
 config = context.config
