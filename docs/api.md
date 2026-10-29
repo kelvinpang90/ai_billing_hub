@@ -7,6 +7,7 @@
 
 - [客户门户认证](#客户门户认证)（AIH-TASK-093）：接受邀请、当前用户、客户自己开启 2FA、客户端 `/customer/me`
 - [客户钱包](#客户钱包)（AIH-TASK-099）：客户自己的余额与钱包流水，流水用序号游标分页
+- [客户通知](#客户通知)（AIH-TASK-127）：客户自己的门户通知、未读数与标已读（第一批客户写接口）
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端钱包流水](#管理端钱包流水)（AIH-TASK-084）：序号游标分页，是下面「分页」的例外
@@ -681,6 +682,109 @@
 | 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 |
 
 没有 404（项目不属于本客户就是空页），也没有 403 `ACCOUNT_READ_ONLY`（读接口）。
+
+---
+
+## 客户通知
+
+设计依据：设计闸门 #471 `APPROVED: design v7`，全文见 [design/AIH-TASK-125-portal-notifications.md](design/AIH-TASK-125-portal-notifications.md)（§2「客户接口」「时间」「金额」、§4、§6；spec §25、§27、§47–§50、§74）。接口登记为 AIH-TASK-127。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/customer/notifications` | CUSTOMER 的访问令牌 | 200，一页通知（每条 6 个键）与未读数 | 401 / 403 / 422 / 500 / 503 |
+| `POST /api/v1/customer/notifications/{notification_id}/read` | 同上 | 200，这一条（6 个键） | 401 / 403 / 404 / 500 / 503 |
+| `POST /api/v1/customer/notifications/read-all` | 同上 | 200，`{"marked": N}` | 401 / 403 / 500 / 503 |
+
+- 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，路径、查询串、请求体里都没有租户参数（带了 `customer_id`、`tenant_id` 也只会被忽略）；ADMIN 不能调。
+- 列表是读接口，四种 `account_status` 都返回 200。两个标已读接口是**写接口**：账户 `DISABLED` / `CLOSED` 时 403 `ACCOUNT_READ_ONLY`；服务端在写事务里锁住客户行后再查一次状态，所以与管理员停用同时发生时，要么在停用之前写完，要么被拒。
+- 不写审计：已读状态只影响客户自己的界面显示，不改变余额、权限或任何业务状态。
+
+### 通知是什么
+
+钱包记账时，余额跨过低余额阈值、或计费状态在 `ACTIVE` / `SUSPENDED` 之间切换，系统为该客户生成一条通知。通知是后台异步生成的：事件发生后**最多晚约一个恢复周期（约 60 秒）**才出现在列表里。每个事件最多一条通知，重试不会产生第二条。
+
+| `notification_type` | 何时产生 | `threshold` |
+| --- | --- | --- |
+| `LOW_BALANCE` | 预付客户的余额从阈值之上跌到阈值及以下（等于阈值也算） | 当时的阈值 |
+| `SUSPENDED` | 预付客户的计费状态 `ACTIVE → SUSPENDED`（余额 ≤ 0） | `null` |
+| `REACTIVATED` | 预付客户的计费状态 `SUSPENDED → ACTIVE`（余额回到 > 0） | `null` |
+
+- **内部计量客户（`INTERNAL_METERED_ONLY`）不收 `SUSPENDED` / `REACTIVATED` 通知**；低余额事件只对预付客户产生，所以内部计量客户也不收 `LOW_BALANCE`。
+- 同一笔流水可以同时产生 `LOW_BALANCE` 与 `SUSPENDED` 两条。
+- 通知说的是**事件当时**发生了什么：`balance`、`threshold` 是事件那一刻的值，不随之后的余额或阈值变化；要看当前余额用[钱包接口](#get-apiv1customerwallet--客户自己的钱包)。
+- 不发 Email、不发 WhatsApp；不能删除、归档或按类型筛选。类型的显示文案在前端，后端只给类型代码。
+
+### `GET /api/v1/customer/notifications` —— 客户自己的通知
+
+| 参数 | 规则 |
+| --- | --- |
+| `page_size` | 1–100，默认 20；类型或范围不对由框架在鉴权**之前**判 422 |
+| `cursor` | 可选，上一页响应的 `next_cursor` 原样传回；省略 = 从最新开始。在鉴权**之后**判 |
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "notification_id": "00000000-0000-0000-0000-000000000000",
+        "notification_type": "LOW_BALANCE",
+        "occurred_at": "2026-10-27T05:12:09",
+        "balance": "12.50000000",
+        "threshold": "50.00000000",
+        "read_at": null
+      }
+    ],
+    "next_cursor": null,
+    "unread_count": 3
+  },
+  "error": null,
+  "request_id": "00000000-0000-0000-0000-000000000000"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `items` | 按**记账顺序**倒序（后记账的事件在前），见下面「排序」 |
+| `notification_id` | 通知的标识（小写 uuid）；标已读与游标都用它 |
+| `notification_type` | `LOW_BALANCE` / `SUSPENDED` / `REACTIVATED`，见上表 |
+| `occurred_at` | **事件发生时刻**（触发它的那笔流水的记账时间），不是通知出现的时刻；不带时区的 UTC，精确到秒、不带 `Z`，与[钱包流水](#get-apiv1customerwallettransactions--客户自己的钱包流水)的 `created_at` 同一格式 |
+| `balance` | 事件当时、那笔流水之后的余额，恰好 8 位小数的字符串，可以为负；不经浮点、不舍入 |
+| `threshold` | 只有 `LOW_BALANCE` 有：事件当时的阈值，同样是 8 位小数字符串；其他类型为 `null` |
+| `read_at` | 首次标为已读的时刻（格式同 `occurred_at`）；`null` = 未读 |
+| `next_cursor` | 还有更早的通知时是本页最后一条的 `notification_id`，否则 `null` |
+| `unread_count` | 本客户全部未读通知的条数，不受分页影响；与列表在同一次读取里得到 |
+
+- 每条恰好上面 6 个键，页恰好 3 个键。**刻意不返回**：内部 id、客户标识、来源事件的标识、通知写入时刻、状态版本号、原因、有效服务状态、流水标识；没有任何成本、加价或毛利字段（INV-7）。没有 `total`。
+
+**排序**：只按记账顺序倒序，**不按时间**。极少数并发调账下，相邻两条显示的 `occurred_at` 可能不单调（较新的一条时间略早）：例如一笔充值先取了时间、等前一笔扣款记完才入账，列表里「已复机」排在「已停机」前面（与当前状态一致），但它的时间早几秒。
+
+**翻页**：第一页不带 `cursor`；下一页把 `next_cursor` 原样传回；为 `null` 就是最后一页。顺序是全序，翻页不重复、不遗漏。`cursor` 不是小写规范 uuid 形状（36 字符、8-4-4-4-12；大写也不行），或在本客户的通知里查不到（包括别的客户的通知 id）→ 422 `VALIDATION_ERROR`（`query.cursor`），两种情况不区分。
+
+### `POST /api/v1/customer/notifications/{notification_id}/read` —— 标一条为已读
+
+- 无请求体。`notification_id` 来自列表。
+- 已读只能从未读变为已读，没有「标为未读」。**重复标记不改时刻**：已读的再标一次，`read_at` 保留首次的时刻，照样 200。
+- 响应是这一条，与列表条目同样的 6 个键（`read_at` 已有值）。
+- `notification_id` 不是小写规范 uuid 形状、不存在或属于别的客户 → 404 `NOTIFICATION_NOT_FOUND`，三种情况不区分（形状在鉴权之后判，不另设 422）。
+
+### `POST /api/v1/customer/notifications/read-all` —— 全部标为已读
+
+- 无请求体。把本客户此刻所有未读通知标为已读；已读的不动（`read_at` 不变）。
+- 响应恰好一个键：`{"marked": N}`，`N` 是本次标记的条数；没有未读时为 0，照样 200。
+- **之后新到的通知仍是未读**：只标记调用那一刻已经生成的通知。
+
+### 错误（三个接口）
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 403 | `ACCOUNT_READ_ONLY` | 只有两个标已读接口：账户 `DISABLED` / `CLOSED` |
+| 404 | `NOTIFICATION_NOT_FOUND` | 只有单条标已读：见上 |
+| 422 | `VALIDATION_ERROR` | 只有列表：`page_size` 不合规，或 `cursor` 不合规 / 查不到 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 |
 
 ---
 
