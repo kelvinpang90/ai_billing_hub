@@ -104,6 +104,10 @@ export function AppLayout() {
               key: ROUTES.usageAnalytics,
               label: <Link to={ROUTES.usageAnalytics}>{t("nav.usageAnalytics")}</Link>,
             },
+            {
+              key: ROUTES.walletReconciliation,
+              label: <Link to={ROUTES.walletReconciliation}>{t("nav.walletReconciliation")}</Link>,
+            },
           ]}
         />
         {/* 登出必须调后端：只清本地令牌的话，那张刷新 cookie 还活着，

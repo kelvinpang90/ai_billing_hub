@@ -70,6 +70,11 @@ export const ROUTES = {
    */
   usageAnalytics: "/usage-analytics",
   /**
+   * 管理端钱包核对（AIH-TASK-135，设计闸门 #474 v13 §2「前端」）。顶栏有一项；验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `open_wallet_reconciliation` 按这个 href 找顶栏链接，改了要同步那里。
+   */
+  walletReconciliation: "/wallet-reconciliation",
+  /**
    * 客户门户首页（AIH-TASK-096，设计 AIH-TASK-089 §11 任务 E）。只给 CUSTOMER：`RequireRole` 把 ADMIN 转回
    * {@link ROUTES.dashboard}，管理端各页同样把 CUSTOMER 转到这里。
    */
