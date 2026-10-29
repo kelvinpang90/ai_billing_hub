@@ -205,6 +205,9 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", PORTAL_ACCOUNT_ROUTE + "/disable"),
     ("POST", PORTAL_ACCOUNT_ROUTE + "/enable"),
     ("POST", PORTAL_ACCOUNT_ROUTE + "/reset-2fa"),
+    # AIH-TASK-134 的钱包核对只读接口（设计闸门 #474 v13 §2「管理端接口」）。
+    ("GET", "/api/v1/admin/wallet-reconciliation/runs"),
+    ("GET", "/api/v1/admin/wallet-reconciliation/runs/{run_id}/findings"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。

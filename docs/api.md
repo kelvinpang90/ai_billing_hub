@@ -20,6 +20,7 @@
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
 - [管理端试算预览](#管理端试算预览)（AIH-TASK-031）
 - [管理端用量事件：重新入队](#管理端用量事件重新入队)（AIH-TASK-032）
+- [钱包核对](#钱包核对)（AIH-TASK-134）：管理端只读的核对运行列表与每次运行的不一致记录
 - [内部告警接口](#内部告警接口)（AIH-TASK-042）：机器接口，**不套信封**，是下面通用约定的例外
 - [集成：用量事件摄取](#集成用量事件摄取)（AIH-TASK-029）：集成签名认证，错误信封多一个顶层 `retryable`
 
@@ -3320,6 +3321,134 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 
 查询使用已有的 `ix_usage_events_status_occurred`（状态与时间段）、`ix_usage_events_tenant_id`、
 `ix_usage_events_project_id` 与 `ix_usage_events_tenant_feature_occurred`；没有新增迁移或索引。
+
+---
+
+## 钱包核对
+
+设计依据：设计闸门 #474 `APPROVED: design v13`，全文见
+[design/AIH-TASK-129-wallet-reconciliation.md](design/AIH-TASK-129-wallet-reconciliation.md) §2「管理端接口」。
+实现登记为 AIH-TASK-134。
+
+后台每天对全部租户的钱包做一次只读核对：逐个钱包按序读账本，判定余额、版本、序号、余额链与计费状态是否与账本一致
+（判定规则同 `verify_wallet`）。核对本身不改钱包、不改账本；发现不一致按数据事故处理（见 `docs/runbook.md`），
+同时[内部告警接口](#内部告警接口)的 `wallet_negative_balance` 维度变 P1。这两个接口让管理员看到核对跑了哪些、
+哪些客户的钱包不一致、问题码是什么。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/wallet-reconciliation/runs` | 200，运行分页 | 401 / 403 / 422 / 503 |
+| `GET /api/v1/admin/wallet-reconciliation/runs/{run_id}/findings` | 200，不一致分页 | 401 / 403 / 404 / 422 / 503 |
+
+只有 ADMIN 能调。**只读**：不写审计、不写日志、不写任何行。
+
+### 查询参数（两个接口相同）
+
+| 参数 | 规则 |
+| --- | --- |
+| `page` / `page_size` | 见[分页](#分页spec-108)：1–10000 与 1–100，默认 1 与 20；超出范围 422，在鉴权**之前**校验 |
+
+没有筛选参数。未知的查询参数不报错，与其他列表接口一致。
+
+### 核对运行
+
+一次核对运行是一行记录。运行分段推进（每 5 分钟推进一小段），所以一次运行通常要跨好几个周期才完成。
+
+- **同一时刻至多一条 `RUNNING`**，由数据库的唯一约束保证。
+- **一天通常一次完成的运行**：在马来西亚时间 03:00 之后的第一个周期开始（表里一条运行都没有时立即开始）；当天已有
+  `COMPLETED` 的运行就不再开始。
+- **但同一个 `run_date` 可能有多条运行**：
+  - 当天没跑完的运行在马来西亚 00:00 之后的第一个周期被收尾为 `ABANDONED`；被收尾的 `ABANDONED` 行不挡住
+    那一天再开始一条新的运行，所以同一个 `run_date` 可能有一条 `ABANDONED` 与之后的一条运行；
+  - 极少数并发下（一个 worker 判断「今天还没有完成的运行」之后、开始之前，恰有另一条运行完成），同一天会多开始并
+    完成一次，结果同样正确，只多一次全量核对。
+
+`data` 是[分页](#分页spec-108)对象，`items` 里每一项恰好这 7 个键：
+
+```json
+{
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "run_date": "2026-10-29",
+  "status": "COMPLETED",
+  "started_at": "2026-10-28T19:05:00",
+  "finished_at": "2026-10-28T19:12:00",
+  "wallets_checked": 3,
+  "wallets_inconsistent": 1
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `run_id` | 运行的对外 id（uuid4）；`…/runs/{run_id}/findings` 用它 |
+| `run_date` | 运行所属的马来西亚日历日，`YYYY-MM-DD`（按 `started_at` 换算到 UTC+8） |
+| `status` | `RUNNING`（进行中）、`COMPLETED`（已核对完开始前已有的全部租户）、`ABANDONED`（当天没跑完、被收尾；已记下的不一致保留） |
+| `started_at` | 开始时刻 |
+| `finished_at` | 完成或被收尾的时刻；`RUNNING` 时为 `null` |
+| `wallets_checked` | 到目前为止核对过的租户数（每个租户一个钱包，所以也是钱包数）；`RUNNING` / `ABANDONED` 时是已核对的部分 |
+| `wallets_inconsistent` | 其中不一致的钱包数，等于这次运行的不一致记录条数 |
+
+时间与[管理端审计日志](#审计对象)的时间字段相同：不带时区的 UTC，精确到秒（见[时间](#时间)）。
+
+**排序**：按 `started_at` 倒序（最新开始的在前）；同一时刻开始的按内部行 id 倒序（后插入的在前）。
+
+响应里没有内部自增 id、核对游标与租约字段。
+
+### 不一致记录
+
+`GET …/runs/{run_id}/findings` 列出一次运行里**不一致**的钱包，一个钱包一条；**一致的钱包不记录**，所以
+全部一致的运行这里是空列表（`total` 为 0）。运行仍在 `RUNNING` 时只列出已核对部分里发现的不一致。
+
+`data` 是[分页](#分页spec-108)对象，`items` 里每一项恰好这 7 个键：
+
+```json
+{
+  "customer_id": "00000000-0000-0000-0000-000000000000",
+  "company_name": "Acme Sdn Bhd",
+  "problem_codes": ["LEDGER_MISSING", "BALANCE_NOT_LEDGER_SUM", "VERSION_NOT_LAST_SEQUENCE"],
+  "balance": "12.50000000",
+  "wallet_version": 4,
+  "ledger_rows": 0,
+  "checked_at": "2026-10-28T19:06:00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `customer_id` | 客户的 `id`（`public_id`），可直接用于[管理端客户管理](#管理端客户管理)的客户详情 |
+| `company_name` | 客户的公司名（读取时的当前值） |
+| `problem_codes` | 问题码的字符串数组，至少一个，按判定顺序（即下表顺序）排列 |
+| `balance` | 核对那一刻钱包的余额，恰好 8 位小数的字符串（见[金额](#金额inv-10)）；钱包不存在（`WALLET_MISSING`）时为 `null` |
+| `wallet_version` | 核对那一刻钱包的版本号（整数）；钱包不存在时为 `null` |
+| `ledger_rows` | 核对时读到的账本行数；钱包不存在时为 0 |
+| `checked_at` | 核对这个钱包的时刻，格式同上 |
+
+`balance`、`wallet_version` 与 `ledger_rows` 都取自核对那一刻的一致性快照，不是现在的值。
+
+问题码：
+
+| 问题码 | 含义 |
+| --- | --- |
+| `WALLET_MISSING` | 租户没有钱包行。单独出现，不与其他码同时出现 |
+| `LEDGER_MISSING` | 钱包版本大于 0，账本却一行都没有（例如账本被清空） |
+| `BALANCE_NOT_LEDGER_SUM` | 钱包余额不等于账本全部金额之和 |
+| `BALANCE_NOT_LAST_BALANCE_AFTER` | 钱包余额不等于最后一行账本的变动后余额 |
+| `VERSION_NOT_LAST_SEQUENCE` | 钱包版本不等于最后一行账本的序号（没有账本行时应为 0） |
+| `SEQUENCE_GAP` | 账本序号不是从 1 起连续的 1..n（有缺号或重号） |
+| `CHAIN_BROKEN` | 某一行的变动前余额不等于上一行的变动后余额（第一行应为 0） |
+| `ROW_ARITHMETIC_BROKEN` | 某一行的变动后余额不等于变动前余额加金额 |
+| `BILLING_STATUS_MISMATCH` | 客户的计费状态与钱包余额对应的状态不一致 |
+
+**排序**：按客户的内部行 id 升序（即客户的创建顺序）。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 404 | `RECONCILIATION_RUN_NOT_FOUND` | 不一致记录：`run_id` 不是小写规范 UUID（8-4-4-4-12，含大写字母也算），或没有这次运行。两种情形的响应相同 |
+| 422 | `VALIDATION_ERROR` | `page` / `page_size` 越界 |
+
+⚠️ `run_id` 的形状在鉴权**之后**判：没带令牌时，任何 `run_id`（包括不合法的）都先得到 401，CUSTOMER 先得到 403。
+分页越界则与其他列表接口一样先于鉴权得到 422。
 
 ---
 

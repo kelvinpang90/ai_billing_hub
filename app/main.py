@@ -27,6 +27,7 @@ from app.api.admin_pricing_rules import router as admin_pricing_rules_router
 from app.api.admin_provider_prices import router as admin_provider_prices_router
 from app.api.admin_usage_analytics import router as admin_usage_analytics_router
 from app.api.admin_usage_events import router as admin_usage_events_router
+from app.api.admin_wallet_reconciliation import router as admin_wallet_reconciliation_router
 from app.api.auth import router as auth_router
 from app.api.customer import router as customer_router
 from app.api.health import router as health_router
@@ -156,6 +157,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 用量事件的重新入队（AIH-TASK-032）；查询接口以后加在同一个路由器上。
     app.include_router(admin_usage_events_router)
     app.include_router(admin_usage_analytics_router)
+    # 钱包核对的只读视图（AIH-TASK-134，设计闸门 #474 v13 §2「管理端接口」）。
+    app.include_router(admin_wallet_reconciliation_router)
     # 集成方的签名接口：错误信封多一个顶层 `retryable`（app/core/errors.py）。
     app.include_router(integration_usage_router)
     # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。
