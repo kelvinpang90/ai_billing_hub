@@ -7656,7 +7656,7 @@ tasks:
       - '新增 frontend/src/api/customerNotifications.ts 封装三个接口：省略的可选参数不进查询串，不传任何租户或客户标识；next_cursor 只原样传回、不解析；两个写接口用 POST、不带请求体'
       - '新增 frontend/src/features/portal/NotificationsPage.tsx：行序恰好是接口返回的顺序（记账顺序，不在前端按时间或别的键重排；相邻两条的时间可能不单调）；表格列为时间（按 +8 显示并标 MYT）、类型说明（三种类型各一条文案；低余额的说明带阈值）、余额（与钱包页同一个 2 位小数显示助手）；未读行加粗，每个未读行一个「Mark as read」，表头一个「Mark all as read」（没有未读时不可用）；按 next_cursor「Load more」追加到表格末尾；标已读成功后就地更新该行与未读数，不重新拉整个列表；ACCOUNT_READ_ONLY 有专门文案；加载中、失败（带 request_id）、空列表三种状态'
       - 'frontend/src/layouts/PortalLayout.tsx 的导航加「Notifications」一项（放在现有各项之后），旁边显示 unread_count（0 时不显示），进入门户时读一次、通知页标已读后刷新；读取失败时不显示数字、不影响导航；frontend/src/routes/paths.ts 登记 portalNotifications 路径 /portal/notifications，frontend/src/routes/index.tsx 把它挂在 RequireRole（CUSTOMER）与 PortalLayout 之下；页面不显示也不请求任何成本、毛利或内部字段，不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
-      - '测试（vitest + Testing Library）：customerNotifications.test.ts 覆盖三个接口的路径、方法与查询串；NotificationsPage.test.tsx 覆盖行序与接口顺序一致（含时间不单调的相邻两条，较新的一条时间更早时仍排在前面）、三种类型的文案与阈值、时间与余额显示、未读加粗、单条与全部标已读后的就地更新、没有未读时全部已读不可用、加载更多的游标与追加、ACCOUNT_READ_ONLY、三种状态、不请求 /api/v1/admin/ 路径；导航的未读数（0 不显示、非 0 显示、读取失败不显示、标已读后刷新）在 NotificationsPage.test.tsx 里经 PortalLayout 渲染覆盖；既有门户页面用例照常通过；示例 uuid 全零'
+      - '测试（vitest + Testing Library）：customerNotifications.test.ts 覆盖三个接口的路径、方法与查询串；NotificationsPage.test.tsx 覆盖行序与接口顺序一致（含时间不单调的相邻两条，较新的一条时间更早时仍排在前面）、三种类型的文案与阈值、时间与余额显示、未读加粗、单条与全部标已读后的就地更新、没有未读时全部已读不可用、加载更多的游标与追加、ACCOUNT_READ_ONLY、三种状态、不请求 /api/v1/admin/ 路径；导航的未读数（0 不显示、非 0 显示、读取失败不显示、标已读后刷新）在 NotificationsPage.test.tsx 里经 PortalLayout 渲染覆盖；既有门户页面用例照常通过，唯一例外是 PortalHomePage.test.tsx：它在真 PortalLayout 里渲染首页，导航进入门户时读未读数后 client.get 多出 GET /api/v1/customer/notifications，所以只在 asks for the five most recent transactions, and no admin endpoint 的请求白名单里补上这个通知列表路径（不带租户或客户标识），并让 serve 对这个路径回一份读得到的空通知列表；同一用例的不请求 /api/v1/admin/ 断言与其余用例保持不变，这个文件不改别处；示例 uuid 全零'
       - 'check_portal_notifications：在 login_customer 之后经门户导航打开通知页（href 为 /portal/notifications）；后端值取页面自己发出的 GET /api/v1/customer/notifications 的响应体（被动观察，不自己发请求），断言表格行数与 items 条数一致、items 为空时显示空状态，导航上的未读数与 unread_count 一致（0 时不显示）；不点「Mark as read」「Mark all as read」与「Load more」，不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
       - 'docs/TODO.md 只勾 Phase 6 的「门户内通知」一项；「低余额告警」「停机通知」「复机通知」不勾（还差 Email 与 WhatsApp 通道）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #471（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
     allowed_change_paths:
@@ -7668,6 +7668,7 @@ tasks:
       - frontend/src/routes/paths.ts
       - frontend/src/routes/index.tsx
       - frontend/src/layouts/PortalLayout.tsx
+      - frontend/src/features/portal/PortalHomePage.test.tsx
       - frontend/src/i18n/locales/en.json
       - docs/TODO.md
     allowed_commands:
