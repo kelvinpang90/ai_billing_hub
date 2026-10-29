@@ -811,7 +811,7 @@ billing_nginx nginx -T | grep -A4 integration` 核对挂载的配置），按「
 | `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
 | `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数 |
 | `wallet_negative_balance` 变 P2 | 有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010）。只有个数 |
-| `outbox_backlog` 变 P2 | 有处理器的 outbox 行（现在只有密码重置信）超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查 |
+| `outbox_backlog` 变 P2 | 有处理器的 outbox 行（密码重置信、门户邀请信与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。通知类行进死信（`FAILED`）时 payload 保留：看 `domain_outbox` 里这一行的 `payload_json` 与 worker 的 error 日志（`Giving up on an outbox notification`，带 `outbox_id`） |
 | worker 日志 | `Recovered a usage event stuck in PROCESSING past its lease`（WARNING，带 `event_id`、`claimed_at`、`attempt_count`）；`A usage event's ledger reference was already posted with another amount`（ERROR，账本冲突）；`Billing a usage event failed; the attempt is recorded`（WARNING，带错误类型与码） |
 
 ### 影响什么

@@ -378,10 +378,12 @@ def wallet_negative_balance(session: Session, context: AlertContext) -> AlertRes
 def outbox_backlog(session: Session, context: AlertContext) -> AlertResult:
     """P2 when an outbox row of a type with a handler is still PENDING after 10 minutes (§120).
 
-    没有处理器的类型（`tenant.billing_status_changed`、`tenant.low_balance`，等以后的投递任务）
-    按设计持久等待，不计入（app/tasks/outbox.py 的 `_RENDERERS`，与 `recover` 同一份名单）。
+    有处理器的类型是 app/tasks/outbox.py 的 `handled_event_types()`
+    （与 `recover` 同一份名单）：邮件类的密码重置与门户邀请，
+    通知类的 `tenant.billing_status_changed` 与 `tenant.low_balance`
+    （设计闸门 #471 v7 §2「投递」）。仍没有处理器的类型按设计持久等待，不计入。
     """
-    handled = list(outbox_tasks._RENDERERS)
+    handled = outbox_tasks.handled_event_types()
     statement = select(func.count(), func.min(DomainOutbox.created_at)).where(
         DomainOutbox.status == OutboxStatus.PENDING,
         DomainOutbox.event_type.in_(handled),

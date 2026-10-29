@@ -1110,7 +1110,8 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
   记账跨越触发：某一笔记账把余额从阈值之上（`>`）压到阈值及以下（`≤`）时写恰好一条；余额回到阈值之上后，
   下一次跌破再写一条（重新武装）。
 - **只对 `PREPAID` 客户**：`INTERNAL_METERED_ONLY` 客户无论阈值如何都不写这个事件（管理员调账照样记账，但不触发）。
-- 事件仍无处理器，以 `PENDING` 持久等待，不计入告警的 `outbox_backlog`。
+- 事件由通知投递处理（设计闸门 #471 v7，AIH-TASK-126）：周期恢复扫到后转成一条门户通知 `LOW_BALANCE`
+  并把这一行结算为 `SENT`（payload 保留）；超过 10 分钟仍 `PENDING` 计入告警的 `outbox_backlog`。
 
 ### 与记账的先后关系
 
@@ -3438,7 +3439,7 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
 | `usage_failed`（AIH-TASK-032） | 存在 `FAILED_FINAL` 的事件，或有 `FAILED_RETRYABLE` 的事件已尝试 ≥ 3 次：`P2`；其中有 `FAILED_FINAL` 带 `LEDGER_CONFLICT` 或 `AMOUNT_OUT_OF_RANGE`：`P1` | `1 FAILED_FINAL, 2 FAILED_RETRYABLE with 3+ attempts, earliest received …, codes LEDGER_CONFLICT, LOCK_WAIT_TIMEOUT`；OK：`no failed events` |
 | `usage_processing_backlog`（AIH-TASK-032） | 最早的可处理事件（`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`）等待超过 5 分钟（§119 p99），或存在租约已过期仍未回收的 `PROCESSING`（回收任务本身停了）：`P2`；等待超过 30 分钟，或有 `PROCESSING` 过期超过 10 分钟：`P1`。等待的起点是事件变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个，`FAILED_RETRYABLE` 取 `next_attempt_at` | `3 due, oldest since 2026-10-01T04:20:00Z; 1 PROCESSING, earliest claimed 2026-10-01T04:29:50Z; 0 lease expired`；空库：`0 due; 0 PROCESSING; 0 lease expired` |
 | `wallet_negative_balance`（AIH-TASK-032） | 存在余额 < 0 的钱包（§120）：`P2` | `P2`：`2 wallets below zero`（只有个数）；OK：`no wallet below zero` |
-| `outbox_backlog`（AIH-TASK-032） | `domain_outbox` 里**有处理器**的事件类型（`app/tasks/outbox.py` 的处理器名单，与周期恢复同一份）存在创建超过 10 分钟仍 `PENDING` 的行（§120）：`P2`。没有处理器的类型（`tenant.billing_status_changed`、`tenant.low_balance`）按设计持久等待，不计入 | `P2`：`1 row pending over 10 minutes, oldest created …`；OK：`no handled outbox row pending over 10 minutes` |
+| `outbox_backlog`（AIH-TASK-032） | `domain_outbox` 里**有处理器**的事件类型（`app/tasks/outbox.py` 的 `handled_event_types()`，与周期恢复同一份：邮件类的密码重置与门户邀请，通知类的 `tenant.billing_status_changed` 与 `tenant.low_balance`）存在创建超过 10 分钟仍 `PENDING` 的行（§120）：`P2`。仍没有处理器的类型（例如 `tenant.account_status_changed`、`tenant.billing_mode_changed`）按设计持久等待，不计入 | `P2`：`1 row pending over 10 minutes, oldest created …`；OK：`no handled outbox row pending over 10 minutes` |
 | `status_webhook`（AIH-TASK-052） | 只统计 `integration_status = ENABLED` 且设了[状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址)的项目（停用或没有地址的项目不推送，一律不计）。三个计数：**`failing`** = 投递落后（`delivered_version` 为空或小于客户的 `status_version`）且连续失败 ≥ 6 次（按默认退避约 15 分钟）的项目数；**`missing secret`** = 没有 `ACTIVE` [签名密钥](#管理端出站-webhook-签名密钥)的项目数（由数据推导，不看错误码）；**`signing error`** = 投递落后且最近一次因 `SECRET_DECRYPT_FAILED`（密钥解不开）或 `ENCRYPTION_NOT_CONFIGURED`（主密钥未配置）未发送的项目数。级别：`signing error > 0` 为 `P1`（加密配置坏了）；否则 `failing > 0` 或 `missing secret > 0` 为 `P2`；否则 OK | `P1` / `P2`：`failing 1, missing secret 0, signing error 2`（三个都是十进制整数，不做单复数变化）；OK：`no status webhook problem` |
 | `ai_usage_outbox`（AIH-TASK-066） | 未处理的 `DEAD`（`dead_acked_at` 为空）、`HELD`，或待复核（`review_required_at` 非空且 `reviewed_at` 为空）任一计数 > 0：`P1`；否则最老 `PENDING` / `SENDING` 行的 `created_at` 超过 `BILLING_AI_PENDING_ALERT_SECONDS`（默认 900 秒）：`P2`；否则 OK | `P1` / `P2` / OK：`dead 1, held 0, review required 0, oldest pending 901 seconds` |
 
