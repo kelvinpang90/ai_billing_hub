@@ -7822,7 +7822,7 @@ tasks:
     title: 余额核对第三层：核对运行的收尾、开始与领租约三个步骤函数
     purpose: >-
       按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「核对运行」第 0 到第 2 步：新文件 app/services/wallet_reconciliation.py 先放三个步骤函数——收尾日期不是今天的 RUNNING、按开始规则插入新运行、读进行中的运行并领租约（领到之后再读游标），外加租约的尽力释放函数与常量。没有调用方：扫描、续租、进度提交、step 主流程、Celery 任务与 beat 属于 AIH-TASK-132。只读钱包与账本，不写、不修复。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-130
     acceptance_criteria:
