@@ -7870,7 +7870,7 @@ tasks:
     title: 余额核对第四层：分段扫描、续租与进度提交，接上每日定时任务
     purpose: >-
       按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「核对运行」第 3 到第 5 步与 §8：app/services/wallet_reconciliation.py 加上分段扫描（逐钱包快照核对、20 秒预算、续租）、带租约与游标的进度 CAS、异常处理，以及把第 0 到第 5 步串起来的 step；新文件 app/tasks/wallet_reconciliation.py 是 Celery 任务，beat 每 300 秒一次。只读钱包与账本，不写、不修复；告警属于 AIH-TASK-133，管理端接口属于 AIH-TASK-134。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-131
     acceptance_criteria:
