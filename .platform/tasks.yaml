@@ -7483,7 +7483,7 @@ tasks:
     title: 门户通知第一层：通知表迁移与模型
     purpose: >-
       按 docs/design/AIH-TASK-125-portal-notifications.md（设计闸门 #471 已批准 v7）§2「数据库」与 §8：新迁移 0028 建 notifications 表（10 列、两个唯一索引、一个租户时间索引、类型与阈值两条 CHECK、tenant_id 外键 RESTRICT，source_outbox_id 不建外键），写法照 0026 与 0027：upgrade 先检查、可以安全重跑；新模型 app/models/notifications.py 并在 alembic/env.py 登记；docs/database-schema.md 记表结构。不写通知、不加接口：投递属于 AIH-TASK-126，接口属于 AIH-TASK-127。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-124
     acceptance_criteria:
