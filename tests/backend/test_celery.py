@@ -94,6 +94,7 @@ def test_the_periodic_tasks_include_the_ai_usage_delivery_sweep(
         "usage-stale-recovery",
         "status-webhook-dispatch",
         "ai_api.deliver_due",
+        "wallet-reconciliation-step",
     }
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
     assert entry["task"] == "app.tasks.outbox.recover"
@@ -209,6 +210,7 @@ def test_task_modules_are_listed_explicitly(celery_app) -> None:
         "app.tasks.usage_billing",
         "app.tasks.status_webhook",
         "app.ai_api.delivery",
+        "app.tasks.wallet_reconciliation",
     ]
     assert celery_app.conf.include == TASK_MODULES
 

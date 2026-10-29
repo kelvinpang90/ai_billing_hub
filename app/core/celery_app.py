@@ -34,6 +34,7 @@ TASK_MODULES = [
     "app.tasks.usage_billing",
     "app.tasks.status_webhook",
     "app.ai_api.delivery",
+    "app.tasks.wallet_reconciliation",
 ]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
@@ -66,6 +67,12 @@ USAGE_STALE_RECOVERY_EXPIRES_SECONDS = 54.0
 # 一次 dispatch 的预算 12 秒；`expires = 14`，beat 停摆后再起来不一口气放出去。
 STATUS_WEBHOOK_DISPATCH_SECONDS = 15.0
 STATUS_WEBHOOK_DISPATCH_EXPIRES_SECONDS = 14.0
+
+# 钱包余额核对（设计闸门 #474 v13 §2「核对运行」，AIH-TASK-132）：每 300 秒一次 step，
+# 一次至多约 20 秒扫描；进度在库里，任何一次触发都从游标继续。`expires = 270`，
+# beat 停摆后再起来不一口气放出去（领不到租约的只会返回 busy）。
+WALLET_RECONCILIATION_STEP_SECONDS = 300.0
+WALLET_RECONCILIATION_STEP_EXPIRES_SECONDS = 270.0
 
 
 class RedisNotConfigured(RuntimeError):
@@ -146,6 +153,11 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "ai_api.deliver_due",
                 "schedule": settings.ai_delivery_sweep_seconds,
                 "options": {"expires": settings.ai_delivery_sweep_seconds * 0.9},
+            },
+            "wallet-reconciliation-step": {
+                "task": "app.tasks.wallet_reconciliation.step",
+                "schedule": WALLET_RECONCILIATION_STEP_SECONDS,
+                "options": {"expires": WALLET_RECONCILIATION_STEP_EXPIRES_SECONDS},
             },
         },
     )
