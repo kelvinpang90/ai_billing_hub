@@ -13,11 +13,17 @@
  * 它为 `null` 时没有更早的会话。游标只原样传回，前端不解析、不拼装（后端以后可以改编码；会话游标与用量游标是两种格式）。
  *
  * ⚠️ 金额是**字符串**（INV-10），类型刻意写成 `string`，不在这一层解析。
+ *
+ * 会话摘要导出（`GET /api/v1/customer/conversations/export`，AIH-TASK-124）以 docs/api.md「客户导出」的
+ * conversations/export 小节为准（AIH-TASK-122）：与列表同一口径，只带 `from_date`、`to_date` 与可选的 `project_id`，
+ * 没有 `page_size` 与 `cursor`，一次导出整个区间。经 `downloadFile` 带令牌下载。
  */
 
 import { apiGet } from "./client";
+import { downloadFile } from "./download";
 
 export const CUSTOMER_CONVERSATIONS_URL = "/api/v1/customer/conversations";
+export const CUSTOMER_CONVERSATIONS_EXPORT_URL = "/api/v1/customer/conversations/export";
 
 /** 一次会话在所选区间内的合计。恰好这 9 个键：没有成本、毛利、供应商 / 模型拆分与内部 id。 */
 export interface CustomerConversation {
@@ -96,4 +102,46 @@ export function listCustomerConversations(
   signal?: AbortSignal,
 ): Promise<CustomerConversationPage> {
   return apiGet<CustomerConversationPage>(customerConversationsUrl(query), signal);
+}
+
+/**
+ * 导出的筛选：两个日期必填（马来西亚日历日 `YYYY-MM-DD`），项目可选（不带 —— `undefined`、`null` 或空串 —— 的不进
+ * 查询串）。没有 `pageSize` 与 `cursor`：一次导出整个区间。
+ */
+export interface CustomerConversationExportQuery {
+  fromDate: string;
+  toDate: string;
+  projectId?: string | null;
+}
+
+/** 导出的地址（含查询串）：按 `from_date`、`to_date`、`project_id` 的顺序，不带的不放。 */
+export function customerConversationsExportUrl(query: CustomerConversationExportQuery): string {
+  const params = new URLSearchParams();
+  if (present(query.fromDate)) {
+    params.set("from_date", query.fromDate);
+  }
+  if (present(query.toDate)) {
+    params.set("to_date", query.toDate);
+  }
+  if (present(query.projectId)) {
+    params.set("project_id", query.projectId);
+  }
+  const search = params.toString();
+  return search === "" ? CUSTOMER_CONVERSATIONS_EXPORT_URL : `${CUSTOMER_CONVERSATIONS_EXPORT_URL}?${search}`;
+}
+
+/** 后端取不到文件名时的兜底，与后端同一规则：`conversations_<from_date>_<to_date>.csv`。 */
+export function customerConversationsExportFilename(query: CustomerConversationExportQuery): string {
+  return `conversations_${query.fromDate}_${query.toDate}.csv`;
+}
+
+/**
+ * 把区间内全部会话导出成一个 CSV 并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 个会话）、
+ * `QUERY_TOO_BROAD`（超过执行时间预算）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带 `request_id`。
+ */
+export function exportCustomerConversations(
+  query: CustomerConversationExportQuery,
+  signal?: AbortSignal,
+): Promise<void> {
+  return downloadFile(customerConversationsExportUrl(query), customerConversationsExportFilename(query), signal);
 }

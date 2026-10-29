@@ -7,11 +7,18 @@
  *
  * 「现在」用 `vi.useFakeTimers({ toFake: ["Date"] })` 固定：只假 `Date`，定时器照常走。
  * 每多渲染一次整页，沙箱里并行的别的测试文件就更容易被拖到超时：能在同一次渲染里断言的放在一起。
+ *
+ * 「Export CSV」（AIH-TASK-124）覆盖设计闸门 #460 v2 §7 前端一段里属于导出按钮的场景：请求地址带已应用的筛选、不带
+ * `page_size` 与 `cursor`、未应用的表单值不生效、兜底文件名、区间无效时不可用、加载中不可重复点、三种专门文案与带
+ * request_id 的通用失败、换筛选时收起失败、导出不影响列表。导出接口同样在 `client.get` 上按路径回应：成功回一个
+ * blob 文件，失败回一个响应体是 blob 的 `AxiosError`（与浏览器里 `responseType: "blob"` 的失败同形）。jsdom 没有
+ * 对象 URL，也不会真下载：装上替身、拦下链接的点击，只记录下载的文件名。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { AxiosError, AxiosHeaders, type AxiosResponse } from "axios";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,6 +31,7 @@ import { ConversationsPage } from "./ConversationsPage";
 
 const PROJECTS_URL = "/api/v1/customer/projects";
 const CONVERSATIONS_URL = "/api/v1/customer/conversations";
+const EXPORT_URL = "/api/v1/customer/conversations/export";
 
 const PROJECT_ID = "00000000-0000-0000-0000-000000000000";
 const OTHER_PROJECT_ID = "00000000-0000-0000-0000-000000000009";
@@ -70,12 +78,24 @@ function envelope(data: unknown) {
 }
 
 /**
- * 按路径回应 `client.get`：项目接口回 `projects`，会话接口按查询串交给 `conversations`。别的路径一律当成失败 ——
+ * 按路径回应 `client.get`：项目接口回 `projects`，会话接口按查询串交给 `conversations`，导出接口回 `exported()` 的
+ * 结果（文件响应原样、不包信封；默认当成失败 —— 不点导出按钮的用例里页面不该问它）。别的路径一律当成失败 ——
  * 页面不该问它们，下面也会逐条断言没有问。
  */
-function serve(conversations: (query: URLSearchParams) => unknown, projects: unknown = PROJECTS) {
+function serve(
+  conversations: (query: URLSearchParams) => unknown,
+  projects: unknown = PROJECTS,
+  exported: () => unknown = () => new ApiError("NOT_FOUND", "Unexpected request.", null),
+) {
   return vi.spyOn(client, "get").mockImplementation((url: string) => {
     const parsed = new URL(url, "https://portal.example");
+    if (parsed.pathname === EXPORT_URL) {
+      const file = exported();
+      if (file === PENDING) {
+        return new Promise(() => undefined);
+      }
+      return file instanceof Error ? Promise.reject(file) : Promise.resolve(file);
+    }
     let reply: unknown;
     if (parsed.pathname === PROJECTS_URL) {
       reply = projects;
@@ -91,9 +111,14 @@ function serve(conversations: (query: URLSearchParams) => unknown, projects: unk
   });
 }
 
-/** 发给会话接口的全部地址，按发出顺序。 */
+/** 发给会话列表接口的全部地址，按发出顺序（不含导出）。 */
 function conversationUrls(get: ReturnType<typeof serve>): string[] {
-  return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(CONVERSATIONS_URL));
+  return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(`${CONVERSATIONS_URL}?`));
+}
+
+/** 发给导出接口的全部地址，按发出顺序。 */
+function exportUrls(get: ReturnType<typeof serve>): string[] {
+  return get.mock.calls.map(([url]) => url).filter((url) => url.startsWith(EXPORT_URL));
 }
 
 /** 用量页的位置上只显示当前地址：点一行之后跳到了哪里。 */
@@ -416,5 +441,239 @@ describe("ConversationsPage filters and paging", () => {
       expect(conversationUrls(get).at(-1)).toBe(`${CONVERSATIONS_URL}?from_date=2026-07-02&to_date=2026-10-01&page_size=20`);
     });
     expect(screen.queryByText("Choose a date range of 92 days or less.")).not.toBeInTheDocument();
+  });
+});
+
+describe("ConversationsPage export", () => {
+  const EXPORT_NAME = /Export CSV/;
+  const FAILED = "Your conversations could not be exported.";
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的下载链接的文件名，按点击顺序。 */
+  let downloads: string[];
+
+  beforeEach(() => {
+    downloads = [];
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: () => "blob:https://portal.example/00000000-0000-0000-0000-000000000000",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: () => undefined });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
+  });
+
+  afterEach(() => {
+    for (const [name, descriptor] of [
+      ["createObjectURL", originalCreate],
+      ["revokeObjectURL", originalRevoke],
+    ] as const) {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(URL, name);
+      } else {
+        Object.defineProperty(URL, name, descriptor);
+      }
+    }
+  });
+
+  /** 文件响应；不给文件名时没有 `Content-Disposition`，页面只能用兜底文件名。 */
+  function file(name?: string) {
+    return {
+      data: new Blob(["﻿conversation_id,project_id\r\n"], { type: "text/csv" }),
+      status: 200,
+      statusText: "",
+      headers: name === undefined ? {} : { "content-disposition": `attachment; filename="${name}"` },
+    };
+  }
+
+  /** 后端的失败：响应体是装着 JSON 信封的 blob。 */
+  function failure(status: number, code: string, requestId: string) {
+    const body = JSON.stringify({ success: false, data: null, error: { code, message: "Safe message." }, request_id: requestId });
+    const response = {
+      data: new Blob([body], { type: "application/json" }),
+      status,
+      statusText: "",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    } satisfies AxiosResponse;
+    return new AxiosError("Request failed", "ERR_BAD_REQUEST", undefined, undefined, response);
+  }
+
+  it("exports with the applied filters, without page_size or cursor, ignores what is still being typed, and leaves the list alone", async () => {
+    const user = userEvent.setup();
+    const get = serve(
+      (query) =>
+        query.has("cursor")
+          ? page([conversation({ conversation_id: "conv_0002", project_name: "Sales assistant" })])
+          : page([conversation()], CURSOR),
+      PROJECTS,
+      () => file(),
+    );
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    setDate("From (Malaysia time)", "2026-10-02");
+    setDate("To (Malaysia time)", "2026-10-20");
+    await choose("Project", "Sales assistant");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    const filtered = `${CONVERSATIONS_URL}?from_date=2026-10-02&to_date=2026-10-20&project_id=${OTHER_PROJECT_ID}&page_size=20`;
+    await waitFor(() => {
+      expect(conversationUrls(get).at(-1)).toBe(filtered);
+    });
+    // 翻到更早的一页：列表带着游标，导出仍然不带。
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Older" })).toBeEnabled();
+    });
+    await user.click(screen.getByRole("button", { name: "Older" }));
+    expect(await screen.findByText("Sales assistant", { selector: "td" })).toBeInTheDocument();
+    expect(conversationUrls(get).at(-1)).toBe(`${filtered}&cursor=${CURSOR}`);
+    // 填了但没点「Apply filters」：不算数。
+    setDate("From (Malaysia time)", "2026-10-05");
+    await choose("Project", "Customer service bot");
+    const listed = conversationUrls(get).length;
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    // 响应没有 Content-Disposition：兜底文件名用的同样是已应用的区间。
+    await waitFor(() => {
+      expect(downloads).toEqual(["conversations_2026-10-02_2026-10-20.csv"]);
+    });
+    expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-02&to_date=2026-10-20&project_id=${OTHER_PROJECT_ID}`]);
+    const [, config] = get.mock.calls.find(([url]) => url.startsWith(EXPORT_URL)) ?? [];
+    expect(config).toMatchObject({ responseType: "blob" });
+    for (const url of exportUrls(get)) {
+      expect(url).not.toMatch(/page_size|cursor/);
+    }
+    // 导出不重新请求列表，不清空表格，也不把列表翻回最新一页。
+    expect(conversationUrls(get)).toHaveLength(listed);
+    expect(screen.getByText("Sales assistant", { selector: "td" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Newest" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+    for (const [url] of get.mock.calls) {
+      expect(url).not.toContain("/api/v1/admin/");
+      expect(url).not.toMatch(/tenant|customer_id|provider|model|conversation_id|event_id/);
+    }
+  });
+
+  it("exports the default range with only the dates when nothing was changed, under the backend's file name", async () => {
+    const user = userEvent.setup();
+    const get = serve(() => page([conversation()]), PROJECTS, () => file("conversations_2026-10-01_2026-10-25.csv"));
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => {
+      expect(downloads).toEqual(["conversations_2026-10-01_2026-10-25.csv"]);
+    });
+    expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25`]);
+  });
+
+  it.each<[string, string, string]>([
+    ["reversed", "2026-10-20", "2026-10-10"],
+    ["longer than 92 days", "2026-07-01", "2026-10-01"],
+    ["incomplete", "", "2026-10-10"],
+    // 越界（早于 2020-01-01）不在这里：日期框带 `min`，浏览器（与 jsdom）的表单校验直接拦下提交，根本应用不上；
+    // 越界的判定由 UsagePage.test.tsx 的 dateRangeProblem 用例钉住，按钮看的是同一个函数。
+  ])("cannot export when the applied range is %s", async (_, from, to) => {
+    const user = userEvent.setup();
+    const get = serve(() => page([conversation()]), PROJECTS, () => file());
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+    expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+
+    setDate("From (Malaysia time)", from);
+    setDate("To (Malaysia time)", to);
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: EXPORT_NAME }));
+    expect(exportUrls(get)).toEqual([]);
+    expect(downloads).toEqual([]);
+  });
+
+  it("shows the button loading while exporting, does not export twice, and keeps the list usable", async () => {
+    const user = userEvent.setup();
+    const get = serve(() => page([conversation()]), PROJECTS, () => PENDING);
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+    });
+    const button = screen.getByRole("button", { name: EXPORT_NAME });
+    expect(within(button).getByRole("img", { name: "loading" })).toBeInTheDocument();
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(exportUrls(get)).toHaveLength(1);
+    expect(downloads).toEqual([]);
+    // 列表与筛选照常可用。
+    expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply filters" })).toBeEnabled();
+  });
+
+  it.each<[number, string, string]>([
+    [
+      422,
+      "EXPORT_TOO_LARGE",
+      "This export has more than 20,000 conversations. Narrow the date range or choose a project, then try again.",
+    ],
+    [
+      422,
+      "QUERY_TOO_BROAD",
+      "This export covers too much usage to finish in time. Narrow the date range or choose a project, then try again.",
+    ],
+    [503, "EXPORT_BUSY", "Another export is in progress. Wait a few seconds, then try again."],
+  ])("explains a %s %s in its own words", async (status, code, text) => {
+    const user = userEvent.setup();
+    serve(() => page([conversation()]), PROJECTS, () => failure(status, code, "req-export-specific"));
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(screen.queryByText(FAILED)).not.toBeInTheDocument();
+    expect(screen.queryByText("req-export-specific")).not.toBeInTheDocument();
+    // 列表不受影响，按钮可以再点。
+    expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+    expect(screen.queryByText("Your conversations could not be loaded.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+    expect(downloads).toEqual([]);
+  });
+
+  it("shows any other failure with its request id, leaves the list alone, and drops it when the filters change", async () => {
+    const user = userEvent.setup();
+    const get = serve(() => page([conversation()]), PROJECTS, () => failure(500, "INTERNAL_ERROR", "req-export-500"));
+    renderPage();
+    await screen.findByText("Customer service bot", { selector: "td" });
+    const listed = conversationUrls(get).length;
+
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    expect(await screen.findByText(FAILED)).toBeInTheDocument();
+    expect(screen.getByText("req-export-500")).toBeInTheDocument();
+    expect(screen.queryByText("Your conversations could not be loaded.")).not.toBeInTheDocument();
+    expect(screen.getByText("Customer service bot", { selector: "td" })).toBeInTheDocument();
+    expect(conversationUrls(get)).toHaveLength(listed);
+    expect(downloads).toEqual([]);
+
+    // 换了条件：上一次的失败说的是旧条件，收起。
+    setDate("From (Malaysia time)", "2026-10-02");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText(FAILED)).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("req-export-500")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(conversationUrls(get).at(-1)).toBe(`${CONVERSATIONS_URL}?from_date=2026-10-02&to_date=2026-10-25&page_size=20`);
+    });
   });
 });

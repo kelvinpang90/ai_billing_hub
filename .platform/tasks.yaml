@@ -7416,7 +7416,7 @@ tasks:
     title: 会话摘要第四层：门户会话页的导出按钮
     purpose: >-
       按 docs/design/AIH-TASK-121-customer-conversations.md（设计闸门 #460 已批准 v2）§2「前端」与 §8 第 4 步：会话页加「Export CSV」按钮，用已应用的筛选经 AIH-TASK-117 的下载辅助函数调用 AIH-TASK-122 的导出接口。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-122
       - AIH-TASK-123

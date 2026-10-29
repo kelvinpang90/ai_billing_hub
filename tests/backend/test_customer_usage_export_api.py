@@ -540,7 +540,7 @@ def test_a_scan_past_the_budget_is_query_too_broad(
     )
 
     with server_log() as lines:
-        response = export(portal, headers, from_date="2026-10-01", to_date="2026-10-31")
+        response = export(portal, headers, from_date="2026-10-01", to_date="2026-10-28")
 
     assert error_of(response) == (422, "QUERY_TOO_BROAD")
     body = response.json()
@@ -550,7 +550,7 @@ def test_a_scan_past_the_budget_is_query_too_broad(
     assert len(timeouts) == 1
     assert timeouts[0]["request_id"] == body["request_id"]
     assert timeouts[0]["customer_id"] == tenant.public_id
-    assert "2026-10-31" not in json.dumps(lines)
+    assert "2026-10-28" not in json.dumps(lines)
     assert not messages(lines, "customer_export_failed")
 
 

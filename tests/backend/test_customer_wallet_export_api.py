@@ -497,7 +497,7 @@ def test_a_scan_past_the_budget_is_query_too_broad(mysql_portal: Portal, monkeyp
     )
 
     with server_log() as lines:
-        response = export(portal, headers, from_date="2026-10-01", to_date="2026-10-31")
+        response = export(portal, headers, from_date="2026-10-01", to_date="2026-10-28")
 
     assert error_of(response) == (422, "QUERY_TOO_BROAD")
     body = response.json()
@@ -507,7 +507,7 @@ def test_a_scan_past_the_budget_is_query_too_broad(mysql_portal: Portal, monkeyp
     assert len(timeouts) == 1
     assert timeouts[0]["request_id"] == body["request_id"]
     assert timeouts[0]["customer_id"] == tenant.public_id
-    assert "2026-10-31" not in json.dumps(lines)
+    assert "2026-10-28" not in json.dumps(lines)
     assert not messages(lines, "customer_export_failed")
 
 
@@ -520,12 +520,12 @@ def test_query_too_broad_keeps_its_422_and_its_warning(portal: Portal, monkeypat
 
     monkeypatch.setattr(wallet_repository, "list_transactions_for_customer_export", too_broad)
     with server_log() as lines:
-        response = export(portal, headers, from_date="2026-10-01", to_date="2026-10-29")
+        response = export(portal, headers, from_date="2026-10-01", to_date="2026-10-28")
 
     assert error_of(response) == (422, "QUERY_TOO_BROAD")
     assert len(messages(lines, "customer_usage_query_timeout")) == 1
     assert not messages(lines, "customer_export_failed")
-    assert "2026-10-29" not in json.dumps(lines)
+    assert "2026-10-28" not in json.dumps(lines)
 
 
 # --- 不读敏感列 -------------------------------------------------------------------------
@@ -840,7 +840,7 @@ def test_a_lost_database_connection_is_a_500_sent_inside_the_lease(
 
     with monkeypatch.context() as patch, server_log() as lines:
         patch.setattr(wallet_repository, "list_transactions_for_customer_export", disconnected)
-        response = export(both, headers, from_date="2026-10-01", to_date="2026-10-29")
+        response = export(both, headers, from_date="2026-10-01", to_date="2026-10-28")
 
     body = response.json()
     assert_generic_500(response.status_code, body)
@@ -851,6 +851,6 @@ def test_a_lost_database_connection_is_a_500_sent_inside_the_lease(
     assert failures[0]["request_id"] == body["request_id"]
     assert "OperationalError" in failures[0]["exception"]
     assert not messages(lines, "Unhandled exception")
-    assert "2026-10-29" not in json.dumps(lines)
+    assert "2026-10-28" not in json.dumps(lines)
     assert not export_lease_held()
     assert len(exported(both, headers, **PERIOD)) == 4
