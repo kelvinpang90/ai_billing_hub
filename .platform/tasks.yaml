@@ -7538,7 +7538,7 @@ tasks:
     title: 门户通知第二层：把低余额与计费状态事件转成通知
     purpose: >-
       按 docs/design/AIH-TASK-125-portal-notifications.md（设计闸门 #471 已批准 v7）§2「通知规则」「投递」与 §8：新文件 app/services/notifications.py 放纯函数通知规则；app/tasks/outbox.py 给 tenant.low_balance 与 tenant.billing_status_changed 接上通知分支（领取不变，结算 UPDATE 与通知 INSERT 同一事务，payload 不清空）；recover 与 alerts.outbox_backlog 改用同一个「有处理器的事件类型」函数；docs/api.md 与 docs/runbook.md 里「没有处理器」「只有密码重置信」的说法改正。不改 post_transaction 与钱包代码；接口属于 AIH-TASK-127。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-125
     acceptance_criteria:
