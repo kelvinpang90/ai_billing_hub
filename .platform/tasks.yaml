@@ -7648,7 +7648,7 @@ tasks:
     title: 门户通知第四层：门户通知页与侧栏未读数
     purpose: >-
       按 docs/design/AIH-TASK-125-portal-notifications.md（设计闸门 #471 已批准 v7）§2「前端」与 §8：新增门户通知页 /portal/notifications（按接口返回的记账顺序倒序列出、不在前端按时间重排，未读加粗、单条与全部标为已读、加载更多、空状态），门户导航加「通知」一项并显示未读数；勾掉 docs/TODO.md Phase 6 的「门户内通知」。只做前端，外加验收脚本的一个只读步骤。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-127
     acceptance_criteria:
