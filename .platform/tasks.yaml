@@ -7773,7 +7773,7 @@ tasks:
     title: 余额核对第二层：账本判定改为按序流式读取
     purpose: >-
       按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「钱包判定」：app/repositories/wallet.py 新增 ledger_problems_in_order（按序逐行判定，规则与原 ledger_problems 完全相同），ledger_problems 排序后委托它，规则只有一份；新增 check_wallet_snapshot（调用方事务内只用普通读、分块流式读账本，内存与行数无关）；verify_wallet 改为调用它、行为不变。只读，不改任何写路径；核对运行属于 AIH-TASK-131、132，告警属于 AIH-TASK-133。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-129
     acceptance_criteria:
