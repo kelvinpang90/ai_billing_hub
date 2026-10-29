@@ -117,7 +117,8 @@ MONEY_WRITE = re.compile(
     re.IGNORECASE,
 )
 
-_NUMBERS = itertools.count(1)
+# 租户 uuid 前四组全零，末尾计数从别的测试文件用不到的区段开始，免得在共用的 MySQL 库里撞号。
+_NUMBERS = itertools.count(132_000_000_001)
 
 
 # --- fixtures --------------------------------------------------------------------------
@@ -264,7 +265,7 @@ def make_tenant(
     number = next(_NUMBERS)
     with factory() as session:
         tenant = Tenant(
-            public_id=f"00000000-0000-0000-0132-{number:012d}",
+            public_id=f"00000000-0000-0000-0000-{number:012d}",
             company_name="Fictional Reconciliation Sdn Bhd",
             email=f"reconciliation-{number}{TEST_EMAIL_DOMAIN}",
             created_at=T0,
