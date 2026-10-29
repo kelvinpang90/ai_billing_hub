@@ -7,6 +7,7 @@
 **维度注册表**是下面的 `DIMENSIONS`：一个有序列表，每个维度一个只读查询函数。
 T-E（幂等冲突）、T-H（定价错误、汇率错误、未知模型、失败、处理积压、负余额、
 outbox 积压，设计闸门 #181 v2 §2「告警维度」，AIH-TASK-032）往里加，不改接口形状。
+`wallet_negative_balance` 另并入钱包核对的结果（设计闸门 #474 v13 §2「告警」，AIH-TASK-133）。
 
 ⚠️ **维度查询全是普通读，不拿 `fx_rate_locks`**（设计 v3）：告警只是提示，
 不参与计费，不应让发布等它。整次请求一个只读事务，从不提交。
@@ -44,6 +45,7 @@ from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, 
 from app.models.tenancy import IntegrationStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import Wallet
+from app.models.wallet_reconciliation import ReconciliationRunStatus, WalletReconciliationRun
 from app.repositories.usage_events import count_conflicts_since
 from app.services.auth import utc_now
 from app.services.status_delivery import ENCRYPTION_NOT_CONFIGURED, SECRET_DECRYPT_FAILED
@@ -73,6 +75,10 @@ BACKLOG_P1_WAIT: Final = dt.timedelta(minutes=30)
 STALE_LEASE_P1_AGE: Final = dt.timedelta(minutes=10)
 # `outbox_backlog`：有处理器的事件类型超过 10 分钟仍 PENDING（§120）。
 OUTBOX_BACKLOG_AGE: Final = dt.timedelta(minutes=10)
+# `wallet_negative_balance` 的核对部分（设计闸门 #474 v13 §2「告警」）：最近一次完成早于
+# `now - 30 小时` 即 `stale`；`run_date` 晚于今天或 `finished_at` 晚于 `now + 10 分钟` 是时钟异常。
+RECONCILIATION_STALE_AFTER: Final = dt.timedelta(hours=30)
+RECONCILIATION_CLOCK_TOLERANCE: Final = dt.timedelta(minutes=10)
 # 每行摘要最多列几个细分码（设计 §2）。
 MAX_CODES: Final = 3
 # `ai_usage_outbox`：PENDING / SENDING 超过此秒数 P2；人工处置项一律 P1。
@@ -365,7 +371,7 @@ def usage_processing_backlog(session: Session, context: AlertContext) -> AlertRe
     return AlertResult(level, summary)
 
 
-def wallet_negative_balance(session: Session, context: AlertContext) -> AlertResult:
+def _negative_wallets(session: Session) -> AlertResult:
     """P2 when any wallet is below zero (§120). The count only: no tenant, no amount."""
     statement = select(func.count()).select_from(Wallet).where(Wallet.balance < 0)
     count = int(session.execute(statement).scalar_one())
@@ -373,6 +379,73 @@ def wallet_negative_balance(session: Session, context: AlertContext) -> AlertRes
         return AlertResult(AlertLevel.OK, "no wallet below zero")
     noun = "1 wallet" if count == 1 else f"{count} wallets"
     return AlertResult(AlertLevel.P2, f"{noun} below zero")
+
+
+def _reconciliation(session: Session, now: dt.datetime) -> AlertResult:
+    """The reconciliation runs (design gate #474 v13 §2「告警」).
+
+    正常行：`run_date <= today` 且 `finished_at` 为 NULL 或不晚于 `now + 10 分钟`；其余是时钟
+    异常的行（P2 `clock anomaly`），不参与「最近完成」与 `stale`，但照样进入待判运行集。
+    「最近完成」是正常行的 `COMPLETED` 里 `id` 最大的一条（插入顺序，不按墙上时钟）；
+    待判运行集是它加上 `id` 更大的全部运行，没有它时为全部运行，其中有不一致即 P1。
+    `K` 是待判集里除最近完成以外的 `wallets_inconsistent` 最大值。
+    """
+    run = WalletReconciliationRun
+    today = kuala_lumpur_date(now)
+    horizon = now + RECONCILIATION_CLOCK_TOLERANCE
+    normal = and_(
+        run.run_date <= today,
+        or_(run.finished_at.is_(None), run.finished_at <= horizon),
+    )
+    latest = session.execute(
+        select(run.id, run.run_date, run.finished_at, run.wallets_checked, run.wallets_inconsistent)
+        .where(run.status == ReconciliationRunStatus.COMPLETED, normal)
+        .order_by(run.id.desc())
+        .limit(1)
+    ).one_or_none()
+    later = select(func.max(run.wallets_inconsistent))
+    if latest is not None:
+        later = later.where(run.id > latest.id)
+    k = int(session.execute(later).scalar_one() or 0)
+    anomalies = (
+        select(func.count())
+        .select_from(run)
+        .where(or_(run.run_date > today, run.finished_at > horizon))
+    )
+    anomaly_count = int(session.execute(anomalies).scalar_one())
+
+    level = AlertLevel.OK
+    if latest is None:
+        text = "reconciliation never completed"
+        level = AlertLevel.P2
+    else:
+        text = (
+            f"reconciliation {latest.run_date.isoformat()} checked {int(latest.wallets_checked)}"
+            f" inconsistent {int(latest.wallets_inconsistent)}"
+        )
+        # `COMPLETED` 恒有 `finished_at`（`ck_wallet_reconciliation_runs_finished`）。
+        finished = latest.finished_at
+        if finished is not None and finished < now - RECONCILIATION_STALE_AFTER:
+            text += " stale"
+            level = AlertLevel.P2
+    if k:
+        text += f"; later inconsistent {k}"
+    if anomaly_count:
+        text += f"; clock anomaly {anomaly_count}"
+        level = AlertLevel.P2
+    if k or (latest is not None and latest.wallets_inconsistent):
+        level = AlertLevel.P1
+    return AlertResult(level, text)
+
+
+def wallet_negative_balance(session: Session, context: AlertContext) -> AlertResult:
+    """Negative wallets (P2) merged with the reconciliation runs (design gate #474 v13 §2「告警」):
+    an inconsistency in the runs under judgement is P1; never completed, stale or a clock anomaly
+    is P2. The summary is `<负余额部分>; <核对部分>`: counts and dates only (INV-7)."""
+    negative = _negative_wallets(session)
+    reconciliation = _reconciliation(session, context.now)
+    level = max((negative.level, reconciliation.level), key=_SEVERITY.__getitem__)
+    return AlertResult(level, f"{negative.summary}; {reconciliation.summary}")
 
 
 def outbox_backlog(session: Session, context: AlertContext) -> AlertResult:
@@ -571,6 +644,8 @@ __all__ = [
     "FX_STALE_DAYS",
     "MAX_CODES",
     "OUTBOX_BACKLOG_AGE",
+    "RECONCILIATION_CLOCK_TOLERANCE",
+    "RECONCILIATION_STALE_AFTER",
     "RETRYING_ALERT_ATTEMPTS",
     "STALE_LEASE_P1_AGE",
     "STATUS_WEBHOOK_FAILING_ATTEMPTS",
