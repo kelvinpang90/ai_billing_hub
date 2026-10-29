@@ -7712,3 +7712,382 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-129
+    title: 余额核对第一层：核对运行与不一致记录两张表的迁移与模型
+    purpose: >-
+      按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「数据库」与 §8：新迁移 0029 建 wallet_reconciliation_runs 与 wallet_reconciliation_findings 两张表（唯一索引、两个普通索引（含显式声明的 ix_wallet_reconciliation_findings_tenant）、外键 RESTRICT 与六条 CHECK 照设计的表，runs 表含租约两列 lease_owner、lease_until 与 running_slot 及其唯一索引，同一时刻至多一条 RUNNING 由数据库保证；run_date 只建普通索引、不唯一），写法照 0027 与设计闸门 #471 的 0028：upgrade 先检查形状、可以安全重跑，downgrade 只在两表为空时删表；新模型 app/models/wallet_reconciliation.py 并在 alembic/env.py 登记；docs/database-schema.md 记表结构。不写核对逻辑、不加接口：判定与核对属于 AIH-TASK-130 到 132，告警属于 AIH-TASK-133，接口属于 AIH-TASK-134。
+    status: ready
+    depends_on:
+      - AIH-TASK-128
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）逐条一致，以 §2「数据库」与「迁移写法」、§3 INV-4 与 INV-5、§5 迁移相关各行、§7 迁移与 CHECK 各行、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261029_0029_wallet_reconciliation.py，revision 为 0029_wallet_reconciliation，down_revision 为 0028_notifications；文件头按 0027 迁移的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明只建两张新表、不改任何已有表、不回填、不读钱包与账本'
+      - 'upgrade：用 SQLAlchemy inspector 判两张表：都不存在 → 建；都存在且列名、类型与宽度、可空性、唯一与普通索引的名称与列序、两个外键的引用与 ON DELETE RESTRICT（DELETE_RULE 读 information_schema.REFERENTIAL_CONSTRAINTS，写法同 tests/backend/test_migrations.py 现有的外键规则断言）、六条 CHECK 的名称逐项与设计一致 → 跳过、不发 DDL；只存在 runs 且它形状正确、为空 → 只建 findings；只存在 findings、只存在的 runs 有行或形状不对、或任何一项缺失多出不同 → 抛错且不发任何 DDL，消息点名表并写明设计给的处理方法（确认表为空后手工删掉再重跑升级；有行则停下按数据事故处理）。列、类型、约束名与索引名照设计 §2 的两张表逐个写；cursor_tenant_id、wallets_checked、wallets_inconsistent 三列 server_default 为 0、形状比对不比较缺省值；CHECK 条件文本两库同义，ck_wallet_reconciliation_runs_running_slot 照设计写上 running_slot IS NOT NULL，不得省略；downgrade 只在两表都存在且都为空时先删 findings 再删 runs，任一张有行就抛错（点名表、处理方法是保留表只回滚应用镜像）且不发 DDL、不删行；两张都不存在时跳过；只存在其中一张且它为空时删掉它（补完中断的降级），它有行则抛错且不发 DDL；离线 --sql 模式下直接抛错，不输出 DROP TABLE；upgrade 的离线行为照 0027'
+      - '新增 app/models/wallet_reconciliation.py：WalletReconciliationRun、WalletReconciliationFinding 两个模型与 ReconciliationRunStatus 枚举（RUNNING、COMPLETED、ABANDONED），金额列用 app/models/base.py 的 Money，枚举列 Enum(native_enum=False, length=16)，三列计数同时写 default=0 与 server_default 0，lease_owner、lease_until 与 running_slot（SmallInteger）可空、无缺省，__table_args__ 声明与迁移同名同序的三个唯一索引、普通索引、外键与六条 CHECK（条件文本与迁移一致，空白除外）；alembic/env.py 照现有写法登记这个模块；不改任何既有模型'
+      - '测试：新增 tests/backend/test_wallet_reconciliation_migration.py，覆盖设计 §7 迁移形状、迁移重跑两行（形状不对的五个子场景各用全新的表）、补完中断的升级、带数据降级、只存在一张时降级（为空与有行两种）、离线降级与 CHECK 各行，写法照 tests/backend/test_wallet_created_index_migration.py：迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑；0006 起的迁移先查 @@log_bin），CHECK 的非法插入在 SQLite（模型 metadata 建表）与 MySQL 上都被拒；捕获执行语句断言「不发 DDL」；tests/backend/test_migrations.py 的模型与迁移列宽比对照常通过，需要时只在它的显式清单里补这两张表；tests/backend/test_fx_rates_db.py 的 test_upgrade_and_downgrade 只在降级后表集合的显式清单里补这两张表，其余不动'
+      - 'docs/database-schema.md 新增两张表一节：列及含义、约束与索引及用途、run_date 不唯一（被收尾的行不挡住当天再开始）、running_slot 唯一即同时至多一条 RUNNING、findings 只记不一致的钱包、行由谁写（AIH-TASK-131、132 的核对运行）、表非空时降级被拒与生产只回滚镜像不降级'
+      - '不改接口、schema、repository、服务、Celery 任务与前端；不改钱包与账本代码；不改既有迁移文件；不改 AI 模块'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474'
+    allowed_change_paths:
+      - alembic/versions/20261029_0029_wallet_reconciliation.py
+      - app/models/wallet_reconciliation.py
+      - alembic/env.py
+      - tests/backend/test_wallet_reconciliation_migration.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_fx_rates_db.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-130
+    title: 余额核对第二层：账本判定改为按序流式读取
+    purpose: >-
+      按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「钱包判定」：app/repositories/wallet.py 新增 ledger_problems_in_order（按序逐行判定，规则与原 ledger_problems 完全相同），ledger_problems 排序后委托它，规则只有一份；新增 check_wallet_snapshot（调用方事务内只用普通读、分块流式读账本，内存与行数无关）；verify_wallet 改为调用它、行为不变。只读，不改任何写路径；核对运行属于 AIH-TASK-131、132，告警属于 AIH-TASK-133。
+    status: ready
+    depends_on:
+      - AIH-TASK-129
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）逐条一致，以 §2「钱包判定」、§3 INV-1、INV-4、INV-5、INV-10、§7 判定等价、流式读取、一致性快照、不加锁、金额精度各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 ledger_problems、verify_wallet、LedgerLine、九个问题码常量与 billing_status_for 形状如设计所述；不同时停下说明，不自行补'
+      - 'app/repositories/wallet.py：新增 ledger_problems_in_order（要求输入已按 wallet_sequence 升序，逐行用 Decimal 累加合计、行数与上一行的 balance_after，第 k 行的序号必须等于 k，问题码与顺序和原 ledger_problems 完全相同）；ledger_problems 保留签名与行为，排序后委托它'
+      - 'app/repositories/wallet.py：新增 check_wallet_snapshot（在调用方的会话里只用普通读，读钱包行、租户行，再按键集分块读账本四列（每块一条 ORDER BY wallet_sequence、LIMIT chunk_rows 的 SELECT，第一块不设序号下界，从第二块起带 wallet_sequence > 上一块末尾，不用 yield_per，内存与行数无关；MySQL 上每块的 SELECT 恰好带一次 MAX_EXECUTION_TIME(60000) 优化器提示（毫秒数取本模块新常量 LEDGER_CHUNK_TIMEOUT_MS = 60000），SQLite 上不渲染；超时的数据库错误原样抛给调用方）；每读完一块并喂给判定之后调用一次可选参数 on_chunk；返回 WalletCheck（NamedTuple，字段依次为 problem_codes、balance、version、ledger_rows）；钱包不存在时为 WalletCheck([WALLET_MISSING], None, None, 0)；不提交、不加锁、不开新事务）；verify_wallet 改为调用它并只返回问题码，行为不变'
+      - '不改 post_transaction、任何写函数、触发器相关代码与既有常量；不新增对外导出以外的模块级状态'
+      - '测试：新增 tests/backend/test_wallet_streaming.py 覆盖设计 §7 判定等价（标准库 random、固定种子、至少 1000 组，测试里保留一份改写前 ledger_problems 的原样副本作对照）、流式读取（chunk_rows 为 3；照设计 §7 该行：六种问题在 10 行账本上按设计给的做法制造（每种篡改都保持 balance_after = balance_before + amount，SQLite 模型建表也有这条 CHECK）、LEDGER_MISSING 用 0 行账本，这些只在 SQLite 上跑；ROW_ARITHMETIC_BROKEN 在库里写不进去，只在判定等价的随机对照里覆盖；MySQL 上只验一致的 10 行钱包与 TRUNCATE 后的 LEDGER_MISSING；比的是整份问题码列表且目标码在列表里，ledger_rows 等于实际读到的行数）、一致性快照与不加锁（只在 MySQL 上，两个会话）、分块与提示（捕获执行语句：块数等于 ceil(行数/chunk_rows) 加一次取空、每块 SELECT 在 MySQL 上恰好带一次提示且在最外层、SQLite 上没有；on_chunk 的调用次数等于非空块数）；金额精度（判定）（只在 MySQL 上，照设计该行经正常记账得到余额 999999999999.99999999 的一致钱包，断言不报问题、返回的 balance 是逐字相同的 Decimal，并先断言这个值经 float 往返会变）；SQLite 与 MySQL 参数化，MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；tests/backend/test_wallet_rules.py 与 tests/backend/test_wallet_repository.py 的既有用例不改、照常通过'
+      - '不改 app/services/、app/tasks/、app/api/、迁移与模型、前端与 AI 模块；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支（CLAUDE.md「写后端测试的约定」）'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474'
+    allowed_change_paths:
+      - app/repositories/wallet.py
+      - tests/backend/test_wallet_streaming.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-131
+    title: 余额核对第三层：核对运行的收尾、开始与领租约三个步骤函数
+    purpose: >-
+      按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「核对运行」第 0 到第 2 步：新文件 app/services/wallet_reconciliation.py 先放三个步骤函数——收尾日期不是今天的 RUNNING、按开始规则插入新运行、读进行中的运行并领租约（领到之后再读游标），外加租约的尽力释放函数与常量。没有调用方：扫描、续租、进度提交、step 主流程、Celery 任务与 beat 属于 AIH-TASK-132。只读钱包与账本，不写、不修复。
+    status: ready
+    depends_on:
+      - AIH-TASK-130
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）逐条一致，以 §2「核对运行」常量与第 0 到第 2 步、§4 运行状态表的收尾、开始、领租约各行、§5 对应各行、§6 日志一条为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 kuala_lumpur_date、AIH-TASK-129 交付的运行模型（含 running_slot、lease_owner、lease_until）形状如设计所述；不同时停下说明，不自行补'
+      - '新文件 app/services/wallet_reconciliation.py：设计列出的常量（STEP_SECONDS、STEP_BUDGET_SECONDS、TENANT_BATCH、START_HOUR_MYT、STALE_AFTER、LEASE_SECONDS、LEASE_RENEW_AFTER_SECONDS）名与值照设计；三个步骤函数都接收会话工厂与调用方传入的同一个 now（取整到秒的 UTC），各自只开自己的短事务：retire_stale_runs(factory, *, now) 普通读出 run_date 不等于 kuala_lumpur_date(now)（早于或晚于）的 RUNNING 行，按主键逐行置 ABANDONED、finished_at=now，同时清空 running_slot、lease_owner 与 lease_until；start_run(factory, *, now) 按开始规则（今天没有 COMPLETED、当前没有 RUNNING，且马来西亚时间不早于 03:00 或表为空）单独一个事务插入新运行（running_slot=1、计数与游标显式给 0），IntegrityError、死锁（1213）或锁等待超时时回滚，再用锁读（with_for_update(read=True) 读 running_slot = 1 的行，会等正在插入的一方提交或回滚）重读，读到 RUNNING 行视为别人已开始、否则把异常原样抛出；claim_run(factory, *, now) 用短只读事务读 run_date 不晚于今天的 RUNNING 行的 id 与 public_id（多行取 run_date 最大，不读游标），再用短事务以新生成的 uuid4 令牌领租约（条件为 status=RUNNING 且 lease_until 为空或早于 now，lease_until 设为 now 加 LEASE_SECONDS），领到之后再用短只读事务读 cursor_tenant_id'
+      - '返回值：start_run 返回 started、already_running 或 not_due 之一——只要存在 RUNNING 行（插入前检查发现，或插入失败后重读发现）就返回 already_running，not_due 只用于时间未到或今天已有 COMPLETED；claim_run 返回 idle（没有可推进的运行）、busy（领不到租约）或领到时的 ClaimedRun（NamedTuple，字段依次为 run_id、public_id、token、old_cursor）；新增 release_lease(factory, *, run_id, public_id, token)：用新会话执行设计第 5 步的释放语句，失败时记一条 warning 日志 wallet_reconciliation_lease_release_failed、恰好带 run_id（public_id）与 error_type、不重试、不向外抛。三个步骤函数遇到数据库异常时回滚自己的事务后原样抛出，由 AIH-TASK-132 的 step 统一记 wallet_reconciliation_failed；claim_run 读到运行之后的失败（领租约的 UPDATE 或读游标抛错）：已领到租约时先用手里的令牌调 release_lease，再抛 ClaimError（新异常类，属性 public_id 为这次运行的 public_id，原异常作为 __cause__）；读到运行之前的失败原样抛出'
+      - '测试：新增 tests/backend/test_wallet_reconciliation_start.py 覆盖设计 §7 里属于第 0 到第 2 步的每一行（开始规则；首次运行在凌晨的开始部分；隔天；前一天的运行在零点后收尾；未来日期的运行的收尾部分；凌晨空表的收尾不挡住当天（只验到新运行开始）；唯一冲突后锁读与锁等待超时（MySQL）；读到运行之后失败的 claim_run 部分；并发开始（重复 20 次，允许其中一方遇到死锁或唯一冲突但都被吸收、不抛出）与跨午夜开始竞态在 MySQL 上用两个线程与屏障、断言任何时刻至多一条 RUNNING；非 running_slot 冲突的插入失败；领租约后读游标；租约过期后接手的领取部分；释放失败只记 warning）；这一层没有 step，用例直接调三个步骤函数并按设计的顺序组合；SQLite 与 MySQL 参数化，MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 全零'
+      - '不新增 Celery 任务、不改 app/core/celery_app.py、不加 beat 条目；不改 app/repositories/wallet.py（AIH-TASK-130 已交付，发现缺陷时停下说明）、app/services/alerts.py、迁移与模型、接口、前端与 AI 模块；不写钱包与账本；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474'
+    allowed_change_paths:
+      - app/services/wallet_reconciliation.py
+      - tests/backend/test_wallet_reconciliation_start.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-132
+    title: 余额核对第四层：分段扫描、续租与进度提交，接上每日定时任务
+    purpose: >-
+      按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「核对运行」第 3 到第 5 步与 §8：app/services/wallet_reconciliation.py 加上分段扫描（逐钱包快照核对、20 秒预算、续租）、带租约与游标的进度 CAS、异常处理，以及把第 0 到第 5 步串起来的 step；新文件 app/tasks/wallet_reconciliation.py 是 Celery 任务，beat 每 300 秒一次。只读钱包与账本，不写、不修复；告警属于 AIH-TASK-133，管理端接口属于 AIH-TASK-134。
+    status: ready
+    depends_on:
+      - AIH-TASK-131
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）逐条一致，以 §2「核对运行」第 3 到第 5 步与要点，§3 INV-1、INV-4、INV-5、INV-13、INV-14，§4，§5 运行相关各行，§6 日志一条为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 AIH-TASK-130 交付的 check_wallet_snapshot 与 WalletCheck、AIH-TASK-131 交付的 retire_stale_runs、start_run、claim_run、ClaimedRun、release_lease 与常量、app/core/celery_app.py 的 beat_schedule 与 TASK_MODULES、app/tasks/outbox.py 的引擎写法形状如设计与上一层契约所述；不同时停下说明，不自行补'
+      - 'step(factory, *, clock, monotonic)：每次只在开头读一次 now 与 today，依次调 retire_stale_runs、start_run、claim_run（第 0 步失败则以 stage=retire 结束、不开始也不推进；start_run 抛错以 stage=start 结束；claim_run 返回 idle 或 busy 时原样返回）；第 3 步每批 50 个租户，每批的租户 id 查询单独一个短只读事务，每个租户一个新会话的只读事务调 check_wallet_snapshot（传 on_chunk），monotonic 的 20 秒预算只在租户之间检查；每读完一块与每核对完一个钱包、距上次领租或续租超过 60 秒时用单独的短事务续租（条件为 lease_owner=令牌且 status=RUNNING，lease_until 设为此刻 clock() 加 290 秒），受影响 0 行立即停止、这一段不提交、返回 superseded；某一块超时按 stage=advance 的异常处理'
+      - '第 4 步提交前重新读 clock()，带 status=RUNNING、cursor_tenant_id=旧游标与 lease_owner=令牌的 CAS 更新进度并同时清空租约（到末尾时同一条置 COMPLETED、finished_at 并把 running_slot 置空），受影响 1 行才插入这一段的 findings 并提交，否则整段回滚返回 superseded；problem_codes 按输出顺序以英文逗号连接；扫描期间不保持任何事务打开；任何异常回滚并记一条 wallet_reconciliation_failed error 日志，恰好带 stage（retire、start、advance、commit 之一，分别对应第 0 步、第 1 步、第 2–3 步、第 4 步）、run_id（还不知道是哪次运行时为 null：retire、start 两个阶段，以及 claim_run 在读到运行之前就失败的 advance 阶段；claim_run 抛 ClaimError 时取它的 public_id，error_type 记 ClaimError 的 __cause__ 的类名而不是 ClaimError）、error_type 三个字段；凡是本次 step 领过租约、却没有以进度提交结束的（superseded、error），返回前调 release_lease；返回 error、不向外抛；不写钱包与账本'
+      - '新文件 app/tasks/wallet_reconciliation.py：Celery 任务 app.tasks.wallet_reconciliation.step（每个 worker 进程一个引擎，写法照 app/tasks/outbox.py）；app/core/celery_app.py 的 TASK_MODULES 加这个模块、beat_schedule 加 wallet-reconciliation-step（schedule 300，expires 270），既有 beat 条目不变；tests/backend/test_celery.py 只在 beat_schedule 键集合与 TASK_MODULES 的显式期望里补这两项，其余不动'
+      - '测试：新增 tests/backend/test_wallet_reconciliation.py 覆盖设计 §7 里属于第 3 到第 5 步与 step 的每一行（正常路径；运行期间提交的低 id 租户；凌晨空表的收尾不挡住当天的完成部分；读到运行之后失败的 step 部分；钱包不存在；完成时刻；未来日期的运行的推进部分；收尾失败则本次不开始；游标不符时释放租约；并发推进在 MySQL 上（领不到租约的一方返回 busy、不扫描）；租约过期后接手的提交部分；长读取续租；单块超时在 MySQL 上；异常时释放租约；释放失败只记 warning 的 step 部分；预算用注入的 monotonic；事务中途失败；推进中读钱包失败（让第 2 个租户的 check_wallet_snapshot 抛错，断言 cursor 与计数不变、没有新 findings、恰好一条 stage=advance 且 run_id 为该运行 public_id 的日志、下一次 step 从第 1 个租户重新开始）；事务不跨扫描；一次 step 一个今天；金额精度（记录）只在 MySQL 上；Redis/Celery 丢失）；正常路径断言钱包与账本行不变；SQLite 与 MySQL 参数化，MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 全零'
+      - '不改 app/repositories/wallet.py 与 AIH-TASK-131 交付的三个步骤函数（发现缺陷时停下说明）、app/services/alerts.py、迁移与模型、接口、前端与 AI 模块；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474'
+    allowed_change_paths:
+      - app/services/wallet_reconciliation.py
+      - app/tasks/wallet_reconciliation.py
+      - app/core/celery_app.py
+      - tests/backend/test_wallet_reconciliation.py
+      - tests/backend/test_celery.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-133
+    title: 余额核对第五层：核对结果并入钱包健康告警
+    purpose: >-
+      按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「告警」与 §8：app/services/alerts.py 的 wallet_negative_balance 并入核对结果（待判运行集有不一致即 P1；负余额、30 小时没完成或从未完成、时钟异常的行为 P2），摘要逐字照设计；docs/api.md 告警表与 docs/runbook.md 同步，runbook 新增「钱包核对发现不一致」的数据事故处置。只读；管理端接口属于 AIH-TASK-134。
+    status: ready
+    depends_on:
+      - AIH-TASK-132
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）逐条一致，以 §1「明确不做什么」的修复说明、§2「告警」、§3 INV-7、§5 告警相关各行、§6 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 alerts.wallet_negative_balance 与 DIMENSIONS、AlertContext、kuala_lumpur_date、AIH-TASK-129 交付的运行模型形状如设计所述；不同时停下说明，不自行补'
+      - 'app/services/alerts.py：wallet_negative_balance 按设计 §2「告警」判级：最近一次 COMPLETED 是正常行的 COMPLETED 运行里 id 最大的一条（按插入顺序，不按 finished_at 或 run_date），没有正常的 COMPLETED 运行（含只有时钟异常的 COMPLETED 行）时视为没有 COMPLETED：摘要 never completed、P2、待判运行集为全部运行；待判运行集是它加上 id 比它大的全部运行（不论状态，不论正常行还是时钟异常的行；没有 COMPLETED 时为全部运行），其中任何一条有不一致 P1；负余额 P2；没有 COMPLETED 或最近一次超过 30 小时 P2；存在时钟异常的行 P2；取最严重；K 取待判集里除最近一次 COMPLETED 本身以外的运行的不一致数最大值。正常行是 run_date 不晚于今天且 finished_at 为空或不晚于 now 加 10 分钟的运行，其余是时钟异常的行；异常行触发那一条 P2、不参与最近完成与 stale 的判断，但照样进入待判运行集并计入 K（异常行记下的不一致照样 P1）'
+      - '摘要逐字照设计的格式与五个例子（负余额部分沿用现有文字；核对部分 never completed 或 reconciliation 日期 checked N inconsistent M、超过 30 小时末尾加 stale；K 大于 0 时接 later inconsistent K；有时钟异常的行时最后接 clock anomaly 行数），只有计数与日期，不含租户与金额；维度名与 DIMENSIONS 的顺序不变；其他维度不变；只读'
+      - '测试：新增 tests/backend/test_wallet_reconciliation_alerts.py 覆盖设计 §7 告警、告警的新旧并存、未完成运行里的不一致、运行始终完不成、不一致修复后恢复、时钟与插入顺序不一致、时钟偏快期间跑完的运行、完成时刻在未来的运行、首次运行在凌晨的告警部分、未来日期的运行的告警部分各行（运行行直接用模型插入，不经核对任务）；SQLite 与 MySQL 参数化，MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；tests/backend/test_usage_alerts.py 里 wallet_negative_balance 的用例按新判级改写（负余额仍 P2）、tests/backend/test_internal_alerts.py 里整段输出中 wallet_negative_balance 那一行的期望按新判级与摘要改写，两个文件的其余用例不动'
+      - 'docs/api.md 告警表的 wallet_negative_balance 一行改为新的判级与摘要格式；docs/runbook.md 的这一行同步改写，并新增「钱包核对发现不一致」一节：在管理端核对页找到客户与问题码、九个问题码各自的含义、按数据事故流程处置（冻结排查、核对触发器与审计、从备份恢复或在维护窗口内人工修复并记审计）、为什么 SYSTEM_CORRECTION 修不好这类问题、P1 持续到出现一次一致的完成运行、时钟异常的 P2 如何核查；不得在流程之外直接改 wallets 或 wallet_transactions；不写主机名'
+      - '不改 app/repositories/wallet.py、app/services/wallet_reconciliation.py 与 app/tasks/（AIH-TASK-130 到 132 已交付，发现缺陷时停下说明）、迁移与模型、接口、前端与 AI 模块；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474'
+    allowed_change_paths:
+      - app/services/alerts.py
+      - tests/backend/test_wallet_reconciliation_alerts.py
+      - tests/backend/test_usage_alerts.py
+      - tests/backend/test_internal_alerts.py
+      - docs/api.md
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-134
+    title: 余额核对第六层：管理端核对运行与不一致记录的只读接口
+    purpose: >-
+      按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「管理端接口」与 §8：新文件 app/api/admin_wallet_reconciliation.py 提供 GET /api/v1/admin/wallet-reconciliation/runs 与 GET /api/v1/admin/wallet-reconciliation/runs/{run_id}/findings，分页与现有管理端列表相同；新文件 app/schemas/wallet_reconciliation.py 放两个白名单视图；docs/api.md 新增「钱包核对」一节。只读、不写审计；前端属于 AIH-TASK-135。
+    status: ready
+    depends_on:
+      - AIH-TASK-133
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）逐条一致，以 §2「管理端接口」、§5 管理端一行、§6、§7 管理端各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。开工前核对 require_admin、Page 与 DEFAULT_PAGE_SIZE / MAX_PAGE_SIZE / MAX_PAGE、money_text、管理端审计列表的时间格式与路由挂载方式、AIH-TASK-129 交付的两个模型形状如设计所述；不同时停下说明，不自行补'
+      - '新文件 app/schemas/wallet_reconciliation.py：运行视图恰好 run_id、run_date、status、started_at、finished_at、wallets_checked、wallets_inconsistent 七个键；不一致视图恰好 customer_id、company_name、problem_codes（字符串数组，按存储顺序拆开）、balance（money_text 或 null）、wallet_version、ledger_rows、checked_at 七个键；不继承、不复用别的模型；新错误 ReconciliationRunNotFound（404 RECONCILIATION_RUN_NOT_FOUND）'
+      - '新文件 app/api/admin_wallet_reconciliation.py：两个处理函数第一条语句显式调用 require_admin；page 与 page_size 用与 admin_audit.py 相同的别名与范围；运行列表按 started_at 倒序、同一时刻按 id 倒序；findings 的 run_id 是普通字符串路径参数（不在 FastAPI 层校验形状，路由守卫用字面路径请求），鉴权之后不是小写规范 UUID 或查不到时 404，按 tenant_id 升序、JOIN tenants 取 public_id 与 company_name；只读：一个普通会话、不提交、不写审计与日志；路由器按现有方式挂进应用'
+      - '测试：新增 tests/backend/test_admin_wallet_reconciliation_api.py 覆盖设计 §7 管理端列表、管理端 findings、路径参数、鉴权各行（运行与 findings 直接用模型插入，不经核对任务）；SQLite 与 MySQL 参数化，MySQL 用例用 BILLING_TEST_DATABASE_URL，未设置时 skip、CI 必跑；示例 uuid 全零；tests/backend/test_admin_customers_api.py 只把两个新路由加进 EXPECTED_ADMIN_ROUTES，别的不动'
+      - 'docs/api.md 新增「钱包核对」一节：两个接口的参数、响应键及含义（运行状态三种；同一时刻至多一条 RUNNING，一天通常一次完成的运行，但同一 run_date 可能有多条——被收尾的 ABANDONED 行不挡住当天再开始，极少数并发下同一天会多完成一次，照设计 §2「数据库」与「核对运行」第 1 步写；findings 只记不一致的钱包、问题码清单与含义、balance 与 wallet_version 为 null 的情形）、排序与分页、错误码；不写主机名'
+      - '不改 app/repositories/wallet.py、app/services/、app/tasks/、迁移与模型、客户接口、前端与 AI 模块（AIH-TASK-130 到 133 已交付判定、核对与告警，发现缺陷时停下说明）；不装依赖；SQL 断言不写死方言字面量，MySQL 专有断言放进方言分支'
+      - '不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474'
+    allowed_change_paths:
+      - app/api/admin_wallet_reconciliation.py
+      - app/schemas/wallet_reconciliation.py
+      - app/main.py
+      - tests/backend/test_admin_wallet_reconciliation_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-135
+    title: 余额核对第七层：管理端钱包核对页
+    purpose: >-
+      按 docs/design/AIH-TASK-129-wallet-reconciliation.md（设计闸门 #474 已批准 v13）§2「前端」与 §8：新增管理端页 /wallet-reconciliation（核对运行表、点一行看这次运行的不一致钱包、两张表分页、空状态），顶栏加一项；勾掉 docs/TODO.md Phase 1 的「不可变钱包账本」。只做前端，外加验收脚本的一个只读步骤。
+    status: ready
+    depends_on:
+      - AIH-TASK-134
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「钱包核对」一节为准（AIH-TASK-134 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/components/MoneyText.tsx'
+      - '新增 frontend/src/api/adminWalletReconciliation.ts 封装两个接口：page 与 page_size 照现有管理端列表的封装写法，run_id 只原样放进路径，不解析'
+      - '新增 frontend/src/features/wallet/WalletReconciliationPage.tsx：运行表列为运行日、状态、开始与结束时间（按 +8 显示并标 MYT）、核对数、不一致数（大于 0 时醒目）；点一行在下方显示该运行的不一致表：客户名链到客户详情页、问题码逐个显示为标签并带一句说明（九个码各一条文案）、余额（与客户详情页同一个金额组件）、版本、账本行数、核对时间；两张表各自分页；加载中、失败（带 request_id）、空状态（还没有核对运行 / 这次运行全部一致）；页面只读，没有任何修复或写操作入口'
+      - 'frontend/src/routes/paths.ts 登记 walletReconciliation 路径 /wallet-reconciliation，frontend/src/routes/index.tsx 把它挂在管理端的 RequireRole（ADMIN）与 AppLayout 之下；frontend/src/layouts/AppLayout.tsx 顶栏在现有各项之后加一项；不请求任何 /api/v1/customer/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：adminWalletReconciliation.test.ts 覆盖两个接口的路径与查询串；WalletReconciliationPage.test.tsx 覆盖运行表的列与不一致数醒目、点一行后的不一致表（客户链接、九个问题码的标签与说明、余额为 null 时的显示）、两张表的分页查询串、三种状态与两种空状态、没有写操作入口、不请求 /api/v1/customer/ 路径；既有管理端页面用例照常通过；示例 uuid 全零'
+      - 'open_wallet_reconciliation：在 login 之后经顶栏打开核对页（href 为 /wallet-reconciliation）；后端值取页面自己发出的 GET /api/v1/admin/wallet-reconciliation/runs 的响应体（被动观察，不自己发请求），断言表格行数与 items 条数一致，items 非空时第一行显示的核对数等于 items[0].wallets_checked，空表显示空状态也算通过；不点行、不翻页、不提交任何表单。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 只勾 Phase 1 的「不可变钱包账本」一项。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #474（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminWalletReconciliation.ts
+      - frontend/src/api/adminWalletReconciliation.test.ts
+      - frontend/src/features/wallet/WalletReconciliationPage.tsx
+      - frontend/src/features/wallet/WalletReconciliationPage.test.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/layouts/AppLayout.tsx
+      - frontend/src/i18n/locales/en.json
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_wallet_reconciliation
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
