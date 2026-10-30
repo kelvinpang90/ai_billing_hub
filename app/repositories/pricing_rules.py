@@ -63,10 +63,11 @@ class RuleComponent(NamedTuple):
 
 
 class Scope(NamedTuple):
-    """A rule's scope: the level and its three columns (internal ids; `None` where unused)."""
+    """A rule's scope: the level and its four columns (internal ids; `None` where unused)."""
 
     priority_scope: PricingScope
     tenant_id: int | None
+    project_id: int | None
     provider_id: int | None
     model_id: int | None
 
@@ -133,7 +134,13 @@ def _locked[T](statement: Select[T], lock: bool) -> Select[T]:
 
 
 def scope_of(row: PricingRule) -> Scope:
-    return Scope(PricingScope(row.priority_scope), row.tenant_id, row.provider_id, row.model_id)
+    return Scope(
+        PricingScope(row.priority_scope),
+        row.tenant_id,
+        row.project_id,
+        row.provider_id,
+        row.model_id,
+    )
 
 
 def _same(column: ColumnElement[int | None], value: int | None) -> ColumnElement[bool]:
@@ -141,10 +148,11 @@ def _same(column: ColumnElement[int | None], value: int | None) -> ColumnElement
 
 
 def _in_scope(scope: Scope) -> list[ColumnElement[bool]]:
-    """The rows of exactly this scope (NULL-safe on the three columns)."""
+    """The rows of exactly this scope (NULL-safe on the four columns)."""
     return [
         PricingRule.priority_scope == scope.priority_scope,
         _same(PricingRule.tenant_id, scope.tenant_id),
+        _same(PricingRule.project_id, scope.project_id),
         _same(PricingRule.provider_id, scope.provider_id),
         _same(PricingRule.model_id, scope.model_id),
     ]
@@ -369,6 +377,7 @@ def insert_draft(
         public_id=_new_public_id(),
         priority_scope=scope.priority_scope,
         tenant_id=scope.tenant_id,
+        project_id=scope.project_id,
         provider_id=scope.provider_id,
         model_id=scope.model_id,
         strategy=strategy,
@@ -508,10 +517,16 @@ def mark_retired(
 
 
 def _level_scope(level: PricingScope, tenant_id: int, provider_id: int, model_id: int) -> Scope:
-    """The one scope of `level` that an event of (tenant, provider, model) falls into."""
+    """The one scope of `level` that an event of (tenant, provider, model) falls into.
+
+    ⚠️ 项目级的 `project_id` 在 AIH-TASK-137 里填 NULL：项目级查询要求 `project_id IS NULL`，
+    而项目级的行（CHECK）项目一定非空，所以这三级匹配不到任何行，解析结果与五级时相同。
+    按事件的项目解析由 AIH-TASK-138 接上。
+    """
     return Scope(
         level,
         tenant_id if level.has_customer else None,
+        None,
         provider_id if level.has_provider else None,
         model_id if level.has_model else None,
     )
@@ -526,11 +541,12 @@ def resolve_pricing_rule(
 ) -> ResolvedPricingRule | None:
     """The pricing rule in effect for the event at `occurred_at`, or `None` (设计 §2「解析」).
 
-    按 §16 的顺序逐级查：`CUSTOMER_PROVIDER_MODEL` → `CUSTOMER_PROVIDER` → `CUSTOMER` →
-    `GLOBAL_PROVIDER_MODEL` → `GLOBAL`。每一级找范围匹配、`PUBLISHED` / `RETIRED`、
+    按 `SCOPE_ORDER` 逐级查：三个项目级（本任务里匹配不到任何行，见 `_level_scope`）→
+    `CUSTOMER_PROVIDER_MODEL` → `CUSTOMER_PROVIDER` → `CUSTOMER` → `GLOBAL_PROVIDER_MODEL` →
+    `GLOBAL`。每一级找范围匹配、`PUBLISHED` / `RETIRED`、
     `effective_from ≤ occurred_at < effective_to`（NULL 端不比）的规则；**第一级命中即返回**
     （规则 + 分量）。一旦命中，就不因该 FIXED_RATE 规则缺事件所需的分量而下落到更低一级（T-G
-    判 `PRICING_ERROR`）。五级都没有 → `None`（T-G 判 `PRICING_ERROR`）。空区间（撤销的预约）
+    判 `PRICING_ERROR`）。各级都没有 → `None`（T-G 判 `PRICING_ERROR`）。空区间（撤销的预约）
     永不匹配。三个 id 都是内部 id：租户取自事件，供应商与模型取自 `resolve_model`；
     `occurred_at` 是不带时区的 UTC。
 

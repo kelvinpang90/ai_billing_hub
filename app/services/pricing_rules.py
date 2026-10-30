@@ -297,8 +297,17 @@ def _require_scope_fields(
     provider_id: str | None,
     model_id: str | None,
 ) -> None:
-    """设计 §2「接口」：范围字段与 `priority_scope` 不匹配（多给或少给）→ 422。"""
-    given = {"customer_id": customer_id, "provider_id": provider_id, "model_id": model_id}
+    """设计 §2「接口」：范围字段与 `priority_scope` 不匹配（多给或少给）→ 422。
+
+    ⚠️ 项目级要 `project_id`（`required_scope_fields`），而本函数还不收项目（AIH-TASK-138
+    起），所以三个项目级在这里一律 422。
+    """
+    given = {
+        "customer_id": customer_id,
+        "project_id": None,
+        "provider_id": provider_id,
+        "model_id": model_id,
+    }
     present = frozenset(name for name, value in given.items() if value is not None)
     if present != required_scope_fields(priority_scope):
         raise PricingRuleShapeInvalid("The scope fields do not match priority_scope.")
@@ -520,6 +529,7 @@ def create_draft(
         scope = Scope(
             priority_scope,
             tenant_pk,
+            None,
             provider.id if provider is not None else None,
             model.id if model is not None else None,
         )

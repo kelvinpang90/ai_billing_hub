@@ -96,6 +96,9 @@ FICTIONAL_MULTIPLIER = "1.23456789"
 
 GLOBAL = PricingScope.GLOBAL
 CUSTOMER = PricingScope.CUSTOMER
+# The levels a rule can be drafted on: project-level rules cannot be built until AIH-TASK-138
+# and 139 carry the project (a draft on one is a 422 now), so rules go level by level only here.
+BUILDABLE_LEVELS = tuple(level for level in SCOPE_ORDER if not level.has_project)
 
 
 # --- helpers ----------------------------------------------------------------------
@@ -365,10 +368,10 @@ def _clean(engine: Engine) -> None:
 
 
 def _one_rule_per_level(rules: Rules) -> dict[PricingScope, str]:
-    """A published MARKUP rule on each of the five levels for tenant-a; the global one first,
-    so that it applies to all time."""
+    """A published MARKUP rule on each of the five non-project levels for tenant-a; the global
+    one first, so that it applies to all time."""
     published = {GLOBAL: rules.publish_new(GLOBAL).id}
-    for level in SCOPE_ORDER[:-1]:
+    for level in BUILDABLE_LEVELS[:-1]:
         published[level] = rules.publish_new(level).id
     return published
 
@@ -384,13 +387,13 @@ def test_the_levels_fall_through_in_section_16_order(sqlite_factory) -> None:
     occurred_at = T0 + 10 * DAY
 
     seen = []
-    for level in SCOPE_ORDER:
+    for level in BUILDABLE_LEVELS:
         seen.append(rules.resolve(occurred_at))
         rules.retire(published[level])
         clock.advance(seconds=5)
     seen.append(rules.resolve(occurred_at))
 
-    assert seen == [published[level] for level in SCOPE_ORDER] + [None]
+    assert seen == [published[level] for level in BUILDABLE_LEVELS] + [None]
 
 
 def test_a_hit_stops_even_without_the_events_component(sqlite_factory) -> None:
@@ -495,8 +498,11 @@ def test_resolution_takes_share_locks() -> None:
     assert "_shared(" in inspect.getsource(lock_pricing_rules_shared)
     assert ".with_for_update()" in inspect.getsource(rule_repository.lock_pricing_rules)
     assert ".with_for_update()" in inspect.getsource(rule_repository.period_rules)
-    # The levels in §16 order, highest first.
+    # The eight levels (design gate #507 v4), highest first: the project levels before §16's five.
     assert [level.value for level in SCOPE_ORDER] == [
+        "PROJECT_PROVIDER_MODEL",
+        "PROJECT_PROVIDER",
+        "PROJECT",
         "CUSTOMER_PROVIDER_MODEL",
         "CUSTOMER_PROVIDER",
         "CUSTOMER",
@@ -525,13 +531,13 @@ def test_a_resolved_moment_never_changes_its_rule(sqlite_factory) -> None:
     tenant_id, provider_id, model_id = rules.ids()
     probes = [T0 + dt.timedelta(milliseconds=500 * k) for k in range(-6, 240)]
     steps = [0, 1, 250_000, 999_999, 1_000_000, 1_500_000, 7_000_000]
-    published: dict[PricingScope, list[str]] = {level: [] for level in SCOPE_ORDER}
+    published: dict[PricingScope, list[str]] = {level: [] for level in BUILDABLE_LEVELS}
     seen: dict[dt.datetime, str] = {}
     changes = 0
 
     for step in range(200):
         clock.advance(microseconds=rng.choice(steps))
-        level = rng.choice(SCOPE_ORDER)
+        level = rng.choice(BUILDABLE_LEVELS)
         operation = rng.choice(["publish", "publish", "reserve", "retire"])
         try:
             if operation == "publish":
