@@ -85,8 +85,10 @@ tests/backend/test_migrations.py 与 tests/backend/test_pricing_rule_project_sco
 修复；列存在时用一条 ALTER 恢复 0014 的两条 CHECK、`scope_key` 表达式与唯一索引并删外键、索引与列；
 主触发器恢复为 0014 的正文（存在且不含 `project_id` → 跳过）；最后删隔离触发器。⚠️ 顺序必须是
 **先改表、后换触发器**（设计 §2「为什么降级先改表、后换触发器」）：ALTER 失败时表完全不变，0030 的
-触发器照旧与表一致；ALTER 完成、触发器还没换时，0030 的触发器引用的 `NEW.project_id` 已不存在，
-每一次 UPDATE 都报错（ERROR 1054，失败即拒绝），直到重跑降级换上 0014 的触发器。
+触发器照旧与表一致；ALTER 完成、触发器还没换时，0030 的触发器引用的 `NEW.project_id` 已不存在。
+MySQL 在执行到含它的语句时才解析，所以走到 ② 或 ④ 的 UPDATE（改已发布或已退役的规则、发布草稿）
+都报错（ERROR 1054，失败即拒绝），直到重跑降级换上 0014 的触发器；只改草稿或作废草稿的 UPDATE
+走不到这两段、照常成功——受保护的不变式（不可变、区间不重叠）都在 ② 与 ④ 里，因此不会被绕过。
 
 Revision ID: 0030_pricing_rule_project_scope
 Revises: 0029_wallet_reconciliation

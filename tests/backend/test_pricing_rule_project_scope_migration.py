@@ -1196,8 +1196,11 @@ def test_0030_downgrade_completes_an_interrupted_downgrade(
     alembic_config: Config, engine: Engine
 ) -> None:
     """Design §7 "补完中断的降级": ① the guards removed by hand, only the downgrade's ALTER run —
-    the 0030 trigger now refers to a column that is gone, so an UPDATE in between fails (1054)
-    instead of slipping past the period check; the rerun downgrade ends at 0029's structure.
+    the 0030 trigger now refers to a column that is gone. MySQL resolves `NEW.project_id` only
+    when the trigger reaches the statement holding it, so an UPDATE that reaches ② or ④ (a change
+    to a published rule, even of `updated_at` alone; publishing a draft) fails (1054) instead of
+    slipping past the immutability or period check, while a draft-only edit, which reaches
+    neither, still succeeds; the rerun downgrade ends at 0029's structure.
     ② a rerun of a complete downgrade sends no DDL and does not query the rules."""
     _start(alembic_config, engine)
     migration = _load()
@@ -1207,17 +1210,21 @@ def test_0030_downgrade_completes_an_interrupted_downgrade(
         at_0029 = _structure(engine)
         command.upgrade(alembic_config, _REVISION)
         seed = _committed_seed(engine)
-        with engine.begin() as connection:
-            draft = _insert_rule(connection, _rule_values(seed, "GLOBAL"))
+        published, draft = _published_and_draft(engine, seed)
 
         _execute(engine, migration._ALTER_DOWNGRADE)
         assert _guards(engine) == set()
+        # Only `updated_at` on a published rule: ② still compares `NEW.project_id`.
+        code, _ = _refusal(engine, *_touch(published))
+        assert code == _ER_BAD_FIELD
         code, _ = _refusal(
             engine,
-            f"UPDATE {_RULES} SET updated_at = :now WHERE id = :id",
-            {"now": _T1, "id": draft},
+            str(_PUBLISH),
+            {"effective_from": _T1, "user_id": seed.user_id, "now": _T1, "id": draft},
         )
         assert code == _ER_BAD_FIELD
+        statement, params = _touch(draft)
+        _execute(engine, statement, params)
 
         command.downgrade(alembic_config, _DOWN_REVISION)
         assert _version(engine) == _DOWN_REVISION
