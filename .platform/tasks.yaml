@@ -8092,3 +8092,295 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-136
+    title: 项目级定价第一层：定价规则加项目列、八级范围约束与生成列的迁移
+    purpose: >-
+      按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「数据库」与 §8：新迁移 0030 给 pricing_rules 加 project_id 列、复合外键 (project_id, tenant_id) → projects (id, tenant_id) 与它的索引，把两条范围 CHECK 改为八级，把生成列 scope_key 的表达式加上项目一段并重建 open_slot 唯一索引，重建 trg_pricing_rules_before_update（不可变列加 project_id、区间重叠检查的范围键加项目）；有项目级规则时降级抛错；模型只同步列、外键、索引、CHECK 文本与生成列表达式，PricingScope 枚举本任务不改（于是应用层还建不出、也读不出项目级规则）。八级枚举与范围字段校验属于 AIH-TASK-137，解析与服务属于 AIH-TASK-138，接口与前端属于 AIH-TASK-139、140。
+    status: ready
+    depends_on:
+      - AIH-TASK-135
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）逐条一致，以 §2「数据库」、§3 INV-6 与 INV-8、§4「迁移与在线计费的并发」、§5 迁移相关各行、§7 迁移与 CHECK 各行、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261030_0030_pricing_rule_project_scope.py，revision 为 0030_pricing_rule_project_scope，down_revision 为 0029_wallet_reconciliation；文件头按 0027 迁移的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明不改任何已有行的业务列、已有行的 scope_key 只多一段 :0。upgrade 先照设计判断是否已完成（完成就直接返回、不发任何 DDL），否则照设计 §2「升级的写法」五步：① 任何 DDL 之前的 binlog 预检（查询、判定与报错文案照 0014）；② 写入隔离：建 trg_pricing_rules_migration_guard_insert 与 trg_pricing_rules_migration_guard_update 两个只 SIGNAL 的隔离触发器（各自按是否存在判定、已存在的跳过；第 ③、④ 步都已完成时跳过这一步、直接到第 ⑤ 步；用 PRECEDES 排在同一时机的主触发器之前，主触发器不存在时不带）；③ project_id 列不存在时用一条 ALTER TABLE 完成全部表结构改动；列存在时按设计列出的标记核对形状，这一核对在第 ② 步之前做，不符抛错且不发任何 DDL（已有的隔离触发器原样留下）；④ 主触发器按 ACTION_STATEMENT 是否含 NEW.project_id 跳过、DROP 后 CREATE 或直接 CREATE；⑤ 第 ③、④ 步都已完成才解除隔离：先查两个隔离触发器各自是否存在，只对存在的发 DROP TRIGGER；--sql 离线模式照设计跳过预检与检查，依次输出建隔离触发器、那条 ALTER、DROP TRIGGER IF EXISTS 与 CREATE TRIGGER、删隔离触发器。CHECK 条件文本、生成列表达式与触发器正文写成模块级常量（触发器照 0014 的 _TRIGGERS 写法），与模型逐字一致（空白除外）。downgrade 照设计 §2「降级」：--sql 离线模式最先抛错（先于「是否已完成」的判断）；在线时先判断是否已完成（完成就直接返回、不发任何 DDL），否则依次：预检；写入隔离（同 upgrade 第 ② 步）；列存在时有任何 project_id 非空或 priority_scope 为三个项目级之一的行就先删隔离触发器、再抛错（消息写明原因：这些规则可能已被用量事件引用），列不存在时跳过这一查询；列存在时用一条 ALTER TABLE 恢复 0014 的两条 CHECK、生成列表达式与唯一索引并删外键、索引与列；把主触发器恢复为 0014 的正文（按是否含 project_id 判定）；最后删隔离触发器。顺序必须是先改表、后换触发器（设计 §2「为什么降级先改表、后换触发器」）'
+      - 'app/models/pricing_rules.py：新列 project_id（可空，与 tenant_id 同类型，声明在 tenant_id 之后；迁移用 AFTER tenant_id）、复合外键 fk_pricing_rules_project 与索引 ix_pricing_rules_project；PRIORITY_SCOPE_CHECK、SCOPE_COLUMNS_CHECK、SCOPE_KEY_EXPRESSION、SQLITE_SCOPE_KEY_EXPRESSION 照设计 §2 的表与表达式改写；PricingScope、SCOPE_ORDER、ix_pricing_rules_resolve 与 SCOPE_KEY_LENGTH 本任务不改；模块文档里的范围列与表达式说法同步，并写明八级的枚举值由 AIH-TASK-137 加入'
+      - '测试：新增 tests/backend/test_pricing_rule_project_scope_migration.py，覆盖设计 §7 的离线升级、迁移结构、迁移不改已有规则、补完中断的迁移（三种）、补完中断的降级（两种，含中间那次 UPDATE 被拒）、只有一个隔离触发器（升级与降级各两个位置）、隔离触发器的顺序、形状不符、迁移期间的写入隔离（三个中断位置）、降级期间的写入隔离（两个中断位置）、预检、降级拒绝（含离线）、降级恢复、CHECK 只放行八种组合（合法的八种与每级翻转一列的非法组合；SQLite 用模型 metadata 建表、MySQL 用迁移）、项目属于租户（外键拒绝）、两个项目各自一条时间线（直接写行验 open_slot 唯一索引）、发布后项目不可改（MySQL 触发器）；项目级的行一律用 SQL 文本插入与更新（PricingScope 本任务还没有这三个值，ORM 读不出这些行）；迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑；写法照 tests/backend/test_wallet_reconciliation_migration.py）；清理照设计 §7「MySQL 用例的清理」，每个用例结束后库在 head、没有项目级行、没有隔离触发器'
+      - 'tests/backend/test_migrations.py：在 head 上断言 pricing_rules 形状的用例（含 test_0014_column_shape、test_0014_keys_foreign_keys_checks_and_triggers，以及比对模型常量、生成列表达式与触发器正文的断言）改为 0030 之后的形状与 0030 的字面量；只在 0014 那一版上验证 0014 自身的用例（如有）照旧；触发器清单不变（同名重建）。其余既有定价用例不改、照常通过'
+      - 'docs/database-schema.md 的 pricing_rules 一节：project_id 列与复合外键、八级与四列的 NULL 组合表、新的 scope_key 表达式、降级在有项目级规则时被拒'
+      - '不改 app/repositories、app/schemas、app/services、接口路由与前端；不改既有迁移文件；不改 AI 模块'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #507'
+    allowed_change_paths:
+      - alembic/versions/20261030_0030_pricing_rule_project_scope.py
+      - app/models/pricing_rules.py
+      - tests/backend/test_pricing_rule_project_scope_migration.py
+      - tests/backend/test_migrations.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-137
+    title: 项目级定价第二层：八级范围枚举与范围字段校验，项目级规则暂不可建
+    purpose: >-
+      按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「数据库」里模型的部分与 §11「任务拆分」：PricingScope 按优先顺序声明八级并加 has_project；repository 的 Scope 带项目，解析在本任务里对项目级填 NULL（结果与现在相同）；请求与服务层的范围字段校验把 project_id 算进项目级的必填字段（请求模型还没有这个字段，所以项目级规则在本任务里建不出来、返回 422）；既有用例里断言五级或逐级建规则的写法同步。解析按项目与服务属于 AIH-TASK-138。
+    status: ready
+    depends_on:
+      - AIH-TASK-136
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）逐条一致，以 §2「数据库」里模型与 Scope 的部分、§11「任务拆分」的本层为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/models/pricing_rules.py：PricingScope 按优先顺序声明八个值（PROJECT_PROVIDER_MODEL、PROJECT_PROVIDER、PROJECT 在最前），新增 has_project 属性，三个项目级的 has_customer 也为真，has_provider / has_model 照设计的表；SCOPE_ORDER = tuple(PricingScope) 不变；不改列、约束与表达式（AIH-TASK-136 已改）'
+      - 'app/repositories/pricing_rules.py：Scope 加 project_id，_in_scope 对四列 NULL 安全比较，scope_of 带上 row.project_id；_level_scope 在本任务里对项目级填 NULL（于是项目级查询匹配不到任何行）、resolve_pricing_rule 的签名不变，解析结果与现在相同；其他读写函数按需带上 project_id，不改它们的语义；list_rules 的排序本任务不改（属于 AIH-TASK-138）'
+      - 'app/schemas/pricing_rules.py 的 required_scope_fields 与 app/services/pricing_rules.py 的 _require_scope_fields 把 project_id 算进 has_project 级的必填字段；请求模型与服务函数本任务都不加 project_id 字段或参数，所以三个项目级的建草稿请求一律 422 VALIDATION_ERROR（不是 500）'
+      - '测试：tests/backend/test_pricing_rules_resolve.py 与 tests/backend/test_pricing_rules_service.py 里断言 SCOPE_ORDER 或逐级建规则的用例改为：SCOPE_ORDER 是设计的八级顺序，逐级建规则只遍历五个非项目级（项目级规则本任务建不出来，由 AIH-TASK-138 补上）；test_the_checks_refuse_scope_and_null_combinations_outside_section_16 按八级改写；加一例「三个项目级的建草稿请求都是 422」；其余既有定价用例照常通过、不改断言'
+      - '不改迁移、计费、试算、接口路由与前端；不改 AI 模块'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #507'
+    allowed_change_paths:
+      - app/models/pricing_rules.py
+      - app/repositories/pricing_rules.py
+      - app/schemas/pricing_rules.py
+      - app/services/pricing_rules.py
+      - tests/backend/test_pricing_rules_resolve.py
+      - tests/backend/test_pricing_rules_service.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-138
+    title: 项目级定价第三层：按事件的项目八级解析规则，服务层接受项目
+    purpose: >-
+      按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「解析」「发布、停用与生效时刻」与 §8：resolve_pricing_rule 与 resolve_charge_inputs 加 project_id，计费传事件的项目，试算在本任务里传 None；服务层建草稿与列表的函数接受项目（项目必须属于客户，否则 404 PROJECT_NOT_FOUND），审计的范围带项目；spec §16、§59、§74.3 与 docs/pricing-engine.md 改为八级。接口不传项目（属于 AIH-TASK-139），所以对外行为不变。
+    status: ready
+    depends_on:
+      - AIH-TASK-137
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）逐条一致，以 §2「解析」「发布、停用与生效时刻」「接口」里服务层的部分、§3 INV-5、INV-6 与 INV-8、§4、§5、§7 解析与服务各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/pricing_rules.py：resolve_pricing_rule(session, tenant_id, project_id, provider_id, model_id, occurred_at)，project_id: int | None；_level_scope 对 has_project 的级填 project_id，project_id 为 None 时三个项目级不查；其余（逐级 FOR SHARE、PUBLISHED / RETIRED、半开区间、第一级命中即返回、同一级多于一条抛错）不变；文档字符串里的顺序写成八级；list_rules 的排序在租户之后、供应商之前加 project_id（NULL 在前），其余排序键不变；ScopeRows 加 projects（内部 id → Project），scope_rows 一并读出规则引用的项目（锁读与否同其余三类），供 _scope_state 与 AIH-TASK-139 的视图使用'
+      - 'app/services/pricing_engine.py：resolve_charge_inputs 增加必填关键字参数 project_id: int | None 并原样传下；命中项目级 FIXED_RATE 规则缺分量时照旧 MISSING_RULE_COMPONENT、不下落；preview_charge 在本任务里传 project_id=None。app/services/usage_billing.py 的 _process 传 event.project_id；锁顺序、快照与扣费不变'
+      - 'app/services/pricing_rules.py：create_draft 与 list_pricing_rules 增加关键字参数 project_id: str | None = None（项目 public_id）；三个项目级必须同时给 customer_id 与 project_id，项目按 tenancy 的 get_project_for_tenant 在该客户下查，不存在或不属于抛已有的 app.services.integration_access.ProjectNotFound（404 PROJECT_NOT_FOUND，不新建错误类）；列表筛选的 project_id 只能与 customer_id 一起给（单独给抛已有的 PricingRuleShapeInvalid），在该客户下查不到同样抛 ProjectNotFound；多个范围 id 都不对时，建草稿与列表都按 客户 → 项目 → 供应商 → 模型 的顺序报第一个；_scope_state 加 project_id（项目 public_id，非项目级为 null），于是 PRICING_CREATE、PRICING_PUBLISH、PRICING_RETIRE 的状态带项目，PRICING_UPDATE 与 PRICING_DISCARD 照旧只记变化的字段；视图（PricingRuleView 与 _views）本任务不改，属于 AIH-TASK-139；发布、停用、丢弃的逻辑不变（项目级与其他非 GLOBAL 级一样不许回溯）。app/api/ 与 app/schemas/ 本任务不改'
+      - '测试：tests/backend/test_pricing_rules_resolve.py 覆盖设计 §7 的八级顺序、没有项目级规则时不变、项目隔离、跨租户、project_id 为 None 时不查项目级；tests/backend/test_pricing_engine.py 覆盖命中项目级 FIXED_RATE 缺分量不下落、金额精度（与同参数的客户级规则金额相同）；tests/backend/test_usage_billing.py 覆盖计费按事件的项目选到项目级规则、已选定的时刻不改选（MySQL，照设计 §7 的 E1、E2、E3 三个事件）；tests/backend/test_usage_billing_concurrency.py 覆盖发布与计费并发（MySQL，沿用该文件已有的发布与计费锁用例与线程辅助，加项目级一例）；tests/backend/test_pricing_rules_service.py 覆盖项目级建草稿与发布（八级都能建）、项目不属于客户 404、列表按客户加项目筛选与单独给项目被拒、审计的范围带项目（建、发布、停用）且改与丢弃照旧、不许回溯、两个项目各自一条时间线、复查失败整体回滚；tests/backend/test_pricing_preview_api.py 只把对 resolve_charge_inputs 的调用补上 project_id=None。MySQL 专属断言放在 if engine.dialect.name == "mysql": 或 MySQL fixture 里；在共享 MySQL 测试库里写入项目级规则的用例照设计 §7「MySQL 用例的清理」在 finally 里清掉自己的行；既有用例照常通过、不改断言'
+      - 'docs/Acuven_Central_AI_Billing_Platform_Spec.md：§16 的顺序改为八级并说明项目级规则只匹配本项目的事件、项目没有规则时从客户级开始；§59 写明规则可以挂在客户的某个项目上；§74.3 的 pricing_rules 加 project_id；§141 写明「一个项目对应一条产品线下的一个模块」的约定与按项目定价靠的是项目级规则；文件头的版本号 +1 并在修订记录里列出改了哪几节。docs/pricing-engine.md 的解析一节改为八级'
+      - '不改接口路由、请求与响应模型、前端；不改迁移与模型；不改 AI 模块'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #507'
+    allowed_change_paths:
+      - app/repositories/pricing_rules.py
+      - app/services/pricing_engine.py
+      - app/services/usage_billing.py
+      - app/services/pricing_rules.py
+      - tests/backend/test_pricing_rules_resolve.py
+      - tests/backend/test_pricing_engine.py
+      - tests/backend/test_usage_billing.py
+      - tests/backend/test_usage_billing_concurrency.py
+      - tests/backend/test_pricing_rules_service.py
+      - tests/backend/test_pricing_preview_api.py
+      - docs/Acuven_Central_AI_Billing_Platform_Spec.md
+      - docs/pricing-engine.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-139
+    title: 项目级定价第四层：规则与试算接口接受项目
+    purpose: >-
+      按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「接口」：管理端建规则与列表筛选的请求加 project_id，视图加 project_id 与 project_name；试算请求加可选 project_id，试算服务按它解析；docs/api.md 同步。前端属于 AIH-TASK-140。
+    status: ready
+    depends_on:
+      - AIH-TASK-138
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）逐条一致，以 §2「接口」、§3 INV-7 与 INV-8、§5 接口相关各行、§6、§7 接口与试算各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/schemas/pricing_rules.py：SCOPE_FIELDS 加 project_id，CreatePricingRuleRequest 加可选 project_id（PublicId），范围字段与 priority_scope 恰好匹配的校验照设计（三个项目级要 customer_id 与 project_id，其余五级不许带 project_id，多给少给都是 422）；PricingRuleView 加 project_id 与 project_name；PATCH 照旧不收范围字段。app/services/pricing_rules.py 只改视图组装（_views 与它调用的 pricing_rule_view 用 AIH-TASK-138 在 ScopeRows 里加的 projects 填 project_id 与 project_name，非项目级为 null），不改其余逻辑。app/api/admin_pricing_rules.py：建草稿把 project_id 传给服务，GET /pricing-rules 加查询参数 project_id 传给服务（单独给、不带 customer_id 时 422 VALIDATION_ERROR）；错误码照设计（PROJECT_NOT_FOUND 404）'
+      - 'app/schemas/pricing_preview.py：PricingPreviewRequest 加可选 project_id（PublicId）；app/services/pricing_engine.py 的 preview_charge：校验顺序照设计（客户 → 项目 → 计量类型 → 其余照旧）；给了 project_id 就按 get_project_for_tenant 在该客户下查，不存在或不属于抛 app.services.integration_access.ProjectNotFound（404 PROJECT_NOT_FOUND），按该项目的内部 id 传给 resolve_charge_inputs；没给传 None（结果与现在相同）；其余不变'
+      - '测试：tests/backend/test_pricing_rules_api.py 覆盖八级各缺一个、多一个范围字段的 422，项目级建草稿与发布，项目不属于客户 404，列表按 customer_id 加 project_id 筛选、单独给 project_id 422、项目不属于客户 404，视图带 project_id 与 project_name、非项目级为 null，审计照设计（建、发布、停用带项目 public_id，改与丢弃只有变化的字段，没有内部 id），非 ADMIN 403；既有用例里对视图字段的精确清单（如 RULE_FIELDS）只加上 project_id 与 project_name 两个键，其余断言不改；tests/backend/test_pricing_preview_api.py 覆盖给项目时与真实计费选到同一条规则（沿用该文件已有的「试算等于解析」写法，传项目内部 id）、不给项目时结果不变、项目不属于客户 404、客户不存在且给了项目时 404 CUSTOMER_NOT_FOUND；在共享 MySQL 测试库里写入项目级规则的用例照设计 §7「MySQL 用例的清理」在 finally 里清掉自己的行；既有用例照常通过、不改断言'
+      - 'docs/api.md 的定价规则与试算两节：project_id 请求字段、视图的两个新字段、八级与范围字段对照、PROJECT_NOT_FOUND 的出现条件、试算不给项目时的含义'
+      - '不改迁移、模型、repository 与解析；不改计费；不改前端；不改 AI 模块'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #507'
+    allowed_change_paths:
+      - app/schemas/pricing_rules.py
+      - app/services/pricing_rules.py
+      - app/api/admin_pricing_rules.py
+      - app/schemas/pricing_preview.py
+      - app/services/pricing_engine.py
+      - tests/backend/test_pricing_rules_api.py
+      - tests/backend/test_pricing_preview_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-140
+    title: 项目级定价第五层：规则页、详情页与试算页支持项目
+    purpose: >-
+      按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「前端」：规则页的范围下拉加三个项目级、选客户后选项目、表格加 Project 列、筛选加项目；详情页显示项目；试算页加可选的项目下拉；浏览器验收的两个已有步骤补上项目相关的只读断言。只做前端与验收脚本。
+    status: ready
+    depends_on:
+      - AIH-TASK-139
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的定价规则与试算两节为准（AIH-TASK-139 写入），交互以设计 §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts'
+      - 'frontend/src/api/adminPricingRules.ts：PRIORITY_SCOPES 按八级顺序（三个项目级在最前），范围与字段的对照加 project_id，建草稿与列表筛选带 project_id，视图类型加 project_id 与 project_name；frontend/src/api/adminPricingPreview.ts：请求加可选 project_id。项目列表沿用已有的 GET /api/v1/admin/customers/{customer_id}/projects 封装，不新建'
+      - 'frontend/src/features/pricing/PricingRulesPage.tsx：范围下拉有八项；选三个项目级之一时，选完客户才出现项目下拉、项目必选，换客户清空项目；非项目级的请求体不带 project_id；表格加 Project 列（非项目级显示 —）；筛选加项目（先选客户才可选）。PricingRuleDetailPage.tsx 显示项目名。PricingPreviewPage.tsx 在客户之后加可选的项目下拉，换客户清空项目，不选时请求不带 project_id；结果照旧显示命中的级别（八级各有文案）。文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：adminPricingRules.test.ts 与 adminPricingPreview.test.ts 覆盖请求体与查询串里的 project_id；PricingRulesPage.test.tsx 覆盖八项范围、项目下拉的出现与必选、换客户清空项目、非项目级不带 project_id、Project 列、按项目筛选；PricingRuleDetailPage.test.tsx 覆盖项目名的显示；PricingPreviewPage.test.tsx 覆盖项目下拉可选可空、换客户清空、请求体；既有用例照常通过；示例 uuid 全零'
+      - 'open_pricing_rules：在既有断言之外，有表格时表头还要有「Project」列；open_pricing_preview：在既有断言之外，表单上要有项目下拉（未选客户时可以是禁用的）。两个步骤仍只读：不提交任何表单、不建规则。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务只改这两个已有步骤（文件名不变），其余步骤行为不变；文件头的步骤说明同步；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #507（本任务是纯前端，引用它只为让审查拿到接口与交互契约）'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminPricingRules.ts
+      - frontend/src/api/adminPricingRules.test.ts
+      - frontend/src/api/adminPricingPreview.ts
+      - frontend/src/api/adminPricingPreview.test.ts
+      - frontend/src/features/pricing/PricingRulesPage.tsx
+      - frontend/src/features/pricing/PricingRulesPage.test.tsx
+      - frontend/src/features/pricing/PricingRuleDetailPage.tsx
+      - frontend/src/features/pricing/PricingRuleDetailPage.test.tsx
+      - frontend/src/features/pricing/PricingPreviewPage.tsx
+      - frontend/src/features/pricing/PricingPreviewPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_pricing_rules
+        - open_pricing_preview
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
