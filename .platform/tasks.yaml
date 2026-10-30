@@ -8548,7 +8548,7 @@ tasks:
     title: 计费处理不再重复解析模型与两把共享锁：计价解析接收已解析的模型
     purpose: >-
       按 docs/design/AIH-TASK-143-pricing-resolution-round-trips.md（设计闸门 #528 已批准 v1）§2「改动二」：app/services/pricing_engine.py 的 resolve_charge_inputs 新增关键字参数 resolved_model（默认 None，行为不变；给了值必须 locking=True，跳过它自己的 resolve_model 与两把单行共享锁）；app/services/usage_billing.py 的 _process 保存步骤 ③ resolve_model 的返回值并在步骤 ⑥ 传入。锁顺序、now_r 的位置与之后各步不变；试算不传。同步计价与计费的测试。规则解析一条语句选级属于 AIH-TASK-143。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-143
     acceptance_criteria:
