@@ -2,7 +2,8 @@
  * 管理端定价规则（契约见 docs/api.md「管理端定价规则」，设计闸门 #178 v4，后端为 AIH-TASK-027）。
  *
  * 收录那一节的全部 7 个接口。每个都要 ADMIN，角色以后端数据库为准 —— 前端不做任何角色判断，
- * 403 原样交给页面显示。路径里的 id 一律是 `public_id`；客户用租户的 `public_id`（`customer_id`）。
+ * 403 原样交给页面显示。路径里的 id 一律是 `public_id`；客户用租户的 `public_id`（`customer_id`），项目用项目的
+ * `public_id`（`project_id`，三个项目级才有，设计闸门 #507 v4）。
  *
  * **价格一律是 MYR 含税价（ADR-0008）**：FIXED_RATE 的 `rate_amount` 是含税单价；倍数乘 MYR 估算成本，
  * 得到的就是含税计费额。倍数（即 markup）只在管理端可见（INV-7）。
@@ -32,8 +33,11 @@ export const PRICING_RULE_FINAL = "PRICING_RULE_FINAL";
 
 // --- 范围与策略 -------------------------------------------------------------------
 
-/** spec §16 的五级，从高到低（docs/api.md 本节「范围」）。 */
+/** spec §16 的八级，从高到低（docs/api.md 本节「范围」）：三个项目级在最前（设计闸门 #507 v4）。 */
 export const PRIORITY_SCOPES = [
+  "PROJECT_PROVIDER_MODEL",
+  "PROJECT_PROVIDER",
+  "PROJECT",
   "CUSTOMER_PROVIDER_MODEL",
   "CUSTOMER_PROVIDER",
   "CUSTOMER",
@@ -48,16 +52,21 @@ export type PriorityScope = (typeof PRIORITY_SCOPES)[number];
  */
 export interface ScopeFields {
   customer: boolean;
+  /** 只有三个项目级要；项目必须属于同时给的客户（否则 404 `PROJECT_NOT_FOUND`）。 */
+  project: boolean;
   provider: boolean;
   model: boolean;
 }
 
 export const SCOPE_FIELDS: Readonly<Record<PriorityScope, ScopeFields>> = {
-  CUSTOMER_PROVIDER_MODEL: { customer: true, provider: true, model: true },
-  CUSTOMER_PROVIDER: { customer: true, provider: true, model: false },
-  CUSTOMER: { customer: true, provider: false, model: false },
-  GLOBAL_PROVIDER_MODEL: { customer: false, provider: true, model: true },
-  GLOBAL: { customer: false, provider: false, model: false },
+  PROJECT_PROVIDER_MODEL: { customer: true, project: true, provider: true, model: true },
+  PROJECT_PROVIDER: { customer: true, project: true, provider: true, model: false },
+  PROJECT: { customer: true, project: true, provider: false, model: false },
+  CUSTOMER_PROVIDER_MODEL: { customer: true, project: false, provider: true, model: true },
+  CUSTOMER_PROVIDER: { customer: true, project: false, provider: true, model: false },
+  CUSTOMER: { customer: true, project: false, provider: false, model: false },
+  GLOBAL_PROVIDER_MODEL: { customer: false, project: false, provider: true, model: true },
+  GLOBAL: { customer: false, project: false, provider: false, model: false },
 };
 
 export const PRICING_STRATEGIES = ["MARKUP", "FIXED_RATE"] as const;
@@ -104,6 +113,9 @@ export interface PricingRule {
   priority_scope: string;
   /** 按 `priority_scope` 有值，其余为 `null`（`provider_code` / `model_code` 同理）。 */
   customer_id: string | null;
+  /** 项目的 `public_id` 与名称：只在三个项目级有值，其余五级为 `null`。 */
+  project_id: string | null;
+  project_name: string | null;
   provider_id: string | null;
   provider_code: string | null;
   model_id: string | null;
@@ -141,6 +153,8 @@ export interface RuleComponentBody {
 export interface CreatePricingRuleBody {
   priority_scope: PriorityScope;
   customer_id?: string;
+  /** 只有三个项目级带；其余五级带了是 422。 */
+  project_id?: string;
   provider_id?: string;
   model_id?: string;
   strategy: PricingStrategy;
@@ -160,6 +174,8 @@ export interface PricingRulePatch {
 export interface PricingRuleFilter {
   priority_scope?: PriorityScope;
   customer_id?: string;
+  /** ⚠️ 只能与 `customer_id` 一起给（单独给是 422）。 */
+  project_id?: string;
   provider_id?: string;
   model_id?: string;
   status?: PricingRuleStatus;
@@ -211,7 +227,7 @@ async function send<T>(method: "post" | "patch", url: string, body: unknown): Pr
 
 // --- 接口 -----------------------------------------------------------------------
 
-/** spec §59「查看价格历史」：按范围（§16 的顺序）、`effective_from`（`null` 在前）排序，每项带分量。 */
+/** spec §59「查看价格历史」：按范围（§16 的八级顺序，项目级在最前）、`effective_from`（`null` 在前）排序，每项带分量。 */
 export function listPricingRules(
   filter: PricingRuleFilter,
   page: number,
@@ -221,6 +237,7 @@ export function listPricingRules(
   const query = listQuery(page, pageSize, {
     priority_scope: filter.priority_scope,
     customer_id: filter.customer_id,
+    project_id: filter.project_id,
     provider_id: filter.provider_id,
     model_id: filter.model_id,
     status: filter.status,

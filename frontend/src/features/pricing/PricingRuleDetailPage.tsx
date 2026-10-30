@@ -1,7 +1,7 @@
 /**
  * 管理端定价规则详情（`GET` / `PATCH` / `publish` / `retire` / `discard`，docs/api.md「管理端定价规则」）。
  *
- * 显示范围、策略、区间、建草稿人与发布人，以及倍数或全部分量（MYR 含税）；按状态给出能做的写操作：
+ * 显示范围（项目级还有项目名）、策略、区间、建草稿人与发布人，以及倍数或全部分量（MYR 含税）；按状态给出能做的写操作：
  *
  * - 草稿：编辑（策略、倍数、分量；只发改了的字段，分量整体替换；范围不可改）、发布（现在或预约）、丢弃
  * - 已发布且未被后继截断：停用（已开始的从此刻起不再命中、下落到更低一级；尚未开始的预约被撤销）
@@ -69,6 +69,7 @@ import {
   CustomerName,
   EMPTY,
   PricingRuleErrorAlert,
+  ProjectName,
   RuleComponentBodiesTable,
   RuleConfirmModal,
   RuleStatusTag,
@@ -225,7 +226,7 @@ export function PricingRuleDetailPage() {
   );
 }
 
-/** 「范围 · 客户 · 供应商 · 模型」，只列这一级有的；代码原样。 */
+/** 「范围 · 客户 · 项目 · 供应商 · 模型」，只列这一级有的；代码原样。 */
 function RuleSubject({
   rule,
   customers,
@@ -240,6 +241,12 @@ function RuleSubject({
         <>
           {" · "}
           <CustomerName customerId={rule.customer_id} customers={customers} />
+        </>
+      )}
+      {rule.project_id === null ? null : (
+        <>
+          {" · "}
+          <ProjectName rule={rule} />
         </>
       )}
       {rule.provider_code === null ? null : (
@@ -280,6 +287,7 @@ function RuleDescriptions({
           </Link>
         ),
     },
+    { key: "project", label: t("pricing.rules.field.project"), children: <ProjectName rule={rule} /> },
     {
       key: "provider",
       label: t("pricing.field.provider"),

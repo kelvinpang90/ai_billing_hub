@@ -80,6 +80,27 @@ describe("listing pricing rules", () => {
     );
   });
 
+  it("adds the project right after the customer when both are chosen", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+
+    await listPricingRules({ priority_scope: "PROJECT", customer_id: ID, project_id: ID }, 1, 20);
+
+    expect(get).toHaveBeenCalledWith(
+      `${RULES}?page=1&page_size=20&priority_scope=PROJECT&customer_id=${ID}&project_id=${ID}`,
+      {},
+    );
+  });
+
+  it("never sends project_id when no project is chosen", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
+
+    await listPricingRules({ customer_id: ID }, 1, 20);
+
+    const url = get.mock.calls[0]?.[0] ?? "";
+    expect(url).toBe(`${RULES}?page=1&page_size=20&customer_id=${ID}`);
+    expect(url).not.toContain("project_id");
+  });
+
   it("leaves out an empty filter value instead of sending it", async () => {
     const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_PAGE));
 
@@ -135,6 +156,32 @@ describe("drafts", () => {
     const sent = post.mock.calls[0]?.[1] as CreatePricingRuleBody;
     expect(typeof sent.components?.[0]?.rate_amount).toBe("string");
     expect(sent.components?.[0]?.rate_amount).toBe("999999999999.99999999");
+  });
+
+  it("creates a project-level draft with the customer and the project", async () => {
+    const post = vi.spyOn(client, "post").mockResolvedValue(envelope({ id: ID }));
+    const body: CreatePricingRuleBody = {
+      priority_scope: "PROJECT_PROVIDER",
+      customer_id: ID,
+      project_id: ID,
+      provider_id: ID,
+      strategy: "MARKUP",
+      markup_multiplier: "1.5",
+    };
+
+    await createPricingRule(body);
+
+    expect(post).toHaveBeenCalledWith(RULES, body);
+    const sent = post.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(Object.keys(sent).sort()).toEqual([
+      "customer_id",
+      "markup_multiplier",
+      "priority_scope",
+      "project_id",
+      "provider_id",
+      "strategy",
+    ]);
+    expect(sent.project_id).toBe(ID);
   });
 
   it("reads one rule and patches only the fields given", async () => {
@@ -208,18 +255,24 @@ describe("publishing and disabling", () => {
 });
 
 describe("scopes", () => {
-  it("are the five levels of spec §16, highest first, with the backend's field combinations", () => {
+  it("are the eight levels of spec §16, project levels first, with the backend's field combinations", () => {
     expect(PRIORITY_SCOPES).toEqual([
+      "PROJECT_PROVIDER_MODEL",
+      "PROJECT_PROVIDER",
+      "PROJECT",
       "CUSTOMER_PROVIDER_MODEL",
       "CUSTOMER_PROVIDER",
       "CUSTOMER",
       "GLOBAL_PROVIDER_MODEL",
       "GLOBAL",
     ]);
-    expect(SCOPE_FIELDS.CUSTOMER_PROVIDER_MODEL).toEqual({ customer: true, provider: true, model: true });
-    expect(SCOPE_FIELDS.CUSTOMER_PROVIDER).toEqual({ customer: true, provider: true, model: false });
-    expect(SCOPE_FIELDS.CUSTOMER).toEqual({ customer: true, provider: false, model: false });
-    expect(SCOPE_FIELDS.GLOBAL_PROVIDER_MODEL).toEqual({ customer: false, provider: true, model: true });
-    expect(SCOPE_FIELDS.GLOBAL).toEqual({ customer: false, provider: false, model: false });
+    expect(SCOPE_FIELDS.PROJECT_PROVIDER_MODEL).toEqual({ customer: true, project: true, provider: true, model: true });
+    expect(SCOPE_FIELDS.PROJECT_PROVIDER).toEqual({ customer: true, project: true, provider: true, model: false });
+    expect(SCOPE_FIELDS.PROJECT).toEqual({ customer: true, project: true, provider: false, model: false });
+    expect(SCOPE_FIELDS.CUSTOMER_PROVIDER_MODEL).toEqual({ customer: true, project: false, provider: true, model: true });
+    expect(SCOPE_FIELDS.CUSTOMER_PROVIDER).toEqual({ customer: true, project: false, provider: true, model: false });
+    expect(SCOPE_FIELDS.CUSTOMER).toEqual({ customer: true, project: false, provider: false, model: false });
+    expect(SCOPE_FIELDS.GLOBAL_PROVIDER_MODEL).toEqual({ customer: false, project: false, provider: true, model: true });
+    expect(SCOPE_FIELDS.GLOBAL).toEqual({ customer: false, project: false, provider: false, model: false });
   });
 });

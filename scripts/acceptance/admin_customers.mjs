@@ -22,6 +22,8 @@
  * AIH-TASK-124 加了门户会话页导出按钮的一个只读步骤（check_portal_conv_export），排在 check_portal_conversations 之后；
  * AIH-TASK-128 加了门户通知页的一个只读步骤（check_portal_notifications），排在 login_customer 之后，经门户导航自己进通知页；
  * AIH-TASK-135 加了管理端钱包核对页的一个只读步骤（open_wallet_reconciliation），排在 login 之后，经顶栏自己进核对页。
+ * AIH-TASK-140 没有新增步骤，只给 open_pricing_rules（有表格时表头还要有「Project」列）与 open_pricing_preview（表单上
+ * 还要有「Project」下拉，未选客户时可以是禁用的）各加了一条只读断言（设计闸门 #507 v4 §2「前端」），两步仍不提交任何表单。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -198,13 +200,16 @@
  *   open_pricing_rules
  *                   点顶栏「Pricing rules」（nav.pricingRules，href 为 paths.ts 的 pricingRules，即 /pricing/rules）进规则页；
  *                   页面落定且不是加载失败（任何错误提示，含客户 / 供应商下拉取不到）、无权限（pricing.rules.forbidden）或
- *                   路由兜底页。空列表合法（pricing.rules.empty），有表格时表头要有「Scope」「Strategy」两列
+ *                   路由兜底页。空列表合法（pricing.rules.empty），有表格时表头要有「Scope」「Strategy」两列，还要有
+ *                   「Project」列（pricing.rules.field.project，AIH-TASK-140；缺了是 assertion_failed）。不碰筛选表单
  *   open_pricing_preview
  *                   点顶栏「Pricing preview」（nav.pricingPreview，href 为 paths.ts 的 pricingPreview，即 /pricing/preview）进
  *                   试算页；表单可见：「Customer」「Provider」「Model」「Usage type」「Occurred at (Kuala Lumpur time)」五个
  *                   label 都关联着控件、「Calculate」按钮在，且页面写着「Estimated cost, not visible to customers.」
- *                   （pricing.preview.estimateNote）。不是加载失败、无权限或路由兜底页；表单出现之后再看一小段时间
- *                   （PREVIEW_LOOKUP_SETTLE_MS），下拉要的客户、供应商、计量类型取不到（错误提示）或无权限同样算失败。不提交
+ *                   （pricing.preview.estimateNote）；另有「Project」label（pricing.rules.field.project，AIH-TASK-140）关联着
+ *                   项目下拉（未选客户时是禁用的，禁用也算在；缺了是 assertion_failed）。不是加载失败、无权限或路由兜底页；
+ *                   表单出现之后再看一小段时间（PREVIEW_LOOKUP_SETTLE_MS），下拉要的客户、供应商、计量类型取不到（错误提示）
+ *                   或无权限同样算失败。不选客户、不选项目、不提交
  *   open_usage_events
  *                   点顶栏「Usage events」（nav.usageEvents，href 为 paths.ts 的 usageEvents，即 /usage-events）进用量事件页；
  *                   页面落定且不是加载失败（任何错误提示）、无权限（usage.forbidden）或路由兜底页。空列表合法（usage.empty：
@@ -555,6 +560,7 @@ const TEXT = {
   rulesForbidden: "Only administrators can manage pricing rules and preview charges.", // pricing.rules.forbidden
   rulesScope: "Scope", // pricing.rules.field.scope —— 规则表格的列头
   rulesStrategy: "Strategy", // pricing.rules.field.strategy
+  rulesProject: "Project", // pricing.rules.field.project —— 规则表格的列头，也是试算表单项目下拉的 label
   rulesLoading: "Loading pricing rules…", // pricing.rules.loading
   rulesEmpty: "No pricing rules yet.", // pricing.rules.empty
   previewCustomer: "Customer", // pricing.rules.field.customer —— 试算表单的 label
@@ -2889,7 +2895,10 @@ function fxAttemptsInView(lib, T) {
   return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight;
 }
 
-/** 规则页的状态。错误提示（任何 role=alert）与无权限分开报；有表格时表头要有「Scope」「Strategy」。 */
+/**
+ * 规则页的状态。错误提示（任何 role=alert）与无权限分开报；有表格时表头要有「Scope」「Strategy」，
+ * projectColumn 另报同一张表的表头里有没有「Project」。
+ */
 function probePricingRules(lib, T) {
   const forbidden = lib.leaf(T.rulesForbidden) !== null;
   return {
@@ -2899,10 +2908,14 @@ function probePricingRules(lib, T) {
     failed: !forbidden && lib.alert(),
     empty: lib.leaf(T.rulesEmpty) !== null,
     table: lib.tableWith([T.rulesScope, T.rulesStrategy]) !== null,
+    projectColumn: lib.tableWith([T.rulesScope, T.rulesStrategy, T.rulesProject]) !== null,
   };
 }
 
-/** 试算页的状态：表单的五个 label 都关联着控件、「Calculate」在、「估算成本，客户不可见」在。只读，不碰表单。 */
+/**
+ * 试算页的状态：表单的五个 label 都关联着控件、「Calculate」在、「估算成本，客户不可见」在；project 另报「Project」
+ * label 是否关联着控件（未选客户时下拉是禁用的，label.control 照样指向它）。只读，不碰表单。
+ */
 function probePricingPreview(lib, T) {
   const forbidden = lib.leaf(T.rulesForbidden) !== null;
   const labels = [T.previewCustomer, T.pricingProvider, T.pricingModel, T.previewUsageType, T.previewOccurredAt];
@@ -2915,6 +2928,7 @@ function probePricingPreview(lib, T) {
       labels.every((text) => lib.control(text) !== null) &&
       lib.button(T.previewSubmit) !== null &&
       lib.leaf(T.previewEstimateNote) !== null,
+    project: lib.control(T.rulesProject) !== null,
   };
 }
 
@@ -5052,6 +5066,10 @@ async function stepOpenPricingRules() {
   }
   // 生产上可能还没有任何定价规则，空列表合法。
   rejectCatalogState(opened.value, TEXT.pricingRulesPath, true);
+  // 有表格时表头还要有「Project」列（AIH-TASK-140）。空列表时没有表头可查。
+  if (opened.value.table && !opened.value.projectColumn) {
+    throw fail("assertion_failed");
+  }
 }
 
 /** 试算页落定：表单画出来了，或者错误提示、无权限、走到了别处。 */
@@ -5071,7 +5089,8 @@ function rejectPreviewState(s) {
   if (s.notFound || s.path !== TEXT.pricingPreviewPath) {
     throw fail("navigation_failed");
   }
-  if (s.forbidden || !s.form) {
+  // 表单上还要有项目下拉（AIH-TASK-140）；未选客户时它是禁用的，在就算。
+  if (s.forbidden || !s.form || !s.project) {
     throw fail("assertion_failed");
   }
 }
@@ -5092,7 +5111,8 @@ async function stepOpenPricingPreview() {
   // 这一页都算失败。到时什么都没出现就是正常（waitFor 以「没等到」结束）。
   const late = await waitFor(
     () => evaluate(probePricingPreview, TEXT),
-    (s) => s.appError || s.notFound || s.failed || s.forbidden || s.path !== TEXT.pricingPreviewPath || !s.form,
+    (s) =>
+      s.appError || s.notFound || s.failed || s.forbidden || s.path !== TEXT.pricingPreviewPath || !s.form || !s.project,
     PREVIEW_LOOKUP_SETTLE_MS,
   );
   if (late.ok) {

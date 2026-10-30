@@ -1,5 +1,5 @@
 /**
- * 规则详情：三种状态、404 与无权限；范围、客户、区间、发布人、倍数或分量（数按字符串显示，标「含税」）；按状态
+ * 规则详情：三种状态、404 与无权限；范围、客户、项目（名称；非项目级是「—」）、区间、发布人、倍数或分量（数按字符串显示，标「含税」）；按状态
  * 出现的写操作；编辑（只发改了的字段，换策略时带上新策略的字段）、发布（现在 / 预约）、停用、丢弃的二次确认、
  * 成功后重读、失败时显示后端码对应的文案与 request_id。
  *
@@ -99,6 +99,8 @@ function rule(overrides: Partial<PricingRule> = {}): PricingRule {
     id: ID,
     priority_scope: "GLOBAL",
     customer_id: null,
+    project_id: null,
+    project_name: null,
     provider_id: null,
     provider_code: null,
     model_id: null,
@@ -274,6 +276,40 @@ describe("PricingRuleDetailPage content", SLOW, () => {
     // 数按字符串显示：千分位、去掉末尾的 0，不舍入（走一遍浮点数的话已经不是它了）。
     expect(screen.getByText("1,000,000")).toBeInTheDocument();
     expect(screen.getByText("999,999,999,999.99999999")).toBeInTheDocument();
+  });
+
+  it("shows the project's name for a project rule, in the fields and in the title", async () => {
+    rules.getPricingRule.mockResolvedValue(
+      rule({
+        priority_scope: "PROJECT_PROVIDER_MODEL",
+        customer_id: ID,
+        project_id: ID,
+        project_name: "Support bot",
+        provider_id: ID,
+        provider_code: "anthropic",
+        model_id: ID,
+        model_code: "claude-x",
+      }),
+    );
+
+    renderPage();
+
+    await waitFor(() => expect(field("Project")).toHaveTextContent("Support bot"));
+    expect(field("Scope")).toHaveTextContent("Project · provider · model");
+    await waitFor(() => expect(field("Customer")).toHaveTextContent("Fictional Trading Sdn Bhd"));
+    // 卡片标题：范围 · 客户 · 项目 · 供应商 / 模型。
+    const subject = "Project · provider · model · Fictional Trading Sdn Bhd · Support bot · anthropic / claude-x";
+    await waitFor(() =>
+      expect(screen.getAllByText((_, element) => element?.textContent === subject)).not.toHaveLength(0),
+    );
+  });
+
+  it("shows — as the project of a rule that is not project-level", async () => {
+    rules.getPricingRule.mockResolvedValue(PUBLISHED_FIXED);
+
+    renderPage();
+
+    await waitFor(() => expect(field("Project").textContent).toBe("—"));
   });
 
   it("shows a markup rule's multiplier exactly as sent, with no components card", async () => {
