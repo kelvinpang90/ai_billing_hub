@@ -1246,6 +1246,9 @@ def test_the_occurred_at_check_comes_after_the_three_shared_locks(world, monkeyp
         "now_r",
     ]
     assert calls.count("now_r") == 1
+    # Design gate #528 v1 §2「改动二」: ⑥ takes ③'s model, so neither it nor the two locks repeat.
+    for name in ("resolve_model", "lock_fx_rates_shared", "lock_pricing_rules_shared"):
+        assert calls.count(name) == 1, name
     assert calls[-1] == "post_transaction"
 
 

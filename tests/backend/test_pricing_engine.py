@@ -10,8 +10,9 @@ Two groups:
   no falling through a FIXED_RATE rule that lacks the event's components, aliases, tenants never
   seeing each other's rules, project rules (design gate #507 v4: no falling through a project
   FIXED_RATE rule, the same amounts as a customer rule with the same terms), the lock order of
-  `locking=True` / `locking=False`, and `reprice_from_snapshot` reproducing the result after
-  newer versions are published.
+  `locking=True` / `locking=False`, a model passed in by the billing transaction (design gate
+  #528 v1: the same resolution, no repeated model or locks, never with `locking=False`), and
+  `reprice_from_snapshot` reproducing the result after newer versions are published.
 
 The preview endpoint is in test_pricing_preview_api.py. Prices, rates and multipliers are
 fictional; no uuid literal other than the all-zero placeholder appears.
@@ -32,7 +33,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.database import create_session_factory
-from app.models.ai_catalog import SEED_METER_TYPES, UsageMeterComponent, UsageMeterType
+from app.models.ai_catalog import SEED_METER_TYPES, AiModel, UsageMeterComponent, UsageMeterType
 from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base, quantize_money
 from app.models.pricing_rules import PricingScope, PricingStrategy
@@ -971,6 +972,100 @@ def test_the_lock_order(world, monkeypatch) -> None:
         "resolve_fx_rate",
         "resolve_pricing_rule",
     ]
+
+
+def _billing_prelude(session: Session, model_code: str) -> AiModel:
+    """What `_process` does before ⑥: `resolve_model`, then the two shared locks."""
+    model = catalog_repository.resolve_model(session, "anthropic", model_code, EVENT_AT)
+    assert model is not None
+    fx_repository.lock_fx_rates_shared(session)
+    rule_repository.lock_pricing_rules_shared(session)
+    return model
+
+
+def _billing_resolver(
+    world: World, model_code: str
+) -> Callable[[Session, AiModel | None], ChargeResolution]:
+    """`resolve_charge_inputs(locking=True)` for tenant-a's p1 event; the ids are read first, so
+    the transaction under test runs nothing but the billing statements."""
+    tenant_id, project_id = world.tenant_id("tenant-a"), world.project_id("p1")
+    meter_type_id = world.meter_type_id("LLM_TOKEN")
+
+    def resolve(session: Session, resolved_model: AiModel | None) -> ChargeResolution:
+        return resolve_charge_inputs(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            provider_code="anthropic",
+            model_code=model_code,
+            meter_type_id=meter_type_id,
+            occurred_at=EVENT_AT,
+            locking=True,
+            resolved_model=resolved_model,
+        )
+
+    return resolve
+
+
+@pytest.mark.parametrize(
+    ("model_code", "matched_via"),
+    [("claude-x", MatchedVia.CODE), ("claude-latest", MatchedVia.ALIAS)],
+    ids=["code", "alias"],
+)
+def test_a_resolved_model_gives_the_same_resolution(world, model_code, matched_via) -> None:
+    """Design gate #528 v1 §7: in one transaction, after `resolve_model` and the two locks,
+    passing the model gives a resolution equal field by field to resolving it again."""
+    world.publish_all()
+    world.alias("claude-latest")
+    resolve = _billing_resolver(world, model_code)
+
+    with world.factory() as session:
+        model = _billing_prelude(session, model_code)
+        again = resolve(session, None)
+        passed = resolve(session, model)
+        session.commit()
+
+    assert passed.status is ChargeStatus.PRICED
+    assert passed.model is not None and passed.model.matched_via is matched_via
+    assert passed == again
+    assert repr(passed) == repr(again)
+
+
+def test_a_resolved_model_skips_the_model_and_the_two_locks(world, monkeypatch) -> None:
+    """Design gate #528 v1 §7: with `resolved_model`, none of the three statements repeat."""
+    world.publish_all()
+    calls: list[str] = []
+    resolve = _billing_resolver(world, "claude-x")
+
+    with world.factory() as session:
+        model = _billing_prelude(session, "claude-x")
+        for module, name in (
+            (catalog_repository, "resolve_model"),
+            (fx_repository, "lock_fx_rates_shared"),
+            (rule_repository, "lock_pricing_rules_shared"),
+        ):
+            monkeypatch.setattr(module, name, _recorder(name, getattr(module, name), calls))
+        resolution = resolve(session, model)
+        session.commit()
+
+    assert resolution.status is ChargeStatus.PRICED
+    assert calls == []
+
+
+def test_a_resolved_model_is_only_for_the_billing_transaction() -> None:
+    """Design gate #528 v1 §5: `resolved_model` with `locking=False` is a programming error."""
+    with pytest.raises(ValueError, match="a resolved model is only for the billing transaction"):
+        resolve_charge_inputs(
+            Session(),
+            tenant_id=1,
+            project_id=None,
+            provider_code="anthropic",
+            model_code="claude-x",
+            meter_type_id=1,
+            occurred_at=EVENT_AT,
+            locking=False,
+            resolved_model=AiModel(code="claude-x"),
+        )
 
 
 def test_the_price_fx_and_rule_reads_are_locking_reads() -> None:

@@ -359,8 +359,10 @@ def _process(session: Session, claim: Claim, clock: Clock) -> Outcome:
         return Outcome.FAILED_FINAL
 
     # ③ 供应商行（S）：`resolve_model` 里加锁。供应商代码未知时没有锁可拿，
-    # 下面照样判 MODEL_UNKNOWN。
-    catalog.resolve_model(session, event.provider_code_raw, event.model_code_raw, event.occurred_at)
+    # 下面照样判 MODEL_UNKNOWN。返回值留给 ⑥，不再解析第二遍（设计闸门 #528 v1）。
+    model = catalog.resolve_model(
+        session, event.provider_code_raw, event.model_code_raw, event.occurred_at
+    )
     # ④ fx_rate_locks（S）→ pricing_rule_locks（S）。
     rates.lock_fx_rates_shared(session)
     rules.lock_pricing_rules_shared(session)
@@ -373,7 +375,8 @@ def _process(session: Session, claim: Claim, clock: Clock) -> Outcome:
         _clear_claim(event)
         return Outcome.NOT_DUE
 
-    # ⑥ 价格版本、汇率、规则（T-G；锁已持有，再取一次是同一事务里的重入）。
+    # ⑥ 价格版本、汇率、规则（T-G）。传入 ③ 的模型：模型与三把共享锁不再取第二遍。
+    # 模型未知时 `model` 为 None，走默认路径自己再解析一次，返回 MODEL_UNKNOWN。
     resolution = resolve_charge_inputs(
         session,
         tenant_id=event.tenant_id,
@@ -384,6 +387,7 @@ def _process(session: Session, claim: Claim, clock: Clock) -> Outcome:
         meter_type_id=event.usage_meter_type_id,
         occurred_at=event.occurred_at,
         locking=True,
+        resolved_model=model,
     )
     if resolution.status is not ChargeStatus.PRICED:
         code = resolution.error_code.value if resolution.error_code is not None else None

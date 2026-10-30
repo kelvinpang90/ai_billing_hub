@@ -39,6 +39,7 @@ from app.core.errors import AppError
 from app.models.ai_catalog import (
     QUANTITY_FIELD,
     TOKEN_FIELDS,
+    AiModel,
     PayloadShape,
     QuantityKind,
     UsageMeterType,
@@ -353,6 +354,7 @@ def resolve_charge_inputs(
     meter_type_id: int,
     occurred_at: dt.datetime,
     locking: bool = True,
+    resolved_model: AiModel | None = None,
 ) -> ChargeResolution:
     """Model, provider price, FX rate and pricing rule for one event (design §2「解析函数与锁」).
 
@@ -379,13 +381,26 @@ def resolve_charge_inputs(
     `locking=False`（试算）：不取两张单行锁表的共享锁，发布不必等试算。025 / 026 /
     027 / 028 的解析函数自身的读按它们的契约不变（MySQL 上是 `FOR SHARE`），随试算
     的只读事务结束释放。
+
+    `resolved_model`（设计闸门 #528 v1 §2「改动二」）：只给计费事务（`locking=True`），
+    否则 `ValueError`。给了值，就表示调用方已在**同一事务**里按顺序执行过
+    `resolve_model(provider_code, model_code, occurred_at)`（得到的就是这个对象）、
+    `lock_fx_rates_shared`、`lock_pricing_rules_shared`；本函数不再调用这三者，也**不复查**
+    这一点，把它当作 `resolve_model` 的结果，其余步骤不变。`None`（默认）时行为照旧。
     """
-    model = catalog.resolve_model(session, provider_code, model_code, occurred_at)
-    if model is None:
-        return ChargeResolution(ChargeStatus.MODEL_UNKNOWN, None, ())
-    if locking:
-        rates.lock_fx_rates_shared(session)
-        rules.lock_pricing_rules_shared(session)
+    if resolved_model is not None:
+        if not locking:
+            raise ValueError("a resolved model is only for the billing transaction")
+        # 调用方已解析过模型、拿过两把单行锁：不再发这几条语句。
+        model = resolved_model
+    else:
+        resolved = catalog.resolve_model(session, provider_code, model_code, occurred_at)
+        if resolved is None:
+            return ChargeResolution(ChargeStatus.MODEL_UNKNOWN, None, ())
+        model = resolved
+        if locking:
+            rates.lock_fx_rates_shared(session)
+            rules.lock_pricing_rules_shared(session)
 
     needed = _meter_components(session, meter_type_id)
     found = ResolvedModelRef(
