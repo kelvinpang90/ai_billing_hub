@@ -206,12 +206,14 @@ def _views(
     views = []
     for row in rows:
         tenant = found.tenants[row.tenant_id] if row.tenant_id is not None else None
+        project = found.projects[row.project_id] if row.project_id is not None else None
         provider = found.providers[row.provider_id] if row.provider_id is not None else None
         model = found.models[row.model_id] if row.model_id is not None else None
         views.append(
             pricing_rule_view(
                 row,
                 customer_id=tenant.public_id if tenant is not None else None,
+                project=(project.public_id, project.name) if project is not None else None,
                 provider=(provider.public_id, provider.code) if provider is not None else None,
                 model=(model.public_id, model.code) if model is not None else None,
                 components=components[row.id],

@@ -971,11 +971,11 @@ def test_the_service_checks_the_scope_fields_as_well(sqlite_factory) -> None:
 
 
 @pytest.mark.parametrize("level", [level for level in PricingScope if level.has_project])
-def test_a_project_level_draft_is_a_422_for_now(sqlite_factory, level: PricingScope) -> None:
-    """AIH-TASK-137: a project level needs `project_id` among its scope fields. The request does
-    not carry one yet (AIH-TASK-139), and the service (AIH-TASK-138) refuses a project level
-    without it: a 422 `VALIDATION_ERROR` — never a 500 — that writes nothing. With a project the
-    service builds it (`test_every_level_takes_a_draft_and_a_publish`)."""
+def test_a_project_level_draft_is_a_422(sqlite_factory, level: PricingScope) -> None:
+    """A project level needs `project_id` among its scope fields (design gate #507 v4 §2「接口」).
+    Without it the request is refused, and the service refuses it too: a 422 `VALIDATION_ERROR`
+    — never a 500 — that writes nothing. With a project the request validates and the service
+    builds it (`test_every_level_takes_a_draft_and_a_publish`)."""
     factory = sqlite_factory
     rules = Rules(factory, Clock(T0))
     fields = rules.scope_fields(level)
@@ -988,10 +988,10 @@ def test_a_project_level_draft_is_a_422_for_now(sqlite_factory, level: PricingSc
         "markup_multiplier": FICTIONAL_MULTIPLIER,
     }
 
-    # The request: the scope fields never match (and `project_id` is not a field at all).
-    for request in (body, {**body, "project_id": str(uuid.uuid4())}):
-        with pytest.raises(ValidationError):
-            CreatePricingRuleRequest.model_validate(request)
+    # The request: without `project_id` the scope fields do not match; with it they do.
+    with pytest.raises(ValidationError):
+        CreatePricingRuleRequest.model_validate(body)
+    CreatePricingRuleRequest.model_validate({**body, "project_id": str(uuid.uuid4())})
     # The service, called directly with everything else the level needs.
     with pytest.raises(PricingRuleShapeInvalid) as raised:
         rules.draft(level)

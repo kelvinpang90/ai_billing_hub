@@ -47,12 +47,12 @@ MARKUP_DESCRIPTION: Final = (
 )
 
 # 每一级要哪几个范围字段（设计 §2「接口」：多给或少给都是 422）。
-SCOPE_FIELDS: Final = ("customer_id", "provider_id", "model_id")
+SCOPE_FIELDS: Final = ("customer_id", "project_id", "provider_id", "model_id")
 
 
 def required_scope_fields(scope: PricingScope) -> frozenset[str]:
-    """The scope fields `scope` takes. ⚠️ The three project levels need `project_id`, which no
-    request carries yet (AIH-TASK-139): a project-level draft is a 422 until then."""
+    """The scope fields `scope` takes: the three project levels need `customer_id` and
+    `project_id`, the other five never take `project_id` (设计闸门 #507 v4 §2「接口」)."""
     wanted = {
         "customer_id": scope.has_customer,
         "project_id": scope.has_project,
@@ -97,7 +97,8 @@ def _check_strategy_fields(
 
 
 class CreatePricingRuleRequest(BaseModel):
-    """建草稿。范围字段按 `priority_scope` 给：客户（租户 `public_id`）、供应商、模型。
+    """建草稿。范围字段按 `priority_scope` 给：客户（租户 `public_id`）、项目（项目
+    `public_id`，只有三个项目级带，且必须属于该客户）、供应商、模型。
 
     MARKUP 必带 `markup_multiplier`、不带 `components`；FIXED_RATE 必带 `components`
     （可以是空列表：草稿可以不完整）、不带 `markup_multiplier`。
@@ -108,6 +109,7 @@ class CreatePricingRuleRequest(BaseModel):
 
     priority_scope: PricingScope
     customer_id: PublicId | None = None
+    project_id: PublicId | None = None
     provider_id: PublicId | None = None
     model_id: PublicId | None = None
     strategy: PricingStrategy
@@ -220,8 +222,9 @@ class PricingRuleComponentView(BaseModel):
 class PricingRuleView(BaseModel):
     """一条客户定价规则（只在管理端可见：倍数即 markup，INV-7）。价格一律 MYR 含税。
 
-    范围字段按 `priority_scope` 有值，其余为 `null`。`effective_from` 为 `null`：草稿，或
-    `GLOBAL` 范围第一条「一直以来」生效；`effective_to` 为 `null`：草稿，或仍生效。
+    范围字段按 `priority_scope` 有值，其余为 `null`（`project_id` 与 `project_name` 只在三个
+    项目级有值）。`effective_from` 为 `null`：草稿，或 `GLOBAL` 范围第一条「一直以来」生效；
+    `effective_to` 为 `null`：草稿，或仍生效。
     """
 
     model_config = ConfigDict(protected_namespaces=())
@@ -229,6 +232,8 @@ class PricingRuleView(BaseModel):
     id: str
     priority_scope: str
     customer_id: str | None
+    project_id: str | None
+    project_name: str | None
     provider_id: str | None
     provider_code: str | None
     model_id: str | None
@@ -267,13 +272,17 @@ def pricing_rule_view(
     model: tuple[str, str] | None,
     components: list[RuleComponent],
     emails: dict[int, str],
+    project: tuple[str, str] | None = None,
 ) -> PricingRuleView:
-    """`customer_id` is the tenant's public id; `provider` / `model` are (public id, code)."""
+    """`customer_id` is the tenant's public id; `project` is (public id, name);
+    `provider` / `model` are (public id, code)."""
     multiplier = row.markup_multiplier
     return PricingRuleView(
         id=row.public_id,
         priority_scope=PricingScope(row.priority_scope).value,
         customer_id=customer_id,
+        project_id=project[0] if project is not None else None,
+        project_name=project[1] if project is not None else None,
         provider_id=provider[0] if provider is not None else None,
         provider_code=provider[1] if provider is not None else None,
         model_id=model[0] if model is not None else None,
