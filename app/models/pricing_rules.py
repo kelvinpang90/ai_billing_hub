@@ -5,8 +5,13 @@ spec §15、§16、§74.3；ADR-0008（含税定价）。三张表：
 - `pricing_rule_locks`：只有一行（`id = 1`）、没有业务字段。发布与停用对它
   `SELECT … FOR UPDATE`，计费对它 `FOR SHARE`：五级规则里「客户默认」「全局默认」没有供应商，
   锁不到供应商行，所以另建这一把锁（设计 §2「为什么用一张单行锁表」）；
-- `pricing_rules`：一条规则 = 一个范围（§16 的五级之一）+ 一种策略。范围与 NULL 组合一一
-  对应（CHECK），策略与倍数一一对应（CHECK）。状态 `DRAFT → PUBLISHED → RETIRED`，草稿也可以
+- `pricing_rules`：一条规则 = 一个范围 + 一种策略。范围列有四个：`tenant_id`、`project_id`
+  （迁移 0030，设计闸门 #507 v4）、`provider_id`、`model_id`；库里的两条范围 CHECK 已是八级
+  （三个项目级 `PROJECT_PROVIDER_MODEL`、`PROJECT_PROVIDER`、`PROJECT` 排在 §16 的五级之前），
+  每级恰好一种 NULL 组合。⚠️ `PricingScope` 仍只有五个值：八级的枚举值由 AIH-TASK-137 加入，
+  在那之前应用层建不出、也读不出项目级规则（`project_id` 恒为 NULL）。项目级规则的
+  `(project_id, tenant_id)` 以复合外键指向 `projects (id, tenant_id)`：项目一定属于同一租户。
+  策略与倍数一一对应（CHECK）。状态 `DRAFT → PUBLISHED → RETIRED`，草稿也可以
   `DISCARDED`。已发布（`PUBLISHED` / `RETIRED`）的规则在 `[effective_from, effective_to)` 内
   生效；同一范围（生成列 `scope_key`）的非空区间首尾相接、不重叠，至多一条未截断的已发布规则
   （生成列 `open_slot` + 唯一索引）；
@@ -16,11 +21,13 @@ spec §15、§16、§74.3；ADR-0008（含税定价）。三张表：
 
 ⚠️ **发布后不可变**由 MySQL 触发器保证（迁移 0014）：锁表恰好一行；规则只能以草稿插入、草稿
 只能改成草稿 / 已发布 / 已丢弃；已发布的行只许改 `effective_to`、`PUBLISHED → RETIRED` 与
-`updated_at`；分量只在草稿阶段可增删改；规则一律不许删除；「草稿 → 已发布」跃迁上 FIXED_RATE
-的分量完整；锁 `pricing_rule_locks` 后检查同一范围的区间不重叠。SQLite 上没有这些触发器，服务层
+`updated_at`（迁移 0030 重建 BEFORE UPDATE 触发器：不可变列加 `project_id`）；分量只在草稿阶段
+可增删改；规则一律不许删除；「草稿 → 已发布」跃迁上 FIXED_RATE 的分量完整；锁
+`pricing_rule_locks` 后检查同一范围（含项目）的区间不重叠。SQLite 上没有这些触发器，服务层
 按同样的规则写。
 
-⚠️ 条件文本与生成列表达式同迁移 0014 逐字一致（空白除外），test_migrations.py 比对两边。
+⚠️ 两条范围 CHECK 与 `scope_key` 表达式同迁移 0030 逐字一致，其余条件文本与 `open_slot` 同迁移
+0014 逐字一致（空白除外），test_migrations.py 比对两边。
 """
 
 from __future__ import annotations
@@ -63,7 +70,8 @@ PRIORITY_SCOPE_LENGTH: Final = 32
 STRATEGY_LENGTH: Final = 16
 STATUS_LENGTH: Final = 16
 CURRENCY_LENGTH: Final = 3
-# `GLOBAL_PROVIDER_MODEL` 21 个字符、三个冒号、三个 BIGINT（各至多 20 位）：84，留足余量。
+# 最长的 `PROJECT_PROVIDER_MODEL` 22 个字符、四个冒号、四个 BIGINT（各至多 20 位）：106，
+# 仍在 128 之内（迁移 0030 不改列宽）。
 SCOPE_KEY_LENGTH: Final = 128
 
 # 锁表唯一一行的 id。
@@ -73,7 +81,10 @@ RULE_CURRENCY: Final = "MYR"
 
 
 class PricingScope(enum.StrEnum):
-    """§16 的五级，**按优先顺序从高到低**声明：`resolve_pricing_rule` 就按这个顺序逐级查。"""
+    """§16 的五级，**按优先顺序从高到低**声明：`resolve_pricing_rule` 就按这个顺序逐级查。
+
+    库里的 CHECK 已放行八级（迁移 0030）；排在最前的三个项目级由 AIH-TASK-137 加入这里。
+    """
 
     CUSTOMER_PROVIDER_MODEL = "CUSTOMER_PROVIDER_MODEL"
     CUSTOMER_PROVIDER = "CUSTOMER_PROVIDER"
@@ -131,24 +142,34 @@ class PricingRuleStatus(enum.StrEnum):
 # 已发布过的两种状态：有区间、参与解析。
 PERIOD_STATUSES: Final = (PricingRuleStatus.PUBLISHED, PricingRuleStatus.RETIRED)
 
-# ⚠️ 条件文本与迁移 0014 逐字一致（空白除外），test_migrations.py 比对两边。
+# ⚠️ 这两条的条件文本与迁移 0030 逐字一致（空白除外），test_migrations.py 比对两边。
+# 八级（设计闸门 #507 v4 §2「数据库」）：三个项目级在前，其后是 §16 的五级。
 PRIORITY_SCOPE_CHECK: Final = (
-    "priority_scope IN ('CUSTOMER_PROVIDER_MODEL', 'CUSTOMER_PROVIDER', 'CUSTOMER',"
+    "priority_scope IN ('PROJECT_PROVIDER_MODEL', 'PROJECT_PROVIDER', 'PROJECT',"
+    " 'CUSTOMER_PROVIDER_MODEL', 'CUSTOMER_PROVIDER', 'CUSTOMER',"
     " 'GLOBAL_PROVIDER_MODEL', 'GLOBAL')"
 )
-# 范围与 NULL 组合一一对应（§74.3「不能有含糊的 NULL 组合」）：§16 之外的组合写不进去。
+# 范围与四列的 NULL 组合一一对应（§74.3「不能有含糊的 NULL 组合」）：八级之外的组合写不进去。
+# 三个项目级同样带 `tenant_id`；其余五级的 `project_id` 一律为 NULL。
 SCOPE_COLUMNS_CHECK: Final = (
-    "(priority_scope = 'CUSTOMER_PROVIDER_MODEL' AND tenant_id IS NOT NULL"
-    " AND provider_id IS NOT NULL AND model_id IS NOT NULL)"
+    "(priority_scope = 'PROJECT_PROVIDER_MODEL' AND tenant_id IS NOT NULL"
+    " AND project_id IS NOT NULL AND provider_id IS NOT NULL AND model_id IS NOT NULL)"
+    " OR (priority_scope = 'PROJECT_PROVIDER' AND tenant_id IS NOT NULL"
+    " AND project_id IS NOT NULL AND provider_id IS NOT NULL AND model_id IS NULL)"
+    " OR (priority_scope = 'PROJECT' AND tenant_id IS NOT NULL"
+    " AND project_id IS NOT NULL AND provider_id IS NULL AND model_id IS NULL)"
+    " OR (priority_scope = 'CUSTOMER_PROVIDER_MODEL' AND tenant_id IS NOT NULL"
+    " AND project_id IS NULL AND provider_id IS NOT NULL AND model_id IS NOT NULL)"
     " OR (priority_scope = 'CUSTOMER_PROVIDER' AND tenant_id IS NOT NULL"
-    " AND provider_id IS NOT NULL AND model_id IS NULL)"
+    " AND project_id IS NULL AND provider_id IS NOT NULL AND model_id IS NULL)"
     " OR (priority_scope = 'CUSTOMER' AND tenant_id IS NOT NULL"
-    " AND provider_id IS NULL AND model_id IS NULL)"
+    " AND project_id IS NULL AND provider_id IS NULL AND model_id IS NULL)"
     " OR (priority_scope = 'GLOBAL_PROVIDER_MODEL' AND tenant_id IS NULL"
-    " AND provider_id IS NOT NULL AND model_id IS NOT NULL)"
+    " AND project_id IS NULL AND provider_id IS NOT NULL AND model_id IS NOT NULL)"
     " OR (priority_scope = 'GLOBAL' AND tenant_id IS NULL"
-    " AND provider_id IS NULL AND model_id IS NULL)"
+    " AND project_id IS NULL AND provider_id IS NULL AND model_id IS NULL)"
 )
+# 以下条件文本与迁移 0014 逐字一致（空白除外）。
 STRATEGY_CHECK: Final = "strategy IN ('MARKUP', 'FIXED_RATE')"
 # MARKUP 必有正的倍数；FIXED_RATE 不许有倍数（混合策略在数据库层被拒绝）。
 MARKUP_CHECK: Final = (
@@ -180,15 +201,16 @@ RATE_AMOUNT_CHECK: Final = "rate_amount > 0"
 CURRENCY_CHECK: Final = "currency = 'MYR'"
 
 # 「同一范围」的非空键：MySQL 的唯一约束不管 NULL，全局范围的两条规则直接按四列建唯一索引
-# 挡不住。迁移 0014 里是这一句（MySQL）。
+# 挡不住。迁移 0030 里是这一句（MySQL）：在 0014 的基础上加了项目一段，同一客户两个项目的
+# 规则因此是两个范围；已有行（`project_id` 为 NULL）的键只多出一段 `:0`。
 SCOPE_KEY_EXPRESSION: Final = (
-    "CONCAT(priority_scope, ':', COALESCE(tenant_id, 0), ':', COALESCE(provider_id, 0),"
-    " ':', COALESCE(model_id, 0))"
+    "CONCAT(priority_scope, ':', COALESCE(tenant_id, 0), ':', COALESCE(project_id, 0),"
+    " ':', COALESCE(provider_id, 0), ':', COALESCE(model_id, 0))"
 )
 # SQLite 上的同一个值：`CONCAT` 要 SQLite 3.44 才有，单元测试的 SQLite 可能更老。
 SQLITE_SCOPE_KEY_EXPRESSION: Final = (
-    "priority_scope || ':' || COALESCE(tenant_id, 0) || ':' || COALESCE(provider_id, 0)"
-    " || ':' || COALESCE(model_id, 0)"
+    "priority_scope || ':' || COALESCE(tenant_id, 0) || ':' || COALESCE(project_id, 0)"
+    " || ':' || COALESCE(provider_id, 0) || ':' || COALESCE(model_id, 0)"
 )
 # 只有未截断的已发布规则有值，其余是 NULL；唯一索引允许多个 NULL，所以「同一范围至多一条
 # 未截断的已发布规则」由数据库保证（写法同 `provider_price_versions.open_slot`）。
@@ -254,8 +276,10 @@ class PricingRule(Base):
     priority_scope: Mapped[PricingScope] = mapped_column(
         Enum(PricingScope, native_enum=False, length=PRIORITY_SCOPE_LENGTH), nullable=False
     )
-    # 三个范围列哪几个非空由 `priority_scope` 决定（CHECK）。
+    # 四个范围列哪几个非空由 `priority_scope` 决定（CHECK）。
     tenant_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
+    # 只有项目级规则有（迁移 0030，列序紧接 `tenant_id`）；本任务的应用层恒写 NULL。
+    project_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
     provider_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
     model_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
     strategy: Mapped[PricingStrategy] = mapped_column(
@@ -289,6 +313,14 @@ class PricingRule(Base):
             ["tenant_id"],
             ["tenants.id"],
             name="fk_pricing_rules_tenant",
+            ondelete="RESTRICT",
+        ),
+        # 项目级规则的项目一定属于同一租户（INV-8，迁移 0030）；`project_id` 为 NULL 时 MySQL
+        # 不检查这条外键。RESTRICT：有规则的项目删不掉。
+        ForeignKeyConstraint(
+            ["project_id", "tenant_id"],
+            ["projects.id", "projects.tenant_id"],
+            name="fk_pricing_rules_project",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
@@ -332,6 +364,7 @@ class PricingRule(Base):
         ),
         # 复合外键在子表上的索引，显式建出来（不让 MySQL 自动起名）。
         Index("ix_pricing_rules_model", "model_id", "provider_id"),
+        Index("ix_pricing_rules_project", "project_id", "tenant_id"),
         CheckConstraint(PRIORITY_SCOPE_CHECK, name="ck_pricing_rules_priority_scope"),
         CheckConstraint(SCOPE_COLUMNS_CHECK, name="ck_pricing_rules_scope_columns"),
         CheckConstraint(STRATEGY_CHECK, name="ck_pricing_rules_strategy"),
