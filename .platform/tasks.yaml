@@ -8495,3 +8495,101 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-143
+    title: 定价规则解析改为一条语句：八级一起查，在 Python 里按优先顺序选级
+    purpose: >-
+      按 docs/design/AIH-TASK-143-pricing-resolution-round-trips.md（设计闸门 #528 已批准 v1）§2「改动一」：app/repositories/pricing_rules.py 的 resolve_pricing_rule 不再逐级各发一条 SELECT，而是把要查的各级的范围条件（逐字复用 _level_scope 与 _in_scope）用 OR 拼成一条加锁读，按 SCOPE_ORDER 取第一个有命中行的级；选中的规则、各级先后、项目为空时跳过项目级、命中的 FIXED_RATE 缺分量不下落、选中级多于一行抛 MultipleResultsFound，全部与现在相同。同步规则解析的测试。不改签名、表结构、索引与其他仓储函数；resolve_charge_inputs 与计费处理的改动属于 AIH-TASK-144。
+    status: ready
+    depends_on:
+      - AIH-TASK-142
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-143-pricing-resolution-round-trips.md（设计闸门 #528 已批准 v1）逐条一致，以 §1「明确不做什么」、§2「改动一」、§4、§5、§7 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/pricing_rules.py：resolve_pricing_rule 的签名、返回值与文档里的调用方契约不变；要查的级 = SCOPE_ORDER 中去掉 project_id 为 None 时的三个项目级；发一条 select(PricingRule).where(or_(各级 and_(*_in_scope(_level_scope(...)))), status in PERIOD_STATUSES, started, not_ended)，经 _shared 加锁读、取全部行；按要查的级的顺序取第一个有行的级（级别以行的 priority_scope 判定）：没有行返回 None，恰好一行交给 _resolved（不变），多于一行抛 sqlalchemy.exc.MultipleResultsFound；更低的级有多行不报错；文档注释改为「一条语句、在 Python 里选级」并写明为什么结果与逐级查相同、加锁范围可能更大但不影响正确性（设计 §2、§4）'
+      - 'tests/backend/test_pricing_rules_resolve.py：_rule_queries 计数相关的断言改为照设计 §7：项目为空且无规则、有项目且第 1 级命中、有项目但无项目级规则时，读 pricing_rules 的语句都恰好 1 条，选中的规则与现有断言相同；test_resolution_takes_share_locks 等现有用例照常通过'
+      - 'tests/backend/test_pricing_rules_resolve.py：新增 test_the_eight_levels_fall_through_in_order 的 MySQL 版本（同一流程用 mysql_factory），依次选到八级的规则、最后 None，与 SCOPE_ORDER 一致'
+      - 'tests/backend/test_pricing_rules_resolve.py：新增数据损坏用例照设计 §7：绕过服务层直接改行，让同一级有两条区间重叠、都带 effective_to 的已发布规则，解析落在重叠处的时刻抛 MultipleResultsFound；另一组第 1 级一条正常规则加更低一级两条重叠规则时返回第 1 级那条、不抛'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #528'
+    allowed_change_paths:
+      - app/repositories/pricing_rules.py
+      - tests/backend/test_pricing_rules_resolve.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-144
+    title: 计费处理不再重复解析模型与两把共享锁：计价解析接收已解析的模型
+    purpose: >-
+      按 docs/design/AIH-TASK-143-pricing-resolution-round-trips.md（设计闸门 #528 已批准 v1）§2「改动二」：app/services/pricing_engine.py 的 resolve_charge_inputs 新增关键字参数 resolved_model（默认 None，行为不变；给了值必须 locking=True，跳过它自己的 resolve_model 与两把单行共享锁）；app/services/usage_billing.py 的 _process 保存步骤 ③ resolve_model 的返回值并在步骤 ⑥ 传入。锁顺序、now_r 的位置与之后各步不变；试算不传。同步计价与计费的测试。规则解析一条语句选级属于 AIH-TASK-143。
+    status: ready
+    depends_on:
+      - AIH-TASK-143
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-143-pricing-resolution-round-trips.md（设计闸门 #528 已批准 v1）逐条一致，以 §1「明确不做什么」、§2「改动二」、§4、§5、§7 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/pricing_engine.py：resolve_charge_inputs 新增关键字参数 resolved_model: AiModel | None = None；None 时行为与现在完全相同；给了值且 locking=False 时抛 ValueError("a resolved model is only for the billing transaction")；给了值时不调用 catalog.resolve_model、rates.lock_fx_rates_shared、rules.lock_pricing_rules_shared，把它当作 resolve_model 的结果构造 ResolvedModelRef（matched_via 仍按 model.code == model_code 判定、provider_code 仍取参数），其余步骤不变；文档注释写明调用方契约（同一事务里已按顺序执行过 resolve_model 与两把锁，函数不复查）'
+      - 'app/services/usage_billing.py：_process 步骤 ③ 保存 catalog.resolve_model 的返回值，步骤 ⑥ 调 resolve_charge_inputs 时传 resolved_model=该值（模型未知时就是 None，走默认路径返回 MODEL_UNKNOWN）；步骤顺序、注释里的锁顺序、now_r 与 NOT_DUE 的处理、⑦⑧⑨ 不变；preview_charge 不传 resolved_model'
+      - 'tests/backend/test_pricing_engine.py：照设计 §7 新增：同一事务里先执行 resolve_model 与两把锁，再分别不带与带 resolved_model 调 resolve_charge_inputs(locking=True)，模型经代码命中、经别名命中各一组，两次的 ChargeResolution 逐字段相等（含 matched_via）；给 resolved_model 时 monkeypatch 计数三个函数调用次数都是 0；resolved_model 给值且 locking=False 抛 ValueError'
+      - 'tests/backend/test_usage_billing.py：test_the_occurred_at_check_comes_after_the_three_shared_locks 增加断言：一次 process_event 里 resolve_model、lock_fx_rates_shared、lock_pricing_rules_shared 各被调用恰好 1 次，前四步顺序、now_r 1 次、最后一步 post_transaction 的现有断言不变；现有 MODEL_UNKNOWN 用例照常通过'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #528'
+    allowed_change_paths:
+      - app/services/pricing_engine.py
+      - app/services/usage_billing.py
+      - tests/backend/test_pricing_engine.py
+      - tests/backend/test_usage_billing.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
