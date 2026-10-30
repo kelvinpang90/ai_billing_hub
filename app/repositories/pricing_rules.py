@@ -43,7 +43,7 @@ from app.models.pricing_rules import (
     PricingScope,
     PricingStrategy,
 )
-from app.models.tenancy import Tenant
+from app.models.tenancy import Project, Tenant
 
 
 class NewComponent(NamedTuple):
@@ -263,30 +263,36 @@ def components_for(
 
 @dataclass(frozen=True)
 class ScopeRows:
-    """The tenants, providers and models some rules hang on, by internal id."""
+    """The tenants, projects, providers and models some rules hang on, by internal id."""
 
     tenants: dict[int, Tenant]
+    projects: dict[int, Project]
     providers: dict[int, AiProvider]
     models: dict[int, AiModel]
 
 
 def scope_rows(session: Session, rows: Sequence[PricingRule], *, lock: bool = False) -> ScopeRows:
     tenant_ids = sorted({row.tenant_id for row in rows if row.tenant_id is not None})
+    project_ids = sorted({row.project_id for row in rows if row.project_id is not None})
     provider_ids = sorted({row.provider_id for row in rows if row.provider_id is not None})
     model_ids = sorted({row.model_id for row in rows if row.model_id is not None})
     tenants: dict[int, Tenant] = {}
+    projects: dict[int, Project] = {}
     providers: dict[int, AiProvider] = {}
     models: dict[int, AiModel] = {}
     if tenant_ids:
         found = session.execute(_locked(select(Tenant).where(Tenant.id.in_(tenant_ids)), lock))
         tenants = {tenant.id: tenant for tenant in found.scalars()}
+    if project_ids:
+        statement = select(Project).where(Project.id.in_(project_ids))
+        projects = {item.id: item for item in session.execute(_locked(statement, lock)).scalars()}
     if provider_ids:
         statement = select(AiProvider).where(AiProvider.id.in_(provider_ids))
         providers = {item.id: item for item in session.execute(_locked(statement, lock)).scalars()}
     if model_ids:
         statement = select(AiModel).where(AiModel.id.in_(model_ids))
         models = {item.id: item for item in session.execute(_locked(statement, lock)).scalars()}
-    return ScopeRows(tenants, providers, models)
+    return ScopeRows(tenants, projects, providers, models)
 
 
 def user_emails(
@@ -310,6 +316,7 @@ def list_rules(
     status: PricingRuleStatus | None,
     offset: int,
     limit: int,
+    project_id: int | None = None,
 ) -> tuple[list[PricingRule], int]:
     """One page by scope (§16 order, then the scope's own rows) and `effective_from`; the total."""
     statement = select(PricingRule)
@@ -317,6 +324,8 @@ def list_rules(
         statement = statement.where(PricingRule.priority_scope == priority_scope)
     if tenant_id is not None:
         statement = statement.where(PricingRule.tenant_id == tenant_id)
+    if project_id is not None:
+        statement = statement.where(PricingRule.project_id == project_id)
     if provider_id is not None:
         statement = statement.where(PricingRule.provider_id == provider_id)
     if model_id is not None:
@@ -332,6 +341,7 @@ def list_rules(
     statement = statement.order_by(
         rank,
         PricingRule.tenant_id,
+        PricingRule.project_id,
         PricingRule.provider_id,
         PricingRule.model_id,
         PricingRule.effective_from.is_not(None),
@@ -516,17 +526,14 @@ def mark_retired(
 # --- 解析（T-G / T-H 调用；本任务不接到任何计费路径） -------------------------------------
 
 
-def _level_scope(level: PricingScope, tenant_id: int, provider_id: int, model_id: int) -> Scope:
-    """The one scope of `level` that an event of (tenant, provider, model) falls into.
-
-    ⚠️ 项目级的 `project_id` 在 AIH-TASK-137 里填 NULL：项目级查询要求 `project_id IS NULL`，
-    而项目级的行（CHECK）项目一定非空，所以这三级匹配不到任何行，解析结果与五级时相同。
-    按事件的项目解析由 AIH-TASK-138 接上。
-    """
+def _level_scope(
+    level: PricingScope, tenant_id: int, project_id: int | None, provider_id: int, model_id: int
+) -> Scope:
+    """The one scope of `level` that an event of (tenant, project, provider, model) falls into."""
     return Scope(
         level,
         tenant_id if level.has_customer else None,
-        None,
+        project_id if level.has_project else None,
         provider_id if level.has_provider else None,
         model_id if level.has_model else None,
     )
@@ -535,20 +542,25 @@ def _level_scope(level: PricingScope, tenant_id: int, provider_id: int, model_id
 def resolve_pricing_rule(
     session: Session,
     tenant_id: int,
+    project_id: int | None,
     provider_id: int,
     model_id: int,
     occurred_at: dt.datetime,
 ) -> ResolvedPricingRule | None:
     """The pricing rule in effect for the event at `occurred_at`, or `None` (设计 §2「解析」).
 
-    按 `SCOPE_ORDER` 逐级查：三个项目级（本任务里匹配不到任何行，见 `_level_scope`）→
+    按 `SCOPE_ORDER` 逐级查八级：`PROJECT_PROVIDER_MODEL` → `PROJECT_PROVIDER` → `PROJECT` →
     `CUSTOMER_PROVIDER_MODEL` → `CUSTOMER_PROVIDER` → `CUSTOMER` → `GLOBAL_PROVIDER_MODEL` →
     `GLOBAL`。每一级找范围匹配、`PUBLISHED` / `RETIRED`、
     `effective_from ≤ occurred_at < effective_to`（NULL 端不比）的规则；**第一级命中即返回**
     （规则 + 分量）。一旦命中，就不因该 FIXED_RATE 规则缺事件所需的分量而下落到更低一级（T-G
     判 `PRICING_ERROR`）。各级都没有 → `None`（T-G 判 `PRICING_ERROR`）。空区间（撤销的预约）
-    永不匹配。三个 id 都是内部 id：租户取自事件，供应商与模型取自 `resolve_model`；
+    永不匹配。四个 id 都是内部 id：租户与项目取自事件，供应商与模型取自 `resolve_model`；
     `occurred_at` 是不带时区的 UTC。
+
+    `project_id` 为 `None`（试算没给项目）时三个项目级不查，直接从客户级开始。项目级查询同时
+    比较租户与项目，所以一个项目的规则只会选给这个项目的事件（INV-8）；项目没有项目级规则时，
+    结果与五级时完全相同。
 
     ⚠️ 调用方契约（设计 §2 T-H）：在计费事务里 `resolve_model` 之后、先
     `lock_pricing_rules_shared`，再调用这里；所有读都是加锁读（`FOR SHARE`），锁持有到计费事务
@@ -560,7 +572,9 @@ def resolve_pricing_rule(
     started = or_(PricingRule.effective_from.is_(None), PricingRule.effective_from <= occurred_at)
     not_ended = or_(PricingRule.effective_to.is_(None), PricingRule.effective_to > occurred_at)
     for level in SCOPE_ORDER:
-        scope = _level_scope(level, tenant_id, provider_id, model_id)
+        if level.has_project and project_id is None:
+            continue
+        scope = _level_scope(level, tenant_id, project_id, provider_id, model_id)
         in_effect = select(PricingRule).where(
             *_in_scope(scope),
             PricingRule.status.in_(PERIOD_STATUSES),

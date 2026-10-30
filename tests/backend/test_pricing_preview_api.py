@@ -759,6 +759,7 @@ def test_the_preview_is_the_billing_code_path(client, admin, app, world) -> None
         resolution = resolve_charge_inputs(
             session,
             tenant_id=tenant_id,
+            project_id=None,
             provider_code="anthropic",
             model_code="claude-x",
             meter_type_id=meter_type_id,

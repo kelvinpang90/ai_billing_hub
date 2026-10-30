@@ -5,7 +5,9 @@ Three groups:
 - **resolution** (SQLite, frozen clock): the five levels in §16 order, falling through as each
   level is retired; a hit stops the search even when the FIXED_RATE rule lacks the event's
   component; tenants never see each other's rules; drafts never match; components come back with
-  their quantity field; every read is a locking read;
+  their quantity field; every read is a locking read; the eight levels of design gate #507 v4
+  (the three project levels first; without project rules nothing changes; one project's rules
+  never price another project's or another tenant's events; no project, no project levels);
 - **time stability** (SQLite, property test): random publish / reserve / retire / withdraw
   sequences over the five levels — once a moment resolved to rule R it resolves to R forever;
 - **serialised with publishing** (real MySQL, several connections): billing waits for an
@@ -23,6 +25,7 @@ import datetime as dt
 import inspect
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -32,7 +35,7 @@ from decimal import Decimal
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, func, select
+from sqlalchemy import Engine, create_engine, delete, event, func, select
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -56,7 +59,7 @@ from app.models.pricing_rules import (
     PricingScope,
     PricingStrategy,
 )
-from app.models.tenancy import Tenant
+from app.models.tenancy import Project, Tenant
 from app.repositories import pricing_rules as rule_repository
 from app.repositories.ai_catalog import resolve_model
 from app.repositories.pricing_rules import (
@@ -96,8 +99,10 @@ FICTIONAL_MULTIPLIER = "1.23456789"
 
 GLOBAL = PricingScope.GLOBAL
 CUSTOMER = PricingScope.CUSTOMER
-# The levels a rule can be drafted on: project-level rules cannot be built until AIH-TASK-138
-# and 139 carry the project (a draft on one is a 422 now), so rules go level by level only here.
+PROJECT = PricingScope.PROJECT
+PROJECT_LEVELS = tuple(level for level in SCOPE_ORDER if level.has_project)
+# The five levels without a project (§16 before design gate #507 v4): the cases that predate the
+# project levels go level by level over these; the eight-level cases are further below.
 BUILDABLE_LEVELS = tuple(level for level in SCOPE_ORDER if not level.has_project)
 
 
@@ -149,6 +154,26 @@ def make_tenant(factory: sessionmaker[Session], name: str) -> str:
                 public_id=public_id,
                 company_name=f"Fictional {name} Sdn Bhd",
                 email=f"{name}{TEST_EMAIL_DOMAIN}",
+                created_at=T0,
+                updated_at=T0,
+            )
+        )
+        session.commit()
+    return public_id
+
+
+def make_project(factory: sessionmaker[Session], tenant_public_id: str, name: str) -> str:
+    """A project of the tenant, written directly; returns its public id."""
+    public_id = str(uuid.uuid4())
+    with factory() as session:
+        tenant_id = session.execute(
+            select(Tenant.id).where(Tenant.public_id == tenant_public_id)
+        ).scalar_one()
+        session.add(
+            Project(
+                public_id=public_id,
+                tenant_id=tenant_id,
+                name=f"Fictional {name}",
                 created_at=T0,
                 updated_at=T0,
             )
@@ -219,21 +244,36 @@ class Rules:
             clock=clock,
         )
         self.tenants = {name: make_tenant(factory, f"{provider_code}-{name}") for name in tenants}
+        # Project name → its public id; each project belongs to one of `tenants` (`add_project`).
+        self.projects: dict[str, str] = {}
+
+    def add_project(self, name: str, tenant: str = "tenant-a") -> str:
+        self.projects[name] = make_project(self.factory, self.tenants[tenant], name)
+        return self.projects[name]
+
+    def project_id(self, name: str) -> int:
+        """The project's internal id."""
+        statement = select(Project.id).where(Project.public_id == self.projects[name])
+        with self.factory() as session:
+            return int(session.execute(statement).scalar_one())
 
     def draft(
         self,
         scope: PricingScope = GLOBAL,
         *,
         tenant: str = "tenant-a",
+        project: str | None = None,
         components: list[RuleComponentInput] | None = None,
     ) -> PricingRuleView:
-        """MARKUP unless `components` is given (then FIXED_RATE)."""
+        """MARKUP unless `components` is given (then FIXED_RATE). A project level needs
+        `project`."""
         fixed = components is not None
         return pricing_rules.create_draft(
             self.factory,
             actor=self.admin,
             priority_scope=scope,
             customer_id=self.tenants[tenant] if scope.has_customer else None,
+            project_id=self.projects[project] if scope.has_project and project else None,
             provider_id=self.provider.id if scope.has_provider else None,
             model_id=self.model.id if scope.has_model else None,
             strategy=PricingStrategy.FIXED_RATE if fixed else PricingStrategy.MARKUP,
@@ -259,9 +299,10 @@ class Rules:
         effective_from: dt.datetime | None = None,
         *,
         tenant: str = "tenant-a",
+        project: str | None = None,
         components: list[RuleComponentInput] | None = None,
     ) -> PricingRuleView:
-        draft = self.draft(scope, tenant=tenant, components=components)
+        draft = self.draft(scope, tenant=tenant, project=project, components=components)
         return self.publish(draft.id, effective_from)
 
     def retire(self, rule_id: str) -> PricingRuleView:
@@ -288,28 +329,46 @@ class Rules:
             provider_id, model_id = session.execute(statement).one()
         return self.tenant_id(tenant), int(provider_id), int(model_id)
 
-    def resolve(self, occurred_at: dt.datetime, tenant: str = "tenant-a") -> str | None:
-        """What one billing run sees (T-H order), in a transaction of its own."""
-        return billed(self.factory, self.tenant_id(tenant), self.code, occurred_at)
+    def resolve(
+        self, occurred_at: dt.datetime, tenant: str = "tenant-a", project: str | None = None
+    ) -> str | None:
+        """What one billing run sees (T-H order), in a transaction of its own. `project`: the
+        event's project by name; `None` resolves as a preview without a project."""
+        project_id = self.project_id(project) if project is not None else None
+        return billed(
+            self.factory, self.tenant_id(tenant), self.code, occurred_at, project_id=project_id
+        )
 
 
 def billed(
-    factory: sessionmaker[Session], tenant_id: int, provider_code: str, occurred_at: dt.datetime
+    factory: sessionmaker[Session],
+    tenant_id: int,
+    provider_code: str,
+    occurred_at: dt.datetime,
+    *,
+    project_id: int | None = None,
 ) -> str | None:
     """`resolve_model`, the shared rule lock, `resolve_pricing_rule`, then commit (T-H)."""
     with factory() as session:
-        found = _rule_of(session, tenant_id, provider_code, occurred_at)
+        found = _rule_of(session, tenant_id, provider_code, occurred_at, project_id=project_id)
         session.commit()
         return None if found is None else found.public_id
 
 
 def _rule_of(
-    session: Session, tenant_id: int, provider_code: str, occurred_at: dt.datetime
+    session: Session,
+    tenant_id: int,
+    provider_code: str,
+    occurred_at: dt.datetime,
+    *,
+    project_id: int | None = None,
 ) -> ResolvedPricingRule | None:
     model = resolve_model(session, provider_code, "model-m", occurred_at)
     assert model is not None
     lock_pricing_rules_shared(session)
-    return resolve_pricing_rule(session, tenant_id, model.provider_id, model.id, occurred_at)
+    return resolve_pricing_rule(
+        session, tenant_id, project_id, model.provider_id, model.id, occurred_at
+    )
 
 
 # --- fixtures ---------------------------------------------------------------------
@@ -360,6 +419,8 @@ def _clean(engine: Engine) -> None:
         connection.execute(delete(AiModelAlias))
         connection.execute(delete(AiModel))
         connection.execute(delete(AiProvider))
+        mine = select(Tenant.id).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}"))
+        connection.execute(delete(Project).where(Project.tenant_id.in_(mine)))
         connection.execute(delete(Tenant).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}")))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 
@@ -408,7 +469,7 @@ def test_a_hit_stops_even_without_the_events_component(sqlite_factory) -> None:
     tenant_id, provider_id, model_id = rules.ids()
 
     with sqlite_factory() as session:
-        found = resolve_pricing_rule(session, tenant_id, provider_id, model_id, T0 + DAY)
+        found = resolve_pricing_rule(session, tenant_id, None, provider_id, model_id, T0 + DAY)
 
     assert found is not None
     assert found.public_id == customer.id
@@ -427,6 +488,145 @@ def test_one_tenants_rule_never_prices_another_tenants_event(sqlite_factory) -> 
     default = rules.publish_new(GLOBAL)
     assert rules.resolve(T0 + DAY, "tenant-b") == default.id
     assert rules.resolve(T0 + DAY, "tenant-a") == mine.id
+
+
+# --- the eight levels (design gate #507 v4 §2「解析」, §7) ----------------------------------
+
+
+def _one_rule_per_eight_levels(rules: Rules, project: str) -> dict[PricingScope, str]:
+    """A published MARKUP rule on each of the eight levels for tenant-a and `project`; the global
+    one first, so that it applies to all time."""
+    published = {GLOBAL: rules.publish_new(GLOBAL).id}
+    for level in SCOPE_ORDER[:-1]:
+        published[level] = rules.publish_new(level, project=project).id
+    return published
+
+
+def test_the_eight_levels_fall_through_in_order(sqlite_factory) -> None:
+    """§7 "eight levels": one rule on each level for the event; retiring the highest level each
+    time, the event resolves to the next one, in exactly the eight-level order."""
+    clock = Clock(T0)
+    rules = Rules(sqlite_factory, clock)
+    rules.add_project("p1")
+    published = _one_rule_per_eight_levels(rules, "p1")
+    clock.advance(seconds=10)
+    occurred_at = T0 + 10 * DAY
+
+    seen = []
+    for level in SCOPE_ORDER:
+        seen.append(rules.resolve(occurred_at, project="p1"))
+        rules.retire(published[level])
+        clock.advance(seconds=5)
+    seen.append(rules.resolve(occurred_at, project="p1"))
+
+    assert seen == [published[level] for level in SCOPE_ORDER] + [None]
+    by_level = {
+        rule.public_id: PricingScope(rule.priority_scope)
+        for rule in _rules(sqlite_factory, published.values())
+    }
+    assert [by_level[rule_id] for rule_id in seen[:-1]] == list(SCOPE_ORDER)
+
+
+def test_without_project_rules_the_project_changes_nothing(sqlite_factory) -> None:
+    """§7 "no project rules, no change": with only the five older levels, an event of any project
+    (or no project at all) resolves exactly as before, at every step of the fall-through."""
+    clock = Clock(T0)
+    rules = Rules(sqlite_factory, clock)
+    for name in ("p1", "p2"):
+        rules.add_project(name)
+    published = _one_rule_per_level(rules)
+    clock.advance(seconds=10)
+    occurred_at = T0 + 10 * DAY
+
+    for level in BUILDABLE_LEVELS:
+        expected = rules.resolve(occurred_at)
+        assert expected == published[level]
+        assert rules.resolve(occurred_at, project="p1") == expected
+        assert rules.resolve(occurred_at, project="p2") == expected
+        rules.retire(published[level])
+        clock.advance(seconds=5)
+    for project in (None, "p1", "p2"):
+        assert rules.resolve(occurred_at, project=project) is None
+
+
+def test_one_projects_rule_never_prices_another_projects_event(sqlite_factory) -> None:
+    """§7 "project isolation": P1's rules on all three project levels; the same customer's P2
+    event resolves to the customer rule, never to P1's."""
+    rules = Rules(sqlite_factory, Clock(T0))
+    for name in ("p1", "p2"):
+        rules.add_project(name)
+    customer = rules.publish_new(CUSTOMER)
+    mine = {level: rules.publish_new(level, project="p1").id for level in PROJECT_LEVELS}
+
+    assert rules.resolve(T0 + DAY, project="p1") == mine[PricingScope.PROJECT_PROVIDER_MODEL]
+    assert rules.resolve(T0 + DAY, project="p2") == customer.id
+    assert rules.resolve(T0 + DAY) == customer.id
+
+
+def test_a_project_rule_never_prices_another_tenants_event(sqlite_factory) -> None:
+    """§7 "across tenants" (INV-8): tenant A's project rules never price tenant B's events — not
+    for B's own project, and not even when B's event claimed A's project id (SQLite enforces no
+    foreign keys, so only the tenant comparison of the project-level query stops it)."""
+    rules = Rules(sqlite_factory, Clock(T0), tenants=("tenant-a", "tenant-b"))
+    rules.add_project("p1", tenant="tenant-a")
+    rules.add_project("q1", tenant="tenant-b")
+    for level in PROJECT_LEVELS:
+        rules.publish_new(level, tenant="tenant-a", project="p1")
+    tenant_b, provider_id, model_id = rules.ids("tenant-b")
+    project_a = rules.project_id("p1")
+
+    assert rules.resolve(T0 + DAY, "tenant-b", "q1") is None
+    with sqlite_factory() as session:
+        forged = resolve_pricing_rule(session, tenant_b, project_a, provider_id, model_id, T0 + DAY)
+    assert forged is None
+    assert rules.resolve(T0 + DAY, "tenant-a", "p1") is not None
+    default = rules.publish_new(GLOBAL)
+    assert rules.resolve(T0 + DAY, "tenant-b", "q1") == default.id
+
+
+def _rule_queries(
+    factory: sessionmaker[Session], project_id: int | None
+) -> tuple[ResolvedPricingRule | None, int]:
+    """Resolve once for tenant-a; return the result and how many queries read `pricing_rules`."""
+    engine = factory.kw["bind"]
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        with factory() as session:
+            tenant_id = session.execute(select(Tenant.id)).scalar_one()
+            provider_id, model_id = session.execute(select(AiModel.provider_id, AiModel.id)).one()
+            statements.clear()
+            found = resolve_pricing_rule(
+                session, tenant_id, project_id, provider_id, model_id, T0 + DAY
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    reads = [item for item in statements if re.search(r"\bFROM pricing_rules\b", item)]
+    return found, len(reads)
+
+
+def test_without_a_project_the_project_levels_are_not_queried(sqlite_factory) -> None:
+    """Design §2「解析」: `project_id=None` (a preview without a project) skips the three project
+    levels — their rules are invisible, and only the five other levels are queried."""
+    rules = Rules(sqlite_factory, Clock(T0))
+    rules.add_project("p1")
+    for level in PROJECT_LEVELS:
+        rules.publish_new(level, project="p1")
+
+    found, queried = _rule_queries(sqlite_factory, None)
+    assert (found, queried) == (None, len(BUILDABLE_LEVELS))
+    found, queried = _rule_queries(sqlite_factory, rules.project_id("p1"))
+    assert found is not None
+    assert found.priority_scope is PricingScope.PROJECT_PROVIDER_MODEL
+    # The first level hit: one query, not eight.
+    assert queried == 1
+    rules.add_project("p2")
+    found, queried = _rule_queries(sqlite_factory, rules.project_id("p2"))
+    assert (found, queried) == (None, len(SCOPE_ORDER))
 
 
 def test_drafts_discarded_drafts_and_withdrawn_reservations_never_match(sqlite_factory) -> None:
@@ -452,8 +652,8 @@ def test_the_rule_comes_with_its_components_or_its_multiplier(sqlite_factory) ->
     tenant_id, provider_id, model_id = rules.ids()
 
     with sqlite_factory() as session:
-        old = resolve_pricing_rule(session, tenant_id, provider_id, model_id, T0)
-        new = resolve_pricing_rule(session, tenant_id, provider_id, model_id, T0 + DAY)
+        old = resolve_pricing_rule(session, tenant_id, None, provider_id, model_id, T0)
+        new = resolve_pricing_rule(session, tenant_id, None, provider_id, model_id, T0 + DAY)
 
     assert old is not None and new is not None
     assert (old.public_id, old.strategy, old.markup_multiplier) == (
@@ -559,7 +759,7 @@ def test_a_resolved_moment_never_changes_its_rule(sqlite_factory) -> None:
             for probe in probes:
                 if probe > clock.now:
                     break
-                found = resolve_pricing_rule(session, tenant_id, provider_id, model_id, probe)
+                found = resolve_pricing_rule(session, tenant_id, None, provider_id, model_id, probe)
                 if probe in seen:
                     assert found is not None, (step, level, operation, probe)
                     assert found.public_id == seen[probe], (step, level, operation, probe)

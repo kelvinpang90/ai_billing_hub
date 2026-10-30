@@ -1,12 +1,16 @@
 """Pricing rules over time, through the services (design gate #178 v4 §7).
 
-Five groups:
+Six groups:
 
 - **periods** (SQLite, frozen clock): only the first GLOBAL rule may be backdated, every other
   first rule starts at `t`; truncation at `t`; reservations and withdrawing them; no backdating;
   retiring the current rule and a superseded one; completeness; retired catalog items; draft
   edits that switch the strategy; the recheck itself, a failed recheck, and "the clock is read
   only after the rule lock";
+- **project rules** (design gate #507 v4; SQLite, the two timelines on MySQL too): all eight
+  levels draft and publish; a project not of the customer is 404 `PROJECT_NOT_FOUND`; listing by
+  customer and project; the audits carry the project; no backdating; two projects, two
+  timelines; a failed recheck rolls a project publish back;
 - **a write failing half way** (audit or commit raises): the `factory` fixture runs each case
   once on SQLite and once on a real MySQL;
 - **the publish side of the snapshot trap** (real MySQL, two connections);
@@ -71,7 +75,10 @@ from app.schemas.pricing_rules import (
     RuleComponentInput,
 )
 from app.services import ai_catalog, pricing_rules
+from app.services.ai_catalog import ModelNotFound, ProviderNotFound
 from app.services.auth import RequestContext, utc_now
+from app.services.customers import CustomerNotFound
+from app.services.integration_access import ProjectNotFound
 from app.services.pricing_rules import (
     EffectiveFromConflict,
     EffectiveFromInPast,
@@ -192,6 +199,26 @@ def make_tenant(factory: sessionmaker[Session], name: str) -> str:
     return public_id
 
 
+def make_project(factory: sessionmaker[Session], tenant_public_id: str, name: str) -> str:
+    """A project of the tenant, written directly; returns its public id."""
+    public_id = str(uuid.uuid4())
+    with factory() as session:
+        tenant_id = session.execute(
+            select(Tenant.id).where(Tenant.public_id == tenant_public_id)
+        ).scalar_one()
+        session.add(
+            Project(
+                public_id=public_id,
+                tenant_id=tenant_id,
+                name=f"Fictional {name}",
+                created_at=T0,
+                updated_at=T0,
+            )
+        )
+        session.commit()
+    return public_id
+
+
 def seed_meter_types(factory: sessionmaker[Session]) -> None:
     """What migration 0012 seeds, for the SQLite tables `create_all` builds empty."""
     with factory() as session:
@@ -257,12 +284,30 @@ class Rules:
                 clock=clock,
             )
         self.tenants = {name: make_tenant(factory, f"{provider_code}-{name}") for name in tenants}
+        # Project name → its public id (`add_project`).
+        self.projects: dict[str, str] = {}
+
+    def add_project(self, name: str, tenant: str = "tenant-a") -> str:
+        self.projects[name] = make_project(self.factory, self.tenants[tenant], name)
+        return self.projects[name]
+
+    def project_pk(self, name: str) -> int:
+        statement = select(Project.id).where(Project.public_id == self.projects[name])
+        with self.factory() as session:
+            return int(session.execute(statement).scalar_one())
 
     def scope_fields(
-        self, scope: PricingScope, tenant: str = "tenant-a", model: str = "model-m"
+        self,
+        scope: PricingScope,
+        tenant: str = "tenant-a",
+        model: str = "model-m",
+        project: str | None = None,
     ) -> dict[str, str | None]:
+        """The scope fields of `scope`; a project level gets `project_id` only when `project`
+        names one."""
         return {
             "customer_id": self.tenants[tenant] if scope.has_customer else None,
+            "project_id": self.projects[project] if scope.has_project and project else None,
             "provider_id": self.provider.id if scope.has_provider else None,
             "model_id": self.models[model].id if scope.has_model else None,
         }
@@ -273,6 +318,7 @@ class Rules:
         *,
         tenant: str = "tenant-a",
         model: str = "model-m",
+        project: str | None = None,
         strategy: PricingStrategy = PricingStrategy.MARKUP,
         multiplier: str | None = FICTIONAL_MULTIPLIER,
         components: list[RuleComponentInput] | None = None,
@@ -284,7 +330,7 @@ class Rules:
             self.factory,
             actor=self.admin,
             priority_scope=scope,
-            **self.scope_fields(scope, tenant, model),
+            **self.scope_fields(scope, tenant, model, project),
             strategy=strategy,
             markup_multiplier=None if multiplier is None else Decimal(multiplier),
             components=components,
@@ -352,11 +398,21 @@ class Rules:
         return internal_ids(self.factory, self.tenants[tenant], self.models[model].id)
 
     def resolve(
-        self, occurred_at: dt.datetime, *, tenant: str = "tenant-a", model: str = "model-m"
+        self,
+        occurred_at: dt.datetime,
+        *,
+        tenant: str = "tenant-a",
+        model: str = "model-m",
+        project: str | None = None,
     ) -> str | None:
-        """The public id of the rule in effect, resolved in a transaction of its own."""
+        """The public id of the rule in effect, resolved in a transaction of its own. `project`:
+        the event's project by name; `None` resolves without one."""
+        tenant_id, provider_id, model_id = self.ids(tenant, model)
+        project_id = self.project_pk(project) if project is not None else None
         with self.factory() as session:
-            found = resolve_pricing_rule(session, *self.ids(tenant, model), occurred_at)
+            found = resolve_pricing_rule(
+                session, tenant_id, project_id, provider_id, model_id, occurred_at
+            )
             session.commit()
             return None if found is None else found.public_id
 
@@ -484,12 +540,20 @@ def clean(engine: Engine) -> None:
             connection.exec_driver_sql("TRUNCATE TABLE pricing_rules")
         finally:
             connection.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1")
+    # Design gate #507 v4 §7「MySQL 用例的清理」: no project-level rule is left behind (it would
+    # make any later downgrade through 0030 refuse).
+    with engine.connect() as connection:
+        project_rules = select(func.count()).select_from(PricingRule)
+        left = connection.execute(project_rules.where(PricingRule.project_id.is_not(None)))
+        assert left.scalar_one() == 0
     with engine.begin() as connection:
         connection.exec_driver_sql("TRUNCATE TABLE audit_logs")
     with engine.begin() as connection:
         connection.execute(delete(AiModelAlias))
         connection.execute(delete(AiModel))
         connection.execute(delete(AiProvider))
+        mine = select(Tenant.id).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}"))
+        connection.execute(delete(Project).where(Project.tenant_id.in_(mine)))
         connection.execute(delete(Tenant).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}")))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 
@@ -908,9 +972,10 @@ def test_the_service_checks_the_scope_fields_as_well(sqlite_factory) -> None:
 
 @pytest.mark.parametrize("level", [level for level in PricingScope if level.has_project])
 def test_a_project_level_draft_is_a_422_for_now(sqlite_factory, level: PricingScope) -> None:
-    """AIH-TASK-137: a project level needs `project_id` among its scope fields, and neither the
-    request nor the service takes one yet (AIH-TASK-138, 139). So a draft on any of the three
-    project levels is a 422 `VALIDATION_ERROR` — never a 500 — and writes nothing."""
+    """AIH-TASK-137: a project level needs `project_id` among its scope fields. The request does
+    not carry one yet (AIH-TASK-139), and the service (AIH-TASK-138) refuses a project level
+    without it: a 422 `VALIDATION_ERROR` — never a 500 — that writes nothing. With a project the
+    service builds it (`test_every_level_takes_a_draft_and_a_publish`)."""
     factory = sqlite_factory
     rules = Rules(factory, Clock(T0))
     fields = rules.scope_fields(level)
@@ -932,6 +997,287 @@ def test_a_project_level_draft_is_a_422_for_now(sqlite_factory, level: PricingSc
         rules.draft(level)
     assert (raised.value.code, raised.value.http_status) == ("VALIDATION_ERROR", 422)
     assert snapshot(factory) == before
+
+
+# --- project rules (design gate #507 v4 §2「接口」服务层, §7) -------------------------------
+
+
+def _create(rules: Rules, scope: PricingScope, **fields: str | None) -> PricingRuleView:
+    """`create_draft` with the scope fields as given (unknown ids included)."""
+    given = {"customer_id": None, "project_id": None, "provider_id": None, "model_id": None}
+    return pricing_rules.create_draft(
+        rules.factory,
+        actor=rules.admin,
+        priority_scope=scope,
+        **{**given, **fields},  # type: ignore[arg-type]
+        strategy=PricingStrategy.MARKUP,
+        markup_multiplier=Decimal(FICTIONAL_MULTIPLIER),
+        components=None,
+        context=CONTEXT,
+        clock=rules.clock,
+    )
+
+
+def _list(rules: Rules, **filters: object) -> list[str]:
+    """The public ids `list_pricing_rules` returns for the filters, in its order."""
+    given: dict[str, object] = {
+        "priority_scope": None,
+        "customer_id": None,
+        "provider_id": None,
+        "model_id": None,
+        "status": None,
+        "page": 1,
+        "page_size": 100,
+    }
+    options = {**given, **filters}
+    page = pricing_rules.list_pricing_rules(rules.factory, **options)  # type: ignore[arg-type]
+    return [item.id for item in page.items]
+
+
+def _integers(value: object) -> list[int]:
+    """Every JSON integer inside `value`: internal ids would show up as integers."""
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, dict):
+        return [found for item in value.values() for found in _integers(item)]
+    if isinstance(value, list):
+        return [found for item in value for found in _integers(item)]
+    return []
+
+
+def _project_of(factory: sessionmaker[Session], public_id: str) -> int | None:
+    statement = select(PricingRule.project_id).where(PricingRule.public_id == public_id)
+    with factory() as session:
+        return session.execute(statement).scalar_one()
+
+
+@pytest.mark.parametrize("level", list(PricingScope), ids=lambda level: level.value)
+def test_every_level_takes_a_draft_and_a_publish(sqlite_factory, level: PricingScope) -> None:
+    """All eight levels are built through the service; a project level stores the project, the
+    others none. Each published rule prices its project's events."""
+    rules = Rules(sqlite_factory, Clock(T0))
+    rules.add_project("p1")
+
+    draft = rules.draft(level, project="p1")
+    published = rules.publish(draft.id)
+
+    assert (draft.priority_scope, published.status) == (level.value, "PUBLISHED")
+    expected = rules.project_pk("p1") if level.has_project else None
+    assert _project_of(sqlite_factory, draft.id) == expected
+    assert rules.resolve(T0 + DAY, project="p1") == published.id
+    # Without the project only a level below the project levels prices the event.
+    assert rules.resolve(T0 + DAY) == (None if level.has_project else published.id)
+
+
+def test_a_project_of_another_customer_is_a_404(sqlite_factory) -> None:
+    """Design gate #507 v4 §5: a project that does not exist or belongs to another customer is
+    404 `PROJECT_NOT_FOUND` (the same error, `get_project_for_tenant`); several wrong ids report
+    customer → project → provider → model, the first one. Nothing is written."""
+    rules = Rules(sqlite_factory, Clock(T0), tenants=("tenant-a", "tenant-b"))
+    rules.add_project("p1", tenant="tenant-a")
+    theirs = rules.add_project("q1", tenant="tenant-b")
+    mine = rules.tenants["tenant-a"]
+    unknown = str(uuid.uuid4())
+    before = snapshot(sqlite_factory)
+
+    for project in (theirs, unknown):
+        for level in (PricingScope.PROJECT, PricingScope.PROJECT_PROVIDER_MODEL):
+            fields = rules.scope_fields(level)
+            with pytest.raises(ProjectNotFound) as raised:
+                _create(rules, level, **{**fields, "project_id": project})
+            assert (raised.value.code, raised.value.http_status) == ("PROJECT_NOT_FOUND", 404)
+    project_model = PricingScope.PROJECT_PROVIDER_MODEL
+    with pytest.raises(CustomerNotFound):
+        _create(
+            rules,
+            project_model,
+            customer_id=unknown,
+            project_id=theirs,
+            provider_id=unknown,
+            model_id=unknown,
+        )
+    with pytest.raises(ProjectNotFound):
+        _create(
+            rules,
+            project_model,
+            customer_id=mine,
+            project_id=theirs,
+            provider_id=unknown,
+            model_id=unknown,
+        )
+    with pytest.raises(ProviderNotFound):
+        _create(
+            rules,
+            project_model,
+            customer_id=mine,
+            project_id=rules.projects["p1"],
+            provider_id=unknown,
+            model_id=unknown,
+        )
+    with pytest.raises(ModelNotFound):
+        _create(
+            rules,
+            project_model,
+            customer_id=mine,
+            project_id=rules.projects["p1"],
+            provider_id=rules.provider.id,
+            model_id=unknown,
+        )
+    # The shape comes first: a project on a non-project level, a project level without one.
+    with pytest.raises(PricingRuleShapeInvalid):
+        _create(rules, CUSTOMER, customer_id=mine, project_id=rules.projects["p1"])
+    with pytest.raises(PricingRuleShapeInvalid):
+        _create(rules, PricingScope.PROJECT, project_id=rules.projects["p1"])
+    assert snapshot(sqlite_factory) == before
+
+
+def test_listing_by_customer_and_project(sqlite_factory) -> None:
+    """Design gate #507 v4 §2「接口」: the `project_id` filter goes with `customer_id` only (alone:
+    422); a project not of that customer is 404; the list puts the project levels first and keeps
+    one project's rules together."""
+    clock = Clock(T0)
+    rules = Rules(sqlite_factory, clock, tenants=("tenant-a", "tenant-b"))
+    for name in ("p1", "p2"):
+        rules.add_project(name)
+    theirs = rules.add_project("q1", tenant="tenant-b")
+    customer = rules.publish_new(CUSTOMER)
+    first = rules.publish_new(PricingScope.PROJECT, project="p1")
+    second = rules.publish_new(PricingScope.PROJECT, project="p2")
+    clock.advance(seconds=5)
+    newer = rules.publish_new(PricingScope.PROJECT, project="p1")
+    mine = rules.tenants["tenant-a"]
+
+    assert _list(rules, customer_id=mine, project_id=rules.projects["p1"]) == [first.id, newer.id]
+    assert _list(rules, customer_id=mine, project_id=rules.projects["p2"]) == [second.id]
+    assert _list(rules, customer_id=mine) == [first.id, newer.id, second.id, customer.id]
+    with pytest.raises(PricingRuleShapeInvalid):
+        _list(rules, project_id=rules.projects["p1"])
+    for project in (theirs, str(uuid.uuid4())):
+        with pytest.raises(ProjectNotFound):
+            _list(rules, customer_id=mine, project_id=project)
+    unknown = str(uuid.uuid4())
+    with pytest.raises(CustomerNotFound):
+        _list(rules, customer_id=unknown, project_id=theirs, provider_id=unknown)
+    with pytest.raises(ProjectNotFound):
+        _list(rules, customer_id=mine, project_id=theirs, provider_id=unknown, model_id=unknown)
+    with pytest.raises(ProviderNotFound):
+        _list(rules, customer_id=mine, project_id=rules.projects["p1"], provider_id=unknown)
+
+
+def test_the_audits_carry_the_project(sqlite_factory) -> None:
+    """Design gate #507 v4 §2「接口」审计: PRICING_CREATE, PRICING_PUBLISH and PRICING_RETIRE carry
+    the scope with the project's public id (null on other levels); PRICING_UPDATE and
+    PRICING_DISCARD still hold only what changed. No internal id anywhere."""
+    clock = Clock(T0)
+    rules = Rules(sqlite_factory, clock)
+    project = rules.add_project("p1")
+    draft = rules.draft(PricingScope.PROJECT, project="p1")
+    rules.edit(draft.id, multiplier=OTHER_MULTIPLIER)
+    published = rules.publish(draft.id)
+    clock.advance(seconds=5)
+    rules.retire(published.id)
+    rules.discard(rules.draft(PricingScope.PROJECT, project="p1").id)
+    rules.draft(CUSTOMER)
+
+    scope = {"priority_scope": "PROJECT", "customer_id": rules.tenants["tenant-a"]}
+    created = audit_states(sqlite_factory, AuditAction.PRICING_CREATE)
+    [(_, publish_after, _)] = audit_states(sqlite_factory, AuditAction.PRICING_PUBLISH)
+    [(_, retire_after, _)] = audit_states(sqlite_factory, AuditAction.PRICING_RETIRE)
+    for state in (created[0][1], created[1][1], publish_after, retire_after):
+        assert {**state, **scope} == state
+        assert (state["project_id"], state["provider_code"], state["model_code"]) == (
+            project,
+            None,
+            None,
+        )
+    assert created[2][1]["project_id"] is None
+    assert created[2][1]["priority_scope"] == "CUSTOMER"
+    [(update_before, update_after, _)] = audit_states(sqlite_factory, AuditAction.PRICING_UPDATE)
+    assert (update_before, update_after) == (
+        {"markup_multiplier": "1.23456789"},
+        {"markup_multiplier": "2.34567891"},
+    )
+    [(discard_before, discard_after, _)] = audit_states(sqlite_factory, AuditAction.PRICING_DISCARD)
+    assert (discard_before, discard_after) == ({"status": "DRAFT"}, {"status": "DISCARDED"})
+    actions = (
+        AuditAction.PRICING_CREATE,
+        AuditAction.PRICING_UPDATE,
+        AuditAction.PRICING_PUBLISH,
+        AuditAction.PRICING_RETIRE,
+        AuditAction.PRICING_DISCARD,
+    )
+    every = [
+        state
+        for action in actions
+        for before_state, after_state, _ in audit_states(sqlite_factory, action)
+        for state in (before_state, after_state)
+    ]
+    # Three creates, one each of the others; before and after of each.
+    assert len(every) == 2 * 7
+    assert all(_integers(state) == [] for state in every)
+
+
+def test_a_project_rule_is_not_backdated(sqlite_factory) -> None:
+    """Design gate #507 v4 §2「发布、停用与生效时刻」: a requested start before `t` is 422; without
+    a time the rule starts at `t`, never "from all time"."""
+    clock = Clock(T0 + dt.timedelta(microseconds=500_000))
+    rules = Rules(sqlite_factory, clock)
+    rules.add_project("p1")
+    draft = rules.draft(PricingScope.PROJECT, project="p1")
+    before = snapshot(sqlite_factory)
+
+    for past in (T0, T0 - DAY, LONG_AGO):
+        with pytest.raises(EffectiveFromInPast):
+            rules.publish(draft.id, past)
+    assert snapshot(sqlite_factory) == before
+
+    published = rules.publish(draft.id)
+    t = T0 + SECOND
+    assert (published.effective_from, published.effective_to) == (t, None)
+    assert rules.resolve(t - MICRO, project="p1") is None
+    assert rules.resolve(t, project="p1") == published.id
+
+
+def test_two_projects_have_their_own_timelines(factory) -> None:
+    """Design gate #507 v4 §7: two projects of one customer each hold an open PROJECT rule (their
+    `scope_key` differs, so `open_slot` does not collide); a second rule of the same project
+    still truncates the first."""
+    clock = Clock(T0)
+    rules = Rules(factory, clock)
+    for name in ("p1", "p2"):
+        rules.add_project(name)
+    first = rules.publish_new(PricingScope.PROJECT, project="p1")
+    other = rules.publish_new(PricingScope.PROJECT, project="p2")
+    assert (rules.rule(first.id).effective_to, other.effective_to) == (None, None)
+    clock.advance(seconds=5)
+
+    second = rules.publish_new(PricingScope.PROJECT, project="p1")
+
+    assert rules.rule(first.id).effective_to == second.effective_from == T0 + 6 * SECOND
+    assert rules.rule(other.id).effective_to is None
+    assert rules.resolve(T0 + DAY, project="p1") == second.id
+    assert rules.resolve(T0 + DAY, project="p2") == other.id
+    assert rules.resolve(T0 + 2 * SECOND, project="p1") == first.id
+
+
+def test_a_failed_recheck_rolls_a_project_publish_back(sqlite_factory, monkeypatch) -> None:
+    """§7 "a transaction failing half way", the project-level case: the previous project rule is
+    not truncated either, and no audit is written."""
+    clock = Clock(T0)
+    rules = Rules(sqlite_factory, clock)
+    rules.add_project("p1")
+    rules.publish_new(PricingScope.PROJECT, project="p1")
+    draft = rules.draft(PricingScope.PROJECT, project="p1")
+    before = snapshot(sqlite_factory)
+    monkeypatch.setattr(pricing_rules, "verify_periods", _always_broken)
+    clock.advance(seconds=5)
+
+    with pytest.raises(PricingPeriodsBroken):
+        rules.publish(draft.id)
+
+    assert snapshot(sqlite_factory) == before
 
 
 # --- the recheck and the lock ----------------------------------------------------

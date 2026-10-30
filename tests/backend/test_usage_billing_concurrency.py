@@ -12,6 +12,7 @@ Rows of design §7 covered here:
   opening − Σ billable = closing;
 - **锁顺序与发布并发** — while billing holds its three shared locks, publishing a price, a rule or
   an FX rate, or mapping an alias, waits for it to commit; the bill uses the tables as they were;
+  the same with a project rule (design gate #507 v4), whose later events then take it;
 - **锁超时** — a publisher holding `pricing_rule_locks` for more than 10 seconds: the billing
   transaction gives up after the session-level 10 seconds (not the default 50), FAILED_RETRYABLE
   `LOCK_WAIT_TIMEOUT` with its backoff;
@@ -46,7 +47,7 @@ from app.core.database import create_session_factory
 from app.models.ai_catalog import AiModel, AiModelAlias, AiProvider
 from app.models.auth import User, UserRole, UserStatus
 from app.models.integration import CredentialStatus, IntegrationCredential, ProjectStatusDelivery
-from app.models.pricing_rules import PricingScope, PricingStrategy
+from app.models.pricing_rules import PricingRule, PricingScope, PricingStrategy
 from app.models.tenancy import Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
@@ -170,6 +171,8 @@ class World:
             context=CONTEXT,
             now=T0,
         )
+        # Public ids, for customer and project rules.
+        self.customer_public_id, self.project_public_id = detail.id, project.id
         with self.factory() as session:
             tenant_id = session.execute(
                 select(Tenant.id).where(Tenant.public_id == detail.id)
@@ -259,14 +262,16 @@ class World:
             clock=self.clock,
         ).id
 
-    def rule_draft(self, multiplier: str = "2") -> str:
+    def rule_draft(self, multiplier: str = "2", scope: PricingScope = PricingScope.GLOBAL) -> str:
+        """A MARKUP draft; a customer or project level is the world's tenant and project."""
         return pricing_rules.create_draft(
             self.factory,
             actor=self.admin,
-            priority_scope=PricingScope.GLOBAL,
-            customer_id=None,
-            provider_id=None,
-            model_id=None,
+            priority_scope=scope,
+            customer_id=self.customer_public_id if scope.has_customer else None,
+            project_id=self.project_public_id if scope.has_project else None,
+            provider_id=self.provider.id if scope.has_provider else None,
+            model_id=self.model.id if scope.has_model else None,
             strategy=PricingStrategy.MARKUP,
             markup_multiplier=Decimal(multiplier),
             components=None,
@@ -300,7 +305,7 @@ class World:
         self.publish_fx(self.fx_draft())
         self.publish_rule(self.rule_draft())
 
-    def event(self) -> int:
+    def event(self, occurred_at: dt.datetime = EVENT_AT) -> int:
         number = next(_NUMBERS)
         with self.factory() as session:
             meter = event_repository.find_meter_type(session, "LLM_TOKEN")
@@ -323,7 +328,7 @@ class World:
                 tokens=dict(TOKENS),
                 quantity=None,
                 payload_fingerprint="0" * 64,
-                occurred_at=EVENT_AT,
+                occurred_at=occurred_at,
                 now=T0,
             )
             session.commit()
@@ -405,6 +410,11 @@ def clean(engine: Engine) -> None:
                 connection.exec_driver_sql(f"TRUNCATE TABLE {table}")
         finally:
             connection.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1")
+    # Design gate #507 v4 §7「MySQL 用例的清理」: no project-level rule is left behind.
+    with engine.connect() as connection:
+        project_rules = select(func.count()).select_from(PricingRule)
+        left = connection.execute(project_rules.where(PricingRule.project_id.is_not(None)))
+        assert left.scalar_one() == 0
     with engine.begin() as connection:
         ours = select(Tenant.id).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}"))
         connection.execute(
@@ -660,6 +670,80 @@ def test_a_publisher_waits_for_billing_and_billing_uses_the_old_tables(
     assert len(published) == 1
     # Priced with the tables as they were before the publish.
     assert world.row(event_id).billable_cost == MARKUP_BILLABLE
+
+
+def _rule_row(world: World, public_id: str) -> PricingRule:
+    with world.factory() as session:
+        found = session.execute(
+            select(PricingRule).where(PricingRule.public_id == public_id)
+        ).scalar_one()
+        session.expunge(found)
+        return found
+
+
+def test_a_project_rule_publish_waits_for_billing_and_later_events_take_it(
+    world, monkeypatch
+) -> None:
+    """Design gate #507 v4 §7 "并发：发布与计费", the project-level case of the lock test above:
+    while billing holds the shared rule lock, publishing a PROJECT rule of the event's project
+    waits for its commit; the event keeps the rule selected before the publish (the global one);
+    an event of the same project at or after `t` takes the project rule."""
+    world.publish_markup_usd()
+    event_id = world.event()
+    [claim] = world.claim()
+    draft = world.rule_draft("4", scope=PricingScope.PROJECT)
+    held, release = threading.Event(), threading.Event()
+    original = usage_billing.price_resolved
+
+    def paused(*args, **kwargs):
+        held.set()
+        release.wait(timeout=30)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(usage_billing, "price_resolved", paused)
+    world.clock.now = NOW
+    outcome: list[Outcome] = []
+    billing = threading.Thread(
+        target=lambda: outcome.append(
+            usage_billing.process_event(
+                world.factory, claim, max_attempts=MAX_ATTEMPTS, clock=lambda: NOW
+            )
+        )
+    )
+    published: list[str] = []
+    publishing = threading.Thread(target=lambda: published.append(world.publish_rule(draft)))
+    billing.start()
+    try:
+        assert held.wait(timeout=30)
+        publishing.start()
+        time.sleep(1.5)
+        assert publishing.is_alive()
+        assert published == []
+    finally:
+        release.set()
+        billing.join(timeout=60)
+        publishing.join(timeout=60)
+    monkeypatch.setattr(usage_billing, "price_resolved", original)
+
+    assert outcome == [Outcome.PROCESSED]
+    [project_rule_id] = published
+    project_rule = _rule_row(world, project_rule_id)
+    assert PricingScope(project_rule.priority_scope) is PricingScope.PROJECT
+    assert project_rule.project_id == world.project_id
+    first = world.row(event_id)
+    assert first.pricing_rule_id != project_rule.id
+    assert first.billable_cost == MARKUP_BILLABLE
+    t = project_rule.effective_from
+    assert t is not None
+    assert first.occurred_at < t
+
+    later = world.event(occurred_at=t + dt.timedelta(seconds=1))
+    assert world.bill(t + dt.timedelta(seconds=10)).outcomes == {Outcome.PROCESSED: 1}
+    second = world.row(later)
+    assert second.pricing_rule_id == project_rule.id
+    # EC × 4 = 2.91796875 × 4.
+    assert second.billable_cost == Decimal("11.67187500")
+    assert world.row(event_id).pricing_rule_id == first.pricing_rule_id
 
 
 def test_a_publisher_holding_its_lock_past_10_seconds_times_billing_out(world, engine) -> None:

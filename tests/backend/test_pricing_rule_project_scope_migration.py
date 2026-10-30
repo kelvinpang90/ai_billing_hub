@@ -1132,7 +1132,7 @@ def test_0030_upgrade_leaves_existing_rules_as_they_were(
         assert event_rule == referred
         with create_session_factory(engine)() as session:
             found = resolve_pricing_rule(
-                session, seed.tenant_id, seed.provider_id, seed.model_id, _OCCURRED_AT
+                session, seed.tenant_id, None, seed.provider_id, seed.model_id, _OCCURRED_AT
             )
             session.commit()
         public_ids = {row["id"]: row["public_id"] for row in after}

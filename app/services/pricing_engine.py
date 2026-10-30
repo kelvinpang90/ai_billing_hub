@@ -346,6 +346,7 @@ def resolve_charge_inputs(
     session: Session,
     *,
     tenant_id: int,
+    project_id: int | None,
     provider_code: str,
     model_code: str,
     meter_type_id: int,
@@ -354,9 +355,10 @@ def resolve_charge_inputs(
 ) -> ChargeResolution:
     """Model, provider price, FX rate and pricing rule for one event (design §2「解析函数与锁」).
 
-    在调用方的事务里运行，不开事务、不提交。`tenant_id`、`meter_type_id` 是事件的
-    内部 id；`provider_code` / `model_code` 是上报的原始字符串；`occurred_at` 是不带
-    时区的 UTC。
+    在调用方的事务里运行，不开事务、不提交。`tenant_id`、`project_id`、`meter_type_id` 是
+    事件的内部 id；`provider_code` / `model_code` 是上报的原始字符串；`occurred_at` 是不带
+    时区的 UTC。`project_id` 原样传给 `resolve_pricing_rule`（设计闸门 #507 v4 §2「解析」）：
+    计费传事件的项目；`None`（试算没给项目）时三个项目级不查。
 
     错误按下面的顺序判定，**先遇到哪个报哪个**：
 
@@ -420,7 +422,9 @@ def resolve_charge_inputs(
                 ChargeStatus.FX_RATE_ERROR, None, needed, model=found, provider_price=price
             )
 
-    rule = rules.resolve_pricing_rule(session, tenant_id, model.provider_id, model.id, occurred_at)
+    rule = rules.resolve_pricing_rule(
+        session, tenant_id, project_id, model.provider_id, model.id, occurred_at
+    )
     if rule is None:
         return ChargeResolution(
             ChargeStatus.PRICING_ERROR,
@@ -637,6 +641,8 @@ def preview_charge(
         resolution = resolve_charge_inputs(
             session,
             tenant_id=tenant.id,
+            # 请求里还没有项目（AIH-TASK-139）：不查三个项目级，结果与五级时相同。
+            project_id=None,
             provider_code=request.provider,
             model_code=request.model,
             meter_type_id=meter.id,
