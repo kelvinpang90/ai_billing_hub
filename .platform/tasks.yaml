@@ -8271,7 +8271,7 @@ tasks:
       - '实现与 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）逐条一致，以 §2「接口」、§3 INV-7 与 INV-8、§5 接口相关各行、§6、§7 接口与试算各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'app/schemas/pricing_rules.py：SCOPE_FIELDS 加 project_id，CreatePricingRuleRequest 加可选 project_id（PublicId），范围字段与 priority_scope 恰好匹配的校验照设计（三个项目级要 customer_id 与 project_id，其余五级不许带 project_id，多给少给都是 422）；PricingRuleView 加 project_id 与 project_name；PATCH 照旧不收范围字段。app/services/pricing_rules.py 只改视图组装（_views 与它调用的 pricing_rule_view 用 AIH-TASK-138 在 ScopeRows 里加的 projects 填 project_id 与 project_name，非项目级为 null），不改其余逻辑。app/api/admin_pricing_rules.py：建草稿把 project_id 传给服务，GET /pricing-rules 加查询参数 project_id 传给服务（单独给、不带 customer_id 时 422 VALIDATION_ERROR）；错误码照设计（PROJECT_NOT_FOUND 404）'
       - 'app/schemas/pricing_preview.py：PricingPreviewRequest 加可选 project_id（PublicId）；app/services/pricing_engine.py 的 preview_charge：校验顺序照设计（客户 → 项目 → 计量类型 → 其余照旧）；给了 project_id 就按 get_project_for_tenant 在该客户下查，不存在或不属于抛 app.services.integration_access.ProjectNotFound（404 PROJECT_NOT_FOUND），按该项目的内部 id 传给 resolve_charge_inputs；没给传 None（结果与现在相同）；其余不变'
-      - '测试：tests/backend/test_pricing_rules_api.py 覆盖八级各缺一个、多一个范围字段的 422，项目级建草稿与发布，项目不属于客户 404，列表按 customer_id 加 project_id 筛选、单独给 project_id 422、项目不属于客户 404，视图带 project_id 与 project_name、非项目级为 null，审计照设计（建、发布、停用带项目 public_id，改与丢弃只有变化的字段，没有内部 id），非 ADMIN 403；既有用例里对视图字段的精确清单（如 RULE_FIELDS）只加上 project_id 与 project_name 两个键，其余断言不改；tests/backend/test_pricing_preview_api.py 覆盖给项目时与真实计费选到同一条规则（沿用该文件已有的「试算等于解析」写法，传项目内部 id）、不给项目时结果不变、项目不属于客户 404、客户不存在且给了项目时 404 CUSTOMER_NOT_FOUND；在共享 MySQL 测试库里写入项目级规则的用例照设计 §7「MySQL 用例的清理」在 finally 里清掉自己的行；既有用例照常通过、不改断言'
+      - '测试：tests/backend/test_pricing_rules_api.py 覆盖八级各缺一个、多一个范围字段的 422，项目级建草稿与发布，项目不属于客户 404，列表按 customer_id 加 project_id 筛选、单独给 project_id 422、项目不属于客户 404，视图带 project_id 与 project_name、非项目级为 null，审计照设计（建、发布、停用带项目 public_id，改与丢弃只有变化的字段，没有内部 id），非 ADMIN 403；既有用例里对视图字段的精确清单（如 RULE_FIELDS）只加上 project_id 与 project_name 两个键，其余断言不改；tests/backend/test_pricing_preview_api.py 覆盖给项目时与真实计费选到同一条规则（沿用该文件已有的「试算等于解析」写法，传项目内部 id）、不给项目时结果不变、项目不属于客户 404、客户不存在且给了项目时 404 CUSTOMER_NOT_FOUND；tests/backend/test_pricing_rules_service.py 只改 AIH-TASK-137 留下的占位用例 test_a_project_level_draft_is_a_422_for_now 的请求模型那一段：项目级的请求体不带 project_id 时 CreatePricingRuleRequest 仍抛 ValidationError，带上 project_id 时校验通过；服务层那一段（不给项目时 PricingRuleShapeInvalid、422 VALIDATION_ERROR、不写库）不改；用例名去掉 _for_now，文档字符串改为说明现状；该文件其余不改；在共享 MySQL 测试库里写入项目级规则的用例照设计 §7「MySQL 用例的清理」在 finally 里清掉自己的行；除上面这一处占位用例外，既有用例照常通过、不改断言'
       - 'docs/api.md 的定价规则与试算两节：project_id 请求字段、视图的两个新字段、八级与范围字段对照、PROJECT_NOT_FOUND 的出现条件、试算不给项目时的含义'
       - '不改迁移、模型、repository 与解析；不改计费；不改前端；不改 AI 模块'
       - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #507'
@@ -8283,6 +8283,7 @@ tasks:
       - app/services/pricing_engine.py
       - tests/backend/test_pricing_rules_api.py
       - tests/backend/test_pricing_preview_api.py
+      - tests/backend/test_pricing_rules_service.py
       - docs/api.md
     allowed_commands:
       - docs.check
