@@ -112,7 +112,8 @@ _SET_LOCK_WAIT: Final = text(f"SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT
 
 # 扫描名额的命名锁名字（设计闸门 #522 v4 §2）：只在 SQL 里拼，`slot` 是绑定参数。带上库名，是因为
 # 命名锁在整个 MySQL 实例内共享：压测库、CI 的各个测试库不能和生产库抢同一组名额。
-_SWEEP_SLOT_NAME: Final = "CONCAT(DATABASE(), ':usage-billing-sweep:', :slot)"
+# ⚠️ 字面量里的冒号要写成 `\:`：`text()` 找绑定参数时不看引号，`':usage-…'` 会被当成参数 `usage`。
+_SWEEP_SLOT_NAME: Final = r"CONCAT(DATABASE(), '\:usage-billing-sweep\:', :slot)"
 _GET_LOCK: Final = text(f"SELECT GET_LOCK({_SWEEP_SLOT_NAME}, 0)")
 _HOLDS_LOCK: Final = text(f"SELECT IS_USED_LOCK({_SWEEP_SLOT_NAME}) = CONNECTION_ID()")
 _RELEASE_LOCK: Final = text(f"SELECT RELEASE_LOCK({_SWEEP_SLOT_NAME})")

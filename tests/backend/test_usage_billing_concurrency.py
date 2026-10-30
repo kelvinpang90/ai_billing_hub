@@ -114,7 +114,7 @@ _NUMBERS = itertools.count(1)
 # Sweep slots (design gate #522 v4 §2): the production parallelism, and the same lock names the
 # implementation builds (the database name keeps them apart from other databases on the server).
 SLOTS = 2
-_SLOT_NAME = "CONCAT(DATABASE(), ':usage-billing-sweep:', :slot)"
+_SLOT_NAME = usage_billing._SWEEP_SLOT_NAME
 _GET_SLOT = text(f"SELECT GET_LOCK({_SLOT_NAME}, 0)")
 _RELEASE_SLOT = text(f"SELECT RELEASE_LOCK({_SLOT_NAME})")
 _SLOT_IS_FREE = text(f"SELECT IS_FREE_LOCK({_SLOT_NAME})")

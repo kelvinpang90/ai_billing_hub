@@ -30,7 +30,7 @@ dimensions in test_usage_alerts.py):
   E3);
 - **名额：参数与 SQLite**, **任务传名额数** (design gate #522 v4 §7) — `parallelism=0` is a
   `ValueError` before anything is claimed; SQLite has no sweep slots and bills as usual; the task
-  passes `USAGE_BILLING_SWEEP_PARALLELISM`.
+  passes `USAGE_BILLING_SWEEP_PARALLELISM`; the slot statements bind `slot` and nothing else.
 
 ⚠️ SQLite has none of migration 0006's wallet triggers, so a ledger row would not move the wallet
 and a second debit would reuse the sequence. The SQLite factory installs one test-only trigger
@@ -1517,6 +1517,15 @@ def test_sqlite_has_no_sweep_slots_and_bills_as_usual(world) -> None:
     assert result.claimed == 3
     assert result.outcomes == {Outcome.PROCESSED: 3}
     assert len(world.usage_rows(tenant)) == 3
+
+
+@pytest.mark.parametrize("statement", ["_GET_LOCK", "_HOLDS_LOCK", "_RELEASE_LOCK"])
+def test_the_slot_statements_bind_only_the_slot(statement: str) -> None:
+    # The colons inside the quoted name must not be read as bind parameters by text().
+    compiled = getattr(usage_billing, statement).compile()
+
+    assert set(compiled.params) == {"slot"}
+    assert "':usage-billing-sweep:'" in str(compiled)
 
 
 def test_the_task_passes_the_sweep_parallelism(monkeypatch) -> None:
