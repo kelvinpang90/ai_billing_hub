@@ -58,6 +58,14 @@ FX_FETCH_EXPIRES_SECONDS = 3600
 # 0.9：beat 停摆后再起来，攒下的触发不一口气放出去（重叠运行安全，但白抢同一批行）。
 USAGE_BILLING_SWEEP_SECONDS = 10.0
 USAGE_BILLING_SWEEP_EXPIRES_SECONDS = 9.0
+# 计费扫描并行（设计闸门 #522 v4 §2，AIH-TASK-141）：Beat 每 10 秒派这么多个扫描
+# （`usage-billing-sweep-1` … `-N`），每个扫描先抢 N 个「扫描名额」（MySQL 命名锁）之一，抢不到
+# 立即返回 0，所以同时计费的扫描最多 N 个，与扫描各自跑了多久无关。
+# 用常量而不是配置项：周期、`expires`、预算都是这里的常量，同一处管理；改它必须同时改
+# celery-worker 的并发（docker-compose.yml 的 `BILLING_CELERY_CONCURRENCY`），不应该让 `.env`
+# 单独改一边。⚠️ celery-worker 的并发必须**至少比它多 1**：计费最多占 N 个子进程，留至少 1 个
+# 给其他周期任务（状态推送、outbox 恢复、卡住回收……）。
+USAGE_BILLING_SWEEP_PARALLELISM = 2
 USAGE_STALE_RECOVERY_SECONDS = 60.0
 USAGE_STALE_RECOVERY_EXPIRES_SECONDS = 54.0
 
@@ -134,10 +142,14 @@ def create_celery_app(settings: Settings) -> Celery:
                 "schedule": FX_FETCH_SCHEDULE,
                 "options": {"expires": FX_FETCH_EXPIRES_SECONDS},
             },
-            "usage-billing-sweep": {
-                "task": "app.tasks.usage_billing.bill_pending_events",
-                "schedule": USAGE_BILLING_SWEEP_SECONDS,
-                "options": {"expires": USAGE_BILLING_SWEEP_EXPIRES_SECONDS},
+            # 同一个任务、同一个周期的 N 个条目：同一时刻入队，prefetch 1 下落到不同的子进程。
+            **{
+                f"usage-billing-sweep-{slot}": {
+                    "task": "app.tasks.usage_billing.bill_pending_events",
+                    "schedule": USAGE_BILLING_SWEEP_SECONDS,
+                    "options": {"expires": USAGE_BILLING_SWEEP_EXPIRES_SECONDS},
+                }
+                for slot in range(1, USAGE_BILLING_SWEEP_PARALLELISM + 1)
             },
             "usage-stale-recovery": {
                 "task": "app.tasks.usage_billing.recover_stale_processing",

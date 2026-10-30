@@ -31,6 +31,12 @@ CHECK 要求 `AI_USAGE < 0`），事件照样 `PROCESSED`、快照齐全。`repl
 
 ⚠️ 日志绑定 `event_id`、`tenant_id`、`project_id`（§94），不打印金额与载荷；异常只记类型与
 错误码（设计 §6）。
+
+**扫描名额**（设计闸门 #522 v4 §2「改动点」第 0 条，AIH-TASK-141）：`bill_pending_events` 给了
+`parallelism` 时，整轮扫描先在一条专用的 `AUTOCOMMIT` 连接上抢一把 MySQL 命名锁
+`<库名>:usage-billing-sweep:<i>`（`i = 1 … parallelism`，`GET_LOCK` 超时 0），抢不到就不认领、
+返回 0；每次认领与每次处理之前确认名额仍在自己手里，丢了就停下，本批剩余事件交给卡住回收。
+名额不进入任何认领或处理事务，不改它们的 SQL、锁顺序与事务边界；SQLite 上不做限制。
 """
 
 from __future__ import annotations
@@ -41,12 +47,14 @@ import logging
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Final
 
 from sqlalchemy import or_, select, text, update
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -101,6 +109,13 @@ _ER_LOCK_DEADLOCK: Final = 1213
 # 会话级（默认 50 秒）。⚠️ 计费 worker 用自己的引擎（app/tasks/usage_billing.py），连接回池后
 # 带着这个值也只影响计费自己的事务。
 _SET_LOCK_WAIT: Final = text(f"SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_TIMEOUT_SECONDS}")
+
+# 扫描名额的命名锁名字（设计闸门 #522 v4 §2）：只在 SQL 里拼，`slot` 是绑定参数。带上库名，是因为
+# 命名锁在整个 MySQL 实例内共享：压测库、CI 的各个测试库不能和生产库抢同一组名额。
+_SWEEP_SLOT_NAME: Final = "CONCAT(DATABASE(), ':usage-billing-sweep:', :slot)"
+_GET_LOCK: Final = text(f"SELECT GET_LOCK({_SWEEP_SLOT_NAME}, 0)")
+_HOLDS_LOCK: Final = text(f"SELECT IS_USED_LOCK({_SWEEP_SLOT_NAME}) = CONNECTION_ID()")
+_RELEASE_LOCK: Final = text(f"SELECT RELEASE_LOCK({_SWEEP_SLOT_NAME})")
 
 # 可认领的状态（`FAILED_RETRYABLE` 还要到期）。
 CLAIMABLE_STATUSES: Final = (UsageEventStatus.RECEIVED, UsageEventStatus.FAILED_RETRYABLE)
@@ -492,6 +507,156 @@ def process_event(
         return Outcome.FAILED
 
 
+# --- 扫描名额（设计闸门 #522 v4 §2） -------------------------------------------------------
+
+
+def _get_lock(connection: Connection, slot: int) -> int | None:
+    """`GET_LOCK(<slot name>, 0)`, as MySQL returns it (1 / 0 / None). Raises on failure."""
+    return connection.execute(_GET_LOCK, {"slot": slot}).scalar()
+
+
+def _holds_lock(connection: Connection, slot: int) -> int | None:
+    """`IS_USED_LOCK(<slot name>) = CONNECTION_ID()`, as MySQL returns it. Raises on failure."""
+    return connection.execute(_HOLDS_LOCK, {"slot": slot}).scalar()
+
+
+def _release_lock(connection: Connection, slot: int) -> int | None:
+    """`RELEASE_LOCK(<slot name>)`, as MySQL returns it (1 / 0 / None). Raises on failure."""
+    return connection.execute(_RELEASE_LOCK, {"slot": slot}).scalar()
+
+
+@dataclass(frozen=True)
+class _SweepSlot:
+    """The slot this sweep holds; `connection` is `None` where nothing is limited (SQLite)."""
+
+    connection: Connection | None
+    slot: int
+
+    def held(self) -> bool:
+        """Before every claim and event: still ours? 0, NULL or an error means lost."""
+        if self.connection is None:
+            return True
+        try:
+            result = _holds_lock(self.connection, self.slot)
+        except Exception as error:
+            logger.warning(
+                "The usage billing sweep slot could not be confirmed; the sweep stops",
+                extra={"slot": self.slot, "error_type": type(error).__name__},
+            )
+            return False
+        if result != 1:
+            logger.warning(
+                "The usage billing sweep slot was lost; the sweep stops",
+                extra={"slot": self.slot, "result": result},
+            )
+            return False
+        return True
+
+
+def _take_slot(connection: Connection, parallelism: int) -> int | None:
+    """Slots 1 … `parallelism` in order, `GET_LOCK` with no wait; the first one taken, or `None`.
+
+    `GET_LOCK` 返回 NULL 或语句失败时不再试后面的名额（多半是这条连接或 MySQL 有问题，跳过这一轮）；
+    失败时丢弃连接，不把可能带着命名锁的连接还回池里。
+    """
+    for slot in range(1, parallelism + 1):
+        try:
+            result = _get_lock(connection, slot)
+        except Exception as error:
+            logger.warning(
+                "Taking a usage billing sweep slot failed; this sweep is skipped",
+                extra={"slot": slot, "error_type": type(error).__name__},
+            )
+            connection.invalidate()
+            return None
+        if result is None:
+            logger.warning(
+                "Taking a usage billing sweep slot returned NULL; this sweep is skipped",
+                extra={"slot": slot},
+            )
+            return None
+        if result == 1:
+            return slot
+    logger.debug(
+        "Every usage billing sweep slot is taken; this sweep is skipped",
+        extra={"parallelism": parallelism},
+    )
+    return None
+
+
+def _give_back(connection: Connection, slot: int) -> None:
+    """`RELEASE_LOCK`; when that fails, invalidate the connection (MySQL drops the lock with it)."""
+    try:
+        result = _release_lock(connection, slot)
+    except Exception as error:
+        logger.warning(
+            "Releasing the usage billing sweep slot failed; its connection is discarded",
+            extra={"slot": slot, "error_type": type(error).__name__},
+        )
+        connection.invalidate()
+        return
+    if result != 1:
+        logger.warning(
+            "The usage billing sweep slot was not released; its connection is discarded",
+            extra={"slot": slot, "result": result},
+        )
+        connection.invalidate()
+
+
+@contextmanager
+def _sweep_slot(factory: sessionmaker[Session], parallelism: int) -> Iterator[_SweepSlot | None]:
+    """One of `parallelism` sweep slots for the whole sweep, or `None` when none can be taken.
+
+    专用连接（`AUTOCOMMIT`，不与认领和处理的 session 共用）；结束时（包括抛异常、名额已丢）在
+    `finally` 里释放。SQLite 没有命名锁：名额永远抢得到。
+    """
+    engine = factory.kw["bind"]
+    assert engine is not None
+    if engine.dialect.name != "mysql":
+        yield _SweepSlot(connection=None, slot=1)
+        return
+    connection = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        slot = _take_slot(connection, parallelism)
+        if slot is None:
+            yield None
+            return
+        try:
+            yield _SweepSlot(connection=connection, slot=slot)
+        finally:
+            _give_back(connection, slot)
+    finally:
+        connection.close()
+
+
+def _sweep(
+    factory: sessionmaker[Session],
+    held: Callable[[], bool],
+    *,
+    lease_seconds: int,
+    max_attempts: int,
+    clock: Clock,
+    ticker: Ticker,
+    budget_seconds: float,
+) -> SweepResult:
+    started = ticker()
+    claimed = 0
+    outcomes: Counter[Outcome] = Counter()
+    while ticker() - started < budget_seconds:
+        if not held():
+            break
+        claims = claim_events(factory, lease_seconds=lease_seconds, clock=clock)
+        if not claims:
+            break
+        claimed += len(claims)
+        for claim in claims:
+            # 名额丢了：本批剩下的留在 PROCESSING，租约过期后由卡住回收放回。
+            if not held():
+                return SweepResult(claimed=claimed, outcomes=dict(outcomes))
+            outcomes[process_event(factory, claim, max_attempts=max_attempts, clock=clock)] += 1
+    return SweepResult(claimed=claimed, outcomes=dict(outcomes))
+
+
 def bill_pending_events(
     factory: sessionmaker[Session],
     *,
@@ -500,22 +665,33 @@ def bill_pending_events(
     clock: Clock = utc_now,
     ticker: Ticker = time.monotonic,
     budget_seconds: float = SWEEP_BUDGET_SECONDS,
+    parallelism: int | None = None,
 ) -> SweepResult:
     """One Beat run: claim and process until nothing is due or the 8-second budget is spent.
 
-    预算只在认领前检查：已认领的一批全部处理完，不留给租约。
+    预算只在认领前检查：已认领的一批全部处理完，不留给租约。`parallelism` 给了值时先抢
+    `parallelism` 个扫描名额之一，抢不到就不认领、返回 `claimed == 0`；`None` 不抢名额。
     """
-    started = ticker()
-    claimed = 0
-    outcomes: Counter[Outcome] = Counter()
-    while ticker() - started < budget_seconds:
-        claims = claim_events(factory, lease_seconds=lease_seconds, clock=clock)
-        if not claims:
-            break
-        claimed += len(claims)
-        for claim in claims:
-            outcomes[process_event(factory, claim, max_attempts=max_attempts, clock=clock)] += 1
-    return SweepResult(claimed=claimed, outcomes=dict(outcomes))
+    if parallelism is not None and parallelism < 1:
+        raise ValueError("parallelism must be at least 1")
+
+    def sweep(held: Callable[[], bool]) -> SweepResult:
+        return _sweep(
+            factory,
+            held,
+            lease_seconds=lease_seconds,
+            max_attempts=max_attempts,
+            clock=clock,
+            ticker=ticker,
+            budget_seconds=budget_seconds,
+        )
+
+    if parallelism is None:
+        return sweep(lambda: True)
+    with _sweep_slot(factory, parallelism) as slot:
+        if slot is None:
+            return SweepResult(claimed=0)
+        return sweep(slot.held)
 
 
 # --- 卡住回收（§110） ------------------------------------------------------------------

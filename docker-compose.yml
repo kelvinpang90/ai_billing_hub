@@ -262,8 +262,10 @@ services:
       # 崩溃重启了 4 次，而 `docker inspect` 的 OOMKilled 还是 false
       # （被杀的是子进程，主进程自己退了 0）—— 一条完全指不回原因的现象。
       #
-      # 生产 VPS 只有 1 核，2 个足够：任务都是 IO 密集（发信、写库），不是 CPU 密集。
-      - --concurrency=${BILLING_CELERY_CONCURRENCY:-2}
+      # 生产 VPS 只有 1 核，3 个足够：任务都是 IO 密集（发信、写库），不是 CPU 密集。
+      # 至少比计费扫描的并行数多 1，见 app/core/celery_app.py 的 USAGE_BILLING_SWEEP_PARALLELISM
+      # （设计闸门 #522 v4：计费扫描最多占 2 个子进程，留 1 个给其他周期任务）。
+      - --concurrency=${BILLING_CELERY_CONCURRENCY:-3}
     # worker 的存活探针可以直接问它自己 —— 这是 beat 没有的待遇（见下）。
     # ⚠️ `inspect ping` 走 broker 往返，所以 Redis 挂了它也会红。那是**对的**：
     # 拿不到任务的 worker 确实不能算健康。但排障时要记得先看 redis 那一格，

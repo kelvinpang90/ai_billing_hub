@@ -7,11 +7,20 @@ import os
 import pytest
 from celery.schedules import crontab
 
-from app.core.celery_app import TASK_MODULES, RedisNotConfigured, create_celery_app
+from app.core.celery_app import (
+    TASK_MODULES,
+    USAGE_BILLING_SWEEP_PARALLELISM,
+    RedisNotConfigured,
+    create_celery_app,
+)
 from app.core.config import Settings
 from app.tasks.ping import ping
 
 MEMORY_BROKER = "memory://"
+# 设计闸门 #522 v4：`usage-billing-sweep-1` … `usage-billing-sweep-N`。
+SWEEP_ENTRIES = [
+    f"usage-billing-sweep-{slot}" for slot in range(1, USAGE_BILLING_SWEEP_PARALLELISM + 1)
+]
 TEST_REDIS_URL = os.environ.get("BILLING_TEST_REDIS_URL", "")
 
 needs_redis = pytest.mark.skipif(
@@ -90,12 +99,13 @@ def test_the_periodic_tasks_include_the_ai_usage_delivery_sweep(
     assert set(celery_app.conf.beat_schedule) == {
         "outbox-recovery",
         "fx-fetch",
-        "usage-billing-sweep",
+        *SWEEP_ENTRIES,
         "usage-stale-recovery",
         "status-webhook-dispatch",
         "ai_api.deliver_due",
         "wallet-reconciliation-step",
     }
+    assert "usage-billing-sweep" not in celery_app.conf.beat_schedule
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
     assert entry["task"] == "app.tasks.outbox.recover"
 
@@ -103,7 +113,7 @@ def test_the_periodic_tasks_include_the_ai_usage_delivery_sweep(
 @pytest.mark.parametrize(
     ("name", "task", "every", "expires"),
     [
-        ("usage-billing-sweep", "app.tasks.usage_billing.bill_pending_events", 10, 9),
+        *((name, "app.tasks.usage_billing.bill_pending_events", 10, 9) for name in SWEEP_ENTRIES),
         ("usage-stale-recovery", "app.tasks.usage_billing.recover_stale_processing", 60, 54),
     ],
 )
@@ -121,6 +131,28 @@ def test_usage_billing_runs_every_10_seconds_and_recovers_every_60(
     assert entry["schedule"] == every
     assert entry["options"] == {"expires": expires}
     assert entry["options"]["expires"] < entry["schedule"]
+
+
+def test_beat_sends_one_sweep_per_slot_and_one_stale_recovery(celery_app) -> None:
+    """设计闸门 #522 v4 §7：扫描条目恰好 `USAGE_BILLING_SWEEP_PARALLELISM` 个
+    （`usage-billing-sweep-1` … `-N`，同一个任务），卡住回收只有一个。"""
+    assert isinstance(USAGE_BILLING_SWEEP_PARALLELISM, int)
+    assert USAGE_BILLING_SWEEP_PARALLELISM >= 1
+    assert USAGE_BILLING_SWEEP_PARALLELISM == 2
+    schedule = celery_app.conf.beat_schedule
+    sweeps = [
+        name
+        for name, entry in schedule.items()
+        if entry["task"] == "app.tasks.usage_billing.bill_pending_events"
+    ]
+    assert sorted(sweeps) == sorted(SWEEP_ENTRIES)
+    assert len(sweeps) == USAGE_BILLING_SWEEP_PARALLELISM
+    recoveries = [
+        name
+        for name, entry in schedule.items()
+        if entry["task"] == "app.tasks.usage_billing.recover_stale_processing"
+    ]
+    assert recoveries == ["usage-stale-recovery"]
 
 
 def test_the_usage_billing_tasks_are_registered(celery_app) -> None:
