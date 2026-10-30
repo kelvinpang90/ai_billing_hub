@@ -68,6 +68,7 @@ from app.schemas.pricing_preview import (
 )
 from app.services.ai_catalog import MeterTypeNotFound
 from app.services.customers import CustomerNotFound
+from app.services.integration_access import ProjectNotFound
 
 # 设计 §2「算法」：50 位有效数字远超 DECIMAL(20,8) 与 DECIMAL(24,10) 的量级，
 # 除法的截断误差在第 40 位以后，不影响任何存储值。`traps=[]`：一概不抛。
@@ -624,8 +625,10 @@ def preview_charge(
     """§59 preview calculation: one read-only transaction, `locking=False`, nothing written.
 
     与计费同一套解析（`resolve_charge_inputs`）与计算（`price_event`）。
-    客户不存在 404 `CUSTOMER_NOT_FOUND`；`usage_type` 不是计量类型 404
-    `USAGE_METER_TYPE_NOT_FOUND`；用量字段与形态不符 422 `VALIDATION_ERROR`；
+    给了 `project_id` 就按事件属于该项目解析（八级）；没给就不查三个项目级（设计闸门 #507 v4
+    §2「接口」）。客户不存在 404 `CUSTOMER_NOT_FOUND`；项目不存在或不属于该客户 404
+    `PROJECT_NOT_FOUND`；`usage_type` 不是计量类型 404 `USAGE_METER_TYPE_NOT_FOUND`
+    （按这个顺序报第一个）；用量字段与形态不符 422 `VALIDATION_ERROR`；
     结果超出 DECIMAL(20,8) 422 `AMOUNT_OUT_OF_RANGE`。其余（模型未知、缺价格 /
     汇率 / 规则）是 200 带状态与已解析到的部分。只用已发布的版本与规则。
     """
@@ -633,6 +636,12 @@ def preview_charge(
         tenant = tenancy.get_tenant_by_public_id(session, request.customer_id)
         if tenant is None:
             raise CustomerNotFound
+        project_pk: int | None = None
+        if request.project_id is not None:
+            project = tenancy.get_project_for_tenant(session, tenant.id, request.project_id)
+            if project is None:
+                raise ProjectNotFound
+            project_pk = project.id
         meter = usage.find_meter_type(session, request.usage_type)
         if meter is None:
             raise MeterTypeNotFound
@@ -641,8 +650,8 @@ def preview_charge(
         resolution = resolve_charge_inputs(
             session,
             tenant_id=tenant.id,
-            # 请求里还没有项目（AIH-TASK-139）：不查三个项目级，结果与五级时相同。
-            project_id=None,
+            # 没给项目时为 None：不查三个项目级，结果与五级时相同。
+            project_id=project_pk,
             provider_code=request.provider,
             model_code=request.model,
             meter_type_id=meter.id,

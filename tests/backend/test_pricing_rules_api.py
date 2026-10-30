@@ -5,7 +5,9 @@ every step; scope fields that must match `priority_scope`; mixed strategies; pre
 only, at most 8 decimals, positive); 404s; completeness and retired catalog items; the effective
 time's format and no backdating; the 409s of the state machine; closed request bodies; listing
 filters and order; no internal ids in responses; "tax-inclusive" in the field descriptions; and
-"the first statement of every handler is `require_admin`" (AST).
+"the first statement of every handler is `require_admin`" (AST). Project rules (design gate #507
+v4 §2「接口」, §7): the scope fields of all eight levels, a project rule's life and audits, a
+project outside the customer, the project filter and the view's project fields, and 403s.
 
 Period semantics under a frozen clock, triggers and half-way failures are in
 test_pricing_rules_service.py; resolution, the property test and concurrency in
@@ -58,6 +60,8 @@ RULE_FIELDS = {
     "id",
     "priority_scope",
     "customer_id",
+    "project_id",
+    "project_name",
     "provider_id",
     "provider_code",
     "model_id",
@@ -112,7 +116,15 @@ SCOPE_FIELDS = {
     "CUSTOMER": ("customer_id",),
     "GLOBAL_PROVIDER_MODEL": ("provider_id", "model_id"),
     "GLOBAL": (),
+    "PROJECT_PROVIDER_MODEL": ("customer_id", "project_id", "provider_id", "model_id"),
+    "PROJECT_PROVIDER": ("customer_id", "project_id", "provider_id"),
+    "PROJECT": ("customer_id", "project_id"),
 }
+# The three project levels (design gate #507 v4 §2「接口」), and all eight in §16 order.
+PROJECT_SCOPES = ("PROJECT_PROVIDER_MODEL", "PROJECT_PROVIDER", "PROJECT")
+ALL_SCOPES = PROJECT_SCOPES + SCOPES
+ALL_SCOPE_FIELDS = ("customer_id", "project_id", "provider_id", "model_id")
+PROJECT_NAME = "Fictional AI Chatbot"
 
 
 # --- fixtures and helpers ------------------------------------------------------------
@@ -226,6 +238,23 @@ def scope_ids(client, admin) -> dict[str, str]:
     }
 
 
+@pytest.fixture
+def project_ids(client, admin, scope_ids) -> dict[str, str]:
+    """`scope_ids` plus two projects of the customer, and another customer with its project."""
+    body = {"company_name": "Other Fictional Sdn Bhd", "email": "other@example.com"}
+    other = client.post(CUSTOMERS, json=body, headers=admin)
+    assert other.status_code == 201, other.text
+    other_customer = other.json()["data"]["id"]
+    customer = scope_ids["customer_id"]
+    return {
+        **scope_ids,
+        "project_id": new_project(client, admin, customer, PROJECT_NAME)["id"],
+        "second_project": new_project(client, admin, customer, "Fictional AI API")["id"],
+        "other_customer": other_customer,
+        "other_project": new_project(client, admin, other_customer, "Fictional elsewhere")["id"],
+    }
+
+
 def factory_of(application: FastAPI) -> sessionmaker[Session]:
     return application.state.session_factory
 
@@ -286,6 +315,14 @@ def new_model(client: TestClient, headers: dict[str, str], provider_id: str, cod
         f"{PROVIDERS}/{provider_id}/models",
         json={"code": code, "display_name": code},
         headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]
+
+
+def new_project(client: TestClient, headers: dict[str, str], customer_id: str, name: str) -> dict:
+    response = client.post(
+        f"{CUSTOMERS}/{customer_id}/projects", json={"name": name}, headers=headers
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]
@@ -752,6 +789,216 @@ def test_listing_filters_and_orders_by_scope_then_time(client, admin, scope_ids)
         ("page_size=101", "VALIDATION_ERROR"),
     ):
         assert error_code(client.get(f"{RULES}?{query}", headers=admin)) == code, query
+
+
+# --- project rules (design gate #507 v4 §2「接口」, §7) -----------------------------------
+
+
+def _scope_shape_cases() -> list[tuple[str, tuple[str, ...], tuple[str, ...]]]:
+    """Every level with one of its scope fields missing, and with one it does not take added."""
+    cases: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+    for scope in ALL_SCOPES:
+        taken = SCOPE_FIELDS[scope]
+        cases += [(scope, (name,), ()) for name in taken]
+        cases += [(scope, (), (name,)) for name in ALL_SCOPE_FIELDS if name not in taken]
+    return cases
+
+
+@pytest.mark.parametrize(("scope", "drop", "add"), _scope_shape_cases())
+def test_every_level_refuses_one_scope_field_too_few_or_too_many(
+    client, app, admin, project_ids, scope, drop, add
+) -> None:
+    """Design gate #507 v4 §2「接口」: the four scope fields match all eight levels exactly."""
+    body = rule_body(project_ids, scope)
+    for name in drop:
+        del body[name]
+    for name in add:
+        body[name] = project_ids[name]
+    before = snapshot(app)
+
+    response = client.post(RULES, json=body, headers=admin)
+
+    assert (response.status_code, error_code(response)) == (422, "VALIDATION_ERROR")
+    assert snapshot(app) == before
+
+
+@pytest.mark.parametrize("strategy", ["MARKUP", "FIXED_RATE"])
+@pytest.mark.parametrize("scope", PROJECT_SCOPES)
+def test_a_project_rule_is_drafted_published_and_retired(
+    client, app, admin, project_ids, scope: str, strategy: str
+) -> None:
+    """The view carries the project; the create, publish and retire audits carry its public id."""
+    created = new_rule(client, admin, rule_body(project_ids, scope, strategy))
+
+    assert set(created) == RULE_FIELDS
+    assert (created["priority_scope"], created["strategy"], created["status"]) == (
+        scope,
+        strategy,
+        "DRAFT",
+    )
+    assert (created["customer_id"], created["project_id"], created["project_name"]) == (
+        project_ids["customer_id"],
+        project_ids["project_id"],
+        PROJECT_NAME,
+    )
+    for name in ("provider_id", "model_id"):
+        expected = project_ids[name] if name in SCOPE_FIELDS[scope] else None
+        assert created[name] == expected, name
+
+    published = publish(client, admin, created["id"])
+    assert published.status_code == 200, published.text
+    data = published.json()["data"]
+    assert data["status"] == "PUBLISHED"
+    # Only the first global default is "from all time": a project level starts at `t`.
+    assert data["effective_from"] is not None
+    assert (data["project_id"], data["project_name"]) == (project_ids["project_id"], PROJECT_NAME)
+    retired = client.post(
+        f"{RULES}/{created['id']}/retire", json={"reason": "Fictional"}, headers=admin
+    )
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["data"]["status"] == "RETIRED"
+
+    for action in (
+        AuditAction.PRICING_CREATE,
+        AuditAction.PRICING_PUBLISH,
+        AuditAction.PRICING_RETIRE,
+    ):
+        [audit] = audits(app, action)
+        _, after = states(audit)
+        assert after["priority_scope"] == scope, action
+        assert after["customer_id"] == project_ids["customer_id"], action
+        assert after["project_id"] == project_ids["project_id"], action
+        for state in states(audit):
+            assert _integers(state) == [], action
+            for key in ("tenant_id", "project_name", "scope_key", "open_slot"):
+                assert key not in (state or {}), action
+
+
+def test_a_project_rule_edit_and_discard_audit_only_the_change(
+    client, app, admin, project_ids
+) -> None:
+    """PRICING_UPDATE and PRICING_DISCARD keep recording only what changed: no project."""
+    rule = new_rule(client, admin, rule_body(project_ids, "PROJECT"))
+
+    edited = client.patch(
+        f"{RULES}/{rule['id']}", json={"markup_multiplier": "9.99999999"}, headers=admin
+    )
+    discarded = client.post(f"{RULES}/{rule['id']}/discard", json={}, headers=admin)
+
+    assert edited.status_code == 200, edited.text
+    assert discarded.status_code == 200, discarded.text
+    assert edited.json()["data"]["project_id"] == project_ids["project_id"]
+    assert discarded.json()["data"]["status"] == "DISCARDED"
+    [update_audit] = audits(app, AuditAction.PRICING_UPDATE)
+    assert states(update_audit) == (
+        {"markup_multiplier": FICTIONAL_MULTIPLIER},
+        {"markup_multiplier": "9.99999999"},
+    )
+    [discard_audit] = audits(app, AuditAction.PRICING_DISCARD)
+    assert states(discard_audit) == ({"status": "DRAFT"}, {"status": "DISCARDED"})
+
+
+def test_a_project_outside_the_customer_is_404(client, app, admin, project_ids) -> None:
+    """Another customer's project or no such project: the same 404; the customer comes first."""
+    before = snapshot(app)
+
+    for project in (project_ids["other_project"], ZERO_ID):
+        for scope in PROJECT_SCOPES:
+            body = rule_body(project_ids, scope, project_id=project)
+            response = client.post(RULES, json=body, headers=admin)
+            assert (response.status_code, error_code(response)) == (404, "PROJECT_NOT_FOUND")
+    unknown = rule_body(project_ids, "PROJECT", customer_id=ZERO_ID)
+    response = client.post(RULES, json=unknown, headers=admin)
+
+    assert (response.status_code, error_code(response)) == (404, "CUSTOMER_NOT_FOUND")
+    assert snapshot(app) == before
+
+
+def test_listing_by_customer_and_project(client, admin, project_ids) -> None:
+    """Design gate #507 v4 §2「接口」: `project_id` filters together with `customer_id` only."""
+    customer = project_ids["customer_id"]
+    mine = new_rule(client, admin, rule_body(project_ids, "PROJECT"))
+    publish(client, admin, mine["id"])
+    mine_model = new_rule(client, admin, rule_body(project_ids, "PROJECT_PROVIDER_MODEL"))
+    second_body = rule_body(project_ids, "PROJECT", project_id=project_ids["second_project"])
+    second = new_rule(client, admin, second_body)
+    customer_rule = new_rule(client, admin, rule_body(project_ids, "CUSTOMER"))
+
+    by_project = client.get(
+        f"{RULES}?customer_id={customer}&project_id={project_ids['project_id']}", headers=admin
+    ).json()["data"]
+    by_customer = client.get(f"{RULES}?customer_id={customer}", headers=admin).json()["data"]
+
+    assert [item["id"] for item in by_project["items"]] == [mine_model["id"], mine["id"]]
+    for item in by_project["items"]:
+        assert set(item) == RULE_FIELDS
+        assert (item["project_id"], item["project_name"]) == (
+            project_ids["project_id"],
+            PROJECT_NAME,
+        )
+    # The project levels first, then the customer's own levels (§16 order).
+    assert [item["id"] for item in by_customer["items"]] == [
+        mine_model["id"],
+        mine["id"],
+        second["id"],
+        customer_rule["id"],
+    ]
+    last = by_customer["items"][-1]
+    assert (last["project_id"], last["project_name"]) == (None, None)
+    for query, expected in (
+        (f"project_id={project_ids['project_id']}", (422, "VALIDATION_ERROR")),
+        (f"project_id={ZERO_ID}", (422, "VALIDATION_ERROR")),
+        (
+            f"customer_id={customer}&project_id={project_ids['other_project']}",
+            (404, "PROJECT_NOT_FOUND"),
+        ),
+        (f"customer_id={customer}&project_id={ZERO_ID}", (404, "PROJECT_NOT_FOUND")),
+        (
+            f"customer_id={ZERO_ID}&project_id={project_ids['project_id']}",
+            (404, "CUSTOMER_NOT_FOUND"),
+        ),
+    ):
+        response = client.get(f"{RULES}?{query}", headers=admin)
+        assert (response.status_code, error_code(response)) == expected, query
+
+
+def test_non_admins_are_refused_on_project_rules(client, app, admin, project_ids) -> None:
+    """Rules stay on the admin side: a CUSTOMER gets 403 and nothing is written."""
+    rule = new_rule(client, admin, rule_body(project_ids, "PROJECT"))
+    now = utc_now()
+    with factory_of(app)() as session:
+        user = User(
+            email=f"{uuid.uuid4().hex}@example.com",
+            password_hash="not-a-real-hash",
+            role=UserRole.CUSTOMER,
+            status=UserStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(user)
+        session.commit()
+        user_id = int(user.id)
+    token = issue_access_token(
+        app.state.settings,
+        user_id=user_id,
+        role="CUSTOMER",
+        session_id=uuid.uuid4().hex,
+        now=now,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    listing = f"{RULES}?customer_id={project_ids['customer_id']}"
+    calls = [
+        ("POST", RULES, rule_body(project_ids, "PROJECT")),
+        ("GET", f"{listing}&project_id={project_ids['project_id']}", None),
+        ("GET", f"{RULES}/{rule['id']}", None),
+        ("POST", f"{RULES}/{rule['id']}/publish", {}),
+    ]
+    before = snapshot(app)
+
+    for method, url, payload in calls:
+        response = client.request(method, url, json=payload, headers=headers)
+        assert (response.status_code, error_code(response)) == (403, "ADMIN_REQUIRED"), url
+    assert snapshot(app) == before
 
 
 # --- authorisation --------------------------------------------------------------------

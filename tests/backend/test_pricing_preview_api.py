@@ -5,7 +5,9 @@ each error state is a 200 with the part that was resolved; a future `occurred_at
 reserved version; an MYR source shows no FX version; aliases and tenant isolation; invalid
 requests (422) and unknown customers or meter types (404); an out-of-range result; nothing is
 written (row counts of every table, no audit); the preview equals `resolve_charge_inputs` +
-`price_event` with `locking=True`; and "the first statement is `require_admin`" (AST).
+`price_event` with `locking=True`; and "the first statement is `require_admin`" (AST). An
+optional project (design gate #507 v4 §2「接口」): the same rule billing picks for that project,
+unchanged without one, and 404s in the order customer → project → meter type.
 
 Anonymous 401 / CUSTOMER 403 without writes is in test_admin_customers_api.py (it enumerates
 every admin route). Prices, rates and multipliers are fictional; the placeholder uuid is all
@@ -38,10 +40,10 @@ from app.models.ai_catalog import SEED_METER_TYPES, UsageMeterComponent, UsageMe
 from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.pricing_rules import PricingScope, PricingStrategy
-from app.models.tenancy import Tenant
+from app.models.tenancy import Project, Tenant
 from app.schemas.pricing_rules import RuleComponentInput
 from app.schemas.provider_prices import ComponentInput
-from app.services import ai_catalog, fx_rates, pricing_rules, provider_prices
+from app.services import ai_catalog, customers, fx_rates, pricing_rules, provider_prices
 from app.services.auth import RequestContext, utc_now
 from app.services.pricing_engine import price_resolved, resolve_charge_inputs
 
@@ -289,11 +291,13 @@ class World:
         scope: PricingScope = PricingScope.GLOBAL,
         *,
         tenant: str = "tenant-a",
+        project: str | None = None,
         multiplier: str = "2",
         rates: Mapping[str, str] | None = None,
         unit: str = PER_MILLION,
     ) -> str:
-        """MARKUP with `multiplier` unless `rates` is given (then FIXED_RATE)."""
+        """MARKUP with `multiplier` unless `rates` is given (then FIXED_RATE). `project` is a
+        project's public id, for the three project levels."""
         components = None
         if rates is not None:
             components = [
@@ -307,6 +311,7 @@ class World:
             actor=self.admin,
             priority_scope=scope,
             customer_id=self.tenants[tenant] if scope.has_customer else None,
+            project_id=project if scope.has_project else None,
             provider_id=self.provider.id if scope.has_provider else None,
             model_id=self.model.id if scope.has_model else None,
             strategy=PricingStrategy.MARKUP if rates is None else PricingStrategy.FIXED_RATE,
@@ -324,6 +329,17 @@ class World:
             clock=self.clock,
         )
         return published.id
+
+    def project(self, name: str, *, tenant: str = "tenant-a") -> str:
+        """A project of `tenant`; its public id."""
+        return customers.create_project(
+            self.factory,
+            actor=self.admin,
+            customer_id=self.tenants[tenant],
+            name=name,
+            context=CONTEXT,
+            now=T0,
+        ).id
 
     def alias(self, alias: str) -> None:
         ai_catalog.map_alias(
@@ -583,6 +599,84 @@ def test_one_customers_rule_never_prices_another(client, admin, world) -> None:
     assert (a["billable_cost"], b["billable_cost"]) == ("0.23600000", "0.15733333")
 
 
+def _resolved_rule(app: FastAPI, world: World, project: str | None) -> tuple[str | None, dict]:
+    """What billing picks for tenant A's event at EVENT_AT in `project` (a public id; internal
+    id passed on, as `usage_billing` does), and its amounts."""
+    factory = app.state.session_factory
+    tenant = select(Tenant.id).where(Tenant.public_id == world.tenants["tenant-a"])
+    meter_type = select(UsageMeterType.id).where(UsageMeterType.code == "LLM_TOKEN")
+    with factory() as session:
+        tenant_id = session.execute(tenant).scalar_one()
+        meter_type_id = session.execute(meter_type).scalar_one()
+        project_id = None
+        if project is not None:
+            found = select(Project.id).where(Project.public_id == project)
+            project_id = session.execute(found).scalar_one()
+        resolution = resolve_charge_inputs(
+            session,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            provider_code="anthropic",
+            model_code="claude-x",
+            meter_type_id=meter_type_id,
+            occurred_at=T0 + dt.timedelta(hours=1),
+            locking=True,
+        )
+        session.commit()
+    billed = price_resolved(resolution, TOKENS)
+    rule = resolution.pricing_rule
+    amounts = {name: format(getattr(billed, name), "f") for name in AMOUNT_FIELDS}
+    return (rule.public_id if rule is not None else None), amounts
+
+
+def test_a_preview_with_a_project_picks_the_rule_billing_picks(client, admin, app, world) -> None:
+    """Design gate #507 v4 §2「接口」: given a project, the preview resolves all eight levels for
+    an event of that project, exactly as billing does; another project of the same customer
+    falls through to the customer level."""
+    world.price()
+    world.fx()
+    world.rule(multiplier="2")
+    customer_rule = world.rule(PricingScope.CUSTOMER, multiplier="3")
+    chatbot = world.project("Fictional AI Chatbot")
+    api = world.project("Fictional AI API")
+    project_rule = world.rule(PricingScope.PROJECT, project=chatbot, multiplier="4")
+    model_rule = world.rule(PricingScope.PROJECT_PROVIDER_MODEL, project=api, rates=FIXED_MYR_RATES)
+
+    for project, expected in (
+        (chatbot, (project_rule, "PROJECT")),
+        (api, (model_rule, "PROJECT_PROVIDER_MODEL")),
+    ):
+        data = preview(client, admin, request_body(world, project_id=project))
+        rule_id, amounts = _resolved_rule(app, world, project)
+
+        assert (data["pricing_rule"]["id"], data["pricing_rule"]["priority_scope"]) == expected
+        assert data["pricing_rule"]["id"] == rule_id
+        for name in AMOUNT_FIELDS:
+            assert data[name] == amounts[name], name
+    without = preview(client, admin, request_body(world))
+    assert without["pricing_rule"]["id"] == customer_rule
+    assert without["billable_cost"] == "0.23600000"
+
+
+def test_a_preview_without_a_project_is_unchanged(client, admin, app, world) -> None:
+    """No project: the three project levels are not looked at (a project with no rule of its
+    own); the result is what resolution gives with `project_id=None`."""
+    world.price()
+    world.fx()
+    customer_rule = world.rule(PricingScope.CUSTOMER, multiplier="3")
+    world.rule(PricingScope.PROJECT, project=world.project("Fictional AI Chatbot"), multiplier="4")
+    unruled = world.project("Fictional AI API")
+
+    without = preview(client, admin, request_body(world))
+    with_unruled = preview(client, admin, request_body(world, project_id=unruled))
+    rule_id, amounts = _resolved_rule(app, world, None)
+
+    assert without["pricing_rule"]["id"] == rule_id == customer_rule
+    assert without == with_unruled
+    for name in AMOUNT_FIELDS:
+        assert without[name] == amounts[name], name
+
+
 # --- error states: 200 with what was resolved ------------------------------------------
 
 
@@ -708,6 +802,30 @@ def test_an_unknown_customer_or_meter_type_is_404(client, admin, world) -> None:
     unknown_type = request_body(world, usage_type="NO_SUCH_TYPE")
     response = client.post(PREVIEW, json=unknown_type, headers=admin)
     assert (response.status_code, error_code(response)) == (404, "USAGE_METER_TYPE_NOT_FOUND")
+
+
+def test_a_project_outside_the_customer_is_404(client, admin, world) -> None:
+    """Design gate #507 v4 §2「接口」: customer → project → meter type, the first wrong one."""
+    world.price()
+    world.fx()
+    world.rule()
+    mine = world.project("Fictional AI Chatbot")
+    theirs = world.project("Fictional elsewhere", tenant="tenant-b")
+
+    cases = [
+        (request_body(world, project_id=theirs), "PROJECT_NOT_FOUND"),
+        (request_body(world, project_id=ZERO_ID), "PROJECT_NOT_FOUND"),
+        (request_body(world, project_id=theirs, usage_type="NO_SUCH_TYPE"), "PROJECT_NOT_FOUND"),
+        (request_body(world, customer_id=ZERO_ID, project_id=mine), "CUSTOMER_NOT_FOUND"),
+        (request_body(world, customer_id=ZERO_ID, project_id=ZERO_ID), "CUSTOMER_NOT_FOUND"),
+        (
+            request_body(world, project_id=mine, usage_type="NO_SUCH_TYPE"),
+            "USAGE_METER_TYPE_NOT_FOUND",
+        ),
+    ]
+    for body, code in cases:
+        response = client.post(PREVIEW, json=body, headers=admin)
+        assert (response.status_code, error_code(response)) == (404, code), body
 
 
 def test_an_out_of_range_result_is_422(client, admin, world) -> None:
