@@ -21,9 +21,9 @@ UPDATE`，之后的读全是加锁读、校验与写入都在锁内 —— 不�
 不参与时间线。每次发布、停用写完后，在同一事务里加锁重读该范围的全部已发布规则
 复查区间，不满足就抛错、整体回滚。
 
-⚠️ 审计的前后状态里，客户用租户 `public_id`，供应商、模型、分量一律用 `code`，规则用
-`public_id`，人用邮箱；不用内部 id（设计 §2「审计」）。这一层不写日志：应用日志不打印分量明细
-（设计 §6）。
+⚠️ 审计的前后状态里，客户用租户 `public_id`，项目用项目 `public_id`，供应商、模型、分量
+一律用 `code`，规则用 `public_id`，人用邮箱；不用内部 id（设计 §2「审计」）。这一层不写
+日志：应用日志不打印分量明细（设计 §6）。
 """
 
 from __future__ import annotations
@@ -61,6 +61,7 @@ from app.schemas.pricing_rules import (
 from app.services.ai_catalog import ModelNotFound, ProviderNotFound, boundary_after
 from app.services.auth import RequestContext, record_audit, utc_now
 from app.services.customers import CustomerNotFound
+from app.services.integration_access import ProjectNotFound
 from app.services.provider_prices import CatalogItemRetired, MeterComponentNotFound
 
 # 审计的 entity_type；entity_id 是规则的 public_id。
@@ -226,13 +227,16 @@ def _view(session: Session, row: PricingRule, *, lock: bool = False) -> PricingR
 
 
 def _scope_state(row: PricingRule, found: ScopeRows) -> dict[str, object]:
-    """Audit form of the scope: tenant public id, provider and model codes (设计 §2「审计」)."""
+    """Audit form of the scope: tenant and project public ids, provider and model codes
+    (设计 §2「审计」；项目见设计闸门 #507 v4 §2「接口」)."""
     tenant = found.tenants.get(row.tenant_id) if row.tenant_id is not None else None
+    project = found.projects.get(row.project_id) if row.project_id is not None else None
     provider = found.providers.get(row.provider_id) if row.provider_id is not None else None
     model = found.models.get(row.model_id) if row.model_id is not None else None
     return {
         "priority_scope": PricingScope(row.priority_scope).value,
         "customer_id": tenant.public_id if tenant is not None else None,
+        "project_id": project.public_id if project is not None else None,
         "provider_code": provider.code if provider is not None else None,
         "model_code": model.code if model is not None else None,
     }
@@ -294,17 +298,18 @@ def _rule_content(
 def _require_scope_fields(
     priority_scope: PricingScope,
     customer_id: str | None,
+    project_id: str | None,
     provider_id: str | None,
     model_id: str | None,
 ) -> None:
     """设计 §2「接口」：范围字段与 `priority_scope` 不匹配（多给或少给）→ 422。
 
-    ⚠️ 项目级要 `project_id`（`required_scope_fields`），而本函数还不收项目（AIH-TASK-138
-    起），所以三个项目级在这里一律 422。
+    三个项目级要 `customer_id` 与 `project_id`，其余五级不许带 `project_id`
+    （`required_scope_fields`，设计闸门 #507 v4 §2「接口」）。
     """
     given = {
         "customer_id": customer_id,
-        "project_id": None,
+        "project_id": project_id,
         "provider_id": provider_id,
         "model_id": model_id,
     }
@@ -473,6 +478,14 @@ def _require_rule(session: Session, rule_id: str, *, for_update: bool = False) -
     return row
 
 
+def _require_project(session: Session, tenant_id: int, project_id: str) -> int:
+    """The project's internal id under the customer; absent or another customer's: 404."""
+    project = tenancy.get_project_for_tenant(session, tenant_id, project_id)
+    if project is None:
+        raise ProjectNotFound
+    return project.id
+
+
 def _require_draft(row: PricingRule) -> None:
     status = _status(row)
     if status in _FINAL_STATUSES:
@@ -494,21 +507,25 @@ def create_draft(
     components: Sequence[RuleComponentInput] | None,
     context: RequestContext,
     clock: Clock = utc_now,
+    project_id: str | None = None,
 ) -> PricingRuleView:
     """A draft, its components and `PRICING_CREATE` in one commit.
 
-    范围字段与 `priority_scope` 不匹配、策略与字段混合：422 `VALIDATION_ERROR`。客户不存在
-    404 `CUSTOMER_NOT_FOUND`；供应商不存在 404 `AI_PROVIDER_NOT_FOUND`；模型不存在或不属于它
-    404 `AI_MODEL_NOT_FOUND`；分量代码不在目录里 404 `USAGE_METER_COMPONENT_NOT_FOUND`；
-    供应商、模型或分量所属计量类型已停用 409 `CATALOG_ITEM_RETIRED`。都不写。草稿可以
-    不完整：完整性在发布时校验。
+    `project_id` 是项目的 `public_id`，三个项目级必须与 `customer_id` 同时给（设计闸门 #507 v4
+    §2「接口」）。范围字段与 `priority_scope` 不匹配、策略与字段混合：422 `VALIDATION_ERROR`。
+    客户不存在 404 `CUSTOMER_NOT_FOUND`；项目不存在或不属于该客户 404 `PROJECT_NOT_FOUND`；
+    供应商不存在 404 `AI_PROVIDER_NOT_FOUND`；模型不存在或不属于它 404 `AI_MODEL_NOT_FOUND`
+    （几个都不对时按这个顺序报第一个）；分量代码不在目录里 404
+    `USAGE_METER_COMPONENT_NOT_FOUND`；供应商、模型或分量所属计量类型已停用 409
+    `CATALOG_ITEM_RETIRED`。都不写。草稿可以不完整：完整性在发布时校验。
     """
-    _require_scope_fields(priority_scope, customer_id, provider_id, model_id)
+    _require_scope_fields(priority_scope, customer_id, project_id, provider_id, model_id)
     _require_strategy_fields(strategy, markup_multiplier, components)
     requested = list(components or [])
     with session_scope(session_factory) as session:
         now = _seconds(clock())
         tenant_pk: int | None = None
+        project_pk: int | None = None
         provider: AiProvider | None = None
         model: AiModel | None = None
         if customer_id is not None:
@@ -516,6 +533,8 @@ def create_draft(
             if tenant is None:
                 raise CustomerNotFound
             tenant_pk = tenant.id
+        if project_id is not None and tenant_pk is not None:
+            project_pk = _require_project(session, tenant_pk, project_id)
         if provider_id is not None:
             provider = catalog.get_provider(session, provider_id)
             if provider is None:
@@ -529,7 +548,7 @@ def create_draft(
         scope = Scope(
             priority_scope,
             tenant_pk,
-            None,
+            project_pk,
             provider.id if provider is not None else None,
             model.id if model is not None else None,
         )
@@ -870,14 +889,21 @@ def list_pricing_rules(
     status: PricingRuleStatus | None,
     page: int,
     page_size: int,
+    project_id: str | None = None,
 ) -> Page[PricingRuleView]:
     """By scope (§16 order), then `effective_from`; each with its components (§59 price history).
 
-    筛选里的客户不存在 404 `CUSTOMER_NOT_FOUND`；供应商不存在 404 `AI_PROVIDER_NOT_FOUND`；模型
-    不存在（或给了供应商、模型却不属于它）404 `AI_MODEL_NOT_FOUND`。
+    筛选的 `project_id`（项目 `public_id`）只能与 `customer_id` 一起给，单独给 422
+    `VALIDATION_ERROR`（设计闸门 #507 v4 §2「接口」）。筛选里的客户不存在 404
+    `CUSTOMER_NOT_FOUND`；项目不存在或不属于该客户 404 `PROJECT_NOT_FOUND`；供应商不存在 404
+    `AI_PROVIDER_NOT_FOUND`；模型不存在（或给了供应商、模型却不属于它）404
+    `AI_MODEL_NOT_FOUND`。几个都不对时按这个顺序报第一个。
     """
+    if project_id is not None and customer_id is None:
+        raise PricingRuleShapeInvalid("project_id is a filter only together with customer_id.")
     with session_factory() as session:
         tenant_pk: int | None = None
+        project_pk: int | None = None
         provider_pk: int | None = None
         model_pk: int | None = None
         if customer_id is not None:
@@ -885,6 +911,8 @@ def list_pricing_rules(
             if tenant is None:
                 raise CustomerNotFound
             tenant_pk = tenant.id
+            if project_id is not None:
+                project_pk = _require_project(session, tenant_pk, project_id)
         if provider_id is not None:
             provider = catalog.get_provider(session, provider_id)
             if provider is None:
@@ -902,6 +930,7 @@ def list_pricing_rules(
             session,
             priority_scope=priority_scope,
             tenant_id=tenant_pk,
+            project_id=project_pk,
             provider_id=provider_pk,
             model_id=model_pk,
             status=status,

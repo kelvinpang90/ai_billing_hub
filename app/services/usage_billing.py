@@ -361,6 +361,8 @@ def _process(session: Session, claim: Claim, clock: Clock) -> Outcome:
     resolution = resolve_charge_inputs(
         session,
         tenant_id=event.tenant_id,
+        # 事件的项目由集成凭据派生（§11），项目级规则只给本项目的事件计费（设计闸门 #507 v4）。
+        project_id=event.project_id,
         provider_code=event.provider_code_raw,
         model_code=event.model_code_raw,
         meter_type_id=event.usage_meter_type_id,

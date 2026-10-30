@@ -8,8 +8,10 @@ Two groups:
   zero billed amount; overflow; and a static scan of the module's source;
 - **integration** (SQLite, services under a frozen clock): the error order and its detail codes,
   no falling through a FIXED_RATE rule that lacks the event's components, aliases, tenants never
-  seeing each other's rules, the lock order of `locking=True` / `locking=False`, and
-  `reprice_from_snapshot` reproducing the result after newer versions are published.
+  seeing each other's rules, project rules (design gate #507 v4: no falling through a project
+  FIXED_RATE rule, the same amounts as a customer rule with the same terms), the lock order of
+  `locking=True` / `locking=False`, and `reprice_from_snapshot` reproducing the result after
+  newer versions are published.
 
 The preview endpoint is in test_pricing_preview_api.py. Prices, rates and multipliers are
 fictional; no uuid literal other than the all-zero placeholder appears.
@@ -34,7 +36,7 @@ from app.models.ai_catalog import SEED_METER_TYPES, UsageMeterComponent, UsageMe
 from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base, quantize_money
 from app.models.pricing_rules import PricingScope, PricingStrategy
-from app.models.tenancy import Tenant
+from app.models.tenancy import Project, Tenant
 from app.repositories import ai_catalog as catalog_repository
 from app.repositories import fx_rates as fx_repository
 from app.repositories import pricing_rules as rule_repository
@@ -525,6 +527,29 @@ class World:
             clock=clock,
         )
         self.tenants = {name: make_tenant(factory, name) for name in ("tenant-a", "tenant-b")}
+        # Two projects of tenant-a, by name → public id.
+        self.projects = {name: self._project("tenant-a", name) for name in ("p1", "p2")}
+
+    def _project(self, tenant: str, name: str) -> str:
+        public_id = str(uuid.uuid4())
+        tenant_id = self.tenant_id(tenant)
+        with self.factory() as session:
+            session.add(
+                Project(
+                    public_id=public_id,
+                    tenant_id=tenant_id,
+                    name=f"Fictional {name}",
+                    created_at=T0,
+                    updated_at=T0,
+                )
+            )
+            session.commit()
+        return public_id
+
+    def project_id(self, project: str) -> int:
+        statement = select(Project.id).where(Project.public_id == self.projects[project])
+        with self.factory() as session:
+            return int(session.execute(statement).scalar_one())
 
     def price(
         self,
@@ -587,11 +612,13 @@ class World:
         scope: PricingScope = PricingScope.GLOBAL,
         *,
         tenant: str = "tenant-a",
+        project: str = "p1",
         multiplier: str = "2",
         rates: Mapping[str, str] | None = None,
         unit: str = PER_MILLION,
     ) -> str:
-        """MARKUP with `multiplier` unless `rates` is given (then FIXED_RATE)."""
+        """MARKUP with `multiplier` unless `rates` is given (then FIXED_RATE). `project` is used
+        by the project levels only."""
         components = None
         if rates is not None:
             components = [
@@ -605,6 +632,7 @@ class World:
             actor=self.admin,
             priority_scope=scope,
             customer_id=self.tenants[tenant] if scope.has_customer else None,
+            project_id=self.projects[project] if scope.has_project else None,
             provider_id=self.provider.id if scope.has_provider else None,
             model_id=self.model.id if scope.has_model else None,
             strategy=PricingStrategy.MARKUP if rates is None else PricingStrategy.FIXED_RATE,
@@ -657,15 +685,19 @@ class World:
         model: str = "claude-x",
         meter: str = "LLM_TOKEN",
         tenant: str = "tenant-a",
+        project: str | None = None,
         occurred_at: dt.datetime = EVENT_AT,
         locking: bool = True,
     ) -> ChargeResolution:
-        """One billing-side resolution in a transaction of its own."""
+        """One billing-side resolution in a transaction of its own. `project`: the event's
+        project by name (tenant-a's); `None` resolves without a project."""
         tenant_id, meter_type_id = self.tenant_id(tenant), self.meter_type_id(meter)
+        project_id = self.project_id(project) if project is not None else None
         with self.factory() as session:
             resolution = resolve_charge_inputs(
                 session,
                 tenant_id=tenant_id,
+                project_id=project_id,
                 provider_code=provider,
                 model_code=model,
                 meter_type_id=meter_type_id,
@@ -837,6 +869,64 @@ def test_a_customer_rule_never_prices_another_tenant(world) -> None:
     # 0.07866666666588 × 3 = 0.23599999999764; × 2 = 0.15733333333176.
     assert text(price_resolved(a, TOKENS).billable_cost) == "0.23600000"
     assert text(price_resolved(b, TOKENS).billable_cost) == "0.15733333"
+
+
+def test_a_project_fixed_rate_rule_without_the_meter_type_does_not_fall_through(world) -> None:
+    """Design gate #507 v4 §5: a project FIXED_RATE rule that lacks LLM_TOKEN wins for its own
+    project's event — MISSING_RULE_COMPONENT, not the customer MARKUP rule below it. The same
+    customer's other project, and an event without a project, are priced by the customer rule."""
+    world.price()
+    world.fx()
+    customer_rule = world.rule(PricingScope.CUSTOMER, multiplier="3")
+    project_rule = world.rule(
+        PricingScope.PROJECT, project="p1", rates={"AUDIO_SECOND": "0.05"}, unit="1"
+    )
+
+    resolution = world.resolve(project="p1")
+
+    failed(resolution, ChargeStatus.PRICING_ERROR, PricingErrorCode.MISSING_RULE_COMPONENT)
+    assert resolution.pricing_rule is not None
+    assert resolution.pricing_rule.public_id == project_rule
+    assert resolution.pricing_rule.priority_scope is PricingScope.PROJECT
+    for other in (world.resolve(project="p2"), world.resolve()):
+        assert other.status is ChargeStatus.PRICED
+        assert other.pricing_rule is not None
+        assert other.pricing_rule.public_id == customer_rule
+
+
+@pytest.mark.parametrize(
+    ("project_level", "customer_level", "rates", "billable"),
+    [
+        (PricingScope.PROJECT, PricingScope.CUSTOMER, None, "0.23600000"),
+        (
+            PricingScope.PROJECT_PROVIDER_MODEL,
+            PricingScope.CUSTOMER_PROVIDER_MODEL,
+            FIXED_MYR_RATES,
+            "0.02360000",
+        ),
+    ],
+    ids=["markup", "fixed-rate"],
+)
+def test_a_project_rule_bills_what_the_same_customer_rule_bills(
+    world, project_level, customer_level, rates, billable
+) -> None:
+    """Design gate #507 v4 §7 "amount precision": a project rule and a customer rule with the
+    same terms give bit-identical results — only the scope differs."""
+    world.price()
+    world.fx()
+    project_rule = world.rule(project_level, project="p1", multiplier="3", rates=rates)
+    customer_rule = world.rule(customer_level, multiplier="3", rates=rates)
+
+    by_project, by_customer = world.resolve(project="p1"), world.resolve(project="p2")
+
+    assert by_project.pricing_rule is not None and by_customer.pricing_rule is not None
+    assert by_project.pricing_rule.public_id == project_rule
+    assert by_customer.pricing_rule.public_id == customer_rule
+    project_result = price_resolved(by_project, TOKENS)
+    customer_result = price_resolved(by_customer, TOKENS)
+    assert project_result == customer_result
+    assert repr(project_result) == repr(customer_result)
+    assert text(project_result.billable_cost) == billable
 
 
 def _recorder(

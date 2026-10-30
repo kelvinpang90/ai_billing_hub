@@ -1,7 +1,7 @@
 # Acuven Central AI Billing Platform
 ## Product Requirements & Technical Implementation Specification
 
-**Version:** 1.9  
+**Version:** 1.10  
 **Status:** V1 Development Specification — Revised after architecture and financial review  
 **Owner:** Acuven Technology Sdn Bhd  
 **Primary Market:** Malaysia  
@@ -22,6 +22,7 @@
 | 1.7 | 2026-09-21 | Traceability only, no normative change. Four rules that were already stated normatively now also carry an identifier so implementation, migrations, and tests can reference them: `REQ-PRIV-002` (§69, Invariant 7), `REQ-TXN-001` (§74.6, Invariant 13), `REQ-TAX-001` (§45.1, SST/accounting launch gate), and `REQ-LAUNCH-001` (§47, real-account integration launch gate). Each added paragraph restates the rule of the section it sits in; no existing sentence was moved, merged, or reworded, and no requirement was added, tightened, or relaxed. |
 | 1.8 | 2026-10-12 | Normative. Added **§141 AI Module**: the system-side AI API, formerly the separate `acuven_ai_api` service, runs inside this platform as one process, one deployment and one database, with the AI caller identity unified into the tenant project (product owner decisions of 2026-10-12; rationale and costs in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; implementation design in design gate #281). Amended to match: §2.1 (the AI Module is the one exception to the trust-domain separation), §3.3 and §126 (pilot addenda), §11 and §79 (optional `feature` label on usage events), §121 (two out-of-scope items, the example in the customer-operated-backend item, and the central AI Gateway item now scoped to Integrated Application Backends), §135 (the AI Module is a model-call API for Acuven's own module backends only; its request path follows §141.5), §139.1 (`REQ-AVAIL-001` primary sections), and the scope of `REQ-AVAIL-001` / Invariant 1 for the AI Module in §1, §119 and §133. |
 | 1.9 | 2026-10-17 | Normative, one rule. §45.1 previously required accounting/tax advice before Phase 4. It now also allows the decision maker to approve the tax treatment directly when Acuven has no accounting or tax adviser engaged; the ADR must state that no adviser was consulted, and the treatment must be re-reviewed once an adviser is engaged or when taxable turnover approaches the SST registration threshold. The six questions, the approval requirement, `REQ-TAX-001`, and the ban on inventing a tax rate are unchanged. See ADR-0008 §5. |
+| 1.10 | 2026-10-30 | Normative. Pricing rules can be scoped to one project of a customer (design gate #507 v4, product owner decision of 2026-10-30). **§16** resolution order is now eight levels: three project levels (project + provider + model, project + provider, project default) before the five existing ones; a project-level rule only matches events of its own project, a project without one is resolved from the customer levels exactly as before, and a matched `FIXED_RATE` rule lacking a component does not fall through. **§59** an admin can assign a pricing rule to one project of a customer. **§74.3** `pricing_rules` gains `project_id`. **§141** states the convention "one project corresponds to one module of one product line" (not stored as data) and that pricing per project is done with project-level rules. |
 
 ## Document Navigation
 
@@ -750,9 +751,15 @@ All required components for an event must resolve to a published price. A missin
 
 # 16. Pricing Rule Resolution
 
-Required V1 precedence:
+Required V1 precedence (eight levels, highest first; the first level with a rule in effect wins):
 
 ```text
+Project + Provider + Model specific rule
+        ↓
+Project + Provider default rule
+        ↓
+Project default rule
+        ↓
 Customer + Provider + Model specific rule
         ↓
 Customer + Provider default rule
@@ -763,6 +770,10 @@ Global Provider + Model rule
         ↓
 Global default
 ```
+
+A project-level rule belongs to one project of one customer and only ever matches usage events of that project (the event's project is derived from its integration credential, §11). It never prices another project of the same customer, nor any other customer's events. When the event's project has no project-level rule in effect, resolution starts at the customer levels and selects exactly the rule it would have selected without the project levels.
+
+Once a level has a rule in effect, that rule is selected; a matched `FIXED_RATE` rule that lacks a component the event needs is a pricing error and does not fall through to a lower level.
 
 Do not silently bill if no valid price is resolvable.
 
@@ -2211,6 +2222,7 @@ Admin can manage:
 Admin can:
 
 - assign pricing rule to customer
+- assign pricing rule to one project of a customer (project levels of §16; the project must belong to that customer)
 - assign specific model rule
 - choose MARKUP
 - choose FIXED_RATE
@@ -2659,6 +2671,7 @@ pricing_rules
   id
   public_id
   tenant_id nullable
+  project_id nullable
   provider_id nullable
   model_id nullable
   strategy: MARKUP | FIXED_RATE
@@ -2686,6 +2699,8 @@ pricing_rule_components
 For `MARKUP`, `markup_multiplier` is required and FIXED_RATE components are absent. For `FIXED_RATE`, the multiplier is absent and all applicable price components are required. Database and service validation must reject mixed or incomplete strategy data.
 
 Published effective intervals of the same pricing scope must not overlap. Scope fields and `priority_scope` must encode the mandatory resolution order in §16 without ambiguous nullable combinations.
+
+`project_id` is set exactly on the three project levels of §16, which also carry `tenant_id`; the database guarantees that the project belongs to that tenant (a composite foreign key to the project and its tenant). Two projects of one customer are two pricing scopes, each with its own timeline.
 
 ## 74.4 integration_credentials
 
@@ -4668,6 +4683,8 @@ Any implementation that violates these priorities should be treated as architect
 Added in v1.8 (2026-10-12; feature definitions moved to the calling module backends on 2026-10-13). The product owner's decisions are recorded in `acuven_hub/DECISIONS.md` (E-17 to E-20) and in design gate #281 §10; the rationale and costs are in `docs/adr/ADR-0012-ai-module-in-billing-process.md`; the implementation design is design gate #281.
 
 The system-side AI API, formerly built as the separate `acuven_ai_api` service, runs inside this platform as the **AI Module**: one application, one deployment, one database. It stays a product line of its own, separate from AI Chatbot, and the two are priced separately per project. Chatbot backends remain external Integrated Application Backends that call AI providers directly; they never call providers through the AI Module.
+
+Convention (product owner, 2026-10-30): one project corresponds to one module of one product line. The product line and module are not stored on the project; the convention only says how projects are created. Pricing per project is done with the project-level pricing rules of §16: a customer whose AI Chatbot project and AI API project use the same model is priced differently for each by a rule on each project, and a project without its own rule is priced by the customer's rules as before.
 
 ## 141.1 Boundary
 
