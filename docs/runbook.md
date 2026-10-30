@@ -771,9 +771,26 @@ billing_nginx nginx -T | grep -A4 integration` 核对挂载的配置），按「
 §2「状态机」「重新入队」「告警维度」「认领、租约与防护令牌」、§5、§8）；接口契约见
 [api.md](api.md#管理端用量事件重新入队)，表、触发器与锁顺序见 [database-schema.md](database-schema.md)。**
 
-计费 worker 由 celery-beat 的两个条目驱动：`usage-billing-sweep` 每 10 秒认领并计费到期的事件（`RECEIVED`，或退避
-到期的 `FAILED_RETRYABLE`），`usage-stale-recovery` 每 60 秒回收租约已过期的 `PROCESSING`。摄取端不入队：**数据库里的
-事件状态就是待办清单**，Redis / Celery / Beat 丢了、停了，恢复后第一轮扫描接着做，什么都不丢、不重复扣。
+计费 worker 由 celery-beat 的 N + 1 个条目驱动：`usage-billing-sweep-1` … `usage-billing-sweep-N` 每 10 秒一起派出
+N 个扫描，认领并计费到期的事件（`RECEIVED`，或退避到期的 `FAILED_RETRYABLE`），`usage-stale-recovery` 每 60 秒回收
+租约已过期的 `PROCESSING`。摄取端不入队：**数据库里的事件状态就是待办清单**，Redis / Celery / Beat 丢了、停了，恢复后
+第一轮扫描接着做，什么都不丢、不重复扣。
+
+**扫描并行与扫描名额**（AIH-TASK-141，设计闸门 #522 v4，[AIH-TASK-141-billing-sweep-parallelism.md](design/AIH-TASK-141-billing-sweep-parallelism.md)）：
+
+- N 是 `app/core/celery_app.py` 的常量 `USAGE_BILLING_SWEEP_PARALLELISM`（当前 2）。每个扫描先抢一个「扫描名额」：MySQL
+  命名锁 `<库名>:usage-billing-sweep:<i>`（`i = 1 … N`，`GET_LOCK` 超时 0，库名让压测库、测试库不与生产库抢同一组名额）。
+  **抢不到就立即返回 0、不认领任何事件**；所以同时计费的扫描最多 N 个，扫描跨过 10 秒周期（等锁、积压大）时新派的扫描
+  几毫秒内返回，积压留到名额释放后的下一轮。
+- 扫描在认领每一批、处理每个事件之前确认名额仍在（`IS_USED_LOCK(name) = CONNECTION_ID()`）；名额连接断开（网络、被
+  KILL、MySQL 重启）时扫描停下、记 warning，本批没处理的事件留在 `PROCESSING`，租约（120 秒）过期后由卡住回收放回、
+  再被认领计费。抢名额时 `GET_LOCK` 返回 NULL 或出错：这一轮跳过、记 warning，下一个 10 秒再来。释放失败时名额连接被
+  丢弃，MySQL 随连接断开释放命名锁。子进程崩溃时命名锁随连接自动释放，没有要清理的残留。
+- 查看谁占着名额（排障）：`SELECT IS_USED_LOCK(CONCAT(DATABASE(), ':usage-billing-sweep:', 1));`（2 同理），返回占用者的
+  连接 id，空闲时为 NULL。
+- celery-worker 的并发默认 **3**；⚠️ `BILLING_CELERY_CONCURRENCY` **必须至少比 N 多 1**。调小到 ≤ 2 时，积压期间两个扫描
+  占满全部子进程，其他周期任务（状态推送等）排在后面、过期的触发被丢弃等下一个周期：不丢数据，只是延迟变大。
+  见 [deployment.md](deployment.md) 3.2「celery-worker 并发与计费扫描并行数」。
 
 ### 上线前要做的（合并部署之前）
 

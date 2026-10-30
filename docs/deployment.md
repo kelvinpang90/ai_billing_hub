@@ -260,12 +260,31 @@ worker。**但生产 VPS 只有 1 核**（第 3.1 节），那条结论**不转�
 
 | 进程 | 默认行为 | 后果 | 已钉成 |
 | --- | --- | --- | --- |
-| celery worker | 并发 = **宿主机 CPU 核数**，每个 prefork 子进程都 import 一遍应用 | 本地（20 核）加上 384m 限额后起了 20 个子进程，**崩溃重启 4 次**；而 `docker inspect` 的 `OOMKilled` 还是 **false**（被杀的是子进程，主进程自己退了 0）—— 一条完全指不回原因的现象 | `--concurrency=2` |
+| celery worker | 并发 = **宿主机 CPU 核数**，每个 prefork 子进程都 import 一遍应用 | 本地（20 核）加上 384m 限额后起了 20 个子进程，**崩溃重启 4 次**；而 `docker inspect` 的 `OOMKilled` 还是 **false**（被杀的是子进程，主进程自己退了 0）—— 一条完全指不回原因的现象 | `--concurrency=${BILLING_CELERY_CONCURRENCY:-3}`（见下面「celery-worker 并发与计费扫描并行数」） |
 | MySQL | buffer pool 默认 128M，但换台大内存机器会自己长大 | 撞限额时表现成「数据库随机重启」 | `--innodb-buffer-pool-size=128M` |
 | Redis | 不知道天花板，一直收到被 OOM kill | 进程整个消失；投递触发丢掉（INV-14 会补，但每次要等最多一分钟） | `maxmemory 64mb` + `allkeys-lru` |
 
 ⚠️ **`OOMKilled=false` 不等于「没有内存问题」** —— 它只说明**主进程**没被杀。
 这一条值得记住：排障时看到 false 很容易就把内存排除掉了。
+
+#### celery-worker 并发与计费扫描并行数
+
+依据：设计闸门 #522 v4（[AIH-TASK-141-billing-sweep-parallelism.md](design/AIH-TASK-141-billing-sweep-parallelism.md)
+§2、§5、§8）。
+
+- celery-beat 每 10 秒派 N 个计费扫描（条目 `usage-billing-sweep-1` … `usage-billing-sweep-N`，同一个任务
+  `app.tasks.usage_billing.bill_pending_events`，`expires` 9 秒）。N 是 `app/core/celery_app.py` 的常量
+  `USAGE_BILLING_SWEEP_PARALLELISM`，当前为 **2**；它是代码常量，不是 `.env` 配置项。
+- 每个扫描先抢一个「扫描名额」：MySQL 命名锁 `<库名>:usage-billing-sweep:<i>`（`i = 1 … N`，`GET_LOCK` 超时 0）。
+  **抢不到就立即返回 0、不认领任何事件**，所以同时计费的扫描最多 N 个，与扫描各自跑了多久无关。
+- celery-worker 的默认并发是 **3**（`--concurrency=${BILLING_CELERY_CONCURRENCY:-3}`）：计费最多占 2 个子进程，至少留 1 个
+  给其他周期任务（状态 webhook 推送、outbox 恢复、卡住回收、AI 用量投递、余额核对、汇率拉取）。
+- ⚠️ **`BILLING_CELERY_CONCURRENCY` 必须至少比 `USAGE_BILLING_SWEEP_PARALLELISM` 多 1**（现在即 ≥ 3）。调小到 ≤ 2 的后果：
+  积压时两个扫描占满全部子进程，其他周期任务要排在扫描后面，超过各自 `expires` 的触发被丢弃、等下一个周期；
+  **不丢数据**（这些任务都是「库里是事实、触发可丢」），只是状态推送等的延迟变大。没有专门告警，
+  `tests/backend/test_compose.py` 守住默认值。改 `USAGE_BILLING_SWEEP_PARALLELISM` 时要同时改 compose 的默认并发。
+- 内存：每个 prefork 子进程约 100 MiB RSS，并发 3 预计约 280 MiB，在 celery-worker 的 768 MiB 之内；CPU 配额不变。
+- 生产 `.env` 没有设 `BILLING_CELERY_CONCURRENCY`，部署后直接取默认值 3，无管理员步骤。
 
 ### 3.3 实测生效的限额
 

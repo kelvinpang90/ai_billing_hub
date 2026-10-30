@@ -20,6 +20,15 @@ Rows of design §7 covered here:
   **事件与账本对应**, **重新入队时账本无行**, and **重复处理** (a processed event forced back to
   RECEIVED) — direct SQL, refused by migration 0018's CHECKs and triggers.
 
+Rows of design gate #522 v4 §7 (AIH-TASK-141, sweep slots — MySQL named locks):
+
+- **并发：两个扫描并行、余额跨零** — two sweeps with `parallelism=2` bill 120 events of a tenant
+  left with 100.5 events' worth: one ledger row each, the balance follows, SUSPENDED with
+  `status_version` + 1 exactly once; **幂等重放** at its end (two more sweeps change nothing);
+- **名额：抢不到就不认领**, **跨周期时第三个扫描立即返回**, **名额连接中途断开**,
+  **释放失败就丢弃连接**, **扫描抛异常也释放**, **`GET_LOCK` 返回 NULL 或出错**,
+  **确认时返回 0、NULL 或出错** — every case ends with both slots free.
+
 All of it needs `BILLING_TEST_DATABASE_URL`; it skips without it — **a skip is not a pass**, CI
 sets it. The world is built the way test_usage_billing.py builds it (services, frozen clock);
 prices, rates and amounts are fictional exact binary fractions; uuids are zero placeholders.
@@ -29,6 +38,7 @@ from __future__ import annotations
 
 import datetime as dt
 import itertools
+import logging
 import os
 import threading
 import time
@@ -39,7 +49,7 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine, delete, func, select, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.orm import Session, object_session, sessionmaker
 
 from alembic import command
@@ -48,7 +58,7 @@ from app.models.ai_catalog import AiModel, AiModelAlias, AiProvider
 from app.models.auth import User, UserRole, UserStatus
 from app.models.integration import CredentialStatus, IntegrationCredential, ProjectStatusDelivery
 from app.models.pricing_rules import PricingRule, PricingScope, PricingStrategy
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import BillingStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 from app.repositories import fx_rates as fx_repository
@@ -100,6 +110,24 @@ _ER_SIGNAL_EXCEPTION = 1644
 _ER_CHECK_CONSTRAINT_VIOLATED = 3819
 
 _NUMBERS = itertools.count(1)
+
+# Sweep slots (design gate #522 v4 §2): the production parallelism, and the same lock names the
+# implementation builds (the database name keeps them apart from other databases on the server).
+SLOTS = 2
+_SLOT_NAME = usage_billing._SWEEP_SLOT_NAME
+_GET_SLOT = text(f"SELECT GET_LOCK({_SLOT_NAME}, 0)")
+_RELEASE_SLOT = text(f"SELECT RELEASE_LOCK({_SLOT_NAME})")
+_SLOT_IS_FREE = text(f"SELECT IS_FREE_LOCK({_SLOT_NAME})")
+_SLOT_HOLDER = text(f"SELECT IS_USED_LOCK({_SLOT_NAME})")
+# Sessions waiting for a row lock on a table of this database (as _WAITING_ON_TABLE in
+# test_session_revocation_concurrency.py, counted over every waiting thread).
+_WAITERS_ON_TABLE = text(
+    "SELECT COUNT(DISTINCT w.REQUESTING_THREAD_ID) FROM performance_schema.data_lock_waits AS w"
+    " JOIN performance_schema.data_locks AS l"
+    " ON l.ENGINE = w.ENGINE AND l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
+    " WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = :table_name"
+)
+_SLOT_LOGGER = "app.services.usage_billing"
 
 
 class Clock:
@@ -337,12 +365,13 @@ class World:
     def events(self, count: int) -> list[int]:
         return [self.event() for _ in range(count)]
 
-    def bill(self, at: dt.datetime) -> usage_billing.SweepResult:
+    def bill(self, at: dt.datetime, *, parallelism: int | None = None) -> usage_billing.SweepResult:
         return usage_billing.bill_pending_events(
             self.factory,
             lease_seconds=LEASE_SECONDS,
             max_attempts=MAX_ATTEMPTS,
             clock=lambda: at,
+            parallelism=parallelism,
         )
 
     def claim(self, at: dt.datetime = NOW) -> list[Claim]:
@@ -382,6 +411,36 @@ class World:
         with self.factory() as session:
             statement = select(Wallet.balance).where(Wallet.tenant_id == self.tenant_id)
             return session.execute(statement).scalar_one()
+
+    def debit(self, amount: Decimal) -> None:
+        """An admin debit, the way `fund` credits (`amount` positive, posted negative)."""
+        with self.factory() as session:
+            wallet_repository.post_transaction(
+                session,
+                tenant_id=self.tenant_id,
+                transaction_type=TransactionType.ADJUSTMENT_DEBIT,
+                amount=-amount,
+                reference_type=ReferenceType.ADMIN_ADJUSTMENT,
+                reference_id=f"debit-{next(_NUMBERS)}",
+                now=T0,
+                created_by=self.admin.id,
+                description="Fictional debit for a billing test",
+                actor_role="ADMIN",
+            )
+            session.commit()
+
+    def billing_status(self) -> tuple[BillingStatus, int]:
+        with self.factory() as session:
+            statement = select(Tenant.billing_status, Tenant.status_version).where(
+                Tenant.id == self.tenant_id
+            )
+            status, version = session.execute(statement).one()
+            return status, version
+
+    def bill_until_done(self, at: dt.datetime) -> None:
+        """Anything backed off (a deadlock, a lock timeout) is due an hour later: bill it."""
+        while self.bill(at, parallelism=SLOTS).claimed:
+            pass
 
 
 # --- fixtures --------------------------------------------------------------------------
@@ -603,6 +662,325 @@ def test_four_workers_bill_two_hundred_events_and_survive_a_crash(world, monkeyp
     assert world.balance() == OPENING - billed
     with world.factory() as session:
         assert wallet_repository.verify_wallet(session, world.tenant_id) == []
+
+
+# --- sweep slots (design gate #522 v4 §7) --------------------------------------------------
+
+
+def _slot_is_free(engine: Engine, slot: int) -> bool:
+    with engine.connect() as connection:
+        return connection.execute(_SLOT_IS_FREE, {"slot": slot}).scalar() == 1
+
+
+def _assert_slots_free(engine: Engine) -> None:
+    assert [_slot_is_free(engine, slot) for slot in range(1, SLOTS + 1)] == [True] * SLOTS
+
+
+def _hold_slot(engine: Engine, slot: int) -> Connection:
+    """An outside connection holding `slot`; the caller releases it (or invalidates it)."""
+    connection = engine.connect()
+    assert connection.execute(_GET_SLOT, {"slot": slot}).scalar() == 1
+    return connection
+
+
+def _let_go(connection: Connection) -> None:
+    """Drop an outside connection: MySQL releases whatever named lock it still holds."""
+    connection.invalidate()
+    connection.close()
+
+
+def _slot_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == _SLOT_LOGGER
+        and record.levelno == logging.WARNING
+        and "sweep slot" in record.getMessage()
+    ]
+
+
+def _assert_billed_once(world: World, events: list[int]) -> None:
+    """Every event PROCESSED, one AI_USAGE row each (by reference), `verify_wallet` passes."""
+    rows = world.rows()
+    assert sorted(row.id for row in rows) == sorted(events)
+    assert {row.status for row in rows} == {UsageEventStatus.PROCESSED}
+    ledger = world.usage_rows()
+    by_reference = {line.reference_id: line for line in ledger}
+    assert len(ledger) == len(by_reference) == len(events)
+    for row in rows:
+        line = by_reference[row.event_id]
+        assert row.wallet_transaction_id == line.id
+        assert line.amount == -row.billable_cost
+    with world.factory() as session:
+        assert wallet_repository.verify_wallet(session, world.tenant_id) == []
+
+
+def _count(world: World, status: UsageEventStatus) -> int:
+    return sum(1 for row in world.rows() if row.status is status)
+
+
+def _sweep(world: World, at: dt.datetime = NOW) -> usage_billing.SweepResult:
+    return world.bill(at, parallelism=SLOTS)
+
+
+def test_two_sweeps_bill_in_parallel_and_the_balance_crosses_zero_once(world, engine) -> None:
+    """并发：两个扫描并行、余额跨零; 幂等重放 at the end."""
+    world.publish_markup_usd()
+    # 100.5 events' worth left: the 101st debit takes the balance from positive to ≤ 0.
+    world.debit(OPENING - (100 * MARKUP_BILLABLE + MARKUP_BILLABLE / 2))
+    opening = world.balance()
+    assert opening == 100 * MARKUP_BILLABLE + MARKUP_BILLABLE / 2
+    status_before, version_before = world.billing_status()
+    assert status_before is BillingStatus.ACTIVE
+    events = world.events(120)
+
+    first, second = run_in_threads(
+        lambda: world.bill(NOW, parallelism=SLOTS), lambda: world.bill(NOW, parallelism=SLOTS)
+    )
+
+    assert isinstance(first, usage_billing.SweepResult), first
+    assert isinstance(second, usage_billing.SweepResult), second
+    assert first.claimed >= 1 and second.claimed >= 1
+    later = NOW + dt.timedelta(hours=1)
+    world.bill_until_done(later)
+
+    _assert_billed_once(world, events)
+    billed = sum((row.billable_cost for row in world.rows()), Decimal(0))
+    assert billed == 120 * MARKUP_BILLABLE
+    assert world.balance() == opening - billed
+    # Only one debit saw the balance go from positive to ≤ 0.
+    assert world.billing_status() == (BillingStatus.SUSPENDED, version_before + 1)
+    _assert_slots_free(engine)
+
+    # 幂等重放: two more sweeps at once find nothing to do and change nothing.
+    ledger, balance, status = len(world.usage_rows()), world.balance(), world.billing_status()
+    replayed = run_in_threads(lambda: _sweep(world, later), lambda: _sweep(world, later))
+    assert [getattr(result, "claimed", result) for result in replayed] == [0, 0]
+    assert (len(world.usage_rows()), world.balance(), world.billing_status()) == (
+        ledger,
+        balance,
+        status,
+    )
+
+
+def test_a_sweep_that_finds_every_slot_taken_claims_nothing(world, engine) -> None:
+    world.publish_markup_usd()
+    events = world.events(10)
+    first = _hold_slot(engine, 1)
+    second = _hold_slot(engine, 2)
+    try:
+        assert _sweep(world).claimed == 0
+        rows = world.rows()
+        assert [(row.status, row.attempt_count) for row in rows] == [
+            (UsageEventStatus.RECEIVED, 0)
+        ] * 10
+
+        assert second.execute(_RELEASE_SLOT, {"slot": 2}).scalar() == 1
+        result = _sweep(world)
+        assert result.claimed == 10
+        assert result.outcomes == {Outcome.PROCESSED: 10}
+        # The sweep gave back the slot it took; the outside one is still held.
+        assert _slot_is_free(engine, 2)
+        assert not _slot_is_free(engine, 1)
+
+        assert first.execute(_RELEASE_SLOT, {"slot": 1}).scalar() == 1
+        _assert_slots_free(engine)
+    finally:
+        _let_go(first)
+        _let_go(second)
+    _assert_billed_once(world, events)
+
+
+def test_a_third_sweep_returns_at_once_while_two_overrun_their_period(world, engine) -> None:
+    world.publish_markup_usd()
+    events = world.events(40)
+    results: list[object] = [None, None]
+
+    def run(index: int) -> None:
+        try:
+            results[index] = _sweep(world)
+        except BaseException as error:
+            results[index] = error
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(2)]
+    with engine.connect() as holder:
+        transaction = holder.begin()
+        holder.execute(
+            text("SELECT id FROM wallets WHERE tenant_id = :tenant FOR UPDATE"),
+            {"tenant": world.tenant_id},
+        )
+        try:
+            for thread in threads:
+                thread.start()
+            deadline = time.monotonic() + 30
+            with engine.connect() as watcher:
+                while True:
+                    waiting = watcher.execute(
+                        _WAITERS_ON_TABLE, {"table_name": "wallets"}
+                    ).scalar_one()
+                    if waiting >= 2:
+                        break
+                    assert time.monotonic() < deadline, "two sweeps never waited on the wallet"
+                    time.sleep(0.05)
+            started = time.monotonic()
+            third = _sweep(world)
+            elapsed = time.monotonic() - started
+        finally:
+            transaction.rollback()
+            for thread in threads:
+                thread.join(timeout=120)
+
+    assert third.claimed == 0
+    assert elapsed < 1
+    assert all(isinstance(result, usage_billing.SweepResult) for result in results), results
+    world.bill_until_done(NOW + dt.timedelta(hours=1))
+    _assert_billed_once(world, events)
+    _assert_slots_free(engine)
+
+
+def test_a_sweep_whose_slot_connection_is_killed_stops(world, engine, monkeypatch) -> None:
+    world.publish_markup_usd()
+    events = world.events(30)
+    original = usage_billing.process_event
+    processed: list[int] = []
+
+    def killing(*args, **kwargs):
+        outcome = original(*args, **kwargs)
+        processed.append(1)
+        if len(processed) == 3:
+            # The slot connection alone goes away; the processing connections are untouched.
+            with engine.connect() as outside:
+                holder = outside.execute(_SLOT_HOLDER, {"slot": 1}).scalar()
+                assert holder is not None
+                outside.execute(text(f"KILL {int(holder)}"))
+        return outcome
+
+    monkeypatch.setattr(usage_billing, "process_event", killing)
+
+    result = _sweep(world)
+
+    assert result.claimed == usage_billing.CLAIM_BATCH
+    assert result.outcomes == {Outcome.PROCESSED: 3}
+    assert _count(world, UsageEventStatus.PROCESSED) == 3
+    assert _count(world, UsageEventStatus.PROCESSING) == usage_billing.CLAIM_BATCH - 3
+    # MySQL released the killed connection's slot: anyone can take it now.
+    taker = _hold_slot(engine, 1)
+    try:
+        assert taker.execute(_RELEASE_SLOT, {"slot": 1}).scalar() == 1
+    finally:
+        _let_go(taker)
+
+    monkeypatch.setattr(usage_billing, "process_event", original)
+    assert world.recover(PAST_LEASE) == usage_billing.CLAIM_BATCH - 3
+    world.bill_until_done(NOW + dt.timedelta(hours=1))
+    _assert_billed_once(world, events)
+    _assert_slots_free(engine)
+
+
+def test_a_failed_release_discards_the_slot_connection(world, engine, monkeypatch, caplog) -> None:
+    world.publish_markup_usd()
+    events = world.events(5)
+    original = usage_billing._release_lock
+
+    def refuse(connection: Connection, slot: int) -> int | None:
+        raise OperationalError("SELECT RELEASE_LOCK(...)", {}, Exception("fictional failure"))
+
+    monkeypatch.setattr(usage_billing, "_release_lock", refuse)
+
+    result = _sweep(world)
+
+    assert result.outcomes == {Outcome.PROCESSED: 5}
+    assert len(_slot_warnings(caplog)) == 1
+    # Invalidated: MySQL drops the lock with the connection.
+    deadline = time.monotonic() + 1
+    while not _slot_is_free(engine, 1):
+        assert time.monotonic() < deadline, "the slot stayed taken after the release failed"
+        time.sleep(0.05)
+    # No connection in the pool still holds a slot: the next sweep takes one and bills.
+    monkeypatch.setattr(usage_billing, "_release_lock", original)
+    events.append(world.event())
+    assert _sweep(world).outcomes == {Outcome.PROCESSED: 1}
+    _assert_billed_once(world, events)
+    _assert_slots_free(engine)
+
+
+def test_a_sweep_that_raises_still_gives_its_slot_back(world, engine, monkeypatch) -> None:
+    def broken(*args, **kwargs):
+        raise RuntimeError("fictional claim failure")
+
+    monkeypatch.setattr(usage_billing, "claim_events", broken)
+
+    with pytest.raises(RuntimeError, match="fictional claim failure"):
+        _sweep(world)
+
+    _assert_slots_free(engine)
+
+
+@pytest.mark.parametrize("failure", ["null", "error"])
+def test_a_get_lock_null_or_error_skips_the_sweep(
+    world, engine, monkeypatch, caplog, failure: str
+) -> None:
+    world.publish_markup_usd()
+    world.events(10)
+    calls: list[int] = []
+
+    def failing(connection: Connection, slot: int) -> int | None:
+        calls.append(slot)
+        if failure == "null":
+            return None
+        raise OperationalError("SELECT GET_LOCK(...)", {}, Exception("fictional failure"))
+
+    monkeypatch.setattr(usage_billing, "_get_lock", failing)
+
+    result = _sweep(world)
+
+    assert result.claimed == 0
+    # Slot 2 is not tried after slot 1 failed.
+    assert calls == [1]
+    assert [(row.status, row.attempt_count) for row in world.rows()] == [
+        (UsageEventStatus.RECEIVED, 0)
+    ] * 10
+    assert len(_slot_warnings(caplog)) == 1
+    _assert_slots_free(engine)
+
+
+@pytest.mark.parametrize("failure", ["zero", "null", "error"])
+def test_a_slot_lost_before_an_event_stops_the_sweep(
+    world, engine, monkeypatch, caplog, failure: str
+) -> None:
+    world.publish_markup_usd()
+    events = world.events(10)
+    original = usage_billing._holds_lock
+    calls: list[int] = []
+
+    def losing(connection: Connection, slot: int) -> int | None:
+        calls.append(slot)
+        # Before the claim, before the 1st and before the 2nd event: the real answer.
+        if len(calls) <= 3:
+            return original(connection, slot)
+        if failure == "zero":
+            return 0
+        if failure == "null":
+            return None
+        raise OperationalError("SELECT IS_USED_LOCK(...)", {}, Exception("fictional failure"))
+
+    monkeypatch.setattr(usage_billing, "_holds_lock", losing)
+
+    result = _sweep(world)
+
+    assert result.claimed == 10
+    assert result.outcomes == {Outcome.PROCESSED: 2}
+    assert _count(world, UsageEventStatus.PROCESSED) == 2
+    assert _count(world, UsageEventStatus.PROCESSING) == 8
+    assert len(_slot_warnings(caplog)) == 1
+    # The named lock really held was released in `finally` all the same.
+    _assert_slots_free(engine)
+
+    monkeypatch.setattr(usage_billing, "_holds_lock", original)
+    assert world.recover(PAST_LEASE) == 8
+    world.bill_until_done(NOW + dt.timedelta(hours=1))
+    _assert_billed_once(world, events)
+    _assert_slots_free(engine)
 
 
 # --- the lock order against publishers ---------------------------------------------------

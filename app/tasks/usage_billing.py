@@ -17,6 +17,7 @@ from functools import lru_cache
 from celery import shared_task
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.celery_app import USAGE_BILLING_SWEEP_PARALLELISM
 from app.core.config import get_settings
 from app.core.database import create_database_engine, create_session_factory
 from app.services import usage_billing as billing
@@ -33,12 +34,16 @@ def _session_factory() -> sessionmaker[Session]:
 
 @shared_task(name="app.tasks.usage_billing.bill_pending_events")
 def bill_pending_events() -> int:
-    """Claim and bill due events for up to 8 seconds. Returns how many were claimed."""
+    """Take a sweep slot, then claim and bill due events for up to 8 seconds.
+
+    Returns how many were claimed (0 when every slot is taken)."""
     settings = get_settings()
     result = billing.bill_pending_events(
         _session_factory(),
         lease_seconds=settings.usage_lease_seconds,
         max_attempts=settings.usage_max_attempts,
+        # 设计闸门 #522 v4：先抢扫描名额，抢不到就返回 0（同时计费的扫描最多这么多个）。
+        parallelism=USAGE_BILLING_SWEEP_PARALLELISM,
     )
     if result.claimed:
         counts = {outcome.value: count for outcome, count in sorted(result.outcomes.items())}

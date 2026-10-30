@@ -27,7 +27,10 @@ dimensions in test_usage_alerts.py):
 - **快照可重算** (ADR-0005), **余额核对** (`verify_wallet`), **两个租户** (INV-8);
 - **项目级规则** (design gate #507 v4 §7) — billing selects the rule by the event's project (SQLite
   and MySQL); a moment already chosen is never repriced by a later project rule (MySQL: E1, E2,
-  E3).
+  E3);
+- **名额：参数与 SQLite**, **任务传名额数** (design gate #522 v4 §7) — `parallelism=0` is a
+  `ValueError` before anything is claimed; SQLite has no sweep slots and bills as usual; the task
+  passes `USAGE_BILLING_SWEEP_PARALLELISM`; the slot statements bind `slot` and nothing else.
 
 ⚠️ SQLite has none of migration 0006's wallet triggers, so a ledger row would not move the wallet
 and a second debit would reuse the sequence. The SQLite factory installs one test-only trigger
@@ -1470,6 +1473,76 @@ def test_a_sweep_stops_claiming_when_its_budget_is_spent(world) -> None:
     assert result.claimed == usage_billing.CLAIM_BATCH
     assert result.outcomes == {Outcome.PROCESSED: usage_billing.CLAIM_BATCH}
     assert world.count(UsageEvent, UsageEvent.status == UsageEventStatus.RECEIVED) == 5
+
+
+# --- sweep slots (design gate #522 v4 §7; the MySQL half is in the concurrency file) -------
+
+
+def test_a_parallelism_below_one_is_refused_before_anything_is_claimed(world) -> None:
+    world.publish_markup_usd()
+    tenant = world.tenant()
+    world.fund(tenant, OPENING)
+    event_id = world.event(tenant)
+    world.clock.now = NOW
+
+    with pytest.raises(ValueError):
+        usage_billing.bill_pending_events(
+            world.factory,
+            lease_seconds=LEASE_SECONDS,
+            max_attempts=MAX_ATTEMPTS,
+            clock=world.clock,
+            parallelism=0,
+        )
+
+    row = world.row(event_id)
+    assert (row.status, row.attempt_count) == (UsageEventStatus.RECEIVED, 0)
+
+
+def test_sqlite_has_no_sweep_slots_and_bills_as_usual(world) -> None:
+    world.publish_markup_usd()
+    tenant = world.tenant()
+    world.fund(tenant, OPENING)
+    for _ in range(3):
+        world.event(tenant)
+    world.clock.now = NOW
+
+    result = usage_billing.bill_pending_events(
+        world.factory,
+        lease_seconds=LEASE_SECONDS,
+        max_attempts=MAX_ATTEMPTS,
+        clock=world.clock,
+        parallelism=2,
+    )
+
+    assert result.claimed == 3
+    assert result.outcomes == {Outcome.PROCESSED: 3}
+    assert len(world.usage_rows(tenant)) == 3
+
+
+@pytest.mark.parametrize("statement", ["_GET_LOCK", "_HOLDS_LOCK", "_RELEASE_LOCK"])
+def test_the_slot_statements_bind_only_the_slot(statement: str) -> None:
+    # The colons inside the quoted name must not be read as bind parameters by text().
+    compiled = getattr(usage_billing, statement).compile()
+
+    assert set(compiled.params) == {"slot"}
+    assert "':usage-billing-sweep:'" in str(compiled)
+
+
+def test_the_task_passes_the_sweep_parallelism(monkeypatch) -> None:
+    from app.core.celery_app import USAGE_BILLING_SWEEP_PARALLELISM
+    from app.tasks import usage_billing as tasks
+
+    received: list[dict[str, object]] = []
+
+    def fake(factory: object, **kwargs: object) -> SweepResult:
+        received.append(kwargs)
+        return SweepResult(claimed=0)
+
+    monkeypatch.setattr(tasks, "_session_factory", lambda: None)
+    monkeypatch.setattr(usage_billing, "bill_pending_events", fake)
+
+    assert tasks.bill_pending_events() == 0
+    assert [call["parallelism"] for call in received] == [USAGE_BILLING_SWEEP_PARALLELISM]
 
 
 # --- snapshot, reconciliation, tenants ---------------------------------------------------

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app.core.celery_app import USAGE_BILLING_SWEEP_PARALLELISM
 from app.core.config import Settings
 from app.core.errors import INTEGRATION_PREFIX
 
@@ -561,6 +562,20 @@ def test_celery_pins_its_concurrency(compose: dict) -> None:
     """
     command = " ".join(str(part) for part in compose["services"]["celery-worker"]["command"])
     assert "--concurrency" in command
+
+
+def test_celery_concurrency_leaves_a_process_beside_the_billing_sweeps(compose: dict) -> None:
+    """设计闸门 #522 v4 §2、§5：计费扫描最多占 `USAGE_BILLING_SWEEP_PARALLELISM` 个子进程，
+    并发至少比它多 1，其他周期任务（状态推送、outbox 恢复……）才不会排在扫描后面。
+
+    默认值钉成 3，两边一起改才通过。
+    """
+    command = " ".join(str(part) for part in compose["services"]["celery-worker"]["command"])
+    default = re.search(r"--concurrency=\$\{BILLING_CELERY_CONCURRENCY:-(\d+)\}", command)
+    assert default is not None, f"unexpected celery-worker command: {command}"
+    concurrency = int(default.group(1))
+    assert concurrency == 3
+    assert concurrency >= USAGE_BILLING_SWEEP_PARALLELISM + 1
 
 
 def test_the_api_gets_at_least_one_cpu(compose: dict) -> None:
