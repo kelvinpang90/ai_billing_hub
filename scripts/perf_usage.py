@@ -25,9 +25,12 @@ nonce —— 它们不在「事件到扣费」的路径上），计费经 `claim
 租户、钱包、凭据、目录、价格、规则、汇率与充值都经各自的服务函数建立，值是虚构的。
 
 ⚠️ **worker 是真的进程**。`billing_perf` 上没有 celery worker，所以脚本自己起 `--workers` 个子进程
-（默认 2，等于 compose 的 `BILLING_CELERY_CONCURRENCY`），由主进程里的一个线程按 Beat 的节奏派
-任务：每 10 秒一次扫描（9 秒过期）、每 60 秒一次卡住回收（54 秒过期），数值取自
-`app/core/celery_app.py`。S3 用 SIGKILL 杀的就是这些进程，杀完立刻补一个（等同 prefork 补子进程）。
+（默认 2，等于计费扫描最多占的子进程数：compose 的 `BILLING_CELERY_CONCURRENCY` 默认 3，其中至少
+1 个留给其他周期任务），由主进程里的一个线程按 Beat 的节奏派任务：每 10 秒派
+`USAGE_BILLING_SWEEP_PARALLELISM` 个扫描（与生产 Beat 相同，各 9 秒过期）、每 60 秒一次卡住回收
+（54 秒过期），数值取自 `app/core/celery_app.py`。每个扫描是一次
+`bill_pending_events(..., parallelism=USAGE_BILLING_SWEEP_PARALLELISM)`，与生产任务一样先抢扫描名额
+（设计闸门 #522 v4）。S3 用 SIGKILL 杀的就是这些进程，杀完立刻补一个（等同 prefork 补子进程）。
 
 ⚠️ 它往库里写行，而且**不删**（账本只增）。所以：
   - `--database-url` 必填，不回落到 `BILLING_DATABASE_URL`；
@@ -70,6 +73,7 @@ from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 
 from app.core.celery_app import (
     USAGE_BILLING_SWEEP_EXPIRES_SECONDS,
+    USAGE_BILLING_SWEEP_PARALLELISM,
     USAGE_BILLING_SWEEP_SECONDS,
     USAGE_STALE_RECOVERY_EXPIRES_SECONDS,
     USAGE_STALE_RECOVERY_SECONDS,
@@ -494,7 +498,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=_positive_int,
         default=2,
-        help="计费 worker 进程数（compose 的 BILLING_CELERY_CONCURRENCY 默认 2）",
+        help=(
+            "计费 worker 进程数（默认 2：compose 的 BILLING_CELERY_CONCURRENCY 默认 3，"
+            "计费扫描最多占其中 2 个）。派发按生产 Beat 的节奏：每 "
+            f"{USAGE_BILLING_SWEEP_SECONDS:g} 秒派 {USAGE_BILLING_SWEEP_PARALLELISM} 个扫描"
+            "（与生产 Beat 相同）"
+        ),
     )
     parser.add_argument("--ingest-threads", type=_positive_int, default=8)
     parser.add_argument(
@@ -1000,31 +1009,55 @@ def _instrument_wallet_lock() -> None:
 
 
 def _sweep(factory, connection: Connection, *, lease: int, attempts: int, rng, fault_rate: float):
-    """与 `usage_billing.bill_pending_events` 同一个循环（8 秒预算、每批 20 条），逐条记完成时刻。
+    """一次 `usage_billing.bill_pending_events`，与生产任务一样传
+    `parallelism=USAGE_BILLING_SWEEP_PARALLELISM`（先抢扫描名额，抢不到就不认领），逐条记完成时刻。
 
-    ⚠️ 不直接调 `bill_pending_events`：它只回计数，量不出每个事件的完成时刻与持锁时间。
-    认领与处理调用的是同样两个函数，预算与批量取自同一组常量。
+    ⚠️ `bill_pending_events` 只回计数，量不出每个事件的完成时刻与持锁时间：这一次调用期间把
+    `usage_billing` 的 `claim_events` / `process_event` 换成记录用的包装（它的循环按模块全局名调用
+    这两个函数），返回值原样交回，结束后换回。每批认领之前把上一批的结果送回主进程 ——
+    S3 杀掉的进程只丢它正在处理的那一批的回报。
     """
-    started = time.monotonic()
+    original_claim, original_process = usage_billing.claim_events, usage_billing.process_event
+    rows: list[tuple] = []
     faults = 0
-    while time.monotonic() - started < usage_billing.SWEEP_BUDGET_SECONDS:
-        claims = usage_billing.claim_events(factory, lease_seconds=lease)
-        if not claims:
-            break
-        rows = []
-        for claim in claims:
-            inject = fault_rate > 0 and rng.random() < fault_rate
-            faults += inject
-            _WALLET_LOCK.clear()
-            outcome = usage_billing.process_event(
-                factory, claim, max_attempts=attempts, clock=_FaultyClock(inject)
-            )
-            done = time.perf_counter()
-            finished = time.time()
-            acquired = _WALLET_LOCK.get("acquired")
-            hold = done - acquired if acquired is not None else None
-            rows.append((claim.id, outcome.value, finished, _WALLET_LOCK.get("tenant_id"), hold))
-        connection.send(("results", rows))
+
+    def flush() -> None:
+        if rows:
+            connection.send(("results", list(rows)))
+            rows.clear()
+
+    def claim_events(*args, **kwargs):
+        flush()
+        return original_claim(*args, **kwargs)
+
+    def process_event(factory, claim, *, max_attempts, clock=utc_now):
+        nonlocal faults
+        inject = fault_rate > 0 and rng.random() < fault_rate
+        faults += inject
+        _WALLET_LOCK.clear()
+        outcome = original_process(
+            factory, claim, max_attempts=max_attempts, clock=_FaultyClock(inject)
+        )
+        done = time.perf_counter()
+        finished = time.time()
+        acquired = _WALLET_LOCK.get("acquired")
+        hold = done - acquired if acquired is not None else None
+        rows.append((claim.id, outcome.value, finished, _WALLET_LOCK.get("tenant_id"), hold))
+        return outcome
+
+    usage_billing.claim_events = claim_events  # type: ignore[assignment]
+    usage_billing.process_event = process_event  # type: ignore[assignment]
+    try:
+        usage_billing.bill_pending_events(
+            factory,
+            lease_seconds=lease,
+            max_attempts=attempts,
+            parallelism=USAGE_BILLING_SWEEP_PARALLELISM,
+        )
+    finally:
+        usage_billing.claim_events = original_claim  # type: ignore[assignment]
+        usage_billing.process_event = original_process  # type: ignore[assignment]
+    flush()
     if faults:
         connection.send(("faults", faults))
 
@@ -1087,6 +1120,9 @@ class WorkerPool:
         self.dropped_tasks = 0
         self._kill_requests = 0
         self._pending: list[tuple[str, float]] = []
+        # 下一次扫描 / 卡住回收的派发时刻；`_run` 开始时设为当时。
+        self._next_sweep = 0.0
+        self._next_recovery = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1158,16 +1194,29 @@ class WorkerPool:
         elif kind == "idle":
             worker.busy = False
 
+    def _beat_sweeps(self, now: float) -> None:
+        """到点就一次入队 `USAGE_BILLING_SWEEP_PARALLELISM` 个扫描、各带同样的过期时刻
+        （生产 Beat 的 `usage-billing-sweep-1` … `-N`：同一周期、同一 `expires`）。"""
+        if now >= self._next_sweep:
+            expires = now + USAGE_BILLING_SWEEP_EXPIRES_SECONDS
+            self._pending.extend(("sweep", expires) for _ in range(USAGE_BILLING_SWEEP_PARALLELISM))
+            self._next_sweep += USAGE_BILLING_SWEEP_SECONDS
+
+    def _beat_recovery(self, now: float) -> None:
+        if now >= self._next_recovery:
+            self._pending.append(("recover", now + USAGE_STALE_RECOVERY_EXPIRES_SECONDS))
+            self._next_recovery += USAGE_STALE_RECOVERY_SECONDS
+
+    def _dispatch(self, now: float) -> None:
+        """派发线程每一圈调用一次：按 Beat 的节奏入队扫描与卡住回收。"""
+        self._beat_sweeps(now)
+        self._beat_recovery(now)
+
     def _run(self) -> None:
-        next_sweep = next_recovery = time.time()
+        self._next_sweep = self._next_recovery = time.time()
         while not self._stop.is_set():
             now = time.time()
-            if now >= next_sweep:
-                self._pending.append(("sweep", now + USAGE_BILLING_SWEEP_EXPIRES_SECONDS))
-                next_sweep += USAGE_BILLING_SWEEP_SECONDS
-            if now >= next_recovery:
-                self._pending.append(("recover", now + USAGE_STALE_RECOVERY_EXPIRES_SECONDS))
-                next_recovery += USAGE_STALE_RECOVERY_SECONDS
+            self._dispatch(now)
             with self._lock:
                 kills, self._kill_requests = self._kill_requests, 0
             for _ in range(kills):
@@ -1606,6 +1655,7 @@ def _describe_environment(factory, settings, args) -> dict[str, object]:
         "lease_seconds": settings.usage_lease_seconds,
         "max_attempts": settings.usage_max_attempts,
         "beat_sweep_seconds": USAGE_BILLING_SWEEP_SECONDS,
+        "beat_sweeps_per_tick": USAGE_BILLING_SWEEP_PARALLELISM,
         "sweep_budget_seconds": usage_billing.SWEEP_BUDGET_SECONDS,
         "claim_batch": usage_billing.CLAIM_BATCH,
         "dataset_before_run": {
