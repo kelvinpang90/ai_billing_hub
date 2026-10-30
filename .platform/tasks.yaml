@@ -8391,7 +8391,7 @@ tasks:
     title: 计费扫描并行：Beat 每 10 秒派两个计费扫描，扫描先抢名额，worker 默认并发改为 3
     purpose: >-
       按 docs/design/AIH-TASK-141-billing-sweep-parallelism.md（设计闸门 #522 已批准 v4）§2：app/core/celery_app.py 新增常量 USAGE_BILLING_SWEEP_PARALLELISM = 2，把 beat_schedule 里的 usage-billing-sweep 换成按它生成的 usage-billing-sweep-1 … usage-billing-sweep-N；app/services/usage_billing.py 的 bill_pending_events 加 parallelism 参数与「扫描名额」（带库名的 MySQL 命名锁，抢不到就立即返回 0），任务传常量；docker-compose.yml 里 celery-worker 的默认并发从 2 改为 3；补调度、名额与并发的测试，同步运维文档。不改认领、处理、卡住回收的任何 SQL、锁顺序或事务边界，不改周期、预算与每批条数，不改容器配额。压测脚本按新的派发节奏模拟属于 AIH-TASK-142。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-140
     acceptance_criteria:
