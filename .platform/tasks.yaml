@@ -8449,7 +8449,7 @@ tasks:
     title: 压测脚本按新的派发节奏模拟：每 10 秒派与生产相同个数的计费扫描
     purpose: >-
       按 docs/design/AIH-TASK-141-billing-sweep-parallelism.md（设计闸门 #522 已批准 v4）§11「任务拆分」第 2 项：scripts/perf_usage.py 与 scripts/perf_usage_profile.py 的派发线程在 Beat 节奏下每 10 秒派 USAGE_BILLING_SWEEP_PARALLELISM 个扫描（从 app.core.celery_app 导入同一个常量，不另设参数），让压测与剖析模拟的派发与生产一致；--continuous 的行为不变；同步测试与 docs/perf-baseline.md 的派发描述。只改脚本与文档，不跑压测，不改 app/。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-141
     acceptance_criteria:
