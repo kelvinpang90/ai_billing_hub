@@ -8150,7 +8150,7 @@ tasks:
     title: 项目级定价第二层：八级范围枚举与范围字段校验，项目级规则暂不可建
     purpose: >-
       按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「数据库」里模型的部分与 §11「任务拆分」：PricingScope 按优先顺序声明八级并加 has_project；repository 的 Scope 带项目，解析在本任务里对项目级填 NULL（结果与现在相同）；请求与服务层的范围字段校验把 project_id 算进项目级的必填字段（请求模型还没有这个字段，所以项目级规则在本任务里建不出来、返回 422）；既有用例里断言五级或逐级建规则的写法同步。解析按项目与服务属于 AIH-TASK-138。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-136
     acceptance_criteria:
