@@ -25,7 +25,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import NamedTuple
 
-from sqlalchemy import Select, case, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select
+from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -549,7 +550,7 @@ def resolve_pricing_rule(
 ) -> ResolvedPricingRule | None:
     """The pricing rule in effect for the event at `occurred_at`, or `None` (设计 §2「解析」).
 
-    按 `SCOPE_ORDER` 逐级查八级：`PROJECT_PROVIDER_MODEL` → `PROJECT_PROVIDER` → `PROJECT` →
+    按 `SCOPE_ORDER` 的八级选：`PROJECT_PROVIDER_MODEL` → `PROJECT_PROVIDER` → `PROJECT` →
     `CUSTOMER_PROVIDER_MODEL` → `CUSTOMER_PROVIDER` → `CUSTOMER` → `GLOBAL_PROVIDER_MODEL` →
     `GLOBAL`。每一级找范围匹配、`PUBLISHED` / `RETIRED`、
     `effective_from ≤ occurred_at < effective_to`（NULL 端不比）的规则；**第一级命中即返回**
@@ -558,7 +559,7 @@ def resolve_pricing_rule(
     永不匹配。四个 id 都是内部 id：租户与项目取自事件，供应商与模型取自 `resolve_model`；
     `occurred_at` 是不带时区的 UTC。
 
-    `project_id` 为 `None`（试算没给项目）时三个项目级不查，直接从客户级开始。项目级查询同时
+    `project_id` 为 `None`（试算没给项目）时三个项目级不查，直接从客户级开始。项目级条件同时
     比较租户与项目，所以一个项目的规则只会选给这个项目的事件（INV-8）；项目没有项目级规则时，
     结果与五级时完全相同。
 
@@ -567,23 +568,42 @@ def resolve_pricing_rule(
     提交。于是一个事件一旦选到某条规则，以后永远选到同一条。
 
     同一范围的非空区间不重叠（服务层在规则锁内保证并复查，数据库触发器兜底），所以每一级至多
-    一条命中；多于一条是数据损坏，`scalar_one_or_none` 抛错，不静默挑一条。
+    一条命中；选中的级多于一条是数据损坏，抛 `MultipleResultsFound`，不静默挑一条。比选中级
+    更低的级有多条不报错（逐级查时那些级根本不查）。
+
+    **一条语句、在 Python 里选级**（设计闸门 #528 v1 §2「改动一」）：要查的各级的范围条件
+    （逐字复用 `_level_scope` 与 `_in_scope`）用 OR 拼成一条加锁读，三条公共条件（状态、起点、
+    终点）与逐级查时每一级的写法相同；再按 `SCOPE_ORDER` 取第一个有命中行的级。为什么结果与
+    逐级查相同：`_in_scope` 的第一条就是 `priority_scope == level`，一条规则只有一个级，所以
+    按行的 `priority_scope` 分组就是按 OR 分支分组，每一级的行集合与逐级查那一级时相同（同一
+    事务、同一组锁内的加锁读，都读最新提交）；逐级查返回第一个非空级，这里也取第一个非空级。
+
+    加锁范围可能比逐级查大（设计 §4）：更低级的命中行也会被加共享锁，扫描路径取决于优化器选的
+    索引。这不影响正确性：发布、停用改规则行之前都先等 `pricing_rule_locks`，计费事务持有它的
+    共享锁直到提交，多出来的共享行锁不会让它们多等；不拿规则锁的草稿写入与计费的互等与逐级查
+    时相同，只是涉及的行与间隙可能更多。
     """
     started = or_(PricingRule.effective_from.is_(None), PricingRule.effective_from <= occurred_at)
     not_ended = or_(PricingRule.effective_to.is_(None), PricingRule.effective_to > occurred_at)
-    for level in SCOPE_ORDER:
-        if level.has_project and project_id is None:
-            continue
-        scope = _level_scope(level, tenant_id, project_id, provider_id, model_id)
-        in_effect = select(PricingRule).where(
-            *_in_scope(scope),
-            PricingRule.status.in_(PERIOD_STATUSES),
-            started,
-            not_ended,
-        )
-        rule = session.execute(_shared(in_effect)).scalar_one_or_none()
-        if rule is not None:
-            return _resolved(session, rule)
+    queried = [level for level in SCOPE_ORDER if project_id is not None or not level.has_project]
+    in_effect = select(PricingRule).where(
+        or_(
+            *(
+                and_(*_in_scope(_level_scope(level, tenant_id, project_id, provider_id, model_id)))
+                for level in queried
+            )
+        ),
+        PricingRule.status.in_(PERIOD_STATUSES),
+        started,
+        not_ended,
+    )
+    found = session.execute(_shared(in_effect)).scalars().all()
+    for level in queried:
+        hits = [rule for rule in found if PricingScope(rule.priority_scope) is level]
+        if len(hits) > 1:
+            raise MultipleResultsFound("Multiple rows were found when one or none was required")
+        if hits:
+            return _resolved(session, hits[0])
     return None
 
 

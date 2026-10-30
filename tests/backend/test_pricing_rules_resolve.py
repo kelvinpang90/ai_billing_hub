@@ -7,12 +7,14 @@ Three groups:
   component; tenants never see each other's rules; drafts never match; components come back with
   their quantity field; every read is a locking read; the eight levels of design gate #507 v4
   (the three project levels first; without project rules nothing changes; one project's rules
-  never price another project's or another tenant's events; no project, no project levels);
+  never price another project's or another tenant's events; no project, no project levels); one
+  statement reads `pricing_rules` whichever level hits, and two overlapping rules on the chosen
+  level raise while those on a lower level do not (design gate #528 v1);
 - **time stability** (SQLite, property test): random publish / reserve / retire / withdraw
   sequences over the five levels — once a moment resolved to rule R it resolves to R forever;
 - **serialised with publishing** (real MySQL, several connections): billing waits for an
   uncommitted publish and the other way round; two billing runs share the lock without blocking;
-  the snapshot-read trap.
+  the snapshot-read trap; the eight levels falling through.
 
 The MySQL half needs `BILLING_TEST_DATABASE_URL` pointing at a database that may be wiped; it
 skips without it — **a skip is not a pass**, CI sets it and treats a skip as a failure. Prices
@@ -35,8 +37,9 @@ from decimal import Decimal
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, event, func, select
+from sqlalchemy import Engine, create_engine, delete, event, func, select, update
 from sqlalchemy.dialects import mysql
+from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
@@ -502,6 +505,29 @@ def _one_rule_per_eight_levels(rules: Rules, project: str) -> dict[PricingScope,
     return published
 
 
+def _falls_through_eight_levels(
+    factory: sessionmaker[Session],
+    rules: Rules,
+    occurred_at: dt.datetime,
+    published: dict[PricingScope, str],
+    advance: Callable[[], None],
+) -> None:
+    """Retire the highest level each time; the event resolves to each next level, then None."""
+    seen = []
+    for level in SCOPE_ORDER:
+        seen.append(rules.resolve(occurred_at, project="p1"))
+        rules.retire(published[level])
+        advance()
+    seen.append(rules.resolve(occurred_at, project="p1"))
+
+    assert seen == [published[level] for level in SCOPE_ORDER] + [None]
+    by_level = {
+        rule.public_id: PricingScope(rule.priority_scope)
+        for rule in _rules(factory, published.values())
+    }
+    assert [by_level[rule_id] for rule_id in seen[:-1]] == list(SCOPE_ORDER)
+
+
 def test_the_eight_levels_fall_through_in_order(sqlite_factory) -> None:
     """§7 "eight levels": one rule on each level for the event; retiring the highest level each
     time, the event resolves to the next one, in exactly the eight-level order."""
@@ -510,21 +536,21 @@ def test_the_eight_levels_fall_through_in_order(sqlite_factory) -> None:
     rules.add_project("p1")
     published = _one_rule_per_eight_levels(rules, "p1")
     clock.advance(seconds=10)
-    occurred_at = T0 + 10 * DAY
 
-    seen = []
-    for level in SCOPE_ORDER:
-        seen.append(rules.resolve(occurred_at, project="p1"))
-        rules.retire(published[level])
-        clock.advance(seconds=5)
-    seen.append(rules.resolve(occurred_at, project="p1"))
+    _falls_through_eight_levels(
+        sqlite_factory, rules, T0 + 10 * DAY, published, lambda: clock.advance(seconds=5)
+    )
 
-    assert seen == [published[level] for level in SCOPE_ORDER] + [None]
-    by_level = {
-        rule.public_id: PricingScope(rule.priority_scope)
-        for rule in _rules(sqlite_factory, published.values())
-    }
-    assert [by_level[rule_id] for rule_id in seen[:-1]] == list(SCOPE_ORDER)
+
+def test_the_eight_levels_fall_through_in_order_on_mysql(mysql_factory) -> None:
+    """Design gate #528 v1 §7: the same flow on MySQL, where the OR of the levels' `IS NULL`
+    conditions and `FOR SHARE` really run. Every retirement ends at its `t`, well before the
+    event a day ahead."""
+    rules = Rules(mysql_factory, utc_now)
+    rules.add_project("p1")
+    published = _one_rule_per_eight_levels(rules, "p1")
+
+    _falls_through_eight_levels(mysql_factory, rules, utc_now() + DAY, published, lambda: None)
 
 
 def test_without_project_rules_the_project_changes_nothing(sqlite_factory) -> None:
@@ -611,22 +637,72 @@ def _rule_queries(
 
 def test_without_a_project_the_project_levels_are_not_queried(sqlite_factory) -> None:
     """Design §2「解析」: `project_id=None` (a preview without a project) skips the three project
-    levels — their rules are invisible, and only the five other levels are queried."""
+    levels — their rules are invisible. Design gate #528 v1 §7: whichever level hits, or none,
+    one statement reads `pricing_rules` (it was 5, 1 and 8 when each level had its own)."""
     rules = Rules(sqlite_factory, Clock(T0))
     rules.add_project("p1")
     for level in PROJECT_LEVELS:
         rules.publish_new(level, project="p1")
 
     found, queried = _rule_queries(sqlite_factory, None)
-    assert (found, queried) == (None, len(BUILDABLE_LEVELS))
+    assert (found, queried) == (None, 1)
     found, queried = _rule_queries(sqlite_factory, rules.project_id("p1"))
     assert found is not None
     assert found.priority_scope is PricingScope.PROJECT_PROVIDER_MODEL
-    # The first level hit: one query, not eight.
     assert queried == 1
     rules.add_project("p2")
     found, queried = _rule_queries(sqlite_factory, rules.project_id("p2"))
-    assert (found, queried) == (None, len(SCOPE_ORDER))
+    assert (found, queried) == (None, 1)
+
+
+def _corrupt_overlap(rules: Rules, level: PricingScope) -> tuple[str, str]:
+    """Two drafts of `level` forced to PUBLISHED with overlapping closed periods, bypassing the
+    services: [T0, T0 + 3 days) and [T0 + 1 day, T0 + 4 days). SQLite has no period trigger, and
+    a row with `effective_to` takes no `open_slot`, so nothing stops it."""
+    periods = ((T0, T0 + 3 * DAY), (T0 + DAY, T0 + 4 * DAY))
+    forced = [rules.draft(level).id for _ in periods]
+    with rules.factory() as session:
+        for public_id, (start, end) in zip(forced, periods, strict=True):
+            session.execute(
+                update(PricingRule)
+                .where(PricingRule.public_id == public_id)
+                .values(
+                    status=PricingRuleStatus.PUBLISHED,
+                    effective_from=start,
+                    effective_to=end,
+                    approved_by=rules.admin.id,
+                    approved_at=T0,
+                )
+            )
+        session.commit()
+    return forced[0], forced[1]
+
+
+def test_two_overlapping_rules_on_the_chosen_level_raise(sqlite_factory) -> None:
+    """Design gate #528 v1 §7 "data corruption": the chosen level has two rules in effect at the
+    moment → `MultipleResultsFound`, as when each level had its own query; outside the overlap the
+    level has one rule and resolves normally."""
+    rules = Rules(sqlite_factory, Clock(T0))
+    first, second = _corrupt_overlap(rules, CUSTOMER)
+
+    with pytest.raises(MultipleResultsFound):
+        rules.resolve(T0 + 2 * DAY)
+    assert rules.resolve(T0 + DAY / 2) == first
+    assert rules.resolve(T0 + 3 * DAY + DAY / 2) == second
+
+
+def test_overlapping_rules_below_the_chosen_level_do_not_raise(sqlite_factory) -> None:
+    """Design gate #528 v1 §7 "data corruption", the other group: a normal rule on the first level
+    and two overlapping rules on a lower one → the first level's rule, no error (the lower level
+    was never queried before). Without a project the lower level is the chosen one and raises."""
+    rules = Rules(sqlite_factory, Clock(T0))
+    rules.add_project("p1")
+    top = rules.publish_new(PricingScope.PROJECT_PROVIDER_MODEL, project="p1")
+    _corrupt_overlap(rules, CUSTOMER)
+
+    assert rules.resolve(T0 + 2 * DAY, project="p1") == top.id
+    with pytest.raises(MultipleResultsFound):
+        rules.resolve(T0 + 2 * DAY)
 
 
 def test_drafts_discarded_drafts_and_withdrawn_reservations_never_match(sqlite_factory) -> None:
@@ -692,7 +768,7 @@ def test_resolution_takes_share_locks() -> None:
     compiled = str(shared.compile(dialect=mysql.dialect()))
     assert "LOCK IN SHARE MODE" in compiled or "FOR SHARE" in compiled
     assert "with_for_update(read=True)" in inspect.getsource(rule_repository._shared)
-    # Each level once, the components once: all through `_shared`.
+    # The one statement over the levels, the components once: both through `_shared`.
     assert "_shared(" in inspect.getsource(resolve_pricing_rule)
     assert "_shared(" in inspect.getsource(rule_repository._resolved)
     assert "_shared(" in inspect.getsource(lock_pricing_rules_shared)
