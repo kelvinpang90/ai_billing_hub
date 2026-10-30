@@ -49,6 +49,9 @@ class PricingPreviewRequest(BaseModel):
 
     # 租户的 public_id。
     customer_id: PublicId
+    # 项目的 public_id，可选，必须属于该客户（设计闸门 #507 v4 §2「接口」）：给了就按事件属于
+    # 该项目解析（八级）；没给就不查三个项目级，结果与不分项目时相同。
+    project_id: PublicId | None = None
     provider: str = Field(pattern=PROVIDER_PATTERN)
     # 模型代码或别名，按 `occurred_at` 解析（AIH-TASK-025）。
     model: str = Field(pattern=MODEL_PATTERN)

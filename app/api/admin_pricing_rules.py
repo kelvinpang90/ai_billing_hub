@@ -58,18 +58,22 @@ def list_pricing_rules(
     request: Request,
     priority_scope: ScopeFilter = None,
     customer_id: PublicIdFilter = None,
+    project_id: PublicIdFilter = None,
     provider_id: PublicIdFilter = None,
     model_id: PublicIdFilter = None,
     status_filter: StatusFilter = None,
     page: PageNumber = 1,
     page_size: PageSize = DEFAULT_PAGE_SIZE,
 ) -> ApiResponse[Page[PricingRuleView]]:
-    """§59 price history: by scope (§16 order), then `effective_from`; with components."""
+    """§59 price history: by scope (§16 order), then `effective_from`; with components.
+
+    `project_id` only together with `customer_id` (alone: 422 `VALIDATION_ERROR`)."""
     require_admin(request)
     listing = pricing_rules.list_pricing_rules(
         require_session_factory(request),
         priority_scope=priority_scope,
         customer_id=customer_id,
+        project_id=project_id,
         provider_id=provider_id,
         model_id=model_id,
         status=status_filter,
@@ -94,6 +98,7 @@ def create_pricing_rule(
         actor=admin,
         priority_scope=payload.priority_scope,
         customer_id=payload.customer_id,
+        project_id=payload.project_id,
         provider_id=payload.provider_id,
         model_id=payload.model_id,
         strategy=payload.strategy,

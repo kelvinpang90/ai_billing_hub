@@ -2653,9 +2653,11 @@ SHA256(RAW_REQUEST_BODY)
 设计依据：设计闸门 #178 `APPROVED: design v4`，全文见
 [design/AIH-TASK-027-pricing-rules.md](design/AIH-TASK-027-pricing-rules.md)（spec §14、§15、§15.1、§16、§59、§66、
 §74.3、§80、§89、§113；ADR-0008）。实现登记为 AIH-TASK-027。表结构见 [database-schema.md](database-schema.md) 的
-「客户定价规则」；五级顺序与下落语义见 [pricing-engine.md](pricing-engine.md) 的「规则」。
+「客户定价规则」；八级顺序与下落语义见 [pricing-engine.md](pricing-engine.md) 的「规则」。项目作用域（三个项目级、
+请求与筛选的 `project_id`、视图的 `project_id` / `project_name`）依据设计闸门 #507 `APPROVED: design v4`，全文见
+[design/AIH-TASK-136-pricing-project-scope.md](design/AIH-TASK-136-pricing-project-scope.md)；接口实现登记为 AIH-TASK-139。
 
-一条**定价规则**决定客户被扣多少钱：一个**范围**（spec §16 的五级之一）加一种**策略**（spec §15）——
+一条**定价规则**决定客户被扣多少钱：一个**范围**（spec §16 的八级之一）加一种**策略**（spec §15）——
 
 - `MARKUP`：MYR 估算成本 × `markup_multiplier`；
 - `FIXED_RATE`：Acuven 自定的 MYR 分量价（`components`），与供应商成本无关。
@@ -2678,7 +2680,7 @@ SHA256(RAW_REQUEST_BODY)
 | `POST /api/v1/admin/pricing-rules/{rule_id}/discard` | `{}` | 200，规则 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
 
 只有 ADMIN 能调（处理函数第一条语句就是鉴权）。路径里的 `rule_id` 是规则的 `public_id`；客户用 `customer_id`（租户
-的 `public_id`）；响应里没有内部自增 id，人一律用登录邮箱表示。所有请求体都拒绝多余字段（422）。**没有删除接口**：
+的 `public_id`），项目用 `project_id`（项目的 `public_id`）；响应里没有内部自增 id，人一律用登录邮箱表示。所有请求体都拒绝多余字段（422）。**没有删除接口**：
 草稿只能丢弃，规则行永不删除。spec §89 没有列发布接口（§66 有 `PRICING_PUBLISH`），这里按 §89「允许调整命名」补上。
 
 本节专有的错误码：
@@ -2687,6 +2689,7 @@ SHA256(RAW_REQUEST_BODY)
 | --- | --- | --- | --- |
 | 404 | `PRICING_RULE_NOT_FOUND` | 路径里的规则不存在 | 否 |
 | 404 | `CUSTOMER_NOT_FOUND` | 请求体或筛选里的客户不存在 | 否 |
+| 404 | `PROJECT_NOT_FOUND` | 请求体或筛选里的 `project_id` 不存在，或不属于同时给的 `customer_id`（两者一模一样）；客户本身不存在时先报 `CUSTOMER_NOT_FOUND` | 否 |
 | 404 | `AI_PROVIDER_NOT_FOUND` | 请求体或筛选里的供应商不存在 | 否 |
 | 404 | `AI_MODEL_NOT_FOUND` | 模型不存在，或不属于那个供应商（两者一模一样） | 否 |
 | 404 | `USAGE_METER_COMPONENT_NOT_FOUND` | `component_code` 不是目录里的计价分量 | 否 |
@@ -2697,21 +2700,26 @@ SHA256(RAW_REQUEST_BODY)
 | 409 | `PRICING_RULE_FINAL` | 对已停用 / 已丢弃的规则做任何写操作 | 否 |
 | 409 | `EFFECTIVE_FROM_CONFLICT` | 生效时刻不晚于该范围末尾规则的起点，或早于它的尽头；不指定时刻而末尾规则尚未开始 | 否 |
 | 422 | `EFFECTIVE_FROM_IN_PAST` | 请求的生效时刻早于 `t`（不许回溯） | 否 |
-| 422 | `VALIDATION_ERROR` | 范围字段与 `priority_scope` 不匹配、策略与字段混合、格式、精度、正数、多余字段 | 否 |
+| 422 | `VALIDATION_ERROR` | 范围字段与 `priority_scope` 不匹配、策略与字段混合、格式、精度、正数、多余字段；列表筛选只给 `project_id` 不给 `customer_id` | 否 |
 | 500 | `INTERNAL_ERROR` | 意外错误（含发布 / 停用后区间复查不通过、锁等待超时）；整个事务回滚 | 否 |
 
 ### 范围（spec §16，从高到低）
 
-| `priority_scope` | `customer_id` | `provider_id` | `model_id` |
-| --- | --- | --- | --- |
-| `CUSTOMER_PROVIDER_MODEL` | 必填 | 必填 | 必填 |
-| `CUSTOMER_PROVIDER` | 必填 | 必填 | 不许给 |
-| `CUSTOMER` | 必填 | 不许给 | 不许给 |
-| `GLOBAL_PROVIDER_MODEL` | 不许给 | 必填 | 必填 |
-| `GLOBAL` | 不许给 | 不许给 | 不许给 |
+| `priority_scope` | `customer_id` | `project_id` | `provider_id` | `model_id` |
+| --- | --- | --- | --- | --- |
+| `PROJECT_PROVIDER_MODEL` | 必填 | 必填 | 必填 | 必填 |
+| `PROJECT_PROVIDER` | 必填 | 必填 | 必填 | 不许给 |
+| `PROJECT` | 必填 | 必填 | 不许给 | 不许给 |
+| `CUSTOMER_PROVIDER_MODEL` | 必填 | 不许给 | 必填 | 必填 |
+| `CUSTOMER_PROVIDER` | 必填 | 不许给 | 必填 | 不许给 |
+| `CUSTOMER` | 必填 | 不许给 | 不许给 | 不许给 |
+| `GLOBAL_PROVIDER_MODEL` | 不许给 | 不许给 | 必填 | 必填 |
+| `GLOBAL` | 不许给 | 不许给 | 不许给 | 不许给 |
 
 多给或少给都是 422 `VALIDATION_ERROR`（`null` 等同不给）；§16 之外的组合（例如全局 + 供应商不带模型）写不进去，数据库
-的 CHECK 也拒绝。模型必须属于给出的供应商。客户的账户状态不限：停用的客户也可以预先配置价格。
+的 CHECK 也拒绝。项目必须属于给出的客户（不存在或属于另一个客户：404 `PROJECT_NOT_FOUND`，数据库的复合外键也保证）；
+模型必须属于给出的供应商。客户的账户状态不限：停用的客户也可以预先配置价格。三个项目级排在客户级之前：一条项目级规则只给
+**这个项目**的事件计费；项目没有项目级规则时，它的事件从客户级开始选，与不分项目时相同。
 
 ### 字段规则
 
@@ -2736,6 +2744,8 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
   "id": "00000000-0000-4000-8000-000000000000",
   "priority_scope": "CUSTOMER_PROVIDER_MODEL",
   "customer_id": "00000000-0000-4000-8000-000000000000",
+  "project_id": null,
+  "project_name": null,
   "provider_id": "00000000-0000-4000-8000-000000000000",
   "provider_code": "anthropic",
   "model_id": "00000000-0000-4000-8000-000000000000",
@@ -2768,7 +2778,8 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
 
 | 字段 | 说明 |
 | --- | --- |
-| `customer_id` / `provider_id` / `model_id` | 按 `priority_scope` 有值，其余为 `null`；`provider_code` / `model_code` 同理 |
+| `customer_id` / `project_id` / `provider_id` / `model_id` | 按 `priority_scope` 有值，其余为 `null`；`provider_code` / `model_code` 同理 |
+| `project_name` | 项目名；与 `project_id` 一样只在三个项目级有值，其余五级为 `null` |
 | `markup_multiplier` | MARKUP 的倍数；FIXED_RATE 为 `null` |
 | `status` | `DRAFT` / `PUBLISHED` / `RETIRED` / `DISCARDED` |
 | `effective_from` | 草稿为 `null`；已发布时 `null` 只有一种含义：`GLOBAL` 范围的第一条、未指定生效时刻 =「一直以来」 |
@@ -2779,22 +2790,26 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
 
 #### `GET /api/v1/admin/pricing-rules` —— 规则列表（spec §59「查看价格历史」）
 
-按范围（§16 的顺序，同一级里同一范围的聚在一起）、`effective_from`（`null` 在前，含草稿）排序，每项带分量。查询参数：
-`priority_scope`、`customer_id`、`provider_id`、`model_id`（`public_id`，最长 64）、
-`status=DRAFT|PUBLISHED|RETIRED|DISCARDED`，以及[分页](#分页spec-108)。筛选里的客户不存在 404 `CUSTOMER_NOT_FOUND`；
-供应商不存在 404 `AI_PROVIDER_NOT_FOUND`；模型不存在（或同时给了供应商而模型不属于它）404 `AI_MODEL_NOT_FOUND`。
+按范围（§16 的顺序，三个项目级在最前；同一级里同一范围的聚在一起）、`effective_from`（`null` 在前，含草稿）排序，每项
+带分量。查询参数：`priority_scope`、`customer_id`、`project_id`、`provider_id`、`model_id`（`public_id`，最长 64）、
+`status=DRAFT|PUBLISHED|RETIRED|DISCARDED`，以及[分页](#分页spec-108)。`project_id` **只能与 `customer_id` 一起给**
+（单独给 422 `VALIDATION_ERROR`），只返回该项目的规则。筛选里的客户不存在 404 `CUSTOMER_NOT_FOUND`；项目不存在或不属于
+该客户 404 `PROJECT_NOT_FOUND`；供应商不存在 404 `AI_PROVIDER_NOT_FOUND`；模型不存在（或同时给了供应商而模型不属于它）
+404 `AI_MODEL_NOT_FOUND`。几个都不对时按这个顺序报第一个。
 
 #### `POST /api/v1/admin/pricing-rules` —— 建草稿
 
-请求体：`priority_scope`、按范围给的 `customer_id` / `provider_id` / `model_id`、`strategy`、`markup_multiplier`
-（MARKUP）或 `components`（FIXED_RATE）。201；同一事务写规则、分量与一条 `PRICING_CREATE`。草稿**可以不完整**。
+请求体：`priority_scope`、按范围给的 `customer_id` / `project_id` / `provider_id` / `model_id`（见上面的范围表）、
+`strategy`、`markup_multiplier`（MARKUP）或 `components`（FIXED_RATE）。范围字段不匹配 422；客户不存在 404
+`CUSTOMER_NOT_FOUND`，项目不存在或不属于该客户 404 `PROJECT_NOT_FOUND`，之后才查供应商与模型。201；同一事务写规则、
+分量与一条 `PRICING_CREATE`。草稿**可以不完整**。
 供应商、模型或分量所属计量类型已停用：409 `CATALOG_ITEM_RETIRED`。不拿规则锁；重发会建出两个草稿（草稿不影响计费，
 丢弃多余的即可）。
 
 #### `PATCH /api/v1/admin/pricing-rules/{rule_id}` —— 改草稿（spec §89）
 
 只收 `strategy`、`markup_multiplier`、`components`，至少一个，都不许是 `null`；`components` 是**整体替换**。**范围
-字段不可改**（带 `priority_scope`、`customer_id`、`provider_id`、`model_id` 是 422；改范围请新建）。与规则现状合起来：
+字段不可改**（带 `priority_scope`、`customer_id`、`project_id`、`provider_id`、`model_id` 是 422；改范围请新建）。与规则现状合起来：
 
 - 改成（或仍是）MARKUP：倍数取请求里的，没给就沿用原来的（原本是 FIXED_RATE 而没给倍数：422）；带 `components` 422；
   原有分量全部删掉；
@@ -2854,16 +2869,18 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
 ### 审计
 
 五个动作都与写入同一事务，不写 outbox；操作者带 ip 与 user agent。`entity_type` = `pricing_rule`，`entity_id` = 规则
-的 `id`。范围里客户用租户 `public_id`（`customer_id`），供应商、模型、分量一律用 `code`，被截断 / 被恢复的规则用
-`public_id`，发布人用邮箱；不含内部 id。审计里有倍数与单价：管理员可见的业务数据；应用日志不打印分量明细。
+的 `id`。范围里客户用租户 `public_id`（`customer_id`），项目用项目 `public_id`（`project_id`，非项目级为 `null`），
+供应商、模型、分量一律用 `code`，被截断 / 被恢复的规则用 `public_id`，发布人用邮箱；不含内部 id。审计里有倍数与单价：
+管理员可见的业务数据；应用日志不打印分量明细。下表的「范围五项」是 `priority_scope`、`customer_id`、`project_id`、
+`provider_code`、`model_code`。
 
 | `action` | `before_state` | `after_state` |
 | --- | --- | --- |
-| `PRICING_CREATE` | — | `priority_scope`、`customer_id`、`provider_code`、`model_code`、`strategy`、`markup_multiplier`、`components`（每项 `component_code`、`unit_quantity`、`rate_amount`）、`status` |
-| `PRICING_UPDATE` | 变化的字段（`strategy` / `markup_multiplier` / `components`）的旧值 | 变化的字段的新值 |
+| `PRICING_CREATE` | — | 范围五项、`strategy`、`markup_multiplier`、`components`（每项 `component_code`、`unit_quantity`、`rate_amount`）、`status` |
+| `PRICING_UPDATE` | 变化的字段（`strategy` / `markup_multiplier` / `components`）的旧值 | 变化的字段的新值（草稿的范围不可改，不带项目） |
 | `PRICING_DISCARD` | `status`（`DRAFT`） | `status`（`DISCARDED`） |
-| `PRICING_PUBLISH` | `status`（`DRAFT`）；截断了前一条时 `truncated_rule`：它的 `id` 与原 `effective_to`（`null`） | 范围四项、`strategy`、`markup_multiplier`、`components`、`status`、`effective_from`、`effective_to`、`approved_by_email`、`approved_at`；截断了前一条时 `truncated_rule`：它的 `id` 与新的 `effective_to` |
-| `PRICING_RETIRE` | `status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与原 `effective_to` | 范围四项、`status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与 `effective_to`（`null`）。`reason` 记在审计行的 `reason` 上 |
+| `PRICING_PUBLISH` | `status`（`DRAFT`）；截断了前一条时 `truncated_rule`：它的 `id` 与原 `effective_to`（`null`） | 范围五项、`strategy`、`markup_multiplier`、`components`、`status`、`effective_from`、`effective_to`、`approved_by_email`、`approved_at`；截断了前一条时 `truncated_rule`：它的 `id` 与新的 `effective_to` |
+| `PRICING_RETIRE` | `status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与原 `effective_to` | 范围五项、`status`、`effective_from`、`effective_to`；恢复了前一条时 `restored_rule`：它的 `id` 与 `effective_to`（`null`）。`reason` 记在审计行的 `reason` 上 |
 
 「已发布再发布」与无变化的 PATCH 不写审计。`PRICING_CREATE` / `PRICING_UPDATE` / `PRICING_PUBLISH` 在 spec §66 的
 清单里；`PRICING_RETIRE`、`PRICING_DISCARD` 按先例补上（见 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-027 记录段）。
@@ -2873,11 +2890,12 @@ MARKUP 带 `components`、FIXED_RATE 带 `markup_multiplier`、MARKUP 不带倍�
 `app/repositories/pricing_rules.py`：
 
 - `lock_pricing_rules_shared(session)`：对 `pricing_rule_locks` 那一行取 `FOR SHARE`，持有到调用方的事务提交；
-- `resolve_pricing_rule(session, tenant_id, provider_id, model_id, occurred_at)`：参数是事件的内部 `tenant_id`、
-  `resolve_model` 返回的模型的内部 `provider_id` / `id`，以及不带时区的 UTC `occurred_at`。按
-  `CUSTOMER_PROVIDER_MODEL → CUSTOMER_PROVIDER → CUSTOMER → GLOBAL_PROVIDER_MODEL → GLOBAL` 逐级加锁读（`FOR SHARE`）
+- `resolve_pricing_rule(session, tenant_id, project_id, provider_id, model_id, occurred_at)`：参数是事件的内部
+  `tenant_id` 与 `project_id`（试算没给项目时为 `None`：前三级不查）、`resolve_model` 返回的模型的内部 `provider_id` /
+  `id`，以及不带时区的 UTC `occurred_at`。按 `PROJECT_PROVIDER_MODEL → PROJECT_PROVIDER → PROJECT →
+  CUSTOMER_PROVIDER_MODEL → CUSTOMER_PROVIDER → CUSTOMER → GLOBAL_PROVIDER_MODEL → GLOBAL` 逐级加锁读（`FOR SHARE`）
   该级范围内状态为 `PUBLISHED` 或 `RETIRED`、`effective_from ≤ occurred_at < effective_to` 的规则，**第一级命中即返回**
-  （规则 + 分量；命中的 FIXED_RATE 规则缺事件所需分量也**不下落**），五级都没有返回 `None`（计费侧 `PRICING_ERROR`）。
+  （规则 + 分量；命中的 FIXED_RATE 规则缺事件所需分量也**不下落**），八级都没有返回 `None`（计费侧 `PRICING_ERROR`）。
 
 计费事务里的顺序：`resolve_model`（供应商 S）→ `lock_pricing_rules_shared` → 价格与规则的加锁读 → 钱包 → 租户；返回
 的规则内部 id 写进事件快照（`pricing_rule_id`）。契约全文见设计 §2「对下游任务的契约」与 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的
@@ -2908,6 +2926,7 @@ AIH-TASK-027 记录段。
 | 字段 | 规则 |
 | --- | --- |
 | `customer_id` | 客户（租户）的 `public_id`；不存在 404 `CUSTOMER_NOT_FOUND` |
+| `project_id` | 可选，项目的 `public_id`；不存在或不属于该客户 404 `PROJECT_NOT_FOUND`。给了：按事件属于该项目解析（八级，与该项目的真实计费选到同一条规则）；不给：三个项目级不查，等价于「该客户一个没有项目级规则的项目」，结果与不分项目时相同 |
 | `provider` | 供应商代码，`^[a-z0-9][a-z0-9_-]{0,63}$` |
 | `model` | 模型代码或别名，`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$`；按 `occurred_at` 解析（含别名段） |
 | `usage_type` | 计量类型 `code`；不存在 404 `USAGE_METER_TYPE_NOT_FOUND` |
@@ -2969,7 +2988,7 @@ AIH-TASK-027 记录段。
 | `model` | 解析到的模型：`model` 是模型自己的代码（用别名试算时也是），`matched_via` 是 `code` 或 `alias` |
 | `provider_price_version` | 生效的价格版本；`effective_from` / `effective_to` 为 `null` 表示「一直以来」/「仍生效」 |
 | `fx_rate_version` | 原币不是 MYR 时生效的汇率版本，`rate` 是原值（1 单位原币 = 多少 MYR，不舍入）；原币是 MYR 时为 `null`（不查汇率） |
-| `pricing_rule` | 命中的规则；`markup_multiplier` 只有 MARKUP 有 |
+| `pricing_rule` | 命中的规则与它的 `priority_scope`（只有请求给了 `project_id` 才可能是三个项目级之一）；`markup_multiplier` 只有 MARKUP 有 |
 | `components` | 该计量类型的全部分量，`component_code` 升序：数量、未舍入的供应商原币成本、未舍入的客户分量价（MYR 含税，只有 FIXED_RATE 有） |
 | `*_unrounded` | 未舍入的中间值，十进制字符串（最多 50 位有效数字），从不是 JSON 数字 |
 | `provider_source_cost` / `estimated_provider_cost_myr` / `billable_cost` | 存储值：恰好 8 位小数，各自由未舍入值 `ROUND_HALF_UP` 舍入一次。「`estimated_provider_cost_myr` × 倍数」与 `billable_cost` 可以差最后一位（见 [pricing-engine.md](pricing-engine.md)） |
@@ -2984,7 +3003,8 @@ FIXED_RATE 规则缺该计量类型的分量时是 `MISSING_RULE_COMPONENT`，�
 
 | HTTP | `error.code` | 什么时候 | 写库 |
 | --- | --- | --- | --- |
-| 404 | `CUSTOMER_NOT_FOUND` | `customer_id` 不存在 | 否 |
+| 404 | `CUSTOMER_NOT_FOUND` | `customer_id` 不存在（给了 `project_id` 时也先报这个） | 否 |
+| 404 | `PROJECT_NOT_FOUND` | 给了 `project_id`，而项目不存在或不属于该客户（两者一模一样） | 否 |
 | 404 | `USAGE_METER_TYPE_NOT_FOUND` | `usage_type` 不是计量类型 | 否 |
 | 422 | `VALIDATION_ERROR` | 格式、类型、多余字段；用量字段与计量类型的形态不符；`occurred_at` 不是日历上存在的时刻 | 否 |
 | 422 | `AMOUNT_OUT_OF_RANGE` | 某个存储值超出 DECIMAL(20,8)（计费侧会把这样的事件标 `FAILED_FINAL`） | 否 |
