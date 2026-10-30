@@ -36,6 +36,7 @@ from decimal import Decimal
 
 import pytest
 from alembic.config import Config
+from pydantic import ValidationError
 from sqlalchemy import Engine, create_engine, delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -60,11 +61,15 @@ from app.models.pricing_rules import (
     PricingScope,
     PricingStrategy,
 )
-from app.models.tenancy import Tenant
+from app.models.tenancy import Project, Tenant
 from app.repositories import pricing_rules as rule_repository
 from app.repositories.pricing_rules import resolve_pricing_rule
 from app.schemas.ai_catalog import ModelView
-from app.schemas.pricing_rules import PricingRuleView, RuleComponentInput
+from app.schemas.pricing_rules import (
+    CreatePricingRuleRequest,
+    PricingRuleView,
+    RuleComponentInput,
+)
 from app.services import ai_catalog, pricing_rules
 from app.services.auth import RequestContext, utc_now
 from app.services.pricing_rules import (
@@ -901,6 +906,34 @@ def test_the_service_checks_the_scope_fields_as_well(sqlite_factory) -> None:
     assert snapshot(factory) == before
 
 
+@pytest.mark.parametrize("level", [level for level in PricingScope if level.has_project])
+def test_a_project_level_draft_is_a_422_for_now(sqlite_factory, level: PricingScope) -> None:
+    """AIH-TASK-137: a project level needs `project_id` among its scope fields, and neither the
+    request nor the service takes one yet (AIH-TASK-138, 139). So a draft on any of the three
+    project levels is a 422 `VALIDATION_ERROR` — never a 500 — and writes nothing."""
+    factory = sqlite_factory
+    rules = Rules(factory, Clock(T0))
+    fields = rules.scope_fields(level)
+    assert fields["customer_id"] is not None
+    before = snapshot(factory)
+    body = {
+        "priority_scope": level.value,
+        **{name: value for name, value in fields.items() if value is not None},
+        "strategy": "MARKUP",
+        "markup_multiplier": FICTIONAL_MULTIPLIER,
+    }
+
+    # The request: the scope fields never match (and `project_id` is not a field at all).
+    for request in (body, {**body, "project_id": str(uuid.uuid4())}):
+        with pytest.raises(ValidationError):
+            CreatePricingRuleRequest.model_validate(request)
+    # The service, called directly with everything else the level needs.
+    with pytest.raises(PricingRuleShapeInvalid) as raised:
+        rules.draft(level)
+    assert (raised.value.code, raised.value.http_status) == ("VALIDATION_ERROR", 422)
+    assert snapshot(factory) == before
+
+
 # --- the recheck and the lock ----------------------------------------------------
 
 
@@ -1284,11 +1317,11 @@ def test_the_lock_table_holds_exactly_one_row(mysql_factory) -> None:
 
 
 _INSERT_RULE = text(
-    "INSERT INTO pricing_rules (public_id, priority_scope, tenant_id, provider_id, model_id,"
-    " strategy, markup_multiplier, status, effective_from, effective_to, created_by, approved_by,"
-    " created_at, updated_at, approved_at) VALUES (:public_id, :scope, :tenant_id, :provider_id,"
-    " :model_id, :strategy, :multiplier, :status, NULL, NULL, :user, :approver, :now, :now,"
-    " :approved_at)"
+    "INSERT INTO pricing_rules (public_id, priority_scope, tenant_id, project_id, provider_id,"
+    " model_id, strategy, markup_multiplier, status, effective_from, effective_to, created_by,"
+    " approved_by, created_at, updated_at, approved_at) VALUES (:public_id, :scope, :tenant_id,"
+    " :project_id, :provider_id, :model_id, :strategy, :multiplier, :status, NULL, NULL, :user,"
+    " :approver, :now, :now, :approved_at)"
 )
 _PUBLISH_DIRECTLY = text(
     "UPDATE pricing_rules SET status = :status, effective_from = :start, effective_to = :end,"
@@ -1301,17 +1334,20 @@ def _insert_rule(
     rules: Rules,
     *,
     scope: str = "GLOBAL",
-    columns: tuple[bool, bool, bool] | None = None,
+    columns: tuple[bool, bool, bool, bool] | None = None,
+    project_id: int | None = None,
     strategy: str = "MARKUP",
     multiplier: str | None = FICTIONAL_MULTIPLIER,
     status: str = "DRAFT",
 ):
-    """A rule row written with plain SQL. `columns`: which of (tenant, provider, model) are set;
-    by default the ones the scope needs."""
+    """A rule row written with plain SQL. `columns`: which of (tenant, project, provider, model)
+    are set; by default the ones the scope needs. A set project is `project_id`."""
     tenant_id, provider_id, model_id = rules.ids()
     if columns is None:
         level = PricingScope(scope)
-        columns = (level.has_customer, level.has_provider, level.has_model)
+        columns = (level.has_customer, level.has_project, level.has_provider, level.has_model)
+    if columns[1]:
+        assert project_id is not None, "a rule with a project needs project_id"
     approved = status != "DRAFT"
     return session.execute(
         _INSERT_RULE,
@@ -1319,8 +1355,9 @@ def _insert_rule(
             "public_id": str(uuid.uuid4()),
             "scope": scope,
             "tenant_id": tenant_id if columns[0] else None,
-            "provider_id": provider_id if columns[1] else None,
-            "model_id": model_id if columns[2] else None,
+            "project_id": project_id if columns[1] else None,
+            "provider_id": provider_id if columns[2] else None,
+            "model_id": model_id if columns[3] else None,
             "strategy": strategy,
             "multiplier": multiplier,
             "status": status,
@@ -1372,12 +1409,23 @@ def _publish_directly(
 @pytest.mark.parametrize(
     ("scope", "columns"),
     [
-        ("GLOBAL_PROVIDER_MODEL", (False, True, False)),
-        ("CUSTOMER_PROVIDER_MODEL", (True, False, True)),
-        ("GLOBAL", (False, False, True)),
-        ("CUSTOMER", (True, True, False)),
-        ("GLOBAL", (True, False, False)),
-        ("GLOBAL_PROVIDER", (False, True, False)),
+        ("GLOBAL_PROVIDER_MODEL", (False, False, True, False)),
+        ("CUSTOMER_PROVIDER_MODEL", (True, False, False, True)),
+        ("GLOBAL", (False, False, False, True)),
+        ("CUSTOMER", (True, False, True, False)),
+        ("GLOBAL", (True, False, False, False)),
+        ("GLOBAL_PROVIDER", (False, False, True, False)),
+        ("PROJECT", (True, False, False, False)),
+        ("PROJECT", (False, True, False, False)),
+        ("PROJECT", (True, True, True, False)),
+        ("PROJECT_PROVIDER", (True, True, True, True)),
+        ("PROJECT_PROVIDER_MODEL", (True, True, True, False)),
+        ("PROJECT_PROVIDER_MODEL", (True, False, True, True)),
+        ("CUSTOMER", (True, True, False, False)),
+        ("CUSTOMER_PROVIDER_MODEL", (True, True, True, True)),
+        ("GLOBAL_PROVIDER_MODEL", (False, True, True, True)),
+        ("GLOBAL", (False, True, False, False)),
+        ("PROJECT_MODEL", (True, True, False, True)),
     ],
     ids=[
         "global-provider-without-model",
@@ -1386,16 +1434,38 @@ def _publish_directly(
         "customer-with-provider",
         "global-with-tenant",
         "unknown-scope",
+        "project-without-project",
+        "project-without-tenant",
+        "project-with-provider",
+        "project-provider-with-model",
+        "project-model-without-model",
+        "project-model-without-project",
+        "customer-with-project",
+        "customer-model-with-project",
+        "global-model-with-project",
+        "global-with-project",
+        "unknown-project-scope",
     ],
 )
 def test_the_checks_refuse_scope_and_null_combinations_outside_section_16(
-    mysql_factory, scope: str, columns: tuple[bool, bool, bool]
+    mysql_factory, scope: str, columns: tuple[bool, bool, bool, bool]
 ) -> None:
-    """§7 "scope and NULL combinations": CHECK refuses what §16 does not list."""
+    """§7 "scope and NULL combinations": CHECK refuses what the eight levels (design gate #507 v4
+    §2「数据库」) do not list. The project is a real one of the rule's tenant, so only the CHECK
+    can be what refuses; it is rolled back with the attempt."""
     rules = Rules(mysql_factory, utc_now)
     with mysql_factory() as session:
+        project = Project(
+            public_id=str(uuid.uuid4()),
+            tenant_id=rules.ids()[0],
+            name="Fictional project",
+            created_at=T0,
+            updated_at=T0,
+        )
+        session.add(project)
+        session.flush()
         with pytest.raises(DBAPIError) as raised:
-            _insert_rule(session, rules, scope=scope, columns=columns)
+            _insert_rule(session, rules, scope=scope, columns=columns, project_id=project.id)
         session.rollback()
 
     assert _error(raised)[0] == _ER_CHECK_CONSTRAINT_VIOLATED

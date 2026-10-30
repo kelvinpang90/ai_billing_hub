@@ -51,8 +51,11 @@ SCOPE_FIELDS: Final = ("customer_id", "provider_id", "model_id")
 
 
 def required_scope_fields(scope: PricingScope) -> frozenset[str]:
+    """The scope fields `scope` takes. ⚠️ The three project levels need `project_id`, which no
+    request carries yet (AIH-TASK-139): a project-level draft is a 422 until then."""
     wanted = {
         "customer_id": scope.has_customer,
+        "project_id": scope.has_project,
         "provider_id": scope.has_provider,
         "model_id": scope.has_model,
     }

@@ -8,8 +8,8 @@ spec §15、§16、§74.3；ADR-0008（含税定价）。三张表：
 - `pricing_rules`：一条规则 = 一个范围 + 一种策略。范围列有四个：`tenant_id`、`project_id`
   （迁移 0030，设计闸门 #507 v4）、`provider_id`、`model_id`；库里的两条范围 CHECK 已是八级
   （三个项目级 `PROJECT_PROVIDER_MODEL`、`PROJECT_PROVIDER`、`PROJECT` 排在 §16 的五级之前），
-  每级恰好一种 NULL 组合。⚠️ `PricingScope` 仍只有五个值：八级的枚举值由 AIH-TASK-137 加入，
-  在那之前应用层建不出、也读不出项目级规则（`project_id` 恒为 NULL）。项目级规则的
+  每级恰好一种 NULL 组合，`PricingScope` 同为八级（AIH-TASK-137）。⚠️ 请求模型还没有
+  `project_id`，应用层还建不出项目级规则，解析也还不查它们（AIH-TASK-138、139）。项目级规则的
   `(project_id, tenant_id)` 以复合外键指向 `projects (id, tenant_id)`：项目一定属于同一租户。
   策略与倍数一一对应（CHECK）。状态 `DRAFT → PUBLISHED → RETIRED`，草稿也可以
   `DISCARDED`。已发布（`PUBLISHED` / `RETIRED`）的规则在 `[effective_from, effective_to)` 内
@@ -81,11 +81,13 @@ RULE_CURRENCY: Final = "MYR"
 
 
 class PricingScope(enum.StrEnum):
-    """§16 的五级，**按优先顺序从高到低**声明：`resolve_pricing_rule` 就按这个顺序逐级查。
-
-    库里的 CHECK 已放行八级（迁移 0030）；排在最前的三个项目级由 AIH-TASK-137 加入这里。
+    """八级（设计闸门 #507 v4），**按优先顺序从高到低**声明：`resolve_pricing_rule` 就按这个
+    顺序逐级查。三个项目级排在 §16 的五级之前；它们同样带租户（`has_customer` 为真）。
     """
 
+    PROJECT_PROVIDER_MODEL = "PROJECT_PROVIDER_MODEL"
+    PROJECT_PROVIDER = "PROJECT_PROVIDER"
+    PROJECT = "PROJECT"
     CUSTOMER_PROVIDER_MODEL = "CUSTOMER_PROVIDER_MODEL"
     CUSTOMER_PROVIDER = "CUSTOMER_PROVIDER"
     CUSTOMER = "CUSTOMER"
@@ -97,6 +99,10 @@ class PricingScope(enum.StrEnum):
         return self in _CUSTOMER_SCOPES
 
     @property
+    def has_project(self) -> bool:
+        return self in _PROJECT_SCOPES
+
+    @property
     def has_provider(self) -> bool:
         return self in _PROVIDER_SCOPES
 
@@ -105,21 +111,31 @@ class PricingScope(enum.StrEnum):
         return self in _MODEL_SCOPES
 
 
-_CUSTOMER_SCOPES: Final = frozenset(
+# 四个范围列哪几个非空，与 `SCOPE_COLUMNS_CHECK` 的八种组合一一对应。
+_PROJECT_SCOPES: Final = frozenset(
+    {PricingScope.PROJECT_PROVIDER_MODEL, PricingScope.PROJECT_PROVIDER, PricingScope.PROJECT}
+)
+_CUSTOMER_SCOPES: Final = _PROJECT_SCOPES | frozenset(
     {PricingScope.CUSTOMER_PROVIDER_MODEL, PricingScope.CUSTOMER_PROVIDER, PricingScope.CUSTOMER}
 )
 _PROVIDER_SCOPES: Final = frozenset(
     {
+        PricingScope.PROJECT_PROVIDER_MODEL,
+        PricingScope.PROJECT_PROVIDER,
         PricingScope.CUSTOMER_PROVIDER_MODEL,
         PricingScope.CUSTOMER_PROVIDER,
         PricingScope.GLOBAL_PROVIDER_MODEL,
     }
 )
 _MODEL_SCOPES: Final = frozenset(
-    {PricingScope.CUSTOMER_PROVIDER_MODEL, PricingScope.GLOBAL_PROVIDER_MODEL}
+    {
+        PricingScope.PROJECT_PROVIDER_MODEL,
+        PricingScope.CUSTOMER_PROVIDER_MODEL,
+        PricingScope.GLOBAL_PROVIDER_MODEL,
+    }
 )
 
-# 解析的顺序（§16）。
+# 解析的顺序（§16 加三个项目级，设计闸门 #507 v4）。
 SCOPE_ORDER: Final = tuple(PricingScope)
 
 
@@ -278,7 +294,7 @@ class PricingRule(Base):
     )
     # 四个范围列哪几个非空由 `priority_scope` 决定（CHECK）。
     tenant_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
-    # 只有项目级规则有（迁移 0030，列序紧接 `tenant_id`）；本任务的应用层恒写 NULL。
+    # 只有项目级规则有（迁移 0030，列序紧接 `tenant_id`）。
     project_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
     provider_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
     model_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
