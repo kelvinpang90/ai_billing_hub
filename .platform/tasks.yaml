@@ -8097,7 +8097,7 @@ tasks:
     title: 项目级定价第一层：定价规则加项目列、八级范围约束与生成列的迁移
     purpose: >-
       按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「数据库」与 §8：新迁移 0030 给 pricing_rules 加 project_id 列、复合外键 (project_id, tenant_id) → projects (id, tenant_id) 与它的索引，把两条范围 CHECK 改为八级，把生成列 scope_key 的表达式加上项目一段并重建 open_slot 唯一索引，重建 trg_pricing_rules_before_update（不可变列加 project_id、区间重叠检查的范围键加项目）；有项目级规则时降级抛错；模型只同步列、外键、索引、CHECK 文本与生成列表达式，PricingScope 枚举本任务不改（于是应用层还建不出、也读不出项目级规则）。八级枚举与范围字段校验属于 AIH-TASK-137，解析与服务属于 AIH-TASK-138，接口与前端属于 AIH-TASK-139、140。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-135
     acceptance_criteria:
