@@ -8203,7 +8203,7 @@ tasks:
     title: 项目级定价第三层：按事件的项目八级解析规则，服务层接受项目
     purpose: >-
       按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「解析」「发布、停用与生效时刻」与 §8：resolve_pricing_rule 与 resolve_charge_inputs 加 project_id，计费传事件的项目，试算在本任务里传 None；服务层建草稿与列表的函数接受项目（项目必须属于客户，否则 404 PROJECT_NOT_FOUND），审计的范围带项目；spec §16、§59、§74.3 与 docs/pricing-engine.md 改为八级。接口不传项目（属于 AIH-TASK-139），所以对外行为不变。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-137
     acceptance_criteria:
