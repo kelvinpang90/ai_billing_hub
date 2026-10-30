@@ -54,6 +54,11 @@ export function canonicalTokenCount(value: string): string | null {
 interface PreviewRequestBase {
   /** 客户（租户）的 `public_id`。 */
   customer_id: string;
+  /**
+   * 可选，项目的 `public_id`（必须属于该客户，否则 404 `PROJECT_NOT_FOUND`）。给了按事件属于该项目解析（八级）；
+   * 不给就**不出现在请求体里**：三个项目级不查，结果与不分项目时相同。
+   */
+  project_id?: string;
   /** 供应商代码。 */
   provider: string;
   /** 模型代码或别名，按 `occurred_at` 解析。 */
@@ -92,16 +97,19 @@ function isTokenRequest(request: PricingPreviewRequest): request is TokenPreview
 }
 
 /**
- * 请求 → JSON 文本。字段顺序固定；字符串一律 `JSON.stringify`，token 是规范后的整数串（JSON 数字）。
+ * 请求 → JSON 文本。字段顺序固定（`project_id` 只在给了时紧跟 `customer_id`）；字符串一律 `JSON.stringify`，token 是规范后的整数串（JSON 数字）。
  * 有一个 token 不合规范就抛 `VALIDATION_ERROR`，什么都不发 —— 不把任意文本拼进 JSON。
  */
 export function previewRequestJson(request: PricingPreviewRequest): string {
-  const fields: [string, string][] = [
-    ["customer_id", JSON.stringify(request.customer_id)],
+  const fields: [string, string][] = [["customer_id", JSON.stringify(request.customer_id)]];
+  if (request.project_id !== undefined) {
+    fields.push(["project_id", JSON.stringify(request.project_id)]);
+  }
+  fields.push(
     ["provider", JSON.stringify(request.provider)],
     ["model", JSON.stringify(request.model)],
     ["usage_type", JSON.stringify(request.usage_type)],
-  ];
+  );
   if (isTokenRequest(request)) {
     for (const name of TOKEN_FIELDS) {
       const count = canonicalTokenCount(request[name]);

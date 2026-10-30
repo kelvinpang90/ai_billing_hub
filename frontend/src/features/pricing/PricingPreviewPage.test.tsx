@@ -1,5 +1,6 @@
 /**
- * 试算页：表单与「估算成本，客户不可见」、取下拉数据失败与无权限；按上报形态切换数量字段（四个 token 或
+ * 试算页：表单与「估算成本，客户不可见」、取下拉数据失败与无权限；可选的项目（选完客户才可选、换客户清空、
+ * 不选时请求里没有 project_id）；按上报形态切换数量字段（四个 token 或
  * quantity + 只读的 unit）；交给接口的请求（token 与 quantity 都是字符串，`occurred_at` 是带时区的 RFC 3339）；
  * 计算中禁用按钮；结果（状态、命中的模型、价格版本、汇率版本、规则、分量的未舍入值、三个存储值、「含税」）与
  * 错误状态照样画出已解析到的部分；后端错误码的文案与 request_id；十进制字符串原样显示。
@@ -15,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
 import type { MeterType, Provider } from "../../api/adminCatalog";
-import type { CustomerSummary, Page } from "../../api/adminCustomers";
+import type { CustomerSummary, Page, Project } from "../../api/adminCustomers";
 import type { PricingPreview } from "../../api/adminPricingPreview";
 import { ApiError } from "../../api/client";
 import { PricingPreviewPage } from "./PricingPreviewPage";
@@ -34,6 +35,7 @@ const catalog = vi.hoisted(() => ({
 
 const customers = vi.hoisted(() => ({
   listCustomers: vi.fn(),
+  listProjects: vi.fn(),
 }));
 
 vi.mock("../../api/adminPricingPreview", async () => {
@@ -67,6 +69,17 @@ const CUSTOMER: CustomerSummary = {
   billing_mode: "PREPAID",
   ai_service_enabled: true,
   status_version: 1,
+  created_at: AT,
+  updated_at: AT,
+};
+
+/** 第二个客户只用来「换客户」：它的 id 是不透明的占位串，不是 uuid（uuid 一律全零）。 */
+const OTHER_CUSTOMER: CustomerSummary = { ...CUSTOMER, id: "other-customer", company_name: "Another Fictional Bhd" };
+
+const PROJECT: Project = {
+  id: ID,
+  name: "Support bot",
+  description: null,
   created_at: AT,
   updated_at: AT,
 };
@@ -216,6 +229,19 @@ type User = ReturnType<typeof userEvent.setup>;
 /** 填客户、供应商、模型、计量类型与 `occurred_at`（吉隆坡时间 2026-10-01 08:00）。 */
 async function fillCommon(user: User, usageType: string): Promise<void> {
   await choose("Customer", "Fictional Trading Sdn Bhd");
+  await fillAfterCustomer(user, usageType);
+}
+
+/** 填一个 token 事件（客户与项目已由调用方选好）并提交。 */
+async function submitFilledTokens(user: User): Promise<void> {
+  await fillAfterCustomer(user, "LLM_TOKEN");
+  await user.clear(await screen.findByLabelText("Input tokens"));
+  await user.paste("1000000000000");
+  await user.click(buttonWithText("Calculate"));
+}
+
+/** 客户之后的字段：供应商、模型、计量类型与 `occurred_at`。 */
+async function fillAfterCustomer(user: User, usageType: string): Promise<void> {
   await choose("Provider", "anthropic");
   await user.click(screen.getByLabelText("Model"));
   await user.paste("claude-x");
@@ -237,9 +263,31 @@ async function submitTokens(user: User): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   customers.listCustomers.mockResolvedValue(page([CUSTOMER]));
+  customers.listProjects.mockImplementation((customerId: string) =>
+    Promise.resolve(customerId === ID ? page([PROJECT]) : page([])),
+  );
   catalog.listProviders.mockResolvedValue(page([PROVIDER]));
   catalog.listMeterTypes.mockResolvedValue(page([LLM_TOKEN, OCR_PAGE]));
 });
+
+/**
+ * 下拉当前选中的那一项的文字；没选时 `null`。antd v6 的单选没有 `.ant-select-selection-item`：
+ * 选中值画在 `.ant-select-content` 里，没选时那里只有占位文字。
+ */
+function selectedText(field: HTMLElement): string | null {
+  const select = field.closest(".ant-select");
+  const item = select?.querySelector(".ant-select-selection-item, .ant-select-content-value");
+  if (item) {
+    return item.textContent;
+  }
+  const content = select?.querySelector(".ant-select-content, .ant-select-selector");
+  if (!content || content.querySelector(".ant-select-placeholder, .ant-select-selection-placeholder")) {
+    return null;
+  }
+  const raw: string | null = content.textContent;
+  const text = raw?.trim() ?? "";
+  return text === "" ? null : text;
+}
 
 const SLOW = { timeout: 20_000 };
 configure({ asyncUtilTimeout: 5_000 });
@@ -350,6 +398,71 @@ describe("PricingPreviewPage form", SLOW, () => {
     expect(preview.previewPricing).not.toHaveBeenCalled();
   });
 
+  it("offers an optional project only after a customer is chosen, and sends no project_id when none is chosen", async () => {
+    const user = userEvent.setup();
+    preview.previewPricing.mockResolvedValue(PRICED);
+
+    renderPage();
+    expect(screen.getByLabelText("Project")).toBeDisabled();
+    expect(customers.listProjects).not.toHaveBeenCalled();
+
+    await choose("Customer", "Fictional Trading Sdn Bhd");
+    await waitFor(() => expect(screen.getByLabelText("Project")).toBeEnabled());
+    await submitFilledTokens(user);
+
+    await waitFor(() => expect(customers.listProjects).toHaveBeenCalledWith(ID, 1, 100, expect.anything()));
+    await waitFor(() => expect(preview.previewPricing).toHaveBeenCalledTimes(1));
+    const sent = preview.previewPricing.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(Object.keys(sent)).not.toContain("project_id");
+  });
+
+  it("sends the chosen project with the customer", async () => {
+    const user = userEvent.setup();
+    preview.previewPricing.mockResolvedValue(PRICED);
+
+    renderPage();
+    await choose("Customer", "Fictional Trading Sdn Bhd");
+    await waitFor(() => expect(screen.getByLabelText("Project")).toBeEnabled());
+    await choose("Project", "Support bot");
+    await submitFilledTokens(user);
+
+    await waitFor(() => expect(preview.previewPricing).toHaveBeenCalledTimes(1));
+    expect(preview.previewPricing.mock.calls[0]?.[0] as unknown).toEqual({
+      customer_id: ID,
+      project_id: ID,
+      provider: "anthropic",
+      model: "claude-x",
+      usage_type: "LLM_TOKEN",
+      input_tokens: "1000000000000",
+      output_tokens: "0",
+      cache_creation_input_tokens: "0",
+      cache_read_input_tokens: "0",
+      occurred_at: "2026-10-01T00:00:00Z",
+    });
+  });
+
+  it("clears the project when the customer changes, and then sends none", async () => {
+    const user = userEvent.setup();
+    customers.listCustomers.mockResolvedValue(page([CUSTOMER, OTHER_CUSTOMER]));
+    preview.previewPricing.mockResolvedValue(PRICED);
+
+    renderPage();
+    await choose("Customer", "Fictional Trading Sdn Bhd");
+    await waitFor(() => expect(screen.getByLabelText("Project")).toBeEnabled());
+    await choose("Project", "Support bot");
+    await waitFor(() => expect(selectedText(screen.getByLabelText("Project"))).toBe("Support bot"));
+
+    await choose("Customer", "Another Fictional Bhd");
+
+    await waitFor(() => expect(selectedText(screen.getByLabelText("Project"))).toBeNull());
+    await submitFilledTokens(user);
+
+    await waitFor(() => expect(preview.previewPricing).toHaveBeenCalledTimes(1));
+    const sent = preview.previewPricing.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(sent.customer_id).toBe("other-customer");
+    expect(Object.keys(sent)).not.toContain("project_id");
+  });
+
   it("disables the button while calculating and sends once however often it is clicked", async () => {
     const user = userEvent.setup();
     const pending = deferred<PricingPreview>();
@@ -400,6 +513,21 @@ describe("PricingPreviewPage result", SLOW, () => {
     expect(billable).toHaveTextContent("0.15733333");
     expect(within(billable).getByText("Tax-inclusive")).toBeInTheDocument();
     expect(screen.getAllByText("Estimated cost, not visible to customers.")).toHaveLength(2);
+  });
+
+  it("names a project level when that is the level that matched", async () => {
+    const user = userEvent.setup();
+    preview.previewPricing.mockResolvedValue({
+      ...PRICED,
+      pricing_rule: { id: ID, priority_scope: "PROJECT_PROVIDER_MODEL", strategy: "MARKUP", markup_multiplier: "2.00000000" },
+    });
+
+    await submitTokens(user);
+
+    expect(await screen.findByRole("link", { name: "Project · provider · model" })).toHaveAttribute(
+      "href",
+      `/pricing/rules/${ID}`,
+    );
   });
 
   it("still shows what was resolved when no pricing rule applies", async () => {

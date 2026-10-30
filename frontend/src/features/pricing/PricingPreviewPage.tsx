@@ -1,8 +1,8 @@
 /**
  * 管理端试算预览（`POST /api/v1/admin/pricing-preview`，docs/api.md「管理端试算预览」）。
  *
- * 顶栏的「Pricing preview」进这一页。填客户、供应商、模型（代码或别名）、计量类型、用量与 `occurred_at`，
- * 得到这一刻会怎么计价：状态与细分码、命中的模型（代码或别名）、价格版本、汇率版本、规则、每个分量的未舍入值、
+ * 顶栏的「Pricing preview」进这一页。填客户、可选的项目（选完客户才可选，换客户清空；不选就不带 `project_id`，
+ * 三个项目级不查）、供应商、模型（代码或别名）、计量类型、用量与 `occurred_at`，得到这一刻会怎么计价：状态与细分码、命中的模型（代码或别名）、价格版本、汇率版本、规则、每个分量的未舍入值、
  * 三个存储值与「含税」。**错误状态（模型未知、缺价格 / 汇率 / 规则）照样画出已解析到的部分**。页面写明
  * 「估算成本，客户不可见」。
  *
@@ -61,14 +61,17 @@ import {
   ScopeText,
   StrategyText,
   customerOptions,
+  projectOptions,
   useAllCustomers,
   useAllProviders,
+  useCustomerProjects,
 } from "./PricingRulesPage";
 
 const TOKEN_SHAPE = "LLM_TOKEN_FIELDS";
 
 interface PreviewValues {
   customer_id: string | undefined;
+  project_id: string | undefined;
   provider: string | undefined;
   model: string;
   usage_type: string | undefined;
@@ -87,7 +90,7 @@ function nowForInput(): string {
 
 /**
  * 表单值 → 请求。用量字段只带这个计量类型的形态要的那一组（另一组带了是 422）；`unit` 取计量类型自己的。
- * `occurred_at` 换不成 RFC 3339 时返回 `null`（表单校验已挡住）。
+ * 项目可选：没选就不带 `project_id`（三个项目级不查）。`occurred_at` 换不成 RFC 3339 时返回 `null`（表单校验已挡住）。
  */
 export function toPreviewRequest(values: PreviewValues, meterType: MeterType): PricingPreviewRequest | null {
   const occurredAt = displayTimeToRfc3339(values.occurred_at.trim());
@@ -96,6 +99,7 @@ export function toPreviewRequest(values: PreviewValues, meterType: MeterType): P
   }
   const base = {
     customer_id: values.customer_id,
+    ...(values.project_id === undefined ? {} : { project_id: values.project_id }),
     provider: values.provider,
     model: values.model.trim(),
     usage_type: meterType.code,
@@ -119,7 +123,9 @@ export function PricingPreviewPage() {
   const [initialTime] = useState(nowForInput);
   const inFlight = useRef(false);
   const usageType = Form.useWatch("usage_type", form);
+  const customerId = Form.useWatch("customer_id", form);
   const customers = useAllCustomers();
+  const projects = useCustomerProjects(customerId);
   const providers = useAllProviders();
   const meterTypes = useAllMeterTypes();
   const meterType = meterTypes.data?.find((candidate) => candidate.code === usageType);
@@ -156,10 +162,13 @@ export function PricingPreviewPage() {
         <EstimateNotice />
         <Typography.Paragraph type="secondary">{t("pricing.preview.intro")}</Typography.Paragraph>
         <PricingRuleErrorAlert
-          error={customers.error ?? providers.error ?? meterTypes.error}
+          error={customers.error ?? projects.error ?? providers.error ?? meterTypes.error}
           title={t("pricing.rules.form.lookupFailed")}
           onRetry={() => {
             void customers.refetch();
+            if (customerId !== undefined) {
+              void projects.refetch();
+            }
             void providers.refetch();
             void meterTypes.refetch();
           }}
@@ -171,6 +180,7 @@ export function PricingPreviewPage() {
           style={{ maxWidth: 640 }}
           initialValues={{
             customer_id: undefined,
+            project_id: undefined,
             provider: undefined,
             model: "",
             usage_type: undefined,
@@ -182,7 +192,13 @@ export function PricingPreviewPage() {
             occurred_at: initialTime,
           }}
           // 改了任何输入，上一次的结果就不再对应表单里的东西：收起来，免得被当成这一次的。
-          onValuesChange={() => preview.reset()}
+          onValuesChange={(changed: Partial<PreviewValues>) => {
+            // 换了客户，原来选的项目就不属于它了。
+            if ("customer_id" in changed) {
+              form.setFieldValue("project_id", undefined);
+            }
+            preview.reset();
+          }}
           onFinish={submit}
         >
           <Form.Item
@@ -195,6 +211,18 @@ export function PricingPreviewPage() {
               optionFilterProp="label"
               loading={customers.isPending}
               options={customerOptions(customers.data)}
+            />
+          </Form.Item>
+          <Form.Item name="project_id" label={t("pricing.rules.field.project")} extra={t("pricing.preview.form.projectHint")}>
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder={t("pricing.preview.form.noProject")}
+              disabled={customerId === undefined}
+              loading={projects.isFetching}
+              notFoundContent={t("pricing.rules.form.noProjects")}
+              options={projectOptions(projects.data)}
             />
           </Form.Item>
           <Form.Item

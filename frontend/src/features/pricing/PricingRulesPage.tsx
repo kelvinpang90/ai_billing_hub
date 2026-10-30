@@ -1,12 +1,14 @@
 /**
  * 管理端定价规则列表（`GET` / `POST /api/v1/admin/pricing-rules`，docs/api.md「管理端定价规则」）。
  *
- * 顶栏的「Pricing rules」进这一页。列表就是 spec §59 的「价格历史」：按范围（§16 的五级）、生效起点排序（由后端
- * 决定，前端不重排），可按范围、客户、供应商、模型、状态筛。三种状态都画出来（spec §132 DoD 第 8 条）：加载中、
- * 失败（带 request_id）、空列表。**价格一律是 MYR 含税价**（ADR-0008），每个出现价格的地方都写明「含税」。
+ * 顶栏的「Pricing rules」进这一页。列表就是 spec §59 的「价格历史」：按范围（§16 的八级，三个项目级在最前）、
+ * 生效起点排序（由后端决定，前端不重排），可按范围、客户、项目（先选客户才可选）、供应商、模型、状态筛。三种状态
+ * 都画出来（spec §132 DoD 第 8 条）：加载中、失败（带 request_id）、空列表。**价格一律是 MYR 含税价**（ADR-0008），
+ * 每个出现价格的地方都写明「含税」。
  *
- * 这一页只建草稿：先选范围（`priority_scope`），再只显示这一级要的客户 / 供应商 / 模型（与后端的范围 / NULL
- * 组合一致，见 `SCOPE_FIELDS`）；MARKUP 只填倍数，FIXED_RATE 按计量类型成组录入分量（ComponentRatesInput）。
+ * 这一页只建草稿：先选范围（`priority_scope`），再只显示这一级要的客户 / 项目 / 供应商 / 模型（与后端的范围 /
+ * NULL 组合一致，见 `SCOPE_FIELDS`；项目下拉在选完客户之后才出现，数据来自该客户的项目列表，设计闸门 #507 v4）；
+ * MARKUP 只填倍数，FIXED_RATE 按计量类型成组录入分量（ComponentRatesInput）。
  * 编辑、发布、停用、丢弃都在详情页（{@link ./PricingRuleDetailPage}）。
  *
  * 本文件后半是规则详情页与试算页共用的部件（错误提示、二次确认、范围与策略的显示、客户下拉）。价格页的同类部件
@@ -60,8 +62,11 @@ import {
   CUSTOMER_NOT_FOUND,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
+  customerProjectsQueryKey,
   listCustomers,
+  listProjects,
   type CustomerSummary,
+  type Project,
 } from "../../api/adminCustomers";
 import { AMOUNT_OUT_OF_RANGE } from "../../api/adminPricingPreview";
 import {
@@ -93,6 +98,7 @@ import {
   USAGE_METER_COMPONENT_NOT_FOUND,
 } from "../../api/adminProviderPrices";
 import { ApiError } from "../../api/client";
+import { PROJECT_NOT_FOUND } from "../../api/projectIntegration";
 import { DecimalText, isZeroDecimal } from "../../components/DecimalText";
 import { RequestReference } from "../../components/RequestReference";
 import { pricingRuleDetailPath } from "../../routes/paths";
@@ -131,6 +137,8 @@ export function PricingRulesPage() {
 
   const customers = useAllCustomers();
   const providers = useAllProviders();
+  const filterCustomerId = filter.customer_id;
+  const projects = useCustomerProjects(filterCustomerId);
   const filterProviderId = filter.provider_id;
   const models = useQuery({
     queryKey: allModelsQueryKey(filterProviderId ?? ""),
@@ -147,6 +155,11 @@ export function PricingRulesPage() {
 
   const changeFilter = (changed: Partial<FilterValues>, all: FilterValues): void => {
     const values = { ...all };
+    // 换了客户，原来选的项目就不属于它了（项目只能与客户一起筛）。
+    if ("customer_id" in changed) {
+      values.project_id = undefined;
+      filterForm.setFieldValue("project_id", undefined);
+    }
     // 换了供应商，原来选的模型就不属于它了。
     if ("provider_id" in changed) {
       values.model_id = undefined;
@@ -176,6 +189,11 @@ export function PricingRulesPage() {
       key: "customer",
       title: t("pricing.rules.field.customer"),
       render: (_: unknown, rule) => <CustomerName customerId={rule.customer_id} customers={customers.data} />,
+    },
+    {
+      key: "project",
+      title: t("pricing.rules.field.project"),
+      render: (_: unknown, rule) => <ProjectName rule={rule} />,
     },
     {
       key: "provider",
@@ -270,11 +288,14 @@ export function PricingRulesPage() {
       <Typography.Paragraph type="secondary">{t("pricing.rules.intro")}</Typography.Paragraph>
       <NoticeAlert message={notice} />
       <PricingRuleErrorAlert
-        error={customers.error ?? providers.error ?? models.error}
+        error={customers.error ?? projects.error ?? providers.error ?? models.error}
         title={t("pricing.rules.form.lookupFailed")}
         onRetry={() => {
           void customers.refetch();
           void providers.refetch();
+          if (filterCustomerId !== undefined) {
+            void projects.refetch();
+          }
           if (filterProviderId !== undefined) {
             void models.refetch();
           }
@@ -289,6 +310,7 @@ export function PricingRulesPage() {
         initialValues={{
           priority_scope: undefined,
           customer_id: undefined,
+          project_id: undefined,
           provider_id: undefined,
           model_id: undefined,
           status: ALL,
@@ -312,6 +334,19 @@ export function PricingRulesPage() {
             placeholder={t("pricing.rules.filter.anyCustomer")}
             loading={customers.isPending}
             options={customerOptions(customers.data)}
+          />
+        </Form.Item>
+        <Form.Item name="project_id" label={t("pricing.rules.field.project")}>
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            style={{ minWidth: 200 }}
+            placeholder={t("pricing.rules.filter.anyProject")}
+            disabled={filterCustomerId === undefined}
+            loading={projects.isFetching}
+            notFoundContent={t("pricing.rules.form.noProjects")}
+            options={projectOptions(projects.data)}
           />
         </Form.Item>
         <Form.Item name="provider_id" label={t("pricing.field.provider")}>
@@ -364,16 +399,18 @@ export function PricingRulesPage() {
 interface FilterValues {
   priority_scope: string | undefined;
   customer_id: string | undefined;
+  project_id: string | undefined;
   provider_id: string | undefined;
   model_id: string | undefined;
   status: string;
 }
 
-/** 表单值 → 查询条件。没选的不带（查询串里也就没有它）。 */
+/** 表单值 → 查询条件。没选的不带（查询串里也就没有它）；项目只与客户一起带（单独给是 422）。 */
 function toRuleFilter(values: FilterValues): PricingRuleFilter {
   return {
     ...(isPriorityScope(values.priority_scope) ? { priority_scope: values.priority_scope } : {}),
     ...(values.customer_id === undefined ? {} : { customer_id: values.customer_id }),
+    ...(values.customer_id === undefined || values.project_id === undefined ? {} : { project_id: values.project_id }),
     ...(values.provider_id === undefined ? {} : { provider_id: values.provider_id }),
     ...(values.provider_id === undefined || values.model_id === undefined ? {} : { model_id: values.model_id }),
     ...(isPricingRuleStatus(values.status) ? { status: values.status } : {}),
@@ -387,6 +424,7 @@ function toRuleFilter(values: FilterValues): PricingRuleFilter {
 interface DraftValues {
   priority_scope: PriorityScope | undefined;
   customer_id: string | undefined;
+  project_id: string | undefined;
   provider_id: string | undefined;
   model_id: string | undefined;
   strategy: PricingStrategy;
@@ -397,22 +435,27 @@ interface DraftValues {
 interface DraftReview {
   body: CreatePricingRuleBody;
   customer: CustomerSummary | undefined;
+  project: Project | undefined;
   provider: Provider | undefined;
   model: Model | undefined;
 }
 
 /**
- * 建草稿：先选范围，再只显示这一级要的范围字段（供应商与模型只列启用中的：停用的建草稿是 409）；策略决定
- * 填倍数还是分量。填表 → 确认 → 发请求。重发会建出两个草稿，所以确认中防双击。
+ * 建草稿：先选范围，再只显示这一级要的范围字段（供应商与模型只列启用中的：停用的建草稿是 409）；三个项目级
+ * 选完客户才出现项目下拉，换客户清空项目。策略决定填倍数还是分量。填表 → 确认 → 发请求。重发会建出两个草稿，
+ * 所以确认中防双击。
  */
 function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
   const { t } = useTranslation();
   const [form] = Form.useForm<DraftValues>();
   const [reviewing, setReviewing] = useState<DraftReview | null>(null);
   const scope = Form.useWatch("priority_scope", form);
+  const customerId = Form.useWatch("customer_id", form);
   const providerId = Form.useWatch("provider_id", form);
   const strategy = Form.useWatch("strategy", form);
   const customers = useAllCustomers();
+  const needs = isPriorityScope(scope) ? SCOPE_FIELDS[scope] : null;
+  const projects = useCustomerProjects(needs?.project === true ? customerId : undefined);
   const providers = useAllProviders();
   const models = useQuery({
     queryKey: allModelsQueryKey(providerId ?? ""),
@@ -424,7 +467,6 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
   const componentRules = useComponentRatesRules(meterTypeList);
   const multiplierRules = useMultiplierRules();
   const scopeOptions = useScopeOptions();
-  const needs = isPriorityScope(scope) ? SCOPE_FIELDS[scope] : null;
 
   const review = (values: DraftValues): void => {
     if (!isPriorityScope(values.priority_scope)) {
@@ -432,18 +474,20 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
     }
     const fields = SCOPE_FIELDS[values.priority_scope];
     const customer = fields.customer ? customers.data?.find((candidate) => candidate.id === values.customer_id) : undefined;
+    const project = fields.project ? projects.data?.find((candidate) => candidate.id === values.project_id) : undefined;
     const provider = fields.provider ? providers.data?.find((candidate) => candidate.id === values.provider_id) : undefined;
     const model = fields.model ? models.data?.find((candidate) => candidate.id === values.model_id) : undefined;
-    if ((fields.customer && customer === undefined) || (fields.provider && provider === undefined)) {
+    if ((fields.customer && customer === undefined) || (fields.project && project === undefined)) {
       return;
     }
-    if (fields.model && model === undefined) {
+    if ((fields.provider && provider === undefined) || (fields.model && model === undefined)) {
       return;
     }
-    // 范围字段只带这一级要的，其余的不出现在请求体里（多给是 422）；策略只带它自己的那个字段。
+    // 范围字段只带这一级要的，其余的不出现在请求体里（多给是 422，非项目级不带 project_id）；策略只带它自己的那个字段。
     const body: CreatePricingRuleBody = {
       priority_scope: values.priority_scope,
       ...(customer === undefined ? {} : { customer_id: customer.id }),
+      ...(project === undefined ? {} : { project_id: project.id }),
       ...(provider === undefined ? {} : { provider_id: provider.id }),
       ...(model === undefined ? {} : { model_id: model.id }),
       strategy: values.strategy,
@@ -451,7 +495,7 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
         ? { markup_multiplier: values.markup_multiplier.trim() }
         : { components: toRuleComponentBodies(values.components) }),
     };
-    setReviewing({ body, customer, provider, model });
+    setReviewing({ body, customer, project, provider, model });
   };
 
   return (
@@ -459,7 +503,7 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
       <FormModal title={t("pricing.rules.create.title")} form={form} width={760} onCancel={onCancel}>
         <TaxInclusiveNotice />
         <PricingRuleErrorAlert
-          error={customers.error ?? providers.error ?? models.error ?? meterTypes.error}
+          error={customers.error ?? projects.error ?? providers.error ?? models.error ?? meterTypes.error}
           title={t("pricing.rules.form.lookupFailed")}
         />
         <Form<DraftValues>
@@ -469,6 +513,7 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
           initialValues={{
             priority_scope: undefined,
             customer_id: undefined,
+            project_id: undefined,
             provider_id: undefined,
             model_id: undefined,
             strategy: "MARKUP",
@@ -476,6 +521,10 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
             components: [],
           }}
           onValuesChange={(changed: Partial<DraftValues>) => {
+            // 换了客户，原来选的项目就不属于它了。
+            if ("customer_id" in changed) {
+              form.setFieldValue("project_id", undefined);
+            }
             if ("provider_id" in changed) {
               form.setFieldValue("model_id", undefined);
             }
@@ -501,6 +550,21 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
                 optionFilterProp="label"
                 loading={customers.isPending}
                 options={customerOptions(customers.data)}
+              />
+            </Form.Item>
+          ) : null}
+          {needs?.project === true && customerId !== undefined ? (
+            <Form.Item
+              name="project_id"
+              label={t("pricing.rules.field.project")}
+              rules={[{ required: true, message: t("pricing.rules.form.projectRequired") }]}
+            >
+              <Select
+                showSearch
+                optionFilterProp="label"
+                loading={projects.isFetching}
+                notFoundContent={t("pricing.rules.form.noProjects")}
+                options={projectOptions(projects.data)}
               />
             </Form.Item>
           ) : null}
@@ -582,6 +646,9 @@ function CreateRuleModal({ onDone, onCancel }: { onDone: () => void; onCancel: (
               ...(reviewing.customer === undefined
                 ? []
                 : [{ key: "customer", label: t("pricing.rules.field.customer"), children: reviewing.customer.company_name }]),
+              ...(reviewing.project === undefined
+                ? []
+                : [{ key: "project", label: t("pricing.rules.field.project"), children: reviewing.project.name }]),
               ...(reviewing.provider === undefined
                 ? []
                 : [{ key: "provider", label: t("pricing.field.provider"), children: <CodeText code={reviewing.provider.code} /> }]),
@@ -638,6 +705,12 @@ export function useScopeLabel(): (scope: string) => string {
   const { t } = useTranslation();
   return (scope) => {
     switch (scope) {
+      case "PROJECT_PROVIDER_MODEL":
+        return t("pricing.rules.scope.projectProviderModel");
+      case "PROJECT_PROVIDER":
+        return t("pricing.rules.scope.projectProvider");
+      case "PROJECT":
+        return t("pricing.rules.scope.project");
       case "CUSTOMER_PROVIDER_MODEL":
         return t("pricing.rules.scope.customerProviderModel");
       case "CUSTOMER_PROVIDER":
@@ -659,7 +732,7 @@ export function ScopeText({ scope }: { scope: string }) {
   return <>{scopeLabel(scope)}</>;
 }
 
-/** 五级范围的下拉选项，从高到低。 */
+/** 八级范围的下拉选项，从高到低（三个项目级在最前）。 */
 function useScopeOptions() {
   const scopeLabel = useScopeLabel();
   return PRIORITY_SCOPES.map((scope) => ({ value: scope, label: scopeLabel(scope) }));
@@ -819,6 +892,39 @@ export function customerOptions(customers: readonly CustomerSummary[] | undefine
   return (customers ?? []).map((customer) => ({ value: customer.id, label: customer.company_name }));
 }
 
+/** 一个客户的全部项目，逐页取完（最早在前，由后端决定）。用已有的项目列表接口。 */
+export async function listAllProjects(customerId: string, signal?: AbortSignal): Promise<Project[]> {
+  const projects: Project[] = [];
+  for (let page = 1; ; page += 1) {
+    const result = await listProjects(customerId, page, MAX_PAGE_SIZE, signal);
+    projects.push(...result.items);
+    if (result.items.length === 0 || projects.length >= result.total) {
+      return projects;
+    }
+  }
+}
+
+/** 选了客户才查它的项目；挂在该客户的项目列表前缀下，建项目之后跟着过期。 */
+export function useCustomerProjects(customerId: string | undefined) {
+  return useQuery({
+    queryKey: [...customerProjectsQueryKey(customerId ?? ""), "all"],
+    queryFn: ({ signal }) => listAllProjects(customerId ?? "", signal),
+    enabled: customerId !== undefined,
+  });
+}
+
+export function projectOptions(projects: readonly Project[] | undefined) {
+  return (projects ?? []).map((project) => ({ value: project.id, label: project.name }));
+}
+
+/** 规则的项目：非项目级是「—」；有名字显示名字，没有时退回到 `project_id` 本身。 */
+export function ProjectName({ rule }: { rule: Pick<PricingRule, "project_id" | "project_name"> }) {
+  if (rule.project_id === null) {
+    return <>{EMPTY}</>;
+  }
+  return rule.project_name === null ? <CodeText code={rule.project_id} /> : <>{rule.project_name}</>;
+}
+
 /** 客户的公司名；客户列表里找不到（还在加载、或取不到）时退回到 `customer_id` 本身。 */
 export function CustomerName({
   customerId,
@@ -865,6 +971,9 @@ export function PricingRuleErrorAlert({
       break;
     case CUSTOMER_NOT_FOUND:
       message = t("pricing.rules.error.customerNotFound");
+      break;
+    case PROJECT_NOT_FOUND:
+      message = t("pricing.rules.error.projectNotFound");
       break;
     case AI_PROVIDER_NOT_FOUND:
       message = t("pricing.error.providerNotFound");

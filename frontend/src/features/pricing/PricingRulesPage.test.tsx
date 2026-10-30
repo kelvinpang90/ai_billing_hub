@@ -1,6 +1,7 @@
 /**
- * 规则列表页：三种状态与无权限、表格（范围、客户、策略、MYR 含税价）、筛选（范围、客户、状态）；建草稿先选范围、
- * 只显示这一级要的字段，MARKUP 只填倍数、FIXED_RATE 成组录入分量；二次确认、成功后重读、失败时显示后端码对应的
+ * 规则列表页：三种状态与无权限、表格（范围、客户、项目、策略、MYR 含税价）、筛选（八级范围、客户、项目、状态）；
+ * 建草稿先选范围（八级）、只显示这一级要的字段（项目级选完客户才出现项目、项目必选、换客户清空项目、非项目级不带
+ * project_id），MARKUP 只填倍数、FIXED_RATE 成组录入分量；二次确认、成功后重读、失败时显示后端码对应的
  * 文案（未知码回落到后端 message）与 request_id、确认中防重复提交；倍数与单价原样是字符串。
  *
  * 请求路径与字段名由 `api/adminPricingRules.test.ts` 管，这里只看页面把什么交给了它。uuid 一律全零。
@@ -15,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
 import type { MeterType, Provider } from "../../api/adminCatalog";
-import type { CustomerSummary, Page } from "../../api/adminCustomers";
+import type { CustomerSummary, Page, Project } from "../../api/adminCustomers";
 import type { PricingRule } from "../../api/adminPricingRules";
 import { ApiError } from "../../api/client";
 import { PricingRulesPage } from "./PricingRulesPage";
@@ -36,6 +37,7 @@ const catalog = vi.hoisted(() => ({
 
 const customers = vi.hoisted(() => ({
   listCustomers: vi.fn(),
+  listProjects: vi.fn(),
 }));
 
 vi.mock("../../api/adminPricingRules", async () => {
@@ -73,6 +75,17 @@ const CUSTOMER: CustomerSummary = {
   updated_at: AT,
 };
 
+/** 第二个客户只用来「换客户」：它的 id 是不透明的占位串，不是 uuid（uuid 一律全零）。 */
+const OTHER_CUSTOMER: CustomerSummary = { ...CUSTOMER, id: "other-customer", company_name: "Another Fictional Bhd" };
+
+const PROJECT: Project = {
+  id: ID,
+  name: "Support bot",
+  description: null,
+  created_at: AT,
+  updated_at: AT,
+};
+
 const PROVIDER: Provider = {
   id: ID,
   code: "anthropic",
@@ -100,6 +113,8 @@ function rule(overrides: Partial<PricingRule> = {}): PricingRule {
     id: ID,
     priority_scope: "GLOBAL",
     customer_id: null,
+    project_id: null,
+    project_name: null,
     provider_id: null,
     provider_code: null,
     model_id: null,
@@ -168,6 +183,55 @@ async function choose(field: HTMLElement, option: string): Promise<void> {
   fireEvent.click(item);
 }
 
+/** 打开着的下拉里全部选项的文字，按显示顺序。 */
+function openOptionTitles(): string[] {
+  return Array.from(
+    document.querySelectorAll(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option"),
+    (option) => option.getAttribute("title") ?? "",
+  );
+}
+
+/**
+ * 下拉当前选中的那一项的文字；没选时 `null`。antd v6 的单选没有 `.ant-select-selection-item`：
+ * 选中值画在 `.ant-select-content` 里，没选时那里只有占位文字。
+ */
+function selectedText(field: HTMLElement): string | null {
+  const select = field.closest(".ant-select");
+  const item = select?.querySelector(".ant-select-selection-item, .ant-select-content-value");
+  if (item) {
+    return item.textContent;
+  }
+  const content = select?.querySelector(".ant-select-content, .ant-select-selector");
+  if (!content || content.querySelector(".ant-select-placeholder, .ant-select-selection-placeholder")) {
+    return null;
+  }
+  const raw: string | null = content.textContent;
+  const text = raw?.trim() ?? "";
+  return text === "" ? null : text;
+}
+
+/** 表格里某一列表头下、第一个数据行的那一格。 */
+function firstRowCell(header: string): HTMLElement {
+  const heads = screen.getAllByRole("columnheader").map((th) => th.textContent);
+  const [row] = screen.getAllByRole("row").slice(1);
+  const cell = row === undefined ? undefined : within(row).getAllByRole("cell")[heads.indexOf(header)];
+  if (cell === undefined) {
+    throw new Error(`no cell under "${header}"`);
+  }
+  return cell;
+}
+
+const EIGHT_SCOPES = [
+  "Project · provider · model",
+  "Project · provider (all models)",
+  "Project (all providers)",
+  "Customer · provider · model",
+  "Customer · provider (all models)",
+  "Customer (all providers)",
+  "All customers · provider · model",
+  "Global default",
+];
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -196,6 +260,9 @@ async function fillMarkupDraft(user: User, multiplier: string): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   customers.listCustomers.mockResolvedValue(page([CUSTOMER]));
+  customers.listProjects.mockImplementation((customerId: string) =>
+    Promise.resolve(customerId === ID ? page([PROJECT]) : page([])),
+  );
   catalog.listProviders.mockResolvedValue(page([PROVIDER]));
   catalog.listAllModels.mockResolvedValue([]);
   catalog.listMeterTypes.mockResolvedValue(page([OCR_PAGE]));
@@ -312,6 +379,103 @@ describe("PricingRulesPage table and filters", SLOW, () => {
     expect(row).toHaveTextContent("Disabled");
   });
 
+  it("shows a Project column: the project's name for a project rule", async () => {
+    rules.listPricingRules.mockResolvedValue(
+      page([
+        rule({
+          priority_scope: "PROJECT_PROVIDER",
+          customer_id: ID,
+          project_id: ID,
+          project_name: "Support bot",
+          provider_id: ID,
+          provider_code: "anthropic",
+        }),
+      ]),
+    );
+
+    renderPage();
+
+    await screen.findByRole("link", { name: "Project · provider (all models)" });
+    expect(screen.getByRole("columnheader", { name: "Project" })).toBeInTheDocument();
+    expect(firstRowCell("Project")).toHaveTextContent("Support bot");
+    await waitFor(() => expect(firstRowCell("Customer")).toHaveTextContent("Fictional Trading Sdn Bhd"));
+  });
+
+  it("shows — in the Project column for a rule that is not project-level", async () => {
+    rules.listPricingRules.mockResolvedValue(page([rule()]));
+
+    renderPage();
+
+    await screen.findByRole("link", { name: "Global default" });
+    expect(firstRowCell("Project").textContent).toBe("—");
+  });
+
+  it("offers the eight scopes in the filter, project scopes first", async () => {
+    rules.listPricingRules.mockResolvedValue(page([]));
+
+    renderPage();
+    await screen.findByText("No pricing rules yet.");
+    fireEvent.mouseDown(screen.getByLabelText("Scope"));
+
+    await waitFor(() => expect(openOptionTitles()).toEqual(EIGHT_SCOPES));
+  });
+
+  it("lets a project be chosen only after a customer, and asks for that customer's project", async () => {
+    rules.listPricingRules.mockResolvedValue(page([]));
+
+    renderPage();
+    await screen.findByText("No pricing rules yet.");
+    expect(screen.getByLabelText("Project")).toBeDisabled();
+    expect(customers.listProjects).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(customers.listCustomers).toHaveBeenCalled());
+    await choose(screen.getByLabelText("Customer"), "Fictional Trading Sdn Bhd");
+    await waitFor(() => expect(screen.getByLabelText("Project")).toBeEnabled());
+    await waitFor(() => expect(customers.listProjects).toHaveBeenCalledWith(ID, 1, 100, expect.anything()));
+    await choose(screen.getByLabelText("Project"), "Support bot");
+
+    await waitFor(() =>
+      expect(rules.listPricingRules).toHaveBeenLastCalledWith(
+        { customer_id: ID, project_id: ID },
+        1,
+        20,
+        expect.anything(),
+      ),
+    );
+  });
+
+  it("drops the project filter when the customer changes", async () => {
+    customers.listCustomers.mockResolvedValue(page([CUSTOMER, OTHER_CUSTOMER]));
+    rules.listPricingRules.mockResolvedValue(page([]));
+
+    renderPage();
+    await screen.findByText("No pricing rules yet.");
+    await waitFor(() => expect(customers.listCustomers).toHaveBeenCalled());
+    await choose(screen.getByLabelText("Customer"), "Fictional Trading Sdn Bhd");
+    await waitFor(() => expect(screen.getByLabelText("Project")).toBeEnabled());
+    await choose(screen.getByLabelText("Project"), "Support bot");
+    await waitFor(() =>
+      expect(rules.listPricingRules).toHaveBeenLastCalledWith(
+        { customer_id: ID, project_id: ID },
+        1,
+        20,
+        expect.anything(),
+      ),
+    );
+
+    await choose(screen.getByLabelText("Customer"), "Another Fictional Bhd");
+
+    await waitFor(() =>
+      expect(rules.listPricingRules).toHaveBeenLastCalledWith(
+        { customer_id: "other-customer" },
+        1,
+        20,
+        expect.anything(),
+      ),
+    );
+    await waitFor(() => expect(selectedText(screen.getByLabelText("Project"))).toBeNull());
+  });
+
   it("asks only for one scope when it is chosen", async () => {
     rules.listPricingRules.mockResolvedValue(page([]));
 
@@ -377,6 +541,115 @@ describe("PricingRulesPage new draft", SLOW, () => {
     await waitFor(() => expect(within(form).queryByLabelText("Customer")).not.toBeInTheDocument());
     expect(within(form).queryByLabelText("Provider")).not.toBeInTheDocument();
     expect(within(form).queryByLabelText("Model")).not.toBeInTheDocument();
+  });
+
+  it("offers the eight scopes, project scopes first", async () => {
+    const user = userEvent.setup();
+    rules.listPricingRules.mockResolvedValue(page([]));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "New draft" }));
+    fireEvent.mouseDown(within(topDialog()).getByLabelText("Scope"));
+
+    await waitFor(() => expect(openOptionTitles()).toEqual(EIGHT_SCOPES));
+  });
+
+  it("shows the project only after the customer for a project scope, requires it, and sends it", async () => {
+    const user = userEvent.setup();
+    rules.listPricingRules.mockResolvedValue(page([]));
+    rules.createPricingRule.mockResolvedValue(rule({ status: "DRAFT" }));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "New draft" }));
+    const form = topDialog();
+    await choose(within(form).getByLabelText("Scope"), "Project (all providers)");
+    const customer = await within(form).findByLabelText("Customer");
+    expect(within(form).queryByLabelText("Project")).not.toBeInTheDocument();
+    expect(within(form).queryByLabelText("Provider")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(customers.listCustomers).toHaveBeenCalled());
+    await choose(customer, "Fictional Trading Sdn Bhd");
+    expect(await within(form).findByLabelText("Project")).toBeInTheDocument();
+    await waitFor(() => expect(customers.listProjects).toHaveBeenCalledWith(ID, 1, 100, expect.anything()));
+
+    await user.click(within(form).getByLabelText("Markup multiplier"));
+    await user.paste("2");
+    await user.click(buttonWithText("Review", form));
+    expect(await within(form).findByText("Choose the project.")).toBeInTheDocument();
+    expect(screen.queryByText("Create this pricing rule draft?")).not.toBeInTheDocument();
+
+    await choose(within(form).getByLabelText("Project"), "Support bot");
+    await user.click(buttonWithText("Review", form));
+    const confirm = await waitFor(() => {
+      const dialog = topDialog();
+      expect(within(dialog).getByText("Create this pricing rule draft?")).toBeInTheDocument();
+      return dialog;
+    });
+    expect(within(confirm).getByText("Support bot")).toBeInTheDocument();
+    await user.click(buttonWithText("Confirm and create", confirm));
+
+    expect(await screen.findByText("Draft created.")).toBeInTheDocument();
+    expect(rules.createPricingRule).toHaveBeenCalledWith({
+      priority_scope: "PROJECT",
+      customer_id: ID,
+      project_id: ID,
+      strategy: "MARKUP",
+      markup_multiplier: "2",
+    });
+  });
+
+  it("clears the chosen project when the customer changes", async () => {
+    const user = userEvent.setup();
+    customers.listCustomers.mockResolvedValue(page([CUSTOMER, OTHER_CUSTOMER]));
+    rules.listPricingRules.mockResolvedValue(page([]));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "New draft" }));
+    const form = topDialog();
+    await choose(within(form).getByLabelText("Scope"), "Project (all providers)");
+    await waitFor(() => expect(customers.listCustomers).toHaveBeenCalled());
+    await choose(await within(form).findByLabelText("Customer"), "Fictional Trading Sdn Bhd");
+    await choose(await within(form).findByLabelText("Project"), "Support bot");
+    await waitFor(() => expect(selectedText(within(form).getByLabelText("Project"))).toBe("Support bot"));
+
+    await choose(within(form).getByLabelText("Customer"), "Another Fictional Bhd");
+
+    await waitFor(() => expect(selectedText(within(form).getByLabelText("Project"))).toBeNull());
+    await user.click(within(form).getByLabelText("Markup multiplier"));
+    await user.paste("2");
+    await user.click(buttonWithText("Review", form));
+    expect(await within(form).findByText("Choose the project.")).toBeInTheDocument();
+    expect(rules.createPricingRule).not.toHaveBeenCalled();
+  });
+
+  it("never sends project_id for a scope that is not project-level", async () => {
+    const user = userEvent.setup();
+    rules.listPricingRules.mockResolvedValue(page([]));
+    rules.createPricingRule.mockResolvedValue(rule({ status: "DRAFT" }));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "New draft" }));
+    const form = topDialog();
+    // 先在项目级选好项目，再改成客户级：项目留在表单里也不能进请求体。
+    await choose(within(form).getByLabelText("Scope"), "Project (all providers)");
+    await waitFor(() => expect(customers.listCustomers).toHaveBeenCalled());
+    await choose(await within(form).findByLabelText("Customer"), "Fictional Trading Sdn Bhd");
+    await choose(await within(form).findByLabelText("Project"), "Support bot");
+    await choose(within(form).getByLabelText("Scope"), "Customer (all providers)");
+    await waitFor(() => expect(within(form).queryByLabelText("Project")).not.toBeInTheDocument());
+    await user.click(within(form).getByLabelText("Markup multiplier"));
+    await user.paste("2");
+    await user.click(buttonWithText("Review", form));
+    await user.click(buttonWithText("Confirm and create", await waitFor(() => {
+      const dialog = topDialog();
+      expect(within(dialog).getByText("Create this pricing rule draft?")).toBeInTheDocument();
+      return dialog;
+    })));
+
+    expect(await screen.findByText("Draft created.")).toBeInTheDocument();
+    const sent = rules.createPricingRule.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(Object.keys(sent).sort()).toEqual(["customer_id", "markup_multiplier", "priority_scope", "strategy"]);
+    expect(sent).toEqual({ priority_scope: "CUSTOMER", customer_id: ID, strategy: "MARKUP", markup_multiplier: "2" });
   });
 
   it("creates a markup rule only after the confirmation, with the multiplier exactly as typed, then refreshes", async () => {

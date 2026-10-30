@@ -128,6 +128,28 @@ describe("previewing a quantity event", () => {
   });
 });
 
+describe("the project", () => {
+  it("is sent right after the customer when given", async () => {
+    const post = vi.spyOn(client, "post").mockResolvedValue(envelope({ status: "PRICED" }));
+
+    await previewPricing({ ...QUANTITY, project_id: ID });
+
+    const sent: unknown = post.mock.calls[0]?.[1];
+    expect(sent).toBe(
+      `{"customer_id":"${ID}","project_id":"${ID}","provider":"openai","model":"whisper-1",` +
+        `"usage_type":"AUDIO_SECOND","quantity":"12.50000001","unit":"SECOND",` +
+        `"occurred_at":"2026-10-01T08:00:00+08:00"}`,
+    );
+    expect((JSON.parse(typeof sent === "string" ? sent : "") as Record<string, unknown>).project_id).toBe(ID);
+  });
+
+  it("is left out of the body when not given", () => {
+    const parsed = JSON.parse(previewRequestJson(TOKENS)) as Record<string, unknown>;
+
+    expect(Object.keys(parsed)).not.toContain("project_id");
+  });
+});
+
 describe("responses", () => {
   it("returns the result with every amount still a string", async () => {
     const result = {
