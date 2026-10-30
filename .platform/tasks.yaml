@@ -8500,7 +8500,7 @@ tasks:
     title: 定价规则解析改为一条语句：八级一起查，在 Python 里按优先顺序选级
     purpose: >-
       按 docs/design/AIH-TASK-143-pricing-resolution-round-trips.md（设计闸门 #528 已批准 v1）§2「改动一」：app/repositories/pricing_rules.py 的 resolve_pricing_rule 不再逐级各发一条 SELECT，而是把要查的各级的范围条件（逐字复用 _level_scope 与 _in_scope）用 OR 拼成一条加锁读，按 SCOPE_ORDER 取第一个有命中行的级；选中的规则、各级先后、项目为空时跳过项目级、命中的 FIXED_RATE 缺分量不下落、选中级多于一行抛 MultipleResultsFound，全部与现在相同。同步规则解析的测试。不改签名、表结构、索引与其他仓储函数；resolve_charge_inputs 与计费处理的改动属于 AIH-TASK-144。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-142
     acceptance_criteria:
