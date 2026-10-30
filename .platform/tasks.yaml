@@ -8320,7 +8320,7 @@ tasks:
     title: 项目级定价第五层：规则页、详情页与试算页支持项目
     purpose: >-
       按 docs/design/AIH-TASK-136-pricing-project-scope.md（设计闸门 #507 已批准 v4）§2「前端」：规则页的范围下拉加三个项目级、选客户后选项目、表格加 Project 列、筛选加项目；详情页显示项目；试算页加可选的项目下拉；浏览器验收的两个已有步骤补上项目相关的只读断言。只做前端与验收脚本。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-139
     acceptance_criteria:
