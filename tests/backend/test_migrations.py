@@ -2946,10 +2946,17 @@ def test_0013_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
 # lock table holding exactly one row, and that upgrade / downgrade add and drop only these
 # tables. What the triggers and constraints refuse or let through is in
 # test_pricing_rules_service.py.
+#
+# ⚠️ The cases that look at head see `pricing_rules` as 0030_pricing_rule_project_scope
+# (AIH-TASK-136, design gate #507 v4) left it: the `project_id` column with its composite foreign
+# key and index, the two scope checks at eight levels, `scope_key` with the project part and the
+# rebuilt `trg_pricing_rules_before_update` — compared with 0030's literals. 0030 itself (its
+# steps, guards, refusals and recovery) is in test_pricing_rule_project_scope_migration.py.
 # ---------------------------------------------------------------------------
 
 _REVISION_0014 = "0014_pricing_rules"
 _MIGRATION_0014 = pathlib.Path("alembic/versions/20260929_0014_pricing_rules.py")
+_MIGRATION_0030 = pathlib.Path("alembic/versions/20261030_0030_pricing_rule_project_scope.py")
 _RULE_MODELS = (PricingRuleLock, PricingRule, PricingRuleComponent)
 _TABLES_0014 = {model.__tablename__ for model in _RULE_MODELS}
 # Creation order; downgrade must be exactly the reverse (foreign keys).
@@ -2973,8 +2980,10 @@ _EXPECTED_0014_COLUMNS = {
         "id": False,
         "public_id": False,
         "priority_scope": False,
-        # Which of the three scope columns are set follows from `priority_scope` (CHECK).
+        # Which of the four scope columns are set follows from `priority_scope` (CHECK).
         "tenant_id": True,
+        # Added by 0030, right after `tenant_id`.
+        "project_id": True,
         "provider_id": True,
         "model_id": True,
         "strategy": False,
@@ -3012,6 +3021,12 @@ _EXPECTED_FOREIGN_KEYS_0014 = {
     "pricing_rule_locks": {},
     "pricing_rules": {
         "fk_pricing_rules_tenant": (["tenant_id"], "tenants", ["id"]),
+        # 0030: the project of a project-level rule belongs to the rule's tenant.
+        "fk_pricing_rules_project": (
+            ["project_id", "tenant_id"],
+            "projects",
+            ["id", "tenant_id"],
+        ),
         "fk_pricing_rules_provider": (["provider_id"], "ai_providers", ["id"]),
         "fk_pricing_rules_model": (["model_id", "provider_id"], "ai_models", ["id", "provider_id"]),
         "fk_pricing_rules_created_by": (["created_by"], "users", ["id"]),
@@ -3041,6 +3056,17 @@ _RULE_CHECKS_QUERY = text(
     " WHERE TABLE_SCHEMA = DATABASE() AND CONSTRAINT_TYPE = 'CHECK'"
     " AND TABLE_NAME IN ('pricing_rule_locks', 'pricing_rules', 'pricing_rule_components')"
 )
+_RULE_CHECK_CLAUSES_QUERY = text(
+    "SELECT CONSTRAINT_NAME, CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS"
+    " WHERE CONSTRAINT_SCHEMA = DATABASE()"
+    " AND CONSTRAINT_NAME IN ('ck_pricing_rules_priority_scope', 'ck_pricing_rules_scope_columns')"
+)
+_RULE_UPDATE_TRIGGER_QUERY = text(
+    "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS"
+    " WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = 'trg_pricing_rules_before_update'"
+)
+# The columns of `scope_key` at head (0030), in their order.
+_SCOPE_KEY_COLUMNS = ("priority_scope", "tenant_id", "project_id", "provider_id", "model_id")
 
 
 def _load_0014() -> ModuleType:
@@ -3049,6 +3075,19 @@ def _load_0014() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_0030() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0030", _MIGRATION_0030)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _trigger_body(statement: str) -> str:
+    """What MySQL keeps as ACTION_STATEMENT: the body after `FOR EACH ROW`."""
+    return _normalised(statement.split("FOR EACH ROW", 1)[1])
 
 
 def _rule_checks() -> dict[str, tuple[str, str]]:
@@ -3068,12 +3107,19 @@ def test_0014_follows_0013() -> None:
 
 
 def test_0014_checks_and_generated_columns_are_the_ones_the_models_declare() -> None:
+    """The models are the head shape: the two scope checks and `scope_key` are 0030's literals,
+    every other check and `open_slot` still 0014's."""
     migration = _load_0014()
+    at_head = _load_0030()
     from_migration = {
-        name: (table, _normalised(condition))
+        name: (table, _normalised(at_head._CHECKS.get(name, condition)))
         for name, (table, condition) in migration._CHECKS.items()
     }
 
+    assert set(at_head._CHECKS) == {
+        "ck_pricing_rules_priority_scope",
+        "ck_pricing_rules_scope_columns",
+    }
     assert from_migration == _rule_checks()
     # Rules 9 (v4 adds the retired rule's end), components 4.
     assert len(from_migration) == 13
@@ -3088,8 +3134,10 @@ def test_0014_checks_and_generated_columns_are_the_ones_the_models_declare() -> 
     scope_key = columns.scope_key.computed.sqltext
     on_mysql = str(scope_key.compile(dialect=mysql.dialect()))
     on_sqlite = str(scope_key.compile(dialect=sqlite.dialect()))
-    assert _normalised(on_mysql) == _normalised(migration._SCOPE_KEY)
-    assert _normalised(migration._SCOPE_KEY) == _normalised(SCOPE_KEY_EXPRESSION)
+    assert _normalised(on_mysql) == _normalised(at_head._SCOPE_KEY)
+    assert _normalised(at_head._SCOPE_KEY) == _normalised(SCOPE_KEY_EXPRESSION)
+    # What 0030's downgrade restores is 0014's expression.
+    assert _normalised(at_head._SCOPE_KEY_0014) == _normalised(migration._SCOPE_KEY)
     assert _normalised(on_sqlite) == _normalised(SQLITE_SCOPE_KEY_EXPRESSION)
     assert _normalised(str(scope_key)) == _normalised(SCOPE_KEY_EXPRESSION)
 
@@ -3238,6 +3286,10 @@ def test_0014_column_shape(alembic_config: Config) -> None:
         types = {(table, c["name"]): c["type"] for table, found in columns.items() for c in found}
 
         locks, rules, components = _CREATE_ORDER_0014
+        # 0030 adds `project_id` right after `tenant_id`, as the model declares it.
+        in_db = [c["name"] for c in columns[rules]]
+        assert in_db == [c.name for c in PricingRule.__table__.columns]
+        assert in_db[in_db.index("tenant_id") + 1] == "project_id"
         assert isinstance(types[(locks, "id")], Integer)
         assert not isinstance(types[(locks, "id")], BigInteger)
         for (table, name), column_type in types.items():
@@ -3278,7 +3330,11 @@ def test_0014_column_shape(alembic_config: Config) -> None:
         assert set(computed) == {(rules, "scope_key"), (rules, "open_slot")}
         for column in computed.values():
             assert column["persisted"] is True
-        assert "concat" in str(computed[(rules, "scope_key")]["sqltext"]).lower()
+        scope_key = str(computed[(rules, "scope_key")]["sqltext"]).lower()
+        assert "concat" in scope_key
+        # 0030's expression: tenant, project, provider, model, in this order.
+        positions = [scope_key.index(name) for name in _SCOPE_KEY_COLUMNS]
+        assert positions == sorted(positions)
         assert "PUBLISHED" in str(computed[(rules, "open_slot")]["sqltext"])
         assert isinstance(types[(rules, "open_slot")], Integer)
     finally:
@@ -3314,6 +3370,9 @@ def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
             "effective_from",
         ]
         assert indexes["ix_pricing_rules_model"]["column_names"] == ["model_id", "provider_id"]
+        # 0030: the composite foreign key's index, declared (not MySQL's own).
+        assert indexes["ix_pricing_rules_project"]["column_names"] == ["project_id", "tenant_id"]
+        assert not indexes["ix_pricing_rules_project"]["unique"]
         by_rule = {i["name"]: i for i in inspector.get_indexes("pricing_rule_components")}
         assert by_rule["ix_pricing_rule_components_rule"]["column_names"] == [
             "pricing_rule_id",
@@ -3326,6 +3385,14 @@ def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
                 for row in connection.execute(_RULE_REFERENTIAL_RULES_QUERY)
             }
             checks = set(connection.execute(_RULE_CHECKS_QUERY).scalars())
+            clauses = dict(connection.execute(_RULE_CHECK_CLAUSES_QUERY).all())
+            update_trigger = connection.execute(_RULE_UPDATE_TRIGGER_QUERY).scalar_one()
+        # 0030's eight levels (MySQL rewrites the text, so markers only).
+        assert "PROJECT_PROVIDER_MODEL" in clauses["ck_pricing_rules_priority_scope"]
+        assert "project_id" in clauses["ck_pricing_rules_scope_columns"]
+        # The trigger rebuilt under the same name is 0030's body, word for word.
+        at_head = _load_0030()._TRIGGERS["trg_pricing_rules_before_update"]
+        assert _normalised(str(update_trigger)) == _trigger_body(at_head)
         # ⚠️ RESTRICT: rules and components are never deleted, nor what they refer to (INV-6);
         # a draft with components cannot change its strategy under them.
         names = {name for keys in _EXPECTED_FOREIGN_KEYS_0014.values() for name in keys}

@@ -687,6 +687,12 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 §2「数据库」。三张表：`pricing_rule_locks`、`pricing_rules`、`pricing_rule_components`。接口见 [api.md](api.md) 的
 「管理端定价规则」；五级顺序与下落语义见 [pricing-engine.md](pricing-engine.md)。
 
+迁移 `0030_pricing_rule_project_scope`（AIH-TASK-136，设计闸门 #507 v4，
+[design/AIH-TASK-136-pricing-project-scope.md](design/AIH-TASK-136-pricing-project-scope.md) §2「数据库」）给
+`pricing_rules` 加项目作用域：`project_id` 列与复合外键、八级的两条 CHECK、带项目一段的 `scope_key`，并重建
+`trg_pricing_rules_before_update`。⚠️ 本任务只改库：应用的 `PricingScope` 仍是五级（八级的枚举值由 AIH-TASK-137
+加入），应用层还建不出、也读不出项目级规则；解析、接口与前端属于 AIH-TASK-138–140。
+
 共同的约定：
 
 - **价格是 MYR 含税价**（ADR-0008）：`rate_amount` 是含税单价，倍数乘出来的是含税计费额。不存税额、不引用税务政策
@@ -710,8 +716,9 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | --- | --- | --- |
 | `id` | BIGINT | 主键，自增；不出库（T-H 把它写进事件快照 `pricing_rule_id`，但不对外） |
 | `public_id` | CHAR(36) | 非空，唯一（`uq_pricing_rules_public_id`） |
-| `priority_scope` | VARCHAR(32) | 非空，`CHECK IN ('CUSTOMER_PROVIDER_MODEL','CUSTOMER_PROVIDER','CUSTOMER','GLOBAL_PROVIDER_MODEL','GLOBAL')`（§16 从高到低） |
+| `priority_scope` | VARCHAR(32) | 非空，`CHECK IN ('PROJECT_PROVIDER_MODEL','PROJECT_PROVIDER','PROJECT','CUSTOMER_PROVIDER_MODEL','CUSTOMER_PROVIDER','CUSTOMER','GLOBAL_PROVIDER_MODEL','GLOBAL')`（八级，从高到低；三个项目级由 0030 加入，排在 §16 的五级之前） |
 | `tenant_id` | BIGINT | 可空；外键 → `tenants(id)` `RESTRICT`（`fk_pricing_rules_tenant`） |
+| `project_id` | BIGINT | 可空（0030，列序紧接 `tenant_id`）；只有三个项目级非空。复合外键 `(project_id, tenant_id)` → `projects(id, tenant_id)` `RESTRICT`（`fk_pricing_rules_project`，子表索引 `ix_pricing_rules_project`）：项目级规则的项目一定属于同一租户（INV-8）；`project_id` 为 NULL 时 MySQL 不检查这条外键，非项目级规则不受影响；有规则的项目删不掉 |
 | `provider_id` | BIGINT | 可空；外键 → `ai_providers(id)` `RESTRICT`（`fk_pricing_rules_provider`） |
 | `model_id` | BIGINT | 可空；复合外键 `(model_id, provider_id)` → `ai_models(id, provider_id)` `RESTRICT`（`fk_pricing_rules_model`）：规则只能挂在同一供应商的模型上。子表索引 `ix_pricing_rules_model` |
 | `strategy` | VARCHAR(16) | 非空，`CHECK IN ('MARKUP','FIXED_RATE')` |
@@ -719,16 +726,26 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | `status` | VARCHAR(16) | 非空，`CHECK IN ('DRAFT','PUBLISHED','RETIRED','DISCARDED')`；`DISCARDED` 是 §74.3 之外补的 |
 | `effective_from` | DATETIME | 可空；草稿为空。`NULL` 另一种含义只有一处：`GLOBAL` 范围第一条、未指定生效时刻 = 「一直以来」 |
 | `effective_to` | DATETIME | 可空；`NULL` = 仍生效（或尚未发布） |
-| `scope_key` | VARCHAR(128)，STORED 生成列 | `CONCAT(priority_scope, ':', COALESCE(tenant_id, 0), ':', COALESCE(provider_id, 0), ':', COALESCE(model_id, 0))`：把「同一范围」变成一个非空值，绕开 MySQL 唯一约束不管 NULL 的问题；只读。SQLite 上用 `\|\|` 写同一个值（`CONCAT` 要 SQLite 3.44） |
+| `scope_key` | VARCHAR(128)，STORED 生成列 | `CONCAT(priority_scope, ':', COALESCE(tenant_id, 0), ':', COALESCE(project_id, 0), ':', COALESCE(provider_id, 0), ':', COALESCE(model_id, 0))`（0030 加了项目一段；最长 106 个字符）：把「同一范围」变成一个非空值，绕开 MySQL 唯一约束不管 NULL 的问题；同一客户两个项目的规则是两个范围，各有自己的时间线。0030 之前的行只多出一段 `:0`。只读。SQLite 上用 `\|\|` 写同一个值（`CONCAT` 要 SQLite 3.44） |
 | `open_slot` | INT，STORED 生成列 | `CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END`；只读 |
 | `created_by` | BIGINT | 非空；外键 → `users(id)` `RESTRICT`（`fk_pricing_rules_created_by`） |
 | `approved_by` | BIGINT | 可空；发布人；外键 → `users(id)` `RESTRICT`（`fk_pricing_rules_approved_by`） |
 | `created_at` / `updated_at` | DATETIME | 非空 |
 | `approved_at` | DATETIME | 可空；发布时刻 |
 
-- `ck_pricing_rules_scope_columns`：**范围与 NULL 组合一一对应**（§74.3「不能有含糊的 NULL 组合」）：
-  `CUSTOMER_PROVIDER_MODEL` 三列都非空；`CUSTOMER_PROVIDER` 租户与供应商非空、模型空；`CUSTOMER` 只有租户；
-  `GLOBAL_PROVIDER_MODEL` 供应商与模型非空、租户空；`GLOBAL` 三列都空。§16 之外的组合写不进去。
+- `ck_pricing_rules_scope_columns`：**范围与四列的 NULL 组合一一对应**（§74.3「不能有含糊的 NULL 组合」；0030 起
+  八级），八级之外的组合写不进去：
+
+  | 级 | `tenant_id` | `project_id` | `provider_id` | `model_id` |
+  | --- | --- | --- | --- | --- |
+  | `PROJECT_PROVIDER_MODEL` | 非空 | 非空 | 非空 | 非空 |
+  | `PROJECT_PROVIDER` | 非空 | 非空 | 非空 | NULL |
+  | `PROJECT` | 非空 | 非空 | NULL | NULL |
+  | `CUSTOMER_PROVIDER_MODEL` | 非空 | NULL | 非空 | 非空 |
+  | `CUSTOMER_PROVIDER` | 非空 | NULL | 非空 | NULL |
+  | `CUSTOMER` | 非空 | NULL | NULL | NULL |
+  | `GLOBAL_PROVIDER_MODEL` | NULL | NULL | 非空 | 非空 |
+  | `GLOBAL` | NULL | NULL | NULL | NULL |
 - `ck_pricing_rules_markup`：`(strategy = 'MARKUP' AND markup_multiplier IS NOT NULL AND markup_multiplier > 0)
   OR (strategy = 'FIXED_RATE' AND markup_multiplier IS NULL)`。
 - `ck_pricing_rules_unpublished` / `_approved` / `_period`：与 `provider_price_versions` 同一写法（草稿与丢弃的草稿没有
@@ -736,9 +753,15 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 - `ck_pricing_rules_retired_end`（v4）：`status <> 'RETIRED' OR effective_to IS NOT NULL`，停用必有尽头。没有尽头的
   `RETIRED` 行会一直被解析命中，并让该范围之后的发布都撞上区间不重叠触发器。
 - **唯一索引 `(scope_key, open_slot)`**（`ux_pricing_rules_open_slot`）：同一范围至多一条未截断的已发布规则（全局
-  范围也是：`scope_key` 非空）。
+  范围也是：`scope_key` 非空；0030 随新的 `scope_key` 重建）。
 - 唯一约束 `(id, strategy)`（`uq_pricing_rules_id_strategy`）：只为分量表的复合外键。
-- 索引 `ix_pricing_rules_resolve (priority_scope, tenant_id, provider_id, model_id, effective_from)`：解析时逐级查。
+- 索引 `ix_pricing_rules_resolve (priority_scope, tenant_id, provider_id, model_id, effective_from)`：解析时逐级查
+  （0030 不改：项目级的查询按这个前缀落到该客户的项目级规则，再按 `project_id` 过滤）。
+- **迁移 0030 的升级与降级**：都分步、可重跑，先判断是否已完成（完成就不发任何 DDL）；其间用两个只 SIGNAL 的隔离
+  触发器 `trg_pricing_rules_migration_guard_insert` / `_update`（`PRECEDES` 排在主触发器之前，消息
+  `pricing_rules is being migrated`）拒绝对本表的一切 INSERT 与 UPDATE，全部 DDL 完成后才删掉。库里还留着隔离触发器，
+  就说明迁移没有完成，重跑即可补完。⚠️ **表里有项目级规则（`project_id` 非空或 `priority_scope` 为三个项目级之一）
+  时降级被拒**：这些规则可能已被用量事件的 `pricing_rule_id` 引用（INV-6），只能前滚修复；`--sql` 离线降级一律被拒。
 
 ### `pricing_rule_components`（只属于 FIXED_RATE 规则）
 
@@ -767,7 +790,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | `trg_pricing_rule_locks_before_delete` | 一律拒绝 |
 | `trg_pricing_rule_locks_before_update` | BEFORE UPDATE（迁移 0016，一律拒绝）：不许把锁行改走（改 `id`、`SET id = 1` 这种不改值的写法都拒绝），否则 ④ 的 `WHERE id = 1 FOR UPDATE` 会静默锁不到行（AIH-TASK-045，设计闸门 #200 v1）；错误文本与上两个相同。锁定读不是 UPDATE，不触发 |
 | `trg_pricing_rules_before_insert` | `status` 不是 `DRAFT` 就拒绝：规则只能以草稿进入，发布跃迁上的检查因此绕不过去 |
-| `trg_pricing_rules_before_update` | ① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（设计 §4 的状态表；不许直接 `DRAFT → RETIRED` 绕过 ③）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；③ `DRAFT → PUBLISHED` 且 `FIXED_RATE` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁），再查同一 `scope_key` 里是否有另一个**非空区间**的已发布规则与本行相交，有就拒绝；空区间不参与判定；⑤ 同一把锁内，`DRAFT → PUBLISHED` 且 `effective_from` 为空时：只许 `GLOBAL` 范围、且该范围没有任何 `PUBLISHED` / `RETIRED` 行（含撤销的预约留下的空区间），否则拒绝（v4：「一直以来」只给全局默认的第一条） |
+| `trg_pricing_rules_before_update` | （迁移 0030 同名重建：② 的不可变列加 `project_id`，④ 现算的范围键加项目一段，其余不变）① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（设计 §4 的状态表；不许直接 `DRAFT → RETIRED` 绕过 ③）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝（含 `project_id`）；③ `DRAFT → PUBLISHED` 且 `FIXED_RATE` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM pricing_rule_locks WHERE id = 1 FOR UPDATE`（与服务层发布同一把锁），再查同一 `scope_key` 里是否有另一个**非空区间**的已发布规则与本行相交，有就拒绝；空区间不参与判定；⑤ 同一把锁内，`DRAFT → PUBLISHED` 且 `effective_from` 为空时：只许 `GLOBAL` 范围、且该范围没有任何 `PUBLISHED` / `RETIRED` 行（含撤销的预约留下的空区间），否则拒绝（v4：「一直以来」只给全局默认的第一条） |
 | `trg_pricing_rules_before_delete` | 一律拒绝 |
 | `trg_pricing_rule_components_before_insert` / `_before_update` / `_before_delete` | 所属规则（更新时新旧两个）不是 `DRAFT` 就拒绝 |
 
