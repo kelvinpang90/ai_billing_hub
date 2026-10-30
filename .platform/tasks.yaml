@@ -8386,3 +8386,112 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-141
+    title: 计费扫描并行：Beat 每 10 秒派两个计费扫描，扫描先抢名额，worker 默认并发改为 3
+    purpose: >-
+      按 docs/design/AIH-TASK-141-billing-sweep-parallelism.md（设计闸门 #522 已批准 v4）§2：app/core/celery_app.py 新增常量 USAGE_BILLING_SWEEP_PARALLELISM = 2，把 beat_schedule 里的 usage-billing-sweep 换成按它生成的 usage-billing-sweep-1 … usage-billing-sweep-N；app/services/usage_billing.py 的 bill_pending_events 加 parallelism 参数与「扫描名额」（带库名的 MySQL 命名锁，抢不到就立即返回 0），任务传常量；docker-compose.yml 里 celery-worker 的默认并发从 2 改为 3；补调度、名额与并发的测试，同步运维文档。不改认领、处理、卡住回收的任何 SQL、锁顺序或事务边界，不改周期、预算与每批条数，不改容器配额。压测脚本按新的派发节奏模拟属于 AIH-TASK-142。
+    status: ready
+    depends_on:
+      - AIH-TASK-140
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-141-billing-sweep-parallelism.md（设计闸门 #522 已批准 v4）逐条一致，以 §1「明确不做什么」、§2「改动点」、§4、§5、§7、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/core/celery_app.py：新增模块级常量 USAGE_BILLING_SWEEP_PARALLELISM = 2，与 USAGE_BILLING_SWEEP_SECONDS 等常量放在一起，注释写明它为什么是常量而不是配置项、以及 celery-worker 并发必须至少比它多 1；beat_schedule 不再有 usage-billing-sweep，改为 usage-billing-sweep-1 到 usage-billing-sweep-<N> 共 N 个条目，每个的 task 为 app.tasks.usage_billing.bill_pending_events、schedule 为 USAGE_BILLING_SWEEP_SECONDS、options 为 expires USAGE_BILLING_SWEEP_EXPIRES_SECONDS；usage-stale-recovery 与其他条目不变'
+      - 'app/services/usage_billing.py：bill_pending_events 新增关键字参数 parallelism: int | None = None（None 不抢名额、行为与现在相同；< 1 抛 ValueError），扫描名额照设计 §2「改动点」第 0 条：私有上下文管理器，专用 AUTOCOMMIT 连接，名字为「库名:usage-billing-sweep:i」（SQL 里用 CONCAT 与 DATABASE() 拼），i = 1 … parallelism 依次 GET_LOCK(name, 0)，全部抢不到时不认领、返回 SweepResult(claimed=0) 并记 debug 日志，任何一次 GET_LOCK 返回 NULL 或语句失败就不再试后面的名额、同样返回 0 并记 warning；抢、确认、释放三条语句各包成模块级私有函数 _get_lock / _holds_lock / _release_lock，都接收名额序号 slot，名字只在 SQL 里用模块常量 _SWEEP_SLOT_NAME（CONCAT 与 DATABASE() 拼，slot 为绑定参数）拼，原样返回 1 / 0 / None、失败时抛异常，测试经 monkeypatch 替换它们；每次 claim_events 与每次 process_event 之前经 _holds_lock 在名额连接上执行 SELECT IS_USED_LOCK(name) = CONNECTION_ID()，返回不是 1 或语句失败就停下（不再认领、不再处理本批剩余事件，记 warning，正常返回），本批剩余事件留给卡住回收；finally 里 RELEASE_LOCK、释放失败就 invalidate 连接，SQLite 上不做限制；claim_events、process_event、recover_stale_processing 不改。app/tasks/usage_billing.py：bill_pending_events 任务传 parallelism=USAGE_BILLING_SWEEP_PARALLELISM（从 app.core.celery_app 导入）'
+      - 'docker-compose.yml：celery-worker 的 --concurrency 默认值由 2 改为 3（仍写成 ${BILLING_CELERY_CONCURRENCY:-3}），旁边的注释补一句「至少比计费扫描的并行数多 1，见 app/core/celery_app.py 的 USAGE_BILLING_SWEEP_PARALLELISM」；不改 cpus、mem_limit 与其他服务'
+      - '单元测试：tests/backend/test_celery.py 的条目集合断言改为含 usage-billing-sweep-1 到 -N、不再含 usage-billing-sweep，扫描条目的周期与 expires 断言对每个条目逐一成立（expires 小于周期），扫描条目恰好 USAGE_BILLING_SWEEP_PARALLELISM 个且该常量是 ≥ 1 的整数，usage-stale-recovery 只有一个；tests/backend/test_compose.py 在 test_celery_pins_its_concurrency 旁新增一条，读 celery-worker 的 --concurrency 默认值，断言它等于 3 且 ≥ USAGE_BILLING_SWEEP_PARALLELISM + 1（从 app.core.celery_app 导入常量）；tests/backend/test_usage_billing.py 照设计 §7「名额：参数与 SQLite」「任务传名额数」两行'
+      - 'tests/backend/test_usage_billing_concurrency.py：照设计 §7 新增八个真 MySQL 用例（后两个名额失败分支按设计参数化），场景、步骤与断言逐条照设计对应的行——「并发：两个扫描并行、余额跨零」（「幂等重放」写在这个用例的末尾）「名额：抢不到就不认领」「名额：跨周期时第三个扫描立即返回」「名额：名额连接中途断开」「名额：释放失败就丢弃连接」「名额：扫描抛异常也释放」「名额：GET_LOCK 返回 NULL 或出错」「名额：确认时返回 0、NULL 或出错」：用文件里现有的 world fixture（一个租户、一个模型）、publish_markup_usd()、run_in_threads 与四 worker 用例的写法；余额跨零用一笔 ADJUSTMENT_DEBIT 把余额压到 100 × MARKUP_BILLABLE + MARKUP_BILLABLE / 2、再造 120 条事件，World.bill 新增关键字参数 parallelism（默认 None、原样传给 bill_pending_events，现有调用不传），两个线程同时 world.bill(NOW, parallelism=2)，并发阶段之后在 NOW + 1 小时反复 world.bill(..., parallelism=2) 直到认领 0 条（退避的事件在这一步补完，不算失败）；等锁用 performance_schema.data_lock_waits（写法同 tests/backend/test_session_revocation_concurrency.py 的 _WAITING_ON_TABLE），不用 INNODB_TRX。清理沿用文件现有的 engine / world fixture（前后各一次 clean()），每个用例结束时两个名额都已释放，不新增清理逻辑、不动触发器。已有用例不改、照常通过'
+      - 'docs/runbook.md 与 docs/deployment.md：写到 usage-billing-sweep 的地方改为 N 个扫描条目，说明每 10 秒派 N 个扫描、每个扫描先抢名额（命名锁的名字与抢不到就返回 0）、celery-worker 并发默认 3、BILLING_CELERY_CONCURRENCY 必须至少比并行数多 1，调小的后果照设计 §5（其他周期任务排队，不丢数据）'
+      - '不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #522'
+    allowed_change_paths:
+      - app/core/celery_app.py
+      - app/services/usage_billing.py
+      - app/tasks/usage_billing.py
+      - docker-compose.yml
+      - tests/backend/test_celery.py
+      - tests/backend/test_compose.py
+      - tests/backend/test_usage_billing.py
+      - tests/backend/test_usage_billing_concurrency.py
+      - docs/runbook.md
+      - docs/deployment.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-142
+    title: 压测脚本按新的派发节奏模拟：每 10 秒派与生产相同个数的计费扫描
+    purpose: >-
+      按 docs/design/AIH-TASK-141-billing-sweep-parallelism.md（设计闸门 #522 已批准 v4）§11「任务拆分」第 2 项：scripts/perf_usage.py 与 scripts/perf_usage_profile.py 的派发线程在 Beat 节奏下每 10 秒派 USAGE_BILLING_SWEEP_PARALLELISM 个扫描（从 app.core.celery_app 导入同一个常量，不另设参数），让压测与剖析模拟的派发与生产一致；--continuous 的行为不变；同步测试与 docs/perf-baseline.md 的派发描述。只改脚本与文档，不跑压测，不改 app/。
+    status: ready
+    depends_on:
+      - AIH-TASK-141
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-141-billing-sweep-parallelism.md（设计闸门 #522 已批准 v4）§11「任务拆分」第 2 项与 §7「吞吐（运维验证）」一致；设计与本契约冲突时以设计文件为准'
+      - 'scripts/perf_usage.py：WorkerPool 的派发线程到点时一次入队 USAGE_BILLING_SWEEP_PARALLELISM 个 sweep（各自带同样的过期时刻），常量从 app.core.celery_app 导入；worker 子进程调用 bill_pending_events 时传 parallelism=USAGE_BILLING_SWEEP_PARALLELISM（与生产任务一致）；卡住回收的派发不变；模块文档与 --help 里「每 10 秒一次扫描」的说法改为「每 10 秒派 N 个扫描（与生产 Beat 相同）」；结果 JSON 的环境信息里记下 beat_sweeps_per_tick'
+      - 'scripts/perf_usage_profile.py：Beat 节奏下同样每 10 秒入队 USAGE_BILLING_SWEEP_PARALLELISM 个 sweep，worker 子进程调用 bill_pending_events 时同样传 parallelism=USAGE_BILLING_SWEEP_PARALLELISM；--continuous 的行为不变（任何 worker 一空闲就派下一次）；文字报告与 JSON 的环境信息记下 beat_sweeps_per_tick'
+      - 'tests/backend/test_perf_usage.py 与 tests/backend/test_perf_usage_profile.py：派发线程在 Beat 节奏下每个周期入队的 sweep 个数等于 USAGE_BILLING_SWEEP_PARALLELISM（用假时钟或直接驱动派发循环，不起子进程、不连数据库）；--continuous 的既有用例照常通过'
+      - 'docs/perf-baseline.md：10.3「计费」一行与 10.6「负载」表「派发」一行改为每 10 秒派 N 个扫描（与生产 Beat 相同），并注明 2026-10-30 那一轮（10.6 的结果）是改之前、每 10 秒一个扫描时测的；10.5 与 10.6 已回填的结果不改'
+      - '不改 app/、alembic/、docker-compose.yml；不装依赖；不跑压测、不连生产；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #522'
+    allowed_change_paths:
+      - scripts/perf_usage.py
+      - scripts/perf_usage_profile.py
+      - tests/backend/test_perf_usage.py
+      - tests/backend/test_perf_usage_profile.py
+      - docs/perf-baseline.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
