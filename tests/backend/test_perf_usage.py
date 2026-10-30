@@ -1,7 +1,8 @@
 """Regression tests for scripts/perf_usage.py (AIH-TASK-033).
 
 只测脚本**不许做什么**与**怎么下结论**：护栏、参数解析、百分位计算、各场景的通过线与方案 C
-判据。负载本身不在这里跑 —— 它要一个真的 `billing_perf` 与几十分钟，是合并后的运维步骤。
+判据，以及派发节奏（每 10 秒派与生产 Beat 相同个数的扫描，AIH-TASK-142）。负载本身不在
+这里跑 —— 它要一个真的 `billing_perf` 与几十分钟，是合并后的运维步骤。
 
 ⚠️ 文件放在 `tests/backend/` 而不是 `tests/`，理由与 test_perf_baseline.py 相同：脚本大量
 import `app.*`，CI 的 `policy` 项（`unittest discover -s tests`）的环境里没有这些依赖。
@@ -11,12 +12,22 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import random
 import re
 import sys
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
+from app.core.celery_app import (
+    USAGE_BILLING_SWEEP_EXPIRES_SECONDS,
+    USAGE_BILLING_SWEEP_PARALLELISM,
+    USAGE_BILLING_SWEEP_SECONDS,
+    USAGE_STALE_RECOVERY_EXPIRES_SECONDS,
+    USAGE_STALE_RECOVERY_SECONDS,
+)
 from app.core.config import Settings
 from app.schemas.usage_ingest import EVENT_ID_PATTERN
 
@@ -423,6 +434,111 @@ class FaultInjectionTests(unittest.TestCase):
         clock = perf._FaultyClock(False)
         clock()
         clock()
+
+
+class _Pipe:
+    """worker 子进程那一端管道的替身：只记下送回主进程的消息。"""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple] = []
+
+    def send(self, message: tuple) -> None:
+        self.sent.append(message)
+
+
+class BeatDispatchTests(unittest.TestCase):
+    """派发线程的节奏：直接驱动 `_dispatch`，用假的时刻，不起子进程、不连库。"""
+
+    def setUp(self) -> None:
+        self.pool = perf.WorkerPool(Settings(database_url=PERF_URL), 2)
+        self.pool._next_sweep = self.pool._next_recovery = 1000.0
+
+    def _sweeps(self) -> list[tuple[str, float]]:
+        return [task for task in self.pool._pending if task[0] == "sweep"]
+
+    def test_the_parallelism_is_the_production_constant(self) -> None:
+        self.assertEqual(perf.USAGE_BILLING_SWEEP_PARALLELISM, USAGE_BILLING_SWEEP_PARALLELISM)
+        self.assertGreaterEqual(USAGE_BILLING_SWEEP_PARALLELISM, 1)
+
+    def test_every_tick_queues_as_many_sweeps_as_production_beat(self) -> None:
+        for tick in range(3):
+            with self.subTest(tick=tick):
+                now = 1000.0 + tick * USAGE_BILLING_SWEEP_SECONDS
+                self.pool._pending.clear()
+                self.pool._dispatch(now)
+                sweeps = self._sweeps()
+                self.assertEqual(len(sweeps), USAGE_BILLING_SWEEP_PARALLELISM)
+                # 同一周期的 N 个扫描带同样的过期时刻（生产 Beat 条目的 expires 相同）。
+                self.assertEqual(
+                    {expires for _kind, expires in sweeps},
+                    {now + USAGE_BILLING_SWEEP_EXPIRES_SECONDS},
+                )
+
+    def test_nothing_more_is_queued_between_ticks(self) -> None:
+        self.pool._dispatch(1000.0)
+        self.pool._pending.clear()
+        self.pool._dispatch(1000.0 + USAGE_BILLING_SWEEP_SECONDS / 2)
+        self.assertEqual(self.pool._pending, [])
+
+    def test_stale_recovery_is_still_one_task_per_period(self) -> None:
+        recoveries = []
+        now = 1000.0
+        while now < 1000.0 + 2 * USAGE_STALE_RECOVERY_SECONDS:
+            self.pool._pending.clear()
+            self.pool._dispatch(now)
+            recoveries.extend(task for task in self.pool._pending if task[0] == "recover")
+            now += USAGE_BILLING_SWEEP_SECONDS
+        self.assertEqual(
+            recoveries,
+            [
+                ("recover", 1000.0 + USAGE_STALE_RECOVERY_EXPIRES_SECONDS),
+                (
+                    "recover",
+                    1000.0 + USAGE_STALE_RECOVERY_SECONDS + USAGE_STALE_RECOVERY_EXPIRES_SECONDS,
+                ),
+            ],
+        )
+
+
+class WorkerSweepTests(unittest.TestCase):
+    """worker 子进程里的一次扫描：替换服务函数，不连库。"""
+
+    def test_a_sweep_is_bill_pending_events_with_the_production_parallelism(self) -> None:
+        billing = perf.usage_billing
+        claim = SimpleNamespace(id=7)
+        batches = iter([[claim], []])
+
+        def bill(factory, **kwargs):
+            # 与 `bill_pending_events` 的循环一样，按模块全局名调用认领与处理。
+            while claims := billing.claim_events(factory, lease_seconds=kwargs["lease_seconds"]):
+                for item in claims:
+                    billing.process_event(factory, item, max_attempts=kwargs["max_attempts"])
+            return billing.SweepResult(claimed=1)
+
+        pipe = _Pipe()
+        with (
+            mock.patch.object(billing, "claim_events", side_effect=lambda *a, **k: next(batches)),
+            mock.patch.object(
+                billing, "process_event", return_value=billing.Outcome.PROCESSED
+            ) as process,
+            mock.patch.object(billing, "bill_pending_events", side_effect=bill) as service,
+        ):
+            originals = (billing.claim_events, billing.process_event)
+            perf._sweep(
+                "factory", pipe, lease=120, attempts=5, rng=random.Random(0), fault_rate=0.0
+            )
+            # 记录用的包装只在这一次扫描里生效。
+            self.assertEqual((billing.claim_events, billing.process_event), originals)
+        service.assert_called_once()
+        self.assertEqual(service.call_args.kwargs["parallelism"], USAGE_BILLING_SWEEP_PARALLELISM)
+        self.assertEqual(service.call_args.kwargs["lease_seconds"], 120)
+        self.assertEqual(service.call_args.kwargs["max_attempts"], 5)
+        process.assert_called_once()
+        self.assertIsInstance(process.call_args.kwargs["clock"], perf._FaultyClock)
+        self.assertEqual(len(pipe.sent), 1)
+        kind, rows = pipe.sent[0]
+        self.assertEqual(kind, "results")
+        self.assertEqual([(row[0], row[1]) for row in rows], [(7, "PROCESSED")])
 
 
 if __name__ == "__main__":

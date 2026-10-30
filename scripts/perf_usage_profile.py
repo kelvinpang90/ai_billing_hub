@@ -4,9 +4,11 @@
 每条约 95 ms，其中持钱包锁只占 9–10 ms。按 10.2 的规则要先找出锁外的瓶颈，再决定是否做方案 C。
 
 负载：单个租户预先积压 `--events` 条（默认 2000），依次在 `--workers` 的每一种配置下（默认 1 与 2）
-各清空一轮，每轮自己的模型、租户与积压。worker 是子进程，派发节奏与 perf_usage.py 相同（Beat 10 秒、
-8 秒预算、每批 20 条）；`--continuous` 不等 Beat，扫描一结束就派下一次 —— 用来把「Beat 节奏造成的
-空转」与「单条处理成本」分开。
+各清空一轮，每轮自己的模型、租户与积压。worker 是子进程，派发节奏与 perf_usage.py 相同（每 10 秒派
+`USAGE_BILLING_SWEEP_PARALLELISM` 个扫描，与生产 Beat 相同；8 秒预算、每批 20 条）；每个扫描是
+一次 `bill_pending_events(..., parallelism=USAGE_BILLING_SWEEP_PARALLELISM)`，与生产任务一样
+先抢扫描名额。`--continuous` 不等 Beat，任何 worker 一空闲就派下一次 —— 用来把
+「Beat 节奏造成的空转」与「单条处理成本」分开。
 
 每条事件在 worker 子进程里记：`process_event` 的墙钟、进程 CPU 时间、SQL 条数与数据库耗时、等钱包锁
 与持锁时间、计价（`resolve_charge_inputs` / `price_resolved`）与记账（`post_transaction`）耗时；
@@ -43,17 +45,12 @@ import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from multiprocessing.connection import Connection, wait
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 from sqlalchemy import event, func, select, text
 
-from app.core.celery_app import (
-    USAGE_BILLING_SWEEP_EXPIRES_SECONDS,
-    USAGE_BILLING_SWEEP_SECONDS,
-    USAGE_STALE_RECOVERY_EXPIRES_SECONDS,
-    USAGE_STALE_RECOVERY_SECONDS,
-)
+from app.core.celery_app import USAGE_BILLING_SWEEP_PARALLELISM, USAGE_BILLING_SWEEP_SECONDS
 from app.core.config import get_settings
 from app.core.database import create_database_engine, create_session_factory
 from app.models.usage import UsageEvent, UsageEventStatus
@@ -433,41 +430,69 @@ def _probe_snapshot(wall: float) -> dict[str, object]:
 
 
 def _profile_sweep(factory, connection: Connection, *, lease: int, attempts: int) -> None:
-    """与 `usage_billing.bill_pending_events` 同一个循环（8 秒预算、每批 20 条），逐条记各阶段。"""
-    started = time.monotonic()
-    while time.monotonic() - started < usage_billing.SWEEP_BUDGET_SECONDS:
+    """一次 `usage_billing.bill_pending_events`，与生产任务一样传
+    `parallelism=USAGE_BILLING_SWEEP_PARALLELISM`，逐次认领、逐条事件记各阶段。
+
+    这一次调用期间把 `usage_billing` 的 `claim_events` / `process_event` 换成记录用的包装（它的循环
+    按模块全局名调用这两个函数），返回值原样交回，结束后换回。每批认领之前把上一批送回主进程。
+    抢名额与确认名额的语句不计入任何一次认领或事件（每条在 1 ms 以内）；抢不到名额的扫描不认领，
+    什么也不送回。
+    """
+    original_claim, original_process = usage_billing.claim_events, usage_billing.process_event
+    batch: list[tuple[dict, list[dict]]] = []
+
+    def flush() -> None:
+        if batch:
+            claim, rows = batch.pop()
+            connection.send(("batch", claim, rows))
+
+    def claim_events(*args, **kwargs):
+        flush()
         _reset_probe()
         begun = time.perf_counter()
-        claims = usage_billing.claim_events(factory, lease_seconds=lease)
-        claim = {**_probe_snapshot(time.perf_counter() - begun), "claimed": len(claims)}
-        rows = []
-        for item in claims:
-            _reset_probe()
-            cpu_before = time.process_time()
-            begun = time.perf_counter()
-            outcome = usage_billing.process_event(factory, item, max_attempts=attempts)
-            done = time.perf_counter()
-            cpu = time.process_time() - cpu_before
-            called = _PROBE.get("lock_called")
-            acquired = _PROBE.get("lock_acquired")
-            rows.append(
-                {
-                    **_probe_snapshot(done - begun),
-                    "event_pk": item.id,
-                    "outcome": outcome.value,
-                    "cpu": cpu,
-                    "sql_in_lock": _PROBE.get("sql_in_lock", 0.0),
-                    "lock_wait": acquired - called if called and acquired else None,
-                    "lock_hold": done - acquired if acquired else None,
-                    "lock_window": done - called if called else None,
-                    "resolve": _PROBE.get("resolve", 0.0),
-                    "price": _PROBE.get("price", 0.0),
-                    "posting": _PROBE.get("posting", 0.0),
-                }
-            )
-        connection.send(("batch", claim, rows))
-        if not claims:
-            break
+        claims = original_claim(*args, **kwargs)
+        batch.append(({**_probe_snapshot(time.perf_counter() - begun), "claimed": len(claims)}, []))
+        return claims
+
+    def process_event(factory, item, **kwargs):
+        _reset_probe()
+        cpu_before = time.process_time()
+        begun = time.perf_counter()
+        outcome = original_process(factory, item, **kwargs)
+        done = time.perf_counter()
+        cpu = time.process_time() - cpu_before
+        called = _PROBE.get("lock_called")
+        acquired = _PROBE.get("lock_acquired")
+        batch[-1][1].append(
+            {
+                **_probe_snapshot(done - begun),
+                "event_pk": item.id,
+                "outcome": outcome.value,
+                "cpu": cpu,
+                "sql_in_lock": _PROBE.get("sql_in_lock", 0.0),
+                "lock_wait": acquired - called if called and acquired else None,
+                "lock_hold": done - acquired if acquired else None,
+                "lock_window": done - called if called else None,
+                "resolve": _PROBE.get("resolve", 0.0),
+                "price": _PROBE.get("price", 0.0),
+                "posting": _PROBE.get("posting", 0.0),
+            }
+        )
+        return outcome
+
+    usage_billing.claim_events = claim_events  # type: ignore[assignment]
+    usage_billing.process_event = process_event  # type: ignore[assignment]
+    try:
+        usage_billing.bill_pending_events(
+            factory,
+            lease_seconds=lease,
+            max_attempts=attempts,
+            parallelism=USAGE_BILLING_SWEEP_PARALLELISM,
+        )
+    finally:
+        usage_billing.claim_events = original_claim  # type: ignore[assignment]
+        usage_billing.process_event = original_process  # type: ignore[assignment]
+    flush()
 
 
 def _profile_worker_main(database_url: str, connection: Connection, lease: int, attempts: int):
@@ -557,41 +582,20 @@ class ProfilePool(perf.WorkerPool):
             worker.busy = False
         # "ready"：中途补的进程报到，无事可做。
 
-    def _run(self) -> None:
-        next_sweep = next_recovery = time.time()
-        while not self._stop.is_set():
-            now = time.time()
-            if self.continuous:
-                # 不等 Beat：每个空闲的 worker 都立刻有一次扫描可拿。
-                idle = sum(1 for worker in self.workers if not worker.busy)
-                queued = sum(1 for kind, _expires in self._pending if kind == "sweep")
-                for _ in range(idle - queued):
-                    self._pending.append(("sweep", math.inf))
-            elif now >= next_sweep:
-                self._pending.append(("sweep", now + USAGE_BILLING_SWEEP_EXPIRES_SECONDS))
-                next_sweep += USAGE_BILLING_SWEEP_SECONDS
-            if now >= next_recovery:
-                self._pending.append(("recover", now + USAGE_STALE_RECOVERY_EXPIRES_SECONDS))
-                next_recovery += USAGE_STALE_RECOVERY_SECONDS
-            # 过期的任务丢弃（celery 的 expires）。
-            alive = [task for task in self._pending if task[1] >= now]
-            self.dropped_tasks += len(self._pending) - len(alive)
-            self._pending = alive
-            for worker in list(self.workers):
-                if not self._pending:
-                    break
-                if not worker.busy:
-                    task = self._pending.pop(0)
-                    try:
-                        worker.connection.send((task[0],))
-                    except OSError:
-                        self._pending.insert(0, task)
-                        self._lost(worker)
-                        continue
-                    worker.busy = True
-            connections = {worker.connection: worker for worker in self.workers}
-            for ready in wait(list(connections), timeout=0.05):
-                self._handle(connections[ready])
+    def _dispatch(self, now: float) -> None:
+        """Beat 节奏照 perf_usage.py（每 10 秒 N 个扫描）；`continuous` 时只换掉扫描的派发。
+
+        派发循环本身（过期丢弃、交给空闲 worker、收结果）是 perf_usage.py 的 `_run`。
+        """
+        if self.continuous:
+            # 不等 Beat：每个空闲的 worker 都立刻有一次扫描可拿。
+            idle = sum(1 for worker in self.workers if not worker.busy)
+            queued = sum(1 for kind, _expires in self._pending if kind == "sweep")
+            for _ in range(idle - queued):
+                self._pending.append(("sweep", math.inf))
+        else:
+            self._beat_sweeps(now)
+        self._beat_recovery(now)
 
 
 # --------------------------------------------------------------------------
@@ -708,7 +712,14 @@ def _percent(value: float | None) -> str:
 
 
 def print_round(result: RoundResult, continuous: bool) -> None:
-    mode = "不等 Beat（--continuous）" if continuous else "Beat 节奏"
+    mode = (
+        "不等 Beat（--continuous）"
+        if continuous
+        else (
+            f"Beat 节奏：每 {USAGE_BILLING_SWEEP_SECONDS:g} 秒"
+            f" {USAGE_BILLING_SWEEP_PARALLELISM} 个扫描"
+        )
+    )
     print(f"--- --workers {result.workers}（{mode}）：{result.status} ---")
     for reason in result.reasons:
         print(f"  ✗ {reason}")
@@ -786,6 +797,7 @@ def describe_environment(factory, settings, args) -> dict[str, object]:
         "lease_seconds": settings.usage_lease_seconds,
         "max_attempts": settings.usage_max_attempts,
         "beat_sweep_seconds": USAGE_BILLING_SWEEP_SECONDS,
+        "beat_sweeps_per_tick": USAGE_BILLING_SWEEP_PARALLELISM,
         "sweep_budget_seconds": usage_billing.SWEEP_BUDGET_SECONDS,
         "claim_batch": usage_billing.CLAIM_BATCH,
         "cpu_stat": str(CPU_STAT_PATH) if read_throttle() is not None else UNAVAILABLE,

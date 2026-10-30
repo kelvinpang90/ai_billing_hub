@@ -385,7 +385,7 @@ S3 在设计的四条之外还要求「事件都走完了」：核对一个还�
 | 造数据 | 每轮一个唯一前缀 `perf-usage-<10 位十六进制>`。ADMIN 账号（口令随机、不保存）、供应商、每个场景一个模型、每个场景自己的客户 / 项目 / 集成凭据，全部经对应的服务函数建立；充值走管理员调账（期初余额 1 000 000 MYR，虚构） |
 | 价格、规则、汇率 | 在 `billing_perf` 里按虚构值发布：USD 价格（每 1 000 token）、`GLOBAL_PROVIDER_MODEL` 范围的 MARKUP 规则（只挂在本场景的模型上）、USD→MYR 汇率。⚠️ 汇率是全局的，会截断 `billing_perf` 里上一轮留下的 USD 版本 |
 | 摄取 | 经 AIH-TASK-029 的 `ingest_one`（UUIDv7 的 `event_id`、`LLM_TOKEN`），按时间表在一个线程池里发；跳过的只有 HTTP 层的验签与 nonce。**不直接写** `usage_events` |
-| 计费 | `--workers` 个**子进程**（默认 2，等于 compose 的 `BILLING_CELERY_CONCURRENCY`），由主进程的一个线程按 Beat 的节奏派任务：每 10 秒一次扫描（9 秒过期）、每 60 秒一次卡住回收（54 秒过期），数值取自 `app/core/celery_app.py`。扫描循环与 `bill_pending_events` 相同（8 秒预算、每批 20 条），逐条调用 AIH-TASK-032 的 `claim_events` / `process_event`；回收调用 `recover_stale_processing`。**不直接写**账本或余额 |
+| 计费 | `--workers` 个**子进程**（默认 2，等于计费扫描最多占的子进程数：compose 的 `BILLING_CELERY_CONCURRENCY` 默认 3，至少 1 个留给其他周期任务），由主进程的一个线程按 Beat 的节奏派任务：每 10 秒派 N 个扫描（N = `USAGE_BILLING_SWEEP_PARALLELISM`，与生产 Beat 相同，各 9 秒过期）、每 60 秒一次卡住回收（54 秒过期），数值与 N 都取自 `app/core/celery_app.py`。每个扫描是一次 `bill_pending_events(..., parallelism=N)`（与生产任务相同：先抢扫描名额，抢不到就不认领；8 秒预算、每批 20 条），只把它按模块全局名调用的 AIH-TASK-032 `claim_events` / `process_event` 包一层记完成时刻；回收调用 `recover_stale_processing`。**不直接写**账本或余额。⚠️ AIH-TASK-142（设计闸门 #522）之前是每 10 秒一个扫描、脚本自己复制扫描循环；10.5 那一轮按那时的节奏测 |
 | S3 的崩溃 | 在负载的 10%–90% 之间随机挑 3 个时刻，对随机一个 worker 进程发 SIGKILL，随即补一个新进程 |
 | S3 的意外异常 | 每条事件以 1% 的概率换一个「第一次调用就抛异常」的时钟：异常落在处理事务中途（三把共享锁之后、扣费之前），事务回滚、按 `FAILED_RETRYABLE` + 退避记一次 |
 | S4 的发布 | 负载期间每 10 秒依次发布一次价格、规则、汇率（数值交替，让快照重算有区分度），只计**发布**那一次调用的耗时；结束后抽 200 条已处理事件做 `reprice_from_snapshot`，与快照逐列比对 |
@@ -524,7 +524,7 @@ docker compose run --rm \
 | --- | --- |
 | 积压 | 单个租户预先积压 `--events` 条（默认 2 000），积压阶段没有 worker，事件全部停在 `RECEIVED` |
 | 配置 | 依次在 `--workers 1` 与 `--workers 2` 下各清空一轮（`--workers` 可给逗号列表）；每轮自己的模型、租户与积压 |
-| 派发 | worker 是子进程，派发节奏与 `perf_usage.py` 相同（Beat 每 10 秒一次扫描、9 秒过期；每 60 秒一次卡住回收；扫描 8 秒预算、每批 20 条）。等所有子进程启动完、装好包装才开始派发，进程启动不算进清空用时 |
+| 派发 | worker 是子进程，派发节奏与 `perf_usage.py` 相同（Beat 每 10 秒派 N 个扫描，N = `USAGE_BILLING_SWEEP_PARALLELISM`，与生产 Beat 相同，各 9 秒过期；每 60 秒一次卡住回收；每个扫描是一次 `bill_pending_events(..., parallelism=N)`，8 秒预算、每批 20 条）。等所有子进程启动完、装好包装才开始派发，进程启动不算进清空用时。⚠️ 下面 2026-10-30 那一轮的结果是 AIH-TASK-142 改之前测的：那时 Beat 每 10 秒只派一个扫描、不抢扫描名额 |
 | `--continuous` | 不等 Beat：任何 worker 一空闲就立刻派下一次扫描。两种模式各跑一次，差值就是「Beat 节奏造成的空转」，剩下的是单条处理成本 |
 | 造数据 | 护栏、造数据、摄取全部复用 `perf_usage.py`（按文件加载，不复制）：ADMIN、供应商、模型、客户 / 项目 / 凭据、充值、价格 / 规则 / 汇率都经服务函数，事件经 `ingest_one`。每次运行一个唯一前缀，**不删除任何行**，结束时逐项打印 |
 | 隔离 | 每轮开始前查 `billing_perf` 里**所有租户**有没有非终态（`RECEIVED` / `PROCESSING` / `FAILED_RETRYABLE`）的用量事件，有就报错退出、不开始负载（10.5 的复核：worker 跨租户按接收先后处理，残留积压会混进测量）。本轮结束时核对本轮事件全部走到终态且全部 `PROCESSED`，否则这一轮判 `INVALID` |
