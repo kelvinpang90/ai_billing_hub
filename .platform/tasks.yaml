@@ -8593,3 +8593,59 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-145
+    title: 供应商价格版本的数据库兜底：发布不带尽头、退役必有尽头、已退役不可再改
+    purpose: >-
+      按 docs/design/AIH-TASK-145-provider-price-backstop.md（设计闸门 #535 已批准 v5）§2「数据库（迁移 0031）」与 §8：新迁移 0031 给 provider_price_versions 加 CHECK ck_provider_price_versions_retired_end（退役必有尽头），并以新名字 trg_provider_price_versions_before_update_v2 建 BEFORE UPDATE 触发器（由 0013 的正文改五处：RETIRED 与 DISCARDED 都是终态、草稿发布时尽头必须为空、不可变检查只对 PUBLISHED、区间相交判定不再用哨兵日期、已发布版本的尽头只按截断恢复退役三种方式变），先建新的、再删 0013 的 trg_provider_price_versions_before_update；模型只同步这条 CHECK。合起来让起点为空的发布只在该（供应商, 模型）没有区间非空的已发布版本时通过。不改服务层、计费、接口与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-144
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-145-provider-price-backstop.md（设计闸门 #535 已批准 v5）逐条一致，以 §2「数据库（迁移 0031）」、§3 INV-6、§4、§5、§7、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261031_0031_provider_price_backstop.py，revision 为 0031_provider_price_backstop，down_revision 为 0030_pricing_rule_project_scope；文件头按 0030 的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明不改任何已有行。upgrade 先照设计判断是否已完成（完成就直接返回、不发任何语句），否则照设计 §2「升级」六步：① 任何 DDL 之前的 binlog 预检（查询、判定与报错文案照 0013，名字改为本迁移的）；② 形状核对（已存在的同名 CHECK 必须在本表上、ENFORCED 为 YES；同名 CHECK 与新触发器必须与目标逐字相同：CHECK 的原文不做归一化、用设计给出的正则全文匹配 MySQL 规范写法（只有字符集前缀可变且限三种），触发器正文去掉首尾空白后逐字等于冻结正文；不同就抛错、不发任何 DDL；「是否已完成」与降级共用这两个比较）；③ CHECK 不存在时查退役无尽头的行，有就抛错、消息列出至多 20 个 id、不发任何 DDL；④ CHECK 不存在时一条 ALTER TABLE 加 CHECK（显式写 ENFORCED）；⑤ 新触发器不存在时建它（不带 FOLLOWS / PRECEDES）；⑥ 旧触发器存在时删它；--sql 离线模式照设计不读库，依次输出 ALTER、CREATE TRIGGER、DROP TRIGGER IF EXISTS。downgrade 照设计 §2「降级」：先判断是否已完成；否则预检、旧触发器不存在时按冻结的 0013 正文建它、新触发器存在时删它、CHECK 存在时删它；旧触发器或新触发器存在但与冻结正文不是逐字相同都抛错；离线模式依次输出 CREATE TRIGGER、DROP TRIGGER IF EXISTS、ALTER。CHECK 条件、新触发器正文、冻结的 0013 正文与各个标记写成模块级常量（触发器照 0013 的 _TRIGGERS 写法）'
+      - 'app/models/provider_prices.py：新增常量 RETIRED_END_CHECK = "status <> ''RETIRED'' OR effective_to IS NOT NULL" 与 CheckConstraint ck_provider_price_versions_retired_end，加进 __all__；模块文档里「触发器（迁移 0013）」的说法同步为 0013 与 0031，并写明 RETIRED 是终态、发布时尽头为空；其余列、约束与表达式不改'
+      - '测试：新增 tests/backend/test_provider_price_backstop_migration.py，覆盖设计 §7 的迁移各行：迁移结构、字面量（迁移与模型的 CHECK 一致；新触发器正文与 0013 原文恰好差五处；冻结副本与 0013 一致）、离线升级与降级、不改已有行、升级中断后重跑（三个位置）、中间状态不弱于 0013（两个位置）、降级中断后重跑（两个位置）、降级恢复 0013、数据核对、形状核对、预检（四种组合）、降级不需要数据前提；迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑；写法照 tests/backend/test_pricing_rule_project_scope_migration.py）；清理照设计 §7，每个用例结束后库在 head、两张价格表为空、触发器清单是 head 的那一份'
+      - 'tests/backend/test_provider_prices_service.py：照设计 §7 新增直接写库用例：起点为空（回溯，三种已有版本各一次，以及 [NULL, E)）、相交判定的边界（四种）、起点为空不误杀（三种）、带尽头的发布（三种区间）、退役必有尽头（MySQL 与 SQLite 各一组，断言约束名）、已发布版本的尽头只按三种方式变（四种拒绝与三种对照）、已退役是终态（六种改法）；既有用例里改丢弃草稿、把已退役改回已发布的两处断言换成新消息；test_the_database_refuses_overlapping_periods 的 end-to-end-before 由通过改为拒绝（设计 §7）；经 _publish_directly 直接发布带尽头版本来造前置状态的用例改为先发布为 [F, NULL)、再用第二条 UPDATE 写尽头，原本的拒绝 / 通过结论不变；test_the_service_paths_pass_the_triggers 不改断言、照常通过'
+      - 'tests/backend/test_pricing_rule_project_scope_migration.py：照设计 §7「0030 的迁移测试」，test_0030_precheck_refuses_before_any_ddl[downgrade]、test_0030_downgrade_refuses_with_a_project_rule 以及同一模块里同样从 head 出发、断言 0030 降级发出的语句或报错的用例，先把库降到 0030_pricing_rule_project_scope（在被观察的部分之外）再执行原来的降级与断言，断言内容不变。tests/backend/test_migrations.py：在 head 上断言 provider_price_versions 形状的用例（CHECK 清单与条数、触发器清单、模型常量与迁移字面量的比对）改为 0031 之后的形状；只在 0013 那一版上验证 0013 自身的用例照旧；其余既有用例不改、照常通过'
+      - 'docs/database-schema.md 的 provider_price_versions 一节：新 CHECK、触发器表里 BEFORE UPDATE 一行换成 …_v2 与五处新规则、说明起点为空的发布只在时间线为空时通过；docs/TODO.md 勾上 Phase 1「provider_price_versions + 泛化价格分量」一项，把其下「不勾」的说明改为「数据库兜底由 AIH-TASK-145 补上」'
+      - '不改 app/repositories、app/schemas、app/services、接口路由与前端；不改既有迁移文件；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #535'
+    allowed_change_paths:
+      - alembic/versions/20261031_0031_provider_price_backstop.py
+      - app/models/provider_prices.py
+      - tests/backend/test_provider_price_backstop_migration.py
+      - tests/backend/test_provider_prices_service.py
+      - tests/backend/test_pricing_rule_project_scope_migration.py
+      - tests/backend/test_migrations.py
+      - docs/database-schema.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
