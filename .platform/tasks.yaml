@@ -8649,3 +8649,162 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  - id: AIH-TASK-146
+    title: 定价规则的数据库兜底：已停用是终态、发布不带尽头、尽头只按三种方式变、相交判定去哨兵
+    purpose: >-
+      按 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）§2 与 §8 的定价规则一行：新迁移 0032 以新名字 trg_pricing_rules_before_update_v2 建 BEFORE UPDATE 触发器（由 0030 的 trg_pricing_rules_before_update 正文按设计 §2 的 P1–P5 逐字替换得到：RETIRED 与 DISCARDED 都是终态、草稿发布时尽头必须为空、不可变检查只对 PUBLISHED、已发布版本的尽头只按截断恢复停用三种方式变、区间相交判定不再用哨兵日期），先建新的、再删 0030 的旧触发器；不加 CHECK、不改任何行。不改服务层、模型、计费、接口与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-145
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）中定价规则的部分逐条一致，以 §2、§4、§5、§7、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261101_0032_pricing_rule_backstop.py，revision 为 0032_pricing_rule_backstop，down_revision 为 0031_provider_price_backstop；文件头按 0030 的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明不改任何已有行。新触发器正文、冻结的 0030 旧触发器字面量、预检的查询与报错、各个名字写成模块级常量，整条 CREATE TRIGGER 是一条语句；新正文恰好是 0030 的 trg_pricing_rules_before_update 字面量经设计 §2 的 P1–P5 与触发器改名得到，其余逐字不变；不导入其他迁移文件'
+      - 'upgrade 照设计 §2「升级」：先判断是否已完成（新触发器存在且与新正文逐字相同、旧触发器不存在，就直接返回、不发任何语句），否则依次 ① binlog 预检（查询、判定与报错文案照 0030，名字改为本迁移的）② 新触发器已存在时做形状核对（ACTION_STATEMENT 去掉首尾空白后等于冻结新正文 FOR EACH ROW 之后的部分去掉首尾空白，且 BEFORE、UPDATE、本表；不符就抛错、不发任何 DDL）③ 新触发器不存在时建它（不带 FOLLOWS / PRECEDES）④ 旧触发器存在时删它；--sql 离线模式不读库，依次输出 CREATE TRIGGER 新名、DROP TRIGGER IF EXISTS 旧名。downgrade 照设计 §2「降级」：先判断是否已完成；否则预检、旧触发器或新触发器存在但不是逐字相同都抛错且不发 DDL、旧触发器不存在时按冻结字面量建它、新触发器存在时删它；离线依次输出 CREATE TRIGGER 旧名、DROP TRIGGER IF EXISTS 新名。形状比较写成一个函数，三处共用'
+      - '测试：新增 tests/backend/test_pricing_rule_backstop_migration.py，覆盖设计 §7 表里「迁移结构」到「降级不需要数据前提」各行（迁移结构、字面量、离线、不改已有行、升级中断后重跑两个位置、中间状态不弱于迁移之前、降级中断后重跑两个位置、降级恢复、形状核对六种、预检四种组合、降级不需要数据前提）；迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑；写法照 tests/backend/test_pricing_rule_project_scope_migration.py）；被观察的部分以 0032 为准，照设计 §7「迁移用例的观察位置」：先回到 head 再降到 0032_pricing_rule_backstop（在被观察部分之外），升级只观察 0031 → 0032、降级只观察 0032 → 0031，finally 回到 head，断言 pricing_rules 为空、它的 BEFORE UPDATE 恰好只有新触发器'
+      - 'tests/backend/test_pricing_rules_service.py：照设计 §7 新增直接写库用例：已停用是终态（六种改法）、发布不带尽头（三种区间与一个对照）、相交判定的边界（①③④）、尽头只按三种方式变（四种拒绝与三种对照）；既有用例只改设计 §7「既有用例」146 一节点名的五个（test_only_truncation_and_retirement_pass_on_a_published_rule、test_a_retired_rule_always_has_an_end、test_the_database_refuses_overlapping_periods、test_empty_periods_and_other_scopes_do_not_overlap、test_only_the_first_global_rule_starts_with_no_time），改法与预期照该节，其中 test_the_database_refuses_overlapping_periods 的 end-to-end-before 由通过改为拒绝；test_the_service_paths_pass_the_triggers 与其余既有用例不改断言、照常通过'
+      - 'tests/backend/test_migrations.py：照设计 §7「既有用例」最后一条，test_0006_keys_indexes_checks_and_triggers 的全库触发器集合里 pricing_rules 的 BEFORE UPDATE 换成 trg_pricing_rules_before_update_v2；test_0014_keys_foreign_keys_checks_and_triggers 的触发器清单与 BEFORE UPDATE 正文按名字 trg_pricing_rules_before_update_v2 查、与 0032 的新正文比；只在 0014 / 0030 那一版上验证它们自身的用例照旧；其余既有用例不改、照常通过'
+      - 'docs/database-schema.md 的 pricing_rules 一节：触发器表里 BEFORE UPDATE 一行换成 trg_pricing_rules_before_update_v2（迁移 0032），写明 P1、P2、P3、P5 与去哨兵的相交判定，其余行不改'
+      - '不改 app/、alembic 里既有的迁移文件、前端；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #539'
+    allowed_change_paths:
+      - alembic/versions/20261101_0032_pricing_rule_backstop.py
+      - tests/backend/test_pricing_rule_backstop_migration.py
+      - tests/backend/test_pricing_rules_service.py
+      - tests/backend/test_migrations.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-147
+    title: 汇率版本的数据库兜底：已发布尽头只按三种方式变、区间相交判定不用哨兵日期
+    purpose: >-
+      按 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）§2 与 §8 的汇率一行：新迁移 0033 以新名字 trg_fx_rate_versions_before_update_v2 建 BEFORE UPDATE 触发器（由 0015 的 trg_fx_rate_versions_before_update 正文按设计 §2 的 P4、P5 逐字替换得到：已发布版本的尽头只按截断恢复停用三种方式变、区间相交判定不再用哨兵日期），先建新的、再删 0015 的旧触发器；不加 CHECK、不改任何行。不改服务层、模型、计费、接口与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-146
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）中汇率的部分逐条一致，以 §2、§4、§5、§7、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261101_0033_fx_rate_backstop.py，revision 为 0033_fx_rate_backstop，down_revision 为 0032_pricing_rule_backstop；文件头按 0030 的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明不改任何已有行。新触发器正文、冻结的 0015 旧触发器字面量、预检的查询与报错、各个名字写成模块级常量，整条 CREATE TRIGGER 是一条语句；新正文恰好是 0015 的 trg_fx_rate_versions_before_update 字面量经设计 §2 的 P4、P5 与触发器改名得到，其余逐字不变；不导入其他迁移文件'
+      - 'upgrade 与 downgrade 照设计 §2「升级」「降级」，结构与 0032 相同：是否已完成的判断、binlog 预检（查询、判定与报错文案照 0015，名字改为本迁移的）、新触发器的形状核对（ACTION_STATEMENT 去掉首尾空白后逐字相等，且 BEFORE、UPDATE、本表；不符就抛错、不发任何 DDL）、先建新（不带 FOLLOWS / PRECEDES）再删旧；降级先建旧（冻结字面量）再删新，旧或新触发器存在但不是逐字相同都抛错；--sql 离线升级依次输出 CREATE TRIGGER 新名、DROP TRIGGER IF EXISTS 旧名，离线降级依次输出 CREATE TRIGGER 旧名、DROP TRIGGER IF EXISTS 新名。形状比较写成一个函数，三处共用'
+      - '测试：新增 tests/backend/test_fx_rate_backstop_migration.py，覆盖设计 §7 表里「迁移结构」到「降级不需要数据前提」各行；迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑）；被观察的部分以 0033 为准，照设计 §7「迁移用例的观察位置」：先回到 head 再降到 0033_fx_rate_backstop（在被观察部分之外），升级只观察 0032 → 0033、降级只观察 0033 → 0032，finally 回到 head，断言 fx_rate_versions 为空、它的 BEFORE UPDATE 恰好只有新触发器'
+      - 'tests/backend/test_fx_rates_db.py：照设计 §7 新增直接写库用例：相交判定的边界（①含 [NULL, NULL) 一次、③、④）、尽头只按三种方式变（四种拒绝与三种对照）；既有用例只改设计 §7「既有用例」147 一节点名的两个（test_two_truncated_versions_that_intersect_are_refused、test_the_same_edits_pass_on_a_draft_and_a_published_version），改法与预期照该节；test_the_service_write_orders_pass、test_upgrade_and_downgrade 与其余既有用例不改断言、照常通过'
+      - 'tests/backend/test_migrations.py：照设计 §7「既有用例」最后一条，test_0006_keys_indexes_checks_and_triggers 的全库触发器集合里 fx_rate_versions 的 BEFORE UPDATE 换成 trg_fx_rate_versions_before_update_v2；test_0015_keys_foreign_keys_checks_and_triggers 在 head 上的触发器清单与 BEFORE UPDATE 断言改为 0033 之后的形状（按新名字查、与 0033 的新正文比）；只在 0015 那一版上验证它自身的用例照旧；其余既有用例不改、照常通过'
+      - 'docs/database-schema.md 的 fx_rate_versions 一节：触发器表里 BEFORE UPDATE 一行换成 trg_fx_rate_versions_before_update_v2（迁移 0033），写明 P5 与去哨兵的相交判定，其余行不改'
+      - '不改 app/、alembic 里既有的迁移文件、前端；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #539'
+    allowed_change_paths:
+      - alembic/versions/20261101_0033_fx_rate_backstop.py
+      - tests/backend/test_fx_rate_backstop_migration.py
+      - tests/backend/test_fx_rates_db.py
+      - tests/backend/test_migrations.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-148
+    title: 税率版本的数据库兜底：已发布尽头只按三种方式变、区间相交判定不用哨兵日期
+    purpose: >-
+      按 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）§2 与 §8 的税率一行：新迁移 0034 以新名字 trg_tax_policy_versions_before_update_v2 建 BEFORE UPDATE 触发器（由 0022 的 trg_tax_policy_versions_before_update 正文按设计 §2 的 P4、P5 逐字替换得到：已发布版本的尽头只按截断恢复停用三种方式变、区间相交判定不再用哨兵日期），先建新的、再删 0022 的旧触发器；不加 CHECK、不改任何行。不改服务层、模型、接口与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-147
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）中税率的部分逐条一致，以 §2、§4、§5、§7、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261101_0034_tax_policy_backstop.py，revision 为 0034_tax_policy_backstop，down_revision 为 0033_fx_rate_backstop；文件头按 0030 的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明不改任何已有行。新触发器正文、冻结的 0022 旧触发器字面量、预检的查询与报错、各个名字写成模块级常量，整条 CREATE TRIGGER 是一条语句；新正文恰好是 0022 的 trg_tax_policy_versions_before_update 字面量经设计 §2 的 P4、P5 与触发器改名得到，其余逐字不变；不导入其他迁移文件'
+      - 'upgrade 与 downgrade 照设计 §2「升级」「降级」，结构与 0032 相同：是否已完成的判断、binlog 预检（查询、判定与报错文案照 0022，名字改为本迁移的）、新触发器的形状核对（ACTION_STATEMENT 去掉首尾空白后逐字相等，且 BEFORE、UPDATE、本表；不符就抛错、不发任何 DDL）、先建新（不带 FOLLOWS / PRECEDES）再删旧；降级先建旧（冻结字面量）再删新，旧或新触发器存在但不是逐字相同都抛错；--sql 离线升级依次输出 CREATE TRIGGER 新名、DROP TRIGGER IF EXISTS 旧名，离线降级依次输出 CREATE TRIGGER 旧名、DROP TRIGGER IF EXISTS 新名。形状比较写成一个函数，三处共用'
+      - '测试：新增 tests/backend/test_tax_policy_backstop_migration.py，覆盖设计 §7 表里「迁移结构」到「降级不需要数据前提」各行；迁移场景只在 BILLING_TEST_DATABASE_URL 的真 MySQL 上跑（未设置时 skip、CI 必跑）；被观察的部分以 0034 为准，照设计 §7「迁移用例的观察位置」：先回到 head 再降到 0034_tax_policy_backstop（在被观察部分之外），升级只观察 0033 → 0034、降级只观察 0034 → 0033，finally 回到 head，断言 tax_policy_versions 为空、它的 BEFORE UPDATE 恰好只有新触发器'
+      - 'tests/backend/test_tax_policy_db.py：照设计 §7 新增直接写库用例：相交判定的边界（①③④）、尽头只按三种方式变（四种拒绝与三种对照，改长的那一种用「没有后继」）；既有用例只改设计 §7「既有用例」148 一节点名的 test_a_published_version_truncates_and_retires，改法与预期照该节；其余既有用例不改断言、照常通过'
+      - 'tests/backend/test_migrations.py：照设计 §7「既有用例」最后一条，test_0006_keys_indexes_checks_and_triggers 的全库触发器集合里 tax_policy_versions 的 BEFORE UPDATE 换成 trg_tax_policy_versions_before_update_v2；test_0022_keys_foreign_keys_checks_triggers_and_the_lock_row 在 head 上的触发器清单与 BEFORE UPDATE 断言改为 0034 之后的形状（按新名字查、与 0034 的新正文比）；只在 0022 那一版上验证它自身的用例照旧；其余既有用例不改、照常通过'
+      - 'docs/database-schema.md 的 tax_policy_versions 一节：触发器表里 BEFORE UPDATE 一行换成 trg_tax_policy_versions_before_update_v2（迁移 0034），写明 P5 与去哨兵的相交判定，其余行不改'
+      - '不改 app/、alembic 里既有的迁移文件、前端；不装依赖；不对任何数据库执行迁移；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #539'
+    allowed_change_paths:
+      - alembic/versions/20261101_0034_tax_policy_backstop.py
+      - tests/backend/test_tax_policy_backstop_migration.py
+      - tests/backend/test_tax_policy_db.py
+      - tests/backend/test_migrations.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
