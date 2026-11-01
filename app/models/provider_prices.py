@@ -9,12 +9,15 @@ spec §14、§15.1、§17、§74.1。两张表：
 - `provider_price_components`：版本的价格分量。每个分量引用 025 的一个计价分量
   （`usage_meter_components`），`component_code`、计量类型与单位都由它唯一确定。
 
-⚠️ **发布后不可变**由 MySQL 触发器保证（迁移 0013）：只能以草稿插入；已发布的行只许改
-`effective_to`、`PUBLISHED → RETIRED` 与 `updated_at`；分量只在草稿阶段可增删改；版本一律
-不许删除；「草稿 → 已发布」跃迁上校验分量完整；锁供应商行后检查区间不重叠。SQLite 上没有
-这些触发器，服务层按同样的规则写。
+⚠️ **发布后不可变**由 MySQL 触发器保证（迁移 0013 与 0031；BEFORE UPDATE 是 0031 的
+`trg_provider_price_versions_before_update_v2`）：只能以草稿插入；发布时尽头为空（发布的区间
+都是 `[F, NULL)`）；`RETIRED` 与 `DISCARDED` 是终态，任何改动都拒绝；`PUBLISHED` 的行只许改
+`effective_to`（截断、恢复为未截断、退役时写尽头）、`PUBLISHED → RETIRED` 与 `updated_at`；
+分量只在草稿阶段可增删改；版本一律不许删除；「草稿 → 已发布」跃迁上校验分量完整；锁供应商行
+后检查区间不重叠。SQLite 上没有这些触发器，服务层按同样的规则写。退役必有尽头是 CHECK
+（`ck_provider_price_versions_retired_end`，迁移 0031），两边都有。
 
-⚠️ 条件文本与生成列表达式同迁移 0013 逐字一致（空白除外），test_migrations.py 比对两边。
+⚠️ 条件文本与生成列表达式同迁移 0013、0031 逐字一致（空白除外），test_migrations.py 比对两边。
 """
 
 from __future__ import annotations
@@ -93,6 +96,8 @@ PERIOD_CHECK: Final = (
     "effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to"
     " OR (status = 'RETIRED' AND effective_from = effective_to)"
 )
+# ⚠️ 与迁移 0031 逐字一致（空白除外）：退役必有尽头（设计闸门 #535 v5 §2）。
+RETIRED_END_CHECK: Final = "status <> 'RETIRED' OR effective_to IS NOT NULL"
 # 只有未截断的已发布版本有值，其余是 NULL。唯一索引允许多个 NULL，所以
 # 「至多一个未截断的已发布版本」由数据库保证（写法同 `ai_model_aliases.open_slot`）。
 OPEN_SLOT_EXPRESSION: Final = "CASE WHEN status = 'PUBLISHED' AND effective_to IS NULL THEN 1 END"
@@ -179,6 +184,7 @@ class ProviderPriceVersion(Base):
         CheckConstraint(UNPUBLISHED_CHECK, name="ck_provider_price_versions_unpublished"),
         CheckConstraint(APPROVED_CHECK, name="ck_provider_price_versions_approved"),
         CheckConstraint(PERIOD_CHECK, name="ck_provider_price_versions_period"),
+        CheckConstraint(RETIRED_END_CHECK, name="ck_provider_price_versions_retired_end"),
     )
 
 
@@ -232,6 +238,7 @@ __all__ = [
     "PERIOD_CHECK",
     "PERIOD_STATUSES",
     "RATE_AMOUNT_CHECK",
+    "RETIRED_END_CHECK",
     "SOURCE_REFERENCE_LENGTH",
     "SOURCE_TYPE_CHECK",
     "UNIT_QUANTITY_CHECK",

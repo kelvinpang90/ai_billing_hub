@@ -629,6 +629,9 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 - `ck_provider_price_versions_period`：`effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to
   OR (status = 'RETIRED' AND effective_from = effective_to)`。最后一项是「撤销尚未生效的预约」留下的空区间
   `[F, F)`，它永不匹配任何时刻。
+- `ck_provider_price_versions_retired_end`（迁移 `0031_provider_price_backstop`，AIH-TASK-145，设计闸门 #535 v5）：
+  `status <> 'RETIRED' OR effective_to IS NOT NULL`——退役必有尽头（与汇率、定价规则、税率三张表的同名 CHECK 同一写法）。
+  模型上同样声明，SQLite（`create_all`）上也有这一条。
 
 ### `provider_price_components`
 
@@ -647,7 +650,7 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
   就要四个价）；整体没出现的计量类型不要求（那一类用量计价时 `PRICING_ERROR`，不按 0 算）。发布时服务层校验并
   列出缺的分量，发布跃迁上的触发器兜底。
 
-### 触发器（迁移 0013 建，只在 MySQL 上）
+### 触发器（迁移 0013 建，BEFORE UPDATE 由迁移 0031 替换；只在 MySQL 上）
 
 写法与权限预检照迁移 0006（binlog 开着而 `log_bin_trust_function_creators` 关着时，迁移在任何 DDL 之前拒绝运行）。
 拒绝一律 `SIGNAL SQLSTATE '45000'`（MySQL 错误号 1644）。
@@ -655,11 +658,19 @@ DELETE 也会被拒。迁移前已有的审计行不受影响（触发器不读�
 | 触发器 | 做什么 |
 | --- | --- |
 | `trg_provider_price_versions_before_insert` | `status` 不是 `DRAFT` 就拒绝：版本只能以草稿进入，发布跃迁上的检查因此绕不过去 |
-| `trg_provider_price_versions_before_update` | ① `DISCARDED` 的行拒绝任何改动；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（不许直接 `DRAFT → RETIRED` 绕过 ③ 的完整性检查）；② `PUBLISHED` / `RETIRED` 的行除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；③ `DRAFT → PUBLISHED` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM ai_providers WHERE id = NEW.provider_id FOR UPDATE`（与服务层发布同一把锁），再查同一（供应商, 模型）里是否有另一个**非空区间**的已发布版本与本行相交，有就拒绝。空区间不参与判定 |
+| `trg_provider_price_versions_before_update_v2`（0031；替换 0013 的 `trg_provider_price_versions_before_update`） | ① `RETIRED` / `DISCARDED` 是终态，拒绝任何改动（**0031**：原来只拒绝 `DISCARDED`）；草稿只能改成 `DRAFT` / `PUBLISHED` / `DISCARDED`（不许直接 `DRAFT → RETIRED` 绕过 ③ 的完整性检查）；`DRAFT → PUBLISHED` 时 `effective_to` 必须为空（**0031**：发布不带尽头）；② `PUBLISHED` 的行（**0031**：不可变检查只对 `PUBLISHED`）除 `effective_to`、`status`（只许 `PUBLISHED → RETIRED`）与 `updated_at` 外任何列变化都拒绝；`effective_to` 只按三种方式变（**0031**）：空 → 有值（截断，或退役时写尽头）、有值 → 空且状态不变（恢复为未截断），`PUBLISHED → RETIRED` 只许退役前未截断；③ `DRAFT → PUBLISHED` 时：至少一个分量，且出现的计量类型的全部分量都在；④ 新状态是 `PUBLISHED` / `RETIRED` 且区间或状态有变化时：先 `SELECT … FROM ai_providers WHERE id = NEW.provider_id FOR UPDATE`（与服务层发布同一把锁），再查同一（供应商, 模型）里是否有另一个**非空区间**的已发布版本与本行相交，有就拒绝。空区间不参与判定。相交按空值逐项判断（**0031**：不再用哨兵日期 `'1000-01-01'` / `'9999-12-31'`）：`[from, to)` 的空端是无穷 |
 | `trg_provider_price_versions_before_delete` | 一律拒绝 |
 | `trg_provider_price_components_before_insert` / `_before_update` / `_before_delete` | 所属版本（更新时新旧两个）不是 `DRAFT` 就拒绝：分量只在草稿阶段可增删改 |
 
 `DRAFT` 的行在 ② 之外，可以任意改（服务层只改 `source_currency`、`source_reference`、`updated_at` 与发布、丢弃时的列）。
+
+**起点为空的发布只在时间线为空时通过**（0031）：发布时尽头必须为空，所以起点为空的发布一定是 `[NULL, NULL)`，
+它与任何非空区间都相交，被 ④ 拒绝。于是只有该（供应商, 模型）没有任何区间非空的已发布 / 已退役版本（没有版本，
+或只有撤销预约留下的空区间）时才通过，与服务层的条件一致；直接写库不能再在已有版本之前补一个「一直以来」的价格。
+发布的区间都是 `[F, NULL)`，所以新发布的只能排在所有非空区间之后，不能插进中间或退役留下的空档。
+
+0031 先建 `…_v2`、再删 0013 的触发器（MySQL 允许同一时机多个触发器，两者并存时任一拒绝即拒绝），每个中间状态都不弱于
+0013；降级按冻结的 0013 正文重建旧触发器、再删 `…_v2` 与 CHECK，不改任何行。
 **残余风险**：`TRUNCATE` / `DROP` 是 DDL，不经触发器（与 0006 相同）。
 
 ### 锁与写入顺序
