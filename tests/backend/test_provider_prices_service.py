@@ -12,7 +12,10 @@
 - **触发器**（真 MySQL）：绕过服务直接改已发布的版本与分量、删除、把 `RETIRED` 改回
   `PUBLISHED`、把草稿直接改成 `RETIRED`；只许截断与退役；
 - **完整性、区间不重叠与约束的数据库兜底**（真 MySQL）：直接改状态为已发布、直接插入已发布的
-  版本、直接写相交的区间、草稿带区间、非正的单价。
+  版本、直接写相交的区间、草稿带区间、非正的单价；
+- **0031 的兜底**（设计闸门 #535 v5 §7，真 MySQL，退役必有尽头另在 SQLite 上跑一次）：起点为空
+  的回溯发布、相交判定的边界、起点为空不误杀、带尽头的发布、退役必有尽头、已发布版本的尽头
+  只按三种方式变、已退役是终态。
 
 取价本身、性质用例与并发在 test_provider_prices_resolve.py；接口契约在
 test_provider_prices_api.py。价格一律是明显的虚构值。
@@ -33,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine, delete, func, select, text, update
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
@@ -94,8 +97,12 @@ _ER_DUP_ENTRY = 1062
 _ER_SIGNAL_EXCEPTION = 1644
 _ER_CHECK_CONSTRAINT_VIOLATED = 3819
 _IMMUTABLE = "a published provider price version is immutable"
-_RETIRE_ONLY = "a published provider price version can only be retired"
-_DISCARDED_FINAL = "a discarded provider price version is final"
+# 0031（设计闸门 #535 v5 §2）：`RETIRED` 与 `DISCARDED` 都是终态；发布不带尽头；已发布版本的
+# 尽头只按截断、恢复、退役三种方式变。
+_FINAL = "a retired or discarded provider price version is final"
+_WITHOUT_END = "a provider price version is published without an end"
+_ENDS_ONLY = "a published provider price version ends only by truncation, restore or retirement"
+_RETIRED_END_CHECK = "ck_provider_price_versions_retired_end"
 _DRAFT_TRANSITION = "a draft provider price version is published or discarded"
 _DRAFT_ONLY = "provider price components change only on a draft"
 _NEVER_DELETED = "provider price versions are never deleted"
@@ -1207,7 +1214,11 @@ def test_published_components_are_frozen_and_versions_never_deleted(mysql_factor
 
 
 def test_only_truncation_and_retirement_pass_on_a_published_version(mysql_factory) -> None:
-    """只有截断与 `PUBLISHED → RETIRED` 通过；改回 `PUBLISHED`、改丢弃的草稿都被拒绝。"""
+    """只有截断与 `PUBLISHED → RETIRED` 通过；改回 `PUBLISHED`、改丢弃的草稿都被拒绝。
+
+    0031 起两处拒绝都是「终态」那一条（设计 #535 v5 §7）：`RETIRED` 与 `DISCARDED` 在不可变
+    检查之前就整体拒绝。
+    """
     clock = Clock(utc_now())
     prices = Prices(mysql_factory, clock)
     published = prices.publish_new()
@@ -1222,10 +1233,10 @@ def test_only_truncation_and_retirement_pass_on_a_published_version(mysql_factor
     clock.advance(seconds=5)
     assert prices.retire(published.id).status == "RETIRED"
     back = _update_version("status = 'PUBLISHED'")
-    assert _refused(mysql_factory, back, id=published_id) == (_ER_SIGNAL_EXCEPTION, _RETIRE_ONLY)
+    assert _refused(mysql_factory, back, id=published_id) == (_ER_SIGNAL_EXCEPTION, _FINAL)
     edit = _update_version("source_reference = 'Edited'")
     refused = _refused(mysql_factory, edit, id=discarded_id)
-    assert refused == (_ER_SIGNAL_EXCEPTION, _DISCARDED_FINAL)
+    assert refused == (_ER_SIGNAL_EXCEPTION, _FINAL)
 
 
 # --- 完整性、区间与约束的数据库兜底（真 MySQL） ------------------------------------------------
@@ -1294,6 +1305,37 @@ def _publish_directly(
     session.execute(_PUBLISH_DIRECTLY, parameters)
 
 
+def _publish_then_end(
+    session: Session,
+    prices: Prices,
+    version_id: int,
+    period: tuple[dt.datetime | None, dt.datetime | None],
+    status: str = "PUBLISHED",
+) -> None:
+    """Publish as `[F, NULL)`, then write the end with a second UPDATE — the service's own path
+    (publish, then truncate; or retire). 0031 refuses a publish that carries an end."""
+    start, end = period
+    _publish_directly(session, prices, version_id, (start, None))
+    if status == "RETIRED":
+        retire = _update_version("status = 'RETIRED', effective_to = :end")
+        session.execute(retire, {"end": end, "id": version_id})
+    elif end is not None:
+        session.execute(_update_version("effective_to = :end"), {"end": end, "id": version_id})
+
+
+def _published_with_end(
+    session: Session,
+    prices: Prices,
+    period: tuple[dt.datetime | None, dt.datetime | None],
+    status: str = "PUBLISHED",
+    model: str = "model-m",
+) -> int:
+    """A complete draft written with SQL, through `_publish_then_end`."""
+    version_id = _direct_draft(session, prices, model=model)
+    _publish_then_end(session, prices, version_id, period, status)
+    return version_id
+
+
 def test_the_database_checks_completeness_on_the_publish_transition(mysql_factory) -> None:
     """设计 §7「完整性由数据库兜底」：零个分量、LLM_TOKEN 缺一个，直接改状态都被拒绝；
     直接插入一条已发布的版本被拒绝；完整的版本直接改状态则通过。
@@ -1345,7 +1387,7 @@ def test_the_database_refuses_a_draft_going_straight_to_retired(mysql_factory) -
         (None, T0 + SECOND, False),
         (T0 - DAY, None, False),
         (T0 + 10 * SECOND, T0 + 20 * SECOND, True),
-        (None, T0, True),
+        (None, T0, False),
         (T0 + 10 * SECOND, None, True),
     ],
     ids=[
@@ -1363,19 +1405,23 @@ def test_the_database_refuses_overlapping_periods(
     mysql_factory, start: dt.datetime | None, end: dt.datetime | None, accepted: bool
 ) -> None:
     """设计 §7「区间不重叠」：绕过服务直接写一个与**已截断**的版本相交的区间，被拒绝；
-    首尾相接的通过。
+    排在它之后、首尾相接的通过。
+
+    0031（设计 #535 v5 §7「既有直接写库用例的前置」）：发布不能带尽头，所以已有版本与候选都先
+    发布为 `[F, NULL)`、再写尽头。被拒的在发布那一步就被重叠触发器拒绝，消息不变。
+    `end-to-end-before`（`[NULL, T0)`，排在已有版本之前）由通过改为拒绝：它只能先发布为
+    `[NULL, NULL)`，与已有的 `[T0, T0+10s)` 相交——这正是 0031 要堵的回溯发布。
     """
     prices = Prices(mysql_factory, utc_now)
     with mysql_factory() as session:
-        existing = _direct_draft(session, prices)
-        _publish_directly(session, prices, existing, (T0, T0 + 10 * SECOND))
+        _published_with_end(session, prices, (T0, T0 + 10 * SECOND))
         candidate = _direct_draft(session, prices)
         if accepted:
-            _publish_directly(session, prices, candidate, (start, end))
+            _publish_then_end(session, prices, candidate, (start, end))
         else:
             with pytest.raises(DBAPIError) as raised:
                 with session.begin_nested():
-                    _publish_directly(session, prices, candidate, (start, end))
+                    _publish_then_end(session, prices, candidate, (start, end))
             assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
         session.rollback()
 
@@ -1392,8 +1438,8 @@ def test_empty_periods_and_other_models_do_not_overlap(mysql_factory) -> None:
         _publish_directly(session, prices, empty, (at, None))
         withdraw = _update_version("status = 'RETIRED', effective_to = effective_from")
         session.execute(withdraw, {"id": empty})
-        existing = _direct_draft(session, prices)
-        _publish_directly(session, prices, existing, (T0, T0 + 10 * SECOND))
+        # 0031：先发布为 [T0, NULL)，再截断（发布不能带尽头）。
+        _published_with_end(session, prices, (T0, T0 + 10 * SECOND))
         theirs = _direct_draft(session, prices, model="model-n")
         _publish_directly(session, prices, theirs, (T0, None))
 
@@ -1440,6 +1486,296 @@ def test_the_service_paths_pass_the_triggers(mysql_factory) -> None:
     assert withdrawn.effective_from == withdrawn.effective_to
     assert prices.version(restored.id).effective_to is None
     assert prices.resolve(truncating.effective_from, "model-p") == restored.id
+
+
+# --- 0031 的数据库兜底（设计闸门 #535 v5 §7，真 MySQL） -------------------------------------
+
+
+def _publish_params(prices: Prices, version_id: int, start, end) -> dict[str, object]:
+    """`_PUBLISH_DIRECTLY` 的参数：草稿直接改为 `PUBLISHED`、区间 `[start, end)`。"""
+    return {
+        "status": "PUBLISHED",
+        "start": start,
+        "end": end,
+        "user": prices.admin.id,
+        "now": T0,
+        "id": version_id,
+    }
+
+
+def _withdrawn(session: Session, prices: Prices, at: dt.datetime, model: str = "model-m") -> int:
+    """撤销预约留下的空区间 `[at, at)`：发布为 `[at, NULL)`，
+    再改为 `RETIRED`、尽头等于起点。"""
+    version_id = _direct_draft(session, prices, model=model)
+    _publish_directly(session, prices, version_id, (at, None))
+    withdraw = _update_version("status = 'RETIRED', effective_to = effective_from")
+    session.execute(withdraw, {"id": version_id})
+    return version_id
+
+
+# 已有版本的三种（区间都非空）：未截断的已发布、被截断的已发布、带尽头的已退役。
+_EXISTING = {
+    "open-published": ((T0, None), "PUBLISHED"),
+    "truncated-published": ((T0, T0 + 10 * SECOND), "PUBLISHED"),
+    "retired-with-end": ((T0, T0 + 10 * SECOND), "RETIRED"),
+}
+
+
+@pytest.mark.parametrize("existing", list(_EXISTING))
+def test_the_database_refuses_publishing_from_the_beginning_before_a_version(
+    mysql_factory, existing: str
+) -> None:
+    """设计 §7「起点为空（回溯）」：时间线上已有区间非空的版本时，把完整的草稿直接改为起点与
+    尽头都为空的 `PUBLISHED` → 「periods overlap」；`[NULL, E)`（E 是最早版本的起点）→
+    「published without an end」。库不变。
+    """
+    prices = Prices(mysql_factory, utc_now)
+    period, status = _EXISTING[existing]
+    with mysql_factory() as session:
+        _published_with_end(session, prices, period, status)
+        candidate = _direct_draft(session, prices)
+        session.commit()
+    before = snapshot(mysql_factory)
+
+    refused = _refused(
+        mysql_factory, _PUBLISH_DIRECTLY, **_publish_params(prices, candidate, None, None)
+    )
+    assert refused == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+    refused = _refused(
+        mysql_factory, _PUBLISH_DIRECTLY, **_publish_params(prices, candidate, None, T0)
+    )
+    assert refused == (_ER_SIGNAL_EXCEPTION, _WITHOUT_END)
+    assert snapshot(mysql_factory) == before
+
+
+# `DATETIME` 的两端：'1000-01-01 00:00:00' 到 '9999-12-31 23:59:59'。
+_LAST_DAY = dt.datetime(9999, 12, 31, 0, 0, 0)
+_LAST_SECOND = dt.datetime(9999, 12, 31, 23, 59, 59)
+_FIRST_DAY = dt.datetime(1000, 1, 1, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("existing", "candidate", "accepted"),
+    [
+        ((_LAST_DAY, _LAST_DAY + SECOND), (None, None), False),
+        ((None, _FIRST_DAY), (None, None), False),
+        ((_LAST_SECOND - SECOND, None), (_LAST_SECOND, None), False),
+        ((_LAST_DAY, _LAST_DAY + SECOND), (_LAST_DAY + SECOND, None), True),
+    ],
+    ids=["upper-bound", "lower-bound", "last-two-seconds", "end-to-end-control"],
+)
+def test_the_overlap_check_holds_at_the_ends_of_datetime(
+    mysql_factory, existing: tuple, candidate: tuple, accepted: bool
+) -> None:
+    """设计 §7「相交判定的边界」（v5）：相交按空值逐项判断，对 `DATETIME` 的任何取值都成立。
+
+    ① 已有 `['9999-12-31 00:00:00', '9999-12-31 00:00:01')`，再发布 `[NULL, NULL)`：0013 的哨兵
+    判定（`'9999-12-31 00:00:00' < '9999-12-31'` 为假）会放行它，0031 拒绝；
+    ② 已有 `[NULL, '1000-01-01 00:00:00')`（空时间线上先发布为 `[NULL, NULL)` 再截断），
+    再发布 `[NULL, NULL)`：0013 也不漏判（勘误：`COALESCE` 的结果按字符串比较，`'1000-01-01' <
+    '1000-01-01 00:00:00'` 成立），留作下界的回归用例；
+    ③ 已有 `['9999-12-31 23:59:58', NULL)`，不截断就发布 `['9999-12-31 23:59:59', NULL)`；
+    ④ 对照：① 的已有版本之后首尾相接地发布 `['9999-12-31 00:00:01', NULL)`，通过。
+    """
+    prices = Prices(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        _published_with_end(session, prices, existing)
+        draft = _direct_draft(session, prices)
+        session.commit()
+    params = _publish_params(prices, draft, *candidate)
+
+    if accepted:
+        _accepted(mysql_factory, _PUBLISH_DIRECTLY, **params)
+    else:
+        assert _refused(mysql_factory, _PUBLISH_DIRECTLY, **params) == (
+            _ER_SIGNAL_EXCEPTION,
+            _OVERLAP,
+        )
+
+
+@pytest.mark.parametrize("timeline", ["no-version", "only-an-empty-period", "other-model"])
+def test_publishing_from_the_beginning_passes_on_an_empty_timeline(
+    mysql_factory, timeline: str
+) -> None:
+    """设计 §7「起点为空不误杀」：该（供应商, 模型）没有版本、只有撤销预约留下的
+    空区间、只有另一个模型有版本，起点为空的发布都通过（与服务层 `_placement` 的
+    条件一致）。
+    """
+    prices = Prices(mysql_factory, utc_now, models=("model-m", "model-n"))
+    with mysql_factory() as session:
+        if timeline == "only-an-empty-period":
+            _withdrawn(session, prices, T0)
+        elif timeline == "other-model":
+            _published_with_end(session, prices, (T0, None), model="model-n")
+        draft = _direct_draft(session, prices)
+        session.commit()
+
+    _accepted(mysql_factory, _PUBLISH_DIRECTLY, **_publish_params(prices, draft, None, None))
+
+
+@pytest.mark.parametrize(
+    "period",
+    [
+        (T0 + 12 * SECOND, T0 + 15 * SECOND),
+        (T0 - DAY, T0 - DAY + SECOND),
+        (T0 + DAY, T0 + DAY + SECOND),
+    ],
+    ids=["in-the-retirement-gap", "before-the-first", "after-the-last"],
+)
+def test_the_database_refuses_publishing_with_an_end(mysql_factory, period: tuple) -> None:
+    """设计 §7「带尽头的发布（插空档）」：时间线是 `[T0, T0+10s)` 已退役、
+    `[T0+20s, NULL)` 已发布；把草稿直接改为带尽头的 `PUBLISHED`，落在退役空档里、
+    整段在最早版本之前、在末尾之后，都被拒绝。
+    """
+    prices = Prices(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        _published_with_end(session, prices, (T0, T0 + 10 * SECOND), "RETIRED")
+        _published_with_end(session, prices, (T0 + 20 * SECOND, None))
+        draft = _direct_draft(session, prices)
+        session.commit()
+    before = snapshot(mysql_factory)
+
+    refused = _refused(mysql_factory, _PUBLISH_DIRECTLY, **_publish_params(prices, draft, *period))
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _WITHOUT_END)
+    assert snapshot(mysql_factory) == before
+
+
+def test_the_database_refuses_retiring_without_an_end(mysql_factory) -> None:
+    """设计 §7「退役必有尽头」（MySQL）：`PUBLISHED` 改为 `RETIRED` 而不写尽头——
+    未截断的、被截断后又把尽头清空的——都是 ERROR 3819、约束名
+    `ck_provider_price_versions_retired_end`；同样改为 `RETIRED` 并写尽头的通过。
+    """
+    prices = Prices(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        version_id = _published_with_end(session, prices, (T0, None))
+        session.commit()
+    retire = _update_version("status = 'RETIRED'")
+
+    errno, message = _refused(mysql_factory, retire, id=version_id)
+    assert errno == _ER_CHECK_CONSTRAINT_VIOLATED
+    assert _RETIRED_END_CHECK in message
+
+    with mysql_factory() as session:
+        session.execute(_update_version("effective_to = :end"), {"end": T0 + DAY, "id": version_id})
+        session.execute(_update_version("effective_to = NULL"), {"id": version_id})
+        session.commit()
+    errno, message = _refused(mysql_factory, retire, id=version_id)
+    assert errno == _ER_CHECK_CONSTRAINT_VIOLATED
+    assert _RETIRED_END_CHECK in message
+
+    with_end = _update_version("status = 'RETIRED', effective_to = :end")
+    _accepted(mysql_factory, with_end, id=version_id, end=T0 + DAY)
+
+
+def test_sqlite_refuses_a_retired_version_without_an_end(sqlite_factory) -> None:
+    """设计 §7「退役必有尽头」（SQLite，`create_all`）：模型上的 CHECK 让 ORM 直接把一行改为
+    `RETIRED` 而尽头为空得到 `IntegrityError`、消息带约束名；写尽头的通过。
+    """
+    prices = Prices(sqlite_factory, Clock(T0))
+    published = prices.publish_new()
+    by_public_id = ProviderPriceVersion.public_id == published.id
+
+    with sqlite_factory() as session:
+        with pytest.raises(IntegrityError) as raised:
+            session.execute(
+                update(ProviderPriceVersion)
+                .where(by_public_id)
+                .values(status=PriceVersionStatus.RETIRED)
+            )
+        session.rollback()
+    assert _RETIRED_END_CHECK in str(raised.value)
+
+    with sqlite_factory() as session:
+        session.execute(
+            update(ProviderPriceVersion)
+            .where(by_public_id)
+            .values(status=PriceVersionStatus.RETIRED, effective_to=T0 + DAY)
+        )
+        session.commit()
+    assert prices.version(published.id).status == "RETIRED"
+
+
+# 已截断的 `PUBLISHED` 行（后继是撤销预约留下的空区间）上，
+# 四种不在服务层三种改法之内的写。
+_OUTSIDE_THE_THREE_WAYS = {
+    "shorten": ("effective_to = :end", {"end": T0 + 5 * SECOND}),
+    "lengthen": ("effective_to = :end", {"end": T0 + 20 * SECOND}),
+    "retire-as-is": ("status = 'RETIRED'", {}),
+    "retire-shortened": ("status = 'RETIRED', effective_to = :end", {"end": T0 + 5 * SECOND}),
+}
+
+
+@pytest.mark.parametrize("write", list(_OUTSIDE_THE_THREE_WAYS))
+def test_a_published_end_changes_only_three_ways(mysql_factory, write: str) -> None:
+    """设计 §7「已发布版本的尽头只按三种方式变」（v5）：截断于 T0+10s 的版本 V，
+    后继是撤销预约留下的空区间 `[T0+10s, T0+10s)`。把 V 的尽头改短、改长到不与
+    任何非空区间相交的值、直接退役（尽头不变、改短各一次）→ 全部
+    「ends only by truncation, restore or retirement」。
+    """
+    prices = Prices(mysql_factory, utc_now)
+    cut = T0 + 10 * SECOND
+    with mysql_factory() as session:
+        truncated = _published_with_end(session, prices, (T0, cut))
+        _withdrawn(session, prices, cut)
+        session.commit()
+    before = snapshot(mysql_factory)
+    assignment, params = _OUTSIDE_THE_THREE_WAYS[write]
+
+    refused = _refused(mysql_factory, _update_version(assignment), id=truncated, **params)
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _ENDS_ONLY)
+    assert snapshot(mysql_factory) == before
+
+
+def test_the_three_ways_a_published_end_changes_pass(mysql_factory) -> None:
+    """对照：未截断的截断、被截断的恢复为空（后继是空区间）、未截断的退役
+    （写尽头），都通过。"""
+    prices = Prices(mysql_factory, utc_now, models=("model-m", "model-n"))
+    cut = T0 + 10 * SECOND
+    with mysql_factory() as session:
+        truncated = _published_with_end(session, prices, (T0, cut))
+        _withdrawn(session, prices, cut)
+        open_one = _published_with_end(session, prices, (T0, None), model="model-n")
+        session.commit()
+
+    _accepted(mysql_factory, _update_version("effective_to = :end"), id=open_one, end=cut)
+    _accepted(mysql_factory, _update_version("effective_to = NULL"), id=truncated)
+    retire = _update_version("status = 'RETIRED', effective_to = :end")
+    _accepted(mysql_factory, retire, id=open_one, end=cut)
+
+
+# 对已退役行的五种改法（设计 §7「已退役是终态」）。
+_RETIRED_WRITES = {
+    "shorten": ("effective_to = :shorter", {"shorter": T0 + 5 * SECOND}),
+    "lengthen": ("effective_to = :longer", {"longer": T0 + 20 * SECOND}),
+    "clear-end": ("effective_to = NULL", {}),
+    "touch": ("updated_at = :now", {"now": T0 + DAY}),
+    "back-to-published": ("status = 'PUBLISHED'", {}),
+}
+
+
+@pytest.mark.parametrize("write", [*_RETIRED_WRITES, "empty-period-end"])
+def test_a_retired_version_is_final(mysql_factory, write: str) -> None:
+    """设计 §7「已退役是终态」：对带尽头的 `RETIRED` 行改短、改长、清空尽头、
+    只改 `updated_at`、改回 `PUBLISHED`，以及对撤销预约留下的空区间行改尽头
+    → 全部「retired or discarded … is final」；库不变。
+    """
+    prices = Prices(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        retired = _published_with_end(session, prices, (T0, T0 + 10 * SECOND), "RETIRED")
+        empty = _withdrawn(session, prices, T0 + DAY)
+        session.commit()
+    before = snapshot(mysql_factory)
+    if write == "empty-period-end":
+        assignment, params, version_id = "effective_to = :end", {"end": T0 + 2 * DAY}, empty
+    else:
+        (assignment, params), version_id = _RETIRED_WRITES[write], retired
+
+    refused = _refused(mysql_factory, _update_version(assignment), id=version_id, **params)
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _FINAL)
+    assert snapshot(mysql_factory) == before
 
 
 @pytest.mark.parametrize(

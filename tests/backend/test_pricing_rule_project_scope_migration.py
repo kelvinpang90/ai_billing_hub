@@ -75,6 +75,9 @@ needs_mysql = pytest.mark.skipif(
 
 _REVISION = "0030_pricing_rule_project_scope"
 _DOWN_REVISION = "0029_wallet_reconciliation"
+# Head is 0031_provider_price_backstop (AIH-TASK-145, design gate #535 v5 §7 "0030 的迁移测试"): a
+# downgrade from head runs 0031's first, so the cases that watch 0030's own downgrade start at 0030.
+_HEAD = "0031_provider_price_backstop"
 _MIGRATION = pathlib.Path("alembic/versions/20261030_0030_pricing_rule_project_scope.py")
 _MIGRATION_0014 = pathlib.Path("alembic/versions/20260929_0014_pricing_rules.py")
 _BEFORE_0014 = "0013_provider_prices"
@@ -931,7 +934,7 @@ def _finish(alembic_config: Config, engine: Engine, seed: _Seed | None) -> None:
             connection.execute(delete(AiModel).where(AiModel.id == seed.model_id))
             connection.execute(delete(AiProvider).where(AiProvider.id == seed.provider_id))
             connection.execute(delete(User).where(User.id == seed.user_id))
-    assert _version(engine) == _REVISION
+    assert _version(engine) == _HEAD
     assert _guards(engine) == set()
     with engine.connect() as connection:
         project_rows = connection.execute(
@@ -1454,6 +1457,9 @@ def test_0030_precheck_refuses_before_any_ddl(
     try:
         if direction == "upgrade":
             command.downgrade(alembic_config, _DOWN_REVISION)
+        else:
+            # Outside what is watched: from head the downgrade would run 0031's first.
+            command.downgrade(alembic_config, _REVISION)
         version = _version(engine)
         before = _structure(engine)
         run = command.upgrade if direction == "upgrade" else command.downgrade
@@ -1479,6 +1485,8 @@ def test_0030_downgrade_refuses_with_a_project_rule(alembic_config: Config, engi
     _start(alembic_config, engine)
     seed = None
     try:
+        # Outside what is watched: from head the downgrade would run 0031's first.
+        command.downgrade(alembic_config, _REVISION)
         seed = _committed_seed(engine)
         with engine.begin() as connection:
             _insert_rule(connection, _rule_values(seed, "PROJECT"))

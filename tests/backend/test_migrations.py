@@ -87,7 +87,11 @@ from app.models.pricing_rules import (
     PricingRuleComponent,
     PricingRuleLock,
 )
-from app.models.provider_prices import ProviderPriceComponent, ProviderPriceVersion
+from app.models.provider_prices import (
+    RETIRED_END_CHECK,
+    ProviderPriceComponent,
+    ProviderPriceVersion,
+)
 from app.models.tax_policy import TaxPolicyLock, TaxPolicyVersion
 from app.models.tenancy import AccountStatus, BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.usage import TEXT_COLLATION, UsageEvent, UsageEventConflict
@@ -934,7 +938,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         }
         assert checks == set(_model_checks())
         # 只比 0006 的两张表：audit_logs 上的两个由 0010 建，在 test_0010_* 里验；价格表上的
-        # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验；
+        # 六个由 0013 建（BEFORE UPDATE 由 0031 换成 …_v2），在 test_0013_* 里验；
+        # 定价规则的八个由 0014 建，在 test_0014_* 里验；
         # 汇率的七个由 0015 建，在 test_0015_* 里验；两张锁表的 BEFORE UPDATE 由 0016 建，在
         # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验；用量事件上的三个由
         # 0018 建，在 test_0018_* 里验；税务政策两张表的六个由 0022 建，在 test_0022_* 里验。
@@ -944,7 +949,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         expected = {
             *_EXPECTED_TRIGGERS,
             *_EXPECTED_TRIGGERS_0010,
-            *_EXPECTED_TRIGGERS_0013,
+            # 0031 把 0013 的 BEFORE UPDATE 换成了 …_v2。
+            *_EXPECTED_PRICE_TRIGGERS_AT_HEAD,
             *_EXPECTED_TRIGGERS_0014,
             *_EXPECTED_TRIGGERS_0015,
             *_EXPECTED_TRIGGERS_0016,
@@ -2622,6 +2628,19 @@ _EXPECTED_TRIGGERS_0013 = {
     ),
 }
 
+# head 上（0031_provider_price_backstop，AIH-TASK-145，设计闸门 #535 v5）：
+# 0013 的 BEFORE UPDATE 换成了 0031 的 …_v2，其余五个不变。0031 自身（步骤、形状核对、
+# 中断与降级）在 test_provider_price_backstop_migration.py。
+_MIGRATION_0031 = pathlib.Path("alembic/versions/20261031_0031_provider_price_backstop.py")
+_EXPECTED_PRICE_TRIGGERS_AT_HEAD = {
+    **{
+        name: row
+        for name, row in _EXPECTED_TRIGGERS_0013.items()
+        if name != "trg_provider_price_versions_before_update"
+    },
+    "trg_provider_price_versions_before_update_v2": ("provider_price_versions", "BEFORE", "UPDATE"),
+}
+
 _EXPECTED_0013_COLUMNS = {
     "provider_price_versions": {
         "id": False,
@@ -2702,6 +2721,14 @@ def _load_0013() -> ModuleType:
     return module
 
 
+def _load_0031() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0031", _MIGRATION_0031)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _price_checks() -> dict[str, tuple[str, str]]:
     return {
         str(constraint.name): (model.__tablename__, _normalised(str(constraint.sqltext)))
@@ -2719,15 +2746,23 @@ def test_0013_follows_0012() -> None:
 
 
 def test_0013_checks_and_slot_are_the_ones_the_models_declare() -> None:
+    """模型是 head 的形状：0013 的七条，加上 0031 的
+    `ck_provider_price_versions_retired_end`。"""
     migration = _load_0013()
+    at_head = _load_0031()
     from_migration = {
         name: (table, _normalised(condition))
         for name, (table, condition) in migration._CHECKS.items()
     }
+    from_0031 = {
+        at_head._CHECK_NAME: ("provider_price_versions", _normalised(at_head._RETIRED_END_CHECK))
+    }
 
-    assert from_migration == _price_checks()
-    # 版本 5 条、分量 2 条。
+    assert {**from_migration, **from_0031} == _price_checks()
+    # 0013：版本 5 条、分量 2 条；0031 再加版本 1 条。
     assert len(from_migration) == 7
+    assert len(_price_checks()) == 8
+    assert _normalised(at_head._RETIRED_END_CHECK) == _normalised(RETIRED_END_CHECK)
     computed = ProviderPriceVersion.__table__.c.open_slot.computed
     assert computed is not None
     assert computed.persisted is True
@@ -2929,9 +2964,13 @@ def test_0013_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
             for name in foreign_keys
         }
         assert delete_rules == expected_rules
+        # head：0013 的七条加 0031 的 `ck_provider_price_versions_retired_end`。
         assert checks == set(_price_checks())
+        assert len(checks) == 8
+        assert "ck_provider_price_versions_retired_end" in checks
+        # head：0013 的 BEFORE UPDATE 已由 0031 换成 …_v2。
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0013}
-        assert ours == _EXPECTED_TRIGGERS_0013
+        assert ours == _EXPECTED_PRICE_TRIGGERS_AT_HEAD
     finally:
         engine.dispose()
 
