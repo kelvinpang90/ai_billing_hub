@@ -8598,7 +8598,7 @@ tasks:
     title: 供应商价格版本的数据库兜底：发布不带尽头、退役必有尽头、已退役不可再改
     purpose: >-
       按 docs/design/AIH-TASK-145-provider-price-backstop.md（设计闸门 #535 已批准 v5）§2「数据库（迁移 0031）」与 §8：新迁移 0031 给 provider_price_versions 加 CHECK ck_provider_price_versions_retired_end（退役必有尽头），并以新名字 trg_provider_price_versions_before_update_v2 建 BEFORE UPDATE 触发器（由 0013 的正文改五处：RETIRED 与 DISCARDED 都是终态、草稿发布时尽头必须为空、不可变检查只对 PUBLISHED、区间相交判定不再用哨兵日期、已发布版本的尽头只按截断恢复退役三种方式变），先建新的、再删 0013 的 trg_provider_price_versions_before_update；模型只同步这条 CHECK。合起来让起点为空的发布只在该（供应商, 模型）没有区间非空的已发布版本时通过。不改服务层、计费、接口与前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-144
     acceptance_criteria:
