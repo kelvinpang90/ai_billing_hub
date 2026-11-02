@@ -1973,14 +1973,13 @@ V1 notification channels:
 - Email
 - WhatsApp
 
-Reuse existing Acuven:
+Reuse existing Acuven Email sending service.
 
-- Email sending service
-- WhatsApp API service
+WhatsApp: Central Billing uses its own Meta App and phone number and calls the Meta Graph API directly, receiving and verifying its own webhooks; it does not go through `whatsapp_gateway`, which was decommissioned on 2026-08-31 (see ADR-0009 §5).
 
-Central Billing must implement Notification Adapter abstraction.
+Central Billing must implement Notification Adapter abstraction. WhatsApp is one Notification Adapter implementation; the adapter must support template messages and delivery status receipts, not plain text only.
 
-Do not rebuild WhatsApp infrastructure.
+Do not rebuild WhatsApp infrastructure: no shared gateway or routing layer of our own; WhatsApp is integrated only as a Notification Adapter.
 
 `REQ-LAUNCH-001`: Before production launch, payment, Email, and WhatsApp integration must be verified using real accounts.
 

@@ -39,7 +39,6 @@
 - 待登记：关户（§112.1：先停用、余额为 0、无未结用量事件与支付，依赖 Phase 2 与 Phase 4）（需设计闸门）
 - 待登记：审计时间戳取整在登录与业务两条路径上统一（需设计闸门，涉及认证路径）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
-- 待登记：spec §47 的「复用既有 WhatsApp 服务」措辞与 ADR-0009 第 5 节同步（spec 修订）
 - 待登记：`.env.example` 补 AI 模块的配置项（Worker 不能改 `.env` 类文件；AIH-TASK-065 合并后由管理员补，内容以 `docs/deployment.md` 为准）
 - 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
