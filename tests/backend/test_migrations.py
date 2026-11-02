@@ -87,7 +87,11 @@ from app.models.pricing_rules import (
     PricingRuleComponent,
     PricingRuleLock,
 )
-from app.models.provider_prices import ProviderPriceComponent, ProviderPriceVersion
+from app.models.provider_prices import (
+    RETIRED_END_CHECK,
+    ProviderPriceComponent,
+    ProviderPriceVersion,
+)
 from app.models.tax_policy import TaxPolicyLock, TaxPolicyVersion
 from app.models.tenancy import AccountStatus, BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.usage import TEXT_COLLATION, UsageEvent, UsageEventConflict
@@ -937,14 +941,15 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 六个由 0013 建，在 test_0013_* 里验；定价规则的八个由 0014 建，在 test_0014_* 里验；
         # 汇率的七个由 0015 建，在 test_0015_* 里验；两张锁表的 BEFORE UPDATE 由 0016 建，在
         # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验；用量事件上的三个由
-        # 0018 建，在 test_0018_* 里验；税务政策两张表的六个由 0022 建，在 test_0022_* 里验。
+        # 0018 建，在 test_0018_* 里验；税务政策两张表的六个由 0022 建，在 test_0022_* 里验；
+        # 价格版本的 BEFORE UPDATE 由 0031 换成 `…_v2`（_EXPECTED_PRICE_TRIGGERS_AT_HEAD）。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
         expected = {
             *_EXPECTED_TRIGGERS,
             *_EXPECTED_TRIGGERS_0010,
-            *_EXPECTED_TRIGGERS_0013,
+            *_EXPECTED_PRICE_TRIGGERS_AT_HEAD,
             *_EXPECTED_TRIGGERS_0014,
             *_EXPECTED_TRIGGERS_0015,
             *_EXPECTED_TRIGGERS_0016,
@@ -2622,6 +2627,18 @@ _EXPECTED_TRIGGERS_0013 = {
     ),
 }
 
+# 0031_provider_price_backstop（AIH-TASK-145，设计闸门 #535 v5）：
+# 版本的 BEFORE UPDATE 换成 `…_v2`，加了 `ck_provider_price_versions_retired_end`。
+# 在 head 上看这两张表的用例比的是 0031 之后的形状；0031 自身
+# （步骤、形状核对、中断与降级）在 test_provider_price_backstop_migration.py。
+_REVISION_0030 = "0030_pricing_rule_project_scope"
+_MIGRATION_0031 = pathlib.Path("alembic/versions/20261031_0031_provider_price_backstop.py")
+_OLD_PRICE_UPDATE_TRIGGER = "trg_provider_price_versions_before_update"
+_EXPECTED_PRICE_TRIGGERS_AT_HEAD = {
+    **{n: row for n, row in _EXPECTED_TRIGGERS_0013.items() if n != _OLD_PRICE_UPDATE_TRIGGER},
+    "trg_provider_price_versions_before_update_v2": ("provider_price_versions", "BEFORE", "UPDATE"),
+}
+
 _EXPECTED_0013_COLUMNS = {
     "provider_price_versions": {
         "id": False,
@@ -2702,6 +2719,14 @@ def _load_0013() -> ModuleType:
     return module
 
 
+def _load_0031() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0031", _MIGRATION_0031)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _price_checks() -> dict[str, tuple[str, str]]:
     return {
         str(constraint.name): (model.__tablename__, _normalised(str(constraint.sqltext)))
@@ -2720,14 +2745,21 @@ def test_0013_follows_0012() -> None:
 
 def test_0013_checks_and_slot_are_the_ones_the_models_declare() -> None:
     migration = _load_0013()
+    later = _load_0031()
     from_migration = {
         name: (table, _normalised(condition))
         for name, (table, condition) in migration._CHECKS.items()
     }
+    # 模型是 head 的形状：0031 加的那一条同样比对。
+    from_migration[later._RETIRED_END_CHECK_NAME] = (
+        later._VERSIONS,
+        _normalised(later._RETIRED_END_CHECK),
+    )
 
     assert from_migration == _price_checks()
-    # 版本 5 条、分量 2 条。
-    assert len(from_migration) == 7
+    assert _normalised(RETIRED_END_CHECK) == _normalised(later._RETIRED_END_CHECK)
+    # 版本 6 条（0013 的 5 条、0031 的 1 条）、分量 2 条。
+    assert len(from_migration) == 8
     computed = ProviderPriceVersion.__table__.c.open_slot.computed
     assert computed is not None
     assert computed.persisted is True
@@ -2929,9 +2961,12 @@ def test_0013_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
             for name in foreign_keys
         }
         assert delete_rules == expected_rules
+        # head 上：0013 的五条、0031 的一条，与模型的一致。
         assert checks == set(_price_checks())
+        assert len(checks) == 8
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0013}
-        assert ours == _EXPECTED_TRIGGERS_0013
+        assert ours == _EXPECTED_PRICE_TRIGGERS_AT_HEAD
+        assert _OLD_PRICE_UPDATE_TRIGGER not in ours
     finally:
         engine.dispose()
 
@@ -5723,8 +5758,10 @@ def test_0022_downgrade_refuses_while_a_version_exists(alembic_config: Config) -
     """Design §8 "回滚": with a version row the downgrade refuses before any DDL and both tables
     stay. The row is a draft written with foreign key checks off (no user is needed for this);
     versions refuse DELETE, so it is removed with TRUNCATE, which is DDL and skips the
-    triggers."""
+    triggers. The baseline is taken at 0030: 0031's downgrade (it swaps a trigger back) is not
+    the part under observation."""
     command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION_0030)
     engine = create_engine(TEST_DATABASE_URL)
     try:
         with engine.begin() as connection:

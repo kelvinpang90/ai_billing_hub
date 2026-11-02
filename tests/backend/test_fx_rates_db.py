@@ -1062,8 +1062,10 @@ def test_upgrade_and_downgrade(alembic_config: Config) -> None:
     """Downgrading to 0014 drops the three tables and their triggers, 0016's two lock table
     triggers, 0017's two tables with their two triggers, 0018's three triggers on `usage_events`,
     0020's delivery table, 0021's two tables and 0022's two tables with their six triggers, and
-    nothing else; upgrading again builds them with exactly one lock row."""
+    nothing else; upgrading again builds them with exactly one lock row. Measured from 0030:
+    0031's downgrade (it swaps a provider price trigger back) is not the part under observation."""
     try:
+        command.downgrade(alembic_config, "0030_pricing_rule_project_scope")
         tables, triggers, locks = _tables_triggers_and_locks()
         assert _TABLES | _TABLES_0017 | _TABLES_0020 | _TABLES_0021 | _TABLES_0022 <= tables
         assert (
@@ -1079,7 +1081,7 @@ def test_upgrade_and_downgrade(alembic_config: Config) -> None:
         dropped = _TRIGGERS | _TRIGGERS_0016 | _TRIGGERS_0017 | _TRIGGERS_0018 | _TRIGGERS_0022
         assert _tables_triggers_and_locks() == (tables - dropped_tables, triggers - dropped, None)
 
-        command.upgrade(alembic_config, "head")
+        command.upgrade(alembic_config, "0030_pricing_rule_project_scope")
         assert _tables_triggers_and_locks() == (tables, triggers, [1])
     finally:
         command.upgrade(alembic_config, "head")

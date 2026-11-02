@@ -24,7 +24,9 @@ three values yet, so the ORM cannot read those rows. Interruptions are made by r
 follows design §7 "MySQL 用例的清理": every case starts and ends with `TRUNCATE` of the two rule
 tables (foreign key checks off; no trigger is dropped or rebuilt), and its `finally` brings the
 database back to head (0030 runs again, so a guard trigger left behind is removed), then checks
-there is no project-level row and no guard trigger.
+there is no project-level row and no guard trigger. What is observed is 0030 alone: every case
+starts at head and goes down to 0030 before it looks (design gate #535 v5 §7 "0030 的迁移测试"),
+so a later revision's downgrade is never counted as 0030's.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from typing import Any
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, create_engine, delete, event, insert, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
@@ -931,7 +934,7 @@ def _finish(alembic_config: Config, engine: Engine, seed: _Seed | None) -> None:
             connection.execute(delete(AiModel).where(AiModel.id == seed.model_id))
             connection.execute(delete(AiProvider).where(AiProvider.id == seed.provider_id))
             connection.execute(delete(User).where(User.id == seed.user_id))
-    assert _version(engine) == _REVISION
+    assert _version(engine) == ScriptDirectory.from_config(alembic_config).get_current_head()
     assert _guards(engine) == set()
     with engine.connect() as connection:
         project_rows = connection.execute(
@@ -944,7 +947,11 @@ def _finish(alembic_config: Config, engine: Engine, seed: _Seed | None) -> None:
 
 
 def _start(alembic_config: Config, engine: Engine) -> None:
+    """Head, then down to 0030 (outside the part under observation): what follows is 0030's,
+    whatever later revisions do (0031 swaps a provider price trigger)."""
     _to_head(alembic_config, engine)
+    command.downgrade(alembic_config, _REVISION)
+    assert _version(engine) == _REVISION
     _clean(engine)
 
 
