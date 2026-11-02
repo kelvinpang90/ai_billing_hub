@@ -942,7 +942,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 汇率的七个由 0015 建，在 test_0015_* 里验；两张锁表的 BEFORE UPDATE 由 0016 建，在
         # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验；用量事件上的三个由
         # 0018 建，在 test_0018_* 里验；税务政策两张表的六个由 0022 建，在 test_0022_* 里验；
-        # 价格版本的 BEFORE UPDATE 由 0031 换成 `…_v2`（_EXPECTED_PRICE_TRIGGERS_AT_HEAD）。
+        # 价格版本的 BEFORE UPDATE 由 0031 换成 `…_v2`（_EXPECTED_PRICE_TRIGGERS_AT_HEAD）；
+        # 定价规则的 BEFORE UPDATE 由 0032 换成 `…_v2`（_EXPECTED_RULE_TRIGGERS_AT_HEAD）。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -950,7 +951,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS,
             *_EXPECTED_TRIGGERS_0010,
             *_EXPECTED_PRICE_TRIGGERS_AT_HEAD,
-            *_EXPECTED_TRIGGERS_0014,
+            *_EXPECTED_RULE_TRIGGERS_AT_HEAD,
             *_EXPECTED_TRIGGERS_0015,
             *_EXPECTED_TRIGGERS_0016,
             *_EXPECTED_TRIGGERS_0017,
@@ -2987,6 +2988,11 @@ def test_0013_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
 # key and index, the two scope checks at eight levels, `scope_key` with the project part and the
 # rebuilt `trg_pricing_rules_before_update` — compared with 0030's literals. 0030 itself (its
 # steps, guards, refusals and recovery) is in test_pricing_rule_project_scope_migration.py.
+#
+# ⚠️ 0032_pricing_rule_backstop (AIH-TASK-146, design gate #539 v1) then replaces that BEFORE
+# UPDATE trigger with `trg_pricing_rules_before_update_v2`: the cases that look at head find it
+# by that name and compare it with 0032's literal. 0032 itself is in
+# test_pricing_rule_backstop_migration.py.
 # ---------------------------------------------------------------------------
 
 _REVISION_0014 = "0014_pricing_rules"
@@ -3007,6 +3013,15 @@ _EXPECTED_TRIGGERS_0014 = {
     "trg_pricing_rule_components_before_insert": ("pricing_rule_components", "BEFORE", "INSERT"),
     "trg_pricing_rule_components_before_update": ("pricing_rule_components", "BEFORE", "UPDATE"),
     "trg_pricing_rule_components_before_delete": ("pricing_rule_components", "BEFORE", "DELETE"),
+}
+
+# At head: 0032 swapped the rules' BEFORE UPDATE for `…_v2`.
+_MIGRATION_0032 = pathlib.Path("alembic/versions/20261101_0032_pricing_rule_backstop.py")
+_OLD_RULE_UPDATE_TRIGGER = "trg_pricing_rules_before_update"
+_RULE_UPDATE_TRIGGER_AT_HEAD = "trg_pricing_rules_before_update_v2"
+_EXPECTED_RULE_TRIGGERS_AT_HEAD = {
+    **{n: row for n, row in _EXPECTED_TRIGGERS_0014.items() if n != _OLD_RULE_UPDATE_TRIGGER},
+    _RULE_UPDATE_TRIGGER_AT_HEAD: ("pricing_rules", "BEFORE", "UPDATE"),
 }
 
 _EXPECTED_0014_COLUMNS = {
@@ -3098,7 +3113,7 @@ _RULE_CHECK_CLAUSES_QUERY = text(
 )
 _RULE_UPDATE_TRIGGER_QUERY = text(
     "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS"
-    " WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = 'trg_pricing_rules_before_update'"
+    " WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = 'trg_pricing_rules_before_update_v2'"
 )
 # The columns of `scope_key` at head (0030), in their order.
 _SCOPE_KEY_COLUMNS = ("priority_scope", "tenant_id", "project_id", "provider_id", "model_id")
@@ -3114,6 +3129,14 @@ def _load_0014() -> ModuleType:
 
 def _load_0030() -> ModuleType:
     spec = importlib.util.spec_from_file_location("migration_0030", _MIGRATION_0030)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_0032() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0032", _MIGRATION_0032)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -3425,8 +3448,8 @@ def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
         # 0030's eight levels (MySQL rewrites the text, so markers only).
         assert "PROJECT_PROVIDER_MODEL" in clauses["ck_pricing_rules_priority_scope"]
         assert "project_id" in clauses["ck_pricing_rules_scope_columns"]
-        # The trigger rebuilt under the same name is 0030's body, word for word.
-        at_head = _load_0030()._TRIGGERS["trg_pricing_rules_before_update"]
+        # At head the BEFORE UPDATE is 0032's `…_v2`, its body word for word.
+        at_head = _load_0032()._TRIGGERS[_RULE_UPDATE_TRIGGER_AT_HEAD]
         assert _normalised(str(update_trigger)) == _trigger_body(at_head)
         # ⚠️ RESTRICT: rules and components are never deleted, nor what they refer to (INV-6);
         # a draft with components cannot change its strategy under them.
@@ -3436,8 +3459,9 @@ def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
         assert referential["fk_pricing_rule_components_rule"][1] == "RESTRICT"
         assert checks == set(_rule_checks())
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0014}
-        # At head the lock table also has 0016's BEFORE UPDATE.
-        assert ours == _EXPECTED_TRIGGERS_0014 | _triggers_0016_on(_TABLES_0014)
+        # At head the lock table also has 0016's BEFORE UPDATE, and the rules' BEFORE UPDATE is
+        # 0032's `…_v2`.
+        assert ours == _EXPECTED_RULE_TRIGGERS_AT_HEAD | _triggers_0016_on(_TABLES_0014)
     finally:
         engine.dispose()
 
