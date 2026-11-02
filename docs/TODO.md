@@ -232,9 +232,9 @@
 
 - [x] Provider / Model / Usage Meter
   - AIH-TASK-025：供应商、模型（含按 `occurred_at` 分段的别名）、计量类型目录与管理端接口、审计，只停用不删除；前端 AIH-TASK-035
-- [ ] `provider_price_versions` + 泛化价格分量（含缓存 token、非 token 单位）
-  - 实现与前端已交付（AIH-TASK-026 / 036）。**不勾**：AIH-TASK-026 记录的两处数据库兜底缺口（起点为空的版本、改为 `RETIRED` 不写
-    `effective_to`）仍只靠服务层拦，补它的任务在「后续计划」（需设计闸门），合并后再勾
+- [x] `provider_price_versions` + 泛化价格分量（含缓存 token、非 token 单位）
+  - 实现与前端已交付（AIH-TASK-026 / 036）。数据库兜底由 AIH-TASK-145 补上（设计闸门 #535 v5，迁移 0031：起点为空的版本只在
+    时间线为空时可发布、改为 `RETIRED` 必须写 `effective_to`、已退役不可再改）
 - [x] FX 适配器 + 审批 + 版本历史
   - AIH-TASK-028 / 039 / 044（版本表与触发器、发布与退役规则、并发与性质测试）、040（BNM 拉取与 Beat，只落 `DRAFT`）、
     041（管理端审批发布与版本历史）、042 / 043（告警与运维）、045（锁表禁止 UPDATE）；前端 AIH-TASK-036；文档 `docs/currency-and-fx.md`
