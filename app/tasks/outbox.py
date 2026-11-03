@@ -36,7 +36,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.database import create_database_engine, create_session_factory
-from app.core.mailer import OutgoingEmail, build_transport
+from app.core.email_templates import TEMPLATE_PASSWORD_RESET, TEMPLATE_PORTAL_INVITATION
+from app.core.notification_adapter import Channel, OutboundMessage, build_adapter
 from app.models.auth import DomainOutbox, OutboxStatus
 from app.models.notifications import Notification
 from app.models.tenancy import Tenant
@@ -61,8 +62,10 @@ def _backoff_seconds(settings: Settings, attempt: int) -> int:
     return settings.outbox_retry_base_seconds * (2 ** max(attempt - 1, 0))
 
 
-def _render_password_reset(settings: Settings, payload: dict[str, object]) -> OutgoingEmail | None:
-    """Build the reset email, or None when we cannot (which counts as a failure)."""
+def _render_password_reset(
+    settings: Settings, payload: dict[str, object]
+) -> OutboundMessage | None:
+    """Build the reset message, or None when we cannot (which counts as a failure)."""
     base = settings.frontend_base_url.strip().rstrip("/")
     if not base:
         # ⚠️ 没有基址就拼不出可点的链接。**不发一封带半截 URL 的信** ——
@@ -79,14 +82,12 @@ def _render_password_reset(settings: Settings, payload: dict[str, object]) -> Ou
     # quote 不是装饰：令牌是 URL-safe base64，但**别的事件将来未必是**，而一个
     # 没转义的查询参数会把链接在某些邮件客户端里截断 —— 症状是「有些人点不开」。
     link = f"{base}/reset-password?token={quote(token, safe='')}"
-    body = (
-        "We received a request to reset the password for your Acuven Billing account.\n\n"
-        f"Open this link to choose a new password:\n{link}\n\n"
-        "The link can be used once, and expires shortly.\n\n"
-        "If you did not ask for this, you can ignore this email — "
-        "your password has not changed."
+    return OutboundMessage(
+        channel=Channel.EMAIL,
+        recipient=to,
+        template=TEMPLATE_PASSWORD_RESET,
+        params={"link": link},
     )
-    return OutgoingEmail(to=to, subject="Reset your Acuven Billing password", body=body)
 
 
 # 马来西亚时间：固定偏移 UTC+8，不依赖 tzdata
@@ -117,8 +118,8 @@ def _invitation_deadline(raw: object) -> str | None:
 
 def _render_portal_invitation(
     settings: Settings, payload: dict[str, object]
-) -> OutgoingEmail | None:
-    """Build the portal invitation email, or None when we cannot (which counts as a failure)."""
+) -> OutboundMessage | None:
+    """Build the portal invitation message, or None when we cannot (which counts as a failure)."""
     base = settings.frontend_base_url.strip().rstrip("/")
     if not base:
         # 与重置邮件同一处理：拼不出可点的链接就不发。
@@ -137,21 +138,15 @@ def _render_portal_invitation(
     # （`acceptInvitation`、`ACCEPT_INVITATION_TOKEN_PARAM`），
     # 由 tests/backend/test_invitation_link.py 机械比对。
     link = f"{base}/accept-invitation?token={quote(token, safe='')}"
-    body = (
-        "You have been invited to the Acuven Billing customer portal.\n\n"
-        f"Open this link to set your password and activate your account:\n{link}\n\n"
-        f"The link can be used once, and expires at {deadline}. "
-        "If it has expired, ask your Acuven contact to send a new invitation.\n\n"
-        "If you are waiting for another email from us and cannot find it, "
-        "please check your spam or junk folder.\n\n"
-        "If you were not expecting this invitation, you can ignore this email."
-    )
-    return OutgoingEmail(
-        to=to, subject="Your invitation to the Acuven Billing customer portal", body=body
+    return OutboundMessage(
+        channel=Channel.EMAIL,
+        recipient=to,
+        template=TEMPLATE_PORTAL_INVITATION,
+        params={"link": link, "deadline": deadline},
     )
 
 
-# event_type → 渲染函数。
+# event_type → 渲染函数。渲染函数只组装模板参数，正文在 app/core/email_templates.py。
 #
 # ⚠️ 认不出来的事件类型走**普通失败**（重试，最终进死信），不是立刻死信。
 # 因为最可能的原因是**滚动更新的时间差**：API 已经在写新事件，worker 镜像还是
@@ -310,7 +305,7 @@ def _attempt_send(settings: Settings, *, event_type: str, raw_payload: str | Non
     message = renderer(settings, payload)
     if message is None:
         return False
-    return build_transport(settings).send(message)
+    return build_adapter(message.channel, settings).send(message).accepted
 
 
 # --- 通知类事件（设计闸门 #471 v7 §2「投递」、§4、§5） ------------------------------------

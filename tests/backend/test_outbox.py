@@ -15,6 +15,8 @@ from sqlalchemy import create_engine, select
 
 from app.core.config import Settings
 from app.core.database import create_session_factory
+from app.core.email_templates import render_email
+from app.core.notification_adapter import EmailAdapter
 from app.models.auth import DomainOutbox, OutboxStatus, User, UserRole, UserStatus
 from app.models.base import Base
 from app.repositories import tenancy
@@ -79,11 +81,27 @@ class FakeTransport:
         return self.succeed
 
 
+def use_transport(monkeypatch, fake: FakeTransport) -> None:
+    """Replace `build_adapter` with a real `EmailAdapter` around `fake`: 渲染路径是真的。"""
+    monkeypatch.setattr(
+        outbox_task, "build_adapter", lambda _channel, _settings: EmailAdapter(fake)
+    )
+
+
 @pytest.fixture
 def transport(monkeypatch) -> FakeTransport:
     fake = FakeTransport()
-    monkeypatch.setattr(outbox_task, "build_transport", lambda _settings: fake)
+    use_transport(monkeypatch, fake)
     return fake
+
+
+def invitation_body(settings: Settings, payload: dict[str, object]) -> str:
+    """The body the invitation email would carry: outbox 的参数经模板层渲染。"""
+    message = _render_portal_invitation(settings, payload)
+    assert message is not None
+    rendered = render_email(message.template, message.params)
+    assert rendered is not None
+    return rendered.body
 
 
 def add_row(session_factory, *, event_type: str = EVENT_PASSWORD_RESET, **overrides) -> int:
@@ -160,7 +178,7 @@ def test_the_email_carries_a_link_to_the_configured_front_end(
 
 def test_a_failed_send_is_left_pending_with_a_later_retry(wired, monkeypatch) -> None:
     """⚠️ 失败**不能**把行标成终态：那样一次 SMTP 抖动就等于这封信永久消失。"""
-    monkeypatch.setattr(outbox_task, "build_transport", lambda _s: FakeTransport(succeed=False))
+    use_transport(monkeypatch, FakeTransport(succeed=False))
     outbox_id = add_row(wired)
     before = read(wired, outbox_id).next_retry_at
 
@@ -186,7 +204,7 @@ def test_the_backoff_doubles_each_attempt(settings: Settings) -> None:
 
 def test_the_retry_interval_grows_between_real_attempts(wired, monkeypatch) -> None:
     """接上一条：那个纯函数确实被投递路径用上了，没有被常数绕过。"""
-    monkeypatch.setattr(outbox_task, "build_transport", lambda _s: FakeTransport(succeed=False))
+    use_transport(monkeypatch, FakeTransport(succeed=False))
     outbox_id = add_row(wired)
 
     gaps = []
@@ -208,7 +226,7 @@ def test_the_retry_interval_grows_between_real_attempts(wired, monkeypatch) -> N
 def test_it_gives_up_after_the_configured_number_of_attempts(wired, monkeypatch) -> None:
     """⚠️ 没有上限的重试会把一封永远发不出去的信（比如收件地址根本不存在）
     变成一个永久转的循环，而且它会一直排在别的信前面。"""
-    monkeypatch.setattr(outbox_task, "build_transport", lambda _s: FakeTransport(succeed=False))
+    use_transport(monkeypatch, FakeTransport(succeed=False))
     outbox_id = add_row(wired)
 
     outcomes = []
@@ -474,15 +492,14 @@ def test_the_invitation_states_the_deadline_in_malaysia_time_with_utc() -> None:
 
     另提示查垃圾箱；不写「72 小时」这类相对时长。
     """
-    message = _render_portal_invitation(
+    body = invitation_body(
         Settings(frontend_base_url="https://billing.example.com"), INVITATION_PAYLOAD
     )
 
-    assert message is not None
-    assert "2026-10-24 16:00 Malaysia time, UTC+8 (2026-10-24 08:00 UTC)" in message.body
-    assert "spam" in message.body
+    assert "2026-10-24 16:00 Malaysia time, UTC+8 (2026-10-24 08:00 UTC)" in body
+    assert "spam" in body
     for relative in ("72", "hour", "day"):
-        assert relative not in message.body.lower()
+        assert relative not in body.lower()
 
 
 def test_the_deadline_crosses_midnight_in_malaysia_time() -> None:
@@ -494,7 +511,9 @@ def test_the_deadline_crosses_midnight_in_malaysia_time() -> None:
     )
 
     assert message is not None
-    assert "2027-01-01 04:30 Malaysia time, UTC+8 (2026-12-31 20:30 UTC)" in message.body
+    assert message.params["deadline"] == (
+        "2027-01-01 04:30 Malaysia time, UTC+8 (2026-12-31 20:30 UTC)"
+    )
 
 
 def test_the_deadline_comes_from_the_payload_not_from_the_current_setting() -> None:
@@ -502,14 +521,14 @@ def test_the_deadline_comes_from_the_payload_not_from_the_current_setting() -> N
 
     outbox 重试时配置可能已经变了，信里的时刻仍须与令牌行真实的 `expires_at` 一致。
     """
-    first = _render_portal_invitation(
+    first = invitation_body(
         Settings(
             frontend_base_url="https://billing.example.com",
             customer_invitation_ttl_seconds=259_200,
         ),
         INVITATION_PAYLOAD,
     )
-    second = _render_portal_invitation(
+    second = invitation_body(
         Settings(
             frontend_base_url="https://billing.example.com",
             customer_invitation_ttl_seconds=3_600,
@@ -517,9 +536,8 @@ def test_the_deadline_comes_from_the_payload_not_from_the_current_setting() -> N
         INVITATION_PAYLOAD,
     )
 
-    assert first is not None and second is not None
-    assert first.body == second.body
-    assert "2026-10-24 16:00 Malaysia time, UTC+8 (2026-10-24 08:00 UTC)" in second.body
+    assert first == second
+    assert "2026-10-24 16:00 Malaysia time, UTC+8 (2026-10-24 08:00 UTC)" in second
 
 
 def test_an_invitation_without_a_front_end_base_url_is_not_sent(

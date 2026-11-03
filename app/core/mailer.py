@@ -1,4 +1,7 @@
-"""Outbound email transport (ADR-0009; spec §47).
+"""Outbound email transport: the Email layer under the Notification Adapter (ADR-0009; spec §47).
+
+业务代码不直接用这里：通知走 app/core/notification_adapter.py 的 Adapter，
+正文由 app/core/email_templates.py 渲染，`EmailAdapter` 再把渲染好的信交给本模块。
 
 **这一层只负责「把一封信交给 SMTP 服务器」**，不知道信是什么、也不负责重试。
 重试、去重、状态持久化全在 `domain_outbox` 那一侧（Invariant 14）——两件事混在
@@ -48,9 +51,12 @@ class OutgoingEmail:
 
 
 class EmailTransport(Protocol):
-    """spec §47 强制的 Notification Adapter 抽象在 Email 这一侧的最小形态。
+    """Notification Adapter 之下的 Email 传输层（spec §47）。
 
-    ⚠️ 业务代码只依赖这个协议，**不直接调 SMTP**。ADR-0009 备选方案 A 记着：
+    调用方是 app/core/notification_adapter.py 的 `EmailAdapter`，
+    模板在 app/core/email_templates.py。
+
+    ⚠️ 业务代码只依赖 Adapter，**不直接调 SMTP**。ADR-0009 备选方案 A 记着：
     将来若换成 SendGrid / SES 这类 API 服务，改的只是本文件里的一个实现类。
     """
 
