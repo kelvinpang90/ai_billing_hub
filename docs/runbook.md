@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-10-29
+> 最后更新：2026-11-03
 
 ---
 
@@ -273,6 +273,120 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
 
 ---
 
+## TLS 证书即将到期或读不到
+
+**首次编写：2026-11-03（AIH-TASK-150）。依据：[deployment.md](deployment.md) §8.1。**
+
+⚠️ **证书不归本项目续期。**对外域名的证书由共享基建的 nginx（`infra_nginx`，同机另外八个项目共用）
+负责签发与续期；本项目的巡检**只负责发现**。这条告警响了，修的地方几乎总在共享基建那边。
+
+### 怎么发现
+
+```text
+条件：宿主机每 5 分钟取 .env 的 BILLING_FRONTEND_BASE_URL（只认 https），
+     timeout 15 openssl s_client -connect <主机>:443 取对外证书的 notAfter
+分级：剩余 < 21 天 = P2（BILLING_MONITOR_TLS_WARN_DAYS）；
+     剩余 < 7 天或已过期 = P1（BILLING_MONITOR_TLS_CRIT_DAYS）；读不到证书 = P2
+通知：并在 Healthchecks.io 检查 `ai_billing_hub disk` 里 → Telegram；状态翻转才发，恢复再发一次
+正文：P2 tls certificate expires in <N> days (warn 21) / P1 tls certificate expires in <N> days (crit 7)
+     / P1 tls certificate has expired / P2 tls certificate could not be read —— 不带主机名
+```
+
+⚠️ **它没有自己的检查**（免费档 20 个已用满）。`disk` 已经因为别的原因红着时，证书出事**不会再通知一次**；
+收到 disk 的通知后要看 `journalctl -t billing-monitor -p err` 里的**全部**行。
+
+Let's Encrypt 正常在剩 30 天时续期，所以剩 21 天还没换 = **续期已经失败约 9 天**。
+
+`BILLING_FRONTEND_BASE_URL` 为空或不是 https 时这项跳过：日志里是
+`no https BILLING_FRONTEND_BASE_URL configured: skipping the certificate check`，disk 的 OK 摘要写 `+ tls skipped`。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 证书过期之前：一切正常，这条告警就是为了在那之前响 | 过期之后：浏览器拒绝打开管理端与客户门户；客户的集成调用（用量摄取、AI 请求）在 TLS 握手处失败 |
+| 宿主机回环上的 `/readyz`、巡检其余各项 | 读不到证书：多半是对外入口本身不通（边缘 nginx 停了、DNS 或防火墙），影响同上 |
+
+### 立刻做什么
+
+1. 在宿主机上看对外证书（只读；主机名从 `.env` 取，**不要**贴进公开的地方）：
+
+   ```bash
+   host="$(sed -n 's/^BILLING_FRONTEND_BASE_URL=https:\/\///p' .env | cut -d/ -f1 | cut -d: -f1)"
+   timeout 15 openssl s_client -connect "$host:443" -servername "$host" </dev/null 2>/dev/null \
+     | openssl x509 -noout -enddate -issuer
+   ```
+
+2. **快到期**：去共享基建那边查续期为什么没发生 —— `infra_nginx` 的证书续期任务（certbot 定时任务 / 容器）
+   的日志、ACME 校验路径（`/.well-known/acme-challenge/`）是否被某个项目的配置挡住、DNS 是否还指向这台机器。
+   续期成功后要让 `infra_nginx` **reload**，否则磁盘上是新证书、对外仍是旧证书
+3. **读不到**：先从外网 `curl -sSI https://<主机>/healthz` 看入口通不通；`infra_nginx` 容器是否在跑；
+   本项目的 `billing_nginx` 是否健康（services 维度应同时报）。宿主机自己出不了网时也会读不到
+4. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. 第 1 步的命令看到新的 `notAfter`（剩余 ≥ 21 天）
+2. 下一轮巡检 `ai_billing_hub disk` 回到 **up**（前提是同一维度没有别的行），OK 摘要以 `+ tls` 结尾的那一段出现
+
+### 绝不能做什么
+
+- **不要在本项目里自己签发或替换证书**来「先让它绿」：证书归共享基建管，两边各签一张会让下一次续期覆盖掉其中一张
+- **不要为了让告警安静把 `BILLING_FRONTEND_BASE_URL` 改成 http 或清空**：检查会跳过，而证书照样会过期
+- **不要调低 `BILLING_MONITOR_TLS_WARN_DAYS` / `BILLING_MONITOR_TLS_CRIT_DAYS`**：它们的意义是「还剩多少时间找人」，
+  调低只会让告警来得更晚
+
+---
+
+## 主机时钟未同步
+
+**首次编写：2026-11-03（AIH-TASK-150）。依据：[deployment.md](deployment.md) §8.1。**
+
+⚠️ **时钟漂移不会让任何请求报错**，但会悄悄弄错一切跟时间有关的东西：集成调用签名的时间窗、会计期 cut-off、
+汇率生效时刻、日志与备份的时间戳、证书有效期判断。
+
+### 怎么发现
+
+```text
+条件：宿主机每 5 分钟读 timedatectl show -p NTPSynchronized --value
+分级：值不是 yes（no 等）= P2
+通知：并在 Healthchecks.io 检查 `ai_billing_hub disk` 里 → Telegram；状态翻转才发，恢复再发一次
+正文：P2 host clock is not NTP-synchronized
+```
+
+⚠️ **它没有自己的检查**（免费档 20 个已用满），`disk` 已红时不会再单独通知 —— 看 `journalctl -t billing-monitor -p err` 的全部行。
+
+命令不存在或输出为空时这项跳过，**不报警**（与 binlog 预算「量不到不报警」同一条理由）：日志里是
+`clock sync status unavailable; skipping the clock check`，disk 的 OK 摘要写 `+ clock skipped`。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 刚失去同步时：本地时钟仍然大体准确，漂移按天累积 | 漂移变大之后：带时间窗的签名校验开始拒绝客户的集成调用；跨会计期边界的事件可能被记进错误的期间；日志与 binlog 时间对不上，按时间点恢复时难以定位 |
+
+### 立刻做什么
+
+1. 在宿主机上看现状：`timedatectl status`（`System clock synchronized`、`NTP service`）与
+   `timedatectl timesync-status`（服务器、偏移量）
+2. NTP 服务没开：`sudo timedatectl set-ntp true`；开着但不同步：查 `systemd-timesyncd`（或 chrony）的日志，
+   以及出站 UDP 123 是否被防火墙挡住
+3. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. `timedatectl show -p NTPSynchronized --value` 输出 `yes`
+2. 下一轮巡检 `ai_billing_hub disk` 回到 **up**（前提是同一维度没有别的行）
+3. 失步期间偏移量若已经大到秒级以上，核对那段时间的集成调用拒绝记录与跨会计期边界的事件
+
+### 绝不能做什么
+
+- **不要用 `date -s` 手工把时钟一下子拨到位**：时间倒退会让数据库与日志里出现「先发生的事排在后面」；
+  交给 NTP 慢慢校正
+- **不要为了让告警安静停掉或卸载 `timedatectl`**：检查会跳过，而时钟照样在漂
+
+---
+
 ## 整台 VPS 没了（灾难恢复）
 
 **首次编写：2026-09-16（T0.9）。§136 的 18 个场景里第三个落地的，也是 §98.1 要求的「书面的灾难恢复顺序与恢复后对账」。**
@@ -286,7 +400,7 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
 | 信号 | 说明 |
 | --- | --- |
 | **binlog 心跳先停**（周期 1 分钟、宽限 5 分钟） | **最快的信号**，也正好是 RPO 的量级 |
-| `ai_billing_hub services` / `readyz` / `disk` 三个检查同时 DOWN | 巡检每 5 分钟一次、宽限 15 分钟 |
+| `ai_billing_hub services` / `readyz` / `disk` 三个检查同时 DOWN | 巡检每 5 分钟一次、宽限 15 分钟。⚠️ `disk` 单独 DOWN 不是整机的事：这个维度里有磁盘水位、binlog 预算、TLS 证书到期、主机时钟同步四项，按正文那一行找对应的节（下面「TLS 证书即将到期或读不到」「主机时钟未同步」） |
 | 站点 502 | 边缘 `infra_nginx` 找不到上游 |
 
 ⚠️ **告警本身跑在那台机器上 —— 它挂了就不会有任何「错误日志」。**能发现这件事的只有
