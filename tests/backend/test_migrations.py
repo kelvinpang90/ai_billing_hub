@@ -944,7 +944,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 0018 建，在 test_0018_* 里验；税务政策两张表的六个由 0022 建，在 test_0022_* 里验；
         # 价格版本的 BEFORE UPDATE 由 0031 换成 `…_v2`（_EXPECTED_PRICE_TRIGGERS_AT_HEAD）；
         # 定价规则的 BEFORE UPDATE 由 0032 换成 `…_v2`（_EXPECTED_RULE_TRIGGERS_AT_HEAD）；
-        # 汇率版本的 BEFORE UPDATE 由 0033 换成 `…_v2`（_EXPECTED_FX_TRIGGERS_AT_HEAD）。
+        # 汇率版本的 BEFORE UPDATE 由 0033 换成 `…_v2`（_EXPECTED_FX_TRIGGERS_AT_HEAD）；
+        # 税务政策版本的 BEFORE UPDATE 由 0034 换成 `…_v2`（_EXPECTED_TAX_TRIGGERS_AT_HEAD）。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -957,7 +958,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0016,
             *_EXPECTED_TRIGGERS_0017,
             *_EXPECTED_TRIGGERS_0018,
-            *_EXPECTED_TRIGGERS_0022,
+            *_EXPECTED_TAX_TRIGGERS_AT_HEAD,
         }
         assert set(triggers) == expected
     finally:
@@ -5409,6 +5410,11 @@ def test_0020_gives_every_existing_project_one_delivery_row_and_downgrades(
 # tables; `create_all` on SQLite writes the lock row. On a real MySQL: the shapes, keys, foreign
 # keys and their rules, checks and triggers, and that upgrade / downgrade add and drop only these.
 # What the triggers and checks refuse or let through is AIH-TASK-080 (test_tax_policy_db.py).
+#
+# ⚠️ 0034_tax_policy_backstop (AIH-TASK-148, design gate #539 v1) then replaces the versions'
+# BEFORE UPDATE trigger with `trg_tax_policy_versions_before_update_v2`: the cases that look at
+# head find it by that name and compare it with 0034's literal. 0034 itself is in
+# test_tax_policy_backstop_migration.py.
 # ---------------------------------------------------------------------------
 
 _REVISION_0022 = "0022_tax_policy"
@@ -5427,6 +5433,20 @@ _EXPECTED_TRIGGERS_0022 = {
     "trg_tax_policy_versions_before_update": ("tax_policy_versions", "BEFORE", "UPDATE"),
     "trg_tax_policy_versions_before_delete": ("tax_policy_versions", "BEFORE", "DELETE"),
 }
+
+# At head: 0034 swapped the versions' BEFORE UPDATE for `…_v2`.
+_MIGRATION_0034 = pathlib.Path("alembic/versions/20261101_0034_tax_policy_backstop.py")
+_OLD_TAX_UPDATE_TRIGGER = "trg_tax_policy_versions_before_update"
+_TAX_UPDATE_TRIGGER_AT_HEAD = "trg_tax_policy_versions_before_update_v2"
+_EXPECTED_TAX_TRIGGERS_AT_HEAD = {
+    **{n: row for n, row in _EXPECTED_TRIGGERS_0022.items() if n != _OLD_TAX_UPDATE_TRIGGER},
+    _TAX_UPDATE_TRIGGER_AT_HEAD: ("tax_policy_versions", "BEFORE", "UPDATE"),
+}
+_TAX_UPDATE_TRIGGER_QUERY = text(
+    "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS"
+    " WHERE TRIGGER_SCHEMA = DATABASE()"
+    " AND TRIGGER_NAME = 'trg_tax_policy_versions_before_update_v2'"
+)
 
 # Design §2 "CHECK（九条）", written out as the design writes them.
 _DESIGN_CHECKS_0022 = {
@@ -5518,6 +5538,14 @@ _TAX_CHECKS_QUERY = text(
 
 def _load_0022() -> ModuleType:
     spec = importlib.util.spec_from_file_location("migration_0022", _MIGRATION_0022)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_0034() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0034", _MIGRATION_0034)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -5935,12 +5963,16 @@ def test_0022_keys_foreign_keys_checks_triggers_and_the_lock_row(alembic_config:
         with engine.connect() as connection:
             delete_rules = dict(connection.execute(_TAX_REFERENTIAL_RULES_QUERY).all())
             checks = set(connection.execute(_TAX_CHECKS_QUERY).scalars())
+            update_trigger = connection.execute(_TAX_UPDATE_TRIGGER_QUERY).scalar_one()
         # ⚠️ RESTRICT: versions are never deleted, nor the users they name (INV-6).
         names = {name for keys in _EXPECTED_FOREIGN_KEYS_0022.values() for name in keys}
         assert delete_rules == dict.fromkeys(names, "RESTRICT")
         assert checks == set(_tax_checks())
+        # At head the versions' BEFORE UPDATE is 0034's `…_v2`, its body word for word.
+        at_head = _load_0034()._TRIGGERS[_TAX_UPDATE_TRIGGER_AT_HEAD]
+        assert _normalised(str(update_trigger)) == _trigger_body(at_head)
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0022}
-        assert ours == _EXPECTED_TRIGGERS_0022
+        assert ours == _EXPECTED_TAX_TRIGGERS_AT_HEAD
     finally:
         engine.dispose()
 
