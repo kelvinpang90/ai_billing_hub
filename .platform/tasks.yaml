@@ -8923,7 +8923,7 @@ tasks:
     title: 通知：抽出通道无关的 Notification Adapter 与邮件模板层，现有两封邮件逐字不变
     purpose: >-
       spec §47 要求一切通知走 Notification Adapter 抽象，ADR-0009 第 2 节要求第二类邮件出现之前先抽出模板层；今天 app/core/mailer.py 只有一个按「收件人 + 标题 + 正文」发信的 EmailTransport，密码重置信与门户邀请信的正文硬编码在 app/tasks/outbox.py。本任务新增通道无关的 Adapter 接口（按「收件人 + 模板键 + 参数」发送，结果带一个可为空的供应商消息 ID，留给以后需要投递回执的 WhatsApp）、只用标准库的邮件模板层与基于既有 SMTP 传输的 Email adapter，outbox 改为经 Adapter 发信。两封现有邮件的收件人、标题与正文逐字不变，outbox 的投递语义不变；不加新邮件（低余额、停机、复机的 Email 通道另立任务），不做 WhatsApp，不做回执接收，模板只有英文。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '新模块 app/core/notification_adapter.py：Channel（StrEnum，本任务只有 EMAIL = "email"，不预留其他成员）；OutboundMessage（frozen dataclass：channel、recipient、template（模板键）、params: Mapping[str, str]；recipient 与 params 用 field(repr=False)，因为 params 里有带令牌的链接）；DeliveryResult（frozen dataclass：accepted: bool、provider_message_id: str | None = None，文档写明 Email 恒为 None、这个值留给需要投递回执的通道（ADR-0009 第 5 节），本任务不接收回执、不持久化它）；NotificationAdapter（Protocol：channel 属性与 send(message) -> DeliveryResult，任何投递失败都返回 accepted=False，不抛异常）；EmailAdapter（构造参数是一个 app/core/mailer.py 的 EmailTransport；send 时 channel 不是 EMAIL 或模板渲染返回 None → 不调 transport、记一条 error 日志并返回 accepted=False；否则用渲染结果构造 OutgoingEmail(to=recipient, subject, body) 交给 transport.send，返回 DeliveryResult(accepted=它的布尔值)）；build_adapter(channel, settings) 是唯一决定用哪个实现的地方，EMAIL → EmailAdapter(build_transport(settings))。本模块所有日志只带模板键与通道，不带收件人、参数值或异常的绑定内容；全部公开名字列入 __all__'
