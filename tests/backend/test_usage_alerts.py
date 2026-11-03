@@ -345,6 +345,7 @@ def add_outbox(
     event_type: str,
     created_at: dt.datetime,
     status: OutboxStatus = OutboxStatus.PENDING,
+    processed_at: dt.datetime | None = None,
 ) -> None:
     with factory() as session:
         session.add(
@@ -357,9 +358,15 @@ def add_outbox(
                 attempt_count=0,
                 next_retry_at=created_at,
                 created_at=created_at,
+                processed_at=processed_at,
             )
         )
         session.commit()
+
+
+NO_BACKLOG = "no handled outbox row pending over 10 minutes"
+NO_DEAD_LETTER = "no dead letter in 7 days"
+DAY = dt.timedelta(days=1)
 
 
 def test_only_handled_outbox_rows_pending_over_10_minutes_count(factory) -> None:
@@ -368,14 +375,16 @@ def test_only_handled_outbox_rows_pending_over_10_minutes_count(factory) -> None
     add_outbox(factory, EVENT_PASSWORD_RESET, NOW - 60 * MINUTE, OutboxStatus.SENT)
     add_outbox(factory, EVENT_PASSWORD_RESET, NOW - 10 * MINUTE)
     assert check(factory, alerts.outbox_backlog) == AlertResult(
-        OK, "no handled outbox row pending over 10 minutes"
+        OK, f"{NO_BACKLOG}; {NO_DEAD_LETTER}"
     )
 
     add_outbox(factory, EVENT_PASSWORD_RESET, NOW - 11 * MINUTE)
 
     result = check(factory, alerts.outbox_backlog)
     assert result == AlertResult(
-        P2, f"1 row pending over 10 minutes, oldest created {stamp(NOW - 11 * MINUTE)}"
+        P2,
+        f"1 row pending over 10 minutes, oldest created {stamp(NOW - 11 * MINUTE)}; "
+        f"{NO_DEAD_LETTER}",
     )
     assert TENANT_PUBLIC_ID not in result.summary
 
@@ -387,7 +396,75 @@ def test_a_billing_status_changed_row_pending_over_10_minutes_counts(factory) ->
 
     result = check(factory, alerts.outbox_backlog)
     assert result == AlertResult(
-        P2, f"1 row pending over 10 minutes, oldest created {stamp(NOW - 60 * MINUTE)}"
+        P2,
+        f"1 row pending over 10 minutes, oldest created {stamp(NOW - 60 * MINUTE)}; "
+        f"{NO_DEAD_LETTER}",
+    )
+    assert TENANT_PUBLIC_ID not in result.summary
+
+
+def add_dead_letter(
+    factory: sessionmaker[Session], event_type: str, processed_at: dt.datetime | None
+) -> None:
+    add_outbox(factory, event_type, NOW - 8 * DAY, OutboxStatus.FAILED, processed_at)
+
+
+def test_a_handled_dead_letter_within_7_days_is_p2(factory) -> None:
+    """AIH-TASK-149：有处理器的行在最近 7 天内结算为 FAILED 即 P2。"""
+    add_dead_letter(factory, EVENT_PASSWORD_RESET, NOW - 2 * DAY)
+
+    result = check(factory, alerts.outbox_backlog)
+    assert result == AlertResult(
+        P2, f"{NO_BACKLOG}; 1 dead letter in 7 days, latest {stamp(NOW - 2 * DAY)}"
+    )
+    assert TENANT_PUBLIC_ID not in result.summary
+
+
+def test_two_dead_letters_report_the_latest(factory) -> None:
+    add_dead_letter(factory, EVENT_BILLING_STATUS_CHANGED, NOW - 30 * MINUTE)
+    add_dead_letter(factory, EVENT_PASSWORD_RESET, NOW - 3 * DAY)
+
+    result = check(factory, alerts.outbox_backlog)
+    assert result == AlertResult(
+        P2, f"{NO_BACKLOG}; 2 dead letters in 7 days, latest {stamp(NOW - 30 * MINUTE)}"
+    )
+    assert TENANT_PUBLIC_ID not in result.summary
+
+
+@pytest.mark.parametrize(
+    ("event_type", "status", "processed_at"),
+    [
+        # Exactly 7 days ago: outside (strictly later only).
+        (EVENT_PASSWORD_RESET, OutboxStatus.FAILED, NOW - alerts.OUTBOX_DEAD_LETTER_WINDOW),
+        # Earlier: outside.
+        (EVENT_PASSWORD_RESET, OutboxStatus.FAILED, NOW - 8 * DAY),
+        # Still no handler: not counted.
+        (EVENT_ACCOUNT_STATUS_CHANGED, OutboxStatus.FAILED, NOW - DAY),
+        # No processed_at: not counted.
+        (EVENT_PASSWORD_RESET, OutboxStatus.FAILED, None),
+        # Sent: done.
+        (EVENT_PASSWORD_RESET, OutboxStatus.SENT, NOW - DAY),
+    ],
+)
+def test_rows_that_are_not_recent_handled_dead_letters_do_not_count(
+    factory, event_type: str, status: OutboxStatus, processed_at: dt.datetime | None
+) -> None:
+    add_outbox(factory, event_type, NOW - 8 * DAY, status, processed_at)
+
+    result = check(factory, alerts.outbox_backlog)
+    assert result == AlertResult(OK, f"{NO_BACKLOG}; {NO_DEAD_LETTER}")
+
+
+def test_backlog_and_dead_letters_together_are_p2(factory) -> None:
+    add_outbox(factory, EVENT_PASSWORD_RESET, NOW - 20 * MINUTE)
+    add_outbox(factory, EVENT_BILLING_STATUS_CHANGED, NOW - 15 * MINUTE)
+    add_dead_letter(factory, EVENT_BILLING_STATUS_CHANGED, NOW - DAY)
+
+    result = check(factory, alerts.outbox_backlog)
+    assert result == AlertResult(
+        P2,
+        f"2 rows pending over 10 minutes, oldest created {stamp(NOW - 20 * MINUTE)}; "
+        f"1 dead letter in 7 days, latest {stamp(NOW - DAY)}",
     )
     assert TENANT_PUBLIC_ID not in result.summary
 

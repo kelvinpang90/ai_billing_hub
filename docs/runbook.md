@@ -828,7 +828,7 @@ N 个扫描，认领并计费到期的事件（`RECEIVED`，或退避到期的 `
 | `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
 | `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数 |
 | `wallet_negative_balance` 变 P2 / **P1** | 一行合并负余额与钱包核对（设计闸门 #474 v13 §2「告警」），摘要恰好 `<负余额部分>; <核对部分>`，只有计数与日期。P2：有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010；摘要 `<n> wallets below zero`）；或核对从未完成（`reconciliation never completed`）、最近一次完成超过 30 小时（末尾 `stale`）；或有时钟异常的运行（`clock anomaly <行数>`）。**P1** = 核对发现余额与账本不一致（`inconsistent <M>` 或 `later inconsistent <K>` 大于 0），按下面「钱包核对发现不一致」处理 |
-| `outbox_backlog` 变 P2 | 有处理器的 outbox 行（密码重置信、门户邀请信与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。通知类行进死信（`FAILED`）时 payload 保留：看 `domain_outbox` 里这一行的 `payload_json` 与 worker 的 error 日志（`Giving up on an outbox notification`，带 `outbox_id`） |
+| `outbox_backlog` 变 P2 | 一行合并积压与死信（AIH-TASK-149），摘要恰好 `<积压部分>; <死信部分>`，只有计数与时刻；只看有处理器的 outbox 行（密码重置信、门户邀请信与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）。两种 P2 可同时出现。**积压**：积压部分是 `<n> row(s) pending over 10 minutes, oldest created <时刻>`（OK 时是 `no handled outbox row pending over 10 minutes`）= 有行超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。**死信**：死信部分是 `<n> dead letter(s) in 7 days, latest <时刻>`（OK 时是 `no dead letter in 7 days`）= 最近 7 天有行重试用尽结算为 `FAILED`，`latest` 是其中最晚的 `processed_at`，按下面「outbox 死信的处置」处理 |
 | worker 日志 | `Recovered a usage event stuck in PROCESSING past its lease`（WARNING，带 `event_id`、`claimed_at`、`attempt_count`）；`A usage event's ledger reference was already posted with another amount`（ERROR，账本冲突）；`Billing a usage event failed; the attempt is recorded`（WARNING，带错误类型与码） |
 
 ### 影响什么
@@ -934,6 +934,47 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 ⚠️ 这两项目前**没有**在 `docker-compose.yml` 的 `x-backend.environment` 里转发（本任务不改 compose），所以容器里一律是
 代码默认值；只改 `.env` 不会生效。要改需另立任务在 compose 里加转发（照 `BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS`
 的写法与 `test_compose.py` 的默认值比对）。
+
+---
+
+## outbox 死信的处置（`outbox_backlog` 告警的死信部分）
+
+**首次编写：AIH-TASK-149。**
+
+### 怎么发现
+
+`outbox_backlog` 变 P2，摘要的死信部分是 `1 dead letter in 7 days, latest <时刻>` 或
+`<n> dead letters in 7 days, latest <时刻>`：最近 7 天（`processed_at` 晚于 `now - 7 天`）有**有处理器**的
+`domain_outbox` 行重试用尽、结算为 `FAILED`。以前这只有一条 worker 的 error 日志。摘要只有计数与时刻，
+不带租户、`outbox_id`、`aggregate_id`、邮箱或 `event_type`。
+
+### 立刻做什么
+
+1. 只读查出是哪些行（只看类型与时刻，**不要把 `payload_json` 的内容贴进任何对话**：邮件类里有一次性令牌与邮箱）：
+
+   ```sql
+   SELECT id, event_type, processed_at, attempt_count
+     FROM domain_outbox
+    WHERE status = 'FAILED' AND processed_at > UTC_TIMESTAMP() - INTERVAL 7 DAY
+    ORDER BY processed_at DESC;
+   ```
+
+2. 先找原因：对着 worker 的 error 日志（按 `outbox_id`）看是 SMTP 配置、对方拒收还是数据问题，修好根因。
+3. 按类型处置：
+   - **邮件类 · 密码重置**：让用户重新点「忘记密码」发起一次，新行会重新投递；旧行不动。
+   - **邮件类 · 门户邀请**：由管理员重新邀请（见「客户门户账号」的「邀请没收到怎么办」）。
+   - **通知类**（`tenant.low_balance`、`tenant.billing_status_changed`）：进死信时 payload 保留，看这一行的
+     `payload_json` 与 worker 的 error 日志（`Giving up on an outbox notification`，带 `outbox_id`）。
+
+### 恢复
+
+死信过了 7 天窗口（`processed_at` 不再晚于 `now - 7 天`），死信部分自动回到 `no dead letter in 7 days`，
+不需要确认。7 天覆盖周末没人看告警的情况。
+
+### 绝不能做什么
+
+- **不要为了消告警去改这些行的 `status` 或 `processed_at`。**告警会自己恢复；改状态会把重试到上限都发不出去的行
+  放回去再烧一轮，改时刻会抹掉排查依据。
 
 ---
 
