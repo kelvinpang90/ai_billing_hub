@@ -8915,3 +8915,63 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AIH-TASK-151：Phase 6 Notification Adapter 抽象与 Email adapter（docs/TODO.md「后续计划」，Kelvin 2026-11-03 选定并定了四件事）：
+  # 只重构，不加新邮件；接口留模板键与供应商消息 ID（ADR-0009 第 5 节），不做回执接收；模板只有英文，不加语言字段；不走设计闸门。
+  # 不走闸门的理由：密码重置信与门户邀请信的输出逐字不变、outbox 的领取 / 结算 / 退避 / 死信一行不改，由测试钉住；不碰钱、用量摄取、Webhook，不改认证与会话的任何判定。
+  - id: AIH-TASK-151
+    title: 通知：抽出通道无关的 Notification Adapter 与邮件模板层，现有两封邮件逐字不变
+    purpose: >-
+      spec §47 要求一切通知走 Notification Adapter 抽象，ADR-0009 第 2 节要求第二类邮件出现之前先抽出模板层；今天 app/core/mailer.py 只有一个按「收件人 + 标题 + 正文」发信的 EmailTransport，密码重置信与门户邀请信的正文硬编码在 app/tasks/outbox.py。本任务新增通道无关的 Adapter 接口（按「收件人 + 模板键 + 参数」发送，结果带一个可为空的供应商消息 ID，留给以后需要投递回执的 WhatsApp）、只用标准库的邮件模板层与基于既有 SMTP 传输的 Email adapter，outbox 改为经 Adapter 发信。两封现有邮件的收件人、标题与正文逐字不变，outbox 的投递语义不变；不加新邮件（低余额、停机、复机的 Email 通道另立任务），不做 WhatsApp，不做回执接收，模板只有英文。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '新模块 app/core/notification_adapter.py：Channel（StrEnum，本任务只有 EMAIL = "email"，不预留其他成员）；OutboundMessage（frozen dataclass：channel、recipient、template（模板键）、params: Mapping[str, str]；recipient 与 params 用 field(repr=False)，因为 params 里有带令牌的链接）；DeliveryResult（frozen dataclass：accepted: bool、provider_message_id: str | None = None，文档写明 Email 恒为 None、这个值留给需要投递回执的通道（ADR-0009 第 5 节），本任务不接收回执、不持久化它）；NotificationAdapter（Protocol：channel 属性与 send(message) -> DeliveryResult，任何投递失败都返回 accepted=False，不抛异常）；EmailAdapter（构造参数是一个 app/core/mailer.py 的 EmailTransport；send 时 channel 不是 EMAIL 或模板渲染返回 None → 不调 transport、记一条 error 日志并返回 accepted=False；否则用渲染结果构造 OutgoingEmail(to=recipient, subject, body) 交给 transport.send，返回 DeliveryResult(accepted=它的布尔值)）；build_adapter(channel, settings) 是唯一决定用哪个实现的地方，EMAIL → EmailAdapter(build_transport(settings))。本模块所有日志只带模板键与通道，不带收件人、参数值或异常的绑定内容；全部公开名字列入 __all__'
+      - '新模块 app/core/email_templates.py：只用标准库（string.Template），不加依赖；模板键常量 TEMPLATE_PASSWORD_RESET = "password_reset" 与 TEMPLATE_PORTAL_INVITATION = "portal_invitation"；每个模板由标题、正文（string.Template）与必需参数集合组成（重置信：link；邀请信：link、deadline）；render_email(template, params) 返回 RenderedEmail(subject, body) 或 None：未知模板键、params 的键集合与必需集合不完全相等（缺或多）都返回 None，不抛异常；用 substitute，不用 safe_substitute。两个模板的标题与正文从改动前的 app/tasks/outbox.py 逐字搬来，只把链接与到期时刻的位置换成占位符。模块文档写明：只有英文（Kelvin 2026-11-03 定，不加语言字段，要双语时再加）；以后新增一类邮件 = 在这里加一个模板，不在 outbox 里拼字符串'
+      - 'app/tasks/outbox.py：_render_password_reset 与 _render_portal_invitation 保留函数名与参数，返回值改为 OutboundMessage | None（channel 为 EMAIL，recipient 取 payload 的 to，template 取对应常量，params 为 link，邀请信另加 deadline）；前端基址为空、缺收件人 / 令牌 / 到期时刻时返回 None 的判定与日志文字不变；链接与到期时刻的拼法（quote、_invitation_deadline、_MALAYSIA）不变，仍留在本文件；_attempt_send 在渲染之后改为 build_adapter(message.channel, settings).send(message).accepted，不再导入 build_transport 与 OutgoingEmail；_RENDERERS 上方的注释同步为「渲染函数只组装模板参数，正文在 app/core/email_templates.py」。领取、结算、退避、死信、payload 清空、recover、handled_event_types、NOTIFICATION_EVENTS 与通知类事件的处理一行不改；通知类事件不构建任何 adapter'
+      - 'app/core/mailer.py 只改文档：模块文档与 EmailTransport 的文档改为「Notification Adapter 之下的 Email 传输层」，并指向 app/core/notification_adapter.py 与 app/core/email_templates.py；SmtpEmailTransport、build_transport、OutgoingEmail 的代码与行为不改'
+      - '新文件 tests/backend/test_notification_adapter.py：① 逐字不变——对固定输入（固定前端基址、收件人、令牌与 expires_at），经 outbox 的两个渲染函数、真实的 EmailAdapter 与一个记录型假 transport 得到的 OutgoingEmail，其 to、subject、body 与测试里的字面量逐字相等；字面量取本任务改动之前 main 上两个渲染函数对同一输入的输出，PR 的「如何验证」写明怎么取的；② render_email：未知模板键、缺参数、多参数都返回 None；③ EmailAdapter：渲染失败或 channel 不对时不调 transport 且 accepted 为 False；transport 返回 False 时 accepted 为 False；成功时 accepted 为 True、provider_message_id 为 None；渲染失败那条 error 日志的文本不含令牌与收件人（caplog 断言）；④ repr(OutboundMessage) 不含令牌与收件人；⑤ build_adapter(Channel.EMAIL, Settings()) 返回 EmailAdapter，且它包着的 transport 是 SmtpEmailTransport'
+      - '既有测试随接口调整，断言的意义不变：tests/backend/test_outbox.py 的 transport fixture 改为替换 outbox 的 build_adapter，返回一个包着 FakeTransport 的真实 EmailAdapter（渲染路径是真的），直接调用 _render_portal_invitation 的用例改为读 OutboundMessage 的 params 或经 render_email 渲染后读正文；tests/backend/test_password_reset_link.py 与 tests/backend/test_invitation_link.py 的取链接辅助函数改为经 render_email 渲染出正文再取链接（仍是「真的会发出去的那封信」）；tests/backend/test_notification_delivery.py 的 _wire 把「调 build_transport 即失败」改为「调 build_adapter 即失败」。tests/backend/test_mailer.py 不改'
+      - 'docs/TODO.md：只把「待办：密码重置与通知投递的几项加固」一节里「邮件正文硬编码在 app/tasks/outbox.py 的渲染函数里，没有模板层」那一条改为 [x]，末尾可补一句由 AIH-TASK-151 交付、模板在 app/core/email_templates.py；其余条目与 planning-v1 块不改'
+      - '不改 app/services/、app/models/、app/api/、alembic/、deploy/、前端、docs/adr/；不新增事件类型、不改任何 outbox payload；不装依赖；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 不适用，并写明理由：两封邮件的输出逐字不变、outbox 的投递语义不变，由测试钉住'
+    allowed_change_paths:
+      - app/core/notification_adapter.py
+      - app/core/email_templates.py
+      - app/core/mailer.py
+      - app/tasks/outbox.py
+      - tests/backend/test_notification_adapter.py
+      - tests/backend/test_outbox.py
+      - tests/backend/test_notification_delivery.py
+      - tests/backend/test_password_reset_link.py
+      - tests/backend/test_invitation_link.py
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
