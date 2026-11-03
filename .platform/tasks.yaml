@@ -8868,7 +8868,7 @@ tasks:
     title: 健康告警：巡检把 TLS 证书到期与主机时钟同步并进磁盘维度
     purpose: >-
       deploy/monitor.sh 的 disk 维度（宿主机层面的检查）在磁盘水位与 binlog 预算之外，再查两件不会让任何请求报错、却会悄悄出事的宿主机问题：对外域名的 TLS 证书剩余天数（证书由共享基建续期，这里只负责发现；剩 21 天以内 P2、7 天以内或已过期 P1），以及主机时钟是否在做 NTP 同步（不同步 P2）。并进已有的 BILLING_HEALTHCHECK_DISK_URL，不新增检查、不新增 .env 地址；同步部署文档与 runbook。不改应用代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-149
     acceptance_criteria:
