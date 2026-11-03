@@ -18,7 +18,9 @@ Six groups:
   to `PUBLISHED`, a draft straight to `RETIRED`, the one-row lock table;
 - **constraints and database fallbacks** (real MySQL): scope and NULL combinations, mixed
   strategies, completeness on the publish transition, direct inserts, the open-slot unique
-  index, overlapping periods, an empty start and a retired rule's end (v4).
+  index, overlapping periods, an empty start and a retired rule's end (v4); and what migration
+  0032 adds (design gate #539 v1): a retired rule is final, a publish has no end, the overlap
+  check has no sentinel date, a published rule's end changes only three ways.
 
 Resolution, the property test and the concurrency cases are in test_pricing_rules_resolve.py;
 the HTTP contract in test_pricing_rules_api.py. Prices and multipliers are fictional; the
@@ -120,7 +122,10 @@ _ER_SIGNAL_EXCEPTION = 1644
 _ER_CHECK_CONSTRAINT_VIOLATED = 3819
 _IMMUTABLE = "a published pricing rule is immutable"
 _RETIRE_ONLY = "a published pricing rule can only be retired"
-_DISCARDED_FINAL = "a discarded pricing rule is final"
+# Design gate #539 v1 (migration 0032): P1, P2 and P5.
+_FINAL = "a retired or discarded pricing rule is final"
+_WITHOUT_AN_END = "a pricing rule is published without an end"
+_ENDS_THREE_WAYS = "a published pricing rule ends only by truncation, restore or retirement"
 _DRAFT_TRANSITION = "a draft pricing rule is published or discarded"
 _DRAFT_ONLY = "pricing rule components change only on a draft"
 _NEVER_DELETED = "pricing rules are never deleted"
@@ -1626,6 +1631,9 @@ def test_published_components_are_frozen_and_rules_never_deleted(mysql_factory) 
 
 
 def test_only_truncation_and_retirement_pass_on_a_published_rule(mysql_factory) -> None:
+    """Truncating an untruncated rule and retiring an untruncated rule pass; a truncated rule
+    is not retired directly (0032, P5); a retired rule and a discarded draft are final (P1 comes
+    before the immutability check)."""
     clock = Clock(utc_now())
     rules = Rules(mysql_factory, clock)
     published = rules.publish_new(GLOBAL)
@@ -1634,18 +1642,22 @@ def test_only_truncation_and_retirement_pass_on_a_published_rule(mysql_factory) 
     discarded_id = _internal_rule_id(mysql_factory, discarded.id)
     end = "effective_to = '2999-01-01 00:00:00'"
 
+    # Each is rolled back: both run on the untruncated rule.
     _accepted(mysql_factory, _update_rule(end), id=published_id)
     _accepted(mysql_factory, _update_rule(f"status = 'RETIRED', {end}"), id=published_id)
+    with mysql_factory() as session:
+        session.execute(_update_rule(end), {"id": published_id})
+        with pytest.raises(DBAPIError) as raised:
+            session.execute(_update_rule("status = 'RETIRED'"), {"id": published_id})
+        session.rollback()
+    assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _ENDS_THREE_WAYS)
 
     clock.advance(seconds=5)
     assert rules.retire(published.id).status == "RETIRED"
     back = _update_rule("status = 'PUBLISHED'")
-    assert _refused(mysql_factory, back, id=published_id) == (_ER_SIGNAL_EXCEPTION, _RETIRE_ONLY)
+    assert _refused(mysql_factory, back, id=published_id) == (_ER_SIGNAL_EXCEPTION, _FINAL)
     edit = _update_rule("markup_multiplier = 9.99999999")
-    assert _refused(mysql_factory, edit, id=discarded_id) == (
-        _ER_SIGNAL_EXCEPTION,
-        _DISCARDED_FINAL,
-    )
+    assert _refused(mysql_factory, edit, id=discarded_id) == (_ER_SIGNAL_EXCEPTION, _FINAL)
 
 
 def test_the_lock_table_holds_exactly_one_row(mysql_factory) -> None:
@@ -1941,7 +1953,10 @@ def test_two_open_global_rules_are_refused(mysql_factory) -> None:
         (None, T0 + SECOND, False),
         (T0 - DAY, None, False),
         (T0 + 10 * SECOND, T0 + 20 * SECOND, True),
-        (T0 - 10 * SECOND, T0, True),
+        # Refused since 0032: published as `[T0 - 10s, NULL)` first, it overlaps the existing
+        # rule; written with its end at once, P2 refuses it. The backdating design gate #539 §1 ②
+        # closes.
+        (T0 - 10 * SECOND, T0, False),
         (T0 + 10 * SECOND, None, True),
     ],
     ids=[
@@ -1959,20 +1974,34 @@ def test_the_database_refuses_overlapping_periods(
     mysql_factory, scope: str, start, end, accepted: bool
 ) -> None:
     """§7 "no overlapping periods": a direct write that intersects a **truncated** rule of the
-    same scope is refused; end-to-end periods pass. The global scope checks that the trigger
-    compares NULL scope columns as one scope."""
+    same scope is refused; end-to-end periods after it pass. The global scope checks that the
+    trigger compares NULL scope columns as one scope.
+
+    Since 0032 (P2) a publish has no end, so every rule is written the service's way: published
+    as `[start, NULL)`, then truncated by a second UPDATE when it has an end. The refused ones are
+    refused on the publish, by the overlap check (it comes before the empty-start check)."""
     rules = Rules(mysql_factory, utc_now)
     with mysql_factory() as session:
         existing = _direct_draft(session, rules, scope=scope)
-        _publish_directly(session, rules, existing, (T0, T0 + 10 * SECOND))
+        _publish_directly(session, rules, existing, (T0, None))
+        session.execute(
+            _update_rule("effective_to = :end"), {"id": existing, "end": T0 + 10 * SECOND}
+        )
         candidate = _direct_draft(session, rules, scope=scope)
         if accepted:
-            _publish_directly(session, rules, candidate, (start, end))
+            _publish_directly(session, rules, candidate, (start, None))
+            if end is not None:
+                session.execute(_update_rule("effective_to = :end"), {"id": candidate, "end": end})
         else:
             with pytest.raises(DBAPIError) as raised:
                 with session.begin_nested():
-                    _publish_directly(session, rules, candidate, (start, end))
+                    _publish_directly(session, rules, candidate, (start, None))
             assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+            if end is not None:
+                with pytest.raises(DBAPIError) as raised:
+                    with session.begin_nested():
+                        _publish_directly(session, rules, candidate, (start, end))
+                assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _WITHOUT_AN_END)
         session.rollback()
 
 
@@ -1989,7 +2018,11 @@ def test_empty_periods_and_other_scopes_do_not_overlap(mysql_factory) -> None:
             _update_rule("status = 'RETIRED', effective_to = effective_from"), {"id": empty}
         )
         existing = _direct_draft(session, rules)
-        _publish_directly(session, rules, existing, (T0, T0 + 10 * SECOND))
+        # Published without an end (0032, P2), then truncated: `[T0, T0 + 10s)`.
+        _publish_directly(session, rules, existing, (T0, None))
+        session.execute(
+            _update_rule("effective_to = :end"), {"id": existing, "end": T0 + 10 * SECOND}
+        )
         for scope in ("GLOBAL_PROVIDER_MODEL", "CUSTOMER"):
             other = _direct_draft(session, rules, scope=scope)
             _publish_directly(session, rules, other, (T0, None))
@@ -2022,8 +2055,10 @@ def test_only_the_first_global_rule_starts_with_no_time(mysql_factory) -> None:
     """§7 v4: an empty start passes for the first GLOBAL rule only. Once the global scope has any
     PUBLISHED / RETIRED row — including the empty period of a withdrawn reservation, as the
     service reads "never had a published rule" — a direct publish with an empty start is
-    refused. The candidates end where the existing rows start, so the overlap check passes and
-    it is the start check that refuses."""
+    refused. Once the scope has a non-empty period, a publish with an empty start is refused
+    first by the overlap check (since 0032 it is `[NULL, NULL)`, which meets every non-empty
+    period); the start check only acts where the scope has nothing but empty periods. A
+    candidate with an end is refused by P2 before either (0032)."""
     rules = Rules(mysql_factory, utc_now)
     with mysql_factory() as session:
         first = _direct_draft(session, rules)
@@ -2045,17 +2080,23 @@ def test_only_the_first_global_rule_starts_with_no_time(mysql_factory) -> None:
         published = _direct_draft(session, rules)
         _publish_directly(session, rules, published, (T0, None))
         before_it = _direct_draft(session, rules)
-        with pytest.raises(DBAPIError) as raised:
-            with session.begin_nested():
-                _publish_directly(session, rules, before_it, (None, T0))
-        assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _EMPTY_START)
-        _publish_directly(session, rules, before_it, (T0 - DAY, T0))
+        refusals = [
+            ((None, T0), _WITHOUT_AN_END),
+            ((T0 - DAY, T0), _WITHOUT_AN_END),
+            ((None, None), _OVERLAP),
+        ]
+        for period, message in refusals:
+            with pytest.raises(DBAPIError) as raised:
+                with session.begin_nested():
+                    _publish_directly(session, rules, before_it, period)
+            assert _error(raised) == (_ER_SIGNAL_EXCEPTION, message), period
         session.rollback()
 
 
 def test_a_retired_rule_always_has_an_end(mysql_factory) -> None:
-    """§7 v4: retiring directly without writing `effective_to`, or clearing the end of a retired
-    rule, is refused by the CHECK; retiring with an end passes."""
+    """§7 v4: retiring directly without writing `effective_to` is refused by the CHECK; retiring
+    with an end passes. Clearing the end of a retired rule is refused as well — since 0032 by P1
+    (a retired rule is final), which fires before the CHECK."""
     rules = Rules(mysql_factory, utc_now)
     with mysql_factory() as session:
         rule = _direct_draft(session, rules)
@@ -2070,7 +2111,186 @@ def test_a_retired_rule_always_has_an_end(mysql_factory) -> None:
         with pytest.raises(DBAPIError) as raised:
             with session.begin_nested():
                 session.execute(_update_rule("effective_to = NULL"), {"id": rule})
-        assert _error(raised)[0] == _ER_CHECK_CONSTRAINT_VIOLATED
+        assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _FINAL)
+        session.rollback()
+
+
+# --- design gate #539 v1 (migration 0032): written directly, bypassing the services ----------
+
+
+def _set_end(session: Session, rule_id: int, end: dt.datetime | None) -> None:
+    session.execute(_update_rule("effective_to = :end"), {"id": rule_id, "end": end})
+
+
+def _truncated_directly(
+    session: Session, rules: Rules, rule_id: int, start: dt.datetime, end: dt.datetime
+) -> None:
+    """The service's way to `[start, end)`: published without an end, then truncated."""
+    _publish_directly(session, rules, rule_id, (start, None))
+    _set_end(session, rule_id, end)
+
+
+def _period(session: Session, rule_id: int) -> tuple[str, dt.datetime | None, dt.datetime | None]:
+    statement = text(
+        "SELECT status, effective_from, effective_to FROM pricing_rules WHERE id = :id"
+    )
+    status, start, end = session.execute(statement, {"id": rule_id}).one()
+    return str(status), start, end
+
+
+def test_a_retired_rule_is_final(mysql_factory) -> None:
+    """Design #539 §7 "已停用是终态" (P1): a retired rule with an end refuses a shorter end, a
+    longer end, no end, a change of `updated_at` alone and going back to PUBLISHED; the empty
+    period a withdrawn reservation leaves refuses a new end. The rows do not change."""
+    rules = Rules(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        retired = _direct_draft(session, rules, scope="GLOBAL_PROVIDER_MODEL")
+        _publish_directly(session, rules, retired, (T0, None))
+        retire = _update_rule("status = 'RETIRED', effective_to = :end")
+        session.execute(retire, {"id": retired, "end": T0 + DAY})
+        withdrawn = _direct_draft(session, rules, scope="CUSTOMER")
+        _publish_directly(session, rules, withdrawn, (T0 + DAY, None))
+        session.execute(
+            _update_rule("status = 'RETIRED', effective_to = effective_from"), {"id": withdrawn}
+        )
+        session.commit()
+    before = snapshot(mysql_factory)
+
+    writes = [
+        (retired, "effective_to = '2026-09-29 20:30:00'"),
+        (retired, "effective_to = '2026-10-01 08:30:00'"),
+        (retired, "effective_to = NULL"),
+        (retired, "updated_at = '2026-10-01 08:30:00'"),
+        (retired, "status = 'PUBLISHED'"),
+        (withdrawn, "effective_to = '2026-10-01 08:30:00'"),
+    ]
+    for rule_id, assignment in writes:
+        refused = _refused(mysql_factory, _update_rule(assignment), id=rule_id)
+        assert refused == (_ER_SIGNAL_EXCEPTION, _FINAL), assignment
+    assert snapshot(mysql_factory) == before
+
+
+def test_a_publish_has_no_end(mysql_factory) -> None:
+    """Design #539 §7 "发布不带尽头" (P2): with the timeline A `[T0, T0+10s)`, B retired at
+    `[T0+10s, T0+20s)`, C `[T0+30s, T0+40s)`, a draft published with an end is refused in the gap
+    the retirement left, wholly before A (backdating) and after the end; the same start without
+    an end passes after the end."""
+    rules = Rules(mysql_factory, utc_now)
+    scope = "GLOBAL_PROVIDER_MODEL"
+    with mysql_factory() as session:
+        first = _direct_draft(session, rules, scope=scope)
+        _truncated_directly(session, rules, first, T0, T0 + 10 * SECOND)
+        retired = _direct_draft(session, rules, scope=scope)
+        _publish_directly(session, rules, retired, (T0 + 10 * SECOND, None))
+        session.execute(
+            _update_rule("status = 'RETIRED', effective_to = :end"),
+            {"id": retired, "end": T0 + 20 * SECOND},
+        )
+        last = _direct_draft(session, rules, scope=scope)
+        _truncated_directly(session, rules, last, T0 + 30 * SECOND, T0 + 40 * SECOND)
+        candidate = _direct_draft(session, rules, scope=scope)
+
+        for period in [
+            (T0 + 22 * SECOND, T0 + 28 * SECOND),
+            (T0 - 20 * SECOND, T0 - 10 * SECOND),
+            (T0 + 50 * SECOND, T0 + 60 * SECOND),
+        ]:
+            with pytest.raises(DBAPIError) as raised:
+                with session.begin_nested():
+                    _publish_directly(session, rules, candidate, period)
+            assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _WITHOUT_AN_END), period
+            assert _period(session, candidate) == ("DRAFT", None, None)
+
+        _publish_directly(session, rules, candidate, (T0 + 50 * SECOND, None))
+        assert _period(session, candidate) == ("PUBLISHED", T0 + 50 * SECOND, None)
+        session.rollback()
+
+
+# The last day DATETIME holds (design #539 §1 ③).
+_LAST_DAY = dt.datetime(9999, 12, 31, 0, 0, 0)
+
+
+def test_the_overlap_check_has_no_sentinel_date(mysql_factory) -> None:
+    """Design #539 §7 "相交判定的边界" (P4), one scope each time.
+
+    ① An existing `['9999-12-31 00:00:00', '9999-12-31 00:00:01')`: a complete draft published
+    as `[T0, NULL)` is refused. Under 0030's check it went through: `COALESCE` compared
+    `'9999-12-31 00:00:00' < '9999-12-31'` as strings, which is false.
+    ③ An existing `['9999-12-31 23:59:58', NULL)`: publishing `['9999-12-31 23:59:59', NULL)`
+    without truncating it first is refused by the trigger. Under 0030's check it was the
+    `open_slot` unique index that refused it (1062).
+    ④ After ①'s existing rule, `['9999-12-31 00:00:01', NULL)` passes (end to end)."""
+    rules = Rules(mysql_factory, utc_now)
+    with mysql_factory() as session:
+        # ①
+        existing = _direct_draft(session, rules)
+        _truncated_directly(session, rules, existing, _LAST_DAY, _LAST_DAY + SECOND)
+        candidate = _direct_draft(session, rules)
+        with pytest.raises(DBAPIError) as raised:
+            with session.begin_nested():
+                _publish_directly(session, rules, candidate, (T0, None))
+        assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+        # ④
+        _publish_directly(session, rules, candidate, (_LAST_DAY + SECOND, None))
+        assert _period(session, candidate) == ("PUBLISHED", _LAST_DAY + SECOND, None)
+        session.rollback()
+
+        # ③
+        last = dt.datetime(9999, 12, 31, 23, 59, 59)
+        existing = _direct_draft(session, rules, scope="GLOBAL_PROVIDER_MODEL")
+        _publish_directly(session, rules, existing, (last - SECOND, None))
+        candidate = _direct_draft(session, rules, scope="GLOBAL_PROVIDER_MODEL")
+        with pytest.raises(DBAPIError) as raised:
+            with session.begin_nested():
+                _publish_directly(session, rules, candidate, (last, None))
+        assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+        session.rollback()
+
+
+def test_a_published_rule_ends_only_three_ways(mysql_factory) -> None:
+    """Design #539 §7 "尽头只按三种方式变" (P5). X is truncated to `[T0, T0+10s)` and its
+    successor is the empty period of a withdrawn reservation. Refused: X's end made shorter,
+    made longer (it meets no non-empty period), X retired as it is, X retired with a shorter end.
+    Passing: truncating an untruncated rule, restoring X to no end (the successor is empty),
+    retiring an untruncated rule."""
+    rules = Rules(mysql_factory, utc_now)
+    scope = "GLOBAL_PROVIDER_MODEL"
+    with mysql_factory() as session:
+        truncated = _direct_draft(session, rules, scope=scope)
+        _truncated_directly(session, rules, truncated, T0, T0 + 10 * SECOND)
+        reserved = _direct_draft(session, rules, scope=scope)
+        _publish_directly(session, rules, reserved, (T0 + 10 * SECOND, None))
+        session.execute(
+            _update_rule("status = 'RETIRED', effective_to = effective_from"), {"id": reserved}
+        )
+        untruncated = _direct_draft(session, rules, scope="CUSTOMER")
+        _publish_directly(session, rules, untruncated, (T0, None))
+        retiring = _direct_draft(session, rules, scope="CUSTOMER_PROVIDER")
+        _publish_directly(session, rules, retiring, (T0, None))
+
+        refused = [
+            ("effective_to = :end", T0 + 5 * SECOND),
+            ("effective_to = :end", T0 + 20 * SECOND),
+            ("status = 'RETIRED'", None),
+            ("status = 'RETIRED', effective_to = :end", T0 + 5 * SECOND),
+        ]
+        for assignment, end in refused:
+            params = {"id": truncated} if end is None else {"id": truncated, "end": end}
+            with pytest.raises(DBAPIError) as raised:
+                with session.begin_nested():
+                    session.execute(_update_rule(assignment), params)
+            assert _error(raised) == (_ER_SIGNAL_EXCEPTION, _ENDS_THREE_WAYS), assignment
+        assert _period(session, truncated) == ("PUBLISHED", T0, T0 + 10 * SECOND)
+
+        _set_end(session, untruncated, T0 + DAY)
+        assert _period(session, untruncated) == ("PUBLISHED", T0, T0 + DAY)
+        _set_end(session, truncated, None)
+        assert _period(session, truncated) == ("PUBLISHED", T0, None)
+        session.execute(
+            _update_rule("status = 'RETIRED', effective_to = :end"),
+            {"id": retiring, "end": T0 + DAY},
+        )
+        assert _period(session, retiring) == ("RETIRED", T0, T0 + DAY)
         session.rollback()
 
 
