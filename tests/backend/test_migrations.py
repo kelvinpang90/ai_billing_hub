@@ -943,7 +943,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # test_0016_* 里验；冲突表的两个由 0017 建，在 test_0017_* 里验；用量事件上的三个由
         # 0018 建，在 test_0018_* 里验；税务政策两张表的六个由 0022 建，在 test_0022_* 里验；
         # 价格版本的 BEFORE UPDATE 由 0031 换成 `…_v2`（_EXPECTED_PRICE_TRIGGERS_AT_HEAD）；
-        # 定价规则的 BEFORE UPDATE 由 0032 换成 `…_v2`（_EXPECTED_RULE_TRIGGERS_AT_HEAD）。
+        # 定价规则的 BEFORE UPDATE 由 0032 换成 `…_v2`（_EXPECTED_RULE_TRIGGERS_AT_HEAD）；
+        # 汇率版本的 BEFORE UPDATE 由 0033 换成 `…_v2`（_EXPECTED_FX_TRIGGERS_AT_HEAD）。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -952,7 +953,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0010,
             *_EXPECTED_PRICE_TRIGGERS_AT_HEAD,
             *_EXPECTED_RULE_TRIGGERS_AT_HEAD,
-            *_EXPECTED_TRIGGERS_0015,
+            *_EXPECTED_FX_TRIGGERS_AT_HEAD,
             *_EXPECTED_TRIGGERS_0016,
             *_EXPECTED_TRIGGERS_0017,
             *_EXPECTED_TRIGGERS_0018,
@@ -3475,6 +3476,11 @@ def test_0014_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
 # keys and their rules, checks and triggers of the three tables, and that upgrade / downgrade
 # add and drop only these tables. What the triggers and constraints refuse or let through is in
 # test_fx_rates_db.py.
+#
+# ⚠️ 0033_fx_rate_backstop (AIH-TASK-147, design gate #539 v1) then replaces the versions'
+# BEFORE UPDATE trigger with `trg_fx_rate_versions_before_update_v2`: the cases that look at head
+# find it by that name and compare it with 0033's literal. 0033 itself is in
+# test_fx_rate_backstop_migration.py.
 # ---------------------------------------------------------------------------
 
 _REVISION_0015 = "0015_fx_rates"
@@ -3494,6 +3500,19 @@ _EXPECTED_TRIGGERS_0015 = {
     "trg_fx_fetch_attempts_before_update": ("fx_fetch_attempts", "BEFORE", "UPDATE"),
     "trg_fx_fetch_attempts_before_delete": ("fx_fetch_attempts", "BEFORE", "DELETE"),
 }
+
+# At head: 0033 swapped the versions' BEFORE UPDATE for `…_v2`.
+_MIGRATION_0033 = pathlib.Path("alembic/versions/20261101_0033_fx_rate_backstop.py")
+_OLD_FX_UPDATE_TRIGGER = "trg_fx_rate_versions_before_update"
+_FX_UPDATE_TRIGGER_AT_HEAD = "trg_fx_rate_versions_before_update_v2"
+_EXPECTED_FX_TRIGGERS_AT_HEAD = {
+    **{n: row for n, row in _EXPECTED_TRIGGERS_0015.items() if n != _OLD_FX_UPDATE_TRIGGER},
+    _FX_UPDATE_TRIGGER_AT_HEAD: ("fx_rate_versions", "BEFORE", "UPDATE"),
+}
+_FX_UPDATE_TRIGGER_QUERY = text(
+    "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS"
+    " WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = 'trg_fx_rate_versions_before_update_v2'"
+)
 
 _EXPECTED_0015_COLUMNS = {
     "fx_rate_locks": {"id": False},
@@ -3567,6 +3586,14 @@ _FX_CHECKS_QUERY = text(
 
 def _load_0015() -> ModuleType:
     spec = importlib.util.spec_from_file_location("migration_0015", _MIGRATION_0015)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_0033() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0033", _MIGRATION_0033)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -3878,13 +3905,18 @@ def test_0015_keys_foreign_keys_checks_and_triggers(alembic_config: Config) -> N
         with engine.connect() as connection:
             delete_rules = dict(connection.execute(_FX_REFERENTIAL_RULES_QUERY).all())
             checks = set(connection.execute(_FX_CHECKS_QUERY).scalars())
+            update_trigger = connection.execute(_FX_UPDATE_TRIGGER_QUERY).scalar_one()
         # ⚠️ RESTRICT: versions and attempts are never deleted, nor the users they name (INV-6).
         names = {name for keys in _EXPECTED_FOREIGN_KEYS_0015.values() for name in keys}
         assert delete_rules == dict.fromkeys(names, "RESTRICT")
         assert checks == set(_fx_checks())
+        # At head the versions' BEFORE UPDATE is 0033's `…_v2`, its body word for word.
+        at_head = _load_0033()._TRIGGERS[_FX_UPDATE_TRIGGER_AT_HEAD]
+        assert _normalised(str(update_trigger)) == _trigger_body(at_head)
         ours = {name: row for name, row in _all_triggers().items() if row[0] in _TABLES_0015}
-        # At head the lock table also has 0016's BEFORE UPDATE.
-        assert ours == _EXPECTED_TRIGGERS_0015 | _triggers_0016_on(_TABLES_0015)
+        # At head the lock table also has 0016's BEFORE UPDATE, and the versions' BEFORE UPDATE is
+        # 0033's `…_v2`.
+        assert ours == _EXPECTED_FX_TRIGGERS_AT_HEAD | _triggers_0016_on(_TABLES_0015)
     finally:
         engine.dispose()
 

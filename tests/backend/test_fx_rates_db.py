@@ -14,6 +14,9 @@ refuse more than it should:
   the service's write orders pass;
 - **no overlapping periods**: intersecting, end-to-end, empty periods, an empty period inside
   another version's period, other currencies, and the trigger taking `fx_rate_locks`;
+- **the backstop of migration 0033** (design gate #539 v1 §7, AIH-TASK-147): the intersection
+  on the last day DATETIME holds, without sentinel dates; a truncated version's end changes only
+  by restore (truncation, restore and retirement pass);
 - **migration**: upgrade / downgrade add and drop the three tables; the lock table holds
   exactly one row.
 
@@ -86,6 +89,8 @@ _PUBLISHED_WITH_END = "an fx rate version is published without an end"
 _IMMUTABLE = "a published fx rate version is immutable"
 _RETIRE_ONLY = "a published fx rate version can only be retired"
 _OVERLAP = "fx rate periods overlap"
+# Migration 0033 (AIH-TASK-147, design gate #539 v1 §2 P5).
+_ENDS_THREE_WAYS = "a published fx rate version ends only by truncation, restore or retirement"
 _NEVER_DELETED = "fx rate versions are never deleted"
 _APPEND_ONLY = "fx fetch attempts are append-only"
 
@@ -517,7 +522,8 @@ def test_a_discarded_version_is_final(db: Db, assignment: str) -> None:
 
 def test_the_same_edits_pass_on_a_draft_and_a_published_version(db: Db) -> None:
     """The counterpart of the two cases above: what is final for RETIRED / DISCARDED is an
-    ordinary edit of a draft, and the end of a published version still moves."""
+    ordinary edit of a draft, and the end of a published version still moves — by truncation
+    and restore (0033: not from one end straight to another)."""
     draft = db.draft()
     published = db.draft()
     db.publish(published, at(10))
@@ -525,6 +531,7 @@ def test_the_same_edits_pass_on_a_draft_and_a_published_version(db: Db) -> None:
     db.execute(_update(f"rate = {OTHER_RATE}"), id=draft)
     db.execute(_update("updated_at = '2026-10-01 13:00:00'"), id=draft)
     db.set_end(published, at(13))
+    db.set_end(published, None)
     db.set_end(published, at(11))
 
     assert db.period(published) == ("PUBLISHED", at(10), at(11))
@@ -964,7 +971,9 @@ def test_a_period_that_meets_another_is_refused(
 
 def test_two_truncated_versions_that_intersect_are_refused(db: Db) -> None:
     """X `[10:00:00, 10:00:10)` and Y `[10:00:10, 10:00:15)` meet end to end; moving X's end
-    into Y (or clearing it) is refused, moving it back is not."""
+    into Y or past it is refused by 0033's P5 (a truncated end never moves to another value),
+    clearing it by the overlap check (the restore meets Y). Shortening it is refused by P5 as
+    well; writing the same end again changes nothing and passes."""
     x = db.draft()
     db.publish(x, at(10))
     db.set_end(x, at(10, 0, 10))
@@ -972,12 +981,16 @@ def test_two_truncated_versions_that_intersect_are_refused(db: Db) -> None:
     db.publish(y, at(10, 0, 10))
     db.set_end(y, at(10, 0, 15))
 
-    for end in (at(10, 0, 12), at(10, 0, 20), None):
+    for end in (at(10, 0, 12), at(10, 0, 20)):
         refused = db.refuses(lambda end=end: db.set_end(x, end))
-        assert refused == (_ER_SIGNAL_EXCEPTION, _OVERLAP), end
+        assert refused == (_ER_SIGNAL_EXCEPTION, _ENDS_THREE_WAYS), end
+    refused = db.refuses(lambda: db.set_end(x, None))
+    assert refused == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
     assert db.period(x) == ("PUBLISHED", at(10), at(10, 0, 10))
 
-    db.set_end(x, at(10, 0, 5))
+    refused = db.refuses(lambda: db.set_end(x, at(10, 0, 5)))
+    assert refused == (_ER_SIGNAL_EXCEPTION, _ENDS_THREE_WAYS)
+    assert db.period(x) == ("PUBLISHED", at(10), at(10, 0, 10))
     db.set_end(x, at(10, 0, 10))
     assert db.period(y) == ("PUBLISHED", at(10, 0, 10), at(10, 0, 15))
 
@@ -1038,6 +1051,117 @@ def test_the_overlap_check_takes_the_fx_rate_lock(engine: Engine) -> None:
     finally:
         writers.close()
         holders.close()
+
+
+# --- the backstop of migration 0033 (design gate #539 v1 §7) ----------------------------------
+
+# An existing period that starts on the last day DATETIME holds.
+LAST_DAY = dt.datetime(9999, 12, 31, 0, 0, 0)
+LAST_SECOND = dt.datetime(9999, 12, 31, 23, 59, 59)
+
+
+@pytest.mark.parametrize("start", [at(10), None], ids=["ordinary-start", "from-all-time"])
+def test_a_period_before_one_on_the_last_day_is_refused(db: Db, start: dt.datetime | None) -> None:
+    """Design §7 "相交判定的边界" ①: the existing version is `[9999-12-31 00:00:00,
+    9999-12-31 00:00:01)` (published open, then truncated); a draft published directly as
+    `[F, NULL)` or `[NULL, NULL)` meets it. 0015's sentinel judgement let both through
+    (`'9999-12-31 00:00:00' < '9999-12-31'` is false); 0033's P4 refuses them."""
+    existing = db.draft()
+    db.publish(existing, LAST_DAY)
+    db.set_end(existing, LAST_DAY + SECOND)
+    draft = db.draft()
+    before = db.snapshot()
+
+    refused = db.refuses(lambda: db.publish(draft, start))
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+    assert db.snapshot() == before
+
+
+def test_a_second_open_period_on_the_last_day_is_refused_by_the_trigger(db: Db) -> None:
+    """Design §7 "相交判定的边界" ③: the existing version is `[9999-12-31 23:59:58, NULL)`;
+    publishing `[9999-12-31 23:59:59, NULL)` without truncating it first is refused. Under 0015's
+    sentinel judgement the trigger missed it and the `open_slot` unique index refused it (1062);
+    0033's P4 refuses it in the trigger."""
+    existing = db.draft()
+    db.publish(existing, LAST_SECOND - SECOND)
+    draft = db.draft()
+    before = db.snapshot()
+
+    refused = db.refuses(lambda: db.publish(draft, LAST_SECOND))
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+    assert db.snapshot() == before
+
+
+def test_end_to_end_on_the_last_day_passes(db: Db) -> None:
+    """Design §7 "相交判定的边界" ④, the counterpart: after `[9999-12-31 00:00:00,
+    9999-12-31 00:00:01)`, `[9999-12-31 00:00:01, NULL)` meets it end to end and passes."""
+    existing = db.draft()
+    db.publish(existing, LAST_DAY)
+    db.set_end(existing, LAST_DAY + SECOND)
+    draft = db.draft()
+
+    db.publish(draft, LAST_DAY + SECOND)
+
+    assert db.period(existing) == ("PUBLISHED", LAST_DAY, LAST_DAY + SECOND)
+    assert db.period(draft) == ("PUBLISHED", LAST_DAY + SECOND, None)
+
+
+def _truncated_before_a_withdrawn_reservation(db: Db) -> tuple[int, int]:
+    """X `[10:00, 12:00)`, truncated for Y reserved from 12:00; Y withdrawn, so its period is the
+    empty `[12:00, 12:00)` and X has not been restored yet."""
+    x = db.draft()
+    db.publish(x, at(10))
+    y = db.draft()
+    db.set_end(x, at(12))
+    db.publish(y, at(12))
+    db.withdraw(y)
+    return x, y
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda db, x: db.set_end(x, at(11)),
+        lambda db, x: db.set_end(x, at(13)),
+        lambda db, x: db.retire(x, at(12)),
+        lambda db, x: db.retire(x, at(11)),
+    ],
+    ids=["shorter-end", "longer-end", "retired-at-its-end", "retired-shorter"],
+)
+def test_a_truncated_end_moves_only_by_restore(db: Db, write: Callable[[Db, int], None]) -> None:
+    """Design §7 "尽头只按三种方式变" (0033's P5): a truncated PUBLISHED version's end is not
+    shortened, nor lengthened — not even to 13:00, which meets nothing because the successor is
+    the empty period a withdrawn reservation left — and the version is not retired directly,
+    with its end or a shorter one."""
+    x, y = _truncated_before_a_withdrawn_reservation(db)
+    before = db.snapshot()
+
+    refused = db.refuses(lambda: write(db, x))
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _ENDS_THREE_WAYS)
+    assert db.snapshot() == before
+    assert db.period(x) == ("PUBLISHED", at(10), at(12))
+    assert db.period(y) == ("RETIRED", at(12), at(12))
+
+
+def test_truncation_restore_and_retirement_pass(db: Db) -> None:
+    """The counterparts: an untruncated version is truncated; a truncated one whose successor is
+    an empty period is restored to no end; an untruncated one is retired."""
+    x, y = _truncated_before_a_withdrawn_reservation(db)
+    z = db.draft(base="EUR")
+    db.publish(z, at(10))
+
+    db.set_end(z, at(11))
+    db.set_end(x, None)
+    restored = db.period(x)
+    db.retire(x, at(11))
+
+    assert db.period(z) == ("PUBLISHED", at(10), at(11))
+    assert restored == ("PUBLISHED", at(10), None)
+    assert db.period(x) == ("RETIRED", at(10), at(11))
+    assert db.period(y) == ("RETIRED", at(12), at(12))
 
 
 # --- migration (design §7 "迁移") ----------------------------------------------------------
