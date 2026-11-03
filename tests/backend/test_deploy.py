@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -876,6 +877,285 @@ def test_the_monitor_never_sources_the_env_file() -> None:
     assert 'sed -n "s/^${1}=//p" "$ENV_FILE"' in monitor
     assert "source " not in monitor
     assert not re.search(r"^\s*\.\s+\"?\$ENV_FILE", monitor, re.MULTILINE)
+
+
+# --- TLS 证书与主机时钟并进 disk 维度（spec §95；AIH-TASK-150）-------------------
+#
+# 两样都不会让任何请求报错。静态守卫钉住形状；行为把函数原样抠出来，对着假 openssl /
+# timedatectl 跑（不联网）。
+
+
+def test_tls_and_clock_ride_on_the_disk_check() -> None:
+    """免费档 20 个已用满：并进 disk，不新增检查、不新增 `.env` 地址键。
+
+    Let's Encrypt 正常在剩 30 天时续期：剩 21 天 = 续期已失败约 9 天（P2），7 天以内 P1。
+    """
+    monitor = uncommented(MONITOR)
+    warn = re.search(r'^TLS_WARN_DAYS="\$\{BILLING_MONITOR_TLS_WARN_DAYS:-(\d+)\}"$', monitor, re.M)
+    crit = re.search(r'^TLS_CRIT_DAYS="\$\{BILLING_MONITOR_TLS_CRIT_DAYS:-(\d+)\}"$', monitor, re.M)
+    assert warn is not None and crit is not None
+    assert (int(warn.group(1)), int(crit.group(1))) == (21, 7)
+    assert int(crit.group(1)) < int(warn.group(1))
+
+    # 在 check_binlog 之后调用 —— 走 disk 那条心跳，复核时随 check_disk 一起重跑。
+    disk = monitor_function("check_disk")
+    assert disk.index("check_binlog") < disk.index("check_tls") < disk.index("check_clock")
+
+    # ⚠️ 连不上的主机会让 s_client 一直挂着，整轮巡检拖过下一个 cron 周期。
+    connects = monitor.count("openssl s_client")
+    assert connects >= 1
+    assert monitor.count("timeout 15 openssl s_client") == connects
+
+    # 字面解析 `.env`，不 source、不从环境变量里拿。
+    assert "env_value BILLING_FRONTEND_BASE_URL" in monitor
+    assert not re.search(r"\$\{?BILLING_FRONTEND_BASE_URL", monitor)
+
+    assert set(re.findall(r"BILLING_HEALTHCHECK_[A-Z0-9_]*", monitor)) == {
+        "BILLING_HEALTHCHECK_SERVICES_URL",
+        "BILLING_HEALTHCHECK_READYZ_URL",
+        "BILLING_HEALTHCHECK_DISK_URL",
+        # publish_alerts 按维度拼出来的前缀
+        "BILLING_HEALTHCHECK_ALERT_",
+    }
+    assert 'publish BILLING_HEALTHCHECK_DISK_URL disk "$DISK_OUT" "$(disk_ok_summary)"' in monitor
+
+
+FAKE_HOST = "billing-fake.example.test"
+
+FAKE_OPENSSL = r"""#!/bin/sh
+case "$1" in
+    s_client)
+        printf '%s\n' "$*" >> openssl_calls
+        # 真的 openssl 报错时带主机名：脚本必须把它丢掉
+        printf 'connect to %s failed\n' "$3" >&2
+        [ "${FAKE_S_CLIENT_EXIT:-0}" = 0 ] || exit "$FAKE_S_CLIENT_EXIT"
+        printf '%s\n' '-----BEGIN CERTIFICATE-----' 'MIIfake' '-----END CERTIFICATE-----'
+        ;;
+    x509)
+        found=""
+        while IFS= read -r line; do
+            case "$line" in *"BEGIN CERTIFICATE"*) found=1 ;; esac
+        done
+        [ -n "$found" ] || exit 1
+        printf 'notAfter=%s\n' "$FAKE_NOT_AFTER"
+        ;;
+    *) exit 2 ;;
+esac
+"""
+
+FAKE_TIMEDATECTL = r"""#!/bin/sh
+printf '%s\n' "$FAKE_NTP"
+"""
+
+OPENSSL_MONTHS = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+)
+
+
+def openssl_time(offset: timedelta) -> str:
+    """`openssl x509 -enddate` 的格式（`Nov  3 12:00:00 2026 GMT`），月份不随 locale 变。"""
+    when = datetime.now(UTC) + offset
+    return f"{OPENSSL_MONTHS[when.month - 1]} {when.day:2d} {when:%H:%M:%S} {when.year} GMT"
+
+
+def run_host_check(
+    tmp_path,
+    call: str,
+    *,
+    base_url: str = f"https://{FAKE_HOST}:8443/portal",
+    not_after: str | None = None,
+    s_client_exit: int = 0,
+    ntp: str | None = "yes",
+) -> tuple[str, str, list[str]]:
+    """把 monitor.sh 的 env_value、tls_host / ntp_status、check_tls / check_clock 与 disk_ok_summary
+    原样抠出来跑 `call`，返回 (stdout, stderr, 假 s_client 收到的参数)。
+
+    `ntp=None`：没有 timedatectl 这个命令。⚠️ 所以 PATH 只留假命令目录，用到的真工具各包一层 ——
+    否则 CI 宿主机自己的 timedatectl 会被找到。
+    """
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    monitor = uncommented(MONITOR)
+    settings = []
+    for name in ("DISK_WARN_PERCENT", "TLS_WARN_DAYS", "TLS_CRIT_DAYS"):
+        line = re.search(rf"^{name}=.*$", monitor, re.M)
+        assert line is not None, name
+        settings.append(line.group(0))
+    log_line = re.search(r"^log\(\) \{.*\}$", monitor, re.M)
+    assert log_line is not None
+    functions = "\n".join(
+        monitor_function(name)
+        for name in (
+            "env_value",
+            "tls_host",
+            "ntp_status",
+            "check_tls",
+            "check_clock",
+            "disk_ok_summary",
+        )
+    )
+
+    work = tmp_path / "host"
+    (work / "bin").mkdir(parents=True)
+    (work / ".env").write_text(
+        f"BILLING_HTTP_PORT=8080\nBILLING_FRONTEND_BASE_URL={base_url}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (work / "run.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "for tool in sed head date timeout df awk; do\n"
+        '    printf \'#!/bin/sh\\nexec "%s" "$@"\\n\' "$(command -v "$tool")" > "bin/$tool"\n'
+        '    chmod +x "bin/$tool"\n'
+        "done\n"
+        'export PATH="$PWD/bin"\n'
+        "ENV_FILE=.env\n" + "\n".join(settings) + f"\n{log_line.group(0)}\n{functions}\n{call}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fakes = {"openssl": FAKE_OPENSSL}
+    if ntp is not None:
+        fakes["timedatectl"] = FAKE_TIMEDATECTL
+    for name, body in fakes.items():
+        fake = work / "bin" / name
+        fake.write_text(body, encoding="utf-8", newline="\n")
+        fake.chmod(0o755)
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("BILLING_")}
+    env.update(
+        {
+            "FAKE_NOT_AFTER": not_after if not_after is not None else "",
+            "FAKE_S_CLIENT_EXIT": str(s_client_exit),
+            "FAKE_NTP": ntp or "",
+        }
+    )
+    done = subprocess.run(
+        [bash, str(work / "run.sh")], cwd=work, env=env, capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    calls_file = work / "openssl_calls"
+    calls = calls_file.read_text(encoding="utf-8").splitlines() if calls_file.exists() else []
+    return done.stdout, done.stderr, calls
+
+
+def test_a_certificate_with_a_month_left_raises_nothing(tmp_path) -> None:
+    """剩 30 天：Let's Encrypt 正是这时续期，不报。
+
+    主机名去掉了协议头、端口与路径，按 SNI 连 443。
+    """
+    out, _, calls = run_host_check(
+        tmp_path, "check_tls", not_after=openssl_time(timedelta(days=30, hours=1))
+    )
+    assert out == ""
+    assert calls == [f"s_client -connect {FAKE_HOST}:443 -servername {FAKE_HOST}"]
+
+
+@pytest.mark.parametrize(
+    ("offset", "problem"),
+    [
+        (timedelta(days=20, hours=1), "P2 tls certificate expires in 20 days (warn 21)"),
+        (timedelta(days=5, hours=1), "P1 tls certificate expires in 5 days (crit 7)"),
+        (timedelta(days=-2), "P1 tls certificate has expired"),
+        # ⚠️ 过期不到一天：整数除法得 0 天，按天数比较会漏成「剩 0 天」
+        (timedelta(hours=-1), "P1 tls certificate has expired"),
+    ],
+)
+def test_a_certificate_close_to_expiry_is_reported(
+    tmp_path, offset: timedelta, problem: str
+) -> None:
+    """恰好一行，分级在行首；问题行与日志都不带主机名。"""
+    out, err, _ = run_host_check(tmp_path, "check_tls", not_after=openssl_time(offset))
+    assert out.splitlines() == [problem]
+    assert FAKE_HOST not in out and FAKE_HOST not in err
+
+
+@pytest.mark.parametrize(
+    ("not_after", "s_client_exit"),
+    [
+        # 连不上 / 超时：s_client 失败，没有证书
+        (openssl_time(timedelta(days=60)), 1),
+        # 输出里没有 notAfter
+        ("", 0),
+        # date 换算失败
+        ("not a date", 0),
+    ],
+)
+def test_an_unreadable_certificate_is_a_p2(tmp_path, not_after: str, s_client_exit: int) -> None:
+    out, err, _ = run_host_check(
+        tmp_path, "check_tls", not_after=not_after, s_client_exit=s_client_exit
+    )
+    assert out.splitlines() == ["P2 tls certificate could not be read"]
+    assert FAKE_HOST not in out and FAKE_HOST not in err
+
+
+@pytest.mark.parametrize("base_url", ["", f"http://{FAKE_HOST}"])
+def test_no_https_base_url_skips_the_certificate_check(tmp_path, base_url: str) -> None:
+    out, err, calls = run_host_check(
+        tmp_path,
+        "check_tls",
+        base_url=base_url,
+        not_after=openssl_time(timedelta(days=-2)),
+    )
+    assert out == ""
+    assert calls == []
+    assert "no https BILLING_FRONTEND_BASE_URL configured: skipping the certificate check" in err
+    assert FAKE_HOST not in err
+
+
+@pytest.mark.parametrize(
+    ("ntp", "problems", "logged"),
+    [
+        ("yes", [], None),
+        ("no", ["P2 host clock is not NTP-synchronized"], None),
+        # 命令不存在：与 check_binlog「量不到不报警」同一条理由
+        (None, [], "clock sync status unavailable; skipping the clock check"),
+    ],
+)
+def test_the_clock_check(
+    tmp_path, ntp: str | None, problems: list[str], logged: str | None
+) -> None:
+    out, err, _ = run_host_check(tmp_path, "check_clock", ntp=ntp)
+    assert out.splitlines() == problems
+    if logged is not None:
+        assert logged in err
+    assert FAKE_HOST not in out and FAKE_HOST not in err
+
+
+def test_the_disk_summary_names_both_host_checks_when_they_ran(tmp_path) -> None:
+    out, _, calls = run_host_check(tmp_path, "disk_ok_summary")
+    summary = out.strip()
+    assert summary.startswith("disk below 80% (")
+    assert summary.endswith(") + tls + clock")
+    # 摘要只判断「会不会执行」，不再连一次
+    assert calls == []
+
+
+@pytest.mark.parametrize("base_url", ["", f"http://{FAKE_HOST}"])
+def test_the_disk_summary_says_when_the_certificate_check_was_skipped(
+    tmp_path, base_url: str
+) -> None:
+    out, _, _ = run_host_check(tmp_path, "disk_ok_summary", base_url=base_url)
+    assert "+ tls skipped" in out
+    assert not re.search(r"\+ tls(?! skipped)", out)
+    assert out.strip().endswith("+ clock")
+
+
+def test_the_disk_summary_says_when_the_clock_check_was_skipped(tmp_path) -> None:
+    out, _, _ = run_host_check(tmp_path, "disk_ok_summary", ntp=None)
+    assert out.strip().endswith("+ tls + clock skipped")
 
 
 # --- 应用的告警维度（设计闸门 #183 v3 §2「两个告警维度」；AIH-TASK-043）------------

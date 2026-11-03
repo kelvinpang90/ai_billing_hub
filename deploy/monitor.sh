@@ -10,6 +10,13 @@
 #      所以负载均衡不会发现，告警名 `billing_readiness_degraded_redis`（docs/runbook.md）
 #      —— AI 就绪（`/healthz/ai`）并在同一个维度里，告警名 `billing_ai_readiness_failed`
 #   3. 磁盘被日志 / binlog 撑满 —— §94 明写：必须在**威胁到 MySQL / 文档存储之前**告警
+#      —— 宿主机层面的 TLS 证书到期与主机时钟不同步（AIH-TASK-150）并在同一个维度里
+#
+# ⚠️ **TLS 与时钟为什么并进 disk、而不是各自一个检查**：Healthchecks 免费档的 20 个检查
+# 已经用满（docs/deployment.md §8.4「生产接通状态」），不能再新建。并进 disk 是因为它
+# 很少变红，新问题被一条已经红着的旧告警遮住的概率最低。代价与 AI 就绪并进 readyz 相同：
+# **disk 已经红着时，证书或时钟随后出问题不会再单独通知**（检查不会再翻转一次），
+# 收到 disk 的通知后要看 `journalctl -t billing-monitor -p err` 里的**每一行**。
 #
 # 由 cron 每 5 分钟跑一次（deploy/cron.d/ai_billing_hub）。
 #
@@ -48,6 +55,14 @@ DISK_CRIT_PERCENT="${BILLING_MONITOR_DISK_CRIT_PERCENT:-90}"
 #
 # 这条是**早期信号**：它先响，磁盘百分比那条才是最后一道防线。处置见 docs/deployment.md §5.2.2。
 BINLOG_BUDGET_MB="${BILLING_MONITOR_BINLOG_BUDGET_MB:-2048}"
+# 对外域名 TLS 证书的剩余天数（AIH-TASK-150）。证书由共享基建（infra_nginx）续期，这里只负责发现。
+#
+# 警戒线：Let's Encrypt 的证书正常在**剩 30 天**时续期，所以剩不到 21 天意味着续期
+# **已经失败了约 9 天** —— 这时还有三周时间去修，不必半夜起身，所以是 P2。
+TLS_WARN_DAYS="${BILLING_MONITOR_TLS_WARN_DAYS:-21}"
+# 危险线：剩不到 7 天（或已过期）是 P1 —— 过期那一刻浏览器与所有集成方直接拒绝连接，
+# 而一周是在共享基建那边排查、修好续期并等它生效的最短余量。
+TLS_CRIT_DAYS="${BILLING_MONITOR_TLS_CRIT_DAYS:-7}"
 
 # 发现问题后隔多久复核一次。⚠️ 不复核的话，**一次正常部署就会误报**：deploy.sh
 # 换版本时容器会有半分钟左右不是 healthy，而那段时间照样可能撞上这个 cron。
@@ -175,6 +190,77 @@ check_binlog() {
     [ "$mb" -lt "$BINLOG_BUDGET_MB" ] || echo "P2 binlog at ${mb} MB (budget ${BINLOG_BUDGET_MB} MB)"
 }
 
+# 对外域名的主机名：`.env` 的 BILLING_FRONTEND_BASE_URL，只认 https，去掉协议头、路径与端口。
+# 不是 https（或没配）时输出为空。⚠️ check_tls 与 disk_ok_summary 共用这一个判断：
+# 「会不会查证书」只能有一份，否则摘要会说查了、实际却跳过了。
+tls_host() {
+    local url host
+    url="$(env_value BILLING_FRONTEND_BASE_URL)"
+    case "$url" in
+        https://*) ;;
+        *) return 0 ;;
+    esac
+    host="${url#https://}"
+    host="${host%%[/?#]*}"
+    host="${host%%:*}"
+    printf '%s' "$host"
+}
+
+# 主机时钟的 NTP 同步状态（yes / no …）；命令不存在或读不到时输出为空。
+# ⚠️ 与 tls_host 同一条：check_clock 与 disk_ok_summary 共用。
+ntp_status() {
+    command -v timedatectl >/dev/null 2>&1 || return 0
+    timedatectl show -p NTPSynchronized --value 2>/dev/null || true
+}
+
+check_tls() {
+    local host end expiry now days
+    host="$(tls_host)"
+    if [ -z "$host" ]; then
+        log "no https BILLING_FRONTEND_BASE_URL configured: skipping the certificate check" >&2
+        return 0
+    fi
+    # ⚠️ `timeout 15`：连不上的主机会让 s_client 一直挂着，整轮巡检拖过下一个 cron 周期。
+    # ⚠️ 标准输入接 /dev/null，否则 s_client 握手之后等着读输入，不会自己退出。
+    # ⚠️ openssl 的 stderr 丢掉：它的报错里带主机名，而问题行与日志都不带主机名。
+    end="$(timeout 15 openssl s_client -connect "${host}:443" -servername "$host" </dev/null 2>/dev/null \
+        | openssl x509 -noout -enddate 2>/dev/null | sed -n 's/^notAfter=//p' | head -1 || true)"
+    expiry=""
+    [ -z "$end" ] || expiry="$(date -u -d "$end" +%s 2>/dev/null || true)"
+    case "$expiry" in
+        '' | *[!0-9]*)
+            # 连不上、超时、没有 notAfter、换算失败都走这里：读不到证书本身就该有人去看。
+            echo "P2 tls certificate could not be read"
+            return 0
+            ;;
+    esac
+    now="$(date -u +%s)"
+    # ⚠️ 按**秒**比较是否过期，不按天数：bash 的整数除法向零截断，过期不到一天时天数是 0。
+    if [ "$expiry" -le "$now" ]; then
+        echo "P1 tls certificate has expired"
+        return 0
+    fi
+    days=$(((expiry - now) / 86400))
+    if [ "$days" -lt "$TLS_CRIT_DAYS" ]; then
+        echo "P1 tls certificate expires in ${days} days (crit ${TLS_CRIT_DAYS})"
+    elif [ "$days" -lt "$TLS_WARN_DAYS" ]; then
+        echo "P2 tls certificate expires in ${days} days (warn ${TLS_WARN_DAYS})"
+    fi
+}
+
+check_clock() {
+    local status
+    status="$(ntp_status)"
+    if [ -z "$status" ]; then
+        # ⚠️ 读不到**不报警**：与 check_binlog「量不到不报警」同一条理由 —— 报一条
+        # 说不清原因的告警，只会训练人忽略告警。
+        log "clock sync status unavailable; skipping the clock check" >&2
+        return 0
+    fi
+    # 时钟漂了不会让任何请求报错，却会让签名时间窗、会计期 cut-off 与日志时间悄悄出错。
+    [ "$status" = "yes" ] || echo "P2 host clock is not NTP-synchronized"
+}
+
 check_disk() {
     local target line device used mount seen=""
     # ⚠️ 用 `df -P` 而不是 `df`：长设备名会让默认输出换行，字段就错位了。
@@ -198,6 +284,29 @@ check_disk() {
     # binlog 的预算并进**同一个维度**：都是「磁盘要出事」这一件事，
     # 合在一起才不会让人收到两条指向同一个原因的通知。
     check_binlog
+    # TLS 证书与主机时钟（AIH-TASK-150）同样并进 disk：它们是宿主机层面的问题，而免费档
+    # 20 个检查已用满。disk 很少变红，被遮住的概率最低；代价是 disk 已红时这两项出问题
+    # 不再单独通知，要看 journalctl 里的每一行（脚本头部那段）。复核时随 check_disk 一起重跑。
+    check_tls
+    check_clock
+}
+
+# disk 维度的 OK 摘要：按**实际执行情况**拼接，跳过的那一项明写 skipped，免得绿灯被读成「都查过了」。
+# ⚠️ 必须在主流程里算：check_disk 跑在命令替换的子 shell 里，它设的变量带不出来。
+disk_ok_summary() {
+    local summary
+    summary="disk below ${DISK_WARN_PERCENT}% ($(df -P / | awk 'NR==2 {print $5}' || true))"
+    if [ -n "$(tls_host)" ]; then
+        summary="$summary + tls"
+    else
+        summary="$summary + tls skipped"
+    fi
+    if [ -n "$(ntp_status)" ]; then
+        summary="$summary + clock"
+    else
+        summary="$summary + clock skipped"
+    fi
+    printf '%s\n' "$summary"
 }
 
 # 应用报的告警维度（设计闸门 #183 v3 §2「两个告警维度」）。与上面三个不同，这里的
@@ -281,8 +390,7 @@ publish() {
 publish BILLING_HEALTHCHECK_SERVICES_URL services "$SERVICES_OUT" \
     "all containers healthy ($(echo "$SERVICES_P1 $SERVICES_P2" | wc -w) services)"
 publish BILLING_HEALTHCHECK_READYZ_URL readyz "$READYZ_OUT" "readyz ok (database + redis + ai)"
-publish BILLING_HEALTHCHECK_DISK_URL disk "$DISK_OUT" \
-    "disk below ${DISK_WARN_PERCENT}% ($(df -P / | awk 'NR==2 {print $5}'))"
+publish BILLING_HEALTHCHECK_DISK_URL disk "$DISK_OUT" "$(disk_ok_summary)"
 
 # 告警维度：**每行一个维度、每个维度一个检查**，地址是 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL`
 # （fx_fetch → BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL）。⚠️ 按行通用处理，不写死维度名：

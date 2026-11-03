@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-10-29
+> 最后更新：2026-11-03
 
 ---
 
@@ -120,6 +120,112 @@ curl -sS -w '\n%{http_code}\n' http://127.0.0.1:<端口>/healthz/ai
 - **不要把 key 写进 `.env`、镜像或命令行**来「先让它绿」。key 只放文件
 - **不要为了让告警安静去改 `BILLING_MONITOR_AI_READY_URL`** 指向别的路径（例如 `/healthz`）：那条只是存活检查，永远是绿的
 - **不要放宽 `/healthz/ai` 的 nginx 名单**：它与 `/readyz` 同一份
+
+---
+
+## TLS 证书即将到期或读不到
+
+**首次编写：2026-11-03（AIH-TASK-150）。依据：[deployment.md](deployment.md) §8.1。**
+
+### 怎么发现
+
+```text
+条件：宿主机每 5 分钟取 .env 里 BILLING_FRONTEND_BASE_URL（只认 https）的主机名，
+     timeout 15 openssl s_client -connect <主机>:443 -servername <主机>，读证书的 notAfter
+分级：剩不到 21 天 P2（BILLING_MONITOR_TLS_WARN_DAYS）；剩不到 7 天或已过期 P1（BILLING_MONITOR_TLS_CRIT_DAYS）；
+     读不到证书（连不上、超时、没有 notAfter）P2
+通知：并在 Healthchecks.io 检查 `ai_billing_hub disk` 里 → Telegram；状态翻转才发，恢复再发一次
+正文：P2 tls certificate expires in <N> days (warn 21) / P1 tls certificate expires in <N> days (crit 7) /
+     P1 tls certificate has expired / P2 tls certificate could not be read —— 不带主机名
+```
+
+⚠️ **它没有自己的检查**（免费档 20 个已用满）。`disk` 已经因为磁盘水位或 binlog 红着时，证书出问题**不会再通知一次**；
+收到 disk 的通知后要看 `journalctl -t billing-monitor -p err` 里的**全部**行。`.env` 里没有 https 的
+`BILLING_FRONTEND_BASE_URL` 时这一项**被跳过**：日志里有 `skipping the certificate check`，OK 摘要写 `+ tls skipped`。
+
+⚠️ **证书不归本项目管**：TLS 在共享基建的 `infra_nginx` 终止，续期也在那边（deployment.md §2.1、§4）。
+Let's Encrypt 正常在剩 30 天时续期，所以剩 21 天意味着**续期已经失败了约 9 天**。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 到期之前：一切正常 | 过期那一刻：浏览器、客户门户、所有集成方与 webhook 发送方**直接拒绝连接**，所有经公网的请求都失败 |
+| 宿主机内部的 `/readyz`、巡检、备份 | 同一台 `infra_nginx` 上的其他项目多半同时受影响（共用同一套续期） |
+
+### 立刻做什么
+
+1. 在宿主机上自己看一眼（只读）：
+
+   ```bash
+   echo | timeout 15 openssl s_client -connect <域名>:443 -servername <域名> 2>/dev/null \
+     | openssl x509 -noout -subject -issuer -enddate
+   ```
+
+2. **读不到**：先分清是连不上（DNS、Cloudflare、`infra_nginx` 挂了 —— 那时站点本身也打不开）还是宿主机出网受限；
+   站点从外面能打开、只有宿主机读不到，是巡检这一侧的问题，修好出网即可
+3. **快到期**：去共享基建那边查续期 —— `infra_nginx` 的续期任务日志、ACME 校验是否被 Cloudflare 或 DNS 改动挡住、
+   续期出来的新证书是否 reload 进了 nginx（磁盘上是新证书、`s_client` 读到的还是旧的 = 没 reload）。
+   这一步通常要找共享基建的负责人
+4. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. 上面那条命令读到的 `notAfter` 在 21 天以后
+2. 下一轮巡检 `ai_billing_hub disk` 回到 up（前提是同一维度没有别的行），OK 摘要里是 `+ tls`
+
+### 绝不能做什么
+
+- **不要在本项目的 `billing_nginx` 里自己签发或挂证书**来「先让它绿」：TLS 在 `infra_nginx` 终止（①A），
+  本层只收内网流量，挂了也不会被用到，只会让两边配置分叉
+- **不要把 `BILLING_FRONTEND_BASE_URL` 改成 http 或清空**来让告警安静：那只是把检查跳过，证书照样会过期
+- **不要调低 `BILLING_MONITOR_TLS_WARN_DAYS`**：它的全部价值在于来得早
+
+---
+
+## 主机时钟未同步
+
+**首次编写：2026-11-03（AIH-TASK-150）。依据：[deployment.md](deployment.md) §8.1。**
+
+### 怎么发现
+
+```text
+条件：宿主机每 5 分钟读 timedatectl show -p NTPSynchronized --value，值不是 yes
+分级：P2
+通知：并在 Healthchecks.io 检查 `ai_billing_hub disk` 里 → Telegram；状态翻转才发，恢复再发一次
+正文：P2 host clock is not NTP-synchronized
+```
+
+⚠️ **它没有自己的检查**，与上一节同一条：`disk` 已红时不会再通知一次，要看 `journalctl -t billing-monitor -p err` 的全部行。
+`timedatectl` 不存在或读不到状态时这一项**被跳过、不报**（与 binlog「量不到不报警」同一条理由）：日志里有
+`clock sync status unavailable; skipping the clock check`，OK 摘要写 `+ clock skipped`。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 所有请求照常成功 —— 这正是它危险的地方 | 时钟一旦漂开：集成 API 签名的时间窗校验、会计期 cut-off、令牌过期、日志与备份的时间戳都会悄悄错位 |
+
+⚠️ 告警看的是「是否在做 NTP 同步」，不是已经漂了多少：刚停止同步时时间多半还是准的，**这时修代价最小**。
+
+### 立刻做什么
+
+1. 看状态与偏差：`timedatectl status`、`timedatectl timesync-status`（systemd-timesyncd），或 `chronyc tracking`（用 chrony 时）
+2. 同步服务是否在跑：`systemctl status systemd-timesyncd`（或 `chronyd`）；没跑就启动它
+3. NTP 是否被关掉：`timedatectl set-ntp true`
+4. 出网的 UDP 123 是否被防火墙挡住
+5. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. `timedatectl show -p NTPSynchronized --value` 输出 `yes`（同步服务刚起来时要等一两分钟）
+2. 下一轮巡检 `ai_billing_hub disk` 回到 up（前提是同一维度没有别的行），OK 摘要里是 `+ clock`
+3. 若偏差曾经很大（分钟级），对照偏差时间段查集成方的签名失败与会计期边界上的事件
+
+### 绝不能做什么
+
+- **不要手工 `date -s` 去拨时钟**：一次跳变会让正在进行的签名校验、令牌与定时任务一起出错；让 NTP 去慢慢纠正
+- **不要在容器里改时间**：容器用的是宿主机的时钟
 
 ---
 
@@ -286,7 +392,7 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
 | 信号 | 说明 |
 | --- | --- |
 | **binlog 心跳先停**（周期 1 分钟、宽限 5 分钟） | **最快的信号**，也正好是 RPO 的量级 |
-| `ai_billing_hub services` / `readyz` / `disk` 三个检查同时 DOWN | 巡检每 5 分钟一次、宽限 15 分钟 |
+| `ai_billing_hub services` / `readyz` / `disk` 三个检查同时 DOWN | 巡检每 5 分钟一次、宽限 15 分钟。⚠️ `disk` 单独 DOWN 不是这一节：它除了磁盘水位与 binlog 预算，还并着 TLS 证书与主机时钟两项（见「TLS 证书即将到期或读不到」「主机时钟未同步」），先看 `journalctl -t billing-monitor -p err` 的每一行 |
 | 站点 502 | 边缘 `infra_nginx` 找不到上游 |
 
 ⚠️ **告警本身跑在那台机器上 —— 它挂了就不会有任何「错误日志」。**能发现这件事的只有
