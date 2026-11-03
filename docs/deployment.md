@@ -981,7 +981,7 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 | --- | --- | --- | --- | --- | --- |
 | 容器不健康（含 **celery-beat 停止调度**） | `docker compose ps` 的 `State` / `Health`，七个服务逐个查 | 非 `running` 或非 `healthy`；`mysql` / `api` / `billing_nginx` / `frontend` = **P1**，`redis` / `celery-worker` / `celery-beat` = **P2** | Telegram（检查 `ai_billing_hub services`） | 状态翻转才通知，红着的期间不重复 | [celery-beat 停止调度](runbook.md) |
 | **`billing_readiness_degraded_redis`**；同一维度另有 **`billing_ai_readiness_failed`**（AIH-TASK-075） | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"`；之后再 `GET /healthz/ai`（默认同一入口，`BILLING_MONITOR_AI_READY_URL` 可覆盖），**状态码与响应体都看**：非 2xx，或正文不含 `"status":"ok"`（前端兜底的 200 HTML 也算失败） | readyz：P2；非 2xx（数据库不通 / API 挂）= **P1**。AI 就绪失败 = **P1**，正文只带 URL 与是否 2xx，不带响应体 | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md)；[AI 就绪检查失败](runbook.md) |
-| 磁盘水位（§94 点名的那条）**与 binlog 总量预算** | `df -P` 查根文件系统与部署目录（按设备去重）；另外进 mysql 容器量一次 binlog 占用 | 磁盘 ≥ **80%** = P2、≥ **90%** = P1；binlog ≥ **2 GB** = P2（三个阈值都可调） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7（日志）、§5.2.2 末尾（binlog） |
+| 磁盘水位（§94 点名的那条）**与 binlog 总量预算**；同一维度另有 **TLS 证书剩余天数**与**主机时钟 NTP 同步**（AIH-TASK-150） | `df -P` 查根文件系统与部署目录（按设备去重）；另外进 mysql 容器量一次 binlog 占用；对 `.env` 里 `BILLING_FRONTEND_BASE_URL`（只认 https）的主机名 `timeout 15 openssl s_client` 取证书 `notAfter`；`timedatectl show -p NTPSynchronized --value` | 磁盘 ≥ **80%** = P2、≥ **90%** = P1；binlog ≥ **2 GB** = P2；证书剩不到 **21 天** = P2、不到 **7 天**或已过期 = **P1**，读不到证书 = P2（`BILLING_MONITOR_TLS_WARN_DAYS` / `_CRIT_DAYS`）；时钟不是 `yes` = P2（阈值都可调）。没配 https 地址、或时钟状态读不到时**跳过、不报**，OK 摘要里写 `+ tls skipped` / `+ clock skipped`；问题行不带主机名 | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7（日志）、§5.2.2 末尾（binlog）；[TLS 证书即将到期或读不到](runbook.md)；[主机时钟未同步](runbook.md) |
 
 ⚠️ **AI 就绪为什么并进 readyz、而不是自己一个检查**：Healthchecks 免费档的 20 个检查按计划已经排满
 （8 个基础检查加 12 个告警维度，见「AI 模块部署前置与配置」末段；实际到 2026-11-03 才全部建出，见 §8.4「生产接通状态」），不新增检查，也不新增 `.env` 键，复用 `BILLING_HEALTHCHECK_READYZ_URL`。
@@ -996,7 +996,11 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 四条设计上的取舍，每一条都对应一种会让告警失效的形态：
 
 1. **三个维度各自一个检查，不合成一个。**外部服务只在**状态翻转**时通知人：
-   磁盘先红了之后 MySQL 再挂，检查早已是 down，**不会再有第二条通知**
+   磁盘先红了之后 MySQL 再挂，检查早已是 down，**不会再有第二条通知**。
+   宿主机层面的 TLS 证书与主机时钟（AIH-TASK-150）却并进了磁盘维度，理由是免费档 20 个检查已经用满；
+   挑 disk 是因为它很少变红，被遮住的概率最低。代价照上面 AI 就绪那段的说法：**`ai_billing_hub disk`
+   已经红着时，证书或时钟随后出问题不会再单独通知**，收到 disk 的通知后要看
+   `journalctl -t billing-monitor -p err` 里**每一行**；修好一个之后检查仍红，就是另一行还在
 2. **全绿时也 ping**（dead man's switch）。cron 没跑、整台 VPS 挂了、脚本卡死 ——
    这些情况**不写任何日志**，只有「该到的 ping 没到」能暴露
 3. **发现问题先隔 45 秒复核一次。**一次正常部署看起来和故障一模一样：换版本时
@@ -1082,6 +1086,9 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 - 日志聚合，以及基于日志内容的告警规则（§94 的异地留存也卡在这一条上）
 - 告警的**值班与升级路径**：现在只有一个人、一条 Telegram。`P1 30 分钟未响应升级`
   这类规则等有第二个人再谈 —— 写在 runbook 里而不是配置里
+
+§95 的 `TLS certificate expiry` 与 `host clock drift` **已由 AIH-TASK-150 覆盖**（并进磁盘维度，见 §8.1），不在上面的清单里。
+⚠️ 时钟那条看的是「是否在做 NTP 同步」，不是漂移的具体秒数。
 
 ### 8.4 应用的告警维度：FX 汇率（AIH-TASK-043，设计闸门 #183 v3）
 
