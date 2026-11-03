@@ -176,7 +176,7 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 | `BILLING_AI_HELD_BUFFER_MAX` / `BILLING_AI_HELD_RETRY_SECONDS` | `1000` / `30` |
 
 为 `ai_usage_outbox` 新建一个 Healthchecks 检查，读取应用告警维度后按现有的每维度一检查规则
-推送；现有 19 个检查加这一项正好达到免费档 20 个上限。检查名使用 `ai_billing_hub ai_usage_outbox`，
+推送；8 个基础检查（备份三个、logs、config、services、readyz、disk）加 12 个告警维度各一个，正好是免费档 20 个上限（2026-11-03 接通时核实，见 §8.4「生产接通状态」）。检查名使用 `ai_billing_hub ai_usage_outbox`，
 地址写入宿主机 `.env` 的 `BILLING_HEALTHCHECK_ALERT_AI_USAGE_OUTBOX_URL`，周期 5 分钟、宽限 15 分钟，
 绑定既有 Telegram 通知。超过免费档上限前必须先调整监控方案，不能静默省略此检查。
 
@@ -983,8 +983,8 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 | **`billing_readiness_degraded_redis`**；同一维度另有 **`billing_ai_readiness_failed`**（AIH-TASK-075） | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"`；之后再 `GET /healthz/ai`（默认同一入口，`BILLING_MONITOR_AI_READY_URL` 可覆盖），**状态码与响应体都看**：非 2xx，或正文不含 `"status":"ok"`（前端兜底的 200 HTML 也算失败） | readyz：P2；非 2xx（数据库不通 / API 挂）= **P1**。AI 就绪失败 = **P1**，正文只带 URL 与是否 2xx，不带响应体 | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md)；[AI 就绪检查失败](runbook.md) |
 | 磁盘水位（§94 点名的那条）**与 binlog 总量预算** | `df -P` 查根文件系统与部署目录（按设备去重）；另外进 mysql 容器量一次 binlog 占用 | 磁盘 ≥ **80%** = P2、≥ **90%** = P1；binlog ≥ **2 GB** = P2（三个阈值都可调） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7（日志）、§5.2.2 末尾（binlog） |
 
-⚠️ **AI 就绪为什么并进 readyz、而不是自己一个检查**：Healthchecks 免费档的 20 个检查已经用满
-（见「AI 模块部署前置与配置」末段），不新增检查，也不新增 `.env` 键，复用 `BILLING_HEALTHCHECK_READYZ_URL`。
+⚠️ **AI 就绪为什么并进 readyz、而不是自己一个检查**：Healthchecks 免费档的 20 个检查按计划已经排满
+（8 个基础检查加 12 个告警维度，见「AI 模块部署前置与配置」末段；实际到 2026-11-03 才全部建出，见 §8.4「生产接通状态」），不新增检查，也不新增 `.env` 键，复用 `BILLING_HEALTHCHECK_READYZ_URL`。
 代价正是上面第 1 条取舍要避免的那种：**`ai_billing_hub readyz` 已经红着时（例如 Redis 降级），AI 就绪
 随后坏掉不会再单独通知** —— 检查不会再翻转一次。反过来也一样。所以收到 readyz 的通知后，要看
 `journalctl -t billing-monitor -p err` 里**每一行**，不能只看第一行就当作唯一原因；修好一个之后检查仍红，
@@ -1185,6 +1185,22 @@ app/services/alerts.py（维度注册表）→ GET /internal/alerts（纯文本�
    - 接口返回 404：令牌文件读不出或过短（应用每次请求记一条 ERROR），回到第 1 步；返回 401：`.env` 指向的不是
      容器挂载的那一份文件
    - cron 那一行不变（仍是 `*/5`），**不需要**重装 `/etc/cron.d/ai_billing_hub`
+
+#### 生产接通状态（2026-11-03 核实并补上）
+
+⚠️ **上面第 1、2 步在生产上一直没有做**，直到 2026-11-03：VPS 的 `.env` 里没有 `BILLING_MONITOR_TOKEN_HOST_FILE`，也没有任何 `BILLING_HEALTHCHECK_ALERT_*_URL`，巡检每一轮都记 `no BILLING_MONITOR_TOKEN_HOST_FILE configured: not reporting the alert dimensions`。所以 AIH-TASK-043 起注册的 12 个维度（`fx_fetch` 到 `ai_usage_outbox`）**从来没有推到 Healthchecks、没有通知过任何人**；本文件与 runbook 里「每个维度一个检查」「已用 19 个」之类的说法写的是计划，不是当时的事实。发现于登记「健康告警其余信号」之前的只读核对。
+
+2026-11-03 的处理（Kelvin 同意后在 VPS 上执行）：
+
+| 步骤 | 结果 |
+| --- | --- |
+| 令牌文件 | 已在位，属主与权限符合第 1 步（`10001:<部署用户的主组> 0440`），没有重新生成 |
+| `.env` 加 `BILLING_MONITOR_TOKEN_HOST_FILE` | 改前留了备份；之后巡检读到 12 个维度，但还没有地址，不推 |
+| 建 12 个检查 | 经 Healthchecks 管理 API（临时 read-write Key，用完即撤销）建出，名字 `ai_billing_hub <维度>`，周期 300 秒、宽限 900 秒，渠道与既有检查一致；地址直接写入 `.env`，**没有经过任何文档或对话**；改前留了备份 |
+| 手工跑一次 | 11 个维度 up；`fx_stale` down：USD 生效汇率的报价日是 2026-10-16（18 天），BNM 每天都有新草稿但没有人发布 |
+| 管理员发布 2026-11-03 的 BNM 草稿 | 旧版本在发布时刻截断、新版本接上；下一轮 `fx_stale` 回到 up，20 个检查全部 up |
+
+现在这个项目**正好 20 个检查**（免费档上限）：以后的新信号只能并进已有维度，不能再新建检查（Kelvin 2026-10-17 定，不升级付费档）。⚠️ 以后核实某条告警是否真的在工作，看 VPS 上 `journalctl -t billing-monitor` 的输出，不要只看本文件。
 
 **本地演练**（设计 §7 的 `monitor.sh` 一行；做法同 §8.1：假 docker + 假告警接口 + 一个记录请求的假心跳服务）：
 
