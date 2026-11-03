@@ -12,7 +12,9 @@ the database does not refuse more than it should:
 - **checks**: every named check refuses (errno 3819, the constraint name in the message) and
   the boundary values pass; `status = 'DISCARDED'` is refused by the triggers first (1644, v3);
 - **open_slot and the unique index**, **no overlapping periods**, **the trigger takes the lock**
-  (two connections) and **foreign keys**.
+  (two connections) and **foreign keys**;
+- **the backstop of migration 0034** (design gate #539 v1 §7): the intersection on the last day
+  DATETIME holds (P4) and a published end changes only by truncation, restore or retirement (P5).
 
 There is no service layer yet (078), so rows are written with plain SQL, the way a direct write
 that bypasses the service would. Each case runs in one transaction that is rolled back, and
@@ -88,6 +90,8 @@ _CONTRADICTS = "a tax policy treatment contradicts itself or its rate"
 _IMMUTABLE = "a published tax policy version is immutable"
 _RETIRE_ONLY = "a published tax policy version can only be retired"
 _OVERLAP = "tax policy periods overlap"
+# Migration 0034 (design gate #539 v1, P5).
+_ENDS_THREE_WAYS = "a published tax policy version ends only by truncation, restore or retirement"
 _NEVER_DELETED = "tax policy versions are never deleted"
 
 _INSERT_VERSION = text(
@@ -496,7 +500,8 @@ def test_a_published_version_never_goes_back_to_draft(db: Db) -> None:
 
 def test_a_published_version_truncates_and_retires(db: Db) -> None:
     """Touching `updated_at`, truncating and retiring with an end pass; retiring without an end
-    is refused by `ck_tax_policy_versions_retired_end`."""
+    is refused by `ck_tax_policy_versions_retired_end`. Since 0034 (P5) a truncated version is
+    retired only after it is restored to no end."""
     version = db.draft()
     db.publish(version)
 
@@ -507,6 +512,11 @@ def test_a_published_version_truncates_and_retires(db: Db) -> None:
 
     db.set_end(version, D3)
     assert db.period(version) == ("PUBLISHED", EFFECTIVE_FROM, D3)
+    # 0034's P5: a truncated version is not retired directly; restored to no end, it is.
+    refused = db.refuses(lambda: db.retire(version, D3))
+    assert refused == (_ER_SIGNAL_EXCEPTION, _ENDS_THREE_WAYS)
+    assert db.period(version) == ("PUBLISHED", EFFECTIVE_FROM, D3)
+    db.set_end(version, None)
     db.retire(version, D3)
     assert db.period(version) == ("RETIRED", EFFECTIVE_FROM, D3)
 
@@ -759,3 +769,101 @@ def test_a_referenced_user_is_not_deleted(db: Db, referenced: str, constraint: s
     assert constraint in message
     spare = db.user(SPARE_EMAIL)
     db.execute(_DELETE_USER, id=spare)
+
+
+# --- the backstop of migration 0034 (design gate #539 v1 §7) ----------------------------------
+
+# An existing period that starts on the last day DATETIME holds.
+LAST_DAY = dt.datetime(9999, 12, 31, 0, 0, 0)
+LAST_SECOND = dt.datetime(9999, 12, 31, 23, 59, 59)
+
+
+def test_a_period_before_one_on_the_last_day_is_refused(db: Db) -> None:
+    """Design §7 "相交判定的边界" ①: the existing version is `[9999-12-31 00:00:00,
+    9999-12-31 00:00:01)` (published open, then truncated); a draft published directly as
+    `[F, NULL)` meets it. 0022's sentinel judgement let it through
+    (`'9999-12-31 00:00:00' < '9999-12-31'` is false); 0034's P4 refuses it."""
+    existing = db.draft()
+    db.publish(existing, LAST_DAY)
+    db.set_end(existing, LAST_DAY + SECOND)
+    draft = db.draft()
+    before = db.snapshot()
+
+    refused = db.refuses(lambda: db.publish(draft, D2))
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+    assert db.snapshot() == before
+
+
+def test_a_second_open_period_on_the_last_day_is_refused_by_the_trigger(db: Db) -> None:
+    """Design §7 "相交判定的边界" ③: the existing version is `[9999-12-31 23:59:58, NULL)`;
+    publishing `[9999-12-31 23:59:59, NULL)` without truncating it first is refused. Under 0022's
+    sentinel judgement the trigger missed it and the `open_slot` unique index refused it (1062);
+    0034's P4 refuses it in the trigger."""
+    existing = db.draft()
+    db.publish(existing, LAST_SECOND - SECOND)
+    draft = db.draft()
+    before = db.snapshot()
+
+    refused = db.refuses(lambda: db.publish(draft, LAST_SECOND))
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _OVERLAP)
+    assert db.snapshot() == before
+
+
+def test_end_to_end_on_the_last_day_passes(db: Db) -> None:
+    """Design §7 "相交判定的边界" ④, the counterpart: after `[9999-12-31 00:00:00,
+    9999-12-31 00:00:01)`, `[9999-12-31 00:00:01, NULL)` meets it end to end and passes."""
+    existing = db.draft()
+    db.publish(existing, LAST_DAY)
+    db.set_end(existing, LAST_DAY + SECOND)
+    draft = db.draft()
+
+    db.publish(draft, LAST_DAY + SECOND)
+
+    assert db.period(existing) == ("PUBLISHED", LAST_DAY, LAST_DAY + SECOND)
+    assert db.period(draft) == ("PUBLISHED", LAST_DAY + SECOND, None)
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda db, x: db.set_end(x, EFFECTIVE_FROM + DAY / 2),
+        lambda db, x: db.set_end(x, D3),
+        lambda db, x: db.retire(x, D2),
+        lambda db, x: db.retire(x, EFFECTIVE_FROM + DAY / 2),
+    ],
+    ids=["shorter-end", "longer-end", "retired-at-its-end", "retired-shorter"],
+)
+def test_a_truncated_end_moves_only_by_restore(db: Db, write: Callable[[Db, int], None]) -> None:
+    """Design §7 "尽头只按三种方式变" (0034's P5): a truncated PUBLISHED version `[d1, d2)` with
+    no successor (tax policies have no reservation to withdraw) is not shortened, nor lengthened
+    — not even to d3, which meets nothing — and is not retired directly, with its end or a
+    shorter one."""
+    x = db.draft()
+    db.publish(x, EFFECTIVE_FROM)
+    db.set_end(x, D2)
+    before = db.snapshot()
+
+    refused = db.refuses(lambda: write(db, x))
+
+    assert refused == (_ER_SIGNAL_EXCEPTION, _ENDS_THREE_WAYS)
+    assert db.snapshot() == before
+    assert db.period(x) == ("PUBLISHED", EFFECTIVE_FROM, D2)
+
+
+def test_truncation_restore_and_retirement_pass(db: Db) -> None:
+    """The counterparts: an untruncated version is truncated; the truncated one, with no
+    successor, is restored to no end; the untruncated one is retired."""
+    x = db.draft()
+    db.publish(x, EFFECTIVE_FROM)
+
+    db.set_end(x, D3)
+    truncated = db.period(x)
+    db.set_end(x, None)
+    restored = db.period(x)
+    db.retire(x, D2)
+
+    assert truncated == ("PUBLISHED", EFFECTIVE_FROM, D3)
+    assert restored == ("PUBLISHED", EFFECTIVE_FROM, None)
+    assert db.period(x) == ("RETIRED", EFFECTIVE_FROM, D2)
