@@ -8655,7 +8655,7 @@ tasks:
     title: 定价规则的数据库兜底：已停用是终态、发布不带尽头、尽头只按三种方式变、相交判定去哨兵
     purpose: >-
       按 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）§2 与 §8 的定价规则一行：新迁移 0032 以新名字 trg_pricing_rules_before_update_v2 建 BEFORE UPDATE 触发器（由 0030 的 trg_pricing_rules_before_update 正文按设计 §2 的 P1–P5 逐字替换得到：RETIRED 与 DISCARDED 都是终态、草稿发布时尽头必须为空、不可变检查只对 PUBLISHED、已发布版本的尽头只按截断恢复停用三种方式变、区间相交判定不再用哨兵日期），先建新的、再删 0030 的旧触发器；不加 CHECK、不改任何行。不改服务层、模型、计费、接口与前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-145
     acceptance_criteria:
