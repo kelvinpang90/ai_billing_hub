@@ -17,12 +17,15 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from app.core.config import Settings
+from app.core.mailer import OutgoingEmail, SmtpEmailTransport
 from app.main import create_app
 from app.schemas.auth import ForgotPasswordRequest, ResetPasswordRequest
-from app.tasks.outbox import _render_password_reset
+from app.services.password_reset import EVENT_PASSWORD_RESET
+from app.tasks.outbox import _attempt_send
 
 FRONTEND_SRC = Path(__file__).resolve().parents[2] / "frontend" / "src"
 PATHS_TS = FRONTEND_SRC / "routes" / "paths.ts"
@@ -54,13 +57,27 @@ def frontend_token_param() -> str:
 
 
 def rendered_link() -> str:
-    """后端真的会发出去的那封信里，那条链接。"""
-    email = _render_password_reset(
-        Settings(frontend_base_url=BASE_URL),
-        {"to": "admin@example.com", "token": TOKEN},
-    )
-    assert email is not None
-    match = re.search(r"(https://\S+)", email.body)
+    """后端真的会发出去的那封信里，那条链接。
+
+    ⚠️ 走 outbox 的投递路径（`_attempt_send`），在最底层的 SMTP 传输处截下那封信，
+    不直接调渲染函数：渲染只是这条路上的一段，它的返回值形状可以变
+    （AIH-TASK-151 把正文搬进模板层），这里不必跟着改。
+    """
+    sent: list[OutgoingEmail] = []
+
+    def capture(_transport: SmtpEmailTransport, message: OutgoingEmail) -> bool:
+        sent.append(message)
+        return True
+
+    with patch.object(SmtpEmailTransport, "send", capture):
+        delivered = _attempt_send(
+            Settings(frontend_base_url=BASE_URL),
+            event_type=EVENT_PASSWORD_RESET,
+            raw_payload=json.dumps({"to": "admin@example.com", "token": TOKEN}),
+        )
+    assert delivered is True
+    assert len(sent) == 1
+    match = re.search(r"(https://\S+)", sent[0].body)
     assert match is not None, "the reset email no longer contains a link"
     return match.group(1)
 

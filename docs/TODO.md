@@ -26,6 +26,7 @@
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
 1. `AIH-TASK-150` 健康告警：巡检把 TLS 证书到期与主机时钟同步并进磁盘维度
+2. `AIH-TASK-151` 通知：抽出通道无关的 Notification Adapter 与邮件模板层，现有两封邮件逐字不变
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -46,8 +47,7 @@
 - 待登记：Phase 4 充值 UI 与充值入账（需设计闸门）
 - 待登记：Phase 4 支付收据与下载
 - 待登记：Phase 5 客户端导出的其余部分：Excel（.xlsx，需管理员先加依赖）；请求级用量与钱包流水的 CSV 导出（设计闸门 #435，AIH-TASK-113..118）、月度用量汇总的 CSV 导出（设计闸门 #457，AIH-TASK-119..120）、会话摘要与会话摘要的 CSV 导出（设计闸门 #460，AIH-TASK-121..124）已登记
-- 待登记：Phase 6 Notification Adapter 抽象与 Email adapter
-- 待登记：Phase 6 低余额、停机、复机通知的 Email 与 WhatsApp 通道（需设计闸门，挂在 `notifications` 逻辑通知之下；Email 先重新评估投递方案，WhatsApp 依赖 D7）；门户内通知（设计闸门 #471，AIH-TASK-125..128）已登记
+- 待登记：Phase 6 低余额、停机、复机通知的 Email 与 WhatsApp 通道（需设计闸门，挂在 `notifications` 逻辑通知之下；Email 走 SMTP（ADR-0014），用 AIH-TASK-151 的 Adapter 与模板层，WhatsApp 依赖 D7）；门户内通知（设计闸门 #471，AIH-TASK-125..128）已登记
 - 待登记：Phase 6 WhatsApp adapter（依赖 D7）
 - 待登记：Phase 6 健康告警的其余信号（Celery 队列长度、日志量增长等；HTTP 错误率与用量摄取速率要指标管道）；AI 就绪检查已由 AIH-TASK-075 并入 readyz；通知死信、TLS 证书到期、主机时钟同步已登记为 AIH-TASK-149..150。Healthchecks 这个项目 2026-11-03 起 20 个检查实际用满（免费档上限），2026-10-17 Kelvin 定：不升级付费档，新信号并进已有维度、不新增检查；登记时每项写明并进哪个维度
 - 待登记：Phase 7 月度对账单、T+1 cut-off 与上期调整（需设计闸门）
