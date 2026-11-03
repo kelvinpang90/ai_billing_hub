@@ -8817,7 +8817,7 @@ tasks:
     title: 健康告警：通知死信并进 outbox_backlog 维度，最近 7 天有死信即 P2
     purpose: >-
       app/services/alerts.py 的 outbox_backlog 维度在「有处理器的行超过 10 分钟仍 PENDING」之外，再报最近 7 天内结算为死信（FAILED）的有处理器的行：邮件类（密码重置、门户邀请）重试用尽、通知类进死信，今天都只有一条 error 日志，没有人会被通知。两部分合成一行（照 wallet_negative_balance 的写法），任一部分不是 OK 即 P2；摘要只有计数与时刻。不新增维度、不改 monitor.sh、不改 outbox 的投递与结算。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 'app/services/alerts.py 新增模块常量 OUTBOX_DEAD_LETTER_WINDOW = 7 天（dt.timedelta(days=7)），列入 __all__；outbox_backlog 的判据由两部分组成：① 积压部分，判据、计数与文字与今天完全相同（有处理器的类型、PENDING、created_at 早于 now 减 10 分钟）；② 死信部分：event_type 在 app/tasks/outbox.py 的 handled_event_types() 里、status 为 FAILED、processed_at 晚于 now 减 OUTBOX_DEAD_LETTER_WINDOW（严格大于；processed_at 为空的行不计）的行数与其中最晚的 processed_at。两部分在同一个只读会话里各一条查询，不改 outbox 的任何写入'
