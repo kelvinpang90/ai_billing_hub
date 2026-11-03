@@ -8761,7 +8761,7 @@ tasks:
     title: 税率版本的数据库兜底：已发布尽头只按三种方式变、区间相交判定不用哨兵日期
     purpose: >-
       按 docs/design/AIH-TASK-146-period-version-backstop.md（设计闸门 #539 已批准 v1）§2 与 §8 的税率一行：新迁移 0034 以新名字 trg_tax_policy_versions_before_update_v2 建 BEFORE UPDATE 触发器（由 0022 的 trg_tax_policy_versions_before_update 正文按设计 §2 的 P4、P5 逐字替换得到：已发布版本的尽头只按截断恢复停用三种方式变、区间相交判定不再用哨兵日期），先建新的、再删 0022 的旧触发器；不加 CHECK、不改任何行。不改服务层、模型、接口与前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-147
     acceptance_criteria:
