@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from app.core.config import Settings
+from app.core.email_templates import render_email
 from app.main import create_app
 from app.tasks.outbox import _render_portal_invitation
 
@@ -56,11 +57,13 @@ def frontend_token_param() -> str:
 
 
 def rendered_link() -> str:
-    """后端真的会发出去的那封邀请信里，那条链接。"""
-    email = _render_portal_invitation(
+    """后端真的会发出去的那封邀请信里，那条链接：outbox 组装参数，模板层渲染正文。"""
+    message = _render_portal_invitation(
         Settings(frontend_base_url=BASE_URL),
         {"to": "portal@example.com", "token": TOKEN, "expires_at": EXPIRES_AT},
     )
+    assert message is not None
+    email = render_email(message.template, message.params)
     assert email is not None
     match = re.search(r"(https://\S+)", email.body)
     assert match is not None, "the invitation email no longer contains a link"

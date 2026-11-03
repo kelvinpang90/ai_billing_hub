@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -107,6 +108,25 @@ class BaselineAccountTests(unittest.TestCase):
         template = perf.BASELINE_EMAIL_TEMPLATE
         self.assertIn("{run}", template)
         self.assertNotEqual(template.format(run="a" * 12), template.format(run="b" * 12))
+
+
+class OutboxSeamTests(unittest.TestCase):
+    def test_every_outbox_name_the_script_touches_exists(self) -> None:
+        """S3 按名字保存、替换、还原 `outbox_task` 上的属性；这个脚本只在手工跑。
+
+        ⚠️ outbox 改了名（AIH-TASK-151 把 `build_transport` 换成 `build_adapter`）而脚本
+        没跟上时，替换只是在模块上新挂一个没人调用的属性 —— 于是 S3 真的去建 SMTP 传输。
+        这里在 CI 上把脚本源码里每一个 `outbox_task.<名字>` 对一遍。
+        """
+        from app.tasks import outbox
+
+        names = set(
+            re.findall(r"\boutbox_task\.([A-Za-z_]\w*)", SCRIPT.read_text(encoding="utf-8"))
+        )
+        self.assertIn("build_adapter", names)
+        for name in sorted(names):
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(outbox, name), f"app.tasks.outbox has no {name}")
 
 
 if __name__ == "__main__":

@@ -53,6 +53,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
 from app.core.database import create_database_engine, create_session_factory
+from app.core.notification_adapter import EmailAdapter
 from app.core.passwords import hash_password, verify_password
 from app.models.auth import (
     DomainOutbox,
@@ -344,16 +345,19 @@ def scenario_outbox_drain(
     #
     # `deliver()` 不用调用方给的 session_factory：它调 `outbox_task._session_factory()`，
     # 那个函数带 `lru_cache`、自己按全局 `get_settings()` 建引擎 —— 也就是**栈自己
-    # 那个库**。只换 `build_transport` 的话，S3 往测量库写行、`deliver()` 却去栈的
+    # 那个库**。只换 `build_adapter` 的话，S3 往测量库写行、`deliver()` 却去栈的
     # 库里读，两边根本不是一张表。
     #
     # 这不是推演出来的：隔离改完第一次跑就报 `Table 'billing.domain_outbox'
     # doesn't exist` —— 反过来说明**在隔离之前，投递一直打在栈的库上**。
     # `tests/backend/test_outbox.py` 的 `wired` 夹具早就这么做了，我漏看了。
-    original_transport = outbox_task.build_transport
+    #
+    # `build_adapter` 换成包着 `NullTransport` 的**真实** `EmailAdapter`
+    # （AIH-TASK-151）：模板渲染仍算在量的这一侧，只有 SMTP 被换掉。
+    original_adapter = outbox_task.build_adapter
     original_factory = outbox_task._session_factory
     original_settings = outbox_task.get_settings
-    outbox_task.build_transport = lambda _settings: NullTransport()  # type: ignore[assignment]
+    outbox_task.build_adapter = lambda _channel, _settings: EmailAdapter(NullTransport())  # type: ignore[assignment]
     outbox_task._session_factory = lambda: session_factory  # type: ignore[assignment]
     outbox_task.get_settings = lambda: settings  # type: ignore[assignment]
     try:
@@ -391,7 +395,7 @@ def scenario_outbox_drain(
             )
         )
     finally:
-        outbox_task.build_transport = original_transport  # type: ignore[assignment]
+        outbox_task.build_adapter = original_adapter  # type: ignore[assignment]
         outbox_task._session_factory = original_factory  # type: ignore[assignment]
         outbox_task.get_settings = original_settings  # type: ignore[assignment]
 

@@ -274,20 +274,20 @@ def _mysql_factory(monkeypatch: pytest.MonkeyPatch) -> Iterator[sessionmaker[Ses
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, factory: sessionmaker[Session]) -> None:
-    """Point the task at this database; any call to `build_transport` fails the test.
+    """Point the task at this database; any call to `build_adapter` fails the test.
 
     ⚠️ 前端基址留空：通知类事件不需要它（设计 §2「投递」）。
     """
 
-    def no_transport(_settings: Settings) -> object:
-        raise AssertionError("notification events must not build an email transport")
+    def no_adapter(_channel: object, _settings: Settings) -> object:
+        raise AssertionError("notification events must not build a notification adapter")
 
     settings = Settings(
         frontend_base_url="", outbox_retry_base_seconds=60, outbox_max_attempts=MAX_ATTEMPTS
     )
     monkeypatch.setattr(outbox_task, "_session_factory", lambda: factory)
     monkeypatch.setattr(outbox_task, "get_settings", lambda: settings)
-    monkeypatch.setattr(outbox_task, "build_transport", no_transport)
+    monkeypatch.setattr(outbox_task, "build_adapter", no_adapter)
 
 
 @pytest.fixture(params=["sqlite", "mysql"])
