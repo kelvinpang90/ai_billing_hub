@@ -75,6 +75,8 @@ BACKLOG_P1_WAIT: Final = dt.timedelta(minutes=30)
 STALE_LEASE_P1_AGE: Final = dt.timedelta(minutes=10)
 # `outbox_backlog`：有处理器的事件类型超过 10 分钟仍 PENDING（§120）。
 OUTBOX_BACKLOG_AGE: Final = dt.timedelta(minutes=10)
+# `outbox_backlog` 的死信部分（AIH-TASK-149）：有处理器的行在这段时间内结算为 FAILED 即 P2。
+OUTBOX_DEAD_LETTER_WINDOW: Final = dt.timedelta(days=7)
 # `wallet_negative_balance` 的核对部分（设计闸门 #474 v13 §2「告警」）：最近一次完成早于
 # `now - 30 小时` 即 `stale`；`run_date` 晚于今天或 `finished_at` 晚于 `now + 10 分钟` 是时钟异常。
 RECONCILIATION_STALE_AFTER: Final = dt.timedelta(hours=30)
@@ -448,19 +450,12 @@ def wallet_negative_balance(session: Session, context: AlertContext) -> AlertRes
     return AlertResult(level, f"{negative.summary}; {reconciliation.summary}")
 
 
-def outbox_backlog(session: Session, context: AlertContext) -> AlertResult:
-    """P2 when an outbox row of a type with a handler is still PENDING after 10 minutes (§120).
-
-    有处理器的类型是 app/tasks/outbox.py 的 `handled_event_types()`
-    （与 `recover` 同一份名单）：邮件类的密码重置与门户邀请，
-    通知类的 `tenant.billing_status_changed` 与 `tenant.low_balance`
-    （设计闸门 #471 v7 §2「投递」）。仍没有处理器的类型按设计持久等待，不计入。
-    """
-    handled = outbox_tasks.handled_event_types()
+def _outbox_pending(session: Session, handled: Sequence[str], now: dt.datetime) -> AlertResult:
+    """P2 when a handled row is still PENDING after 10 minutes (§120)."""
     statement = select(func.count(), func.min(DomainOutbox.created_at)).where(
         DomainOutbox.status == OutboxStatus.PENDING,
         DomainOutbox.event_type.in_(handled),
-        DomainOutbox.created_at < context.now - OUTBOX_BACKLOG_AGE,
+        DomainOutbox.created_at < now - OUTBOX_BACKLOG_AGE,
     )
     count, oldest = session.execute(statement).one()
     if not count or oldest is None:
@@ -469,6 +464,46 @@ def outbox_backlog(session: Session, context: AlertContext) -> AlertResult:
     return AlertResult(
         AlertLevel.P2, f"{noun} pending over 10 minutes, oldest created {_stamp(oldest)}"
     )
+
+
+def _outbox_dead_letters(session: Session, handled: Sequence[str], now: dt.datetime) -> AlertResult:
+    """P2 when a handled row was settled as FAILED in the last 7 days (AIH-TASK-149)."""
+    statement = select(func.count(), func.max(DomainOutbox.processed_at)).where(
+        DomainOutbox.status == OutboxStatus.FAILED,
+        DomainOutbox.event_type.in_(handled),
+        DomainOutbox.processed_at > now - OUTBOX_DEAD_LETTER_WINDOW,
+    )
+    count, latest = session.execute(statement).one()
+    if not count or latest is None:
+        return AlertResult(AlertLevel.OK, "no dead letter in 7 days")
+    noun = "1 dead letter" if count == 1 else f"{int(count)} dead letters"
+    return AlertResult(AlertLevel.P2, f"{noun} in 7 days, latest {_stamp(latest)}")
+
+
+def outbox_backlog(session: Session, context: AlertContext) -> AlertResult:
+    """Handled outbox rows pending over 10 minutes (§120) merged with the dead letters of the
+    last 7 days (AIH-TASK-149): either part not OK is P2, never P1.
+
+    有处理器的类型是 app/tasks/outbox.py 的 `handled_event_types()`
+    （与 `recover` 同一份名单）：邮件类的密码重置与门户邀请，
+    通知类的 `tenant.billing_status_changed` 与 `tenant.low_balance`
+    （设计闸门 #471 v7 §2「投递」）。仍没有处理器的类型按设计持久等待，不计入。
+
+    - 积压部分：有处理器、`PENDING`、`created_at` 早于 `now - 10 分钟`；
+    - 死信部分：有处理器、`FAILED`、`processed_at` 晚于 `now - 7 天`（严格大于；
+      `processed_at` 为空的行不计）。邮件重试用尽、通知进死信原本只有一条 error 日志。
+
+    7 天窗口与 `usage_event_conflicts` 的窗口做法一致：不需要确认机制，死信过了窗口
+    告警自动恢复；7 天覆盖周末没人看告警的情况。
+
+    摘要恒为 `<积压部分>; <死信部分>`，只有计数与时刻：不含租户、outbox_id、aggregate_id、
+    邮箱或 event_type。
+    """
+    handled = outbox_tasks.handled_event_types()
+    pending = _outbox_pending(session, handled, context.now)
+    dead = _outbox_dead_letters(session, handled, context.now)
+    level = max((pending.level, dead.level), key=_SEVERITY.__getitem__)
+    return AlertResult(level, f"{pending.summary}; {dead.summary}")
 
 
 # --- status_webhook（AIH-TASK-052）：三类问题合在一行，摘要只有计数 ----------------------
@@ -644,6 +679,7 @@ __all__ = [
     "FX_STALE_DAYS",
     "MAX_CODES",
     "OUTBOX_BACKLOG_AGE",
+    "OUTBOX_DEAD_LETTER_WINDOW",
     "RECONCILIATION_CLOCK_TOLERANCE",
     "RECONCILIATION_STALE_AFTER",
     "RETRYING_ALERT_ATTEMPTS",
