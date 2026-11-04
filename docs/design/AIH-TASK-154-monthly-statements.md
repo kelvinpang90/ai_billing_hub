@@ -1,6 +1,6 @@
-# AIH-TASK-154..162 设计：月度对账单、T+1 cut-off 与上期调整（送审 v5）
+# AIH-TASK-154..162 设计：月度对账单、T+1 cut-off 与上期调整（已批准 v5）
 
-> **来源**：设计闸门 Issue #565。批准后本文件改为 `APPROVED: design v<N>` 那一版正文的**逐字副本**。
+> **来源**：设计闸门 Issue #565。本文件是 `APPROVED: design v5` 那一版正文的**逐字副本**（五轮均由 Claude 审查：v1 被要求修改，有界扫描假设 `created_at ≥ occurred_at`；v2 被要求修改，数据缺陷下的恢复方式走不通，改为 Kelvin 拍板的已知限制；v3 曾获批准，之后 AIH-TASK-158 预审查出缺失告警会一直 P2、遮住同维度的 P1，改为只报 24 小时（v4，Kelvin 拍板），批准随之作废；v4 被要求修改，快照缺 ADR-0008 §5 的税务说明；v5 审查通过，见 §12。送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v5`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
 > **实现以本文件为准**；与 Issue 不一致时，以 Issue 上被批准的版本为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：ADR-0003（财务期间与 cut-off）；账本 `wallet_transactions` 与 `post_transaction`（AIH-TASK-008 起）；用量计费的 `processed_at` 与 `wallet_transaction_id`（AIH-TASK-032）；告警维度 `usage_processing_backlog`（AIH-TASK-046）。
