@@ -1,4 +1,4 @@
-# AIH-TASK-154..162 设计：月度对账单、T+1 cut-off 与上期调整（送审 v4）
+# AIH-TASK-154..162 设计：月度对账单、T+1 cut-off 与上期调整（送审 v5）
 
 > **来源**：设计闸门 Issue #565。批准后本文件改为 `APPROVED: design v<N>` 那一版正文的**逐字副本**。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
@@ -24,7 +24,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v4`
+**设计版本**：`v5`
 对应需求：spec §46、§65、§74.8、§113、§114、§130「monthly statements」「T+1 cut-off and prior-period adjustments」；ADR-0003；Invariant 12
 目标 PR：待开（登记 PR）；实现为 AIH-TASK-154..162
 
@@ -35,7 +35,7 @@
   1. 每个预付租户（`billing_mode = PREPAID`）每个账期（马来西亚日历月）恰好一份 `FINALIZED` 对账单，在新月第 2 日 01:00（马来西亚时间）之后的第一次整点任务里生成；任务没跑成，下一次整点补上。
   2. 对账单的期初余额 + 本期各类发生额 = 期末余额，精确到账本精度（8 位小数）；上期对账单的期末余额 = 本期对账单的期初余额。
   3. 每一行账本恰好进一份对账单：在 cut-off 之后才入账的上月用量出现在当前开放期的对账单里，标为上期调整并注明原用量期间；已定稿的对账单不因此改变。
-  4. 定稿的对账单在数据库层拒绝任何 UPDATE 与 DELETE。
+  4. 定稿的对账单在数据库层拒绝任何 UPDATE 与 DELETE。每份对账单引用 cutoff 时刻生效的税务政策版本，并把该版本的税务说明原文冻结进快照（ADR-0008 §5、spec §45.1 `REQ-TAX-001`）：以后改措辞不改已定稿的对账单。
   5. 管理员能按客户与账期查看对账单，能对某个客户手动补生成；客户在门户能看到自己的对账单列表与详情，看不到估算或对账后的供应商成本、加价、毛利。
   6. 某期对账单到期后 6 至 30 小时内仍缺失、或最近 24 小时晚到用量占比达到 1%，`usage_processing_backlog` 维度报 P2。
 - **明确不做什么**（Kelvin 2026-11-04 定的范围，见 §10「已拍板」）：
@@ -158,13 +158,13 @@ S(M)    = A(M; hw(M)) \ A(M-1; hw_prev)          —— 本期对账单的账本
 `snapshot_json` 的键集合固定（`schema_version = 1`），金额都是 8 位小数的字符串，计数是整数：
 
 ```text
-schema_version, period, currency("MYR"), company_name,
+schema_version, period, currency("MYR"), company_name, tax_notice{zh, en},
 opening_balance, total_topup, total_ai_usage, total_adjustments, prior_period{usage[], rebill, total}, closing_balance,
 request_count, conversation_count, input_tokens, output_tokens, total_customer_charges,
 by_provider[], by_model[], by_project[]
 ```
 
-不出现任何成本、汇率、加价、毛利、价格版本、规则、内部 id 的键（INV-7）；测试断言键集合逐一相等，而不是「不含某几个键」。
+`tax_notice` 是生成时取到的税务政策版本的 `treatment_json.document_notice` 原文（`zh`、`en` 两个字符串，逐字照抄、不改写），只放说明文字，不放税率、版本 id 或其他政策字段；版本引用存在列 `tax_policy_version_id` 上（见「数据库」）。不出现任何成本、汇率、加价、毛利、价格版本、规则、内部 id 的键（INV-7）；测试断言键集合逐一相等，而不是「不含某几个键」。
 
 ### 生成函数（AIH-TASK-156）
 
@@ -173,14 +173,15 @@ by_provider[], by_model[], by_project[]
 1. `period` 早于 `FIRST_STATEMENT_PERIOD` 或未到期 → `StatementNotDue`；租户不合格 → `StatementNotEligible`。
 2. 已有 `(tenant_id, period_start)` 的行 → 返回它（`created=False`），什么都不写（幂等）。
 3. `M-1` 合格且没有对账单 → `PreviousStatementMissing`。
-4. 读钱包与上期（普通读，不加锁），按上面算 `S(M)`、用量、自检。
-5. INSERT 一行：`status = FINALIZED`、`finalized_at = created_at = now`、`statement_number` = `ST-<YYYYMM>-` 加 8 个 Crockford base32 随机字符（`secrets`）、`generated_by`（系统为 NULL，管理员为其 `users.id`）、`ledger_high_sequence = hw(M)`、`cutoff_at`、快照。本函数不写审计；管理员触发时由 catch-up 的提交前钩子在同一事务写审计（见「Celery 任务」与「管理端接口」）。
+4. 取税务政策：`resolve_tax_policy(session, MY, SST, at=cutoff(M))`（`app/repositories/tax_policy.py`，已有；`FOR SHARE` 共享读，只与发布税务政策互斥）。取 `cutoff(M)` 而不取 `now`，是为了同一期不论哪一轮生成，取到的都是同一个版本。返回 `None`（这一时刻没有生效版本）或抛 `ValueError`（读出校验失败）→ `StatementTaxPolicyUnavailable`，不写行；不默认「无税」（照该函数的文档）。
+5. 读钱包与上期（普通读，不加锁），按上面算 `S(M)`、用量、自检。
+6. INSERT 一行：`status = FINALIZED`、`finalized_at = created_at = now`、`statement_number` = `ST-<YYYYMM>-` 加 8 个 Crockford base32 随机字符（`secrets`）、`generated_by`（系统为 NULL，管理员为其 `users.id`）、`ledger_high_sequence = hw(M)`、`cutoff_at`、`tax_policy_version_id`（第 4 步取到的版本）、快照。本函数不写审计；管理员触发时由 catch-up 的提交前钩子在同一事务写审计（见「Celery 任务」与「管理端接口」）。
 
-并发：同一 `(tenant_id, period_start)` 两个生成者同时到第 5 步，唯一约束让后提交的那个 `IntegrityError`；调用方回滚后再查一次，行已存在就当作成功（`created=False`），不存在（编号撞了）就记 warning、本轮放弃这一项，下一轮重来。
+并发：同一 `(tenant_id, period_start)` 两个生成者同时到第 6 步，唯一约束让后提交的那个 `IntegrityError`；调用方回滚后再查一次，行已存在就当作成功（`created=False`），不存在（编号撞了）就记 warning、本轮放弃这一项，下一轮重来。
 
 ### 数据库（迁移 0035，AIH-TASK-154）
 
-表 `monthly_statements`（spec §74.8，外加 `ledger_high_sequence` 与 `generated_by`）：
+表 `monthly_statements`（spec §74.8，外加 `ledger_high_sequence`、`generated_by` 与 `tax_policy_version_id`）：
 
 | 列 | 类型 | 说明 |
 | --- | --- | --- |
@@ -193,10 +194,11 @@ by_provider[], by_model[], by_project[]
 | `ledger_high_sequence` | BIGINT | CHECK `>= 0` |
 | `snapshot_json` | JSON | NOT NULL |
 | `generated_by` | BIGINT NULL | FK `users.id` RESTRICT；NULL = 系统 |
+| `tax_policy_version_id` | BIGINT | NOT NULL；FK `tax_policy_versions.id` RESTRICT（spec §45.1 `REQ-TAX-001`：不可变的财务快照引用版本化的税务政策） |
 | `finalized_at` | DATETIME NULL | CHECK `status <> 'FINALIZED' OR finalized_at IS NOT NULL` |
 | `created_at` | DATETIME | |
 
-- 唯一 `uq_monthly_statements_tenant_period (tenant_id, period_start)`（V1 没有更正版本，spec §74.8 末句）；索引 `ix_monthly_statements_period (period_start, tenant_id)` 供管理端按账期列与告警查缺失；索引 `ix_monthly_statements_generated_by (generated_by)` 显式声明（否则 MySQL 会为外键自动建一个同名于外键的索引，形状校验对不上）。
+- 唯一 `uq_monthly_statements_tenant_period (tenant_id, period_start)`（V1 没有更正版本，spec §74.8 末句）；索引 `ix_monthly_statements_period (period_start, tenant_id)` 供管理端按账期列与告警查缺失；索引 `ix_monthly_statements_generated_by (generated_by)` 与 `ix_monthly_statements_tax_policy_version_id (tax_policy_version_id)` 显式声明（否则 MySQL 会为外键自动建一个同名于外键的索引，形状校验对不上）。
 - MySQL 触发器（INV-12 的数据库兜底）：`trg_monthly_statements_before_update` 与 `trg_monthly_statements_before_delete`，`OLD.status <> 'DRAFT'` 时 `SIGNAL SQLSTATE '45000'`。SQLite 不建触发器（与 0006 等迁移同一惯例），服务层本来就没有更新与删除路径。
 - 迁移形状照 0028：表已存在且形状（列、索引、外键与 `DELETE_RULE`、CHECK 名称）一致时，MySQL 上再逐个看两个触发器：读 `information_schema.TRIGGERS` 的 `ACTION_TIMING`、`EVENT_MANIPULATION`、`EVENT_OBJECT_TABLE` 与 `ACTION_STATEMENT`（去掉首尾空白后与迁移里的主体逐字比较），都在且一致 → 不发 DDL；缺了的只补缺的那个（补完中断的升级：建表与建触发器是分开提交的 DDL）；存在但任一项不一致 → 抛错、不发 DDL。表形状不一致 → 抛错、不发 DDL。降级在离线模式拒绝，表非空拒绝，不删任何行；表为空先删触发器再删表。
 
@@ -234,6 +236,7 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 
 ### 前端（AIH-TASK-161、162，不在闸门范围内，写在这里只为说明接口够用）
 
+- 两个页面的详情都显示快照里的 `tax_notice.en`（界面只有英文），原样显示、不改写。
 - 管理端 `/statements`：列表（按客户、账期筛）、点一行在下方显示详情；按客户筛选时显示「补生成对账单」按钮（调用手动生成接口），成功或失败之后都刷新列表（失败时前几期可能已生成）。
 - 门户 `/portal/statements`：列表（每页 12 条，上一页 / 下一页）、点一行在列表下方显示详情（不开弹窗、不跳子路由），金额按现有门户的显示规则（2 位小数）。
 
@@ -246,7 +249,7 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 | INV-3 支付不重复入账 | 否 | 同上 | 同上 | 同上 |
 | INV-4 余额只经账本变动 | 否 | 同上；期初期末是算出来的，不回写钱包 | 不调用 `post_transaction`，不写 `wallets` | §7「只读」 |
 | INV-5 历史账本不可变 | 否 | 只读 | 同上 | 同上 |
-| INV-6 事件保留版本引用 | 否 | 快照不带版本引用（客户不可见），事件本身不改 | 不改事件 | — |
+| INV-6 事件保留版本引用 | 是 | 对账单不带税务政策版本，以后渲染只能读当前政策，改措辞时历史对账单跟着变（ADR-0008 §5） | 列 `tax_policy_version_id` NOT NULL、FK RESTRICT，指向 `cutoff(M)` 时生效的版本；该版本的 `document_notice` 原文冻结进快照 `tax_notice`；定稿行由触发器拒绝修改。用量事件本身不改 | §7「税务说明」 |
 | INV-7 客户不可见成本毛利 | 是 | 快照或接口带出成本、汇率、加价 | 快照只从 `billable_cost` 与账本金额汇总；键集合固定并逐一断言；管理端也用同一快照 | §7「快照键集合」「客户接口」 |
 | INV-8 租户不可互访 | 是 | 客户读到别人的对账单；生成时混入别的租户的账本或事件 | 客户接口 `WHERE tenant_id = principal.tenant_id AND public_id = ?`；生成的每条查询都带 `tenant_id` | §7「越权」「两个租户」 |
 | INV-9 对话内容不入库 | 否 | 快照只有计数、token 数、金额、代码与项目名 | 不读 prompt / response（库里本来也没有） | 快照键集合 |
@@ -265,7 +268,7 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 | `FINALIZED` / `VOID` | UPDATE / DELETE | — | — | — | MySQL 触发器 SIGNAL |
 | `DRAFT` | — | V1 不产生 `DRAFT` 行 | — | — | — |
 
-- 串行化：靠唯一约束 `(tenant_id, period_start)`，不加锁、不读钱包锁（高水位读不需要锁，见 §2）。
+- 串行化：靠唯一约束 `(tenant_id, period_start)`，不加锁、不读钱包锁（高水位读不需要锁，见 §2）；唯一的锁是税务政策的共享读（§2「生成函数」第 4 步），只与发布税务政策互斥。
 - 幂等键：`(tenant_id, period_start)`。没有「相同 ID 不同载荷」：载荷完全由账本与事件决定，已存在就不重算。
 - 重试层：beat 每小时一次；管理端手动触发是同一个函数。
 - 原子提交：一份对账单行 + （管理员触发时）一条审计。
@@ -275,6 +278,7 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 | 失败点 | 对外结果 | 数据最终状态 | 是否可重试 | 恢复来源 | 告警 |
 | --- | --- | --- | --- | --- | --- |
 | 未到期 / 早于首个账期 | 任务跳过；管理端只生成到期的 | 无行 | — | — | 无 |
+| `cutoff(M)` 没有生效的税务政策，或读出校验失败 | `StatementTaxPolicyUnavailable`，error 日志；管理端 500 | 无行；这个租户后续账期随之 `PreviousStatementMissing` | 是 | 没有生效版本：按税务政策发布流程补一条覆盖 `cutoff(M)` 的版本，下一个整点自动补上（生产自 2026-10-17 起已有一条不设尽头的 `PUBLISHED` 版本，正常不会触发）；读出校验失败是数据缺陷，按上面「自检不等」一行的处置 | 到期后 6–30 小时内缺失 P2 |
 | 不合格（非预付） | 任务跳过；管理端 409 | 无行 | — | — | 无 |
 | 上期缺失 | 本轮跳过该租户后续账期 | 无行 | 是 | 下一轮先补上期 | 到期后 6–30 小时内缺失 P2 |
 | 自检不等，或有 `AI_USAGE` 行连不上事件 | error 日志（带检查编号）；管理端 500 | 这个租户从账期 `M` 起**永久停出**：`M` 无行、每小时重试都失败；`M+1` 起每期都 `PreviousStatementMissing`、无行。其他租户不受影响 | 否（数据不可变，重试结果相同） | **已知限制，Kelvin 2026-11-04 拍板接受**（§10）。只有数据缺陷（`AI_USAGE` 行连不上事件、收费事件的 `billable_cost` 与账本金额不符）会触发。计费在同一事务里写事件与账本，所以这种缺陷只可能来自代码缺陷或绕过服务层直接写库。各集合由完整谓词判定、不依赖时间先后（§2「候选扫描」），合法数据不会触发。本批不提供放行、不出 `VOID` 占位单。处置写在 runbook（AIH-TASK-157）：按日志里的租户、账期与检查编号查出缺陷行，不改、不删账本、事件与对账单；再开设计闸门定修复（例如作废与更正版本，§10「后续」） | 到期后 6–30 小时内缺失 P2（报一次就停，§2「告警」；之后靠 error 日志与管理端列表） |
@@ -317,11 +321,12 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 | 合格性 | db | 内部计量租户；钱包在 `end(M)` 之后才建；早于首个账期 | 不生成 | 156、157 |
 | 零收费事件 | db | `billable_cost = 0`、无账本行的事件在 cut-off 前后处理 | 前者计入本期请求数与 token，后者不计；金额不受影响 | 156 |
 | 用量统计 | db | 两个项目、两个模型、有无 `conversation_id` | 明细与合计相等；会话数为去重的非空 `conversation_id` | 156 |
-| 快照键集合 | unit | 生成的快照 | 键集合与 §2 逐一相等，没有成本类键 | 156 |
+| 快照键集合 | unit | 生成的快照 | 键集合与 §2 逐一相等（含 `tax_notice` 的 `zh`、`en`），没有成本类键 | 156 |
+| 税务说明 | db | `cutoff(M)` 时生效的版本；在 `end(M)` 与 `cutoff(M)` 之间、`cutoff(M)` 之后各换一次版本；`cutoff(M)` 没有生效版本；`treatment_json` 读出校验失败 | 快照 `tax_notice` 与 `cutoff(M)` 时生效版本的 `document_notice` 逐字相等、列指向该版本；之后换版本不影响已定稿的对账单，下一期用下一期 `cutoff` 时的版本；后两种 `StatementTaxPolicyUnavailable`、不写行，补发布后下一轮生成成功 | 156 |
 | 金额精度 | db（MySQL） | 金额带 8 位小数，多行求和 | 快照字符串与 `Decimal` 手算逐位相等 | 155、156 |
 | 两个租户 | db | 两个租户同月都有发生额 | 各自的对账单只含自己的行 | 156 |
 | 触发器 | db（MySQL） | 对 `FINALIZED` 行 UPDATE 任一列、DELETE | 都报 45000；`DRAFT` 行可改 | 154 |
-| 迁移 | db | 升级、形状校验、降级（空表、非空表、离线） | 同 0028 的三种结果 | 154 |
+| 迁移 | db | 升级、形状校验（含 `tax_policy_version_id` 的外键与索引）、降级（空表、非空表、离线） | 同 0028 的三种结果 | 154 |
 | catch-up | db | 任务停了两个月后运行；某租户中间一期自检失败；编号碰撞 | 其余租户补齐；失败租户只到失败之前；返回新生成份数；碰撞记 warning、停止该租户后续账期、不算错误 | 157 |
 | 永久停出（已知限制） | db | 某租户 `M` 期自检失败后，再跑两轮整点（`now` 跨过 `M+1` 的到期时刻） | 每轮 `M` 都失败、日志带检查编号；`M+1` 不生成（`PreviousStatementMissing`）；其他租户的 `M`、`M+1` 照常生成 | 157 |
 | beat 登记 | unit | `beat_schedule` | 有 `statements-generate-due` 条目，`crontab(minute=0)`、`expires` 3240 | 157 |
@@ -407,3 +412,4 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 | v2 | 2026-11-04 | §2「有界扫描」改为「候选扫描」：期末、首期期初与 `S(M)` 段二的候选对 `AI_USAGE` 增加按事件 `occ` 的第二段（`C2`），每行再按完整谓词判定，不再假设 `created_at ≥ occurred_at`；§5「自检不等」写明只由数据或代码缺陷触发与恢复方式；§7 增加 `created_at` 早于 `occ` 跨月与扫描完整性两行；§10 写明不做的假设 | #565 v1 审查阻断项：`occurred_at` 可比服务端时间晚 300 秒，旧下界会漏行、自检永久失败 |
 | v3 | 2026-11-04 | §5「自检不等」改为「永久停出」的已知限制：写明最终状态、不可重试与 runbook 处置；§10 记 Kelvin 拍板；§2「自检」日志带检查编号；§7 增加「永久停出」一行，「catch-up」补编号碰撞，「管理端」补没有到期账期、没有钱包与中间一期失败 | #565 v2 审查阻断项：数据缺陷下 v2 写的「修数据后自动补上」走不通；五问第 4 条的测试缺口 |
 | v4 | 2026-11-04 | §2「告警」缺失对账单只在 `cutoff(M) + 6h ≤ now < cutoff(M) + 30h` 的窗口内计数并写明理由；§1 完成标准 6、§3 INV-14、§5 各行的告警一栏、§7「告警：缺失」、§10 已拍板随之改 | AIH-TASK-158 预审 DESIGN_DEFECT：永久停出让缺失告警一直 P2，`usage_processing_backlog` 的 Healthchecks 检查一直 down，之后的 P1 无人知晓 |
+| v5 | 2026-11-04 | 对账单引用税务政策：表加 `tax_policy_version_id`（NOT NULL、FK RESTRICT、显式索引）；`generate_statement` 第 4 步按 `cutoff(M)` 取生效版本，取不到或校验失败 → `StatementTaxPolicyUnavailable`；快照加 `tax_notice{zh, en}`；§1 完成标准 4、§3 INV-6 改为「是」、§4 锁、§5 新增一行、§7 新增「税务说明」、前端显示说明随之改 | #565 v4 审查阻断项：ADR-0008 §5 要求说明随税务政策版本快照进每张对账单，spec §45.1 `REQ-TAX-001` |
