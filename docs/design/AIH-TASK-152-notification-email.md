@@ -1,6 +1,6 @@
-# AIH-TASK-152 / 153 设计：低余额、停机、复机通知的 Email 通道
+# AIH-TASK-152 / 153 设计：低余额、停机、复机通知的 Email 通道（已批准 v2）
 
-> **来源**：设计闸门 Issue #559。本文件是被批准那一版正文的**逐字副本**。
+> **来源**：设计闸门 Issue #559。本文件是 `APPROVED: design v2` 那一版正文的**逐字副本**（v1 由 Codex 审查、被要求修改：复机文案宣称服务已恢复，与 spec §24、§27 冲突；v2 由 Codex 审查通过，见 §12。送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v2`）。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
 > **实现以本文件为准**；与 Issue 不一致时，以 Issue 上被批准的版本为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：设计闸门 #471（[AIH-TASK-125-portal-notifications.md](AIH-TASK-125-portal-notifications.md)）的 `notifications` 表与通知类事件的结算分支；AIH-TASK-151 的 Notification Adapter 与邮件模板层（`app/core/notification_adapter.py`、`app/core/email_templates.py`）。
