@@ -22,7 +22,7 @@
 
 ---
 
-状态：`DRAFT`
+状态：`READY_FOR_REVIEW`
 负责人：Claude
 **设计版本**：`v1`
 对应需求：spec §47、§48、§49、§50、§74.6、§98.1、§129「Low Balance」「Suspension notification」「Reactivation notification」「existing Email adapter」；ADR-0009 第 1–3 节；ADR-0014
