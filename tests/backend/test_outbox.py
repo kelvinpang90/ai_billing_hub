@@ -361,10 +361,12 @@ def test_recovery_leaves_events_without_a_handler_pending(wired, monkeypatch) ->
 
 
 def test_the_handled_types_are_the_email_and_the_notification_events() -> None:
-    """设计闸门 #471 v7 §7「recover 与告警名单」：一个函数，邮件类并通知类。"""
+    """设计闸门 #471 v7 §7「recover 与告警名单」：一个函数，邮件类并通知类。
+    通知邮件（设计闸门 #559 v2）是第三类邮件事件。"""
     assert set(outbox_task.handled_event_types()) == {
         EVENT_PASSWORD_RESET,
         EVENT_PORTAL_INVITATION,
+        outbox_task.EVENT_NOTIFICATION_EMAIL,
         EVENT_LOW_BALANCE,
         EVENT_BILLING_STATUS_CHANGED,
     }
