@@ -1086,7 +1086,7 @@ tasks:
       - bypass_ci
       - bypass_review
 
-  # 019：出站 webhook 签名密钥（ADR-0004 §4a 方案 i）。设计闸门 #135 APPROVED: design v2；
+  # 019：出站 webhook 签名密钥（ADR-0004 §4a 方案 i）。设计闸门 #135 APPROVED: design v1；
   # Kelvin 2026-09-28 同意把「密钥表 + 签名库」与「投递」拆成两步，投递归 Phase 3。
   # 文件名避开 Worker 的敏感路径规则（secret / key / credential / token 等整词），统一用 webhook_signing。
   - id: AIH-TASK-019
