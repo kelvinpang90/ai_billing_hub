@@ -8976,3 +8976,113 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AIH-TASK-152..153：Phase 6 低余额、停机、复机通知的 Email 通道（设计闸门 #559 v1，docs/design/AIH-TASK-152-notification-email.md）。
+  # Kelvin 2026-11-04 定：只做 Email（WhatsApp 等 D7）；收件人是租户联系邮箱 tenants.email；不补发已有通知；邮件带余额、阈值、事件时刻与门户钱包页链接；模板只有英文。
+  # 152 只加处理器（库里还没有这类行，不发任何信），153 才开始生成邮件行；153 部署之前管理员确认生产 SMTP 与前端基址已配置（设计 §8「上线前置」）。
+  - id: AIH-TASK-152
+    title: 通知：低余额、停机、复机通知邮件的模板、渲染与投递，邮件类结算只认当前领取者
+    purpose: >-
+      spec §48–§50 要求低余额、停机、复机三类通知除门户外还要发 Email（设计闸门 #559 v1）。本任务是两层里的投递层：新增邮件类事件 NOTIFICATION_EMAIL_REQUESTED 的处理器（三个英文模板、渲染函数与 2 位小数的显示金额），并把邮件类结算改为带上本次领取的 attempt_count，修掉设计闸门 #471 v7 §10 记下的「旧领取者结算覆盖新领取」缺口。本任务不生成任何这类 outbox 行（生成在 AIH-TASK-153），所以上线后不发任何新邮件；密码重置信与门户邀请信的收件人、标题与正文逐字不变。
+    status: ready
+    depends_on:
+      - AIH-TASK-151
+    acceptance_criteria:
+      - 'app/tasks/outbox.py：新增常量 EVENT_NOTIFICATION_EMAIL: Final = "NOTIFICATION_EMAIL_REQUESTED"，登记为 _RENDERERS 的第三项（渲染函数 _render_notification_email）；因而 handled_event_types() 恰好是 PASSWORD_RESET_REQUESTED、PORTAL_INVITATION_REQUESTED、NOTIFICATION_EMAIL_REQUESTED、tenant.billing_status_changed、tenant.low_balance 五类，recover 与 alerts.outbox_backlog 不另改代码；_RENDERERS 上方注释补一句这一类的生产者是 AIH-TASK-153。_settle_notification、_insert_notification、_dead_letter_notification、_deliver_notification、notification_for 与通知规则一行不改；本任务的代码在任何路径上都不插入 NOTIFICATION_EMAIL_REQUESTED 行（测试自己插入）'
+      - 'app/core/email_templates.py：新增 TEMPLATE_NOTIFICATION_LOW_BALANCE = "notification_low_balance"（必需参数 company_name、balance、threshold、occurred_at、link）、TEMPLATE_NOTIFICATION_SUSPENDED = "notification_suspended" 与 TEMPLATE_NOTIFICATION_REACTIVATED = "notification_reactivated"（两者必需参数 company_name、balance、occurred_at、link），标题与正文与设计 §2「模板」三个代码块逐字一致（Subject: 后面是 subject；空行之后到代码块末尾是 body，段落之间恰好一个空行，正文末尾没有换行）；标题不含任何占位符；三个常量列入 __all__；password_reset 与 portal_invitation 两个模板一字不改；render_email 不改'
+      - 'app/tasks/outbox.py 的 _render_notification_email(settings, payload) -> OutboundMessage | None：payload 的键集合必须恰好是 to、company_name、notification_type、balance、threshold、occurred_at；前端基址为空、to 不是非空字符串或含回车换行、company_name 不是非空字符串、notification_type 不是 LOW_BALANCE / SUSPENDED / REACTIVATED、balance 不是合法金额、LOW_BALANCE 的 threshold 不是合法的非负金额、其他两类的 threshold 不是 null、occurred_at 不能被 datetime.fromisoformat 解析、键集合不对——每种返回 None 并记一条固定文本的 error 日志，日志与异常里不带任何 payload 值。合法金额复用 app/services/notifications.py 的 _money：改名为公开的 parse_money（签名与行为不变，模块内调用处同步）。返回的 OutboundMessage：channel EMAIL、recipient 为 to、template 按类型取上一条的三个常量、params 为 company_name 原值、balance 与 threshold（仅低余额）的显示金额、occurred_at 的显示时刻、link 为前端基址（strip 后去掉末尾斜杠）拼 /portal/wallet，无查询参数'
+      - '显示金额 _display_money(Decimal) -> str 放在 app/tasks/outbox.py：先 quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)，再格式化成带千分位的两位小数；量化结果为 0 时一律是 0.00（不出现 -0.00）；不经 float，不能只靠 format(value, ",.2f")（Decimal 格式化按上下文舍入，默认 ROUND_HALF_EVEN）。显示时刻：把 _invitation_deadline 改名为 _malaysia_time（行为不变，邀请信调用处同步），通知邮件的 occurred_at 也经它格式化'
+      - 'app/tasks/outbox.py 的 _settle 改为 _settle(factory, claim, *, status)，UPDATE 条件在 id 与 status = PENDING 之外加 attempt_count = claim.attempt，仍写 processed_at 并把 payload_json 置空；返回受影响行数是否为 1。deliver 的邮件类分支：成功后调用它，返回值仍是 sent；次数用尽时受影响 1 行才记现有那条 error 日志并返回 dead-lettered，受影响 0 行不记 error、返回 superseded；领取、退避与 warning 日志不改。_settle 的文档写明这是设计闸门 #471 v7 §10 的缺口、对密码重置与门户邀请同样生效'
+      - '新文件 tests/backend/test_notification_email.py，覆盖设计 §7 标注 152 的各行：三类邮件经 _render_notification_email、真实 EmailAdapter 与记录型假 transport 得到的 to、subject、body 与测试里的字面量逐字相等；显示金额的五个例子，并先断言 format(Decimal("0.125"), ".2f") == "0.12"；渲染失败的全部情形返回 None 且 caplog 里没有收件人、公司名与金额；链接路径与 frontend/src/routes/paths.ts 的 portalWallet 字面量相等（取法同 tests/backend/test_invitation_link.py，不从它导入）；手工插入一行合法的 NOTIFICATION_EMAIL_REQUESTED 经 recover 与 deliver 发出一封信、行 SENT 且 payload 为 NULL；transport 恒失败且 outbox_max_attempts 为 2 时依次 retry-later、dead-lettered，行 FAILED 且 payload 为 NULL；邮件结算的两种交错（旧领取者最后一次失败遇上新领取：superseded、不记 error，行由新领取者结算为 SENT；旧领取者成功遇上新领取：旧的受影响 0 行，行由新领取者结算）。tests/backend/test_outbox.py 只改 handled_event_types 的集合断言（加上新类型）与随 _settle 签名必须调整的地方，断言意义不变'
+      - 'docs/api.md 的 outbox_backlog 一行与 docs/runbook.md 列举「有处理器的类型」的句子补上 NOTIFICATION_EMAIL_REQUESTED（通知邮件，AIH-TASK-152）；docs/runbook.md「outbox 死信的处置」补一条：通知邮件进死信后 payload 已置空，按这一行的 aggregate_id（通知的 public_id）在 notifications 表找到通知与租户，处置后不自动重发'
+      - '不改 app/core/notification_adapter.py、app/core/mailer.py、app/models/、app/api/、app/repositories/、alembic/、deploy/、前端、docs/adr/、docs/TODO.md；不加表、不加迁移、不装依赖；tests/backend/test_password_reset_link.py、test_invitation_link.py、test_notification_adapter.py、test_mailer.py 不改且照常通过；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #559 与 APPROVED: design v1'
+    allowed_change_paths:
+      - app/tasks/outbox.py
+      - app/core/email_templates.py
+      - app/services/notifications.py
+      - tests/backend/test_notification_email.py
+      - tests/backend/test_outbox.py
+      - docs/api.md
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-153
+    title: 通知：结算门户通知时同一事务写一行通知邮件，发往租户联系邮箱
+    purpose: >-
+      设计闸门 #559 v1 的业务规则层：通知类 outbox 行（tenant.low_balance、tenant.billing_status_changed）结算并插入门户通知的同一个事务里，再插入一行 NOTIFICATION_EMAIL_REQUESTED（AIH-TASK-152 的处理器把它发往租户联系邮箱）。结算 UPDATE、通知插入与邮件行插入原子提交，一条通知最多一行邮件行；不出通知（内部计量租户）与 payload 无效时不写；已经存在的通知不补发（Kelvin 2026-11-04 定）。不改钱包、账本、通知规则与邮件投递。
+    status: ready
+    depends_on:
+      - AIH-TASK-152
+    acceptance_criteria:
+      - 'app/tasks/outbox.py 的 _settle_notification：规则给出草稿时，租户查询从只取 Tenant.id 改为同一条 SELECT 取 Tenant.id、Tenant.email、Tenant.company_name（不加锁，查不到仍按无效回滚）；_insert_notification 之后、提交之前，在同一个会话里加一行 DomainOutbox：event_type 为 EVENT_NOTIFICATION_EMAIL，aggregate_type 为 "notification"，aggregate_id 为刚插入的通知的 public_id，status PENDING，attempt_count 0，created_at 与 next_retry_at 都是这个事务的 now（与通知行的 created_at 相同），payload_json 见下一条；flush 失败按事务内异常处理（整个事务回滚）。不出通知与 payload 无效时不写这一行；不 delay() 它（只靠 recover 触发）；_settle_notification 的返回值、结算 UPDATE 的条件与失败分支不改'
+      - 'payload_json = json.dumps(payload, sort_keys=True)，键恰好 to（tenants.email）、company_name（tenants.company_name）、notification_type（草稿类型的值）、balance、threshold、occurred_at：balance 与 threshold 是 format(quantize_money(value), "f")（quantize_money 来自 app/models/base.py，结果恰好 8 位小数），threshold 只有 LOW_BALANCE 非空、其他两类为 null；occurred_at 是草稿 occurred_at 的 isoformat()（不带时区、整秒）。不从 app/repositories/wallet.py 导入私有的 _money_text'
+      - 'tests/backend/test_notification_email.py 补上设计 §7 标注 153 的各行：三类正常路径（阈值 50、余额 60 → 记 -15 → 记 -45 → 记 +5，每步跑 recover 与 deliver 两轮）得到三条通知、三行邮件行（aggregate_id 依次是三条通知的 public_id）与三封信（收件人是该租户的 email，类型与余额对应），钱包与账本行不变；payload 恰好 6 键、金额 8 位小数、occurred_at 等于通知行的 occurred_at；内部计量租户与 payload 无效都没有邮件行；让邮件行的插入抛错时通知类 outbox 仍 PENDING、没有通知行也没有邮件行；同一通知类行 deliver 两次、已 SENT 的再 deliver 都只有一条通知与一行邮件行；A、B 两个预付租户各跨一次阈值得到两行邮件行，to、company_name 与金额各自来自自己的租户；预置一条已存在的通知（通知类 outbox 行已 SENT）后跑 recover 不产生邮件行；不调 delay、只调 recover 两轮，通知与邮件都出现'
+      - 'tests/backend/test_notification_delivery.py：「两个会话同时结算」（MySQL）与「旧领取者成功与新领取交错」两个用例补断言恰好一行邮件行；其他用例里计数 domain_outbox 行、或让所有到期行结算的地方，随邮件行的出现调整（只数通知类行，或断言恰好多出对应的邮件行），断言意义不变；_wire 等辅助函数若会让邮件行走到真实 SMTP，改为替换 build_adapter。tests/backend/test_customer_notifications_api.py、tests/backend/test_outbox.py 只在邮件行的出现使既有断言失效时调整，意义不变'
+      - 'docs/TODO.md：Phase 6 清单里「门户内通知」一条末尾的说明改为 Email 通道已由 AIH-TASK-152..153 交付（设计闸门 #559 v1）、WhatsApp 未做、低余额 / 停机 / 复机三项因此仍不勾；「Email adapter（依赖 D7）」改为 [x] 并注明 AIH-TASK-151..153；planning-v1 块不改'
+      - '不改 app/core/、app/services/、app/models/、app/api/、app/repositories/、alembic/、deploy/、前端、docs/adr/；不改 _render_notification_email、模板与 _settle；不加表、不加迁移、不装依赖；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #559 与 APPROVED: design v1，并在「已知未做 / 留给后续」写明部署前置：管理员确认生产 SMTP 与 BILLING_FRONTEND_BASE_URL 已配置（设计 §8）'
+    allowed_change_paths:
+      - app/tasks/outbox.py
+      - tests/backend/test_notification_email.py
+      - tests/backend/test_notification_delivery.py
+      - tests/backend/test_customer_notifications_api.py
+      - tests/backend/test_outbox.py
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
