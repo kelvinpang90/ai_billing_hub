@@ -16,7 +16,8 @@
 
 **通知类事件**（`tenant.low_balance`、`tenant.billing_status_changed`，
 设计闸门 #471 v7 §2「投递」）不发信：领取之后在一个事务里结算这一行并插入一条门户通知，
-二者原子提交，所以同一行不论投递几次最多一条通知。
+同一事务再写一行 `NOTIFICATION_EMAIL_REQUESTED`（设计闸门 #559 v2，AIH-TASK-153），
+三者原子提交，所以同一行不论投递几次最多一条通知、一行邮件行。信由邮件行另行投递。
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from app.core.email_templates import (
 )
 from app.core.notification_adapter import Channel, OutboundMessage, build_adapter
 from app.models.auth import DomainOutbox, OutboxStatus
+from app.models.base import quantize_money
 from app.models.notifications import Notification, NotificationType
 from app.models.tenancy import Tenant
 from app.repositories.wallet import EVENT_BILLING_STATUS_CHANGED, EVENT_LOW_BALANCE
@@ -163,6 +165,8 @@ def _render_portal_invitation(
 # --- 通知邮件（设计闸门 #559 v2 §2「新事件类型」「渲染」，AIH-TASK-152） ---------------------
 
 EVENT_NOTIFICATION_EMAIL: Final = "NOTIFICATION_EMAIL_REQUESTED"
+# `aggregate_id` 是那条通知的 `public_id`（设计 §2）。
+AGGREGATE_NOTIFICATION: Final = "notification"
 
 # payload 的键恰好这 6 个（设计 §2 payload 表），多一个少一个都不发。
 _NOTIFICATION_EMAIL_KEYS: Final = frozenset(
@@ -272,8 +276,8 @@ def _render_notification_email(
 # 门户邀请（AIH-TASK-094）登记之后，恢复扫描才会领
 # `PORTAL_INVITATION_REQUESTED` 行；在那之前它们以 PENDING 躺在库里，等的就是这一行。
 #
-# `NOTIFICATION_EMAIL_REQUESTED`（通知邮件，设计闸门 #559 v2）的生产者是 AIH-TASK-153
-# （通知结算事务里同事务写这一行）；本处只是处理器，在那之前库里没有这类行。
+# `NOTIFICATION_EMAIL_REQUESTED`（通知邮件，设计闸门 #559 v2）的生产者是下面的
+# `_settle_notification`（AIH-TASK-153：插入通知的同一事务里写这一行）。
 _RENDERERS = {
     EVENT_PASSWORD_RESET: _render_password_reset,
     EVENT_PORTAL_INVITATION: _render_portal_invitation,
@@ -499,10 +503,11 @@ def _deliver_notification(factory: sessionmaker[Session], settings: Settings, cl
 
 
 def _settle_notification(factory: sessionmaker[Session], claim: _Claim) -> str | None:
-    """One transaction: settle the row as SENT and insert its notification (INV-13).
+    """One transaction: settle the row as SENT, insert its notification and that
+    notification's email row (INV-13).
 
     返回值：
-    - `notified`：插入了一条；
+    - `notified`：插入了一条通知与它的邮件行；
     - `no-notification`：规则判不出通知，行照常 SENT；
     - `already-settled`：结算 UPDATE 受影响行数不是 1
       （另一个 worker 已结算，或这一行已被更晚的一次领取接手）；
@@ -540,14 +545,27 @@ def _settle_notification(factory: sessionmaker[Session], claim: _Claim) -> str |
             session.commit()
             return "no-notification"
 
-        tenant_id = session.execute(
-            select(Tenant.id).where(Tenant.public_id == claim.aggregate_id)
-        ).scalar_one_or_none()
-        if tenant_id is None:
+        # 收件人与公司名是结算时的快照（设计闸门 #559 v2 §2「payload」），与租户 id 同一条 SELECT。
+        tenant = session.execute(
+            select(Tenant.id, Tenant.email, Tenant.company_name).where(
+                Tenant.public_id == claim.aggregate_id
+            )
+        ).one_or_none()
+        if tenant is None:
             # 租户从不删除，不应发生；与 payload 无效同样处理。
             session.rollback()
             return None
-        _insert_notification(session, claim=claim, tenant_id=int(tenant_id), draft=outcome, now=now)
+        notification_id = _insert_notification(
+            session, claim=claim, tenant_id=int(tenant.id), draft=outcome, now=now
+        )
+        _insert_notification_email(
+            session,
+            notification_id=notification_id,
+            to=tenant.email,
+            company_name=tenant.company_name,
+            draft=outcome,
+            now=now,
+        )
         session.commit()
         return "notified"
 
@@ -559,18 +577,64 @@ def _insert_notification(
     tenant_id: int,
     draft: NotificationDraft,
     now: dt.datetime,
-) -> None:
-    """Add the notification row in the settling transaction. `source_outbox_id` is unique: the
-    database's own guarantee of one notification per outbox row."""
+) -> str:
+    """Add the notification row in the settling transaction; return its `public_id`.
+    `source_outbox_id` is unique: the database's own guarantee of one notification per outbox
+    row."""
+    public_id = str(uuid.uuid4())
     session.add(
         Notification(
-            public_id=str(uuid.uuid4()),
+            public_id=public_id,
             tenant_id=tenant_id,
             notification_type=draft.notification_type,
             source_outbox_id=claim.outbox_id,
             balance=draft.balance,
             threshold=draft.threshold,
             occurred_at=draft.occurred_at,
+            created_at=now,
+        )
+    )
+    session.flush()
+    return public_id
+
+
+def _payload_money(value: Decimal) -> str:
+    """Exactly 8 decimals, fixed point (设计闸门 #559 v2 §2 payload 表「balance」)."""
+    return format(quantize_money(value), "f")
+
+
+def _insert_notification_email(
+    session: Session,
+    *,
+    notification_id: str,
+    to: str,
+    company_name: str,
+    draft: NotificationDraft,
+    now: dt.datetime,
+) -> None:
+    """Add the email row for this notification in the same transaction (设计闸门 #559 v2 §2
+    「写邮件 outbox 行」).
+
+    只在插入了通知行之后调用：一条通知类 outbox 行 → 最多一条通知（`source_outbox_id` 唯一）
+    → 最多一行邮件行。⚠️ 不 `delay()`：与通知类事件一样只靠 `recover` 触发。
+    """
+    payload = {
+        "to": to,
+        "company_name": company_name,
+        "notification_type": draft.notification_type.value,
+        "balance": _payload_money(draft.balance),
+        "threshold": None if draft.threshold is None else _payload_money(draft.threshold),
+        "occurred_at": draft.occurred_at.isoformat(),
+    }
+    session.add(
+        DomainOutbox(
+            event_type=EVENT_NOTIFICATION_EMAIL,
+            aggregate_type=AGGREGATE_NOTIFICATION,
+            aggregate_id=notification_id,
+            payload_json=json.dumps(payload, sort_keys=True),
+            status=OutboxStatus.PENDING,
+            attempt_count=0,
+            next_retry_at=now,
             created_at=now,
         )
     )
