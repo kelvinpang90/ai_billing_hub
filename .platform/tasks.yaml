@@ -8984,7 +8984,7 @@ tasks:
     title: 通知：低余额、停机、复机通知邮件的模板、渲染与投递，邮件类结算只认当前领取者
     purpose: >-
       spec §48–§50 要求低余额、停机、复机三类通知除门户外还要发 Email（设计闸门 #559 v2）。本任务是两层里的投递层：新增邮件类事件 NOTIFICATION_EMAIL_REQUESTED 的处理器（三个英文模板、渲染函数与 2 位小数的显示金额），并把邮件类结算改为带上本次领取的 attempt_count，修掉设计闸门 #471 v7 §10 记下的「旧领取者结算覆盖新领取」缺口。本任务不生成任何这类 outbox 行（生成在 AIH-TASK-153），所以上线后不发任何新邮件；密码重置信与门户邀请信的收件人、标题与正文逐字不变。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-151
     acceptance_criteria:
