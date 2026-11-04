@@ -26,6 +26,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
 from typing import Final
 from urllib.parse import quote
@@ -36,14 +37,25 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.database import create_database_engine, create_session_factory
-from app.core.email_templates import TEMPLATE_PASSWORD_RESET, TEMPLATE_PORTAL_INVITATION
+from app.core.email_templates import (
+    TEMPLATE_NOTIFICATION_LOW_BALANCE,
+    TEMPLATE_NOTIFICATION_REACTIVATED,
+    TEMPLATE_NOTIFICATION_SUSPENDED,
+    TEMPLATE_PASSWORD_RESET,
+    TEMPLATE_PORTAL_INVITATION,
+)
 from app.core.notification_adapter import Channel, OutboundMessage, build_adapter
 from app.models.auth import DomainOutbox, OutboxStatus
-from app.models.notifications import Notification
+from app.models.notifications import Notification, NotificationType
 from app.models.tenancy import Tenant
 from app.repositories.wallet import EVENT_BILLING_STATUS_CHANGED, EVENT_LOW_BALANCE
 from app.services.auth import utc_now
-from app.services.notifications import InvalidPayload, NotificationDraft, notification_for
+from app.services.notifications import (
+    InvalidPayload,
+    NotificationDraft,
+    notification_for,
+    parse_money,
+)
 from app.services.password_reset import EVENT_PASSWORD_RESET
 from app.services.portal_accounts import EVENT_PORTAL_INVITATION
 
@@ -96,11 +108,13 @@ def _render_password_reset(
 _MALAYSIA = dt.timezone(dt.timedelta(hours=8))
 
 
-def _invitation_deadline(raw: object) -> str | None:
-    """`expires_at` from the payload, as Malaysia time to the minute plus UTC; None if unusable.
+def _malaysia_time(raw: object) -> str | None:
+    """A moment from the payload, as Malaysia time to the minute plus UTC; None if unusable.
 
-    ⚠️ **只用 payload 里的值，不读当前配置、不写相对时长**（设计 §2）：
-    它与令牌行的 `expires_at` 是同一个值（不带时区的 UTC、整秒），
+    邀请信的 `expires_at` 与通知邮件的 `occurred_at`（设计闸门 #559 v2 §2「渲染」）都经它格式化。
+
+    ⚠️ **只用 payload 里的值，不读当前配置、不写相对时长**（设计闸门 #368 v12 §2）：
+    邀请信的到期时刻与令牌行的 `expires_at` 是同一个值（不带时区的 UTC、整秒），
     outbox 重试或有效期配置改动之后，信里的到期时刻仍与令牌真实的到期时刻一致。
     """
     if not isinstance(raw, str) or not raw:
@@ -129,7 +143,7 @@ def _render_portal_invitation(
 
     to = str(payload.get("to") or "")
     token = str(payload.get("token") or "")
-    deadline = _invitation_deadline(payload.get("expires_at"))
+    deadline = _malaysia_time(payload.get("expires_at"))
     if not to or not token or deadline is None:
         logger.error("A portal invitation outbox row is missing its recipient, token or expiry")
         return None
@@ -143,6 +157,103 @@ def _render_portal_invitation(
         recipient=to,
         template=TEMPLATE_PORTAL_INVITATION,
         params={"link": link, "deadline": deadline},
+    )
+
+
+# --- 通知邮件（设计闸门 #559 v2 §2「新事件类型」「渲染」，AIH-TASK-152） ---------------------
+
+EVENT_NOTIFICATION_EMAIL: Final = "NOTIFICATION_EMAIL_REQUESTED"
+
+# payload 的键恰好这 6 个（设计 §2 payload 表），多一个少一个都不发。
+_NOTIFICATION_EMAIL_KEYS: Final = frozenset(
+    {"to", "company_name", "notification_type", "balance", "threshold", "occurred_at"}
+)
+_NOTIFICATION_TEMPLATES: Final = {
+    NotificationType.LOW_BALANCE.value: TEMPLATE_NOTIFICATION_LOW_BALANCE,
+    NotificationType.SUSPENDED.value: TEMPLATE_NOTIFICATION_SUSPENDED,
+    NotificationType.REACTIVATED.value: TEMPLATE_NOTIFICATION_REACTIVATED,
+}
+_CENT: Final = Decimal("0.01")
+
+
+def _display_money(value: Decimal) -> str:
+    """An amount as shown to the customer: 2 decimals, HALF_UP, thousands separators.
+
+    ⚠️ 先 `quantize(ROUND_HALF_UP)` 再格式化：`Decimal.__format__` 按上下文舍入，
+    默认是 `ROUND_HALF_EVEN`，`"0.125"` 会显示成 `0.12`（spec §80，与门户
+    `formatAmountRounded(amount, 2)` 同一规则）。量化结果为 0 时去掉符号，不显示 `-0.00`。
+    只显示，不经 float，不改任何持久值。
+    """
+    rounded = value.quantize(_CENT, rounding=ROUND_HALF_UP)
+    if rounded == 0:
+        rounded = abs(rounded)
+    return f"{rounded:,.2f}"
+
+
+def _render_notification_email(
+    settings: Settings, payload: dict[str, object]
+) -> OutboundMessage | None:
+    """Build a low balance / suspended / reactivated email, or None when we cannot (which
+    counts as a failure).
+
+    ⚠️ 日志是固定文本，**不带任何 payload 值**（收件人、公司名、金额，设计 §6）。
+    """
+    base = settings.frontend_base_url.strip().rstrip("/")
+    if not base:
+        # 与重置信、邀请信同一判定：拼不出可点的链接就不发。
+        logger.error("BILLING_FRONTEND_BASE_URL is not configured; cannot build a wallet link")
+        return None
+
+    if set(payload) != _NOTIFICATION_EMAIL_KEYS:
+        logger.error("A notification email outbox row does not have the expected payload keys")
+        return None
+
+    to = payload["to"]
+    # 列已经 `EmailStr` 校验；这一条只是不把 payload 原样塞进信头。
+    if not isinstance(to, str) or not to or "\r" in to or "\n" in to:
+        logger.error("A notification email outbox row has an unusable recipient")
+        return None
+
+    company_name = payload["company_name"]
+    if not isinstance(company_name, str) or not company_name:
+        logger.error("A notification email outbox row has an unusable company name")
+        return None
+
+    notification_type = payload["notification_type"]
+    if not isinstance(notification_type, str) or notification_type not in _NOTIFICATION_TEMPLATES:
+        logger.error("A notification email outbox row has an unknown notification type")
+        return None
+
+    balance = parse_money(payload["balance"])
+    if balance is None:
+        logger.error("A notification email outbox row has an invalid balance")
+        return None
+
+    params = {"company_name": company_name, "balance": _display_money(balance)}
+    if notification_type == NotificationType.LOW_BALANCE.value:
+        threshold = parse_money(payload["threshold"], non_negative=True)
+        if threshold is None:
+            logger.error("A notification email outbox row has an invalid threshold")
+            return None
+        params["threshold"] = _display_money(threshold)
+    elif payload["threshold"] is not None:
+        logger.error("A notification email outbox row has a threshold it should not have")
+        return None
+
+    occurred_at = _malaysia_time(payload["occurred_at"])
+    if occurred_at is None:
+        logger.error("A notification email outbox row has an unreadable occurred_at")
+        return None
+
+    # 路径由前端 `routes/paths.ts` 的 `portalWallet` 登记，
+    # 由 tests/backend/test_notification_email.py 机械比对。钱包页要登录，不带查询参数。
+    params["occurred_at"] = occurred_at
+    params["link"] = f"{base}/portal/wallet"
+    return OutboundMessage(
+        channel=Channel.EMAIL,
+        recipient=to,
+        template=_NOTIFICATION_TEMPLATES[notification_type],
+        params=params,
     )
 
 
@@ -160,9 +271,13 @@ def _render_portal_invitation(
 #
 # 门户邀请（AIH-TASK-094）登记之后，恢复扫描才会领
 # `PORTAL_INVITATION_REQUESTED` 行；在那之前它们以 PENDING 躺在库里，等的就是这一行。
+#
+# `NOTIFICATION_EMAIL_REQUESTED`（通知邮件，设计闸门 #559 v2）的生产者是 AIH-TASK-153
+# （通知结算事务里同事务写这一行）；本处只是处理器，在那之前库里没有这类行。
 _RENDERERS = {
     EVENT_PASSWORD_RESET: _render_password_reset,
     EVENT_PORTAL_INVITATION: _render_portal_invitation,
+    EVENT_NOTIFICATION_EMAIL: _render_notification_email,
 }
 
 # 通知类事件（设计闸门 #471 v7 §2「投递」）：不调 SMTP、不需要前端基址，
@@ -253,11 +368,14 @@ def deliver(outbox_id: int) -> str:
     if sent:
         # ⚠️ 连同 payload 一起清空：密码重置的 payload 里是**令牌明文**，
         # 而这一行是长期保留的。它的用途在投递完成的这一瞬就结束了。
-        _settle(factory, outbox_id, status=OutboxStatus.SENT)
+        # 受影响 0 行（已被更晚的一次领取接手）时由那一方结算；信已经发出，仍是 sent。
+        _settle(factory, claim, status=OutboxStatus.SENT)
         return "sent"
 
     if attempt >= settings.outbox_max_attempts:
-        _settle(factory, outbox_id, status=OutboxStatus.FAILED)
+        if not _settle(factory, claim, status=OutboxStatus.FAILED):
+            # 这一行已被更晚的一次领取接手（或已结算）：由那一方结算，这里不记 error。
+            return "superseded"
         # ⚠️ **error 级别**：没有别人会再碰这一行了，只能靠人。
         logger.error(
             "Giving up on an outbox row after repeated failures",
@@ -272,19 +390,30 @@ def deliver(outbox_id: int) -> str:
     return "retry-later"
 
 
-def _settle(factory: sessionmaker[Session], outbox_id: int, *, status: OutboxStatus) -> None:
-    """Close out one row. `status == PENDING` 是前置条件，所以重复结算是无害的。
+def _settle(factory: sessionmaker[Session], claim: _Claim, *, status: OutboxStatus) -> bool:
+    """Close out one email row, only if this claim is still the current one. True if it did.
+
+    前置条件是 `status == PENDING` 且 `attempt_count == claim.attempt`：重复结算无害，
+    而且**只有当前领取者能结算**。这补上设计闸门 #471 v7 §10 记下的缺口
+    （设计闸门 #559 v2 §2「邮件类结算带上领取次数」）：旧领取者停顿期间行被更晚的一次领取接手时，
+    它的结算受影响 0 行，不会把新领取者正在投的行置为 `FAILED` 或 `SENT`。
+    对密码重置、门户邀请与通知邮件同样生效；单个领取者时行为不变。
 
     ⚠️ `payload_json` 一律置空 —— 无论成功还是死信。密码重置的 payload 里是
     令牌明文，而死信那一行同样是长期保留的：投不出去不等于那把钥匙就该一直留着。
     """
     with factory() as session:
-        session.execute(
+        result = session.execute(
             update(DomainOutbox)
-            .where(DomainOutbox.id == outbox_id, DomainOutbox.status == OutboxStatus.PENDING)
+            .where(
+                DomainOutbox.id == claim.outbox_id,
+                DomainOutbox.status == OutboxStatus.PENDING,
+                DomainOutbox.attempt_count == claim.attempt,
+            )
             .values(status=status, processed_at=utc_now(), payload_json=None)
         )
         session.commit()
+        return int(result.rowcount) == 1
 
 
 def _attempt_send(settings: Settings, *, event_type: str, raw_payload: str | None) -> bool:
@@ -508,4 +637,10 @@ def recover() -> int:
     return len(due)
 
 
-__all__ = ["NOTIFICATION_EVENTS", "deliver", "handled_event_types", "recover"]
+__all__ = [
+    "EVENT_NOTIFICATION_EMAIL",
+    "NOTIFICATION_EVENTS",
+    "deliver",
+    "handled_event_types",
+    "recover",
+]

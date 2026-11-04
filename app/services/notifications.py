@@ -73,8 +73,11 @@ class InvalidPayload:
 type NotificationOutcome = NotificationDraft | NoNotification | InvalidPayload
 
 
-def _money(raw: object, *, non_negative: bool = False) -> Decimal | None:
-    """A fixed-point money string as a Decimal, or None if it is not one. Never via float."""
+def parse_money(raw: object, *, non_negative: bool = False) -> Decimal | None:
+    """A fixed-point money string as a Decimal, or None if it is not one. Never via float.
+
+    通知邮件的渲染（app/tasks/outbox.py，设计闸门 #559 v2 §2「渲染」）复用同一判定。
+    """
     if not isinstance(raw, str) or _MONEY.fullmatch(raw) is None:
         return None
     try:
@@ -98,10 +101,10 @@ def _payload(raw: str | None) -> dict[str, object] | None:
 
 def _low_balance(payload: dict[str, object], occurred_at: dt.datetime) -> NotificationOutcome:
     # 不检查计费模式：写入方只对预付客户写这类事件（设计闸门 #433 v2 §2）。
-    balance = _money(payload.get("balance"))
+    balance = parse_money(payload.get("balance"))
     if balance is None:
         return InvalidPayload("balance is not a valid amount")
-    threshold = _money(payload.get("threshold"), non_negative=True)
+    threshold = parse_money(payload.get("threshold"), non_negative=True)
     if threshold is None:
         return InvalidPayload("threshold is not a valid non-negative amount")
     return NotificationDraft(NotificationType.LOW_BALANCE, balance, threshold, occurred_at)
@@ -113,7 +116,7 @@ def _billing_status_changed(
     status = payload.get("billing_status")
     if not isinstance(status, str) or status not in _STATUS_TYPES:
         return InvalidPayload("billing_status is not a known value")
-    balance = _money(payload.get("balance"))
+    balance = parse_money(payload.get("balance"))
     if balance is None:
         return InvalidPayload("balance is not a valid amount")
     # ⚠️ 没有这个键按预付：键与 `billing_mode` 列同一个提交加入（迁移 0019），
@@ -157,4 +160,5 @@ __all__ = [
     "NotificationDraft",
     "NotificationOutcome",
     "notification_for",
+    "parse_money",
 ]

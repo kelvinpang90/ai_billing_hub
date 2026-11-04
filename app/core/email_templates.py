@@ -21,6 +21,10 @@ from typing import Final
 
 TEMPLATE_PASSWORD_RESET: Final = "password_reset"
 TEMPLATE_PORTAL_INVITATION: Final = "portal_invitation"
+# 低余额、停机、复机通知邮件（设计闸门 #559 v2 §2「模板」，AIH-TASK-152）。
+TEMPLATE_NOTIFICATION_LOW_BALANCE: Final = "notification_low_balance"
+TEMPLATE_NOTIFICATION_SUSPENDED: Final = "notification_suspended"
+TEMPLATE_NOTIFICATION_REACTIVATED: Final = "notification_reactivated"
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,45 @@ _TEMPLATES: Final[Mapping[str, _EmailTemplate]] = {
         ),
         required=frozenset({"link", "deadline"}),
     ),
+    # ⚠️ 三封通知信的标题固定、不含任何 payload 值；文案**只说计费状态，不说服务状态**：
+    # 复机后 AI 服务是否可用还看账户与项目状态（spec §24、§27），所以不写「服务已恢复」。
+    TEMPLATE_NOTIFICATION_LOW_BALANCE: _EmailTemplate(
+        subject="Your Acuven Billing balance is low",
+        body=Template(
+            "The prepaid balance of the Acuven Billing account for $company_name "
+            "has fallen to RM $balance, "
+            "at or below your low-balance threshold of RM $threshold.\n\n"
+            "This was recorded at $occurred_at.\n\n"
+            "AI services billed to this account are suspended when the balance reaches RM 0.00. "
+            "To top up, please contact your Acuven contact.\n\n"
+            "You can check your balance in the customer portal:\n$link"
+        ),
+        required=frozenset({"company_name", "balance", "threshold", "occurred_at", "link"}),
+    ),
+    TEMPLATE_NOTIFICATION_SUSPENDED: _EmailTemplate(
+        subject="Your Acuven Billing account is suspended",
+        body=Template(
+            "The prepaid balance of the Acuven Billing account for $company_name "
+            "reached RM $balance at $occurred_at, "
+            "so AI services billed to this account are now suspended.\n\n"
+            "This balance suspension is lifted automatically once the balance is above RM 0.00. "
+            "To top up, please contact your Acuven contact.\n\n"
+            "You can check your balance in the customer portal:\n$link"
+        ),
+        required=frozenset({"company_name", "balance", "occurred_at", "link"}),
+    ),
+    TEMPLATE_NOTIFICATION_REACTIVATED: _EmailTemplate(
+        subject="Your Acuven Billing balance suspension has been lifted",
+        body=Template(
+            "The prepaid balance of the Acuven Billing account for $company_name "
+            "is RM $balance as of $occurred_at, "
+            "so this account is no longer suspended for its balance.\n\n"
+            "If AI services are still unavailable, the account or one of its projects "
+            "may be disabled for another reason; please contact your Acuven contact.\n\n"
+            "You can check your balance in the customer portal:\n$link"
+        ),
+        required=frozenset({"company_name", "balance", "occurred_at", "link"}),
+    ),
 }
 
 
@@ -84,6 +127,9 @@ def render_email(template: str, params: Mapping[str, str]) -> RenderedEmail | No
 
 
 __all__ = [
+    "TEMPLATE_NOTIFICATION_LOW_BALANCE",
+    "TEMPLATE_NOTIFICATION_REACTIVATED",
+    "TEMPLATE_NOTIFICATION_SUSPENDED",
     "TEMPLATE_PASSWORD_RESET",
     "TEMPLATE_PORTAL_INVITATION",
     "RenderedEmail",
