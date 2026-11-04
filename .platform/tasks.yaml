@@ -9039,7 +9039,7 @@ tasks:
     title: 通知：结算门户通知时同一事务写一行通知邮件，发往租户联系邮箱
     purpose: >-
       设计闸门 #559 v2 的业务规则层：通知类 outbox 行（tenant.low_balance、tenant.billing_status_changed）结算并插入门户通知的同一个事务里，再插入一行 NOTIFICATION_EMAIL_REQUESTED（AIH-TASK-152 的处理器把它发往租户联系邮箱）。结算 UPDATE、通知插入与邮件行插入原子提交，一条通知最多一行邮件行；不出通知（内部计量租户）与 payload 无效时不写；已经存在的通知不补发（Kelvin 2026-11-04 定）。不改钱包、账本、通知规则与邮件投递。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-152
     acceptance_criteria:
