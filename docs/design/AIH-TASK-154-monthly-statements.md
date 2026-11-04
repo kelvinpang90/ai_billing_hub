@@ -1,6 +1,6 @@
-# AIH-TASK-154..162 设计：月度对账单、T+1 cut-off 与上期调整（已批准 v5）
+# AIH-TASK-154..162 设计：月度对账单、T+1 cut-off 与上期调整（送审 v6）
 
-> **来源**：设计闸门 Issue #565。本文件是 `APPROVED: design v5` 那一版正文的**逐字副本**（五轮均由 Claude 审查：v1 被要求修改，有界扫描假设 `created_at ≥ occurred_at`；v2 被要求修改，数据缺陷下的恢复方式走不通，改为 Kelvin 拍板的已知限制；v3 曾获批准，之后 AIH-TASK-158 预审查出缺失告警会一直 P2、遮住同维度的 P1，改为只报 24 小时（v4，Kelvin 拍板），批准随之作废；v4 被要求修改，快照缺 ADR-0008 §5 的税务说明；v5 审查通过，见 §12。送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v5`）。
+> **来源**：设计闸门 Issue #565。批准后本文件改为 `APPROVED: design v<N>` 那一版正文的**逐字副本**。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
 > **实现以本文件为准**；与 Issue 不一致时，以 Issue 上被批准的版本为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **前置**：ADR-0003（财务期间与 cut-off）；账本 `wallet_transactions` 与 `post_transaction`（AIH-TASK-008 起）；用量计费的 `processed_at` 与 `wallet_transaction_id`（AIH-TASK-032）；告警维度 `usage_processing_backlog`（AIH-TASK-046）。
@@ -24,7 +24,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v5`
+**设计版本**：`v6`
 对应需求：spec §46、§65、§74.8、§113、§114、§130「monthly statements」「T+1 cut-off and prior-period adjustments」；ADR-0003；Invariant 12
 目标 PR：待开（登记 PR）；实现为 AIH-TASK-154..162
 
@@ -218,7 +218,7 @@ by_provider[], by_model[], by_project[]
 Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing_backlog`，不加维度、不改 `deploy/monitor.sh`：
 
 - **缺失对账单**：对每个账期 `M`（`FIRST_STATEMENT_PERIOD` 起，`cutoff(M) + 6 小时 ≤ now < cutoff(M) + 30 小时`，常量 `STATEMENT_MISSING_GRACE = 6h`、`STATEMENT_MISSING_WINDOW = 24h`）与每个合格租户，没有对账单的项数 `> 0` → P2。摘要：有缺失时 `<n> statements missing, earliest period <YYYY-MM>`，没有时 `0 statements missing`。只报 24 小时（Kelvin 2026-11-04 定）：`deploy/monitor.sh` 每个维度一个 Healthchecks 检查，非 OK 就推 `/fail`，而 Healthchecks 只在状态切换时通知一次。数据缺陷导致的永久停出（§5）如果一直报，这个维度会一直是 down，之后同一维度的积压、过期租约（P1）都不会再通知任何人。只报 24 小时则一定通知一次，窗口过后维度恢复；代价是同一维度的其他问题最多被遮住 24 小时，停出之后只剩 error 日志与管理端列表可见。Healthchecks 已 20/20（免费版上限），不单开维度。
-- **晚到用量占比**：最近 24 小时内入账的预付租户 `AI_USAGE` 行（按 `created_at`），其中 `t(r) ≠ U` 的为晚到；晚到条数占比或金额占比 `≥ 1%` → P2（`Decimal` 比较）。只统计连得上事件的行（内连接；连不上事件的 `AI_USAGE` 行是数据缺陷，由生成的自检报出）。窗口最多跨两个月，按月边界拆开，每段用该月的常量谓词判定（晚到 ⇔ `occ < start(K) AND NOT (occ >= start(K-1) AND created_at < cutoff(K-1))`，`K` 为该段所在月）。摘要 `late usage 24h <a>/<b> rows (<x>%), <y>% of amount`，百分比 `ROUND_HALF_UP` 到两位小数，分母为 0 时写 `0.00`（如 `late usage 24h 0/0 rows (0.00%), 0.00% of amount`）；只有计数与百分比，不带租户与金额。
+- **晚到用量占比**：最近 24 小时内入账的预付租户 `AI_USAGE` 行（按 `created_at`），其中 `t(r) ≠ U` 的为晚到；晚到条数占比或金额占比 `≥ 1%` → P2（用精确的 `Decimal` 比值与 `0.01` 比较；摘要里舍入后的百分比只用于显示，不参与判定）。只统计连得上事件的行（内连接；连不上事件的 `AI_USAGE` 行是数据缺陷，由生成的自检报出）。窗口最多跨两个月，按月边界拆开，每段用该月的常量谓词判定（晚到 ⇔ `occ < start(K) AND NOT (occ >= start(K-1) AND created_at < cutoff(K-1))`，`K` 为该段所在月）。摘要 `late usage 24h <a>/<b> rows (<x>%), <y>% of amount`，百分比 `ROUND_HALF_UP` 到两位小数，分母为 0 时写 `0.00`（如 `late usage 24h 0/0 rows (0.00%), 0.00% of amount`）；只有计数与百分比，不带租户与金额。
 - 现有三部分（积压、PROCESSING、过期租约）的判据与摘要不变；新两部分各成一段，用 `; ` 接在后面，维度级别取最严重的一个（照 `wallet_negative_balance` 的合并写法）。
 
 ### 管理端接口（AIH-TASK-159，`app/api/admin_statements.py`）
@@ -286,7 +286,7 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 | 并发重复生成 | 后者 `IntegrityError` → 回滚后查到已有行，当作成功 | 恰好一行 | — | — | 无 |
 | 编号碰撞 | warning；本轮放弃这一项 | 无行 | 是 | 下一轮换随机数 | 一般不会触发 |
 | Redis/Celery 丢失 | 本小时没跑 | 无行 | 是 | 下一小时 beat；管理端手动 | 到期后 6–30 小时内缺失 P2 |
-| 生成之后才提交的旧行 | 不改已定稿对账单 | 进下一期，归为上期调整 | — | 高水位规则 | 晚到占比 P2 |
+| 生成之后才提交的旧行 | 不改已定稿对账单 | 进下一期，归为上期调整 | — | 高水位规则 | 无：这类行 `created_at < cutoff(U)`、`t(r) = U`，晚到占比的判定按定义不计它（§10 假设） |
 
 ## 6. 数据与安全边界
 
@@ -365,6 +365,7 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 - **已拍板（Kelvin 2026-11-04，#565 v2 审查后）**：数据缺陷（`AI_USAGE` 行连不上事件、收费事件的 `billable_cost` 与账本金额不符）让自检失败时，这个租户从该期起永久停出，接受为已知限制。本批不做放行登记、不出 `VOID` 占位单。缺失告警在该期到期后 6–30 小时内报 P2，之后不再报（下一条）；发生时按 runbook 定位，再开设计闸门定修复（§5）。
 - **已拍板（Kelvin 2026-11-04，#565 v3 预审后）**：缺失对账单的告警只在到期后 `[6 小时, 30 小时)` 的窗口里报，不一直报、不单开维度（理由见 §2「告警」）。
 - **不做的假设**：不假设 `created_at ≥ occurred_at`，也不依赖 `FUTURE_TOLERANCE` 的值（§2「候选扫描」）；金额与归属的正确性只依赖不可变字段与高水位。
+- **假设**：`created_at` 在 cut-off 之前、却在生成（cut-off 之后至少 1 小时）之后才提交的 `AI_USAGE` 行，金额正确地进下一期的上期调整（高水位规则），但晚到用量告警不计它（它的 `t(r) = U`，不算晚到）。这要求一个计费事务跨过 1 小时以上才提交；处理事务在拿到计费锁之后才取时刻，锁等待有上限、事务以秒计，所以不为它另加告警，§7「生成后才提交」覆盖它的金额去向。
 - **假设**：零收费事件在 cut-off 之前取了 `processed_at`、却在生成（cut-off 之后至少 1 小时）之后才提交时，会从对账单的请求数里漏掉（它没有金额，账本侧不受影响）。处理事务在拿到计费锁之后才取 `processed_at`，锁等待有上限，正常情况下事务以秒计；这个漏计只影响计数，记为已知限制。
 - **假设**：管理端手动触发是同步执行；一个大租户一个月的数据量下可能耗时较长。目前只有内部租户与验收租户，真实客户的量级出现后再看是否改为异步。
 - **后续**：作废与更正版本（`VOID`、唯一约束改为「有效版本唯一」）、PDF、财务分析、出单通知、关户后的出单规则、rebill 的原期间引用，各由对应的设计闸门定。ADR-0003「收口条件」的勾选在本批全部交付后由管理员另开 PR 处理。
@@ -413,3 +414,4 @@ Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing
 | v3 | 2026-11-04 | §5「自检不等」改为「永久停出」的已知限制：写明最终状态、不可重试与 runbook 处置；§10 记 Kelvin 拍板；§2「自检」日志带检查编号；§7 增加「永久停出」一行，「catch-up」补编号碰撞，「管理端」补没有到期账期、没有钱包与中间一期失败 | #565 v2 审查阻断项：数据缺陷下 v2 写的「修数据后自动补上」走不通；五问第 4 条的测试缺口 |
 | v4 | 2026-11-04 | §2「告警」缺失对账单只在 `cutoff(M) + 6h ≤ now < cutoff(M) + 30h` 的窗口内计数并写明理由；§1 完成标准 6、§3 INV-14、§5 各行的告警一栏、§7「告警：缺失」、§10 已拍板随之改 | AIH-TASK-158 预审 DESIGN_DEFECT：永久停出让缺失告警一直 P2，`usage_processing_backlog` 的 Healthchecks 检查一直 down，之后的 P1 无人知晓 |
 | v5 | 2026-11-04 | 对账单引用税务政策：表加 `tax_policy_version_id`（NOT NULL、FK RESTRICT、显式索引）；`generate_statement` 第 4 步按 `cutoff(M)` 取生效版本，取不到或校验失败 → `StatementTaxPolicyUnavailable`；快照加 `tax_notice{zh, en}`；§1 完成标准 4、§3 INV-6 改为「是」、§4 锁、§5 新增一行、§7 新增「税务说明」、前端显示说明随之改 | #565 v4 审查阻断项：ADR-0008 §5 要求说明随税务政策版本快照进每张对账单，spec §45.1 `REQ-TAX-001` |
+| v6 | 2026-11-04 | §5「生成之后才提交的旧行」的告警一栏改为「无」并在 §10 记为假设（v5 误写成由晚到占比告警兜住）；§2「告警」写明 1% 阈值用精确 `Decimal` 比值判定、舍入后的百分比只用于显示 | AIH-TASK-158 预审 DESIGN_DEFECT：这类行 `t(r) = U`，晚到判定按定义不计它；同一预审的 UNDECIDED |
