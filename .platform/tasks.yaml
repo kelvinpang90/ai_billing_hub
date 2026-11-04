@@ -9087,18 +9087,18 @@ tasks:
       - bypass_ci
       - bypass_review
 
-  # AIH-TASK-154..162：Phase 7 月度对账单、T+1 cut-off 与上期调整（设计闸门 #565 v1，docs/design/AIH-TASK-154-monthly-statements.md）。
+  # AIH-TASK-154..162：Phase 7 月度对账单、T+1 cut-off 与上期调整（设计闸门 #565 v3，docs/design/AIH-TASK-154-monthly-statements.md）。
   # Kelvin 2026-11-04 定：本批到「生成并定稿 + 管理端查看与补生成 + 门户查看」，PDF 与财务分析另批；只给 PREPAID 出；生成即定稿；首个账期 2026-12、不回补；上期调整监控并进 usage_processing_backlog；出单不通知。
   # 不写账本、不改计费；上期调整是对账单上的归类（按 T+1 归属月与钱包高水位划分账本行），不是新的账本类型。
   - id: AIH-TASK-154
     title: 月度对账单第一层：对账单表的迁移、模型与定稿后不可改删的触发器
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「数据库」与 §8：新迁移 0035 建 monthly_statements（列、两个唯一、一个唯一的租户与账期、一个普通索引、两个外键 RESTRICT、四条 CHECK 照设计的表），MySQL 上建两个触发器拒绝 UPDATE 与 DELETE 非 DRAFT 行；新模型 app/models/statements.py 并在 alembic/env.py 登记；docs/database-schema.md 记表结构。不写生成逻辑、不加任务与接口：账本归属与期初期末属于 AIH-TASK-155，生成属于 156，任务属于 157。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「数据库」与 §8：新迁移 0035 建 monthly_statements（列、两个唯一、一个唯一的租户与账期、一个普通索引、两个外键 RESTRICT、四条 CHECK 照设计的表），MySQL 上建两个触发器拒绝 UPDATE 与 DELETE 非 DRAFT 行；新模型 app/models/statements.py 并在 alembic/env.py 登记；docs/database-schema.md 记表结构。不写生成逻辑、不加任务与接口：账本归属与期初期末属于 AIH-TASK-155，生成属于 156，任务属于 157。
     status: ready
     depends_on:
       - AIH-TASK-153
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） 逐条一致，以 §2「数据库」、§3 INV-12、§4 状态表、§7 触发器与迁移两行、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） 逐条一致，以 §2「数据库」、§3 INV-12、§4 状态表、§7 触发器与迁移两行、§8 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '新增 alembic/versions/20261104_0035_monthly_statements.py，revision 为 0035_monthly_statements，down_revision 为 0034_tax_policy_backstop；文件头照 0028 迁移的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明只建一张新表与两个触发器、不改任何已有表、不回填'
       - '表与约束的名称：唯一 uq_monthly_statements_public_id（public_id）、uq_monthly_statements_statement_number（statement_number）、uq_monthly_statements_tenant_period（tenant_id, period_start）；普通索引 ix_monthly_statements_period（period_start, tenant_id）与 ix_monthly_statements_generated_by（generated_by，显式声明，免得 MySQL 为外键自动建索引）；外键 fk_monthly_statements_tenant_id（tenant_id → tenants.id）与 fk_monthly_statements_generated_by（generated_by → users.id），都是 ON DELETE RESTRICT；CHECK ck_monthly_statements_status（status IN (''DRAFT'', ''FINALIZED'', ''VOID'')）、ck_monthly_statements_period（period_start < period_end AND period_end < cutoff_at）、ck_monthly_statements_high_sequence（ledger_high_sequence >= 0）、ck_monthly_statements_finalized_at（status <> ''FINALIZED'' OR finalized_at IS NOT NULL）；列名、类型与宽度、可空性照设计 §2 的表，金额以外没有 DECIMAL 列，snapshot_json 为 JSON NOT NULL'
       - 'MySQL 触发器 trg_monthly_statements_before_update（BEFORE UPDATE）与 trg_monthly_statements_before_delete（BEFORE DELETE），主体都是 IF OLD.status <> ''DRAFT'' THEN SIGNAL SQLSTATE ''45000'' SET MESSAGE_TEXT = ''monthly_statements: a finalized or void statement is immutable''; END IF（BEGIN … END 包住）；SQLite 不建触发器。upgrade 照 0028：表不存在 → 建表（MySQL 一条 CREATE TABLE 字面量）再建两个触发器；表已存在且列、索引、外键与 DELETE_RULE、四条 CHECK 名称逐项一致 → MySQL 上读 information_schema.TRIGGERS 逐个比对两个触发器的 ACTION_TIMING、EVENT_MANIPULATION、EVENT_OBJECT_TABLE 与 ACTION_STATEMENT（去掉首尾空白后与迁移里的主体逐字相等）：都在且一致不发 DDL，缺了的只补缺的那个（补完中断的升级），存在但任一项不一致抛错且不发 DDL；形状任何一项不一致 → 抛错且不发任何 DDL，消息点名表并写明处理方法（确认表为空后手工删表再升级；有行则停下按数据事故处理）。downgrade：离线 --sql 模式直接抛错、不输出 DROP；表不存在跳过；表有行抛错且不发 DDL、不删行（消息写明保留表、只回滚应用镜像）；表为空先删两个触发器再删表'
@@ -9147,17 +9147,17 @@ tasks:
   - id: AIH-TASK-155
     title: 月度对账单第二层：账期时刻、账本归属规则与期初期末发生额
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「账期与时间」「账本归属规则」「发生额分类」与「自检」第 1 条：新模块 app/services/statements.py 的账期边界、到期判定、首个账期常量、归属谓词（SQL 表达式与 Python 参考函数）、在给定高水位下算出本期账本行的分类汇总与期初期末，并做期初加发生额等于期末的自检。只读、不写库、不提交；用量统计、快照与生成属于 AIH-TASK-156。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「账期与时间」「账本归属规则」「发生额分类」与「自检」第 1 条：新模块 app/services/statements.py 的账期边界、到期判定、首个账期常量、归属谓词（SQL 表达式与 Python 参考函数）、在给定高水位下算出本期账本行的分类汇总与期初期末，并做期初加发生额等于期末的自检。只读、不写库、不提交；用量统计、快照与生成属于 AIH-TASK-156。
     status: ready
     depends_on:
       - AIH-TASK-154
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） 逐条一致，以 §2「账期与时间」「账本归属规则」「发生额分类」「自检」第 1 条、§3 INV-4、INV-5、INV-8、INV-10、§7 标 155 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） 逐条一致，以 §2「账期与时间」「账本归属规则」「发生额分类」「自检」第 1 条、§3 INV-4、INV-5、INV-8、INV-10、§7 标 155 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '账期：StatementPeriod（label 为 YYYY-MM，start、end、cutoff 为 naive UTC）由 statement_period(label) 得到，三者经 app/schemas/customer_usage.py 的 malaysia_day_start_utc 计算（start = 本月 1 日、end = 下月 1 日、cutoff = 下月 2 日的马来西亚零点）；label 只接受 YYYY-MM 且月份 1–12，否则 ValueError；period_containing(moment) 返回 naive UTC 时刻所在的马来西亚月；previous_period(period)；GENERATION_DELAY: Final = timedelta(hours=1)，is_due(period, now) 恰为 now >= cutoff + GENERATION_DELAY；FIRST_STATEMENT_PERIOD: Final = "2026-12"；due_periods(now, *, first=FIRST_STATEMENT_PERIOD) 返回从 first 到最近一个到期账期的升序列表（没有则为空）。不读环境变量'
       - '归属：attributed_month(transaction_type, created_at, occurred_at) 是设计 §2 定义的 t(r) 的 Python 参考实现，返回 YYYY-MM；AI_USAGE 而 occurred_at 为 None、或非 AI_USAGE 而 occurred_at 不为 None，都抛 ValueError；attributed_through(period) 返回 SQL 布尔表达式，作用于 wallet_transactions 左外连接 usage_events（usage_events.wallet_transaction_id = wallet_transactions.id），与设计 §2 的常量谓词逐字同义（非 AI_USAGE：created_at < end；AI_USAGE：occurred_at < end AND (created_at < end OR (occurred_at >= start AND created_at < cutoff))），比较只用账期常量，不在 SQL 里做日期运算'
-      - 'ledger_section(session, tenant_id, period, *, high_sequence, balance, previous) -> LedgerSection：previous 是上期的 (ledger_high_sequence, closing_balance) 或 None；按设计 §2 求 S(M)（候选是两条不相交的查询：hw_prev < wallet_sequence <= high_sequence，与 wallet_sequence <= hw_prev 且 created_at >= start；previous 为 None 时 hw_prev 取 high_sequence），期末 = balance − Σ{seq <= high_sequence, created_at >= end, 不满足 attributed_through(M)}，期初 = previous 的期末，previous 为 None 时 = balance − Σ{seq <= high_sequence, created_at >= start, 不满足 attributed_through(M-1)}；LedgerSection 含 opening_balance、closing_balance、total_topup、total_ai_usage、total_adjustments、prior_usage（(usage_period, request_count, amount) 按 usage_period 升序，usage_period 由 MalaysiaDay 分组后在 Python 里折成月）、prior_rebill、prior_total、current_usage_rows（本期 AI_USAGE 行数），分组口径照设计 §2「发生额分类」的表；每条查询都带 tenant_id，不加锁、不写、不提交；SQL 用 SUM 在 DECIMAL 上求和，Python 侧只有 Decimal'
-      - '自检第 1 条：opening_balance 加全部发生额（total_topup + total_ai_usage + total_adjustments + prior_total）不等于 closing_balance，或 S(M) 或期末、期初扫描里有一行 AI_USAGE 找不到事件，抛本模块的 StatementIntegrityError，并记一条固定文本的 error 日志，extra 只带租户 public_id 与账期 label，不带任何金额'
-      - '测试：新增 tests/backend/test_statement_ledger.py，覆盖设计 §7 标 155 的各行：账期边界（2026-12、2027-02 与 2028-02、到期判定在 cutoff + 1h 前后各一秒、due_periods 为空与多期）；归属谓词表驱动（上月末、宽限日内、宽限日后、本月、下月 1 日，非用量行月末前后一秒），对每行断言 attributed_through 的 SQL 结果与 attributed_month 一致；正常路径、宽限日、晚到（含上上月发生）、生成后才提交（传入的 high_sequence 小于实际最大序号，被挡在外面的行进下一期）、首期、两个租户互不混入、AI_USAGE 无事件时的错误与日志不含金额、调用前后 wallets 与 wallet_transactions 不变；金额与 SQL 用例在 SQLite 与 MySQL 两个分片都跑，8 位小数精度的断言只在 MySQL 下做（照 CLAUDE.md「写后端测试的约定」，不写死方言相关的 SQL 字面量）；账本行经 post_transaction 写入，已处理的事件直接插入并回填 wallet_transaction_id，建数写法照 tests/backend/test_usage_billing.py'
+      - 'ledger_section(session, tenant_id, period, *, high_sequence, balance, previous) -> LedgerSection：previous 是上期的 (ledger_high_sequence, closing_balance) 或 None；按设计 §2「候选扫描」：later_rows(K, h) 求 L(K; h)，候选是两条按 created_at 不相交的查询 C1（wallet_transactions.created_at >= end(K)，走 ix_wallet_transactions_tenant_created）与 C2（AI_USAGE、created_at < end(K)、事件 occurred_at >= end(K)，从 usage_events 侧走 ix_usage_events_tenant_occurred 再按 wallet_transaction_id 连账本），两段的每一行都再用 NOT attributed_through(K) 判定，不假设 created_at 与 occurred_at 的先后、不引用 FUTURE_TOLERANCE；S(M) = 段一（hw_prev < wallet_sequence <= high_sequence 且 attributed_through(M)）∪ 段二（later_rows(M-1, hw_prev) 中 attributed_through(M) 的行），previous 为 None 时 hw_prev 取 high_sequence；期末 = balance − Σ later_rows(M, high_sequence)，期初 = previous 的期末，previous 为 None 时 = balance − Σ later_rows(M-1, high_sequence)；每段一条查询，不写成一个 OR；LedgerSection 含 opening_balance、closing_balance、total_topup、total_ai_usage、total_adjustments、prior_usage（(usage_period, request_count, amount) 按 usage_period 升序，usage_period 由 MalaysiaDay 分组后在 Python 里折成月）、prior_rebill、prior_total、current_usage_rows（本期 AI_USAGE 行数），分组口径照设计 §2「发生额分类」的表；每条查询都带 tenant_id，不加锁、不写、不提交；SQL 用 SUM 在 DECIMAL 上求和，Python 侧只有 Decimal'
+      - '自检第 1 条：opening_balance 加全部发生额（total_topup + total_ai_usage + total_adjustments + prior_total）不等于 closing_balance，或 S(M) 或期末、期初扫描里有一行 AI_USAGE 找不到事件，抛本模块的 StatementIntegrityError（带属性 check），并记一条固定文本的 error 日志，extra 只带租户 public_id、账期 label 与 check（自检第 1 条为 "1"，AI_USAGE 行找不到事件为 "missing_event"），不带任何金额'
+      - '测试：新增 tests/backend/test_statement_ledger.py，覆盖设计 §7 标 155 的各行：账期边界（2026-12、2027-02 与 2028-02、到期判定在 cutoff + 1h 前后各一秒、due_periods 为空与多期）；归属谓词表驱动（上月末、宽限日内、宽限日后、本月、下月 1 日，非用量行月末前后一秒，含 created_at 早于 occurred_at 的行），对每行断言 attributed_through 的 SQL 结果与 attributed_month 一致；created_at 早于 occurred_at 跨月（end(M) − 90 秒入账、occurred_at = end(M) + 120 秒，与镜像 start(M) − 90 秒入账、occurred_at = start(M) + 120 秒）：自检通过，前者不进 M 的 S(M)、进 M+1，后者不进 M-1、进 M；扫描完整性：一批覆盖各类型、created_at 比 occurred_at 早 0 秒至 1 天或晚 0 秒至 40 天、跨三个月的账本行，对几组 (K, h) 断言 later_rows、S(M)、期末与首期期初和全表扫描后逐行用 attributed_month 判定的参考结果逐一相等（集合与金额）；正常路径、宽限日、晚到（含上上月发生）、生成后才提交（传入的 high_sequence 小于实际最大序号，被挡在外面的行进下一期）、首期、两个租户互不混入、AI_USAGE 无事件时的错误与日志不含金额、调用前后 wallets 与 wallet_transactions 不变；金额与 SQL 用例在 SQLite 与 MySQL 两个分片都跑，8 位小数精度的断言只在 MySQL 下做（照 CLAUDE.md「写后端测试的约定」，不写死方言相关的 SQL 字面量）；账本行经 post_transaction 写入，已处理的事件直接插入并回填 wallet_transaction_id，建数写法照 tests/backend/test_usage_billing.py'
       - '只改 app/services/statements.py 与新测试；不改钱包、账本、计费、模型与迁移；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #565'
     allowed_change_paths:
       - app/services/statements.py
@@ -9196,14 +9196,14 @@ tasks:
   - id: AIH-TASK-156
     title: 月度对账单第三层：本期用量统计、快照、自检与生成一份对账单
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「用量统计」「自检」第 2、3 条、「快照」「生成函数」：在 app/services/statements.py 加本期用量统计、固定键集合的快照、合格性判定与 generate_statement（只 flush、不提交）。不加 Celery 任务、不加接口、不写审计：catch-up 与任务属于 AIH-TASK-157，审计属于 159。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「用量统计」「自检」第 2、3 条、「快照」「生成函数」：在 app/services/statements.py 加本期用量统计、固定键集合的快照、合格性判定与 generate_statement（只 flush、不提交）。不加 Celery 任务、不加接口、不写审计：catch-up 与任务属于 AIH-TASK-157，审计属于 159。
     status: ready
     depends_on:
       - AIH-TASK-155
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） 逐条一致，以 §2「用量统计」「自检」「快照」「生成函数」、§3 INV-7、INV-8、INV-10、INV-12、§4、§5 前五行、§6、§7 标 156 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） 逐条一致，以 §2「用量统计」「自检」「快照」「生成函数」、§3 INV-7、INV-8、INV-10、INV-12、§4、§5 前五行、§6、§7 标 156 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'usage_section(session, tenant_id, period, *, high_sequence) -> UsageSection：E(M) 照设计 §2（PROCESSED、billing_mode_snapshot = PREPAID、occurred_at 在本月；收费事件要求其账本行 wallet_sequence <= high_sequence 且 created_at < cutoff，零收费事件要求 processed_at < cutoff）；request_count、conversation_count（COUNT(DISTINCT conversation_id)，NULL 不计）、input_tokens 与 output_tokens（NULL 按 0）、total_customer_charges（billable_cost 之和）、charged_event_count；by_provider（ai_providers.code）、by_model（ai_providers.code 与 ai_models.code）、by_project（projects.public_id 与 projects.name）每组 request_count、input_tokens、output_tokens、charges，排序照设计；不读任何成本、汇率、加价、价格版本与规则列'
-      - '自检第 2、3 条：total_customer_charges 不等于 −total_ai_usage，或 charged_event_count 不等于 LedgerSection.current_usage_rows，抛 AIH-TASK-155 的 StatementIntegrityError，日志写法同第 1 条'
+      - '自检第 2、3 条：total_customer_charges 不等于 −total_ai_usage，或 charged_event_count 不等于 LedgerSection.current_usage_rows，抛 AIH-TASK-155 的 StatementIntegrityError，check 分别为 "2"、"3"，日志写法同第 1 条'
       - 'build_snapshot(...) 的键集合恰好是设计 §2「快照」列出的那些（schema_version 为 1、currency 为 MYR、company_name 取生成时的 tenants.company_name；prior_period 含 usage、rebill、total；明细三组各项的键集合也固定），金额经 app/schemas/customers.py 的 money_text 写成 8 位小数字符串，计数为 int；不出现成本、汇率、加价、毛利、版本、规则、内部 id 的键'
       - 'is_eligible(tenant, wallet, period) 照设计 §2（billing_mode 为 PREPAID、有钱包、wallets.created_at < end，不看账户状态）；generate_statement(session, tenant_id, period, *, now, generated_by=None) -> GenerateResult(statement, created) 按设计 §2「生成函数」1–5 的顺序：未到期或早于首个账期 StatementNotDue，不合格 StatementNotEligible，已有 (tenant_id, period_start) 的行直接返回（created=False，不读账本、不写），上期合格却没有对账单 PreviousStatementMissing；读钱包（version、balance，普通读不加锁）与上期，调 ledger_section、usage_section、两段自检后 INSERT 一行：status FINALIZED、finalized_at 与 created_at 为 now、statement_number 匹配 ^ST-[0-9]{6}-[0-9A-HJKMNP-TV-Z]{8}$（随机部分用 secrets）、generated_by、ledger_high_sequence、cutoff_at、snapshot_json；只 flush 不提交、不写审计、不写钱包与账本；唯一冲突的 IntegrityError 原样抛出（并发处理在 AIH-TASK-157）'
       - '测试：新增 tests/backend/test_statement_generate.py，覆盖设计 §7 标 156 的各行：正常路径的完整快照与手算值逐字段相等（键集合逐一相等）、链式连续三个月（每期期初等于上期期末）、零收费事件在 cutoff 前后、用量统计（两个项目、两个模型、有无 conversation_id）、自检第 2 条（插入时就是 PROCESSED、billable_cost 与其账本行金额不符的事件；MySQL 上触发器不许改已处理的事件，不得事后 UPDATE）、幂等（第二次 created=False、行数 1、不发账本查询）、上期缺失、合格性（内部计量租户、钱包在 end 之后才建、早于首个账期、未到期）、两个租户、只读（wallets 与 wallet_transactions 不变）、编号格式；MySQL 下两个会话在两个线程里生成同一项：第一个 flush 后等第二个的 INSERT 阻塞在唯一键上再提交，第二个得到 IntegrityError、表里恰好一行；测试只用 2026-12 及之后的账期并注入 now，不覆盖 FIRST_STATEMENT_PERIOD；金额精度断言只在 MySQL 下做；测试写入的对账单行用 SET FOREIGN_KEY_CHECKS = 0 加 TRUNCATE 清掉（触发器挡 DELETE）'
@@ -9245,16 +9245,16 @@ tasks:
   - id: AIH-TASK-157
     title: 月度对账单第四层：每小时补生成到期对账单的任务与 beat
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「Celery 任务」与 §5：在 app/services/statements.py 加 catch_up_tenant 与 generate_due（每项一个事务，并发重复与编号碰撞照设计处理），新任务模块 app/tasks/statements.py 与 beat 条目 statements-generate-due（3600 秒，expires 3240 秒）。首个账期 2026-12 在 2027-01-02 01:00（马来西亚时间）才到期，之前每次都是空跑。告警属于 AIH-TASK-158，接口属于 159。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「Celery 任务」与 §5：在 app/services/statements.py 加 catch_up_tenant 与 generate_due（每项一个事务，并发重复与编号碰撞照设计处理），新任务模块 app/tasks/statements.py 与 beat 条目 statements-generate-due（3600 秒，expires 3240 秒）。首个账期 2026-12 在 2027-01-02 01:00（马来西亚时间）才到期，之前每次都是空跑。告警属于 AIH-TASK-158，接口属于 159。
     status: ready
     depends_on:
       - AIH-TASK-156
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） 逐条一致，以 §2「Celery 任务」「生成函数」末段的并发处理、§3 INV-14、§4、§5、§7 catch-up 与 beat 登记两行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） 逐条一致，以 §2「Celery 任务」「生成函数」末段的并发处理、§3 INV-14、§4、§5、§7 catch-up 与 beat 登记两行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'catch_up_tenant(factory, tenant_id, now, *, generated_by=None, before_commit=None, raise_errors=False) -> list[MonthlyStatement]：照设计 §2「Celery 任务」的五条逐条实现：对 due_periods(now) 升序，每个账期一个事务调用 generate_statement；已有行与不合格的账期跳过；只有 generate_statement 本身抛的 IntegrityError 走「回滚、新事务里查 (tenant_id, period_start)：已存在当作成功（不进返回值）继续下一期，不存在（编号碰撞）记一条 warning 并停止这个租户的后续账期、不算错误」；新生成的那份依次调用 before_commit(session, statement)、session.flush()、提交，这三步抛的任何异常（包括 IntegrityError）都按失败处理；失败（上一句，或 generate_statement 抛的其他任何异常）时回滚，记一条固定文本的 error 日志（extra 只带租户 public_id、账期 label 与异常类型名，不带金额与公司名）后停止这个租户的后续账期；raise_errors 为 False 时返回已生成的部分，为 True 时记完日志后原样抛出（管理端用 True，generate_due 用 False）；返回本次新生成的对账单（按账期升序）'
       - 'generate_due(factory, now) -> int：对生成时 billing_mode 为 PREPAID 的租户按 id 升序调用 catch_up_tenant，单个租户失败不影响其他租户，返回新生成的总份数；app/tasks/statements.py 新增 Celery 任务 app.tasks.statements.generate_due（写法照 app/tasks/wallet_reconciliation.py：取 session 工厂与当前 UTC 时刻，调用服务函数，记一条 info 日志带份数）；app/core/celery_app.py 的 include 列表登记这个模块，beat_schedule 新增 statements-generate-due 条目，schedule 为 crontab(minute=0)（每小时整点，写法照 FX_FETCH_SCHEDULE）、options 的 expires 3240（常量写在模块级）'
-      - '测试：新增 tests/backend/test_statements_task.py，覆盖设计 §7 catch-up 一行（任务停了两个月后运行补齐两期；某租户中间一期自检失败时其余租户补齐、失败租户只到失败之前、返回份数正确、日志不含金额）、并发重复（MySQL 下另一个线程先插入并提交同一项，catch_up 的 INSERT 得到 IntegrityError 后当作成功继续下一期）、before_commit 钩子抛 IntegrityError 时按失败处理（raise_errors=True 时抛出、False 时不抛，都记 error、这一份不在）、编号碰撞（让随机部分固定撞上已有编号：warning、停止该租户、不抛到 generate_due 之外）、before_commit 钩子被调用恰一次且与对账单同事务（钩子抛错时对账单也没写）、未到期时空跑返回 0；tests/backend/test_celery.py 补 beat 条目（crontab(minute=0)、expires 3240）与 include 的断言，其余不动；测试写入的对账单行用 SET FOREIGN_KEY_CHECKS = 0 加 TRUNCATE 清掉'
-      - 'docs/runbook.md 新增「月度对账单」一节：生成时刻（新月第 2 日 01:00 之后的整点）、首个账期 2026-12、每小时补生成、任务停了怎么办（等下一小时或用管理端补生成，AIH-TASK-159 之后）、生成失败的日志怎么读（只有租户 public_id、账期与异常类型名）、StatementIntegrityError 是数据缺陷要人工查、不要手工改或删对账单行（触发器会拒绝）'
+      - '测试：新增 tests/backend/test_statements_task.py，覆盖设计 §7 catch-up 一行（任务停了两个月后运行补齐两期；某租户中间一期自检失败时其余租户补齐、失败租户只到失败之前、返回份数正确、日志不含金额）、永久停出一行（某租户 M 期自检失败后再跑两轮整点、now 跨过 M+1 的到期时刻：每轮 M 都失败且日志带检查编号，M+1 不生成，其他租户的 M 与 M+1 照常生成）、并发重复（MySQL 下另一个线程先插入并提交同一项，catch_up 的 INSERT 得到 IntegrityError 后当作成功继续下一期）、before_commit 钩子抛 IntegrityError 时按失败处理（raise_errors=True 时抛出、False 时不抛，都记 error、这一份不在）、编号碰撞（让随机部分固定撞上已有编号：warning、停止该租户、不抛到 generate_due 之外）、before_commit 钩子被调用恰一次且与对账单同事务（钩子抛错时对账单也没写）、未到期时空跑返回 0；tests/backend/test_celery.py 补 beat 条目（crontab(minute=0)、expires 3240）与 include 的断言，其余不动；测试写入的对账单行用 SET FOREIGN_KEY_CHECKS = 0 加 TRUNCATE 清掉'
+      - 'docs/runbook.md 新增「月度对账单」一节：生成时刻（新月第 2 日 01:00 之后的整点）、首个账期 2026-12、每小时补生成、任务停了怎么办（等下一小时或用管理端补生成，AIH-TASK-159 之后）、生成失败的日志怎么读（只有租户 public_id、账期与异常类型名，StatementIntegrityError 另带检查编号）；StatementIntegrityError 是数据缺陷，按设计 §5 是已知限制（Kelvin 2026-11-04 拍板）：这个租户从该期起永久停出、重试不会好、缺失告警一直 P2，处置是按检查编号查出缺陷行（1 期初加发生额不等于期末，2 收费事件金额与账本不符，3 收费事件条数与本期用量账本行数不符，missing_event 用量账本行连不上事件），不改不删账本、事件与对账单，再开设计闸门定修复；不要手工改或删对账单行（触发器会拒绝）'
       - '只改下列路径；不改模型、迁移、钱包、账本、计费与告警；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #565'
     allowed_change_paths:
       - app/services/statements.py
@@ -9297,12 +9297,12 @@ tasks:
   - id: AIH-TASK-158
     title: 月度对账单第五层：缺失对账单与晚到用量占比并进用量处理积压告警
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「告警」：app/services/alerts.py 的 usage_processing_backlog 在现有三部分之外再报两段：到期 6 小时仍缺失的对账单 P2，最近 24 小时晚到用量的条数或金额占比达到 1% P2。Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进这个维度，不加维度、不改 deploy/monitor.sh 与 .env。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「告警」：app/services/alerts.py 的 usage_processing_backlog 在现有三部分之外再报两段：到期 6 小时仍缺失的对账单 P2，最近 24 小时晚到用量的条数或金额占比达到 1% P2。Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进这个维度，不加维度、不改 deploy/monitor.sh 与 .env。
     status: ready
     depends_on:
       - AIH-TASK-157
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） 逐条一致，以 §2「告警」、§3 INV-14、§5 告警一列、§6 日志一条、§7 告警三行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） 逐条一致，以 §2「告警」、§3 INV-14、§5 告警一列、§6 日志一条、§7 告警三行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - '缺失对账单：对 due_periods(now) 里 now >= cutoff + 6 小时的每个账期与每个生成时 is_eligible 的租户，没有对账单的项数大于 0 即 P2；摘要 <n> statements missing, earliest period <YYYY-MM>，没有缺失时这一段是 0 statements missing；常量 STATEMENT_MISSING_GRACE: Final = timedelta(hours=6)'
       - '晚到用量占比：窗口为 [now − 24 小时, now)，按马来西亚月边界拆成至多两段，每段只统计 billing_mode 为 PREPAID 的租户的 AI_USAGE 账本行（按 created_at，走 ix_wallet_transactions_tenant_created：tenant_id 用 IN 列表），左外连接事件；晚到 ⇔ 该段所在月 K 下 occurred_at < start(K) AND NOT (occurred_at >= start(K-1) AND created_at < cutoff(K-1))，与 AIH-TASK-155 的 attributed_month 判定一致；晚到条数占比或金额占比 >= 1%（常量 LATE_USAGE_SHARE_P2: Final = Decimal("0.01")，比较用 Decimal）即 P2；只统计内连接得上事件的行；摘要 late usage 24h <a>/<b> rows (<x>%), <y>% of amount，百分比 ROUND_HALF_UP 到两位小数、分母为 0 时写 0.00（窗口内没有行时恰为 late usage 24h 0/0 rows (0.00%), 0.00% of amount，级别 OK）；不带租户、金额与公司名'
       - '合并：现有三部分（到期积压、PROCESSING、过期租约）的判据、级别与摘要文字一字不改，新两段各成一段用 ; 接在现有摘要之后，维度级别取全部部分中最严重的一个（照 wallet_negative_balance 的合并写法）；不加维度、不改维度顺序与 DIMENSIONS 注册表的其余条目；模块文档里 usage_processing_backlog 的说明补上两段新判据与出处'
@@ -9349,17 +9349,17 @@ tasks:
   - id: AIH-TASK-159
     title: 月度对账单第六层：管理端对账单列表、详情与按客户补生成接口
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「管理端接口」与 §6：新文件 app/api/admin_statements.py 三个接口（列表、详情、按客户补生成），新 schema app/schemas/statements.py，AuditAction 新增 STATEMENT_GENERATE（经 catch_up_tenant 的 before_commit 钩子与对账单同事务写），前端 adminAudit.ts 同步；docs/api.md 新增「月度对账单（管理端）」一节。页面属于 AIH-TASK-161。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「管理端接口」与 §6：新文件 app/api/admin_statements.py 三个接口（列表、详情、按客户补生成），新 schema app/schemas/statements.py，AuditAction 新增 STATEMENT_GENERATE（经 catch_up_tenant 的 before_commit 钩子与对账单同事务写），前端 adminAudit.ts 同步；docs/api.md 新增「月度对账单（管理端）」一节。页面属于 AIH-TASK-161。
     status: ready
     depends_on:
       - AIH-TASK-158
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） 逐条一致，以 §2「管理端接口」「快照」、§3 INV-7、INV-8、INV-13、§5、§6、§7 管理端与审计两行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） 逐条一致，以 §2「管理端接口」「快照」、§3 INV-7、INV-8、INV-13、§5、§6、§7 管理端与审计两行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'GET /api/v1/admin/statements：查询参数 customer_id（客户 public_id，可选）、period（YYYY-MM，可选，格式不对 422）、page 与 page_size（照 app/api/admin_customers.py 的列表写法与上下限）；返回 Page，按 period_start 倒序、id 倒序；每项恰好 statement_id、statement_number、customer_id、company_name（快照里的）、period、status、closing_balance、finalized_at；customer_id 不存在时返回空页（不区分）'
       - 'GET /api/v1/admin/statements/{statement_id}：上面的字段加 cutoff_at、ledger_high_sequence、generated_by_email（生成者管理员的 users.email，系统生成为 null）与 snapshot（完整快照作为嵌套对象，键集合与设计 §2 一致，不加成本类字段）；不存在或格式不对 404 STATEMENT_NOT_FOUND'
       - 'POST /api/v1/admin/customers/{customer_id}/statements/generate（无请求体）：客户不存在 404 CUSTOMER_NOT_FOUND；非预付或没有钱包 409 STATEMENT_NOT_ELIGIBLE；否则调用 catch_up_tenant(generated_by=当前管理员的 users.id, before_commit=写审计, raise_errors=True)，200 返回本次新生成的 [{statement_id, period}]（可以为空）；某一期失败时 500（统一错误体，已生成的前几期保留）；审计每份一条 STATEMENT_GENERATE：entity_type monthly_statement、entity_id 对账单 public_id、after_state 只有 period，经 app/services/auth.py 的 record_audit 写，带请求的 ip 与 user agent；app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES 补 monthly_statement（带一行出处注释）。app/models/auth.py 的 AuditAction 新增 STATEMENT_GENERATE，frontend/src/api/adminAudit.ts 的动作清单同步（adminAudit.test.ts 的交叉核对照常通过）'
       - '三个接口的处理函数第一件事是 require_admin(request)；router 在 app/main.py 照现有管理端 router 登记；日志与错误体不带金额与公司名'
-      - '测试：新增 tests/backend/test_admin_statements_api.py，覆盖设计 §7 管理端与审计两行：列表的两种筛选与分页、排序、详情、404、手动生成的新建（返回值、行、审计各一条且与对账单同事务：让审计写入失败时对账单也不在）、已有（空列表、不新写审计）、非预付 409、客户不存在 404、非管理员与未登录 403/401（与现有管理端接口同一断言写法）、响应里没有成本类键；tests/backend/test_admin_customers_api.py 只在它枚举管理端路由或审计动作的显式清单里补上新项；测试写入的对账单行用 SET FOREIGN_KEY_CHECKS = 0 加 TRUNCATE 清掉'
+      - '测试：新增 tests/backend/test_admin_statements_api.py，覆盖设计 §7 管理端与审计两行：列表的两种筛选与分页、排序、详情、404、手动生成的新建（返回值、行、审计各一条且与对账单同事务：让审计写入失败时对账单也不在）、已有（空列表、不新写审计）、预付但没有到期账期 200 空列表、非预付 409、没有钱包 409、客户不存在 404、中间一期失败（第二期自检失败）500 且第一期的对账单与审计保留、第二期起都没有、非管理员与未登录 403/401（与现有管理端接口同一断言写法）、响应里没有成本类键；tests/backend/test_admin_customers_api.py 只在它枚举管理端路由或审计动作的显式清单里补上新项；测试写入的对账单行用 SET FOREIGN_KEY_CHECKS = 0 加 TRUNCATE 清掉'
       - 'docs/api.md 新增「月度对账单（管理端）」一节：三个接口的参数、响应字段、错误码与审计；快照字段表（与设计 §2 一致，写明金额是带符号的 8 位小数字符串、期末不是某一时刻的钱包余额而是按 T+1 归属后的余额）'
       - '只改下列路径；不改服务层的生成逻辑、模型（AuditAction 除外）、迁移、钱包、账本与计费；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #565'
     allowed_change_paths:
@@ -9407,12 +9407,12 @@ tasks:
   - id: AIH-TASK-160
     title: 月度对账单第七层：客户门户的对账单列表与详情接口
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「客户接口」与 §6：app/api/customer.py 新增 GET /api/v1/customer/statements 与 GET /api/v1/customer/statements/{statement_id}，只读本租户 FINALIZED 的行；视图放进 app/schemas/statements.py；docs/api.md 新增「月度对账单（客户）」一节。页面属于 AIH-TASK-162。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「客户接口」与 §6：app/api/customer.py 新增 GET /api/v1/customer/statements 与 GET /api/v1/customer/statements/{statement_id}，只读本租户 FINALIZED 的行；视图放进 app/schemas/statements.py；docs/api.md 新增「月度对账单（客户）」一节。页面属于 AIH-TASK-162。
     status: ready
     depends_on:
       - AIH-TASK-159
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） 逐条一致，以 §2「客户接口」「快照」、§3 INV-7、INV-8、§6、§7 客户接口一行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） 逐条一致，以 §2「客户接口」「快照」、§3 INV-7、INV-8、§6、§7 客户接口一行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'GET /api/v1/customer/statements：require_customer 之后按 principal.tenant_id 与 status = FINALIZED 过滤，page 与 page_size 照管理端列表的写法，按 period_start 倒序；每项恰好 statement_id、statement_number、period、closing_balance、finalized_at；不按当前 billing_mode 过滤：没有对账单的租户（包括一直是内部计量的）返回空页，从预付改为内部计量的租户仍能看到改之前的对账单'
       - 'GET /api/v1/customer/statements/{statement_id}：鉴权之后再校验 id 格式；按 tenant_id 与 public_id 一起查，别的租户的、不存在的、格式不对的、非 FINALIZED 的一律 404 STATEMENT_NOT_FOUND（不区分）；返回上面五个字段加 snapshot（完整快照作为嵌套对象，键集合与设计 §2 一致），不返回 cutoff_at、ledger_high_sequence、生成者与任何成本类键；DISABLED 账户照常可读（与现有门户只读接口同一处理）'
       - '测试：新增 tests/backend/test_customer_statements_api.py：列表只含本租户 FINALIZED（另一个租户的对账单不出现）、分页与排序、详情、别人的 id 与乱写的 id 与不存在的 id 都是 404 且错误体相同、没有对账单的内部计量租户空页、DISABLED 账户可读、管理员令牌访问客户接口被拒（与现有客户接口同一断言写法）、响应键集合逐一相等且没有成本类键；tests/backend/test_customer_api.py 只在 test_the_customer_routes_are_exactly_the_expected_ones 的路由集合里补上两条新路由；测试写入的对账单行用 SET FOREIGN_KEY_CHECKS = 0 加 TRUNCATE 清掉'
@@ -9458,7 +9458,7 @@ tasks:
   - id: AIH-TASK-161
     title: 月度对账单第八层：管理端对账单页与按客户补生成按钮
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「前端」：新增管理端页 /statements（按客户与账期筛选的列表、点一行看详情、按客户筛选时显示补生成按钮），顶栏加一项；验收脚本加一个只读步骤。只做前端。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「前端」：新增管理端页 /statements（按客户与账期筛选的列表、点一行看详情、按客户筛选时显示补生成按钮），顶栏加一项；验收脚本加一个只读步骤。只做前端。
     status: ready
     depends_on:
       - AIH-TASK-160
@@ -9525,7 +9525,7 @@ tasks:
   - id: AIH-TASK-162
     title: 月度对账单第九层：客户门户对账单页
     purpose: >-
-      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v1） §2「前端」：新增门户页 /portal/statements（对账单列表、点一行看详情），门户导航加一项；验收脚本加一个只读步骤；勾掉 docs/TODO.md Phase 7 的「月度对账单」与「T+1 cut-off + 上期调整」。只做前端。
+      按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v3） §2「前端」：新增门户页 /portal/statements（对账单列表、点一行看详情），门户导航加一项；验收脚本加一个只读步骤；勾掉 docs/TODO.md Phase 7 的「月度对账单」与「T+1 cut-off + 上期调整」。只做前端。
     status: ready
     depends_on:
       - AIH-TASK-161
