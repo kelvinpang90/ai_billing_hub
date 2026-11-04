@@ -1,0 +1,384 @@
+# AIH-TASK-154..162 设计：月度对账单、T+1 cut-off 与上期调整（草稿）
+
+> **来源**：设计闸门 Issue（待开）。批准后本文件改为 `APPROVED: design v<N>` 那一版正文的**逐字副本**。
+> 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue 上被批准的版本为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **前置**：ADR-0003（财务期间与 cut-off）；账本 `wallet_transactions` 与 `post_transaction`（AIH-TASK-008 起）；用量计费的 `processed_at` 与 `wallet_transaction_id`（AIH-TASK-032）；告警维度 `usage_processing_backlog`（AIH-TASK-046）。
+> §11「任务拆分」的九个实现任务登记为 `AIH-TASK-154` → `155` → `156` → `157` → `158` → `159` → `160` → `161` → `162`，按这个顺序依赖。
+
+---
+## 0. 准入判定
+
+| 任务涉及 | 要填的范围 |
+| --- | --- |
+| 钱包 / 账本 / 定价 / 汇率 / 支付 / 幂等 / 状态机 | **全部章节** |
+| 用量摄取 / 认证与会话（集成侧与平台侧）/ Webhook | §1–§7（**§6 不可省**） |
+| 前端 / 文档 / CI / 脚本 | **不走本闸门**，直接开 PR |
+| 既不碰钱、也不碰用量摄取 / 认证与会话 / Webhook 的后端改动 | **不走本闸门**，直接开 PR |
+
+本任务档位：`全部`
+
+理由：对账单是财务快照：读账本算期初、期末余额与各类发生额，按 T+1 cut-off 判定上期调整，定稿后不可变（INV-12）；生成要对每个租户与账期幂等，并带一个小状态机（`DRAFT` / `FINALIZED` / `VOID`）。不写账本、不改 `post_transaction`、不改计费。
+
+---
+
+状态：`DRAFT`
+负责人：Claude
+**设计版本**：`v1`
+对应需求：spec §46、§65、§74.8、§113、§114、§130「monthly statements」「T+1 cut-off and prior-period adjustments」；ADR-0003；Invariant 12
+目标 PR：待开（登记 PR）；实现为 AIH-TASK-154..162
+
+## 1. 目标与边界
+
+- **要解决的问题**：spec §46 要求每月自动生成并定稿上月对账单，按 T+1 cut-off 区分本期用量与上期调整；今天没有对账单表、没有生成任务、客户和管理员都看不到月度对账单。
+- **可观察的完成标准**：
+  1. 每个预付租户（`billing_mode = PREPAID`）每个账期（马来西亚日历月）恰好一份 `FINALIZED` 对账单，在新月第 2 日 01:00（马来西亚时间）之后的第一次整点任务里生成；任务没跑成，下一次整点补上。
+  2. 对账单的期初余额 + 本期各类发生额 = 期末余额，精确到账本精度（8 位小数）；上期对账单的期末余额 = 本期对账单的期初余额。
+  3. 每一行账本恰好进一份对账单：在 cut-off 之后才入账的上月用量出现在当前开放期的对账单里，标为上期调整并注明原用量期间；已定稿的对账单不因此改变。
+  4. 定稿的对账单在数据库层拒绝任何 UPDATE 与 DELETE。
+  5. 管理员能按客户与账期查看对账单，能对某个客户手动补生成；客户在门户能看到自己的对账单列表与详情，看不到估算或对账后的供应商成本、加价、毛利。
+  6. 生成缺失超过 6 小时、或最近 24 小时晚到用量占比达到 1%，`usage_processing_backlog` 维度报 P2。
+- **明确不做什么**（Kelvin 2026-11-04 定的范围，见 §10「已拍板」）：
+  - 不做 PDF 下载与「从快照重新渲染文件」（Phase 7 后续批）；不做收入、成本、毛利分析与导出（Phase 7 后续批）。
+  - 只给 `PREPAID` 租户出对账单；内部计量租户（`INTERNAL_METERED_ONLY`）不出。
+  - 不做人工确认的草稿环节：生成即定稿；`VOID` 只作为状态值存在，不做作废流程与更正版本。
+  - 不回补：第一个账期是 `2026-12`（部署后第一个完整月），之前的月份不生成。
+  - 出单后不发邮件、不写门户通知。
+  - 不写账本、不改 `post_transaction`、不改计费与用量摄取、不加 `PRIOR_PERIOD_ADJUSTMENT` 账本类型（上期调整是对账单上的**归类**，不是新的账本行：用量已按事件入账，ADR-0011）。
+  - Rebill（Phase 8）尚未实现：`REBILL_CREDIT` / `REBILL_DEBIT` 行今天不存在；本设计把它们计入上期调整一栏，但不做 rebill 的原期间引用（Phase 8 设计再定）。
+  - 关户（`CLOSED`）尚未实现：本设计不按账户状态筛租户，关户后的出单规则由关户设计闸门定。
+- **现有行为与问题证据**：
+  - 代码里没有 `monthly_statements` 表、模型、服务、任务与接口（`grep -rn statement app` 只命中 SQL `statement` 变量名）。
+  - 账本：`wallet_transactions` 只追加；`(wallet_id, wallet_sequence)` 唯一、从 1 连续递增；`wallets.version` 等于最后一行的 `wallet_sequence`，`wallets.balance` 等于它的 `balance_after`，两者由触发器随账本行在同一事务推进（`app/models/wallet.py`）。
+  - `created_at` 由调用方传入，在钱包锁**之前**取值（`post_transaction(now=...)`），所以 `created_at` 的先后与 `wallet_sequence` 的先后不保证一致：一个 `created_at` 在 cut-off 之前的事务可能在 cut-off 之后才提交。
+  - 用量计费：`app/services/usage_billing.py` 的 `_process` 在同一事务里写 `AI_USAGE` 账本行（`created_at = processed_at`）与事件快照（`processed_at`、`wallet_transaction_id`、`billing_mode_snapshot`）；`billable_cost = 0` 时不写账本行，事件的 `wallet_transaction_id` 为 NULL。
+  - 租户的 `billing_mode` 只会从 `PREPAID` 改为 `INTERNAL_METERED_ONLY`（`app/services/internal_billing.py`），不会反向。
+  - 马来西亚日历换算已有：`app/schemas/customer_usage.py` 的 `malaysia_day_start_utc`、`usage_month`；SQL 侧 `app/repositories/usage_events.py` 的 `MalaysiaDay`。
+
+## 2. 设计概要
+
+```text
+beat 每小时 ──► generate_due(now)：对每个到期账期 M（升序）× 每个合格租户
+                  └─ generate_statement(session, tenant, M, now)  —— 一个 (租户, 账期) 一个事务
+                       ① 读租户、钱包（version = 高水位 hw，balance）、上期对账单
+                       ② 账本归属：S(M) = A(M; hw) \ A(M-1; hw_prev) 的分类汇总
+                       ③ 用量统计：本期事件（收费事件跟随账本行，零收费事件按 processed_at）
+                       ④ 三条自检；任一不等 → 不写，抛错
+                       ⑤ INSERT monthly_statements（FINALIZED，快照，hw）—— 提交
+管理员 POST …/statements/generate ──► 同一个 catch-up（只对这个租户），每份对账单同事务写一条审计
+客户 GET /customer/statements[/{id}] ──► 只读本租户 FINALIZED 行
+告警 usage_processing_backlog ──► 现有三部分 + 缺失对账单 + 24 小时晚到用量占比
+```
+
+### 账期与时间（AIH-TASK-155，`app/services/statements.py`）
+
+- 账期 `M` 用字符串 `YYYY-MM` 表示，是马来西亚日历月。库里所有时刻都是 naive UTC（与全库一致）。
+- `start(M)` = `malaysia_day_start_utc(M 的 1 日)`；`end(M)` = `start(M+1)`；`cutoff(M)` = `malaysia_day_start_utc(M+1 的 2 日)`，即 T+1 宽限日（新月 1 日）结束的时刻（ADR-0003）。
+- 到期：`now ≥ cutoff(M) + 1 小时`（`GENERATION_DELAY`）。1 小时的余量只为让宽限日最后几秒处理的事件提交完；**金额的正确性不依赖这个余量**（见下面的高水位）。
+- `FIRST_STATEMENT_PERIOD: Final = "2026-12"`：早于它的账期一律不生成（Kelvin 定不回补）。测试可以用参数覆盖，代码里不读环境变量。
+- 合格租户 `eligible(T, M)`：生成时 `tenants.billing_mode = PREPAID`，有钱包，且 `wallets.created_at < end(M)`；账户状态不筛（`PENDING_ACTIVATION`、`ENABLED`、`DISABLED` 都出；没有发生额就是一份全零的对账单）。
+
+### 账本归属规则（AIH-TASK-155）
+
+每行账本 `r` 有一个**归属月** `t(r)`，只由不可变的字段决定：
+
+- `AI_USAGE` 行：设其事件（`usage_events.wallet_transaction_id = r.id`）的 `occurred_at` 所在马来西亚月为 `U`。`r.created_at < cutoff(U)` 时 `t(r) = U`；否则 `t(r)` = `r.created_at` 所在马来西亚月（晚到，进当时的开放期）。
+- 其他所有类型（`TOPUP`、`ADJUSTMENT_*`、`BONUS`、`REFUND_ADJUSTMENT`、`SYSTEM_CORRECTION`、`REBILL_*`）：`t(r)` = `r.created_at` 所在马来西亚月。
+
+对固定的月 `K`，`t(r) ≤ K` 等价于下面这个只含常量的谓词（`occ` 为事件的 `occurred_at`）：
+
+```text
+非 AI_USAGE：created_at < end(K)
+AI_USAGE：  occ < end(K) AND ( created_at < end(K) OR ( occ >= start(K) AND created_at < cutoff(K) ) )
+```
+
+推导：`U ≤ K-1` 时 `cutoff(U) ≤ cutoff(K-1) < end(K)`，条件化为 `created_at < end(K)`；`U = K` 时化为 `created_at < cutoff(K)`（`cutoff(K) > end(K)`，晚到的不可能落回 `K`）；`U > K` 时为假。
+
+**高水位**：生成账期 `M` 时读一次钱包，`hw(M) = wallets.version`，`B = wallets.balance`（同一行、同一次读，二者由触发器同事务推进，所以 `B` 就是序号 `hw(M)` 那一行的 `balance_after`；`hw = 0` 时 `B = 0`）。序号 `≤ hw(M)` 的行此刻都已提交、以后不会再有，所以下面的集合一经生成就冻结。`hw(M)` 存进对账单行（`ledger_high_sequence`）。
+
+```text
+A(K; h) = { r : r.wallet_sequence ≤ h  且  t(r) ≤ K }
+hw_prev = 上期对账单（M-1）的 ledger_high_sequence；上期不合格（钱包在 M-1 结束后才建，或 M-1 早于首个账期）时取 hw(M)
+S(M)    = A(M; hw(M)) \ A(M-1; hw_prev)          —— 本期对账单的账本行
+期末    = Σ A(M; hw(M))   = B − Σ{ r : seq ≤ hw(M), t(r) > M }
+期初    = 上期对账单的期末；上期不合格时 = Σ A(M-1; hw(M)) = B − Σ{ r : seq ≤ hw(M), t(r) ≥ M }
+```
+
+- 每行账本恰好进一份对账单：`A` 对 `K` 与 `h` 都单调（`hw` 只增），相邻两期的差集不重不漏。一个 `created_at` 在 cut-off 之前、却在生成之后才提交的行，序号 `> hw(M)`，自然落进下一期的 `S`（归为上期调整），不会丢。
+- 有界扫描（全用现有索引）：`t(r) > M` 的行都有 `created_at ≥ end(M)`，`t(r) ≥ M` 的行都有 `created_at ≥ start(M)`（由上面的谓词直接可得），走 `ix_wallet_transactions_tenant_created`；`S(M)` 的候选是两段不相交的范围：`hw_prev < seq ≤ hw(M)`（走 `ix_wallet_transactions_tenant_sequence`）与 `seq ≤ hw_prev 且 created_at ≥ start(M)`（走 `ix_wallet_transactions_tenant_created`），分两条查询，不写成一个 `OR`。
+- 生成账期 `M` 时，若 `M-1` 合格却没有对账单，**拒绝**（`PreviousStatementMissing`），不跳过：否则 `hw_prev` 取不到，`A` 链会断。catch-up 按账期升序，前一期失败，本轮跳过这个租户的后续账期。
+
+### 发生额分类（AIH-TASK-155）
+
+对 `S(M)` 按类型汇总（金额是账本的带符号金额，8 位小数，`Decimal`，不经 float）：
+
+| 快照字段 | 内容 |
+| --- | --- |
+| `total_topup` | `TOPUP` 之和（≥ 0） |
+| `total_ai_usage` | `AI_USAGE` 且 `occ ∈ [start(M), end(M))` 之和（≤ 0，本期用量扣费） |
+| `total_adjustments` | `ADJUSTMENT_CREDIT`、`ADJUSTMENT_DEBIT`、`BONUS`、`REFUND_ADJUSTMENT`、`SYSTEM_CORRECTION` 之和 |
+| `prior_period.usage[]` | `AI_USAGE` 且 `occ < start(M)`：按 `occ` 的马来西亚月分组，每组 `usage_period`（`YYYY-MM`）、`request_count`（行数）、`amount`（之和），按 `usage_period` 升序 |
+| `prior_period.rebill` | `REBILL_CREDIT`、`REBILL_DEBIT` 之和 |
+| `prior_period.total` | 上两项之和 |
+
+`S(M)` 里不可能有 `occ ≥ end(M)` 的 `AI_USAGE` 行（`t ≥ U`）。一行 `AI_USAGE` 找不到事件（`LEFT JOIN` 为空）视为数据缺陷，生成失败。
+
+### 用量统计（AIH-TASK-156）
+
+本期用量事件 `E(M)`：本租户、`status = PROCESSED`、`billing_mode_snapshot = 'PREPAID'`、`occurred_at ∈ [start(M), end(M))`，并且
+
+- 收费事件（`wallet_transaction_id` 非空）：其账本行在 `S(M)` 里，即 `seq ≤ hw(M)` 且 `created_at < cutoff(M)`（`occ` 在本月时 `S(M)` 的条件化简为此）——**跟随账本行**，与金额同一个归属；
+- 零收费事件（`wallet_transaction_id` 为空）：`processed_at < cutoff(M)`。
+
+快照的用量字段（全部只来自 `E(M)`）：`request_count`、`conversation_count`（`COUNT(DISTINCT conversation_id)`，NULL 不计，与 `GET /customer/usage-summary` 同一口径）、`input_tokens`、`output_tokens`（NULL 按 0）、`total_customer_charges`（`billable_cost` 之和），以及三组明细 `by_provider`（`provider_code`）、`by_model`（`provider_code`、`model_code`）、`by_project`（`project_public_id`、`project_name`），每组 `request_count`、`input_tokens`、`output_tokens`、`charges`，按代码 / 名称升序（名称相同再按 `project_public_id`）。代码取目录表 `ai_providers.code`、`ai_models.code`，项目名取生成时的 `projects.name`（快照冻结，之后改名不影响已定稿的对账单）。
+
+上期调整的用量只给金额与条数（来自账本），不进本期的用量统计。
+
+### 自检（第 1 条 AIH-TASK-155，第 2、3 条 AIH-TASK-156）
+
+生成在写入之前做三条等式检查，任一不成立就抛 `StatementIntegrityError`、不写任何行、记一条 error 日志（只带租户 `public_id` 与账期，不带金额）：
+
+1. `opening + Σ S(M) == closing`（`closing` 按上面「期末」公式独立算出）；
+2. `total_customer_charges == −total_ai_usage`（本期收费事件的 `billable_cost` 之和与其账本行金额之和互为相反数；零收费事件的 `billable_cost` 为 0）；
+3. `E(M)` 中收费事件的条数 == `S(M)` 中本期 `AI_USAGE` 行的条数。
+
+### 快照（AIH-TASK-156）
+
+`snapshot_json` 的键集合固定（`schema_version = 1`），金额都是 8 位小数的字符串，计数是整数：
+
+```text
+schema_version, period, currency("MYR"), company_name,
+opening_balance, total_topup, total_ai_usage, total_adjustments, prior_period{usage[], rebill, total}, closing_balance,
+request_count, conversation_count, input_tokens, output_tokens, total_customer_charges,
+by_provider[], by_model[], by_project[]
+```
+
+不出现任何成本、汇率、加价、毛利、价格版本、规则、内部 id 的键（INV-7）；测试断言键集合逐一相等，而不是「不含某几个键」。
+
+### 生成函数（AIH-TASK-156）
+
+`generate_statement(session, tenant_id, period, *, now, generated_by=None) -> GenerateResult`，不提交、只 flush：
+
+1. `period` 早于 `FIRST_STATEMENT_PERIOD` 或未到期 → `StatementNotDue`；租户不合格 → `StatementNotEligible`。
+2. 已有 `(tenant_id, period_start)` 的行 → 返回它（`created=False`），什么都不写（幂等）。
+3. `M-1` 合格且没有对账单 → `PreviousStatementMissing`。
+4. 读钱包与上期（普通读，不加锁），按上面算 `S(M)`、用量、自检。
+5. INSERT 一行：`status = FINALIZED`、`finalized_at = created_at = now`、`statement_number` = `ST-<YYYYMM>-` 加 8 个 Crockford base32 随机字符（`secrets`）、`generated_by`（系统为 NULL，管理员为其 `users.id`）、`ledger_high_sequence = hw(M)`、`cutoff_at`、快照。本函数不写审计；管理员触发时由 catch-up 的提交前钩子在同一事务写审计（见「Celery 任务」与「管理端接口」）。
+
+并发：同一 `(tenant_id, period_start)` 两个生成者同时到第 5 步，唯一约束让后提交的那个 `IntegrityError`；调用方回滚后再查一次，行已存在就当作成功（`created=False`），不存在（编号撞了）就记 warning、本轮放弃这一项，下一轮重来。
+
+### 数据库（迁移 0035，AIH-TASK-154）
+
+表 `monthly_statements`（spec §74.8，外加 `ledger_high_sequence` 与 `generated_by`）：
+
+| 列 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | BIGINT 自增主键 | |
+| `public_id` | CHAR(36) | 唯一 |
+| `tenant_id` | BIGINT | FK `tenants.id` RESTRICT |
+| `statement_number` | VARCHAR(32) | 唯一 |
+| `period_start` / `period_end` / `cutoff_at` | DATETIME | naive UTC；CHECK `period_start < period_end AND period_end < cutoff_at` |
+| `status` | VARCHAR(16) | CHECK `IN ('DRAFT','FINALIZED','VOID')` |
+| `ledger_high_sequence` | BIGINT | CHECK `>= 0` |
+| `snapshot_json` | JSON | NOT NULL |
+| `generated_by` | BIGINT NULL | FK `users.id` RESTRICT；NULL = 系统 |
+| `finalized_at` | DATETIME NULL | CHECK `status <> 'FINALIZED' OR finalized_at IS NOT NULL` |
+| `created_at` | DATETIME | |
+
+- 唯一 `uq_monthly_statements_tenant_period (tenant_id, period_start)`（V1 没有更正版本，spec §74.8 末句）；索引 `ix_monthly_statements_period (period_start, tenant_id)` 供管理端按账期列与告警查缺失。
+- MySQL 触发器（INV-12 的数据库兜底）：`trg_monthly_statements_before_update` 与 `trg_monthly_statements_before_delete`，`OLD.status <> 'DRAFT'` 时 `SIGNAL SQLSTATE '45000'`。SQLite 不建触发器（与 0006 等迁移同一惯例），服务层本来就没有更新与删除路径。
+- 迁移形状照 0028：表已存在且形状一致就跳过，形状不一致就报错且不发 DDL；降级在离线模式拒绝，表非空拒绝，不删任何行。
+
+### Celery 任务（AIH-TASK-157，`app/tasks/statements.py`）
+
+- `app.tasks.statements.generate_due`，beat 每 3600 秒一次，`expires` 3240 秒（与其他周期任务同一写法）。
+- `generate_due(factory, now)`：账期从 `FIRST_STATEMENT_PERIOD` 到最近一个到期的账期，对每个合格租户按账期升序调用 `generate_statement`，每项一个事务；单项失败（任何异常）记一条 error 日志（租户 `public_id`、账期、异常类型名），回滚，跳过这个租户的后续账期，继续下一个租户。返回本轮新生成的份数。
+- `catch_up_tenant(factory, tenant_id, now, *, generated_by=None, before_commit=None)`：一个租户的 catch-up，`generate_due` 对每个租户调用它；管理端的手动补生成也调用它。`before_commit(session, statement)` 只在新生成的那一份提交之前调用一次（同一事务），钩子抛错则这一份回滚。
+
+### 告警（AIH-TASK-158，`app/services/alerts.py` 的 `usage_processing_backlog`）
+
+Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进 `usage_processing_backlog`，不加维度、不改 `deploy/monitor.sh`：
+
+- **缺失对账单**：对每个账期 `M`（`FIRST_STATEMENT_PERIOD` 起，`now ≥ cutoff(M) + 6 小时`）与每个合格租户，没有对账单的项数 `> 0` → P2。摘要 `<n> statements missing, earliest period <YYYY-MM>`。
+- **晚到用量占比**：最近 24 小时内入账的预付租户 `AI_USAGE` 行（按 `created_at`），其中 `t(r) ≠ U` 的为晚到；晚到条数占比或金额占比 `≥ 1%` → P2。窗口最多跨两个月，按月边界拆开，每段用该月的常量谓词判定（晚到 ⇔ `occ < start(K) AND NOT (occ >= start(K-1) AND created_at < cutoff(K-1))`，`K` 为该段所在月）。摘要 `late usage 24h <a>/<b> rows (<x>%), <y>% of amount`，只有计数与百分比，不带租户与金额。
+- 现有三部分（积压、PROCESSING、过期租约）的判据与摘要不变；新两部分各成一段，用 `; ` 接在后面，维度级别取最严重的一个（照 `wallet_negative_balance` 的合并写法）。
+
+### 管理端接口（AIH-TASK-159，`app/api/admin_statements.py`）
+
+- `GET /api/v1/admin/statements?customer_id=&period=&page=&page_size=`（现有 `Page`，与客户列表同一分页写法）：按 `period_start` 倒序、`id` 倒序；每项 `statement_id`、`statement_number`、`customer_id`、`company_name`（快照里的）、`period`、`status`、`closing_balance`、`finalized_at`。
+- `GET /api/v1/admin/statements/{statement_id}`：上面的字段加完整快照。管理端也看不到成本与毛利（快照里本来就没有；内部成本分析是 Phase 7 后续批）。
+- `POST /api/v1/admin/customers/{customer_id}/statements/generate`：对这个客户跑 catch-up，200 返回本次新生成的 `[{statement_id, period}]`（可以为空）；客户不存在 404 `CUSTOMER_NOT_FOUND`；不合格（非预付）409 `STATEMENT_NOT_ELIGIBLE`；某一期生成失败 500（已生成的前几期照常保留）。同步执行，没有请求体。审计经 `before_commit` 钩子写：每份新生成的对账单一条 `STATEMENT_GENERATE`（`entity_type = monthly_statement`、`entity_id` 为对账单 `public_id`、`after_state` 只有 `period`），与对账单同一事务。
+- 三个接口的第一件事都是 `require_admin(request)`；`AuditAction` 新增 `STATEMENT_GENERATE`，前端 `adminAudit.ts` 同步。
+
+### 客户接口（AIH-TASK-160，`app/api/customer.py`）
+
+- `GET /api/v1/customer/statements?page=&page_size=`：本租户 `FINALIZED` 的对账单，按账期倒序；每项 `statement_id`、`statement_number`、`period`、`closing_balance`、`finalized_at`。内部计量租户返回空列表。
+- `GET /api/v1/customer/statements/{statement_id}`：同上字段加完整快照；别的租户的、不存在的、格式不对的 id 一律 404 `STATEMENT_NOT_FOUND`（鉴权之后再校验）。
+- 门户账号在 `DISABLED` 下也能看（只读，AIH-TASK-020 契约）。
+
+### 前端（AIH-TASK-161、162，不在闸门范围内，写在这里只为说明接口够用）
+
+- 管理端 `/statements`：列表（按客户、账期筛）、详情；按客户筛选时显示「补生成对账单」按钮（调用手动生成接口）。
+- 门户 `/portal/statements`：列表与详情，金额按现有门户的显示规则（2 位小数）。
+
+## 3. 不变量影响矩阵
+
+| 不变量 | 是否触碰 | 可能怎样被破坏 | 设计控制 | 验证方式 |
+| --- | --- | --- | --- | --- |
+| INV-1 中心故障不中断 AI | 否 | 生成任务只读账本与事件、写自己的表，不在 AI 调用或用量摄取路径上 | 不改摄取、计费、AI 模块 | 不新增测试；现有测试照常 |
+| INV-2 事件不重复扣费 | 否 | 不写账本 | 对账单只读 | §7「只读」 |
+| INV-3 支付不重复入账 | 否 | 同上 | 同上 | 同上 |
+| INV-4 余额只经账本变动 | 否 | 同上；期初期末是算出来的，不回写钱包 | 不调用 `post_transaction`，不写 `wallets` | §7「只读」 |
+| INV-5 历史账本不可变 | 否 | 只读 | 同上 | 同上 |
+| INV-6 事件保留版本引用 | 否 | 快照不带版本引用（客户不可见），事件本身不改 | 不改事件 | — |
+| INV-7 客户不可见成本毛利 | 是 | 快照或接口带出成本、汇率、加价 | 快照只从 `billable_cost` 与账本金额汇总；键集合固定并逐一断言；管理端也用同一快照 | §7「快照键集合」「客户接口」 |
+| INV-8 租户不可互访 | 是 | 客户读到别人的对账单；生成时混入别的租户的账本或事件 | 客户接口 `WHERE tenant_id = principal.tenant_id AND public_id = ?`；生成的每条查询都带 `tenant_id` | §7「越权」「两个租户」 |
+| INV-9 对话内容不入库 | 否 | 快照只有计数、token 数、金额、代码与项目名 | 不读 prompt / response（库里本来也没有） | 快照键集合 |
+| INV-10 金额用 Decimal | 是 | 汇总经 float、舍入 | SQL `SUM` 在 `DECIMAL(20,8)` 上；Python 侧只有 `Decimal` 加减；快照存 8 位小数字符串，不舍入 | §7「金额精度」（MySQL 跑） |
+| INV-11 event_id 至多一次财务效果 | 否 | 对账单不产生财务效果 | 只读 | — |
+| INV-12 定稿对账单不可变 | 是 | 重新生成覆盖；手工 UPDATE；之后晚到的行改动旧单 | 唯一 `(tenant_id, period_start)` + 已存在就返回；MySQL 触发器拒绝改删非草稿行；晚到行按高水位进下一期 | §7「幂等」「触发器」「晚到」 |
+| INV-13 状态与事件原子提交 | 是 | 对账单写了、审计没写，或反之 | 管理员生成时对账单行与审计同一事务 | §7「审计」 |
+| INV-14 队列丢失不毁持久工作 | 是 | beat 或 worker 丢了一次任务，某期没生成 | 每小时 catch-up 从首个账期扫到最近到期账期，缺什么补什么；缺失超过 6 小时告警 | §7「catch-up」「告警」 |
+
+## 4. 状态与并发
+
+| 当前状态 | 事件 | 前置条件 | 新状态 | 副作用 | 非法时结果 |
+| --- | --- | --- | --- | --- | --- |
+| （无行） | 生成 | 到期、合格、上期齐全、自检通过 | `FINALIZED` | 审计（仅管理员触发） | 不写行，抛对应异常 |
+| `FINALIZED` | 再次生成 | — | `FINALIZED`（不变） | 无 | 返回已有行 |
+| `FINALIZED` / `VOID` | UPDATE / DELETE | — | — | — | MySQL 触发器 SIGNAL |
+| `DRAFT` | — | V1 不产生 `DRAFT` 行 | — | — | — |
+
+- 串行化：靠唯一约束 `(tenant_id, period_start)`，不加锁、不读钱包锁（高水位读不需要锁，见 §2）。
+- 幂等键：`(tenant_id, period_start)`。没有「相同 ID 不同载荷」：载荷完全由账本与事件决定，已存在就不重算。
+- 重试层：beat 每小时一次；管理端手动触发是同一个函数。
+- 原子提交：一份对账单行 + （管理员触发时）一条审计。
+
+## 5. 失败与恢复矩阵
+
+| 失败点 | 对外结果 | 数据最终状态 | 是否可重试 | 恢复来源 | 告警 |
+| --- | --- | --- | --- | --- | --- |
+| 未到期 / 早于首个账期 | 任务跳过；管理端只生成到期的 | 无行 | — | — | 无 |
+| 不合格（非预付） | 任务跳过；管理端 409 | 无行 | — | — | 无 |
+| 上期缺失 | 本轮跳过该租户后续账期 | 无行 | 是 | 下一轮先补上期 | 超 6 小时缺失 P2 |
+| 自检不等 / 账本行无事件 | error 日志；管理端 500 | 无行 | 是，但会一直失败 | 人工查数据缺陷 | 超 6 小时缺失 P2 |
+| DB 提交失败 | error 日志；管理端 500 | 无行（事务回滚） | 是 | 下一轮 | 超 6 小时缺失 P2 |
+| 并发重复生成 | 后者 `IntegrityError` → 回滚后查到已有行，当作成功 | 恰好一行 | — | — | 无 |
+| 编号碰撞 | warning；本轮放弃这一项 | 无行 | 是 | 下一轮换随机数 | 一般不会触发 |
+| Redis/Celery 丢失 | 本小时没跑 | 无行 | 是 | 下一小时 beat；管理端手动 | 超 6 小时缺失 P2 |
+| 生成之后才提交的旧行 | 不改已定稿对账单 | 进下一期，归为上期调整 | — | 高水位规则 | 晚到占比 P2 |
+
+## 6. 数据与安全边界
+
+- 租户过滤：生成的每条查询带 `tenant_id`；客户接口按 `principal.tenant_id` 过滤，id 不属于本租户一律 404（不区分「不存在」与「别人的」）。
+- 鉴权：管理端三个接口 `require_admin`；客户接口 `require_customer`；生成任务无外部入口。
+- 客户侧禁止返回：成本、汇率、加价、毛利、价格版本与规则、内部 id、`generated_by`、`ledger_high_sequence`。管理端详情可以多返回 `ledger_high_sequence` 与生成者，便于排查。
+- 日志：只带租户 `public_id`、账期、异常类型名与计数，不带金额与公司名；审计元数据只有账期。
+- 密钥：不涉及。
+- prompt / response：不涉及。
+- 保留与删除：对账单行 RESTRICT 引用租户与用户，不随删除级联；保留期随上线闸门的数据留存政策定（后续计划已有）。
+
+## 7. 测试证据计划
+
+金额与 SQL 相关的用例都在 SQLite 与 MySQL 两个分片跑；只有 MySQL 才成立的（触发器、`DECIMAL` 精度）放进 `if engine.dialect.name == "mysql":` 或只在 MySQL 参数化下跑。时间一律注入 `now`。
+
+| 风险/需求 | 测试层级 | 场景 | 预期结果 | 任务 |
+| --- | --- | --- | --- | --- |
+| 账期边界 | unit | `2026-12`：`start` = 2026-11-30 16:00、`end` = 2026-12-31 16:00、`cutoff` = 2027-01-01 16:00（UTC）；`2027-02` 闰年与非闰年；到期判定在 `cutoff + 1h` 前后各一秒 | 时刻逐一相等；到期恰在 `cutoff + 1h` | 155 |
+| 归属谓词 | unit + db | 表驱动：`AI_USAGE` 的 `occ` / `created_at` 落在上月末、宽限日内、宽限日后、本月、下月 1 日，非用量行落在月末前后一秒 | 与直接按定义算 `t(r)` 的参考函数逐一相等 | 155 |
+| 正常路径 | db | 一个租户：期初有余额；本月充值、用量、调账；生成 | 各字段等于手算值；期初 + 发生额 = 期末 | 155、156 |
+| 宽限日 | db | 上月 31 日 23:59 发生、1 日 10:00 入账的用量 | 进上月对账单的本期用量；本月对账单不含 | 155 |
+| 晚到 | db | 上月发生、2 日 00:00 之后入账的用量；上上月发生、本月入账的用量 | 进本月 `prior_period.usage`，`usage_period` 分别为原月；上月已定稿的对账单不变 | 155 |
+| 生成后才提交 | db | 上月对账单生成后，再插入一行 `created_at` 在 cut-off 之前、序号大于高水位的 `AI_USAGE` 行 | 上月不变；本月对账单含它（上期调整）；两期期末与钱包余额一致 | 155、156 |
+| 链式连续 | db | 连续三个月生成 | 每期期初 = 上期期末；最后一期期末 = 截至该期高水位、归属不晚于该月的账本和 | 156 |
+| 首期 | db | 租户在首个账期之前就有账本 | 期初 = 截至首期高水位、归属早于首期的账本和 | 155 |
+| 自检 | db | 人为插入一行没有事件的 `AI_USAGE` 账本行（155）；事件的 `billable_cost` 与账本金额不符（156） | `StatementIntegrityError`，不写行，日志不含金额 | 155、156 |
+| 幂等 | db | 同一 `(租户, 账期)` 生成两次 | 第二次返回已有行、`created=False`，行数 1 | 156 |
+| 并发 | db（MySQL） | 两个会话同时生成同一项 | 恰好一行；另一方回滚后得到已有行 | 156 |
+| 上期缺失 | db | `M-1` 合格但没有对账单时生成 `M` | `PreviousStatementMissing`，不写行 | 156 |
+| 合格性 | db | 内部计量租户；钱包在 `end(M)` 之后才建；早于首个账期 | 不生成 | 156、157 |
+| 零收费事件 | db | `billable_cost = 0`、无账本行的事件在 cut-off 前后处理 | 前者计入本期请求数与 token，后者不计；金额不受影响 | 156 |
+| 用量统计 | db | 两个项目、两个模型、有无 `conversation_id` | 明细与合计相等；会话数为去重的非空 `conversation_id` | 156 |
+| 快照键集合 | unit | 生成的快照 | 键集合与 §2 逐一相等，没有成本类键 | 156 |
+| 金额精度 | db（MySQL） | 金额带 8 位小数，多行求和 | 快照字符串与 `Decimal` 手算逐位相等 | 155、156 |
+| 两个租户 | db | 两个租户同月都有发生额 | 各自的对账单只含自己的行 | 156 |
+| 触发器 | db（MySQL） | 对 `FINALIZED` 行 UPDATE 任一列、DELETE | 都报 45000；`DRAFT` 行可改 | 154 |
+| 迁移 | db | 升级、形状校验、降级（空表、非空表、离线） | 同 0028 的三种结果 | 154 |
+| catch-up | db | 任务停了两个月后运行；某租户中间一期自检失败 | 其余租户补齐；失败租户只到失败之前；返回新生成份数 | 157 |
+| beat 登记 | unit | `beat_schedule` | 有 `statements-generate-due` 条目，周期 3600、`expires` 3240 | 157 |
+| 告警：缺失 | db | `cutoff + 6h` 前后各一秒、缺一份 | 之前 OK、之后 P2；摘要只有计数与账期 | 158 |
+| 告警：晚到 | db | 24 小时内 100 行里 1 行晚到；窗口跨月 | P2；0 行晚到 OK；跨月两段各按各月常量判 | 158 |
+| 告警：原有部分 | db | 原有积压、过期租约用例 | 判据与摘要前缀不变 | 158 |
+| 管理端 | api | 列表筛选、详情、手动生成（新建、已有、非预付 409、不存在 404、非管理员 403） | 状态码与载荷；手动生成每份一条审计 | 159 |
+| 审计 | db | 手动生成时让审计写入失败 | 对账单也不写 | 159 |
+| 客户接口 | api | 列表只含本租户 `FINALIZED`；别人的 id、乱写的 id 404；内部租户空列表；响应里没有成本类键 | 同左 | 160 |
+| 只读 | db | 生成前后对比 `wallets` 与 `wallet_transactions` | 完全不变 | 156 |
+
+## 8. 迁移与上线
+
+- 数据迁移：只建新表，不动已有表、不回填。
+- 锁表与性能：新表建在空库上，无锁影响。生成查询按 §2 的有界范围走现有索引；一个大租户一个月的账本与事件在后台任务里聚合，耗时随数据量增长，不在请求路径上（管理端手动触发除外，见 §10）。
+- 兼容窗口：迁移先于代码可用（新表无人读写）；代码依赖新表，部署顺序是迁移随部署先跑（现有部署流程）。
+- 部署顺序：154（迁移）→ 155、156（纯服务，无入口）→ 157（beat 开始跑；首个账期 `2026-12` 在 2027-01-02 01:00 才到期，之前每次都是空跑）→ 158（告警）→ 159、160（接口）→ 161、162（页面）。
+- 回滚：154 之后任何一步都可以只回滚应用镜像；表留着。降级迁移在表非空时拒绝。
+- 部分部署：157 上线前没有任何对账单；159、160 上线前页面不存在。都不影响计费。
+- 监控与负责人：`usage_processing_backlog` 的两段新判据；负责人 Kelvin。
+
+## 9. 方案取舍
+
+| 方案 | 优点 | 风险 | 未采用原因 |
+| --- | --- | --- | --- |
+| 采用：按 `t(r)` 与钱包高水位划分账本行 | 每行恰好一期；不依赖任何时间余量；期初期末可独立算出并自检 | 期末不是某一时刻的钱包余额（宽限日里的上月用量算在上月），要在页面上说明 | — |
+| 只按 `created_at` 与 cut-off 划分 | 简单 | `created_at` 在钱包锁之前取值，cut-off 前取值、生成后才提交的行会两期都不含，期初期末对不上 | 正确性依赖时间假设，无法证明 |
+| 加 `PRIOR_PERIOD_ADJUSTMENT` 账本类型，晚到时冲销再记 | 账本上直接看得见 | 要改 `post_transaction` 与计费、一笔用量两行账本，违背 ADR-0011 的每事件一行 | 上期调整只是展示归类，不需要新的财务效果 |
+| 期末取生成时的钱包余额 | 与钱包页一致 | 包含 cut-off 之后、下一期的发生额 | 期初 + 发生额 ≠ 期末 |
+| 生成时锁钱包 | 能拿到「此刻」的一致视图 | 与计费抢锁；高水位读本来就一致 | 不需要 |
+| 编号用全局序列或租户内部 id | 好读、可排序 | 暴露内部 id 或要额外的序列表 | 随机后缀 + 唯一约束足够，碰撞下一轮重来 |
+
+## 10. 未决问题与假设
+
+- **已拍板（Kelvin 2026-11-04）**：本批范围到「生成并定稿 + 管理端查看与手动补生成 + 门户查看」；只给 `PREPAID` 出；生成即定稿；首个账期是部署后第一个完整月（`2026-12`），不回补；上期调整占比的监控本批做、并进 `usage_processing_backlog`；出单不通知客户。
+- **假设**：零收费事件在 cut-off 之前取了 `processed_at`、却在生成（cut-off 之后至少 1 小时）之后才提交时，会从对账单的请求数里漏掉（它没有金额，账本侧不受影响）。处理事务在拿到计费锁之后才取 `processed_at`，锁等待有上限，正常情况下事务以秒计；这个漏计只影响计数，记为已知限制。
+- **假设**：管理端手动触发是同步执行；一个大租户一个月的数据量下可能耗时较长。目前只有内部租户与验收租户，真实客户的量级出现后再看是否改为异步。
+- **后续**：作废与更正版本（`VOID`、唯一约束改为「有效版本唯一」）、PDF、财务分析、出单通知、关户后的出单规则、rebill 的原期间引用，各由对应的设计闸门定。ADR-0003「收口条件」的勾选在本批全部交付后由管理员另开 PR 处理。
+- **需要谁拍板**：无。
+
+## 11. 审查与版本绑定
+
+审查方要回答的五个问题常驻在 [scripts/review_checklist.md](../../scripts/review_checklist.md) 的「设计审查」一节，此处不重复。
+
+**版本绑定规则**（规则的出处是 [WORKFLOW §3](../../docs/WORKFLOW.md)）：
+
+- 批准必须写成 `APPROVED: design v<N>`，`<N>` 取本文件顶部的「设计版本」
+- **设计版本一变，之前的 APPROVE 自动作废**，必须重新过闸门
+- 实质修改：改了契约、表结构、事务边界、状态机、失败语义、不变量控制
+
+### 任务拆分
+
+| 任务 | 层 | 内容 |
+| --- | --- | --- |
+| AIH-TASK-154 | 数据库 | 迁移 0035、模型、触发器、迁移测试 |
+| AIH-TASK-155 | 业务规则 | 账期与时间、归属谓词、高水位、`S(M)` 与期初期末、发生额分类 |
+| AIH-TASK-156 | 业务规则 | 用量统计、快照、自检、`generate_statement` |
+| AIH-TASK-157 | 任务 | `generate_due` catch-up、Celery 任务与 beat |
+| AIH-TASK-158 | 告警 | `usage_processing_backlog` 两段新判据 |
+| AIH-TASK-159 | 接口 | 管理端列表、详情、手动生成、审计动作 |
+| AIH-TASK-160 | 接口 | 客户列表与详情 |
+| AIH-TASK-161 | 前端 | 管理端对账单页与补生成按钮 |
+| AIH-TASK-162 | 前端 | 门户对账单页 |
+
+### 设计闸门判定
+
+- [ ] 需求、非目标和验收标准明确
+- [ ] 关键契约与事务边界明确
+- [ ] 触碰的不变量都有控制措施
+- [ ] 失败路径都有确定的最终状态
+- [ ] 高风险控制都有测试场景
+- [ ] 没有未解决的阻断假设
+- [ ] 审批绑定到明确的设计版本
+
+## 12. 版本变更记录
+
+| 版本 | 日期 | 改了什么 | 触发原因 |
+| --- | --- | --- | --- |
+| v1 | 2026-11-04 | 初稿 | — |
