@@ -275,7 +275,7 @@ WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt
 | 邮件结算带领取次数（152） | integration | `outbox_max_attempts` 2；worker A 以 `attempt_count` 2 领取一行密码重置信后暂停；把 `next_retry_at` 拨到过去，worker B 以 3 领取；A 发信失败走死信；B 发信成功结算 | A 返回 `superseded`、不记 error、行未变；B 结算为 `SENT`；同样的交错让 A 成功、B 随后结算：A 的结算受影响 0 行，行由 B 置为 `SENT` |
 | 现有两封信不回归（152） | integration | 现有 `test_outbox.py`、`test_notification_adapter.py`、`test_invitation_link.py`、`test_password_reset_link.py` | 不改断言即通过（`test_password_reset_link.py` 不在 Worker 可改范围内，必须原样通过） |
 | 正常路径：三类（153） | integration | 预付租户阈值 50、余额 60 → 记 -15；再记 -45（停机）；再记 +5（复机）；每步跑 `recover` 两轮 | 三条通知；三行邮件行，`aggregate_id` 依次是三条通知的 `public_id`；三封信的收件人是该租户的 `email`、类型与余额对应；钱包与账本行不变 |
-| payload 形状（153） | integration | 上一行的邮件行 payload | 恰好 6 键；金额是 8 位小数定点字符串；`occurred_at` 等于通知行的 `occurred_at` |
+| payload 形状（153） | integration | 上一行每一步的第一轮 `recover` 结算通知之后、第二轮投递邮件行之前，读邮件行的 payload（投递后 `_settle` 会把它置空） | 行为 `PENDING`、`attempt_count` 0；payload 恰好 6 键；金额是 8 位小数定点字符串；`occurred_at` 等于通知行的 `occurred_at`；第二轮之后同一行 `SENT`、payload 为 NULL |
 | 内部计量租户（153） | integration | `INTERNAL_METERED_ONLY` 租户的 `billing_status_changed` | 没有通知行，没有邮件行 |
 | payload 无效（153） | integration | 一行无效的通知类 outbox 行 | 没有通知行，没有邮件行（与 #471 的失败分支同一结局） |
 | 事务中途失败（153） | integration | 让邮件行的 `flush` 抛错（替换 `session.add` 之后的 flush，或插入一行违反约束的数据） | 通知类 outbox 仍 `PENDING`、无通知行、无邮件行 |
@@ -360,4 +360,4 @@ WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt
 | 版本 | 日期 | 改了什么 | 触发原因 |
 | --- | --- | --- | --- |
 | v1 | 2026-11-04 | 初稿 | — |
-| v2 | 2026-11-04 | 复机模板改为只说「不再因余额暂停」并提示仍不可用时可能另有停用，标题改为 `Your Acuven Billing balance suspension has been lifted`；停机模板「They resume automatically」改为「This balance suspension is lifted automatically」；§2 写明文案只说计费状态不说服务状态；§10 第 4 条补项目集成状态；§7 加「复机但账户已停用」用例，渲染逐字一行加「不含 resumed / active again」 | Codex v1 REQUEST_CHANGES：账户或项目停用时复机后有效状态仍是 `BLOCK_AI`（spec §24、§27），原文案「AI services … have resumed」会误导客户 |
+| v2 | 2026-11-04 | 复机模板改为只说「不再因余额暂停」并提示仍不可用时可能另有停用，标题改为 `Your Acuven Billing balance suspension has been lifted`；停机模板「They resume automatically」改为「This balance suspension is lifted automatically」；§2 写明文案只说计费状态不说服务状态；§10 第 4 条补项目集成状态；§7 加「复机但账户已停用」用例，渲染逐字一行加「不含 resumed / active again」；§7「payload 形状」改为在邮件行投递之前读 payload（登记前预审：投递后 payload 已被置空） | Codex v1 REQUEST_CHANGES：账户或项目停用时复机后有效状态仍是 `BLOCK_AI`（spec §24、§27），原文案「AI services … have resumed」会误导客户 |
