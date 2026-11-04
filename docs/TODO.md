@@ -351,8 +351,8 @@
 - [ ] 低余额告警
 - [ ] 停机通知
 - [ ] 复机通知
-- [x] 门户内通知（AIH-TASK-125..128，设计闸门 #471 v7：低余额、停机、复机三类事件转成门户通知，门户 `/portal/notifications` 按记账顺序倒序列出、可单条或全部标为已读，导航显示未读数；Email 与 WhatsApp 通道未做，上面三项因此不勾）
-- [ ] Email adapter（依赖 D7）
+- [x] 门户内通知（AIH-TASK-125..128，设计闸门 #471 v7：低余额、停机、复机三类事件转成门户通知，门户 `/portal/notifications` 按记账顺序倒序列出、可单条或全部标为已读，导航显示未读数；Email 通道已由 AIH-TASK-152..153 交付（设计闸门 #559 v2：每条门户通知同一事务写一行通知邮件，发往租户联系邮箱），WhatsApp 通道未做，上面三项因此仍不勾）
+- [x] Email adapter（AIH-TASK-151..153：Notification Adapter 与模板层、通知邮件的渲染与投递、通知结算时同事务写邮件行）
 - [ ] WhatsApp adapter（依赖 D7）
 - [ ] Webhook 重试
 - [ ] 健康告警

@@ -2,10 +2,14 @@
 
 设计 §7 标注 152 的各行：渲染逐字、显示金额、渲染失败、链接守卫、投递正常路径、
 投递失败到死信、邮件结算带领取次数的两种交错。
-「邮件类型进名单」在 test_outbox.py 的集合断言里。
+「邮件类型进名单」在 test_outbox.py 的集合断言里。152 的用例里，行都由测试自己插入。
 
-本任务不生成 `NOTIFICATION_EMAIL_REQUESTED` 行（生产者是 AIH-TASK-153），
-这里的行都由测试自己插入。示例公司名、邮箱与金额都是虚构的。
+设计 §7 标注 153 的各行（通知结算事务里写邮件行）在文件末尾：三类正常路径与 payload 形状、
+内部计量租户、payload 无效、事务中途失败、幂等重放、两个租户、不补发、Redis/Celery 丢失、
+复机但账户已停用。「并发」与「旧领取者成功与新领取交错」在 test_notification_delivery.py。
+这一部分只在 SQLite 上跑，装与 test_notification_delivery.py 同一个钱包测试触发器。
+
+示例公司名、邮箱与金额都是虚构的。
 """
 
 from __future__ import annotations
@@ -14,19 +18,35 @@ import datetime as dt
 import json
 import logging
 import re
+import uuid
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
-from sqlalchemy import create_engine, update
+from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy.orm import Session, sessionmaker
+from test_notification_delivery import _SQLITE_LEDGER_TRIGGER, money_state, notifications
 
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.notification_adapter import EmailAdapter
-from app.models.auth import DomainOutbox, OutboxStatus
+from app.models.auth import DomainOutbox, OutboxStatus, User, UserRole, UserStatus
 from app.models.base import Base
-from app.services.auth import utc_now
+from app.models.notifications import Notification, NotificationType
+from app.models.tenancy import AccountStatus, BillingMode
+from app.models.wallet import REFERENCE_TYPE_FOR, TransactionType
+from app.repositories.tenancy import create_tenant
+from app.repositories.wallet import (
+    AGGREGATE_TENANT,
+    EVENT_BILLING_STATUS_CHANGED,
+    EVENT_LOW_BALANCE,
+    create_wallet,
+    post_transaction,
+)
+from app.services.account_status import change_account_status
+from app.services.auth import RequestContext, utc_now
 from app.services.password_reset import AGGREGATE_USERS, EVENT_PASSWORD_RESET
 from app.tasks import outbox as outbox_task
 from app.tasks.outbox import (
@@ -578,3 +598,418 @@ def test_a_single_claimer_settles_as_before(wired, monkeypatch) -> None:
     assert outbox_task.deliver(outbox_id) == "sent"
     assert settled == [True]
     assert read(wired, outbox_id).status is OutboxStatus.SENT
+
+
+# --- 通知结算事务里写邮件行（AIH-TASK-153，设计 §2「写邮件 outbox 行」） --------------------------
+
+# 固定的记账时刻：邮件行的 `occurred_at` 取它（通知行的 `occurred_at`），不取处理时刻。
+NOW = dt.datetime(2026, 10, 27, 5, 12, 9)
+ADMIN_CONTEXT = RequestContext(ip_address="203.0.113.53", user_agent="notification-email-test")
+EMAIL_KEYS = {"to", "company_name", "notification_type", "balance", "threshold", "occurred_at"}
+_EIGHT_DECIMALS = re.compile(r"-?\d+\.\d{8}")
+
+TOPUP = TransactionType.TOPUP
+AI_USAGE = TransactionType.AI_USAGE
+
+SUBJECTS = {kind: subject for kind, (_to, subject, _body) in EXPECTED.items()}
+
+
+@pytest.fixture
+def ledger(monkeypatch, settings: Settings) -> Iterator[sessionmaker[Session]]:
+    """In-memory SQLite with the test wallet trigger, so `post_transaction` moves the wallet."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(_SQLITE_LEDGER_TRIGGER)
+    factory = create_session_factory(engine)
+    monkeypatch.setattr(outbox_task, "_session_factory", lambda: factory)
+    monkeypatch.setattr(outbox_task, "get_settings", lambda: settings)
+    yield factory
+    engine.dispose()
+
+
+def make_tenant(
+    factory,
+    *,
+    company_name: str = "Contoh Sdn Bhd",
+    email: str = "ops@contoh.example.com",
+    threshold: str | None = None,
+    mode: BillingMode = BillingMode.PREPAID,
+) -> tuple[int, str]:
+    """A tenant with an empty wallet: (id, public_id)."""
+    with factory() as session:
+        tenant = create_tenant(session, company_name=company_name, email=email, now=NOW)
+        tenant.billing_mode = mode
+        if threshold is not None:
+            tenant.low_balance_threshold = Decimal(threshold)
+        create_wallet(session, tenant_id=tenant.id, now=NOW)
+        session.commit()
+        return int(tenant.id), tenant.public_id
+
+
+def post(
+    factory, tenant_id: int, kind: TransactionType, amount: str, *, now: dt.datetime = NOW
+) -> None:
+    """One committed posting through the real `post_transaction`."""
+    with factory() as session:
+        post_transaction(
+            session,
+            tenant_id=tenant_id,
+            transaction_type=kind,
+            amount=Decimal(amount),
+            reference_type=REFERENCE_TYPE_FOR[kind],
+            reference_id=str(uuid.uuid4()),
+            now=now,
+        )
+        session.commit()
+
+
+def fund(factory, tenant_id: int, public_id: str, amount: str) -> None:
+    """Top up and drop the events of that setup posting, so each case sees only its own."""
+    post(factory, tenant_id, TOPUP, amount)
+    with factory() as session:
+        session.execute(delete(DomainOutbox).where(DomainOutbox.aggregate_id == public_id))
+        session.commit()
+
+
+def add_tenant_event(factory, event_type: str, payload: dict[str, object], public_id: str) -> int:
+    return add_row(
+        factory,
+        event_type=event_type,
+        payload=payload,
+        aggregate_type=AGGREGATE_TENANT,
+        aggregate_id=public_id,
+        created_at=NOW,
+        next_retry_at=NOW,
+    )
+
+
+def email_rows(factory) -> list[DomainOutbox]:
+    with factory() as session:
+        statement = (
+            select(DomainOutbox)
+            .where(DomainOutbox.event_type == EVENT_NOTIFICATION_EMAIL)
+            .order_by(DomainOutbox.id)
+        )
+        rows = list(session.execute(statement).scalars())
+        session.expunge_all()
+        return rows
+
+
+def recover_round(monkeypatch) -> list[str]:
+    """`recover` with the broker gone: deliver what it re-queues, nothing else.
+
+    ⚠️ 断言结算不 `delay()` 邮件行（设计 §2）：投递期间队列里不能多出任何一行。
+    """
+    queued: list[int] = []
+    monkeypatch.setattr(outbox_task.deliver, "delay", queued.append)
+    outbox_task.recover()
+    due = list(queued)
+    results = [outbox_task.deliver(outbox_id) for outbox_id in due]
+    assert queued == due, "邮件行只靠 recover 触发"
+    return results
+
+
+def assert_pending_email(row: DomainOutbox, notice: Notification, tenant_email: str) -> None:
+    """设计 §7「payload 形状」：第一轮之后、投递之前的邮件行。"""
+    assert (row.status, row.attempt_count) == (OutboxStatus.PENDING, 0)
+    assert (row.aggregate_type, row.aggregate_id) == ("notification", notice.public_id)
+    assert row.created_at == row.next_retry_at == notice.created_at
+    assert row.payload_json is not None
+    payload = json.loads(row.payload_json)
+    assert set(payload) == EMAIL_KEYS
+    assert row.payload_json == json.dumps(payload, sort_keys=True)
+    assert payload["to"] == tenant_email
+    assert payload["notification_type"] == notice.notification_type.value
+    assert _EIGHT_DECIMALS.fullmatch(payload["balance"])
+    assert Decimal(payload["balance"]) == notice.balance
+    if notice.notification_type is NotificationType.LOW_BALANCE:
+        assert _EIGHT_DECIMALS.fullmatch(payload["threshold"])
+        assert Decimal(payload["threshold"]) == notice.threshold
+    else:
+        assert payload["threshold"] is None
+    assert payload["occurred_at"] == notice.occurred_at.isoformat()
+
+
+def test_three_notifications_become_three_emails(ledger, monkeypatch) -> None:
+    """设计 §7「正常路径：三类」与「payload 形状」：阈值 50、余额 60 → 记 -15 → 记 -45 → 记 +5，
+    每步跑 `recover` 两轮。"""
+    transport = use_transport(monkeypatch, FakeTransport())
+    tenant_id, public_id = make_tenant(ledger, threshold="50")
+    fund(ledger, tenant_id, public_id, "60")
+
+    steps = [
+        ("-15", AI_USAGE, NotificationType.LOW_BALANCE, "45.00000000", "50.00000000", "RM 45.00"),
+        ("-45", AI_USAGE, NotificationType.SUSPENDED, "0.00000000", None, "RM 0.00"),
+        ("5", TOPUP, NotificationType.REACTIVATED, "5.00000000", None, "RM 5.00"),
+    ]
+    for count, (amount, kind, expected_type, balance, threshold, shown) in enumerate(steps, 1):
+        post(ledger, tenant_id, kind, amount)
+        before = money_state(ledger, tenant_id)
+
+        assert recover_round(monkeypatch) == ["notified"]
+
+        notice = notifications(ledger)[-1]
+        assert notice.notification_type is expected_type
+        rows = email_rows(ledger)
+        assert len(rows) == count
+        assert_pending_email(rows[-1], notice, "ops@contoh.example.com")
+        payload = json.loads(rows[-1].payload_json or "")
+        assert (payload["balance"], payload["threshold"]) == (balance, threshold)
+        assert payload["company_name"] == "Contoh Sdn Bhd"
+        assert payload["occurred_at"] == NOW.isoformat()
+        assert len(transport.sent) == count - 1, "第一轮只结算通知，不发信"
+
+        assert recover_round(monkeypatch) == ["sent"]
+
+        row = read(ledger, rows[-1].id)
+        assert row.status is OutboxStatus.SENT
+        assert row.payload_json is None
+        email = transport.sent[-1]
+        assert email.to == "ops@contoh.example.com"
+        assert email.subject == SUBJECTS[expected_type.value]
+        assert shown in email.body
+        assert money_state(ledger, tenant_id) == before
+
+    assert len(transport.sent) == 3
+    found = notifications(ledger)
+    assert [notice.notification_type for notice in found] == [step[2] for step in steps]
+    assert [row.aggregate_id for row in email_rows(ledger)] == [n.public_id for n in found]
+
+
+def test_an_internal_metered_transition_writes_no_email_row(ledger) -> None:
+    """设计 §7「内部计量租户」：不出通知，也就没有邮件行。"""
+    _tenant_id, public_id = make_tenant(ledger, mode=BillingMode.INTERNAL_METERED_ONLY)
+    payload = {
+        "billing_status": "SUSPENDED",
+        "billing_mode": "INTERNAL_METERED_ONLY",
+        "effective_status": "ALLOW_AI",
+        "status_version": 2,
+        "reason": "BALANCE_NON_POSITIVE",
+        "balance": "0.00000000",
+        "wallet_transaction": ZERO_UUID,
+    }
+    outbox_id = add_tenant_event(ledger, EVENT_BILLING_STATUS_CHANGED, payload, public_id)
+
+    assert outbox_task.deliver(outbox_id) == "no-notification"
+
+    assert read(ledger, outbox_id).status is OutboxStatus.SENT
+    assert notifications(ledger) == []
+    assert email_rows(ledger) == []
+
+
+def test_an_invalid_notification_payload_writes_no_email_row(ledger) -> None:
+    """设计 §7「payload 无效」：与 #471 的失败分支同一结局，没有通知行，没有邮件行。"""
+    _tenant_id, public_id = make_tenant(ledger)
+    payload = {"balance": "1e3", "threshold": "50.00000000", "wallet_transaction": ZERO_UUID}
+    outbox_id = add_tenant_event(ledger, EVENT_LOW_BALANCE, payload, public_id)
+
+    assert outbox_task.deliver(outbox_id) == "retry-later"
+
+    row = read(ledger, outbox_id)
+    assert (row.status, row.attempt_count) == (OutboxStatus.PENDING, 1)
+    assert notifications(ledger) == []
+    assert email_rows(ledger) == []
+
+
+LOW_EVENT = {"balance": "45.00000000", "threshold": "50.00000000", "wallet_transaction": ZERO_UUID}
+
+
+def test_a_failing_email_insert_rolls_back_the_whole_settlement(ledger, monkeypatch) -> None:
+    """设计 §7「事务中途失败」：邮件行 flush 之后抛错 → 结算与通知一并回滚。"""
+    _tenant_id, public_id = make_tenant(ledger)
+    outbox_id = add_tenant_event(ledger, EVENT_LOW_BALANCE, LOW_EVENT, public_id)
+    real_insert = outbox_task._insert_notification_email
+
+    def insert_then_fail(session, **kwargs) -> None:
+        real_insert(session, **kwargs)
+        raise RuntimeError("the connection dropped here")
+
+    monkeypatch.setattr(outbox_task, "_insert_notification_email", insert_then_fail)
+
+    assert outbox_task.deliver(outbox_id) == "retry-later"
+
+    row = read(ledger, outbox_id)
+    assert (row.status, row.attempt_count, row.processed_at) == (OutboxStatus.PENDING, 1, None)
+    assert notifications(ledger) == []
+    assert email_rows(ledger) == []
+
+
+def test_delivering_the_same_notification_row_again_writes_one_email_row(ledger) -> None:
+    """设计 §7「幂等重放」：同一通知类行 `deliver` 两次；已 `SENT` 的再 `deliver`；
+    同一次领取结算第二遍。"""
+    _tenant_id, public_id = make_tenant(ledger)
+    outbox_id = add_tenant_event(ledger, EVENT_LOW_BALANCE, LOW_EVENT, public_id)
+
+    assert outbox_task.deliver(outbox_id) == "notified"
+    assert outbox_task.deliver(outbox_id) == "already-settled"
+    make_due(ledger, outbox_id)
+    assert outbox_task.deliver(outbox_id) == "already-settled"
+
+    other = add_tenant_event(ledger, EVENT_LOW_BALANCE, LOW_EVENT, public_id)
+    current = claim(ledger, other)
+    assert outbox_task._settle_notification(ledger, current) == "notified"
+    assert outbox_task._settle_notification(ledger, current) == "already-settled"
+
+    found = notifications(ledger)
+    assert [notice.source_outbox_id for notice in found] == [outbox_id, other]
+    assert [row.aggregate_id for row in email_rows(ledger)] == [n.public_id for n in found]
+
+
+def test_two_tenants_each_get_their_own_email(ledger, monkeypatch) -> None:
+    """设计 §7「两个租户」（INV-8）：收件人、公司名与金额各自来自自己的租户。"""
+    transport = use_transport(monkeypatch, FakeTransport())
+    a_id, a_public = make_tenant(
+        ledger, company_name="Contoh Sdn Bhd", email="ops@contoh.example.com", threshold="50"
+    )
+    b_id, b_public = make_tenant(
+        ledger,
+        company_name="A$ia Trading Sdn Bhd",
+        email="billing@asia-trading.example.com",
+        threshold="100",
+    )
+    fund(ledger, a_id, a_public, "60")
+    fund(ledger, b_id, b_public, "120")
+    post(ledger, a_id, AI_USAGE, "-15")
+    post(ledger, b_id, AI_USAGE, "-30")
+
+    assert recover_round(monkeypatch) == ["notified", "notified"]
+
+    by_tenant = {notice.tenant_id: notice for notice in notifications(ledger)}
+    rows = {row.aggregate_id: row for row in email_rows(ledger)}
+    assert len(rows) == 2
+    expected = {
+        a_id: ("ops@contoh.example.com", "Contoh Sdn Bhd", "45.00000000", "50.00000000"),
+        b_id: (
+            "billing@asia-trading.example.com",
+            "A$ia Trading Sdn Bhd",
+            "90.00000000",
+            "100.00000000",
+        ),
+    }
+    for tenant_id, (to, company_name, balance, threshold) in expected.items():
+        payload = json.loads(rows[by_tenant[tenant_id].public_id].payload_json or "")
+        assert (payload["to"], payload["company_name"]) == (to, company_name)
+        assert (payload["balance"], payload["threshold"]) == (balance, threshold)
+
+    assert recover_round(monkeypatch) == ["sent", "sent"]
+    assert sorted(email.to for email in transport.sent) == sorted(t[0] for t in expected.values())
+
+
+def test_an_existing_notification_gets_no_email(ledger, monkeypatch) -> None:
+    """设计 §7「不补发」（Kelvin 2026-11-04 定）：通知类行已 `SENT`、通知已存在，
+    跑 `recover` 不产生邮件行。"""
+    tenant_id, public_id = make_tenant(ledger)
+    outbox_id = add_row(
+        ledger,
+        event_type=EVENT_LOW_BALANCE,
+        payload=LOW_EVENT,
+        aggregate_type=AGGREGATE_TENANT,
+        aggregate_id=public_id,
+        status=OutboxStatus.SENT,
+        processed_at=NOW,
+        created_at=NOW,
+        next_retry_at=NOW,
+    )
+    with ledger() as session:
+        session.add(
+            Notification(
+                public_id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                notification_type=NotificationType.LOW_BALANCE,
+                source_outbox_id=outbox_id,
+                balance=Decimal("45"),
+                threshold=Decimal("50"),
+                occurred_at=NOW,
+                created_at=NOW,
+            )
+        )
+        session.commit()
+
+    assert recover_round(monkeypatch) == []
+    assert outbox_task.deliver(outbox_id) == "already-settled"
+
+    assert len(notifications(ledger)) == 1
+    assert email_rows(ledger) == []
+
+
+def test_recovery_alone_delivers_the_notification_and_its_email(ledger, monkeypatch) -> None:
+    """设计 §7「Redis/Celery 丢失」：不调 `delay`，只调 `recover` 两轮。"""
+    transport = use_transport(monkeypatch, FakeTransport())
+    _tenant_id, public_id = make_tenant(ledger)
+    add_tenant_event(ledger, EVENT_LOW_BALANCE, LOW_EVENT, public_id)
+
+    assert recover_round(monkeypatch) == ["notified"]
+    assert recover_round(monkeypatch) == ["sent"]
+
+    [notice] = notifications(ledger)
+    [row] = email_rows(ledger)
+    assert row.aggregate_id == notice.public_id
+    assert row.status is OutboxStatus.SENT
+    [email] = transport.sent
+    assert (email.to, email.subject) == ("ops@contoh.example.com", SUBJECTS["LOW_BALANCE"])
+
+
+def make_admin(factory) -> User:
+    """A committed ADMIN, detached with its columns loaded — what `require_admin` returns."""
+    with factory() as session:
+        user = User(
+            email="admin@notification-email-test.example.com",
+            password_hash="not-a-real-hash",
+            role=UserRole.ADMIN,
+            status=UserStatus.ACTIVE,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        session.add(user)
+        session.commit()
+        return user
+
+
+def test_reactivation_of_a_disabled_account_still_sends_the_reactivated_email(
+    ledger, monkeypatch
+) -> None:
+    """设计 §7「复机但账户已停用」：有效状态仍是 `BLOCK_AI`，信只说计费状态。"""
+    transport = use_transport(monkeypatch, FakeTransport())
+    tenant_id, public_id = make_tenant(ledger)
+    fund(ledger, tenant_id, public_id, "10")
+    post(ledger, tenant_id, AI_USAGE, "-10")
+    assert recover_round(monkeypatch) == ["notified"]
+    assert recover_round(monkeypatch) == ["sent"]
+
+    change_account_status(
+        ledger,
+        actor=make_admin(ledger),
+        customer_id=public_id,
+        account_status=AccountStatus.DISABLED,
+        reason="Contract under review",
+        context=ADMIN_CONTEXT,
+        now=NOW,
+    )
+    # 时刻与 EXPECTED["REACTIVATED"] 相同，信可以逐字比对。
+    post(ledger, tenant_id, TOPUP, "5", now=dt.datetime(2026, 11, 4, 0, 0, 0))
+    with ledger() as session:
+        [trigger] = session.execute(
+            select(DomainOutbox.payload_json).where(
+                DomainOutbox.event_type == EVENT_BILLING_STATUS_CHANGED,
+                DomainOutbox.status == OutboxStatus.PENDING,
+            )
+        ).scalars()
+    status = json.loads(trigger or "")
+    assert (status["billing_status"], status["effective_status"]) == ("ACTIVE", "BLOCK_AI")
+
+    assert recover_round(monkeypatch) == ["notified"]
+    assert recover_round(monkeypatch) == ["sent"]
+
+    suspended, reactivated = notifications(ledger)
+    assert suspended.notification_type is NotificationType.SUSPENDED
+    assert reactivated.notification_type is NotificationType.REACTIVATED
+    assert [row.aggregate_id for row in email_rows(ledger)] == [
+        suspended.public_id,
+        reactivated.public_id,
+    ]
+    email = transport.sent[-1]
+    assert (email.to, email.subject, email.body) == EXPECTED["REACTIVATED"]
+    for text in (email.subject, email.body):
+        assert "resumed" not in text.lower()
+        assert "active again" not in text.lower()

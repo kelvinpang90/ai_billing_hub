@@ -277,6 +277,8 @@ def _wire(monkeypatch: pytest.MonkeyPatch, factory: sessionmaker[Session]) -> No
     """Point the task at this database; any call to `build_adapter` fails the test.
 
     ⚠️ 前端基址留空：通知类事件不需要它（设计 §2「投递」）。
+    结算写下的 `NOTIFICATION_EMAIL_REQUESTED` 行（设计闸门 #559 v2）在这里因此渲染不出、
+    走不到 `build_adapter`，被投到时是 `retry-later`；它们的投递在 test_notification_email.py。
     """
 
     def no_adapter(_channel: object, _settings: Settings) -> object:
@@ -404,6 +406,19 @@ def outbox_rows(factory: sessionmaker[Session], public_id: str) -> list[DomainOu
         statement = (
             select(DomainOutbox)
             .where(DomainOutbox.aggregate_id == public_id)
+            .order_by(DomainOutbox.id)
+        )
+        rows = list(session.execute(statement).scalars())
+        session.expunge_all()
+        return rows
+
+
+def email_rows(factory: sessionmaker[Session]) -> list[DomainOutbox]:
+    """The `NOTIFICATION_EMAIL_REQUESTED` rows the settlements wrote (design gate #559 v2)."""
+    with factory() as session:
+        statement = (
+            select(DomainOutbox)
+            .where(DomainOutbox.event_type == outbox_task.EVENT_NOTIFICATION_EMAIL)
             .order_by(DomainOutbox.id)
         )
         rows = list(session.execute(statement).scalars())
@@ -541,7 +556,8 @@ def test_suspension_and_reactivation_become_two_notifications(factory, monkeypat
     assert money_state(factory, tenant_id) == before
     post(factory, tenant_id, TOPUP, "5")
     before = money_state(factory, tenant_id)
-    assert run_recovery(monkeypatch) == ["notified"]
+    # 第一次结算写下的邮件行也到期了，先于复机事件被投到（id 更小）；基址为空，见 `_wire`。
+    assert run_recovery(monkeypatch) == ["retry-later", "notified"]
     assert money_state(factory, tenant_id) == before
 
     suspended, reactivated = notifications(factory)
@@ -553,6 +569,9 @@ def test_suspension_and_reactivation_become_two_notifications(factory, monkeypat
     assert [event.event_type for event in events] == [EVENT_BILLING_STATUS_CHANGED] * 2
     assert [suspended.source_outbox_id, reactivated.source_outbox_id] == [e.id for e in events]
     assert all(event.status is OutboxStatus.SENT for event in events)
+    # 恰好多出两行邮件行，一条通知一行。
+    emails = email_rows(factory)
+    assert [row.aggregate_id for row in emails] == [suspended.public_id, reactivated.public_id]
 
 
 def test_one_posting_with_two_events_becomes_two_notifications(factory, monkeypatch) -> None:
@@ -782,12 +801,15 @@ def test_an_old_claimer_succeeding_late_does_not_insert(factory, monkeypatch) ->
     row = read(factory, outbox_id)
     assert (row.status, row.attempt_count) == (OutboxStatus.PENDING, 3)
     assert notifications(factory) == []
+    assert email_rows(factory) == []
 
     [claim_b] = newer
     assert real_settle(factory, claim_b) == "notified"
 
     assert read(factory, outbox_id).status is OutboxStatus.SENT
-    assert len(notifications(factory)) == 1
+    [notice] = notifications(factory)
+    [email] = email_rows(factory)
+    assert email.aggregate_id == notice.public_id
 
 
 @pytest.mark.parametrize("other", ["stale-claim", "same-claim"])
@@ -834,7 +856,9 @@ def test_two_concurrent_settlements_make_one_notification(mysql, monkeypatch, ot
 
     assert len(calls) == 1, "受影响 0 行的一方不调规则、不插入"
     assert read(mysql, outbox_id).status is OutboxStatus.SENT
-    assert len(notifications(mysql)) == 1
+    [notice] = notifications(mysql)
+    [email] = email_rows(mysql)
+    assert email.aggregate_id == notice.public_id
 
 
 # --- 失败与恢复 ---------------------------------------------------------------------------
