@@ -24,7 +24,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v1`
+**设计版本**：`v2`
 对应需求：spec §47、§48、§49、§50、§74.6、§98.1、§129「Low Balance」「Suspension notification」「Reactivation notification」「existing Email adapter」；ADR-0009 第 1–3 节；ADR-0014
 目标 PR：待开（登记 PR）；实现为 AIH-TASK-152..153
 
@@ -141,7 +141,7 @@ Subject: Your Acuven Billing account is suspended
 
 The prepaid balance of the Acuven Billing account for $company_name reached RM $balance at $occurred_at, so AI services billed to this account are now suspended.
 
-They resume automatically once the balance is above RM 0.00. To top up, please contact your Acuven contact.
+This balance suspension is lifted automatically once the balance is above RM 0.00. To top up, please contact your Acuven contact.
 
 You can check your balance in the customer portal:
 $link
@@ -150,13 +150,17 @@ $link
 `notification_reactivated`，必需参数 `company_name`、`balance`、`occurred_at`、`link`：
 
 ```text
-Subject: Your Acuven Billing account is active again
+Subject: Your Acuven Billing balance suspension has been lifted
 
-The prepaid balance of the Acuven Billing account for $company_name is RM $balance as of $occurred_at, so AI services billed to this account have resumed.
+The prepaid balance of the Acuven Billing account for $company_name is RM $balance as of $occurred_at, so this account is no longer suspended for its balance.
+
+If AI services are still unavailable, the account or one of its projects may be disabled for another reason; please contact your Acuven contact.
 
 You can check your balance in the customer portal:
 $link
 ```
+
+**文案只说计费状态，不说服务状态**：邮件由计费状态跃迁（`ACTIVE` ↔ `SUSPENDED`）触发，而 AI 服务是否可用看有效状态（spec §24：账户状态、计费状态、项目集成状态共同决定；§27 复机后只有有效状态为 `ALLOW_AI` 才恢复）。账户 `DISABLED` / `CLOSED` 或项目停用时，复机后有效状态仍是 `BLOCK_AI`。所以复机信只说「不再因余额暂停」，并提示仍不可用时可能另有停用；停机信只说「这次余额暂停」何时解除，不承诺服务恢复。三个模板都不写「服务已恢复」。
 
 正文里 `Subject:` 那一行与其后的空行不属于正文：`Subject:` 后面是模板的 `subject`，空行之后到代码块末尾是 `body`；段落之间恰好一个空行（`\n\n`），正文末尾没有换行。`company_name` 里的 `$` 不会被再次解释（`substitute` 只替换模板里的占位符）。
 
@@ -261,7 +265,7 @@ WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt
 
 | 风险/需求 | 测试层级 | 场景 | 预期结果 |
 | --- | --- | --- | --- |
-| 渲染逐字（152） | unit | 三类 payload 各一（固定基址、公司名、金额、时刻），经 `_render_notification_email`、真实 `EmailAdapter` 与记录型假 transport | `to`、`subject`、`body` 与测试里的字面量逐字相等（字面量按 §2「模板」写出） |
+| 渲染逐字（152） | unit | 三类 payload 各一（固定基址、公司名、金额、时刻），经 `_render_notification_email`、真实 `EmailAdapter` 与记录型假 transport | `to`、`subject`、`body` 与测试里的字面量逐字相等（字面量按 §2「模板」写出）；三封信的标题与正文都不含 `resumed`、`active again`（服务状态不由计费状态决定） |
 | 显示金额（152） | unit | `"0.125"` → `0.13`（区分 HALF_UP 与 HALF_EVEN）、`"1234.56500000"` → `1,234.57`、`"-0.00400000"` → `0.00`、`"-12.50000000"` → `-12.50`、`"999999999999.99999999"` → `1,000,000,000,000.00` | 全部如左；先断言 `format(Decimal("0.125"), ".2f") == "0.12"`（用例有区分力） |
 | 渲染失败（152） | unit | 基址为空；`to` 为空 / 非字符串 / 含 `\n`；`company_name` 为空；未知类型；`balance` 为 `"1e3"`；`LOW_BALANCE` 缺 `threshold` 或为负；`SUSPENDED` 带 `threshold`；`occurred_at` 不能解析；多一个键；少一个键 | 都返回 `None`；error 日志不含收件人、公司名与金额（caplog） |
 | 链接守卫（152） | unit | 从 `paths.ts` 取 `portalWallet` 字面量 | 渲染出的链接路径与它相等；无查询参数 |
@@ -278,6 +282,7 @@ WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt
 | 并发（153，MySQL） | integration | #471 的「两个会话同时结算」用例 | 一条通知、一行邮件行 |
 | 旧领取者成功与新领取交错（153） | integration | #471 的同名用例 | 恰好一条通知、一行邮件行 |
 | 幂等重放（153） | integration | 同一通知类行 `deliver` 两次；已 `SENT` 的再 `deliver` | 一条通知、一行邮件行 |
+| 复机但账户已停用（153） | integration | 预付租户先停机，管理员把账户置为 `DISABLED`（经 `app/services/account_status.py`），再经 `post_transaction` 记一笔正数流水使计费状态复机 | 触发复机的 `tenant.billing_status_changed` 行 payload 的 `effective_status` 是 `BLOCK_AI`；一条 `REACTIVATED` 通知、一行邮件行、一封信；信的标题与正文逐字等于复机模板（不含 `resumed`、`active again`） |
 | 两个租户（153） | integration | A、B 两个预付租户同一轮各跨一次阈值 | 两行邮件行，各自的 `to`、`company_name`、金额来自各自的租户 |
 | 不补发（153） | integration | 预置一条已存在的通知（对应的通知类 outbox 行已 `SENT`），跑 `recover` | 不产生邮件行 |
 | Redis/Celery 丢失（153） | integration | 不调 `delay`，只调 `recover` 两轮 | 通知与邮件都出现 |
@@ -313,7 +318,7 @@ WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt
   1. 投递至少一次：极少数情况下同一封信收到两次（§4）。
   2. 联系邮箱是结算时的快照（§2）。
   3. 长时间故障后信会迟到，信里的时刻是事件时刻（§9 F）。
-  4. 账户状态（`DISABLED` / `CLOSED`）不影响发信，与门户通知一致：通知规则本来就不看账户状态。
+  4. 账户状态（`DISABLED` / `CLOSED`）与项目集成状态不影响发信，与门户通知一致：通知规则本来就不看它们。邮件文案因此只说计费状态（§2「模板」），不宣称服务可用。
 - **尚未验证的假设**：
   1. 生产 SMTP 已配置且能投递到外部邮箱（§8「上线前置」核对）。
   2. `BILLING_FRONTEND_BASE_URL` 在生产已配置（门户邀请信依赖它）。
@@ -355,3 +360,4 @@ WHERE id = :id AND status = 'PENDING' AND attempt_count = :attempt
 | 版本 | 日期 | 改了什么 | 触发原因 |
 | --- | --- | --- | --- |
 | v1 | 2026-11-04 | 初稿 | — |
+| v2 | 2026-11-04 | 复机模板改为只说「不再因余额暂停」并提示仍不可用时可能另有停用，标题改为 `Your Acuven Billing balance suspension has been lifted`；停机模板「They resume automatically」改为「This balance suspension is lifted automatically」；§2 写明文案只说计费状态不说服务状态；§10 第 4 条补项目集成状态；§7 加「复机但账户已停用」用例，渲染逐字一行加「不含 resumed / active again」 | Codex v1 REQUEST_CHANGES：账户或项目停用时复机后有效状态仍是 `BLOCK_AI`（spec §24、§27），原文案「AI services … have resumed」会误导客户 |
