@@ -45,7 +45,7 @@ from typing import Any
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, create_engine, delete, event, insert, text
+from sqlalchemy import Connection, create_engine, delete, event, insert, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
 
@@ -438,6 +438,15 @@ def _version(engine: Engine) -> str:
         return str(connection.execute(_ALEMBIC_VERSION).scalar_one())
 
 
+def _recorded_version(engine: Engine) -> str | None:
+    """`_version`, or None where there is none yet: a database Alembic has never touched (no
+    `alembic_version`, as when this module runs first on a fresh one) or one left at base."""
+    with engine.connect() as connection:
+        if not inspect(connection).has_table("alembic_version"):
+            return None
+        return connection.execute(_ALEMBIC_VERSION).scalar_one_or_none()
+
+
 def _set_version(engine: Engine, version: str) -> None:
     with engine.begin() as connection:
         connection.execute(_SET_VERSION, {"version": version})
@@ -455,7 +464,7 @@ def _head_revision(alembic_config: Config) -> str:
 def _to_head(alembic_config: Config, engine: Engine) -> None:
     """Head, complete: at 0033 the version goes back to 0032 first, so 0033 runs again — nothing
     when complete, otherwise it finishes the half-done steps."""
-    if _version(engine) == _REVISION:
+    if _recorded_version(engine) == _REVISION:
         _set_version(engine, _DOWN_REVISION)
     command.upgrade(alembic_config, "head")
 
