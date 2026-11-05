@@ -9600,7 +9600,7 @@ tasks:
     status: ready
     depends_on: []
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-163-audit-timestamp-truncation.md（设计闸门 #569 已批准 v1） 逐条一致，以 §1 完成标准与不做清单、§2、§3 INV-13、§7 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '实现与 docs/design/AIH-TASK-163-audit-timestamp-truncation.md（设计闸门 #569 已批准 v1） 逐条一致，以 §1 完成标准与不做清单、§2、§3 INV-13、§7 为准；设计与本契约冲突时以设计文件为准，只有两处例外以本契约为准：§1 完成标准第 3 条里「按时间段筛选可能差一秒」那句的处理以本契约第 3 条为准（设计闸门审查的建议项，设计文件头已记），§7「登录路径端到端」的写法以本契约第 4 条为准（直接调用 authenticate 并传入 now，测的是同一件事），发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'record_audit 构造 AuditLog 时 created_at 写 now.replace(microsecond=0)，这是唯一的行为改动；签名、其余字段、session.add 与事务归属不变；函数文档补一句：审计时间在这里统一向下截到整秒，与其余写入路径的约定一致，MySQL 的 DATETIME 不存小数秒、不截会被四舍五入；app/repositories/wallet.py 里直接构造 AuditLog 的两处用账本行的 created_at（已是整秒），不改'
       - 'app/services/audit_query.py 模块说明与 docs/api.md「排序」一段：排序仍按自增 id 倒序，原因改为时刻在插入之前取，并发时先取时刻的请求可能后插入，created_at 与 id 的顺序本来就可能不一致；删掉「登录路径与业务路径取整不一致」的说法，把「按时间段筛选在整秒边界上可能差一秒」改为只针对本任务上线前写入的历史审计行（它们在 MySQL 上被四舍五入，最多比真实时刻晚 1 秒），不整句删掉；读取侧的 created_at.replace(microsecond=0) 保留'
       - '测试：新增 tests/backend/test_audit_timestamp.py，覆盖设计 §7 各行：record_audit 传入 2026-11-05 02:49:15.600000、02:49:15.000000、02:49:15.999999 提交后读出都是 02:49:15，参数化 [sqlite] 与 [mysql]，MySQL 分支的建库与清表照 tests/backend/test_account_status_service.py 的 _mysql_factory（BILLING_TEST_DATABASE_URL 未设置时 skip、CI 必跑）；MySQL 上先写 …:15.6 再写 …:15.9 的两行，按 id 读出 created_at 都是 …:15、第一行不晚于第二行；SQLite 上调用 app/services/auth.py 的 authenticate 并传入带微秒的 now，一次密码错误、一次未启用 2FA 的 CUSTOMER 用户在 settings.customer_2fa_required 为 False 时登录成功（建用户与租户的写法照 tests/backend/test_auth_service.py），对应的 LOGIN_FAILED 与 LOGIN 审计 created_at.microsecond == 0 且等于 now 截到整秒；同一会话里 record_audit 后回滚，audit_logs 里没有这一行；不写死方言相关的 SQL 字面量'
