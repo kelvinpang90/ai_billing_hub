@@ -9642,3 +9642,418 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # Billing Client 库（设计闸门 #571 v24）：本仓库 integration-client/，只用标准库；第一个接入方 acuven_aichat，接入在它自己的仓库另做。
+  # Kelvin 2026-11-05 定：outbox 用本地 SQLite 文件；第一版做 spec §35 全部七项；包在本仓库子目录、pip 从 git 安装钉到提交。不改服务端。
+  - id: AIH-TASK-164
+    title: Billing Client 第一层：包骨架、配置、事件校验与序列化、请求签名
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §1、§2「包的位置与形态」「模块与公开接口」「事件」「签名」：新建 integration-client/ 目录下的 acuven_billing_client 包骨架与它自己的 pyproject.toml，实现 config.py、ids.py、events.py（字段校验与序列化，不写库）、signing.py（规范串、签名、请求头与 webhook 签名比较函数），根 pyproject.toml 的 pytest 配置让客户端测试进现有 CI。不做存储、投递、门面、状态与指标：分别属于 AIH-TASK-165..171。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §1、§2「包的位置与形态」「模块与公开接口」中 config、ids、events、signing 四行、「事件」「签名」、§6、§7 标 164 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 integration-client/pyproject.toml：项目名 acuven-billing-client、版本 0.1.0、requires-python >= 3.12、dependencies 为空列表、构建后端用 setuptools 且只打包 acuven_billing_client；acuven_billing_client/__init__.py 定义 __version__ = "0.1.0"（与 pyproject 一致）并导出本任务的公开名字；integration-client/README.md 写包的用途、安装方式（pip 从本仓库 git 安装、钉到提交、subdirectory 为 integration-client，示例里的仓库地址用占位符写，不写真实地址）与「接入指南在 AIH-TASK-171 补全」一句'
+      - 'config.py：不可变的 BillingClientConfig，字段照设计 §2；可调参数的字段名与默认值为 delivery_interval_seconds、batch_max_events、batch_max_bytes、lease_seconds、http_timeout_seconds、reconcile_interval_seconds、reconcile_retry_seconds、delivered_retention_seconds、held_max_events、pending_incidents_max（条数类 batch_max_events、batch_max_bytes、held_max_events、pending_incidents_max 必须是 int，秒数类可以是 int 或有限的 float，bool 都不算，全部必须为正，batch_max_bytes 另须不小于 17000（单条事件上限 16384 字节加批量包装，小于它会让合法事件永远领不出去）；直接构造 BillingClientConfig 与 from_env 走同一套校验：base_url 协议、必填字符串非空、key_version 为正 int 且不是 bool、webhook_secrets 的键为正 int、值为非空且不含空白的字符串，否则构造时 ValueError；默认值照设计：投递间隔 10 秒、每批 100 条与 1,000,000 字节、租约 60 秒、HTTP 超时 10 秒、对账 240 秒与补查 30 秒、已送达保留 7 天、内存暂存 1000 条、待记事故 10000 个）；delivered_retention_seconds 小于 1 天时构造配置对象抛 ValueError；key_version 必须是正整数；类方法 BillingClientConfig.from_env(prefix="ACUVEN_BILLING_") 读设计列出的八个变量，KEY_VERSION 与 WEBHOOK_SECRETS 里的版本都必须完全匹配 ^[1-9][0-9]{0,18}$（只认 ASCII 数字，不接受空白、正负号、下划线）；WEBHOOK_SECRETS 为「版本:密钥」用逗号分隔（每项去掉首尾空白后在第一个冒号处切开，冒号两侧不允许空白，密钥不能为空也不能含空白；空项（例如末尾多一个逗号）、版本重复都算格式错误；变量未设置或只有空白表示不接收 webhook，得到空字典）；必填变量（除 WEBHOOK_SECRETS 外的七个）一律去掉首尾空白后再保存与校验，为空算缺失；BASE_URL 必须以 http 或 https 协议开头；缺必填变量或任何一项格式不对（含 WEBHOOK_SECRETS 缺冒号、版本不是正整数、密钥为空）都抛 ValueError，消息只点名变量名（WEBHOOK_SECRETS 出错时最多再给出第几项），**不含变量的值**；repr 与 str 都不含 secret 与 webhook 密钥'
+      - 'ids.py：new_ulid() 与 app/ai_api/client_rules.py 的 new_ulid 同算法（48 位毫秒时间加 80 位随机，26 个大写 Crockford 字符），时间与随机源可注入，不 import app；events.py：纯函数 build_llm_event 与 build_quantity_event 只收关键字参数（未知参数由 Python 抛 TypeError），除业务字段外还必须传 now（带时区的当前时刻，用作 occurred_at 的缺省）与 new_id（无参、返回 str 的函数，生成 event_id），event_id 与 occurred_at 可选，缺省值在这里按设计补上，返回 (event_id: str, payload: bytes)；new_ulid(*, now_ms=None, randbits=None) 的两个可选参数分别是返回整数毫秒与 secrets.randbits 同签名的函数；QUANTITY 的 unit 必须是去掉首尾空白后不变的非空字符串、最长 64 个字符；负零的 Decimal 规范化为 0、合法；参数名照设计（四个 token 字段为 input_tokens、output_tokens、cache_creation_input_tokens、cache_read_input_tokens），返回 event_id 与载荷字节、不写库；校验规则逐条照 app/schemas/usage_ingest.py 的正则与范围（schema_version 固定 "1.0"，bool 不算整数，usage_type 只校验非空字符串），不合规抛 ValueError；传了 event_id 却没给 occurred_at 抛 ValueError；occurred_at 必须带时区，序列化为 UTC 的 RFC 3339（Z 结尾，有微秒时 6 位）'
+      - '载荷照设计 §2「事件」：没给的 conversation_id、feature 不出现（不是 null）；LLM 载荷没有 quantity 与 unit，QUANTITY 载荷没有四个 token 字段；**载荷不带 tenant_id 与 project_id**；quantity 只收有限的 Decimal 或完全匹配「ASCII 数字、可选的小数点加 ASCII 数字」的字符串（不允许空白、正负号、下划线、指数与 Infinity 之类；int、float 与其他类型抛 ValueError，照设计只收这两种），先去掉小数尾零再按位数判定（0.000000010 规范化为 0.00000001，1E+3 输出 1000），负数、非有限值、整数超过 12 位、小数超过 8 位抛 ValueError；序列化为 sort_keys、紧凑分隔符、ensure_ascii=False 的 UTF-8 字节，超过 16 KiB 抛 ValueError'
+      - 'signing.py：canonical_request(method, path_and_query, timestamp, request_id, body) 按 docs/api.md「集成请求签名」逐条实现（大写方法、路径原样、查询串按键值整段的 UTF-8 字节序排序、没有查询串时不带问号、空请求体也算 SHA-256）；sign(secret, canonical) 为 HMAC-SHA256 小写十六进制；request_headers(config, method, path_and_query, body, *, timestamp: int, request_id: str) 返回设计列出的五个签名头与有请求体时的 Content-Type；verify_webhook_signature(*, secrets, key_version, method, path_and_query, timestamp: str（请求头原值，原样进规范串）, event_id, body, signature) -> bool 照设计只做取密钥、算签名、比较：key_version 不是 int 或是 bool 时直接返回假，signature 不是 64 个小写十六进制字符时直接返回假，否则把两边转成 ASCII 字节再 hmac.compare_digest，任何输入都不抛异常；版本不在 secrets 里返回假；本模块不读时钟、不生成 id'
+      - '测试：新增 integration-client/tests/test_client_config.py、integration-client/tests/test_client_events.py、integration-client/tests/test_client_signing.py，覆盖设计 §7 标 164 的各行，另加 WEBHOOK_SECRETS 格式错误（缺冒号、版本非数字、密钥为空）时异常消息不含任何密钥值；签名对照向量照抄 tests/backend/test_integration_auth.py 的全零占位输入与期望签名（不 import tests 或 app）；客户端测试只用标准库与 pytest，SQLite 用 tmp_path 下的文件，HTTP 用注入的假 Transport，时间用注入的时钟，不联网、不 sleep 真实时间、不出现 skipped（CI 的 backend-tests 分片把出现 skipped 判为失败）；根 pyproject.toml 的 [tool.pytest.ini_options] 中 testpaths 加 "integration-client/tests"、pythonpath 加 "integration-client"（原有值保留、顺序不变），上方注释写明客户端测试随 backend-tests 分片在 CI 里跑，其余配置不改'
+      - '只改本任务 allowed_change_paths 里的文件；不实现 store、delivery、transport、client、status、webhook、metrics、__main__ 模块；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - integration-client/pyproject.toml
+      - integration-client/README.md
+      - integration-client/acuven_billing_client/__init__.py
+      - integration-client/acuven_billing_client/config.py
+      - integration-client/acuven_billing_client/ids.py
+      - integration-client/acuven_billing_client/events.py
+      - integration-client/acuven_billing_client/signing.py
+      - integration-client/tests/test_client_config.py
+      - integration-client/tests/test_client_events.py
+      - integration-client/tests/test_client_signing.py
+      - pyproject.toml
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-165
+    title: Billing Client 第二层：SQLite outbox 核心：建表、写入去重、领取与租约、落回执与清理
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「存储（SQLite）」「事务边界」「投递」与 §4：新模块 store.py 的 outbox 核心，建 meta、usage_outbox、status_state、reconcile_state、ops_log、incidents 六张表（后四张的读写函数属于 AIH-TASK-166），两种打开方式与版本保护，写事件（BEGIN IMMEDIATE、主键冲突与存储故障分开），领取与租约栅栏，落回执，清理，投递相关的只读计数。不发 HTTP、不做内存暂存与后台线程。
+    status: ready
+    depends_on:
+      - AIH-TASK-164
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §2「存储（SQLite）」「事务边界」「投递」中领取、租约栅栏、错误码清除与清理的描述、§4 outbox 状态表中投递相关的行与并发、§5 与存储相关的行、§7 标 165 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'Store(path, *, clock)：路径所在目录不存在时抛错；另提供照设计「不建表的打开方式」的 Store.open_existing(path, *, clock)（文件不存在、零字节、不是 SQLite 文件、没有 meta 表、schema_version 比代码新都抛错，不建表、不改日志模式、不写任何东西；先确认 <path> 存在且不是零字节（否则直接抛错，不建任何文件，包括 <path>.lock），再取单进程锁，取不到抛 StoreLockedError；这里与正常打开相同的是加锁、连接登记与文件身份检查，不同的是不建表、不改日志模式；「不写任何东西」只指上面这些报错的路径，成功打开后的读写与关闭时 SQLite 自己做的检查点属于正常行为），供 AIH-TASK-170 的命令行使用；每个线程各用自己的连接，连接设置 journal_mode=WAL、synchronous=FULL、busy_timeout=5000、foreign_keys=ON；照设计 v20「单进程锁」「连接登记与作废」「文件替换检测」：正常打开先在 <path>.lock 取排他文件锁（POSIX fcntl.flock，Windows msvcrt.locking，非阻塞），取不到抛 StoreLockedError；连接以 check_same_thread=False 建立并登记，使用时持登记表的共享锁，invalidate() 取排他锁、关闭全部已登记连接、清空登记表、代号加一，重新打开与新建库只在 invalidate() 完成之后；Store.close() 关闭全部已登记连接并释放单进程锁（可重复调用）；Store.reopen() 在 invalidate() 之后显式重新打开或按设计的前提新建库（失败照常抛错），各线程不会自行新建库；构造失败时已取到的锁要释放；每个连接记下文件身份 (st_dev, st_ino)，每次使用前比对，路径的文件身份变了或路径不存在就抛本模块定义的 StoreReplacedError（由 AIH-TASK-168 的门面转入降级）；正常打开时主库不存在，只有 <path>-wal 与 <path>-shm 也都不存在才新建库，否则抛 StoreResidueError（点名还在的文件，不碰它们）；首次打开在**一个** BEGIN IMMEDIATE 事务里建六张表与索引 (status, next_attempt_at)、写 schema_version = 1，中途失败整体回滚、不留半建的库（正常打开时：文件不存在或是一个没有任何表的空 SQLite 库才建表；是 SQLite 库却没有 meta 表或 meta 里没有 schema_version 而已有别的表，抛 StoreForeignError、不建表、不改文件）；invalidate() 之后、reopen() 成功之前 Store 处于关闭状态，任何读写都抛 StoreUnavailableError，各线程不会自行重连或建文件；Store 在每次 open / reopen 校验通过后记下「当前文件身份」，各线程新建连接时路径上的文件身份必须与它一致，否则抛 StoreReplacedError（不能绕过 open / reopen 的表结构、外来库与残留检查）；异常类型：StoreError 为基类，StoreMissingError（正常打开时目录不存在；不建表的打开方式下文件不存在或零字节）、StoreForeignError（不是 SQLite、没有 meta 而有别的表、只有 meta 而缺表、schema_version 为 1 却缺表；由 sqlite3 错误引起时带属性 sqlite_errorname 保留原错误名，例如 SQLITE_NOTADB）、StoreVersionError（schema_version 不是正整数或比代码新）、StoreLockedError、StoreResidueError、StoreReplacedError、StoreUnavailableError、StoreIntegrityFault 都是它的子类，全部定义在 store.py；库里 schema_version 大于 1 时抛错且不改任何表；六张表的列、类型、可空性、CHECK 与主键照设计 §2 v13（incidents 主键 incident_id；status_state 与 reconcile_state 主键都是 (tenant_id, project_id)；ops_log 的 action 含 RESET_STATUS、只增不改，模块里没有更新或删除它的代码），last_delivery_ok_at 存在 meta'
+      - '写事件 insert_event(event_id, payload)：BEGIN IMMEDIATE → 查同 event_id → 不存在则插入 PENDING（next_attempt_at = now、attempts = 0）→ COMMIT；已存在且 payload 字节相同返回已有 id；不同抛 EventConflictError（在本模块定义）且不改原行；INSERT 抛 sqlite3.IntegrityError 时按同一规则比对字节，不当作存储故障；若库里并没有这个 event_id 的行（例如 NOT NULL 或 CHECK 被违反），包装成本模块的 StoreIntegrityFault（不是 IntegrityError 的子类）抛出，由门面按存储故障处理（进暂存、不抛给接入方）；IntegrityError 以外的 sqlite3.Error 原样抛出，由 AIH-TASK-168 的调用方决定进暂存'
+      - '领取 claim(*, max_events, max_bytes, lease_seconds)：BEGIN IMMEDIATE，按 (created_at, event_id) 升序选到期的 PENDING 与租约过期的 SENDING，逐条累加到条数上限或下一条会让批量请求体（{"events":[ 加各条 payload 用逗号连接加 ]}）超过 max_bytes 为止（第一条单独超过时仍领这一条），置 SENDING、写租约、attempts 加 1、不改 last_error_code，返回各行的 event_id、payload、加 1 之后的 attempts、上一次的 last_error_code 与所写的 lease_until；renew_lease(event_ids, old_lease, new_lease) 按设计的栅栏条件统一续租并返回影响行数'
+      - '落状态：mark_delivered（同时清 last_error_code）、mark_retry（每行各自的 next_attempt_at 与 error_code）、mark_dead(error_code) 都接收一组行（各带领取时的 lease_until 作栅栏：status = SENDING AND lease_until = 该值），在**一个** BEGIN IMMEDIATE 事务里逐行更新，返回实际更新到的 event_id 集合（栅栏失效的行不在其中、不改）；事务中途抛错则这一组都不改、停在 SENDING；purge_delivered(older_than, limit=1000)（older_than 由调用方按 delivered_retention_seconds 算）只删 DELIVERED 且 delivered_at 早于给定时刻的行，DEAD 不删；record_delivery_ok 与 read_last_delivery_ok_at 读写 meta；投递相关的只读计数（各状态条数、未确认死信数、PENDING 与 SENDING 行里最早的 created_at、是否存在 last_error_code 为 INTEGRATION_AUTH_FAILED 的 PENDING 或 SENDING 行）；AIH-TASK-167..170 只经 store 的函数读写库，不直接写 SQL'
+      - '测试：新增 integration-client/tests/test_client_store.py，覆盖设计 §7 标 165 的各行（载荷用测试里直接构造的字节，不经 events.py；自带 event_id 须给 occurred_at 那一行的门面部分由 AIH-TASK-164、168 覆盖）：写入持久、本地去重与冲突、并发写同一 event_id 两组、主键冲突不算存储故障（用 monkeypatch 让查重返回不存在，从而让 INSERT 撞主键）、不建表的打开方式、版本保护、领取并发、领取顺序、错误码清除中送达的部分、单进程锁（用 multiprocessing 起子进程用同一路径打开，得到 StoreLockedError；父进程关闭后子进程能取到锁）、invalidate() 后各线程重建连接且新库 -wal 在旧连接关闭后保持存在、integrity_check 为 ok、文件被移走或替换后抛 StoreReplacedError、设计 v23 §7「只移走主库」「三个文件一起移走」两行的存储部分（只移主库时原路径的 -wal 仍在、不新建库、抛 StoreResidueError 点名残留；按配对名字补放后命令行能读出全部已提交行；三个文件一起移走后立即可新建库）、租约过期重领与旧租约回执落不进去、§4 状态机中投递相关的行、清理、落回执中途失败停在 SENDING；并发用例用两个线程各自的连接；在打开状态下移动或替换文件的用例依赖 POSIX 语义（生产与 CI 都是 Linux），可以在 sys.platform 为 win32 时条件跳过，CI 上不会出现 skipped；客户端测试只用标准库与 pytest，SQLite 用 tmp_path 下的文件，HTTP 用注入的假 Transport，时间用注入的时钟，不联网、不 sleep 真实时间、不出现 skipped（CI 的 backend-tests 分片把出现 skipped 判为失败）'
+      - '只改 store.py、__init__.py 的导出与 test_client_store.py；不改 AIH-TASK-164 交付的其他模块；不写死信运维、重放、ops_log、incidents 与状态表的读写函数（属于 AIH-TASK-166）；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - integration-client/acuven_billing_client/store.py
+      - integration-client/acuven_billing_client/__init__.py
+      - integration-client/tests/test_client_store.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-166
+    title: Billing Client 第三层：存储的运维与状态部分：死信、重放、处置记录、事故与状态表
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「存储（SQLite）」中 ops_log、incidents、status_state、reconcile_state 四张表、「投递」的死信与重放、「有效状态」的应用规则与状态重置、§4：在 store.py 里加死信运维、已送达重放、处置记录、事故记录与确认、状态与对账时刻的读写、状态重置。不改 AIH-TASK-165 已交付的函数。
+    status: ready
+    depends_on:
+      - AIH-TASK-165
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §2「存储（SQLite）」中 ops_log、incidents、status_state、reconcile_state 四张表与待记事故、「投递」的死信与中心恢复后的重放、「有效状态」的应用与状态重置、§4 死信、重放与事故确认各行、§5 对应的行、§7 标 166 与标「165、166」的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '处置函数：requeue_dead(event_id, *, reason)（清 last_error_code、dead_at、dead_acked_at）、ack_dead(event_id, *, reason)、replay_delivered(*, delivered_from, delivered_until, reason) -> 改回的条数（两个时刻在存储层是 Unix 秒的 float，与 delivered_at 同口径；门面与命令行负责把带时区的时刻换算过来）、ack_incident(incident_id, *, reason)、reset_status(tenant_id, project_id, *, reason) -> 是否删了行；原因须是字符串（不是字符串抛 TypeError）、去掉首尾空白后为 1 到 500 个字符（否则 ValueError、不改），ops_log.reason 与 incidents.ack_reason 存去掉首尾空白之后的文本；成功时在**同一个事务**里写 ops_log（重放每行一条，RESET_STATUS 的 target_id 为 <tenant_id>/<project_id>）；非法状态或已确认、不存在时返回假且不写 ops_log；list_dead(limit, *, include_acked=True)（按 dead_at、再按 event_id 升序，返回 event_id、last_error_code、attempts、dead_at 与 dead_acked_at）'
+      - '事故：record_incidents(items, *, overflow) 在一个事务里写入：items 为逐条丢弃的 event_id、kind（DROPPED 或 CONFLICT_DROPPED）与时刻，每条生成新的 incident_id（inc_ 加新 ULID），只在同一 event_id、同一 kind 已有未确认事故时跳过；overflow 为溢出条数与首次、最近时刻，条数大于 0 时写一行 OVERFLOW_DROPPED（event_id 为空、dropped_count 为该条数）；list_incidents(limit, *, include_acked=True) 按 recorded_at、再按 incident_id 升序返回设计列出的字段；未确认事故数的只读计数'
+      - '状态与对账时刻：read_status(tenant_id, project_id) 只读那一对的 status_state 行；apply_status(tenant_id, project_id, fields, *, now) -> bool 在 BEGIN IMMEDIATE 里没有行就插入、status_version 更大才整行覆盖（含 applied_at），相等或更小不改，**不写对账时刻**；record_reconcile_ok(tenant_id, project_id, *, now) 与 record_reconcile_error(tenant_id, project_id, *, now) 只写 reconcile_state 那一对的 last_ok_at 或 last_error_at（没有行就插入），不碰 status_state；带 now 参数的函数用传入的时刻，其余写时刻的函数（处置、事故、重放）一律取 Store 构造时注入的时钟；read_reconcile(tenant_id, project_id) 返回 last_ok_at 与 last_error_at（没有行时都为 None）；只保存设计列出的已知字段；list_status_pairs() 返回两表里出现过的每一对及其两表的列（某表没有这一对时那些列为 None），供命令行使用'
+      - '测试：新增 integration-client/tests/test_client_store_ops.py，覆盖设计 §7 标 166 与标「165、166」的各行中本任务的部分（重放已送达、处置必填原因与审计、事故确认后再丢弃、状态重置的存储部分、错误码清除中 requeue_dead 的部分、§4 死信与事故确认各行），另覆盖 apply_status 与 record_reconcile_* 互不影响（首次对账失败后 status_state 仍没有行、之后 apply_status 能插入）、换项目不沿用旧状态的存储部分、OVERFLOW_DROPPED 的写入、ops_log 在事务中途失败时与状态改动一起回滚；客户端测试只用标准库与 pytest，SQLite 用 tmp_path 下的文件，HTTP 用注入的假 Transport，时间用注入的时钟，不联网、不 sleep 真实时间、不出现 skipped（CI 的 backend-tests 分片把出现 skipped 判为失败）'
+      - '只改 store.py、__init__.py 的导出与 test_client_store_ops.py；不改 AIH-TASK-165 已交付函数的行为；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - integration-client/acuven_billing_client/store.py
+      - integration-client/acuven_billing_client/__init__.py
+      - integration-client/tests/test_client_store_ops.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-167
+    title: Billing Client 第四层：HTTP 传输与一轮投递：组批、回执判定、单发回退、退避与清理
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「投递」：新模块 transport.py 与 delivery.py。delivery.py 提供一轮投递的函数（领取、组批、签名发送、按回执落状态、批层不可重试改单发与续租、退避、401 固定 60 秒重试、清理），不含门面、内存暂存与后台线程（属于 AIH-TASK-168）。
+    status: ready
+    depends_on:
+      - AIH-TASK-166
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §2「模块与公开接口」中 transport、delivery 两行、「投递」「时间语义」、§3 INV-2、INV-11、INV-13、INV-14、§5 投递相关的行、§7 标 167 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'transport.py：Transport 协议与 Response(status, body)；默认 UrllibTransport 用 urllib.request，不跟随重定向（重定向当作网络错误），响应体最多读 64 KiB，超时取配置；网络异常统一抛本模块的 TransportError，消息不带请求头与请求体'
+      - 'delivery.py 的 run_delivery_round(store, transport, config, *, clock, rng, new_request_id) -> DeliverySummary（delivery.py 定义并导出的冻结 dataclass，字段 claimed、delivered、retried、dead、fenced 五个整数，另有类方法 zero() 返回全 0 的实例；续租不足而放弃的行与收到回执后 mark_* 栅栏失效的行都计入 fenced）：**一次调用只领取一次、处理一批**（是否连续多轮由 AIH-TASK-168 的门面决定）；领取 → 按设计拼批量请求体（各条 payload 原样拼接、不重新序列化）→ 每次尝试新的 Request-Id 与 int(clock()) 时间戳、签名、POST 到 /api/v1/integration/usage-events/batch → 回执判定逐行照设计「投递」的表（进 DEAD 只限白名单的六个码且 retryable 为假，其余 retryable 为假的码保持待发；只有批层 413 PAYLOAD_TOO_LARGE、422 VALIDATION_ERROR 与 422 BATCH_TOO_LARGE 才改逐条单发；逐条结果 status 未知或缺布尔 retryable 只让该条记 INVALID_BILLING_RECEIPT）；单条接口回执状态码为 200 或 202、status 为 accepted、already_received 或 already_processed 之一且 event_id 相同就算送达（不要求状态码与 status 的对应关系），event_id 不符或 status 不在这三个里记 INVALID_BILLING_RECEIPT'
+      - '批层其他不可重试改为逐条单发，每发一条前对剩下还没落状态的行统一续租，续租影响行数不足即停止回退；单发途中某条得到与这条事件无关的结果（网络错误、retryable 为真的信封、401、retryable 为假但码不在白名单、无信封的非 200）立即停止，这条与剩下的行按该结果落状态；与这条事件有关的结果只落这一条、继续下一条；CREDENTIAL_SCOPE_MISMATCH 在白名单里，按信封进 DEAD（不特殊处理）；单发途中 UNKNOWN_USAGE_TYPE 只让该条退避、继续下一条；错误信封、回执整批失败与单条失败的界线、base_url 与接口路径的拼接都照设计 v8 的写法'
+      - '退避 next_attempt_at = now + min(3600, 2 ** min(attempts, 12)) × uniform(0.5, 1.0) 秒，可重试的没有放弃上限；last_error_code 为 INTEGRATION_AUTH_FAILED 的行固定 now + 60 秒；进死信记一条 ERROR 日志只带 event_id 与 error_code；落回执（mark_*）或续租时抛 sqlite3.Error 则本轮立即中止并把异常抛给调用方（不再继续单发回退、清理与 record_delivery_ok；已领取的行停在 SENDING，租约到期后被重领）；每轮末尾 purge_delivered（早于 7 天、单次至多 1000 行）；送达至少一条时 record_delivery_ok；logger 名 acuven_billing_client，不记密钥、签名、请求头原文、载荷与响应体'
+      - '测试：新增 integration-client/tests/test_client_transport.py 与 integration-client/tests/test_client_delivery.py，覆盖设计 §7 标 167 的各行（回执判定全表含逐条混合、死信白名单三组、逐条结果残缺、单发回退里的事件相关可重试码、地址拼接、重试载荷逐字节相同而 Request-Id 与时间戳不同、组批上限按条数与按约 15 KiB 事件按字节、批层不可重试改单发、单发回退的停止条件两组、单发回退续租与被重领后停止（测试里用原生 SQL 把那几行的 lease_until 改到过去，再由另一个线程调用 claim 重领；不为测试给 Store 加按线程的时钟）、凭据错误不进死信、凭据错误固定 60 秒重试与修好后送达并清空错误码、范围不符按信封、退避区间）；UrllibTransport 用本地不联网的方式测（不跟随重定向、64 KiB 截断、超时与网络异常转 TransportError），可以用标准库的 HTTP 服务器在本机回环地址的临时端口上起一个线程；客户端测试只用标准库与 pytest，SQLite 用 tmp_path 下的文件，HTTP 用注入的假 Transport，时间用注入的时钟，不联网、不 sleep 真实时间、不出现 skipped（CI 的 backend-tests 分片把出现 skipped 判为失败）'
+      - '只改本任务 allowed_change_paths 里的文件；不改 store.py 与 AIH-TASK-164 交付的模块；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - integration-client/acuven_billing_client/transport.py
+      - integration-client/acuven_billing_client/delivery.py
+      - integration-client/acuven_billing_client/__init__.py
+      - integration-client/tests/test_client_transport.py
+      - integration-client/tests/test_client_delivery.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-168
+    title: Billing Client 第五层：记账门面、存储故障暂存与回灌、后台线程与死信运维
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「存储」的暂存回灌、「投递」的后台线程与死信、「健康指标」末尾的三个进程内计数、§5：新模块 client.py 的 BillingClient 门面的记账与投递部分（record_llm_usage、record_quantity_usage、start、stop、deliver_once、requeue_dead、ack_dead、list_dead、replay_delivered、list_incidents、ack_incident、held_in_memory、incidents_pending、dropped_events、conflicts_dropped）。不做有效状态与 webhook（属于 AIH-TASK-169）。
+    status: ready
+    depends_on:
+      - AIH-TASK-167
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §2「模块与公开接口」中 client 一行、「存储」的写入事件、暂存回灌与待记事故、「投递」的后台线程与死信、「健康指标」末尾一句、「事务边界」、§3 INV-1、INV-14、§5、§7 标 168 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'BillingClient(config, *, transport=None, clock=None, rng=None)：构造时照设计 v15「构造时存储不可用 → 降级运行」处理（打开 Store 抛 sqlite3.Error、OSError 或版本错误时不抛，store_available 为假，record_* 进暂存，处置函数抛 StoreUnavailableError（就是 store.py 定义的那一个，client.py 只重新导出，不另定义；record_* 遇到它照存储故障进暂存），投递线程每个间隔先尝试重新打开，deliver_once() 在降级时也先尝试重新打开，成功后照常回灌与投递；运行中任何读写库抛出 IntegrityError 以外、且 sqlite_errorname 不是 SQLITE_BUSY 或 SQLITE_LOCKED 的 sqlite3.Error 或 OSError 时，调用 Store.invalidate() 作废全部连接、转入同一套降级状态（照设计 v17「运行中转入降级」与 v23 对关闭连接行为的说明；StoreReplacedError 同样转入降级并立即尝试重新打开路径上的文件；StoreLockedError 与 StoreResidueError 按构造时打开失败处理（降级、每个间隔再试）；BUSY 与 LOCKED 不转降级，只让本次记账进暂存）；只有配置不合法才抛）；store_available 为只读属性；record_llm_usage 与 record_quantity_usage 调 AIH-TASK-164 的构建函数再调 store.insert_event；校验错误（ValueError、TypeError）与 EventConflictError 照常抛；写库前先查进程内暂存：暂存里已有同 event_id 时字节相同直接返回该 id、不同抛 EventConflictError，不重复放入；IntegrityError 以外的 sqlite3.Error 不抛、放进上限为配置值的进程内暂存并记 ERROR（不带载荷），暂存满则丢弃、dropped_events 加 1、记 ERROR 带 event_id，并把 (event_id, DROPPED, 时刻) 放进待记事故列表（上限取配置；满了不再记 id，只累加溢出计数并记下溢出的首次与最近时刻、记 ERROR）；返回 event_id'
+      - '暂存回灌照设计「存储」：每轮开头逐条写回，成功或同内容冲突移出暂存；不同内容冲突移出并 conflicts_dropped 加 1、记 ERROR 只带 event_id、放进待记事故（CONFLICT_DROPPED）；仍是存储故障则留在暂存并停止本轮回灌；回灌之后在存储可用时把待记事故列表与溢出计数用 store.record_incidents 在一个事务里写入：照设计 v14 的写法：用一把专用锁保证同一时刻只有一处在写；在锁内把列表与溢出计数（条数与首次、最近时刻）整体移入待写快照并把进程内的列表与计数清零，锁外写库，写成功就丢掉快照，写失败按设计并回（先快照、再写库期间新增的，超出上限的 id 转为溢出，两段溢出条数相加、首次取较早、最近取较晚）；暂存回灌本身也由同一把专用锁串行，deliver_once 与后台线程不会同时回灌，同一个内容冲突只计一次；held_in_memory、incidents_pending（待记事故列表条数加溢出计数）、dropped_events、conflicts_dropped 为只读属性，线程安全'
+      - 'start() 启动一个守护线程，第一轮立即执行，投递线程循环「回灌 → 调用一次 run_delivery_round → 用停止事件的 wait 等投递间隔」（每个间隔只投递一轮，照设计）（对账线程由 AIH-TASK-169 加入同一个 start / stop，本任务只实现投递线程）；一轮里的异常捕获记 ERROR 后继续，线程不退出；重复 start 不起第二个线程；stop 成功之后可以再 start（清掉停止事件、起新线程）；上一次 stop 超时、旧线程还活着时 start 抛 RuntimeError；stop(timeout) 设停止事件并等线程结束，超时线程仍在则返回假并记 WARNING，否则返回真；close(timeout) 先 stop 再 Store.close() 释放单进程锁（测试里模拟重启时先 close 旧客户端）；deliver_once() 同步执行一次回灌加一轮投递，返回 DeliverySummary（降级且重新打开失败时不抛，返回 DeliverySummary.zero()；本轮途中存储出错时（run_delivery_round 抛出存储错误）按规则转入降级并返回 DeliverySummary.zero()，不抛，已落状态的行以库为准、不另统计；错误名一律按前缀匹配（SQLITE_BUSY、SQLITE_LOCKED 开头的都算暂时性，SQLITE_CORRUPT 开头的与 SQLITE_NOTADB 都算坏文件类，例如 SQLITE_BUSY_SNAPSHOT、SQLITE_CORRUPT_INDEX）；回灌遇到 SQLITE_BUSY 或 SQLITE_LOCKED 时停止本轮回灌但照常投递；投递本身遇到 SQLITE_BUSY 或 SQLITE_LOCKED 不转降级，deliver_once 返回 DeliverySummary.zero()、不抛，后台线程下一轮再试；处置函数遇到它们原样抛出 sqlite3.OperationalError、不转降级；record_* 遇到 StoreIntegrityFault 只把这一条放进暂存、记 ERROR，不作废连接、不转降级；其他异常照常抛给调用方）；回灌时某一条单独引起 StoreIntegrityFault，就把这一条移出暂存、dropped_events 加 1、记 ERROR（只带 event_id）、放进待记事故（DROPPED），继续回灌下一条；replay_delivered 只收带时区的 datetime（不带时区抛 ValueError），换算成 Unix 秒再调 store；构造时打开失败若是 StoreForeignError 且 sqlite_errorname 为 SQLITE_NOTADB 或 SQLITE_CORRUPT，同样记下坏文件身份；转入降级后由门面调用 Store.reopen() 重新打开（照设计 v24：因 SQLITE_CORRUPT 或 SQLITE_NOTADB 降级时记下坏文件身份，路径上的文件身份未变就不重开）；StoreIntegrityFault 按存储故障处理；降级时 list_dead、list_incidents 与处置函数抛 StoreUnavailableError，处置途中遇到会转入降级的错误也是先转入降级再抛 StoreUnavailableError；list_incidents 缺省 limit 为 50；close() 之后 record_*、start、deliver_once 与各处置函数抛 RuntimeError（关闭后再用是接入方的编程错误），门面也不再调用 Store.reopen（stop 超时后残留的线程转入降级时同样不重开）；incidents_pending 包括正在写库的那份待写快照，写成功后才减去；只有当前连接代号的连接上抛出的错误才触发转入降级，旧代号连接迟到的错误只记 WARNING、不作废新打开的库、不标记坏文件；异常处理见本条前文；暂存由一把锁保护，回灌时在锁内取快照、在锁外写 SQLite、再在锁内移除已处理的条目，记账不会因回灌写库而被锁住；requeue_dead、ack_dead、replay_delivered、list_incidents、ack_incident 转调 store（原因必填，照 AIH-TASK-166），list_dead(limit=50)'
+      - '测试：新增 integration-client/tests/test_client_record.py 与 integration-client/tests/test_client_runner.py，覆盖设计 §7 标 168 的各行（平台不可用时记账照常、存储故障与暂存满、回灌时冲突两种、事故记录（含模拟重启后仍在）、溢出事故、后台线程不死与 stop 在超时内返回、重启后继续送），**例外，以本契约为准**：设计 §7「运行中转入降级」一行的「去掉替身后下一轮重新打开、回灌入库」部分改用 SQLITE_IOERR 替身来测（它不属于坏文件类，按设计 v24 允许重开同一个文件），SQLITE_CORRUPT 触发的降级只断言进入降级、连接关闭、事件进暂存，它的恢复由「部分损坏的文件不来回切换」一行覆盖（设计 v24 的坏文件规则不重开同一个文件，与该行原写法冲突，规则以设计正文为准）；另覆盖设计 §7「构造时存储不可用」「运行中转入降级」「部分损坏的文件不来回切换」「空闲线程不写旧文件」「单进程锁」「只移走主库」「三个文件一起移走」「运行中隔离损坏文件」「降级后只靠 deliver_once() 恢复」九行中本任务的部分、自带 event_id 须给 occurred_at 经门面时不写库、同参数两次返回同一 id、写事故期间新加的待记事故不丢、设计 §7「回写失败并回」一行、deliver_once 与后台线程同时回灌时一个冲突只计一次；**例外，以本契约为准**：设计 §7「事故记录」「溢出事故」两行里对 health().level 与 incidents_unacked 的断言，本任务改用 AIH-TASK-166 的 store 只读计数（未确认事故数）与本任务的 incidents_pending 属性断言，level 的部分由 AIH-TASK-170 的测试覆盖（health() 在 169 才实现，设计 §7 的任务列只是测试归属，不改变行为）；存储故障用注入的、写入时抛 sqlite3.OperationalError 的 Store 替身或 monkeypatch，不靠真的写满磁盘；后台线程的用例可以把投递间隔配成 0.01 秒并用 threading.Event 同步，单个用例耗时不超过 2 秒；在打开状态下移动或替换文件的用例依赖 POSIX 语义（生产与 CI 都是 Linux），可以在 sys.platform 为 win32 时条件跳过，CI 上不会出现 skipped；客户端测试只用标准库与 pytest，SQLite 用 tmp_path 下的文件，HTTP 用注入的假 Transport，时间用注入的时钟，不联网、不 sleep 真实时间、不出现 skipped（CI 的 backend-tests 分片把出现 skipped 判为失败）'
+      - '只改本任务 allowed_change_paths 里的文件；不改 delivery.py、transport.py、store.py 与 AIH-TASK-164 交付的模块；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - integration-client/acuven_billing_client/client.py
+      - integration-client/acuven_billing_client/__init__.py
+      - integration-client/tests/test_client_record.py
+      - integration-client/tests/test_client_runner.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-169
+    title: Billing Client 第六层：有效状态对账、按版本应用与状态 webhook 验签助手
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「有效状态」「状态 webhook」与 §4 有效状态的版本表：新模块 status.py 与 webhook.py，门面加 reconcile_status_once、should_block_ai、current_status、handle_status_webhook，并把对账接进 AIH-TASK-168 的后台线程循环。不做健康指标与命令行：属于 AIH-TASK-170。
+    status: ready
+    depends_on:
+      - AIH-TASK-168
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §2「有效状态」「状态 webhook」、§3 INV-1、INV-7、INV-8、§4 有效状态的版本表、§5 对账、webhook 与状态表读失败各行、§7 标 169 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'status.py：reconcile_status_once 签名 GET /api/v1/integration/effective-status（空请求体、超时取配置）；应答校验照设计（200、data 是对象且含服务端 10 个字段、类型对、tenant_id 与 project_id 等于配置、status_version 为非负整数、effective_status 只能是 ALLOW_AI 或 BLOCK_AI；多出的字段忽略不存）；不过则记 WARNING、record_reconcile_error、不应用；通过则 apply_status 后 record_reconcile_ok（不论是否覆盖）；对账过程中读写库抛 sqlite3.Error 也算一次失败（记 WARNING，尽力 record_reconcile_error）；reconcile_status_once 返回是否成功、不抛；status_version 为 bool 时不算整数；节奏照设计（start 后立即查、成功后 240 秒、一段连续失败只在第一次失败后 30 秒补查一次、之后每次失败 240 秒），下一次时刻按注入的时钟计算，手动调用 reconcile_status_once（包括第一次 start() 之前）与后台线程共用同一份节奏状态，并由一把锁串行（手动调用遇到对账线程正在对账时等它完成再做自己的一轮），调用后 next_reconcile_at 按结果更新；门面提供只读属性 next_reconcile_at（下一次对账的 Unix 秒，供测试观察）；对账线程用停止事件的 wait 等待，每次最多等 5 秒，醒来都重新读这份状态，没到时刻就继续等；start() 同时重置「本段连续失败已补查过」的标记；第一次 start() 与第一次手动对账之前 next_reconcile_at 为 None；应答字段类型：tenant_id、project_id、billing_mode、billing_status、account_status、project_integration_status、effective_at 为字符串，reason_code 为字符串或 null，status_version 为非负整数（bool 不算），effective_status 只能是 ALLOW_AI 或 BLOCK_AI；其余字符串字段不校验取值范围（服务端可能新增取值）；should_block_ai() 只看配置那一对有没有状态行与其 effective_status，与对账是否成功过无关'
+      - 'should_block_ai() 只在配置那一对已有 status_state 行且 effective_status 为 BLOCK_AI 时返回真（store_available 为假时直接返回假、不访问库；对账线程在 store_available 为假时跳过的那一轮不算失败、不写 reconcile_state，next_reconcile_at 保持为原值（已到期），存储恢复后的下一次唤醒立即对账；status_version 超过 2^63 − 1 时对账与 webhook 都按字段校验不通过处理（对账记失败，webhook 抛 WebhookVerificationError），不让 OverflowError 漏出；门面在本任务加 reset_status(*, reason)，转调 store.reset_status 作用于配置的那一对；current_status() 在降级时返回 None；handle_status_webhook 在降级时验签通过后抛 StatusStoreError（接入方回 503）；状态路径上遇到存储错误或 StoreReplacedError 同样按 AIH-TASK-168 的规则转入降级；对账线程在 store_available 为假时不对账；reconcile_status_once() 在降级时先尝试重新打开，打开成功再对账，仍失败则算一次失败、返回假）；读库失败或没有行返回假、不抛、记 WARNING；current_status() 返回已应用状态（设计的 10 个字段加 applied_at 组成的字典），没有或读库失败返回 None、不抛'
+      - 'webhook.py 与门面 handle_status_webhook(*, method, raw_path, query_string, headers, body, signed_path=None)：五步照设计（请求头大小写不敏感；缺失或格式不对、时间窗大于 300 秒、版本不在 webhook_secrets 或签名不等、体不是对象或缺字段或类型错（effective_status 只能是 ALLOW_AI 或 BLOCK_AI、status_version 为非负整数且 bool 不算，与对账同一套校验）、event_id 与请求头不符、租户或项目不符都抛 WebhookVerificationError；raw_path 与 query_string 接受 str 或 bytes（bytes 按 latin-1 逐字节解码）；headers 接受映射或键值对序列，名字与值可以是 str 或 bytes（bytes 按 latin-1 解码，名字不区分大小写），同名签名相关请求头出现多次算格式错误；X-Acuven-Key-Version 用与请求签名相同的规则（正整数、不补零）；X-Acuven-Event-ID 须匹配 ^[A-Za-z0-9_.:-]{1,200}$（含下划线，服务端发的是 sevt_ 加项目对外 id 加版本号）；时间窗用 int(clock()) 与请求头时间戳比较（与服务端同为整秒），恰好 300 秒接受；signed_path 给出时代替原始路径与查询串参与规范串第二行且仍按查询串规则排序；webhook_secrets 为空时一律抛错）；通过后 apply_status 并返回 applied，旧版本或同版本返回假、不是错误；**不写对账时刻**；apply_status 抛 sqlite3.Error 时抛 StatusStoreError'
+      - 'start() 另起一个对账线程（与投递线程共用停止事件，stop 等两个线程都结束），按 status.py 的节奏循环「对账一次 → 用停止事件的 wait 等到下一次对账时刻」；每次 start 都把节奏重置为立即对账；对账异常捕获记录、不让线程退出；投递线程不调用对账'
+      - '测试：新增 integration-client/tests/test_client_status.py 与 integration-client/tests/test_client_webhook.py，覆盖设计 §7 标 169 的各行（对账应用与版本 3 → 5 → 4、先失败后成功、webhook 不冒充对账（本任务只断言 reconcile_state 的 last_ok_at 不变，status_reconcile_stale 的断言在 AIH-TASK-170）、webhook 写库失败、状态应答字段含多一个未知字段照常应用、换项目不沿用旧状态含 webhook、租户或项目不符、对账失败放行两种、状态表读失败放行、对账不被投递拖住、对账节奏七步、webhook 的 BLOCK_AI 在对账失败时生效、webhook 验签全部情形含 signed_path 与新旧两个版本）；客户端测试只用标准库与 pytest，SQLite 用 tmp_path 下的文件，HTTP 用注入的假 Transport，时间用注入的时钟，不联网、不 sleep 真实时间、不出现 skipped（CI 的 backend-tests 分片把出现 skipped 判为失败）'
+      - '只改本任务 allowed_change_paths 里的文件；不改 delivery.py、transport.py、store.py 与 AIH-TASK-164 交付的模块；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - integration-client/acuven_billing_client/status.py
+      - integration-client/acuven_billing_client/webhook.py
+      - integration-client/acuven_billing_client/client.py
+      - integration-client/acuven_billing_client/__init__.py
+      - integration-client/tests/test_client_status.py
+      - integration-client/tests/test_client_webhook.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-170
+    title: Billing Client 第七层：健康指标与运维命令行
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「健康指标」与「模块与公开接口」中 metrics、__main__ 两行：新模块 metrics.py 与 __main__.py，门面加 health()。契约测试、接入指南与文档属于 AIH-TASK-171。
+    status: ready
+    depends_on:
+      - AIH-TASK-169
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §2「健康指标」与 metrics、__main__ 两行、§6 日志一条、§7 标 170 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'metrics.py 与门面 health()：键集合固定为设计列出的十五个（store_available、pending、sending、dead_unacked、incidents_unacked、oldest_pending_age_seconds、held_in_memory、incidents_pending、dropped_events、conflicts_dropped、last_delivery_ok_at、last_status_reconcile_ok_at、status_reconcile_stale、auth_failing、level）；oldest_pending_age_seconds 按 PENDING 与 SENDING 行最早的 created_at 算，结果小于 0（注入的时钟早于 created_at）时取 0；last_status_reconcile_ok_at 取 reconcile_state；auth_failing 只看 INTEGRATION_AUTH_FAILED；level 判定照设计（P1：store_available 为假、未确认死信、未确认事故、待记事故、内存暂存非空或 auth_failing；dropped_events 与 conflicts_dropped 只展示、不参与；P2：最老待发超过 900 秒或对账超过 300 秒未成功或从未成功；否则 OK）；health() 自己读库出错并因此转入降级时，返回切换之后的 store_available（即假）；store_available 为假或读库失败时照设计 v24 统一处理：库里算出的九个键为 null，store_available 与四个进程内计数照实返回，level 为 P1，不抛'
+      - '__main__.py：python -m acuven_billing_client --outbox <路径> 的 stats、dead [--limit N]、requeue <event_id> --reason、ack <event_id> --reason、replay --delivered-from --delivered-until --reason（带时区的 ISO 8601，换算成 Unix 秒再调 store）、incidents [--limit N]、ack-incident <incident_id> --reason、reset-status --tenant-id --project-id --reason，--reason 必填；时刻都是 Unix 秒的 JSON 数字；入口为 main(argv=None, *, clock=None) -> int（clock 供测试注入，缺省 time.time），python -m 调用它；成功的 JSON 写到 stdout，错误的 JSON 写到 stderr；参数解析错误（缺 --reason、未知子命令等）也输出一行 JSON 的 error 到 stderr、退出 2，不输出 argparse 默认的用法文本；输出格式、--limit 缺省 50、不输出 level 与进程内计数，照设计 §2 模块表的 __main__ 一行'
+      - '命令行的输出与退出码：requeue 与 ack 输出一行 JSON（event_id 与 ok），ack-incident 输出一行 JSON（incident_id 与 ok），reset-status 输出一行 JSON（tenant_id、project_id 与 ok），这几个命令不论 ok 真假都把结果 JSON 写到 stdout（ok 为假时退出 1），只有异常引起的错误 JSON 写到 stderr，replay 输出一行 JSON（键为 replayed，值为改回的条数）；open_existing 本身抛出 Store 系列以外的 OSError 或 sqlite3.Error（例如没有权限打开锁文件），或成功之后的读写抛 sqlite3.Error、OSError 或任何 StoreError 子类（例如损坏的页、StoreReplacedError），都退出 4，输出一行 JSON 的 error（只含错误类别，不含文件内容），不改文件；成功退出 0，replay 改回 0 行也是成功；目标不存在或状态不对（含 reset-status 那一对没有状态行）退出 1；取不到单进程锁（outbox 正被运行中的进程使用）退出 3，输出一行 JSON 的 error，提示改用进程内方法；store 抛 ValueError（原因为空或超过 500 字符、重放时间段倒置）、--limit 不是正整数、时刻没有时区都按参数错退出 2 并输出一行 JSON 的 error；一律用 AIH-TASK-165 的 Store.open_existing 打开 --outbox（不存在、零字节、不是 SQLite 文件、别的应用的库、schema_version 比代码新都退出 1，输出一行 JSON 的 error（不含文件内容），不建也不改文件）；stats 里只在 reconcile_state 出现过的那一对，其 effective_status、status_version、applied_at 为 null；只经 AIH-TASK-165、166 的 store 函数读写库，不直接写 SQL；只读写本地 SQLite、不联网、不需要凭据'
+      - '测试：新增 integration-client/tests/test_client_metrics.py 与 integration-client/tests/test_client_cli.py，覆盖设计 §7 的健康指标、确认后告警消失、命令行与「命令行对着被锁的 outbox」四行，以及 AIH-TASK-168、169 移交过来的断言（「事故记录」「溢出事故」两行里 health().level 的部分；「webhook 不冒充对账」一行里 status_reconcile_stale 的部分）（命令行每个子命令的成功、失败与参数错，含 reset-status；被锁时用 multiprocessing 子进程持有 BillingClient）；客户端测试只用标准库与 pytest，SQLite 用 tmp_path 下的文件，HTTP 用注入的假 Transport，时间用注入的时钟，不联网、不 sleep 真实时间、不出现 skipped（CI 的 backend-tests 分片把出现 skipped 判为失败）'
+      - '只改本任务 allowed_change_paths 里的文件；不改 delivery.py、transport.py、status.py、webhook.py 与 store.py；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - integration-client/acuven_billing_client/metrics.py
+      - integration-client/acuven_billing_client/__main__.py
+      - integration-client/acuven_billing_client/client.py
+      - integration-client/acuven_billing_client/__init__.py
+      - integration-client/tests/test_client_metrics.py
+      - integration-client/tests/test_client_cli.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-171
+    title: Billing Client 第八层：与服务端的契约测试、接入指南与文档
+    purpose: >-
+      按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §7 的四行契约测试、§8 与 §11：tests/backend 新增同时导入客户端与服务端的契约测试，README 写全接入指南，docs/ARCHITECTURE.md 记下 integration-client/ 的位置，docs/TODO.md 勾掉 Phase 3「Billing Client」。不改客户端代码。
+    status: ready
+    depends_on:
+      - AIH-TASK-170
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §7 标 171 的各行、§8、§2「状态 webhook」中 README 的要求、§2「事务边界」与 §10 的已知窗口 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 tests/backend/test_billing_client_contract.py，照设计 §7 的四行契约测试：客户端签的请求打到服务端的摄取接口验签通过；LLM 与 QUANTITY 两类事件经客户端写入并 deliver_once 送到批量接口后本地 DELIVERED；再用第二个指向另一个 outbox 文件的客户端，以相同的 event_id、occurred_at 与字段重记一次并 deliver_once，服务端回执为 already_*、第二个文件里该行也是 DELIVERED；客户端对账打到服务端有效状态接口后应用成功；用服务端 status_delivery 与 webhook_signing 构造出站请求（不发网络）交给客户端验签通过并应用；服务端用 FastAPI TestClient，客户端通过测试内一个把 Transport 转发到 TestClient 的适配器；建租户、项目、凭据、webhook 密钥与计量类型的写法照 tests/backend 里已有的摄取、有效状态与状态投递测试；照 CLAUDE.md「写后端测试的约定」不写死方言相关的 SQL 字面量，SQLite 与 MySQL 两种后端都不出现 skipped'
+      - 'integration-client/README.md 写全接入指南：安装与钉提交、配置八个环境变量与持久卷、记账调用位置（模型调用成功之后）与自带 event_id 时必须给 occurred_at、载荷不带租户与项目、should_block_ai 在模型调用前、start 与 stop 的生命周期、一个 outbox 文件只给一个进程用（多 worker 时每个 worker 配自己的文件）、FastAPI 的 webhook 路由示例（raw_path、query_string、原始请求体、401 与 503 两种失败返回、反向代理改写路径时的 signed_path）、health 接进健康检查与 level 的含义、401 的固定 60 秒重试、命令行运维（只用于没有进程在用的文件，被锁时退出 3）与运行中处置的写法（接入方暴露一个受保护的入口转调 BillingClient 的 requeue_dead、ack_dead、replay_delivered、ack_incident、reset_status，必填原因）、delivered_retention_seconds 须不短于中心的灾备重放窗口、中心恢复后先 reset-status 再按时间段 replay、存储不可用时的降级运行与损坏文件的隔离和人工对账步骤（设计 v23：不停进程、运行中把主库与 -wal、-shm 三个文件按配对名字一起隔离，只移了主库时把残留按配对名字补放到旁边，等 held_in_memory 与 incidents_pending 归零后再用命令行读旧文件）、事故的人工对账与 ack-incident、已知窗口（设计 §2「事务边界」与 §10）；示例里不写真实主机名、地址与密钥'
+      - 'docs/ARCHITECTURE.md 在讲顶层目录取代 spec §101 的那一节把「integration-client 的目录在对应 Phase 再定」改为已定：本仓库 integration-client/，包名 acuven_billing_client，不进服务端镜像，设计见 docs/design/AIH-TASK-164-billing-client.md；docs/TODO.md 只把 Phase 3 的「Billing Client」一项从 [ ] 改为 [x] 并在下面缩进写一行交付说明（AIH-TASK-164..171、设计闸门 #571），不改其他行'
+      - '只改本任务 allowed_change_paths 里的文件；不改 integration-client/acuven_billing_client/ 下任何代码；不改 app/、alembic/、frontend/ 与服务端任何代码；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #571'
+    allowed_change_paths:
+      - tests/backend/test_billing_client_contract.py
+      - integration-client/README.md
+      - docs/ARCHITECTURE.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review

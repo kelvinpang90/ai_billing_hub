@@ -35,6 +35,14 @@
 8. `AIH-TASK-161` 月度对账单第八层：管理端对账单页与按客户补生成按钮
 9. `AIH-TASK-162` 月度对账单第九层：客户门户对账单页
 10. `AIH-TASK-163` 审计时间戳在写入时统一向下截到整秒，消除登录与业务两条路径的取整差异
+11. `AIH-TASK-164` Billing Client 第一层：包骨架、配置、事件校验与序列化、请求签名
+12. `AIH-TASK-165` Billing Client 第二层：SQLite outbox 核心：建表、写入去重、领取与租约、落回执与清理
+13. `AIH-TASK-166` Billing Client 第三层：存储的运维与状态部分：死信、重放、处置记录、事故与状态表
+14. `AIH-TASK-167` Billing Client 第四层：HTTP 传输与一轮投递：组批、回执判定、单发回退、退避与清理
+15. `AIH-TASK-168` Billing Client 第五层：记账门面、存储故障暂存与回灌、后台线程与死信运维
+16. `AIH-TASK-169` Billing Client 第六层：有效状态对账、按版本应用与状态 webhook 验签助手
+17. `AIH-TASK-170` Billing Client 第七层：健康指标与运维命令行
+18. `AIH-TASK-171` Billing Client 第八层：与服务端的契约测试、接入指南与文档
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
@@ -46,7 +54,8 @@
 - 待登记：关户（§112.1：先停用、余额为 0、无未结用量事件与支付，依赖 Phase 2 与 Phase 4）（需设计闸门）
 - 待登记：数据库账号权限拆分，迁移账号与运行账号分开（运维，管理员执行）
 - 待登记：`.env.example` 补 AI 模块的配置项（Worker 不能改 `.env` 类文件；AIH-TASK-065 合并后由管理员补，内容以 `docs/deployment.md` 为准）
-- 待登记：Phase 3 Billing Client 库 integration-client（需设计闸门）
+- 待登记：`docs/api.md` 集成摄取错误表里 401 `INTEGRATION_AUTH_FAILED` 一行的客户端建议改为「保持待发、固定 60 秒重试并告警，不进死信」，与 Billing Client 一致（设计闸门 #571 §1）
+- 待登记：Billing Client 支持一个接入方的多个 worker（每个 worker 各自的 outbox 文件，需设计闸门；第一版限定一个 outbox 文件只给一个进程用，设计闸门 #571 §1）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
 - 待登记：Phase 4 客户仪表盘的其余部分：最小恢复额（随充值设计闸门定缓冲配置）；余额卡与最近流水（设计闸门 #393，AIH-TASK-099..101）、本月用量、请求数、对话数与按日用量图（设计闸门 #403，AIH-TASK-107..108）、低余额阈值配置与低余额提示（设计闸门 #433，AIH-TASK-109..112）已登记
 - 待登记：Phase 4 支付网关适配器与支付 Webhook（需设计闸门，依赖 D6）
