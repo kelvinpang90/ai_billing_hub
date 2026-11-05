@@ -366,11 +366,16 @@ INVALID = {
 }
 
 
+_STANDARD_RECORD_KEYS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+
+
 def _assert_nothing_leaked(caplog: pytest.LogCaptureFixture) -> None:
     records = outbox_logs(caplog)
     assert any(record.levelno == logging.ERROR for record in records), "每种失败记一条 error"
     for record in records:
-        text = f"{record.getMessage()} {record.__dict__!r}"
+        # 只查消息与 extra 字段：`created` / `msecs` 这类时间戳碰巧含 "8765" 会误报。
+        extra = {k: v for k, v in record.__dict__.items() if k not in _STANDARD_RECORD_KEYS}
+        text = f"{record.getMessage()} {extra!r}"
         for leak in LEAKS:
             assert leak not in text
     for leak in LEAKS:
