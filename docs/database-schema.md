@@ -1400,6 +1400,83 @@ UPDATE 写 `PROCESSED`。
 
 ---
 
+## `monthly_statements`（spec §46、§74.8；ADR-0003；AIH-TASK-154，迁移 `0035_monthly_statements`）
+
+设计依据：[design/AIH-TASK-154-monthly-statements.md](design/AIH-TASK-154-monthly-statements.md)（设计闸门 #565 v6）
+§2「数据库」、§3 INV-12、§4 与 §8。一行 = 一个预付租户一个账期（马来西亚日历月）的对账单：期初、期末余额与各类发生额、
+用量统计都冻结在快照里，生成即定稿。
+
+**行由谁写**：只有 AIH-TASK-156 的生成函数 `generate_statement`（经 AIH-TASK-157 的每小时 catch-up 任务，或管理端的手动
+补生成）INSERT，状态是 `FINALIZED`；管理端与客户接口（AIH-TASK-159、160）只读。没有更新与删除路径。AIH-TASK-154 只建表与
+触发器，部署后表是空的、没有写入方。行不删除。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_monthly_statements_public_id`）；uuid4，接口里的 `statement_id` |
+| `tenant_id` | BIGINT | 非空；外键 → `tenants(id)` `ON DELETE RESTRICT`（`fk_monthly_statements_tenant_id`） |
+| `statement_number` | VARCHAR(32) | 非空，唯一（`uq_monthly_statements_statement_number`）；`ST-<YYYYMM>-` 加 8 个 Crockford base32 随机字符，撞了下一轮重来 |
+| `period_start` | DATETIME | 非空；账期起点 `start(M)`（马来西亚 1 日 00:00 换成 UTC） |
+| `period_end` | DATETIME | 非空；账期终点 `end(M) = start(M+1)`，不含 |
+| `cutoff_at` | DATETIME | 非空；T+1 cut-off `cutoff(M)`（新月 2 日 00:00 马来西亚时间换成 UTC，ADR-0003）；`period_start < period_end AND period_end < cutoff_at`（`ck_monthly_statements_period`） |
+| `status` | VARCHAR(16) | 非空，`DRAFT` / `FINALIZED` / `VOID`（`ck_monthly_statements_status`）；模型 `Enum(native_enum=False, length=16)`。V1 只写 `FINALIZED`，另外两个值没有写入方 |
+| `ledger_high_sequence` | BIGINT | 非空，`>= 0`（`ck_monthly_statements_high_sequence`）；生成时读到的钱包 `version`（见下） |
+| `snapshot_json` | JSON | 非空；快照，`schema_version = 1`，键集合固定，金额是 8 位小数的字符串（设计 §2「快照」）；不含成本、汇率、加价、毛利（INV-7） |
+| `generated_by` | BIGINT | 可空；外键 → `users(id)` `ON DELETE RESTRICT`（`fk_monthly_statements_generated_by`）；管理员手动补生成时为其 id，系统生成为 NULL |
+| `tax_policy_version_id` | BIGINT | 非空；外键 → `tax_policy_versions(id)` `ON DELETE RESTRICT`（`fk_monthly_statements_tax_policy_version_id`）；`cutoff_at` 时刻生效的税务政策版本，它的 `document_notice` 原文冻结进快照（spec §45.1 `REQ-TAX-001`、ADR-0008 §5） |
+| `finalized_at` | DATETIME | 可空；定稿时刻；`FINALIZED` 时必须非空（`ck_monthly_statements_finalized_at`：`status <> 'FINALIZED' OR finalized_at IS NOT NULL`） |
+| `created_at` | DATETIME | 非空；写入时刻 |
+
+时间一律不带时区的 UTC。表里没有金额列，也就没有任何 DECIMAL 列；金额只在快照里，是 8 位小数的字符串（INV-10）。
+
+**`ledger_high_sequence` 的含义**（设计 §2「高水位」）：生成账期 `M` 时读一次钱包，`wallets.version`（= 最后一行账本的
+`wallet_sequence`）就是高水位 `hw(M)`，钱包余额就是这一行的 `balance_after`。序号不大于它的账本行此刻都已提交、以后不会
+再有，所以这份对账单的账本行集合一经生成就冻结；下一期以它为下界取本期的行（`S(M) = A(M; hw(M)) \ A(M-1; hw_prev)`），
+每行账本恰好进一份对账单，生成之后才提交的旧行落进下一期、归为上期调整。
+
+约束与索引：
+
+- `uq_monthly_statements_tenant_period (tenant_id, period_start)`：**每个租户每个账期至多一份**（V1 没有更正版本，spec §74.8
+  末句）。它是生成的幂等键：已有这一行就返回它、不重算；两个生成者并发时后提交的一方唯一冲突。同时满足 `tenant_id` 外键
+  对索引的要求。
+- `ix_monthly_statements_period (period_start, tenant_id)`，非唯一：管理端按账期列、告警按账期查缺失的对账单。
+- `ix_monthly_statements_generated_by (generated_by)` 与 `ix_monthly_statements_tax_policy_version_id (tax_policy_version_id)`，
+  非唯一：**显式声明**（模型与迁移都写），供两个外键使用。不声明的话 MySQL 会为外键自动建一个与外键同名的索引，迁移重跑时的
+  形状比对就对不上。
+- `uq_monthly_statements_public_id (public_id)`、`uq_monthly_statements_statement_number (statement_number)`：接口按它们找。
+- 三个外键都是 `RESTRICT`：删租户、用户或税务政策版本不许连带删掉对账单。
+- 四条 CHECK 的条件文本是 `app/models/statements.py` 的常量，迁移里冻结一份，`tests/backend/test_monthly_statements_migration.py`
+  比对两边；非法插入（未知状态、账期倒置或空、cut-off 不在账期之后、负的高水位、`FINALIZED` 缺 `finalized_at`）在 SQLite
+  与 MySQL 上都被拒绝。
+
+### 触发器（迁移 0035 建，只在 MySQL 上）
+
+| 触发器 | 时机 | 作用 |
+| --- | --- | --- |
+| `trg_monthly_statements_before_update` | BEFORE UPDATE | `OLD.status <> 'DRAFT'` 时 `SIGNAL SQLSTATE '45000'`（`monthly_statements: a finalized or void statement is immutable`） |
+| `trg_monthly_statements_before_delete` | BEFORE DELETE | 同上 |
+
+**定稿的对账单不可变**（INV-12）：`FINALIZED` 与 `VOID` 行的任何 UPDATE（改哪一列都一样）与 DELETE 都被拒绝；只有 `DRAFT`
+行可改可删（V1 不产生 `DRAFT` 行）。SQLite 上没有这两个触发器（与 0006 等迁移同一惯例），服务层本来就没有更新与删除路径。
+`TRUNCATE` / `DROP` 是 DDL，不经触发器（与 0006 / 0022 相同），归「迁移账号与运行账号拆分」；测试清理用关外键检查加
+`TRUNCATE`，不删触发器。
+
+**迁移与回滚**（设计 §2「数据库」、§8）：
+
+- 0035 只建这一张表与两个触发器，不改任何已有表、不回填。MySQL 上表是**一条**原子的 `CREATE TABLE`（索引、外键与 CHECK
+  都在里面），之后各一条 `CREATE TRIGGER`。之前用 inspector 判表：不存在 → 建表再建两个触发器；存在且形状逐项一致（14 列的
+  名称、类型与宽度、可空性，三个唯一与三个普通索引的名称与列序，三个外键的引用与 `RESTRICT`——删除规则读
+  `information_schema`——，四条 CHECK 名称）→ 再读 `information_schema.TRIGGERS` 逐个比两个触发器的所在表、时机、事件与
+  主体（去掉首尾空白后逐字比）：都在且一致不发 DDL，缺了的只补缺的那个（补完中断的升级）；存在但任一项不一致 → 报错点名
+  触发器、不发 DDL。表形状不对 → 报错点名表、不发 DDL；处理方法：先确认表没有任何行，为空则手工删表再重跑升级，有行则停下
+  按数据事故处理。任何 DDL 之前先查 `@@log_bin` 与 `@@log_bin_trust_function_creators`（与 0022、0030 同一个预检）。
+- **表非空时降级被拒**：`downgrade` 先查 `SELECT 1 FROM monthly_statements LIMIT 1`，有任何一行就抛错，不发 DDL、不删行，
+  `alembic_version` 仍是 0035——已定稿的对账单是不可变的财务快照，删了无法重建。表为空时先删两个触发器（只删存在的）再删
+  表；表不存在时什么都不做；`--sql` 离线模式判断不了是否为空，直接拒绝、不输出 `DROP`。
+- **生产只回滚应用镜像，不降级 0035**：154 之后任何一步都可以只回滚镜像，表与已定稿的对账单原样留着。需要修复时一律前滚。
+
+---
+
 ## 尚未建的列
 
 AIH-TASK-004 建了两张表的身份与归属字段，AIH-TASK-005 在 `tenants` 上加了 `billing_status`、
