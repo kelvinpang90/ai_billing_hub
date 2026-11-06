@@ -104,6 +104,7 @@ def test_the_periodic_tasks_include_the_ai_usage_delivery_sweep(
         "status-webhook-dispatch",
         "ai_api.deliver_due",
         "wallet-reconciliation-step",
+        "statements-generate-due",
     }
     assert "usage-billing-sweep" not in celery_app.conf.beat_schedule
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
@@ -222,6 +223,26 @@ def test_the_fx_fetch_task_is_registered(celery_app) -> None:
     assert "app.tasks.fx_fetch.fetch" in celery_app.tasks
 
 
+def test_monthly_statements_are_generated_every_hour_on_the_hour(celery_app) -> None:
+    """设计闸门 #565 v6 §2「Celery 任务」：`crontab(minute=0)`（与 `FX_FETCH_SCHEDULE` 同一写法），
+    expires 3240 秒。所以「第 2 日 01:00 之后的第一个整点」就是 01:00 本身。"""
+    entry = celery_app.conf.beat_schedule["statements-generate-due"]
+
+    assert entry["task"] == "app.tasks.statements.generate_due"
+    assert entry["schedule"] == crontab(minute=0)
+    assert entry["schedule"].minute == {0}
+    assert entry["schedule"].hour == set(range(24))
+    assert entry["options"] == {"expires": 3240}
+    assert entry["options"]["expires"] < 3600
+
+
+def test_the_statements_task_is_registered(celery_app) -> None:
+    import app.tasks.statements  # noqa: F401
+
+    assert "app.tasks.statements" in celery_app.conf.include
+    assert "app.tasks.statements.generate_due" in celery_app.tasks
+
+
 def test_the_sweep_does_not_pile_up_while_beat_is_down(celery_app) -> None:
     """⚠️ beat 停了一小时再起来时，攒下的几十次触发**不该**一口气全放出去。
 
@@ -243,6 +264,7 @@ def test_task_modules_are_listed_explicitly(celery_app) -> None:
         "app.tasks.status_webhook",
         "app.ai_api.delivery",
         "app.tasks.wallet_reconciliation",
+        "app.tasks.statements",
     ]
     assert celery_app.conf.include == TASK_MODULES
 

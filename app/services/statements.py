@@ -4,11 +4,13 @@ AIH-TASK-155 这一层：账期边界与到期判定、账本行的归属月 `t(
 （Python 参考函数与只含常量的 SQL 谓词）、给定高水位下本期账本行 `S(M)`
 的分类汇总与期初期末，以及自检第 1 条。
 AIH-TASK-156 这一层：本期用量统计 `E(M)`、自检第 2、3 条、固定键集合的快照、
-合格性判定与 `generate_statement`。catch-up 与 Celery 任务属于 AIH-TASK-157，
-审计属于 AIH-TASK-159。
+合格性判定与 `generate_statement`。
+AIH-TASK-157 这一层：一个租户的 catch-up `catch_up_tenant` 与每小时的 `generate_due`
+（每个 (租户, 账期) 一个事务）；Celery 任务在 app/tasks/statements.py，审计属于 AIH-TASK-159。
 
 ⚠️ **不写账本与钱包**（INV-4、INV-5）：账本与事件只读、不加锁；唯一的写是
-`generate_statement` 的一条 `monthly_statements` INSERT，只 flush、不提交。
+`generate_statement` 的一条 `monthly_statements` INSERT，只 flush、不提交；
+提交只在 `catch_up_tenant`。
 唯一的锁是 `resolve_tax_policy` 对税务政策的共享读（设计 §4）。
 每条查询都带 `tenant_id`（INV-8）。金额在 SQL 里用 `SUM` 在 `DECIMAL` 上求和，
 Python 侧只有 `Decimal` 加减，不经 float（INV-10）。
@@ -33,13 +35,14 @@ import logging
 import re
 import secrets
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Final, NoReturn
 
 from sqlalchemy import ColumnElement, Select, and_, func, not_, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.fx_source import KUALA_LUMPUR_OFFSET
 from app.models.ai_catalog import AiModel, AiProvider
@@ -1000,6 +1003,131 @@ def generate_statement(
     return GenerateResult(statement=statement, created=True)
 
 
+# --- catch-up ---------------------------------------------------------------------------
+
+# 提交前钩子：管理端补生成在对账单的同一事务里写审计（设计 §2「管理端接口」）。
+BeforeCommit = Callable[[Session, MonthlyStatement], None]
+
+
+def catch_up_tenant(
+    factory: sessionmaker[Session],
+    tenant_id: int,
+    now: dt.datetime,
+    *,
+    generated_by: int | None = None,
+    before_commit: BeforeCommit | None = None,
+    raise_errors: bool = False,
+) -> list[MonthlyStatement]:
+    """Generate every due statement of one tenant the database lacks (design §2「Celery 任务」).
+
+    按 `due_periods(now)` 升序，每期一个事务：
+    - 已有行、未到期、不合格 → 下一期；
+    - `generate_statement` 本身抛 `IntegrityError` → 回滚，新事务里查
+      `(tenant_id, period_start)`：已存在当作成功（不进返回值）、继续下一期；
+      不存在是编号碰撞：warning，停止这个租户的后续账期，不算错误；
+    - 新生成的一份：`before_commit(session, statement)`、`session.flush()`、提交；
+      这三步抛的任何异常（包括 `IntegrityError`）都是失败；
+    - 失败（上一条，或 `generate_statement` 抛的其他任何异常）：回滚，一条 error 日志，
+      停止这个租户的后续账期；`raise_errors` 时原样抛出，否则返回已生成的部分。
+
+    租户 public_id 在开头的独立只读事务里读一次（租户不存在返回空列表），之后的日志都用它，
+    出错后不再查库。日志只带 public_id、账期与异常类型名，不带金额与公司名（设计 §6）。
+    返回本次新生成的对账单，按账期升序。
+    """
+    with factory() as session:
+        tenant_public_id = session.execute(
+            select(Tenant.public_id).where(Tenant.id == tenant_id)
+        ).scalar_one_or_none()
+        session.rollback()
+    if tenant_public_id is None:
+        return []
+
+    generated: list[MonthlyStatement] = []
+    for period in due_periods(now):
+        with factory() as session:
+            try:
+                result = generate_statement(
+                    session, tenant_id, period, now=now, generated_by=generated_by
+                )
+            except (StatementNotDue, StatementNotEligible):
+                session.rollback()
+                continue
+            except IntegrityError:
+                session.rollback()
+                # 新事务：回滚之后的第一条读开启它，看得到并发生成者已提交的行。
+                found = _statement_of(session, tenant_id, period)
+                session.rollback()
+                if found is not None:
+                    continue
+                logger.warning(
+                    "Statement number collided; the next run retries",
+                    extra={"customer_id": tenant_public_id, "period": period.label},
+                )
+                return generated
+            except Exception as error:
+                session.rollback()
+                _catch_up_failure(tenant_public_id, period, error)
+                if raise_errors:
+                    raise
+                return generated
+            if not result.created:
+                session.rollback()
+                continue
+            try:
+                if before_commit is not None:
+                    before_commit(session, result.statement)
+                session.flush()
+                session.commit()
+            except Exception as error:
+                session.rollback()
+                _catch_up_failure(tenant_public_id, period, error)
+                if raise_errors:
+                    raise
+                return generated
+            generated.append(result.statement)
+    return generated
+
+
+def _catch_up_failure(tenant_public_id: str, period: StatementPeriod, error: Exception) -> None:
+    # 固定文本；只带租户 public_id、账期与异常类型名（设计 §2「Celery 任务」、§6）。
+    logger.error(
+        "Statement generation failed",
+        extra={
+            "customer_id": tenant_public_id,
+            "period": period.label,
+            "error_type": type(error).__name__,
+        },
+    )
+
+
+def generate_due(factory: sessionmaker[Session], now: dt.datetime) -> int:
+    """`catch_up_tenant` for every tenant `PREPAID` now, by id; returns how many were generated.
+
+    一个租户失败不影响其他租户：`catch_up_tenant` 每期之外的步骤抛错也在这里接住，
+    记一条 error 日志（租户 public_id 与异常类型名；public_id 在列租户时一并取出）后
+    继续下一个租户。这时该租户本次已提交的份数拿不到，不计入返回值：只少计，
+    已提交的对账单不受影响。
+    """
+    with factory() as session:
+        tenants = session.execute(
+            select(Tenant.id, Tenant.public_id)
+            .where(Tenant.billing_mode == BillingMode.PREPAID)
+            .order_by(Tenant.id)
+        ).all()
+        session.rollback()
+
+    total = 0
+    for tenant_id, tenant_public_id in tenants:
+        try:
+            total += len(catch_up_tenant(factory, int(tenant_id), now))
+        except Exception as error:
+            logger.error(
+                "Statement catch-up failed for a tenant",
+                extra={"customer_id": tenant_public_id, "error_type": type(error).__name__},
+            )
+    return total
+
+
 __all__ = [
     "CHECK_BALANCE",
     "CHECK_CHARGED_EVENTS",
@@ -1009,6 +1137,7 @@ __all__ = [
     "GENERATION_DELAY",
     "SNAPSHOT_SCHEMA_VERSION",
     "STATEMENT_CURRENCY",
+    "BeforeCommit",
     "GenerateResult",
     "LedgerSection",
     "ModelUsage",
@@ -1025,8 +1154,10 @@ __all__ = [
     "attributed_month",
     "attributed_through",
     "build_snapshot",
+    "catch_up_tenant",
     "check_usage",
     "due_periods",
+    "generate_due",
     "generate_statement",
     "is_due",
     "is_eligible",

@@ -35,6 +35,7 @@ TASK_MODULES = [
     "app.tasks.status_webhook",
     "app.ai_api.delivery",
     "app.tasks.wallet_reconciliation",
+    "app.tasks.statements",
 ]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
@@ -81,6 +82,12 @@ STATUS_WEBHOOK_DISPATCH_EXPIRES_SECONDS = 14.0
 # beat 停摆后再起来不一口气放出去（领不到租约的只会返回 busy）。
 WALLET_RECONCILIATION_STEP_SECONDS = 300.0
 WALLET_RECONCILIATION_STEP_EXPIRES_SECONDS = 270.0
+
+# 月度对账单补生成（设计闸门 #565 v6 §2「Celery 任务」，AIH-TASK-157）：每小时整点一次，
+# 所以「第 2 日 01:00 之后的第一个整点」就是 01:00 本身。每一轮从首个账期扫到最近到期的账期，
+# 缺什么补什么（INV-14）。`expires = 3240`（周期的 0.9）：beat 停摆后再起来不一口气放出去。
+STATEMENTS_GENERATE_DUE_SCHEDULE = crontab(minute=0)
+STATEMENTS_GENERATE_DUE_EXPIRES_SECONDS = 3240
 
 
 class RedisNotConfigured(RuntimeError):
@@ -170,6 +177,11 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "app.tasks.wallet_reconciliation.step",
                 "schedule": WALLET_RECONCILIATION_STEP_SECONDS,
                 "options": {"expires": WALLET_RECONCILIATION_STEP_EXPIRES_SECONDS},
+            },
+            "statements-generate-due": {
+                "task": "app.tasks.statements.generate_due",
+                "schedule": STATEMENTS_GENERATE_DUE_SCHEDULE,
+                "options": {"expires": STATEMENTS_GENERATE_DUE_EXPIRES_SECONDS},
             },
         },
     )
