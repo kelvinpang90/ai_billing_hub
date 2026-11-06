@@ -9148,7 +9148,7 @@ tasks:
     title: 月度对账单第二层：账期时刻、账本归属规则与期初期末发生额
     purpose: >-
       按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v6） §2「账期与时间」「账本归属规则」「发生额分类」与「自检」第 1 条：新模块 app/services/statements.py 的账期边界、到期判定、首个账期常量、归属谓词（SQL 表达式与 Python 参考函数）、在给定高水位下算出本期账本行的分类汇总与期初期末，并做期初加发生额等于期末的自检。只读、不写库、不提交；用量统计、快照与生成属于 AIH-TASK-156。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-154
     acceptance_criteria:
