@@ -9246,7 +9246,7 @@ tasks:
     title: 月度对账单第四层：每小时补生成到期对账单的任务与 beat
     purpose: >-
       按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v6） §2「Celery 任务」与 §5：在 app/services/statements.py 加 catch_up_tenant 与 generate_due（每项一个事务，并发重复与编号碰撞照设计处理），新任务模块 app/tasks/statements.py 与 beat 条目 statements-generate-due（每小时整点 crontab(minute=0)，expires 3240 秒）。首个账期 2026-12 在 2027-01-02 01:00（马来西亚时间）才到期，之前每次都是空跑。告警属于 AIH-TASK-158，接口属于 159。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-156
     acceptance_criteria:
