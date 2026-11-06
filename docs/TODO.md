@@ -46,7 +46,6 @@
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
-- 待登记：D6 Stripe 沙箱实测 H1–H4 并补写选型 ADR（Phase 4 支付开工前；供应商 2026-10-15 已选 Stripe）｜阻塞：等 Stripe 测试模式密钥放到本机（不进仓库）
 
 ### 后续计划
 - 待登记：方案 C —— 同租户 N 个用量事件一个事务、每事件仍一行账本（需设计闸门）。docs/perf-baseline.md 10.5 的判据成立（S2：8.79 ms × 500 / 秒 = 4.4 > 1）；AIH-TASK-055 的测量 2026-10-30 已跑完（perf-baseline 10.6），派发的上限已由 AIH-TASK-141 解除（perf-baseline 10.7：Beat 节奏下 2 个 worker 29.9 条每秒），钱包锁远未饱和。设计闸门等计价解析调完（AIH-TASK-143..144）、重跑 10.5 之后再按 10.2 重判
@@ -58,7 +57,7 @@
 - 待登记：Billing Client 支持一个接入方的多个 worker（每个 worker 各自的 outbox 文件，需设计闸门；第一版限定一个 outbox 文件只给一个进程用，设计闸门 #571 §1）
 - 待登记：Phase 3 ai_chatbot_demo 接入：用量进内部租户 Acuven Technology 下的独立项目，承担会话生命周期与 OpenAI 转写用量（在 ai_chatbot_demo 仓库做，OpenClaw 尚未登记该项目；2026-10-09 Kelvin）
 - 待登记：Phase 4 客户仪表盘的其余部分：最小恢复额（随充值设计闸门定缓冲配置）；余额卡与最近流水（设计闸门 #393，AIH-TASK-099..101）、本月用量、请求数、对话数与按日用量图（设计闸门 #403，AIH-TASK-107..108）、低余额阈值配置与低余额提示（设计闸门 #433，AIH-TASK-109..112）已登记
-- 待登记：Phase 4 支付网关适配器与支付 Webhook（需设计闸门，依赖 D6）
+- 待登记：Phase 4 支付网关适配器与支付 Webhook（需设计闸门；D6 已由 ADR-0015 收口）
 - 待登记：Phase 4 stale payment 对账与金额不符人工复核（需设计闸门）
 - 待登记：Phase 4 充值 UI 与充值入账（需设计闸门）
 - 待登记：Phase 4 支付收据与下载
@@ -87,7 +86,7 @@
 - [x] **D3 — 生产数据库隔离** —— 已收口。结论：专用 MySQL/Redis 实例，不接 `vps_infra` 的 `infra_mysql` / `infra_redis`。理由与代价见 [ADR-0002](adr/ADR-0002-production-datastore-isolation.md)
 - [ ] **D4 — 凭据加密方案** —— 主体已定，**尚未完全收口**。应用层信封加密（AES-256-GCM）；主密钥走 Docker Compose `secrets:` 文件注入，**不用环境变量**；备份与数据库备份分离、两套访问控制。见 [ADR-0004](adr/ADR-0004-credential-encryption.md)。⚠️ **遗留一项未决**：出站 webhook 密钥的 schema（新建 `project_webhook_secrets` 表 vs `projects` 加暂存列）——`projects` 现在只有一组密钥槽，轮换重叠期无处安放。**Phase 1 前必须二选一，且要走设计闸门**（ADR-0004 第 4a 节） → **2026-09-25 已选定方案 i**（Kelvin），ADR-0004 第 4a 节已补完；它自己的设计闸门还没开，D4 因此仍不勾 → 2026-09-28：设计闸门 #135 已批准 v1，AIH-TASK-019 实现了表、管理端与签名库，ADR-0004「收口条件」的第 4a 节那一项随合并满足（勾选要改 ADR-0004，不在 019 的可改路径里，留给下一次改 ADR 的任务）。**D4 仍不勾**：ADR-0004「收口条件」还有五项未满足 —— ① Phase 0 的「备份、恢复、加密密钥方案设计」验收（T0.9）；② `docs/runbook.md` 写入主密钥恢复流程（脱敏）与私有附录；③ 季度恢复演练含主密钥恢复；④ §113 的 secret-leak tests 覆盖日志、审计、API 响应、异常栈四条路径（入站凭据与出站签名密钥各自的用例已覆盖这四条，但收口条件指的是整体，要有人对照 ADR 判定）；⑤ D6 选型时确认支付网关回调的幂等标识
 - [x] **D5 — 财务期间与 cut-off** —— 已收口。结论：用量期按 `occurred_at`（Asia/KL），T+1 宽限，新月第 2 日定稿；晚到走 `PRIOR_PERIOD_ADJUSTMENT`。见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)。⚠️ T+1（24h）覆盖不了 §31 举例的 31 小时积压，所以上期调整**是预期会出现的**；但 §31 那个数字是**告警阈值示例，不是日常状态**——每一笔都应能追溯到一次具体延迟事件，**不是会计常态**。笔数与金额占比必须进 §95 监控，占比走高要查根因
-- [ ] **D6 — 支付网关选型** —— 准入契约已定，**供应商 2026-10-15 已选 Stripe**（Kelvin 已申请账号），H1–H4 沙箱实测与选型 ADR 未做。已定四条硬性准入（H1 回调带稳定唯一标识 / H2 服务端权威状态查询 / H3 回调可验签 / H4 沙箱 + 对账）与适配器接口，Phase 1–3 不再被阻塞。见 [ADR-0006](adr/ADR-0006-payment-gateway-contract.md)。⚠️ **沙箱实测与选型 ADR 硬截止在 Phase 4 开工前**；H1–H4 必须用沙箱实测，不能凭供应商文档
+- [x] **D6 — 支付网关选型** —— 供应商 2026-10-15 选定 Stripe，H1–H4 与 FPX 的沙箱实测 2026-10-19 至 2026-11-06 全部通过，见 [ADR-0015](adr/ADR-0015-stripe-payment-gateway.md)；准入契约与适配器接口见 [ADR-0006](adr/ADR-0006-payment-gateway-contract.md)。⚠️ H1、H3 是经 Stripe CLI 转发测的，生产端点的自动重试与按端点密钥验签留到 Phase 4 支付 Webhook 任务的上线验收（ADR-0015「收口条件」）
 - [x] **D7 — 通知通道** —— 已收口（2026-10-15）。已定：Email 借 `rs-roof-pms` 的 SMTP 传输层（`aiosmtplib`、465/587 TLS 分支、空 host = 未配置、发送不抛异常），但**投递模型不借**——改走 domain Outbox + worker + 周期恢复（Invariant 13/14；`rs-roof-pms` 是请求内同步发送、零重试、无发送记录）；一切通知走 spec §47 强制的 Notification Adapter 抽象。见 [ADR-0009](adr/ADR-0009-notification-channels.md)。→ 2026-10-15 Kelvin 拍板两项：① WhatsApp 由计费平台独立 Meta App 直连，不经已停用的 `whatsapp_gateway`（ADR-0009 第 5 节补完）；② Email 现阶段继续走 SMTP、沿用 `rs-roof-pms` 的发件邮箱，退信与投诉缺口先接受，出现送达问题再评估 API 服务（[ADR-0014](adr/ADR-0014-email-smtp-for-now.md)；同日较早的 ADR-0013「改用 API 服务」已被它取代）。⚠️ 剩下的是落地项，不再是决策：上线前确认该邮箱已开通、发件域名属于 Acuven 且 SPF / DKIM 已配置；WhatsApp 的 Meta 凭据链路与模板审批（Phase 6 WhatsApp 开工前）
 
 ---
@@ -549,7 +548,7 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 
 ## 文档欠账
 
-- [ ] D1–D7 的 ADR（`docs/adr/` 目录已建，见 [adr/README.md](adr/README.md)；D1、D3、D4、D5 已完成，D6 部分完成，**剩 D2、D7**）
+- [x] D1–D7 的 ADR（`docs/adr/` 目录已建，见 [adr/README.md](adr/README.md)；D1–D7 都已有 ADR，D6 的选型 ADR-0015 于 2026-11-06 补齐）
 - [ ] `docs/database-schema.md`（Phase 1 起维护）
 - [x] `projects` 表结构裁决（Phase 1 建表前）：spec §57 的 UI 字段有 `project_id` 与 `description`，§76 的表却是 `id` + `public_id`、没有 `description`。两节不一致，建表前定下来并写进 `docs/database-schema.md`；改 spec 的话走一次勘误 —— **已裁决（Kelvin，2026-09-19）**：§57 的 `project_id` 就是 §76 的 `public_id`；加可空 `description`。§74 说表定义是最低要求，多一列不冲突，**不需要勘误**。见 [database-schema.md](database-schema.md)
 - [ ] `docs/api.md`（Phase 1 起维护）—— [已新建](api.md)（AIH-TASK-006），目前只有管理端客户管理的五个接口；认证接口的契约还没补进去

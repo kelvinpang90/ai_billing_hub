@@ -64,6 +64,7 @@
 | [0012](ADR-0012-ai-module-in-billing-process.md) | AI API 并入计费平台：同一进程、同一部署、同一个库 | 已接受 | 2026-10-12 |
 | [0013](ADR-0013-email-api-service.md) | Email 传输层：改用带退信与投诉回调的 API 服务 | 已被 ADR-0014 取代 | 2026-10-15 |
 | [0014](ADR-0014-email-smtp-for-now.md) | Email 传输层：现阶段继续用 SMTP，出现送达问题再换 API 服务 | 已接受 | 2026-10-15 |
+| [0015](ADR-0015-stripe-payment-gateway.md) | 支付网关选定 Stripe：沙箱实测 H1–H4 的结果 | 已接受 | 2026-11-06 |
 
 ## 待写（spec §136 要求）
 
@@ -72,6 +73,6 @@
 - [x] 凭据加密方案（密钥管理、轮换、恢复）→ [ADR-0004](ADR-0004-credential-encryption.md)
 - [x] 生产数据库隔离 → [ADR-0002](ADR-0002-production-datastore-isolation.md)
 - [x] FX 数据源 → [ADR-0005](ADR-0005-fx-rate-source.md)
-- [ ] 支付网关选型（准入契约已定，供应商 2026-10-15 选 Stripe）→ [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；**H1–H4 沙箱实测与选型 ADR 还没做，硬截止在 Phase 4 开工前**
+- [x] 支付网关选型 → [ADR-0006](ADR-0006-payment-gateway-contract.md) 定了准入契约与适配器边界；供应商 2026-10-15 选 Stripe，H1–H4 与 FPX 的沙箱实测与选型见 [ADR-0015](ADR-0015-stripe-payment-gateway.md)（2026-11-06）
 - [x] SST 税务口径 → [ADR-0008](ADR-0008-sst-tax-treatment.md) 定了「对客户展示的金额一律含税」与税额反算规则；spec §45.1 其余五项 2026-10-17 由决策人补完：Acuven 未注册、不需要注册 SST，充值属服务预付，价格是最终价，收据不出现税额栏
 - [x] 通知通道 → [ADR-0009](ADR-0009-notification-channels.md) 定了 Adapter 抽象与 Outbox 投递模型，WhatsApp 由计费平台独立 Meta App 直连（2026-10-15）；Email 现阶段继续走 SMTP，出现送达问题再评估 API 服务，见 [ADR-0014](ADR-0014-email-smtp-for-now.md)
