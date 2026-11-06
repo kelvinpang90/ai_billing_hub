@@ -855,6 +855,8 @@ def test_a_charged_event_count_that_differs_from_the_ledger_fails_check_3(
         found = real(*args, **kwargs)
         return dataclasses.replace(found, charged_event_count=found.charged_event_count + 1)
 
+    # Patched rather than built from data: a usage ledger row without its event would
+    # trip self-check 1 (`missing_event`) before self-check 3 is reached.
     monkeypatch.setattr(statements, "usage_section", one_more)
 
     with caplog.at_level(logging.ERROR, logger=statements.__name__):
@@ -1035,15 +1037,19 @@ def test_the_version_in_effect_at_the_cutoff_is_frozen_into_the_statement(untaxe
     # Changed between December's end and its cutoff: December takes this one.
     books.end_tax(first, DECEMBER.end + HOUR)
     second = books.publish_tax(DECEMBER.end + HOUR, NOTICE_B)
+    # Changed again after the cutoff but before December is generated: the version in
+    # effect at `now` differs from the one at the cutoff, and December still takes the latter.
+    after_cutoff = DECEMBER.cutoff + SECOND
+    assert after_cutoff < due(DECEMBER)
+    books.end_tax(second, after_cutoff)
+    third = books.publish_tax(after_cutoff, NOTICE_C)
 
-    december = books.generate(tenant, DECEMBER).statement
+    december = books.generate(tenant, DECEMBER, now=due(DECEMBER)).statement
 
     assert december.snapshot_json["tax_notice"] == NOTICE_B
     assert december.tax_policy_version_id == second
 
-    # Changed after December's cutoff: December stays, January takes the new one.
-    books.end_tax(second, DECEMBER.cutoff + HOUR)
-    third = books.publish_tax(DECEMBER.cutoff + HOUR, NOTICE_C)
+    # January's cutoff falls in the new version: January takes it, December stays.
     january = books.generate(tenant, JANUARY).statement
 
     stored = books.statements(tenant)[0]
