@@ -250,6 +250,14 @@ _NOTIFICATIONS_TABLE = "notifications"
 # 降级到它之前时随之删掉（空表）。迁移本身由 test_wallet_reconciliation_migration.py 验。
 _RECONCILIATION_TABLES = {"wallet_reconciliation_runs", "wallet_reconciliation_findings"}
 
+# 0035_monthly_statements（AIH-TASK-154，设计闸门 #565 v6）建的表与它的两个触发器：从 head
+# 降级到它之前时随之删掉（空表）。迁移本身由 test_monthly_statements_migration.py 验。
+_STATEMENTS_TABLE = "monthly_statements"
+_EXPECTED_TRIGGERS_0035 = {
+    "trg_monthly_statements_before_update": ("monthly_statements", "BEFORE", "UPDATE"),
+    "trg_monthly_statements_before_delete": ("monthly_statements", "BEFORE", "DELETE"),
+}
+
 
 # ---------------------------------------------------------------------------
 # 0021_ai_module（AIH-TASK-056，设计闸门 #281 v23）
@@ -945,7 +953,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 价格版本的 BEFORE UPDATE 由 0031 换成 `…_v2`（_EXPECTED_PRICE_TRIGGERS_AT_HEAD）；
         # 定价规则的 BEFORE UPDATE 由 0032 换成 `…_v2`（_EXPECTED_RULE_TRIGGERS_AT_HEAD）；
         # 汇率版本的 BEFORE UPDATE 由 0033 换成 `…_v2`（_EXPECTED_FX_TRIGGERS_AT_HEAD）；
-        # 税务政策版本的 BEFORE UPDATE 由 0034 换成 `…_v2`（_EXPECTED_TAX_TRIGGERS_AT_HEAD）。
+        # 税务政策版本的 BEFORE UPDATE 由 0034 换成 `…_v2`（_EXPECTED_TAX_TRIGGERS_AT_HEAD）；
+        # 对账单的两个由 0035 建，在 test_monthly_statements_migration.py 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -959,6 +968,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0017,
             *_EXPECTED_TRIGGERS_0018,
             *_EXPECTED_TAX_TRIGGERS_AT_HEAD,
+            *_EXPECTED_TRIGGERS_0035,
         }
         assert set(triggers) == expected
     finally:
@@ -1962,11 +1972,11 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022、0028 与 0029
+        # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022、0028、0029 与 0035
         # 的表随降级到 0009 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
-        later |= _RECONCILIATION_TABLES
+        later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -2063,10 +2073,10 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
         # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020、0021、
-        # 0022、0028 与 0029 的表随降级到 0010 一并删掉）。
+        # 0022、0028、0029 与 0035 的表随降级到 0010 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
-        later |= _RECONCILIATION_TABLES
+        later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
@@ -5876,8 +5886,15 @@ def test_0022_downgrade_refuses_while_a_version_exists(alembic_config: Config) -
         assert _lock_ids_0022() == [1]
     finally:
         command.upgrade(alembic_config, "head")
+        # monthly_statements (0035) refers to tax_policy_versions, and MySQL refuses TRUNCATE on a
+        # referenced table even when nothing refers to it: foreign key checks off, as in
+        # test_tax_policy_db.py.
         with engine.begin() as connection:
-            connection.execute(text("TRUNCATE TABLE tax_policy_versions"))
+            connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+            try:
+                connection.execute(text("TRUNCATE TABLE tax_policy_versions"))
+            finally:
+                connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
         engine.dispose()
 
 

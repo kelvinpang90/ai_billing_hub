@@ -37,6 +37,9 @@ from app.models import (
     provider_prices as _provider_price_models,  # noqa: F401  (registers the two price tables)
 )
 from app.models import (
+    statements as _statement_models,  # noqa: F401  (registers monthly_statements)
+)
+from app.models import (
     tax_policy as _tax_policy_models,  # noqa: F401  (registers the two tax policy tables)
 )
 from app.models import (
