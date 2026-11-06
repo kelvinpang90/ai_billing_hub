@@ -9197,7 +9197,7 @@ tasks:
     title: 月度对账单第三层：本期用量统计、快照、自检与生成一份对账单
     purpose: >-
       按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v6） §2「用量统计」「自检」第 2、3 条、「快照」「生成函数」：在 app/services/statements.py 加本期用量统计、固定键集合的快照、合格性判定与 generate_statement（只 flush、不提交）。不加 Celery 任务、不加接口、不写审计：catch-up 与任务属于 AIH-TASK-157，审计属于 159。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-155
     acceptance_criteria:
