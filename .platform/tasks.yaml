@@ -9094,7 +9094,7 @@ tasks:
     title: 月度对账单第一层：对账单表的迁移、模型与定稿后不可改删的触发器
     purpose: >-
       按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v6） §2「数据库」与 §8：新迁移 0035 建 monthly_statements（列、两个唯一、一个唯一的租户与账期、三个普通索引（其中两个是外键列的显式索引）、三个外键 RESTRICT（含指向 tax_policy_versions 的 tax_policy_version_id）、四条 CHECK 照设计的表），MySQL 上建两个触发器拒绝 UPDATE 与 DELETE 非 DRAFT 行；新模型 app/models/statements.py 并在 alembic/env.py 登记；docs/database-schema.md 记表结构。不写生成逻辑、不加任务与接口：账本归属与期初期末属于 AIH-TASK-155，生成属于 156，任务属于 157。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-153
     acceptance_criteria:
