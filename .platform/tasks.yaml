@@ -10483,7 +10483,7 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-180
-    title: 支付第二批第二层：补对账任务、孤儿与超时过期、手续费补抓与结案终态规则
+    title: 支付第二批第二层：补对账第一段、孤儿与超时过期与结案终态规则
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §2「对 A 的 confirm_payment 的一处修改」「补对账」「配置」「事务边界」：confirm_payment 把 resolution 不为空的支付视为终态；新服务 app/services/payment_reconcile.py 与任务 app/tasks/payment_reconcile.py（第 1 段：PENDING 补对账含孤儿与超时过期），Beat 登记，三个配置项。不做第 2 段手续费补抓（属于 AIH-TASK-187）；不做争议事件、告警、人工出口与接口：属于 AIH-TASK-181..183。
     status: ready
@@ -10548,7 +10548,7 @@ tasks:
       - AIH-TASK-180
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） 逐条一致，以 §2「补对账」第 2 段与其下的两条说明、「金额与精度」、§7 标 187 的各行 为准；本设计建立在 docs/design/AIH-TASK-172-payments-gateway.md（A，设计闸门 #580 已批准 v3） 之上，B 没有改写的地方沿用 A；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
-      - 'app/services/payment_reconcile.py 实现第 2 段手续费补抓（AIH-TASK-180 留下的空函数）：候选查询逐字照设计（status 为 PAID、gateway_fee 为空、gateway_payment_id 不为空、created_at 在 now 减 8 天之后、paid_at 不晚于 now 减 600 秒、last_reconciled_at 为空或不晚于 now 减 3600 秒，都写在查询里；按 COALESCE(last_reconciled_at, paid_at)、id 排序，最多 50 行）；事务外 get_payment_status；GatewayUnavailable 结束本轮；GatewayRequestRejected、session_id 对不上、没有 fee_minor、费用币种转大写后不是 MYR 都只用条件更新（status 仍为 PAID）写 last_reconciled_at（前两种记 ERROR、非 MYR 记 WARNING）；有 MYR 费用时条件更新（status 为 PAID 且 gateway_fee 为空）写 gateway_fee 与 last_reconciled_at，影响 1 行时同一事务写 PAYMENT_FEE_RECORDED 审计（before 为 gateway_fee 空，after 为 fee_minor / 100 量化到两位小数后的定点字符串，例如 1.50；以本契约为准，设计只写了照 _money_text）'
+      - 'app/services/payment_reconcile.py 实现第 2 段手续费补抓（AIH-TASK-180 留下的空函数）：候选查询逐字照设计（status 为 PAID、gateway_fee 为空、gateway_payment_id 不为空、created_at 在 now 减 8 天之后、paid_at 不晚于 now 减 600 秒、last_reconciled_at 为空或不晚于 now 减 3600 秒，都写在查询里；按 COALESCE(last_reconciled_at, paid_at)、id 排序，最多 50 行）；事务外 get_payment_status；GatewayUnavailable 结束本轮；GatewayRequestRejected、session_id 对不上、没有 fee_minor、费用币种转大写后不是 MYR 都只用条件更新（status 仍为 PAID）写 last_reconciled_at（前两种记 ERROR、非 MYR 记 WARNING）；有 MYR 费用时条件更新（status 为 PAID 且 gateway_fee 为空）写 gateway_fee 与 last_reconciled_at，影响 1 行时同一事务写 PAYMENT_FEE_RECORDED 审计（before 为 gateway_fee 空，after 为本次写入的 gateway_fee（fee_minor / 100 的 Decimal，不另做量化）经 app/repositories/wallet.py 的 _money_text 得到的定点字符串，照设计，例如 fee_minor 为 150 时是 1.5）'
       - '预算与查询次数和第 1 段共用（AIH-TASK-180 的计数）；第 2 段中 GatewayUnavailable 结束本轮；单笔出现其他意外异常时回滚这一笔、记 ERROR（只带 public_id 与异常类型）并结束本轮；run_due 返回值里的补到手续费数按实际写入计'
       - '测试：新增 tests/backend/test_payment_fee_backfill.py，覆盖设计 §7 标 187 的各行（拿到 MYR 费用写入并记审计；没有费用；非 MYR；会话 id 对不上；超过 8 天不选；并发已写影响 0 行；拿不到费用的老单不挡住新单；Stripe 不可用时结束本轮；Stripe 拒绝查询只更新 last_reconciled_at；CREDITED 的行只写 gateway_fee 与 last_reconciled_at、状态与结案字段不变）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网；时间一律注入，不 sleep'
       - '只改本任务 allowed_change_paths 里的文件；第 1 段的行为不变；不改 confirm_payment、回调、事件处理、建单与告警；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #585'
@@ -10883,7 +10883,7 @@ tasks:
       - AIH-TASK-185
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） 逐条一致，以 §8、§2「补对账」「人工复核出口」「争议与退款」「告警」「配置」、§1「明确不做什么」 为准；本设计建立在 docs/design/AIH-TASK-172-payments-gateway.md（A，设计闸门 #580 已批准 v3） 之上，B 没有改写的地方沿用 A；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
-      - 'docs/payment-flow.md 新增四节：补对账（候选条件与节奏、孤儿与超时过期、Stripe 不可用时的表现、手续费补抓的期限）；复核处理（管理端支付页的两个出口、设计「各错误码的处理」表、CREDIT 以 Stripe 实收为准、结案后终态、CLOSE 后在 Stripe 后台退款、GATEWAY_PAYMENT_REUSED 的复核单结案时不退款）；争议与退款（照设计「争议与退款」列出的全部情形逐条写，不写成「三种」；结案后退款是否告警以设计「告警」表为准：关联到 resolution 为 CLOSED 的支付时不计入 P1，关联不上时为 UNMATCHED 并计入 P1；复核处理一节写 CLOSE 后退款时也照此说明）；对客户开放充值前的检查（照设计 §8：回调端点加订阅两种事件共六种、停用端点验证丢失回调能被补回的步骤、验证后从建单允许名单移除验收租户、由 Kelvin 执行、C 上线后再打开 payment_topups_open）；A 写的 REVIEW_REQUIRED、UNMATCHED 与 REJECTED 临时排查方法中关于 REVIEW_REQUIRED 的部分改为指向复核处理一节'
+      - 'docs/payment-flow.md 新增四节：补对账（候选条件与节奏、孤儿与超时过期、Stripe 不可用时的表现、手续费补抓的期限）；复核处理（管理端支付页的两个出口、设计「各错误码的处理」表、CREDIT 以 Stripe 实收为准、结案后终态、CLOSE 后在 Stripe 后台退款、GATEWAY_PAYMENT_REUSED 的复核单结案时不退款）；争议与退款（照设计「争议与退款」列出的全部情形逐条写，不写成「三种」；结案后退款是否告警：设计「人工复核出口」的 CLOSE 一段与「告警」表说法不一，以设计的「告警」表为准（这是设计内部两处措辞的取舍，不是契约改设计）：关联到 resolution 为 CLOSED 的支付时不计入 P1，关联不上时为 UNMATCHED 并计入 P1；复核处理一节写 CLOSE 后退款时也照此说明）；对客户开放充值前的检查（照设计 §8：回调端点加订阅两种事件共六种、停用端点验证丢失回调能被补回的步骤、验证后从建单允许名单移除验收租户、由 Kelvin 执行、C 上线后再打开 payment_topups_open）；A 写的 REVIEW_REQUIRED、UNMATCHED 与 REJECTED 临时排查方法中关于 REVIEW_REQUIRED 的部分改为指向复核处理一节'
       - 'docs/deployment.md 补设计「配置」表的三个配置项（名字、缺省、范围、含义）'
       - 'docs/TODO.md 的 Phase 4 章节只把「主动的 stale payment 对账定时任务」与「支付金额不符的人工复核流」两项改为 [x]，并在同一行末尾照钱包页一项的写法加括注：前者为（AIH-TASK-180、187，设计闸门 #585 v3），后者为（AIH-TASK-182..185，设计闸门 #585 v3）；「钱包充值入账」一项下若有 A 留下的「丢失回调由 B 补对账」类说明，改为已由本批交付；其余不动；不改 planning-v1 块'
       - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #585'
