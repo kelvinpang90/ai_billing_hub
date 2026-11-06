@@ -10057,3 +10057,370 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 支付第一批（设计闸门 #580）：Stripe 托管付款页、支付 Webhook、可信确认与 TOPUP 入账、客户建单接口（开关生产默认关）。
+  # Kelvin 2026-11-06 定：只存逐笔实际手续费；DISABLED 入账、CLOSED 与内部租户复核；B（补对账与人工复核）上线前不对客户开放。
+  - id: AIH-TASK-172
+    title: 支付第一批第一层：payments 与 payment_gateway_events 两张表的迁移和模型
+    purpose: >-
+      按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「数据库」「幂等的三层」与 §8：新迁移 0036 建 payments 与 payment_gateway_events 两张表（列、唯一、CHECK、索引、外键与约束名照设计），新模型 app/models/payments.py 并在 alembic/env.py 登记，AuditAction 加 PAYMENT_STATUS_CHANGE（前端审计动作清单同步），docs/database-schema.md 记两张表。不写适配器、服务、任务与接口：分别属于 AIH-TASK-173..177。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §2「数据库」「幂等的三层」、§3 INV-3、INV-6、INV-13、§7 标 172 的一行、§8 的迁移一条 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261106_0036_payments.py，revision 为 0036_payments，down_revision 为 0035_monthly_statements；文件头照 0035 迁移的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明只建两张新表、不改任何已有表、不回填'
+      - '两张表的列、类型、可空性、外键（都是 ON DELETE RESTRICT）、唯一、CHECK（两张表各自的 gateway、币种、wallet_credit_amount 等于 expected_amount、expected_amount 大于 0 且只有两位小数、tax_amount 为空、status 六种、PAID 时三个字段非空、REVIEW_REQUIRED 时 review_required_at 非空、事件的 verification_status 与七种 processing_status）、索引（含外键列 tax_policy_version_id 的显式索引）与约束名，全部照设计 §2 的两张表与约束名一段；迁移与模型同名同序'
+      - 'upgrade 照设计 §8 的简化写法：两张表都不存在 → 建表；任一已存在 → 抛错且不发任何 DDL，消息点名那张表（不做逐项形状比较）；离线 --sql 输出 CREATE TABLE；downgrade：离线模式抛错、表不存在跳过、任一表有行抛错且不删行、都为空时先删事件表再删 payments'
+      - '新增 app/models/payments.py：Payment 与 PaymentGatewayEvent 模型，PaymentStatus（六种）、PaymentEventProcessingStatus（RECEIVED、PROCESSING、RETRY、PROCESSED、IGNORED、UNMATCHED、REJECTED）、PaymentGateway（STRIPE）、PaymentEventVerificationStatus（VERIFIED）枚举，Enum(native_enum=False)；alembic/env.py 照现有写法登记；app/models/auth.py 的 AuditAction 加 PAYMENT_STATUS_CHANGE（不改其他成员），frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 同步加这一项（adminAudit.test.ts 逐项比对两边）'
+      - '测试：新增 tests/backend/test_payments_migration.py，覆盖迁移的每个分支（建表、任一表已存在时报错且不发 DDL、离线输出、各降级情形；迁移场景照 tests/backend/test_monthly_statements_migration.py 的写法只在真 MySQL 上跑）与 CHECK、唯一约束的非法插入（SQLite 与 MySQL 都测）；tests/backend/test_migrations.py 里按表名显式集合比对的用例只在集合里补两张新表，断言意义不变；tests/backend/test_monthly_statements_migration.py 里从 head 降级的用例（例如 test_0035_downgrade_with_a_row_refuses_before_any_ddl）改为先降到 0035 再做原来的断言，断言意义不变；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网'
+      - 'docs/database-schema.md 新增两张表各一节：列及含义、约束与索引及用途、三层幂等里属于这两张表的两层、payments 行由谁写（AIH-TASK-174、175 的认回会话、176）、事件行由谁写（AIH-TASK-175）、表非空时降级被拒'
+      - '只改本任务 allowed_change_paths 里的文件；不改接口、服务、任务；不改钱包、账本与计费代码；不改既有迁移文件；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #580'
+    allowed_change_paths:
+      - alembic/versions/20261106_0036_payments.py
+      - app/models/payments.py
+      - app/models/auth.py
+      - alembic/env.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_payments_migration.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_monthly_statements_migration.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-173
+    title: 支付第一批第二层：Stripe 适配器、状态映射、回调验签与支付配置项
+    purpose: >-
+      按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「Stripe 适配器」「配置」与 §6：新包 app/payments/（协议与数据类、Stripe 实现、Checkout Session 状态映射、回调验签与解析、错误分类），app/core/config.py 加支付配置项与密钥读取。只是纯适配器，不读写数据库：确认与入账属于 AIH-TASK-174。
+    status: ready
+    depends_on:
+      - AIH-TASK-172
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §2「Stripe 适配器」「配置」「金额与精度」、§6 密钥与日志、§7 标 173 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/payments/base.py：PaymentGateway 协议（同步方法；create_payment、get_payment_status、verify_webhook、parse_webhook；list_settlements 不实现）与冻结数据类 CreatedPayment、GatewayPaymentStatus（字段照设计，含 session_id）、ParsedEvent(gateway_event_id, event_type, livemode, fields)（fields 只含 §6 白名单字段），GatewayState 枚举（PAID、OPEN、FAILED、EXPIRED、INCONSISTENT、UNKNOWN），异常 GatewayUnavailable、GatewayRequestRejected（带 Stripe 错误码，不带请求体与密钥）、WebhookSignatureError、WebhookPayloadError'
+      - 'app/payments/stripe_gateway.py 的 StripeGateway(secret_key, webhook_secret, *, timeout_seconds, webhook_tolerance_seconds, transport=None)（同步，用 httpx2 的同步客户端）；app/payments/__init__.py 的工厂 get_payment_gateway(settings) -> PaymentGateway | None（凭据读不到返回 None，路由、建单与事件任务都经它取得网关，测试 monkeypatch 它注入假传输）：create_payment 照设计发 POST /v1/checkout/sessions（表单编码、mode=payment、一个 MYR 价格项且 unit_amount 为整数分、client_reference_id 与 metadata[payment_id] 为 public_id、expires_at、success_url、cancel_url、Idempotency-Key 为 topup-<public_id>、不传 payment_method_types）；get_payment_status 发 GET 并展开 payment_intent.latest_charge.balance_transaction，按设计的映射表（含 no_payment_required 一行；complete 而 payment_status 是表外取值时为 UNKNOWN）得出 state 并填全部字段；请求地址取配置的 stripe_api_base_url（仓库里不写 Stripe 的主机名）'
+      - 'verify_webhook(raw_body, headers, *, now)：从 Stripe-Signature 取 t 与全部 v1，计算 HMAC-SHA256(webhook_secret, t + "." + 原始请求体)，任一 v1 用 hmac.compare_digest 相等即通过；|now − t| 大于 webhook_tolerance_seconds、请求头缺失或格式不对都抛 WebhookSignatureError；parse_webhook 不是 JSON、缺 id 或 type、或 livemode 缺失或不是布尔值都抛 WebhookPayloadError；错误分类：网络错误、超时、5xx、429，以及 2xx 但响应不是 JSON 或缺必需字段为 GatewayUnavailable（必需字段按方法分：create_payment 要 id、url、status；get_payment_status 要 id、status、payment_status，url 不必需，complete 的会话上 url 为 null，此时 redirect_url 为空）；3xx 为 GatewayRequestRejected（错误码 UNEXPECTED_REDIRECT，不跟随）；其余 4xx 为 GatewayRequestRejected（Stripe 的 idempotency_key_in_use 也归此类但保留错误码，供建单区分）；金额与整数分互换用 Decimal 精确换算'
+      - 'app/core/config.py 加设计 §2「配置」表的十三个配置项（名字、缺省与取值范围照表，环境变量前缀沿用 BILLING_；stripe_api_base_url 缺省为空、格式校验与 fx_bnm_base_url 相同；payment_topup_tenant_allowlist 按逗号拆分、去掉空白与空项、每项必须是 UUID 格式否则启动校验失败，按 str(uuid.UUID(项)) 规范成小写带连字符的写法后解析为集合（与租户 public_id 的写法一致）；payment_topup_max 为空串时为 None），payment_topup_min 小于 2.00、payment_topup_max 小于最低额或大于 999999.99、payment_pending_timeout_seconds 不在 2400 到 86400 都在启动校验时失败；另加 read_stripe_credentials(settings)：开关为假返回 None；开关为真时读两个文件并去掉首尾空白，任一读不到、为空、Stripe 密钥前缀不是 sk_live_ / sk_test_、webhook 签名密钥前缀不是 whsec_、或 stripe_api_base_url 为空返回 None 并记 ERROR（只带文件路径与原因），否则返回 (secret_key, webhook_secret, livemode)；密钥不出现在 repr、日志与异常消息里'
+      - '测试：新增 tests/backend/test_stripe_gateway.py 与 tests/backend/test_payments_config.py，覆盖设计 §7 标 173 的各行；tests/backend/test_compose.py 的 test_every_credential_file_setting_is_wired_into_compose 把 stripe_secret_key_file 与 stripe_webhook_secret_file 登记为「开关默认关、开启时由管理员接入 compose」的例外，同时断言这两个字段缺省为空字符串，其余断言不变；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网'
+      - '只改本任务 allowed_change_paths 里的文件；不读写数据库；不改服务、任务、接口；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #580'
+    allowed_change_paths:
+      - app/payments/__init__.py
+      - app/payments/base.py
+      - app/payments/stripe_gateway.py
+      - app/core/config.py
+      - tests/backend/test_stripe_gateway.py
+      - tests/backend/test_payments_config.py
+      - tests/backend/test_compose.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-174
+    title: 支付第一批第三层：可信确认、按决策表落状态与 TOPUP 入账
+    purpose: >-
+      按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「可信确认」「事务边界」与 §4：新模块 app/services/payments.py 的 confirm_payment（事务外查 Stripe、依次锁支付、钱包、租户，按两张决策表落状态、通过时调用 post_transaction 写 TOPUP、写 PAYMENT_STATUS_CHANGE 审计）。不做事件处理、建单与接口：属于 AIH-TASK-175..177。
+    status: ready
+    depends_on:
+      - AIH-TASK-173
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §2「可信确认」「幂等的三层」「事务边界」「金额与精度」、§3 全部「是」的行、§4、§5 确认相关的行、§7 标 174 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'confirm_payment(session_factory, gateway, payment_public_id, *, now) -> ConfirmResult（新旧状态、原因、是否入账、Stripe 的 state 或「无可查询」）照设计五步：gateway_payment_id 为空返回「无可查询」；事务外调用 get_payment_status（GatewayUnavailable 原样抛给调用方）；新事务依次 SELECT … FOR UPDATE 锁 payments 行、该租户钱包行、租户行，重读支付状态与租户的 account_status、billing_mode；已是 PAID 或 REVIEW_REQUIRED 只更新 last_reconciled_at'
+      - 'PI 是否被另一笔占用（pi_taken）在锁内**先查**，对任何 state 都查（含 INCONSISTENT；payment_intent_id 为空时为假）；state 为 PAID 时在写入前按设计表的顺序判定六条（引用含 session_id、币种、金额整数分比较、pi_taken、CLOSED、内部租户），第一条不满足的决定原因；通过时清空 status_reason；通过时写 confirmed_amount、confirmed_currency、paid_at、gateway_payment_intent_id、gateway_fee（费用币种转大写后为 MYR 才写，拿不到为空不记日志，非 MYR 为空并记 WARNING），并在同一事务里调用 post_transaction（TOPUP、amount 为 wallet_credit_amount、reference_type 为 PAYMENT、reference_id 为 public_id、actor_role 为系统）；DISABLED 照常入账'
+      - '进入 REVIEW_REQUIRED 时写 review_required_at、confirmed_amount、confirmed_currency（Stripe 没给金额或币种时写空，CHECK 只要求 PAID 时非空），只在 pi_taken 为假时写 gateway_payment_intent_id（不论原因是哪一条）；其他 state 照设计第二张表（含 EXPIRED、FAILED、CANCELLED 收到 FAILED 或 EXPIRED 时不变）；写入撞唯一约束时整个事务回滚、支付与账本都不变，抛本模块定义的 ConfirmConflict（调用方按可重试处理）；任何异常都让事务整体回滚'
+      - '每次状态改变写一条 PAYMENT_STATUS_CHANGE 审计（同一事务，entity_type 为 payments、entity_id 为 public_id，before / after 只含 status、status_reason、expected_amount、confirmed_amount、gateway_fee，金额照 app/repositories/wallet.py 的 _money_text 写成定点字符串 format(value, ''f'')，空为 null）；app/services/audit_query.py 把 payments 归进对外 id 一类（PUBLIC_ENTITY_TYPES）'
+      - '测试：新增 tests/backend/test_payment_confirm.py，覆盖设计 §7 标 174 的各行（两张决策表每一行、金额精度三组、入账走账本与复机、多事件并发只入账一次（MySQL 两线程）、同一网关支付号两笔内部支付、关户与入账互斥（MySQL）、复核记录两组、过期后到账清原因、事务中途失败）；tests/backend/test_admin_audit_api.py 只在扫描需要时补一项；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/repositories/wallet.py 与账本、计费逻辑；不改适配器；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #580'
+    allowed_change_paths:
+      - app/services/payments.py
+      - app/services/audit_query.py
+      - tests/backend/test_payment_confirm.py
+      - tests/backend/test_admin_audit_api.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-175
+    title: 支付第一批第四层：回调事件落库、后台处理任务与告警判据
+    purpose: >-
+      按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「支付 Webhook」中落库的部分、「事件处理任务」「告警」：新模块 app/services/payment_events.py（落库与指纹冲突）、app/tasks/payment_events.py（Beat 每 15 秒、一次领一个事件、重试退避）、Beat 登记，告警判据并进 wallet_negative_balance 维度并同步运维文档。路由属于 AIH-TASK-177。
+    status: ready
+    depends_on:
+      - AIH-TASK-174
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §2「支付 Webhook」落库部分、「事件处理任务」「告警」、§3 INV-11、INV-14、§5 事件相关的行、§7 标 175 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/payment_events.py 的 record_event(session_factory, parsed, raw_body, *, now, livemode)：四种处理类型为 RECEIVED、其余 IGNORED、livemode 不一致为 IGNORED 并在 last_error_code 记 LIVEMODE_MISMATCH（IGNORED 时写 processed_at）；payload_fingerprint 为原始请求体的 SHA-256；metadata_json 就是 parsed.fields；撞唯一约束时比对指纹：相同返回「重复」，不同则把 fingerprint_conflict_at 更新为本次的 now（每次冲突都更新，让 24 小时窗口的告警对再次冲突也生效）、记 ERROR、返回「冲突」，都不覆盖原行'
+      - 'app/tasks/payment_events.py 的 process_due(*, now=None, rng=None)：开始时取 MySQL 命名锁 GET_LOCK(CONCAT(''payment_events:'', DATABASE()), 0)（照 app/ai_api/delivery.py；SQLite 下跳过），取不到直接返回；每轮最多 50 个、预算 45 秒（用 time.monotonic 计，与注入的 now 无关；now 为 None 时每个事件处理前各读一次当前 UTC 时间，传入时整轮都用它），一次领一个（短事务、FOR UPDATE SKIP LOCKED、按 next_attempt_at 升序取到期的 RECEIVED、RETRY 或租约过期的 PROCESSING，置 PROCESSING、租约 60 秒、attempts 加 1）；处理照设计：按 metadata_json 的 client_reference_id 找支付（找不到为 UNMATCHED）、写 payment_id；支付的 gateway_payment_id 为空而事件带会话 id（metadata_json.object_id）时用条件更新（gateway_payment_id IS NULL）认回，撞唯一约束为 REJECTED（GATEWAY_REFERENCE_TAKEN）；再调用 confirm_payment；成功为 PROCESSED（清空 last_error_code）；仍是「无可查询」时支付已过 expires_at 为 REJECTED（NO_GATEWAY_REFERENCE），否则 RETRY（与其他 RETRY 同一退避规则）；GatewayUnavailable、state 为 UNKNOWN 或 ConfirmConflict 为 RETRY；last_error_code 按原因写：GATEWAY_UNAVAILABLE、GATEWAY_STATE_UNKNOWN、CONFIRM_CONFLICT、NO_GATEWAY_REFERENCE（未过期时的 RETRY 也写它），UNMATCHED 写 PAYMENT_NOT_FOUND（缺 client_reference_id 时写 NO_CLIENT_REFERENCE）；RETRY 按 min(3600, 2^min(attempts, 12)) × uniform(0.5, 1.0) 退避且不放弃；GatewayRequestRejected 为 REJECTED 并记错误码；进入终止状态时写 processed_at；落事件结果用条件更新（status = PROCESSING 且 lease_until 等于领取时写的值），影响 0 行说明租约已被别人重领，丢弃本次结果只记 WARNING；开关为假或 get_payment_gateway 返回 None 时直接返回、不领取事件'
+      - 'app/core/celery_app.py 照现有 Beat 条目写法登记 payment_events.process_due（条目名 payment-events-process-due，间隔取 payment_event_poll_seconds，expires 为间隔减 1 秒）并把模块加进 TASK_MODULES；tests/backend/test_celery.py 里逐项比对 Beat 条目与 TASK_MODULES 的用例只补这一项'
+      - 'app/services/alerts.py 的 wallet_negative_balance 维度照设计「告警」表加五个判据（窗口列照表：review_required_at、fingerprint_conflict_at、received_at、processed_at；窗口为 now − 24 小时 < 时刻 ≤ now），配置判据从 get_settings() 与 read_stripe_credentials 读，不改 AlertContext；最老未处理事件的年龄为 max(0, ⌊now − received_at⌋) 秒，超过 900 秒（严格大于）才算 P2；摘要只在三个 24 小时计数任一大于 0、最老未处理事件超过 900 秒或配置判据触发时追加设计给出的那一段（逐字照设计），否则与原来逐字相同；不新增维度；docs/runbook.md 与 docs/api.md 里这个维度的说明补上支付判据与排查入口'
+      - '测试：新增 tests/backend/test_payment_events.py（落库各情形、指纹冲突、一次领一个与租约、重试退避区间、UNMATCHED、REJECTED、成功后清空错误码、认回会话四组、重领后不重复入账、不经 Celery 直接调用扫描函数）与 tests/backend/test_payment_alerts.py（告警表每一行与窗口边界、没有支付数据时摘要逐字不变）；支付相关的测试在每个用例后清理自己写的支付与事件行，免得 MySQL 共用库里的其他告警用例看到支付段落；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网'
+      - '只改本任务 allowed_change_paths 里的文件；不改路由、确认逻辑与适配器；不改其他告警维度；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #580'
+    allowed_change_paths:
+      - app/services/payment_events.py
+      - app/tasks/payment_events.py
+      - app/core/celery_app.py
+      - app/services/alerts.py
+      - tests/backend/test_payment_events.py
+      - tests/backend/test_payment_alerts.py
+      - tests/backend/test_celery.py
+      - docs/runbook.md
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-176
+    title: 支付第一批第五层：客户建单服务，含校验、六十秒同额复用与网关失败处理
+    purpose: >-
+      按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「建单」与 §4：在 app/services/payments.py 加 create_topup（沿用客户写规则锁租户、四项校验、60 秒同额复用、两段事务与事务外调 Stripe、条件更新网关 id、失败与并发幂等键的处理）。路由属于 AIH-TASK-177。
+    status: ready
+    depends_on:
+      - AIH-TASK-175
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §2「建单」「事务边界」「金额与精度」、§4 建单相关的行、§5 建单相关的行、§7 标 176 与「176、177」的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'create_topup(session_factory, gateway_factory, tenant_id, amount_text, *, now, settings) -> TopupResult(payment_public_id, redirect_url, expires_at)：开关为假、get_payment_gateway 为 None 或 frontend_base_url 为空抛 PaymentsMisconfigured（503 PAYMENTS_MISCONFIGURED）；校验顺序照设计 v3：lock_tenant_for_customer_write（AccountReadOnly 原样抛出）、payment_topups_open 为假且租户 public_id 不在允许名单里抛 TopupsNotOpen（403 TOPUPS_NOT_OPEN，在账户可写检查之后、计费模式检查之前）、billing_mode 不是 PREPAID 抛 TopupNotAllowed（403）、金额格式与上下限抛 TopupAmountInvalid（422）、税务政策没有、解析抛错抛 TaxPolicyUnavailable（503）、要求收税抛 TaxPolicyUnsupported（503）'
+      - '执行顺序：先不加锁读租户做快速校验（账户可写、开放、计费模式、金额、解析税务政策，没有生效政策就在复用之前报错）；再锁外预查候选并在事务外查询它的会话（OPEN 且有 redirect_url 直接返回；其他状态或 GatewayRequestRejected 记为排除；GatewayUnavailable 抛 PaymentGatewayUnavailable）；再在 lock_tenant_for_customer_write 的事务里重查账户可写与计费模式、解析税务政策，排除记下的 id 重查 payment_reuse_window_seconds（缺省 60；锁外预查用同一个值，为 0 时不复用）内同金额且剩余有效期不少于 31 分钟的 PENDING：找到没有网关 id 的 → 复用；找到有网关 id 的（并发产生的）→ 提交后回到「事务外查询」处理它，至多再来一次，第二次仍不能复用就新建；都没有则插入 PENDING（expires_at = now + payment_pending_timeout_seconds、wallet_credit_amount 等于 expected_amount、tax_policy_version_id、tax_amount 为空）并提交；之后在事务外调 Stripe'
+      - '调用 create_payment 的结果：成功 → 新事务用条件更新（gateway_payment_id IS NULL）写网关 id 并清空 status_reason，影响 0 行则读出比较，相同即可，不同记 ERROR 并抛 PaymentGatewayUnavailable；GatewayUnavailable 或 GatewayRequestRejected → 条件更新写 GATEWAY_CREATE_FAILED（错误码为 idempotency_key_in_use 时不写）并抛 PaymentGatewayUnavailable（503）；success_url 与 cancel_url 照设计由 frontend_base_url 拼出'
+      - '测试：新增 tests/backend/test_payment_create.py，覆盖设计 §7 标 176 的各行与「建单校验」的服务部分（校验顺序与错误、60 秒复用、剩余有效期不足 31 分钟不复用、待付超时与 Stripe 区间、Stripe 失败后用同一幂等键重试复用、并发复用同一幂等键、复用会话已关闭时新建、建单记税务版本、建单未开放时名单内外两组、复用排除）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网'
+      - '只改本任务 allowed_change_paths 里的文件；不改 confirm_payment；不加路由；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #580'
+    allowed_change_paths:
+      - app/services/payments.py
+      - tests/backend/test_payment_create.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-177
+    title: 支付第一批第六层：支付回调路由、客户建单路由与端到端测试
+    purpose: >-
+      按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「支付 Webhook」「建单」与 §6：新路由模块 app/api/payments.py（POST /api/v1/webhooks/payments/{gateway} 与 POST /api/v1/customer/topups，只在 payments_enabled 为真时注册）、请求与响应 schema、docs/api.md 两节、端到端测试。
+    status: ready
+    depends_on:
+      - AIH-TASK-176
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §2「支付 Webhook」「建单」、§3 INV-7、INV-8、§5 回调相关的行、§6、§7 标 177 与「176、177」的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '回调路由照设计：gateway 不是 stripe 为 404 NOT_FOUND；get_payment_gateway 为 None 时 503 PAYMENTS_MISCONFIGURED；自己读原始字节（照 app/api/integration_usage.py 的写法），超过 64 KiB 为 413 PAYLOAD_TOO_LARGE；验签失败为 400 WEBHOOK_SIGNATURE_INVALID、解析失败为 400 WEBHOOK_PAYLOAD_INVALID，都不落库、WARNING 日志不带请求体与请求头原文；调用 record_event（livemode 取 read_stripe_credentials 的结果），新事件、重复与冲突都回 200；数据库不可用为 503 SERVICE_UNAVAILABLE；错误响应用仓库现有的错误信封；不在请求里做确认'
+      - '建单路由：require_customer_writable 鉴权（DISABLED、CLOSED 为 403 ACCOUNT_READ_ONLY），租户只来自令牌主体，请求体只接受 amount（多余字段 422 VALIDATION_ERROR，仓库现有写法 extra=forbid；鉴权与 require_customer_writable 的错误先于它，它先于 create_topup 的全部有序校验；缺 amount 或它不是字符串也是 422 TOPUP_AMOUNT_INVALID，schema 不把它声明成数字类型）；调用 create_topup，把各异常映射为设计的错误码与状态码（含 403 TOPUPS_NOT_OPEN）；成功 201，响应只有 payment_id、redirect_url、expires_at；app/main.py 只在 payments_enabled 为真时 include 这个路由模块'
+      - 'docs/api.md 新增「支付回调」与「客户建单」两节：路径、鉴权、请求与响应、错误码表、幂等与 60 秒复用、开关关闭时 404、跳回门户不改状态'
+      - '测试：新增 tests/backend/test_payments_api.py，覆盖设计 §7 标 177 与「建单校验」的接口部分（回调各情形含密钥读不到 503、伪造成功跳转、端到端（建单 → 回调 → 直接调用事件扫描 → 同支付另一个事件 → 重复投递，钱包只加一次、gateway_fee 写入）、开关关闭 404、客户接口字段、跨租户）；开关打开的应用用测试内的 settings 覆盖构造；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网'
+      - '只改本任务 allowed_change_paths 里的文件；confirm_payment、create_topup、事件处理与适配器只调用不修改；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #580'
+    allowed_change_paths:
+      - app/api/payments.py
+      - app/schemas/payments.py
+      - app/main.py
+      - tests/backend/test_payments_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-178
+    title: 支付第一批第七层：支付开启步骤与排查文档、部署配置说明
+    purpose: >-
+      按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §8 与 §6：新文档 docs/payment-flow.md（链路、开启步骤、生产端点复验、REVIEW_REQUIRED、UNMATCHED 与 REJECTED 的临时排查方法），docs/deployment.md 补支付配置项与 secret 文件，docs/TODO.md 勾掉已交付的项。纯文档，不改代码。
+    status: ready
+    depends_on:
+      - AIH-TASK-177
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §8、§6、§2「配置」「告警」、§1「明确不做什么」 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 docs/payment-flow.md：端到端链路（建单、付款页、回调、后台确认、入账）与三层幂等；开启支付的五步（照设计 §8，含先放宿主机 secret 文件再合并加 secret 的 PR、回调端点只订阅四种事件、设置 BILLING_STRIPE_API_BASE_URL、用建单允许名单只放验收租户、生产端点复验的具体做法（RM10 的真实充值、换成格式正确但不属于该端点的签名密钥）与由 Kelvin 执行、复验后移出名单、B 上线前不打开 payment_topups_open）；告警五个判据各自的含义与排查方法；REVIEW_REQUIRED、UNMATCHED 与 REJECTED 在 B 上线前的只读排查方法（用哪张表的哪些列，不改数据）；示例里不写真实主机名、地址与密钥'
+      - 'docs/deployment.md 补设计 §2「配置」表的十三个配置项（含缺省与约束）、两个 secret 文件的用途与读取规则，写明本批不改 docker-compose、开启时由管理员另提 PR'
+      - 'docs/ARCHITECTURE.md 里说 payment-flow.md 尚未建立的那一句改为指向新文档；docs/TODO.md 的 Phase 4 章节只把「支付网关适配器 + 选定的马来西亚网关」「支付 Webhook」「钱包充值入账」三项从 [ ] 改为 [x]，各在下面缩进写一行交付说明（AIH-TASK-172..178、设计闸门 #580；钱包充值入账一项注明丢失回调的补对账属于下一批）；文档欠账里「docs/payment-flow.md」一项若存在也改为 [x]；不改 planning-v1 块，不勾 stale 对账、人工复核、充值界面与收据'
+      - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #580'
+    allowed_change_paths:
+      - docs/payment-flow.md
+      - docs/deployment.md
+      - docs/ARCHITECTURE.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
