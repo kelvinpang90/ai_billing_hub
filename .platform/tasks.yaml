@@ -10921,3 +10921,476 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 支付第三批（设计闸门 #587）：单行支付设置（管理端可改）、最小恢复额、门户充值页、支付历史与付款结果页、管理端支付设置页。
+  # Kelvin 2026-11-06 定：推荐金额放进支付设置、管理端可改；客户看到 REVIEW_REQUIRED 显示核对中，不显示原因。
+  - id: AIH-TASK-188
+    title: 支付第三批第一层：单行支付设置表的迁移、种子行、模型与审计动作
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「数据库」与 §8：新迁移 0038 建 payment_settings（恰好一行，CHECK、外键、索引照设计）并插入种子行，新模型 PaymentSettings，AuditAction 加 PAYMENT_SETTINGS_UPDATE（前端审计动作清单同步），docs/database-schema.md 记这张表。不写服务与接口：属于 AIH-TASK-189..191。
+    status: ready
+    depends_on:
+      - AIH-TASK-186
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） 逐条一致，以 §2「数据库」、§3 INV-6、INV-10、§7 标 188 的一行、§8 的迁移一条 为准；本设计建立在 docs/design/AIH-TASK-172-payments-gateway.md（A，设计闸门 #580 已批准 v3）与 docs/design/AIH-TASK-179-payments-review.md（B，设计闸门 #585 已批准 v3） 之上，C 没有改写的地方沿用 A 与 B；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261108_0038_payment_settings.py，revision 为 0038_payment_settings，down_revision 为 0037_payment_review；文件头照 0037 迁移的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、失败处理、回滚），写明只建一张新表并插入种子行、不改已有表'
+      - '表的列、类型、可空性、CHECK（singleton 与各字段的范围、两位小数、max_amount 为空或不小于 min_amount）、外键 fk_payment_settings_updated_by_user_id（ON DELETE RESTRICT）、索引 ix_payment_settings_updated_by_user_id 与约束名照设计；种子行的值逐个照设计（preset_amounts 存定点字符串数组）；迁移与模型同名同序。upgrade：表已存在 → 抛错且不发任何 DDL；离线 --sql 输出建表与插入；downgrade：离线模式抛错、表不存在跳过、否则删表'
+      - '新增 app/models/payment_settings.py 的 PaymentSettings 模型，alembic/env.py 照现有写法登记；app/models/auth.py 的 AuditAction 加 PAYMENT_SETTINGS_UPDATE（不改其他成员），frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 同步加这一项（adminAudit.test.ts 逐项比对两边）'
+      - '测试：新增 tests/backend/test_payment_settings_migration.py，覆盖迁移的每个分支（建表与种子行的值、表已存在时报错且不发 DDL、离线输出、降级；迁移场景照 tests/backend/test_payment_review_migration.py 的写法只在真 MySQL 上跑）与 CHECK 的非法插入（第二行、各字段越界、缓冲为 0、三位小数、max_amount 小于 min_amount；SQLite 与 MySQL 都测）；tests/backend/test_migrations.py 里按表名显式集合比对的用例只在集合里补这张表，断言意义不变；tests/backend/test_payment_review_migration.py 里从 head 降级的用例改为先降到 0037 再做原来的断言，断言意义不变；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网；时间一律注入，不 sleep'
+      - 'docs/database-schema.md 新增 payment_settings 一节：列及含义、约束与用途（恰好一行、范围与精度）、由谁写（AIH-TASK-189 的 update_payment_settings）、谁读（建单、充值选项、管理端）、种子值'
+      - '只改本任务 allowed_change_paths 里的文件；不改接口、服务；不改钱包、账本与计费代码；不改既有迁移文件；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - alembic/versions/20261108_0038_payment_settings.py
+      - app/models/payment_settings.py
+      - app/models/auth.py
+      - alembic/env.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_payment_settings_migration.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_payment_review_migration.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-189
+    title: 支付第三批第二层：支付设置服务、最小恢复额与建单改读支付设置
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「支付设置服务」「最小恢复额」「对 A 的建单的修改」：新服务 app/services/payment_settings.py（读、带乐观锁与审计的整体替换、校验、最小恢复额），A 的 create_topup 改为从支付设置读金额规则、复用窗口与待付超时并校验最小恢复额，删除 A 的四个配置项。不加接口：属于 AIH-TASK-190、191。
+    status: ready
+    depends_on:
+      - AIH-TASK-188
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） 逐条一致，以 §2「支付设置服务」「最小恢复额」「对 A 的建单的修改」「事务边界」「金额与精度」、§3、§4、§5 设置与恢复额相关的行、§7 标 189 的各行 为准；本设计建立在 docs/design/AIH-TASK-172-payments-gateway.md（A，设计闸门 #580 已批准 v3）与 docs/design/AIH-TASK-179-payments-review.md（B，设计闸门 #585 已批准 v3） 之上，C 没有改写的地方沿用 A 与 B；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/payment_settings.py：get_payment_settings(session) 普通读那一行，不存在抛 PaymentSettingsMissing；update_payment_settings(session_factory, *, actor, values, expected_version, context, now) 照设计的校验规则按设计给出的字段顺序逐条校验（不过抛 PaymentSettingsInvalid，错误码 PAYMENT_SETTINGS_INVALID、422，消息点名第一个不合规的字段；类型由请求层严格校验，不在这里），再在一个事务里先普通读那一行（不存在抛 PaymentSettingsMissing）、然后用 WHERE id = 1 AND version = expected_version 的条件更新整体替换、version 加 1、写 updated_at 与 updated_by_user_id，影响 0 行抛 PaymentSettingsVersionConflict（PAYMENT_SETTINGS_VERSION_CONFLICT、409）；同一事务写 PAYMENT_SETTINGS_UPDATE 审计（字段照设计，金额照 app/repositories/wallet.py 的 _money_text）；新值与旧值相同时也照常加版本并写审计；PaymentSettingsMissing 的错误码为 PAYMENTS_MISCONFIGURED、503；app/services/audit_query.py 把 payment_settings 归进 PUBLIC_ENTITY_TYPES（entity_id 固定为 1，原样返回；照 A 对 payments 的写法加注释），tests/backend/test_admin_audit_api.py 里逐类核对 entity_type 的用例照常通过'
+      - 'recovery_minimum(balance, billing_mode, settings) 与 effective_minimum 照设计：只对 PREPAID 且 balance 不大于 0 有值，值为负余额加缓冲后用 ROUND_CEILING 取到两位小数；effective_minimum 为它与 min_amount 的较大者；全部在 Decimal 上计算；另提供 topup_cap(settings) -> Decimal（max_amount，为空时为 999999.99）与 recovery_exceeds_cap(effective_minimum, settings) -> bool（effective_minimum 严格大于 topup_cap 时为真），供充值选项判断 RECOVERY_EXCEEDS_MAXIMUM，测试里的 RECOVERY_EXCEEDS_MAXIMUM 两组断言这个函数返回真'
+      - 'app/services/payments.py 的 create_topup 只改设计列出的几处：快速校验开始时读一次 get_payment_settings 并整次使用（读不到抛 PaymentsMisconfigured，503）；金额第 3 步按设计的新顺序（格式、不低于 min_amount、不低于 effective_minimum、不高于 max_amount）逐条校验，第三条不过抛 TopupBelowRecoveryMinimum（TOPUP_BELOW_RECOVERY_MINIMUM、422），其余照 A 为 TOPUP_AMOUNT_INVALID，最低额与最高额来自设置；快速校验用不加锁读到的余额判一次、lock_tenant_for_customer_write 的事务里再用普通读（不加 FOR UPDATE）读一次钱包余额重判，这次重判排在锁内复用查找之前（不过就不复用、不新建），A 的锁外预查直接复用一笔开着的候选时不再重判；复用窗口与 expires_at 的待付超时来自设置；其余判定、事务划分与加锁顺序不变'
+      - 'app/core/config.py 删除 payment_topup_min、payment_topup_max、payment_pending_timeout_seconds、payment_reuse_window_seconds 四项及其校验，不保留兼容读取；仓库里其余引用这四项的代码一并改为读支付设置'
+      - '测试：新增 tests/backend/test_payment_settings.py，覆盖设计 §7 标 189 的各行（设置校验每条规则与边界、改设置写审计与版本、相同值也加版本、版本冲突且数据不变、并发改设置（MySQL）、最小恢复额各组（含缓冲 0.01、余额 −50.00 时为 50.01 且充值后余额为 0.01）、配置项已删除）；tests/backend/test_payment_create.py 补设置生效（改最低额、最高额、复用窗口、待付超时后建单；设置行缺失时建单 503 PAYMENTS_MISCONFIGURED 且不建单）与挂起租户建单两组（后者含锁内重读时余额由正变为不大于 0 而金额低于恢复额，应为 422 TOPUP_BELOW_RECOVERY_MINIMUM；以及此时 60 秒内有同金额的待付候选，仍为 422 且不复用），并把原来依赖四个配置项的用例改为改支付设置，断言意义不变；tests/backend/test_payments_config.py 删掉四个配置项的用例；测试建库用 create_all，没有迁移插入的种子行：在 tests/backend/payment_world.py 加帮手 seed_payment_settings（值等于设计的种子行）并在 tests/backend/conftest.py 注册一个夹具，A 的 tests/backend/test_payments_api.py 与本任务的测试在建单前调用它，A 的用例断言意义不变；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网；时间一律注入，不 sleep'
+      - '只改本任务 allowed_change_paths 里的文件；create_topup 只改设计列出的几处；不改 confirm_payment、事件处理、补对账、人工复核与路由；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - app/services/payment_settings.py
+      - app/services/payments.py
+      - app/core/config.py
+      - tests/backend/test_payment_settings.py
+      - tests/backend/test_payment_create.py
+      - tests/backend/test_payments_config.py
+      - tests/backend/test_payments_api.py
+      - tests/backend/conftest.py
+      - tests/backend/payment_world.py
+      - app/services/audit_query.py
+      - tests/backend/test_admin_audit_api.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-190
+    title: 支付第三批第三层：客户的充值选项、支付列表与支付详情三个接口
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「客户接口」与 §6：新路由模块 app/api/customer_payments.py（GET topup-options、GET payments、GET payments/{payment_id}），查询与客户侧状态映射放进 app/services/customer_payments.py，schema，app/main.py 注册，docs/api.md 新增「支付（客户）」一节。不做页面：属于 AIH-TASK-192、193。
+    status: ready
+    depends_on:
+      - AIH-TASK-189
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） 逐条一致，以 §2「客户接口」「最小恢复额」、§3 INV-7、INV-8、INV-10、§6、§7 标 190 的各行 为准；本设计建立在 docs/design/AIH-TASK-172-payments-gateway.md（A，设计闸门 #580 已批准 v3）与 docs/design/AIH-TASK-179-payments-review.md（B，设计闸门 #585 已批准 v3） 之上，C 没有改写的地方沿用 A 与 B；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/customer_payments.py：三个处理函数都调用 require_customer（只读，DISABLED 与 CLOSED 也能看），租户只来自令牌主体；路由总是注册（不看 payments_enabled）；只有 topup-options 读支付设置，读不到时 503 PAYMENTS_MISCONFIGURED，支付列表与详情不读设置；详情的 payment_id 不存在、属于别的租户或格式不像 uuid 都是 404 PAYMENT_NOT_FOUND（不做格式校验）；列表用 page（不小于 1）与 page_size（1–100，缺省 20），返回与管理端列表相同的分页信封（items、page、page_size、total）'
+      - 'topup-options：字段与顺序照设计；available 与 unavailable_reason 按设计的五个原因的顺序取第一个成立的（PAYMENTS_DISABLED、ACCOUNT_READ_ONLY、TOPUPS_NOT_OPEN、TOPUP_NOT_ALLOWED、RECOVERY_EXCEEDS_MAXIMUM 用 AIH-TASK-189 的单笔上限 cap 判断；开放判断与 A 的建单相同，含允许名单）；金额为两位小数定点字符串；recovery_minimum 与 effective_minimum 调用 AIH-TASK-189 的函数，余额为普通读；不查 Stripe、不读密钥文件'
+      - '支付列表与详情：字段只有设计列出的 id、amount、currency、status、credited_amount、created_at、paid_at、expires_at；status 按设计的七行映射（REVIEW_REQUIRED 为 IN_REVIEW，FAILED 且 resolution 为 CLOSED 为 NOT_CREDITED）；credited_amount 取这笔支付的 TOPUP 账本行（PAYMENT 引用）；按 created_at 降序、id 降序；不返回手续费、状态原因、结案字段、网关编号与 confirmed 字段'
+      - 'tests/backend/test_customer_api.py 的客户路由集合补三个新接口（其鉴权参数化用例自动覆盖管理员与匿名）；新增 tests/backend/test_customer_payments_api.py，覆盖设计 §7 标 190 的各行（五种不可充值原因的顺序、可充值、挂起租户的恢复额、最高额为空而恢复额超过 999999.99、设置行缺失时 topup-options 为 503 而列表与详情照常、读不到设置 503、七种状态映射、人工按实付入账的 credited_amount、分页、total 与排序、响应字段白名单、跨租户 404 且列表不含别的租户、格式不像 uuid 的 id 为 404）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网；时间一律注入，不 sleep'
+      - 'docs/api.md 新增「支付（客户）」一节：三个接口的路径、鉴权、请求与响应字段、客户侧状态表、不可充值原因表、错误码；写明最小恢复额只在建单时校验'
+      - '只改本任务 allowed_change_paths 里的文件；A 与 B 的服务只调用不修改；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - app/api/customer_payments.py
+      - app/services/customer_payments.py
+      - app/schemas/customer_payments.py
+      - app/main.py
+      - tests/backend/test_customer_payments_api.py
+      - tests/backend/test_customer_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-191
+    title: 支付第三批第四层：管理端支付设置的读取与整体替换两个接口
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「管理端接口」：新路由模块 app/api/admin_payment_settings.py（GET 与 PUT /api/v1/admin/payment-settings），schema，app/main.py 注册，docs/api.md 新增「支付设置（管理端）」一节。不做页面：属于 AIH-TASK-194。
+    status: ready
+    depends_on:
+      - AIH-TASK-190
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） 逐条一致，以 §2「管理端接口」「支付设置服务」、§4 设置的并发、§6、§7 标 191 的一行 为准；本设计建立在 docs/design/AIH-TASK-172-payments-gateway.md（A，设计闸门 #580 已批准 v3）与 docs/design/AIH-TASK-179-payments-review.md（B，设计闸门 #585 已批准 v3） 之上，C 没有改写的地方沿用 A 与 B；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '两个处理函数都显式调用 require_admin；路由总是注册；GET 返回全部业务字段、version、updated_at、updated_by（管理员邮箱，种子行为 null）；PUT 请求体为全部业务字段加 version（extra=forbid；严格类型：金额为 JSON 字符串、推荐金额为字符串数组、秒数与 version 为 JSON 整数，布尔值与字符串形式的数字都不收；缺字段或类型错误由请求层返回 422 VALIDATION_ERROR），调用 update_payment_settings，把 PAYMENT_SETTINGS_INVALID（422）、PAYMENT_SETTINGS_VERSION_CONFLICT（409）、PAYMENTS_MISCONFIGURED（503）原样交给现有的错误信封；成功 200 返回与 GET 相同的内容；金额为两位小数定点字符串，推荐金额为字符串数组；updated_at 照仓库现有接口的写法（不带时区的 UTC、精确到秒、不带 Z）'
+      - 'app/schemas/admin_payment_settings.py：字段名与顺序照设计给出的 JSON 示例（GET 九个字段，PUT 前七个）；日志只记管理员用户 id 与新版本号，不记请求体'
+      - 'tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES 补两个新接口（其鉴权参数化用例自动覆盖匿名 401 与客户 403）；新增 tests/backend/test_admin_payment_settings_api.py，覆盖 GET 的字段与顺序、PUT 合规、规则不过、缺字段、多余字段、布尔值或字符串形式的秒数、数字形式的金额、版本冲突且数据不变、行缺失 503、种子行的 updated_by 为 null；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网；时间一律注入，不 sleep'
+      - 'docs/api.md 新增「支付设置（管理端）」一节：两个接口的路径、鉴权、字段与规则、乐观锁的用法、错误码'
+      - '只改本任务 allowed_change_paths 里的文件；支付设置服务只调用不修改；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - app/api/admin_payment_settings.py
+      - app/schemas/admin_payment_settings.py
+      - app/main.py
+      - tests/backend/test_admin_payment_settings_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-192
+    title: 支付第三批第五层：门户充值页与客户支付接口的前端封装
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「门户页面」的充值页：新增前端封装 frontend/src/api/customerPayments.ts（客户三个支付接口与 A 的建单）与门户页 /portal/topup，门户导航加一项；验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-191
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「支付（客户）」一节为准，交互以 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「门户页面」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/components/MoneyText.tsx；POST topups 的请求、响应与错误码以 docs/api.md 里 A 写的「客户建单」一节为准'
+      - '新增 frontend/src/api/customerPayments.ts 封装四个接口：GET topup-options、GET payments（page 与 page_size 照现有客户列表的封装写法）、GET payments/{payment_id}（payment_id 只原样放进路径）、POST topups（请求体只有 amount，金额为字符串）；AIH-TASK-193 复用这里的列表与详情封装'
+      - '新增 frontend/src/features/portal/TopupPage.tsx：读 topup-options；available 为假时只按 unavailable_reason 显示对应说明（五种，各有 i18n 文案），不显示表单；推荐金额显示为按钮，低于 effective_minimum 或高于 max_amount 的不可点，点了只把金额填进金额输入框、不提交；同一个输入框也用于自定义金额，先去掉首尾空白再按 ^[0-9]{1,6}(\.[0-9]{1,2})?$ 即时提示（发送的也是去空白后的字符串），下限为 effective_minimum（不是 min_amount）、上限为 max_amount（为空时不设），低于下限时去付款按钮不可点；有 recovery_minimum 时在表单上方说明至少充值 effective_minimum 才能恢复服务；金额用 MoneyText（币种取返回的 currency）；不写死任何金额'
+      - '提交：另有一个去付款的提交按钮，金额不合规时不可点；点它才 POST topups，请求中按钮不可再点；成功后 window.location.assign 返回的 redirect_url（不拼接、不读查询串里的地址）；失败显示错误码、信息与 request_id；TOPUP_BELOW_RECOVERY_MINIMUM 时重新读一次 topup-options；加载中与读取失败（带 request_id）两种状态'
+      - 'frontend/src/routes/paths.ts 登记 portalTopup（/portal/topup），frontend/src/routes/index.tsx 把它挂在门户的 RequireRole（CUSTOMER）与 PortalLayout 之下；frontend/src/layouts/PortalLayout.tsx 的门户导航在现有各项之后加一项（frontend/src/features/portal/NotificationsPage.test.tsx 里断言门户导航链接清单的用例同步补上这一项，断言意义不变）；不请求任何 /api/v1/admin/ 路径；文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts。测试（vitest + Testing Library）：customerPayments.test.ts 覆盖四个接口的路径、方法、查询串与请求体；TopupPage.test.tsx 覆盖设计 §7「充值页」一行的全部场景（含自定义金额低于 effective_minimum 时按钮不可点）；示例 uuid 全零'
+      - 'check_portal_topup：在 login_customer 之后经门户导航打开充值页（href 为 /portal/topup）；后端值取页面自己发出的 GET /api/v1/customer/topup-options 的响应体（被动观察，不自己发请求）：available 为假时断言页面显示了 unavailable_reason 对应的说明且没有提交按钮，为真时断言推荐金额按钮的个数等于 preset_amounts 的个数；不点任何按钮、不输入、不提交。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 4 的勾选在 AIH-TASK-195）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerPayments.ts
+      - frontend/src/api/customerPayments.test.ts
+      - frontend/src/features/portal/TopupPage.tsx
+      - frontend/src/features/portal/TopupPage.test.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/layouts/PortalLayout.tsx
+      - frontend/src/features/portal/NotificationsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_topup
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-193
+    title: 支付第三批第六层：门户支付历史页与付款结果页
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「门户页面」的支付历史页与付款结果页：新增门户页 /portal/payments（分页列表）与 /portal/payments/:paymentId（状态与等待中的刷新），门户导航加一项；验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-192
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「支付（客户）」一节为准，交互以 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「门户页面」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/components/MoneyText.tsx；接口调用只用 AIH-TASK-192 写的 frontend/src/api/customerPayments.ts，不改它'
+      - '新增 frontend/src/features/portal/PaymentsHistoryPage.tsx：表格列为编号、金额（MoneyText）、状态（七种客户侧状态各有 i18n 文案，含义照设计的状态表）、实际入账额、创建时间与付款时间（按 +8 显示并标 MYT；实际入账额与付款时间为空时显示短横）；按页码分页（每页 20 条，页码放在地址查询串 page 里；page 不是正整数时按 1 处理并把地址改为 page=1，大于最后一页而 total 大于 0 时跳到最后一页；点一行进结果页时用路由 state 带上当前页码，结果页的返回支付历史链接用这个页码，没有 state（例如从 Stripe 跳回）时回到第 1 页，结果页的地址本身不加参数、与 A 的 success_url 一致；接口返回 total；上一页 / 下一页按 total 判断是否可用，不照门户其他列表的游标写法）；点一行进付款结果页；加载中、失败（带 request_id）、空列表三种状态'
+      - '新增 frontend/src/features/portal/PaymentResultPage.tsx：读详情；status 为 PENDING 时每 3 秒再读一次、最多 40 次，之后停止并提示稍后在支付历史查看；其他状态停止刷新；离开页面时停止计时；查询串 result=cancelled 时顶部提示你取消了付款，result=success 不改变显示逻辑；404 显示找不到这笔支付；第一次读取失败（非 404）显示错误与 request_id 和重试按钮、不自动刷新，重试成功且为 PENDING 时从 0 重新计 40 次；刷新中某次读取失败（非 404）计入 40 次并继续刷新、保留上一次成功的内容，40 次用完而最后一次失败时同时显示还在确认中的提示、这次的错误与 request_id，并给重试按钮（重试成功且为 PENDING 时从 0 重新计 40 次）；刷新中读到 404 时停止刷新并显示找不到这笔支付；有返回支付历史与再次充值的链接'
+      - 'frontend/src/routes/paths.ts 登记 portalPayments（/portal/payments）与 portalPaymentResult（/portal/payments/:paymentId，与 A 的 success_url 一致），frontend/src/routes/index.tsx 把两页挂在门户的 RequireRole（CUSTOMER）与 PortalLayout 之下；frontend/src/layouts/PortalLayout.tsx 的门户导航在充值一项之后加一项（frontend/src/features/portal/NotificationsPage.test.tsx 的导航链接清单同步补上，断言意义不变）；不请求任何 /api/v1/admin/ 路径；文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library，计时用假时钟）：PaymentsHistoryPage.test.tsx 覆盖列、七种状态文案、分页、点一行的跳转、三种状态；PaymentsHistoryPage.test.tsx 另覆盖空值短横、查询串里的页码、page 为 0 或非数字时按 1、超过最后一页时跳到最后一页、点一行时带上页码；PaymentResultPage.test.tsx 另覆盖返回链接用 state 里的页码、没有 state 时回到第 1 页；PaymentResultPage.test.tsx 覆盖 PENDING 时 3 秒刷新、40 次后停止并提示、变为终态后停止、卸载后不再请求、result=cancelled 提示、404、第一次读取失败后重试成功重新计数、刷新中读取失败、40 次用完且最后一次失败时提示与错误与重试按钮同时出现、刷新中读到 404；示例 uuid 全零'
+      - 'check_portal_payments：在 login_customer 之后经门户导航打开支付历史页（href 为 /portal/payments）；后端值取页面自己发出的 GET /api/v1/customer/payments 的响应体（被动观察），断言表格行数与 items 条数一致，items 非空时第一行的编号等于 items[0].id，空表显示空状态也算通过；不点行、不点任何按钮。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 4 的勾选在 AIH-TASK-195）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/features/portal/PaymentsHistoryPage.tsx
+      - frontend/src/features/portal/PaymentsHistoryPage.test.tsx
+      - frontend/src/features/portal/PaymentResultPage.tsx
+      - frontend/src/features/portal/PaymentResultPage.test.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/layouts/PortalLayout.tsx
+      - frontend/src/features/portal/NotificationsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_payments
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-194
+    title: 支付第三批第七层：管理端支付设置页
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「管理端页面」：新增前端封装 frontend/src/api/adminPaymentSettings.ts 与管理端页 /payment-settings（读出、编辑、带版本保存），顶栏加一项；验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-193
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「支付设置（管理端）」一节为准，交互以 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「管理端页面」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/components/MoneyText.tsx'
+      - '新增 frontend/src/api/adminPaymentSettings.ts 封装 GET 与 PUT 两个接口（PUT 请求体为全部业务字段加 version，金额为字符串，推荐金额为字符串数组）'
+      - '新增 frontend/src/features/payments/PaymentSettingsPage.tsx：表单字段即接口字段；金额输入框去掉首尾空白后原样作为字符串发送，最高额去空白后为空表示 null；两个秒数输入框去空白后必须匹配 ^[0-9]+$ 才转成整数发送，否则在页面上提示、不发请求（空框不当 0）；推荐金额用一个逗号分隔的输入框，保存前按逗号拆分、去掉每段首尾空白并丢掉空段；显示当前 version、最后修改人与时间（按 +8 显示并标 MYT，种子行的修改人显示短横）；保存时带上读到的 version；409 时提示设置已被他人修改并给出刷新按钮；422 显示后端的错误码与信息；保存成功用返回值刷新表单；加载中与读取失败（带 request_id）两种状态；保存中按钮不可再点'
+      - 'frontend/src/routes/paths.ts 登记 paymentSettings（/payment-settings），frontend/src/routes/index.tsx 把它挂在管理端的 RequireRole（ADMIN）与 AppLayout 之下；frontend/src/layouts/AppLayout.tsx 顶栏在现有各项之后加一项；不请求任何 /api/v1/customer/ 路径；文案走 i18n，满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：adminPaymentSettings.test.ts 覆盖两个接口的路径、方法与请求体；PaymentSettingsPage.test.tsx 覆盖读出与回填、推荐金额的拆分与去空白及空段、最高额留空或只有空白为 null、秒数框为空或不是整数时不发请求、保存带版本、409 提示与刷新、422 展示、成功刷新、两种状态；示例 uuid 全零'
+      - 'open_payment_settings：在 login 之后经顶栏打开支付设置页（href 为 /payment-settings）；后端值取页面自己发出的 GET /api/v1/admin/payment-settings 的响应体（被动观察），断言最低充值额输入框的值等于 min_amount、版本显示等于 version；不改任何输入、不点保存。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 4 的勾选在 AIH-TASK-195）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminPaymentSettings.ts
+      - frontend/src/api/adminPaymentSettings.test.ts
+      - frontend/src/features/payments/PaymentSettingsPage.tsx
+      - frontend/src/features/payments/PaymentSettingsPage.test.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/routes/index.tsx
+      - frontend/src/layouts/AppLayout.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_payment_settings
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-195
+    title: 支付第三批第八层：支付设置与对客户开放充值的运维文档和部署配置清理
+    purpose: >-
+      按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §8、§2「支付设置服务」「最小恢复额」：docs/payment-flow.md 补支付设置、最小恢复额与对客户开放充值的步骤，docs/deployment.md 删掉 A 的四个配置项，docs/TODO.md 勾选 Phase 4 本批完成的项。不改代码与测试。
+    status: ready
+    depends_on:
+      - AIH-TASK-194
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） 逐条一致，以 §8、§1「明确不做什么」、§2「支付设置服务」「最小恢复额」「门户页面」 为准；本设计建立在 docs/design/AIH-TASK-172-payments-gateway.md（A，设计闸门 #580 已批准 v3）与 docs/design/AIH-TASK-179-payments-review.md（B，设计闸门 #585 已批准 v3） 之上，C 没有改写的地方沿用 A 与 B；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'docs/payment-flow.md 新增三节：支付设置（每个字段的含义与范围、乐观锁、改动写审计、改动不影响已建好的支付）；最小恢复额（公式、向上取到分、为什么要缓冲（ADR-0010）、超过单笔上限时怎么办）；对客户开放充值（照设计 §8：B 的开放前检查完成后核对支付设置，再设 BILLING_PAYMENT_TOPUPS_OPEN=true 并重启；回滚照设计 §8：设为 false、清空建单允许名单、重启；之后原本能充值的客户与内部租户都得到 TOPUPS_NOT_OPEN（开放检查在计费模式之前），DISABLED 与 CLOSED 的客户照旧先得到 ACCOUNT_READ_ONLY）；A 写的配置说明里提到这四个配置项的地方改为指向支付设置一节'
+      - 'docs/deployment.md 删掉 payment_topup_min、payment_topup_max、payment_pending_timeout_seconds、payment_reuse_window_seconds 四个配置项的说明，并加一句它们已改由管理端支付设置维护'
+      - 'docs/TODO.md 的 Phase 4 章节只把「充值 UI（金额不许硬编码）」一项改为 [x]，并在同一行末尾照钱包页一项的写法加括注（AIH-TASK-188..194，设计闸门 #587 v3）；这一项下面关于 ADR-0010 最小恢复额的子条目保留不改；其余勾选不动；不改 planning-v1 块（「后续计划」里最小恢复额的说明已在登记 PR 里改掉）'
+      - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #587'
+    allowed_change_paths:
+      - docs/payment-flow.md
+      - docs/deployment.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
