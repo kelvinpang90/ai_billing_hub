@@ -305,6 +305,11 @@ class AuditAction(enum.StrEnum):
     # 不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。前后状态只有
     # `public_id` 与 `low_balance_threshold`。
     TENANT_LOW_BALANCE_THRESHOLD_SET = "TENANT_LOW_BALANCE_THRESHOLD_SET"
+    # AIH-TASK-159（设计闸门 #565 v6 §2「管理端接口」）：写入方是 app/api/admin_statements.py
+    # 的手动补生成，经 `catch_up_tenant` 的 `before_commit` 钩子与对账单行同一事务，每份新生成的
+    # 对账单一条；`entity_type = monthly_statement`、`entity_id = public_id`，`after_state` 只有
+    # `period`。不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
+    STATEMENT_GENERATE = "STATEMENT_GENERATE"
 
 
 class AuditLog(Base):

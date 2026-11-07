@@ -72,6 +72,8 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "ai_usage_outbox",
         # 税务政策版本的 public_id：app/services/tax_policy.py（AIH-TASK-078）。
         "tax_policy_version",
+        # 对账单的 public_id：app/api/admin_statements.py 的手动补生成（AIH-TASK-159）。
+        "monthly_statement",
     }
 )
 

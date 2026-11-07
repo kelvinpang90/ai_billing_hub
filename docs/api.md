@@ -2182,6 +2182,7 @@ SHA256(RAW_REQUEST_BODY)
 | `ai_provider` | 供应商的 `id`（`public_id`） |
 | `ai_model` | 模型的 `id`（`public_id`） |
 | `ai_model_alias` | 别名段的 `id`（`public_id`）：映射是新段的，撤销是被截断那一段的 |
+| `monthly_statement` | 对账单的 `statement_id`（`public_id`），见[月度对账单（管理端）](#月度对账单管理端) |
 
 两类的清单在 `app/services/audit_query.py`；新增一种写审计的 `entity_type` 而没有归类，
 `tests/backend/test_admin_audit_api.py` 的扫描用例会红。
@@ -3469,6 +3470,145 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 
 ⚠️ `run_id` 的形状在鉴权**之后**判：没带令牌时，任何 `run_id`（包括不合法的）都先得到 401，CUSTOMER 先得到 403。
 分页越界则与其他列表接口一样先于鉴权得到 422。
+
+## 月度对账单（管理端）
+
+设计依据：设计闸门 #565 `APPROVED: design v6`，全文见
+[design/AIH-TASK-154-monthly-statements.md](design/AIH-TASK-154-monthly-statements.md) §2「管理端接口」「快照」、§6。
+实现登记为 AIH-TASK-159。
+
+每个预付客户（`billing_mode = PREPAID`）每个账期（马来西亚日历月，`YYYY-MM`）一份对账单，由每小时的后台任务在
+新月第 2 日 01:00（马来西亚时间）之后生成，生成即定稿（`FINALIZED`），之后不可修改。首个账期是 `2026-12`，
+之前的月份不生成。这三个接口让管理员按客户与账期查看对账单，并对某个客户立即补生成缺失的对账单。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/statements` | 200，对账单分页 | 401 / 403 / 422 / 503 |
+| `GET /api/v1/admin/statements/{statement_id}` | 200，对账单详情 | 401 / 403 / 404 / 503 |
+| `POST /api/v1/admin/customers/{customer_id}/statements/generate` | 200，本次新生成的对账单 | 401 / 403 / 404 / 409 / 500 / 503 |
+
+只有 ADMIN 能调。列表与详情**只读**：不写审计、不写任何行。管理端也看不到成本、汇率、加价与毛利：快照里本来就
+没有这些字段。
+
+### `GET /api/v1/admin/statements` —— 对账单列表
+
+| 参数 | 规则 |
+| --- | --- |
+| `customer_id` | 可选；客户的 `id`（`public_id`）。没有这个客户时返回空页（`total` 为 0），与「有这个客户但没有对账单」不区分 |
+| `period` | 可选；账期 `YYYY-MM`。不是这个形状、月份不在 01–12、年份不在 2000–2999（如 `2026-13`、`2026-1`）都是 422 |
+| `page` / `page_size` | 见[分页](#分页spec-108)：1–10000 与 1–100，默认 1 与 20；超出范围 422，在鉴权**之前**校验 |
+
+两个筛选可以同时给，按 AND 组合。`period` 在鉴权**之后**判：没带令牌时先得到 401。
+
+`data` 是[分页](#分页spec-108)对象，`items` 里每一项恰好这 8 个键：
+
+```json
+{
+  "statement_id": "00000000-0000-0000-0000-000000000000",
+  "statement_number": "ST-202612-0A1B2C3D",
+  "customer_id": "00000000-0000-0000-0000-000000000000",
+  "company_name": "Acme Sdn Bhd",
+  "period": "2026-12",
+  "status": "FINALIZED",
+  "closing_balance": "87.50000000",
+  "finalized_at": "2027-01-01T17:00:00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `statement_id` | 对账单的对外 id（uuid4）；详情接口用它 |
+| `statement_number` | 对账单编号：`ST-<账期 YYYYMM>-` 加 8 个 Crockford base32 字符，全局唯一 |
+| `customer_id` | 客户的 `id`（`public_id`） |
+| `company_name` | **快照里的**公司名（生成时冻结），之后改公司名不影响已生成的对账单 |
+| `period` | 账期 `YYYY-MM` |
+| `status` | `FINALIZED`（V1 只产生这一种；`DRAFT` / `VOID` 只是保留的状态值） |
+| `closing_balance` | 快照里的期末余额，见下面「快照」 |
+| `finalized_at` | 定稿时刻（不带时区的 UTC，精确到秒，见[时间](#时间)） |
+
+**排序**：按账期倒序（最新的账期在前）；同一账期的按内部行 id 倒序（后生成的在前）。
+
+### `GET /api/v1/admin/statements/{statement_id}` —— 对账单详情
+
+`data` 是列表项的 8 个键，再加下面 4 个：
+
+| 字段 | 说明 |
+| --- | --- |
+| `cutoff_at` | 这一期的 T+1 cut-off 时刻：次月 2 日 00:00（马来西亚时间），以不带时区的 UTC 表示 |
+| `ledger_high_sequence` | 生成时读到的钱包版本号（账本高水位，整数）：序号不大于它的账本行按归属规则进了这一期或之前各期，之后入账的进下一期。便于排查 |
+| `generated_by_email` | 手动补生成的管理员的邮箱；后台任务生成的为 `null` |
+| `snapshot` | 完整快照，嵌套对象，键见下面「快照」；不展开到顶层 |
+
+`statement_id` 不是小写规范 UUID（8-4-4-4-12），或没有这份对账单：同一个 404 `STATEMENT_NOT_FOUND`。形状在鉴权
+**之后**判。
+
+### `POST /api/v1/admin/customers/{customer_id}/statements/generate` —— 按客户补生成
+
+没有请求体。对这个客户从首个账期起、按账期升序补生成每一期**已到期而缺失**的对账单（与后台任务是同一个函数，
+同步执行），已有的不重算、不改。
+
+`data` 是本次**新生成**的对账单数组，按账期升序，每项恰好 2 个键；什么都没缺时是空数组：
+
+```json
+[
+  { "statement_id": "00000000-0000-0000-0000-000000000000", "period": "2026-12" }
+]
+```
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | 没有这个客户 |
+| 409 | `STATEMENT_NOT_ELIGIBLE` | 客户不是预付（内部计量客户），或没有钱包 |
+| 500 | `INTERNAL_ERROR` | 某一期生成失败（账本自检不等、cut-off 时刻没有生效的税务政策、提交失败等）。固定文案，不带金额与公司名 |
+
+- 预付但还没有到期的账期（首个账期 `2026-12` 在 2027-01-02 01:00 马来西亚时间才到期）：200 空数组。
+- 钱包在某一期结束之后才建：那一期不生成（不是错误）。
+- **某一期失败时**：失败之前已生成的各期照常保留（各自的审计也在），失败的那一期与之后各期都没有生成；响应是 500，
+  不返回已生成的部分。刷新列表即可看到已生成的各期。数据缺陷导致的失败重试结果相同，处置见 `docs/runbook.md`。
+
+### 审计
+
+手动补生成的每份新对账单写一条审计，与对账单行**同一事务**提交（审计写不进去，对账单也不写）；已有的对账单不写。
+后台任务生成的对账单不写审计。
+
+| 字段 | 值 |
+| --- | --- |
+| `action` | `STATEMENT_GENERATE` |
+| `entity_type` | `monthly_statement` |
+| `entity_id` | 对账单的 `statement_id` |
+| `after_state` | `{"period": "YYYY-MM"}`，只有账期，不带金额与公司名 |
+| `before_state` | `null` |
+| 操作者、`ip_address`、`user_agent` | 调用的管理员与这次请求的 |
+
+### 快照
+
+`snapshot` 的键集合固定（`schema_version` 为 1），恰好下面这些键，不含任何成本、汇率、加价、毛利、价格版本、规则或
+内部 id。**金额都是带符号、恰好 8 位小数的字符串**（见[金额](#金额inv-10)），扣款为负；计数与 token 数是整数。
+
+| 字段 | 说明 |
+| --- | --- |
+| `schema_version` | 整数 `1` |
+| `period` | 账期 `YYYY-MM` |
+| `currency` | `"MYR"` |
+| `company_name` | 生成时的公司名 |
+| `tax_notice` | `{"zh": …, "en": …}`：cut-off 时刻生效的税务政策版本的说明原文，逐字照抄；以后改措辞不影响已生成的对账单 |
+| `opening_balance` | 期初余额：等于上一期对账单的 `closing_balance`；客户的第一份对账单为截至本期之前归属的账本之和 |
+| `total_topup` | 本期充值之和（≥ 0） |
+| `total_ai_usage` | 本期发生的 AI 用量扣费之和（≤ 0） |
+| `total_adjustments` | 本期调账、赠送、退款调整与系统更正之和 |
+| `prior_period` | 上期调整：`usage`（数组，每项 `usage_period` 原用量月份 `YYYY-MM`、`request_count` 行数、`amount` 金额，按 `usage_period` 升序）、`rebill`（重新计费之和）、`total`（两者之和）。在 cut-off 之后才入账的往期用量记在这里，原月份的对账单不变 |
+| `closing_balance` | 期末余额 = `opening_balance` + `total_topup` + `total_ai_usage` + `total_adjustments` + `prior_period.total` |
+| `request_count` | 本期用量请求数（含零收费请求） |
+| `conversation_count` | 本期去重的会话数（没有会话 id 的请求不计） |
+| `input_tokens` / `output_tokens` | 本期输入 / 输出 token 数（没有 token 的请求按 0） |
+| `total_customer_charges` | 本期用量的客户收费之和（≥ 0，等于 `−total_ai_usage`） |
+| `by_provider` | 数组，每项 `provider_code`、`request_count`、`input_tokens`、`output_tokens`、`charges`，按 `provider_code` 升序 |
+| `by_model` | 数组，每项 `provider_code`、`model_code` 与上面四个计数字段，按 `(provider_code, model_code)` 升序 |
+| `by_project` | 数组，每项 `project_public_id`、`project_name`（生成时的项目名）与上面四个计数字段，按项目名升序（同名按 `project_public_id`） |
+
+⚠️ **期末余额不是某一时刻的钱包余额**，而是按 T+1 归属之后的余额：本月发生、在次月 1 日（宽限日）内入账的用量
+算在本月；在 cut-off 之后才入账的往期用量算在入账时的那一期（作为上期调整）。所以期末余额与月末那一刻、或生成那一刻
+钱包页上的余额都可能不同。
 
 ---
 
