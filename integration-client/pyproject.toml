@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acuven-billing-client"
+# 与 acuven_billing_client/__init__.py 的 __version__ 一致，随客户端改动一起递增。
+version = "0.1.0"
+description = "Acuven Billing Client — usage events, local outbox, request signing and effective status for integrated applications"
+requires-python = ">=3.12"
+# 只用标准库：不与任何接入方的依赖冲突（设计闸门 #571 §2「包的位置与形态」）。
+dependencies = []
+
+[tool.setuptools]
+packages = ["acuven_billing_client"]

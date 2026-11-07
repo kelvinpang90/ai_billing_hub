@@ -77,5 +77,7 @@ select = ["E", "F", "W", "I", "B", "UP"]
 [tool.pytest.ini_options]
 # 只跑后端测试。tests/ 顶层那两个文件是流程脚本自己的 unittest 回归，
 # 由 WORKFLOW §7 的 `python -m unittest discover -s tests` 跑，两套互不干扰。
-testpaths = ["tests/backend"]
-pythonpath = ["."]
+# integration-client/tests 是 Billing Client（acuven_billing_client）自己的测试，随 backend-tests 分片
+# 在 CI 里跑（同样不许 skipped）；pythonpath 加 integration-client 让它不经安装即可导入（设计闸门 #571 §2）。
+testpaths = ["tests/backend", "integration-client/tests"]
+pythonpath = [".", "integration-client"]
