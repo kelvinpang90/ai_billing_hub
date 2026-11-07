@@ -8,6 +8,7 @@
 - [客户门户认证](#客户门户认证)（AIH-TASK-093）：接受邀请、当前用户、客户自己开启 2FA、客户端 `/customer/me`
 - [客户钱包](#客户钱包)（AIH-TASK-099）：客户自己的余额与钱包流水，流水用序号游标分页
 - [客户通知](#客户通知)（AIH-TASK-127）：客户自己的门户通知、未读数与标已读（第一批客户写接口）
+- [月度对账单（客户）](#月度对账单客户)（AIH-TASK-160）：客户自己已定稿的对账单列表与详情
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端钱包流水](#管理端钱包流水)（AIH-TASK-084）：序号游标分页，是下面「分页」的例外
@@ -3609,6 +3610,74 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 ⚠️ **期末余额不是某一时刻的钱包余额**，而是按 T+1 归属之后的余额：本月发生、在次月 1 日（宽限日）内入账的用量
 算在本月；在 cut-off 之后才入账的往期用量算在入账时的那一期（作为上期调整）。所以期末余额与月末那一刻、或生成那一刻
 钱包页上的余额都可能不同。
+
+---
+
+## 月度对账单（客户）
+
+设计依据：设计闸门 #565 `APPROVED: design v6`，全文见
+[design/AIH-TASK-154-monthly-statements.md](design/AIH-TASK-154-monthly-statements.md) §2「客户接口」「快照」、§6。
+实现登记为 AIH-TASK-160。对账单是什么、怎么生成，见[月度对账单（管理端）](#月度对账单管理端)开头。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/customer/statements` | CUSTOMER 的访问令牌 | 200，自己的对账单分页 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/statements/{statement_id}` | 同上 | 200，一份对账单与完整快照 | 401 / 403 / 404 / 500 / 503 |
+
+- 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，路径、查询串里都没有租户参数（带了 `customer_id`、`tenant_id` 也只会被忽略）；ADMIN 不能调（403 `CUSTOMER_REQUIRED`）。
+- **只读**：不写审计、不写任何行；四种 `account_status` 都返回 200（`DISABLED` / `CLOSED` 照常可读）。
+- 只返回本客户**已定稿**（`FINALIZED`）的对账单。**不按客户当前的计费方式过滤**：没有对账单的客户（包括一直是内部计量的客户）得到空页；从预付改为内部计量的客户仍能看到改之前的对账单。
+
+### `GET /api/v1/customer/statements` —— 客户自己的对账单列表
+
+| 参数 | 规则 |
+| --- | --- |
+| `page` / `page_size` | 见[分页](#分页spec-108)：1–10000 与 1–100，默认 1 与 20；超出范围 422，在鉴权**之前**校验 |
+
+`data` 是[分页](#分页spec-108)对象，`items` 里每一项恰好这 5 个键：
+
+```json
+{
+  "statement_id": "00000000-0000-0000-0000-000000000000",
+  "statement_number": "ST-202612-0A1B2C3D",
+  "period": "2026-12",
+  "closing_balance": "87.50000000",
+  "finalized_at": "2027-01-01T17:00:00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `statement_id` | 对账单的对外 id（uuid4）；详情接口用它 |
+| `statement_number` | 对账单编号：`ST-<账期 YYYYMM>-` 加 8 个 Crockford base32 字符 |
+| `period` | 账期 `YYYY-MM`（马来西亚日历月） |
+| `closing_balance` | 快照里的期末余额（带符号、恰好 8 位小数的字符串），见[快照](#快照)末尾的说明：不是某一时刻的钱包余额 |
+| `finalized_at` | 定稿时刻（不带时区的 UTC，精确到秒，见[时间](#时间)） |
+
+**排序**：按账期倒序（最新的账期在前）。一个客户每个账期至多一份对账单。
+
+### `GET /api/v1/customer/statements/{statement_id}` —— 客户自己的一份对账单
+
+`data` 是列表项的 5 个键，再加一个 `snapshot`：这份对账单的完整快照，嵌套对象，不展开到顶层。快照的键与每个字段的
+含义与管理端相同，见[月度对账单（管理端）的快照](#快照)（`company_name`、`tax_notice` 等都在快照里）。
+
+**客户看不到的字段**（管理端详情有、这里没有）：`customer_id`、顶层的 `company_name` 与 `status`、`cutoff_at`、
+`ledger_high_sequence`、生成者（`generated_by_email`）。快照里本来就没有成本、汇率、加价、毛利、价格版本、规则或
+内部 id（INV-7）；客户与管理端看到的是同一份快照。
+
+`statement_id` 不是小写规范 UUID（8-4-4-4-12）、没有这份对账单、属于别的客户、或尚未定稿（非 `FINALIZED`）：同一个
+404 `STATEMENT_NOT_FOUND`，错误体相同，几种情况不区分。形状在鉴权**之后**判：没带令牌时先得到 401。
+
+### 错误（两个接口）
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 404 | `STATEMENT_NOT_FOUND` | 只有详情：见上 |
+| 422 | `VALIDATION_ERROR` | 只有列表：`page` 或 `page_size` 不合规 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 |
 
 ---
 
