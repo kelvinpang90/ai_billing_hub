@@ -104,6 +104,12 @@ export const ROUTES = {
    */
   portalConversations: "/portal/conversations",
   /**
+   * 客户门户对账单页（AIH-TASK-162，设计闸门 #565 v6 §2「前端」）。在 {@link ROUTES.portalHome} 之下；点一行在列表下方
+   * 显示详情，不跳子路由。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `check_portal_statements` 按这个 href 找
+   * 门户导航的链接，改了要同步那里。
+   */
+  portalStatements: "/portal/statements",
+  /**
    * 客户门户通知页（AIH-TASK-128，设计闸门 #471 v7 §2「前端」）。在 {@link ROUTES.portalHome} 之下；门户导航的这一项
    * 旁边显示未读数。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `check_portal_notifications` 按这个 href 找门户
    * 导航的链接，改了要同步那里。

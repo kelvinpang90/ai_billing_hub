@@ -559,7 +559,7 @@ describe("Portal navigation unread count", () => {
     await screen.findByText("You have no notifications yet.");
 
     const links = within(screen.getByRole("navigation")).getAllByRole("link");
-    expect(links.map((link) => link.textContent)).toEqual(["Home", "Wallet", "Usage", "Conversations", "Notifications"]);
+    expect(links.map((link) => link.textContent)).toEqual(["Home", "Wallet", "Usage", "Conversations", "Statements", "Notifications"]);
     expect(links.at(-1)).toHaveAttribute("href", ROUTES.portalNotifications);
     expect(navCount()).toBeNull();
   });

@@ -26,6 +26,8 @@
  * 还要有「Project」下拉，未选客户时可以是禁用的）各加了一条只读断言（设计闸门 #507 v4 §2「前端」），两步仍不提交任何表单。
  * AIH-TASK-161 加了管理端月度对账单页的一个只读步骤（open_statements），排在 login 之后，经顶栏自己进对账单页（设计闸门
  * #565 v6 §2「前端」）。
+ * AIH-TASK-162 加了门户对账单页的一个只读步骤（check_portal_statements），排在 login_customer 之后，经门户导航自己进
+ * 对账单页（设计闸门 #565 v6 §2「前端」）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -105,6 +107,9 @@
  * - 门户通知页（check_portal_notifications）只点门户导航里的「Notifications」（href 为 /portal/notifications）这一个链接：
  *   不点「Mark as read」「Mark all as read」（标已读会写数据）、不点「Load more」（不翻页）、不点任何别的按钮与链接，
  *   不填也不提交任何表单。
+ * - 门户对账单页（check_portal_statements）只点门户导航里的「Statements」（href 为 /portal/statements）这一个链接：
+ *   不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不点「Try again」或任何别的按钮与链接，
+ *   不填也不提交任何表单（页面本身没有写操作入口）。
  * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
  *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
@@ -459,6 +464,17 @@
  *                   （header 里 aria-label 为「Unread notifications」的元素，portal.nav.unreadCount）：unread_count 为 0 时一个
  *                   都没有，否则恰好一个、文字等于 unread_count。不点「Mark as read」「Mark all as read」「Load more」，不提交
  *                   任何表单。报到前把通知一块滚动到视口里（规则同 check_portal_wallet）
+ *   check_portal_statements
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Statements」链接（en.json 的
+ *                   portal.nav.statements，href 为 paths.ts 的 portalStatements，即 /portal/statements）进对账单页。页面落定：
+ *                   地址是 /portal/statements，门户外壳在、管理端顶栏不在，对账单列表一块（role=region、aria-label 为「Your
+ *                   statements」，portal.statements.listTitle）不再显示 portal.statements.loading；显示 portal.statements.loadFailed
+ *                   是 page_error。后端值取页面在点击之后自己发出的 GET /api/v1/customer/statements 的响应体（被动观察，不自己发
+ *                   请求、不拦截；取最近一次读完的那一次；详情接口 …/statements/{statement_id} 不算），不是 200、不是成功信封或
+ *                   没有 items 数组都是 assertion_failed。对账单表格（表头有「Statement number」「Period」）里带 data-row-key 的
+ *                   数据行数与 items 的条数一致；items 为空时显示空状态（portal.statements.empty）、没有数据行，同样算通过。
+ *                   不点行（不打开详情）、不点「Previous」「Next」，不提交任何表单。报到前把列表一块滚动到视口里（规则同
+ *                   check_portal_wallet）
  *   check_portal_usage_summary
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
  *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
@@ -725,6 +741,15 @@ const TEXT = {
   portalNotificationsEmpty: "You have no notifications yet.", // portal.notifications.empty
   portalNotificationsTime: "Time (MYT)", // portal.notifications.field.occurredAt —— 通知表格的列头
   portalNotificationsType: "Notification", // portal.notifications.field.type
+  portalNavStatements: "Statements", // portal.nav.statements —— 门户导航的对账单项
+  portalStatementsTitle: "Your statements", // portal.statements.listTitle —— 对账单列表一块的 aria-label
+  portalStatementsLoading: "Loading your statements…", // portal.statements.loading
+  portalStatementsLoadFailed: "Your statements could not be loaded.", // portal.statements.loadFailed
+  // portal.statements.empty
+  portalStatementsEmpty:
+    "You have no statements yet. Each month's statement is created on the 2nd day after that month ends.",
+  portalStatementsNumber: "Statement number", // portal.statements.field.number —— 对账单表格的列头
+  portalStatementsPeriod: "Period", // portal.statements.field.period
   portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
   portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
   portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
@@ -783,6 +808,7 @@ const TEXT = {
   portalUsagePath: "/portal/usage",
   portalConversationsPath: "/portal/conversations",
   portalNotificationsPath: "/portal/notifications",
+  portalStatementsPath: "/portal/statements",
   // 管理端顶栏各项指向的路径（paths.ts 的 dashboard、customers、audit、catalogProviders、catalogMeterTypes、
   // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics、walletReconciliation）。门户首页上不许有
   // 指向它们的链接。
@@ -908,6 +934,12 @@ const CUSTOMER_CONVERSATIONS_API = /^\/api\/v1\/customer\/conversations$/;
  * 那一次不带查询串，不算通知页的请求。
  */
 const CUSTOMER_NOTIFICATIONS_API = /^\/api\/v1\/customer\/notifications$/;
+
+/**
+ * 客户自己的对账单列表接口的路径（frontend/src/api/customerStatements.ts 的 CUSTOMER_STATEMENTS_URL）。详情
+ * （…/statements/{statement_id}）不匹配：check_portal_statements 不点行，页面本来也不该发它。
+ */
+const CUSTOMER_STATEMENTS_API = /^\/api\/v1\/customer\/statements$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -1394,6 +1426,8 @@ const network = {
   customerConversations: new Map(),
   /** 客户自己的通知接口（只记 GET）：requestId → { newest, status, finished, failed, seq }。查询串本身不保存。 */
   customerNotifications: new Map(),
+  /** 客户自己的对账单列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
+  customerStatements: new Map(),
   seq: 0,
 };
 
@@ -1418,8 +1452,24 @@ function trackedRequest(requestId) {
     network.customerUsage.get(requestId) ??
     network.customerUsageSummary.get(requestId) ??
     network.customerConversations.get(requestId) ??
-    network.customerNotifications.get(requestId)
+    network.customerNotifications.get(requestId) ??
+    network.customerStatements.get(requestId)
   );
+}
+
+/** 是不是客户自己的对账单列表接口（同源 https、路径恰好是 /api/v1/customer/statements）。不保存 URL。 */
+function isCustomerStatementsList(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" && parsed.hostname === network.host && CUSTOMER_STATEMENTS_API.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1967,6 +2017,14 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        if (isCustomerStatementsList(params.request?.url) && params.request?.method === "GET") {
+          network.customerStatements.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -2257,7 +2315,8 @@ function latestCustomerMeResponse(afterSeq) {
  * 不带 month 的 GET /api/v1/customer/usage-summary（network.customerUsageSummary，同样只认 newest）；
  * check_portal_conversations 拿它取不带 cursor 的 GET /api/v1/customer/conversations（network.customerConversations，
  * 同样只认 newest）；check_portal_notifications 拿它取带 page_size、不带 cursor 的 GET /api/v1/customer/notifications
- * （network.customerNotifications，同样只认 newest）。
+ * （network.customerNotifications，同样只认 newest）；check_portal_statements 拿它取 GET /api/v1/customer/statements
+ * （network.customerStatements，记录里没有 newest，每一次都算）。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -4296,6 +4355,75 @@ function clickPortalNavNotifications(lib, T) {
   }
   for (const a of header.querySelectorAll("a")) {
     if (lib.norm(a.textContent) === T.portalNavNotifications && a.getAttribute("href") === T.portalNotificationsPath) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 门户对账单页的状态：门户外壳、管理端顶栏在不在；对账单列表一块（role=region、aria-label 为「Your statements」）在加载、
+ * 加载失败、空状态，以及表格（表头有「Statement number」「Period」）里带 data-row-key 的数据行数。只读 DOM，不点、不填。
+ */
+function probePortalStatements(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalStatementsTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    empty: false,
+    table: false,
+    rows: 0,
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(region, T.portalStatementsLoading);
+  out.failed = has(region, T.portalStatementsLoadFailed);
+  out.empty = has(region, T.portalStatementsEmpty);
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.portalStatementsNumber) || !heads.includes(T.portalStatementsPeriod)) {
+      continue;
+    }
+    out.table = true;
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      if (tr.querySelectorAll(":scope > td").length !== heads.length) {
+        continue;
+      }
+      out.rows += 1;
+    }
+    break;
+  }
+  return out;
+}
+
+/** 门户导航里文字为「Statements」、href 恰好为 /portal/statements 的链接。只点这一个。 */
+function clickPortalNavStatements(lib, T) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === T.portalNavStatements && a.getAttribute("href") === T.portalStatementsPath) {
       a.click();
       return true;
     }
@@ -7317,6 +7445,108 @@ async function stepCheckPortalNotifications(ctx) {
   }
 }
 
+/** 把对账单列表一块滚进视口：理由同 {@link PORTAL_NOTIFICATIONS_SCROLL_TEXT}，只换找的那一块的 aria-label。 */
+const PORTAL_STATEMENTS_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalStatementsTitle };
+
+async function stepCheckPortalStatements(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开对账单页：只点「Statements」这一个链接；不点行、不点「Previous」「Next」。
+  const afterSeq = network.seq;
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavStatements, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 对账单页落定：门户外壳在，列表一块不在加载，且是某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalStatements, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalStatementsPath &&
+        s.portalShell &&
+        s.region &&
+        !s.busy &&
+        (s.failed || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalStatementsPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面在点击之后自己发出的 GET /api/v1/customer/statements 的响应体（被动观察，不自己发请求）。
+  const seen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerStatements, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!seen.ok) {
+    throw fail("assertion_failed");
+  }
+  let expectedRows;
+  try {
+    const envelope = await readEnvelope(seen.value.requestId);
+    if (seen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    const items = envelope.data?.items;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expectedRows = items.length;
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：数据行数一致，items 为空时是空状态、没有数据行。
+  const shown = await waitFor(
+    () => evaluate(probePortalStatements, TEXT),
+    (s) =>
+      s.path === TEXT.portalStatementsPath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.busy &&
+      !s.failed &&
+      (expectedRows === 0 ? s.empty && s.rows === 0 : s.table && s.rows === expectedRows),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把列表一块滚进视口。只滚动，不点任何行或按钮。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_STATEMENTS_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_STATEMENTS_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -7354,6 +7584,7 @@ const STEPS = {
   check_portal_conversations: stepCheckPortalConversations,
   check_portal_conv_export: stepCheckPortalConvExport,
   check_portal_notifications: stepCheckPortalNotifications,
+  check_portal_statements: stepCheckPortalStatements,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
   check_portal_low_balance: stepCheckPortalLowBalance,
 };
@@ -7387,8 +7618,8 @@ async function main() {
     /**
      * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home、check_portal_dashboard、
      * check_portal_usage_summary 与 check_portal_low_balance 只认这之后发出的请求，check_portal_wallet、check_portal_usage、
-     * check_portal_conversations 与 check_portal_notifications 要求它不为 null（各自再按点击
-     * 「Wallet」「Usage」「Conversations」「Notifications」之前的序号截断）。
+     * check_portal_conversations、check_portal_notifications 与 check_portal_statements 要求它不为 null（各自再按点击
+     * 「Wallet」「Usage」「Conversations」「Notifications」「Statements」之前的序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,
