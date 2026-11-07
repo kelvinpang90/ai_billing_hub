@@ -1,8 +1,8 @@
-# AIH-TASK-196..206 设计：支付第四批（收据：编号、快照、PDF 下载、付款邮件与补发）（已批准 v1）
+# AIH-TASK-196..206 设计：支付第四批（收据：编号、快照、PDF 下载、付款邮件与补发）（已批准 v2）
 
-> **来源**：设计闸门 Issue #589。本文件是 `APPROVED: design v1` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v1`）。审查：Codex 额度不可用期间由 Claude Code 审查（审查者沿用 Kelvin 为支付第二、三批选定的 Claude）。送审前按登记前预审（`worker.design_precheck`）三轮修订；v1 审查无阻断项，批准。审查的测试建议项（`gateway_reference` 的回退分支）补进了 AIH-TASK-197 的契约。
+> **来源**：设计闸门 Issue #589。本文件是 `APPROVED: design v2` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`，批准后 Issue 上只把状态行改成了 `APPROVED: design v2`）。审查：Codex 额度不可用期间由 Claude Code 审查（审查者沿用 Kelvin 为支付第二、三批选定的 Claude）。送审前按登记前预审（`worker.design_precheck`）三轮修订；v1 审查无阻断项，批准；v1 批准后的最终预审发现迁移的系列行检查没有对照已有收据、降级中断后重跑的结局没写，升 v2（见 §12），v2 审查无阻断项，批准。两轮审查的测试建议项（`gateway_reference` 的回退分支；年份交界用带微秒的时刻）补进了 AIH-TASK-197 的契约。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #589 上被批准的 v1 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #589 上被批准的 v2 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > 本设计建立在支付第一批（设计闸门 #580 已批准 v3）、第二批（#585 已批准 v3）与第三批（#587 已批准 v3）之上。产品决定（即时生成 PDF、按年编号、付款邮件不带附件、上线前的 PAID 补发收据不发邮件）由 Kelvin 2026-11-07 拍板，见 §1。
 
 ## 0. 准入判定
@@ -20,7 +20,7 @@
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v1`
+**设计版本**：`v2`
 对应需求：spec §43（「Generate Receipt」一步）、§45、§45.1（`REQ-TAX-001`）、§56、§64、§71、§93、§106、§112.1、§129「Payment Receipt」「Receipt download」「Receipt generated」、Invariant 3、6、7、8、10、13、14；ADR-0008 §5；ADR-0014；建立在设计闸门 #580（支付第一批，下称「A」）、#585（第二批，「B」）、#587（第三批，「C」）三份已批准的 v3 之上
 目标 PR：待开（拆成 `AIH-TASK-196`..`206`，见 §11）
 
@@ -138,7 +138,14 @@ recover ──► 付款邮件：渲染 → Adapter → SMTP（现有 outbox 路
 
 MySQL 触发器 `trg_payment_receipts_before_update`（BEFORE UPDATE）与 `trg_payment_receipts_before_delete`（BEFORE DELETE）：无条件 `SIGNAL SQLSTATE '45000'`（消息 `payment_receipts rows are immutable`）。SQLite 不建触发器（与 0035 同一惯例）。
 
-迁移的检查、预检（`log_bin_trust_function_creators`）、离线输出、失败窗口与降级照 0035 的写法（见 §8）。MySQL 的 `CREATE TABLE` 与插入系列行不在同一个事务里，所以系列行的检查分三种：0 行 → 插入 74 行（补完在建表与插入之间中断的升级）；恰好 74 行、年份恰好 2026–2099、`last_sequence` 都在 0–999999 → 不动；其他 → 抛错、不发 DDL、不写行。
+迁移的检查、预检（`log_bin_trust_function_creators`）、离线输出、失败窗口与降级照 0035 的写法（见 §8），以下几处与 0035 不同或 0035 没有：
+
+- **系列行**：MySQL 的 `CREATE TABLE` 与插入系列行不在同一个事务里，所以重跑时要检查系列行，先看 `payment_receipts`：
+  - `payment_receipts` 不存在或为空：系列表 0 行 → 插入 74 行（补完在建表与插入之间中断的升级）；恰好 74 行、年份恰好 2026–2099、`last_sequence` 都在 0–999999 → 不动；其他 → 抛错、不发 DDL、不写行。
+  - `payment_receipts` 有行：系列表不存在或 0 行 → 抛错，不建表、不补插（补插会从 0 起编号，与已开具的序号相撞）；恰好 74 行时除上面的条件外，每个年份的 `last_sequence` 还要不小于 `payment_receipts` 里该年份的 `MAX(sequence)`，否则抛错。这一支都不发 DDL、不写行。正常路径走不到这一支：收据只在 0039 到 head 之后由新代码写，降级碰到有行就拒绝；只可能来自手工改库或改 `alembic_version`。
+- **形状检查**：照 0035 比名称、类型与宽度、可空性，不比服务端默认值；另核对 `series_year` 没有 `AUTO_INCREMENT`。
+- **预检**：紧接在第一条 DDL 之前；只缺系列行、不需要任何 DDL 时不跑预检。
+- **降级重跑**：见 §8。
 
 ### 编号
 
@@ -363,7 +370,7 @@ MySQL 触发器 `trg_payment_receipts_before_update`（BEFORE UPDATE）与 `trg_
 
 | 风险/需求 | 测试层级 | 场景 | 预期结果 | 任务 |
 | --- | --- | --- | --- | --- |
-| 迁移、CHECK 与触发器 | integration（MySQL） | 建两张表与 74 行系列；表已存在且形状一致 / 不一致；缺一个触发器；离线输出；降级（空表、有行、离线）；非法插入（序号 0 与 1000000、年份 2025 与 2100、金额 0 与三位小数、币种 USD、同一支付两张、同一年份同一序号）；MySQL 上 UPDATE 与 DELETE 收据行被拒 | 照 0035 的各分支；非法插入被拒；降级有行时报错不删 | 196 |
+| 迁移、CHECK 与触发器 | integration（MySQL） | 建两张表与 74 行系列；表已存在且形状一致 / 不一致；缺一个触发器；只缺系列行（不跑预检）；`payment_receipts` 有行而系列表不存在、0 行、或某年 `last_sequence` 小于该年 `MAX(sequence)`；离线输出；降级（空表、有行、离线、在两次 DROP 之间中断后重跑）；非法插入（序号 0 与 1000000、年份 2025 与 2100、金额 0 与三位小数、币种 USD、同一支付两张、同一年份同一序号）；MySQL 上 UPDATE 与 DELETE 收据行被拒 | 照 0035 的各分支；收据有行时系列不对抛错、不发 DDL、不写行；非法插入被拒；降级有行时报错不删，重跑降级后两张表都不在 | 196 |
 | 付款方式字段 | unit（假传输） | `payment_method_details.type` 为 `card`、`fpx`、缺失、非字符串、含大写或超长、没有 `latest_charge` | `card`、`fpx`，其余 `None`；A 的状态映射结果不变 | 197 |
 | 开具 | integration | 正常开具：编号、快照键集合与每个值、列与快照一致、`tenant_id` 与 `tax_policy_version_id` 取自支付；`send_email` 真与假；同一支付第二次调用；状态不是 `PAID` | 编号 `ACV-AIR-<年>-000001`、下一张 `000002`；真时一行邮件 outbox 行、payload 恰好 6 个键，假时没有；第二次返回同一张、不写任何行；`ValueError` | 197 |
 | 开具检查不过 | integration | 三条检查各自不过（没有 TOPUP 行；税务政策 `treatment_json` 读不出；当年没有系列行；`last_sequence = 999999`） | 返回 `None`，系列行、收据与邮件行都不变，ERROR 日志带原因码、不带公司名与金额 | 197 |
@@ -389,7 +396,7 @@ MySQL 触发器 `trg_payment_receipts_before_update`（BEFORE UPDATE）与 `trg_
 
 ## 8. 迁移与上线
 
-- **迁移 0039**（`down_revision` 为 `0038_payment_settings`）：建 `receipt_number_series`（并插入 2026–2099 共 74 行）与 `payment_receipts`，MySQL 上建两个触发器。检查（两张表的形状、系列行恰好 74 行且 `last_sequence` 在合法范围、触发器的时机事件与正文）、预检（`log_bin_trust_function_creators`）、离线 `--sql`、每个失败窗口与重跑结局照 0035 的写法逐条写进文件头。**downgrade 只删空表**：离线模式抛错；`payment_receipts` 有任何一行就抛错、不发 DDL（收据是不可变的财务快照，删了编号就会复用）；为空时先删触发器、再删两张表。
+- **迁移 0039**（`down_revision` 为 `0038_payment_settings`）：建 `receipt_number_series`（并插入 2026–2099 共 74 行）与 `payment_receipts`，MySQL 上建两个触发器。检查（两张表的形状、系列行恰好 74 行且 `last_sequence` 在合法范围、触发器的时机事件与正文）、预检（`log_bin_trust_function_creators`）、离线 `--sql`、每个失败窗口与重跑结局照 0035 的写法逐条写进文件头。**downgrade 只删空表**：离线模式抛错；`payment_receipts` 有任何一行就抛错、不发 DDL（收据是不可变的财务快照，删了编号就会复用）；为空时先删触发器、再删两张表；每个对象只在存在时删，`payment_receipts` 已不存在时照样删 `receipt_number_series`（补完在两次 DROP 之间中断的降级，不照 0035「表不在就什么都不做」），全都不在时不发 DDL。
 - **部署顺序**：A、B、C 全部合并之后。196 合并后只多两张没人读写的表；200 合并后新入账开始开具收据；201 合并后补发扫描为此前的 `PAID` 补开（只有 Kelvin 的测试付款，开关在生产关着）。198（邮件渲染）排在 200 之前：200 写的邮件行一出现就有处理器。
 - **对客户开放充值**：仍按 B、C 写进 `docs/payment-flow.md` 的步骤；206 在那里加一条开放前检查：「在管理端支付详情能下载测试付款的收据，PDF 内容正确」。
 - **回滚**：只回滚应用镜像，不降级 0039。回滚到 200 之前的镜像后新入账不再开具收据；重新部署后补发扫描补开（不发邮件）。
@@ -463,3 +470,4 @@ MySQL 触发器 `trg_payment_receipts_before_update`（BEFORE UPDATE）与 `trg_
 | 版本 | 日期 | 改了什么 | 触发原因 |
 | --- | --- | --- | --- |
 | v1 | 2026-11-07 | 初稿 | — |
+| v2 | 2026-11-07 | §2「数据库」迁移：`payment_receipts` 有行时系列表不存在、0 行或计数小于已开具的最大序号都抛错，不补插；形状检查不比服务端默认值、核对 `series_year` 无 `AUTO_INCREMENT`；只缺系列行时不跑预检。§8 降级每个对象只在存在时删，补完两次 DROP 之间中断的降级。§7 迁移一行补对应场景 | v1 批准后的最终预审：系列行检查没有对照已有收据，补插会与已开具的序号相撞；降级在两次 DROP 之间中断后重跑的结局没写 |
