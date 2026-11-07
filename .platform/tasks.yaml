@@ -9350,7 +9350,7 @@ tasks:
     title: 月度对账单第六层：管理端对账单列表、详情与按客户补生成接口
     purpose: >-
       按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v6） §2「管理端接口」与 §6：新文件 app/api/admin_statements.py 三个接口（列表、详情、按客户补生成），新 schema app/schemas/statements.py，AuditAction 新增 STATEMENT_GENERATE（经 catch_up_tenant 的 before_commit 钩子与对账单同事务写），前端 adminAudit.ts 同步；docs/api.md 新增「月度对账单（管理端）」一节。页面属于 AIH-TASK-161。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-158
     acceptance_criteria:
