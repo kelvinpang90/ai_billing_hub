@@ -208,6 +208,10 @@ EXPECTED_ADMIN_ROUTES = {
     # AIH-TASK-134 的钱包核对只读接口（设计闸门 #474 v13 §2「管理端接口」）。
     ("GET", "/api/v1/admin/wallet-reconciliation/runs"),
     ("GET", "/api/v1/admin/wallet-reconciliation/runs/{run_id}/findings"),
+    # AIH-TASK-159 的月度对账单（设计闸门 #565 v6 §2「管理端接口」）。
+    ("GET", "/api/v1/admin/statements"),
+    ("GET", "/api/v1/admin/statements/{statement_id}"),
+    ("POST", "/api/v1/admin/customers/{customer_id}/statements/generate"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
