@@ -1,6 +1,11 @@
-"""Admin views of monthly statements (AIH-TASK-159).
+"""Admin and customer views of monthly statements (AIH-TASK-159, AIH-TASK-160).
 
-设计闸门 #565 v6 §2「管理端接口」；契约见 [docs/api.md](../../docs/api.md)「月度对账单（管理端）」。
+设计闸门 #565 v6 §2「管理端接口」「客户接口」；契约见 [docs/api.md](../../docs/api.md)
+「月度对账单（管理端）」「月度对账单（客户）」。
+
+⚠️ **客户视图另是一份更窄的白名单**（§6、INV-7）：列表项恰好 5 个键，详情只多一个
+`snapshot`。没有 `customer_id`、`company_name`（顶层）、`status`、`cutoff_at`、
+`ledger_high_sequence` 与生成者；客户视图不继承管理端视图，两边加字段互不连带。
 
 ⚠️ **视图是字段白名单**：列表项恰好 8 个键，详情在其上加 `cutoff_at`、`ledger_high_sequence`、
 `generated_by_email` 与 `snapshot`。内部自增 `id`、`tenant_id`、`generated_by`（内部用户 id）与
@@ -87,6 +92,24 @@ class StatementDetail(StatementSummary):
     snapshot: dict[str, Any]
 
 
+class CustomerStatementSummary(BaseModel):
+    """One statement in the customer's own list. `statement_id` is the `public_id`."""
+
+    statement_id: str
+    statement_number: str
+    # 马来西亚日历月，`YYYY-MM`。
+    period: str
+    # 带符号、恰好 8 位小数的字符串，来自快照。
+    closing_balance: str
+    finalized_at: dt.datetime | None
+
+
+class CustomerStatementDetail(CustomerStatementSummary):
+    """One of the customer's statements with the whole snapshot, nested."""
+
+    snapshot: dict[str, Any]
+
+
 class GeneratedStatement(BaseModel):
     """One statement the manual catch-up generated just now."""
 
@@ -145,13 +168,38 @@ def generated_statement(statement: MonthlyStatement) -> GeneratedStatement:
     )
 
 
+def _customer_summary_fields(statement: MonthlyStatement) -> dict[str, Any]:
+    snapshot = statement.snapshot_json
+    return {
+        "statement_id": statement.public_id,
+        "statement_number": statement.statement_number,
+        "period": snapshot["period"],
+        "closing_balance": snapshot["closing_balance"],
+        "finalized_at": statement.finalized_at,
+    }
+
+
+def customer_statement_summary(statement: MonthlyStatement) -> CustomerStatementSummary:
+    return CustomerStatementSummary(**_customer_summary_fields(statement))
+
+
+def customer_statement_detail(statement: MonthlyStatement) -> CustomerStatementDetail:
+    return CustomerStatementDetail(
+        **_customer_summary_fields(statement), snapshot=statement.snapshot_json
+    )
+
+
 __all__ = [
+    "CustomerStatementDetail",
+    "CustomerStatementSummary",
     "GeneratedStatement",
     "InvalidStatementQuery",
     "StatementDetail",
     "StatementGenerationNotEligible",
     "StatementNotFound",
     "StatementSummary",
+    "customer_statement_detail",
+    "customer_statement_summary",
     "generated_statement",
     "is_statement_id",
     "parse_period",

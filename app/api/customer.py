@@ -65,6 +65,12 @@ repository 函数、同一个 5 键视图，唯一的差别是 `month` 必填。
 都是 422 `cursor`）。标已读与全部已读是**第一批客户写接口**：`require_customer_writable`，
 在自己的写事务里先 `lock_tenant_for_customer_write` 再写；路径参数在鉴权之后判，不是小写 UUID
 与查不到同是 404 `NOTIFICATION_NOT_FOUND`。不写审计：已读只影响客户自己的显示（设计 §6）。
+
+月度对账单（AIH-TASK-160，设计闸门 #565 v6 §2「客户接口」、§6）：只读、用 `require_customer`，
+四种账户状态都能读。只读本租户 `FINALIZED` 的行，不按租户当前的 `billing_mode` 过滤：从预付改为
+内部计量的客户仍能看到改之前的对账单。详情按 `tenant_id` 与 `public_id` 一起查，路径参数在鉴权
+之后判：不是小写 UUID、不存在、别的客户的、非 `FINALIZED` 的同是 404 `STATEMENT_NOT_FOUND`。
+视图是 app/schemas/statements.py 的客户白名单（不含 `cutoff_at`、`ledger_high_sequence` 与生成者）。
 """
 
 from __future__ import annotations
@@ -73,6 +79,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Request
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.auth import require_customer, require_customer_writable, require_session_factory
@@ -90,6 +97,7 @@ from app.core.csv_export import (
 from app.core.database import session_scope
 from app.core.errors import AppError
 from app.core.logging import current_request_id
+from app.models.statements import MonthlyStatement, StatementStatus
 from app.models.tenancy import Tenant
 from app.repositories import notifications as notifications_repository
 from app.repositories import tenancy as tenancy_repository
@@ -143,8 +151,16 @@ from app.schemas.customer_wallet import (
     customer_wallet_transaction_page,
     customer_wallet_view,
 )
-from app.schemas.customers import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
+from app.schemas.customers import DEFAULT_PAGE_SIZE, MAX_PAGE, MAX_PAGE_SIZE, Page
 from app.schemas.envelope import ApiResponse, success
+from app.schemas.statements import (
+    CustomerStatementDetail,
+    CustomerStatementSummary,
+    StatementNotFound,
+    customer_statement_detail,
+    customer_statement_summary,
+    is_statement_id,
+)
 from app.schemas.usage_ingest import (
     EVENT_ID_PATTERN,
     MODEL_PATTERN,
@@ -162,6 +178,8 @@ router = APIRouter(prefix="/api/v1/customer", tags=["customer"])
 
 # 与管理端钱包流水同一范围；超出是 422，不静默截断。
 PageSize = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)]
+# 对账单列表的页码：与管理端对账单列表同一范围。
+PageNumber = Annotated[int, Query(ge=1, le=MAX_PAGE)]
 BeforeSequence = Annotated[int | None, Query(ge=1, le=MAX_WALLET_SEQUENCE)]
 # 用量筛选的格式与用量摄取相同（设计 §2「接口二」）。
 UsageDate = Annotated[str | None, Query(pattern=USAGE_DATE_PATTERN)]
@@ -682,6 +700,61 @@ def customer_notifications_read_all(request: Request) -> ApiResponse[CustomerNot
         lock_tenant_for_customer_write(session, principal.tenant_id)
         marked = notifications_repository.mark_all_read(session, principal.tenant_id, now=now)
     return success(CustomerNotificationsMarked(marked=marked), request_id=current_request_id())
+
+
+@router.get("/statements", response_model=ApiResponse[Page[CustomerStatementSummary]])
+def customer_statements(
+    request: Request,
+    page: PageNumber = 1,
+    page_size: PageSize = DEFAULT_PAGE_SIZE,
+) -> ApiResponse[Page[CustomerStatementSummary]]:
+    """The caller's finalized statements, latest period first. None at all is an empty page."""
+    principal = require_customer(request)
+    # 不看租户当前的 billing_mode：改为内部计量之前的对账单照常列出。
+    conditions = (
+        MonthlyStatement.tenant_id == principal.tenant_id,
+        MonthlyStatement.status == StatementStatus.FINALIZED,
+    )
+    listing = (
+        select(MonthlyStatement)
+        .where(*conditions)
+        .order_by(MonthlyStatement.period_start.desc(), MonthlyStatement.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    counting = select(func.count()).select_from(MonthlyStatement).where(*conditions)
+    with require_session_factory(request)() as session:
+        found = session.execute(listing).scalars().all()
+        total = session.execute(counting).scalar_one()
+        listing_page = Page[CustomerStatementSummary](
+            items=[customer_statement_summary(statement) for statement in found],
+            page=page,
+            page_size=page_size,
+            total=total,
+        )
+    return success(listing_page, request_id=current_request_id())
+
+
+@router.get("/statements/{statement_id}", response_model=ApiResponse[CustomerStatementDetail])
+def customer_statement(request: Request, statement_id: str) -> ApiResponse[CustomerStatementDetail]:
+    """One of the caller's finalized statements with its whole snapshot.
+
+    不是小写 UUID、不存在、别的客户的、非 `FINALIZED` 的同是 404，不区分（INV-8）。
+    """
+    principal = require_customer(request)
+    if not is_statement_id(statement_id):
+        raise StatementNotFound
+    query = select(MonthlyStatement).where(
+        MonthlyStatement.tenant_id == principal.tenant_id,
+        MonthlyStatement.public_id == statement_id,
+        MonthlyStatement.status == StatementStatus.FINALIZED,
+    )
+    with require_session_factory(request)() as session:
+        statement = session.execute(query).scalar_one_or_none()
+        if statement is None:
+            raise StatementNotFound
+        detail = customer_statement_detail(statement)
+    return success(detail, request_id=current_request_id())
 
 
 def _log_query_timeout(factory: sessionmaker[Session], tenant_id: int) -> None:

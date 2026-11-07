@@ -528,6 +528,8 @@ def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
         ("GET", f"{CUSTOMER_PREFIX}/notifications"),
         ("POST", f"{CUSTOMER_PREFIX}/notifications/{{notification_id}}/read"),
         ("POST", f"{CUSTOMER_PREFIX}/notifications/read-all"),
+        ("GET", f"{CUSTOMER_PREFIX}/statements"),
+        ("GET", f"{CUSTOMER_PREFIX}/statements/{{statement_id}}"),
     }
 
 
