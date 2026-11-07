@@ -9298,7 +9298,7 @@ tasks:
     title: 月度对账单第五层：缺失对账单与晚到用量占比并进用量处理积压告警
     purpose: >-
       按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v6） §2「告警」：app/services/alerts.py 的 usage_processing_backlog 在现有三部分之外再报两段：到期后 6 至 30 小时内仍缺失的对账单 P2（只报 24 小时，Kelvin 2026-11-04 定），最近 24 小时晚到用量的条数或金额占比达到 1% P2。Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定并进这个维度，不加维度、不改 deploy/monitor.sh 与 .env。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-157
     acceptance_criteria:
