@@ -108,6 +108,10 @@ export function AppLayout() {
               key: ROUTES.walletReconciliation,
               label: <Link to={ROUTES.walletReconciliation}>{t("nav.walletReconciliation")}</Link>,
             },
+            {
+              key: ROUTES.statements,
+              label: <Link to={ROUTES.statements}>{t("nav.statements")}</Link>,
+            },
           ]}
         />
         {/* 登出必须调后端：只清本地令牌的话，那张刷新 cookie 还活着，
