@@ -163,7 +163,8 @@ def record_audit(
             # 截到列宽：User-Agent 是客户端可控的，不截会让一次插入直接报错。
             user_agent=context.user_agent[:512] if context.user_agent else None,
             reason=reason,
-            created_at=now.replace(microsecond=0),
+            # None 原样放过，仍交给 NOT NULL 约束在 flush 时拒绝，与截秒前的失败方式一致。
+            created_at=now.replace(microsecond=0) if now is not None else None,
         )
     )
 
