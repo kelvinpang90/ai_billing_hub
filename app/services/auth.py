@@ -146,6 +146,9 @@ def record_audit(
     ⚠️ `before_state` / `after_state` 只接受调用方显式挑好的字段。
     **绝不要把整个 ORM 对象或请求体 dump 进来** —— `password_hash`、令牌、
     将来的 TOTP 密钥都会顺着进去，而审计表是长期保留的。
+
+    审计时间在这里统一向下截到整秒，与其余写入路径的约定一致：MySQL 的 `DATETIME`
+    不存小数秒，不截会被四舍五入（设计闸门 #569 v1）。
     """
     session.add(
         AuditLog(
@@ -160,7 +163,8 @@ def record_audit(
             # 截到列宽：User-Agent 是客户端可控的，不截会让一次插入直接报错。
             user_agent=context.user_agent[:512] if context.user_agent else None,
             reason=reason,
-            created_at=now,
+            # None 原样放过，仍交给 NOT NULL 约束在 flush 时拒绝，与截秒前的失败方式一致。
+            created_at=now.replace(microsecond=0) if now is not None else None,
         )
     )
 

@@ -316,7 +316,7 @@ def test_entity_id_never_matches_a_user_id(client, admin, seeded, other_id) -> N
 
 
 def test_newest_first_is_by_row_id_not_by_created_at(client, app, admin) -> None:
-    """登录路径与业务路径的时间取整不一致：后写的那一行 created_at 可能更早。"""
+    """时刻在插入之前取：并发时先取时刻的请求可能后插入，后写的那一行 created_at 可能更早。"""
     add_audit(app, action=AuditAction.LOGIN, created_at=at(9, 0, 1), reason="written first")
     add_audit(
         app, action=AuditAction.CUSTOMER_CREATE, created_at=at(9, 0, 0), reason="written second"
