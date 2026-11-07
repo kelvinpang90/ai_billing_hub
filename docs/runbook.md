@@ -940,7 +940,7 @@ N 个扫描，认领并计费到期的事件（`RECEIVED`，或退避到期的 `
 | --- | --- |
 | `usage_pricing_error` / `usage_fx_rate_error` / `usage_model_unknown` 变 P2 | 有事件停在对应的错误状态。摘要有条数、最早接收时刻与至多 3 个细分码（`NO_PROVIDER_PRICE`、`MISSING_PROVIDER_COMPONENT`、`NO_PRICING_RULE`、`MISSING_RULE_COMPONENT`） |
 | `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
-| `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数 |
+| `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数。另两段（AIH-TASK-158，设计闸门 #565 v6 §2「告警」）接在后面，各报 P2：**缺失对账单** `<n> statements missing, earliest period <YYYY-MM>` = 某期到期后 6–30 小时内仍有合格租户没有对账单（没有时是 `0 statements missing`），按「月度对账单」一节处置；**晚到用量** `late usage 24h <a>/<b> rows (<x>%), <y>% of amount` = 最近 24 小时入账的预付用量里，过了原用量月 cut-off 才入账的条数或金额占比 ≥ 1%（宽限日内入账的上月用量不算），投递链路有延迟，按下面积压的处置查根因。摘要恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>`，级别取最严重的一段 |
 | `wallet_negative_balance` 变 P2 / **P1** | 一行合并负余额与钱包核对（设计闸门 #474 v13 §2「告警」），摘要恰好 `<负余额部分>; <核对部分>`，只有计数与日期。P2：有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010；摘要 `<n> wallets below zero`）；或核对从未完成（`reconciliation never completed`）、最近一次完成超过 30 小时（末尾 `stale`）；或有时钟异常的运行（`clock anomaly <行数>`）。**P1** = 核对发现余额与账本不一致（`inconsistent <M>` 或 `later inconsistent <K>` 大于 0），按下面「钱包核对发现不一致」处理 |
 | `outbox_backlog` 变 P2 | 一行合并积压与死信（AIH-TASK-149），摘要恰好 `<积压部分>; <死信部分>`，只有计数与时刻；只看有处理器的 outbox 行（密码重置信、门户邀请信、`NOTIFICATION_EMAIL_REQUESTED`（通知邮件，AIH-TASK-152）与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）。两种 P2 可同时出现。**积压**：积压部分是 `<n> row(s) pending over 10 minutes, oldest created <时刻>`（OK 时是 `no handled outbox row pending over 10 minutes`）= 有行超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。**死信**：死信部分是 `<n> dead letter(s) in 7 days, latest <时刻>`（OK 时是 `no dead letter in 7 days`）= 最近 7 天有行重试用尽结算为 `FAILED`，`latest` 是其中最晚的 `processed_at`，按下面「outbox 死信的处置」处理 |
 | worker 日志 | `Recovered a usage event stuck in PROCESSING past its lease`（WARNING，带 `event_id`、`claimed_at`、`attempt_count`）；`A usage event's ledger reference was already posted with another amount`（ERROR，账本冲突）；`Billing a usage event failed; the attempt is recorded`（WARNING，带错误类型与码） |
@@ -1003,6 +1003,13 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 
 积压或回收停了：先按「celery-beat 停止调度」「Redis / Celery broker 不可用」确认 beat 与 worker 在跑；不需要手工补投
 任何东西 —— 数据库就是待办清单。负余额：联系客户充值，或按流程调账（管理端手工调账接口）。
+
+晚到用量占比高（AIH-TASK-158）：说明上报到入账之间有延迟（客户侧投递、摄取或计费积压），晚到的用量会进当时开放期的
+对账单、归为上期调整，金额不丢。按上面积压的处置查根因（beat / worker、`ai_usage_outbox` 与 `outbox_backlog` 维度、客户侧
+投递）；**不要为了消告警改账本或事件**。窗口是最近 24 小时，延迟消除后占比随窗口滑过自动回落。
+
+缺失对账单（AIH-TASK-158）：按下面「月度对账单」一节处置 —— 先看 AIH-TASK-157 写的生成失败日志
+（`Statement generation failed`），再用管理端补生成（AIH-TASK-159 上线之后）。
 
 ### 恢复
 
@@ -1445,8 +1452,13 @@ echo "exit=$?"
 - 某个租户整体出错（不在某一期里）：error 日志 `Statement catch-up failed for a tenant`，带 `customer_id` 与 `error_type`
 - 编号碰撞：warning `Statement number collided; the next run retries`（`customer_id`、`period`）。随机部分撞上了已有编号，
   本轮放弃这个租户，下一轮换随机数，**不用处理**
-- 告警（AIH-TASK-158 上线后）：某期到期后 6–30 小时内仍缺失，`usage_processing_backlog` 报 P2。⚠️ **只报这 24 小时**，
-  窗口过后维度恢复 OK；之后缺失只能从上面的 error 日志与管理端对账单列表看到
+- 告警（AIH-TASK-158）：某期到期后 6–30 小时内（`cutoff(M) + 6h ≤ now < cutoff(M) + 30h`）仍有合格租户缺对账单，
+  `usage_processing_backlog` 报 P2，摘要里这一段是 `<n> statements missing, earliest period <YYYY-MM>`（只有缺失项数与
+  最早的账期，不带租户）。⚠️ **只报这 24 小时**，窗口过后维度恢复 OK：**回到 OK 不代表已补上**，之后缺失只能从上面的
+  error 日志与管理端对账单列表看到，要到管理端对账单列表确认。只报 24 小时是为了不让永久停出一直占着这个维度的
+  Healthchecks 检查、遮住之后的积压与过期租约（P1）
+- 处置这条告警：先按上面的 error 日志（`Statement generation failed` 及同一轮的前一条）定位租户、账期与 `error_type`，
+  按下表处置；之后在管理端对该客户补生成（AIH-TASK-159 上线之后），再到管理端对账单列表确认那一期已有
 
 按 `error_type` 读：
 

@@ -8,6 +8,9 @@
 T-E（幂等冲突）、T-H（定价错误、汇率错误、未知模型、失败、处理积压、负余额、
 outbox 积压，设计闸门 #181 v2 §2「告警维度」，AIH-TASK-032）往里加，不改接口形状。
 `wallet_negative_balance` 另并入钱包核对的结果（设计闸门 #474 v13 §2「告警」，AIH-TASK-133）。
+`usage_processing_backlog` 在积压、PROCESSING、过期租约三部分之后另接两段（设计闸门 #565 v6
+§2「告警」，AIH-TASK-158）：到期后 6 至 30 小时内仍缺失的对账单 P2，最近 24 小时晚到用量的
+条数或金额占比达到 1% P2；Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定不加维度。
 
 ⚠️ **维度查询全是普通读，不拿 `fx_rate_locks`**（设计 v3）：告警只是提示，
 不参与计费，不应让发布等它。整次请求一个只读事务，从不提交。
@@ -26,9 +29,11 @@ import datetime as dt
 import enum
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
+from fractions import Fraction
 from typing import Final
 
-from sqlalchemy import ColumnElement, and_, case, exists, func, or_, select
+from sqlalchemy import ColumnElement, and_, case, exists, func, not_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
@@ -42,12 +47,20 @@ from app.models.fx_rates import (
     FxRateVersion,
 )
 from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
-from app.models.tenancy import IntegrationStatus, Project, Tenant
+from app.models.statements import MonthlyStatement
+from app.models.tenancy import BillingMode, IntegrationStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
-from app.models.wallet import Wallet
+from app.models.wallet import TransactionType, Wallet, WalletTransaction
 from app.models.wallet_reconciliation import ReconciliationRunStatus, WalletReconciliationRun
 from app.repositories.usage_events import count_conflicts_since
 from app.services.auth import utc_now
+from app.services.statements import (
+    StatementPeriod,
+    due_periods,
+    is_eligible,
+    period_containing,
+    previous_period,
+)
 from app.services.status_delivery import ENCRYPTION_NOT_CONFIGURED, SECRET_DECRYPT_FAILED
 from app.services.usage_billing import AMOUNT_OUT_OF_RANGE, LEDGER_CONFLICT
 from app.tasks import outbox as outbox_tasks
@@ -73,6 +86,17 @@ FAILED_P1_CODES: Final = (LEDGER_CONFLICT, AMOUNT_OUT_OF_RANGE)
 BACKLOG_P2_WAIT: Final = dt.timedelta(minutes=5)
 BACKLOG_P1_WAIT: Final = dt.timedelta(minutes=30)
 STALE_LEASE_P1_AGE: Final = dt.timedelta(minutes=10)
+# `usage_processing_backlog` 的缺失对账单部分（设计闸门 #565 v6 §2「告警」，AIH-TASK-158）：
+# 只在 `cutoff(M) + 6 小时 <= now < cutoff(M) + 30 小时` 里报，只报 24 小时
+# （Kelvin 2026-11-04 定）。
+# monitor.sh 每个维度一个 Healthchecks 检查，只在状态切换时通知一次：数据缺陷导致的永久停出
+# 若一直报，这个维度的检查会一直 down，遮住之后同一维度的积压与过期租约（P1）。
+STATEMENT_MISSING_GRACE: Final = dt.timedelta(hours=6)
+STATEMENT_MISSING_WINDOW: Final = dt.timedelta(hours=24)
+# 晚到用量部分：最近 24 小时入账的用量里晚到的条数或金额占比达到 1% 即 P2。
+LATE_USAGE_WINDOW: Final = dt.timedelta(hours=24)
+LATE_USAGE_SHARE_P2: Final = Decimal("0.01")
+_HUNDREDTH: Final = Decimal("0.01")
 # `outbox_backlog`：有处理器的事件类型超过 10 分钟仍 PENDING（§120）。
 OUTBOX_BACKLOG_AGE: Final = dt.timedelta(minutes=10)
 # `outbox_backlog` 的死信部分（AIH-TASK-149）：有处理器的行在这段时间内结算为 FAILED 即 P2。
@@ -323,15 +347,8 @@ def usage_failed(session: Session, context: AlertContext) -> AlertResult:
     return AlertResult(level, _with_codes(summary, _codes(session, or_(final, retrying))))
 
 
-def usage_processing_backlog(session: Session, context: AlertContext) -> AlertResult:
-    """The oldest claimable event waiting, and PROCESSING whose lease expired unrecovered.
-
-    可处理：`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`。等待的起点是它
-    变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个（未来偏差的事件到点才可认领），
-    `FAILED_RETRYABLE` 取 `next_attempt_at`。等待超过 5 分钟 P2、超过 30 分钟 P1；存在租约已
-    过期的 `PROCESSING`（回收任务本身停了）P2，过期超过 10 分钟 P1。
-    """
-    now = context.now
+def _backlog(session: Session, now: dt.datetime) -> AlertResult:
+    """The oldest claimable event waiting, and PROCESSING whose lease expired unrecovered."""
     happened = UsageEvent.occurred_at <= now
     received_since = case(
         (UsageEvent.occurred_at > UsageEvent.received_at, UsageEvent.occurred_at),
@@ -371,6 +388,166 @@ def usage_processing_backlog(session: Session, context: AlertContext) -> AlertRe
     first = f", earliest claimed {_stamp(earliest_claim)}" if earliest_claim is not None else ""
     summary = f"{due} due{since}; {int(in_progress)} PROCESSING{first}; {int(stale)} lease expired"
     return AlertResult(level, summary)
+
+
+def _missing_statements(session: Session, now: dt.datetime) -> AlertResult:
+    """P2 when a statement is still missing 6 to 30 hours after its period's cutoff.
+
+    账期取 `due_periods(now)`（首个账期起）里 `cutoff + 6h <= now < cutoff + 30h` 的；租户是
+    生成时 `is_eligible` 的那些（此刻 `PREPAID`、有钱包且钱包早于账期结束）。
+    """
+    periods = [
+        period
+        for period in due_periods(now)
+        if period.cutoff + STATEMENT_MISSING_GRACE
+        <= now
+        < period.cutoff + STATEMENT_MISSING_GRACE + STATEMENT_MISSING_WINDOW
+    ]
+    if not periods:
+        return AlertResult(AlertLevel.OK, "0 statements missing")
+    candidates = session.execute(
+        select(Tenant, Wallet)
+        .join(Wallet, Wallet.tenant_id == Tenant.id)
+        .where(Tenant.billing_mode == BillingMode.PREPAID)
+    ).all()
+    missing = 0
+    earliest: str | None = None
+    for period in periods:
+        present = set(
+            session.execute(
+                select(MonthlyStatement.tenant_id).where(
+                    MonthlyStatement.period_start == period.start
+                )
+            )
+            .scalars()
+            .all()
+        )
+        lacking = sum(
+            1
+            for tenant, wallet in candidates
+            if is_eligible(tenant, wallet, period) and tenant.id not in present
+        )
+        if lacking and earliest is None:
+            earliest = period.label
+        missing += lacking
+    if not missing or earliest is None:
+        return AlertResult(AlertLevel.OK, "0 statements missing")
+    return AlertResult(AlertLevel.P2, f"{missing} statements missing, earliest period {earliest}")
+
+
+def _late_usage_segment(
+    session: Session,
+    tenant_ids: Sequence[int],
+    start: dt.datetime,
+    end: dt.datetime,
+    period: StatementPeriod,
+) -> tuple[int, int, Decimal, Decimal]:
+    """`(rows, late rows, amount, late amount)` of the `AI_USAGE` rows booked in `[start, end)`.
+
+    `[start, end)` 落在月 `K = period` 之内；晚到 ⇔ `occ < start(K) AND NOT (occ >= start(K-1)
+    AND created_at < cutoff(K-1))`，与 `attributed_month` 判定 `t(r) ≠ U` 一致。按 `created_at`
+    走 `ix_wallet_transactions_tenant_created`；内连接事件，连不上事件的行不计。
+    """
+    before = previous_period(period)
+    occurred = UsageEvent.occurred_at
+    late = and_(
+        occurred < period.start,
+        not_(and_(occurred >= before.start, WalletTransaction.created_at < before.cutoff)),
+    )
+    statement = (
+        select(
+            func.count(),
+            func.coalesce(func.sum(case((late, 1), else_=0)), 0),
+            func.coalesce(func.sum(WalletTransaction.amount), 0),
+            func.coalesce(func.sum(case((late, WalletTransaction.amount), else_=0)), 0),
+        )
+        .select_from(WalletTransaction)
+        .join(UsageEvent, UsageEvent.wallet_transaction_id == WalletTransaction.id)
+        .where(
+            WalletTransaction.tenant_id.in_(tenant_ids),
+            WalletTransaction.created_at >= start,
+            WalletTransaction.created_at < end,
+            WalletTransaction.transaction_type == TransactionType.AI_USAGE,
+        )
+    )
+    rows, late_rows, amount, late_amount = session.execute(statement).one()
+    return int(rows), int(late_rows), Decimal(amount), Decimal(late_amount)
+
+
+def _share(part: Decimal, whole: Decimal) -> Fraction:
+    """The exact ratio; 0 when `whole` is 0. 用量金额为负，按绝对值比。"""
+    if not whole:
+        return Fraction(0)
+    return Fraction(abs(part)) / Fraction(abs(whole))
+
+
+def _percent(share: Fraction) -> str:
+    """For display only: the percentage `ROUND_HALF_UP` to two decimals."""
+    value = Decimal(share.numerator) * 100 / Decimal(share.denominator)
+    return str(value.quantize(_HUNDREDTH, rounding=ROUND_HALF_UP))
+
+
+def _late_usage(session: Session, now: dt.datetime) -> AlertResult:
+    """P2 when late `AI_USAGE` rows booked in `[now − 24h, now)` reach 1% by count or amount.
+
+    窗口按马来西亚月边界拆成至多两段，每段用该段所在月的常量判定；只统计此刻 `PREPAID`
+    的租户。级别用精确的比值与 `LATE_USAGE_SHARE_P2` 比较，摘要里的百分比只用于显示。
+    """
+    since = now - LATE_USAGE_WINDOW
+    tenant_ids = (
+        session.execute(select(Tenant.id).where(Tenant.billing_mode == BillingMode.PREPAID))
+        .scalars()
+        .all()
+    )
+    rows = late_rows = 0
+    amount = late_amount = Decimal(0)
+    if tenant_ids:
+        start = since
+        while start < now:
+            period = period_containing(start)
+            end = min(period.end, now)
+            found = _late_usage_segment(session, tenant_ids, start, end, period)
+            rows += found[0]
+            late_rows += found[1]
+            amount += found[2]
+            late_amount += found[3]
+            start = end
+    by_rows = _share(Decimal(late_rows), Decimal(rows))
+    by_amount = _share(late_amount, amount)
+    threshold = Fraction(LATE_USAGE_SHARE_P2)
+    level = AlertLevel.OK
+    if by_rows >= threshold or by_amount >= threshold:
+        level = AlertLevel.P2
+    summary = (
+        f"late usage 24h {late_rows}/{rows} rows ({_percent(by_rows)}%), "
+        f"{_percent(by_amount)}% of amount"
+    )
+    return AlertResult(level, summary)
+
+
+def usage_processing_backlog(session: Session, context: AlertContext) -> AlertResult:
+    """The backlog, missing statements and late usage, merged into one line.
+
+    可处理：`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`。等待的起点是它
+    变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个（未来偏差的事件到点才可认领），
+    `FAILED_RETRYABLE` 取 `next_attempt_at`。等待超过 5 分钟 P2、超过 30 分钟 P1；存在租约已
+    过期的 `PROCESSING`（回收任务本身停了）P2，过期超过 10 分钟 P1。
+
+    另两段（设计闸门 #565 v6 §2「告警」，AIH-TASK-158）：
+    - 缺失对账单：首个账期起、`cutoff(M) + 6h <= now < cutoff(M) + 30h` 的账期 × 生成时合格的
+      租户，没有对账单的项数大于 0 即 P2；
+    - 晚到用量：`[now − 24h, now)` 内入账的预付租户 `AI_USAGE` 行里 `t(r) ≠ U` 的，条数或金额
+      占比 ≥ 1% 即 P2。
+
+    摘要恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>`，只有计数、时刻、
+    账期与百分比；级别取各部分最严重的一个。
+    """
+    backlog = _backlog(session, context.now)
+    missing = _missing_statements(session, context.now)
+    late = _late_usage(session, context.now)
+    parts = (backlog, missing, late)
+    level = max((part.level for part in parts), key=_SEVERITY.__getitem__)
+    return AlertResult(level, "; ".join(part.summary for part in parts))
 
 
 def _negative_wallets(session: Session) -> AlertResult:
@@ -677,6 +854,8 @@ __all__ = [
     "FAILED_P1_CODES",
     "FX_FETCH_WINDOW",
     "FX_STALE_DAYS",
+    "LATE_USAGE_SHARE_P2",
+    "LATE_USAGE_WINDOW",
     "MAX_CODES",
     "OUTBOX_BACKLOG_AGE",
     "OUTBOX_DEAD_LETTER_WINDOW",
@@ -684,6 +863,8 @@ __all__ = [
     "RECONCILIATION_STALE_AFTER",
     "RETRYING_ALERT_ATTEMPTS",
     "STALE_LEASE_P1_AGE",
+    "STATEMENT_MISSING_GRACE",
+    "STATEMENT_MISSING_WINDOW",
     "STATUS_WEBHOOK_FAILING_ATTEMPTS",
     "STATUS_WEBHOOK_SIGNING_ERRORS",
     "AlertContext",
