@@ -9597,7 +9597,7 @@ tasks:
     title: 审计时间戳在写入时统一向下截到整秒，消除登录与业务两条路径的取整差异
     purpose: >-
       按 docs/design/AIH-TASK-163-audit-timestamp-truncation.md（设计闸门 #569 已批准 v1） §1、§2：app/services/auth.py 的 record_audit 把写入的 created_at 改为传入时刻向下截到整秒（now.replace(microsecond=0)），其余字段、签名与事务归属不变；同步改 app/services/audit_query.py 模块说明与 docs/api.md「排序」里关于取整不一致的说法，补测试。不改 utc_now、不改任何调用方、不改认证路径写的其他列、不回写历史审计行、不设 sql_mode。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-163-audit-timestamp-truncation.md（设计闸门 #569 已批准 v1） 逐条一致，以 §1 完成标准与不做清单、§2、§3 INV-13、§7 为准；设计与本契约冲突时以设计文件为准，只有两处例外以本契约为准：§1 完成标准第 3 条里「按时间段筛选可能差一秒」那句的处理以本契约第 3 条为准（设计闸门审查的建议项，设计文件头已记），§7「登录路径端到端」的写法以本契约第 4 条为准（直接调用 authenticate 并传入 now，测的是同一件事），发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
