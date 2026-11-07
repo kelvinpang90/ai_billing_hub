@@ -2190,9 +2190,12 @@ SHA256(RAW_REQUEST_BODY)
 
 ### 排序
 
-**最新在前，按审计行的自增 id 倒序**，不按 `created_at`。登录路径与业务路径写 `created_at` 时的取整不一致
-（见 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-006 记录段）：登录审计可能比它之后写入的建客户审计晚一秒。自增 id 才是
-真实的写入顺序。同一个原因，按 `created_from` / `created_to` 筛选在整秒边界上可能差一秒。
+**最新在前，按审计行的自增 id 倒序**，不按 `created_at`。审计时刻在插入之前取：并发的两个请求，先取时刻的那个可能后插入，
+`created_at` 与 id 的顺序本来就可能不一致。自增 id 才是真实的写入顺序。
+
+`created_at` 在写入时统一向下截到整秒（AIH-TASK-163）。在那之前写入的历史审计行在 MySQL 上被四舍五入（见
+[TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-006 记录段），最多比真实时刻晚 1 秒：按
+`created_from` / `created_to` 筛选这些历史行时，在整秒边界上可能差一秒。
 
 ---
 
