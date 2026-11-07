@@ -9649,7 +9649,7 @@ tasks:
     title: Billing Client 第一层：包骨架、配置、事件校验与序列化、请求签名
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §1、§2「包的位置与形态」「模块与公开接口」「事件」「签名」：新建 integration-client/ 目录下的 acuven_billing_client 包骨架与它自己的 pyproject.toml，实现 config.py、ids.py、events.py（字段校验与序列化，不写库）、signing.py（规范串、签名、请求头与 webhook 签名比较函数），根 pyproject.toml 的 pytest 配置让客户端测试进现有 CI。不做存储、投递、门面、状态与指标：分别属于 AIH-TASK-165..171。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） 逐条一致，以 §1、§2「包的位置与形态」「模块与公开接口」中 config、ids、events、signing 四行、「事件」「签名」、§6、§7 标 164 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
