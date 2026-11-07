@@ -25,23 +25,22 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-160` 月度对账单第七层：客户门户的对账单列表与详情接口
-2. `AIH-TASK-161` 月度对账单第八层：管理端对账单页与按客户补生成按钮
-3. `AIH-TASK-162` 月度对账单第九层：客户门户对账单页
-4. `AIH-TASK-163` 审计时间戳在写入时统一向下截到整秒，消除登录与业务两条路径的取整差异
-5. `AIH-TASK-164` Billing Client 第一层：包骨架、配置、事件校验与序列化、请求签名
-6. `AIH-TASK-165` Billing Client 第二层：SQLite outbox 核心：建表、写入去重、领取与租约、落回执与清理
-7. `AIH-TASK-166` Billing Client 第三层：存储的运维与状态部分：死信、重放、处置记录、事故与状态表
-8. `AIH-TASK-167` Billing Client 第四层：HTTP 传输与一轮投递：组批、回执判定、单发回退、退避与清理
-9. `AIH-TASK-168` Billing Client 第五层：记账门面、存储故障暂存与回灌、后台线程与死信运维
-10. `AIH-TASK-169` Billing Client 第六层：有效状态对账、按版本应用与状态 webhook 验签助手
-11. `AIH-TASK-170` Billing Client 第七层：健康指标与运维命令行
-12. `AIH-TASK-171` Billing Client 第八层：与服务端的契约测试、接入指南与文档
-13. `AIH-TASK-172` 支付第一批第一层：payments 与 payment_gateway_events 两张表的迁移和模型
-14. `AIH-TASK-173` 支付第一批第二层：Stripe 适配器、状态映射、回调验签与支付配置项
-15. `AIH-TASK-174` 支付第一批第三层：可信确认、按决策表落状态与 TOPUP 入账
-16. `AIH-TASK-175` 支付第一批第四层：回调事件落库、后台处理任务与告警判据
-17. `AIH-TASK-176` 支付第一批第五层：客户建单服务，含校验、六十秒同额复用与网关失败处理
+1. `AIH-TASK-161` 月度对账单第八层：管理端对账单页与按客户补生成按钮
+2. `AIH-TASK-162` 月度对账单第九层：客户门户对账单页
+3. `AIH-TASK-163` 审计时间戳在写入时统一向下截到整秒，消除登录与业务两条路径的取整差异
+4. `AIH-TASK-164` Billing Client 第一层：包骨架、配置、事件校验与序列化、请求签名
+5. `AIH-TASK-165` Billing Client 第二层：SQLite outbox 核心：建表、写入去重、领取与租约、落回执与清理
+6. `AIH-TASK-166` Billing Client 第三层：存储的运维与状态部分：死信、重放、处置记录、事故与状态表
+7. `AIH-TASK-167` Billing Client 第四层：HTTP 传输与一轮投递：组批、回执判定、单发回退、退避与清理
+8. `AIH-TASK-168` Billing Client 第五层：记账门面、存储故障暂存与回灌、后台线程与死信运维
+9. `AIH-TASK-169` Billing Client 第六层：有效状态对账、按版本应用与状态 webhook 验签助手
+10. `AIH-TASK-170` Billing Client 第七层：健康指标与运维命令行
+11. `AIH-TASK-171` Billing Client 第八层：与服务端的契约测试、接入指南与文档
+12. `AIH-TASK-172` 支付第一批第一层：payments 与 payment_gateway_events 两张表的迁移和模型
+13. `AIH-TASK-173` 支付第一批第二层：Stripe 适配器、状态映射、回调验签与支付配置项
+14. `AIH-TASK-174` 支付第一批第三层：可信确认、按决策表落状态与 TOPUP 入账
+15. `AIH-TASK-175` 支付第一批第四层：回调事件落库、后台处理任务与告警判据
+16. `AIH-TASK-176` 支付第一批第五层：客户建单服务，含校验、六十秒同额复用与网关失败处理
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行

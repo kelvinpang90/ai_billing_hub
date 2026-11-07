@@ -9408,7 +9408,7 @@ tasks:
     title: 月度对账单第七层：客户门户的对账单列表与详情接口
     purpose: >-
       按 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565 已批准 v6） §2「客户接口」与 §6：app/api/customer.py 新增 GET /api/v1/customer/statements 与 GET /api/v1/customer/statements/{statement_id}，只读本租户 FINALIZED 的行；视图放进 app/schemas/statements.py；docs/api.md 新增「月度对账单（客户）」一节。页面属于 AIH-TASK-162。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-159
     acceptance_criteria:
