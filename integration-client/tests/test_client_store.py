@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 from acuven_billing_client import (
-    DeadRow,
     EventConflictError,
     Fence,
     RetryRow,
@@ -767,7 +766,7 @@ def test_lease_expiry_reclaim_and_stale_receipts(
     old = Fence("E01", first.lease_until)
     assert store.mark_delivered([old]) == set()
     assert store.mark_retry([RetryRow("E01", first.lease_until, T0, "X")]) == set()
-    assert store.mark_dead([DeadRow("E01", first.lease_until, "VALIDATION_ERROR")]) == set()
+    assert store.mark_dead([old], "VALIDATION_ERROR") == set()
     assert store.renew_lease(["E01"], first.lease_until, clock.now + 999) == 0
     row = read_rows(db_path)["E01"]
     assert (row["status"], row["lease_until"], row["attempts"]) == (
@@ -829,7 +828,7 @@ def test_receipt_transitions_from_sending(store: Store, db_path: Path, clock: Fa
     clock.now += 7
     assert store.mark_delivered([Fence("E01", lease)]) == {"E01"}
     assert store.mark_retry([RetryRow("E02", lease, clock.now + 42, "NETWORK_ERROR")]) == {"E02"}
-    assert store.mark_dead([DeadRow("E03", lease, "VALIDATION_ERROR")]) == {"E03"}
+    assert store.mark_dead([Fence("E03", lease)], "VALIDATION_ERROR") == {"E03"}
     rows = read_rows(db_path)
     assert rows["E01"]["status"] == "DELIVERED"
     assert rows["E01"]["delivered_at"] == clock.now
@@ -854,9 +853,27 @@ def test_receipts_on_non_sending_rows_change_nothing(store: Store, db_path: Path
     next_attempt = before["E01"]["next_attempt_at"]
     assert store.mark_delivered([Fence("E01", next_attempt)]) == set()
     assert store.mark_retry([RetryRow("E01", next_attempt, T0 + 5, "X")]) == set()
-    assert store.mark_dead([DeadRow("E01", next_attempt, "X")]) == set()
+    assert store.mark_dead([Fence("E01", next_attempt)], "X") == set()
     assert store.mark_delivered([Fence("MISSING", T0)]) == set()
     assert read_rows(db_path) == before
+
+
+def test_dead_again_counts_as_unacked(store: Store, db_path: Path, clock: FakeClock) -> None:
+    store.insert_event("E01", payload("E01"))
+    (event,) = claim_all(store)
+    store.mark_dead([Fence("E01", event.lease_until)], "VALIDATION_ERROR")
+    # 模拟确认后又被放回 PENDING（属于 AIH-TASK-166 的路径）。
+    conn = raw(db_path)
+    conn.execute(
+        "UPDATE usage_outbox SET status = 'PENDING', dead_acked_at = 1, next_attempt_at = ?"
+        " WHERE event_id = 'E01'",
+        (clock.now,),
+    )
+    conn.close()
+    (again,) = claim_all(store)
+    assert store.mark_dead([Fence("E01", again.lease_until)], "VALIDATION_ERROR") == {"E01"}
+    assert read_rows(db_path)["E01"]["dead_acked_at"] is None
+    assert store.delivery_counts().dead_unacked == 1
 
 
 def test_mixed_batch_reports_only_fenced_rows(store: Store, clock: FakeClock) -> None:
@@ -884,7 +901,7 @@ def test_receipt_transaction_failure_leaves_rows_sending(
     with pytest.raises(sqlite3.Error):
         store.mark_delivered(fences)
     with pytest.raises(sqlite3.Error):
-        store.mark_dead([DeadRow("E01", lease, "X"), DeadRow("E02", lease, "X")])
+        store.mark_dead(fences, "X")
 
     def interrupted() -> Iterator[RetryRow]:
         yield RetryRow("E01", lease, T0, "X")
@@ -912,7 +929,7 @@ def _delivered_8_and_6_days_ago_plus_dead(store: Store, clock: FakeClock) -> Non
         store.insert_event(event_id, payload(event_id))
     lease = claim_all(store)[0].lease_until
     store.mark_delivered([Fence("OLD", lease)])
-    store.mark_dead([DeadRow("DEAD", lease, "VALIDATION_ERROR")])
+    store.mark_dead([Fence("DEAD", lease)], "VALIDATION_ERROR")
     clock.now = T0 + 2 * DAY
     store.mark_delivered([Fence("NEW", lease)])
     clock.now = T0 + 8 * DAY
@@ -956,8 +973,8 @@ def test_delivery_counts(store: Store, db_path: Path, clock: FakeClock) -> None:
     store.insert_event("DEAD2", payload("DEAD2"))
     lease = claim_all(store)[0].lease_until
     store.mark_delivered([Fence("DEL", lease)])
-    store.mark_dead([DeadRow("DEAD1", lease, "VALIDATION_ERROR")])
-    store.mark_dead([DeadRow("DEAD2", lease, "INTEGRATION_AUTH_FAILED")])
+    store.mark_dead([Fence("DEAD1", lease)], "VALIDATION_ERROR")
+    store.mark_dead([Fence("DEAD2", lease)], "INTEGRATION_AUTH_FAILED")
     clock.now = T0
     store.insert_event("PEND", payload("PEND"))
     conn = raw(db_path)

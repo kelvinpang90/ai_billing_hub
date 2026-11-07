@@ -206,12 +206,6 @@ class RetryRow(NamedTuple):
     error_code: str
 
 
-class DeadRow(NamedTuple):
-    event_id: str
-    lease_until: float
-    error_code: str
-
-
 @dataclass(frozen=True, slots=True)
 class DeliveryCounts:
     pending: int
@@ -777,13 +771,14 @@ class Store:
                     updated.add(event_id)
         return updated
 
-    def mark_dead(self, rows: Iterable[DeadRow]) -> set[str]:
+    def mark_dead(self, rows: Iterable[Fence], error_code: str) -> set[str]:
+        # 同一组共用一个错误码；再次死信的行重新算作未确认。
         now = float(self._clock())
         updated: set[str] = set()
         with self._write() as conn:
-            for event_id, lease_until, error_code in rows:
+            for event_id, lease_until in rows:
                 cursor = conn.execute(
-                    "UPDATE usage_outbox SET status = 'DEAD', dead_at = ?,"
+                    "UPDATE usage_outbox SET status = 'DEAD', dead_at = ?, dead_acked_at = NULL,"
                     " lease_until = NULL, last_error_code = ?"
                     " WHERE event_id = ? AND status = 'SENDING' AND lease_until = ?",
                     (now, error_code, event_id, lease_until),
@@ -862,7 +857,6 @@ __all__ = [
     "AUTH_FAILED_CODE",
     "SCHEMA_VERSION",
     "ClaimedEvent",
-    "DeadRow",
     "DeliveryCounts",
     "EventConflictError",
     "Fence",

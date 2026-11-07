@@ -10,7 +10,6 @@ from .ids import new_ulid
 from .signing import canonical_request, request_headers, sign, verify_webhook_signature
 from .store import (
     ClaimedEvent,
-    DeadRow,
     DeliveryCounts,
     EventConflictError,
     Fence,
@@ -33,7 +32,6 @@ __version__ = "0.1.0"
 __all__ = [
     "BillingClientConfig",
     "ClaimedEvent",
-    "DeadRow",
     "DeliveryCounts",
     "EventConflictError",
     "Fence",
