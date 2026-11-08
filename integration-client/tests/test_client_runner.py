@@ -40,6 +40,7 @@ from acuven_billing_client import (
 )
 from acuven_billing_client.client import THREAD_NAME
 from acuven_billing_client.delivery import BATCH_PATH
+from acuven_billing_client.status import EFFECTIVE_STATUS_PATH
 
 T0 = 1_790_000_000.0
 LOGGER = "acuven_billing_client"
@@ -68,11 +69,18 @@ Handler = Callable[[str, bytes], Response]
 
 
 class FakeTransport:
+    """Delivery POSTs go to `handler`; the reconcile thread's GET always gets a fixed 503.
+
+    对账的 GET 不进 handler、不计入 `sent`：注入的失败、同步事件与计数只对投递生效。
+    """
+
     def __init__(self, handler: Handler) -> None:
         self.handler = handler
         self.sent: list[bytes] = []
 
     def send(self, method: str, url: str, headers: Any, body: bytes, timeout: float) -> Response:
+        if method.upper() == "GET" and urlsplit(url).path.endswith(EFFECTIVE_STATUS_PATH):
+            return Response(503, b"")
         self.sent.append(body)
         return self.handler(url, body)
 
