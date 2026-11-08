@@ -9908,7 +9908,7 @@ tasks:
     title: Billing Client 第六层：有效状态对账、按版本应用与状态 webhook 验签助手
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「有效状态」「状态 webhook」与 §4 有效状态的版本表：新模块 status.py 与 webhook.py，门面加 reconcile_status_once、should_block_ai、current_status、handle_status_webhook，并把对账接进 AIH-TASK-168 的后台线程循环。不做健康指标与命令行：属于 AIH-TASK-170。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-168
     acceptance_criteria:
