@@ -1,7 +1,16 @@
 """BillingClient facade: recording and delivery (design gate #571 v24 §2「存储」「投递」, §5).
 
 AIH-TASK-168：`record_*`、进程内暂存与回灌、待记事故、降级运行与重新打开、投递线程、
-`deliver_once`、死信运维与事故确认、四个进程内计数。有效状态与 webhook 在 AIH-TASK-169。
+`deliver_once`、死信运维与事故确认、四个进程内计数。
+AIH-TASK-169：对账线程与 `reconcile_status_once`、`should_block_ai`、`current_status`、
+`handle_status_webhook`、`reset_status`（§2「有效状态」「状态 webhook」）。
+
+- **对账节奏**：手动调用与对账线程共用一份 `ReconcileSchedule`，由 `_reconcile_lock` 串行
+  （手动调用遇到线程正在对账时等它做完再做自己的一轮）。对账线程用停止事件的 `wait`，
+  每次最多等 `RECONCILE_WAIT_MAX_SECONDS`，醒来重新读节奏；存储不可用时跳过到期的那一轮
+  （不算失败、不改节奏），存储恢复后的下一次唤醒立即对账。投递线程不对账。
+- **放行**：`should_block_ai()` 只在配置那一对已有状态行且为 `BLOCK_AI` 时为真；降级、
+  读库失败、没有行都返回假、不抛（INV-1）。
 
 - **降级**：构造时打开失败、或运行中读写库抛出会转入降级的错误（`IntegrityError` 以外、
   错误名不以 `SQLITE_BUSY` / `SQLITE_LOCKED` 开头的 `sqlite3.Error`，`OSError`，
@@ -12,7 +21,8 @@ AIH-TASK-168：`record_*`、进程内暂存与回灌、待记事故、降级运�
 - **连接代号**：每次打开成功代号加一；只有当前代号上抛出的错误才转入降级，旧代号迟到的
   错误只记 WARNING，不作废新打开的库、不标记坏文件。
 - **锁的次序**：`_maintenance_lock`（回灌与写事故串行）→ `_open_lock`（作废与重新打开串行）
-  → `_state_lock`；`_held_lock` 与 `_incident_lock` 只护内存数据，持有时不碰 SQLite。
+  → `_state_lock`；`_reconcile_lock` 在 `_open_lock` 之前；`_held_lock`、`_incident_lock`
+  与 `_schedule_lock` 只护内存数据，持有时不碰 SQLite。
 - `close()` 之后不再重新打开（stop 超时残留的线程同样不重开），公开方法抛 `RuntimeError`。
 
 ⚠️ 日志（logger `acuven_billing_client`）只带 `event_id`、异常类型、文件路径与条数，
@@ -27,15 +37,18 @@ import random
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Final, TypeVar
+from typing import Any, Final, TypeVar
 
+from . import status as _status
 from .config import BillingClientConfig
 from .delivery import DeliverySummary, Uniform, run_delivery_round
 from .events import build_llm_event, build_quantity_event
 from .ids import new_ulid
+from .status import RECONCILE_WAIT_MAX_SECONDS, ReconcileSchedule
 from .store import (
     DeadEvent,
     EventConflictError,
@@ -51,12 +64,14 @@ from .store import (
     StoreUnavailableError,
 )
 from .transport import Transport, UrllibTransport
+from .webhook import StatusStoreError, WebhookVerificationError, verify_status_webhook
 
 logger = logging.getLogger("acuven_billing_client")
 
 DEFAULT_LIST_LIMIT: Final = 50
 DEFAULT_STOP_TIMEOUT: Final = 30.0
 THREAD_NAME: Final = "acuven-billing-delivery"
+RECONCILE_THREAD_NAME: Final = "acuven-billing-reconcile"
 _TRANSIENT_PREFIXES: Final = ("SQLITE_BUSY", "SQLITE_LOCKED")
 # 读写 Store 时按存储故障处理的异常；EventConflictError 不在其中。
 _STORE_ERRORS: Final = (sqlite3.Error, OSError, StoreError)
@@ -187,6 +202,8 @@ class BillingClient:
         self._held_lock = threading.Lock()
         self._incident_lock = threading.Lock()
         self._thread_lock = threading.Lock()
+        self._reconcile_lock = threading.Lock()
+        self._schedule_lock = threading.Lock()
 
         self._store: Store | None = None
         self._available = False
@@ -204,8 +221,14 @@ class BillingClient:
         self._dropped_events = 0
         self._conflicts_dropped = 0
 
+        self._schedule = ReconcileSchedule(
+            config.reconcile_interval_seconds, config.reconcile_retry_seconds
+        )
+
+        # 投递线程与对账线程共用一个停止事件。
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._reconcile_thread: threading.Thread | None = None
 
         self._try_reopen()
 
@@ -242,6 +265,12 @@ class BillingClient:
     def conflicts_dropped(self) -> int:
         with self._incident_lock:
             return self._conflicts_dropped
+
+    @property
+    def next_reconcile_at(self) -> float | None:
+        """Unix seconds (injected clock) of the next reconcile; None before the first one."""
+        with self._schedule_lock:
+            return self._schedule.next_at
 
     # --- 记账 ---
 
@@ -568,18 +597,33 @@ class BillingClient:
             return DeliverySummary.zero()
 
     def start(self) -> None:
-        """Start the delivery thread; the first round runs at once. No-op while running."""
+        """Start the delivery and reconcile threads; both first rounds run at once.
+
+        运行中再调是空操作。每次真正启动都把对账节奏重置为立即对账、并重置「本段连续失败
+        已补查过」的标记。
+        """
         with self._thread_lock:
             self._check_open()
-            thread = self._thread
-            if thread is not None and thread.is_alive():
+            running = [
+                thread
+                for thread in (self._thread, self._reconcile_thread)
+                if thread is not None and thread.is_alive()
+            ]
+            if running:
                 if self._stop_event.is_set():
                     raise RuntimeError("previous stop timed out; old thread still running")
                 return
             self._stop_event.clear()
-            thread = threading.Thread(target=self._run, name=THREAD_NAME, daemon=True)
-            self._thread = thread
-            thread.start()
+            with self._schedule_lock:
+                self._schedule.restart(float(self._clock()))
+            delivery = threading.Thread(target=self._run, name=THREAD_NAME, daemon=True)
+            reconcile = threading.Thread(
+                target=self._run_reconcile, name=RECONCILE_THREAD_NAME, daemon=True
+            )
+            self._thread = delivery
+            self._reconcile_thread = reconcile
+            delivery.start()
+            reconcile.start()
 
     def _run(self) -> None:
         stop_event = self._stop_event
@@ -593,21 +637,37 @@ class BillingClient:
             if stop_event.wait(interval):
                 return
 
+    def _run_reconcile(self) -> None:
+        stop_event = self._stop_event
+        while not stop_event.is_set():
+            try:
+                self._reconcile_tick()
+            except Exception as exc:
+                logger.error("status reconcile round failed: %s", type(exc).__name__)
+            if stop_event.wait(self._reconcile_wait()):
+                return
+
     def stop(self, timeout: float | None = DEFAULT_STOP_TIMEOUT) -> bool:
-        """Signal the thread and wait; False (with a WARNING) if it is still running."""
+        """Signal both threads and wait; False (with a WARNING) if either is still running."""
         with self._thread_lock:
             self._stop_event.set()
-            thread = self._thread
-        if thread is None:
-            return True
-        thread.join(timeout)
-        if thread.is_alive():
-            logger.warning("delivery thread did not stop within %s seconds", timeout)
-            return False
-        with self._thread_lock:
-            if self._thread is thread:
-                self._thread = None
-        return True
+            delivery, reconcile = self._thread, self._reconcile_thread
+        deadline = None if timeout is None else time.monotonic() + timeout
+        stopped = True
+        for thread, label in ((delivery, "delivery"), (reconcile, "reconcile")):
+            if thread is None:
+                continue
+            thread.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                logger.warning("%s thread did not stop within %s seconds", label, timeout)
+                stopped = False
+                continue
+            with self._thread_lock:
+                if self._thread is thread:
+                    self._thread = None
+                if self._reconcile_thread is thread:
+                    self._reconcile_thread = None
+        return stopped
 
     def close(self, timeout: float | None = DEFAULT_STOP_TIMEOUT) -> bool:
         """`stop(timeout)`, then close the store and release the single-process lock.
@@ -625,6 +685,161 @@ class BillingClient:
             if store is not None:
                 store.close()
         return stopped
+
+    # --- 有效状态 ---
+
+    def reconcile_status_once(self) -> bool:
+        """One reconcile now, whatever the schedule; returns whether it succeeded. Never raises.
+
+        降级时先尝试重新打开，仍不可用算一次失败。对账线程正在对账时等它做完再做自己的
+        一轮；之后按结果更新 `next_reconcile_at`。
+        """
+        self._check_open()
+        with self._reconcile_lock:
+            if not self.store_available:
+                self._try_reopen()
+            current = self._current()
+            if current is None:
+                logger.warning("effective-status reconcile failed: outbox store unavailable")
+                self._schedule_result(False)
+                return False
+            return self._reconcile_with(*current)
+
+    def _reconcile_tick(self) -> None:
+        """The reconcile thread's turn: reconcile only when due and the store is available."""
+        with self._reconcile_lock:
+            if self._stop_event.is_set():
+                return
+            with self._schedule_lock:
+                due = self._schedule.due(float(self._clock()))
+            if not due:
+                return
+            # 存储不可用：跳过这一轮，不算失败、不改节奏（重新打开由投递线程负责）。
+            current = self._current()
+            if current is None:
+                return
+            self._reconcile_with(*current)
+
+    def _reconcile_with(self, epoch: int, store: Store) -> bool:
+        # 调用方持有 _reconcile_lock。
+        ok = _status.reconcile_status_once(
+            store,
+            self._transport,
+            self._config,
+            clock=self._clock,
+            new_request_id=self._new_ulid,
+            on_store_error=lambda exc: self._on_status_store_error(exc, epoch),
+        )
+        self._schedule_result(ok)
+        return ok
+
+    def _schedule_result(self, ok: bool) -> None:
+        now = float(self._clock())
+        with self._schedule_lock:
+            if ok:
+                self._schedule.succeeded(now)
+            else:
+                self._schedule.failed(now)
+
+    def _reconcile_wait(self) -> float:
+        with self._schedule_lock:
+            return self._schedule.wait_seconds(float(self._clock()), RECONCILE_WAIT_MAX_SECONDS)
+
+    def _on_status_store_error(self, exc: BaseException, epoch: int) -> None:
+        if _degrades(exc):
+            self._on_store_error(exc, epoch)
+
+    def should_block_ai(self) -> bool:
+        """True only if the configured pair has an applied status row that says BLOCK_AI.
+
+        降级时直接返回假、不访问库；读库失败或没有行返回假并记 WARNING。从不抛异常（INV-1）。
+        """
+        current = self._current()
+        if current is None:
+            return False
+        epoch, store = current
+        try:
+            row = store.read_status(self._config.tenant_id, self._config.project_id)
+        except Exception as exc:
+            logger.warning(
+                "reading the effective status failed; allowing AI: %s", type(exc).__name__
+            )
+            if isinstance(exc, _STORE_ERRORS):
+                self._on_status_store_error(exc, epoch)
+            return False
+        if row is None:
+            logger.warning("no effective status applied yet; allowing AI")
+            return False
+        return row.effective_status == "BLOCK_AI"
+
+    def current_status(self) -> dict[str, Any] | None:
+        """The applied status: the 10 fields plus `applied_at`. None if none or unreadable."""
+        current = self._current()
+        if current is None:
+            return None
+        epoch, store = current
+        try:
+            row = store.read_status(self._config.tenant_id, self._config.project_id)
+        except Exception as exc:
+            logger.warning("reading the effective status failed: %s", type(exc).__name__)
+            if isinstance(exc, _STORE_ERRORS):
+                self._on_status_store_error(exc, epoch)
+            return None
+        return None if row is None else asdict(row)
+
+    def handle_status_webhook(
+        self,
+        *,
+        method: str,
+        raw_path: str | bytes,
+        query_string: str | bytes,
+        headers: Mapping[Any, Any] | Iterable[Any],
+        body: bytes,
+        signed_path: str | None = None,
+    ) -> bool:
+        """Verify a status webhook, then apply it by version. Returns whether it was applied.
+
+        验签失败抛 `WebhookVerificationError`（回 401）；验签通过而存储不可用或写库失败抛
+        `StatusStoreError`（回 503）。旧版本或同版本返回假，不是错误。不写对账时刻。
+        """
+        self._check_open()
+        fields = verify_status_webhook(
+            self._config,
+            now=float(self._clock()),
+            method=method,
+            raw_path=raw_path,
+            query_string=query_string,
+            headers=headers,
+            body=body,
+            signed_path=signed_path,
+        )
+        current = self._current()
+        if current is None:
+            raise StatusStoreError(f"outbox store is unavailable: {self._path}")
+        epoch, store = current
+        try:
+            applied = store.apply_status(
+                self._config.tenant_id, self._config.project_id, fields, now=float(self._clock())
+            )
+        except _STORE_ERRORS as exc:
+            logger.error("storing the webhook status failed: %s", type(exc).__name__)
+            self._on_status_store_error(exc, epoch)
+            raise StatusStoreError(f"storing the status failed: {type(exc).__name__}") from exc
+        logger.info(
+            "status webhook verified: status_version=%d effective_status=%s applied=%s",
+            fields["status_version"],
+            fields["effective_status"],
+            applied,
+        )
+        return applied
+
+    def reset_status(self, *, reason: str) -> bool:
+        """Delete the configured pair's status row (RESET_STATUS in ops_log); False if none."""
+        return self._dispose(
+            lambda store: store.reset_status(
+                self._config.tenant_id, self._config.project_id, reason=reason
+            )
+        )
 
     # --- 死信运维、重放与事故 ---
 
@@ -688,4 +903,9 @@ class BillingClient:
         return new_ulid(now_ms=lambda: int(float(self._clock()) * 1000))
 
 
-__all__ = ["BillingClient", "StoreUnavailableError"]
+__all__ = [
+    "BillingClient",
+    "StatusStoreError",
+    "StoreUnavailableError",
+    "WebhookVerificationError",
+]
