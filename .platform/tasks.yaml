@@ -9707,7 +9707,7 @@ tasks:
     title: Billing Client 第二层：SQLite outbox 核心：建表、写入去重、领取与租约、落回执与清理
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「存储（SQLite）」「事务边界」「投递」与 §4：新模块 store.py 的 outbox 核心，建 meta、usage_outbox、status_state、reconcile_state、ops_log、incidents 六张表（后四张的读写函数属于 AIH-TASK-166），两种打开方式与版本保护，写事件（BEGIN IMMEDIATE、主键冲突与存储故障分开），领取与租约栅栏，落回执，清理，投递相关的只读计数。不发 HTTP、不做内存暂存与后台线程。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-164
     acceptance_criteria:
