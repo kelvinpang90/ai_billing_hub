@@ -4,6 +4,7 @@ AIH-TASK-168：`record_*`、进程内暂存与回灌、待记事故、降级运�
 `deliver_once`、死信运维与事故确认、四个进程内计数。
 AIH-TASK-169：有效状态对账（`reconcile_status_once`、对账线程与节奏）、`should_block_ai`、
 `current_status`、`reset_status` 与 `handle_status_webhook`。
+AIH-TASK-170：`health()`（汇总见 `metrics.py`）。
 
 - **两个线程**：`start()` 起投递线程与对账线程，共用一个停止事件；`stop()` 等两个都结束。
   投递线程不调用对账。对账线程按 `ReconcileSchedule` 的时刻对账，用停止事件的 `wait`
@@ -47,6 +48,7 @@ from .config import BillingClientConfig
 from .delivery import DeliverySummary, Uniform, run_delivery_round
 from .events import build_llm_event, build_quantity_event
 from .ids import new_ulid
+from .metrics import build_health, read_store_metrics
 from .status import ReconcileSchedule
 from .status import reconcile_status_once as run_reconcile
 from .store import (
@@ -841,6 +843,38 @@ class BillingClient:
             if store is not None:
                 store.close()
         return stopped
+
+    # --- 健康指标 ---
+
+    def health(self) -> dict[str, Any]:
+        """The fifteen health keys (§2「健康指标」). Never raises.
+
+        读库失败按存储错误的规则处理（会转入降级的错误先转入降级），库里的九个键为 None、
+        `level = P1`；`store_available` 取读库之后的值。
+        """
+        store_metrics: dict[str, Any] | None = None
+        current = self._current()
+        if current is not None:
+            epoch, store = current
+            try:
+                store_metrics = read_store_metrics(
+                    store,
+                    tenant_id=self._config.tenant_id,
+                    project_id=self._config.project_id,
+                    now=float(self._clock()),
+                )
+            except Exception as exc:
+                logger.warning("reading health metrics failed: %s", type(exc).__name__)
+                if isinstance(exc, _STORE_ERRORS) and _degrades(exc):
+                    self._on_store_error(exc, epoch)
+        return build_health(
+            store_metrics,
+            store_available=self.store_available,
+            held_in_memory=self.held_in_memory,
+            incidents_pending=self.incidents_pending,
+            dropped_events=self.dropped_events,
+            conflicts_dropped=self.conflicts_dropped,
+        )
 
     # --- 死信运维、重放与事故 ---
 
