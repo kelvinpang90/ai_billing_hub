@@ -311,7 +311,8 @@
   - AIH-TASK-056 / 061：`ai_usage_outbox` 表，用量写入 outbox、提交结果核查、落库失败暂存与处置（067 / 068）
 - [x] Celery 投递
   - AIH-TASK-065：Celery 任务 `ai_api.deliver_due` 领取、签名上报、结算与重试
-- [ ] Billing Client
+- [x] Billing Client
+  - AIH-TASK-164..171（设计闸门 #571）：本仓库 `integration-client/` 的 `acuven_billing_client` 包（outbox、投递、签名、对账、状态 webhook 验签、健康指标、运维命令行），与服务端的契约测试和接入指南
 - [x] 集成认证 + HMAC 签名
   - 接收端 AIH-TASK-012（凭据）与 029（验签、防重放）；AI 模块上报端 AIH-TASK-065 按同一 HMAC 契约签名
 - [ ] Webhook 接收端
