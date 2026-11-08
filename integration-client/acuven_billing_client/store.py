@@ -1,9 +1,9 @@
-"""SQLite outbox core (design gate #571 v24 §2「存储（SQLite）」「事务边界」「投递」, §4).
+"""SQLite outbox (design gate #571 v24 §2「存储（SQLite）」「事务边界」「投递」「有效状态」, §4).
 
-本模块（AIH-TASK-165）：建表与两种打开方式、版本保护、单进程锁、连接登记与作废、
+AIH-TASK-165：建表与两种打开方式、版本保护、单进程锁、连接登记与作废、
 文件替换检测、写事件与去重、领取与租约栅栏、落回执、清理、投递相关的只读计数。
-死信运维、重放、`ops_log`、`incidents`、`status_state` 与 `reconcile_state` 的读写
-属于 AIH-TASK-166；这里只建这四张表。不发 HTTP、不做内存暂存、不起线程。
+AIH-TASK-166：死信运维、已送达重放、`ops_log`、`incidents`、`status_state` 与
+`reconcile_state` 的读写与状态重置。不发 HTTP、不做内存暂存、不起线程。
 
 - 每个线程各用自己的连接；全部连接以 `check_same_thread=False` 建立并登记。每次使用
   连接时持登记表的共享锁，`invalidate()` 取排他锁、关闭全部已登记连接、代号加一。
@@ -12,22 +12,28 @@
 - 每次使用连接前比对路径当前的文件身份 `(st_dev, st_ino)`：变了或路径不存在就抛
   `StoreReplacedError`，由门面（AIH-TASK-168）`invalidate()` 后转入降级。
 - 本模块不自己调 `invalidate()`：持着共享锁的调用里再取排他锁会自锁。
-- `ops_log` 只增不改：本模块没有更新或删除它的代码（写入也在 AIH-TASK-166）。
+- `ops_log` 只增不改：本模块没有更新或删除它的代码。每一次处置与它改动的行在同一个
+  事务里写 `ops_log`；先改行、后写 `ops_log`，任何一步失败整个事务回滚。
+- 处置、事故与重放写的时刻取构造时注入的时钟；带 `now` 参数的函数（状态与对账时刻）
+  用传入的时刻。
 """
 
 from __future__ import annotations
 
 import errno
+import math
 import os
 import re
 import sqlite3
 import sys
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, NamedTuple
+from typing import Any, Final, NamedTuple
+
+from .ids import new_ulid
 
 if sys.platform == "win32":
     import msvcrt
@@ -40,6 +46,21 @@ BUSY_TIMEOUT_MS: Final = 5000
 _BATCH_PREFIX: Final = b'{"events":['
 _BATCH_SUFFIX: Final = b"]}"
 AUTH_FAILED_CODE: Final = "INTEGRATION_AUTH_FAILED"
+# 处置原因去掉首尾空白后的长度上限（§2「模块与公开接口」命令行 `--reason`）。
+MAX_REASON_LENGTH: Final = 500
+# 逐条记录的事故种类；OVERFLOW_DROPPED 只由 `record_incidents` 的 `overflow` 写。
+_ITEM_INCIDENT_KINDS: Final = frozenset({"DROPPED", "CONFLICT_DROPPED"})
+# 有效状态应答里除 tenant_id、project_id 以外的 8 个已知字段（§2「存储」status_state）。
+STATUS_FIELDS: Final = (
+    "billing_mode",
+    "billing_status",
+    "account_status",
+    "project_integration_status",
+    "effective_status",
+    "status_version",
+    "reason_code",
+    "effective_at",
+)
 
 _VERSION_TEXT: Final = re.compile(r"[1-9][0-9]*")
 _TABLES: Final = frozenset(
@@ -217,6 +238,119 @@ class DeliveryCounts:
     oldest_unsent_created_at: float | None
     # 存在 last_error_code 为 INTEGRATION_AUTH_FAILED 的 PENDING 或 SENDING 行。
     auth_failing: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DeadEvent:
+    event_id: str
+    last_error_code: str | None
+    attempts: int
+    dead_at: float | None
+    dead_acked_at: float | None
+
+
+class IncidentItem(NamedTuple):
+    """One dropped event: `kind` is DROPPED or CONFLICT_DROPPED."""
+
+    event_id: str
+    kind: str
+    occurred_at: float
+
+
+class OverflowCount(NamedTuple):
+    """Drops counted after the pending-incident list was full; only the count is known."""
+
+    count: int
+    first_occurred_at: float
+    last_occurred_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class Incident:
+    incident_id: str
+    kind: str
+    # OVERFLOW_DROPPED 为 None。
+    event_id: str | None
+    dropped_count: int
+    first_occurred_at: float
+    last_occurred_at: float
+    recorded_at: float
+    acked_at: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredStatus:
+    tenant_id: str
+    project_id: str
+    billing_mode: str
+    billing_status: str
+    account_status: str
+    project_integration_status: str
+    effective_status: str
+    status_version: int
+    reason_code: str | None
+    effective_at: str
+    applied_at: float
+
+
+class ReconcileTimes(NamedTuple):
+    last_ok_at: float | None
+    last_error_at: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class StatusPair:
+    """One tenant × project seen in status_state or reconcile_state (command line `stats`).
+
+    某张表里没有这一对时，那张表的列为 None。
+    """
+
+    tenant_id: str
+    project_id: str
+    billing_mode: str | None
+    billing_status: str | None
+    account_status: str | None
+    project_integration_status: str | None
+    effective_status: str | None
+    status_version: int | None
+    reason_code: str | None
+    effective_at: str | None
+    applied_at: float | None
+    last_ok_at: float | None
+    last_error_at: float | None
+
+
+def _clean_reason(reason: object) -> str:
+    if not isinstance(reason, str):
+        raise TypeError("reason must be a string")
+    text = reason.strip()
+    if not 1 <= len(text) <= MAX_REASON_LENGTH:
+        raise ValueError(f"reason must be 1 to {MAX_REASON_LENGTH} characters after stripping")
+    return text
+
+
+def _check_limit(limit: object) -> int:
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise TypeError("limit must be an integer")
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    return limit
+
+
+def _unix_seconds(value: object, name: str) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise TypeError(f"{name} must be Unix seconds (int or float)")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _log_op(conn: sqlite3.Connection, action: str, target_id: str, reason: str, at: float) -> None:
+    conn.execute(
+        "INSERT INTO ops_log (action, target_id, reason, at) VALUES (?, ?, ?, ?)",
+        (action, target_id, reason, at),
+    )
 
 
 # --- 单进程锁与登记表的读写锁 ---------------------------------------------------------
@@ -852,16 +986,322 @@ class Store:
             auth_failing=bool(auth_failing),
         )
 
+    # --- 死信运维（§2「投递」死信，§4） ---
+    # 原因不合规时抛错、不碰库；非法状态或不存在时返回假、不写 ops_log。
+
+    def requeue_dead(self, event_id: str, *, reason: str) -> bool:
+        """DEAD → PENDING, `attempts = 0`, due now; clears the error code and both dead times."""
+        text = _clean_reason(reason)
+        now = float(self._clock())
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE usage_outbox SET status = 'PENDING', attempts = 0, next_attempt_at = ?,"
+                " lease_until = NULL, last_error_code = NULL, dead_at = NULL, dead_acked_at = NULL"
+                " WHERE event_id = ? AND status = 'DEAD'",
+                (now, event_id),
+            ).rowcount
+            if not changed:
+                return False
+            _log_op(conn, "REQUEUE_DEAD", event_id, text, now)
+        return True
+
+    def ack_dead(self, event_id: str, *, reason: str) -> bool:
+        """Confirm giving up a DEAD row: sets `dead_acked_at`, keeps the row."""
+        text = _clean_reason(reason)
+        now = float(self._clock())
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE usage_outbox SET dead_acked_at = ?"
+                " WHERE event_id = ? AND status = 'DEAD' AND dead_acked_at IS NULL",
+                (now, event_id),
+            ).rowcount
+            if not changed:
+                return False
+            _log_op(conn, "ACK_DEAD", event_id, text, now)
+        return True
+
+    def list_dead(self, limit: int, *, include_acked: bool = True) -> list[DeadEvent]:
+        """DEAD rows ordered by `dead_at`, then `event_id`."""
+        count = _check_limit(limit)
+        acked_filter = "" if include_acked else " AND dead_acked_at IS NULL"
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT event_id, last_error_code, attempts, dead_at, dead_acked_at"
+                " FROM usage_outbox WHERE status = 'DEAD'"
+                + acked_filter
+                + " ORDER BY dead_at, event_id LIMIT ?",
+                (count,),
+            ).fetchall()
+        return [DeadEvent(*row) for row in rows]
+
+    # --- 中心恢复后的重放（§2「投递」） ---
+
+    def replay_delivered(
+        self, *, delivered_from: float, delivered_until: float, reason: str
+    ) -> int:
+        """DELIVERED rows with `delivered_at` in `[delivered_from, delivered_until)` → PENDING.
+
+        时刻是 Unix 秒，与 `delivered_at` 同口径（门面与命令行负责从带时区的时刻换算）。
+        每个改回的行在同一事务里写一条 REPLAY_DELIVERED；返回改回的条数。载荷不变。
+        """
+        text = _clean_reason(reason)
+        start = _unix_seconds(delivered_from, "delivered_from")
+        end = _unix_seconds(delivered_until, "delivered_until")
+        if start >= end:
+            raise ValueError("delivered_from must be earlier than delivered_until")
+        now = float(self._clock())
+        replayed = 0
+        with self._write() as conn:
+            event_ids = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT event_id FROM usage_outbox WHERE status = 'DELIVERED'"
+                    " AND delivered_at >= ? AND delivered_at < ? ORDER BY delivered_at, event_id",
+                    (start, end),
+                ).fetchall()
+            ]
+            for event_id in event_ids:
+                changed = conn.execute(
+                    "UPDATE usage_outbox SET status = 'PENDING', attempts = 0, next_attempt_at = ?,"
+                    " lease_until = NULL, delivered_at = NULL, last_error_code = NULL"
+                    " WHERE event_id = ? AND status = 'DELIVERED'",
+                    (now, event_id),
+                ).rowcount
+                if changed:
+                    _log_op(conn, "REPLAY_DELIVERED", event_id, text, now)
+                    replayed += 1
+        return replayed
+
+    # --- 事故（§2「存储」incidents 与待记事故） ---
+
+    def record_incidents(
+        self, items: Iterable[IncidentItem], *, overflow: OverflowCount | None
+    ) -> int:
+        """Write pending incidents in one transaction; returns the rows inserted.
+
+        `items` 每条生成新的 `inc_<ULID>`；同一 `event_id`、同一 `kind` 已有未确认事故时跳过
+        （已确认的不算）。`overflow` 的条数大于 0 时另写一行 OVERFLOW_DROPPED（不去重）。
+        入参不合规时抛错、不写任何行。
+        """
+        checked: list[IncidentItem] = []
+        for event_id, kind, occurred_at in items:
+            if not isinstance(event_id, str) or not event_id:
+                raise TypeError("incident event_id must be a non-empty string")
+            if kind not in _ITEM_INCIDENT_KINDS:
+                raise ValueError(f"incident kind must be DROPPED or CONFLICT_DROPPED: {kind!r}")
+            checked.append(IncidentItem(event_id, kind, _unix_seconds(occurred_at, "occurred_at")))
+        overflow_row: OverflowCount | None = None
+        if overflow is not None:
+            count, first_at, last_at = overflow
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise TypeError("overflow count must be an integer")
+            if count < 0:
+                raise ValueError("overflow count must not be negative")
+            if count > 0:
+                overflow_row = OverflowCount(
+                    count,
+                    _unix_seconds(first_at, "first_occurred_at"),
+                    _unix_seconds(last_at, "last_occurred_at"),
+                )
+        now = float(self._clock())
+        inserted = 0
+        with self._write() as conn:
+            for event_id, kind, occurred_at in checked:
+                open_incident = conn.execute(
+                    "SELECT 1 FROM incidents"
+                    " WHERE event_id = ? AND kind = ? AND acked_at IS NULL LIMIT 1",
+                    (event_id, kind),
+                ).fetchone()
+                if open_incident is not None:
+                    continue
+                conn.execute(
+                    "INSERT INTO incidents (incident_id, kind, event_id, dropped_count,"
+                    " first_occurred_at, last_occurred_at, recorded_at)"
+                    " VALUES (?, ?, ?, 1, ?, ?, ?)",
+                    ("inc_" + new_ulid(), kind, event_id, occurred_at, occurred_at, now),
+                )
+                inserted += 1
+            if overflow_row is not None:
+                conn.execute(
+                    "INSERT INTO incidents (incident_id, kind, event_id, dropped_count,"
+                    " first_occurred_at, last_occurred_at, recorded_at)"
+                    " VALUES (?, 'OVERFLOW_DROPPED', NULL, ?, ?, ?, ?)",
+                    (
+                        "inc_" + new_ulid(),
+                        overflow_row.count,
+                        overflow_row.first_occurred_at,
+                        overflow_row.last_occurred_at,
+                        now,
+                    ),
+                )
+                inserted += 1
+        return inserted
+
+    def ack_incident(self, incident_id: str, *, reason: str) -> bool:
+        """Confirm an unacknowledged incident: sets `acked_at` and `ack_reason`."""
+        text = _clean_reason(reason)
+        now = float(self._clock())
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE incidents SET acked_at = ?, ack_reason = ?"
+                " WHERE incident_id = ? AND acked_at IS NULL",
+                (now, text, incident_id),
+            ).rowcount
+            if not changed:
+                return False
+            _log_op(conn, "ACK_INCIDENT", incident_id, text, now)
+        return True
+
+    def list_incidents(self, limit: int, *, include_acked: bool = True) -> list[Incident]:
+        """Incidents ordered by `recorded_at`, then `incident_id`."""
+        count = _check_limit(limit)
+        acked_filter = "" if include_acked else " WHERE acked_at IS NULL"
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT incident_id, kind, event_id, dropped_count, first_occurred_at,"
+                " last_occurred_at, recorded_at, acked_at FROM incidents"
+                + acked_filter
+                + " ORDER BY recorded_at, incident_id LIMIT ?",
+                (count,),
+            ).fetchall()
+        return [Incident(*row) for row in rows]
+
+    def count_unacked_incidents(self) -> int:
+        with self._read() as conn:
+            row = conn.execute("SELECT count(*) FROM incidents WHERE acked_at IS NULL").fetchone()
+        return int(row[0])
+
+    # --- 有效状态（§2「有效状态」） ---
+    # 只读写给定那一对的行；换了租户或项目时旧那一对的行留在表里但不被读到。
+
+    def read_status(self, tenant_id: str, project_id: str) -> StoredStatus | None:
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT tenant_id, project_id, " + ", ".join(STATUS_FIELDS) + ", applied_at"
+                " FROM status_state WHERE tenant_id = ? AND project_id = ?",
+                (tenant_id, project_id),
+            ).fetchone()
+        return None if row is None else StoredStatus(*row)
+
+    def apply_status(
+        self, tenant_id: str, project_id: str, fields: Mapping[str, Any], *, now: float
+    ) -> bool:
+        """Apply by version: insert if no row, replace the whole row only for a larger version.
+
+        只取 `STATUS_FIELDS` 里的 8 个已知字段，多出的忽略、不存；缺字段抛 `ValueError`。
+        版本相等或更小不改、返回假。不写对账时刻。
+        """
+        missing = [name for name in STATUS_FIELDS if name not in fields]
+        if missing:
+            raise ValueError(f"status fields missing: {', '.join(missing)}")
+        values = tuple(fields[name] for name in STATUS_FIELDS)
+        version = fields["status_version"]
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise TypeError("status_version must be an integer")
+        applied_at = _unix_seconds(now, "now")
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT status_version FROM status_state WHERE tenant_id = ? AND project_id = ?",
+                (tenant_id, project_id),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO status_state (tenant_id, project_id, "
+                    + ", ".join(STATUS_FIELDS)
+                    + ", applied_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (tenant_id, project_id, *values, applied_at),
+                )
+                return True
+            if version <= row[0]:
+                return False
+            conn.execute(
+                "UPDATE status_state SET "
+                + ", ".join(f"{name} = ?" for name in STATUS_FIELDS)
+                + ", applied_at = ? WHERE tenant_id = ? AND project_id = ?",
+                (*values, applied_at, tenant_id, project_id),
+            )
+        return True
+
+    def reset_status(self, tenant_id: str, project_id: str, *, reason: str) -> bool:
+        """Delete that pair's status_state row (RESET_STATUS); reconcile_state is untouched.
+
+        返回是否删了行；没有行时不写 ops_log。
+        """
+        text = _clean_reason(reason)
+        now = float(self._clock())
+        with self._write() as conn:
+            deleted = conn.execute(
+                "DELETE FROM status_state WHERE tenant_id = ? AND project_id = ?",
+                (tenant_id, project_id),
+            ).rowcount
+            if not deleted:
+                return False
+            _log_op(conn, "RESET_STATUS", f"{tenant_id}/{project_id}", text, now)
+        return True
+
+    # --- 对账时刻（§2「存储」reconcile_state）：不碰 status_state ---
+
+    def record_reconcile_ok(self, tenant_id: str, project_id: str, *, now: float) -> None:
+        self._record_reconcile("last_ok_at", tenant_id, project_id, now)
+
+    def record_reconcile_error(self, tenant_id: str, project_id: str, *, now: float) -> None:
+        self._record_reconcile("last_error_at", tenant_id, project_id, now)
+
+    def _record_reconcile(self, column: str, tenant_id: str, project_id: str, now: float) -> None:
+        at = _unix_seconds(now, "now")
+        with self._write() as conn:
+            conn.execute(
+                f"INSERT INTO reconcile_state (tenant_id, project_id, {column}) VALUES (?, ?, ?)"
+                " ON CONFLICT (tenant_id, project_id)"
+                f" DO UPDATE SET {column} = excluded.{column}",
+                (tenant_id, project_id, at),
+            )
+
+    def read_reconcile(self, tenant_id: str, project_id: str) -> ReconcileTimes:
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT last_ok_at, last_error_at FROM reconcile_state"
+                " WHERE tenant_id = ? AND project_id = ?",
+                (tenant_id, project_id),
+            ).fetchone()
+        return ReconcileTimes(None, None) if row is None else ReconcileTimes(*row)
+
+    def list_status_pairs(self) -> list[StatusPair]:
+        """Every pair in status_state or reconcile_state, ordered by tenant_id, project_id."""
+        status_columns = ", ".join(f"s.{name}" for name in (*STATUS_FIELDS, "applied_at"))
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT p.tenant_id, p.project_id, " + status_columns + ","
+                " r.last_ok_at, r.last_error_at FROM ("
+                " SELECT tenant_id, project_id FROM status_state"
+                " UNION SELECT tenant_id, project_id FROM reconcile_state) AS p"
+                " LEFT JOIN status_state AS s"
+                " ON s.tenant_id = p.tenant_id AND s.project_id = p.project_id"
+                " LEFT JOIN reconcile_state AS r"
+                " ON r.tenant_id = p.tenant_id AND r.project_id = p.project_id"
+                " ORDER BY p.tenant_id, p.project_id"
+            ).fetchall()
+        return [StatusPair(*row) for row in rows]
+
 
 __all__ = [
     "AUTH_FAILED_CODE",
+    "MAX_REASON_LENGTH",
     "SCHEMA_VERSION",
+    "STATUS_FIELDS",
     "ClaimedEvent",
+    "DeadEvent",
     "DeliveryCounts",
     "EventConflictError",
     "Fence",
+    "Incident",
+    "IncidentItem",
+    "OverflowCount",
+    "ReconcileTimes",
     "RetryRow",
+    "StatusPair",
     "Store",
+    "StoredStatus",
     "StoreError",
     "StoreForeignError",
     "StoreIntegrityFault",
