@@ -9757,7 +9757,7 @@ tasks:
     title: Billing Client 第三层：存储的运维与状态部分：死信、重放、处置记录、事故与状态表
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「存储（SQLite）」中 ops_log、incidents、status_state、reconcile_state 四张表、「投递」的死信与重放、「有效状态」的应用规则与状态重置、§4：在 store.py 里加死信运维、已送达重放、处置记录、事故记录与确认、状态与对账时刻的读写、状态重置。不改 AIH-TASK-165 已交付的函数。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-165
     acceptance_criteria:
