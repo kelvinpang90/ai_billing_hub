@@ -204,9 +204,14 @@ ai_billing_hub/
 ├── alembic/       # 迁移（T0.4 创建；⚠️ 不在 wheel 里，镜像要单独 COPY）
 ├── deploy/        # 部署期配置，目前只有 nginx/（T0.6 创建）
 ├── frontend/      # React SPA，自带 Dockerfile 与 nginx.conf（T0.7 创建）
+├── integration-client/  # Billing Client 包 acuven_billing_client（AIH-TASK-164..171）
 └── tests/         # 后端测试（Phase 0 创建）
 ```
 
 `frontend/src/` 内部**照 §101 的分法**（`api` / `components` / `features` / `layouts` / `routes` / `i18n`），
 只有 `features/` 下的九个业务子目录不预建 —— 空目录会让人以为那块已经开工。
-integration-client 的目录在对应 Phase 再定。**§101 的顶层结构视为已被本节取代**，实现时不要再回去照抄。
+integration-client 的目录**已定**（设计闸门 #571）：本仓库 `integration-client/`，包名 `acuven_billing_client`，
+自带 `pyproject.toml`、`README.md`（接入指南）与 `tests/`，接入方用 pip 从 git 安装并钉到提交；**不进服务端镜像**
+（`Dockerfile` 只复制 `app`、`alembic`）。与服务端的契约测试在 `tests/backend/test_billing_client_contract.py`。
+设计见 [`docs/design/AIH-TASK-164-billing-client.md`](design/AIH-TASK-164-billing-client.md)。
+**§101 的顶层结构视为已被本节取代**，实现时不要再回去照抄。
