@@ -79,7 +79,9 @@ def validate_status(data: object, config: BillingClientConfig) -> dict[str, Any]
         or not 0 <= version <= MAX_STATUS_VERSION
     ):
         raise StatusValidationError("status_version must be a non-negative 64-bit integer")
-    if data["effective_status"] not in EFFECTIVE_STATUSES:
+    # 先确认是字符串：列表或对象做集合成员判断会抛 TypeError（unhashable）。
+    effective_status = data["effective_status"]
+    if not isinstance(effective_status, str) or effective_status not in EFFECTIVE_STATUSES:
         raise StatusValidationError("effective_status must be ALLOW_AI or BLOCK_AI")
     if data["tenant_id"] != config.tenant_id or data["project_id"] != config.project_id:
         raise StatusValidationError("tenant_id or project_id does not match the configuration")
