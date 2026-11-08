@@ -424,7 +424,10 @@ def test_both_event_kinds_are_delivered_and_a_second_outbox_gets_already(world: 
 
     assert (summary.claimed, summary.delivered, summary.retried, summary.dead) == (2, 2, 0, 0)
     [exchange] = world.transport.to(BATCH_PATH)
-    assert batch_statuses(exchange) == [(llm_id, "accepted"), (quantity_id, "accepted")]
+    # 客户端时钟冻结，两条事件 created_at 相同，批内先后由 event_id 的随机部分决定，所以不比顺序。
+    assert sorted(batch_statuses(exchange)) == sorted(
+        [(llm_id, "accepted"), (quantity_id, "accepted")]
+    )
     first.close()
     counts = outbox_counts(world.tmp_path / "first.db")
     assert (counts.delivered, counts.pending, counts.sending, counts.dead) == (2, 0, 0, 0)
@@ -444,7 +447,7 @@ def test_both_event_kinds_are_delivered_and_a_second_outbox_gets_already(world: 
     assert (again.claimed, again.delivered, again.retried, again.dead) == (2, 2, 0, 0)
     [_, repeat] = world.transport.to(BATCH_PATH)
     statuses = batch_statuses(repeat)
-    assert [event_id for event_id, _ in statuses] == [llm_id, quantity_id]
+    assert sorted(event_id for event_id, _ in statuses) == sorted((llm_id, quantity_id))
     assert all(status.startswith("already_") for _, status in statuses), statuses
     second.close()
     counts = outbox_counts(world.tmp_path / "second.db")
