@@ -9962,7 +9962,7 @@ tasks:
     title: Billing Client 第七层：健康指标与运维命令行
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「健康指标」与「模块与公开接口」中 metrics、__main__ 两行：新模块 metrics.py 与 __main__.py，门面加 health()。契约测试、接入指南与文档属于 AIH-TASK-171。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-169
     acceptance_criteria:
