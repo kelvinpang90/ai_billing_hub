@@ -1,9 +1,10 @@
 """Acuven Billing Client (design gate #571 v24).
 
 本版有配置、ID、事件校验与序列化、请求签名、SQLite 存储（outbox 核心与运维、状态部分）、
-HTTP 传输与一轮投递；门面、状态与指标在 AIH-TASK-168..171。
+HTTP 传输、一轮投递与门面的记账和投递部分；状态与指标在 AIH-TASK-169..171。
 """
 
+from .client import BillingClient
 from .config import BillingClientConfig
 from .delivery import DeliverySummary, run_delivery_round
 from .events import build_llm_event, build_quantity_event
@@ -39,6 +40,7 @@ from .transport import Response, Transport, TransportError, UrllibTransport
 __version__ = "0.1.0"
 
 __all__ = [
+    "BillingClient",
     "BillingClientConfig",
     "ClaimedEvent",
     "DeadEvent",
