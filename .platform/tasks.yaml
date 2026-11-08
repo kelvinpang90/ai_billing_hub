@@ -9858,7 +9858,7 @@ tasks:
     title: Billing Client 第五层：记账门面、存储故障暂存与回灌、后台线程与死信运维
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「存储」的暂存回灌、「投递」的后台线程与死信、「健康指标」末尾的三个进程内计数、§5：新模块 client.py 的 BillingClient 门面的记账与投递部分（record_llm_usage、record_quantity_usage、start、stop、deliver_once、requeue_dead、ack_dead、list_dead、replay_delivered、list_incidents、ack_incident、held_in_memory、incidents_pending、dropped_events、conflicts_dropped）。不做有效状态与 webhook（属于 AIH-TASK-169）。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-167
     acceptance_criteria:
