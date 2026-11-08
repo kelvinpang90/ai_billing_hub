@@ -9806,7 +9806,7 @@ tasks:
     title: Billing Client 第四层：HTTP 传输与一轮投递：组批、回执判定、单发回退、退避与清理
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §2「投递」：新模块 transport.py 与 delivery.py。delivery.py 提供一轮投递的函数（领取、组批、签名发送、按回执落状态、批层不可重试改单发与续租、退避、401 固定 60 秒重试、清理），不含门面、内存暂存与后台线程（属于 AIH-TASK-168）。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-166
     acceptance_criteria:
