@@ -649,6 +649,26 @@ def provider_budget_world(tmp_path, monkeypatch) -> Iterator[World]:
     )
 
 
+@pytest.fixture
+def outbox_write_world(tmp_path, monkeypatch) -> Iterator[World]:
+    """Read limit 1.4 s like `provider_budget_world`, write limit 3.0 s.
+
+    `fast_world`'s 0.4 s read limit let the auth read time out first under CI load (503
+    AI_STORE_UNAVAILABLE instead of AI_USAGE_NOT_PERSISTED). Pool and connect carry the read limit
+    so the write limit (2 * (pool + connect) + 3 * rw) stays as short as that read limit allows.
+    """
+    yield from _build_world(
+        "sqlite",
+        tmp_path,
+        monkeypatch,
+        ai_provider_timeout_seconds=1.0,
+        ai_request_deadline_seconds=6.0,
+        ai_db_pool_timeout_seconds=0.6,
+        ai_db_connect_timeout_seconds=0.6,
+        ai_db_rw_timeout_seconds=0.2,
+    )
+
+
 def test_normal_path_forwards_the_subset_and_writes_one_pending_row(world: World) -> None:
     response = world.post(output_config={"effort": "low"}, system="caller system")
 
@@ -1040,26 +1060,26 @@ def test_hung_provider_and_slow_trickle_are_cut_at_the_budget(
 
 
 def test_hung_outbox_write_holds_usage_within_its_limit(
-    fast_world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    outbox_write_world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     blocker = Blocker(write_pending)
     monkeypatch.setattr("app.ai_api.outbox.write_pending", blocker)
     try:
         started = time.monotonic()
-        response = fast_world.post()
+        response = outbox_write_world.post()
         elapsed = time.monotonic() - started
 
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "AI_USAGE_NOT_PERSISTED"
-        assert 1.0 <= elapsed < 1.0 + 1.0
+        assert 3.0 <= elapsed < 3.0 + 1.0
         # 超时那一刻 CRITICAL 与暂存已经存在，不等卡住的线程回来。
         critical = [r for r in caplog.records if r.getMessage() == "AI usage not persisted"]
         assert [r.levelno for r in critical] == [logging.CRITICAL]
         assert critical[0].commit_outcome == "unknown"
-        assert len(fast_world.runtime.held_buffer) == 1
+        assert len(outbox_write_world.runtime.held_buffer) == 1
     finally:
         blocker.release.set()
-    _drain(fast_world)
+    _drain(outbox_write_world)
 
 
 def test_a_stuck_database_caps_threads_rejects_overflow_and_recovers(
