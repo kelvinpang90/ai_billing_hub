@@ -323,7 +323,9 @@ def _has_rows(table: str) -> str:
 def _column_type(kind: str) -> sa.types.TypeEngine:
     """`_*_COLUMNS` 里的类型文本 → 其他方言上 `create_table` 用的类型。"""
     if kind == "BIGINT":
-        return sa.BigInteger()
+        # 与模型的 `_PrimaryKey` / `_ForeignKeyInt` 一致：SQLite 只给
+        # `INTEGER PRIMARY KEY` 自动分配 rowid，BIGINT 主键插入时会撞 NOT NULL。
+        return sa.BigInteger().with_variant(sa.Integer(), "sqlite")
     if kind == "INTEGER":
         return sa.Integer()
     if kind == "DATETIME":
