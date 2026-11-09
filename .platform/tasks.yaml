@@ -10065,7 +10065,7 @@ tasks:
     title: 支付第一批第一层：payments 与 payment_gateway_events 两张表的迁移和模型
     purpose: >-
       按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「数据库」「幂等的三层」与 §8：新迁移 0036 建 payments 与 payment_gateway_events 两张表（列、唯一、CHECK、索引、外键与约束名照设计），新模型 app/models/payments.py 并在 alembic/env.py 登记，AuditAction 加 PAYMENT_STATUS_CHANGE（前端审计动作清单同步），docs/database-schema.md 记两张表。不写适配器、服务、任务与接口：分别属于 AIH-TASK-173..177。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） 逐条一致，以 §2「数据库」「幂等的三层」、§3 INV-3、INV-6、INV-13、§7 标 172 的一行、§8 的迁移一条 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
