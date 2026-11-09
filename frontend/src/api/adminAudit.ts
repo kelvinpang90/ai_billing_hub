@@ -96,6 +96,7 @@ export const AUDIT_ACTIONS = [
   "PORTAL_2FA_RESET",
   "TENANT_LOW_BALANCE_THRESHOLD_SET",
   "STATEMENT_GENERATE",
+  "PAYMENT_STATUS_CHANGE",
 ] as const;
 
 /** 系统动作（计费状态跃迁）的 `actor_role`。 */

@@ -19,7 +19,8 @@
 - **金额**：一律 `DECIMAL(20,8)`（`Money`，`app/models/base.py`；spec §80），永远不用浮点。
   金额列：`tenants.low_balance_threshold`、`wallets.balance`、`wallet_transactions` 的
   `amount` / `balance_before` / `balance_after`；`provider_price_components` 的 `rate_amount`（原币种单价）与
-  `unit_quantity`（多少个计量单位）同一精度。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
+  `unit_quantity`（多少个计量单位）同一精度；`payments` 的 `expected_amount`、`wallet_credit_amount`、`tax_amount`、
+  `confirmed_amount`、`gateway_fee` 也是。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
   #183 §2），同样不用浮点
 - **枚举列**：非原生 enum，`VARCHAR` 宽度写死（理由见 `app/models/auth.py` 的 `_ENUM_LENGTH`）
 
@@ -1474,6 +1475,124 @@ UPDATE 写 `PROCESSED`。
   `alembic_version` 仍是 0035——已定稿的对账单是不可变的财务快照，删了无法重建。表为空时先删两个触发器（只删存在的）再删
   表；表不存在时什么都不做；`--sql` 离线模式判断不了是否为空，直接拒绝、不输出 `DROP`。
 - **生产只回滚应用镜像，不降级 0035**：154 之后任何一步都可以只回滚镜像，表与已定稿的对账单原样留着。需要修复时一律前滚。
+
+---
+
+## 支付（spec §43、§63、§74.7、§118；ADR-0004、ADR-0006、ADR-0007、ADR-0008、ADR-0015；AIH-TASK-172，迁移 `0036_payments`）
+
+设计依据：[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)（设计闸门 #580 v3）
+§2「数据库」「幂等的三层」、§3 INV-3、INV-6、INV-13 与 §8。两张表：`payments` 一笔充值（Stripe Checkout Session）一行，
+`payment_gateway_events` 一个验签通过的 Stripe 事件一行。模型在 `app/models/payments.py`。AIH-TASK-172 只建表，部署后两张
+表都是空的、没有写入方；写入方由 AIH-TASK-174..177 陆续加上，支付开关默认关。行不删除（财务记录，长期保留）。
+
+### 幂等的三层（设计 §2，INV-3：同一笔支付永不重复入账）
+
+1. **`uq_payment_gateway_events_event (gateway, gateway_event_id)`**（本节的事件表）：同一事件重复投递只落一行（ADR-0004、
+   ADR-0006）。它**只去重投递，不足以挡重复入账**：Stripe 同一笔支付会发出多个不同 id 的事件（ADR-0015），B 的补对账也
+   没有事件 id。
+2. **`uq_payments_gateway_payment_id`、`uq_payments_gateway_payment_intent_id`**（本节的 `payments`）：一个 Stripe 付款对象
+   （会话 `cs_…`、PaymentIntent `pi_…`）只能对应一笔内部支付（spec §118「同一网关支付号不能给两笔内部支付入账」）。
+3. 账本 `uq_wallet_transactions_reference (reference_type, reference_id)`，即 `(PAYMENT, payments.public_id)`：一笔内部支付
+   至多一条 `TOPUP`（见 `wallet_transactions`，本迁移不碰）。`confirm_payment` 锁住 `payments` 行后再判状态，已是 `PAID`
+   就什么也不做；即使绕过也会被这条唯一约束挡住。
+
+### `payments`
+
+**行由谁写**：AIH-TASK-176 的建单 `create_topup` 插入 `PENDING` 行，并在调 Stripe 成功后用条件更新
+（`gateway_payment_id IS NULL`）写入会话 id，失败时写 `status_reason = GATEWAY_CREATE_FAILED`；AIH-TASK-174 的
+`confirm_payment` 锁住本行后改状态（`PAID` 时与 `TOPUP` 账本行、`PAYMENT_STATUS_CHANGE` 审计同一事务，INV-13）、写确认金额、
+PI id、手续费与 `last_reconciled_at`；AIH-TASK-175 的事件处理在 `gateway_payment_id` 为空时从事件**认回会话**（条件更新写
+`gateway_payment_id`）。没有删除路径。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_payments_public_id`）；uuid4，对外 id，也是账本引用（`reference_id`）与 Stripe `client_reference_id` |
+| `tenant_id` | BIGINT | 非空；外键 → `tenants(id)` `ON DELETE RESTRICT`（`fk_payments_tenant_id`）；入账以它为准（INV-8） |
+| `gateway` | VARCHAR(16) | 非空，`STRIPE`（`ck_payments_gateway`）；模型 `Enum(PaymentGateway, native_enum=False, length=16)` |
+| `expected_amount` | DECIMAL(20,8) | 非空；客户要付的含税毛额，`> 0` 且只有两位小数（`ck_payments_expected_amount`：`expected_amount > 0 AND expected_amount = ROUND(expected_amount, 2)`） |
+| `expected_currency` | CHAR(3) | 非空，`MYR`（`ck_payments_expected_currency`） |
+| `wallet_credit_amount` | DECIMAL(20,8) | 非空；入账额，等于 `expected_amount`（`ck_payments_wallet_credit_amount`，ADR-0008）；手续费不影响入账额 |
+| `tax_policy_version_id` | BIGINT | 非空；外键 → `tax_policy_versions(id)` `ON DELETE RESTRICT`（`fk_payments_tax_policy_version_id`）；建单时生效的税务政策版本（INV-6） |
+| `tax_amount` | DECIMAL(20,8) | 可空，且必须为空（`ck_payments_tax_amount`：`tax_amount IS NULL`）；ADR-0008：未注册 SST |
+| `confirmed_amount` | DECIMAL(20,8) | 可空；可信确认时 Stripe 报的金额（进入 `REVIEW_REQUIRED` 时也照样记下，供人工复核） |
+| `confirmed_currency` | CHAR(3) | 可空；同上，Stripe 报的币种 |
+| `gateway_payment_id` | VARCHAR(255) | 可空，唯一（`uq_payments_gateway_payment_id`）；Checkout Session id（`cs_…`），建单成功或认回会话后写入，之后不变 |
+| `gateway_payment_intent_id` | VARCHAR(255) | 可空，唯一（`uq_payments_gateway_payment_intent_id`）；付款后才产生的 PaymentIntent id（`pi_…`），只在没被另一笔占用时写入 |
+| `gateway_fee` | DECIMAL(20,8) | 可空；Stripe 余额流水里的逐笔实际手续费（MYR，spec §44）；拿不到或币种不是 MYR 时为空 |
+| `status` | VARCHAR(20) | 非空，`PENDING` / `PAID` / `FAILED` / `EXPIRED` / `CANCELLED` / `REVIEW_REQUIRED`（`ck_payments_status`）；模型 `Enum(PaymentStatus, native_enum=False, length=20)` |
+| `status_reason` | VARCHAR(64) | 可空；设计 §2「状态原因」的取值（`AMOUNT_MISMATCH`、`GATEWAY_EXPIRED`、`GATEWAY_CREATE_FAILED` 等）；进入 `PAID` 时清空 |
+| `review_required_at` | DATETIME | 可空；进入 `REVIEW_REQUIRED` 的时刻，那时必须非空（`ck_payments_review_at`：`status <> 'REVIEW_REQUIRED' OR review_required_at IS NOT NULL`）；告警的 24 小时窗口用它 |
+| `expires_at` | DATETIME | 非空；建单时刻 + 待付超时 |
+| `paid_at` | DATETIME | 可空；本系统做出可信确认的时刻（不是 Stripe 的付款时刻） |
+| `last_reconciled_at` | DATETIME | 可空；每次向 Stripe 查询后更新 |
+| `created_at` / `updated_at` | DATETIME | 非空 |
+
+`PAID` 时三个字段必须非空：`ck_payments_paid_fields`：`status <> 'PAID' OR (paid_at IS NOT NULL AND confirmed_amount IS NOT
+NULL AND confirmed_currency IS NOT NULL)`。时间一律不带时区的 UTC；金额一律 DECIMAL(20,8)（INV-10），与 Stripe 比较时换算成
+整数分。
+
+状态：`PENDING` 建单；`PAID` 与 `REVIEW_REQUIRED` 是「终结」，`confirm_payment` 不再改变它们（`REVIEW_REQUIRED` 永不自动入账，
+由支付第二批的人工出口处理）；`EXPIRED` / `FAILED` 不是终态，之后到账照样入账（ADR-0007）；`CANCELLED` 本批没有产生路径。
+
+约束与索引：
+
+- 三个唯一约束见上表；后两个是幂等的第二层。三个都允许多行为 NULL（未建会话、未付款的单子）。
+- `ix_payments_tenant_created (tenant_id, created_at)`：按租户列支付；同时满足 `tenant_id` 外键对索引的要求。
+- `ix_payments_status_created (status, created_at)`：按状态扫（补对账、过期处理）。
+- `ix_payments_reuse (tenant_id, status, expected_amount, created_at)`：60 秒同额复用的查找（ADR-0007）。
+- `ix_payments_tax_policy_version_id (tax_policy_version_id)`：**显式声明**（模型与迁移都写），供外键使用；不声明的话 MySQL
+  会为外键自动建一个模型里没有的索引（与 0035 同一理由）。
+- `ix_payments_review_required_at (review_required_at)`：告警查最近 24 小时进入复核的支付。
+- 两个外键都是 `RESTRICT`：删租户或税务政策版本不许连带删掉支付记录。
+- 八条 CHECK 的条件文本是 `app/models/payments.py` 的常量，迁移里冻结一份，`tests/backend/test_payments_migration.py` 比对
+  两边；非法插入在 SQLite 与 MySQL 上都被拒绝。
+
+### `payment_gateway_events`
+
+**行由谁写**：只有 AIH-TASK-175：回调验签通过后插入（`RECEIVED`，或不处理的事件类型、`livemode` 不一致时 `IGNORED`）；同一
+事件 id 内容不同的重复投递只写 `fingerprint_conflict_at`、不覆盖原行；事件处理任务领取（`PROCESSING`、租约、`attempts + 1`）、
+写 `payment_id` 与处理结果。验签失败、解析失败的请求不落库。没有删除路径。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `gateway` | VARCHAR(16) | 非空，`STRIPE`（`ck_payment_gateway_events_gateway`）；模型 `Enum(PaymentGateway, native_enum=False, length=16)` |
+| `gateway_event_id` | VARCHAR(255) | 非空；Stripe 事件 id（`evt_…`）；与 `gateway` 一起唯一（`uq_payment_gateway_events_event`） |
+| `event_type` | VARCHAR(64) | 非空；例如 `checkout.session.completed` |
+| `payment_id` | BIGINT | 可空；外键 → `payments(id)` `ON DELETE RESTRICT`（`fk_payment_gateway_events_payment_id`）；匹配到支付后写入 |
+| `payload_fingerprint` | CHAR(64) | 非空；原始请求体的 SHA-256，小写十六进制（原始请求体本身不存） |
+| `verification_status` | VARCHAR(16) | 非空，`VERIFIED`（`ck_payment_gateway_events_verification_status`）：只保存验签通过的事件；模型 `Enum(PaymentEventVerificationStatus, native_enum=False, length=16)` |
+| `processing_status` | VARCHAR(16) | 非空，`RECEIVED` / `PROCESSING` / `RETRY` / `PROCESSED` / `IGNORED` / `UNMATCHED` / `REJECTED`（`ck_payment_gateway_events_processing_status`）；模型 `Enum(PaymentEventProcessingStatus, native_enum=False, length=16)` |
+| `attempts` | INT | 非空，缺省 0；每次领取加一 |
+| `next_attempt_at` | DATETIME | 非空；落库时等于 `received_at`（`IGNORED` 也一样），`RETRY` 时按退避推后 |
+| `lease_until` | DATETIME | 可空；`PROCESSING` 的租约，过期可被重领（INV-14） |
+| `last_error_code` | VARCHAR(64) | 可空；`LIVEMODE_MISMATCH`、`GATEWAY_REFERENCE_TAKEN`、`NO_GATEWAY_REFERENCE`、Stripe 的错误码等；进入 `PROCESSED` 时清空 |
+| `fingerprint_conflict_at` | DATETIME | 可空；同一事件 id 后来收到内容不同的请求体时记下（告警 P1） |
+| `received_at` | DATETIME | 非空；落库时刻 |
+| `processed_at` | DATETIME | 可空；进入 `PROCESSED`、`IGNORED`、`UNMATCHED`、`REJECTED` 时写入 |
+| `metadata_json` | JSON | 非空；只存设计 §6 的白名单字段（`type`、`livemode`、`created`、`object_id`、`client_reference_id`、`payment_status`、`status`、`amount_total`、`currency`、`payment_intent`），**不存原始请求体**（其中有客户邮箱、姓名等个人数据） |
+
+约束与索引：
+
+- `uq_payment_gateway_events_event (gateway, gateway_event_id)`：幂等的第一层，同一事件重复投递只落一行。
+- `ix_payment_gateway_events_due (processing_status, next_attempt_at)`：事件任务领取到期的 `RECEIVED` / `RETRY`
+  （`FOR UPDATE SKIP LOCKED`）。
+- `ix_payment_gateway_events_payment_id (payment_id)`：**显式声明**，供外键使用，也用来按支付查它的事件。
+- `ix_payment_gateway_events_received (received_at)`：告警查最早的未处理事件。
+- 外键 `RESTRICT`：有事件指向的支付不许删除。
+- 三条 CHECK 同 `payments`，条件文本是模型的常量、迁移冻结一份，测试比对两边；非法插入在 SQLite 与 MySQL 上都被拒绝。
+
+### 迁移与回滚（设计 §8）
+
+- 0036 只建这两张新表，不改任何已有表、不回填。MySQL 上每张表是**一条**原子的 `CREATE TABLE`（索引、外键与 CHECK 都在里面），
+  先 `payments`、再 `payment_gateway_events`。之前用 inspector 判两张表：都不存在 → 建表；任一已存在 → 报错点名那张表、
+  不发任何 DDL（不做逐项形状比较，生产上只会执行一次）；处理方法：先确认表没有任何行，为空则手工删表（先事件表、后
+  `payments`）再重跑升级，有行则停下按数据事故处理。`--sql` 离线模式输出两条 `CREATE TABLE`。
+- **表非空时降级被拒**：`downgrade` 先对存在的每张表查 `SELECT 1 … LIMIT 1`，任何一张有行就抛错（点名那张表），不发 DDL、
+  不删行，`alembic_version` 仍是 0036——支付与网关事件是财务记录，删了无法重建。都为空时先删 `payment_gateway_events`、
+  再删 `payments`；不存在的表跳过；`--sql` 离线模式判断不了是否为空，直接拒绝、不输出 `DROP`。
+- **生产的回滚是关支付开关，不降级 0036**：已有支付与账本行保留。需要修复时一律前滚。
 
 ---
 
