@@ -10,9 +10,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import uuid
+from decimal import Decimal
 from functools import lru_cache
-from typing import Final, Literal
+from pathlib import Path
+from typing import Final, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -21,9 +25,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 Environment = Literal["local", "production"]
 FxSourceName = Literal["bnm"]
 
+_logger = logging.getLogger(__name__)
+
 _CURRENCY_CODE: Final = re.compile(r"[A-Z]{3}")
 # 汇率都换成 MYR（§17.1），MYR 自己不拉取。
 _QUOTE_CURRENCY: Final = "MYR"
+
+# Stripe 密钥前缀（设计闸门 #580 v3 §2「配置」）：`livemode` 由 Stripe 密钥的前缀决定。
+LIVE_SECRET_KEY_PREFIX: Final = "sk_live_"
+TEST_SECRET_KEY_PREFIX: Final = "sk_test_"
+WEBHOOK_SECRET_PREFIX: Final = "whsec_"
+# ADR-0015：MYR 单笔最低 RM2；Stripe 单笔上限 999,999.99。
+PAYMENT_TOPUP_FLOOR: Final = Decimal("2.00")
+PAYMENT_TOPUP_CEILING: Final = Decimal("999999.99")
 
 
 def require_https_base_url(value: str) -> str:
@@ -87,6 +101,24 @@ def parse_currency_codes(value: str) -> tuple[str, ...]:
     if len(set(codes)) != len(codes):
         raise ValueError("a currency is listed twice")
     return codes
+
+
+def parse_tenant_allowlist(value: str) -> frozenset[str]:
+    """`A, ,b` → `{"a", "b"}`: comma-separated tenant `public_id`s, canonical lower-case UUIDs.
+
+    去掉空白与空项；每项必须是 UUID，按 `str(uuid.UUID(项))` 规范成小写带连字符的写法（与租户
+    `public_id` 的写法一致）。不是 UUID 时抛 `ValueError`，让进程起不来。
+    """
+    tenants: set[str] = set()
+    for item in value.split(","):
+        stripped = item.strip()
+        if not stripped:
+            continue
+        try:
+            tenants.add(str(uuid.UUID(stripped)))
+        except ValueError:
+            raise ValueError("each allowlisted tenant must be a UUID") from None
+    return frozenset(tenants)
 
 
 class Settings(BaseSettings):
@@ -340,6 +372,82 @@ class Settings(BaseSettings):
     # 一次 dispatch 的时间预算，小于 beat 间隔 15 秒（app/core/celery_app.py）。
     status_webhook_dispatch_budget_seconds: int = Field(default=12, gt=0)
 
+    # --- 支付（AIH-TASK-173，设计闸门 #580 v3 §2「配置」） ----------------------------------
+
+    # 回调与后台处理。生产默认关；开启步骤见设计 §8。
+    payments_enabled: bool = False
+    # 客户建单对所有合格租户开放。B（补对账与人工复核）上线前保持关。
+    payment_topups_open: bool = False
+    # 逗号分隔的租户 `public_id`：`payment_topups_open` 为假时只有它们能建单（生产端点复验用）。
+    # 启动时规范成小写带连字符的 UUID；集合见 `payment_topup_tenant_ids`。
+    payment_topup_tenant_allowlist: str = ""
+    # Stripe 密钥与回调端点签名密钥所在的**文件路径**，不是密钥本身（ADR-0004 第 2 节）。
+    # 只在 `payments_enabled` 为真时读取（`read_stripe_credentials`）；compose 暂不接入，
+    # 开启支付时由管理员先放宿主机文件、再提交加 secret 的 PR（设计 §8）。
+    stripe_secret_key_file: str = ""
+    stripe_webhook_secret_file: str = ""
+    # Stripe API 的 https 根地址。⚠️ **不写默认值**（ADR-0001：公开仓库不写第三方主机名）；
+    # 开关打开而它为空视为未配置。
+    stripe_api_base_url: str = ""
+    # ⚠️ 不能不设：Stripe 卡住时调用方（建单请求、事件任务）会一直占着。
+    stripe_api_timeout_seconds: int = Field(default=10, ge=1, le=60)
+    # 建单最低额，不得小于 2.00（ADR-0015 的 MYR 下限）。
+    payment_topup_min: Decimal = Decimal("10.00")
+    # 建单最高额；空 = 不设。设了时不得小于最低额、不得大于 999999.99（Stripe 单笔上限）。
+    payment_topup_max: Decimal | None = None
+    # 待付超时。Stripe 要求会话过期时刻在创建后 30 分钟到 24 小时之间；下限 2400 秒给
+    # 「插入到调用 Stripe」留出余量（设计 §2「建单」）。
+    payment_pending_timeout_seconds: int = Field(default=3600, ge=2400, le=86_400)
+    # ADR-0007 的同额复用窗口。
+    payment_reuse_window_seconds: int = Field(default=60, ge=0, le=300)
+    # 回调验签的时间窗：签名头的 `t` 与服务端当前时刻相差不超过它。
+    payment_webhook_tolerance_seconds: int = Field(default=300, ge=60, le=600)
+    # 事件处理任务的 Beat 间隔。
+    payment_event_poll_seconds: int = Field(default=15, ge=5, le=300)
+
+    @field_validator("stripe_api_base_url")
+    @classmethod
+    def _stripe_api_base_url_is_https(cls, value: str) -> str:
+        # 空串 = 未配置，是合法状态；设了就与 `fx_bnm_base_url` 同一个格式校验。
+        if not value.strip():
+            return ""
+        return require_https_base_url(value)
+
+    @field_validator("payment_topup_tenant_allowlist")
+    @classmethod
+    def _payment_allowlist_is_uuids(cls, value: str) -> str:
+        return ",".join(sorted(parse_tenant_allowlist(value)))
+
+    @field_validator("payment_topup_max", mode="before")
+    @classmethod
+    def _payment_topup_max_blank_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("payment_topup_min")
+    @classmethod
+    def _payment_topup_min_is_at_least_the_floor(cls, value: Decimal) -> Decimal:
+        if not value.is_finite() or value < PAYMENT_TOPUP_FLOOR:
+            raise ValueError("payment_topup_min must not be below 2.00")
+        return value
+
+    @model_validator(mode="after")
+    def _payment_topup_max_fits(self) -> Settings:
+        maximum = self.payment_topup_max
+        if maximum is not None and (
+            not maximum.is_finite()
+            or maximum < self.payment_topup_min
+            or maximum > PAYMENT_TOPUP_CEILING
+        ):
+            raise ValueError("payment_topup_max must be between payment_topup_min and 999999.99")
+        return self
+
+    @property
+    def payment_topup_tenant_ids(self) -> frozenset[str]:
+        """`payment_topup_tenant_allowlist` as a set of canonical tenant `public_id`s."""
+        return parse_tenant_allowlist(self.payment_topup_tenant_allowlist)
+
     @model_validator(mode="after")
     def _status_webhook_timings_fit(self) -> Settings:
         # ⚠️ 配反了不报错，只会让投递行为怪异：宁可进程起不来。
@@ -391,3 +499,69 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached accessor so settings are parsed once per process."""
     return Settings()
+
+
+class StripeCredentials(NamedTuple):
+    """`(secret_key, webhook_secret, livemode)`; the repr never shows the keys."""
+
+    secret_key: str
+    webhook_secret: str
+    livemode: bool
+
+    def __repr__(self) -> str:
+        return f"StripeCredentials(livemode={self.livemode})"
+
+
+def _read_secret_file(setting: str, path: str) -> str | None:
+    """The stripped file content, or `None` (with an ERROR naming only the path and why)."""
+    if not path:
+        _logger.error("payments credential unavailable: %s is not set", setting)
+        return None
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        # ValueError：UnicodeDecodeError。都不带文件内容。
+        _logger.error("payments credential unavailable: %s (unreadable)", path)
+        return None
+    if not value:
+        _logger.error("payments credential unavailable: %s (empty)", path)
+        return None
+    return value
+
+
+def read_stripe_credentials(settings: Settings) -> StripeCredentials | None:
+    """Read the Stripe secret key and webhook signing secret (设计闸门 #580 v3 §2「配置」).
+
+    开关为假返回 `None`，不读文件。开关为真时读两个文件并去掉首尾空白；任一读不到或为空、
+    Stripe 密钥前缀不是 `sk_live_` / `sk_test_`、webhook 签名密钥前缀不是 `whsec_`、或
+    `stripe_api_base_url` 为空，视为未配置：返回 `None` 并记 ERROR（只带文件路径与原因）。
+    `livemode` 由 Stripe 密钥的前缀决定。⚠️ 密钥不进日志与异常消息。
+    """
+    if not settings.payments_enabled:
+        return None
+    secret_key = _read_secret_file("stripe_secret_key_file", settings.stripe_secret_key_file)
+    webhook_secret = _read_secret_file(
+        "stripe_webhook_secret_file", settings.stripe_webhook_secret_file
+    )
+    if secret_key is None or webhook_secret is None:
+        return None
+    if not secret_key.startswith((LIVE_SECRET_KEY_PREFIX, TEST_SECRET_KEY_PREFIX)):
+        _logger.error(
+            "payments credential unavailable: %s (not a Stripe secret key)",
+            settings.stripe_secret_key_file,
+        )
+        return None
+    if not webhook_secret.startswith(WEBHOOK_SECRET_PREFIX):
+        _logger.error(
+            "payments credential unavailable: %s (not a webhook signing secret)",
+            settings.stripe_webhook_secret_file,
+        )
+        return None
+    if not settings.stripe_api_base_url:
+        _logger.error("payments credential unavailable: stripe_api_base_url is not set")
+        return None
+    return StripeCredentials(
+        secret_key=secret_key,
+        webhook_secret=webhook_secret,
+        livemode=secret_key.startswith(LIVE_SECRET_KEY_PREFIX),
+    )
