@@ -10121,7 +10121,7 @@ tasks:
     title: 支付第一批第二层：Stripe 适配器、状态映射、回调验签与支付配置项
     purpose: >-
       按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「Stripe 适配器」「配置」与 §6：新包 app/payments/（协议与数据类、Stripe 实现、Checkout Session 状态映射、回调验签与解析、错误分类），app/core/config.py 加支付配置项与密钥读取。只是纯适配器，不读写数据库：确认与入账属于 AIH-TASK-174。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-172
     acceptance_criteria:
