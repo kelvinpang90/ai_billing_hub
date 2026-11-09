@@ -310,6 +310,12 @@ class AuditAction(enum.StrEnum):
     # 对账单一条；`entity_type = monthly_statement`、`entity_id = public_id`，`after_state` 只有
     # `period`。不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
     STATEMENT_GENERATE = "STATEMENT_GENERATE"
+    # AIH-TASK-172（设计闸门 #580 v3 §2「可信确认」、§6「审计」）：写入方是 AIH-TASK-174 的
+    # `confirm_payment`（app/services/payments.py），与支付状态、TOPUP 账本行同一事务，每次状态
+    # 改变一条；操作者为系统。`before` / `after` 只有 `status`、`status_reason`、
+    # `expected_amount`、`confirmed_amount`、`gateway_fee`。不在 spec §66 的清单里，按
+    # `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
+    PAYMENT_STATUS_CHANGE = "PAYMENT_STATUS_CHANGE"
 
 
 class AuditLog(Base):

@@ -1510,8 +1510,12 @@ def test_0035_downgrade_with_a_row_refuses_before_any_ddl(
     alembic_config: Config, engine: Engine
 ) -> None:
     """Design §2 / §8: a FINALIZED statement — the downgrade fails naming the table, no DDL, the
-    table, its row and its triggers are as they were, `alembic_version` stays 0035."""
+    table, its row and its triggers are as they were, `alembic_version` stays 0035. Taken at
+    0035: the later migrations' downgrades (0036 drops its empty tables) are not the part under
+    observation."""
     command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION)
+    assert _version(engine) == _REVISION
     try:
         _insert_committed(engine, [({}, 1)])
         before_schema = _schema_snapshot(engine)
