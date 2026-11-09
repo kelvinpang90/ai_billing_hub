@@ -219,12 +219,20 @@ def test_every_credential_file_setting_is_wired_into_compose(compose: dict) -> N
     env = backend["environment"]
     mounted = set(backend["secrets"])
     api_only = {"ai_anthropic_key_file"}
+    # 设计闸门 #580 v3 §2「配置」：支付开关默认关，两个 Stripe 密钥只在开关打开时读取；
+    # 开启支付时由管理员先放宿主机文件、再提交接入 compose 的 PR（设计 §8）。现在接进 compose，
+    # 宿主机文件不存在会让生产部署失败。所以登记为例外，但缺省必须为空。
+    enabled_by_admin = {"stripe_secret_key_file", "stripe_webhook_secret_file"}
 
     file_fields = [name for name in Settings.model_fields if name.endswith("_file")]
     assert file_fields, "Settings 一个 *_file 字段都没有，这条用例在空集合上空转"
+    assert enabled_by_admin <= set(file_fields)
 
     for field in file_fields:
         key = f"BILLING_{field.upper()}"
+        if field in enabled_by_admin:
+            assert Settings.model_fields[field].default == "", f"Settings.{field} 缺省应为空"
+            continue
         if field in api_only:
             api = compose["services"]["api"]
             value = str(api["environment"][key])
@@ -247,6 +255,7 @@ def test_every_credential_file_setting_is_wired_into_compose(compose: dict) -> N
         assert name in mounted, f"{name} 定义了却没挂给后端，容器里那个路径不存在"
 
     assert api_only == {"ai_anthropic_key_file"}
+    assert enabled_by_admin == {"stripe_secret_key_file", "stripe_webhook_secret_file"}
 
 
 def test_the_anthropic_key_is_mounted_only_for_api(compose: dict) -> None:
