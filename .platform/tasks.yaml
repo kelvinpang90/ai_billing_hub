@@ -10014,7 +10014,7 @@ tasks:
     title: Billing Client 第八层：与服务端的契约测试、接入指南与文档
     purpose: >-
       按 docs/design/AIH-TASK-164-billing-client.md（设计闸门 #571 已批准 v24） §7 的四行契约测试、§8 与 §11：tests/backend 新增同时导入客户端与服务端的契约测试，README 写全接入指南，docs/ARCHITECTURE.md 记下 integration-client/ 的位置，docs/TODO.md 勾掉 Phase 3「Billing Client」。不改客户端代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-170
     acceptance_criteria:
