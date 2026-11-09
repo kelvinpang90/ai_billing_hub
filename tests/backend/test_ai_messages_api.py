@@ -630,6 +630,25 @@ def fast_world(tmp_path, monkeypatch) -> Iterator[World]:
     )
 
 
+@pytest.fixture
+def provider_budget_world(tmp_path, monkeypatch) -> Iterator[World]:
+    """Provider 1.0 s like `fast_world`, but a read limit (1.4 s) a loaded CI runner cannot hit.
+
+    `fast_world`'s 0.4 s read limit let the auth read time out first under CI load (503 instead of
+    the provider's 502). The deadline is raised with it, so the provider budget is still 1.0 s.
+    """
+    yield from _build_world(
+        "sqlite",
+        tmp_path,
+        monkeypatch,
+        ai_provider_timeout_seconds=1.0,
+        ai_request_deadline_seconds=7.0,
+        ai_db_pool_timeout_seconds=0.2,
+        ai_db_connect_timeout_seconds=0.2,
+        ai_db_rw_timeout_seconds=1.0,
+    )
+
+
 def test_normal_path_forwards_the_subset_and_writes_one_pending_row(world: World) -> None:
     response = world.post(output_config={"effort": "low"}, system="caller system")
 
@@ -996,7 +1015,9 @@ def test_hung_auth_read_returns_503_within_its_limit(
     assert fast_world.rows() == []
 
 
-def test_hung_provider_and_slow_trickle_are_cut_at_the_budget(fast_world: World) -> None:
+def test_hung_provider_and_slow_trickle_are_cut_at_the_budget(
+    provider_budget_world: World,
+) -> None:
     async def trickle(request: httpx2.Request) -> httpx2.Response:
         # 每一段都远小于 httpx 的读超时，累计却超过预算。
         async def chunks():
@@ -1007,15 +1028,15 @@ def test_hung_provider_and_slow_trickle_are_cut_at_the_budget(fast_world: World)
         return httpx2.Response(200, content=chunks())
 
     for respond in (_hang, trickle):
-        fast_world.respond = respond
+        provider_budget_world.respond = respond
         started = time.monotonic()
-        response = fast_world.post()
+        response = provider_budget_world.post()
         elapsed = time.monotonic() - started
 
         assert response.status_code == 502
         assert response.json()["error"]["code"] == "AI_PROVIDER_UNAVAILABLE"
         assert 1.0 <= elapsed < 1.0 + 1.0
-    assert fast_world.rows() == []
+    assert provider_budget_world.rows() == []
 
 
 def test_hung_outbox_write_holds_usage_within_its_limit(
