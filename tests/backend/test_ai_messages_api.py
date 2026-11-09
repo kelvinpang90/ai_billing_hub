@@ -1071,7 +1071,8 @@ def test_hung_outbox_write_holds_usage_within_its_limit(
 
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "AI_USAGE_NOT_PERSISTED"
-        assert 3.0 <= elapsed < 3.0 + 1.0
+        # 计时含鉴权读库：上限给足读时限 1.4 秒，再加写时限 3.0 秒与 1 秒余量。
+        assert 3.0 <= elapsed < 1.4 + 3.0 + 1.0
         # 超时那一刻 CRITICAL 与暂存已经存在，不等卡住的线程回来。
         critical = [r for r in caplog.records if r.getMessage() == "AI usage not persisted"]
         assert [r.levelno for r in critical] == [logging.CRITICAL]
