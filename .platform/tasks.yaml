@@ -10487,7 +10487,7 @@ tasks:
     title: 支付第二批第二层：补对账第一段、孤儿与超时过期与结案终态规则
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §2「对 A 的 confirm_payment 的一处修改」「补对账」「配置」「事务边界」：confirm_payment 把 resolution 不为空的支付视为终态；新服务 app/services/payment_reconcile.py 与任务 app/tasks/payment_reconcile.py（第 1 段：PENDING 补对账含孤儿与超时过期），Beat 登记，三个配置项。不做第 2 段手续费补抓（属于 AIH-TASK-187）；不做争议事件、告警、人工出口与接口：属于 AIH-TASK-181..183。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-179
     acceptance_criteria:
