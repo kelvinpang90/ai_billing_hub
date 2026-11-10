@@ -337,11 +337,14 @@
 - [x] 钱包页（AIH-TASK-100，设计闸门 #393 v3：门户 `/portal/wallet` 的余额卡与按序号翻页的流水表）
 - [ ] 充值 UI（金额不许硬编码）
   - ADR-0010：§42 的最小恢复额 = 欠款 + 可配置缓冲（不是只比 0 多一分钱），设计闸门里要写明缓冲的配置项与计算
-- [ ] 支付网关适配器 + 选定的马来西亚网关（FPX 优先，依赖 D6）
-- [ ] 支付 Webhook
+- [x] 支付网关适配器 + 选定的马来西亚网关（FPX 优先，依赖 D6）
+  - AIH-TASK-172..178，设计闸门 #580 v3：Stripe Checkout Session 适配器（卡与 FPX）、`payments` 与 `payment_gateway_events` 两张表、客户建单接口（生产默认关，开启步骤见 [payment-flow.md](payment-flow.md)）
+- [x] 支付 Webhook
+  - AIH-TASK-172..178，设计闸门 #580 v3：`POST /api/v1/webhooks/payments/stripe` 验签落库，后台任务向 Stripe 查询权威状态后确认
 - [ ] 主动的 stale payment 对账定时任务
 - [ ] 支付金额不符的人工复核流
-- [ ] 钱包充值入账
+- [x] 钱包充值入账
+  - AIH-TASK-172..178，设计闸门 #580 v3：可信确认后经 `post_transaction` 写 `TOPUP`，三层唯一约束保证同一笔支付只入账一次；丢失回调的补对账属于下一批（支付第二批）
   - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：新充值在 `PENDING_ACTIVATION` / `ENABLED` 下允许，在 `DISABLED`
     下**拒绝**（§112.1 第 1 步），`CLOSED` 下拒绝
 - [ ] **关户（`→ CLOSED`）**：Phase 2 的用量事件与本 Phase 的支付落地后另立任务，走设计闸门（已在「后续计划」）。
@@ -562,7 +565,7 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 - [ ] `docs/api.md`（Phase 1 起维护）—— [已新建](api.md)（AIH-TASK-006），目前只有管理端客户管理的五个接口；认证接口的契约还没补进去
 - [x] `docs/pricing-engine.md`、`docs/currency-and-fx.md`（Phase 2）（AIH-TASK-027 / 031 与 039 / 040 交付）
 - [ ] `docs/integrated-application-backend.md`（Phase 3）
-- [ ] `docs/payment-flow.md`（Phase 4）
+- [x] `docs/payment-flow.md`（Phase 4）
 - [ ] `docs/data-governance.md`、`docs/runbook.md`（Phase 0 起补，runbook 需覆盖 §136 列的 18 个故障场景）；[`docs/deployment.md`](deployment.md) **已起草，七件决策已定案** —— T0.9 的方案文档；落地部分仍待生产主机
 - [x] 逐条核对 25 条评审意见与 spec v1.1 —— 完成于 2026-09-10，结果见 [REVIEW_FOLLOWUP_v1.1.md](archive/REVIEW_FOLLOWUP_v1.1.md)（20 条已解决 / 5 条残留，已转为上方 R1–R5）
 - [x] 给 spec 的硬性要求补 `REQ-*` 编号（= R5）—— AIH-TASK-008（2026-09-21）收口：spec v1.7 新增 `REQ-PRIV-002` / `REQ-TXN-001` / `REQ-TAX-001` / `REQ-LAUNCH-001` 四个编号，其余 11 条逐功能交付流程要求标「不适用」并逐条给理由；[REQUIREMENTS.md](REQUIREMENTS.md) 第 1.3 节已无「缺口」行
