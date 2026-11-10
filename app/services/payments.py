@@ -90,6 +90,9 @@ INTERNAL_TENANT: Final = "INTERNAL_TENANT"
 GATEWAY_INCONSISTENT: Final = "GATEWAY_INCONSISTENT"
 GATEWAY_FAILED: Final = "GATEWAY_FAILED"
 GATEWAY_EXPIRED: Final = "GATEWAY_EXPIRED"
+# 设计闸门 #585 v3 §2「状态原因」：由补对账（app/services/payment_reconcile.py）写入。
+NO_GATEWAY_SESSION: Final = "NO_GATEWAY_SESSION"
+RECONCILE_TIMEOUT: Final = "RECONCILE_TIMEOUT"
 
 # 本系统只收令吉（设计 §2：`expected_currency` CHECK = MYR）。
 PAYMENT_CURRENCY: Final = "MYR"
@@ -231,8 +234,9 @@ def _apply(
 
     old_status = payment.status
     payment.last_reconciled_at = now
-    if old_status in FINAL_STATUSES:
-        # 幂等：`PAID` 与 `REVIEW_REQUIRED` 都不会被本函数改变（第 3 步）。
+    if old_status in FINAL_STATUSES or payment.resolution is not None:
+        # 幂等：`PAID` 与 `REVIEW_REQUIRED` 都不会被本函数改变（第 3 步）；已人工结案的也不会
+        # （设计闸门 #585 v3 §2：不入账结案是 `FAILED`，自动入账等于推翻人工结论）。
         return _unchanged(payment, reported)
 
     # PI 占用在锁内**先查**，对任何 state 都查
@@ -887,7 +891,9 @@ __all__ = [
     "GATEWAY_PAYMENT_REUSED",
     "IDEMPOTENCY_KEY_IN_USE",
     "INTERNAL_TENANT",
+    "NO_GATEWAY_SESSION",
     "PAYMENT_CURRENCY",
+    "RECONCILE_TIMEOUT",
     "REFERENCE_MISMATCH",
     "REUSE_MIN_REMAINING",
     "TENANT_CLOSED",
