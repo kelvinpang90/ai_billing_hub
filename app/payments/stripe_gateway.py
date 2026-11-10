@@ -56,6 +56,11 @@ PRODUCT_NAME: Final = "Acuven AI 预付充值"
 STRIPE_CURRENCY: Final = "myr"
 SIGNATURE_HEADER: Final = "stripe-signature"
 
+# 只告警、不改账的两种事件（设计闸门 #585 v3 §2「争议与退款」）：对象是 Dispute / Charge。
+CHARGE_DISPUTE_CREATED: Final = "charge.dispute.created"
+CHARGE_REFUNDED: Final = "charge.refunded"
+CHARGE_EVENT_TYPES: Final = frozenset({CHARGE_DISPUTE_CREATED, CHARGE_REFUNDED})
+
 # 原因码（`GatewayUnavailable.code`）。
 TIMEOUT: Final = "TIMEOUT"
 NETWORK: Final = "NETWORK"
@@ -233,16 +238,40 @@ def _parse_signature_header(header: str) -> tuple[int, list[str]]:
     return int(timestamps[0]), signatures
 
 
+def _charge_fields(event_type: str, obj: dict[str, Any]) -> dict[str, Any]:
+    """The Charge / Dispute part of the whitelist (设计闸门 #585 v3 §2「争议与退款」, AIH-TASK-181).
+
+    对象里没有的键（或取不到合法值的键）不写；不取 `billing_details`、`receipt_email` 等个人数据。
+    """
+    candidates: dict[str, Any] = {
+        "object_id": _str_or_none(obj.get("id")),
+        "payment_intent": _object_id(obj.get("payment_intent")),
+        "amount": _int_or_none(obj.get("amount")),
+        "currency": _str_or_none(obj.get("currency")),
+    }
+    if event_type == CHARGE_REFUNDED:
+        candidates["amount_refunded"] = _int_or_none(obj.get("amount_refunded"))
+    else:
+        candidates["status"] = _str_or_none(obj.get("status"))
+        candidates["charge"] = _object_id(obj.get("charge"))
+    return {name: value for name, value in candidates.items() if value is not None}
+
+
 def _event_fields(event: dict[str, Any]) -> dict[str, Any]:
     """The §6 whitelist. Never the raw body, never the Stripe object's own `metadata`."""
     data = event.get("data")
     obj = data.get("object") if isinstance(data, dict) else None
     if not isinstance(obj, dict):
         obj = {}
-    return {
+    common = {
         "type": event["type"],
         "livemode": event["livemode"],
         "created": _int_or_none(event.get("created")),
+    }
+    if event["type"] in CHARGE_EVENT_TYPES:
+        return {**common, **_charge_fields(event["type"], obj)}
+    return {
+        **common,
         "object_id": _str_or_none(obj.get("id")),
         "client_reference_id": _str_or_none(obj.get("client_reference_id")),
         "payment_status": _str_or_none(obj.get("payment_status")),
@@ -427,6 +456,9 @@ class StripeGateway:
 
 __all__ = [
     "BAD_RESPONSE",
+    "CHARGE_DISPUTE_CREATED",
+    "CHARGE_EVENT_TYPES",
+    "CHARGE_REFUNDED",
     "CHECKOUT_SESSIONS_PATH",
     "LIVE_SECRET_KEY_PREFIX",
     "NETWORK",

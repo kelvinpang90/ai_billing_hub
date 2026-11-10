@@ -4,7 +4,8 @@
 `payment_gateway_events` 后提交。这里不查 Stripe、不改支付：事件由后台任务
 （app/tasks/payment_events.py）领取处理。
 
-- 四种处理的事件类型落为 `RECEIVED`，其余类型落为 `IGNORED`；
+- 四种处理的事件类型与争议、退款两种（设计闸门 #585 v3 §2「争议与退款」，AIH-TASK-181）落为
+  `RECEIVED`，其余类型落为 `IGNORED`；
 - 事件的 `livemode` 与配置的密钥模式不一致：落为 `IGNORED`、`last_error_code = LIVEMODE_MISMATCH`；
 - `IGNORED` 落库时写 `processed_at`；`next_attempt_at` 一律等于 `received_at`；
 - `payload_fingerprint` 是原始请求体的 SHA-256（小写十六进制），`metadata_json` 就是
@@ -37,6 +38,7 @@ from app.models.payments import (
     PaymentGatewayEvent,
 )
 from app.payments.base import ParsedEvent
+from app.payments.stripe_gateway import CHARGE_EVENT_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,9 @@ HANDLED_EVENT_TYPES: Final = frozenset(
         "checkout.session.expired",
     }
 )
+# 争议与退款（设计闸门 #585 v3 §2「争议与退款」，AIH-TASK-181）：同样落为 `RECEIVED`，
+# 事件任务只关联支付、不查 Stripe、不改支付。
+ALERT_ONLY_EVENT_TYPES: Final = CHARGE_EVENT_TYPES
 
 LIVEMODE_MISMATCH: Final = "LIVEMODE_MISMATCH"
 
@@ -129,7 +134,7 @@ def _initial_status(
 ) -> tuple[PaymentEventProcessingStatus, str | None]:
     if parsed.livemode is not livemode:
         return PaymentEventProcessingStatus.IGNORED, LIVEMODE_MISMATCH
-    if parsed.event_type in HANDLED_EVENT_TYPES:
+    if parsed.event_type in HANDLED_EVENT_TYPES or parsed.event_type in ALERT_ONLY_EVENT_TYPES:
         return PaymentEventProcessingStatus.RECEIVED, None
     return PaymentEventProcessingStatus.IGNORED, None
 
@@ -172,6 +177,7 @@ def _is_unique_violation(error: IntegrityError) -> bool:
 
 
 __all__ = [
+    "ALERT_ONLY_EVENT_TYPES",
     "HANDLED_EVENT_TYPES",
     "LIVEMODE_MISMATCH",
     "RecordOutcome",

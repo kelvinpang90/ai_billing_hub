@@ -8,7 +8,8 @@
 T-E（幂等冲突）、T-H（定价错误、汇率错误、未知模型、失败、处理积压、负余额、
 outbox 积压，设计闸门 #181 v2 §2「告警维度」，AIH-TASK-032）往里加，不改接口形状。
 `wallet_negative_balance` 另并入钱包核对的结果（设计闸门 #474 v13 §2「告警」，AIH-TASK-133）
-与支付的判据（设计闸门 #580 v3 §2「告警」，AIH-TASK-175）。
+与支付的判据（设计闸门 #580 v3 §2「告警」，AIH-TASK-175；
+设计闸门 #585 v3 §2「告警」，AIH-TASK-181）。
 `usage_processing_backlog` 在积压、PROCESSING、过期租约三部分之后另接两段（设计闸门 #565 v6
 §2「告警」，AIH-TASK-158）：到期后 6 至 30 小时内仍缺失的对账单 P2，最近 24 小时晚到用量的
 条数或金额占比达到 1% P2；Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定不加维度。
@@ -50,12 +51,19 @@ from app.models.fx_rates import (
     FxRateVersion,
 )
 from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
-from app.models.payments import Payment, PaymentEventProcessingStatus, PaymentGatewayEvent
+from app.models.payments import (
+    Payment,
+    PaymentEventProcessingStatus,
+    PaymentGatewayEvent,
+    PaymentResolution,
+    PaymentStatus,
+)
 from app.models.statements import MonthlyStatement
 from app.models.tenancy import BillingMode, IntegrationStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import TransactionType, Wallet, WalletTransaction
 from app.models.wallet_reconciliation import ReconciliationRunStatus, WalletReconciliationRun
+from app.payments.stripe_gateway import CHARGE_EVENT_TYPES, CHARGE_REFUNDED
 from app.repositories.usage_events import count_conflicts_since
 from app.services.auth import utc_now
 from app.services.statements import (
@@ -113,6 +121,8 @@ RECONCILIATION_CLOCK_TOLERANCE: Final = dt.timedelta(minutes=10)
 # 窗口一律是 `now − 24 小时 < 时刻 ≤ now`；最老未处理事件的年龄**超过** 900 秒 P2。
 PAYMENT_ALERT_WINDOW: Final = dt.timedelta(hours=24)
 PAYMENT_OPEN_EVENT_P2_SECONDS: Final = 900
+# 设计闸门 #585 v3 §2「告警」（AIH-TASK-181）：`expires_at` 过了 1 小时仍 `PENDING` P2。
+PAYMENT_STALE_PENDING_AFTER: Final = dt.timedelta(seconds=3600)
 _OPEN_EVENT_STATUSES: Final = (
     PaymentEventProcessingStatus.RECEIVED,
     PaymentEventProcessingStatus.RETRY,
@@ -647,14 +657,18 @@ def _payments_misconfigured() -> bool:
 
 
 def _payments(session: Session, now: dt.datetime) -> AlertResult | None:
-    """The payment part (design gate #580 v3 §2「告警」); `None` when there is nothing to report.
+    """The payment part (design gate #580 v3 §2「告警」, updated by #585 v3 §2「告警」); `None` when
+    there is nothing to report.
 
-    - P1：`review_required_at` 在窗口内的支付；`fingerprint_conflict_at` 在窗口内的事件；配置判据；
+    - P1：`status = REVIEW_REQUIRED` 的支付（不论进入多久，结案即消失）；`fingerprint_conflict_at`
+      在窗口内的事件；`received_at` 在窗口内、不是 `IGNORED` 的争议与退款事件（不含关联到
+      `resolution = CLOSED` 的支付的 `charge.refunded`）；配置判据；
     - P2：`RECEIVED` / `RETRY` / `PROCESSING` 里最早的 `received_at` 已超过 900 秒；`processed_at`
-      在窗口内、状态为 `UNMATCHED` 或 `REJECTED` 的事件。
+      在窗口内、状态为 `UNMATCHED` 或 `REJECTED` 的事件；`PENDING` 且 `expires_at <= now − 3600 秒`
+      的支付。
 
-    窗口是 `now − 24 小时 < 时刻 ≤ now`。只在三个 24 小时计数任一大于 0、最老未处理事件超过
-    900 秒或配置判据触发时返回一段；否则返回 `None`，维度摘要与原来逐字相同。
+    窗口是 `now − 24 小时 < 时刻 ≤ now`。只在任一计数大于 0、最老未处理事件超过 900 秒或配置判据
+    触发时返回一段；否则返回 `None`，维度摘要与原来逐字相同。
     """
     since = now - PAYMENT_ALERT_WINDOW
     event = PaymentGatewayEvent
@@ -662,7 +676,34 @@ def _payments(session: Session, now: dt.datetime) -> AlertResult | None:
         session.execute(
             select(func.count())
             .select_from(Payment)
-            .where(Payment.review_required_at > since, Payment.review_required_at <= now)
+            .where(Payment.status == PaymentStatus.REVIEW_REQUIRED)
+        ).scalar_one()
+    )
+    stale_pending = int(
+        session.execute(
+            select(func.count())
+            .select_from(Payment)
+            .where(
+                Payment.status == PaymentStatus.PENDING,
+                Payment.expires_at <= now - PAYMENT_STALE_PENDING_AFTER,
+            )
+        ).scalar_one()
+    )
+    refund_after_close = exists().where(
+        Payment.id == event.payment_id,
+        Payment.resolution == PaymentResolution.CLOSED,
+    )
+    disputes = int(
+        session.execute(
+            select(func.count())
+            .select_from(event)
+            .where(
+                event.event_type.in_(CHARGE_EVENT_TYPES),
+                event.processing_status != PaymentEventProcessingStatus.IGNORED,
+                event.received_at > since,
+                event.received_at <= now,
+                or_(event.event_type != CHARGE_REFUNDED, ~refund_after_close),
+            )
         ).scalar_one()
     )
     conflicts = int(
@@ -690,16 +731,17 @@ def _payments(session: Session, now: dt.datetime) -> AlertResult | None:
     misconfigured = _payments_misconfigured()
     stale = age > PAYMENT_OPEN_EVENT_P2_SECONDS
 
-    if review or conflicts or misconfigured:
+    if review or conflicts or disputes or misconfigured:
         level = AlertLevel.P1
-    elif stale or failed:
+    elif stale or failed or stale_pending:
         level = AlertLevel.P2
     else:
         return None
     config = "missing" if misconfigured else "ok"
     summary = (
-        f"; payments: review 24h {review}, event conflicts 24h {conflicts}, "
-        f"oldest open event {age}s, unmatched or rejected 24h {failed}, config {config}"
+        f"; payments: review open {review}, event conflicts 24h {conflicts}, "
+        f"oldest open event {age}s, unmatched or rejected 24h {failed}, "
+        f"stale pending {stale_pending}, disputes or refunds 24h {disputes}, config {config}"
     )
     return AlertResult(level, summary)
 
@@ -709,9 +751,10 @@ def wallet_negative_balance(session: Session, context: AlertContext) -> AlertRes
     an inconsistency in the runs under judgement is P1; never completed, stale or a clock anomaly
     is P2. The summary is `<负余额部分>; <核对部分>`: counts and dates only (INV-7).
 
-    支付的判据也并在这里（设计闸门 #580 v3 §2「告警」，见 `_payments`）：有要报的时，摘要末尾追加
-    `; payments: review 24h <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or
-    rejected 24h <d>, config <ok|missing>`，没有时摘要与原来逐字相同。"""
+    支付的判据也并在这里（设计闸门 #580 v3 §2「告警」、#585 v3 §2「告警」，见 `_payments`）：
+    有要报的时，摘要末尾追加 `; payments: review open <a>, event conflicts 24h <b>,
+    oldest open event <c>s, unmatched or rejected 24h <d>, stale pending <e>,
+    disputes or refunds 24h <f>, config <ok|missing>`，没有时摘要与原来逐字相同。"""
     negative = _negative_wallets(session)
     reconciliation = _reconciliation(session, context.now)
     parts = [negative, reconciliation]
@@ -958,6 +1001,7 @@ __all__ = [
     "OUTBOX_DEAD_LETTER_WINDOW",
     "PAYMENT_ALERT_WINDOW",
     "PAYMENT_OPEN_EVENT_P2_SECONDS",
+    "PAYMENT_STALE_PENDING_AFTER",
     "RECONCILIATION_CLOCK_TOLERANCE",
     "RECONCILIATION_STALE_AFTER",
     "RETRYING_ALERT_ATTEMPTS",
