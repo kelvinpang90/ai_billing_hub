@@ -182,7 +182,7 @@ spec §136 还要求维护以下九份文档：
 - [`database-schema.md`](database-schema.md)
 - [`api.md`](api.md)
 - `integrated-application-backend.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
-- `payment-flow.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
+- [`payment-flow.md`](payment-flow.md)
 - `pricing-engine.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
 - `currency-and-fx.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
 - `data-governance.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件

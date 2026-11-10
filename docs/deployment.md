@@ -182,6 +182,55 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 
 ---
 
+## 支付配置与 secret 文件
+
+依据：设计闸门 #580 v3（[AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md) §2「配置」、§6、§8）。
+链路、开启步骤与排查见 [payment-flow.md](payment-flow.md)。
+
+⚠️ **支付在生产上默认关。本批不改 docker-compose 文件、不新增 Docker secret**：compose secret 的宿主机文件不存在时容器创建失败，
+提前加上会让合并即部署失败。开启支付时由管理员先在宿主机放好两个 secret 文件，**再另提加 `secrets:` 的 PR**
+（步骤见 [payment-flow.md §3](payment-flow.md#3-开启支付管理员执行不在-a-的代码里)）。在那之前生产 `.env` 不需要设下面任何一项。
+
+配置均以 `BILLING_` 开头（`app/core/config.py`）：
+
+| 配置 | 缺省 | 约束与说明 |
+| --- | --- | --- |
+| `BILLING_PAYMENTS_ENABLED` | `false` | 回调路由与后台事件处理的开关；为假时回调与建单两个路由都不注册（404），事件任务每一轮直接返回 |
+| `BILLING_PAYMENT_TOPUPS_OPEN` | `false` | 客户建单对所有合格租户开放。⚠️ B（补对账与人工复核）上线前保持关 |
+| `BILLING_PAYMENT_TOPUP_TENANT_ALLOWLIST` | 空 | 逗号分隔的租户 `public_id`（UUID，启动时规范成小写）；`BILLING_PAYMENT_TOPUPS_OPEN` 为假时只有它们能建单，其他租户 403 `TOPUPS_NOT_OPEN`。只用于生产端点复验，复验后清空 |
+| `BILLING_STRIPE_SECRET_KEY_FILE` | 空 | Stripe 密钥所在的**文件路径**（不是密钥本身）；只在开关打开时读取 |
+| `BILLING_STRIPE_WEBHOOK_SECRET_FILE` | 空 | 回调端点签名密钥所在的文件路径；必须是**生产端点自己的**签名密钥（ADR-0015）；只在开关打开时读取 |
+| `BILLING_STRIPE_API_BASE_URL` | 空 | Stripe API 的 https 根地址。⚠️ **仓库里不写默认值**（ADR-0001：公开仓库不写第三方主机名），开启时由管理员在 `.env` 设置；格式校验与 `BILLING_FX_BNM_BASE_URL` 相同；开关打开而它为空视为未配置 |
+| `BILLING_STRIPE_API_TIMEOUT_SECONDS` | `10` | 1–60；Stripe 调用的超时 |
+| `BILLING_PAYMENT_TOPUP_MIN` | `10.00` | 建单最低额（MYR）；不得小于 `2.00`（ADR-0015 的 MYR 下限） |
+| `BILLING_PAYMENT_TOPUP_MAX` | 空（不设上限） | 设了时不得小于最低额、不得大于 `999999.99`（Stripe 单笔上限） |
+| `BILLING_PAYMENT_PENDING_TIMEOUT_SECONDS` | `3600` | 2400–86400；待付超时，也是 Stripe 会话的过期时刻（Stripe 要求创建后 30 分钟到 24 小时） |
+| `BILLING_PAYMENT_REUSE_WINDOW_SECONDS` | `60` | 0–300；ADR-0007 的同额复用窗口 |
+| `BILLING_PAYMENT_WEBHOOK_TOLERANCE_SECONDS` | `300` | 60–600；回调验签的时间窗（签名头的 `t` 与服务端当前时刻之差） |
+| `BILLING_PAYMENT_EVENT_POLL_SECONDS` | `15` | 5–300；事件处理任务 `payment-events-process-due` 的 Beat 间隔 |
+
+开关打开时还要求既有的 `BILLING_FRONTEND_BASE_URL` 不为空（付款页的跳回地址由它拼出），否则建单 503 `PAYMENTS_MISCONFIGURED`、告警 P1。
+
+**两个 secret 文件：**
+
+| 文件 | 用途 | 内容要求 |
+| --- | --- | --- |
+| Stripe 密钥（`BILLING_STRIPE_SECRET_KEY_FILE` 指向） | 建单（创建 Checkout Session）与事件处理时向 Stripe 查询权威状态 | `sk_live_`（生产）或 `sk_test_` 开头；`livemode` 由这个前缀决定，与之不一致的回调事件落为 `IGNORED` |
+| 回调端点签名密钥（`BILLING_STRIPE_WEBHOOK_SECRET_FILE` 指向） | 回调验签（HMAC-SHA256） | `whsec_` 开头；Stripe Dashboard 上这个生产端点自己的签名密钥，不是 Stripe CLI 的 |
+
+读取规则：
+
+- 只在 `BILLING_PAYMENTS_ENABLED` 为真时读取；读取时去掉首尾空白。
+- 任一文件路径未设、读不到或为空，Stripe 密钥前缀不是 `sk_live_` / `sk_test_`，签名密钥前缀不是 `whsec_`，或 `BILLING_STRIPE_API_BASE_URL`
+  为空：视为未配置 —— 回调与建单返回 503 `PAYMENTS_MISCONFIGURED`，事件任务不领取事件，`wallet_negative_balance` 告警 P1（`config missing`）；
+  日志 `payments credential unavailable: …` 只带文件路径与原因。
+- 密钥只放宿主机文件、由 Docker secret 挂进 api 与 celery-worker，给容器运行用户只读；**不进环境变量、`.env`、镜像、日志、异常消息与审计**。
+- 轮换：在 Stripe 生成新密钥 → 替换宿主机文件 → 重启 api 与 celery-worker。签名密钥只配一个：先换文件、重启，再在 Stripe 让旧密钥失效。
+- `tests/backend/test_compose.py` 要求每个 `*_file` 配置都接进 compose，这两项是登记过的例外（开关默认关、开启时由管理员接入），
+  加 secret 的 PR 要连同这个用例一起改。
+
+---
+
 ## 3. 进程模型（T0.10 基线的直接输出）
 
 现状：`Dockerfile` 的 CMD 是 `uvicorn app.main:app`，**没有 `--workers`**，也就是单进程。
