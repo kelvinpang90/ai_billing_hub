@@ -39,7 +39,13 @@ from alembic import command
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.payments import Payment, PaymentGateway, PaymentGatewayEvent, PaymentStatus
+from app.models.payments import (
+    Payment,
+    PaymentGateway,
+    PaymentGatewayEvent,
+    PaymentResolution,
+    PaymentStatus,
+)
 from app.models.tax_policy import TaxJurisdiction, TaxPolicyStatus, TaxPolicyType, TaxPolicyVersion
 from app.models.tenancy import AccountStatus, BillingMode, BillingStatus, Project, Tenant
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
@@ -820,15 +826,54 @@ def test_paid_and_review_required_are_never_changed(
     _assert_unchanged(payment_world, current, state)
 
 
-def _assert_unchanged(world: World, current: PaymentStatus, state: GatewayState) -> None:
-    payment = world.payment(world.customer(), status=current, reason=PRIOR_REASON[current])
+@pytest.mark.parametrize("state", list(GatewayState), ids=lambda s: s.value)
+def test_a_payment_closed_by_review_is_never_changed(
+    payment_world: World, state: GatewayState
+) -> None:
+    """设计闸门 #585 v3 §2「对 A 的 confirm_payment 的一处修改」：`resolution` 不为空（不入账结案，
+    状态是 `FAILED`）→ 只更新 last_reconciled_at；收到 PAID 也不入账、不再进入复核。"""
+    world = payment_world
+    payment = world.payment(
+        world.customer(), status=PaymentStatus.REVIEW_REQUIRED, reason=AMOUNT_MISMATCH
+    )
+    close_by_review(world, payment)
+    _assert_unchanged(world, PaymentStatus.FAILED, state, payment=payment)
+
+
+def close_by_review(world: World, payment: PaymentRef) -> None:
+    """What the manual CLOSE (AIH-TASK-182) leaves: `FAILED`, the review reason kept, resolved."""
+    with world.factory() as session:
+        session.execute(
+            update(Payment)
+            .where(Payment.public_id == payment.public_id)
+            .values(
+                status=PaymentStatus.FAILED,
+                resolution=PaymentResolution.CLOSED,
+                resolved_at=CREATED,
+                resolved_by_user_id=world.admin_id,
+                resolution_reason="Fictional review closed without credit",
+            )
+        )
+        session.commit()
+
+
+def _assert_unchanged(
+    world: World,
+    current: PaymentStatus,
+    state: GatewayState,
+    *,
+    payment: PaymentRef | None = None,
+) -> None:
+    if payment is None:
+        payment = world.payment(world.customer(), status=current, reason=PRIOR_REASON[current])
     world.serve(payment, state)
+    reason = world.row(payment).status_reason
     before = world.snapshot(payment)
 
     result = world.confirm(payment)
 
     assert (result.old_status, result.new_status) == (current, current)
-    assert (result.reason, result.posted, result.state) == (PRIOR_REASON[current], False, state)
+    assert (result.reason, result.posted, result.state) == (reason, False, state)
     after = world.snapshot(payment)
     changed = {
         name

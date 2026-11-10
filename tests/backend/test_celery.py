@@ -106,6 +106,7 @@ def test_the_periodic_tasks_include_the_ai_usage_delivery_sweep(
         "wallet-reconciliation-step",
         "statements-generate-due",
         "payment-events-process-due",
+        "payment-reconcile-due",
     }
     assert "usage-billing-sweep" not in celery_app.conf.beat_schedule
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
@@ -267,6 +268,7 @@ def test_task_modules_are_listed_explicitly(celery_app) -> None:
         "app.tasks.wallet_reconciliation",
         "app.tasks.statements",
         "app.tasks.payment_events",
+        "app.tasks.payment_reconcile",
     ]
     assert celery_app.conf.include == TASK_MODULES
 

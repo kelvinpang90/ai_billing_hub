@@ -404,6 +404,11 @@ class Settings(BaseSettings):
     payment_webhook_tolerance_seconds: int = Field(default=300, ge=60, le=600)
     # 事件处理任务的 Beat 间隔。
     payment_event_poll_seconds: int = Field(default=15, ge=5, le=300)
+    # 补对账（设计闸门 #585 v3 §2「配置」，AIH-TASK-180）：Beat 间隔；建单后多久才开始查
+    # （给回调先到的机会）；创建满多久仍 `PENDING` 就超时过期（缺省 7 天）。
+    payment_reconcile_poll_seconds: int = Field(default=60, ge=30, le=600)
+    payment_reconcile_grace_seconds: int = Field(default=300, ge=60, le=3600)
+    payment_reconcile_max_seconds: int = Field(default=604_800, ge=86_400, le=2_592_000)
 
     @field_validator("stripe_api_base_url")
     @classmethod
