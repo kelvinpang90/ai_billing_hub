@@ -26,7 +26,21 @@
 `PAYMENT_STATUS_CHANGE` 审计（系统，字段与写法照 A）；不满足什么也不做。之后收到付款成功照 A 入账
 （ADR-0007）。
 
-**第 2 段：手续费补抓**属于 AIH-TASK-187；本任务里 `_reconcile_fees` 什么也不做。
+**第 2 段：手续费补抓**（AIH-TASK-187；第 1 段正常结束、预算与查询次数还有剩余时）。候选查询照设计：
+`PAID`、`gateway_fee` 为空、有网关 id、创建 8 天内、付款满 600 秒、`last_reconciled_at` 为空或不晚于
+now 减 3600 秒；按 `COALESCE(last_reconciled_at, paid_at)`、`id` 排序，最多 50 行。逐笔事务外
+`get_payment_status`：
+
+- `GatewayUnavailable` → 结束本轮；
+- `GatewayRequestRejected`、会话 id 对不上 → 只更新 `last_reconciled_at`
+  （条件 `status = 'PAID'`），记 ERROR；
+- 没有 `fee_minor` → 只更新 `last_reconciled_at`；费用币种（转大写）不是 MYR → 同上，
+  记 WARNING；
+- 有 MYR 费用 → 新事务条件更新（`status = 'PAID' AND gateway_fee IS NULL`）写
+  `gateway_fee = fee_minor / 100` 与 `last_reconciled_at`，影响 1 行时同一事务写
+  `PAYMENT_FEE_RECORDED` 审计（系统）；影响 0 行什么也不做。
+  只写这两列：人工按实付入账（`CREDITED`）的行状态与结案字段不变。
+- 其他意外异常 → 同第 1 段，记 ERROR（只带 `public_id` 与异常类型），结束本轮。
 
 ⚠️ 不跨笔开事务（设计 §2「事务边界」）；补对账与事件处理同时确认同一笔时，A 的「锁支付行后再判、
 `PAID` 不再变、账本引用唯一」保证只入账一次（INV-3）。
@@ -41,6 +55,7 @@ import enum
 import logging
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Final
 
 from sqlalchemy import ColumnElement, Row, Select, and_, func, or_, select, update
@@ -48,15 +63,19 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 from app.core.database import session_scope
+from app.models.auth import AuditAction, AuditLog
 from app.models.payments import Payment, PaymentStatus
 from app.payments.base import GatewayRequestRejected, GatewayUnavailable, PaymentGateway
+from app.repositories.wallet import SYSTEM_ACTOR_ROLE, _money_text
 from app.services.auth import utc_now
 from app.services.payments import (
     NO_GATEWAY_SESSION,
+    PAYMENT_CURRENCY,
     RECONCILE_TIMEOUT,
     ConfirmConflict,
     _audit,
     _audit_state,
+    _json,
     confirm_payment,
 )
 
@@ -77,8 +96,20 @@ JUST_EXPIRED_SECONDS: Final = 3600
 JUST_EXPIRED_INTERVAL_SECONDS: Final = 300
 LONG_EXPIRED_INTERVAL_SECONDS: Final = 21600
 
+# 第 2 段（手续费补抓）：创建 8 天内、付款 600 秒后、每 3600 秒最多查一次；候选最多 50 行。
+FEE_WINDOW_SECONDS: Final = 8 * 86400
+FEE_AFTER_PAID_SECONDS: Final = 600
+FEE_INTERVAL_SECONDS: Final = 3600
+FEE_CANDIDATE_LIMIT: Final = 50
+
+# 审计的 entity_type，与 app.services.payments.ENTITY_PAYMENT 同值
+# （审计分类扫描只认本模块的字面量常量）。
+_ENTITY_PAYMENT: Final = "payments"
+
 # 候选行：`id`、`public_id`、`gateway_payment_id`、`created_at`。
 _Candidate = tuple[int, str, str | None, dt.datetime]
+# 第 2 段候选行：`id`、`public_id`、`gateway_payment_id`（查询保证不为空）。
+_FeeCandidate = tuple[int, str, str | None]
 
 
 class StopReason(enum.StrEnum):
@@ -99,7 +130,7 @@ class ReconcileRun:
     queries: int
     orphans_expired: int
     timeouts_expired: int
-    # 第 2 段（AIH-TASK-187）补到的手续费；本任务恒为 0。
+    # 第 2 段补到的手续费：条件更新实际影响 1 行的笔数。
     fees_recorded: int
     stop_reason: StopReason
 
@@ -382,16 +413,152 @@ def _reconcile_fees(
     *,
     now: dt.datetime,
 ) -> StopReason:
-    """Stage 2. AIH-TASK-187 implements it; here it does nothing."""
+    """Stage 2: fetch the missing gateway fee of `PAID` payments created within 8 days."""
+    with session_factory() as session:
+        candidates = session.execute(fee_candidates(now=now)).all()
+    for row in candidates:
+        exhausted = round_.exhausted()
+        if exhausted is not None:
+            return exhausted
+        try:
+            stop = _record_fee(session_factory, gateway, round_, row, now=now)
+        except Exception as error:
+            # 这一笔的事务已由 `session_scope` 回滚；与第 1 段相同，结束本轮。
+            logger.error(
+                "Payment fee backfill failed unexpectedly; the run ends",
+                extra={"payment_id": row.public_id, "error_type": type(error).__name__},
+            )
+            return StopReason.UNEXPECTED_ERROR
+        if stop is not None:
+            return stop
     return StopReason.DONE
+
+
+def fee_candidates(*, now: dt.datetime) -> Select[_FeeCandidate]:
+    """The stage 2 candidate query, condition for condition as design §2 writes it."""
+    payment = Payment
+    reconciled = payment.last_reconciled_at
+    return (
+        select(payment.id, payment.public_id, payment.gateway_payment_id)
+        .where(
+            payment.status == PaymentStatus.PAID,
+            payment.gateway_fee.is_(None),
+            payment.gateway_payment_id.is_not(None),
+            payment.created_at >= now - dt.timedelta(seconds=FEE_WINDOW_SECONDS),
+            payment.paid_at <= now - dt.timedelta(seconds=FEE_AFTER_PAID_SECONDS),
+            or_(
+                reconciled.is_(None),
+                reconciled <= now - dt.timedelta(seconds=FEE_INTERVAL_SECONDS),
+            ),
+        )
+        .order_by(func.coalesce(reconciled, payment.paid_at), payment.id)
+        .limit(FEE_CANDIDATE_LIMIT)
+    )
+
+
+def _record_fee(
+    session_factory: sessionmaker[Session],
+    gateway: PaymentGateway,
+    round_: _Round,
+    row: Row[_FeeCandidate],
+    *,
+    now: dt.datetime,
+) -> StopReason | None:
+    """One fee candidate. `None`: go on with the next one; otherwise the run ends with it."""
+    session_id = row.gateway_payment_id
+    if session_id is None:
+        # 候选查询已排除；只为类型收窄。
+        return None
+    round_.queries += 1
+    try:
+        reported = gateway.get_payment_status(session_id)
+    except GatewayUnavailable as error:
+        logger.warning(
+            "Gateway unavailable during payment fee backfill; the run ends",
+            extra={"payment_id": row.public_id, "error_code": error.code},
+        )
+        return StopReason.GATEWAY_UNAVAILABLE
+    except GatewayRequestRejected as error:
+        _mark_fee_checked(session_factory, row.id, now=now)
+        logger.error(
+            "Gateway rejected the payment fee query",
+            extra={"payment_id": row.public_id, "error_code": error.code},
+        )
+        return None
+
+    if reported.session_id != session_id:
+        _mark_fee_checked(session_factory, row.id, now=now)
+        logger.error(
+            "Gateway session does not match the payment; fee not recorded",
+            extra={"payment_id": row.public_id},
+        )
+        return None
+    if reported.fee_minor is None:
+        _mark_fee_checked(session_factory, row.id, now=now)
+        return None
+    if (reported.fee_currency or "").upper() != PAYMENT_CURRENCY:
+        _mark_fee_checked(session_factory, row.id, now=now)
+        logger.warning(
+            "Gateway fee is not in MYR; not recorded",
+            extra={"payment_id": row.public_id, "fee_currency": reported.fee_currency},
+        )
+        return None
+
+    # fee_minor / 100，Decimal，不另做量化（设计 §2「金额与精度」：同 A，不经 float）。
+    fee = Decimal(reported.fee_minor) / 100
+    with session_scope(session_factory) as session:
+        changed = session.execute(
+            update(Payment)
+            .where(
+                Payment.id == row.id,
+                Payment.status == PaymentStatus.PAID,
+                Payment.gateway_fee.is_(None),
+            )
+            .values(gateway_fee=fee, last_reconciled_at=now)
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        if changed != 1:
+            # 并发已写（或已不是 PAID）：什么也不做。
+            return None
+        session.add(
+            AuditLog(
+                actor_user_id=None,
+                actor_role=SYSTEM_ACTOR_ROLE,
+                action=AuditAction.PAYMENT_FEE_RECORDED,
+                entity_type=_ENTITY_PAYMENT,
+                entity_id=row.public_id,
+                before_state=_json({"gateway_fee": None}),
+                after_state=_json({"gateway_fee": _money_text(fee)}),
+                reason=None,
+                created_at=now,
+            )
+        )
+    round_.fees_recorded += 1
+    logger.info("Payment gateway fee recorded", extra={"payment_id": row.public_id})
+    return None
+
+
+def _mark_fee_checked(
+    session_factory: sessionmaker[Session], payment_id: int, *, now: dt.datetime
+) -> None:
+    """`last_reconciled_at = now` while the payment is still `PAID`; nothing else."""
+    with session_scope(session_factory) as session:
+        session.execute(
+            update(Payment)
+            .where(Payment.id == payment_id, Payment.status == PaymentStatus.PAID)
+            .values(last_reconciled_at=now)
+            .execution_options(synchronize_session=False)
+        )
 
 
 __all__ = [
     "CANDIDATE_LIMIT",
+    "FEE_CANDIDATE_LIMIT",
     "MAX_QUERIES",
     "RUN_BUDGET_SECONDS",
     "ReconcileRun",
     "StopReason",
+    "fee_candidates",
     "pending_candidates",
     "run_due",
 ]
