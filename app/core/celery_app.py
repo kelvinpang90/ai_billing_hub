@@ -36,6 +36,7 @@ TASK_MODULES = [
     "app.ai_api.delivery",
     "app.tasks.wallet_reconciliation",
     "app.tasks.statements",
+    "app.tasks.payment_events",
 ]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
@@ -88,6 +89,11 @@ WALLET_RECONCILIATION_STEP_EXPIRES_SECONDS = 270.0
 # 缺什么补什么（INV-14）。`expires = 3240`（周期的 0.9）：beat 停摆后再起来不一口气放出去。
 STATEMENTS_GENERATE_DUE_SCHEDULE = crontab(minute=0)
 STATEMENTS_GENERATE_DUE_EXPIRES_SECONDS = 3240
+
+# 支付事件处理（设计闸门 #580 v3 §2「事件处理任务」，AIH-TASK-175）：间隔取
+# `payment_event_poll_seconds`（缺省 15 秒），`expires` 为间隔减 1 秒。⚠️ 回调只落库、不入队，
+# 这一条就是事件处理本身（INV-14）；开关关闭时每一轮直接返回。
+PAYMENT_EVENTS_EXPIRES_MARGIN_SECONDS = 1
 
 
 class RedisNotConfigured(RuntimeError):
@@ -182,6 +188,14 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "app.tasks.statements.generate_due",
                 "schedule": STATEMENTS_GENERATE_DUE_SCHEDULE,
                 "options": {"expires": STATEMENTS_GENERATE_DUE_EXPIRES_SECONDS},
+            },
+            "payment-events-process-due": {
+                "task": "app.tasks.payment_events.process_due",
+                "schedule": settings.payment_event_poll_seconds,
+                "options": {
+                    "expires": settings.payment_event_poll_seconds
+                    - PAYMENT_EVENTS_EXPIRES_MARGIN_SECONDS
+                },
             },
         },
     )

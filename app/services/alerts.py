@@ -7,7 +7,8 @@
 **维度注册表**是下面的 `DIMENSIONS`：一个有序列表，每个维度一个只读查询函数。
 T-E（幂等冲突）、T-H（定价错误、汇率错误、未知模型、失败、处理积压、负余额、
 outbox 积压，设计闸门 #181 v2 §2「告警维度」，AIH-TASK-032）往里加，不改接口形状。
-`wallet_negative_balance` 另并入钱包核对的结果（设计闸门 #474 v13 §2「告警」，AIH-TASK-133）。
+`wallet_negative_balance` 另并入钱包核对的结果（设计闸门 #474 v13 §2「告警」，AIH-TASK-133）
+与支付的判据（设计闸门 #580 v3 §2「告警」，AIH-TASK-175）。
 `usage_processing_backlog` 在积压、PROCESSING、过期租约三部分之后另接两段（设计闸门 #565 v6
 §2「告警」，AIH-TASK-158）：到期后 6 至 30 小时内仍缺失的对账单 P2，最近 24 小时晚到用量的
 条数或金额占比达到 1% P2；Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定不加维度。
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import datetime as dt
 import enum
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -37,6 +39,7 @@ from sqlalchemy import ColumnElement, and_, case, exists, func, not_, or_, selec
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.ai_api.outbox import AiUsageOutbox, AiUsageOutboxStatus
+from app.core.config import get_settings, read_stripe_credentials
 from app.core.fx_source import kuala_lumpur_date
 from app.models.auth import DomainOutbox, OutboxStatus
 from app.models.fx_rates import (
@@ -47,6 +50,7 @@ from app.models.fx_rates import (
     FxRateVersion,
 )
 from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
+from app.models.payments import Payment, PaymentEventProcessingStatus, PaymentGatewayEvent
 from app.models.statements import MonthlyStatement
 from app.models.tenancy import BillingMode, IntegrationStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
@@ -105,6 +109,19 @@ OUTBOX_DEAD_LETTER_WINDOW: Final = dt.timedelta(days=7)
 # `now - 30 小时` 即 `stale`；`run_date` 晚于今天或 `finished_at` 晚于 `now + 10 分钟` 是时钟异常。
 RECONCILIATION_STALE_AFTER: Final = dt.timedelta(hours=30)
 RECONCILIATION_CLOCK_TOLERANCE: Final = dt.timedelta(minutes=10)
+# `wallet_negative_balance` 的支付部分（设计闸门 #580 v3 §2「告警」，AIH-TASK-175）：
+# 窗口一律是 `now − 24 小时 < 时刻 ≤ now`；最老未处理事件的年龄**超过** 900 秒 P2。
+PAYMENT_ALERT_WINDOW: Final = dt.timedelta(hours=24)
+PAYMENT_OPEN_EVENT_P2_SECONDS: Final = 900
+_OPEN_EVENT_STATUSES: Final = (
+    PaymentEventProcessingStatus.RECEIVED,
+    PaymentEventProcessingStatus.RETRY,
+    PaymentEventProcessingStatus.PROCESSING,
+)
+_FAILED_EVENT_STATUSES: Final = (
+    PaymentEventProcessingStatus.UNMATCHED,
+    PaymentEventProcessingStatus.REJECTED,
+)
 # 每行摘要最多列几个细分码（设计 §2）。
 MAX_CODES: Final = 3
 # `ai_usage_outbox`：PENDING / SENDING 超过此秒数 P2；人工处置项一律 P1。
@@ -617,14 +634,94 @@ def _reconciliation(session: Session, now: dt.datetime) -> AlertResult:
     return AlertResult(level, text)
 
 
+def _payments_misconfigured() -> bool:
+    """`payments_enabled` is on but the credentials or the addresses are unusable.
+
+    凭据读不到、Stripe 密钥前缀不是 `sk_live_` / `sk_test_`、签名密钥前缀不是 `whsec_`、
+    `stripe_api_base_url` 为空都由 `read_stripe_credentials` 判定；另加 `frontend_base_url` 为空。
+    """
+    settings = get_settings()
+    if not settings.payments_enabled:
+        return False
+    return read_stripe_credentials(settings) is None or not settings.frontend_base_url.strip()
+
+
+def _payments(session: Session, now: dt.datetime) -> AlertResult | None:
+    """The payment part (design gate #580 v3 §2「告警」); `None` when there is nothing to report.
+
+    - P1：`review_required_at` 在窗口内的支付；`fingerprint_conflict_at` 在窗口内的事件；配置判据；
+    - P2：`RECEIVED` / `RETRY` / `PROCESSING` 里最早的 `received_at` 已超过 900 秒；`processed_at`
+      在窗口内、状态为 `UNMATCHED` 或 `REJECTED` 的事件。
+
+    窗口是 `now − 24 小时 < 时刻 ≤ now`。只在三个 24 小时计数任一大于 0、最老未处理事件超过
+    900 秒或配置判据触发时返回一段；否则返回 `None`，维度摘要与原来逐字相同。
+    """
+    since = now - PAYMENT_ALERT_WINDOW
+    event = PaymentGatewayEvent
+    review = int(
+        session.execute(
+            select(func.count())
+            .select_from(Payment)
+            .where(Payment.review_required_at > since, Payment.review_required_at <= now)
+        ).scalar_one()
+    )
+    conflicts = int(
+        session.execute(
+            select(func.count())
+            .select_from(event)
+            .where(event.fingerprint_conflict_at > since, event.fingerprint_conflict_at <= now)
+        ).scalar_one()
+    )
+    oldest = session.execute(
+        select(func.min(event.received_at)).where(event.processing_status.in_(_OPEN_EVENT_STATUSES))
+    ).scalar_one()
+    age = max(0, math.floor((now - oldest).total_seconds())) if oldest is not None else 0
+    failed = int(
+        session.execute(
+            select(func.count())
+            .select_from(event)
+            .where(
+                event.processing_status.in_(_FAILED_EVENT_STATUSES),
+                event.processed_at > since,
+                event.processed_at <= now,
+            )
+        ).scalar_one()
+    )
+    misconfigured = _payments_misconfigured()
+    stale = age > PAYMENT_OPEN_EVENT_P2_SECONDS
+
+    if review or conflicts or misconfigured:
+        level = AlertLevel.P1
+    elif stale or failed:
+        level = AlertLevel.P2
+    else:
+        return None
+    config = "missing" if misconfigured else "ok"
+    summary = (
+        f"; payments: review 24h {review}, event conflicts 24h {conflicts}, "
+        f"oldest open event {age}s, unmatched or rejected 24h {failed}, config {config}"
+    )
+    return AlertResult(level, summary)
+
+
 def wallet_negative_balance(session: Session, context: AlertContext) -> AlertResult:
     """Negative wallets (P2) merged with the reconciliation runs (design gate #474 v13 §2「告警」):
     an inconsistency in the runs under judgement is P1; never completed, stale or a clock anomaly
-    is P2. The summary is `<负余额部分>; <核对部分>`: counts and dates only (INV-7)."""
+    is P2. The summary is `<负余额部分>; <核对部分>`: counts and dates only (INV-7).
+
+    支付的判据也并在这里（设计闸门 #580 v3 §2「告警」，见 `_payments`）：有要报的时，摘要末尾追加
+    `; payments: review 24h <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or
+    rejected 24h <d>, config <ok|missing>`，没有时摘要与原来逐字相同。"""
     negative = _negative_wallets(session)
     reconciliation = _reconciliation(session, context.now)
-    level = max((negative.level, reconciliation.level), key=_SEVERITY.__getitem__)
-    return AlertResult(level, f"{negative.summary}; {reconciliation.summary}")
+    parts = [negative, reconciliation]
+    summary = f"{negative.summary}; {reconciliation.summary}"
+    payments = _payments(session, context.now)
+    if payments is not None:
+        parts.append(payments)
+        summary += payments.summary
+    level = max((part.level for part in parts), key=_SEVERITY.__getitem__)
+    return AlertResult(level, summary)
 
 
 def _outbox_pending(session: Session, handled: Sequence[str], now: dt.datetime) -> AlertResult:
@@ -859,6 +956,8 @@ __all__ = [
     "MAX_CODES",
     "OUTBOX_BACKLOG_AGE",
     "OUTBOX_DEAD_LETTER_WINDOW",
+    "PAYMENT_ALERT_WINDOW",
+    "PAYMENT_OPEN_EVENT_P2_SECONDS",
     "RECONCILIATION_CLOCK_TOLERANCE",
     "RECONCILIATION_STALE_AFTER",
     "RETRYING_ALERT_ATTEMPTS",
