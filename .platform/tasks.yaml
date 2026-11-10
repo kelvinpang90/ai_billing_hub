@@ -10544,7 +10544,7 @@ tasks:
     title: 支付第二批补对账第二段：PAID 而手续费为空的支付在 8 天内补抓手续费
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §2「补对账」第 2 段：在 AIH-TASK-180 的 run_due 里实现手续费补抓（候选查询、逐笔查询 Stripe、条件更新 gateway_fee 与 PAYMENT_FEE_RECORDED 审计）。编号放在最后只为不改其他任务的编号，执行顺序在 AIH-TASK-180 之后、AIH-TASK-181 之前。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-180
     acceptance_criteria:
