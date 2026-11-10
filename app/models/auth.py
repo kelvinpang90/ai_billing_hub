@@ -316,6 +316,18 @@ class AuditAction(enum.StrEnum):
     # `expected_amount`、`confirmed_amount`、`gateway_fee`。不在 spec §66 的清单里，按
     # `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
     PAYMENT_STATUS_CHANGE = "PAYMENT_STATUS_CHANGE"
+    # AIH-TASK-179（设计闸门 #585 v3 §2「人工复核出口」、§6「审计」）：写入方是 AIH-TASK-182 的
+    # `resolve_review`（app/services/payment_review.py），与支付状态、结案字段（CREDIT 时还有
+    # TOPUP 账本行）同一事务；操作者为管理员；`entity_type = payments`、`entity_id = public_id`。
+    # `before` 为 `status`、`status_reason`、`resolution`（null）、`confirmed_amount`、
+    # `confirmed_currency`，`after` 另加 `credited_amount`、`resolution_reason`。不在 spec §66 的
+    # 清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
+    PAYMENT_REVIEW_RESOLVED = "PAYMENT_REVIEW_RESOLVED"
+    # AIH-TASK-179（设计闸门 #585 v3 §2「补对账」第 2 段）：写入方是 AIH-TASK-187 的手续费补抓，
+    # 与 `gateway_fee` 的条件更新同一事务，影响 1 行时一条；操作者为系统。`before` 为
+    # `{"gateway_fee": null}`，`after` 为 `{"gateway_fee": "<定点字符串>"}`。不在 spec §66 的清单
+    # 里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
+    PAYMENT_FEE_RECORDED = "PAYMENT_FEE_RECORDED"
 
 
 class AuditLog(Base):

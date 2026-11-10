@@ -97,6 +97,8 @@ export const AUDIT_ACTIONS = [
   "TENANT_LOW_BALANCE_THRESHOLD_SET",
   "STATEMENT_GENERATE",
   "PAYMENT_STATUS_CHANGE",
+  "PAYMENT_REVIEW_RESOLVED",
+  "PAYMENT_FEE_RECORDED",
 ] as const;
 
 /** 系统动作（计费状态跃迁）的 `actor_role`。 */
