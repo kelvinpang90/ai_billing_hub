@@ -10226,7 +10226,7 @@ tasks:
     title: 支付第一批第四层：回调事件落库、后台处理任务与告警判据
     purpose: >-
       按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「支付 Webhook」中落库的部分、「事件处理任务」「告警」：新模块 app/services/payment_events.py（落库与指纹冲突）、app/tasks/payment_events.py（Beat 每 15 秒、一次领一个事件、重试退避）、Beat 登记，告警判据并进 wallet_negative_balance 维度并同步运维文档。路由属于 AIH-TASK-177。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-174
     acceptance_criteria:
