@@ -358,21 +358,27 @@ def test_payments_off_means_neither_route_exists(api: Api) -> None:
     account = api.account()
     off = api.with_settings(payments_enabled=False)
 
-    paths = {getattr(route, "path", None) for route in off.app.routes}
-    assert TOPUPS not in paths
-    assert "/api/v1/webhooks/payments/{gateway}" not in paths
     topup = off.client.post(TOPUPS, json={"amount": "100.00"}, headers=account.headers)
     body = event_body(reference=str(uuid.uuid4()), session_id="cs_test_off")
     webhook = off.client.post(STRIPE_WEBHOOK, content=body, headers=sign(body))
+    other_gateway = off.client.post("/api/v1/webhooks/payments/paypal", content=b"{}")
 
-    assert topup.status_code == webhook.status_code == 404
+    # 框架自己的 404 是 HTTP_ERROR；路由在场时拒绝会是 NOT_FOUND 或别的业务码。
+    assert error_of(topup) == (404, "HTTP_ERROR")
+    assert error_of(webhook) == (404, "HTTP_ERROR")
+    assert error_of(other_gateway) == (404, "HTTP_ERROR")
     assert api.world.payments() == [] and api.events() == []
     assert api.world.stripe.created == []
 
 
 def test_payments_on_registers_both_routes(api: Api) -> None:
-    paths = {getattr(route, "path", None) for route in api.app.routes}
-    assert {TOPUPS, "/api/v1/webhooks/payments/{gateway}"} <= paths
+    """开关打开时两个路由都在：回答的是路由自己的结果，而不是框架的 HTTP_ERROR。"""
+    account = api.account()
+    webhook = api.client.post("/api/v1/webhooks/payments/paypal", content=b"{}")
+    topup = api.client.post(TOPUPS, json={"amount": "100.00"}, headers=account.headers)
+
+    assert error_of(webhook) == (404, "NOT_FOUND")
+    assert topup.status_code == 201
 
 
 # --- 回调：落库 -----------------------------------------------------------------------
