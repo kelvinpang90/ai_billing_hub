@@ -10175,7 +10175,7 @@ tasks:
     title: 支付第一批第三层：可信确认、按决策表落状态与 TOPUP 入账
     purpose: >-
       按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「可信确认」「事务边界」与 §4：新模块 app/services/payments.py 的 confirm_payment（事务外查 Stripe、依次锁支付、钱包、租户，按两张决策表落状态、通过时调用 post_transaction 写 TOPUP、写 PAYMENT_STATUS_CHANGE 审计）。不做事件处理、建单与接口：属于 AIH-TASK-175..177。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-173
     acceptance_criteria:
