@@ -76,6 +76,8 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "tax_policy_version",
         # 对账单的 public_id：app/api/admin_statements.py 的手动补生成（AIH-TASK-159）。
         "monthly_statement",
+        # 支付的 public_id：app/services/payments.py 的状态改变审计（AIH-TASK-174）。
+        "payments",
     }
 )
 
