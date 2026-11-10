@@ -10282,7 +10282,7 @@ tasks:
     title: 支付第一批第五层：客户建单服务，含校验、六十秒同额复用与网关失败处理
     purpose: >-
       按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「建单」与 §4：在 app/services/payments.py 加 create_topup（沿用客户写规则锁租户、四项校验、60 秒同额复用、两段事务与事务外调 Stripe、条件更新网关 id、失败与并发幂等键的处理）。路由属于 AIH-TASK-177。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-175
     acceptance_criteria:
