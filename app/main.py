@@ -35,6 +35,7 @@ from app.api.health import router as health_router
 from app.api.integration_usage import router as integration_usage_router
 from app.api.internal_alerts import router as internal_alerts_router
 from app.api.me import router as me_router
+from app.api.payments import router as payments_router
 from app.api.two_factor import router as two_factor_router
 from app.core.celery_app import RedisNotConfigured, create_celery_app
 from app.core.clientip import parse_trusted_proxies
@@ -164,6 +165,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_statements_router)
     # 集成方的签名接口：错误信封多一个顶层 `retryable`（app/core/errors.py）。
     app.include_router(integration_usage_router)
+    # 支付回调与客户建单（AIH-TASK-177，设计闸门 #580 v3 §2）：只在开关打开时注册，
+    # 关闭时两个路径都是 404。
+    if settings.payments_enabled:
+        app.include_router(payments_router)
     # 机器接口，不在 /api/ 下、不套信封（app/api/internal_alerts.py）。
     app.include_router(internal_alerts_router)
     app.include_router(ai_messages_router)
