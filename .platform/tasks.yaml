@@ -10330,7 +10330,7 @@ tasks:
     title: 支付第一批第六层：支付回调路由、客户建单路由与端到端测试
     purpose: >-
       按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §2「支付 Webhook」「建单」与 §6：新路由模块 app/api/payments.py（POST /api/v1/webhooks/payments/{gateway} 与 POST /api/v1/customer/topups，只在 payments_enabled 为真时注册）、请求与响应 schema、docs/api.md 两节、端到端测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-176
     acceptance_criteria:
