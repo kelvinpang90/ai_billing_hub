@@ -23,6 +23,10 @@ B 的补对账复用它。照设计五步：
 ⚠️ 余额只经 `post_transaction` 的账本行变动（INV-4）：这里锁钱包行只为固定加锁顺序，不改它。
 
 ⚠️ 日志只带 `payments.public_id`、状态与原因码（设计 §6），不带金额、请求体与密钥。
+
+`create_topup`（AIH-TASK-176，设计 §2「建单」）是客户建单：照设计的校验顺序、60 秒同额复用的两步
+（锁外预查、`lock_tenant_for_customer_write` 锁内重查）、两段事务与事务外调 Stripe。它只插入
+`PENDING` 与写网关 id / `GATEWAY_CREATE_FAILED`，不改支付状态。
 """
 
 from __future__ import annotations
@@ -30,29 +34,45 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-from collections.abc import Mapping
+import re
+import uuid
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError, MultipleResultsFound
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.config import Settings
 from app.core.database import session_scope
+from app.core.errors import AppError
 from app.models.auth import AuditAction, AuditLog
 from app.models.base import MONEY_SCALE
 from app.models.payments import Payment, PaymentStatus
+from app.models.payments import PaymentGateway as GatewayName
+from app.models.tax_policy import TaxJurisdiction, TaxPolicyType
 from app.models.tenancy import AccountStatus, BillingMode, Tenant
 from app.models.wallet import ReferenceType, TransactionType, Wallet
 from app.payments.base import (
+    CreatedPayment,
     GatewayPaymentStatus,
+    GatewayRequestRejected,
     GatewayState,
+    GatewayUnavailable,
     PaymentGateway,
     amount_to_minor,
     minor_to_amount,
 )
+from app.repositories.tax_policy import resolve_tax_policy
 from app.repositories.wallet import SYSTEM_ACTOR_ROLE, post_transaction
+from app.services.account_status import (
+    READ_ONLY_STATUSES,
+    AccountReadOnly,
+    lock_tenant_for_customer_write,
+)
+from app.services.customers import CustomerNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -434,21 +454,454 @@ def _is_unique_violation(error: IntegrityError) -> bool:
     return _SQLITE_UNIQUE in str(original)
 
 
+# --- 建单（AIH-TASK-176，设计 §2「建单」） --------------------------------------------------
+
+# 建单时 Stripe 不可用或拒绝（设计 §2「状态原因」）。
+GATEWAY_CREATE_FAILED: Final = "GATEWAY_CREATE_FAILED"
+# Stripe 因同一幂等键正被并发使用而拒绝：先到的那个请求还在建，不写原因。
+IDEMPOTENCY_KEY_IN_USE: Final = "idempotency_key_in_use"
+# 复用要求剩余有效期不少于 31 分钟：Stripe 要求会话过期时刻在创建后至少 30 分钟。
+REUSE_MIN_REMAINING: Final = dt.timedelta(minutes=31)
+# 锁内重查至多两轮：第一轮找到并发产生的、已有网关 id 的一笔，回到事务外查询它；第二轮仍不能
+# 复用就新建（设计 §2「60 秒同额复用」）。
+_LOCKED_PASSES: Final = 2
+
+# Stripe 单笔上限 999,999.99：至多六位整数、两位小数（设计 §2「建单」校验 3）。
+# `[0-9]` 而不是 `\d`：全角数字等 Unicode 数字不算。
+_AMOUNT_PATTERN: Final = re.compile(r"[0-9]{1,6}(\.[0-9]{1,2})?")
+_CENT: Final = Decimal("0.01")
+
+
+class PaymentsMisconfigured(AppError):
+    """Payments are off, the gateway credentials are unusable, or `frontend_base_url` is empty."""
+
+    code = "PAYMENTS_MISCONFIGURED"
+    http_status = 503
+
+    def __init__(self) -> None:
+        super().__init__("Payments are not configured.")
+
+
+class TopupsNotOpen(AppError):
+    """`payment_topups_open` is off and the tenant is not on the allowlist."""
+
+    code = "TOPUPS_NOT_OPEN"
+    http_status = 403
+
+    def __init__(self) -> None:
+        super().__init__("Top-ups are not open for this account.")
+
+
+class TopupNotAllowed(AppError):
+    """The tenant is not `PREPAID` (内部计量租户不能充值)."""
+
+    code = "TOPUP_NOT_ALLOWED"
+    http_status = 403
+
+    def __init__(self) -> None:
+        super().__init__("This account cannot top up.")
+
+
+class TopupAmountInvalid(AppError):
+    """Not a string, not in the amount format, or outside the configured minimum and maximum."""
+
+    code = "TOPUP_AMOUNT_INVALID"
+    http_status = 422
+
+    def __init__(self) -> None:
+        super().__init__("The top-up amount is invalid.")
+
+
+class TaxPolicyUnavailable(AppError):
+    """No tax policy version is in effect, or the one in effect fails its check on read."""
+
+    code = "TAX_POLICY_UNAVAILABLE"
+    http_status = 503
+
+    def __init__(self) -> None:
+        super().__init__("The tax policy is unavailable.")
+
+
+class TaxPolicyUnsupported(AppError):
+    """The version in effect charges tax (ADR-0008：未注册、不收税；收税另过设计闸门)."""
+
+    code = "TAX_POLICY_UNSUPPORTED"
+    http_status = 503
+
+    def __init__(self) -> None:
+        super().__init__("The tax policy in effect is not supported for top-ups.")
+
+
+class PaymentGatewayUnavailable(AppError):
+    """The gateway could not create or report the payment page.
+
+    可重试：60 秒内重试复用同一笔、用同一个幂等键。
+    """
+
+    code = "PAYMENT_GATEWAY_UNAVAILABLE"
+    http_status = 503
+
+    def __init__(self) -> None:
+        super().__init__("The payment gateway is unavailable. Please try again.")
+
+
+@dataclass(frozen=True)
+class TopupResult:
+    """What the customer gets back: the payment, where to pay, until when (INV-7：只有这三项)."""
+
+    payment_public_id: str
+    redirect_url: str
+    expires_at: dt.datetime
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """A `PENDING` payment the reuse query found."""
+
+    id: int
+    public_id: str
+    gateway_payment_id: str | None
+    expires_at: dt.datetime
+
+
+def create_topup(
+    session_factory: sessionmaker[Session],
+    gateway_factory: Callable[[Settings], PaymentGateway | None],
+    tenant_id: int,
+    amount_text: object,
+    *,
+    now: dt.datetime,
+    settings: Settings,
+) -> TopupResult:
+    """Create (or reuse) a `PENDING` top-up and its Stripe payment page (设计 §2「建单」).
+
+    `tenant_id` 来自客户令牌主体（INV-8）；`amount_text` 是请求体里的原值（不是字符串也是
+    `TopupAmountInvalid`）。`now` 是不带时区的 UTC、精确到秒。
+
+    顺序：配置 → 锁外快速校验（账户可写、开放、计费模式、金额、税务政策）→ 锁外预查候选并在
+    事务外查询它的会话 → 锁租户的事务里重查并复用或插入 `PENDING`、提交 → 事务外调 Stripe →
+    新事务写网关 id。
+    """
+    if not settings.payments_enabled:
+        raise PaymentsMisconfigured
+    base_url = settings.frontend_base_url.strip().rstrip("/")
+    if not base_url:
+        raise PaymentsMisconfigured
+    gateway = gateway_factory(settings)
+    if gateway is None:
+        raise PaymentsMisconfigured
+
+    # 锁外快速校验与预查。没有生效的税务政策就在复用之前报错。
+    with session_factory() as session:
+        tenant = session.get(Tenant, tenant_id)
+        if tenant is None:
+            raise CustomerNotFound
+        if tenant.account_status in READ_ONLY_STATUSES:
+            raise AccountReadOnly
+        _check_tenant(tenant, settings)
+        amount = _parse_amount(amount_text, settings)
+        _tax_policy_version_id(session, now)
+        candidate = _reusable(session, tenant_id, amount, now=now, settings=settings, excluded=())
+
+    excluded: set[int] = set()
+    if candidate is not None and candidate.gateway_payment_id is not None:
+        reused = _reuse_open_session(gateway, candidate)
+        if reused is not None:
+            return reused
+        excluded.add(candidate.id)
+
+    payment: Payment | None = None
+    for locked_pass in range(1, _LOCKED_PASSES + 1):
+        with session_scope(session_factory) as session:
+            found = _locked_pass(
+                session,
+                tenant_id,
+                amount,
+                now=now,
+                settings=settings,
+                excluded=excluded,
+                may_query=locked_pass < _LOCKED_PASSES,
+            )
+        if isinstance(found, Payment):
+            payment = found
+            break
+        # 并发产生的、已有网关 id 的一笔：提交之后回到事务外查询它。
+        reused = _reuse_open_session(gateway, found)
+        if reused is not None:
+            return reused
+        excluded.add(found.id)
+    # 最后一轮总是复用没有网关 id 的一笔或新建。
+    assert payment is not None
+    return _create_on_gateway(session_factory, gateway, payment, base_url=base_url, now=now)
+
+
+def _check_tenant(tenant: Tenant, settings: Settings) -> None:
+    """Checks 1a and 2, in that order (账户可写由调用方先查)."""
+    if not settings.payment_topups_open and (
+        tenant.public_id.lower() not in settings.payment_topup_tenant_ids
+    ):
+        raise TopupsNotOpen
+    if tenant.billing_mode is not BillingMode.PREPAID:
+        raise TopupNotAllowed
+
+
+def _parse_amount(amount_text: object, settings: Settings) -> Decimal:
+    """Check 3: the format, then the configured minimum and maximum. Two decimal places."""
+    if type(amount_text) is not str or not _AMOUNT_PATTERN.fullmatch(amount_text):
+        raise TopupAmountInvalid
+    amount = Decimal(amount_text).quantize(_CENT)
+    if amount < settings.payment_topup_min:
+        raise TopupAmountInvalid
+    maximum = settings.payment_topup_max
+    if maximum is not None and amount > maximum:
+        raise TopupAmountInvalid
+    return amount
+
+
+def _tax_policy_version_id(session: Session, now: dt.datetime) -> int:
+    """Check 4: the SST / Malaysia version in effect at `now` (INV-6). Fail closed."""
+    try:
+        policy = resolve_tax_policy(session, TaxJurisdiction.MY, TaxPolicyType.SST, now)
+    except (ValueError, MultipleResultsFound):
+        logger.error("Tax policy for top-ups failed its check on read")
+        raise TaxPolicyUnavailable from None
+    if policy is None:
+        logger.error("No tax policy is in effect for top-ups")
+        raise TaxPolicyUnavailable
+    if policy.treatment.tax_charged:
+        logger.error(
+            "Tax policy in effect charges tax; top-ups do not support it",
+            extra={"tax_policy_version": policy.public_id},
+        )
+        raise TaxPolicyUnsupported
+    return policy.version_id
+
+
+def _reusable(
+    session: Session,
+    tenant_id: int,
+    amount: Decimal,
+    *,
+    now: dt.datetime,
+    settings: Settings,
+    excluded: Collection[int],
+) -> _Candidate | None:
+    """The newest `PENDING` of this tenant and amount created within the reuse window and with
+    at least 31 minutes left (ADR-0007); `None` when the window is 0. A plain read: 建单不锁已有
+    支付行（设计 §2「可信确认」第 5 步）。"""
+    window = settings.payment_reuse_window_seconds
+    if window <= 0:
+        return None
+    statement = select(
+        Payment.id, Payment.public_id, Payment.gateway_payment_id, Payment.expires_at
+    ).where(
+        Payment.tenant_id == tenant_id,
+        Payment.status == PaymentStatus.PENDING,
+        Payment.expected_amount == amount,
+        Payment.created_at >= now - dt.timedelta(seconds=window),
+        Payment.expires_at >= now + REUSE_MIN_REMAINING,
+    )
+    if excluded:
+        statement = statement.where(Payment.id.not_in(list(excluded)))
+    row = session.execute(
+        statement.order_by(Payment.created_at.desc(), Payment.id.desc()).limit(1)
+    ).one_or_none()
+    if row is None:
+        return None
+    return _Candidate(int(row.id), row.public_id, row.gateway_payment_id, row.expires_at)
+
+
+def _reuse_open_session(gateway: PaymentGateway, candidate: _Candidate) -> TopupResult | None:
+    """Ask the gateway about a candidate's session, outside any transaction.
+
+    `OPEN` 且有 `redirect_url`：复用完成。其他状态或 `GatewayRequestRejected`：`None`（调用方记为
+    排除）。`GatewayUnavailable`：`PaymentGatewayUnavailable`。
+    """
+    assert candidate.gateway_payment_id is not None
+    try:
+        reported = gateway.get_payment_status(candidate.gateway_payment_id)
+    except GatewayUnavailable as error:
+        logger.warning(
+            "Gateway unavailable while checking a top-up for reuse",
+            extra={"payment_id": candidate.public_id, "error_code": error.code},
+        )
+        raise PaymentGatewayUnavailable from None
+    except GatewayRequestRejected as error:
+        logger.warning(
+            "Gateway rejected the reuse check; the top-up is not reused",
+            extra={"payment_id": candidate.public_id, "error_code": error.code},
+        )
+        return None
+    if reported.state is GatewayState.OPEN and reported.redirect_url:
+        logger.info("Top-up reused", extra={"payment_id": candidate.public_id})
+        return TopupResult(candidate.public_id, reported.redirect_url, candidate.expires_at)
+    logger.info(
+        "Top-up session is no longer open; not reused",
+        extra={"payment_id": candidate.public_id, "state": reported.state.value},
+    )
+    return None
+
+
+def _locked_pass(
+    session: Session,
+    tenant_id: int,
+    amount: Decimal,
+    *,
+    now: dt.datetime,
+    settings: Settings,
+    excluded: Collection[int],
+    may_query: bool,
+) -> Payment | _Candidate:
+    """In the caller's write transaction: lock the tenant, re-check, then reuse or insert.
+
+    返回要调 Stripe 的支付（复用的、没有网关 id 的一笔，或新插入的 `PENDING`，都已脱离会话），
+    或一个已有网关 id 的候选（`may_query` 为真时：调用方提交后在事务外查询它）。并发的两个请求在
+    租户锁上排队，后到者找到先到者刚插入的一笔而复用它。
+    """
+    tenant = lock_tenant_for_customer_write(session, tenant_id)
+    _check_tenant(tenant, settings)
+    tax_policy_version_id = _tax_policy_version_id(session, now)
+    found = _reusable(session, tenant_id, amount, now=now, settings=settings, excluded=excluded)
+    if found is not None and found.gateway_payment_id is not None and may_query:
+        return found
+    if found is not None and found.gateway_payment_id is None:
+        payment = session.execute(select(Payment).where(Payment.id == found.id)).scalar_one()
+    else:
+        payment = Payment(
+            public_id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            gateway=GatewayName.STRIPE,
+            expected_amount=amount,
+            expected_currency=PAYMENT_CURRENCY,
+            # ADR-0008：入账额等于含税毛额；未注册 SST，税额为空。
+            wallet_credit_amount=amount,
+            tax_policy_version_id=tax_policy_version_id,
+            tax_amount=None,
+            status=PaymentStatus.PENDING,
+            status_reason=None,
+            expires_at=now + dt.timedelta(seconds=settings.payment_pending_timeout_seconds),
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(payment)
+        session.flush()
+        logger.info("Top-up created", extra={"payment_id": payment.public_id})
+    # 脱离会话：提交不让它过期，事务外调 Stripe 时照样读得到。
+    session.expunge(payment)
+    return payment
+
+
+def _create_on_gateway(
+    session_factory: sessionmaker[Session],
+    gateway: PaymentGateway,
+    payment: Payment,
+    *,
+    base_url: str,
+    now: dt.datetime,
+) -> TopupResult:
+    """Call `create_payment` holding no lock, then record the outcome in a new transaction."""
+    try:
+        created = gateway.create_payment(
+            payment,
+            success_url=_return_url(base_url, payment.public_id, "success"),
+            cancel_url=_return_url(base_url, payment.public_id, "cancelled"),
+        )
+    except (GatewayUnavailable, GatewayRequestRejected) as error:
+        in_use = error.code == IDEMPOTENCY_KEY_IN_USE
+        if not in_use:
+            _record_create_failed(session_factory, payment.id, now=now)
+        logger.warning(
+            "Gateway could not create the top-up payment page",
+            extra={"payment_id": payment.public_id, "error_code": error.code},
+        )
+        raise PaymentGatewayUnavailable from None
+    _record_gateway_id(session_factory, payment, created, now=now)
+    return TopupResult(payment.public_id, created.redirect_url, payment.expires_at)
+
+
+def _return_url(base_url: str, public_id: str, result: str) -> str:
+    # 跳回门户本身不改任何状态（spec §43）。
+    return f"{base_url}/portal/payments/{public_id}?result={result}"
+
+
+def _record_create_failed(
+    session_factory: sessionmaker[Session], payment_id: int, *, now: dt.datetime
+) -> None:
+    """`status_reason = GATEWAY_CREATE_FAILED`, only while there is no gateway id; stays PENDING."""
+    with session_scope(session_factory) as session:
+        session.execute(
+            update(Payment)
+            .where(Payment.id == payment_id, Payment.gateway_payment_id.is_(None))
+            .values(status_reason=GATEWAY_CREATE_FAILED, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+
+
+def _record_gateway_id(
+    session_factory: sessionmaker[Session],
+    payment: Payment,
+    created: CreatedPayment,
+    *,
+    now: dt.datetime,
+) -> None:
+    """Write the gateway id where there is none and clear the reason.
+
+    影响 0 行：并发的复用请求已写；读出比较，相同即可。不同（同一幂等键正常不会出现）：记 ERROR、
+    `PaymentGatewayUnavailable`，客户重试时复用库里那一笔。
+    """
+    with session_scope(session_factory) as session:
+        written = session.execute(
+            update(Payment)
+            .where(Payment.id == payment.id, Payment.gateway_payment_id.is_(None))
+            .values(
+                gateway_payment_id=created.gateway_payment_id,
+                status_reason=None,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        stored = (
+            created.gateway_payment_id
+            if written
+            else session.execute(
+                select(Payment.gateway_payment_id).where(Payment.id == payment.id)
+            ).scalar_one()
+        )
+    if stored != created.gateway_payment_id:
+        logger.error(
+            "Top-up already holds a different gateway payment id",
+            extra={"payment_id": payment.public_id},
+        )
+        raise PaymentGatewayUnavailable
+
+
 __all__ = [
     "AMOUNT_MISMATCH",
     "CURRENCY_MISMATCH",
     "ENTITY_PAYMENT",
     "FINAL_STATUSES",
+    "GATEWAY_CREATE_FAILED",
     "GATEWAY_EXPIRED",
     "GATEWAY_FAILED",
     "GATEWAY_INCONSISTENT",
     "GATEWAY_PAYMENT_REUSED",
+    "IDEMPOTENCY_KEY_IN_USE",
     "INTERNAL_TENANT",
     "PAYMENT_CURRENCY",
     "REFERENCE_MISMATCH",
+    "REUSE_MIN_REMAINING",
     "TENANT_CLOSED",
     "ConfirmConflict",
     "ConfirmResult",
+    "PaymentGatewayUnavailable",
     "PaymentNotFound",
+    "PaymentsMisconfigured",
+    "TaxPolicyUnavailable",
+    "TaxPolicyUnsupported",
+    "TopupAmountInvalid",
+    "TopupNotAllowed",
+    "TopupResult",
+    "TopupsNotOpen",
     "confirm_payment",
+    "create_topup",
 ]
