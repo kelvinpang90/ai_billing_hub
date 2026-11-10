@@ -10591,7 +10591,7 @@ tasks:
     title: 支付第二批第三层：争议与退款事件只告警不改账，以及支付告警判据的更新
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §2「争议与退款」「告警」：回调多认 charge.dispute.created 与 charge.refunded 两种事件并扩展白名单字段，事件处理对它们只按 payment_intent 关联支付、不查 Stripe、不改支付；wallet_negative_balance 维度的支付判据与摘要按设计更新；docs/runbook.md 与 docs/api.md 里这个维度的说明同步。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-187
     acceptance_criteria:
