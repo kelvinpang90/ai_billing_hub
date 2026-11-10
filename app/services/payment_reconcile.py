@@ -69,7 +69,6 @@ from app.payments.base import GatewayRequestRejected, GatewayUnavailable, Paymen
 from app.repositories.wallet import SYSTEM_ACTOR_ROLE, _money_text
 from app.services.auth import utc_now
 from app.services.payments import (
-    ENTITY_PAYMENT,
     NO_GATEWAY_SESSION,
     PAYMENT_CURRENCY,
     RECONCILE_TIMEOUT,
@@ -102,6 +101,10 @@ FEE_WINDOW_SECONDS: Final = 8 * 86400
 FEE_AFTER_PAID_SECONDS: Final = 600
 FEE_INTERVAL_SECONDS: Final = 3600
 FEE_CANDIDATE_LIMIT: Final = 50
+
+# 审计的 entity_type，与 app.services.payments.ENTITY_PAYMENT 同值
+# （审计分类扫描只认本模块的字面量常量）。
+_ENTITY_PAYMENT: Final = "payments"
 
 # 候选行：`id`、`public_id`、`gateway_payment_id`、`created_at`。
 _Candidate = tuple[int, str, str | None, dt.datetime]
@@ -522,7 +525,7 @@ def _record_fee(
                 actor_user_id=None,
                 actor_role=SYSTEM_ACTOR_ROLE,
                 action=AuditAction.PAYMENT_FEE_RECORDED,
-                entity_type=ENTITY_PAYMENT,
+                entity_type=_ENTITY_PAYMENT,
                 entity_id=row.public_id,
                 before_state=_json({"gateway_fee": None}),
                 after_state=_json({"gateway_fee": _money_text(fee)}),
