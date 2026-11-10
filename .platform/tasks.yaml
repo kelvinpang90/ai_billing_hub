@@ -10432,7 +10432,7 @@ tasks:
     title: 支付第二批第一层：payments 加人工结案四列的迁移、模型与两个审计动作
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §2「数据库」与 §8：新迁移 0037 给 payments 加 resolution、resolved_at、resolved_by_user_id、resolution_reason 四列与CHECK、外键、索引，模型同步；AuditAction 加 PAYMENT_REVIEW_RESOLVED 与 PAYMENT_FEE_RECORDED（前端审计动作清单同步）；docs/database-schema.md 补四列。不写服务、任务与接口：分别属于 AIH-TASK-180..183。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-178
     acceptance_criteria:
