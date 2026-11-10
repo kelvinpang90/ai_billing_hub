@@ -10381,7 +10381,7 @@ tasks:
     title: 支付第一批第七层：支付开启步骤与排查文档、部署配置说明
     purpose: >-
       按 docs/design/AIH-TASK-172-payments-gateway.md（设计闸门 #580 已批准 v3） §8 与 §6：新文档 docs/payment-flow.md（链路、开启步骤、生产端点复验、REVIEW_REQUIRED、UNMATCHED 与 REJECTED 的临时排查方法），docs/deployment.md 补支付配置项与 secret 文件，docs/TODO.md 勾掉已交付的项。纯文档，不改代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-177
     acceptance_criteria:
