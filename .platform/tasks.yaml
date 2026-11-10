@@ -10651,7 +10651,7 @@ tasks:
     title: 支付第二批第四层：复核单的两个人工出口，按实付入账与不入账结案
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §2「对 A 的适配器的扩展」「人工复核出口」：GatewayPaymentStatus 加 charge_amount_refunded_minor 与 charge_disputed 两个字段；新服务 app/services/payment_review.py 的 resolve_review（CREDIT 向 Stripe 重新查询并按设计核对，在锁支付、钱包、租户的事务里按 Stripe 实收金额写 TOPUP 并转 PAID；CLOSE 转 FAILED），两者都写 PAYMENT_REVIEW_RESOLVED 审计。不加路由：属于 AIH-TASK-183。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-181
     acceptance_criteria:
