@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-11-06
+> 最后更新：2026-11-10
 
 ---
 
@@ -941,7 +941,7 @@ N 个扫描，认领并计费到期的事件（`RECEIVED`，或退避到期的 `
 | `usage_pricing_error` / `usage_fx_rate_error` / `usage_model_unknown` 变 P2 | 有事件停在对应的错误状态。摘要有条数、最早接收时刻与至多 3 个细分码（`NO_PROVIDER_PRICE`、`MISSING_PROVIDER_COMPONENT`、`NO_PRICING_RULE`、`MISSING_RULE_COMPONENT`） |
 | `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
 | `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数。另两段（AIH-TASK-158，设计闸门 #565 v6 §2「告警」）接在后面，各报 P2：**缺失对账单** `<n> statements missing, earliest period <YYYY-MM>` = 某期到期后 6–30 小时内仍有合格租户没有对账单（没有时是 `0 statements missing`），按「月度对账单」一节处置；**晚到用量** `late usage 24h <a>/<b> rows (<x>%), <y>% of amount` = 最近 24 小时入账的预付用量里，过了原用量月 cut-off 才入账的条数或金额占比 ≥ 1%（宽限日内入账的上月用量不算），投递链路有延迟，按下面积压的处置查根因。摘要恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>`，级别取最严重的一段 |
-| `wallet_negative_balance` 变 P2 / **P1** | 一行合并负余额与钱包核对（设计闸门 #474 v13 §2「告警」），摘要恰好 `<负余额部分>; <核对部分>`，只有计数与日期。P2：有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010；摘要 `<n> wallets below zero`）；或核对从未完成（`reconciliation never completed`）、最近一次完成超过 30 小时（末尾 `stale`）；或有时钟异常的运行（`clock anomaly <行数>`）。**P1** = 核对发现余额与账本不一致（`inconsistent <M>` 或 `later inconsistent <K>` 大于 0），按下面「钱包核对发现不一致」处理 |
+| `wallet_negative_balance` 变 P2 / **P1** | 一行合并负余额与钱包核对（设计闸门 #474 v13 §2「告警」），摘要恰好 `<负余额部分>; <核对部分>`，只有计数与日期。P2：有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010；摘要 `<n> wallets below zero`）；或核对从未完成（`reconciliation never completed`）、最近一次完成超过 30 小时（末尾 `stale`）；或有时钟异常的运行（`clock anomaly <行数>`）。**P1** = 核对发现余额与账本不一致（`inconsistent <M>` 或 `later inconsistent <K>` 大于 0），按下面「钱包核对发现不一致」处理。摘要末尾出现 `; payments: …` 时是支付的判据（AIH-TASK-175，设计闸门 #580 v3 §2「告警」），按下面「支付：复核、事件冲突、事件积压与配置（`wallet_negative_balance` 告警的支付部分）」处理 |
 | `outbox_backlog` 变 P2 | 一行合并积压与死信（AIH-TASK-149），摘要恰好 `<积压部分>; <死信部分>`，只有计数与时刻；只看有处理器的 outbox 行（密码重置信、门户邀请信、`NOTIFICATION_EMAIL_REQUESTED`（通知邮件，AIH-TASK-152）与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）。两种 P2 可同时出现。**积压**：积压部分是 `<n> row(s) pending over 10 minutes, oldest created <时刻>`（OK 时是 `no handled outbox row pending over 10 minutes`）= 有行超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。**死信**：死信部分是 `<n> dead letter(s) in 7 days, latest <时刻>`（OK 时是 `no dead letter in 7 days`）= 最近 7 天有行重试用尽结算为 `FAILED`，`latest` 是其中最晚的 `processed_at`，按下面「outbox 死信的处置」处理 |
 | worker 日志 | `Recovered a usage event stuck in PROCESSING past its lease`（WARNING，带 `event_id`、`claimed_at`、`attempt_count`）；`A usage event's ledger reference was already posted with another amount`（ERROR，账本冲突）；`Billing a usage event failed; the attempt is recorded`（WARNING，带错误类型与码） |
 
@@ -1216,6 +1216,92 @@ P2 随之消失；这些行记下的不一致照样算 P1、照样要处理。
 - **不要用 `SYSTEM_CORRECTION` 或手工调账「抹平」不一致**：理由见上，它修不好这些问题码，只会把损坏埋得更深
 - **不要删 `wallet_reconciliation_runs` / `wallet_reconciliation_findings` 的行来消 P1**：它们是事故的证据（外键也是 `RESTRICT`）
 - **不要为了消 `clock anomaly` 手工改运行的 `run_date` 或 `finished_at`**：修的是时钟，不是记录
+
+---
+
+## 支付：复核、事件冲突、事件积压与配置（`wallet_negative_balance` 告警的支付部分）
+
+**首次编写：2026-11-10（AIH-TASK-175）。依据：设计闸门 #580 v3（[AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)
+§2「支付 Webhook」「事件处理任务」「告警」、§5）；告警接口见 [api.md「内部告警接口」](api.md#内部告警接口)。**
+
+Stripe 回调验签通过后只落库（`payment_gateway_events`），不入队；celery-beat 每 `BILLING_PAYMENT_EVENT_POLL_SECONDS`（缺省 15 秒）
+跑一次 `payment-events-process-due`，一次领一个到期事件、向 Stripe 查询权威状态后确认支付。Healthchecks 已满，支付的信号并进
+`wallet_negative_balance` 维度：摘要在原有两部分之后追加
+`; payments: review 24h <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or rejected 24h <d>, config <ok|missing>`，
+没有要报的时不出现这一段。支付开关（`BILLING_PAYMENTS_ENABLED`）关闭时事件任务每一轮直接返回。
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| `review 24h <a>` 大于 0（**P1**） | 最近 24 小时有支付进入 `REVIEW_REQUIRED`（金额、币种或引用不符，同一 PaymentIntent 两笔内部支付，Stripe 状态不一致，租户已关户或是内部租户）：**没有入账**，钱已在 Stripe。只报进入后的 24 小时 |
+| `event conflicts 24h <b>` 大于 0（**P1**） | 最近 24 小时同一 Stripe 事件 id 收到了内容不同的请求体（`fingerprint_conflict_at`）；原行未被覆盖。worker 日志 `Payment event redelivered with a different body; the stored row is kept`（ERROR，带事件 id 与类型） |
+| `config missing`（**P1**） | 开关打开但凭据不可用：两个 Stripe 密钥文件有一个读不到或为空、Stripe 密钥前缀不是 `sk_live_` / `sk_test_`、签名密钥前缀不是 `whsec_`、`BILLING_STRIPE_API_BASE_URL` 为空，或 `BILLING_FRONTEND_BASE_URL` 为空。回调与建单返回 503，事件任务不领取事件。API 与 worker 日志有 `payments credential unavailable: …`（只带文件路径与原因） |
+| `oldest open event <c>s` 超过 900（P2） | 有 `RECEIVED` / `RETRY` / `PROCESSING` 的事件已等了 15 分钟以上：Stripe 不可用、beat / worker 停了，或事件一直重试（`last_error_code` 见下） |
+| `unmatched or rejected 24h <d>` 大于 0（P2） | 最近 24 小时有事件结算为 `UNMATCHED`（`PAYMENT_NOT_FOUND`、`NO_CLIENT_REFERENCE`）或 `REJECTED`（Stripe 拒绝了权威查询，例如 `resource_missing`；`GATEWAY_REFERENCE_TAKEN`；`NO_GATEWAY_REFERENCE`） |
+| worker 日志 | `Payment event not processed`（WARNING，带事件 id、类型、`processing_status`、`error_code`、`attempts`）；`Payment event lease was lost; the result is discarded`（WARNING：租约过期后被另一轮重领，重领那一轮的结果为准）；`Payment needs review`（WARNING，带支付 `public_id` 与原因） |
+
+摘要只有计数与秒数，不含客户、金额与 Stripe 对象 id：具体是哪些支付与事件按下面的查询看。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| AI 服务、用量计费、其他客户的充值；已入账的支付不会被重复入账（三层唯一约束） | `REVIEW_REQUIRED` 的那几笔钱已收而钱包未加，客户可能仍处于停机；事件积压期间付款的客户迟迟看不到到账；`config missing` 时所有回调 503（Stripe 会自动重试约三天） |
+
+### 立刻做什么
+
+**1. 看事件。**只读查询最近的非正常事件（`metadata_json` 只有白名单字段，没有个人数据）：
+
+```bash
+docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+  SELECT e.id, e.gateway_event_id, e.event_type, e.processing_status, e.last_error_code, e.attempts,
+         e.received_at, e.next_attempt_at, e.processed_at, e.fingerprint_conflict_at, p.public_id AS payment
+    FROM payment_gateway_events e
+    LEFT JOIN payments p ON p.id = e.payment_id
+   WHERE e.processing_status IN (\"RECEIVED\", \"RETRY\", \"PROCESSING\", \"UNMATCHED\", \"REJECTED\")
+      OR e.fingerprint_conflict_at IS NOT NULL
+   ORDER BY e.received_at DESC
+   LIMIT 50"'
+```
+
+**2. 看复核单。**
+
+```bash
+docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+  SELECT p.public_id, t.public_id AS customer, p.status_reason, p.expected_amount, p.confirmed_amount,
+         p.confirmed_currency, p.gateway_payment_id, p.review_required_at
+    FROM payments p JOIN tenants t ON t.id = p.tenant_id
+   WHERE p.status = \"REVIEW_REQUIRED\"
+   ORDER BY p.review_required_at DESC
+   LIMIT 50"'
+```
+
+**3. 按原因处置：**
+
+| 原因 | 多半是 | 做什么 |
+| --- | --- | --- |
+| 复核单（`status_reason`） | 见设计 §2「可信确认」的判定表 | 在 Stripe Dashboard 按 `gateway_payment_id` 核对会话与付款。人工处理出口属于后续批次；此前只记录在工单里，**不要**手工改支付状态或补账本行 |
+| `event conflicts` | 有人用同一事件 id 发了不同内容（重放或伪造），或 Stripe 侧异常 | 按事件 id 在 Stripe Dashboard 看原始事件；核对签名密钥是否泄露，泄露时按配置项一节轮换 |
+| `GATEWAY_UNAVAILABLE` / `GATEWAY_STATE_UNKNOWN` / `CONFIRM_CONFLICT`（`RETRY`） | Stripe 不可用或返回了表外状态；并发确认撞了唯一约束 | 事件按退避自动重试、不放弃（最长约一小时一次）；Stripe 恢复后自然消化。积压不降时先按「celery-beat 停止调度」「Redis / Celery broker 不可用」排查 |
+| `NO_GATEWAY_REFERENCE`（`RETRY` 或 `REJECTED`） | 建单时 Stripe 超时、支付没有会话 id，而事件也不带会话 id | 支付过期前重试；过期后 `REJECTED`。按支付 `public_id` 在 Stripe Dashboard 查是否真有付款 |
+| `GATEWAY_REFERENCE_TAKEN`（`REJECTED`） | 事件的会话 id 已属于另一笔支付 | 不会入账；在 Stripe 核对会话的 `client_reference_id`，按复核处理 |
+| `PAYMENT_NOT_FOUND` / `NO_CLIENT_REFERENCE`（`UNMATCHED`） | 不是本系统建的会话（例如 Dashboard 手工建的付款链接），或测试与生产的端点配串了 | 核对 Stripe Dashboard 的回调端点只订阅那四种 `checkout.session.*` 事件、指向正确的环境 |
+| Stripe 错误码（`REJECTED`，如 `resource_missing`） | 会话在 Stripe 不存在：密钥与端点不属于同一账户或模式 | 核对密钥文件与 `BILLING_STRIPE_API_BASE_URL` |
+| `config missing` | 密钥文件没放、权限不对、前缀错，或地址没配 | 看日志里 `payments credential unavailable` 点名的文件与原因，修好后重启 api 与 worker |
+
+### 恢复
+
+- 三个 24 小时计数在事件发生 24 小时后自动归零，摘要随之不再出现支付段落；这是有意的（`REVIEW_REQUIRED` 一直报会让这个维度长期 P1，
+  遮住之后的新问题），复核单本身仍在库里，按上面的查询跟进。
+- `oldest open event` 在积压消化后回到 0；`config missing` 在配置修好、重启后消失。
+
+### 绝不能做什么
+
+- **不要手工把事件改成 `PROCESSED` 或改 `attempts` / `next_attempt_at` 来消告警**：事件是入账的触发，改掉会让真实付款不再被确认
+- **不要手工改 `payments.status`、补 `TOPUP` 账本行或直接改钱包**：入账只经 `confirm_payment` 与账本（INV-3、INV-4），
+  `REVIEW_REQUIRED` 永不自动入账
+- **不要删 `payment_gateway_events` 的行**：它是去重的依据（同一事件 id 只落一行），删掉后 Stripe 的重投会被当成新事件
 
 ---
 
