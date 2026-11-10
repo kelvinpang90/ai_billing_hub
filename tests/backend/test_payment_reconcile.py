@@ -9,8 +9,8 @@
   在 SQLite 与真 MySQL 上各跑一次；
 - **补对账与回调并发只入账一次**、**命名锁被占时直接返回**：只在真 MySQL 上。
 
-支付与租户沿用 test_payment_confirm.py 的世界，事件沿用 test_payment_events.py 的写法；
-夹具只在本文件里用，定义在这里。Stripe 一律是注入了假传输的 `StripeGateway`，不联网；时间一律注入
+支付、租户、假 Stripe 与回调事件用共用的 payment_world.py；本文件的两个夹具只在这里用，
+定义在这里。Stripe 一律是注入了假传输的 `StripeGateway`，不联网；时间一律注入
 （`now` 与单调时钟），不 sleep。
 
 MySQL 那部分需要 `BILLING_TEST_DATABASE_URL`，没设时 skip ——
@@ -30,22 +30,24 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
-from sqlalchemy import Engine, text, update
-from sqlalchemy.exc import OperationalError
-from test_payment_confirm import (
+from payment_world import (
     AUDIT_FIELDS,
     CREATED,
     EXPIRES,
     Customer,
     PaymentRef,
     World,
-    _mysql_world,
-    _sqlite_world,
-    _state,
+    audit_state,
+    build_mysql_world,
+    build_sqlite_world,
     close_by_review,
+    event_row,
+    record_payment_event,
+    wire_event_task,
 )
-from test_payment_events import event_row, payment_event, wire
+from pydantic import ValidationError
+from sqlalchemy import Engine, text, update
+from sqlalchemy.exc import OperationalError
 
 from app.core.celery_app import create_celery_app
 from app.core.config import Settings
@@ -93,14 +95,14 @@ def after_created(seconds: int) -> dt.datetime:
 @pytest.fixture(params=["sqlite", "mysql"])
 def reconcile_world(request, monkeypatch) -> Iterator[World]:
     if request.param == "mysql":
-        yield from _mysql_world(monkeypatch)
+        yield from build_mysql_world(monkeypatch)
         return
-    yield from _sqlite_world()
+    yield from build_sqlite_world()
 
 
 @pytest.fixture
 def mysql_reconcile_world(monkeypatch) -> Iterator[World]:
-    yield from _mysql_world(monkeypatch)
+    yield from build_mysql_world(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +182,7 @@ def assert_expired_by_reconciliation(
     assert (audit.actor_user_id, audit.actor_role) == (None, "SYSTEM")
     assert (audit.entity_type, audit.entity_id) == (ENTITY_PAYMENT, payment.public_id)
     assert (audit.reason, audit.created_at) == (reason, now)
-    before, after = _state(audit.before_state), _state(audit.after_state)
+    before, after = audit_state(audit.before_state), audit_state(audit.after_state)
     assert set(before) == set(after) == AUDIT_FIELDS
     assert (before["status"], before["status_reason"]) == ("PENDING", None)
     assert (after["status"], after["status_reason"]) == ("EXPIRED", reason)
@@ -373,7 +375,7 @@ def test_a_closed_review_stays_closed_on_the_event_path_and_is_never_a_candidate
     """不入账结案后 Stripe 报已付：事件处理确认后状态不变、无账本行、只更新 last_reconciled_at；
     补对账第 1 段不碰它。"""
     world = reconcile_world
-    wire(monkeypatch, world)
+    wire_event_task(monkeypatch, world)
     payment = world.payment(world.customer(), status=PaymentStatus.REVIEW_REQUIRED)
     close_by_review(world, payment)
     world.serve(payment, GatewayState.PAID)
@@ -384,7 +386,7 @@ def test_a_closed_review_stays_closed_on_the_event_path_and_is_never_a_candidate
     assert (run.queries, run.stop_reason) == (0, StopReason.DONE)
     assert world.stripe.asked == []
 
-    body = payment_event(world, payment)
+    body = record_payment_event(world, payment, received=when)
     assert events_task.process_due(now=when) == 1
 
     assert event_row(world, body).processing_status is PaymentEventProcessingStatus.PROCESSED
@@ -402,7 +404,7 @@ def test_a_lost_webhook_is_recovered_and_a_later_delivery_does_not_credit_twice(
     reconcile_world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     world = reconcile_world
-    wire(monkeypatch, world)
+    wire_event_task(monkeypatch, world)
     payment = world.payment(world.customer())
     world.serve(payment, GatewayState.PAID)
     when = after_created(600)
@@ -420,8 +422,10 @@ def test_a_lost_webhook_is_recovered_and_a_later_delivery_does_not_credit_twice(
     assert (row.status, row.paid_at, row.last_reconciled_at) == (PaymentStatus.PAID, when, when)
     assert len(world.topups(payment)) == 1
 
-    body = payment_event(world, payment)
-    assert events_task.process_due(now=when + dt.timedelta(minutes=1)) == 1
+    # 迟到的回调在补对账之后一分钟收到，同一时刻处理。
+    delivered = when + dt.timedelta(minutes=1)
+    body = record_payment_event(world, payment, received=delivered)
+    assert events_task.process_due(now=delivered) == 1
 
     assert event_row(world, body).processing_status is PaymentEventProcessingStatus.PROCESSED
     assert len(world.topups(payment)) == 1
@@ -435,7 +439,7 @@ def test_an_orphan_expires_600_seconds_after_its_expiry_and_a_late_payment_still
     reconcile_world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     world = reconcile_world
-    wire(monkeypatch, world)
+    wire_event_task(monkeypatch, world)
     payment = world.payment(world.customer(), with_session=False)
     before = world.snapshot(payment)
 
@@ -456,7 +460,7 @@ def test_an_orphan_expires_600_seconds_after_its_expiry_and_a_late_payment_still
     recovered = dataclasses.replace(payment, session_id="cs_test_orphan_recovered")
     world.serve(recovered, GatewayState.PAID)
     later = when + dt.timedelta(minutes=5)
-    payment_event(world, recovered)
+    record_payment_event(world, recovered, received=later)
     assert events_task.process_due(now=later) == 1
 
     row = world.row(payment)
@@ -772,11 +776,11 @@ def test_reconciliation_and_event_processing_at_once_credit_once(
 ) -> None:
     """INV-3：补对账与事件处理同时确认同一笔 → 只有一条 TOPUP。"""
     world = mysql_reconcile_world
-    wire(monkeypatch, world)
+    wire_event_task(monkeypatch, world)
     payment = world.payment(world.customer())
     world.serve(payment, GatewayState.PAID)
-    payment_event(world, payment)
     when = after_created(600)
+    record_payment_event(world, payment, received=when)
     start = threading.Barrier(2)
 
     def reconciling() -> object:
