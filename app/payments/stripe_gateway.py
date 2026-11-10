@@ -84,6 +84,10 @@ def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _bool_or_none(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 def _upper_or_none(value: object) -> str | None:
     return value.upper() if isinstance(value, str) else None
 
@@ -182,6 +186,8 @@ def parse_session(payload: dict[str, Any]) -> GatewayPaymentStatus:
     amount_received: int | None = None
     fee_minor: int | None = None
     fee_currency: str | None = None
+    amount_refunded: int | None = None
+    disputed: bool | None = None
     if isinstance(intent, dict):
         payment_intent_status = _str_or_none(intent.get("status"))
         amount_received = _int_or_none(intent.get("amount_received"))
@@ -190,6 +196,11 @@ def parse_session(payload: dict[str, Any]) -> GatewayPaymentStatus:
         if isinstance(balance, dict):
             fee_minor = _int_or_none(balance.get("fee"))
             fee_currency = _upper_or_none(balance.get("currency"))
+        if isinstance(charge, dict):
+            # 设计闸门 #585 v3 §2「对 A 的适配器的扩展」：只给人工按实付入账
+            # 核对用，不进映射。
+            amount_refunded = _int_or_none(charge.get("amount_refunded"))
+            disputed = _bool_or_none(charge.get("disputed"))
 
     state = map_session_state(
         payload["status"],
@@ -210,6 +221,8 @@ def parse_session(payload: dict[str, Any]) -> GatewayPaymentStatus:
         fee_minor=fee_minor,
         fee_currency=fee_currency,
         redirect_url=_str_or_none(payload.get("url")),
+        charge_amount_refunded_minor=amount_refunded,
+        charge_disputed=disputed,
     )
 
 

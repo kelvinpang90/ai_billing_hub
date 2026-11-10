@@ -69,6 +69,11 @@ class GatewayPaymentStatus:
     """What the gateway reports for one payment (设计 §2「GatewayPaymentStatus 的字段」).
 
     金额都是整数分；币种都已转成大写。`redirect_url` 只在会话还开着时有值。
+
+    `charge_amount_refunded_minor` 与 `charge_disputed` 取自已展开的
+    `payment_intent.latest_charge`（设计闸门 #585 v3 §2「对 A 的适配器的扩展」），没有
+    `latest_charge` 时为 `None`。A 的状态映射与可信确认不用它们，只有人工按实付入账
+    （app/services/payment_review.py）用。
     """
 
     state: GatewayState
@@ -82,6 +87,8 @@ class GatewayPaymentStatus:
     fee_minor: int | None
     fee_currency: str | None
     redirect_url: str | None
+    charge_amount_refunded_minor: int | None = None
+    charge_disputed: bool | None = None
 
 
 @dataclass(frozen=True)

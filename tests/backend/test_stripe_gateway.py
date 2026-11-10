@@ -342,6 +342,72 @@ def test_every_row_of_the_session_state_mapping(
     assert gateway.get_payment_status(SESSION_ID).state is expected
 
 
+CHARGE_WITH_FEE = {
+    "id": "ch_test_0001",
+    "balance_transaction": {"id": "txn_test_0001", "fee": 280, "currency": "myr"},
+}
+
+
+@pytest.mark.parametrize(
+    ("latest_charge", "refunded", "disputed"),
+    [
+        ({**CHARGE_WITH_FEE, "amount_refunded": 2500, "disputed": False}, 2500, False),
+        ({**CHARGE_WITH_FEE, "amount_refunded": 0, "disputed": True}, 0, True),
+        ({**CHARGE_WITH_FEE, "amount_refunded": 0, "disputed": False}, 0, False),
+        ("missing", None, None),
+    ],
+    ids=["refunded", "disputed", "neither", "no-latest-charge"],
+)
+def test_the_charge_refund_and_dispute_fields_come_from_the_latest_charge(
+    latest_charge: Any, refunded: int | None, disputed: bool | None
+) -> None:
+    """设计闸门 #585 v3 §2「对 A 的适配器的扩展」。
+
+    取自已展开的 `latest_charge`，没有时为 None；不多发请求、不改请求参数；
+    A 的状态映射结果不变。
+    """
+    intent = payment_intent()
+    if latest_charge == "missing":
+        del intent["latest_charge"]
+    else:
+        intent["latest_charge"] = latest_charge
+    gateway, recorder = gateway_with(ok(session(intent=intent)))
+
+    status = gateway.get_payment_status(SESSION_ID)
+
+    assert status.charge_amount_refunded_minor == refunded
+    assert status.charge_disputed is disputed
+    # A 的映射不看这两个字段：已退款或有争议的会话照样是 PAID。
+    assert status.state is GatewayState.PAID
+    assert status.amount_received_minor == 10000
+    assert status.payment_intent_id == "pi_test_0001"
+    if latest_charge == "missing":
+        assert (status.fee_minor, status.fee_currency) == (None, None)
+    else:
+        assert (status.fee_minor, status.fee_currency) == (280, "MYR")
+    [request] = recorder.requests
+    assert request.url.params.get_list("expand[]") == [STATUS_EXPAND]
+
+
+@pytest.mark.parametrize(
+    "latest_charge",
+    [
+        "ch_test_0001",
+        {"id": "ch_test_0001", "amount_refunded": "0", "disputed": "false"},
+        {"id": "ch_test_0001", "amount_refunded": True, "disputed": 0},
+    ],
+    ids=["unexpanded", "strings", "wrong-types"],
+)
+def test_unusable_charge_fields_are_none(latest_charge: Any) -> None:
+    """取不到合法值时为 None（`True` 不算整数，`0` 不算布尔）。"""
+    gateway, _ = gateway_with(ok(session(intent=payment_intent(latest_charge=latest_charge))))
+
+    status = gateway.get_payment_status(SESSION_ID)
+
+    assert (status.charge_amount_refunded_minor, status.charge_disputed) == (None, None)
+    assert status.state is GatewayState.PAID
+
+
 @pytest.mark.parametrize("missing", ["id", "status", "payment_status"])
 def test_get_payment_status_needs_id_status_and_payment_status(missing: str) -> None:
     body = session()
