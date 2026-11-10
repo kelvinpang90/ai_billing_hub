@@ -9,6 +9,7 @@
 - [客户钱包](#客户钱包)（AIH-TASK-099）：客户自己的余额与钱包流水，流水用序号游标分页
 - [客户通知](#客户通知)（AIH-TASK-127）：客户自己的门户通知、未读数与标已读（第一批客户写接口）
 - [月度对账单（客户）](#月度对账单客户)（AIH-TASK-160）：客户自己已定稿的对账单列表与详情
+- [客户建单](#客户建单)与[支付回调](#支付回调)（AIH-TASK-177）：客户发起 Stripe 充值、Stripe 的回调；只在 `payments_enabled` 打开时存在
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端钱包流水](#管理端钱包流水)（AIH-TASK-084）：序号游标分页，是下面「分页」的例外
@@ -3681,6 +3682,126 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | 422 | `VALIDATION_ERROR` | 只有列表：`page` 或 `page_size` 不合规 |
 | 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
 | 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 |
+
+---
+
+## 客户建单
+
+设计依据：设计闸门 #580 `APPROVED: design v3`，全文见
+[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md) §2「建单」、§6。实现登记为
+AIH-TASK-176（服务）与 AIH-TASK-177（接口）。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST /api/v1/customer/topups` | CUSTOMER 的访问令牌 | 201 `{payment_id, redirect_url, expires_at}` | 见下表 |
+
+- **开关**：只在 `BILLING_PAYMENTS_ENABLED` 为真时注册；关闭时这个路径不存在，404（框架的 `HTTP_ERROR`）。
+  `payment_topups_open` 为假时只有 `payment_topup_tenant_allowlist` 里的客户能建单，其他客户 403 `TOPUPS_NOT_OPEN`。
+- **鉴权**：与其他客户写接口一样，第一步是 `require_customer_writable`；租户只取自访问令牌对应的、库里的 user 行。
+  `DISABLED` / `CLOSED` 403 `ACCOUNT_READ_ONLY`。
+- **请求体**只有一个字段：
+
+  ```json
+  { "amount": "100.00" }
+  ```
+
+  `amount` 是**字符串**：1–6 位整数、可带 1–2 位小数（`^[0-9]{1,6}(\.[0-9]{1,2})?$`），不小于最低额（配置，缺省
+  `10.00`）、不大于最高额（配置，缺省不设）。缺字段、`null`、JSON 数字或布尔都是 422 `TOPUP_AMOUNT_INVALID`，不是
+  `VALIDATION_ERROR`。请求体里有任何别的字段（`tenant_id`、`customer_id` 等）是 422 `VALIDATION_ERROR`；请求体不是
+  JSON 对象同样是 422 `VALIDATION_ERROR`。
+- ⚠️ **校验顺序**，与[通用约定](#通用错误码)「请求体在鉴权之前校验」不同：先鉴权与 `require_customer_writable`
+  （401 / 403），再校验请求体的形状（多余字段 422 `VALIDATION_ERROR`），然后按设计的顺序：开放
+  （`TOPUPS_NOT_OPEN`）→ 计费方式（`TOPUP_NOT_ALLOWED`）→ 金额（`TOPUP_AMOUNT_INVALID`）→ 税务政策
+  （`TAX_POLICY_UNAVAILABLE` / `TAX_POLICY_UNSUPPORTED`）。任何一项不过都不建单。写事务里锁客户行后再查一次账户状态、
+  开放与计费方式。
+- **响应** `data` 恰好这 3 个键：
+
+  ```json
+  {
+    "payment_id": "00000000-0000-0000-0000-000000000000",
+    "redirect_url": "<Stripe 托管付款页的地址>",
+    "expires_at": "2026-11-10T09:00:00"
+  }
+  ```
+
+  | 字段 | 说明 |
+  | --- | --- |
+  | `payment_id` | 这笔充值的对外 id（uuid4） |
+  | `redirect_url` | Stripe 托管付款页的地址，前端把客户跳过去。地址里自带 Stripe 的会话 id，这是付款所必需的 |
+  | `expires_at` | 付款页的过期时刻（不带时区的 UTC，精确到秒）：建单时刻加待付超时，缺省 3600 秒 |
+
+  手续费、状态原因、税务版本与 Stripe 对象 id 都不作为字段返回（INV-7）。
+- **幂等与 60 秒复用**（ADR-0007）：同一客户、同一金额，60 秒内（`payment_reuse_window_seconds`）建过一笔还在待付、
+  剩余有效期不少于 31 分钟的单，就复用它：返回同一个 `payment_id` 与仍然开着的付款页，不新建、Stripe 那边也不多一个会话。
+  Stripe 不可用时返回 503 `PAYMENT_GATEWAY_UNAVAILABLE`，那一笔留在待付；60 秒内重试会复用它，并用同一个
+  `Idempotency-Key`（`topup-<payment_id>`）再调一次 Stripe。同一客户可以同时有多笔待付的单，付了的都入账。
+- **跳回门户不改状态**：付款页的成功与取消地址是 `{frontend_base_url}/portal/payments/{payment_id}?result=success`
+  （或 `cancelled`）。客户跳回来只是一个前端页面，**不改任何状态**；支付只由[支付回调](#支付回调)触发、后台任务向 Stripe
+  查询权威状态后才确认入账（spec §43）。伪造一个成功跳转什么也不会入账。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 403 | `ACCOUNT_READ_ONLY` | 客户的 `account_status` 是 `DISABLED` 或 `CLOSED` |
+| 422 | `VALIDATION_ERROR` | 请求体不是 JSON 对象，或有 `amount` 以外的字段。`message` 只列字段名，不回显值 |
+| 403 | `TOPUPS_NOT_OPEN` | 建单尚未开放（`payment_topups_open` 为假），且客户不在允许名单里 |
+| 403 | `TOPUP_NOT_ALLOWED` | 客户不是预付（`PREPAID`），例如内部计量客户 |
+| 422 | `TOPUP_AMOUNT_INVALID` | `amount` 缺失、不是字符串、格式不对，或不在最低额与最高额之间 |
+| 503 | `TAX_POLICY_UNAVAILABLE` | 建单时刻没有生效的税务政策版本，或生效版本读出时校验失败 |
+| 503 | `TAX_POLICY_UNSUPPORTED` | 生效的税务政策要求收税（本批只支持未注册、不收税） |
+| 503 | `PAYMENT_GATEWAY_UNAVAILABLE` | Stripe 不可用或拒绝建单，或查询可复用的单时 Stripe 不可用。可重试，60 秒内重试复用同一笔 |
+| 503 | `PAYMENTS_MISCONFIGURED` | 开关打开，但 Stripe 凭据读不到或不合规、`stripe_api_base_url` 为空，或 `frontend_base_url` 为空 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+
+表里 401 到 422 `VALIDATION_ERROR` 四行按出现的先后排列；之后几行按上面「校验顺序」判。
+
+---
+
+## 支付回调
+
+设计依据：设计闸门 #580 `APPROVED: design v3`，全文见
+[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md) §2「支付 Webhook」、§6。实现登记为
+AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `POST /api/v1/webhooks/payments/{gateway}` | 不要求登录，凭 Stripe 签名 | 200 `{received: true}` | 见下表 |
+
+- **开关**：只在 `BILLING_PAYMENTS_ENABLED` 为真时注册；关闭时这个路径不存在，404（框架的 `HTTP_ERROR`）。
+- `{gateway}` 目前只有 `stripe`（小写），其他取值 404 `NOT_FOUND`。Stripe Dashboard 的回调端点只订阅四种事件：
+  `checkout.session.completed`、`checkout.session.async_payment_succeeded`、`checkout.session.async_payment_failed`、
+  `checkout.session.expired`。
+- **鉴权**：请求头 `Stripe-Signature: t=<unix 秒>,v1=<hex>[,v1=<hex>…]`。服务端用这个端点自己的签名密钥计算
+  `HMAC-SHA256(secret, t + "." + 原始请求体)`，与任一 `v1` 相同、且 `t` 与服务端当前时刻相差不超过
+  `payment_webhook_tolerance_seconds`（缺省 300 秒）才通过。签名覆盖的是**原始字节**：服务端自己读请求体，不先解析 JSON。
+- **请求体**是 Stripe 的事件对象，上限 64 KiB（超过 413，不落库）。只保存白名单字段（事件类型、`livemode`、创建时刻、
+  会话 id、`client_reference_id`、付款状态、会话状态、金额、币种、PaymentIntent id）与原始请求体的 SHA-256 指纹，
+  **不保存原始请求体**（里面有付款人的邮箱与姓名）。
+- **响应**：验签与解析通过、事件落库提交之后立即返回 200，`data` 是 `{"received": true}`。**请求里不做确认、不入账**：
+  后台任务（每 15 秒）领取事件，向 Stripe 查询这笔支付的权威状态，六条可信确认全部满足才入账。
+- **幂等**：
+  - 同一事件 id 重复投递、请求体相同：200，不落第二行；
+  - 同一事件 id、请求体不同：200，不覆盖原来那一行，记下冲突时刻、记 ERROR 日志并告警；
+  - 同一笔支付的多个不同事件、并发处理：钱包只加一次（账本 `(PAYMENT, payment_id)` 唯一）。
+- 事件的 `livemode` 与配置的密钥模式（Stripe 密钥前缀 `sk_live_` / `sk_test_`）不一致：落库但不处理，200。
+- **日志**：验签失败与解析失败各记一条 WARNING，只带网关名与错误码，不带请求体、签名头原文与密钥。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 | 落库 |
+| --- | --- | --- | --- |
+| 404 | `NOT_FOUND` | `{gateway}` 不是 `stripe` | 否 |
+| 413 | `PAYLOAD_TOO_LARGE` | 请求体超过 64 KiB（声明的长度或实际读到的字节） | 否 |
+| 503 | `PAYMENTS_MISCONFIGURED` | 开关打开，但 Stripe 凭据读不到或不合规、或 `stripe_api_base_url` 为空。Stripe 会重试 | 否 |
+| 400 | `WEBHOOK_SIGNATURE_INVALID` | 没有 `Stripe-Signature`、格式不对、签名都不对，或 `t` 在时间窗外 | 否 |
+| 400 | `WEBHOOK_PAYLOAD_INVALID` | 签名正确，但请求体不是 JSON 对象，或缺 `id` / `type` / `livemode` | 否 |
+| 503 | `SERVICE_UNAVAILABLE` | 数据库未配置或不可用。Stripe 会重试 | 否 |
+
+错误响应都是[信封](#信封spec-107)。先验签、后解析：签名不对的请求体不会被解析。非 2xx 之后 Stripe 会按自己的策略
+重试；修好配置的签名密钥后重试成功，事件 id 不变（ADR-0015）。
 
 ---
 
