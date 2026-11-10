@@ -252,7 +252,9 @@ def test_the_four_handled_types_are_recorded_as_received(
     assert "customer_details" not in row.metadata_json and "metadata" not in row.metadata_json
 
 
-@pytest.mark.parametrize("event_type", ["payment_intent.succeeded", "charge.refunded"])
+# `charge.refunded` 自 AIH-TASK-181 起落为 RECEIVED（见 test_payment_disputes.py），
+# 这里换成仍不处理的类型。
+@pytest.mark.parametrize("event_type", ["payment_intent.succeeded", "charge.succeeded"])
 def test_other_types_are_recorded_as_ignored(events_world: World, event_type: str) -> None:
     world = events_world
     body = event_body(event_type, reference=str(uuid.uuid4()))

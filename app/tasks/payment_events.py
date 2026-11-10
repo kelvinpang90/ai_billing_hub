@@ -32,6 +32,11 @@ worker 在处理中途挂了，事件仍在库里，租约过期后被重领。
 到秒，DATETIME 不存小数秒），**不放弃**。进入终止状态（`PROCESSED`、`UNMATCHED`、`REJECTED`）时写
 `processed_at`。
 
+争议与退款（`charge.dispute.created`、`charge.refunded`，设计闸门 #585 v3 §2「争议与退款」，
+AIH-TASK-181）走另一个分支：不查 Stripe、不调 `confirm_payment`，按 `metadata_json.payment_intent`
+找 `payments.gateway_payment_intent_id`：找到 → 写 `payment_id`、`PROCESSED`；没有它或找不到 →
+`UNMATCHED`（`PAYMENT_NOT_FOUND`）。支付与钱包都不变。
+
 ⚠️ 落事件结果是**另一个事务**，用条件更新（`processing_status = PROCESSING` 且 `lease_until` 等于
 领取时写的值）：影响 0 行说明租约已过期、被别人重领，本次结果丢弃，只记 WARNING。确认已提交而落结果
 失败时，事件租约到期后被重领、再确认一次：`confirm_payment` 锁住支付行后看到 `PAID` 就什么也不做，
@@ -70,6 +75,7 @@ from app.payments import (
     get_payment_gateway,
 )
 from app.services.auth import utc_now
+from app.services.payment_events import ALERT_ONLY_EVENT_TYPES
 from app.services.payments import ConfirmConflict, PaymentNotFound, confirm_payment
 
 logger = logging.getLogger(__name__)
@@ -246,6 +252,8 @@ def decide(
     """Process one claimed event (设计 §2 四步) and say where it goes.
 
     Never touches the event row."""
+    if claim.event_type in ALERT_ONLY_EVENT_TYPES:
+        return _link_charge_event(factory, claim)
     reference = claim.metadata.get("client_reference_id")
     if not isinstance(reference, str) or not reference:
         return Outcome(PaymentEventProcessingStatus.UNMATCHED, NO_CLIENT_REFERENCE)
@@ -286,6 +294,24 @@ def decide(
     if result.state is GatewayState.UNKNOWN:
         return Outcome(PaymentEventProcessingStatus.RETRY, GATEWAY_STATE_UNKNOWN, payment_id)
     return Outcome(PaymentEventProcessingStatus.PROCESSED, None, payment_id)
+
+
+def _link_charge_event(factory: sessionmaker[Session], claim: Claim) -> Outcome:
+    """A dispute or a refund: link it to its payment by `payment_intent`, nothing else.
+
+    设计闸门 #585 v3 §2「争议与退款」：不查 Stripe、不调 `confirm_payment`，支付与钱包都不变
+    （INV-4、INV-11）；扣回由人工调账做，告警见 `wallet_negative_balance`。
+    """
+    intent = claim.metadata.get("payment_intent")
+    if not isinstance(intent, str) or not intent:
+        return Outcome(PaymentEventProcessingStatus.UNMATCHED, PAYMENT_NOT_FOUND)
+    with factory() as session:
+        payment_id = session.execute(
+            select(Payment.id).where(Payment.gateway_payment_intent_id == intent)
+        ).scalar_one_or_none()
+    if payment_id is None:
+        return Outcome(PaymentEventProcessingStatus.UNMATCHED, PAYMENT_NOT_FOUND)
+    return Outcome(PaymentEventProcessingStatus.PROCESSED, None, int(payment_id))
 
 
 def _recover_session(

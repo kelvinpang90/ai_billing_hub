@@ -675,6 +675,187 @@ def test_parse_webhook_tolerates_an_event_without_an_object() -> None:
     assert event.fields["payment_intent"] is None
 
 
+# --- 争议与退款的解析（设计闸门 #585 v3 §2「争议与退款」，AIH-TASK-181） ----------------
+
+PAYER_DATA = ("payer@example.test", "Fictional Payer", "1 Fictional Street")
+
+
+def refunded_charge(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "id": "ch_test_0001",
+        "object": "charge",
+        "amount": 10000,
+        "amount_refunded": 10000,
+        "currency": "myr",
+        "payment_intent": "pi_test_0001",
+        "status": "succeeded",
+        "refunded": True,
+        "customer": "cus_test_0001",
+        "billing_details": {
+            "email": PAYER_DATA[0],
+            "name": PAYER_DATA[1],
+            "address": {"line1": PAYER_DATA[2]},
+        },
+        "receipt_email": PAYER_DATA[0],
+        "metadata": {"payment_id": PUBLIC_ID, "note": "private"},
+    }
+    body.update(overrides)
+    return body
+
+
+def created_dispute(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "id": "dp_test_0001",
+        "object": "dispute",
+        "amount": 10000,
+        "currency": "myr",
+        "status": "needs_response",
+        "reason": "fraudulent",
+        "charge": "ch_test_0001",
+        "payment_intent": "pi_test_0001",
+        "evidence": {"customer_email_address": PAYER_DATA[0], "customer_name": PAYER_DATA[1]},
+        "metadata": {"payment_id": PUBLIC_ID, "note": "private"},
+    }
+    body.update(overrides)
+    return body
+
+
+def charge_event(event_type: str, obj: Any, **extra: Any) -> bytes:
+    raw: dict[str, Any] = {
+        "id": "evt_test_0003",
+        "type": event_type,
+        "livemode": False,
+        "created": 1_762_680_000,
+        "data": {"object": obj},
+    }
+    raw.update(extra)
+    return json.dumps(raw).encode("utf-8")
+
+
+def assert_no_personal_data(fields: dict[str, Any]) -> None:
+    stored = json.dumps(fields)
+    for value in (*PAYER_DATA, "private", "cus_test_0001"):
+        assert value not in stored
+    for key in ("billing_details", "receipt_email", "evidence", "metadata", "customer", "reason"):
+        assert key not in fields
+
+
+def test_a_refund_keeps_the_common_fields_and_the_charge_whitelist() -> None:
+    event = verifier().parse_webhook(charge_event("charge.refunded", refunded_charge()))
+
+    assert (event.gateway_event_id, event.event_type, event.livemode) == (
+        "evt_test_0003",
+        "charge.refunded",
+        False,
+    )
+    assert dict(event.fields) == {
+        "type": "charge.refunded",
+        "livemode": False,
+        "created": 1_762_680_000,
+        "object_id": "ch_test_0001",
+        "payment_intent": "pi_test_0001",
+        "amount": 10000,
+        "amount_refunded": 10000,
+        "currency": "myr",
+    }
+    assert_no_personal_data(dict(event.fields))
+
+
+def test_a_dispute_keeps_the_common_fields_and_the_dispute_whitelist() -> None:
+    event = verifier().parse_webhook(charge_event("charge.dispute.created", created_dispute()))
+
+    assert event.event_type == "charge.dispute.created"
+    assert dict(event.fields) == {
+        "type": "charge.dispute.created",
+        "livemode": False,
+        "created": 1_762_680_000,
+        "object_id": "dp_test_0001",
+        "payment_intent": "pi_test_0001",
+        "amount": 10000,
+        "currency": "myr",
+        "status": "needs_response",
+        "charge": "ch_test_0001",
+    }
+    assert_no_personal_data(dict(event.fields))
+
+
+def test_expanded_references_are_kept_as_their_ids() -> None:
+    dispute = created_dispute(
+        payment_intent={"id": "pi_test_0002", "object": "payment_intent"},
+        charge={"id": "ch_test_0002", "billing_details": {"email": PAYER_DATA[0]}},
+    )
+
+    event = verifier().parse_webhook(charge_event("charge.dispute.created", dispute))
+
+    assert event.fields["payment_intent"] == "pi_test_0002"
+    assert event.fields["charge"] == "ch_test_0002"
+    assert_no_personal_data(dict(event.fields))
+
+
+@pytest.mark.parametrize(
+    ("event_type", "obj"),
+    [
+        ("charge.refunded", {"id": "ch_test_0001", "object": "charge"}),
+        ("charge.dispute.created", {"id": "dp_test_0001", "object": "dispute"}),
+        ("charge.refunded", {"id": "ch_test_0001", "payment_intent": None, "amount": "100"}),
+        ("charge.dispute.created", {"id": "dp_test_0001", "charge": None, "status": 3}),
+    ],
+    ids=["charge-missing", "dispute-missing", "charge-null-and-wrong-type", "dispute-null"],
+)
+def test_keys_the_object_lacks_are_not_written(event_type: str, obj: dict[str, Any]) -> None:
+    event = verifier().parse_webhook(charge_event(event_type, obj))
+
+    expected_id = obj["id"]
+    assert dict(event.fields) == {
+        "type": event_type,
+        "livemode": False,
+        "created": 1_762_680_000,
+        "object_id": expected_id,
+    }
+
+
+@pytest.mark.parametrize("event_type", ["charge.refunded", "charge.dispute.created"])
+def test_a_charge_event_without_an_object_keeps_only_the_common_fields(event_type: str) -> None:
+    raw = {"id": "evt_test_0004", "type": event_type, "livemode": True}
+
+    event = verifier().parse_webhook(json.dumps(raw).encode("utf-8"))
+
+    assert dict(event.fields) == {"type": event_type, "livemode": True, "created": None}
+
+
+def test_a_refund_does_not_take_the_dispute_only_fields_and_vice_versa() -> None:
+    """Charge 不取 `status` 与 `charge`；Dispute 不取 `amount_refunded`。"""
+    refund = verifier().parse_webhook(
+        charge_event("charge.refunded", refunded_charge(charge="ch_other"))
+    )
+    dispute = verifier().parse_webhook(
+        charge_event("charge.dispute.created", created_dispute(amount_refunded=500))
+    )
+
+    assert "status" not in refund.fields and "charge" not in refund.fields
+    assert "amount_refunded" not in dispute.fields
+
+
+def test_the_checkout_whitelist_is_unchanged_by_the_charge_types() -> None:
+    """A 的四种事件的解析不变：仍是固定的十个键（缺的值为 None）。"""
+    raw = {"id": "evt_test_0005", "type": "checkout.session.completed", "livemode": False}
+
+    event = verifier().parse_webhook(json.dumps(raw).encode("utf-8"))
+
+    assert set(event.fields) == {
+        "type",
+        "livemode",
+        "created",
+        "object_id",
+        "client_reference_id",
+        "payment_status",
+        "status",
+        "amount_total",
+        "currency",
+        "payment_intent",
+    }
+
+
 @pytest.mark.parametrize(
     "raw",
     [
