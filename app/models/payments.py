@@ -17,6 +17,12 @@ Stripe 事件一行。
 
 ⚠️ 索引名、外键名与条件文本同迁移 0036 一致（空白除外），
 tests/backend/test_payments_migration.py 比对两边。
+
+AIH-TASK-179（设计闸门 #585 v3 §2「数据库」）给 `payments` 加了人工结案的四列
+（`resolution`、`resolved_at`、`resolved_by_user_id`、`resolution_reason`）、两条 CHECK、
+外键 `fk_payments_resolved_by_user_id` 与索引 `ix_payments_resolved_by_user_id`，同迁移 0037
+一致，tests/backend/test_payment_review_migration.py 比对两边。四列只由 AIH-TASK-182 的
+`resolve_review` 写；`ck_payments_resolution_fields` 让已结案的行成为终态。
 """
 
 from __future__ import annotations
@@ -41,7 +47,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-# 外键指向 tenants 与 tax_policy_versions：import 这两个模块，表才在同一个 metadata 里。
+# 外键指向 tenants、tax_policy_versions 与 users：import 这三个模块，表才在同一个 metadata 里。
+from app.models import auth as _auth_models  # noqa: F401
 from app.models import tax_policy as _tax_policy_models  # noqa: F401
 from app.models import tenancy as _tenancy_models  # noqa: F401
 from app.models.base import Base, Money
@@ -61,6 +68,8 @@ EVENT_TYPE_LENGTH: Final = 64
 EVENT_STATUS_LENGTH: Final = 16
 PAYLOAD_FINGERPRINT_LENGTH: Final = 64
 ERROR_CODE_LENGTH: Final = 64
+RESOLUTION_LENGTH: Final = 16
+RESOLUTION_REASON_LENGTH: Final = 255
 
 
 class PaymentGateway(enum.StrEnum):
@@ -79,6 +88,14 @@ class PaymentStatus(enum.StrEnum):
     EXPIRED = "EXPIRED"
     CANCELLED = "CANCELLED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
+
+
+class PaymentResolution(enum.StrEnum):
+    """人工结案的方式（设计闸门 #585 v3 §2「人工复核出口」）：`CREDITED` 按实付入账（支付转
+    `PAID`），`CLOSED` 不入账结案（支付转 `FAILED`）。"""
+
+    CREDITED = "CREDITED"
+    CLOSED = "CLOSED"
 
 
 class PaymentEventVerificationStatus(enum.StrEnum):
@@ -114,6 +131,16 @@ PAID_FIELDS_CHECK: Final = (
     " AND confirmed_currency IS NOT NULL)"
 )
 REVIEW_AT_CHECK: Final = "status <> 'REVIEW_REQUIRED' OR review_required_at IS NOT NULL"
+# ⚠️ 下面两条与迁移 0037 一致（空白除外）。
+RESOLUTION_CHECK: Final = "resolution IS NULL OR resolution IN ('CREDITED', 'CLOSED')"
+RESOLUTION_FIELDS_CHECK: Final = (
+    "(resolution IS NULL AND resolved_at IS NULL AND resolved_by_user_id IS NULL"
+    " AND resolution_reason IS NULL)"
+    " OR (resolution IS NOT NULL AND resolved_at IS NOT NULL AND resolved_by_user_id IS NOT NULL"
+    " AND resolution_reason IS NOT NULL AND review_required_at IS NOT NULL"
+    " AND ((resolution = 'CREDITED' AND status = 'PAID')"
+    " OR (resolution = 'CLOSED' AND status = 'FAILED')))"
+)
 EVENT_GATEWAY_CHECK: Final = "gateway = 'STRIPE'"
 VERIFICATION_STATUS_CHECK: Final = "verification_status = 'VERIFIED'"
 PROCESSING_STATUS_CHECK: Final = (
@@ -127,7 +154,8 @@ class Payment(Base):
 
     ⚠️ 不要绕过 `confirm_payment`（AIH-TASK-174）改 `status`：`PAID` 必须与 `TOPUP` 账本行、
     `PAYMENT_STATUS_CHANGE` 审计同一事务提交（INV-13），而且只能在锁住本行之后判定（INV-3）。
-    `PAID` 与 `REVIEW_REQUIRED` 不会被自动改变。
+    `PAID` 与 `REVIEW_REQUIRED` 不会被自动改变；已人工结案（`resolution` 不为空）的行也不会
+    （AIH-TASK-180 起，`ck_payments_resolution_fields` 兜底）。
     """
 
     __tablename__ = "payments"
@@ -176,6 +204,18 @@ class Payment(Base):
     last_reconciled_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    # 以下四列是人工结案（迁移 0037）：要么全为空，要么全不为空（`ck_payments_resolution_fields`）。
+    resolution: Mapped[PaymentResolution | None] = mapped_column(
+        Enum(PaymentResolution, native_enum=False, length=RESOLUTION_LENGTH), nullable=True
+    )
+    # 管理员提交的时刻。
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 操作的管理员。
+    resolved_by_user_id: Mapped[int | None] = mapped_column(_ForeignKeyInt, nullable=True)
+    # 管理员填的原因（去掉首尾空白后 1–255 字）；只进库与审计，不进日志。
+    resolution_reason: Mapped[str | None] = mapped_column(
+        String(RESOLUTION_REASON_LENGTH), nullable=True
+    )
 
     __table_args__ = (
         UniqueConstraint("public_id", name="uq_payments_public_id"),
@@ -208,6 +248,17 @@ class Payment(Base):
         CheckConstraint(PAYMENT_STATUS_CHECK, name="ck_payments_status"),
         CheckConstraint(PAID_FIELDS_CHECK, name="ck_payments_paid_fields"),
         CheckConstraint(REVIEW_AT_CHECK, name="ck_payments_review_at"),
+        # 迁移 0037：外键列的显式索引（与上面同一理由）、外键、两条 CHECK。
+        Index("ix_payments_resolved_by_user_id", "resolved_by_user_id"),
+        ForeignKeyConstraint(
+            ["resolved_by_user_id"],
+            ["users.id"],
+            name="fk_payments_resolved_by_user_id",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(RESOLUTION_CHECK, name="ck_payments_resolution"),
+        # 结案即终态：已结案的行改成别的状态、或只清掉部分结案字段都违反它。
+        CheckConstraint(RESOLUTION_FIELDS_CHECK, name="ck_payments_resolution_fields"),
     )
 
 
@@ -290,6 +341,8 @@ __all__ = [
     "PAYMENT_GATEWAY_CHECK",
     "PAYMENT_STATUS_CHECK",
     "PROCESSING_STATUS_CHECK",
+    "RESOLUTION_CHECK",
+    "RESOLUTION_FIELDS_CHECK",
     "REVIEW_AT_CHECK",
     "TAX_AMOUNT_CHECK",
     "VERIFICATION_STATUS_CHECK",
@@ -299,5 +352,6 @@ __all__ = [
     "PaymentEventVerificationStatus",
     "PaymentGateway",
     "PaymentGatewayEvent",
+    "PaymentResolution",
     "PaymentStatus",
 ]

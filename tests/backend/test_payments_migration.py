@@ -79,6 +79,20 @@ _EVENTS = "payment_gateway_events"
 _TABLES = (_PAYMENTS, _EVENTS)
 _MODELS = {_PAYMENTS: Payment, _EVENTS: PaymentGatewayEvent}
 
+# What 0037_payment_review (AIH-TASK-179) later adds to `payments`: four columns, an index, a
+# foreign key and two checks. The model is head's shape, so the comparisons with 0036 leave
+# them out; 0037 itself is test_payment_review_migration.py's.
+_ADDED_BY_0037 = {
+    "resolution",
+    "resolved_at",
+    "resolved_by_user_id",
+    "resolution_reason",
+    "ix_payments_resolved_by_user_id",
+    "fk_payments_resolved_by_user_id",
+    "ck_payments_resolution",
+    "ck_payments_resolution_fields",
+}
+
 # Design §2 "数据库", table `payments`.
 _DESIGN_PAYMENT_COLUMNS = {
     "id": ("BIGINT", False),
@@ -466,18 +480,27 @@ def _model_type_text(column: sqlalchemy.Column) -> str:
     return _type_text(compiled).replace("NUMERIC", "DECIMAL")
 
 
+def _model_columns(table_name: str) -> list[sqlalchemy.Column]:
+    """The model's columns as of 0036 (0037's left out), in order."""
+    return [c for c in _MODELS[table_name].__table__.columns if c.name not in _ADDED_BY_0037]
+
+
 def _model_shape(table_name: str) -> dict[str, object]:
-    """The model's columns, indexes, foreign keys and check names, shaped like the migration's."""
+    """The model's columns, indexes, foreign keys and check names as of 0036, shaped like the
+    migration's."""
     table = _MODELS[table_name].__table__
     indexes: dict[str, tuple[tuple[str, ...], bool]] = {}
     checks: set[str] = set()
     for constraint in table.constraints:
+        if str(constraint.name) in _ADDED_BY_0037:
+            continue
         if isinstance(constraint, UniqueConstraint):
             indexes[str(constraint.name)] = (tuple(c.name for c in constraint.columns), True)
         elif isinstance(constraint, CheckConstraint):
             checks.add(str(constraint.name))
     for index in table.indexes:
-        indexes[str(index.name)] = (tuple(c.name for c in index.columns), bool(index.unique))
+        if str(index.name) not in _ADDED_BY_0037:
+            indexes[str(index.name)] = (tuple(c.name for c in index.columns), bool(index.unique))
     foreign_keys = {
         str(key.name): (
             tuple(key.column_keys),
@@ -486,9 +509,12 @@ def _model_shape(table_name: str) -> dict[str, object]:
             str(key.ondelete).upper(),
         )
         for key in table.foreign_key_constraints
+        if str(key.name) not in _ADDED_BY_0037
     }
     return {
-        "columns": {c.name: (_model_type_text(c), bool(c.nullable)) for c in table.columns},
+        "columns": {
+            c.name: (_model_type_text(c), bool(c.nullable)) for c in _model_columns(table_name)
+        },
         "indexes": indexes,
         "foreign_keys": foreign_keys,
         "checks": checks,
@@ -611,7 +637,7 @@ def test_0036_shape_is_the_design_and_the_model(table: str) -> None:
     assert model.__tablename__ == table
     assert _migration_shape(migration, table) == _design_shape(table) == _model_shape(table)
     columns, *_ = migration._SHAPES[table]
-    assert list(columns) == [c.name for c in model.__table__.columns]
+    assert list(columns) == [c.name for c in _model_columns(table)]
     assert list(columns) == list(_DESIGN[table][0])
     assert list(migration._SHAPES) == list(_TABLES)
 
@@ -619,13 +645,15 @@ def test_0036_shape_is_the_design_and_the_model(table: str) -> None:
 @pytest.mark.parametrize("table", _TABLES)
 def test_0036_table_args_order_is_the_migrations(table: str) -> None:
     """`__table_args__` declares the unique constraints, indexes, foreign keys and checks under
-    the migration's names and in its order."""
+    the migration's names and in its order (0037's come after them all)."""
     migration = _load()
     _, indexes, foreign_keys, checks = migration._SHAPES[table]
     kinds = UniqueConstraint | sqlalchemy.Index | ForeignKeyConstraint | CheckConstraint
     declared = [str(arg.name) for arg in _MODELS[table].__table_args__ if isinstance(arg, kinds)]
+    ours = [name for name in declared if name not in _ADDED_BY_0037]
 
-    assert declared == [*indexes, *foreign_keys, *checks]
+    assert ours == [*indexes, *foreign_keys, *checks]
+    assert declared[: len(ours)] == ours
 
 
 @pytest.mark.parametrize("table", _TABLES)
@@ -636,7 +664,7 @@ def test_0036_checks_are_the_ones_the_model_declares(table: str) -> None:
     model = {
         str(constraint.name): _normalised(str(constraint.sqltext))
         for constraint in _MODELS[table].__table__.constraints
-        if isinstance(constraint, CheckConstraint)
+        if isinstance(constraint, CheckConstraint) and constraint.name not in _ADDED_BY_0037
     }
 
     assert {name: _normalised(c) for name, c in checks.items()} == model
@@ -972,8 +1000,9 @@ def test_0036_sqlite_tables_get_the_indexes_and_the_foreign_keys(table: str) -> 
         indexes, keys = _reflected_keys(engine, table)
 
     # The checks are judged by what they refuse (below), not by SQLite's reflection of them.
-    assert indexes == _DESIGN[table][1]
-    assert keys == _DESIGN[table][2]
+    # `create_all` builds head's shape: 0037's index and key are left out here.
+    assert {k: v for k, v in indexes.items() if k not in _ADDED_BY_0037} == _DESIGN[table][1]
+    assert {k: v for k, v in keys.items() if k not in _ADDED_BY_0037} == _DESIGN[table][2]
 
 
 def test_0036_sqlite_migration_path_builds_refuses_and_drops(monkeypatch) -> None:
@@ -1312,8 +1341,11 @@ def test_0036_downgrade_with_a_row_refuses_before_any_ddl(
     alembic_config: Config, engine: Engine, not_empty: str
 ) -> None:
     """Design §8: a row in either table — the downgrade fails naming it, no DDL (the other table
-    is not dropped either), the rows are as they were, `alembic_version` stays 0036."""
+    is not dropped either), the rows are as they were, `alembic_version` stays 0036. Taken at
+    0036: the later migrations' downgrades (0037 drops its columns) are not the part under
+    observation."""
     command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION)
     assert _version(engine) == _REVISION
     try:
         with engine.begin() as connection:

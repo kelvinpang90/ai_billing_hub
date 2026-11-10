@@ -1527,6 +1527,10 @@ PI id、手续费与 `last_reconciled_at`；AIH-TASK-175 的事件处理在 `gat
 | `paid_at` | DATETIME | 可空；本系统做出可信确认的时刻（不是 Stripe 的付款时刻） |
 | `last_reconciled_at` | DATETIME | 可空；每次向 Stripe 查询后更新 |
 | `created_at` / `updated_at` | DATETIME | 非空 |
+| `resolution` | VARCHAR(16) | 可空；人工结案的方式：`CREDITED`（按实付入账，支付转 `PAID`）/ `CLOSED`（不入账结案，支付转 `FAILED`）（`ck_payments_resolution`：`resolution IS NULL OR resolution IN ('CREDITED', 'CLOSED')`）；模型 `Enum(PaymentResolution, native_enum=False, length=16)`；迁移 0037 加 |
+| `resolved_at` | DATETIME | 可空；管理员提交结案的时刻；迁移 0037 加 |
+| `resolved_by_user_id` | BIGINT | 可空；外键 → `users(id)` `ON DELETE RESTRICT`（`fk_payments_resolved_by_user_id`）；操作的管理员；迁移 0037 加 |
+| `resolution_reason` | VARCHAR(255) | 可空；管理员填的原因（去掉首尾空白后 1–255 字），只进库与审计、不进日志；迁移 0037 加 |
 
 `PAID` 时三个字段必须非空：`ck_payments_paid_fields`：`status <> 'PAID' OR (paid_at IS NOT NULL AND confirmed_amount IS NOT
 NULL AND confirmed_currency IS NOT NULL)`。时间一律不带时区的 UTC；金额一律 DECIMAL(20,8)（INV-10），与 Stripe 比较时换算成
@@ -1534,6 +1538,24 @@ NULL AND confirmed_currency IS NOT NULL)`。时间一律不带时区的 UTC；�
 
 状态：`PENDING` 建单；`PAID` 与 `REVIEW_REQUIRED` 是「终结」，`confirm_payment` 不再改变它们（`REVIEW_REQUIRED` 永不自动入账，
 由支付第二批的人工出口处理）；`EXPIRED` / `FAILED` 不是终态，之后到账照样入账（ADR-0007）；`CANCELLED` 本批没有产生路径。
+
+**人工结案**（AIH-TASK-179，迁移 `0037_payment_review`；设计依据
+[design/AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md)（设计闸门 #585 v3）§2「数据库」、§4、§8）：
+`resolution`、`resolved_at`、`resolved_by_user_id`、`resolution_reason` 四列**只由 AIH-TASK-182 的 `resolve_review` 写**：
+管理员对 `REVIEW_REQUIRED` 的支付选「按实付入账」（`CREDITED`，支付转 `PAID`，同一事务写 `TOPUP` 账本行）或「不入账结案」
+（`CLOSED`，支付转 `FAILED`），与 `PAYMENT_REVIEW_RESOLVED` 审计同一事务（INV-13）。已有行与其他写入方写的行四列全为空。
+`ck_payments_resolution_fields` 让**结案即终态**（INV-3）：
+
+```text
+(resolution IS NULL AND resolved_at IS NULL AND resolved_by_user_id IS NULL AND resolution_reason IS NULL)
+OR (resolution IS NOT NULL AND resolved_at IS NOT NULL AND resolved_by_user_id IS NOT NULL
+    AND resolution_reason IS NOT NULL AND review_required_at IS NOT NULL
+    AND ((resolution = 'CREDITED' AND status = 'PAID') OR (resolution = 'CLOSED' AND status = 'FAILED')))
+```
+
+四列要么全空、要么全不空；结案的行必须进过复核（`review_required_at` 非空），且 `CREDITED` 只配 `PAID`、`CLOSED` 只配
+`FAILED`。任何路径把已结案的行改成别的状态（例如 `CLOSED` 的 `FAILED` 被自动确认改成 `PAID`）、或只清掉部分结案字段，都被
+数据库拒绝；`confirm_payment` 也把 `resolution` 不为空的行当作终态（AIH-TASK-180）。
 
 约束与索引：
 
@@ -1544,9 +1566,13 @@ NULL AND confirmed_currency IS NOT NULL)`。时间一律不带时区的 UTC；�
 - `ix_payments_tax_policy_version_id (tax_policy_version_id)`：**显式声明**（模型与迁移都写），供外键使用；不声明的话 MySQL
   会为外键自动建一个模型里没有的索引（与 0035 同一理由）。
 - `ix_payments_review_required_at (review_required_at)`：告警查最近 24 小时进入复核的支付。
-- 两个外键都是 `RESTRICT`：删租户或税务政策版本不许连带删掉支付记录。
-- 八条 CHECK 的条件文本是 `app/models/payments.py` 的常量，迁移里冻结一份，`tests/backend/test_payments_migration.py` 比对
-  两边；非法插入在 SQLite 与 MySQL 上都被拒绝。
+- `ix_payments_resolved_by_user_id (resolved_by_user_id)`（迁移 0037）：外键列的**显式**索引，与
+  `ix_payments_tax_policy_version_id` 同一理由。
+- 三个外键都是 `RESTRICT`：删租户、税务政策版本或做过结案的管理员账号，都不许连带删掉支付记录
+  （`fk_payments_resolved_by_user_id` 由迁移 0037 加）。
+- 0036 的八条 CHECK 与 0037 的两条（`ck_payments_resolution`、`ck_payments_resolution_fields`）的条件文本是
+  `app/models/payments.py` 的常量，迁移里各冻结一份，`tests/backend/test_payments_migration.py` 与
+  `tests/backend/test_payment_review_migration.py` 比对两边；非法插入在 SQLite 与 MySQL 上都被拒绝。
 
 ### `payment_gateway_events`
 
@@ -1593,6 +1619,13 @@ NULL AND confirmed_currency IS NOT NULL)`。时间一律不带时区的 UTC；�
   不删行，`alembic_version` 仍是 0036——支付与网关事件是财务记录，删了无法重建。都为空时先删 `payment_gateway_events`、
   再删 `payments`；不存在的表跳过；`--sql` 离线模式判断不了是否为空，直接拒绝、不输出 `DROP`。
 - **生产的回滚是关支付开关，不降级 0036**：已有支付与账本行保留。需要修复时一律前滚。
+- 0037 只给 `payments` 加四列、索引、外键与两条 CHECK，**不回填**（已有行四列全为空，满足 CHECK）。升级前用 inspector
+  读列：四列任一已存在 → 报错点名那几列、不发任何 DDL；否则 MySQL 上发**一条**原子的 `ALTER TABLE payments`（四列、索引、
+  外键、两条 CHECK 都在里面），失败时表不变、可以直接重跑。`--sql` 离线模式输出这一条 `ALTER TABLE`。只在 MySQL 上跑。
+- **有结案行时降级被拒**：`downgrade` 先查 `SELECT 1 FROM payments WHERE resolution IS NOT NULL LIMIT 1`，有行就抛错，不发
+  DDL、不删行，`alembic_version` 仍是 0037——结案是人工的财务结论，删了无法重建。没有结案行时按「两条 CHECK → 外键 → 索引 →
+  四列」的顺序删（先删外键再删它依赖的索引，MySQL 错误 1553），每一项只在仍存在时删，中途失败可以直接重跑；`--sql` 离线模式
+  判断不了有没有结案行，直接拒绝、不输出 DDL。生产的回滚同样是关支付开关，不降级 0037。
 
 ---
 
