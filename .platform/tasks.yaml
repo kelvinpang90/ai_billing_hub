@@ -11097,7 +11097,7 @@ tasks:
     title: 支付第三批第四层：管理端支付设置的读取与整体替换两个接口
     purpose: >-
       按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「管理端接口」：新路由模块 app/api/admin_payment_settings.py（GET 与 PUT /api/v1/admin/payment-settings），schema，app/main.py 注册，docs/api.md 新增「支付设置（管理端）」一节。不做页面：属于 AIH-TASK-194。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-190
     acceptance_criteria:
