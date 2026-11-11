@@ -80,6 +80,13 @@ export const ROUTES = {
    */
   statements: "/statements",
   /**
+   * 管理端支付（AIH-TASK-184，设计闸门 #585 v3 §2「管理端页面」）。顶栏有一项指向列表页；点列表的一行跳到详情页
+   * （路由由 AIH-TASK-185 挂上）。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `open_payments` 按列表页的 href
+   * 找顶栏链接，改了要同步那里。
+   */
+  payments: "/payments",
+  paymentDetail: "/payments/:paymentId",
+  /**
    * 客户门户首页（AIH-TASK-096，设计 AIH-TASK-089 §11 任务 E）。只给 CUSTOMER：`RequireRole` 把 ADMIN 转回
    * {@link ROUTES.dashboard}，管理端各页同样把 CUSTOMER 转到这里。
    */
@@ -145,6 +152,11 @@ export function pricingRuleDetailPath(ruleId: string): string {
 /** 用量事件详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
 export function usageEventDetailPath(usageEventId: string): string {
   return generatePath(ROUTES.usageEventDetail, { usageEventId });
+}
+
+/** 支付详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
+export function paymentDetailPath(paymentId: string): string {
+  return generatePath(ROUTES.paymentDetail, { paymentId });
 }
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */

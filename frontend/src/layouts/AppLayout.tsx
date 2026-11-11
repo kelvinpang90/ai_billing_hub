@@ -41,6 +41,10 @@ export function AppLayout() {
   const inUsageEvents =
     location.pathname === ROUTES.usageEvents ||
     location.pathname.startsWith(`${ROUTES.usageEvents}/`);
+  // 支付列表与支付详情都算在顶栏的「支付」这一项下面。
+  const inPayments =
+    location.pathname === ROUTES.payments ||
+    location.pathname.startsWith(`${ROUTES.payments}/`);
   let selectedKey = location.pathname;
   if (inCustomers) {
     selectedKey = ROUTES.customers;
@@ -52,6 +56,8 @@ export function AppLayout() {
     selectedKey = ROUTES.pricingRules;
   } else if (inUsageEvents) {
     selectedKey = ROUTES.usageEvents;
+  } else if (inPayments) {
+    selectedKey = ROUTES.payments;
   }
 
   return (
@@ -111,6 +117,10 @@ export function AppLayout() {
             {
               key: ROUTES.statements,
               label: <Link to={ROUTES.statements}>{t("nav.statements")}</Link>,
+            },
+            {
+              key: ROUTES.payments,
+              label: <Link to={ROUTES.payments}>{t("nav.payments")}</Link>,
             },
           ]}
         />
