@@ -567,10 +567,12 @@ describe("Portal navigation unread count", () => {
       "Statements",
       "Notifications",
       "Top up",
+      "Payments",
     ]);
-    // 充值（AIH-TASK-192）加在通知之后；通知仍排在其余各项之后。
-    expect(links.at(-2)).toHaveAttribute("href", ROUTES.portalNotifications);
-    expect(links.at(-1)).toHaveAttribute("href", ROUTES.portalTopup);
+    // 充值（AIH-TASK-192）加在通知之后、支付历史（AIH-TASK-193）加在充值之后；通知仍排在其余各项之后。
+    expect(links.at(-3)).toHaveAttribute("href", ROUTES.portalNotifications);
+    expect(links.at(-2)).toHaveAttribute("href", ROUTES.portalTopup);
+    expect(links.at(-1)).toHaveAttribute("href", ROUTES.portalPayments);
     expect(navCount()).toBeNull();
   });
 

@@ -123,10 +123,21 @@ export const ROUTES = {
    */
   portalNotifications: "/portal/notifications",
   /**
-   * 客户门户充值页（AIH-TASK-192，设计闸门 #587 v3 §2「门户页面」）。在 {@link ROUTES.portalHome} 之下；门户导航的最后一项。
+   * 客户门户充值页（AIH-TASK-192，设计闸门 #587 v3 §2「门户页面」）。在 {@link ROUTES.portalHome} 之下；门户导航里排在通知之后。
    * 验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `check_portal_topup` 按这个 href 找门户导航的链接，改了要同步那里。
    */
   portalTopup: "/portal/topup",
+  /**
+   * 客户门户支付历史页与付款结果页（AIH-TASK-193，设计闸门 #587 v3 §2「门户页面」）。在 {@link ROUTES.portalHome} 之下；
+   * 门户导航在充值之后有一项指向支付历史，页码放在查询串 `page` 里（`features/portal/PaymentsHistoryPage.tsx` 的
+   * `PAGE_PARAM`）。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `check_portal_payments` 按支付历史的 href 找门户
+   * 导航的链接，改了要同步那里。
+   *
+   * ⚠️ 付款结果页**不只是前端的事**：后端建单时拼的 Stripe `success_url` / `cancel_url` 指向
+   * `/portal/payments/{payment_id}`（只多一个查询串 `result`），改这个路径要同步那边。
+   */
+  portalPayments: "/portal/payments",
+  portalPaymentResult: "/portal/payments/:paymentId",
 } as const;
 
 /**
@@ -162,6 +173,11 @@ export function usageEventDetailPath(usageEventId: string): string {
 /** 支付详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
 export function paymentDetailPath(paymentId: string): string {
   return generatePath(ROUTES.paymentDetail, { paymentId });
+}
+
+/** 门户付款结果页的地址。id 只来自后端（支付的对外 id），理由同 {@link customerDetailPath}。 */
+export function portalPaymentResultPath(paymentId: string): string {
+  return generatePath(ROUTES.portalPaymentResult, { paymentId });
 }
 
 /** 重置链接里装令牌的查询参数名。后端那一处由同一条用例比对。 */
