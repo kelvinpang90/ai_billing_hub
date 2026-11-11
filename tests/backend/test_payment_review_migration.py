@@ -930,8 +930,15 @@ def _insert_committed(engine: Engine, rows: list[dict[str, object]]) -> None:
             connection.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1")
 
 
-def _at_0036(alembic_config: Config, engine: Engine) -> None:
+def _at_0037(alembic_config: Config, engine: Engine) -> None:
+    """Head, then down to 0037: later revisions (0038 onwards) are not under observation."""
     command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION)
+    assert _version(engine) == _REVISION
+
+
+def _at_0036(alembic_config: Config, engine: Engine) -> None:
+    _at_0037(alembic_config, engine)
     command.downgrade(alembic_config, _DOWN_REVISION)
     assert _version(engine) == _DOWN_REVISION
     assert _our_columns(engine) == set()
@@ -1025,8 +1032,7 @@ def test_0037_downgrade_with_a_resolved_row_refuses_before_any_ddl(
 ) -> None:
     """Design §8: a resolved payment — the downgrade fails, no DDL, the rows are as they were,
     `alembic_version` stays 0037."""
-    command.upgrade(alembic_config, "head")
-    assert _version(engine) == _REVISION
+    _at_0037(alembic_config, engine)
     try:
         _insert_committed(engine, [_LEGAL_ROWS[resolved], _LEGAL_ROWS["PENDING, not resolved"]])
         before = _schema_snapshot(engine)
@@ -1061,7 +1067,7 @@ def test_0037_downgrade_with_unresolved_rows_only_succeeds(
 ) -> None:
     """Rows with no resolution do not stop the downgrade: the columns go, the rows stay with
     their 0036 columns as they were."""
-    command.upgrade(alembic_config, "head")
+    _at_0037(alembic_config, engine)
     try:
         _insert_committed(
             engine,

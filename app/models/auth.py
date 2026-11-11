@@ -328,6 +328,13 @@ class AuditAction(enum.StrEnum):
     # `{"gateway_fee": null}`，`after` 为 `{"gateway_fee": "<定点字符串>"}`。不在 spec §66 的清单
     # 里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
     PAYMENT_FEE_RECORDED = "PAYMENT_FEE_RECORDED"
+    # AIH-TASK-188（设计闸门 #587 v3 §2「支付设置服务」、§6「审计」）：写入方是 AIH-TASK-189 的
+    # `update_payment_settings`（app/services/payment_settings.py），与 `payment_settings` 的条件
+    # 更新同一事务，每次修改一条（新值与旧值相同也写）；操作者为管理员；
+    # `entity_type = payment_settings`、`entity_id = 1`。`before` / `after` 为全部业务字段与
+    # `version`，金额为定点字符串。不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在
+    # PR 描述里。
+    PAYMENT_SETTINGS_UPDATE = "PAYMENT_SETTINGS_UPDATE"
 
 
 class AuditLog(Base):

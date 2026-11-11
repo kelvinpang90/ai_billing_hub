@@ -262,6 +262,10 @@ _EXPECTED_TRIGGERS_0035 = {
 # （空表）。迁移本身由 test_payments_migration.py 验。
 _PAYMENTS_TABLES = {"payments", "payment_gateway_events"}
 
+# 0038_payment_settings（AIH-TASK-188，设计闸门 #587 v3）建的单行表：从 head 降级到它之前时随之
+# 删掉。迁移本身由 test_payment_settings_migration.py 验。
+_PAYMENT_SETTINGS_TABLE = "payment_settings"
+
 
 # ---------------------------------------------------------------------------
 # 0021_ai_module（AIH-TASK-056，设计闸门 #281 v23）
@@ -1976,11 +1980,12 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
     try:
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
-        # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022、0028、0029、0035 与
-        # 0036 的表随降级到 0009 一并删掉）。
+        # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022、0028、0029、0035、
+        # 0036 与 0038 的表随降级到 0009 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
         later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE} | _PAYMENTS_TABLES
+        later |= {_PAYMENT_SETTINGS_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -2077,10 +2082,11 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
         # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020、0021、
-        # 0022、0028、0029、0035 与 0036 的表随降级到 0010 一并删掉）。
+        # 0022、0028、0029、0035、0036 与 0038 的表随降级到 0010 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
         later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE} | _PAYMENTS_TABLES
+        later |= {_PAYMENT_SETTINGS_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
