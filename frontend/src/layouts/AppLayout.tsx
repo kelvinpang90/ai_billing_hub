@@ -122,6 +122,10 @@ export function AppLayout() {
               key: ROUTES.payments,
               label: <Link to={ROUTES.payments}>{t("nav.payments")}</Link>,
             },
+            {
+              key: ROUTES.paymentSettings,
+              label: <Link to={ROUTES.paymentSettings}>{t("nav.paymentSettings")}</Link>,
+            },
           ]}
         />
         {/* 登出必须调后端：只清本地令牌的话，那张刷新 cookie 还活着，

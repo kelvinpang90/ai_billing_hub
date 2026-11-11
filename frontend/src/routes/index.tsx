@@ -4,7 +4,7 @@
  * 目前有落地页、认证相关的三页、客户门户接受邀请页（AIH-TASK-092）、管理端客户管理（AIH-TASK-015）、管理端审计日志（AIH-TASK-023）、
  * 管理端 AI 目录（AIH-TASK-035）、管理端供应商价格与汇率（AIH-TASK-036）、管理端定价规则与试算
  * （AIH-TASK-037）、管理端用量事件与重新入队（AIH-TASK-038）、管理端用量分析（AIH-TASK-074）、管理端钱包核对（AIH-TASK-135）、
- * 管理端月度对账单（AIH-TASK-161）、管理端支付列表（AIH-TASK-184）与详情（AIH-TASK-185）、
+ * 管理端月度对账单（AIH-TASK-161）、管理端支付列表（AIH-TASK-184）与详情（AIH-TASK-185）、管理端支付设置（AIH-TASK-194）、
  * 客户门户首页（AIH-TASK-096，管理端与门户按 `RequireRole` 分流）、客户门户钱包页（AIH-TASK-100）、客户门户用量页
  * （AIH-TASK-105）、客户门户会话页（AIH-TASK-123）、客户门户对账单页（AIH-TASK-162）、客户门户通知页（AIH-TASK-128）、
  * 客户门户充值页（AIH-TASK-192）、客户门户支付历史页与付款结果页（AIH-TASK-193）与兜底页。
@@ -118,6 +118,9 @@ const PaymentsPage = lazy(() =>
 const PaymentDetailPage = lazy(() =>
   import("../features/payments/PaymentDetailPage").then((m) => ({ default: m.PaymentDetailPage })),
 );
+const PaymentSettingsPage = lazy(() =>
+  import("../features/payments/PaymentSettingsPage").then((m) => ({ default: m.PaymentSettingsPage })),
+);
 const PortalHomePage = lazy(() =>
   import("../features/portal/PortalHomePage").then((m) => ({ default: m.PortalHomePage })),
 );
@@ -205,6 +208,7 @@ export function AppRoutes() {
                 <Route path={ROUTES.statements} element={<StatementsPage />} />
                 <Route path={ROUTES.payments} element={<PaymentsPage />} />
                 <Route path={ROUTES.paymentDetail} element={<PaymentDetailPage />} />
+                <Route path={ROUTES.paymentSettings} element={<PaymentSettingsPage />} />
                 <Route path="*" element={<NotFoundPage />} />
               </Route>
             </Route>
