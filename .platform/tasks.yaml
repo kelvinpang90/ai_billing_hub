@@ -11352,7 +11352,7 @@ tasks:
     title: 支付第三批第八层：支付设置与对客户开放充值的运维文档和部署配置清理
     purpose: >-
       按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §8、§2「支付设置服务」「最小恢复额」：docs/payment-flow.md 补支付设置、最小恢复额与对客户开放充值的步骤，docs/deployment.md 删掉 A 的四个配置项，docs/TODO.md 勾选 Phase 4 本批完成的项。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-194
     acceptance_criteria:
