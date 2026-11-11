@@ -700,11 +700,14 @@ def test_with_the_switch_off_credit_is_503_and_close_is_200(
     before = unchanged(world, credited)
 
     refused = resolve(client, credited, {"action": "CREDIT", "reason": REASON})
-    accepted = resolve(client, closed, {"action": "CLOSE", "reason": REASON})
 
     assert error_of(refused) == (503, "PAYMENTS_MISCONFIGURED")
+    # 在 CLOSE 写入它自己的审计之前比较，拒绝的 CREDIT 不留下任何写入。
     assert unchanged(world, credited) == before
     assert world.stripe.asked == []
+
+    accepted = resolve(client, closed, {"action": "CLOSE", "reason": REASON})
+
     assert data_of(accepted)["resolution"] == "CLOSED"
     # 读接口与开关无关。
     assert set(listed(client)) == {credited.public_id, closed.public_id}
