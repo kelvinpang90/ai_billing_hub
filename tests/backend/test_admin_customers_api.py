@@ -126,6 +126,7 @@ STATUS_WEBHOOK_ROUTE = PROJECT_ROUTE + "/status-webhook"
 # AIH-TASK-094 的六个门户账号接口（设计闸门 #368 v12 §2「API」管理端）。
 PORTAL_ACCOUNT_ROUTE = "/api/v1/admin/customers/{customer_id}/portal-account"
 PAYMENTS_ROUTE = "/api/v1/admin/payments"
+PAYMENT_SETTINGS_ROUTE = "/api/v1/admin/payment-settings"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -217,6 +218,9 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", PAYMENTS_ROUTE),
     ("GET", PAYMENTS_ROUTE + "/{payment_id}"),
     ("POST", PAYMENTS_ROUTE + "/{payment_id}/resolve"),
+    # AIH-TASK-191 的管理端支付设置（设计闸门 #587 v3 §2「管理端接口」）。
+    ("GET", PAYMENT_SETTINGS_ROUTE),
+    ("PUT", PAYMENT_SETTINGS_ROUTE),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -337,6 +341,17 @@ VALID_BODIES = {
     # 管理端支付（AIH-TASK-183）：库里没有支付，漏了鉴权的处理函数会走到 404
     # `PAYMENT_NOT_FOUND`，过不了 401 / 403；请求体合法，保证 422 不会先出现。
     ("POST", PAYMENTS_ROUTE + "/{payment_id}/resolve"): {"action": "CLOSE", "reason": "Probe"},
+    # 管理端支付设置（AIH-TASK-191）：这里的库没有设置行，漏了鉴权的处理函数会走到 503
+    # `PAYMENTS_MISCONFIGURED`，过不了 401 / 403；请求体合法，保证 422 不会先出现。
+    ("PUT", PAYMENT_SETTINGS_ROUTE): {
+        "min_amount": "10.00",
+        "max_amount": None,
+        "recovery_buffer": "10.00",
+        "preset_amounts": ["50.00", "100.00"],
+        "reuse_window_seconds": 60,
+        "pending_timeout_seconds": 3600,
+        "version": 1,
+    },
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。

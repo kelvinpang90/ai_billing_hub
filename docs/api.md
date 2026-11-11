@@ -4107,6 +4107,128 @@ PaymentIntent 编号、Stripe 报的金额与币种（`confirmed_*`）、回调�
 
 ---
 
+## 支付设置（管理端）
+
+设计依据：设计闸门 #587 `APPROVED: design v3`，全文见
+[design/AIH-TASK-188-payment-settings-portal.md](design/AIH-TASK-188-payment-settings-portal.md) §2「管理端接口」「支付设置服务」、
+§4「设置的并发」、§6；建立在设计闸门 #580（[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)）与 #585
+（[design/AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md)）之上。实现登记为 AIH-TASK-189（支付设置服务）与
+AIH-TASK-191（接口）。
+
+支付设置是**恰好一行**的全局设置：建单的最低额与最高额、最小恢复额的余额缓冲、充值页的推荐金额、60 秒同额复用窗口与待付超时。
+客户建单（[客户建单](#客户建单)）与充值选项（[支付（客户）](#支付客户)）都从这一行读。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/payment-settings` | 200，当前设置 | 401 / 403 / 500 / 503 |
+| `PUT /api/v1/admin/payment-settings` | 200，替换后的设置（与 `GET` 同样的字段） | 见下面「错误」 |
+
+- **鉴权**：只有 ADMIN 能调（ADMIN 登录必过 2FA）；匿名 401 `TOKEN_INVALID`，CUSTOMER 403 `ADMIN_REQUIRED`。
+- **开关**：两个接口**总是注册**，与 `BILLING_PAYMENTS_ENABLED` 无关。建单的开关（`BILLING_PAYMENTS_ENABLED`、
+  `BILLING_PAYMENT_TOPUPS_OPEN`、允许名单）是部署配置，不在这里改。
+- `GET` **只读**：不写审计、不写任何行。
+- ⚠️ **金额是恰好两位小数的字符串**（例如 `"50.00"`），与[支付（客户）](#支付客户)相同，不是 8 位小数的通用写法；客户端按十进制
+  解析，不要转成浮点数。时刻是不带时区的 UTC，精确到秒、不带 `Z`，见[时间](#时间)。
+
+### 设置对象
+
+`data` 恰好这 9 个键，按这个顺序：
+
+```json
+{
+  "min_amount": "10.00",
+  "max_amount": null,
+  "recovery_buffer": "10.00",
+  "preset_amounts": ["50.00", "100.00", "300.00", "500.00", "1000.00"],
+  "reuse_window_seconds": 60,
+  "pending_timeout_seconds": 3600,
+  "version": 1,
+  "updated_at": "2026-11-08T00:00:00",
+  "updated_by": null
+}
+```
+
+| 字段 | 类型 | 规则（`PUT` 时校验） |
+| --- | --- | --- |
+| `min_amount` | 字符串 | 最低充值额。金额格式（见下）且 ≥ `2.00` |
+| `max_amount` | 字符串或 `null` | 最高充值额；`null` 表示不设（单笔上限仍是 `999999.99`）。不为 `null` 时金额格式且 ≥ `min_amount` |
+| `recovery_buffer` | 字符串 | 最小恢复额的余额缓冲：挂起客户至少要充「欠款 + 缓冲」。金额格式且 ≥ `0.01`（不能为 0：否则欠整分的客户按最小恢复额充值后余额正好为 0、仍然停机） |
+| `preset_amounts` | 字符串数组 | 充值页的推荐金额。1–8 个，每个都是金额格式、互不相同、严格升序、≥ `min_amount`，且（`max_amount` 不为 `null` 时）≤ `max_amount` |
+| `reuse_window_seconds` | 整数 | 同一客户、同一金额在这么多秒内重复建单时复用同一笔待付支付；0–300（0 表示不复用） |
+| `pending_timeout_seconds` | 整数 | 新建支付的付款页有效期（`expires_at = 建单时刻 + 这么多秒`）；2400–86400 |
+| `version` | 整数 | 乐观锁版本，迁移写入的种子行为 1，每次修改 +1 |
+| `updated_at` | 时刻 | 最后一次修改的时刻；种子行为迁移时刻 |
+| `updated_by` | 字符串或 `null` | 最后一次修改的管理员邮箱；种子行（从未改过）为 `null` |
+
+**金额格式**：`^[0-9]{1,6}(\.[0-9]{1,2})?$`，即至多 6 位整数、至多 2 位小数，只认 ASCII 数字（`"10"`、`"10.5"`、`"10.50"`
+都可以，返回时一律写成两位小数）。最大 `999999.99`。
+
+### `GET /api/v1/admin/payment-settings` —— 读取
+
+没有查询参数，返回上面的设置对象。设置行不存在（迁移 0038 没跑）：503 `PAYMENTS_MISCONFIGURED`。
+
+### `PUT /api/v1/admin/payment-settings` —— 整体替换
+
+请求体恰好是设置对象的**前 7 个键**：全部 6 个业务字段加上读到的 `version`。**整体替换**：每个字段都必须给（`max_amount`
+不设时显式给 `null`），没有部分更新。
+
+```json
+{
+  "min_amount": "10.00",
+  "max_amount": null,
+  "recovery_buffer": "10.00",
+  "preset_amounts": ["50.00", "100.00", "300.00", "500.00", "1000.00"],
+  "reuse_window_seconds": 60,
+  "pending_timeout_seconds": 3600,
+  "version": 1
+}
+```
+
+**严格类型**（请求层，在鉴权**之前**校验，不合规为 422 `VALIDATION_ERROR`）：
+
+- 三个金额字段必须是 JSON 字符串（`max_amount` 也可以是 `null`）；JSON 数字（例如 `10` 或 `10.5`）不收；
+- `preset_amounts` 必须是字符串数组；
+- `reuse_window_seconds`、`pending_timeout_seconds` 与 `version` 必须是 JSON 整数；`true` / `false`、`"60"` 这样的字符串、
+  `60.0` 都不收；
+- 缺任何一个字段、或有多余的字段，都是 422 `VALIDATION_ERROR`。`message` 只列字段名，不回显值。
+
+**规则**（类型过了之后由服务校验）：按 `min_amount`、`max_amount`、`recovery_buffer`、`preset_amounts`、`reuse_window_seconds`、
+`pending_timeout_seconds` 的顺序逐条判上表的规则，第一个不合规的字段给出 422 `PAYMENT_SETTINGS_INVALID`，`message` 点名这个
+字段（例如 `Invalid payment settings: recovery_buffer.`）。规则不过时不连库、什么也不写。
+
+**乐观锁**：
+
+1. 先 `GET`，记下返回的 `version`；
+2. `PUT` 时把这个 `version` 原样带上；
+3. 服务端只在当前版本仍等于它时写入，同时 `version + 1`、`updated_at` 为提交时刻、`updated_by` 为当前管理员；
+4. 期间别人已经改过（版本对不上）：409 `PAYMENT_SETTINGS_VERSION_CONFLICT`，什么也不写，别人的修改原样保留。重新 `GET`，
+   在最新的值上再改、再提交。两个管理员同时提交同一个版本时，只有一个成功，另一个得到 409。
+
+- **新值与旧值完全相同也照常 +1 版本并写审计**：管理员的确认动作本身要留痕。
+- 每次成功的修改写一条 `PAYMENT_SETTINGS_UPDATE` 审计（`entity_type` 为 `payment_settings`，`entity_id` 为 `1`；`before` /
+  `after` 是全部业务字段与 `version`），与修改同一事务提交。日志只记管理员的用户 id 与新版本号，不记请求体。
+- 成功 200，`data` 是替换后的设置对象（与 `GET` 同样的 9 个键）。
+- **生效**：之后的建单立刻按新值校验金额、按新的复用窗口查找候选、按新的待付超时写 `expires_at`；已经建好的支付不受影响。
+  正在进行的那一次建单可能仍按旧值完成。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 | 管理员该怎么做 |
+| --- | --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期 | 重新登录 |
+| 403 | `ADMIN_REQUIRED` | 调用者不是 ADMIN | — |
+| 422 | `VALIDATION_ERROR` | 只有 `PUT`：缺字段、多余字段或字段类型不对（见上「严格类型」） | 改正请求体 |
+| 422 | `PAYMENT_SETTINGS_INVALID` | 只有 `PUT`：某个字段不合规则；`message` 点名第一个不合规的字段 | 改正这个字段 |
+| 409 | `PAYMENT_SETTINGS_VERSION_CONFLICT` | 只有 `PUT`：`version` 不是当前版本，设置已被别人修改 | 刷新后在最新的值上再改 |
+| 503 | `PAYMENTS_MISCONFIGURED` | 设置行不存在（迁移没跑）；`PUT` 时先判规则、再判这一条，不当作版本冲突 | 跑迁移 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id`；什么也没写 | 重试；仍失败时按 `request_id` 查日志 |
+| 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 | 稍后重试 |
+
+检查顺序：先请求体（422 `VALIDATION_ERROR`），再鉴权（401 / 403），再规则（422 `PAYMENT_SETTINGS_INVALID`），再设置行存在
+（503），最后版本（409）。错误响应都是[信封](#信封spec-107)。
+
+---
+
 ## AI 调用接口
 
 设计依据：设计闸门 #281 `APPROVED: design v23`，全文见 [design/AI-MODULE.md](design/AI-MODULE.md) §2「调用接口 `POST /v1/messages`」。此接口供业务后端调用模型；提示词、输入输出格式、输出解析与质量评测都由调用方负责。AI 密钥须等 AIH-TASK-068 合并后才签发。
