@@ -10826,7 +10826,7 @@ tasks:
     title: 支付第二批第七层：管理端支付详情页与复核面板
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §2「管理端页面」：新增管理端详情页 /payments/:paymentId（详情字段、事件表、REVIEW_REQUIRED 时的复核面板），挂上路由。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-184
     acceptance_criteria:
