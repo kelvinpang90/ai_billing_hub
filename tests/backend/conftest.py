@@ -11,6 +11,7 @@ import os
 
 import pytest
 from ai_mysql_world import mysql_world  # noqa: F401  (registers the shared fixture)
+from payment_world import payment_settings_seeder  # noqa: F401  (registers the shared fixture)
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 

@@ -17,7 +17,7 @@ import json
 import os
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -25,7 +25,7 @@ from typing import Any
 import httpx2
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, func, select, text, update
+from sqlalchemy import Connection, Engine, create_engine, delete, func, insert, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
@@ -33,6 +33,7 @@ from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
+from app.models.payment_settings import PAYMENT_SETTINGS_ID, PaymentSettings
 from app.models.payments import (
     Payment,
     PaymentGateway,
@@ -65,6 +66,67 @@ NOW = dt.datetime(2026, 11, 8, 8, 20, 0)
 AUDIT_FIELDS = {"status", "status_reason", "expected_amount", "confirmed_amount", "gateway_fee"}
 
 CHECKOUT_COMPLETED = "checkout.session.completed"
+
+# 迁移 0038 的种子行（设计闸门 #587 v3 §2「数据库」），`updated_at` 除外（迁移写迁移时刻）。
+# `create_all` 建的库没有这一行：建单之前用 `seed_payment_settings` 写入。
+SEED_PAYMENT_SETTINGS: dict[str, Any] = {
+    "min_amount": Decimal("10.00"),
+    "max_amount": None,
+    "recovery_buffer": Decimal("10.00"),
+    "preset_amounts": ["50.00", "100.00", "300.00", "500.00", "1000.00"],
+    "reuse_window_seconds": 60,
+    "pending_timeout_seconds": 3600,
+    "version": 1,
+    "updated_by_user_id": None,
+}
+SEED_SETTINGS_AT = dt.datetime(2026, 11, 8, 0, 0, 0)
+
+
+# --- 支付设置 -------------------------------------------------------------------------
+
+
+def _settings_row(overrides: dict[str, Any]) -> dict[str, Any]:
+    unknown = set(overrides) - set(SEED_PAYMENT_SETTINGS)
+    assert not unknown, f"not a payment settings column: {sorted(unknown)}"
+    return {
+        "id": PAYMENT_SETTINGS_ID,
+        **SEED_PAYMENT_SETTINGS,
+        **overrides,
+        "updated_at": SEED_SETTINGS_AT,
+    }
+
+
+def reset_payment_settings(connection: Connection, **overrides: Any) -> None:
+    """Replace the one `payment_settings` row with the seed values (and `overrides`)."""
+    connection.execute(delete(PaymentSettings))
+    connection.execute(insert(PaymentSettings).values(**_settings_row(overrides)))
+
+
+def seed_payment_settings(factory: sessionmaker[Session], **overrides: Any) -> None:
+    """Write the seed row of migration 0038, with `overrides` for some columns.
+
+    SQLite（`create_all`）上本来没有这一行；MySQL 上迁移已写过，这里换成同样的值，所以用例之间
+    不会互相带着改过的设置。直接写表，不经 `update_payment_settings`：不写审计、不加版本。
+    """
+    with factory() as session:
+        reset_payment_settings(session.connection(), **overrides)
+        session.commit()
+
+
+def remove_payment_settings(factory: sessionmaker[Session]) -> None:
+    """The row is gone, as before migration 0038 ran."""
+    with factory() as session:
+        session.execute(delete(PaymentSettings))
+        session.commit()
+
+
+@pytest.fixture
+def payment_settings_seeder() -> Callable[..., None]:
+    """`seed_payment_settings`: call it with the world's session factory before any top-up.
+
+    conftest.py 注册它；世界（与它的会话工厂）由各用例模块自己的夹具建。
+    """
+    return seed_payment_settings
 
 
 # --- 假 Stripe -----------------------------------------------------------------------
@@ -386,6 +448,7 @@ def _clean(engine: Engine) -> None:
 
     账本、审计与税务政策版本都拒绝 DELETE（触发器），只能在关掉外键检查后 TRUNCATE。
     支付与事件行在用例后删掉：告警用例与支付用例共用这个库（设计 §2「告警」）。
+    支付设置换回种子行：改过设置的测试管理员（外键 RESTRICT）才删得掉，下一个用例也不带着改过的值。
     """
     with engine.begin() as connection:
         connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
@@ -396,6 +459,7 @@ def _clean(engine: Engine) -> None:
         finally:
             connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
     with engine.begin() as connection:
+        reset_payment_settings(connection)
         connection.execute(delete(PaymentGatewayEvent))
         connection.execute(delete(Payment))
         connection.execute(delete(Wallet))

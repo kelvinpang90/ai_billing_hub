@@ -10,6 +10,10 @@
 - **复用排除**：候选会话已不是 `OPEN`、查询被拒、查询不可用；锁内找到并发产生的、
   已有网关 id 的一笔；两个并发请求只新建一笔（真 MySQL）。
 
+AIH-TASK-189（设计闸门 #587 v3 §7 标 189 的「设置生效」「挂起租户建单」两行）：最低额、最高额、
+复用窗口与待付超时来自支付设置（`payment_settings_seeder` 夹具先写入迁移 0038 的种子行，用例再按
+需改它）；设置行缺失时 503 且不建单；挂起租户的最小恢复额，含锁内重读余额（在复用查找之前）。
+
 以上除最后一条外都用 `payment_world` 夹具在 SQLite 与真 MySQL 上各跑一次。「并发」的
 那几组在 SQLite 上用确定的写法造出：假 Stripe 在收到建单请求时先跑另一个请求（此时
 第一个请求不持任何锁，设计 §2「调 `create_payment`（在事务外，不持任何锁）」），或在
@@ -41,8 +45,10 @@ from urllib.parse import parse_qs
 import httpx2
 import pytest
 from alembic.config import Config
+from payment_world import remove_payment_settings, reset_payment_settings, seed_payment_settings
 from sqlalchemy import Engine, create_engine, delete, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
+from test_usage_billing import _SQLITE_LEDGER_TRIGGER
 
 from alembic import command
 from app.core.config import Settings
@@ -52,9 +58,10 @@ from app.models.base import Base
 from app.models.payments import Payment, PaymentGateway, PaymentGatewayEvent, PaymentStatus
 from app.models.tax_policy import TaxJurisdiction, TaxPolicyStatus, TaxPolicyType, TaxPolicyVersion
 from app.models.tenancy import AccountStatus, BillingMode, Project, Tenant
-from app.models.wallet import Wallet
+from app.models.wallet import ReferenceType, TransactionType, Wallet
 from app.payments.stripe_gateway import StripeGateway
 from app.repositories import tenancy
+from app.repositories.wallet import create_wallet, get_wallet_for_tenant, post_transaction
 from app.services import payments as payments_service
 from app.services.account_status import AccountReadOnly
 from app.services.customers import CustomerNotFound
@@ -65,6 +72,7 @@ from app.services.payments import (
     TaxPolicyUnavailable,
     TaxPolicyUnsupported,
     TopupAmountInvalid,
+    TopupBelowRecoveryMinimum,
     TopupNotAllowed,
     TopupResult,
     TopupsNotOpen,
@@ -219,7 +227,9 @@ class World:
         *,
         account_status: AccountStatus = AccountStatus.ENABLED,
         billing_mode: BillingMode = BillingMode.PREPAID,
+        balance: str | None = None,
     ) -> Customer:
+        """A tenant; with a wallet at `balance` when given (没有钱包行就没有欠款可算)."""
         with self.factory() as session:
             tenant = tenancy.create_tenant(
                 session,
@@ -229,13 +239,48 @@ class World:
             )
             tenant.account_status = account_status
             tenant.billing_mode = billing_mode
+            if balance is not None:
+                create_wallet(session, tenant_id=tenant.id, now=CREATED)
             session.commit()
-            return Customer(int(tenant.id), tenant.public_id)
+            customer = Customer(int(tenant.id), tenant.public_id)
+        if balance is not None and Decimal(balance) != 0:
+            self.adjust(customer, balance)
+        return customer
+
+    def adjust(self, tenant: Customer, amount: str) -> None:
+        """Move the wallet by `amount` through the ledger (余额只经账本变动，INV-4)."""
+        value = Decimal(amount)
+        with self.factory() as session:
+            post_transaction(
+                session,
+                tenant_id=tenant.id,
+                transaction_type=TransactionType.ADJUSTMENT_CREDIT
+                if value > 0
+                else TransactionType.ADJUSTMENT_DEBIT,
+                amount=value,
+                reference_type=ReferenceType.ADMIN_ADJUSTMENT,
+                reference_id=str(uuid.uuid4()),
+                now=CREATED,
+                created_by=self.admin_id,
+                description="Fictional adjustment for a top-up test",
+                actor_role=UserRole.ADMIN.value,
+            )
+            session.commit()
+
+    def balance(self, tenant: Customer) -> Decimal:
+        with self.factory() as session:
+            wallet = get_wallet_for_tenant(session, tenant.id)
+            assert wallet is not None
+            return wallet.balance
 
     def set_tenant(self, tenant: Customer, **values: Any) -> None:
         with self.factory() as session:
             session.execute(update(Tenant).where(Tenant.id == tenant.id).values(**values))
             session.commit()
+
+    def payment_settings(self, **overrides: Any) -> None:
+        """The seed row with `overrides` (列名与类型照 `payment_settings` 表)."""
+        seed_payment_settings(self.factory, **overrides)
 
     # -- tax policies (the writes of test_tax_policy_db.py, through the ORM) --
 
@@ -386,21 +431,31 @@ def _key(public_id: str) -> str:
 
 
 @pytest.fixture(params=["sqlite", "mysql"])
-def payment_world(request, monkeypatch) -> Iterator[World]:
+def payment_world(request, monkeypatch, payment_settings_seeder) -> Iterator[World]:
     if request.param == "mysql":
-        yield from _mysql_world(monkeypatch)
+        yield from _seeded(_mysql_world(monkeypatch), payment_settings_seeder)
         return
-    yield from _sqlite_world()
+    yield from _seeded(_sqlite_world(), payment_settings_seeder)
 
 
 @pytest.fixture
-def mysql_payment_world(monkeypatch) -> Iterator[World]:
-    yield from _mysql_world(monkeypatch)
+def mysql_payment_world(monkeypatch, payment_settings_seeder) -> Iterator[World]:
+    yield from _seeded(_mysql_world(monkeypatch), payment_settings_seeder)
+
+
+def _seeded(worlds: Iterator[World], seed: Callable[..., None]) -> Iterator[World]:
+    """The world with the seed `payment_settings` row written before any top-up."""
+    for world in worlds:
+        seed(world.factory)
+        yield world
 
 
 def _sqlite_world() -> Iterator[World]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
+    # 挂起租户的用例经账本调余额：SQLite 上没有迁移的触发器，装上推进钱包的测试触发器。
+    with engine.begin() as connection:
+        connection.exec_driver_sql(_SQLITE_LEDGER_TRIGGER)
     try:
         yield _populate(create_session_factory(engine))
     finally:
@@ -439,6 +494,7 @@ def _clean(engine: Engine) -> None:
 
     税务政策版本拒绝 DELETE（触发器），只能在关掉外键检查后 TRUNCATE。
     支付与事件行在用例后删掉：告警用例与本文件共用这个库（设计 §2「告警」）。
+    支付设置换回种子行：下一个用例不带着改过（或删掉）的设置。
     """
     with engine.begin() as connection:
         connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
@@ -449,6 +505,7 @@ def _clean(engine: Engine) -> None:
         finally:
             connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
     with engine.begin() as connection:
+        reset_payment_settings(connection)
         connection.execute(delete(PaymentGatewayEvent))
         connection.execute(delete(Payment))
         connection.execute(delete(Wallet))
@@ -746,29 +803,60 @@ def test_valid_amounts_are_stored_with_two_decimals(
     assert created.form["line_items[0][price_data][unit_amount]"] == minor
 
 
+LOW_PRESETS = ["50.00", "100.00", "300.00", "500.00"]
+
+
 @pytest.mark.parametrize(
     ("overrides", "amount", "valid"),
     [
-        ({"payment_topup_min": Decimal("2.00")}, "2", True),
-        ({"payment_topup_min": Decimal("2.00")}, "1.99", False),
-        ({"payment_topup_max": Decimal("500.00")}, "500.00", True),
-        ({"payment_topup_max": Decimal("500.00")}, "500.01", False),
+        ({"min_amount": Decimal("2.00")}, "2", True),
+        ({"min_amount": Decimal("2.00")}, "1.99", False),
+        ({"min_amount": Decimal("20.00")}, "20.00", True),
+        ({"min_amount": Decimal("20.00")}, "19.99", False),
+        ({"max_amount": Decimal("500.00"), "preset_amounts": LOW_PRESETS}, "500.00", True),
+        ({"max_amount": Decimal("500.00"), "preset_amounts": LOW_PRESETS}, "500.01", False),
     ],
-    ids=["min-2", "below-min", "at-max", "above-max"],
+    ids=["min-2", "below-min-2", "min-20", "below-min-20", "at-max", "above-max"],
 )
-def test_the_configured_minimum_and_maximum_are_inclusive(
+def test_the_minimum_and_maximum_of_the_payment_settings_are_inclusive(
     world: World, overrides: dict[str, Any], amount: str, valid: bool
 ) -> None:
+    """设计闸门 #587 v3 §7「设置生效」：改最低额、最高额后建单按新值校验。"""
     tenant = world.customer()
-    settings = world.settings(**overrides)
+    world.payment_settings(**overrides)
 
     if valid:
-        world.topup(tenant, amount, settings=settings)
+        world.topup(tenant, amount)
         assert len(world.payments()) == 1
     else:
         with pytest.raises(TopupAmountInvalid):
-            world.topup(tenant, amount, settings=settings)
+            world.topup(tenant, amount)
         _assert_nothing_happened(world)
+
+
+def test_missing_payment_settings_refuse_the_topup(world: World) -> None:
+    """设计闸门 #587 v3 §5：设置行缺失（迁移没跑）→ 503 `PAYMENTS_MISCONFIGURED`，不建单。"""
+    tenant = world.customer()
+    remove_payment_settings(world.factory)
+
+    with pytest.raises(PaymentsMisconfigured) as raised:
+        world.topup(tenant)
+
+    assert (raised.value.code, raised.value.http_status) == ("PAYMENTS_MISCONFIGURED", 503)
+    _assert_nothing_happened(world)
+
+
+def test_the_payment_settings_are_read_once_per_topup(world: World, monkeypatch) -> None:
+    """快速校验开始时读一次、整次使用：锁租户之前改了设置，这一次建单仍按读到的那一份。"""
+    tenant = world.customer()
+    _lock_hook(monkeypatch, lambda _pass: world.payment_settings(pending_timeout_seconds=7200))
+
+    result = world.topup(tenant)
+
+    assert result.expires_at == NOW + dt.timedelta(seconds=3600)
+    # 下一次建单读到新值。
+    later = world.topup(tenant, "100.01", now=NOW + SECOND)
+    assert later.expires_at == NOW + SECOND + dt.timedelta(seconds=7200)
 
 
 def test_no_tax_policy_in_effect_is_unavailable_before_any_reuse(payment_world: World) -> None:
@@ -883,6 +971,137 @@ def test_the_locked_transaction_re_resolves_the_tax_policy(world: World, monkeyp
     _assert_nothing_happened(world)
 
 
+# --- 挂起租户与最小恢复额（设计闸门 #587 v3 §2「对 A 的建单的修改」） ---
+
+
+def _assert_below_recovery(raised: pytest.ExceptionInfo[TopupBelowRecoveryMinimum]) -> None:
+    assert (raised.value.code, raised.value.http_status) == ("TOPUP_BELOW_RECOVERY_MINIMUM", 422)
+
+
+@pytest.mark.parametrize(("amount", "accepted"), [("25.00", False), ("29.99", False), ("30", True)])
+def test_a_suspended_tenant_must_top_up_the_recovery_minimum(
+    world: World, amount: str, accepted: bool
+) -> None:
+    """§7「挂起租户建单」：余额 −20、缓冲 10 → 最小恢复额 30。25 → 422；30 成功。"""
+    tenant = world.customer(balance="-20.00")
+
+    if accepted:
+        result = world.topup(tenant, amount)
+        [row] = world.payments()
+        assert row.public_id == result.payment_public_id
+        assert row.expected_amount == Decimal("30.00")
+        return
+    with pytest.raises(TopupBelowRecoveryMinimum) as raised:
+        world.topup(tenant, amount)
+    _assert_below_recovery(raised)
+    _assert_nothing_happened(world)
+
+
+def test_a_suspended_tenant_below_the_plain_minimum_gets_amount_invalid(world: World) -> None:
+    """金额第 3 步的顺序：低于 `min_amount` 先于恢复额，仍是 `TOPUP_AMOUNT_INVALID`。"""
+    tenant = world.customer(balance="-20.00")
+
+    with pytest.raises(TopupAmountInvalid):
+        world.topup(tenant, "9.99")
+
+    _assert_nothing_happened(world)
+
+
+def test_a_zero_balance_needs_the_buffer(world: World) -> None:
+    """余额正好为 0 也是挂起：最小恢复额 = 缓冲。缓冲改成 25 时低于 25 被拒、25 通过。"""
+    tenant = world.customer(balance="0")
+    world.payment_settings(recovery_buffer=Decimal("25.00"))
+
+    with pytest.raises(TopupBelowRecoveryMinimum):
+        world.topup(tenant, "24.99")
+    world.topup(tenant, "25.00")
+
+    [row] = world.payments()
+    assert row.expected_amount == Decimal("25.00")
+
+
+@pytest.mark.parametrize(
+    ("amount", "error"),
+    [("150.00", TopupBelowRecoveryMinimum), ("250.00", TopupAmountInvalid)],
+    ids=["below-recovery", "above-maximum"],
+)
+def test_a_recovery_minimum_above_the_maximum_refuses_every_amount(
+    world: World, amount: str, error: type[Exception]
+) -> None:
+    """恢复额超过最高额：余额 −200 → 恢复额 210 > 最高额 100。低于恢复额与高于最高额依次两种码。"""
+    tenant = world.customer(balance="-200.00")
+    world.payment_settings(max_amount=Decimal("100.00"), preset_amounts=["50.00", "100.00"])
+
+    with pytest.raises(error):
+        world.topup(tenant, amount)
+
+    _assert_nothing_happened(world)
+
+
+def test_a_positive_balance_has_no_recovery_minimum(world: World) -> None:
+    tenant = world.customer(balance="0.01")
+
+    world.topup(tenant, "10.00")
+
+    assert len(world.payments()) == 1
+
+
+def test_the_locked_transaction_re_checks_the_recovery_minimum(world: World, monkeypatch) -> None:
+    """锁外读到的余额为正（没有恢复额），锁租户之前一笔扣费让余额变为 −20：锁内普通读余额
+    重判，10.00 低于恢复额 30 → 422，不建单。"""
+    tenant = world.customer(balance="5.00")
+    calls = _lock_hook(monkeypatch, lambda _pass: world.adjust(tenant, "-25.00"))
+
+    with pytest.raises(TopupBelowRecoveryMinimum) as raised:
+        world.topup(tenant, "10.00")
+
+    _assert_below_recovery(raised)
+    assert calls == [1]
+    assert world.balance(tenant) == Decimal("-20.00")
+    _assert_nothing_happened(world)
+
+
+def test_the_recovery_re_check_comes_before_the_locked_reuse_lookup(
+    world: World, monkeypatch
+) -> None:
+    """60 秒内有同金额的待付候选（还没有网关 id，锁外预查不直接复用它）；锁内余额变为不大于 0：
+    重判排在复用查找之前 → 仍 422，不复用、不新建，候选不变。"""
+    tenant = world.customer(balance="5.00")
+    candidate = world.pending(tenant, amount="10.00", created_at=NOW - 10 * SECOND)
+    _lock_hook(monkeypatch, lambda _pass: world.adjust(tenant, "-25.00"))
+
+    with pytest.raises(TopupBelowRecoveryMinimum) as raised:
+        world.topup(tenant, "10.00")
+
+    _assert_below_recovery(raised)
+    [row] = world.payments()
+    assert row.public_id == candidate.public_id
+    assert (row.status, row.status_reason, row.gateway_payment_id) == (
+        PaymentStatus.PENDING,
+        None,
+        None,
+    )
+    assert row.updated_at == candidate.updated_at
+    assert world.stripe.created == [] and world.stripe.asked == []
+
+
+def test_a_balance_turned_positive_under_the_lock_is_judged_by_the_plain_minimum(
+    world: World, monkeypatch
+) -> None:
+    """锁外余额 −20（恢复额 30），锁租户之前另一笔入账使余额变正。
+
+    锁内按普通最低额判，30 照常建单。
+    """
+    tenant = world.customer(balance="-20.00")
+    _lock_hook(monkeypatch, lambda _pass: world.adjust(tenant, "100.00"))
+
+    result = world.topup(tenant, "30.00")
+
+    [row] = world.payments()
+    assert row.public_id == result.payment_public_id
+    assert world.balance(tenant) == Decimal("80.00")
+
+
 # --- 60 秒同额复用 -------------------------------------------------------------------------
 
 
@@ -902,15 +1121,14 @@ def test_the_same_amount_within_the_reuse_window_reuses_the_payment(
 ) -> None:
     """ADR-0007：窗口内同额复用（会话还开着就直接返回它）。
 
-    `payment_reuse_window_seconds` 为 0 时不复用。
+    窗口来自支付设置的 `reuse_window_seconds`（设计闸门 #587 v3 §7「设置生效」）；为 0 时不复用。
     """
     tenant = world.customer()
-    settings = (
-        world.settings() if window is None else world.settings(payment_reuse_window_seconds=window)
-    )
-    first = world.topup(tenant, settings=settings)
+    if window is not None:
+        world.payment_settings(reuse_window_seconds=window)
+    first = world.topup(tenant)
 
-    second = world.topup(tenant, now=NOW + later, settings=settings)
+    second = world.topup(tenant, now=NOW + later)
 
     rows = world.payments()
     if reused:
@@ -924,6 +1142,21 @@ def test_the_same_amount_within_the_reuse_window_reuses_the_payment(
         assert len(rows) == 2
         assert world.stripe.asked == []
         assert len(world.stripe.created) == 2
+
+
+def test_a_reuse_window_changed_between_two_topups_applies_to_the_second(world: World) -> None:
+    """改设置不影响已建好的支付；下一次建单按新窗口查候选。"""
+    tenant = world.customer()
+    first = world.topup(tenant)
+    world.payment_settings(reuse_window_seconds=0)
+
+    second = world.topup(tenant, now=NOW + 10 * SECOND)
+
+    assert second.payment_public_id != first.payment_public_id
+    assert world.stripe.asked == []
+    old, new = world.payments()
+    assert old.expires_at == NOW + dt.timedelta(seconds=3600)
+    assert new.public_id == second.payment_public_id
 
 
 @pytest.mark.parametrize("other", ["amount", "tenant"])
@@ -949,7 +1182,7 @@ def test_another_amount_or_another_tenant_is_never_reused(world: World, other: s
 def test_a_payment_with_less_than_31_minutes_left_is_not_reused(
     world: World, remaining: dt.timedelta, reused: bool
 ) -> None:
-    """设计 §7「待付超时与 Stripe 区间」：超时配成 2400 秒。
+    """设计 §7「待付超时与 Stripe 区间」：支付设置的超时改成 2400 秒。
 
     剩余不足 31 分钟的单不复用、新建一笔；恰好 31 分钟仍复用。
     """
@@ -961,9 +1194,9 @@ def test_a_payment_with_less_than_31_minutes_left_is_not_reused(
         created_at=NOW - 10 * SECOND,
         expires_at=NOW + remaining,
     )
-    settings = world.settings(payment_pending_timeout_seconds=2400)
+    world.payment_settings(pending_timeout_seconds=2400)
 
-    result = world.topup(tenant, settings=settings)
+    result = world.topup(tenant)
 
     if reused:
         assert result.payment_public_id == old.public_id
@@ -978,10 +1211,11 @@ def test_a_payment_with_less_than_31_minutes_left_is_not_reused(
 
 @pytest.mark.parametrize("timeout", [2400, 3600, 86_400])
 def test_the_expiry_sent_to_stripe_is_within_its_window(world: World, timeout: int) -> None:
-    """Stripe 要求会话过期时刻在创建后 30 分钟到 24 小时之间。"""
+    """Stripe 要求会话过期时刻在创建后 30 分钟到 24 小时之间；超时来自支付设置。"""
     tenant = world.customer()
+    world.payment_settings(pending_timeout_seconds=timeout)
 
-    world.topup(tenant, settings=world.settings(payment_pending_timeout_seconds=timeout))
+    world.topup(tenant)
 
     [row] = world.payments()
     assert row.expires_at == NOW + dt.timedelta(seconds=timeout)

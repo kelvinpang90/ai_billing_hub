@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal, NamedTuple
@@ -35,9 +34,6 @@ _QUOTE_CURRENCY: Final = "MYR"
 LIVE_SECRET_KEY_PREFIX: Final = "sk_live_"
 TEST_SECRET_KEY_PREFIX: Final = "sk_test_"
 WEBHOOK_SECRET_PREFIX: Final = "whsec_"
-# ADR-0015：MYR 单笔最低 RM2；Stripe 单笔上限 999,999.99。
-PAYMENT_TOPUP_FLOOR: Final = Decimal("2.00")
-PAYMENT_TOPUP_CEILING: Final = Decimal("999999.99")
 
 
 def require_https_base_url(value: str) -> str:
@@ -391,15 +387,8 @@ class Settings(BaseSettings):
     stripe_api_base_url: str = ""
     # ⚠️ 不能不设：Stripe 卡住时调用方（建单请求、事件任务）会一直占着。
     stripe_api_timeout_seconds: int = Field(default=10, ge=1, le=60)
-    # 建单最低额，不得小于 2.00（ADR-0015 的 MYR 下限）。
-    payment_topup_min: Decimal = Decimal("10.00")
-    # 建单最高额；空 = 不设。设了时不得小于最低额、不得大于 999999.99（Stripe 单笔上限）。
-    payment_topup_max: Decimal | None = None
-    # 待付超时。Stripe 要求会话过期时刻在创建后 30 分钟到 24 小时之间；下限 2400 秒给
-    # 「插入到调用 Stripe」留出余量（设计 §2「建单」）。
-    payment_pending_timeout_seconds: int = Field(default=3600, ge=2400, le=86_400)
-    # ADR-0007 的同额复用窗口。
-    payment_reuse_window_seconds: int = Field(default=60, ge=0, le=300)
+    # 建单的最低额、最高额、待付超时与复用窗口不在这里：由管理端支付设置维护
+    # （设计闸门 #587 v3，app/services/payment_settings.py），不保留兼容读取。
     # 回调验签的时间窗：签名头的 `t` 与服务端当前时刻相差不超过它。
     payment_webhook_tolerance_seconds: int = Field(default=300, ge=60, le=600)
     # 事件处理任务的 Beat 间隔。
@@ -422,31 +411,6 @@ class Settings(BaseSettings):
     @classmethod
     def _payment_allowlist_is_uuids(cls, value: str) -> str:
         return ",".join(sorted(parse_tenant_allowlist(value)))
-
-    @field_validator("payment_topup_max", mode="before")
-    @classmethod
-    def _payment_topup_max_blank_is_none(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
-
-    @field_validator("payment_topup_min")
-    @classmethod
-    def _payment_topup_min_is_at_least_the_floor(cls, value: Decimal) -> Decimal:
-        if not value.is_finite() or value < PAYMENT_TOPUP_FLOOR:
-            raise ValueError("payment_topup_min must not be below 2.00")
-        return value
-
-    @model_validator(mode="after")
-    def _payment_topup_max_fits(self) -> Settings:
-        maximum = self.payment_topup_max
-        if maximum is not None and (
-            not maximum.is_finite()
-            or maximum < self.payment_topup_min
-            or maximum > PAYMENT_TOPUP_CEILING
-        ):
-            raise ValueError("payment_topup_max must be between payment_topup_min and 999999.99")
-        return self
 
     @property
     def payment_topup_tenant_ids(self) -> frozenset[str]:
