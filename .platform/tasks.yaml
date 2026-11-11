@@ -11043,7 +11043,7 @@ tasks:
     title: 支付第三批第三层：客户的充值选项、支付列表与支付详情三个接口
     purpose: >-
       按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「客户接口」与 §6：新路由模块 app/api/customer_payments.py（GET topup-options、GET payments、GET payments/{payment_id}），查询与客户侧状态映射放进 app/services/customer_payments.py，schema，app/main.py 注册，docs/api.md 新增「支付（客户）」一节。不做页面：属于 AIH-TASK-192、193。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-189
     acceptance_criteria:
