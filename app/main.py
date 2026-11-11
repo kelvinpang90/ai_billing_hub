@@ -32,6 +32,7 @@ from app.api.admin_usage_events import router as admin_usage_events_router
 from app.api.admin_wallet_reconciliation import router as admin_wallet_reconciliation_router
 from app.api.auth import router as auth_router
 from app.api.customer import router as customer_router
+from app.api.customer_payments import router as customer_payments_router
 from app.api.health import router as health_router
 from app.api.integration_usage import router as integration_usage_router
 from app.api.internal_alerts import router as internal_alerts_router
@@ -147,6 +148,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 当前用户与客户门户（设计闸门 #368 v12 §2）：`/api/v1/me` 刻意不在 `/api/v1/auth/` 下。
     app.include_router(me_router)
     app.include_router(customer_router)
+    # 客户的充值选项、支付列表与详情（AIH-TASK-190，设计闸门 #587 v3 §2「客户接口」）：
+    # 只读，与开关无关，总是注册。
+    app.include_router(customer_payments_router)
     app.include_router(admin_customers_router)
     # 管理端门户账号（AIH-TASK-094，设计闸门 #368 v12 §2）。
     app.include_router(admin_portal_accounts_router)
