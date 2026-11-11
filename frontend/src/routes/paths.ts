@@ -122,6 +122,11 @@ export const ROUTES = {
    * 导航的链接，改了要同步那里。
    */
   portalNotifications: "/portal/notifications",
+  /**
+   * 客户门户充值页（AIH-TASK-192，设计闸门 #587 v3 §2「门户页面」）。在 {@link ROUTES.portalHome} 之下；门户导航的最后一项。
+   * 验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `check_portal_topup` 按这个 href 找门户导航的链接，改了要同步那里。
+   */
+  portalTopup: "/portal/topup",
 } as const;
 
 /**

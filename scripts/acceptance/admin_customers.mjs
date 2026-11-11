@@ -30,6 +30,8 @@
  * 对账单页（设计闸门 #565 v6 §2「前端」）。
  * AIH-TASK-184 加了管理端支付列表页的一个只读步骤（open_payments），排在 login 之后，经顶栏自己进支付页（设计闸门
  * #585 v3 §2「管理端页面」）。
+ * AIH-TASK-192 加了门户充值页的一个只读步骤（check_portal_topup），排在 login_customer 之后，经门户导航自己进充值页
+ * （设计闸门 #587 v3 §2「门户页面」）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -112,6 +114,9 @@
  * - 门户对账单页（check_portal_statements）只点门户导航里的「Statements」（href 为 /portal/statements）这一个链接：
  *   不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不点「Try again」或任何别的按钮与链接，
  *   不填也不提交任何表单（页面本身没有写操作入口）。
+ * - 门户充值页（check_portal_topup）只点门户导航里的「Top up」（href 为 /portal/topup）这一个链接：不点任何推荐金额按钮、
+ *   不在金额输入框里输入、不点「Go to payment」（建单会写数据并跳去付款页）、不点「Try again」或任何别的按钮与链接，
+ *   不提交任何表单。
  * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
  *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
@@ -490,6 +495,19 @@
  *                   数据行数与 items 的条数一致；items 为空时显示空状态（portal.statements.empty）、没有数据行，同样算通过。
  *                   不点行（不打开详情）、不点「Previous」「Next」，不提交任何表单。报到前把列表一块滚动到视口里（规则同
  *                   check_portal_wallet）
+ *   check_portal_topup
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Top up」链接（en.json 的
+ *                   portal.nav.topup，href 为 paths.ts 的 portalTopup，即 /portal/topup）进充值页。页面落定：地址是
+ *                   /portal/topup，门户外壳在、管理端顶栏不在，充值一块（role=region、aria-label 为「Top up」，portal.topup.title）
+ *                   不再显示 portal.topup.loading；显示 portal.topup.loadFailed 是 page_error。后端值取页面在点击之后自己发出的
+ *                   GET /api/v1/customer/topup-options 的响应体（被动观察，不自己发请求、不拦截；取最近一次读完的那一次），不是 200、
+ *                   不是成功信封、available 不是布尔都是 assertion_failed。available 为假时：unavailable_reason 必须是五种之一
+ *                   （PAYMENTS_DISABLED / ACCOUNT_READ_ONLY / TOPUPS_NOT_OPEN / TOPUP_NOT_ALLOWED / RECOVERY_EXCEEDS_MAXIMUM，否则
+ *                   assertion_failed），一块里显示它对应的说明（portal.topup.unavailable.*）、不显示别的原因的说明，且没有文字为
+ *                   「Go to payment」（portal.topup.submit）的提交按钮。available 为真时：preset_amounts 必须是数组（否则
+ *                   assertion_failed），推荐金额一组（role=group、aria-label 为「Suggested amounts」，portal.topup.presets）里的按钮
+ *                   个数等于它的项数，且一块里不显示任何不可充值的说明。不点推荐金额、不输入金额、不点「Go to payment」，不提交任何
+ *                   表单。报到前把充值一块滚动到视口里（规则同 check_portal_wallet）
  *   check_portal_usage_summary
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
  *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
@@ -773,6 +791,24 @@ const TEXT = {
     "You have no statements yet. Each month's statement is created on the 2nd day after that month ends.",
   portalStatementsNumber: "Statement number", // portal.statements.field.number —— 对账单表格的列头
   portalStatementsPeriod: "Period", // portal.statements.field.period
+  portalNavTopup: "Top up", // portal.nav.topup —— 门户导航的充值项
+  portalTopupTitle: "Top up", // portal.topup.title —— 充值一块的 aria-label
+  portalTopupLoading: "Loading top-up options…", // portal.topup.loading
+  portalTopupLoadFailed: "Top-up options could not be loaded.", // portal.topup.loadFailed
+  portalTopupPresets: "Suggested amounts", // portal.topup.presets —— 推荐金额一组的 aria-label，按钮只数不点
+  portalTopupSubmit: "Go to payment", // portal.topup.submit —— 只查在不在，不点
+  portalTopupUnavailableTitle: "Top-ups are not available", // portal.topup.unavailable.title
+  // 不可充值的原因 → 充值页上的说明（portal.topup.unavailable.paymentsDisabled / accountReadOnly / topupsNotOpen /
+  // topupNotAllowed / recoveryExceedsMaximum）。
+  portalTopupUnavailableText: {
+    PAYMENTS_DISABLED: "Online top-ups are not available at the moment. Please try again later.",
+    ACCOUNT_READ_ONLY:
+      "Your account is read-only, so it cannot be topped up. If you have questions, please contact support.",
+    TOPUPS_NOT_OPEN: "Online top-ups are not open for your account yet.",
+    TOPUP_NOT_ALLOWED: "Your account is not on prepaid billing, so it cannot be topped up online.",
+    RECOVERY_EXCEEDS_MAXIMUM:
+      "The amount needed to restore your service is more than the largest single top-up allowed. Please contact support.",
+  },
   portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
   portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
   portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
@@ -833,6 +869,7 @@ const TEXT = {
   portalConversationsPath: "/portal/conversations",
   portalNotificationsPath: "/portal/notifications",
   portalStatementsPath: "/portal/statements",
+  portalTopupPath: "/portal/topup",
   // 管理端顶栏各项指向的路径（paths.ts 的 dashboard、customers、audit、catalogProviders、catalogMeterTypes、
   // providerPrices、fxRates、pricingRules、pricingPreview、usageEvents、usageAnalytics、walletReconciliation）。门户首页上不许有
   // 指向它们的链接。
@@ -970,6 +1007,9 @@ const CUSTOMER_NOTIFICATIONS_API = /^\/api\/v1\/customer\/notifications$/;
  * （…/statements/{statement_id}）不匹配：check_portal_statements 不点行，页面本来也不该发它。
  */
 const CUSTOMER_STATEMENTS_API = /^\/api\/v1\/customer\/statements$/;
+
+/** 客户自己的充值选项接口的路径（frontend/src/api/customerPayments.ts 的 CUSTOMER_TOPUP_OPTIONS_URL）。 */
+const CUSTOMER_TOPUP_OPTIONS_API = /^\/api\/v1\/customer\/topup-options$/;
 
 // ---------------------------------------------------------------------------
 // 时限（全部有上限；总预算留出余量，保证在 timeout_seconds = 300 之内打出结论）
@@ -1460,6 +1500,8 @@ const network = {
   customerNotifications: new Map(),
   /** 客户自己的对账单列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   customerStatements: new Map(),
+  /** 客户自己的充值选项接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
+  customerTopupOptions: new Map(),
   seq: 0,
 };
 
@@ -1486,8 +1528,26 @@ function trackedRequest(requestId) {
     network.customerUsageSummary.get(requestId) ??
     network.customerConversations.get(requestId) ??
     network.customerNotifications.get(requestId) ??
-    network.customerStatements.get(requestId)
+    network.customerStatements.get(requestId) ??
+    network.customerTopupOptions.get(requestId)
   );
+}
+
+/** 是不是客户自己的充值选项接口（同源 https、路径恰好是 /api/v1/customer/topup-options）。不保存 URL。 */
+function isCustomerTopupOptions(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === network.host &&
+      CUSTOMER_TOPUP_OPTIONS_API.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** 是不是客户自己的对账单列表接口（同源 https、路径恰好是 /api/v1/customer/statements）。不保存 URL。 */
@@ -2079,6 +2139,14 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        if (isCustomerTopupOptions(params.request?.url) && params.request?.method === "GET") {
+          network.customerTopupOptions.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         break;
       }
       case "Network.responseReceived": {
@@ -2387,7 +2455,8 @@ function latestCustomerMeResponse(afterSeq) {
  * check_portal_conversations 拿它取不带 cursor 的 GET /api/v1/customer/conversations（network.customerConversations，
  * 同样只认 newest）；check_portal_notifications 拿它取带 page_size、不带 cursor 的 GET /api/v1/customer/notifications
  * （network.customerNotifications，同样只认 newest）；check_portal_statements 拿它取 GET /api/v1/customer/statements
- * （network.customerStatements，记录里没有 newest，每一次都算）。
+ * （network.customerStatements，记录里没有 newest，每一次都算）；check_portal_topup 拿它取
+ * GET /api/v1/customer/topup-options（network.customerTopupOptions，同样每一次都算）。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -4583,6 +4652,73 @@ function clickPortalNavStatements(lib, T) {
   }
   for (const a of header.querySelectorAll("a")) {
     if (lib.norm(a.textContent) === T.portalNavStatements && a.getAttribute("href") === T.portalStatementsPath) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 门户充值页的状态：门户外壳、管理端顶栏在不在；充值一块（role=region、aria-label 为「Top up」）在加载、加载失败、
+ * 是否显示「Top-ups are not available」；一块里显示了哪些不可充值原因的说明（原因码，按 T.portalTopupUnavailableText 的顺序）；文字为「Go to payment」的按钮
+ * 有几个；推荐金额一组（role=group、aria-label 为「Suggested amounts」）在不在、里面有几个按钮。只读 DOM，不点、不填。
+ */
+function probePortalTopup(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === T.portalTopupTitle) ??
+    null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    unavailable: false,
+    reasons: [],
+    submits: 0,
+    presetGroup: false,
+    presets: 0,
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(region, T.portalTopupLoading);
+  out.failed = has(region, T.portalTopupLoadFailed);
+  out.unavailable = has(region, T.portalTopupUnavailableTitle);
+  out.reasons = Object.entries(T.portalTopupUnavailableText)
+    .filter(([, text]) => has(region, text))
+    .map(([reason]) => reason);
+  out.submits = [...region.querySelectorAll("button")].filter(
+    (el) => lib.norm(el.textContent) === T.portalTopupSubmit,
+  ).length;
+  const group =
+    [...region.querySelectorAll('[role="group"]')].find((el) => el.getAttribute("aria-label") === T.portalTopupPresets) ??
+    null;
+  if (group !== null) {
+    out.presetGroup = true;
+    out.presets = group.querySelectorAll("button").length;
+  }
+  return out;
+}
+
+/** 门户导航里文字为「Top up」、href 恰好为 /portal/topup 的链接。只点这一个。 */
+function clickPortalNavTopup(lib, T) {
+  const header = document.querySelector("header");
+  if (!header) {
+    return false;
+  }
+  for (const a of header.querySelectorAll("a")) {
+    if (lib.norm(a.textContent) === T.portalNavTopup && a.getAttribute("href") === T.portalTopupPath) {
       a.click();
       return true;
     }
@@ -7785,6 +7921,121 @@ async function stepCheckPortalStatements(ctx) {
   }
 }
 
+/** 把充值一块滚进视口：理由同 {@link PORTAL_NOTIFICATIONS_SCROLL_TEXT}，只换找的那一块的 aria-label。 */
+const PORTAL_TOPUP_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalTopupTitle };
+
+async function stepCheckPortalTopup(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开充值页：只点「Top up」这一个链接；不点推荐金额、不输入、不点「Go to payment」。
+  const afterSeq = network.seq;
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavTopup, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 充值页落定：门户外壳在，充值一块不在加载，且是某一种终态（失败、不可充值的说明、或表单）。
+  const opened = await waitFor(
+    () => evaluate(probePortalTopup, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalTopupPath &&
+        s.portalShell &&
+        s.region &&
+        !s.busy &&
+        (s.failed || s.unavailable || s.submits > 0)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalTopupPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面在点击之后自己发出的 GET /api/v1/customer/topup-options 的响应体（被动观察，不自己发请求）。
+  const seen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerTopupOptions, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!seen.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(seen.value.requestId);
+    if (seen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    const available = envelope.data?.available;
+    if (available === false) {
+      const reason = envelope.data?.unavailable_reason;
+      if (typeof reason !== "string" || !Object.hasOwn(TEXT.portalTopupUnavailableText, reason)) {
+        throw fail("assertion_failed");
+      }
+      expected = { available, reason };
+    } else if (available === true) {
+      const presets = envelope.data?.preset_amounts;
+      if (!Array.isArray(presets)) {
+        throw fail("assertion_failed");
+      }
+      expected = { available, presets: presets.length };
+    } else {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、available 不是布尔、原因认不出、preset_amounts 不是数组：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：不可充值时只有对应原因的说明、没有提交按钮；可充值时推荐金额按钮的个数等于 preset_amounts 的项数。
+  const shown = await waitFor(
+    () => evaluate(probePortalTopup, TEXT),
+    (s) =>
+      s.path === TEXT.portalTopupPath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.busy &&
+      !s.failed &&
+      (expected.available
+        ? s.reasons.length === 0 && s.presetGroup && s.presets === expected.presets
+        : s.reasons.length === 1 && s.reasons[0] === expected.reason && s.submits === 0),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把充值一块滚进视口。只滚动，不点任何按钮、不输入。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_TOPUP_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_TOPUP_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -7824,6 +8075,7 @@ const STEPS = {
   check_portal_conv_export: stepCheckPortalConvExport,
   check_portal_notifications: stepCheckPortalNotifications,
   check_portal_statements: stepCheckPortalStatements,
+  check_portal_topup: stepCheckPortalTopup,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
   check_portal_low_balance: stepCheckPortalLowBalance,
 };
@@ -7857,8 +8109,8 @@ async function main() {
     /**
      * login_customer 点「Continue」之前的网络序号（成功后才写入）：check_portal_home、check_portal_dashboard、
      * check_portal_usage_summary 与 check_portal_low_balance 只认这之后发出的请求，check_portal_wallet、check_portal_usage、
-     * check_portal_conversations、check_portal_notifications 与 check_portal_statements 要求它不为 null（各自再按点击
-     * 「Wallet」「Usage」「Conversations」「Notifications」「Statements」之前的序号截断）。
+     * check_portal_conversations、check_portal_notifications、check_portal_statements 与 check_portal_topup 要求它不为
+     * null（各自再按点击「Wallet」「Usage」「Conversations」「Notifications」「Statements」「Top up」之前的序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,

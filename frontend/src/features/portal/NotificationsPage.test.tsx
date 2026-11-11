@@ -559,8 +559,18 @@ describe("Portal navigation unread count", () => {
     await screen.findByText("You have no notifications yet.");
 
     const links = within(screen.getByRole("navigation")).getAllByRole("link");
-    expect(links.map((link) => link.textContent)).toEqual(["Home", "Wallet", "Usage", "Conversations", "Statements", "Notifications"]);
-    expect(links.at(-1)).toHaveAttribute("href", ROUTES.portalNotifications);
+    expect(links.map((link) => link.textContent)).toEqual([
+      "Home",
+      "Wallet",
+      "Usage",
+      "Conversations",
+      "Statements",
+      "Notifications",
+      "Top up",
+    ]);
+    // 充值（AIH-TASK-192）加在通知之后；通知仍排在其余各项之后。
+    expect(links.at(-2)).toHaveAttribute("href", ROUTES.portalNotifications);
+    expect(links.at(-1)).toHaveAttribute("href", ROUTES.portalTopup);
     expect(navCount()).toBeNull();
   });
 

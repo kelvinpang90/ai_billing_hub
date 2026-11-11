@@ -4,7 +4,8 @@
  * ⚠️ 这里**不出现任何管理端菜单**，也不复用 `AppLayout`。客户点得到的管理端链接只会把他转回门户
  * （`RequireRole`），而后端对 `/api/v1/admin/*` 一律 403 —— 菜单在这里只是噪音，不是权限（spec §51）。
  * 门户自己的导航是几个普通链接（AIH-TASK-100 加了首页与钱包，AIH-TASK-105 加了用量，AIH-TASK-123 加了会话，AIH-TASK-128
- * 加了通知，AIH-TASK-162 在会话与通知之间加了对账单；其余由之后的任务各自加。通知带未读数，保持最后一项），不用 antd `Menu`：
+ * 加了通知，AIH-TASK-162 在会话与通知之间加了对账单，AIH-TASK-192 在通知之后加了充值；其余由之后的任务各自加。通知带
+ * 未读数），不用 antd `Menu`：
  * 门户里不出现 role 为 menu / menuitem 的元素，与管理端顶栏一眼可分。每个链接都指向 `ROUTES.portalHome` 之下。
  *
  * 「Notifications」旁边的未读数（AIH-TASK-128，设计闸门 #471 v7 §2「前端」）：进入门户时读一次
@@ -90,6 +91,9 @@ export function PortalLayout() {
             </Link>
             <UnreadNotificationsCount />
           </span>
+          <Link to={ROUTES.portalTopup} style={{ color: "#fff" }}>
+            {t("portal.nav.topup")}
+          </Link>
         </nav>
         {/* 登出必须调后端，理由同 `AppLayout`：只清本地令牌的话，那张刷新 cookie 还活着。 */}
         <Button onClick={() => void signOut()}>{t("nav.signOut")}</Button>
