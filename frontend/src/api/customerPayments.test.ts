@@ -123,9 +123,9 @@ describe("getCustomerPayment", () => {
   it("does not reshape the id: the backend's 404 decides what is not a payment", async () => {
     const get = vi.spyOn(client, "get").mockResolvedValue(envelope({}));
 
-    await getCustomerPayment("00000000-0000-0000-0000-00000000000A");
+    await getCustomerPayment("not-a-uuid");
 
-    expect(get.mock.calls[0]?.[0]).toBe(`${PAYMENTS_URL}/00000000-0000-0000-0000-00000000000A`);
+    expect(get.mock.calls[0]?.[0]).toBe(`${PAYMENTS_URL}/not-a-uuid`);
   });
 
   it("throws the backend's error code and request_id", async () => {
