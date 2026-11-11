@@ -34,6 +34,8 @@
  * （设计闸门 #587 v3 §2「门户页面」）。
  * AIH-TASK-193 加了门户支付历史页的一个只读步骤（check_portal_payments），排在 login_customer 之后，经门户导航自己进
  * 支付历史页（设计闸门 #587 v3 §2「门户页面」）。
+ * AIH-TASK-194 加了管理端支付设置页的一个只读步骤（open_payment_settings），排在 login 之后，经顶栏自己进支付设置页
+ * （设计闸门 #587 v3 §2「管理端页面」）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -131,7 +133,8 @@
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
  *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏
  *   「Usage analytics」（href 为 /usage-analytics）、顶栏「Wallet reconciliation」（href 为 /wallet-reconciliation）、顶栏
- *   「Monthly statements」（href 为 /statements）、顶栏「Payments」（href 为 /payments）、夹具客户详情里
+ *   「Monthly statements」（href 为 /statements）、顶栏「Payments」（href 为 /payments）、顶栏「Payment settings」
+ *   （href 为 /payment-settings）、夹具客户详情里
  *   项目列表第一行的展开按钮（aria-label 为「Expand row」，只展开、不收起）。夹具客户详情资料卡上的「Disable account」
  *   「Enable account」按钮（check_account_status）**只查不点**：只确认对应的那一个在，不点它、不打开启用 / 停用弹窗、
  *   不填原因。接受邀请页（check_accept_invitation_page）不填密码、不点「Activate my account」、不提交表单，
@@ -162,6 +165,8 @@
  *   别的按钮与链接，不填也不提交任何表单。
  *   支付页（open_payments）不点列表的任何一行（不跳到详情页）、不点「Previous」「Next」（不翻页）、不动状态与客户
  *   下拉和创建日期输入框、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单（列表页本身没有写操作入口）。
+ *   支付设置页（open_payment_settings）不改任何输入框、不点「Save settings」（保存会写数据并把版本加一）、不点
+ *   「Refresh」「Try again」或任何别的按钮与链接，不提交任何表单。
  *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
@@ -316,6 +321,18 @@
  *                   列的文字等于 items[0].id（不是非空字符串是 assertion_failed）；items 为空时显示空状态（payments.list.empty
  *                   或 payments.list.emptyPage）、没有数据行，同样算通过。不点行、不点任何按钮、不翻页、不提交任何表单。报到前
  *                   把列表一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   open_payment_settings
+ *                   要排在 login 之后（本次运行没跑过 login 就 assertion_failed）。点顶栏「Payment settings」（en.json 的
+ *                   nav.paymentSettings，href 为 paths.ts 的 paymentSettings，即 /payment-settings）进支付设置页；页面落定：
+ *                   地址是 /payment-settings，设置一块（role=region、aria-label 为「Payment settings」，paymentSettings.title）
+ *                   不再显示 paymentSettings.loading，且不是加载失败（任何错误提示，page_error）、无权限
+ *                   （paymentSettings.forbidden，assertion_failed）或路由兜底页。后端值取页面在点击之后自己发出的
+ *                   GET /api/v1/admin/payment-settings 的响应体（被动观察，不自己发请求、不拦截；取成功读完的最近一次），不是
+ *                   成功信封、min_amount 不是字符串或 version 不是正整数都是 assertion_failed。一块里 label 为「Minimum top-up
+ *                   (MYR)」（paymentSettings.field.minAmount）的输入框恰好一个，它的值等于 min_amount；「Version」一项
+ *                   （paymentSettings.field.version，带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）恰好一项，文字等于
+ *                   version。不改任何输入、不点「Save settings」或任何按钮、不提交任何表单。报到前把设置一块滚动到视口里
+ *                   （放得下时整块在视口内，放不下时顶端在视口内）
  *   check_account_status
  *                   在夹具客户详情（open_fixture 打开的那一页）上，后端值取详情页自己发出的
  *                   GET /api/v1/admin/customers/{customer_id} 的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次
@@ -688,6 +705,12 @@ const TEXT = {
   paymentsEmptyPage: "There are no payments on this page.", // payments.list.emptyPage
   paymentsId: "Payment ID", // payments.field.id —— 列表表格的列头
   paymentsAmount: "Amount", // payments.field.amount
+  navPaymentSettings: "Payment settings", // nav.paymentSettings —— 顶栏的支付设置项
+  paymentSettingsTitle: "Payment settings", // paymentSettings.title —— 设置一块的 aria-label
+  paymentSettingsForbidden: "Only administrators can view payment settings.", // paymentSettings.forbidden
+  paymentSettingsLoading: "Loading payment settings…", // paymentSettings.loading
+  paymentSettingsMinAmount: "Minimum top-up (MYR)", // paymentSettings.field.minAmount —— 最低充值额输入框的 label，只读不改
+  paymentSettingsVersion: "Version", // paymentSettings.field.version —— 设置一块里 Descriptions 的一项
   customersForbidden: "Only administrators can manage customers.", // customers.forbidden —— 客户区块（含签名密钥面板）的无权限
   projectName: "Project name", // customers.projects.field.name —— 项目表格的列头
   projectDescription: "Description", // customers.projects.field.description
@@ -887,6 +910,7 @@ const TEXT = {
   walletReconciliationPath: "/wallet-reconciliation",
   statementsPath: "/statements",
   paymentsPath: "/payments",
+  paymentSettingsPath: "/payment-settings",
   portalHomePath: "/portal",
   portalWalletPath: "/portal/wallet",
   portalUsagePath: "/portal/usage",
@@ -984,6 +1008,9 @@ const STATEMENTS_API = /^\/api\/v1\/admin\/statements$/;
  * open_payments 不点行，页面本来也不该发它。
  */
 const PAYMENTS_API = /^\/api\/v1\/admin\/payments$/;
+
+/** 支付设置接口的路径（frontend/src/api/adminPaymentSettings.ts 的 PAYMENT_SETTINGS_URL）。只记 GET：本脚本不保存。 */
+const PAYMENT_SETTINGS_API = /^\/api\/v1\/admin\/payment-settings$/;
 
 /** 钱包流水接口的路径（frontend/src/api/walletTransactions.ts 的 listWalletTransactions）。 */
 const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/transactions$/;
@@ -1509,6 +1536,8 @@ const network = {
   statements: new Map(),
   /** 支付列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   payments: new Map(),
+  /** 支付设置接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
+  paymentSettings: new Map(),
   /** 钱包流水接口：requestId → { customerId, newest, status, finished, failed, seq }。查询串本身不保存。 */
   walletTransactions: new Map(),
   /** 门户账号接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
@@ -1551,6 +1580,7 @@ function trackedRequest(requestId) {
     network.reconciliationRuns.get(requestId) ??
     network.statements.get(requestId) ??
     network.payments.get(requestId) ??
+    network.paymentSettings.get(requestId) ??
     network.walletTransactions.get(requestId) ??
     network.portalAccounts.get(requestId) ??
     network.lowBalanceThresholds.get(requestId) ??
@@ -1867,6 +1897,21 @@ function isPaymentsList(url) {
   }
 }
 
+/** 是不是支付设置接口（同源 https、路径恰好是这个接口，查询串不看、不保存）。 */
+function isPaymentSettings(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" && parsed.hostname === network.host && PAYMENT_SETTINGS_API.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 是不是项目列表接口（同源 https）：是的话回路径里的客户 id 与「查询串是不是第 1 页」，不是回 null。
  * 只留这两样，不保存 URL。
@@ -2075,6 +2120,14 @@ function observeNetwork(sessionId) {
         }
         if (isPaymentsList(params.request?.url) && params.request?.method === "GET") {
           network.payments.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
+        if (isPaymentSettings(params.request?.url) && params.request?.method === "GET") {
+          network.paymentSettings.set(params.requestId, {
             status: null,
             finished: false,
             failed: false,
@@ -2405,6 +2458,23 @@ function latestStatementsResponse(afterSeq) {
 function latestPaymentsResponse(afterSeq) {
   let best = null;
   for (const [requestId, request] of network.payments) {
+    if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/** afterSeq 之后发出、成功读完的支付设置请求里最近的一次；还有在路上的就回 null，等它落定。 */
+function latestPaymentSettingsResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, request] of network.paymentSettings) {
     if (request.seq <= afterSeq) {
       continue;
     }
@@ -3575,6 +3645,82 @@ function paymentsInView(lib, T) {
   let region = null;
   for (const el of document.querySelectorAll('[role="region"]')) {
     if (el.getAttribute("aria-label") === T.paymentsListTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 支付设置页的状态：设置一块（role=region、aria-label 为「Payment settings」）里 label 为「Minimum top-up (MYR)」的
+ * 输入框（个数与第一个的值）和「Version」一项（个数与第一项的文字）。错误提示（任何 role=alert）与无权限分开报。只读，
+ * 不改输入、不点任何按钮。
+ */
+function probePaymentSettings(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.paymentSettingsTitle) {
+      region = el;
+      break;
+    }
+  }
+  const minInputs = [];
+  const versionCells = [];
+  if (region !== null) {
+    for (const label of region.querySelectorAll("label")) {
+      if (lib.norm(label.textContent) === T.paymentSettingsMinAmount && label.control) {
+        minInputs.push(label.control);
+      }
+    }
+    for (const th of region.querySelectorAll("th")) {
+      const td = th.nextElementSibling;
+      if (lib.norm(th.textContent) === T.paymentSettingsVersion && td && td.tagName === "TD") {
+        versionCells.push(td);
+      }
+    }
+  }
+  const forbidden = lib.leaf(T.paymentSettingsForbidden) !== null;
+  return {
+    ...lib.common(T),
+    region: region !== null,
+    busy: lib.leaf(T.paymentSettingsLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    minInputs: minInputs.length,
+    minAmount: minInputs.length > 0 && typeof minInputs[0].value === "string" ? minInputs[0].value : null,
+    versionCells: versionCells.length,
+    version: versionCells.length > 0 ? lib.norm(versionCells[0].textContent) : null,
+  };
+}
+
+/** 把设置一块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollPaymentSettingsIntoView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.paymentSettingsTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的一块要整块在视口内；放不下的只要求顶端在视口内。 */
+function paymentSettingsInView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.paymentSettingsTitle) {
       region = el;
       break;
     }
@@ -6185,6 +6331,99 @@ async function stepOpenPayments(ctx) {
   }
 }
 
+async function stepOpenPaymentSettings(ctx) {
+  if (ctx.loginCompletedAt === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.paymentSettingsPath;
+  // 点顶栏之前的序号：只认在这之后页面自己发出的支付设置请求。
+  const beforeClick = network.seq;
+  const link = { text: TEXT.navPaymentSettings, href: path };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定：不在加载，且是某一种终态（表单、错误提示、无权限），或者走到了别处。
+  const opened = await waitFor(
+    () => evaluate(probePaymentSettings, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === path && s.region && !s.busy && (s.failed || s.forbidden || s.minInputs > 0)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  if (opened.value.appError || opened.value.failed) {
+    throw fail("page_error");
+  }
+  if (opened.value.notFound || opened.value.path !== path) {
+    throw fail("navigation_failed");
+  }
+  if (opened.value.forbidden) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面自己发出的那次支付设置 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestPaymentSettingsResponse(beforeClick),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expectedMin;
+  let expectedVersion;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const data = envelope?.success === true ? envelope.data : null;
+    const min = data?.min_amount;
+    const version = data?.version;
+    if (typeof min !== "string" || !Number.isInteger(version) || version < 1) {
+      throw fail("assertion_failed");
+    }
+    expectedMin = min;
+    expectedVersion = String(version);
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、字段类型不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这一份响应：最低充值额输入框的值等于 min_amount，「Version」一项等于 version，各恰好一个。
+  const shown = await waitFor(
+    () => evaluate(probePaymentSettings, TEXT),
+    (s) =>
+      s.path === path &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      s.minInputs === 1 &&
+      s.versionCells === 1 &&
+      s.minAmount === expectedMin &&
+      s.version === expectedVersion,
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.minInputs > 0 ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把设置一块滚进视口。只滚动，不改输入、不点任何按钮。
+  if ((await evaluate(scrollPaymentSettingsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(paymentSettingsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckWebhookSigning(ctx) {
   if (ctx.customerId === null || ctx.fixture === null) {
     throw fail("assertion_failed");
@@ -8305,6 +8544,7 @@ const STEPS = {
   open_wallet_reconciliation: stepOpenWalletReconciliation,
   open_statements: stepOpenStatements,
   open_payments: stepOpenPayments,
+  open_payment_settings: stepOpenPaymentSettings,
   check_account_status: stepCheckAccountStatus,
   check_wallet_transactions: stepCheckWalletTransactions,
   check_portal_account: stepCheckPortalAccount,

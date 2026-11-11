@@ -87,6 +87,11 @@ export const ROUTES = {
   payments: "/payments",
   paymentDetail: "/payments/:paymentId",
   /**
+   * 管理端支付设置（AIH-TASK-194，设计闸门 #587 v3 §2「管理端页面」）。顶栏在支付之后有一项；验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `open_payment_settings` 按这个 href 找顶栏链接，改了要同步那里。
+   */
+  paymentSettings: "/payment-settings",
+  /**
    * 客户门户首页（AIH-TASK-096，设计 AIH-TASK-089 §11 任务 E）。只给 CUSTOMER：`RequireRole` 把 ADMIN 转回
    * {@link ROUTES.dashboard}，管理端各页同样把 CUSTOMER 转到这里。
    */
