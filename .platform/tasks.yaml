@@ -10879,7 +10879,7 @@ tasks:
     title: 支付第二批第八层：补对账、复核处理与争议退款的运维文档和部署配置说明
     purpose: >-
       按 docs/design/AIH-TASK-179-payments-review.md（设计闸门 #585 已批准 v3） §8、§2「补对账」「人工复核出口」「争议与退款」「配置」：docs/payment-flow.md 补补对账、复核处理、争议与退款的处理步骤与对客户开放充值前的检查，docs/deployment.md 补三个配置项，docs/TODO.md 勾选 Phase 4 本批完成的两项。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-185
     acceptance_criteria:
