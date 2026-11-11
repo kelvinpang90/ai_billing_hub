@@ -3,19 +3,25 @@
 **首次编写：2026-11-10（AIH-TASK-178）。依据：设计闸门 #580 v3（[AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)
 §1、§2、§5、§6、§8）；ADR-0006、ADR-0007、ADR-0008、ADR-0015。
 更新：AIH-TASK-186，设计闸门 #585 v3（[AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md)
-§1、§2「补对账」「人工复核出口」「争议与退款」「告警」「配置」、§8）：补对账、复核处理、争议与退款、对客户开放充值前的检查。**
+§1、§2「补对账」「人工复核出口」「争议与退款」「告警」「配置」、§8）：补对账、复核处理、争议与退款、对客户开放充值前的检查。
+更新：AIH-TASK-195，设计闸门 #587 v3（[AIH-TASK-188-payment-settings-portal.md](design/AIH-TASK-188-payment-settings-portal.md)
+§1、§2「支付设置服务」「最小恢复额」「门户页面」、§8）：支付设置、最小恢复额、对客户开放充值。**
 
-本文件覆盖支付第一批（下称「A」）：从客户建单到可信确认后入账的后端链路与生产开启步骤；以及支付第二批（下称「B」）：
-补对账（§5）、`REVIEW_REQUIRED` 的人工复核处理（§6）、争议与退款（§7）、对客户开放充值前的检查（§8）。
+本文件覆盖支付第一批（下称「A」）：从客户建单到可信确认后入账的后端链路与生产开启步骤；支付第二批（下称「B」）：
+补对账（§5）、`REVIEW_REQUIRED` 的人工复核处理（§6）、争议与退款（§7）、对客户开放充值前的检查（§8）；以及支付第三批（下称「C」）：
+支付设置（§11）、最小恢复额（§12）、对客户开放充值与回滚（§13）。
 接口契约见 [api.md](api.md)，配置项与 secret 文件见 [deployment.md「支付配置与 secret 文件」](deployment.md#支付配置与-secret-文件)，
 告警的值班处置见 [runbook.md「支付」一节](runbook.md#支付复核事件冲突事件积压与配置wallet_negative_balance-告警的支付部分)。
 
 ⚠️ **生产上支付默认关**（`BILLING_PAYMENTS_ENABLED=false`）：两个路由不注册（404），事件任务与补对账每一轮直接返回。
 
-## 1. A 与 B 不做什么
+## 1. A、B、C 不做什么
 
 - A 留下的长时间待付的单子的补对账、`EXPIRED` 的定时转换、`REVIEW_REQUIRED` 的管理端处理：已由 B 交付，见 §5、§6。
-- 充值界面、支付历史、管理端设置、最小恢复额（C），收据（D）。
+- 充值界面、支付历史、管理端支付设置、最小恢复额：已由 C 交付，见 §11、§12。收据属于 D，支付历史不显示收据列。
+- 不让客户取消或继续一笔待付的支付：复用窗口内重复点同一金额会复用同一笔（§2.1）。
+- 不改停机阈值（ADR-0010 方案 A：停机规则仍是余额 ≤ 0），不改可信确认与入账：最小恢复额只是建单时的校验（§12）。
+- 不把 `BILLING_PAYMENTS_ENABLED`、`BILLING_PAYMENT_TOPUPS_OPEN`、建单允许名单搬进支付设置：它们是运维开关，仍是配置项（§13）。
 - 不做自动退款，不对争议自动扣回（spec §112.1）：B 订阅争议与退款事件，只落库、关联与告警，扣回走现有人工调账（§7）。
 - 不对 `PENDING`、`EXPIRED`、`FAILED`、`CANCELLED`、`PAID` 提供人工操作：人工出口只针对 `REVIEW_REQUIRED`。
 - 对客户单独发「支付成功」通知：复机通知由现有账本逻辑发出。
@@ -58,10 +64,11 @@ Stripe → charge.dispute.created / charge.refunded → 落库、关联支付、
 | 1 | 账户可写（`DISABLED` / `CLOSED` 拒绝新充值） | 403 `ACCOUNT_READ_ONLY` |
 | 1a | `payment_topups_open` 为真，或租户 `public_id` 在建单允许名单里 | 403 `TOPUPS_NOT_OPEN` |
 | 2 | 计费模式为 `PREPAID`（内部计量租户不能充值） | 403 `TOPUP_NOT_ALLOWED` |
-| 3 | 金额格式 `^[0-9]{1,6}(\.[0-9]{1,2})?$`，在最低额与最高额之间 | 422 `TOPUP_AMOUNT_INVALID` |
+| 3 | 金额按顺序：格式 `^[0-9]{1,6}(\.[0-9]{1,2})?$` → 不小于最低额 → 不小于生效的最低额（挂起租户的最小恢复额，§12）→ 不大于最高额（设了时）；最低额与最高额来自支付设置（§11） | 422 `TOPUP_AMOUNT_INVALID`；只有第三条不过时为 422 `TOPUP_BELOW_RECOVERY_MINIMUM` |
 | 4 | 建单时刻有生效的 SST 税务政策，且不要求收税（ADR-0008） | 503 `TAX_POLICY_UNAVAILABLE` / `TAX_POLICY_UNSUPPORTED` |
 
-- 60 秒内同租户、同金额、仍 `PENDING` 且剩余有效期不少于 31 分钟的一笔会被复用（ADR-0007），返回同一个付款页地址。
+- 金额规则、复用窗口与待付超时在快速校验开始时从支付设置读一次，整个建单过程用这一份；读不到（设置行缺失）→ 503 `PAYMENTS_MISCONFIGURED`。
+- 复用窗口内（支付设置的 `reuse_window_seconds`，缺省 60 秒，§11）同租户、同金额、仍 `PENDING` 且剩余有效期不少于 31 分钟的一笔会被复用（ADR-0007），返回同一个付款页地址。
 - Stripe 不可用或拒绝：支付保持 `PENDING`（`status_reason = GATEWAY_CREATE_FAILED`），返回 503 `PAYMENT_GATEWAY_UNAVAILABLE`；
   客户 60 秒内重试会复用这一笔、用同一个 `Idempotency-Key`，Stripe 那边不会出现第二个会话。
   没有会话 id 的 `PENDING` 由补对账在 `expires_at` 之后 10 分钟置为 `EXPIRED`（§5.2）。
@@ -71,7 +78,7 @@ Stripe → charge.dispute.created / charge.refunded → 落库、关联支付、
 
 ### 2.2 付款页
 
-Stripe 托管的 Checkout Session：一个 MYR 价格项、`unit_amount` 为整数分、会话过期时刻 = `payments.expires_at`（缺省建单后 3600 秒）。
+Stripe 托管的 Checkout Session：一个 MYR 价格项、`unit_amount` 为整数分、会话过期时刻 = `payments.expires_at`（建单时刻加支付设置的 `pending_timeout_seconds`，缺省 3600 秒，§11）。
 付款方式（卡、FPX）由 Stripe Dashboard 的开关决定，请求里不传 `payment_method_types`；门户不加载 Stripe 脚本。
 
 ### 2.3 回调
@@ -210,7 +217,7 @@ B 另加 CHECK `ck_payments_resolution_fields`：人工结案的支付（`CREDIT
    （重试投递的事件 id 不变、只落一行；钱包只加一次），核对方法不变。
 
 **5. 收尾。**从 `BILLING_PAYMENT_TOPUP_TENANT_ALLOWLIST` 里移除验收租户，重启。**不要在这一步设 `BILLING_PAYMENT_TOPUPS_OPEN=true`**：
-先完成 §8 的检查，充值界面（C）上线后再打开。
+先完成 §8 的检查，充值界面（C）上线后按 §13 打开。
 
 **回滚**：设 `BILLING_PAYMENTS_ENABLED=false` 并重启即可；已有支付、事件与账本行保留，补对账随之停止，已结案的数据保留。
 关着期间回调得到 404、不落库。
@@ -474,7 +481,7 @@ charge.refunded
 
 这笔 RM10 留在验收租户的钱包里，**不冲回**。
 
-**3. 充值界面（C）上线之后再打开 `payment_topups_open`**（宿主机 `.env` 设 `BILLING_PAYMENT_TOPUPS_OPEN=true` 并重启）。在那之前保持为假。
+**3. 充值界面（C）上线之后再打开 `payment_topups_open`**：先核对支付设置，再设 `BILLING_PAYMENT_TOPUPS_OPEN=true` 并重启，步骤与回滚见 §13。在那之前保持为假。
 
 ## 9. 只读排查：`UNMATCHED` 与 `REJECTED`
 
@@ -538,3 +545,112 @@ SELECT e.gateway_event_id, e.event_type, e.last_error_code, e.attempts, e.receiv
 ## 10. 示例的写法
 
 本文件与 PR、工单里的示例一律用占位符（`<平台对外域名>`、`<Stripe API 根地址>`、`<payment_id>`），**不写真实主机名、地址、租户 id 与密钥**（ADR-0001）。
+
+## 11. 支付设置
+
+建单的金额规则、复用窗口与待付超时由管理端「支付设置」维护（spec §42：最低额「通过管理端设置配置」、前端不许写死），
+取代 A 的四个配置项 `payment_topup_min`、`payment_topup_max`、`payment_pending_timeout_seconds`、`payment_reuse_window_seconds`
+（已删除，设了也不再读取，见 [deployment.md「支付配置与 secret 文件」](deployment.md#支付配置与-secret-文件)）。
+`BILLING_PAYMENTS_ENABLED`、`BILLING_PAYMENT_TOPUPS_OPEN`、建单允许名单是运维开关，**不在**支付设置里。
+
+- 入口：管理端「支付设置」页（`/payment-settings`），对应接口 `GET` / `PUT /api/v1/admin/payment-settings`，只有 ADMIN 能调用（登录必过 2FA），
+  契约见 [api.md](api.md)。客户在门户充值页通过 `GET /api/v1/customer/topup-options` 读到这些值，门户不写死任何金额。
+- 存储：表 `payment_settings`，恰好一行（迁移 0038 插入种子行，种子值等于 A 的配置缺省，所以部署前后建单行为不变）。
+
+### 11.1 字段
+
+金额一律是两位小数的定点字符串（MYR，格式 `^[0-9]{1,6}(\.[0-9]{1,2})?$`，所以不会超过 `999999.99`）。
+
+| 字段 | 含义 | 范围 | 种子值 |
+| --- | --- | --- | --- |
+| `min_amount` | 最低充值额 | `≥ 2.00`（ADR-0015 的 MYR 下限） | `10.00` |
+| `max_amount` | 最高充值额（单笔上限） | 可为空（空 = 不另设上限，只受格式限制的 `999999.99`）；设了时 `≥ min_amount` | 空 |
+| `recovery_buffer` | 最小恢复额的余额缓冲（§12） | `≥ 0.01`，**不能为 0** | `10.00` |
+| `preset_amounts` | 充值页的推荐金额 | 1–8 个；每个符合金额格式、互不相同、严格升序、都 `≥ min_amount`，且（`max_amount` 不为空时）`≤ max_amount` | `50.00`、`100.00`、`300.00`、`500.00`、`1000.00` |
+| `reuse_window_seconds` | 同额复用窗口（ADR-0007，§2.1） | 0–300 的整数 | `60` |
+| `pending_timeout_seconds` | 待付超时，也是 Stripe 会话的过期时刻（`expires_at = 建单时刻 + 它`；Stripe 要求创建后 30 分钟到 24 小时） | 2400–86400 的整数 | `3600` |
+
+- 每次保存都要给全部字段（整体替换）。类型不对（金额不是字符串、推荐金额不是字符串数组、秒数不是整数，布尔值与字符串形式的数字都不算）→
+  422 `VALIDATION_ERROR`；规则不过 → 422 `PAYMENT_SETTINGS_INVALID`，按上表的字段顺序点名**第一个**不合规的字段。
+- 管理端页面：最高额留空表示不设上限；推荐金额用逗号分隔填写（保存前拆分、去掉首尾空白、丢掉空段）；两个秒数框必须是整数，否则页面提示、不发请求。
+
+### 11.2 乐观锁
+
+- 每次修改 `version` +1。保存时带上读到的 `version`；期间别的管理员已经改过 → 409 `PAYMENT_SETTINGS_VERSION_CONFLICT`，数据不变（别人的修改保留），
+  页面提示「设置已被他人修改」并提供刷新按钮：刷新、重新核对后再改。两个管理员同时保存，后提交者得到 409，不会静默覆盖。
+- 设置行缺失（只会在迁移没跑时出现）→ 503 `PAYMENTS_MISCONFIGURED`，不当作版本冲突；此时建单与充值选项也都是 503，客户的支付列表与详情不受影响。处理：跑迁移。
+
+### 11.3 改动写审计
+
+- 每次修改在同一事务里写一条 `PAYMENT_SETTINGS_UPDATE` 审计（`entity_type` 为 `payment_settings`、`entity_id` 为 `1`；
+  `before` / `after` 为全部业务字段与 `version`）。设置不保留历史版本，**历史值只在审计里**。
+- 新值与旧值完全相同时也照常 +1 版本并写审计（管理员的确认动作本身要留痕）。
+- 日志只记管理员用户 id 与新版本号，不记请求体。
+
+### 11.4 改动不影响已建好的支付
+
+- 建单在快速校验开始时读一次设置，整个建单过程用这一份（§2.1）；改设置那一刻正在进行的建单可能按旧规则完成，这是可接受的（金额规则是输入校验，不是账本规则）。
+- 已建好的支付不受影响：金额（`expected_amount`）与过期时刻（`expires_at`）在建单时已写进支付行，改待付超时不会延长或缩短已有的 Stripe 会话；
+  入账仍按 A 与 B 的规则（`wallet_credit_amount`），与设置无关。
+- 改复用窗口只影响之后建单时的候选查询；改最低额、最高额只影响之后的建单校验与充值页显示。
+
+## 12. 最小恢复额
+
+挂起（余额 ≤ 0）的 `PREPAID` 租户充值时，后端算出一个最小恢复额，保证按它充值后余额严格大于 RM0（spec §42、ADR-0010 方案 A）。
+
+### 12.1 公式
+
+- 只对 `billing_mode = PREPAID` 且钱包 `balance ≤ 0` 的租户有值，否则为空。
+- **最小恢复额** = `(−balance + recovery_buffer)` **向上取到分**（两位小数，`ROUND_CEILING`）。钱包余额是 8 位小数，欠款可能有两位以上小数，
+  向上取保证充值后余额 ≥ 缓冲。
+- **生效的最低额** = `max(min_amount, 最小恢复额)`（没有最小恢复额时就是 `min_amount`）。建单金额低于它 → 422 `TOPUP_BELOW_RECOVERY_MINIMUM`（§2.1 第 3 步）；
+  充值页的金额下限、推荐金额按钮可不可点都按它，并在表单上方提示「账户已暂停，至少充值 RM X 才能恢复服务」（X 为生效的最低额）。
+- 计算全部在 `Decimal` 上做，不经 `float`。
+
+例（`min_amount = 10.00`、`recovery_buffer = 10.00`）：
+
+| 余额 | 最小恢复额 | 生效的最低额 |
+| --- | --- | --- |
+| `5.00` | 空 | `10.00` |
+| `0` | `10.00` | `10.00` |
+| `−0.00000001` | `10.01` | `10.01` |
+| `−12.345` | `22.35` | `22.35` |
+| `−50.00` | `60.00` | `60.00` |
+
+缓冲为 `0.01`、余额 `−50.00` 时最小恢复额为 `50.01`，按它充值后余额为 `0.01`（> 0）。
+
+### 12.2 为什么要缓冲（ADR-0010）
+
+- 停机规则仍是余额 ≤ 0（ADR-0010 方案 A，不改停机阈值）。如果最小恢复额只保证余额比 0 多一分钱，客户充 RM0.01 复机、下一个请求就又停机，
+  反复循环；缓冲让复机后还有一段可用余额。
+- 最小恢复额只在**建单时**校验：从建单到付款之间余额还可能继续变化（在途用量），缓冲就是为这段留的余地。入账时不再校验（按 `wallet_credit_amount` 入账）。
+- 缓冲**至少 0.01**：最小恢复额 ≥ 欠款 + 0.01，所以按生效的最低额充值后余额至少 RM0.01。缓冲若为 0，欠款是整分时（例如欠 RM50、充 RM50）
+  充值后余额正好为 0、仍然停机，正是 ADR-0010 要消除的边界。
+- 建单时先用不加锁读到的余额判一次，再在租户锁的事务里重读余额重判（排在复用查找之前）；若另一笔支付在这之间入账使余额变正，就按普通最低额判。
+
+### 12.3 超过单笔上限时
+
+单笔上限为 `max_amount`，为空时为 `999999.99`。生效的最低额大于单笔上限（欠款很大而上限不够）时：
+
+- 充值选项返回 `available = false`、`unavailable_reason = RECOVERY_EXCEEDS_MAXIMUM`，充值页不显示表单，显示「需充值的金额超过单笔上限，请联系客服」；
+- 建单时任何金额都被 422 拒绝：低于生效的最低额的为 `TOPUP_BELOW_RECOVERY_MINIMUM`，其余为 `TOPUP_AMOUNT_INVALID`；
+- 处理：管理员在支付设置（§11）里调高最高额（不超过 `999999.99`）；仍不够，或不想调高上限时，用人工调账处理。
+
+## 13. 对客户开放充值（管理员执行）
+
+前提：C 的全部任务（AIH-TASK-188..194）已合并部署；§8 的开放前检查都已完成（开关打开、`config missing` 不出现、
+`BILLING_PAYMENT_TOPUPS_OPEN` 仍为假、建单允许名单已清空）。按顺序做，任一步不成功就停下。**由 Kelvin 执行。**
+
+**1. 核对支付设置。**在管理端「支付设置」页（§11）核对最低额、缓冲与推荐金额（顺带看一眼最高额、复用窗口与待付超时）。
+要改就在页面上保存（写 `PAYMENT_SETTINGS_UPDATE` 审计）；保存得到 409 时刷新后重新核对。
+
+**2. 打开建单。**宿主机 `.env` 设 `BILLING_PAYMENT_TOPUPS_OPEN=true`，重启 api、celery-worker、celery-beat。
+之后所有合格的客户（`PREPAID`、账户可写）都能在门户「充值」页建单。
+
+**回滚**：
+
+1. 宿主机 `.env` 设 `BILLING_PAYMENT_TOPUPS_OPEN=false`，清空 `BILLING_PAYMENT_TOPUP_TENANT_ALLOWLIST`，然后重启（两者都是配置项，重启后生效）。
+   `BILLING_PAYMENTS_ENABLED` 不动：回调与补对账要继续运行。
+2. 之后原本能充值的客户建单得到 403 `TOPUPS_NOT_OPEN`，充值页显示「未开放」；内部租户也得到 `TOPUPS_NOT_OPEN`（开放检查排在计费模式之前，§2.1）；
+   `DISABLED` 与 `CLOSED` 的客户照旧先得到 `ACCOUNT_READ_ONLY`（账户可写检查排在开放检查之前）。
+3. 已建好的支付照常由回调与补对账收口；支付历史与付款结果页照常可看。
