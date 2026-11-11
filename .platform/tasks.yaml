@@ -10929,7 +10929,7 @@ tasks:
     title: 支付第三批第一层：单行支付设置表的迁移、种子行、模型与审计动作
     purpose: >-
       按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「数据库」与 §8：新迁移 0038 建 payment_settings（恰好一行，CHECK、外键、索引照设计）并插入种子行，新模型 PaymentSettings，AuditAction 加 PAYMENT_SETTINGS_UPDATE（前端审计动作清单同步），docs/database-schema.md 记这张表。不写服务与接口：属于 AIH-TASK-189..191。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-186
     acceptance_criteria:
