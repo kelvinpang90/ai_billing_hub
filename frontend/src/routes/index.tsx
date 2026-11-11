@@ -7,7 +7,7 @@
  * 管理端月度对账单（AIH-TASK-161）、管理端支付列表（AIH-TASK-184）与详情（AIH-TASK-185）、
  * 客户门户首页（AIH-TASK-096，管理端与门户按 `RequireRole` 分流）、客户门户钱包页（AIH-TASK-100）、客户门户用量页
  * （AIH-TASK-105）、客户门户会话页（AIH-TASK-123）、客户门户对账单页（AIH-TASK-162）、客户门户通知页（AIH-TASK-128）、
- * 客户门户充值页（AIH-TASK-192）与兜底页。
+ * 客户门户充值页（AIH-TASK-192）、客户门户支付历史页与付款结果页（AIH-TASK-193）与兜底页。
  * **不预建 spec §101 列的其余 feature 目录** —— 空目录会让人以为「那块已经开工了」，
  * 和 runbook 不预留空标题是同一条道理。每个 feature 在它自己那个 Phase 落地时再建。
  *
@@ -139,6 +139,12 @@ const NotificationsPage = lazy(() =>
 const TopupPage = lazy(() =>
   import("../features/portal/TopupPage").then((m) => ({ default: m.TopupPage })),
 );
+const PaymentsHistoryPage = lazy(() =>
+  import("../features/portal/PaymentsHistoryPage").then((m) => ({ default: m.PaymentsHistoryPage })),
+);
+const PaymentResultPage = lazy(() =>
+  import("../features/portal/PaymentResultPage").then((m) => ({ default: m.PaymentResultPage })),
+);
 const NotFoundPage = lazy(() =>
   import("./NotFoundPage").then((m) => ({ default: m.NotFoundPage })),
 );
@@ -213,6 +219,8 @@ export function AppRoutes() {
                 <Route path={ROUTES.portalStatements} element={<PortalStatementsPage />} />
                 <Route path={ROUTES.portalNotifications} element={<NotificationsPage />} />
                 <Route path={ROUTES.portalTopup} element={<TopupPage />} />
+                <Route path={ROUTES.portalPayments} element={<PaymentsHistoryPage />} />
+                <Route path={ROUTES.portalPaymentResult} element={<PaymentResultPage />} />
               </Route>
             </Route>
           </Route>
