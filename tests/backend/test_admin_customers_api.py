@@ -125,6 +125,7 @@ INTEGRATION_STATUS_ROUTE = PROJECT_ROUTE + "/integration-status"
 STATUS_WEBHOOK_ROUTE = PROJECT_ROUTE + "/status-webhook"
 # AIH-TASK-094 的六个门户账号接口（设计闸门 #368 v12 §2「API」管理端）。
 PORTAL_ACCOUNT_ROUTE = "/api/v1/admin/customers/{customer_id}/portal-account"
+PAYMENTS_ROUTE = "/api/v1/admin/payments"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -212,6 +213,10 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", "/api/v1/admin/statements"),
     ("GET", "/api/v1/admin/statements/{statement_id}"),
     ("POST", "/api/v1/admin/customers/{customer_id}/statements/generate"),
+    # AIH-TASK-183 的管理端支付（设计闸门 #585 v3 §2「管理端接口」）。
+    ("GET", PAYMENTS_ROUTE),
+    ("GET", PAYMENTS_ROUTE + "/{payment_id}"),
+    ("POST", PAYMENTS_ROUTE + "/{payment_id}/resolve"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -329,6 +334,9 @@ VALID_BODIES = {
     ("POST", PORTAL_ACCOUNT_ROUTE): {"email": "portal-probe@example.com"},
     ("POST", PORTAL_ACCOUNT_ROUTE + "/resend-invitation"): {},
     ("POST", PORTAL_ACCOUNT_ROUTE + "/reset-2fa"): {"reason": "Probe"},
+    # 管理端支付（AIH-TASK-183）：库里没有支付，漏了鉴权的处理函数会走到 404
+    # `PAYMENT_NOT_FOUND`，过不了 401 / 403；请求体合法，保证 422 不会先出现。
+    ("POST", PAYMENTS_ROUTE + "/{payment_id}/resolve"): {"action": "CLOSE", "reason": "Probe"},
 }
 
 # 鉴权用例预先插入的凭据行（全零占位值：它只用来填路径，从不参与签名）。
@@ -962,6 +970,7 @@ def test_every_admin_route_refuses_non_admins(
         "rule_id",
         "fx_rate_id",
         "usage_event_id",
+        "payment_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     if path == USAGE_ANALYTICS_ROUTE:

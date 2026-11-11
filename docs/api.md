@@ -3809,6 +3809,162 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 
 ---
 
+## 支付（管理端）
+
+设计依据：设计闸门 #585 `APPROVED: design v3`，全文见
+[design/AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md) §2「管理端接口」「人工复核出口」、§6；
+建立在设计闸门 #580（[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)）之上。
+实现登记为 AIH-TASK-182（复核服务）与 AIH-TASK-183（接口）。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/payments` | 200，支付分页 | 401 / 403 / 422 / 503 |
+| `GET /api/v1/admin/payments/{payment_id}` | 200，支付详情 | 401 / 403 / 404 / 503 |
+| `POST /api/v1/admin/payments/{payment_id}/resolve` | 200，结案后的支付详情 | 见下面「错误」 |
+
+- **鉴权**：只有 ADMIN 能调（ADMIN 登录必过 2FA）；匿名 401 `TOKEN_INVALID`，CUSTOMER 403 `ADMIN_REQUIRED`。管理端跨客户
+  可见。手续费、状态原因与人工结案信息只在这几个接口里，客户接口看不到（INV-7）。
+- **开关**：这三个接口**总是注册**，与 `BILLING_PAYMENTS_ENABLED` 无关。开关关闭时列表通常为空，读接口照常可用；
+  「不入账结案」照常可用，「按实付入账」是 503 `PAYMENTS_MISCONFIGURED`。
+- 列表与详情**只读**：不写审计、不写任何行。
+- `{payment_id}` 是支付的 `id`（`public_id`，即客户建单时得到的 `payment_id`）。
+
+### `GET /api/v1/admin/payments` —— 支付列表
+
+| 参数 | 规则 |
+| --- | --- |
+| `status` | 可选；`PENDING` / `PAID` / `FAILED` / `EXPIRED` / `CANCELLED` / `REVIEW_REQUIRED` 之一（大小写敏感），否则 422，在鉴权**之前**校验 |
+| `customer_id` | 可选；客户的 `id`（`public_id`）。没有这个客户时返回空页（`total` 为 0），与「有这个客户但没有支付」不区分 |
+| `created_from` / `created_to` | 可选；创建日期 `YYYY-MM-DD`，按**马来西亚时间（UTC+8）的日历日**理解、含两端：从 `created_from` 当天 00:00（马来西亚时间）起，到 `created_to` 次日 00:00（马来西亚时间）止（不含），服务端换算成 UTC 与 `created_at` 比较。可以只给一个 |
+| `page` / `page_size` | 见[分页](#分页spec-108)：1–10000 与 1–100，默认 1 与 20；超出范围 422，在鉴权**之前**校验 |
+
+- 日期**严格解析**：必须恰好是四位年、两位月、两位日（`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`，只认 ASCII 数字）且是真实存在的
+  日期，年份在 2000–2099 之间；`2026-1-08`、`2026-02-30`、`1999-12-31`、`2100-01-01`、带时刻的值都是 422
+  `VALIDATION_ERROR`。`created_from` 晚于 `created_to` 也是 422（同一天可以）。日期在鉴权**之后**判：没带令牌时先得到 401。
+- 未知的查询参数忽略，与其他列表接口一致。几个筛选按 AND 组合。
+- **排序**：按 `created_at` 倒序（最新的在前）；同一时刻的按内部行 id 倒序（后建的在前）。
+
+`data` 是[分页](#分页spec-108)对象，`items` 里每一项恰好这 14 个键，按这个顺序：
+
+```json
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "customer_id": "00000000-0000-0000-0000-000000000000",
+  "customer_name": "Acme Sdn Bhd",
+  "amount": "100.00000000",
+  "currency": "MYR",
+  "gateway": "STRIPE",
+  "gateway_reference": "cs_test_…",
+  "gateway_fee": "2.90000000",
+  "status": "PAID",
+  "status_reason": null,
+  "resolution": null,
+  "created_at": "2026-11-08T08:00:00",
+  "paid_at": "2026-11-08T08:01:00",
+  "review_required_at": null
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 支付的对外 id（uuid4）；详情与结案接口用它 |
+| `customer_id` / `customer_name` | 客户的 `id`（`public_id`）与当前公司名 |
+| `amount` / `currency` | 建单时客户要付的含税毛额（`expected_amount`）与币种（恒为 `MYR`） |
+| `gateway` | `STRIPE` |
+| `gateway_reference` | Stripe Checkout Session id（`cs_…`）；建单时 Stripe 调用失败留下的单为 `null` |
+| `gateway_fee` | Stripe 的实际手续费（MYR）；拿不到时为 `null` |
+| `status` | 六种状态之一，见上 |
+| `status_reason` | 状态原因码（例如 `AMOUNT_MISMATCH`、`NO_GATEWAY_SESSION`），没有为 `null`。人工结案后保留进入复核时的原因 |
+| `resolution` | 人工结案的方式：`CREDITED`（按实付入账，状态 `PAID`）或 `CLOSED`（不入账结案，状态 `FAILED`）；未结案为 `null` |
+| `created_at` / `paid_at` / `review_required_at` | 建单时刻、本系统确认已付的时刻（人工入账时为管理员提交的时刻）、进入复核的时刻；不带时区的 UTC，精确到秒，见[时间](#时间) |
+
+金额都是恰好 8 位小数的字符串（见[金额](#金额inv-10)）。不返回事件的原始字段（`metadata_json`）、Stripe 的密钥或任何内部 id。
+
+### `GET /api/v1/admin/payments/{payment_id}` —— 支付详情
+
+`data` 是列表项的 14 个键，后面再按这个顺序加 10 个：
+
+| 字段 | 说明 |
+| --- | --- |
+| `confirmed_amount` / `confirmed_currency` | Stripe 报的金额与币种（进入复核时也记下）；没有为 `null` |
+| `credited_amount` | **实际入账额**：这笔支付的 `TOPUP` 账本行金额；没有入账为 `null`。自动入账时等于 `amount`，人工「按实付入账」时等于 Stripe 实收（可能不等于 `amount`） |
+| `gateway_payment_intent_id` | Stripe PaymentIntent id（`pi_…`）；没有为 `null` |
+| `expires_at` | 付款页的过期时刻 |
+| `last_reconciled_at` | 最近一次向 Stripe 查询的时刻；没有为 `null` |
+| `resolved_at` | 人工结案的时刻；未结案为 `null` |
+| `resolved_by` | 结案管理员的邮箱；未结案为 `null` |
+| `resolution_reason` | 管理员结案时填的原因；未结案为 `null` |
+| `events` | 这笔支付关联的回调事件，按 `received_at` 升序、同一时刻按内部 id 升序，最多 100 条 |
+
+`events` 每项恰好这 7 个键：
+
+| 字段 | 说明 |
+| --- | --- |
+| `gateway_event_id` | Stripe 事件 id（`evt_…`） |
+| `event_type` | 事件类型，例如 `checkout.session.completed`、`charge.refunded` |
+| `processing_status` | `RECEIVED` / `PROCESSING` / `RETRY` / `PROCESSED` / `IGNORED` / `UNMATCHED` / `REJECTED` |
+| `last_error_code` | 最近一次处理的错误码；没有为 `null` |
+| `received_at` / `processed_at` | 收到与处理完的时刻；未处理完为 `null` |
+| `fingerprint_conflict_at` | 同一事件 id 后来收到内容不同的请求体的时刻；没有为 `null` |
+
+没有这笔支付：404 `PAYMENT_NOT_FOUND`。
+
+### `POST /api/v1/admin/payments/{payment_id}/resolve` —— 复核结案
+
+只对 `REVIEW_REQUIRED`、且还没有人工结案的支付。请求体恰好两个字段，有别的字段是 422 `VALIDATION_ERROR`：
+
+```json
+{ "action": "CREDIT", "reason": "Confirmed with the customer by phone" }
+```
+
+| 字段 | 规则 |
+| --- | --- |
+| `action` | `CREDIT`（按实付入账）或 `CLOSE`（不入账结案），大小写敏感；其他值 422 |
+| `reason` | 字符串，去掉首尾空白后 1–255 字（与人工调账的原因相同），否则 422。存进支付行与审计（`CREDIT` 时也是账本行的 `description`），**不进日志** |
+
+请求体在鉴权**之前**校验（与其他管理端写接口一致）。
+
+- **`CREDIT`（按实付入账）**：服务端向 Stripe 重新查询这笔支付，核对引用、已付、币种为 MYR、有 PaymentIntent、拿得到
+  charge 的退款与争议信息且没有退过款、没有争议，再锁住支付、钱包与客户重查（仍在复核、PI 没有被别的支付占用、客户不是
+  `CLOSED`、客户是预付）。全部通过才写入：支付转 `PAID`、`resolution = CREDITED`，写一条 `TOPUP` 账本行。
+  ⚠️ **入账金额以提交时 Stripe 的实收金额为准**，可能不等于 `amount`（金额不符正是进入复核的常见原因）；实际入账额见
+  返回的 `credited_amount`。`DISABLED` 的客户照常入账。
+- **`CLOSE`（不入账结案）**：支付转 `FAILED`、`resolution = CLOSED`，不写账本、不查 Stripe。需要退款时由管理员在 Stripe
+  后台手工做。
+- 两种动作都写一条 `PAYMENT_REVIEW_RESOLVED` 审计（`entity_type` 为 `payments`，`entity_id` 为支付的 `id`），与状态
+  改变、账本行同一事务提交；任何一项不过都什么也不写，可以重试。
+- **结案后是终态**：之后无论 Stripe 再报什么（迟到的付款成功事件、补对账），支付状态都不再改变；再次结案 409
+  `PAYMENT_NOT_IN_REVIEW`。
+- 成功 200，`data` 是结案后的支付详情（与 `GET …/payments/{payment_id}` 同一个查询、同样的字段）。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 | 管理员该怎么做 |
+| --- | --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期 | 重新登录 |
+| 403 | `ADMIN_REQUIRED` | 调用者不是 ADMIN | — |
+| 422 | `VALIDATION_ERROR` | 列表：`status`、`page`、`page_size` 或日期不合规，`created_from` 晚于 `created_to`；结案：请求体不合规。`message` 只列字段名，不回显值 | 改正参数 |
+| 404 | `PAYMENT_NOT_FOUND` | 详情与结案：没有这笔支付 | — |
+| 409 | `PAYMENT_NOT_IN_REVIEW` | 支付不是 `REVIEW_REQUIRED`，或已被别人结案 | 刷新页面看当前状态 |
+| 409 | `RESOLUTION_CONFLICT` | 入账时与并发的处理冲突 | 刷新页面看当前状态 |
+| 503 | `PAYMENTS_MISCONFIGURED` | 只有 `CREDIT`：开关关闭，或 Stripe 凭据读不到 | 稍后重试；不要因为它改用不入账结案 |
+| 503 | `PAYMENT_GATEWAY_UNAVAILABLE` | 只有 `CREDIT`：Stripe 暂时不可用 | 稍后重试；不要因为它改用不入账结案 |
+| 409 | `GATEWAY_QUERY_REJECTED` | Stripe 拒绝查询（例如会话不存在） | 在 Stripe Dashboard 核对；确认没有收到钱 → 不入账结案 |
+| 409 | `GATEWAY_REFERENCE_MISSING` / `GATEWAY_REFERENCE_MISMATCH` | 网关引用缺失或对不上 | 在 Stripe Dashboard 核对这笔钱属于谁；不能确认 → 不入账结案并在 Stripe 退款 |
+| 409 | `GATEWAY_NOT_PAID` | Stripe 现在不报已付，或拿不到 charge 的退款与争议信息 | 异步付款可能还在处理，稍后再试；确认不会到账 → 不入账结案 |
+| 409 | `CURRENCY_NOT_MYR` / `INTERNAL_TENANT` / `TENANT_CLOSED` | 不是 MYR、客户不是预付、客户已关户：不能入账 | 不入账结案，并在 Stripe 退款 |
+| 409 | `GATEWAY_PAYMENT_REUSED` | 这笔钱已给另一笔支付入过账 | 不入账结案，**不退款** |
+| 409 | `GATEWAY_REFUNDED_OR_DISPUTED` | 这笔钱在 Stripe 已退过款（全部或部分）或有争议 | 不入账结案，**不再退款** |
+| 422 | `BALANCE_OUT_OF_RANGE` | 入账后余额越界 | 不入账结案并退款，或先联系 Kelvin |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id`；什么也没写 | 重试；仍失败时按 `request_id` 查日志 |
+| 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 | 稍后重试 |
+
+检查顺序：先请求体（422），再鉴权（401 / 403），再「这笔支付存在且在复核」（404 / 409 `PAYMENT_NOT_IN_REVIEW`），
+`CREDIT` 之后才看网关（503 `PAYMENTS_MISCONFIGURED`）与 Stripe 的核对。错误响应都是[信封](#信封spec-107)，文案固定，
+不带金额、原因或 Stripe 的数据。
+
+---
+
 ## AI 调用接口
 
 设计依据：设计闸门 #281 `APPROVED: design v23`，全文见 [design/AI-MODULE.md](design/AI-MODULE.md) §2「调用接口 `POST /v1/messages`」。此接口供业务后端调用模型；提示词、输入输出格式、输出解析与质量评测都由调用方负责。AI 密钥须等 AIH-TASK-068 合并后才签发。
