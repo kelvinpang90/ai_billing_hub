@@ -1627,6 +1627,79 @@ OR (resolution IS NOT NULL AND resolved_at IS NOT NULL AND resolved_by_user_id I
   四列」的顺序删（先删外键再删它依赖的索引，MySQL 错误 1553），每一项只在仍存在时删，中途失败可以直接重跑；`--sql` 离线模式
   判断不了有没有结案行，直接拒绝、不输出 DDL。生产的回滚同样是关支付开关，不降级 0037。
 
+## `payment_settings`（spec §42、§71；ADR-0007、ADR-0010；AIH-TASK-188，迁移 `0038_payment_settings`）
+
+设计依据：[design/AIH-TASK-188-payment-settings-portal.md](design/AIH-TASK-188-payment-settings-portal.md)（设计闸门 #587 v3）
+§2「数据库」、§3 INV-6、INV-10、§4 与 §8。支付的金额规则、同额复用窗口与待付超时，**恰好一行**（`id = 1`），管理端可改
+（spec §42「通过管理端设置配置」，前端不写死）。模型在 `app/models/payment_settings.py`。取代 A 的四个配置项
+`payment_topup_min`、`payment_topup_max`、`payment_pending_timeout_seconds`、`payment_reuse_window_seconds`（由 AIH-TASK-189
+删除）；`payments_enabled`、`payment_topups_open`、建单允许名单仍是配置项（运维开关）。
+
+**行由谁写**：迁移 0038 插入种子行；之后只有 AIH-TASK-189 的 `update_payment_settings`（`app/services/payment_settings.py`）改
+它：全部字段整体替换，条件更新 `WHERE id = 1 AND version = <读到的版本>`，`version + 1`、`updated_at`、`updated_by_user_id`
+一起写，与 `PAYMENT_SETTINGS_UPDATE` 审计（`entity_type = payment_settings`、`entity_id = 1`，`before` / `after` 为全部业务字段
+与 `version`）同一事务（INV-6、INV-13）；影响 0 行就是版本冲突（409）。新值与旧值相同也 +1 版本、写审计。没有插入与删除路径。
+
+**谁读**：建单（A 的 `create_topup`，在快速校验开始时读一次，整次建单用这一份：金额规则、最小恢复额的缓冲、复用窗口、
+`expires_at = now + pending_timeout_seconds`）；客户的充值选项（`GET /api/v1/customer/topup-options`，AIH-TASK-190：最低额、
+最高额、推荐金额、最小恢复额与生效的最低额）；管理端支付设置（`GET` / `PUT /api/v1/admin/payment-settings`，AIH-TASK-191）。
+读不到这一行（迁移没跑）时这几处一律 503 `PAYMENTS_MISCONFIGURED`。
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | INT | 主键，不自增；恒为 1（`ck_payment_settings_singleton`：`id = 1`） |
+| `min_amount` | DECIMAL(20,8) | 非空；最低充值额，2.00–999999.99、两位小数（`ck_payment_settings_min_amount`：`min_amount >= 2 AND min_amount <= 999999.99 AND min_amount = ROUND(min_amount, 2)`） |
+| `max_amount` | DECIMAL(20,8) | 可空；最高充值额，为空时单笔上限是 999999.99（A 的金额正则）；不为空时不小于 `min_amount`、不大于 999999.99、两位小数（`ck_payment_settings_max_amount`：`max_amount IS NULL OR (max_amount >= min_amount AND max_amount <= 999999.99 AND max_amount = ROUND(max_amount, 2))`） |
+| `recovery_buffer` | DECIMAL(20,8) | 非空；最小恢复额的余额缓冲（ADR-0010），0.01–999999.99、两位小数（`ck_payment_settings_recovery_buffer`：`recovery_buffer >= 0.01 AND recovery_buffer <= 999999.99 AND recovery_buffer = ROUND(recovery_buffer, 2)`）；**不能为 0**，见下 |
+| `preset_amounts` | JSON | 非空；推荐金额，**定点字符串**的数组（例如 `["50.00","100.00"]`，不用 JSON 数字，免得浮点解析，INV-10）；形状（1–8 个、互不相同、严格升序、都在最低额与最高额之间）由 189 的服务校验，数据库不管 |
+| `reuse_window_seconds` | INT | 非空；60 秒同额复用的窗口（ADR-0007），0–300（`ck_payment_settings_reuse_window_seconds`） |
+| `pending_timeout_seconds` | INT | 非空；待付超时，2400–86400（`ck_payment_settings_pending_timeout_seconds`） |
+| `version` | INT | 非空；乐观锁，`>= 1`（`ck_payment_settings_version`），每次修改 +1；两个管理员同时改，后提交者 409 |
+| `updated_at` | DATETIME | 非空；最后修改的时刻（种子行为迁移执行的时刻），不带时区的 UTC |
+| `updated_by_user_id` | BIGINT | 可空；外键 → `users(id)` `ON DELETE RESTRICT`（`fk_payment_settings_updated_by_user_id`）；最后修改的管理员，种子行为空 |
+
+**最小恢复额**（设计 §2，189 实现，不落库）：`billing_mode = PREPAID` 且余额 `≤ 0` 的租户建单时，最低额是
+`max(min_amount, ceil(−balance + recovery_buffer))`（向上取到分）。缓冲至少 0.01，所以按这个金额充值后余额至少 RM0.01、严格
+大于 0（spec §42）；缓冲若能为 0，欠整分的租户（例如欠 RM50、充 RM50）充值后余额正好为 0、仍然停机。
+
+约束与索引：
+
+- **恰好一行**：主键 `id` 加 `ck_payment_settings_singleton`；第二行（`id = 2`）被 CHECK 拒绝，再插 `id = 1` 被主键拒绝。
+- 六条字段 CHECK 管范围与精度（两位小数用 `= ROUND(…, 2)`），越界、三位小数、缓冲为 0、`max_amount < min_amount` 都被数据库
+  拒绝。七条 CHECK 的条件文本是 `app/models/payment_settings.py` 的常量，迁移里冻结一份，
+  `tests/backend/test_payment_settings_migration.py` 比对两边；非法插入在 SQLite 与 MySQL 上都被拒绝。
+- `ix_payment_settings_updated_by_user_id (updated_by_user_id)`：外键列的**显式**索引（与 `payments` 的外键索引同一理由：不声明
+  的话 MySQL 会自动建一个模型里没有的索引）。
+- 外键 `RESTRICT`：改过设置的管理员账号不许连带删掉这一行。
+
+**种子值**（迁移 0038 写入；与 A 的配置项缺省一致，部署前后建单行为不变）：
+
+| 列 | 值 |
+| --- | --- |
+| `id` | 1 |
+| `min_amount` | 10.00 |
+| `max_amount` | NULL |
+| `recovery_buffer` | 10.00 |
+| `preset_amounts` | `["50.00","100.00","300.00","500.00","1000.00"]` |
+| `reuse_window_seconds` | 60 |
+| `pending_timeout_seconds` | 3600 |
+| `version` | 1 |
+| `updated_at` | 迁移执行的时刻（MySQL 的 `UTC_TIMESTAMP()`） |
+| `updated_by_user_id` | NULL |
+
+单元测试的 SQLite 由模型 `create_all` 建表，**不带种子行**：需要它的测试自己写入。
+
+### 迁移与回滚（设计 §8）
+
+- 0038 只建这一张新表并插入种子行，不改任何已有表、不读写任何已有行。只在 MySQL 上跑。升级前用 inspector 判表：已存在 →
+  报错、不发任何 DDL、不写行（不做形状比较）；否则发**一条**原子的 `CREATE TABLE`（列、主键、索引、外键、七条 CHECK 都在里面），
+  再发一条 `INSERT` 写种子行（与写 `alembic_version` 同一事务提交）。建表之后、提交之前中断时表在而没有行，重跑在第一步报错：
+  确认表为空后手工 `DROP TABLE payment_settings` 再重跑。`--sql` 离线模式输出这两条语句。
+- `downgrade`：`--sql` 离线模式直接拒绝、不输出 DDL；表不存在 → 跳过；否则删表，不检查行——设置的每次修改都在
+  `PAYMENT_SETTINGS_UPDATE` 审计里（含前后值与版本），删表不丢财务数据。再升级时重新写入种子行，之前改过的值要由管理员照审计
+  重新设置。
+- **生产的回滚是关充值开关**（`BILLING_PAYMENT_TOPUPS_OPEN=false`、清空建单允许名单后重启），不降级 0038。
+
 ---
 
 ## 尚未建的列

@@ -31,6 +31,9 @@ from app.models import (
     notifications as _notification_models,  # noqa: F401  (registers notifications)
 )
 from app.models import (
+    payment_settings as _payment_settings_models,  # noqa: F401  (registers payment_settings)
+)
+from app.models import (
     payments as _payment_models,  # noqa: F401  (registers payments/payment_gateway_events)
 )
 from app.models import (
