@@ -36,6 +36,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.auth import require_customer_writable
 from app.api.customer import router as customer_router
+from app.api.customer_payments import router as customer_payments_router
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.logging import JsonFormatter
@@ -271,18 +272,19 @@ def served_routes() -> set[tuple[str, str]]:
 
 
 def customer_handlers() -> tuple[set[tuple[str, str]], list]:
-    """(method, path) pairs and handlers, straight from the customer router.
+    """(method, path) pairs and handlers, straight from the customer routers.
 
     不走 app 的路由树：子路由延迟挂载时那里可能一条都找不到。路由器带前缀，`route.path` 已是完整
     路径；守卫用例再把这些 (method, path) 与 `CUSTOMER_ROUTES` 对齐，app 新挂的客户接口不在
-    这个路由器上也会失败。
+    这几个路由器上也会失败。客户支付（AIH-TASK-190）是单独的路由模块。
     """
     pairs: set[tuple[str, str]] = set()
     handlers = []
-    for route in customer_router.routes:
-        if isinstance(route, APIRoute):
-            pairs |= {(method, route.path) for method in route.methods}
-            handlers.append(route.endpoint)
+    for router in (customer_router, customer_payments_router):
+        for route in router.routes:
+            if isinstance(route, APIRoute):
+                pairs |= {(method, route.path) for method in route.methods}
+                handlers.append(route.endpoint)
     return pairs, handlers
 
 
@@ -530,6 +532,11 @@ def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
         ("POST", f"{CUSTOMER_PREFIX}/notifications/read-all"),
         ("GET", f"{CUSTOMER_PREFIX}/statements"),
         ("GET", f"{CUSTOMER_PREFIX}/statements/{{statement_id}}"),
+        # 客户支付（AIH-TASK-190）：与开关无关，总是注册。建单 `POST …/topups` 只在
+        # `payments_enabled` 为真时注册，这里的 app 没开，所以不在集合里。
+        ("GET", f"{CUSTOMER_PREFIX}/topup-options"),
+        ("GET", f"{CUSTOMER_PREFIX}/payments"),
+        ("GET", f"{CUSTOMER_PREFIX}/payments/{{payment_id}}"),
     }
 
 

@@ -10,6 +10,7 @@
 - [客户通知](#客户通知)（AIH-TASK-127）：客户自己的门户通知、未读数与标已读（第一批客户写接口）
 - [月度对账单（客户）](#月度对账单客户)（AIH-TASK-160）：客户自己已定稿的对账单列表与详情
 - [客户建单](#客户建单)与[支付回调](#支付回调)（AIH-TASK-177）：客户发起 Stripe 充值、Stripe 的回调；只在 `payments_enabled` 打开时存在
+- [支付（客户）](#支付客户)（AIH-TASK-190）：客户自己的充值选项、支付列表与支付详情；总是注册，金额是两位小数的字符串
 - [管理端客户管理](#管理端客户管理)（AIH-TASK-006）
 - [管理端手工调账](#管理端手工调账)（AIH-TASK-011）
 - [管理端钱包流水](#管理端钱包流水)（AIH-TASK-084）：序号游标分页，是下面「分页」的例外
@@ -3962,6 +3963,147 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 检查顺序：先请求体（422），再鉴权（401 / 403），再「这笔支付存在且在复核」（404 / 409 `PAYMENT_NOT_IN_REVIEW`），
 `CREDIT` 之后才看网关（503 `PAYMENTS_MISCONFIGURED`）与 Stripe 的核对。错误响应都是[信封](#信封spec-107)，文案固定，
 不带金额、原因或 Stripe 的数据。
+
+---
+
+## 支付（客户）
+
+设计依据：设计闸门 #587 `APPROVED: design v3`，全文见
+[design/AIH-TASK-188-payment-settings-portal.md](design/AIH-TASK-188-payment-settings-portal.md) §2「客户接口」「最小恢复额」、§6；
+建立在设计闸门 #580（[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)）与 #585
+（[design/AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md)）之上。实现登记为 AIH-TASK-190。
+
+| 方法与路径 | 主体 | 成功 | 错误 |
+| --- | --- | --- | --- |
+| `GET /api/v1/customer/topup-options` | CUSTOMER 的访问令牌 | 200，能否充值与金额规则 | 401 / 403 / 500 / 503 |
+| `GET /api/v1/customer/payments` | 同上 | 200，自己的支付分页 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/payments/{payment_id}` | 同上 | 200，自己的一笔支付 | 401 / 403 / 404 / 500 / 503 |
+
+- **鉴权**：与其他客户读接口一样用 `require_customer`；租户只取自访问令牌对应的、库里的 user 行，路径、查询串里都没有
+  租户参数（带了 `customer_id`、`tenant_id` 也只会被忽略）；ADMIN 不能调（403 `CUSTOMER_REQUIRED`）。
+- **只读**：不写审计、不写任何行；四种 `account_status` 都返回 200（`DISABLED` / `CLOSED` 照常可读，充值选项给出
+  `ACCOUNT_READ_ONLY`）。
+- **开关**：三个接口**总是注册**，与 `BILLING_PAYMENTS_ENABLED` 无关（建单 `POST /api/v1/customer/topups` 仍只在开关打开时
+  存在，见[客户建单](#客户建单)）。开关关闭时充值选项给出 `PAYMENTS_DISABLED`，列表与详情照常可读。
+- **只有充值选项读支付设置**（管理端「支付设置」那一行）；读不到时 503 `PAYMENTS_MISCONFIGURED`。支付列表与详情不读设置，
+  设置行缺失时照常返回。三个接口都不查 Stripe、不读密钥文件。
+- ⚠️ **金额是恰好两位小数的字符串**（例如 `"50.00"`），不是[金额](#金额inv-10)的 8 位小数通用写法：这三个接口的金额本身就是
+  整分（设计 §2）。客户端照样按十进制解析，不要转成浮点数。时刻是不带时区的 UTC，精确到秒，见[时间](#时间)。
+
+### `GET /api/v1/customer/topup-options` —— 充值选项
+
+没有查询参数。`data` 恰好这 8 个键，按这个顺序：
+
+```json
+{
+  "currency": "MYR",
+  "available": true,
+  "unavailable_reason": null,
+  "min_amount": "10.00",
+  "max_amount": null,
+  "preset_amounts": ["50.00", "100.00", "300.00", "500.00", "1000.00"],
+  "recovery_minimum": null,
+  "effective_minimum": "10.00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `currency` | 恒为 `MYR` |
+| `available` | 现在能不能建单；为假时门户只显示原因，不显示充值表单 |
+| `unavailable_reason` | `available` 为真时为 `null`；否则是下表的一个原因 |
+| `min_amount` | 支付设置里的最低充值额 |
+| `max_amount` | 支付设置里的最高充值额；没设为 `null`（此时单笔上限是 `999999.99`） |
+| `preset_amounts` | 推荐金额（1–8 个，升序），来自支付设置 |
+| `recovery_minimum` | **最小恢复额**：只对余额 ≤ 0 的预付（`PREPAID`）客户有值，等于「欠款 + 余额缓冲」向上取到分；其他情况为 `null` |
+| `effective_minimum` | **生效的最低额**：`max(min_amount, recovery_minimum)`；`recovery_minimum` 为 `null` 时等于 `min_amount`。建单的金额不能低于它 |
+
+不可充值时金额字段照样返回。`available` 为假时，`unavailable_reason` 按下表的顺序取**第一个成立的**（与建单的校验顺序一致，
+开关放最前）：
+
+| 顺序 | `unavailable_reason` | 什么时候 | 对应的建单错误 |
+| --- | --- | --- | --- |
+| 1 | `PAYMENTS_DISABLED` | 支付总开关（`BILLING_PAYMENTS_ENABLED`）关闭 | 建单路径不存在（404） |
+| 2 | `ACCOUNT_READ_ONLY` | 客户的 `account_status` 是 `DISABLED` 或 `CLOSED` | 403 `ACCOUNT_READ_ONLY` |
+| 3 | `TOPUPS_NOT_OPEN` | 建单尚未开放（`payment_topups_open` 为假），且客户不在允许名单里 | 403 `TOPUPS_NOT_OPEN` |
+| 4 | `TOPUP_NOT_ALLOWED` | 客户不是预付（`PREPAID`），例如内部计量客户 | 403 `TOPUP_NOT_ALLOWED` |
+| 5 | `RECOVERY_EXCEEDS_MAXIMUM` | `effective_minimum` 大于单笔上限（`max_amount`，没设时 `999999.99`）：欠款太大，任何金额都建不了单。门户提示联系客服；管理员可调高最高额或人工调账 | 422 `TOPUP_BELOW_RECOVERY_MINIMUM` 或 `TOPUP_AMOUNT_INVALID` |
+
+**最小恢复额**（设计 §2「最小恢复额」）：余额 ≤ 0 的预付客户处于停机状态；按 `effective_minimum` 充值后余额至少等于余额缓冲
+（不小于 RM0.01），严格大于 0，服务恢复。例如缓冲 `10.00`、余额 `-12.345`：`recovery_minimum` 与 `effective_minimum` 都是
+`"22.35"`。⚠️ **最小恢复额只在建单时校验**：建单低于它是 422 `TOPUP_BELOW_RECOVERY_MINIMUM`；从建单到付款之间余额可能继续
+变化（在途用量），缓冲就是为这段留的余地；付款确认入账时不再校验，确认通过就按建单金额入账。这里的余额是读取那一刻已提交的
+余额，不保证建单时仍是同一个值：建单收到 `TOPUP_BELOW_RECOVERY_MINIMUM` 时重新读一次本接口。
+
+### `GET /api/v1/customer/payments` —— 支付列表
+
+| 参数 | 规则 |
+| --- | --- |
+| `page` / `page_size` | 见[分页](#分页spec-108)：1–10000 与 1–100，默认 1 与 20；超出范围 422，在鉴权**之前**校验 |
+
+`data` 是[分页](#分页spec-108)对象（`items`、`page`、`page_size`、`total`，与管理端支付列表相同）。门户其他列表用游标，这里用
+页码，因为支付量小、需要显示总数。只有本客户的支付；**排序**：按 `created_at` 倒序（最新的在前），同一时刻的按内部行 id 倒序
+（后建的在前）。
+
+`items` 里每一项恰好这 8 个键，按这个顺序：
+
+```json
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "amount": "100.00",
+  "currency": "MYR",
+  "status": "PAID",
+  "credited_amount": "100.00",
+  "created_at": "2026-11-08T08:00:00",
+  "paid_at": "2026-11-08T08:01:00",
+  "expires_at": "2026-11-08T09:00:00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 支付的对外 id（uuid4），即建单时得到的 `payment_id`；详情接口用它 |
+| `amount` | 建单时要付的金额（两位小数） |
+| `currency` | 恒为 `MYR` |
+| `status` | 客户侧状态，见下表；不是支付的原始状态 |
+| `credited_amount` | **实际入账额**：这笔支付的 `TOPUP` 账本行金额；没有入账为 `null`。人工「按实付入账」时等于 Stripe 实收，可能不等于 `amount` |
+| `created_at` / `paid_at` / `expires_at` | 建单时刻、本系统确认已付的时刻（没付为 `null`）、付款页的过期时刻 |
+
+**客户侧状态**（由支付状态与人工结案的方式映射）：
+
+| 支付 | `status` | 含义 |
+| --- | --- | --- |
+| `PENDING` | `PENDING` | 等待付款 |
+| `PAID`（含人工按实付入账） | `PAID` | 已入账 |
+| `REVIEW_REQUIRED` | `IN_REVIEW` | 核对中，如有疑问请联系客服 |
+| `FAILED` 且人工结案为不入账 | `NOT_CREDITED` | 未入账，如有疑问请联系客服 |
+| `FAILED`（其他） | `FAILED` | 付款失败 |
+| `EXPIRED` | `EXPIRED` | 已过期 |
+| `CANCELLED` | `CANCELLED` | 已取消 |
+
+**客户看不到的字段**（管理端有、这里没有，INV-7）：手续费、状态原因、原始状态、人工结案的方式与原因与结案人、Stripe 的会话与
+PaymentIntent 编号、Stripe 报的金额与币种（`confirmed_*`）、回调事件、客户 id 与公司名。
+
+### `GET /api/v1/customer/payments/{payment_id}` —— 一笔支付
+
+`data` 是列表项的同一组 8 个键、同样的值。
+
+`payment_id` 不存在、属于别的客户、或格式根本不像 uuid（例如内部自增 id）：同一个 404 `PAYMENT_NOT_FOUND`，错误体相同，几种
+情况不区分（不做格式校验）。没带令牌时先得到 401。
+
+### 错误
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
+| 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
+| 404 | `PAYMENT_NOT_FOUND` | 只有详情：见上 |
+| 422 | `VALIDATION_ERROR` | 只有列表：`page` 或 `page_size` 不合规。`message` 只列字段名，不回显值 |
+| 503 | `PAYMENTS_MISCONFIGURED` | 只有充值选项：支付设置那一行读不到（迁移没跑）。列表与详情不受影响 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 |
+
+错误响应都是[信封](#信封spec-107)。不可充值**不是错误**：充值选项照常 200，原因在 `unavailable_reason` 里。
 
 ---
 
