@@ -11217,7 +11217,7 @@ tasks:
     title: 支付第三批第六层：门户支付历史页与付款结果页
     purpose: >-
       按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「门户页面」的支付历史页与付款结果页：新增门户页 /portal/payments（分页列表）与 /portal/payments/:paymentId（状态与等待中的刷新），门户导航加一项；验收脚本加一个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-192
     acceptance_criteria:
