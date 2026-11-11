@@ -332,10 +332,10 @@
   - AIH-TASK-172..178，设计闸门 #580 v3：Stripe Checkout Session 适配器（卡与 FPX）、`payments` 与 `payment_gateway_events` 两张表、客户建单接口（生产默认关，开启步骤见 [payment-flow.md](payment-flow.md)）
 - [x] 支付 Webhook
   - AIH-TASK-172..178，设计闸门 #580 v3：`POST /api/v1/webhooks/payments/stripe` 验签落库，后台任务向 Stripe 查询权威状态后确认
-- [ ] 主动的 stale payment 对账定时任务
-- [ ] 支付金额不符的人工复核流
+- [x] 主动的 stale payment 对账定时任务（AIH-TASK-180、187，设计闸门 #585 v3）
+- [x] 支付金额不符的人工复核流（AIH-TASK-182..185，设计闸门 #585 v3）
 - [x] 钱包充值入账
-  - AIH-TASK-172..178，设计闸门 #580 v3：可信确认后经 `post_transaction` 写 `TOPUP`，三层唯一约束保证同一笔支付只入账一次；丢失回调的补对账属于下一批（支付第二批）
+  - AIH-TASK-172..178，设计闸门 #580 v3：可信确认后经 `post_transaction` 写 `TOPUP`，三层唯一约束保证同一笔支付只入账一次；丢失回调的补对账已由支付第二批交付（AIH-TASK-180，设计闸门 #585 v3，见 [payment-flow.md §5](payment-flow.md#5-补对账)）
   - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：新充值在 `PENDING_ACTIVATION` / `ENABLED` 下允许，在 `DISABLED`
     下**拒绝**（§112.1 第 1 步），`CLOSED` 下拒绝
 - [ ] **关户（`→ CLOSED`）**：Phase 2 的用量事件与本 Phase 的支付落地后另立任务，走设计闸门（已在「后续计划」）。
