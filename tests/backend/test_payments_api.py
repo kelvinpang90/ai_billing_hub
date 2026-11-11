@@ -337,11 +337,13 @@ def _delete_portal_users(factory: sessionmaker[Session]) -> None:
 
 
 @pytest.fixture(params=["sqlite", "mysql"])
-def api(request, monkeypatch, tmp_path) -> Iterator[Api]:
-    """An untaxed MY / SST version in effect since `TAX_FROM`; payments on and open."""
+def api(request, monkeypatch, tmp_path, payment_settings_seeder) -> Iterator[Api]:
+    """An untaxed MY / SST version in effect since `TAX_FROM`; payments on and open; the seed
+    payment settings of migration 0038 (设计闸门 #587 v3：建单的金额规则来自它)."""
     source = _mysql_world(monkeypatch) if request.param == "mysql" else _sqlite_world()
     world = next(source)
     try:
+        payment_settings_seeder(world.factory)
         world.publish_tax()
         yield Api(world, tmp_path, monkeypatch)
     finally:

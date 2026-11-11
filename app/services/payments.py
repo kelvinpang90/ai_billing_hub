@@ -27,6 +27,10 @@ B 的补对账复用它。照设计五步：
 `create_topup`（AIH-TASK-176，设计 §2「建单」）是客户建单：照设计的校验顺序、60 秒同额复用的两步
 （锁外预查、`lock_tenant_for_customer_write` 锁内重查）、两段事务与事务外调 Stripe。它只插入
 `PENDING` 与写网关 id / `GATEWAY_CREATE_FAILED`，不改支付状态。
+
+AIH-TASK-189（设计闸门 #587 v3 §2「对 A 的建单的修改」）：金额规则、复用窗口与待付超时改为在快速
+校验开始时读一次支付设置（app/services/payment_settings.py）并整次使用；金额第 3 步加最小恢复额
+（`TOPUP_BELOW_RECOVERY_MINIMUM`），锁内在复用查找之前用普通读的余额重判一次。
 """
 
 from __future__ import annotations
@@ -73,6 +77,12 @@ from app.services.account_status import (
     lock_tenant_for_customer_write,
 )
 from app.services.customers import CustomerNotFound
+from app.services.payment_settings import (
+    PaymentSettings,
+    PaymentSettingsMissing,
+    effective_minimum,
+    get_payment_settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -507,13 +517,27 @@ class TopupNotAllowed(AppError):
 
 
 class TopupAmountInvalid(AppError):
-    """Not a string, not in the amount format, or outside the configured minimum and maximum."""
+    """Not a string, not in the amount format, or outside the minimum and maximum of the
+    payment settings."""
 
     code = "TOPUP_AMOUNT_INVALID"
     http_status = 422
 
     def __init__(self) -> None:
         super().__init__("The top-up amount is invalid.")
+
+
+class TopupBelowRecoveryMinimum(AppError):
+    """A suspended `PREPAID` tenant's amount is below `max(min_amount, debt + buffer)`.
+
+    金额本身由充值选项（AIH-TASK-190）给出，不放在错误里（错误信封没有附加字段）。
+    """
+
+    code = "TOPUP_BELOW_RECOVERY_MINIMUM"
+    http_status = 422
+
+    def __init__(self) -> None:
+        super().__init__("The top-up amount is below the minimum needed to restore the service.")
 
 
 class TaxPolicyUnavailable(AppError):
@@ -582,9 +606,9 @@ def create_topup(
     `tenant_id` 来自客户令牌主体（INV-8）；`amount_text` 是请求体里的原值（不是字符串也是
     `TopupAmountInvalid`）。`now` 是不带时区的 UTC、精确到秒。
 
-    顺序：配置 → 锁外快速校验（账户可写、开放、计费模式、金额、税务政策）→ 锁外预查候选并在
-    事务外查询它的会话 → 锁租户的事务里重查并复用或插入 `PENDING`、提交 → 事务外调 Stripe →
-    新事务写网关 id。
+    顺序：配置 → 锁外快速校验（读支付设置；账户可写、开放、计费模式、金额、税务政策）→ 锁外预查
+    候选并在事务外查询它的会话 → 锁租户的事务里重查（含最小恢复额）并复用或插入 `PENDING`、
+    提交 → 事务外调 Stripe → 新事务写网关 id。
     """
     if not settings.payments_enabled:
         raise PaymentsMisconfigured
@@ -597,18 +621,27 @@ def create_topup(
 
     # 锁外快速校验与预查。没有生效的税务政策就在复用之前报错。
     with session_factory() as session:
+        # 读一次、整次使用：锁内不再读，同一次建单前后不会用两份设置（设计闸门 #587 v3 §2）。
+        rules = _payment_settings(session)
         tenant = session.get(Tenant, tenant_id)
         if tenant is None:
             raise CustomerNotFound
         if tenant.account_status in READ_ONLY_STATUSES:
             raise AccountReadOnly
         _check_tenant(tenant, settings)
-        amount = _parse_amount(amount_text, settings)
+        amount = _parse_amount(
+            amount_text,
+            rules,
+            balance=_wallet_balance(session, tenant_id),
+            billing_mode=tenant.billing_mode,
+        )
         _tax_policy_version_id(session, now)
-        candidate = _reusable(session, tenant_id, amount, now=now, settings=settings, excluded=())
+        candidate = _reusable(session, tenant_id, amount, now=now, rules=rules, excluded=())
 
     excluded: set[int] = set()
     if candidate is not None and candidate.gateway_payment_id is not None:
+        # 直接复用一笔开着的候选时不再重判恢复额：它是窗口内同金额建的，建它时已按当时的余额
+        # 校验过，快速校验也刚用当前余额判过一次。
         reused = _reuse_open_session(gateway, candidate)
         if reused is not None:
             return reused
@@ -623,6 +656,7 @@ def create_topup(
                 amount,
                 now=now,
                 settings=settings,
+                rules=rules,
                 excluded=excluded,
                 may_query=locked_pass < _LOCKED_PASSES,
             )
@@ -649,17 +683,54 @@ def _check_tenant(tenant: Tenant, settings: Settings) -> None:
         raise TopupNotAllowed
 
 
-def _parse_amount(amount_text: object, settings: Settings) -> Decimal:
-    """Check 3: the format, then the configured minimum and maximum. Two decimal places."""
+def _payment_settings(session: Session) -> PaymentSettings:
+    try:
+        return get_payment_settings(session)
+    except PaymentSettingsMissing:
+        logger.error("Payment settings are missing; top-ups are refused")
+        raise PaymentsMisconfigured from None
+
+
+def _wallet_balance(session: Session, tenant_id: int) -> Decimal | None:
+    """The committed wallet balance, a plain read (不加锁，不改变 A 的加锁顺序)."""
+    return session.execute(
+        select(Wallet.balance).where(Wallet.tenant_id == tenant_id)
+    ).scalar_one_or_none()
+
+
+def _parse_amount(
+    amount_text: object,
+    rules: PaymentSettings,
+    *,
+    balance: Decimal | None,
+    billing_mode: BillingMode,
+) -> Decimal:
+    """Check 3, first failure wins: the format, `≥ min_amount`, `≥ effective_minimum`,
+    `≤ max_amount` (设计闸门 #587 v3 §2). Two decimal places."""
     if type(amount_text) is not str or not _AMOUNT_PATTERN.fullmatch(amount_text):
         raise TopupAmountInvalid
     amount = Decimal(amount_text).quantize(_CENT)
-    if amount < settings.payment_topup_min:
+    if amount < rules.min_amount:
         raise TopupAmountInvalid
-    maximum = settings.payment_topup_max
+    _check_recovery(amount, rules, balance=balance, billing_mode=billing_mode)
+    maximum = rules.max_amount
     if maximum is not None and amount > maximum:
         raise TopupAmountInvalid
     return amount
+
+
+def _check_recovery(
+    amount: Decimal,
+    rules: PaymentSettings,
+    *,
+    balance: Decimal | None,
+    billing_mode: BillingMode,
+) -> None:
+    """Check 3c: not below the effective minimum. 没有钱包行就没有欠款，只按最低额判。"""
+    if balance is None:
+        return
+    if amount < effective_minimum(balance, billing_mode, rules):
+        raise TopupBelowRecoveryMinimum
 
 
 def _tax_policy_version_id(session: Session, now: dt.datetime) -> int:
@@ -687,13 +758,13 @@ def _reusable(
     amount: Decimal,
     *,
     now: dt.datetime,
-    settings: Settings,
+    rules: PaymentSettings,
     excluded: Collection[int],
 ) -> _Candidate | None:
     """The newest `PENDING` of this tenant and amount created within the reuse window and with
     at least 31 minutes left (ADR-0007); `None` when the window is 0. A plain read: 建单不锁已有
-    支付行（设计 §2「可信确认」第 5 步）。"""
-    window = settings.payment_reuse_window_seconds
+    支付行（设计 §2「可信确认」第 5 步）。窗口来自支付设置。"""
+    window = rules.reuse_window_seconds
     if window <= 0:
         return None
     statement = select(
@@ -753,6 +824,7 @@ def _locked_pass(
     *,
     now: dt.datetime,
     settings: Settings,
+    rules: PaymentSettings,
     excluded: Collection[int],
     may_query: bool,
 ) -> Payment | _Candidate:
@@ -761,11 +833,20 @@ def _locked_pass(
     返回要调 Stripe 的支付（复用的、没有网关 id 的一笔，或新插入的 `PENDING`，都已脱离会话），
     或一个已有网关 id 的候选（`may_query` 为真时：调用方提交后在事务外查询它）。并发的两个请求在
     租户锁上排队，后到者找到先到者刚插入的一笔而复用它。
+
+    最小恢复额用锁内普通读到的余额重判，排在复用查找之前：不过就既不复用、也不新建
+    （设计闸门 #587 v3 §2）。余额已被另一笔入账变正时按普通最低额判。
     """
     tenant = lock_tenant_for_customer_write(session, tenant_id)
     _check_tenant(tenant, settings)
+    _check_recovery(
+        amount,
+        rules,
+        balance=_wallet_balance(session, tenant_id),
+        billing_mode=tenant.billing_mode,
+    )
     tax_policy_version_id = _tax_policy_version_id(session, now)
-    found = _reusable(session, tenant_id, amount, now=now, settings=settings, excluded=excluded)
+    found = _reusable(session, tenant_id, amount, now=now, rules=rules, excluded=excluded)
     if found is not None and found.gateway_payment_id is not None and may_query:
         return found
     if found is not None and found.gateway_payment_id is None:
@@ -783,7 +864,7 @@ def _locked_pass(
             tax_amount=None,
             status=PaymentStatus.PENDING,
             status_reason=None,
-            expires_at=now + dt.timedelta(seconds=settings.payment_pending_timeout_seconds),
+            expires_at=now + dt.timedelta(seconds=rules.pending_timeout_seconds),
             created_at=now,
             updated_at=now,
         )
@@ -905,6 +986,7 @@ __all__ = [
     "TaxPolicyUnavailable",
     "TaxPolicyUnsupported",
     "TopupAmountInvalid",
+    "TopupBelowRecoveryMinimum",
     "TopupNotAllowed",
     "TopupResult",
     "TopupsNotOpen",

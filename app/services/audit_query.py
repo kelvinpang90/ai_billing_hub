@@ -78,6 +78,9 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "monthly_statement",
         # 支付的 public_id：app/services/payments.py 的状态改变审计（AIH-TASK-174）。
         "payments",
+        # 恒为 "1"（单行表的主键，不是用户 id）：app/services/payment_settings.py 的修改审计
+        # （AIH-TASK-189）。
+        "payment_settings",
     }
 )
 

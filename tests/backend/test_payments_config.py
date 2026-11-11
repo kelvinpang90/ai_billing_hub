@@ -1,12 +1,13 @@
 """支付配置项与 Stripe 凭据读取（设计闸门 #580 v3 §2「配置」、§6，AIH-TASK-173）。
 
 配错的值让进程起不来；凭据读不到时返回 `None` 并记 ERROR（只带路径与原因，不带密钥）。
+建单的最低额、最高额、待付超时与复用窗口已改由支付设置维护（设计闸门 #587 v3，AIH-TASK-189），
+「配置项已删除」的用例在 test_payment_settings.py。
 """
 
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -53,11 +54,6 @@ def test_the_payment_settings_default_to_the_design_table() -> None:
     assert settings.stripe_webhook_secret_file == ""
     assert settings.stripe_api_base_url == ""
     assert settings.stripe_api_timeout_seconds == 10
-    assert settings.payment_topup_min == Decimal("10.00")
-    assert isinstance(settings.payment_topup_min, Decimal)
-    assert settings.payment_topup_max is None
-    assert settings.payment_pending_timeout_seconds == 3600
-    assert settings.payment_reuse_window_seconds == 60
     assert settings.payment_webhook_tolerance_seconds == 300
     assert settings.payment_event_poll_seconds == 15
 
@@ -65,8 +61,6 @@ def test_the_payment_settings_default_to_the_design_table() -> None:
 def test_the_payment_settings_come_from_billing_environment_variables(monkeypatch) -> None:
     monkeypatch.setenv("BILLING_PAYMENTS_ENABLED", "true")
     monkeypatch.setenv("BILLING_PAYMENT_TOPUPS_OPEN", "true")
-    monkeypatch.setenv("BILLING_PAYMENT_TOPUP_MIN", "20.50")
-    monkeypatch.setenv("BILLING_PAYMENT_TOPUP_MAX", "5000")
     monkeypatch.setenv("BILLING_STRIPE_API_BASE_URL", f"{API_BASE_URL}/")
     monkeypatch.setenv("BILLING_PAYMENT_EVENT_POLL_SECONDS", "30")
 
@@ -74,24 +68,14 @@ def test_the_payment_settings_come_from_billing_environment_variables(monkeypatc
 
     assert settings.payments_enabled is True
     assert settings.payment_topups_open is True
-    assert settings.payment_topup_min == Decimal("20.50")
-    assert settings.payment_topup_max == Decimal("5000")
     assert settings.stripe_api_base_url == API_BASE_URL
     assert settings.payment_event_poll_seconds == 30
-
-
-def test_an_empty_topup_max_means_no_maximum(monkeypatch) -> None:
-    monkeypatch.setenv("BILLING_PAYMENT_TOPUP_MAX", "")
-    assert Settings().payment_topup_max is None
-    assert Settings(payment_topup_max="  ").payment_topup_max is None
 
 
 @pytest.mark.parametrize(
     ("field", "lowest", "highest"),
     [
         ("stripe_api_timeout_seconds", 1, 60),
-        ("payment_pending_timeout_seconds", 2400, 86_400),
-        ("payment_reuse_window_seconds", 0, 300),
         ("payment_webhook_tolerance_seconds", 60, 600),
         ("payment_event_poll_seconds", 5, 300),
     ],
@@ -104,23 +88,6 @@ def test_the_integer_payment_settings_have_the_design_ranges(
     for bad in (lowest - 1, highest + 1):
         with pytest.raises(ValidationError):
             Settings(**{field: bad})
-
-
-def test_the_topup_minimum_is_not_below_the_myr_floor() -> None:
-    assert Settings(payment_topup_min="2.00").payment_topup_min == Decimal("2.00")
-    for bad in ("1.99", "0", "-10", "NaN"):
-        with pytest.raises(ValidationError):
-            Settings(payment_topup_min=bad)
-
-
-def test_the_topup_maximum_is_between_the_minimum_and_the_stripe_ceiling() -> None:
-    assert Settings(payment_topup_max="10.00").payment_topup_max == Decimal("10.00")
-    assert Settings(payment_topup_max="999999.99").payment_topup_max == Decimal("999999.99")
-    for bad in ("9.99", "1000000.00", "999999.991"):
-        with pytest.raises(ValidationError):
-            Settings(payment_topup_max=bad)
-    with pytest.raises(ValidationError):
-        Settings(payment_topup_min="50.00", payment_topup_max="49.99")
 
 
 def test_the_stripe_api_base_url_is_empty_or_an_https_root() -> None:
