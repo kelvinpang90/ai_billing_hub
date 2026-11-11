@@ -21,6 +21,7 @@ from app.api.admin_ai_catalog import router as admin_ai_catalog_router
 from app.api.admin_audit import router as admin_audit_router
 from app.api.admin_customers import router as admin_customers_router
 from app.api.admin_fx_rates import router as admin_fx_rates_router
+from app.api.admin_payment_settings import router as admin_payment_settings_router
 from app.api.admin_payments import router as admin_payments_router
 from app.api.admin_portal_accounts import router as admin_portal_accounts_router
 from app.api.admin_pricing_preview import router as admin_pricing_preview_router
@@ -171,6 +172,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 管理端支付的列表、详情与复核结案（AIH-TASK-183，设计闸门 #585 v3 §2「管理端接口」）：
     # 与开关无关，总是注册。
     app.include_router(admin_payments_router)
+    # 管理端支付设置的读取与整体替换（AIH-TASK-191，设计闸门 #587 v3 §2「管理端接口」）：
+    # 与开关无关，总是注册。
+    app.include_router(admin_payment_settings_router)
     # 集成方的签名接口：错误信封多一个顶层 `retryable`（app/core/errors.py）。
     app.include_router(integration_usage_router)
     # 支付回调与客户建单（AIH-TASK-177，设计闸门 #580 v3 §2）：只在开关打开时注册，
