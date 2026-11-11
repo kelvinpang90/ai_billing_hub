@@ -196,21 +196,22 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 | 配置 | 缺省 | 约束与说明 |
 | --- | --- | --- |
 | `BILLING_PAYMENTS_ENABLED` | `false` | 回调路由与后台事件处理的开关；为假时回调与建单两个路由都不注册（404），事件任务每一轮直接返回 |
-| `BILLING_PAYMENT_TOPUPS_OPEN` | `false` | 客户建单对所有合格租户开放。⚠️ 完成 [payment-flow.md §8](payment-flow.md#8-对客户开放充值前的检查管理员执行不在-b-的代码里) 的检查、充值界面（C）上线前保持关 |
+| `BILLING_PAYMENT_TOPUPS_OPEN` | `false` | 客户建单对所有合格租户开放。⚠️ 完成 [payment-flow.md §8](payment-flow.md#8-对客户开放充值前的检查管理员执行不在-b-的代码里) 的检查、充值界面（C）上线前保持关；打开与回滚的步骤见 [payment-flow.md §13](payment-flow.md#13-对客户开放充值管理员执行) |
 | `BILLING_PAYMENT_TOPUP_TENANT_ALLOWLIST` | 空 | 逗号分隔的租户 `public_id`（UUID，启动时规范成小写）；`BILLING_PAYMENT_TOPUPS_OPEN` 为假时只有它们能建单，其他租户 403 `TOPUPS_NOT_OPEN`。只用于生产端点复验，复验后清空 |
 | `BILLING_STRIPE_SECRET_KEY_FILE` | 空 | Stripe 密钥所在的**文件路径**（不是密钥本身）；只在开关打开时读取 |
 | `BILLING_STRIPE_WEBHOOK_SECRET_FILE` | 空 | 回调端点签名密钥所在的文件路径；必须是**生产端点自己的**签名密钥（ADR-0015）；只在开关打开时读取 |
 | `BILLING_STRIPE_API_BASE_URL` | 空 | Stripe API 的 https 根地址。⚠️ **仓库里不写默认值**（ADR-0001：公开仓库不写第三方主机名），开启时由管理员在 `.env` 设置；格式校验与 `BILLING_FX_BNM_BASE_URL` 相同；开关打开而它为空视为未配置 |
 | `BILLING_STRIPE_API_TIMEOUT_SECONDS` | `10` | 1–60；Stripe 调用的超时 |
-| `BILLING_PAYMENT_TOPUP_MIN` | `10.00` | 建单最低额（MYR）；不得小于 `2.00`（ADR-0015 的 MYR 下限） |
-| `BILLING_PAYMENT_TOPUP_MAX` | 空（不设上限） | 设了时不得小于最低额、不得大于 `999999.99`（Stripe 单笔上限） |
-| `BILLING_PAYMENT_PENDING_TIMEOUT_SECONDS` | `3600` | 2400–86400；待付超时，也是 Stripe 会话的过期时刻（Stripe 要求创建后 30 分钟到 24 小时） |
-| `BILLING_PAYMENT_REUSE_WINDOW_SECONDS` | `60` | 0–300；ADR-0007 的同额复用窗口 |
 | `BILLING_PAYMENT_WEBHOOK_TOLERANCE_SECONDS` | `300` | 60–600；回调验签的时间窗（签名头的 `t` 与服务端当前时刻之差） |
 | `BILLING_PAYMENT_EVENT_POLL_SECONDS` | `15` | 5–300；事件处理任务 `payment-events-process-due` 的 Beat 间隔 |
 | `BILLING_PAYMENT_RECONCILE_POLL_SECONDS` | `60` | 30–600；补对账任务 `payment-reconcile-due` 的 Beat 间隔（`expires` 为间隔减 1 秒）；开关为假时每一轮直接返回 |
 | `BILLING_PAYMENT_RECONCILE_GRACE_SECONDS` | `300` | 60–3600；建单后至少过这么久才进入补对账，给回调先到的机会 |
 | `BILLING_PAYMENT_RECONCILE_MAX_SECONDS` | `604800`（7 天） | 86400–2592000；建单满这么久、向 Stripe 查询后仍是 `PENDING` 的支付置 `EXPIRED`（`RECONCILE_TIMEOUT`） |
+
+建单的最低额、最高额、待付超时与同额复用窗口原是配置项 `BILLING_PAYMENT_TOPUP_MIN`、`BILLING_PAYMENT_TOPUP_MAX`、
+`BILLING_PAYMENT_PENDING_TIMEOUT_SECONDS`、`BILLING_PAYMENT_REUSE_WINDOW_SECONDS`，已改由管理端支付设置维护（设计闸门 #587 v3，
+[AIH-TASK-188-payment-settings-portal.md](design/AIH-TASK-188-payment-settings-portal.md) §2「支付设置服务」），不再读取这四个环境变量；
+字段与范围见 [payment-flow.md §11](payment-flow.md#11-支付设置)。
 
 补对账的三个配置项依据设计闸门 #585 v3（[AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md) §2「补对账」「配置」）；
 候选查询里的其余时长（孤儿 600 秒、各查询间隔、手续费补抓的 8 天等）是代码常量，不是配置。节奏与表现见

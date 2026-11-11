@@ -317,7 +317,7 @@
     与收据），`PENDING_ACTIVATION` 由本 Phase 的设计闸门定
 - [ ] 客户仪表盘
 - [x] 钱包页（AIH-TASK-100，设计闸门 #393 v3：门户 `/portal/wallet` 的余额卡与按序号翻页的流水表）
-- [ ] 充值 UI（金额不许硬编码）
+- [x] 充值 UI（金额不许硬编码）（AIH-TASK-188..194，设计闸门 #587 v3）
   - ADR-0010：§42 的最小恢复额 = 欠款 + 可配置缓冲（不是只比 0 多一分钱），设计闸门里要写明缓冲的配置项与计算
 - [x] 支付网关适配器 + 选定的马来西亚网关（FPX 优先，依赖 D6）
   - AIH-TASK-172..178，设计闸门 #580 v3：Stripe Checkout Session 适配器（卡与 FPX）、`payments` 与 `payment_gateway_events` 两张表、客户建单接口（生产默认关，开启步骤见 [payment-flow.md](payment-flow.md)）
