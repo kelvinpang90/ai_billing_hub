@@ -10985,7 +10985,7 @@ tasks:
     title: 支付第三批第二层：支付设置服务、最小恢复额与建单改读支付设置
     purpose: >-
       按 docs/design/AIH-TASK-188-payment-settings-portal.md（设计闸门 #587 已批准 v3） §2「支付设置服务」「最小恢复额」「对 A 的建单的修改」：新服务 app/services/payment_settings.py（读、带乐观锁与审计的整体替换、校验、最小恢复额），A 的 create_topup 改为从支付设置读金额规则、复用窗口与待付超时并校验最小恢复额，删除 A 的四个配置项。不加接口：属于 AIH-TASK-190、191。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-188
     acceptance_criteria:
