@@ -10,7 +10,8 @@
 - **CREDIT（按实付入账）**：不加锁检查前提与网关 id → **事务外**
   `get_payment_status` → 按设计表的顺序核对六条 → 新事务依次锁支付、
   钱包、租户（与 A 的顺序相同）并重查五条 → 写入、`post_transaction`
-  （`TOPUP`，金额为 Stripe 实收额）、审计 → 提交。
+  （`TOPUP`，金额为 Stripe 实收额）、审计 → 开具收据（AIH-TASK-200，设计闸门
+  #589 v2 §2；锁当年系列行，返回 `None` 时结果不变）→ 提交。
 
 检查顺序：先共同前提（404 `PAYMENT_NOT_FOUND`、409
 `PAYMENT_NOT_IN_REVIEW`），CREDIT 再看网关 id 与 `gateway`（`None` 为 503
@@ -72,6 +73,7 @@ from app.services.payments import (
     _json,
     _money,
 )
+from app.services.receipts import issue_receipt
 from app.services.wallet_adjustments import BALANCE_OUT_OF_RANGE, BalanceOutOfRange
 
 logger = logging.getLogger(__name__)
@@ -429,6 +431,15 @@ def _credit_locked(
         actor=actor,
         context=context,
         now=now,
+    )
+    # 设计闸门 #589 v2 §2：同一事务开具收据，付款方式取第 2 步那次查询；返回 None（检查不过）
+    # 不改变结果，入账照常提交。异常不捕获：随整个事务回滚（第 6 步）。
+    issue_receipt(
+        session,
+        payment=payment,
+        payment_method=reported.payment_method_type,
+        now=now,
+        send_email=True,
     )
 
 
