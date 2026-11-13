@@ -31,6 +31,10 @@ B 的补对账复用它。照设计五步：
 AIH-TASK-189（设计闸门 #587 v3 §2「对 A 的建单的修改」）：金额规则、复用窗口与待付超时改为在快速
 校验开始时读一次支付设置（app/services/payment_settings.py）并整次使用；金额第 3 步加最小恢复额
 （`TOPUP_BELOW_RECOVERY_MINIMUM`），锁内在复用查找之前用普通读的余额重判一次。
+
+AIH-TASK-200（设计闸门 #589 v2 §2）：判定通过、写 `PAID` 并入账与审计之后、提交之前，在同一事务里
+`issue_receipt`（锁顺序在末尾多一把当年系列行的锁）。返回 `None` 时入账照常提交；
+它抛出的异常不捕获。
 """
 
 from __future__ import annotations
@@ -83,6 +87,7 @@ from app.services.payment_settings import (
     effective_minimum,
     get_payment_settings,
 )
+from app.services.receipts import issue_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +274,15 @@ def _apply(
                 actor_role=SYSTEM_ACTOR_ROLE,
             )
             _audit(session, payment, before, now=now)
+            # 设计闸门 #589 v2 §2（AIH-TASK-200）：同一事务开具收据。返回 None（检查不过）不改变
+            # 结果与提交；数据库错误不捕获，整个事务回滚。
+            issue_receipt(
+                session,
+                payment=payment,
+                payment_method=reported.payment_method_type,
+                now=now,
+                send_email=True,
+            )
             return _result(payment, old_status, reported, posted=not outcome.replayed)
         _mark_review(payment, reported, failure, pi_taken=pi_taken, now=now)
     elif reported.state is GatewayState.INCONSISTENT:
