@@ -13,6 +13,11 @@
   的 422、开关关闭时 CREDIT 503 而 CLOSE 200（读接口照常）、凭据读不到时 CREDIT 503、
   `resolve_review` 的错误码经接口原样返回、原因不进日志。
 
+收据字段（设计闸门 #589 v2 §2「管理端接口」，AIH-TASK-203）：列表项在 B 定的字段之后多
+`receipt_number`，详情（含结案响应）在 `events` 之前多 `receipt_id`、`receipt_number`、
+`receipt_issued_at`；CREDIT 成功后响应带着刚开具的收据。收据下载与其余收据字段的用例在
+test_admin_receipts_api.py。MySQL 上的清场由 payment_world 先清收据、系列归零，再删支付。
+
 支付、租户与假 Stripe 用共用的 payment_world.py；本文件的夹具只在这里用，定义在这里。
 Stripe 一律是注入了假传输的 `StripeGateway`（monkeypatch `admin_payments.get_payment_gateway`），
 不联网；结案时刻经 `admin_payments.utc_now` 注入，不 sleep。
@@ -40,6 +45,8 @@ from payment_world import (
     World,
     _populate,
     build_mysql_world,
+    insert_tax_version,
+    seed_receipt_series,
 )
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.pool import StaticPool
@@ -59,6 +66,7 @@ from app.models.payments import (
     PaymentGatewayEvent,
     PaymentStatus,
 )
+from app.models.receipts import PaymentReceipt
 from app.payments.base import GatewayState
 from app.services.auth import utc_now
 from app.services.payments import AMOUNT_MISMATCH
@@ -72,8 +80,8 @@ REASON = "Fictional review note: payer Aminah confirmed by phone, ref Z4PQ8"
 # 事件 `metadata_json` 里的标记：响应里不许出现。
 METADATA_MARKER = "fictional-metadata-marker-7c1d"
 
-# 设计 §2 的字段与顺序：断言「恰好等于」，按顺序比。
-SUMMARY_KEYS = [
+# 设计 §2 的字段与顺序：断言「恰好等于」，按顺序比。B 定的列表项字段：
+PAYMENT_KEYS = [
     "id",
     "customer_id",
     "customer_name",
@@ -89,8 +97,11 @@ SUMMARY_KEYS = [
     "paid_at",
     "review_required_at",
 ]
+# 收据字段（设计闸门 #589 v2 §2「管理端接口」）追加在 B 定的字段之后：列表项加收据号；
+# 详情在 B 定的字段之后、`events` 之前依次加三个。
+SUMMARY_KEYS = [*PAYMENT_KEYS, "receipt_number"]
 DETAIL_KEYS = [
-    *SUMMARY_KEYS,
+    *PAYMENT_KEYS,
     "confirmed_amount",
     "confirmed_currency",
     "credited_amount",
@@ -100,8 +111,12 @@ DETAIL_KEYS = [
     "resolved_at",
     "resolved_by",
     "resolution_reason",
+    "receipt_id",
+    "receipt_number",
+    "receipt_issued_at",
     "events",
 ]
+RECEIPT_KEYS = ("receipt_id", "receipt_number", "receipt_issued_at")
 EVENT_KEYS = [
     "gateway_event_id",
     "event_type",
@@ -329,6 +344,8 @@ def test_list_items_have_exactly_the_design_fields_in_order(world, client) -> No
         "created_at": CREATED.isoformat(),
         "paid_at": CREATED.isoformat(),
         "review_required_at": None,
+        # 这笔没有收据（世界里的支付不经开具）。
+        "receipt_number": None,
     }
 
 
@@ -536,6 +553,7 @@ def test_detail_has_exactly_the_design_fields_and_ordered_events(world, client) 
         "resolved_at",
         "resolved_by",
         "resolution_reason",
+        *RECEIPT_KEYS,
     ):
         assert data[key] is None, key
     assert [event["gateway_event_id"] for event in data["events"]] == [
@@ -614,11 +632,55 @@ def test_credit_returns_the_detail_with_the_credited_amount(world, client, caplo
     assert "Z4PQ8" not in caplog.text
 
 
+def test_a_successful_credit_returns_the_receipt_just_issued(world, client) -> None:
+    """设计闸门 #589 v2：CREDIT 在入账事务里开具收据，结案响应就带着它。"""
+    # `create_all` 建的 SQLite 库没有系列行；MySQL 上迁移 0039 已写过（这里什么都不做）。
+    seed_receipt_series(world.factory)
+    # 世界自带的税务政策版本过不了 `parse_treatment`：换一版读得出的，开具检查才通过。
+    tax_version_id = insert_tax_version(world)
+    payment = world.payment(
+        world.customer(),
+        status=PaymentStatus.REVIEW_REQUIRED,
+        reason=AMOUNT_MISMATCH,
+        tax_version_id=tax_version_id,
+    )
+    set_columns(world, payment, confirmed_amount=Decimal("99.99"), confirmed_currency="MYR")
+    serve_paid(world, payment, amount_total=9999)
+
+    data = data_of(resolve(client, payment, {"action": "CREDIT", "reason": REASON}))
+
+    assert list(data) == DETAIL_KEYS
+    assert (data["status"], data["resolution"]) == ("PAID", "CREDITED")
+    assert data["receipt_number"] is not None
+    with world.factory() as session:
+        receipt = session.execute(
+            select(PaymentReceipt)
+            .join(Payment, Payment.id == PaymentReceipt.payment_id)
+            .where(Payment.public_id == payment.public_id)
+        ).scalar_one()
+        stored = (receipt.public_id, receipt.receipt_number, receipt.issued_at)
+    assert (data["receipt_id"], data["receipt_number"], data["receipt_issued_at"]) == (
+        stored[0],
+        stored[1],
+        RESOLVED_AT.isoformat(),
+    )
+    assert stored[2] == RESOLVED_AT
+    assert data["receipt_number"] == f"ACV-AIR-{RESOLVED_AT.year}-000001"
+    # 列表里同一笔带着同一个收据号；GET 详情与结案响应相同。
+    [item] = data_of(client.get(PAYMENTS))["items"]
+    assert item["receipt_number"] == data["receipt_number"]
+    assert data_of(client.get(f"{PAYMENTS}/{payment.public_id}")) == data
+
+
 def test_close_returns_the_detail_without_a_credit(world, client) -> None:
     payment = in_review(world)
 
     data = data_of(resolve(client, payment, {"action": "CLOSE", "reason": REASON}))
 
+    assert list(data) == DETAIL_KEYS
+    # CLOSE 不开具收据。
+    for key in RECEIPT_KEYS:
+        assert data[key] is None, key
     assert (data["status"], data["status_reason"], data["resolution"]) == (
         "FAILED",
         AMOUNT_MISMATCH,

@@ -1,10 +1,14 @@
-"""Admin payment views and the review resolution request (AIH-TASK-183).
+"""Admin payment views and the review resolution request (AIH-TASK-183, AIH-TASK-203).
 
-设计闸门 #585 v3 §2「管理端接口」；契约见 [docs/api.md](../../docs/api.md)「支付（管理端）」。
+设计闸门 #585 v3 §2「管理端接口」；收据字段见设计闸门 #589 v2 §2「管理端接口」（AIH-TASK-203）；
+契约见 [docs/api.md](../../docs/api.md)「支付（管理端）」。
 
-⚠️ **视图是字段白名单，不直接序列化 ORM 对象**：列表项恰好 14 个键，详情在其上按设计的顺序
-加 10 个；事件每项恰好 7 个键。内部自增 id、`tenant_id`、`resolved_by_user_id`、
-`tax_policy_version_id`、`wallet_credit_amount`、事件的 `metadata_json`、指纹与租约一律不出这里，
+⚠️ **视图是字段白名单，不直接序列化 ORM 对象**：B 定的列表项恰好 14 个键，详情在其上按设计的
+顺序加 10 个；事件每项恰好 7 个键。收据字段追加在 B 定的字段之后：列表项再加 `receipt_number`
+（15 个键）；详情在 `resolution_reason` 之后、`events` 之前依次加 `receipt_id`、`receipt_number`、
+`receipt_issued_at`（27 个键）。所以详情不继承列表项，两者共用 B 的 14 个键的基类。
+内部自增 id、`tenant_id`、`resolved_by_user_id`、`tax_policy_version_id`、
+`wallet_credit_amount`、事件的 `metadata_json`、指纹与租约一律不出这里，
 任何密钥都不在这些表里。对外的引用是 `public_id`（支付与客户）与 Stripe 的对象 id。
 
 ⚠️ 金额是恰好 8 位小数的字符串（`money_text`），不经 float（INV-10）；时刻是不带时区的 UTC。
@@ -45,8 +49,8 @@ class ResolvePaymentRequest(BaseModel):
     reason: _Reason
 
 
-class AdminPaymentSummary(BaseModel):
-    """One payment in the admin list. `id` / `customer_id` are `public_id`s."""
+class _AdminPaymentFields(BaseModel):
+    """B 的列表项 14 个键；列表与详情各自在其后按设计的顺序追加。"""
 
     id: str
     customer_id: str
@@ -70,6 +74,13 @@ class AdminPaymentSummary(BaseModel):
     review_required_at: dt.datetime | None
 
 
+class AdminPaymentSummary(_AdminPaymentFields):
+    """One payment in the admin list. `id` / `customer_id` are `public_id`s."""
+
+    # 这笔支付的收据号；没有为 null（设计闸门 #589 v2）。
+    receipt_number: str | None
+
+
 class AdminPaymentEventView(BaseModel):
     """One gateway event linked to the payment; never its `metadata_json`."""
 
@@ -82,8 +93,8 @@ class AdminPaymentEventView(BaseModel):
     fingerprint_conflict_at: dt.datetime | None
 
 
-class AdminPaymentDetail(AdminPaymentSummary):
-    """One payment with its confirmation, credit, resolution and events."""
+class AdminPaymentDetail(_AdminPaymentFields):
+    """One payment with its confirmation, credit, resolution, receipt and events."""
 
     confirmed_amount: str | None
     confirmed_currency: str | None
@@ -96,6 +107,10 @@ class AdminPaymentDetail(AdminPaymentSummary):
     # 结案管理员的邮箱。
     resolved_by: str | None
     resolution_reason: str | None
+    # 收据的 `public_id`、收据号与开具时刻；没有收据时都为 null（设计闸门 #589 v2）。
+    receipt_id: str | None
+    receipt_number: str | None
+    receipt_issued_at: dt.datetime | None
     # 按 `received_at` 升序、同一时刻按内部 id 升序，最多 100 条。
     events: list[AdminPaymentEventView]
 
@@ -125,7 +140,10 @@ def _summary_fields(payment: Payment, customer_id: str, customer_name: str) -> d
 
 
 def admin_payment_summary(row: PaymentListRow) -> AdminPaymentSummary:
-    return AdminPaymentSummary(**_summary_fields(row.payment, row.customer_id, row.customer_name))
+    return AdminPaymentSummary(
+        **_summary_fields(row.payment, row.customer_id, row.customer_name),
+        receipt_number=row.receipt_number,
+    )
 
 
 def admin_payment_event(event: PaymentGatewayEvent) -> AdminPaymentEventView:
@@ -153,6 +171,9 @@ def admin_payment_detail(row: PaymentDetailRow) -> AdminPaymentDetail:
         resolved_at=payment.resolved_at,
         resolved_by=row.resolved_by,
         resolution_reason=payment.resolution_reason,
+        receipt_id=row.receipt_id,
+        receipt_number=row.receipt_number,
+        receipt_issued_at=row.receipt_issued_at,
         events=[admin_payment_event(event) for event in row.events],
     )
 

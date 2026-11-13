@@ -3816,16 +3816,19 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 [design/AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md) §2「管理端接口」「人工复核出口」、§6；
 建立在设计闸门 #580（[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)）之上。
 实现登记为 AIH-TASK-182（复核服务）与 AIH-TASK-183（接口）。
+收据（收据下载与支付的收据字段）的设计依据：设计闸门 #589 `APPROVED: design v2`，全文见
+[design/AIH-TASK-196-payment-receipts.md](design/AIH-TASK-196-payment-receipts.md) §2「管理端接口」、§6；实现登记为 AIH-TASK-203。
 
 | 方法与路径 | 成功 | 错误 |
 | --- | --- | --- |
 | `GET /api/v1/admin/payments` | 200，支付分页 | 401 / 403 / 422 / 503 |
 | `GET /api/v1/admin/payments/{payment_id}` | 200，支付详情 | 401 / 403 / 404 / 503 |
 | `POST /api/v1/admin/payments/{payment_id}/resolve` | 200，结案后的支付详情 | 见下面「错误」 |
+| `GET /api/v1/admin/receipts/{receipt_id}/download` | 200，一张收据的 PDF 附件 | 401 / 403 / 404 / 500 / 503 |
 
 - **鉴权**：只有 ADMIN 能调（ADMIN 登录必过 2FA）；匿名 401 `TOKEN_INVALID`，CUSTOMER 403 `ADMIN_REQUIRED`。管理端跨客户
   可见。手续费、状态原因与人工结案信息只在这几个接口里，客户接口看不到（INV-7）。
-- **开关**：这三个接口**总是注册**，与 `BILLING_PAYMENTS_ENABLED` 无关。开关关闭时列表通常为空，读接口照常可用；
+- **开关**：这四个接口**总是注册**，与 `BILLING_PAYMENTS_ENABLED` 无关。开关关闭时列表通常为空，读接口照常可用；
   「不入账结案」照常可用，「按实付入账」是 503 `PAYMENTS_MISCONFIGURED`。
 - 列表与详情**只读**：不写审计、不写任何行。
 - `{payment_id}` 是支付的 `id`（`public_id`，即客户建单时得到的 `payment_id`）。
@@ -3845,7 +3848,7 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 - 未知的查询参数忽略，与其他列表接口一致。几个筛选按 AND 组合。
 - **排序**：按 `created_at` 倒序（最新的在前）；同一时刻的按内部行 id 倒序（后建的在前）。
 
-`data` 是[分页](#分页spec-108)对象，`items` 里每一项恰好这 14 个键，按这个顺序：
+`data` 是[分页](#分页spec-108)对象，`items` 里每一项恰好这 15 个键，按这个顺序：
 
 ```json
 {
@@ -3862,7 +3865,8 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
   "resolution": null,
   "created_at": "2026-11-08T08:00:00",
   "paid_at": "2026-11-08T08:01:00",
-  "review_required_at": null
+  "review_required_at": null,
+  "receipt_number": "ACV-AIR-2026-000001"
 }
 ```
 
@@ -3878,12 +3882,13 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 | `status_reason` | 状态原因码（例如 `AMOUNT_MISMATCH`、`NO_GATEWAY_SESSION`），没有为 `null`。人工结案后保留进入复核时的原因 |
 | `resolution` | 人工结案的方式：`CREDITED`（按实付入账，状态 `PAID`）或 `CLOSED`（不入账结案，状态 `FAILED`）；未结案为 `null` |
 | `created_at` / `paid_at` / `review_required_at` | 建单时刻、本系统确认已付的时刻（人工入账时为管理员提交的时刻）、进入复核的时刻；不带时区的 UTC，精确到秒，见[时间](#时间) |
+| `receipt_number` | 这笔支付的收据号 `ACV-AIR-<马来西亚年份>-<6 位序号>`；没有收据为 `null`（只有 `PAID` 的支付有收据；已付而暂时没有收据时由补发扫描补开） |
 
 金额都是恰好 8 位小数的字符串（见[金额](#金额inv-10)）。不返回事件的原始字段（`metadata_json`）、Stripe 的密钥或任何内部 id。
 
 ### `GET /api/v1/admin/payments/{payment_id}` —— 支付详情
 
-`data` 是列表项的 14 个键，后面再按这个顺序加 10 个：
+`data` 是列表项除 `receipt_number` 之外的 14 个键（顺序同列表），后面再按这个顺序加 13 个（共 27 个）：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -3895,6 +3900,9 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 | `resolved_at` | 人工结案的时刻；未结案为 `null` |
 | `resolved_by` | 结案管理员的邮箱；未结案为 `null` |
 | `resolution_reason` | 管理员结案时填的原因；未结案为 `null` |
+| `receipt_id` | 这笔支付的收据的对外 id（uuid4），[下载收据](#get-apiv1adminreceiptsreceipt_iddownload--下载一张收据)用它；没有收据为 `null` |
+| `receipt_number` | 收据号，同列表；没有收据为 `null` |
+| `receipt_issued_at` | 收据的开具时刻（不带时区的 UTC，精确到秒）；没有收据为 `null` |
 | `events` | 这笔支付关联的回调事件，按 `received_at` 升序、同一时刻按内部 id 升序，最多 100 条 |
 
 `events` 每项恰好这 7 个键：
@@ -3936,7 +3944,27 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
   改变、账本行同一事务提交；任何一项不过都什么也不写，可以重试。
 - **结案后是终态**：之后无论 Stripe 再报什么（迟到的付款成功事件、补对账），支付状态都不再改变；再次结案 409
   `PAYMENT_NOT_IN_REVIEW`。
-- 成功 200，`data` 是结案后的支付详情（与 `GET …/payments/{payment_id}` 同一个查询、同样的字段）。
+- 成功 200，`data` 是结案后的支付详情（与 `GET …/payments/{payment_id}` 同一个查询、同样的字段，含三个收据字段）。
+  `CREDIT` 成功时收据在入账的同一事务里开具，响应里就是刚开具的收据；开具前的检查不过时入账照常、三个收据字段为
+  `null`，收据稍后由补发扫描补开。`CLOSE` 不开具收据。
+
+### `GET /api/v1/admin/receipts/{receipt_id}/download` —— 下载一张收据
+
+没有查询参数；`{receipt_id}` 是支付详情里的 `receipt_id`。响应与错误同客户的
+[下载接口](#get-apiv1customerreceiptsreceipt_iddownload--下载一张收据)，只是**不按客户过滤**：任一客户的收据都下载得到。
+成功时**不是**[信封](#信封spec-107)，而是文件本身：
+
+- 200，`Content-Type: application/pdf`；
+- `Content-Disposition: attachment; filename="<receipt_number>.pdf"`，例如 `filename="ACV-AIR-2026-000001.pdf"`。文件名只由收据号
+  组成（ASCII）；
+- `Cache-Control: no-store`。
+
+PDF 每次下载由服务端从开具时冻结的收据快照现生成，与客户下载到的字节相同。只读：不写审计、不写任何行。
+
+`receipt_id` 不存在、或格式根本不像 uuid（例如内部自增 id、收据号、支付 id）：404 `RECEIPT_NOT_FOUND`（不做格式校验）。
+鉴权在前：没带令牌 401，CUSTOMER 的令牌（即使是收据所属的客户）403 `ADMIN_REQUIRED`。存下的快照不合规（数据被破坏，正常
+不会发生）：500 `INTERNAL_ERROR`，错误信封与通用 500 相同，服务端记一条只带收据 id 的 ERROR 日志。失败的响应都是 JSON
+信封，没有 `Content-Disposition`。
 
 ### 错误
 
@@ -3946,6 +3974,7 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 | 403 | `ADMIN_REQUIRED` | 调用者不是 ADMIN | — |
 | 422 | `VALIDATION_ERROR` | 列表：`status`、`page`、`page_size` 或日期不合规，`created_from` 晚于 `created_to`；结案：请求体不合规。`message` 只列字段名，不回显值 | 改正参数 |
 | 404 | `PAYMENT_NOT_FOUND` | 详情与结案：没有这笔支付 | — |
+| 404 | `RECEIPT_NOT_FOUND` | 只有收据下载：没有这张收据（见上） | 刷新支付详情取当前的 `receipt_id` |
 | 409 | `PAYMENT_NOT_IN_REVIEW` | 支付不是 `REVIEW_REQUIRED`，或已被别人结案 | 刷新页面看当前状态 |
 | 409 | `RESOLUTION_CONFLICT` | 入账时与并发的处理冲突 | 刷新页面看当前状态 |
 | 503 | `PAYMENTS_MISCONFIGURED` | 只有 `CREDIT`：开关关闭，或 Stripe 凭据读不到 | 稍后重试；不要因为它改用不入账结案 |
@@ -3957,7 +3986,7 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 | 409 | `GATEWAY_PAYMENT_REUSED` | 这笔钱已给另一笔支付入过账 | 不入账结案，**不退款** |
 | 409 | `GATEWAY_REFUNDED_OR_DISPUTED` | 这笔钱在 Stripe 已退过款（全部或部分）或有争议 | 不入账结案，**不再退款** |
 | 422 | `BALANCE_OUT_OF_RANGE` | 入账后余额越界 | 不入账结案并退款，或先联系 Kelvin |
-| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id`；什么也没写 | 重试；仍失败时按 `request_id` 查日志 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id`；什么也没写。收据下载时存下的快照不合规也是它（见上） | 重试；仍失败时按 `request_id` 查日志 |
 | 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 | 稍后重试 |
 
 检查顺序：先请求体（422），再鉴权（401 / 403），再「这笔支付存在且在复核」（404 / 409 `PAYMENT_NOT_IN_REVIEW`），

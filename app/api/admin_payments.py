@@ -1,6 +1,10 @@
-"""Admin payments: list, detail and the review resolution (AIH-TASK-183).
+"""Admin payments: list, detail, the review resolution and receipt download (AIH-TASK-183, 203).
 
-设计闸门 #585 v3 §2「管理端接口」、§6；契约见 [docs/api.md](../../docs/api.md)「支付（管理端）」。
+设计闸门 #585 v3 §2「管理端接口」、§6；收据见设计闸门 #589 v2 §2「管理端接口」、§6
+（AIH-TASK-203）；契约见 [docs/api.md](../../docs/api.md)「支付（管理端）」。
+
+收据下载由 app/api/receipt_download.py 完成（与客户共用），这里传 `tenant_id=None`：不按租户过滤，
+响应与错误同客户的下载接口（404 `RECEIPT_NOT_FOUND`、快照不合规 500 `INTERNAL_ERROR`）。
 
 ⚠️ **每个处理函数的第一条语句是 `require_admin(request)`**，与 app/api/admin_customers.py
 同一条：鉴权是显式调用，不挂在路由器上。`tests/backend/test_admin_customers_api.py` 从路由表枚举
@@ -25,6 +29,7 @@ from fastapi import APIRouter, Query, Request
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.auth import request_context, require_admin, require_session_factory
+from app.api.receipt_download import ReceiptPdfResponse, receipt_pdf_response
 from app.core.logging import current_request_id
 from app.models.payments import PaymentStatus
 from app.payments import get_payment_gateway
@@ -44,6 +49,7 @@ from app.services.payment_review import ReviewPaymentNotFound, resolve_review
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 _PAYMENTS = "/payments"
+_RECEIPTS = "/receipts"
 
 # 超出范围是 422，不静默截断（spec §108）。与 admin_usage_events.py 的同名别名一致。
 PageNumber = Annotated[int, Query(ge=1, le=MAX_PAGE)]
@@ -113,6 +119,14 @@ def resolve_payment(
     # `resolve_review` 已提交；用与 GET 详情相同的查询重新读出。
     detail = _detail(factory, resolved)
     return success(detail, request_id=current_request_id())
+
+
+@router.get(_RECEIPTS + "/{receipt_id}/download", response_class=ReceiptPdfResponse)
+def download_receipt(request: Request, receipt_id: str) -> ReceiptPdfResponse:
+    """Any tenant's receipt as a PDF attachment; 404 `RECEIPT_NOT_FOUND` if absent."""
+    require_admin(request)
+    # 管理端不按租户过滤（设计闸门 #589 v2 §2「管理端接口」）。
+    return receipt_pdf_response(require_session_factory(request), receipt_id, tenant_id=None)
 
 
 def _detail(factory: sessionmaker[Session], payment_id: str) -> AdminPaymentDetail:
