@@ -11509,7 +11509,7 @@ tasks:
     title: 支付第四批第三层：付款邮件的模板与渲染函数并登记进邮件 outbox
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「付款邮件」：app/core/email_templates.py 加 TEMPLATE_PAYMENT_RECEIPT，app/tasks/outbox.py 加 _render_receipt_email 并登记进 _RENDERERS，让 AIH-TASK-197 写的 PAYMENT_RECEIPT_EMAIL_REQUESTED 行由现有 recover 投递；docs/api.md 的 outbox_backlog 一行与 docs/runbook.md 的已处理类型清单、按类型的死信处置补上这个类型。不改写邮件行的地方。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-197
     acceptance_criteria:
