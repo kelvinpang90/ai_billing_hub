@@ -45,7 +45,12 @@ from urllib.parse import parse_qs
 import httpx2
 import pytest
 from alembic.config import Config
-from payment_world import remove_payment_settings, reset_payment_settings, seed_payment_settings
+from payment_world import (
+    clean_receipts,
+    remove_payment_settings,
+    reset_payment_settings,
+    seed_payment_settings,
+)
 from sqlalchemy import Engine, create_engine, delete, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from test_usage_billing import _SQLITE_LEDGER_TRIGGER
@@ -78,6 +83,7 @@ from app.services.payments import (
     TopupsNotOpen,
     create_topup,
 )
+from app.services.receipts import AGGREGATE_PAYMENT_RECEIPT
 
 TEST_EMAIL_DOMAIN = "@payment-create-test.example.com"
 # 虚构的地址：这些用例不会连到任何主机。
@@ -495,7 +501,11 @@ def _clean(engine: Engine) -> None:
     税务政策版本拒绝 DELETE（触发器），只能在关掉外键检查后 TRUNCATE。
     支付与事件行在用例后删掉：告警用例与本文件共用这个库（设计 §2「告警」）。
     支付设置换回种子行：下一个用例不带着改过（或删掉）的设置。
+    收据先于支付清掉（`clean_receipts`）：复用这个清场的用例里支付走到 PAID 时会开具收据
+    （AIH-TASK-200），收据以 RESTRICT 外键引用支付。
     """
+    with engine.begin() as connection:
+        clean_receipts(connection)
     with engine.begin() as connection:
         connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
         try:
@@ -511,7 +521,11 @@ def _clean(engine: Engine) -> None:
         connection.execute(delete(Wallet))
         connection.execute(delete(Project))
         connection.execute(delete(Tenant))
-        connection.execute(delete(DomainOutbox).where(DomainOutbox.aggregate_type == "tenant"))
+        connection.execute(
+            delete(DomainOutbox).where(
+                DomainOutbox.aggregate_type.in_(("tenant", AGGREGATE_PAYMENT_RECEIPT))
+            )
+        )
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 
 
