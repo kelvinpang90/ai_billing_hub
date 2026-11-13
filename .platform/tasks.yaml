@@ -11662,7 +11662,7 @@ tasks:
     title: 支付第四批第六层：收据补发扫描、Beat 登记与缺收据告警
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「补发扫描」「告警」：新任务 app/tasks/receipts.py 的 issue_missing（每 300 秒，给没有收据的 PAID 支付补开、不发邮件），Beat 登记，wallet_negative_balance 维度加一条 P2 判据，docs/runbook.md 与 docs/api.md 里该维度的说明同步。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-200
     acceptance_criteria:
