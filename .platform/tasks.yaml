@@ -11456,7 +11456,7 @@ tasks:
     title: 支付第四批第二层：付款方式字段与收据开具服务（编号、快照、检查与邮件行）
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「付款方式」「编号」「快照」「开具」「付款邮件」：A 的 GatewayPaymentStatus 加 payment_method_type；新服务 app/services/receipts.py 的 issue_receipt（幂等、只读检查在前、分配编号、写快照、按需写付款邮件 outbox 行）。不接进入账路径：属于 AIH-TASK-200。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-196
     acceptance_criteria:
