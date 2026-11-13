@@ -22,6 +22,10 @@ B 的补对账复用它。照设计五步：
 
 ⚠️ 余额只经 `post_transaction` 的账本行变动（INV-4）：这里锁钱包行只为固定加锁顺序，不改它。
 
+AIH-TASK-200（设计闸门 #589 v2 §2）：判定通过、写 `PAID` 并入账与审计之后、提交之前调用
+`issue_receipt(send_email=True)`，收据、系列行与付款邮件行与入账同一次提交；锁顺序变为「支付 → 钱包
+→ 租户 → 当年系列行」。返回 `None` 时入账照常提交；开具时的数据库错误不捕获，整个事务回滚。
+
 ⚠️ 日志只带 `payments.public_id`、状态与原因码（设计 §6），不带金额、请求体与密钥。
 
 `create_topup`（AIH-TASK-176，设计 §2「建单」）是客户建单：照设计的校验顺序、60 秒同额复用的两步
@@ -83,6 +87,7 @@ from app.services.payment_settings import (
     effective_minimum,
     get_payment_settings,
 )
+from app.services.receipts import issue_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +274,16 @@ def _apply(
                 actor_role=SYSTEM_ACTOR_ROLE,
             )
             _audit(session, payment, before, now=now)
+            # 设计闸门 #589 v2 §2：入账与审计之后、提交之前开具收据（锁顺序末尾多一把当年系列行）。
+            # 返回 None（开具检查不过）时入账照常提交，收据由补发扫描再试；返回值不影响结果。
+            # 异常不捕获：整个事务回滚（INV-13）。
+            issue_receipt(
+                session,
+                payment=payment,
+                payment_method=reported.payment_method_type,
+                now=now,
+                send_email=True,
+            )
             return _result(payment, old_status, reported, posted=not outcome.replayed)
         _mark_review(payment, reported, failure, pi_taken=pi_taken, now=now)
     elif reported.state is GatewayState.INCONSISTENT:

@@ -144,14 +144,21 @@ def stripe_session(
     intent_id: str | None = None,
     fee: int | None = 290,
     fee_currency: str | None = "myr",
+    payment_method: str | None = None,
 ) -> dict[str, Any]:
-    """A Checkout Session, payment intent expanded down to its fee, that maps to `state`."""
+    """A Checkout Session, payment intent expanded down to its fee, that maps to `state`.
+
+    `payment_method` 给了就写进 `latest_charge.payment_method_details.type`（设计闸门 #589 v2
+    §2「付款方式」）；缺省不带这个对象。
+    """
     intent_id = intent_id or f"pi_test_{uuid.uuid4().hex}"
 
     def intent(status: str, received: int | None) -> dict[str, Any]:
         charge: dict[str, Any] = {"id": f"ch_test_{uuid.uuid4().hex}"}
         if fee is not None:
             charge["balance_transaction"] = {"fee": fee, "currency": fee_currency}
+        if payment_method is not None:
+            charge["payment_method_details"] = {"type": payment_method}
         return {
             "id": intent_id,
             "status": status,
