@@ -1227,15 +1227,19 @@ P2 随之消失；这些行记下的不一致照样算 P1、照样要处理。
 **首次编写：2026-11-10（AIH-TASK-175）。依据：设计闸门 #580 v3（[AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)
 §2「支付 Webhook」「事件处理任务」「告警」、§5）；告警接口见 [api.md「内部告警接口」](api.md#内部告警接口)。
 更新：AIH-TASK-181，设计闸门 #585 v3（[AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md)
-§2「争议与退款」「告警」）：复核一直报到结案、争议与退款、过期一小时仍 `PENDING`。**
+§2「争议与退款」「告警」）：复核一直报到结案、争议与退款、过期一小时仍 `PENDING`。
+更新：AIH-TASK-201，设计闸门 #589 v2（[AIH-TASK-196-payment-receipts.md](design/AIH-TASK-196-payment-receipts.md)
+§2「补发扫描」「告警」）：入账一小时后仍没有收据。**
 
 Stripe 回调验签通过后只落库（`payment_gateway_events`），不入队；celery-beat 每 `BILLING_PAYMENT_EVENT_POLL_SECONDS`（缺省 15 秒）
 跑一次 `payment-events-process-due`，一次领一个到期事件、向 Stripe 查询权威状态后确认支付。`charge.dispute.created`（争议 / 拒付）与
 `charge.refunded`（Stripe 后台退款）两种事件也落库为 `RECEIVED`，但事件任务对它们**不查 Stripe、不改支付、不改钱包**，只按
 `payment_intent` 关联到支付（`gateway_payment_intent_id`）：关联上为 `PROCESSED`，没有 `payment_intent` 或找不到为 `UNMATCHED`
 （`PAYMENT_NOT_FOUND`）。Healthchecks 已满，支付的信号并进 `wallet_negative_balance` 维度：摘要在原有两部分之后追加
-`; payments: review open <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or rejected 24h <d>, stale pending <e>, disputes or refunds 24h <f>, config <ok|missing>`，
+`; payments: review open <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or rejected 24h <d>, stale pending <e>, disputes or refunds 24h <f>, receipts missing 1h <g>, config <ok|missing>`，
 没有要报的时不出现这一段。支付开关（`BILLING_PAYMENTS_ENABLED`）关闭时事件任务每一轮直接返回。
+收据正常与入账同一事务开具；开具前的检查不过时入账照常提交、没有收据，由 celery-beat 每 300 秒跑一次的补发扫描
+`receipts-issue-missing`（`app.tasks.receipts.issue_missing`）补开（不发付款邮件）。补发扫描**不看支付开关**，开关关闭时照常运行。
 
 ### 怎么发现
 
@@ -1244,11 +1248,13 @@ Stripe 回调验签通过后只落库（`payment_gateway_events`），不入队�
 | `review open <a>` 大于 0（**P1**） | 有支付处于 `REVIEW_REQUIRED`（金额、币种或引用不符，同一 PaymentIntent 两笔内部支付，Stripe 状态不一致，租户已关户或是内部租户）：**没有入账**，钱已在 Stripe。**不论进入多久，一直报到结案**（「按实付入账」或「不入账结案」）为止 |
 | `disputes or refunds 24h <f>` 大于 0（**P1**） | 最近 24 小时收到了 `charge.dispute.created` 或 `charge.refunded`（不含 `IGNORED` 的，例如 `LIVEMODE_MISMATCH`；不含关联到「不入账结案」支付的 `charge.refunded`，那是结案后在 Stripe 退款的预期结果）。**支付与钱包都没有被改动**，按下面「争议与退款」处理；24 小时后自动不再计入 |
 | `stale pending <e>` 大于 0（P2） | 有支付 `PENDING` 且 `expires_at` 已过去一小时以上：补对账在过期后的第一个小时每 5 分钟查一次，过了一小时还没收口，多半是补对账没在工作或 Stripe 持续不可用。少数是正常的：会话已 `complete` 而异步付款仍在处理，这时会一直报到付款有结果或 7 天超时 |
+| `receipts missing 1h <g>` 大于 0（P2） | 有支付 `PAID`、`paid_at` 已过去一小时以上（覆盖 12 轮补发扫描）仍没有收据：开具检查持续不过（账本行缺失、税务政策读不出、当年编号系列缺失或耗尽），或补发扫描停了。钱已入账，只是客户与管理员暂时下载不到收据 |
 | `event conflicts 24h <b>` 大于 0（**P1**） | 最近 24 小时同一 Stripe 事件 id 收到了内容不同的请求体（`fingerprint_conflict_at`）；原行未被覆盖。worker 日志 `Payment event redelivered with a different body; the stored row is kept`（ERROR，带事件 id 与类型） |
 | `config missing`（**P1**） | 开关打开但凭据不可用：两个 Stripe 密钥文件有一个读不到或为空、Stripe 密钥前缀不是 `sk_live_` / `sk_test_`、签名密钥前缀不是 `whsec_`、`BILLING_STRIPE_API_BASE_URL` 为空，或 `BILLING_FRONTEND_BASE_URL` 为空。回调与建单返回 503，事件任务不领取事件。API 与 worker 日志有 `payments credential unavailable: …`（只带文件路径与原因） |
 | `oldest open event <c>s` 超过 900（P2） | 有 `RECEIVED` / `RETRY` / `PROCESSING` 的事件已等了 15 分钟以上：Stripe 不可用、beat / worker 停了，或事件一直重试（`last_error_code` 见下） |
 | `unmatched or rejected 24h <d>` 大于 0（P2） | 最近 24 小时有事件结算为 `UNMATCHED`（`PAYMENT_NOT_FOUND`、`NO_CLIENT_REFERENCE`）或 `REJECTED`（Stripe 拒绝了权威查询，例如 `resource_missing`；`GATEWAY_REFERENCE_TAKEN`；`NO_GATEWAY_REFERENCE`） |
 | worker 日志 | `Payment event not processed`（WARNING，带事件 id、类型、`processing_status`、`error_code`、`attempts`）；`Payment event lease was lost; the result is discarded`（WARNING：租约过期后被另一轮重领，重领那一轮的结果为准）；`Payment needs review`（WARNING，带支付 `public_id` 与原因） |
+| 补发扫描的日志 | 每轮结束一条 `Receipt back-fill finished`（INFO，只带 `issued` 与 `failed` 两个计数；`failed` 持续大于 0 就是有支付补不上）；开具检查不过时 `Receipt not issued; a pre-issue check failed`（ERROR，带原因码 `reason` 与支付 `payment_id`）；某一笔抛了异常时 `Receipt back-fill failed for a payment`（ERROR，只带支付 `payment_id`，不带异常文本） |
 
 摘要只有计数与秒数，不含客户、金额与 Stripe 对象 id：具体是哪些支付与事件按下面的查询看。
 
@@ -1297,6 +1303,7 @@ docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYS
 | `GATEWAY_REFERENCE_TAKEN`（`REJECTED`） | 事件的会话 id 已属于另一笔支付 | 不会入账；在 Stripe 核对会话的 `client_reference_id`，按复核处理 |
 | `PAYMENT_NOT_FOUND` / `NO_CLIENT_REFERENCE`（`UNMATCHED`） | 不是本系统建的会话（例如 Dashboard 手工建的付款链接），或测试与生产的端点配串了 | 核对 Stripe Dashboard 的回调端点只订阅那四种 `checkout.session.*` 事件与 `charge.dispute.created`、`charge.refunded`（共六种）、指向正确的环境。争议与退款事件的 `UNMATCHED` 见下面「争议与退款」 |
 | `disputes or refunds` | Stripe 侧发生了争议（拒付）或有人在 Stripe 后台退款 | 见下面「争议与退款」 |
+| `receipts missing` | 开具检查持续不过，或补发扫描停了 | 见下面第 5 步 |
 | `stale pending` | 补对账没在工作，或 Stripe 持续不可用 | 先按「celery-beat 停止调度」「Redis / Celery broker 不可用」排查，并看 worker 日志里补对账的 ERROR；Stripe 恢复后补对账自然收口。会话已 `complete`、异步付款仍在处理的，等它有结果 |
 | Stripe 错误码（`REJECTED`，如 `resource_missing`） | 会话在 Stripe 不存在：密钥与端点不属于同一账户或模式 | 核对密钥文件与 `BILLING_STRIPE_API_BASE_URL` |
 | `config missing` | 密钥文件没放、权限不对、前缀错，或地址没配 | 看日志里 `payments credential unavailable` 点名的文件与原因，修好后重启 api 与 worker |
@@ -1332,11 +1339,35 @@ docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYS
   `client_reference_id`，再按它对应的支付归入上面各种。不入账结案时没记下 PaymentIntent 的支付（例如 `GATEWAY_INCONSISTENT`），结案后的退款
   关联不上、照样计入 P1：核对它确实是刚做的那笔结案退款即可，不改账。
 
+**5. 缺收据（`receipts missing 1h`）。**先找出是哪几笔（只读）：
+
+```bash
+docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+  SELECT p.public_id, p.paid_at, p.tax_policy_version_id
+    FROM payments p
+    LEFT JOIN payment_receipts r ON r.payment_id = p.id
+   WHERE p.status = \"PAID\" AND r.id IS NULL
+   ORDER BY p.paid_at, p.id
+   LIMIT 50"'
+```
+
+再看 worker 日志里补发扫描的记录：`Receipt back-fill finished` 一条都没有，是补发扫描没在跑，先按「celery-beat 停止调度」
+「Redis / Celery broker 不可用」排查，恢复后下一轮自动补齐。有记录而 `failed` 大于 0，按这几笔的 `public_id` 找
+`Receipt not issued; a pre-issue check failed` 的原因码，按 [payment-flow.md](payment-flow.md) 的收据一节处理：
+
+| 原因码 | 多半是 | 做什么 |
+| --- | --- | --- |
+| `RECEIPT_SERIES_UNAVAILABLE` | 当年（马来西亚时间）没有编号系列行（2099 年之后），或这一年的 `last_sequence` 已到 999999 | 不能手工补行或改计数（会让编号复用）：要新的迁移补系列行（过设计闸门）。上线后补发扫描自动收口 |
+| `RECEIPT_LEDGER_MISSING` | 这笔支付没有 `TOPUP` 账本行，或金额不是两位小数的正数 | **数据事故**：正常入账路径里账本行与收据同一事务、先写账本，不会出现。账本只追加，不能靠改数据恢复；告警会一直报，按事故上报 Kelvin，等人工开具或更正的设计 |
+| `RECEIPT_TAX_POLICY_UNREADABLE` | 支付建单时那一版税务政策的 `treatment_json` 读不出 | 同上，按数据事故处理；税务政策版本有触发器拒绝改删，不能靠改数据恢复 |
+| 只有 `Receipt back-fill failed for a payment` | 开具时数据库错误（死锁、断连） | 下一轮自动重试；持续出现时按 MySQL 的排查步骤看连接与锁 |
+
 ### 恢复
 
 - `event conflicts 24h`、`unmatched or rejected 24h`、`disputes or refunds 24h` 在事件发生 24 小时后自动归零，摘要随之不再出现支付段落。
 - `review open` 一直报到复核单结案；结案即消失。
 - `stale pending` 在那笔支付收口（`PAID` / `EXPIRED` / `FAILED` / `REVIEW_REQUIRED`）后消失。
+- `receipts missing 1h` 在补发扫描给那笔支付开出收据后消失；账本行缺失或税务政策读不出的那几笔会一直报。
 - `oldest open event` 在积压消化后回到 0；`config missing` 在配置修好、重启后消失。
 
 ### 绝不能做什么
@@ -1346,6 +1377,8 @@ docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYS
   `REVIEW_REQUIRED` 永不自动入账
 - **不要因为争议或退款去改支付状态或原 `TOPUP` 行**：扣回只用人工调账 `REFUND_ADJUSTMENT` 新增一行（INV-5）
 - **不要删 `payment_gateway_events` 的行**：它是去重的依据（同一事件 id 只落一行），删掉后 Stripe 的重投会被当成新事件
+- **不要为了消 `receipts missing` 手工插收据行或改 `receipt_number_series`**：编号只由开具在系列行锁下分配，手工改会让编号重复或复用；
+  收据行插进去就不可改、不可删
 
 ---
 

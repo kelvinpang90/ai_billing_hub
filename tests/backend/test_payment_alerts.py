@@ -6,7 +6,9 @@ AIH-TASK-175; updated by design gate #585 v3 §2「告警」, AIH-TASK-181).
 （`max(0, ⌊now − received_at⌋)`，严格大于才算）、配置判据的每一种情形；#585 的新表：
 未结案的复核不论多久都报（结案即消失）、争议与退款的 24 小时窗口（`IGNORED` 的不计、
 不入账结案后的退款不计而争议照计）、`expires_at` 前后 3600 秒的过期 `PENDING`；以及
-**没有支付数据时摘要与原来逐字相同**。
+**没有支付数据时摘要与原来逐字相同**。设计闸门 #589 v2 §2「告警」（AIH-TASK-201）加了
+`receipts missing 1h`：`paid_at` 59 / 61 分钟前、有收据、非 `PAID`。#589 之后入账的 `PAID`
+都带着收据，所以只为别的判据而存在的 `PAID` 用例里都给了收据（`give_receipt`）。
 
 每个用例先放一次已完成、没有不一致的核对运行，使原有两部分是 OK，
 支付判据的级别因此看得清；期望的原有部分取自同一个库里「还没有支付数据」时的结果。
@@ -28,7 +30,7 @@ from pathlib import Path
 
 import pytest
 from payment_world import PaymentRef, close_by_review
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 from test_payment_confirm import World, _mysql_world, _sqlite_world
 from test_wallet_reconciliation_alerts import completed
 from test_wallet_reconciliation_start import _wipe
@@ -44,6 +46,7 @@ from app.models.payments import (
     PaymentResolution,
     PaymentStatus,
 )
+from app.models.receipts import PaymentReceipt
 from app.services import alerts
 from app.services.alerts import AlertContext, AlertLevel, AlertResult
 
@@ -54,6 +57,7 @@ P2 = AlertLevel.P2
 # 马来西亚 2026-11-09 12:00。
 NOW = dt.datetime(2026, 11, 9, 4, 0, 0)
 SECOND = dt.timedelta(seconds=1)
+MINUTE = dt.timedelta(minutes=1)
 DAY = dt.timedelta(hours=24)
 
 # 窗口边界：(时刻, 是否计入)。
@@ -83,12 +87,14 @@ def segment(
     stale: int = 0,
     disputes: int = 0,
     config: str = "ok",
+    receipts: int = 0,
 ) -> str:
-    """The paragraph design gate #585 v3 §2「告警」gives, verbatim."""
+    """The paragraph design gate #585 v3 §2「告警」gives, with #589 v2's `receipts missing 1h`."""
     return (
         f"; payments: review open {review}, event conflicts 24h {conflicts}, "
         f"oldest open event {oldest}s, unmatched or rejected 24h {failed}, "
-        f"stale pending {stale}, disputes or refunds 24h {disputes}, config {config}"
+        f"stale pending {stale}, disputes or refunds 24h {disputes}, "
+        f"receipts missing 1h {receipts}, config {config}"
     )
 
 
@@ -139,8 +145,50 @@ def review_payment(world: World, review_required_at: dt.datetime) -> PaymentRef:
     return payment
 
 
+def give_receipt(world: World, payment: PaymentRef) -> PaymentRef:
+    """The receipt a `PAID` payment gets with its credit (#589 v2, AIH-TASK-200).
+
+    #589 之后入账的 `PAID` 都带着收据；用例里只为别的判据而存在的 `PAID` 也给一张，否则会计入
+    `receipts missing 1h`。直接插一行（不经 `issue_receipt`：只要「有收据」这一事实）。
+    """
+    row = world.row(payment)
+    with world.factory() as session:
+        sequence = int(
+            session.execute(select(func.count()).select_from(PaymentReceipt)).scalar_one()
+        )
+        sequence += 1
+        session.add(
+            PaymentReceipt(
+                public_id=str(uuid.uuid4()),
+                payment_id=row.id,
+                tenant_id=row.tenant_id,
+                receipt_number=f"ACV-AIR-2026-{sequence:06d}",
+                series_year=2026,
+                sequence=sequence,
+                amount=Decimal("100.00"),
+                currency="MYR",
+                tax_policy_version_id=row.tax_policy_version_id,
+                snapshot_json={"schema_version": 1},
+                issued_at=row.paid_at or NOW,
+            )
+        )
+        session.commit()
+    return payment
+
+
+def paid_payment(world: World) -> PaymentRef:
+    """A `PAID` payment with its receipt (see `give_receipt`)."""
+    return give_receipt(world, world.payment(world.customer(), status=PaymentStatus.PAID))
+
+
 def credit_by_review(world: World, payment: PaymentRef) -> None:
-    """What the manual CREDIT (AIH-TASK-182) leaves on the payment row: `PAID`, resolved."""
+    """What the manual CREDIT (AIH-TASK-182) leaves on the payment row: `PAID`, resolved; with
+    the receipt AIH-TASK-200 issues in the same transaction."""
+    _credit_row(world, payment)
+    give_receipt(world, payment)
+
+
+def _credit_row(world: World, payment: PaymentRef) -> None:
     with world.factory() as session:
         session.execute(
             update(Payment)
@@ -233,7 +281,7 @@ def test_payment_rows_that_meet_no_criterion_change_nothing(alert_world: World) 
     """支付与事件都在，但没有一条落在判据里：摘要仍与原来逐字相同。"""
     world = alert_world
     pending_payment(world, NOW - 3599 * SECOND)
-    world.payment(world.customer(), status=PaymentStatus.PAID)
+    paid_payment(world)
     closed = review_payment(world, NOW - DAY - SECOND)
     close_by_review(world, closed)
     put_event(world, PaymentEventProcessingStatus.PROCESSED, processed_at=NOW - SECOND)
@@ -531,7 +579,7 @@ def test_a_refund_on_any_other_payment_is_counted(alert_world: World, linked: st
     review = 0
     target: int | None = None
     if linked == "paid":
-        target = payment_id(world, world.payment(world.customer(), status=PaymentStatus.PAID))
+        target = payment_id(world, paid_payment(world))
     elif linked == "credited":
         credited = review_payment(world, NOW - DAY * 2)
         credit_by_review(world, credited)
@@ -603,9 +651,108 @@ def test_a_pending_payment_an_hour_past_its_expiry_is_p2(
 def test_only_pending_payments_are_stale(alert_world: World, status: PaymentStatus) -> None:
     world = alert_world
     payment = world.payment(world.customer(), status=status)
+    if status is PaymentStatus.PAID:
+        give_receipt(world, payment)
     set_expiry(world, payment, NOW - dt.timedelta(days=2))
 
     expect(world, OK)
+
+
+# --- P2：入账一小时后仍没有收据（#589） -------------------------------------------------------
+
+
+def paid_at(world: World, payment: PaymentRef, moment: dt.datetime) -> None:
+    with world.factory() as session:
+        session.execute(
+            update(Payment).where(Payment.public_id == payment.public_id).values(paid_at=moment)
+        )
+        session.commit()
+
+
+@pytest.mark.parametrize(
+    ("paid", "counted"),
+    [
+        (NOW - 61 * MINUTE, True),
+        (NOW - 3600 * SECOND, True),
+        (NOW - 59 * MINUTE, False),
+        (NOW - dt.timedelta(days=30), True),
+    ],
+    ids=["61min", "exactly-1h", "59min", "30-days"],
+)
+def test_a_paid_payment_without_a_receipt_an_hour_after_paid_at_is_p2(
+    alert_world: World, paid: dt.datetime, counted: bool
+) -> None:
+    """设计闸门 #589 v2 §2「告警」：`paid_at <= now − 3600 秒`、没有收据的 `PAID` 计入。"""
+    world = alert_world
+    payment = world.payment(world.customer(), status=PaymentStatus.PAID)
+    paid_at(world, payment, paid)
+
+    if counted:
+        expect(world, P2, segment(receipts=1))
+    else:
+        expect(world, OK)
+
+
+def test_only_the_payment_past_the_hour_is_counted(alert_world: World) -> None:
+    """59 分钟前与 61 分钟前各一笔没有收据的：只有 61 分钟那一笔计入。"""
+    world = alert_world
+    recent = world.payment(world.customer(), status=PaymentStatus.PAID)
+    paid_at(world, recent, NOW - 59 * MINUTE)
+    late = world.payment(world.customer(), status=PaymentStatus.PAID)
+    paid_at(world, late, NOW - 61 * MINUTE)
+
+    expect(world, P2, segment(receipts=1))
+
+
+def test_a_paid_payment_with_a_receipt_is_not_counted(alert_world: World) -> None:
+    world = alert_world
+    payment = paid_payment(world)
+    paid_at(world, payment, NOW - 61 * MINUTE)
+
+    expect(world, OK)
+
+    # 补开之前与之后：收据一出现，这条判据随之消失。
+    missing = world.payment(world.customer(), status=PaymentStatus.PAID)
+    paid_at(world, missing, NOW - 61 * MINUTE)
+
+    expect(world, P2, segment(receipts=1))
+
+    give_receipt(world, missing)
+
+    expect(world, OK)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        PaymentStatus.PENDING,
+        PaymentStatus.REVIEW_REQUIRED,
+        PaymentStatus.FAILED,
+        PaymentStatus.EXPIRED,
+        PaymentStatus.CANCELLED,
+    ],
+    ids=lambda s: s.value,
+)
+def test_only_paid_payments_need_a_receipt(alert_world: World, status: PaymentStatus) -> None:
+    """非 `PAID` 的支付没有收据也不计入（复核单照 #585 计入 review open）。"""
+    world = alert_world
+    payment = world.payment(world.customer(), status=status)
+    # 还没过期的 PENDING，不计入 stale pending。
+    set_expiry(world, payment, NOW)
+
+    if status is PaymentStatus.REVIEW_REQUIRED:
+        expect(world, P1, segment(review=1))
+    else:
+        expect(world, OK)
+
+
+def test_a_missing_receipt_alongside_p1_keeps_p1(alert_world: World) -> None:
+    world = alert_world
+    late = world.payment(world.customer(), status=PaymentStatus.PAID)
+    paid_at(world, late, NOW - 2 * DAY)
+    review_payment(world, NOW)
+
+    expect(world, P1, segment(review=1, receipts=1))
 
 
 # --- P1：配置 -----------------------------------------------------------------------------
@@ -734,7 +881,8 @@ def test_every_count_lands_in_one_paragraph_at_the_worst_level(
     assert result == AlertResult(
         P1,
         BASE + "; payments: review open 2, event conflicts 24h 1, oldest open event 1200s, "
-        "unmatched or rejected 24h 3, stale pending 1, disputes or refunds 24h 1, config missing",
+        "unmatched or rejected 24h 3, stale pending 1, disputes or refunds 24h 1, "
+        "receipts missing 1h 0, config missing",
     )
 
 
