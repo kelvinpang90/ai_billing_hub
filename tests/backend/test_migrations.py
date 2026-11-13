@@ -266,6 +266,14 @@ _PAYMENTS_TABLES = {"payments", "payment_gateway_events"}
 # 删掉。迁移本身由 test_payment_settings_migration.py 验。
 _PAYMENT_SETTINGS_TABLE = "payment_settings"
 
+# 0039_payment_receipts（AIH-TASK-196，设计闸门 #589 v2）建的两张表与收据表上的两个触发器：从 head
+# 降级到它之前时随之删掉（收据表为空）。迁移本身由 test_payment_receipts_migration.py 验。
+_RECEIPTS_TABLES = {"receipt_number_series", "payment_receipts"}
+_EXPECTED_TRIGGERS_0039 = {
+    "trg_payment_receipts_before_update": ("payment_receipts", "BEFORE", "UPDATE"),
+    "trg_payment_receipts_before_delete": ("payment_receipts", "BEFORE", "DELETE"),
+}
+
 
 # ---------------------------------------------------------------------------
 # 0021_ai_module（AIH-TASK-056，设计闸门 #281 v23）
@@ -962,7 +970,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 定价规则的 BEFORE UPDATE 由 0032 换成 `…_v2`（_EXPECTED_RULE_TRIGGERS_AT_HEAD）；
         # 汇率版本的 BEFORE UPDATE 由 0033 换成 `…_v2`（_EXPECTED_FX_TRIGGERS_AT_HEAD）；
         # 税务政策版本的 BEFORE UPDATE 由 0034 换成 `…_v2`（_EXPECTED_TAX_TRIGGERS_AT_HEAD）；
-        # 对账单的两个由 0035 建，在 test_monthly_statements_migration.py 里验。
+        # 对账单的两个由 0035 建，在 test_monthly_statements_migration.py 里验；收据的两个由 0039
+        # 建，在 test_payment_receipts_migration.py 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -977,6 +986,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TRIGGERS_0018,
             *_EXPECTED_TAX_TRIGGERS_AT_HEAD,
             *_EXPECTED_TRIGGERS_0035,
+            *_EXPECTED_TRIGGERS_0039,
         }
         assert set(triggers) == expected
     finally:
@@ -1981,11 +1991,11 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
         # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022、0028、0029、0035、
-        # 0036 与 0038 的表随降级到 0009 一并删掉）。
+        # 0036、0038 与 0039 的表随降级到 0009 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
         later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE} | _PAYMENTS_TABLES
-        later |= {_PAYMENT_SETTINGS_TABLE}
+        later |= {_PAYMENT_SETTINGS_TABLE} | _RECEIPTS_TABLES
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -2082,11 +2092,11 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
         # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020、0021、
-        # 0022、0028、0029、0035、0036 与 0038 的表随降级到 0010 一并删掉）。
+        # 0022、0028、0029、0035、0036、0038 与 0039 的表随降级到 0010 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
         later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE} | _PAYMENTS_TABLES
-        later |= {_PAYMENT_SETTINGS_TABLE}
+        later |= {_PAYMENT_SETTINGS_TABLE} | _RECEIPTS_TABLES
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
