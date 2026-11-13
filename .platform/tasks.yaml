@@ -11561,7 +11561,7 @@ tasks:
     title: 支付第四批第四层：收据 PDF 渲染与新增的 PDF 依赖
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「PDF」：pyproject.toml 加运行时依赖 fpdf2，新模块 app/services/receipt_pdf.py 的 render_receipt_pdf(snapshot) -> bytes（只读快照、英文、一页、可重现），scripts/packaging_smoke.py 证明装好的那一份带着它。不加接口：属于 AIH-TASK-202、203。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-198
     acceptance_criteria:
