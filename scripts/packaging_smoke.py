@@ -36,6 +36,7 @@ def main() -> int:
     import app.ai_api.provider  # noqa: F401
     import app.api.health  # noqa: F401
     import app.core.config  # noqa: F401
+    import app.services.receipt_pdf  # noqa: F401
 
     # ⚠️ 数据文件默认**不进 wheel**（`packages.find` 只收 Python 包），要靠
     # `[tool.setuptools.package-data]` 显式带上。漏了不会有任何报错，直到装好的
