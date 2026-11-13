@@ -1,10 +1,13 @@
-"""Customer payment views: top-up options and the payment list / detail (AIH-TASK-190).
+"""Customer payment views: top-up options, the payment list / detail and receipts (AIH-TASK-190).
 
-设计闸门 #587 v3 §2「客户接口」、§6；契约见 [docs/api.md](../../docs/api.md)「支付（客户）」。
+设计闸门 #587 v3 §2「客户接口」、§6；收据见设计闸门 #589 v2 §2「客户接口」（AIH-TASK-202）；
+契约见 [docs/api.md](../../docs/api.md)「支付（客户）」。
 
-⚠️ **视图是字段白名单，不直接序列化 ORM 对象**：充值选项恰好 8 个键，支付恰好 8 个键，都按设计的
-顺序。手续费、状态原因、原始状态、`resolution` 与其他结案字段、网关编号（`cs_…` / `pi_…`）、
-`confirmed_*`、内部 id 与 `tenant_id` 一律不出这里（INV-7、INV-8）。
+⚠️ **视图是字段白名单，不直接序列化 ORM 对象**：充值选项恰好 8 个键，支付恰好 10 个键（#587 的
+8 个之后追加 `receipt_id`、`receipt_number`），收据恰好 7 个键，都按设计的顺序。收据不带快照、
+`tax_policy_version_id` 与内部 id。手续费、状态原因、原始状态、`resolution` 与其他结案字段、
+网关编号（`cs_…` / `pi_…`）、`confirmed_*`、内部 id 与 `tenant_id`
+一律不出这里（INV-7、INV-8）。
 
 ⚠️ 金额是**两位小数**的定点字符串（例如 `"50.00"`），不经 float（INV-10）：与 8 位小数的通用写法
 不同，是设计 §2 对这三个接口的规定（金额本身就是整分）。时刻是不带时区的 UTC。
@@ -18,7 +21,12 @@ from typing import Final
 
 from pydantic import BaseModel
 
-from app.services.customer_payments import CustomerPaymentRow, TopupOptions, customer_status
+from app.services.customer_payments import (
+    CustomerPaymentRow,
+    CustomerReceiptRow,
+    TopupOptions,
+    customer_status,
+)
 from app.services.payments import PAYMENT_CURRENCY
 
 _CENT: Final = Decimal("0.01")
@@ -62,6 +70,23 @@ class CustomerPaymentView(BaseModel):
     created_at: dt.datetime
     paid_at: dt.datetime | None
     expires_at: dt.datetime
+    # 这笔支付的收据（AIH-TASK-202）：收据的 `public_id` 与收据号；没有为 null。
+    receipt_id: str | None
+    receipt_number: str | None
+
+
+class CustomerReceiptView(BaseModel):
+    """One of the caller's receipts (`GET /api/v1/customer/receipts`). `id` is its `public_id`."""
+
+    id: str
+    receipt_number: str
+    # 支付的 `public_id`。
+    payment_id: str
+    # 收据金额（这笔支付的 `TOPUP` 账本行），两位小数。
+    amount: str
+    currency: str
+    paid_at: dt.datetime
+    issued_at: dt.datetime
 
 
 def customer_topup_options(options: TopupOptions) -> CustomerTopupOptions:
@@ -89,13 +114,29 @@ def customer_payment_view(row: CustomerPaymentRow) -> CustomerPaymentView:
         created_at=payment.created_at,
         paid_at=payment.paid_at,
         expires_at=payment.expires_at,
+        receipt_id=row.receipt_id,
+        receipt_number=row.receipt_number,
+    )
+
+
+def customer_receipt_view(row: CustomerReceiptRow) -> CustomerReceiptView:
+    return CustomerReceiptView(
+        id=row.receipt_id,
+        receipt_number=row.receipt_number,
+        payment_id=row.payment_id,
+        amount=cents_text(row.amount),
+        currency=row.currency,
+        paid_at=row.paid_at,
+        issued_at=row.issued_at,
     )
 
 
 __all__ = [
     "CustomerPaymentView",
+    "CustomerReceiptView",
     "CustomerTopupOptions",
     "cents_text",
     "customer_payment_view",
+    "customer_receipt_view",
     "customer_topup_options",
 ]

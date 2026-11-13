@@ -13,13 +13,18 @@
 - `list_payments` / `get_payment`：不读设置，设置行缺失时照常返回。`credited_amount` 是这笔支付的
   `TOPUP` 账本行（`(PAYMENT, public_id)` 唯一，至多一行）；客户侧状态由 `customer_status` 映射，
   原始状态、原因、手续费、结案字段与网关编号都不出这里之外的视图（INV-7，白名单在
-  app/schemas/customer_payments.py）。
+  app/schemas/customer_payments.py）。每一项另带这笔支付的收据 `public_id` 与收据号（左连接
+  `payment_receipts`，`payment_id` 唯一，没有为 None；设计闸门 #589 v2 §2「客户接口」，
+  AIH-TASK-202）。
+- `list_receipts`（AIH-TASK-202）：本租户的收据，`issued_at` 降序、`id` 降序；只读列，不读快照。
+  收据下载不在这里：读快照与渲染在 app/api/receipt_download.py（管理端共用）。
 
 ⚠️ 金额一律是 `Decimal`，比较不经 `float`（INV-10）。
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import enum
 from dataclasses import dataclass
 from decimal import Decimal
@@ -29,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models.payments import Payment, PaymentResolution, PaymentStatus
+from app.models.receipts import PaymentReceipt
 from app.models.tenancy import BillingMode, Tenant
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 from app.services.account_status import READ_ONLY_STATUSES
@@ -107,6 +113,23 @@ class CustomerPaymentRow:
     payment: Payment
     # 这笔支付的 `TOPUP` 账本行金额；没有为 None。
     credited_amount: Decimal | None
+    # 这笔支付的收据（`public_id` 与收据号）；没有为 None。
+    receipt_id: str | None
+    receipt_number: str | None
+
+
+@dataclass(frozen=True)
+class CustomerReceiptRow:
+    # 收据的 `public_id`。
+    receipt_id: str
+    receipt_number: str
+    # 支付的 `public_id`。
+    payment_id: str
+    amount: Decimal
+    currency: str
+    # 收据只开给 `PAID` 的支付，`paid_at` 不为空。
+    paid_at: dt.datetime
+    issued_at: dt.datetime
 
 
 def topup_options(session: Session, tenant_id: int, *, settings: Settings) -> TopupOptions:
@@ -156,16 +179,25 @@ def _unavailable_reason(
     return None
 
 
-def _with_credit() -> Select[tuple[Payment, Decimal]]:
+def _with_credit() -> Select[tuple[Payment, Decimal, str, str]]:
     # 左连接：没有入账的支付没有账本行（金额为 None）。账本引用 `(PAYMENT, public_id)` 唯一，
-    # 至多一行。
-    return select(Payment, WalletTransaction.amount).outerjoin(
-        WalletTransaction,
-        and_(
-            WalletTransaction.reference_type == ReferenceType.PAYMENT,
-            WalletTransaction.reference_id == Payment.public_id,
-            WalletTransaction.transaction_type == TransactionType.TOPUP,
-        ),
+    # 至多一行。收据同样左连接：`payment_id` 唯一，至多一张，没有为 None（设计闸门 #589 v2）。
+    return (
+        select(
+            Payment,
+            WalletTransaction.amount,
+            PaymentReceipt.public_id,
+            PaymentReceipt.receipt_number,
+        )
+        .outerjoin(
+            WalletTransaction,
+            and_(
+                WalletTransaction.reference_type == ReferenceType.PAYMENT,
+                WalletTransaction.reference_id == Payment.public_id,
+                WalletTransaction.transaction_type == TransactionType.TOPUP,
+            ),
+        )
+        .outerjoin(PaymentReceipt, PaymentReceipt.payment_id == Payment.id)
     )
 
 
@@ -182,8 +214,8 @@ def list_payments(
     )
     counting = select(func.count()).select_from(Payment).where(Payment.tenant_id == tenant_id)
     rows = [
-        CustomerPaymentRow(payment, credited)
-        for payment, credited in session.execute(listing).all()
+        CustomerPaymentRow(payment, credited, receipt_id, receipt_number)
+        for payment, credited, receipt_id, receipt_number in session.execute(listing).all()
     ]
     total = session.execute(counting).scalar_one()
     return rows, total
@@ -199,17 +231,52 @@ def get_payment(session: Session, tenant_id: int, payment_id: str) -> CustomerPa
     ).one_or_none()
     if found is None:
         return None
-    payment, credited = found
-    return CustomerPaymentRow(payment, credited)
+    payment, credited, receipt_id, receipt_number = found
+    return CustomerPaymentRow(payment, credited, receipt_id, receipt_number)
+
+
+def list_receipts(
+    session: Session, tenant_id: int, *, offset: int, limit: int
+) -> tuple[list[CustomerReceiptRow], int]:
+    """One page of the tenant's receipts, newest `issued_at` first then descending id.
+
+    排序与 `ix_payment_receipts_tenant_issued (tenant_id, issued_at, id)` 一致。只读列，不读快照。
+    """
+    listing = (
+        select(
+            PaymentReceipt.public_id,
+            PaymentReceipt.receipt_number,
+            Payment.public_id,
+            PaymentReceipt.amount,
+            PaymentReceipt.currency,
+            Payment.paid_at,
+            PaymentReceipt.issued_at,
+        )
+        .join(Payment, Payment.id == PaymentReceipt.payment_id)
+        .where(PaymentReceipt.tenant_id == tenant_id)
+        .order_by(PaymentReceipt.issued_at.desc(), PaymentReceipt.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    counting = (
+        select(func.count())
+        .select_from(PaymentReceipt)
+        .where(PaymentReceipt.tenant_id == tenant_id)
+    )
+    rows = [CustomerReceiptRow(*row) for row in session.execute(listing).all()]
+    total = session.execute(counting).scalar_one()
+    return rows, total
 
 
 __all__ = [
     "CustomerPaymentRow",
     "CustomerPaymentStatus",
+    "CustomerReceiptRow",
     "TopupOptions",
     "UnavailableReason",
     "customer_status",
     "get_payment",
     "list_payments",
+    "list_receipts",
     "topup_options",
 ]
