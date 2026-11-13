@@ -74,6 +74,9 @@ class GatewayPaymentStatus:
     `payment_intent.latest_charge`（设计闸门 #585 v3 §2「对 A 的适配器的扩展」），没有
     `latest_charge` 时为 `None`。A 的状态映射与可信确认不用它们，只有人工按实付入账
     （app/services/payment_review.py）用。
+
+    `payment_method_type` 取自同一个 `latest_charge` 的 `payment_method_details.type`
+    （设计闸门 #589 v2 §2「付款方式」），只供收据快照用；拿不到或不合规时为 `None`。
     """
 
     state: GatewayState
@@ -89,6 +92,7 @@ class GatewayPaymentStatus:
     redirect_url: str | None
     charge_amount_refunded_minor: int | None = None
     charge_disputed: bool | None = None
+    payment_method_type: str | None = None
 
 
 @dataclass(frozen=True)

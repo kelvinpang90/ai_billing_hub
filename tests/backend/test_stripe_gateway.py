@@ -30,6 +30,7 @@ from app.payments import (
     amount_to_minor,
     minor_to_amount,
 )
+from app.payments.base import GatewayPaymentStatus
 from app.payments.stripe_gateway import PRODUCT_NAME, STATUS_EXPAND
 
 SECRET_KEY = "sk_test_gateway_secret_value_0123456789"
@@ -406,6 +407,136 @@ def test_unusable_charge_fields_are_none(latest_charge: Any) -> None:
 
     assert (status.charge_amount_refunded_minor, status.charge_disputed) == (None, None)
     assert status.state is GatewayState.PAID
+
+
+@pytest.mark.parametrize(
+    ("latest_charge", "expected"),
+    [
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "card"}}, "card"),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "fpx"}}, "fpx"),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "grabpay_2"}}, "grabpay_2"),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "x" * 32}}, "x" * 32),
+        (CHARGE_WITH_FEE, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": None}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": "card"}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": None}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": 1}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": True}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": ["card"]}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "Card"}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "FPX"}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "x" * 33}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": ""}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "card\n"}}, None),
+        ({**CHARGE_WITH_FEE, "payment_method_details": {"type": "us-bank"}}, None),
+        ("ch_test_0001", None),
+        ("missing", None),
+    ],
+    ids=[
+        "card",
+        "fpx",
+        "digits-and-underscore",
+        "32-chars",
+        "no-details",
+        "details-without-type",
+        "details-null",
+        "details-not-an-object",
+        "type-null",
+        "type-integer",
+        "type-boolean",
+        "type-list",
+        "uppercase-card",
+        "uppercase-fpx",
+        "33-chars",
+        "empty",
+        "trailing-newline",
+        "hyphen",
+        "unexpanded-charge",
+        "no-latest-charge",
+    ],
+)
+def test_the_payment_method_type_comes_from_the_latest_charge(
+    latest_charge: Any, expected: str | None
+) -> None:
+    """设计闸门 #589 v2 §2「付款方式」、§7「付款方式字段」。
+
+    `payment_method_details.type` 是字符串且匹配 `^[a-z0-9_]{1,32}$` 时原样返回，否则为 None；
+    请求不变，A 的状态映射与 B 的两个字段不变。
+    """
+    intent = payment_intent()
+    if latest_charge == "missing":
+        del intent["latest_charge"]
+    else:
+        intent["latest_charge"] = latest_charge
+    gateway, recorder = gateway_with(ok(session(intent=intent)))
+
+    status = gateway.get_payment_status(SESSION_ID)
+
+    assert status.payment_method_type == expected
+    assert status.state is GatewayState.PAID
+    assert status.amount_received_minor == 10000
+    assert status.payment_intent_id == "pi_test_0001"
+    assert (status.charge_amount_refunded_minor, status.charge_disputed) == (None, None)
+    [request] = recorder.requests
+    assert request.url.params.get_list("expand[]") == [STATUS_EXPAND]
+
+
+def test_the_payment_method_type_does_not_change_the_refund_and_dispute_fields() -> None:
+    charge = {
+        **CHARGE_WITH_FEE,
+        "amount_refunded": 2500,
+        "disputed": True,
+        "payment_method_details": {"type": "fpx", "fpx": {"bank": "maybank2u"}},
+    }
+    gateway, _ = gateway_with(ok(session(intent=payment_intent(latest_charge=charge))))
+
+    status = gateway.get_payment_status(SESSION_ID)
+
+    assert status.payment_method_type == "fpx"
+    assert (status.charge_amount_refunded_minor, status.charge_disputed) == (2500, True)
+    assert (status.fee_minor, status.fee_currency) == (280, "MYR")
+    assert status.state is GatewayState.PAID
+
+
+@pytest.mark.parametrize(
+    ("session_status", "payment_status", "intent", "expected"),
+    [
+        ("open", "unpaid", None, GatewayState.OPEN),
+        ("expired", "unpaid", None, GatewayState.EXPIRED),
+        ("complete", "paid", "pi_test_0001", GatewayState.INCONSISTENT),
+    ],
+)
+def test_a_session_without_an_expanded_charge_has_no_payment_method_type(
+    session_status: str, payment_status: str, intent: Any, expected: GatewayState
+) -> None:
+    gateway, _ = gateway_with(
+        ok(session(status=session_status, payment_status=payment_status, intent=intent))
+    )
+
+    status = gateway.get_payment_status(SESSION_ID)
+
+    assert status.payment_method_type is None
+    assert status.state is expected
+
+
+def test_a_status_built_without_the_payment_method_type_defaults_to_none() -> None:
+    """其他构造 `GatewayPaymentStatus` 的地方（例如测试里的假网关）不传它也照常工作。"""
+    status = GatewayPaymentStatus(
+        state=GatewayState.PAID,
+        session_id=SESSION_ID,
+        amount_minor=10000,
+        currency="MYR",
+        client_reference_id=PUBLIC_ID,
+        payment_intent_id="pi_test_0001",
+        payment_intent_status="succeeded",
+        amount_received_minor=10000,
+        fee_minor=None,
+        fee_currency=None,
+        redirect_url=None,
+    )
+
+    assert status.payment_method_type is None
 
 
 @pytest.mark.parametrize("missing", ["id", "status", "payment_status"])

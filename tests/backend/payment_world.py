@@ -41,15 +41,17 @@ from app.models.payments import (
     PaymentResolution,
     PaymentStatus,
 )
+from app.models.receipts import ReceiptNumberSeries
 from app.models.tax_policy import TaxJurisdiction, TaxPolicyStatus, TaxPolicyType, TaxPolicyVersion
 from app.models.tenancy import AccountStatus, BillingMode, BillingStatus, Project, Tenant
-from app.models.wallet import TransactionType, Wallet, WalletTransaction
+from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 from app.payments.base import GatewayState
 from app.payments.stripe_gateway import StripeGateway
 from app.repositories import tenancy
-from app.repositories.wallet import create_wallet, get_wallet_for_tenant
+from app.repositories.wallet import create_wallet, get_wallet_for_tenant, post_transaction
 from app.services.payment_events import RecordOutcome, record_event
 from app.services.payments import ConfirmResult, confirm_payment
+from app.services.receipts import AGGREGATE_PAYMENT_RECEIPT
 from app.tasks import payment_events as events_task
 
 TEST_EMAIL_DOMAIN = "@payment-confirm-test.example.com"
@@ -273,6 +275,7 @@ class World:
         reason: str | None = None,
         with_session: bool = True,
         intent_id: str | None = None,
+        tax_version_id: int | None = None,
     ) -> PaymentRef:
         """A payment as the top-up and earlier confirmations would have left it."""
         public_id = str(uuid.uuid4())
@@ -287,7 +290,7 @@ class World:
                     expected_amount=Decimal(amount),
                     expected_currency="MYR",
                     wallet_credit_amount=Decimal(amount),
-                    tax_policy_version_id=self.tax_version_id,
+                    tax_policy_version_id=tax_version_id or self.tax_version_id,
                     tax_amount=None,
                     confirmed_amount=Decimal(amount) if paid else None,
                     confirmed_currency="MYR" if paid else None,
@@ -387,6 +390,131 @@ def audit_state(text_value: str | None) -> dict[str, Any]:
     return json.loads(text_value or "{}")
 
 
+# --- 收据（设计闸门 #589 v2，AIH-TASK-197） ----------------------------------------------
+
+# 虚构的说明文字；`parse_treatment` 读得出。
+RECEIPT_NOTICE: dict[str, str] = {
+    "zh": "虚构的税务说明：本公司未注册 SST。",
+    "en": "Fictional tax notice: not registered for SST.",
+}
+# 迁移 0039 预建的系列年份（两端都含）。
+RECEIPT_SERIES_YEARS = range(2026, 2100)
+
+
+def insert_tax_version(
+    world: World,
+    notice: dict[str, str] | None = None,
+    *,
+    published_from: dt.datetime | None = None,
+) -> int:
+    """A MY / SST version whose `treatment_json` passes `parse_treatment` (world 自带的那一版不过).
+
+    以草稿插入；给了 `published_from` 就在同一事务里发布（写法同 test_payment_create.py）。
+    """
+    with world.factory() as session:
+        row = TaxPolicyVersion(
+            public_id=str(uuid.uuid4()),
+            jurisdiction=TaxJurisdiction.MY,
+            policy_type=TaxPolicyType.SST,
+            rate=None,
+            treatment_json={
+                "schema_version": 1,
+                "sst_registered": False,
+                "tax_charged": False,
+                "document_notice": dict(notice or RECEIPT_NOTICE),
+            },
+            status=TaxPolicyStatus.DRAFT,
+            effective_from=None,
+            effective_to=None,
+            source_reference="Fictional policy for a receipt test",
+            created_by=world.admin_id,
+            approved_by=None,
+            approved_at=None,
+            created_at=CREATED,
+            updated_at=CREATED,
+        )
+        session.add(row)
+        session.flush()
+        if published_from is not None:
+            row.status = TaxPolicyStatus.PUBLISHED
+            row.effective_from = published_from
+            row.approved_by = world.admin_id
+            row.approved_at = CREATED
+        session.commit()
+        return int(row.id)
+
+
+def make_paid_payment(
+    world: World,
+    tenant: Customer,
+    *,
+    tax_version_id: int,
+    amount: str = "100.00",
+    intent_id: str | None = "",
+    ledger: bool = True,
+) -> PaymentRef:
+    """A `PAID` payment (paid at `CREATED`) and, unless `ledger` is false, its `TOPUP` row.
+
+    `intent_id` 缺省（空串）时生成一个 `pi_…`；传 `None` 表示没有 PaymentIntent id。
+    账本行经 `post_transaction` 写（MySQL 上触发器随之推进钱包）。
+    """
+    payment = world.payment(
+        tenant,
+        amount=amount,
+        status=PaymentStatus.PAID,
+        intent_id=f"pi_test_{uuid.uuid4().hex}" if intent_id == "" else intent_id,
+        tax_version_id=tax_version_id,
+    )
+    if ledger:
+        with world.factory() as session:
+            post_transaction(
+                session,
+                tenant_id=tenant.id,
+                transaction_type=TransactionType.TOPUP,
+                amount=Decimal(amount),
+                reference_type=ReferenceType.PAYMENT,
+                reference_id=payment.public_id,
+                now=CREATED,
+            )
+            session.commit()
+    return payment
+
+
+@pytest.fixture
+def paid_payment_maker() -> Callable[..., PaymentRef]:
+    """`make_paid_payment`: call it with a world built by the test module's own fixture.
+
+    conftest.py 注册它（同 `payment_settings_seeder`）。
+    """
+    return make_paid_payment
+
+
+def seed_receipt_series(factory: sessionmaker[Session]) -> None:
+    """The 74 series rows migration 0039 writes, for a `create_all` database that has none."""
+    with factory() as session:
+        if session.execute(select(func.count()).select_from(ReceiptNumberSeries)).scalar_one():
+            return
+        session.execute(
+            insert(ReceiptNumberSeries),
+            [{"series_year": year, "last_sequence": 0} for year in RECEIPT_SERIES_YEARS],
+        )
+        session.commit()
+
+
+def clean_receipts(connection: Connection) -> None:
+    """MySQL only: empty `payment_receipts` and set every series back to 0.
+
+    ⚠️ 收据行拒绝 DELETE（触发器），而且以 RESTRICT 外键引用 payments：关掉外键检查后 TRUNCATE
+    （TRUNCATE 不经触发器），再恢复；写法同 test_account_status_service.py。要在删支付行之前调用。
+    """
+    connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+    try:
+        connection.execute(text("TRUNCATE TABLE payment_receipts"))
+    finally:
+        connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+    connection.execute(update(ReceiptNumberSeries).values(last_sequence=0))
+
+
 def close_by_review(world: World, payment: PaymentRef) -> None:
     """What the manual CLOSE (AIH-TASK-182) leaves: `FAILED`, the review reason kept, resolved."""
     with world.factory() as session:
@@ -449,7 +577,10 @@ def _clean(engine: Engine) -> None:
     账本、审计与税务政策版本都拒绝 DELETE（触发器），只能在关掉外键检查后 TRUNCATE。
     支付与事件行在用例后删掉：告警用例与支付用例共用这个库（设计 §2「告警」）。
     支付设置换回种子行：改过设置的测试管理员（外键 RESTRICT）才删得掉，下一个用例也不带着改过的值。
+    收据先于支付清掉（`clean_receipts`）。
     """
+    with engine.begin() as connection:
+        clean_receipts(connection)
     with engine.begin() as connection:
         connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
         try:
@@ -465,7 +596,11 @@ def _clean(engine: Engine) -> None:
         connection.execute(delete(Wallet))
         connection.execute(delete(Project))
         connection.execute(delete(Tenant))
-        connection.execute(delete(DomainOutbox).where(DomainOutbox.aggregate_type == "tenant"))
+        connection.execute(
+            delete(DomainOutbox).where(
+                DomainOutbox.aggregate_type.in_(("tenant", AGGREGATE_PAYMENT_RECEIPT))
+            )
+        )
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
 
 
