@@ -11610,7 +11610,7 @@ tasks:
     title: 支付第四批第五层：自动确认与人工按实付入账在同一事务里开具收据
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「对 A 的 confirm_payment 与 B 的 resolve_review 的修改」：两处在写 PAID、入账与审计之后、提交之前调用 AIH-TASK-197 的 issue_receipt（send_email 为真），返回 None 时不改变原有结果。不做补发：属于 AIH-TASK-201。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-199
     acceptance_criteria:
