@@ -73,6 +73,8 @@ _EVENT_TYPE_MAX_LENGTH: Final = 64
 _ERROR_CODE_PATTERN: Final = re.compile(r"[a-z0-9_]{1,64}")
 _TIMESTAMP_PATTERN: Final = re.compile(r"[0-9]{1,12}")
 _TOO_MANY_REQUESTS: Final = 429
+# 收据快照里的付款方式（设计闸门 #589 v2 §2「付款方式」）。
+_PAYMENT_METHOD_TYPE_PATTERN: Final = re.compile(r"[a-z0-9_]{1,32}")
 
 
 def _int_or_none(value: object) -> int | None:
@@ -90,6 +92,14 @@ def _bool_or_none(value: object) -> bool | None:
 
 def _upper_or_none(value: object) -> str | None:
     return value.upper() if isinstance(value, str) else None
+
+
+def _payment_method_type(charge: dict[str, Any]) -> str | None:
+    details = charge.get("payment_method_details")
+    value = details.get("type") if isinstance(details, dict) else None
+    if isinstance(value, str) and _PAYMENT_METHOD_TYPE_PATTERN.fullmatch(value):
+        return value
+    return None
 
 
 def _object_id(value: object) -> str | None:
@@ -188,6 +198,7 @@ def parse_session(payload: dict[str, Any]) -> GatewayPaymentStatus:
     fee_currency: str | None = None
     amount_refunded: int | None = None
     disputed: bool | None = None
+    payment_method_type: str | None = None
     if isinstance(intent, dict):
         payment_intent_status = _str_or_none(intent.get("status"))
         amount_received = _int_or_none(intent.get("amount_received"))
@@ -201,6 +212,8 @@ def parse_session(payload: dict[str, Any]) -> GatewayPaymentStatus:
             # 核对用，不进映射。
             amount_refunded = _int_or_none(charge.get("amount_refunded"))
             disputed = _bool_or_none(charge.get("disputed"))
+            # 设计闸门 #589 v2 §2「付款方式」：只给收据快照用，不进映射。
+            payment_method_type = _payment_method_type(charge)
 
     state = map_session_state(
         payload["status"],
@@ -223,6 +236,7 @@ def parse_session(payload: dict[str, Any]) -> GatewayPaymentStatus:
         redirect_url=_str_or_none(payload.get("url")),
         charge_amount_refunded_minor=amount_refunded,
         charge_disputed=disputed,
+        payment_method_type=payment_method_type,
     )
 
 
