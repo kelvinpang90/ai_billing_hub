@@ -11716,7 +11716,7 @@ tasks:
     title: 支付第四批第七层：客户的收据列表、收据下载与支付接口的收据字段
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「客户接口」与 §6：C 的 app/api/customer_payments.py 加 GET /customer/receipts 与 GET /customer/receipts/{receipt_id}/download，C 的支付列表与详情加 receipt_id、receipt_number；收据下载的共用部分放进新模块 app/api/receipt_download.py；docs/api.md 补「支付（客户）」一节。不做页面：属于 AIH-TASK-204。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-201
     acceptance_criteria:
