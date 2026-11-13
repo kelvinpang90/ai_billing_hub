@@ -11402,7 +11402,7 @@ tasks:
     title: 支付第四批第一层：收据表与编号系列表的迁移、种子行、触发器与模型
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「数据库」与 §8：新迁移 0039 建 receipt_number_series（插入 2026 至 2099 每年一行）与 payment_receipts（CHECK、外键、索引照设计），MySQL 上建两个拒绝 UPDATE 与 DELETE 的触发器；新模型 app/models/receipts.py；docs/database-schema.md 记两张表。不写服务与接口：属于 AIH-TASK-197 起的任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-195
     acceptance_criteria:
