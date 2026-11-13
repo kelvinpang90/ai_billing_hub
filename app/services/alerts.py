@@ -58,6 +58,7 @@ from app.models.payments import (
     PaymentResolution,
     PaymentStatus,
 )
+from app.models.receipts import PaymentReceipt
 from app.models.statements import MonthlyStatement
 from app.models.tenancy import BillingMode, IntegrationStatus, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
@@ -123,6 +124,9 @@ PAYMENT_ALERT_WINDOW: Final = dt.timedelta(hours=24)
 PAYMENT_OPEN_EVENT_P2_SECONDS: Final = 900
 # 设计闸门 #585 v3 §2「告警」（AIH-TASK-181）：`expires_at` 过了 1 小时仍 `PENDING` P2。
 PAYMENT_STALE_PENDING_AFTER: Final = dt.timedelta(seconds=3600)
+# 设计闸门 #589 v2 §2「告警」（AIH-TASK-201）：`PAID` 在 `paid_at` 之后 1 小时（12 轮补发扫描）
+# 仍没有收据 P2。
+RECEIPT_MISSING_AFTER: Final = dt.timedelta(seconds=3600)
 _OPEN_EVENT_STATUSES: Final = (
     PaymentEventProcessingStatus.RECEIVED,
     PaymentEventProcessingStatus.RETRY,
@@ -665,7 +669,7 @@ def _payments(session: Session, now: dt.datetime) -> AlertResult | None:
       `resolution = CLOSED` 的支付的 `charge.refunded`）；配置判据；
     - P2：`RECEIVED` / `RETRY` / `PROCESSING` 里最早的 `received_at` 已超过 900 秒；`processed_at`
       在窗口内、状态为 `UNMATCHED` 或 `REJECTED` 的事件；`PENDING` 且 `expires_at <= now − 3600 秒`
-      的支付。
+      的支付；`PAID`、`paid_at <= now − 3600 秒` 且没有收据的支付（设计闸门 #589 v2 §2「告警」）。
 
     窗口是 `now − 24 小时 < 时刻 ≤ now`。只在任一计数大于 0、最老未处理事件超过 900 秒或配置判据
     触发时返回一段；否则返回 `None`，维度摘要与原来逐字相同。
@@ -728,12 +732,23 @@ def _payments(session: Session, now: dt.datetime) -> AlertResult | None:
             )
         ).scalar_one()
     )
+    receipts_missing = int(
+        session.execute(
+            select(func.count())
+            .select_from(Payment)
+            .where(
+                Payment.status == PaymentStatus.PAID,
+                Payment.paid_at <= now - RECEIPT_MISSING_AFTER,
+                ~exists().where(PaymentReceipt.payment_id == Payment.id),
+            )
+        ).scalar_one()
+    )
     misconfigured = _payments_misconfigured()
     stale = age > PAYMENT_OPEN_EVENT_P2_SECONDS
 
     if review or conflicts or disputes or misconfigured:
         level = AlertLevel.P1
-    elif stale or failed or stale_pending:
+    elif stale or failed or stale_pending or receipts_missing:
         level = AlertLevel.P2
     else:
         return None
@@ -741,7 +756,8 @@ def _payments(session: Session, now: dt.datetime) -> AlertResult | None:
     summary = (
         f"; payments: review open {review}, event conflicts 24h {conflicts}, "
         f"oldest open event {age}s, unmatched or rejected 24h {failed}, "
-        f"stale pending {stale_pending}, disputes or refunds 24h {disputes}, config {config}"
+        f"stale pending {stale_pending}, disputes or refunds 24h {disputes}, "
+        f"receipts missing 1h {receipts_missing}, config {config}"
     )
     return AlertResult(level, summary)
 
@@ -751,10 +767,12 @@ def wallet_negative_balance(session: Session, context: AlertContext) -> AlertRes
     an inconsistency in the runs under judgement is P1; never completed, stale or a clock anomaly
     is P2. The summary is `<负余额部分>; <核对部分>`: counts and dates only (INV-7).
 
-    支付的判据也并在这里（设计闸门 #580 v3 §2「告警」、#585 v3 §2「告警」，见 `_payments`）：
-    有要报的时，摘要末尾追加 `; payments: review open <a>, event conflicts 24h <b>,
+    支付的判据也并在这里（设计闸门 #580 v3 §2「告警」、#585 v3 §2「告警」、#589 v2 §2「告警」，
+    见 `_payments`）：有要报的时，摘要末尾追加
+    `; payments: review open <a>, event conflicts 24h <b>,
     oldest open event <c>s, unmatched or rejected 24h <d>, stale pending <e>,
-    disputes or refunds 24h <f>, config <ok|missing>`，没有时摘要与原来逐字相同。"""
+    disputes or refunds 24h <f>, receipts missing 1h <g>, config <ok|missing>`，
+    没有时摘要与原来逐字相同。"""
     negative = _negative_wallets(session)
     reconciliation = _reconciliation(session, context.now)
     parts = [negative, reconciliation]

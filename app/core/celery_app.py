@@ -38,6 +38,7 @@ TASK_MODULES = [
     "app.tasks.statements",
     "app.tasks.payment_events",
     "app.tasks.payment_reconcile",
+    "app.tasks.receipts",
 ]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
@@ -100,6 +101,11 @@ PAYMENT_EVENTS_EXPIRES_MARGIN_SECONDS = 1
 # `payment_reconcile_poll_seconds`（缺省 60 秒），`expires` 为间隔减 1 秒。丢失回调的支付只靠它
 # 收口（INV-14）；开关关闭时每一轮直接返回。
 PAYMENT_RECONCILE_EXPIRES_MARGIN_SECONDS = 1
+
+# 收据补发扫描（设计闸门 #589 v2 §2「补发扫描」，AIH-TASK-201）：每 300 秒，`expires` 为间隔减
+# 1 秒。本批上线前的 `PAID` 与开具检查曾经不过的支付只靠它补开收据（INV-14）；不看开关。
+RECEIPT_SWEEP_SECONDS = 300.0
+RECEIPT_SWEEP_EXPIRES_SECONDS = RECEIPT_SWEEP_SECONDS - 1
 
 
 class RedisNotConfigured(RuntimeError):
@@ -210,6 +216,11 @@ def create_celery_app(settings: Settings) -> Celery:
                     "expires": settings.payment_reconcile_poll_seconds
                     - PAYMENT_RECONCILE_EXPIRES_MARGIN_SECONDS
                 },
+            },
+            "receipts-issue-missing": {
+                "task": "app.tasks.receipts.issue_missing",
+                "schedule": RECEIPT_SWEEP_SECONDS,
+                "options": {"expires": RECEIPT_SWEEP_EXPIRES_SECONDS},
             },
         },
     )
