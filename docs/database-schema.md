@@ -20,7 +20,7 @@
   金额列：`tenants.low_balance_threshold`、`wallets.balance`、`wallet_transactions` 的
   `amount` / `balance_before` / `balance_after`；`provider_price_components` 的 `rate_amount`（原币种单价）与
   `unit_quantity`（多少个计量单位）同一精度；`payments` 的 `expected_amount`、`wallet_credit_amount`、`tax_amount`、
-  `confirmed_amount`、`gateway_fee` 也是。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
+  `confirmed_amount`、`gateway_fee` 也是，`payment_receipts.amount` 也是。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
   #183 §2），同样不用浮点
 - **枚举列**：非原生 enum，`VARCHAR` 宽度写死（理由见 `app/models/auth.py` 的 `_ENUM_LENGTH`）
 
@@ -1699,6 +1699,110 @@ OR (resolution IS NOT NULL AND resolved_at IS NOT NULL AND resolved_by_user_id I
   `PAYMENT_SETTINGS_UPDATE` 审计里（含前后值与版本），删表不丢财务数据。再升级时重新写入种子行，之前改过的值要由管理员照审计
   重新设置。
 - **生产的回滚是关充值开关**（`BILLING_PAYMENT_TOPUPS_OPEN=false`、清空建单允许名单后重启），不降级 0038。
+
+---
+
+## 支付收据（spec §43、§45、§45.1、§106；ADR-0008 §5；AIH-TASK-196，迁移 `0039_payment_receipts`）
+
+设计依据：[design/AIH-TASK-196-payment-receipts.md](design/AIH-TASK-196-payment-receipts.md)（设计闸门 #589 v2）
+§2「数据库」「编号」、§3 INV-3、INV-6、INV-10、§6「数据保留」与 §8。两张表：`receipt_number_series` 是收据编号的计数器，
+每个马来西亚日历年一行；`payment_receipts` 是每笔 `PAID` 支付至多一张的收据，开具时把收据数据冻结进快照，之后不可改、不可删。
+模型在 `app/models/receipts.py`。AIH-TASK-196 只建表、系列行与触发器，部署后收据表是空的、系列表 74 行都是 0，没有写入方。
+
+**行由谁写**：只有 AIH-TASK-197 的 `issue_receipt`（`app/services/receipts.py`）。它在调用方的入账事务里（A 的
+`confirm_payment`、B 的人工按实付入账，AIH-TASK-200；补发扫描每笔一个事务，AIH-TASK-201）先做只读检查，再
+`SELECT … FOR UPDATE` 锁住 `issued_at` 的马来西亚年份那一行系列、`last_sequence + 1`，然后 INSERT 收据（同一事务里写付款
+邮件 outbox 行）。回滚时系列行一起回滚，不留空号。没有任何更新收据、删除收据、插入或删除系列行的路径。
+
+**谁读**：收据下载（客户 `GET /api/v1/customer/receipts/{receipt_id}/download`，AIH-TASK-202；管理员
+`GET /api/v1/admin/receipts/{receipt_id}/download`，AIH-TASK-203：都从 `snapshot_json` 即时生成 PDF，AIH-TASK-199）；客户的
+收据列表 `GET /api/v1/customer/receipts`，以及 C 的支付列表与详情、B 的管理端支付列表与详情里的收据字段（AIH-TASK-202、
+203）；补发扫描找没有收据的 `PAID` 支付、告警数 `paid_at` 1 小时后仍没有收据的支付（`wallet_negative_balance` 维度，
+AIH-TASK-201）。
+
+### `receipt_number_series`（编号计数器，迁移预建 74 行）
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `series_year` | SMALLINT | 主键，**不自增**（模型 `autoincrement=False`，MySQL 上没有 `AUTO_INCREMENT`，迁移的形状检查核对）；马来西亚日历年，2026–2099（`ck_receipt_number_series_year`：`series_year BETWEEN 2026 AND 2099`） |
+| `last_sequence` | INT | 非空，缺省 0；这一年已分配的最大序号，0–999999（`ck_receipt_number_series_sequence`：`last_sequence BETWEEN 0 AND 999999`） |
+
+- **系列行预建**：迁移 0039 插入 2026 至 2099 每年一行（74 行，`last_sequence = 0`），应用不插入、不删除系列行（按需插入会
+  让并发开具撞主键、把入账事务一起带失败，设计 §9）。2099 年之后要用新的迁移同时放宽两张表上的年份 CHECK 并插入新的系列行
+  （过设计闸门）。年份没有系列行或 `last_sequence` 已是 999999 时开具检查不过（`RECEIPT_SERIES_UNAVAILABLE`）：入账照常、
+  收据由补发扫描再试，1 小时后告警 P2。
+- **编号按年连续**：并发的开具在当年的系列行锁上排队，后到者读到先到者提交后的 `last_sequence`，所以同一年份内编号按分配
+  顺序连续、唯一、不复用（spec §45）；年份交界的两笔各锁各的行。
+- **不要手工把 `last_sequence` 改小或清空系列表**：下一次开具会分配已用过的序号（被 `uq_payment_receipts_series_sequence`
+  拒绝、开具失败），迁移重跑也会拒绝（见下）。
+- 单元测试的 SQLite 由模型 `create_all` 建表，**不带系列行**：需要它的测试自己写入。
+
+### `payment_receipts`
+
+| 列 | 类型 | 约束 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_payment_receipts_public_id`）；uuid4，对外 id（接口里的 `receipt_id`） |
+| `payment_id` | BIGINT | 非空，唯一（`uq_payment_receipts_payment_id`）；外键 → `payments(id)` `ON DELETE RESTRICT`（`fk_payment_receipts_payment_id`）；**每笔支付至多一张** |
+| `tenant_id` | BIGINT | 非空；外键 → `tenants(id)` `ON DELETE RESTRICT`（`fk_payment_receipts_tenant_id`）；等于支付的 `tenant_id`（客户接口按它过滤，INV-8） |
+| `receipt_number` | VARCHAR(32) | 非空，唯一（`uq_payment_receipts_receipt_number`）；`ACV-AIR-<series_year:04d>-<sequence:06d>`，例如 `ACV-AIR-2026-000001`；模型常量 `RECEIPT_NUMBER_LENGTH = 32` |
+| `series_year` | SMALLINT | 非空，2026–2099（`ck_payment_receipts_series_year`：`series_year BETWEEN 2026 AND 2099`）；`issued_at` 换算成马来西亚时间（UTC+8）后的年份 |
+| `sequence` | INT | 非空，1–999999（`ck_payment_receipts_sequence`：`sequence BETWEEN 1 AND 999999`）；与 `series_year` 一起唯一（`uq_payment_receipts_series_sequence`） |
+| `amount` | DECIMAL(20,8) | 非空；这笔支付的 `TOPUP` 账本行金额，`> 0` 且只有两位小数（`ck_payment_receipts_amount`：`amount > 0 AND amount = ROUND(amount, 2)`，INV-10） |
+| `currency` | CHAR(3) | 非空，`MYR`（`ck_payment_receipts_currency`：`currency = 'MYR'`） |
+| `tax_policy_version_id` | BIGINT | 非空；外键 → `tax_policy_versions(id)` `ON DELETE RESTRICT`（`fk_payment_receipts_tax_policy_version_id`）；等于支付建单时的税务政策版本，它的 `document_notice` 原文冻结进快照（INV-6、ADR-0008 §5） |
+| `snapshot_json` | JSON | 非空；快照，`schema_version = 1`，键集合固定（收据号、开具时刻、开具方、客户公司名、支付的 id / 付款时刻 / 金额 / 币种 / 状态 / 网关 / 网关参考号 / 付款方式、税务说明，设计 §2「快照」）；金额是两位小数的定点字符串；不含手续费、`expected_amount`、状态原因、内部 id 与任何成本类字段（INV-7） |
+| `issued_at` | DATETIME | 非空；开具时刻，不带时区的 UTC、精确到秒（与快照里的 `issued_at` 相同） |
+
+`amount` 与 `currency` 另存成列，供列表与 CHECK 使用，与快照里的值相同。PDF 每次下载都从快照即时生成，不存文件；改公司名、
+改税务政策都不改变已开具的收据（spec §106）。
+
+约束与索引：
+
+- `uq_payment_receipts_payment_id (payment_id)`：每笔支付至多一张（INV-3：开具幂等，已有就返回它）；也是 `payment_id` 外键
+  用的索引。
+- `uq_payment_receipts_series_sequence (series_year, sequence)` 与 `uq_payment_receipts_receipt_number (receipt_number)`：
+  编号唯一（编号由系列行锁分配，这两条是数据库兜底）。
+- `ix_payment_receipts_tenant_issued (tenant_id, issued_at, id)`，非唯一：客户的收据列表（按 `issued_at`、`id` 降序）；同时满足
+  `tenant_id` 外键对索引的要求。
+- `ix_payment_receipts_tax_policy_version_id (tax_policy_version_id)`，非唯一：外键列的**显式**索引（与 `monthly_statements`、
+  `payments` 同一理由：不声明的话 MySQL 会为外键自动建一个模型里没有的索引，迁移重跑时的形状比对就对不上）。
+- 三个外键都是 `RESTRICT`：删支付、租户或税务政策版本不许连带删掉收据。
+- 两张表六条 CHECK 的条件文本是 `app/models/receipts.py` 的常量，迁移里冻结一份，
+  `tests/backend/test_payment_receipts_migration.py` 比对两边；非法插入（序号 0 与 1000000、年份 2025 与 2100、金额 0、负数与
+  三位小数、币种 USD、系列计数 -1 与 1000000）与唯一冲突（同一支付两张、同一年份同一序号、同一收据号）在 SQLite 与 MySQL 上
+  都被拒绝。
+
+### 触发器（迁移 0039 建，只在 MySQL 上）
+
+| 触发器 | 时机 | 作用 |
+| --- | --- | --- |
+| `trg_payment_receipts_before_update` | BEFORE UPDATE | 无条件 `SIGNAL SQLSTATE '45000'`（`payment_receipts rows are immutable`） |
+| `trg_payment_receipts_before_delete` | BEFORE DELETE | 同上 |
+
+**收据行不可改、不可删**（§6「数据保留」：收据行永久保留）：任何 UPDATE（改哪一列都一样）与 DELETE 都被拒绝；没有作废与更正
+（设计 §1）。因为行不可删，编号永不复用。系列表上没有触发器（`issue_receipt` 要改 `last_sequence`）。SQLite 上没有这两个触发器
+（与 0035 同一惯例），服务层本来就没有更新与删除路径。`TRUNCATE` / `DROP` 是 DDL，不经触发器（与 0006 / 0035 相同），归「迁移
+账号与运行账号拆分」；测试清理用关外键检查加 `TRUNCATE`，不删触发器。
+
+### 迁移与回滚（设计 §2「数据库」、§8）
+
+- 0039 只建这两张新表、插入系列行、建两个触发器，不改任何已有表、不读写任何已有行。MySQL 上每张表是**一条**原子的
+  `CREATE TABLE`（主键、索引、外键与 CHECK 都在里面），顺序：`receipt_number_series` → 插入 74 行的**一条** `INSERT` →
+  `payment_receipts` → 两条 `CREATE TRIGGER`。缺什么建什么（补完在任一步之间中断的升级）。
+- 之前先检查、不对就报错且不发 DDL、不写行：存在的表逐项比形状（列的名称、类型与宽度、可空性，**不比服务端默认值**；主键、索引、
+  外键与 `RESTRICT`、CHECK 名称；另核对 `series_year` 没有 `AUTO_INCREMENT`）；MySQL 上读 `information_schema.TRIGGERS` 逐个比
+  两个触发器的所在表、时机、事件与主体；再看系列行：`payment_receipts` 不存在或为空时，系列表 0 行 → 插入 74 行，恰好 74 行、
+  年份恰好 2026–2099、计数都在 0–999999 → 不动，其他 → 报错；`payment_receipts` 有行时，系列表不存在或 0 行也报错（补插会从 0
+  起编号，与已开具的序号相撞），恰好 74 行时每个年份的 `last_sequence` 还要不小于收据里该年份的 `MAX(sequence)`。
+- 预检 `@@log_bin` 与 `@@log_bin_trust_function_creators`（与 0035 同一个）只在要发 DDL 时跑，排在第一条写入之前；只缺系列行、
+  不需要任何 DDL 时只发那一条 `INSERT`、不跑预检。`--sql` 离线模式按「什么都没做过」输出全部语句。
+- **收据表非空时降级被拒**：`downgrade` 先查 `SELECT 1 FROM payment_receipts LIMIT 1`，有任何一行就抛错，不发 DDL、不删行，
+  `alembic_version` 仍是 0039——收据是不可变的财务快照，删了编号就会复用。为空时先删两个触发器（只删存在的），再删
+  `payment_receipts`、再删 `receipt_number_series`；每张表只在存在时删：`payment_receipts` 已不存在时照样删系列表（补完在两次
+  `DROP` 之间中断的降级），两张都不在时不发 DDL。`--sql` 离线模式判断不了是否为空，直接拒绝、不输出 `DROP`。
+- **生产只回滚应用镜像，不降级 0039**：回滚到 AIH-TASK-200 之前的镜像后新入账不再开具收据，重新部署后补发扫描补开（不发
+  邮件）。需要修复时一律前滚。
 
 ---
 

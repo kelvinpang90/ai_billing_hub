@@ -43,6 +43,9 @@ from app.models import (
     provider_prices as _provider_price_models,  # noqa: F401  (registers the two price tables)
 )
 from app.models import (
+    receipts as _receipt_models,  # noqa: F401  (registers payment_receipts/receipt_number_series)
+)
+from app.models import (
     statements as _statement_models,  # noqa: F401  (registers monthly_statements)
 )
 from app.models import (

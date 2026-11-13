@@ -846,7 +846,8 @@ def _ledger_and_wallets(engine: Engine) -> tuple[list[tuple[object, ...]], ...]:
 
 
 def _at_0037(alembic_config: Config, engine: Engine) -> None:
-    command.upgrade(alembic_config, "head")
+    """Head, then down to 0038 (later revisions are not under observation), then to 0037."""
+    _at_0038(alembic_config, engine)
     command.downgrade(alembic_config, _DOWN_REVISION)
     assert _version(engine) == _DOWN_REVISION
     assert not _has_table(engine)
