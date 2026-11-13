@@ -25,6 +25,8 @@ TEMPLATE_PORTAL_INVITATION: Final = "portal_invitation"
 TEMPLATE_NOTIFICATION_LOW_BALANCE: Final = "notification_low_balance"
 TEMPLATE_NOTIFICATION_SUSPENDED: Final = "notification_suspended"
 TEMPLATE_NOTIFICATION_REACTIVATED: Final = "notification_reactivated"
+# 付款邮件（设计闸门 #589 v2 §2「付款邮件」，AIH-TASK-198）。
+TEMPLATE_PAYMENT_RECEIPT: Final = "payment_receipt"
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,19 @@ _TEMPLATES: Final[Mapping[str, _EmailTemplate]] = {
         ),
         required=frozenset({"company_name", "balance", "occurred_at", "link"}),
     ),
+    # ⚠️ 标题固定、不含任何 payload 值；不带附件，收据在门户里下载（Kelvin 2026-11-07 定）。
+    TEMPLATE_PAYMENT_RECEIPT: _EmailTemplate(
+        subject="We have received your Acuven Billing payment",
+        body=Template(
+            "We have received your payment of RM $amount for the Acuven Billing account of "
+            "$company_name, made at $paid_at.\n"
+            "It has been added to your prepaid balance.\n\n"
+            "Receipt number: $receipt_number\n\n"
+            "You can view this payment and download the receipt in the customer portal:\n"
+            "$link"
+        ),
+        required=frozenset({"amount", "company_name", "paid_at", "receipt_number", "link"}),
+    ),
 }
 
 
@@ -131,6 +146,7 @@ __all__ = [
     "TEMPLATE_NOTIFICATION_REACTIVATED",
     "TEMPLATE_NOTIFICATION_SUSPENDED",
     "TEMPLATE_PASSWORD_RESET",
+    "TEMPLATE_PAYMENT_RECEIPT",
     "TEMPLATE_PORTAL_INVITATION",
     "RenderedEmail",
     "render_email",

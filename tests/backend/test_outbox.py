@@ -31,6 +31,7 @@ from app.services.auth import RequestContext, utc_now
 from app.services.internal_billing import EVENT_BILLING_MODE_CHANGED
 from app.services.password_reset import AGGREGATE_USERS, EVENT_PASSWORD_RESET
 from app.services.portal_accounts import EVENT_PORTAL_INVITATION, create_portal_account
+from app.services.receipts import EVENT_RECEIPT_EMAIL
 from app.tasks import outbox as outbox_task
 from app.tasks.outbox import _backoff_seconds, _render_portal_invitation
 
@@ -362,11 +363,12 @@ def test_recovery_leaves_events_without_a_handler_pending(wired, monkeypatch) ->
 
 def test_the_handled_types_are_the_email_and_the_notification_events() -> None:
     """设计闸门 #471 v7 §7「recover 与告警名单」：一个函数，邮件类并通知类。
-    通知邮件（设计闸门 #559 v2）是第三类邮件事件。"""
+    通知邮件（设计闸门 #559 v2）是第三类邮件事件，付款邮件（设计闸门 #589 v2）是第四类。"""
     assert set(outbox_task.handled_event_types()) == {
         EVENT_PASSWORD_RESET,
         EVENT_PORTAL_INVITATION,
         outbox_task.EVENT_NOTIFICATION_EMAIL,
+        EVENT_RECEIPT_EMAIL,
         EVENT_LOW_BALANCE,
         EVENT_BILLING_STATUS_CHANGED,
     }
