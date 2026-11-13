@@ -1,6 +1,8 @@
-"""Admin payment queries: the list and one payment's detail (AIH-TASK-183).
+"""Admin payment queries: the list and one payment's detail (AIH-TASK-183, AIH-TASK-203).
 
-设计闸门 #585 v3 §2「管理端接口」；契约见 [docs/api.md](../../docs/api.md)「支付（管理端）」。
+设计闸门 #585 v3 §2「管理端接口」；收据字段见设计闸门 #589 v2 §2「管理端接口」（AIH-TASK-203：
+左连接 `payment_receipts`，列表带收据号，详情带收据 `public_id`、收据号与开具时刻）；契约见
+[docs/api.md](../../docs/api.md)「支付（管理端）」。
 
 只读：调用方给一个普通会话，这里不加锁、不提交、不写审计，也不写日志。结案接口在
 `resolve_review` 提交之后用同一个 `get_payment_detail` 重新读出详情。
@@ -29,6 +31,7 @@ from app.core.errors import AppError
 from app.core.fx_source import KUALA_LUMPUR_OFFSET
 from app.models.auth import User
 from app.models.payments import Payment, PaymentGatewayEvent, PaymentStatus
+from app.models.receipts import PaymentReceipt
 from app.models.tenancy import Tenant
 from app.models.wallet import ReferenceType, TransactionType, WalletTransaction
 
@@ -91,6 +94,8 @@ class PaymentListRow:
     payment: Payment
     customer_id: str
     customer_name: str
+    # 这笔支付的收据号；没有为 None。
+    receipt_number: str | None
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,10 @@ class PaymentDetailRow:
     credited_amount: Decimal | None
     # 结案管理员的 `users.email`；未结案为 None。
     resolved_by: str | None
+    # 这笔支付的收据（`public_id`、收据号、开具时刻）；没有时三者都为 None。
+    receipt_id: str | None
+    receipt_number: str | None
+    receipt_issued_at: dt.datetime | None
     # 按 `received_at` 升序、同一时刻按 `id` 升序，最多 `MAX_DETAIL_EVENTS` 条。
     events: list[PaymentGatewayEvent]
 
@@ -130,9 +139,11 @@ def list_payments(
         conditions.append(Payment.created_at >= created_from)
     if created_to is not None:
         conditions.append(Payment.created_at < created_to)
+    # 收据左连接：`payment_id` 唯一，不改变行数与排序；计数不需要它。
     listing = (
-        select(Payment, Tenant.public_id, Tenant.company_name)
+        select(Payment, Tenant.public_id, Tenant.company_name, PaymentReceipt.receipt_number)
         .join(Tenant, Tenant.id == Payment.tenant_id)
+        .outerjoin(PaymentReceipt, PaymentReceipt.payment_id == Payment.id)
         .where(*conditions)
         .order_by(Payment.created_at.desc(), Payment.id.desc())
         .offset(offset)
@@ -145,8 +156,8 @@ def list_payments(
         .where(*conditions)
     )
     rows = [
-        PaymentListRow(payment, public_id, company_name)
-        for payment, public_id, company_name in session.execute(listing).all()
+        PaymentListRow(payment, public_id, company_name, receipt_number)
+        for payment, public_id, company_name, receipt_number in session.execute(listing).all()
     ]
     total = session.execute(counting).scalar_one()
     return rows, total
@@ -154,16 +165,33 @@ def list_payments(
 
 def get_payment_detail(session: Session, payment_id: str) -> PaymentDetailRow | None:
     """One payment by `public_id` with its credit, resolver and events; `None` if absent."""
-    # 左连接：未结案的支付没有结案管理员。
+    # 左连接：未结案的支付没有结案管理员，没有收据的支付没有收据列（`payment_id` 唯一）。
     found = session.execute(
-        select(Payment, Tenant.public_id, Tenant.company_name, User.email)
+        select(
+            Payment,
+            Tenant.public_id,
+            Tenant.company_name,
+            User.email,
+            PaymentReceipt.public_id,
+            PaymentReceipt.receipt_number,
+            PaymentReceipt.issued_at,
+        )
         .join(Tenant, Tenant.id == Payment.tenant_id)
         .outerjoin(User, User.id == Payment.resolved_by_user_id)
+        .outerjoin(PaymentReceipt, PaymentReceipt.payment_id == Payment.id)
         .where(Payment.public_id == payment_id)
     ).one_or_none()
     if found is None:
         return None
-    payment, customer_id, customer_name, resolved_by = found
+    (
+        payment,
+        customer_id,
+        customer_name,
+        resolved_by,
+        receipt_id,
+        receipt_number,
+        receipt_issued_at,
+    ) = found
     # 账本引用 `(PAYMENT, public_id)` 唯一，至多一行。
     credited_amount = session.execute(
         select(WalletTransaction.amount).where(
@@ -186,6 +214,9 @@ def get_payment_detail(session: Session, payment_id: str) -> PaymentDetailRow | 
         customer_name=customer_name,
         credited_amount=credited_amount,
         resolved_by=resolved_by,
+        receipt_id=receipt_id,
+        receipt_number=receipt_number,
+        receipt_issued_at=receipt_issued_at,
         events=events,
     )
 

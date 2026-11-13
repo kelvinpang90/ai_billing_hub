@@ -218,6 +218,8 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", PAYMENTS_ROUTE),
     ("GET", PAYMENTS_ROUTE + "/{payment_id}"),
     ("POST", PAYMENTS_ROUTE + "/{payment_id}/resolve"),
+    # AIH-TASK-203 的管理端收据下载（设计闸门 #589 v2 §2「管理端接口」）。
+    ("GET", "/api/v1/admin/receipts/{receipt_id}/download"),
     # AIH-TASK-191 的管理端支付设置（设计闸门 #587 v3 §2「管理端接口」）。
     ("GET", PAYMENT_SETTINGS_ROUTE),
     ("PUT", PAYMENT_SETTINGS_ROUTE),
@@ -986,6 +988,7 @@ def test_every_admin_route_refuses_non_admins(
         "fx_rate_id",
         "usage_event_id",
         "payment_id",
+        "receipt_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     if path == USAGE_ANALYTICS_ROUTE:
