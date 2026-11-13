@@ -11770,7 +11770,7 @@ tasks:
     title: 支付第四批第八层：管理端收据下载与支付接口的收据字段
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「管理端接口」：B 的 app/api/admin_payments.py 加 GET /admin/receipts/{receipt_id}/download（复用 AIH-TASK-202 的 app/api/receipt_download.py），B 的支付列表加 receipt_number、详情加 receipt_id、receipt_number、receipt_issued_at；docs/api.md 补管理端支付一节。不做页面：属于 AIH-TASK-205。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-202
     acceptance_criteria:
