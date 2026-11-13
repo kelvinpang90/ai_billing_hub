@@ -37,6 +37,8 @@ dependencies = [
     "cryptography>=43",
     # TOTP（spec §54 推荐机制）。
     "pyotp>=2.9",
+    # 收据 PDF（设计闸门 #589 v2 §2「PDF」）；纯 Python，不需要编译链。
+    "fpdf2>=2.8",
 ]
 
 [project.optional-dependencies]
