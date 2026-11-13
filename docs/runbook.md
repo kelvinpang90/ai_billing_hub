@@ -942,7 +942,7 @@ N 个扫描，认领并计费到期的事件（`RECEIVED`，或退避到期的 `
 | `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
 | `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数。另两段（AIH-TASK-158，设计闸门 #565 v6 §2「告警」）接在后面，各报 P2：**缺失对账单** `<n> statements missing, earliest period <YYYY-MM>` = 某期到期后 6–30 小时内仍有合格租户没有对账单（没有时是 `0 statements missing`），按「月度对账单」一节处置；**晚到用量** `late usage 24h <a>/<b> rows (<x>%), <y>% of amount` = 最近 24 小时入账的预付用量里，过了原用量月 cut-off 才入账的条数或金额占比 ≥ 1%（宽限日内入账的上月用量不算），投递链路有延迟，按下面积压的处置查根因。摘要恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>`，级别取最严重的一段 |
 | `wallet_negative_balance` 变 P2 / **P1** | 一行合并负余额与钱包核对（设计闸门 #474 v13 §2「告警」），摘要恰好 `<负余额部分>; <核对部分>`，只有计数与日期。P2：有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010；摘要 `<n> wallets below zero`）；或核对从未完成（`reconciliation never completed`）、最近一次完成超过 30 小时（末尾 `stale`）；或有时钟异常的运行（`clock anomaly <行数>`）。**P1** = 核对发现余额与账本不一致（`inconsistent <M>` 或 `later inconsistent <K>` 大于 0），按下面「钱包核对发现不一致」处理。摘要末尾出现 `; payments: …` 时是支付的判据（AIH-TASK-175，设计闸门 #580 v3 §2「告警」；AIH-TASK-181，设计闸门 #585 v3 §2「告警」：未结案的复核一直报到结案、24 小时内的争议与退款、过期一小时仍 `PENDING`），按下面「支付：复核、事件冲突、事件积压与配置（`wallet_negative_balance` 告警的支付部分）」处理（争议与退款也在那一节） |
-| `outbox_backlog` 变 P2 | 一行合并积压与死信（AIH-TASK-149），摘要恰好 `<积压部分>; <死信部分>`，只有计数与时刻；只看有处理器的 outbox 行（密码重置信、门户邀请信、`NOTIFICATION_EMAIL_REQUESTED`（通知邮件，AIH-TASK-152）与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）。两种 P2 可同时出现。**积压**：积压部分是 `<n> row(s) pending over 10 minutes, oldest created <时刻>`（OK 时是 `no handled outbox row pending over 10 minutes`）= 有行超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。**死信**：死信部分是 `<n> dead letter(s) in 7 days, latest <时刻>`（OK 时是 `no dead letter in 7 days`）= 最近 7 天有行重试用尽结算为 `FAILED`，`latest` 是其中最晚的 `processed_at`，按下面「outbox 死信的处置」处理 |
+| `outbox_backlog` 变 P2 | 一行合并积压与死信（AIH-TASK-149），摘要恰好 `<积压部分>; <死信部分>`，只有计数与时刻；只看有处理器的 outbox 行（密码重置信、门户邀请信、`NOTIFICATION_EMAIL_REQUESTED`（通知邮件，AIH-TASK-152）、`PAYMENT_RECEIPT_EMAIL_REQUESTED`（付款邮件，AIH-TASK-198）与两类通知事件 `tenant.low_balance`、`tenant.billing_status_changed`）。两种 P2 可同时出现。**积压**：积压部分是 `<n> row(s) pending over 10 minutes, oldest created <时刻>`（OK 时是 `no handled outbox row pending over 10 minutes`）= 有行超过 10 分钟仍 `PENDING`：worker 或邮件出了问题，按「Redis / Celery broker 不可用」与邮件配置排查。**死信**：死信部分是 `<n> dead letter(s) in 7 days, latest <时刻>`（OK 时是 `no dead letter in 7 days`）= 最近 7 天有行重试用尽结算为 `FAILED`，`latest` 是其中最晚的 `processed_at`，按下面「outbox 死信的处置」处理 |
 | worker 日志 | `Recovered a usage event stuck in PROCESSING past its lease`（WARNING，带 `event_id`、`claimed_at`、`attempt_count`）；`A usage event's ledger reference was already posted with another amount`（ERROR，账本冲突）；`Billing a usage event failed; the attempt is recorded`（WARNING，带错误类型与码） |
 
 ### 影响什么
@@ -1087,6 +1087,9 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
    - **邮件类 · 通知邮件**（`NOTIFICATION_EMAIL_REQUESTED`，AIH-TASK-152）：进死信后 payload 已置空（里面有联系邮箱）。
      按这一行的 `aggregate_id`（通知的 `public_id`）在 `notifications` 表找到那条通知，再按它的 `tenant_id` 找到租户；
      门户通知不受影响。处置后**不会自动重发**这封信，需要时由人联系客户。
+   - **邮件类 · 付款邮件**（`PAYMENT_RECEIPT_EMAIL_REQUESTED`，AIH-TASK-198）：进死信后 payload 已置空（里面有联系邮箱与公司名），不能重投。
+     收据不受影响，客户照常可在门户下载。按这一行的 `aggregate_id`（收据的 `public_id`）在 `payment_receipts` 表找到收据号与 `payment_id`，
+     再按 `payment_id` 查 `payments.public_id`，在管理端支付详情核对；处置后**不会自动重发**这封信，需要时由人告知客户收据号。
    - **通知类**（`tenant.low_balance`、`tenant.billing_status_changed`）：进死信时 payload 保留，看这一行的
      `payload_json` 与 worker 的 error 日志（`Giving up on an outbox notification`，带 `outbox_id`）。
 

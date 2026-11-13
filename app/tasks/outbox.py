@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -43,6 +44,7 @@ from app.core.email_templates import (
     TEMPLATE_NOTIFICATION_REACTIVATED,
     TEMPLATE_NOTIFICATION_SUSPENDED,
     TEMPLATE_PASSWORD_RESET,
+    TEMPLATE_PAYMENT_RECEIPT,
     TEMPLATE_PORTAL_INVITATION,
 )
 from app.core.notification_adapter import Channel, OutboundMessage, build_adapter
@@ -60,6 +62,7 @@ from app.services.notifications import (
 )
 from app.services.password_reset import EVENT_PASSWORD_RESET
 from app.services.portal_accounts import EVENT_PORTAL_INVITATION
+from app.services.receipts import EVENT_RECEIPT_EMAIL
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +264,79 @@ def _render_notification_email(
     )
 
 
+# --- 付款邮件（设计闸门 #589 v2 §2「付款邮件」，AIH-TASK-198） ------------------------------------
+
+# payload 的键恰好这 6 个，由 app/services/receipts.py 的 `issue_receipt` 写入；多一个少一个都不发。
+_RECEIPT_EMAIL_KEYS: Final = frozenset(
+    {"to", "company_name", "receipt_number", "amount", "paid_at", "payment_id"}
+)
+_RECEIPT_NUMBER: Final = re.compile(r"ACV-AIR-[0-9]{4}-[0-9]{6}")
+_PAYMENT_PUBLIC_ID: Final = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+
+def _render_receipt_email(settings: Settings, payload: dict[str, object]) -> OutboundMessage | None:
+    """Build the payment received email, or None when we cannot (which counts as a failure).
+
+    ⚠️ 日志是固定文本，**不带任何 payload 值**（收件人、公司名、收据号、金额，设计 §6）。
+    """
+    base = settings.frontend_base_url.strip().rstrip("/")
+    if not base:
+        # 与其他邮件同一判定：拼不出可点的链接就不发。
+        logger.error("BILLING_FRONTEND_BASE_URL is not configured; cannot build a payment link")
+        return None
+
+    if set(payload) != _RECEIPT_EMAIL_KEYS:
+        logger.error("A payment receipt email outbox row does not have the expected payload keys")
+        return None
+
+    to = payload["to"]
+    if not isinstance(to, str) or not to or "\r" in to or "\n" in to:
+        logger.error("A payment receipt email outbox row has an unusable recipient")
+        return None
+
+    company_name = payload["company_name"]
+    if not isinstance(company_name, str) or not company_name:
+        logger.error("A payment receipt email outbox row has an unusable company name")
+        return None
+
+    receipt_number = payload["receipt_number"]
+    if not isinstance(receipt_number, str) or _RECEIPT_NUMBER.fullmatch(receipt_number) is None:
+        logger.error("A payment receipt email outbox row has an invalid receipt number")
+        return None
+
+    amount = parse_money(payload["amount"])
+    if amount is None or amount <= 0:
+        logger.error("A payment receipt email outbox row has an invalid amount")
+        return None
+
+    paid_at = _malaysia_time(payload["paid_at"])
+    if paid_at is None:
+        logger.error("A payment receipt email outbox row has an unreadable paid_at")
+        return None
+
+    payment_id = payload["payment_id"]
+    if not isinstance(payment_id, str) or _PAYMENT_PUBLIC_ID.fullmatch(payment_id) is None:
+        logger.error("A payment receipt email outbox row has an invalid payment id")
+        return None
+
+    # 路径由前端 `routes/paths.ts` 的 `portalPaymentResult` 登记（C 的付款结果页，要登录、
+    # 不带查询参数），由 tests/backend/test_receipt_email.py 机械比对。
+    return OutboundMessage(
+        channel=Channel.EMAIL,
+        recipient=to,
+        template=TEMPLATE_PAYMENT_RECEIPT,
+        params={
+            "amount": _display_money(amount),
+            "company_name": company_name,
+            "paid_at": paid_at,
+            "receipt_number": receipt_number,
+            "link": f"{base}/portal/payments/{payment_id}",
+        },
+    )
+
+
 # event_type → 渲染函数。渲染函数只组装模板参数，正文在 app/core/email_templates.py。
 #
 # ⚠️ 认不出来的事件类型走**普通失败**（重试，最终进死信），不是立刻死信。
@@ -278,10 +354,14 @@ def _render_notification_email(
 #
 # `NOTIFICATION_EMAIL_REQUESTED`（通知邮件，设计闸门 #559 v2）的生产者是下面的
 # `_settle_notification`（AIH-TASK-153：插入通知的同一事务里写这一行）。
+#
+# `PAYMENT_RECEIPT_EMAIL_REQUESTED`（付款邮件，设计闸门 #589 v2）的生产者是
+# app/services/receipts.py 的 `issue_receipt`（开具收据的同一事务里写这一行）。
 _RENDERERS = {
     EVENT_PASSWORD_RESET: _render_password_reset,
     EVENT_PORTAL_INVITATION: _render_portal_invitation,
     EVENT_NOTIFICATION_EMAIL: _render_notification_email,
+    EVENT_RECEIPT_EMAIL: _render_receipt_email,
 }
 
 # 通知类事件（设计闸门 #471 v7 §2「投递」）：不调 SMTP、不需要前端基址，
