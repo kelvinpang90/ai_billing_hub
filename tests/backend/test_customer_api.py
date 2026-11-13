@@ -537,6 +537,9 @@ def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
         ("GET", f"{CUSTOMER_PREFIX}/topup-options"),
         ("GET", f"{CUSTOMER_PREFIX}/payments"),
         ("GET", f"{CUSTOMER_PREFIX}/payments/{{payment_id}}"),
+        # 客户收据（AIH-TASK-202）：同一个路由模块，总是注册。
+        ("GET", f"{CUSTOMER_PREFIX}/receipts"),
+        ("GET", f"{CUSTOMER_PREFIX}/receipts/{{receipt_id}}/download"),
     }
 
 

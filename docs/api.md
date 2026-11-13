@@ -3972,22 +3972,26 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 [design/AIH-TASK-188-payment-settings-portal.md](design/AIH-TASK-188-payment-settings-portal.md) §2「客户接口」「最小恢复额」、§6；
 建立在设计闸门 #580（[design/AIH-TASK-172-payments-gateway.md](design/AIH-TASK-172-payments-gateway.md)）与 #585
 （[design/AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md)）之上。实现登记为 AIH-TASK-190。
+收据（两个收据接口与支付的收据字段）的设计依据：设计闸门 #589 `APPROVED: design v2`，全文见
+[design/AIH-TASK-196-payment-receipts.md](design/AIH-TASK-196-payment-receipts.md) §2「客户接口」「PDF」、§6；实现登记为 AIH-TASK-202。
 
 | 方法与路径 | 主体 | 成功 | 错误 |
 | --- | --- | --- | --- |
 | `GET /api/v1/customer/topup-options` | CUSTOMER 的访问令牌 | 200，能否充值与金额规则 | 401 / 403 / 500 / 503 |
 | `GET /api/v1/customer/payments` | 同上 | 200，自己的支付分页 | 401 / 403 / 422 / 500 / 503 |
 | `GET /api/v1/customer/payments/{payment_id}` | 同上 | 200，自己的一笔支付 | 401 / 403 / 404 / 500 / 503 |
+| `GET /api/v1/customer/receipts` | 同上 | 200，自己的收据分页 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/receipts/{receipt_id}/download` | 同上 | 200，一张收据的 PDF 附件 | 401 / 403 / 404 / 500 / 503 |
 
 - **鉴权**：与其他客户读接口一样用 `require_customer`；租户只取自访问令牌对应的、库里的 user 行，路径、查询串里都没有
   租户参数（带了 `customer_id`、`tenant_id` 也只会被忽略）；ADMIN 不能调（403 `CUSTOMER_REQUIRED`）。
 - **只读**：不写审计、不写任何行；四种 `account_status` 都返回 200（`DISABLED` / `CLOSED` 照常可读，充值选项给出
   `ACCOUNT_READ_ONLY`）。
-- **开关**：三个接口**总是注册**，与 `BILLING_PAYMENTS_ENABLED` 无关（建单 `POST /api/v1/customer/topups` 仍只在开关打开时
+- **开关**：五个接口**总是注册**，与 `BILLING_PAYMENTS_ENABLED` 无关（建单 `POST /api/v1/customer/topups` 仍只在开关打开时
   存在，见[客户建单](#客户建单)）。开关关闭时充值选项给出 `PAYMENTS_DISABLED`，列表与详情照常可读。
-- **只有充值选项读支付设置**（管理端「支付设置」那一行）；读不到时 503 `PAYMENTS_MISCONFIGURED`。支付列表与详情不读设置，
-  设置行缺失时照常返回。三个接口都不查 Stripe、不读密钥文件。
-- ⚠️ **金额是恰好两位小数的字符串**（例如 `"50.00"`），不是[金额](#金额inv-10)的 8 位小数通用写法：这三个接口的金额本身就是
+- **只有充值选项读支付设置**（管理端「支付设置」那一行）；读不到时 503 `PAYMENTS_MISCONFIGURED`。支付列表与详情、两个收据
+  接口不读设置，设置行缺失时照常返回。五个接口都不查 Stripe、不读密钥文件。
+- ⚠️ **金额是恰好两位小数的字符串**（例如 `"50.00"`），不是[金额](#金额inv-10)的 8 位小数通用写法：这几个接口的金额本身就是
   整分（设计 §2）。客户端照样按十进制解析，不要转成浮点数。时刻是不带时区的 UTC，精确到秒，见[时间](#时间)。
 
 ### `GET /api/v1/customer/topup-options` —— 充值选项
@@ -4045,7 +4049,7 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 页码，因为支付量小、需要显示总数。只有本客户的支付；**排序**：按 `created_at` 倒序（最新的在前），同一时刻的按内部行 id 倒序
 （后建的在前）。
 
-`items` 里每一项恰好这 8 个键，按这个顺序：
+`items` 里每一项恰好这 10 个键，按这个顺序：
 
 ```json
 {
@@ -4056,7 +4060,9 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
   "credited_amount": "100.00",
   "created_at": "2026-11-08T08:00:00",
   "paid_at": "2026-11-08T08:01:00",
-  "expires_at": "2026-11-08T09:00:00"
+  "expires_at": "2026-11-08T09:00:00",
+  "receipt_id": "11111111-1111-1111-1111-111111111111",
+  "receipt_number": "ACV-AIR-2026-000001"
 }
 ```
 
@@ -4068,6 +4074,11 @@ AIH-TASK-175（落库与处理）与 AIH-TASK-177（接口）。
 | `status` | 客户侧状态，见下表；不是支付的原始状态 |
 | `credited_amount` | **实际入账额**：这笔支付的 `TOPUP` 账本行金额；没有入账为 `null`。人工「按实付入账」时等于 Stripe 实收，可能不等于 `amount` |
 | `created_at` / `paid_at` / `expires_at` | 建单时刻、本系统确认已付的时刻（没付为 `null`）、付款页的过期时刻 |
+| `receipt_id` | 这笔支付的收据的对外 id（uuid4），[下载收据](#get-apiv1customerreceiptsreceipt_iddownload--下载一张收据)用它；没有收据为 `null` |
+| `receipt_number` | 收据号 `ACV-AIR-<马来西亚年份>-<6 位序号>`；没有收据为 `null` |
+
+只有 `PAID` 的支付才有收据，每笔至多一张。`PAID` 而收据为 `null` 是暂时状态：收据通常与入账同时出现，个别情况下由后台
+补发（每 5 分钟一轮），稍后再读即可。两个收据字段不改变 `status` 与其他字段。
 
 **客户侧状态**（由支付状态与人工结案的方式映射）：
 
@@ -4086,10 +4097,67 @@ PaymentIntent 编号、Stripe 报的金额与币种（`confirmed_*`）、回调�
 
 ### `GET /api/v1/customer/payments/{payment_id}` —— 一笔支付
 
-`data` 是列表项的同一组 8 个键、同样的值。
+`data` 是列表项的同一组 10 个键、同样的值。
 
 `payment_id` 不存在、属于别的客户、或格式根本不像 uuid（例如内部自增 id）：同一个 404 `PAYMENT_NOT_FOUND`，错误体相同，几种
 情况不区分（不做格式校验）。没带令牌时先得到 401。
+
+### `GET /api/v1/customer/receipts` —— 收据列表
+
+| 参数 | 规则 |
+| --- | --- |
+| `page` / `page_size` | 见[分页](#分页spec-108)：1–10000 与 1–100，默认 1 与 20；超出范围 422，在鉴权**之前**校验 |
+
+`data` 是[分页](#分页spec-108)对象（`items`、`page`、`page_size`、`total`，与支付列表相同）。只有本客户的收据；**排序**：按
+`issued_at` 倒序（最新开具的在前），同一时刻的按内部行 id 倒序（后开具的在前）。门户页面不调用它（收据号与下载入口在支付
+历史与付款结果页），供需要单独列出收据的调用方使用。
+
+`items` 里每一项恰好这 7 个键，按这个顺序：
+
+```json
+{
+  "id": "11111111-1111-1111-1111-111111111111",
+  "receipt_number": "ACV-AIR-2026-000001",
+  "payment_id": "00000000-0000-0000-0000-000000000000",
+  "amount": "100.00",
+  "currency": "MYR",
+  "paid_at": "2026-11-08T08:01:00",
+  "issued_at": "2026-11-08T08:01:00"
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 收据的对外 id（uuid4），即支付里的 `receipt_id`；下载接口用它 |
+| `receipt_number` | 收据号 `ACV-AIR-<马来西亚年份>-<6 位序号>`：每个马来西亚日历年从 `000001` 起连续编号，不重复、不复用 |
+| `payment_id` | 这张收据对应的支付的对外 id（即支付列表里的 `id`） |
+| `amount` | 收据金额（两位小数）：这笔支付的实际入账额，等于支付的 `credited_amount`，不一定等于建单的 `amount` |
+| `currency` | 恒为 `MYR` |
+| `paid_at` | 支付确认已付的时刻 |
+| `issued_at` | 收据开具时刻；本批上线前已付、由后台补发的收据晚于 `paid_at` |
+
+收据开具后不可改、不可删；之后改公司名或税务政策都不改变已开具的收据。列表不带收据的快照内容（公司名、税务说明等只印在
+PDF 上），也不带手续费、税务政策版本与内部 id（INV-7）。
+
+### `GET /api/v1/customer/receipts/{receipt_id}/download` —— 下载一张收据
+
+没有查询参数。成功时**不是**[信封](#信封spec-107)，而是文件本身：
+
+- 200，`Content-Type: application/pdf`；
+- `Content-Disposition: attachment; filename="<receipt_number>.pdf"`，例如 `filename="ACV-AIR-2026-000001.pdf"`。文件名只由收据号
+  组成（ASCII），不含任何客户输入；
+- `Cache-Control: no-store`。
+
+PDF 是 A4 一页、英文，每次下载由服务端从开具时冻结的收据快照现生成，不存文件；同一张收据任何时候下载内容都相同。上面印
+收据号、开具时刻与付款时刻（马来西亚时间 `MYT`）、公司名、金额（`RM 1,000.00`）、币种、付款方式（Stripe 没给出时印
+`Stripe`）、Stripe 的付款编号、支付 id、状态 `PAID` 与开具时的税务说明（英文）。字体只支持 Latin-1，之外的字符（例如中文）
+印成 `?`。
+
+`receipt_id` 不存在、属于别的客户、或格式根本不像 uuid（例如内部自增 id、收据号、支付 id）：同一个 404 `RECEIPT_NOT_FOUND`，
+错误体相同，几种情况不区分（不做格式校验）。没带令牌时先得到 401。
+
+存下的快照不合规（数据被破坏，正常不会发生）：500 `INTERNAL_ERROR`，错误信封与通用 500 相同（固定文案，带 `request_id`）；
+服务端记一条只带收据 id 的 ERROR 日志，按 `request_id` 排查。失败的响应都是 JSON 信封，没有 `Content-Disposition`。
 
 ### 错误
 
@@ -4097,10 +4165,11 @@ PaymentIntent 编号、Stripe 报的金额与币种（`confirmed_*`）、回调�
 | --- | --- | --- |
 | 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
 | 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
-| 404 | `PAYMENT_NOT_FOUND` | 只有详情：见上 |
-| 422 | `VALIDATION_ERROR` | 只有列表：`page` 或 `page_size` 不合规。`message` 只列字段名，不回显值 |
-| 503 | `PAYMENTS_MISCONFIGURED` | 只有充值选项：支付设置那一行读不到（迁移没跑）。列表与详情不受影响 |
-| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id` |
+| 404 | `PAYMENT_NOT_FOUND` | 只有支付详情：见上 |
+| 404 | `RECEIPT_NOT_FOUND` | 只有收据下载：见上 |
+| 422 | `VALIDATION_ERROR` | 只有两个列表：`page` 或 `page_size` 不合规。`message` 只列字段名，不回显值 |
+| 503 | `PAYMENTS_MISCONFIGURED` | 只有充值选项：支付设置那一行读不到（迁移没跑）。列表、详情与收据接口不受影响 |
+| 500 | `INTERNAL_ERROR` | 意外错误，带 `request_id`；收据下载时存下的快照不合规也是它（见上） |
 | 503 | `DATABASE_NOT_CONFIGURED` 等 | 数据库未配置或不可用，沿用通用处理 |
 
 错误响应都是[信封](#信封spec-107)。不可充值**不是错误**：充值选项照常 200，原因在 `unavailable_reason` 里。

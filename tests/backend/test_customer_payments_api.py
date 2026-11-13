@@ -9,7 +9,8 @@
 - **支付列表与详情**：七种客户侧状态的映射（自动入账、人工按实付入账、不入账结案经 B 的
   `resolve_review`）、人工按实付入账的 `credited_amount`（99.99 而 `amount` 100.00）、分页与
   `total`、排序（`created_at` 降序、`id` 降序）、页码越界 422；
-- **客户接口字段**：只有设计列出的八个键，手续费、原因、网关编号、结案字段、`confirmed_*` 不在
+- **客户接口字段**：只有设计列出的十个键（#587 的八个加 #589 v2 的 `receipt_id`、
+  `receipt_number`，AIH-TASK-202），手续费、原因、网关编号、结案字段、`confirmed_*` 不在
   响应里（INV-7）；
 - **跨租户**：别的租户的支付 404、列表里没有；格式不像 uuid 的 id 与内部自增 id 都是 404（INV-8）；
   `DISABLED` / `CLOSED` 照常可读。
@@ -100,6 +101,9 @@ PAYMENT_KEYS = [
     "created_at",
     "paid_at",
     "expires_at",
+    # 设计闸门 #589 v2 §2「客户接口」（AIH-TASK-202）追加的收据字段。
+    "receipt_id",
+    "receipt_number",
 ]
 PAGE_KEYS = {"items", "page", "page_size", "total"}
 ENVELOPE_KEYS = {"success", "data", "error", "request_id"}
@@ -590,6 +594,10 @@ def test_the_seven_customer_statuses_and_the_credited_amounts(world, portal) -> 
             "created_at": CREATED.isoformat(),
             "paid_at": paid_at,
             "expires_at": EXPIRES.isoformat(),
+            # 世界自带的税务政策版本没有 `document_notice`，开具检查不过：没有收据。有收据时的
+            # 两个字段由 test_customer_receipts_api.py 覆盖。
+            "receipt_id": None,
+            "receipt_number": None,
         }, public_id
         # 详情与列表项是同一组字段、同样的值。
         assert data_of(portal.get(f"{PAYMENTS}/{public_id}", headers)) == item
@@ -612,7 +620,8 @@ def test_responses_carry_only_the_whitelisted_fields(world, portal) -> None:
         for payment in (paid, closed, reviewing)
     ]
 
-    # 键的白名单：恰好八个、按顺序（手续费、原因、结案、网关、`confirmed_*` 的键都不在）。
+    # 键的白名单：恰好十个（含两个收据字段）、按顺序
+    # （手续费、原因、结案、网关、`confirmed_*` 的键都不在）。
     items = data_of(responses[0])["items"]
     assert len(items) == 3
     for item in items:
