@@ -5,11 +5,13 @@
 更新：AIH-TASK-186，设计闸门 #585 v3（[AIH-TASK-179-payments-review.md](design/AIH-TASK-179-payments-review.md)
 §1、§2「补对账」「人工复核出口」「争议与退款」「告警」「配置」、§8）：补对账、复核处理、争议与退款、对客户开放充值前的检查。
 更新：AIH-TASK-195，设计闸门 #587 v3（[AIH-TASK-188-payment-settings-portal.md](design/AIH-TASK-188-payment-settings-portal.md)
-§1、§2「支付设置服务」「最小恢复额」「门户页面」、§8）：支付设置、最小恢复额、对客户开放充值。**
+§1、§2「支付设置服务」「最小恢复额」「门户页面」、§8）：支付设置、最小恢复额、对客户开放充值。
+更新：AIH-TASK-206，设计闸门 #589 v2（[AIH-TASK-196-payment-receipts.md](design/AIH-TASK-196-payment-receipts.md)
+§1、§2「编号」「开具」「补发扫描」「告警」「付款邮件」、§5、§8、§10）：收据、补发、缺收据告警的处置、付款邮件、开放前检查。**
 
 本文件覆盖支付第一批（下称「A」）：从客户建单到可信确认后入账的后端链路与生产开启步骤；支付第二批（下称「B」）：
-补对账（§5）、`REVIEW_REQUIRED` 的人工复核处理（§6）、争议与退款（§7）、对客户开放充值前的检查（§8）；以及支付第三批（下称「C」）：
-支付设置（§11）、最小恢复额（§12）、对客户开放充值与回滚（§13）。
+补对账（§5）、`REVIEW_REQUIRED` 的人工复核处理（§6）、争议与退款（§7）、对客户开放充值前的检查（§8）；支付第三批（下称「C」）：
+支付设置（§11）、最小恢复额（§12）、对客户开放充值与回滚（§13）；以及支付第四批（下称「D」）：收据与付款邮件（§14）。
 接口契约见 [api.md](api.md)，配置项与 secret 文件见 [deployment.md「支付配置与 secret 文件」](deployment.md#支付配置与-secret-文件)，
 告警的值班处置见 [runbook.md「支付」一节](runbook.md#支付复核事件冲突事件积压与配置wallet_negative_balance-告警的支付部分)。
 
@@ -18,13 +20,13 @@
 ## 1. A、B、C 不做什么
 
 - A 留下的长时间待付的单子的补对账、`EXPIRED` 的定时转换、`REVIEW_REQUIRED` 的管理端处理：已由 B 交付，见 §5、§6。
-- 充值界面、支付历史、管理端支付设置、最小恢复额：已由 C 交付，见 §11、§12。收据属于 D，支付历史不显示收据列。
+- 充值界面、支付历史、管理端支付设置、最小恢复额：已由 C 交付，见 §11、§12。收据已由 D 交付，见 §14。
 - 不让客户取消或继续一笔待付的支付：复用窗口内重复点同一金额会复用同一笔（§2.1）。
 - 不改停机阈值（ADR-0010 方案 A：停机规则仍是余额 ≤ 0），不改可信确认与入账：最小恢复额只是建单时的校验（§12）。
 - 不把 `BILLING_PAYMENTS_ENABLED`、`BILLING_PAYMENT_TOPUPS_OPEN`、建单允许名单搬进支付设置：它们是运维开关，仍是配置项（§13）。
 - 不做自动退款，不对争议自动扣回（spec §112.1）：B 订阅争议与退款事件，只落库、关联与告警，扣回走现有人工调账（§7）。
 - 不对 `PENDING`、`EXPIRED`、`FAILED`、`CANCELLED`、`PAID` 提供人工操作：人工出口只针对 `REVIEW_REQUIRED`。
-- 对客户单独发「支付成功」通知：复机通知由现有账本逻辑发出。
+- A、B、C 不对客户单独发「支付成功」通知：复机通知由现有账本逻辑发出；付款邮件由 D 随收据开具发出（§14.6）。
 - 按合同费率核对手续费：只记 Stripe 余额流水里的逐笔实际手续费 `gateway_fee`。
 - 不新增 Healthchecks 检查：支付信号并进已有的 `wallet_negative_balance` 维度。
 
@@ -230,10 +232,10 @@ B 另加 CHECK `ck_payments_resolution_fields`：人工结案的支付（`CREDIT
 Healthchecks 已满 20 个检查，支付信号并进 `wallet_negative_balance` 维度。摘要段落为：
 
 ```text
-; payments: review open <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or rejected 24h <d>, stale pending <e>, disputes or refunds 24h <f>, config <ok|missing>
+; payments: review open <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or rejected 24h <d>, stale pending <e>, disputes or refunds 24h <f>, receipts missing 1h <g>, config <ok|missing>
 ```
 
-只在 `<a>`、`<b>`、`<d>`、`<e>`、`<f>` 任一大于 0、`<c>` 超过 900 秒（严格大于）、或配置判据触发时追加。
+只在 `<a>`、`<b>`、`<d>`、`<e>`、`<f>`、`<g>` 任一大于 0、`<c>` 超过 900 秒（严格大于）、或配置判据触发时追加。
 24 小时窗口一律是 `now − 24 小时 < 时刻 ≤ now`。值班处置的完整步骤（查询语句、原因码对照、绝不能做什么）见
 [runbook.md「支付」一节](runbook.md#支付复核事件冲突事件积压与配置wallet_negative_balance-告警的支付部分)。
 
@@ -245,6 +247,7 @@ Healthchecks 已满 20 个检查，支付信号并进 `wallet_negative_balance` 
 | `unmatched or rejected 24h <d>`：`processed_at` 在最近 24 小时内、状态为 `UNMATCHED` 或 `REJECTED` | P2 | 有事件对不上本系统的支付，或 Stripe 拒绝了权威查询 | 按 §9.2、§9.3 查；争议与退款事件的 `UNMATCHED` 按 §7 |
 | `stale pending <e>`：`status = 'PENDING'` 且 `expires_at <= now − 3600 秒` | P2 | 过期一小时仍未收口：补对账没在工作或 Stripe 持续不可用。会话已 `complete` 而异步付款仍在处理时会一直报到付款有结果或 7 天超时，这是有意的 | 按 §5.3 |
 | `disputes or refunds 24h <f>`：`charge.dispute.created` / `charge.refunded`、`processing_status` 不是 `IGNORED`、`received_at` 在最近 24 小时内；不含「`charge.refunded` 且关联的支付 `resolution = CLOSED`」 | P1 | Stripe 侧有争议（拒付）或后台退款；支付与钱包都没有被改动 | 按 §7 |
+| `receipts missing 1h <g>`：`status = 'PAID'`、`paid_at ≤ now − 3600 秒` 且没有收据（D） | P2 | 钱已入账，收据开具检查持续不过或补发扫描停了 | 按 §14.5 |
 | `config missing` | P1 | 开关打开，但两个密钥文件有一个读不到或为空、Stripe 密钥前缀不是 `sk_live_` / `sk_test_`、签名密钥前缀不是 `whsec_`、`BILLING_STRIPE_API_BASE_URL` 为空，或 `BILLING_FRONTEND_BASE_URL` 为空。回调与建单 503，事件任务不领取事件，补对账不运行 | 看 api / worker 日志的 `payments credential unavailable: …`（只带文件路径与原因），修好后重启 api 与 worker |
 
 ## 5. 补对账
@@ -638,13 +641,16 @@ SELECT e.gateway_event_id, e.event_type, e.last_error_code, e.attempts, e.receiv
 
 ## 13. 对客户开放充值（管理员执行）
 
-前提：C 的全部任务（AIH-TASK-188..194）已合并部署；§8 的开放前检查都已完成（开关打开、`config missing` 不出现、
+前提：C 的全部任务（AIH-TASK-188..194）与 D 的全部任务（AIH-TASK-196..205）已合并部署；§8 的开放前检查都已完成（开关打开、`config missing` 不出现、
 `BILLING_PAYMENT_TOPUPS_OPEN` 仍为假、建单允许名单已清空）。按顺序做，任一步不成功就停下。**由 Kelvin 执行。**
 
 **1. 核对支付设置。**在管理端「支付设置」页（§11）核对最低额、缓冲与推荐金额（顺带看一眼最高额、复用窗口与待付超时）。
 要改就在页面上保存（写 `PAYMENT_SETTINGS_UPDATE` 审计）；保存得到 409 时刷新后重新核对。
 
-**2. 打开建单。**宿主机 `.env` 设 `BILLING_PAYMENT_TOPUPS_OPEN=true`，重启 api、celery-worker、celery-beat。
+**2. 核对测试付款的收据（D）。**在管理端支付详情能下载测试付款的收据，PDF 的内容正确。做法见 §14.8；收据没有出现、下载失败或内容不对时停下，
+按 §14.5 排查，不要继续开放。
+
+**3. 打开建单。**宿主机 `.env` 设 `BILLING_PAYMENT_TOPUPS_OPEN=true`，重启 api、celery-worker、celery-beat。
 之后所有合格的客户（`PREPAID`、账户可写）都能在门户「充值」页建单。
 
 **回滚**：
@@ -654,3 +660,141 @@ SELECT e.gateway_event_id, e.event_type, e.last_error_code, e.attempts, e.receiv
 2. 之后原本能充值的客户建单得到 403 `TOPUPS_NOT_OPEN`，充值页显示「未开放」；内部租户也得到 `TOPUPS_NOT_OPEN`（开放检查排在计费模式之前，§2.1）；
    `DISABLED` 与 `CLOSED` 的客户照旧先得到 `ACCOUNT_READ_ONLY`（账户可写检查排在开放检查之前）。
 3. 已建好的支付照常由回调与补对账收口；支付历史与付款结果页照常可看。
+
+## 14. 收据
+
+依据设计闸门 #589 v2（[AIH-TASK-196-payment-receipts.md](design/AIH-TASK-196-payment-receipts.md)）。每笔 `PAID` 的支付恰好一张收据：
+收据数据在开具时冻结成快照（`payment_receipts.snapshot_json`），每次下载由服务端从快照现生成 PDF（英文、A4 一页），**不存文件**。
+收据行在数据库层拒绝 UPDATE 与 DELETE（MySQL 触发器），开具即终态。
+
+- 门户：支付历史的 `Receipt` 列（收据号与下载按钮）、付款结果页（`PAID` 且有收据时显示收据号与下载按钮；`PAID` 而还没有收据时提示稍后在支付历史下载）。
+- 管理端：支付列表的 `Receipt` 列（收据号）、支付详情的收据号、开具时刻（MYT）与下载按钮。
+- 接口：`GET /api/v1/customer/receipts`、`GET /api/v1/customer/receipts/{receipt_id}/download`、`GET /api/v1/admin/receipts/{receipt_id}/download`，
+  契约见 [api.md](api.md)。
+
+### 14.1 编号
+
+- 格式 `ACV-AIR-<年份>-<6 位序号>`，例如 `ACV-AIR-2026-000001`。年份是开具时刻（`issued_at`）换算成马来西亚时间（UTC+8）后的年份；
+  **每个自然年从 `000001` 重新开始**。例：`issued_at` 为 `2026-12-31 15:59:59`（UTC）的编为 2026 年，`2026-12-31 16:00:00`（UTC，即 MYT 次年 1 月 1 日零点）的编为 2027 年。
+- 编号在开具的同一事务里分配：锁住这一年的系列行（`receipt_number_series`，`SELECT … FOR UPDATE`）、`last_sequence + 1`、回写、插入收据。
+  事务回滚时系列行一起回滚，**不留空号**；并发的开具在系列行上排队，所以同一年份内连续、不重复；收据行不可删，**编号永不复用**。
+- 系列行由迁移 0039 预先插入 2026–2099 每年一行（共 74 行，`last_sequence` 从 0 起），每年最多 999999 张。只有开具会写它，**不要手工改**。
+
+### 14.2 开具
+
+- **时机**：与入账**同一事务**。A 的自动确认（`confirm_payment` 判定通过）与 B 的「按实付入账」（`CREDIT`）在写 `PAID`、`TOPUP` 账本行与审计之后、提交之前开具；
+  支付状态、账本行、收据、编号系列行与付款邮件的 outbox 行一起提交。进入 `REVIEW_REQUIRED`、「不入账结案」（`CLOSE`）与其他状态不开具。
+- **幂等**：同一笔支付已有收据就直接返回它，什么都不写；`payment_id` 唯一，每笔至多一张。
+- **检查在任何写入之前**（只读，按顺序，第一条不过即停）：账本里有这笔的 `TOPUP` 行且金额是两位小数的正数 → 支付建单时那一版税务政策读得出 →
+  当年编号系列行存在且未耗尽。原因码见 §14.3。
+- **检查不过不挡入账**：钱照常入账、事务照常提交，只是没有收据、也没有付款邮件；worker 日志记一条
+  `Receipt not issued; a pre-issue check failed`（ERROR，带原因码与支付 `public_id`，不带公司名、邮箱、金额）。之后由补发扫描（§14.4）每 5 分钟重试，
+  一小时后仍没有收据报 P2（§14.5）。
+- **数据库错误**（死锁、断连）：收据与入账一起回滚，支付、账本、收据都不变。A 的事件停在 `PROCESSING`，60 秒租约过期后被重新领取；
+  B 的「按实付入账」返回 500，管理员重试。
+- **快照内容**：收据号、开具时刻、开具方（`Acuven Technology Sdn Bhd`）、客户公司名（开具时的 `company_name`，不印联系人与邮箱）、
+  支付编号（`public_id`）、付款时刻、金额（= 这笔的 `TOPUP` 账本行金额：自动确认为应收额，「按实付入账」为 Stripe 实收）、币种 `MYR`、状态 `PAID`、
+  网关 `STRIPE`、网关引用（PaymentIntent id，没有时为会话 id）、付款方式（Stripe 返回的 `card`、`fpx` 等，PDF 上印 `Card`、`FPX`；拿不到为空，印 `Stripe`）、
+  支付建单时那一版税务政策的说明原文（PDF 页脚印英文）。不含手续费、应收额、状态原因、结案原因与任何内部 id。
+- **快照冻结**：之后改公司名、发布新的税务政策版本，都不改变已开具的收据；同一张收据任何时候下载，PDF 内容相同。
+
+### 14.3 开具检查不过：三个原因码
+
+| 原因码 | 含义 | 是否会自动收口 | 怎么处理 |
+| --- | --- | --- | --- |
+| `RECEIPT_SERIES_UNAVAILABLE` | 开具时刻的马来西亚年份没有系列行（不在 2026–2099，即 2099 年之后），或这一年的 `last_sequence` 已到 999999 | **会**：补上系列行后，补发扫描下一轮自动开出，P2 随之消失 | 要**过设计闸门**、用新的迁移补系列行（2099 年之后还要同时放宽两张表上的年份 CHECK）。**不要**手工插系列行、改 `last_sequence` 或插收据行：编号会重复或复用 |
+| `RECEIPT_LEDGER_MISSING` | 这笔支付没有 `TOPUP` 账本行（`reference_type = PAYMENT`、`reference_id = public_id`），或金额不是两位小数的正数 | **不会**，是永久状态：账本只追加、不可改（INV-5） | **按数据事故处理**，上报 Kelvin。正常入账路径里账本行与收据同一事务、先写账本，不会出现。**不要尝试改账本**（补行、改金额）来让它通过。这笔支付没有收据，P2 会一直报，直到另一个设计闸门给出人工开具或更正的办法 |
+| `RECEIPT_TAX_POLICY_UNREADABLE` | 支付建单时那一版税务政策（`payments.tax_policy_version_id`）读不出，或它的 `treatment_json` 校验不过 | **不会**，是永久状态：税务政策版本有触发器拒绝改删 | 同上，**按数据事故处理**。**不要尝试改税务政策**（改版本行、改支付引用的版本）。P2 一直报到另一个设计闸门给出办法 |
+
+账本行缺失与税务政策读不出在正常数据下都不会发生（税务政策在发布时已校验，外键 RESTRICT 保证存在），与对账单「永久停出」（设计闸门 #565）同一类处理。
+
+### 14.4 补发扫描
+
+- celery-beat 每 300 秒执行一次 `app.tasks.receipts.issue_missing`（条目 `receipts-issue-missing`，`expires` 为 299 秒）。
+  **不看支付开关**（不调 Stripe），`BILLING_PAYMENTS_ENABLED=false` 时照常运行。
+- 候选：`status = 'PAID'` 且没有收据的支付，按 `paid_at`、`id` 升序，每轮最多 500 笔、预算 240 秒（用完就停，下一轮继续）。
+  每笔一个事务：锁支付行、重查仍是 `PAID` 且没有收据（否则跳过），然后开具。
+- **补发不发付款邮件**；补发的收据付款方式为空，PDF 上印 `Stripe`。编号照常按开具时刻的年份分配。
+- **本批上线前已 `PAID` 的支付**（只有 Kelvin 的测试付款：§3 第 4 步与 §8 第 2 步的 RM10，充值开关在生产关着）由它补开：
+  AIH-TASK-201 部署后的第一轮里得到收据，不发邮件。开具检查曾经不过的支付也由它收口。
+- 某一笔检查不过或抛异常（回滚这一笔）都只记入本轮的失败数，继续下一笔，不挡后面的。每轮结束记一条 `Receipt back-fill finished`（INFO，只带 `issued` 与 `failed` 两个计数）；
+  某一笔抛异常时另记 `Receipt back-fill failed for a payment`（ERROR，只带支付 `public_id`）。
+- 与入账、与另一轮补发并发时，锁支付行后重查「没有收据」，`payment_id` 唯一，只会有一张收据。
+
+### 14.5 缺收据告警（`receipts missing 1h`）的处置
+
+`wallet_negative_balance` 维度的支付段落里 `receipts missing 1h <g>` 大于 0（P2，§4）：有支付 `PAID`、`paid_at` 已过一小时以上（覆盖 12 轮补发扫描）仍没有收据。
+钱已入账，只是客户与管理员暂时下载不到收据。正常路径下收据与入账同时提交，所以它只在开具检查持续不过或补发扫描停摆时出现。
+
+1. 按 [runbook.md「支付」一节](runbook.md#支付复核事件冲突事件积压与配置wallet_negative_balance-告警的支付部分)第 5 步的只读查询找出是哪几笔。
+2. 看 worker 日志：一条 `Receipt back-fill finished` 都没有 → 补发扫描没在跑，按 runbook 的「celery-beat 停止调度」「Redis / Celery broker 不可用」排查，
+   恢复后下一轮自动补齐。
+3. 有记录而 `failed` 大于 0 → 按这几笔的 `public_id` 找 `Receipt not issued; a pre-issue check failed` 的原因码，按 §14.3 处理；
+   只有 `Receipt back-fill failed for a payment`（数据库错误）→ 下一轮自动重试，持续出现时按 MySQL 的排查步骤看连接与锁。
+4. 恢复：补发扫描开出收据后这笔不再计入；账本行缺失或税务政策读不出的那几笔会一直报。
+
+**绝不能做什么**：不要为了消告警手工插收据行、改 `receipt_number_series`、补或改 `TOPUP` 账本行、改税务政策或改支付状态。
+收据行插进去就不可改、不可删，编号会重复或复用。
+
+### 14.6 付款邮件
+
+- **什么时候发**：只在入账的同一事务里开具（自动确认、「按实付入账」）时写一行 outbox（事件类型 `PAYMENT_RECEIPT_EMAIL_REQUESTED`，
+  `aggregate_type = payment_receipt`，`aggregate_id` 为收据的 `public_id`），由现有的 outbox `recover` 投递。**补发的收据不发邮件。**
+- **收件人**：开具时的租户联系邮箱（`tenants.email`）。
+- **内容**（英文，不带附件）：标题固定为 `We have received your Acuven Billing payment`；正文含金额（`RM 1,000.00` 格式）、公司名、付款时刻（MYT）、收据号，
+  以及门户里这笔支付的付款结果页链接 `{BILLING_FRONTEND_BASE_URL}/portal/payments/<payment_id>`（要登录，客户在那里下载收据）。
+- **失败不影响收据**：渲染不过（例如 `BILLING_FRONTEND_BASE_URL` 为空）或投递失败按现有规则重试，重试用完转死信、计入 `outbox_backlog`；
+  收据照常可下载。投递成功或死信后 payload 被清空，**不能重投**：死信的处置见
+  [runbook.md「outbox 死信的处置」](runbook.md#outbox-死信的处置outbox_backlog-告警的死信部分)（按 `aggregate_id` 查 `payment_receipts` 得到收据号与 `payment_id`，
+  在管理端支付详情核对；需要时由人告知客户收据号）。
+- **传输**：沿用 [ADR-0014](adr/ADR-0014-email-smtp-for-now.md) 定的 SMTP，本批不另行评估。ADR-0014 第 2 节的**重新评估触发条件**（任一出现即回到 ADR-0014 重新评估是否换事务邮件 API 服务）：
+  客户反馈收不到收据、对账单或余额提醒，且查明是送达问题；发件域名被列入黑名单，或邮件成批进垃圾箱；退信需要人工处理的频率高到成为日常工作。
+
+### 14.7 下载
+
+- 客户只能下载本租户的收据；别的租户的、不存在的、id 不像 uuid 的一律 404 `RECEIPT_NOT_FOUND`。管理端下载要 ADMIN（登录必过 2FA），不按租户过滤。
+- 响应为 `application/pdf` 附件，文件名 `<收据号>.pdf`，`Cache-Control: no-store`。
+- 快照校验不过（只会来自手工改库）→ 500 `INTERNAL_ERROR`，api 日志有一条带收据 `public_id` 的 ERROR：人工排查，**不要改收据行**（触发器也会拒绝）。
+
+### 14.8 开放前检查：测试付款的收据（§13 第 2 步）
+
+前提：D 的全部任务已部署至少 5 分钟（补发扫描已跑过一轮），`receipts missing` 没有出现在告警摘要里。
+
+1. 在管理端「支付」页按 `PAID` 筛选，找到测试付款（§3 第 4 步、§8 第 2 步的 RM10），`Receipt` 列显示收据号。
+2. 打开支付详情，看到收据号与开具时刻（MYT），点下载，得到 `<收据号>.pdf`。
+3. 核对 PDF 的内容：
+   - 标题 `PAYMENT RECEIPT`，下一行 `Acuven Technology Sdn Bhd`；
+   - `Receipt No.` 与详情页的收据号相同，形如 `ACV-AIR-2026-000001`；`Issued` 为 MYT 时刻；
+   - `Received from` 为验收租户的公司名；`Payment date` 为这笔 `paid_at` 的 MYT 时刻；
+   - `Amount` 为 `RM 10.00`，与这笔的 `TOPUP` 账本行金额相同；`Currency` 为 `MYR`；`Status` 为 `PAID`；
+   - `Payment method`：补发的（本批上线前的测试付款）为 `Stripe`；入账时开具的为 `Card` / `FPX` 等；
+   - `Gateway reference` 为这笔的 PaymentIntent id（`pi_` 开头）；`Payment ID` 为这笔的 `public_id`；
+   - 页脚为这笔支付建单时那一版税务政策的英文说明。
+4. 需要时只读核对数据库：
+
+   ```sql
+   SELECT r.receipt_number, r.series_year, r.sequence, r.amount, r.currency, r.issued_at, p.public_id, p.paid_at
+     FROM payment_receipts r
+     JOIN payments p ON p.id = r.payment_id
+    WHERE p.public_id = '<这笔支付的 payment_id>';
+
+   SELECT transaction_type, amount
+     FROM wallet_transactions
+    WHERE reference_type = 'PAYMENT' AND reference_id = '<这笔支付的 payment_id>';
+   ```
+
+任一项不对就停下，不要打开建单。
+
+### 14.9 回滚
+
+只回滚应用镜像，**不降级迁移 0039**（降级在 `payment_receipts` 有行时会拒绝：收据是不可变的财务快照）。回滚到 AIH-TASK-200 之前的镜像后，
+新入账不再开具收据；重新部署后补发扫描补开（不发邮件）。
+
+### 14.10 不做什么与已知限制
+
+- **不做作废与更正**（也不做红冲）：没有任何路径改变已开具的收据。争议与外部退款照 §7 用人工调账扣回，原收据保持不变。
+- 不做 LHDN e-Invoice；不存 PDF 文件；不做中文收据；邮件不附 PDF；门户没有独立的「收据」页面（收据列表接口照 spec 提供，门户不调用）。
+- 已知限制（设计 §10）：
+  1. PDF 用标准字体（Helvetica），Latin-1 之外的字符（例如中文）印成 `?`。马来西亚注册公司名使用拉丁字母，V1 接受；需要时另过设计闸门加字体。
+  2. 开具检查的「账本行缺失」与「税务政策读不出」是永久状态（§14.3）：这笔支付永远没有收据，P2 一直报，直到另一个设计闸门给出人工开具或更正的办法。
+  3. 补发扫描每轮按 `paid_at` 取最旧的 500 笔；同时有 500 笔以上持续失败时，更新的支付补不上。那时 P2 已在报。
