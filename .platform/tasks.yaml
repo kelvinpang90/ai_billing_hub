@@ -11887,7 +11887,7 @@ tasks:
     title: 支付第四批第十层：管理端支付列表与详情的收据号和下载
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §2「管理端页面」：frontend/src/api/adminPayments.ts 加收据字段与 downloadAdminReceipt，支付列表加收据列，支付详情加收据号、开具时刻与下载按钮；验收脚本加一个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-204
     acceptance_criteria:
