@@ -1623,6 +1623,9 @@ ERROR: the host deploy lock was not free within 300s; nothing has been changed (
 等锁 5 分钟 + 本项目等库、迁移、等健康、冒烟、回滚后再等健康约 10 分钟。job 超时会在部署进行到一半时切断 SSH，
 所以不能比这更短。
 
+SSH 步骤（`appleboy/ssh-action`）另有自己的 `command_timeout`，默认 10 分钟，会比 job 超时先到，
+所以显式设为 16 分钟，落在 job 的 17 分钟之内（Kelvin 2026-11-14 批准）。两处要一起改：只放宽 job 超时没有用。
+
 ## 10. 七件事的决定（Kelvin，2026-09-13）
 
 | # | 问题 | 决定 | 落在哪一节 |

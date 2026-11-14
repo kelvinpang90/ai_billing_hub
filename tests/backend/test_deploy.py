@@ -2450,6 +2450,8 @@ def test_the_deploy_jobs_are_bounded() -> None:
     deploy = workflow[workflow.index("  deploy:") :]
     assert re.findall(r"^    timeout-minutes: (\d+)$", build, re.M) == ["12"]
     assert re.findall(r"^    timeout-minutes: (\d+)$", deploy, re.M) == ["17"]
+    # ssh-action 自己的 command_timeout 默认 10 分钟，比 job 超时先到；必须显式放宽到 job 之内
+    assert re.findall(r"^          command_timeout: (\d+)m$", deploy, re.M) == ["16"]
 
 
 # --- 部署配置快照（§98.1 备份四层的第三层；T0.9）------------------------------

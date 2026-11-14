@@ -154,6 +154,10 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
           fingerprint: ${{ secrets.VPS_FINGERPRINT }}
+          # ⚠️ ssh-action 的 command_timeout 默认 10 分钟，比上面 job 的 17 分钟先到：等主机级部署锁
+          # 5 分钟 + 最坏一次回滚约 10 分钟时，SSH 会在部署中途被切断。16 分钟落在 job 超时之内
+          # （Kelvin 2026-11-14 批准，docs/deployment.md §9.9）。
+          command_timeout: 16m
           script: |
             set -euo pipefail
             cd /opt/ai_billing_hub
