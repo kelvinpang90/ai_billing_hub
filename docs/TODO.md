@@ -300,7 +300,7 @@
 
 ## Phase 4 — Payment & Customer Portal（§127）
 
-- [x] 客户认证（AIH-TASK-086..145，设计闸门 #368 等：共用登录、TOTP、密码重置、邀请接受，`require_customer`，门户自助 2FA）
+- [x] 客户认证（AIH-TASK-086..098，设计闸门 #368 等：共用登录、TOTP、密码重置、邀请接受，`require_customer`，门户自助 2FA）
   - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：客户门户登录在 `ENABLED` 下允许，`DISABLED` 与 `CLOSED` 下只读（看账单
     与收据），`PENDING_ACTIVATION` 由本 Phase 的设计闸门定
 - [x] 客户仪表盘（AIH-TASK-097、101、108：门户首页 `/portal` 的账户状态、余额卡、最近流水与本月用量）
@@ -368,7 +368,7 @@
 
 ## Phase 8 — Provider Price Sync & Rebill（§131）
 
-- [x] 供应商价格同步适配器（2026-11-14 Kelvin 定不做：Anthropic 与 OpenAI 都没有官方价格 API，spec §18 允许退回手工录入；价格由管理员按草稿录入）
+- [x] 供应商价格同步适配器（V1 不做，见 [ADR-0016](adr/ADR-0016-no-provider-price-sync.md)：Anthropic 与 OpenAI 都没有官方价格 API，spec §18 允许退回手工录入；价格由管理员按草稿录入）
 - [x] FX 汇率同步适配器（已由 Phase 2 交付：BNM 每日拉取落草稿、审批发布，AIH-TASK-028、039..044，设计闸门 #183；本 Phase 只做供应商价格同步）
 - [x] 草稿 → 管理员审批 → 发布（已由 AIH-TASK-026 交付，设计闸门 #177 v3：供应商价格版本 DRAFT → PUBLISHED → RETIRED，记录 `approved_by` / `approved_at`）
 - [x] 历史版本化（同上，AIH-TASK-026：每次改价是新版本，发布后由 MySQL 触发器保证不可改）
