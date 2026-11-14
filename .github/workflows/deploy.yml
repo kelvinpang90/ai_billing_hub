@@ -52,6 +52,8 @@ jobs:
   build:
     name: build and push
     runs-on: ubuntu-latest
+    # 两个 job 合计不超过 30 分钟（D5）。deploy 的 17 分钟见下。
+    timeout-minutes: 12
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
@@ -118,6 +120,10 @@ jobs:
     name: deploy to the VPS
     needs: build
     runs-on: ubuntu-latest
+    # ⚠️ 17 分钟按最坏情况算：等主机级部署锁 5 分钟（别的项目正在部署，docs/deployment.md §9.9）
+    # + 本项目等库、迁移、等健康、冒烟、回滚后再等健康约 10 分钟。job 超时会在部署进行到
+    # 一半时切断 SSH，所以不能比这更短。
+    timeout-minutes: 17
     # ⚠️ environment 的保护是「只允许从 main 部署」（手动触发时填别的分支会被拒）。
     # 「需要人工批准」那一道 2026-09-18 起撤掉了 —— 合并本身就是 Kelvin 的决定，
     # 再批一次是同一件事确认两遍（docs/deployment.md §9.4）。保护规则配在

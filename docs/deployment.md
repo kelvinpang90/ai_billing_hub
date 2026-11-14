@@ -1576,6 +1576,53 @@ CLI 写入。部署顺序（设计 §8，每一步单独部署都安全）：
 写上日期与 `public_id`（不是秘密，可以进公开仓库）；`docs/TODO.md` D2 一行与 Phase 4 一节去掉「不得开工」的阻塞句。
 **仅 079 合并部署不解除 Phase 4 闸门，这个 PR 合并之后才解除**（Phase 4 支付部分另外还要等 D6）。
 
+### 9.9 主机级部署锁：同主机各项目的部署串行（AIH-TASK-226，2026-11-14）
+
+**起因**：同一台主机上的几个项目都是合并即部署。另一个项目部署成功后执行 `docker image prune`，恰好落在本项目
+`compose pull` 的那几秒里，containerd 报 `content digest … not found` 或 `failed to extract layer`，部署失败
+（2026-10-27、11-03、11-14 三次，失败方都是本项目，重跑即成功）。workflow 的 `concurrency` 只在单个仓库内生效，
+管不到别的项目。
+
+**约定**（Kelvin 2026-11-14 批准；约定与参与名单登记在基础设施仓库 README「部署串行化」）：
+
+| 项 | 值 |
+| --- | --- |
+| 锁文件 | `/run/lock/acuven-deploy.lock`，可用 `ACUVEN_DEPLOY_LOCK` 覆盖。这是发行版的标准锁目录（tmpfs，重启清空），不透露主机或项目目录；写进公开仓库是 Kelvin 批准的例外 |
+| 等待上限 | 300 秒，可用 `ACUVEN_DEPLOY_LOCK_WAIT` 覆盖。平时每次持锁 17–45 秒，其余项目全排在前面也不到 3 分钟；超过 5 分钟说明持锁方在回滚、在等健康超时或卡住了，后面的部署应当失败让人看，而不是继续等 |
+| 持锁范围 | `deploy.sh` 参数检查之后、第一次碰 docker 之前取锁，一直到脚本退出：拉镜像、迁移、换版本、等健康、冒烟、prune、回滚全在锁内。锁随进程退出由内核释放，任何退出路径都不会留下死锁 |
+| 参与的项目 | 第一批：本项目、网店演示站、Stock Core、CRM 演示（三次事故都在这四个之间）；同主机其余用 docker 部署的项目随后在各自的内联部署脚本里加锁 |
+
+各项目把同一段约 20 行的片段嵌在自己的部署脚本里，不依赖主机上的共享脚本：部署跑的必须是「该提交里的脚本」（§9.1），
+回滚也要能回到它。只要路径相同、都用 `flock`，各项目即使写法略有不同也能互相排斥。
+
+**排队时的日志**：
+
+```
+06:04:46  another deploy holds the host lock (acuven_shop <SHA> pid=12345 since=2026-11-14T06:04:31Z); waiting up to 300s
+06:05:02  holding the host deploy lock
+06:05:02  currently running: …
+```
+
+括号里是锁文件第一行，由持锁方拿到锁之后写下（项目名、标签、pid、UTC 时间）。写不进去不影响部署，那时显示 `unknown`。
+没有排队时只有 `holding the host deploy lock` 一行。
+
+**等锁超时**：Deploy 以非零退出，日志是
+
+```
+ERROR: the host deploy lock was not free within 300s; nothing has been changed (re-run this job)
+```
+
+这时**生产没有任何改动**（超时发生在记下当前版本、拉镜像之前），与 `pull failed; nothing has been changed yet` 同一种语义：
+
+1. 先看是谁占着锁、它在做什么：括号里的项目名与时间，对照那个项目的 Deploy 运行。通常它在回滚或在等健康超时，等它结束
+2. 它结束之后，在 GitHub Actions 里重跑这次 Deploy（Re-run failed jobs）即可
+3. ⚠️ **不要手工删锁文件**：锁是内核挂在打开的文件上的，删掉文件不会让持锁方放手，只会让之后的部署锁在一个新文件上，
+   和它并行跑 —— 正是这把锁要防的情况。持锁方确实卡死了，就按它自己项目的处置办法结束那个部署进程，锁随之释放
+
+⚠️ **workflow 超时**：build job 12 分钟、deploy job 17 分钟（合计不超过 30 分钟）。deploy job 的 17 分钟按最坏情况算：
+等锁 5 分钟 + 本项目等库、迁移、等健康、冒烟、回滚后再等健康约 10 分钟。job 超时会在部署进行到一半时切断 SSH，
+所以不能比这更短。
+
 ## 10. 七件事的决定（Kelvin，2026-09-13）
 
 | # | 问题 | 决定 | 落在哪一节 |

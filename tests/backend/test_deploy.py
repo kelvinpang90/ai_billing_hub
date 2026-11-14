@@ -2280,6 +2280,178 @@ def test_an_unrelated_failure_is_not_papered_over(tmp_path) -> None:
     assert [c for c in calls if c.startswith("compose stop")] == []
 
 
+# --- 主机级部署锁（AIH-TASK-226，docs/deployment.md §9.9）---------------------
+#
+# 同一台主机上的各项目部署共用一把 flock。另一个项目部署成功后的 image prune 撞上本项目的
+# compose pull，containerd 报错，部署失败（2026-10-27、11-03、11-14 三次）。下面的用例
+# **真的执行整份 deploy.sh**：取锁是它第一个有副作用的动作，静态断言看不出「超时之前
+# 有没有碰过 docker」「锁文件里写的是什么」「stderr 还在不在」。
+#
+# ⚠️ Windows 的 Git Bash 没有 flock（Worker 在那里跑检查），所以默认用假的 flock。
+# 有真 flock 的地方（CI 的 ubuntu）另跑一遍「锁被占」，锁由本测试进程用 fcntl 持有。
+
+FAKE_FLOCK = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_STATE/flock_calls"
+[ -e "$FAKE_STATE/busy" ] && exit 1
+exit 0
+"""
+
+# 记下每一次调用；拉镜像失败，并往 stderr 写一行 —— 用来钉住「取锁之后 stderr 没被吞掉」。
+FAKE_DOCKER_DEPLOY = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_STATE/docker_calls"
+case "$1 $2" in
+    "compose ps") exit 0 ;;
+    "compose pull") echo "FAKE PULL ERROR ON STDERR" >&2; exit 1 ;;
+    *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"""
+
+# ⚠️ 先 `cd` 再拼 PATH 与锁路径，理由同 RUNNER：Windows 上 tmp_path 是 `C:/...`。
+DEPLOY_RUNNER = """#!/usr/bin/env bash
+cd "$1"
+export FAKE_STATE="$PWD"
+export PATH="$PWD/bin:$PATH"
+export ACUVEN_DEPLOY_LOCK="$PWD/deploy.lock"
+exec bash "$PWD/deploy.sh" deadbeef
+"""
+
+LOCK_HOLDER = "acuven_shop 0123abc pid=4242 since=2026-11-14T06:04:31Z\n"
+
+
+def run_deploy_script(tmp_path, *, fake_flock: bool = True, busy: bool = False, **env):
+    """在假的 docker（与可选的假 flock）下执行整份 deploy.sh，返回 (结果, 工作目录)。"""
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    work = tmp_path / "deploylock"
+    (work / "bin").mkdir(parents=True)
+
+    # ⚠️ `newline="\\n"`：工作树里的 deploy.sh 在 Windows 上是 CRLF，原样交给 bash 跑不起来。
+    def put(rel: str, text: str) -> Path:
+        target = work / rel
+        target.write_text(text, encoding="utf-8", newline="\n")
+        return target
+
+    put("deploy.sh", SCRIPT.read_text(encoding="utf-8"))
+    put("bin/docker", FAKE_DOCKER_DEPLOY).chmod(0o755)
+    if fake_flock:
+        put("bin/flock", FAKE_FLOCK).chmod(0o755)
+    if busy:
+        put("busy", "")
+    # 另一个项目拿到锁之后写下的持锁方
+    put("deploy.lock", LOCK_HOLDER)
+    runner = put("run.sh", DEPLOY_RUNNER)
+
+    full = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("BILLING_COMPOSE", "ACUVEN_DEPLOY_LOCK", "ACUVEN_DEPLOY_LOCK_WAIT")
+    }
+    full.update(
+        BILLING_IMAGE_REPO="ghcr.io/o/r",
+        BILLING_DEPLOY_STATE_FILE=str(work / ".last-good-deploy"),
+        **env,
+    )
+    done = subprocess.run([bash, str(runner), str(work)], env=full, capture_output=True, text=True)
+    return done, work
+
+
+def calls(work: Path, name: str) -> list[str]:
+    path = work / name
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def test_a_free_host_lock_is_taken_before_docker_is_touched(tmp_path) -> None:
+    """锁空闲：直接取得、写下持锁方，然后才碰 docker；之后的 stderr 照常进部署日志。"""
+    done, work = run_deploy_script(tmp_path)
+
+    # 拉镜像失败是这个假 docker 故意的：脚本走到了取锁之后的第 2 步
+    assert done.returncode != 0
+    assert "pull failed; nothing has been changed yet" in done.stdout, done.stdout
+    assert "holding the host deploy lock" in done.stdout
+    assert "another deploy holds the host lock" not in done.stdout
+    # 只试了一次非阻塞，没有等
+    assert calls(work, "flock_calls") == ["-n 9"]
+    out = done.stdout
+    assert out.index("holding the host deploy lock") < out.index("pulling ghcr.io/o/r:deadbeef")
+    assert calls(work, "docker_calls")[-1].startswith("compose pull")
+
+    holder = (work / "deploy.lock").read_text(encoding="utf-8")
+    assert holder.startswith("ai_billing_hub deadbeef pid="), holder
+    assert "acuven_shop" not in holder, "持锁方那一行要覆盖，不是追加"
+
+    # ⚠️ 打开锁文件那句的 `2>/dev/null` 只能作用于那一句。写成不带花括号的
+    # `exec 9>>"$F" 2>/dev/null` 时，之后整段脚本的 stderr 都被丢掉，这一行就看不到了。
+    assert "FAKE PULL ERROR ON STDERR" in done.stderr, done.stderr
+
+
+def test_a_busy_host_lock_times_out_before_anything_changes(tmp_path) -> None:
+    """锁被占且等不到：非零退出、说清是谁占着、没有调用任何 docker 命令。"""
+    done, work = run_deploy_script(tmp_path, busy=True, ACUVEN_DEPLOY_LOCK_WAIT="7")
+
+    assert done.returncode != 0
+    assert (
+        "another deploy holds the host lock (acuven_shop 0123abc pid=4242 "
+        "since=2026-11-14T06:04:31Z); waiting up to 7s"
+    ) in done.stdout, done.stdout
+    assert (
+        "the host deploy lock was not free within 7s; nothing has been changed (re-run this job)"
+    ) in done.stdout
+    assert "holding the host deploy lock" not in done.stdout
+    assert calls(work, "flock_calls") == ["-n 9", "-w 7 9"]
+    assert calls(work, "docker_calls") == []
+    # 没拿到锁的一方不许改写持锁方那一行
+    assert (work / "deploy.lock").read_text(encoding="utf-8") == LOCK_HOLDER
+
+
+@pytest.mark.skipif(
+    shutil.which("flock") is None or os.name == "nt", reason="需要真 flock 与 fcntl（CI 的 ubuntu）"
+)
+def test_a_busy_host_lock_times_out_with_the_real_flock(tmp_path) -> None:
+    """同上，换成真 flock：锁由本进程持有，和另一个项目的 deploy.sh 持有是同一回事。"""
+    import fcntl
+
+    lock_path = tmp_path / "deploylock" / "deploy.lock"
+    lock_path.parent.mkdir(parents=True)
+    with lock_path.open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        done, work = run_deploy_script(tmp_path, fake_flock=False, ACUVEN_DEPLOY_LOCK_WAIT="1")
+
+    assert done.returncode != 0
+    assert "waiting up to 1s" in done.stdout, done.stdout
+    assert "the host deploy lock was not free within 1s; nothing has been changed" in done.stdout
+    assert calls(work, "docker_calls") == []
+
+
+def test_the_host_lock_covers_the_whole_script() -> None:
+    """取锁在参数检查之后、记下当前版本之前；prune 与回滚都在锁内；中途不放锁。"""
+    script = uncommented(SCRIPT)
+    tag_check = script.index("refusing a mutable tag")
+    lock = script.index('flock -w "$DEPLOY_LOCK_WAIT" 9')
+    held = script.index('log "holding the host deploy lock"')
+    assert tag_check < script.index("flock -n 9") < lock < held
+    assert held < script.index("PREVIOUS_IMAGE=")
+    assert held < script.index("docker image prune")
+    # 函数定义在前面，这里比的是成功分支里的那次调用
+    assert held < script.index("    prune_old_images\n")
+    assert held < script.index('log "rolling back to $PREVIOUS_IMAGE"')
+    # 锁随进程退出由内核释放；脚本里不许有提前放锁的写法
+    assert "flock -u" not in script
+    assert not re.search(r"9\s*[<>]&\s*-", script)
+    # 打开锁文件时的重定向必须包在花括号里（见 test_a_free_host_lock_...）
+    assert '{ exec 9>>"$DEPLOY_LOCK"; } 2>/dev/null' in script
+    assert not re.search(r"^\s*exec 9[<>]+\S+ 2>", script, re.M)
+
+
+def test_the_deploy_jobs_are_bounded() -> None:
+    """D5：两个 job 合计不超过 30 分钟；deploy 的 17 分钟要容得下 5 分钟等锁加最坏的一次回滚。"""
+    workflow = uncommented(WORKFLOW)
+    build = workflow[workflow.index("  build:") : workflow.index("  deploy:")]
+    deploy = workflow[workflow.index("  deploy:") :]
+    assert re.findall(r"^    timeout-minutes: (\d+)$", build, re.M) == ["12"]
+    assert re.findall(r"^    timeout-minutes: (\d+)$", deploy, re.M) == ["17"]
+
+
 # --- 部署配置快照（§98.1 备份四层的第三层；T0.9）------------------------------
 
 CONFIG_SNAPSHOT = REPO_ROOT / "deploy" / "config_snapshot.sh"

@@ -267,6 +267,32 @@ case "$TAG" in
 esac
 
 # --------------------------------------------------------------------------
+# 0.5 主机级部署锁：同一台主机上的各项目部署一个接一个跑
+# --------------------------------------------------------------------------
+#
+# 约定登记在基础设施仓库 README「部署串行化」，见 docs/deployment.md §9.9。
+# 起因：另一个项目部署成功后的 image prune 恰好落在本项目拉镜像的几秒里，containerd 报
+# content digest not found / failed to extract layer（2026-10-27、11-03、11-14 三次）。
+# 锁覆盖整个脚本：prune 与回滚也在锁内。进程退出（含 die）时由内核释放。
+# ⚠️ 必须排在第 1 步之前：等锁超时要落在「任何改动之前」，和拉取失败是同一种语义。
+DEPLOY_LOCK="${ACUVEN_DEPLOY_LOCK:-/run/lock/acuven-deploy.lock}"
+DEPLOY_LOCK_WAIT="${ACUVEN_DEPLOY_LOCK_WAIT:-300}"
+command -v flock >/dev/null || die "flock is not installed; nothing has been changed"
+# 先试追加写；文件属于别的用户时（protected_regular）退回只读打开，flock 对只读描述符同样有效。
+# ⚠️ `2>/dev/null` 必须用花括号包住：`exec` 不带命令时，写在它后面的重定向作用于整个 shell，
+# 之后 compose pull、迁移的报错就全从部署日志里消失了（本地实测）。
+{ exec 9>>"$DEPLOY_LOCK"; } 2>/dev/null || { exec 9<"$DEPLOY_LOCK"; } 2>/dev/null \
+    || die "cannot open the host deploy lock $DEPLOY_LOCK; nothing has been changed"
+if ! flock -n 9; then
+    log "another deploy holds the host lock ($(head -1 "$DEPLOY_LOCK" 2>/dev/null || echo unknown)); waiting up to ${DEPLOY_LOCK_WAIT}s"
+    flock -w "$DEPLOY_LOCK_WAIT" 9 \
+        || die "the host deploy lock was not free within ${DEPLOY_LOCK_WAIT}s; nothing has been changed (re-run this job)"
+fi
+# 尽力写下持锁方，给排队的人看；写不进去不影响部署。
+printf '%s %s pid=%s since=%s\n' "ai_billing_hub" "$TAG" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null >"$DEPLOY_LOCK" || true
+log "holding the host deploy lock"
+
+# --------------------------------------------------------------------------
 # 1. 记下当前在跑的是什么 —— 回滚要用
 # --------------------------------------------------------------------------
 #
