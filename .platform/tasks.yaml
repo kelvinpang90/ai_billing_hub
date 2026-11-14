@@ -12104,3 +12104,59 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AIH-TASK-226：同主机部署串行化（方案 D，Kelvin 2026-11-14 批准；同一台主机上另一个项目部署成功后的 image prune
+  # 撞上本项目的 compose pull，containerd 报错、部署失败：2026-10-27、11-03、11-14 三次，失败方都是本项目）。
+  # 由人工会话按编号任务流程交付（不经 Worker）。不碰钱，不走设计闸门。
+  # 编号跳过 209..225：那一段同日由关户、对账单 PDF、毛利分析三批另行登记。
+  - id: AIH-TASK-226
+    title: 部署脚本全程持有主机级部署锁，与同主机其他项目的部署串行
+    purpose: >-
+      同一台主机上的几个项目都是合并即部署，GitHub 的 concurrency 只管单个仓库。另一个项目部署成功后执行 image prune，恰好落在本项目 compose pull 的几秒里，containerd 报 content digest not found 或 failed to extract layer，部署失败（2026-10-27、11-03、11-14 三次）。deploy/deploy.sh 在参数检查之后、第一次碰 docker 之前取一把各项目共用的主机级 flock（默认 /run/lock/acuven-deploy.lock，Kelvin 2026-11-14 批准写进公开仓库，作为不写服务器绝对路径规则的例外），最多等 300 秒，拿不到就在改动任何东西之前退出；持锁覆盖整个脚本，包括 prune 与回滚。同时给 Deploy workflow 两个 job 补上 timeout-minutes（build 12、deploy 17，合计不超过 30 分钟）。另外三个项目在各自仓库做同样的改动。
+    status: ready
+    depends_on:
+      - AIH-TASK-208
+    acceptance_criteria:
+      - 'deploy/deploy.sh 在第 0 步参数检查之后、第 1 步记下当前在跑的版本之前，取主机级部署锁：锁文件默认 /run/lock/acuven-deploy.lock，可用 ACUVEN_DEPLOY_LOCK 覆盖；等待上限默认 300 秒，可用 ACUVEN_DEPLOY_LOCK_WAIT 覆盖；没有 flock、锁文件打不开、等锁超时，都以非零退出，日志写明 nothing has been changed，此前不调用任何 docker 命令'
+      - '锁先试非阻塞获取；被占时记一行日志，写明持锁方（锁文件第一行）与等待上限，再阻塞等待。拿到锁后尽力把项目名、镜像标签、pid、UTC 时间写进锁文件（写不进去不影响部署），并记一行 holding the host deploy lock。打开锁文件时重定向只作用于那一句，不得让脚本其余部分的 stderr 被吞掉'
+      - '持锁覆盖整个脚本：脚本里没有任何提前释放锁或关闭锁描述符的写法；成功路径上的 image prune 与 prune_old_images、失败时的回滚都在取锁之后；锁随进程退出由内核释放'
+      - '.github/workflows/deploy.yml：build job 加 timeout-minutes: 12，deploy job 加 timeout-minutes: 17；on: 一节一字不改（OpenClaw 自动收尾会核对它的形状）'
+      - 'tests/backend/test_deploy.py 新增用 bash 实际执行整份 deploy.sh 的用例，假的 flock 与 docker 放在 PATH 最前面，ACUVEN_DEPLOY_LOCK 指向 tmp_path，不起容器、不联网（Windows 的 Git Bash 没有 flock）：锁空闲时直接取得、日志有 holding the host deploy lock、锁文件里写着本次的标签，然后才走到 docker；锁被占且等锁超时时非零退出、日志有 nothing has been changed、没有调用任何 docker 命令'
+      - 'tests/backend/test_deploy.py 新增文本守卫：取锁在参数检查之后、PREVIOUS_IMAGE 之前；image prune、prune_old_images 与回滚都在取锁之后；脚本里没有 flock -u 或关闭 9 号描述符；deploy.yml 两个 job 的 timeout-minutes 分别是 12 与 17，合计不超过 30'
+      - 'docs/deployment.md 新增一节：锁的约定（路径、两个环境变量、等待上限、持锁范围、同主机哪些项目参与、约定的登记处在基础设施仓库的 README）、排队时日志长什么样、等锁超时后怎么处理（生产没有任何改动，重跑这次 Deploy 即可，不要手工删锁文件）'
+      - '不改 app/、alembic/、docker-compose 类文件、deploy/ 下其他脚本、.env 类文件；不加 pull 失败重试；不加额外的生产审批；不写主机名、IP、凭据；复选框只允许 [ ] / [x]；本地检查全部零退出；以 Draft PR 交付。PR 正文的「设计闸门」写 不适用，并写明锁路径是 Kelvin 2026-11-14 批准的例外'
+    allowed_change_paths:
+      - deploy/deploy.sh
+      - .github/workflows/deploy.yml
+      - tests/backend/test_deploy.py
+      - docs/deployment.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
