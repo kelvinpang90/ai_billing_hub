@@ -19,6 +19,10 @@
  * 「返回支付历史」回到路由 state 里的页码（支付历史点一行时带上，{@link PaymentsHistoryState}）；没有 state（例如从 Stripe
  * 跳回）时回第 1 页。
  *
+ * 收据（AIH-TASK-204；设计闸门 #589 v2 §2「门户页面」）：`status` 为 `PAID` 且有收据时显示收据号与下载按钮（下载中不可再点；
+ * 失败在按钮下方显示错误码、信息与 request_id，下一次点下载时清除）；`PAID` 而还没有收据时提示收据正在准备、稍后可在支付历史
+ * 下载；其他状态不显示收据区域。刷新规则不因收据改变（只在 `PENDING` 时刷新）。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径。
  */
 
@@ -28,7 +32,12 @@ import { useTranslation } from "react-i18next";
 import { Link, useLocation, useParams, useSearchParams } from "react-router";
 
 import { ApiError } from "../../api/client";
-import { PAYMENT_NOT_FOUND, getCustomerPayment, type CustomerPayment } from "../../api/customerPayments";
+import {
+  PAYMENT_NOT_FOUND,
+  downloadCustomerReceipt,
+  getCustomerPayment,
+  type CustomerPayment,
+} from "../../api/customerPayments";
 import { DateTimeText } from "../../components/DateTimeText";
 import { MoneyText } from "../../components/MoneyText";
 import { RequestReference } from "../../components/RequestReference";
@@ -38,6 +47,8 @@ import {
   PAGE_PARAM,
   PaidAt,
   PaymentStatusText,
+  ReceiptDownloadButton,
+  ReceiptDownloadFailure,
   type PaymentsHistoryState,
 } from "./PaymentsHistoryPage";
 
@@ -52,6 +63,7 @@ export const RESULT_PARAM = "result";
 const RESULT_CANCELLED = "cancelled";
 
 const PENDING_STATUS = "PENDING";
+const PAID_STATUS = "PAID";
 
 type ResultState =
   | { kind: "loading" }
@@ -203,6 +215,46 @@ function PaymentDetails({ payment }: { payment: CustomerPayment }) {
   );
 }
 
+/** 已付支付的收据：有收据时收据号与下载按钮，还没有时说明正在准备。只在 `PAID` 时画出来。 */
+function ReceiptSection({ payment }: { payment: CustomerPayment }) {
+  const { t } = useTranslation();
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const { receipt_id: receiptId, receipt_number: receiptNumber } = payment;
+  if (receiptId === null || receiptNumber === null) {
+    return <Typography.Text type="secondary">{t("portal.paymentResult.receiptPreparing")}</Typography.Text>;
+  }
+
+  const download = (): void => {
+    setError(null);
+    setDownloading(true);
+    void (async () => {
+      try {
+        await downloadCustomerReceipt(receiptId, receiptNumber);
+      } catch (caught) {
+        setError(asError(caught));
+      } finally {
+        setDownloading(false);
+      }
+    })();
+  };
+
+  return (
+    <Space direction="vertical" size="small" style={{ width: "100%" }}>
+      <Space size="small">
+        <Typography.Text>
+          {t("portal.paymentResult.receiptNumber")}
+          {": "}
+          {receiptNumber}
+        </Typography.Text>
+        <ReceiptDownloadButton disabled={downloading} onDownload={download} />
+      </Space>
+      {error === null ? null : <ReceiptDownloadFailure error={error} />}
+    </Space>
+  );
+}
+
 function PaymentResult({ paymentId }: { paymentId: string }) {
   const { t } = useTranslation();
   const location = useLocation();
@@ -259,6 +311,7 @@ function PaymentResult({ paymentId }: { paymentId: string }) {
             />
           ) : null}
           <PaymentDetails payment={state.payment} />
+          {state.payment.status === PAID_STATUS ? <ReceiptSection payment={state.payment} /> : null}
         </Space>
       );
       break;

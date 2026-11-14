@@ -12,19 +12,27 @@
  *
  * ⚠️ 金额是**恰好两位小数的字符串**（INV-10），这一层不解析。`payment_id` 只来自列表、建单的响应或地址栏，**原样**放进
  * 路径：不校验形状、不改大小写 —— 不存在、属于别的客户或根本不像 uuid 时后端回同一个 404 `PAYMENT_NOT_FOUND`，那才是准绳。
+ *
+ * 收据（AIH-TASK-204；设计闸门 #589 v2 §2「门户页面」）：列表与详情的每一项带 `receipt_id`、`receipt_number`；下载
+ * （`GET /api/v1/customer/receipts/{receipt_id}/download`）经 `download.ts` 的 `downloadFile`。`receipt_id` 同样**原样**
+ * 放进路径，后端的 404 `RECEIPT_NOT_FOUND` 是准绳。门户不调用收据列表接口。
  */
 
 import type { Page } from "./adminCustomers";
 import { apiGet, client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
+import { downloadFile } from "./download";
 
 export const CUSTOMER_TOPUP_OPTIONS_URL = "/api/v1/customer/topup-options";
 export const CUSTOMER_PAYMENTS_URL = "/api/v1/customer/payments";
 export const CUSTOMER_TOPUPS_URL = "/api/v1/customer/topups";
+export const CUSTOMER_RECEIPTS_URL = "/api/v1/customer/receipts";
 
 // --- 错误码 ---------------------------------------------------------------------
 
 /** 详情：不存在、属于别的客户或格式不像 uuid（几种情形响应相同）。 */
 export const PAYMENT_NOT_FOUND = "PAYMENT_NOT_FOUND";
+/** 收据下载：不存在、属于别的客户或格式不像 uuid（几种情形响应相同）。 */
+export const RECEIPT_NOT_FOUND = "RECEIPT_NOT_FOUND";
 /** 建单：金额低于最小恢复额（`effective_minimum`）。收到它时重新读一次充值选项。 */
 export const TOPUP_BELOW_RECOVERY_MINIMUM = "TOPUP_BELOW_RECOVERY_MINIMUM";
 
@@ -72,7 +80,7 @@ export const CUSTOMER_PAYMENT_STATUSES = [
 ] as const;
 export type CustomerPaymentStatus = (typeof CUSTOMER_PAYMENT_STATUSES)[number];
 
-/** 列表项与详情：恰好这 8 个键。 */
+/** 列表项与详情：恰好这 10 个键。 */
 export interface CustomerPayment {
   /** 支付的对外 id，即建单时得到的 `payment_id`。 */
   id: string;
@@ -84,6 +92,10 @@ export interface CustomerPayment {
   created_at: string;
   paid_at: string | null;
   expires_at: string;
+  /** 收据的对外 id，下载用它；没有收据为 `null`。只有 `PAID` 才有，`PAID` 而为 `null` 是暂时状态（后台补发）。 */
+  receipt_id: string | null;
+  /** 收据号 `ACV-AIR-<年份>-<6 位序号>`；没有收据为 `null`。 */
+  receipt_number: string | null;
 }
 
 /** 建单请求体：只有 `amount` 一个字段，金额是字符串（`^[0-9]{1,6}(\.[0-9]{1,2})?$`）。 */
@@ -132,6 +144,14 @@ export function listCustomerPayments(
 
 export function getCustomerPayment(paymentId: string, signal?: AbortSignal): Promise<CustomerPayment> {
   return apiGet<CustomerPayment>(`${CUSTOMER_PAYMENTS_URL}/${paymentId}`, signal);
+}
+
+/**
+ * 下载一张收据的 PDF 并交给浏览器保存。文件名取自 `Content-Disposition`，取不到时用 `<receiptNumber>.pdf`。
+ * 失败抛 `ApiError`（`RECEIPT_NOT_FOUND`、`INTERNAL_ERROR` 等，带 `request_id`）。
+ */
+export function downloadCustomerReceipt(receiptId: string, receiptNumber: string, signal?: AbortSignal): Promise<void> {
+  return downloadFile(`${CUSTOMER_RECEIPTS_URL}/${receiptId}/download`, `${receiptNumber}.pdf`, signal);
 }
 
 /**

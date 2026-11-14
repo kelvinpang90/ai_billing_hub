@@ -4,26 +4,35 @@
  * 钉住：充值选项没有查询串；列表是页码分页（`page` 在前、`page_size` 在后，与 `listCustomerStatements` 同一写法）；
  * 详情把 `payment_id` 原样放进路径、没有查询串；建单是 POST、请求体只有字符串 `amount`。四个接口都**不带**任何租户
  * 或客户标识、不碰 `/api/v1/admin/`。
+ *
+ * 收据下载（AIH-TASK-204）：GET `/api/v1/customer/receipts/{receipt_id}/download`，`receipt_id` 原样放进路径、没有查询串；
+ * 经 `downloadFile` 取 blob，文件名先认 `Content-Disposition`，取不到时用 `<receipt_number>.pdf`。jsdom 没有
+ * `URL.createObjectURL` / `revokeObjectURL`，按属性装上替身、用完还原；`<a>` 的 `click` 拦下来只记录文件名。
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { client } from "./client";
+import { ApiError, client } from "./client";
 import {
   CUSTOMER_PAYMENTS_QUERY_KEY,
   CUSTOMER_TOPUP_OPTIONS_QUERY_KEY,
   createTopup,
   customerPaymentDetailQueryKey,
   customerPaymentListQueryKey,
+  downloadCustomerReceipt,
   getCustomerPayment,
   getTopupOptions,
   listCustomerPayments,
 } from "./customerPayments";
+import { DOWNLOAD_TIMEOUT_MS } from "./download";
 
 const TOPUP_OPTIONS_URL = "/api/v1/customer/topup-options";
 const PAYMENTS_URL = "/api/v1/customer/payments";
 const TOPUPS_URL = "/api/v1/customer/topups";
+const RECEIPTS_URL = "/api/v1/customer/receipts";
 const PAYMENT_ID = "00000000-0000-0000-0000-000000000000";
+const RECEIPT_ID = "00000000-0000-0000-0000-000000000000";
+const RECEIPT_NUMBER = "ACV-AIR-2026-000001";
 
 const EMPTY_PAGE = { items: [], page: 1, page_size: 20, total: 0 };
 
@@ -164,6 +173,90 @@ describe("createTopup", () => {
       code: "TOPUP_BELOW_RECOVERY_MINIMUM",
       requestId: "req-422",
     });
+  });
+});
+
+describe("downloadCustomerReceipt", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的链接的 download 属性（即存成的文件名）。 */
+  let saved: string[];
+
+  function restore(name: "createObjectURL" | "revokeObjectURL", descriptor: PropertyDescriptor | undefined): void {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(URL, name);
+    } else {
+      Object.defineProperty(URL, name, descriptor);
+    }
+  }
+
+  function pdfResponse(headers: Record<string, string>) {
+    return { data: new Blob(["%PDF-1.3"], { type: "application/pdf" }), status: 200, statusText: "", headers };
+  }
+
+  beforeEach(() => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(() => "blob:https://portal.example/00000000-0000-0000-0000-000000000000"),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: vi.fn() });
+    saved = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+  });
+
+  afterEach(() => {
+    restore("createObjectURL", originalCreate);
+    restore("revokeObjectURL", originalRevoke);
+  });
+
+  it("GETs the receipt's download path as a blob, with no query string", async () => {
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValue(pdfResponse({ "content-disposition": `attachment; filename="${RECEIPT_NUMBER}.pdf"` }));
+
+    await downloadCustomerReceipt(RECEIPT_ID, RECEIPT_NUMBER);
+
+    expect(get.mock.calls).toEqual([
+      [`${RECEIPTS_URL}/${RECEIPT_ID}/download`, { responseType: "blob", timeout: DOWNLOAD_TIMEOUT_MS }],
+    ]);
+    expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]);
+  });
+
+  it("takes the file name from Content-Disposition when there is one", async () => {
+    vi.spyOn(client, "get").mockResolvedValue(pdfResponse({ "content-disposition": 'attachment; filename="other.pdf"' }));
+
+    await downloadCustomerReceipt(RECEIPT_ID, RECEIPT_NUMBER);
+
+    expect(saved).toEqual(["other.pdf"]);
+  });
+
+  it("falls back to <receipt_number>.pdf without a usable file name", async () => {
+    vi.spyOn(client, "get").mockResolvedValue(pdfResponse({}));
+
+    await downloadCustomerReceipt(RECEIPT_ID, RECEIPT_NUMBER);
+
+    expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]);
+  });
+
+  it("does not reshape the id: the backend's 404 decides what is not a receipt", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(pdfResponse({}));
+
+    await downloadCustomerReceipt("not-a-uuid", RECEIPT_NUMBER);
+
+    expect(get.mock.calls[0]?.[0]).toBe(`${RECEIPTS_URL}/not-a-uuid/download`);
+  });
+
+  it("throws the backend's error code and request_id", async () => {
+    vi.spyOn(client, "get").mockRejectedValue(new ApiError("RECEIPT_NOT_FOUND", "Receipt not found.", "req-404"));
+
+    await expect(downloadCustomerReceipt(RECEIPT_ID, RECEIPT_NUMBER)).rejects.toMatchObject({
+      code: "RECEIPT_NOT_FOUND",
+      requestId: "req-404",
+    });
+    expect(saved).toEqual([]);
   });
 });
 

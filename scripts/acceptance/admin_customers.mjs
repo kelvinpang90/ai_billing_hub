@@ -36,6 +36,8 @@
  * 支付历史页（设计闸门 #587 v3 §2「门户页面」）。
  * AIH-TASK-194 加了管理端支付设置页的一个只读步骤（open_payment_settings），排在 login 之后，经顶栏自己进支付设置页
  * （设计闸门 #587 v3 §2「管理端页面」）。
+ * AIH-TASK-204 加了门户支付历史页收据列的一个只读步骤（check_portal_receipts），排在 login_customer 之后，经门户导航自己进
+ * 支付历史页（设计闸门 #589 v2 §2「门户页面」、§11）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -124,6 +126,9 @@
  * - 门户支付历史页（check_portal_payments）只点门户导航里的「Payments」（href 为 /portal/payments）这一个链接：不点列表的
  *   任何一行（不跳到付款结果页）、不点「Previous」「Next」（不翻页）、不点「Try again」或任何别的按钮与链接，不填也不提交
  *   任何表单（页面本身没有写操作入口）。
+ * - 门户支付历史页的收据列（check_portal_receipts）只点门户导航里的「Payments」（href 为 /portal/payments）这一个链接：
+ *   不点收据格里的「Download」（验收不下载文件）、不点列表的任何一行（不跳到付款结果页）、不点「Previous」「Next」
+ *   （不翻页）、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单。
  * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
  *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
@@ -542,6 +547,17 @@
  *                   且第一行第一格（编号）的文字等于 items[0].id；items 为空时显示空状态（portal.payments.empty）、没有数据行，
  *                   同样算通过。不点行（不跳到付款结果页）、不点「Previous」「Next」，不提交任何表单。报到前把支付历史一块滚动到
  *                   视口里（规则同 check_portal_wallet）
+ *   check_portal_receipts
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Payments」链接（portal.nav.payments，
+ *                   href 为 /portal/payments）进支付历史页，页面落定的判定与失败码同 check_portal_payments。后端值取页面自己发出的
+ *                   GET /api/v1/customer/payments 的响应体（被动观察，不自己发请求、不拦截；取 login_customer 之后最近一次读完的那一次
+ *                   —— 紧跟在 check_portal_payments 之后时点导航不会重新请求，页面显示的仍是那一次），不是 200、不是成功信封、没有
+ *                   items 数组、某一项的 id 不是字符串或 receipt_number 既不是字符串也不是 null，都是 assertion_failed。items 非空时：
+ *                   支付表格（表头有「Payment ID」「Status」）的表头要有「Receipt」列（portal.payments.field.receipt；缺了是
+ *                   assertion_failed），带 data-row-key 的数据行数与 items 的条数一致，且按 data-row-key 对上支付 id 的每一行，
+ *                   「Receipt」格（去掉格里「Download」按钮的文字）在 receipt_number 不为 null 时等于它、为 null 时是短横「—」。
+ *                   items 为空时显示空状态（portal.payments.empty）、没有数据行，同样算通过。不点「Download」、不点行、不点
+ *                   「Previous」「Next」，不提交任何表单。报到前把支付历史一块滚动到视口里（规则同 check_portal_wallet）
  *   check_portal_usage_summary
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 与 check_portal_usage
  *                   之前：它不自己导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：
@@ -856,6 +872,9 @@ const TEXT = {
   portalPaymentsEmpty: "You have no payments yet.", // portal.payments.empty
   portalPaymentsId: "Payment ID", // portal.payments.field.id —— 支付表格的列头（第一列）
   portalPaymentsStatus: "Status", // portal.payments.field.status
+  portalPaymentsReceipt: "Receipt", // portal.payments.field.receipt —— 支付表格的收据列（最后一列）
+  // 没有收据的那一格：frontend/src/features/portal/PaymentsHistoryPage.tsx 的 EMPTY（纯标点，不在 en.json 里）。
+  portalPaymentsNoReceipt: "—",
   portalUsageSummaryTitle: "This month's usage", // portal.home.usageSummary.title —— 本月用量卡的 aria-label
   portalUsageSummaryLoading: "Loading this month's usage…", // portal.home.usageSummary.loading
   portalUsageSummaryLoadFailed: "This month's usage could not be loaded.", // portal.home.usageSummary.loadFailed
@@ -2584,7 +2603,7 @@ function latestCustomerMeResponse(afterSeq) {
  * （network.customerNotifications，同样只认 newest）；check_portal_statements 拿它取 GET /api/v1/customer/statements
  * （network.customerStatements，记录里没有 newest，每一次都算）；check_portal_topup 拿它取
  * GET /api/v1/customer/topup-options（network.customerTopupOptions，同样每一次都算）；check_portal_payments 拿它取
- * GET /api/v1/customer/payments（network.customerPayments，同样每一次都算）。
+ * GET /api/v1/customer/payments（network.customerPayments，同样每一次都算）；check_portal_receipts 也拿它取同一个接口。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -4985,6 +5004,73 @@ function probePortalPayments(lib, T) {
         out.firstId = lib.norm(cells[idColumn].textContent);
       }
       out.rows += 1;
+    }
+    break;
+  }
+  return out;
+}
+
+/**
+ * 门户支付历史页的收据列：在 {@link probePortalPayments} 的基础上，表格（表头有「Payment ID」「Status」）的表头有没有
+ * 「Receipt」列，以及每个数据行的 data-row-key 与「Receipt」那一格的文字（去掉格里按钮的文字，只剩收据号或短横）。
+ * 只读 DOM（按钮的文字在一份不挂进文档的拷贝上去掉），不点、不填。
+ */
+function probePortalReceipts(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalPaymentsTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    empty: false,
+    table: false,
+    receiptColumn: false,
+    rows: [],
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(region, T.portalPaymentsLoading);
+  out.failed = has(region, T.portalPaymentsLoadFailed);
+  out.empty = has(region, T.portalPaymentsEmpty);
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.portalPaymentsId) || !heads.includes(T.portalPaymentsStatus)) {
+      continue;
+    }
+    out.table = true;
+    const receiptColumn = heads.indexOf(T.portalPaymentsReceipt);
+    out.receiptColumn = receiptColumn >= 0;
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      const cells = tr.querySelectorAll(":scope > td");
+      if (cells.length !== heads.length) {
+        continue;
+      }
+      let receipt = null;
+      if (receiptColumn >= 0) {
+        const copy = cells[receiptColumn].cloneNode(true);
+        for (const button of copy.querySelectorAll("button")) {
+          button.remove();
+        }
+        receipt = lib.norm(copy.textContent);
+      }
+      out.rows.push({ key: tr.getAttribute("data-row-key"), receipt });
     }
     break;
   }
@@ -8521,6 +8607,121 @@ async function stepCheckPortalPayments(ctx) {
   }
 }
 
+async function stepCheckPortalReceipts(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开支付历史页：只点「Payments」这一个链接；不点下载、不点行、不点「Previous」「Next」。
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavPayments, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 支付历史页落定：门户外壳在，列表一块不在加载，且是某一种终态。地址只看路径（页面会把查询串补成 page=1）。
+  const opened = await waitFor(
+    () => evaluate(probePortalReceipts, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalPaymentsPath &&
+        s.portalShell &&
+        s.region &&
+        !s.busy &&
+        (s.failed || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalPaymentsPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面自己发出的 GET /api/v1/customer/payments 的响应体（被动观察，不自己发请求）。从 login_customer 之后算起、
+  // 取最近一次读完的那一次：这一步若紧跟在 check_portal_payments 之后，页面已停在支付历史页，点导航不换查询键、不重新请求，
+  // 页面显示的仍是那一次的响应。
+  const seen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerPayments, ctx.customerLoginSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!seen.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(seen.value.requestId);
+    if (seen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    const items = envelope.data?.items;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expected = new Map();
+    for (const item of items) {
+      const id = item?.id;
+      const receiptNumber = item?.receipt_number;
+      if (typeof id !== "string" || !(receiptNumber === null || typeof receiptNumber === "string")) {
+        throw fail("assertion_failed");
+      }
+      expected.set(id, receiptNumber ?? TEXT.portalPaymentsNoReceipt);
+    }
+    if (expected.size !== items.length) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、某一项没有 id 或 receipt_number 不是字符串或 null：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：表头有收据列；每一行（按 data-row-key 对上支付 id）的收据格是它的 receipt_number，没有收据的
+  // 是短横；items 为空时是空状态、没有数据行。
+  const matches = (s) => {
+    if (expected.size === 0) {
+      return s.empty && s.rows.length === 0;
+    }
+    if (!s.table || !s.receiptColumn || s.rows.length !== expected.size) {
+      return false;
+    }
+    return s.rows.every((row) => expected.has(row.key) && expected.get(row.key) === row.receipt);
+  };
+  const shown = await waitFor(
+    () => evaluate(probePortalReceipts, TEXT),
+    (s) => s.path === TEXT.portalPaymentsPath && s.portalShell && !s.adminLayout && !s.busy && !s.failed && matches(s),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把支付历史一块滚进视口。只滚动，不点任何下载按钮、行或别的按钮。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_PAYMENTS_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_PAYMENTS_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 const STEPS = {
   check_accept_invitation_page: stepCheckAcceptInvitationPage,
   login: stepLogin,
@@ -8563,6 +8764,7 @@ const STEPS = {
   check_portal_statements: stepCheckPortalStatements,
   check_portal_topup: stepCheckPortalTopup,
   check_portal_payments: stepCheckPortalPayments,
+  check_portal_receipts: stepCheckPortalReceipts,
   check_portal_usage_summary: stepCheckPortalUsageSummary,
   check_portal_low_balance: stepCheckPortalLowBalance,
 };
@@ -8598,7 +8800,7 @@ async function main() {
      * check_portal_usage_summary 与 check_portal_low_balance 只认这之后发出的请求，check_portal_wallet、check_portal_usage、
      * check_portal_conversations、check_portal_notifications、check_portal_statements、check_portal_topup 与
      * check_portal_payments 要求它不为 null（各自再按点击「Wallet」「Usage」「Conversations」「Notifications」「Statements」
-     * 「Top up」「Payments」之前的序号截断）。
+     * 「Top up」「Payments」之前的序号截断）；check_portal_receipts 同样要求它不为 null，并直接按它截断。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,

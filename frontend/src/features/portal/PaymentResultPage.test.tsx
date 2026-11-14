@@ -7,6 +7,10 @@
  * 计时用假时钟：只假 `setTimeout` / `clearTimeout`（页面的刷新只用它们），用 `vi.advanceTimersByTimeAsync` 推进。
  * ⚠️ 不用 `findBy*` / `waitFor`：Testing Library 在它们收尾时用 `setTimeout(0)` 排空微任务，假时钟下那一下永远不来。这里
  * 一律在 `act` 里推进时钟、排空微任务，再同步断言。
+ *
+ * 收据（AIH-TASK-204，设计闸门 #589 v2 §2「门户页面」、§7「门户页面」）：`PAID` 有收据时收据号与下载按钮（下载中不可再点；
+ * 失败在按钮下方显示错误码、信息与 request_id，下一次点下载时清除）；`PAID` 无收据时提示正在准备；其他状态没有收据区域。
+ * jsdom 没有 `URL.createObjectURL` / `revokeObjectURL`：按属性装上替身、用完还原；`<a>` 的 `click` 拦下来只记录文件名。
  */
 
 import { act, fireEvent, render, screen } from "@testing-library/react";
@@ -30,6 +34,12 @@ const NOT_FOUND = "This payment was not found.";
 const CANCELLED_NOTICE = "You cancelled the payment.";
 const AWAITING = "Awaiting payment";
 
+const RECEIPT_ID = "00000000-0000-0000-0000-000000000000";
+const RECEIPT_NUMBER = "ACV-AIR-2026-000001";
+const DOWNLOAD_URL = `/api/v1/customer/receipts/${RECEIPT_ID}/download`;
+const RECEIPT_PREPARING = "Your receipt is being prepared. You can download it later from your payment history.";
+const DOWNLOAD_FAILED = "The receipt could not be downloaded.";
+
 function payment(overrides: Partial<CustomerPayment> = {}): CustomerPayment {
   return {
     id: PAYMENT_ID,
@@ -40,7 +50,28 @@ function payment(overrides: Partial<CustomerPayment> = {}): CustomerPayment {
     created_at: "2026-11-08T08:00:00",
     paid_at: null,
     expires_at: "2026-11-08T09:00:00",
+    receipt_id: null,
+    receipt_number: null,
     ...overrides,
+  };
+}
+
+/** 已付、已入账的支付；`receipt` 为真时带收据。 */
+function paid(receipt: boolean): CustomerPayment {
+  return payment({
+    status: "PAID",
+    credited_amount: "100.00",
+    paid_at: "2026-11-08T08:01:00",
+    ...(receipt ? { receipt_id: RECEIPT_ID, receipt_number: RECEIPT_NUMBER } : {}),
+  });
+}
+
+function pdf(filename: string) {
+  return {
+    data: new Blob(["%PDF-1.3"], { type: "application/pdf" }),
+    status: 200,
+    statusText: "",
+    headers: { "content-disposition": `attachment; filename="${filename}"` },
   };
 }
 
@@ -57,12 +88,17 @@ function envelope(data: unknown) {
 }
 
 /**
- * 按路径回应 `client.get`：详情的第 n 次读取（从 1 起）回 `handler(n)`。别的路径一律当成失败 —— 页面不该问它们，下面也会
- * 断言没有问。
+ * 按路径回应 `client.get`：详情的第 n 次读取（从 1 起）回 `handler(n)`；收据下载的第 n 次回 `download(n)`（它回的就是
+ * `client.get` 的结果）。别的路径一律当成失败 —— 页面不该问它们，下面也会断言没有问。
  */
-function serve(handler: (read: number) => unknown) {
+function serve(handler: (read: number) => unknown, download?: (attempt: number) => Promise<unknown>) {
   let reads = 0;
+  let downloads = 0;
   return vi.spyOn(client, "get").mockImplementation((url: string) => {
+    if (url === DOWNLOAD_URL && download !== undefined) {
+      downloads += 1;
+      return download(downloads);
+    }
     if (url !== DETAIL_URL) {
       return Promise.reject(new ApiError("NOT_FOUND", "Unexpected request.", null));
     }
@@ -111,13 +147,47 @@ function retryButton(): HTMLElement | null {
   return screen.queryByRole("button", { name: /Try again/ });
 }
 
+function downloadButton(): HTMLButtonElement | null {
+  return screen.queryByRole<HTMLButtonElement>("button", { name: "Download" });
+}
+
+function downloads(get: ReturnType<typeof serve>): number {
+  return get.mock.calls.filter(([url]) => url === DOWNLOAD_URL).length;
+}
+
+const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+
+function restore(name: "createObjectURL" | "revokeObjectURL", descriptor: PropertyDescriptor | undefined): void {
+  if (descriptor === undefined) {
+    Reflect.deleteProperty(URL, name);
+  } else {
+    Object.defineProperty(URL, name, descriptor);
+  }
+}
+
+/** 存下的文件名（被点击的链接的 download 属性），按顺序。 */
+let saved: string[];
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    writable: true,
+    value: vi.fn(() => "blob:https://portal.test/00000000-0000-0000-0000-000000000000"),
+  });
+  Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: vi.fn() });
+  saved = [];
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    saved.push(this.download);
+  });
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  restore("createObjectURL", originalCreate);
+  restore("revokeObjectURL", originalRevoke);
 });
 
 describe("PaymentResultPage", () => {
@@ -367,5 +437,115 @@ describe("PaymentResultPage", () => {
       "href",
       `${ROUTES.portalPayments}?page=1`,
     );
+  });
+});
+
+describe("PaymentResultPage receipt", () => {
+  it("shows the receipt number and downloads it, not clickable while downloading", async () => {
+    let finish!: (value: unknown) => void;
+    const get = serve(
+      () => paid(true),
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+
+    renderPage();
+    await advance(0);
+
+    expect(screen.getByText(`Receipt: ${RECEIPT_NUMBER}`)).toBeInTheDocument();
+    expect(screen.queryByText(RECEIPT_PREPARING)).not.toBeInTheDocument();
+    expect(downloadButton()).toBeEnabled();
+
+    fireEvent.click(downloadButton()!);
+    await advance(0);
+    expect(downloads(get)).toBe(1);
+    expect(downloadButton()).toBeDisabled();
+
+    // 下载中再点：不发第二个请求。
+    fireEvent.click(downloadButton()!);
+    await advance(0);
+    expect(downloads(get)).toBe(1);
+
+    finish(pdf(`${RECEIPT_NUMBER}.pdf`));
+    await advance(0);
+    expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]);
+    expect(downloadButton()).toBeEnabled();
+    expect(screen.queryByText(DOWNLOAD_FAILED)).not.toBeInTheDocument();
+    // 已付：下载不改变刷新规则，不再读详情。
+    await advance(POLL_INTERVAL_MS * 5);
+    expect(reads(get)).toBe(1);
+    noAdminRequests(get);
+  });
+
+  it("shows a failed download below the button with its code, message and request_id, cleared by the next click", async () => {
+    const get = serve(
+      () => paid(true),
+      (attempt) =>
+        attempt === 1
+          ? Promise.reject(new ApiError("INTERNAL_ERROR", "Something went wrong.", "req-500"))
+          : new Promise(() => undefined),
+    );
+
+    renderPage();
+    await advance(0);
+
+    fireEvent.click(downloadButton()!);
+    await advance(0);
+
+    const failed = screen.getByText(DOWNLOAD_FAILED);
+    expect(screen.getByText("INTERNAL_ERROR")).toBeInTheDocument();
+    expect(screen.getByText(/Something went wrong\./)).toBeInTheDocument();
+    expect(screen.getByText("req-500")).toBeInTheDocument();
+    expect(downloadButton()!.compareDocumentPosition(failed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(downloadButton()).toBeEnabled();
+    expect(saved).toEqual([]);
+
+    fireEvent.click(downloadButton()!);
+    await advance(0);
+    expect(downloads(get)).toBe(2);
+    expect(screen.queryByText(DOWNLOAD_FAILED)).not.toBeInTheDocument();
+    expect(screen.queryByText("req-500")).not.toBeInTheDocument();
+  });
+
+  it("says the receipt is being prepared when PAID without a receipt, without reading again", async () => {
+    const get = serve(() => paid(false));
+
+    renderPage();
+    await advance(0);
+
+    expect(screen.getByText(RECEIPT_PREPARING)).toBeInTheDocument();
+    expect(downloadButton()).toBeNull();
+    await advance(POLL_INTERVAL_MS * 5);
+    expect(reads(get)).toBe(1);
+  });
+
+  it.each(["PENDING", "IN_REVIEW", "NOT_CREDITED", "FAILED", "EXPIRED", "CANCELLED"])(
+    "shows no receipt area for %s",
+    async (status) => {
+      serve(() => payment({ status }));
+
+      renderPage();
+      await advance(0);
+
+      expect(screen.getByText(PAYMENT_ID)).toBeInTheDocument();
+      expect(screen.queryByText(RECEIPT_PREPARING)).not.toBeInTheDocument();
+      expect(screen.queryByText(/^Receipt/)).not.toBeInTheDocument();
+      expect(downloadButton()).toBeNull();
+    },
+  );
+
+  it("shows the receipt once a PENDING payment turns PAID with one", async () => {
+    const get = serve((read) => (read === 1 ? payment() : paid(true)));
+
+    renderPage();
+    await advance(0);
+    expect(downloadButton()).toBeNull();
+
+    await refresh(1);
+    expect(reads(get)).toBe(2);
+    expect(screen.getByText(`Receipt: ${RECEIPT_NUMBER}`)).toBeInTheDocument();
+    expect(downloadButton()).toBeEnabled();
   });
 });
