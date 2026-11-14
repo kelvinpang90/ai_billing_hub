@@ -7,7 +7,8 @@
  * 改任一筛选回到第 1 页。顺序由后端决定，前端不重排。点一行跳到这笔支付的详情页（AIH-TASK-185）。
  *
  * 金额与手续费用 `MoneyText`，币种取返回的 `currency`；手续费为空显示短横。状态用文案；状态原因与结案方式原样显示代码
- * （状态原因的取值不固定，不翻译）。时间按吉隆坡时间（UTC+8）显示，列头标 MYT。
+ * （状态原因的取值不固定，不翻译）。时间按吉隆坡时间（UTC+8）显示，列头标 MYT。最后一列是收据号（AIH-TASK-205；设计闸门
+ * #589 v2 §2「管理端页面」），没有收据显示短横；列表里不下载，下载在详情页。
  *
  * 三种状态都画出来（spec §132 DoD 第 8 条）：加载中、失败（带 request_id）、空列表。403 说「没有权限」。只请求
  * `/api/v1/admin/` 路径。
@@ -222,6 +223,11 @@ export function PaymentsPage() {
       key: "paid_at",
       title: t("payments.field.paidAt"),
       render: (_: unknown, payment) => (payment.paid_at === null ? EMPTY : <DateTimeText value={payment.paid_at} />),
+    },
+    {
+      key: "receipt_number",
+      title: t("payments.field.receipt"),
+      render: (_: unknown, payment) => payment.receipt_number ?? EMPTY,
     },
   ];
 

@@ -38,6 +38,8 @@
  * （设计闸门 #587 v3 §2「管理端页面」）。
  * AIH-TASK-204 加了门户支付历史页收据列的一个只读步骤（check_portal_receipts），排在 login_customer 之后，经门户导航自己进
  * 支付历史页（设计闸门 #589 v2 §2「门户页面」、§11）。
+ * AIH-TASK-205 加了管理端支付列表页收据列的一个只读步骤（check_admin_payment_receipts），排在 login 之后，经顶栏自己进
+ * 支付列表页（设计闸门 #589 v2 §2「管理端页面」、§11）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -170,6 +172,9 @@
  *   别的按钮与链接，不填也不提交任何表单。
  *   支付页（open_payments）不点列表的任何一行（不跳到详情页）、不点「Previous」「Next」（不翻页）、不动状态与客户
  *   下拉和创建日期输入框、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单（列表页本身没有写操作入口）。
+ *   支付列表页的收据列（check_admin_payment_receipts）只点顶栏「Payments」（href 为 /payments）这一个链接：不点列表的
+ *   任何一行（不跳到详情页，详情页的「Download receipt」更不碰：验收不下载文件）、不点「Previous」「Next」（不翻页）、
+ *   不动状态与客户下拉和创建日期输入框、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单。
  *   支付设置页（open_payment_settings）不改任何输入框、不点「Save settings」（保存会写数据并把版本加一）、不点
  *   「Refresh」「Try again」或任何别的按钮与链接，不提交任何表单。
  *   登录会在服务端留下会话与
@@ -326,6 +331,17 @@
  *                   列的文字等于 items[0].id（不是非空字符串是 assertion_failed）；items 为空时显示空状态（payments.list.empty
  *                   或 payments.list.emptyPage）、没有数据行，同样算通过。不点行、不点任何按钮、不翻页、不提交任何表单。报到前
  *                   把列表一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   check_admin_payment_receipts
+ *                   要排在 login 之后（本次运行没跑过 login 就 assertion_failed）。点顶栏「Payments」（nav.payments，href 为
+ *                   /payments）进支付列表页，页面落定的判定与失败码同 open_payments。后端值取页面自己发出的
+ *                   GET /api/v1/admin/payments 的响应体（被动观察，不自己发请求、不拦截；取 login 之后最近一次成功读完的那一次
+ *                   —— 紧跟在 open_payments 之后时点顶栏不会重新请求，页面显示的仍是那一次；详情 …/payments/{payment_id}
+ *                   不算），不是成功信封、没有 items 数组、某一项的 id 不是非空字符串或 receipt_number 既不是字符串也不是
+ *                   null、id 有重复，都是 assertion_failed。items 非空时：列表表格（表头有「Payment ID」「Amount」）的表头要有
+ *                   「Receipt」列（payments.field.receipt；缺了是 assertion_failed），带 data-row-key 的数据行数与 items 的条数
+ *                   一致，且 receipt_number 不为 null 的每一项，按 data-row-key 对上支付 id 的那一行「Receipt」格的文字等于它。
+ *                   items 为空时显示空状态（payments.list.empty 或 payments.list.emptyPage）、没有数据行，同样算通过。不点行、
+ *                   不点任何按钮、不翻页、不提交任何表单。报到前把列表一块滚动到视口里（规则同 open_payments）
  *   open_payment_settings
  *                   要排在 login 之后（本次运行没跑过 login 就 assertion_failed）。点顶栏「Payment settings」（en.json 的
  *                   nav.paymentSettings，href 为 paths.ts 的 paymentSettings，即 /payment-settings）进支付设置页；页面落定：
@@ -721,6 +737,7 @@ const TEXT = {
   paymentsEmptyPage: "There are no payments on this page.", // payments.list.emptyPage
   paymentsId: "Payment ID", // payments.field.id —— 列表表格的列头
   paymentsAmount: "Amount", // payments.field.amount
+  paymentsReceipt: "Receipt", // payments.field.receipt —— 列表表格的收据列（最后一列）
   navPaymentSettings: "Payment settings", // nav.paymentSettings —— 顶栏的支付设置项
   paymentSettingsTitle: "Payment settings", // paymentSettings.title —— 设置一块的 aria-label
   paymentSettingsForbidden: "Only administrators can view payment settings.", // paymentSettings.forbidden
@@ -1024,7 +1041,7 @@ const STATEMENTS_API = /^\/api\/v1\/admin\/statements$/;
 
 /**
  * 支付列表接口的路径（frontend/src/api/adminPayments.ts 的 PAYMENTS_URL）。详情（…/payments/{payment_id}）不匹配：
- * open_payments 不点行，页面本来也不该发它。
+ * open_payments 与 check_admin_payment_receipts 都不点行，页面本来也不该发它。
  */
 const PAYMENTS_API = /^\/api\/v1\/admin\/payments$/;
 
@@ -3677,6 +3694,58 @@ function paymentsInView(lib, T) {
 }
 
 /**
+ * 支付列表页的收据列：落定的字段同 {@link probePayments}（region、busy、forbidden、failed、empty、table），另报表格
+ * （表头有「Payment ID」「Amount」）的表头有没有「Receipt」列，以及每个数据行的 data-row-key 与「Receipt」那一格的文字
+ * （没有这一列或格数对不上时为 null）。只读 DOM，不点行、不碰翻页按钮、不动筛选。
+ */
+function probeAdminPaymentReceipts(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.paymentsListTitle) {
+      region = el;
+      break;
+    }
+  }
+  let table = false;
+  let receiptColumn = false;
+  const rows = [];
+  if (region !== null) {
+    for (const el of region.querySelectorAll("table")) {
+      const heads = [...el.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+      if (!heads.includes(T.paymentsId) || !heads.includes(T.paymentsAmount)) {
+        continue;
+      }
+      table = true;
+      const receipt = heads.indexOf(T.paymentsReceipt);
+      receiptColumn = receipt >= 0;
+      for (const tr of el.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        const cells = tr.querySelectorAll(":scope > td");
+        rows.push({
+          key: tr.getAttribute("data-row-key"),
+          receipt: receipt >= 0 && cells.length === heads.length ? lib.norm(cells[receipt].textContent) : null,
+        });
+      }
+      break;
+    }
+  }
+  const forbidden = lib.leaf(T.paymentsForbidden) !== null;
+  return {
+    ...lib.common(T),
+    region: region !== null,
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.paymentsLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: region !== null && (lib.leaf(T.paymentsEmpty) !== null || lib.leaf(T.paymentsEmptyPage) !== null),
+    table,
+    receiptColumn,
+    rows,
+  };
+}
+
+/**
  * 支付设置页的状态：设置一块（role=region、aria-label 为「Payment settings」）里 label 为「Minimum top-up (MYR)」的
  * 输入框（个数与第一个的值）和「Version」一项（个数与第一项的文字）。错误提示（任何 role=alert）与无权限分开报。只读，
  * 不改输入、不点任何按钮。
@@ -5451,6 +5520,8 @@ async function stepLogin(ctx) {
   }
   // check_audit_entry 用它判断「本次登录留下的那条审计」。
   ctx.loginCompletedAt = Date.now();
+  // check_admin_payment_receipts 只认这之后发出的支付列表请求。
+  ctx.loginSeq = network.seq;
 }
 
 async function stepOpenCustomers(ctx) {
@@ -6408,6 +6479,96 @@ async function stepOpenPayments(ctx) {
   }
 
   // Worker 在报到后截图：先把列表一块滚进视口。只滚动，不点任何行。
+  if ((await evaluate(scrollPaymentsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(paymentsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepCheckAdminPaymentReceipts(ctx) {
+  if (ctx.loginCompletedAt === null || ctx.loginSeq === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.paymentsPath;
+  // 经顶栏打开支付列表页：只点「Payments」这一个链接；不点行、不点任何按钮、不翻页。
+  const link = { text: TEXT.navPayments, href: path };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同 open_payments。
+  const opened = await waitFor(() => evaluate(probeAdminPaymentReceipts, TEXT), catalogSettled(path), ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(opened.value, path, true);
+
+  // 后端值：页面自己发出的支付列表 GET 的响应体（被动观察，不自己发请求）。从 login 之后算起、取最近一次成功读完的那一次：
+  // 这一步若紧跟在 open_payments 之后，页面已停在支付列表页，点顶栏不换查询键、不重新请求，页面显示的仍是那一次的响应。
+  const observed = await waitFor(
+    async () => latestPaymentsResponse(ctx.loginSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expectedRows;
+  let expectedReceipts;
+  try {
+    const envelope = await readEnvelope(observed.value.requestId);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    const ids = new Set();
+    expectedReceipts = new Map();
+    for (const item of items) {
+      const id = item?.id;
+      const receiptNumber = item?.receipt_number;
+      if (typeof id !== "string" || id.trim() === "" || !(receiptNumber === null || typeof receiptNumber === "string")) {
+        throw fail("assertion_failed");
+      }
+      ids.add(id);
+      if (receiptNumber !== null) {
+        expectedReceipts.set(id, receiptNumber.replace(/\s+/g, " ").trim());
+      }
+    }
+    if (ids.size !== items.length) {
+      throw fail("assertion_failed");
+    }
+    expectedRows = items.length;
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、某一项没有 id、receipt_number 不是字符串或 null、id 重复：都算没观察到
+    // 可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：表头有收据列，数据行数与 items 条数一致；有收据的每一行（按 data-row-key 对上支付 id）的收据格
+  // 是它的 receipt_number。items 为空时是空状态、没有数据行。
+  const matches = (s) => {
+    if (expectedRows === 0) {
+      return s.empty && s.rows.length === 0;
+    }
+    if (!s.table || !s.receiptColumn || s.rows.length !== expectedRows) {
+      return false;
+    }
+    const shownReceipts = new Map(s.rows.map((row) => [row.key, row.receipt]));
+    return [...expectedReceipts].every(([id, number]) => shownReceipts.get(id) === number);
+  };
+  const shown = await waitFor(
+    () => evaluate(probeAdminPaymentReceipts, TEXT),
+    (s) => s.path === path && !s.busy && !s.failed && !s.forbidden && matches(s),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && (shown.value.table || shown.value.empty) ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把列表一块滚进视口。只滚动，不点任何行或按钮。
   if ((await evaluate(scrollPaymentsIntoView, TEXT)) !== true) {
     throw fail("element_missing");
   }
@@ -8745,6 +8906,7 @@ const STEPS = {
   open_wallet_reconciliation: stepOpenWalletReconciliation,
   open_statements: stepOpenStatements,
   open_payments: stepOpenPayments,
+  check_admin_payment_receipts: stepCheckAdminPaymentReceipts,
   open_payment_settings: stepOpenPaymentSettings,
   check_account_status: stepCheckAccountStatus,
   check_wallet_transactions: stepCheckWalletTransactions,
@@ -8808,6 +8970,8 @@ async function main() {
     customerId: null,
     /** login 步骤完成的时刻（毫秒）；本次运行没跑过 login 时为 null。 */
     loginCompletedAt: null,
+    /** login 步骤完成时的网络序号（check_admin_payment_receipts 按它截断）；本次运行没跑过 login 时为 null。 */
+    loginSeq: null,
     /** open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null。 */
     usageAnalyticsAfterSeq: null,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */

@@ -9,12 +9,18 @@
  *
  * ⚠️ 金额是**字符串**（INV-10），这一层不解析。`payment_id` 只来自列表的响应或地址栏，**原样**放进路径：不校验形状、
  * 不改大小写 —— 没有这笔支付时后端回 404 `PAYMENT_NOT_FOUND`，那才是准绳。
+ *
+ * 收据（AIH-TASK-205；设计闸门 #589 v2 §2「管理端页面」）：列表项带 `receipt_number`，详情另带 `receipt_id` 与
+ * `receipt_issued_at`；下载（`GET /api/v1/admin/receipts/{receipt_id}/download`）经 `download.ts` 的 `downloadFile`。
+ * `receipt_id` 同样**原样**放进路径，后端的 404 `RECEIPT_NOT_FOUND` 是准绳。
  */
 
 import type { Page } from "./adminCustomers";
 import { apiGet, client, toApiError, unwrapEnvelope, type ApiEnvelope } from "./client";
+import { downloadFile } from "./download";
 
 const PAYMENTS_URL = "/api/v1/admin/payments";
+const RECEIPTS_URL = "/api/v1/admin/receipts";
 
 // --- 错误码（docs/api.md「支付（管理端）」的「错误」） --------------------------------------
 
@@ -26,6 +32,8 @@ export const PAYMENT_NOT_IN_REVIEW = "PAYMENT_NOT_IN_REVIEW";
 export const PAYMENTS_MISCONFIGURED = "PAYMENTS_MISCONFIGURED";
 /** 结案（只有 `CREDIT`）：Stripe 暂时不可用。 */
 export const PAYMENT_GATEWAY_UNAVAILABLE = "PAYMENT_GATEWAY_UNAVAILABLE";
+/** 收据下载：没有这张收据（刷新支付详情取当前的 `receipt_id`）。 */
+export const RECEIPT_NOT_FOUND = "RECEIPT_NOT_FOUND";
 
 // --- 状态（六种，大小写敏感；别的值后端 422） ------------------------------------------------
 
@@ -42,7 +50,7 @@ export const CREATED_DATE_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
 // --- 对象 -----------------------------------------------------------------------
 // 时间都是不带时区的 UTC，精确到秒（docs/api.md「时间」）。
 
-/** 列表项：恰好这 14 个键。 */
+/** 列表项：恰好这 15 个键。 */
 export interface PaymentSummary {
   /** 支付的对外 id（`public_id`）；详情与结案用它。 */
   id: string;
@@ -65,6 +73,8 @@ export interface PaymentSummary {
   created_at: string;
   paid_at: string | null;
   review_required_at: string | null;
+  /** 收据号 `ACV-AIR-<年份>-<6 位序号>`；没有收据为 `null`（只有 `PAID` 才有，`PAID` 而为 `null` 是暂时状态）。 */
+  receipt_number: string | null;
 }
 
 /** 详情里的一条回调事件：恰好这 7 个键。 */
@@ -78,7 +88,7 @@ export interface PaymentEvent {
   fingerprint_conflict_at: string | null;
 }
 
-/** 详情 = 列表项的 14 个键再加 10 个。 */
+/** 详情 = 列表项除 `receipt_number` 之外的 14 个键，再加 13 个（含三个收据字段，`receipt_number` 在其中）。 */
 export interface PaymentDetail extends PaymentSummary {
   /** Stripe 报的金额与币种；没有为 `null`（金额不为空时币种也可能为空）。 */
   confirmed_amount: string | null;
@@ -92,6 +102,12 @@ export interface PaymentDetail extends PaymentSummary {
   /** 结案管理员的邮箱；未结案为 `null`。 */
   resolved_by: string | null;
   resolution_reason: string | null;
+  /** 收据的对外 id，下载用它；没有收据为 `null`。 */
+  receipt_id: string | null;
+  /** 收据号，同列表；没有收据为 `null`。 */
+  receipt_number: string | null;
+  /** 收据的开具时刻；没有收据为 `null`。 */
+  receipt_issued_at: string | null;
   /** 按 `received_at` 升序，最多 100 条。 */
   events: PaymentEvent[];
 }
@@ -169,4 +185,12 @@ export async function resolvePayment(paymentId: string, body: ResolvePaymentBody
   } catch (error) {
     throw toApiError(error);
   }
+}
+
+/**
+ * 下载一张收据的 PDF 并交给浏览器保存。文件名取自 `Content-Disposition`，取不到时用 `<receiptNumber>.pdf`。
+ * 失败抛 `ApiError`（`RECEIPT_NOT_FOUND`、`INTERNAL_ERROR` 等，带 `request_id`）。
+ */
+export function downloadAdminReceipt(receiptId: string, receiptNumber: string, signal?: AbortSignal): Promise<void> {
+  return downloadFile(`${RECEIPTS_URL}/${receiptId}/download`, `${receiptNumber}.pdf`, signal);
 }

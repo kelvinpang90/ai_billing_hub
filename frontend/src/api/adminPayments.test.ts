@@ -2,15 +2,28 @@
  * 管理端支付的三个接口发到哪个地址、用什么方法、带什么查询参数与请求体。
  *
  * ⚠️ 参数名写错（`pageSize`、`createdFrom`）后端不报错（未知参数忽略），结果是筛选悄悄失效、永远停在第 1 页。
+ *
+ * 收据下载（AIH-TASK-205）：GET `/api/v1/admin/receipts/{receipt_id}/download`，`receipt_id` 原样放进路径、没有查询串；
+ * 经 `downloadFile` 取 blob，文件名先认 `Content-Disposition`，取不到时用 `<receipt_number>.pdf`。jsdom 没有
+ * `URL.createObjectURL` / `revokeObjectURL`，按属性装上替身、用完还原；`<a>` 的 `click` 拦下来只记录文件名。
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, client } from "./client";
-import { getPayment, listPayments, resolvePayment, type ResolvePaymentBody } from "./adminPayments";
+import {
+  downloadAdminReceipt,
+  getPayment,
+  listPayments,
+  resolvePayment,
+  type ResolvePaymentBody,
+} from "./adminPayments";
+import { DOWNLOAD_TIMEOUT_MS } from "./download";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const PAYMENTS_URL = "/api/v1/admin/payments";
+const RECEIPTS_URL = "/api/v1/admin/receipts";
+const RECEIPT_NUMBER = "ACV-AIR-2026-000001";
 
 function envelope(data: unknown) {
   return { data: { success: true, data, error: null, request_id: "req-1" } };
@@ -160,5 +173,105 @@ describe("admin payment resolve", () => {
 
     expect(failure).toBeInstanceOf(ApiError);
     expect(failure).toMatchObject({ code: "PAYMENT_NOT_IN_REVIEW", requestId: "req-409" });
+  });
+});
+
+describe("admin receipt download", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的链接的 download 属性（即存成的文件名）。 */
+  let saved: string[];
+
+  function restore(name: "createObjectURL" | "revokeObjectURL", descriptor: PropertyDescriptor | undefined): void {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(URL, name);
+    } else {
+      Object.defineProperty(URL, name, descriptor);
+    }
+  }
+
+  function pdfResponse(headers: Record<string, string>) {
+    return { data: new Blob(["%PDF-1.3"], { type: "application/pdf" }), status: 200, statusText: "", headers };
+  }
+
+  beforeEach(() => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(() => "blob:https://admin.example/00000000-0000-0000-0000-000000000000"),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: vi.fn() });
+    saved = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+  });
+
+  afterEach(() => {
+    restore("createObjectURL", originalCreate);
+    restore("revokeObjectURL", originalRevoke);
+  });
+
+  it("GETs the admin receipt download path as a blob, with no query string", async () => {
+    const get = vi
+      .spyOn(client, "get")
+      .mockResolvedValue(pdfResponse({ "content-disposition": `attachment; filename="${RECEIPT_NUMBER}.pdf"` }));
+
+    await downloadAdminReceipt(ZERO_UUID, RECEIPT_NUMBER);
+
+    expect(get.mock.calls).toEqual([
+      [`${RECEIPTS_URL}/${ZERO_UUID}/download`, { responseType: "blob", timeout: DOWNLOAD_TIMEOUT_MS }],
+    ]);
+    expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]);
+  });
+
+  it("never asks a customer path", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(pdfResponse({}));
+
+    await downloadAdminReceipt(ZERO_UUID, RECEIPT_NUMBER);
+
+    expect(String(get.mock.calls[0]?.[0])).not.toContain("/api/v1/customer/");
+  });
+
+  it("takes the file name from Content-Disposition when there is one", async () => {
+    vi.spyOn(client, "get").mockResolvedValue(pdfResponse({ "content-disposition": 'attachment; filename="other.pdf"' }));
+
+    await downloadAdminReceipt(ZERO_UUID, RECEIPT_NUMBER);
+
+    expect(saved).toEqual(["other.pdf"]);
+  });
+
+  it("falls back to <receipt_number>.pdf without a usable file name", async () => {
+    vi.spyOn(client, "get").mockResolvedValue(pdfResponse({}));
+
+    await downloadAdminReceipt(ZERO_UUID, RECEIPT_NUMBER);
+
+    expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]);
+  });
+
+  it("falls back to <receipt_number>.pdf when Content-Disposition has an empty file name", async () => {
+    vi.spyOn(client, "get").mockResolvedValue(pdfResponse({ "content-disposition": 'attachment; filename=""' }));
+
+    await downloadAdminReceipt(ZERO_UUID, RECEIPT_NUMBER);
+
+    expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]);
+  });
+
+  it("puts the receipt id into the path exactly as given", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(pdfResponse({}));
+
+    await downloadAdminReceipt("Not-A-Receipt", RECEIPT_NUMBER);
+
+    expect(get.mock.calls[0]?.[0]).toBe(`${RECEIPTS_URL}/Not-A-Receipt/download`);
+  });
+
+  it("throws the backend's error code and request_id", async () => {
+    vi.spyOn(client, "get").mockRejectedValue(new ApiError("RECEIPT_NOT_FOUND", "Receipt not found.", "req-404"));
+
+    await expect(downloadAdminReceipt(ZERO_UUID, RECEIPT_NUMBER)).rejects.toMatchObject({
+      code: "RECEIPT_NOT_FOUND",
+      requestId: "req-404",
+    });
+    expect(saved).toEqual([]);
   });
 });
