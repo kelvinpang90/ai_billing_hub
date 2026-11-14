@@ -60,6 +60,7 @@ function payment(overrides: Partial<PaymentSummary> = {}): PaymentSummary {
     created_at: "2026-11-08T08:00:00",
     paid_at: "2026-11-08T08:01:00",
     review_required_at: null,
+    receipt_number: null,
     ...overrides,
   };
 }
@@ -238,6 +239,7 @@ describe("PaymentsPage columns", () => {
       "Resolution",
       "Created at (MYT)",
       "Paid at (MYT)",
+      "Receipt",
     ]);
     expect(rowKeys(region)).toEqual([ZERO_UUID]);
     expect(cellTexts(region, ZERO_UUID)).toEqual([
@@ -251,6 +253,7 @@ describe("PaymentsPage columns", () => {
       // 08:00 UTC → 16:00 吉隆坡时间。
       "2026-11-08 16:00:00",
       "2026-11-08 16:01:00",
+      "—",
     ]);
     expect(listUrls(get)).toEqual([LIST_FIRST_PAGE]);
     // 客户下拉的选项逐页取全，用的是客户列表接口。
@@ -290,8 +293,34 @@ describe("PaymentsPage columns", () => {
       "—",
       "2026-11-08 16:00:00",
       "—",
+      "—",
     ]);
     expect(cellTexts(region, SECOND_ID).slice(4, 7)).toEqual(["Failed", "NO_GATEWAY_SESSION", "CLOSED"]);
+  });
+
+  it("shows the receipt number in the last column, and a dash for a payment without a receipt", async () => {
+    serve(() =>
+      page(
+        [
+          payment({ receipt_number: "ACV-AIR-2026-000001" }),
+          // 已付而暂时没有收据（等补发扫描）：同样是短横。
+          payment({ id: SECOND_ID, receipt_number: null }),
+          payment({ id: "pending-payment", status: "PENDING", paid_at: null }),
+        ],
+        3,
+      ),
+    );
+
+    renderPage();
+    await screen.findByText(ZERO_UUID);
+
+    const region = listRegion();
+    expect(headersOf(region).at(-1)).toBe("Receipt");
+    expect(cellTexts(region, ZERO_UUID).at(-1)).toBe("ACV-AIR-2026-000001");
+    expect(cellTexts(region, SECOND_ID).at(-1)).toBe("—");
+    expect(cellTexts(region, "pending-payment").at(-1)).toBe("—");
+    // 列表里只有收据号，没有下载按钮：下载在详情页。
+    expect(within(rowOf(region, ZERO_UUID)).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("names every one of the six statuses", async () => {

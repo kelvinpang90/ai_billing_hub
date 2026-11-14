@@ -13,6 +13,12 @@
  * 金额用 `MoneyText`，币种取返回的字段；时间按吉隆坡时间（UTC+8）显示，标签标 MYT。状态原因、结案方式与事件的
  * 处理状态原样显示代码。加载中、失败（带 request_id）、404 三种状态都画出来。只请求 `/api/v1/admin/` 路径。
  *
+ * 收据（AIH-TASK-205；设计闸门 #589 v2 §2「管理端页面」）：基本字段末尾加收据号与开具时刻（MYT），没有为短横；有收据时
+ * 收据号旁有下载按钮（`GET /api/v1/admin/receipts/{receipt_id}/download`）。下载中按钮不可点（另用 ref 挡住第二次点击）；
+ * 失败在按钮下方显示错误码、信息与 request_id，下一次点下载或详情重新读取（重试、复核面板的重新读取、结案后用返回的详情
+ * 刷新，以及任何一次重新读到详情，按查询的 `dataUpdatedAt` 判断）时清除。下载状态放在页面这一层：详情重新读取时字段区
+ * 换成新数据，下载中的状态不丢。
+ *
  * ⚠️ 结案不自动重试（`api/adminPayments.ts`）：要不要重发由管理员决定。
  */
 
@@ -34,7 +40,7 @@ import {
   type DescriptionsProps,
   type TableColumnsType,
 } from "antd";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router";
 
@@ -42,6 +48,7 @@ import { ADMIN_REQUIRED } from "../../api/adminCustomers";
 import {
   PAYMENT_LISTS_QUERY_KEY,
   PAYMENT_NOT_FOUND,
+  downloadAdminReceipt,
   getPayment,
   paymentDetailQueryKey,
   resolvePayment,
@@ -180,11 +187,52 @@ export function PaymentDetailPage() {
   const { paymentId = "" } = useParams();
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<string | null>(null);
+  const [receiptDownloading, setReceiptDownloading] = useState(false);
+  // 最近一次下载失败，连同失败时详情的 `dataUpdatedAt`：详情之后再读到（含结案后用返回的详情刷新）就不再显示。
+  const [receiptFailure, setReceiptFailure] = useState<{ error: Error; loadedAt: number } | null>(null);
+  // `receiptDownloading` 要等下一次渲染才变 true：同一刻的第二次点击靠它挡。
+  const receiptInFlight = useRef(false);
+  const loadedAt = useRef(0);
 
   const payment = useQuery({
     queryKey: paymentDetailQueryKey(paymentId),
     queryFn: ({ signal }) => getPayment(paymentId, signal),
   });
+
+  useEffect(() => {
+    loadedAt.current = payment.dataUpdatedAt;
+  }, [payment.dataUpdatedAt]);
+
+  const receiptError =
+    receiptFailure !== null && receiptFailure.loadedAt === payment.dataUpdatedAt ? receiptFailure.error : null;
+
+  /** 重新读取详情：上一次的收据下载错误一并清掉。 */
+  const reload = (): void => {
+    setReceiptFailure(null);
+    void payment.refetch();
+  };
+
+  const downloadReceipt = (receiptId: string, receiptNumber: string): void => {
+    if (receiptInFlight.current) {
+      return;
+    }
+    receiptInFlight.current = true;
+    setReceiptFailure(null);
+    setReceiptDownloading(true);
+    void (async () => {
+      try {
+        await downloadAdminReceipt(receiptId, receiptNumber);
+      } catch (error) {
+        setReceiptFailure({
+          error: error instanceof Error ? error : new Error(String(error)),
+          loadedAt: loadedAt.current,
+        });
+      } finally {
+        receiptInFlight.current = false;
+        setReceiptDownloading(false);
+      }
+    })();
+  };
 
   const backLink = <Link to={ROUTES.payments}>{t("payments.detail.backToList")}</Link>;
 
@@ -215,7 +263,7 @@ export function PaymentDetailPage() {
           error={error}
           failedText={t("payments.detail.loadFailed")}
           action={
-            <Button size="small" onClick={() => void payment.refetch()}>
+            <Button size="small" onClick={reload}>
               {t("payments.retry")}
             </Button>
           }
@@ -231,6 +279,7 @@ export function PaymentDetailPage() {
     // 用返回的详情直接刷新，不再多问一次；列表里的状态与结案方式也变了。
     queryClient.setQueryData(paymentDetailQueryKey(paymentId), detail);
     void queryClient.invalidateQueries({ queryKey: PAYMENT_LISTS_QUERY_KEY });
+    setReceiptFailure(null);
     setNotice(t("payments.review.done"));
   };
 
@@ -246,7 +295,10 @@ export function PaymentDetailPage() {
           </Space>
         }
       >
-        <PaymentDescriptions payment={current} />
+        <PaymentDescriptions
+          payment={current}
+          receipt={{ downloading: receiptDownloading, error: receiptError, onDownload: downloadReceipt }}
+        />
       </Card>
       {current.status === REVIEW_REQUIRED ? (
         <ReviewPanel
@@ -254,7 +306,7 @@ export function PaymentDetailPage() {
           onResolved={resolved}
           onReload={() => {
             setNotice(null);
-            void payment.refetch();
+            reload();
           }}
         />
       ) : null}
@@ -265,7 +317,42 @@ export function PaymentDetailPage() {
   );
 }
 
-function PaymentDescriptions({ payment }: { payment: PaymentDetail }) {
+interface ReceiptDownloadState {
+  downloading: boolean;
+  /** 最近一次下载的失败；没有为 `null`。 */
+  error: Error | null;
+  onDownload: (receiptId: string, receiptNumber: string) => void;
+}
+
+/** 收据号；有收据时旁边是下载按钮，失败显示在按钮下方。没有收据为短横。 */
+function ReceiptNumber({ payment, receipt }: { payment: PaymentDetail; receipt: ReceiptDownloadState }) {
+  const { t } = useTranslation();
+  const { receipt_id: receiptId, receipt_number: receiptNumber } = payment;
+  if (receiptNumber === null) {
+    return <>{EMPTY}</>;
+  }
+  return (
+    <Space direction="vertical" size="small" style={{ width: "100%" }}>
+      <Space size="small" wrap>
+        <CodeText code={receiptNumber} />
+        {receiptId === null ? null : (
+          <Button
+            size="small"
+            disabled={receipt.downloading}
+            onClick={() => receipt.onDownload(receiptId, receiptNumber)}
+          >
+            {t("payments.receipt.download")}
+          </Button>
+        )}
+      </Space>
+      {receipt.error === null ? null : (
+        <PaymentErrorAlert error={receipt.error} failedText={t("payments.receipt.downloadFailed")} />
+      )}
+    </Space>
+  );
+}
+
+function PaymentDescriptions({ payment, receipt }: { payment: PaymentDetail; receipt: ReceiptDownloadState }) {
   const { t } = useTranslation();
   const items: DescriptionsProps["items"] = [
     { key: "id", label: t("payments.field.id"), children: <CodeText code={payment.id} /> },
@@ -332,6 +419,16 @@ function PaymentDescriptions({ payment }: { payment: PaymentDetail }) {
       key: "resolution_reason",
       label: t("payments.field.resolutionReason"),
       children: payment.resolution_reason ?? EMPTY,
+    },
+    {
+      key: "receipt_number",
+      label: t("payments.field.receiptNumber"),
+      children: <ReceiptNumber payment={payment} receipt={receipt} />,
+    },
+    {
+      key: "receipt_issued_at",
+      label: t("payments.field.receiptIssuedAt"),
+      children: <OptionalTime value={payment.receipt_issued_at} />,
     },
   ];
   return <Descriptions bordered size="small" column={1} items={items} />;

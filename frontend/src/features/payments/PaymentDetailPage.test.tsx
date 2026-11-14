@@ -3,22 +3,29 @@
  *
  * 与列表页的测试同一写法：不 mock `api/adminPayments`，而是在 `client.get` / `client.post` 上回应，钉住**页面真正发出去的
  * 地址与请求体**，并断言没有问 `/api/v1/customer/` 路径。
+ *
+ * 收据（AIH-TASK-205，设计闸门 #589 v2 §2「管理端页面」、§7「管理端页面」）：有与没有收据、下载成功与失败、下载中不可再点、
+ * 失败在下一次点下载或详情重新读取时清除。下载同样在 `client.get` 上回应；jsdom 没有 `URL.createObjectURL` /
+ * `revokeObjectURL`，按属性装上替身、用完还原，`<a>` 的 `click` 拦下来只记录文件名。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
 import type { PaymentDetail } from "../../api/adminPayments";
 import { ApiError, client } from "../../api/client";
+import { DOWNLOAD_TIMEOUT_MS } from "../../api/download";
 import { ROUTES, paymentDetailPath } from "../../routes/paths";
 import { PaymentDetailPage } from "./PaymentDetailPage";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const DETAIL_URL = `/api/v1/admin/payments/${ZERO_UUID}`;
 const RESOLVE_URL = `${DETAIL_URL}/resolve`;
+const RECEIPT_NUMBER = "ACV-AIR-2026-000001";
+const DOWNLOAD_URL = `/api/v1/admin/receipts/${ZERO_UUID}/download`;
 
 /** 让请求一直挂着（加载中）。 */
 const PENDING = Symbol("pending");
@@ -48,6 +55,9 @@ function detail(overrides: Partial<PaymentDetail> = {}): PaymentDetail {
     resolved_at: null,
     resolved_by: null,
     resolution_reason: null,
+    receipt_id: null,
+    receipt_number: null,
+    receipt_issued_at: null,
     events: [
       {
         gateway_event_id: "evt_test_0",
@@ -99,9 +109,45 @@ function serveResolve(reply: () => unknown) {
   });
 }
 
-function renderPage() {
+/** 已开具收据的已付支付：收据 id 全零，开具在付款之后几秒。 */
+function withReceipt(overrides: Partial<PaymentDetail> = {}): PaymentDetail {
+  return detail({
+    receipt_id: ZERO_UUID,
+    receipt_number: RECEIPT_NUMBER,
+    receipt_issued_at: "2026-11-08T08:01:05",
+    ...overrides,
+  });
+}
+
+/** 一份下载成功的响应：PDF blob，`headers` 由用例决定（不给 `Content-Disposition` 时页面用收据号作文件名）。 */
+function pdfResponse(headers: Record<string, string> = {}) {
+  return { data: new Blob(["%PDF-1.3"], { type: "application/pdf" }), status: 200, statusText: "", headers };
+}
+
+/**
+ * 详情照 `reply` 回应；收据下载照 `download` 回应（一份 {@link pdfResponse}、一个错误，或 PENDING 一直挂着）。
+ * 别的路径一律当成失败。
+ */
+function serveWithDownload(reply: () => unknown, download: () => unknown) {
+  return vi.spyOn(client, "get").mockImplementation((url: string) => {
+    if (url === DOWNLOAD_URL) {
+      const answer = download();
+      if (answer === PENDING) {
+        return new Promise(() => undefined);
+      }
+      return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer);
+    }
+    const answer = url === DETAIL_URL ? reply() : new ApiError("NOT_FOUND", "Unexpected request.", null);
+    if (answer === PENDING) {
+      return new Promise(() => undefined);
+    }
+    return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(envelope(answer));
+  });
+}
+
+function renderPage(): QueryClient {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[paymentDetailPath(ZERO_UUID)]}>
         <Routes>
@@ -110,6 +156,7 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return queryClient;
 }
 
 async function loaded(): Promise<void> {
@@ -253,6 +300,8 @@ describe("PaymentDetailPage fields", () => {
       "Resolved at (MYT)": "2026-11-09 10:00:00",
       "Resolved by": "admin@acuven.example",
       "Resolution reason": "Checked in Stripe",
+      "Receipt number": "—",
+      "Receipt issued at (MYT)": "—",
     });
     expect(screen.getByRole("link", { name: "Acme Sdn Bhd" })).toHaveAttribute("href", `/customers/${ZERO_UUID}`);
   });
@@ -291,6 +340,8 @@ describe("PaymentDetailPage fields", () => {
       "Resolved at (MYT)",
       "Resolved by",
       "Resolution reason",
+      "Receipt number",
+      "Receipt issued at (MYT)",
     ]) {
       expect(values[label]).toBe("—");
     }
@@ -631,6 +682,192 @@ describe("PaymentDetailPage requests", () => {
 
     const urls = [...get.mock.calls, ...post.mock.calls].map(([url]) => url);
     expect(urls).toEqual([DETAIL_URL, RESOLVE_URL]);
+    expect(urls.filter((url) => url.startsWith("/api/v1/customer/"))).toEqual([]);
+  });
+});
+
+describe("PaymentDetailPage receipt", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的链接的 download 属性（即存成的文件名）。 */
+  let saved: string[];
+
+  function restore(name: "createObjectURL" | "revokeObjectURL", descriptor: PropertyDescriptor | undefined): void {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(URL, name);
+    } else {
+      Object.defineProperty(URL, name, descriptor);
+    }
+  }
+
+  /**
+   * 下载按钮。按文字找再取外层的 `<button>`：`getByRole` 每次都要把整页（详情表、事件表、错误提示）算一遍可访问性，
+   * 在 jsdom 里很慢，放进 `waitFor` 反复调用会拖过用例的超时。
+   */
+  function downloadButton(): HTMLElement {
+    const button = screen.getByText("Download receipt").closest("button");
+    if (button === null) {
+      throw new Error("no download button");
+    }
+    return button;
+  }
+
+  function downloadCalls(get: ReturnType<typeof serveWithDownload>): unknown[][] {
+    return get.mock.calls.filter(([url]) => url === DOWNLOAD_URL);
+  }
+
+  beforeEach(() => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(() => "blob:https://admin.example/00000000-0000-0000-0000-000000000000"),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: vi.fn() });
+    saved = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+  });
+
+  afterEach(() => {
+    restore("createObjectURL", originalCreate);
+    restore("revokeObjectURL", originalRevoke);
+  });
+
+  it("shows the receipt number, the MYT issue time and a download button when there is a receipt", async () => {
+    serve(() => withReceipt());
+
+    renderPage();
+    await loaded();
+
+    const values = fields();
+    expect(values["Receipt number"]).toBe(`${RECEIPT_NUMBER}Download receipt`);
+    // 08:01:05 UTC → 16:01:05 吉隆坡时间。
+    expect(values["Receipt issued at (MYT)"]).toBe("2026-11-08 16:01:05");
+    expect(downloadButton()).toBeEnabled();
+  });
+
+  it("shows dashes and no download button when the payment has no receipt", async () => {
+    // 已付而暂时没有收据（等补发扫描）。
+    serve(() => detail());
+
+    renderPage();
+    await loaded();
+
+    const values = fields();
+    expect(values["Receipt number"]).toBe("—");
+    expect(values["Receipt issued at (MYT)"]).toBe("—");
+    expect(screen.queryByText("Download receipt")).not.toBeInTheDocument();
+  });
+
+  it("downloads the receipt from the admin path, falling back to <receipt_number>.pdf for the file name", async () => {
+    const get = serveWithDownload(
+      () => withReceipt(),
+      () => pdfResponse(),
+    );
+
+    renderPage();
+    await loaded();
+    fireEvent.click(downloadButton());
+
+    await waitFor(() => expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]));
+    expect(downloadCalls(get)).toEqual([[DOWNLOAD_URL, { responseType: "blob", timeout: DOWNLOAD_TIMEOUT_MS }]]);
+    await waitFor(() => expect(downloadButton()).toBeEnabled());
+    expect(screen.queryByText("The receipt could not be downloaded.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the button disabled while a download is in flight and sends only one request", async () => {
+    const get = serveWithDownload(
+      () => withReceipt(),
+      () => PENDING,
+    );
+
+    renderPage();
+    await loaded();
+    const button = downloadButton();
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(downloadButton()).toBeDisabled());
+    fireEvent.click(downloadButton());
+    expect(downloadCalls(get)).toHaveLength(1);
+  });
+
+  it("shows the code, message and request id below the button when the download fails", async () => {
+    serveWithDownload(
+      () => withReceipt(),
+      () => new ApiError("RECEIPT_NOT_FOUND", "Receipt not found.", "req-404"),
+    );
+
+    renderPage();
+    await loaded();
+    fireEvent.click(downloadButton());
+
+    const title = await screen.findByText("The receipt could not be downloaded.");
+    expect(screen.getByText("RECEIPT_NOT_FOUND")).toBeInTheDocument();
+    expect(screen.getByText(/Receipt not found\./)).toBeInTheDocument();
+    expect(screen.getByText("req-404")).toBeInTheDocument();
+    // 错误在按钮下方。
+    expect(downloadButton().compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await waitFor(() => expect(downloadButton()).toBeEnabled());
+    expect(saved).toEqual([]);
+  });
+
+  it("clears the failure on the next download click", async () => {
+    let failing = true;
+    const get = serveWithDownload(
+      () => withReceipt(),
+      () => (failing ? new ApiError("INTERNAL_ERROR", "An unexpected error occurred.", "req-500") : PENDING),
+    );
+
+    renderPage();
+    await loaded();
+    fireEvent.click(downloadButton());
+    expect(await screen.findByText("The receipt could not be downloaded.")).toBeInTheDocument();
+    await waitFor(() => expect(downloadButton()).toBeEnabled());
+
+    failing = false;
+    fireEvent.click(downloadButton());
+
+    await waitFor(() => expect(screen.queryByText("The receipt could not be downloaded.")).not.toBeInTheDocument());
+    expect(screen.queryByText("req-500")).not.toBeInTheDocument();
+    expect(downloadCalls(get)).toHaveLength(2);
+  });
+
+  it("clears the failure when the detail is read again", async () => {
+    const get = serveWithDownload(
+      () => withReceipt(),
+      () => new ApiError("RECEIPT_NOT_FOUND", "Receipt not found.", "req-404"),
+    );
+
+    const queryClient = renderPage();
+    await loaded();
+    fireEvent.click(downloadButton());
+    expect(await screen.findByText("The receipt could not be downloaded.")).toBeInTheDocument();
+
+    // 让重新读到的详情落在另一个时刻（页面按 dataUpdatedAt 判断详情是不是重新读过）。
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await queryClient.refetchQueries();
+
+    await waitFor(() => expect(screen.queryByText("The receipt could not be downloaded.")).not.toBeInTheDocument());
+    expect(screen.queryByText("req-404")).not.toBeInTheDocument();
+    expect(get.mock.calls.filter(([url]) => url === DETAIL_URL)).toHaveLength(2);
+    expect(downloadButton()).toBeEnabled();
+  });
+
+  it("asks only admin endpoints for the receipt, never a /api/v1/customer/ path", async () => {
+    const get = serveWithDownload(
+      () => withReceipt(),
+      () => pdfResponse({ "content-disposition": `attachment; filename="${RECEIPT_NUMBER}.pdf"` }),
+    );
+
+    renderPage();
+    await loaded();
+    fireEvent.click(downloadButton());
+    await waitFor(() => expect(saved).toEqual([`${RECEIPT_NUMBER}.pdf`]));
+
+    const urls = get.mock.calls.map(([url]) => url);
+    expect(urls).toEqual([DETAIL_URL, DOWNLOAD_URL]);
     expect(urls.filter((url) => url.startsWith("/api/v1/customer/"))).toEqual([]);
   });
 });
