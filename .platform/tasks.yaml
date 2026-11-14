@@ -11960,6 +11960,7 @@ tasks:
       - 'docs/payment-flow.md 新增「收据」一节：编号规则与按年重置、开具时机（与入账同一事务，检查不过不挡入账）、三个原因码各自的含义与处理步骤（照设计 §5 与 §10 已知限制 2：系列缺失或耗尽要过设计闸门加迁移，补上后自动收口；账本行缺失与税务政策读不出是永久状态，按数据事故处理、不要尝试改账本或税务政策，P2 会一直报到另一个设计闸门给出办法）、补发扫描（每 5 分钟、不发邮件、本批上线前的 PAID 由它补开）、缺收据告警的处置、付款邮件（收件人、内容、失败不影响收据）、已知限制（照设计 §10 的三条，另加不做作废与更正）；付款邮件沿用 ADR-0014 的 SMTP，写明它的重新评估触发条件；B 与 C 写的「对客户开放充值」的检查清单里加一条：在管理端支付详情能下载测试付款的收据、PDF 的内容正确'
       - 'docs/TODO.md 的 Phase 4 章节只把「支付收据 + 下载」一项改为 [x]，并在同一行末尾照钱包页一项的写法加括注（AIH-TASK-196..205，设计闸门 #589 v2）；其余勾选不动；不改 planning-v1 块'
       - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #589'
+      - '部署后浏览器验收只跑 login_customer、check_portal_receipts 两步（AIH-TASK-204 的验收步骤：204 由人接手交付，没有 Worker run，这两步没跑过；login_customer 要排在 login 之前，与 205 的 login 不能同在一次运行，所以挪到本任务）。本任务不改 scripts/acceptance/admin_customers.mjs，两步照现有脚本跑、应 PASS；沿用验收脚本已有的约束'
     allowed_change_paths:
       - docs/payment-flow.md
       - docs/TODO.md
@@ -11974,6 +11975,14 @@ tasks:
     execution: sequential
     stop_on_first_failure: true
     max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_receipts
 
     worker_handoff_state: awaiting_review
     worker_failure_state: failed
