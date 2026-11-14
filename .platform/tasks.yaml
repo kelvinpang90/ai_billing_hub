@@ -12105,10 +12105,11 @@ tasks:
       - bypass_ci
       - bypass_review
 
-  # AIH-TASK-209：同主机部署串行化（方案 D，Kelvin 2026-11-14 批准；同一台主机上另一个项目部署成功后的 image prune
+  # AIH-TASK-226：同主机部署串行化（方案 D，Kelvin 2026-11-14 批准；同一台主机上另一个项目部署成功后的 image prune
   # 撞上本项目的 compose pull，containerd 报错、部署失败：2026-10-27、11-03、11-14 三次，失败方都是本项目）。
   # 由人工会话按编号任务流程交付（不经 Worker）。不碰钱，不走设计闸门。
-  - id: AIH-TASK-209
+  # 编号跳过 209..225：那一段同日由关户、对账单 PDF、毛利分析三批另行登记。
+  - id: AIH-TASK-226
     title: 部署脚本全程持有主机级部署锁，与同主机其他项目的部署串行
     purpose: >-
       同一台主机上的几个项目都是合并即部署，GitHub 的 concurrency 只管单个仓库。另一个项目部署成功后执行 image prune，恰好落在本项目 compose pull 的几秒里，containerd 报 content digest not found 或 failed to extract layer，部署失败（2026-10-27、11-03、11-14 三次）。deploy/deploy.sh 在参数检查之后、第一次碰 docker 之前取一把各项目共用的主机级 flock（默认 /run/lock/acuven-deploy.lock，Kelvin 2026-11-14 批准写进公开仓库，作为不写服务器绝对路径规则的例外），最多等 300 秒，拿不到就在改动任何东西之前退出；持锁覆盖整个脚本，包括 prune 与回滚。同时给 Deploy workflow 两个 job 补上 timeout-minutes（build 12、deploy 17，合计不超过 30 分钟）。另外三个项目在各自仓库做同样的改动。
