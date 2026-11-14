@@ -44,7 +44,6 @@
 - 待登记：Phase 6 健康告警的其余信号（Celery 队列长度、日志量增长等；HTTP 错误率与用量摄取速率要指标管道）；AI 就绪检查已由 AIH-TASK-075 并入 readyz；通知死信、TLS 证书到期、主机时钟同步已登记为 AIH-TASK-149..150。Healthchecks 这个项目 2026-11-03 起 20 个检查实际用满（免费档上限），2026-10-17 Kelvin 定：不升级付费档，新信号并进已有维度、不新增检查；登记时每项写明并进哪个维度
 - 待登记：Phase 7 对账单 PDF 下载
 - 待登记：Phase 7 收入、成本、手续费、毛利分析与 CSV / Excel 导出
-- 待登记：Phase 8 供应商价格同步适配器、草稿审批发布（需设计闸门）
 - 待登记：Phase 8 供应商账单成本对账（需设计闸门）
 - 待登记：Phase 8 Reprocess 与 Rebill 调整（需设计闸门）
 - 待登记：上线闸门：PDPA 与数据留存政策
@@ -300,10 +299,10 @@
 
 ## Phase 4 — Payment & Customer Portal（§127）
 
-- [ ] 客户认证
+- [x] 客户认证（AIH-TASK-086..145，设计闸门 #368 等：共用登录、TOTP、密码重置、邀请接受，`require_customer`，门户自助 2FA）
   - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：客户门户登录在 `ENABLED` 下允许，`DISABLED` 与 `CLOSED` 下只读（看账单
     与收据），`PENDING_ACTIVATION` 由本 Phase 的设计闸门定
-- [ ] 客户仪表盘
+- [x] 客户仪表盘（AIH-TASK-097、101、108：门户首页 `/portal` 的账户状态、余额卡、最近流水与本月用量）
 - [x] 钱包页（AIH-TASK-100，设计闸门 #393 v3：门户 `/portal/wallet` 的余额卡与按序号翻页的流水表）
 - [x] 充值 UI（金额不许硬编码）（AIH-TASK-188..194，设计闸门 #587 v3）
   - ADR-0010：§42 的最小恢复额 = 欠款 + 可配置缓冲（不是只比 0 多一分钱），设计闸门里要写明缓冲的配置项与计算
@@ -323,7 +322,7 @@
   关户后拒绝新调账、建项目、建凭据、轮换凭据（吊销凭据、查看、编辑客户仍允许）。AIH-TASK-020 已让列与 CHECK 允许
   `CLOSED`、账户状态接口从 `CLOSED` 出发一律 409，这个任务不必改列
 - [x] 支付收据 + 下载（AIH-TASK-196..205，设计闸门 #589 v2）
-- [ ] **开工前重新评估 Email 传输**：Phase 0 用 Google Workspace SMTP 直连，认证全过仍被 Outlook.com 判进垃圾箱（T0.9 2026-09-15 实测）。给客户发收据 / 通知之前，决定是否换事务邮件 API 服务，并补退信与投诉抑制（[ADR-0009](adr/ADR-0009-notification-channels.md) 备选 A 与已知缺口）
+- [x] **开工前重新评估 Email 传输**：已由 [ADR-0014](adr/ADR-0014-email-smtp-for-now.md)（2026-10-15 接受，取代 ADR-0013）定为现阶段继续用 SMTP、遇到触发条件再评估；退信与投诉抑制的缺口先接受，不再是开工前提
 
 **验收**：客户付 RM100 → 网关确认 → 钱包**恰好**增加 RM100 一次 · 生成收据 · 重复 webhook 不双入账 · 丢失 webhook 由状态对账补回 · **SST / 会计闸门在上生产前已批准**
 
@@ -368,10 +367,10 @@
 
 ## Phase 8 — Provider Price Sync & Rebill（§131）
 
-- [ ] 供应商价格同步适配器
+- [x] 供应商价格同步适配器（2026-11-14 Kelvin 定不做：Anthropic 与 OpenAI 都没有官方价格 API，spec §18 允许退回手工录入；价格由管理员按草稿录入）
 - [x] FX 汇率同步适配器（已由 Phase 2 交付：BNM 每日拉取落草稿、审批发布，AIH-TASK-028、039..044，设计闸门 #183；本 Phase 只做供应商价格同步）
-- [ ] 草稿 → 管理员审批 → 发布
-- [ ] 历史版本化
+- [x] 草稿 → 管理员审批 → 发布（已由 AIH-TASK-026 交付，设计闸门 #177 v3：供应商价格版本 DRAFT → PUBLISHED → RETIRED，记录 `approved_by` / `approved_at`）
+- [x] 历史版本化（同上，AIH-TASK-026：每次改价是新版本，发布后由 MySQL 触发器保证不可改）
 - [ ] 供应商账单成本对账
 - [ ] Reprocess
 - [ ] Rebill 调整
