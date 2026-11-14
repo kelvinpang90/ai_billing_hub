@@ -12002,3 +12002,105 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AIH-TASK-207：docs/TODO.md「后续计划」的待登记项（设计闸门 #571 §1 留下的文档欠账；Kelvin 2026-11-14 同意登记）。
+  # 不走闸门：只改 docs/api.md 一处客户端建议，与已交付的 Billing Client（AIH-TASK-164..171）对齐，不改代码与服务端行为。
+  - id: AIH-TASK-207
+    title: 集成摄取错误表里 401 一行的客户端建议改为固定 60 秒重试、不进死信
+    purpose: >-
+      docs/api.md 集成摄取的错误表把 401 INTEGRATION_AUTH_FAILED 的客户端建议写成「停止重试、进死信、人工重投」，而已交付的 Billing Client（integration-client/，设计闸门 #571）对 401 保持待发、每 60 秒按当前配置重签重发、报 P1、不进死信，integration-client/README.md 第 7 节因此写了「与 docs/api.md 错误表的建议不同，以本客户端为准」。本任务把 api.md 的建议改成与客户端一致，并去掉 README 里那句分歧说明。只改文档；服务端的 retryable 值不变。
+    status: ready
+    depends_on:
+      - AIH-TASK-206
+    acceptance_criteria:
+      - 'docs/api.md 集成摄取单条端点错误表里 401 INTEGRATION_AUTH_FAILED 一行：「什么时候」与 retryable（false）两列一字不改；「客户端该做什么」一列改为：不进死信，保持待发，固定每 60 秒按当前配置重新签名重发并告警（P1）；修好凭据、主机时钟或 Request-Id 生成后积压自动送达，不需要人工重投。措辞照 integration-client/README.md 第 7 节「401 的固定 60 秒重试」那一段，可指向它'
+      - '同一张表下方或 retryable 说明处如有「retryable 为 false 一律进死信」之类的通则，补一句 401 是例外（retryable 仍为 false，表示同一份签名请求原样重发不会成功，但重新签名后可能成功）；没有这样的通则就不加。批量端点表里 401 一行写「与单条端点相同」的保持不变'
+      - 'integration-client/README.md 第 7 节「401 的固定 60 秒重试」段末尾括号里那句（与 docs/api.md 错误表的建议不同，以本客户端为准）删掉，其余文字不变'
+      - '不改 docs/runbook.md 里 AI 模块用量 outbox 的 DEAD 处置（进程内 AI 模块自己的 outbox 对 401 进死信、可重投，是另一套已批准的行为，见设计闸门 #281）；如认为两者需要统一，写进 PR 的「已知未做 / 留给后续」，不在本任务改'
+      - '不改代码、测试、docs/TODO.md 与 planning-v1 块；不装依赖；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 不适用'
+    allowed_change_paths:
+      - docs/api.md
+      - integration-client/README.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-208：Phase 6 健康告警的其余信号之一（docs/TODO.md「后续计划」）。Kelvin 2026-11-14 选定：Celery 队列长度并进
+  # deploy/monitor.sh 的 services 维度（Healthchecks 免费档 20 个已用满，2026-10-17 定不新增检查）。不走闸门：只改巡检脚本与文档。
+  - id: AIH-TASK-208
+    title: 健康告警：巡检把 Celery 队列积压并进 services 维度
+    purpose: >-
+      celery-worker 活着但处理不过来（或卡在某个任务上）时，容器 health 仍是 healthy，现有巡检看不出来，表现只是投递、计费、对账慢慢滞后。deploy/monitor.sh 的 services 维度在逐个检查容器之后，再读 Redis broker 里 Celery 默认队列的长度，超过阈值报 P2。并进已有的 BILLING_HEALTHCHECK_SERVICES_URL，不新增检查、不新增 .env 地址；同步部署文档与 runbook。不改应用代码。
+    status: ready
+    depends_on:
+      - AIH-TASK-207
+    acceptance_criteria:
+      - 'deploy/monitor.sh 新增 check_celery_queue，由 check_services 在逐个服务循环之后调用（并进 services 维度，复核时随 check_services 一起重跑）；沿用本脚本的约定：问题逐行写 stdout、行首是 P1 / P2，普通日志一律走 stderr，命令替换里失败的命令写 || true（set -e 下不中止）。services 维度的 OK 摘要不变'
+      - 'check_celery_queue：用 timeout 10 包住 $COMPOSE exec -T redis redis-cli -n <库号> LLEN celery，库号与队列名各用一个带注释的常量（库号必须与 docker-compose.yml 里 BILLING_REDIS_URL 的库号一致；队列名是 Celery 未配置 task_default_queue 时的默认队列 celery，见 app/core/celery_app.py）；输出去掉首尾空白后不是非负整数（redis 没在跑、命令失败、超时、输出为空）时 stderr 记一行 celery queue length unavailable; skipping the queue check，不报问题（redis 停了已由同一维度的容器检查报出，与 check_binlog「量不到不报警」同一条理由）；长度不小于 BILLING_MONITOR_CELERY_QUEUE_WARN（默认 500，非负整数，配置值不是非负整数时按默认值并 stderr 记一行）报 P2 celery queue backlog <N> (warn <阈值>)；否则不报'
+      - '脚本头部或 services 维度的注释写明：为什么并进 services 而不是新检查（免费档 20 个已用满，2026-10-17 Kelvin 定）；Redis 的 maxmemory 与 allkeys-lru（docker-compose.yml）意味着积压过大时消息可能被淘汰，这条告警要在那之前响；阈值配一段注释说明意义（正常时队列接近 0，Beat 的周期任务只在 worker 跟不上时才会堆起来）'
+      - 'tests/backend/test_deploy.py 的生产巡检一节：文本守卫——阈值默认值是 500；check_services 调用 check_celery_queue；redis-cli 前有 timeout；脚本里 redis-cli 用的库号与 docker-compose.yml 里 BILLING_REDIS_URL 的库号一致（从两个文件解析出来比较，不写死）；不出现 BILLING_HEALTHCHECK_ 开头的新键'
+      - 'tests/backend/test_deploy.py 新增用 bash 实际执行的场景用例（写法照同文件 check_tls / check_clock 的那组：从 monitor.sh 截出 env_value 与 check_celery_queue，假的 docker 或 $COMPOSE 命令放在 PATH 前面或经 BILLING_COMPOSE 指向假脚本，不起容器、不联网）：长度 0 不报；499 不报；500 报 P2 且正文含 500 与阈值；配置阈值为 10 时 11 报 P2；输出为空、非数字、命令非零退出时都不报且 stderr 有 unavailable 那一行；阈值配置为非数字时按 500 处理且 stderr 有一行说明'
+      - 'docs/deployment.md §8：8.1 表格的容器不健康一行（或紧随其后新增一行）写进 Celery 队列积压的判据、阈值、分级（P2）与并进 services 检查；8.3 诚实清单里注明 Celery 队列长度已由本任务覆盖；docs/runbook.md 新增「Celery 队列积压」一节（怎么发现、影响什么、立刻做什么：先看 celery-worker 日志与是否卡在某个任务、确认 Beat 没有重复调度、必要时重启 celery-worker，以及绝不能做什么：不要清空 Redis 或删队列——持久工作在 MySQL，INV-14 靠周期恢复补回，清队列只会让恢复多等一轮），格式照同文件已有各节'
+      - '不改 app/、alembic/、docker-compose.yml、deploy/cron.d/、deploy/ 下其他脚本、.env 类文件；不新增 Healthchecks 检查或 .env 地址键；不装依赖；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；不改 docs/TODO.md 与 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 不适用'
+    allowed_change_paths:
+      - deploy/monitor.sh
+      - tests/backend/test_deploy.py
+      - docs/deployment.md
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
