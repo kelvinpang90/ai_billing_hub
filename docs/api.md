@@ -2550,7 +2550,7 @@ SHA256(RAW_REQUEST_BODY)
 
 | 字段 | 说明 |
 | --- | --- |
-| `source_type` | 本任务只有 `MANUAL`；`SYNC` 留给 Phase 8 的供应商价格同步 |
+| `source_type` | 目前只有 `MANUAL`；`SYNC` 保留不用：V1 不做供应商价格同步（[ADR-0016](adr/ADR-0016-no-provider-price-sync.md)） |
 | `status` | `DRAFT` / `PUBLISHED` / `RETIRED` / `DISCARDED` |
 | `effective_from` | 草稿为 `null`；已发布时 `null` 只有一种含义：发布时该（供应商, 模型）没有区间非空的已发布版本、且未指定生效时刻 =「一直以来」 |
 | `effective_to` | `null` = 仍生效（或尚未发布）。`effective_from == effective_to` 是空区间（被撤销的预约，或同一秒里发布又退役），永不生效，只出现在 `RETIRED` 上 |
