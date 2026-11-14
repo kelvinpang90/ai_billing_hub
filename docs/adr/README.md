@@ -65,6 +65,7 @@
 | [0013](ADR-0013-email-api-service.md) | Email 传输层：改用带退信与投诉回调的 API 服务 | 已被 ADR-0014 取代 | 2026-10-15 |
 | [0014](ADR-0014-email-smtp-for-now.md) | Email 传输层：现阶段继续用 SMTP，出现送达问题再换 API 服务 | 已接受 | 2026-10-15 |
 | [0015](ADR-0015-stripe-payment-gateway.md) | 支付网关选定 Stripe：沙箱实测 H1–H4 的结果 | 已接受 | 2026-11-06 |
+| [0016](ADR-0016-no-provider-price-sync.md) | 供应商价格：V1 不做自动同步适配器，只用手工录入草稿 | 已接受 | 2026-11-14 |
 
 ## 待写（spec §136 要求）
 
