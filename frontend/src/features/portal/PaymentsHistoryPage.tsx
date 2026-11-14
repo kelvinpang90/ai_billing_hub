@@ -13,18 +13,24 @@
  * 列：编号、金额（`MoneyText`）、状态（七种客户侧状态各有文案，{@link PaymentStatusText}）、实际入账额、创建时间与付款时间
  * （吉隆坡时间，列头标 MYT）。实际入账额与付款时间为空时显示短横。三种状态都画出来：加载中、失败（带 request_id）、空列表。
  *
+ * 收据列（AIH-TASK-204；设计闸门 #589 v2 §2「门户页面」）排在最后：有收据时是收据号与下载按钮，没有时是短横。点下载不进
+ * 结果页；下载中只有这一行的按钮不可点，其他行照常可点。下载失败在表格上方显示一条页面级错误（错误码、信息与 request_id），
+ * 只留最近一次失败（翻页之后才失败的照样显示），下一次点任一下载或翻页时清除。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径。说明文字不用 antd 的 `Alert`：它带 `role="alert"`，
  * 部署后浏览器验收把它当成错误提示（scripts/acceptance/admin_customers.mjs 的 `check_portal_payments`）。
  */
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Empty, Skeleton, Space, Table, Typography, type TableColumnsType } from "antd";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode, type SyntheticEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router";
 
+import { ApiError } from "../../api/client";
 import {
   customerPaymentListQueryKey,
+  downloadCustomerReceipt,
   listCustomerPayments,
   type CustomerPayment,
 } from "../../api/customerPayments";
@@ -94,6 +100,47 @@ export function PaidAt({ payment }: { payment: CustomerPayment }) {
   return payment.paid_at === null ? EMPTY : <DateTimeText value={payment.paid_at} />;
 }
 
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/** 收据下载失败：错误码、后端的信息与 request_id。 */
+export function ReceiptDownloadFailure({ error }: { error: Error }) {
+  const { t } = useTranslation();
+  return (
+    <Alert
+      type="error"
+      showIcon
+      message={t("portal.payments.receipt.downloadFailed")}
+      description={
+        <Space direction="vertical" size={4}>
+          {error instanceof ApiError ? (
+            <Typography.Text type="secondary">
+              {t("portal.payments.receipt.errorCode")}
+              {": "}
+              <Typography.Text code>{error.code}</Typography.Text>
+            </Typography.Text>
+          ) : null}
+          <RequestReference error={error} />
+        </Space>
+      }
+    />
+  );
+}
+
+/** 收据下载按钮。外面包一层挡住点击与按键的冒泡：点它（禁用时也一样）不触发行的「进结果页」。 */
+export function ReceiptDownloadButton({ disabled, onDownload }: { disabled: boolean; onDownload: () => void }) {
+  const { t } = useTranslation();
+  const stop = (event: SyntheticEvent): void => event.stopPropagation();
+  return (
+    <span onClick={stop} onKeyDown={stop}>
+      <Button size="small" disabled={disabled} onClick={onDownload}>
+        {t("portal.payments.receipt.download")}
+      </Button>
+    </span>
+  );
+}
+
 export function PaymentsHistoryPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -145,7 +192,31 @@ export function PaymentsHistoryPage() {
     }
   }, [settledOnThisPage, total, lastPage, page, setSearchParams]);
 
+  // 正在下载收据的行（支付 id）；最近一次下载失败。
+  const [downloading, setDownloading] = useState<ReadonlySet<string>>(() => new Set());
+  const [downloadError, setDownloadError] = useState<Error | null>(null);
+
+  const download = (paymentId: string, receiptId: string, receiptNumber: string): void => {
+    setDownloadError(null);
+    setDownloading((current) => new Set(current).add(paymentId));
+    void (async () => {
+      try {
+        await downloadCustomerReceipt(receiptId, receiptNumber);
+      } catch (error) {
+        // 后到的失败覆盖先到的；翻页之后才落定的也照样显示。
+        setDownloadError(asError(error));
+      } finally {
+        setDownloading((current) => {
+          const next = new Set(current);
+          next.delete(paymentId);
+          return next;
+        });
+      }
+    })();
+  };
+
   const goTo = (nextPage: number): void => {
+    setDownloadError(null);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       next.set(PAGE_PARAM, String(nextPage));
@@ -184,6 +255,27 @@ export function PaymentsHistoryPage() {
       key: "paid_at",
       title: t("portal.payments.field.paidAt"),
       render: (_: unknown, payment) => <PaidAt payment={payment} />,
+    },
+    {
+      key: "receipt",
+      title: t("portal.payments.field.receipt"),
+      render: (_: unknown, payment) => {
+        const { receipt_id: receiptId, receipt_number: receiptNumber } = payment;
+        if (receiptNumber === null) {
+          return EMPTY;
+        }
+        return (
+          <Space size="small">
+            <span>{receiptNumber}</span>
+            {receiptId === null ? null : (
+              <ReceiptDownloadButton
+                disabled={downloading.has(payment.id)}
+                onDownload={() => download(payment.id, receiptId, receiptNumber)}
+              />
+            )}
+          </Space>
+        );
+      },
     },
   ];
 
@@ -256,6 +348,11 @@ export function PaymentsHistoryPage() {
       <Typography.Paragraph type="secondary">{t("portal.payments.intro")}</Typography.Paragraph>
       {/* 列表与它的状态单独成一块，用例与验收脚本按 aria-label 找它。 */}
       <div role="region" aria-label={t("portal.payments.title")}>
+        {downloadError === null ? null : (
+          <div style={{ marginBottom: 16 }}>
+            <ReceiptDownloadFailure error={downloadError} />
+          </div>
+        )}
         {result}
       </div>
     </Card>
