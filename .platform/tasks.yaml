@@ -11952,7 +11952,7 @@ tasks:
     title: 支付第四批第十一层：收据的运维文档与 Phase 4 收据一项的勾选
     purpose: >-
       按 docs/design/AIH-TASK-196-payment-receipts.md（设计闸门 #589 已批准 v2） §8、§2「开具」「补发扫描」「告警」：docs/payment-flow.md 补收据一节（编号、开具、补发、告警处置、开放前检查），docs/TODO.md 勾选 Phase 4 的「支付收据 + 下载」。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-205
     acceptance_criteria:
