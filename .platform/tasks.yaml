@@ -12104,3 +12104,992 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+
+  # 关户第一批（设计闸门 #707，docs/design/AIH-TASK-209-account-closure.md）：AIH-TASK-209..215 七层串行，落实 AIH-TASK-020
+  # 设计 §2 末尾「对以后功能的契约」。Kelvin 2026-11-14 定：关户当月一律出最后一份对账单；挡关户的未结为四类（用量、AI outbox、
+  # 支付、网关事件）；关户后另拒 AI 密钥、签名密钥、内部计量、阈值；退款扣回在调账原因里写支付号；关户填原因、前端输入客户名确认。
+  # 209 是第一层：记账总入口的兜底，预计约 350 行；不加迁移。
+  - id: AIH-TASK-209
+    title: 关户第一层：记账总入口拒绝给已关户租户入账，用量计费与调账各自收口
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「契约一」：app/repositories/wallet.py 新增 TenantClosed(LedgerError)，post_transaction 在锁租户之后、余额范围判定与任何写入之前拒绝 CLOSED 租户；用量计费 ⑧ 捕获它把事件置 FAILED_FINAL / ACCOUNT_CLOSED，手工调账把它映射为 409 ACCOUNT_CLOSED；支付确认与人工入账不改（锁内已先判 TENANT_CLOSED）。docs/api.md 手工调账一节补错误码。不做其他写入口：属于 AIH-TASK-210。
+    status: ready
+    depends_on:
+      - AIH-TASK-208
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） 逐条一致，以 §2「契约一」「事务边界」、§3 INV-2、INV-3、INV-4、INV-11、INV-13、§4「并发」里关户与 post_transaction 串行的一条、§5 调账一行、§7 标 E1 的各行 为准；本设计建立在 docs/design/AIH-TASK-020-tenant-account-status.md（设计闸门 #136 已批准 v2）§2 末尾「对以后功能的契约」与 docs/design/AIH-TASK-032-usage-billing.md（设计闸门 #181）§2「锁顺序」之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/wallet.py：新增 class TenantClosed(LedgerError)，消息恰好是问题码 TENANT_CLOSED；post_transaction 的检查顺序为 参数校验 → _lock_wallet → WalletNotFound → 来源查重（同来源同效果仍返回既有行 replayed=True、不同效果仍抛 LedgerConflict，两者都在锁租户之前、不看账户状态）→ _lock_tenant → tenant.account_status is AccountStatus.CLOSED 时 raise TenantClosed(TENANT_CLOSED) → BALANCE_OUT_OF_RANGE → 写账本行、审计、计费状态跃迁、低余额事件；抛出时没有写过任何行；docstring 里「所有校验错误都在任何写入之前抛出」仍成立；锁顺序钱包 → 租户与其他调用约定不变'
+      - 'app/services/usage_billing.py 的 _process ⑧：except TenantClosed 与现有 except LedgerConflict 并列，调用 _settle(event, UsageEventStatus.FAILED_FINAL, ACCOUNT_CLOSED, resolution) 并返回 Outcome.FAILED_FINAL，记一条 INFO（固定英文文本 + _context(event)，不带金额）；不是 500、不进 record_failure 的重试；② 的普通读与已有的 CLOSED 分支、全局锁顺序都不改。app/services/wallet_adjustments.py 的 _post_once：except TenantClosed 时 raise AccountClosed from None（从 app/services/project_integration.py 导入复用，409 ACCOUNT_CLOSED），整个事务回滚、什么都不写'
+      - '不改 app/services/payments.py 与 app/services/payment_review.py：两处在「支付 → 钱包 → 租户」锁内由 _paid_check_failure / _locked_check_failure 先对 CLOSED 返回 TENANT_CLOSED，走不到 post_transaction；tests/backend/test_payment_confirm.py 与 tests/backend/test_payment_review.py 不改、现有 TENANT_CLOSED 用例照常通过即为证据'
+      - '测试：tests/backend/test_wallet_repository.py 覆盖 §7「post_transaction 拒绝」（CLOSED 租户用 TransactionType 九种类型逐一记账都抛 TenantClosed，账本行数、钱包 version 与 balance、审计行数、租户 status_version 都不变）、「重放」（DISABLED 时记一条调账 → 直接改库为 CLOSED → 同来源同效果返回既有行且 replayed=True；同来源不同金额抛 LedgerConflict）、「检查顺序」（CLOSED 且余额会越界时抛 TenantClosed 而不是 BALANCE_OUT_OF_RANGE）；tests/backend/test_usage_billing.py 覆盖「计费旧值窗口」（认领后先把租户对象载入本会话的 identity map，再由另一个会话提交 CLOSED，② 读到 DISABLED、⑧ 锁内读到 CLOSED：_process 返回 Outcome.FAILED_FINAL，事件 FAILED_FINAL / ACCOUNT_CLOSED，没有账本行，不抛异常、不进 record_failure）与「计费 ② 照旧」；tests/backend/test_wallet_adjustment_service.py 与 tests/backend/test_wallet_adjustment_api.py 覆盖「调账」（CLOSED 客户调账 409 ACCOUNT_CLOSED、账本与钱包与审计都不变；关户前已记的同一幂等键重发 200 且 replayed 为真）。造 CLOSED 租户用直接改库；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep'
+      - '已有用例的连带修改：tests/backend/test_customer_receipts_api.py 的 test_read_only_accounts_still_list_and_download 在 CLOSED 参数下先 world.customer(account_status=CLOSED) 再经 receipted → make_paid_payment 调 post_transaction 记 TOPUP，本任务之后会抛 TenantClosed；只把它改为先以 ENABLED 建客户、记账并开收据，再直接改库把 account_status 改为参数值（DISABLED / CLOSED），断言不变；该文件其余用例与 tests/backend/payment_world.py 都不改'
+      - 'docs/api.md「管理端手工调账」一节的错误表加 409 ACCOUNT_CLOSED（客户已关户；在记账的租户行锁内判定，什么都不写；关户前已记过的同一幂等键重发仍返回原结果）；其余内容不改'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/services/payments.py、app/services/payment_review.py、app/services/project_integration.py（AccountClosed 只导入复用）；不改其他写入口（属于 AIH-TASK-210）；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - app/repositories/wallet.py
+      - app/services/usage_billing.py
+      - app/services/wallet_adjustments.py
+      - tests/backend/test_wallet_repository.py
+      - tests/backend/test_usage_billing.py
+      - tests/backend/test_wallet_adjustment_service.py
+      - tests/backend/test_wallet_adjustment_api.py
+      - tests/backend/test_customer_receipts_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-210：关户第二层（设计闸门 #707）。AIH-TASK-020 契约要求关户后拒绝建项目、建与轮换凭据；Kelvin 2026-11-14 另加
+  # AI 客户端密钥签发、webhook 签名密钥签发与启用、内部计量开通、低余额阈值设置，吊销类照常。预计约 450 行；可改路径 12 条已到上限。
+  - id: AIH-TASK-210
+    title: 关户第二层：关户后拒绝建项目、建与轮换凭据、签发密钥、内部计量和阈值设置
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「契约二」：建项目、设置或清除低余额阈值、建与轮换集成凭据、签发 AI 客户端密钥、签发与启用 webhook 签名密钥、开通内部计量这八个入口在锁住租户行之后对 CLOSED 返回 409 ACCOUNT_CLOSED（复用 project_integration.AccountClosed），不写库；吊销、退役、查看、编辑照常。docs/api.md 对应各节补错误码。
+    status: ready
+    depends_on:
+      - AIH-TASK-209
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） 逐条一致，以 §2「契约二」「事务边界」、§4「并发」、§5 E2 入口一行、§6「密钥」、§7 标 E2 的各行 为准；本设计建立在 docs/design/AIH-TASK-020-tenant-account-status.md（设计闸门 #136 已批准 v2）§2 末尾「对以后功能的契约」之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '各入口的改法：app/services/customers.py 的 create_project 把 _require_tenant 改为 for_update=True，CLOSED 判定在 tenancy.create_project 之前；set_low_balance_threshold（已 for_update=True）的 CLOSED 判定在读 before 之前，与现值相同（含两边都是 null）也 409；app/services/integration_access.py 的 create_credential 与 rotate_credential、app/ai_api/admin.py 的 issue_client_key、app/services/webhook_signing.py 的 issue_secret 与 activate_secret 加一次租户行共享锁读（SELECT … FOR SHARE 加 populate_existing，写法同 app/services/project_integration.py 的 _lock_tenant_shared），CLOSED 判定在共享锁之后、生成 api_key / secret 之前、锁项目行（_locked_project）与锁版本行（_locked_versions）之前；activate_secret 对已是 ACTIVE 的幂等返回也先 409；app/services/internal_billing.py 的 enable_internal_metering（已锁钱包 → 租户）的 CLOSED 判定在锁租户之后、「已是 INTERNAL_METERED_ONLY 直接返回」之前。八处都 raise AccountClosed（从 app/services/project_integration.py 导入），什么都不写（含审计）'
+      - '判定顺序：主密钥未配置 503（load_keyring 在事务外，照旧最先）→ 客户与项目不存在 404 → CLOSED 409 → 其他业务 409（例如 WEBHOOK_SECRET_PENDING_EXISTS、AI 密钥数量上限、INTERNAL_METERING_NOT_ELIGIBLE）；因为 CLOSED 判定在锁版本行之前，CLOSED 租户上不存在的 api_key 或 key_version 报 409 而不是 404。锁顺序只能是「租户（S 或 X）→ 项目 / 投递行 / 凭据 / 密钥行」或「钱包 → 租户」，不新增先锁项目、凭据、密钥行再锁租户的路径'
+      - '照常允许、不改的写入口：integration_access 的 revoke_version 与 revoke_key、ai_api/admin 的 revoke_client_key、webhook_signing 的 retire_secret、customers 的 update_customer；project_integration 与 portal_accounts 已有的规则不改'
+      - '测试（服务层）：tests/backend/test_customer_service.py（建项目）、tests/backend/test_low_balance_threshold_api.py（阈值设置与清除，含与现值相同）、tests/backend/test_integration_access_service.py（建凭据、轮换；吊销版本与整个 key 照常）、tests/backend/test_ai_admin_service.py（签发；吊销照常）、tests/backend/test_webhook_signing_service.py（签发、启用，含已 ACTIVE 的幂等启用；退役照常）、tests/backend/test_status_version.py（开通内部计量，含已是内部计量）：对 CLOSED 租户全部 409 ACCOUNT_CLOSED 且不写任何行（含审计）；对 DISABLED 租户同样操作照常成功；CLOSED 租户配不存在的客户或项目先报 404；主密钥未配置时建凭据、轮换、签发签名密钥先报 503；编辑客户资料对 CLOSED 照常成功。造 CLOSED 租户用直接改库'
+      - '入口与关户并发（§7「入口与关户并发」，只在真 MySQL 上跑，写在 tests/backend/test_customer_service.py）：连接 A 持租户行 FOR UPDATE 并把它改为 CLOSED，连接 B 同时调用 create_project；经 performance_schema.data_lock_waits（按 DATABASE() 与表名 tenants 过滤，写法照 tests/backend/test_session_revocation_concurrency.py 的 _WAITING_ON_TABLE，不查 INNODB_TRX）确认 B 在等租户行后 A 提交；B 得到 409 ACCOUNT_CLOSED、没有项目行、投递行与审计。后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep'
+      - 'docs/api.md 对应各节的错误表（与「管理端客户管理」等概览表的错误码列）加 409 ACCOUNT_CLOSED：建项目、低余额阈值 PUT、建凭据、轮换凭据、签发 AI 客户端密钥、签发与启用 webhook 签名密钥、开通内部计量；写明在锁住租户行之后判定、与现值相同也 409、已 ACTIVE 的启用也 409；吊销类不受影响'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/repositories/wallet.py、app/services/project_integration.py（AccountClosed 只导入复用）与 app/services/portal_accounts.py；不改接口层与 schema；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - app/services/customers.py
+      - app/services/integration_access.py
+      - app/ai_api/admin.py
+      - app/services/webhook_signing.py
+      - app/services/internal_billing.py
+      - tests/backend/test_customer_service.py
+      - tests/backend/test_low_balance_threshold_api.py
+      - tests/backend/test_integration_access_service.py
+      - tests/backend/test_ai_admin_service.py
+      - tests/backend/test_webhook_signing_service.py
+      - tests/backend/test_status_version.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-211：关户第三层（设计闸门 #707）。Kelvin 2026-11-14 定关户当月一律出最后一份对账单（无发生额时期初 = 期末 = 0），
+  # 之后不再生成。关户时刻取 status_changed_at、不加迁移：依赖 209、210 让四个 bump_status_version 调用方在 CLOSED 后都不再执行，
+  # 本任务的测试把这一点钉住。预计约 250 行。
+  - id: AIH-TASK-211
+    title: 关户第三层：对账单资格加关户截止，关户后的账期不再生成也不算缺失
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「对账单资格」「关户时刻为什么可以取 status_changed_at」：app/services/statements.py 的 is_eligible 加一条：账户 CLOSED 且 status_changed_at 不为空时，只有开始不晚于关户时刻的账期合格。生成、缺失对账单告警与管理端补生成共用它，自动一致。不改告警代码与已定稿对账单。
+    status: ready
+    depends_on:
+      - AIH-TASK-210
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） 逐条一致，以 §2「对账单资格」「关户时刻为什么可以取 status_changed_at」、§1 Kelvin 决定 1、§3 INV-12、§7 标 E3 的各行 为准；本设计建立在 docs/design/AIH-TASK-154-monthly-statements.md（设计闸门 #565）之上，没有改写的地方沿用它；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/statements.py 的 is_eligible(tenant, wallet, period)：原条件（PREPAID、有钱包、wallet.created_at < period.end）不变，再与上「account_status 不是 CLOSED，或 status_changed_at 为空，或 period.start <= status_changed_at」；docstring 里「账户状态不看」改为这条规则；generate_statement、上期连续性检查、catch_up_tenant、generate_due 与 app/services/alerts.py 都只经它生效，代码不改；已定稿对账单的行与生成函数的其他步骤不变'
+      - '单元测试（tests/backend/test_statement_generate.py，§7「对账单资格」）：CLOSED 且 status_changed_at 在账期 M 内 → M 与之前的账期合格、M+1 不合格；status_changed_at 恰好等于 M 的开始 → M 合格、M+1 不合格；CLOSED 而 status_changed_at 为空 → 都合格；DISABLED 与 ENABLED 的结果与改动前相同；INTERNAL_METERED_ONLY 与没有钱包照旧不合格'
+      - '集成测试（§7「对账单生成与告警」）：tests/backend/test_statement_generate.py 或 tests/backend/test_statements_task.py 里一个 CLOSED 租户跨三个到期账期跑 generate_due，只生成关户当月及之前的账期，之后不生成；关户当月没有发生额时生成一份期初 = 期末 = 0 的对账单；tests/backend/test_statements_task.py 里 catch_up_tenant 跳过关户之后的账期；tests/backend/test_usage_alerts.py 里 usage_processing_backlog 摘要的 statements missing 部分不把关户之后的账期算作缺失（关户当月未生成时照旧算缺失）'
+      - 'tests/backend/test_status_version.py（§7「status_changed_at 冻结」）：对 CLOSED 租户分别触发四个 bump_status_version 调用方——post_transaction（抛 TenantClosed，AIH-TASK-209）、change_account_status（409）、enable_internal_metering（409 ACCOUNT_CLOSED，AIH-TASK-210）、项目集成状态变更（已有 409）——之后租户的 status_version 与 status_changed_at 都不变'
+      - '后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep；造 CLOSED 租户用直接改库（同时写 status_changed_at）'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/services/alerts.py、app/api/admin_statements.py 与已有迁移；不改已定稿对账单的任何行；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - app/services/statements.py
+      - tests/backend/test_statement_generate.py
+      - tests/backend/test_statements_task.py
+      - tests/backend/test_usage_alerts.py
+      - tests/backend/test_status_version.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-212：关户第四层（设计闸门 #707）：状态机 DISABLED → CLOSED 与锁内前置条件，本批最大的一层，预计约 950 行
+  # （未到 1500 行的拆分线）。只做服务；接口属于 AIH-TASK-213。Kelvin 2026-11-14 定的四类未结与 EXPIRED 支付 7 天视为终态在这里落地。
+  - id: AIH-TASK-212
+    title: 关户第四层：关户服务与锁内前置条件检查
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「契约三」：新服务 app/services/account_closure.py 的 closure_blockers（四类未结的只读计数）、get_closure_check（只读视图）与 close_account（事务 0 取 id；事务 1 锁钱包 → 租户，按顺序判定后写状态、版本、outbox、投递重排与审计）；app/services/account_status.py 把 _apply 的写入部分原样抽成 _record_transition 供两处共用，TRANSITIONS 不变。不加接口：属于 AIH-TASK-213。
+    status: ready
+    depends_on:
+      - AIH-TASK-211
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） 逐条一致，以 §2「契约三」「契约四」「事务边界」「时间语义」「金额与精度」、§3、§4、§5、§6「日志」「审计」「数据保留」、§7 标 E4 的各行 为准；本设计建立在 docs/design/AIH-TASK-020-tenant-account-status.md（设计闸门 #136 已批准 v2）之上，没有改写的地方沿用它；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'closure_blockers(session, *, tenant_id, now) -> ClosureBlockers（不可变数据类，字段 usage_events、ai_usage、payments、payment_events 为 int，payment_events_truncated 为 bool，方法 codes() 按设计表序给出非零或截断类别的错误码）：全部普通读、只计数、都带本租户过滤；用量为 status 在「UsageEventStatus 除 PROCESSED、FAILED_FINAL 以外的全部取值」（由枚举推导、写成正向 IN）；AI outbox 为 ai_usage_outbox 的 PENDING / SENDING / HELD；支付为 PENDING、REVIEW_REQUIRED，或 EXPIRED 且 created_at > now − EXPIRED_PAYMENT_SETTLE_DAYS 天（常量 Final = 7；恰好 7 天前不挡，晚一秒挡）；网关事件按设计四步：全库 processing_status 为 RECEIVED / PROCESSING / RETRY 的事件按 id 升序至多 PAYMENT_EVENT_SCAN_LIMIT（模块级常量，值 10000）行（函数在调用时读这个模块属性，不做成参数缺省值、不复制进局部常量；测试用 monkeypatch.setattr 把它设为 3，经 close_account 与 get_closure_check 调用时同样生效），归属本租户当且仅当 payment_id 是本租户支付的 id，或 metadata_json 的 client_reference_id / object_id / payment_intent（只比较字符串值）分别等于本租户支付的 public_id / gateway_payment_id / gateway_payment_intent_id；取满上限时 payment_events_truncated 为真、该类别按未结处理并记一条 WARNING（固定文本 + 上限值）'
+      - 'close_account(factory, *, actor, customer_id, reason, context, now=None) -> CustomerDetail：now 缺省为 utc_now() 截到整秒；事务 0 单独一个只读事务按 public_id 取 tenants.id，没有 → CustomerNotFound；事务 1：锁钱包 FOR UPDATE（populate_existing，没有钱包 → RuntimeError(WALLET_MISSING)）→ 锁租户 FOR UPDATE（populate_existing）→ 已是 CLOSED 直接返回（不写任何行）→ 不是 DISABLED 抛 AccountStatusTransitionInvalid（复用 account_status.py）→ wallet.balance != Decimal(0) 抛 AccountClosureBalanceNotZero → closure_blockers（事务 1 的第一次普通读）第一个类别抛 AccountClosureUsagePending / AccountClosureAiUsagePending / AccountClosurePaymentsPending / AccountClosurePaymentEventsPending → 写；五个新错误类都是 409，错误码照设计 §2「接口」的表，消息是固定英文句子、不带计数与金额；提交后在事务外 customers.get_customer 读详情返回。get_closure_check(factory, *, customer_id, now=None) 在一个只读会话里读租户、钱包余额与 closure_blockers 组装视图，不加锁、不写、不写审计'
+      - 'app/services/account_status.py：把 _apply 的写入部分（状态、bump_status_version、updated_at、TENANT_ACCOUNT_STATUS_CHANGED 审计）原样抽成 _record_transition(session, tenant, previous, wanted, reason, actor, context, now)，_apply 改为 transition 判定 → 目标等于当前就返回 → _record_transition，行为不变；TRANSITIONS 表不变（DISABLED 仍只能到 ENABLED）；模块文件头「只锁租户行」处补一句关户不经这里的入口、它锁钱包 → 租户；tests/backend/test_account_status_service.py、tests/backend/test_account_status_api.py、tests/backend/test_status_version.py 不改仍全过（它们按名字替换的 record_audit、_status_event 照常生效）'
+      - '测试 tests/backend/test_account_closure_service.py 覆盖 §7 标 E4 的非并发各行：「关户正常路径」（CLOSED、status_version +1、status_changed_at = now、一行 tenant.account_status_changed outbox 的 payload 键与 change_account_status 相同且 account_status 为 CLOSED、effective_status 为 BLOCK_AI，投递行 next_attempt_at 提前到 now，一行审计带 reason 与白名单前后状态，钱包 version 不变）、「前置条件逐条」（ENABLED、PENDING_ACTIVATION、余额 0.00000001 与 -0.00000001、用量七种非终结状态各一、outbox 三种各一、支付 PENDING 与 REVIEW_REQUIRED 与 7 天内 / 恰好 7 天前 / 7 天零 1 秒前的 EXPIRED、网关事件只靠 client_reference_id 的 RECEIVED / 只靠 object_id 的 PROCESSING / 带 payment_id 的 RETRY / 只靠 payment_intent 的争议事件；各自的 409 且什么都不写；设计列出的各终结状态都不挡）、「判定顺序」、「网关事件扫描上限」（上限注入为 3、造 3 条别的租户的未结事件：计数 0、truncated 为真、关户 409、一条 WARNING）、「已关户」、「跨租户」、「事务中途失败」（审计写入时注入数据库错误：异常传出，账户仍 DISABLED，没有 outbox、版本不变）、「Redis/Celery 丢失」（不注入任何 Celery 依赖照常成功）'
+      - '并发测试 tests/backend/test_account_closure_concurrency.py（只在真 MySQL 上跑）覆盖 §7 的三行：关户 vs 计费（设计 v2 起：A 关户经注入钩子停在 closure_blockers 之后、写入之前，此时 A 的四类计数都是 0；这之后才插入一条该租户的 RECEIVED 用量事件，由 B 认领并计费，B 的 ② 读到 DISABLED 并在 ⑧ 等钱包锁（data_lock_waits 确认），放行 A 提交后 B 得到 FAILED_FINAL / ACCOUNT_CLOSED、没有账本行、余额仍 0）、关户 vs 调账（两种先后：调账先则关户锁内读到非零余额 409；关户先则调账 409 ACCOUNT_CLOSED）、关户 vs 启用（同时 DISABLED → ENABLED 与关户：恰好一个成功、另一个 409、无死锁）；确认对方在等行锁一律查 performance_schema.data_lock_waits（按 DATABASE() 与表名过滤，写法照 tests/backend/test_session_revocation_concurrency.py 的 _WAITING_ON_TABLE），不查 INNODB_TRX；造支付与网关事件的辅助函数可加进 tests/backend/payment_world.py（改它的清场时保持已有调用方的行为）。后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；Stripe 一律用注入的假传输，不联网；时间一律注入，不 sleep'
+      - '日志与数据：关户服务除扫描截断那一条 WARNING 外不写日志；reason 只进审计的 reason 列，不进日志、outbox payload 与异常消息；不读用量、支付、事件与 outbox 的金额和内容；不调用 Stripe、不发邮件、不新增 Celery 任务或 Beat 条目'
+      - '只改本任务 allowed_change_paths 里的文件；不改接口与 schema（属于 AIH-TASK-213）；不改 app/repositories/wallet.py、app/repositories/tenancy.py、app/services/usage_billing.py、app/services/payments.py、app/services/statements.py；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - app/services/account_closure.py
+      - app/services/account_status.py
+      - tests/backend/test_account_closure_service.py
+      - tests/backend/test_account_closure_concurrency.py
+      - tests/backend/payment_world.py
+      - tests/backend/conftest.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-213：关户第五层（设计闸门 #707）：独立的关户接口与只读检查接口，账户状态接口不变（设计 §9 备选 A 未采用）。
+  # 合并即上线第一条产生 CLOSED 的路径，此时 209..212 的防线、对账单规则与服务都已在生产。预计约 550 行。
+  - id: AIH-TASK-213
+    title: 关户第五层：管理端关户接口与关户检查接口
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「接口」：app/api/admin_customers.py 加 GET /api/v1/admin/customers/{customer_id}/closure-check 与 POST /api/v1/admin/customers/{customer_id}/close（显式 require_admin），schema 进 app/schemas/customers.py；账户状态接口不变；docs/api.md 新增「管理端关户」一节并改掉关于关户的旧说明。不做页面：属于 AIH-TASK-214。
+    status: ready
+    depends_on:
+      - AIH-TASK-212
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） 逐条一致，以 §2「接口」、§4 账户状态跃迁表、§5、§6「鉴权」「租户过滤」「字段」、§7 标 E5 的各行 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'GET …/closure-check：显式 require_admin，客户只来自路径，200 ApiResponse[ClosureCheckView]，字段恰好 account_status、balance（恰好 8 位小数的定点字符串，与 WalletView.balance 同一写法）、unresolved_usage_events、unresolved_ai_usage、unresolved_payments、unresolved_payment_events、payment_events_truncated、blockers；blockers 顺序同 POST 的判定顺序（账户不是 DISABLED 时首项 ACCOUNT_STATUS_TRANSITION_INVALID，余额不为 0 时 ACCOUNT_CLOSURE_BALANCE_NOT_ZERO，之后 closure_blockers.codes()），CLOSED 时为空数组；401 / 403 / 404 CUSTOMER_NOT_FOUND / 500（没有钱包：get_closure_check 抛 RuntimeError，交给通用处理器）/ 503；只读、不写审计；只调用 AIH-TASK-212 的 get_closure_check，它返回服务层的 ClosureCheck 数据类；ClosureCheckView（pydantic）定义在 app/schemas/customers.py，由 ClosureCheck 逐字段转换（balance 经 money_text、blockers 取 ClosureCheck.codes、四个计数与 payment_events_truncated 取 ClosureCheck.blockers 的字段），不改 app/services/account_closure.py'
+      - 'POST …/close：显式 require_admin；请求体 CloseAccountRequest 只有 reason（extra=forbid，复用 app/schemas/customers.py 的 _Reason：去首尾空白后 1–255）；成功与已是 CLOSED 都是 200 ApiResponse[CustomerDetail]；错误表与判定顺序照设计：422 VALIDATION_ERROR → 404 CUSTOMER_NOT_FOUND → CLOSED 直接 200 → 409 ACCOUNT_STATUS_TRANSITION_INVALID → 409 ACCOUNT_CLOSURE_BALANCE_NOT_ZERO → 409 ACCOUNT_CLOSURE_USAGE_PENDING / ACCOUNT_CLOSURE_AI_USAGE_PENDING / ACCOUNT_CLOSURE_PAYMENTS_PENDING / ACCOUNT_CLOSURE_PAYMENT_EVENTS_PENDING；没有钱包 500 INTERNAL_ERROR；只调用 close_account。POST …/account-status 不变：ChangeAccountStatusRequest 仍只收 ENABLED / DISABLED，CLOSED 作目标 422，从 CLOSED 出发 409'
+      - '测试：新增 tests/backend/test_admin_account_closure_api.py 覆盖 §7「接口」（匿名 401、客户令牌 403；closure-check 的字段白名单、blockers 顺序、CLOSED 时为空；close 的 200 与已关户 200 不写、各 409、404、422：缺 reason、空白、256 码点、多余字段 account_status；account-status 接口对 CLOSED 目标仍 422）与「余额边界」（余额 0 与 0.00000001 时 balance 为 0.00000000 与 0.00000001，后者 blockers 含 ACCOUNT_CLOSURE_BALANCE_NOT_ZERO）；tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES 补这两个接口、VALID_BODIES 补 POST close 的合法请求体，其按路由集合参数化的鉴权用例自动覆盖它们，断言意义不变；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep'
+      - 'docs/api.md：新增「管理端关户」一节（两个接口的路径、鉴权、请求体、响应字段、错误表与判定顺序、blockers 为空不保证随后的关户成功、已关户 200 不写、关户之后各写入口的 409 ACCOUNT_CLOSED 汇总）；「管理端客户管理」的接口表补这两行；把「明确不做」里关户的旧说明（约第 1155 行）与「管理端账户状态」里「现在没有任何路径会产生 … CLOSED（关户另立任务）」（约第 1272 行）改为指向新一节；同理更新账户状态接口一节里只列 ENABLED / DISABLED 的说明（约第 1033 行）与「关户另立任务」一类的旧说明（约第 1303 行），改为写明 CLOSED 只由关户接口产生并指向新一节（预审指出这两处会过时）；其余内容不改'
+      - '只改本任务 allowed_change_paths 里的文件；app/services/account_closure.py 与 app/services/account_status.py 只调用不修改；不改前端；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - app/api/admin_customers.py
+      - app/schemas/customers.py
+      - tests/backend/test_admin_account_closure_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-214：关户第六层（设计闸门 #707）：管理端前端。Kelvin 2026-11-14 定关户要填原因、前端要求输入客户名才能确认
+  # （后端不校验客户名，设计 §9 备选 G）。验收步骤沿用其他客户详情步骤的写法排在 open_customers、open_fixture 之后。预计约 850 行。
+  - id: AIH-TASK-214
+    title: 关户第六层：管理端客户详情的关户按钮与确认弹窗
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「前端」：frontend/src/api/adminCustomers.ts 加关户检查与关户的封装和错误类，新组件 CloseAccountModal 接进客户详情页（只在 DISABLED 显示按钮），文案进 i18n；验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-213
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端关户」一节为准，交互以 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「前端」为准；与后端代码冲突时停下，在 PR 里说明。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/features/customers/AccountStatusModal.tsx 与其他面板（建项目、凭据、AI 密钥、签名密钥、阈值、内部计量的按钮照旧显示，CLOSED 时由现有错误提示显示 409）'
+      - 'frontend/src/api/adminCustomers.ts：类型 ClosureCheck（字段同 closure-check 响应）；getClosureCheck(customerId, signal?) 请求 GET /api/v1/admin/customers/<customerId>/closure-check；postCloseAccount(customerId, {reason}) 请求 POST /api/v1/admin/customers/<customerId>/close，失败抛 CloseAccountError（ApiError 子类，保留 HTTP 状态，写法同 AccountStatusError）；customerId 只原样放进路径'
+      - '新组件 frontend/src/features/customers/CloseAccountModal.tsx：打开即请求 closure-check，显示余额与四类计数；closure-check 请求进行中显示加载状态、确认按钮不可点；请求失败（4xx、5xx、网络错误）显示 error.code（没有时显示 HTTP 状态）与 request_id、确认按钮不可点、给 Refresh 重新请求；只有最近一次请求成功且 blockers 为空时，确认按钮才由原因与客户名两项决定是否可点；blockers 非空时逐条显示原因说明（每个码一句英文文案）与 Refresh 按钮（重新请求），确认按钮不可点；原因去首尾空白后 1–255 码点（与 AccountStatusModal 同一计数法）；客户名输入框的值去首尾空白后与详情的 company_name 完全相同（区分大小写）时确认才可点；提交成功关闭弹窗并让客户详情与客户列表过期重读；404 / 409 / 422 显示 error.code、信息与 request_id 并重新请求 closure-check；5xx 与网络错误时按钮变 Try again、原样重发同一请求体；不自动重试'
+      - 'frontend/src/features/customers/CustomerDetailPage.tsx：仅当 account_status 为 DISABLED 时显示危险样式的 Close account 按钮并接入弹窗；其他状态（含 CLOSED）不显示；CLOSED 时账户状态区照常显示状态文本、不给任何状态按钮（accountStatusTarget 已对 CLOSED 返回 null）；其他区域不变'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts；不请求任何 /api/v1/customer/ 路径。测试（vitest + Testing Library）：adminCustomers.test.ts 补两个封装的路径、方法、请求体与 CloseAccountError；CloseAccountModal.test.tsx 覆盖设计 §7「前端」一行（弹窗读检查、有 blockers 时确认不可点、Refresh 重读；原因 0 / 1 / 255 / 256 码点；客户名不符、大小写不同、首尾空白；成功后详情与列表过期；409 显示码与 request_id 并重读检查；5xx 显示 Try again 并原样重发）；CustomerDetailPage.test.tsx 补按钮只在 DISABLED 出现（ENABLED、PENDING_ACTIVATION、CLOSED 都不出现）；已有用例照常通过；示例 uuid 全零'
+      - 'check_account_closure：排在 login、open_customers、open_fixture 之后，复用 open_fixture 打开的公司名以 [TEST] Acceptance Fixture 开头的夹具客户详情（同 check_account_status 的写法）；后端值取页面自己发出的 GET /api/v1/admin/customers/<id> 的响应体（被动观察，不自己发请求）；断言 Close account 按钮出现当且仅当 account_status 为 DISABLED；不点任何按钮、不请求 closure-check。部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS；文件头的步骤说明同步补上；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 4 的勾选在 AIH-TASK-215）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminCustomers.ts
+      - frontend/src/api/adminCustomers.test.ts
+      - frontend/src/features/customers/CloseAccountModal.tsx
+      - frontend/src/features/customers/CloseAccountModal.test.tsx
+      - frontend/src/features/customers/CustomerDetailPage.tsx
+      - frontend/src/features/customers/CustomerDetailPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_customers
+        - open_fixture
+        - check_account_closure
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-215：关户第七层（设计闸门 #707）：只改文档。runbook 的八步固定顺序（先等 AI outbox 清空再吊销凭据）与
+  # 「新的 bump_status_version 调用方必须拒绝 CLOSED」这条约束写进文档；Phase 4「关户」勾选。docs/TODO.md 后续计划里
+  # 「待登记：关户」一行在 planning-v1 块内，由登记 PR 处理，本任务不碰。
+  - id: AIH-TASK-215
+    title: 关户第七层：关户 runbook、数据库契约说明与 TODO 勾选
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「runbook」「关户时刻为什么可以取 status_changed_at」、§8、§10：docs/runbook.md 新增「关户」一节，docs/database-schema.md 把账户状态契约表的 CLOSED 列改为已实现的规则并写下 bump_status_version 的新约束，docs/payment-flow.md 争议与退款一节补关户后的限制，docs/TODO.md 勾选 Phase 4「关户」。不改代码与测试。
+    status: ready
+    depends_on:
+      - AIH-TASK-214
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） 逐条一致，以 §1「明确不做什么」、§2「runbook」「契约四」「关户时刻为什么可以取 status_changed_at」、§6「审计」、§8、§10 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'docs/runbook.md 新增「关户」一节，格式照同文件「本文件的写法」规定的五个小节：「怎么发现」写何时需要关户（客户要求终止服务、按合同终止）；「影响什么」写关户后的效果（不可重开、各写入口 409、关户当月最后一份对账单）；「立刻做什么」写下面八步；「恢复」写 CLOSED 是终态、同一家公司要重新使用就新建客户；「绝不能做什么」写下面的提醒。设计 §2「runbook」的八步固定顺序逐步写全（停用；等 AI 模块 outbox 清空，此前不要吊销集成凭据，HELD 行按「AI 模块用量 outbox」一节处理；吊销全部 AI 客户端密钥与集成凭据；等用量、支付与网关事件到终态；只用调账清零余额，正余额来自付款时先在 Stripe 后台人工退款、每笔一条 REFUND_ADJUSTMENT 且原因写支付号与 Stripe 退款号并等 charge.refunded 事件处理完；收据与对账单不需操作；在客户详情关户；关户之后的处置）；另写设计 §10 的已知限制 1、3、4（争议与退款不能再记账扣回；退款扣回不校验可退额；用量停在 MODEL_UNKNOWN / PRICING_ERROR / FX_RATE_ERROR 时必须修好后重新入队，否则关不了户）与「不要对 CLOSED 客户做调账与 E2 那些写操作」的回滚提醒（设计 §8）'
+      - 'docs/database-schema.md：tenants 一节里「本任务只产生 ENABLED / DISABLED … CLOSED 归关户任务」的说明改为已实现（只由关户接口从 DISABLED 产生，前置条件与锁顺序一句话并指向 runbook「关户」）；账户状态契约表的 CLOSED 列按 AIH-TASK-209..213 实现的规则更新（新入账在 post_transaction 锁内拒绝、调账与各管理写入口 409 ACCOUNT_CLOSED、用量 FAILED_FINAL / ACCOUNT_CLOSED、迟到到账 REVIEW_REQUIRED / TENANT_CLOSED、对账单只出到关户当月）；bump_status_version 调用方那一节：账户状态那一行补上关户路径（AIH-TASK-212 把写入部分抽成 account_status._record_transition，通用状态接口经 _apply 调它、锁租户 → 投递行；关户经 account_closure.close_account 调它、锁钱包 → 租户 → 投递行），并加一条约束：以后新增的调用方必须在租户行锁内拒绝 CLOSED，因为关户时刻取 status_changed_at、对账单资格依赖它在 CLOSED 后不再变化'
+      - 'docs/payment-flow.md 第 7 节「争议与退款」加一句：关户后的争议与退款事件只关联、不能记账扣回（post_transaction 拒绝 CLOSED），在 Stripe 与会计账上处理，见 runbook「关户」'
+      - 'docs/TODO.md Phase 4 章节只把「关户（→ CLOSED）」一项改为 [x]，并在同一行末尾照「支付收据 + 下载」一项的写法加括注（AIH-TASK-209..214，设计闸门 #707 v3）；该项下方的说明行补一句对 spec §66 的映射：DISABLED → CLOSED 同样记 TENANT_ACCOUNT_STATUS_CHANGED；§66 清单里没有关户动作（只有 TENANT_SUSPEND / TENANT_REACTIVATE），所以没有对应的 §66 动作名，与 PENDING_ACTIVATION → ENABLED 同一处理（原映射说明已随 2026-09-30 归档在 docs/archive/TODO_RECORDS_2026-09-30.md，归档文件不改）；其余勾选不动；不改 planning-v1 块（其中「待登记：关户」一行留给管理员）'
+      - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - docs/runbook.md
+      - docs/database-schema.md
+      - docs/payment-flow.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 月度对账单 PDF（设计闸门 #708 v3，批次 F 的 F1..F5）：即时从定稿快照渲染、客户与管理员下载、中文用嵌入的 Noto Sans SC 子集。
+  # 前置 P0：字体文件、许可证、package-data 与 fonttools 依赖由管理员 PR #706 提交（不走 OpenClaw），AIH-TASK-216 之前必须已合并。
+  # Kelvin 2026-11-14 定：嵌入完整的静态 Regular 字体、不预先子集化；只印 tax_notice.en；开具方名称用常量、对账单快照 v1 不改；本批不改收据。
+  # AIH-TASK-216 预计约 950 行（设计 §11），不足 1500 行，不拆。
+  - id: AIH-TASK-216
+    title: 对账单 PDF 第一层：渲染服务的快照校验、中文字体子集、分页版面与可重现
+    purpose: >-
+      按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §2「PDF：render_statement_pdf」：新模块 app/services/statement_pdf.py 的 render_statement_pdf(snapshot, *, statement_number, finalized_at) -> bytes（先严格校验快照 v1 的键集合与字段格式、Latin-1 用 Helvetica 其他走 Noto Sans SC 子集、A4 多页版面、可字节级重现），scripts/packaging_smoke.py 证明装好的那一份带着字体。不加接口：属于 AIH-TASK-217。
+    status: ready
+    depends_on:
+      - AIH-TASK-215
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） 逐条一致，以 §1「Kelvin 2026-11-14 的决定」「明确不做什么」、§2「P0」「PDF：render_statement_pdf」的校验、文本与字体、版面、金额显示、可重现五小节、§3 INV-6、INV-7、INV-10、INV-12、§9 备选 A、B、D、E、G、§10 假设 2、3、5、§7 标 F1 的各行 为准；本设计建立在 docs/design/AIH-TASK-154-monthly-statements.md（月度对账单，设计闸门 #565 已批准 v6）与 docs/design/AIH-TASK-196-payment-receipts.md（收据 PDF，#589 已批准 v2） 之上，本设计没有改写的地方沿用它们；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '前置：管理员 PR #706 已合并，app/data/NotoSansSC-Regular.ttf 与 app/data/NotoSansSC-OFL.txt 在仓库里、字体的 SHA-256 为 d45f67f0a7c0ca3f256950777ce6a61cc7ce5f9696d02900cbbaac25f8aa7d16，pyproject.toml 的 package-data 含 *.ttf、dependencies 含 fonttools；任何一项不满足就停下并在 PR 里说明，不自行取得或提交字体。新模块 app/services/statement_pdf.py 导出 render_statement_pdf(snapshot: dict[str, Any], *, statement_number: str, finalized_at: datetime) -> bytes、异常 StatementSnapshotInvalid 与 StatementFontUnavailable、常量 STATEMENT_ISSUER_NAME = "Acuven Technology Sdn Bhd" 与 STATEMENT_FONT_SHA256（等于上面的哈希）'
+      - '校验照 §2「校验」逐条，先校验再渲染，任何一条不合规只抛 StatementSnapshotInvalid、不修改输入字典：statement_number 用 fullmatch 匹配 ST-[0-9]{6}-[0-9A-HJKMNP-TV-Z]{8} 且其中 YYYYMM 等于 period 去掉连字符；finalized_at 是不带时区的 datetime；顶层键集合恰好是设计列出的 19 个（多一个、少一个都拒绝）；schema_version 是 int、不是 bool、等于 1；period 匹配 [0-9]{4}-(0[1-9]|1[0-2]) 且年份在 2026–2999；currency 等于 MYR；company_name 非空字符串；tax_notice 键集合恰好 {zh, en} 且都是非空字符串；全部金额字段匹配 -?[0-9]{1,12}\.[0-9]{8}；全部计数字段是 int、不是 bool、不小于 0；prior_period 恰好 {usage, rebill, total}，usage 每项恰好 {usage_period, request_count, amount} 且 usage_period 形状同 period、字符串比较小于 period；by_provider、by_model、by_project 每项的键集合照设计恰好相等、字符串字段非空；不复核算术'
+      - '文本与字体照 §2「文本与字体」：字符串全部 ord(c) < 256 → Helvetica；否则把既不在 Latin-1 也不在字体 cmap 里的字符换成 ?，替换后全 Latin-1 → Helvetica，否则 → Noto Sans SC（add_font 每次渲染至多调用一次），并且（设计 v2）选定 Noto Sans SC 的字符串里凡不在字体 cmap 里的字符（包括 Latin-1 里的 C0 / C1 控制字符）也一律换成 ?，不出现缺字框，但换行符 \n 例外、不替换（设计 v3：它是 multi_cell 的换行指令；\r、\t 等照替换）；校验里 usage_period 的年份范围与 period 相同（2026–2999，设计 v3）；测试加一条（设计闸门审查的建议项）：快照的 tax_notice.en 同时含弯引号 ’、换行 \n 与制表符 \t，断言 \n 处换了行、\t 印成 ?；cmap 取 fontTools.ttLib.TTFont(path, lazy=True).getBestCmap() 的键集合并用 functools.lru_cache 进程内缓存；字体路径经 importlib.resources.files("app.data").joinpath("NotoSansSC-Regular.ttf") 与 resources.as_file 取得；读字体失败（文件不在、读不出、不是 TrueType）抛 StatementFontUnavailable，全 Latin-1 的对账单不读字体文件、照常渲染'
+      - '版面与金额照 §2「版面」「金额显示」逐字：A4 纵向、边距 15、set_auto_page_break(auto=True, margin=20)、alias_nb_pages()；每页页脚 <statement_number> | Page <n> of <N>，第 2 页起页眉 Monthly statement <statement_number> (continued)；第 1 页抬头（MONTHLY STATEMENT、开具方、Statement No.、Billing period 形如 2026-12 (1 Dec 2026 - 31 Dec 2026, MYT) 且月份缩写用代码里的固定元组不用 strftime、Customer、Currency、Finalized 形如 YYYY-MM-DD HH:MM MYT）与七节的标题、标签、表头、固定说明文字逐字照设计；by_project 只印 project_name、不印 project_public_id；明细行序照快照、空列表印 No usage in this period.；Notes 第 3 条印 tax_notice.en 原文；表格用 FPDF.table()、repeat_headings=1、单元格按字体规则用 FontFace(family=…)、数值列右对齐、一行不跨页拆开；计数用 f"{n:,}"；金额为 MYR 加 Decimal.quantize(Decimal("0.01"), ROUND_HALF_UP)、零不带负号、千分位，符号原样，合计行印快照合计字段自己的舍入值、不由显示值相加，不经 float；不印任何成本、毛利、加价、汇率、税额栏与 SST 号'
+      - '可重现与隔离：set_compression(False)、set_creation_date(finalized_at.replace(tzinfo=UTC))、set_title(statement_number)，不写取自当前时间、随机数、主机名或环境变量的元数据；同进程两次、跨进程（PYTHONHASHSEED 与 SOURCE_DATE_EPOCH 不同）渲染同一输入字节相同，含中文字体子集时也一样，做不到时停下并在 PR 里说明，不得放宽为去掉某些字节再比较；FPDF.table() 的单元格不能按 FontFace 换字体或 repeat_headings 不可用时同样停下说明（§10 假设 2）；模块不 import 会话、app.models、app.core.config、sqlalchemy、app/services/statements.py 与 app/services/receipts.py。scripts/packaging_smoke.py 照 import app.services.receipt_pdf 的写法加 import app.services.statement_pdf，并照现有口令表一段的写法加字体检查：经 importlib.resources 读得到 NotoSansSC-Regular.ttf 且其 cmap 含 中（U+4E2D），否则打印原因并返回 1；其余不变'
+      - '测试：新增 tests/backend/test_statement_pdf.py 覆盖设计 §7 标 F1 的每一行：正常路径（内容流里能检索到各 (文字) 字面量、不含 /FontFile2）、键集合、版本（2、0、True、"1"、1.0）、字段格式、PDF 不含成本类字样、金额显示（0.00500000 → MYR 0.01、-0.00500000 → MYR -0.01、-0.00400000 → MYR 0.00、1234567.99500000 → MYR 1,234,568.00、0.00000000 → MYR 0.00 与合计不等于各行之和的例子）、数字格式、中文（/FontFile2、/BaseFont 含 NotoSansSC、ToUnicode 里有这几个字的码点）、字体里没有的字符（先断言 U+0BA4 不在 cmap 里）、字体缺失（monkeypatch 字体路径并清 lru_cache）、字体文件钉住（源码树字体文件的 SHA-256 等于 STATEMENT_FONT_SHA256，许可证文件含 SIL OPEN FONT LICENSE Version 1.1）、开具方与 app.services.receipts.RECEIPT_ISSUER_NAME 相等、分页（300 行 by_project 含若干 255 字符的名字：页数大于 1、每页 Page n of N、续页页眉与重复表头、每个项目名都出现）、可重现（同进程；两个 sys.executable 子进程，环境为当前环境副本加 PYTHONHASHSEED=1 / 2 与 SOURCE_DATE_EPOCH=0 / 2000000000，输出经标准输出传回）、元数据（照 tests/backend/test_receipt_pdf.py 的两种编码判断）、渲染只读输入（深拷贝比较；单独子进程只 import 本模块后检查 sys.modules）；纯单元测试，不建数据库，只用 pytest、标准库与已有依赖，不新增测试依赖；后端测试照 CLAUDE.md「写后端测试的约定」，时间一律注入，不 sleep；PR 里记一次本地实测的含中文、几百行明细的渲染耗时与内存（§10 假设 5）'
+      - '只改本任务 allowed_change_paths 里的文件；不改 pyproject.toml 与 app/data/ 下任何文件（P0 已由 PR #706 提交），不新增二进制文件；不改收据相关文件（app/services/receipt_pdf.py、app/services/receipts.py、app/api/receipt_download.py 与收据接口）；不改 app/services/statements.py、对账单模型与迁移，不改快照 schema_version；不加接口（属于 AIH-TASK-217）；Dockerfile 不改；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #708'
+    allowed_change_paths:
+      - app/services/statement_pdf.py
+      - tests/backend/test_statement_pdf.py
+      - scripts/packaging_smoke.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-217：对账单 PDF 第二层（设计闸门 #708 v3，F2），客户与管理端两个下载接口，照收据下载 app/api/receipt_download.py 的结构。
+  # 设计 §11 的可改路径漏了两个路由表精确集合的测试（客户与管理端各一处），登记时已补进 allowed_change_paths。
+  # 预计约 600 行，不拆。
+  - id: AIH-TASK-217
+    title: 对账单 PDF 第二层：客户与管理端的对账单 PDF 下载接口
+    purpose: >-
+      按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §2「下载」「客户接口」「管理端接口」「事务边界」：新模块 app/api/statement_download.py 的 statement_pdf_response（只读会话取一行 FINALIZED、会话关闭后调用 AIH-TASK-216 的 render_statement_pdf、三种失败记 ERROR 并返回 500），app/api/customer.py 与 app/api/admin_statements.py 各加一个 GET …/statements/{statement_id}/download；docs/api.md 两节补下载接口。不做页面：属于 AIH-TASK-218、219。
+    status: ready
+    depends_on:
+      - AIH-TASK-216
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） 逐条一致，以 §2「数据流」「下载：statement_pdf_response」「客户接口」「管理端接口」「事务边界」、§3 INV-6、INV-7、INV-8、INV-12、§4、§5、§6、§7 标 F2 的各行 为准；本设计建立在 docs/design/AIH-TASK-154-monthly-statements.md（月度对账单，设计闸门 #565 已批准 v6）与 docs/design/AIH-TASK-196-payment-receipts.md（收据 PDF，#589 已批准 v2） 之上，本设计没有改写的地方沿用它们；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/statement_download.py：statement_pdf_response(factory, statement_id, *, tenant_id: int | None) -> StatementPdfResponse，tenant_id 没有缺省值；is_statement_id 不成立抛现有 StatementNotFound（404 STATEMENT_NOT_FOUND）；一个普通只读会话只 SELECT public_id、statement_number、finalized_at、snapshot_json，条件 public_id 相等且 status 为 FINALIZED，tenant_id 不为 None 时再加租户条件，不加锁、不提交、不写审计，没有行抛 StatementNotFound；会话关闭之后才调用 render_statement_pdf；成功返回 200，媒体类型 application/pdf，头 Content-Disposition: attachment; filename="<statement_number>.pdf" 与 Cache-Control: no-store，文件名只来自对账单号；StatementPdfResponse（Response 子类）与 StatementRenderFailed（500、INTERNAL_ERROR、固定文案 An internal error occurred.）照 app/api/receipt_download.py 的 ReceiptPdfResponse 与 ReceiptRenderFailed 写在本模块'
+      - '渲染失败照 §2「下载」第 3 步：StatementSnapshotInvalid → ERROR Statement snapshot invalid; download refused；StatementFontUnavailable → ERROR Statement font unavailable; download refused；其他任何异常 → ERROR Statement PDF rendering failed 并另带 error_type 为异常类名；三种日志的 extra 只带 statement_id（对账单 public_id，第三种另加 error_type），不带快照内容、公司名、项目名、金额与异常原文，不用 logger.exception、不交给通用处理器；三者都 raise StatementRenderFailed from None；成功下载不记日志'
+      - 'app/api/customer.py 加 GET /api/v1/customer/statements/{statement_id}/download（response_class=StatementPdfResponse），第一条语句 require_customer（DISABLED 也放行），tenant_id 取令牌主体的 tenant_id；app/api/admin_statements.py 加 GET /api/v1/admin/statements/{statement_id}/download（response_class=StatementPdfResponse），第一条语句 require_admin，tenant_id=None，不写审计；两个模块已有的列表、详情与补生成不变。tests/backend/test_customer_api.py 的 test_the_customer_routes_are_exactly_the_expected_ones 与 tests/backend/test_admin_customers_api.py 的管理端路由集合各只补这一个接口（照 AIH-TASK-202、203 补收据下载的写法加一行注释），断言意义不变，由其参数化用例自动覆盖 401 / 403 且不写库'
+      - '测试：tests/backend/test_customer_statements_api.py 覆盖设计 §7 的「客户下载」（200、头、正文等于直接调 render_statement_pdf 的结果、连发两次字节相同）、「租户越权」（别的租户、不存在、大写 uuid、not-a-uuid、自己的 VOID 与 DRAFT 行，都是 404 STATEMENT_NOT_FOUND、响应体除 request_id 外相同）、「只读状态」（DISABLED 时 200）、「改名与新税务政策后字节不变」（改租户公司名、改项目名、发布一版新的税务政策后再下载）、「快照不合规」（500 固定文案、ERROR 日志恰好一条、statement_id 为该行 public_id、日志记录里不含公司名）、「渲染异常」（monkeypatch 抛文案含公司名的 RuntimeError：500、error_type 为 RuntimeError、日志与异常信息里不含该文案）、「字体不可用」（设计闸门审查的建议项：monkeypatch 让渲染抛 StatementFontUnavailable：500 固定文案、ERROR 日志恰好一条且文案是 Statement font unavailable; download refused，不是兜底的 Statement PDF rendering failed、没有 error_type）、「下载不改行」（前后全部列相同、没有审计行）；tests/backend/test_admin_statements_api.py 覆盖「管理端下载」（任一租户的 FINALIZED 200 且与客户下载同一份字节、VOID 404、不存在 404）'
+      - '测试写法：坏快照与 VOID、DRAFT 行一律直接 INSERT 新行，不 UPDATE 已有行（MySQL 触发器拒绝改定稿行，两种库都要能跑），清理沿用两个文件现有的 _wipe（TRUNCATE）；SQLite 与 MySQL 两个分片都跑；示例 uuid 全零；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep'
+      - 'docs/api.md 的「月度对账单（管理端）」与「月度对账单（客户）」两节各加下载接口的表格行与小节：路径、鉴权（客户 DISABLED 也可下载）、只认 FINALIZED、响应媒体类型 application/pdf、Content-Disposition 文件名 <statement_number>.pdf、Cache-Control: no-store、404 STATEMENT_NOT_FOUND（形状不对、不存在、别的租户、非 FINALIZED 不区分）、500 INTERNAL_ERROR（快照不合规、字体不可用、渲染失败）；两节其余内容不改'
+      - '只改本任务 allowed_change_paths 里的文件；app/services/statement_pdf.py 只调用不修改；不改收据相关文件（app/api/receipt_download.py、app/services/receipt_pdf.py 与收据接口）；不改 app/services/statements.py、对账单模型、schema 与迁移；不改前端；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #708'
+    allowed_change_paths:
+      - app/api/statement_download.py
+      - app/api/customer.py
+      - app/api/admin_statements.py
+      - tests/backend/test_customer_statements_api.py
+      - tests/backend/test_admin_statements_api.py
+      - tests/backend/test_customer_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-218：对账单 PDF 第三层（设计闸门 #708 v3，F3），门户详情卡片的下载按钮，只做前端，带一个只读的浏览器验收步骤。
+  # 生产首个账期 2026-12 的对账单在 2027-01-02 才生成，之前的部署验收只能走列表为空即通过的分支（设计 §10 假设 6）。
+  - id: AIH-TASK-218
+    title: 对账单 PDF 第三层：门户对账单详情的 PDF 下载按钮
+    purpose: >-
+      按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §2「门户页面」：frontend/src/api/customerStatements.ts 加 downloadCustomerStatement，门户对账单页的详情卡片加 Download PDF 按钮（下载中不可再点、失败显示错误），验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-217
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） 逐条一致，以 §2「门户页面」、§7「门户页面」「浏览器验收」两行、§10 假设 6、§11 F3 为准；接口语义以 docs/api.md 的「月度对账单（客户）」一节（AIH-TASK-217 已补下载接口）为准；设计与本契约冲突时以设计文件为准，与后端代码冲突时停下，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'frontend/src/api/customerStatements.ts：新增 downloadCustomerStatement(statementId, statementNumber, signal?)，经 frontend/src/api/download.ts 的 downloadFile 下载 ${CUSTOMER_STATEMENTS_URL}/${statementId}/download，取不到文件名时用 ${statementNumber}.pdf；statementId 只原样放进路径'
+      - 'frontend/src/features/portal/StatementsPage.tsx 的 StatementDetailCard：详情读成功后在 Card 的 extra 显示 Download PDF 按钮；下载中按钮 loading 且不可再点；失败时在详情正文上方显示一条错误：标题用文案 portal.statements.download.failed，其值带插值 {{code}}（例如 Download failed ({{code}})，code 取 error.code，没有时取 HTTP 状态），下面用现有 RequestReference 显示信息与 request_id（预审指出 RequestReference 不显示错误码，故把码插进文案），下一次点下载时清除；换一份对账单时卡片按 key 重建、错误随之消失；详情加载中或读失败时不显示按钮；列表、翻页与点行行为不变；不请求任何 /api/v1/admin/ 路径'
+      - '文案键 portal.statements.download.button（Download PDF）与 portal.statements.download.failed 进 frontend/src/i18n/locales/en.json，满足 no-hardcoded-jsx-text 与 keys.test.ts。测试（vitest + Testing Library）：customerStatements.test.ts 补下载的路径与文件名回退；StatementsPage.test.tsx 补设计 §7「门户页面」一行的场景（详情读成功后有按钮、点下载调用 downloadCustomerStatement 且路径与回退文件名正确、下载中不可再点、失败显示错误码 / 信息 / request_id 且再点一次时清除、详情加载中与读失败时没有按钮、不请求 /api/v1/admin/）；已有用例照常通过；示例 uuid 全零'
+      - 'check_portal_statement_pdf：排在 login_customer 之后（本次运行跑过 login_customer 才能跑，否则 assertion_failed）；只点门户导航里的 Statements（href 为 /portal/statements）进对账单页；后端值取页面自己发出的 GET /api/v1/customer/statements 的响应体（被动观察，不自己发请求、不拦截）；items 非空时点第一行（只触发详情的 GET /api/v1/customer/statements/<id>，脚本为它另加一个只匹配详情路径的正则，现有 CUSTOMER_STATEMENTS_API 不改），等详情卡片落定，断言卡片里有可点的 Download PDF 按钮且不点它；items 为空时显示空状态即通过；不翻页、不点 Try again 或任何别的按钮与链接、不填也不提交任何表单'
+      - '部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS（check_portal_statements 仍然不点行）；文件头的步骤说明与只读约束清单同步补上新步骤的一条；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - '不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts、frontend/src/components/MoneyText.tsx；docs/TODO.md 不改（Phase 7 的勾选在 AIH-TASK-220）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #708'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerStatements.ts
+      - frontend/src/api/customerStatements.test.ts
+      - frontend/src/features/portal/StatementsPage.tsx
+      - frontend/src/features/portal/StatementsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_statement_pdf
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-219：对账单 PDF 第四层（设计闸门 #708 v3，F4），管理端详情卡片的下载按钮，只给 FINALIZED 显示，只做前端。
+  # 与 AIH-TASK-218 同改 en.json 与验收脚本，所以串行；login 与 login_customer 不同跑，验收步骤只用 login。
+  - id: AIH-TASK-219
+    title: 对账单 PDF 第四层：管理端对账单详情的 PDF 下载按钮
+    purpose: >-
+      按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §2「管理端页面」：frontend/src/api/adminStatements.ts 加 downloadAdminStatement，管理端对账单页的详情卡片在 FINALIZED 时加 Download PDF 按钮，验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-218
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） 逐条一致，以 §2「管理端页面」、§7「管理端页面」「浏览器验收」两行、§10 假设 6、§11 F4 为准；接口语义以 docs/api.md 的「月度对账单（管理端）」一节（AIH-TASK-217 已补下载接口）为准；设计与本契约冲突时以设计文件为准，与后端代码冲突时停下，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'frontend/src/api/adminStatements.ts：新增 downloadAdminStatement(statementId, statementNumber, signal?)，经 frontend/src/api/download.ts 的 downloadFile 下载 /api/v1/admin/statements/${statementId}/download，取不到文件名时用 ${statementNumber}.pdf；statementId 只原样放进路径'
+      - 'frontend/src/features/statements/StatementsPage.tsx 的 StatementDetailCard：仅当详情的 status 为 FINALIZED 时在 Card 的 extra 显示 Download PDF 按钮（DRAFT、VOID 不显示，详情加载中或读失败时也不显示）；下载中按钮 loading 且不可再点；失败时显示一条错误：标题用文案 statements.download.failed，其值带插值 {{code}}（例如 Download failed ({{code}})，code 取 error.code，没有时取 HTTP 状态），下面用现有 RequestReference 显示信息与 request_id（预审指出 RequestReference 不显示错误码，故把码插进文案），下一次点下载或换一份对账单时清除；补生成按钮、客户与账期筛选、列表与翻页不变；不请求任何 /api/v1/customer/ 路径'
+      - '文案键 statements.download.button（Download PDF）与 statements.download.failed 进 frontend/src/i18n/locales/en.json，满足 no-hardcoded-jsx-text 与 keys.test.ts。测试（vitest + Testing Library）：adminStatements.test.ts 补下载的路径与文件名回退；StatementsPage.test.tsx 补设计 §7「管理端页面」一行的场景（FINALIZED 详情有按钮、VOID 详情没有、下载成功、下载中不可再点、失败显示错误码 / 信息 / request_id 且再点或换一份时清除、不请求 /api/v1/customer/）；已有用例照常通过；示例 uuid 全零'
+      - 'check_admin_statement_pdf：排在 login 之后（本次运行跑过 login 才能跑，否则 assertion_failed）；只点顶栏的 Statements（href 为 /statements）进对账单页；后端值取页面自己发出的 GET /api/v1/admin/statements 的响应体（被动观察，不自己发请求、不拦截）；items 非空时点第一行（只触发详情的 GET /api/v1/admin/statements/<id>），等详情卡片落定，status 为 FINALIZED 时断言卡片里有可点的 Download PDF 按钮且不点它，不是 FINALIZED 时断言没有该按钮；items 为空时显示空状态即通过；不点 Generate missing statements、不动客户下拉与账期输入框、不翻页、不点 Try again 或任何别的按钮与链接、不填也不提交任何表单'
+      - '部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤行为不变、照跑仍应 PASS（open_statements 仍然不点行，AIH-TASK-218 的 check_portal_statement_pdf 不变）；文件头的步骤说明与只读约束清单同步补上新步骤的一条；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - '不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts、frontend/src/components/MoneyText.tsx；不改门户页面与 frontend/src/api/customerStatements.ts；docs/TODO.md 不改（Phase 7 的勾选在 AIH-TASK-220）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #708'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminStatements.ts
+      - frontend/src/api/adminStatements.test.ts
+      - frontend/src/features/statements/StatementsPage.tsx
+      - frontend/src/features/statements/StatementsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - check_admin_statement_pdf
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-220：对账单 PDF 第五层（设计闸门 #708 v3，F5），只改文档：runbook 的下载失败处置与首个账期后的人工核对，TODO 勾选 Phase 7 的 PDF 下载。
+  # 规划块里删「待登记：Phase 7 对账单 PDF 下载」、加收据中文字体的后续项，由管理员在登记 PR 里做，Worker 不碰规划块。
+  - id: AIH-TASK-220
+    title: 对账单 PDF 第五层：PDF 下载的运维说明与 Phase 7 一项的勾选
+    purpose: >-
+      按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §5、§8、§10：docs/runbook.md 的「月度对账单」一节补「PDF 下载失败」处置与首个账期生成后的人工核对，docs/TODO.md 勾选 Phase 7 的「PDF 下载」。不改代码与测试。
+    status: ready
+    depends_on:
+      - AIH-TASK-219
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） 逐条一致，以 §1「明确不做什么」、§2「下载：statement_pdf_response」的失败处理、§5、§6「日志」、§8、§10 已知限制与假设 6、§11 F5 为准；本设计建立在 docs/design/AIH-TASK-154-monthly-statements.md（月度对账单，设计闸门 #565 已批准 v6）与 docs/design/AIH-TASK-196-payment-receipts.md（收据 PDF，#589 已批准 v2） 之上，本设计没有改写的地方沿用它们；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'docs/runbook.md 的「月度对账单」一节新增「PDF 下载失败」处置，三种 ERROR 日志各一条，日志文本与 app/api/statement_download.py 一致：Statement snapshot invalid; download refused（快照不合规，这一份永久下载不了：按日志的 statement_id 查 monthly_statements 行、核对快照哪一处不合规，不改、不删行，修复要另过设计闸门做作废与更正版本，客户仍可在门户看 JSON 详情）；Statement font unavailable; download refused（只影响含非 Latin-1 字符的对账单：查镜像里的 app/data/NotoSansSC-Regular.ttf 与构建期的 packaging smoke，重新部署带字体的镜像）；Statement PDF rendering failed（看 error_type，按 statement_id 在本地用同一快照复现）；三种都没有告警维度，只在 ERROR 日志'
+      - '同一节补：下载是即时从快照渲染、不存文件；已知限制照设计 §10（开具方名称是代码常量、换字体文件会改变历史 PDF 的字形，二者要改都须过设计闸门；可重现限于同一代码与依赖版本，升级 fpdf2 会改变字节而不改变内容）；加一条：首个账期 2026-12 的对账单生成之后，管理员在管理端对账单详情下载一份，核对 PDF 的字段与金额和页面一致、含中文公司名或项目名时显示正确（§10 假设 6：在那之前的部署验收只证明页面与接口可达）'
+      - 'docs/TODO.md 的 Phase 7 章节只把「PDF 下载」一项改为 [x]，并在同一行末尾照 Phase 4「支付收据 + 下载」一项的写法加括注（AIH-TASK-216..219，设计闸门 #708 v3）；其余勾选不动；不改 planning-v1 块（其中「待登记：Phase 7 对账单 PDF 下载」一行由管理员在登记 PR 里处理，本任务不碰）'
+      - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不改 scripts/acceptance/admin_customers.mjs；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #708'
+    allowed_change_paths:
+      - docs/runbook.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 毛利分析 G 批（设计闸门 #709）：管理端用量分析加按日 / 按月分组、全量合计、按 paid_at 归期的网关手续费与扣手续费后的毛利，加管理端 CSV 导出与 INV-7 守卫。
+  # Kelvin 2026-11-14 定：在现有 GET /admin/usage-analytics 上扩展、不另开报表接口；手续费按 paid_at 现金期间单独成一个数、不分摊到分组行；管理端只做 CSV（Excel 与客户端一起推迟）；成本只标 estimated（对账后成本等 Phase 8）；导出不写审计、只记一条 INFO。
+  # AIH-TASK-221：第一层只做仓储（约 450 行，代码 150、测试 300）；接口仍拒绝 day / month，到 AIH-TASK-222 才开放。
+  - id: AIH-TASK-221
+    title: 毛利分析第一层：用量分析仓储层加按马来西亚日与月分组、全量合计与已付款手续费汇总
+    purpose: >-
+      按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「仓储」「V1 口径」「时间语义」「金额与精度」：app/repositories/usage_analytics.py 加 MalaysiaMonth 表达式，list_usage_analytics 支持 day / month 分组，抽出共用的条件构造 _conditions，新增 usage_analytics_totals（与分组同列同条件的全量合计）与 paid_payment_totals（paid_at 落在区间内的 PAID 支付的笔数、充值到账额、已知手续费与未知笔数）。不改接口、schema 与前端：属于 AIH-TASK-222 起的任务。
+    status: ready
+    depends_on:
+      - AIH-TASK-220
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） 逐条一致，以 §2「仓储」「V1 口径」「时间语义」「金额与精度」、§3 INV-6、INV-10、§4「并发」、§7 标 G1 的各行、§9 备选 C、D、E 为准；本设计建立在 AIH-TASK-073 的用量分析仓储之上，没有改写的地方沿用它；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/usage_analytics.py 新增 MalaysiaMonth(FunctionElement[int])（type 为 Integer，写法照 app/repositories/usage_events.py 的 MalaysiaDay，小时数由 app/core/fx_source.py 的 KUALA_LUMPUR_OFFSET 算出、不另写字面 8）：MySQL 编译为 EXTRACT(YEAR_MONTH FROM DATE_ADD(col, INTERVAL <小时> HOUR))，文本里不出现 %；SQLite 编译为 CAST(strftime(''%Y%m'', substr(col, 1, 19), ''+<小时> hours'') AS INTEGER)；按日直接从 app.repositories.usage_events 导入 MalaysiaDay，不复制'
+      - 'list_usage_analytics 签名不变；group_by 为 day / month 时分组表达式即 group_key、group_name 为 NULL、不 join、ORDER BY 只按该表达式升序（不按事件数）；行转换时 day 的 datetime.date 转 isoformat()，month 的整数 v 转 f"{v // 100:04d}-{v % 100:02d}"，UsageAnalyticsRow.group_key 仍是 str | None；provider、model、customer、project、feature 五种分组的 SQL 一字不改；原 :53-77 的条件构造抽成内部函数 _conditions(session, …) -> list[ColumnElement[bool]] | None（None 表示 customer_id 或 project_id 查不到），三个公开函数共用，行为不变'
+      - 'usage_analytics_totals(session, *, customer_id, project_id, provider, model, feature, occurred_from, occurred_to) -> UsageAnalyticsTotals：与分组查询相同的 12 个聚合列、相同条件，不 GROUP BY、不 join，恰好一行（COALESCE(…, 0)）；_conditions 为 None 时不查库、返回全零。paid_payment_totals(session, *, customer_id, paid_from, paid_to) -> PaidPaymentTotals（paid_count、topup_amount、gateway_fee、gateway_fee_unknown_count）照设计 §2 的 SQL（v2）：status = PAID 且 confirmed_currency = MYR、paid_at 左闭右开、给了 customer_id 时按租户过滤（查不到客户时返回全零、不发聚合查询）、SUM(confirmed_amount)、只加非空 gateway_fee、CASE 数为空的笔数；按币种只取 MYR，不按计费模式过滤，只用可移植 SQL（COUNT、SUM、CASE、比较）。三个函数只读、不加锁、不提交；计数字段交出 int、金额交出 Decimal（MySQL 的 SUM 返回 DECIMAL，同现有用例对 int 的断言）'
+      - '测试（tests/backend/test_admin_usage_analytics_api.py，billed 夹具的 SQLite 与 MySQL 两半都跑）覆盖设计 §7 的「按日 / 按月归属」（UTC 2026-10-31 15:59:59.999999、16:00:00、2026-12-31 15:59:59、16:00:00 四条事件，日键与月键逐个断言、两种库相同、group_name 为 null）、「日 / 月排序与分页」（三个月事件数各不相同、page_size=2，第 2 页是第三个月、total = 3）、「月表达式的编译」（对 MySQL 与 SQLite 方言分别编译：MySQL 文本含 EXTRACT(YEAR_MONTH 且不含 %，SQLite 文本含 strftime；MySQL 那一半带绑定参数真执行不报错）、「合计与分组一致」（两个 PREPAID 客户、一个内部计量客户、一条 null 功能、一条 QUANTITY 事件、一条非 PROCESSED 事件；对五种分组各取全部页，合计的 12 个聚合字段等于各分组之和）与「合计的筛选与空集」（customer_id 或 project_id 查不到、区间内无事件 → 全零；查不到时用 before_cursor_execute 计数断言没有发出聚合查询）；跨月事件不必经 billed 世界计费，可在本文件里直接 INSERT PROCESSED 行（usage_events 只有 BEFORE UPDATE 触发器），外键与清场照 billed 世界的租户、凭据与邮箱域；现有用例不改断言照常通过'
+      - '测试（新建 tests/backend/test_usage_analytics_payments.py）覆盖设计 §7「手续费汇总」：本模块自写参数化夹具，用 tests/backend/payment_world.py 的 build_sqlite_world / build_mysql_world 建世界（不在用例模块之间转引用夹具），PAID 支付用 conftest 已注册的 paid_payment_maker 或 World.payment；payment_world 造的 PAID 的 paid_at 恒为 CREATED、gateway_fee 恒为空，本测试在自己的模块里用 UPDATE 改 paid_at 与 gateway_fee（不改 payment_world.py）；场景照 §7（v2）：本租户区间内 PAID 三笔——手续费 1.50 且 paid_at 恰为 occurred_from（计）、0.75 在区间中间、手续费为空在区间中间；本租户另一笔 PAID 手续费 9.99 且 paid_at 恰为 occurred_to（不计）；本租户区间内 confirmed_currency 为 USD 的 PAID 一笔、手续费 5.00（UPDATE 改币种即可，不计）；PENDING、REVIEW_REQUIRED、人工 CLOSED（payment_world 的 close_by_review）各一笔带手续费；另一个租户区间内 PAID 一笔、手续费 0.25；断言：不带客户 paid_count = 4、gateway_fee = 2.50、未知 1、topup_amount 等于这 4 笔 confirmed_amount 之和；带客户只算该租户（3 笔、2.25、未知 1）；查不到客户全零；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量（MySQL 专属断言放进 if engine.dialect.name == "mysql": 分支），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；测试金额都能精确表示，MySQL 分支逐位断言；时间一律注入，不 sleep'
+      - 'PR 正文写明 MySQL EXPLAIN 实际选用的索引（不预设：用量预期走 ix_usage_events_status_occurred；支付带 customer_id 时是以 tenant_id 打头的 ix_payments_reuse 或 ix_payments_tenant_created 之一，否则 ix_payments_status_created 的 status 前缀；没有 paid_at 索引，照设计 §8 v2），并写明 paid_payment_totals 用 confirmed_currency = MYR 过滤的原因：数据库对 confirmed_currency 没有 CHECK'
+      - '只改本任务 allowed_change_paths 里的文件；不改接口、schema 与前端；不改 app/repositories/usage_events.py、app/core/fx_source.py 与 tests/backend/payment_world.py；不改计费、支付、补对账与对账单的任何写路径；不加迁移、不加索引；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #709'
+    allowed_change_paths:
+      - app/repositories/usage_analytics.py
+      - tests/backend/test_admin_usage_analytics_api.py
+      - tests/backend/test_usage_analytics_payments.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-222：毛利分析第二层（设计闸门 #709 v2），约 700 行（代码 180、测试 470、文档 50）。
+  # 我定、请审查者重点看的口径（设计 §10）：带 project_id / provider / model / feature 任一筛选时手续费块与扣手续费后的毛利为 null；只带 customer_id 时按该客户的支付算；合计块顺带给出充值到账额（现金期间、不是收入）。
+  - id: AIH-TASK-222
+    title: 毛利分析第二层：用量分析接口加日与月分组、合计、现金期间手续费与毛利，并加客户侧内部成本守卫
+    purpose: >-
+      按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「接口一」「V1 口径」「事务边界」与 §6：GET /api/v1/admin/usage-analytics 的 group_by 扩到七个值，data 新增 usage_period_basis 与 totals（全量合计、payments 手续费块、gross_profit 与 gross_profit_rate），用 AIH-TASK-221 的仓储函数在同一个只读会话里查；新增 INV-7 守卫测试；docs/api.md「管理端用量分析」一节改写口径。不做导出：属于 AIH-TASK-223。
+    status: ready
+    depends_on:
+      - AIH-TASK-221
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） 逐条一致，以 §1「可观察的完成标准」1–3 与 6、§2「接口一」「V1 口径」「事务边界」「金额与精度」、§3 INV-7、INV-8、INV-10、§6、§7 标 G2 的各行 为准；本设计建立在 AIH-TASK-073 的用量分析接口之上，没有改写的地方沿用它；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/schemas/usage_analytics.py：UsageAnalyticsGroupBy 与 parse_analytics_query 的合法集合同步扩到 provider、model、customer、project、feature、day、month 七个值，跨度上限、校验顺序与错误信封不变；UsageAnalyticsView 新增 usage_period_basis（Literal["occurred_at"]）与 totals，totals 的键恰好是设计 §2 示例里的 event_count、token_event_count、input_tokens、output_tokens、cache_creation_input_tokens、cache_read_input_tokens、average_input_tokens、average_output_tokens、prepaid、internal_metered_only、payments、gross_profit、gross_profit_rate；payments 为 null 或恰好 period_basis（Literal["paid_at"]）、paid_count、topup_amount、gateway_fee、gateway_fee_unknown_count 五个键；cost_basis 仍为 estimated；AIH-TASK-073 的分组项形状不变'
+      - 'app/api/admin_usage_analytics.py：处理函数第一条语句仍是 require_admin；分组一页、分组总数、usage_analytics_totals 与（需要时的）paid_payment_totals 在同一个 require_session_factory 会话里查、不提交；分组项与 totals 的前 10 个键由同一个构造函数从仓储行算出（totals 的平均值按合计重算）；带了 project_id、provider、model、feature 中任一参数（参数出现即算，含空串）时不调 paid_payment_totals，payments、gross_profit、gross_profit_rate 都为 null；否则 payments 按 customer_id（可空）查，查不到客户时为全零对象（paid_count = 0、两个金额 "0.00000000"、未知 0）；gross_profit = prepaid.billable_cost − prepaid.estimated_provider_cost_myr − payments.gateway_fee，gross_profit_rate = gross_profit ÷ prepaid.billable_cost（分母为 0 时 null）；金额 money_text 8 位、比率与平均值 ratio_text，全程 Decimal、不经 float'
+      - '测试（tests/backend/test_admin_usage_analytics_api.py）覆盖设计 §7 的「接口新字段与兼容」（data 恰好 AIH-TASK-073 的键加 usage_period_basis 与 totals，day / month 合法）、「合计不随分页」（page=1 与 page=2 的 totals 完全相同）、「扣手续费后的毛利」（计费额 10、估算成本 6、手续费 1.50 与空各一笔 → gross_profit "2.50000000"、gross_profit_rate "0.25"、gateway_fee_unknown_count 1）、「手续费不可归属」（分别带 project_id、provider、model、feature 与 provider= 空串 → 三项为 null、用量合计照常；只带 customer_id → 只算该客户）、「分母为 0」（只有内部计量事件、区间内有手续费 → gross_profit 为负的手续费、比率 null）、「金额精度」（三条 0.00000001 计费额 → "0.00000003"；三笔手续费 0.01 → "0.03000000"；比率逐位等于 Decimal 计算值）、「校验」（group_by=week、跨度 367 天 → 422 VALIDATION_ERROR；匿名与客户令牌带非法参数时 401 / 403 先于 422）；SQLite 与 MySQL 两半照 §7；现有用例照常通过，只在需要时补新字段的断言、断言意义不变'
+      - 'MySQL 一半里写支付行时：payments.tax_policy_version_id 非空且外键 RESTRICT，billed 夹具的清场（tests/backend/test_usage_billing.py 的 clean）不删 payments 与 tax_policy_versions，删租户会被 fk_payments_tenant_id 拦下；所以本文件在 billed 拆除之前自己删掉本用例写的支付行，并照 tests/backend/payment_world.py 的 _clean 关掉外键检查后 TRUNCATE tax_policy_versions（不改 test_usage_billing.py 与 payment_world.py）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（本任务 allowed_change_paths 不含 conftest，夹具写在本任务的测试文件里），需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；时间一律注入，不 sleep'
+      - '新建 tests/backend/test_internal_cost_visibility.py（INV-7 守卫）：对 create_app(Settings(database_url="", jwt_secret_file="", payments_enabled=True)).openapi()（设计闸门审查的建议项：支付路由只在支付开关打开时注册，开关关着就扫不到客户建单的响应；若 Settings 打开支付开关还需要别的必填项，按 tests/backend 里现有打开该开关的写法补齐，并断言客户建单路径确实出现在被扫描的路径里） 里每个不以 /api/v1/admin/ 开头的路径的全部响应（$ref 递归展开组件）收集属性名，与禁用名单 estimated_provider_cost_myr、provider_source_cost、fx_rate_applied、reference_customer_price、gross_margin、gross_margin_rate、gross_profit、gross_profit_rate、gateway_fee、gateway_fee_unknown_count、cost_basis、markup 无交集；用 ast 扫 app/api/customer.py、app/api/customer_payments.py、app/api/me.py、app/api/integration_usage.py、app/api/payments.py 与 app/ai_api/ 下全部模块，没有一个导入 app.repositories.usage_analytics、app.schemas.usage_analytics、app.api.admin_usage_analytics；WALLET_EXPORT_COLUMNS、USAGE_EXPORT_COLUMNS、USAGE_SUMMARY_EXPORT_COLUMNS、CONVERSATION_EXPORT_COLUMNS 与禁用名单无交集；另有一条自检：把一个禁用名注入假 schema 时同一检查函数报出它（防空转）。只走 OpenAPI，不读 app.routes（子路由延迟挂载）'
+      - 'docs/api.md 的「管理端用量分析」一节改写：group_by 的 day / month（马来西亚日历、只返回有事件的日月、首尾桶可能不完整）、totals 各键、usage_period_basis 与 payments.period_basis 两个期间口径、手续费块为 null 的条件与 customer_id 规则、gateway_fee_unknown_count 与毛利偏高、充值到账额不是收入、V1 不计的项（账本调整、外部退款与争议、非 PAID 支付）、报表不是定稿数字、与对账单口径不同；删去「不含网关手续费，也不是 Phase 7 财务毛利」那句'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/repositories/、前端与 app/core/csv_export.py；不改计费、支付与对账单的写路径；不写审计；不加迁移；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #709'
+    allowed_change_paths:
+      - app/schemas/usage_analytics.py
+      - app/api/admin_usage_analytics.py
+      - tests/backend/test_admin_usage_analytics_api.py
+      - tests/backend/test_internal_cost_visibility.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-223：毛利分析第三层（设计闸门 #709 v2），约 550 行（代码 170、测试 340、文档 40）。
+  # 复用客户导出的进程级租约（管理端与客户端共用，同一进程同一时刻至多一个导出）；不改 app/core/csv_export.py；Kelvin 2026-11-14 定导出不写审计、只记一条 INFO。
+  - id: AIH-TASK-223
+    title: 毛利分析第三层：管理端用量分析的 CSV 导出接口
+    purpose: >-
+      按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「接口二」：在 app/api/admin_usage_analytics.py 新增 GET /api/v1/admin/usage-analytics/export，参数与接口一相同，复用校验、导出租约与 CSV 工具，输出每个分组一行 GROUP 加末尾一行 TOTAL 的 31 列 CSV；路由守卫补导出路径；docs/api.md 补导出小节。不做页面：属于 AIH-TASK-224。
+    status: ready
+    depends_on:
+      - AIH-TASK-222
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） 逐条一致，以 §1「可观察的完成标准」4、§2「接口二」「事务边界」、§3 INV-1、INV-7、INV-9、§5、§6「鉴权」「日志」「审计」「导出文件」、§7 标 G3 的各行 为准；本设计建立在 AIH-TASK-222 的接口一与 AIH-TASK-114 起的客户导出基础设施之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'GET /api/v1/admin/usage-analytics/export（同一路由器，response_class=ExportCsvResponse）：参数 group_by、occurred_from、occurred_to、customer_id、project_id、provider、model、feature，没有分页；检查顺序照 app/api/customer.py 的 customer_wallet_transactions_export：require_admin 第一条语句（401 / 403）→ parse_analytics_query(…, page=1, page_size=1, max_page=1, max_page_size=1)（422）→ require_session_factory（503，早于拿租约）→ try_acquire_export_lease 为 None 时抛 ExportBusy（503 EXPORT_BUSY、Retry-After: 5）→ request.scope[EXPORT_LEASE_SCOPE_KEY].hold(token) 后不在处理函数里释放 → 一个只读会话里 list_usage_analytics(offset=0, limit=EXPORT_MAX_ROWS + 1)、usage_analytics_totals 与手续费块（null 规则同接口一）→ 分组行数超过 EXPORT_MAX_ROWS 抛 ExportTooLarge（不给部分文件）→ 会话关闭后拼 CSV；AppError 原样抛，其他异常 logger.exception("admin_usage_analytics_export_failed", extra={"path": …}) 后在 except 块之外抛 CustomerExportFailed；不改 app/core/csv_export.py'
+      - 'app/schemas/usage_analytics.py 放列常量（恰好 31 列，按设计 §2 的顺序：row_type、group_by、group_key、group_name、8 个用量列、5 个 prepaid_ 列、3 个 internal_ 列、paid_payment_count、topup_amount、gateway_fee、gateway_fee_unknown_count、gross_profit、gross_profit_rate、cost_basis、usage_period_basis、fee_period_basis、occurred_from、occurred_to）、文本列集合（只有 group_key、group_name）与 GROUP / TOTAL 两种行的单元格函数：单元格全部取接口一 JSON 视图的值转字符串（整数 str()、金额与比率沿用接口一的字符串、null 为空），GROUP 行第 21–26 列与 fee_period_basis 为空；TOTAL 行 group_key、group_name 为空，payments 为 null 时第 21–24 列与 fee_period_basis 为空，gross_profit 为 null 时第 25–26 列为空；occurred_from / occurred_to 为解析后时刻的 UTC RFC 3339（设计 v2：微秒为 0 时写 YYYY-MM-DDTHH:MM:SSZ，否则写恰好 6 位小数 YYYY-MM-DDTHH:MM:SS.ffffffZ；在本模块用一个小函数格式化，不新增共用工具；测试覆盖整秒与带微秒两种）；GROUP 行顺序同接口一，TOTAL 行恒在末尾、恒存在、不计入 20 000 上限'
+      - '文件经 write_csv 与 csv_response 输出（Content-Disposition: attachment、Cache-Control: no-store、BOM、\r\n 不变）；文件名 usage-analytics_<group_by>_<from>_<to>.csv，from / to 为解析后的 UTC 时刻加 8 小时（由 KUALA_LUMPUR_OFFSET 算）按 %Y%m%dT%H%M%S 格式化再接字面 MYT，不拼任何客户输入；成功后恰好一条 INFO admin_usage_analytics_exported，extra 只有 user_id（require_admin 返回的管理员内部 id）、group_by、row_count（GROUP 行数）；不写审计、不落盘'
+      - '新建 tests/backend/test_admin_usage_analytics_export_api.py 覆盖设计 §7 的「导出正常路径」（group_by=customer 两个客户加手续费：200、text/csv; charset=utf-8、文件名、no-store、BOM、表头恰好 31 列按序、两行 GROUP 顺序同接口一、TOTAL 行逐列等于接口一的 totals）、「导出不可归属与空集」（带 model 时 TOTAL 行第 21–26 与 29 列为空；无事件时文件 = 表头 + TOTAL 行）、「导出上限」（monkeypatch EXPORT_MAX_ROWS 为 2：3 个分组 422 EXPORT_TOO_LARGE，恰好 2 个分组 200）、「导出租约」（预先占住租约 → 503 EXPORT_BUSY 且 Retry-After: 5；查询中途注入异常 → 500 INTERNAL_ERROR 且请求结束后 export_lease_held() 为假；数据库未配置 → 503 且没拿租约）、「公式注入」（功能标签或公司名以 = 或 - 开头时文本列加单引号前缀，负毛利的金额列不加）、「导出日志」（caplog 恰好一条、extra 只有三个键、不含公司名与金额）、「鉴权」（匿名 401、客户令牌 403）；正常路径的 SQLite 与 MySQL 两半照 §7，MySQL 夹具写在本文件里（可照 test_admin_usage_analytics_api.py 的 billed 写法，但不转引用它的夹具），写了支付行时在拆除前删支付行并 TRUNCATE tax_policy_versions（同 AIH-TASK-222 的写法）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；时间一律注入，不 sleep'
+      - 'tests/backend/test_admin_customers_api.py：EXPECTED_ADMIN_ROUTES 加 ("GET", "/api/v1/admin/usage-analytics/export")，401 / 403 探测给导出路径补与 USAGE_ANALYTICS_ROUTE 相同的查询串（group_by=provider 与同一对时刻），其余用例与断言不变'
+      - 'docs/api.md 在「管理端用量分析」一节后补导出小节：路径、鉴权、参数、31 列的列表与 GROUP / TOTAL 两种行的填法、20 000 行上限与 422 EXPORT_TOO_LARGE、503 EXPORT_BUSY 与 Retry-After、数据库未配置的 503、500 INTERNAL_ERROR、文件名格式、公式注入防护只作用于 group_key 与 group_name、共用客户导出的进程级租约、「含内部成本，不得转发给客户」'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/core/csv_export.py、app/repositories/ 与前端；不写审计；不加迁移；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #709'
+    allowed_change_paths:
+      - app/api/admin_usage_analytics.py
+      - app/schemas/usage_analytics.py
+      - tests/backend/test_admin_usage_analytics_export_api.py
+      - tests/backend/test_admin_customers_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-224：毛利分析第四层（设计闸门 #709 v2），只做前端与验收脚本，约 850 行（页面与 api 260、前端测试 330、验收脚本 220、文案 40）。
+  # 依赖 AIH-TASK-222、223 已在生产（前端与后端同一次部署）；合计块不用 Table（免得 check_usage_analytics 数成数据行）、不用 Alert（验收脚本把 role=alert 当错误）。
+  - id: AIH-TASK-224
+    title: 毛利分析第四层：管理端用量分析页加日月分组、合计与毛利块和 CSV 导出按钮
+    purpose: >-
+      按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「页面」：frontend/src/api/adminUsageAnalytics.ts 加 day / month、totals 类型与导出函数，用量分析页加 Day / Month 维度、表格上方的 Totals 合计块（新组件 UsageAnalyticsTotals）、期间口径说明与 Export CSV 按钮；验收脚本加两个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-223
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「页面」与 §7 标 G4 的各行 逐条一致；接口语义一律以 docs/api.md 的「管理端用量分析」与其后的导出小节为准；与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts'
+      - 'frontend/src/api/adminUsageAnalytics.ts：USAGE_ANALYTICS_GROUP_BYS 加 day、month；UsageAnalyticsReport 加 usage_period_basis 与 totals（payments 为对象或 null，gross_profit、gross_profit_rate 为 string | null，金额与比率都是 string）；新增 usageAnalyticsExportUrl(query)（GET /api/v1/admin/usage-analytics/export，参数规则同 getUsageAnalytics：省略与空白的可选筛选不进查询串，不带 page / page_size）与 exportUsageAnalytics(query, signal) 经 download.ts 的 downloadFile 下载，取不到文件名时用 usage-analytics.csv'
+      - 'frontend/src/features/usage/UsageAnalyticsPage.tsx：维度选择加 Day、Month（usageAnalytics.groupBy.day / month），按日 / 按月时分组单元格（现有 GroupCell，名称与键合在一格）只显示日期键 YYYY-MM-DD / YYYY-MM、不显示名称行，不新增列，其他维度的显示不变；查询成功就渲染合计块，包括 total 为 0（没有分组）时，此时显示后端返回的零值字符串，表格自身的空状态照旧；表格上方渲染新组件 frontend/src/features/usage/UsageAnalyticsTotals.tsx：<section role="region" aria-label="Totals">，带边框的 antd Descriptions（标签在 th、值在 td），不用 Table、不用 Alert；逐项原样显示后端字符串：Usage revenue、Estimated provider cost、Usage gross margin、Gateway fees、Gross profit、Gross margin、Top-ups received（标 cash, not revenue）、Paid payments、内部计量的事件数 / 估算成本 / 参考售价，null 显示短横；gateway_fee_unknown_count > 0 时显示含数量的未扣手续费提示，payments 为 null 时显示手续费不能按项目、供应商、模型或功能归属所以不显示毛利的提示，两者都是普通文字、不是 role="alert"；金额与比率不转 number'
+      - '说明文字替换现有 usageAnalytics.estimateNote（删去不含网关手续费的旧句）：收入、成本与用量毛利按调用时间（occurred_at，所选区间）；手续费与充值按付款确认时间（paid_at，同一区间）；成本为估算值；毛利 = 用量毛利 − 手续费；对账单按记账期间、数字可能不同；首尾日 / 月可能不完整；不用 Alert'
+      - 'Export CSV 按钮：用当前已应用的条件（与表格同一组，不是表单里未提交的草稿）调用 exportUsageAnalytics；下载中不可再点；失败在按钮下方显示错误码、信息与 request_id（EXPORT_TOO_LARGE / EXPORT_BUSY 沿用 download.ts 的常量），下一次点导出或已应用条件变化时清除；导出不影响表格与合计的查询；文案进 frontend/src/i18n/locales/en.json，满足 no-hardcoded-jsx-text 与 keys.test.ts；不请求任何 /api/v1/customer/ 路径'
+      - '测试（vitest + Testing Library）：adminUsageAnalytics.test.ts 补设计 §7「前端 api」（getUsageAnalytics 发 group_by=month；usageAnalyticsExportUrl 省略空筛选、不带分页；exportUsageAnalytics 经 downloadFile、回退文件名）；新建 UsageAnalyticsTotals.test.tsx 覆盖「前端合计块」（payments 有值且未知 0、未知 2、payments 为 null、gross_profit_rate 为 null；没有 role="alert"；合计块不是数据表格：设计说的「不用 Table」指不用 antd Table 组件，Descriptions 内部渲染的 table 元素允许，断言合计块里没有 thead、没有带 data-row-key 的行，这样验收脚本按表头与 data-row-key 识别的数据表格不会把它算进去）与「前端不经 number」（"0.10000001"、"0.333333333333333333333333333" 原样显示）；UsageAnalyticsPage.test.tsx 的已有用例按下面两条调整、其余不动（登记前预审指出）：一，合计块的标签（Gross margin、Reference customer price 等）在 Descriptions 的 th 里，会与表格列头同名，已有的 getByRole("columnheader", { name }) 断言改为只在数据表格里查找：带边框的 Descriptions 自己也渲染成 table 元素，所以不能用 screen.getByRole("table")，要取带 thead 的那一个（例如 screen.getAllByRole("table").find((t) => t.querySelector("thead") !== null)，再 within 它），断言的列头集合不变；二，说明文字一条用例改为断言新文案的要点（成本为估算；收入、成本与用量毛利按 occurred_at，手续费与充值按 paid_at；毛利 = 用量毛利 − 手续费），不再断言旧的「不含网关手续费」那句，仍断言没有 role="alert"；另外 UsageAnalyticsPage.test.tsx 覆盖「前端维度与导出」（选 Day / Month 后的请求参数；改了表单不提交时导出仍用已应用条件；下载中不可点；失败显示码、信息与 request_id，再点时清除），现有 mock 报告补 totals 与 usage_period_basis，说明文字用例按新文案改、断言意义不变；已有用例照常通过；示例 uuid 全零'
+      - 'scripts/acceptance/admin_customers.mjs 加两步（文件名不变，文件头步骤说明同步）：check_analytics_totals 须先跑过 open_usage_analytics（否则 assertion_failed），不自己导航；后端值取页面自己发出的 GET /api/v1/admin/usage-analytics 的响应体（被动观察，不自己发请求、不拦截；取点顶栏之后成功读完的最近一次）；Totals 合计块里 Usage revenue、Gross profit、Gateway fees 三项的 td 文字分别等于 totals.prepaid.billable_cost、totals.gross_profit、totals.payments.gateway_fee（null 时为短横）；不改筛选、不翻页。check_analytics_export：同一页上文字为 Export CSV 的按钮恰好一个且可用，不点。已有步骤行为不变、照跑仍应 PASS（现有 USAGE_ANALYTICS_API 正则只认接口一路径）；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 7 的勾选在 AIH-TASK-225）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #709'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminUsageAnalytics.ts
+      - frontend/src/api/adminUsageAnalytics.test.ts
+      - frontend/src/features/usage/UsageAnalyticsPage.tsx
+      - frontend/src/features/usage/UsageAnalyticsPage.test.tsx
+      - frontend/src/features/usage/UsageAnalyticsTotals.tsx
+      - frontend/src/features/usage/UsageAnalyticsTotals.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_usage_analytics
+        - check_analytics_totals
+        - check_analytics_export
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-225：毛利分析第五层（设计闸门 #709 v2），只改文档，约 60 行。
+  # Phase 7 只勾「筛选」；「收入 / 估算成本 / 对账后成本 / 网关手续费 / 毛利 / 毛利率」等 Phase 8 对账后成本、「CSV / Excel 导出」等 Excel，保持 [ ]。
+  - id: AIH-TASK-225
+    title: 毛利分析第五层：支付流程文档补毛利报表口径与手续费未知的处置，勾选 Phase 7 对应项
+    purpose: >-
+      按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「V1 口径」、§5 手续费永久未知一行与 §10 已知限制 1、5：docs/payment-flow.md §5.4 之后补一小节写毛利报表里手续费的归期与未知手续费的处置；docs/TODO.md Phase 7 勾选「筛选」并在另两项正文写明已交付与剩下的部分。不改代码与测试。
+    status: ready
+    depends_on:
+      - AIH-TASK-224
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） 逐条一致，以 §1「明确不做什么」、§2「V1 口径」、§5 手续费永久未知一行、§10 已知限制 1、5 与 §11 G5 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'docs/payment-flow.md 在 §5.4「手续费补抓的期限」之后新增一小节：毛利报表（管理端用量分析的 totals 与 CSV 的 TOTAL 行）里手续费按 paid_at 归期、只计 PAID、不分摊到分组行；gateway_fee 为空的支付计入 gateway_fee_unknown_count、毛利没有扣它们；建单 8 天后仍为空（或费用币种非 MYR）时的处置：到 Stripe 后台核对实际手续费，V1 不录入，按未知笔数估算毛利偏高的量级（写法：未知笔数 × 同一区间已知手续费的平均每笔金额，即 gateway_fee ÷（paid_count − gateway_fee_unknown_count）；已知笔数为 0 时只写笔数、不估金额；写明这只是量级估计，以 Stripe 后台的实际手续费为准）；paid_at 是系统确认时刻，人工按实付入账的支付按结案日归期；该文件其余内容不改'
+      - 'docs/TODO.md 的 Phase 7 章节：「筛选」改为 [x]，同一行照该章节已勾项的写法加括注（AIH-TASK-222 交付的 Day / Month 与原有的客户、项目、供应商、模型、功能维度，设计闸门 #709 v2）；「收入 / 估算成本 / 对账后成本 / 网关手续费 / 毛利 / 毛利率」与「CSV / Excel 导出」保持 [ ]，在各自行末写明已交付的部分（估算口径的收入、成本、手续费与毛利；管理端 CSV，AIH-TASK-221..224）与剩下的（对账后成本等 Phase 8；Excel 与客户端 Excel 一起做）；其余勾选不动；不改 planning-v1 块'
+      - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #709'
+    allowed_change_paths:
+      - docs/payment-flow.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
