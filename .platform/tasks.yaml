@@ -12170,34 +12170,87 @@ tasks:
 
   # AIH-TASK-210：关户第二层（设计闸门 #707）。AIH-TASK-020 契约要求关户后拒绝建项目、建与轮换凭据；Kelvin 2026-11-14 另加
   # AI 客户端密钥签发、webhook 签名密钥签发与启用、内部计量开通、低余额阈值设置，吊销类照常。预计约 450 行；可改路径 12 条已到上限。
+  # 2026-11-15 run 6f933ebf 以 pr_checks_failed 失败：policy 不许 app/ai_api/ 与计费路径（internal_billing.py）同一个 PR 改，
+  # 登记时漏查。Kelvin 2026-11-15 定把签发 AI 客户端密钥（admin.py）拆到 AIH-TASK-227，本任务剩七个入口，可改路径 10 条。
   - id: AIH-TASK-210
     title: 关户第二层：关户后拒绝建项目、建与轮换凭据、签发密钥、内部计量和阈值设置
     purpose: >-
-      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「契约二」：建项目、设置或清除低余额阈值、建与轮换集成凭据、签发 AI 客户端密钥、签发与启用 webhook 签名密钥、开通内部计量这八个入口在锁住租户行之后对 CLOSED 返回 409 ACCOUNT_CLOSED（app/services/ 下复用 project_integration.AccountClosed；app/ai_api/admin.py 受 AI 模块边界约束，在本文件另定义同码同消息的 AccountClosed），不写库；吊销、退役、查看、编辑照常。docs/api.md 对应各节补错误码。
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「契约二」：建项目、设置或清除低余额阈值、建与轮换集成凭据、签发与启用 webhook 签名密钥、开通内部计量这七个入口在锁住租户行之后对 CLOSED 返回 409 ACCOUNT_CLOSED（复用 project_integration.AccountClosed），不写库；吊销、退役、查看、编辑照常。docs/api.md 对应各节补错误码。设计把签发 AI 客户端密钥（app/ai_api/admin.py）也归在本任务，因仓库规则不许 app/ai_api/ 与计费路径 app/services/internal_billing.py 在同一个 PR 里改，拆到 AIH-TASK-227；本任务不改 app/ai_api/ 下任何文件。
     status: ready
     depends_on:
       - AIH-TASK-209
     acceptance_criteria:
-      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） 逐条一致，以 §2「契约二」「事务边界」、§4「并发」、§5 E2 入口一行、§6「密钥」、§7 标 E2 的各行 为准；本设计建立在 docs/design/AIH-TASK-020-tenant-account-status.md（设计闸门 #136 已批准 v2）§2 末尾「对以后功能的契约」之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
-      - '各入口的改法：app/services/customers.py 的 create_project 把 _require_tenant 改为 for_update=True，CLOSED 判定在 tenancy.create_project 之前；set_low_balance_threshold（已 for_update=True）的 CLOSED 判定在读 before 之前，与现值相同（含两边都是 null）也 409；app/services/integration_access.py 的 create_credential 与 rotate_credential、app/ai_api/admin.py 的 issue_client_key、app/services/webhook_signing.py 的 issue_secret 与 activate_secret 加一次租户行共享锁读（SELECT … FOR SHARE 加 populate_existing，写法同 app/services/project_integration.py 的 _lock_tenant_shared），CLOSED 判定在共享锁之后、生成 api_key / secret 之前、锁项目行（_locked_project）与锁版本行（_locked_versions）之前；activate_secret 对已是 ACTIVE 的幂等返回也先 409；app/services/internal_billing.py 的 enable_internal_metering（已锁钱包 → 租户）的 CLOSED 判定在锁租户之后、「已是 INTERNAL_METERED_ONLY 直接返回」之前。八处都 raise AccountClosed，什么都不写（含审计）：webhook_signing.py 与 internal_billing.py 在模块顶层从 app/services/project_integration.py 导入；customers.py 与 integration_access.py 被 project_integration 在顶层导入，只能在函数内导入（写法同 app/services/auth.py 在函数内导入 two_factor）；app/ai_api/admin.py 不导入它（tests/backend/test_ai_module_boundary.py 的 ADMIN_ALLOWLIST 不含 app.services.project_integration，设计闸门 #281 v23 §2），在本文件另定义 AccountClosed(AppError)，消息、code、http_status 与 project_integration.AccountClosed 逐字相同（The customer account is closed.、ACCOUNT_CLOSED、409），写法同它已有的 CustomerNotFound / ProjectNotFound；不改边界测试与白名单'
-      - '判定顺序：主密钥未配置 503（load_keyring 在事务外，照旧最先）→ 客户与项目不存在 404 → CLOSED 409 → 其他业务 409（例如 WEBHOOK_SECRET_PENDING_EXISTS、AI 密钥数量上限、INTERNAL_METERING_NOT_ELIGIBLE）；因为 CLOSED 判定在锁版本行之前，CLOSED 租户上不存在的 api_key 或 key_version 报 409 而不是 404。锁顺序只能是「租户（S 或 X）→ 项目 / 投递行 / 凭据 / 密钥行」或「钱包 → 租户」，不新增先锁项目、凭据、密钥行再锁租户的路径'
-      - '照常允许、不改的写入口：integration_access 的 revoke_version 与 revoke_key、ai_api/admin 的 revoke_client_key、webhook_signing 的 retire_secret、customers 的 update_customer；project_integration 与 portal_accounts 已有的规则不改'
-      - '测试（服务层）：tests/backend/test_customer_service.py（建项目）、tests/backend/test_low_balance_threshold_api.py（阈值设置与清除，含与现值相同）、tests/backend/test_integration_access_service.py（建凭据、轮换；吊销版本与整个 key 照常）、tests/backend/test_ai_admin_service.py（签发；吊销照常）、tests/backend/test_webhook_signing_service.py（签发、启用，含已 ACTIVE 的幂等启用；退役照常）、tests/backend/test_status_version.py（开通内部计量，含已是内部计量）：对 CLOSED 租户全部 409 ACCOUNT_CLOSED 且不写任何行（含审计）；对 DISABLED 租户同样操作照常成功；CLOSED 租户配不存在的客户或项目先报 404；主密钥未配置时建凭据、轮换、签发签名密钥先报 503；编辑客户资料对 CLOSED 照常成功。造 CLOSED 租户用直接改库'
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） 逐条一致，以 §2「契约二」「事务边界」、§4「并发」、§5 E2 入口一行、§6「密钥」、§7 标 E2 的各行 为准；本设计建立在 docs/design/AIH-TASK-020-tenant-account-status.md（设计闸门 #136 已批准 v2）§2 末尾「对以后功能的契约」之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计。唯一的有意偏离：设计 §2「契约二」表与 §11「实现拆分」把「签发 AI 客户端密钥」（app/ai_api/admin.py）归在本任务，它拆到 AIH-TASK-227 交付（只改任务划分，契约不变），本任务不做'
+      - '各入口的改法：app/services/customers.py 的 create_project 把 _require_tenant 改为 for_update=True，CLOSED 判定在 tenancy.create_project 之前；set_low_balance_threshold（已 for_update=True）的 CLOSED 判定在读 before 之前，与现值相同（含两边都是 null）也 409；app/services/integration_access.py 的 create_credential 与 rotate_credential、app/services/webhook_signing.py 的 issue_secret 与 activate_secret 加一次租户行共享锁读（SELECT … FOR SHARE 加 populate_existing，写法同 app/services/project_integration.py 的 _lock_tenant_shared），CLOSED 判定在共享锁之后、生成 api_key / secret 之前、锁项目行（_locked_project）与锁版本行（_locked_versions）之前；activate_secret 对已是 ACTIVE 的幂等返回也先 409；app/services/internal_billing.py 的 enable_internal_metering（已锁钱包 → 租户）的 CLOSED 判定在锁租户之后、「已是 INTERNAL_METERED_ONLY 直接返回」之前。七处都 raise AccountClosed，什么都不写（含审计）：webhook_signing.py 与 internal_billing.py 在模块顶层从 app/services/project_integration.py 导入；customers.py 与 integration_access.py 被 project_integration 在顶层导入，只能在函数内导入（写法同 app/services/auth.py 在函数内导入 two_factor）'
+      - '判定顺序：主密钥未配置 503（load_keyring 在事务外，照旧最先）→ 客户与项目不存在 404 → CLOSED 409 → 其他业务 409（例如 WEBHOOK_SECRET_PENDING_EXISTS、INTERNAL_METERING_NOT_ELIGIBLE）；因为 CLOSED 判定在锁版本行之前，CLOSED 租户上不存在的 api_key 或 key_version 报 409 而不是 404。锁顺序只能是「租户（S 或 X）→ 项目 / 投递行 / 凭据 / 密钥行」或「钱包 → 租户」，不新增先锁项目、凭据、密钥行再锁租户的路径'
+      - '照常允许、不改的写入口：integration_access 的 revoke_version 与 revoke_key、webhook_signing 的 retire_secret、customers 的 update_customer；project_integration 与 portal_accounts 已有的规则不改'
+      - '测试（服务层）：tests/backend/test_customer_service.py（建项目）、tests/backend/test_low_balance_threshold_api.py（阈值设置与清除，含与现值相同）、tests/backend/test_integration_access_service.py（建凭据、轮换；吊销版本与整个 key 照常）、tests/backend/test_webhook_signing_service.py（签发、启用，含已 ACTIVE 的幂等启用；退役照常）、tests/backend/test_status_version.py（开通内部计量，含已是内部计量）：对 CLOSED 租户全部 409 ACCOUNT_CLOSED 且不写任何行（含审计）；对 DISABLED 租户同样操作照常成功；CLOSED 租户配不存在的客户或项目先报 404；主密钥未配置时建凭据、轮换、签发签名密钥先报 503；编辑客户资料对 CLOSED 照常成功。造 CLOSED 租户用直接改库'
       - '入口与关户并发（§7「入口与关户并发」，只在真 MySQL 上跑，写在 tests/backend/test_customer_service.py）：连接 A 持租户行 FOR UPDATE 并把它改为 CLOSED，连接 B 同时调用 create_project；经 performance_schema.data_lock_waits（按 DATABASE() 与表名 tenants 过滤，写法照 tests/backend/test_session_revocation_concurrency.py 的 _WAITING_ON_TABLE，不查 INNODB_TRX）确认 B 在等租户行后 A 提交；B 得到 409 ACCOUNT_CLOSED、没有项目行、投递行与审计。后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep'
-      - 'docs/api.md 对应各节的错误表（与「管理端客户管理」等概览表的错误码列）加 409 ACCOUNT_CLOSED：建项目、低余额阈值 PUT、建凭据、轮换凭据、签发 AI 客户端密钥、签发与启用 webhook 签名密钥、开通内部计量；写明在锁住租户行之后判定、与现值相同也 409、已 ACTIVE 的启用也 409；吊销类不受影响'
+      - 'docs/api.md 对应各节的错误表（与「管理端客户管理」等概览表的错误码列）加 409 ACCOUNT_CLOSED：建项目、低余额阈值 PUT、建凭据、轮换凭据、签发与启用 webhook 签名密钥、开通内部计量（签发 AI 客户端密钥一节由 AIH-TASK-227 补）；写明在锁住租户行之后判定、与现值相同也 409、已 ACTIVE 的启用也 409；吊销类不受影响'
       - '只改本任务 allowed_change_paths 里的文件；不改 app/repositories/wallet.py、app/services/project_integration.py（AccountClosed 只导入复用）与 app/services/portal_accounts.py；不改接口层与 schema；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口（测试一律用假传输）；不发真实邮件；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
     allowed_change_paths:
       - app/services/customers.py
       - app/services/integration_access.py
-      - app/ai_api/admin.py
       - app/services/webhook_signing.py
       - app/services/internal_billing.py
       - tests/backend/test_customer_service.py
       - tests/backend/test_low_balance_threshold_api.py
       - tests/backend/test_integration_access_service.py
-      - tests/backend/test_ai_admin_service.py
       - tests/backend/test_webhook_signing_service.py
       - tests/backend/test_status_version.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-227：关户补充层（设计闸门 #707）。从 AIH-TASK-210 拆出：仓库规则（scripts/check_repo_policy.py）不许
+  # app/ai_api/ 与计费路径（210 要改 internal_billing.py）在同一个 PR 里改，Kelvin 2026-11-15 定拆开。
+  # 由人工会话按编号任务流程交付（不经 Worker，复用 210 run 6f933ebf 写好的 admin.py 改动）。预计约 150 行。
+  - id: AIH-TASK-227
+    title: 关户补充层：关户后拒绝签发 AI 客户端密钥
+    purpose: >-
+      按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「契约二」表中「签发 AI 客户端密钥」一行：app/ai_api/admin.py 的 issue_client_key 在锁住租户行之后对 CLOSED 返回 409 ACCOUNT_CLOSED（admin.py 受 AI 模块边界约束，在本文件另定义同码同消息的 AccountClosed），不写库；吊销与查看照常。docs/api.md 对应一节补错误码。设计把这一行归在 AIH-TASK-210，因仓库规则不许 app/ai_api/ 与计费路径在同一个 PR 里改，拆为本任务；契约本身不变。
+    status: ready
+    depends_on:
+      - AIH-TASK-210
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） 逐条一致，以 §1「现有行为与证据」中 admin.py 一条、§2「契约二」首段与表中「签发 AI 客户端密钥」一行、「事务边界」、§4「并发」、§5 与 §6「密钥」中 AIH-TASK-210 的部分、§7 标 AIH-TASK-210 各行中涉及 AI 客户端密钥的部分为准；设计里这些归在 AIH-TASK-210，由本任务交付，只改任务划分、契约不变；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '改法：app/ai_api/admin.py 的 issue_client_key 经 _locked_project 先对租户行做一次共享锁读（SELECT … FOR SHARE 加 populate_existing，写法同 app/services/project_integration.py 的 _lock_tenant_shared，但写在 admin.py 里、不导入它），CLOSED 判定在共享锁之后、锁项目行之前、生成 api_key 与 secret 之前，raise AccountClosed，什么都不写（含审计）。AccountClosed(AppError) 在 admin.py 本文件定义，消息、code、http_status 与 project_integration.AccountClosed 逐字相同（The customer account is closed.、ACCOUNT_CLOSED、409），写法同它已有的 CustomerNotFound / ProjectNotFound；admin.py 不导入 app.services.project_integration（tests/backend/test_ai_module_boundary.py 的 ADMIN_ALLOWLIST 不含它，设计闸门 #281 v23 §2）；不改边界测试与白名单'
+      - '判定顺序：客户不存在 404 → 项目不存在 404 → CLOSED 409 → 其他业务 409（例如 AI 密钥数量上限）。锁顺序只能是「租户（S）→ 项目 → 密钥行」，不新增先锁项目或密钥行再锁租户的路径'
+      - '照常允许、不改：revoke_client_key 与 list_client_keys 不看账户状态，对 CLOSED 租户照常；app/ai_api/ 下其他文件不改'
+      - '测试（服务层，tests/backend/test_ai_admin_service.py）：对 CLOSED 租户签发 409 ACCOUNT_CLOSED 且不写任何行（含审计）；对 DISABLED 租户签发照常成功；CLOSED 租户配不存在的客户或项目先报 404；吊销 AI 客户端密钥对 CLOSED 照常成功；AccountClosed 的消息、code、http_status 与 project_integration.AccountClosed 一致（测试文件可以同时导入两者比较）。造 CLOSED 租户用直接改库。后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep'
+      - 'docs/api.md 签发 AI 客户端密钥一节的错误表（与所在概览表的错误码列）加 409 ACCOUNT_CLOSED，写明在锁住租户行之后判定；吊销不受影响'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/services/ 与 app/repositories/ 下任何文件；不改接口层与 schema；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #707'
+    allowed_change_paths:
+      - app/ai_api/admin.py
+      - tests/backend/test_ai_admin_service.py
       - docs/api.md
     allowed_commands:
       - docs.check
