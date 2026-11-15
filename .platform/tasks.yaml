@@ -12009,7 +12009,7 @@ tasks:
     title: 集成摄取错误表里 401 一行的客户端建议改为固定 60 秒重试、不进死信
     purpose: >-
       docs/api.md 集成摄取的错误表把 401 INTEGRATION_AUTH_FAILED 的客户端建议写成「停止重试、进死信、人工重投」，而已交付的 Billing Client（integration-client/，设计闸门 #571）对 401 保持待发、每 60 秒按当前配置重签重发、报 P1、不进死信，integration-client/README.md 第 7 节因此写了「与 docs/api.md 错误表的建议不同，以本客户端为准」。本任务把 api.md 的建议改成与客户端一致，并去掉 README 里那句分歧说明。只改文档；服务端的 retryable 值不变。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-206
     acceptance_criteria:
