@@ -4674,6 +4674,8 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 
 集成端点的**每一个**错误响应都在信封顶层多带一个布尔 `retryable`（包括框架自己的 404 / 405 / 422 与意外的 500）。
 **集成方只看 `retryable` 决定是否重试，不按 HTTP 状态码推断**：同一个 409 里既有该重试的、也有不该重试的。
+唯一的例外是 401 `INTEGRATION_AUTH_FAILED`：`retryable` 仍为 `false`，表示同一份签名请求原样重发不会成功，但重新签名后可能成功，
+客户端按下表固定每 60 秒重签重发、不进死信。
 这是对[信封](#信封spec-107)的只增扩展，只用在 `/api/v1/integration/` 下，别的接口不变。
 
 ```json
@@ -4688,7 +4690,7 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 
 | HTTP | `error.code` | 什么时候 | `retryable` | 客户端该做什么 |
 | --- | --- | --- | --- | --- |
-| 401 | `INTEGRATION_AUTH_FAILED` | 请求头缺失或格式不对、凭据不存在 / 已吊销 / 已过期、签名错、时间戳出窗、Request-Id 重放 —— **一律同一个码**，原因只进服务端日志 | `false` | 停止重试该事件，进死信（保留）并告警；修好凭据、时钟或 Request-Id 生成后人工重投 |
+| 401 | `INTEGRATION_AUTH_FAILED` | 请求头缺失或格式不对、凭据不存在 / 已吊销 / 已过期、签名错、时间戳出窗、Request-Id 重放 —— **一律同一个码**，原因只进服务端日志 | `false` | 不进死信，保持待发，固定每 60 秒按当前配置重新签名重发并告警（P1）；修好凭据、主机时钟或 Request-Id 生成后积压自动送达，不需要人工重投（同 [Billing Client 第 7 节「401 的固定 60 秒重试」](../integration-client/README.md#7-健康检查与告警)） |
 | 403 | `CREDENTIAL_SCOPE_MISMATCH` | 载荷里的 `tenant_id` / `project_id` 不是凭据所属的（服务端另写一条审计） | `false` | 死信并告警 |
 | 409 | `IDEMPOTENCY_CONFLICT` | 同一 `event_id`、归属或指纹不同。原事件不变；响应不透露原事件的任何信息 | `false` | 死信并告警 |
 | 409 | `UNKNOWN_USAGE_TYPE` | `usage_type` 不在目录里 | `true` | 保留事件，退避重试；管理员建好类型后自然成功 |
