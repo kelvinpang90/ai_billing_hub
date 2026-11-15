@@ -28,7 +28,7 @@ from app.core.errors import AppError
 from app.models.auth import AuditAction, User
 from app.models.base import quantize_money
 from app.models.integration import ProjectStatusDelivery
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import AccountStatus, Project, Tenant
 from app.repositories import tenancy
 from app.repositories.wallet import WALLET_MISSING, create_wallet, get_wallet_for_tenant
 from app.schemas.customers import (
@@ -78,6 +78,19 @@ def _require_tenant(session: Session, customer_id: str, *, for_update: bool = Fa
     if tenant is None:
         raise CustomerNotFound
     return tenant
+
+
+def _refuse_closed(tenant: Tenant) -> None:
+    """409 `ACCOUNT_CLOSED` for a CLOSED tenant (design gate #707 v4 §2「契约二」).
+
+    ⚠️ 调用方已锁住租户行：与关户事务（租户 X 锁）串行，读到的是最新提交的状态。
+    在函数里 import 是因为 `app.services.project_integration` 在顶层 import 了本模块，
+    顶层互相 import 会转不动。
+    """
+    from app.services.project_integration import AccountClosed
+
+    if tenant.account_status is AccountStatus.CLOSED:
+        raise AccountClosed
 
 
 def create_customer(
@@ -215,11 +228,15 @@ def set_low_balance_threshold(
 
     不改余额、不写账本与 outbox、不动 `status_version`（阈值不在状态快照里）；也不补发
     `tenant.low_balance`：那个事件只由记账跨越触发。
+
+    已关户（`CLOSED`）：锁内、读 before 之前 409 `ACCOUNT_CLOSED`，与现值相同（含两边都是
+    `null`）也一样，什么都不写（设计闸门 #707 v4 §2「契约二」）。
     """
     moment = now or _now()
     value = quantize_money(threshold) if threshold is not None else None
     with session_scope(session_factory) as session:
         tenant = _require_tenant(session, customer_id, for_update=True)
+        _refuse_closed(tenant)
         before = low_balance_threshold_view(tenant.low_balance_threshold)
         changed = tenancy.set_low_balance_threshold(session, tenant, threshold=value, now=moment)
         after = low_balance_threshold_view(tenant.low_balance_threshold)
@@ -273,11 +290,15 @@ def create_project(
 ) -> ProjectView:
     """Project, its delivery row and `PROJECT_CREATE` audit in one commit.
 
-    Unknown customer: 404, no writes.
+    Unknown customer: 404, no writes. CLOSED customer: 409 `ACCOUNT_CLOSED`, no writes.
+
+    ⚠️ 先锁租户行（`FOR UPDATE`）再判 `CLOSED`、再插项目：与关户事务串行（设计闸门
+    #707 v4 §2「契约二」）。加锁顺序租户 → 项目 / 投递行。
     """
     moment = now or _now()
     with session_scope(session_factory) as session:
-        tenant = _require_tenant(session, customer_id)
+        tenant = _require_tenant(session, customer_id, for_update=True)
+        _refuse_closed(tenant)
         project = tenancy.create_project(
             session,
             tenant_id=tenant.id,

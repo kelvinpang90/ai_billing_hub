@@ -41,20 +41,26 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
 from app.core.config import Settings
-from app.core.crypto import DecryptionFailed, decrypt_secret, load_keyring
+from app.core.crypto import (
+    DecryptionFailed,
+    EncryptionNotConfigured,
+    decrypt_secret,
+    load_keyring,
+)
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import AccountStatus, Project, Tenant
 from app.repositories import tenancy
 from app.repositories import webhook_signing as webhook_repository
 from app.schemas.webhook_signing import IssuedWebhookSecretView
 from app.services import webhook_signing
 from app.services.auth import RequestContext
-from app.services.customers import add_status_delivery
+from app.services.customers import CustomerNotFound, add_status_delivery
 from app.services.integration_access import ProjectNotFound
 from app.services.integration_auth import canonical_request, sign
+from app.services.project_integration import AccountClosed
 from app.services.webhook_signing import (
     SigningMaterial,
     WebhookSecretConflict,
@@ -985,6 +991,127 @@ def test_a_failed_activation_leaves_the_delivery_alone(factory, settings, monkey
 
     assert delivery(scene) == before
     assert statuses(factory, scene.project_id) == [(1, "PENDING")]
+
+
+# --- 关户后（AIH-TASK-210，设计闸门 #707 v4 §2「契约二」） ------------------------
+
+
+def force_status(factory, customer_id: str, value: AccountStatus) -> None:
+    """造数据：直接改库（关户接口归 AIH-TASK-213；写法同 test_account_status_api.py）。"""
+    with factory() as session:
+        session.execute(
+            update(Tenant).where(Tenant.public_id == customer_id).values(account_status=value)
+        )
+        session.commit()
+
+
+def every_audit(factory) -> int:
+    with factory() as session:
+        return session.execute(select(func.count()).select_from(AuditLog)).scalar_one()
+
+
+def test_issue_and_activate_for_a_closed_customer_are_409_and_write_nothing(
+    factory, settings, monkeypatch
+) -> None:
+    """§7「管理写入口」：CLOSED 客户签发、启用 PENDING、启用已 ACTIVE（幂等路径）、启用不存在的
+    版本都 409 ACCOUNT_CLOSED；签发即使已有 PENDING 也是 409 而不是 PENDING_EXISTS。
+    不生成 secret；密钥行、投递行与审计（任何动作）都不变。"""
+    scene = Scene(factory, settings)
+    add_delivery(scene)
+    scene.issue()
+    scene.activate(1)
+    scene.issue()
+    force_status(factory, scene.customer_id, AccountStatus.CLOSED)
+    before, delivery_before = snapshot(factory), delivery(scene)
+    audits_before = every_audit(factory)
+    generated = recorded_secrets(monkeypatch)
+
+    attempts = [
+        scene.issue,
+        lambda: scene.activate(2, now=LATER),
+        lambda: scene.activate(1, now=LATER),
+        lambda: scene.activate(9, now=LATER),
+    ]
+    for attempt in attempts:
+        with pytest.raises(AccountClosed) as raised:
+            attempt()
+        error = raised.value
+        assert (error.code, error.http_status, error.message) == (
+            "ACCOUNT_CLOSED",
+            409,
+            "The customer account is closed.",
+        )
+
+    assert generated == []
+    assert snapshot(factory) == before
+    assert delivery(scene) == delivery_before
+    assert every_audit(factory) == audits_before
+
+
+def test_issue_and_activate_for_a_disabled_customer_still_work(factory, settings) -> None:
+    """§7「管理写入口」：DISABLED 不是 CLOSED，签发、启用与已 ACTIVE 的重复启用照常。"""
+    scene = Scene(factory, settings)
+    force_status(factory, scene.customer_id, AccountStatus.DISABLED)
+
+    scene.issue()
+    scene.activate(1)
+    again = scene.activate(1)
+
+    assert [(view.key_version, view.status) for view in again] == [(1, "ACTIVE")]
+    assert len(audits(factory, AuditAction.WEBHOOK_SECRET_ISSUE)) == 1
+    assert len(audits(factory, AuditAction.WEBHOOK_SECRET_ACTIVATE)) == 1
+
+
+def test_retiring_for_a_closed_customer_still_works(factory, settings) -> None:
+    """§2「契约二」不改的写入口：退役 PENDING 与 ACTIVE 对 CLOSED 照常。"""
+    scene = Scene(factory, settings)
+    scene.issue()
+    scene.activate(1)
+    scene.issue()
+    force_status(factory, scene.customer_id, AccountStatus.CLOSED)
+
+    scene.retire(2)
+    scene.retire(1)
+
+    assert statuses(factory, scene.project_id) == [(1, "RETIRED"), (2, "RETIRED")]
+    assert len(audits(factory, AuditAction.WEBHOOK_SECRET_RETIRE)) == 2
+
+
+def test_a_closed_customer_with_an_unknown_customer_or_project_is_404_first(
+    sqlite_factory, settings
+) -> None:
+    """§7「入口判定顺序」：客户与项目不存在的 404 先于 CLOSED 的 409。"""
+    scene = Scene(sqlite_factory, settings)
+    scene.issue()
+    force_status(sqlite_factory, scene.customer_id, AccountStatus.CLOSED)
+    before = snapshot(sqlite_factory)
+
+    scene.project_id = ZERO_PROJECT_ID
+    with pytest.raises(ProjectNotFound):
+        scene.issue()
+    with pytest.raises(ProjectNotFound):
+        scene.activate(1)
+    scene.customer_id = str(uuid.uuid4())
+    with pytest.raises(CustomerNotFound):
+        scene.issue()
+    with pytest.raises(CustomerNotFound):
+        scene.activate(1)
+
+    assert snapshot(sqlite_factory) == before
+
+
+def test_a_missing_master_key_is_503_before_the_closed_check(sqlite_factory, settings) -> None:
+    """§7「入口判定顺序」：签发的主密钥检查在事务外最先，503 先于 CLOSED 的 409。"""
+    scene = Scene(sqlite_factory, settings)
+    force_status(sqlite_factory, scene.customer_id, AccountStatus.CLOSED)
+    before = snapshot(sqlite_factory)
+    scene.settings = Settings(master_key_file="")
+
+    with pytest.raises(EncryptionNotConfigured) as raised:
+        scene.issue()
+
+    assert raised.value.http_status == 503
+    assert snapshot(sqlite_factory) == before
 
 
 # --- 签名库 ---------------------------------------------------------------------

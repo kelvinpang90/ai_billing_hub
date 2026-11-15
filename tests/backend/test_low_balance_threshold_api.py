@@ -54,7 +54,7 @@ from app.core.tokens import issue_access_token
 from app.main import create_app
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.tenancy import Tenant
+from app.models.tenancy import AccountStatus, Tenant
 from app.models.wallet import Wallet, WalletTransaction
 from app.repositories.wallet import EVENT_LOW_BALANCE
 from app.services import customers as customers_service
@@ -454,6 +454,76 @@ def test_an_unknown_customer_is_404_on_both_methods_and_writes_nothing(both: Con
     assert error_of(read) == (404, "CUSTOMER_NOT_FOUND")
     assert error_of(written) == (404, "CUSTOMER_NOT_FOUND")
     assert both.count(AuditLog) == audits_before
+
+
+# --- 关户后（AIH-TASK-210，设计闸门 #707 v4 §2「契约二」） ------------------------------------
+
+
+def force_status(console: Console, customer_id: str, value: AccountStatus) -> None:
+    """造数据：直接改库（关户接口归 AIH-TASK-213；写法同 test_account_status_api.py）。"""
+    with console.factory() as session:
+        session.execute(
+            update(Tenant).where(Tenant.public_id == customer_id).values(account_status=value)
+        )
+        session.commit()
+
+
+@pytest.mark.parametrize(
+    ("current", "wanted"),
+    [(None, "50"), ("50", None), ("50", "70"), ("50", "50"), (None, None)],
+    ids=["set", "clear", "change", "same-value", "both-null"],
+)
+def test_a_closed_customer_is_409_and_nothing_is_written(
+    both: Console, current: str | None, wanted: str | None
+) -> None:
+    """§7「管理写入口」：CLOSED 客户设置或清除阈值都 409 ACCOUNT_CLOSED，与现值相同（含两边都是
+    null）也一样；阈值、updated_at、审计（任何动作）都不变。"""
+    customer_id = both.customer()
+    if current is not None:
+        both.set(customer_id, current)
+    force_status(both, customer_id, AccountStatus.CLOSED)
+    both.backdate(customer_id)
+    stored_before = both.tenant(customer_id).low_balance_threshold
+    audits_before = both.count(AuditLog)
+
+    response = both.put(customer_id, {FIELD: wanted})
+
+    assert error_of(response) == (409, "ACCOUNT_CLOSED")
+    assert response.json()["error"]["message"] == "The customer account is closed."
+    tenant = both.tenant(customer_id)
+    assert tenant.low_balance_threshold == stored_before
+    assert tenant.updated_at == T0
+    assert both.count(AuditLog) == audits_before
+
+
+def test_a_disabled_customer_sets_and_clears_the_threshold(both: Console) -> None:
+    """§7「管理写入口」：DISABLED 不是 CLOSED，设置与清除照常，各一条审计。"""
+    customer_id = both.customer()
+    force_status(both, customer_id, AccountStatus.DISABLED)
+
+    assert both.set(customer_id, "50") == "50.00000000"
+    assert both.set(customer_id, None) is None
+
+    assert both.states(customer_id) == [(None, "50.00000000"), ("50.00000000", None)]
+
+
+def test_an_unknown_customer_is_404_beside_a_closed_one(both: Console) -> None:
+    """§7「入口判定顺序」：404 先于 409。"""
+    customer_id = both.customer()
+    force_status(both, customer_id, AccountStatus.CLOSED)
+    audits_before = both.count(AuditLog)
+
+    assert error_of(both.put(PLACEHOLDER_ID, {FIELD: "50"})) == (404, "CUSTOMER_NOT_FOUND")
+    assert both.count(AuditLog) == audits_before
+
+
+def test_reading_a_closed_customers_threshold_still_works(both: Console) -> None:
+    """查看照常：GET 对 CLOSED 客户 200。"""
+    customer_id = both.customer()
+    both.set(customer_id, "50")
+    force_status(both, customer_id, AccountStatus.CLOSED)
+
+    assert both.threshold(customer_id) == "50.00000000"
 
 
 # --- 余额不动、不补发、重新武装 ---------------------------------------------------------------

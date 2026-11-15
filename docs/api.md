@@ -990,7 +990,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | `PATCH /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 422 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/account-status` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/internal-metering` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 503 |
-| `POST /api/v1/admin/customers/{customer_id}/projects` | 201，项目 | 401 / 403 / 404 / 422 / 503 |
+| `POST /api/v1/admin/customers/{customer_id}/projects` | 201，项目 | 401 / 403 / 404 / 409 / 422 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}/projects` | 200，项目分页 | 401 / 403 / 404 / 422 / 503 |
 
 `{customer_id}` 是客户的 `id`（`public_id`）。本任务专有的错误码：
@@ -998,6 +998,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | HTTP | `error.code` | 什么时候 |
 | --- | --- | --- |
 | 404 | `CUSTOMER_NOT_FOUND` | 路径里的客户不存在 |
+| 409 | `ACCOUNT_CLOSED` | 客户已关户（`CLOSED`）时建项目、初始化内部计量（AIH-TASK-210，设计闸门 #707）。在锁住客户行之后判定，什么都不写（含审计）。编辑客户、查看照常 |
 
 ### 客户对象
 
@@ -1098,6 +1099,9 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 不会根据邮箱或公司名自动判定。只有尚无集成凭据、用量事件及钱包流水且余额为零的租户可启用；
 否则 409 `INTERNAL_METERING_NOT_ELIGIBLE`。成功后返回客户详情，模式为
 `INTERNAL_METERED_ONLY`，`status_version` 加一并写审计。重复调用幂等；本接口不支持切回预付。
+客户已关户（`CLOSED`）：409 `ACCOUNT_CLOSED`，什么都不写（AIH-TASK-210，设计闸门 #707）。在锁住钱包与
+客户行之后判定，先于 `INTERNAL_METERING_NOT_ELIGIBLE`，也先于「已是内部计量」的幂等返回：已是
+`INTERNAL_METERED_ONLY` 的已关户客户同样 409。判定顺序：404 → 409 `ACCOUNT_CLOSED` → 其他 409。
 该模式的参考售价不计入收入、应收或钱包，详见
 [内部计量模式设计](design/INTERNAL-METERED-ONLY-2026-10-08.md)。
 
@@ -1141,6 +1145,9 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 - 其他字段一律 422。项目归属只来自路径里的客户，请求体里的 `tenant_id` / `customer_id` 之类被拒。
 - 客户不存在：404 `CUSTOMER_NOT_FOUND`，什么都不写。
+- 客户已关户（`CLOSED`）：409 `ACCOUNT_CLOSED`，项目、投递行与审计都不写（AIH-TASK-210，设计闸门 #707）。
+  客户行在事务内加锁（`FOR UPDATE`）之后判定：与关户串行，关户先提交时这里等锁后读到 `CLOSED` 而拒绝。
+  判定顺序：422（请求校验）→ 404 → 409。
 
 成功：**201**，`data` 是项目。项目与一条 `PROJECT_CREATE` 审计同一事务提交；审计的
 `after_state` 是 `public_id`、`name` 与所属客户的 `tenant_public_id`。同样不幂等。
@@ -1165,11 +1172,15 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | 方法与路径 | 成功 | 错误 |
 | --- | --- | --- |
 | `GET /api/v1/admin/customers/{customer_id}/low-balance-threshold` | 200，阈值对象 | 401 / 403 / 404 / 503 |
-| `PUT /api/v1/admin/customers/{customer_id}/low-balance-threshold` | 200，阈值对象 | 401 / 403 / 404 / 422 / 500 / 503 |
+| `PUT /api/v1/admin/customers/{customer_id}/low-balance-threshold` | 200，阈值对象 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
 
 两个接口都只有 ADMIN 能调；客户只来自路径里的 `{customer_id}`（`public_id`）。客户不存在：404
-`CUSTOMER_NOT_FOUND`，什么都不写。客户的账户状态（含 `DISABLED`）与计费模式（含 `INTERNAL_METERED_ONLY`）
-都不拦。客户自己只读，门户没有修改入口。
+`CUSTOMER_NOT_FOUND`，什么都不写。计费模式（含 `INTERNAL_METERED_ONLY`）与账户状态 `DISABLED` 都不拦；
+客户已关户（`CLOSED`）时 PUT 是 409 `ACCOUNT_CLOSED`（见下），GET 照常。客户自己只读，门户没有修改入口。
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 409 | `ACCOUNT_CLOSED` | 客户已关户时 PUT（设置或清除，含与现值相同）。AIH-TASK-210，设计闸门 #707 |
 
 ### 阈值对象
 
@@ -1200,6 +1211,8 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 - 不收 0：余额 ≤ 0 已经是 `SUSPENDED`；不想提醒用 `null`。
 - 其他字段一律 422：请求体不能带 `tenant_id`、`customer_id` 之类。
 - 不要求 `reason`：前后值都进审计。
+- 客户已关户（`CLOSED`）：409 `ACCOUNT_CLOSED`，不写库、不写审计。在锁住客户行之后、与现值比较之前判定，
+  所以**与现值相同（含两边都是 `null`）也是 409**，不是下面的「同值不写」200。判定顺序：422 → 404 → 409。
 
 成功：**200**，`data` 是改后的阈值对象。客户行在事务内加锁（只锁客户行，不锁钱包），与现值比较：
 
@@ -1613,7 +1626,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 | 方法与路径 | 请求体 | 成功 | 错误 |
 | --- | --- | --- | --- |
-| `POST /api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials` | `{}` | 201，签发的凭据版本 | 401 / 403 / 404 / 422 / 500 / 503 |
+| `POST /api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials` | `{}` | 201，签发的凭据版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials` | — | 200，凭据版本分页 | 401 / 403 / 404 / 422 / 503 |
 | `POST …/credentials/{api_key}/rotate` | `{"current_key_version": int}` | 201，签发的凭据版本 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
 | `POST …/credentials/{api_key}/versions/{key_version}/revoke` | `{"reason": str}` | 200，该版本 | 401 / 403 / 404 / 422 / 500 / 503 |
@@ -1635,8 +1648,13 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | 404 | `CREDENTIAL_NOT_FOUND` | `api_key` / `key_version` 不存在，或属于别的项目（一模一样） | 否 |
 | 409 | `CREDENTIAL_VERSION_CONFLICT` | 轮换时 `current_key_version` 不是当前最大版本 | 否 |
 | 409 | `CREDENTIAL_REVOKED` | 轮换一个所有版本都已吊销的 `api_key` | 否 |
+| 409 | `ACCOUNT_CLOSED` | 客户已关户（`CLOSED`）时建凭据或轮换（AIH-TASK-210，设计闸门 #707）。对客户行加共享锁之后、生成 `secret` 与锁版本行之前判定，`secret` 不会生成。吊销版本与吊销整个 key 不受影响 | 否 |
 | 503 | `ENCRYPTION_NOT_CONFIGURED` | 主密钥未配置（只影响建凭据与轮换；列表与吊销照常） | 否 |
 | 500 | `INTERNAL_ERROR` | 意外错误；整个事务回滚，这次生成的 `secret` 随之作废、从未返回 | 否 |
+
+建凭据与轮换的判定顺序：503 `ENCRYPTION_NOT_CONFIGURED`（事务外最先）→ 404 `CUSTOMER_NOT_FOUND` /
+`PROJECT_NOT_FOUND` → 409 `ACCOUNT_CLOSED` → 其他 404 / 409。因为关户判定在锁版本行之前，已关户客户上轮换一个
+不存在的 `api_key` 得到 409 `ACCOUNT_CLOSED`，而不是 404 `CREDENTIAL_NOT_FOUND`。
 
 ### 格式
 
@@ -1816,8 +1834,13 @@ SHA256(RAW_REQUEST_BODY)
 | 409 | `WEBHOOK_SECRET_PENDING_EXISTS` | 签发时已有一个 `PENDING` 版本（先启用或退役它） | 否 |
 | 409 | `WEBHOOK_SECRET_NOT_PENDING` | 启用一个 `RETIRED` 版本 | 否 |
 | 409 | `WEBHOOK_SECRET_CONFLICT` | 数据库唯一约束兜底触发（并发下理论上被行锁挡住） | 否 |
+| 409 | `ACCOUNT_CLOSED` | 客户已关户（`CLOSED`）时签发或启用（AIH-TASK-210，设计闸门 #707）。对客户行加共享锁之后、锁项目行之前判定，`secret` 不会生成；**已是 `ACTIVE` 的启用（平时的幂等 200）也是 409**。退役不受影响 | 否 |
 | 503 | `ENCRYPTION_NOT_CONFIGURED` | 主密钥未配置（只影响签发；列表、启用、退役照常） | 否 |
 | 500 | `INTERNAL_ERROR` | 意外错误；整个事务回滚，这次生成的 `secret` 随之作废、从未返回 | 否 |
+
+签发与启用的判定顺序：503 `ENCRYPTION_NOT_CONFIGURED`（只有签发，事务外最先）→ 404 `CUSTOMER_NOT_FOUND` /
+`PROJECT_NOT_FOUND` → 409 `ACCOUNT_CLOSED` → 其他 404 / 409（`WEBHOOK_SECRET_PENDING_EXISTS` 等）。因为关户判定在锁
+项目行与读版本之前，已关户客户上启用一个不存在的 `key_version` 得到 409 `ACCOUNT_CLOSED`，而不是 404。
 
 ### 格式
 
@@ -1860,6 +1883,7 @@ SHA256(RAW_REQUEST_BODY)
 是 `key_version` 与 `status`）。
 
 - 已有 `PENDING`：409 `WEBHOOK_SECRET_PENDING_EXISTS`，什么都不写。
+- 客户已关户（`CLOSED`）：409 `ACCOUNT_CLOSED`，什么都不写，`secret` 不生成；先于 `WEBHOOK_SECRET_PENDING_EXISTS`。
 - 不幂等。若提交成功而响应丢了，新版本已是 `PENDING` 但拿不到 `secret`：退役它再签发一次，`secret` 不能事后找回。
 
 ### `GET …/webhook-secrets` —— 版本列表
@@ -1874,8 +1898,9 @@ SHA256(RAW_REQUEST_BODY)
 - `PENDING` → `ACTIVE`，`activated_at` 为现在；原来的 `ACTIVE`（若有）**同一事务**变成 `RETIRED`，`retired_at`
   为现在。平台从此用新版本签名，不会出现两把 `ACTIVE` 或一把都没有的中间态。写一条 `WEBHOOK_SECRET_ACTIVATE`
   审计（前后状态是新旧两个版本的 `key_version` 与 `status`）。
-- 已是 `ACTIVE`：200 与当前各版本，什么都不写（幂等）。
+- 已是 `ACTIVE`：200 与当前各版本，什么都不写（幂等）。客户已关户时例外：409 `ACCOUNT_CLOSED`。
 - `RETIRED`：409 `WEBHOOK_SECRET_NOT_PENDING`。
+- 客户已关户（`CLOSED`）：409 `ACCOUNT_CLOSED`，什么都不写，先于以上各条。
 
 **正常轮换**（ADR-0004 §4a）：签发新版本 → 把 `secret` 交给集成方，集成方配置成「新旧两个版本都接受」→ 启用
 新版本（平台原子切换）→ 集成方确认新签名能通过后自己停止接受旧版本。旧版本在启用那一步已是 `RETIRED`，

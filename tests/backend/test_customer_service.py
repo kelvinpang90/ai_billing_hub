@@ -11,13 +11,15 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import threading
+import time
 import uuid
 from collections.abc import Iterator
 from decimal import Decimal
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, func, select, text
+from sqlalchemy import Engine, create_engine, delete, event, func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -26,13 +28,14 @@ from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.integration import ProjectStatusDelivery
-from app.models.tenancy import BillingStatus, IntegrationStatus, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingStatus, IntegrationStatus, Project, Tenant
 from app.models.wallet import Wallet
 from app.repositories import tenancy
 from app.repositories.wallet import get_wallet_for_tenant, verify_wallet
 from app.services import customers
 from app.services.auth import RequestContext, record_audit
 from app.services.customers import CustomerNotFound
+from app.services.project_integration import AccountClosed
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
 TEST_EMAIL_DOMAIN = "@customer-service-test.example.com"
@@ -499,6 +502,197 @@ def test_a_project_for_an_unknown_customer_is_not_found_and_writes_nothing(facto
 
     assert (raised.value.code, raised.value.http_status) == ("CUSTOMER_NOT_FOUND", 404)
     assert counts(factory) == before
+
+
+# --- 关户后建项目（AIH-TASK-210，设计闸门 #707 v4 §2「契约二」） ------------------
+
+
+def force_status(factory, customer_id: str, value: AccountStatus) -> None:
+    """造数据：直接改库（关户接口归 AIH-TASK-213；写法同 test_account_status_api.py）。"""
+    with factory() as session:
+        session.execute(
+            update(Tenant).where(Tenant.public_id == customer_id).values(account_status=value)
+        )
+        session.commit()
+
+
+def every_audit(factory) -> int:
+    """All audit rows, whatever the action: a refused write leaves none at all."""
+    with factory() as session:
+        return session.execute(select(func.count()).select_from(AuditLog)).scalar_one()
+
+
+def test_a_project_for_a_closed_customer_is_409_and_writes_nothing(factory) -> None:
+    """§7「管理写入口」：CLOSED 客户建项目 409 ACCOUNT_CLOSED；项目、投递行、审计都不写。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    force_status(factory, customer.id, AccountStatus.CLOSED)
+    before, audits_before = counts(factory), every_audit(factory)
+
+    with pytest.raises(AccountClosed) as raised:
+        add_project(factory, admin, customer.id)
+
+    error = raised.value
+    assert (error.code, error.http_status, error.message) == (
+        "ACCOUNT_CLOSED",
+        409,
+        "The customer account is closed.",
+    )
+    assert counts(factory) == before
+    assert every_audit(factory) == audits_before
+    assert deliveries(factory) == []
+
+
+def test_a_project_for_a_disabled_customer_is_created(factory) -> None:
+    """§7「管理写入口」：DISABLED 不是 CLOSED，建项目照常。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    force_status(factory, customer.id, AccountStatus.DISABLED)
+
+    project = add_project(factory, admin, customer.id)
+
+    assert counts(factory)["projects"] == 1
+    assert [row.entity_id for row in audits(factory, AuditAction.PROJECT_CREATE)] == [project.id]
+
+
+def test_an_unknown_customer_is_404_even_beside_a_closed_one(factory) -> None:
+    """§7「入口判定顺序」：404 先于 409；不存在的客户不会因为库里有 CLOSED 客户而变成 409。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin)
+    force_status(factory, customer.id, AccountStatus.CLOSED)
+    before = counts(factory)
+
+    with pytest.raises(CustomerNotFound):
+        add_project(factory, admin, str(uuid.uuid4()))
+
+    assert counts(factory) == before
+
+
+def test_editing_a_closed_customer_still_works(factory) -> None:
+    """§2「契约二」不改的写入口：编辑客户资料对 CLOSED 照常，写一条 CUSTOMER_UPDATE。"""
+    admin = make_admin(factory)
+    customer = create(factory, admin, company_name="Old Name")
+    force_status(factory, customer.id, AccountStatus.CLOSED)
+
+    detail = edit(factory, admin, customer.id, company_name="New Name")
+
+    assert detail.company_name == "New Name"
+    assert len(audits(factory, AuditAction.CUSTOMER_UPDATE)) == 1
+
+
+# 入口与关户并发（只在真 MySQL 上；SQLite 忽略 `FOR UPDATE`）。
+# 「B 确实在等租户行锁」查 performance_schema.data_lock_waits，写法照
+# test_session_revocation_concurrency.py 的 `_WAITING_ON_TABLE`；不查 INNODB_TRX（缓存不准）。
+_WAITING_ON_TABLE = text(
+    "SELECT COUNT(*) FROM performance_schema.data_lock_waits AS w"
+    " JOIN performance_schema.threads AS t ON t.THREAD_ID = w.REQUESTING_THREAD_ID"
+    " JOIN performance_schema.data_locks AS l"
+    " ON l.ENGINE = w.ENGINE AND l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
+    " WHERE t.PROCESSLIST_ID = :connection_id"
+    " AND l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = :table_name"
+)
+_LOCK_REPORT = text(
+    "SELECT THREAD_ID, OBJECT_SCHEMA, OBJECT_NAME, INDEX_NAME, LOCK_TYPE, LOCK_MODE,"
+    " LOCK_STATUS, LOCK_DATA FROM performance_schema.data_locks"
+)
+# 「对方在等行锁」的轮询：间隔 50 毫秒、最多 10 秒。
+LOCK_POLL_INTERVAL_SECONDS = 0.05
+LOCK_POLL_LIMIT_SECONDS = 10.0
+# B 的连接把 innodb_lock_wait_timeout 调到这个值：真卡住时以 1205 收场，不等默认的 50 秒。
+LOCK_WAIT_TIMEOUT_SECONDS = 20
+JOIN_TIMEOUT_SECONDS = 40.0
+
+
+def test_create_project_waits_for_closure_and_is_refused(mysql_factory) -> None:
+    """§7「入口与关户并发」（MySQL）。
+
+    连接 A 锁住租户行（`FOR UPDATE`，模拟关户事务）并改为 CLOSED、暂不提交；连接 B 建项目。
+    经 data_lock_waits 确认 B 在等租户行后 A 提交：B 得到 409 ACCOUNT_CLOSED，没有项目行、
+    投递行与 PROJECT_CREATE 审计。
+    """
+    admin = make_admin(mysql_factory)
+    customer = create(mysql_factory, admin)
+    before, audits_before = counts(mysql_factory), every_audit(mysql_factory)
+
+    # B 用自己的引擎、恰好一条连接：它的 CONNECTION_ID() 就是要观察的那一个。
+    connection_ids: list[int] = []
+    engine_b = create_engine(TEST_DATABASE_URL, pool_size=1, max_overflow=0)
+
+    def prepare(dbapi_connection, _record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("SELECT CONNECTION_ID()")
+            connection_ids.append(int(cursor.fetchone()[0]))
+            cursor.execute(f"SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_TIMEOUT_SECONDS}")
+        finally:
+            cursor.close()
+        dbapi_connection.rollback()
+
+    event.listen(engine_b, "connect", prepare)
+    factory_b = create_session_factory(engine_b)
+    observer = create_engine(TEST_DATABASE_URL, isolation_level="AUTOCOMMIT", pool_size=1)
+    outcome: dict[str, BaseException | object] = {}
+    finished = threading.Event()
+
+    def run_b() -> None:
+        try:
+            outcome["result"] = add_project(factory_b, admin, customer.id)
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=run_b, name="create project", daemon=True)
+    try:
+        with mysql_factory() as closer:
+            tenant = closer.execute(
+                select(Tenant).where(Tenant.public_id == customer.id).with_for_update()
+            ).scalar_one()
+            tenant.account_status = AccountStatus.CLOSED
+            closer.flush()
+
+            thread.start()
+            _wait_until_waiting_for_tenants(observer, connection_ids, finished)
+            closer.commit()
+
+        thread.join(JOIN_TIMEOUT_SECONDS)
+        assert not thread.is_alive(), "create project did not finish"
+    finally:
+        thread.join(5)
+        engine_b.dispose()
+        observer.dispose()
+
+    error = outcome.get("error")
+    assert isinstance(error, AccountClosed), outcome
+    assert (error.code, error.http_status) == ("ACCOUNT_CLOSED", 409)
+    assert counts(mysql_factory) == before
+    assert every_audit(mysql_factory) == audits_before
+    assert deliveries(mysql_factory) == []
+    assert audits(mysql_factory, AuditAction.PROJECT_CREATE) == []
+
+
+def _wait_until_waiting_for_tenants(
+    observer: Engine, connection_ids: list[int], finished: threading.Event
+) -> None:
+    """Poll until B's connection waits for a row lock on `tenants`; fail if B ends first."""
+    deadline = time.monotonic() + LOCK_POLL_LIMIT_SECONDS
+    with observer.connect() as connection:
+        while time.monotonic() < deadline:
+            if connection_ids:
+                waiting = connection.execute(
+                    _WAITING_ON_TABLE,
+                    {"connection_id": connection_ids[-1], "table_name": "tenants"},
+                ).scalar_one()
+                if waiting:
+                    return
+            # B 结束了就不可能还在等锁：立即失败，不等到超时。
+            if finished.wait(LOCK_POLL_INTERVAL_SECONDS):
+                pytest.fail("create project finished before it was seen waiting for the tenant")
+        report = [tuple(row) for row in connection.execute(_LOCK_REPORT).all()]
+    pytest.fail(
+        f"create project (connections {connection_ids}) was not seen waiting for a tenants"
+        f" row lock within {LOCK_POLL_LIMIT_SECONDS}s\ndata_locks: {report}"
+    )
 
 
 # --- 编辑客户（AIH-TASK-009） ---------------------------------------------------
