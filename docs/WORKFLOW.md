@@ -109,7 +109,8 @@
    - 模板里的 `设计闸门：#N` 一行是**机器可读**的：`codex-review.ps1` 靠它把设计文档
      与批准记录一并取进审查材料。不走闸门的改动写「不适用」；触及钱包 / 账本 / 定价 /
      汇率 / 支付 / 幂等 / 状态机却写「不适用」的，审查时会被判为阻断项
-5. **审查准入**：CI 五项（`docs` / `scripts` / `policy` / `backend` / `secret-scan`）全绿，且 PR 正文过
+5. **审查准入**：CI 五项（`docs` / `scripts` / `policy` / `backend` / `secret-scan`）全绿、其余检查也都通过
+   （只改登记 / 收尾类文档的 PR 里，`backend-tests`、`backend-build`、`frontend` 被跳过不算未通过，见 §7），且 PR 正文过
    `scripts/check_repo_policy.py`（模板小节齐全、`设计闸门：` 一行、`TODO 影响` 声明）。
    `codex-review.ps1` 会先查这两样，**不满足就不调 Codex**——配额不花在注定被打回的材料上
 6. 跑 `scripts\codex-review.ps1 -Pr <N> -Post`
@@ -264,6 +265,8 @@ BILLING_TEST_REDIS_URL="redis://127.0.0.1:16379/0" python -m pytest
 ```
 
 ⚠️ **不要把 skipped 读成 passed。**SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上跑通的迁移证明不了生产上跑得通。CI 的 `backend-tests` 各分片 job 都起了 MySQL service，并且**显式把「有任何 skipped」判成失败** —— 少了那一步，MySQL 起不来时 pytest 照样绿。必需检查 `backend` 是汇总 job，`backend-tests` 各片与 `backend-build`（lint、打包冒烟、compose 构建）全部成功它才通过。
+
+**只改登记 / 收尾类文档的 PR 跳过代码检查。**PR 改动的文件全部落在 `.platform/`、`docs/TODO.md`、`docs/design/`、`docs/adr/README.md` 时，`changes` job 输出 `code=false`，`backend-tests`、`backend-build`、`frontend` 都不跑。这时 `backend` 要求两类后端 job 都是 skipped，否则仍要求 success；`changes` 自己没成功，`backend` 也不过。清单在 `scripts/ci_scope.py`，有测试开始读清单里的文件时要把它拿掉。推到 `main` 一律跑全量。
 
 **这里是命令清单的唯一出处。**`CLAUDE.md`、`README.md`、PR 模板的自检行只链接到这里，不再各抄一份。
 

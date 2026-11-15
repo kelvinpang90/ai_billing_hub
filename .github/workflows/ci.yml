@@ -52,12 +52,46 @@ jobs:
       - name: Policy and verified-write regression tests
         run: python -m unittest discover -s tests -v
 
+  # 只改登记 / 收尾类文档的 PR 跳过代码检查（backend-tests、backend-build、frontend）。
+  # 判定与可跳过的文件清单在 scripts/ci_scope.py；推到 main 一律跑全量。
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 要对着 base...head 算 diff，浅克隆拿不到
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Decide whether the code checks run
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -o pipefail
+          if [ "$EVENT_NAME" = pull_request ]; then
+            git diff --name-only "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          else
+            : > "$RUNNER_TEMP/changed.txt"
+          fi
+          cat "$RUNNER_TEMP/changed.txt"
+          python scripts/ci_scope.py --event "$EVENT_NAME" < "$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
+
   # 后端检查拆成三类 job 并行，再由名为 `backend` 的汇总 job 给出一个结论：
   #   backend-tests（分片 × N）：pytest。每片有自己的 runner 与 MySQL / Redis，按用例轮流分配
   #   backend-build：lint、打包冒烟、compose 构建。不需要数据库，与测试同时跑
-  #   backend：只看前两类的结果。分支保护与 scripts/codex-review.ps1 的准入名单都按这个名字找它
+  #   backend：只看 changes 与前两类的结果。分支保护与 scripts/codex-review.ps1 的准入名单都按这个名字找它
+  # 前两类只在 changes 明确判定 code=false 时跳过；输出缺失或异常一律照跑。
   backend-tests:
     name: backend-tests (${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     strategy:
       # 一片失败不取消其他片：一轮里就能看到全部失败的用例
@@ -137,6 +171,8 @@ jobs:
 
   backend-build:
     name: backend-build
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -173,23 +209,31 @@ jobs:
 
   backend:
     name: backend
-    needs: [backend-tests, backend-build]
+    needs: [changes, backend-tests, backend-build]
     # ⚠️ 必须 always()：不加的话上游一失败，这个 job 就被标成 skipped，而分支保护把
     # skipped 的必需检查当成通过 —— 测试红着也能合并。tests/backend/test_compose.py 钉住这一点。
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Every backend job succeeded
+      - name: Every backend job succeeded, or was skipped for a docs-only PR
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
           TESTS_RESULT: ${{ needs.backend-tests.result }}
           BUILD_RESULT: ${{ needs.backend-build.result }}
+        # 判定 job 本身必须成功；只有它明确输出 code=false 时，两类后端 job 才必须是 skipped，
+        # 否则必须是 success。跳过与否以判定为准，不以上游的实际结果反推。
         run: |
-          echo "backend-tests: $TESTS_RESULT, backend-build: $BUILD_RESULT"
-          test "$TESTS_RESULT" = success
-          test "$BUILD_RESULT" = success
+          echo "changes: $CHANGES_RESULT (code=$CODE_CHANGED), backend-tests: $TESTS_RESULT, backend-build: $BUILD_RESULT"
+          test "$CHANGES_RESULT" = success
+          if [ "$CODE_CHANGED" = false ]; then expected=skipped; else expected=success; fi
+          test "$TESTS_RESULT" = "$expected"
+          test "$BUILD_RESULT" = "$expected"
 
   frontend:
     name: frontend
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     defaults:
       run:

@@ -261,7 +261,14 @@ function Test-PrAdmission {
             Fail "准入未通过：$required 缺失或尚未成功。未调用 Codex。"
         }
     }
-    if (@($checks | Where-Object { $_.bucket -cne 'pass' }).Count -gt 0) {
+    # 只改登记 / 收尾类文档的 PR 会跳过代码检查（判定见 scripts/ci_scope.py）。跳过的只能是这几个
+    # job，而且后端两类跳得对不对由必需检查 `backend` 把关；其余检查仍必须通过。
+    # 被跳过的矩阵 job 在 GitHub 上可能显示为未展开的 `backend-tests (${{ matrix.shard }})`，所以按前缀认。
+    $skippable = '^(backend-tests \(.*\)|backend-build|frontend)$'
+    $unpassed = @($checks | Where-Object {
+            $_.bucket -cne 'pass' -and -not ($_.bucket -ceq 'skipping' -and $_.name -cmatch $skippable)
+        })
+    if ($unpassed.Count -gt 0) {
         Fail '准入未通过：仍有未通过的 CI 检查。'
     }
 }

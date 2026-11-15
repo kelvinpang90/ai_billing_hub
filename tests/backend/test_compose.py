@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -513,19 +516,80 @@ def test_ci_backend_check_fails_when_any_backend_job_fails() -> None:
     ⚠️ 汇总 job 少了 `if: always()`，上游一失败它就被标成 skipped，而分支保护把 skipped 的
     必需检查当成通过 —— 测试红着也能合并，而且没有任何东西变红。
     """
-    ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
-    jobs = yaml.safe_load(ci.read_text(encoding="utf-8"))["jobs"]
+    jobs = _ci_jobs()
     gate = jobs["backend"]
-    upstream = {name for name in jobs if name.startswith("backend-")}
+    upstream = {name for name in jobs if name.startswith("backend-")} | {"changes"}
 
     assert gate["name"] == "backend"
     assert set(gate["needs"]) == upstream
     assert "always()" in gate["if"]
-    checks = yaml.safe_dump(gate["steps"])
+    env = gate["steps"][0]["env"]
     for name in upstream:
-        assert f"needs.{name}.result" in checks, name
-    # 每个上游结果都要和 success 比，不是只打印出来
-    assert checks.count("= success") == len(upstream)
+        assert f"${{{{ needs.{name}.result }}}}" in env.values(), name
+    assert env["CODE_CHANGED"] == "${{ needs.changes.outputs.code }}"
+
+
+def _ci_jobs() -> dict:
+    ci = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+    return yaml.safe_load(ci.read_text(encoding="utf-8"))["jobs"]
+
+
+def test_ci_code_checks_skip_only_on_an_explicit_docs_only_verdict() -> None:
+    """文档 PR 跳过代码检查：只有 `changes` 明确输出 `code=false` 才跳过，输出缺失也照跑。
+
+    必需检查里除了汇总的 `backend`，其余都不许带条件 —— 它们被跳过时分支保护会当成通过。
+    """
+    jobs = _ci_jobs()
+
+    assert jobs["changes"]["outputs"]["code"] == "${{ steps.scope.outputs.code }}"
+    for name in ("backend-tests", "backend-build", "frontend"):
+        assert jobs[name]["needs"] == "changes", name
+        assert jobs[name]["if"] == "needs.changes.outputs.code != 'false'", name
+    for name in ("docs", "scripts", "policy", "secret-scan", "changes"):
+        assert "if" not in jobs[name], name
+
+
+# (changes 的结果, 它输出的 code, backend-tests 的结果, backend-build 的结果, 汇总是否通过)
+GATE_CASES = [
+    ("success", "true", "success", "success", True),
+    ("success", "false", "skipped", "skipped", True),
+    # 输出缺失按「改了代码」处理，上游照跑
+    ("success", "", "success", "success", True),
+    ("success", "true", "failure", "success", False),
+    ("success", "true", "success", "cancelled", False),
+    # 没有「只改文档」的判定却被跳过了
+    ("success", "true", "skipped", "skipped", False),
+    ("success", "", "skipped", "skipped", False),
+    # 判定说跳过，实际却跑了或只跳了一半
+    ("success", "false", "success", "success", False),
+    ("success", "false", "skipped", "failure", False),
+    # 判定 job 自己没成功，上游因此被跳过
+    ("failure", "", "skipped", "skipped", False),
+    ("cancelled", "", "skipped", "skipped", False),
+    # 判定 job 没成功就不认，哪怕上游看起来都过了（单独钉住对 changes 结果的检查）
+    ("failure", "true", "success", "success", False),
+]
+
+
+@pytest.mark.parametrize(("changes", "code", "tests", "build", "passes"), GATE_CASES)
+def test_ci_backend_gate_accepts_a_skip_only_when_changes_asked_for_it(
+    changes: str, code: str, tests: str, build: str, passes: bool
+) -> None:
+    """真的执行汇总 job 的脚本（与 GitHub 一样用 `bash -e`），而不是只看文本。"""
+    step = _ci_jobs()["backend"]["steps"][0]
+    bash = shutil.which("bash")
+    assert bash, "the CI gate script needs bash"
+    env = {
+        **os.environ,
+        "CHANGES_RESULT": changes,
+        "CODE_CHANGED": code,
+        "TESTS_RESULT": tests,
+        "BUILD_RESULT": build,
+    }
+
+    result = subprocess.run([bash, "-e", "-c", step["run"]], env=env, capture_output=True)
+
+    assert (result.returncode == 0) is passes, result.stdout
 
 
 def test_the_edge_resolves_the_real_client_address() -> None:
