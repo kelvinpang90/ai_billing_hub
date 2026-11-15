@@ -39,6 +39,10 @@ dependencies = [
     "pyotp>=2.9",
     # 收据 PDF（设计闸门 #589 v2 §2「PDF」）；纯 Python，不需要编译链。
     "fpdf2>=2.8",
+    # 对账单 PDF 读中文字体的 cmap（Phase 7 对账单 PDF）。它本来就是 fpdf2 的
+    # 依赖（下界与 fpdf2 2.8 的 install_requires 一致）；显式写出来，是因为代码会直接
+    # `import fontTools`，不该靠传递关系。
+    "fonttools>=4.34",
 ]
 
 [project.optional-dependencies]
@@ -64,7 +68,7 @@ include = ["app*"]
 # 任何报错，直到装好的那一份在运行时找不到文件 —— 和「alembic/ 不在 wheel 里」
 # 是同一类坑。`scripts/packaging_smoke.py` 会验它真的在已安装的发行版里。
 [tool.setuptools.package-data]
-"app.data" = ["*.txt"]
+"app.data" = ["*.txt", "*.ttf"]
 
 [tool.ruff]
 line-length = 100
