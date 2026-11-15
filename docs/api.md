@@ -1650,11 +1650,11 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | 409 | `CREDENTIAL_REVOKED` | 轮换一个所有版本都已吊销的 `api_key` | 否 |
 | 409 | `ACCOUNT_CLOSED` | 客户已关户（`CLOSED`）时建凭据或轮换（AIH-TASK-210，设计闸门 #707）。对客户行加共享锁之后、生成 `secret` 与锁版本行之前判定，`secret` 不会生成。吊销版本与吊销整个 key 不受影响 | 否 |
 | 503 | `ENCRYPTION_NOT_CONFIGURED` | 主密钥未配置（只影响建凭据与轮换；列表与吊销照常） | 否 |
+| 500 | `INTERNAL_ERROR` | 意外错误；整个事务回滚，这次生成的 `secret` 随之作废、从未返回 | 否 |
 
 建凭据与轮换的判定顺序：503 `ENCRYPTION_NOT_CONFIGURED`（事务外最先）→ 404 `CUSTOMER_NOT_FOUND` /
 `PROJECT_NOT_FOUND` → 409 `ACCOUNT_CLOSED` → 其他 404 / 409。因为关户判定在锁版本行之前，已关户客户上轮换一个
 不存在的 `api_key` 得到 409 `ACCOUNT_CLOSED`，而不是 404 `CREDENTIAL_NOT_FOUND`。
-| 500 | `INTERNAL_ERROR` | 意外错误；整个事务回滚，这次生成的 `secret` 随之作废、从未返回 | 否 |
 
 ### 格式
 
@@ -4430,12 +4430,6 @@ AIH-TASK-191（接口）。
 只有 ADMIN 能调。`customer_id`、`project_id` 是公开 ID；客户不存在为 `CUSTOMER_NOT_FOUND`，项目不存在或不属于客户为 `PROJECT_NOT_FOUND`，不存在或不属于项目的 `client_id` 为 `AI_CLIENT_KEY_NOT_FOUND`。所有成功响应走 §107 信封。
 
 列表按 `created_at` 倒序，同一秒按内部创建顺序倒序；每项仅含 `client_id`、`status`（`ACTIVE` 或 `REVOKED`）、`created_at`、`revoked_at`。签发响应仅这一次额外含 256 位随机 `token`；响应带 `Cache-Control: no-store`，列表和吊销响应绝不返回 token。每项目最多两把 `ACTIVE` 密钥，达到上限为 409 `AI_CLIENT_KEY_LIMIT`；吊销已吊销密钥为 409 `AI_CLIENT_KEY_REVOKED`。
-
-| HTTP | `error.code` | 什么时候 |
-| --- | --- | --- |
-| 409 | `ACCOUNT_CLOSED` | 客户已关户（`CLOSED`）时签发（AIH-TASK-210，设计闸门 #707）。对客户行加共享锁之后、锁项目行之前判定，token 不会生成，什么都不写（含审计）。吊销与列表不受影响 |
-
-签发的判定顺序：404 `CUSTOMER_NOT_FOUND` / `PROJECT_NOT_FOUND` → 409 `ACCOUNT_CLOSED` → 409 `AI_CLIENT_KEY_LIMIT`。
 
 AI 密钥须等 AIH-TASK-068 合并后才签发，见设计 §8「部署顺序」。
 

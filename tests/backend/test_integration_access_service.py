@@ -907,7 +907,11 @@ def test_find_verifiable_credential_after_revoking_the_newest(sqlite_factory, se
 def test_rotation_and_revocation_lock_the_keys_versions(
     sqlite_factory, settings, monkeypatch
 ) -> None:
-    """设计 §2：轮换与吊销先按 api_key 锁住全部版本行；客户与项目不加锁。"""
+    """设计 §2：轮换与吊销先按 api_key 锁住全部版本行。
+
+    吊销不看账户状态，客户与项目不加锁（经 `get_tenant_by_public_id` 只拿 id）；轮换改由
+    `_open_project` 对客户行加共享锁（设计闸门 #707 v4 §2「契约二」），不再经这个函数。
+    """
     scene = Scene(sqlite_factory, settings)
     created = scene.create()
     real_lock = credential_repository.lock_key_versions
@@ -931,7 +935,19 @@ def test_rotation_and_revocation_lock_the_keys_versions(
     scene.revoke_key(created.api_key)
 
     assert locked == [created.api_key] * 3
-    assert tenant_locks == [False] * 3
+    assert tenant_locks == [False] * 2  # 只有两次吊销
+
+
+def test_create_and_rotate_share_lock_the_tenant_row() -> None:
+    """设计闸门 #707 v4 §2「契约二」：建凭据与轮换先对客户行 `FOR SHARE`，与关户的 X 锁串行。"""
+    source = inspect.getsource(integration_access._open_project)
+
+    assert ".with_for_update(read=True)" in source
+    assert "populate_existing=True" in source
+    for entry in (integration_access.create_credential, integration_access.rotate_credential):
+        entry_source = inspect.getsource(entry)
+        assert "_open_project(session, customer_id, project_id)" in entry_source
+        assert "_resolve_project(" not in entry_source
 
 
 def test_the_lock_query_is_for_update_and_ordered_by_version() -> None:
