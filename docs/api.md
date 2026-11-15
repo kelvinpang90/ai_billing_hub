@@ -4688,7 +4688,7 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 
 | HTTP | `error.code` | 什么时候 | `retryable` | 客户端该做什么 |
 | --- | --- | --- | --- | --- |
-| 401 | `INTEGRATION_AUTH_FAILED` | 请求头缺失或格式不对、凭据不存在 / 已吊销 / 已过期、签名错、时间戳出窗、Request-Id 重放 —— **一律同一个码**，原因只进服务端日志 | `false` | 停止重试该事件，进死信（保留）并告警；修好凭据、时钟或 Request-Id 生成后人工重投 |
+| 401 | `INTEGRATION_AUTH_FAILED` | 请求头缺失或格式不对、凭据不存在 / 已吊销 / 已过期、签名错、时间戳出窗、Request-Id 重放 —— **一律同一个码**，原因只进服务端日志 | `false` | 不进死信，保持待发，固定每 60 秒按当前配置重新签名重发并告警（P1）；修好凭据、主机时钟或 Request-Id 生成后积压自动送达，不需要人工重投（同 [Billing Client 的 401 固定 60 秒重试](../integration-client/README.md#7-健康检查与告警)） |
 | 403 | `CREDENTIAL_SCOPE_MISMATCH` | 载荷里的 `tenant_id` / `project_id` 不是凭据所属的（服务端另写一条审计） | `false` | 死信并告警 |
 | 409 | `IDEMPOTENCY_CONFLICT` | 同一 `event_id`、归属或指纹不同。原事件不变；响应不透露原事件的任何信息 | `false` | 死信并告警 |
 | 409 | `UNKNOWN_USAGE_TYPE` | `usage_type` 不在目录里 | `true` | 保留事件，退避重试；管理员建好类型后自然成功 |
@@ -4696,6 +4696,9 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 | 422 | `VALIDATION_ERROR` / `UNSUPPORTED_SCHEMA_VERSION` / `OCCURRED_AT_IN_FUTURE` | 见上表。`message` 只列字段名，不回显值 | `false` | 死信并告警 |
 | 500 | `INTERNAL_ERROR` | 意外错误（含提交失败）；事件没有落库 | `true` | 退避重试 |
 | 503 | `SERVICE_UNAVAILABLE` | 数据库不可用或未配置（主密钥未配置同样） | `true` | 退避重试 |
+
+401 是“只看 `retryable`”的唯一例外：`retryable` 仍为 `false`，表示同一份签名请求原样重发不会成功；但重新签名后可能成功，
+所以客户端按上表固定间隔重签重发，而不是进死信。
 
 框架自己的 404 / 405（`HTTP_ERROR`）同样带 `retryable`：4xx 为 `false`。
 
