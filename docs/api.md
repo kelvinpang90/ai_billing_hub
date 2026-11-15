@@ -4431,6 +4431,12 @@ AIH-TASK-191（接口）。
 
 列表按 `created_at` 倒序，同一秒按内部创建顺序倒序；每项仅含 `client_id`、`status`（`ACTIVE` 或 `REVOKED`）、`created_at`、`revoked_at`。签发响应仅这一次额外含 256 位随机 `token`；响应带 `Cache-Control: no-store`，列表和吊销响应绝不返回 token。每项目最多两把 `ACTIVE` 密钥，达到上限为 409 `AI_CLIENT_KEY_LIMIT`；吊销已吊销密钥为 409 `AI_CLIENT_KEY_REVOKED`。
 
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 409 | `ACCOUNT_CLOSED` | 客户已关户（`CLOSED`）时签发（AIH-TASK-227，设计闸门 #707）。对客户行加共享锁之后、锁项目行之前判定，token 不会生成，什么都不写（含审计）。吊销与列表不受影响 |
+
+签发的判定顺序：404 `CUSTOMER_NOT_FOUND` / `PROJECT_NOT_FOUND` → 409 `ACCOUNT_CLOSED` → 409 `AI_CLIENT_KEY_LIMIT`。
+
 AI 密钥须等 AIH-TASK-068 合并后才签发，见设计 §8「部署顺序」。
 
 ---
