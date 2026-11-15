@@ -12058,7 +12058,7 @@ tasks:
     title: 健康告警：巡检把 Celery 队列积压并进 services 维度
     purpose: >-
       celery-worker 活着但处理不过来（或卡在某个任务上）时，容器 health 仍是 healthy，现有巡检看不出来，表现只是投递、计费、对账慢慢滞后。deploy/monitor.sh 的 services 维度在逐个检查容器之后，再读 Redis broker 里 Celery 默认队列的长度，超过阈值报 P2。并进已有的 BILLING_HEALTHCHECK_SERVICES_URL，不新增检查、不新增 .env 地址；同步部署文档与 runbook。不改应用代码。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-207
     acceptance_criteria:
