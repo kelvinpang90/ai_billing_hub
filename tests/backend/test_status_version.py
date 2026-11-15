@@ -70,8 +70,9 @@ from app.repositories.wallet import EVENT_BILLING_STATUS_CHANGED, create_wallet
 from app.services import account_status, internal_billing
 from app.services.account_status import EVENT_ACCOUNT_STATUS_CHANGED, change_account_status
 from app.services.auth import RequestContext
-from app.services.customers import add_status_delivery
+from app.services.customers import CustomerNotFound, add_status_delivery
 from app.services.internal_billing import EVENT_BILLING_MODE_CHANGED, enable_internal_metering
+from app.services.project_integration import AccountClosed
 from app.services.wallet_adjustments import post_adjustment
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
@@ -744,6 +745,81 @@ def test_a_failed_write_rolls_back_state_version_and_time(
     with factory() as session:
         statement = select(AuditLog).where(AuditLog.action == AUDIT_FOR[point])
         assert session.execute(statement.where(AuditLog.entity_id == public_id)).first() is None
+
+
+# --- 关户后开通内部计量（AIH-TASK-210，设计闸门 #707 v4 §2「契约二」） ------------------
+
+
+def force_tenant(factory, public_id: str, **values: object) -> None:
+    """造数据：直接改库（关户接口归 AIH-TASK-213；写法同 test_account_status_api.py）。"""
+    with factory() as session:
+        session.execute(update(Tenant).where(Tenant.public_id == public_id).values(**values))
+        session.commit()
+
+
+def every_audit(factory) -> int:
+    with factory() as session:
+        return session.execute(select(func.count()).select_from(AuditLog)).scalar_one()
+
+
+@pytest.mark.parametrize("mode", [BillingMode.PREPAID, BillingMode.INTERNAL_METERED_ONLY])
+def test_internal_metering_for_a_closed_customer_is_409_and_writes_nothing(
+    factory, mode: BillingMode
+) -> None:
+    """§7「管理写入口」：CLOSED 客户开通内部计量 409 ACCOUNT_CLOSED；已是内部计量也一样
+    （判定在「已是内部计量直接返回」之前）。状态、版本、status_changed_at、outbox、审计、
+    投递退避都不变。"""
+    admin = make_admin(factory)
+    tenant_id, public_id = make_customer(factory)
+    project_id = make_project(factory, tenant_id, FUTURE)
+    force_tenant(factory, public_id, account_status=AccountStatus.CLOSED, billing_mode=mode)
+    before, audits_before = (
+        snapshot(factory, tenant_id, public_id, project_id),
+        every_audit(factory),
+    )
+
+    with pytest.raises(AccountClosed) as raised:
+        trigger(factory, admin, "internal", public_id)
+
+    error = raised.value
+    assert (error.code, error.http_status, error.message) == (
+        "ACCOUNT_CLOSED",
+        409,
+        "The customer account is closed.",
+    )
+    assert snapshot(factory, tenant_id, public_id, project_id) == before
+    assert every_audit(factory) == audits_before
+    assert tenant_state(factory, tenant_id)[:3] == (
+        AccountStatus.CLOSED,
+        BillingStatus.SUSPENDED,
+        mode,
+    )
+
+
+def test_internal_metering_for_a_disabled_customer_still_works(factory) -> None:
+    """§7「管理写入口」：DISABLED 不是 CLOSED，开通照常；再开通是幂等返回、不写。"""
+    admin = make_admin(factory)
+    tenant_id, public_id = make_customer(factory)
+    force_tenant(factory, public_id, account_status=AccountStatus.DISABLED)
+
+    trigger(factory, admin, "internal", public_id)
+    trigger(factory, admin, "internal", public_id)
+
+    assert tenant_state(factory, tenant_id)[2:4] == (BillingMode.INTERNAL_METERED_ONLY, 1)
+    assert len(events(factory, EVENT_BILLING_MODE_CHANGED, public_id)) == 1
+
+
+def test_internal_metering_for_an_unknown_customer_is_404_beside_a_closed_one(factory) -> None:
+    """§7「入口判定顺序」：404 先于 409。"""
+    admin = make_admin(factory)
+    _tenant_id, public_id = make_customer(factory)
+    force_tenant(factory, public_id, account_status=AccountStatus.CLOSED)
+    audits_before = every_audit(factory)
+
+    with pytest.raises(CustomerNotFound):
+        trigger(factory, admin, "internal", str(uuid.uuid4()))
+
+    assert every_audit(factory) == audits_before
 
 
 # --- 退避重排只锁本租户：只在真 MySQL 上 ---------------------------------------------

@@ -6,6 +6,8 @@
 
 ⚠️ **归属只来自路径**：客户按 `public_id` 读、项目按「客户 + 项目 public_id」读（都不加锁，
 只为拿内部 id）；凭据按「项目 + api_key」查。别人的一律 404，与不存在的一模一样（INV-8）。
+建凭据与轮换例外：先对租户行加共享锁，已关户 409 `ACCOUNT_CLOSED`（设计闸门 #707 v4）；
+吊销照常，不看账户状态。
 
 ⚠️ **轮换与吊销先锁住这个 key 的全部版本行**（按 `key_version` 排序），判断与写入都在
 锁之后：同一个 key 的并发轮换 / 吊销串行执行，后到的读到先到的结果（设计 §2、§4）。
@@ -23,6 +25,7 @@ import datetime as dt
 import secrets
 from typing import Final
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -32,7 +35,7 @@ from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, User
 from app.models.integration import CredentialStatus, IntegrationCredential
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import AccountStatus, Project, Tenant
 from app.repositories import integration_access as credentials
 from app.repositories import tenancy
 from app.schemas.customers import Page
@@ -122,6 +125,33 @@ def _resolve_project(session: Session, customer_id: str, project_id: str) -> tup
     return tenant, project
 
 
+def _open_project(session: Session, customer_id: str, project_id: str) -> tuple[Tenant, Project]:
+    """Shared-lock the tenant row, resolve the project, refuse a CLOSED account.
+
+    设计闸门 #707 v4 §2「契约二」：租户行 `SELECT … FOR SHARE`（`populate_existing`，同
+    `project_integration._lock_tenant_shared`）与关户事务（租户 X 锁）串行；判定顺序是
+    客户 404 → 项目 404 → `CLOSED` 409，都在生成密钥与锁版本行之前。加锁顺序租户 → 凭据。
+    ⚠️ 在函数里 import 是因为 `app.services.project_integration` 在顶层 import 了本模块。
+    """
+    from app.services.project_integration import AccountClosed
+
+    statement = (
+        select(Tenant)
+        .where(Tenant.public_id == customer_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    tenant = session.execute(statement).scalar_one_or_none()
+    if tenant is None:
+        raise CustomerNotFound
+    project = tenancy.get_project_for_tenant(session, tenant.id, project_id)
+    if project is None:
+        raise ProjectNotFound
+    if tenant.account_status is AccountStatus.CLOSED:
+        raise AccountClosed
+    return tenant, project
+
+
 def _locked_versions(
     session: Session, project: Project, api_key: str
 ) -> list[IntegrationCredential]:
@@ -165,13 +195,13 @@ def create_credential(
     """A new `api_key`, version 1, and `API_KEY_CREATE` audit in one commit.
 
     建凭据不加锁：`api_key` 是新随机值，唯一约束兜底；撞上的概率可忽略，撞上就是 500、
-    不重试（设计 §2）。
+    不重试（设计 §2）。已关户：租户共享锁后 409 `ACCOUNT_CLOSED`，secret 不生成、不写库。
     """
     # ⚠️ 主密钥先于一切：没配置就 503，什么都不生成、不写（设计 §5）。
     keyring = load_keyring(settings)
     moment = now or _now()
     with session_scope(session_factory) as session:
-        tenant, project = _resolve_project(session, customer_id, project_id)
+        tenant, project = _open_project(session, customer_id, project_id)
         api_key = _new_api_key()
         secret = _new_secret()
         encrypted, master_version = _encrypt(keyring, secret, api_key, FIRST_KEY_VERSION)
@@ -222,13 +252,14 @@ def rotate_credential(
 
     旧的未吊销版本中，`valid_until` 为 NULL 或晚于 `now + 重叠期` 的改成 `now + 重叠期`；
     新版本没有截止。整个 key 都已吊销：409 `CREDENTIAL_REVOKED`；`current_key_version`
-    不是锁内读到的最大版本：409 `CREDENTIAL_VERSION_CONFLICT`。都不写库。
+    不是锁内读到的最大版本：409 `CREDENTIAL_VERSION_CONFLICT`。都不写库。已关户：租户共享锁后、
+    锁版本行之前 409 `ACCOUNT_CLOSED`（不存在的 `api_key` 也是 409，不是 404）。
     """
     keyring = load_keyring(settings)
     moment = now or _now()
     overlap_until = moment + dt.timedelta(seconds=settings.credential_rotation_overlap_seconds)
     with session_scope(session_factory) as session:
-        _tenant, project = _resolve_project(session, customer_id, project_id)
+        _tenant, project = _open_project(session, customer_id, project_id)
         rows = _locked_versions(session, project, api_key)
         live = [row for row in rows if row.status is CredentialStatus.ACTIVE]
         if not live:

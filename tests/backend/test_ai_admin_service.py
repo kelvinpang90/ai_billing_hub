@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, func, select
+from sqlalchemy import Engine, create_engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
@@ -24,8 +24,9 @@ from app.ai_api.models import AiClientKey, AiClientKeyStatus
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import AccountStatus, Project, Tenant
 from app.repositories import tenancy
+from app.services import project_integration
 from app.services.auth import RequestContext
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
@@ -335,6 +336,100 @@ def test_token_stays_out_of_audit_logs_and_errors(factory, caplog) -> None:
             assert secret not in surface
 
 
+# --- 关户后（AIH-TASK-210，设计闸门 #707 v4 §2「契约二」） ------------------------
+
+
+def force_status(factory, customer_id: str, value: AccountStatus) -> None:
+    """造数据：直接改库（关户接口归 AIH-TASK-213；写法同 test_account_status_api.py）。"""
+    with factory() as session:
+        session.execute(
+            update(Tenant).where(Tenant.public_id == customer_id).values(account_status=value)
+        )
+        session.commit()
+
+
+def written(factory) -> tuple[list[tuple[str, str]], int]:
+    """(every key's client id and status, every audit row of any action)."""
+    with factory() as session:
+        keys = session.execute(
+            select(AiClientKey.client_id, AiClientKey.status).order_by(AiClientKey.id)
+        ).all()
+        audits = session.execute(select(func.count()).select_from(AuditLog)).scalar_one()
+    return [(row.client_id, row.status.value) for row in keys], audits
+
+
+def test_account_closed_matches_the_services_error_word_for_word() -> None:
+    """admin.py 不能导入 project_integration（AI 模块边界），本地定义的必须同码同消息。"""
+    local, shared = admin.AccountClosed(), project_integration.AccountClosed()
+
+    assert (local.message, local.code, local.http_status) == (
+        shared.message,
+        shared.code,
+        shared.http_status,
+    )
+    assert (local.message, local.code, local.http_status) == (
+        "The customer account is closed.",
+        "ACCOUNT_CLOSED",
+        409,
+    )
+
+
+def test_issue_for_a_closed_customer_is_409_and_writes_nothing(factory) -> None:
+    """§7「管理写入口」：CLOSED 客户签发 409 ACCOUNT_CLOSED，不写密钥行与审计；
+    判定在数量上限之前（已有两把也是 409，不是 AI_CLIENT_KEY_LIMIT）。"""
+    actor = make_admin(factory)
+    customer_id, project_id = make_project(factory)
+    issue(factory, actor, customer_id, project_id)
+    issue(factory, actor, customer_id, project_id)
+    force_status(factory, customer_id, AccountStatus.CLOSED)
+    before = written(factory)
+
+    with pytest.raises(admin.AccountClosed) as raised:
+        issue(factory, actor, customer_id, project_id)
+
+    assert (raised.value.code, raised.value.http_status) == ("ACCOUNT_CLOSED", 409)
+    assert written(factory) == before
+
+
+def test_issue_for_a_disabled_customer_still_works(factory) -> None:
+    actor = make_admin(factory)
+    customer_id, project_id = make_project(factory)
+    force_status(factory, customer_id, AccountStatus.DISABLED)
+
+    issued = issue(factory, actor, customer_id, project_id)
+
+    assert [row.client_id for row in key_rows(factory, project_id)] == [issued.client_id]
+
+
+def test_revoke_and_list_for_a_closed_customer_still_work(factory) -> None:
+    """§2「契约二」不改的写入口：吊销与查看对 CLOSED 照常。"""
+    actor = make_admin(factory)
+    customer_id, project_id = make_project(factory)
+    key = issue(factory, actor, customer_id, project_id)
+    force_status(factory, customer_id, AccountStatus.CLOSED)
+
+    revoked = revoke(factory, actor, customer_id, project_id, key.client_id)
+
+    assert revoked.status == "REVOKED"
+    views = admin.list_client_keys(factory, customer_id=customer_id, project_id=project_id)
+    assert [(view.client_id, view.status) for view in views] == [(key.client_id, "REVOKED")]
+
+
+def test_a_closed_customer_with_an_unknown_customer_or_project_is_404_first(factory) -> None:
+    """§7「入口判定顺序」：客户与项目不存在的 404 先于 CLOSED 的 409。"""
+    actor = make_admin(factory)
+    customer_id, project_id = make_project(factory)
+    force_status(factory, customer_id, AccountStatus.CLOSED)
+    before = written(factory)
+
+    with pytest.raises(admin.ProjectNotFound):
+        issue(factory, actor, customer_id, "missing")
+    with pytest.raises(admin.CustomerNotFound):
+        issue(factory, actor, "missing", project_id)
+
+    assert written(factory) == before
+
+
 def test_mysql_concurrent_issue_allows_exactly_one_second_key(mysql_factory, monkeypatch) -> None:
     actor = make_admin(mysql_factory)
     customer_id, project_id = make_project(mysql_factory)
@@ -347,15 +442,16 @@ def test_mysql_concurrent_issue_allows_exactly_one_second_key(mysql_factory, mon
         ).scalar_one()
     # 屏障放在锁前的普通读之后：两边都已在 REPEATABLE READ 下建立了只看得到 1 把的快照，
     # 再去抢项目行锁。后拿到锁的一方必须用加锁读看到先提交的那一把，否则会签出第三把。
+    # 签发先对租户行加共享锁（两边相容），项目的普通读在 `_project_of` 里。
     barrier = threading.Barrier(2)
-    original = admin._resolve_project
+    original = admin._project_of
 
     def resolve_then_wait(*args, **kwargs):
         resolved = original(*args, **kwargs)
         barrier.wait(timeout=5)
         return resolved
 
-    monkeypatch.setattr(admin, "_resolve_project", resolve_then_wait)
+    monkeypatch.setattr(admin, "_project_of", resolve_then_wait)
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
             executor.submit(issue, mysql_factory, actor, customer_id, project_id) for _ in range(2)

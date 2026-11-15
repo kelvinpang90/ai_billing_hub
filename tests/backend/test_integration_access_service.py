@@ -35,12 +35,18 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from alembic import command
 from app.core.config import Settings
-from app.core.crypto import DecryptionFailed, decrypt_secret, encrypt_secret, load_keyring
+from app.core.crypto import (
+    DecryptionFailed,
+    EncryptionNotConfigured,
+    decrypt_secret,
+    encrypt_secret,
+    load_keyring,
+)
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.integration import CredentialStatus, IntegrationCredential
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import AccountStatus, Project, Tenant
 from app.repositories import integration_access as credential_repository
 from app.repositories import tenancy
 from app.schemas.integration_access import IssuedCredentialView
@@ -53,6 +59,7 @@ from app.services.integration_access import (
     ProjectNotFound,
 )
 from app.services.integration_auth import credential_aad, find_verifiable_credential
+from app.services.project_integration import AccountClosed
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
 TEST_EMAIL_DOMAIN = "@integration-access-test.example.com"
@@ -443,6 +450,124 @@ def test_an_unknown_customer_or_project_writes_nothing(sqlite_factory, settings)
 
     assert snapshot(sqlite_factory)["credentials"] == before["credentials"]
     assert snapshot(sqlite_factory)["audits"] == before["audits"]
+
+
+# --- 关户后（AIH-TASK-210，设计闸门 #707 v4 §2「契约二」） ------------------------
+
+
+def force_status(factory, customer_id: str, value: AccountStatus) -> None:
+    """造数据：直接改库（关户接口归 AIH-TASK-213；写法同 test_account_status_api.py）。"""
+    with factory() as session:
+        session.execute(
+            update(Tenant).where(Tenant.public_id == customer_id).values(account_status=value)
+        )
+        session.commit()
+
+
+def every_audit(factory) -> int:
+    with factory() as session:
+        return session.execute(select(func.count()).select_from(AuditLog)).scalar_one()
+
+
+def assert_account_closed(error: BaseException) -> None:
+    assert isinstance(error, AccountClosed)
+    assert (error.code, error.http_status, error.message) == (
+        "ACCOUNT_CLOSED",
+        409,
+        "The customer account is closed.",
+    )
+
+
+def test_create_and_rotate_for_a_closed_customer_are_409_and_write_nothing(
+    factory, settings, monkeypatch
+) -> None:
+    """§7「管理写入口」：CLOSED 客户建凭据、轮换都 409 ACCOUNT_CLOSED；不生成 secret、
+    凭据行与审计（任何动作）都不变。判定在锁版本行之前：不存在的 api_key 也是 409。"""
+    scene = Scene(factory, settings)
+    existing = scene.create()
+    force_status(factory, scene.customer_id, AccountStatus.CLOSED)
+    before, audits_before = snapshot(factory), every_audit(factory)
+    generated = recorded_secrets(monkeypatch)
+
+    attempts = [
+        scene.create,
+        lambda: scene.rotate(existing.api_key, 1),
+        lambda: scene.rotate("ak_" + "0" * 32, 1),
+    ]
+    for attempt in attempts:
+        with pytest.raises(AccountClosed) as raised:
+            attempt()
+        assert_account_closed(raised.value)
+
+    assert generated == []
+    assert snapshot(factory) == before
+    assert every_audit(factory) == audits_before
+
+
+def test_create_and_rotate_for_a_disabled_customer_still_work(factory, settings) -> None:
+    """§7「管理写入口」：DISABLED 不是 CLOSED，建凭据与轮换照常。"""
+    scene = Scene(factory, settings)
+    force_status(factory, scene.customer_id, AccountStatus.DISABLED)
+
+    issued = scene.create()
+    rotated = scene.rotate(issued.api_key, 1)
+
+    assert rotated.key_version == 2
+    assert len(audits(factory, AuditAction.API_KEY_CREATE)) == 1
+    assert len(audits(factory, AuditAction.API_KEY_ROTATE)) == 1
+
+
+def test_revoking_for_a_closed_customer_still_works(factory, settings) -> None:
+    """§2「契约二」不改的写入口：吊销版本与吊销整个 key 对 CLOSED 照常。"""
+    scene = Scene(factory, settings)
+    first = scene.create()
+    second = scene.create()
+    force_status(factory, scene.customer_id, AccountStatus.CLOSED)
+
+    revoked = scene.revoke_version(first.api_key, 1)
+    all_revoked = scene.revoke_key(second.api_key)
+
+    assert revoked.status == "REVOKED"
+    assert [view.status for view in all_revoked] == ["REVOKED"]
+    assert len(audits(factory, AuditAction.API_KEY_REVOKE)) == 2
+
+
+def test_a_closed_customer_with_an_unknown_customer_or_project_is_404_first(
+    sqlite_factory, settings
+) -> None:
+    """§7「入口判定顺序」：客户与项目不存在的 404 先于 CLOSED 的 409。"""
+    scene = Scene(sqlite_factory, settings)
+    existing = scene.create()
+    force_status(sqlite_factory, scene.customer_id, AccountStatus.CLOSED)
+    before = snapshot(sqlite_factory)
+
+    scene.project_id = str(uuid.uuid4())
+    with pytest.raises(ProjectNotFound):
+        scene.create()
+    with pytest.raises(ProjectNotFound):
+        scene.rotate(existing.api_key, 1)
+    scene.customer_id = str(uuid.uuid4())
+    with pytest.raises(integration_access.CustomerNotFound):
+        scene.create()
+
+    assert snapshot(sqlite_factory) == before
+
+
+def test_a_missing_master_key_is_503_before_the_closed_check(sqlite_factory, settings) -> None:
+    """§7「入口判定顺序」：主密钥未配置的 503 在事务外最先，先于 CLOSED 的 409。"""
+    scene = Scene(sqlite_factory, settings)
+    existing = scene.create()
+    force_status(sqlite_factory, scene.customer_id, AccountStatus.CLOSED)
+    before = snapshot(sqlite_factory)
+    scene.settings = Settings(master_key_file="")
+
+    with pytest.raises(EncryptionNotConfigured) as created:
+        scene.create()
+    with pytest.raises(EncryptionNotConfigured) as rotated:
+        scene.rotate(existing.api_key, 1)
+
+    assert created.value.http_status == rotated.value.http_status == 503
+    assert snapshot(sqlite_factory) == before
 
 
 # --- AAD 绑定 ------------------------------------------------------------------

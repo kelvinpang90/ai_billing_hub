@@ -17,13 +17,20 @@ from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, DomainOutbox, OutboxStatus, User, UserRole
 from app.models.integration import IntegrationCredential
-from app.models.tenancy import BillingMode, IntegrationStatus, Tenant, compose_effective_status
+from app.models.tenancy import (
+    AccountStatus,
+    BillingMode,
+    IntegrationStatus,
+    Tenant,
+    compose_effective_status,
+)
 from app.models.usage import UsageEvent
 from app.models.wallet import Wallet
 from app.repositories.tenancy import bump_status_version, get_tenant_by_public_id
 from app.schemas.customers import CustomerDetail, customer_detail
 from app.services.auth import RequestContext, record_audit, utc_now
 from app.services.customers import CustomerNotFound
+from app.services.project_integration import AccountClosed
 
 # 出站事件（设计 #241 §2）。⚠️ 这个字符串是将来投递任务选处理器的键，改名等于让
 # 已经躺在 domain_outbox 里的行认不出自己。
@@ -73,6 +80,10 @@ def enable_internal_metering(
             .with_for_update()
             .execution_options(populate_existing=True)
         ).scalar_one()
+        # Design gate #707 v4 §2: a CLOSED tenant is refused under the tenant lock,
+        # before the idempotent "already internal" return. Nothing is written.
+        if tenant.account_status is AccountStatus.CLOSED:
+            raise AccountClosed
         if tenant.billing_mode is BillingMode.INTERNAL_METERED_ONLY:
             return customer_detail(tenant, wallet)
         existing_usage = session.execute(

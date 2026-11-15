@@ -14,7 +14,8 @@
 
 ⚠️ **每个写操作先 `SELECT … FOR UPDATE` 锁项目行**，读版本、判断与写入都在锁之后：同一
 项目的密钥操作串行执行（设计 §4）。锁之外的最后兜底是唯一索引，撞上映射为 409
-`WEBHOOK_SECRET_CONFLICT`。
+`WEBHOOK_SECRET_CONFLICT`。签发与启用在锁项目行之前先对租户行加共享锁，已关户 409
+`ACCOUNT_CLOSED`（设计闸门 #707 v4 §2「契约二」）；加锁顺序租户 → 项目 → 投递行。退役照常。
 
 ⚠️ **secret 只活在一次请求的内存里**：生成 → `encrypt_secret`（带 AAD）→ 响应模型的
 `SecretStr`。它不进审计、不进异常消息、不进日志；这一层根本不写日志。提交失败时它随
@@ -28,7 +29,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Final
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -38,7 +39,7 @@ from app.core.database import session_scope
 from app.core.errors import AppError
 from app.models.auth import AuditAction, User
 from app.models.integration import ProjectStatusDelivery, ProjectWebhookSecret, WebhookSecretStatus
-from app.models.tenancy import Project
+from app.models.tenancy import AccountStatus, Project, Tenant
 from app.repositories import tenancy
 from app.repositories import webhook_signing as webhook_secrets
 from app.schemas.customers import Page
@@ -52,6 +53,7 @@ from app.services.auth import RequestContext, record_audit, utc_now
 from app.services.customers import CustomerNotFound
 from app.services.integration_access import ProjectNotFound
 from app.services.integration_auth import canonical_request, sign
+from app.services.project_integration import AccountClosed
 
 # 审计的 entity_type；entity_id 是项目的 public_id。
 ENTITY_WEBHOOK_SECRET: Final = "project_webhook_secret"
@@ -150,6 +152,31 @@ def _resolve_project(session: Session, customer_id: str, project_id: str) -> Pro
     return project
 
 
+def _open_project(session: Session, customer_id: str, project_id: str) -> Project:
+    """Shared-lock the tenant row, resolve the project, refuse a CLOSED account.
+
+    设计闸门 #707 v4 §2「契约二」：租户行 `SELECT … FOR SHARE`（`populate_existing`，同
+    `project_integration._lock_tenant_shared`）与关户事务（租户 X 锁）串行；判定顺序是
+    客户 404 → 项目 404 → `CLOSED` 409，都在锁项目行（`_locked_versions`）之前。
+    加锁顺序租户 → 项目 → 投递行。
+    """
+    statement = (
+        select(Tenant)
+        .where(Tenant.public_id == customer_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    tenant = session.execute(statement).scalar_one_or_none()
+    if tenant is None:
+        raise CustomerNotFound
+    project = tenancy.get_project_for_tenant(session, tenant.id, project_id)
+    if project is None:
+        raise ProjectNotFound
+    if tenant.account_status is AccountStatus.CLOSED:
+        raise AccountClosed
+    return project
+
+
 def _locked_versions(session: Session, project: Project) -> list[ProjectWebhookSecret]:
     webhook_secrets.lock_project(session, project.id)
     return webhook_secrets.versions_for_project(session, project.id)
@@ -198,13 +225,14 @@ def issue_secret(
 ) -> IssuedWebhookSecretView:
     """A new PENDING version (newest + 1, or 1) and `WEBHOOK_SECRET_ISSUE` audit in one commit.
 
-    已有 PENDING：409 `WEBHOOK_SECRET_PENDING_EXISTS`，不写库。
+    已有 PENDING：409 `WEBHOOK_SECRET_PENDING_EXISTS`，不写库。已关户：租户共享锁后 409
+    `ACCOUNT_CLOSED`，先于 PENDING 判定，secret 不生成、不写库。
     """
     # ⚠️ 主密钥先于一切：没配置就 503，什么都不生成、不写（设计 §2「事务边界」）。
     keyring = load_keyring(settings)
     moment = now or _now()
     with session_scope(session_factory) as session:
-        project = _resolve_project(session, customer_id, project_id)
+        project = _open_project(session, customer_id, project_id)
         rows = _locked_versions(session, project)
         if any(row.status is WebhookSecretStatus.PENDING for row in rows):
             raise WebhookSecretPendingExists
@@ -256,10 +284,12 @@ def activate_secret(
     已是 ACTIVE：返回当前各版本，什么都不写（幂等）。RETIRED：409
     `WEBHOOK_SECRET_NOT_PENDING`。不需要主密钥。返回全部版本，`key_version` 从小到大。
     真正切换时同一事务重排该项目的投递行（`_rearm_delivery`）。
+    已关户：租户共享锁后、锁项目行之前 409 `ACCOUNT_CLOSED`，已是 ACTIVE 的幂等返回也一样，
+    不存在的 `key_version` 也是 409（设计闸门 #707 v4 §2「契约二」）。
     """
     moment = now or _now()
     with session_scope(session_factory) as session:
-        project = _resolve_project(session, customer_id, project_id)
+        project = _open_project(session, customer_id, project_id)
         rows = _locked_versions(session, project)
         target = _target(rows, key_version)
         if target.status is WebhookSecretStatus.RETIRED:
