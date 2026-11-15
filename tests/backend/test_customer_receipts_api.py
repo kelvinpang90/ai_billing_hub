@@ -62,7 +62,7 @@ from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.payments import Payment
 from app.models.receipts import PaymentReceipt
-from app.models.tenancy import AccountStatus
+from app.models.tenancy import AccountStatus, Tenant
 from app.services.auth import utc_now
 from app.services.receipt_pdf import render_receipt_pdf
 from app.services.receipts import IssuedReceipt, issue_receipt
@@ -546,8 +546,12 @@ def test_another_customers_receipt_is_404_and_not_listed(world, portal) -> None:
 
 @pytest.mark.parametrize("status", [AccountStatus.DISABLED, AccountStatus.CLOSED])
 def test_read_only_accounts_still_list_and_download(world, portal, status) -> None:
-    tenant = world.customer(account_status=status)
+    # 先以 ENABLED 记账、开收据，再直接改库：CLOSED 租户不能再入账（AIH-TASK-209）。
+    tenant = world.customer()
     _, issued = receipted(world, tenant)
+    with world.factory() as session:
+        session.execute(update(Tenant).where(Tenant.id == tenant.id).values(account_status=status))
+        session.commit()
     headers = portal.headers(tenant)
 
     assert listed_receipt_ids(portal, headers) == [issued.public_id]

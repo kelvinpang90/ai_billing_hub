@@ -101,6 +101,9 @@ CHAIN_BROKEN: Final = "CHAIN_BROKEN"
 ROW_ARITHMETIC_BROKEN: Final = "ROW_ARITHMETIC_BROKEN"
 BILLING_STATUS_MISMATCH: Final = "BILLING_STATUS_MISMATCH"
 
+# `TenantClosed` 的问题码，与支付确认与人工入账的 `TENANT_CLOSED` 同一个字符串。
+TENANT_CLOSED: Final = "TENANT_CLOSED"
+
 # `check_wallet_snapshot` 每块账本 SELECT 在 MySQL 上的执行上限（毫秒，设计闸门 #474 v13 §2）。
 LEDGER_CHUNK_TIMEOUT_MS: Final = 60000
 
@@ -133,6 +136,10 @@ class WalletNotFound(LedgerError):
 
 class LedgerConflict(LedgerError):
     """The same financial source was already posted with a different effect."""
+
+
+class TenantClosed(LedgerError):
+    """The tenant is CLOSED: no new ledger row (design gate #707 v3 §2「契约一」)."""
 
 
 @dataclass(frozen=True)
@@ -434,7 +441,8 @@ def post_transaction(
     （设计闸门 #111 v1 §2）。计费状态跃迁的审计不带它们：那一条的操作者是系统。
 
     同一来源 `(reference_type, reference_id)` 已记过时：钱包、类型、金额都一致就
-    返回既有行（`replayed=True`，什么都不写），否则 `LedgerConflict`。
+    返回既有行（`replayed=True`，什么都不写），否则 `LedgerConflict`；这两者都在锁租户
+    之前，不看账户状态。租户已 `CLOSED` 时抛 `TenantClosed`（先于 `BALANCE_OUT_OF_RANGE`）。
     所有校验错误都在任何写入之前抛出。
     """
     kind = coerce_transaction_type(transaction_type)
@@ -462,6 +470,10 @@ def post_transaction(
         return PostResult(transaction=existing, replayed=True)
 
     tenant = _lock_tenant(session, tenant_id)
+    # 关户之后不入账（AIH-TASK-020 的契约）。在租户行锁内判，与关户事务串行；
+    # 重放与冲突已在上面返回或抛出，不看账户状态。此时还没写过任何行。
+    if tenant.account_status is AccountStatus.CLOSED:
+        raise TenantClosed(TENANT_CLOSED)
     # `balance_before` 与序号取自锁内刚刷新的钱包行。
     before = wallet.balance
     after = before + value

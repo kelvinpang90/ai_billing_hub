@@ -42,6 +42,7 @@ from app.models.auth import (
 )
 from app.models.tenancy import AccountStatus, BillingMode, BillingStatus, Project, Tenant
 from app.models.wallet import (
+    DEBIT_TYPES,
     REFERENCE_TYPE_FOR,
     ReferenceType,
     TransactionType,
@@ -58,11 +59,13 @@ from app.repositories.wallet import (
     MAX_PAGE_SIZE,
     REASON_BALANCE_NON_POSITIVE,
     REASON_BALANCE_POSITIVE,
+    TENANT_CLOSED,
     WALLET_MISSING,
     InvalidAmount,
     InvalidTransaction,
     LedgerConflict,
     PostResult,
+    TenantClosed,
     WalletNotFound,
     WalletSummary,
     billing_status_for,
@@ -216,6 +219,21 @@ def public_id_of(factory, tenant_id: int) -> str:
         tenant = session.get(Tenant, tenant_id)
         assert tenant is not None
         return tenant.public_id
+
+
+def force_account_status(factory, tenant_id: int, status: AccountStatus) -> None:
+    """Change the account status directly in the database, as the closure design's tests do.
+
+    不经账户状态服务：不加版本、不写审计、不写出站事件，只为造出这个状态。
+    """
+    with factory() as session:
+        session.execute(update(Tenant).where(Tenant.id == tenant_id).values(account_status=status))
+        session.commit()
+
+
+def all_audit_count(factory) -> int:
+    with factory() as session:
+        return len(list(session.execute(select(AuditLog.id)).scalars()))
 
 
 def wallet_id_of(factory, tenant_id: int) -> int:
@@ -659,6 +677,85 @@ def test_sources_that_differ_only_in_case_or_trailing_space_are_distinct(factory
     assert [result.replayed for result in results] == [False, False, False]
     assert len(ledger_rows(factory, tenant_id)) == 3
     assert state(factory, tenant_id)[0] == Decimal("30")
+
+
+# --- 关户（AIH-TASK-209，设计闸门 #707 v3 §2「契约一」） ------------------------------
+
+
+def _signed_amount(kind: TransactionType) -> str:
+    """A valid amount for `kind`: debits negative, credits and corrections positive."""
+    return "-5" if kind in DEBIT_TYPES else "5"
+
+
+@pytest.mark.parametrize("kind", list(TransactionType), ids=str)
+def test_a_closed_tenant_refuses_every_transaction_type(factory, kind: TransactionType) -> None:
+    """INV-11 / INV-13：锁租户后见 CLOSED 即抛，没有写过任何行。"""
+    tenant_id = make_tenant(factory)
+    admin_id = make_admin(factory)
+    post(factory, tenant_id, TOPUP, "30")
+    force_account_status(factory, tenant_id, AccountStatus.CLOSED)
+    before = state(factory, tenant_id)
+    audit_count = all_audit_count(factory)
+
+    with pytest.raises(TenantClosed) as raised:
+        post(
+            factory,
+            tenant_id,
+            kind,
+            _signed_amount(kind),
+            created_by=admin_id,
+            description="After closure",
+            actor_role="ADMIN",
+        )
+
+    assert str(raised.value) == TENANT_CLOSED
+    # 余额、钱包版本、计费状态、租户 status_version 全都不变。
+    assert state(factory, tenant_id) == before
+    assert len(ledger_rows(factory, tenant_id)) == 1
+    assert all_audit_count(factory) == audit_count
+
+
+def test_all_nine_transaction_types_are_covered() -> None:
+    assert len(TransactionType) == 9
+
+
+def test_a_closed_tenant_still_replays_what_was_posted_before(factory) -> None:
+    """INV-11：查重在锁租户之前，重放不看账户状态；不同效果仍是冲突。"""
+    tenant_id = make_tenant(factory)
+    admin_id = make_admin(factory)
+    force_account_status(factory, tenant_id, AccountStatus.DISABLED)
+    options = {
+        "created_by": admin_id,
+        "description": "Refund paid outside the system",
+        "actor_role": "ADMIN",
+        "reference_id": "adjustment-before-closure",
+    }
+    first = post(factory, tenant_id, TransactionType.ADJUSTMENT_CREDIT, "25", **options)
+    force_account_status(factory, tenant_id, AccountStatus.CLOSED)
+    before = state(factory, tenant_id)
+
+    again = post(factory, tenant_id, TransactionType.ADJUSTMENT_CREDIT, "25", **options)
+    with pytest.raises(LedgerConflict):
+        post(factory, tenant_id, TransactionType.ADJUSTMENT_CREDIT, "26", **options)
+
+    assert (first.replayed, again.replayed) == (False, True)
+    assert again.transaction.public_id == first.transaction.public_id
+    assert state(factory, tenant_id) == before
+    assert len(ledger_rows(factory, tenant_id)) == 1
+    assert len(audits(factory, AuditAction.WALLET_ADJUSTMENT_POSTED)) == 1
+
+
+def test_a_closed_tenant_is_refused_before_the_balance_range(factory) -> None:
+    """检查顺序：CLOSED 先于 BALANCE_OUT_OF_RANGE。"""
+    tenant_id = make_tenant(factory)
+    post(factory, tenant_id, TOPUP, "999999999999")
+    force_account_status(factory, tenant_id, AccountStatus.CLOSED)
+
+    with pytest.raises(TenantClosed):
+        post(factory, tenant_id, TOPUP, "1")
+
+    assert state(factory, tenant_id)[:2] == (Decimal("999999999999"), 1)
+    assert len(ledger_rows(factory, tenant_id)) == 1
 
 
 # --- 原子性（INV-13） ----------------------------------------------------------------

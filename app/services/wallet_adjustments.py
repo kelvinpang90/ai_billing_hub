@@ -36,11 +36,13 @@ from app.repositories.wallet import (
     InvalidAmount,
     InvalidTransaction,
     LedgerConflict,
+    TenantClosed,
     post_transaction,
 )
 from app.schemas.wallet_adjustments import AdjustmentView, adjustment_view
 from app.services.auth import RequestContext, utc_now
 from app.services.customers import CustomerNotFound
+from app.services.project_integration import AccountClosed
 
 # `post_transaction` 的 `InvalidAmount` 问题码里，唯一一个请求校验层挡不住的。
 BALANCE_OUT_OF_RANGE = "BALANCE_OUT_OF_RANGE"
@@ -174,6 +176,10 @@ def _post_once(
             )
     except LedgerConflict:
         raise AdjustmentConflict from None
+    except TenantClosed:
+        # 在记账的租户行锁内判定、任何写入之前（设计闸门 #707 v3 §2「契约一」）；
+        # 关户前已记过的同一个键在锁租户之前就走了重放分支，到不了这里。
+        raise AccountClosed from None
     except InvalidAmount as error:
         if str(error) == BALANCE_OUT_OF_RANGE:
             raise BalanceOutOfRange from None

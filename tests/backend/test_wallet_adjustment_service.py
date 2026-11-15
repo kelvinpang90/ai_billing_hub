@@ -27,7 +27,7 @@ from decimal import Decimal
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, func, select, text
+from sqlalchemy import Engine, create_engine, delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
@@ -36,7 +36,7 @@ from alembic import command
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.tenancy import BillingStatus, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
 from app.models.wallet import TransactionType, Wallet, WalletTransaction
 from app.repositories import tenancy
 from app.repositories import wallet as wallet_repository
@@ -47,6 +47,7 @@ from app.repositories.wallet import (
     InvalidAmount,
     InvalidTransaction,
     LedgerConflict,
+    TenantClosed,
     create_wallet,
     get_wallet_for_tenant,
     verify_wallet,
@@ -55,6 +56,7 @@ from app.schemas.wallet_adjustments import AdjustmentView
 from app.services import wallet_adjustments
 from app.services.auth import RequestContext
 from app.services.customers import CustomerNotFound
+from app.services.project_integration import AccountClosed
 from app.services.wallet_adjustments import (
     AdjustmentConflict,
     AdjustmentRejected,
@@ -310,6 +312,37 @@ def test_an_unknown_customer_is_not_found_and_writes_nothing(factory) -> None:
     with pytest.raises(CustomerNotFound):
         adjust(factory, admin, str(uuid.uuid4()), CREDIT, "20")
 
+    assert snapshot(factory, tenant_id, public_id) == before
+
+
+def force_account_status(factory, tenant_id: int, status: AccountStatus) -> None:
+    """Change the account status directly in the database (no version, audit or outbox)."""
+    with factory() as session:
+        session.execute(update(Tenant).where(Tenant.id == tenant_id).values(account_status=status))
+        session.commit()
+
+
+def test_a_closed_customer_is_refused_and_an_earlier_key_still_replays(factory) -> None:
+    """设计闸门 #707 v3 §7「调账」：CLOSED 客户的新调账 409 `ACCOUNT_CLOSED`、什么都不写；
+    关户前已记的同一幂等键重发仍是重放（查重在锁租户之前，INV-11）。"""
+    admin = make_admin(factory)
+    tenant_id, public_id = make_customer(factory)
+    force_account_status(factory, tenant_id, AccountStatus.DISABLED)
+    key = str(uuid.uuid4())
+    first = adjust(factory, admin, public_id, CREDIT, "20", key=key)
+    force_account_status(factory, tenant_id, AccountStatus.CLOSED)
+    before = snapshot(factory, tenant_id, public_id)
+
+    with pytest.raises(AccountClosed) as raised:
+        adjust(factory, admin, public_id, CREDIT, "20")
+
+    assert (raised.value.code, raised.value.http_status) == ("ACCOUNT_CLOSED", 409)
+    assert snapshot(factory, tenant_id, public_id) == before
+
+    again = adjust(factory, admin, public_id, CREDIT, "20", key=key)
+
+    assert first.replayed is False and again.replayed is True
+    assert again.id == first.id
     assert snapshot(factory, tenant_id, public_id) == before
 
 
@@ -576,8 +609,15 @@ def test_an_operational_error_is_not_retried(sqlite_factory, monkeypatch) -> Non
         (InvalidAmount("BALANCE_OUT_OF_RANGE"), BalanceOutOfRange, "BALANCE_OUT_OF_RANGE", 422),
         (InvalidAmount("AMOUNT_ZERO"), AdjustmentRejected, "VALIDATION_ERROR", 422),
         (InvalidTransaction("REASON_REQUIRED"), AdjustmentRejected, "VALIDATION_ERROR", 422),
+        (TenantClosed("TENANT_CLOSED"), AccountClosed, "ACCOUNT_CLOSED", 409),
     ],
-    ids=["conflict", "balance-out-of-range", "invalid-amount", "invalid-transaction"],
+    ids=[
+        "conflict",
+        "balance-out-of-range",
+        "invalid-amount",
+        "invalid-transaction",
+        "tenant-closed",
+    ],
 )
 def test_ledger_errors_map_to_their_http_errors(
     sqlite_factory, monkeypatch, failure, error, code: str, status: int
