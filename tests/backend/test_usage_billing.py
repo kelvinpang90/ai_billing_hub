@@ -18,7 +18,8 @@ dimensions in test_usage_alerts.py):
   the order «three shared locks, then the clock»;
 - **跨零停机** (SQLite and MySQL) — 0.0625 − 0.125: SUSPENDED with the ledger row, `status_version`
   + 1, the audit and the outbox row; exactly 0 is SUSPENDED; debits while suspended move nothing;
-- **`DISABLED` / `CLOSED` 租户**;
+- **`DISABLED` / `CLOSED` 租户**; design gate #707 v3 §7「计费 ② 照旧」and「计费旧值窗口」(MySQL:
+  ② reads a stale DISABLED, ⑧'s tenant lock reads CLOSED, `TenantClosed` settles the event);
 - **退避与上限** — 2^n capped at 300 seconds; FAILED_FINAL at the 10th attempt;
 - **事务中途失败** (SQLite and MySQL) — the event write after `post_transaction` raises: ledger,
   wallet, transition, audit and outbox all roll back; the attempt is recorded apart;
@@ -1303,18 +1304,90 @@ def test_a_disabled_tenant_is_billed_as_usual(world) -> None:
     assert len(world.usage_rows(tenant)) == 1
 
 
-def test_a_closed_tenant_is_failed_final_without_a_ledger_row(world) -> None:
+def _refuse_record_failure(monkeypatch: pytest.MonkeyPatch) -> list[Claim]:
+    """Make any call of `record_failure` visible: the closed paths must never retry."""
+    recorded: list[Claim] = []
+
+    def record(factory, claim, **kwargs):
+        recorded.append(claim)
+        return None
+
+    monkeypatch.setattr(usage_billing, "record_failure", record)
+    return recorded
+
+
+def test_a_closed_tenant_is_failed_final_without_a_ledger_row(world, monkeypatch) -> None:
+    """Design gate #707 v3 §7「计费 ② 照旧」: closed before the claim, ② settles it."""
     world.publish_markup_usd()
     tenant = world.tenant()
     world.fund(tenant, OPENING)
     world.set_account_status(tenant, AccountStatus.CLOSED)
     event_id = world.event(tenant)
+    recorded = _refuse_record_failure(monkeypatch)
 
-    world.bill()
+    result = world.bill()
 
+    assert result.outcomes == {Outcome.FAILED_FINAL: 1}
+    assert recorded == []
     row = world.row(event_id)
     assert (row.status, row.error_code) == (UsageEventStatus.FAILED_FINAL, "ACCOUNT_CLOSED")
     _assert_unbilled(world, tenant, row)
+
+
+def test_a_tenant_closed_after_step_two_is_refused_by_the_ledger(
+    mysql_world, monkeypatch, caplog
+) -> None:
+    """Design gate #707 v3 §7「计费旧值窗口」: ② reads DISABLED, ⑧'s tenant lock reads CLOSED.
+
+    The tenant is loaded into the billing session's identity map first, so ② (`session.get`)
+    returns that stale object; then another session commits CLOSED. `post_transaction` locks the
+    tenant with `populate_existing`, sees CLOSED and raises `TenantClosed` before any write; ⑧
+    settles the event. Two real connections are needed, so MySQL only.
+    """
+    world = mysql_world
+    world.publish_markup_usd()
+    tenant = world.tenant()
+    world.fund(tenant, OPENING)
+    world.set_account_status(tenant, AccountStatus.DISABLED)
+    event_id = world.event(tenant)
+    [claim] = world.claim()
+    recorded = _refuse_record_failure(monkeypatch)
+    original = usage_billing._process
+    seen: list[AccountStatus] = []
+
+    def stale_then_close(session: Session, held: Claim, clock) -> Outcome:
+        loaded = session.get(Tenant, tenant.id)
+        assert loaded is not None
+        seen.append(loaded.account_status)
+        world.set_account_status(tenant, AccountStatus.CLOSED)
+        outcome = original(session, held, clock)
+        # ② used the stale object; the ledger's lock refreshed it.
+        seen.append(loaded.account_status)
+        return outcome
+
+    monkeypatch.setattr(usage_billing, "_process", stale_then_close)
+
+    with caplog.at_level("INFO"):
+        outcome = usage_billing.process_event(
+            world.factory, claim, max_attempts=MAX_ATTEMPTS, clock=world.clock
+        )
+
+    assert outcome is Outcome.FAILED_FINAL
+    assert seen == [AccountStatus.DISABLED, AccountStatus.CLOSED]
+    assert recorded == []
+    row = world.row(event_id)
+    assert (row.status, row.error_code) == (UsageEventStatus.FAILED_FINAL, "ACCOUNT_CLOSED")
+    assert row.attempt_count == 1
+    _assert_unbilled(world, tenant, row)
+    assert world.tenant_row(tenant).account_status is AccountStatus.CLOSED
+    assert world.verify(tenant) == []
+    records = [r for r in caplog.records if r.name == "app.services.usage_billing"]
+    assert [r.levelname for r in records] == ["INFO"]
+    assert records[0].__dict__["event_id"] == row.event_id
+    assert records[0].__dict__["tenant_id"] == tenant.id
+    # No amount in the line.
+    message = records[0].getMessage()
+    assert str(MARKUP_BILLABLE) not in message and str(OPENING) not in message
 
 
 # --- crossing zero (§7, ADR-0010), SQLite and MySQL ------------------------------------
