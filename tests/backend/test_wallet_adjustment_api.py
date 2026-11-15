@@ -22,7 +22,7 @@ import uuid
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, select, text, update
 from sqlalchemy.pool import StaticPool
 
 from app.api import admin_customers
@@ -33,7 +33,7 @@ from app.core.tokens import issue_access_token
 from app.main import create_app
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.tenancy import Tenant
+from app.models.tenancy import AccountStatus, Tenant
 from app.models.wallet import Wallet, WalletTransaction
 from app.repositories.tenancy import create_tenant
 from app.services.auth import utc_now
@@ -537,6 +537,73 @@ def test_a_key_used_on_one_customer_conflicts_on_another(client, app, admin) -> 
     with app.state.session_factory() as session:
         tenant = session.execute(select(Tenant).where(Tenant.public_id == second)).scalar_one()
         assert (tenant.billing_status.value, tenant.status_version) == ("SUSPENDED", 0)
+
+
+# --- 关户（设计闸门 #707 v3 §7「调账」，AIH-TASK-209） ------------------------------------
+
+
+def force_account_status(application: FastAPI, customer_id: str, value: AccountStatus) -> None:
+    """造数据：直接改库（设计 §7）。"""
+    with application.state.session_factory() as session:
+        session.execute(
+            update(Tenant).where(Tenant.public_id == customer_id).values(account_status=value)
+        )
+        session.commit()
+
+
+def wallet_of(application: FastAPI, customer_id: str) -> tuple[object, int]:
+    with application.state.session_factory() as session:
+        statement = (
+            select(Wallet.balance, Wallet.version)
+            .join(Tenant, Tenant.id == Wallet.tenant_id)
+            .where(Tenant.public_id == customer_id)
+        )
+        balance, version = session.execute(statement).one()
+        return balance, version
+
+
+def test_a_closed_customer_cannot_be_adjusted(client, app, admin) -> None:
+    """409 `ACCOUNT_CLOSED`：账本、钱包、审计、状态都不变；响应里没有原因。"""
+    customer_id = new_customer(client, admin)
+    force_account_status(app, customer_id, AccountStatus.CLOSED)
+    before = row_counts(app)
+    wallet_before = wallet_of(app, customer_id)
+    body = adjustment(reason="Probe reason 7a1f")
+
+    response = client.post(adjustments_url(customer_id), json=body, headers=admin)
+
+    assert (response.status_code, error_code(response)) == (409, "ACCOUNT_CLOSED")
+    assert "Probe reason 7a1f" not in response.text
+    assert row_counts(app) == before
+    assert wallet_of(app, customer_id) == wallet_before
+    assert ledger(app) == []
+    assert audits(app, AuditAction.WALLET_ADJUSTMENT_POSTED) == []
+    with app.state.session_factory() as session:
+        tenant = session.execute(select(Tenant).where(Tenant.public_id == customer_id)).scalar_one()
+        assert (tenant.account_status, tenant.status_version) == (AccountStatus.CLOSED, 0)
+
+
+def test_a_key_posted_before_closure_replays_after_it(client, app, admin) -> None:
+    """关户前已记的同一幂等键重发：200、`replayed` 为真，账本字段与第一次逐字相同，什么都不写。"""
+    customer_id = new_customer(client, admin)
+    force_account_status(app, customer_id, AccountStatus.DISABLED)
+    body = adjustment()
+    first = client.post(adjustments_url(customer_id), json=body, headers=admin)
+    assert first.status_code == 201, first.text
+    force_account_status(app, customer_id, AccountStatus.CLOSED)
+    before = row_counts(app)
+    wallet_before = wallet_of(app, customer_id)
+
+    again = client.post(adjustments_url(customer_id), json=body, headers=admin)
+
+    assert again.status_code == 200, again.text
+    one, two = first.json()["data"], again.json()["data"]
+    assert two["replayed"] is True
+    assert {field for field in LEDGER_FIELDS if one[field] == two[field]} == LEDGER_FIELDS
+    assert row_counts(app) == before
+    assert wallet_of(app, customer_id) == wallet_before
+    assert len(ledger(app)) == 1
+    assert len(audits(app, AuditAction.WALLET_ADJUSTMENT_POSTED)) == 1
 
 
 # --- 租户越权与数据不一致 -------------------------------------------------------

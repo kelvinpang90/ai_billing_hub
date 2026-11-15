@@ -27,7 +27,7 @@ from decimal import Decimal
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, delete, func, select, text
+from sqlalchemy import Engine, create_engine, delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
@@ -36,7 +36,7 @@ from alembic import command
 from app.core.database import create_session_factory
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.tenancy import BillingStatus, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingStatus, Project, Tenant
 from app.models.wallet import TransactionType, Wallet, WalletTransaction
 from app.repositories import tenancy
 from app.repositories import wallet as wallet_repository
@@ -47,6 +47,7 @@ from app.repositories.wallet import (
     InvalidAmount,
     InvalidTransaction,
     LedgerConflict,
+    TenantClosed,
     create_wallet,
     get_wallet_for_tenant,
     verify_wallet,
@@ -55,6 +56,7 @@ from app.schemas.wallet_adjustments import AdjustmentView
 from app.services import wallet_adjustments
 from app.services.auth import RequestContext
 from app.services.customers import CustomerNotFound
+from app.services.project_integration import AccountClosed
 from app.services.wallet_adjustments import (
     AdjustmentConflict,
     AdjustmentRejected,
@@ -506,6 +508,58 @@ def test_a_replay_reports_the_status_committed_after_the_tenant_was_read(
     assert (replay.billing_status, replay.status_version) == ("ACTIVE", 1)
 
 
+# --- 关户（设计闸门 #707 v3 §2「契约一」、§7「调账」，AIH-TASK-209） ---------------------
+
+
+def force_account_status(factory, tenant_id: int, value: AccountStatus) -> None:
+    """造数据：直接改库（设计 §7）。"""
+    with factory() as session:
+        session.execute(update(Tenant).where(Tenant.id == tenant_id).values(account_status=value))
+        session.commit()
+
+
+def test_a_closed_customer_cannot_be_adjusted(factory) -> None:
+    """记账的租户行锁内读到 CLOSED：409 `ACCOUNT_CLOSED`，账本、钱包、审计、状态都不变。"""
+    admin = make_admin(factory)
+    tenant_id, public_id = make_customer(factory)
+    force_account_status(factory, tenant_id, AccountStatus.CLOSED)
+    before = snapshot(factory, tenant_id, public_id)
+
+    for kind, amount in ((CREDIT, "20"), (DEBIT, "-5")):
+        with pytest.raises(AccountClosed) as raised:
+            adjust(factory, admin, public_id, kind, amount, reason="Probe reason 5c2e")
+        assert (raised.value.code, raised.value.http_status) == ("ACCOUNT_CLOSED", 409)
+        assert "Probe reason 5c2e" not in raised.value.message
+
+    assert snapshot(factory, tenant_id, public_id) == before
+    assert before["ledger"] == 0 and before["audits"] == 0
+
+
+def test_a_key_posted_before_closure_still_replays(factory) -> None:
+    """关户前已记的同一幂等键重发：照旧重放（查重在锁租户之前），什么都不写。"""
+    admin = make_admin(factory)
+    tenant_id, public_id = make_customer(factory)
+    force_account_status(factory, tenant_id, AccountStatus.DISABLED)
+    key = str(uuid.uuid4())
+    first = adjust(factory, admin, public_id, CREDIT, "20", key=key)
+    force_account_status(factory, tenant_id, AccountStatus.CLOSED)
+    before = snapshot(factory, tenant_id, public_id)
+
+    replay = adjust(factory, admin, public_id, CREDIT, "20", key=key)
+
+    assert replay.replayed is True
+    assert replay.id == first.id
+    assert (replay.balance_before, replay.balance_after) == (
+        first.balance_before,
+        first.balance_after,
+    )
+    assert snapshot(factory, tenant_id, public_id) == before
+    # 同一个键配了别的金额：仍是冲突，先于 CLOSED。
+    with pytest.raises(AdjustmentConflict):
+        adjust(factory, admin, public_id, CREDIT, "21", key=key)
+    assert snapshot(factory, tenant_id, public_id) == before
+
+
 # --- 重试与错误映射（SQLite，替身） -----------------------------------------------
 
 
@@ -576,8 +630,15 @@ def test_an_operational_error_is_not_retried(sqlite_factory, monkeypatch) -> Non
         (InvalidAmount("BALANCE_OUT_OF_RANGE"), BalanceOutOfRange, "BALANCE_OUT_OF_RANGE", 422),
         (InvalidAmount("AMOUNT_ZERO"), AdjustmentRejected, "VALIDATION_ERROR", 422),
         (InvalidTransaction("REASON_REQUIRED"), AdjustmentRejected, "VALIDATION_ERROR", 422),
+        (TenantClosed("TENANT_CLOSED"), AccountClosed, "ACCOUNT_CLOSED", 409),
     ],
-    ids=["conflict", "balance-out-of-range", "invalid-amount", "invalid-transaction"],
+    ids=[
+        "conflict",
+        "balance-out-of-range",
+        "invalid-amount",
+        "invalid-transaction",
+        "tenant-closed",
+    ],
 )
 def test_ledger_errors_map_to_their_http_errors(
     sqlite_factory, monkeypatch, failure, error, code: str, status: int

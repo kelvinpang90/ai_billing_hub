@@ -63,6 +63,7 @@ from app.repositories.wallet import (
     InvalidTransaction,
     LedgerConflict,
     PostResult,
+    TenantClosed,
     WalletNotFound,
     WalletSummary,
     billing_status_for,
@@ -1355,3 +1356,110 @@ def test_several_postings_in_one_transaction(factory) -> None:
     assert len(status_audits(factory, public_id)) == 1
     with factory() as session:
         assert verify_wallet(session, tenant_id) == []
+
+
+# --- 关户（设计闸门 #707 v3 §2「契约一」，AIH-TASK-209） ------------------------------------
+
+
+def force_account_status(engine: Engine, tenant_id: int, value: AccountStatus) -> None:
+    """造数据：直接改库（设计 §7：造 CLOSED 租户用直接改库）。不碰 status_version。"""
+    with engine.begin() as connection:
+        connection.execute(
+            update(Tenant).where(Tenant.id == tenant_id).values(account_status=value)
+        )
+
+
+def audit_count(factory) -> int:
+    with factory() as session:
+        return len(list(session.execute(select(AuditLog.id)).scalars()))
+
+
+# 九种类型各一笔；借方的金额都会让余额 30 跨零，没被拒绝的话必然有跃迁。
+_CLOSED_POSTINGS = [
+    (TransactionType.TOPUP, "10", False),
+    (TransactionType.AI_USAGE, "-35", False),
+    (TransactionType.ADJUSTMENT_CREDIT, "5", True),
+    (TransactionType.ADJUSTMENT_DEBIT, "-35", True),
+    (TransactionType.REBILL_CREDIT, "5", False),
+    (TransactionType.REBILL_DEBIT, "-35", False),
+    (TransactionType.REFUND_ADJUSTMENT, "-35", True),
+    (TransactionType.BONUS, "5", True),
+    (TransactionType.SYSTEM_CORRECTION, "-35", False),
+]
+
+
+def test_the_closed_postings_cover_every_transaction_type() -> None:
+    assert {kind for kind, _amount, _actor in _CLOSED_POSTINGS} == set(TransactionType)
+
+
+def test_a_closed_tenant_gets_no_posting_of_any_type(factory, engine) -> None:
+    """§7「post_transaction 拒绝」：九种类型逐一记账都抛 TenantClosed，什么都没写。"""
+    tenant_id = make_tenant(factory, threshold="20")
+    admin_id = make_admin(factory)
+    public_id = public_id_of(factory, tenant_id)
+    post(factory, tenant_id, TOPUP, "30")
+    force_account_status(engine, tenant_id, AccountStatus.CLOSED)
+    before = state(factory, tenant_id)
+    assert before == (Decimal("30"), 1, BillingStatus.ACTIVE, 1)
+    audits_before = audit_count(factory)
+
+    for kind, amount, needs_actor in _CLOSED_POSTINGS:
+        options: dict[str, object] = {"description": "Closure test", "actor_role": "ADMIN"}
+        if needs_actor:
+            options["created_by"] = admin_id
+        with pytest.raises(TenantClosed) as raised:
+            post(factory, tenant_id, kind, amount, **options)
+        assert str(raised.value) == "TENANT_CLOSED"
+
+    assert state(factory, tenant_id) == before
+    assert len(ledger_rows(factory, tenant_id)) == 1
+    assert audit_count(factory) == audits_before
+    assert len(status_events(factory, public_id)) == 1
+    assert events(factory, EVENT_LOW_BALANCE, public_id) == []
+    with factory() as session:
+        assert verify_wallet(session, tenant_id) == []
+
+
+def test_a_closed_tenant_still_replays_and_conflicts_on_an_earlier_source(factory, engine) -> None:
+    """§7「重放」：查重在锁租户之前、不看账户状态（INV-11）。"""
+    tenant_id = make_tenant(factory)
+    admin_id = make_admin(factory)
+    force_account_status(engine, tenant_id, AccountStatus.DISABLED)
+    adjustment = {
+        "created_by": admin_id,
+        "description": "Goodwill credit",
+        "actor_role": "ADMIN",
+        "reference_id": "adjustment-before-closure",
+    }
+    credit = TransactionType.ADJUSTMENT_CREDIT
+    first = post(factory, tenant_id, credit, "5", **adjustment)
+    force_account_status(engine, tenant_id, AccountStatus.CLOSED)
+    before = state(factory, tenant_id)
+    audits_before = audit_count(factory)
+
+    replayed = post(factory, tenant_id, credit, "5", **adjustment)
+    with pytest.raises(LedgerConflict):
+        post(factory, tenant_id, credit, "6", **adjustment)
+
+    assert (first.replayed, replayed.replayed) == (False, True)
+    assert replayed.transaction.public_id == first.transaction.public_id
+    assert state(factory, tenant_id) == before
+    assert len(ledger_rows(factory, tenant_id)) == 1
+    assert audit_count(factory) == audits_before
+
+
+def test_closed_is_checked_before_the_balance_range(factory, engine) -> None:
+    """§7「检查顺序」：CLOSED 且这一笔会让余额越界时，抛 TenantClosed。
+
+    而不是 BALANCE_OUT_OF_RANGE。
+    """
+    tenant_id = make_tenant(factory)
+    post(factory, tenant_id, TOPUP, "999999999999")
+    force_account_status(engine, tenant_id, AccountStatus.CLOSED)
+    before = state(factory, tenant_id)
+
+    with pytest.raises(TenantClosed):
+        post(factory, tenant_id, TOPUP, "1")
+
+    assert state(factory, tenant_id) == before
+    assert len(ledger_rows(factory, tenant_id)) == 1
