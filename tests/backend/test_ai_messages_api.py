@@ -49,7 +49,7 @@ from app.ai_api.provider import (
     ProviderRejectedRequest,
     ProviderUnavailable,
 )
-from app.ai_api.routes import AiRuntime, router
+from app.ai_api.routes import AiRuntime, _read_limits, router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.core.middleware import RequestContextMiddleware
@@ -984,6 +984,12 @@ def test_request_path_writes_only_the_outbox(world: World) -> None:
 
 # --- 时限与取消（设计 §7「时限与取消」，缩小的时限） ---
 
+# 墙钟上限 = 时限 + 这份余量。上限只需把「到时限被切断」与「挂到下一个更大的时限 /
+# 一直挂住」分开：鉴权读不切断就挂满 Blocker 的 30 秒；供应商预算不切断就挂到截止时间
+# 推出的 3.2 秒，或一直挂住。余量原为 1 秒，CI 上 4 个 xdist worker 抢 CPU 时实测超出
+# 时限 1.05 秒（鉴权读 0.4 秒那条跑了 1.45 秒）。
+OVERRUN_SLACK_SECONDS = 2.0
+
 
 class Blocker:
     """Make a sync database call hang on an event, counting how many run at once."""
@@ -1029,7 +1035,7 @@ def test_hung_auth_read_returns_503_within_its_limit(
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "AI_STORE_UNAVAILABLE"
-    assert 0.4 <= elapsed < 0.4 + 1.0
+    assert 0.4 <= elapsed < 0.4 + OVERRUN_SLACK_SECONDS
     assert fast_world.provider_bodies == []
     _drain(fast_world)
     assert fast_world.rows() == []
@@ -1047,6 +1053,12 @@ def test_hung_provider_and_slow_trickle_are_cut_at_the_budget(
 
         return httpx2.Response(200, content=chunks())
 
+    # 上限要分得出「预算被 min(...) 截到 1.0 秒」与「没截断、跑到截止时间推出的预算」：
+    # fixture 的时限一改、两者靠得太近，这里先失败，而不是让用例悄悄失去区分能力。
+    settings = provider_budget_world.app.state.settings
+    _, write_limit = _read_limits(settings)
+    assert settings.ai_request_deadline_seconds - write_limit > 1.0 + OVERRUN_SLACK_SECONDS
+
     for respond in (_hang, trickle):
         provider_budget_world.respond = respond
         started = time.monotonic()
@@ -1055,7 +1067,7 @@ def test_hung_provider_and_slow_trickle_are_cut_at_the_budget(
 
         assert response.status_code == 502
         assert response.json()["error"]["code"] == "AI_PROVIDER_UNAVAILABLE"
-        assert 1.0 <= elapsed < 1.0 + 1.0
+        assert 1.0 <= elapsed < 1.0 + OVERRUN_SLACK_SECONDS
     assert provider_budget_world.rows() == []
 
 
@@ -1071,8 +1083,8 @@ def test_hung_outbox_write_holds_usage_within_its_limit(
 
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "AI_USAGE_NOT_PERSISTED"
-        # 计时含鉴权读库：上限给足读时限 1.4 秒，再加写时限 3.0 秒与 1 秒余量。
-        assert 3.0 <= elapsed < 1.4 + 3.0 + 1.0
+        # 计时含鉴权读库：上限给足读时限 1.4 秒，再加写时限 3.0 秒与余量。
+        assert 3.0 <= elapsed < 1.4 + 3.0 + OVERRUN_SLACK_SECONDS
         # 超时那一刻 CRITICAL 与暂存已经存在，不等卡住的线程回来。
         critical = [r for r in caplog.records if r.getMessage() == "AI usage not persisted"]
         assert [r.levelno for r in critical] == [logging.CRITICAL]
