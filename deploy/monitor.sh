@@ -3,7 +3,7 @@
 # 生产巡检：容器健康 + `/readyz` 降级 + 磁盘水位（spec §94 的磁盘告警、§95 的告警通道；T0.9），
 # 外加应用自己报的告警维度（`GET /internal/alerts`，每行一个维度；设计闸门 #183 v3）。
 #
-# ⚠️ **这个脚本补的是三个「不会有人发现」的故障**，三个都不会让任何请求报错：
+# ⚠️ **这个脚本补的是四个「不会有人发现」的故障**，四个都不会让任何请求报错：
 #   1. celery-beat 停了 —— 周期任务全停，API 一切正常，日志里什么都没有
 #      （探针早就有了，见 docker-compose.yml；缺的一直是**把 unhealthy 送到人手里**）
 #   2. Redis 不可用 —— `/readyz` **刻意**返回 200（app/api/health.py 写了理由），
@@ -12,11 +12,19 @@
 #   3. 磁盘被日志 / binlog 撑满 —— §94 明写：必须在**威胁到 MySQL / 文档存储之前**告警
 #      —— 宿主机层面另外两件同样安静的事并在同一个维度里（AIH-TASK-150）：对外域名的
 #      TLS 证书快到期（证书由共享基建续期，这里只负责发现），以及主机时钟没在做 NTP 同步
+#   4. celery-worker 活着但处理不过来（或卡在某个任务上）—— 容器照样 healthy，表现只是
+#      投递、计费、对账慢慢滞后（AIH-TASK-208）：services 维度在逐个检查容器之后，
+#      再读 Redis broker 里 Celery 默认队列的长度，超过阈值报 P2
 #
 # ⚠️ **TLS 与时钟为什么并进 disk、而不是各自一个检查**：Healthchecks 免费档的 20 个检查已经用满。
 # disk 很少变红，并在它里面被别的问题遮住的概率最低。代价是第 1 条取舍要避免的那种：
 # disk 已经红着时，证书或时钟出事**不会再单独通知** —— 收到 disk 的通知后要看
 # `journalctl -t billing-monitor -p err` 里的**每一行**。
+#
+# ⚠️ **Celery 队列积压为什么并进 services、而不是新开一个检查**：同一个理由，免费档 20 个
+# 已用满（2026-10-17 Kelvin 定：不再新增检查，新的巡检项一律并进已有维度）。它并进 services
+# 是因为两者是同一件事 ——「异步链路的那几个容器在不在干活」，复核时随 check_services 一起重跑。
+# 代价同上：services 已经红着时，积压不会再单独通知。
 #
 # 由 cron 每 5 分钟跑一次（deploy/cron.d/ai_billing_hub）。
 #
@@ -64,6 +72,18 @@ TLS_WARN_DAYS="${BILLING_MONITOR_TLS_WARN_DAYS:-21}"
 # ⚠️ 剩 7 天以内（或已过期）是 P1：再拖下去，浏览器与客户的集成调用会直接拒绝连接，
 # 而续期这件事不在本项目手里，要留出找人的时间。
 TLS_CRIT_DAYS="${BILLING_MONITOR_TLS_CRIT_DAYS:-7}"
+
+# Celery broker 在 Redis 里的库号。⚠️ 必须与 docker-compose.yml 里 BILLING_REDIS_URL
+# （`redis://redis:6379/0`）的库号一致 —— 读错了库，LLEN 对不存在的键永远回 0，告警永远不响。
+CELERY_REDIS_DB=0
+# Celery 的默认队列名：app/core/celery_app.py 没有配置 task_default_queue，任务都进 `celery`。
+CELERY_QUEUE=celery
+# 队列积压的告警线（条）。正常时队列接近 0：worker 取得比 Beat 投得快，周期任务只在
+# worker 跟不上（处理不过来或卡在某个任务上）时才会堆起来，所以几百条已经是明确的信号。
+# ⚠️ Redis 设了 maxmemory 与 allkeys-lru（docker-compose.yml）：积压再涨下去，**消息本身会被
+# 淘汰**，那时队列反而变短。这条告警必须在那之前响 —— 调高它只会让告警来得更晚。
+CELERY_QUEUE_WARN_DEFAULT=500
+CELERY_QUEUE_WARN="${BILLING_MONITOR_CELERY_QUEUE_WARN:-$CELERY_QUEUE_WARN_DEFAULT}"
 
 # 发现问题后隔多久复核一次。⚠️ 不复核的话，**一次正常部署就会误报**：deploy.sh
 # 换版本时容器会有半分钟左右不是 healthy，而那段时间照样可能撞上这个 cron。
@@ -139,6 +159,35 @@ check_services() {
             echo "$sev $svc health=${health:-none}"
         fi
     done
+    # 队列积压并在这个维度里（免费档已用满，见文件头）；复核时随 check_services 一起重跑。
+    check_celery_queue
+}
+
+check_celery_queue() {
+    local warn="$CELERY_QUEUE_WARN" len
+    case "$warn" in
+        '' | *[!0-9]*)
+            log "BILLING_MONITOR_CELERY_QUEUE_WARN is not a non-negative integer; using ${CELERY_QUEUE_WARN_DEFAULT}" >&2
+            warn="$CELERY_QUEUE_WARN_DEFAULT"
+            ;;
+    esac
+    # ⚠️ `timeout 10`：redis 卡住时 redis-cli 会一直等，整轮巡检就拖过下一个 cron 周期。
+    # ⚠️ `|| true` 写在命令替换里面，理由同 check_binlog（`set -e`）。
+    len="$(timeout 10 $COMPOSE exec -T redis redis-cli -n "$CELERY_REDIS_DB" LLEN "$CELERY_QUEUE" 2>/dev/null || true)"
+    # 去首尾空白（含 exec 带出来的 \r）；中间的空白不去，多行输出照样算「不是整数」。
+    len="${len#"${len%%[![:space:]]*}"}"
+    len="${len%"${len##*[![:space:]]}"}"
+    case "$len" in
+        '' | *[!0-9]*)
+            # ⚠️ 量不到**不报警**，与 check_binlog 同一条理由：redis 停了已由上面的容器检查报出，
+            # 在这里再报一次只是双响。走 stderr：本函数的 stdout 就是问题清单。
+            log "celery queue length unavailable; skipping the queue check" >&2
+            return 0
+            ;;
+    esac
+    if [ "$len" -ge "$warn" ]; then
+        echo "P2 celery queue backlog ${len} (warn ${warn})"
+    fi
 }
 
 check_readyz() {

@@ -273,6 +273,79 @@ beat 停多久都不会毁掉已持久化的工作，恢复之后会自然补上
 
 ---
 
+## Celery 队列积压
+
+**首次编写：2026-11-15（AIH-TASK-208）。依据：[deployment.md](deployment.md) §8.1。**
+
+⚠️ **容器照样是 healthy。**celery-worker 活着但处理不过来、或卡在某个任务上时，它的探针仍然通过，
+API 一切正常 —— 唯一的现象是投递、计费、对账**慢慢滞后**。这条告警读的是 broker 里的队列长度。
+
+### 怎么发现
+
+```text
+条件：宿主机每 5 分钟（services 维度逐个查完容器之后）
+     timeout 10 docker compose exec -T redis redis-cli -n 0 LLEN celery
+     （库号与 docker-compose.yml 的 BILLING_REDIS_URL 一致；celery 是 Celery 的默认队列）
+分级：长度 ≥ 500 = P2（BILLING_MONITOR_CELERY_QUEUE_WARN）
+通知：并在 Healthchecks.io 检查 `ai_billing_hub services` 里 → Telegram；状态翻转才发，恢复再发一次
+正文：P2 celery queue backlog <N> (warn 500)
+```
+
+⚠️ **它没有自己的检查**（免费档 20 个已用满，2026-10-17 定）。`services` 已经因为别的原因红着时，积压**不会再通知一次**；
+收到 services 的通知后要看 `journalctl -t billing-monitor -p err` 里的**全部**行。
+
+读不到长度（redis 没在跑、命令失败或超时）时这项跳过、不报，日志里是
+`celery queue length unavailable; skipping the queue check` —— redis 停了已由同一维度的 `redis` 那一行报出。
+
+正常时队列接近 0：Beat 的周期任务只在 worker 跟不上时才会堆起来。⚠️ Redis 设了 `maxmemory` 与 `allkeys-lru`
+（`docker-compose.yml`），积压再涨下去**消息会被淘汰**，那时队列反而变短 —— 告警消失不一定是恢复了。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 所有 API 端点，收用量事件、落库、返回 `202` | 异步投递、用量计费、对账扫描**滞后**，滞后随积压增长 |
+| 数据完整性 —— 持久工作在 MySQL（`domain_outbox` 等），行都在 | 跨了会计期 cut-off 的积压会变成上期调整（见 [ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)） |
+
+**没有数据丢失。** Redis 只承载触发（spec §74.6）；即便消息被淘汰，INV-14 也靠周期恢复补回。
+
+### 立刻做什么
+
+1. 看 celery-worker 日志，判断是**处理不过来**还是**卡在某个任务上**：
+
+   ```bash
+   docker compose logs --since 30m celery-worker | tail -200
+   docker compose exec celery-worker celery -A app.worker inspect active
+   ```
+
+   同一个任务 id 一直出现在 `active` 里、日志长时间没有新的 `succeeded`，就是卡住了
+2. 确认 Beat 没有重复调度：`docker compose ps celery-beat` 只有**一个**在跑；日志里同一个周期任务
+   每个周期只派发一次。两个 beat 会让同一批周期任务进队列两次（见「celery-beat 停止调度」）
+3. 再读一次长度，看是在涨还是在落：
+
+   ```bash
+   docker compose exec -T redis redis-cli -n 0 LLEN celery
+   ```
+
+4. 卡住或一直只涨不落时，重启 worker：`docker compose restart celery-worker`。进行中的任务会被中断，
+   任务幂等、持久工作在 MySQL，由周期恢复补上
+
+### 恢复
+
+1. 队列长度回落到接近 0
+2. 下一轮巡检 `ai_billing_hub services` 回到 **up**（前提是同一维度没有别的行）
+3. 盯 `domain_outbox` 的 `PENDING` 行数与计费积压回落；反复积压时看 worker 并发（deployment.md §3.2）是否该调
+
+### 绝不能做什么
+
+- **不要清空 Redis 或删队列**（`FLUSHDB` / `FLUSHALL` / `DEL celery`）来「让它快点恢复」。持久工作在 MySQL，
+  INV-14 靠周期恢复补回 —— 清队列丢掉的只是触发，**只会让恢复多等一轮**
+- **不要调高 `BILLING_MONITOR_CELERY_QUEUE_WARN`** 来让告警安静：积压过大时 Redis 会按 `allkeys-lru` 淘汰消息，
+  这条告警必须在那之前响
+- **不要为了「快点消化」多起一个 beat**：同一批周期任务会被派发两次，积压只会更大
+
+---
+
 ## TLS 证书即将到期或读不到
 
 **首次编写：2026-11-03（AIH-TASK-150）。依据：[deployment.md](deployment.md) §8.1。**

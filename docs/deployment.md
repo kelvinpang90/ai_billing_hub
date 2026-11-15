@@ -1037,6 +1037,7 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 | 告警 | 判据 | 阈值 / 分级 | 通知 | 抑制 | runbook |
 | --- | --- | --- | --- | --- | --- |
 | 容器不健康（含 **celery-beat 停止调度**） | `docker compose ps` 的 `State` / `Health`，七个服务逐个查 | 非 `running` 或非 `healthy`；`mysql` / `api` / `billing_nginx` / `frontend` = **P1**，`redis` / `celery-worker` / `celery-beat` = **P2** | Telegram（检查 `ai_billing_hub services`） | 状态翻转才通知，红着的期间不重复 | [celery-beat 停止调度](runbook.md) |
+| **Celery 队列积压**（AIH-TASK-208，并进 services 检查） | 七个服务逐个查完之后，`timeout 10 docker compose exec -T redis redis-cli -n 0 LLEN celery`：broker 库号与 `docker-compose.yml` 的 `BILLING_REDIS_URL` 一致，`celery` 是未配置 `task_default_queue` 时的默认队列。输出不是非负整数（redis 没在跑、命令失败、超时、为空）时跳过、不报，只记 stderr —— redis 停了已由上一行报出 | 长度 ≥ **500** = **P2**，正文 `P2 celery queue backlog <N> (warn <阈值>)`（`BILLING_MONITOR_CELERY_QUEUE_WARN` 可调，不是非负整数时按 500 并记一行）。正常时队列接近 0；Redis 设了 `maxmemory` + `allkeys-lru`，积压过大时消息会被淘汰，这条要在那之前响 | Telegram（检查 `ai_billing_hub services`，不新增检查、不新增 `.env` 地址） | 同上；services 已红时积压不再单独通知 | [Celery 队列积压](runbook.md) |
 | **`billing_readiness_degraded_redis`**；同一维度另有 **`billing_ai_readiness_failed`**（AIH-TASK-075） | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"`；之后再 `GET /healthz/ai`（默认同一入口，`BILLING_MONITOR_AI_READY_URL` 可覆盖），**状态码与响应体都看**：非 2xx，或正文不含 `"status":"ok"`（前端兜底的 200 HTML 也算失败） | readyz：P2；非 2xx（数据库不通 / API 挂）= **P1**。AI 就绪失败 = **P1**，正文只带 URL 与是否 2xx，不带响应体 | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md)；[AI 就绪检查失败](runbook.md) |
 | 磁盘水位（§94 点名的那条）**与 binlog 总量预算**；同一维度另有 **TLS 证书到期**与**主机时钟同步**（AIH-TASK-150） | `df -P` 查根文件系统与部署目录（按设备去重）；另外进 mysql 容器量一次 binlog 占用。TLS：主机名取 `.env` 的 `BILLING_FRONTEND_BASE_URL`（只认 https；为空或不是 https 时跳过），`timeout 15 openssl s_client` 取对外证书的 `notAfter`。时钟：`timedatectl show -p NTPSynchronized --value`（命令不存在或输出为空时跳过） | 磁盘 ≥ **80%** = P2、≥ **90%** = P1；binlog ≥ **2 GB** = P2。证书剩余 < **21 天** = P2、< **7 天**或已过期 = P1（`BILLING_MONITOR_TLS_WARN_DAYS` / `BILLING_MONITOR_TLS_CRIT_DAYS`），读不到证书 = P2；时钟不是 `yes` = P2（五个阈值都可调；问题行不带主机名） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7（日志）、§5.2.2 末尾（binlog）；[TLS 证书即将到期或读不到](runbook.md)；[主机时钟未同步](runbook.md) |
 
@@ -1142,7 +1143,8 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 - §95 的 17 项**业务指标**（用量摄取速率、钱包余额异常、支付回调失败率……）：
   需要指标管道，**不在 T0.9 的范围里**，Phase 1 起随功能补。
   ⚠️ 其中 **TLS certificate expiry** 与 **host clock drift** 两项已由 AIH-TASK-150 覆盖（并进磁盘维度，见 §8.1；
-  时钟一项看的是「是否在做 NTP 同步」，不量漂移的秒数）
+  时钟一项看的是「是否在做 NTP 同步」，不量漂移的秒数）；**Celery 队列长度**已由 AIH-TASK-208 覆盖
+  （并进 services 维度，见 §8.1；只看默认队列 `celery` 的长度，不量任务耗时与失败率）
 - 日志聚合，以及基于日志内容的告警规则（§94 的异地留存也卡在这一条上）
 - 告警的**值班与升级路径**：现在只有一个人、一条 Telegram。`P1 30 分钟未响应升级`
   这类规则等有第二个人再谈 —— 写在 runbook 里而不是配置里
