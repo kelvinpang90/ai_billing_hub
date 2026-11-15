@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.ai_api.models import AiClientKey, AiClientKeyStatus
 from app.core.errors import AppError
 from app.models.auth import AuditAction, User
-from app.models.tenancy import Project, Tenant
+from app.models.tenancy import AccountStatus, Project, Tenant
 from app.services.auth import RequestContext, record_audit, utc_now
 
 ENTITY_AI_CLIENT_KEY: Final = "ai_client_key"
@@ -40,6 +40,17 @@ class ProjectNotFound(AppError):
 
     def __init__(self) -> None:
         super().__init__("Project not found.", code="PROJECT_NOT_FOUND", http_status=404)
+
+
+class AccountClosed(AppError):
+    """The customer is CLOSED: no new AI client key (design gate #707 v4 §2).
+
+    Same message, code and status as `app.services.project_integration.AccountClosed`;
+    defined here because the AI module boundary (#281 v23 §2) forbids that import.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("The customer account is closed.", code="ACCOUNT_CLOSED", http_status=409)
 
 
 class AiClientKeyNotFound(AppError):
@@ -100,6 +111,10 @@ def _resolve_project(session: Session, customer_id: str, project_id: str) -> tup
     ).scalar_one_or_none()
     if tenant is None:
         raise CustomerNotFound
+    return tenant, _project_of(session, tenant, project_id)
+
+
+def _project_of(session: Session, tenant: Tenant, project_id: str) -> Project:
     project = session.execute(
         select(Project).where(
             Project.tenant_id == tenant.id,
@@ -108,11 +123,27 @@ def _resolve_project(session: Session, customer_id: str, project_id: str) -> tup
     ).scalar_one_or_none()
     if project is None:
         raise ProjectNotFound
-    return tenant, project
+    return project
 
 
 def _locked_project(session: Session, customer_id: str, project_id: str) -> tuple[Tenant, Project]:
-    tenant, project = _resolve_project(session, customer_id, project_id)
+    """Shared-lock the tenant, refuse a CLOSED account, then lock the project row.
+
+    Design gate #707 v4 §2: the tenant `FOR SHARE` read serializes with account
+    closure (tenant `FOR UPDATE`); lock order is tenant, then project. Order of
+    checks: customer 404, project 404, then `ACCOUNT_CLOSED` 409.
+    """
+    tenant = session.execute(
+        select(Tenant)
+        .where(Tenant.public_id == customer_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if tenant is None:
+        raise CustomerNotFound
+    project = _project_of(session, tenant, project_id)
+    if tenant.account_status is AccountStatus.CLOSED:
+        raise AccountClosed
     locked = session.execute(
         select(Project).where(Project.id == project.id).with_for_update()
     ).scalar_one()
