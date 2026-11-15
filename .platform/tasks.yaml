@@ -12114,7 +12114,7 @@ tasks:
     title: 关户第一层：记账总入口拒绝给已关户租户入账，用量计费与调账各自收口
     purpose: >-
       按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v3） §2「契约一」：app/repositories/wallet.py 新增 TenantClosed(LedgerError)，post_transaction 在锁租户之后、余额范围判定与任何写入之前拒绝 CLOSED 租户；用量计费 ⑧ 捕获它把事件置 FAILED_FINAL / ACCOUNT_CLOSED，手工调账把它映射为 409 ACCOUNT_CLOSED；支付确认与人工入账不改（锁内已先判 TENANT_CLOSED）。docs/api.md 手工调账一节补错误码。不做其他写入口：属于 AIH-TASK-210。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-208
     acceptance_criteria:
