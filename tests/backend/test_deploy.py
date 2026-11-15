@@ -2101,6 +2101,183 @@ def test_the_disk_summary_says_when_the_clock_was_skipped(tmp_path) -> None:
     assert out.endswith(" + tls + clock skipped")
 
 
+# --- Celery 队列积压并进 services 维度（AIH-TASK-208）-------------------------
+
+
+def test_the_celery_queue_rides_on_the_services_check() -> None:
+    """⚠️ worker 活着但处理不过来时容器照样 healthy：积压只能读 broker 里的队列长度。
+
+    免费档已用满：并进 services 维度，不新增检查、不新增 `.env` 地址；复核时随
+    check_services 一起重跑，所以必须由 check_services 在逐个服务的循环之后调用。
+    """
+    monitor = uncommented(MONITOR)
+    default = re.search(r"^CELERY_QUEUE_WARN_DEFAULT=(\d+)$", monitor, re.M)
+    assert default is not None and int(default.group(1)) == 500
+    assert (
+        'CELERY_QUEUE_WARN="${BILLING_MONITOR_CELERY_QUEUE_WARN:-$CELERY_QUEUE_WARN_DEFAULT}"'
+        in monitor
+    )
+
+    services = monitor_function("check_services")
+    assert "check_celery_queue" in services
+    assert services.index("done") < services.index("check_celery_queue")
+
+    # ⚠️ redis 卡住时 redis-cli 会一直等：每一处都必须由 timeout 包住。
+    assert monitor.count("redis-cli") >= 1
+    assert monitor.count("redis-cli") == monitor.count(
+        "timeout 10 $COMPOSE exec -T redis redis-cli"
+    )
+
+    # ⚠️ 读错了库，LLEN 对不存在的键永远回 0 —— 告警永远不响。库号从两边各自解析出来比。
+    assert 'redis-cli -n "$CELERY_REDIS_DB" LLEN "$CELERY_QUEUE"' in monitor
+    db = re.search(r"^CELERY_REDIS_DB=(\d+)$", monitor, re.M)
+    broker = re.search(
+        r"BILLING_REDIS_URL:\s*redis://[^/\s]+/(\d+)\s*$",
+        COMPOSE.read_text(encoding="utf-8"),
+        re.M,
+    )
+    assert db is not None and broker is not None
+    assert int(db.group(1)) == int(broker.group(1))
+    assert re.search(r"^CELERY_QUEUE=celery$", monitor, re.M)
+
+    assert set(re.findall(r"BILLING_HEALTHCHECK_[A-Z0-9_]+", monitor)) == {
+        "BILLING_HEALTHCHECK_SERVICES_URL",
+        "BILLING_HEALTHCHECK_READYZ_URL",
+        "BILLING_HEALTHCHECK_DISK_URL",
+        "BILLING_HEALTHCHECK_ALERT_",
+    }
+    # services 维度的 OK 摘要不变。
+    assert 'publish BILLING_HEALTHCHECK_SERVICES_URL services "$SERVICES_OUT"' in monitor
+    assert (
+        '"all containers healthy ($(echo "$SERVICES_P1 $SERVICES_P2" | wc -w) services)"' in monitor
+    )
+
+
+# 假 docker：记下参数；FAKE_DOCKER_FAIL 非空时像 redis 没在跑那样只写 stderr、退出 1，
+# 否则把 FAKE_LLEN 当作 redis-cli 的输出吐出来。
+FAKE_DOCKER = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> docker_calls
+if [ -n "${FAKE_DOCKER_FAIL:-}" ]; then
+    echo 'service "redis" is not running' >&2
+    exit 1
+fi
+printf '%s\\n' "${FAKE_LLEN:-}"
+"""
+
+
+def run_celery_queue_check(tmp_path, **env) -> tuple[str, str, list[str]]:
+    """把 monitor.sh 的 COMPOSE、几个 CELERY_ 常量、env_value 与 check_celery_queue 原样抠出来，
+    对着假 docker 跑。返回 (stdout, stderr, docker 的参数行)。
+    """
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    monitor = uncommented(MONITOR)
+    settings = re.findall(r"^(?:COMPOSE|CELERY_[A-Z_]+)=.*$", monitor, re.M)
+    assert len(settings) == 5
+    functions = [monitor_function(name) for name in ("env_value", "check_celery_queue")]
+
+    work = tmp_path / "celery"
+    (work / "bin").mkdir(parents=True)
+    run = work / "run.sh"
+    run.write_text(
+        HOST_CHECK_RUNNER + "\n".join(settings + functions) + "\ncheck_celery_queue\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    docker = work / "bin" / "docker"
+    docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")
+    docker.chmod(0o755)
+    (work / ".env").write_text("BILLING_HTTP_PORT=8080\n", encoding="utf-8", newline="\n")
+
+    full = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("BILLING_MONITOR_")
+        and not k.startswith("FAKE_")
+        and k != "BILLING_COMPOSE"
+    }
+    full.update(env)
+    done = subprocess.run([bash, str(run)], cwd=work, env=full, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    calls_file = work / "docker_calls"
+    calls = calls_file.read_text(encoding="utf-8").splitlines() if calls_file.exists() else []
+    return done.stdout, done.stderr, calls
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"FAKE_LLEN": "0"}, []),
+        ({"FAKE_LLEN": "499"}, []),
+        ({"FAKE_LLEN": "500"}, ["P2 celery queue backlog 500 (warn 500)"]),
+        ({"FAKE_LLEN": "12000"}, ["P2 celery queue backlog 12000 (warn 500)"]),
+        (
+            {"FAKE_LLEN": "10", "BILLING_MONITOR_CELERY_QUEUE_WARN": "10"},
+            ["P2 celery queue backlog 10 (warn 10)"],
+        ),
+        (
+            {"FAKE_LLEN": "11", "BILLING_MONITOR_CELERY_QUEUE_WARN": "10"},
+            ["P2 celery queue backlog 11 (warn 10)"],
+        ),
+        ({"FAKE_LLEN": "9", "BILLING_MONITOR_CELERY_QUEUE_WARN": "10"}, []),
+        # exec 带出来的首尾空白（含 \r）去掉之后照样是数字。
+        (
+            {"FAKE_LLEN": " 11\r", "BILLING_MONITOR_CELERY_QUEUE_WARN": "10"},
+            ["P2 celery queue backlog 11 (warn 10)"],
+        ),
+    ],
+)
+def test_a_celery_backlog_at_the_threshold_is_a_p2(
+    tmp_path, env: dict[str, str], expected: list[str]
+) -> None:
+    """长度不小于阈值报 P2（正文带长度与阈值），否则不报；查的是 broker 那个库的默认队列。"""
+    out, err, calls = run_celery_queue_check(tmp_path, **env)
+    assert out.splitlines() == expected
+    assert "unavailable" not in err
+    assert "not a non-negative integer" not in err
+
+    monitor = uncommented(MONITOR)
+    db = re.search(r"^CELERY_REDIS_DB=(\d+)$", monitor, re.M)
+    assert db is not None
+    assert calls == [f"compose exec -T redis redis-cli -n {db.group(1)} LLEN celery"]
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"FAKE_LLEN": ""},
+        {"FAKE_LLEN": "ERR unknown command"},
+        {"FAKE_LLEN": "-3"},
+        {"FAKE_LLEN": "1 2"},
+        {"FAKE_DOCKER_FAIL": "1"},
+    ],
+)
+def test_an_unreadable_celery_queue_is_not_an_alert(tmp_path, env: dict[str, str]) -> None:
+    """输出为空、不是非负整数、命令失败：与 check_binlog 同理，量不到不报警，只记 stderr。
+
+    redis 停了已由同一维度的容器检查报出，这里再报一次只是双响。
+    """
+    out, err, _ = run_celery_queue_check(tmp_path, **env)
+    assert out == ""
+    assert "celery queue length unavailable; skipping the queue check" in err
+
+
+@pytest.mark.parametrize("warn", ["abc", "-1", "1e3", ""])
+def test_a_nonsense_celery_threshold_falls_back_to_500(tmp_path, warn: str) -> None:
+    """阈值配置不是非负整数：按默认 500 处理，stderr 记一行说明。"""
+    out, err, _ = run_celery_queue_check(
+        tmp_path, FAKE_LLEN="499", BILLING_MONITOR_CELERY_QUEUE_WARN=warn
+    )
+    assert out == ""
+    out, err, _ = run_celery_queue_check(
+        tmp_path / "again", FAKE_LLEN="500", BILLING_MONITOR_CELERY_QUEUE_WARN=warn
+    )
+    assert out.splitlines() == ["P2 celery queue backlog 500 (warn 500)"]
+    if warn:
+        assert "BILLING_MONITOR_CELERY_QUEUE_WARN is not a non-negative integer; using 500" in err
+
+
 def test_local_binlog_retention_outlives_one_full_backup_cycle() -> None:
     """⚠️ 本地保留期短于「全量间隔 + 余量」的话，最近一份全量的 PITR 链会缺前半截。
 
