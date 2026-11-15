@@ -49,7 +49,7 @@ from app.ai_api.provider import (
     ProviderRejectedRequest,
     ProviderUnavailable,
 )
-from app.ai_api.routes import AiRuntime, router
+from app.ai_api.routes import AiRuntime, _read_limits, router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.core.middleware import RequestContextMiddleware
@@ -1052,6 +1052,12 @@ def test_hung_provider_and_slow_trickle_are_cut_at_the_budget(
                 yield b" "
 
         return httpx2.Response(200, content=chunks())
+
+    # 上限要分得出「预算被 min(...) 截到 1.0 秒」与「没截断、跑到截止时间推出的预算」：
+    # fixture 的时限一改、两者靠得太近，这里先失败，而不是让用例悄悄失去区分能力。
+    settings = provider_budget_world.app.state.settings
+    _, write_limit = _read_limits(settings)
+    assert settings.ai_request_deadline_seconds - write_limit > 1.0 + OVERRUN_SLACK_SECONDS
 
     for respond in (_hang, trickle):
         provider_budget_world.respond = respond
