@@ -2155,7 +2155,8 @@ def test_the_celery_queue_rides_on_the_services_check() -> None:
 
 # 假 docker：记下参数；FAKE_DOCKER_FAIL 非空时像 redis 没在跑那样只写 stderr、退出 1，
 # 否则把 FAKE_LLEN 当作 redis-cli 的输出吐出来。
-FAKE_DOCKER = """#!/usr/bin/env bash
+# ⚠️ 不能叫 FAKE_DOCKER：那个名字是镜像清理用例（run_prune）的假 docker，同名会把它覆盖掉。
+FAKE_DOCKER_REDIS = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> docker_calls
 if [ -n "${FAKE_DOCKER_FAIL:-}" ]; then
     echo 'service "redis" is not running' >&2
@@ -2186,7 +2187,7 @@ def run_celery_queue_check(tmp_path, **env) -> tuple[str, str, list[str]]:
         newline="\n",
     )
     docker = work / "bin" / "docker"
-    docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")
+    docker.write_text(FAKE_DOCKER_REDIS, encoding="utf-8", newline="\n")
     docker.chmod(0o755)
     (work / ".env").write_text("BILLING_HTTP_PORT=8080\n", encoding="utf-8", newline="\n")
 
