@@ -12237,7 +12237,7 @@ tasks:
     title: 关户补充层：关户后拒绝签发 AI 客户端密钥
     purpose: >-
       按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「契约二」表中「签发 AI 客户端密钥」一行：app/ai_api/admin.py 的 issue_client_key 在锁住租户行之后对 CLOSED 返回 409 ACCOUNT_CLOSED（admin.py 受 AI 模块边界约束，在本文件另定义同码同消息的 AccountClosed），不写库；吊销与查看照常。docs/api.md 对应一节补错误码。设计把这一行归在 AIH-TASK-210，因仓库规则不许 app/ai_api/ 与计费路径在同一个 PR 里改，拆为本任务；契约本身不变。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-210
     acceptance_criteria:
