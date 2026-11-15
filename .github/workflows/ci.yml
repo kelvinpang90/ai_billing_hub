@@ -64,7 +64,7 @@ jobs:
       fail-fast: false
       matrix:
         # 改片数只改这一处：分片号与总片数取自 strategy.job-index / job-total（见下方 env）
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5]
     services:
       # 迁移必须对着真 MySQL 跑。SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上
       # 跑通证明不了生产上跑得通 —— 而迁移跑不通是部署时才发现的那种故障。
