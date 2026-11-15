@@ -22,7 +22,7 @@ import uuid
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, select, text, update
 from sqlalchemy.pool import StaticPool
 
 from app.api import admin_customers
@@ -33,7 +33,7 @@ from app.core.tokens import issue_access_token
 from app.main import create_app
 from app.models.auth import AuditAction, AuditLog, DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.tenancy import Tenant
+from app.models.tenancy import AccountStatus, Tenant
 from app.models.wallet import Wallet, WalletTransaction
 from app.repositories.tenancy import create_tenant
 from app.services.auth import utc_now
@@ -537,6 +537,55 @@ def test_a_key_used_on_one_customer_conflicts_on_another(client, app, admin) -> 
     with app.state.session_factory() as session:
         tenant = session.execute(select(Tenant).where(Tenant.public_id == second)).scalar_one()
         assert (tenant.billing_status.value, tenant.status_version) == ("SUSPENDED", 0)
+
+
+# --- 关户（AIH-TASK-209，设计闸门 #707 v3 §7「调账」） ------------------------------
+
+
+def force_account_status(application: FastAPI, customer_id: str, status: AccountStatus) -> None:
+    """Change the account status directly in the database (no version, audit or outbox)."""
+    statement = update(Tenant).where(Tenant.public_id == customer_id)
+    with application.state.session_factory() as session:
+        session.execute(statement.values(account_status=status))
+        session.commit()
+
+
+def wallet_of(application: FastAPI, customer_id: str) -> tuple[object, int]:
+    statement = (
+        select(Wallet.balance, Wallet.version)
+        .join(Tenant, Tenant.id == Wallet.tenant_id)
+        .where(Tenant.public_id == customer_id)
+    )
+    with application.state.session_factory() as session:
+        balance, version = session.execute(statement).one()
+        return balance, version
+
+
+def test_a_closed_customer_is_409_and_an_earlier_key_still_replays(client, app, admin) -> None:
+    customer_id = new_customer(client, admin)
+    force_account_status(app, customer_id, AccountStatus.DISABLED)
+    body = adjustment()
+    first = client.post(adjustments_url(customer_id), json=body, headers=admin)
+    assert first.status_code == 201, first.text
+    force_account_status(app, customer_id, AccountStatus.CLOSED)
+    before = (row_counts(app), wallet_of(app, customer_id))
+
+    refused = client.post(adjustments_url(customer_id), json=adjustment(), headers=admin)
+
+    assert (refused.status_code, error_code(refused)) == (409, "ACCOUNT_CLOSED")
+    assert (row_counts(app), wallet_of(app, customer_id)) == before
+
+    again = client.post(adjustments_url(customer_id), json=body, headers=admin)
+
+    assert again.status_code == 200, again.text
+    one, two = first.json()["data"], again.json()["data"]
+    assert (one["replayed"], two["replayed"]) == (False, True)
+    assert {field: two[field] for field in LEDGER_FIELDS} == {
+        field: one[field] for field in LEDGER_FIELDS
+    }
+    assert (row_counts(app), wallet_of(app, customer_id)) == before
+    assert len(ledger(app)) == 1
+    assert len(audits(app, AuditAction.WALLET_ADJUSTMENT_POSTED)) == 1
 
 
 # --- 租户越权与数据不一致 -------------------------------------------------------

@@ -62,7 +62,7 @@ from app.main import create_app
 from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.payments import Payment, PaymentStatus
-from app.models.tenancy import AccountStatus, BillingMode
+from app.models.tenancy import AccountStatus, BillingMode, Tenant
 from app.models.wallet import ReferenceType, TransactionType
 from app.payments.base import GatewayState
 from app.repositories.wallet import post_transaction
@@ -388,8 +388,13 @@ def test_the_first_unavailable_reason_wins(
     world, make_portal, overrides, account_status, billing_mode, allowlisted, expected
 ) -> None:
     """欠款 999990.00、缓冲 10.00：恢复额 1000000.00 超过单笔上限 999999.99（最高额为空）。"""
-    tenant = world.customer(account_status=account_status, billing_mode=billing_mode)
+    # 先以 ENABLED 记账，再直接改库：CLOSED 租户不能再入账（AIH-TASK-209）。
+    tenant = world.customer(billing_mode=billing_mode)
     set_balance(world, tenant, "-999990.00")
+    with world.factory() as session:
+        statement = update(Tenant).where(Tenant.id == tenant.id)
+        session.execute(statement.values(account_status=account_status))
+        session.commit()
     if allowlisted:
         overrides = {**overrides, "payment_topup_tenant_allowlist": tenant.public_id.upper()}
     portal = make_portal(**overrides)

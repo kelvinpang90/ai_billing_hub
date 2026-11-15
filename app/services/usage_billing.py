@@ -24,7 +24,8 @@ spec §7、§8、§25、§78、§80–§84、§110；REQ-INGEST-002；ADR-0003�
 ⚠️ **只经 `post_transaction` 写账本与改余额**（INV-4）：`AI_USAGE`、金额 = −计费额（`ChargeResult`
 的存储值原样取负，不再舍入）、`reference = USAGE_EVENT / event_id`。计费额为 0 不写账本（账本
 CHECK 要求 `AI_USAGE < 0`），事件照样 `PROCESSED`、快照齐全。`replayed` 记 WARNING 后照常
-`PROCESSED`（指向已有行）；`LedgerConflict` 判 `FAILED_FINAL`（`LEDGER_CONFLICT`），原账本行不动。
+`PROCESSED`（指向已有行）；`LedgerConflict` 判 `FAILED_FINAL`（`LEDGER_CONFLICT`），原账本行不动；
+`TenantClosed`（② 读到关户前的旧值、⑧ 锁内读到 `CLOSED`）判 `FAILED_FINAL`（`ACCOUNT_CLOSED`）。
 
 ⚠️ 本模块的事务把 `innodb_lock_wait_timeout` 设为会话级 10 秒（MySQL）：发布方持排他锁时，
 计费等待超过 10 秒就回滚、按可重试记一次，不长时间占着 worker。
@@ -66,7 +67,7 @@ from app.models.wallet import ReferenceType, TransactionType
 from app.repositories import ai_catalog as catalog
 from app.repositories import fx_rates as rates
 from app.repositories import pricing_rules as rules
-from app.repositories.wallet import LedgerConflict, post_transaction
+from app.repositories.wallet import LedgerConflict, TenantClosed, post_transaction
 from app.services.auth import utc_now
 from app.services.pricing_engine import (
     ChargeOverflow,
@@ -422,6 +423,15 @@ def _process(session: Session, claim: Claim, clock: Clock) -> Outcome:
                 extra={**_context(event), "error_code": LEDGER_CONFLICT},
             )
             _settle(event, UsageEventStatus.FAILED_FINAL, LEDGER_CONFLICT, resolution)
+            return Outcome.FAILED_FINAL
+        except TenantClosed:
+            # ② 是普通读，可能读到关户提交前的旧值；⑧ 的租户锁内读到 CLOSED（设计闸门 #707
+            # v3 §2「契约一」）。与 ② 判出的结果相同：不入账，进人工复核。
+            logger.info(
+                "A usage event's tenant was closed before it could be posted",
+                extra=_context(event),
+            )
+            _settle(event, UsageEventStatus.FAILED_FINAL, ACCOUNT_CLOSED, resolution)
             return Outcome.FAILED_FINAL
         if posted.replayed:
             # 已有同额账本行：前一次提交了账本却没提交事件 —— 二者同事务，所以同样是缺陷信号。
