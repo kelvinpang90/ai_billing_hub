@@ -1,13 +1,13 @@
-# AIH-TASK-209..215 设计：关户（租户账户 → `CLOSED`）（已批准 v3）
+# AIH-TASK-209..215 设计：关户（租户账户 → `CLOSED`）（已批准 v4）
 
-> **来源**：设计闸门 Issue #707。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`）。审查：Codex 额度不可用期间由 Claude Code 审查。v1、v2 各获批准后，登记前预审报出的问题改进了 v2、v3（见 §12），v3 重新审查通过、没有阻断项。
+> **来源**：设计闸门 Issue #707。本文件是 `APPROVED: design v4` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`）。审查：Codex 额度不可用期间由 Claude Code 审查。v1、v2 各获批准后，登记前预审报出的问题改进了 v2、v3（见 §12），v3 重新审查通过、没有阻断项。v4 只改 AIH-TASK-210 里 `AccountClosed` 的定义位置与导入方式（`app/ai_api/admin.py` 受 AI 模块边界约束，见 §12），对外响应不变，重新审查通过、没有阻断项。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #707 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #707 上被批准的 v4 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > 产品决定（「未结」的范围、关户后另外拒绝的写入口、退款扣回引用支付号、关户确认方式、关户当月一律出最后一份对账单）由 Kelvin 2026-11-14 拍板，见 §1。
 
 状态：`READY_FOR_REVIEW`
 负责人：Claude
-**设计版本**：`v3`
+**设计版本**：`v4`
 对应需求：spec §112.1、§8、§24、§65、§66、§83、§133（Invariant 2、3、4、5、8、11、12、13、14）；`docs/TODO.md` Phase 4「关户（`→ CLOSED`）」一条；AIH-TASK-020 设计（`docs/design/AIH-TASK-020-tenant-account-status.md` §2 末尾「对以后功能的契约」，设计闸门 #136 v2）；AIH-TASK-154 设计 §1「明确不做什么」末条（关户后的出单规则留给本设计，设计闸门 #565）；AIH-TASK-032 设计 §2「锁顺序」（关户前置条件挡住计费的旧值窗口，设计闸门 #181）
 目标 PR：待开（拆成 `AIH-TASK-209`..`215`，见 §11）
 
@@ -88,7 +88,7 @@ spec §112.1 规定关户是一个有状态的流程（先停用 → 吊销凭�
 - **支付状态**（`app/models/payments.py:81-91`）：`PENDING` / `PAID` / `FAILED` / `EXPIRED` / `CANCELLED` / `REVIEW_REQUIRED`；`EXPIRED` 与 `FAILED` 不是终结，迟到的 `PAID` 照样走确认（`payments.py:116` 的 `FINAL_STATUSES` 只有 `PAID`、`REVIEW_REQUIRED`）。索引 `ix_payments_tenant_created (tenant_id, created_at)`（`:226`）。
 - **网关事件**（`app/models/payments.py:107-116`、`:265-319`）：回调落库时 `payment_id` 为空（`app/services/payment_events.py:102`），处理结果落库时才写（`app/tasks/payment_events.py` 文件头第 2 步）；归属靠 `metadata_json` 的 `client_reference_id`（= 支付 `public_id`）、`object_id`（会话 id）或争议 / 退款事件的 `payment_intent`（`app/tasks/payment_events.py:258-267`、`:299-313`）。`RETRY` 不放弃。索引 `ix_payment_gateway_events_due (processing_status, next_attempt_at)`（`:315`）。
 - **对账单资格**：`is_eligible`（`statements.py:859-868`）= `PREPAID` 且有钱包且钱包早于账期结束；生成（`:917-1003`）与「缺失对账单」告警（`app/services/alerts.py:424-466`）共用它。
-- **已有 `ACCOUNT_CLOSED` 错误类**：`AccountClosed`（`app/services/project_integration.py:104-108`，409），`portal_accounts.py:65` 已从那里导入复用。
+- **已有 `ACCOUNT_CLOSED` 错误类**：`AccountClosed`（`app/services/project_integration.py:104-108`，409），`portal_accounts.py:65` 已从那里导入复用。`app/ai_api/admin.py` 不能导入它：AI 模块边界（设计闸门 #281 v23 §2，由 `tests/backend/test_ai_module_boundary.py` 的 `ADMIN_ALLOWLIST` 以 `ast.walk` 检查，函数内导入也算）只许 admin.py 导入 `app.ai_api.*`、`app.core.config` / `logging` / `errors`、`app.models.base` / `tenancy` / `ai_catalog` / `auth` 与 `app.services.auth`；admin.py 因此已自定义 `CustomerNotFound`、`ProjectNotFound`。
 - **锁租户的既有写法**：项目集成状态「先租户（`FOR UPDATE`）后项目」（`project_integration.py:290-294`），状态 webhook 地址「租户共享锁 → 项目行锁」（`:411-415`，`_lock_tenant_shared` 在 `:215-226`）；内部计量开通「钱包 → 租户」（`internal_billing.py:58-75`）。
 
 ## 2. 设计概要
@@ -142,7 +142,7 @@ spec §112.1 规定关户是一个有状态的流程（先停用 → 吊销凭�
 
 ### 契约二：其他管理写入口拒绝 `CLOSED`（AIH-TASK-210）
 
-一律用已有的 `AccountClosed`（409 `ACCOUNT_CLOSED`），**在锁住租户行之后判**，这样与关户事务（持有租户 X 锁）串行：写入先拿到锁就在关户之前完成；关户先提交，这里锁到后读到 `CLOSED` 而拒绝。所有入口都是「先租户、后其他行」，与现有的租户 → 项目 / 投递行 / 凭据顺序一致，不新增锁环（§4「并发」）。
+一律报 409 `ACCOUNT_CLOSED`：`app/services/` 下的入口复用已有的 `project_integration.AccountClosed`；`app/ai_api/admin.py` 受 AI 模块边界约束（§1「现有行为与证据」），在本文件另定义同名 `AccountClosed(AppError)`（消息 `The customer account is closed.`、`code="ACCOUNT_CLOSED"`、`http_status=409`，与 `project_integration.AccountClosed` 逐字相同，写法同它已有的 `CustomerNotFound` / `ProjectNotFound`），不改边界白名单。`project_integration` 在模块顶层导入了 `customers` 与 `integration_access`，所以这两个文件只能在函数内导入 `AccountClosed`（顶层互相导入会形成环；写法同 `app/services/auth.py` 在函数内导入 `two_factor`）；`webhook_signing` 与 `internal_billing` 不在环上，顶层导入。错误**在锁住租户行之后判**，这样与关户事务（持有租户 X 锁）串行：写入先拿到锁就在关户之前完成；关户先提交，这里锁到后读到 `CLOSED` 而拒绝。所有入口都是「先租户、后其他行」，与现有的租户 → 项目 / 投递行 / 凭据顺序一致，不新增锁环（§4「并发」）。
 
 | 入口 | 文件 | 改法 | `CLOSED` 判定位置 |
 | --- | --- | --- | --- |
@@ -530,7 +530,7 @@ AIH-TASK-210 让以下已有接口多一个 409 `ACCOUNT_CLOSED`（写进 `docs/
 
 - 可改路径：`app/services/customers.py`、`app/services/integration_access.py`、`app/ai_api/admin.py`、`app/services/webhook_signing.py`、`app/services/internal_billing.py`、`tests/backend/test_customer_service.py`、`tests/backend/test_low_balance_threshold_api.py`、`tests/backend/test_integration_access_service.py`、`tests/backend/test_ai_admin_service.py`、`tests/backend/test_webhook_signing_service.py`、`tests/backend/test_status_version.py`、`docs/api.md`
 - 验收要点：
-  1. §2 契约二表中八个入口在锁住租户后判 `CLOSED`，409 `ACCOUNT_CLOSED`，不写（含审计）；锁顺序「租户 → 项目 / 凭据 / 密钥」或「钱包 → 租户」
+  1. §2 契约二表中八个入口在锁住租户后判 `CLOSED`，409 `ACCOUNT_CLOSED`，不写（含审计）；`admin.py` 用本文件定义的同码 `AccountClosed`，其余复用 `project_integration.AccountClosed`（`customers`、`integration_access` 在函数内导入）；锁顺序「租户 → 项目 / 凭据 / 密钥」或「钱包 → 租户」
   2. 判定顺序：主密钥 503 → 404 → `CLOSED` 409 → 其他业务 409；阈值与现值相同、签名密钥已 `ACTIVE` 的幂等路径也先 409
   3. 吊销凭据、吊销 AI 密钥、退役签名密钥、编辑资料对 `CLOSED` 照常
   4. MySQL 并发一条（建项目等关户的租户锁，用 `data_lock_waits` 确认）
@@ -604,3 +604,4 @@ AIH-TASK-210 让以下已有接口多一个 409 `ACCOUNT_CLOSED`（写进 `docs/
 | v1 | 2026-11-14 | 初稿 | — |
 | v2 | 2026-11-14 | ① §7「并发：关户 vs 计费」的钩子挪到 `closure_blockers` 之后，事件在 A 的检查之后才插入（v1 的写法下 B 的事件在 A 检查时已是 `PROCESSING`，A 得 409，测不到要测的窗口）；② `get_closure_check` 改为返回服务层的 `ClosureCheck` 数据类，定义它的字段与 `codes` 顺序，接口层 `ClosureCheckView` 由它转换；③ 无钱包时 `closure-check` 也是 500；④ `PAYMENT_EVENT_SCAN_LIMIT` 由函数在调用时读模块属性，测试以 monkeypatch 注入；⑤ 前端写明 `closure-check` 加载中与失败时确认按钮不可点及显示内容 | v1 批准后的登记前预审（AIH-TASK-212 `NOT_READY`：一条 DESIGN_DEFECT、两条 UNDECIDED；213、214 各一条 UNDECIDED） |
 | v3 | 2026-11-14 | §6「审计」：§66 没有关户动作，`DISABLED → CLOSED` 写明没有对应的 §66 动作名（v2 写「对应 §66 的租户关停」，§66 并无此项） | v2 批准后的最终预审（AIH-TASK-215 一条 DESIGN_DEFECT） |
+| v4 | 2026-11-15 | §1「现有行为与证据」与 §2「契约二」：`app/ai_api/admin.py` 受 AI 模块边界（#281 v23 §2）约束不能导入 `project_integration`，改为在 admin.py 另定义同码同消息的 `AccountClosed`（对外响应不变）；写明 `customers`、`integration_access` 须在函数内导入 `AccountClosed` 以免循环导入；§11 AIH-TASK-210 验收要点 1 同步 | AIH-TASK-210 run `be4099e0` 实现会话报 CONTRACT_SCOPE_INSUFFICIENT（v3 要求 admin.py 导入 `project_integration.AccountClosed`，边界测试禁止）；Kelvin 2026-11-15 选「本地定义＋升 v4」 |
