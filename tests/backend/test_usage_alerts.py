@@ -30,7 +30,7 @@ from app.models.ai_catalog import PayloadShape, QuantityKind
 from app.models.auth import DomainOutbox, OutboxStatus
 from app.models.base import Base
 from app.models.statements import MonthlyStatement, StatementStatus
-from app.models.tenancy import BillingMode, Tenant
+from app.models.tenancy import AccountStatus, BillingMode, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 from app.models.wallet_reconciliation import ReconciliationRunStatus, WalletReconciliationRun
@@ -332,9 +332,17 @@ def add_tenant(
     *,
     mode: BillingMode = BillingMode.PREPAID,
     wallet_created_at: dt.datetime | None = LONG_AGO,
+    closed: bool = False,
+    closed_at: dt.datetime | None = None,
 ) -> Tenant:
-    """A tenant and (unless `wallet_created_at` is None) its empty wallet."""
+    """A tenant and (unless `wallet_created_at` is None) its empty wallet.
+
+    `closed` makes it CLOSED, written directly with `status_changed_at = closed_at`.
+    """
     number = next(_NUMBERS)
+    closure = (
+        {"account_status": AccountStatus.CLOSED, "status_changed_at": closed_at} if closed else {}
+    )
     with factory() as session:
         tenant = Tenant(
             public_id=f"00000000-0000-4000-8000-{number:012d}",
@@ -343,6 +351,7 @@ def add_tenant(
             billing_mode=mode,
             created_at=LONG_AGO,
             updated_at=LONG_AGO,
+            **closure,
         )
         session.add(tenant)
         session.flush()
@@ -446,6 +455,36 @@ def test_tenants_that_get_no_statement_are_not_missing(factory) -> None:
     add_tenant(factory, wallet_created_at=DECEMBER.end - SECOND)
 
     assert missing_part(backlog(factory, now)) == "1 statements missing, earliest period 2026-12"
+
+
+def test_periods_after_the_closure_are_not_missing(factory) -> None:
+    """Gate #707 v4 §7「对账单生成与告警」(AIH-TASK-211): closed in December, January's window
+    counts nothing for it; December, its closing month, is missing as before until generated."""
+    closed = add_tenant(factory, closed=True, closed_at=DECEMBER.start + 10 * 24 * HOUR)
+
+    in_december = backlog(factory, DECEMBER.cutoff + 6 * HOUR)
+    assert missing_part(in_december) == "1 statements missing, earliest period 2026-12"
+    assert closed.public_id not in in_december.summary
+
+    in_january = backlog(factory, JANUARY.cutoff + 6 * HOUR)
+    assert in_january == AlertResult(
+        OK, f"{NO_BACKLOG_PARTS}; 0 statements missing; {NO_LATE_USAGE}"
+    )
+
+    add_statement(factory, closed, DECEMBER)
+    assert missing_part(backlog(factory, DECEMBER.cutoff + 6 * HOUR)) == "0 statements missing"
+
+
+def test_a_closure_exactly_at_a_month_start_keeps_that_month_missing(factory) -> None:
+    add_tenant(factory, closed=True, closed_at=JANUARY.start)
+    # Closed with no time recorded (only by writing the row directly): eligible as before.
+    add_tenant(factory, closed=True, closed_at=None)
+    # Closed one second before January: January is already after its closure.
+    add_tenant(factory, closed=True, closed_at=JANUARY.start - SECOND)
+
+    result = backlog(factory, JANUARY.cutoff + 6 * HOUR)
+
+    assert missing_part(result) == "2 statements missing, earliest period 2027-01"
 
 
 def test_a_period_before_the_first_one_is_never_missing(factory) -> None:

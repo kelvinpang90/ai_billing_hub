@@ -19,6 +19,11 @@ Rows of design §7 marked 157 covered here:
 - before the first period is due every run is empty; the Celery task passes the current
   UTC time and logs the count.
 
+Gate #707 v4 §7「对账单生成与告警」 (AIH-TASK-211): a CLOSED tenant across three due periods
+gets statements up to its closing month only, a closing month without activity gets a zero
+statement, and `catch_up_tenant` skips the periods after the closure without a failure.
+CLOSED tenants are made by writing the row directly, `status_changed_at` with it.
+
 Ledger rows and events are written as test_statement_generate.py does (its `Statements`).
 The MySQL half needs `BILLING_TEST_DATABASE_URL`; it skips without it — **a skip is not a
 pass**, CI sets it. On MySQL, `monthly_statements` and `tax_policy_versions` are truncated
@@ -54,7 +59,7 @@ from test_usage_billing import TEST_DATABASE_URL, Tenancy, _sqlite_factory, clea
 from alembic import command
 from app.core.database import create_session_factory
 from app.models.statements import MonthlyStatement
-from app.models.tenancy import BillingMode, Tenant
+from app.models.tenancy import AccountStatus, BillingMode, Tenant
 from app.services import statements
 from app.services.statements import PreviousStatementMissing, generate_statement
 
@@ -362,6 +367,86 @@ def test_only_tenants_prepaid_now_are_caught_up(books) -> None:
     assert _periods(books, internal) == []
     # Directly, the ineligible tenant's periods are skipped, not errors.
     assert statements.catch_up_tenant(books.factory, internal.id, due(DECEMBER)) == []
+
+
+# --- the closure cut-off (gate #707 v4 §7「对账单生成与告警」, AIH-TASK-211) ------------------
+
+
+def close_directly(books: Statements, tenant: Tenancy, closed_at: dt.datetime) -> None:
+    """造 CLOSED 租户：直接改库，同时写关户时刻 `status_changed_at`（关户接口归 AIH-TASK-213）。
+
+    账本行都在这之前记：关户之后 `post_transaction` 拒绝一切新行。
+    """
+    with books.factory() as session:
+        session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant.id)
+            .values(account_status=AccountStatus.CLOSED, status_changed_at=closed_at)
+        )
+        session.commit()
+
+
+def test_a_closed_tenant_gets_statements_up_to_its_closing_month_only(books) -> None:
+    closed, open_ = books.tenant("closed"), books.tenant("open")
+    for tenant in (closed, open_):
+        books.charge(tenant, DECEMBER.start + DAY, DECEMBER.start + DAY, AMOUNT)
+        books.charge(tenant, JANUARY.start + DAY, JANUARY.start + DAY, AMOUNT)
+    # Closed in January: January is its last statement; February and later never come.
+    close_directly(books, closed, JANUARY.start + 10 * DAY)
+
+    assert statements.generate_due(books.factory, due(FEBRUARY)) == 5
+
+    assert _periods(books, closed) == [DECEMBER.start, JANUARY.start]
+    assert _periods(books, open_) == [DECEMBER.start, JANUARY.start, FEBRUARY.start]
+    december, january = books.statements(closed)
+    assert january.snapshot_json["opening_balance"] == december.snapshot_json["closing_balance"]
+    # Nothing is booked after the closure: January closes at the wallet's balance.
+    assert Decimal(january.snapshot_json["closing_balance"]) == books.wallet(closed)[1]
+    # Later runs find nothing more for it.
+    march = statements.statement_period("2027-03")
+    assert statements.generate_due(books.factory, due(FEBRUARY) + HOUR) == 0
+    assert statements.generate_due(books.factory, due(march)) == 1
+    assert _periods(books, closed) == [DECEMBER.start, JANUARY.start]
+
+
+def test_a_closing_month_without_activity_still_gets_a_zero_statement(books) -> None:
+    """§1 Kelvin 决定 1：关户当月一律出最后一份；无发生额时期初 = 期末 = 0。"""
+    tenant = books.customer_at("quiet", DECEMBER.start - DAY)
+    close_directly(books, tenant, DECEMBER.start + 5 * DAY)
+
+    assert statements.generate_due(books.factory, due(FEBRUARY)) == 1
+
+    [december] = books.statements(tenant)
+    assert december.period_start == DECEMBER.start
+    snapshot = december.snapshot_json
+    assert snapshot["opening_balance"] == snapshot["closing_balance"] == "0.00000000"
+    assert snapshot["request_count"] == 0
+
+
+def test_catch_up_skips_the_periods_after_the_closure(books, caplog) -> None:
+    tenant = books.tenant()
+    books.charge(tenant, DECEMBER.start + DAY, DECEMBER.start + DAY, AMOUNT)
+    # Exactly at January's start: January is the closing month.
+    close_directly(books, tenant, JANUARY.start)
+
+    with caplog.at_level(logging.INFO, logger=statements.__name__):
+        generated = statements.catch_up_tenant(
+            books.factory,
+            tenant.id,
+            due(FEBRUARY),
+            generated_by=books.world.admin.id,
+            raise_errors=True,
+        )
+
+    assert [s.period_start for s in generated] == [DECEMBER.start, JANUARY.start]
+    assert _periods(books, tenant) == [DECEMBER.start, JANUARY.start]
+    # Skipped, not a failure: no log line at all.
+    assert _records(caplog) == []
+    assert (
+        statements.catch_up_tenant(books.factory, tenant.id, due(FEBRUARY), raise_errors=True) == []
+    )
+    with pytest.raises(statements.StatementNotEligible):
+        books.generate(tenant, FEBRUARY)
 
 
 def test_an_unknown_tenant_has_nothing_to_catch_up(books) -> None:
