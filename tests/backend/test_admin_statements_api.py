@@ -13,6 +13,11 @@ Rows of design §7 marked 159 covered here:
   the way test_admin_customers_api.py asserts them; no cost-like key anywhere in a response;
 - **审计** — the audit write failing leaves no statement either (same transaction, INV-13).
 
+Rows of gate #708 v3 §7 marked AIH-TASK-217 covered here: **管理端下载** — any customer's
+`FINALIZED` statement is 200 with the same bytes the customer downloads (and the attachment
+headers), no audit; a `VOID` row (inserted directly: V1 has no writer for it) and an absent
+(all-zero) uuid are 404 `STATEMENT_NOT_FOUND`; anonymous 401 and CUSTOMER 403 as above.
+
 Ledger rows, events and tax policies are written as test_statement_generate.py does (its
 `Statements`); the app's clock is pinned through `app.api.admin_statements.utc_now`.
 The MySQL half needs `BILLING_TEST_DATABASE_URL`; it skips without it — **a skip is not a
@@ -58,20 +63,23 @@ from test_usage_billing import (
 
 from alembic import command
 from app.api import admin_statements
+from app.api.statement_download import statement_pdf_response
 from app.core.config import Settings
 from app.core.database import create_session_factory
 from app.core.tokens import issue_access_token
 from app.main import create_app
 from app.models.auth import AuditAction, AuditLog, User, UserRole, UserStatus
 from app.models.base import Base
-from app.models.statements import MonthlyStatement
+from app.models.statements import MonthlyStatement, StatementStatus
 from app.models.tenancy import BillingMode, Tenant
 from app.models.wallet import Wallet
 from app.services.auth import utc_now
+from app.services.statement_pdf import render_statement_pdf
 
 STATEMENTS = "/api/v1/admin/statements"
 CUSTOMERS = "/api/v1/admin/customers"
 USER_AGENT = "admin-statements-test"
+ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
 # Distinctive amounts: no error body may carry them.
 AMOUNT = "-0.31415926"
@@ -590,11 +598,103 @@ def test_a_failing_audit_write_leaves_no_statement(
     assert audits(books) == []
 
 
+# --- the PDF download (gate #708 v3, AIH-TASK-217) ----------------------------------------
+
+
+def download_url(statement_id: str) -> str:
+    return f"{STATEMENTS}/{statement_id}/download"
+
+
+def customer_download(books: Statements, tenant: Tenancy, statement_id: str) -> bytes:
+    """What the customer route returns for `tenant`: the same function with the tenant's id.
+    (A portal account would reference the tenant, which this file's `_wipe` deletes first.)"""
+    response = statement_pdf_response(books.factory, statement_id, tenant_id=tenant.id)
+    return bytes(response.body)
+
+
+def stored_row(books: Statements, public_id: str) -> MonthlyStatement:
+    with books.factory() as session:
+        row = session.execute(
+            select(MonthlyStatement).where(MonthlyStatement.public_id == public_id)
+        ).scalar_one()
+        session.expunge(row)
+    return row
+
+
+def void_copy(books: Statements, like: MonthlyStatement) -> MonthlyStatement:
+    """A `VOID` row of `like`'s tenant for February. V1 has no writer for it, so it is inserted
+    directly (never an UPDATE: the MySQL trigger refuses changing a finalized row)."""
+    row = MonthlyStatement(
+        public_id=str(uuid.uuid4()),
+        tenant_id=like.tenant_id,
+        statement_number="ST-202702-VOID0000",
+        period_start=FEBRUARY.start,
+        period_end=FEBRUARY.end,
+        cutoff_at=FEBRUARY.cutoff,
+        status=StatementStatus.VOID,
+        ledger_high_sequence=like.ledger_high_sequence,
+        snapshot_json={**like.snapshot_json, "period": FEBRUARY.label},
+        generated_by=None,
+        tax_policy_version_id=like.tax_policy_version_id,
+        finalized_at=None,
+        created_at=like.created_at,
+    )
+    with books.factory() as session:
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        session.expunge(row)
+    return row
+
+
+def all_audit_count(books: Statements) -> int:
+    with books.factory() as session:
+        return int(session.execute(select(func.count()).select_from(AuditLog)).scalar_one())
+
+
+def test_an_admin_downloads_any_customers_finalized_statement(client, admin, books) -> None:
+    a, b, made = two_customers_two_months(books)
+    audits_before = all_audit_count(books)
+
+    for key, tenant in (("a-2026-12", a), ("b-2027-01", b)):
+        statement = stored_row(books, made[key].public_id)
+        assert statement.finalized_at is not None
+        response = client.get(download_url(statement.public_id), headers=admin)
+
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/pdf"
+        assert response.headers["content-disposition"] == (
+            f'attachment; filename="{statement.statement_number}.pdf"'
+        )
+        assert response.headers["cache-control"] == "no-store"
+        assert response.content == render_statement_pdf(
+            statement.snapshot_json,
+            statement_number=statement.statement_number,
+            finalized_at=statement.finalized_at,
+        )
+        # The very file the customer gets.
+        assert customer_download(books, tenant, statement.public_id) == response.content
+    assert all_audit_count(books) == audits_before
+
+
+def test_a_void_or_absent_statement_is_404_for_the_admin(client, admin, books) -> None:
+    tenant = books.tenant("a")
+    december = books.generate(tenant, DECEMBER).statement
+    void = void_copy(books, december)
+
+    for statement_id in (void.public_id, ZERO_UUID):
+        response = client.get(download_url(statement_id), headers=admin)
+        assert (response.status_code, error_code(response)) == (404, "STATEMENT_NOT_FOUND")
+        assert "content-disposition" not in response.headers
+    assert client.get(download_url(december.public_id), headers=admin).status_code == 200
+
+
 # --- authorization ------------------------------------------------------------------------
 
 ROUTES = [
     ("GET", STATEMENTS),
     ("GET", STATEMENTS + "/{statement_id}"),
+    ("GET", STATEMENTS + "/{statement_id}/download"),
     ("POST", CUSTOMERS + "/{customer_id}/statements/generate"),
 ]
 

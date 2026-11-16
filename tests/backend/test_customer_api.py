@@ -532,6 +532,8 @@ def test_the_customer_routes_are_exactly_the_expected_ones() -> None:
         ("POST", f"{CUSTOMER_PREFIX}/notifications/read-all"),
         ("GET", f"{CUSTOMER_PREFIX}/statements"),
         ("GET", f"{CUSTOMER_PREFIX}/statements/{{statement_id}}"),
+        # 客户对账单 PDF 下载（AIH-TASK-217）：同一个路由模块，总是注册。
+        ("GET", f"{CUSTOMER_PREFIX}/statements/{{statement_id}}/download"),
         # 客户支付（AIH-TASK-190）：与开关无关，总是注册。建单 `POST …/topups` 只在
         # `payments_enabled` 为真时注册，这里的 app 没开，所以不在集合里。
         ("GET", f"{CUSTOMER_PREFIX}/topup-options"),
