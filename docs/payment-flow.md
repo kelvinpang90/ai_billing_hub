@@ -434,6 +434,9 @@ Stripe 侧的争议（拒付，`charge.dispute.created`）与在 Stripe 后台�
 
 **不要**因为争议或退款去改支付状态、改原 `TOPUP` 行或直接改钱包；扣回只用人工调账新增一行。
 
+**客户已关户（`CLOSED`）**：关户后的争议与退款事件照样只关联、不改账，但**不能再记账扣回**（`post_transaction` 拒绝 `CLOSED`，
+调账 409 `ACCOUNT_CLOSED`），以上第 1 条不适用：在 Stripe 与会计账上处理。见 [runbook.md「关户」](runbook.md#关户)。
+
 ## 8. 对客户开放充值前的检查（管理员执行；不在 B 的代码里）
 
 前提：B 的全部任务（AIH-TASK-179..187）已合并部署，§3 已做完（开关打开、`config missing` 不出现、`BILLING_PAYMENT_TOPUPS_OPEN` 仍为假、
