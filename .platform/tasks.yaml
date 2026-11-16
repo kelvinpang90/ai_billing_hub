@@ -12344,7 +12344,7 @@ tasks:
     title: 关户第四层：关户服务与锁内前置条件检查
     purpose: >-
       按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「契约三」：新服务 app/services/account_closure.py 的 closure_blockers（四类未结的只读计数）、get_closure_check（只读视图）与 close_account（事务 0 取 id；事务 1 锁钱包 → 租户，按顺序判定后写状态、版本、outbox、投递重排与审计）；app/services/account_status.py 把 _apply 的写入部分原样抽成 _record_transition 供两处共用，TRANSITIONS 不变。不加接口：属于 AIH-TASK-213。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-211
     acceptance_criteria:
