@@ -12400,7 +12400,7 @@ tasks:
     title: 关户第五层：管理端关户接口与关户检查接口
     purpose: >-
       按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「接口」：app/api/admin_customers.py 加 GET /api/v1/admin/customers/{customer_id}/closure-check 与 POST /api/v1/admin/customers/{customer_id}/close（显式 require_admin），schema 进 app/schemas/customers.py；账户状态接口不变；docs/api.md 新增「管理端关户」一节并改掉关于关户的旧说明。不做页面：属于 AIH-TASK-214。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-212
     acceptance_criteria:
