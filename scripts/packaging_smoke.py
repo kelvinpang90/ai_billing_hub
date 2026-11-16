@@ -37,6 +37,7 @@ def main() -> int:
     import app.api.health  # noqa: F401
     import app.core.config  # noqa: F401
     import app.services.receipt_pdf  # noqa: F401
+    import app.services.statement_pdf  # noqa: F401
 
     # ⚠️ 数据文件默认**不进 wheel**（`packages.find` 只收 Python 包），要靠
     # `[tool.setuptools.package-data]` 显式带上。漏了不会有任何报错，直到装好的
@@ -50,6 +51,27 @@ def main() -> int:
         return 1
     if len(wordlist) < 1000:
         print(f"Bundled password list looks truncated: {len(wordlist)} entries", file=sys.stderr)
+        return 1
+
+    # 对账单 PDF 的中文字体同理（`*.ttf` 靠 package-data 带上）：漏了要到客户下载一份含中文的
+    # 对账单时才 500（设计闸门 #708 §2「P0」）。
+    from importlib import resources
+
+    from fontTools.ttLib import TTFont
+
+    try:
+        font_file = resources.files("app.data").joinpath("NotoSansSC-Regular.ttf")
+        with resources.as_file(font_file) as font_path:
+            font = TTFont(font_path, lazy=True)
+            try:
+                font_cmap = font.getBestCmap() or {}
+            finally:
+                font.close()
+    except Exception as error:  # noqa: BLE001 - 这里要的就是「任何原因都算失败」
+        print(f"Installed app cannot load its bundled statement font: {error}", file=sys.stderr)
+        return 1
+    if ord("中") not in font_cmap:
+        print("Bundled statement font does not cover U+4E2D", file=sys.stderr)
         return 1
 
     paths = create_app().openapi()["paths"]
