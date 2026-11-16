@@ -11,13 +11,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AccountStatusError,
+  CloseAccountError,
   createCustomer,
   createProject,
+  getClosureCheck,
   getCustomer,
   getLowBalanceThreshold,
   listCustomers,
   listProjects,
   postAccountStatus,
+  postCloseAccount,
   setLowBalanceThreshold,
   updateCustomer,
 } from "./adminCustomers";
@@ -311,6 +314,115 @@ describe("admin customer requests", () => {
 
     await expect(failure).rejects.toBeInstanceOf(ApiError);
     await expect(failure).rejects.toMatchObject({ code: "VALIDATION_ERROR", requestId: "req-422" });
+  });
+
+  it("reads the closure check with GET on the customer's closure-check path", async () => {
+    const check = {
+      account_status: "DISABLED",
+      balance: "0.00000000",
+      unresolved_usage_events: 0,
+      unresolved_ai_usage: 0,
+      unresolved_payments: 1,
+      unresolved_payment_events: 0,
+      payment_events_truncated: false,
+      blockers: ["ACCOUNT_CLOSURE_PAYMENTS_PENDING"],
+    };
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(check));
+
+    const result = await getClosureCheck(ZERO_CUSTOMER_ID);
+
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledWith(`/api/v1/admin/customers/${ZERO_CUSTOMER_ID}/closure-check`, {});
+    // 余额原样交回字符串，不解析。
+    expect(result).toEqual(check);
+  });
+
+  it("passes the abort signal of the closure check through", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope({ blockers: [] }));
+    const controller = new AbortController();
+
+    await getClosureCheck(ZERO_CUSTOMER_ID, controller.signal);
+
+    expect(get).toHaveBeenCalledWith(`/api/v1/admin/customers/${ZERO_CUSTOMER_ID}/closure-check`, {
+      signal: controller.signal,
+    });
+  });
+
+  it("keeps the HTTP status of a failed closure check", async () => {
+    // 代理层的错误页：没有信封，也就没有 error.code；弹窗靠状态显示。
+    const response = {
+      data: "<html>Bad Gateway</html>",
+      status: 502,
+      statusText: "Bad Gateway",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    } satisfies AxiosResponse;
+    const get = vi
+      .spyOn(client, "get")
+      .mockRejectedValue(new AxiosError("Request failed", "ERR_BAD_RESPONSE", undefined, undefined, response));
+
+    const failure = getClosureCheck(ZERO_CUSTOMER_ID);
+
+    await expect(failure).rejects.toBeInstanceOf(CloseAccountError);
+    await expect(failure).rejects.toMatchObject({ code: "MALFORMED_RESPONSE", status: 502 });
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the account with POST on the customer's close path and a body of exactly the reason", async () => {
+    const post = vi
+      .spyOn(client, "post")
+      .mockResolvedValue({ ...envelope({ id: ZERO_CUSTOMER_ID, account_status: "CLOSED" }), status: 200 });
+
+    const closed = await postCloseAccount(ZERO_CUSTOMER_ID, { reason: "Closure ticket CL-0001" });
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith(`/api/v1/admin/customers/${ZERO_CUSTOMER_ID}/close`, {
+      reason: "Closure ticket CL-0001",
+    });
+    // 恰好一个键：客户只来自路径，没有 account_status、status_version 之类（后端一律 422）。
+    const body = post.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(["reason"]);
+    expect(closed).toEqual({ id: ZERO_CUSTOMER_ID, account_status: "CLOSED" });
+  });
+
+  it("keeps the HTTP status of a rejected closure and does not retry", async () => {
+    const response = {
+      data: {
+        success: false,
+        data: null,
+        error: { code: "ACCOUNT_CLOSURE_BALANCE_NOT_ZERO", message: "The balance is not zero." },
+        request_id: "req-409",
+      },
+      status: 409,
+      statusText: "Conflict",
+      headers: {},
+      config: { headers: new AxiosHeaders() },
+    } satisfies AxiosResponse;
+    const post = vi
+      .spyOn(client, "post")
+      .mockRejectedValue(new AxiosError("Request failed", "ERR_BAD_REQUEST", undefined, undefined, response));
+
+    const failure = postCloseAccount(ZERO_CUSTOMER_ID, { reason: "Closure ticket CL-0001" });
+
+    await expect(failure).rejects.toBeInstanceOf(CloseAccountError);
+    await expect(failure).rejects.toBeInstanceOf(ApiError);
+    await expect(failure).rejects.toMatchObject({
+      code: "ACCOUNT_CLOSURE_BALANCE_NOT_ZERO",
+      message: "The balance is not zero.",
+      requestId: "req-409",
+      status: 409,
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a network failure of the closure with no HTTP status", async () => {
+    const post = vi.spyOn(client, "post").mockRejectedValue(new AxiosError("Network Error", "ERR_NETWORK"));
+
+    const failure = postCloseAccount(ZERO_CUSTOMER_ID, { reason: "Closure ticket CL-0001" });
+
+    await expect(failure).rejects.toBeInstanceOf(CloseAccountError);
+    await expect(failure).rejects.toMatchObject({ code: "NETWORK_ERROR", status: null });
+    expect(post).toHaveBeenCalledTimes(1);
   });
 
   it("turns a 422 envelope into an ApiError carrying the backend message", async () => {

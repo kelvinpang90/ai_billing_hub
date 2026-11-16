@@ -17,6 +17,10 @@
  * 打开 `AccountStatusModal`，成功后由弹窗让这里的详情过期重读。`PENDING_ACTIVATION` 与 `CLOSED`
  * 不给按钮；跃迁规则全在后端。
  *
+ * 账户是 `DISABLED` 时资料卡另给危险样式的「Close account」（AIH-TASK-214，设计闸门 #707）：打开
+ * `CloseAccountModal`，成功后由弹窗让这里的详情与客户列表过期重读。其他状态（含 `CLOSED`）不给；`CLOSED` 时
+ * 资料卡照常显示状态文本，不给任何状态按钮。其余面板不因 `CLOSED` 隐藏按钮，写入被拒时由各自的错误提示显示 409。
+ *
  * 资料卡下面是门户账号面板（`PortalAccountPanel`，AIH-TASK-095）：未开通时开通，已开通时显示状态并按
  * 状态给重发邀请、停用、启用、重置 2FA。客户已关户时面板不给开通、重发、启用。
  *
@@ -60,6 +64,7 @@ import { ROUTES } from "../../routes/paths";
 import { AdjustmentModal } from "../wallet/AdjustmentModal";
 import { WalletTransactionsPanel } from "../wallet/WalletTransactionsPanel";
 import { AccountStatusModal, accountStatusTarget } from "./AccountStatusModal";
+import { CloseAccountModal } from "./CloseAccountModal";
 import {
   CustomerErrorAlert,
   CustomerForm,
@@ -86,6 +91,7 @@ export function CustomerDetailPage() {
   const [notice, setNotice] = useState<Notice>(null);
   const [adjusting, setAdjusting] = useState(false);
   const [changingStatus, setChangingStatus] = useState<AccountStatusTarget | null>(null);
+  const [closingAccount, setClosingAccount] = useState(false);
   // 与建客户同一个理由：双击时两次 onFinish 可能都赶在按钮禁用之前。
   const inFlight = useRef(false);
 
@@ -205,6 +211,12 @@ export function CustomerDetailPage() {
                   {t("customers.accountStatus.enable")}
                 </Button>
               ) : null}
+              {/* 只在 DISABLED 时给：关户只能从停用出发，其他状态（含 CLOSED）不提供入口。 */}
+              {current.account_status === "DISABLED" ? (
+                <Button danger onClick={() => setClosingAccount(true)}>
+                  {t("customers.closeAccount.open")}
+                </Button>
+              ) : null}
               <Button onClick={startEditing}>{t("customers.detail.edit")}</Button>
             </Space>
           }
@@ -246,6 +258,11 @@ export function CustomerDetailPage() {
           target={changingStatus}
           onClose={() => setChangingStatus(null)}
         />
+      ) : null}
+
+      {/* 只在打开时挂载、关闭即卸载：每次打开都重读检查、表单为空。 */}
+      {closingAccount ? (
+        <CloseAccountModal customer={current} onClose={() => setClosingAccount(false)} />
       ) : null}
 
       {/* key：换了客户，页码与建项目表单都从头来。 */}
