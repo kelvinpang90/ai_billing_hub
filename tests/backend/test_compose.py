@@ -549,6 +549,72 @@ def test_ci_code_checks_skip_only_on_an_explicit_docs_only_verdict() -> None:
         assert "if" not in jobs[name], name
 
 
+@pytest.mark.parametrize(
+    ("moved_from", "moved_to"),
+    [
+        ("app/x.py", "docs/design/x.py"),
+        # 后端测试会读的文档，挪进可跳过目录同样要跑检查
+        ("docs/runbook.md", "docs/design/runbook.md"),
+    ],
+)
+def test_ci_changes_counts_both_sides_of_a_rename(
+    tmp_path: Path, moved_from: str, moved_to: str
+) -> None:
+    """真的执行 `changes` 的判定步骤：在临时仓库里做一次重命名，判定必须是 `code=true`。
+
+    开着重命名检测时 `git diff --name-only` 只列新路径，代码挪进 `docs/design/` 会被判成
+    「只改文档」而跳过全部代码检查（Claude 审查 #731 发现）。这里强制打开重命名检测，
+    不依赖本机 git 配置。
+    """
+    step = next(s for s in _ci_jobs()["changes"]["steps"] if s.get("id") == "scope")
+    bash, git = shutil.which("bash"), shutil.which("git")
+    assert bash and git, "the CI scope step needs bash and git"
+    repo = tmp_path / "repo"
+    env = {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "diff.renames",
+        "GIT_CONFIG_VALUE_0": "true",
+    }
+
+    def sh(*args: str) -> str:
+        done = subprocess.run(
+            [git, "-c", "user.name=ci", "-c", "user.email=ci@example.invalid", *args],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return done.stdout.strip()
+
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy(Path(__file__).resolve().parents[2] / "scripts" / "ci_scope.py", repo / "scripts")
+    (repo / moved_from).parent.mkdir(parents=True, exist_ok=True)
+    (repo / moved_from).write_text("unchanged body\n", encoding="utf-8")
+    sh("init", "-q")
+    sh("add", "-A")
+    sh("commit", "-q", "-m", "base")
+    base = sh("rev-parse", "HEAD")
+    (repo / moved_to).parent.mkdir(parents=True, exist_ok=True)
+    sh("mv", moved_from, moved_to)
+    sh("commit", "-q", "-m", "move")
+    head = sh("rev-parse", "HEAD")
+    output = tmp_path / "github_output"
+    step_env = {
+        **env,
+        "EVENT_NAME": "pull_request",
+        "BASE_SHA": base,
+        "HEAD_SHA": head,
+        "RUNNER_TEMP": tmp_path.as_posix(),
+        "GITHUB_OUTPUT": output.as_posix(),
+    }
+
+    subprocess.run([bash, "-e", "-c", step["run"]], cwd=repo, env=step_env, check=True)
+
+    assert output.read_text(encoding="utf-8") == "code=true\n"
+
+
 # (changes 的结果, 它输出的 code, backend-tests 的结果, backend-build 的结果, 汇总是否通过)
 GATE_CASES = [
     ("success", "true", "success", "success", True),

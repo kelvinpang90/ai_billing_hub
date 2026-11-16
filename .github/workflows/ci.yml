@@ -73,10 +73,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # --no-renames：开着重命名检测时 --name-only 只列新路径，把代码挪进可跳过目录就能绕过检查
         run: |
           set -o pipefail
           if [ "$EVENT_NAME" = pull_request ]; then
-            git diff --name-only "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
           else
             : > "$RUNNER_TEMP/changed.txt"
           fi
