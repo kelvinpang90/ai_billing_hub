@@ -12632,7 +12632,7 @@ tasks:
     title: 对账单 PDF 第二层：客户与管理端的对账单 PDF 下载接口
     purpose: >-
       按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §2「下载」「客户接口」「管理端接口」「事务边界」：新模块 app/api/statement_download.py 的 statement_pdf_response（只读会话取一行 FINALIZED、会话关闭后调用 AIH-TASK-216 的 render_statement_pdf、三种失败记 ERROR 并返回 500），app/api/customer.py 与 app/api/admin_statements.py 各加一个 GET …/statements/{statement_id}/download；docs/api.md 两节补下载接口。不做页面：属于 AIH-TASK-218、219。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-216
     acceptance_criteria:
