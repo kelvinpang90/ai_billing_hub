@@ -12453,7 +12453,7 @@ tasks:
     title: 关户第六层：管理端客户详情的关户按钮与确认弹窗
     purpose: >-
       按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「前端」：frontend/src/api/adminCustomers.ts 加关户检查与关户的封装和错误类，新组件 CloseAccountModal 接进客户详情页（只在 DISABLED 显示按钮），文案进 i18n；验收脚本加一个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-213
     acceptance_criteria:
