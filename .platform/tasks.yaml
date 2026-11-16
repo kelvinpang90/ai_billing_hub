@@ -12578,7 +12578,7 @@ tasks:
     title: 对账单 PDF 第一层：渲染服务的快照校验、中文字体子集、分页版面与可重现
     purpose: >-
       按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §2「PDF：render_statement_pdf」：新模块 app/services/statement_pdf.py 的 render_statement_pdf(snapshot, *, statement_number, finalized_at) -> bytes（先严格校验快照 v1 的键集合与字段格式、Latin-1 用 Helvetica 其他走 Noto Sans SC 子集、A4 多页版面、可字节级重现），scripts/packaging_smoke.py 证明装好的那一份带着字体。不加接口：属于 AIH-TASK-217。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-215
     acceptance_criteria:
