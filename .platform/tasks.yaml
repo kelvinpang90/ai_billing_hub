@@ -12290,7 +12290,7 @@ tasks:
     title: 关户第三层：对账单资格加关户截止，关户后的账期不再生成也不算缺失
     purpose: >-
       按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「对账单资格」「关户时刻为什么可以取 status_changed_at」：app/services/statements.py 的 is_eligible 加一条：账户 CLOSED 且 status_changed_at 不为空时，只有开始不晚于关户时刻的账期合格。生成、缺失对账单告警与管理端补生成共用它，自动一致。不改告警代码与已定稿对账单。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-210
     acceptance_criteria:
