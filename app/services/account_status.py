@@ -8,6 +8,8 @@
 ⚠️ **只锁租户行**（`SELECT … FOR UPDATE`），不读、不锁、不写钱包（设计 §2「事务边界」）。
 记账路径的加锁顺序是钱包 → 租户；这里只拿租户一把锁，不会与它成环。两条路径都在
 租户行锁内给 `status_version` +1，所以两维的跃迁交错时版本号仍严格递增、不重复。
+关户（`DISABLED → CLOSED`，app/services/account_closure.py）不经这里的入口：它锁「钱包 →
+租户」，判完前置条件后只复用 `_record_transition` 的写入（设计闸门 #707 v4 §2「契约三」）。
 
 ⚠️ **客户只来自路径里的 `public_id`**（INV-8），查不到就是 `CUSTOMER_NOT_FOUND`。
 
@@ -174,6 +176,33 @@ def _apply(
     wanted = transition(previous, target)
     if wanted is None:
         return
+    _record_transition(
+        session,
+        tenant,
+        previous,
+        wanted,
+        reason=reason,
+        actor=actor,
+        context=context,
+        now=now,
+    )
+
+
+def _record_transition(
+    session: Session,
+    tenant: Tenant,
+    previous: AccountStatus,
+    wanted: AccountStatus,
+    reason: str,
+    actor: User,
+    context: RequestContext,
+    now: dt.datetime,
+) -> None:
+    """Write one transition: status, `bump_status_version`, `updated_at`, the audit row.
+
+    ⚠️ 不判定：调用方已在租户行锁内判过这一跃迁合法（`_apply` 查跃迁表，关户判它自己的
+    前置条件，设计闸门 #707 v4 §2「契约三」）。不提交，事务归调用方。
+    """
     before_state = {
         "account_status": previous.value,
         "status_version": tenant.status_version,
@@ -199,7 +228,7 @@ def _apply(
         }
         return _status_event(locked, payload, now)
 
-    # 锁内刚读到的值 + 1（调用方只锁了租户行）。
+    # 锁内刚读到的值 + 1（调用方已锁住租户行）。
     tenant.account_status = wanted
     tenancy.bump_status_version(session, tenant, now, make_event=make_event)
     tenant.updated_at = now
