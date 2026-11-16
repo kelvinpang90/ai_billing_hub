@@ -324,11 +324,14 @@
   - AIH-TASK-172..178，设计闸门 #580 v3：可信确认后经 `post_transaction` 写 `TOPUP`，三层唯一约束保证同一笔支付只入账一次；丢失回调的补对账已由支付第二批交付（AIH-TASK-180，设计闸门 #585 v3，见 [payment-flow.md §5](payment-flow.md#5-补对账)）
   - AIH-TASK-020 契约（设计闸门 #136 v2 §2 末尾）：新充值在 `PENDING_ACTIVATION` / `ENABLED` 下允许，在 `DISABLED`
     下**拒绝**（§112.1 第 1 步），`CLOSED` 下拒绝
-- [ ] **关户（`→ CLOSED`）**：Phase 2 的用量事件与本 Phase 的支付落地后另立任务，走设计闸门（已在「后续计划」）。
+- [x] **关户（`→ CLOSED`）**：Phase 2 的用量事件与本 Phase 的支付落地后另立任务，走设计闸门（已在「后续计划」）。（AIH-TASK-209..214，设计闸门 #707 v4）
   前置条件（AIH-TASK-020 设计 §2 末尾，Kelvin 2026-09-28 确认）：只能从 `DISABLED` 关；钱包余额恰好为 0；没有非终态的
   用量事件与支付（§112.1）；在记账总入口 `post_transaction` 的租户行锁内拒绝给 `CLOSED` 租户入账；`CLOSED` 为终态。
   关户后拒绝新调账、建项目、建凭据、轮换凭据（吊销凭据、查看、编辑客户仍允许）。AIH-TASK-020 已让列与 CHECK 允许
-  `CLOSED`、账户状态接口从 `CLOSED` 出发一律 409，这个任务不必改列
+  `CLOSED`、账户状态接口从 `CLOSED` 出发一律 409，这个任务不必改列。spec §66 映射：`DISABLED → CLOSED` 同样记
+  `TENANT_ACCOUNT_STATUS_CHANGED`；§66 清单里没有关户动作（只有 `TENANT_SUSPEND` / `TENANT_REACTIVATE`），所以没有对应的 §66 动作名，
+  与 `PENDING_ACTIVATION → ENABLED` 同一处理（原映射说明已随 2026-09-30 归档在
+  [archive/TODO_RECORDS_2026-09-30.md](archive/TODO_RECORDS_2026-09-30.md)）
 - [x] 支付收据 + 下载（AIH-TASK-196..205，设计闸门 #589 v2）
 - [x] **开工前重新评估 Email 传输**：已由 [ADR-0014](adr/ADR-0014-email-smtp-for-now.md)（2026-10-15 接受，取代 ADR-0013）定为现阶段继续用 SMTP、遇到触发条件再评估；退信与投诉抑制的缺口先接受，不再是开工前提
 

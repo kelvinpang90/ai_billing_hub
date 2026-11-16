@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-10-19
+> 最后更新：2026-11-16
 
 ---
 
@@ -66,7 +66,7 @@
 | 调用方 | 事件类型 | 加锁顺序 |
 | --- | --- | --- |
 | `app/repositories/wallet.py` `_apply_billing_status`（余额跃迁） | `tenant.billing_status_changed` | 钱包 → 租户 → 投递行 |
-| `app/services/account_status.py` `_apply`（管理员启停） | `tenant.account_status_changed` | 租户 → 投递行 |
+| `app/services/account_status.py` `_record_transition`（账户状态跃迁；AIH-TASK-212 从 `_apply` 原样抽出）：管理员启停经 `_apply` 调它；关户经 `app/services/account_closure.py` `close_account` 调它 | `tenant.account_status_changed` | 启停：租户 → 投递行；关户：钱包 → 租户 → 投递行 |
 | `app/services/internal_billing.py` `enable_internal_metering`（设为内部计量） | `tenant.billing_mode_changed` | 钱包 → 租户 → 投递行 |
 | `app/services/project_integration.py` `_apply`（项目集成状态跃迁，AIH-TASK-049） | `project.integration_status_changed`（聚合是项目 public_id） | 租户 → 项目 → 投递行 |
 
@@ -74,6 +74,13 @@
 跃迁交错时版本号严格递增。没有任何路径先锁投递行、再锁租户或钱包，所以不会成环。事件 payload 里的
 `effective_status` 一律由 `app/models/tenancy.py` 的 `compose_effective_status` 合成（租户级事件的项目
 维度按 `ENABLED`）。
+
+⚠️ **以后新增的调用方必须在租户行锁内拒绝 `CLOSED`**（设计闸门 #707 v4 §2「关户时刻为什么可以取 `status_changed_at`」，
+AIH-TASK-215）：关户时刻就取 `status_changed_at`（没有单独的 `closed_at` 列），月度对账单的出单资格依赖它在 `CLOSED` 之后不再变化。
+上表四个调用方在 `CLOSED` 之后都不会再执行：账户状态（通用接口的跃迁表里 `CLOSED` 没有出口；关户对已 `CLOSED` 的租户什么都不写）、
+计费状态（只在 `post_transaction` 里，对 `CLOSED` 在跃迁之前就拒绝，AIH-TASK-209）、内部计量开通（对 `CLOSED` 409，AIH-TASK-210）、
+项目集成状态（对 `CLOSED` 409）。`tests/backend/test_status_version.py` 钉住这四条在 `CLOSED` 租户上不改 `status_version` 与
+`status_changed_at`（AIH-TASK-211）；新增调用方时同样补测试。
 
 **计费状态由余额驱动**（spec §7 第 8–10 条、§24；设计闸门 #88）：余额 > 0 为 `ACTIVE`，≤ 0 为
 `SUSPENDED`，**正好为 0 也是暂停**。新租户余额为 0，所以默认 `SUSPENDED`。`billing_status` 只经
@@ -84,23 +91,31 @@
 「大于 0、最多 2 位小数」只在接口层校验，库约束仍是 `NULL` 或 `>= 0`。
 
 **账户状态由管理员控制**（spec §24、§56；设计闸门 #136 v2，AIH-TASK-020）：与计费状态互相独立，共用
-`status_version`。只经 `app/services/account_status.py` 改变：在租户行锁（`SELECT … FOR UPDATE`，不锁钱包）
-内改状态、经 `bump_status_version` 给版本 +1 并写 `tenant.account_status_changed` outbox 事件、改 `updated_at`，
+`status_version`。只经 `app/services/account_status.py` 的 `_record_transition` 写入（启停经 `_apply`，关户见下）：启停在租户行锁
+（`SELECT … FOR UPDATE`，不锁钱包）内改状态、经 `bump_status_version` 给版本 +1 并写 `tenant.account_status_changed` outbox 事件、改 `updated_at`，
 与一条 `TENANT_ACCOUNT_STATUS_CHANGED` 审计同一事务提交。计费跃迁同样在租户行锁内 +1，所以两维交错时版本号
-严格递增、不重复。新租户与迁移前已有的租户都是 `ENABLED`（服务端默认值回填）。本任务只产生
-`ENABLED` / `DISABLED`：`PENDING_ACTIVATION` 没有产生路径（V1 没有自助注册），`CLOSED` 归关户任务；两者
-现在就是 CHECK 允许的取值，关户任务不必再改列。跃迁表见 [api.md](api.md) 的「管理端账户状态」。
+严格递增、不重复。新租户与迁移前已有的租户都是 `ENABLED`（服务端默认值回填）。账户状态接口只产生
+`ENABLED` / `DISABLED`；`PENDING_ACTIVATION` 没有产生路径（V1 没有自助注册）。跃迁表见 [api.md](api.md) 的「管理端账户状态」。
 
-各账户状态下以后功能的行为（设计 §2 末尾「对以后功能的契约」，Kelvin 2026-09-28 确认；本任务不实现，
-由各自 Phase 的设计闸门落地，同一份记在 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-020 一节）：
+**`CLOSED` 已实现**（设计闸门 #707 v4，AIH-TASK-209..214）：只由关户接口 `POST /api/v1/admin/customers/{customer_id}/close`
+（`app/services/account_closure.py` `close_account`）从 `DISABLED` 产生，是终态，没有任何路径离开它。前置条件是钱包余额恰好为 0，且没有
+未结的用量事件、AI 模块 outbox 行、支付与网关事件；在「钱包 → 租户」两把行锁内判定并写入（与 `post_transaction` 同序），状态、版本、
+`status_changed_at`、outbox 与审计同一事务提交。关户时刻即 `status_changed_at`，没有加列（迁移 0009 起列与 CHECK 已允许 `CLOSED`）。
+操作步骤见 [runbook.md「关户」](runbook.md#关户)。
 
-| 功能 | `PENDING_ACTIVATION` | `ENABLED` | `DISABLED` | `CLOSED`（关户任务） |
+各账户状态下功能的行为（AIH-TASK-020 设计 §2 末尾「对以后功能的契约」，Kelvin 2026-09-28 确认，同一份记在
+[TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-020 一节；`CLOSED` 列按 AIH-TASK-209..213 已实现的规则）：
+
+| 功能 | `PENDING_ACTIVATION` | `ENABLED` | `DISABLED` | `CLOSED`（AIH-TASK-209..213 已实现） |
 | --- | --- | --- | --- | --- |
-| 新的 AI 调用（有效状态） | 阻断 | 看计费与集成状态 | 阻断 | 阻断 |
-| 用量事件摄取与扣费（Phase 2） | 照常 | 照常 | **照常**（§112.1：在途的合法事件要处理完） | 不入账，进人工复核 |
-| 新充值（Phase 4） | 允许 | 允许 | **拒绝**（§112.1 第 1 步） | 拒绝 |
-| 管理员调账 | 允许 | 允许 | 允许（关户前清偿 / 退款要用） | 拒绝 |
-| 建项目、建凭据、轮换凭据 | 允许 | 允许 | 允许 | 拒绝（吊销凭据、查看、编辑客户仍允许） |
+| 新的 AI 调用（有效状态） | 阻断 | 看计费与集成状态 | 阻断 | 阻断（`BLOCK_AI` / `ACCOUNT_CLOSED`） |
+| 用量事件摄取与扣费（Phase 2） | 照常 | 照常 | **照常**（§112.1：在途的合法事件要处理完） | 照常落库；计费不入账，事件 `FAILED_FINAL` / `ACCOUNT_CLOSED`，进人工复核 |
+| 新入账（任何类型） | 照常 | 照常 | 照常 | `post_transaction` 在租户行锁内拒绝（`TenantClosed`，不写任何行） |
+| 新充值（Phase 4） | 允许 | 允许 | **拒绝**（§112.1 第 1 步） | 拒绝；迟到到账进 `REVIEW_REQUIRED` / `TENANT_CLOSED`，不入账 |
+| 管理员调账 | 允许 | 允许 | 允许（关户前清偿 / 退款要用） | 409 `ACCOUNT_CLOSED` |
+| 建项目、建凭据、轮换凭据 | 允许 | 允许 | 允许 | 409 `ACCOUNT_CLOSED`（吊销凭据、查看、编辑客户仍允许） |
+| 签发 AI 客户端密钥、签发与启用 webhook 签名密钥、开通内部计量、设置或清除低余额阈值 | 允许 | 允许 | 允许 | 409 `ACCOUNT_CLOSED`（吊销 AI 客户端密钥、退役签名密钥仍允许） |
+| 月度对账单 | 照常 | 照常 | 照常 | 只出到关户当月（含无发生额的一份），之后的账期不生成、不算缺失 |
 | 客户门户登录（Phase 4） | 由 Phase 4 定 | 允许 | 只读（看账单与收据） | 只读 |
 
 ## `projects`（spec §76，UI 字段见 §57）
