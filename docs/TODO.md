@@ -122,9 +122,9 @@
 
 ## Phase 1 — Tenant, Project & Wallet Core（§124）
 
-- [ ] Tenant
-- [ ] Project
-- [ ] 管理端客户管理
+- [x] Tenant（账户状态 AIH-TASK-020；有效状态合成与状态推送 AIH-TASK-049..051，设计闸门 #241 v6；关户 AIH-TASK-209..215、227，设计闸门 #707）
+- [x] Project（集成状态与状态 webhook 地址 AIH-TASK-049..050、管理端面板 053，设计闸门 #241 v6；`backend_base_url` 按该设计不建，见 [database-schema.md](database-schema.md)）
+- [x] 管理端客户管理（账户状态前端 AIH-TASK-082；低余额阈值配置 AIH-TASK-111）
 - [x] Wallet（建钱包 006、手工调账 011；管理端查看流水 AIH-TASK-083 到 085，设计闸门 #351；随合并生效）
 - [x] 不可变钱包账本（数据层与触发器 005；每日余额核对、告警与管理端核对页 AIH-TASK-129 到 135，设计闸门 #474；随合并生效）
 - [x] 管理员手工调账（AIH-TASK-011，见下面的记录段；随合并生效）
@@ -132,6 +132,8 @@
 - [x] **出站 webhook 密钥 schema 二选一**（`project_webhook_secrets` 新表 / `projects` 加暂存列），走设计闸门后再实现——见 [ADR-0004](adr/ADR-0004-credential-encryption.md) 第 4a 节。2026-09-25 已选定方案 i（新表），实现另过设计闸门 → 设计闸门 #135 `APPROVED: design v1`（2026-09-27），实现登记为 AIH-TASK-019；Kelvin 2026-09-28 同意密钥表与投递拆成两步，投递归 Phase 3。AIH-TASK-019 建了表、四个管理端接口与签名库（见下面的记录段；随合并生效）
 - [x] 审计日志（AIH-TASK-021 到 023，按下面的「审计日志差异清单」判断，见 AIH-TASK-023 记录段；随合并生效）
 
+> 2026-11-16：下面列的缺口都已补齐，Tenant、Project、管理端客户管理三项已勾（各项括号里写了交付任务）。以下是 2026-09-25 的原记录。
+>
 > 未勾的几项**不是漏勾**，是各自还差一块（2026-09-25 汇总自下面各任务记录）：
 > - Tenant：身份字段（004）与计费状态（005）已有；账户状态 `account_status` 的列与启用 / 停用接口在 AIH-TASK-020（随合并生效）；缺关户（依赖 Phase 2 与 Phase 4）与有效状态合成（Phase 3）
 > - Project：身份字段与管理端建 / 列（004、006）已有，出站 webhook 签名密钥（019，`project_webhook_secrets` 表）已有；缺集成字段（后端地址、状态 webhook 地址、`integration_status`），随状态模型任务与 Phase 3
@@ -356,7 +358,7 @@
 - [x] 门户内通知（AIH-TASK-125..128，设计闸门 #471 v7：低余额、停机、复机三类事件转成门户通知，门户 `/portal/notifications` 按记账顺序倒序列出、可单条或全部标为已读，导航显示未读数；Email 通道已由 AIH-TASK-152..153 交付（设计闸门 #559 v2：每条门户通知同一事务写一行通知邮件，发往租户联系邮箱），WhatsApp 通道未做，上面三项因此仍不勾）
 - [x] Email adapter（AIH-TASK-151..153：Notification Adapter 与模板层、通知邮件的渲染与投递、通知结算时同事务写邮件行）
 - [ ] WhatsApp adapter（依赖 D7）
-- [ ] Webhook 重试
+- [x] Webhook 重试（状态 webhook 投递：失败不设上限地重试、指数退避，AIH-TASK-051，设计闸门 #241 v6）
 - [ ] 健康告警
 
 ---
@@ -424,7 +426,7 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ### 来自「AIH-TASK-019 —— 出站 webhook 签名密钥：签发、启用、退役与签名库（2026-09-28）」
 
-- [ ] **后续**：ADR-0004「收口条件」里第 4a 节那一项的勾选（要改 ADR 文件，不在本任务的可改路径里）；管理端前端（已在
+- [x] **后续**：ADR-0004「收口条件」里第 4a 节那一项的勾选（要改 ADR 文件，不在本任务的可改路径里）；管理端前端（已在
   「后续计划」）；Phase 3 的投递设计闸门接上 `signing_material` 与 `sign_status_webhook`，并在 api.md「状态 webhook 签名」
   补时间窗、重试与按事件 id 去重的约定
 
@@ -472,7 +474,7 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ### 来自「AIH-TASK-026 —— 供应商价格版本与泛化价格分量（T-B，2026-09-29）」
 
-- [ ] **后续**：
+- [x] **后续**：
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-K
     （AIH-TASK-036）补上
   - 「快照读陷阱」用例同时断言了陷阱本身（同一事务里的普通读仍是旧快照），与 025 一样依赖 MySQL 默认的
@@ -484,7 +486,7 @@ Phase 全做完还不能上，以下五条必须全过：
 
 ### 来自「AIH-TASK-027 —— 客户定价规则 MARKUP 与 FIXED_RATE（T-D，2026-09-29）」
 
-- [ ] **后续**：
+- [x] **后续**：
   - 前端 `frontend/src/api/adminAudit.ts` 的 `AUDIT_ACTIONS` 还没有这五个新动作（本任务不改前端），随 T-L
     （AIH-TASK-037）补上
   - 「快照读陷阱」用例同时断言了陷阱本身，与 025 / 026 一样依赖 MySQL 默认的 REPEATABLE READ
@@ -536,9 +538,9 @@ T0.8d 的阻断项**，spec §53 与设计闸门 #32 v5 都没有要求，所以
 ## 文档欠账
 
 - [x] D1–D7 的 ADR（`docs/adr/` 目录已建，见 [adr/README.md](adr/README.md)；D1–D7 都已有 ADR，D6 的选型 ADR-0015 于 2026-11-06 补齐）
-- [ ] `docs/database-schema.md`（Phase 1 起维护）
+- [x] `docs/database-schema.md`（Phase 1 起维护；已建，各任务随改表结构同步维护）
 - [x] `projects` 表结构裁决（Phase 1 建表前）：spec §57 的 UI 字段有 `project_id` 与 `description`，§76 的表却是 `id` + `public_id`、没有 `description`。两节不一致，建表前定下来并写进 `docs/database-schema.md`；改 spec 的话走一次勘误 —— **已裁决（Kelvin，2026-09-19）**：§57 的 `project_id` 就是 §76 的 `public_id`；加可空 `description`。§74 说表定义是最低要求，多一列不冲突，**不需要勘误**。见 [database-schema.md](database-schema.md)
-- [ ] `docs/api.md`（Phase 1 起维护）—— [已新建](api.md)（AIH-TASK-006），目前只有管理端客户管理的五个接口；认证接口的契约还没补进去
+- [x] `docs/api.md`（Phase 1 起维护）—— [已新建](api.md)（AIH-TASK-006），各任务随改接口同步维护；认证接口的契约已补（「通用约定」与「客户门户认证」两节）
 - [x] `docs/pricing-engine.md`、`docs/currency-and-fx.md`（Phase 2）（AIH-TASK-027 / 031 与 039 / 040 交付）
 - [ ] `docs/integrated-application-backend.md`（Phase 3）
 - [x] `docs/payment-flow.md`（Phase 4）
