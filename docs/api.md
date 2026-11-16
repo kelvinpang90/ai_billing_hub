@@ -979,8 +979,9 @@
 
 设计依据：设计闸门 #96 `APPROVED: design v3`，全文见 [design/AIH-TASK-006-admin-customers.md](design/AIH-TASK-006-admin-customers.md)（spec §56、§57、§124）。
 
-七个接口都在 `/api/v1/admin` 下，都要 ADMIN。编辑客户是 AIH-TASK-009 加的，改账户状态是
-AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个来自设计闸门 #96。
+下表的接口都在 `/api/v1/admin` 下，都要 ADMIN。编辑客户是 AIH-TASK-009 加的，改账户状态是
+AIH-TASK-020 加的（见[管理端账户状态](#管理端账户状态)），关户检查与关户是 AIH-TASK-213 加的（见
+[管理端关户](#管理端关户)），其余五个来自设计闸门 #96。
 
 | 方法与路径 | 成功 | 错误 |
 | --- | --- | --- |
@@ -989,6 +990,8 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | `GET /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 503 |
 | `PATCH /api/v1/admin/customers/{customer_id}` | 200，客户详情 | 401 / 403 / 404 / 422 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/account-status` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `GET /api/v1/admin/customers/{customer_id}/closure-check` | 200，关户检查 | 401 / 403 / 404 / 500 / 503 |
+| `POST /api/v1/admin/customers/{customer_id}/close` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/internal-metering` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/projects` | 201，项目 | 401 / 403 / 404 / 409 / 422 / 503 |
 | `GET /api/v1/admin/customers/{customer_id}/projects` | 200，项目分页 | 401 / 403 / 404 / 422 / 503 |
@@ -1031,7 +1034,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | `billing_status` | 由余额驱动：`ACTIVE`（余额 > 0）或 `SUSPENDED`（余额 ≤ 0）。新客户余额为 0，所以是 `SUSPENDED` |
 | `billing_mode` | 默认为 `PREPAID`；Acuven 自用租户可在首次使用前受控设为 `INTERNAL_METERED_ONLY` |
 | `ai_service_enabled` | 按模式、余额和管理员账户状态计算的有效 AI 权限；内部模式免余额停用，但不免管理员禁用 |
-| `account_status` | 管理员控制的账户生命周期，与 `billing_status` 互相独立：`PENDING_ACTIVATION`、`ENABLED`、`DISABLED`、`CLOSED` 之一。新客户与迁移前已有的客户都是 `ENABLED`；现在只有 `ENABLED` / `DISABLED` 会出现（AIH-TASK-020） |
+| `account_status` | 管理员控制的账户生命周期，与 `billing_status` 互相独立：`PENDING_ACTIVATION`、`ENABLED`、`DISABLED`、`CLOSED` 之一。新客户与迁移前已有的客户都是 `ENABLED`；`ENABLED` / `DISABLED` 由账户状态接口产生（AIH-TASK-020），`CLOSED` 只由关户接口产生（AIH-TASK-213，见[管理端关户](#管理端关户)），`PENDING_ACTIVATION` 现在没有产生路径 |
 | `status_version` | 计费状态、账户状态、计费模式或该客户任一项目的集成状态每真实跃迁一次 +1，各维共用、只增不减。新客户是 0 |
 | `wallet.currency` | V1 只有 `MYR` |
 | `wallet.balance` | 8 位小数的字符串 |
@@ -1159,7 +1162,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 ### 不在本批接口里
 
-删除客户与项目（财务记录永久保留）、关户（`→ CLOSED`，见[管理端账户状态](#管理端账户状态)末尾）。
+删除客户与项目（财务记录永久保留）。关户（`→ CLOSED`）见[管理端关户](#管理端关户)。
 低余额阈值见[下一节](#管理端低余额阈值)；账户状态、管理员调账、API 凭据、项目集成状态与状态 webhook
 地址见后面几节。
 
@@ -1264,7 +1267,7 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 | 字段 | 必填 | 规则 |
 | --- | --- | --- |
-| `account_status` | 是 | `ENABLED` 或 `DISABLED`，大小写敏感。`PENDING_ACTIVATION` 与 `CLOSED` 不能作为目标（422） |
+| `account_status` | 是 | `ENABLED` 或 `DISABLED`，大小写敏感。`PENDING_ACTIVATION` 与 `CLOSED` 不能作为目标（422）；`CLOSED` 只由[关户接口](#管理端关户)产生 |
 | `reason` | 是 | 去掉首尾空白后长度 1–255。存的是去掉首尾空白后的值 |
 
 - 其他字段一律 422，包括 `status_version`、`billing_status`、余额、`tenant_id`、`customer_id` 与
@@ -1282,8 +1285,8 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 | `CLOSED` | 任何目标 | 409 `ACCOUNT_STATUS_TRANSITION_INVALID` |
 | 任何状态 | 与当前相同 | 200，不写 |
 
-现在没有任何路径会产生 `PENDING_ACTIVATION`（V1 没有自助注册）或 `CLOSED`（关户另立任务）；
-表按全部取值写全，保证关户上线后本接口也不会把已关的户重开。
+现在没有任何路径会产生 `PENDING_ACTIVATION`（V1 没有自助注册）；`CLOSED` 只由
+[`POST …/close`](#管理端关户) 从 `DISABLED` 产生，本接口产生不了它。表按全部取值写全，保证本接口不会把已关的户重开。
 
 ### 语义
 
@@ -1313,9 +1316,115 @@ AIH-TASK-020 加的（见[下一节](#管理端账户状态)），其余五个�
 
 `billing_status` 是跃迁那一刻的计费状态；`changed_at` 与客户的 `updated_at` 相同（UTC，截到整秒）。
 
-不在本接口里：关户（`→ CLOSED`，要等用量事件与支付落地后另立任务）、有效状态（`ALLOW_AI` /
+不在本接口里：关户（`→ CLOSED`，只由关户接口产生，见[管理端关户](#管理端关户)）、有效状态（`ALLOW_AI` /
 `BLOCK_AI`）与 `reason_code`、项目的 `integration_status`。各状态下摄取、充值、客户登录的行为
 是对以后功能的契约，记在 [TODO 历史记录](archive/TODO_RECORDS_2026-09-30.md) 的 AIH-TASK-020 一节。
+
+---
+
+## 管理端关户
+
+设计依据：设计闸门 #707 `APPROVED: design v4`，全文见 [design/AIH-TASK-209-account-closure.md](design/AIH-TASK-209-account-closure.md) §2「接口」（spec §112.1）。实现登记为 AIH-TASK-213。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `GET /api/v1/admin/customers/{customer_id}/closure-check` | 200，关户检查 | 401 / 403 / 404 / 500 / 503 |
+| `POST /api/v1/admin/customers/{customer_id}/close` | 200，客户详情 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+
+两个接口都只有 ADMIN 能调（登录必过 2FA）；客户只来自路径里的 `{customer_id}`（`public_id`）。关户把账户从
+`DISABLED` 置为终态 `CLOSED`；`CLOSED` **只由本节的 `POST …/close` 产生**，[账户状态接口](#管理端账户状态)不变
+（`CLOSED` 作目标 422，从 `CLOSED` 出发 409），没有任何接口能离开 `CLOSED`（不能重开）。操作顺序（停用 →
+等用量与支付到终态 → 吊销凭据 → 余额清零 → 关户）见 runbook「关户」一节。
+
+### `GET …/closure-check` —— 关户检查
+
+成功：**200**，`data` 是关户检查对象。只读：不加锁、不写库、不写审计。
+
+```json
+{
+  "account_status": "DISABLED",
+  "balance": "0.00000000",
+  "unresolved_usage_events": 0,
+  "unresolved_ai_usage": 0,
+  "unresolved_payments": 1,
+  "unresolved_payment_events": 0,
+  "payment_events_truncated": false,
+  "blockers": ["ACCOUNT_CLOSURE_PAYMENTS_PENDING"]
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `account_status` | string | 当前账户状态 |
+| `balance` | string | 钱包余额，恰好 8 位小数的定点字符串（与客户详情的 `wallet.balance` 同一写法） |
+| `unresolved_usage_events` | int | 状态不是 `PROCESSED` / `FAILED_FINAL` 的用量事件数 |
+| `unresolved_ai_usage` | int | AI 模块用量 outbox 里该客户 `PENDING` / `SENDING` / `HELD` 的行数 |
+| `unresolved_payments` | int | `PENDING`、`REVIEW_REQUIRED`，或创建不满 7 天的 `EXPIRED` 支付数 |
+| `unresolved_payment_events` | int | 归属该客户支付的 `RECEIVED` / `PROCESSING` / `RETRY` 网关事件数 |
+| `payment_events_truncated` | bool | 网关事件的扫描到了上限（可能还有更多）；此时该类别按未结处理 |
+| `blockers` | string[] | 此刻关户会被拒绝的全部原因码，顺序同 `POST …/close` 的判定顺序：账户不是 `DISABLED` 时首项 `ACCOUNT_STATUS_TRANSITION_INVALID`；余额不为 0 时 `ACCOUNT_CLOSURE_BALANCE_NOT_ZERO`；之后按用量事件、AI 用量、支付、网关事件的顺序给出非零类别的码（网关事件截断时即使计数为 0 也给出）。`CLOSED` 时为空数组 |
+
+响应里只有上面这些字段：没有成本、毛利或个人数据。⚠️ **`blockers` 为空不保证随后的 `POST …/close`
+成功**：两次请求之间可能有新的用量或支付事件落库，关户在锁内重新判定。
+
+错误：404 `CUSTOMER_NOT_FOUND`（客户不存在）；500 `INTERNAL_ERROR`（客户没有钱包，属于数据缺陷）。
+
+### `POST …/close` —— 关户
+
+请求体 `{"reason": "Closure ticket CL-0001"}`：
+
+| 字段 | 必填 | 规则 |
+| --- | --- | --- |
+| `reason` | 是 | 去掉首尾空白后长度 1–255。存的是去掉首尾空白后的值 |
+
+- 其他字段一律 422，包括 `account_status`、`status_version`、余额与任何 id：客户只来自路径，目标永远是 `CLOSED`。
+- ⚠️ **原因只写业务说明（例如关户工单号），不写个人数据。**原因只进审计，不进出站事件、不进应用日志。
+- 管理端前端另要求输入客户名才能确认；服务端不校验客户名。
+
+成功：**200**，`data` 是关户后的客户详情。同一个事务里（锁钱包 → 锁客户行之后判定）：`account_status = CLOSED`、
+`status_version` +1、`updated_at`；一条 `TENANT_ACCOUNT_STATUS_CHANGED` 审计（`before_state` / `after_state` 只有
+`account_status` 与 `status_version`，`reason` 是请求里的原因）；一条 `tenant.account_status_changed` 出站事件
+（payload 同[管理端账户状态](#管理端账户状态)，`account_status` 为 `CLOSED`）；该客户各项目的状态投递被重排，
+集成方随后收到 `BLOCK_AI` / `ACCOUNT_CLOSED`。不写钱包。任何一步失败整体回滚，账户仍是 `DISABLED`。
+
+**已是 `CLOSED`：200，返回当前详情，什么都不写**（不写审计、不加版本、不写事件）。所以超时重发是安全的；
+原因不同的重发不写，审计只有第一次的。没有幂等键。
+
+| HTTP | `error.code` | 什么时候 | 写库 |
+| --- | --- | --- | --- |
+| 422 | `VALIDATION_ERROR` | 原因缺失、为空白或超长；多余字段 | 否 |
+| 404 | `CUSTOMER_NOT_FOUND` | 客户不存在 | 否 |
+| 409 | `ACCOUNT_STATUS_TRANSITION_INVALID` | 账户不是 `DISABLED`（也不是 `CLOSED`）：先停用 | 否 |
+| 409 | `ACCOUNT_CLOSURE_BALANCE_NOT_ZERO` | 余额不恰好为 0 | 否 |
+| 409 | `ACCOUNT_CLOSURE_USAGE_PENDING` | 有未结用量事件 | 否 |
+| 409 | `ACCOUNT_CLOSURE_AI_USAGE_PENDING` | AI 模块 outbox 有该客户的 `PENDING` / `SENDING` / `HELD` 行 | 否 |
+| 409 | `ACCOUNT_CLOSURE_PAYMENTS_PENDING` | 有 `PENDING`、`REVIEW_REQUIRED` 或 7 天内创建的 `EXPIRED` 支付 | 否 |
+| 409 | `ACCOUNT_CLOSURE_PAYMENT_EVENTS_PENDING` | 有归属该客户的 `RECEIVED` / `PROCESSING` / `RETRY` 网关事件，或扫描到了上限 | 否 |
+| 500 | `INTERNAL_ERROR` | 客户没有钱包（数据缺陷）或数据库错误（含锁等待超时、死锁）；整个事务回滚 | 否 |
+
+**判定顺序**：422（请求校验）→ 404 → 已是 `CLOSED` 直接 200 → `ACCOUNT_STATUS_TRANSITION_INVALID` → 余额 →
+四类未结（按上表顺序）。同时不满足多条时只报第一条；要一次看全部，用 `closure-check`。409 的消息是固定英文句子，
+不带计数与金额。
+
+### 关户之后
+
+账户 `CLOSED` 后，下列写接口返回 **409 `ACCOUNT_CLOSED`**、什么都不写（含审计）：
+
+| 接口 | 见 |
+| --- | --- |
+| 建项目 `POST …/customers/{customer_id}/projects` | [管理端客户管理](#管理端客户管理) |
+| 初始化内部计量 `POST …/internal-metering` | [管理端客户管理](#管理端客户管理) |
+| 设置或清除低余额阈值 `PUT …/low-balance-threshold`（含与现值相同） | [管理端低余额阈值](#管理端低余额阈值) |
+| 手工调账 `POST …/wallet/adjustments`（关户前已记过的同一幂等键重发仍 200 `replayed`） | [管理端手工调账](#管理端手工调账) |
+| 建集成凭据、轮换集成凭据 | [管理端集成 API 凭据](#管理端集成-api-凭据) |
+| 签发与启用出站 webhook 签名密钥（含已 `ACTIVE` 的启用） | [管理端出站 webhook 签名密钥](#管理端出站-webhook-签名密钥) |
+| 签发 AI 客户端密钥 `POST …/ai-access/client-keys` | [管理端 AI 密钥](#管理端-ai-密钥) |
+| 改项目集成状态、设置状态 webhook 地址（清除不受限） | [管理端项目集成状态与状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址) |
+| 门户账号的开通、重发邀请与启用；客户接受邀请 | [管理端门户账号](#管理端门户账号)、[客户门户认证](#客户门户认证) |
+
+照常允许：查看、编辑客户资料、吊销集成凭据、吊销 AI 客户端密钥、退役签名密钥、清除状态 webhook 地址、
+停用门户账号。客户门户只读（写接口 403 `ACCOUNT_READ_ONLY`）。关户后到达的用量计费为 `FAILED_FINAL` /
+`ACCOUNT_CLOSED`、迟到到账进复核 `TENANT_CLOSED`，都不入账；关户当月照常出最后一份对账单，之后不再生成。
 
 ---
 
