@@ -42,6 +42,8 @@
  * 支付列表页（设计闸门 #589 v2 §2「管理端页面」、§11）。
  * AIH-TASK-214 加了客户详情关户按钮的一个只读步骤（check_account_closure），排在 login、open_customers、open_fixture
  * 之后，复用 open_fixture 打开的夹具客户详情（设计闸门 #707 v4 §2「前端」）。
+ * AIH-TASK-218 加了门户对账单详情 PDF 下载按钮的一个只读步骤（check_portal_statement_pdf），排在 login_customer 之后，经门户
+ * 导航自己进对账单页，列表非空时点第一行打开详情、只查「Download PDF」不点（设计闸门 #708 v3 §2「门户页面」、§11）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -124,6 +126,10 @@
  * - 门户对账单页（check_portal_statements）只点门户导航里的「Statements」（href 为 /portal/statements）这一个链接：
  *   不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不点「Try again」或任何别的按钮与链接，
  *   不填也不提交任何表单（页面本身没有写操作入口）。
+ * - 门户对账单详情的 PDF 下载按钮（check_portal_statement_pdf）只点门户导航里的「Statements」（href 为 /portal/statements）
+ *   这一个链接，以及列表不为空时列表的**第一行**（只为打开详情：页面因此只发详情的 GET /api/v1/customer/statements/<id>）：
+ *   不点详情卡片里的「Download PDF」（验收不下载文件）、不点别的行、不点「Previous」「Next」（不翻页）、不点「Try again」
+ *   或任何别的按钮与链接，不填也不提交任何表单。
  * - 门户充值页（check_portal_topup）只点门户导航里的「Top up」（href 为 /portal/topup）这一个链接：不点任何推荐金额按钮、
  *   不在金额输入框里输入、不点「Go to payment」（建单会写数据并跳去付款页）、不点「Try again」或任何别的按钮与链接，
  *   不提交任何表单。
@@ -551,6 +557,24 @@
  *                   数据行数与 items 的条数一致；items 为空时显示空状态（portal.statements.empty）、没有数据行，同样算通过。
  *                   不点行（不打开详情）、不点「Previous」「Next」，不提交任何表单。报到前把列表一块滚动到视口里（规则同
  *                   check_portal_wallet）
+ *   check_portal_statement_pdf
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Statements」链接（portal.nav.statements，
+ *                   href 为 /portal/statements）进对账单页，页面落定的判定与失败码同 check_portal_statements。后端值取页面自己发出的
+ *                   GET /api/v1/customer/statements 的响应体（被动观察，不自己发请求、不拦截；取 login_customer 之后最近一次读完的那一次
+ *                   —— 紧跟在 check_portal_statements 之后时点导航不会重新请求，页面显示的仍是那一次），不是 200、不是成功信封、没有
+ *                   items 数组、items 非空而 items[0].statement_id 或 items[0].statement_number 不是字符串，都是 assertion_failed。
+ *                   items 为空时显示空状态（portal.statements.empty）、没有数据行、没有详情卡片，即通过。items 非空时：对账单表格的
+ *                   数据行数与 items 的条数一致、第一行的 data-row-key 等于 items[0].statement_id，此刻还没有详情卡片（role=region、
+ *                   aria-label 为「Statement details」，portal.statements.detail.title）且第一行没有被选中（否则 assertion_failed）；
+ *                   点第一行，页面只发详情的 GET /api/v1/customer/statements/<id>（CUSTOMER_STATEMENT_DETAIL_API 只匹配这一种路径，
+ *                   不含 …/download）。等详情卡片落定：不再显示 portal.statements.detail.loading；显示
+ *                   portal.statements.detail.loadFailed 是 page_error，显示 portal.statements.detail.notFound 是 assertion_failed。
+ *                   后端值取点击之后页面发出的那次详情 GET 的响应体（被动观察），不是 200、不是成功信封、statement_id 或
+ *                   statement_number 与 items[0] 不同都是 assertion_failed。卡片里「Statement number」一项（带边框的 Descriptions）
+ *                   等于 statement_number，且卡片里恰好一个文字为「Download PDF」（portal.statements.download.button）的按钮、
+ *                   可点（没有 disabled 属性、aria-disabled 不是 true）；缺按钮是 element_missing，多于一个或不可点是
+ *                   assertion_failed。**不点它**。不点别的行、不点「Previous」「Next」，不提交任何表单。报到前把详情卡片（列表为空
+ *                   时是列表一块）滚动到视口里（规则同 check_portal_wallet）
  *   check_portal_topup
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Top up」链接（en.json 的
  *                   portal.nav.topup，href 为 paths.ts 的 portalTopup，即 /portal/topup）进充值页。页面落定：地址是
@@ -878,6 +902,11 @@ const TEXT = {
     "You have no statements yet. Each month's statement is created on the 2nd day after that month ends.",
   portalStatementsNumber: "Statement number", // portal.statements.field.number —— 对账单表格的列头
   portalStatementsPeriod: "Period", // portal.statements.field.period
+  portalStatementDetailTitle: "Statement details", // portal.statements.detail.title —— 详情卡片的 aria-label
+  portalStatementDetailLoading: "Loading the statement…", // portal.statements.detail.loading
+  portalStatementDetailLoadFailed: "The statement could not be loaded.", // portal.statements.detail.loadFailed
+  portalStatementDetailNotFound: "This statement was not found.", // portal.statements.detail.notFound
+  portalStatementDownload: "Download PDF", // portal.statements.download.button —— 详情卡片的下载按钮，只查不点
   portalNavTopup: "Top up", // portal.nav.topup —— 门户导航的充值项
   portalTopupTitle: "Top up", // portal.topup.title —— 充值一块的 aria-label
   portalTopupLoading: "Loading top-up options…", // portal.topup.loading
@@ -1106,9 +1135,16 @@ const CUSTOMER_NOTIFICATIONS_API = /^\/api\/v1\/customer\/notifications$/;
 
 /**
  * 客户自己的对账单列表接口的路径（frontend/src/api/customerStatements.ts 的 CUSTOMER_STATEMENTS_URL）。详情
- * （…/statements/{statement_id}）不匹配：check_portal_statements 不点行，页面本来也不该发它。
+ * （…/statements/{statement_id}）不匹配：check_portal_statements 不点行，页面本来也不该发它；check_portal_statement_pdf
+ * 点第一行时发的详情由下面的 CUSTOMER_STATEMENT_DETAIL_API 单独观察。
  */
 const CUSTOMER_STATEMENTS_API = /^\/api\/v1\/customer\/statements$/;
+
+/**
+ * 客户自己的对账单详情接口的路径（…/statements/{statement_id}，只有这一段 id）。列表与 PDF 下载
+ * （…/statements/{statement_id}/download）都不匹配。
+ */
+const CUSTOMER_STATEMENT_DETAIL_API = /^\/api\/v1\/customer\/statements\/[^/]+$/;
 
 /** 客户自己的充值选项接口的路径（frontend/src/api/customerPayments.ts 的 CUSTOMER_TOPUP_OPTIONS_URL）。 */
 const CUSTOMER_TOPUP_OPTIONS_API = /^\/api\/v1\/customer\/topup-options$/;
@@ -1610,6 +1646,8 @@ const network = {
   customerNotifications: new Map(),
   /** 客户自己的对账单列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   customerStatements: new Map(),
+  /** 客户自己的对账单详情接口（只记 GET）：requestId → { status, finished, failed, seq }。路径里的 id 不保存。 */
+  customerStatementDetails: new Map(),
   /** 客户自己的充值选项接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
   customerTopupOptions: new Map(),
   /** 客户自己的支付列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
@@ -1642,6 +1680,7 @@ function trackedRequest(requestId) {
     network.customerConversations.get(requestId) ??
     network.customerNotifications.get(requestId) ??
     network.customerStatements.get(requestId) ??
+    network.customerStatementDetails.get(requestId) ??
     network.customerTopupOptions.get(requestId) ??
     network.customerPayments.get(requestId)
   );
@@ -1688,6 +1727,27 @@ function isCustomerStatementsList(url) {
     const parsed = new URL(url);
     return (
       parsed.protocol === "https:" && parsed.hostname === network.host && CUSTOMER_STATEMENTS_API.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 是不是客户自己的对账单详情接口（同源 https、路径恰好是 /api/v1/customer/statements/<id>、没有查询串）。不保存 URL，
+ * 也不保存 id。
+ */
+function isCustomerStatementDetail(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === network.host &&
+      parsed.search === "" &&
+      CUSTOMER_STATEMENT_DETAIL_API.test(parsed.pathname)
     );
   } catch {
     return false;
@@ -2291,6 +2351,14 @@ function observeNetwork(sessionId) {
             seq: ++network.seq,
           });
         }
+        if (isCustomerStatementDetail(params.request?.url) && params.request?.method === "GET") {
+          network.customerStatementDetails.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
         if (isCustomerTopupOptions(params.request?.url) && params.request?.method === "GET") {
           network.customerTopupOptions.set(params.requestId, {
             status: null,
@@ -2635,6 +2703,8 @@ function latestCustomerMeResponse(afterSeq) {
  * （network.customerStatements，记录里没有 newest，每一次都算）；check_portal_topup 拿它取
  * GET /api/v1/customer/topup-options（network.customerTopupOptions，同样每一次都算）；check_portal_payments 拿它取
  * GET /api/v1/customer/payments（network.customerPayments，同样每一次都算）；check_portal_receipts 也拿它取同一个接口。
+ * check_portal_statement_pdf 拿它取对账单列表（network.customerStatements）与点第一行之后的详情
+ * GET /api/v1/customer/statements/<id>（network.customerStatementDetails，同样每一次都算）。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -4975,6 +5045,130 @@ function clickPortalNavStatements(lib, T) {
       a.click();
       return true;
     }
+  }
+  return false;
+}
+
+/**
+ * 门户对账单页与详情卡片的状态（check_portal_statement_pdf 用）：在 {@link probePortalStatements} 的基础上，再给出表格
+ * 第一个数据行的 data-row-key 与它是否被选中（aria-selected）；详情卡片（role=region、aria-label 为「Statement details」）
+ * 在不在、在加载、读失败、没找到，卡片里「Statement number」一项（带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）
+ * 的文字，以及卡片里文字为「Download PDF」的按钮有几个、恰好一个时它是否可用（没有 disabled 属性、aria-disabled 不是
+ * true）。按钮在下载中会多一个 loading 图标，图标没有文字，不影响按文字找。只读 DOM，不点、不填。
+ */
+function probePortalStatementPdf(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const regionNamed = (label) =>
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === label) ?? null;
+  const region = regionNamed(T.portalStatementsTitle);
+  const card = regionNamed(T.portalStatementDetailTitle);
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    empty: false,
+    table: false,
+    rows: 0,
+    firstKey: null,
+    firstSelected: false,
+    detail: card !== null,
+    detailBusy: false,
+    detailFailed: false,
+    detailNotFound: false,
+    detailNumber: null,
+    downloads: 0,
+    downloadEnabled: false,
+  };
+  if (region !== null) {
+    out.busy = region.querySelector('[aria-busy="true"]') !== null || has(region, T.portalStatementsLoading);
+    out.failed = has(region, T.portalStatementsLoadFailed);
+    out.empty = has(region, T.portalStatementsEmpty);
+    for (const table of region.querySelectorAll("table")) {
+      const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+      if (!heads.includes(T.portalStatementsNumber) || !heads.includes(T.portalStatementsPeriod)) {
+        continue;
+      }
+      out.table = true;
+      for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        if (tr.querySelectorAll(":scope > td").length !== heads.length) {
+          continue;
+        }
+        if (out.rows === 0) {
+          out.firstKey = tr.getAttribute("data-row-key");
+          out.firstSelected = tr.getAttribute("aria-selected") === "true";
+        }
+        out.rows += 1;
+      }
+      break;
+    }
+  }
+  if (card !== null) {
+    out.detailBusy = card.querySelector('[aria-busy="true"]') !== null || has(card, T.portalStatementDetailLoading);
+    out.detailFailed = has(card, T.portalStatementDetailLoadFailed);
+    out.detailNotFound = has(card, T.portalStatementDetailNotFound);
+    for (const th of card.querySelectorAll("th")) {
+      const td = th.nextElementSibling;
+      if (lib.norm(th.textContent) === T.portalStatementsNumber && td && td.tagName === "TD") {
+        out.detailNumber = lib.norm(td.textContent);
+        break;
+      }
+    }
+    const buttons = [...card.querySelectorAll("button")].filter(
+      (el) => lib.norm(el.textContent) === T.portalStatementDownload,
+    );
+    out.downloads = buttons.length;
+    if (buttons.length === 1) {
+      const button = buttons[0];
+      out.downloadEnabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+    }
+  }
+  return out;
+}
+
+/**
+ * 点对账单列表的**第一个**数据行（只为打开详情），且只在它的 data-row-key 恰好是 T.portalStatementRowKey 时点。
+ * 不点别的行、不点行里或页面上的任何按钮与链接。点了回 true，没点回 false。
+ */
+function clickFirstPortalStatementRow(lib, T) {
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalStatementsTitle,
+    ) ?? null;
+  if (region === null) {
+    return false;
+  }
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.portalStatementsNumber) || !heads.includes(T.portalStatementsPeriod)) {
+      continue;
+    }
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      if (tr.querySelectorAll(":scope > td").length !== heads.length) {
+        continue;
+      }
+      if (tr.getAttribute("data-row-key") !== T.portalStatementRowKey) {
+        return false;
+      }
+      tr.click();
+      return true;
+    }
+    return false;
   }
   return false;
 }
@@ -8639,6 +8833,217 @@ async function stepCheckPortalStatements(ctx) {
   }
 }
 
+/** 把对账单详情卡片滚进视口：理由同 {@link PORTAL_NOTIFICATIONS_SCROLL_TEXT}，只换找的那一块的 aria-label。 */
+const PORTAL_STATEMENT_DETAIL_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalStatementDetailTitle };
+
+async function stepCheckPortalStatementPdf(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开对账单页：只点「Statements」这一个链接；不点「Previous」「Next」。
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavStatements, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 对账单页落定：门户外壳在，列表一块不在加载，且是某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalStatementPdf, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalStatementsPath &&
+        s.portalShell &&
+        s.region &&
+        !s.busy &&
+        (s.failed || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalStatementsPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：页面自己发出的 GET /api/v1/customer/statements 的响应体（被动观察，不自己发请求）。从 login_customer 之后算起、
+  // 取最近一次读完的那一次：这一步若紧跟在 check_portal_statements 之后，页面已停在对账单页，点导航不换查询键、不重新请求，
+  // 页面显示的仍是那一次的响应。
+  const seen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerStatements, ctx.customerLoginSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!seen.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(seen.value.requestId);
+    if (seen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    const items = envelope.data?.items;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    if (items.length === 0) {
+      expected = { rows: 0, id: null, number: null };
+    } else {
+      const id = items[0]?.statement_id;
+      const number = items[0]?.statement_number;
+      if (typeof id !== "string" || typeof number !== "string") {
+        throw fail("assertion_failed");
+      }
+      expected = { rows: items.length, id, number };
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、第一项没有 statement_id 或 statement_number：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：数据行数一致、第一行就是 items[0]；items 为空时是空状态、没有数据行。
+  const listed = await waitFor(
+    () => evaluate(probePortalStatementPdf, TEXT),
+    (s) =>
+      s.path === TEXT.portalStatementsPath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      !s.busy &&
+      !s.failed &&
+      (expected.rows === 0
+        ? s.empty && s.rows === 0
+        : s.table && s.rows === expected.rows && s.firstKey === expected.id),
+    ELEMENT_WAIT_MS,
+  );
+  if (!listed.ok) {
+    throw fail(listed.value !== null && listed.value.region ? "assertion_failed" : "element_missing");
+  }
+
+  if (expected.rows === 0) {
+    // 没有对账单（生产首个账期生成之前就是这样，设计闸门 #708 v3 §10 假设 6）：没有可打开的详情，空状态即通过。
+    if (listed.value.detail) {
+      throw fail("assertion_failed");
+    }
+    if ((await evaluate(scrollPortalWalletIntoView, PORTAL_STATEMENTS_SCROLL_TEXT)) !== true) {
+      throw fail("element_missing");
+    }
+    const visible = await waitFor(
+      () => evaluate(portalWalletInView, PORTAL_STATEMENTS_SCROLL_TEXT),
+      (v) => v === true,
+      SCROLL_WAIT_MS,
+    );
+    if (!visible.ok) {
+      throw fail("assertion_failed");
+    }
+    return;
+  }
+
+  // 点之前还没有打开任何详情：否则点第一行可能是把已打开的详情收起。
+  if (listed.value.detail || listed.value.firstSelected) {
+    throw fail("assertion_failed");
+  }
+
+  // 只点第一行（打开详情，页面只发详情的 GET）；只点一次，不重试，免得第二下把详情收起。
+  const afterSeq = network.seq;
+  if ((await evaluate(clickFirstPortalStatementRow, { ...TEXT, portalStatementRowKey: expected.id })) !== true) {
+    throw fail("element_missing");
+  }
+
+  // 详情卡片落定：不在加载，且是某一种终态（读失败、没找到、或画出了对账单号）。
+  const settled = await waitFor(
+    () => evaluate(probePortalStatementPdf, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.detail && !s.detailBusy && (s.detailFailed || s.detailNotFound || s.detailNumber !== null)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    throw fail("element_missing");
+  }
+  const card = settled.value;
+  if (card.appError || card.detailFailed) {
+    throw fail("page_error");
+  }
+  if (card.notFound) {
+    throw fail("navigation_failed");
+  }
+  if (card.adminLayout || card.detailNotFound) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：点第一行之后页面自己发出的详情 GET 的响应体（被动观察，不自己发请求）：就是列表第一项那一份。
+  const detailSeen = await waitFor(
+    async () => latestCustomerWalletResponse(network.customerStatementDetails, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!detailSeen.ok) {
+    throw fail("assertion_failed");
+  }
+  try {
+    const envelope = await readEnvelope(detailSeen.value.requestId);
+    if (detailSeen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    if (envelope.data?.statement_id !== expected.id || envelope.data?.statement_number !== expected.number) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、不是列表第一项那一份：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 卡片显示的就是这一份，且标题栏里恰好一个可点的「Download PDF」。只查，不点。
+  const shown = await waitFor(
+    () => evaluate(probePortalStatementPdf, TEXT),
+    (s) =>
+      s.path === TEXT.portalStatementsPath &&
+      s.portalShell &&
+      !s.adminLayout &&
+      s.detail &&
+      !s.detailBusy &&
+      !s.detailFailed &&
+      !s.detailNotFound &&
+      s.detailNumber === expected.number &&
+      s.downloads === 1 &&
+      s.downloadEnabled,
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    const last = shown.value;
+    throw fail(last === null || !last.detail || last.downloads === 0 ? "element_missing" : "assertion_failed");
+  }
+
+  // Worker 在报到后截图：先把详情卡片滚进视口（卡片比视口高时顶端对齐，标题栏里的按钮因此可见）。只滚动，不点任何按钮。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_STATEMENT_DETAIL_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_STATEMENT_DETAIL_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 /** 把充值一块滚进视口：理由同 {@link PORTAL_NOTIFICATIONS_SCROLL_TEXT}，只换找的那一块的 aria-label。 */
 const PORTAL_TOPUP_SCROLL_TEXT = { ...TEXT, portalWalletTitle: TEXT.portalTopupTitle };
 
@@ -9023,6 +9428,7 @@ const STEPS = {
   check_portal_conv_export: stepCheckPortalConvExport,
   check_portal_notifications: stepCheckPortalNotifications,
   check_portal_statements: stepCheckPortalStatements,
+  check_portal_statement_pdf: stepCheckPortalStatementPdf,
   check_portal_topup: stepCheckPortalTopup,
   check_portal_payments: stepCheckPortalPayments,
   check_portal_receipts: stepCheckPortalReceipts,
@@ -9061,7 +9467,8 @@ async function main() {
      * check_portal_usage_summary 与 check_portal_low_balance 只认这之后发出的请求，check_portal_wallet、check_portal_usage、
      * check_portal_conversations、check_portal_notifications、check_portal_statements、check_portal_topup 与
      * check_portal_payments 要求它不为 null（各自再按点击「Wallet」「Usage」「Conversations」「Notifications」「Statements」
-     * 「Top up」「Payments」之前的序号截断）；check_portal_receipts 同样要求它不为 null，并直接按它截断。
+     * 「Top up」「Payments」之前的序号截断）；check_portal_receipts 与 check_portal_statement_pdf 同样要求它不为 null，
+     * 并直接按它截断列表请求（check_portal_statement_pdf 的详情请求另按点第一行之前的序号截断）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,

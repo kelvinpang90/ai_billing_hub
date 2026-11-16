@@ -13,6 +13,9 @@
  * 三种状态都画出来（spec §132 DoD 第 8 条）：加载中、失败（带 request_id）、空列表（说明对账单在每月结束后的第 2 日
  * 生成）。
  *
+ * 详情卡片的标题栏右侧有「Download PDF」（AIH-TASK-218；设计闸门 #708 v3 §2「门户页面」）：只在详情读成功后出现，
+ * 经 `downloadCustomerStatement` 带令牌下载 `GET …/{statement_id}/download`。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。说明文字
  * 不用 antd 的 `Alert`：它带 `role="alert"`，部署后浏览器验收把它当成错误提示（scripts/acceptance/admin_customers.mjs）。
  */
@@ -30,15 +33,17 @@ import {
   Typography,
   type TableColumnsType,
 } from "antd";
-import { useState, type ReactNode } from "react";
+import { AxiosError } from "axios";
+import { useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { ApiError } from "../../api/client";
+import { ApiError, NETWORK_ERROR } from "../../api/client";
 import {
   STATEMENT_CURRENCY,
   STATEMENT_NOT_FOUND,
   customerStatementDetailQueryKey,
   customerStatementListQueryKey,
+  downloadCustomerStatement,
   getCustomerStatement,
   listCustomerStatements,
   type CustomerStatementDetail,
@@ -143,7 +148,26 @@ interface PriorRow {
   amount: string;
 }
 
-/** 选中的那一份对账单的详情。换一份时由调用方用 `key` 重建。 */
+/**
+ * 下载失败时显示的错误码：后端信封里的 `error.code`；没有时取 HTTP 状态；两者都没有（没连上）时 `NETWORK_ERROR`。
+ * 码插进标题文案里，因为 `RequestReference` 只显示信息与 request_id。
+ */
+function downloadErrorCode(error: Error): string {
+  if (error instanceof ApiError && error.code !== "") {
+    return error.code;
+  }
+  if (error instanceof AxiosError && error.response !== undefined) {
+    return String(error.response.status);
+  }
+  return NETWORK_ERROR;
+}
+
+/**
+ * 选中的那一份对账单的详情。换一份时由调用方用 `key` 重建（下载中的状态与下载错误随之清掉）。
+ *
+ * 详情读成功后标题栏右侧有「Download PDF」（设计闸门 #708 v3 §2「门户页面」）：下载中按钮转圈且不可再点；失败时在详情
+ * 正文上方显示错误码、信息与 request_id，下一次点下载时清除。
+ */
 function StatementDetailCard({ statementId }: { statementId: string }) {
   const { t } = useTranslation();
   const detail = useQuery({
@@ -153,7 +177,32 @@ function StatementDetailCard({ statementId }: { statementId: string }) {
     gcTime: 0,
   });
 
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<Error | null>(null);
+  // 同一轮渲染里连点两下时 state 还没更新：用 ref 挡住第二次。
+  const inFlight = useRef(false);
+
+  const download = (statementNumber: string): void => {
+    if (inFlight.current) {
+      return;
+    }
+    inFlight.current = true;
+    setDownloadError(null);
+    setDownloading(true);
+    void (async () => {
+      try {
+        await downloadCustomerStatement(statementId, statementNumber);
+      } catch (error) {
+        setDownloadError(error instanceof Error ? error : new Error(String(error)));
+      } finally {
+        inFlight.current = false;
+        setDownloading(false);
+      }
+    })();
+  };
+
   const title = t("portal.statements.detail.title");
+  let extra: ReactNode = null;
   let body: ReactNode;
   if (detail.isPending) {
     body = <Loading text={t("portal.statements.detail.loading")} />;
@@ -176,11 +225,34 @@ function StatementDetailCard({ statementId }: { statementId: string }) {
       />
     );
   } else {
-    body = <StatementDetailBody statement={detail.data} />;
+    const statement = detail.data;
+    extra = (
+      <Button
+        loading={downloading}
+        disabled={downloading}
+        onClick={() => download(statement.statement_number)}
+      >
+        {t("portal.statements.download.button")}
+      </Button>
+    );
+    body = (
+      <>
+        {downloadError === null ? null : (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={t("portal.statements.download.failed", { code: downloadErrorCode(downloadError) })}
+            description={<RequestReference error={downloadError} />}
+          />
+        )}
+        <StatementDetailBody statement={statement} />
+      </>
+    );
   }
 
   return (
-    <Card role="region" aria-label={title} title={title}>
+    <Card role="region" aria-label={title} title={title} extra={extra}>
       {body}
     </Card>
   );
