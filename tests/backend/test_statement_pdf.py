@@ -34,8 +34,27 @@ from app.services.statement_pdf import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
 _STREAM = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.S)
+_OBJECT = re.compile(rb"(?<![0-9])([0-9]+)\s+0\s+obj\b(.*?)\bendobj", re.S)
+_CONTENTS = re.compile(rb"/Contents\s*(\[[^\]]*\]|[0-9]+\s+0\s+R)")
+_REFERENCE = re.compile(rb"([0-9]+)\s+0\s+R")
 _LITERAL_TJ = re.compile(rb"\(((?:\\.|[^\\)])*)\)\s*Tj", re.S)
 _HEX_TJ = re.compile(rb"<([0-9A-Fa-f]*)>\s*Tj")
+_LITERAL_OPERAND = rb"\((?:\\.|[^\\)])*\)"
+_HEX_OPERAND = rb"<[0-9A-Fa-f]*>"
+# 一次文字输出：`(…) Tj`、`<…> Tj` 或 `[(…) -120 <…>] TJ`。
+_SHOW_TEXT = re.compile(
+    rb"("
+    + _LITERAL_OPERAND
+    + rb"|"
+    + _HEX_OPERAND
+    + rb")\s*Tj|\[((?:"
+    + _LITERAL_OPERAND
+    + rb"|"
+    + _HEX_OPERAND
+    + rb"|[^\]()<])*)\]\s*TJ",
+    re.S,
+)
+_STRING_OPERAND = re.compile(rb"\(((?:\\.|[^\\)])*)\)|<([0-9A-Fa-f]*)>", re.S)
 _BFCHAR = re.compile(rb"beginbfchar(.*?)endbfchar", re.S)
 _BFCHAR_PAIR = re.compile(rb"<([0-9A-Fa-f]{4})>\s*<([0-9A-Fa-f]+)>")
 
@@ -158,7 +177,39 @@ def _unescape(raw: bytes) -> bytes:
 
 
 def _page_streams(pdf: bytes) -> list[bytes]:
-    return [s for s in _STREAM.findall(pdf) if re.search(rb"\bBT\b", s) and b" Tf" in s]
+    """The content of every page, found through the `/Contents` of each `/Type /Page` object.
+
+    一页的 `/Contents` 是数组时，几段内容流按顺序接起来。
+    """
+    objects = {int(number): body for number, body in _OBJECT.findall(pdf)}
+    pages = []
+    for body in objects.values():
+        if not _PAGE_OBJECT.search(body):
+            continue
+        contents = _CONTENTS.search(body)
+        assert contents is not None, body[:200]
+        parts = []
+        for reference in _REFERENCE.findall(contents.group(1)):
+            stream = _STREAM.search(objects[int(reference)])
+            assert stream is not None, reference
+            parts.append(stream.group(1))
+        pages.append(b"\n".join(parts))
+    return pages
+
+
+def _decode_operand(operand: re.Match[bytes]) -> str:
+    if operand.group(1) is not None:
+        return _unescape(operand.group(1)).decode("latin-1")
+    return bytes.fromhex(operand.group(2).decode("ascii")).decode("latin-1")
+
+
+def _fragments(stream: bytes) -> list[str]:
+    """Every Helvetica text shown in `stream`, in drawing order; a `TJ` array is one fragment."""
+    fragments = []
+    for show in _SHOW_TEXT.finditer(stream):
+        operands = show.group(1) if show.group(1) is not None else show.group(2)
+        fragments.append("".join(_decode_operand(o) for o in _STRING_OPERAND.finditer(operands)))
+    return fragments
 
 
 def _texts(pdf: bytes) -> list[str]:
@@ -501,6 +552,10 @@ def _project_names() -> list[str]:
     return names
 
 
+def _has_project_row(fragments: list[str]) -> bool:
+    return any(fragment.startswith("Prj") for fragment in fragments)
+
+
 def test_long_breakdown_spans_pages_with_footer_header_and_repeated_headings() -> None:
     names = _project_names()
     snapshot = _snapshot()
@@ -520,21 +575,28 @@ def test_long_breakdown_spans_pages_with_footer_header_and_repeated_headings() -
     assert total > 1
     streams = _page_streams(pdf)
     assert len(streams) == total
-    by_page: dict[int, bytes] = {}
+    by_page: dict[int, list[str]] = {}
     for stream in streams:
-        found = re.findall(rb"\| Page ([0-9]+) of ([0-9]+)\)", stream)
-        assert len(found) == 1, found
+        fragments = _fragments(stream)
+        # 页脚可能被拆成几段输出：把这一页的文字接起来再找。
+        text = "".join(fragments)
+        found = re.findall(r"\| Page ([0-9]+) of ([0-9]+)", text)
+        assert len(found) == 1, (found, fragments[-5:], stream[-400:])
         page, of = (int(value) for value in found[0])
         assert of == total
-        by_page[page] = stream
+        assert f"{_NUMBER} | Page {page} of {total}" in text, page
+        continued = f"Monthly statement {_NUMBER} (continued)"
+        assert (continued in text) == (page > 1), page
+        assert page not in by_page, page
+        by_page[page] = fragments
     assert sorted(by_page) == list(range(1, total + 1))
-    for page, stream in by_page.items():
-        assert _literal(f"{_NUMBER} | Page {page} of {total}") in stream
-        continued = _literal(f"Monthly statement {_NUMBER} (continued)")
-        assert (continued in stream) == (page > 1), page
+    continued_tables = 0
+    for page, fragments in by_page.items():
         # 表格从上一页延续到这一页：表头重复。
-        if page > 1 and b"(Prj" in by_page[page - 1] and b"(Prj" in stream:
-            assert _literal("Project") in stream, page
+        if page > 1 and _has_project_row(by_page[page - 1]) and _has_project_row(fragments):
+            continued_tables += 1
+            assert "Project" in fragments, page
+    assert continued_tables >= 1
     for name in names:
         if len(name) < 255:
             assert _literal(name) in pdf, name
