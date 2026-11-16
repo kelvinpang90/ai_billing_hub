@@ -11,6 +11,8 @@ CI 的 `changes` job 调用它：事件名从参数传入，改动的文件从�
 清单故意窄：只放登记 PR 与收尾 PR 会改的文件，而且后端测试、前端构建都不读它们。
 ⚠️ 有测试开始读这里的某个文件时，必须把它从清单里拿掉（目前后端测试读的文档只有
 docs/runbook.md 与 docs/adr/ADR-0008-sst-tax-treatment.md，都不在清单里）。
+`backend-build` 的 `ruff check .` 会检查整棵树，所以即使在清单目录里，ruff 认的文件
+（LINTED_SUFFIXES 与 pyproject.toml）也不跳过（Claude 审查 #731 发现）。
 """
 
 from __future__ import annotations
@@ -21,9 +23,12 @@ from collections.abc import Iterable
 
 SKIPPABLE_PREFIXES = (".platform/", "docs/design/")
 SKIPPABLE_FILES = frozenset({"docs/TODO.md", "docs/adr/README.md"})
+LINTED_SUFFIXES = (".py", ".pyi", ".ipynb")
 
 
 def is_skippable(path: str) -> bool:
+    if path.endswith(LINTED_SUFFIXES) or path.rsplit("/", 1)[-1] == "pyproject.toml":
+        return False
     return path in SKIPPABLE_FILES or path.startswith(SKIPPABLE_PREFIXES)
 
 

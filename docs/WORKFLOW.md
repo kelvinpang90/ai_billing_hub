@@ -266,7 +266,7 @@ BILLING_TEST_REDIS_URL="redis://127.0.0.1:16379/0" python -m pytest
 
 ⚠️ **不要把 skipped 读成 passed。**SQLite 的 DDL 与 MySQL 差得远，在 SQLite 上跑通的迁移证明不了生产上跑得通。CI 的 `backend-tests` 各分片 job 都起了 MySQL service，并且**显式把「有任何 skipped」判成失败** —— 少了那一步，MySQL 起不来时 pytest 照样绿。必需检查 `backend` 是汇总 job，`backend-tests` 各片与 `backend-build`（lint、打包冒烟、compose 构建）全部成功它才通过。
 
-**只改登记 / 收尾类文档的 PR 跳过代码检查。**PR 改动的文件全部落在 `.platform/`、`docs/TODO.md`、`docs/design/`、`docs/adr/README.md` 时，`changes` job 输出 `code=false`，`backend-tests`、`backend-build`、`frontend` 都不跑。这时 `backend` 要求两类后端 job 都是 skipped，否则仍要求 success；`changes` 自己没成功，`backend` 也不过。清单在 `scripts/ci_scope.py`，有测试开始读清单里的文件时要把它拿掉。推到 `main` 一律跑全量。
+**只改登记 / 收尾类文档的 PR 跳过代码检查。**PR 改动的文件全部落在 `.platform/`、`docs/TODO.md`、`docs/design/`、`docs/adr/README.md`（ruff 会检查的 `.py` / `.pyi` / `.ipynb` / `pyproject.toml` 除外）时，`changes` job 输出 `code=false`，`backend-tests`、`backend-build`、`frontend` 都不跑。这时 `backend` 要求两类后端 job 都是 skipped，否则仍要求 success；`changes` 自己没成功，`backend` 也不过。清单在 `scripts/ci_scope.py`，有测试开始读清单里的文件时要把它拿掉。推到 `main` 一律跑全量。
 
 **这里是命令清单的唯一出处。**`CLAUDE.md`、`README.md`、PR 模板的自检行只链接到这里，不再各抄一份。
 

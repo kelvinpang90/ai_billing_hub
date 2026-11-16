@@ -57,6 +57,23 @@ class CodeChecksNeededTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(ci_scope.code_checks_needed("pull_request", [path]))
 
+    def test_files_ruff_checks_run_the_checks_even_in_skippable_dirs(self) -> None:
+        # backend-build 的 ruff 检查整棵树（审查 #731）
+        for path in (
+            "docs/design/x.py",
+            "docs/design/x.pyi",
+            "docs/design/x.ipynb",
+            "docs/design/pyproject.toml",
+            ".platform/tool.py",
+            ".platform/pyproject.toml",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(ci_scope.code_checks_needed("pull_request", [path]))
+        # 不被 ruff 认的扩展名照旧可跳过，例如设计文档里附的代码摘录
+        self.assertFalse(
+            ci_scope.code_checks_needed("pull_request", ["docs/design/ref/client.py.txt"])
+        )
+
     def test_non_pull_request_events_always_run(self) -> None:
         for event in ("push", "workflow_dispatch", "", "pull_request_target"):
             with self.subTest(event=event):
