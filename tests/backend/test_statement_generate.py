@@ -20,6 +20,12 @@ Rows of design §7 marked 156 covered here:
   check on read, then a covering version published;
 - **金额精度** and **并发** — MySQL only.
 
+Gate #707 v4 §7 rows marked AIH-TASK-211 covered here: **对账单资格** (unit, `is_eligible` on
+objects never written: the closure cut-off at `status_changed_at`, its month-start boundary,
+an empty `status_changed_at`, the other account statuses unchanged, internal metering and no
+wallet still ineligible) and the zero statement of a closing month without activity. CLOSED
+tenants are made by writing the row directly, `status_changed_at` with it.
+
 Ledger rows go through `post_transaction` (test_statement_ledger.py's `Books`); events
 are inserted directly, already `PROCESSED`. Tax policy versions are written the way
 test_tax_policy_db.py does: inserted as drafts, then published, truncated or retired.
@@ -944,6 +950,128 @@ def test_a_disabled_account_still_gets_its_statement(books) -> None:
     books.world.set_account_status(tenant, AccountStatus.DISABLED)
 
     assert books.generate(tenant, DECEMBER).created is True
+
+
+# --- the closure cut-off (gate #707 v4 §2「对账单资格」, §7「对账单资格」, AIH-TASK-211) ------
+
+MARCH = statement_period("2027-03")
+PERIODS = [NOVEMBER, DECEMBER, JANUARY, FEBRUARY, MARCH]
+WALLET_FROM = dt.datetime(2026, 9, 1)
+
+
+def in_memory(
+    status: AccountStatus,
+    changed_at: dt.datetime | None,
+    *,
+    mode: BillingMode = BillingMode.PREPAID,
+    wallet: bool = True,
+) -> tuple[Tenant, Wallet | None]:
+    """A tenant and wallet never written anywhere: `is_eligible` is a pure function."""
+    tenant = Tenant(billing_mode=mode, account_status=status, status_changed_at=changed_at)
+    return tenant, Wallet(created_at=WALLET_FROM) if wallet else None
+
+
+def eligible(tenant: Tenant, wallet: Wallet | None) -> list[str]:
+    return [p.label for p in PERIODS if statements.is_eligible(tenant, wallet, p)]
+
+
+def before_the_change(tenant: Tenant, wallet: Wallet | None, period: StatementPeriod) -> bool:
+    """The rule before AIH-TASK-211, written out: the account status is not looked at."""
+    return (
+        tenant.billing_mode == BillingMode.PREPAID
+        and wallet is not None
+        and wallet.created_at < period.end
+    )
+
+
+@pytest.mark.parametrize(
+    "closed_at",
+    [JANUARY.start + SECOND, JANUARY.start + 10 * DAY, JANUARY.end - SECOND],
+    ids=["first-second", "mid-month", "last-second"],
+)
+def test_a_closed_account_is_eligible_up_to_the_month_it_closed_in(closed_at) -> None:
+    tenant, wallet = in_memory(AccountStatus.CLOSED, closed_at)
+
+    assert eligible(tenant, wallet) == ["2026-11", "2026-12", "2027-01"]
+
+
+def test_closing_exactly_at_a_month_start_keeps_that_month_and_drops_the_next() -> None:
+    tenant, wallet = in_memory(AccountStatus.CLOSED, JANUARY.start)
+
+    assert statements.is_eligible(tenant, wallet, JANUARY) is True
+    assert statements.is_eligible(tenant, wallet, FEBRUARY) is False
+    assert eligible(tenant, wallet) == ["2026-11", "2026-12", "2027-01"]
+    # One second earlier is still December: January is already after the closure.
+    tenant, wallet = in_memory(AccountStatus.CLOSED, JANUARY.start - SECOND)
+    assert eligible(tenant, wallet) == ["2026-11", "2026-12"]
+
+
+def test_a_closed_account_without_a_change_time_stays_eligible() -> None:
+    tenant, wallet = in_memory(AccountStatus.CLOSED, None)
+
+    assert eligible(tenant, wallet) == [p.label for p in PERIODS]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [AccountStatus.ENABLED, AccountStatus.DISABLED, AccountStatus.PENDING_ACTIVATION],
+)
+@pytest.mark.parametrize("changed_at", [None, NOVEMBER.start, JANUARY.start + DAY])
+def test_other_account_statuses_are_eligible_as_before(status, changed_at) -> None:
+    tenant, wallet = in_memory(status, changed_at)
+
+    for period in PERIODS:
+        assert statements.is_eligible(tenant, wallet, period) is True
+        assert statements.is_eligible(tenant, wallet, period) == before_the_change(
+            tenant, wallet, period
+        )
+
+
+@pytest.mark.parametrize(
+    "status", [AccountStatus.ENABLED, AccountStatus.DISABLED, AccountStatus.CLOSED]
+)
+@pytest.mark.parametrize("changed_at", [None, MARCH.end])
+def test_internal_metering_or_no_wallet_is_never_eligible(status, changed_at) -> None:
+    internal = in_memory(status, changed_at, mode=BillingMode.INTERNAL_METERED_ONLY)
+    walletless = in_memory(status, changed_at, wallet=False)
+
+    assert eligible(*internal) == []
+    assert eligible(*walletless) == []
+
+
+def test_the_wallet_rule_and_the_closure_cut_off_both_hold() -> None:
+    tenant, _wallet = in_memory(AccountStatus.CLOSED, JANUARY.start + DAY)
+    wallet = Wallet(created_at=DECEMBER.end)
+
+    assert eligible(tenant, wallet) == ["2027-01"]
+
+
+def close_directly(books: Statements, tenant: Tenancy, closed_at: dt.datetime) -> None:
+    """造 CLOSED 租户：直接改库，同时写关户时刻 `status_changed_at`（关户接口归 AIH-TASK-213）。"""
+    with books.factory() as session:
+        session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant.id)
+            .values(account_status=AccountStatus.CLOSED, status_changed_at=closed_at)
+        )
+        session.commit()
+
+
+def test_the_closing_month_without_activity_gets_a_zero_statement(books) -> None:
+    """§1 Kelvin 决定 1：关户当月一律出最后一份；没有发生额时期初 = 期末 = 0。"""
+    tenant = books.customer_at("quiet", DECEMBER.start - DAY)
+    close_directly(books, tenant, DECEMBER.start + 5 * DAY)
+
+    december = books.generate(tenant, DECEMBER, now=due(FEBRUARY)).statement.snapshot_json
+    with pytest.raises(StatementNotEligible):
+        books.generate(tenant, JANUARY, now=due(FEBRUARY))
+
+    assert december["opening_balance"] == december["closing_balance"] == money(0)
+    assert december["total_topup"] == december["total_ai_usage"] == money(0)
+    assert december["total_adjustments"] == december["total_customer_charges"] == money(0)
+    assert december["request_count"] == 0
+    assert december["by_provider"] == december["by_model"] == december["by_project"] == []
+    assert [s.period_start for s in books.statements(tenant)] == [DECEMBER.start]
 
 
 def test_a_period_before_the_first_or_not_yet_due_is_not_generated(books) -> None:

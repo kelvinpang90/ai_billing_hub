@@ -10,7 +10,9 @@
 - **回滚**：审计或 outbox 写入失败时状态、版本、`status_changed_at`、退避全部不变；SQLite 与
   MySQL 各一次；
 - **退避重排只锁本租户**：A 租户的 bump 不提交，B 租户的 bump 与按主键 UPDATE 不被阻塞，只在
-  真 MySQL 上（SQLite 没有行锁）。
+  真 MySQL 上（SQLite 没有行锁）；
+- **status_changed_at 冻结**（设计闸门 #707 v4 §7，AIH-TASK-211）：CLOSED 租户上四个调用方都
+  拒绝，`status_version` 与 `status_changed_at` 都不变；SQLite 与 MySQL 各一次。
 
 MySQL 那部分需要 `BILLING_TEST_DATABASE_URL` 指向一个**可以被清空的**库，没设时 skip ——
 **不要把 skipped 读成 passed**，CI 设了它并把 skipped 判成失败。
@@ -72,7 +74,7 @@ from app.services.account_status import EVENT_ACCOUNT_STATUS_CHANGED, change_acc
 from app.services.auth import RequestContext
 from app.services.customers import CustomerNotFound, add_status_delivery
 from app.services.internal_billing import EVENT_BILLING_MODE_CHANGED, enable_internal_metering
-from app.services.project_integration import AccountClosed
+from app.services.project_integration import AccountClosed, change_integration_status
 from app.services.wallet_adjustments import post_adjustment
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
@@ -820,6 +822,112 @@ def test_internal_metering_for_an_unknown_customer_is_404_beside_a_closed_one(fa
         trigger(factory, admin, "internal", str(uuid.uuid4()))
 
     assert every_audit(factory) == audits_before
+
+
+# --- 关户后 status_changed_at 冻结（AIH-TASK-211，设计闸门 #707 v4 §2「关户时刻」） ----------
+
+# 四个 `bump_status_version` 调用方（docs/database-schema.md「status_version」一节）；
+# 账户状态接口的两个目标各试一次。
+CLOSED_CALLERS = [
+    "post_transaction",
+    "account_enable",
+    "account_disable",
+    "internal",
+    "integration",
+]
+
+
+def project_public_id(factory, project_id: int) -> str:
+    with factory() as session:
+        project = session.get(Project, project_id)
+        assert project is not None
+        return project.public_id
+
+
+def trigger_closed(factory, admin: User, caller: str, tenant_id: int, public_id: str) -> None:
+    """Each `bump_status_version` caller on a CLOSED tenant; every one of them refuses."""
+    if caller == "post_transaction":
+        # 0 → 20 本会是 SUSPENDED → ACTIVE 的一次计费跃迁。
+        with factory() as session:
+            with pytest.raises(wallet_repository.TenantClosed):
+                wallet_repository.post_transaction(
+                    session,
+                    tenant_id=tenant_id,
+                    transaction_type=TransactionType.ADJUSTMENT_CREDIT,
+                    amount=Decimal("20"),
+                    reference_type="ADMIN_ADJUSTMENT",
+                    reference_id=str(uuid.uuid4()),
+                    now=NOW,
+                    created_by=admin.id,
+                    description="After closure",
+                    actor_role="ADMIN",
+                )
+            session.rollback()
+    elif caller in ("account_enable", "account_disable"):
+        target = AccountStatus.ENABLED if caller == "account_enable" else AccountStatus.DISABLED
+        with pytest.raises(account_status.AccountStatusTransitionInvalid) as raised:
+            change_account_status(
+                factory,
+                actor=admin,
+                customer_id=public_id,
+                account_status=target,
+                reason=REASON,
+                context=CONTEXT,
+                now=NOW,
+            )
+        assert raised.value.http_status == 409
+    elif caller == "internal":
+        with pytest.raises(AccountClosed) as raised:
+            trigger(factory, admin, "internal", public_id)
+        assert (raised.value.code, raised.value.http_status) == ("ACCOUNT_CLOSED", 409)
+    else:
+        [project_id] = projects_of(factory, tenant_id)
+        with pytest.raises(AccountClosed) as raised:
+            change_integration_status(
+                factory,
+                actor=admin,
+                customer_id=public_id,
+                project_id=project_public_id(factory, project_id),
+                integration_status=IntegrationStatus.DISABLED,
+                reason=REASON,
+                context=CONTEXT,
+                now=NOW,
+            )
+        assert (raised.value.code, raised.value.http_status) == ("ACCOUNT_CLOSED", 409)
+
+
+def projects_of(factory, tenant_id: int) -> list[int]:
+    with factory() as session:
+        statement = select(Project.id).where(Project.tenant_id == tenant_id)
+        return [int(found) for found in session.execute(statement).scalars()]
+
+
+@pytest.mark.parametrize("caller", CLOSED_CALLERS)
+def test_a_closed_tenant_keeps_its_status_version_and_changed_at(factory, caller: str) -> None:
+    """§7「status_changed_at 冻结」：CLOSED 租户上每个调用方都拒绝，`status_version` 与
+    `status_changed_at`（关户时刻，对账单截止的依据）都不变，也不写 outbox、审计、退避。"""
+    admin = make_admin(factory)
+    tenant_id, public_id = make_customer(factory)
+    project_id = make_project(factory, tenant_id, FUTURE)
+    # 造 CLOSED 租户：直接改库，同时写关户时刻（关户接口归 AIH-TASK-213）。
+    force_tenant(
+        factory,
+        public_id,
+        account_status=AccountStatus.CLOSED,
+        status_version=3,
+        status_changed_at=PAST,
+    )
+    before, audits_before = (
+        snapshot(factory, tenant_id, public_id, project_id),
+        every_audit(factory),
+    )
+
+    trigger_closed(factory, admin, caller, tenant_id, public_id)
+
+    assert tenant_state(factory, tenant_id)[3:5] == (3, PAST)
+    assert snapshot(factory, tenant_id, public_id, project_id) == before
+    assert every_audit(factory) == audits_before
+    assert tenant_state(factory, tenant_id)[0] is AccountStatus.CLOSED
 
 
 # --- 退避重排只锁本租户：只在真 MySQL 上 ---------------------------------------------

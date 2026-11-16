@@ -48,7 +48,7 @@ from app.core.fx_source import KUALA_LUMPUR_OFFSET
 from app.models.ai_catalog import AiModel, AiProvider
 from app.models.statements import MonthlyStatement, StatementStatus
 from app.models.tax_policy import TaxJurisdiction, TaxPolicyType
-from app.models.tenancy import BillingMode, Project, Tenant
+from app.models.tenancy import AccountStatus, BillingMode, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import TransactionType, Wallet, WalletTransaction
 from app.repositories.tax_policy import DocumentNotice, ResolvedTaxPolicy, resolve_tax_policy
@@ -857,14 +857,24 @@ class GenerateResult:
 
 
 def is_eligible(tenant: Tenant, wallet: Wallet | None, period: StatementPeriod) -> bool:
-    """`PREPAID` now, with a wallet created before the period ended.
+    """`PREPAID` now, with a wallet created before the period ended, and not closed before it.
 
-    账户状态不看；首个账期之前的账期由调用方另判（设计 §2「合格租户」）。
+    关户截止（设计闸门 #707 §2「对账单资格」）：`CLOSED` 且 `status_changed_at`
+    不为空时，只有开始不晚于关户时刻的账期合格，即关户当月出最后一份、之后不再生成；
+    `CLOSED` 而 `status_changed_at` 为空时照常合格。其他账户状态不看。
+    生成、上期连续性检查、catch-up 与「缺失对账单」告警都只经这里判定。
+    首个账期之前的账期由调用方另判（设计 §2「合格租户」）。
     """
+    closed_at = tenant.status_changed_at
     return (
         tenant.billing_mode == BillingMode.PREPAID
         and wallet is not None
         and wallet.created_at < period.end
+        and (
+            tenant.account_status != AccountStatus.CLOSED
+            or closed_at is None
+            or period.start <= closed_at
+        )
     )
 
 
