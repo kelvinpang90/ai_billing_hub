@@ -12524,7 +12524,7 @@ tasks:
     title: 关户第七层：关户 runbook、数据库契约说明与 TODO 勾选
     purpose: >-
       按 docs/design/AIH-TASK-209-account-closure.md（设计闸门 #707 已批准 v4） §2「runbook」「关户时刻为什么可以取 status_changed_at」、§8、§10：docs/runbook.md 新增「关户」一节，docs/database-schema.md 把账户状态契约表的 CLOSED 列改为已实现的规则并写下 bump_status_version 的新约束，docs/payment-flow.md 争议与退款一节补关户后的限制，docs/TODO.md 勾选 Phase 4「关户」。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-214
     acceptance_criteria:
