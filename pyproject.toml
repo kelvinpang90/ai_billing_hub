@@ -43,6 +43,9 @@ dependencies = [
     # 依赖（下界与 fpdf2 2.8 的 install_requires 一致）；显式写出来，是因为代码会直接
     # `import fontTools`，不该靠传递关系。
     "fonttools>=4.34",
+    # Excel（.xlsx）导出（Phase 5 客户端导出、Phase 7 毛利报表）。纯 Python（只带
+    # et-xmlfile），python:3.12-slim 上不需要编译链。管理员先加依赖，导出功能另过设计闸门。
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
