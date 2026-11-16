@@ -1311,6 +1311,8 @@
   "portal.statements.byModel.title": "By model",
   "portal.statements.byProject.title": "By project",
   "portal.statements.taxNotice.title": "Tax notice",
+  "portal.statements.download.button": "Download PDF",
+  "portal.statements.download.failed": "Download failed ({{code}})",
   "portal.topup.title": "Top up",
   "portal.topup.loading": "Loading top-up options…",
   "portal.topup.loadFailed": "Top-up options could not be loaded.",

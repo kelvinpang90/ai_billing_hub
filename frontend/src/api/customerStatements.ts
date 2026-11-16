@@ -11,11 +11,15 @@
  *
  * ⚠️ 金额是**字符串**（INV-10），这一层不解析。`statement_id` 只来自列表的响应，**原样**放进路径：不校验形状、
  * 不改大小写 —— 不是小写规范 UUID、没有这份、属于别的客户或尚未定稿时后端回同一个 404，那才是准绳。
+ *
+ * PDF 下载（`GET …/{statement_id}/download`，AIH-TASK-218；设计闸门 #708 v3 §2「门户页面」）经 `download.ts` 的
+ * `downloadFile`：文件名先认 `Content-Disposition`，取不到时用 `<statement_number>.pdf`。`statement_id` 同样原样放进路径。
  */
 
 import type { Page } from "./adminCustomers";
 import type { StatementSnapshot } from "./adminStatements";
 import { apiGet } from "./client";
+import { downloadFile } from "./download";
 
 export type {
   ModelUsage,
@@ -77,4 +81,13 @@ export function listCustomerStatements(
 
 export function getCustomerStatement(statementId: string, signal?: AbortSignal): Promise<CustomerStatementDetail> {
   return apiGet<CustomerStatementDetail>(`${CUSTOMER_STATEMENTS_URL}/${statementId}`, signal);
+}
+
+/** 下载一份对账单的 PDF。失败抛 `ApiError`（错误码与 `request_id` 来自后端的信封；连不上时 `NETWORK_ERROR`）。 */
+export function downloadCustomerStatement(
+  statementId: string,
+  statementNumber: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return downloadFile(`${CUSTOMER_STATEMENTS_URL}/${statementId}/download`, `${statementNumber}.pdf`, signal);
 }
