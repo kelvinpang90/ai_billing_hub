@@ -9,6 +9,9 @@
 
 列表与详情只读：一个普通会话（不加锁、不提交），不写审计。
 
+PDF 下载（AIH-TASK-217，设计闸门 #708 v3 §2「管理端接口」）由 app/api/statement_download.py 完成
+（与客户共用），这里传 `tenant_id=None`：不按租户过滤，只认 `FINALIZED`；只读，不写审计。
+
 手动补生成：生成逻辑全在 `app/services/statements.py` 的 `catch_up_tenant`，这一层只做鉴权、
 判客户与合格性、转发，并经 `before_commit` 钩子在每份新对账单的同一事务里写一条
 `STATEMENT_GENERATE` 审计（INV-13）。某一期失败时异常原样抛出，成为统一错误体的 500；
@@ -26,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import request_context, require_admin, require_session_factory
+from app.api.statement_download import StatementPdfResponse, statement_pdf_response
 from app.core.logging import current_request_id
 from app.models.auth import AuditAction, User
 from app.models.statements import MonthlyStatement
@@ -129,6 +133,13 @@ def get_statement(request: Request, statement_id: str) -> ApiResponse[StatementD
         statement, customer_id, email = row
         detail = statement_detail(statement, customer_id=customer_id, generated_by_email=email)
     return success(detail, request_id=current_request_id())
+
+
+@router.get("/statements/{statement_id}/download", response_class=StatementPdfResponse)
+def download_statement(request: Request, statement_id: str) -> StatementPdfResponse:
+    """Any tenant's finalized statement as a PDF attachment; 404 `STATEMENT_NOT_FOUND` otherwise."""
+    require_admin(request)
+    return statement_pdf_response(require_session_factory(request), statement_id, tenant_id=None)
 
 
 @router.post(

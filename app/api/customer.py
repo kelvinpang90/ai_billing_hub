@@ -71,6 +71,9 @@ repository 函数、同一个 5 键视图，唯一的差别是 `month` 必填。
 内部计量的客户仍能看到改之前的对账单。详情按 `tenant_id` 与 `public_id` 一起查，路径参数在鉴权
 之后判：不是小写 UUID、不存在、别的客户的、非 `FINALIZED` 的同是 404 `STATEMENT_NOT_FOUND`。
 视图是 app/schemas/statements.py 的客户白名单（不含 `cutoff_at`、`ledger_high_sequence` 与生成者）。
+
+对账单 PDF 下载（AIH-TASK-217，设计闸门 #708 v3 §2「客户接口」）：由 app/api/statement_download.py
+完成（管理端共用），这里只传令牌主体的租户；同样只读、用 `require_customer`。
 """
 
 from __future__ import annotations
@@ -83,6 +86,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.auth import require_customer, require_customer_writable, require_session_factory
+from app.api.statement_download import StatementPdfResponse, statement_pdf_response
 from app.core.csv_export import (
     EXPORT_LEASE_SCOPE_KEY,
     EXPORT_MAX_ROWS,
@@ -755,6 +759,18 @@ def customer_statement(request: Request, statement_id: str) -> ApiResponse[Custo
             raise StatementNotFound
         detail = customer_statement_detail(statement)
     return success(detail, request_id=current_request_id())
+
+
+@router.get("/statements/{statement_id}/download", response_class=StatementPdfResponse)
+def customer_statement_download(request: Request, statement_id: str) -> StatementPdfResponse:
+    """One of the caller's finalized statements as a PDF attachment; 404 otherwise.
+
+    只读：`DISABLED` 也能下载。不是小写 UUID、不存在、别的客户的、非 `FINALIZED` 的同是 404。
+    """
+    principal = require_customer(request)
+    return statement_pdf_response(
+        require_session_factory(request), statement_id, tenant_id=principal.tenant_id
+    )
 
 
 def _log_query_timeout(factory: sessionmaker[Session], tenant_id: int) -> None:

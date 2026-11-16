@@ -3627,6 +3627,7 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | `GET /api/v1/admin/statements` | 200，对账单分页 | 401 / 403 / 422 / 503 |
 | `GET /api/v1/admin/statements/{statement_id}` | 200，对账单详情 | 401 / 403 / 404 / 503 |
 | `POST /api/v1/admin/customers/{customer_id}/statements/generate` | 200，本次新生成的对账单 | 401 / 403 / 404 / 409 / 500 / 503 |
+| `GET /api/v1/admin/statements/{statement_id}/download` | 200，一份已定稿对账单的 PDF 附件 | 401 / 403 / 404 / 500 / 503 |
 
 只有 ADMIN 能调。列表与详情**只读**：不写审计、不写任何行。管理端也看不到成本、汇率、加价与毛利：快照里本来就
 没有这些字段。
@@ -3682,6 +3683,30 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 
 `statement_id` 不是小写规范 UUID（8-4-4-4-12），或没有这份对账单：同一个 404 `STATEMENT_NOT_FOUND`。形状在鉴权
 **之后**判。
+
+### `GET /api/v1/admin/statements/{statement_id}/download` —— 下载一份对账单的 PDF
+
+设计依据：设计闸门 #708 `APPROVED: design v3`，全文见
+[design/AIH-TASK-216-statement-pdf.md](design/AIH-TASK-216-statement-pdf.md) §2「下载」「管理端接口」、§6。实现登记为
+AIH-TASK-217。
+
+只有 ADMIN 能调；任何客户的对账单都能下载（不按客户过滤），但**只认已定稿（`FINALIZED`）的**。没有查询参数。**只读**：
+不写审计、不写任何行。成功时**不是**[信封](#信封spec-107)，而是文件本身：
+
+- 200，`Content-Type: application/pdf`；
+- `Content-Disposition: attachment; filename="<statement_number>.pdf"`，例如 `filename="ST-202612-0A1B2C3D.pdf"`。文件名只由
+  对账单号组成（ASCII），不含任何客户输入；
+- `Cache-Control: no-store`。
+
+管理员下载到的与客户自己下载的是**同一份 PDF**（字节相同，不额外印任何内部字段）。PDF 每次下载由服务端从定稿时冻结的
+快照现生成，不存文件；同一份对账单任何时候下载字节都相同，之后改公司名、改项目名、发布新的税务政策都不改变它。
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 404 | `STATEMENT_NOT_FOUND` | `statement_id` 不是小写规范 UUID、没有这份对账单、或尚未定稿（非 `FINALIZED`），几种情况不区分。形状在鉴权**之后**判 |
+| 500 | `INTERNAL_ERROR` | 生成不了 PDF：存下的快照不合规、需要的中文字体不可用、或渲染失败。错误信封与通用 500 相同（固定文案 `An internal error occurred.`，带 `request_id`）；服务端记一条只带对账单 id 的 ERROR 日志 |
+
+失败的响应都是 JSON 信封，没有 `Content-Disposition`。401 / 403 与本节其他接口相同。
 
 ### `POST /api/v1/admin/customers/{customer_id}/statements/generate` —— 按客户补生成
 
@@ -3763,6 +3788,7 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | --- | --- | --- | --- |
 | `GET /api/v1/customer/statements` | CUSTOMER 的访问令牌 | 200，自己的对账单分页 | 401 / 403 / 422 / 500 / 503 |
 | `GET /api/v1/customer/statements/{statement_id}` | 同上 | 200，一份对账单与完整快照 | 401 / 403 / 404 / 500 / 503 |
+| `GET /api/v1/customer/statements/{statement_id}/download` | 同上 | 200，一份对账单的 PDF 附件 | 401 / 403 / 404 / 500 / 503 |
 
 - 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，路径、查询串里都没有租户参数（带了 `customer_id`、`tenant_id` 也只会被忽略）；ADMIN 不能调（403 `CUSTOMER_REQUIRED`）。
 - **只读**：不写审计、不写任何行；四种 `account_status` 都返回 200（`DISABLED` / `CLOSED` 照常可读）。
@@ -3807,6 +3833,31 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 
 `statement_id` 不是小写规范 UUID（8-4-4-4-12）、没有这份对账单、属于别的客户、或尚未定稿（非 `FINALIZED`）：同一个
 404 `STATEMENT_NOT_FOUND`，错误体相同，几种情况不区分。形状在鉴权**之后**判：没带令牌时先得到 401。
+
+### `GET /api/v1/customer/statements/{statement_id}/download` —— 下载自己的一份对账单的 PDF
+
+设计依据：设计闸门 #708 `APPROVED: design v3`，全文见
+[design/AIH-TASK-216-statement-pdf.md](design/AIH-TASK-216-statement-pdf.md) §2「下载」「客户接口」、§6。实现登记为
+AIH-TASK-217。
+
+没有查询参数。**只读**：不写审计、不写任何行；与上面两个接口一样，四种 `account_status` 都能下载（`DISABLED` /
+`CLOSED` 照常可下载）。只认本客户**已定稿（`FINALIZED`）**的对账单。成功时**不是**[信封](#信封spec-107)，而是文件本身：
+
+- 200，`Content-Type: application/pdf`；
+- `Content-Disposition: attachment; filename="<statement_number>.pdf"`，例如 `filename="ST-202612-0A1B2C3D.pdf"`。文件名只由
+  对账单号组成（ASCII），不含任何客户输入；
+- `Cache-Control: no-store`。
+
+PDF 是 A4、英文标签，可多页，每次下载由服务端从定稿时冻结的快照现生成，不存文件；同一份对账单任何时候下载字节都相同，
+之后改公司名、改项目名、发布新的税务政策都不改变它。快照里的公司名与项目名含中文时用嵌入的 Noto Sans SC 字体印出。
+不印成本、汇率、加价、毛利、税额栏或 SST 注册号。
+
+| HTTP | `error.code` | 什么时候 |
+| --- | --- | --- |
+| 404 | `STATEMENT_NOT_FOUND` | 与详情相同：`statement_id` 不是小写规范 UUID、没有这份对账单、属于别的客户、或尚未定稿（非 `FINALIZED`），错误体相同，几种情况不区分。形状在鉴权**之后**判 |
+| 500 | `INTERNAL_ERROR` | 生成不了 PDF：存下的快照不合规、需要的中文字体不可用、或渲染失败。错误信封与通用 500 相同（固定文案 `An internal error occurred.`，带 `request_id`）；服务端记一条只带对账单 id 的 ERROR 日志，按 `request_id` 排查 |
+
+失败的响应都是 JSON 信封，没有 `Content-Disposition`。401 / 403 / 503 与下面「错误（两个接口）」相同。
 
 ### 错误（两个接口）
 

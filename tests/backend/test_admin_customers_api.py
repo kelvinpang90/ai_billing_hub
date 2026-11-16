@@ -218,6 +218,8 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", "/api/v1/admin/statements"),
     ("GET", "/api/v1/admin/statements/{statement_id}"),
     ("POST", "/api/v1/admin/customers/{customer_id}/statements/generate"),
+    # AIH-TASK-217 的管理端对账单 PDF 下载（设计闸门 #708 v3 §2「管理端接口」）。
+    ("GET", "/api/v1/admin/statements/{statement_id}/download"),
     # AIH-TASK-183 的管理端支付（设计闸门 #585 v3 §2「管理端接口」）。
     ("GET", PAYMENTS_ROUTE),
     ("GET", PAYMENTS_ROUTE + "/{payment_id}"),
