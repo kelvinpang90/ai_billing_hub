@@ -627,7 +627,7 @@ def void_copy(books: Statements, like: MonthlyStatement) -> MonthlyStatement:
     row = MonthlyStatement(
         public_id=str(uuid.uuid4()),
         tenant_id=like.tenant_id,
-        statement_number="ST-202702-VOID0000",
+        statement_number="ST-202702-00000001",
         period_start=FEBRUARY.start,
         period_end=FEBRUARY.end,
         cutoff_at=FEBRUARY.cutoff,

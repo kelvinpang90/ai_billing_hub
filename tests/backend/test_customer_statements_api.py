@@ -580,7 +580,10 @@ def download_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]
 
 
 def extras_of(record: logging.LogRecord) -> dict[str, Any]:
-    baseline = logging.LogRecord("x", logging.ERROR, "x", 0, "x", None, None).__dict__
+    # `message` and `asctime` are set by `Formatter.format()` (caplog formats
+    # every record), so a fresh record does not have them.
+    baseline = set(logging.LogRecord("x", logging.ERROR, "x", 0, "x", None, None).__dict__)
+    baseline |= {"message", "asctime", "taskName"}
     return {key: value for key, value in record.__dict__.items() if key not in baseline}
 
 
