@@ -29,6 +29,9 @@ const api = vi.hoisted(() => ({
   createProject: vi.fn(),
   // 启用 / 停用账户（AIH-TASK-082）；弹窗自己的用例在 AccountStatusModal.test.tsx。
   postAccountStatus: vi.fn(),
+  // 关户（AIH-TASK-214）；弹窗自己的用例在 CloseAccountModal.test.tsx。
+  getClosureCheck: vi.fn(),
+  postCloseAccount: vi.fn(),
   // 低余额阈值面板（AIH-TASK-111）挂在钱包卡片下面；面板自己的用例在 LowBalanceThresholdPanel.test.tsx。
   getLowBalanceThreshold: vi.fn(),
   setLowBalanceThreshold: vi.fn(),
@@ -251,6 +254,63 @@ describe("CustomerDetailPage", () => {
     for (const name of hidden) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
+  });
+
+  it.each([
+    { status: "ENABLED", shown: false },
+    { status: "DISABLED", shown: true },
+    { status: "PENDING_ACTIVATION", shown: false },
+    { status: "CLOSED", shown: false },
+  ])("offers Close account only for DISABLED ($status)", async ({ status, shown }) => {
+    api.getCustomer.mockResolvedValue({ ...customer(), account_status: status });
+
+    renderDetail();
+
+    await screen.findByRole("button", { name: "Edit" });
+    if (shown) {
+      expect(screen.getByRole("button", { name: "Close account" })).toBeInTheDocument();
+    } else {
+      expect(screen.queryByRole("button", { name: "Close account" })).not.toBeInTheDocument();
+    }
+    // 只是给按钮，打开弹窗之前不读关户检查。
+    expect(api.getClosureCheck).not.toHaveBeenCalled();
+  });
+
+  it("shows the status text of a closed account with no account action at all", async () => {
+    api.getCustomer.mockResolvedValue(customer({ account_status: "CLOSED" }));
+
+    renderDetail();
+
+    expect(await accountStatusCell()).toHaveTextContent("Closed");
+    for (const name of ["Disable account", "Enable account", "Close account"]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+    // 其余区块照常。
+    expect(screen.getByRole("button", { name: "Adjust balance" })).toBeInTheDocument();
+  });
+
+  it("opens the close account dialog, which reads the closure check of this customer", async () => {
+    const user = userEvent.setup();
+    api.getCustomer.mockResolvedValue(customer({ account_status: "DISABLED" }));
+    api.getClosureCheck.mockResolvedValue({
+      account_status: "DISABLED",
+      balance: "0.00000000",
+      unresolved_usage_events: 0,
+      unresolved_ai_usage: 0,
+      unresolved_payments: 0,
+      unresolved_payment_events: 0,
+      payment_events_truncated: false,
+      blockers: [],
+    });
+    renderDetail();
+
+    await user.click(await findButtonWithText("Close account"));
+
+    expect(
+      await screen.findByText("Nothing blocks the closure right now. The backend checks again when you confirm."),
+    ).toBeInTheDocument();
+    expect(api.getClosureCheck).toHaveBeenCalledWith(CUSTOMER_ID, expect.anything());
+    expect(api.postCloseAccount).not.toHaveBeenCalled();
   });
 
   it("disables the account after confirmation and shows the status read back from the backend", async () => {

@@ -4,7 +4,8 @@
  * 只收录前端已经用到的七个接口：建客户、列表、详情、编辑、改账户状态（AIH-TASK-082，契约见
  * docs/api.md「管理端账户状态」），以及某个客户的建项目与项目列表（AIH-TASK-016）；项目的集成状态与
  * 状态 webhook 地址在 `projectIntegration.ts`。另有某个客户低余额阈值的读取与设置（AIH-TASK-111，契约见
- * docs/api.md「管理端低余额阈值」）。每个都要 ADMIN，
+ * docs/api.md「管理端低余额阈值」），以及关户检查与关户（AIH-TASK-214，契约见 docs/api.md「管理端关户」，
+ * 设计闸门 #707）。每个都要 ADMIN，
  * 角色以后端数据库为准 —— 前端不做任何角色判断，403 原样交给页面显示。
  *
  * ⚠️ 金额是**字符串**（INV-10）。这里的类型刻意写成 `string`，不在这一层解析：
@@ -156,6 +157,49 @@ export class AccountStatusError extends ApiError {
 }
 
 /**
+ * 关户检查（`GET …/closure-check`）：此刻关户会被拒绝的全部原因。字段同 docs/api.md「管理端关户」。
+ * 只读；`blockers` 为空不保证随后的关户成功（之间可能有新事件），关户在锁内重新判定。
+ */
+export interface ClosureCheck {
+  account_status: AccountStatus;
+  /** 恰好 8 位小数的十进制字符串，与钱包余额同一写法；只当字符串用，不解析（INV-10）。 */
+  balance: string;
+  unresolved_usage_events: number;
+  unresolved_ai_usage: number;
+  unresolved_payments: number;
+  unresolved_payment_events: number;
+  /** 网关事件的扫描到了上限：可能还有更多，这一类按未结处理。 */
+  payment_events_truncated: boolean;
+  /** 关户会被拒绝的原因码，顺序同关户的判定顺序；`CLOSED` 时为空数组。 */
+  blockers: string[];
+}
+
+/**
+ * 关户的请求体：只有原因。客户只来自路径，目标永远是 `CLOSED`；别的字段后端一律 422，这里的类型也不给
+ * 它们留位置。`reason` 去掉首尾空白后 1–255，只写业务说明（例如关户工单号），不写个人数据。
+ */
+export interface CloseAccountBody {
+  reason: string;
+}
+
+/**
+ * 关户检查与关户的错误：一个带 HTTP 状态的 {@link ApiError}（写法同 {@link AccountStatusError}）。没有响应
+ * （连不上、超时）时状态是 `null`。状态要留着：关户的 404 / 409 / 422 是后端明确拒绝，5xx 与网络错误则可以
+ * 原样重发；检查的响应没有 `error.code`（例如代理层回了一张错误页）时，弹窗改为显示 HTTP 状态。
+ */
+export class CloseAccountError extends ApiError {
+  constructor(
+    code: string,
+    message: string,
+    requestId: string | null,
+    readonly status: number | null,
+  ) {
+    super(code, message, requestId);
+    this.name = "CloseAccountError";
+  }
+}
+
+/**
  * 阈值对象：`data` 恰好这一个键。恰好 8 位小数的字符串（例如 `"50.00000000"`），未设置（不提醒）为 `null`。
  * 与钱包余额一样只当字符串用，不解析（INV-10）。
  */
@@ -187,6 +231,11 @@ export function projectListQueryKey(customerId: string, page: number, pageSize: 
 /** 不挂在详情的 key 下面：详情过期（调账、改状态）时不必跟着重读阈值。 */
 export function lowBalanceThresholdQueryKey(customerId: string) {
   return [...CUSTOMERS_QUERY_KEY, "low-balance-threshold", customerId] as const;
+}
+
+/** 不挂在详情的 key 下面：关户检查只在弹窗里读，详情过期时不必跟着重读。 */
+export function closureCheckQueryKey(customerId: string) {
+  return [...CUSTOMERS_QUERY_KEY, "closure-check", customerId] as const;
 }
 
 function customerUrl(customerId: string): string {
@@ -259,6 +308,57 @@ export async function postAccountStatus(
     }
     const apiError = toApiError(error);
     throw new AccountStatusError(apiError.code, apiError.message, apiError.requestId, status);
+  }
+}
+
+function closeAccountError(error: unknown): CloseAccountError {
+  const status =
+    error instanceof AxiosError && error.response !== undefined ? error.response.status : null;
+  const apiError = toApiError(error);
+  return new CloseAccountError(apiError.code, apiError.message, apiError.requestId, status);
+}
+
+/**
+ * 读这个客户的关户检查。只读：后端不加锁、不写库、不写审计。
+ *
+ * 失败一律抛 {@link CloseAccountError}（它是 `ApiError`），保留 HTTP 状态。不自动重试。
+ */
+export async function getClosureCheck(
+  customerId: string,
+  signal?: AbortSignal,
+): Promise<ClosureCheck> {
+  try {
+    // `exactOptionalPropertyTypes` 下不能把 `signal: undefined` 传进去（同 `apiGet`）。
+    const response = await client.get<ApiEnvelope<ClosureCheck>>(
+      `${customerUrl(customerId)}/closure-check`,
+      signal === undefined ? {} : { signal },
+    );
+    return unwrapEnvelope<ClosureCheck>(response.data);
+  } catch (error) {
+    throw closeAccountError(error);
+  }
+}
+
+/**
+ * 关户：把账户从 `DISABLED` 置为终态 `CLOSED`。200 时返回关户后的客户详情；已是 `CLOSED` 时后端什么都
+ * 不写、返回当前详情（docs/api.md「管理端关户」），所以原样重发是安全的。
+ *
+ * 失败一律抛 {@link CloseAccountError}（它是 `ApiError`）。
+ *
+ * ⚠️ 这里**不自动重试**：要不要重发由弹窗交给管理员决定。
+ */
+export async function postCloseAccount(
+  customerId: string,
+  body: CloseAccountBody,
+): Promise<CustomerDetail> {
+  try {
+    const response = await client.post<ApiEnvelope<CustomerDetail>>(
+      `${customerUrl(customerId)}/close`,
+      body,
+    );
+    return unwrapEnvelope<CustomerDetail>(response.data);
+  } catch (error) {
+    throw closeAccountError(error);
   }
 }
 

@@ -40,6 +40,8 @@
  * 支付历史页（设计闸门 #589 v2 §2「门户页面」、§11）。
  * AIH-TASK-205 加了管理端支付列表页收据列的一个只读步骤（check_admin_payment_receipts），排在 login 之后，经顶栏自己进
  * 支付列表页（设计闸门 #589 v2 §2「管理端页面」、§11）。
+ * AIH-TASK-214 加了客户详情关户按钮的一个只读步骤（check_account_closure），排在 login、open_customers、open_fixture
+ * 之后，复用 open_fixture 打开的夹具客户详情（设计闸门 #707 v4 §2「前端」）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -150,7 +152,9 @@
  *   不点：不点「Create portal account」「Resend invitation」「Disable portal access」「Enable portal access」「Reset 2FA」
  *   或任何确认按钮，不填也不提交开通表单里的「Login email」。夹具客户详情里的低余额阈值面板
  *   （check_low_balance_threshold）只看不点：不点「Change」「Clear」「Save threshold」「Clear threshold」或任何按钮，
- *   不打开修改表单或清除确认框，不填也不提交「New threshold」。不点新建客户、编辑 / 保存、手工调账、
+ *   不打开修改表单或清除确认框，不填也不提交「New threshold」。夹具客户详情资料卡上的「Close account」按钮
+ *   （check_account_closure）**只查不点**：只确认它在或不在，不点它、不打开关户弹窗、不填原因与客户名、不请求
+ *   …/closure-check，更不发 …/close。不点新建客户、编辑 / 保存、手工调账、
  *   新建项目、建凭据、轮换、吊销、签发签名密钥（「Issue new secret」）、启用（「Activate v…」）、退役（「Retire v…」）、
  *   停用 / 启用项目集成（「Disable integration」「Enable integration」）、保存 / 清除状态 webhook 地址（「Save address」
  *   「Clear address」）等任何会写数据的按钮；只打开公司名以 `[TEST] Acceptance Fixture` 开头的夹具客户的详情。项目列表
@@ -364,6 +368,15 @@
  *                   对应「Disable account」（customers.accountStatus.disable）、DISABLED 对应「Enable account」
  *                   （customers.accountStatus.enable），另一个不在；PENDING_ACTIVATION 与 CLOSED 两个都不在。这个按钮
  *                   只查不点、不打开弹窗。报到前把「Account status」这一行滚动到视口中间
+ *   check_account_closure
+ *                   要排在 login、open_customers、open_fixture 之后（本次运行没打开夹具客户详情就 assertion_failed）。在夹具
+ *                   客户详情（open_fixture 打开的那一页）上，后端值取详情页自己发出的 GET /api/v1/admin/customers/{customer_id}
+ *                   的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次成功读完的那一次；同 check_account_status）里的
+ *                   account_status（PENDING_ACTIVATION / ENABLED / DISABLED / CLOSED，认不出的值是 assertion_failed）。资料卡
+ *                   「Account status」一项恰好一项、文字是它的文案（customers.accountStatus.*）；文字为「Close account」
+ *                   （customers.closeAccount.open）的按钮出现当且仅当 account_status 为 DISABLED：DISABLED 时恰好一个（不在是
+ *                   element_missing），其余状态一个都没有（在了是 assertion_failed）。这个按钮只查不点、不打开关户弹窗、不请求
+ *                   closure-check。报到前把「Account status」这一行滚动到视口中间
  *   check_wallet_transactions
  *                   在夹具客户详情（open_fixture 打开的那一页）上，钱包流水面板（role=region、aria-label 为「Wallet
  *                   transactions」，en.json 的 wallet.transactions.title）落定且不是加载失败（wallet.transactions.loadFailed）
@@ -649,6 +662,7 @@ const TEXT = {
   },
   accountDisable: "Disable account", // customers.accountStatus.disable —— 只查它在，不点
   accountEnable: "Enable account", // customers.accountStatus.enable —— 只查它在，不点
+  accountClose: "Close account", // customers.closeAccount.open —— 只查它在或不在，不点
   navAudit: "Audit log", // nav.audit
   auditLoading: "Loading audit records…", // audit.loading
   auditLoadFailed: "The audit log could not be loaded.", // audit.loadFailed
@@ -3088,6 +3102,20 @@ function readAccountStatus(lib, T) {
     text: cells.length === 1 ? lib.norm(cells[0].textContent) : null,
     disableButtons: buttons.filter((text) => text === T.accountDisable).length,
     enableButtons: buttons.filter((text) => text === T.accountEnable).length,
+  };
+}
+
+/**
+ * 资料卡「Account status」一项的文字，以及「Close account」按钮有几个。只读 DOM：按钮只数、不点。
+ */
+function readAccountClosure(lib, T) {
+  const cells = lib.valueCells(T.accountStatusLabel);
+  const buttons = [...document.querySelectorAll("button")].map((el) => lib.norm(el.textContent));
+  return {
+    ...lib.common(T),
+    count: cells.length,
+    text: cells.length === 1 ? lib.norm(cells[0].textContent) : null,
+    closeButtons: buttons.filter((text) => text === T.accountClose).length,
   };
 }
 
@@ -5729,6 +5757,76 @@ async function stepCheckAccountStatus(ctx) {
     throw fail(s.text === expectedText && s.disableButtons + s.enableButtons < expectedDisable + expectedEnable
       ? "element_missing"
       : "assertion_failed");
+  }
+  if (shown.value.appError) {
+    throw fail("page_error");
+  }
+  if (shown.value.notFound) {
+    throw fail("navigation_failed");
+  }
+
+  // Worker 在报到后截图：先把「Account status」这一行滚进视口。只滚动，不点按钮。
+  if ((await evaluate(scrollAccountStatusIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(accountStatusInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepCheckAccountClosure(ctx) {
+  if (ctx.customerId === null || ctx.fixture === null) {
+    throw fail("assertion_failed");
+  }
+  const customerId = ctx.customerId;
+  const href = ctx.fixture.href;
+
+  // 后端值：详情页自己发出的那次 GET 的响应体（与 check_account_status 同一个来源）。
+  const observed = await waitFor(
+    async () => latestDetailResponse(customerId),
+    () => true,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let status;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const data = envelope?.success === true ? envelope.data : null;
+    status = data?.account_status;
+    if (data?.id !== customerId || typeof status !== "string" || !Object.hasOwn(TEXT.accountStatusText, status)) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、不是这个客户、状态不认识：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+  const expectedText = TEXT.accountStatusText[status];
+  // 关户只能从 DISABLED 出发：只有这时给按钮，其他状态（含 CLOSED）都不给。
+  const expectedClose = status === "DISABLED" ? 1 : 0;
+
+  const shown = await waitFor(
+    () => evaluate(readAccountClosure, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      (s.path === href && s.count === 1 && s.text === expectedText && s.closeButtons === expectedClose),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    const s = shown.value;
+    if (s === null || s.path !== href || s.count !== 1) {
+      throw fail("element_missing");
+    }
+    // 状态文字不对，或者该在的按钮不在、不该在的按钮在了。
+    throw fail(s.text === expectedText && s.closeButtons < expectedClose ? "element_missing" : "assertion_failed");
   }
   if (shown.value.appError) {
     throw fail("page_error");
@@ -8909,6 +9007,7 @@ const STEPS = {
   check_admin_payment_receipts: stepCheckAdminPaymentReceipts,
   open_payment_settings: stepOpenPaymentSettings,
   check_account_status: stepCheckAccountStatus,
+  check_account_closure: stepCheckAccountClosure,
   check_wallet_transactions: stepCheckWalletTransactions,
   check_portal_account: stepCheckPortalAccount,
   check_low_balance_threshold: stepCheckLowBalanceThreshold,
