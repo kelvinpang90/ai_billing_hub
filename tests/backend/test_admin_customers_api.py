@@ -99,7 +99,8 @@ ENVELOPE_FIELDS = {"success", "data", "error", "request_id"}
 # 设计 §2 的五个接口，加 AIH-TASK-009 的编辑客户、AIH-TASK-011 的调账、AIH-TASK-012 的
 # 五个集成凭据接口、AIH-TASK-019 的四个出站 webhook 签名密钥接口、AIH-TASK-020 的改账户状态、
 # AIH-TASK-022 的审计日志查询、AIH-TASK-025 的十五个 AI 目录接口、AIH-TASK-026 的七个供应商价格
-# 接口、AIH-TASK-027 的七个定价规则接口、AIH-TASK-041 的八个汇率接口、AIH-TASK-031 的试算接口。
+# 接口、AIH-TASK-027 的七个定价规则接口、AIH-TASK-041 的八个汇率接口、AIH-TASK-031 的试算接口、
+# AIH-TASK-213 的关户检查与关户。
 CREDENTIALS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/credentials"
 WEBHOOK_SECRETS_ROUTE = (
     "/api/v1/admin/customers/{customer_id}/projects/{project_id}/webhook-secrets"
@@ -148,6 +149,9 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", WEBHOOK_SECRETS_ROUTE + "/{key_version}/retire"),
     ("POST", "/api/v1/admin/customers/{customer_id}/account-status"),
     ("POST", "/api/v1/admin/customers/{customer_id}/internal-metering"),
+    # AIH-TASK-213 的关户检查与关户（设计闸门 #707 v4 §2「接口」）。
+    ("GET", "/api/v1/admin/customers/{customer_id}/closure-check"),
+    ("POST", "/api/v1/admin/customers/{customer_id}/close"),
     # AIH-TASK-109 的低余额阈值（设计闸门 #433 v2 §2「接口一」「接口二」）。
     ("GET", "/api/v1/admin/customers/{customer_id}/low-balance-threshold"),
     ("PUT", "/api/v1/admin/customers/{customer_id}/low-balance-threshold"),
@@ -255,6 +259,9 @@ VALID_BODIES = {
     ("POST", "/api/v1/admin/customers/{customer_id}/internal-metering"): {
         "reason": "Probe",
     },
+    # 关户（AIH-TASK-213）：请求体合法，保证 422 不会先于 401 / 403 出现；新客户是 ENABLED，
+    # 漏了鉴权的处理函数会走到 409，同样过不了 401 / 403。
+    ("POST", "/api/v1/admin/customers/{customer_id}/close"): {"reason": "Probe"},
     # 新客户的阈值是 NULL：漏了鉴权的处理函数会真的把它改成 50。
     ("PUT", "/api/v1/admin/customers/{customer_id}/low-balance-threshold"): {
         "low_balance_threshold": "50.00",

@@ -29,6 +29,10 @@
 钱包流水（AIH-TASK-084，设计闸门 #351 v2 §2「接口」）：只读，一个普通会话两条 SELECT（找客户、
 取一页），不提交、不写审计。没有服务层：这一层直接调 repository，与用量事件查询的写法一致。
 
+关户（AIH-TASK-213，设计闸门 #707 v4 §2「接口」）：`closure-check` 只读、不写审计；`close` 的锁、
+判定顺序与写入全在 `app/services/account_closure.py`，这一层只做鉴权、请求体形状与转发。
+`CLOSED` 只由 `close` 产生，账户状态接口不变。原因只进审计，这一层不记。
+
 低余额阈值（AIH-TASK-109，设计闸门 #433 v2 §2「接口一」「接口二」）：GET 只读、不写审计；
 PUT 的锁、比较与审计全在 `app/services/customers.py`，这一层只做鉴权、请求体形状与转发。
 """
@@ -51,6 +55,8 @@ from app.schemas.customers import (
     MAX_PAGE_SIZE,
     ChangeAccountStatusRequest,
     ChangeIntegrationStatusRequest,
+    CloseAccountRequest,
+    ClosureCheckView,
     CreateCustomerRequest,
     CreateProjectRequest,
     CustomerDetail,
@@ -63,6 +69,7 @@ from app.schemas.customers import (
     SetStatusWebhookRequest,
     StatusWebhookSettings,
     UpdateCustomerRequest,
+    closure_check_view,
 )
 from app.schemas.envelope import ApiResponse, success
 from app.schemas.integration_access import (
@@ -86,6 +93,7 @@ from app.schemas.webhook_signing import (
     WebhookSecretView,
 )
 from app.services import (
+    account_closure,
     account_status,
     customers,
     integration_access,
@@ -210,6 +218,38 @@ def change_account_status(
         actor=admin,
         customer_id=customer_id,
         account_status=AccountStatus(payload.account_status),
+        reason=payload.reason,
+        context=request_context(request),
+    )
+    return success(detail, request_id=current_request_id())
+
+
+@router.get(
+    "/customers/{customer_id}/closure-check",
+    response_model=ApiResponse[ClosureCheckView],
+)
+def get_closure_check(request: Request, customer_id: str) -> ApiResponse[ClosureCheckView]:
+    """What closing the account would be refused for right now. Read-only, no audit.
+
+    `blockers` 为空不保证随后的关户成功（之间可能有新事件）：`close` 在锁内重查。
+    """
+    require_admin(request)
+    check = account_closure.get_closure_check(
+        require_session_factory(request), customer_id=customer_id
+    )
+    return success(closure_check_view(check), request_id=current_request_id())
+
+
+@router.post("/customers/{customer_id}/close", response_model=ApiResponse[CustomerDetail])
+def close_account(
+    request: Request, customer_id: str, payload: CloseAccountRequest
+) -> ApiResponse[CustomerDetail]:
+    """DISABLED → CLOSED, terminal. Already CLOSED: 200 and nothing is written."""
+    admin = require_admin(request)
+    detail = account_closure.close_account(
+        require_session_factory(request),
+        actor=admin,
+        customer_id=customer_id,
         reason=payload.reason,
         context=request_context(request),
     )

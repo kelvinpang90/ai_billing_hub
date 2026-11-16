@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from decimal import Decimal
-from typing import Annotated, Any, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal
 
 from pydantic import (
     BaseModel,
@@ -31,6 +31,10 @@ from pydantic import (
 from app.models.base import quantize_money
 from app.models.tenancy import Project, Tenant, ai_service_enabled
 from app.models.wallet import Wallet
+
+if TYPE_CHECKING:
+    # 只用于类型标注：`account_closure` 在模块顶层导入本文件的 `CustomerDetail`，运行时导入会成环。
+    from app.services.account_closure import ClosureCheck
 
 # 分页边界（spec §108；设计 §2）。超出范围是 422，不静默截断。`page` 的上限防止
 # OFFSET 溢出变成 500。
@@ -142,13 +146,26 @@ class ChangeAccountStatusRequest(BaseModel):
     """改账户状态（AIH-TASK-020，设计闸门 #136 v2 §2）。
 
     ⚠️ 目标只能是 `ENABLED` / `DISABLED`，大小写敏感：`PENDING_ACTIVATION`
-    没有产生路径，`CLOSED` 归关户任务，都是 422。多余字段一律拒绝：`status_version`、
-    `billing_status`、余额、任何 id 都不能经这里带进来 —— 客户只来自路径（INV-8）。
+    没有产生路径，`CLOSED` 只由 `POST …/close` 产生（AIH-TASK-213），都是 422。
+    多余字段一律拒绝：`status_version`、`billing_status`、余额、任何 id 都不能经这里带进来
+    —— 客户只来自路径（INV-8）。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     account_status: Literal["ENABLED", "DISABLED"]
+    reason: _Reason
+
+
+class CloseAccountRequest(BaseModel):
+    """关户（AIH-TASK-213，设计闸门 #707 v4 §2「接口」）：只有原因。
+
+    ⚠️ 多余字段一律拒绝：目标状态、`status_version`、余额、任何 id 都不能经这里带进来 ——
+    客户只来自路径（INV-8），目标永远是 `CLOSED`。原因只进审计。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     reason: _Reason
 
 
@@ -186,6 +203,24 @@ class CustomerSummary(BaseModel):
 
 class CustomerDetail(CustomerSummary):
     wallet: WalletView
+
+
+class ClosureCheckView(BaseModel):
+    """The `data` of GET `…/closure-check` (design gate #707 v4 §2「接口」): exactly these keys.
+
+    ⚠️ 只有账户状态、余额、四类计数、截断标志与原因码；没有成本、毛利、个人数据（INV-7）。
+    `blockers` 的顺序同 POST `…/close` 的判定顺序，`CLOSED` 时为空。
+    """
+
+    account_status: str
+    # 恰好 8 位小数的定点字符串，与 `WalletView.balance` 同一写法。
+    balance: str
+    unresolved_usage_events: int
+    unresolved_ai_usage: int
+    unresolved_payments: int
+    unresolved_payment_events: int
+    payment_events_truncated: bool
+    blockers: list[str]
 
 
 class ChangeIntegrationStatusRequest(BaseModel):
@@ -342,6 +377,20 @@ def customer_detail(tenant: Tenant, wallet: Wallet) -> CustomerDetail:
             balance=money_text(wallet.balance),
             version=wallet.version,
         ),
+    )
+
+
+def closure_check_view(check: ClosureCheck) -> ClosureCheckView:
+    """服务层 `ClosureCheck` → 接口视图，逐字段转换（设计 §2「接口」）。"""
+    return ClosureCheckView(
+        account_status=check.account_status.value,
+        balance=money_text(check.balance),
+        unresolved_usage_events=check.blockers.usage_events,
+        unresolved_ai_usage=check.blockers.ai_usage,
+        unresolved_payments=check.blockers.payments,
+        unresolved_payment_events=check.blockers.payment_events,
+        payment_events_truncated=check.blockers.payment_events_truncated,
+        blockers=list(check.codes),
     )
 
 
