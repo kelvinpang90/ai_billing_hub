@@ -13202,3 +13202,281 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+  # 收据 PDF 嵌入中文字体（设计闸门 #750 v1）：把对账单的字体选择规则抽成共用模块，收据按同一规则嵌入 Noto Sans SC 子集，收据下载补齐三种失败处置。
+  # 批次说明已定（设计 §1 H-a..H-e）：复用对账单同一套规则；对账单 PDF 输出字节不变（冻结参照差分测试钉住）；收据快照 schema_version 仍为 1、只改渲染；只印 tax_notice.en；不加迁移、不加依赖。无管理员前置步骤（字体、许可证与 fonttools 已由 PR #706 提交）。
+  # 设计 §10 第 1 条（已开具收据重新下载字节会变）：截至登记，生产上收据为 0 张，没有实际影响。PDF 内容的变化对页面不可见，两项都不带浏览器验收。
+  # AIH-TASK-228 预计约 950 行（设计 §11），不足 1500 行，不拆。
+  - id: AIH-TASK-228
+    title: 收据 PDF 中文字体第一层：抽出共用字体选择模块，收据按对账单同一规则嵌入 Noto Sans SC
+    purpose: >-
+      按 docs/design/AIH-TASK-228-receipt-cjk-font.md（设计闸门 #750 已批准 v1） §2「共用模块」「对账单」「收据」：新模块 app/services/pdf_text.py 原样搬入 app/services/statement_pdf.py 的字体选择规则（只改名字），对账单改从它取字体选择且输出字节不变，app/services/receipt_pdf.py 的每个印出的值按同一规则选 Helvetica 或嵌入 Noto Sans SC 子集；app/data/__init__.py 只改文档串。不改下载接口与文档：属于 AIH-TASK-229。
+    status: ready
+    depends_on:
+      - AIH-TASK-225
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-228-receipt-cjk-font.md（设计闸门 #750 已批准 v1） 逐条一致，以 §1「本批任务说明已定的事项」「可观察的完成标准」1–4、6、「明确不做什么」、§2「共用模块」「对账单」「收据」、§3 INV-6、INV-7、INV-10、INV-12、§4「并发」、§7 任务列为 AIH-TASK-228 的各行、§9 备选 A、B、E、H、§10 第 2–4 条与假设 3、4、§11 AIH-TASK-228 为准；本设计建立在 docs/design/AIH-TASK-196-payment-receipts.md（收据，设计闸门 #589 已批准 v2）与 docs/design/AIH-TASK-216-statement-pdf.md（对账单 PDF，#708 已批准 v3） 之上，本设计没有改写的地方沿用它们；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新模块 app/services/pdf_text.py 照 §2「共用模块」的表：HELVETICA = "Helvetica"、NOTO = "NotoSansSC"、NOTO_FONT_FILE = "NotoSansSC-Regular.ttf"、NOTO_FONT_SHA256 = "d45f67f0a7c0ca3f256950777ce6a61cc7ce5f9696d02900cbbaac25f8aa7d16"、异常 PdfFontUnavailable、_font_resource()（测试的 monkeypatch 点）、font_cmap()（functools.lru_cache(maxsize=1)，只认 glyf，cmap 为空或读不了抛 PdfFontUnavailable 且不缓存异常）、is_latin1(text)、PdfFonts(pdf, stack).prepare(text) -> tuple[str, str]；代码由 app/services/statement_pdf.py 第 251–323 行原样搬移，只改名字，逻辑、顺序、raise … from error 与 ExitStack 用法一字不改；prepare 照规则第 1–4 步：全部 ord < 256 原样返回 Helvetica 且不读字体；否则把既不在 Latin-1 也不在 cmap 的字符换成 ?，替换后全 Latin-1 返回 Helvetica 且不 add_font；否则凡不在 cmap 的字符（含 Latin-1 的 C0 / C1 控制字符）换成 ?、换行符 \n 例外保留，add_font(NOTO, "", path) 每个 PdfFonts 实例至多一次、在第一次需要时；模块只 import 标准库、fontTools 与 fpdf，不 import 会话、模型、配置与 app.services 下任何别的模块'
+      - 'app/services/statement_pdf.py 照 §2「对账单」：删去搬走的 _font_resource、_font_cmap、_is_latin1、_Fonts 与只为它们服务的 import 与常量（functools、resources、Traversable、TTFont、_NOTO、_FONT_FILE、_LATIN1_END、_NEWLINE；contextlib 保留），改为 from app.services.pdf_text import HELVETICA, NOTO_FONT_SHA256, PdfFontUnavailable, PdfFonts，_HELVETICA 取 HELVETICA 的值；渲染里的 _Fonts(pdf, stack) 换成按模块全局名调用的 PdfFonts(pdf, stack)（差分测试 monkeypatch 它）；_Layout.__init__ 的类型注解 fonts: _Fonts 换成 fonts: PdfFonts（只改注解，版面里唯一允许的一处）；StatementFontUnavailable = PdfFontUnavailable（同一个类）、STATEMENT_FONT_SHA256: Final = NOTO_FONT_SHA256，__all__ 不变；除这几处与文档串里字体一段改为指向 pdf_text 之外，校验、显示、版面与 render_statement_pdf 的代码一字不改。app/data/__init__.py 只改 NotoSansSC-Regular.ttf 一节的文档串：字体为对账单与收据共用，换字体要同步 app/services/pdf_text.py 的 NOTO_FONT_SHA256，并写明换字体会同时改变历史对账单与历史收据重新渲染出的字形'
+      - 'app/services/receipt_pdf.py 照 §2「收据」第 1–8 步：删去 _latin1 与 _FONT，from app.services.pdf_text import HELVETICA, PdfFontUnavailable, PdfFonts，导出 ReceiptFontUnavailable = PdfFontUnavailable 并加进 __all__；先 _validate（不合规只抛 ReceiptSnapshotInvalid、不读字体，校验代码一字不改）；set_title(snapshot["receipt_number"])；在 with contextlib.ExitStack() as stack: 里建 fonts = PdfFonts(pdf, stack)（按模块全局名调用，测试 monkeypatch 它）再 add_page；标题 PAYMENT RECEIPT 与十个标签是固定 ASCII、仍用 Helvetica、不经 prepare；开具方、十个值（含代码生成的时刻、金额、币种、付款方式显示值、状态）与 tax_notice.en 原文每一个都先经 fonts.prepare 再 set_font(family, "", 原字号)；坐标、字号、行高、宽度、顺序与现有逐一相同；在 with 块内 return bytes(pdf.output())；模块文档串的字体一段改为指向 pdf_text、可重现一段补「含中文字体子集时也一样」'
+      - '测试（pdf_text 与对账单）：新增 tests/backend/test_pdf_text.py 覆盖 §7「规则矩阵」（六个输入与预期逐条照表，Café த 与 \t 的前提先断言 cmap）、「add_font 次数」（包一层计数：两个含中文串加一个 ASCII 串恰好一次且家族名 NotoSansSC；只有 ASCII 与 Café த 的实例零次）、「字体不可用不缓存」（缺失 → PdfFontUnavailable、恢复后成功、非字体文件 → PdfFontUnavailable、字体缺失时 prepare("Example") 照常）与「模块隔离」（子进程分别只 import app.services.pdf_text 与 app.services.receipt_pdf，sys.modules 不含 §7 所列模块；pdf_text 不含两个渲染器，receipt_pdf 不含 app.services.statement_pdf）。tests/backend/test_statement_pdf.py：新增「对账单字节不变」差分用例，测试文件里放一份冻结参照 _FrozenStatementFonts（开工时 main 上 statement_pdf.py 第 254–323 行四个定义的逐字副本，只改成测试私有名、自带缓存、读同一字体文件），对 ASCII、_chinese_snapshot、Café த Sdn Bhd、Café 中 த、税务说明含 ’ / \t / \n、300 行分页六份输入各渲染两次（照常一次，monkeypatch.setattr(statement_pdf, "PdfFonts", _FrozenStatementFonts) 一次），字节完全相同；另加 STATEMENT_FONT_SHA256 == pdf_text.NOTO_FONT_SHA256 与 StatementFontUnavailable is PdfFontUnavailable；_FORBIDDEN_MODULES 加 app.services.receipt_pdf；其余只做 §7 所列机械替换（statement_pdf._font_cmap → pdf_text.font_cmap，缓存夹具与两处 _font_resource 的 monkeypatch 改指 pdf_text），现有断言一条不改'
+      - '测试（收据，tests/backend/test_receipt_pdf.py；PDF 内容流与 ToUnicode 的检索工具放进新辅助模块 tests/backend/pdf_content.py，由收据与 pdf_text 的测试导入，对账单测试保留自己那份不改）：覆盖 §7「收据：全 Latin-1 字节不变」（现有 _snapshot()、Café Sdn Bhd、Café த Sdn Bhd 三份，与 monkeypatch receipt_pdf.PdfFonts 为恒返回 Helvetica 加 ord ≥ 256 换 ? 且从不 add_font 的桩的渲染字节相同、不含 /FontFile2、第三份含 Café ? Sdn Bhd 字面量）、「收据：中文」（示例科技 Sdn Bhd：/FontFile2、/BaseFont 含 NotoSansSC、ToUnicode 有四个字的码点并能还原出该串、PAYMENT RECEIPT / RM 1,000.00 / ACV-AIR-2026-000001 与标签仍是 Helvetica 字面量、恰好一页）、「字体里没有的字符」、「其他自由文本」（tax_notice.en 为 Customer’s copy\tA\nSecond line B 在 \n 处换行、\t 印成 ?；issuer.name 含中文经 Noto 印出）、「一页放得下」（255 个中：恰好一页、每个 BT x y Td 的 y 不小于 56.69、还原文字里中共 255 个）、「字体缺失」（monkeypatch pdf_text._font_resource 并清缓存：中文抛 ReceiptFontUnavailable 且不是 ReceiptSnapshotInvalid、ASCII 照常、schema_version 为 2 的中文快照仍先抛 ReceiptSnapshotInvalid）、「只读快照」（test_renders_without_database_or_configuration 参数化加中文快照、深拷贝比较）；现有 test_characters_outside_latin1_become_question_marks 钉的是本批要改的旧行为，是唯一允许改断言的现有用例：改为断言 Café 中文 Sdn Bhd 经 Noto 原样印出（嵌入字体、还原文字含该串）；_INVALID 全表、金额与付款方式显示等其余现有用例不改照过'
+      - '可重现与验证：中文收据同进程两次、两个 sys.executable 子进程（环境为当前环境副本加 PYTHONHASHSEED=1 / 2 与 SOURCE_DATE_EPOCH=0 / 2000000000，输出经标准输出传回）字节相同且等于同进程结果，做不到时停下并在 PR 里说明，不得放宽为去掉某些字节再比较；一页放得下的断言依赖 fpdf2 把每段文字写成 BT x y Td … ET（§10 假设 3），不成立时改用 fpdf2 实际的定位写法并在 PR 里说明，不放宽为只数页数；全部是纯单元测试，不建数据库，只用 pytest、标准库与已有依赖，不新增测试依赖，示例 uuid 全零，时间一律注入，不 sleep；PR 里记一次本地实测：255 个汉字公司名的收据单次渲染耗时与峰值内存'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/api/ 下任何文件（收据下载的异常分支属于 AIH-TASK-229）、app/services/receipts.py、app/services/statements.py、模型与迁移，不改快照 schema_version；不改 pyproject.toml、scripts/packaging_smoke.py、app/data/NotoSansSC-Regular.ttf 与 app/data/NotoSansSC-OFL.txt，不新增二进制文件；不改 docs/、前端与 docs/TODO.md；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #750'
+    allowed_change_paths:
+      - app/services/pdf_text.py
+      - app/services/statement_pdf.py
+      - app/services/receipt_pdf.py
+      - app/data/__init__.py
+      - tests/backend/pdf_content.py
+      - tests/backend/test_pdf_text.py
+      - tests/backend/test_statement_pdf.py
+      - tests/backend/test_receipt_pdf.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-229：收据 PDF 中文字体第二层（设计闸门 #750 v1），收据下载照对账单下载补字体不可用与渲染失败两支，文档并进本任务（设计 §10 第 5 条），约 200 行。
+  # 管理端收据下载复用同一个 receipt_pdf_response，不另改管理端测试；AIH-TASK-228 部署到本任务部署之间的窗口见设计 §5 第 5 行。
+  - id: AIH-TASK-229
+    title: 收据 PDF 中文字体第二层：下载接口补字体不可用与渲染失败的处置，同步接口与支付流程文档
+    purpose: >-
+      按 docs/design/AIH-TASK-228-receipt-cjk-font.md（设计闸门 #750 已批准 v1） §2「下载」「文档」：app/api/receipt_download.py 的 receipt_pdf_response 照 app/api/statement_download.py 的三支处理快照不合规、字体不可用与其他渲染异常（ERROR 日志只带收据 id，返回 500），docs/api.md 的客户与管理端收据下载小节、docs/payment-flow.md §14.7 与 §14.10 同步。不改渲染：AIH-TASK-228 已交付。
+    status: ready
+    depends_on:
+      - AIH-TASK-228
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-228-receipt-cjk-font.md（设计闸门 #750 已批准 v1） 逐条一致，以 §1「可观察的完成标准」5、§2「数据流」「下载」「文档」「事务边界」、§3 INV-8、§5、§6「鉴权与租户过滤」「日志」、§7 任务列为 AIH-TASK-229 的各行、§8「对已开具收据的影响」、§9 备选 G、H、§11 AIH-TASK-229 为准；本设计建立在 docs/design/AIH-TASK-196-payment-receipts.md（收据，设计闸门 #589 已批准 v2）与 docs/design/AIH-TASK-216-statement-pdf.md（对账单 PDF，#708 已批准 v3） 之上，本设计没有改写的地方沿用它们；渲染层以 AIH-TASK-228 已交付的代码为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/receipt_download.py 的 receipt_pdf_response：try 里仍先查收据号列的格式（不合规按快照不合规处理）再调用 render_receipt_pdf；except 照 §2「下载」三行表、按此顺序：ReceiptSnapshotInvalid → ERROR Receipt snapshot invalid; download refused（现有，不变）；ReceiptFontUnavailable（从 app.services.receipt_pdf 导入）→ ERROR Receipt font unavailable; download refused；其他任何 Exception → ERROR Receipt PDF rendering failed，extra 另带 error_type 为 type(exc).__name__；三种日志的 extra 只带 receipt_id（收据 public_id，第三种另加 error_type），不带公司名、收据号、金额、快照内容与异常原文，不用 logger.exception、不交给通用处理器，三者都 raise ReceiptRenderFailed from None；成功下载不记日志；_read 与查询、租户过滤、404、参数签名、响应头与文件名不变；模块文档串讲快照不合规的那一段同步写三种失败'
+      - '测试（tests/backend/test_customer_receipts_api.py）覆盖 §7 任务列为 AIH-TASK-229 的三行：「下载：中文收据」（用 world 夹具，SQLite 与 MySQL 都跑：租户公司名改成 示例科技 Sdn Bhd 后开具收据并下载，200、正文等于 render_receipt_pdf(存下的快照)、含 /FontFile2、连发两次字节相同）；「下载：字体不可用」（monkeypatch receipt_download.render_receipt_pdf 抛 ReceiptFontUnavailable：500 固定文案 An internal error occurred.、没有 Content-Disposition、该 logger 的 ERROR 恰好一条且文案是 Receipt font unavailable; download refused 而不是兜底的 Receipt PDF rendering failed、receipt_id 为该收据 public_id、没有 error_type）；「下载：渲染异常」（monkeypatch 让渲染抛文案含公司名的 RuntimeError：500、ERROR 恰好一条 Receipt PDF rendering failed、error_type == RuntimeError、日志记录的消息、extra 与 exc_info / exc_text 都不含该文案）；现有 test_a_corrupted_snapshot_is_500_with_one_error_log、跨租户、鉴权与只读状态用例不改照过，tests/backend/test_admin_receipts_api.py 不改照过'
+      - '测试写法：需要改快照的场景沿用现有 sqlite_world 直接改行的写法（MySQL 触发器拒绝改收据行）；示例 uuid 全零；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（定义放在不以 test_ 开头的辅助模块；本任务的 allowed_change_paths 不含 conftest 时夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep'
+      - 'docs/api.md：客户收据下载小节删去「字体只支持 Latin-1，之外的字符（例如中文）印成 ?」，改为快照里的公司名等含中文时用嵌入的 Noto Sans SC 字体（子集）印出、字体里没有的字符印成 ?；「同一张收据任何时候下载内容都相同」补（同一代码与依赖版本下字节相同）；该小节的 500 说明与客户错误表的 500 一行改为「快照不合规、需要的中文字体不可用、或渲染失败」，与对账单小节同一措辞；管理端收据下载小节的 500 一句与管理端错误表的 500 一行同步；其余内容不改'
+      - 'docs/payment-flow.md：§14.7「下载」把一条 500 处置扩成三种 ERROR 日志各自的含义与处置，日志文本与 app/api/receipt_download.py 一致（Receipt snapshot invalid; download refused：人工排查、不改收据行；Receipt font unavailable; download refused：查镜像里的 app/data/NotoSansSC-Regular.ttf 与构建期的 packaging smoke，重新部署带字体的镜像；Receipt PDF rendering failed：看 error_type，按 receipt_id 读快照在本地用同一代码复现）；§14.10 的「不做中文收据」改为「版面只用英文」，已知限制 1 改为快照里的中文等字符用嵌入的 Noto Sans SC 印出、字体里没有的字符印成 ?，并写明设计闸门 #750 之前开具、印出的字符串含中文的收据重新下载得到的字节与之前不同（字形代替 ?，数据不变）；其余小节不改'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/services/ 下任何文件、app/api/statement_download.py、app/api/customer_payments.py、app/api/admin_payments.py；不改前端与 docs/TODO.md；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #750'
+    allowed_change_paths:
+      - app/api/receipt_download.py
+      - tests/backend/test_customer_receipts_api.py
+      - docs/api.md
+      - docs/payment-flow.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 认证加固（设计闸门 #751，docs/design/AIH-TASK-231-auth-hardening.md）：AIH-TASK-231..233 三层由 Worker 交付（设计 I1–I3）；I4–I7 的核心文件名含 password，Worker 收不了，由人工会话按常规 PR 交付，不分配编号，落实 docs/TODO.md
+  # 「密码重置与通知投递的几项加固」里的按账号限频、改密通知、基址格式三项与「既有配置项缺下界校验」。Kelvin 已定：同一账号
+  # 5 分钟内至多一封重置邮件（配置项，默认 300 秒）；改密通知发给重置成功的那个账号本人，ADMIN 与 CUSTOMER 都发。
+  # 231 是第一层：迁移 0040 只加一个索引，预计约 200 行。文件名与 revision 避开 Worker 的敏感路径规则（password / token 等整词）与 alembic_version 的 32 字符上限。
+  - id: AIH-TASK-231
+    title: 认证加固第一层：重置令牌表加按用户、用途与创建时刻的索引迁移
+    purpose: >-
+      按 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） §2「数据库（迁移 0040，I1）」与 §8：新迁移 alembic/versions/20261116_0040_reset_request_index.py（revision 0040_reset_request_index，down_revision 0039_payment_receipts）给 password_reset_tokens 加非唯一索引 ix_password_reset_tokens_user_purpose_created (user_id, purpose, created_at)，模型同步声明，docs/database-schema.md 记索引与用途。只加这一个索引，不改列、约束与数据；限频查询属于设计 #751 的 I4（人工 PR）。
+    status: ready
+    depends_on:
+      - AIH-TASK-229
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） 逐条一致，以 §2「数据库（迁移 0040，I1）」、§5 迁移 0040 中途失败一行、§7「迁移与模型」一行、§8「迁移 0040」「部署顺序」第 1 步与「回滚」为准；迁移文件名与 revision 以本契约为准（文件名不得含 password、token 等整词，revision 不超过 alembic_version.version_num 的 32 个字符），索引名与列不变；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261116_0040_reset_request_index.py，revision 为 0040_reset_request_index，down_revision 为 0039_payment_receipts（照 0023 在 revision 上方注释 VARCHAR(32) 的限制）；upgrade 只建非唯一索引 ix_password_reset_tokens_user_purpose_created，列顺序恰好 user_id、purpose、created_at；downgrade 只删这个索引；不改列、约束、触发器，不写数据。文件头照 alembic/versions/20260928_0011_audit_logs_query_indexes.py 写步骤与 §132 第 13 条分析：已有数据不改；MySQL 8.4 InnoDB 加二级索引默认在线（ALGORITHM=INPLACE、LOCK=NONE），表照常读写；只有一个 DDL，失败时没有半成品，索引已建而 alembic_version 停在 0039 时先 DROP INDEX 再重新部署；部署顺序先于设计 #751 的 I4（人工 PR）；回滚只删索引'
+      - 'app/models/auth.py 的 PasswordResetToken.__table_args__ 加同名 Index（名称与列顺序与迁移一致），注释写明用途（忘记密码按账号限频的窗口查询与锁读，设计 §2「限频规则」）；ix_password_reset_tokens_user 与 token_hash 唯一索引不动（前者是 user_id 外键依赖的索引）；不改任何列与约束'
+      - 'tests/backend/test_migrations.py 新增 0040 的用例：0040 接在 0039_payment_receipts 之后且是 head；SQLite 与 MySQL 升级到 head 后新索引存在、列顺序为 user_id、purpose、created_at、非唯一，ix_password_reset_tokens_user 仍是 (user_id, used_at)；升级、降级到 0039_payment_receipts、再升级的往返里新索引随之删、建，其余表结构不变；模型与迁移的索引名、列字面量一致；不对优化器选用哪个索引做断言（设计 §10 假设 4）。后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，MySQL 专有断言放进方言分支，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped'
+      - 'tests/backend/test_migrations.py 里 0025 的两处「索引只有 0004 那一个、没有含 purpose 的索引」断言（约第 6664 行对模型 PasswordResetToken.__table__.indexes 的断言、约第 6839–6845 行对库的断言）改为只约束 0025 自己：模型那处显式排除 0040 的索引名后仍恰好只有 0004 那一个，库那处在 0025 版本上断言或同样显式排除 0040 的索引名；不放宽 0025 的其他检查'
+      - 'tests/backend/test_payment_receipts_migration.py 的 _at_0039（约第 1784 行）现在升到 head 后断言版本是 0039，head 变成 0040 后必然失败：改为升到 head 后再降到 0039_payment_receipts，其余断言与该文件其他用例不改、断言意义不变；其他迁移测试文件若因 head 变为 0040 而失败，停下并在 PR 里说明，不自行扩大范围'
+      - 'docs/database-schema.md 的 password_reset_tokens 一节（约第 406–420 行）：标题补「迁移 0040_reset_request_index 加索引」，「索引不变」一段改为列出新索引 ix_password_reset_tokens_user_purpose_created (user_id, purpose, created_at)，写明用途是忘记密码按账号限频的窗口查询与锁读（只覆盖窗口内的行，不受该账号历史令牌与邀请令牌数量影响）；purpose 一行约束列里的「不建索引」改为「不单独建索引；是复合索引 (user_id, purpose, created_at) 的第二列（迁移 0040）」'
+      - '只改本任务 allowed_change_paths 里的文件；不改任何服务、接口与 app/core/config.py；不改既有迁移文件与 alembic/env.py；不装依赖；不对任何数据库执行迁移；不连生产；不发真实邮件；不改 docker-compose 文件与 .env 类文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #751'
+    allowed_change_paths:
+      - alembic/versions/20261116_0040_reset_request_index.py
+      - app/models/auth.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_payment_receipts_migration.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-232：认证加固第二层（设计闸门 #751）：七个认证配置项加下界与跨字段关系，新增重置申请最短间隔（默认 300 秒、60–3600、
+  # 不大于重置令牌寿命）。生产取默认值（compose 不转发这几项），全部满足新下界。预计约 250 行。前提：tests/backend/test_password_reset.py
+  # 约第 354 行由管理员随登记 PR 另传 password_reset_min_interval_seconds=60（文件名含 password，Worker 不能改；Settings 的
+  # extra=ignore 让这个关键字在本任务之前被忽略）。.env.example 的注释行也由管理员随登记 PR 加。
+  - id: AIH-TASK-232
+    title: 认证加固第二层：认证寿命、计数与限流配置项加下界，新增重置申请最短间隔
+    purpose: >-
+      按 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） §2「配置下界」：app/core/config.py 给 access_token_ttl_seconds、login_max_failures、login_lockout_seconds、auth_rate_limit_burst、auth_rate_limit_per_minute 加 Field 下界，新增一个 model_validator 管 refresh_token_idle_seconds、refresh_token_ttl_seconds 与新配置项的跨字段关系，新增 password_reset_min_interval_seconds（默认 300，环境变量 BILLING_PASSWORD_RESET_MIN_INTERVAL_SECONDS）；同步改四处低于新下界的既有用例中 Worker 能改的三处。新配置项此任务没有读取方（限频属于设计 #751 的 I4（人工 PR））；frontend_base_url 校验属于 AIH-TASK-233。
+    status: ready
+    depends_on:
+      - AIH-TASK-231
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） 逐条一致，以 §1「明确不做什么」、§2「配置下界」（含末尾「现值核对」）、§3 INV-1、§5 配置不合规一行、§7「配置下界」「限流用例仍有效」两行、§8 第 2 步为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/core/config.py 的 Field 下界（默认值都不变）：access_token_ttl_seconds = Field(default=600, ge=60)，login_max_failures = Field(default=5, ge=3)，login_lockout_seconds = Field(default=900, ge=300)，auth_rate_limit_burst = Field(default=20, ge=3)，auth_rate_limit_per_minute = Field(default=10, ge=3)；新增 password_reset_min_interval_seconds: int = Field(default=300, ge=60, le=3600)，放在 password_reset_ttl_seconds 之后；每一项的注释写明设计 §2 表里那条理由（只在 401 时刷新与认证限流、给真人留两次手误、单账号猜测速率上限、冷启动登录连过三次令牌桶、429 后一分钟内补回一次登录、新配置项的下界上界与不大于令牌寿命的理由）'
+      - '新增一个 @model_validator(mode="after")（不并进 _status_webhook_timings_fit，各管各的），三条关系：refresh_token_idle_seconds >= access_token_ttl_seconds + 60；refresh_token_ttl_seconds >= refresh_token_idle_seconds；password_reset_min_interval_seconds <= password_reset_ttl_seconds；不成立时抛 ValueError（构造 Settings 得到 ValidationError），错误信息只说哪条关系不成立；注释写明 idle 从当前刷新令牌签发时刻算、多出的 60 秒是访问令牌过期后的宽限、绝对寿命短于闲置期限时闲置期限形同虚设、interval 不大于令牌寿命保证被限频时窗口内那封信的链接仍有效'
+      - '测试（tests/backend/test_config.py，设计 §7「配置下界」）：五个 Field 下界各自取下界通过、下界减一 ValidationError；跨字段两侧：idle = access + 59 拒绝、+ 60 通过，refresh_ttl = idle - 1 拒绝、= idle 通过，interval = password_reset_ttl_seconds + 1 拒绝、相等通过；interval 取 59 拒绝、60 通过、3600 通过（令牌寿命同时设到不小于 3600）、3601 拒绝；Settings() 默认构造通过且八项默认值恰好是 600、1800、43200、5、900、20、10、300；monkeypatch.setenv BILLING_PASSWORD_RESET_MIN_INTERVAL_SECONDS 为 120 时读到 120'
+      - '既有用例（设计 §2「现值核对」）：tests/backend/test_config.py 约第 159 行 Settings(password_reset_ttl_seconds=1, outbox_max_attempts=1) 的 1 改为 300（断言同步为 300，那条用例只证明「正数照常通过」）；tests/backend/test_auth_api.py 约第 185 行（burst=2）与约第 206 行（burst=1）改为 burst=3，并相应增加请求次数，仍断言能观察到 429 与 Retry-After、429 文案不含邮箱；直接构造 TokenBucket 的用例不经 Settings，不改'
+      - '前提核对：tests/backend/test_password_reset.py 的 test_the_token_expires_at_the_configured_ttl（约第 354 行）已由管理员随登记 PR 改为同时传 password_reset_min_interval_seconds=60（该文件名含 password，Worker 的敏感路径规则不许改；Settings 是 extra=ignore，这个关键字在本任务之前被忽略）。动手前核对，没有就停下并在 PR 里说明，不自行绕过；全仓其他构造 Settings 的用例若因新下界或新关系失败（登记时已核对只有上述四处），同样停下并在 PR 里说明'
+      - '不改：app/core/ratelimit.py 的 TokenBucket（对非正数的拒绝作为第二道检查保留）、docker-compose 文件的环境变量转发、_status_webhook_timings_fit、frontend_base_url（属于 AIH-TASK-233）、pending_token_ttl_seconds / enrolment_pending_token_ttl_seconds / customer_invitation_ttl_seconds / password_reset_ttl_seconds 已有的下界（不加上界）；新配置项此任务没有任何读取方；文档属于设计 #751 的 I7（人工 PR）'
+      - '只改本任务 allowed_change_paths 里的文件；不装依赖；不对任何数据库执行迁移；不连生产；不发真实邮件；不改 docker-compose 文件与 .env 类文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #751'
+    allowed_change_paths:
+      - app/core/config.py
+      - tests/backend/test_config.py
+      - tests/backend/test_auth_api.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-233：认证加固第三层（设计闸门 #751）：启动时校验 frontend_base_url，配错让进程起不来，部署在迁移步骤中止、旧版本继续跑。
+  # 设计 §8 的合并前置已于 2026-11-16 由管理员核实：生产的 BILLING_FRONTEND_BASE_URL 是 https，没有路径、查询串、片段与尾部斜杠，
+  # 设计 §10 第 2 条无风险。预计约 150 行。
+  - id: AIH-TASK-233
+    title: 认证加固第三层：启动时校验前端基址的格式，生产环境必须是 https
+    purpose: >-
+      按 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） §2「frontend_base_url 的格式（I3）」：app/core/config.py 新增 require_frontend_base_url 与 frontend_base_url 的字段校验（第 1–5 步，返回去掉末尾斜杠的规范值），另加一个 model_validator 管第 6 步（environment 为 production 时非空值必须是 https）；测试同步。不改任何使用方（渲染函数、支付建单、告警）。
+    status: ready
+    depends_on:
+      - AIH-TASK-232
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） 逐条一致，以 §2「frontend_base_url 的格式」、§3 INV-1 与 INV-3、§5 配置不合规一行、§6「链接安全」、§7「frontend_base_url」「渲染不受规范化影响」两行、§8 第 3 步为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/core/config.py 新增模块级函数 require_frontend_base_url(value: str) -> str 与 @field_validator("frontend_base_url") 调用它，规则逐条照设计：① 去首尾空白，为空返回空串（全空白也规范成空串）；② 含任何空白字符、ASCII 控制字符（小于 0x20 与 0x7f）或反斜杠 → 拒绝；③ 含问号或井号 → 拒绝（末尾单独一个问号也拒绝，不能只看 urlsplit 的 query）；④ urlsplit 后 scheme 是 http 或 https、hostname 非空、没有 username 与 password、port 读得出（读 port 抛 ValueError 即拒绝）且不为 0、path 只能是空串或单个斜杠；⑤ 返回去掉末尾斜杠的值。拒绝时抛 ValueError（构造 Settings 得到 ValidationError），错误信息可以带配置值本身，不带其他内容；注释写明每条的理由（设计 §2 第 2–4 步）'
+      - '生产规则写成一个新的 @model_validator(mode="after")（不并进 _status_webhook_timings_fit 与 AIH-TASK-232 的那个）：environment 为 production、frontend_base_url 非空且 scheme 不是 https 时拒绝；local 照常允许 http；production 下空串照常合法；注释写明理由（重置与邀请链接带一次性令牌、生产会话 cookie 是 Secure）'
+      - '测试（tests/backend/test_config.py）覆盖设计 §7「frontend_base_url」一行的每个输入：合法——空串、全空白、https 根地址、http 根地址、带端口、末尾斜杠、首尾空白，规范成去掉首尾空白与末尾斜杠的值；拒绝——没有方案（只有主机名）、ftp 方案、没有主机、带用户名、带用户名与密码、端口非数字、端口 0、端口 70000、路径 /app、路径为两个斜杠、末尾一个问号、带查询串、末尾一个井号、带片段、中间含空格、含 \n、含 \t、含反斜杠；environment 为 production 时 http 拒绝、https 通过、空串通过。测试里的主机名沿用该文件已有的保留示例域名'
+      - '既有用例：tests/backend/test_receipt_email.py 约第 232 行的参数化 ["", "   ", "/"] 里的 "/" 在新校验下构造 Settings 即抛错，从参数化中去掉（它的拒绝已由 test_config.py 覆盖），保留空串与全空白两项、断言不变；其余渲染、支付建单与告警的用例（含 test_receipt_email.py 约第 284 行、tests/backend/test_notification_email.py 约第 447 行的首尾空白加末尾斜杠输入，tests/backend/test_payment_create.py 约第 632 行的末尾斜杠输入）不改也全部通过，得到的链接与跳回地址不变'
+      - '不改 app/tasks/outbox.py、app/services/payments.py、app/services/alerts.py 里对 frontend_base_url 的使用（现有 strip().rstrip("/") 照留，与新规范化幂等）；不改 docker-compose 文件（本地默认值是 http 的本机地址，在 local 下合法）；不改 AIH-TASK-232 的下界与跨字段校验'
+      - 'PR 正文「已知未做 / 留给后续」写明部署前置：管理员已于 2026-11-16 核对生产 .env 的 BILLING_FRONTEND_BASE_URL 是 https 根地址、没有路径、查询串、片段与尾部斜杠（设计 §8 第 3 步）；并写明开发机本地 .env 若把它设成 http，用 environment 为 production 构造 Settings 的用例（例如 tests/backend/test_perf_usage.py）会在本地失败，CI 不受影响（设计 §10 假设 5）'
+      - '只改本任务 allowed_change_paths 里的文件；不装依赖；不对任何数据库执行迁移；不连生产；不发真实邮件；不改 docker-compose 文件与 .env 类文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #751'
+    allowed_change_paths:
+      - app/core/config.py
+      - tests/backend/test_config.py
+      - tests/backend/test_receipt_email.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
