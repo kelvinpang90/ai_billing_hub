@@ -351,7 +351,7 @@ def test_the_stored_token_is_only_a_hash(session_factory, settings: Settings) ->
 
 def test_the_token_expires_at_the_configured_ttl(session_factory) -> None:
     make_user(session_factory)
-    settings = Settings(password_reset_ttl_seconds=60)
+    settings = Settings(password_reset_ttl_seconds=60, password_reset_min_interval_seconds=60)
     moment = utc_now()
 
     request_reset(session_factory, settings, email=EMAIL, context=CONTEXT, now=moment)
