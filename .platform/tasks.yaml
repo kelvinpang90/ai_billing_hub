@@ -13480,3 +13480,479 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # Excel 导出 J 批（设计闸门 #753，docs/design/AIH-TASK-234-excel-exports.md）：客户门户四个 CSV 导出与管理端毛利分析导出各加 xlsx 版本，
+  # 同一查询、同一列、同一上限与错误码，只换编码（现有导出接口加 format 参数，不加新路径）。AIH-TASK-234..241 八层串行，排在 AIH-TASK-233 之后。
+  # 前置：管理员 PR #748 已把 openpyxl>=3.1,<3.2 加进 pyproject.toml 的依赖，并会装进 Worker 检查用的 Python 3.12（Worker 不装依赖）。
+  # AIH-TASK-234：第一层只改部署配置，约 60 行；api 的 /tmp 挂 tmpfs，必须先于 AIH-TASK-236 在生产生效，所以整批串成一条链。
+  - id: AIH-TASK-234
+    title: Excel 导出第一层：API 容器的临时目录挂载为内存文件系统
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「tmpfs（AIH-TASK-234）」与 §8：docker-compose.yml 只给 api 服务加 tmpfs（/tmp，上限 128m，mode 1777），让 openpyxl 生成 xlsx 时写的工作表临时文件只在内存里、不落宿主机磁盘；tests/backend/test_compose.py 钉住它；docs/deployment.md 3.3 节「客户导出」一段补 xlsx 的容量说明。不改应用代码：xlsx 写出模块属于 AIH-TASK-235。
+    status: ready
+    depends_on:
+      - AIH-TASK-233
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） 逐条一致，以 §1「我定的」tmpfs 一条与「现有行为与证据」第 7 条、§2「tmpfs（AIH-TASK-234）」「资源边界（INV-1）」、§3 INV-1、§6「临时数据」、§7「tmpfs 声明」一行、§8、§10 第 1 条与假设 3、§11 AIH-TASK-234 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'docker-compose.yml：只在 api 服务本身加 tmpfs（不加在 x-backend 锚点里，celery-worker 与 celery-beat 不继承），短写法的列表恰好一项 /tmp:size=128m,mode=1777；上方写注释说明为什么（openpyxl 生成 xlsx 时先把工作表写进临时文件，挂内存文件系统让客户数据不落宿主机磁盘、容器重启即清空，设计闸门 #753）以及它的页计入 api 的 mem_limit；其他服务、mem_limit、cpus、环境变量与 docker-compose.prod.yml 都不改'
+      - 'tests/backend/test_compose.py 新增一个用例（用文件里已有的 compose 夹具）：services.api.tmpfs 恰好等于 ["/tmp:size=128m,mode=1777"]；其他每个服务要么没有 tmpfs，要么其中没有挂到 /tmp 的项；已有用例与断言不改。CI 的 backend-build 里 docker compose config 一步必须照常通过（设计假设 3：compose 接受短写法里的 size 与 mode；不接受时停下在 PR 里说明，不自行改成长写法）'
+      - 'docs/deployment.md 3.3 节「客户导出」那一段（设计闸门 #435 v10 起的那段）补：xlsx 与 CSV 共用同一个进程级导出租约名额（月度汇总两种格式都不占）；生成 xlsx 时工作表临时文件写在 api 容器 /tmp 的 tmpfs（上限 128 MiB，页计入 768m 的 mem_limit，最坏多占约 60 MB、只在生成的几秒里），不落宿主机磁盘；单个导出的 Python 堆峰值仍 ≤ 128 MiB；部署时 compose 因配置变化重建 api 容器；该文件其余内容不改'
+      - '只改本任务 allowed_change_paths 里的文件；不改任何应用代码、前端与 deploy/ 下的脚本；不改 docker-compose.prod.yml；不装依赖；不对任何数据库执行迁移；不连生产；不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - docker-compose.yml
+      - tests/backend/test_compose.py
+      - docs/deployment.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-235：Excel 导出第二层（设计闸门 #753 v1），约 700 行（代码 210、测试 490、打包冒烟 2）。
+  # 前置：管理员 PR #748 已把 openpyxl>=3.1,<3.2 加进依赖，并会装进 Worker 检查用的 Python 3.12；没装时本任务起的测试在沙箱里 ImportError。
+  # 失败时的临时文件清理依赖 openpyxl 3.1 的私有属性（_rows、_writer、xf、out、ALL_TEMP_FILES），依赖上界 <3.2 由此而来。tests.backend 只在 CI 跑，CI 秒数在审查时从 CI 输出读取。
+  - id: AIH-TASK-235
+    title: Excel 导出第二层：通用 xlsx 写出模块与附件响应，公式注入防护与 CSV 共用
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「新模块 app/core/xlsx_export.py（AIH-TASK-235）」「临时文件（AIH-TASK-235 的清理步骤）」「单元格类型（逐列规则）」「金额为什么写文本」「公式注入防护」「可重现性」「资源边界（INV-1）」：新建 app/core/xlsx_export.py（write_xlsx、ExportXlsxResponse、xlsx_response、两个公开常量与一个私有正则），app/core/csv_export.py 抽出 formula_guarded 与 export_attachment_headers 供两种格式共用、CSV 输出逐字节不变；scripts/packaging_smoke.py 加一行导入。不接任何接口：属于 AIH-TASK-236、237。
+    status: ready
+    depends_on:
+      - AIH-TASK-234
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） 逐条一致，以 §1「现有行为与证据」第 1、5 条、§2「新模块 app/core/xlsx_export.py（AIH-TASK-235）」「临时文件（AIH-TASK-235 的清理步骤）」「app/core/csv_export.py 的配合改动」「单元格类型（逐列规则）」「金额为什么写文本」「公式注入防护」「可重现性」「资源边界（INV-1）」、§3 INV-1、INV-7、INV-10、§5 xlsx 生成出错与写出器构造到一半出错两行及「各导出的失败日志」表、§6「临时数据」「依赖」、§7 开头的「回车的比较口径」与标 AIH-TASK-235 的各行、§8 前置、§10 已知限制 1、2、7 与假设 1、2、§11 AIH-TASK-235 为准；本设计建立在 docs/design/AIH-TASK-113-customer-export.md（设计闸门 #435 已批准 v10）的导出基础设施之上，没有改写的地方沿用它；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/core/xlsx_export.py：两个公开 Final 常量 XLSX_MEDIA_TYPE（application/vnd.openxmlformats-officedocument.spreadsheetml.sheet）与 XLSX_MAX_TEXT_LENGTH = 32_767，一个私有 Final 正则 _NUMERIC_INTEGER = re.compile(r"0|[1-9][0-9]{0,14}")（只用 fullmatch；15 位是 Excel 的有效数字上限，即 0 到 999 999 999 999 999）；不设 XLSX_MAX_NUMERIC_INTEGER 常量（上界已由正则的位数表达，两处写同一个数会漂移）。write_xlsx(columns, rows, text_columns, integer_columns, *, sheet_title) -> bytes 用 openpyxl.Workbook(write_only=True)，恰好一个名为 sheet_title 的工作表，第一行是列名（文本单元格），之后每行一条；不设样式（整数单元格的数字格式 0 除外）、列宽、冻结、筛选与文档标题；保存到 io.BytesIO 后返回 getvalue()，ZIP 只在内存里；不碰数据库、不打日志。输入约定同 write_csv：单元格不是 str 或 None 抛 TypeError，行长度与列数不等抛 ValueError（zip strict）；integer_columns 与 text_columns 相交、或含不在 columns 里的名字，抛 ValueError。class ExportXlsxResponse(ExportCsvResponse) 只把 media_type 换成 XLSX_MEDIA_TYPE（不追加 charset，64 KiB 分段发送沿用父类）；xlsx_response(filename, body) 用 export_attachment_headers 组响应头'
+      - '单元格类型按设计 §2 的表，顺序是先公式防护、再类型、再字符清洗：所有字符串单元格显式标为字符串类型（工作表 XML 里不出现 <f> 也不出现 t="e"）；text_columns 的值先经 formula_guarded（与 CSV 逐字相同）；integer_columns 的值只有 _NUMERIC_INTEGER.fullmatch(value) 成立（0，或不带前导零、至多 15 位的 ASCII 十进制数字串）时写 int 数字单元格、数字格式 0（此时 str(int(value)) 与原串逐字相同）；其余任何值（超过 15 位、带前导零如 007、带空白或换行如 5 后跟换行、负号、小数点、非 ASCII 数字、空串）原样写文本单元格（经字符清洗），不抛错；不得用 re.match、re.search 或带 $ 的写法判断（$ 在末尾换行之前也匹配）；其余列（金额、quantity、比率、平均值、时间、日期、TOTAL 标签、口径列）原样写文本；None 写空单元格；全程不经 float。文本单元格做字符清洗：U+0000–U+0008、U+000B、U+000C、U+000E–U+001F、U+FFFE、U+FFFF 与代理码点各换成一个 U+FFFD，制表符、换行、回车保留；清洗后长于 XLSX_MAX_TEXT_LENGTH 抛 ValueError（不让 openpyxl 静默截断）'
+      - '临时文件：write_xlsx 用 try / except BaseException 包住从 openpyxl.Workbook(write_only=True) 到 save 的全过程；成功时由 openpyxl 在保存时删除。进入 except 时，对 wb.worksheets 里的每个工作表按设计 §2「临时文件（AIH-TASK-235 的清理步骤）」的四步与顺序清理，每一步各自包在 contextlib.suppress(Exception) 里，最后原样重抛原异常（不包装、不换类型）：①rows = getattr(ws, "_rows", None)，不为 None 时 rows.close()；②writer = getattr(ws, "_writer", None)，为 None 时跳过③④（写出器在第一次 append 时才建，还没 append 就没有临时文件）；③writer.xf.close()：关闭写 XML 的生成器，文件句柄随 with xmlfile 退出而关闭（writer.out 只是路径字符串，不对它调用 close）；④path = writer.out 是 str 且 os.path.exists(path) 时 os.remove(path)，path 仍在 openpyxl.worksheet._writer.ALL_TEMP_FILES 里时把它移除。不扫描临时目录、不按前缀删别的文件；写出器构造到一半出错留下的无引用临时文件按设计 §10 已知限制 7 交给 tmpfs 与 atexit，不为它写用例。app/core/csv_export.py 新增公开函数 formula_guarded(value: str) -> str（以 _FORMULA_PREFIXES 之一开头时前加单引号，否则原样）与 export_attachment_headers(filename: str) -> dict[str, str]（文件名校验 + Content-Disposition: attachment、Cache-Control: no-store、X-Accel-Buffering: no 三个头），write_csv 与 csv_response 改为调用它们；CSV 输出字节与响应头逐字节不变，tests/backend/test_csv_export.py 不改、照常通过'
+      - '新建 tests/backend/test_xlsx_export.py 覆盖设计 §7 标 AIH-TASK-235 的各行，读回比较一律照 §7 开头的「回车的比较口径」（值里含回车时期望值与读回值两边都先把回车换成换行再逐字比较，其余字符逐字比较）：CSV 重构（formula_guarded 对 =、+、-、@、制表符、回车六个前缀加单引号、其余原样；export_attachment_headers 与 csv_response 的头逐字相同；这些新用例写在本文件，不改 test_csv_export.py）、基本形状（以 PK 开头；ZIP 成员恰好设计列出的 9 个；openpyxl.load_workbook(read_only=True) 读出恰好一个工作表、名称正确、第一行是列名、文本列为 str、整数列为 int、None 读回 None）、与 CSV 逐格一致（含公式前缀、非 ASCII、逗号、引号、换行、回车、空值；整数列读回的 int 经 str() 等于 CSV 字段）、公式与错误值不出现（文本列 =1+1、+1、-1、@A1、制表符开头与回车开头的值读回都带开头的单引号、与 CSV 字段相同，回车开头那个按口径比较；文本列与非文本列的 #N/A、#REF! 原样是字符串；工作表 XML 里没有 <f> 也没有 t="e"）、金额与整数精度（金额 999999999999.99999999、0.00000001、-0.04120000 读回同一字符串；整数列 0 与 999999999999999 读回 int、数字格式为 0、str 后等于原串；1000000000000000、2**63 - 1 的十进制串、007、5 后跟换行、前面带一个空格的 5、1.5、-1、全角零 chr(0xFF10) 都读回同一个字符串（文本单元格，不是数字）且不抛错）、字符清洗与长度（U+0001、U+000B、chr(0xFFFE) 变 U+FFFD 且不抛错；制表符与换行保留；a 回车 b 按口径比较；32 768 字符抛 ValueError）、输入约定、临时文件清理（每个场景先把 tempfile.tempdir monkeypatch 到一个空的 tmp_path：①正常写出；②行迭代器在第 3 行抛 RuntimeError（写出器已建、已写两行）；③行迭代器在第一条数据行之前抛（表头行已 append，写出器已建、xf 开着，只是还没有数据行）；④monkeypatch openpyxl.worksheet._writer.WorksheetWriter.write_tail 抛错（ws._writer 已赋值、xf 仍开着）；⑤monkeypatch zipfile.ZipFile.write 抛 OSError（工作表已关闭，复制进 ZIP 时失败，文件仍在）；五种结局之后 tmp_path 里都没有任何文件，②–⑤ 原样传出注入的那个异常对象，openpyxl.worksheet._writer.ALL_TEMP_FILES 不含 tmp_path 下的路径）、可重现（同一组行写两次，除 docProps/core.xml 外每个 ZIP 成员逐字节相同，core.xml 里不含任何单元格的值）、响应（Content-Type 恰好是 XLSX_MEDIA_TYPE 不带 charset、三个头、非法文件名 ValueError、按 64 KiB 分段同 CSV）'
+      - '资源用例：内存用例在 tracemalloc 开着时建 20 000 个最长形态行（从 tests/backend/test_csv_export.py 导入普通函数 longest_row 与 usage_cells，不转引用夹具），按用量导出的列与文本列（app/schemas/customer_usage.py 已有的两个常量）和四个 token 整数列（本任务的测试里按设计 §2 的表写字面量，schema 常量由 AIH-TASK-236 加）写 xlsx：峰值 ≤ 128 MiB，读回 20 001 行，token 列（2**63 - 1）与金额都是文本；临时文件大小用例（不开 tracemalloc）断言 xl/worksheets/sheet1.xml 的未压缩大小 ≤ 96 MiB 并打印生成秒数。任何一条超出时停下在 PR 里说明，不自行调上限、行数或类型规则。tests.backend 在 Worker 沙箱里不跑：PR 正文写明 CI 上最长形态 20 000 行的生成秒数待 CI 跑完后从输出读取补报（超过 10 秒时停下由 Kelvin 决定是否改设计），不自行估算'
+      - '后端测试照 CLAUDE.md「写后端测试的约定」：本任务不新增 SQL、不需要数据库；新测试模块不转引用别的模块的夹具（只导入普通函数与常量）；示例 uuid 全零；不 sleep。scripts/packaging_smoke.py 在已有的子包导入旁加 import app.core.xlsx_export（证明 openpyxl 随依赖装进 wheel），其余不改'
+      - '只改本任务 allowed_change_paths 里的文件；不改任何接口、schema 与前端；不改 pyproject.toml（openpyxl 依赖由管理员 PR #748 先加）；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - app/core/xlsx_export.py
+      - app/core/csv_export.py
+      - tests/backend/test_xlsx_export.py
+      - scripts/packaging_smoke.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-236：Excel 导出第三层（设计闸门 #753 v1），约 750 行（代码 90、测试 560、文档 100）。
+  # 在现有四个客户导出接口上加 format 参数（设计 §9 备选 A 未采用：不另开 .xlsx 路径），路由集合不变；合并即对客户开放 xlsx，此时 234 的 tmpfs 已在生产。
+  # 只跑 SQLite：查询代码路径与 CSV 同一段，已由现有 CSV 导出测试的 MySQL 一半覆盖。
+  - id: AIH-TASK-236
+    title: Excel 导出第三层：客户四个导出接口加 xlsx 格式参数
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「参数 format」「各接口的改法」：app/api/customer.py 的四个客户导出接口加查询参数 format（ExportFormatParam，缺省 csv，只认 csv / xlsx），xlsx 时只在拼文件与构造响应那一步改用 AIH-TASK-235 的 write_xlsx 与 xlsx_response；三个 schema 模块加整数列常量；docs/api.md「客户导出」写明 xlsx。不改管理端接口与前端：属于 AIH-TASK-237 起的任务。
+    status: ready
+    depends_on:
+      - AIH-TASK-235
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） 逐条一致，以 §1「可观察的完成标准」1–5、§2「参数 format」「各接口的改法」与其中的文件名表、「单元格类型（逐列规则）」各导出的整数列表、§3 INV-7、INV-8、INV-10、§4、§5、§6 逐列对照、§7 标 AIH-TASK-236 的各行、§8 兼容窗口与回滚、§11 AIH-TASK-236 为准；本设计建立在 docs/design/AIH-TASK-113-customer-export.md（#435 v10）、docs/design/AIH-TASK-119-customer-usage-summary-export.md（#457 v1）、docs/design/AIH-TASK-121-customer-conversations.md（#460 v2）之上，它们的查询、列、筛选、上限与错误不变；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/customer.py：在现有参数别名旁定义 ExportFormatParam = Annotated[Literal["csv", "xlsx"], Query(alias="format")]，四个导出处理函数（customer_wallet_transactions_export、customer_usage_events_export、customer_usage_summary_export、customer_conversations_export）加参数 export_format: ExportFormatParam = "csv"；非法值（XLSX、xls、空串）由 FastAPI 在处理函数之前回 422 VALIDATION_ERROR、消息含 query.format（未登录也是 422，与这些接口其他形状类参数同一时序）；不带或 format=csv 时代码路径与响应体逐字节不变；路由装饰器的 response_class=ExportCsvResponse 不变，加 responses 让 OpenAPI 的 200 列出 text/csv 与 XLSX_MEDIA_TYPE 两种媒体类型；不新增路径，tests/backend/test_customer_api.py 的路由守卫不改'
+      - 'xlsx 分支只在「拼文件 → 构造响应」那两行（设计 §2「各接口的改法」）：三个大导出在拿到租约之后的同一个 try 里调用 write_xlsx(列常量, 同一组单元格, 文本列常量, 整数列常量, sheet_title=工作表名) 与 xlsx_response，意外异常照旧记 customer_export_failed 并在 except 之外抛 CustomerExportFailed（500，租约内发出）；月度汇总在同一位置分支、不拿租约、不包 try。文件名主干与 CSV 相同只换扩展名、工作表名是程序常量：usage-events_<from_date>_<to_date>.xlsx 与 usage-events、wallet-transactions_<from_date>_<to_date>.xlsx 与 wallet-transactions、usage-summary_<YYYY-MM>.xlsx 与 usage-summary、conversations_<from_date>_<to_date>.xlsx 与 conversations；查询、筛选、EXPORT_MAX_ROWS 上限、租约、错误码与日志都不分格式；编码在会话关闭之后做'
+      - 'app/schemas/customer_usage.py 新增 USAGE_EXPORT_INTEGER_COLUMNS（input_tokens、output_tokens、cache_creation_input_tokens、cache_read_input_tokens）与 USAGE_SUMMARY_EXPORT_INTEGER_COLUMNS（request_count、conversation_count），app/schemas/customer_wallet.py 新增 WALLET_EXPORT_INTEGER_COLUMNS（wallet_sequence），app/schemas/customer_conversations.py 新增 CONVERSATION_EXPORT_INTEGER_COLUMNS（request_count、input_tokens、output_tokens）；写法与同模块的文本列常量相同（Final 的 frozenset），放在各自列常量旁边；已有 __all__ 的模块（customer_usage.py、customer_conversations.py）把新常量加进 __all__，customer_wallet.py 现在没有 __all__，不为此新建；列常量、文本列常量与单元格函数不改'
+      - '新建 tests/backend/test_customer_xlsx_export_api.py 覆盖设计 §7 标 AIH-TASK-236 的各行：四个接口正常路径（不带 format 与 format=csv 的响应体逐字节相同；xlsx 200、Content-Type 恰好 XLSX_MEDIA_TYPE、文件名 .xlsx、no-store、X-Accel-Buffering: no、工作表名、第一行等于列常量、与同参数 CSV 逐格一致、整数列读回 int）；format 校验（XLSX、xls、空串 422 且消息含 query.format；未登录带 format=xls 也是 422）；错误一致（monkeypatch EXPORT_MAX_ROWS 为 2 造 3 行 422 EXPORT_TOO_LARGE；注入 QueryTooBroad 422 QUERY_TOO_BROAD；预先占住租约 503 EXPORT_BUSY 且 Retry-After: 5，月度汇总两种格式在租约被占时都 200；monkeypatch write_xlsx 抛 RuntimeError 得 500 INTERNAL_ERROR 且请求结束后 export_lease_held() 为假；钱包缺失 500 且没拿租约；月度汇总不带 month 422 query.month；两种格式逐一相同）；跨租户（租户 A 的令牌带租户 B 的 project_id 导出用量与会话 xlsx：200，只有表头一行）；INV-7（四个 xlsx 的表头恰好等于各自列常量、与设计 §6 逐列对照列出的成本、汇率、参考价、毛利与内部 id 字段无交集、恰好一个工作表、ZIP 成员集合固定）；恶意与异常文本（项目名 =HYPERLINK("x","y") 读回前加单引号的同一串、#N/A 读回字符串、含 U+0001 的名字在该处为 U+FFFD；CSV 不受影响）'
+      - '后端测试照 CLAUDE.md「写后端测试的约定」：本任务只跑 SQLite（查询代码路径与 CSV 同一段，已由现有 CSV 导出测试的 MySQL 一半覆盖，xlsx 只改会话关闭之后的编码），这一点写进 PR；夹具写在本文件里，只从现有测试模块导入普通函数与常量（写法同 tests/backend/test_customer_usage_summary_export_api.py 开头的导入），不转引用夹具；断言 SQL 时不写死方言相关的字面量；示例 uuid 全零；时间一律注入，不 sleep。现有四个 CSV 导出测试文件 tests/backend/test_customer_usage_export_api.py、tests/backend/test_customer_wallet_export_api.py、tests/backend/test_customer_usage_summary_export_api.py、tests/backend/test_customer_conversations_export_api.py 不改、照常通过'
+      - 'docs/api.md「客户导出」一节：删去「只做 CSV；.xlsx 不在这里」那一句；概览表与四个接口小节写明 format 参数（缺省 csv，只认 csv / xlsx，非法 422 query.format）与 xlsx 文件名；新增「xlsx 格式」小节：一个工作表、表头同 CSV；单元格类型（金额、quantity、比率写文本及理由，求和写法例如 =SUMPRODUCT(VALUE(range))；整数 ≤ 15 位为数字、超过为文本；时间与日期为文本）；公式前缀与 CSV 相同且单引号会显示；XML 不允许的控制字符换成 U+FFFD；与 CSV 共用导出名额、上限与错误码；媒体类型；其余内容不改'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/core/、app/repositories/、管理端接口与前端；不改 tests/backend/test_customer_api.py；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - app/api/customer.py
+      - app/schemas/customer_usage.py
+      - app/schemas/customer_wallet.py
+      - app/schemas/customer_conversations.py
+      - tests/backend/test_customer_xlsx_export_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-237：Excel 导出第四层（设计闸门 #753 v1），约 350 行（代码 40、测试 270、文档 40）。
+  # 需要 AIH-TASK-223 的管理端 CSV 导出已在生产（链上已在它之后）；它的实际实现与设计假设 5 不符时以 docs/api.md 与已合并的代码为准，冲突时停下。
+  - id: AIH-TASK-237
+    title: Excel 导出第四层：管理端毛利分析导出接口加 xlsx 格式参数
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「参数 format」管理端一行与「各接口的改法」：AIH-TASK-223 的 GET /api/v1/admin/usage-analytics/export 加查询参数 format（在 require_admin 与 parse_analytics_query 之后判），xlsx 时在同一个 try 里改用 write_xlsx 与 xlsx_response；app/schemas/usage_analytics.py 加 10 个整数列的常量；docs/api.md 的导出小节补 xlsx。不改客户接口与前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-236
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） 逐条一致，以 §1「可观察的完成标准」1–3、§2「参数 format」管理端一行、「各接口的改法」管理端一条、文件名表管理端一行、「单元格类型（逐列规则）」管理端的整数列、§3 INV-1、INV-7、§5、§6、§7 标 AIH-TASK-237 的各行、§10 假设 5、§11 AIH-TASK-237 为准；本设计建立在 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2）§2「接口二」与 AIH-TASK-223 已合并的代码之上，它的查询、31 列、上限与日志不变；AIH-TASK-223 的实现与设计假设 5 不符时以 docs/api.md 与已合并的代码为准、冲突时停下说明；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/admin_usage_analytics.py 的导出处理函数加参数 export_format: str | None = Query(default=None, alias="format")，在 require_admin（401 / 403）与 parse_analytics_query（422）之后、拿导出租约之前判：None 或 csv 走 CSV，xlsx 走 xlsx，其他值（含 XLSX、xls、空串）抛 InvalidUsageEventQuery("format")，即 422 VALIDATION_ERROR、消息含 query.format，不拿租约、不查询；不带或 format=csv 时输出逐字节不变'
+      - 'xlsx 分支在 AIH-TASK-223 的同一个 try 里、会话关闭之后：调用 write_xlsx(31 列常量, 同一组 GROUP 与 TOTAL 行单元格, 文本列常量（group_key、group_name）, USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS, sheet_title="usage-analytics") 与 xlsx_response，文件名为 CSV 的同一主干 usage-analytics_<group_by>_<from>MYT_<to>MYT 换扩展名 .xlsx；租约、20 000 行上限（TOTAL 行不计）、TOTAL 行恒在末尾、成功日志 admin_usage_analytics_exported 的 extra 仍恰好 user_id、group_by、row_count（不加格式）、失败日志 admin_usage_analytics_export_failed 与 CustomerExportFailed 都不变；路由装饰器的 response_class 不变，加 responses 让 OpenAPI 的 200 列出两种媒体类型；路由清单不变'
+      - 'app/schemas/usage_analytics.py 新增 USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS（Final，写法与同模块文本列常量相同），恰好 event_count、token_event_count、input_tokens、output_tokens、cache_creation_input_tokens、cache_read_input_tokens、prepaid_event_count、internal_event_count、paid_payment_count、gateway_fee_unknown_count 十列，且每一列都在 AIH-TASK-223 的 31 列常量里（有不在的列时停下说明，不自行改名）；其余列常量与单元格函数不改'
+      - '新建 tests/backend/test_admin_usage_analytics_xlsx_export_api.py 覆盖设计 §7 标 AIH-TASK-237 的各行：管理端 xlsx（group_by=customer 两个客户加手续费：不带 format 与 format=csv 的响应体逐字节相同；xlsx 200、媒体类型、文件名 .xlsx、工作表名 usage-analytics、31 列逐格等于同参数 CSV、10 个整数列读回 int、金额比率与平均值读回文本、GROUP 行在前 TOTAL 行恒在末尾）；校验与鉴权（format=xls 422 query.format；匿名与客户令牌带 format=xls 分别先得 401 / 403）；错误一致（monkeypatch EXPORT_MAX_ROWS 为 2 时 3 个分组 422 EXPORT_TOO_LARGE、预先占住租约 503 EXPORT_BUSY 且 Retry-After: 5、monkeypatch write_xlsx 抛错 500 INTERNAL_ERROR 且请求结束后 export_lease_held() 为假，两种格式相同；成功日志 extra 恰好三个键）'
+      - '后端测试照 CLAUDE.md「写后端测试的约定」：本任务只跑 SQLite（理由同 AIH-TASK-236，写进 PR）；夹具写在本文件里，只从现有测试模块导入普通函数与常量，不转引用夹具；写了支付行时在拆除前删支付行并 TRUNCATE tax_policy_versions（同 AIH-TASK-222、223 的写法）；断言 SQL 时不写死方言相关的字面量；示例 uuid 全零；时间一律注入，不 sleep。tests/backend/test_admin_usage_analytics_export_api.py（AIH-TASK-223）与 tests/backend/test_admin_customers_api.py 不改、照常通过'
+      - 'docs/api.md 管理端用量分析的导出小节（AIH-TASK-223 写的）补：format 参数（缺省 csv，只认 csv / xlsx，非法 422 query.format，判定在鉴权与其他参数校验之后）、xlsx 文件名与工作表名、单元格类型指向「客户导出」的「xlsx 格式」小节并列出这 10 个整数列；重申「含内部成本，不得转发给客户」；其余内容不改'
+      - '只改本任务 allowed_change_paths 里的文件；不改客户接口、app/core/、app/repositories/ 与前端；不写审计；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - app/api/admin_usage_analytics.py
+      - app/schemas/usage_analytics.py
+      - tests/backend/test_admin_usage_analytics_xlsx_export_api.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-238：Excel 导出第五层（设计闸门 #753 v1），只做前端与验收脚本，约 550 行（api 与页面 110、前端测试 260、验收脚本 170、文案 2）。
+  # 浏览器验收只查按钮在且可用、不点（不下载文件，设计 §10 第 3 条）；新步骤自己经门户导航进页。已有用例里按正则 /Export monthly summary/ 找按钮的两处会同时匹配新按钮，要改成精确名称。
+  - id: AIH-TASK-238
+    title: Excel 导出第五层：门户用量页的用量导出与月度汇总加导出 Excel 按钮
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」：frontend/src/api/download.ts 加 ExportFormat 与 withExportFormat，frontend/src/api/customerUsage.ts 的用量导出与月度汇总导出加可选 format，门户用量页工具栏与月度汇总区各加一个 Excel 按钮，文案进 i18n；验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-237
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」、§7「前端 api」「前端按钮」「浏览器验收」三行里 AIH-TASK-238 的部分、§10 第 3 条、§11 AIH-TASK-238 逐条一致；接口语义一律以 docs/api.md 的「客户导出」一节（AIH-TASK-236 已写 format 与 xlsx 格式）为准；与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts'
+      - 'frontend/src/api/download.ts：新增 export type ExportFormat = "csv" | "xlsx" 与 withExportFormat(url, format)：csv 原样返回（地址与今天逐字相同），xlsx 在查询串末尾加 format=xlsx；downloadFile 与已有常量不改。frontend/src/api/customerUsage.ts：CustomerUsageExportQuery 加可选 format?: ExportFormat（缺省 csv），customerUsageExportUrl 经 withExportFormat，customerUsageExportFilename 按格式换扩展名 .csv / .xlsx；月度汇总三个函数加可选参数：customerUsageSummaryExportUrl(month, format = "csv")、customerUsageSummaryExportFilename(month, format = "csv")、exportCustomerUsageSummary(month, signal?, format = "csv")；现有调用、CSV 地址与回退文件名逐字不变'
+      - 'frontend/src/features/portal/UsagePage.tsx：用量一块工具栏的 Export CSV 右边、月度汇总区（aria-label 为 Monthly summary）的 Export monthly summary 右边各加一个 Excel 按钮；每个区的两个按钮共用该区现有的那一个 useMutation（变量里带 format）：任一在下载中两个都不可点，加载状态只显示在被点的那个按钮上；可用条件（日期区间无效、按 event_id 点查、月份不合法时都不可用）、失败提示（错误码不分格式、失败文案不提格式）与清除规则都与 CSV 按钮相同；不请求任何 /api/v1/admin/ 路径'
+      - 'frontend/src/i18n/locales/en.json 新键 portal.usage.export.buttonXlsx（值 Export Excel）与 portal.usage.monthly.buttonXlsx（值 Export monthly summary (Excel)）；现有键与文案不改（验收脚本按它们找按钮）；满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：frontend/src/api/download.test.ts 补 withExportFormat（csv 原样、xlsx 末尾 format=xlsx）；frontend/src/api/customerUsage.test.ts 补两个导出地址与回退文件名带与不带 format；frontend/src/features/portal/UsagePage.test.tsx 补设计 §7「前端按钮」：两个区各两个按钮都在、点 Excel 用已应用条件与 format=xlsx 请求、下载中两个都不可点且加载状态在被点的按钮上、失败文案与 CSV 相同并按原规则清除、条件无效时两个都不可用。已有用例里按正则 /Export monthly summary/ 找按钮的两处（约第 228 行的断言与约第 1005 行的 MONTHLY_NAME）会同时匹配新按钮，只把它们改为精确匹配原按钮名 Export monthly summary，断言意义不变；其余已有用例不改、照常通过；示例 uuid 全零'
+      - 'check_portal_usage_xlsx：排在 login_customer 之后（本次运行跑过 login_customer 才能跑，否则 assertion_failed）；自己点门户导航里的 Usage（href 为 /portal/usage）进用量页，不依赖别的步骤停在哪个页面（同 check_portal_receipts 的写法）；页面落定（门户外壳在、用量一块不再显示加载中；显示加载失败为 page_error）后：用量一块里文字恰好为 Export Excel 的按钮恰好一个且可用，月度汇总区（aria-label 为 Monthly summary）里文字恰好为 Export monthly summary (Excel) 的按钮恰好一个且可用；找不到按钮为 element_missing，不止一个或一直不可用为 assertion_failed；两个按钮都不点、不下载文件、不改月份与任何筛选、不点别的按钮与链接、不填也不提交任何表单；只把月度汇总区滚动到视口内（Worker 截图看到的是它），用量一块不另滚动'
+      - '部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤（含按文字全等找按钮的 check_portal_usage_export 与 check_portal_monthly_export）行为不变、照跑仍应 PASS；文件头的步骤说明与只读约束清单同步补上新步骤的一条；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 5 的勾选在 AIH-TASK-241）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/download.ts
+      - frontend/src/api/download.test.ts
+      - frontend/src/api/customerUsage.ts
+      - frontend/src/api/customerUsage.test.ts
+      - frontend/src/features/portal/UsagePage.tsx
+      - frontend/src/features/portal/UsagePage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_usage_xlsx
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-239：Excel 导出第六层（设计闸门 #753 v1），只做前端与验收脚本，约 700 行（api 与页面 140、前端测试 330、验收脚本 230、文案 2）。
+  # 与 AIH-TASK-238 同改 en.json 与验收脚本，所以串行；用 238 的 ExportFormat 与 withExportFormat，不改 download.ts。可改路径 10 条。
+  - id: AIH-TASK-239
+    title: Excel 导出第六层：门户钱包页与会话页加导出 Excel 按钮
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」：frontend/src/api/customerWallet.ts 与 frontend/src/api/customerConversations.ts 的导出查询加可选 format，钱包页导出区与会话页工具栏各加一个 Excel 按钮，文案进 i18n；验收脚本加两个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-238
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」、§7「前端 api」「前端按钮」「浏览器验收」三行里 AIH-TASK-239 的部分、§10 第 3 条、§11 AIH-TASK-239 逐条一致；接口语义一律以 docs/api.md 的「客户导出」一节为准；与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts 与 frontend/src/api/download.ts（用 AIH-TASK-238 加的 ExportFormat 与 withExportFormat）'
+      - 'frontend/src/api/customerWallet.ts 的 CustomerTransactionExportQuery 与 frontend/src/api/customerConversations.ts 的 CustomerConversationExportQuery 加可选 format?: ExportFormat（缺省 csv）；customerTransactionExportUrl 与 customerConversationsExportUrl 经 withExportFormat；customerTransactionExportFilename 与 customerConversationsExportFilename 按格式换扩展名 .csv / .xlsx；现有调用、CSV 地址与回退文件名逐字不变'
+      - 'frontend/src/features/portal/WalletPage.tsx 导出区（aria-label 为 Export transactions）的 Export CSV 右边、frontend/src/features/portal/ConversationsPage.tsx 工具栏的 Export CSV 右边各加一个 Excel 按钮；规则同 AIH-TASK-238：两个按钮共用该区现有的那一个 useMutation（变量里带 format），任一在下载中两个都不可点，加载状态只显示在被点的那个按钮上；可用条件、失败提示（错误码不分格式、失败文案不提格式）与清除规则都与 CSV 按钮相同；不请求任何 /api/v1/admin/ 路径'
+      - 'frontend/src/i18n/locales/en.json 新键 portal.wallet.export.buttonXlsx 与 portal.conversations.export.buttonXlsx（值都是 Export Excel）；现有键与文案不改；满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：frontend/src/api/customerWallet.test.ts 与 frontend/src/api/customerConversations.test.ts 补导出地址与回退文件名带与不带 format；frontend/src/features/portal/WalletPage.test.tsx 与 frontend/src/features/portal/ConversationsPage.test.tsx 补设计 §7「前端按钮」：两个按钮都在、点 Excel 用已应用条件与 format=xlsx 请求、下载中两个都不可点且加载状态在被点的按钮上、失败文案与 CSV 相同并按原规则清除、条件无效时两个都不可用；已有用例不改、照常通过（它们按 /Export CSV/ 找按钮，不会匹配 Export Excel；若发现别的查询会同时匹配新按钮，只改为精确匹配原按钮名并在 PR 里列出）；示例 uuid 全零'
+      - 'check_portal_wallet_xlsx：排在 login_customer 之后（否则 assertion_failed）；自己点门户导航里的 Wallet（href 为 /portal/wallet）进钱包页；导出区（aria-label 为 Export transactions）里文字恰好为 Export Excel 的按钮恰好一个且可用（默认区间有效）；导出区不发请求，不等任何数据块，也不以钱包摘要或流水的加载状态判 page_error，找到导出区并把它滚动到视口内即断言按钮。check_portal_conv_xlsx：排在 login_customer 之后（否则 assertion_failed）；自己点门户导航里的 Conversations（href 为 /portal/conversations）进会话页；会话一块不再显示加载中后，文字恰好为 Export Excel 的按钮恰好一个且可用；会话一块显示 portal.conversations.queryTooBroad 为 assertion_failed、显示 portal.conversations.loadFailed 为 page_error（同现有 check_portal_conversations 的分类）。两步都不依赖别的步骤停在哪个页面（同 check_portal_receipts 的写法）；找不到按钮为 element_missing，不止一个或一直不可用为 assertion_failed；都不点按钮、不下载文件、不动日期与任何筛选、不点别的按钮与链接、不填也不提交任何表单'
+      - '部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这两个新步骤加进脚本（文件名不变），已有步骤（含 check_portal_wallet_export、check_portal_conv_export 与 AIH-TASK-238 的 check_portal_usage_xlsx）行为不变、照跑仍应 PASS；文件头的步骤说明与只读约束清单同步补上两步；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 5 的勾选在 AIH-TASK-241）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/customerWallet.ts
+      - frontend/src/api/customerWallet.test.ts
+      - frontend/src/api/customerConversations.ts
+      - frontend/src/api/customerConversations.test.ts
+      - frontend/src/features/portal/WalletPage.tsx
+      - frontend/src/features/portal/WalletPage.test.tsx
+      - frontend/src/features/portal/ConversationsPage.tsx
+      - frontend/src/features/portal/ConversationsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login_customer
+        - check_portal_wallet_xlsx
+        - check_portal_conv_xlsx
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-240：Excel 导出第七层（设计闸门 #753 v1），只做前端与验收脚本，约 350 行（api 与页面 60、前端测试 160、验收脚本 130、文案 1）。
+  # 需要 AIH-TASK-224 的页面与 Export CSV 按钮已在生产；login 与 login_customer 不同跑，验收步骤只用 login。
+  - id: AIH-TASK-240
+    title: Excel 导出第七层：管理端用量分析页加导出 Excel 按钮
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」：frontend/src/api/adminUsageAnalytics.ts 中 AIH-TASK-224 的导出地址与下载函数加可选 format，管理端用量分析页的 Export CSV 右边加一个 Excel 按钮，文案进 i18n；验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-239
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」、§7「前端 api」「前端按钮」「浏览器验收」三行里 AIH-TASK-240 的部分、§11 AIH-TASK-240 逐条一致；接口语义一律以 docs/api.md 管理端用量分析的导出小节（AIH-TASK-237 已补 format）为准；与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts 与 frontend/src/api/download.ts'
+      - 'frontend/src/api/adminUsageAnalytics.ts：AIH-TASK-224 的 usageAnalyticsExportUrl 与 exportUsageAnalytics 的查询加可选 format?: ExportFormat（缺省 csv，类型来自 download.ts），地址经 withExportFormat；CSV 地址与回退文件名 usage-analytics.csv 逐字不变，xlsx 回退 usage-analytics.xlsx；getUsageAnalytics 不变'
+      - 'frontend/src/features/usage/UsageAnalyticsPage.tsx：AIH-TASK-224 的 Export CSV 按钮右边加一个 Excel 按钮，用同一组已应用条件（不是表单里未提交的草稿），与 CSV 按钮共用一个下载状态：任一在下载中两个都不可点，加载状态只显示在被点的那个按钮上；失败显示（错误码、信息与 request_id）与清除规则不变（下一次点任一导出或已应用条件变化时清除）；导出不影响表格与合计块的查询；不请求任何 /api/v1/customer/ 路径'
+      - 'frontend/src/i18n/locales/en.json 新键与 AIH-TASK-224 的 Export CSV 按钮键同一前缀、末段为 buttonXlsx 一类的同级名（例如那个键是 usageAnalytics.export.button 时新键为 usageAnalytics.export.buttonXlsx），值 Export Excel；现有键与文案不改；满足 no-hardcoded-jsx-text 与 keys.test.ts'
+      - '测试（vitest + Testing Library）：frontend/src/api/adminUsageAnalytics.test.ts 补导出地址带与不带 format、回退文件名随格式；frontend/src/features/usage/UsageAnalyticsPage.test.tsx 补设计 §7「前端按钮」：两个按钮都在、改了表单不提交时点 Excel 仍用已应用条件与 format=xlsx 请求、下载中两个都不可点且加载状态在被点的按钮上、失败显示码与 request_id 并按原规则清除；AIH-TASK-224 的已有用例照常通过（若有按正则找导出按钮的查询会同时匹配新按钮，只改为精确匹配原按钮名，断言意义不变，并在 PR 里列出）；示例 uuid 全零'
+      - 'check_analytics_xlsx：须先跑过 open_usage_analytics（否则 assertion_failed），不自己导航；同一页上文字恰好为 Export Excel 的按钮恰好一个且可用，找不到为 element_missing，不止一个或一直不可用为 assertion_failed；不点它、不下载文件、不改筛选、不翻页、不点别的按钮与链接、不填也不提交任何表单'
+      - '部署后浏览器验收：acceptance.browser 固定跑 scripts/acceptance/admin_customers.mjs，本任务把这个新步骤加进脚本（文件名不变），已有步骤（含 AIH-TASK-224 的 check_analytics_totals 与按文字全等找 Export CSV 的 check_analytics_export）行为不变、照跑仍应 PASS；文件头的步骤说明与只读约束清单同步补上新步骤的一条；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 7 的勾选在 AIH-TASK-241）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminUsageAnalytics.ts
+      - frontend/src/api/adminUsageAnalytics.test.ts
+      - frontend/src/features/usage/UsageAnalyticsPage.tsx
+      - frontend/src/features/usage/UsageAnalyticsPage.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_usage_analytics
+        - check_analytics_xlsx
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-241：Excel 导出第八层（设计闸门 #753 v1），只改文档，约 60 行。
+  # Phase 7「CSV / Excel 导出」按设计 §10 第 4 条批准时的决定处理（缺省勾选）；docs/TODO.md 规划块里两条「Excel 待登记」由登记 PR 处理，本任务不碰。
+  - id: AIH-TASK-241
+    title: Excel 导出第八层：运维手册补 xlsx 导出排查，勾选 Phase 5 与 Phase 7 的导出项
+    purpose: >-
+      按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「tmpfs（AIH-TASK-234）」里「tmpfs 写满时怎么判断、怎么处置」一段、§5（含「各导出的失败日志」表）、§8「监控」、§10 第 4 条与已知限制、§11 AIH-TASK-241：docs/runbook.md 新增 xlsx 导出失败的处置一节，docs/TODO.md 勾选 Phase 5「客户端用量导出」并按决定处理 Phase 7「CSV / Excel 导出」。不改代码与测试。
+    status: ready
+    depends_on:
+      - AIH-TASK-240
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） 逐条一致，以 §1「明确不做什么」、§2「tmpfs（AIH-TASK-234）」（含「tmpfs 写满时怎么判断、怎么处置」一段）「金额为什么写文本」、§5 xlsx 生成出错、tmpfs 写满、进程被杀三行与「各导出的失败日志」表、§8「监控」、§10 第 4 条与已知限制、§11 AIH-TASK-241 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'docs/runbook.md 新增「xlsx 导出失败」一节，格式照同文件「本文件的写法」规定的五个小节。怎么发现：按设计 §5「各导出的失败日志」逐个列出——用量、钱包、会话三个导出是 ERROR 日志 customer_export_failed；管理端毛利分析导出是 admin_usage_analytics_export_failed；月度汇总导出（不占租约、不包 try）的任何失败，以及钱包导出在拿租约之前发现钱包缺失，都由通用 500 处理器记 ERROR 日志 Unhandled exception（app/core/errors.py 的 handle_unexpected_error），按 extra 里的 path 区分（月度汇总是 /api/v1/customer/usage-summary/export）；四种都带栈、只带路径；另有客户或管理员反馈导出 500。影响什么：一次生成失败只影响那一次 xlsx 导出，CSV、其他接口与 AI 模块不受影响，没有业务状态；tmpfs 写满时所有 xlsx 导出都失败、CSV 照常；写明下面的重启 api 会把影响扩大到整个 api 进程。立刻做什么：看日志的栈；栈里是 No space left on device 时照设计 §2「tmpfs 写满时怎么判断、怎么处置」三步——先 docker compose exec api df -h /tmp 与 docker compose exec api ls -la --time-style=full-iso /tmp 确认是否真的满、是什么文件（没满就不是这个原因）；再只删修改时间早于 10 分钟的 openpyxl. 开头的文件：docker compose exec api find /tmp -maxdepth 1 -name ''openpyxl.*'' -mmin +10 -delete，删后再 df；仍满才重启 api。恢复：重新导出；需要重启 api 时用 docker compose restart api，并写明影响面（以代码为准）：uvicorn 最长 85 秒优雅排空、容器宽限 100 秒，期间新请求失败，计费、门户、管理端与 AI 模块同进程一起中断；AI 模块内存里的暂存缓冲在停机时限时 5 秒做最后一次落库，落不完的条目只留日志，按本文件「AI 模块用量 outbox」一节从消息为 AI usage not persisted 的日志行用 ai-usage-held import 补录；时机选低峰，不紧急时先请客户改用 CSV；重启后再 df 复核。绝不能做什么：不删 /tmp 下不明来源或 10 分钟内的文件；不用 docker compose down 代替 restart；不为腾空间去改 tmpfs 的 size；不去掉 api 的 tmpfs 或把临时目录改到宿主机磁盘；不过 AIH-TASK-235 的用例就不升级 openpyxl（依赖上界小于 3.2 的理由）。不写「失败只影响那一次导出」这种不区分 tmpfs 写满与重启的概括。同一节另写客户问「金额求和为 0」时的答复：金额是文本单元格，求和写法见 docs/api.md「客户导出」的「xlsx 格式」小节'
+      - 'docs/TODO.md Phase 5「客户端用量导出」改为 [x]，同一行末尾照该章节已勾项的写法加括注：CSV（设计闸门 #435、#457、#460，AIH-TASK-113..124）与 Excel（设计闸门 #753，AIH-TASK-236、238、239）'
+      - 'docs/TODO.md Phase 7「CSV / Excel 导出」按设计 §10 第 4 条批准时的决定处理：缺省改为 [x]，同一行括注管理端毛利分析的 CSV（设计闸门 #709，AIH-TASK-223、224）与 Excel（设计闸门 #753，AIH-TASK-237、240），对账单只有 PDF 下载；并把 AIH-TASK-225 在该行末写的「Excel 与客户端 Excel 一起做」一类剩余说明改为已交付；批准的设计改为不勾时照设计写明原因。其余勾选不动；不改 planning-v1 块（其中两条「待登记」Excel 由登记 PR 处理）'
+      - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不改 scripts/acceptance/admin_customers.mjs；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #753'
+    allowed_change_paths:
+      - docs/runbook.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
