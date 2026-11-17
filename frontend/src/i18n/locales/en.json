@@ -1600,6 +1600,8 @@
   "statements.byModel.title": "By model",
   "statements.byProject.title": "By project",
   "statements.taxNotice.title": "Tax notice",
+  "statements.download.button": "Download PDF",
+  "statements.download.failed": "Download failed ({{code}})",
   "nav.payments": "Payments",
   "payments.title": "Payments",
   "payments.intro": "Online top-up payments from every customer, newest first. Select a payment to see its details.",

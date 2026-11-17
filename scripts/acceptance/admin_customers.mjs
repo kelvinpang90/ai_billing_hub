@@ -44,6 +44,9 @@
  * 之后，复用 open_fixture 打开的夹具客户详情（设计闸门 #707 v4 §2「前端」）。
  * AIH-TASK-218 加了门户对账单详情 PDF 下载按钮的一个只读步骤（check_portal_statement_pdf），排在 login_customer 之后，经门户
  * 导航自己进对账单页，列表非空时点第一行打开详情、只查「Download PDF」不点（设计闸门 #708 v3 §2「门户页面」、§11）。
+ * AIH-TASK-219 加了管理端对账单详情 PDF 下载按钮的一个只读步骤（check_admin_statement_pdf），排在 login 之后，经顶栏自己进
+ * 对账单页，列表非空时点第一行打开详情，FINALIZED 时只查「Download PDF」在且可点、不点，别的状态查它不在（设计闸门
+ * #708 v3 §2「管理端页面」、§11）；open_statements 仍然不点行。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -180,6 +183,10 @@
  *   对账单页（open_statements）不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不动客户下拉与
  *   账期输入框、不点「Generate missing statements」（补生成会写数据；未按客户筛选时它本来也不出现）、「Try again」或任何
  *   别的按钮与链接，不填也不提交任何表单。
+ *   对账单详情的 PDF 下载按钮（check_admin_statement_pdf）只点顶栏「Monthly statements」（href 为 /statements）这一个
+ *   链接，以及列表不为空时列表的**第一行**（只为打开详情：页面因此只发详情的 GET /api/v1/admin/statements/<id>）：不点
+ *   详情卡片里的「Download PDF」（验收不下载文件）、不点别的行、不点「Generate missing statements」、不动客户下拉与账期
+ *   输入框、不点「Previous」「Next」（不翻页）、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单。
  *   支付页（open_payments）不点列表的任何一行（不跳到详情页）、不点「Previous」「Next」（不翻页）、不动状态与客户
  *   下拉和创建日期输入框、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单（列表页本身没有写操作入口）。
  *   支付列表页的收据列（check_admin_payment_receipts）只点顶栏「Payments」（href 为 /payments）这一个链接：不点列表的
@@ -330,6 +337,26 @@
  *                   （不是非空字符串是 assertion_failed）；items 为空时显示空状态（statements.list.empty 或
  *                   statements.list.emptyPage）、没有数据行，同样算通过。不点行、不点补生成、不翻页、不提交任何表单。报到前把
  *                   列表一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   check_admin_statement_pdf
+ *                   要排在 login 之后（本次运行没跑过 login 就 assertion_failed）。点顶栏「Monthly statements」（nav.statements，
+ *                   href 为 /statements）进对账单页，页面落定的判定与失败码同 open_statements。后端值取页面自己发出的
+ *                   GET /api/v1/admin/statements 的响应体（被动观察，不自己发请求、不拦截；取 login 之后最近一次成功读完的那一次
+ *                   —— 紧跟在 open_statements 之后时点顶栏不会重新请求，页面显示的仍是那一次），不是成功信封、没有 items 数组、
+ *                   items 非空而 items[0].statement_id 或 items[0].statement_number 不是字符串，都是 assertion_failed。items 为空时
+ *                   显示空状态（statements.list.empty 或 statements.list.emptyPage）、没有数据行、没有详情卡片，即通过。items 非空
+ *                   时：列表表格（表头有「Statement number」「Closing balance」）的数据行数与 items 的条数一致、第一行的 data-row-key
+ *                   等于 items[0].statement_id，此刻还没有详情卡片（role=region、aria-label 为「Statement details」，
+ *                   statements.detail.title）且第一行没有被选中（否则 assertion_failed）；点第一行，页面只发详情的
+ *                   GET /api/v1/admin/statements/<id>（STATEMENT_DETAIL_API 只匹配这一种路径，不含 …/download）。等详情卡片落定：
+ *                   不再显示 statements.detail.loading；显示 statements.detail.loadFailed 是 page_error，显示
+ *                   statements.detail.notFound 是 assertion_failed。后端值取点击之后页面发出的那次详情 GET 的响应体（被动观察），
+ *                   不是 200、不是成功信封、statement_id 或 statement_number 与 items[0] 不同、status 不是 FINALIZED / DRAFT / VOID
+ *                   都是 assertion_failed。卡片里「Statement number」一项（带边框的 Descriptions）等于 statement_number、「Status」
+ *                   一项是 status 的文案（Finalized / Draft / Void，statements.status.*）；status 为 FINALIZED 时卡片里恰好一个文字为
+ *                   「Download PDF」（statements.download.button）的按钮、可点（没有 disabled 属性、aria-disabled 不是 true；缺按钮是
+ *                   element_missing，多于一个或不可点是 assertion_failed），不是 FINALIZED 时卡片里没有这个按钮（有是
+ *                   assertion_failed）。**不点它**。不点别的行、不点补生成、不动筛选、不翻页，不提交任何表单。报到前把详情卡片
+ *                   （列表为空时是列表一块）滚动到视口里（规则同 open_statements）
  *   open_payments
  *                   要排在 login 之后。点顶栏「Payments」（en.json 的 nav.payments，href 为 paths.ts 的 payments，即 /payments）
  *                   进支付列表页；页面落定：地址是 /payments，列表一块（role=region、aria-label 为「Payment list」，
@@ -767,6 +794,18 @@ const TEXT = {
   statementsEmptyPage: "There are no statements on this page.", // statements.list.emptyPage
   statementsNumber: "Statement number", // statements.field.number —— 列表表格的列头
   statementsClosingBalance: "Closing balance", // statements.field.closingBalance
+  statementsStatus: "Status", // statements.field.status —— 详情卡片 Descriptions 的一项
+  // 对账单状态 → 「Status」一项的文案（statements.status.finalized / draft / void）。
+  statementsStatusText: {
+    FINALIZED: "Finalized",
+    DRAFT: "Draft",
+    VOID: "Void",
+  },
+  statementDetailTitle: "Statement details", // statements.detail.title —— 详情卡片的 aria-label
+  statementDetailLoading: "Loading the statement…", // statements.detail.loading
+  statementDetailLoadFailed: "The statement could not be loaded.", // statements.detail.loadFailed
+  statementDetailNotFound: "This statement was not found.", // statements.detail.notFound
+  statementDownload: "Download PDF", // statements.download.button —— 详情卡片的下载按钮，只查不点
   navPayments: "Payments", // nav.payments —— 顶栏的支付项
   paymentsListTitle: "Payment list", // payments.list.title —— 列表一块的 aria-label
   paymentsForbidden: "Only administrators can view payments.", // payments.forbidden
@@ -1081,6 +1120,12 @@ const RECONCILIATION_RUNS_API = /^\/api\/v1\/admin\/wallet-reconciliation\/runs$
 
 /** 对账单列表接口的路径（frontend/src/api/adminStatements.ts 的 STATEMENTS_URL）。 */
 const STATEMENTS_API = /^\/api\/v1\/admin\/statements$/;
+
+/**
+ * 对账单详情接口的路径（…/statements/{statement_id}，只有这一段 id；frontend/src/api/adminStatements.ts 的 getStatement）。
+ * 列表与 PDF 下载（…/statements/{statement_id}/download）都不匹配。check_admin_statement_pdf 点第一行时页面发的就是它。
+ */
+const STATEMENT_DETAIL_API = /^\/api\/v1\/admin\/statements\/[^/]+$/;
 
 /**
  * 支付列表接口的路径（frontend/src/api/adminPayments.ts 的 PAYMENTS_URL）。详情（…/payments/{payment_id}）不匹配：
@@ -1620,6 +1665,8 @@ const network = {
   reconciliationRuns: new Map(),
   /** 对账单列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   statements: new Map(),
+  /** 对账单详情接口（只记 GET）：requestId → { status, finished, failed, seq }。路径里的 id 不保存。 */
+  statementDetails: new Map(),
   /** 支付列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   payments: new Map(),
   /** 支付设置接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
@@ -1667,6 +1714,7 @@ function trackedRequest(requestId) {
     network.usageAnalytics.get(requestId) ??
     network.reconciliationRuns.get(requestId) ??
     network.statements.get(requestId) ??
+    network.statementDetails.get(requestId) ??
     network.payments.get(requestId) ??
     network.paymentSettings.get(requestId) ??
     network.walletTransactions.get(requestId) ??
@@ -1994,6 +2042,26 @@ function isStatementsList(url) {
   }
 }
 
+/**
+ * 是不是对账单详情接口（同源 https、路径恰好是 /api/v1/admin/statements/<id>、没有查询串）。不保存 URL，也不保存 id。
+ */
+function isStatementDetail(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === network.host &&
+      parsed.search === "" &&
+      STATEMENT_DETAIL_API.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** 是不是支付列表接口（同源 https、路径恰好是这个接口，查询串不看、不保存）。 */
 function isPaymentsList(url) {
   if (typeof url !== "string") {
@@ -2222,6 +2290,14 @@ function observeNetwork(sessionId) {
         }
         if (isStatementsList(params.request?.url) && params.request?.method === "GET") {
           network.statements.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
+        if (isStatementDetail(params.request?.url) && params.request?.method === "GET") {
+          network.statementDetails.set(params.requestId, {
             status: null,
             finished: false,
             failed: false,
@@ -2704,7 +2780,8 @@ function latestCustomerMeResponse(afterSeq) {
  * GET /api/v1/customer/topup-options（network.customerTopupOptions，同样每一次都算）；check_portal_payments 拿它取
  * GET /api/v1/customer/payments（network.customerPayments，同样每一次都算）；check_portal_receipts 也拿它取同一个接口。
  * check_portal_statement_pdf 拿它取对账单列表（network.customerStatements）与点第一行之后的详情
- * GET /api/v1/customer/statements/<id>（network.customerStatementDetails，同样每一次都算）。
+ * GET /api/v1/customer/statements/<id>（network.customerStatementDetails，同样每一次都算）。check_admin_statement_pdf 拿它取
+ * 点第一行之后的管理端详情 GET /api/v1/admin/statements/<id>（network.statementDetails，同样每一次都算）。
  */
 function latestCustomerWalletResponse(requests, afterSeq) {
   let best = null;
@@ -3701,6 +3778,130 @@ function statementsInView(lib, T) {
   const rect = region.getBoundingClientRect();
   const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
   return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 对账单页与详情卡片的状态（check_admin_statement_pdf 用）：列表一块（role=region、aria-label 为「Statements」）在加载、
+ * 无权限、加载失败（详情卡片之外的任何 role=alert）、空状态，表格（表头有「Statement number」「Closing balance」）带
+ * data-row-key 的数据行数、第一行的 data-row-key 与它是否被选中（aria-selected）；详情卡片（role=region、aria-label 为
+ * 「Statement details」）在不在、在加载、读失败、没找到，卡片里「Statement number」「Status」两项（带边框的
+ * Descriptions：label 在 <th>，值在紧跟的 <td>）的文字，以及卡片里文字为「Download PDF」的按钮有几个、恰好一个时它是否
+ * 可用（没有 disabled 属性、aria-disabled 不是 true）。只读 DOM，不点、不填。
+ */
+function probeAdminStatementPdf(lib, T) {
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const regionNamed = (label) =>
+    [...document.querySelectorAll('[role="region"]')].find((el) => el.getAttribute("aria-label") === label) ?? null;
+  const region = regionNamed(T.statementsListTitle);
+  const card = regionNamed(T.statementDetailTitle);
+  const forbidden = lib.leaf(T.statementsForbidden) !== null;
+  const out = {
+    ...lib.common(T),
+    region: region !== null,
+    busy: region !== null && (region.querySelector('[aria-busy="true"]') !== null || has(region, T.statementsLoading)),
+    forbidden,
+    failed:
+      !forbidden &&
+      [...document.querySelectorAll('[role="alert"]')].some(
+        (el) => lib.norm(el.textContent) !== "" && (card === null || !card.contains(el)),
+      ),
+    empty: region !== null && (has(region, T.statementsEmpty) || has(region, T.statementsEmptyPage)),
+    table: false,
+    rows: 0,
+    firstKey: null,
+    firstSelected: false,
+    detail: card !== null,
+    detailBusy: false,
+    detailFailed: false,
+    detailNotFound: false,
+    detailNumber: null,
+    detailStatus: null,
+    downloads: 0,
+    downloadEnabled: false,
+  };
+  if (region !== null) {
+    for (const table of region.querySelectorAll("table")) {
+      const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+      if (!heads.includes(T.statementsNumber) || !heads.includes(T.statementsClosingBalance)) {
+        continue;
+      }
+      out.table = true;
+      for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        if (tr.querySelectorAll(":scope > td").length !== heads.length) {
+          continue;
+        }
+        if (out.rows === 0) {
+          out.firstKey = tr.getAttribute("data-row-key");
+          out.firstSelected = tr.getAttribute("aria-selected") === "true";
+        }
+        out.rows += 1;
+      }
+      break;
+    }
+  }
+  if (card !== null) {
+    out.detailBusy = card.querySelector('[aria-busy="true"]') !== null || has(card, T.statementDetailLoading);
+    out.detailFailed = has(card, T.statementDetailLoadFailed);
+    out.detailNotFound = has(card, T.statementDetailNotFound);
+    for (const th of card.querySelectorAll("th")) {
+      const td = th.nextElementSibling;
+      if (!td || td.tagName !== "TD") {
+        continue;
+      }
+      const label = lib.norm(th.textContent);
+      if (label === T.statementsNumber && out.detailNumber === null) {
+        out.detailNumber = lib.norm(td.textContent);
+      } else if (label === T.statementsStatus && out.detailStatus === null) {
+        out.detailStatus = lib.norm(td.textContent);
+      }
+    }
+    const buttons = [...card.querySelectorAll("button")].filter((el) => lib.norm(el.textContent) === T.statementDownload);
+    out.downloads = buttons.length;
+    if (buttons.length === 1) {
+      const button = buttons[0];
+      out.downloadEnabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+    }
+  }
+  return out;
+}
+
+/**
+ * 点对账单列表的**第一个**数据行（只为打开详情），且只在它的 data-row-key 恰好是 T.statementRowKey 时点。
+ * 不点别的行、不点行里或页面上的任何按钮与链接。点了回 true，没点回 false。
+ */
+function clickFirstAdminStatementRow(lib, T) {
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.statementsListTitle,
+    ) ?? null;
+  if (region === null) {
+    return false;
+  }
+  for (const table of region.querySelectorAll("table")) {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    if (!heads.includes(T.statementsNumber) || !heads.includes(T.statementsClosingBalance)) {
+      continue;
+    }
+    for (const tr of table.querySelectorAll(":scope > tbody > tr[data-row-key]")) {
+      if (tr.getAttribute("aria-hidden") === "true") {
+        continue;
+      }
+      if (tr.querySelectorAll(":scope > td").length !== heads.length) {
+        continue;
+      }
+      if (tr.getAttribute("data-row-key") !== T.statementRowKey) {
+        return false;
+      }
+      tr.click();
+      return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 /**
@@ -6701,6 +6902,189 @@ async function stepOpenStatements(ctx) {
   }
 }
 
+/** 把对账单详情卡片滚进视口：滚动函数按 T.statementsListTitle 找那一块，这里只换成详情卡片的 aria-label。 */
+const STATEMENT_DETAIL_SCROLL_TEXT = { ...TEXT, statementsListTitle: TEXT.statementDetailTitle };
+
+async function stepCheckAdminStatementPdf(ctx) {
+  if (ctx.loginCompletedAt === null || ctx.loginSeq === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.statementsPath;
+  // 经顶栏打开对账单页：只点「Monthly statements」这一个链接；不动筛选、不点补生成、不翻页。
+  const link = { text: TEXT.navStatements, href: path };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同 open_statements。还没有任何对账单时（首个账期生成之前）空列表合法。
+  const opened = await waitFor(() => evaluate(probeAdminStatementPdf, TEXT), catalogSettled(path), ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(opened.value, path, true);
+
+  // 后端值：页面自己发出的对账单列表 GET 的响应体（被动观察，不自己发请求）。从 login 之后算起、取最近一次成功读完的
+  // 那一次：这一步若紧跟在 open_statements 之后，页面已停在对账单页，点顶栏不换查询键、不重新请求，页面显示的仍是那一次。
+  const observed = await waitFor(
+    async () => latestStatementsResponse(ctx.loginSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const envelope = await readEnvelope(observed.value.requestId);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    if (items.length === 0) {
+      expected = { rows: 0, id: null, number: null };
+    } else {
+      const id = items[0]?.statement_id;
+      const number = items[0]?.statement_number;
+      if (typeof id !== "string" || typeof number !== "string") {
+        throw fail("assertion_failed");
+      }
+      expected = { rows: items.length, id, number };
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、第一项没有 statement_id 或 statement_number：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 页面显示的就是这份响应：数据行数一致、第一行就是 items[0]；items 为空时是空状态、没有数据行。
+  const listed = await waitFor(
+    () => evaluate(probeAdminStatementPdf, TEXT),
+    (s) =>
+      s.path === path &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      (expected.rows === 0
+        ? s.empty && s.rows === 0
+        : s.table && s.rows === expected.rows && s.firstKey === expected.id),
+    ELEMENT_WAIT_MS,
+  );
+  if (!listed.ok) {
+    throw fail(listed.value !== null && (listed.value.table || listed.value.empty) ? "assertion_failed" : "element_missing");
+  }
+
+  if (expected.rows === 0) {
+    // 没有对账单（生产首个账期生成之前就是这样，设计闸门 #708 v3 §10 假设 6）：没有可打开的详情，空状态即通过。
+    if (listed.value.detail) {
+      throw fail("assertion_failed");
+    }
+    if ((await evaluate(scrollStatementsIntoView, TEXT)) !== true) {
+      throw fail("element_missing");
+    }
+    const visible = await waitFor(() => evaluate(statementsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+    if (!visible.ok) {
+      throw fail("assertion_failed");
+    }
+    return;
+  }
+
+  // 点之前还没有打开任何详情：否则点第一行可能是把已打开的详情收起。
+  if (listed.value.detail || listed.value.firstSelected) {
+    throw fail("assertion_failed");
+  }
+
+  // 只点第一行（打开详情，页面只发详情的 GET）；只点一次，不重试，免得第二下把详情收起。
+  const afterSeq = network.seq;
+  if ((await evaluate(clickFirstAdminStatementRow, { ...TEXT, statementRowKey: expected.id })) !== true) {
+    throw fail("element_missing");
+  }
+
+  // 详情卡片落定：不在加载，且是某一种终态（读失败、没找到、或画出了对账单号）。
+  const settled = await waitFor(
+    () => evaluate(probeAdminStatementPdf, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.path !== path ||
+      (s.detail && !s.detailBusy && (s.detailFailed || s.detailNotFound || s.detailNumber !== null)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    throw fail("element_missing");
+  }
+  const card = settled.value;
+  if (card.appError || card.detailFailed) {
+    throw fail("page_error");
+  }
+  if (card.notFound || card.path !== path) {
+    throw fail("navigation_failed");
+  }
+  if (card.detailNotFound) {
+    throw fail("assertion_failed");
+  }
+
+  // 后端值：点第一行之后页面自己发出的详情 GET 的响应体（被动观察，不自己发请求）：就是列表第一项那一份。
+  const detailSeen = await waitFor(
+    async () => latestCustomerWalletResponse(network.statementDetails, afterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!detailSeen.ok) {
+    throw fail("assertion_failed");
+  }
+  let status;
+  try {
+    const envelope = await readEnvelope(detailSeen.value.requestId);
+    if (detailSeen.value.status !== 200 || envelope?.success !== true) {
+      throw fail("assertion_failed");
+    }
+    if (envelope.data?.statement_id !== expected.id || envelope.data?.statement_number !== expected.number) {
+      throw fail("assertion_failed");
+    }
+    status = envelope.data?.status;
+    if (!Object.hasOwn(TEXT.statementsStatusText, status)) {
+      throw fail("assertion_failed");
+    }
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、不是列表第一项那一份、状态认不出：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 卡片显示的就是这一份；FINALIZED 时标题栏里恰好一个可点的「Download PDF」，别的状态一个都没有。只查，不点。
+  const finalized = status === "FINALIZED";
+  const shown = await waitFor(
+    () => evaluate(probeAdminStatementPdf, TEXT),
+    (s) =>
+      s.path === path &&
+      s.detail &&
+      !s.detailBusy &&
+      !s.detailFailed &&
+      !s.detailNotFound &&
+      s.detailNumber === expected.number &&
+      s.detailStatus === TEXT.statementsStatusText[status] &&
+      (finalized ? s.downloads === 1 && s.downloadEnabled : s.downloads === 0),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    const last = shown.value;
+    throw fail(
+      last === null || !last.detail || (finalized && last.downloads === 0) ? "element_missing" : "assertion_failed",
+    );
+  }
+
+  // Worker 在报到后截图：先把详情卡片滚进视口（卡片比视口高时顶端对齐，标题栏里的按钮因此可见）。只滚动，不点任何按钮。
+  if ((await evaluate(scrollStatementsIntoView, STATEMENT_DETAIL_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(statementsInView, STATEMENT_DETAIL_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepOpenPayments(ctx) {
   if (ctx.loginCompletedAt === null) {
     throw fail("assertion_failed");
@@ -9408,6 +9792,7 @@ const STEPS = {
   check_usage_analytics: stepCheckUsageAnalytics,
   open_wallet_reconciliation: stepOpenWalletReconciliation,
   open_statements: stepOpenStatements,
+  check_admin_statement_pdf: stepCheckAdminStatementPdf,
   open_payments: stepOpenPayments,
   check_admin_payment_receipts: stepCheckAdminPaymentReceipts,
   open_payment_settings: stepOpenPaymentSettings,
@@ -9476,7 +9861,10 @@ async function main() {
     customerId: null,
     /** login 步骤完成的时刻（毫秒）；本次运行没跑过 login 时为 null。 */
     loginCompletedAt: null,
-    /** login 步骤完成时的网络序号（check_admin_payment_receipts 按它截断）；本次运行没跑过 login 时为 null。 */
+    /**
+     * login 步骤完成时的网络序号（check_admin_payment_receipts 与 check_admin_statement_pdf 按它截断列表请求；后者的详情
+     * 请求另按点第一行之前的序号截断）；本次运行没跑过 login 时为 null。
+     */
     loginSeq: null,
     /** open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null。 */
     usageAnalyticsAfterSeq: null,
