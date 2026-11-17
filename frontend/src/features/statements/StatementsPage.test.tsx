@@ -4,12 +4,16 @@
  * 与钱包核对页的测试同一写法：不 mock `api/adminStatements`，而是在 `client.get` / `client.post` 上按路径回应，钉住
  * **页面真正发出去的地址**（列表的分页与筛选查询串、点一行后问的是哪一份、补生成发给了哪个客户），并断言没有问
  * `/api/v1/customer/` 路径。
+ *
+ * PDF 下载（AIH-TASK-219，设计闸门 #708 v3 §2「管理端页面」）：只有 `FINALIZED` 的详情有「Download PDF」，下载 GET
+ * `…/{statement_id}/download`、没有文件名头时存成 `<statement_number>.pdf`；下载中不可再点；失败显示错误码、信息与
+ * request_id，再点一次或换一份时清除。jsdom 没有 `URL.createObjectURL` / `revokeObjectURL`，按属性装上替身、用完还原。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
 import type { CustomerSummary, Page } from "../../api/adminCustomers";
@@ -132,17 +136,43 @@ function envelope(data: unknown) {
 
 type Reply = (query: URLSearchParams) => unknown;
 
+/** 下载成功：一个 PDF blob，**不带** `Content-Disposition`，页面应当用 `<statement_number>.pdf`。 */
+const PDF_FILE = Symbol("pdf");
+
+const DOWNLOAD_PATH = /^\/api\/v1\/admin\/statements\/([^/]+)\/download$/;
+
+/** 下载接口的回应：不是信封，是 blob（失败时 `downloadFile` 自己把错误统一成 `ApiError`）。 */
+function replyFile(value: unknown) {
+  if (value === PENDING) {
+    return new Promise(() => undefined);
+  }
+  if (value instanceof Error) {
+    return Promise.reject(value);
+  }
+  return Promise.resolve({
+    data: new Blob(["%PDF-1.3"], { type: "application/pdf" }),
+    status: 200,
+    statusText: "",
+    headers: {},
+  });
+}
+
 /**
  * 按路径回应 `client.get`：客户列表交给 `customers`，对账单列表交给 `list`，某一份的详情交给 `detailOf`（参数是路径
- * 里的 id）。别的路径一律当成失败 —— 页面不该问它们，下面也会断言没有问。
+ * 里的 id），PDF 下载交给 `file`（参数同样是 id）。别的路径一律当成失败 —— 页面不该问它们，下面也会断言没有问。
  */
 function serve(
   list: Reply,
   detailOf: (statementId: string) => unknown = () => detail(),
   customers: Reply = () => page([customer()], 1),
+  file: (statementId: string) => unknown = () => PDF_FILE,
 ) {
   return vi.spyOn(client, "get").mockImplementation((url: string) => {
     const parsed = new URL(url, "https://admin.example");
+    const download = DOWNLOAD_PATH.exec(parsed.pathname);
+    if (download !== null && parsed.search === "") {
+      return replyFile(file(download[1] ?? ""));
+    }
     let reply: unknown;
     if (parsed.pathname === CUSTOMERS_URL) {
       reply = customers(parsed.searchParams);
@@ -224,6 +254,27 @@ function urls(get: ReturnType<typeof serve>): string[] {
 
 function listUrls(get: ReturnType<typeof serve>): string[] {
   return urls(get).filter((url) => url.startsWith(`${STATEMENTS_URL}?`));
+}
+
+function detailUrls(get: ReturnType<typeof serve>): string[] {
+  return urls(get).filter((url) => url.startsWith(`${STATEMENTS_URL}/`) && !url.endsWith("/download"));
+}
+
+function downloadUrls(get: ReturnType<typeof serve>): string[] {
+  return urls(get).filter((url) => url.startsWith(`${STATEMENTS_URL}/`) && url.endsWith("/download"));
+}
+
+/** `scope` 里文字恰好为 `name` 的按钮；没有时为 null。 */
+function findButton(scope: ParentNode, name: string): HTMLButtonElement | null {
+  return Array.from(scope.querySelectorAll("button")).find((el) => el.textContent?.trim() === name) ?? null;
+}
+
+function buttonNamed(scope: ParentNode, name: string): HTMLButtonElement {
+  const button = findButton(scope, name);
+  if (button === null) {
+    throw new Error(`no ${name} button`);
+  }
+  return button;
 }
 
 /** antd 下拉在 mousedown 时打开；选项按 title 找、用 fireEvent 点（同定价规则页的用例）。 */
@@ -771,6 +822,252 @@ describe("StatementsPage generate missing statements", () => {
       await screen.findByText("Statements are only generated for prepaid customers that have a wallet."),
     ).toBeInTheDocument();
     expect(screen.getByText("req-409")).toBeInTheDocument();
+  });
+});
+
+describe("StatementsPage PDF download", () => {
+  const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+  const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+  /** 被点击的链接的 download 属性（即存成的文件名）。 */
+  let saved: string[];
+
+  function restore(name: "createObjectURL" | "revokeObjectURL", descriptor: PropertyDescriptor | undefined): void {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(URL, name);
+    } else {
+      Object.defineProperty(URL, name, descriptor);
+    }
+  }
+
+  beforeEach(() => {
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(() => `blob:https://admin.example/${ZERO_UUID}`),
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: vi.fn() });
+    saved = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+  });
+
+  afterEach(() => {
+    restore("createObjectURL", originalCreate);
+    restore("revokeObjectURL", originalRevoke);
+  });
+
+  /** 点第一行并等详情落定。 */
+  async function openFirst(): Promise<HTMLElement> {
+    renderPage();
+    const region = await openRow();
+    await within(region).findByText("Statement number");
+    return region;
+  }
+
+  it("shows Download PDF on a finalized statement and saves <statement_number>.pdf from the admin download path", async () => {
+    const get = serve(() => page([summary()], 1));
+
+    const region = await openFirst();
+
+    const button = buttonNamed(region, "Download PDF");
+    expect(button).toBeEnabled();
+    // 按钮在详情卡片里，不在列表那一块。
+    expect(findButton(listRegion(), "Download PDF")).toBeNull();
+    expect(downloadUrls(get)).toEqual([]);
+
+    fireEvent.click(button);
+
+    await waitFor(() => expect(saved).toEqual(["ST-202612-0A1B2C3D.pdf"]));
+    expect(downloadUrls(get)).toEqual([`${STATEMENTS_URL}/${ZERO_UUID}/download`]);
+    await waitFor(() => expect(buttonNamed(region, "Download PDF")).toBeEnabled());
+    expect(region.querySelector('[role="alert"]')).toBeNull();
+    // 下载不重读详情与列表。
+    expect(detailUrls(get)).toEqual([`${STATEMENTS_URL}/${ZERO_UUID}`]);
+    expect(listUrls(get)).toEqual([LIST_FIRST_PAGE]);
+    expect(urls(get).filter((url) => url.startsWith("/api/v1/customer/"))).toEqual([]);
+    expect(urls(get).every((url) => url.startsWith("/api/v1/admin/"))).toBe(true);
+  });
+
+  it("has no Download PDF on a void statement", async () => {
+    const get = serve(
+      () => page([summary({ status: "VOID" })], 1),
+      () => detail({ status: "VOID" }),
+    );
+
+    const region = await openFirst();
+
+    expect(valueOf(region, "Status")).toBe("Void");
+    expect(findButton(region, "Download PDF")).toBeNull();
+    expect(downloadUrls(get)).toEqual([]);
+  });
+
+  it("has no Download PDF on a draft statement", async () => {
+    serve(
+      () => page([summary({ status: "DRAFT" })], 1),
+      () => detail({ status: "DRAFT" }),
+    );
+
+    const region = await openFirst();
+
+    expect(valueOf(region, "Status")).toBe("Draft");
+    expect(findButton(region, "Download PDF")).toBeNull();
+  });
+
+  it("cannot be clicked again while the download is on its way", async () => {
+    const get = serve(
+      () => page([summary()], 1),
+      () => detail(),
+      () => page([customer()], 1),
+      () => PENDING,
+    );
+
+    const region = await openFirst();
+    fireEvent.click(buttonNamed(region, "Download PDF"));
+
+    await waitFor(() => expect(buttonNamed(region, "Download PDF")).toBeDisabled());
+    fireEvent.click(buttonNamed(region, "Download PDF"));
+
+    expect(downloadUrls(get)).toEqual([`${STATEMENTS_URL}/${ZERO_UUID}/download`]);
+    expect(saved).toEqual([]);
+  });
+
+  it("shows the error code, message and request_id above the details and clears them on the next click", async () => {
+    let attempts = 0;
+    const get = serve(
+      () => page([summary()], 1),
+      () => detail(),
+      () => page([customer()], 1),
+      () => {
+        attempts += 1;
+        return attempts === 1 ? new ApiError("INTERNAL_ERROR", "An internal error occurred.", "req-pdf-500") : PENDING;
+      },
+    );
+
+    const region = await openFirst();
+    fireEvent.click(buttonNamed(region, "Download PDF"));
+
+    expect(await within(region).findByText("Download failed (INTERNAL_ERROR)")).toBeInTheDocument();
+    const alert = region.querySelector('[role="alert"]');
+    const firstTable = region.querySelector("table");
+    if (alert === null || firstTable === null) {
+      throw new Error("no download error or no details");
+    }
+    expect(alert.textContent ?? "").toContain("An internal error occurred.");
+    expect(within(region).getByText("req-pdf-500")).toBeInTheDocument();
+    // 错误在详情正文上方。
+    expect(alert.compareDocumentPosition(firstTable) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // 详情照常显示，按钮可以再点。
+    expect(valueOf(region, "Statement number")).toBe("ST-202612-0A1B2C3D");
+    expect(buttonNamed(region, "Download PDF")).toBeEnabled();
+    expect(saved).toEqual([]);
+
+    fireEvent.click(buttonNamed(region, "Download PDF"));
+
+    await waitFor(() => expect(screen.queryByText("Download failed (INTERNAL_ERROR)")).not.toBeInTheDocument());
+    expect(screen.queryByText("req-pdf-500")).not.toBeInTheDocument();
+    expect(region.querySelector('[role="alert"]')).toBeNull();
+    expect(downloadUrls(get)).toEqual([
+      `${STATEMENTS_URL}/${ZERO_UUID}/download`,
+      `${STATEMENTS_URL}/${ZERO_UUID}/download`,
+    ]);
+  });
+
+  it("shows the backend's not-found code when the statement cannot be downloaded", async () => {
+    serve(
+      () => page([summary()], 1),
+      () => detail(),
+      () => page([customer()], 1),
+      () => new ApiError("STATEMENT_NOT_FOUND", "Statement not found.", "req-pdf-404"),
+    );
+
+    const region = await openFirst();
+    fireEvent.click(buttonNamed(region, "Download PDF"));
+
+    expect(await within(region).findByText("Download failed (STATEMENT_NOT_FOUND)")).toBeInTheDocument();
+    expect(within(region).getByText("req-pdf-404")).toBeInTheDocument();
+    // 详情本身读得到：不换成「不存在」的提示。
+    expect(within(region).queryByText("This statement was not found.")).not.toBeInTheDocument();
+  });
+
+  it("drops the download error when another statement is selected", async () => {
+    serve(
+      () =>
+        page(
+          [summary(), summary({ statement_id: SECOND_ID, statement_number: "ST-202611-ZZZZZZZZ", period: "2026-11" })],
+          2,
+        ),
+      (statementId) =>
+        statementId === SECOND_ID
+          ? detail({ statement_id: SECOND_ID, statement_number: "ST-202611-ZZZZZZZZ", period: "2026-11" })
+          : detail(),
+      () => page([customer()], 1),
+      () => new ApiError("INTERNAL_ERROR", "An internal error occurred.", "req-pdf-500"),
+    );
+
+    const region = await openFirst();
+    fireEvent.click(buttonNamed(region, "Download PDF"));
+    expect(await screen.findByText("Download failed (INTERNAL_ERROR)")).toBeInTheDocument();
+
+    fireEvent.click(rowOf(listRegion(), SECOND_ID));
+
+    await waitFor(() =>
+      expect(valueOf(screen.getByRole("region", { name: "Statement details" }), "Statement number")).toBe(
+        "ST-202611-ZZZZZZZZ",
+      ),
+    );
+    const second = screen.getByRole("region", { name: "Statement details" });
+    expect(screen.queryByText("Download failed (INTERNAL_ERROR)")).not.toBeInTheDocument();
+    expect(screen.queryByText("req-pdf-500")).not.toBeInTheDocument();
+    expect(second.querySelector('[role="alert"]')).toBeNull();
+    expect(buttonNamed(second, "Download PDF")).toBeEnabled();
+  });
+
+  it("has no Download PDF while the details are loading", async () => {
+    serve(
+      () => page([summary()], 1),
+      () => PENDING,
+    );
+
+    renderPage();
+    const region = await openRow();
+
+    expect(within(region).getByText("Loading the statement…")).toBeInTheDocument();
+    expect(findButton(region, "Download PDF")).toBeNull();
+  });
+
+  it("has no Download PDF when the details could not be loaded", async () => {
+    const get = serve(
+      () => page([summary()], 1),
+      () => new ApiError("INTERNAL_ERROR", "An unexpected error occurred.", "req-500"),
+    );
+
+    renderPage();
+    const region = await openRow();
+
+    expect(await within(region).findByText("The statement could not be loaded.")).toBeInTheDocument();
+    expect(findButton(region, "Download PDF")).toBeNull();
+    expect(downloadUrls(get)).toEqual([]);
+  });
+
+  it("leaves generating, the filters and the list as they were", async () => {
+    const post = vi.spyOn(client, "post").mockResolvedValue(envelope([]));
+    const get = serve(() => page([summary()], 1));
+
+    const region = await openFirst();
+    fireEvent.click(buttonNamed(region, "Download PDF"));
+    await waitFor(() => expect(saved).toEqual(["ST-202612-0A1B2C3D.pdf"]));
+
+    // 下载不触发补生成，也不改列表的查询。
+    expect(post).not.toHaveBeenCalled();
+    expect(listUrls(get)).toEqual([LIST_FIRST_PAGE]);
+    expect(screen.queryByRole("button", { name: "Generate missing statements" })).not.toBeInTheDocument();
+
+    await chooseCustomer();
+    await waitFor(() => expect(listUrls(get)).toContain(LIST_FOR_CUSTOMER));
+    // 改筛选照常清掉已选的详情。
+    await waitFor(() => expect(queryDetailRegion()).toBeNull());
+    expect(await screen.findByRole("button", { name: "Generate missing statements" })).toBeInTheDocument();
   });
 });
 
