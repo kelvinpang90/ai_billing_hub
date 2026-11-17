@@ -13956,3 +13956,637 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+  # 供应商成本对账 L 批（设计闸门 #755，docs/design/AIH-TASK-242-provider-cost-reconciliation.md；247..249 的分摊另见设计闸门 #756，docs/design/AIH-TASK-247-provider-cost-allocation.md）：Phase 8 供应商账单成本对账，AIH-TASK-242..251 十层串行。
+  # Kelvin 2026-11-16 定：对账期间按 UTC 自然月；录入 Console 成本页上本平台专用 workspace 当月不含税的消耗额；毛利分析按估算成本比例分摊（247..249）与对账页一起登记、不推迟；
+  # 首个对账月 2026-12，前提是 Kelvin 在 2026-12-01 00:00 UTC（马来西亚 08:00）之前换好专用密钥，晚于这个时刻就在写入任何对账记录之前用单独的小 PR 改常量。
+  # 242 是第一层：迁移 0041 只建一张只插入的表与两个触发器，预计约 1100 行；依赖 AIH-TASK-231（它带来迁移 0040，本迁移的 down_revision）。
+  - id: AIH-TASK-242
+    title: 供应商成本对账第一层：新建不可变的供应商成本对账表与迁移 0041
+    purpose: >-
+      按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「数据库（迁移 0041，AIH-TASK-242）」与 §8：新迁移 0041 建 provider_cost_reconciliations（只插入；STORED 生成列 root_slot、CHECK、唯一索引、复合自引用外键照设计），MySQL 上建两个拒绝 UPDATE 与 DELETE 的触发器；新模型 app/models/provider_cost_reconciliations.py；docs/database-schema.md 记这张表。不加写入方与接口：属于 AIH-TASK-243 起的任务。
+    status: ready
+    depends_on:
+      - AIH-TASK-241
+      - AIH-TASK-231
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） 逐条一致，以 §2「数据库（迁移 0041，AIH-TASK-242）」、§3 INV-6、INV-10、§4 跃迁表最后一行、§5 迁移中断一行、§6「公开仓库与保留」、§7 标 AIH-TASK-242 的各行、§8「数据迁移」「回滚或前滚」与 §11 AIH-TASK-242 为准；本设计建立在 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2）之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261117_0041_provider_cost_reconciliations.py，revision 为 0041_provider_cost_recon（24 个字符，在 revision 上方注释 alembic_version.version_num 是 VARCHAR(32)），down_revision 为 0040_reset_request_index（AIH-TASK-231 的迁移）；文件头照 alembic/versions/20261109_0039_payment_receipts.py 的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、每个失败窗口与重跑结局、回滚），写明只建一张新表与两个触发器、不改已有表、不回填'
+      - 'provider_cost_reconciliations 的列、类型、可空性逐个照设计 §2 的表；root_slot 为 STORED 生成列 CASE WHEN supersedes_id IS NULL THEN 1 END；CHECK 恰好 13 条、名字逐字照设计 §2：ck_provider_cost_reconciliations_fx、_reason（逐列写 IS NOT NULL、不用行构造器）、_scope（只许 AI_MODULE）、_coverage_method（只许 PERIOD_AGGREGATE）、_period、_source_total、_reconciled_cost、_estimated_source_cost、_estimated_cost_myr、_estimated_event_count、_unprocessed_event_count、_outbox_unsettled_count、_outbox_discarded_count（前缀均为 ck_provider_cost_reconciliations_）；除主键外恰好六个索引：唯一 ux_provider_cost_reconciliations_root (provider_id, scope, billing_month, root_slot)、uq_provider_cost_reconciliations_public_id、uq_provider_cost_reconciliations_supersedes (supersedes_id, provider_id, scope, billing_month)（它同时是复合自引用外键在子表上的索引，前导列与外键列同名同序；不另建只有 supersedes_id 的索引）、uq_provider_cost_reconciliations_chain_key (id, provider_id, scope, billing_month)，与显式索引 ix_provider_cost_reconciliations_fx_rate_version_id、ix_provider_cost_reconciliations_created_by；复合自引用外键 fk_provider_cost_reconciliations_supersedes (supersedes_id, provider_id, scope, billing_month) → (id, provider_id, scope, billing_month) 与普通外键 fk_provider_cost_reconciliations_provider_id（→ ai_providers.id）、fk_provider_cost_reconciliations_fx_rate_version_id（→ fx_rate_versions.id）、fk_provider_cost_reconciliations_created_by（→ users.id）都是 RESTRICT，每个外键在子表上都有前导列一致的上述索引，MySQL 不会自建隐藏索引；不建 metadata_json、不建状态列。新增 app/models/provider_cost_reconciliations.py 的 ProviderCostReconciliation 模型，与迁移同名同序声明全部索引，alembic/env.py 照现有写法登记'
+      - 'upgrade 照 0039：先逐项检查表的形状（列名、类型与宽度、可空性、生成列、CHECK、唯一索引、外键与普通索引，不比服务端默认值；任何一项不同 → 抛错且不发 DDL），MySQL 上逐个检查两个触发器的表、时机、事件与正文；预检 log_bin 与 log_bin_trust_function_creators（文案照 0039）紧接在第一条 DDL 之前，什么都不缺时不跑预检；缺什么建什么（表不在时一条 CREATE TABLE，再补缺的触发器）；离线 --sql 按什么都没做过输出全部 DDL。触发器 trg_provider_cost_reconciliations_before_update（BEFORE UPDATE）与 trg_provider_cost_reconciliations_before_delete（BEFORE DELETE）无条件 SIGNAL SQLSTATE ''45000''，消息为 provider_cost_reconciliations rows are immutable；SQLite 不建。downgrade：离线模式抛错；表里有任何一行就抛错、不发 DDL；为空时 MySQL 上先删存在的触发器再删表；表已不在时不发 DDL'
+      - '测试：新增 tests/backend/test_provider_cost_reconciliations_migration.py，覆盖设计 §7 标 AIH-TASK-242 的四行：表结构与触发器（模型与迁移的列、索引、外键、CHECK 逐项比对；MySQL 上读 information_schema.STATISTICS，除主键外的索引集合恰好是上面六个、没有为外键自建的隐藏索引；对一行 UPDATE 与 DELETE 都被 45000 拒绝）、根唯一与单链（同供应商同月两个根 → ux_provider_cost_reconciliations_root 失败；两行取代同一行 → uq_provider_cost_reconciliations_supersedes 失败；取代行的月份与被取代者不同 → fk_provider_cost_reconciliations_supersedes 失败，这一个用例只在真 MySQL 上跑（后端测试的 SQLite 引擎不开 PRAGMA foreign_keys，本任务也不为它开）；唯一约束的两个用例 SQLite 与 MySQL 都跑；不同月份可以各有一个根）、CHECK（MYR 行带汇率、非 MYR 行缺汇率或汇率为 0、根带理由、取代行缺理由、负金额与负计数，SQLite 与 MySQL 都被拒绝）、迁移中断与降级（只建了表缺触发器时重跑只补触发器；同名不同形状的表抛错且不发 DDL；表里有行时降级抛错）；迁移场景照 tests/backend/test_payment_receipts_migration.py 的写法只在真 MySQL 上跑，触发器只在 MySQL 上测；MySQL 上清理这张表只能关外键检查后 TRUNCATE（触发器拒绝 DELETE，写法同 tests/backend/payment_world.py 清理收据表）'
+      - '已有测试的连带修改：tests/backend/test_migrations.py 照 0039 的写法补本表与两个触发器的显式集合常量，按表名与按触发器名显式集合比对的用例只在集合里补它们；AIH-TASK-231 加的「0040 是 head」断言改为 0041 接在 0040_reset_request_index 之后且是 head，0040 的其余断言不变；tests/backend/test_payment_receipts_migration.py 只在 head 变为 0041 导致其辅助函数（_at_0039、_back_to_head 一类）失败时做最小修改，断言意义不变；其他迁移测试文件若因 head 变为 0041 而失败，停下并在 PR 里说明，不自行扩大范围。后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 conftest 注册（本任务的 allowed_change_paths 不含 conftest，夹具写在本任务的测试文件里），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；时间一律注入，不 sleep'
+      - 'docs/database-schema.md 新增 provider_cost_reconciliations 一节：列及含义、口径（UTC 自然月、范围 AI_MODULE 即经 AI 模块发出的调用、只插入、取代链与当前版本的判定：没有任何行的 supersedes_id 指向它）、与 spec §74.5 字段的对应（billing_period 落为 billing_month 加 period_start / period_end，metadata_json 不建及理由）、由谁写（AIH-TASK-244 的 confirm）、谁读（对账页、毛利分析、告警）、有行时降级被拒；在触发器清单里补这两个触发器'
+      - '只改本任务 allowed_change_paths 里的文件；不加写入方、不加服务与接口；不改任何已有表与既有迁移文件；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #755'
+    allowed_change_paths:
+      - alembic/versions/20261117_0041_provider_cost_reconciliations.py
+      - app/models/provider_cost_reconciliations.py
+      - alembic/env.py
+      - tests/backend/test_provider_cost_reconciliations_migration.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_payment_receipts_migration.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-243：供应商成本对账第二层（设计闸门 #755），只做仓储，约 650 行（代码 230、测试世界 70、测试 350）。
+  # AI 模块的 outbox 只按表名与三列引用（照 app/services/account_closure.py 已批准的先例），不 import app.ai_api、不扩大 AI 模块的反向依赖面（设计 §9 备选 K）。
+  - id: AIH-TASK-243
+    title: 供应商成本对账第二层：范围内估算聚合、诊断计数与对账记录的读写仓储
+    purpose: >-
+      按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「口径」「仓储」：新建 app/repositories/provider_cost_reconciliations.py（ai_module_origin、scope_estimate、scope_estimated_myr、unprocessed_count、outbox_counts、scope_providers、current_record、get_by_public_id、chain、has_successor、current_records_overlapping、insert_record）；设计 §7 的标准世界放进新辅助模块 tests/backend/provider_cost_world.py，夹具在 conftest 注册。不写服务与接口：属于 AIH-TASK-244 起的任务。
+    status: ready
+    depends_on:
+      - AIH-TASK-242
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） 逐条一致，以 §1「现有行为与证据」、§2「口径」「仓储」「时间语义」、§3 INV-1、INV-9、§7 的标准世界与标 AIH-TASK-243 的各行、§10 假设 2 与已知限制 1、§11 AIH-TASK-243 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/provider_cost_reconciliations.py：_AI_USAGE_OUTBOX = table("ai_usage_outbox", column("event_id"), column("status"), column("created_at"))，不 import app.ai_api、不引用 payload_json，注释照 app/services/account_closure.py 的先例写明 AI 模块边界；ai_module_origin() 返回 exists().where(_AI_USAGE_OUTBOX.c.event_id == UsageEvent.event_id)，直接等值比较、不加字符集转换；tests/backend/test_ai_module_boundary.py 不改、照常通过'
+      - 'scope_estimate(session, *, provider_id, period_start, period_end, source_currency) -> ScopeEstimate 是一条 SELECT：status = PROCESSED、provider_id 相等、occurred_at 左闭右开、ai_module_origin()，返回 event_count、estimated_source_cost（SUM(CASE WHEN provider_source_currency = :cur THEN provider_source_cost ELSE 0 END)）、estimated_cost_myr、currency_mismatch_count（SUM(CASE WHEN provider_source_currency <> :cur THEN 1 ELSE 0 END)），全部 COALESCE(…, 0)；scope_estimated_myr 同条件只求 estimated_provider_cost_myr 之和；unprocessed_count 为 status <> PROCESSED、occurred_at 在期间内、ai_module_origin()，不限供应商；outbox_counts 按 ai_usage_outbox.created_at 左闭右开返回 (状态 PENDING / SENDING / HELD / DEAD 的行数, 状态 DISCARDED 的行数)；scope_providers(session, *, period_start, period_end) -> list[tuple[int, str]] 是一条 SELECT DISTINCT usage_events.provider_id, ai_providers.code（连 ai_providers），条件 status = PROCESSED、occurred_at 左闭右开、ai_module_origin()，按 code 升序（AIH-TASK-250 的告警用）'
+      - 'current_record 返回链头（NOT EXISTS 后继）或 None；get_by_public_id；chain 按 id 升序返回同一供应商、范围、月份的全部行；has_successor(session, record_id) -> bool；current_records_overlapping(session, *, start, end) -> list[tuple[ProviderCostReconciliation, str]] 是一条连 ai_providers 的 SELECT，返回 (链头行, 供应商代码)，条件 period_start < end AND period_end > start 且没有后继，按 provider_id、period_start 升序（AIH-TASK-247 的查询预算依赖它带回代码）；insert_record 只 add + flush，唯一约束冲突的 IntegrityError 原样抛出。全部只用可移植 SQL（COUNT、SUM、CASE、EXISTS、比较）；只读函数不加锁、不提交；计数交出 int、金额交出 Decimal'
+      - '新增辅助模块 tests/backend/provider_cost_world.py（不以 test_ 开头）建设计 §7 的标准世界，逐条照 §7 的事件表：供应商 anthropic 与模型 claude-test（一个 USD 价格版本与所需定价规则，只被引用）；租户 T_int（INTERNAL_METERED_ONLY）的项目 P_crm，租户 T_pre（PREPAID）的项目 P_pre 与 P_chat；汇率 V45 [2026-11-01 00:00:00, 2026-12-31 12:00:00) 4.5 与 V44 [2026-12-31 12:00:00, 无上界) 4.4，每个事件快照的汇率版本就是按它的 occurred_at 取到的那一版；事件 E1–E6 的租户、项目、occurred_at、状态、来源成本、汇率版本、估算 MYR、计费模式照 §7；计费额一律 0（不建钱包与账本行，理由见 §7），T_int 的事件 reference_customer_price 为估算 MYR × 2、T_pre 的为 NULL；outbox 行 E1、E2、E3、E4、E6 各一行 DELIVERED（created_at 等于事件 occurred_at）、O_pending（PENDING，2026-12-20）、O_discarded（DISCARDED，2026-12-21）（这两行无对应事件，租户与项目用 T_int / P_crm），所有 outbox 行占位值照 §7 写死：event_id 为 26 字符常量 00000000000000000000000E01..E06（同时是 E1–E6 的 event_id）、O_pending 为 00000000000000000000000P01、O_discarded 为 00000000000000000000000D01，request_id 等于 event_id，feature 为 provider_cost_test，payload_json 为 {}，attempts 为 0，next_attempt_at 等于 created_at，其余可空列为 NULL，按表名插入、不经 app.ai_api；另提供 §7 三个变体世界 fx_switch、myr_three、unallocatable 的构建函数（fx_switch 从零按变体后的值直接写入：V45、V44 的区间与 E2 的汇率快照、估算一开始就是变体值，不对已发布汇率版本与已处理事件做 UPDATE，MySQL 触发器不允许；unallocatable 里的三条记录由构建函数用本任务的 insert_record 直接写入，不经 confirm，字段逐条照设计 §7：2026-12 USD 11.70 / V44 / R 51.48、2027-02 MYR 5.00、2027-03 MYR 0.00，都是根、scope AI_MODULE；public_id 依次为 00000000-0000-0000-0000-000000000101、…102、…103（全零规则的例外，同一世界须互不相同）；created_by 为标准世界的 ADMIN 用户（标准世界照 tests/backend/payment_world.py 的 _populate 建一个 role ADMIN、status ACTIVE、邮箱用该文件测试域名常量的用户）；估算与诊断快照取该月按标准世界算出的值（2026-12 为事件 2、10.50、46.80、未处理 1、未投递 1、已丢弃 1，另两条全为 0）；created_at 为 period_end 加 1 天；source_document_reference 为 test-statement-<YYYY-MM>）；SQLite 与 MySQL 两份，夹具在 tests/backend/conftest.py 注册、环境变量在夹具里读；MySQL 清场时照 tests/backend/payment_world.py:507-512 关外键检查后 TRUNCATE 本世界写过的、带 BEFORE DELETE 触发器的全部表：provider_cost_reconciliations、audit_logs、fx_rate_versions、provider_price_versions、provider_price_components、pricing_rules、pricing_rule_components（触发器拒绝 DELETE），再恢复外键检查；锁表 fx_rate_locks、pricing_rule_locks 的种子行是取锁前提、本世界不写，不清'
+      - '新增 tests/backend/test_provider_cost_reconciliations_repository.py 覆盖设计 §7 标 AIH-TASK-243 的五行：范围判定（scope_estimate(anthropic, 12 月, USD) 为事件 2、来源成本 10.50000000、MYR 46.80000000、币种不一 0；E5 集成方、E3 十一月、E4 一月不计；E2 马来西亚已是 1 月仍计入 12 月；SQLite 与 MySQL）、边界的 event_id（只在 MySQL：另加两条 12 月集成方事件，一条 event_id 含非 ASCII 字符，一条 64 字符且前 26 字符与 E1 的 ULID 相同，都不计入、scope_estimate 仍为 2 / 10.50000000、查询不报错）、诊断计数（unprocessed_count 1、outbox_counts 为 (1, 1)）、范围内供应商（scope_providers 取 12 月与 2027-01 都是 [(anthropic 的 id, anthropic)]，2027-02 为空列表）、链头（直接 insert_record：根 a 被 b 取代，current_record 为 b、chain 为 [a, b]、current_records_overlapping 只返回 [(b, anthropic)]）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量（MySQL 专属断言放进 if engine.dialect.name == "mysql": 分支），需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；测试金额都能精确表示，MySQL 分支逐位断言；时间一律注入，不 sleep'
+      - 'PR 正文写明 MySQL EXPLAIN 对 scope_estimate 的实际计划（不预设：usage_events 预期走 ix_usage_events_status_occurred；ai_usage_outbox 因两边 event_id 字符集不同可能不走 uq_ai_usage_outbox_event_id，照实写），作为设计 §10 已知限制 1 的证据'
+      - '只改本任务 allowed_change_paths 里的文件；不写服务、接口与前端；不改 app/ai_api/ 下任何文件与 tests/backend/test_ai_module_boundary.py；不写 usage_events、ai_usage_outbox；不加迁移、不加索引；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #755'
+    allowed_change_paths:
+      - app/repositories/provider_cost_reconciliations.py
+      - tests/backend/provider_cost_world.py
+      - tests/backend/conftest.py
+      - tests/backend/test_provider_cost_reconciliations_repository.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-244：供应商成本对账第三层（设计闸门 #755），业务规则，约 1150 行（服务 420、审计枚举 10、测试 560、并发测试 160）。
+  # 与设计 §11 的一处偏离：设计把前端审计动作清单 frontend/src/api/adminAudit.ts 放在 AIH-TASK-246，但 adminAudit.test.ts 按声明顺序逐项比对后端 AuditAction，
+  # 后端加成员的同一个 PR 不同步就会让 CI 的 frontend job 失败；照 AIH-TASK-188 的先例挪到本任务（只加一项）。
+  - id: AIH-TASK-244
+    title: 供应商成本对账第三层：预览、确认与更正的业务规则、月末汇率换算和审计
+    purpose: >-
+      按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「服务」「检查顺序」「审计」「事务边界」「金额与精度」与 §4：新建 app/services/provider_cost_reconciliation.py（常量、reconciliation_period、preview、confirm、months_overview、get_detail、allocate），AuditAction 加 PROVIDER_COST_RECONCILIATION_CREATE 并同步前端审计动作清单。不写接口：属于 AIH-TASK-245。
+    status: ready
+    depends_on:
+      - AIH-TASK-243
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） 逐条一致，以 §2「服务」「检查顺序」「审计」「事务边界」「时间语义」「金额与精度」、§3 INV-4、INV-5、INV-6、INV-10、INV-12、INV-13、§4、§5、§7 标 AIH-TASK-244 的各行、§10「已定」第 4 条、§11 AIH-TASK-244 为准；唯一的有意偏离：前端审计动作清单 frontend/src/api/adminAudit.ts 由本任务同步（设计放在 AIH-TASK-246），只改任务划分、契约不变；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '常量 FIRST_RECONCILIATION_MONTH: Final = "2026-12"（旁注 Kelvin 2026-11-16 的前提：专用密钥须在 2026-12-01 00:00 UTC 前换好，否则写入任何记录前用单独的小 PR 改它；写法同 app/services/statements.py 的 FIRST_STATEMENT_PERIOD）、SCOPE_AI_MODULE、COVERAGE_PERIOD_AGGREGATE、VARIANCE_THRESHOLD = Decimal("0.05")、MONTHS_SHOWN = 24；reconciliation_period(label) 只收 YYYY-MM（年 2000–2999、月 1–12，否则 ValueError），返回不带时区的 UTC 月首与下月首；preview、confirm、months_overview、get_detail、allocate 的签名与返回如设计 §2（preview 也收 source_document_reference 与 reason，入参与 confirm 只差 actor、context 与两个期望值）；返回类型是设计 §2 写死的四个 frozen dataclass ReconciliationView、MonthView、LiveEstimate、ReconciliationDetail，字段与类型逐字照抄，只放类型化的值（Decimal、int、bool、datetime、str 或 None），不在服务里格式化字符串；months_overview 的供应商代码查不到时先抛 ProviderNotFound；allocate 在 PRICING_CONTEXT 内算 covered × R ÷ E、不舍入，E = 0 时返回 None'
+      - '检查顺序（preview 与 confirm 共用，第一个不过的就返回）：preview 与 confirm 都先做第 1a 步：reason 去首尾空白后为空串或长于 255、或与 supersedes_id 不配对（带 supersedes_id 而 reason 为 None，或不带而 reason 不为 None）→ 422 RECONCILIATION_REASON_INVALID；然后月份解析失败、早于 FIRST_RECONCILIATION_MONTH 或 period_end > now → 422 RECONCILIATION_MONTH_INVALID；供应商代码不存在 → 复用 app/services/ai_catalog.py 的 ProviderNotFound（404 AI_PROVIDER_NOT_FOUND）；带 supersedes_id 时找不到 → 404 PROVIDER_COST_RECONCILIATION_NOT_FOUND、供应商范围或月份不同 → 422 RECONCILIATION_SUPERSEDES_MISMATCH、已有后继 → 409 RECONCILIATION_NOT_CURRENT，不带时该月已有根 → 409 RECONCILIATION_EXISTS；所有错误都不带 details（§107 信封与 AppError 只有 code 与 message，不改 app/core/errors.py 与 app/schemas/envelope.py）；非 MYR 先 lock_fx_rates_shared 再 resolve_fx_rate(币种, period_end − 1 微秒)，None → 422 FX_RATE_UNAVAILABLE；之后（preview 与 confirm 都做）按设计 §2 第 5a 步算 reconciled_cost_myr，≥ 10^12 → 422 RECONCILIATION_AMOUNT_OUT_OF_RANGE，不写任何行；聚合后 currency_mismatch_count > 0 → 422 SOURCE_CURRENCY_MISMATCH；仅 confirm：期望值与聚合不等 → 409 RECONCILIATION_ESTIMATE_CHANGED。preview 在一个事务里跑完后回滚、不写任何行；confirm 在同一事务里 INSERT 记录与 record_audit 后提交；插入时的 IntegrityError 回滚后先判是否唯一冲突（MySQL 为 orig.args[0] == 1062，SQLite 为错误文本以 UNIQUE constraint failed 开头），不是就原样抛出；是则按请求形状映射、不看约束名（SQLite 文本里没有索引名）：不带 supersedes_id 的插入只可能撞 ux_provider_cost_reconciliations_root → 409 RECONCILIATION_EXISTS，带 supersedes_id 的只可能撞 uq_provider_cost_reconciliations_supersedes → 409 RECONCILIATION_NOT_CURRENT；回滚后不再读库；不在服务层重试；confirm 在 record_audit 之后、提交之前调用模块级测试钩子 _after_audit_before_commit(session)（默认什么都不做，只供并发用例 monkeypatch 来阻塞，先例为 tests/backend/test_payment_create.py 的 _lock_hook 对服务模块属性的 monkeypatch）'
+      - '计算：录入 MYR 时 reconciled_cost_myr = source_total、两个汇率字段为空；否则 quantize_money(source_total × fx_rate_applied)，乘法在 PRICING_CONTEXT 内、只舍入一次；source_variance 与 myr_variance 是 Decimal 相减，两个差额率是 Decimal 除法、分母为 0 时 None；exceeds_threshold 为 abs(source_variance_rate) >= VARIANCE_THRESHOLD，或 estimated_source_cost = 0 且 source_total > 0，用精确 Decimal 比较；created_at 为整秒 UTC；全程 Decimal、不经 float。months_overview 从首月到最近一个 period_end ≤ now 的月份倒序、至多 24 个，首月未结束时为空列表；get_detail 找不到时 404 PROVIDER_COST_RECONCILIATION_NOT_FOUND，返回该行、整条链（id 升序，每行 is_current）与 live_estimate（用该行的供应商、期间与 source_currency 重算 scope_estimate 的四个值与 unprocessed_count，共五个键）；estimate_changed_since_confirmation 为真当且仅当实时 estimated_event_count、estimated_source_cost、estimated_cost_myr 任一与行上快照不等，或实时 currency_mismatch_count > 0；unprocessed_event_count 的变化不参与判定；详情只读、不加锁、不取汇率、不重算差额'
+      - '审计：app/models/auth.py 的 AuditAction 照 PROJECT_CREATE 的先例加 PROVIDER_COST_RECONCILIATION_CREATE（不改其他成员），frontend/src/api/adminAudit.ts 的 AUDIT_ACTIONS 在对应位置同步加这一项（adminAudit.test.ts 按声明顺序逐项比对两边）；entity_type 为 provider_cost_reconciliation、entity_id 为 public_id；before_state 为 null（根）或被取代行的 public_id、source_currency、source_total、reconciled_cost_myr（两个金额用 money_text 转成定点字符串，同 after_state）；after_state 的键恰好如设计 §2「审计」（汇率版本与被取代行用 public_id；source_total、reconciled_cost_myr、estimated_source_cost、estimated_cost_myr 用 money_text；fx_rate_applied 用 app/services/fx_rates.py 的 rate_text，MYR 时为 null；计数为整数）；reason 列写更正理由；不写 source_document_reference。服务不直接 import 钱包、账本、对账单与计费模块（只管本模块源码里的 import 语句，经 PRICING_CONTEXT、money_text 等共用工具间接带进来的不算），不写 usage_events；服务层不重复校验 source_total、source_currency、source_document_reference 的格式（由接口层 schema 保证），只做设计 §2 第 1a 步与第 5a 步；app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES 加 provider_cost_reconciliation（tests/backend/test_admin_audit_api.py 的分类用例要求每个写入的 entity_type 都已分类）'
+      - '新增 tests/backend/test_provider_cost_reconciliation_service.py 覆盖设计 §7 标 AIH-TASK-244 的服务与单元各行，数值照 §7 标准世界与变体世界：正常确认（12 月 USD 11.70 → reconciled 51.48000000 取 V44，source_variance 1.20000000 与比率 0.1142857142857142857142857143，myr_variance 4.68000000 与比率 0.1，超阈值，一行一条审计、审计字段恰好如 §2）、汇率时刻（fx_switch 世界取 V45，reconciled 52.65000000）、MYR 录入（标准世界录 MYR 51.48 → 422 SOURCE_CURRENCY_MISMATCH；myr_three 录 MYR 1.00 → reconciled 1.00000000、两个汇率字段为空）、检查顺序（§7 的五种组合，其中第四种是标准世界录 12 月 EUR 11.70，SQLite 与 MySQL 都跑、不改世界；依次报 422 RECONCILIATION_REASON_INVALID、422 RECONCILIATION_MONTH_INVALID、422 RECONCILIATION_MONTH_INVALID、422 FX_RATE_UNAVAILABLE、422 RECONCILIATION_SUPERSEDES_MISMATCH）、理由校验（preview 与 confirm 各三种情形都是 422 RECONCILIATION_REASON_INVALID）、预览不写库（同一组入参先预览再确认：除 reconciliation_id、created_at、created_by_email、is_current 四个字段外视图逐字段相等，含 source_document_reference 与 reason）、估算变化 409、已有根（409 RECONCILIATION_EXISTS，只断言状态码与 code）、更正（b 为当前、审计 before 为 a 的金额；再次取代 a 为 409 RECONCILIATION_NOT_CURRENT）、事务中途失败（审计写入时注入异常：记录与审计都不存在）、快照不变（只在 MySQL：确认前后全部事件的计费快照列、钱包余额、账本行数、对账单行逐列相同；标准世界没有钱包与账本，本用例先给预付租户建钱包并用现有手工调账服务记一笔贷方，让钱包余额与账本行数是非空的比较对象，对账单表比较行数（为 0 也要比较））、详情的估算变化（§7 三种情形：事件数 3 为真、另一币种事件 currency_mismatch_count 1 为真、只多一条 PRICING_ERROR 为假且 unprocessed_event_count 2）、分摊纯函数（allocate(27.00, 51.48, 46.80) 为精确的 29.70，E = 0 为 None）、金额精度（0.00000001 × 4.4 → 0.00000004）；本任务的用例一律在夹具里 monkeypatch app.services.provider_cost_reconciliation 模块上的 FIRST_RECONCILIATION_MONTH 为 2026-12（读这个常量的代码一律经模块属性读取，alerts.py 用 import 模块后取属性，不用 from ... import 把常量拷进自己的命名空间，否则改了不生效）（只有「早于首月」那个用例另设为它要的值），不依赖常量默认值，使只改常量的 PR 不会让 CI 失败'
+      - '新增 tests/backend/test_provider_cost_reconciliation_concurrency.py（只在真 MySQL 上跑）覆盖并发确认与并发更正：事务 1 跑真实的 confirm，被 monkeypatch 的 _after_audit_before_commit 挡在审计之后、提交之前（所以它提交后是一行一条审计），事务 2 同月确认，经 performance_schema.data_lock_waits（按 DATABASE() 与表名 provider_cost_reconciliations 过滤，写法照 tests/backend/test_session_revocation_concurrency.py 的 _WAITING_ON_TABLE，不查 INNODB_TRX）确认它在等锁后事务 1 提交；事务 2 得到 409 RECONCILIATION_EXISTS，表里一行、审计一条；两个更正同时取代经 confirm 写入的 a 时，一个成功、一个 409 RECONCILIATION_NOT_CURRENT，最终表里两行（a 与胜出的更正）、审计两条，败者不写行与审计。世界来自 tests/backend/provider_cost_world.py（需要时只追加构件，不改已有构件的行为）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 tests/backend/conftest.py 注册，需要真 MySQL 的场景照现有写法在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；测试金额都能精确表示，MySQL 分支逐位断言；时间一律注入，不 sleep'
+      - '只改本任务 allowed_change_paths 里的文件；不写接口、schema 与页面；adminAudit.ts 只加这一项；不改钱包、账本、对账单、计费与支付代码；不改 app/ai_api/ 下任何文件；不加迁移；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #755'
+    allowed_change_paths:
+      - app/services/provider_cost_reconciliation.py
+      - app/models/auth.py
+      - app/services/audit_query.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/provider_cost_world.py
+      - tests/backend/test_provider_cost_reconciliation_service.py
+      - tests/backend/test_provider_cost_reconciliation_concurrency.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-245：供应商成本对账第四层（设计闸门 #755），接口，约 950 行（schema 160、接口 200、测试 470、守卫 40、文档 80）。
+  # 设计另列依赖 AIH-TASK-222：INV-7 守卫 tests/backend/test_internal_cost_visibility.py 由它新建，本任务往禁用名单与 import 扫描里追加。
+  - id: AIH-TASK-245
+    title: 供应商成本对账第四层：管理端对账的月份总览、预览、确认与详情接口
+    purpose: >-
+      按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「管理端接口」与 §6：新建 app/schemas/provider_cost_reconciliations.py 与 app/api/admin_provider_cost_reconciliations.py（GET months、POST preview、POST 确认、GET 详情），在 app/main.py 注册；管理端路由枚举与 INV-7 守卫补新路径、新键名与新模块；docs/api.md 新增「管理端供应商成本对账」一节。不做页面：属于 AIH-TASK-246。
+    status: ready
+    depends_on:
+      - AIH-TASK-244
+      - AIH-TASK-222
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） 逐条一致，以 §1「可观察的完成标准」1–3 与 6、§2「管理端接口」「口径」、§3 INV-7、INV-8、INV-10、§5、§6、§7 标 AIH-TASK-245 的各行、§11 AIH-TASK-245 为准；本设计建立在 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2）的 INV-7 守卫之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/admin_provider_cost_reconciliations.py 挂在 /api/v1/admin：GET /provider-cost-reconciliations/months?provider_code=（必填，^[a-z0-9_.-]{1,64}$，格式不符 422；格式对但 ai_providers 里没有 → 404 AI_PROVIDER_NOT_FOUND；200 data.items）、POST /provider-cost-reconciliations/preview（200）、POST /provider-cost-reconciliations（201）、GET /provider-cost-reconciliations/{reconciliation_id}（public_id，路径参数不做格式校验，查不到含不是 UUID 的值一律 404 PROVIDER_COST_RECONCILIATION_NOT_FOUND，200）；/months 与 /preview 先于 /{reconciliation_id} 注册（app/api/admin_fx_rates.py 文件头记的同一个坑）；每个处理函数第一条语句 require_admin(request)；路由器在 app/main.py 照 admin_fx_rates_router 的写法注册；错误信封照 spec §107，422 VALIDATION_ERROR 只列字段名、不回显值'
+      - 'app/schemas/provider_cost_reconciliations.py：请求体 extra="forbid"；source_total 只收 JSON 字符串 [0-9]{1,9}(\.[0-9]{1,8})?（整数只到 9 位，见设计 §2）、不经 float（照 app/schemas/fx_rates.py 的 _parse_rate 写法但允许 0），传数字 422；source_currency ^[A-Z]{3}$；provider_code（1–64 字符）与 billing_month（1–7 字符）只限长度、不加格式正则，格式与取值交给服务层判 RECONCILIATION_MONTH_INVALID / AI_PROVIDER_NOT_FOUND；source_document_reference 复用 app/schemas/provider_prices.py 的 SourceReference，reason 复用 Reason；supersedes_id 非空时 reason 必填、为空时 reason 必须为 null（模型校验，422）；预览请求体恰好七个字段（provider_code、billing_month、source_currency、source_total、source_document_reference 必填、supersedes_id、reason，配对规则同样校验），确认请求体在其上加必填的 expected_event_count 与 expected_estimated_source_cost 共九个（expected_estimated_source_cost 为 JSON 字符串，[0-9]{1,12}(\.[0-9]{1,8})?，同 app/schemas/provider_prices.py 的 _AMOUNT_PATTERN 与本批 source_total 的规则、允许 0、不经 float；expected_event_count 为 JSON 整数、>= 0、严格类型同 app/schemas/integration_access.py 的 Field(strict=True, ...)，布尔与字符串都拒绝；不合规 422 VALIDATION_ERROR），预览带 expected_* 为 422；supersedes_id 用 app/schemas/provider_prices.py 的 PublicId（1–64 字符、不校验 UUID 格式），查不到为 404 PROVIDER_COST_RECONCILIATION_NOT_FOUND'
+      - '响应：ReconciliationView 的键恰好如设计 §2 示例（reconciliation_id、provider_code、scope、billing_month、period_basis 恒为 utc_calendar_month、period_start、period_end、source_document_reference、source_currency、source_total、fx_rate_version_id、fx_rate_applied、fx_rate_moment、reconciled_cost_myr、estimated_event_count、estimated_source_cost、estimated_cost_myr、source_variance、source_variance_rate、myr_variance、myr_variance_rate、exceeds_threshold、variance_threshold、unprocessed_event_count、outbox_unsettled_count、outbox_discarded_count、coverage_method、supersedes_id、reason、is_current、created_at、created_by_email），预览时 reconciliation_id、created_at、created_by_email、is_current 为 null；非 MYR 时 fx_rate_moment 为 period_end − 1 微秒，序列化与 FxRateView 相同（不带时区、没有 Z，tests/backend/test_fx_rates_api.py:320 的写法，如 2026-12-31T23:59:59.999999），MYR 时 fx_rate_version_id、fx_rate_applied、fx_rate_moment 三个都为 null；月份总览项恰好 billing_month、period_start、period_end、status（RECONCILED 或 NOT_RECONCILED）、current；详情恰好 reconciliation、chain、live_estimate（estimated_event_count、estimated_source_cost、estimated_cost_myr、currency_mismatch_count、unprocessed_event_count）、estimate_changed_since_confirmation；错误信封照 spec §107，不带 details；字符串格式化全在本任务的 schema 里做（服务只给类型化的值）：金额用 money_text（8 位），fx_rate_applied 用 app/services/fx_rates.py 的 rate_text，差额率与 variance_threshold 用 app/schemas/usage_analytics.py 的 ratio_text；period_start、period_end、fx_rate_moment、created_at 的 schema 类型为 dt.datetime，序列化与 FxRateView 相同、不自己拼字符串；period_basis 与 variance_threshold 由 schema 从常量补进；全程 Decimal'
+      - '守卫：tests/backend/test_admin_customers_api.py 的 EXPECTED_ADMIN_ROUTES 加这四个 (方法, 路径)，401 / 403 探测给 /months 补 provider_code 查询串、给两个 POST 补合法请求体，其余用例与断言不变；tests/backend/test_internal_cost_visibility.py 的禁用名单追加设计 §6 列出的本任务键名（reconciled_cost_myr、source_total、source_variance、source_variance_rate、myr_variance、myr_variance_rate、estimated_source_cost、estimated_cost_myr），import 扫描追加 app.services.provider_cost_reconciliation、app.repositories.provider_cost_reconciliations、app.schemas.provider_cost_reconciliations、app.api.admin_provider_cost_reconciliations 四个模块，自检照常'
+      - '新增 tests/backend/test_admin_provider_cost_reconciliations_api.py 覆盖设计 §7 标 AIH-TASK-245 的各行：接口契约（标准世界与 myr_three：预览、确认、总览、详情的键与类型恰好如上，金额为 8 位字符串，MYR 记录三个汇率键为 null；source_total 传数字 422；预览带 expected_* 422；/months 与 /preview 不被当作 id）、总览（now 为 2027-02-15、12 月已对账：两项，2027-01 NOT_RECONCILED 在前、2026-12 RECONCILED 在后；now 为 2026-12-20 时为空列表；provider_code=openai 为 404 AI_PROVIDER_NOT_FOUND；provider_code=Bad! 为 422）、详情与 id（确认后插入一条 12 月 AI 模块事件：200 且 live_estimate 五个键齐全、事件数 3；不存在的 UUID、not-a-uuid、确认时 supersedes_id 为 not-a-uuid 都是 404 PROVIDER_COST_RECONCILIATION_NOT_FOUND，不是 422）、鉴权（匿名 401、客户令牌 403，探针一律带合法参数与请求体、不写库；不断言 401 / 403 与 422 的先后：照本仓库现状，FastAPI 在处理函数之前校验查询参数与请求体，非法输入可能先得 422，同 app/api/admin_fx_rates.py 文件头）；SQLite 与 MySQL 两半，夹具来自 tests/backend/provider_cost_world.py（需要时只追加构件，不改已有构件的行为）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 tests/backend/conftest.py 注册，需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；时间一律注入，不 sleep；本任务的用例一律在夹具里 monkeypatch app.services.provider_cost_reconciliation 模块上的 FIRST_RECONCILIATION_MONTH 为 2026-12（读这个常量的代码一律经模块属性读取，alerts.py 用 import 模块后取属性，不用 from ... import 把常量拷进自己的命名空间，否则改了不生效）（只有「早于首月」那个用例另设为它要的值），不依赖常量默认值，使只改常量的 PR 不会让 CI 失败'
+      - 'docs/api.md 新增「管理端供应商成本对账」一节：口径（UTC 自然月、范围只含经 AI 模块的调用、月末生效的已发布汇率、MYR 记录没有汇率三键、差额率阈值 5% 按来源币种、诊断计数的含义）、四个接口的参数请求体（预览七个字段、确认九个）与响应键、未知供应商与非 UUID id 的结果（含 live_estimate 五个键与 estimate_changed_since_confirmation 的判定）、错误码表（RECONCILIATION_REASON_INVALID、RECONCILIATION_MONTH_INVALID、AI_PROVIDER_NOT_FOUND、PROVIDER_COST_RECONCILIATION_NOT_FOUND、RECONCILIATION_SUPERSEDES_MISMATCH、RECONCILIATION_NOT_CURRENT、RECONCILIATION_EXISTS（前端收到后重新拉月份总览）、FX_RATE_UNAVAILABLE、RECONCILIATION_AMOUNT_OUT_OF_RANGE、SOURCE_CURRENCY_MISMATCH、RECONCILIATION_ESTIMATE_CHANGED）、只追加与更正链、不改任何已计费金额与钱包账本对账单；示例金额虚构，不写 Console 地址与工作区真实名称'
+      - '只改本任务 allowed_change_paths 里的文件；不改服务与仓储（只调用 AIH-TASK-243、244 的函数）；不改前端；不改 app/ai_api/ 下任何文件；不加迁移；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #755'
+    allowed_change_paths:
+      - app/schemas/provider_cost_reconciliations.py
+      - app/api/admin_provider_cost_reconciliations.py
+      - app/main.py
+      - tests/backend/test_admin_provider_cost_reconciliations_api.py
+      - tests/backend/test_admin_customers_api.py
+      - tests/backend/test_internal_cost_visibility.py
+      - tests/backend/provider_cost_world.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-246：供应商成本对账第五层（设计闸门 #755），只做前端与验收脚本，约 1150 行（api 与测试 230、页面 400、页面测试 320、导航与路由 30、文案 40、验收脚本 130）。
+  # 依赖 AIH-TASK-245 已在生产（前端与后端同一次部署）；审计动作清单 adminAudit.ts 已由 AIH-TASK-244 同步，本任务不改（与设计 §11 的偏离）；超阈值用文字标记、不用 Alert（验收脚本把 role=alert 当错误）。
+  - id: AIH-TASK-246
+    title: 供应商成本对账第五层：管理端供应商成本页的月份总览、录入预览确认与更正
+    purpose: >-
+      按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「管理端页面」：新建 frontend/src/api/adminProviderCosts.ts 与 frontend/src/features/providerCosts/ProviderCostsPage.tsx（月份表格、Reconcile / Correct 表单、预览后确认、更正链详情），新路由 /provider-costs 与 FX rates 旁的导航，文案进 i18n；验收脚本加两个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-245
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端供应商成本对账」一节为准，交互以 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「管理端页面」与 §7 标 AIH-TASK-246 的各行为准；与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts 与 frontend/src/api/adminAudit.ts（新审计动作已由 AIH-TASK-244 同步）'
+      - 'frontend/src/api/adminProviderCosts.ts：类型 ReconciliationView、MonthItem、ReconciliationDetail（金额、汇率与比率都是 string，可空的为 string | null）；getProviderCostMonths(providerCode, signal?) 请求 GET /api/v1/admin/provider-cost-reconciliations/months?provider_code=…；previewProviderCost(body) 请求 POST /api/v1/admin/provider-cost-reconciliations/preview（请求体不含 expected_*）；confirmProviderCost(body) 请求 POST /api/v1/admin/provider-cost-reconciliations（带预览返回的 expected_event_count 与 expected_estimated_source_cost）；getProviderCostDetail(id, signal?) 请求 GET /api/v1/admin/provider-cost-reconciliations/<id>，id 只原样放进路径；source_total 始终作为字符串发送、不转 number；失败抛保留 HTTP 状态与 error.code 的 ApiError（写法同现有封装）'
+      - 'frontend/src/features/providerCosts/ProviderCostsPage.tsx：frontend/src/routes/paths.ts 加 ROUTES.providerCosts = "/provider-costs"，frontend/src/routes/index.tsx 照 FX rates 页的写法只对 ADMIN 注册，frontend/src/layouts/AppLayout.tsx 在 FX rates 之后加导航项；供应商选择只有常量 anthropic 一个选项、不调目录接口；月份表格列为 Month (UTC)、Status、Actual (source)、Actual (MYR)、Estimated (MYR)、Variance rate (source)、Variance rate (MYR)；Month (UTC) 单元格文字恰为 billing_month；Status 单元格文字按 status 为 Reconciled（RECONCILED）或 Not reconciled（NOT_RECONCILED）；未对账行的 Actual (source)、Actual (MYR)、Estimated (MYR)、Variance rate (source)、Variance rate (MYR) 五列都显示 —（U+2014）（月份总览对未对账行 current 为 null、不给估算，也不为此加查询；估算在 Preview 里看）；items 为空时 Table 的 locale.emptyText 恰为 No completed months to reconcile yet.；这三处文案都进 en.json；表格关闭分页（pagination={false}）；exceeds_threshold 为真的行只在 Variance rate (source) 单元格的值旁显示文字标记 Above 5%（MYR 差额率格不加）；已对账行里为 null 的差额率显示 —；未对账行的 Reconcile 与已对账行的 Correct 打开同一个表单（币种为固定下拉、只有 USD 与 MYR，实际金额、来源说明，更正时多一个必填理由）；Reconcile 时表单为空、币种 USD；Correct 时用当前记录预填币种、原币金额 source_total 与来源说明 source_document_reference，理由为空且必填，supersedes_id 取当前记录的 reconciliation_id；确认成功（201）后关闭表单、重新拉月份总览，并用 antd message.success 显示成功提示（不用 Alert 或任何 role="alert" 的组件）；Preview 显示预览结果、诊断计数及其说明；Confirm 只在本次预览成功且表单在预览后没被改动时可点，提交带预览返回的两个期望值；409 RECONCILIATION_ESTIMATE_CHANGED 时提示重新预览；409 RECONCILIATION_EXISTS 或 RECONCILIATION_NOT_CURRENT 时关闭表单、重新拉月份总览并提示已有更新的版本；月份总览加载失败（含 404 AI_PROVIDER_NOT_FOUND）时在表格位置显示普通文字（Typography.Text type=danger，不用 antd Alert、不带 role=alert）：错误码、信息与 RequestReference，内容取法同 frontend/src/features/catalog/ProvidersPage.tsx 的 CatalogErrorAlert，不显示空状态文字；其他错误显示 error.code、信息与 request_id；点已对账行展开详情：更正链（时间、操作人、理由、各版本金额、当前 / 已被取代）与确认之后估算已变化的提示；说明文字写明期间按 UTC 自然月、范围只含经 AI 模块的调用、汇率取月末生效的已发布版本、对账不改任何已计费金额；不用 Alert、没有 role="alert"；金额与比率原样显示后端字符串'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts；不请求任何 /api/v1/customer/ 路径。测试（vitest + Testing Library）：新建 frontend/src/api/adminProviderCosts.test.ts 覆盖设计 §7「前端 api」（四个封装的路径、方法、请求体，金额为字符串，预览不带 expected_*）；新建 frontend/src/features/providerCosts/ProviderCostsPage.test.tsx 覆盖设计 §7「前端页面」（未对账行五列含 Estimated (MYR) 都为 —；Correct 预填当前记录的币种、金额与来源说明且理由为空；确认 201 后关闭表单、月份总览再请求一次、message.success 被调用且没有 role="alert"；总览渲染：已对账与未对账各一行的状态文字恰为 Reconciled 与 Not reconciled、空列表的空状态文字、超阈值标记、预览后才能确认、预览后改表单则确认不可点、409 估算变化提示、更正必填理由、详情链；没有 role="alert"；"0.10000001" 一类金额原样显示）；已有用例照常通过；示例 uuid 全零'
+      - 'scripts/acceptance/admin_customers.mjs 加两步（文件名不变，文件头步骤说明同步）：open_provider_costs 在 login 之后经导航打开供应商成本页（链接 href 为 /provider-costs）；check_provider_cost_months 须先跑过 open_provider_costs（否则 assertion_failed），不自己导航，后端值取页面自己发出的 GET /api/v1/admin/provider-cost-reconciliations/months 的响应体（被动观察，不自己发请求、不拦截），断言表格数据行数等于 items 数、每行 Month (UTC) 单元格文字等于 billing_month、Status 单元格文字按 status 恰为 Reconciled 或 Not reconciled，items 为空时空状态文字恰为 No completed months to reconcile yet. 也算通过；不点任何按钮、不打开表单。已有步骤行为不变、照跑仍应 PASS；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 8 的勾选在 AIH-TASK-251）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #755'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminProviderCosts.ts
+      - frontend/src/api/adminProviderCosts.test.ts
+      - frontend/src/features/providerCosts/ProviderCostsPage.tsx
+      - frontend/src/features/providerCosts/ProviderCostsPage.test.tsx
+      - frontend/src/routes/index.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/layouts/AppLayout.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_provider_costs
+        - check_provider_cost_months
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-247：对账后成本第一层（设计闸门 #756），用量分析仓储，约 600 行（代码 180、测试 420）。
+  # Kelvin 2026-11-16 定按估算成本比例分摊、与对账页一起登记；分摊只在查询时算、不落库。设计另列依赖 AIH-TASK-221（_conditions 与日 / 月分组表达式由它抽出）。
+  - id: AIH-TASK-247
+    title: 对账后成本第一层：用量分析仓储按对账记录汇总覆盖范围内的估算成本
+    purpose: >-
+      按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「规则」与「仓储」：app/repositories/usage_analytics.py 新增 reconciled_allocation_inputs，按与分组区间重叠的当前对账记录，给出每条记录的 R 与实时 E 以及按分组、按计费模式的覆盖估算之和。不改接口、schema 与前端：属于 AIH-TASK-248。
+    status: ready
+    depends_on:
+      - AIH-TASK-246
+      - AIH-TASK-221
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） 逐条一致，以 §2「规则」「推论」与「仓储」第 1–4 步、§2「金额与精度」、§3 INV-6、INV-10、§7「分摊输入」一行、§11 AIH-TASK-247 为准；本设计建立在 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2）的仓储之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/usage_analytics.py 新增 reconciled_allocation_inputs(session, *, group_by, customer_id, project_id, provider, model, feature, occurred_from, occurred_to) -> AllocationInputs，步骤照设计 §2：① _conditions 为 None 时返回空输入 AllocationInputs(records=(), group_covered={}, total_covered={})、不再发任何查询；② current_records_overlapping(occurred_from, occurred_to) 一次（它已连 ai_providers 带回供应商代码，CoveringRecord.provider_code 取自它，不另查供应商表）；③ 对每条记录 r：scope_estimated_myr（整个期间、不受报表筛选影响）一次得 E，再一条分组聚合：在 _conditions 之上加 occurred_at ∈ [max(from, s), min(to, e))、provider_id = r 的供应商、ai_module_origin()，SELECT 分组表达式、billing_mode_snapshot、SUM(estimated_provider_cost_myr)，GROUP BY 与 list_usage_analytics 同一个分组表达式与连接（含 day / month）再加 billing_mode_snapshot，不分页、不排序；④ 在 Python 里转换分组键、填 group_covered，并按 (记录, 模式) 累加出 total_covered；没有不分组的合计查询'
+      - '类型写死：@dataclass(frozen=True) CoveringRecord(public_id: str, provider_code: str, billing_month: str, period_start: datetime, period_end: datetime, reconciled_cost_myr: Decimal, scope_estimated_myr: Decimal)；@dataclass(frozen=True) AllocationInputs(records: tuple[CoveringRecord, ...] 按 provider_id、period_start 升序, group_covered: dict[tuple[str | None, str, str], Decimal] 键为 (group_key, 记录 public_id, 模式), total_covered: dict[tuple[str, str], Decimal] 键为 (记录 public_id, 模式))；模式是字符串 PREPAID 或 INTERNAL_METERED_ONLY（billing_mode_snapshot 原值）；group_key 与 list_usage_analytics 的 UsageAnalyticsRow.group_key 同值同类型（day 为 YYYY-MM-DD、month 为 YYYY-MM）；字典只含出现过的键、缺的按 0；total_covered 恰好等于 group_covered 同一 (记录, 模式) 各项之和。精确查询次数（before_cursor_execute 计数，只数本函数发出的语句）：L 为 _conditions 的查找次数（只带 customer_id 为 1、只带 project_id 为 1、两者都带且租户找到为 2、租户找不到为 1、都不带为 0），_conditions 为 None 时恰好 L 次，否则恰好 L + 1 + 2n 次（n 为重叠记录数）；只读、不加锁、不提交；金额交出 Decimal、不在这里分摊与舍入'
+      - '复用 app/repositories/provider_cost_reconciliations.py 的 ai_module_origin、current_records_overlapping、scope_estimated_myr，不复制 SQL；list_usage_analytics、usage_analytics_totals、paid_payment_totals 与 _conditions 的 SQL 与行为不变，现有用例不改断言照常通过'
+      - '新增 tests/backend/test_usage_analytics_reconciled.py 覆盖设计 §7「分摊输入」与「查询次数」两行：世界为标准世界加一条经 insert_record 写入的 12 月记录（USD 11.70、V44、R = 51.48、快照取 L1（docs/design/AIH-TASK-242-provider-cost-reconciliation.md）§7 的值）；区间 [2026-11-01, 2027-02-01)：records 恰好一条且 E = 46.80；group_by=customer 时 group_covered 恰好 {(T_int 的 public_id, r, INTERNAL_METERED_ONLY): 27.00, (T_pre 的 public_id, r, PREPAID): 19.80}；group_by=month 时恰好 {(2026-12, r, INTERNAL_METERED_ONLY): 27.00, (2027-01, r, PREPAID): 19.80}；group_by=provider 时恰好 {(anthropic, r, INTERNAL_METERED_ONLY): 27.00, (anthropic, r, PREPAID): 19.80}（E5 不在任何覆盖和里）；三种 total_covered 都是 {(r, INTERNAL_METERED_ONLY): 27.00, (r, PREPAID): 19.80}；查询次数（SQLite）：不带筛选 3、customer_id = T_int 为 4、customer_id 不存在为 1、customer_id = T_int 且 project_id 不存在为 2、customer_id 不存在且带 project_id 为 1，后三种返回空输入；SQLite 与 MySQL 两半，夹具来自 tests/backend/provider_cost_world.py（需要时只追加构件，不改已有构件的行为）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量（MySQL 专属断言放进 if engine.dialect.name == "mysql": 分支），跨文件共用的 fixture 在 tests/backend/conftest.py 注册，需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；测试金额都能精确表示，MySQL 分支逐位断言；时间一律注入，不 sleep'
+      - '只改本任务 allowed_change_paths 里的文件；不改接口、schema 与前端；不改 app/repositories/provider_cost_reconciliations.py；不把分摊额写进任何表；不加迁移、不加索引；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #756'
+    allowed_change_paths:
+      - app/repositories/usage_analytics.py
+      - tests/backend/test_usage_analytics_reconciled.py
+      - tests/backend/provider_cost_world.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-248：对账后成本第二层（设计闸门 #756），接口与导出，约 900 行（代码 260、测试 560、文档 80）。
+  # 设计另列依赖 AIH-TASK-223（导出的 31 列由它建，本任务在其后追加 10 列）与 AIH-TASK-244（allocate）；AIH-TASK-222 的全部旧键与值不变。
+  - id: AIH-TASK-248
+    title: 对账后成本第二层：用量分析接口与导出加按比例分摊的供应商成本和基于它的毛利
+    purpose: >-
+      按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「接口与导出」：GET /api/v1/admin/usage-analytics 的分组项与 totals 加分摊后的供应商成本、口径与基于它的毛利，合计加覆盖的对账月份；CSV 导出在 31 列后追加 10 列；INV-7 守卫追加新键名；docs/api.md 补口径。不做页面：属于 AIH-TASK-249。
+    status: ready
+    depends_on:
+      - AIH-TASK-247
+      - AIH-TASK-223
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） 逐条一致，以 §1「可观察的完成标准」1–4、§2「规则」「推论」「接口与导出」、§2「金额与精度」、§3 INV-7、INV-10、§6、§7 标 AIH-TASK-248 的各行、§11 AIH-TASK-248 为准；本设计建立在 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2）的接口一与接口二之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '接口新增键：data 顶层 provider_cost_allocation 恒为 pro_rata_estimated_cost、reconciliation_period_basis 恒为 utc_calendar_month，cost_basis 仍为 estimated；每个分组项与 totals 的 prepaid 块加 covered_estimated_cost_myr、reconciled_provider_cost_myr、provider_cost_myr、provider_cost_basis、gross_margin_on_provider_cost、gross_margin_on_provider_cost_rate，internal_metered_only 块加前四个；provider_cost_basis：covered = 0 为 estimated，covered = estimated_provider_cost_myr > 0 为 reconciled，其余 mixed；totals 加 gross_profit_on_provider_cost、gross_profit_on_provider_cost_rate（payments 为 null 时两者 null，规则同 AIH-TASK-222）与 reconciliation_coverage（每项恰好 reconciliation_id、provider_code、billing_month、period_start、period_end、fully_in_range、allocatable），以及披露字段 unallocated_reconciled_months（allocatable 为 false 的记录，每条 provider_code:YYYY-MM，顺序同 reconciliation_coverage，没有时为空列表）与 unallocated_reconciled_cost_myr（这些记录 R 之和、按记录全额、money_text，没有时 null），两者不并进任何成本与毛利'
+      - '计算：reconciled(g) = quantize_money(Σ_r allocate(covered(g, r), R, E))，allocate 返回 None 按 0，求和在 PRICING_CONTEXT 内、每个分组每个块只舍入一次；provider_cost(g) = reconciled(g) + (estimated(g) − covered(g))；provider_cost_basis 逐块判定：该块 covered = 0（含该块没有事件）为 estimated，covered = estimated_provider_cost_myr 且 > 0 为 reconciled，其余 mixed；allocatable = (E > 0) 或 (R = 0)：E = 0 而 R > 0 的记录不进任何行、allocatable 为 false，E = 0 且 R = 0 的为 true；fully_in_range = (occurred_from ≤ period_start 且 period_end ≤ occurred_to)；合计两块用 total_covered 按同一公式单独计算、只舍入一次，不由分组行相加；gross_margin_on_provider_cost = billable_cost − provider_cost_myr，比率在计费额为 0 时 null；gross_profit_on_provider_cost = prepaid.gross_margin_on_provider_cost − payments.gateway_fee；分摊用 AIH-TASK-244 的 allocate 与 AIH-TASK-247 的 reconciled_allocation_inputs，在同一个只读会话里查；金额 money_text、比率 ratio_text，不经 float。AIH-TASK-222 的全部旧键与值不变'
+      - '导出：AIH-TASK-223 的 31 列之后追加 10 列，按序为 prepaid_provider_cost_myr、prepaid_provider_cost_basis、prepaid_gross_margin_on_provider_cost、internal_provider_cost_myr、internal_provider_cost_basis、gross_profit_on_provider_cost（只 TOTAL 行，null 时空）、provider_cost_allocation（两种行都是 pro_rata_estimated_cost）、reconciled_months（只 TOTAL 行：allocatable 的覆盖记录按 provider_code:YYYY-MM 以分号连接；GROUP 行空）、unallocated_reconciled_months（只 TOTAL 行：totals.unallocated_reconciled_months 以分号连接，没有时空）、unallocated_reconciled_cost_myr（只 TOTAL 行：totals.unallocated_reconciled_cost_myr，null 时空）；前 31 列逐字不变；reconciled_months 与 unallocated_reconciled_months 加进公式注入防护的文本列集合；追加的 10 列进入 CSV 与 AIH-TASK-237 的 xlsx 导出共用的同一个列常量（与 237「只换编码」一致，不另立 CSV 专用列表），所以 xlsx 也是 41 列；tests/backend/test_admin_usage_analytics_xlsx_export_api.py（237 新建）只调整列数与新列的断言，断言意义不变'
+      - 'tests/backend/test_internal_cost_visibility.py 的禁用名单追加 covered_estimated_cost_myr、reconciled_provider_cost_myr、provider_cost_myr、provider_cost_basis、gross_margin_on_provider_cost、gross_margin_on_provider_cost_rate、gross_profit_on_provider_cost、gross_profit_on_provider_cost_rate、reconciliation_coverage、unallocated_reconciled_months、unallocated_reconciled_cost_myr，自检照常；tests/backend/test_admin_usage_analytics_api.py 与 tests/backend/test_admin_usage_analytics_export_api.py 里断言键集合与 31 列表头的已有用例只按追加的新键与新列调整，断言意义不变'
+      - '测试覆盖设计 §7 标 AIH-TASK-248 的各行，期望值逐个照 §7：分摊结果（区间 [2026-12-01, 2027-01-01)、group_by=project：P_crm internal 块 reconciled 29.70000000 与 reconciled 口径、prepaid 块 0.00000000 与 estimated；P_pre prepaid 块 reconciled 21.78000000、reconciled 口径、gross_margin_on_provider_cost -21.78000000、比率 null；P_chat prepaid 块 provider_cost 450.00000000、estimated；group_by=provider 的 anthropic 行 prepaid 块 471.78000000 与 mixed、internal 块 29.70000000 与 reconciled；合计 prepaid 471.78000000、internal 29.70000000，覆盖一项 fully_in_range 与 allocatable 都为 true）、马来西亚月分组（2027-01 组 prepaid 21.78000000 reconciled、internal 8.80000000 estimated；2026-12 组 internal 34.20000000 mixed、prepaid 450.00000000 estimated）、部分覆盖（区间 [2026-12-15, 2027-01-01)：fully_in_range 为 false，合计 prepaid reconciled 21.78000000、internal 为 estimated）、分摊舍入（myr_three 加 12 月 MYR 1.00 记录、group_by=project：每组 internal 0.33333333、合计 1.00000000）、不可分摊（unallocatable 世界、区间 [2026-11-01, 2027-04-01)：覆盖三项按月升序 allocatable 为 true、false、true（3 月是 E = 0 且 R = 0 的分支），任何分组行与成本、毛利都不含 2 月的 5.00，totals.unallocated_reconciled_months 为 [anthropic:2027-02]、unallocated_reconciled_cost_myr 为 5.00000000，导出 TOTAL 行第 39 列为 anthropic:2026-12;anthropic:2027-03、第 40 列 anthropic:2027-02、第 41 列 5.00000000）、未覆盖与旧键不变（没有记录时 covered 0、estimated、provider_cost 等于 estimated、reconciliation_coverage 与 unallocated_reconciled_months 为空列表、unallocated_reconciled_cost_myr 为 null，AIH-TASK-222 的旧键与值不变）、导出追加列（CSV 与 xlsx 表头都是 41 列、前 31 列逐字相同、第 39 与 40 列有公式注入防护；分摊结果条件下 TOTAL 行第 40、41 列为空；分摊结果的 totals 两个披露字段为空列表与 null）；SQLite 与 MySQL 两半，夹具来自 tests/backend/provider_cost_world.py（需要时只追加构件，不改已有构件的行为）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，跨文件共用的 fixture 在 tests/backend/conftest.py 注册，需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；测试金额都能精确表示，MySQL 分支逐位断言；时间一律注入，不 sleep'
+      - 'docs/api.md 的「管理端用量分析」与其后的导出小节补：对账后成本口径（pro_rata_estimated_cost：按估算成本比例分摊、不是逐请求实际成本、用实时 E 使分摊之和等于实际成本）、provider_cost_basis 三个值、UTC 月覆盖与马来西亚日月分组的关系、分组舍入误差至多组数乘 0.5×10⁻⁸、allocatable 为 false 的含义、新增的 10 个导出列（含第 40、41 列与 totals 两个字段对不可分摊已对账成本的披露）'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/repositories/ 与 app/services/ 下任何文件、前端与 app/core/csv_export.py；不把分摊额写进任何表；不写审计；不加迁移；不装依赖；不对任何数据库执行迁移；不连生产；不调用真实的 Stripe 接口；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #756'
+    allowed_change_paths:
+      - app/schemas/usage_analytics.py
+      - app/api/admin_usage_analytics.py
+      - tests/backend/test_admin_usage_analytics_api.py
+      - tests/backend/test_admin_usage_analytics_export_api.py
+      - tests/backend/test_admin_usage_analytics_xlsx_export_api.py
+      - tests/backend/test_internal_cost_visibility.py
+      - tests/backend/provider_cost_world.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-249：对账后成本第三层（设计闸门 #756），只做前端与验收脚本，约 750 行（页面与 api 220、测试 330、文案 40、验收脚本 160）。
+  # 设计另列依赖 AIH-TASK-224（合计块组件 UsageAnalyticsTotals 由它新建）；依赖 AIH-TASK-248 已在生产；合计块仍不用 Table、不用 Alert。
+  - id: AIH-TASK-249
+    title: 对账后成本第三层：管理端用量分析页显示对账后供应商成本、口径与覆盖月份
+    purpose: >-
+      按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「页面」：frontend/src/api/adminUsageAnalytics.ts 加新键类型，合计块加对账后供应商成本、基于它的毛利与口径、覆盖月份与不可分摊提示，表格加 Provider cost 列，说明文字补分摊口径；验收脚本加一个只读步骤。只做前端。
+    status: ready
+    depends_on:
+      - AIH-TASK-248
+      - AIH-TASK-224
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端用量分析」一节为准，页面以 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「页面」与 §7「前端分析页」一行为准；与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/download.ts'
+      - 'frontend/src/api/adminUsageAnalytics.ts：UsageAnalyticsReport 加 provider_cost_allocation、reconciliation_period_basis；分组项与 totals 的 prepaid 块加 covered_estimated_cost_myr、reconciled_provider_cost_myr、provider_cost_myr、provider_cost_basis（estimated | reconciled | mixed）、gross_margin_on_provider_cost、gross_margin_on_provider_cost_rate，internal_metered_only 块加前四个；totals 加 gross_profit_on_provider_cost、gross_profit_on_provider_cost_rate（string | null）与 reconciliation_coverage 数组、unallocated_reconciled_months（string 数组）、unallocated_reconciled_cost_myr（string | null）；金额与比率都是 string'
+      - '合计块（frontend/src/features/usage/UsageAnalyticsTotals.tsx，带边框的 Descriptions）追加 8 项，每项是独立的一对 th / td，td 里只有那一个值（后端字符串原样、口径的显示文案或短横 —），不在同一格里附口径、比率或说明：Provider cost (reconciled where available) = totals.prepaid.provider_cost_myr；Provider cost basis = totals.prepaid.provider_cost_basis 的显示文案；Internal provider cost (reconciled where available) = totals.internal_metered_only.provider_cost_myr；Internal provider cost basis = 其 provider_cost_basis 的显示文案；Gross margin on provider cost = totals.prepaid.gross_margin_on_provider_cost；Gross margin on provider cost (ratio) = totals.prepaid.gross_margin_on_provider_cost_rate；Gross profit on provider cost = totals.gross_profit_on_provider_cost；Gross profit on provider cost (ratio) = totals.gross_profit_on_provider_cost_rate。口径显示文案进 en.json：estimated 为 Estimated、reconciled 为 Reconciled、mixed 为 Mixed (partly reconciled)，页面不显示后端原词。「Gross margin / Gross profit on provider cost 按 prepaid 块的供应商成本算、口径同 Provider cost basis；手续费按 paid_at」写在合计块下方说明文字里。覆盖说明（合计块下方普通文字，至多两行）：第一行恒在，为 Reconciled months (UTC): 后接 allocatable 为 true 的记录，每条写 <provider_code> <YYYY-MM>，fully_in_range 为 false 的其后加一个空格和 (partial)，多条用逗号加空格连接、顺序同 reconciliation_coverage，没有时整行为 Reconciled months (UTC): none — provider costs are estimated；第二行只在有 allocatable 为 false 的记录时出现，为 Not allocated (no estimated cost in that month, UTC): 后接这些记录（同样写法），全部在这一行，行尾再接 — reconciled cost not included in provider cost: <totals.unallocated_reconciled_cost_myr> MYR（金额原样）。合计块仍是 Descriptions、不是数据表格（没有 thead、没有带 data-row-key 的行），不用 Alert、没有 role="alert"。表格（frontend/src/features/usage/UsageAnalyticsPage.tsx）在 AIH-TASK-224 的 Prepaid 列组追加 Provider cost（item.prepaid.provider_cost_myr，下一行小字为口径显示文案）与 Margin on provider cost（item.prepaid.gross_margin_on_provider_cost）两列，在 Internal 列组追加 Provider cost（item.internal_metered_only.provider_cost_myr，下一行小字为口径显示文案）一列，不新增列组、其他列不变；说明文字补：对账后成本按估算成本比例分摊到分组、不是逐请求的实际成本，对账月份按 UTC 划分，三种口径的含义；金额与比率原样显示后端字符串、不转 number'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts；不请求任何 /api/v1/customer/ 路径。测试（vitest + Testing Library）：adminUsageAnalytics.test.ts 补新字段的类型用例（mock 报告带新键）；UsageAnalyticsTotals.test.tsx 覆盖设计 §7「前端分析页」（8 个 td 的文字逐个等于对应值且没有别的文字，mixed 显示 Mixed (partly reconciled)、null 为 —；覆盖第一行恰为 Reconciled months (UTC): anthropic 2026-12, anthropic 2027-03 (partial)，mock 的 unallocated_reconciled_cost_myr 为 7.50000000，第二行恰为 Not allocated (no estimated cost in that month, UTC): anthropic 2027-01, anthropic 2027-02 — reconciled cost not included in provider cost: 7.50000000 MYR；覆盖为空时第一行为 none 文案且没有第二行；没有 role="alert"；"0.333333333333333333333333333" 原样显示）；UsageAnalyticsPage.test.tsx 补表格三个新列（Prepaid 组两列、Internal 组一列）与口径小字、说明文字新要点，已有的列头集合断言只追加新列、现有 mock 报告补新键，断言意义不变；已有用例照常通过；示例 uuid 全零'
+      - 'scripts/acceptance/admin_customers.mjs 加一步（文件名不变，文件头步骤说明同步）：check_analytics_provider_cost 须先跑过 open_usage_analytics（否则 assertion_failed），不自己导航；后端值取页面自己发出的 GET /api/v1/admin/usage-analytics 的响应体（被动观察，不自己发请求、不拦截；取点顶栏之后成功读完的最近一次）；Totals 合计块里 th 文字恰为 Provider cost (reconciled where available) 与 Gross profit on provider cost 的两项，其 td 的全部文字（去首尾空白）分别等于 totals.prepaid.provider_cost_myr 与 totals.gross_profit_on_provider_cost（null 时为短横）；不改筛选、不翻页。已有步骤（含 check_usage_analytics、check_analytics_totals、check_analytics_export）行为不变、照跑仍应 PASS；沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'docs/TODO.md 不改（Phase 7 与 Phase 8 的勾选在 AIH-TASK-251）。allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #756'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminUsageAnalytics.ts
+      - frontend/src/api/adminUsageAnalytics.test.ts
+      - frontend/src/features/usage/UsageAnalyticsPage.tsx
+      - frontend/src/features/usage/UsageAnalyticsPage.test.tsx
+      - frontend/src/features/usage/UsageAnalyticsTotals.tsx
+      - frontend/src/features/usage/UsageAnalyticsTotals.test.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_usage_analytics
+        - check_analytics_provider_cost
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-250：供应商成本对账第六层（设计闸门 #755），告警，约 300 行（代码 80、测试 180、文档 40）。
+  # Healthchecks 已 20/20，不加维度：上月满 9 天仍未对账只在 72 小时窗口内并进 usage_processing_backlog 报 P2；差额超阈值不告警（设计 §9 备选 L）。
+  # 与设计 §11 的一处补充：docs/api.md 的内部告警表逐字写了这个维度的摘要格式，一并更新，所以可改路径多一条 docs/api.md。
+  - id: AIH-TASK-250
+    title: 供应商成本对账第六层：上月满九天仍未对账时在用量积压告警里提醒三天
+    purpose: >-
+      按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「告警」：app/services/alerts.py 的 usage_processing_backlog 在现有五段之后追加第六段，判定上一个已结束的 UTC 月在月末后第 9 至 12 天内是否有范围内事件却没有当前对账记录；docs/runbook.md 与 docs/api.md 补第六段的含义与处置。不新增维度。
+    status: ready
+    depends_on:
+      - AIH-TASK-249
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） 逐条一致，以 §1「可观察的完成标准」7、§2「告警」、§3 INV-7、§5 告警查询出错一行、§7「告警窗口」一行、§9 备选 L、§10「我定的」第 4 条、§11 AIH-TASK-250 为准；与设计 §11 的唯一补充：docs/api.md 内部告警表里本维度的摘要格式一并更新；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/alerts.py 的 usage_processing_backlog 在 <积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量> 之后追加第六段：判定月 m 为 now 所在 UTC 月的上一个月，且 m 不早于 FIRST_RECONCILIATION_MONTH；窗口为 period_end(m) + 9 天 ≤ now < period_end(m) + 12 天（两个 timedelta 常量，旁注只报 72 小时的理由：持续红会遮住同一检查后来的故障）；窗口内对 m 期间里有范围内已处理事件（由 AIH-TASK-243 的 scope_providers 一条查询列出，见下一条）却没有当前对账记录的供应商，P2，摘要 provider cost <code>,<code> not reconciled for <YYYY-MM>（代码按字母升序）；否则 provider cost reconciled or not due；窗口外恒 OK；级别仍取各段最严重的；其余五段逐字不变；不新增维度、DIMENSIONS 不变'
+      - '判定：scope_providers(m 的期间) 一条查询（AIH-TASK-243，按代码升序）列出 m 期间有范围内已处理事件的供应商，对每个调 current_record(provider_id, AI_MODULE, m)，为 None 的收集起来；不调 scope_estimate（不需要币种与金额）；首月与期间用 AIH-TASK-244 的 FIRST_RECONCILIATION_MONTH 与 reconciliation_period，不复制 SQL；普通读、不加锁、不提交；摘要只有供应商代码与月份，没有金额、租户与计数以外的个人数据；模块文件头与 usage_processing_backlog 的 docstring 补第六段，并在「摘要只有计数、日期与币种」处写明本段另含供应商代码'
+      - '测试：tests/backend/test_usage_alerts.py 覆盖设计 §7「告警窗口」（SQLite，标准世界：判定月 2027-01 有 E4；now 为 2027-02-01 加 8 天 23:59:59、9 天整、12 天减 1 秒、12 天整；有 / 无 2027-01 的当前记录；只在窗口内、有事件且无记录时 P2，第六段恰为 provider cost anthropic not reconciled for 2027-01；判定月 2027-02 没有范围内事件时窗口内也 OK；把 FIRST_RECONCILIATION_MONTH 临时改为 2027-02 时判定月 2027-01 不报；其余五段逐字不变），世界来自 tests/backend/provider_cost_world.py 已注册的夹具（不改它，需要的记录经 AIH-TASK-243 的 insert_record 在本文件里写入）；tests/backend/test_internal_alerts.py 里逐字比对的空库摘要只在 usage_processing_backlog 行末追加 ; provider cost reconciled or not due，断言意义不变；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量，需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，不 sleep；本任务的用例一律在夹具里 monkeypatch app.services.provider_cost_reconciliation 模块上的 FIRST_RECONCILIATION_MONTH 为 2026-12（读这个常量的代码一律经模块属性读取，alerts.py 用 import 模块后取属性，不用 from ... import 把常量拷进自己的命名空间，否则改了不生效）（只有「早于首月」那个用例另设为它要的值），不依赖常量默认值，使只改常量的 PR 不会让 CI 失败'
+      - 'docs/runbook.md 的告警处置表 usage_processing_backlog 一行与 docs/api.md 内部告警表 usage_processing_backlog 一行：摘要改为恰好六段，补第六段的格式、窗口（上月结束后第 9 至 12 天）、含义与处置（到管理端供应商成本页录入上月的 Console 消耗额；首个对账月之前不报）；其余行不改'
+      - '只改本任务 allowed_change_paths 里的文件；不新增 Healthchecks 检查与告警维度；不改 deploy/ 下的脚本；不改服务、仓储与接口；不加迁移；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #755'
+    allowed_change_paths:
+      - app/services/alerts.py
+      - tests/backend/test_usage_alerts.py
+      - tests/backend/test_internal_alerts.py
+      - docs/runbook.md
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-251：供应商成本对账收尾（设计闸门 #755），只改文档，约 150 行。
+  # runbook 写换钥（Kelvin 在 Console 建本平台专用 workspace 与密钥、替换宿主机 secret 文件、记切换时刻）与每月录入流程；不写地址、主机名、工作区真实名称与金额。
+  - id: AIH-TASK-251
+    title: 供应商成本对账收尾：运维手册补换钥与月度对账流程，勾选 Phase 8 对账项
+    purpose: >-
+      按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §6「密钥」、§8「上线后的人工步骤」与 §10：docs/runbook.md 新增「供应商成本对账」一节（操作流程，照「税务政策：首条政策的发布」一节的流程写法，不套故障场景的五个固定小节，放在「月度对账单」一节之后），docs/currency-and-fx.md 补对账换算一段，docs/TODO.md 勾选 Phase 8「供应商账单成本对账」并按条件处理 Phase 7 对应项。不改代码与测试。
+    status: ready
+    depends_on:
+      - AIH-TASK-250
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） 逐条一致，以 §1「已定」与「明确不做什么」、§2「口径」、§5、§6「密钥」「公开仓库与保留」、§8「上线后的人工步骤」「回滚或前滚」、§10、§11 AIH-TASK-251 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'docs/runbook.md 新增「供应商成本对账」一节：换钥步骤（在 Console 为本平台建专用 workspace 与密钥；替换宿主机上 AI 模块读取的 secret 文件并重建 api 容器，确认 /healthz/ai 正常；记下切换时刻，首个对账月 = 切换之后的第一个完整 UTC 月，与代码常量 FIRST_RECONCILIATION_MONTH 不同时在写入任何记录之前用单独的小 PR 改常量；Kelvin 2026-11-16 的前提是 2026-12-01 00:00 UTC 之前换好）、每月录入流程（月初在 Console 成本页确认上月数字稳定后录入不含税的消耗额与来源说明，先预览再确认）、诊断计数的解读、更正方法（追加取代行、必填理由，不删行）、FX_RATE_UNAVAILABLE 的处置指向 docs/currency-and-fx.md §4 的补录流程（P1 / P4），不写成发布一个该时刻的汇率；SOURCE_CURRENCY_MISMATCH 在范围内事件币种混杂时写明本月无法对账、需另走设计闸门（与设计 §10 假设 4 一致）；换钥晚于 2026-12-01 时：每月 10 日之前（AIH-TASK-250 的告警窗口开始前）开一个只改 FIRST_RECONCILIATION_MONTH 的 PR，把它推到当前月的下一个月，到下月 10 日前仍未换钥就再推一个月，直到它等于换钥后的第一个完整 UTC 月；月末时刻落在 P1、P4 都补不了的汇率空档时写本月暂不能对账、记待办、汇率补录另走设计（与设计 §5、§10 一致）、生产不降级 0041；不写地址、主机名、工作区真实名称、密钥值与实际金额'
+      - 'docs/currency-and-fx.md 补一段：对账换算取期间最后一刻（period_end − 1 微秒）生效的已发布版本、记录版本引用与汇率值，与用量事件按发生时刻逐笔换算的区别；该文件其余内容不改'
+      - 'docs/TODO.md 只改 planning-v1 规划块之外的勾选项：Phase 8「供应商账单成本对账」改为 [x]，照该章节已勾项的写法括注时同时引用两个闸门：AIH-TASK-242..246、250、251 为设计闸门 #755 v1，AIH-TASK-247..249 为设计闸门 #756 v1；Phase 7「收入 / 估算成本 / 对账后成本 / 网关手续费 / 毛利 / 毛利率」在 AIH-TASK-221..225 与 AIH-TASK-247..249 都已合并时改为 [x]，否则保持 [ ] 并在该行写明剩什么；规划块里的「待登记：Phase 8 供应商账单成本对账」与 Phase 7 待登记行不碰（由登记 PR 删改）；其余勾选不动'
+      - '只改本任务 allowed_change_paths 里的文件；不改代码与测试；不装依赖；不对任何数据库执行迁移；不连生产；不碰任何密钥文件；不改 docker-compose 文件；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #755'
+    allowed_change_paths:
+      - docs/runbook.md
+      - docs/TODO.md
+      - docs/currency-and-fx.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # AIH-TASK-230：spec §136 要求 runbook 覆盖 18 个故障场景，docs/TODO.md「文档欠账」一项。2026-11-16 盘点：Billing API 不可用、
+  # MySQL 不可用、备份失败、状态推送乱序、上期用量与跨期调整、文档存储恢复六个没有对应章节，待支付与支付对账失败要核对。
+  # Kelvin 2026-11-16 同意登记；当前计划已满 20 项，本项排在后续计划、依赖 L 批最后一项 251。不走闸门：只改 runbook，不改代码与流程。预审：不适用（无设计闸门，单文件文档任务）。
+  - id: AIH-TASK-230
+    title: 运维手册补齐规格要求的十八个故障场景并加覆盖对照表
+    purpose: >-
+      spec §136 要求 docs/runbook.md 覆盖 18 个故障场景。现有章节已覆盖其中多数，但 Billing API 不可用、MySQL 不可用、备份失败、状态推送乱序、上期用量与跨期调整、文档存储恢复没有对应章节，待支付与支付对账失败要核对现有支付章节是否写到。本任务在 runbook 开头加一张 18 个场景到章节的对照表，并按本文件「本文件的写法」补上缺的章节；每一条都以仓库里已有的代码、部署脚本与文档为依据，不发明新的流程、告警或命令。只改文档。
+    status: ready
+    depends_on:
+      - AIH-TASK-251
+    acceptance_criteria:
+      - 'docs/runbook.md 开头的说明之后加一张表，逐行列出 spec §136 runbook 清单的 18 个场景（英文原文照抄，按 spec 顺序），每行写对应章节的锚点链接；一个场景由多个章节共同覆盖时都列出；表下注明 18 行与 spec 逐条对应，spec 改了要同步改表'
+      - '新增章节（缺哪个补哪个，已有章节覆盖的不重复写）：Billing API 不可用（api 容器不健康、nginx 回 502/503，以 deploy/monitor.sh 的 services 维度与 /readyz 为发现途径）；MySQL 不可用（/readyz 与 /healthz/billing 的表现、AI 模块的 HELD 暂存与摄取的行为以代码为准）；备份失败（deploy/backup.sh、binlog_ship.sh 的失败如何被发现与告警，以 deploy/cron.d 与脚本实际的心跳为准；没有告警的如实写明）；状态推送乱序（平台按 status_version 推送、集成方按版本丢弃旧状态，依据 docs/api.md 状态 webhook 一节与 app/services/status_delivery.py）；上期用量与跨期调整（cut-off 后入账的往期用量记为上期调整，依据 ADR-0003 与月度对账单章节；写明 Rebill 在 V1 未实现、不能用手工调账代替跨期重算以外的场景以 ADR 与 TODO 为准）'
+      - '每个新章节照「本文件的写法」的结构写：怎么发现、影响什么、立刻做什么、恢复、绝不能做什么；只用仓库里已有的命令、脚本、告警维度与配置项名，引用写 文件:行 或章节锚点；涉及数据库的命令只给只读查询，写操作一律写成「按某章节走」而不是现场 SQL'
+      - '文档存储恢复：先核实 docker-compose.yml 没有文档存储卷、收据与对账单 PDF 都由数据库快照现场渲染（app/services/receipt_pdf.py、app/services/statement_pdf.py）、字体随镜像打包（app/data/）；据此写一节说明本平台没有独立的文档存储，文档的恢复等于数据库恢复（指向整台 VPS 灾难恢复一节），并写明将来新增文档存储时要补本节。核实结果与此不符时停下并在 PR 里说明'
+      - '待支付与支付对账失败：核对现有支付章节是否写到长时间 PENDING 的支付、EXPIRED 之后的晚到成功（REVIEW_REQUIRED）与网关事件积压的处置；已写到的只在对照表里指向它，缺的在支付章节内补一个小节，不改已有段落'
+      - '不修改任何已有章节的正文（只允许在已有章节标题旁不加改动地被对照表链接）；不写主机名、IP、地址、邮箱、凭据；不预留空条目'
+      - '不改代码、测试、docs/TODO.md 与 planning-v1 块；不装依赖；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 不适用'
+    allowed_change_paths:
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
