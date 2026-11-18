@@ -14,8 +14,9 @@ AIH-TASK-216。下载接口属于 AIH-TASK-217。
 ⚠️ **可重现**：创建时刻取 `finalized_at`、不压缩内容流、月份缩写不经 locale，同一份输入在任何
 进程里渲染的字节都相同（含中文字体子集）。
 
-字体：全 Latin-1 的字符串用 Helvetica（标准字体，不嵌入）；其他的用 Noto Sans SC，fpdf2 只把用到的
-字形子集嵌进 PDF。两种字体都印不出的字符换成 `?`。金额只经 `Decimal`，不经 float（INV-10）。
+字体照 `app/services/pdf_text.py`（与收据共用，设计 #750 §2「共用模块」）：全 Latin-1 的字符串用
+Helvetica（标准字体，不嵌入）；其他的用 Noto Sans SC，fpdf2 只把用到的字形子集嵌进 PDF。两种字体都
+印不出的字符换成 `?`。金额只经 `Decimal`，不经 float（INV-10）。
 """
 
 from __future__ import annotations
@@ -23,22 +24,21 @@ from __future__ import annotations
 import calendar
 import contextlib
 import datetime as dt
-import functools
 import re
 from decimal import ROUND_HALF_UP, Decimal
-from importlib import resources
-from importlib.resources.abc import Traversable
 from typing import Any, Final
 
-from fontTools.ttLib import TTFont
 from fpdf import FPDF, FontFace, XPos, YPos
+
+from app.services.pdf_text import HELVETICA, NOTO_FONT_SHA256, PdfFonts, PdfFontUnavailable
 
 # 与 `app.services.receipts.RECEIPT_ISSUER_NAME` 相同（测试断言）；不 import 它，见文档串。
 # ⚠️ 不在快照里：改它会改变历史对账单重渲染的结果，要过设计闸门（设计 §10 已知限制 1）。
 STATEMENT_ISSUER_NAME: Final = "Acuven Technology Sdn Bhd"
-# `app/data/NotoSansSC-Regular.ttf` 的 SHA-256（PR #706，`app/data/__init__.py` 文档串）。
-# ⚠️ 换字体会改变历史对账单 PDF 的字形，改这个值要过设计闸门。
-STATEMENT_FONT_SHA256: Final = "d45f67f0a7c0ca3f256950777ce6a61cc7ce5f9696d02900cbbaac25f8aa7d16"
+# 公共名字保留为共用模块的别名（设计 #750 §2「对账单」）：
+# `app/data/NotoSansSC-Regular.ttf` 的 SHA-256。
+# ⚠️ 换字体会改变历史对账单与收据 PDF 的字形，改这个值要过设计闸门。
+STATEMENT_FONT_SHA256: Final = NOTO_FONT_SHA256
 
 _SCHEMA_VERSION: Final = 1
 _TOP_KEYS: Final = frozenset(
@@ -112,12 +112,7 @@ _MONTHS: Final = (
     "Dec",
 )
 
-_HELVETICA: Final = "Helvetica"
-_NOTO: Final = "NotoSansSC"
-_FONT_FILE: Final = "NotoSansSC-Regular.ttf"
-_LATIN1_END: Final = 256
-# multi_cell 的换行指令，不是要印的字形（设计 v3 §2「文本与字体」第 3 步）。
-_NEWLINE: Final = "\n"
+_HELVETICA: Final = HELVETICA
 
 _MARGIN: Final = 15
 _PAGE_BREAK_MARGIN: Final = 20
@@ -151,8 +146,8 @@ class StatementSnapshotInvalid(Exception):
     """The inputs do not have the shape of gate #708 v3 §2「校验」."""
 
 
-class StatementFontUnavailable(Exception):
-    """The bundled Noto Sans SC font is missing, unreadable or not TrueType."""
+# 同一个类（`app/api/statement_download.py` 的 `except` 照常命中）。
+StatementFontUnavailable = PdfFontUnavailable
 
 
 # --- 校验 -------------------------------------------------------------------------------
@@ -248,81 +243,6 @@ def _validate(snapshot: object, statement_number: object, finalized_at: object) 
             _amount(line["charges"], f"{section}[].charges")
 
 
-# --- 文本与字体 -------------------------------------------------------------------------
-
-
-def _font_resource() -> Traversable:
-    return resources.files("app.data").joinpath(_FONT_FILE)
-
-
-@functools.lru_cache(maxsize=1)
-def _font_cmap() -> frozenset[int]:
-    """Code points of the bundled Noto Sans SC, read once per process.
-
-    并发下可能重复计算，结果相同，无害。读不了时抛 `StatementFontUnavailable`（不缓存异常）。
-    """
-    try:
-        with resources.as_file(_font_resource()) as path:
-            font = TTFont(path, lazy=True)
-            try:
-                # 只认 TrueType（`glyf` 轮廓）：CFF 轮廓与可变字体 fpdf2 的支持未验证
-                # （设计 §2「P0」）。
-                if "glyf" not in font:
-                    raise StatementFontUnavailable("statement font is not TrueType")
-                cmap = font.getBestCmap()
-            finally:
-                font.close()
-    except StatementFontUnavailable:
-        raise
-    except Exception as error:  # noqa: BLE001 - 读不出的原因各式各样，都算「字体不可用」
-        raise StatementFontUnavailable("statement font cannot be read") from error
-    if not cmap:
-        raise StatementFontUnavailable("statement font has no character map")
-    return frozenset(cmap)
-
-
-def _is_latin1(text: str) -> bool:
-    return all(ord(char) < _LATIN1_END for char in text)
-
-
-class _Fonts:
-    """Choose Helvetica or Noto Sans SC per string (设计 §2「文本与字体」).
-
-    Noto Sans SC 在本次渲染第一次需要时 `add_font` 一次；字体文件在 `stack` 关闭之前一直可读
-    （fpdf2 懒加载字体表，输出时才子集化）。
-    """
-
-    def __init__(self, pdf: FPDF, stack: contextlib.ExitStack) -> None:
-        self._pdf = pdf
-        self._stack = stack
-        self._added = False
-
-    def prepare(self, text: str) -> tuple[str, str]:
-        """`(family, text to print)`."""
-        if _is_latin1(text):
-            return _HELVETICA, text
-        cmap = _font_cmap()
-        text = "".join(
-            char if ord(char) < _LATIN1_END or ord(char) in cmap else "?" for char in text
-        )
-        if _is_latin1(text):
-            return _HELVETICA, text
-        # 字体里没有的字符（含 Latin-1 的控制字符）不印缺字框；换行符是版面指令，保留。
-        text = "".join(char if char == _NEWLINE or ord(char) in cmap else "?" for char in text)
-        self._add_noto()
-        return _NOTO, text
-
-    def _add_noto(self) -> None:
-        if self._added:
-            return
-        try:
-            path = self._stack.enter_context(resources.as_file(_font_resource()))
-            self._pdf.add_font(_NOTO, "", str(path))
-        except Exception as error:  # noqa: BLE001 - 同 `_font_cmap`
-            raise StatementFontUnavailable("statement font cannot be loaded") from error
-        self._added = True
-
-
 # --- 显示 -------------------------------------------------------------------------------
 
 
@@ -385,7 +305,7 @@ class _StatementPdf(FPDF):
 
 
 class _Layout:
-    def __init__(self, pdf: _StatementPdf, fonts: _Fonts) -> None:
+    def __init__(self, pdf: _StatementPdf, fonts: PdfFonts) -> None:
         self._pdf = pdf
         self._fonts = fonts
 
@@ -485,7 +405,7 @@ def render_statement_pdf(
     pdf.alias_nb_pages()
 
     with contextlib.ExitStack() as stack:
-        layout = _Layout(pdf, _Fonts(pdf, stack))
+        layout = _Layout(pdf, PdfFonts(pdf, stack))
         pdf.add_page()
 
         pdf.set_font(_HELVETICA, "B", 18)

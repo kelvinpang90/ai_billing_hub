@@ -20,8 +20,9 @@
 
 ### NotoSansSC-Regular.ttf
 
-月度对账单 PDF 里客户名、项目名等中文字符用的字体（Phase 7；Kelvin 2026-11-14 定：嵌入完整
-字体，不预先子集化）。fpdf2 渲染时只把用到的字形子集嵌进 PDF，所以 PDF 本身很小。
+月度对账单 PDF 与付款收据 PDF 共用的字体，印客户名、项目名等中文字符（Phase 7；Kelvin
+2026-11-14 定：嵌入完整字体，不预先子集化；收据自设计闸门 #750 起共用，选字规则在
+`app/services/pdf_text.py`）。fpdf2 渲染时只把用到的字形子集嵌进 PDF，所以 PDF 本身很小。
 
 - 来源：Google Fonts 的 Noto Sans SC 静态 Regular（`static/NotoSansSC-Regular.ttf`，
   字体版本 2.004），TrueType（`glyf`）轮廓，不是可变字体；原样提交，未改名、未改字形
@@ -30,6 +31,6 @@
 - SHA-256：`d45f67f0a7c0ca3f256950777ce6a61cc7ce5f9696d02900cbbaac25f8aa7d16`
 - 大小：10,559,284 字节
 
-⚠️ **换这个文件会改变历史对账单 PDF 重新渲染出的字形**（PDF 由快照即时生成，不存文件），
-所以换字体要过设计闸门，并同步对账单 PDF 代码里钉住的哈希。
+⚠️ **换这个文件会同时改变历史对账单与历史收据 PDF 重新渲染出的字形**（两种 PDF 都由快照即时
+生成，不存文件），所以换字体要过设计闸门，并同步 `app/services/pdf_text.py` 的 `NOTO_FONT_SHA256`。
 """

@@ -7,8 +7,10 @@ CMap 还原（`_unicode_texts`）。页数数 `/Type /Page` 对象（不含 `/Ty
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import datetime as dt
+import functools
 import hashlib
 import json
 import os
@@ -17,12 +19,17 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import Callable, Iterator
+from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fontTools.ttLib import TTFont
+from fpdf import FPDF
 
-from app.services import statement_pdf
+from app.services import pdf_text, statement_pdf
+from app.services.pdf_text import PdfFontUnavailable
 from app.services.statement_pdf import (
     STATEMENT_FONT_SHA256,
     STATEMENT_ISSUER_NAME,
@@ -448,7 +455,7 @@ def test_chinese_text_embeds_a_noto_sans_sc_subset() -> None:
 
 
 def test_character_missing_from_the_font_becomes_question_mark_with_helvetica() -> None:
-    assert 0x0BA4 not in statement_pdf._font_cmap()
+    assert 0x0BA4 not in pdf_text.font_cmap()
     snapshot = _snapshot()
     snapshot["company_name"] = "Café த Sdn Bhd"
 
@@ -460,7 +467,7 @@ def test_character_missing_from_the_font_becomes_question_mark_with_helvetica() 
 
 
 def test_character_missing_from_the_font_becomes_question_mark_with_noto() -> None:
-    assert 0x0BA4 not in statement_pdf._font_cmap()
+    assert 0x0BA4 not in pdf_text.font_cmap()
     snapshot = _snapshot()
     snapshot["company_name"] = "Café 中 த"
 
@@ -473,7 +480,7 @@ def test_character_missing_from_the_font_becomes_question_mark_with_noto() -> No
 
 def test_tax_notice_keeps_newlines_and_replaces_other_control_characters() -> None:
     """设计 v3：Noto 字符串里换行符保留（multi_cell 换行），制表符等不在字体里的印成 `?`。"""
-    cmap = statement_pdf._font_cmap()
+    cmap = pdf_text.font_cmap()
     assert ord("’") in cmap
     assert ord("\t") not in cmap
     snapshot = _snapshot()
@@ -492,16 +499,16 @@ def test_tax_notice_keeps_newlines_and_replaces_other_control_characters() -> No
 
 @pytest.fixture
 def fresh_font_cache() -> Iterator[None]:
-    statement_pdf._font_cmap.cache_clear()
+    pdf_text.font_cmap.cache_clear()
     yield
-    statement_pdf._font_cmap.cache_clear()
+    pdf_text.font_cmap.cache_clear()
 
 
 @pytest.mark.usefixtures("fresh_font_cache")
 def test_missing_font_fails_only_statements_that_need_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(statement_pdf, "_font_resource", lambda: tmp_path / "missing.ttf")
+    monkeypatch.setattr(pdf_text, "_font_resource", lambda: tmp_path / "missing.ttf")
 
     with pytest.raises(StatementFontUnavailable):
         _render(_chinese_snapshot())
@@ -515,7 +522,7 @@ def test_font_that_is_not_truetype_is_unavailable(
 ) -> None:
     broken = tmp_path / "broken.ttf"
     broken.write_bytes(b"not a font at all")
-    monkeypatch.setattr(statement_pdf, "_font_resource", lambda: broken)
+    monkeypatch.setattr(pdf_text, "_font_resource", lambda: broken)
 
     with pytest.raises(StatementFontUnavailable):
         _render(_chinese_snapshot())
@@ -528,6 +535,150 @@ def test_font_file_is_pinned_and_licensed() -> None:
     assert digest == STATEMENT_FONT_SHA256
     license_text = (data / "NotoSansSC-OFL.txt").read_text(encoding="utf-8")
     assert "SIL OPEN FONT LICENSE Version 1.1" in license_text
+
+
+def test_public_font_names_are_the_shared_ones() -> None:
+    """设计 #750 §2「对账单」：公共名字是共用模块的别名。"""
+    assert STATEMENT_FONT_SHA256 == pdf_text.NOTO_FONT_SHA256
+    assert StatementFontUnavailable is PdfFontUnavailable
+
+
+# --- 对账单字节不变（设计 #750 §7，H-b）-----------------------------------------------
+#
+# 冻结参照：AIH-TASK-228 开工时 main 上 `app/services/statement_pdf.py` 第 254–323 行
+# `_font_resource`、`_font_cmap`、`_is_latin1`、`_Fonts` 的逐字副本，只改成测试私有名；自带缓存，
+# 读同一个字体文件。⚠️ 不要随共用模块一起改：它钉的正是搬移之前的行为。
+
+_FROZEN_HELVETICA = "Helvetica"
+_FROZEN_NOTO = "NotoSansSC"
+_FROZEN_FONT_FILE = "NotoSansSC-Regular.ttf"
+_FROZEN_LATIN1_END = 256
+_FROZEN_NEWLINE = "\n"
+
+
+def _frozen_font_resource() -> Traversable:
+    return resources.files("app.data").joinpath(_FROZEN_FONT_FILE)
+
+
+@functools.lru_cache(maxsize=1)
+def _frozen_font_cmap() -> frozenset[int]:
+    """Code points of the bundled Noto Sans SC, read once per process.
+
+    并发下可能重复计算，结果相同，无害。读不了时抛 `StatementFontUnavailable`（不缓存异常）。
+    """
+    try:
+        with resources.as_file(_frozen_font_resource()) as path:
+            font = TTFont(path, lazy=True)
+            try:
+                # 只认 TrueType（`glyf` 轮廓）：CFF 轮廓与可变字体 fpdf2 的支持未验证
+                # （设计 §2「P0」）。
+                if "glyf" not in font:
+                    raise StatementFontUnavailable("statement font is not TrueType")
+                cmap = font.getBestCmap()
+            finally:
+                font.close()
+    except StatementFontUnavailable:
+        raise
+    except Exception as error:  # noqa: BLE001 - 读不出的原因各式各样，都算「字体不可用」
+        raise StatementFontUnavailable("statement font cannot be read") from error
+    if not cmap:
+        raise StatementFontUnavailable("statement font has no character map")
+    return frozenset(cmap)
+
+
+def _frozen_is_latin1(text: str) -> bool:
+    return all(ord(char) < _FROZEN_LATIN1_END for char in text)
+
+
+class _FrozenStatementFonts:
+    """Choose Helvetica or Noto Sans SC per string (设计 §2「文本与字体」).
+
+    Noto Sans SC 在本次渲染第一次需要时 `add_font` 一次；字体文件在 `stack` 关闭之前一直可读
+    （fpdf2 懒加载字体表，输出时才子集化）。
+    """
+
+    def __init__(self, pdf: FPDF, stack: contextlib.ExitStack) -> None:
+        self._pdf = pdf
+        self._stack = stack
+        self._added = False
+
+    def prepare(self, text: str) -> tuple[str, str]:
+        """`(family, text to print)`."""
+        if _frozen_is_latin1(text):
+            return _FROZEN_HELVETICA, text
+        cmap = _frozen_font_cmap()
+        text = "".join(
+            char if ord(char) < _FROZEN_LATIN1_END or ord(char) in cmap else "?" for char in text
+        )
+        if _frozen_is_latin1(text):
+            return _FROZEN_HELVETICA, text
+        # 字体里没有的字符（含 Latin-1 的控制字符）不印缺字框；换行符是版面指令，保留。
+        text = "".join(
+            char if char == _FROZEN_NEWLINE or ord(char) in cmap else "?" for char in text
+        )
+        self._add_noto()
+        return _FROZEN_NOTO, text
+
+    def _add_noto(self) -> None:
+        if self._added:
+            return
+        try:
+            path = self._stack.enter_context(resources.as_file(_frozen_font_resource()))
+            self._pdf.add_font(_FROZEN_NOTO, "", str(path))
+        except Exception as error:  # noqa: BLE001 - 同 `_font_cmap`
+            raise StatementFontUnavailable("statement font cannot be loaded") from error
+        self._added = True
+
+
+def _company(name: str) -> Callable[[], dict[str, Any]]:
+    def build() -> dict[str, Any]:
+        snapshot = _snapshot()
+        snapshot["company_name"] = name
+        return snapshot
+
+    return build
+
+
+def _tax_notice_with_controls() -> dict[str, Any]:
+    snapshot = _snapshot()
+    snapshot["tax_notice"]["en"] = "Customer’s copy\tA\nSecond line B"
+    return snapshot
+
+
+def _many_pages() -> dict[str, Any]:
+    snapshot = _snapshot()
+    snapshot["by_project"] = [
+        _line(
+            project_public_id=f"00000000-0000-0000-0000-{index:012d}",
+            project_name=name,
+            request_count=index,
+            charges="1.00000000",
+        )
+        for index, name in enumerate(_project_names())
+    ]
+    return snapshot
+
+
+_FROZEN_INPUTS: dict[str, Callable[[], dict[str, Any]]] = {
+    "ascii": _snapshot,
+    "chinese": _chinese_snapshot,
+    "missing_glyph_helvetica": _company("Café த Sdn Bhd"),
+    "missing_glyph_noto": _company("Café 中 த"),
+    "tax_notice_controls": _tax_notice_with_controls,
+    "three_hundred_lines": _many_pages,
+}
+
+
+@pytest.mark.parametrize("snapshot", list(_FROZEN_INPUTS.values()), ids=list(_FROZEN_INPUTS))
+def test_statement_bytes_match_the_frozen_font_choice(
+    monkeypatch: pytest.MonkeyPatch, snapshot: Callable[[], dict[str, Any]]
+) -> None:
+    current = _render(snapshot())
+
+    monkeypatch.setattr(statement_pdf, "PdfFonts", _FrozenStatementFonts)
+    frozen = _render(snapshot())
+
+    assert current == frozen
 
 
 def test_issuer_matches_the_receipt_issuer() -> None:
@@ -715,6 +866,7 @@ _FORBIDDEN_MODULES = (
     "app.core.database",
     "app.services.statements",
     "app.services.receipts",
+    "app.services.receipt_pdf",
 )
 
 
