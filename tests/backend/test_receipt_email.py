@@ -229,7 +229,7 @@ def test_an_unusable_payload_renders_nothing_and_logs_no_values(
     _assert_nothing_leaked(caplog)
 
 
-@pytest.mark.parametrize("base", ["", "   ", "/"])
+@pytest.mark.parametrize("base", ["", "   "])
 def test_without_a_front_end_base_url_nothing_is_rendered(
     caplog: pytest.LogCaptureFixture, base: str
 ) -> None:

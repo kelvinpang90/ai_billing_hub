@@ -80,6 +80,44 @@ def require_http_base_url(value: str) -> str:
     return stripped.rstrip("/")
 
 
+def require_frontend_base_url(value: str) -> str:
+    """`""` when unset, else an http(s) root without path, query, fragment or credentials.
+
+    设计闸门 #751 v3 §2「frontend_base_url 的格式」第 1–5 步；返回去掉末尾 `/` 的值。
+    生产必须 https（第 6 步）要看 `environment`，
+    在 `Settings._frontend_base_url_is_https_in_production`。
+    """
+    # ① 空 = 未配置，仍合法；全空白也规范成 `""`，与渲染处现有的判空写法一致。
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    # ② `urlsplit` 会悄悄去掉制表符与换行再解析：校验看到的与拼进邮件正文的不是同一个
+    # 字符串。反斜杠在浏览器里被当成 `/`。
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F or ch == "\\" for ch in stripped):
+        raise ValueError("must not contain whitespace, control characters or backslashes")
+    # ③ 渲染直接在后面接 `/<路径>?token=…`。`urlsplit` 对末尾单独一个 `?` 给出空的
+    # `query`，只查 `query` 拦不住，所以按字符查。
+    if "?" in stripped or "#" in stripped:
+        raise ValueError("must not contain a query or fragment")
+    # ④ 前端从根路由（没有 Vite `base` 与路由 `basename`），带路径前缀拼出的每条链接都是 404。
+    parts = urlsplit(stripped)
+    try:
+        port = parts.port
+    except ValueError:  # not a number, or outside 0-65535
+        port = 0
+    if (
+        parts.scheme not in ("http", "https")
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or port == 0
+        or parts.path not in ("", "/")
+    ):
+        raise ValueError("must be an http(s):// root with a valid port and no path or credentials")
+    # ⑤ 调用方现有的 `strip().rstrip("/")` 不动，与这里幂等。
+    return stripped.rstrip("/")
+
+
 def parse_currency_codes(value: str) -> tuple[str, ...]:
     """`USD,EUR` → `("USD", "EUR")`: upper-case three letters, not MYR, not empty, no repeats.
 
@@ -276,6 +314,8 @@ class Settings(BaseSettings):
     # 是一封**发给用户、带着一把钥匙**的链接。攻击者只要在申请重置时改一个 Host，
     # 就能让受害者收到一封指向自己服务器的信 —— 受害者点进去，令牌就到了对方手上。
     # 这类漏洞有个名字叫 host header poisoning，密码重置是它最经典的落点。
+    # 非空时必须是 http(s) 根地址、生产必须 https（`require_frontend_base_url` 与
+    # `_frontend_base_url_is_https_in_production`，设计闸门 #751 v3 §2）。
     frontend_base_url: str = ""
 
     # --- 出站邮件（ADR-0009；仍是 T0.8d） -----------------------------------
@@ -432,6 +472,25 @@ class Settings(BaseSettings):
         if not value.strip():
             return ""
         return require_https_base_url(value)
+
+    @field_validator("frontend_base_url")
+    @classmethod
+    def _frontend_base_url_is_a_root(cls, value: str) -> str:
+        # 配错时链接是坏的，症状要到用户点不开才暴露：宁可进程起不来。
+        return require_frontend_base_url(value)
+
+    @model_validator(mode="after")
+    def _frontend_base_url_is_https_in_production(self) -> Settings:
+        # 设计闸门 #751 v3 §2「frontend_base_url 的格式」第 6 步：重置与邀请链接带着一次性
+        # 令牌，生产的会话 cookie 是 `Secure`，http 链接会让令牌明文过网。本地默认值是 http，
+        # `local` 照常允许；空串（未配置）在生产下照常合法。
+        if (
+            self.environment == "production"
+            and self.frontend_base_url
+            and urlsplit(self.frontend_base_url).scheme != "https"
+        ):
+            raise ValueError("frontend_base_url must be https in production")
+        return self
 
     @field_validator("payment_topup_tenant_allowlist")
     @classmethod
