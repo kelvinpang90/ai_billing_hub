@@ -3487,7 +3487,7 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - `PREPAID` 块包含计费额、估算成本、用量毛利（`gross_margin`）和毛利率；`INTERNAL_METERED_ONLY` 只包含事件数、
   估算成本和参考售价。内部计量租户的参考售价不是收入，因此不进入任何毛利。
 
-`data` 在 `cost_basis`、`items`、`page`、`page_size`、`total` 之外有两个键：
+`data` 在 `items`、`page`、`page_size`、`total` 之外的键（`cost_basis` 沿用 AIH-TASK-073，新增的是 `usage_period_basis` 与 `totals`）：
 
 | 键 | 含义 |
 | --- | --- |

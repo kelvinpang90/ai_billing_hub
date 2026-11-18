@@ -1149,14 +1149,39 @@ def test_without_usage_revenue_the_gross_profit_is_minus_the_fees_and_has_no_rat
 
 
 def test_amounts_keep_eight_places_and_the_rate_is_the_decimal_quotient(billed, fees) -> None:
+    """SQLite 把 NUMERIC 存成浮点：余额在千位时连扣 `0.00000001` 过不了
+    `ck_wallet_transactions_arithmetic`。照 test_customer_usage_summary_api.py 的做法，那里先按
+    精确的二进制小数记账，再把事件的计费额直接改成 `0.00000001`（合计只读 `usage_events`）；
+    MySQL 上照常记账。
+    """
     app, world = billed
     tenant, template = priced_template(world)
     one = Decimal("0.00000001")
+    exact = Decimal("0.5")
+    on_mysql = world.factory.kw["bind"].dialect.name == "mysql"
     for _ in range(3):
         insert_processed(
-            world, template, tenant, occurred_at=IN_PERIOD, billable=one, estimated=Decimal(0)
+            world,
+            template,
+            tenant,
+            occurred_at=IN_PERIOD,
+            billable=one if on_mysql else exact,
+            estimated=Decimal(0),
         )
         fees(tenant, "0.01", amount="10.00")
+    if not on_mysql:
+        with world.factory() as session:
+            changed = session.execute(
+                update(UsageEvent)
+                .where(
+                    UsageEvent.tenant_id == tenant.id,
+                    UsageEvent.occurred_at == IN_PERIOD,
+                    UsageEvent.billable_cost == exact,
+                )
+                .values(billable_cost=one)
+            )
+            assert changed.rowcount == 3
+            session.commit()
     totals = analytics(app, headers(app, domain=TEST_EMAIL_DOMAIN))["totals"]
     assert totals["prepaid"]["billable_cost"] == "0.00000003"
     assert totals["payments"]["gateway_fee"] == "0.03000000"
