@@ -12,6 +12,13 @@
 - **跨租户**：租户 A 的令牌下载 B 的收据 404、列表里没有 B 的收据；查询串里的租户参数不读（INV-8）。
   `DISABLED` / `CLOSED` 照常可读。
 
+设计闸门 #750 v1 §7 标 AIH-TASK-229 的三行：
+
+- **下载：中文收据**：租户公司名改成中文后开具、下载，与按快照渲染的字节相同、嵌入了字体，连发两次
+  字节相同；
+- **下载：字体不可用**、**下载：渲染异常**：500 固定文案、各一条只带收据 `public_id`（兜底的那种
+  另带异常类名）的 ERROR，异常原文不进任何日志。
+
 管理员与匿名调用者的拒绝由 test_customer_api.py 的路由枚举覆盖（两个接口已补进客户路由集合）。
 
 世界用共用的 payment_world.py（SQLite 与真 MySQL 各跑一次；快照被破坏只在 SQLite 上造，MySQL 的
@@ -64,7 +71,7 @@ from app.models.payments import Payment
 from app.models.receipts import PaymentReceipt
 from app.models.tenancy import AccountStatus, Tenant
 from app.services.auth import utc_now
-from app.services.receipt_pdf import render_receipt_pdf
+from app.services.receipt_pdf import ReceiptFontUnavailable, render_receipt_pdf
 from app.services.receipts import IssuedReceipt, issue_receipt
 
 PAYMENTS = "/api/v1/customer/payments"
@@ -75,6 +82,8 @@ PLACEHOLDER_SESSION = "00000000-0000-0000-0000-000000000000"
 ISSUE_NOW = dt.datetime(2026, 11, 10, 6, 5, 9)
 # world.customer() 的公司名；日志里不许出现。
 COMPANY = "Payment Confirm Test Sdn Bhd"
+# 设计闸门 #750 v1 §7「下载：中文收据」的公司名。
+CHINESE_COMPANY = "示例科技 Sdn Bhd"
 
 # 设计 §2 的字段与顺序：断言「恰好等于」，按顺序比。
 RECEIPT_KEYS = [
@@ -510,6 +519,114 @@ def test_a_corrupted_snapshot_is_500_with_one_error_log(
     logged = errors[0].getMessage() + repr(extras)
     for forbidden in (COMPANY, issued.receipt_number, "100.00", snapshot["tax_notice"]["en"]):
         assert forbidden not in logged, forbidden
+
+
+def download_errors(caplog) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == receipt_download.__name__ and record.levelno == logging.ERROR
+    ]
+
+
+def extras_of(record: logging.LogRecord) -> dict[str, Any]:
+    # `message` 与 `asctime` 由 `Formatter.format()` 设（caplog 会格式化每条记录），新建的记录没有。
+    baseline = set(logging.LogRecord("x", logging.ERROR, "x", 0, "x", None, None).__dict__)
+    baseline |= {"message", "asctime", "taskName"}
+    return {key: value for key, value in record.__dict__.items() if key not in baseline}
+
+
+def assert_internal_error(response) -> None:
+    assert error_of(response) == (500, "INTERNAL_ERROR")
+    body = response.json()
+    assert body["error"]["message"] == "An internal error occurred."
+    assert body["request_id"]
+    assert "content-disposition" not in response.headers
+
+
+def test_a_chinese_company_name_downloads_with_the_embedded_font(world, portal, caplog) -> None:
+    """设计闸门 #750 v1 §7「下载：中文收据」：快照里的中文经嵌入的 Noto Sans SC 印出。"""
+    tenant = world.customer()
+    with world.factory() as session:
+        session.execute(
+            update(Tenant).where(Tenant.id == tenant.id).values(company_name=CHINESE_COMPANY)
+        )
+        session.commit()
+    _, issued = receipted(world, tenant)
+    snapshot = stored_snapshot(world, issued.public_id)
+    assert snapshot["customer"]["company_name"] == CHINESE_COMPANY
+    headers = portal.headers(tenant)
+
+    with caplog.at_level(logging.ERROR, logger=receipt_download.__name__):
+        response = download(portal, headers, issued.public_id)
+        again = download(portal, headers, issued.public_id)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-disposition"] == (
+        f'attachment; filename="{issued.receipt_number}.pdf"'
+    )
+    body = response.content
+    assert body == render_receipt_pdf(snapshot)
+    assert b"/FontFile2" in body
+    # 连发两次字节相同。
+    assert again.status_code == 200
+    assert again.content == body
+    # 成功下载不记日志。
+    assert download_errors(caplog) == []
+
+
+def test_an_unavailable_font_is_500_with_its_own_error_log(
+    world, portal, caplog, monkeypatch
+) -> None:
+    tenant = world.customer()
+    _, issued = receipted(world, tenant)
+
+    def failing(*args: Any, **kwargs: Any) -> bytes:
+        raise ReceiptFontUnavailable(f"fictional missing font for {COMPANY}")
+
+    monkeypatch.setattr(receipt_download, "render_receipt_pdf", failing)
+
+    with caplog.at_level(logging.ERROR, logger=receipt_download.__name__):
+        response = download(portal, portal.headers(tenant), issued.public_id)
+
+    assert_internal_error(response)
+    [record] = download_errors(caplog)
+    # 自己的文案，不是兜底的 `Receipt PDF rendering failed`，也没有 `error_type`。
+    assert record.getMessage() == "Receipt font unavailable; download refused"
+    assert record.exc_info is None
+    assert extras_of(record) == {"receipt_id": issued.public_id}
+    assert COMPANY not in caplog.text
+
+
+def test_a_rendering_exception_is_500_naming_only_its_class(
+    world, portal, caplog, monkeypatch
+) -> None:
+    tenant = world.customer()
+    _, issued = receipted(world, tenant)
+    text = f"fictional fpdf2 failure while printing {COMPANY}"
+
+    def failing(*args: Any, **kwargs: Any) -> bytes:
+        raise RuntimeError(text)
+
+    monkeypatch.setattr(receipt_download, "render_receipt_pdf", failing)
+
+    with caplog.at_level(logging.ERROR, logger=receipt_download.__name__):
+        response = download(portal, portal.headers(tenant), issued.public_id)
+
+    assert_internal_error(response)
+    assert text not in response.text
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    [record] = download_errors(caplog)
+    # 没有交给通用处理器：恰好这一条 ERROR。
+    assert errors == [record]
+    assert record.getMessage() == "Receipt PDF rendering failed"
+    assert record.exc_info is None
+    assert record.exc_text is None
+    extras = extras_of(record)
+    assert extras == {"receipt_id": issued.public_id, "error_type": "RuntimeError"}
+    assert text not in record.getMessage() + repr(extras)
+    assert text not in caplog.text
+    assert COMPANY not in caplog.text
 
 
 # --- 跨租户与只读账户 -----------------------------------------------------

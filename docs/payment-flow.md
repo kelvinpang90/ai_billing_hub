@@ -782,7 +782,10 @@ SELECT e.gateway_event_id, e.event_type, e.last_error_code, e.attempts, e.receiv
 
 - 客户只能下载本租户的收据；别的租户的、不存在的、id 不像 uuid 的一律 404 `RECEIPT_NOT_FOUND`。管理端下载要 ADMIN（登录必过 2FA），不按租户过滤。
 - 响应为 `application/pdf` 附件，文件名 `<收据号>.pdf`，`Cache-Control: no-store`。
-- 快照校验不过（只会来自手工改库）→ 500 `INTERNAL_ERROR`，api 日志有一条带收据 `public_id` 的 ERROR：人工排查，**不要改收据行**（触发器也会拒绝）。
+- 生成不了 PDF → 500 `INTERNAL_ERROR`，api 日志有一条 ERROR，`extra` 只带收据 `public_id`（`receipt_id`），不带公司名、收据号、金额、快照内容与异常原文（设计闸门 #750 §2「下载」）。按文案分三种：
+  - `Receipt snapshot invalid; download refused`：快照校验不过（只会来自手工改库）。人工排查，**不要改收据行**（触发器也会拒绝）。
+  - `Receipt font unavailable; download refused`：印出的字符串含非 Latin-1 字符，而镜像里的中文字体读不了（打包缺陷）。查镜像里的 `app/data/NotoSansSC-Regular.ttf` 与构建期的 packaging smoke（`scripts/packaging_smoke.py`），重新部署带字体的镜像。
+  - `Receipt PDF rendering failed`：其他渲染异常，`extra` 另带 `error_type`（异常类名）。看 `error_type`，按 `receipt_id` 读快照，在本地用同一代码复现。
 
 ### 14.8 开放前检查：测试付款的收据（§13 第 2 步）
 
@@ -821,8 +824,8 @@ SELECT e.gateway_event_id, e.event_type, e.last_error_code, e.attempts, e.receiv
 ### 14.10 不做什么与已知限制
 
 - **不做作废与更正**（也不做红冲）：没有任何路径改变已开具的收据。争议与外部退款照 §7 用人工调账扣回，原收据保持不变。
-- 不做 LHDN e-Invoice；不存 PDF 文件；不做中文收据；邮件不附 PDF；门户没有独立的「收据」页面（收据列表接口照 spec 提供，门户不调用）。
+- 不做 LHDN e-Invoice；不存 PDF 文件；版面只用英文；邮件不附 PDF；门户没有独立的「收据」页面（收据列表接口照 spec 提供，门户不调用）。
 - 已知限制（设计 §10）：
-  1. PDF 用标准字体（Helvetica），Latin-1 之外的字符（例如中文）印成 `?`。马来西亚注册公司名使用拉丁字母，V1 接受；需要时另过设计闸门加字体。
+  1. 快照里的中文等字符用嵌入的 Noto Sans SC（子集）印出；字体里没有的字符印成 `?`。设计闸门 #750 之前开具、印出的字符串含中文的收据，重新下载得到的字节与之前不同（字形代替 `?`，数据不变）。
   2. 开具检查的「账本行缺失」与「税务政策读不出」是永久状态（§14.3）：这笔支付永远没有收据，P2 一直报，直到另一个设计闸门给出人工开具或更正的办法。
   3. 补发扫描每轮按 `paid_at` 取最旧的 500 笔；同时有 500 笔以上持续失败时，更新的支付补不上。那时 P2 已在报。
