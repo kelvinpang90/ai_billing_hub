@@ -12980,7 +12980,7 @@ tasks:
     title: 毛利分析第三层：管理端用量分析的 CSV 导出接口
     purpose: >-
       按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「接口二」：在 app/api/admin_usage_analytics.py 新增 GET /api/v1/admin/usage-analytics/export，参数与接口一相同，复用校验、导出租约与 CSV 工具，输出每个分组一行 GROUP 加末尾一行 TOTAL 的 31 列 CSV；路由守卫补导出路径；docs/api.md 补导出小节。不做页面：属于 AIH-TASK-224。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-222
     acceptance_criteria:
