@@ -480,6 +480,15 @@ class PasswordResetToken(Base):
     __table_args__ = (
         # 0004 建；0025 不动它：它同时是 `user_id` 外键在 MySQL 上依赖的索引。
         Index("ix_password_reset_tokens_user", "user_id", "used_at"),
+        # 0040 建：忘记密码按账号限频的窗口查询（设计 #751 §2「限频规则」；v3 起是
+        # READ COMMITTED 下的普通读，不是锁读），只读窗口内的行，不受该账号历史令牌
+        # 与邀请令牌数量影响。非唯一。
+        Index(
+            "ix_password_reset_tokens_user_purpose_created",
+            "user_id",
+            "purpose",
+            "created_at",
+        ),
         # ⚠️ 条件文本与迁移 0025 一致（空白除外），test_migrations.py 比对两边。
         CheckConstraint(
             "purpose IN ('PASSWORD_RESET', 'INVITATION')",

@@ -403,21 +403,27 @@ spec §57 的项目字段写 `project_id` 与 `description`，§76 的表写 `id
 0024 只加列与 CHECK：递增（P3，`reset_password`）与签发、比较（P2，AIH-TASK-087）不在本迁移里。
 迁移的锁表、失败处理与回滚分析见迁移文件头。
 
-## `password_reset_tokens`（spec §53；T0.8d 迁移 `0004_password_reset_outbox` 建表，AIH-TASK-089 迁移 `0025_customer_portal_accounts` 加 `purpose`）
+## `password_reset_tokens`（spec §53；T0.8d 迁移 `0004_password_reset_outbox` 建表，AIH-TASK-089 迁移 `0025_customer_portal_accounts` 加 `purpose`，AIH-TASK-231 迁移 `0040_reset_request_index` 加索引）
 
 这里只写本任务涉及的列与约束，其余列见模型 `app/models/auth.py` 的 `PasswordResetToken`。
 
 | 列 | 类型 | 约束 |
 | --- | --- | --- |
-| `purpose` | VARCHAR(32) | 非空，服务器端默认 `PASSWORD_RESET`（迁移时已有行取它），`CHECK (purpose IN ('PASSWORD_RESET', 'INVITATION'))`（`ck_password_reset_tokens_purpose`）；不建索引 |
+| `purpose` | VARCHAR(32) | 非空，服务器端默认 `PASSWORD_RESET`（迁移时已有行取它），`CHECK (purpose IN ('PASSWORD_RESET', 'INVITATION'))`（`ck_password_reset_tokens_purpose`）；不单独建索引；是复合索引 `(user_id, purpose, created_at)` 的第二列（迁移 0040） |
 
 用途（设计闸门 #368 v10 §2）：一张表装两种一次性令牌，`PASSWORD_RESET` 是重置密码，`INVITATION` 是门户账号
 邀请。⚠️ **两种令牌必须按用途隔离**（设计 §2「邀请邮件与重置的隔离」）：重置只认 `PASSWORD_RESET`，接受邀请只认
 `INVITATION`，按令牌查找或消费的查询都带上用途条件。旧代码插入时不写这一列，取默认值，所以「新迁移 + 旧代码」
 窗口里重置照常。
 
-索引不变：按令牌查找走 `token_hash` 的唯一索引，按用户作废走 `ix_password_reset_tokens_user (user_id, used_at)`，
-它同时是 `user_id` 外键在 MySQL 上依赖的索引。
+索引：按令牌查找走 `token_hash` 的唯一索引，按用户作废走 `ix_password_reset_tokens_user (user_id, used_at)`，
+它同时是 `user_id` 外键在 MySQL 上依赖的索引；这两个 0040 不动。
+
+迁移 `0040_reset_request_index`（设计闸门 #751 v3 §2「数据库（迁移 0040，I1）」）加非唯一索引
+`ix_password_reset_tokens_user_purpose_created (user_id, purpose, created_at)`。用途：忘记密码按账号限频的窗口查询
+（设计 §2「限频规则」：READ COMMITTED 下的普通读，不是锁读；查询本身属于设计 #751 的 I4），按等值前缀 `(user_id, purpose)` 加 `created_at` 的范围扫描只覆盖
+窗口内的行，不受该账号历史令牌与邀请令牌数量影响。0040 只加这一个索引，不改列、约束与数据；在线 DDL，`downgrade`
+只删它；锁表、失败处理与回滚分析见迁移文件头。
 
 0025 只改表结构：开通、接受邀请与重置的用途过滤属于 AIH-TASK-090 / 091 与管理员的重置 PR。`downgrade` 在存在
 CUSTOMER 用户或 `INVITATION` 令牌时拒绝执行；锁表、失败处理与回滚分析见迁移文件头。
