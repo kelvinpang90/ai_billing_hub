@@ -13268,7 +13268,7 @@ tasks:
     title: 收据 PDF 中文字体第二层：下载接口补字体不可用与渲染失败的处置，同步接口与支付流程文档
     purpose: >-
       按 docs/design/AIH-TASK-228-receipt-cjk-font.md（设计闸门 #750 已批准 v1） §2「下载」「文档」：app/api/receipt_download.py 的 receipt_pdf_response 照 app/api/statement_download.py 的三支处理快照不合规、字体不可用与其他渲染异常（ERROR 日志只带收据 id，返回 500），docs/api.md 的客户与管理端收据下载小节、docs/payment-flow.md §14.7 与 §14.10 同步。不改渲染：AIH-TASK-228 已交付。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-228
     acceptance_criteria:
