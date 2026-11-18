@@ -13210,7 +13210,7 @@ tasks:
     title: 收据 PDF 中文字体第一层：抽出共用字体选择模块，收据按对账单同一规则嵌入 Noto Sans SC
     purpose: >-
       按 docs/design/AIH-TASK-228-receipt-cjk-font.md（设计闸门 #750 已批准 v1） §2「共用模块」「对账单」「收据」：新模块 app/services/pdf_text.py 原样搬入 app/services/statement_pdf.py 的字体选择规则（只改名字），对账单改从它取字体选择且输出字节不变，app/services/receipt_pdf.py 的每个印出的值按同一规则选 Helvetica 或嵌入 Noto Sans SC 子集；app/data/__init__.py 只改文档串。不改下载接口与文档：属于 AIH-TASK-229。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-225
     acceptance_criteria:
