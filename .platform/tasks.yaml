@@ -12872,7 +12872,7 @@ tasks:
     title: 毛利分析第一层：用量分析仓储层加按马来西亚日与月分组、全量合计与已付款手续费汇总
     purpose: >-
       按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「仓储」「V1 口径」「时间语义」「金额与精度」：app/repositories/usage_analytics.py 加 MalaysiaMonth 表达式，list_usage_analytics 支持 day / month 分组，抽出共用的条件构造 _conditions，新增 usage_analytics_totals（与分组同列同条件的全量合计）与 paid_payment_totals（paid_at 落在区间内的 PAID 支付的笔数、充值到账额、已知手续费与未知笔数）。不改接口、schema 与前端：属于 AIH-TASK-222 起的任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-220
     acceptance_criteria:
