@@ -25,16 +25,15 @@
 
 <!-- openclaw:planning-v1:begin -->
 ### 当前计划
-1. `AIH-TASK-232` 认证加固第二层：认证寿命、计数与限流配置项加下界，新增重置申请最短间隔
-2. `AIH-TASK-233` 认证加固第三层：启动时校验前端基址的格式，生产环境必须是 https
-3. `AIH-TASK-234` Excel 导出第一层：API 容器的临时目录挂载为内存文件系统
-4. `AIH-TASK-235` Excel 导出第二层：通用 xlsx 写出模块与附件响应，公式注入防护与 CSV 共用
-5. `AIH-TASK-236` Excel 导出第三层：客户四个导出接口加 xlsx 格式参数
-6. `AIH-TASK-237` Excel 导出第四层：管理端毛利分析导出接口加 xlsx 格式参数
-7. `AIH-TASK-238` Excel 导出第五层：门户用量页的用量导出与月度汇总加导出 Excel 按钮
-8. `AIH-TASK-239` Excel 导出第六层：门户钱包页与会话页加导出 Excel 按钮
-9. `AIH-TASK-240` Excel 导出第七层：管理端用量分析页加导出 Excel 按钮
-10. `AIH-TASK-241` Excel 导出第八层：运维手册补 xlsx 导出排查，勾选 Phase 5 与 Phase 7 的导出项
+1. `AIH-TASK-233` 认证加固第三层：启动时校验前端基址的格式，生产环境必须是 https
+2. `AIH-TASK-234` Excel 导出第一层：API 容器的临时目录挂载为内存文件系统
+3. `AIH-TASK-235` Excel 导出第二层：通用 xlsx 写出模块与附件响应，公式注入防护与 CSV 共用
+4. `AIH-TASK-236` Excel 导出第三层：客户四个导出接口加 xlsx 格式参数
+5. `AIH-TASK-237` Excel 导出第四层：管理端毛利分析导出接口加 xlsx 格式参数
+6. `AIH-TASK-238` Excel 导出第五层：门户用量页的用量导出与月度汇总加导出 Excel 按钮
+7. `AIH-TASK-239` Excel 导出第六层：门户钱包页与会话页加导出 Excel 按钮
+8. `AIH-TASK-240` Excel 导出第七层：管理端用量分析页加导出 Excel 按钮
+9. `AIH-TASK-241` Excel 导出第八层：运维手册补 xlsx 导出排查，勾选 Phase 5 与 Phase 7 的导出项
 
 ### 已阻塞
 - 待登记：第一个真实客户进生产前处置验收管理员账号（2026-09-28 Kelvin 选 (a)：浏览器验收沿用夹具 ADMIN 账号，期限是第一个真实客户进生产之前，届时必须降权或撤销；仍是待办）｜阻塞：等第一个真实客户进生产前执行
