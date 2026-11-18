@@ -319,6 +319,31 @@ Healthchecks 已满 20 个检查，支付信号并进 `wallet_negative_balance` 
 - **建单超过 8 天仍拿不到的，`gateway_fee` 保持为空**，不再补查。它只影响内部毛利分析，不影响入账。
 - 人工「按实付入账」（`resolution = CREDITED`）的支付也是 `PAID`，同样会被补手续费：只写 `gateway_fee` 与 `last_reconciled_at`，不改状态与结案字段。
 
+### 5.5 毛利报表里的手续费与未知手续费的处置
+
+管理端用量分析（`GET /api/v1/admin/usage-analytics` 的 `totals` 与 CSV 导出的 `TOTAL` 行，口径见 [api.md](api.md)「管理端用量分析」，
+设计见 [AIH-TASK-221 设计](design/AIH-TASK-221-margin-analytics.md) §2「V1 口径」）这样计手续费：
+
+- **按 `paid_at` 归期**（现金期间）：`paid_at` 落在查询区间 `[occurred_from, occurred_to)` 内的支付计入；用量收入与估算成本按 `occurred_at`，
+  两个期间用同一对时刻，扣手续费后的毛利是两个期间的数相减（接口的 `usage_period_basis` 与 `payments.period_basis`、CSV 的列都写明）。
+- **只计 `PAID`**（且 `confirmed_currency = 'MYR'`）：`REVIEW_REQUIRED`、人工不入账结案（`FAILED`）的支付即使 Stripe 收了钱、扣了手续费也不计；
+  外部退款、争议费不计（§7）。
+- **不分摊到分组行**：手续费只出现在合计层（`totals.payments` 与 `TOTAL` 行），客户、项目、供应商、模型、功能、日、月各分组行只有用量毛利；
+  按日 / 按月分组时也不放进当天 / 当月那一行。带项目、供应商、模型或功能筛选时手续费无法归属，手续费块与扣手续费后的毛利为空。
+- **`gateway_fee` 为空的支付**计入 `gateway_fee_unknown_count`，**毛利没有扣它们**：`gross_profit` 偏高，页面显示
+  「N paid payment(s) have no recorded gateway fee; gross profit does not deduct them.」。补抓期内（§5.4）未知笔数会逐渐减少、手续费合计随之增加，
+  报表不是定稿数字。
+- **`paid_at` 是本系统确认的时刻**，不是 Stripe 的付款时刻：人工「按实付入账」（§6.3）的支付按**结案日**归期，可能与客户实际付款跨月。
+
+**建单 8 天后仍为空（或费用币种非 MYR）的处置**：这些支付的 `gateway_fee` 永久为空，报表会一直把它们计为未知。
+
+1. 在管理端支付详情里按 `gateway_reference` 与 `gateway_payment_intent_id` 到 Stripe 后台核对这笔付款的实际手续费。
+2. **V1 不录入**：没有人工录入手续费的路径，不要改库补写（手续费人工录入需另过设计闸门）。
+3. 按未知笔数估算毛利偏高的量级：**未知笔数 × 同一区间已知手续费的平均每笔金额**，即
+   `gateway_fee_unknown_count × gateway_fee ÷ (paid_count − gateway_fee_unknown_count)`（各值取同一次查询的 `totals.payments`）。
+   已知笔数（`paid_count − gateway_fee_unknown_count`）为 0 时只写未知笔数、不估金额。
+4. 这只是**量级估计**，用于判断偏差是否要紧；以 Stripe 后台的实际手续费为准。
+
 ## 6. 复核处理
 
 `REVIEW_REQUIRED` 的支付**钱已在 Stripe、钱包没有加**，`review open` 一直报 P1 到结案为止。它永不自动入账，只能由管理员经下面的两个出口之一结案。
