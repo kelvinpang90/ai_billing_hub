@@ -13434,7 +13434,7 @@ tasks:
     title: 认证加固第三层：启动时校验前端基址的格式，生产环境必须是 https
     purpose: >-
       按 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） §2「frontend_base_url 的格式（I3）」：app/core/config.py 新增 require_frontend_base_url 与 frontend_base_url 的字段校验（第 1–5 步，返回去掉末尾斜杠的规范值），另加一个 model_validator 管第 6 步（environment 为 production 时非空值必须是 https）；测试同步。不改任何使用方（渲染函数、支付建单、告警）。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-232
     acceptance_criteria:
