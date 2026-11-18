@@ -12822,7 +12822,7 @@ tasks:
     title: 对账单 PDF 第五层：PDF 下载的运维说明与 Phase 7 一项的勾选
     purpose: >-
       按 docs/design/AIH-TASK-216-statement-pdf.md（设计闸门 #708 已批准 v3） §5、§8、§10：docs/runbook.md 的「月度对账单」一节补「PDF 下载失败」处置与首个账期生成后的人工核对，docs/TODO.md 勾选 Phase 7 的「PDF 下载」。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-219
     acceptance_criteria:
