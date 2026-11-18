@@ -8,20 +8,26 @@ AIH-TASK-199。下载接口属于 AIH-TASK-202（客户）与 203（管理端）
 ⚠️ **先校验、再渲染**：快照任何一处不合规都抛 `ReceiptSnapshotInvalid`，不抛别的异常（下载接口
 把它转成 500）。
 
-⚠️ **可重现**：创建时刻取快照的 `issued_at`、不压缩内容流，同一份快照两次渲染的字节完全相同。
+⚠️ **可重现**：创建时刻取快照的 `issued_at`、不压缩内容流，同一份快照两次渲染的字节完全相同
+（含中文字体子集时也一样）。
 
-只用 Helvetica 标准字体（不嵌入字体文件）：它只支持 Latin-1，每个印出的字符串先把编不了的字符
-换成 `?`（设计 §10 已知限制 1）。金额只经 `Decimal`，不经 float（INV-10）。
+字体照 `app/services/pdf_text.py`（与对账单共用，设计闸门 #750 §2）：标题与标签是固定 ASCII，用
+Helvetica；每个印出的值按同一规则选 Helvetica 或嵌入 Noto Sans SC 子集，两种字体都印不出的字符换成
+`?`；需要中文字体而字体读不了时抛 `ReceiptFontUnavailable`。金额只经 `Decimal`，不经 float
+（INV-10）。
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import re
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final
 
 from fpdf import FPDF, XPos, YPos
+
+from app.services.pdf_text import HELVETICA, PdfFonts, PdfFontUnavailable
 
 _SCHEMA_VERSION: Final = 1
 _TOP_KEYS: Final = frozenset(
@@ -55,13 +61,16 @@ _METHOD_LABELS: Final = {"card": "Card", "fpx": "FPX"}
 # 补发的收据与 Stripe 没给付款方式时快照里是 null（设计 §2「补发扫描」）。
 _METHOD_UNKNOWN: Final = "Stripe"
 
-_FONT: Final = "Helvetica"
 _LABEL_WIDTH: Final = 45
 _LINE_HEIGHT: Final = 7
 
 
 class ReceiptSnapshotInvalid(Exception):
     """The snapshot does not have the shape of gate #589 v2 §2「快照」."""
+
+
+# 与对账单的 `StatementFontUnavailable` 是同一个类（设计闸门 #750 §10 第 3 条）。
+ReceiptFontUnavailable = PdfFontUnavailable
 
 
 def _section(container: dict[str, Any], key: str, keys: frozenset[str]) -> dict[str, Any]:
@@ -134,11 +143,6 @@ def _validate(snapshot: object) -> dict[str, Any]:
     return snapshot
 
 
-def _latin1(text: str) -> str:
-    """Replace what Helvetica cannot encode with `?` (fpdf2 raises on it otherwise)."""
-    return "".join(char if ord(char) < 256 else "?" for char in text)
-
-
 def _malaysia_time(raw: str) -> str:
     """A validated naive UTC timestamp as `YYYY-MM-DD HH:MM MYT`."""
     moment = dt.datetime.fromisoformat(raw).replace(tzinfo=dt.UTC).astimezone(_MALAYSIA)
@@ -166,7 +170,8 @@ def _payment_method(raw: str | None) -> str:
 def render_receipt_pdf(snapshot: dict[str, Any]) -> bytes:
     """One A4 portrait page in English, rendered only from the snapshot.
 
-    不合规的快照抛 `ReceiptSnapshotInvalid`。同一份快照两次渲染的字节相同。
+    不合规的快照抛 `ReceiptSnapshotInvalid`（先校验、不读字体）；需要中文字体而字体读不了时抛
+    `ReceiptFontUnavailable`。同一份快照两次渲染的字节相同。
     """
     _validate(snapshot)
     payment = snapshot["payment"]
@@ -191,32 +196,38 @@ def render_receipt_pdf(snapshot: dict[str, Any]) -> bytes:
     pdf.set_auto_page_break(auto=False)
     # 可重现：创建时刻取快照（不带时区的 UTC），fpdf2 的文件标识也由它与内容算出。
     pdf.set_creation_date(issued_at.replace(tzinfo=dt.UTC))
-    pdf.set_title(_latin1(snapshot["receipt_number"]))
+    # 收据号已校验为 ASCII。
+    pdf.set_title(snapshot["receipt_number"])
     pdf.set_margins(20, 20, 20)
-    pdf.add_page()
 
-    pdf.set_font(_FONT, "B", 18)
-    pdf.cell(0, 10, "PAYMENT RECEIPT", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.set_font(_FONT, "", 12)
-    pdf.multi_cell(
-        0, 8, _latin1(snapshot["issuer"]["name"]), align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT
-    )
-    pdf.ln(8)
+    with contextlib.ExitStack() as stack:
+        fonts = PdfFonts(pdf, stack)
+        pdf.add_page()
 
-    for label, value in rows:
-        pdf.set_font(_FONT, "B", 11)
-        pdf.cell(_LABEL_WIDTH, _LINE_HEIGHT, label)
-        pdf.set_font(_FONT, "", 11)
-        pdf.multi_cell(
-            0, _LINE_HEIGHT, _latin1(value), align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT
-        )
+        # 标题与标签是固定 ASCII：Helvetica，不经 `prepare`。
+        pdf.set_font(HELVETICA, "B", 18)
+        pdf.cell(0, 10, "PAYMENT RECEIPT", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        family, text = fonts.prepare(snapshot["issuer"]["name"])
+        pdf.set_font(family, "", 12)
+        pdf.multi_cell(0, 8, text, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.ln(8)
 
-    pdf.ln(10)
-    pdf.set_font(_FONT, "", 9)
-    pdf.multi_cell(
-        0, 5, _latin1(snapshot["tax_notice"]["en"]), align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT
-    )
-    return bytes(pdf.output())
+        for label, value in rows:
+            pdf.set_font(HELVETICA, "B", 11)
+            pdf.cell(_LABEL_WIDTH, _LINE_HEIGHT, label)
+            # 每个值都经 `prepare`（含代码生成的 ASCII 值，原样返回）。
+            family, text = fonts.prepare(value)
+            pdf.set_font(family, "", 11)
+            pdf.multi_cell(0, _LINE_HEIGHT, text, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        pdf.ln(10)
+        # 原文：不改写、不拼接，含换行时照换行。
+        family, text = fonts.prepare(snapshot["tax_notice"]["en"])
+        pdf.set_font(family, "", 9)
+        pdf.multi_cell(0, 5, text, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        # 字体文件在输出（子集化）之后才释放。
+        return bytes(pdf.output())
 
 
-__all__ = ["ReceiptSnapshotInvalid", "render_receipt_pdf"]
+__all__ = ["ReceiptFontUnavailable", "ReceiptSnapshotInvalid", "render_receipt_pdf"]

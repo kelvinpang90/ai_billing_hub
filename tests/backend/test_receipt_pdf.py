@@ -1,27 +1,60 @@
 """Receipt PDF rendering (gate #589 v2 §2「PDF」, §7「渲染」「渲染只读快照」; AIH-TASK-199).
 
+中文字体（设计闸门 #750 v1 §2「收据」、§7；AIH-TASK-228）：每个印出的值按 `app/services/pdf_text.py`
+的规则选 Helvetica 或嵌入 Noto Sans SC 子集。
+
 内容流不压缩，文字直接在字节里检索（标准字体的字符串是 Latin-1 编码的 `(…)` 字面量）；页数数
-`/Type /Page` 对象（不含 `/Type /Pages`）。
+`/Type /Page` 对象（不含 `/Type /Pages`）。Noto Sans SC 的文字经 ToUnicode 还原（`pdf_content`）。
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
+import os
 import re
 import subprocess
 import sys
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fpdf import FPDF
+from pdf_content import (
+    bfchar_hex,
+    embeds_noto,
+    literal,
+    text_positions,
+    to_unicode,
+    unicode_texts,
+)
 
-from app.services.receipt_pdf import ReceiptSnapshotInvalid, render_receipt_pdf
+from app.services import pdf_text, receipt_pdf
+from app.services.receipt_pdf import (
+    ReceiptFontUnavailable,
+    ReceiptSnapshotInvalid,
+    render_receipt_pdf,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
+_LABELS = (
+    "Receipt No.",
+    "Issued",
+    "Received from",
+    "Payment date",
+    "Amount",
+    "Currency",
+    "Payment method",
+    "Gateway reference",
+    "Payment ID",
+    "Status",
+)
+# A4 底边往上 20 mm，单位 pt（`BT x y Td` 的 y 从页面左下角量起）。
+_BOTTOM_LIMIT = 56.69
 
 
 def _snapshot(**payment: Any) -> dict[str, Any]:
@@ -52,6 +85,19 @@ def _snapshot(**payment: Any) -> dict[str, Any]:
 
 def _pages(pdf: bytes) -> int:
     return len(_PAGE_OBJECT.findall(pdf))
+
+
+def _company(name: str) -> Callable[[], dict[str, Any]]:
+    def build() -> dict[str, Any]:
+        snapshot = _snapshot()
+        snapshot["customer"]["company_name"] = name
+        return snapshot
+
+    return build
+
+
+def _chinese_snapshot() -> dict[str, Any]:
+    return _company("示例科技 Sdn Bhd")()
 
 
 def test_renders_one_page_with_every_value() -> None:
@@ -110,16 +156,193 @@ def test_payment_method_display(method: str | None, shown: bytes) -> None:
     assert _pages(pdf) == 1
 
 
-def test_characters_outside_latin1_become_question_marks() -> None:
+def test_characters_outside_latin1_are_printed_with_noto_sans_sc() -> None:
+    """设计闸门 #750 §7「旧的印成 ? 用例」：本批之前这里印成 `??`。"""
     snapshot = _snapshot()
     snapshot["customer"]["company_name"] = "Café 中文 Sdn Bhd"
 
     pdf = render_receipt_pdf(snapshot)
 
-    # é 在 Latin-1 里，原样留下；两个汉字换成 `?`。
-    assert b"(Caf" in pdf
-    assert b" ?? Sdn Bhd)" in pdf
+    assert embeds_noto(pdf)
+    texts = unicode_texts(pdf)
+    assert any("Café 中文 Sdn Bhd" in text for text in texts), texts
+    assert not any("??" in text for text in texts), texts
+    assert b" ?? Sdn Bhd)" not in pdf
     assert _pages(pdf) == 1
+
+
+# --- 中文字体（设计闸门 #750 §7）--------------------------------------------------------
+
+
+class _LegacyFonts:
+    """The rule before AIH-TASK-228: always Helvetica, `ord ≥ 256` → `?`, never `add_font`."""
+
+    def __init__(self, pdf: FPDF, stack: contextlib.ExitStack) -> None:
+        del pdf, stack
+
+    def prepare(self, text: str) -> tuple[str, str]:
+        return "Helvetica", "".join(char if ord(char) < 256 else "?" for char in text)
+
+
+# 快照 → 收据上印出的公司名。
+_LATIN1_RESULTS = {
+    "ascii": (_snapshot, "Example Sdn Bhd"),
+    "latin1": (_company("Café Sdn Bhd"), "Café Sdn Bhd"),
+    "missing_glyph": (_company("Café த Sdn Bhd"), "Café ? Sdn Bhd"),
+}
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "shown"), list(_LATIN1_RESULTS.values()), ids=list(_LATIN1_RESULTS)
+)
+def test_latin1_receipts_render_the_same_bytes_as_before(
+    monkeypatch: pytest.MonkeyPatch, snapshot: Callable[[], dict[str, Any]], shown: str
+) -> None:
+    current = render_receipt_pdf(snapshot())
+
+    monkeypatch.setattr(receipt_pdf, "PdfFonts", _LegacyFonts)
+    legacy = render_receipt_pdf(snapshot())
+
+    assert current == legacy
+    assert b"/FontFile2" not in current
+    assert literal(shown) in current
+
+
+def test_character_missing_from_the_font_stays_helvetica() -> None:
+    assert 0x0BA4 not in pdf_text.font_cmap()
+
+    pdf = render_receipt_pdf(_company("Café த Sdn Bhd")())
+
+    assert literal("Café ? Sdn Bhd") in pdf
+    assert b"/FontFile2" not in pdf
+
+
+def test_chinese_company_name_embeds_a_noto_sans_sc_subset() -> None:
+    pdf = render_receipt_pdf(_chinese_snapshot())
+
+    assert b"/FontFile2" in pdf
+    assert re.search(rb"/BaseFont\s*/\S*NotoSansSC", pdf)
+    hexadecimal = bfchar_hex(pdf)
+    for char in "示例科技":
+        assert f"{ord(char):04X}" in hexadecimal, char
+    texts = unicode_texts(pdf)
+    assert any("示例科技 Sdn Bhd" in text for text in texts), texts
+    # 标题、标签与 ASCII 的值仍是 Helvetica 字面量。
+    for text in ("PAYMENT RECEIPT", "RM 1,000.00", "ACV-AIR-2026-000001", *_LABELS):
+        assert literal(text) in pdf, text
+    assert _pages(pdf) == 1
+
+
+def test_character_missing_from_the_font_becomes_question_mark_with_noto() -> None:
+    assert 0x0BA4 not in pdf_text.font_cmap()
+
+    pdf = render_receipt_pdf(_company("Café 中 த")())
+
+    assert embeds_noto(pdf)
+    assert any("Café 中 ?" in text for text in unicode_texts(pdf))
+    assert "த" not in to_unicode(pdf).values()
+
+
+def test_other_free_text_uses_the_same_rule() -> None:
+    cmap = pdf_text.font_cmap()
+    assert ord("’") in cmap
+    assert ord("\t") not in cmap
+    snapshot = _snapshot()
+    snapshot["issuer"]["name"] = "示例开具方 Sdn Bhd"
+    snapshot["tax_notice"]["en"] = "Customer’s copy\tA\nSecond line B"
+
+    pdf = render_receipt_pdf(snapshot)
+    texts = unicode_texts(pdf)
+
+    assert embeds_noto(pdf)
+    assert any("示例开具方 Sdn Bhd" in text for text in texts), texts
+    assert any("Customer’s copy?A" in text for text in texts), texts
+    assert any("Second line B" in text for text in texts), texts
+    # 在换行符处断开：两段不在同一个字符串里。
+    assert not any("A" in text and "Second" in text for text in texts), texts
+    assert all("\t" not in text and "\n" not in text for text in texts), texts
+    assert "\t" not in to_unicode(pdf).values()
+    assert _pages(pdf) == 1
+
+
+def test_long_chinese_company_name_fits_on_one_page() -> None:
+    pdf = render_receipt_pdf(_company("中" * 255)())
+
+    assert _pages(pdf) == 1
+    # fpdf2 把每段文字写成 `BT x y Td … ET`（设计闸门 #750 §10 假设 3）。
+    positions = text_positions(pdf)
+    assert len(positions) > len(_LABELS)
+    assert all(y >= _BOTTOM_LIMIT for _, y in positions), min(y for _, y in positions)
+    assert sum(text.count("中") for text in unicode_texts(pdf)) == 255
+
+
+@pytest.fixture
+def fresh_font_cache() -> Iterator[None]:
+    pdf_text.font_cmap.cache_clear()
+    yield
+    pdf_text.font_cmap.cache_clear()
+
+
+@pytest.mark.usefixtures("fresh_font_cache")
+def test_missing_font_fails_only_receipts_that_need_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(pdf_text, "_font_resource", lambda: tmp_path / "missing.ttf")
+
+    with pytest.raises(ReceiptFontUnavailable) as raised:
+        render_receipt_pdf(_chinese_snapshot())
+    assert not isinstance(raised.value, ReceiptSnapshotInvalid)
+    # 全 Latin-1 的收据不读字体文件，照常渲染。
+    assert render_receipt_pdf(_snapshot()).startswith(b"%PDF-")
+    # 先校验、后读字体：不合规的中文快照仍是 ReceiptSnapshotInvalid。
+    invalid = _chinese_snapshot()
+    invalid["schema_version"] = 2
+    with pytest.raises(ReceiptSnapshotInvalid):
+        render_receipt_pdf(invalid)
+
+
+def test_chinese_receipt_renders_identical_bytes_in_one_process() -> None:
+    assert render_receipt_pdf(_chinese_snapshot()) == render_receipt_pdf(_chinese_snapshot())
+
+
+_RENDER_SCRIPT = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    sys.path.insert(0, sys.argv[1])
+
+    from app.services.receipt_pdf import render_receipt_pdf
+
+    sys.stdout.buffer.write(render_receipt_pdf(json.loads(sys.stdin.read())))
+    """
+)
+
+
+def _render_in_subprocess(snapshot: dict[str, Any], **environment: str) -> bytes:
+    done = subprocess.run(
+        [sys.executable, "-c", _RENDER_SCRIPT, str(_REPO_ROOT)],
+        input=json.dumps(snapshot).encode("utf-8"),
+        capture_output=True,
+        cwd=_REPO_ROOT,
+        env={**os.environ, **environment},
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    return done.stdout
+
+
+def test_chinese_receipt_renders_identical_bytes_across_processes() -> None:
+    """哈希随机化与 fontTools 的 `head.modified`（当前时间或 SOURCE_DATE_EPOCH）都不影响字节。"""
+    snapshot = _chinese_snapshot()
+
+    first = _render_in_subprocess(snapshot, PYTHONHASHSEED="1", SOURCE_DATE_EPOCH="0")
+    second = _render_in_subprocess(snapshot, PYTHONHASHSEED="2", SOURCE_DATE_EPOCH="2000000000")
+
+    assert b"/FontFile2" in first
+    assert first == second
+    assert first == render_receipt_pdf(snapshot)
 
 
 def test_long_company_name_wraps_on_one_page() -> None:
@@ -264,8 +487,12 @@ def test_snapshot_that_is_not_an_object_is_rejected(snapshot: Any) -> None:
         render_receipt_pdf(snapshot)
 
 
-def test_renders_without_database_or_configuration() -> None:
-    """设计 §7「渲染只读快照」：会话、模型、仓储与配置模块都导入不了时照常渲染，字节相同。"""
+@pytest.mark.parametrize("make", [_snapshot, _chinese_snapshot], ids=["ascii", "chinese"])
+def test_renders_without_database_or_configuration(make: Callable[[], dict[str, Any]]) -> None:
+    """设计 §7「渲染只读快照」：会话、模型、仓储与配置模块都导入不了时照常渲染，字节相同。
+
+    设计闸门 #750 §7：含中文字体时也一样，快照不被改动。
+    """
     script = textwrap.dedent(
         """
         import json
@@ -289,7 +516,8 @@ def test_renders_without_database_or_configuration() -> None:
         sys.stdout.buffer.write(render_receipt_pdf(json.loads(sys.stdin.read())))
         """
     )
-    snapshot = _snapshot()
+    snapshot = make()
+    before = copy.deepcopy(snapshot)
 
     done = subprocess.run(
         [sys.executable, "-c", script, str(_REPO_ROOT)],
@@ -302,3 +530,4 @@ def test_renders_without_database_or_configuration() -> None:
 
     assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
     assert done.stdout == render_receipt_pdf(snapshot)
+    assert snapshot == before
