@@ -13106,7 +13106,7 @@ tasks:
     title: 毛利分析第五层：支付流程文档补毛利报表口径与手续费未知的处置，勾选 Phase 7 对应项
     purpose: >-
       按 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2） §2「V1 口径」、§5 手续费永久未知一行与 §10 已知限制 1、5：docs/payment-flow.md §5.4 之后补一小节写毛利报表里手续费的归期与未知手续费的处置；docs/TODO.md Phase 7 勾选「筛选」并在另两项正文写明已交付与剩下的部分。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-224
     acceptance_criteria:
