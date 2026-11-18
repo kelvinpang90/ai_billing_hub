@@ -180,8 +180,13 @@ class Settings(BaseSettings):
 
     # 访问令牌短寿命是刻意的：吊销作用在刷新令牌上，访问令牌靠过期自然失效。
     # 这意味着「吊销后最多还有这么久旧令牌可用」，是明确接受的取舍。
-    access_token_ttl_seconds: int = 600
+    # ⚠️ `ge=60`（设计闸门 #751 v3 §2「配置下界」）：前端只在 401 时刷新，每次刷新都过一次
+    # 认证限流（进程内令牌桶与 nginx `billing_auth`，每来源每分钟 10 次）。低于 60 秒时一个
+    # 活跃会话每分钟刷新不止一次，同一出口 IP 后的几个会话就把认证限流吃满，表现为「用着
+    # 用着被踢回登录页」。60 秒让每个会话每分钟至多刷新一次。
+    access_token_ttl_seconds: int = Field(default=600, ge=60)
     # 刷新令牌的绝对寿命与闲置上限。计费后台不需要长会话。
+    # 两者与访问令牌寿命的关系由 `_auth_timings_fit` 校验。
     refresh_token_ttl_seconds: int = 43_200
     refresh_token_idle_seconds: int = 1_800
 
@@ -205,13 +210,25 @@ class Settings(BaseSettings):
 
     # 账号锁定：连续失败次数与锁定时长。⚠️ 这防的是**针对某个账号**的猜测；
     # 针对来源的高频请求由 auth_rate_limit_* 挡，两者防的不是一回事。
-    login_max_failures: int = 5
-    login_lockout_seconds: int = 900
+    #
+    # ⚠️ 下界（设计闸门 #751 v3 §2「配置下界」）：
+    # - `login_max_failures` `ge=3`：1 时一次输错就锁 15 分钟，任何知道邮箱的人每个锁定周期
+    #   发一次请求就能把账号一直锁着；2 时大小写锁定键加一次手误就锁。3 次给真人留出两次手误。
+    # - `login_lockout_seconds` `ge=300`：递增封顶（×4）时，单个账号的猜测速率上限是
+    #   `login_max_failures / (4 × lockout)`。下界组合（3 次、300 秒）约每天 216 次，默认约
+    #   每天 120 次；若允许 60 秒则约每天 1080 次，接近按来源限流的量级、锁定形同虚设。
+    login_max_failures: int = Field(default=5, ge=3)
+    login_lockout_seconds: int = Field(default=900, ge=300)
 
     # 进程内限流兜底（每来源每分钟）。主控在 nginx 的 limit_req；这一层是为了
     # 「不经 nginx 直接跑 uvicorn」时 Argon2 的调用次数仍有上界。
-    auth_rate_limit_per_minute: int = 10
-    auth_rate_limit_burst: int = 20
+    # ⚠️ 下界（设计闸门 #751 v3 §2「配置下界」；`TokenBucket` 对非正数的拒绝作为第二道检查保留）：
+    # - `auth_rate_limit_per_minute` `ge=3`：被限流的用户一分钟内要能补回完整的一次登录
+    #   （3 次）；低于它，一次 429 之后要等一分多钟才能再试。
+    # - `auth_rate_limit_burst` `ge=3`：一次冷启动登录要连过三次令牌桶 —— 页面加载的静默
+    #   刷新、`/login`、`/login/totp`。容量小于 3 时，没有任何攻击，正常用户也登不完一次。
+    auth_rate_limit_per_minute: int = Field(default=10, ge=3)
+    auth_rate_limit_burst: int = Field(default=20, ge=3)
 
     # ⚠️ 默认 True（安全优先）。本地跑 http 时 Secure cookie 不会被发送，
     # 所以本地 .env 要显式设成 false —— 让不安全成为一次**有意识的**选择。
@@ -233,6 +250,15 @@ class Settings(BaseSettings):
     # 重置令牌的寿命。30 分钟是闸门定的：足够去邮箱把信翻出来，又不至于让一封
     # 躺在收件箱里的旧信长期是一把可用的钥匙。
     password_reset_ttl_seconds: int = Field(default=1_800, gt=0)
+
+    # 同一账号两次忘记密码申请之间的最短间隔（设计闸门 #751 v3 §2「限频规则」「配置下界」）：
+    # 窗口内的第二次申请照常 200，但不签发令牌、不发信。
+    # - 下界 `ge=60`：低于 60 秒时，对一个账号每分钟可发的信已与按来源限流同量级，控制形同虚设。
+    # - 上界 `le=3600`：丢了信的真用户最多等 1 小时。
+    # - 不大于 `password_reset_ttl_seconds`（`_auth_timings_fit` 校验）：保证被限频时窗口内
+    #   那封信的链接一定还有效；否则攻击者可以在每封信过期后、窗口重开前替受害者抢先申请，
+    #   让受害者长期拿不到可用链接。
+    password_reset_min_interval_seconds: int = Field(default=300, ge=60, le=3600)
 
     # --- 客户门户认证（AIH-TASK-090，设计闸门 #368 v10 §2） -------------------
 
@@ -441,6 +467,30 @@ class Settings(BaseSettings):
             )
         if 59 >= self.ai_delivery_lease_seconds:
             raise ValueError("ai_delivery_lease_seconds must exceed the hard time limit")
+        return self
+
+    @model_validator(mode="after")
+    def _auth_timings_fit(self) -> Settings:
+        # 设计闸门 #751 v3 §2「配置下界」的跨字段关系。⚠️ 配反了不报错，只会让会话或重置
+        # 行为怪异：宁可进程起不来。
+        #
+        # 闲置期限从**当前这张刷新令牌的签发时刻**算，而它与访问令牌同时签发、访问令牌过期后
+        # 才会被拿来刷新：闲置期限不长于访问令牌寿命时，每一次刷新都已过闲置期限，活跃用户
+        # 每个访问令牌寿命被登出一次。多出的 60 秒是访问令牌过期后用户下一次操作的宽限。
+        if self.refresh_token_idle_seconds < self.access_token_ttl_seconds + 60:
+            raise ValueError(
+                "refresh_token_idle_seconds must be at least access_token_ttl_seconds + 60"
+            )
+        # 绝对寿命短于闲置期限时闲置期限形同虚设，配置的「闲置多久登出」是假的。
+        if self.refresh_token_ttl_seconds < self.refresh_token_idle_seconds:
+            raise ValueError(
+                "refresh_token_ttl_seconds must not be below refresh_token_idle_seconds"
+            )
+        # 间隔不大于令牌寿命：被限频时窗口内那封信的链接一定还有效。
+        if self.password_reset_min_interval_seconds > self.password_reset_ttl_seconds:
+            raise ValueError(
+                "password_reset_min_interval_seconds must not exceed password_reset_ttl_seconds"
+            )
         return self
 
     @field_validator("ai_ingest_base_url")

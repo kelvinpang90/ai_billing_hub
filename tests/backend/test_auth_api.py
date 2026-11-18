@@ -182,20 +182,22 @@ def test_rate_limiting_returns_429_with_retry_after(tmp_path) -> None:
     key = tmp_path / "jwt.key"
     key.write_text("a-test-signing-key-that-is-long-enough", encoding="utf-8")
     app = create_app(
-        Settings(jwt_secret_file=str(key), auth_rate_limit_per_minute=60, auth_rate_limit_burst=2)
+        Settings(jwt_secret_file=str(key), auth_rate_limit_per_minute=60, auth_rate_limit_burst=3)
     )
     engine = in_memory_engine()
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
 
     with TestClient(app) as limited:
-        statuses = [
+        responses = [
             limited.post(
                 "/api/v1/auth/login", json={"email": "nobody@example.com", "password": PASSWORD}
-            ).status_code
-            for _ in range(6)
+            )
+            for _ in range(8)
         ]
-    assert 429 in statuses, "the backstop must eventually refuse"
+    refused = [response for response in responses if response.status_code == 429]
+    assert refused, "the backstop must eventually refuse"
+    assert all(response.headers["retry-after"] for response in refused)
 
 
 def test_a_429_never_mentions_an_account(tmp_path) -> None:
@@ -203,14 +205,14 @@ def test_a_429_never_mentions_an_account(tmp_path) -> None:
     key = tmp_path / "jwt.key"
     key.write_text("a-test-signing-key-that-is-long-enough", encoding="utf-8")
     app = create_app(
-        Settings(jwt_secret_file=str(key), auth_rate_limit_per_minute=60, auth_rate_limit_burst=1)
+        Settings(jwt_secret_file=str(key), auth_rate_limit_per_minute=60, auth_rate_limit_burst=3)
     )
     engine = in_memory_engine()
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
 
     with TestClient(app) as limited:
-        for _ in range(4):
+        for _ in range(8):
             response = limited.post(
                 "/api/v1/auth/login", json={"email": "nobody@example.com", "password": PASSWORD}
             )
