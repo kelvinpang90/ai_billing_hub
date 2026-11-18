@@ -3469,20 +3469,73 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 
 ## 管理端用量分析
 
-`GET /api/v1/admin/usage-analytics`（AIH-TASK-073）是仅 ADMIN 可用的只读报表。`group_by` 必填，可为
-`provider`、`model`、`customer`、`project` 或 `feature`；`occurred_from` 与 `occurred_to` 必填，按
-`occurred_at` 取左闭右开的 RFC 3339 区间，最大跨度 366 天。它支持与管理端用量事件列表相同语义的
-`customer_id`、`project_id`、`provider`、`model`、`feature` 筛选及 `page` / `page_size` 分页。
+设计依据：AIH-TASK-073；毛利扩展见设计闸门 #709 `APPROVED: design v2`，全文见
+[design/AIH-TASK-221-margin-analytics.md](design/AIH-TASK-221-margin-analytics.md) §2「接口一」「V1 口径」。
+实现登记为 AIH-TASK-222。
 
-- 只统计 `PROCESSED` 事件，按事件数倒序、分组键升序；供应商和模型使用已解析目录代码，未解析值单列为
-  `null` 组，客户和项目返回 public id 与名称。
-- 响应的 `cost_basis` 固定为 `estimated`。金额是 8 位小数的十进制字符串；平均 token 与毛利率也是十进制
-  字符串，全程不经 float。成本为处理时保存的估算供应商成本，**不含网关手续费，也不是 Phase 7 财务毛利**。
-- `PREPAID` 块包含计费额、估算成本、毛利和毛利率；`INTERNAL_METERED_ONLY` 只包含事件数、估算成本和参考售价。
-  内部计量租户的参考售价不是收入，因此不进入毛利。
+`GET /api/v1/admin/usage-analytics` 是仅 ADMIN 可用的只读报表（未登录 401、非 ADMIN 403，都先于参数校验）。
+`group_by` 必填，可为 `provider`、`model`、`customer`、`project`、`feature`、`day` 或 `month`；`occurred_from`
+与 `occurred_to` 必填，按 `occurred_at` 取左闭右开的 RFC 3339 区间，最大跨度 366 天。它支持与管理端用量事件列表
+相同语义的 `customer_id`、`project_id`、`provider`、`model`、`feature` 筛选及 `page` / `page_size` 分页。
+
+- 只统计 `PROCESSED` 事件。`provider` / `model` / `customer` / `project` / `feature` 按事件数倒序、分组键升序；
+  供应商和模型使用已解析目录代码，未解析值单列为 `null` 组，客户和项目返回 public id 与名称。
+- `day` / `month` 按马来西亚日历（UTC + 8 小时，ADR-0003）归属 `occurred_at`：`group_key` 是 `YYYY-MM-DD` 或
+  `YYYY-MM`，`group_name` 为 `null`，按分组键升序（时间顺序）。只返回有事件的日 / 月，不补零行；区间两端不在
+  马来西亚零点时，**首尾两个日 / 月桶可能不完整**（只含区间内的事件）。
+- 金额是 8 位小数的十进制字符串；平均 token 与比率也是十进制字符串，全程 `Decimal`、不经 float。
+- `PREPAID` 块包含计费额、估算成本、用量毛利（`gross_margin`）和毛利率；`INTERNAL_METERED_ONLY` 只包含事件数、
+  估算成本和参考售价。内部计量租户的参考售价不是收入，因此不进入任何毛利。
+
+`data` 在 `cost_basis`、`items`、`page`、`page_size`、`total` 之外有两个键：
+
+| 键 | 含义 |
+| --- | --- |
+| `cost_basis` | 固定 `estimated`：成本是处理时保存的估算供应商成本，不是对账后成本 |
+| `usage_period_basis` | 固定 `occurred_at`：用量收入、估算成本与用量毛利按事件发生时刻归期 |
+| `totals` | 覆盖全部分组的合计，**不随分页变化** |
+
+`totals` 的键：
+
+| 键 | 含义 |
+| --- | --- |
+| `event_count`、`token_event_count`、`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens` | 与分组项同口径，等于全部分组（含 `null` 组）之和 |
+| `average_input_tokens`、`average_output_tokens` | 按合计重新算（不是各组平均值的平均）；没有 token 事件时 `null` |
+| `prepaid`、`internal_metered_only` | 与分组项同形同算法的两块 |
+| `payments` | 手续费块，见下；可为 `null` |
+| `gross_profit` | 毛利（扣手续费后）= `prepaid.billable_cost` − `prepaid.estimated_provider_cost_myr` − `payments.gateway_fee`；`payments` 为 `null` 时 `null` |
+| `gross_profit_rate` | `gross_profit` ÷ `prepaid.billable_cost`；计费额为 0 或 `payments` 为 `null` 时 `null` |
+
+`totals.payments`（**现金期间**）：
+
+| 键 | 含义 |
+| --- | --- |
+| `period_basis` | 固定 `paid_at`：按本系统确认付款的时刻归期，与查询用同一对时刻 `[occurred_from, occurred_to)` |
+| `paid_count` | 区间内 `PAID`、确认币种为 MYR 的支付笔数 |
+| `topup_amount` | 这些支付的 `confirmed_amount` 之和，即充值到账额。**充值是现金，不是收入** |
+| `gateway_fee` | 这些支付里已知（非空）的网关手续费之和（MYR） |
+| `gateway_fee_unknown_count` | 手续费为空的笔数 |
+
+- 两个期间口径：用量收入、成本与用量毛利按 `occurred_at`（`usage_period_basis`），手续费与充值到账额按
+  `paid_at`（`payments.period_basis`）。毛利（扣手续费后）把这两个期间的数相减：手续费单独成一个数，**不分摊**
+  到任何分组行（按日 / 按月分组时也不放进当天 / 当月那一行）。
+- 手续费块为 `null` 的条件：带了 `project_id`、`provider`、`model`、`feature` 中任一参数（参数出现即算，含空串）。
+  手续费不能归属到项目、供应商、模型或功能，此时 `gross_profit` 与 `gross_profit_rate` 也为 `null`，用量合计照常。
+- `customer_id`：不带时算全部租户的支付；带了只算该客户的支付；客户查不到时为全零（`paid_count = 0`、两个金额
+  `"0.00000000"`、`gateway_fee_unknown_count = 0`），与分组为空一致。
+- `gateway_fee_unknown_count > 0` 时，那几笔的手续费**没有被扣**，`gross_profit` 偏高。
+- V1 **不计**：账本调整（`ADJUSTMENT_CREDIT` / `ADJUSTMENT_DEBIT`、`REFUND_ADJUSTMENT`、`BONUS`、
+  `SYSTEM_CORRECTION`、`REBILL_*`）不增减收入，用赠送或调账额度的消费仍按 `billable_cost` 计入用量收入；Stripe
+  侧的外部退款与争议不减充值到账额、不改手续费，争议费不计；非 `PAID` 的支付（`REVIEW_REQUIRED`、人工结案后的
+  `FAILED`）即使 Stripe 收了钱、扣了手续费也不计。
+- **报表不是定稿数字**：事件后来才处理、手续费后来才补抓到，再查一次数字会变（同一次请求内的几条查询在一个
+  只读事务里，看同一个快照）。
+- **与对账单口径不同**：对账单按账本入账期间（含上期调整），本报表按 `occurred_at`；同一个月的两个数可能不同，
+  这是口径差异，不是错误。
 
 查询使用已有的 `ix_usage_events_status_occurred`（状态与时间段）、`ix_usage_events_tenant_id`、
-`ix_usage_events_project_id` 与 `ix_usage_events_tenant_feature_occurred`；没有新增迁移或索引。
+`ix_usage_events_project_id` 与 `ix_usage_events_tenant_feature_occurred`；手续费块走 `payments` 上已有的索引
+（`payments` 没有 `paid_at` 索引）。没有新增迁移或索引。
 
 ---
 
