@@ -1782,7 +1782,10 @@ def _at_0038(alembic_config: Config, engine: Engine) -> None:
 
 
 def _at_0039(alembic_config: Config, engine: Engine) -> None:
+    # Head is past 0039 (0040_reset_request_index, 设计闸门 #751); Alembic cannot "upgrade" to an
+    # earlier revision, so go to head first and come down.
     command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, _REVISION)
     assert _version(engine) == _REVISION
     assert _series_rows(engine) == _SEED_ROWS
 

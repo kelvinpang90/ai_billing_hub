@@ -24,6 +24,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import (
     CHAR,
     JSON,
@@ -6661,10 +6662,12 @@ def test_0025_checks_and_columns_are_the_ones_the_models_declare() -> None:
     assert purpose.nullable is False
     assert purpose.default.arg == TokenPurpose.PASSWORD_RESET
     assert str(purpose.server_default.arg) == migration._PURPOSE_DEFAULT == "PASSWORD_RESET"
-    # Indexes unchanged (design §2): still only 0004's, and none on `purpose`.
+    # Indexes unchanged by 0025 (design §2): apart from 0040's (设计闸门 #751, a later revision),
+    # still only 0004's, and none on `purpose`.
     indexes = {
         str(index.name): [column.name for column in index.columns]
         for index in PasswordResetToken.__table__.indexes
+        if index.name != _INDEX_0040
     }
     assert indexes == {_TOKENS_INDEX_0025: ["user_id", "used_at"]}
 
@@ -6836,10 +6839,12 @@ def test_0025_columns_and_constraints_exist_at_head(alembic_config: Config) -> N
         assert tokens["purpose"]["type"].length == 32
         assert tokens["purpose"]["nullable"] is False
         assert str(tokens["purpose"]["default"]).strip("'") == "PASSWORD_RESET"
-        # Indexes unchanged: 0004's is there as it was, none on `purpose`.
+        # Indexes unchanged by 0025: 0004's is there as it was, none on `purpose` apart from
+        # 0040's (设计闸门 #751, a later revision).
         token_indexes = {
             str(i["name"]): (tuple(i["column_names"]), bool(i["unique"]))
             for i in inspector.get_indexes("password_reset_tokens")
+            if i["name"] != _INDEX_0040
         }
         assert token_indexes[_TOKENS_INDEX_0025] == (("user_id", "used_at"), False)
         assert not [name for name, (cols, _) in token_indexes.items() if "purpose" in cols]
@@ -6930,5 +6935,149 @@ def test_0025_downgrade_refuses_with_a_customer_or_an_invitation(
         assert _all_triggers() == triggers
     finally:
         _clean_0025(engine)
+        command.upgrade(alembic_config, "head")
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 0040_reset_request_index（AIH-TASK-231，设计闸门 #751 v3）
+#
+# The first cases need no database: the revision chain (after 0039, the head, the ID fits
+# VARCHAR(32)); the index in the migration equals the model's and design §2's (name, column order,
+# not unique) and 0004's index and the `token_hash` unique key are untouched; upgrade creates only
+# it and downgrade drops only it; `create_all` on SQLite (what the unit tests run) builds it. On a
+# real MySQL: it exists at head, and the round trip to 0039 drops and recreates only it (design §7
+# "迁移与模型"). Which index the optimizer picks is not asserted (design §10, assumption 3).
+# ---------------------------------------------------------------------------
+
+_REVISION_0039 = "0039_payment_receipts"
+_REVISION_0040 = "0040_reset_request_index"
+_MIGRATION_0040 = pathlib.Path("alembic/versions/20261116_0040_reset_request_index.py")
+_INDEX_0040 = "ix_password_reset_tokens_user_purpose_created"
+_COLUMNS_0040 = ["user_id", "purpose", "created_at"]
+# 0004's index (`user_id`'s foreign key depends on it on MySQL); 0040 must leave it as it is.
+_COLUMNS_BEFORE_0040 = ["user_id", "used_at"]
+
+
+def _load_0040() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("migration_0040", _MIGRATION_0040)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _reflected_token_indexes(engine: Engine) -> dict[str, tuple[list[str], bool]]:
+    indexes = inspect(engine).get_indexes(_TOKENS_0025)
+    return {str(i["name"]): (list(i["column_names"]), bool(i["unique"])) for i in indexes}
+
+
+def test_0040_follows_0039_and_is_the_head() -> None:
+    migration = _load_0040()
+
+    assert migration.revision == _REVISION_0040
+    assert migration.down_revision == _REVISION_0039
+    assert len(migration.revision) <= 32
+    assert ScriptDirectory.from_config(Config("alembic.ini")).get_current_head() == _REVISION_0040
+
+
+def test_0040_index_is_the_one_the_model_declares() -> None:
+    """The migration's frozen literal, the model's `__table_args__` and design §2 agree."""
+    migration = _load_0040()
+    model = {
+        str(index.name): ([column.name for column in index.columns], bool(index.unique))
+        for index in PasswordResetToken.__table__.indexes
+    }
+
+    assert migration._TABLE == _TOKENS_0025
+    assert (migration._INDEX, migration._COLUMNS) == (_INDEX_0040, _COLUMNS_0040)
+    assert model == {
+        _TOKENS_INDEX_0025: (_COLUMNS_BEFORE_0040, False),
+        _INDEX_0040: (_COLUMNS_0040, False),
+    }
+    # The `token_hash` unique key is the column's, not an index in `__table_args__`; unchanged.
+    assert PasswordResetToken.__table__.c.token_hash.unique is True
+
+
+def test_0040_upgrade_creates_and_downgrade_drops_only_the_index(monkeypatch) -> None:
+    migration = _load_0040()
+    upgrade = _CallRecorder0025()
+    monkeypatch.setattr(migration, "op", upgrade)
+    migration.upgrade()
+
+    assert upgrade.calls == [
+        ("create_index", (_INDEX_0040, _TOKENS_0025, _COLUMNS_0040), {"unique": False})
+    ]
+
+    downgrade = _CallRecorder0025()
+    monkeypatch.setattr(migration, "op", downgrade)
+    migration.downgrade()
+
+    assert downgrade.calls == [("drop_index", (_INDEX_0040,), {"table_name": _TOKENS_0025})]
+
+
+def test_0040_sqlite_tables_get_the_index_in_order_and_not_unique() -> None:
+    """The unit tests build SQLite with `create_all` from the models, not with the migrations;
+    this is the SQLite side of design §7 "迁移与模型"."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        Base.metadata.create_all(engine)
+        indexes = _reflected_token_indexes(engine)
+    finally:
+        engine.dispose()
+
+    assert indexes[_INDEX_0040] == (_COLUMNS_0040, False)
+    assert indexes[_TOKENS_INDEX_0025] == (_COLUMNS_BEFORE_0040, False)
+
+
+@needs_mysql
+def test_0040_index_exists_at_head_in_order_and_not_unique(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        indexes = _reflected_token_indexes(engine)
+        version = _alembic_version(engine)
+    finally:
+        engine.dispose()
+
+    assert version == _REVISION_0040
+    assert indexes[_INDEX_0040] == (_COLUMNS_0040, False)
+    assert indexes[_TOKENS_INDEX_0025] == (_COLUMNS_BEFORE_0040, False)
+
+
+@needs_mysql
+def test_0040_round_trip_drops_and_recreates_only_the_index(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(TEST_DATABASE_URL)
+    try:
+        at_head = _schema_snapshot(engine)
+        checks = _all_checks()
+        triggers = _all_triggers()
+        tokens_at_head = _reflected_token_indexes(engine)
+        assert _INDEX_0040 in tokens_at_head
+
+        command.downgrade(alembic_config, _REVISION_0039)
+        assert _alembic_version(engine) == _REVISION_0039
+        without = _schema_snapshot(engine)
+        tokens_without = _reflected_token_indexes(engine)
+        assert _INDEX_0040 not in tokens_without
+        assert tokens_without[_TOKENS_INDEX_0025] == (_COLUMNS_BEFORE_0040, False)
+        # Only the one index is gone: every other table, column, key, check and trigger is the
+        # same.
+        expected = {table: dict(shape) for table, shape in at_head.items()}
+        expected[_TOKENS_0025]["indexes"] = [
+            index for index in at_head[_TOKENS_0025]["indexes"] if index[0] != _INDEX_0040
+        ]
+        assert without == expected
+        assert _all_checks() == checks
+        assert _all_triggers() == triggers
+
+        command.upgrade(alembic_config, "head")
+        assert _alembic_version(engine) == _REVISION_0040
+        assert _schema_snapshot(engine) == at_head
+        assert _reflected_token_indexes(engine) == tokens_at_head
+        assert _all_checks() == checks
+        assert _all_triggers() == triggers
+    finally:
         command.upgrade(alembic_config, "head")
         engine.dispose()
