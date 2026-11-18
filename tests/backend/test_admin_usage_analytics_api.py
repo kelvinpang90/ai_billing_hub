@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, insert, select, update
+from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from test_usage_billing import (
@@ -24,6 +24,7 @@ from test_usage_billing import (
     _mysql_factory,
     seed_meter_types,
 )
+from test_usage_billing import NOW as BILLED_AT
 from test_usage_billing import World as BillingWorld
 
 from app.core.config import Settings
@@ -33,9 +34,13 @@ from app.main import create_app
 from app.models.ai_catalog import AiModel, AiProvider, PayloadShape, QuantityKind, UsageMeterType
 from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
+from app.models.payments import Payment, PaymentGateway, PaymentStatus
+from app.models.tax_policy import TaxJurisdiction, TaxPolicyStatus, TaxPolicyType, TaxPolicyVersion
 from app.models.tenancy import BillingMode, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
+from app.models.wallet import ReferenceType, TransactionType
 from app.repositories import usage_events as event_repository
+from app.repositories import wallet as wallet_repository
 from app.repositories.usage_analytics import (
     MalaysiaMonth,
     UsageAnalyticsTotals,
@@ -521,10 +526,18 @@ def insert_processed(
     occurred_at: dt.datetime,
     feature: str | None = "crm.chat",
     quantity: bool = False,
+    billable: Decimal = Decimal(0),
+    estimated: Decimal | None = None,
+    internal: bool = False,
 ) -> None:
     """A PROCESSED event inserted directly, with the billed template's snapshot but 0 billed (so
     it needs no ledger row); usage_events has only BEFORE UPDATE triggers. `quantity` makes it an
-    AUDIO_SECOND (QUANTITY) event."""
+    AUDIO_SECOND (QUANTITY) event.
+
+    `billable` 大于 0 时先在同一事务里记一条 `AI_USAGE` 账本行并链接它（计费额大于 0 的已处理
+    事件必有账本行）；`estimated` 替换估算成本；
+    `internal` 改成内部计量快照（计费额 0、有参考售价）。
+    """
     template = world.row(template_id)
     skipped = {"id", "public_id", "event_id", "request_id", "wallet_transaction_id"}
     values = {
@@ -545,7 +558,25 @@ def insert_processed(
         billable_cost=Decimal(0),
         wallet_transaction_id=None,
     )
+    if estimated is not None:
+        values["estimated_provider_cost_myr"] = estimated
+    if internal:
+        values.update(
+            billing_mode_snapshot=BillingMode.INTERNAL_METERED_ONLY.value,
+            reference_customer_price=Decimal(1),
+        )
     with world.factory() as session:
+        if billable:
+            posted = wallet_repository.post_transaction(
+                session,
+                tenant_id=tenant.id,
+                transaction_type=TransactionType.AI_USAGE,
+                amount=-billable,
+                reference_type=ReferenceType.USAGE_EVENT,
+                reference_id=values["event_id"],
+                now=BILLED_AT,
+            )
+            values.update(billable_cost=billable, wallet_transaction_id=posted.transaction.id)
         if quantity:
             meter = event_repository.find_meter_type(session, "AUDIO_SECOND")
             assert meter is not None
@@ -785,3 +816,405 @@ def test_totals_are_zero_for_an_unknown_customer_or_project_and_an_empty_period(
     assert empty == ZERO_TOTALS
     assert all(type(getattr(empty, field)) is int for field in UsageAnalyticsTotals._fields[:7])
     assert all(isinstance(value, Decimal) for value in empty[7:9] + empty[10:])
+
+
+# --- AIH-TASK-222：接口的 totals、手续费块与毛利（设计闸门 #709 v2 §2「接口一」、§7） ---------
+
+# AIH-TASK-073 的 data 键；本任务只新增 `usage_period_basis` 与 `totals`。
+TASK_073_KEYS = {"cost_basis", "items", "page", "page_size", "total"}
+ITEM_KEYS = {
+    "group_key",
+    "group_name",
+    "event_count",
+    "token_event_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "average_input_tokens",
+    "average_output_tokens",
+    "prepaid",
+    "internal_metered_only",
+}
+TOTALS_KEYS = (ITEM_KEYS - {"group_key", "group_name"}) | {
+    "payments",
+    "gross_profit",
+    "gross_profit_rate",
+}
+PAYMENTS_KEYS = {
+    "period_basis",
+    "paid_count",
+    "topup_amount",
+    "gateway_fee",
+    "gateway_fee_unknown_count",
+}
+# 分组项与合计里可以逐项相加的键。
+ADDITIVE_KEYS = (
+    "event_count",
+    "token_event_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+PERIOD_QUERY = {"occurred_from": "2026-10-01T00:00:00Z", "occurred_to": "2027-02-01T00:00:00Z"}
+IN_PERIOD = dt.datetime(2026, 11, 10, 4, 0, 0)
+FEE_AT = dt.datetime(2026, 11, 15, 4, 0, 0)
+ZERO_MONEY = "0.00000000"
+_PAYMENTS = itertools.count(1)
+
+
+def fixed(value: str) -> str:
+    """The 8-place text of an exactly representable amount."""
+    return f"{Decimal(value):.8f}"
+
+
+def ratio(value: Decimal) -> str:
+    """What the endpoint's `ratio_text` gives: normalised, fixed-point."""
+    return format(value.normalize(), "f")
+
+
+@pytest.fixture
+def fees(billed):
+    """Writes `PAID` MYR payments into the billed world; removes them before `billed` tears down.
+
+    `payments.tax_policy_version_id` 非空且外键 RESTRICT，billed 的清场（test_usage_billing.clean）
+    不删支付与税务政策版本，删租户会被 `fk_payments_tenant_id` 拦下：本夹具先删本用例写的支付行，
+    在 MySQL 上再照 payment_world._clean 关掉外键检查后 TRUNCATE 税务政策版本（它拒绝 DELETE，
+    而且以外键引用 billed 世界的管理员）。
+    """
+    _app, world = billed
+    written: list[str] = []
+    versions: list[int] = []
+
+    def pay(
+        tenant: Tenancy,
+        fee: str | None,
+        *,
+        amount: str = "100.00",
+        paid_at: dt.datetime = FEE_AT,
+    ) -> None:
+        with world.factory() as session:
+            if not versions:
+                version = TaxPolicyVersion(
+                    public_id=f"00000000-0000-4009-8000-{next(_PAYMENTS):012d}",
+                    jurisdiction=TaxJurisdiction.MY,
+                    policy_type=TaxPolicyType.SST,
+                    rate=None,
+                    treatment_json={
+                        "schema_version": 1,
+                        "sst_registered": False,
+                        "tax_charged": False,
+                    },
+                    status=TaxPolicyStatus.DRAFT,
+                    effective_from=None,
+                    effective_to=None,
+                    source_reference="Fictional policy for a margin analytics test",
+                    created_by=world.admin.id,
+                    approved_by=None,
+                    approved_at=None,
+                    created_at=T0,
+                    updated_at=T0,
+                )
+                session.add(version)
+                session.flush()
+                versions.append(int(version.id))
+            public_id = f"00000000-0000-4008-8000-{next(_PAYMENTS):012d}"
+            session.add(
+                Payment(
+                    public_id=public_id,
+                    tenant_id=tenant.id,
+                    gateway=PaymentGateway.STRIPE,
+                    expected_amount=Decimal(amount),
+                    expected_currency="MYR",
+                    wallet_credit_amount=Decimal(amount),
+                    tax_policy_version_id=versions[0],
+                    tax_amount=None,
+                    confirmed_amount=Decimal(amount),
+                    confirmed_currency="MYR",
+                    gateway_fee=None if fee is None else Decimal(fee),
+                    status=PaymentStatus.PAID,
+                    expires_at=paid_at,
+                    paid_at=paid_at,
+                    created_at=paid_at,
+                    updated_at=paid_at,
+                )
+            )
+            session.commit()
+            written.append(public_id)
+
+    try:
+        yield pay
+    finally:
+        with world.factory.begin() as session:
+            if written:
+                session.execute(delete(Payment).where(Payment.public_id.in_(written)))
+        engine = world.factory.kw["bind"]
+        if engine.dialect.name == "mysql":
+            with engine.begin() as connection:
+                connection.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 0")
+                try:
+                    connection.exec_driver_sql("TRUNCATE TABLE tax_policy_versions")
+                finally:
+                    connection.exec_driver_sql("SET FOREIGN_KEY_CHECKS = 1")
+
+
+def priced_template(world: BillingWorld) -> tuple[Tenancy, int]:
+    """`billed_template` with enough in the wallet for the directly posted `AI_USAGE` rows."""
+    tenant, template = billed_template(world)
+    world.fund(tenant, "1000")
+    return tenant, template
+
+
+def analytics(app, admin, **params) -> dict:
+    return query(TestClient(app), admin, **{**PERIOD_QUERY, **params})
+
+
+def test_the_data_keeps_task_073_keys_and_adds_the_period_basis_and_totals(billed, fees) -> None:
+    app, world = billed
+    tenant, template = priced_template(world)
+    for moment in (IN_PERIOD, dt.datetime(2026, 12, 10, 4, 0, 0)):
+        insert_processed(
+            world,
+            template,
+            tenant,
+            occurred_at=moment,
+            billable=Decimal("4"),
+            estimated=Decimal("1"),
+        )
+    insert_processed(world, template, tenant, occurred_at=IN_PERIOD, feature=None, internal=True)
+    fees(tenant, "1.50")
+    admin = headers(app, domain=TEST_EMAIL_DOMAIN)
+    for group_by in (*GROUPINGS, "day", "month"):
+        data = analytics(app, admin, group_by=group_by)
+        assert set(data) == TASK_073_KEYS | {"usage_period_basis", "totals"}, group_by
+        assert (data["cost_basis"], data["usage_period_basis"]) == ("estimated", "occurred_at")
+        assert data["items"] and all(set(item) == ITEM_KEYS for item in data["items"]), group_by
+        totals = data["totals"]
+        assert set(totals) == TOTALS_KEYS, group_by
+        assert set(totals["payments"]) == PAYMENTS_KEYS
+        assert set(totals["prepaid"]) == set(data["items"][0]["prepaid"])
+        assert set(totals["internal_metered_only"]) == set(
+            data["items"][0]["internal_metered_only"]
+        )
+        assert totals["payments"]["period_basis"] == "paid_at"
+        # 一页装下全部分组：可加字段等于各组之和（含 null 组）。
+        assert data["total"] == len(data["items"]), group_by
+        for key in ADDITIVE_KEYS:
+            assert totals[key] == sum(item[key] for item in data["items"]), (group_by, key)
+        assert totals["prepaid"]["billable_cost"] == fixed("8")
+        assert totals["prepaid"]["gross_margin"] == fixed("6")
+        assert totals["internal_metered_only"]["reference_customer_price"] == fixed("1")
+        # 平均值按合计重新算。
+        assert totals["average_input_tokens"] == ratio(
+            Decimal(totals["input_tokens"]) / Decimal(totals["token_event_count"])
+        )
+    days = analytics(app, admin, group_by="day")["items"]
+    months = analytics(app, admin, group_by="month")["items"]
+    assert [(item["group_key"], item["group_name"]) for item in days] == [
+        ("2026-11-10", None),
+        ("2026-12-10", None),
+    ]
+    assert [item["group_key"] for item in months] == ["2026-11", "2026-12"]
+
+
+def test_the_totals_do_not_change_with_the_page(billed, fees) -> None:
+    app, world = billed
+    tenant, template = priced_template(world)
+    for month in (10, 11, 12):
+        insert_processed(
+            world,
+            template,
+            tenant,
+            occurred_at=dt.datetime(2026, month, 10, 4, 0, 0),
+            billable=Decimal("2"),
+            estimated=Decimal("1"),
+        )
+    fees(tenant, "0.75")
+    admin = headers(app, domain=TEST_EMAIL_DOMAIN)
+    first = analytics(app, admin, group_by="month", page=1, page_size=2)
+    second = analytics(app, admin, group_by="month", page=2, page_size=2)
+    assert [item["group_key"] for item in first["items"]] == ["2026-10", "2026-11"]
+    assert [item["group_key"] for item in second["items"]] == ["2026-12"]
+    assert first["totals"] == second["totals"]
+    assert first["totals"]["event_count"] == 3
+    assert first["totals"]["prepaid"]["billable_cost"] == fixed("6")
+
+
+def test_the_gross_profit_deducts_the_known_gateway_fees(billed, fees) -> None:
+    app, world = billed
+    tenant, template = priced_template(world)
+    insert_processed(
+        world,
+        template,
+        tenant,
+        occurred_at=IN_PERIOD,
+        billable=Decimal("10"),
+        estimated=Decimal("6"),
+    )
+    fees(tenant, "1.50")
+    fees(tenant, None)
+    totals = analytics(app, headers(app, domain=TEST_EMAIL_DOMAIN))["totals"]
+    assert totals["prepaid"]["billable_cost"] == fixed("10")
+    assert totals["prepaid"]["estimated_provider_cost_myr"] == fixed("6")
+    assert totals["prepaid"]["gross_margin"] == fixed("4")
+    assert totals["payments"] == {
+        "period_basis": "paid_at",
+        "paid_count": 2,
+        "topup_amount": "200.00000000",
+        "gateway_fee": "1.50000000",
+        "gateway_fee_unknown_count": 1,
+    }
+    assert (totals["gross_profit"], totals["gross_profit_rate"]) == ("2.50000000", "0.25")
+
+
+def test_fees_cannot_be_attributed_to_project_provider_model_or_feature(billed, fees) -> None:
+    app, world = billed
+    mine, template = priced_template(world)
+    other = world.tenant("other")
+    world.fund(other, "1000")
+    insert_processed(
+        world, template, mine, occurred_at=IN_PERIOD, billable=Decimal("10"), estimated=Decimal("6")
+    )
+    insert_processed(
+        world, template, other, occurred_at=IN_PERIOD, billable=Decimal("4"), estimated=Decimal("1")
+    )
+    fees(mine, "1.50")
+    fees(other, "0.25", amount="50.00")
+    admin = headers(app, domain=TEST_EMAIL_DOMAIN)
+    for filters, events, billable in (
+        ({"project_id": mine.project_public_id}, 1, "10"),
+        ({"provider": "anthropic"}, 2, "14"),
+        ({"model": "claude-x"}, 2, "14"),
+        ({"feature": "crm.chat"}, 2, "14"),
+        # 参数出现即算：空串不匹配任何事件，手续费同样不可归属。
+        ({"provider": ""}, 0, "0"),
+    ):
+        totals = analytics(app, admin, **filters)["totals"]
+        assert (totals["payments"], totals["gross_profit"], totals["gross_profit_rate"]) == (
+            None,
+            None,
+            None,
+        ), filters
+        # 用量合计照常。
+        assert totals["event_count"] == events, filters
+        assert totals["prepaid"]["billable_cost"] == fixed(billable), filters
+
+    everyone = analytics(app, admin)["totals"]
+    assert (everyone["payments"]["paid_count"], everyone["payments"]["gateway_fee"]) == (
+        2,
+        "1.75000000",
+    )
+    assert everyone["gross_profit"] == fixed("5.25")
+    only_mine = analytics(app, admin, customer_id=mine.public_id)["totals"]
+    assert only_mine["event_count"] == 1
+    assert only_mine["payments"] == {
+        "period_basis": "paid_at",
+        "paid_count": 1,
+        "topup_amount": "100.00000000",
+        "gateway_fee": "1.50000000",
+        "gateway_fee_unknown_count": 0,
+    }
+    assert (only_mine["gross_profit"], only_mine["gross_profit_rate"]) == ("2.50000000", "0.25")
+    nobody = analytics(app, admin, customer_id=UNKNOWN_ID)
+    assert (nobody["total"], nobody["items"], nobody["totals"]["event_count"]) == (0, [], 0)
+    assert nobody["totals"]["payments"] == {
+        "period_basis": "paid_at",
+        "paid_count": 0,
+        "topup_amount": ZERO_MONEY,
+        "gateway_fee": ZERO_MONEY,
+        "gateway_fee_unknown_count": 0,
+    }
+    assert (nobody["totals"]["gross_profit"], nobody["totals"]["gross_profit_rate"]) == (
+        ZERO_MONEY,
+        None,
+    )
+
+
+def test_without_usage_revenue_the_gross_profit_is_minus_the_fees_and_has_no_rate(
+    billed, fees
+) -> None:
+    app, world = billed
+    tenant, template = priced_template(world)
+    insert_processed(world, template, tenant, occurred_at=IN_PERIOD, internal=True)
+    fees(tenant, "0.40")
+    totals = analytics(app, headers(app, domain=TEST_EMAIL_DOMAIN))["totals"]
+    assert (totals["prepaid"]["event_count"], totals["internal_metered_only"]["event_count"]) == (
+        0,
+        1,
+    )
+    assert totals["prepaid"]["billable_cost"] == ZERO_MONEY
+    assert totals["prepaid"]["gross_margin_rate"] is None
+    assert (totals["gross_profit"], totals["gross_profit_rate"]) == ("-0.40000000", None)
+
+
+def test_amounts_keep_eight_places_and_the_rate_is_the_decimal_quotient(billed, fees) -> None:
+    """SQLite 把 NUMERIC 存成浮点：余额在千位时连扣 `0.00000001` 过不了
+    `ck_wallet_transactions_arithmetic`。照 test_customer_usage_summary_api.py 的做法，那里先按
+    精确的二进制小数记账，再把事件的计费额直接改成 `0.00000001`（合计只读 `usage_events`）；
+    MySQL 上照常记账。
+    """
+    app, world = billed
+    tenant, template = priced_template(world)
+    one = Decimal("0.00000001")
+    exact = Decimal("0.5")
+    on_mysql = world.factory.kw["bind"].dialect.name == "mysql"
+    for _ in range(3):
+        insert_processed(
+            world,
+            template,
+            tenant,
+            occurred_at=IN_PERIOD,
+            billable=one if on_mysql else exact,
+            estimated=Decimal(0),
+        )
+        fees(tenant, "0.01", amount="10.00")
+    if not on_mysql:
+        with world.factory() as session:
+            changed = session.execute(
+                update(UsageEvent)
+                .where(
+                    UsageEvent.tenant_id == tenant.id,
+                    UsageEvent.occurred_at == IN_PERIOD,
+                    UsageEvent.billable_cost == exact,
+                )
+                .values(billable_cost=one)
+            )
+            assert changed.rowcount == 3
+            session.commit()
+    totals = analytics(app, headers(app, domain=TEST_EMAIL_DOMAIN))["totals"]
+    assert totals["prepaid"]["billable_cost"] == "0.00000003"
+    assert totals["payments"]["gateway_fee"] == "0.03000000"
+    assert totals["payments"]["topup_amount"] == "30.00000000"
+    profit = 3 * one - Decimal("0.03")
+    assert totals["gross_profit"] == "-0.02999997" == f"{profit:.8f}"
+    assert totals["gross_profit_rate"] == ratio(profit / (3 * one))
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"group_by": "week", **PERIOD_QUERY},
+        # 367 天：比上限多一天。
+        {
+            "group_by": "day",
+            "occurred_from": "2026-01-01T00:00:00Z",
+            "occurred_to": "2027-01-03T00:00:00Z",
+        },
+    ],
+)
+def test_a_week_grouping_or_a_367_day_span_is_refused_after_authentication(
+    app, client, params
+) -> None:
+    assert client.get(PATH, params=params).status_code == 401
+    assert (
+        client.get(PATH, params=params, headers=headers(app, UserRole.CUSTOMER)).status_code == 403
+    )
+    response = client.get(PATH, params=params, headers=headers(app))
+    assert (response.status_code, response.json()["error"]["code"]) == (422, "VALIDATION_ERROR")
+
+
+@pytest.mark.parametrize("group_by", ["day", "month"])
+def test_days_and_months_are_valid_groupings(app, client, group_by: str) -> None:
+    data = query(client, headers(app), group_by=group_by)
+    assert (data["total"], data["items"], data["totals"]["event_count"]) == (0, [], 0)
