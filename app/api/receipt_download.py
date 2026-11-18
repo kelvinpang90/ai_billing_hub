@@ -11,9 +11,12 @@
 ⚠️ **只读，渲染在会话关闭之后**：会话里只读出收据号与快照（不加锁、不提交、不写审计），关闭之后
 才调用 `render_receipt_pdf`，不持连接渲染。PDF 只来自快照（spec §106、INV-6）。
 
-⚠️ **快照不合规**（`ReceiptSnapshotInvalid`）记一条只带收据 `public_id` 的 ERROR，转成通用 500
-`INTERNAL_ERROR` 信封（固定文案，与 `handle_unexpected_error` 相同）；不记快照内容、公司名与金额
-（设计 §6）。
+⚠️ **渲染失败分三种**（设计闸门 #750 v1 §2「下载」，写法照 app/api/statement_download.py）：快照
+不合规（`ReceiptSnapshotInvalid`）、需要的中文字体不可用（`ReceiptFontUnavailable`）、其他任何
+渲染异常，各记一条只带收据 `public_id`（兜底的那种另带异常类名）的 ERROR，转成通用 500
+`INTERNAL_ERROR` 信封（固定文案，与 `handle_unexpected_error` 相同）；不记快照内容、公司名、
+收据号、金额与异常原文，所以不用 `logger.exception`、也不交给 `handle_unexpected_error`
+（设计 §6）。成功下载不记日志。
 
 ⚠️ **文件名只来自收据号**（`ACV-AIR-YYYY-NNNNNN`，ASCII），不拼任何客户输入；列里的收据号不是
 这个格式时按快照不合规处理。
@@ -32,7 +35,11 @@ from starlette.responses import Response
 
 from app.core.errors import AppError
 from app.models.receipts import PaymentReceipt
-from app.services.receipt_pdf import ReceiptSnapshotInvalid, render_receipt_pdf
+from app.services.receipt_pdf import (
+    ReceiptFontUnavailable,
+    ReceiptSnapshotInvalid,
+    render_receipt_pdf,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +101,22 @@ def receipt_pdf_response(
     `tenant_id`：客户传令牌主体的租户；只有管理端传 `None`（不按租户过滤）。
     """
     public_id, receipt_number, snapshot = _read(factory, receipt_id, tenant_id)
+    # 会话已关闭。日志只带收据 public_id：不带快照内容、公司名、收据号、金额与异常原文（设计 §6）。
     try:
         if _RECEIPT_NUMBER.fullmatch(receipt_number) is None:
             raise ReceiptSnapshotInvalid("receipt number column has an unexpected format")
         body = render_receipt_pdf(snapshot)
     except ReceiptSnapshotInvalid:
-        # 只带收据 public_id：不带快照内容与异常原文（设计 §6）。
         logger.error("Receipt snapshot invalid; download refused", extra={"receipt_id": public_id})
+        raise ReceiptRenderFailed from None
+    except ReceiptFontUnavailable:
+        logger.error("Receipt font unavailable; download refused", extra={"receipt_id": public_id})
+        raise ReceiptRenderFailed from None
+    except Exception as exc:
+        logger.error(
+            "Receipt PDF rendering failed",
+            extra={"receipt_id": public_id, "error_type": type(exc).__name__},
+        )
         raise ReceiptRenderFailed from None
     return ReceiptPdfResponse(
         content=body,
