@@ -415,6 +415,74 @@ def test_email_is_unconfigured_by_default() -> None:
     assert settings.frontend_base_url == ""
 
 
+# --- 前端基址（AIH-TASK-233，设计闸门 #751 v3 §2「frontend_base_url 的格式」） ---------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", ""),
+        ("   ", ""),
+        ("https://billing.example.com", "https://billing.example.com"),
+        ("http://billing.example.com", "http://billing.example.com"),
+        ("https://billing.example.com:8443", "https://billing.example.com:8443"),
+        ("https://billing.example.com/", "https://billing.example.com"),
+        ("  https://billing.example.com/  ", "https://billing.example.com"),
+    ],
+)
+def test_the_frontend_base_url_is_normalised_to_a_root_without_trailing_slash(
+    raw: str, expected: str
+) -> None:
+    """空与全空白是「未配置」；合法值去掉首尾空白与末尾 `/`，与渲染处的 `rstrip("/")` 幂等。"""
+    assert Settings(frontend_base_url=raw).frontend_base_url == expected
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "billing.example.com",
+        "ftp://billing.example.com",
+        "https://",
+        "https://someone@billing.example.com",
+        "https://someone:secret@billing.example.com",
+        "https://billing.example.com:abc",
+        "https://billing.example.com:0",
+        "https://billing.example.com:70000",
+        "https://billing.example.com/app",
+        "https://billing.example.com//",
+        "https://billing.example.com?",
+        "https://billing.example.com?a=1",
+        "https://billing.example.com#",
+        "https://billing.example.com#x",
+        "https://billing.example .com",
+        "https://billing.\nexample.com",
+        "https://billing.\texample.com",
+        "https://billing.example.com\\",
+    ],
+)
+def test_the_frontend_base_url_rejects_anything_but_an_http_root(bad: str) -> None:
+    """配错时链接是坏的，症状要到用户点不开才暴露：让进程起不来。
+
+    末尾单独一个 `?` / `#` 的 `query` / `fragment` 是空串，只查它们拦不住；`urlsplit` 会
+    悄悄去掉制表符与换行，校验看到的与拼进邮件的不是同一个字符串；带路径前缀的链接都是 404。
+    """
+    with pytest.raises(ValidationError):
+        Settings(frontend_base_url=bad)
+
+
+def test_the_frontend_base_url_must_be_https_in_production() -> None:
+    """重置与邀请链接带一次性令牌：生产拒 http；空串（未配置）照常合法。"""
+    with pytest.raises(ValidationError):
+        Settings(environment="production", frontend_base_url="http://billing.example.com")
+
+    https = Settings(environment="production", frontend_base_url="https://billing.example.com/")
+    assert https.frontend_base_url == "https://billing.example.com"
+    assert Settings(environment="production", frontend_base_url="").frontend_base_url == ""
+    # 本地照常允许 http（compose 的本地默认值就是 http 的本机地址）。
+    local = Settings(environment="local", frontend_base_url="http://billing.example.com")
+    assert local.frontend_base_url == "http://billing.example.com"
+
+
 # --- FX 拉取（AIH-TASK-040，设计闸门 #183 v3 §2「BNM 适配器」） -----------------------
 
 
