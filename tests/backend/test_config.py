@@ -156,8 +156,91 @@ def test_the_new_delivery_settings_reject_non_positive_values() -> None:
 
     # 正数照常通过 —— 少了这一句，上面那组断言在「构造 Settings 本来就会炸」
     # 时也会全绿。
-    ok = Settings(password_reset_ttl_seconds=1, outbox_max_attempts=1)
-    assert ok.password_reset_ttl_seconds == 1
+    ok = Settings(password_reset_ttl_seconds=300, outbox_max_attempts=1)
+    assert ok.password_reset_ttl_seconds == 300
+
+
+# --- 认证配置下界（AIH-TASK-232，设计闸门 #751 v3 §2「配置下界」） --------------------
+
+AUTH_FIELD_LOWER_BOUNDS = {
+    "access_token_ttl_seconds": 60,
+    "login_max_failures": 3,
+    "login_lockout_seconds": 300,
+    "auth_rate_limit_burst": 3,
+    "auth_rate_limit_per_minute": 3,
+}
+
+
+@pytest.mark.parametrize(("field", "lower"), AUTH_FIELD_LOWER_BOUNDS.items())
+def test_the_auth_settings_accept_their_lower_bound_and_reject_one_below(
+    field: str, lower: int
+) -> None:
+    """每一项都只是防误配的下限；默认值与生产现值都远在其上。"""
+    assert getattr(Settings(**{field: lower}), field) == lower
+    with pytest.raises(ValidationError):
+        Settings(**{field: lower - 1})
+
+
+def test_the_refresh_idle_period_must_outlast_the_access_token_by_a_minute() -> None:
+    """闲置期限从刷新令牌签发时刻算：不比访问令牌寿命长出 60 秒，活跃用户也会被登出。"""
+    with pytest.raises(ValidationError):
+        Settings(access_token_ttl_seconds=600, refresh_token_idle_seconds=659)
+
+    ok = Settings(access_token_ttl_seconds=600, refresh_token_idle_seconds=660)
+    assert ok.refresh_token_idle_seconds == 660
+
+
+def test_the_refresh_lifetime_must_not_be_shorter_than_the_idle_period() -> None:
+    """绝对寿命短于闲置期限时，闲置期限永远不起作用。"""
+    with pytest.raises(ValidationError):
+        Settings(refresh_token_idle_seconds=1_800, refresh_token_ttl_seconds=1_799)
+
+    ok = Settings(refresh_token_idle_seconds=1_800, refresh_token_ttl_seconds=1_800)
+    assert ok.refresh_token_ttl_seconds == 1_800
+
+
+def test_the_reset_interval_must_not_exceed_the_reset_token_lifetime() -> None:
+    """被限频时窗口内那封信的链接必须还有效。"""
+    with pytest.raises(ValidationError):
+        Settings(password_reset_ttl_seconds=600, password_reset_min_interval_seconds=601)
+
+    ok = Settings(password_reset_ttl_seconds=600, password_reset_min_interval_seconds=600)
+    assert ok.password_reset_min_interval_seconds == 600
+
+
+def test_the_reset_interval_stays_between_one_minute_and_one_hour() -> None:
+    """令牌寿命设到 3600 以上，只测区间本身。"""
+    for bad in (59, 3_601):
+        with pytest.raises(ValidationError):
+            Settings(password_reset_ttl_seconds=7_200, password_reset_min_interval_seconds=bad)
+
+    for good in (60, 3_600):
+        settings = Settings(
+            password_reset_ttl_seconds=3_600, password_reset_min_interval_seconds=good
+        )
+        assert settings.password_reset_min_interval_seconds == good
+
+
+def test_the_auth_settings_default_to_the_design_values() -> None:
+    """默认值（即生产现值）不变，且满足全部下界与跨字段关系。"""
+    settings = Settings()
+
+    assert (
+        settings.access_token_ttl_seconds,
+        settings.refresh_token_idle_seconds,
+        settings.refresh_token_ttl_seconds,
+        settings.login_max_failures,
+        settings.login_lockout_seconds,
+        settings.auth_rate_limit_burst,
+        settings.auth_rate_limit_per_minute,
+        settings.password_reset_min_interval_seconds,
+    ) == (600, 1_800, 43_200, 5, 900, 20, 10, 300)
+
+
+def test_the_reset_interval_comes_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_PASSWORD_RESET_MIN_INTERVAL_SECONDS", "120")
+
+    assert Settings().password_reset_min_interval_seconds == 120
 
 
 def test_the_smtp_port_must_be_a_real_port() -> None:
