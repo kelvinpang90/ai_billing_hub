@@ -4,16 +4,39 @@ AIH-TASK-222（设计闸门 #709 v2 §2「接口一」「V1 口径」「事务�
 `group_by` 多 `day` / `month`；`totals` 是覆盖全部分组的同口径合计，
 另带按 `paid_at` 归期的手续费块与扣手续费后的毛利。
 分组一页、分组总数、合计与手续费块在同一个只读会话里查、不提交。金额全程 `Decimal`。
+
+导出（AIH-TASK-223，设计闸门 #709 v2 §2「接口二」）：参数与接口一相同、没有分页，每个分组一行
+GROUP、末尾恒有一行 TOTAL。检查顺序照客户钱包流水导出（app/api/customer.py）：鉴权 → 校验 →
+数据库未配置的 503（早于租约）→ 导出租约（与客户导出共用，拿不到 503 `EXPORT_BUSY`）→ 只 hold、
+不在这里释放。查询在一个只读会话里，CSV 在会话关闭之后拼。`AppError` 原样抛，其他异常记
+`admin_usage_analytics_export_failed` 后在 `except` 块之外抛 `CustomerExportFailed`（通用 500 的
+信封）。成功记一条 INFO，不写审计、不落盘；文件含内部成本，只给管理端。
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import itertools
+import logging
 from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Request
 
 from app.api.auth import require_admin, require_session_factory
+from app.core.csv_export import (
+    EXPORT_LEASE_SCOPE_KEY,
+    EXPORT_MAX_ROWS,
+    CustomerExportFailed,
+    ExportBusy,
+    ExportCsvResponse,
+    ExportTooLarge,
+    csv_response,
+    try_acquire_export_lease,
+    write_csv,
+)
+from app.core.errors import AppError
+from app.core.fx_source import KUALA_LUMPUR_OFFSET
 from app.core.logging import current_request_id
 from app.repositories import usage_analytics as analytics_repository
 from app.repositories.usage_analytics import (
@@ -24,6 +47,9 @@ from app.repositories.usage_analytics import (
 from app.schemas.customers import DEFAULT_PAGE_SIZE, MAX_PAGE, MAX_PAGE_SIZE, money_text
 from app.schemas.envelope import ApiResponse, success
 from app.schemas.usage_analytics import (
+    USAGE_ANALYTICS_EXPORT_COLUMNS,
+    USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS,
+    UsageAnalyticsGroupBy,
     UsageAnalyticsInternalMeteredOnly,
     UsageAnalyticsItem,
     UsageAnalyticsPayments,
@@ -32,7 +58,11 @@ from app.schemas.usage_analytics import (
     UsageAnalyticsView,
     parse_analytics_query,
     ratio_text,
+    usage_analytics_export_group_cells,
+    usage_analytics_export_total_cells,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -104,6 +134,127 @@ def get_usage_analytics(
         ),
         request_id=current_request_id(),
     )
+
+
+@router.get("/usage-analytics/export", response_class=ExportCsvResponse)
+def export_usage_analytics(
+    request: Request,
+    group_by: str | None = None,
+    occurred_from: str | None = None,
+    occurred_to: str | None = None,
+    customer_id: str | None = None,
+    project_id: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    feature: str | None = None,
+) -> ExportCsvResponse:
+    """Every group as a GROUP row plus one TOTAL row, as a CSV attachment; at most 20 000 groups.
+
+    含 Acuven 内部成本与毛利：只给管理端，不得转发给客户（INV-7）。
+    """
+    admin = require_admin(request)
+    fees_attributable = all(value is None for value in (project_id, provider, model, feature))
+    # 同一个校验函数；没有分页参数，分页那两项恒通过。
+    group_by, start, end, feature = parse_analytics_query(
+        group_by=group_by,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+        feature=feature,
+        page=1,
+        page_size=1,
+        max_page=1,
+        max_page_size=1,
+    )
+    # 数据库没配置时在这里 503，早于获取租约。
+    factory = require_session_factory(request)
+    token = try_acquire_export_lease()
+    if token is None:
+        raise ExportBusy
+    # 只 hold，不在这里释放：最外层中间件在整个响应发完后释放。
+    request.scope[EXPORT_LEASE_SCOPE_KEY].hold(token)
+    filters: dict[str, Any] = {
+        "customer_id": customer_id,
+        "project_id": project_id,
+        "provider": provider,
+        "model": model,
+        "feature": feature,
+        "occurred_from": start,
+        "occurred_to": end,
+    }
+    rows = None
+    body = None
+    response = None
+    failed = False
+    try:
+        # 一个只读会话、不提交：分组、合计与手续费块看同一个快照。
+        with factory() as session:
+            # 多取一行，只用来判「超了」。
+            rows, _total = analytics_repository.list_usage_analytics(
+                session, group_by=group_by, offset=0, limit=EXPORT_MAX_ROWS + 1, **filters
+            )
+            totals = analytics_repository.usage_analytics_totals(session, **filters)
+            fees = (
+                analytics_repository.paid_payment_totals(
+                    session, customer_id=customer_id, paid_from=start, paid_to=end
+                )
+                if fees_attributable
+                else None
+            )
+        # 不给部分文件；TOTAL 行不计入上限。
+        if len(rows) > EXPORT_MAX_ROWS:
+            raise ExportTooLarge
+        # 会话已关闭：不持连接拼文件。
+        row_count = len(rows)
+        groups = (
+            usage_analytics_export_group_cells(
+                UsageAnalyticsItem(
+                    group_key=row.group_key, group_name=row.group_name, **_aggregates(row)
+                ),
+                group_by=group_by,
+                occurred_from=start,
+                occurred_to=end,
+            )
+            for row in rows
+        )
+        total_row = usage_analytics_export_total_cells(
+            _totals_view(totals, fees), group_by=group_by, occurred_from=start, occurred_to=end
+        )
+        body = write_csv(
+            USAGE_ANALYTICS_EXPORT_COLUMNS,
+            itertools.chain(groups, (total_row,)),
+            USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS,
+        )
+        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+        rows = None
+        response = csv_response(_export_filename(group_by, start, end), body)
+        body = None
+    except AppError:
+        raise
+    except Exception:
+        # 与 handle_unexpected_error 同一口径：栈进日志，不带参数值与文件内容。
+        logger.exception("admin_usage_analytics_export_failed", extra={"path": request.url.path})
+        failed = True
+    if failed:
+        # 在 except 块之外抛：新异常没有 `__context__`，原异常与它引用的数据此时已可回收。
+        rows = None
+        body = None
+        response = None
+        raise CustomerExportFailed
+    # 只记管理员内部 id、分组维度与 GROUP 行数：不记筛选值、公司名、金额与文件内容。
+    logger.info(
+        "admin_usage_analytics_exported",
+        extra={"user_id": admin.id, "group_by": group_by, "row_count": row_count},
+    )
+    return response
+
+
+def _export_filename(group_by: UsageAnalyticsGroupBy, start: dt.datetime, end: dt.datetime) -> str:
+    """`usage-analytics_<group_by>_<from>_<to>.csv` in Malaysian time; no client input in it."""
+
+    def local(moment: dt.datetime) -> str:
+        return (moment + KUALA_LUMPUR_OFFSET).strftime("%Y%m%dT%H%M%S") + "MYT"
+
+    return f"usage-analytics_{group_by}_{local(start)}_{local(end)}.csv"
 
 
 def _ratio(numerator: Decimal, denominator: Decimal | int) -> str | None:

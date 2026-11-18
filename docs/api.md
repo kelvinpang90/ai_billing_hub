@@ -3537,6 +3537,55 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 `ix_usage_events_project_id` 与 `ix_usage_events_tenant_feature_occurred`；手续费块走 `payments` 上已有的索引
 （`payments` 没有 `paid_at` 索引）。没有新增迁移或索引。
 
+### `GET /api/v1/admin/usage-analytics/export` —— 导出用量分析（CSV）
+
+设计依据：设计闸门 #709 `APPROVED: design v2` §2「接口二」，全文见
+[design/AIH-TASK-221-margin-analytics.md](design/AIH-TASK-221-margin-analytics.md)。实现登记为 AIH-TASK-223。
+
+> ⚠️ **文件含 Acuven 内部成本、毛利与网关手续费，不得转发给客户。**服务器不保存导出文件；`group_by=customer`
+> 时文件里还有客户公司名。文件离开系统后由管理员负责保管。
+
+- **鉴权**：仅 ADMIN（未登录 401 `TOKEN_INVALID`、非 ADMIN 403 `ADMIN_REQUIRED`，都先于参数校验）。
+- **参数**：`group_by`、`occurred_from`、`occurred_to`、`customer_id`、`project_id`、`provider`、`model`、`feature`，
+  语义、校验与 422 `VALIDATION_ERROR` 与上面的 `GET /api/v1/admin/usage-analytics` 完全相同（含手续费块为 `null`
+  的条件）。**没有分页**：`page` / `page_size` 传了按未知参数忽略，一次导出全部分组。
+- **行**：每个分组一行 `GROUP`，顺序与 JSON 接口相同；最后恒有一行 `TOTAL`（没有任何分组时文件 = 表头 + `TOTAL`
+  行，仍报手续费）。单元格取 JSON 接口的值转成文本：整数原样、金额与比率与 JSON 逐字相同（金额 8 位小数）、`null`
+  写成空字段。格式（UTF-8 带 BOM、RFC 4180、行尾 `\r\n`、响应头 `Cache-Control: no-store` 等）同「客户导出」一节的「CSV 格式」。
+- **列**：表头恰好这 31 列，按这个顺序：
+
+| # | 列 | `GROUP` 行 | `TOTAL` 行 |
+| --- | --- | --- | --- |
+| 1 | `row_type` | `GROUP` | `TOTAL` |
+| 2 | `group_by` | 请求的 `group_by` | 同左 |
+| 3 | `group_key` | 分组键（`null` 组为空） | 空 |
+| 4 | `group_name` | 名称或空 | 空 |
+| 5–12 | `event_count`、`token_event_count`、`input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`、`average_input_tokens`、`average_output_tokens` | 分组项的值 | `totals` 的值 |
+| 13–17 | `prepaid_event_count`、`prepaid_billable_cost`、`prepaid_estimated_provider_cost_myr`、`prepaid_gross_margin`、`prepaid_gross_margin_rate` | 分组项的 `prepaid` | `totals.prepaid` |
+| 18–20 | `internal_event_count`、`internal_estimated_provider_cost_myr`、`internal_reference_customer_price` | 分组项的 `internal_metered_only` | `totals.internal_metered_only` |
+| 21–24 | `paid_payment_count`、`topup_amount`、`gateway_fee`、`gateway_fee_unknown_count` | 空 | `totals.payments` 的 `paid_count`、`topup_amount`、`gateway_fee`、`gateway_fee_unknown_count`；`payments` 为 `null` 时空 |
+| 25–26 | `gross_profit`、`gross_profit_rate` | 空 | `totals` 的值；`null` 时空 |
+| 27 | `cost_basis` | `estimated` | `estimated` |
+| 28 | `usage_period_basis` | `occurred_at` | `occurred_at` |
+| 29 | `fee_period_basis` | 空 | `paid_at`；`payments` 为 `null` 时空 |
+| 30–31 | `occurred_from`、`occurred_to` | 解析后的区间，UTC RFC 3339：整秒写 `YYYY-MM-DDTHH:MM:SSZ`，有微秒时写恰好 6 位小数 `YYYY-MM-DDTHH:MM:SS.ffffffZ` | 同左 |
+
+- 手续费与扣手续费后的毛利**只在 `TOTAL` 行**，不分摊到任何 `GROUP` 行；两个期间口径由第 28、29 列写明。
+- **公式注入防护只作用于 `group_key` 与 `group_name`**（功能标签、公司名、模型代码来自输入）：以 `=`、`+`、`-`、
+  `@`、制表符或回车开头时前加单引号。数值列不加：负毛利 `-0.40000000` 保持是数。
+- **文件名**：`usage-analytics_<group_by>_<from>_<to>.csv`，`<from>` / `<to>` 是解析后的 UTC 时刻加 8 小时、按
+  `%Y%m%dT%H%M%S` 格式化再接字面 `MYT`，例 `usage-analytics_month_20260101T000000MYT_20270101T000000MYT.csv`；
+  不拼任何请求里的原始字符串。
+- **行数上限**：最多 **20 000 个分组**（`TOTAL` 行不计入）；超过时 422 `EXPORT_TOO_LARGE`，不返回部分文件，缩短区间
+  或加筛选条件后重试。
+- **导出名额**：与「客户导出」一节的导出名额**共用**同一个进程级名额（同一进程同一时刻至多一个
+  导出在生成或下载，管理端与客户端之间也共用）；被占用时 503 `EXPORT_BUSY`，带 `Retry-After: 5`，不发任何查询。
+- **数据库未配置**：503，早于获取导出名额。
+- **意外错误**（如查询时数据库断连）：500 `INTERNAL_ERROR`，信封与通用 500 相同；服务端记一条带栈的
+  `admin_usage_analytics_export_failed`（只带路径）。名额在请求结束时释放。
+- 只读：分组、合计与手续费块在一个只读会话里查（同一快照），不写任何表、**不写审计**、不落盘。成功时服务端记一条
+  INFO `admin_usage_analytics_exported`，只带管理员内部 id、`group_by` 与 `GROUP` 行数，不带筛选值、公司名与金额。
+
 ---
 
 ## 钱包核对
