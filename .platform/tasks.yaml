@@ -13380,7 +13380,7 @@ tasks:
     title: 认证加固第二层：认证寿命、计数与限流配置项加下界，新增重置申请最短间隔
     purpose: >-
       按 docs/design/AIH-TASK-231-auth-hardening.md（设计闸门 #751 已批准 v3） §2「配置下界」：app/core/config.py 给 access_token_ttl_seconds、login_max_failures、login_lockout_seconds、auth_rate_limit_burst、auth_rate_limit_per_minute 加 Field 下界，新增一个 model_validator 管 refresh_token_idle_seconds、refresh_token_ttl_seconds 与新配置项的跨字段关系，新增 password_reset_min_interval_seconds（默认 300，环境变量 BILLING_PASSWORD_RESET_MIN_INTERVAL_SECONDS）；同步改四处低于新下界的既有用例中 Worker 能改的三处。新配置项此任务没有读取方（限频属于设计 #751 的 I4（人工 PR））；frontend_base_url 校验属于 AIH-TASK-233。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-231
     acceptance_criteria:
