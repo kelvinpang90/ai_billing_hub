@@ -1,10 +1,15 @@
-"""Response shapes and post-auth validation for admin usage analytics."""
+"""Response shapes and post-auth validation for admin usage analytics.
+
+导出（AIH-TASK-223，设计闸门 #709 v2 §2「接口二」）：31 列的列常量、文本列集合与 GROUP / TOTAL
+两种行的单元格函数。单元格全部取接口一 JSON 视图的值转成字符串（整数 `str()`、金额与比率沿用
+接口一的字符串、null 为空）；含内部成本，只给管理端用。
+"""
 
 from __future__ import annotations
 
 import datetime as dt
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel
 
@@ -129,3 +134,139 @@ class UsageAnalyticsView(BaseModel):
     page_size: int
     total: int
     totals: UsageAnalyticsTotalsView
+
+
+# --- 导出（设计闸门 #709 v2 §2「接口二」） ------------------------------------------------
+
+# 恰好 31 列，按这个顺序。
+USAGE_ANALYTICS_EXPORT_COLUMNS: Final = (
+    "row_type",
+    "group_by",
+    "group_key",
+    "group_name",
+    "event_count",
+    "token_event_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "average_input_tokens",
+    "average_output_tokens",
+    "prepaid_event_count",
+    "prepaid_billable_cost",
+    "prepaid_estimated_provider_cost_myr",
+    "prepaid_gross_margin",
+    "prepaid_gross_margin_rate",
+    "internal_event_count",
+    "internal_estimated_provider_cost_myr",
+    "internal_reference_customer_price",
+    "paid_payment_count",
+    "topup_amount",
+    "gateway_fee",
+    "gateway_fee_unknown_count",
+    "gross_profit",
+    "gross_profit_rate",
+    "cost_basis",
+    "usage_period_basis",
+    "fee_period_basis",
+    "occurred_from",
+    "occurred_to",
+)
+# 加公式注入前缀的文本列（功能标签、公司名、模型代码来自输入）；数值列不加：负毛利要保持是数。
+USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS: Final = frozenset({"group_key", "group_name"})
+
+_USAGE_KEYS: Final = (
+    "event_count",
+    "token_event_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "average_input_tokens",
+    "average_output_tokens",
+)
+_PREPAID_KEYS: Final = (
+    "event_count",
+    "billable_cost",
+    "estimated_provider_cost_myr",
+    "gross_margin",
+    "gross_margin_rate",
+)
+_INTERNAL_KEYS: Final = ("event_count", "estimated_provider_cost_myr", "reference_customer_price")
+_PAYMENT_KEYS: Final = ("paid_count", "topup_amount", "gateway_fee", "gateway_fee_unknown_count")
+
+
+def rfc3339_utc(moment: dt.datetime) -> str:
+    """A naive UTC moment as RFC 3339: whole seconds without a fraction, else exactly 6 places."""
+    text = moment.strftime("%Y-%m-%dT%H:%M:%S")
+    if moment.microsecond:
+        text += f".{moment.microsecond:06d}"
+    return text + "Z"
+
+
+def _cell(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _usage_cells(view: dict[str, Any]) -> list[str | None]:
+    """Columns 5–20: the ten keys a group item and `totals` share, in their JSON values."""
+    return [
+        *(_cell(view[key]) for key in _USAGE_KEYS),
+        *(_cell(view["prepaid"][key]) for key in _PREPAID_KEYS),
+        *(_cell(view["internal_metered_only"][key]) for key in _INTERNAL_KEYS),
+    ]
+
+
+def usage_analytics_export_group_cells(
+    item: UsageAnalyticsItem,
+    *,
+    group_by: UsageAnalyticsGroupBy,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+) -> list[str | None]:
+    """One GROUP row in `USAGE_ANALYTICS_EXPORT_COLUMNS` order; fees and gross profit are empty."""
+    view = item.model_dump(mode="json")
+    return [
+        "GROUP",
+        group_by,
+        _cell(view["group_key"]),
+        _cell(view["group_name"]),
+        *_usage_cells(view),
+        *([None] * (len(_PAYMENT_KEYS) + 2)),
+        "estimated",
+        "occurred_at",
+        None,
+        rfc3339_utc(occurred_from),
+        rfc3339_utc(occurred_to),
+    ]
+
+
+def usage_analytics_export_total_cells(
+    totals: UsageAnalyticsTotalsView,
+    *,
+    group_by: UsageAnalyticsGroupBy,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+) -> list[str | None]:
+    """The TOTAL row: no group key or name; fee columns empty when `payments` is null."""
+    view = totals.model_dump(mode="json")
+    payments: dict[str, Any] | None = view["payments"]
+    return [
+        "TOTAL",
+        group_by,
+        None,
+        None,
+        *_usage_cells(view),
+        *(
+            [None] * len(_PAYMENT_KEYS)
+            if payments is None
+            else [_cell(payments[key]) for key in _PAYMENT_KEYS]
+        ),
+        _cell(view["gross_profit"]),
+        _cell(view["gross_profit_rate"]),
+        "estimated",
+        "occurred_at",
+        None if payments is None else _cell(payments["period_basis"]),
+        rfc3339_utc(occurred_from),
+        rfc3339_utc(occurred_to),
+    ]

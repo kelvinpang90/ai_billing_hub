@@ -119,6 +119,7 @@ FX_RATE_ROUTE = FX_RATES_ROUTE + "/{fx_rate_id}"
 PRICING_PREVIEW_ROUTE = "/api/v1/admin/pricing-preview"
 USAGE_EVENTS_ROUTE = "/api/v1/admin/usage-events"
 USAGE_ANALYTICS_ROUTE = "/api/v1/admin/usage-analytics"
+USAGE_ANALYTICS_EXPORT_ROUTE = USAGE_ANALYTICS_ROUTE + "/export"
 AI_ACCESS_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}/ai-access"
 # AIH-TASK-050 的三个接口（设计闸门 #241 v6 §2「接口」）。
 PROJECT_ROUTE = "/api/v1/admin/customers/{customer_id}/projects/{project_id}"
@@ -199,6 +200,8 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", USAGE_EVENTS_ROUTE),
     ("GET", USAGE_EVENTS_ROUTE + "/{usage_event_id}"),
     ("GET", USAGE_ANALYTICS_ROUTE),
+    # AIH-TASK-223 的管理端用量分析导出（设计闸门 #709 v2 §2「接口二」）。
+    ("GET", USAGE_ANALYTICS_EXPORT_ROUTE),
     ("GET", AI_ACCESS_ROUTE),
     ("POST", AI_ACCESS_ROUTE + "/client-keys"),
     ("POST", AI_ACCESS_ROUTE + "/client-keys/{client_id}/revoke"),
@@ -1000,7 +1003,7 @@ def test_every_admin_route_refuses_non_admins(
         "receipt_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
-    if path == USAGE_ANALYTICS_ROUTE:
+    if path in (USAGE_ANALYTICS_ROUTE, USAGE_ANALYTICS_EXPORT_ROUTE):
         url += (
             "?group_by=provider&occurred_from=2026-01-01T00:00:00Z&occurred_to=2026-01-02T00:00:00Z"
         )
