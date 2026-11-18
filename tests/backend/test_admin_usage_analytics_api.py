@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import itertools
 import os
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, insert, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from test_usage_billing import (
     _SQLITE_LEDGER_TRIGGER,
+    ESTIMATED_MYR,
     EVENT_AT,
+    MARKUP_BILLABLE,
     TEST_EMAIL_DOMAIN,
+    TOKENS,
+    Tenancy,
     _mysql_factory,
     seed_meter_types,
 )
@@ -30,7 +35,13 @@ from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
 from app.models.tenancy import BillingMode, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
-from app.repositories.usage_analytics import list_usage_analytics
+from app.repositories import usage_events as event_repository
+from app.repositories.usage_analytics import (
+    MalaysiaMonth,
+    UsageAnalyticsTotals,
+    list_usage_analytics,
+    usage_analytics_totals,
+)
 from app.services.auth import utc_now
 
 PATH = "/api/v1/admin/usage-analytics"
@@ -481,3 +492,296 @@ def test_billed_sums_are_exact_on_both_databases_and_ties_sort_by_group_key(bill
             "gross_margin": f"{margin:.8f}",
             "gross_margin_rate": format((margin / billable).normalize(), "f"),
         }
+
+
+# --- AIH-TASK-221：按马来西亚日 / 月分组与全量合计（设计闸门 #709 v2 §7） -----------------
+
+UNKNOWN_ID = "00000000-0000-0000-0000-000000000000"
+NO_FILTERS: dict[str, str | None] = {
+    "customer_id": None,
+    "project_id": None,
+    "provider": None,
+    "model": None,
+    "feature": None,
+}
+PERIOD_FROM = dt.datetime(2026, 10, 1)
+PERIOD_TO = dt.datetime(2027, 2, 1)
+GROUPINGS = ("provider", "model", "customer", "project", "feature")
+ZERO_TOTALS = UsageAnalyticsTotals(
+    0, 0, 0, 0, 0, 0, 0, Decimal(0), Decimal(0), 0, Decimal(0), Decimal(0)
+)
+_INSERTED = itertools.count(1)
+
+
+def insert_processed(
+    world: BillingWorld,
+    template_id: int,
+    tenant: Tenancy,
+    *,
+    occurred_at: dt.datetime,
+    feature: str | None = "crm.chat",
+    quantity: bool = False,
+) -> None:
+    """A PROCESSED event inserted directly, with the billed template's snapshot but 0 billed (so
+    it needs no ledger row); usage_events has only BEFORE UPDATE triggers. `quantity` makes it an
+    AUDIO_SECOND (QUANTITY) event."""
+    template = world.row(template_id)
+    skipped = {"id", "public_id", "event_id", "request_id", "wallet_transaction_id"}
+    values = {
+        column.key: getattr(template, column.key)
+        for column in UsageEvent.__table__.columns
+        if column.key not in skipped
+    }
+    number = next(_INSERTED)
+    values.update(
+        public_id=f"00000000-0000-4006-8000-{number:012d}",
+        event_id=f"00000000-0000-7006-8000-{number:012d}",
+        request_id=f"inserted-{number}",
+        tenant_id=tenant.id,
+        project_id=tenant.project_id,
+        integration_credential_id=tenant.credential_id,
+        occurred_at=occurred_at,
+        feature=feature,
+        billable_cost=Decimal(0),
+        wallet_transaction_id=None,
+    )
+    with world.factory() as session:
+        if quantity:
+            meter = event_repository.find_meter_type(session, "AUDIO_SECOND")
+            assert meter is not None
+            values.update(
+                usage_meter_type_id=meter.id,
+                payload_shape=meter.payload_shape,
+                unit=meter.unit,
+                quantity_kind=meter.quantity_kind,
+                input_tokens=None,
+                output_tokens=None,
+                cache_creation_input_tokens=None,
+                cache_read_input_tokens=None,
+                quantity=Decimal(2),
+            )
+        session.execute(insert(UsageEvent).values(**values))
+        session.commit()
+
+
+def billed_template(world: BillingWorld) -> tuple[Tenancy, int]:
+    """One tenant and one event billed by the real worker (at EVENT_AT, outside PERIOD_*)."""
+    world.publish_markup_usd()
+    tenant = world.tenant("periods")
+    world.fund(tenant, "100")
+    template = world.event(tenant)
+    assert world.bill().claimed == 1
+    return tenant, template
+
+
+def grouped(
+    world: BillingWorld,
+    group_by: str,
+    *,
+    offset: int = 0,
+    limit: int = 10,
+    occurred_from: dt.datetime = PERIOD_FROM,
+    occurred_to: dt.datetime = PERIOD_TO,
+):
+    with world.factory() as session:
+        return list_usage_analytics(
+            session,
+            group_by=group_by,
+            offset=offset,
+            limit=limit,
+            occurred_from=occurred_from,
+            occurred_to=occurred_to,
+            **NO_FILTERS,
+        )
+
+
+def test_days_and_months_follow_the_malaysian_calendar_on_both_databases(billed) -> None:
+    _app, world = billed
+    tenant, template = billed_template(world)
+    for moment in (
+        dt.datetime(2026, 10, 31, 15, 59, 59, 999999),
+        dt.datetime(2026, 10, 31, 16, 0, 0),
+        dt.datetime(2026, 12, 31, 15, 59, 59),
+        dt.datetime(2026, 12, 31, 16, 0, 0),
+    ):
+        insert_processed(world, template, tenant, occurred_at=moment)
+    for group_by, keys in (
+        ("day", ["2026-10-31", "2026-11-01", "2026-12-31", "2027-01-01"]),
+        ("month", ["2026-10", "2026-11", "2026-12", "2027-01"]),
+    ):
+        rows, total = grouped(world, group_by)
+        assert total == 4, group_by
+        assert [(row.group_key, row.group_name, row.event_count) for row in rows] == [
+            (key, None, 1) for key in keys
+        ], group_by
+
+
+def test_days_and_months_sort_by_key_not_by_event_count_and_page(billed) -> None:
+    _app, world = billed
+    tenant, template = billed_template(world)
+    for moment, count in (
+        (dt.datetime(2026, 10, 10, 4, 0, 0), 1),
+        (dt.datetime(2026, 11, 10, 4, 0, 0), 3),
+        (dt.datetime(2026, 12, 10, 4, 0, 0), 2),
+    ):
+        for _ in range(count):
+            insert_processed(world, template, tenant, occurred_at=moment)
+    for group_by, keys in (
+        ("day", ["2026-10-10", "2026-11-10", "2026-12-10"]),
+        ("month", ["2026-10", "2026-11", "2026-12"]),
+    ):
+        first, first_total = grouped(world, group_by, limit=2)
+        second, second_total = grouped(world, group_by, offset=2, limit=2)
+        assert (first_total, second_total) == (3, 3), group_by
+        assert [(row.group_key, row.event_count) for row in first] == [
+            (keys[0], 1),
+            (keys[1], 3),
+        ], group_by
+        assert [(row.group_key, row.event_count) for row in second] == [(keys[2], 2)], group_by
+
+
+def test_the_month_expression_compiles_per_dialect_and_runs_with_bound_parameters(
+    billed,
+) -> None:
+    _app, world = billed
+    tenant, template = billed_template(world)
+    insert_processed(world, template, tenant, occurred_at=dt.datetime(2026, 10, 31, 16, 0, 0))
+    engine = world.factory.kw["bind"]
+    month = MalaysiaMonth(UsageEvent.occurred_at)
+    compiled = str(month.compile(dialect=engine.dialect))
+    if engine.dialect.name == "mysql":
+        # 带绑定参数的语句经驱动的 format 参数风格展开：表达式里不能有 `%`（设计 §9 备选 E）。
+        assert "EXTRACT(YEAR_MONTH" in compiled and "%" not in compiled
+    else:
+        assert "strftime" in compiled
+    statement = select(month).where(
+        UsageEvent.occurred_at >= PERIOD_FROM, UsageEvent.occurred_at < PERIOD_TO
+    )
+    with world.factory() as session:
+        assert list(session.execute(statement).scalars()) == [202611]
+
+
+def test_totals_equal_the_sum_of_every_grouping(billed) -> None:
+    _app, world = billed
+    world.publish_markup_usd()
+    first, second, internal = (
+        world.tenant("first"),
+        world.tenant("second"),
+        world.tenant("internal"),
+    )
+    for tenant in (first, second):
+        world.fund(tenant, "100")
+    with world.factory.begin() as session:
+        session.execute(
+            update(Tenant)
+            .where(Tenant.id == internal.id)
+            .values(billing_mode=BillingMode.INTERNAL_METERED_ONLY)
+        )
+    template = world.event(first, feature="crm.chat")
+    world.event(first)  # 功能为 null。
+    world.event(second, feature="crm.other")
+    world.event(internal, feature="crm.chat")
+    assert world.bill().claimed == 4
+    insert_processed(
+        world, template, second, occurred_at=EVENT_AT, feature="crm.audio", quantity=True
+    )
+    world.event(first, feature="crm.chat")  # 留在 RECEIVED：不计。
+
+    with world.factory() as session:
+        totals = usage_analytics_totals(
+            session, occurred_from=WINDOW_FROM, occurred_to=WINDOW_TO, **NO_FILTERS
+        )
+    assert (
+        totals.event_count,
+        totals.token_event_count,
+        totals.prepaid_event_count,
+        totals.internal_event_count,
+    ) == (5, 4, 4, 1)
+    # QUANTITY 事件不进 token 合计。
+    assert (
+        totals.input_tokens,
+        totals.output_tokens,
+        totals.cache_creation_input_tokens,
+        totals.cache_read_input_tokens,
+    ) == tuple(4 * TOKENS[name] for name in TOKENS)
+    expected_money = (
+        3 * MARKUP_BILLABLE,
+        4 * ESTIMATED_MYR,
+        ESTIMATED_MYR,
+        MARKUP_BILLABLE,
+    )
+    money = (
+        totals.prepaid_billable_cost,
+        totals.prepaid_estimated_cost,
+        totals.internal_estimated_cost,
+        totals.internal_reference_price,
+    )
+    assert money == expected_money
+    assert all(isinstance(value, Decimal) for value in money)
+    if world.factory.kw["bind"].dialect.name == "mysql":
+        assert [str(value) for value in money] == [f"{value:.8f}" for value in expected_money]
+
+    for group_by in GROUPINGS:
+        rows, offset = [], 0
+        while True:
+            page, total = grouped(
+                world,
+                group_by,
+                offset=offset,
+                limit=2,
+                occurred_from=WINDOW_FROM,
+                occurred_to=WINDOW_TO,
+            )
+            rows.extend(page)
+            offset += 2
+            if offset >= total:
+                break
+        assert len(rows) == total, group_by
+        for field in UsageAnalyticsTotals._fields:
+            value = getattr(totals, field)
+            start = Decimal(0) if isinstance(value, Decimal) else 0
+            assert sum((getattr(row, field) for row in rows), start) == value, (group_by, field)
+
+
+def test_totals_are_zero_for_an_unknown_customer_or_project_and_an_empty_period(billed) -> None:
+    _app, world = billed
+    tenant, _template = billed_template(world)
+    engine = world.factory.kw["bind"]
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    for filters in ({"customer_id": UNKNOWN_ID}, {"project_id": UNKNOWN_ID}):
+        statements.clear()
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            with world.factory() as session:
+                totals = usage_analytics_totals(
+                    session,
+                    occurred_from=WINDOW_FROM,
+                    occurred_to=WINDOW_TO,
+                    **{**NO_FILTERS, **filters},
+                )
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        assert totals == ZERO_TOTALS, filters
+        # 只查了客户或项目，没有发出聚合查询。
+        assert statements and not any("usage_events" in text for text in statements), filters
+
+    with world.factory() as session:
+        mine = usage_analytics_totals(
+            session,
+            occurred_from=WINDOW_FROM,
+            occurred_to=WINDOW_TO,
+            **{
+                **NO_FILTERS,
+                "customer_id": tenant.public_id,
+                "project_id": tenant.project_public_id,
+            },
+        )
+        empty = usage_analytics_totals(session, occurred_from=T0, occurred_to=T1, **NO_FILTERS)
+    assert mine.event_count == 1
+    assert empty == ZERO_TOTALS
+    assert all(type(getattr(empty, field)) is int for field in UsageAnalyticsTotals._fields[:7])
+    assert all(isinstance(value, Decimal) for value in empty[7:9] + empty[10:])
