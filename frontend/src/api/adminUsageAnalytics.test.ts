@@ -1,7 +1,8 @@
 /**
  * 用量分析请求发到哪个地址、带什么查询参数。
  *
- * ⚠️ 页面用例把 `getUsageAnalytics` mock 掉了，路径与参数名只在这里被看住。
+ * ⚠️ 页面用例把 `getUsageAnalytics` 与 `exportUsageAnalytics` mock 掉了，路径与参数名只在这里被看住。导出这一层只管
+ * 地址与回退文件名；下载本身（令牌、blob、错误信封）由 `download.test.ts` 管，这里把 `downloadFile` mock 掉。
  *
  * uuid 一律是全零占位值。
  */
@@ -9,11 +10,19 @@
 import { AxiosError, AxiosHeaders, type AxiosResponse } from "axios";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getUsageAnalytics } from "./adminUsageAnalytics";
+import { exportUsageAnalytics, getUsageAnalytics, usageAnalyticsExportUrl } from "./adminUsageAnalytics";
 import { ApiError, client } from "./client";
+
+const download = vi.hoisted(() => ({ downloadFile: vi.fn() }));
+
+vi.mock("./download", async () => {
+  const actual = await vi.importActual<typeof import("./download")>("./download");
+  return { ...actual, ...download };
+});
 
 const ID = "00000000-0000-0000-0000-000000000000";
 const ANALYTICS = "/api/v1/admin/usage-analytics";
+const EXPORT = "/api/v1/admin/usage-analytics/export";
 const FROM = "2026-09-01T00:00:00Z";
 const TO = "2026-10-01T00:00:00Z";
 
@@ -36,6 +45,7 @@ function rejection(status: number, code: string, message: string, requestId: str
 
 afterEach(() => {
   vi.restoreAllMocks();
+  download.downloadFile.mockReset();
 });
 
 describe("usage analytics", () => {
@@ -149,6 +159,21 @@ describe("usage analytics", () => {
     expect(typeof result.items[0]?.average_input_tokens).toBe("string");
   });
 
+  it("sends group_by=month as the dimension", async () => {
+    const get = vi.spyOn(client, "get").mockResolvedValue(envelope(EMPTY_REPORT));
+
+    await getUsageAnalytics({ group_by: "month", occurred_from: FROM, occurred_to: TO }, 1, 20);
+
+    const query = new URLSearchParams({
+      group_by: "month",
+      occurred_from: FROM,
+      occurred_to: TO,
+      page: "1",
+      page_size: "20",
+    });
+    expect(get).toHaveBeenCalledWith(`${ANALYTICS}?${query.toString()}`, {});
+  });
+
   it("turns a 403 into an ApiError carrying the code and the request id", async () => {
     vi.spyOn(client, "get").mockRejectedValue(
       rejection(403, "ADMIN_REQUIRED", "Administrator access is required.", "req-403"),
@@ -158,5 +183,58 @@ describe("usage analytics", () => {
 
     await expect(failure).rejects.toBeInstanceOf(ApiError);
     await expect(failure).rejects.toMatchObject({ code: "ADMIN_REQUIRED", requestId: "req-403" });
+  });
+});
+
+describe("usage analytics export", () => {
+  it("builds the export address with the same filters, leaving out empty ones and paging", () => {
+    const url = usageAnalyticsExportUrl({
+      group_by: "day",
+      occurred_from: FROM,
+      occurred_to: TO,
+      customer_id: ID,
+      project_id: "",
+      provider: "   ",
+      model: " claude-x ",
+    });
+
+    const query = new URLSearchParams({
+      group_by: "day",
+      occurred_from: FROM,
+      occurred_to: TO,
+      customer_id: ID,
+      model: "claude-x",
+    });
+    expect(url).toBe(`${EXPORT}?${query.toString()}`);
+    const params = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+    expect(params.has("page")).toBe(false);
+    expect(params.has("page_size")).toBe(false);
+    expect(params.has("project_id")).toBe(false);
+    expect(params.has("provider")).toBe(false);
+    expect(params.has("feature")).toBe(false);
+  });
+
+  it("downloads through downloadFile with usage-analytics.csv as the fallback file name", async () => {
+    download.downloadFile.mockResolvedValue(undefined);
+    const controller = new AbortController();
+    const query = { group_by: "month" as const, occurred_from: FROM, occurred_to: TO, feature: "crm.contact_summary" };
+
+    await exportUsageAnalytics(query, controller.signal);
+
+    expect(download.downloadFile).toHaveBeenCalledTimes(1);
+    expect(download.downloadFile).toHaveBeenCalledWith(
+      usageAnalyticsExportUrl(query),
+      "usage-analytics.csv",
+      controller.signal,
+    );
+    expect(String(download.downloadFile.mock.calls[0]?.[0]).startsWith(`${EXPORT}?`)).toBe(true);
+  });
+
+  it("passes a download failure through unchanged", async () => {
+    download.downloadFile.mockRejectedValue(new ApiError("EXPORT_BUSY", "Another export is in progress.", "req-503"));
+
+    const failure = exportUsageAnalytics({ group_by: "provider", occurred_from: FROM, occurred_to: TO });
+
+    await expect(failure).rejects.toMatchObject({ code: "EXPORT_BUSY", requestId: "req-503" });
   });
 });

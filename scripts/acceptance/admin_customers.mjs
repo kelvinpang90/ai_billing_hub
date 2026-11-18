@@ -47,6 +47,9 @@
  * AIH-TASK-219 加了管理端对账单详情 PDF 下载按钮的一个只读步骤（check_admin_statement_pdf），排在 login 之后，经顶栏自己进
  * 对账单页，列表非空时点第一行打开详情，FINALIZED 时只查「Download PDF」在且可点、不点，别的状态查它不在（设计闸门
  * #708 v3 §2「管理端页面」、§11）；open_statements 仍然不点行。
+ * AIH-TASK-224 加了用量分析页的两个只读步骤（check_analytics_totals 核对合计块、check_analytics_export 只查「Export CSV」
+ * 按钮不点），都排在 open_usage_analytics 之后、不自己导航（设计闸门 #709 v2 §2「页面」、§11）；open_usage_analytics
+ * 与 check_usage_analytics 不变（USAGE_ANALYTICS_API 只认接口一的路径，导出路径不算）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -177,7 +180,8 @@
  *   不填也不提交任何表单。试算页不选也不填任何字段、不点「Calculate」（试算本身只读，但「不提交任何表单」一视同仁）。
  *   用量事件页不勾选任何行、不点「Requeue selected」「Requeue all matching…」「Requeue」或任何确认按钮、不填也不
  *   提交筛选表单（不点「Apply filters」「Clear filters」）、不翻页、不打开任何事件的详情（「View」链接）。
- *   用量分析页不改分组维度、时间段或任何筛选、不点「Apply filters」「Reset to last 30 days」、不翻页、不改每页条数。
+ *   用量分析页不改分组维度、时间段或任何筛选、不点「Apply filters」「Reset to last 30 days」、不翻页、不改每页条数；
+ *   合计块（check_analytics_totals）只看不点；「Export CSV」按钮（check_analytics_export）**只查不点**（验收不下载文件）。
  *   钱包核对页（open_wallet_reconciliation）不点运行表的任何一行（不打开不一致列表）、不翻页、不改每页条数、不点
  *   「Try again」或任何别的按钮与链接，不填也不提交任何表单（页面本身没有写操作入口）。
  *   对账单页（open_statements）不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不动客户下拉与
@@ -314,6 +318,24 @@
  *                   data-row-key 的数据行数与响应 data.items 的条数一致；items 为空时页面显示空状态（usageAnalytics.empty
  *                   或 usageAnalytics.emptyPage）、没有数据行。不改筛选、不翻页。有数据行时报到前把表格滚动到视口里
  *                   （放得下时整张在视口内，放不下时表格顶端在视口内）
+ *   check_analytics_totals
+ *                   本次运行跑过 open_usage_analytics 才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认
+ *                   open_usage_analytics 打开的那一页（落定的判定与失败码同 check_usage_analytics）。后端值取页面自己发出的
+ *                   GET /api/v1/admin/usage-analytics 的响应体（被动观察，不自己发请求、不拦截；取点顶栏之后成功读完的最近
+ *                   一次），不是成功信封、没有 data.totals、totals.prepaid.billable_cost 不是字符串、totals.gross_profit 或
+ *                   totals.payments.gateway_fee（payments 为 null 时按 null 算）既不是字符串也不是 null，都是 assertion_failed。
+ *                   合计块（role=region、aria-label 为「Totals」，usageAnalytics.totals.title；带边框的 Descriptions：label 在
+ *                   <th>，值在紧跟的 <td>）里「Usage revenue」「Gross profit」「Gateway fees」三项（usageAnalytics.totals.*）各
+ *                   恰好一个，<td> 文字分别等于 totals.prepaid.billable_cost、totals.gross_profit、totals.payments.gateway_fee
+ *                   （null 时为短横「—」）。找不到合计块或某一项是 element_missing，文字不等或不止一个是 assertion_failed。合计块
+ *                   不是数据表格（没有 thead、没有 data-row-key），不影响 check_usage_analytics 的行数。不改筛选、不翻页。报到前
+ *                   把合计块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   check_analytics_export
+ *                   本次运行跑过 open_usage_analytics 才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认
+ *                   open_usage_analytics 打开的那一页（落定的判定与失败码同 check_usage_analytics）。同一页上文字为「Export CSV」
+ *                   （usageAnalytics.export.button）的按钮恰好一个，且处于可用状态（没有 disabled 属性、aria-disabled 不是
+ *                   true）。找不到按钮是 element_missing，不止一个或一直不可用是 assertion_failed。**不点**这个按钮（验收不下载
+ *                   文件）、不改筛选、不翻页、不提交任何表单
  *   open_wallet_reconciliation
  *                   要排在 login 之后。点顶栏「Wallet reconciliation」（en.json 的 nav.walletReconciliation，href 为 paths.ts 的
  *                   walletReconciliation，即 /wallet-reconciliation）进钱包核对页；页面落定：地址是 /wallet-reconciliation，运行表
@@ -778,6 +800,12 @@ const TEXT = {
   analyticsEmptyPage: "There are no groups on this page.", // usageAnalytics.emptyPage
   analyticsPrepaid: "Prepaid (MYR)", // usageAnalytics.prepaid.title —— 分析表格的列组表头
   analyticsInternal: "Internal metering only (MYR)", // usageAnalytics.internal.title
+  analyticsTotalsTitle: "Totals", // usageAnalytics.totals.title —— 合计块的 aria-label
+  analyticsUsageRevenue: "Usage revenue", // usageAnalytics.totals.usageRevenue —— 合计块里的一项（th）
+  analyticsGrossProfit: "Gross profit", // usageAnalytics.totals.grossProfit
+  analyticsGatewayFees: "Gateway fees", // usageAnalytics.totals.gatewayFees
+  analyticsNull: "—", // 合计块里 null 的显示（frontend/src/features/usage/UsageEventsPage.tsx 的 EMPTY）
+  analyticsExport: "Export CSV", // usageAnalytics.export.button —— 只确认它在且可用，不点
   navWalletReconciliation: "Wallet reconciliation", // nav.walletReconciliation —— 顶栏的钱包核对项
   reconRunsTitle: "Reconciliation runs", // walletReconciliation.runs.title —— 运行表一块的 aria-label
   reconForbidden: "Only administrators can view wallet reconciliation.", // walletReconciliation.forbidden
@@ -3600,6 +3628,74 @@ function analyticsTableInView(lib, T) {
     return false;
   }
   const rect = table.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * 用量分析页的合计块与导出按钮（check_analytics_totals、check_analytics_export 用）：合计块（role=region、aria-label 为
+ * 「Totals」）在不在；块里「Usage revenue」「Gross profit」「Gateway fees」三项（带边框的 Descriptions：label 在 <th>，
+ * 值在紧跟的 <td>）各有几个、恰好一个时 <td> 的文字；整页上文字为「Export CSV」的按钮有几个，恰好一个时它是否可用
+ * （没有 disabled 属性、aria-disabled 不是 true）。按钮在导出中会多一个 loading 图标，图标没有文字，不影响按文字找。
+ * 只读 DOM，不点、不填。
+ */
+function probeAnalyticsTotals(lib, T) {
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.analyticsTotalsTitle,
+    ) ?? null;
+  const item = (label) => {
+    const cells = [];
+    if (region !== null) {
+      for (const th of region.querySelectorAll("th")) {
+        const td = th.nextElementSibling;
+        if (lib.norm(th.textContent) === label && td && td.tagName === "TD") {
+          cells.push(td);
+        }
+      }
+    }
+    return { count: cells.length, text: cells.length === 1 ? lib.norm(cells[0].textContent) : null };
+  };
+  const buttons = [...document.querySelectorAll("button")].filter((el) => lib.norm(el.textContent) === T.analyticsExport);
+  let exportEnabled = false;
+  if (buttons.length === 1) {
+    exportEnabled = !buttons[0].disabled && buttons[0].getAttribute("aria-disabled") !== "true";
+  }
+  return {
+    path: location.pathname,
+    region: region !== null,
+    revenue: item(T.analyticsUsageRevenue),
+    grossProfit: item(T.analyticsGrossProfit),
+    gatewayFees: item(T.analyticsGatewayFees),
+    exportButtons: buttons.length,
+    exportEnabled,
+  };
+}
+
+/** 把合计块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
+function scrollAnalyticsTotalsIntoView(lib, T) {
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.analyticsTotalsTitle,
+    ) ?? null;
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的合计块要整块在视口内；放不下的只要求顶端在视口内。 */
+function analyticsTotalsInView(lib, T) {
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.analyticsTotalsTitle,
+    ) ?? null;
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
   const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
   return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
@@ -6740,6 +6836,114 @@ async function stepCheckUsageAnalytics(ctx) {
   }
 }
 
+/** 用量分析页（open_usage_analytics 打开的那一页）落定且不是加载失败、无权限或路由兜底页；不导航、不点任何东西。 */
+async function awaitUsageAnalyticsSettled() {
+  const ready = await waitFor(
+    () => evaluate(probeUsageAnalytics, TEXT),
+    catalogSettled(TEXT.usageAnalyticsPath),
+    ELEMENT_WAIT_MS,
+  );
+  if (!ready.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(ready.value, TEXT.usageAnalyticsPath, true);
+}
+
+async function stepCheckAnalyticsTotals(ctx) {
+  // 不自己导航：只认 open_usage_analytics 打开的那一页，以及点顶栏之后页面自己发出的请求。
+  if (ctx.usageAnalyticsAfterSeq === null) {
+    throw fail("assertion_failed");
+  }
+  await awaitUsageAnalyticsSettled();
+
+  // 后端值：点顶栏之后页面自己发出、成功读完的最近一次分析 GET 的响应体（被动观察）。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestUsageAnalyticsResponse(ctx.usageAnalyticsAfterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const totals = envelope?.success === true ? envelope.data?.totals : null;
+    const revenue = totals?.prepaid?.billable_cost;
+    const grossProfit = totals?.gross_profit;
+    const payments = totals?.payments;
+    const fee = payments === null ? null : payments?.gateway_fee;
+    if (
+      typeof revenue !== "string" ||
+      (grossProfit !== null && typeof grossProfit !== "string") ||
+      (fee !== null && typeof fee !== "string")
+    ) {
+      throw fail("assertion_failed");
+    }
+    expected = {
+      revenue,
+      grossProfit: grossProfit ?? TEXT.analyticsNull,
+      gatewayFees: fee ?? TEXT.analyticsNull,
+    };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 totals 或类型不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 合计块显示的就是这一份响应：三项各恰好一个，<td> 文字逐字等于后端字符串（null 是短横）。
+  const matches = (s) =>
+    s.path === TEXT.usageAnalyticsPath &&
+    s.region &&
+    s.revenue.count === 1 &&
+    s.grossProfit.count === 1 &&
+    s.gatewayFees.count === 1 &&
+    s.revenue.text === expected.revenue &&
+    s.grossProfit.text === expected.grossProfit &&
+    s.gatewayFees.text === expected.gatewayFees;
+  const shown = await waitFor(() => evaluate(probeAnalyticsTotals, TEXT), matches, ELEMENT_WAIT_MS);
+  if (!shown.ok) {
+    const s = shown.value;
+    const missing =
+      s === null || !s.region || s.revenue.count === 0 || s.grossProfit.count === 0 || s.gatewayFees.count === 0;
+    throw fail(missing ? "element_missing" : "assertion_failed");
+  }
+
+  // Worker 在报到后截图：先把合计块滚进视口。
+  if ((await evaluate(scrollAnalyticsTotalsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(analyticsTotalsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepCheckAnalyticsExport(ctx) {
+  // 不自己导航：只认 open_usage_analytics 打开的那一页。
+  if (ctx.usageAnalyticsAfterSeq === null) {
+    throw fail("assertion_failed");
+  }
+  await awaitUsageAnalyticsSettled();
+
+  // 整页上恰好一个「Export CSV」按钮且可用。**不点它**（验收不下载文件）。
+  const ready = await waitFor(
+    () => evaluate(probeAnalyticsTotals, TEXT),
+    (s) => s.path === TEXT.usageAnalyticsPath && s.exportButtons === 1 && s.exportEnabled,
+    ELEMENT_WAIT_MS,
+  );
+  if (!ready.ok) {
+    if (ready.value !== null && ready.value.path !== TEXT.usageAnalyticsPath) {
+      throw fail("navigation_failed");
+    }
+    throw fail(ready.value === null || ready.value.exportButtons === 0 ? "element_missing" : "assertion_failed");
+  }
+}
+
 async function stepOpenWalletReconciliation(ctx) {
   if (ctx.loginCompletedAt === null) {
     throw fail("assertion_failed");
@@ -9790,6 +9994,8 @@ const STEPS = {
   check_project_integration: stepCheckProjectIntegration,
   open_usage_analytics: stepOpenUsageAnalytics,
   check_usage_analytics: stepCheckUsageAnalytics,
+  check_analytics_totals: stepCheckAnalyticsTotals,
+  check_analytics_export: stepCheckAnalyticsExport,
   open_wallet_reconciliation: stepOpenWalletReconciliation,
   open_statements: stepOpenStatements,
   check_admin_statement_pdf: stepCheckAdminStatementPdf,
@@ -9866,7 +10072,10 @@ async function main() {
      * 请求另按点第一行之前的序号截断）；本次运行没跑过 login 时为 null。
      */
     loginSeq: null,
-    /** open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null。 */
+    /**
+     * open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null（check_analytics_totals 与
+     * check_analytics_export 这时 assertion_failed）。
+     */
     usageAnalyticsAfterSeq: null,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */
     portalUsageChecked: false,

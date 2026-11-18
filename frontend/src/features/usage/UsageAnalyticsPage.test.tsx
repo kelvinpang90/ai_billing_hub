@@ -1,6 +1,11 @@
 /**
  * 用量分析页：四种状态（加载中、失败带 request_id、空列表、无权限）；默认最近 30 天、按供应商分组；切换维度与
  * 时间段（吉隆坡时间换成带时区的 RFC 3339）后的请求参数；时间段校验；翻页；金额、平均值与毛利率原样显示。
+ * AIH-TASK-224（设计闸门 #709 v2 §7「前端维度与导出」）：按日 / 按月的请求参数与分组格；「Export CSV」用已应用的条件、
+ * 下载中不可点、失败显示码、信息与 request_id 并在再点时收起。合计块本身的内容由 `UsageAnalyticsTotals.test.tsx` 管。
+ *
+ * ⚠️ 合计块是带边框的 Descriptions，它也渲染成 table 元素，标签在 th 里（有的与列头同名）：列头断言只在带 thead 的
+ * 数据表格里找（`dataTable()`）。
  *
  * 请求路径与参数名由 `api/adminUsageAnalytics.test.ts` 管，这里只看页面把什么交给了它。uuid 一律全零。
  */
@@ -12,7 +17,11 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
-import type { UsageAnalyticsItem, UsageAnalyticsReport } from "../../api/adminUsageAnalytics";
+import type {
+  UsageAnalyticsItem,
+  UsageAnalyticsReport,
+  UsageAnalyticsReportTotals,
+} from "../../api/adminUsageAnalytics";
 import { ApiError } from "../../api/client";
 import { UsageAnalyticsPage } from "./UsageAnalyticsPage";
 
@@ -20,6 +29,7 @@ const ID = "00000000-0000-0000-0000-000000000000";
 
 const api = vi.hoisted(() => ({
   getUsageAnalytics: vi.fn(),
+  exportUsageAnalytics: vi.fn(),
 }));
 
 vi.mock("../../api/adminUsageAnalytics", async () => {
@@ -57,8 +67,59 @@ function item(overrides: Partial<UsageAnalyticsItem> = {}): UsageAnalyticsItem {
   };
 }
 
+function totals(): UsageAnalyticsReportTotals {
+  return {
+    event_count: 0,
+    token_event_count: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    average_input_tokens: null,
+    average_output_tokens: null,
+    prepaid: {
+      event_count: 0,
+      billable_cost: "0.00000000",
+      estimated_provider_cost_myr: "0.00000000",
+      gross_margin: "0.00000000",
+      gross_margin_rate: null,
+    },
+    internal_metered_only: {
+      event_count: 0,
+      estimated_provider_cost_myr: "0.00000000",
+      reference_customer_price: "0.00000000",
+    },
+    payments: {
+      period_basis: "paid_at",
+      paid_count: 0,
+      topup_amount: "0.00000000",
+      gateway_fee: "0.00000000",
+      gateway_fee_unknown_count: 0,
+    },
+    gross_profit: "0.00000000",
+    gross_profit_rate: null,
+  };
+}
+
 function report(items: UsageAnalyticsItem[], total: number, number = 1): UsageAnalyticsReport {
-  return { cost_basis: "estimated", items, page: number, page_size: 20, total };
+  return {
+    cost_basis: "estimated",
+    usage_period_basis: "occurred_at",
+    items,
+    page: number,
+    page_size: 20,
+    total,
+    totals: totals(),
+  };
+}
+
+/** 带 thead 的那张数据表格（合计块的 Descriptions 也是 table 元素，但没有 thead）。 */
+function dataTable(): HTMLElement {
+  const found = screen.getAllByRole("table").find((table) => table.querySelector("thead") !== null);
+  if (found === undefined) {
+    throw new Error("no data table");
+  }
+  return found;
 }
 
 function renderPage() {
@@ -130,13 +191,19 @@ describe("UsageAnalyticsPage states", SLOW, () => {
     expect(screen.getByLabelText<HTMLInputElement>(TO_LABEL).value).toMatch(/^2026-10-18T12:00(:00)?$/);
   });
 
-  it("says the costs are estimates without gateway fees, for administrators only", () => {
+  it("says the costs are estimates and which period each figure follows, for administrators only", () => {
     api.getUsageAnalytics.mockReturnValue(new Promise(() => undefined));
 
     renderPage();
 
     expect(screen.getByText("Cost and margin are visible to administrators only.")).toBeInTheDocument();
-    expect(screen.getByText(/Provider costs are estimates/)).toHaveTextContent("do not include payment gateway fees");
+    const note = screen.getByText(/Provider costs are estimates/);
+    expect(note).toHaveTextContent(
+      "Usage revenue, provider cost and usage gross margin are counted by call time (occurred_at",
+    );
+    expect(note).toHaveTextContent("gateway fees and top-ups are counted by payment confirmation time (paid_at");
+    expect(note).toHaveTextContent("Gross profit = usage gross margin − gateway fees.");
+    expect(note).not.toHaveTextContent("do not include payment gateway fees");
     // 说明文字不是错误提示：验收脚本把任何 role=alert 都当成失败。
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -171,6 +238,18 @@ describe("UsageAnalyticsPage states", SLOW, () => {
     renderPage();
 
     expect(await screen.findByText("No processed usage matches these conditions.")).toBeInTheDocument();
+    expect(dataRows()).toHaveLength(0);
+  });
+
+  it("still shows the totals, with the zero values from the backend, when there are no groups", async () => {
+    api.getUsageAnalytics.mockResolvedValue(report([], 0));
+
+    renderPage();
+
+    const totalsBlock = await screen.findByRole("region", { name: "Totals" });
+    expect(screen.getByText("No processed usage matches these conditions.")).toBeInTheDocument();
+    expect(within(totalsBlock).getAllByText("0.00000000").length).toBeGreaterThan(0);
+    expect(totalsBlock.querySelector("thead")).toBeNull();
     expect(dataRows()).toHaveLength(0);
   });
 });
@@ -231,11 +310,12 @@ describe("UsageAnalyticsPage table", SLOW, () => {
     expect(within(row(1)).getByText("Unresolved or not set")).toBeInTheDocument();
     expect(within(row(1)).getAllByText("—")).toHaveLength(3);
     // 预付与内部计量是两组列。
-    expect(screen.getByRole("columnheader", { name: "Prepaid (MYR)" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Internal metering only (MYR)" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Gross margin" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Reference customer price" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Provider" })).toBeInTheDocument();
+    const table = within(dataTable());
+    expect(table.getByRole("columnheader", { name: "Prepaid (MYR)" })).toBeInTheDocument();
+    expect(table.getByRole("columnheader", { name: "Internal metering only (MYR)" })).toBeInTheDocument();
+    expect(table.getByRole("columnheader", { name: "Gross margin" })).toBeInTheDocument();
+    expect(table.getByRole("columnheader", { name: "Reference customer price" })).toBeInTheDocument();
+    expect(table.getByRole("columnheader", { name: "Provider" })).toBeInTheDocument();
   });
 });
 
@@ -274,7 +354,7 @@ describe("UsageAnalyticsPage conditions", SLOW, () => {
     );
     // 表头跟着新的维度走，客户显示名称与 public id。
     expect(await screen.findByText("Fictional Sdn Bhd")).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Customer" })).toBeInTheDocument();
+    expect(within(dataTable()).getByRole("columnheader", { name: "Customer" })).toBeInTheDocument();
     expect(row(0)).toHaveTextContent(ID);
   });
 
@@ -331,5 +411,163 @@ describe("UsageAnalyticsPage conditions", SLOW, () => {
     expect(await screen.findByText("This field is required.")).toBeInTheDocument();
 
     expect(api.getUsageAnalytics).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** 第一行分组格（第一列）的文字。 */
+function groupCellText(index: number): string {
+  return row(index).querySelector("td")?.textContent ?? "";
+}
+
+describe("UsageAnalyticsPage days and months", SLOW, () => {
+  it("asks for days and shows only the date key in the group cell", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+
+    renderPage();
+    await screen.findByText("anthropic");
+    api.getUsageAnalytics.mockResolvedValue(
+      report([item({ group_key: "2026-10-01" }), item({ group_key: "2026-10-02" })], 2),
+    );
+    await pickGroupBy("Day");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() =>
+      expect(api.getUsageAnalytics).toHaveBeenLastCalledWith(
+        expect.objectContaining({ group_by: "day" }),
+        1,
+        20,
+        expect.anything(),
+      ),
+    );
+    expect(await screen.findByText("2026-10-01")).toBeInTheDocument();
+    expect(within(dataTable()).getByRole("columnheader", { name: "Day" })).toBeInTheDocument();
+    expect(groupCellText(0)).toBe("2026-10-01");
+    expect(groupCellText(1)).toBe("2026-10-02");
+  });
+
+  it("asks for months and shows only the month key in the group cell", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+
+    renderPage();
+    await screen.findByText("anthropic");
+    api.getUsageAnalytics.mockResolvedValue(report([item({ group_key: "2026-10" })], 1));
+    await pickGroupBy("Month");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() =>
+      expect(api.getUsageAnalytics).toHaveBeenLastCalledWith(
+        expect.objectContaining({ group_by: "month" }),
+        1,
+        20,
+        expect.anything(),
+      ),
+    );
+    expect(await screen.findByText("2026-10")).toBeInTheDocument();
+    expect(within(dataTable()).getByRole("columnheader", { name: "Month" })).toBeInTheDocument();
+    expect(groupCellText(0)).toBe("2026-10");
+  });
+});
+
+describe("UsageAnalyticsPage export", SLOW, () => {
+  const EXPORT_NAME = /Export CSV/;
+
+  it("exports the applied conditions, not the form values that were never applied", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockResolvedValue(undefined);
+
+    renderPage();
+    await screen.findByText("anthropic");
+    const applied: unknown = api.getUsageAnalytics.mock.calls[0]?.[0];
+    expect(applied).toEqual(expect.objectContaining({ group_by: "provider" }));
+
+    // 改了表单却不提交：导出仍用表格的那一组条件。
+    await pickGroupBy("Month");
+    await user.click(screen.getByLabelText("Provider (as reported)"));
+    await user.paste("anthropic");
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => expect(api.exportUsageAnalytics).toHaveBeenCalledTimes(1));
+    expect(api.exportUsageAnalytics).toHaveBeenCalledWith(applied);
+    // 导出不让表格与合计重新请求。
+    expect(api.getUsageAnalytics).toHaveBeenCalledTimes(1);
+
+    // 提交之后，导出跟着新的已应用条件走。
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() => expect(api.getUsageAnalytics).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+    await waitFor(() => expect(api.exportUsageAnalytics).toHaveBeenCalledTimes(2));
+    expect(api.exportUsageAnalytics).toHaveBeenLastCalledWith(
+      expect.objectContaining({ group_by: "month", provider: "anthropic" }),
+    );
+  });
+
+  it("cannot be clicked again while the download is running", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockReturnValue(new Promise(() => undefined));
+
+    renderPage();
+    await screen.findByText("anthropic");
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: EXPORT_NAME }));
+    expect(api.exportUsageAnalytics).toHaveBeenCalledTimes(1);
+    // 表格照常显示。
+    expect(dataRows()).toHaveLength(1);
+  });
+
+  it("shows the code, the message and the request id of a failure, and clears them on the next click", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockRejectedValueOnce(
+      new ApiError("EXPORT_TOO_LARGE", "The export has more than 20000 rows.", "req-422"),
+    );
+
+    renderPage();
+    await screen.findByText("anthropic");
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    expect(
+      await screen.findByText("There are too many groups to export. Shorten the period or add filters."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("EXPORT_TOO_LARGE")).toBeInTheDocument();
+    expect(screen.getByText(/The export has more than 20000 rows\./)).toBeInTheDocument();
+    expect(screen.getByText("req-422")).toBeInTheDocument();
+    // 表格不受影响。
+    expect(dataRows()).toHaveLength(1);
+
+    api.exportUsageAnalytics.mockReturnValue(new Promise(() => undefined));
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => expect(screen.queryByText("req-422")).not.toBeInTheDocument());
+    expect(screen.queryByText("EXPORT_TOO_LARGE")).not.toBeInTheDocument();
+  });
+
+  it("clears a failure when the applied conditions change", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockRejectedValueOnce(
+      new ApiError("EXPORT_BUSY", "Another export is in progress.", "req-503"),
+    );
+
+    renderPage();
+    await screen.findByText("anthropic");
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    expect(await screen.findByText("Another export is in progress. Try again in a few seconds.")).toBeInTheDocument();
+    expect(screen.getByText("EXPORT_BUSY")).toBeInTheDocument();
+    expect(screen.getByText("req-503")).toBeInTheDocument();
+
+    await pickGroupBy("Day");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => expect(screen.queryByText("req-503")).not.toBeInTheDocument());
+    expect(screen.queryByText("EXPORT_BUSY")).not.toBeInTheDocument();
   });
 });

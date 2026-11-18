@@ -1,9 +1,13 @@
 /**
  * 管理端用量分析（`GET /api/v1/admin/usage-analytics`，docs/api.md「管理端用量分析」）。
  *
- * 顶栏的「Usage analytics」进这一页。按一个维度（供应商、模型、客户、项目、功能）分组，看次数、token、成本与
- * 毛利。只统计 `PROCESSED` 事件；顺序由后端决定（事件数倒序、分组键升序），前端不重排、不汇总、不算任何数。
- * 四种状态都画出来：加载中、失败（带 request_id）、空列表、无权限（403 单独说）。
+ * 顶栏的「Usage analytics」进这一页。按一个维度（供应商、模型、客户、项目、功能、马来西亚日、马来西亚月）分组，看
+ * 次数、token、成本与毛利。只统计 `PROCESSED` 事件；顺序由后端决定（日 / 月按键升序，其余事件数倒序、分组键升序），
+ * 前端不重排、不汇总、不算任何数。四种状态都画出来：加载中、失败（带 request_id）、空列表、无权限（403 单独说）。
+ *
+ * 查询成功时表格上方是合计块（`UsageAnalyticsTotals`，设计闸门 #709 v2 §2「页面」），包括没有任何分组的时候。
+ * 「Export CSV」用**已应用**的条件（与表格同一组）经 `GET /api/v1/admin/usage-analytics/export` 下载，不影响表格与
+ * 合计的查询；失败在按钮下方显示错误码、信息与 request_id，下次点导出或已应用条件变化时收起。
  *
  * 默认最近 30 天、按供应商分组。时间段按吉隆坡时间输入，发请求前换成**带时区**的 RFC 3339、整秒
  * （`displayTimeToRfc3339`）；两端必填、开始早于结束、跨度不超过 366 天，提交前先挡住。条件与页码放在组件状态里，
@@ -15,7 +19,7 @@
  * 的 `Alert`：它带 `role="alert"`，部署后浏览器验收把页面上任何 `role="alert"` 都当成错误提示。
  */
 
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import {
   Alert,
   Button,
@@ -38,6 +42,7 @@ import { ADMIN_REQUIRED, DEFAULT_PAGE_SIZE } from "../../api/adminCustomers";
 import {
   USAGE_ANALYTICS_GROUP_BYS,
   USAGE_ANALYTICS_MAX_SPAN_DAYS,
+  exportUsageAnalytics,
   getUsageAnalytics,
   usageAnalyticsQueryKey,
   type UsageAnalyticsGroupBy,
@@ -45,9 +50,11 @@ import {
   type UsageAnalyticsQuery,
 } from "../../api/adminUsageAnalytics";
 import { ApiError } from "../../api/client";
+import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
 import { displayTimeToRfc3339, utcToDisplayInput } from "../../components/DateTimeText";
 import { RequestReference } from "../../components/RequestReference";
 import { CodeText, LoadingBlock, PAGE_SIZE_OPTIONS, usePaging } from "../catalog/ProvidersPage";
+import { UsageAnalyticsTotals } from "./UsageAnalyticsTotals";
 import { AdminOnlyNote, EMPTY } from "./UsageEventsPage";
 
 const DEFAULT_GROUP_BY: UsageAnalyticsGroupBy = "provider";
@@ -150,14 +157,38 @@ export function UsageAnalyticsPage() {
     customer: t("usageAnalytics.groupBy.customer"),
     project: t("usageAnalytics.groupBy.project"),
     feature: t("usageAnalytics.groupBy.feature"),
+    day: t("usageAnalytics.groupBy.day"),
+    month: t("usageAnalytics.groupBy.month"),
   };
   const groupByOptions = USAGE_ANALYTICS_GROUP_BYS.map((value) => ({ value, label: groupByLabels[value] }));
+
+  // 导出与表格、合计的查询互不相干：它不改 query，也不让那两个重新请求。
+  const exporting = useMutation({
+    mutationFn: (applied: UsageAnalyticsQuery) => exportUsageAnalytics(applied),
+  });
+
+  const startExport = (): void => {
+    // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。用的是已应用的条件，不是表单里还没提交的草稿。
+    if (exporting.isPending) {
+      return;
+    }
+    exporting.reset();
+    exporting.mutate(query);
+  };
+
+  // 上一次导出的失败说的是旧的条件，换条件时收起。只收失败：导出中 reset 会让按钮提前恢复可点。
+  const clearExportFailure = (): void => {
+    if (exporting.isError) {
+      exporting.reset();
+    }
+  };
 
   const apply = (values: AnalyticsFormValues): void => {
     const next = toQuery(values);
     if (next !== null) {
       setQuery(next);
       paging.reset();
+      clearExportFailure();
     }
   };
 
@@ -168,6 +199,7 @@ export function UsageAnalyticsPage() {
     form.setFieldsValue(defaults.values);
     setQuery(defaults.query);
     paging.reset();
+    clearExportFailure();
   };
 
   const requiredRule: FormRule = { required: true, message: t("usageAnalytics.filter.required") };
@@ -297,11 +329,13 @@ export function UsageAnalyticsPage() {
     result = <LoadingBlock text={t("usageAnalytics.loading")} />;
   } else if (report.isError) {
     result = <AnalyticsErrorAlert error={report.error} onRetry={() => void report.refetch()} />;
-  } else if (report.data.total === 0) {
-    result = <Empty description={t("usageAnalytics.empty")} />;
   } else {
-    result = (
-      <Table<UsageAnalyticsItem>
+    let groups: ReactNode;
+    if (report.data.total === 0) {
+      groups = <Empty description={t("usageAnalytics.empty")} />;
+    } else {
+      groups = (
+        <Table<UsageAnalyticsItem>
         rowKey={rowKey}
         columns={columns}
         dataSource={report.data.items}
@@ -321,6 +355,14 @@ export function UsageAnalyticsPage() {
           onChange: paging.goTo,
         }}
       />
+      );
+    }
+    // 合计块只要查询成功就画，包括没有任何分组的时候（那时是后端给的零值）；表格自己的空状态照旧。
+    result = (
+      <>
+        <UsageAnalyticsTotals totals={report.data.totals} />
+        {groups}
+      </>
     );
   }
 
@@ -338,7 +380,7 @@ export function UsageAnalyticsPage() {
         style={{ display: "flex", flexWrap: "wrap", columnGap: 16, alignItems: "flex-end" }}
       >
         <Form.Item name="group_by" label={t("usageAnalytics.filter.groupBy")} rules={[requiredRule]} style={{ minWidth: 180 }}>
-          {/* ⚠️ `virtual={false}`：只有五项，全部渲染出来，测试才找得到每一项。 */}
+          {/* ⚠️ `virtual={false}`：只有七项，全部渲染出来，测试才找得到每一项。 */}
           <Select virtual={false} options={groupByOptions} />
         </Form.Item>
         <Form.Item name="occurred_from" label={t("usage.filter.occurredFrom")} rules={[requiredRule, timeRule]}>
@@ -377,16 +419,28 @@ export function UsageAnalyticsPage() {
           </Space>
         </Form.Item>
       </Form>
+      <div style={{ marginBottom: 16 }}>
+        <Button onClick={startExport} loading={exporting.isPending} disabled={exporting.isPending}>
+          {t("usageAnalytics.export.button")}
+        </Button>
+        {exporting.error ? <ExportFailure error={exporting.error} /> : null}
+      </div>
       {result}
     </Card>
   );
 }
 
-/** 分组那一格：客户与项目显示名称和 public id，其余显示键；未解析的 null 组单独说明。 */
+/**
+ * 分组那一格：客户与项目显示名称和 public id，日 / 月只显示日期键（`YYYY-MM-DD` / `YYYY-MM`，没有名称行），其余显示
+ * 键；未解析的 null 组单独说明。
+ */
 function GroupCell({ item, groupBy }: { item: UsageAnalyticsItem; groupBy: UsageAnalyticsGroupBy }) {
   const { t } = useTranslation();
   if (item.group_key === null) {
     return <Typography.Text type="secondary">{t("usageAnalytics.nullGroup")}</Typography.Text>;
+  }
+  if (groupBy === "day" || groupBy === "month") {
+    return <span style={{ fontVariantNumeric: "tabular-nums" }}>{item.group_key}</span>;
   }
   if ((groupBy === "customer" || groupBy === "project") && item.group_name !== null) {
     return (
@@ -399,6 +453,34 @@ function GroupCell({ item, groupBy }: { item: UsageAnalyticsItem; groupBy: Usage
     );
   }
   return <CodeText code={item.group_key} />;
+}
+
+/**
+ * 导出失败，显示在按钮下方：分组太多与已有导出在进行各有专门文案，下面都带错误码、后端 message 与 request_id。
+ */
+function ExportFailure({ error }: { error: Error }) {
+  const { t } = useTranslation();
+  const code = error instanceof ApiError ? error.code : null;
+  let message = t("usageAnalytics.export.failed");
+  if (code === EXPORT_TOO_LARGE) {
+    message = t("usageAnalytics.export.tooLarge");
+  } else if (code === EXPORT_BUSY) {
+    message = t("usageAnalytics.export.busy");
+  }
+  return (
+    <Alert
+      type="error"
+      showIcon
+      style={{ marginTop: 8 }}
+      message={message}
+      description={
+        <Space direction="vertical" size={0}>
+          {code === null ? null : <Typography.Text code>{code}</Typography.Text>}
+          <RequestReference error={error} />
+        </Space>
+      }
+    />
+  );
 }
 
 /**
