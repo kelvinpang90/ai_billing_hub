@@ -185,7 +185,7 @@ spec §136 还要求维护以下九份文档：
 - [`payment-flow.md`](payment-flow.md)
 - `pricing-engine.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
 - `currency-and-fx.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
-- `data-governance.md` —— 尚未创建，在对应 Phase 落地时再建，不预创建空文件
+- [`data-governance.md`](data-governance.md) —— 草稿（2026-11-19 收进仓库），保留期待批准，决策见 ADR-0017（提议中）
 - [`deployment.md`](deployment.md)
 - [`runbook.md`](runbook.md)
 
