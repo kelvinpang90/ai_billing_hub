@@ -47,8 +47,10 @@ from app.models.auth import (
     AuditAction,
     AuditLog,
     DomainOutbox,
+    PasswordResetToken,
     RecoveryCode,
     RefreshToken,
+    TokenPurpose,
     TwoFactorSetting,
     User,
     UserRole,
@@ -250,6 +252,22 @@ def reset(client: TestClient, new_password: str):  # noqa: ANN201 - httpx.Respon
 def reset_ok(client: TestClient, new_password: str) -> None:
     response = reset(client, new_password)
     assert response.status_code == 200, response.text
+
+
+def move_reset_tokens_out_of_the_window(client: TestClient) -> None:
+    """Backdate this account's reset tokens past the per-account throttle window."""
+    shift = dt.timedelta(seconds=settings_of(client).password_reset_min_interval_seconds + 1)
+    with factory_of(client)() as session:
+        user_id = session.execute(select(User.id).where(User.email == EMAIL)).scalar_one()
+        # 逐行在 Python 里减，不写 SQL 里的日期运算：SQLite 与 MySQL 写法不同。
+        for row in session.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.user_id == user_id,
+                PasswordResetToken.purpose == TokenPurpose.PASSWORD_RESET,
+            )
+        ).scalars():
+            row.created_at = row.created_at - shift
+        session.commit()
 
 
 def reuse_audits(client: TestClient) -> list[AuditLog]:
@@ -699,6 +717,9 @@ def test_each_reset_moves_the_version_on_and_ends_the_sessions_before_it(
 
     for expected in (1, 2, 3):
         password = f"rotated-passphrase-number-{expected}"
+        # 忘记密码按账号限频（设计闸门 #751 v3）：端点层传不了 `now`，把这个账号已有的重置
+        # 令牌挪到窗口之外，下一次申请才会签发新令牌。
+        move_reset_tokens_out_of_the_window(client)
         reset_ok(client, password)
         assert stored_user(client).password_version == expected
         assert client.get(LOGGED_IN, headers=bearer(current.access_token)).status_code == 401
