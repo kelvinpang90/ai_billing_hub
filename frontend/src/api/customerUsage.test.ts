@@ -290,6 +290,34 @@ describe("exportCustomerUsageEvents", () => {
       "usage-events_2026-10-01_2026-10-31.csv",
     );
   });
+
+  it("adds format=xlsx at the end only for Excel and leaves the CSV address as it was (AIH-TASK-238)", async () => {
+    const query = { fromDate: "2026-10-01", toDate: "2026-10-25", projectId: PROJECT_ID, provider: "anthropic" };
+
+    expect(customerUsageExportUrl({ ...query, format: "csv" })).toBe(customerUsageExportUrl(query));
+    expect(customerUsageExportUrl(query)).toBe(
+      `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${PROJECT_ID}&provider=anthropic`,
+    );
+    expect(customerUsageExportUrl({ ...query, format: "xlsx" })).toBe(
+      `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${PROJECT_ID}&provider=anthropic&format=xlsx`,
+    );
+
+    stubDownload();
+    const get = vi.spyOn(client, "get").mockResolvedValue(file());
+
+    await exportCustomerUsageEvents({ fromDate: "2026-10-01", toDate: "2026-10-25", format: "xlsx" });
+
+    const [url, config] = get.mock.calls[0] ?? [];
+    expect(url).toBe(`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&format=xlsx`);
+    expect(config).toMatchObject({ responseType: "blob" });
+  });
+
+  it("switches the fallback file name to .xlsx only for Excel (AIH-TASK-238)", () => {
+    const query = { fromDate: "2026-10-01", toDate: "2026-10-31" };
+
+    expect(customerUsageExportFilename({ ...query, format: "csv" })).toBe("usage-events_2026-10-01_2026-10-31.csv");
+    expect(customerUsageExportFilename({ ...query, format: "xlsx" })).toBe("usage-events_2026-10-01_2026-10-31.xlsx");
+  });
 });
 
 describe("exportCustomerUsageSummary", () => {
@@ -357,6 +385,29 @@ describe("exportCustomerUsageSummary", () => {
   it("falls back to the backend's file name rule", () => {
     expect(customerUsageSummaryExportFilename("2026-10")).toBe("usage-summary_2026-10.csv");
     expect(customerUsageSummaryExportFilename("2020-01")).toBe("usage-summary_2020-01.csv");
+  });
+
+  it("adds format=xlsx at the end and switches the fallback to .xlsx only for Excel (AIH-TASK-238)", async () => {
+    expect(customerUsageSummaryExportUrl("2026-10", "csv")).toBe(`${SUMMARY_EXPORT_URL}?month=2026-10`);
+    expect(customerUsageSummaryExportUrl("2026-10", "xlsx")).toBe(`${SUMMARY_EXPORT_URL}?month=2026-10&format=xlsx`);
+    expect(customerUsageSummaryExportFilename("2026-10", "csv")).toBe("usage-summary_2026-10.csv");
+    expect(customerUsageSummaryExportFilename("2026-10", "xlsx")).toBe("usage-summary_2026-10.xlsx");
+
+    stubDownload();
+    const get = vi.spyOn(client, "get").mockResolvedValue({
+      data: new Blob(["PK"], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+      status: 200,
+      statusText: "",
+      headers: {},
+    });
+
+    await exportCustomerUsageSummary("2026-10", undefined, "xlsx");
+
+    expect(get).toHaveBeenCalledTimes(1);
+    const [url, config] = get.mock.calls[0] ?? [];
+    expect(url).toBe(`${SUMMARY_EXPORT_URL}?month=2026-10&format=xlsx`);
+    expect(config).toMatchObject({ responseType: "blob" });
+    expect(downloads).toEqual(["usage-summary_2026-10.xlsx"]);
   });
 });
 
