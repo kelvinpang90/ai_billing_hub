@@ -19,6 +19,7 @@ import {
   REVOKE_DELAY_MS,
   downloadFile,
   filenameFromContentDisposition,
+  withExportFormat,
 } from "./download";
 
 const URL_PATH = "/api/v1/customer/usage-events/export?from_date=2026-10-01&to_date=2026-10-25";
@@ -217,5 +218,24 @@ describe("downloadFile failure", () => {
     for (const spy of spies) {
       expect(spy).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("withExportFormat (AIH-TASK-238)", () => {
+  it("returns the CSV address exactly as it was", () => {
+    expect(withExportFormat(URL_PATH, "csv")).toBe(URL_PATH);
+    expect(withExportFormat("/api/v1/customer/usage-summary/export?month=2026-10", "csv")).toBe(
+      "/api/v1/customer/usage-summary/export?month=2026-10",
+    );
+  });
+
+  it("adds format=xlsx at the end of the query string for Excel", () => {
+    expect(withExportFormat(URL_PATH, "xlsx")).toBe(`${URL_PATH}&format=xlsx`);
+    expect(withExportFormat("/api/v1/customer/usage-summary/export?month=2026-10", "xlsx")).toBe(
+      "/api/v1/customer/usage-summary/export?month=2026-10&format=xlsx",
+    );
+    expect(withExportFormat("/api/v1/customer/usage-events/export", "xlsx")).toBe(
+      "/api/v1/customer/usage-events/export?format=xlsx",
+    );
   });
 });

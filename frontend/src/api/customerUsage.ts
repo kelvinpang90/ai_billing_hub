@@ -16,7 +16,7 @@
  */
 
 import { apiGet } from "./client";
-import { downloadFile } from "./download";
+import { downloadFile, withExportFormat, type ExportFormat } from "./download";
 
 export const CUSTOMER_PROJECTS_URL = "/api/v1/customer/projects";
 export const CUSTOMER_USAGE_EVENTS_URL = "/api/v1/customer/usage-events";
@@ -157,21 +157,24 @@ export interface CustomerUsageExportQuery {
   model?: string | null;
   conversationId?: string | null;
   eventId?: string | null;
+  /** 文件格式（AIH-TASK-238）；不带时 `csv`，地址与以前逐字相同。 */
+  format?: ExportFormat;
 }
 
-/** 导出的地址（含查询串）。 */
+/** 导出的地址（含查询串）。`xlsx` 时末尾加 `format=xlsx`。 */
 export function customerUsageExportUrl(query: CustomerUsageExportQuery): string {
   const search = textParams(query).toString();
-  return search === "" ? CUSTOMER_USAGE_EXPORT_URL : `${CUSTOMER_USAGE_EXPORT_URL}?${search}`;
+  const url = search === "" ? CUSTOMER_USAGE_EXPORT_URL : `${CUSTOMER_USAGE_EXPORT_URL}?${search}`;
+  return withExportFormat(url, query.format ?? "csv");
 }
 
-/** 后端取不到文件名时的兜底，与后端同一规则：`usage-events_<from_date>_<to_date>.csv`。 */
+/** 后端取不到文件名时的兜底，与后端同一规则：`usage-events_<from_date>_<to_date>.csv`（xlsx 时 `.xlsx`）。 */
 export function customerUsageExportFilename(query: CustomerUsageExportQuery): string {
-  return `usage-events_${query.fromDate}_${query.toDate}.csv`;
+  return `usage-events_${query.fromDate}_${query.toDate}.${query.format ?? "csv"}`;
 }
 
 /**
- * 把区间内全部已计费用量导出成一个 CSV 并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 行）、
+ * 把区间内全部已计费用量导出成一个 CSV（`format: "xlsx"` 时 Excel）并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 行）、
  * `QUERY_TOO_BROAD`（超过执行时间预算）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带 `request_id`。
  */
 export function exportCustomerUsageEvents(query: CustomerUsageExportQuery, signal?: AbortSignal): Promise<void> {
@@ -227,21 +230,29 @@ export function getCustomerUsageSummary(
  * 月度汇总导出的地址（含查询串）：只带 `month`（`YYYY-MM`，后端必填），没有任何筛选，也不带租户或客户标识
  * （docs/api.md「客户导出」，AIH-TASK-119，设计闸门 #457 v1）。
  */
-export function customerUsageSummaryExportUrl(month: string): string {
+export function customerUsageSummaryExportUrl(month: string, format: ExportFormat = "csv"): string {
   const params = new URLSearchParams({ month });
-  return `${CUSTOMER_USAGE_SUMMARY_EXPORT_URL}?${params.toString()}`;
+  return withExportFormat(`${CUSTOMER_USAGE_SUMMARY_EXPORT_URL}?${params.toString()}`, format);
 }
 
-/** 后端取不到文件名时的兜底，与后端同一规则：`usage-summary_<YYYY-MM>.csv`。 */
-export function customerUsageSummaryExportFilename(month: string): string {
-  return `usage-summary_${month}.csv`;
+/** 后端取不到文件名时的兜底，与后端同一规则：`usage-summary_<YYYY-MM>.csv`（xlsx 时 `.xlsx`）。 */
+export function customerUsageSummaryExportFilename(month: string, format: ExportFormat = "csv"): string {
+  return `usage-summary_${month}.${format}`;
 }
 
 /**
- * 把一个马来西亚日历月的用量汇总（每天一行加 `TOTAL` 行）导出成 CSV 并交给浏览器下载。失败抛 `ApiError`：
- * `QUERY_TOO_BROAD`（超过执行时间预算），其余照常带 `request_id`。不占导出名额，所以没有 `EXPORT_BUSY`；行数恒有界，
- * 所以没有 `EXPORT_TOO_LARGE`。
+ * 把一个马来西亚日历月的用量汇总（每天一行加 `TOTAL` 行）导出成 CSV（`format` 为 `xlsx` 时 Excel）并交给浏览器下载。
+ * 失败抛 `ApiError`：`QUERY_TOO_BROAD`（超过执行时间预算），其余照常带 `request_id`。不占导出名额，所以没有
+ * `EXPORT_BUSY`；行数恒有界，所以没有 `EXPORT_TOO_LARGE`。
  */
-export function exportCustomerUsageSummary(month: string, signal?: AbortSignal): Promise<void> {
-  return downloadFile(customerUsageSummaryExportUrl(month), customerUsageSummaryExportFilename(month), signal);
+export function exportCustomerUsageSummary(
+  month: string,
+  signal?: AbortSignal,
+  format: ExportFormat = "csv",
+): Promise<void> {
+  return downloadFile(
+    customerUsageSummaryExportUrl(month, format),
+    customerUsageSummaryExportFilename(month, format),
+    signal,
+  );
 }
