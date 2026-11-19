@@ -97,11 +97,24 @@ def audit_actions(session_factory) -> list[AuditAction]:
         return list(session.execute(select(AuditLog.action).order_by(AuditLog.id)).scalars())
 
 
-def issue_token(session_factory, settings: Settings, *, email: str = EMAIL) -> str:
-    """Run the forgot flow and dig the plaintext token back out of the outbox row."""
-    request_reset(session_factory, settings, email=email, context=CONTEXT)
+def issue_token(
+    session_factory, settings: Settings, *, email: str = EMAIL, now: dt.datetime | None = None
+) -> str:
+    """Run the forgot flow and dig the plaintext token back out of the outbox row.
+
+    断言确实签发了：被按账号限频时这里直接报错，不会悄悄读回上一行 outbox。
+    """
+    outbox_id = request_reset(session_factory, settings, email=email, context=CONTEXT, now=now)
+    assert outbox_id is not None, "the request was throttled; issue earlier ones with `now`"
     payload = json.loads(outbox_rows(session_factory)[-1].payload_json or "{}")
     return str(payload["token"])
+
+
+def windows_ago(settings: Settings, count: int) -> dt.datetime:
+    """A moment `count` throttle windows (plus a second each) before now."""
+    return utc_now() - count * dt.timedelta(
+        seconds=settings.password_reset_min_interval_seconds + 1
+    )
 
 
 # --- 忘记密码：反用户枚举 -------------------------------------------------------
@@ -199,8 +212,10 @@ def test_every_path_is_padded_to_the_same_floor(
     request_reset(session_factory, settings, email=EMAIL, context=CONTEXT)
     request_reset(session_factory, settings, email="nobody@example.com", context=CONTEXT)
     request_reset(session_factory, settings, email="not-an-email", context=CONTEXT)
+    # 按账号限频（设计闸门 #751 v3）：同一账号紧接着再申请，被挡的那条路径也要补齐。
+    assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT) is None
 
-    assert len(padded) == 3, "每一条路径都要补齐，一条都不能漏"
+    assert len(padded) == 4, "每一条路径都要补齐，一条都不能漏"
     assert len(set(padded)) == 1, "而且必须补到同一个目标，否则差异只是换了个来源"
 
 
@@ -322,6 +337,107 @@ def test_the_address_is_rechecked_on_the_locked_read(session_factory, settings: 
     assert outbox_rows(session_factory) == []
 
 
+# --- 忘记密码：按账号限频（设计闸门 #751 v3 §2「限频规则」，I4） ------------------
+
+
+def test_the_first_request_after_the_window_is_issued_and_one_inside_is_not(
+    session_factory, settings: Settings
+) -> None:
+    """窗口左开：`T + interval - 1` 被挡，恰好 `T + interval` 放行。"""
+    make_user(session_factory)
+    interval = dt.timedelta(seconds=settings.password_reset_min_interval_seconds)
+    start = utc_now()
+
+    assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT, now=start)
+    inside = start + interval - dt.timedelta(seconds=1)
+    assert (
+        request_reset(session_factory, settings, email=EMAIL, context=CONTEXT, now=inside) is None
+    )
+    assert len(token_rows(session_factory)) == 1
+    assert len(outbox_rows(session_factory)) == 1
+
+    edge = start + interval
+    assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT, now=edge)
+    assert [row.created_at for row in token_rows(session_factory)] == [start, edge]
+    assert len(outbox_rows(session_factory)) == 2
+
+
+def test_a_throttled_request_leaves_no_trace(session_factory, settings: Settings, caplog) -> None:
+    """被挡的那次：没有令牌、outbox、审计；只有一条 INFO，只带 `user_id`，不含邮箱。"""
+    user = make_user(session_factory)
+    issue_token(session_factory, settings)
+    caplog.clear()
+
+    with caplog.at_level("INFO", logger="app.services.password_reset"):
+        assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT) is None
+
+    assert len(token_rows(session_factory)) == 1
+    assert len(outbox_rows(session_factory)) == 1
+    assert audit_actions(session_factory) == [AuditAction.PASSWORD_RESET_REQUESTED]
+    throttled = [r for r in caplog.records if "throttled" in r.getMessage()]
+    assert len(throttled) == 1
+    assert throttled[0].levelname == "INFO"
+    assert throttled[0].user_id == user.id
+    assert all(EMAIL not in r.getMessage() for r in caplog.records)
+    assert all(EMAIL not in str(r.__dict__) for r in throttled)
+
+
+def test_a_throttled_request_triggers_no_delivery(session_factory, settings: Settings) -> None:
+    """没有行可投：`on_queued` 不被调用（否则它就是一段可测量的额外工作）。"""
+    make_user(session_factory)
+    issue_token(session_factory, settings)
+    queued: list[int] = []
+
+    outcome = request_reset(
+        session_factory, settings, email=EMAIL, context=CONTEXT, on_queued=queued.append
+    )
+
+    assert outcome is None
+    assert queued == []
+
+
+def test_the_throttle_is_per_account(session_factory, settings: Settings) -> None:
+    """账号 A 刚申请过，账号 B 照常签发。"""
+    make_user(session_factory)
+    other = make_user(session_factory, email="other@example.com")
+    issue_token(session_factory, settings)
+
+    assert request_reset(session_factory, settings, email="other@example.com", context=CONTEXT)
+    assert [row.user_id for row in token_rows(session_factory)][-1] == other.id
+
+
+def test_an_invitation_token_in_the_window_does_not_throttle(
+    session_factory, settings: Settings
+) -> None:
+    """邀请令牌不是重置邮件：窗口内有邀请令牌，重置照常签发。"""
+    user = make_user(session_factory)
+    now = utc_now()
+    with session_factory() as session:
+        session.add(
+            PasswordResetToken(
+                user_id=user.id,
+                token_hash=hash_opaque_token("an-invitation"),
+                expires_at=now + dt.timedelta(days=3),
+                created_at=now,
+                purpose=TokenPurpose.INVITATION,
+            )
+        )
+        session.commit()
+
+    assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT, now=now)
+
+
+def test_a_used_token_in_the_window_still_throttles(session_factory, settings: Settings) -> None:
+    """限的是发出去的信：窗口内那张令牌已经用掉，也照样挡（设计 §2，Kelvin 已定）。"""
+    make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+    reset_password(session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT)
+    assert token_rows(session_factory)[0].used_at is not None
+
+    assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT) is None
+    assert len(token_rows(session_factory)) == 1
+
+
 def test_the_outbox_payload_carries_nothing_beyond_what_the_email_needs(
     session_factory, settings: Settings
 ) -> None:
@@ -399,7 +515,8 @@ def test_each_reset_bumps_the_password_version(session_factory, settings: Settin
     assert password_version(session_factory, user.id) == 0
 
     for expected in (1, 2, 3):
-        raw = issue_token(session_factory, settings)
+        # 按账号限频：前面的签发放在更早的窗口里，最后一次是现在。
+        raw = issue_token(session_factory, settings, now=windows_ago(settings, 3 - expected))
         reset_password(
             session_factory,
             settings,
@@ -614,7 +731,8 @@ def test_resetting_also_invalidates_the_other_outstanding_links(
 ) -> None:
     """收件箱里躺着的上一封信，不该在这次重置之后还能再改一次密码。"""
     make_user(session_factory)
-    first = issue_token(session_factory, settings)
+    # 按账号限频：第一封信放在上一个窗口里，第二封才签发得出来。
+    first = issue_token(session_factory, settings, now=windows_ago(settings, 1))
     second = issue_token(session_factory, settings)
 
     reset_password(

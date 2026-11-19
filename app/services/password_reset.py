@@ -11,6 +11,9 @@
   差异化的响应就是一个用户枚举接口 —— 而这个接口不需要任何凭据就能调。
 - `/password/reset` 可以明确报「令牌无效或已过期」：调用方手上已经有一张令牌，
   告诉他这张不能用不泄漏任何他还不知道的事。
+
+**同一账号的重置邮件按账号限频**（设计闸门 #751 v3，I4）：窗口内签发过就不再签发，
+对外结果不变；位置与「为什么这个事务在 MySQL 上用 READ COMMITTED」见 `_start_reset`。
 """
 
 from __future__ import annotations
@@ -143,7 +146,16 @@ def _start_reset(
     context: RequestContext,
     now: dt.datetime | None,
 ) -> int | None:
-    """The actual work. 耗时由调用方补齐，这里不必为对齐做任何无用功。"""
+    """The actual work. 耗时由调用方补齐，这里不必为对齐做任何无用功。
+
+    ⚠️ **按账号限频**（设计闸门 #751 v3 §2「限频规则」，I4）：锁住用户行、复查为 ACTIVE
+    之后，`password_reset_min_interval_seconds` 窗口内这个账号**签发过** `PASSWORD_RESET`
+    令牌就不再签发 —— 不论那张令牌后来用没用掉、过没过期：要限的是「发出去的信」，每张
+    令牌就是一封信。被限频时不写令牌、outbox、审计，只记一条 INFO，返回 `None`。
+    **对外结果不变**：响应、状态码一样，耗时由 `request_reset` 补齐到同一下限（被限频
+    路径只有三次 SELECT，比签发路径更快），所以不打开新的用户枚举通道。配置保证
+    `interval ≤ password_reset_ttl_seconds`：被挡时窗口里那封信的链接一定还有效。
+    """
     moment = now or utc_now()
     try:
         address = normalise_email(email)
@@ -154,6 +166,26 @@ def _start_reset(
         return None
 
     with session_factory() as session:
+        # ⚠️ **这个事务在 MySQL 上用 READ COMMITTED**（设计 #751 v3 §2「限频规则」、§4）。
+        # 必须是本会话的第一句：`execution_options` 只在为本事务取连接时生效一次。
+        #
+        # - 为什么不用默认的 REPEATABLE READ：RR 的一致性快照建立在事务的**第一次普通读**，
+        #   就是下面按邮箱的那次。同一账号两个并发申请时，后到者的快照早于先到者提交；它在
+        #   用户行锁上排队、拿到锁时先到者已提交，RR 下的普通读仍看不到那张令牌，两封都发。
+        #   RC 下每条普通读在执行时取最新读视图，拿锁之后的窗口查询一定看到先到者的令牌。
+        # - 为什么不把窗口查询改成锁读（设计 v1 的做法，审查阻断）：RR 下 `FOR UPDATE` 范围读
+        #   带间隙锁。两个**不同**账号的窗口查询落在同一个间隙（典型是索引末尾的 supremum，
+        #   间隙锁彼此兼容），各自 INSERT 时插入意向锁互相挡住 → 1213 死锁，被回滚的一方 500；
+        #   而只有存在且 ACTIVE 的账号走得到这一步，500 就成了账号存在的信号。RC 不为查找加
+        #   间隙锁，两个不同账号的申请之间没有任何锁交集。
+        # - 只在 `mysql` 方言上设：SQLite 方言不接受 READ COMMITTED（会抛错），它本来也没有
+        #   行锁与快照问题。写法照 `app/services/usage_billing.py` 按方言名分支。
+        # - 不泄漏到连接池：会话在 `with` 结束时关闭、连接归还，SQLAlchemy 归还时把经
+        #   `execution_options` 改过的隔离级别还原为引擎默认值（RR）。只动这一个事务：
+        #   引擎、`session_scope` 与 `reset_password` 等其他认证事务照旧（它们靠锁读）。
+        if session.get_bind().dialect.name == "mysql":
+            session.connection(execution_options={"isolation_level": "READ COMMITTED"})
+
         # ⚠️ 第一次读**刻意不加锁**，只用来拿 `user_id`：这是匿名端点，按邮箱加锁读一个不存在的
         # 值，MySQL 会在唯一索引上留下间隙锁 —— 任何人都能用随机邮箱制造锁等待，还会挡住开通时
         # 插入相邻邮箱的用户（设计闸门 #368 v12 §2「邀请邮件与重置的隔离」）。
@@ -184,6 +216,30 @@ def _start_reset(
             logger.info(
                 "Password reset requested for an unknown or inactive account",
                 extra={"account_exists": account_exists},
+            )
+            return None
+
+        # ⚠️ **按账号限频**：仍持有用户行锁时，**不加锁**地查窗口内签发过的重置令牌。
+        # 同一账号的申请由上面的用户行锁串行化；先到者提交之后才释放锁，后到者拿到锁才执行
+        # 这条普通读，RC 下它一定看到先到者的令牌。窗口左开：恰好 `interval` 秒前签发的令牌
+        # 不再挡。只看 `PASSWORD_RESET`：邀请令牌不是重置邮件。不论已用、已过期都算：用掉
+        # 也是发出去过的信。不在补齐窗口内对数据库错误重试。查询走迁移 0040 的复合索引
+        # `(user_id, purpose, created_at)`，只读窗口内的行。
+        cutoff = moment - dt.timedelta(seconds=settings.password_reset_min_interval_seconds)
+        recently_issued = session.execute(
+            select(PasswordResetToken.id)
+            .where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.purpose == TokenPurpose.PASSWORD_RESET,
+                PasswordResetToken.created_at > cutoff,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if recently_issued is not None:
+            # 不写审计（设计 §6）：被挡的申请不留库内痕迹。日志只带 `user_id`，不带邮箱、令牌。
+            # 不调 `on_queued`：没有行可投（返回 `None`）。
+            logger.info(
+                "Password reset request throttled for this account", extra={"user_id": user.id}
             )
             return None
 
