@@ -11,6 +11,11 @@ GROUP、末尾恒有一行 TOTAL。检查顺序照客户钱包流水导出（app
 不在这里释放。查询在一个只读会话里，CSV 在会话关闭之后拼。`AppError` 原样抛，其他异常记
 `admin_usage_analytics_export_failed` 后在 `except` 块之外抛 `CustomerExportFailed`（通用 500 的
 信封）。成功记一条 INFO，不写审计、不落盘；文件含内部成本，只给管理端。
+
+xlsx（AIH-TASK-237，设计闸门 #753 v1 §2「参数 format」「各接口的改法」）：
+查询参数 `format` 在鉴权与其他参数校验之后判（缺省 / `csv` / `xlsx`，
+其他 422 `query.format`）；只在同一个 `try` 里「拼文件 → 构造响应」处分支，
+查询、上限、租约与日志对两种格式是同一段。
 """
 
 from __future__ import annotations
@@ -19,9 +24,9 @@ import datetime as dt
 import itertools
 import logging
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from app.api.auth import require_admin, require_session_factory
 from app.core.csv_export import (
@@ -38,6 +43,7 @@ from app.core.csv_export import (
 from app.core.errors import AppError
 from app.core.fx_source import KUALA_LUMPUR_OFFSET
 from app.core.logging import current_request_id
+from app.core.xlsx_export import XLSX_MEDIA_TYPE, write_xlsx, xlsx_response
 from app.repositories import usage_analytics as analytics_repository
 from app.repositories.usage_analytics import (
     PaidPaymentTotals,
@@ -48,6 +54,7 @@ from app.schemas.customers import DEFAULT_PAGE_SIZE, MAX_PAGE, MAX_PAGE_SIZE, mo
 from app.schemas.envelope import ApiResponse, success
 from app.schemas.usage_analytics import (
     USAGE_ANALYTICS_EXPORT_COLUMNS,
+    USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS,
     USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS,
     UsageAnalyticsGroupBy,
     UsageAnalyticsInternalMeteredOnly,
@@ -61,10 +68,18 @@ from app.schemas.usage_analytics import (
     usage_analytics_export_group_cells,
     usage_analytics_export_total_cells,
 )
+from app.schemas.usage_events import InvalidUsageEventQuery
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+# OpenAPI 的 200 列出两种媒体类型；响应类仍是 `ExportCsvResponse`。
+_EXPORT_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {"content": {"text/csv": {}, XLSX_MEDIA_TYPE: {}}}
+}
+# xlsx 的工作表名：程序常量，不拼任何输入。
+_EXPORT_SHEET = "usage-analytics"
 
 
 @router.get("/usage-analytics", response_model=ApiResponse[UsageAnalyticsView])
@@ -136,7 +151,9 @@ def get_usage_analytics(
     )
 
 
-@router.get("/usage-analytics/export", response_class=ExportCsvResponse)
+@router.get(
+    "/usage-analytics/export", response_class=ExportCsvResponse, responses=_EXPORT_RESPONSES
+)
 def export_usage_analytics(
     request: Request,
     group_by: str | None = None,
@@ -147,8 +164,10 @@ def export_usage_analytics(
     provider: str | None = None,
     model: str | None = None,
     feature: str | None = None,
+    # 等同 `= Query(default=None, alias="format")`；Annotated 写法避开 B008。
+    export_format: Annotated[str | None, Query(alias="format")] = None,
 ) -> ExportCsvResponse:
-    """Every group as a GROUP row plus one TOTAL row, as a CSV attachment; at most 20 000 groups.
+    """Every group as a GROUP row plus one TOTAL row, as CSV or xlsx; at most 20 000 groups.
 
     含 Acuven 内部成本与毛利：只给管理端，不得转发给客户（INV-7）。
     """
@@ -165,6 +184,10 @@ def export_usage_analytics(
         max_page=1,
         max_page_size=1,
     )
+    # 在鉴权与其他参数之后判（设计闸门 #753 v1 §2「参数 format」）：
+    # 非法值不拿租约、不查询。
+    if export_format not in (None, "csv", "xlsx"):
+        raise InvalidUsageEventQuery("format")
     # 数据库没配置时在这里 503，早于获取租约。
     factory = require_session_factory(request)
     token = try_acquire_export_lease()
@@ -219,14 +242,25 @@ def export_usage_analytics(
         total_row = usage_analytics_export_total_cells(
             _totals_view(totals, fees), group_by=group_by, occurred_from=start, occurred_to=end
         )
-        body = write_csv(
-            USAGE_ANALYTICS_EXPORT_COLUMNS,
-            itertools.chain(groups, (total_row,)),
-            USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS,
-        )
-        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
-        rows = None
-        response = csv_response(_export_filename(group_by, start, end), body)
+        if export_format == "xlsx":
+            body = write_xlsx(
+                USAGE_ANALYTICS_EXPORT_COLUMNS,
+                itertools.chain(groups, (total_row,)),
+                USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS,
+                USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS,
+                sheet_title=_EXPORT_SHEET,
+            )
+            rows = None
+            response = xlsx_response(_export_filename(group_by, start, end, "xlsx"), body)
+        else:
+            body = write_csv(
+                USAGE_ANALYTICS_EXPORT_COLUMNS,
+                itertools.chain(groups, (total_row,)),
+                USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS,
+            )
+            # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+            rows = None
+            response = csv_response(_export_filename(group_by, start, end, "csv"), body)
         body = None
     except AppError:
         raise
@@ -248,13 +282,15 @@ def export_usage_analytics(
     return response
 
 
-def _export_filename(group_by: UsageAnalyticsGroupBy, start: dt.datetime, end: dt.datetime) -> str:
-    """`usage-analytics_<group_by>_<from>_<to>.csv` in Malaysian time; no client input in it."""
+def _export_filename(
+    group_by: UsageAnalyticsGroupBy, start: dt.datetime, end: dt.datetime, extension: str
+) -> str:
+    """`usage-analytics_<group_by>_<from>_<to>.<extension>` in Malaysian time; no client input."""
 
     def local(moment: dt.datetime) -> str:
         return (moment + KUALA_LUMPUR_OFFSET).strftime("%Y%m%dT%H%M%S") + "MYT"
 
-    return f"usage-analytics_{group_by}_{local(start)}_{local(end)}.csv"
+    return f"usage-analytics_{group_by}_{local(start)}_{local(end)}.{extension}"
 
 
 def _ratio(numerator: Decimal, denominator: Decimal | int) -> str | None:

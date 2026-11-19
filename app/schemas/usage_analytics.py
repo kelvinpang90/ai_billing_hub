@@ -1,7 +1,8 @@
 """Response shapes and post-auth validation for admin usage analytics.
 
 导出（AIH-TASK-223，设计闸门 #709 v2 §2「接口二」）：31 列的列常量、文本列集合与 GROUP / TOTAL
-两种行的单元格函数。单元格全部取接口一 JSON 视图的值转成字符串（整数 `str()`、金额与比率沿用
+两种行的单元格函数；xlsx 的整数列（AIH-TASK-237，设计闸门 #753 v1）。
+单元格全部取接口一 JSON 视图的值转成字符串（整数 `str()`、金额与比率沿用
 接口一的字符串、null 为空）；含内部成本，只给管理端用。
 """
 
@@ -174,6 +175,22 @@ USAGE_ANALYTICS_EXPORT_COLUMNS: Final = (
 )
 # 加公式注入前缀的文本列（功能标签、公司名、模型代码来自输入）；数值列不加：负毛利要保持是数。
 USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS: Final = frozenset({"group_key", "group_name"})
+# xlsx 里写数字单元格的计数与 token 列（设计闸门 #753 v1 §2「单元格类型」）；
+# 金额、比率与平均值仍是文本。
+USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS: Final = frozenset(
+    {
+        "event_count",
+        "token_event_count",
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "prepaid_event_count",
+        "internal_event_count",
+        "paid_payment_count",
+        "gateway_fee_unknown_count",
+    }
+)
 
 _USAGE_KEYS: Final = (
     "event_count",
