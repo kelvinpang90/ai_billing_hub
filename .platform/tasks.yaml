@@ -13489,7 +13489,7 @@ tasks:
     title: Excel 导出第一层：API 容器的临时目录挂载为内存文件系统
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「tmpfs（AIH-TASK-234）」与 §8：docker-compose.yml 只给 api 服务加 tmpfs（/tmp，上限 128m，mode 1777），让 openpyxl 生成 xlsx 时写的工作表临时文件只在内存里、不落宿主机磁盘；tests/backend/test_compose.py 钉住它；docs/deployment.md 3.3 节「客户导出」一段补 xlsx 的容量说明。不改应用代码：xlsx 写出模块属于 AIH-TASK-235。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-233
     acceptance_criteria:
