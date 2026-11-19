@@ -27,6 +27,8 @@ TEMPLATE_NOTIFICATION_SUSPENDED: Final = "notification_suspended"
 TEMPLATE_NOTIFICATION_REACTIVATED: Final = "notification_reactivated"
 # 付款邮件（设计闸门 #589 v2 §2「付款邮件」，AIH-TASK-198）。
 TEMPLATE_PAYMENT_RECEIPT: Final = "payment_receipt"
+# 密码已修改通知（设计闸门 #751 v3 §2「改密通知」，I5）。
+TEMPLATE_PASSWORD_CHANGED: Final = "password_changed"
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,20 @@ _TEMPLATES: Final[Mapping[str, _EmailTemplate]] = {
         ),
         required=frozenset({"amount", "company_name", "paid_at", "receipt_number", "link"}),
     ),
+    # ⚠️ 标题固定；正文不写邮箱、角色、IP、设备、令牌，ADMIN 与 CUSTOMER 同一个模板
+    # （设计闸门 #751 v3 §2「改密通知」、§9 备选 F）。链接是忘记密码页，不带查询参数。
+    TEMPLATE_PASSWORD_CHANGED: _EmailTemplate(
+        subject="Your Acuven Billing password was changed",
+        body=Template(
+            "The password for your Acuven Billing account was changed at $changed_at.\n"
+            "For your security, every signed-in session has been signed out.\n\n"
+            "If you made this change, you do not need to do anything.\n\n"
+            "If you did not make this change, someone else may have access to your email.\n"
+            "Reset your password again straight away from this page, and contact Acuven:\n"
+            "$link"
+        ),
+        required=frozenset({"changed_at", "link"}),
+    ),
 }
 
 
@@ -145,6 +161,7 @@ __all__ = [
     "TEMPLATE_NOTIFICATION_LOW_BALANCE",
     "TEMPLATE_NOTIFICATION_REACTIVATED",
     "TEMPLATE_NOTIFICATION_SUSPENDED",
+    "TEMPLATE_PASSWORD_CHANGED",
     "TEMPLATE_PASSWORD_RESET",
     "TEMPLATE_PAYMENT_RECEIPT",
     "TEMPLATE_PORTAL_INVITATION",

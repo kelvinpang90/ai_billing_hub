@@ -24,7 +24,7 @@ from app.core.config import Settings
 from app.core.mailer import OutgoingEmail, SmtpEmailTransport
 from app.main import create_app
 from app.schemas.auth import ForgotPasswordRequest, ResetPasswordRequest
-from app.services.password_reset import EVENT_PASSWORD_RESET
+from app.services.password_reset import EVENT_PASSWORD_CHANGED, EVENT_PASSWORD_RESET
 from app.tasks.outbox import _attempt_send
 
 FRONTEND_SRC = Path(__file__).resolve().parents[2] / "frontend" / "src"
@@ -52,11 +52,18 @@ def frontend_reset_path() -> str:
     return _frontend_literal("ROUTES.resetPassword", r'resetPassword:\s*"([^"]+)"')
 
 
+def frontend_forgot_path() -> str:
+    return _frontend_literal("ROUTES.forgotPassword", r'forgotPassword:\s*"([^"]+)"')
+
+
 def frontend_token_param() -> str:
     return _frontend_literal("RESET_TOKEN_PARAM", r'RESET_TOKEN_PARAM\s*=\s*"([^"]+)"')
 
 
-def rendered_link() -> str:
+def rendered_link(
+    event_type: str = EVENT_PASSWORD_RESET,
+    payload: dict[str, str] | None = None,
+) -> str:
     """后端真的会发出去的那封信里，那条链接。
 
     ⚠️ 走 outbox 的投递路径（`_attempt_send`），在最底层的 SMTP 传输处截下那封信，
@@ -72,18 +79,37 @@ def rendered_link() -> str:
     with patch.object(SmtpEmailTransport, "send", capture):
         delivered = _attempt_send(
             Settings(frontend_base_url=BASE_URL),
-            event_type=EVENT_PASSWORD_RESET,
-            raw_payload=json.dumps({"to": "admin@example.com", "token": TOKEN}),
+            event_type=event_type,
+            raw_payload=json.dumps(payload or {"to": "admin@example.com", "token": TOKEN}),
         )
     assert delivered is True
     assert len(sent) == 1
     match = re.search(r"(https://\S+)", sent[0].body)
-    assert match is not None, "the reset email no longer contains a link"
+    assert match is not None, "the email no longer contains a link"
     return match.group(1)
 
 
 def test_the_email_link_lands_on_a_route_the_frontend_registers() -> None:
     assert urlparse(rendered_link()).path == frontend_reset_path()
+
+
+def test_the_password_changed_link_lands_on_the_forgot_password_route() -> None:
+    """改密通知（设计闸门 #751 v3 §2，I5）里的链接指向忘记密码页，不带任何参数。
+
+    ⚠️ 这一页必须在 `RequireAuth` 之外（下面 `test_the_reset_page_is_outside_the_signed_in_guard`
+    同时钉住）：收到这封信的人可能正是被别人改了密码、登不进去的那一个。
+    """
+    link = urlparse(
+        rendered_link(
+            EVENT_PASSWORD_CHANGED,
+            {"to": "admin@example.com", "changed_at": "2026-11-19T08:30:00"},
+        )
+    )
+
+    assert link.path == frontend_forgot_path()
+    assert link.query == ""
+    assert link.fragment == ""
+    assert f"{link.scheme}://{link.netloc}" == BASE_URL
 
 
 def test_the_email_link_carries_the_token_in_the_parameter_the_page_reads() -> None:
