@@ -50,6 +50,9 @@ logger = logging.getLogger(__name__)
 # outbox 行的事件类型。⚠️ 这个字符串是**投递任务查表选模板的键**，改它等于让
 # 所有已经躺在 outbox 里、还没投出去的行认不出自己是什么 —— 那些行会直接进死信。
 EVENT_PASSWORD_RESET: Final = "PASSWORD_RESET_REQUESTED"
+# 密码已修改通知（设计闸门 #751 v3 §2「改密通知」）。渲染在 app/tasks/outbox.py 的
+# `_render_password_changed`；生产者是重置成功的同一事务（I6），本常量先于生产者登记。
+EVENT_PASSWORD_CHANGED: Final = "PASSWORD_CHANGED_EMAIL_REQUESTED"
 AGGREGATE_USERS: Final = "users"
 
 # 「忘记密码」这个端点的固定耗时下限。⚠️ 它是一条**安全控制**，不是性能旋钮：
@@ -444,6 +447,7 @@ def reset_password(
 
 __all__ = [
     "AGGREGATE_USERS",
+    "EVENT_PASSWORD_CHANGED",
     "EVENT_PASSWORD_RESET",
     "InvalidResetToken",
     "request_reset",

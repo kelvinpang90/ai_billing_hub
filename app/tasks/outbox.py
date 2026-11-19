@@ -43,6 +43,7 @@ from app.core.email_templates import (
     TEMPLATE_NOTIFICATION_LOW_BALANCE,
     TEMPLATE_NOTIFICATION_REACTIVATED,
     TEMPLATE_NOTIFICATION_SUSPENDED,
+    TEMPLATE_PASSWORD_CHANGED,
     TEMPLATE_PASSWORD_RESET,
     TEMPLATE_PAYMENT_RECEIPT,
     TEMPLATE_PORTAL_INVITATION,
@@ -60,7 +61,7 @@ from app.services.notifications import (
     notification_for,
     parse_money,
 )
-from app.services.password_reset import EVENT_PASSWORD_RESET
+from app.services.password_reset import EVENT_PASSWORD_CHANGED, EVENT_PASSWORD_RESET
 from app.services.portal_accounts import EVENT_PORTAL_INVITATION
 from app.services.receipts import EVENT_RECEIPT_EMAIL
 
@@ -337,6 +338,51 @@ def _render_receipt_email(settings: Settings, payload: dict[str, object]) -> Out
     )
 
 
+# --- 密码已修改通知（设计闸门 #751 v3 §2「改密通知」，I5） ---------------------------------------
+
+# payload 的键恰好这 2 个（设计 §2），由重置成功的同一事务写入（I6）；多一个少一个都不发。
+_PASSWORD_CHANGED_KEYS: Final = frozenset({"to", "changed_at"})
+
+
+def _render_password_changed(
+    settings: Settings, payload: dict[str, object]
+) -> OutboundMessage | None:
+    """Build the password changed email, or None when we cannot (which counts as a failure).
+
+    ⚠️ 日志是固定文本，**不带任何 payload 值**（收件人、时刻，设计 §6）。
+    """
+    base = settings.frontend_base_url.strip().rstrip("/")
+    if not base:
+        # 与其他邮件同一判定：拼不出可点的链接就不发。
+        logger.error(
+            "BILLING_FRONTEND_BASE_URL is not configured; cannot build a forgot password link"
+        )
+        return None
+
+    if set(payload) != _PASSWORD_CHANGED_KEYS:
+        logger.error("A password changed email outbox row does not have the expected payload keys")
+        return None
+
+    to = payload["to"]
+    if not isinstance(to, str) or not to or "\r" in to or "\n" in to:
+        logger.error("A password changed email outbox row has an unusable recipient")
+        return None
+
+    changed_at = _malaysia_time(payload["changed_at"])
+    if changed_at is None:
+        logger.error("A password changed email outbox row has an unreadable changed_at")
+        return None
+
+    # 路径由前端 `routes/paths.ts` 的 `forgotPassword` 登记（在 `RequireAuth` 之外，
+    # 不登录也能打开），由 tests/backend/test_password_reset_link.py 机械比对。不带查询参数。
+    return OutboundMessage(
+        channel=Channel.EMAIL,
+        recipient=to,
+        template=TEMPLATE_PASSWORD_CHANGED,
+        params={"changed_at": changed_at, "link": f"{base}/forgot-password"},
+    )
+
+
 # event_type → 渲染函数。渲染函数只组装模板参数，正文在 app/core/email_templates.py。
 #
 # ⚠️ 认不出来的事件类型走**普通失败**（重试，最终进死信），不是立刻死信。
@@ -357,11 +403,16 @@ def _render_receipt_email(settings: Settings, payload: dict[str, object]) -> Out
 #
 # `PAYMENT_RECEIPT_EMAIL_REQUESTED`（付款邮件，设计闸门 #589 v2）的生产者是
 # app/services/receipts.py 的 `issue_receipt`（开具收据的同一事务里写这一行）。
+#
+# `PASSWORD_CHANGED_EMAIL_REQUESTED`（改密通知，设计闸门 #751 v3）的生产者由 I6 接入：
+# app/services/password_reset.py 的 `reset_password` 在重置成功的同一事务里写这一行。
+# 渲染先于生产者登记（I5），所以 I6 上线时第一行就有人投。
 _RENDERERS = {
     EVENT_PASSWORD_RESET: _render_password_reset,
     EVENT_PORTAL_INVITATION: _render_portal_invitation,
     EVENT_NOTIFICATION_EMAIL: _render_notification_email,
     EVENT_RECEIPT_EMAIL: _render_receipt_email,
+    EVENT_PASSWORD_CHANGED: _render_password_changed,
 }
 
 # 通知类事件（设计闸门 #471 v7 §2「投递」）：不调 SMTP、不需要前端基址，
