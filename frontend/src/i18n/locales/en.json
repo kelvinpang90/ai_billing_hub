@@ -1125,6 +1125,7 @@
   "usageAnalytics.totals.unknownFees": "{{unknown}} paid payment(s) have no recorded gateway fee; gross profit does not deduct them.",
   "usageAnalytics.totals.feesNotAttributable": "Gateway fees cannot be attributed to project, provider, model or feature filters, so gross profit is not shown.",
   "usageAnalytics.export.button": "Export CSV",
+  "usageAnalytics.export.buttonXlsx": "Export Excel",
   "usageAnalytics.export.failed": "The usage analytics could not be exported.",
   "usageAnalytics.export.tooLarge": "There are too many groups to export. Shorten the period or add filters.",
   "usageAnalytics.export.busy": "Another export is in progress. Try again in a few seconds.",
