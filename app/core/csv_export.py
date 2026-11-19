@@ -209,6 +209,27 @@ class ExportLeaseMiddleware:
 # --- CSV --------------------------------------------------------------------------------
 
 
+def formula_guarded(value: str) -> str:
+    """`value` with a leading `'` when it starts with a formula prefix, else unchanged.
+
+    CSV 与 xlsx（设计闸门 #753 v1 §2「公式注入防护」）共用：同一组前缀、同一个单引号。
+    """
+    if value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def export_attachment_headers(filename: str) -> dict[str, str]:
+    """The three attachment headers shared by CSV and xlsx; `filename` is `[A-Za-z0-9._-]+`."""
+    if _FILENAME.fullmatch(filename) is None:
+        raise ValueError("export filename must be ASCII letters, digits, '-', '_' or '.'")
+    return {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+    }
+
+
 def write_csv(
     columns: Sequence[str],
     rows: Iterable[Sequence[str | None]],
@@ -227,8 +248,8 @@ def write_csv(
                 cells.append("")
             elif type(value) is not str:
                 raise TypeError("CSV cells must be str or None")
-            elif guard and value.startswith(_FORMULA_PREFIXES):
-                cells.append("'" + value)
+            elif guard:
+                cells.append(formula_guarded(value))
             else:
                 cells.append(value)
         writer.writerow(cells)
@@ -268,16 +289,7 @@ class ExportCsvResponse(Response):
 
 def csv_response(filename: str, body: bytes) -> ExportCsvResponse:
     """200 `text/csv` attachment. `filename` is built from validated dates by the caller."""
-    if _FILENAME.fullmatch(filename) is None:
-        raise ValueError("export filename must be ASCII letters, digits, '-', '_' or '.'")
-    return ExportCsvResponse(
-        content=body,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return ExportCsvResponse(content=body, headers=export_attachment_headers(filename))
 
 
 __all__ = [
@@ -296,7 +308,9 @@ __all__ = [
     "ExportLeaseToken",
     "ExportTooLarge",
     "csv_response",
+    "export_attachment_headers",
     "export_lease_held",
+    "formula_guarded",
     "release_export_lease",
     "try_acquire_export_lease",
     "write_csv",

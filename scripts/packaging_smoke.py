@@ -36,6 +36,7 @@ def main() -> int:
     import app.ai_api.provider  # noqa: F401
     import app.api.health  # noqa: F401
     import app.core.config  # noqa: F401
+    import app.core.xlsx_export  # noqa: F401
     import app.services.receipt_pdf  # noqa: F401
     import app.services.statement_pdf  # noqa: F401
 
