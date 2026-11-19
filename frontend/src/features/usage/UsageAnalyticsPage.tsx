@@ -6,8 +6,9 @@
  * 前端不重排、不汇总、不算任何数。四种状态都画出来：加载中、失败（带 request_id）、空列表、无权限（403 单独说）。
  *
  * 查询成功时表格上方是合计块（`UsageAnalyticsTotals`，设计闸门 #709 v2 §2「页面」），包括没有任何分组的时候。
- * 「Export CSV」用**已应用**的条件（与表格同一组）经 `GET /api/v1/admin/usage-analytics/export` 下载，不影响表格与
- * 合计的查询；失败在按钮下方显示错误码、信息与 request_id，下次点导出或已应用条件变化时收起。
+ * 「Export CSV」与其右边的「Export Excel」（`format=xlsx`，设计闸门 #753 v1）用**已应用**的条件（与表格同一组）经
+ * `GET /api/v1/admin/usage-analytics/export` 下载，不影响表格与合计的查询；两个按钮共用一个下载状态。失败在按钮下方
+ * 显示错误码、信息与 request_id，下次点任一导出或已应用条件变化时收起。
  *
  * 默认最近 30 天、按供应商分组。时间段按吉隆坡时间输入，发请求前换成**带时区**的 RFC 3339、整秒
  * （`displayTimeToRfc3339`）；两端必填、开始早于结束、跨度不超过 366 天，提交前先挡住。条件与页码放在组件状态里，
@@ -50,7 +51,7 @@ import {
   type UsageAnalyticsQuery,
 } from "../../api/adminUsageAnalytics";
 import { ApiError } from "../../api/client";
-import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
+import { EXPORT_BUSY, EXPORT_TOO_LARGE, type ExportFormat } from "../../api/download";
 import { displayTimeToRfc3339, utcToDisplayInput } from "../../components/DateTimeText";
 import { RequestReference } from "../../components/RequestReference";
 import { CodeText, LoadingBlock, PAGE_SIZE_OPTIONS, usePaging } from "../catalog/ProvidersPage";
@@ -162,19 +163,24 @@ export function UsageAnalyticsPage() {
   };
   const groupByOptions = USAGE_ANALYTICS_GROUP_BYS.map((value) => ({ value, label: groupByLabels[value] }));
 
-  // 导出与表格、合计的查询互不相干：它不改 query，也不让那两个重新请求。
+  // 导出与表格、合计的查询互不相干：它不改 query，也不让那两个重新请求。CSV 与 Excel 共用这一个下载状态。
   const exporting = useMutation({
-    mutationFn: (applied: UsageAnalyticsQuery) => exportUsageAnalytics(applied),
+    // CSV 不带 format，交给 api 的条件与加 Excel 之前逐字相同。
+    mutationFn: ({ applied, format }: { applied: UsageAnalyticsQuery; format: ExportFormat }) =>
+      exportUsageAnalytics(format === "csv" ? applied : { ...applied, format }),
   });
 
-  const startExport = (): void => {
+  const startExport = (format: ExportFormat): void => {
     // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。用的是已应用的条件，不是表单里还没提交的草稿。
     if (exporting.isPending) {
       return;
     }
     exporting.reset();
-    exporting.mutate(query);
+    exporting.mutate({ applied: query, format });
   };
+
+  // 加载状态只画在被点的那个按钮上；两个按钮在下载中都不可点。
+  const exportingFormat = exporting.isPending ? exporting.variables.format : null;
 
   // 上一次导出的失败说的是旧的条件，换条件时收起。只收失败：导出中 reset 会让按钮提前恢复可点。
   const clearExportFailure = (): void => {
@@ -420,9 +426,22 @@ export function UsageAnalyticsPage() {
         </Form.Item>
       </Form>
       <div style={{ marginBottom: 16 }}>
-        <Button onClick={startExport} loading={exporting.isPending} disabled={exporting.isPending}>
-          {t("usageAnalytics.export.button")}
-        </Button>
+        <Space>
+          <Button
+            onClick={() => startExport("csv")}
+            loading={exportingFormat === "csv"}
+            disabled={exporting.isPending}
+          >
+            {t("usageAnalytics.export.button")}
+          </Button>
+          <Button
+            onClick={() => startExport("xlsx")}
+            loading={exportingFormat === "xlsx"}
+            disabled={exporting.isPending}
+          >
+            {t("usageAnalytics.export.buttonXlsx")}
+          </Button>
+        </Space>
         {exporting.error ? <ExportFailure error={exporting.error} /> : null}
       </div>
       {result}

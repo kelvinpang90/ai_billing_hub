@@ -56,6 +56,9 @@
  * AIH-TASK-239 加了门户钱包页与会话页导出 Excel 按钮的两个只读步骤（check_portal_wallet_xlsx、check_portal_conv_xlsx），都排在
  * login_customer 之后，各自经门户导航进页，只查「Export Excel」恰好一个且可用、不点（设计闸门 #753 v1 §2「浏览器验收」、§11）；
  * check_portal_wallet_export 与 check_portal_conv_export 按文字全等找「Export CSV」，不受新按钮影响、行为不变。
+ * AIH-TASK-240 加了用量分析页导出 Excel 按钮的一个只读步骤（check_analytics_xlsx），排在 open_usage_analytics 之后、不自己
+ * 导航，只查「Export Excel」恰好一个且可用、不点（设计闸门 #753 v1 §2「浏览器验收」、§11）；check_analytics_totals 不变，
+ * check_analytics_export 按文字全等找「Export CSV」，不受新按钮影响、行为不变。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -198,6 +201,8 @@
  *   提交筛选表单（不点「Apply filters」「Clear filters」）、不翻页、不打开任何事件的详情（「View」链接）。
  *   用量分析页不改分组维度、时间段或任何筛选、不点「Apply filters」「Reset to last 30 days」、不翻页、不改每页条数；
  *   合计块（check_analytics_totals）只看不点；「Export CSV」按钮（check_analytics_export）**只查不点**（验收不下载文件）。
+ *   「Export Excel」按钮（check_analytics_xlsx）同样**只查不点**（验收不下载文件）：不自己导航，停在 open_usage_analytics
+ *   打开的那一页，不点「Export Excel」「Export CSV」或任何别的按钮与链接、不改筛选、不翻页，不填也不提交任何表单。
  *   钱包核对页（open_wallet_reconciliation）不点运行表的任何一行（不打开不一致列表）、不翻页、不改每页条数、不点
  *   「Try again」或任何别的按钮与链接，不填也不提交任何表单（页面本身没有写操作入口）。
  *   对账单页（open_statements）不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不动客户下拉与
@@ -352,6 +357,12 @@
  *                   （usageAnalytics.export.button）的按钮恰好一个，且处于可用状态（没有 disabled 属性、aria-disabled 不是
  *                   true）。找不到按钮是 element_missing，不止一个或一直不可用是 assertion_failed。**不点**这个按钮（验收不下载
  *                   文件）、不改筛选、不翻页、不提交任何表单
+ *   check_analytics_xlsx
+ *                   本次运行跑过 open_usage_analytics 才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认
+ *                   open_usage_analytics 打开的那一页（落定的判定与失败码同 check_usage_analytics）。同一页上文字恰好为
+ *                   「Export Excel」（usageAnalytics.export.buttonXlsx）的按钮恰好一个，且处于可用状态（没有 disabled 属性、
+ *                   aria-disabled 不是 true）。找不到按钮是 element_missing，不止一个或一直不可用是 assertion_failed。**不点**
+ *                   这个按钮（验收不下载文件），也不点「Export CSV」或任何别的按钮与链接、不改筛选、不翻页、不填也不提交任何表单
  *   open_wallet_reconciliation
  *                   要排在 login 之后。点顶栏「Wallet reconciliation」（en.json 的 nav.walletReconciliation，href 为 paths.ts 的
  *                   walletReconciliation，即 /wallet-reconciliation）进钱包核对页；页面落定：地址是 /wallet-reconciliation，运行表
@@ -854,6 +865,7 @@ const TEXT = {
   analyticsGatewayFees: "Gateway fees", // usageAnalytics.totals.gatewayFees
   analyticsNull: "—", // 合计块里 null 的显示（frontend/src/features/usage/UsageEventsPage.tsx 的 EMPTY）
   analyticsExport: "Export CSV", // usageAnalytics.export.button —— 只确认它在且可用，不点
+  analyticsExportXlsx: "Export Excel", // usageAnalytics.export.buttonXlsx —— 只确认它在且可用，不点
   navWalletReconciliation: "Wallet reconciliation", // nav.walletReconciliation —— 顶栏的钱包核对项
   reconRunsTitle: "Reconciliation runs", // walletReconciliation.runs.title —— 运行表一块的 aria-label
   reconForbidden: "Only administrators can view wallet reconciliation.", // walletReconciliation.forbidden
@@ -3724,6 +3736,21 @@ function probeAnalyticsTotals(lib, T) {
     exportButtons: buttons.length,
     exportEnabled,
   };
+}
+
+/**
+ * 用量分析页的导出 Excel 按钮（check_analytics_xlsx 用）：整页上文字恰好为「Export Excel」的按钮有几个，恰好一个时它是否
+ * 可用（没有 disabled 属性、aria-disabled 不是 true）。只读 DOM，不点、不填。
+ */
+function probeAnalyticsXlsx(lib, T) {
+  const buttons = [...document.querySelectorAll("button")].filter(
+    (el) => lib.norm(el.textContent) === T.analyticsExportXlsx,
+  );
+  let enabled = false;
+  if (buttons.length === 1) {
+    enabled = !buttons[0].disabled && buttons[0].getAttribute("aria-disabled") !== "true";
+  }
+  return { path: location.pathname, buttons: buttons.length, enabled };
 }
 
 /** 把合计块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
@@ -7150,6 +7177,27 @@ async function stepCheckAnalyticsExport(ctx) {
   }
 }
 
+async function stepCheckAnalyticsXlsx(ctx) {
+  // 不自己导航：只认 open_usage_analytics 打开的那一页。
+  if (ctx.usageAnalyticsAfterSeq === null) {
+    throw fail("assertion_failed");
+  }
+  await awaitUsageAnalyticsSettled();
+
+  // 整页上恰好一个「Export Excel」按钮且可用。**不点它**（验收不下载文件）。
+  const ready = await waitFor(
+    () => evaluate(probeAnalyticsXlsx, TEXT),
+    (s) => s.path === TEXT.usageAnalyticsPath && s.buttons === 1 && s.enabled,
+    ELEMENT_WAIT_MS,
+  );
+  if (!ready.ok) {
+    if (ready.value !== null && ready.value.path !== TEXT.usageAnalyticsPath) {
+      throw fail("navigation_failed");
+    }
+    throw fail(ready.value === null || ready.value.buttons === 0 ? "element_missing" : "assertion_failed");
+  }
+}
+
 async function stepOpenWalletReconciliation(ctx) {
   if (ctx.loginCompletedAt === null) {
     throw fail("assertion_failed");
@@ -10460,6 +10508,7 @@ const STEPS = {
   check_usage_analytics: stepCheckUsageAnalytics,
   check_analytics_totals: stepCheckAnalyticsTotals,
   check_analytics_export: stepCheckAnalyticsExport,
+  check_analytics_xlsx: stepCheckAnalyticsXlsx,
   open_wallet_reconciliation: stepOpenWalletReconciliation,
   open_statements: stepOpenStatements,
   check_admin_statement_pdf: stepCheckAdminStatementPdf,
@@ -10541,8 +10590,8 @@ async function main() {
      */
     loginSeq: null,
     /**
-     * open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null（check_analytics_totals 与
-     * check_analytics_export 这时 assertion_failed）。
+     * open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null（check_analytics_totals、
+     * check_analytics_export 与 check_analytics_xlsx 这时 assertion_failed）。
      */
     usageAnalyticsAfterSeq: null,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */

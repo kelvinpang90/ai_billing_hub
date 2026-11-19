@@ -230,6 +230,37 @@ describe("usage analytics export", () => {
     expect(String(download.downloadFile.mock.calls[0]?.[0]).startsWith(`${EXPORT}?`)).toBe(true);
   });
 
+  it("keeps the CSV address word for word with or without format=csv, and appends format=xlsx for Excel", () => {
+    const query = { group_by: "customer" as const, occurred_from: FROM, occurred_to: TO, customer_id: ID };
+    const csv = `${EXPORT}?${new URLSearchParams({
+      group_by: "customer",
+      occurred_from: FROM,
+      occurred_to: TO,
+      customer_id: ID,
+    }).toString()}`;
+
+    expect(usageAnalyticsExportUrl(query)).toBe(csv);
+    expect(usageAnalyticsExportUrl({ ...query, format: "csv" })).toBe(csv);
+    expect(usageAnalyticsExportUrl({ ...query, format: "xlsx" })).toBe(`${csv}&format=xlsx`);
+  });
+
+  it("names the fallback file after the format", async () => {
+    download.downloadFile.mockResolvedValue(undefined);
+    const query = { group_by: "provider" as const, occurred_from: FROM, occurred_to: TO };
+
+    await exportUsageAnalytics({ ...query, format: "csv" });
+    await exportUsageAnalytics({ ...query, format: "xlsx" });
+
+    expect(download.downloadFile).toHaveBeenNthCalledWith(1, usageAnalyticsExportUrl(query), "usage-analytics.csv", undefined);
+    expect(download.downloadFile).toHaveBeenNthCalledWith(
+      2,
+      usageAnalyticsExportUrl({ ...query, format: "xlsx" }),
+      "usage-analytics.xlsx",
+      undefined,
+    );
+    expect(String(download.downloadFile.mock.calls[1]?.[0]).endsWith("&format=xlsx")).toBe(true);
+  });
+
   it("passes a download failure through unchanged", async () => {
     download.downloadFile.mockRejectedValue(new ApiError("EXPORT_BUSY", "Another export is in progress.", "req-503"));
 
