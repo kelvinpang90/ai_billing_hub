@@ -15,6 +15,10 @@
  * `EXPORT_TOO_LARGE`、`QUERY_TOO_BROAD`、`EXPORT_BUSY` 各有专门文案，其余失败带 request_id。导出区的日期只管导出，
  * 不影响余额卡、流水列表与翻页。
  *
+ * 「Export CSV」右边是「Export Excel」（AIH-TASK-239；设计闸门 #753 v1 §2「门户与管理端页面」）：同样的请求加
+ * `format=xlsx`。两个按钮共用导出区的那一个下载状态：任一在下载中两个都不可点，加载状态只在被点的那个上；可用条件、
+ * 失败文案（不分格式）与收起规则都与 CSV 按钮相同。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。
  */
 
@@ -31,7 +35,7 @@ import {
   listCustomerTransactions,
   type CustomerTransactionExportQuery,
 } from "../../api/customerWallet";
-import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
+import { EXPORT_BUSY, EXPORT_TOO_LARGE, type ExportFormat } from "../../api/download";
 import { RequestReference } from "../../components/RequestReference";
 import { CustomerTransactionsTable } from "./CustomerTransactionsTable";
 import {
@@ -104,13 +108,15 @@ function ExportSection() {
   const exporting = useMutation({
     mutationFn: (query: CustomerTransactionExportQuery) => exportCustomerTransactions(query),
   });
+  // CSV 与 Excel 两个按钮共用这一个下载状态；加载状态只显示在被点的那个按钮上。
+  const pendingFormat = exporting.isPending ? (exporting.variables.format ?? "csv") : null;
 
-  const startExport = (): void => {
+  const startExport = (format: ExportFormat): void => {
     // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
     if (exportQuery === null || exporting.isPending) {
       return;
     }
-    exporting.mutate(exportQuery);
+    exporting.mutate({ ...exportQuery, format });
   };
 
   const changeRange = (_: Partial<ExportRangeValues>, values: Partial<ExportRangeValues>): void => {
@@ -138,13 +144,22 @@ function ExportSection() {
           <Input type="date" min={MIN_DATE} max={MAX_DATE} />
         </Form.Item>
         <Form.Item>
-          <Button
-            onClick={startExport}
-            loading={exporting.isPending}
-            disabled={exportQuery === null || exporting.isPending}
-          >
-            {t("portal.wallet.export.button")}
-          </Button>
+          <Space>
+            <Button
+              onClick={() => startExport("csv")}
+              loading={pendingFormat === "csv"}
+              disabled={exportQuery === null || exporting.isPending}
+            >
+              {t("portal.wallet.export.button")}
+            </Button>
+            <Button
+              onClick={() => startExport("xlsx")}
+              loading={pendingFormat === "xlsx"}
+              disabled={exportQuery === null || exporting.isPending}
+            >
+              {t("portal.wallet.export.buttonXlsx")}
+            </Button>
+          </Space>
         </Form.Item>
       </Form>
       {problem !== null ? <Alert type="warning" showIcon message={<RangeProblemText problem={problem} />} /> : null}

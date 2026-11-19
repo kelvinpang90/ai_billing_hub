@@ -18,6 +18,10 @@
  * 会话页跳过来的地址（AIH-TASK-123）覆盖设计闸门 #460 v2 §7 前端一段里属于用量页的场景：带 `conversation_id` 等四个
  * 参数时首个请求就带这四个筛选、表单显示它们、之后的筛选不写回地址栏；日期缺一或不合规时用默认区间、其余照用；同时带
  * `event_id` 时只按 `event_id` 查。不带这些参数时的行为由上面的既有用例覆盖（不改）。
+ *
+ * 两个「Excel」按钮（AIH-TASK-238）覆盖设计闸门 #753 v1 §7「前端按钮」一行：两块各两个按钮、Excel 在 CSV 右边、点
+ * Excel 用已应用条件加 `format=xlsx` 请求、下载中两个都不可点且加载状态只在被点的那个上、失败文案与 CSV 相同并按原
+ * 规则收起、条件无效时两个都不可用。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -225,7 +229,7 @@ describe("UsagePage default dates", () => {
     expect(monthInput).toHaveValue(month);
     expect(monthInput).toHaveAttribute("min", "2020-01");
     expect(monthInput).toHaveAttribute("max", month);
-    expect(within(monthly).getByRole("button", { name: /Export monthly summary/ })).toBeEnabled();
+    expect(within(monthly).getByRole("button", { name: "Export monthly summary" })).toBeEnabled();
   });
 
   it.each<[string, string, string]>([
@@ -1001,8 +1005,189 @@ describe("UsagePage export", () => {
     expect(downloads).toEqual([]);
   });
 
+  describe("Excel (AIH-TASK-238)", () => {
+    const XLSX_NAME = /Export Excel/;
+    const XLSX_FILE_NAME = "usage-events_2026-10-01_2026-10-25.xlsx";
+    const LOADING = { name: "loading" } as const;
+
+    /** xlsx 文件，响应头里不带文件名（页面用兜底的文件名）。 */
+    function xlsxFile() {
+      return {
+        data: new Blob(["PK"], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+        status: 200,
+        statusText: "",
+        headers: {},
+      };
+    }
+
+    /** 某一块里全部按钮的文字，按页面顺序。 */
+    function buttonTexts(region: HTMLElement): string[] {
+      return within(region)
+        .getAllByRole("button")
+        .map((button) => button.textContent ?? "");
+    }
+
+    it("puts Export Excel right of Export CSV in both sections and exports the applied filters with format=xlsx", async () => {
+      const user = userEvent.setup();
+      const get = serve(() => page([event()]), PROJECTS, xlsxFile);
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      const usageTexts = buttonTexts(screen.getByRole("region", { name: "Usage" }));
+      expect(usageTexts[usageTexts.indexOf("Export CSV") + 1]).toBe("Export Excel");
+      const monthlyTexts = buttonTexts(screen.getByRole("region", { name: "Monthly summary" }));
+      expect(monthlyTexts[monthlyTexts.indexOf("Export monthly summary") + 1]).toBe("Export monthly summary (Excel)");
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeEnabled();
+
+      await choose("Project", "Sales assistant");
+      await user.type(screen.getByLabelText("Provider"), " anthropic ");
+      await user.click(screen.getByRole("button", { name: "Apply filters" }));
+      await waitFor(() => {
+        expect(usageUrls(get).at(-1)).toBe(
+          `${USAGE_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${OTHER_PROJECT_ID}&provider=anthropic&page_size=20`,
+        );
+      });
+      // 填了但没点「Apply filters」：不算数。
+      await user.type(screen.getByLabelText("Model"), "claude-sonnet-5-5");
+      const listed = usageUrls(get).length;
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      await waitFor(() => {
+        expect(downloads).toEqual([XLSX_FILE_NAME]);
+      });
+      expect(exportUrls(get)).toEqual([
+        `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${OTHER_PROJECT_ID}&provider=anthropic&format=xlsx`,
+      ]);
+      const [, config] = get.mock.calls.find(([url]) => url.startsWith(EXPORT_URL)) ?? [];
+      expect(config).toMatchObject({ responseType: "blob" });
+      expect(usageUrls(get)).toHaveLength(listed);
+      expect(summaryExportUrls(get)).toEqual([]);
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeEnabled();
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+      for (const [url] of get.mock.calls) {
+        expect(url).not.toContain("/api/v1/admin/");
+        expect(url).not.toMatch(/tenant|customer_id/);
+      }
+    });
+
+    // 下载中与失败拆成几条用例：一条里先后点两个按钮时，antd 收起加载图标的动画在 jsdom 里不结束，图标会留在先点的
+    // 那个按钮上；每条也更短，不被并行的测试文件拖到超时。
+    it("disables both buttons while Export Excel downloads and shows loading only on it", async () => {
+      const get = serve(() => page([event()]), PROJECTS, () => PENDING);
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+      const csv = screen.getByRole("button", { name: EXPORT_NAME });
+
+      fireEvent.click(xlsx);
+
+      await waitFor(() => {
+        expect(xlsx).toBeDisabled();
+      });
+      expect(within(xlsx).getByRole("img", LOADING)).toBeInTheDocument();
+      expect(csv).toBeDisabled();
+      expect(within(csv).queryByRole("img", LOADING)).not.toBeInTheDocument();
+      fireEvent.click(xlsx);
+      fireEvent.click(csv);
+      expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&format=xlsx`]);
+      // 月度汇总的两个按钮与列表不受影响。
+      expect(screen.getByRole("button", { name: "Export monthly summary" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Export monthly summary (Excel)" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Apply filters" })).toBeEnabled();
+      expect(downloads).toEqual([]);
+    });
+
+    it("disables Export Excel too while Export CSV downloads, with loading only on Export CSV", async () => {
+      const get = serve(() => page([event()]), PROJECTS, () => PENDING);
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+      const csv = screen.getByRole("button", { name: EXPORT_NAME });
+
+      fireEvent.click(csv);
+
+      await waitFor(() => {
+        expect(csv).toBeDisabled();
+      });
+      expect(within(csv).getByRole("img", LOADING)).toBeInTheDocument();
+      expect(xlsx).toBeDisabled();
+      expect(within(xlsx).queryByRole("img", LOADING)).not.toBeInTheDocument();
+      fireEvent.click(xlsx);
+      expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25`]);
+    });
+
+    it("fails in the same words as Export CSV and clears the same way", async () => {
+      const replies: unknown[] = [
+        failure(503, "EXPORT_BUSY", "req-xlsx-busy"),
+        failure(500, "INTERNAL_ERROR", "req-xlsx-500"),
+      ];
+      const get = serve(() => page([event()]), PROJECTS, () => replies.shift());
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+
+      fireEvent.click(xlsx);
+
+      expect(await screen.findByText("Another export is in progress. Wait a few seconds, then try again.")).toBeInTheDocument();
+      expect(screen.queryByText("req-xlsx-busy")).not.toBeInTheDocument();
+      expect(xlsx).toBeEnabled();
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+
+      // 换条件（点「Apply filters」）时收起，同 Export CSV。
+      fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+      await waitFor(() => {
+        expect(
+          screen.queryByText("Another export is in progress. Wait a few seconds, then try again."),
+        ).not.toBeInTheDocument();
+      });
+
+      fireEvent.click(xlsx);
+
+      expect(await screen.findByText("Your usage could not be exported.")).toBeInTheDocument();
+      expect(screen.getByText("req-xlsx-500")).toBeInTheDocument();
+      expect(screen.queryByText("Your usage could not be loaded.")).not.toBeInTheDocument();
+      expect(exportUrls(get)).toEqual([
+        `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&format=xlsx`,
+        `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&format=xlsx`,
+      ]);
+      expect(downloads).toEqual([]);
+    });
+
+    it("cannot export Excel when the applied range is invalid", async () => {
+      const user = userEvent.setup();
+      const get = serve(() => page([event()]), PROJECTS, xlsxFile);
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      setDate("From (Malaysia time)", "2026-10-20");
+      setDate("To (Malaysia time)", "2026-10-10");
+      await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      });
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: XLSX_NAME }));
+      expect(exportUrls(get)).toEqual([]);
+    });
+
+    it("cannot export Excel while showing a single event", async () => {
+      const get = serve(() => page([event()]), PROJECTS, xlsxFile);
+
+      renderPage(`${ROUTES.portalUsage}?event_id=${EVENT_ID}`);
+
+      await screen.findByText("Customer service bot", { selector: "td" });
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: XLSX_NAME }));
+      expect(exportUrls(get)).toEqual([]);
+    });
+  });
+
   describe("monthly summary", () => {
-    const MONTHLY_NAME = /Export monthly summary/;
+    // 以原按钮名结尾：加载中名字前面多一个图标的「loading」；不匹配旁边的「Export monthly summary (Excel)」。
+    const MONTHLY_NAME = /Export monthly summary$/;
     const MONTH_LABEL = "Month (Malaysia time)";
     const MONTHLY_TOO_BROAD =
       "The summary for this month cannot be worked out right now. Try again later, or export the request details above for a shorter date range.";
@@ -1205,6 +1390,144 @@ describe("UsagePage export", () => {
 
       await waitFor(() => {
         expect(screen.queryByText(MONTHLY_FAILED)).not.toBeInTheDocument();
+      });
+    });
+
+    describe("Excel (AIH-TASK-238)", () => {
+      const MONTHLY_XLSX_NAME = /Export monthly summary \(Excel\)/;
+
+      function monthlyXlsxButton(): HTMLElement {
+        return within(monthlyRegion()).getByRole("button", { name: MONTHLY_XLSX_NAME });
+      }
+
+      // 无效月份、两次导出与回退文件名在同一次渲染里做（理由同上）。
+      it("exports the chosen month with format=xlsx, falls back to an .xlsx file name, and is unavailable whenever Export monthly summary is", async () => {
+        const replies = [summaryFile(null), summaryFile(null)];
+        const get = serve(() => page([event()]), PROJECTS, file, () => replies.shift());
+        renderPage();
+        await screen.findByText("Customer service bot", { selector: "td" });
+        expect(monthlyXlsxButton()).toBeEnabled();
+
+        for (const value of ["", "2026-1", "2019-12", "2026-11"]) {
+          fireEvent.change(monthInput(), { target: { value } });
+          await waitFor(() => {
+            expect(monthlyXlsxButton()).toBeDisabled();
+          });
+          expect(monthlyButton()).toBeDisabled();
+          fireEvent.click(monthlyXlsxButton());
+          expect(summaryExportUrls(get)).toEqual([]);
+        }
+
+        fireEvent.change(monthInput(), { target: { value: "2026-10" } });
+        await waitFor(() => {
+          expect(monthlyXlsxButton()).toBeEnabled();
+        });
+        fireEvent.click(monthlyXlsxButton());
+
+        await waitFor(() => {
+          expect(downloads).toEqual(["usage-summary_2026-10.xlsx"]);
+        });
+        expect(summaryExportUrls(get)).toEqual([`${SUMMARY_EXPORT_URL}?month=2026-10&format=xlsx`]);
+        const [, config] = get.mock.calls.find(([url]) => url.startsWith(SUMMARY_EXPORT_URL)) ?? [];
+        expect(config).toMatchObject({ responseType: "blob" });
+        await waitFor(() => {
+          expect(monthlyXlsxButton()).toBeEnabled();
+        });
+
+        fireEvent.change(monthInput(), { target: { value: "2026-09" } });
+        fireEvent.click(monthlyXlsxButton());
+
+        await waitFor(() => {
+          expect(downloads).toEqual(["usage-summary_2026-10.xlsx", "usage-summary_2026-09.xlsx"]);
+        });
+        expect(summaryExportUrls(get)).toEqual([
+          `${SUMMARY_EXPORT_URL}?month=2026-10&format=xlsx`,
+          `${SUMMARY_EXPORT_URL}?month=2026-09&format=xlsx`,
+        ]);
+        expect(exportUrls(get)).toEqual([]);
+        for (const [url] of get.mock.calls) {
+          expect(url).not.toContain("/api/v1/admin/");
+          expect(url).not.toMatch(/tenant|customer_id/);
+        }
+      });
+
+      // 下载中与失败拆成几条用例，理由同用量一块的 Excel 用例（加载图标收起的动画在 jsdom 里不结束）。
+      it("disables both monthly buttons while the Excel one downloads and shows loading only on it", async () => {
+        const get = serve(() => page([event()]), PROJECTS, file, () => PENDING);
+        renderPage();
+        await screen.findByText("Customer service bot", { selector: "td" });
+        const xlsx = monthlyXlsxButton();
+        const csv = monthlyButton();
+
+        fireEvent.click(xlsx);
+
+        await waitFor(() => {
+          expect(xlsx).toBeDisabled();
+        });
+        expect(within(xlsx).getByRole("img", { name: "loading" })).toBeInTheDocument();
+        expect(csv).toBeDisabled();
+        expect(within(csv).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+        fireEvent.click(xlsx);
+        fireEvent.click(csv);
+        expect(summaryExportUrls(get)).toEqual([`${SUMMARY_EXPORT_URL}?month=2026-10&format=xlsx`]);
+        // 用量一块的两个导出照常可点。
+        expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+        expect(screen.getByRole("button", { name: /Export Excel/ })).toBeEnabled();
+        expect(downloads).toEqual([]);
+      });
+
+      it("disables the Excel one too while Export monthly summary downloads, with loading only on Export monthly summary", async () => {
+        const get = serve(() => page([event()]), PROJECTS, file, () => PENDING);
+        renderPage();
+        await screen.findByText("Customer service bot", { selector: "td" });
+        const xlsx = monthlyXlsxButton();
+        const csv = monthlyButton();
+
+        fireEvent.click(csv);
+
+        await waitFor(() => {
+          expect(csv).toBeDisabled();
+        });
+        expect(within(csv).getByRole("img", { name: "loading" })).toBeInTheDocument();
+        expect(xlsx).toBeDisabled();
+        expect(within(xlsx).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+        fireEvent.click(xlsx);
+        expect(summaryExportUrls(get)).toEqual([`${SUMMARY_EXPORT_URL}?month=2026-10`]);
+      });
+
+      it("fails in the same words as Export monthly summary and clears the same way", async () => {
+        const replies: unknown[] = [
+          failure(422, "QUERY_TOO_BROAD", "req-monthly-xlsx-422"),
+          failure(500, "INTERNAL_ERROR", "req-monthly-xlsx-500"),
+        ];
+        const get = serve(() => page([event()]), PROJECTS, file, () => replies.shift());
+        renderPage();
+        await screen.findByText("Customer service bot", { selector: "td" });
+        const xlsx = monthlyXlsxButton();
+
+        fireEvent.click(xlsx);
+
+        expect(await within(monthlyRegion()).findByText(MONTHLY_TOO_BROAD)).toBeInTheDocument();
+        expect(screen.queryByText("req-monthly-xlsx-422")).not.toBeInTheDocument();
+        expect(xlsx).toBeEnabled();
+        expect(monthlyButton()).toBeEnabled();
+
+        // 换月份时收起，同 Export monthly summary。
+        fireEvent.change(monthInput(), { target: { value: "2026-09" } });
+        await waitFor(() => {
+          expect(screen.queryByText(MONTHLY_TOO_BROAD)).not.toBeInTheDocument();
+        });
+
+        fireEvent.click(xlsx);
+
+        expect(await within(monthlyRegion()).findByText(MONTHLY_FAILED)).toBeInTheDocument();
+        expect(screen.getByText("req-monthly-xlsx-500")).toBeInTheDocument();
+        expect(screen.queryByText("Your usage could not be exported.")).not.toBeInTheDocument();
+        expect(summaryExportUrls(get)).toEqual([
+          `${SUMMARY_EXPORT_URL}?month=2026-10&format=xlsx`,
+          `${SUMMARY_EXPORT_URL}?month=2026-09&format=xlsx`,
+        ]);
+        expect(downloads).toEqual([]);
       });
     });
   });

@@ -25,6 +25,10 @@
  * 导出中按钮转为加载状态、不可重复点。`EXPORT_TOO_LARGE`、`QUERY_TOO_BROAD`、`EXPORT_BUSY` 各有专门文案，其余失败带
  * request_id；换筛选时收起上一次的失败。导出不影响列表、筛选与翻页。
  *
+ * 「Export CSV」右边是「Export Excel」（AIH-TASK-239；设计闸门 #753 v1 §2「门户与管理端页面」）：同样的请求加
+ * `format=xlsx`。两个按钮共用这一个下载状态：任一在下载中两个都不可点，加载状态只在被点的那个上；可用条件、失败文案
+ * （不分格式）与收起规则都与 CSV 按钮相同。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。
  */
 
@@ -57,7 +61,7 @@ import {
   type CustomerConversationQuery,
 } from "../../api/customerConversations";
 import { CUSTOMER_PROJECTS_QUERY_KEY, QUERY_TOO_BROAD, listCustomerProjects } from "../../api/customerUsage";
-import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
+import { EXPORT_BUSY, EXPORT_TOO_LARGE, type ExportFormat } from "../../api/download";
 import { RequestReference } from "../../components/RequestReference";
 import { ChargedAmount, UsageTime, tokenCount } from "./UsageDetail";
 import {
@@ -167,13 +171,15 @@ export function ConversationsPage() {
   const exporting = useMutation({
     mutationFn: (query: CustomerConversationExportQuery) => exportCustomerConversations(query),
   });
+  // CSV 与 Excel 两个按钮共用这一个下载状态；加载状态只显示在被点的那个按钮上。
+  const pendingFormat = exporting.isPending ? (exporting.variables.format ?? "csv") : null;
 
-  const startExport = (): void => {
+  const startExport = (format: ExportFormat): void => {
     // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
     if (exportQuery === null || exporting.isPending) {
       return;
     }
-    exporting.mutate(exportQuery);
+    exporting.mutate({ ...exportQuery, format });
   };
 
   // 上一次导出的失败说的是旧的筛选条件，换条件时收起。只收失败：导出中 reset 会让按钮提前恢复可点。
@@ -344,8 +350,19 @@ export function ConversationsPage() {
             {t("portal.usage.older")}
           </Button>
         ) : null}
-        <Button onClick={startExport} loading={exporting.isPending} disabled={exportQuery === null || exporting.isPending}>
+        <Button
+          onClick={() => startExport("csv")}
+          loading={pendingFormat === "csv"}
+          disabled={exportQuery === null || exporting.isPending}
+        >
           {t("portal.conversations.export.button")}
+        </Button>
+        <Button
+          onClick={() => startExport("xlsx")}
+          loading={pendingFormat === "xlsx"}
+          disabled={exportQuery === null || exporting.isPending}
+        >
+          {t("portal.conversations.export.buttonXlsx")}
         </Button>
       </Space>
       {exporting.error ? (

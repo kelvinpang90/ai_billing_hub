@@ -34,6 +34,10 @@
  * `type="month"` 的浏览器会退回文本框）、早于 2020-01 或晚于当前月时按钮不可用并提示格式。`QUERY_TOO_BROAD` 有专门
  * 文案，其余失败带 request_id。
  *
+ * 两块各在 CSV 按钮右边加一个「Excel」按钮（AIH-TASK-238；设计闸门 #753 v1 §2「门户与管理端页面」）：同样的请求加
+ * `format=xlsx`。每块的两个按钮共用该块的那一个下载状态：任一在下载中两个都不可点，加载状态只在被点的那个上；可用条件、
+ * 失败文案（不分格式）与收起规则都与 CSV 按钮相同。
+ *
  * ⚠️ 只请求 `/api/v1/customer/*`：不请求任何 `/api/v1/admin/` 路径，不显示成本、毛利或内部字段（INV-7）。
  */
 
@@ -69,7 +73,7 @@ import {
   type CustomerUsageExportQuery,
   type CustomerUsageQuery,
 } from "../../api/customerUsage";
-import { EXPORT_BUSY, EXPORT_TOO_LARGE } from "../../api/download";
+import { EXPORT_BUSY, EXPORT_TOO_LARGE, type ExportFormat } from "../../api/download";
 import { RequestReference } from "../../components/RequestReference";
 import { ROUTES } from "../../routes/paths";
 import { ChargedAmount, EMPTY, UsageDetail, UsageTime, UsageTypeText, tokenCount } from "./UsageDetail";
@@ -264,16 +268,20 @@ function MonthlySummaryExport() {
   const chosen = month.trim();
   const valid = isExportableMonth(chosen, maxMonth);
 
+  // CSV 与 Excel 两个按钮共用这一个下载状态：任一在下载中两个都不可点。
   const exporting = useMutation({
-    mutationFn: (value: string) => exportCustomerUsageSummary(value),
+    mutationFn: ({ month: value, format }: { month: string; format: ExportFormat }) =>
+      exportCustomerUsageSummary(value, undefined, format),
   });
+  // 加载状态只显示在被点的那个按钮上。
+  const pendingFormat = exporting.isPending ? exporting.variables.format : null;
 
-  const startExport = (): void => {
+  const startExport = (format: ExportFormat): void => {
     // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
     if (!valid || exporting.isPending) {
       return;
     }
-    exporting.mutate(chosen);
+    exporting.mutate({ month: chosen, format });
   };
 
   const changeMonth = (value: string): void => {
@@ -305,8 +313,19 @@ function MonthlySummaryExport() {
             status={valid ? "" : "error"}
           />
         </Space>
-        <Button onClick={startExport} loading={exporting.isPending} disabled={!valid || exporting.isPending}>
+        <Button
+          onClick={() => startExport("csv")}
+          loading={pendingFormat === "csv"}
+          disabled={!valid || exporting.isPending}
+        >
           {t("portal.usage.monthly.button")}
+        </Button>
+        <Button
+          onClick={() => startExport("xlsx")}
+          loading={pendingFormat === "xlsx"}
+          disabled={!valid || exporting.isPending}
+        >
+          {t("portal.usage.monthly.buttonXlsx")}
         </Button>
       </Space>
       {valid ? null : (
@@ -393,13 +412,15 @@ export function UsagePage() {
   const exporting = useMutation({
     mutationFn: (query: CustomerUsageExportQuery) => exportCustomerUsageEvents(query),
   });
+  // CSV 与 Excel 两个按钮共用这一个下载状态；加载状态只显示在被点的那个按钮上。
+  const pendingFormat = exporting.isPending ? (exporting.variables.format ?? "csv") : null;
 
-  const startExport = (): void => {
+  const startExport = (format: ExportFormat): void => {
     // 按钮在导出中已禁用；这里再挡一次，连点也只发一个请求。
     if (exportQuery === null || exporting.isPending) {
       return;
     }
-    exporting.mutate(exportQuery);
+    exporting.mutate({ ...exportQuery, format });
   };
 
   // 上一次导出的失败说的是旧的筛选条件，换条件时收起。只收失败：导出中 reset 会让按钮提前恢复可点。
@@ -533,11 +554,18 @@ export function UsagePage() {
         </Button>
       ) : null}
       <Button
-        onClick={startExport}
-        loading={exporting.isPending}
+        onClick={() => startExport("csv")}
+        loading={pendingFormat === "csv"}
         disabled={exportQuery === null || exporting.isPending}
       >
         {t("portal.usage.export.button")}
+      </Button>
+      <Button
+        onClick={() => startExport("xlsx")}
+        loading={pendingFormat === "xlsx"}
+        disabled={exportQuery === null || exporting.isPending}
+      >
+        {t("portal.usage.export.buttonXlsx")}
       </Button>
     </Space>
   );
