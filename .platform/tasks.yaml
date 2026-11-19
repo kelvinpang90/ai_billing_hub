@@ -13651,7 +13651,7 @@ tasks:
     title: Excel 导出第四层：管理端毛利分析导出接口加 xlsx 格式参数
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「参数 format」管理端一行与「各接口的改法」：AIH-TASK-223 的 GET /api/v1/admin/usage-analytics/export 加查询参数 format（在 require_admin 与 parse_analytics_query 之后判），xlsx 时在同一个 try 里改用 write_xlsx 与 xlsx_response；app/schemas/usage_analytics.py 加 10 个整数列的常量；docs/api.md 的导出小节补 xlsx。不改客户接口与前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-236
     acceptance_criteria:
