@@ -13846,7 +13846,7 @@ tasks:
     title: Excel 导出第七层：管理端用量分析页加导出 Excel 按钮
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」：frontend/src/api/adminUsageAnalytics.ts 中 AIH-TASK-224 的导出地址与下载函数加可选 format，管理端用量分析页的 Export CSV 右边加一个 Excel 按钮，文案进 i18n；验收脚本加一个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-239
     acceptance_criteria:
