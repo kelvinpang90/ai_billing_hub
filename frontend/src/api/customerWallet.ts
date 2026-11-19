@@ -16,7 +16,7 @@
  */
 
 import { apiGet } from "./client";
-import { downloadFile } from "./download";
+import { downloadFile, withExportFormat, type ExportFormat } from "./download";
 
 export const CUSTOMER_WALLET_URL = "/api/v1/customer/wallet";
 export const CUSTOMER_WALLET_TRANSACTIONS_URL = "/api/v1/customer/wallet/transactions";
@@ -112,21 +112,23 @@ export function listCustomerTransactions(
 export interface CustomerTransactionExportQuery {
   fromDate: string;
   toDate: string;
+  /** 文件格式（AIH-TASK-239）；不带时 `csv`，地址与以前逐字相同。 */
+  format?: ExportFormat;
 }
 
-/** 导出的地址（含查询串）：只有 `from_date` 与 `to_date`。 */
+/** 导出的地址（含查询串）：只有 `from_date` 与 `to_date`；`xlsx` 时末尾加 `format=xlsx`。 */
 export function customerTransactionExportUrl(query: CustomerTransactionExportQuery): string {
   const params = new URLSearchParams({ from_date: query.fromDate, to_date: query.toDate });
-  return `${CUSTOMER_WALLET_TRANSACTIONS_EXPORT_URL}?${params.toString()}`;
+  return withExportFormat(`${CUSTOMER_WALLET_TRANSACTIONS_EXPORT_URL}?${params.toString()}`, query.format ?? "csv");
 }
 
-/** 后端取不到文件名时的兜底，与后端同一规则：`wallet-transactions_<from_date>_<to_date>.csv`。 */
+/** 后端取不到文件名时的兜底，与后端同一规则：`wallet-transactions_<from_date>_<to_date>.csv`（xlsx 时 `.xlsx`）。 */
 export function customerTransactionExportFilename(query: CustomerTransactionExportQuery): string {
-  return `wallet-transactions_${query.fromDate}_${query.toDate}.csv`;
+  return `wallet-transactions_${query.fromDate}_${query.toDate}.${query.format ?? "csv"}`;
 }
 
 /**
- * 把区间内记账的全部流水导出成一个 CSV 并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 行）、
+ * 把区间内记账的全部流水导出成一个 CSV（`format: "xlsx"` 时 Excel）并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 行）、
  * `QUERY_TOO_BROAD`（超过执行时间预算）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带 `request_id`。
  */
 export function exportCustomerTransactions(query: CustomerTransactionExportQuery, signal?: AbortSignal): Promise<void> {

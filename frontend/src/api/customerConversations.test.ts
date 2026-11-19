@@ -240,4 +240,41 @@ describe("exportCustomerConversations", () => {
     const [, config] = get.mock.calls[0] ?? [];
     expect(config).toMatchObject({ responseType: "blob", signal: controller.signal });
   });
+
+  it("adds format=xlsx at the end only for Excel and leaves the CSV address as it was (AIH-TASK-239)", async () => {
+    const query = { fromDate: "2026-10-01", toDate: "2026-10-25", projectId: PROJECT_ID };
+
+    expect(customerConversationsExportUrl(query)).toBe(
+      `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${PROJECT_ID}`,
+    );
+    expect(customerConversationsExportUrl({ ...query, format: "csv" })).toBe(
+      `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${PROJECT_ID}`,
+    );
+    expect(customerConversationsExportUrl({ ...query, format: "xlsx" })).toBe(
+      `${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&project_id=${PROJECT_ID}&format=xlsx`,
+    );
+
+    stubDownload();
+    const get = vi.spyOn(client, "get").mockResolvedValue(file());
+
+    await exportCustomerConversations({ fromDate: "2026-10-01", toDate: "2026-10-25", format: "xlsx" });
+
+    expect(get).toHaveBeenCalledTimes(1);
+    const [url, config] = get.mock.calls[0] ?? [];
+    expect(url).toBe(`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&format=xlsx`);
+    expect(config).toMatchObject({ responseType: "blob" });
+    expect(downloads).toEqual(["conversations_2026-10-01_2026-10-25.xlsx"]);
+  });
+
+  it("switches the fallback file name to .xlsx only for Excel (AIH-TASK-239)", () => {
+    const query = { fromDate: "2026-10-01", toDate: "2026-10-31" };
+
+    expect(customerConversationsExportFilename(query)).toBe("conversations_2026-10-01_2026-10-31.csv");
+    expect(customerConversationsExportFilename({ ...query, format: "csv" })).toBe(
+      "conversations_2026-10-01_2026-10-31.csv",
+    );
+    expect(customerConversationsExportFilename({ ...query, format: "xlsx" })).toBe(
+      "conversations_2026-10-01_2026-10-31.xlsx",
+    );
+  });
 });

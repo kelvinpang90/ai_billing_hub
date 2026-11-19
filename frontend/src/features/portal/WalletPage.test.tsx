@@ -11,6 +11,9 @@
  * 导出区（AIH-TASK-118）同样在 `client.get` 上按路径回应：成功回一个 blob 文件，失败回一个响应体是 blob 的
  * `AxiosError`（与浏览器里 `responseType: "blob"` 的失败同形）。jsdom 没有对象 URL，也不会真下载：装上替身、拦下
  * 链接的点击，只记录下载的文件名。「现在」用 `vi.useFakeTimers({ toFake: ["Date"] })` 固定：只假 `Date`，定时器照常走。
+ *
+ * 「Export Excel」（AIH-TASK-239）覆盖设计闸门 #753 v1 §7「前端按钮」：两个按钮都在、点 Excel 用当前区间与 `format=xlsx`、
+ * 下载中两个都不可点且加载状态在被点的那个上、失败文案与 CSV 相同并按原规则收起、区间无效时两个都不可用。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -871,5 +874,149 @@ describe("WalletPage export", () => {
       expect(screen.queryByText("Your transactions could not be exported.")).not.toBeInTheDocument();
     });
     expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+  });
+
+  describe("Excel (AIH-TASK-239)", () => {
+    const XLSX_NAME = /Export Excel/;
+
+    it("puts Export Excel right of Export CSV inside the export area, both usable", async () => {
+      serve(wallet(), () => page([row()]));
+      renderPage();
+      await screen.findByText("AI usage");
+
+      const area = screen.getByRole("region", { name: "Export transactions" });
+      const csv = within(area).getByRole("button", { name: EXPORT_NAME });
+      const xlsx = within(area).getByRole("button", { name: XLSX_NAME });
+      expect(within(area).getAllByRole("button", { name: XLSX_NAME })).toHaveLength(1);
+      expect(csv).toBeEnabled();
+      expect(xlsx).toBeEnabled();
+      expect(csv.compareDocumentPosition(xlsx) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const transactions = screen.getByRole("region", { name: "Transactions" });
+      expect(within(transactions).queryByRole("button", { name: XLSX_NAME })).not.toBeInTheDocument();
+    });
+
+    it("exports the chosen range with format=xlsx and saves an .xlsx file", async () => {
+      const user = userEvent.setup();
+      const name = "wallet-transactions_2026-07-27_2026-10-26.xlsx";
+      const get = serve(wallet(), () => page([row()]), () => file(name));
+      renderPage();
+      await screen.findByText("AI usage");
+
+      setDate(FROM, "2026-07-27");
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      await waitFor(() => {
+        expect(downloads).toEqual([name]);
+      });
+      expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-07-27&to_date=2026-10-26&format=xlsx`]);
+      for (const [url] of get.mock.calls) {
+        expect(url).not.toContain("/api/v1/admin/");
+      }
+    });
+
+    it("disables both buttons while exporting and shows loading only on the one clicked", async () => {
+      const user = userEvent.setup();
+      const get = serve(wallet(), () => page([row()]), () => PENDING);
+      renderPage();
+      await screen.findByText("AI usage");
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      });
+      const csv = screen.getByRole("button", { name: EXPORT_NAME });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+      expect(csv).toBeDisabled();
+      expect(within(xlsx).getByRole("img", { name: "loading" })).toBeInTheDocument();
+      expect(within(csv).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+      fireEvent.click(csv);
+      fireEvent.click(xlsx);
+      expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-26&format=xlsx`]);
+    });
+
+    it("shows loading only on Export CSV when that is the one clicked", async () => {
+      const user = userEvent.setup();
+      serve(wallet(), () => page([row()]), () => PENDING);
+      renderPage();
+      await screen.findByText("AI usage");
+
+      await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      });
+      const csv = screen.getByRole("button", { name: EXPORT_NAME });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+      expect(within(csv).getByRole("img", { name: "loading" })).toBeInTheDocument();
+      expect(within(xlsx).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+    });
+
+    it.each<[number, string, string]>([
+      [422, "EXPORT_TOO_LARGE", "This export has more than 20,000 rows. Choose a shorter date range, then try again."],
+      [
+        422,
+        "QUERY_TOO_BROAD",
+        "This export covers too many transactions to finish in time. Choose a shorter date range, then try again.",
+      ],
+      [503, "EXPORT_BUSY", "Another export is in progress. Wait a few seconds, then try again."],
+    ])("explains a %s %s with the same words as for CSV", async (status, code, text) => {
+      const user = userEvent.setup();
+      serve(wallet(), () => page([row()]), () => failure(status, code, "req-export-specific"));
+      renderPage();
+      await screen.findByText("AI usage");
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      expect(await screen.findByText(text)).toBeInTheDocument();
+      expect(screen.queryByText("req-export-specific")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeEnabled();
+      expect(downloads).toEqual([]);
+    });
+
+    it("shows any other failure with its request id and clears it when the range changes", async () => {
+      const user = userEvent.setup();
+      serve(wallet(), () => page([row()]), () => failure(500, "INTERNAL_ERROR", "req-export-500"));
+      renderPage();
+      await screen.findByText("AI usage");
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      expect(await screen.findByText("Your transactions could not be exported.")).toBeInTheDocument();
+      expect(screen.getByText("req-export-500")).toBeInTheDocument();
+      // 失败文案不提格式。
+      const area = screen.getByRole("region", { name: "Export transactions" });
+      expect(within(area).getByRole("alert").textContent ?? "").not.toMatch(/excel|xlsx|csv/i);
+
+      setDate(FROM, "2026-10-02");
+
+      await waitFor(() => {
+        expect(screen.queryByText("Your transactions could not be exported.")).not.toBeInTheDocument();
+      });
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeEnabled();
+    });
+
+    it.each<[string, string, string]>([
+      ["reversed", "2026-10-20", "2026-10-10"],
+      ["longer than 92 days", "2026-07-26", "2026-10-26"],
+      ["incomplete", "", "2026-10-10"],
+      ["before 2020-01-01", "2019-12-31", "2020-01-31"],
+    ])("cannot export with either button when the range is %s", async (_, from, to) => {
+      const get = serve(wallet(), () => page([row()]), () => file());
+      renderPage();
+      await screen.findByText("AI usage");
+
+      setDate(FROM, from);
+      setDate(TO, to);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      });
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: XLSX_NAME }));
+      expect(exportUrls(get)).toEqual([]);
+      expect(downloads).toEqual([]);
+    });
   });
 });

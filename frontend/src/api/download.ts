@@ -33,6 +33,20 @@ export const DOWNLOAD_TIMEOUT_MS = 120_000;
  */
 export const REVOKE_DELAY_MS = 1_000;
 
+/** 导出文件的格式（AIH-TASK-238；设计闸门 #753 v1 §2「门户与管理端页面」）。缺省 `csv`。 */
+export type ExportFormat = "csv" | "xlsx";
+
+/**
+ * 给导出地址带上格式：`csv` 原样返回（地址与不带格式时逐字相同），`xlsx` 在查询串末尾加 `format=xlsx`
+ * （docs/api.md「客户导出」）。
+ */
+export function withExportFormat(url: string, format: ExportFormat): string {
+  if (format === "csv") {
+    return url;
+  }
+  return `${url}${url.includes("?") ? "&" : "?"}format=xlsx`;
+}
+
 /**
  * 从 `Content-Disposition` 取文件名：先认 RFC 5987 的 `filename*=UTF-8''…`，再认 `filename="…"` 或不带引号的
  * `filename=…`。取不到、或取到的是空串时 `null`。只取最后一段（去掉路径分隔符之前的部分），不让响应头决定目录。
