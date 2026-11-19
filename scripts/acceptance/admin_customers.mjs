@@ -53,6 +53,9 @@
  * AIH-TASK-238 加了门户用量页两个导出 Excel 按钮的一个只读步骤（check_portal_usage_xlsx），排在 login_customer 之后，经门户
  * 导航自己进用量页，只查「Export Excel」「Export monthly summary (Excel)」各恰好一个且可用、不点（设计闸门 #753 v1 §2「浏览器
  * 验收」、§11）；check_portal_usage_export 与 check_portal_monthly_export 按文字全等找按钮，不受新按钮影响、行为不变。
+ * AIH-TASK-239 加了门户钱包页与会话页导出 Excel 按钮的两个只读步骤（check_portal_wallet_xlsx、check_portal_conv_xlsx），都排在
+ * login_customer 之后，各自经门户导航进页，只查「Export Excel」恰好一个且可用、不点（设计闸门 #753 v1 §2「浏览器验收」、§11）；
+ * check_portal_wallet_export 与 check_portal_conv_export 按文字全等找「Export CSV」，不受新按钮影响、行为不变。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -133,6 +136,9 @@
  *   （不翻页）、不点表格的任何一行或会话 ID 链接（不跳到用量页）、不点任何别的按钮与链接。
  * - 门户会话页的导出按钮（check_portal_conv_export）只查不点：停留在 check_portal_conversations 打开的会话页，不点
  *   「Export CSV」（验收不下载文件）、不动任何筛选、不点任何别的按钮与链接，不填也不提交任何表单。
+ * - 门户会话页的导出 Excel 按钮（check_portal_conv_xlsx）只点门户导航里的「Conversations」（href 为 /portal/conversations）
+ *   这一个链接：不点「Export Excel」（验收不下载文件），也不点「Export CSV」「Apply filters」「Reset」「Older」「Newest」、
+ *   表格的任何一行或会话 ID 链接、任何别的按钮与链接；不动日期与项目筛选，不填也不提交任何表单。
  * - 门户通知页（check_portal_notifications）只点门户导航里的「Notifications」（href 为 /portal/notifications）这一个链接：
  *   不点「Mark as read」「Mark all as read」（标已读会写数据）、不点「Load more」（不翻页）、不点任何别的按钮与链接，
  *   不填也不提交任何表单。
@@ -154,6 +160,9 @@
  *   （不翻页）、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单。
  * - 门户钱包页的导出区（check_portal_wallet_export）只查不点：停留在 check_portal_wallet 打开的钱包页，不点「Export CSV」
  *   （验收不下载文件）、不动导出区的日期、不点「Older」「Newest」或任何别的按钮与链接，不填也不提交任何表单。
+ * - 门户钱包页导出区的导出 Excel 按钮（check_portal_wallet_xlsx）只点门户导航里的「Wallet」（href 为 /portal/wallet）这一个
+ *   链接：不点「Export Excel」（验收不下载文件），也不点「Export CSV」「Older」「Newest」或任何别的按钮与链接；不动导出区的
+ *   日期，不填也不提交任何表单。只把导出区滚动到视口内。
  * - 只读：只点「Continue」「Verify」（登录）、顶栏「Customers」、列表的「Next Page」（翻页）、夹具客户的公司名
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
@@ -516,6 +525,16 @@
  *                   时间本月 1 日到今天，按钮应当可用）。找不到按钮或导出区是 element_missing，按钮在但一直不可用或不止一个是
  *                   assertion_failed。**不点**这个按钮（验收不下载文件）、不动日期、不提交任何表单。报到前把导出区滚动到视口里
  *                   （规则同 check_portal_wallet）
+ *   check_portal_wallet_xlsx
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Wallet」链接（portal.nav.wallet，
+ *                   href 为 /portal/wallet）进钱包页，不依赖别的步骤停在哪个页面（同 check_portal_receipts 的写法）。导出区不发请求：
+ *                   不等任何数据块，也不以余额卡或流水一块的加载状态判 page_error。页面落定只看：地址是 /portal/wallet，门户外壳在、
+ *                   管理端顶栏不在，导出区（role=region、aria-label 为「Export transactions」）在。找到导出区即把它滚动到视口里
+ *                   （规则同 check_portal_wallet），再断言区里文字恰好为「Export Excel」（en.json 的 portal.wallet.export.buttonXlsx）
+ *                   的按钮恰好一个且可用（没有 disabled 属性、aria-disabled 不是 true；导出区用默认的日期区间，有效）。找不到按钮或
+ *                   导出区是 element_missing，按钮在但一直不可用或不止一个是 assertion_failed。**不点**这个按钮（验收不下载文件），
+ *                   也不点「Export CSV」或任何别的按钮与链接、不动日期、不填也不提交任何表单。报到前再把导出区滚动到视口里一次
+ *                   （余额卡与流水落定时可能把它挤出视口）
  *   check_portal_dashboard
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed），且要排在 check_portal_wallet 之前：它不自己
  *                   导航、不点任何链接，只认当前页面是门户首页（地址是 /portal，否则 navigation_failed）。页面落定：门户外壳
@@ -600,6 +619,17 @@
  *                   页面用默认的日期区间，按钮应当可用）。找不到按钮是 element_missing，按钮在但一直不可用或不止一个是
  *                   assertion_failed。**不点**这个按钮（验收不下载文件）、不改筛选、不提交任何表单。报到前把会话一块滚动到视口里
  *                   （规则同 check_portal_wallet）
+ *   check_portal_conv_xlsx
+ *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Conversations」链接
+ *                   （portal.nav.conversations，href 为 /portal/conversations）进会话页，不依赖别的步骤停在哪个页面（同
+ *                   check_portal_receipts 的写法）；用页面默认的日期区间，不改任何筛选。页面落定：地址是 /portal/conversations，门户
+ *                   外壳在、管理端顶栏不在，会话一块（role=region、aria-label 为「Conversations」）不再显示
+ *                   portal.conversations.loading；显示 portal.conversations.queryTooBroad 是 assertion_failed，显示
+ *                   portal.conversations.loadFailed 是 page_error（同 check_portal_conversations 的分类）。不读任何响应。之后：一块里
+ *                   文字恰好为「Export Excel」（en.json 的 portal.conversations.export.buttonXlsx）的按钮恰好一个且可用（没有 disabled
+ *                   属性、aria-disabled 不是 true）。找不到按钮是 element_missing，按钮在但一直不可用或不止一个是 assertion_failed。
+ *                   **不点**这个按钮（验收不下载文件），也不点「Export CSV」或任何别的按钮与链接、不改筛选、不填也不提交任何表单。
+ *                   报到前把会话一块滚动到视口里（规则同 check_portal_wallet）
  *   check_portal_notifications
  *                   本次运行跑过 login_customer 才能跑（否则 assertion_failed）。点门户导航里的「Notifications」链接（en.json 的
  *                   portal.nav.notifications，href 为 paths.ts 的 portalNotifications，即 /portal/notifications）进通知页。页面
@@ -944,6 +974,7 @@ const TEXT = {
   portalTxEventId: "Event ID", // portal.wallet.transactions.field.eventId
   portalWalletExportTitle: "Export transactions", // portal.wallet.export.title —— 钱包页导出区的 aria-label
   portalWalletExport: "Export CSV", // portal.wallet.export.button —— 钱包页导出区的导出按钮，只查不点
+  portalWalletExportXlsx: "Export Excel", // portal.wallet.export.buttonXlsx —— 钱包页导出区的导出 Excel 按钮，只查不点
   portalRecentTitle: "Recent transactions", // portal.home.recentTransactions.title —— 门户首页最近流水一块的 aria-label
   portalNavUsage: "Usage", // portal.nav.usage —— 门户导航的用量项
   portalUsageTitle: "Usage", // portal.usage.title —— 用量一块的 aria-label
@@ -973,6 +1004,8 @@ const TEXT = {
   portalConversationsId: "Conversation ID", // portal.conversations.field.conversationId —— 会话表格的列头
   portalConversationsCharged: "Charged (MYR)", // portal.conversations.field.chargedAmount
   portalConversationsExport: "Export CSV", // portal.conversations.export.button —— 会话页的导出按钮，只查不点
+  // portal.conversations.export.buttonXlsx —— 会话页的导出 Excel 按钮，只查不点
+  portalConversationsExportXlsx: "Export Excel",
   portalNavNotifications: "Notifications", // portal.nav.notifications —— 门户导航的通知项
   portalNavUnreadCount: "Unread notifications", // portal.nav.unreadCount —— 导航上未读数的 aria-label
   portalNotificationsTitle: "Notifications", // portal.notifications.title —— 通知一块的 aria-label
@@ -5264,6 +5297,99 @@ function probePortalConvExport(lib, T) {
   return out;
 }
 
+/**
+ * 门户钱包页导出区「Excel」按钮的状态（check_portal_wallet_xlsx）：门户外壳、管理端顶栏在不在；导出区（role=region、
+ * aria-label 为「Export transactions」）在不在；区里文字恰好为「Export Excel」的按钮有几个，恰好一个时它是否可用（没有
+ * disabled 属性、aria-disabled 不是 true）。不看余额卡与流水一块（它们的加载状态与导出区无关）。按钮在导出中会多一个
+ * loading 图标，图标没有文字，不影响按文字找。只读 DOM，不点、不填、不动日期。
+ */
+function probePortalWalletXlsx(lib, T) {
+  const header = document.querySelector("header");
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalWalletExportTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    buttons: 0,
+    enabled: false,
+  };
+  if (region === null) {
+    return out;
+  }
+  const buttons = [...region.querySelectorAll("button")].filter(
+    (el) => lib.norm(el.textContent) === T.portalWalletExportXlsx,
+  );
+  out.buttons = buttons.length;
+  if (buttons.length === 1) {
+    const button = buttons[0];
+    out.enabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  }
+  return out;
+}
+
+/**
+ * 门户会话页「Excel」按钮的状态（check_portal_conv_xlsx）：门户外壳、管理端顶栏在不在；会话一块（role=region、aria-label
+ * 为「Conversations」）在不在、在加载、加载失败、查询过宽、空状态、有没有会话表格；一块里文字恰好为「Export Excel」的按钮
+ * 有几个，恰好一个时它是否可用（没有 disabled 属性、aria-disabled 不是 true）。按钮在导出中会多一个 loading 图标，图标
+ * 没有文字，不影响按文字找。只读 DOM，不点、不填。
+ */
+function probePortalConvXlsx(lib, T) {
+  const header = document.querySelector("header");
+  const has = (root, text) =>
+    [...root.querySelectorAll("*")].some((el) => el.childElementCount === 0 && lib.norm(el.textContent) === text);
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.portalConversationsTitle,
+    ) ?? null;
+  const out = {
+    ...lib.common(T),
+    portalShell:
+      header !== null &&
+      lib.button(T.navSignOut, header) !== null &&
+      [...header.querySelectorAll("*")].some(
+        (el) => el.childElementCount === 0 && lib.norm(el.textContent) === T.portalShellTitle,
+      ),
+    adminLayout: lib.layout(T),
+    region: region !== null,
+    busy: false,
+    failed: false,
+    tooBroad: false,
+    empty: false,
+    table: false,
+    buttons: 0,
+    enabled: false,
+  };
+  if (region === null) {
+    return out;
+  }
+  out.busy = region.querySelector('[aria-busy="true"]') !== null || has(region, T.portalConversationsLoading);
+  out.failed = has(region, T.portalConversationsLoadFailed);
+  out.tooBroad = has(region, T.portalConversationsTooBroad);
+  out.empty = has(region, T.portalConversationsEmpty);
+  out.table = [...region.querySelectorAll("table")].some((table) => {
+    const heads = [...table.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+    return heads.includes(T.portalConversationsId) && heads.includes(T.portalConversationsCharged);
+  });
+  const buttons = [...region.querySelectorAll("button")].filter(
+    (el) => lib.norm(el.textContent) === T.portalConversationsExportXlsx,
+  );
+  out.buttons = buttons.length;
+  if (buttons.length === 1) {
+    const button = buttons[0];
+    out.enabled = !button.disabled && button.getAttribute("aria-disabled") !== "true";
+  }
+  return out;
+}
+
 /** 门户导航里文字为「Conversations」、href 恰好为 /portal/conversations 的链接。只点这一个。 */
 function clickPortalNavConversations(lib, T) {
   const header = document.querySelector("header");
@@ -8568,6 +8694,90 @@ async function stepCheckPortalWalletExport(ctx) {
   }
 }
 
+/** 把钱包页导出区滚进视口（规则同 check_portal_wallet）；找不到导出区是 element_missing，滚不进视口是 assertion_failed。 */
+async function scrollPortalWalletExportIntoView() {
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_WALLET_EXPORT_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_WALLET_EXPORT_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepCheckPortalWalletXlsx(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开钱包页：只点「Wallet」这一个链接，不依赖别的步骤停在哪个页面；之后不动导出区的日期。
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavWallet, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 钱包页落定到导出区出现为止：导出区不发请求，不等余额卡与流水，也不看它们的加载状态。
+  const opened = await waitFor(
+    () => evaluate(probePortalWalletXlsx, TEXT),
+    (s) =>
+      s.appError || s.notFound || s.adminLayout || (s.path === TEXT.portalWalletPath && s.portalShell && s.region),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalWalletPath) {
+    throw fail("navigation_failed");
+  }
+  if (page.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // 先把导出区滚进视口，再断言按钮。只滚动，不点任何东西。
+  await scrollPortalWalletExportIntoView();
+
+  // 「Export Excel」恰好一个且可用（导出区用默认的日期区间，有效）。只查不点。
+  const settled = await waitFor(
+    () => evaluate(probePortalWalletXlsx, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalWalletPath ||
+      (s.portalShell && s.region && s.buttons === 1 && s.enabled),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    // 按钮在但一直不可用（或不止一个）是断言失败；找不到按钮或导出区是元素缺失。
+    throw fail(settled.value !== null && settled.value.buttons > 0 ? "assertion_failed" : "element_missing");
+  }
+  const shown = settled.value;
+  if (shown.appError) {
+    throw fail("page_error");
+  }
+  if (shown.notFound || shown.path !== TEXT.portalWalletPath) {
+    throw fail("navigation_failed");
+  }
+  if (shown.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // Worker 在报到后截图：余额卡与流水落定时可能把导出区挤出视口，报到前再滚一次。只滚动。
+  await scrollPortalWalletExportIntoView();
+}
+
 /**
  * 门户首页的余额卡与最近流水用 probePortalWallet 读：同一张余额卡、同一张流水表，只是流水那一块的 aria-label 是
  * 「Recent transactions」。换掉这一个文案再送进页面，不另写一份同样的探测函数。
@@ -9366,6 +9576,90 @@ async function stepCheckPortalConvExport(ctx) {
   }
 
   // Worker 在报到后截图：把会话一块（按钮在它的工具栏里）滚进视口。只滚动，不点导出按钮或任何别的东西。
+  if ((await evaluate(scrollPortalWalletIntoView, PORTAL_CONVERSATIONS_SCROLL_TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(
+    () => evaluate(portalWalletInView, PORTAL_CONVERSATIONS_SCROLL_TEXT),
+    (v) => v === true,
+    SCROLL_WAIT_MS,
+  );
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepCheckPortalConvXlsx(ctx) {
+  if (ctx.customerLoginSeq === null) {
+    throw fail("assertion_failed");
+  }
+
+  // 经门户导航打开会话页：只点「Conversations」这一个链接，不依赖别的步骤停在哪个页面；之后不碰筛选表单。
+  const clicked = await waitFor(
+    () => evaluate(clickPortalNavConversations, TEXT),
+    (v) => v === true,
+    ELEMENT_WAIT_MS,
+  );
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+
+  // 会话页落定：门户外壳在，会话一块不在加载，且是某一种终态。
+  const opened = await waitFor(
+    () => evaluate(probePortalConvXlsx, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      (s.path === TEXT.portalConversationsPath &&
+        s.portalShell &&
+        s.region &&
+        !s.busy &&
+        (s.failed || s.tooBroad || s.empty || s.table)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  const page = opened.value;
+  if (page.appError || page.failed) {
+    throw fail("page_error");
+  }
+  if (page.notFound || page.path !== TEXT.portalConversationsPath) {
+    throw fail("navigation_failed");
+  }
+  // 分类同 check_portal_conversations：默认区间的会话聚合超出后端的执行预算是断言失败。
+  if (page.adminLayout || page.tooBroad) {
+    throw fail("assertion_failed");
+  }
+
+  // 「Export Excel」恰好一个且可用（默认日期区间有效）。只查不点。
+  const settled = await waitFor(
+    () => evaluate(probePortalConvXlsx, TEXT),
+    (s) =>
+      s.appError ||
+      s.notFound ||
+      s.adminLayout ||
+      s.path !== TEXT.portalConversationsPath ||
+      (s.portalShell && s.region && !s.busy && s.buttons === 1 && s.enabled),
+    ELEMENT_WAIT_MS,
+  );
+  if (!settled.ok) {
+    // 按钮在但一直不可用（或不止一个）是断言失败；找不到按钮或会话一块是元素缺失。
+    throw fail(settled.value !== null && settled.value.buttons > 0 ? "assertion_failed" : "element_missing");
+  }
+  const shown = settled.value;
+  if (shown.appError) {
+    throw fail("page_error");
+  }
+  if (shown.notFound || shown.path !== TEXT.portalConversationsPath) {
+    throw fail("navigation_failed");
+  }
+  if (shown.adminLayout) {
+    throw fail("assertion_failed");
+  }
+
+  // Worker 在报到后截图：把会话一块（按钮在它的工具栏里）滚进视口。只滚动，不点按钮或任何别的东西。
   if ((await evaluate(scrollPortalWalletIntoView, PORTAL_CONVERSATIONS_SCROLL_TEXT)) !== true) {
     throw fail("element_missing");
   }
@@ -10181,6 +10475,7 @@ const STEPS = {
   check_portal_home: stepCheckPortalHome,
   check_portal_wallet: stepCheckPortalWallet,
   check_portal_wallet_export: stepCheckPortalWalletExport,
+  check_portal_wallet_xlsx: stepCheckPortalWalletXlsx,
   check_portal_dashboard: stepCheckPortalDashboard,
   check_portal_usage: stepCheckPortalUsage,
   check_portal_usage_export: stepCheckPortalUsageExport,
@@ -10188,6 +10483,7 @@ const STEPS = {
   check_portal_usage_xlsx: stepCheckPortalUsageXlsx,
   check_portal_conversations: stepCheckPortalConversations,
   check_portal_conv_export: stepCheckPortalConvExport,
+  check_portal_conv_xlsx: stepCheckPortalConvXlsx,
   check_portal_notifications: stepCheckPortalNotifications,
   check_portal_statements: stepCheckPortalStatements,
   check_portal_statement_pdf: stepCheckPortalStatementPdf,
@@ -10230,8 +10526,8 @@ async function main() {
      * check_portal_conversations、check_portal_notifications、check_portal_statements、check_portal_topup 与
      * check_portal_payments 要求它不为 null（各自再按点击「Wallet」「Usage」「Conversations」「Notifications」「Statements」
      * 「Top up」「Payments」之前的序号截断）；check_portal_receipts 与 check_portal_statement_pdf 同样要求它不为 null，
-     * 并直接按它截断列表请求（check_portal_statement_pdf 的详情请求另按点第一行之前的序号截断）；check_portal_usage_xlsx
-     * 只要求它不为 null（不读任何响应）。
+     * 并直接按它截断列表请求（check_portal_statement_pdf 的详情请求另按点第一行之前的序号截断）；check_portal_usage_xlsx、
+     * check_portal_wallet_xlsx 与 check_portal_conv_xlsx 只要求它不为 null（不读任何响应）。
      * 本次运行没跑过 login_customer、或它没成功时为 null。
      */
     customerLoginSeq: null,

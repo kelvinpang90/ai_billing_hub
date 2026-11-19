@@ -20,7 +20,7 @@
  */
 
 import { apiGet } from "./client";
-import { downloadFile } from "./download";
+import { downloadFile, withExportFormat, type ExportFormat } from "./download";
 
 export const CUSTOMER_CONVERSATIONS_URL = "/api/v1/customer/conversations";
 export const CUSTOMER_CONVERSATIONS_EXPORT_URL = "/api/v1/customer/conversations/export";
@@ -112,9 +112,11 @@ export interface CustomerConversationExportQuery {
   fromDate: string;
   toDate: string;
   projectId?: string | null;
+  /** 文件格式（AIH-TASK-239）；不带时 `csv`，地址与以前逐字相同。 */
+  format?: ExportFormat;
 }
 
-/** 导出的地址（含查询串）：按 `from_date`、`to_date`、`project_id` 的顺序，不带的不放。 */
+/** 导出的地址（含查询串）：按 `from_date`、`to_date`、`project_id` 的顺序，不带的不放；`xlsx` 时末尾加 `format=xlsx`。 */
 export function customerConversationsExportUrl(query: CustomerConversationExportQuery): string {
   const params = new URLSearchParams();
   if (present(query.fromDate)) {
@@ -127,16 +129,17 @@ export function customerConversationsExportUrl(query: CustomerConversationExport
     params.set("project_id", query.projectId);
   }
   const search = params.toString();
-  return search === "" ? CUSTOMER_CONVERSATIONS_EXPORT_URL : `${CUSTOMER_CONVERSATIONS_EXPORT_URL}?${search}`;
+  const url = search === "" ? CUSTOMER_CONVERSATIONS_EXPORT_URL : `${CUSTOMER_CONVERSATIONS_EXPORT_URL}?${search}`;
+  return withExportFormat(url, query.format ?? "csv");
 }
 
-/** 后端取不到文件名时的兜底，与后端同一规则：`conversations_<from_date>_<to_date>.csv`。 */
+/** 后端取不到文件名时的兜底，与后端同一规则：`conversations_<from_date>_<to_date>.csv`（xlsx 时 `.xlsx`）。 */
 export function customerConversationsExportFilename(query: CustomerConversationExportQuery): string {
-  return `conversations_${query.fromDate}_${query.toDate}.csv`;
+  return `conversations_${query.fromDate}_${query.toDate}.${query.format ?? "csv"}`;
 }
 
 /**
- * 把区间内全部会话导出成一个 CSV 并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 个会话）、
+ * 把区间内全部会话导出成一个 CSV（`format: "xlsx"` 时 Excel）并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 个会话）、
  * `QUERY_TOO_BROAD`（超过执行时间预算）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带 `request_id`。
  */
 export function exportCustomerConversations(
