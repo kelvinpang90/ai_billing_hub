@@ -98,6 +98,15 @@ USAGE_EXPORT_TEXT_COLUMNS: Final = frozenset(
         "unit",
     }
 )
+# xlsx 里写数字单元格的整数列（设计 #753 §2「单元格类型」）；其余非文本列在 xlsx 里是文本。
+USAGE_EXPORT_INTEGER_COLUMNS: Final = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    }
+)
 # 唯一改名的列：导出列名 → 白名单视图的键。
 _USAGE_EXPORT_RENAMED: Final = {"occurred_at_utc": "occurred_at"}
 
@@ -110,6 +119,8 @@ USAGE_SUMMARY_EXPORT_COLUMNS: Final = (
 )
 # 值只可能是程序生成的日期或 `TOTAL`，仍按「文本列一律防护」声明。
 USAGE_SUMMARY_EXPORT_TEXT_COLUMNS: Final = frozenset({"date_myt"})
+# xlsx 里写数字单元格的整数列（设计 #753 §2「单元格类型」）。
+USAGE_SUMMARY_EXPORT_INTEGER_COLUMNS: Final = frozenset({"request_count", "conversation_count"})
 USAGE_SUMMARY_EXPORT_TOTAL_LABEL: Final = "TOTAL"
 
 _CURSOR_TIME_FORMAT: Final = "%Y-%m-%dT%H:%M:%S.%f"
@@ -442,9 +453,11 @@ __all__ = [
     "MIN_USAGE_MONTH",
     "USAGE_DATE_PATTERN",
     "USAGE_EXPORT_COLUMNS",
+    "USAGE_EXPORT_INTEGER_COLUMNS",
     "USAGE_EXPORT_TEXT_COLUMNS",
     "USAGE_MONTH_PATTERN",
     "USAGE_SUMMARY_EXPORT_COLUMNS",
+    "USAGE_SUMMARY_EXPORT_INTEGER_COLUMNS",
     "USAGE_SUMMARY_EXPORT_TEXT_COLUMNS",
     "USAGE_SUMMARY_EXPORT_TOTAL_LABEL",
     "CustomerProjectList",

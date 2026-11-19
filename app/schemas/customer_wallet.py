@@ -40,6 +40,8 @@ WALLET_EXPORT_COLUMNS: Final = (
 )
 # 加公式注入前缀的文本列（设计 #435 §2「CSV 格式」）；序号、金额与时间列不加。
 WALLET_EXPORT_TEXT_COLUMNS: Final = frozenset({"id", "transaction_type", "event_id"})
+# xlsx 里写数字单元格的整数列（设计 #753 §2「单元格类型」）；金额与时间列在 xlsx 里是文本。
+WALLET_EXPORT_INTEGER_COLUMNS: Final = frozenset({"wallet_sequence"})
 # 唯一改名的列：导出列名 → 白名单视图的键。
 _WALLET_EXPORT_RENAMED: Final = {"created_at_utc": "created_at"}
 

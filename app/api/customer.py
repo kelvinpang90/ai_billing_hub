@@ -74,12 +74,17 @@ repository 函数、同一个 5 键视图，唯一的差别是 `month` 必填。
 
 对账单 PDF 下载（AIH-TASK-217，设计闸门 #708 v3 §2「客户接口」）：由 app/api/statement_download.py
 完成（管理端共用），这里只传令牌主体的租户；同样只读、用 `require_customer`。
+
+导出的 Excel 版本（AIH-TASK-236，设计闸门 #753 v1 §2「参数 format」「各接口的改法」）：四个导出接口
+多一个查询参数 `format`（缺省 `csv`，只认 `csv` / `xlsx`，FastAPI 在处理函数之前判）。只在
+「拼文件 → 构造响应」那一步分支：查询、筛选、上限、租约、错误码与日志对两种格式是同一段代码；
+`xlsx` 的文件名主干与 CSV 相同、只换扩展名，工作表名是程序常量。
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, Request
 from sqlalchemy import func, select
@@ -101,6 +106,7 @@ from app.core.csv_export import (
 from app.core.database import session_scope
 from app.core.errors import AppError
 from app.core.logging import current_request_id
+from app.core.xlsx_export import XLSX_MEDIA_TYPE, write_xlsx, xlsx_response
 from app.models.statements import MonthlyStatement, StatementStatus
 from app.models.tenancy import Tenant
 from app.repositories import notifications as notifications_repository
@@ -110,6 +116,7 @@ from app.repositories import wallet as wallet_repository
 from app.schemas.customer import CustomerMe
 from app.schemas.customer_conversations import (
     CONVERSATION_EXPORT_COLUMNS,
+    CONVERSATION_EXPORT_INTEGER_COLUMNS,
     CONVERSATION_EXPORT_TEXT_COLUMNS,
     CustomerConversationPage,
     customer_conversation_export_cells,
@@ -128,9 +135,11 @@ from app.schemas.customer_notifications import (
 from app.schemas.customer_usage import (
     USAGE_DATE_PATTERN,
     USAGE_EXPORT_COLUMNS,
+    USAGE_EXPORT_INTEGER_COLUMNS,
     USAGE_EXPORT_TEXT_COLUMNS,
     USAGE_MONTH_PATTERN,
     USAGE_SUMMARY_EXPORT_COLUMNS,
+    USAGE_SUMMARY_EXPORT_INTEGER_COLUMNS,
     USAGE_SUMMARY_EXPORT_TEXT_COLUMNS,
     CustomerProjectList,
     CustomerUsageEventPage,
@@ -148,6 +157,7 @@ from app.schemas.customer_usage import (
 )
 from app.schemas.customer_wallet import (
     WALLET_EXPORT_COLUMNS,
+    WALLET_EXPORT_INTEGER_COLUMNS,
     WALLET_EXPORT_TEXT_COLUMNS,
     CustomerWalletTransactionPage,
     CustomerWalletView,
@@ -193,6 +203,17 @@ ConversationFilter = Annotated[str | None, Query(pattern=REQUEST_ID_PATTERN)]
 EventIdFilter = Annotated[str | None, Query(pattern=EVENT_ID_PATTERN)]
 # 本月用量的月份（设计 #403 §2）：形状在鉴权之前判，范围在鉴权之后判。
 UsageMonthParam = Annotated[str | None, Query(pattern=USAGE_MONTH_PATTERN)]
+# 导出的编码（设计 #753 §2「参数 format」）：只认小写的这两个值，其他 422 `query.format`。
+ExportFormatParam = Annotated[Literal["csv", "xlsx"], Query(alias="format")]
+# OpenAPI 的 200 列出两种媒体类型；响应类仍是 `ExportCsvResponse`。
+_EXPORT_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {"content": {"text/csv": {}, XLSX_MEDIA_TYPE: {}}}
+}
+# xlsx 的工作表名：程序常量，不拼任何输入。
+_USAGE_EXPORT_SHEET = "usage-events"
+_WALLET_EXPORT_SHEET = "wallet-transactions"
+_USAGE_SUMMARY_EXPORT_SHEET = "usage-summary"
+_CONVERSATION_EXPORT_SHEET = "conversations"
 
 
 @router.get("/me", response_model=ApiResponse[CustomerMe])
@@ -262,11 +283,16 @@ def customer_wallet_transactions(
     return success(page, request_id=current_request_id())
 
 
-@router.get("/wallet/transactions/export", response_class=ExportCsvResponse)
+@router.get(
+    "/wallet/transactions/export",
+    response_class=ExportCsvResponse,
+    responses=_EXPORT_RESPONSES,
+)
 def customer_wallet_transactions_export(
     request: Request,
     from_date: UsageDate = None,
     to_date: UsageDate = None,
+    export_format: ExportFormatParam = "csv",
 ) -> ExportCsvResponse:
     """The caller's own ledger rows booked in the period as one CSV attachment, at most 20 000.
 
@@ -308,14 +334,25 @@ def customer_wallet_transactions_export(
             raise CustomerUsageQueryTooBroad from None
         if len(rows) > EXPORT_MAX_ROWS:
             raise ExportTooLarge
-        body = write_csv(
-            WALLET_EXPORT_COLUMNS,
-            (customer_wallet_export_cells(row) for row in rows),
-            WALLET_EXPORT_TEXT_COLUMNS,
-        )
-        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
-        rows = None
-        response = csv_response(f"wallet-transactions_{from_date}_{to_date}.csv", body)
+        if export_format == "xlsx":
+            body = write_xlsx(
+                WALLET_EXPORT_COLUMNS,
+                (customer_wallet_export_cells(row) for row in rows),
+                WALLET_EXPORT_TEXT_COLUMNS,
+                WALLET_EXPORT_INTEGER_COLUMNS,
+                sheet_title=_WALLET_EXPORT_SHEET,
+            )
+            rows = None
+            response = xlsx_response(f"wallet-transactions_{from_date}_{to_date}.xlsx", body)
+        else:
+            body = write_csv(
+                WALLET_EXPORT_COLUMNS,
+                (customer_wallet_export_cells(row) for row in rows),
+                WALLET_EXPORT_TEXT_COLUMNS,
+            )
+            # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+            rows = None
+            response = csv_response(f"wallet-transactions_{from_date}_{to_date}.csv", body)
         body = None
     except AppError:
         raise
@@ -387,7 +424,11 @@ def customer_usage_events(
     return success(page, request_id=current_request_id())
 
 
-@router.get("/usage-events/export", response_class=ExportCsvResponse)
+@router.get(
+    "/usage-events/export",
+    response_class=ExportCsvResponse,
+    responses=_EXPORT_RESPONSES,
+)
 def customer_usage_events_export(
     request: Request,
     from_date: UsageDate = None,
@@ -397,6 +438,7 @@ def customer_usage_events_export(
     model: ModelFilter = None,
     conversation_id: ConversationFilter = None,
     event_id: EventIdFilter = None,
+    export_format: ExportFormatParam = "csv",
 ) -> ExportCsvResponse:
     """The caller's billed usage events as one CSV attachment, newest first, at most 20 000 rows.
 
@@ -437,14 +479,25 @@ def customer_usage_events_export(
             raise CustomerUsageQueryTooBroad from None
         if len(rows) > EXPORT_MAX_ROWS:
             raise ExportTooLarge
-        body = write_csv(
-            USAGE_EXPORT_COLUMNS,
-            (customer_usage_export_cells(row) for row in rows),
-            USAGE_EXPORT_TEXT_COLUMNS,
-        )
-        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
-        rows = None
-        response = csv_response(f"usage-events_{from_date}_{to_date}.csv", body)
+        if export_format == "xlsx":
+            body = write_xlsx(
+                USAGE_EXPORT_COLUMNS,
+                (customer_usage_export_cells(row) for row in rows),
+                USAGE_EXPORT_TEXT_COLUMNS,
+                USAGE_EXPORT_INTEGER_COLUMNS,
+                sheet_title=_USAGE_EXPORT_SHEET,
+            )
+            rows = None
+            response = xlsx_response(f"usage-events_{from_date}_{to_date}.xlsx", body)
+        else:
+            body = write_csv(
+                USAGE_EXPORT_COLUMNS,
+                (customer_usage_export_cells(row) for row in rows),
+                USAGE_EXPORT_TEXT_COLUMNS,
+            )
+            # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+            rows = None
+            response = csv_response(f"usage-events_{from_date}_{to_date}.csv", body)
         body = None
     except AppError:
         raise
@@ -488,9 +541,15 @@ def customer_usage_summary(
     return success(view, request_id=current_request_id())
 
 
-@router.get("/usage-summary/export", response_class=ExportCsvResponse)
+@router.get(
+    "/usage-summary/export",
+    response_class=ExportCsvResponse,
+    responses=_EXPORT_RESPONSES,
+)
 def customer_usage_summary_export(
-    request: Request, month: UsageMonthParam = None
+    request: Request,
+    month: UsageMonthParam = None,
+    export_format: ExportFormatParam = "csv",
 ) -> ExportCsvResponse:
     """The caller's billed usage in one Malaysian calendar month as a CSV: a row a day, then TOTAL.
 
@@ -514,6 +573,16 @@ def customer_usage_summary_export(
         _log_query_timeout(factory, principal.tenant_id)
         raise CustomerUsageQueryTooBroad from None
     view = customer_usage_summary_view(period.first_day, summary)
+    if export_format == "xlsx":
+        # 与 CSV 一样不占租约、不包 try：意外错误由通用 500 处理。
+        body = write_xlsx(
+            USAGE_SUMMARY_EXPORT_COLUMNS,
+            customer_usage_summary_export_cells(view),
+            USAGE_SUMMARY_EXPORT_TEXT_COLUMNS,
+            USAGE_SUMMARY_EXPORT_INTEGER_COLUMNS,
+            sheet_title=_USAGE_SUMMARY_EXPORT_SHEET,
+        )
+        return xlsx_response(f"usage-summary_{view.month}.xlsx", body)
     body = write_csv(
         USAGE_SUMMARY_EXPORT_COLUMNS,
         customer_usage_summary_export_cells(view),
@@ -561,12 +630,17 @@ def customer_conversations(
     return success(page, request_id=current_request_id())
 
 
-@router.get("/conversations/export", response_class=ExportCsvResponse)
+@router.get(
+    "/conversations/export",
+    response_class=ExportCsvResponse,
+    responses=_EXPORT_RESPONSES,
+)
 def customer_conversations_export(
     request: Request,
     from_date: UsageDate = None,
     to_date: UsageDate = None,
     project_id: str | None = None,
+    export_format: ExportFormatParam = "csv",
 ) -> ExportCsvResponse:
     """The caller's conversations in the period as one CSV attachment, at most 20 000 rows.
 
@@ -605,14 +679,25 @@ def customer_conversations_export(
             raise CustomerUsageQueryTooBroad from None
         if len(rows) > EXPORT_MAX_ROWS:
             raise ExportTooLarge
-        body = write_csv(
-            CONVERSATION_EXPORT_COLUMNS,
-            (customer_conversation_export_cells(row) for row in rows),
-            CONVERSATION_EXPORT_TEXT_COLUMNS,
-        )
-        # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
-        rows = None
-        response = csv_response(f"conversations_{from_date}_{to_date}.csv", body)
+        if export_format == "xlsx":
+            body = write_xlsx(
+                CONVERSATION_EXPORT_COLUMNS,
+                (customer_conversation_export_cells(row) for row in rows),
+                CONVERSATION_EXPORT_TEXT_COLUMNS,
+                CONVERSATION_EXPORT_INTEGER_COLUMNS,
+                sheet_title=_CONVERSATION_EXPORT_SHEET,
+            )
+            rows = None
+            response = xlsx_response(f"conversations_{from_date}_{to_date}.xlsx", body)
+        else:
+            body = write_csv(
+                CONVERSATION_EXPORT_COLUMNS,
+                (customer_conversation_export_cells(row) for row in rows),
+                CONVERSATION_EXPORT_TEXT_COLUMNS,
+            )
+            # 拼好就丢掉结果列表：之后进程里只留响应体这一份。
+            rows = None
+            response = csv_response(f"conversations_{from_date}_{to_date}.csv", body)
         body = None
     except AppError:
         raise
