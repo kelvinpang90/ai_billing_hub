@@ -11,9 +11,11 @@ import json
 
 import pytest
 from sqlalchemy import create_engine, event, select, update
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.database import create_session_factory
+from app.core.notification_adapter import EmailAdapter
 from app.core.passwords import WeakPassword, hash_password, verify_password
 from app.core.tokens import hash_opaque_token
 from app.models.auth import (
@@ -29,14 +31,18 @@ from app.models.auth import (
     UserStatus,
 )
 from app.models.base import Base
+from app.repositories import tenancy
 from app.services.auth import RequestContext, utc_now
 from app.services.password_reset import (
     _MIN_DURATION_SECONDS,
+    AGGREGATE_USERS,
+    EVENT_PASSWORD_CHANGED,
     EVENT_PASSWORD_RESET,
     InvalidResetToken,
     request_reset,
     reset_password,
 )
+from app.tasks import outbox as outbox_task
 
 PASSWORD = "a-perfectly-fine-passphrase"
 NEW_PASSWORD = "another-perfectly-fine-passphrase"
@@ -62,10 +68,9 @@ def make_user(session_factory, *, email: str = EMAIL, **overrides) -> User:
         user = User(
             email=email,
             password_hash=hash_password(PASSWORD),
-            role=UserRole.ADMIN,
             created_at=now,
             updated_at=now,
-            **{"status": UserStatus.ACTIVE, **overrides},
+            **{"role": UserRole.ADMIN, "status": UserStatus.ACTIVE, **overrides},
         )
         session.add(user)
         session.commit()
@@ -106,7 +111,9 @@ def issue_token(
     """
     outbox_id = request_reset(session_factory, settings, email=email, context=CONTEXT, now=now)
     assert outbox_id is not None, "the request was throttled; issue earlier ones with `now`"
-    payload = json.loads(outbox_rows(session_factory)[-1].payload_json or "{}")
+    # 按事件类型取：重置成功还会写一行改密通知（I6），「最后一行」不一定是重置邮件。
+    [*_, last] = [r for r in outbox_rows(session_factory) if r.event_type == EVENT_PASSWORD_RESET]
+    payload = json.loads(last.payload_json or "{}")
     return str(payload["token"])
 
 
@@ -834,3 +841,227 @@ def test_the_audit_row_never_carries_the_token_or_the_password(
     assert raw not in blob
     assert NEW_PASSWORD not in blob
     assert PASSWORD not in blob
+
+
+# --- 改密通知（设计闸门 #751 v3 §2「改密通知」、§7，I6） -------------------------------------
+
+
+def changed_rows(session_factory) -> list[DomainOutbox]:
+    return [r for r in outbox_rows(session_factory) if r.event_type == EVENT_PASSWORD_CHANGED]
+
+
+def make_customer(session_factory, *, email: str, company: str) -> User:
+    with session_factory() as session:
+        tenant = tenancy.create_tenant(
+            session, company_name=company, email=f"contact-{email}", now=utc_now()
+        )
+        session.commit()
+        tenant_id = tenant.id
+    return make_user(session_factory, email=email, role=UserRole.CUSTOMER, tenant_id=tenant_id)
+
+
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.CUSTOMER])
+def test_a_successful_reset_writes_one_password_changed_row(
+    session_factory, settings: Settings, role: UserRole
+) -> None:
+    """设计 §7「同事务」「通知 payload」：恰好一行，字段与 payload 照 §2；
+    ADMIN 与 CUSTOMER 各一例。"""
+    if role is UserRole.ADMIN:
+        user = make_user(session_factory)
+    else:
+        user = make_customer(
+            session_factory, email="customer@example.com", company="Contoh Sdn Bhd"
+        )
+    moment = utc_now().replace(microsecond=654_321)
+    raw = issue_token(
+        session_factory, settings, email=user.email, now=moment - dt.timedelta(minutes=1)
+    )
+
+    reset_password(
+        session_factory,
+        settings,
+        token=raw,
+        new_password=NEW_PASSWORD,
+        context=CONTEXT,
+        now=moment,
+    )
+
+    [row] = changed_rows(session_factory)
+    assert (row.aggregate_type, row.aggregate_id) == (AGGREGATE_USERS, str(user.id))
+    assert row.status is OutboxStatus.PENDING
+    assert row.attempt_count == 0
+    assert row.next_retry_at == row.created_at == moment
+    payload = json.loads(row.payload_json or "")
+    # 整秒、不带时区的 UTC。
+    assert payload == {"to": user.email, "changed_at": moment.replace(microsecond=0).isoformat()}
+    # 没有令牌、IP、User-Agent、角色、租户字段（设计 §6）。
+    for absent in (raw, NEW_PASSWORD, CONTEXT.ip_address, CONTEXT.user_agent, role.value):
+        assert absent not in (row.payload_json or "")
+
+
+def _refuse_unknown(session_factory, settings: Settings) -> str:
+    make_user(session_factory)
+    return "a-token-nobody-ever-issued"
+
+
+def _refuse_used(session_factory, settings: Settings) -> str:
+    make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+    with session_factory() as session:
+        session.execute(update(PasswordResetToken).values(used_at=utc_now()))
+        session.commit()
+    return raw
+
+
+def _refuse_expired(session_factory, settings: Settings) -> str:
+    make_user(session_factory)
+    # 签发在 TTL 之前（也就早于限频窗口）：到「现在」已经过期。
+    long_ago = utc_now() - dt.timedelta(seconds=settings.password_reset_ttl_seconds + 1)
+    return issue_token(session_factory, settings, now=long_ago)
+
+
+def _refuse_disabled(session_factory, settings: Settings) -> str:
+    user = make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+    with session_factory() as session:
+        session.execute(update(User).where(User.id == user.id).values(status=UserStatus.DISABLED))
+        session.commit()
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("prepare", "new_password", "error"),
+    [
+        (_refuse_unknown, NEW_PASSWORD, InvalidResetToken),
+        (_refuse_used, NEW_PASSWORD, InvalidResetToken),
+        (_refuse_expired, NEW_PASSWORD, InvalidResetToken),
+        (issue_token, "short", WeakPassword),
+        (_refuse_disabled, NEW_PASSWORD, InvalidResetToken),
+    ],
+    ids=["unknown-token", "used-token", "expired-token", "weak-password", "disabled-account"],
+)
+def test_a_refused_reset_writes_no_password_changed_row(
+    session_factory, settings: Settings, prepare, new_password: str, error: type[Exception]
+) -> None:
+    """设计 §7「失败不写通知」。"""
+    if prepare is issue_token:
+        make_user(session_factory)
+    raw = prepare(session_factory, settings)
+
+    with pytest.raises(error):
+        reset_password(
+            session_factory, settings, token=raw, new_password=new_password, context=CONTEXT
+        )
+
+    assert changed_rows(session_factory) == []
+
+
+def test_a_failure_after_the_notice_row_rolls_everything_back(
+    session_factory, settings: Settings
+) -> None:
+    """设计 §7「事务中途失败」：通知行已加进会话、提交之前失败 —— 什么都不留下。"""
+    user = make_user(session_factory)
+    now = utc_now()
+    with session_factory() as session:
+        session.add(
+            RefreshToken(
+                user_id=user.id,
+                family_id="family-a",
+                token_hash="hash-family-a",
+                issued_at=now,
+                expires_at=now + dt.timedelta(hours=12),
+            )
+        )
+        session.commit()
+    raw = issue_token(session_factory, settings)
+    outbox_before = [(r.id, r.status) for r in outbox_rows(session_factory)]
+    audits_before = audit_actions(session_factory)
+
+    def explode_once_the_notice_is_pending(session: Session) -> None:
+        if any(
+            isinstance(obj, DomainOutbox) and obj.event_type == EVENT_PASSWORD_CHANGED
+            for obj in session.new
+        ):
+            raise RuntimeError("injected after the notice row, before commit")
+
+    event.listen(session_factory, "before_commit", explode_once_the_notice_is_pending)
+    try:
+        with pytest.raises(RuntimeError, match="injected"):
+            reset_password(
+                session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT
+            )
+    finally:
+        event.remove(session_factory, "before_commit", explode_once_the_notice_is_pending)
+
+    with session_factory() as session:
+        stored = session.get(User, user.id)
+        assert stored is not None
+        assert verify_password(stored.password_hash, PASSWORD)
+        assert stored.password_version == 0
+        live = session.execute(
+            select(RefreshToken).where(RefreshToken.revoked_at.is_(None))
+        ).scalars()
+        assert len(list(live)) == 1
+    assert token_rows(session_factory)[0].used_at is None
+    assert audit_actions(session_factory) == audits_before
+    assert [(r.id, r.status) for r in outbox_rows(session_factory)] == outbox_before
+
+
+def test_the_notice_is_delivered_by_recovery_alone(
+    session_factory, settings: Settings, monkeypatch
+) -> None:
+    """设计 §7「Redis/Celery 丢失」：重置不触发任何投递，只靠 `recover` 领取并投出。"""
+    user = make_user(session_factory)
+    raw = issue_token(session_factory, settings)
+    triggered: list[int] = []
+    monkeypatch.setattr(outbox_task.deliver, "delay", triggered.append)
+
+    reset_password(session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT)
+
+    assert triggered == [], "重置端点不 delay()，只靠 recover"
+    [notice] = changed_rows(session_factory)
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.sent: list[object] = []
+
+        def send(self, message) -> bool:  # noqa: ANN001 - 形状由 EmailTransport 协议定
+            self.sent.append(message)
+            return True
+
+    transport = FakeTransport()
+    delivery_settings = Settings(frontend_base_url="https://billing.example.com")
+    monkeypatch.setattr(outbox_task, "_session_factory", lambda: session_factory)
+    monkeypatch.setattr(outbox_task, "get_settings", lambda: delivery_settings)
+    monkeypatch.setattr(
+        outbox_task, "build_adapter", lambda _channel, _settings: EmailAdapter(transport)
+    )
+
+    # 重置邮件那一行同样还在 PENDING（本例没有投递它），所以领到两行。
+    assert outbox_task.recover() == 2
+    assert notice.id in triggered
+    assert outbox_task.deliver(notice.id) == "sent"
+
+    [email] = transport.sent
+    assert email.to == user.email
+    assert email.subject == "Your Acuven Billing password was changed"
+    [delivered] = changed_rows(session_factory)
+    assert delivered.status is OutboxStatus.SENT
+    assert delivered.payload_json is None
+
+
+def test_only_the_account_that_reset_gets_the_notice(session_factory, settings: Settings) -> None:
+    """设计 §7「租户越权」：两个租户各一个门户账号，A 重置，只有 A 的邮箱有通知行。"""
+    first = make_customer(session_factory, email="alpha@example.com", company="Alpha Sdn Bhd")
+    second = make_customer(session_factory, email="beta@example.com", company="Beta Sdn Bhd")
+    raw = issue_token(session_factory, settings, email=first.email)
+    issue_token(session_factory, settings, email=second.email)
+
+    reset_password(session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT)
+
+    [row] = changed_rows(session_factory)
+    assert row.aggregate_id == str(first.id)
+    payload = json.loads(row.payload_json or "")
+    assert payload["to"] == first.email
+    assert second.email not in (row.payload_json or "")
+    assert f"contact-{first.email}" not in (row.payload_json or "")

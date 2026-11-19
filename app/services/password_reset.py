@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # 所有已经躺在 outbox 里、还没投出去的行认不出自己是什么 —— 那些行会直接进死信。
 EVENT_PASSWORD_RESET: Final = "PASSWORD_RESET_REQUESTED"
 # 密码已修改通知（设计闸门 #751 v3 §2「改密通知」）。渲染在 app/tasks/outbox.py 的
-# `_render_password_changed`；生产者是重置成功的同一事务（I6），本常量先于生产者登记。
+# `_render_password_changed`（I5）；生产者是 `reset_password` 重置成功的同一事务（I6）。
 EVENT_PASSWORD_CHANGED: Final = "PASSWORD_CHANGED_EMAIL_REQUESTED"
 AGGREGATE_USERS: Final = "users"
 
@@ -441,6 +441,30 @@ def reset_password(
             actor=user,
             entity_type="users",
             entity_id=str(user.id),
+        )
+
+        # ⚠️ **改密通知与改密同一事务**（设计闸门 #751 v3 §2「改密通知」，I6）：密码改了而通知行
+        # 没写，被盗号的人就收不到提醒；通知行写了而密码没改，就是一封谎报的信。任何一步失败，
+        # 整个重置回滚，两者都没有。
+        # - 收件人取自上面锁住的这个用户行，不读租户联系邮箱、不读请求参数（INV-8）。
+        # - payload 恰好 `{to, changed_at}`：不放 IP、User-Agent、角色、租户、令牌（设计 §6）。
+        #   `changed_at` 是不带时区的 UTC、整秒，渲染时换成马来西亚时间（app/tasks/outbox.py）。
+        # - 不 `delay()`：由 `recover` 最多晚 60 秒领取（设计 §9 备选 G）；这个端点也不需要
+        #   `request_reset` 那种在补齐窗口内触发的 `on_queued`。
+        session.add(
+            DomainOutbox(
+                event_type=EVENT_PASSWORD_CHANGED,
+                aggregate_type=AGGREGATE_USERS,
+                aggregate_id=str(user.id),
+                payload_json=json.dumps(
+                    {"to": user.email, "changed_at": moment.replace(microsecond=0).isoformat()},
+                    sort_keys=True,
+                ),
+                status=OutboxStatus.PENDING,
+                attempt_count=0,
+                next_retry_at=moment,
+                created_at=moment,
+            )
         )
         session.commit()
 
