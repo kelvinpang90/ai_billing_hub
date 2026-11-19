@@ -61,6 +61,10 @@ CONVERSATION_EXPORT_COLUMNS: Final = (
 CONVERSATION_EXPORT_TEXT_COLUMNS: Final = frozenset(
     {"conversation_id", "project_id", "project_name"}
 )
+# xlsx 里写数字单元格的整数列（设计 #753 §2「单元格类型」）；时间与金额列在 xlsx 里是文本。
+CONVERSATION_EXPORT_INTEGER_COLUMNS: Final = frozenset(
+    {"request_count", "input_tokens", "output_tokens"}
+)
 # 改名的列：导出列名 → 白名单视图的键。
 _CONVERSATION_EXPORT_RENAMED: Final = {
     "first_occurred_at_utc": "first_occurred_at",
@@ -187,6 +191,7 @@ def customer_conversation_export_cells(row: CustomerConversationRow) -> list[str
 
 __all__ = [
     "CONVERSATION_EXPORT_COLUMNS",
+    "CONVERSATION_EXPORT_INTEGER_COLUMNS",
     "CONVERSATION_EXPORT_TEXT_COLUMNS",
     "CustomerConversationPage",
     "CustomerConversationView",

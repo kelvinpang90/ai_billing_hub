@@ -794,18 +794,18 @@
 
 ## 客户导出
 
-设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。月度用量汇总导出依据设计闸门 #457 `APPROVED: design v1`（[design/AIH-TASK-119-customer-usage-summary-export.md](design/AIH-TASK-119-customer-usage-summary-export.md)），接口登记为 AIH-TASK-119。会话摘要导出依据设计闸门 #460 `APPROVED: design v2`（[design/AIH-TASK-121-customer-conversations.md](design/AIH-TASK-121-customer-conversations.md) §2「接口二」），接口登记为 AIH-TASK-122。
+设计依据：设计闸门 #435 `APPROVED: design v10`，全文见 [design/AIH-TASK-113-customer-export.md](design/AIH-TASK-113-customer-export.md)（§2、§5、§6；spec §73、§80、§109、§112）。CSV 模块与导出租约登记为 AIH-TASK-114，用量导出接口登记为 AIH-TASK-115，钱包流水导出接口登记为 AIH-TASK-116。月度用量汇总导出依据设计闸门 #457 `APPROVED: design v1`（[design/AIH-TASK-119-customer-usage-summary-export.md](design/AIH-TASK-119-customer-usage-summary-export.md)），接口登记为 AIH-TASK-119。会话摘要导出依据设计闸门 #460 `APPROVED: design v2`（[design/AIH-TASK-121-customer-conversations.md](design/AIH-TASK-121-customer-conversations.md) §2「接口二」），接口登记为 AIH-TASK-122。四个接口的 Excel（`.xlsx`）版本依据设计闸门 #753 `APPROVED: design v1`（[design/AIH-TASK-234-excel-exports.md](design/AIH-TASK-234-excel-exports.md) §2），接口登记为 AIH-TASK-236。
 
 | 方法与路径 | 主体 | 成功 | 错误 |
 | --- | --- | --- | --- |
-| `GET /api/v1/customer/usage-events/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内全部已计费用量事件，每行一条、18 列 | 401 / 403 / 422 / 500 / 503 |
-| `GET /api/v1/customer/wallet/transactions/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内记账的全部钱包流水，每行一条、7 列 | 401 / 403 / 422 / 500 / 503 |
-| `GET /api/v1/customer/usage-summary/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：一个马来西亚日历月每天一行，末尾一行合计，4 列 | 401 / 403 / 422 / 500 / 503 |
-| `GET /api/v1/customer/conversations/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 附件：区间内的全部会话，每行一个会话、9 列 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/usage-events/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 或 xlsx 附件（`format`）：区间内全部已计费用量事件，每行一条、18 列 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/wallet/transactions/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 或 xlsx 附件（`format`）：区间内记账的全部钱包流水，每行一条、7 列 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/usage-summary/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 或 xlsx 附件（`format`）：一个马来西亚日历月每天一行，末尾一行合计，4 列 | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/customer/conversations/export` | CUSTOMER 的访问令牌 | 200，一个 CSV 或 xlsx 附件（`format`）：区间内的全部会话，每行一个会话、9 列 | 401 / 403 / 422 / 500 / 503 |
 
 - 与其他客户接口一样：租户只取自访问令牌对应的、库里的 user 行，不接受任何租户、客户标识；四种 `account_status` 都能导出（导出是读）；ADMIN 不能调。
 - 同步生成、不落盘：请求时查询一次，在内存里拼好整份文件后再开始发送。服务器不保存任何导出文件，没有导出任务、没有异步。只读：不写任何表、不加锁、不写审计。
-- 只做 CSV；`.xlsx` 不在这里。
+- **`format`**（四个接口都有）：可选，缺省 `csv`，只认小写的 `csv` 与 `xlsx`；其他值（包括 `XLSX`、`xls`、空串）422 `VALIDATION_ERROR`，字段名 `query.format`。它与日期等其他「形状」参数一样由框架在鉴权之前判，所以没有令牌时带非法的 `format` 也是 422。不带或 `format=csv` 时返回的 CSV 与加这个参数之前逐字节相同；`format=xlsx` 时返回同一组行的 xlsx（见下文「xlsx 格式」），文件名主干相同、扩展名换成 `.xlsx`。查询、筛选、行数上限、导出名额与错误码不分格式。
 
 ### CSV 格式
 
@@ -817,6 +817,22 @@
 - **公式注入防护**：文本列的值若以 `=`、`+`、`-`、`@`、制表符或回车开头，前面加一个单引号 `'`（例：`=1+1` 写成 `'=1+1`）。这些值有的来自集成方上报或管理员，用 Excel 打开时以这些字符开头的单元格会被当成公式执行。数值列（token、`quantity`、`charged_amount`、`wallet_sequence`、`amount`、`balance_after`）与时间列不加：负金额必须保持是数。哪些是文本列见下文各接口的列表。
 - **响应头**：`Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment; filename="<文件名>"`、`Cache-Control: no-store`（文件不留在浏览器缓存里）、`X-Accel-Buffering: no`（见下文「同一时刻只有一个导出」）。文件名只由校验过的日期拼出，只含 ASCII 字母、数字、`-`、`_`、`.`。
 - **错误响应不是 CSV**：仍是 JSON 信封（`{success:false, error, request_id}`），HTTP 状态码照常。整份文件拼好才开始发送，所以不会出现「已经收到 200 和半个文件、之后才失败」。下载前端用 `responseType: "blob"` 时，失败的 blob 按 JSON 信封解析。
+
+### xlsx 格式
+
+`format=xlsx` 时返回的文件。与同一组参数的 CSV 是同一次查询、同一组列、同一组行，只换编码。
+
+- **一个工作表**：工作表名是固定的常量（用量 `usage-events`、钱包流水 `wallet-transactions`、月度汇总 `usage-summary`、会话 `conversations`），不含任何输入。第一行是表头，列名与顺序与 CSV 表头相同；之后的行数、行序与每个单元格的值都与 CSV 相同（CSV 的空字段在 xlsx 里是空单元格）。没有样式、列宽、冻结首行、筛选按钮、合计公式、说明行或其他工作表。
+- **单元格类型**：
+  - **金额、`quantity`、比率是文本单元格**，字符与 CSV、JSON 接口逐字相同（恰好 8 位小数）。理由：Excel 的数字是双精度，只保 15 位有效数字，而金额列最多 20 位（例：`999999999999.99999999` 会被读成 `1000000000000`），余额到千万级就开始丢最后一位；导出是对账用的数据，写成数字后在 Excel 里看到和加总的值会与账本、对账单、门户页面对不上。代价是 Excel 把这些格标为「以文本形式存储的数字」，直接 `SUM` 得 0；需要求和时自己转换，例如 `=SUMPRODUCT(VALUE(range))`（这一步由使用者选择转成双精度）。月度汇总本来就有 `TOTAL` 行。
+  - **整数列**（token、`wallet_sequence`、`request_count`、`conversation_count`）的值不超过 15 位时是**数字单元格**（整数显示，可以直接求和），读回后的十进制写法与 CSV 字段逐字相同；超过 15 位（双精度装不下）时退回**文本单元格**，与 CSV 字段逐字相同、不丢一位。
+  - **时间与日期是文本单元格**（`*_utc` 列、`date_myt`），与 CSV 逐字相同：Excel 的日期时间没有时区、只到毫秒，写成日期会丢微秒，并让人误以为是本地时间。
+  - 其余文本（id、名称、类型等）是文本单元格。所有字符串单元格都显式标为字符串类型，文件里没有公式单元格，也没有错误值单元格：项目名就叫 `#N/A` 时读回的仍是字符串 `#N/A`。
+- **公式前缀与 CSV 相同**：同一批文本列、同一组开头字符（`=`、`+`、`-`、`@`、制表符、回车）、同一个单引号（例：`=1+1` 写成 `'=1+1`）。单元格本身不会被求值，但在 Excel 里编辑这一格、回车后，Excel 会把 `=…` 重新当公式解析，单引号让它在那时仍是文本。这个单引号是值的一部分，**在 Excel 里会显示出来**。
+- **控制字符**：XML 不允许的字符（`U+0000`–`U+0008`、`U+000B`、`U+000C`、`U+000E`–`U+001F`、`U+FFFE`、`U+FFFF` 与代理码点）在 xlsx 里各换成一个 `U+FFFD`（`�`），CSV 保留原字符；只可能出现在管理员录入的项目名、公司名里。制表符与换行保留；值里的回车读回时可能变成换行。
+- **与 CSV 共用**导出名额、20 000 行上限与全部错误码（见上文「行数上限」「同一时刻只有一个导出」与各接口的错误表）：xlsx 不另占名额，月度汇总两种格式都不占名额。错误响应同样是 JSON 信封，不是 xlsx。
+- **响应头**：`Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`（不带 `charset`）；`Content-Disposition`、`Cache-Control: no-store`、`X-Accel-Buffering: no` 与 CSV 相同。文件按同样的方式分段发送。
+- 文件内容（工作表）对同一份数据可重现，但整个文件的字节每次不同：文档属性与 ZIP 条目里有生成时刻（只是生成时间，不含业务数据）。
 
 ### 行数上限与 `EXPORT_TOO_LARGE`
 
@@ -836,9 +852,10 @@
 | --- | --- |
 | `from_date` / `to_date` | **恒为必填**（带 `event_id` 也要）。`YYYY-MM-DD`，马来西亚日历日，含两端；其余规则与用量页相同：`2020-01-01` 到 `2099-12-31` 之间、`to_date` 不早于 `from_date`、最多 92 天 |
 | `project_id` / `provider` / `model` / `conversation_id` / `event_id` | 可选，规则与用量页相同。不是自己的项目时得到只有表头的文件，不报错 |
+| `format` | 可选，缺省 `csv`，只认 `csv` / `xlsx`；其他值 422 `query.format`（鉴权之前判） |
 
 - **与用量页的差别**：日期恒必填（用量页带 `event_id` 时可省略）；没有 `page_size` 与 `cursor`（给了按未知参数忽略），一次返回整个区间。其余的校验、文案与时序完全相同：形状由框架在鉴权之前判，日期是否存在、必填、先后与 92 天在鉴权之后判，所有 422 只列字段名、不回显值。
-- **文件名**：`usage-events_<from_date>_<to_date>.csv`，例 `usage-events_2026-10-01_2026-10-31.csv`。
+- **文件名**：`usage-events_<from_date>_<to_date>.csv`，例 `usage-events_2026-10-01_2026-10-31.csv`；`format=xlsx` 时 `usage-events_<from_date>_<to_date>.xlsx`，工作表名 `usage-events`，四个 token 列是整数列（见「xlsx 格式」）。
 - **列**：表头恰好这 18 列，按这个顺序。每列的值与[用量页](#get-apiv1customerusage-events--客户自己的已计费用量)每项的同名键逐字相同；唯一改名的是时间列。
 
 | 列 | 文本列（防公式注入） | 说明 |
@@ -866,11 +883,12 @@
 | 参数 | 规则 |
 | --- | --- |
 | `from_date` / `to_date` | **必填**。`YYYY-MM-DD`，马来西亚日历日，含两端；规则与用量导出相同：`2020-01-01` 到 `2099-12-31` 之间、`to_date` 不早于 `from_date`、最多 92 天 |
+| `format` | 可选，缺省 `csv`，只认 `csv` / `xlsx`；其他值 422 `query.format`（鉴权之前判） |
 
 - **按记账时间取**：一笔流水归哪一天，看它的 `created_at`（记账时间）落在哪个马来西亚日历日（`[from_date 00:00, to_date + 1 天 00:00)`，UTC+8）。**与用量导出不同**：用量导出按 `occurred_at`（调用发生时间）取，一次调用的扣费流水在计费时才记账，所以同一个日期区间两边可能差在跨日的几笔（例如月末发生、次月计费）。
 - **排序按序号**：`wallet_sequence` 倒序（最新的一笔在前），这是账本的真实顺序，相邻两行的 `balance_after` 逐行接得上。不按 `created_at` 排：记账时间不保证与序号同序。
 - 没有其他参数：没有分页、`before_sequence`、来源筛选（给了按未知参数忽略），一次返回整个区间；校验、文案与时序与用量导出相同，所有 422 只列字段名、不回显值。
-- **文件名**：`wallet-transactions_<from_date>_<to_date>.csv`，例 `wallet-transactions_2026-10-01_2026-10-31.csv`。
+- **文件名**：`wallet-transactions_<from_date>_<to_date>.csv`，例 `wallet-transactions_2026-10-01_2026-10-31.csv`；`format=xlsx` 时 `wallet-transactions_<from_date>_<to_date>.xlsx`，工作表名 `wallet-transactions`，`wallet_sequence` 是整数列，`amount`、`balance_after` 是文本（见「xlsx 格式」）。
 - **列**：表头恰好这 7 列，按这个顺序。每列的值与[钱包流水](#get-apiv1customerwallettransactions--客户自己的钱包流水)每项的同名键逐字相同；唯一改名的是时间列。
 
 | 列 | 文本列（防公式注入） | 说明 |
@@ -895,9 +913,10 @@
 | 参数 | 规则 |
 | --- | --- |
 | `month` | **必填**。`YYYY-MM`，马来西亚日历月，`2020-01` 到 `2099-12`（含两端）。形状由框架在鉴权之前判；缺失、月份数不在 1..12、越界在鉴权之后判，422 `VALIDATION_ERROR` 只列字段名 `month`、不回显值。未来的月份照常 200，全为 0 |
+| `format` | 可选，缺省 `csv`，只认 `csv` / `xlsx`；其他值 422 `query.format`（鉴权之前判） |
 
-- **与 `GET /usage-summary` 的唯一差别**：`month` 必填，不默认当月。文件用于对账，月份由客户明确选择，文件名与内容恒为请求里的那个月。未知参数忽略；不接受任何租户、客户标识。
-- **文件名**：`usage-summary_<YYYY-MM>.csv`，例 `usage-summary_2026-10.csv`。
+- **与 `GET /usage-summary` 的唯一差别**：`month` 必填，不默认当月（另有导出才有的 `format`）。文件用于对账，月份由客户明确选择，文件名与内容恒为请求里的那个月。未知参数忽略；不接受任何租户、客户标识。
+- **文件名**：`usage-summary_<YYYY-MM>.csv`，例 `usage-summary_2026-10.csv`；`format=xlsx` 时 `usage-summary_<YYYY-MM>.xlsx`，工作表名 `usage-summary`，`request_count`、`conversation_count` 是整数列（见「xlsx 格式」）。两种格式都不占导出名额。
 - **行**：表头一行；该月**每一天**一行（28–31 行），按日期升序，没有事件的日子也有；最后一行是合计，`date_myt` 列写 `TOTAL`。共 30–33 行。
 - **列**：表头恰好这 4 列，按这个顺序。
 
@@ -919,12 +938,12 @@
 | --- | --- | --- |
 | 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
 | 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
-| 422 | `VALIDATION_ERROR` | `month` 缺失、格式错、月份数不在 1..12 或越界 |
+| 422 | `VALIDATION_ERROR` | `month` 缺失、格式错、月份数不在 1..12 或越界；`format` 不是 `csv` / `xlsx` |
 | 422 | `QUERY_TOO_BROAD` | 任一条汇总查询超过 2 秒执行预算 |
 | 500 | `INTERNAL_ERROR` | 意外错误，包括查询时数据库连接失败或中断，带 `request_id`；与 `GET /usage-summary` 同一形状 |
 | 503 | `DATABASE_NOT_CONFIGURED` | 服务端根本没有配置数据库 |
 
-**没有** `EXPORT_TOO_LARGE`（行数恒有界）与 `EXPORT_BUSY`（不占导出名额）；没有 404，也没有 403 `ACCOUNT_READ_ONLY`。错误都是 JSON 信封，不是 CSV。
+**没有** `EXPORT_TOO_LARGE`（行数恒有界）与 `EXPORT_BUSY`（不占导出名额）；没有 404，也没有 403 `ACCOUNT_READ_ONLY`。错误都是 JSON 信封，不是 CSV 或 xlsx。
 
 ### `GET /api/v1/customer/conversations/export` —— 导出客户自己的会话摘要
 
@@ -934,12 +953,13 @@
 | --- | --- |
 | `from_date` / `to_date` | **必填**，规则与会话列表相同：`YYYY-MM-DD` 马来西亚日历日，含两端；`2020-01-01` 到 `2099-12-31` 之间、`to_date` 不早于 `from_date`、最多 92 天 |
 | `project_id` | 可选，项目 `public_id`。不是自己的项目（不存在或属于别的客户）时得到只有表头的文件，不报错 |
+| `format` | 可选，缺省 `csv`，只认 `csv` / `xlsx`；其他值 422 `query.format`（鉴权之前判） |
 
 - **与会话列表的差别**：没有 `page_size` 与 `cursor`（给了按未知参数忽略），一次返回整个区间。其余的校验、文案与时序完全相同：形状由框架在鉴权之前判，日期是否存在、必填、先后与 92 天在鉴权之后判，所有 422 只列字段名、不回显值。
 - **排序**：与会话列表相同，按 `last_occurred_at` 倒序；相同时按项目 `public_id` 倒序，再按 `conversation_id` 倒序（按字节）。
 - **行数上限**：最多 20 000 个**会话**（不是请求）；超过时 422 `EXPORT_TOO_LARGE`，见上文「行数上限」。
 - **占导出名额**：与用量导出、钱包流水导出共用，见上文「同一时刻只有一个导出」；名额被占时 503 `EXPORT_BUSY`，不发查询。
-- **文件名**：`conversations_<from_date>_<to_date>.csv`，例 `conversations_2026-10-01_2026-10-31.csv`。
+- **文件名**：`conversations_<from_date>_<to_date>.csv`，例 `conversations_2026-10-01_2026-10-31.csv`；`format=xlsx` 时 `conversations_<from_date>_<to_date>.xlsx`，工作表名 `conversations`，`request_count`、`input_tokens`、`output_tokens` 是整数列（见「xlsx 格式」）。
 - **列**：表头恰好这 9 列，按这个顺序。每列的值与会话列表每项的同名键逐字相同；唯一改名的是两个时间列。
 
 | 列 | 文本列（防公式注入） | 说明 |
@@ -964,14 +984,14 @@
 | --- | --- | --- |
 | 401 | `TOKEN_INVALID` | 没有令牌、令牌无效或过期；门户账号已停用或不是 `ACTIVE` |
 | 403 | `CUSTOMER_REQUIRED` | 令牌有效，但调用者是 ADMIN，或是一个不属于任何客户的 CUSTOMER |
-| 422 | `VALIDATION_ERROR` | 查询参数违反上面的规则（包括缺 `from_date` 或 `to_date`） |
+| 422 | `VALIDATION_ERROR` | 查询参数违反上面的规则（包括缺 `from_date` 或 `to_date`，以及 `format` 不是 `csv` / `xlsx`） |
 | 422 | `EXPORT_TOO_LARGE` | 超过 20 000 行 |
 | 422 | `QUERY_TOO_BROAD` | 查询超过 2 秒执行预算 |
 | 500 | `INTERNAL_ERROR` | 意外错误，**包括查询时数据库连接失败或中断**（与其他客户接口一致：查询时的连接错误不是 503），带 `request_id`；信封与通用 500 相同。钱包流水导出另有一种：客户的钱包缺失 |
 | 503 | `EXPORT_BUSY` | 已有一个导出在生成或下载；响应头 `Retry-After: 5`，几秒后重试 |
 | 503 | `DATABASE_NOT_CONFIGURED` | 服务端根本没有配置数据库 |
 
-所有错误都是 JSON 信封，不是 CSV。没有 404，也没有 403 `ACCOUNT_READ_ONLY`。
+所有错误都是 JSON 信封，不是 CSV 或 xlsx；两种格式的错误码与时机完全相同。没有 404，也没有 403 `ACCOUNT_READ_ONLY`。
 
 ---
 
