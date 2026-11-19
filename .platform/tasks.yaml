@@ -13705,7 +13705,7 @@ tasks:
     title: Excel 导出第五层：门户用量页的用量导出与月度汇总加导出 Excel 按钮
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「门户与管理端页面」「浏览器验收」：frontend/src/api/download.ts 加 ExportFormat 与 withExportFormat，frontend/src/api/customerUsage.ts 的用量导出与月度汇总导出加可选 format，门户用量页工具栏与月度汇总区各加一个 Excel 按钮，文案进 i18n；验收脚本加一个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-237
     acceptance_criteria:
