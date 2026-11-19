@@ -3569,6 +3569,12 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - **参数**：`group_by`、`occurred_from`、`occurred_to`、`customer_id`、`project_id`、`provider`、`model`、`feature`，
   语义、校验与 422 `VALIDATION_ERROR` 与上面的 `GET /api/v1/admin/usage-analytics` 完全相同（含手续费块为 `null`
   的条件）。**没有分页**：`page` / `page_size` 传了按未知参数忽略，一次导出全部分组。
+- **`format`**（AIH-TASK-237，设计闸门 #753 `APPROVED: design v1`，全文见
+  [design/AIH-TASK-234-excel-exports.md](design/AIH-TASK-234-excel-exports.md)）：可选，缺省 `csv`，只认小写的 `csv`
+  与 `xlsx`；其他值（包括 `XLSX`、`xls`、空串）422 `VALIDATION_ERROR`，字段名 `query.format`。与本接口其他参数一样
+  **在鉴权与其他参数校验之后**判：未登录 401、非 ADMIN 403 先于它，其他参数也非法时只报那些参数；非法的 `format`
+  不占导出名额、不发查询。不带或 `format=csv` 时返回的 CSV 与加这个参数之前逐字节相同；`format=xlsx` 时返回同一组行的
+  xlsx（见下文「xlsx」）。查询、筛选、行数上限、导出名额、错误码与日志不分格式。
 - **行**：每个分组一行 `GROUP`，顺序与 JSON 接口相同；最后恒有一行 `TOTAL`（没有任何分组时文件 = 表头 + `TOTAL`
   行，仍报手续费）。单元格取 JSON 接口的值转成文本：整数原样、金额与比率与 JSON 逐字相同（金额 8 位小数）、`null`
   写成空字段。格式（UTF-8 带 BOM、RFC 4180、行尾 `\r\n`、响应头 `Cache-Control: no-store` 等）同「客户导出」一节的「CSV 格式」。
@@ -3596,6 +3602,14 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - **文件名**：`usage-analytics_<group_by>_<from>_<to>.csv`，`<from>` / `<to>` 是解析后的 UTC 时刻加 8 小时、按
   `%Y%m%dT%H%M%S` 格式化再接字面 `MYT`，例 `usage-analytics_month_20260101T000000MYT_20270101T000000MYT.csv`；
   不拼任何请求里的原始字符串。
+- **xlsx**（`format=xlsx`）：文件名主干与 CSV 相同、扩展名换成 `.xlsx`，即
+  `usage-analytics_<group_by>_<from>_<to>.xlsx`，例 `usage-analytics_month_20260101T000000MYT_20270101T000000MYT.xlsx`；
+  一个工作表，名为 `usage-analytics`；表头、行数、行序（`GROUP` 行在前、`TOTAL` 行恒在末尾）与每个单元格的值都与同参数的
+  CSV 相同。单元格类型、公式前缀、控制字符、响应头与求和写法同「客户导出」一节的 [xlsx 格式](#xlsx-格式)：金额、比率
+  与平均值是文本单元格（与 CSV 逐字相同），整数列是这 10 列：`event_count`、`token_event_count`、`input_tokens`、
+  `output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`、`prepaid_event_count`、
+  `internal_event_count`、`paid_payment_count`、`gateway_fee_unknown_count`（值不超过 15 位时是数字单元格，否则退回文本）；
+  其余列都是文本单元格。**xlsx 与 CSV 含同样的内部成本、毛利与手续费，同样不得转发给客户。**
 - **行数上限**：最多 **20 000 个分组**（`TOTAL` 行不计入）；超过时 422 `EXPORT_TOO_LARGE`，不返回部分文件，缩短区间
   或加筛选条件后重试。
 - **导出名额**：与「客户导出」一节的导出名额**共用**同一个进程级名额（同一进程同一时刻至多一个
