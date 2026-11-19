@@ -13595,7 +13595,7 @@ tasks:
     title: Excel 导出第三层：客户四个导出接口加 xlsx 格式参数
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「参数 format」「各接口的改法」：app/api/customer.py 的四个客户导出接口加查询参数 format（ExportFormatParam，缺省 csv，只认 csv / xlsx），xlsx 时只在拼文件与构造响应那一步改用 AIH-TASK-235 的 write_xlsx 与 xlsx_response；三个 schema 模块加整数列常量；docs/api.md「客户导出」写明 xlsx。不改管理端接口与前端：属于 AIH-TASK-237 起的任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-235
     acceptance_criteria:
