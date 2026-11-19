@@ -222,6 +222,12 @@ services:
 
   api:
     <<: *backend
+    # Excel 导出（设计闸门 #753 §2「tmpfs」）：openpyxl 生成 xlsx 时总是先把工作表写进
+    # /tmp 下的临时文件。挂内存文件系统，客户数据就不落宿主机磁盘，容器重启即清空。
+    # ⚠️ 只挂给 api（只有它生成导出），所以写在这里而不是 x-backend 锚点里。
+    # ⚠️ tmpfs 的页计入上面的 mem_limit：128m 是上限不是预留，最坏多占约 60 MB、只在生成的几秒里。
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     environment:
       <<: *backend-environment
       BILLING_AI_ANTHROPIC_KEY_FILE: /run/secrets/billing_anthropic_key

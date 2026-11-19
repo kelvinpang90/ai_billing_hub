@@ -732,6 +732,23 @@ def test_the_api_gets_at_least_one_cpu(compose: dict) -> None:
     assert float(default.group(1)) >= 1.0, f"api cpus default={default.group(1)}"
 
 
+def test_only_the_api_mounts_tmp_as_tmpfs(compose: dict) -> None:
+    """设计闸门 #753 §2「tmpfs」：openpyxl 生成 xlsx 时先把工作表写进 /tmp 的临时文件。
+
+    ⚠️ 少了这一项，导出照样成功 —— 只是客户的计费明细明文落到了宿主机磁盘。
+    只挂给 api：写进 `x-backend` 锚点会让两个 celery 服务也继承它。
+    """
+    services = compose["services"]
+    assert services["api"]["tmpfs"] == ["/tmp:size=128m,mode=1777"]
+    for name, service in services.items():
+        if name == "api":
+            continue
+        tmpfs = service.get("tmpfs") or []
+        if isinstance(tmpfs, str):
+            tmpfs = [tmpfs]
+        assert not any(entry.split(":", 1)[0] == "/tmp" for entry in tmpfs), name
+
+
 def test_beat_does_not_inherit_the_api_memory_limit(compose: dict) -> None:
     """beat 只把任务名丢进队列，不执行任务，给它和 api 一样的额度是浪费。
 

@@ -367,6 +367,11 @@ worker。**但生产 VPS 只有 1 核**（第 3.1 节），那条结论**不转�
 `X-Accel-Buffering: no`，依赖两层 nginx（本项目的 `billing_nginx` 经 `billing.conf` 的
 `proxy_pass_header X-Accel-Buffering;` 照它关闭缓冲并转交外层，外层 `infra_nginx` 也照它关闭）都不缓冲、
 不写代理临时文件；改外层代理（例如加 `proxy_ignore_headers`，或在两层之间插入别的代理）时要核对这一点。
+Excel（xlsx）导出（设计闸门 #753 §2「tmpfs」「资源边界」）与 CSV 共用同一个进程级导出租约名额，不增加并发
+（月度汇总两种格式都不占）。生成 xlsx 时 openpyxl 把工作表写进临时文件，它在 api 容器 `/tmp` 的 tmpfs 里
+（`docker-compose.yml` 的 `/tmp:size=128m,mode=1777`，上限 128 MiB），不落宿主机磁盘、容器重启即清空；
+tmpfs 的页计入 api 的 768m `mem_limit`，最坏多占约 60 MB、只在生成的几秒里。单个导出的 Python 堆峰值仍
+≤ 128 MiB。加 tmpfs 是配置变化，部署时 `docker compose up -d` 会重建 api 容器。
 
 ⚠️ 合计 1.63 GB，而升配前可用只有 1.8 GB。**限额是上限不是预留**，正常占用远低于
 这个数；但它说明升配这件事不是可选的（决策 ③）。
