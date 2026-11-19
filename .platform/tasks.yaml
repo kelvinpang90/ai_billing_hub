@@ -13540,7 +13540,7 @@ tasks:
     title: Excel 导出第二层：通用 xlsx 写出模块与附件响应，公式注入防护与 CSV 共用
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「新模块 app/core/xlsx_export.py（AIH-TASK-235）」「临时文件（AIH-TASK-235 的清理步骤）」「单元格类型（逐列规则）」「金额为什么写文本」「公式注入防护」「可重现性」「资源边界（INV-1）」：新建 app/core/xlsx_export.py（write_xlsx、ExportXlsxResponse、xlsx_response、两个公开常量与一个私有正则），app/core/csv_export.py 抽出 formula_guarded 与 export_attachment_headers 供两种格式共用、CSV 输出逐字节不变；scripts/packaging_smoke.py 加一行导入。不接任何接口：属于 AIH-TASK-236、237。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-234
     acceptance_criteria:
