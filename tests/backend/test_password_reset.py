@@ -431,9 +431,7 @@ def test_a_used_token_in_the_window_still_throttles(session_factory, settings: S
     """限的是发出去的信：窗口内那张令牌已经用掉，也照样挡（设计 §2，Kelvin 已定）。"""
     make_user(session_factory)
     raw = issue_token(session_factory, settings)
-    reset_password(
-        session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT
-    )
+    reset_password(session_factory, settings, token=raw, new_password=NEW_PASSWORD, context=CONTEXT)
     assert token_rows(session_factory)[0].used_at is not None
 
     assert request_reset(session_factory, settings, email=EMAIL, context=CONTEXT) is None

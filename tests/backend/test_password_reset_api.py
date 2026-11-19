@@ -250,6 +250,39 @@ def test_an_unknown_address_triggers_no_delivery(client: TestClient) -> None:
     assert celery.calls == []
 
 
+def test_a_throttled_repeat_looks_like_an_unknown_address_repeat(client: TestClient) -> None:
+    """按账号限频（设计闸门 #751 v3 §7「对外不可区分」，I4）。
+
+    已知账号连发两次，第二次被限频；未知邮箱连发两次，两次都无事发生。四次响应必须
+    完全一样，被限频的那次也不能触发投递 —— 否则限频本身就成了「这个邮箱注册过」的信号。
+    """
+
+    class RecordingCelery:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def send_task(self, name, args=None, **_kwargs):  # noqa: ANN001
+            self.calls.append(name)
+
+    celery = RecordingCelery()
+    client.app.state.celery_app = celery
+
+    known_first = forgot(client)
+    assert celery.calls == ["app.tasks.outbox.deliver"]
+
+    known_throttled = forgot(client)
+    unknown_first = forgot(client, "nobody@example.com")
+    unknown_second = forgot(client, "nobody@example.com")
+
+    responses = [known_first, known_throttled, unknown_first, unknown_second]
+    assert {r.status_code for r in responses} == {200}
+    assert {(str(r.json()["data"]), str(r.json()["error"])) for r in responses} == {("{}", "None")}
+    assert celery.calls == ["app.tasks.outbox.deliver"], "被限频与未知邮箱都不该触发投递"
+
+    with client.app.state.session_factory() as session:
+        assert len(session.execute(select(DomainOutbox)).scalars().all()) == 1
+
+
 def test_the_reset_token_never_reaches_the_logs(client: TestClient) -> None:
     """spec §113 / §94：重置令牌和访问令牌一样，是一把可以直接用的钥匙。"""
     stream = io.StringIO()

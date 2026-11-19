@@ -16,13 +16,16 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy import create_engine, delete, event, func, select, text, update
 
 from alembic import command
 from app.core.config import Settings
@@ -30,9 +33,12 @@ from app.core.database import create_session_factory
 from app.core.errors import AppError
 from app.core.passwords import hash_password, verify_password
 from app.models.auth import (
+    AuditAction,
+    AuditLog,
     DomainOutbox,
     PasswordResetToken,
     RefreshToken,
+    TokenPurpose,
     User,
     UserRole,
     UserStatus,
@@ -50,6 +56,8 @@ needs_mysql = pytest.mark.skipif(
 PASSWORD = "a-perfectly-fine-passphrase"
 CONTEXT = RequestContext(ip_address="10.0.0.1", user_agent="pytest")
 EMAIL = "concurrency@example.com"
+# 场景 ③ 的两个账号（设计闸门 #751 v3 §7）。清场时与 `EMAIL` 一起删。
+GAP_EMAILS = ("concurrency-gap-1@example.com", "concurrency-gap-2@example.com")
 
 
 @pytest.fixture
@@ -82,17 +90,17 @@ def session_factory(monkeypatch):
         session.execute(delete(DomainOutbox))
         session.execute(delete(PasswordResetToken))
         session.execute(delete(RefreshToken))
-        session.execute(delete(User).where(User.email == EMAIL))
+        session.execute(delete(User).where(User.email.in_((EMAIL, *GAP_EMAILS))))
         session.commit()
     yield factory
     engine.dispose()
 
 
-def make_user(session_factory) -> int:
+def make_user(session_factory, email: str = EMAIL) -> int:
     now = utc_now()
     with session_factory() as session:
         user = User(
-            email=EMAIL,
+            email=email,
             password_hash=hash_password(PASSWORD),
             role=UserRole.ADMIN,
             status=UserStatus.ACTIVE,
@@ -104,13 +112,22 @@ def make_user(session_factory) -> int:
         return int(user.id)
 
 
-def issue_token(session_factory, settings: Settings) -> str:
-    request_reset(session_factory, settings, email=EMAIL, context=CONTEXT)
+def issue_token(session_factory, settings: Settings, *, now: dt.datetime | None = None) -> str:
+    # ⚠️ 断言真的签发了：按账号限频（#751 v3，I4）之后，窗口内的第二次申请返回 `None`，
+    # 不断言的话下面会悄悄读回上一张令牌的 outbox 行。
+    outbox_id = request_reset(session_factory, settings, email=EMAIL, context=CONTEXT, now=now)
+    assert outbox_id is not None, "这次申请被限频了：前一次签发要传早于窗口的 `now`"
     with session_factory() as session:
         row = session.execute(
             select(DomainOutbox).order_by(DomainOutbox.id.desc()).limit(1)
         ).scalar_one()
         return str(json.loads(row.payload_json)["token"])
+
+
+def before_the_window(settings: Settings) -> dt.datetime:
+    """A whole-second moment old enough not to throttle a request made now, yet still live."""
+    seconds = settings.password_reset_min_interval_seconds + 60
+    return utc_now().replace(microsecond=0) - dt.timedelta(seconds=seconds)
 
 
 @needs_mysql
@@ -130,8 +147,9 @@ def test_two_live_links_submitted_together_settle_cleanly(
     修法是先在 `users` 行上取锁，把加锁顺序统一成「先用户、后令牌」。
     """
     user_id = make_user(session_factory)
-    first = issue_token(session_factory, settings)
+    first = issue_token(session_factory, settings, now=before_the_window(settings))
     second = issue_token(session_factory, settings)
+    assert first != second
     passwords = {first: "first-brand-new-passphrase", second: "second-brand-new-passphrase"}
 
     def attempt(token: str):
@@ -202,8 +220,9 @@ def test_the_loser_reports_an_invalid_token_not_a_weak_password(
     from app.core import passwords as passwords_module
 
     make_user(session_factory)
-    winner = issue_token(session_factory, settings)
+    winner = issue_token(session_factory, settings, now=before_the_window(settings))
     loser = issue_token(session_factory, settings)
+    assert winner != loser
     strong = "the-winning-brand-new-passphrase"
 
     real_validate = passwords_module.validate_password_strength
@@ -275,3 +294,273 @@ def test_the_same_link_submitted_twice_at_once_only_lands_once(
 
     assert len([o for o in outcomes if o is None]) == 1
     assert len([o for o in outcomes if isinstance(o, InvalidResetToken)]) == 1
+
+
+# --- 按账号限频（设计闸门 #751 v3 §4、§7，I4）--------------------------------------
+#
+# ⚠️ 这四条守的是 `_start_reset` 在 MySQL 上用 READ COMMITTED 这一个决定，SQLite 上一条也测不出：
+# ① 删掉设 RC 的那一句（回到 RR）会变红；③ 把 RC 换回 v1 的 `with_for_update()` 锁读会变红；
+# ④ 守「RC 只动这一个事务、不泄漏到连接池」。
+
+POLL_INTERVAL_SECONDS = 0.05
+WAIT_LIMIT_SECONDS = 10
+
+# 只看本库（xdist 各 worker 的库在同一台 MySQL 上）`users` 表上的锁等待。
+# 不用 `information_schema.INNODB_TRX`：那是一份不满 0.1 秒不刷新、也不分库的缓存。
+_WAITING_ON_USERS = text(
+    "SELECT COUNT(*) FROM performance_schema.data_lock_waits AS w"
+    " JOIN performance_schema.data_locks AS l"
+    " ON l.ENGINE = w.ENGINE AND l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID"
+    " WHERE l.OBJECT_SCHEMA = DATABASE() AND l.OBJECT_NAME = 'users'"
+)
+
+_LOCKS_ON_RESET_TOKENS = text(
+    "SELECT LOCK_TYPE, LOCK_MODE, LOCK_STATUS, LOCK_DATA FROM performance_schema.data_locks"
+    " WHERE OBJECT_SCHEMA = DATABASE() AND OBJECT_NAME = 'password_reset_tokens'"
+)
+
+
+def wait_until_someone_waits_on_users(engine) -> bool:
+    deadline = time.monotonic() + WAIT_LIMIT_SECONDS
+    with engine.connect() as probe:
+        while time.monotonic() < deadline:
+            if probe.execute(_WAITING_ON_USERS).scalar_one():
+                return True
+            probe.rollback()
+            time.sleep(POLL_INTERVAL_SECONDS)
+    return False
+
+
+def reset_tokens_of(session_factory, user_id: int) -> list[PasswordResetToken]:
+    with session_factory() as session:
+        return list(
+            session.execute(
+                select(PasswordResetToken).where(PasswordResetToken.user_id == user_id)
+            ).scalars()
+        )
+
+
+def count_rows(session_factory, model) -> int:
+    with session_factory() as session:
+        return int(session.execute(select(func.count()).select_from(model)).scalar_one())
+
+
+def reset_requested_audits(session_factory) -> int:
+    with session_factory() as session:
+        return int(
+            session.execute(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(AuditLog.action == AuditAction.PASSWORD_RESET_REQUESTED)
+            ).scalar_one()
+        )
+
+
+@needs_mysql
+def test_a_request_queued_on_the_user_lock_sees_the_token_committed_meanwhile(
+    session_factory, settings: Settings
+) -> None:
+    """场景 ①：后到者在用户行锁上排队，拿到锁时先到者已提交 —— 它必须看到那张令牌。
+
+    RR 下后到者的快照建立在它第一次普通读（按邮箱找用户）时，早于先到者提交；拿到锁之后
+    的窗口查询读的仍是那份旧快照，看不到令牌，于是再发一封。RC 下那条查询执行时才取读视图。
+    """
+    user_id = make_user(session_factory)
+    engine = session_factory.kw["bind"]
+    moment = utc_now().replace(microsecond=0)
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = request_reset(
+                session_factory,
+                settings,
+                email=EMAIL,
+                context=CONTEXT,
+                now=moment + dt.timedelta(seconds=1),
+            )
+        except Exception as exc:  # noqa: BLE001 - reported by the assertions below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run)
+    with engine.connect() as holder:
+        # 先到者：锁住用户行，插入一张窗口内的令牌，先不提交。
+        holder.execute(select(User.id).where(User.id == user_id).with_for_update())
+        holder.execute(
+            PasswordResetToken.__table__.insert().values(
+                user_id=user_id,
+                token_hash="0" * 64,
+                purpose=TokenPurpose.PASSWORD_RESET.value,
+                created_at=moment,
+                expires_at=moment + dt.timedelta(seconds=settings.password_reset_ttl_seconds),
+            )
+        )
+        worker.start()
+        try:
+            queued = wait_until_someone_waits_on_users(engine)
+        finally:
+            holder.commit()
+    worker.join(15)
+
+    assert queued, "后到者没有在 users 行锁上排队，编排没有成立"
+    assert not worker.is_alive(), "后到者在先到者提交后仍未返回"
+    assert "error" not in outcome, f"后到者出错：{outcome.get('error')!r}"
+    assert outcome["result"] is None, "后到者必须被限频：它拿到锁时先到者的令牌已经提交"
+    assert [t.token_hash for t in reset_tokens_of(session_factory, user_id)] == ["0" * 64]
+    assert count_rows(session_factory, DomainOutbox) == 0
+    assert reset_requested_audits(session_factory) == 0
+
+
+@needs_mysql
+def test_two_simultaneous_requests_for_one_account_send_one_email(
+    session_factory, settings: Settings
+) -> None:
+    """场景 ②：同一账号两次并发申请，20 轮，每轮恰好一张令牌、一行 outbox、一条审计。"""
+    user_id = make_user(session_factory)
+    base = utc_now().replace(microsecond=0)
+    # 每轮往后挪过一个窗口，上一轮的令牌不挡下一轮。
+    step = dt.timedelta(seconds=settings.password_reset_min_interval_seconds + 1)
+
+    for round_no in range(20):
+        moment = base + round_no * step
+        start = threading.Barrier(2)
+
+        def attempt(_i: int, moment: dt.datetime = moment, start=start) -> int | None:  # noqa: ANN001
+            start.wait(WAIT_LIMIT_SECONDS)
+            return request_reset(
+                session_factory, settings, email=EMAIL, context=CONTEXT, now=moment
+            )
+
+        # 任何一边抛异常都会从 `pool.map` 冒出来让用例失败（「两个线程都正常返回」）。
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(attempt, [0, 1]))
+
+        issued = [r for r in results if r is not None]
+        assert len(issued) == 1, f"第 {round_no} 轮必须恰好签发一次，实际 {results}"
+        in_round = [t for t in reset_tokens_of(session_factory, user_id) if t.created_at == moment]
+        assert len(in_round) == 1, f"第 {round_no} 轮必须恰好一张令牌，实际 {len(in_round)}"
+
+    assert len(reset_tokens_of(session_factory, user_id)) == 20
+    assert count_rows(session_factory, DomainOutbox) == 20
+    assert reset_requested_audits(session_factory) == 20
+
+
+@needs_mysql
+def test_two_accounts_in_the_same_gap_share_no_lock(session_factory, settings: Settings) -> None:
+    """场景 ③：两个不同账号的窗口查询落在同一间隙（新索引末尾的 supremum），不能死锁。
+
+    两个线程都做完窗口查询、都还没插入令牌时停在屏障上；此刻 `password_reset_tokens`
+    上不能有任何锁。v1 的 `with_for_update()` 锁读在 RR 下会在这里留下 supremum 间隙锁，
+    放行后两边的插入意向锁互相挡住，一方以 1213 死锁失败 —— 而只有存在且 ACTIVE 的账号
+    才走得到这里，那个 500 就是账号存在的信号。
+    """
+    first_id = make_user(session_factory, GAP_EMAILS[0])
+    second_id = make_user(session_factory, GAP_EMAILS[1])
+    assert first_id < second_id
+    engine = session_factory.kw["bind"]
+
+    arrived = threading.Barrier(3)
+    release = threading.Barrier(3)
+    isolation_levels: list[str] = []
+
+    def hold_before_token_insert(conn, _cursor, statement, _params, _context, _many) -> None:  # noqa: ANN001
+        if not statement.lstrip().upper().startswith("INSERT INTO PASSWORD_RESET_TOKENS"):
+            return
+        # 用这个事务自己的连接读隔离级别：证明 RC 落在了真正签发的那个事务上。
+        probe = conn.connection.cursor()
+        try:
+            probe.execute("SELECT @@transaction_isolation")
+            isolation_levels.append(str(probe.fetchone()[0]))
+        finally:
+            probe.close()
+        arrived.wait(WAIT_LIMIT_SECONDS)
+        release.wait(WAIT_LIMIT_SECONDS)
+
+    outcomes: dict[str, object] = {}
+
+    def run(email: str) -> None:
+        try:
+            outcomes[email] = request_reset(session_factory, settings, email=email, context=CONTEXT)
+        except Exception as exc:  # noqa: BLE001 - reported by the assertions below
+            outcomes[email] = exc
+
+    threads = [threading.Thread(target=run, args=(email,)) for email in GAP_EMAILS]
+    event.listen(engine, "before_cursor_execute", hold_before_token_insert)
+    try:
+        for thread in threads:
+            thread.start()
+        try:
+            arrived.wait(WAIT_LIMIT_SECONDS)
+            with engine.connect() as probe:
+                locks = [tuple(row) for row in probe.execute(_LOCKS_ON_RESET_TOKENS)]
+            release.wait(WAIT_LIMIT_SECONDS)
+        except BaseException:
+            arrived.abort()
+            release.abort()
+            raise
+        finally:
+            for thread in threads:
+                thread.join(30)
+    finally:
+        event.remove(engine, "before_cursor_execute", hold_before_token_insert)
+
+    assert locks == [], f"两个线程都停在插入之前时，令牌表上不该有任何锁：{locks}"
+    assert isolation_levels == ["READ-COMMITTED", "READ-COMMITTED"]
+    assert all(isinstance(outcomes.get(email), int) for email in GAP_EMAILS), (
+        f"两个账号都必须正常签发（没有 1213）：{outcomes}"
+    )
+    assert len(reset_tokens_of(session_factory, first_id)) == 1
+    assert len(reset_tokens_of(session_factory, second_id)) == 1
+    assert count_rows(session_factory, DomainOutbox) == 2
+
+
+@needs_mysql
+def test_read_committed_does_not_leak_back_into_the_pool(
+    session_factory, settings: Settings, monkeypatch
+) -> None:
+    """场景 ④：连接池只有一条连接，每条路径之后借到的仍是 REPEATABLE READ。"""
+    user_id = make_user(session_factory)
+    engine = create_engine(TEST_DATABASE_URL, pool_size=1, max_overflow=0)
+    factory = create_session_factory(engine)
+    interval = dt.timedelta(seconds=settings.password_reset_min_interval_seconds)
+    moment = utc_now().replace(microsecond=0)
+    seen: list[tuple[str, str, int]] = []
+
+    def check(path: str) -> None:
+        with factory() as session:
+            level, connection_id = session.execute(
+                text("SELECT @@transaction_isolation, CONNECTION_ID()")
+            ).one()
+        seen.append((path, str(level), int(connection_id)))
+
+    def explode() -> str:
+        raise RuntimeError("injected inside _start_reset")
+
+    def ask(email: str = EMAIL, *, at: dt.datetime) -> int | None:
+        return request_reset(factory, settings, email=email, context=CONTEXT, now=at)
+
+    try:
+        assert ask(at=moment) is not None
+        check("issued")
+        assert ask(at=moment + dt.timedelta(seconds=1)) is None
+        check("throttled")
+        assert ask("nobody@example.com", at=moment) is None
+        check("unknown")
+        with monkeypatch.context() as patch:
+            patch.setattr("app.services.password_reset.generate_opaque_token", explode)
+            with pytest.raises(RuntimeError, match="injected"):
+                ask(at=moment + interval + dt.timedelta(seconds=1))
+        check("raised")
+        with factory() as session:
+            session.execute(
+                update(User).where(User.id == user_id).values(status=UserStatus.DISABLED)
+            )
+            session.commit()
+        assert ask(at=moment + 2 * interval + dt.timedelta(seconds=2)) is None
+        check("inactive")
+    finally:
+        engine.dispose()
+
+    paths = ("issued", "throttled", "unknown", "raised", "inactive")
+    assert [(path, level) for path, level, _ in seen] == [(p, "REPEATABLE-READ") for p in paths]
+    assert len({connection_id for *_, connection_id in seen}) == 1, "必须是同一条物理连接"
