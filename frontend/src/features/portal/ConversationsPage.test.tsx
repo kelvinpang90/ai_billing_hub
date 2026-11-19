@@ -13,6 +13,9 @@
  * request_id 的通用失败、换筛选时收起失败、导出不影响列表。导出接口同样在 `client.get` 上按路径回应：成功回一个
  * blob 文件，失败回一个响应体是 blob 的 `AxiosError`（与浏览器里 `responseType: "blob"` 的失败同形）。jsdom 没有
  * 对象 URL，也不会真下载：装上替身、拦下链接的点击，只记录下载的文件名。
+ *
+ * 「Export Excel」（AIH-TASK-239）覆盖设计闸门 #753 v1 §7「前端按钮」：两个按钮都在、点 Excel 用已应用的筛选与
+ * `format=xlsx`、下载中两个都不可点且加载状态在被点的那个上、失败文案与 CSV 相同并按原规则收起、区间无效时两个都不可用。
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -674,6 +677,165 @@ describe("ConversationsPage export", () => {
     expect(screen.queryByText("req-export-500")).not.toBeInTheDocument();
     await waitFor(() => {
       expect(conversationUrls(get).at(-1)).toBe(`${CONVERSATIONS_URL}?from_date=2026-10-02&to_date=2026-10-25&page_size=20`);
+    });
+  });
+
+  describe("Excel (AIH-TASK-239)", () => {
+    const XLSX_NAME = /Export Excel/;
+
+    it("puts Export Excel right of Export CSV and exports the applied filters with format=xlsx, ignoring what is still being typed", async () => {
+      const user = userEvent.setup();
+      const get = serve(() => page([conversation()]), PROJECTS, () => file());
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      const csv = screen.getByRole("button", { name: EXPORT_NAME });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+      expect(screen.getAllByRole("button", { name: XLSX_NAME })).toHaveLength(1);
+      expect(csv).toBeEnabled();
+      expect(xlsx).toBeEnabled();
+      expect(csv.compareDocumentPosition(xlsx) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+      setDate("From (Malaysia time)", "2026-10-02");
+      setDate("To (Malaysia time)", "2026-10-20");
+      await choose("Project", "Sales assistant");
+      await user.click(screen.getByRole("button", { name: "Apply filters" }));
+      await waitFor(() => {
+        expect(conversationUrls(get).at(-1)).toBe(
+          `${CONVERSATIONS_URL}?from_date=2026-10-02&to_date=2026-10-20&project_id=${OTHER_PROJECT_ID}&page_size=20`,
+        );
+      });
+      // 填了但没点「Apply filters」：不算数。
+      setDate("From (Malaysia time)", "2026-10-05");
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      // 响应没有 Content-Disposition：兜底文件名是 .xlsx，用的同样是已应用的区间。
+      await waitFor(() => {
+        expect(downloads).toEqual(["conversations_2026-10-02_2026-10-20.xlsx"]);
+      });
+      expect(exportUrls(get)).toEqual([
+        `${EXPORT_URL}?from_date=2026-10-02&to_date=2026-10-20&project_id=${OTHER_PROJECT_ID}&format=xlsx`,
+      ]);
+      for (const url of exportUrls(get)) {
+        expect(url).not.toMatch(/page_size|cursor/);
+      }
+      for (const [url] of get.mock.calls) {
+        expect(url).not.toContain("/api/v1/admin/");
+        expect(url).not.toMatch(/tenant|customer_id/);
+      }
+    });
+
+    it("disables both buttons while exporting and shows loading only on the one clicked", async () => {
+      const user = userEvent.setup();
+      const get = serve(() => page([conversation()]), PROJECTS, () => PENDING);
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      });
+      const csv = screen.getByRole("button", { name: EXPORT_NAME });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+      expect(csv).toBeDisabled();
+      expect(within(xlsx).getByRole("img", { name: "loading" })).toBeInTheDocument();
+      expect(within(csv).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+      fireEvent.click(csv);
+      fireEvent.click(xlsx);
+      expect(exportUrls(get)).toEqual([`${EXPORT_URL}?from_date=2026-10-01&to_date=2026-10-25&format=xlsx`]);
+      expect(downloads).toEqual([]);
+    });
+
+    it("shows loading only on Export CSV when that is the one clicked", async () => {
+      const user = userEvent.setup();
+      serve(() => page([conversation()]), PROJECTS, () => PENDING);
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      });
+      const csv = screen.getByRole("button", { name: EXPORT_NAME });
+      const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+      expect(within(csv).getByRole("img", { name: "loading" })).toBeInTheDocument();
+      expect(within(xlsx).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+    });
+
+    it.each<[number, string, string]>([
+      [
+        422,
+        "EXPORT_TOO_LARGE",
+        "This export has more than 20,000 conversations. Narrow the date range or choose a project, then try again.",
+      ],
+      [
+        422,
+        "QUERY_TOO_BROAD",
+        "This export covers too much usage to finish in time. Narrow the date range or choose a project, then try again.",
+      ],
+      [503, "EXPORT_BUSY", "Another export is in progress. Wait a few seconds, then try again."],
+    ])("explains a %s %s with the same words as for CSV", async (status, code, text) => {
+      const user = userEvent.setup();
+      serve(() => page([conversation()]), PROJECTS, () => failure(status, code, "req-export-specific"));
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      expect(await screen.findByText(text)).toBeInTheDocument();
+      expect(screen.queryByText(FAILED)).not.toBeInTheDocument();
+      expect(screen.queryByText("req-export-specific")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeEnabled();
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeEnabled();
+      expect(downloads).toEqual([]);
+    });
+
+    it("shows any other failure with its request id, without naming the format, and drops it when the filters change", async () => {
+      const user = userEvent.setup();
+      serve(() => page([conversation()]), PROJECTS, () => failure(500, "INTERNAL_ERROR", "req-export-500"));
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+      expect(await screen.findByText(FAILED)).toBeInTheDocument();
+      expect(screen.getByText("req-export-500")).toBeInTheDocument();
+      // 失败文案不提格式。
+      expect(screen.getByRole("alert").textContent ?? "").not.toMatch(/excel|xlsx|csv/i);
+
+      setDate("From (Malaysia time)", "2026-10-02");
+      await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+      await waitFor(() => {
+        expect(screen.queryByText(FAILED)).not.toBeInTheDocument();
+      });
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeEnabled();
+    });
+
+    it.each<[string, string, string]>([
+      ["reversed", "2026-10-20", "2026-10-10"],
+      ["longer than 92 days", "2026-07-01", "2026-10-01"],
+      ["incomplete", "", "2026-10-10"],
+    ])("cannot export with either button when the applied range is %s", async (_, from, to) => {
+      const user = userEvent.setup();
+      const get = serve(() => page([conversation()]), PROJECTS, () => file());
+      renderPage();
+      await screen.findByText("Customer service bot", { selector: "td" });
+
+      setDate("From (Malaysia time)", from);
+      setDate("To (Malaysia time)", to);
+      await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+      });
+      expect(screen.getByRole("button", { name: EXPORT_NAME })).toBeDisabled();
+      fireEvent.click(screen.getByRole("button", { name: XLSX_NAME }));
+      expect(exportUrls(get)).toEqual([]);
+      expect(downloads).toEqual([]);
     });
   });
 });
