@@ -40,6 +40,9 @@ from app.models import (
     pricing_rules as _pricing_rule_models,  # noqa: F401  (registers the three pricing rule tables)
 )
 from app.models import (
+    provider_cost_reconciliations as _provider_cost_models,  # noqa: F401  (registers the table)
+)
+from app.models import (
     provider_prices as _provider_price_models,  # noqa: F401  (registers the two price tables)
 )
 from app.models import (

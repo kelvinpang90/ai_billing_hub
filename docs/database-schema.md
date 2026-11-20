@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-11-16
+> 最后更新：2026-11-17
 
 ---
 
@@ -20,8 +20,9 @@
   金额列：`tenants.low_balance_threshold`、`wallets.balance`、`wallet_transactions` 的
   `amount` / `balance_before` / `balance_after`；`provider_price_components` 的 `rate_amount`（原币种单价）与
   `unit_quantity`（多少个计量单位）同一精度；`payments` 的 `expected_amount`、`wallet_credit_amount`、`tax_amount`、
-  `confirmed_amount`、`gateway_fee` 也是，`payment_receipts.amount` 也是。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
-  #183 §2），同样不用浮点
+  `confirmed_amount`、`gateway_fee` 也是，`payment_receipts.amount` 也是，`provider_cost_reconciliations` 的 `source_total`、
+  `reconciled_cost_myr`、`estimated_source_cost`、`estimated_cost_myr` 也是。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
+  #183 §2），`provider_cost_reconciliations.fx_rate_applied` 同精度，同样不用浮点
 - **枚举列**：非原生 enum，`VARCHAR` 宽度写死（理由见 `app/models/auth.py` 的 `_ENUM_LENGTH`）
 
 ---
@@ -1824,6 +1825,118 @@ AIH-TASK-201）。
   `DROP` 之间中断的降级），两张都不在时不发 DDL。`--sql` 离线模式判断不了是否为空，直接拒绝、不输出 `DROP`。
 - **生产只回滚应用镜像，不降级 0039**：回滚到 AIH-TASK-200 之前的镜像后新入账不再开具收据，重新部署后补发扫描补开（不发
   邮件）。需要修复时一律前滚。
+
+---
+
+## `provider_cost_reconciliations`（spec §14、§17.1、§19、§74.5；ADR-0016；AIH-TASK-242，迁移 `0041_provider_cost_recon`）
+
+设计依据：[design/AIH-TASK-242-provider-cost-reconciliation.md](design/AIH-TASK-242-provider-cost-reconciliation.md)（设计闸门
+#755 v1，建立在毛利分析设计闸门 #709 v2 之上）§2「数据库（迁移 0041，AIH-TASK-242）」、§3 INV-6、INV-10、§4、§6 与 §8。
+一行是一个供应商 × 范围 × UTC 自然月的**实际成本记录**：管理员按供应商账单或 Console 成本页手工录入的来源币种原值（不含税），
+按期间最后一刻生效的已发布汇率版本换算成的 MYR，以及确认那一刻范围内的估算与诊断计数快照。行**只插入**，不改、不删。模型在
+`app/models/provider_cost_reconciliations.py`。AIH-TASK-242 只建表与触发器，部署后表是空的，没有写入方。
+
+**口径**：
+
+- **期间 = UTC 自然月**：`billing_month` 是 `YYYY-MM`，`period_start` 是该月 1 日 00:00 UTC，`period_end` 是下月 1 日 00:00 UTC，
+  左闭右开；**不是** ADR-0003 的马来西亚月（与 Console 成本页的日边界一致）。
+- **范围 `AI_MODULE`**：经 AI 模块发出的调用，判据是用量事件的 `event_id` 出现在 `ai_usage_outbox` 里；集成方用自己的密钥上报的
+  同供应商用量不在范围内。`scope` 只许这一个值（CHECK），覆盖方式 `coverage_method` 只许 `PERIOD_AGGREGATE`（供应商 × 期间一个
+  合计数，不分模型、不落到逐请求）。
+- **只插入**：更正 = 追加一行取代行（`supersedes_id` 指向被取代的那一行，必填 `reason`），旧行保留、不改。
+- **取代链与当前版本**：同一供应商、范围、月份至多一个根（`supersedes_id` 为空的行），每行至多被取代一次，取代者与被取代者必是同一
+  供应商、范围、月份，所以每月的记录是一条单链。**当前版本 = 没有任何行的 `supersedes_id` 指向它**；已被取代 = 有。没有状态列，
+  派生状态不需要改行。
+
+| 列 | 类型 | 约束 / 含义 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_provider_cost_reconciliations_public_id`）；uuid4，对外 id（接口里的 `reconciliation_id`） |
+| `provider_id` | BIGINT | 非空；外键 → `ai_providers(id)` `ON DELETE RESTRICT`（`fk_provider_cost_reconciliations_provider_id`） |
+| `scope` | VARCHAR(16) | 非空；只许 `AI_MODULE`（`ck_provider_cost_reconciliations_scope`：`scope IN ('AI_MODULE')`） |
+| `billing_month` | CHAR(7) | 非空；`YYYY-MM`，UTC 自然月；格式由应用层校验（同 `base_currency` 不做正则 CHECK 的惯例） |
+| `period_start`、`period_end` | DATETIME | 非空；不带时区的 UTC，月首与下月首（`ck_provider_cost_reconciliations_period`：`period_start < period_end`），把口径写死在行上 |
+| `source_document_reference` | VARCHAR(255) | 非空；来源说明（例：工作区名称 + 月份 + 页面或账单号）；不写合同价 |
+| `source_currency` | CHAR(3) | 非空；录入币种 |
+| `source_total` | DECIMAL(20,8) | 非空；录入的实际成本（来源币种原值，不含税），`>= 0`（`ck_provider_cost_reconciliations_source_total`） |
+| `fx_rate_version_id` | BIGINT | 可空；期间最后一刻（`period_end − 1µs`）生效的已发布汇率版本；外键 → `fx_rate_versions(id)` `ON DELETE RESTRICT`（`fk_provider_cost_reconciliations_fx_rate_version_id`）；MYR 录入时为空 |
+| `fx_rate_applied` | DECIMAL(24,10) | 可空；该版本的汇率值（与 `fx_rate_versions.rate` 同精度）；MYR 录入时为空 |
+| `reconciled_cost_myr` | DECIMAL(20,8) | 非空；换算后的实际 MYR 成本，`>= 0`（`ck_provider_cost_reconciliations_reconciled_cost`）；MYR 录入时等于 `source_total`，否则 `quantize_money(source_total × fx_rate_applied)` |
+| `coverage_method` | VARCHAR(32) | 非空；只许 `PERIOD_AGGREGATE`（`ck_provider_cost_reconciliations_coverage_method`） |
+| `estimated_event_count` | BIGINT | 非空，`>= 0`；确认时范围内已处理事件数 |
+| `unprocessed_event_count` | BIGINT | 非空，`>= 0`；确认时期间内属于 AI 模块、尚未 `PROCESSED` 的事件数（不限供应商） |
+| `outbox_unsettled_count` | BIGINT | 非空，`>= 0`；确认时 `created_at` 在期间内、状态 `PENDING / SENDING / HELD / DEAD` 的 outbox 行数 |
+| `outbox_discarded_count` | BIGINT | 非空，`>= 0`；同一区间状态 `DISCARDED` 的 outbox 行数 |
+| `estimated_source_cost` | DECIMAL(20,8) | 非空，`>= 0`；确认时范围内已处理事件里来源币种等于录入币种的 `provider_source_cost` 之和 |
+| `estimated_cost_myr` | DECIMAL(20,8) | 非空，`>= 0`；确认时范围内已处理事件的 `estimated_provider_cost_myr` 之和 |
+| `supersedes_id` | BIGINT | 可空；被本行取代的那一行，根为空 |
+| `reason` | VARCHAR(255) | 可空；更正理由，根为空、取代行必填 |
+| `created_by` | BIGINT | 非空；确认的管理员；外键 → `users(id)` `ON DELETE RESTRICT`（`fk_provider_cost_reconciliations_created_by`） |
+| `created_at` | DATETIME | 非空；整秒 UTC |
+| `root_slot` | INT | STORED 生成列 `CASE WHEN supersedes_id IS NULL THEN 1 END`：根为 1，取代行为 NULL（写法同 `fx_rate_versions.open_slot`）；只读，ORM 从不写它 |
+
+八个计数与估算列各有一条 `>= 0` 的 CHECK（`ck_provider_cost_reconciliations_` 加 `estimated_event_count`、
+`unprocessed_event_count`、`outbox_unsettled_count`、`outbox_discarded_count`、`estimated_source_cost`、`estimated_cost_myr`；
+连同上表点名的共 13 条）。另两条：
+
+- `ck_provider_cost_reconciliations_fx`：`(source_currency = 'MYR' AND fx_rate_version_id IS NULL AND fx_rate_applied IS NULL
+  AND reconciled_cost_myr = source_total) OR (source_currency <> 'MYR' AND fx_rate_version_id IS NOT NULL AND fx_rate_applied IS NOT
+  NULL AND fx_rate_applied > 0)`。逐列写 `IS NOT NULL`，不用行构造器（同 `usage_events` 的 `PROCESSED_SNAPSHOT_CHECK`）。
+- `ck_provider_cost_reconciliations_reason`：`(supersedes_id IS NULL AND reason IS NULL) OR (supersedes_id IS NOT NULL AND reason
+  IS NOT NULL)`。
+
+约束与索引（除主键外**恰好六个**索引；每个外键在子表上都有前导列一致的索引，MySQL 不自建隐藏索引）：
+
+- 唯一 `ux_provider_cost_reconciliations_root (provider_id, scope, billing_month, root_slot)`：同一供应商、范围、月份至多一个根
+  （唯一索引不管 NULL，取代行不受约束）；也是 `provider_id` 外键用的索引。
+- 唯一 `uq_provider_cost_reconciliations_public_id (public_id)`。
+- 唯一 `uq_provider_cost_reconciliations_supersedes (supersedes_id, provider_id, scope, billing_month)`：复合自引用外键在子表上的
+  索引（前导列与外键列同名同序，不另建只有 `supersedes_id` 的索引）；因外键保证后三列等于被取代行的，四列唯一等价于
+  `supersedes_id` 唯一，即**每行至多被取代一次**。
+- 唯一 `uq_provider_cost_reconciliations_chain_key (id, provider_id, scope, billing_month)`：复合自引用外键在父表一侧引用的键。
+- `ix_provider_cost_reconciliations_fx_rate_version_id`、`ix_provider_cost_reconciliations_created_by`，非唯一：外键列的**显式**索引
+  （与 `payment_receipts` 同一理由）。
+- 复合自引用外键 `fk_provider_cost_reconciliations_supersedes (supersedes_id, provider_id, scope, billing_month)` →
+  `(id, provider_id, scope, billing_month)`：取代者与被取代者必是同一供应商、范围、月份；`supersedes_id` 为空时 MATCH SIMPLE 不检查。
+- 四个外键都是 `RESTRICT`：删供应商、汇率版本、用户或被取代的行都不许连带删掉记录。
+- 后端测试的 SQLite 由模型 `create_all` 建表，不开 `PRAGMA foreign_keys`：复合外键只在 MySQL 上测；CHECK 与唯一索引两种库都测
+  （`tests/backend/test_provider_cost_reconciliations_migration.py`）。
+
+**与 spec §74.5 字段的对应**：`billing_period` 落为 `billing_month` 加 `period_start` / `period_end`（把 UTC 自然月的口径写死在
+行上）；`metadata_json` **不建**：所有字段都是结构化列，没有要放进去的东西（设计 §10「我定的」第 5 条）；也不建状态列（当前版本
+是派生的，见上文「口径」）。
+
+**行由谁写**：只有 AIH-TASK-244 的 `confirm`（`app/services/provider_cost_reconciliation.py`），在同一事务里 INSERT 记录与审计；
+根撞 `ux_…_root`、更正撞 `uq_…_supersedes` 时 409。没有任何更新与删除路径。
+
+**谁读**：管理端供应商成本对账页（月份总览、详情与更正链，AIH-TASK-245、246）、毛利分析的对账后成本分摊
+（AIH-TASK-247..249，`docs/design/AIH-TASK-247-provider-cost-allocation.md`）、`usage_processing_backlog` 告警的「上月满 9 天未对账」
+（AIH-TASK-250，只读供应商代码与月份）。客户永远看不到（INV-7）。
+
+### 触发器（迁移 0041 建，只在 MySQL 上）
+
+| 触发器 | 时机 | 作用 |
+| --- | --- | --- |
+| `trg_provider_cost_reconciliations_before_update` | BEFORE UPDATE | 无条件 `SIGNAL SQLSTATE '45000'`（`provider_cost_reconciliations rows are immutable`） |
+| `trg_provider_cost_reconciliations_before_delete` | BEFORE DELETE | 同上 |
+
+**记录行不可改、不可删**（设计 §4 跃迁表最后一行、§6「公开仓库与保留」：对账记录与审计永久保留）：任何 UPDATE（改哪一列都一样）与
+DELETE 都被拒绝，记录写错只能追加取代行。SQLite 上没有这两个触发器（与 0039 同一惯例），服务层本来就没有更新与删除路径。
+`TRUNCATE` / `DROP` 是 DDL，不经触发器；测试清理用关外键检查加 `TRUNCATE`（表引用自己），不删触发器。
+
+### 迁移与回滚（设计 §2「数据库」、§8）
+
+- 0041 只建这一张新表与两个触发器，不改任何已有表、不回填。MySQL 上表是**一条**原子的 `CREATE TABLE`（生成列、索引、外键与 CHECK
+  都在里面），之后两条 `CREATE TRIGGER`。缺什么建什么（补完在建表与建触发器之间中断的升级：只补缺的触发器）。
+- 之前先检查、不对就报错且不发 DDL：表存在时逐项比形状（列的名称、类型与宽度、可空性，**不比服务端默认值**；`root_slot` 是 STORED
+  生成列且表达式是设计的；主键、索引、外键与 `RESTRICT`、CHECK 名称）；MySQL 上读 `information_schema.TRIGGERS` 逐个比两个
+  触发器的所在表、时机、事件与主体。
+- 预检 `@@log_bin` 与 `@@log_bin_trust_function_creators`（与 0039 同一个）只在要发 DDL 时跑，紧接在第一条 DDL 之前；什么都不缺时
+  不跑。`--sql` 离线模式按「什么都没做过」输出全部语句。
+- **有行时降级被拒**：`downgrade` 先查 `SELECT 1 FROM provider_cost_reconciliations LIMIT 1`，有任何一行就抛错，不发 DDL、不删行，
+  `alembic_version` 仍是 0041。为空时先删两个触发器（只删存在的），再删表；表已不在时不发 DDL。`--sql` 离线模式判断不了是否为空，
+  直接拒绝、不输出 `DROP`。
+- **生产只回滚应用镜像，不降级 0041**；记录写错用更正（追加取代行），不删行。
 
 ---
 
