@@ -14022,7 +14022,7 @@ tasks:
     title: 供应商成本对账第二层：范围内估算聚合、诊断计数与对账记录的读写仓储
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「口径」「仓储」：新建 app/repositories/provider_cost_reconciliations.py（ai_module_origin、scope_estimate、scope_estimated_myr、unprocessed_count、outbox_counts、scope_providers、current_record、get_by_public_id、chain、has_successor、current_records_overlapping、insert_record）；设计 §7 的标准世界放进新辅助模块 tests/backend/provider_cost_world.py，夹具在 conftest 注册。不写服务与接口：属于 AIH-TASK-244 起的任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-242
     acceptance_criteria:
