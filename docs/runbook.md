@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-11-16
+> 最后更新：2026-11-20
 
 ---
 
@@ -1800,6 +1800,93 @@ echo "exit=$?"
 3. 不含成本、毛利、加价、汇率、税额栏或 SST 注册号
 
 不一致时按上表与设计 §10 处置并记下对账单 `public_id`，不要把金额与公司名写进工单。
+
+---
+
+## xlsx 导出失败
+
+**首次编写：2026-11-20（AIH-TASK-241）。依据：设计闸门 #753 v1（[设计文件](design/AIH-TASK-234-excel-exports.md)）§2「tmpfs（AIH-TASK-234）」、
+§5（含「各导出的失败日志」）、§8「监控」、§10。**接口契约见 [api.md「客户导出」](api.md#客户导出)与其中的「xlsx 格式」小节。
+
+客户门户的四个导出（用量、钱包流水、月度汇总、会话）与管理端毛利分析导出带 `format=xlsx` 时返回 `.xlsx`。openpyxl
+生成时总是先把工作表写进 `api` 容器的 `/tmp`，那里挂的是内存文件系统（tmpfs，上限 128 MiB，计入 `api` 的
+`mem_limit`）；成功或失败后 `write_xlsx` 都会删掉这次的临时文件。CSV、JSON 接口与 AI 模块都不写 `/tmp`。
+
+### 怎么发现
+
+⚠️ **没有告警维度**（设计 §8：无新告警），**只在 ERROR 日志**；通常是客户或管理员反馈「导出 Excel 失败」（对外是 500
+`INTERNAL_ERROR`，固定文案）后，按请求时刻与 `request_id` 去 api 的日志里找。各导出的失败日志不同（设计 §5「各导出的失败日志」）：
+
+| 导出 | ERROR 日志（消息） | 怎么认 |
+| --- | --- | --- |
+| 用量、钱包流水、会话（占导出租约） | `customer_export_failed`（`app.api.customer`） | `extra` 的 `path` 是对应的导出路径 |
+| 管理端毛利分析 | `admin_usage_analytics_export_failed`（`app.api.admin_usage_analytics`） | `path` 是 `/api/v1/admin/usage-analytics/export` |
+| 月度汇总（不占租约、不包 `try`）的**任何**失败 | `Unhandled exception`（`app.core.errors` 的 `handle_unexpected_error`，通用 500 处理器） | `path` 是 `/api/v1/customer/usage-summary/export` |
+| 钱包导出在拿租约**之前**发现钱包缺失 | `Unhandled exception`（同上） | `path` 是 `/api/v1/customer/wallet/transactions/export` |
+
+四种都带栈、`extra` 只有 `path`，不带筛选值、公司名、金额与文件内容。⚠️ 查月度汇总的 xlsx 失败要找**路径为
+`/api/v1/customer/usage-summary/export` 的 `Unhandled exception`**，不是 `customer_export_failed`。`QUERY_TOO_BROAD`
+不是失败日志（是现有的 `customer_usage_query_timeout`），`EXPORT_BUSY`（503）是正常的串行，不在本节。
+
+### 影响什么
+
+| 情形 | 影响 |
+| --- | --- |
+| 一次生成出错（openpyxl 异常、`MemoryError`、超长文本等） | 只影响那一次 xlsx 导出；同样参数的 CSV、其他接口与 AI 模块不受影响；只读，没有业务状态要修 |
+| tmpfs 写满（栈里是 `OSError: No space left on device`） | **所有** xlsx 导出都 500，直到处置完；CSV、JSON 接口与 AI 模块照常 |
+| 按下面第三步重启 `api` | 影响扩大到**整个 api 进程**：计费、门户、管理端与 AI 模块一起中断（见「恢复」） |
+
+### 立刻做什么
+
+1. 按「怎么发现」的表找到那一行 ERROR 日志，看栈。
+2. 栈里**不是** `No space left on device`：这是生成本身的错误。偶发的让客户重新导出；同样的错误对同样的参数反复出现，按栈修代码
+   （临时文件已由 `write_xlsx` 删掉，不需要人清理）；急用时请客户先用 CSV（同一查询、同一列）。
+3. 栈里**是** `No space left on device`：照设计 §2「tmpfs 写满时怎么判断、怎么处置」三步走。正常路径写不满 128 MiB
+   （单个导出的工作表 ≤ 96 MiB、大导出由租约串行），所以「满」是异常，先查证再动手：
+   1. **确认是否真的满**（只读）：
+
+      ```bash
+      docker compose exec api df -h /tmp
+      docker compose exec api ls -la --time-style=full-iso /tmp
+      ```
+
+      看 `Use%`，以及是什么文件、多大、多旧。**没满就不是这个原因**，回到失败日志的栈。
+   2. **不重启的处置**：残留的是 `openpyxl.` 开头、修改时间早于 10 分钟的文件时，只删它们：
+
+      ```bash
+      docker compose exec api find /tmp -maxdepth 1 -name 'openpyxl.*' -mmin +10 -delete
+      docker compose exec api df -h /tmp
+      ```
+
+      10 分钟远长于任何一次生成加发送，不会删到正在写的文件；这一步不影响任何请求。删后已不满，就到「恢复」第 1 条。
+   3. **第二步之后仍满**（占满的不是 openpyxl 的文件）**才重启 `api`**，做法与影响面见「恢复」第 2 条。
+
+### 恢复
+
+1. 请客户（或管理员自己）**重新导出**；处置期间急用的先用 CSV。
+2. 需要重启 `api` 时：`docker compose restart api`。影响面（以代码为准）：
+   - uvicorn 优雅排空最长 85 秒（`Dockerfile` 的 `--timeout-graceful-shutdown 85`）、容器宽限 100 秒
+     （`docker-compose.yml` 的 `stop_grace_period: 100s`），**期间新请求失败**，进行中的 AI 调用在排空窗口内尽量完成；
+     计费、门户、管理端与 AI 模块在同一进程，**一起中断**
+   - 停机时 AI 模块内存里的暂存缓冲（`HeldBuffer`）做最后一次落库，**限时 5 秒**（`app/main.py` 的停机钩子）；落不完的条目
+     只留日志 —— 按本文件「AI 模块用量 outbox」一节的「积压与从日志补录」，从消息为 `AI usage not persisted` 的日志行用
+     `python -m app.cli ai-usage-held import --from-log-line '<完整 JSON 行>' --reason '<事故编号>'` 补录
+   - **时机选低峰**；不紧急时（只影响 xlsx 导出，CSV 可替代）先告诉客户改用 CSV，等低峰再重启
+   - 重启后 tmpfs 清空，再 `docker compose exec api df -h /tmp` 复核，然后请客户重新导出
+
+**客户问「Excel 里金额求和为 0」**：这不是故障。金额（以及 `quantity`、比率）是**文本单元格**，字符与 CSV、JSON 接口逐字相同，
+为的是不让 Excel 的双精度丢掉 8 位小数的精度，所以 Excel 标「以文本形式存储的数字」、直接 `SUM` 得 0。答复客户：求和写法见
+[api.md「客户导出」](api.md#客户导出)的「xlsx 格式」小节（例如 `=SUMPRODUCT(VALUE(range))`）；月度汇总本来就有 `TOTAL` 行。
+token、序号、计数等整数列是数字单元格，可以直接求和。
+
+### 绝不能做什么
+
+- **不要删 `/tmp` 下不明来源或 10 分钟内的文件**：可能是另一个导出正在写的文件（月度汇总不占租约，可以与大导出并发），删了会让它失败
+- **不要用 `docker compose down` 代替 `restart`**：会删网络与容器，扩大影响
+- **不要为腾空间去改 tmpfs 的 `size`**：上限是设计定的（计入 `mem_limit`），要改须回设计闸门
+- **不要去掉 `api` 的 tmpfs，或把临时目录改到宿主机磁盘**：客户计费明细会明文落盘（spec §112 要求导出安全删除）
+- **不过 AIH-TASK-235 的用例就不要升级 openpyxl**：依赖上界写成 `<3.2`，是因为 `write_xlsx` 失败时的临时文件清理依赖
+  openpyxl 3.1 的私有属性；属性名变了，清理会失效，残留文件才会真的把 tmpfs 写满
 
 ---
 
