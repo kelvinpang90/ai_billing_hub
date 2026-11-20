@@ -57,7 +57,7 @@ from app.models.ai_catalog import (
     UsageMeterComponent,
     UsageMeterType,
 )
-from app.models.auth import User, UserRole, UserStatus
+from app.models.auth import DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base, quantize_money
 from app.models.fx_rates import FxRateVersion
 from app.models.integration import CredentialStatus, IntegrationCredential
@@ -65,10 +65,13 @@ from app.models.pricing_rules import PricingRule, PricingScope, PricingStrategy
 from app.models.provider_prices import ProviderPriceVersion
 from app.models.tenancy import BillingMode, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
+from app.models.wallet import TransactionType, Wallet
 from app.repositories import provider_cost_reconciliations as reconciliations
+from app.repositories.wallet import create_wallet
 from app.schemas.provider_prices import ComponentInput
 from app.services import ai_catalog, fx_rates, pricing_rules, provider_prices
 from app.services.auth import RequestContext
+from app.services.wallet_adjustments import post_adjustment
 
 TEST_EMAIL_DOMAIN = "@provider-cost-test.example.com"
 CONTEXT = RequestContext(ip_address="203.0.113.75", user_agent="provider-cost-world")
@@ -859,6 +862,60 @@ def clean(engine: Engine) -> None:
         connection.execute(delete(AiModel))
         connection.execute(delete(AiProvider))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
+
+
+# --- 钱包（AIH-TASK-244「快照不变」，只在用到的用例里建） ---------------------------------------
+
+
+def add_wallet_credit(world: World, *, project: str, amount: str) -> None:
+    """A wallet for the project's tenant and one manual credit through `post_adjustment`.
+
+    标准世界没有钱包与账本；「快照不变」用例要一个非空的余额与账本行数作比较对象。
+    经现有的手工调账服务记账（与生产同一条路径），不直接写账本。
+    MySQL 上用完要在世界清场之前调 `clean_wallets`（有钱包的租户删不掉）。
+    """
+    tenancy = world.projects[project]
+    with world.factory() as session:
+        create_wallet(session, tenant_id=tenancy.tenant_id, now=SETUP_AT)
+        customer_id = session.execute(
+            select(Tenant.public_id).where(Tenant.id == tenancy.tenant_id)
+        ).scalar_one()
+        session.commit()
+    post_adjustment(
+        world.factory,
+        actor=world.admin,
+        customer_id=customer_id,
+        transaction_type=TransactionType.ADJUSTMENT_CREDIT,
+        amount=Decimal(amount),
+        reason="Fictional opening credit",
+        idempotency_key=zero_uuid(next(world._numbers)),
+        context=CONTEXT,
+        now=SETUP_AT,
+    )
+
+
+def clean_wallets(engine: Engine) -> None:
+    """MySQL only: the ledger, wallets and tenant outbox rows `add_wallet_credit` left behind.
+
+    账本拒绝 DELETE（触发器），关掉外键检查后 TRUNCATE（写法同 test_wallet_adjustment_service.py）；
+    审计由 `clean` 清。要在 `clean` 删租户之前调用。
+    """
+    with engine.begin() as connection:
+        connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        try:
+            connection.execute(text("TRUNCATE TABLE wallet_transactions"))
+        finally:
+            connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+    with engine.begin() as connection:
+        ours = select(Tenant.id).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}"))
+        our_public_ids = select(Tenant.public_id).where(Tenant.email.like(f"%{TEST_EMAIL_DOMAIN}"))
+        connection.execute(delete(Wallet).where(Wallet.tenant_id.in_(ours)))
+        connection.execute(
+            delete(DomainOutbox).where(
+                DomainOutbox.aggregate_type == "tenant",
+                DomainOutbox.aggregate_id.in_(our_public_ids),
+            )
+        )
 
 
 # --- 夹具（conftest.py 注册） -----------------------------------------------------------
