@@ -13964,7 +13964,7 @@ tasks:
     title: 供应商成本对账第一层：新建不可变的供应商成本对账表与迁移 0041
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「数据库（迁移 0041，AIH-TASK-242）」与 §8：新迁移 0041 建 provider_cost_reconciliations（只插入；STORED 生成列 root_slot、CHECK、唯一索引、复合自引用外键照设计），MySQL 上建两个拒绝 UPDATE 与 DELETE 的触发器；新模型 app/models/provider_cost_reconciliations.py；docs/database-schema.md 记这张表。不加写入方与接口：属于 AIH-TASK-243 起的任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-241
       - AIH-TASK-231
