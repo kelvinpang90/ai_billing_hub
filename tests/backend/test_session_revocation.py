@@ -67,6 +67,7 @@ from app.services.auth import (
     refresh_session,
     utc_now,
 )
+from app.services.password_reset import EVENT_PASSWORD_RESET
 from app.services.two_factor import (
     confirm_enrolment,
     regenerate_recovery_codes,
@@ -240,8 +241,12 @@ def reset(client: TestClient, new_password: str):  # noqa: ANN201 - httpx.Respon
     """Forgot → dig the token out of the outbox row, the way the email would → reset."""
     assert client.post("/api/v1/auth/password/forgot", json={"email": EMAIL}).status_code == 200
     with factory_of(client)() as session:
+        # 按事件类型取：重置成功还会写一行改密通知（I6），「最后一行」不一定是重置邮件。
         row = session.execute(
-            select(DomainOutbox).order_by(DomainOutbox.id.desc()).limit(1)
+            select(DomainOutbox)
+            .where(DomainOutbox.event_type == EVENT_PASSWORD_RESET)
+            .order_by(DomainOutbox.id.desc())
+            .limit(1)
         ).scalar_one()
         token = str(json.loads(row.payload_json)["token"])
     return client.post(
@@ -748,8 +753,12 @@ def test_a_reset_that_fails_midway_changes_nothing(client: TestClient, monkeypat
 
     assert client.post("/api/v1/auth/password/forgot", json={"email": EMAIL}).status_code == 200
     with factory_of(client)() as session:
+        # 按事件类型取：重置成功还会写一行改密通知（I6），「最后一行」不一定是重置邮件。
         row = session.execute(
-            select(DomainOutbox).order_by(DomainOutbox.id.desc()).limit(1)
+            select(DomainOutbox)
+            .where(DomainOutbox.event_type == EVENT_PASSWORD_RESET)
+            .order_by(DomainOutbox.id.desc())
+            .limit(1)
         ).scalar_one()
         token = str(json.loads(row.payload_json)["token"])
 

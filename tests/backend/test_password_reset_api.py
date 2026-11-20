@@ -27,6 +27,7 @@ from app.main import create_app
 from app.models.auth import DomainOutbox, User, UserRole, UserStatus
 from app.models.base import Base
 from app.services.auth import utc_now
+from app.services.password_reset import EVENT_PASSWORD_RESET
 
 PASSWORD = "a-perfectly-fine-passphrase"
 NEW_PASSWORD = "a-brand-new-fine-passphrase"
@@ -80,8 +81,12 @@ def client(tmp_path) -> TestClient:
 def reset_token(client: TestClient) -> str:
     """Dig the plaintext token out of the outbox row, the way the email would."""
     with client.app.state.session_factory() as session:
+        # 按事件类型取：重置成功还会写一行改密通知（I6），「最后一行」不一定是重置邮件。
         row = session.execute(
-            select(DomainOutbox).order_by(DomainOutbox.id.desc()).limit(1)
+            select(DomainOutbox)
+            .where(DomainOutbox.event_type == EVENT_PASSWORD_RESET)
+            .order_by(DomainOutbox.id.desc())
+            .limit(1)
         ).scalar_one()
         return str(json.loads(row.payload_json)["token"])
 
