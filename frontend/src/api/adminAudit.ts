@@ -100,6 +100,7 @@ export const AUDIT_ACTIONS = [
   "PAYMENT_REVIEW_RESOLVED",
   "PAYMENT_FEE_RECORDED",
   "PAYMENT_SETTINGS_UPDATE",
+  "PROVIDER_COST_RECONCILIATION_CREATE",
 ] as const;
 
 /** 系统动作（计费状态跃迁）的 `actor_role`。 */

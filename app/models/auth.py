@@ -335,6 +335,13 @@ class AuditAction(enum.StrEnum):
     # `version`，金额为定点字符串。不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在
     # PR 描述里。
     PAYMENT_SETTINGS_UPDATE = "PAYMENT_SETTINGS_UPDATE"
+    # AIH-TASK-244（设计闸门 #755 v1 §2「审计」）：写入方是 `confirm`
+    # （app/services/provider_cost_reconciliation.py），与对账记录同一事务，每行一条（根与更正都是
+    # 这一个动作）；操作者为管理员；`entity_type = provider_cost_reconciliation`、
+    # `entity_id = public_id`。`before` 为 null（根）或被取代行的 `public_id` 与币种、金额，`after`
+    # 为新行的金额、汇率版本与估算快照，金额为定点字符串，不含来源说明；`reason` 列写更正理由。
+    # 不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
+    PROVIDER_COST_RECONCILIATION_CREATE = "PROVIDER_COST_RECONCILIATION_CREATE"
 
 
 class AuditLog(Base):
