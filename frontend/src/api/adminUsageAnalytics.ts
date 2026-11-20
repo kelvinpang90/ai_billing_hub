@@ -12,13 +12,16 @@
  */
 
 import { apiGet } from "./client";
-import { downloadFile } from "./download";
+import { downloadFile, withExportFormat, type ExportFormat } from "./download";
 
 const USAGE_ANALYTICS_URL = "/api/v1/admin/usage-analytics";
 const USAGE_ANALYTICS_EXPORT_URL = "/api/v1/admin/usage-analytics/export";
 
 /** 响应头里取不到文件名时的兜底。 */
 export const USAGE_ANALYTICS_EXPORT_FILENAME = "usage-analytics.csv";
+
+/** 同上，`format=xlsx` 时。 */
+export const USAGE_ANALYTICS_EXPORT_FILENAME_XLSX = "usage-analytics.xlsx";
 
 // --- 分组维度 ---------------------------------------------------------------------
 
@@ -170,21 +173,36 @@ function setFilters(params: URLSearchParams, query: UsageAnalyticsQuery): void {
   }
 }
 
-/** 导出的地址（含查询串）：参数规则同 {@link getUsageAnalytics}，但没有 `page` / `page_size`（一次导出全部分组）。 */
-export function usageAnalyticsExportUrl(query: UsageAnalyticsQuery): string {
+/**
+ * 导出的条件：分析的那一组条件加可选的文件格式（AIH-TASK-240；设计闸门 #753 v1 §2「门户与管理端页面」）。
+ * `format` 缺省 `csv`。
+ */
+export type UsageAnalyticsExportQuery = UsageAnalyticsQuery & { format?: ExportFormat };
+
+/** 回退文件名按格式换扩展名：`csv` 与今天逐字相同。 */
+export function usageAnalyticsExportFilename(format: ExportFormat = "csv"): string {
+  return format === "csv" ? USAGE_ANALYTICS_EXPORT_FILENAME : USAGE_ANALYTICS_EXPORT_FILENAME_XLSX;
+}
+
+/**
+ * 导出的地址（含查询串）：参数规则同 {@link getUsageAnalytics}，但没有 `page` / `page_size`（一次导出全部分组）。
+ * `csv`（缺省）时与不带格式逐字相同，`xlsx` 时末尾加 `format=xlsx`。
+ */
+export function usageAnalyticsExportUrl(query: UsageAnalyticsExportQuery): string {
   const params = new URLSearchParams({
     group_by: query.group_by,
     occurred_from: query.occurred_from,
     occurred_to: query.occurred_to,
   });
   setFilters(params, query);
-  return `${USAGE_ANALYTICS_EXPORT_URL}?${params.toString()}`;
+  return withExportFormat(`${USAGE_ANALYTICS_EXPORT_URL}?${params.toString()}`, query.format ?? "csv");
 }
 
 /**
- * 把这组条件下的全部分组与合计导出成一个 CSV 并交给浏览器下载。失败抛 `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000
- * 个分组）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带 `request_id`。
+ * 把这组条件下的全部分组与合计导出成一个 CSV（或 `format: "xlsx"` 时一个 xlsx）并交给浏览器下载。失败抛
+ * `ApiError`：`EXPORT_TOO_LARGE`（超过 20 000 个分组）、`EXPORT_BUSY`（已有一个导出在进行），其余照常带
+ * `request_id`；错误码不分格式。
  */
-export function exportUsageAnalytics(query: UsageAnalyticsQuery, signal?: AbortSignal): Promise<void> {
-  return downloadFile(usageAnalyticsExportUrl(query), USAGE_ANALYTICS_EXPORT_FILENAME, signal);
+export function exportUsageAnalytics(query: UsageAnalyticsExportQuery, signal?: AbortSignal): Promise<void> {
+  return downloadFile(usageAnalyticsExportUrl(query), usageAnalyticsExportFilename(query.format), signal);
 }

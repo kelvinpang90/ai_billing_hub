@@ -3,6 +3,8 @@
  * 时间段（吉隆坡时间换成带时区的 RFC 3339）后的请求参数；时间段校验；翻页；金额、平均值与毛利率原样显示。
  * AIH-TASK-224（设计闸门 #709 v2 §7「前端维度与导出」）：按日 / 按月的请求参数与分组格；「Export CSV」用已应用的条件、
  * 下载中不可点、失败显示码、信息与 request_id 并在再点时收起。合计块本身的内容由 `UsageAnalyticsTotals.test.tsx` 管。
+ * AIH-TASK-240（设计闸门 #753 v1 §7「前端按钮」）：「Export Excel」在「Export CSV」右边、点它用已应用的条件与
+ * `format: "xlsx"`、下载中两个都不可点且加载状态在被点的那个上、失败文案与 CSV 相同并按原规则收起。
  *
  * ⚠️ 合计块是带边框的 Descriptions，它也渲染成 table 元素，标签在 th 里（有的与列头同名）：列头断言只在带 thead 的
  * 数据表格里找（`dataTable()`）。
@@ -17,10 +19,12 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
-import type {
-  UsageAnalyticsItem,
-  UsageAnalyticsReport,
-  UsageAnalyticsReportTotals,
+import {
+  usageAnalyticsExportUrl,
+  type UsageAnalyticsItem,
+  type UsageAnalyticsQuery,
+  type UsageAnalyticsReport,
+  type UsageAnalyticsReportTotals,
 } from "../../api/adminUsageAnalytics";
 import { ApiError } from "../../api/client";
 import { UsageAnalyticsPage } from "./UsageAnalyticsPage";
@@ -559,6 +563,130 @@ describe("UsageAnalyticsPage export", SLOW, () => {
     renderPage();
     await screen.findByText("anthropic");
     await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    expect(await screen.findByText("Another export is in progress. Try again in a few seconds.")).toBeInTheDocument();
+    expect(screen.getByText("EXPORT_BUSY")).toBeInTheDocument();
+    expect(screen.getByText("req-503")).toBeInTheDocument();
+
+    await pickGroupBy("Day");
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    await waitFor(() => expect(screen.queryByText("req-503")).not.toBeInTheDocument());
+    expect(screen.queryByText("EXPORT_BUSY")).not.toBeInTheDocument();
+  });
+});
+
+describe("UsageAnalyticsPage Excel export (AIH-TASK-240)", SLOW, () => {
+  const EXPORT_NAME = /Export CSV/;
+  const XLSX_NAME = /Export Excel/;
+
+  it("exports the applied conditions with format xlsx, not the form values that were never applied", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockResolvedValue(undefined);
+
+    renderPage();
+    await screen.findByText("anthropic");
+    const applied = api.getUsageAnalytics.mock.calls[0]?.[0] as UsageAnalyticsQuery;
+
+    // 改了表单却不提交：导出仍用表格的那一组条件。
+    await pickGroupBy("Month");
+    await user.click(screen.getByLabelText("Customer ID"));
+    await user.paste(ID);
+    await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+    await waitFor(() => expect(api.exportUsageAnalytics).toHaveBeenCalledTimes(1));
+    expect(api.exportUsageAnalytics).toHaveBeenCalledWith({ ...applied, format: "xlsx" });
+    // 导出不让表格与合计重新请求。
+    expect(api.getUsageAnalytics).toHaveBeenCalledTimes(1);
+    // 交给 api 的条件落到管理端的导出地址上，不碰门户路径。
+    const url = usageAnalyticsExportUrl({ ...applied, format: "xlsx" });
+    expect(url.startsWith("/api/v1/admin/usage-analytics/export?")).toBe(true);
+    expect(url.endsWith("&format=xlsx")).toBe(true);
+    expect(url).not.toContain("/api/v1/customer/");
+    expect(url).not.toContain(ID);
+  });
+
+  it("puts Export Excel right of Export CSV, disables both while exporting and shows loading only on Export Excel when that is the one clicked", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockReturnValue(new Promise(() => undefined));
+
+    renderPage();
+    await screen.findByText("anthropic");
+
+    expect(screen.getAllByRole("button", { name: EXPORT_NAME })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: XLSX_NAME })).toHaveLength(1);
+    const csvBefore = screen.getByRole("button", { name: EXPORT_NAME });
+    const xlsxBefore = screen.getByRole("button", { name: XLSX_NAME });
+    expect(csvBefore).toBeEnabled();
+    expect(xlsxBefore).toBeEnabled();
+    expect(csvBefore.compareDocumentPosition(xlsxBefore) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(xlsxBefore);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+    });
+    const csv = screen.getByRole("button", { name: EXPORT_NAME });
+    const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+    expect(csv).toBeDisabled();
+    expect(within(xlsx).getByRole("img", { name: "loading" })).toBeInTheDocument();
+    expect(within(csv).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+    fireEvent.click(csv);
+    fireEvent.click(xlsx);
+    expect(api.exportUsageAnalytics).toHaveBeenCalledTimes(1);
+    // 表格照常显示。
+    expect(dataRows()).toHaveLength(1);
+  });
+
+  it("shows the code and the request id of an Excel failure, clears them on the next click of either button, and then shows loading only on Export CSV", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockRejectedValueOnce(
+      new ApiError("EXPORT_TOO_LARGE", "The export has more than 20000 rows.", "req-422"),
+    );
+
+    renderPage();
+    await screen.findByText("anthropic");
+    await user.click(screen.getByRole("button", { name: XLSX_NAME }));
+
+    // 文案与 CSV 相同，不提格式。
+    expect(
+      await screen.findByText("There are too many groups to export. Shorten the period or add filters."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("EXPORT_TOO_LARGE")).toBeInTheDocument();
+    expect(screen.getByText(/The export has more than 20000 rows\./)).toBeInTheDocument();
+    expect(screen.getByText("req-422")).toBeInTheDocument();
+    expect(dataRows()).toHaveLength(1);
+
+    api.exportUsageAnalytics.mockReturnValue(new Promise(() => undefined));
+    await user.click(screen.getByRole("button", { name: EXPORT_NAME }));
+
+    await waitFor(() => expect(screen.queryByText("req-422")).not.toBeInTheDocument());
+    expect(screen.queryByText("EXPORT_TOO_LARGE")).not.toBeInTheDocument();
+
+    // 这次点的是 CSV：两个都不可点，加载状态只在 CSV 上。
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: XLSX_NAME })).toBeDisabled();
+    });
+    const csv = screen.getByRole("button", { name: EXPORT_NAME });
+    const xlsx = screen.getByRole("button", { name: XLSX_NAME });
+    expect(csv).toBeDisabled();
+    expect(within(csv).getByRole("img", { name: "loading" })).toBeInTheDocument();
+    expect(within(xlsx).queryByRole("img", { name: "loading" })).not.toBeInTheDocument();
+  });
+
+  it("clears an Excel failure when the applied conditions change", async () => {
+    const user = userEvent.setup();
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+    api.exportUsageAnalytics.mockRejectedValueOnce(
+      new ApiError("EXPORT_BUSY", "Another export is in progress.", "req-503"),
+    );
+
+    renderPage();
+    await screen.findByText("anthropic");
+    await user.click(screen.getByRole("button", { name: XLSX_NAME }));
 
     expect(await screen.findByText("Another export is in progress. Try again in a few seconds.")).toBeInTheDocument();
     expect(screen.getByText("EXPORT_BUSY")).toBeInTheDocument();
