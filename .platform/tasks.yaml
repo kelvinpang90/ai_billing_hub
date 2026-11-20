@@ -13914,7 +13914,7 @@ tasks:
     title: Excel 导出第八层：运维手册补 xlsx 导出排查，勾选 Phase 5 与 Phase 7 的导出项
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「tmpfs（AIH-TASK-234）」里「tmpfs 写满时怎么判断、怎么处置」一段、§5（含「各导出的失败日志」表）、§8「监控」、§10 第 4 条与已知限制、§11 AIH-TASK-241：docs/runbook.md 新增 xlsx 导出失败的处置一节，docs/TODO.md 勾选 Phase 5「客户端用量导出」并按决定处理 Phase 7「CSV / Excel 导出」。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-240
     acceptance_criteria:
