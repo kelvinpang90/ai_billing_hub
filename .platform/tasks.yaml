@@ -14077,7 +14077,7 @@ tasks:
     title: 供应商成本对账第三层：预览、确认与更正的业务规则、月末汇率换算和审计
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「服务」「检查顺序」「审计」「事务边界」「金额与精度」与 §4：新建 app/services/provider_cost_reconciliation.py（常量、reconciliation_period、preview、confirm、months_overview、get_detail、allocate），AuditAction 加 PROVIDER_COST_RECONCILIATION_CREATE 并同步前端审计动作清单。不写接口：属于 AIH-TASK-245。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-243
     acceptance_criteria:
