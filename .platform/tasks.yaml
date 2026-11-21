@@ -14373,7 +14373,7 @@ tasks:
     title: 对账后成本第三层：管理端用量分析页显示对账后供应商成本、口径与覆盖月份
     purpose: >-
       按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「页面」：frontend/src/api/adminUsageAnalytics.ts 加新键类型，合计块加对账后供应商成本、基于它的毛利与口径、覆盖月份与不可分摊提示，表格加 Provider cost 列，说明文字补分摊口径；验收脚本加一个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-248
       - AIH-TASK-224
