@@ -14262,7 +14262,7 @@ tasks:
     title: 对账后成本第一层：用量分析仓储按对账记录汇总覆盖范围内的估算成本
     purpose: >-
       按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「规则」与「仓储」：app/repositories/usage_analytics.py 新增 reconciled_allocation_inputs，按与分组区间重叠的当前对账记录，给出每条记录的 R 与实时 E 以及按分组、按计费模式的覆盖估算之和。不改接口、schema 与前端：属于 AIH-TASK-248。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-246
       - AIH-TASK-221
