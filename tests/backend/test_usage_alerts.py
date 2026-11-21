@@ -190,6 +190,20 @@ def test_pricing_errors_list_at_most_three_codes_in_order(factory) -> None:
     )
 
 
+def test_the_merged_line_names_the_error_state_that_is_not_ok(factory) -> None:
+    """The three error states share one line (2026-11-21): the worst level, every member's own
+    summary, so the notice tells which state the events are in."""
+    add_event(factory, UsageEventStatus.MODEL_UNKNOWN, received_at=NOW - 30 * MINUTE)
+
+    assert check(factory, alerts.usage_unpriced) == AlertResult(
+        P2,
+        "usage_pricing_error OK: no PRICING_ERROR events"
+        " | usage_fx_rate_error OK: no FX_RATE_ERROR events"
+        f" | usage_model_unknown P2: 1 event MODEL_UNKNOWN, earliest received "
+        f"{stamp(NOW - 30 * MINUTE)}",
+    )
+
+
 # --- usage_failed --------------------------------------------------------------------------
 
 
@@ -968,7 +982,7 @@ def test_no_summary_names_a_tenant_or_an_amount(factory) -> None:
 
     body = alerts.alert_lines(factory, ("USD",), clock=lambda: NOW)
 
-    for line in body.splitlines()[3:]:
+    for line in body.splitlines()[2:]:
         assert TENANT_PUBLIC_ID not in line
         assert "3.25" not in line
         assert "tenant" not in line.lower()

@@ -669,7 +669,7 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 
 | 信号 | 说明 |
 | --- | --- |
-| Telegram：`ai_billing_hub fx_fetch` 变 DOWN，正文 `P2 fx_fetch: USD no successful fetch in 72 hours (<n> failed)` | **主信号**。判据：某个配置币种最近 72 小时没有任何成功的拉取（`NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE`），且至少一条 `FAILED` —— 即连续 3 天、9 次拉取全部失败 |
+| Telegram：`ai_billing_hub fx_stale` 变 DOWN，正文 `P2 fx_stale: fx_fetch P2: USD no successful fetch in 72 hours (<n> failed) \| fx_stale <级别>: …` | **主信号**（2026-11-21 起 `fx_fetch` 与 `fx_stale` 并成一行、共用 `ai_billing_hub fx_stale` 一个检查；正文按成员列出 `fx_fetch <级别>: … \| fx_stale <级别>: …`，看是哪个成员不是 OK，见 [deployment.md](deployment.md) §8.4「2026-11-21 合并维度」）。判据：某个配置币种最近 72 小时没有任何成功的拉取（`NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE`），且至少一条 `FAILED` —— 即连续 3 天、9 次拉取全部失败 |
 | `GET /api/v1/admin/fx-rates/fetch-attempts?outcome=FAILED` | 每次失败一行，`error_code` 说明原因 |
 | worker 日志 | 某个币种写库失败时的 ERROR（那一次不留拉取记录，任务以失败结束） |
 
@@ -726,8 +726,8 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 
 | 信号 | 说明 |
 | --- | --- |
-| Telegram：`ai_billing_hub fx_stale` 变 DOWN，正文 `P2 fx_stale: USD quoted <报价日> (<n> calendar days)` | 当前生效版本的报价日距今**超过 5 个日历日**（吉隆坡日期相减；Kelvin 2026-09-29 定，ADR-0005 收口条件旁有注明）。手工版本取 `observed_at` 的吉隆坡日期 |
-| 正文 `P2 fx_stale: USD no rate in effect` | 该币种**此刻没有任何生效的版本**：从没发布过、最后一个被退役了、或只有未来的预约 |
+| Telegram：`ai_billing_hub fx_stale` 变 DOWN，正文 `P2 fx_stale: fx_fetch <级别>: … \| fx_stale P2: USD quoted <报价日> (<n> calendar days)`（2026-11-21 起与 `fx_fetch` 同一行，见上一节） | 当前生效版本的报价日距今**超过 5 个日历日**（吉隆坡日期相减；Kelvin 2026-09-29 定，ADR-0005 收口条件旁有注明）。手工版本取 `observed_at` 的吉隆坡日期 |
+| 正文里 `fx_stale P2: USD no rate in effect` | 该币种**此刻没有任何生效的版本**：从没发布过、最后一个被退役了、或只有未来的预约 |
 | 业务侧：非 MYR 事件判 `FX_RATE_ERROR` | 只在「没有生效的版本」时出现，计费 worker 落地之后（T-H）才有这个信号 |
 
 三种常见原因：
@@ -761,7 +761,7 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 
 ### 恢复
 
-1. 下一轮巡检（5 分钟内）`fx_stale` 转绿，正文变成 `OK USD quoted <新报价日> (<n> calendar days)`
+1. 下一轮巡检（5 分钟内）`fx_stale` 转绿，正文变成 `fx_fetch OK: … | fx_stale OK: USD quoted <新报价日> (<n> calendar days)`（`fx_fetch` 成员也不是 OK 时整行仍红，按上一节处理）
 2. 「没有生效的版本」那种：时间线为空时不给时刻的发布得到 `[null, null)`、退役留下的空档由不给时刻的发布从退役时刻起补上
    （设计 §2 P1 / P4）—— 这段时间里 `FX_RATE_ERROR` 的事件此后取得到汇率，由 T-H 重新入队补算；已取到汇率的时刻结果不变
 
@@ -828,8 +828,8 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 
 ### 怎么发现
 
-Telegram：`ai_billing_hub fx_fetch` 与 `ai_billing_hub fx_stale` **一起**变 DOWN，原因是「该到的 ping 没到」（Healthchecks
-宽限期 15 分钟过了），而不是收到 `/fail`。`monitor.sh` 在这几种情况下**刻意不推**告警维度：
+Telegram：`ai_billing_hub fx_stale` 与其余告警维度的检查**一起**变 DOWN（2026-11-21 起 `fx_fetch` 并进了 `fx_stale`，
+不再有自己的检查），原因是「该到的 ping 没到」（Healthchecks 宽限期 15 分钟过了），而不是收到 `/fail`。`monitor.sh` 在这几种情况下**刻意不推**告警维度：
 
 | 巡检日志（`journalctl -t billing-monitor`） | 原因 |
 | --- | --- |
@@ -841,12 +841,12 @@ Telegram：`ai_billing_hub fx_fetch` 与 `ai_billing_hub fx_stale` **一起**变
 
 ### 影响什么
 
-只影响**告警**：两个 FX 维度此刻没人看着。计费、拉取、发布都不受影响。
+只影响**告警**：告警维度此刻没人看着。计费、拉取、发布都不受影响。
 
 ### 立刻做什么
 
 1. `readyz` 也 DOWN：先按 API / 数据库故障处理，告警维度会随之恢复
-2. 只有 FX 两个 DOWN：在宿主机上看状态码（不带令牌）：
+2. 只有告警维度的检查 DOWN：在宿主机上看状态码（不带令牌）：
    `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<端口>/internal/alerts`
 
    | 状态码 | 含义 | 处理 |
@@ -995,14 +995,14 @@ N 个扫描，认领并计费到期的事件（`RECEIVED`，或退避到期的 `
    | 检查 | `.env` 的键 |
    | --- | --- |
    | `ai_billing_hub usage_pricing_error` | `BILLING_HEALTHCHECK_ALERT_USAGE_PRICING_ERROR_URL` |
-   | `ai_billing_hub usage_fx_rate_error` | `BILLING_HEALTHCHECK_ALERT_USAGE_FX_RATE_ERROR_URL` |
-   | `ai_billing_hub usage_model_unknown` | `BILLING_HEALTHCHECK_ALERT_USAGE_MODEL_UNKNOWN_URL` |
+   | `ai_billing_hub usage_fx_rate_error`（2026-11-21 并进 `usage_pricing_error`，检查删除） | `BILLING_HEALTHCHECK_ALERT_USAGE_FX_RATE_ERROR_URL` |
+   | `ai_billing_hub usage_model_unknown`（2026-11-21 并进 `usage_pricing_error`，检查删除） | `BILLING_HEALTHCHECK_ALERT_USAGE_MODEL_UNKNOWN_URL` |
    | `ai_billing_hub usage_failed` | `BILLING_HEALTHCHECK_ALERT_USAGE_FAILED_URL` |
    | `ai_billing_hub usage_processing_backlog` | `BILLING_HEALTHCHECK_ALERT_USAGE_PROCESSING_BACKLOG_URL` |
    | `ai_billing_hub wallet_negative_balance` | `BILLING_HEALTHCHECK_ALERT_WALLET_NEGATIVE_BALANCE_URL` |
    | `ai_billing_hub outbox_backlog` | `BILLING_HEALTHCHECK_ALERT_OUTBOX_BACKLOG_URL` |
 
-   之后 Healthchecks 用量 8 + 2 + 1 + 7 = 18（免费档上限 20）。验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，
+   之后 Healthchecks 用量 8 + 2 + 1 + 7 = 18（免费档上限 20；2026-11-21 合并维度后整个项目是 17 个，见 [deployment.md](deployment.md) §8.4）。验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，
    日志里出现这七个维度的行，七个检查变绿。
 5. 迁移 0018 是纯加列与约束（文件头有 §132 第 13 条分析），部署顺序照常「先迁移、再换镜像」；一旦有事件被计费，**只能
    前滚**（downgrade 会丢快照）。
@@ -1011,7 +1011,7 @@ N 个扫描，认领并计费到期的事件（`RECEIVED`，或退避到期的 `
 
 | 信号 | 说明 |
 | --- | --- |
-| `usage_pricing_error` / `usage_fx_rate_error` / `usage_model_unknown` 变 P2 | 有事件停在对应的错误状态。摘要有条数、最早接收时刻与至多 3 个细分码（`NO_PROVIDER_PRICE`、`MISSING_PROVIDER_COMPONENT`、`NO_PRICING_RULE`、`MISSING_RULE_COMPONENT`） |
+| `usage_pricing_error` 变 P2（2026-11-21 起这一行合并 `usage_pricing_error`、`usage_fx_rate_error`、`usage_model_unknown` 三个成员，共用 `ai_billing_hub usage_pricing_error` 一个检查） | 有事件停在某个错误状态。正文按成员列出 `usage_pricing_error <级别>: … \| usage_fx_rate_error <级别>: … \| usage_model_unknown <级别>: …`，是 P2 的那个成员就是事件所在的状态。每个成员的摘要有条数、最早接收时刻与至多 3 个细分码（`NO_PROVIDER_PRICE`、`MISSING_PROVIDER_COMPONENT`、`NO_PRICING_RULE`、`MISSING_RULE_COMPONENT`） |
 | `usage_failed` 变 P2 / **P1** | 有 `FAILED_FINAL`，或有 `FAILED_RETRYABLE` 已尝试 ≥ 3 次。**P1** = 有 `LEDGER_CONFLICT`（同一事件已有金额不同的账本行，只可能是缺陷）或 `AMOUNT_OUT_OF_RANGE`（计算结果超出 DECIMAL(20,8)） |
 | `usage_processing_backlog` 变 P2 / **P1** | 最早的可处理事件等了 > 5 分钟（> 30 分钟 P1），或有租约过期仍未回收的 `PROCESSING`（> 10 分钟 P1 = **回收任务本身停了**）。摘要有到期数、`PROCESSING` 数、最早认领时刻、过期数。另两段（AIH-TASK-158，设计闸门 #565 v6 §2「告警」）接在后面，各报 P2：**缺失对账单** `<n> statements missing, earliest period <YYYY-MM>` = 某期到期后 6–30 小时内仍有合格租户没有对账单（没有时是 `0 statements missing`），按「月度对账单」一节处置；**晚到用量** `late usage 24h <a>/<b> rows (<x>%), <y>% of amount` = 最近 24 小时入账的预付用量里，过了原用量月 cut-off 才入账的条数或金额占比 ≥ 1%（宽限日内入账的上月用量不算），投递链路有延迟，按下面积压的处置查根因。第六段（AIH-TASK-250，设计闸门 #755 v1 §2「告警」）报 P2：**供应商成本未对账** `provider cost <code>,<code> not reconciled for <YYYY-MM>`（供应商代码按字母升序）= 上一个 UTC 月结束后第 9 至 12 天（`月末 + 9 天 ≤ now < 月末 + 12 天`，只报 72 小时，之后自动回到 OK，不长期遮住同一检查后来的故障）内，该月有经 AI 模块的已处理用量的供应商还没有当前对账记录；处置：到管理端「Provider costs」页录入上月 Console 成本页的消耗额（不含税）。首个对账月之前的月份不报；没有要报的时是 `provider cost reconciled or not due`。摘要恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>; <供应商成本>`，级别取最严重的一段 |
 | `wallet_negative_balance` 变 P2 / **P1** | 一行合并负余额与钱包核对（设计闸门 #474 v13 §2「告警」），摘要恰好 `<负余额部分>; <核对部分>`，只有计数与日期。P2：有钱包余额 < 0（§7 第 7 条接受透支；停机规则仍是 `balance <= 0`，ADR-0010；摘要 `<n> wallets below zero`）；或核对从未完成（`reconciliation never completed`）、最近一次完成超过 30 小时（末尾 `stale`）；或有时钟异常的运行（`clock anomaly <行数>`）。**P1** = 核对发现余额与账本不一致（`inconsistent <M>` 或 `later inconsistent <K>` 大于 0），按下面「钱包核对发现不一致」处理。摘要末尾出现 `; payments: …` 时是支付的判据（AIH-TASK-175，设计闸门 #580 v3 §2「告警」；AIH-TASK-181，设计闸门 #585 v3 §2「告警」：未结案的复核一直报到结案、24 小时内的争议与退款、过期一小时仍 `PENDING`），按下面「支付：复核、事件冲突、事件积压与配置（`wallet_negative_balance` 告警的支付部分）」处理（争议与退款也在那一节） |
@@ -1475,7 +1475,7 @@ docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYS
    | --- | --- |
    | `ai_billing_hub status_webhook` | `BILLING_HEALTHCHECK_ALERT_STATUS_WEBHOOK_URL` |
 
-   之后 Healthchecks 用量 18 + 1 = **19**（免费档上限 20，只剩 1 个）。三类问题合在这一个检查里，就是为了不超上限
+   之后 Healthchecks 用量 18 + 1 = **19**（免费档上限 20，只剩 1 个；2026-11-21 合并维度后整个项目是 17 个，见 [deployment.md](deployment.md) §8.4）。三类问题合在这一个检查里，就是为了不超上限
    （设计 §2）。验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，日志里出现这个维度的行，
    检查变绿。没配这个键时巡检日志写 `no BILLING_HEALTHCHECK_ALERT_STATUS_WEBHOOK_URL configured`，Healthchecks 宽限期后报
    「未上报」。
@@ -2212,7 +2212,7 @@ secret 读**同一份**文件（容器内 `/run/secrets/billing_monitor_token`�
 | 默认值 | 无。不配 = `monitor.sh` 只记 `no BILLING_MONITOR_TOKEN_HOST_FILE configured`，不推告警维度 |
 | 取值 | 令牌文件的**绝对路径**，例如 `<部署目录>/secrets/monitor.token` |
 | 令牌文件 | `openssl rand -hex 32`（64 个字符）；属主 `10001`、**属组为部署用户的主组**、`0440` |
-| 相关的两个键 | `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL`、`BILLING_HEALTHCHECK_ALERT_FX_STALE_URL`：两个 Healthchecks 检查的 Ping URL。通用规则 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL` |
+| 相关的键 | `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL`：FX 那一行（成员 `fx_fetch`、`fx_stale`）的 Healthchecks 检查的 Ping URL；`BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` 2026-11-21 起不再被读。通用规则 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL` |
 
 ⚠️ **为什么是 `0440` 而不是其他 secrets 的 `0400`**：`monitor.sh` 由 cron 以部署用户（不是 root）运行，`0400` 它读不到，
 告警维度就永远推不出去。容器以 uid 10001 按属主读，部署用户按属组读，其他用户读不到。
@@ -2222,8 +2222,8 @@ secret 读**同一份**文件（容器内 `/run/secrets/billing_monitor_token`�
 1. 令牌文件：已有且不少于 32 个字符就不重新生成，只改属主与权限（`sudo chown 10001:"$(id -gn <部署用户>)"`、
    `sudo chmod 0440`）；没有或过短才 `openssl rand -hex 32` 生成。`.env` 加
    `BILLING_MONITOR_TOKEN_HOST_FILE=<部署目录>/secrets/monitor.token`
-2. Healthchecks 新建 `ai_billing_hub fx_fetch`、`ai_billing_hub fx_stale` 两个检查（Simple，5 分钟，宽限 15 分钟，Telegram），
-   Ping URL 写进 `.env` 的 `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` / `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL`
+2. Healthchecks 新建 `ai_billing_hub fx_stale` 一个检查（Simple，5 分钟，宽限 15 分钟，Telegram），
+   Ping URL 写进 `.env` 的 `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL`（2026-11-21 之前 `fx_fetch` 还有自己的检查）
 3. 在 worker 容器里手工触发一次拉取，确认 BNM 可达（「无记录」也算可达）：
    `docker compose exec celery-worker python -c "from app.tasks.fx_fetch import fetch; print(fetch())"`
 4. 管理员发布第一个汇率版本（见上面「FX 汇率：过期，或没有生效的汇率」的「立刻做什么」）
@@ -2236,7 +2236,7 @@ secret 读**同一份**文件（容器内 `/run/secrets/billing_monitor_token`�
 
 - `.env` 的这几项**不需要重建任何容器**：`monitor.sh` 每一轮（5 分钟）重新读 `.env`
 - 令牌文件的内容**也不需要重启**：应用每次请求都重新读文件
-- 验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，日志里出现 `fx_fetch: …` / `fx_stale: …`，两个检查变绿
+- 验证：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`，日志里出现 `fx_stale: fx_fetch OK: … | fx_stale OK: …`，检查变绿
 
 #### 对已有数据的影响
 
