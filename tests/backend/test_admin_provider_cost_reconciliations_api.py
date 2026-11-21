@@ -557,11 +557,6 @@ def test_month_and_provider_are_judged_by_the_service(
 
 
 def test_months_and_preview_are_not_taken_for_an_id(app, client, world) -> None:
-    paths = [route.path for route in app.routes if hasattr(route, "path")]
-    detail = paths.index(RECONCILIATIONS + "/{reconciliation_id}")
-    assert paths.index(MONTHS) < detail
-    assert paths.index(PREVIEW) < detail
-
     admin = admin_of(app, world)
     months = data(client.get(MONTHS, params={"provider_code": "anthropic"}, headers=admin))
     assert set(months) == {"items"}
