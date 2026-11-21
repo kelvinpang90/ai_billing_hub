@@ -40,6 +40,15 @@ FORBIDDEN: Final = frozenset(
         "gateway_fee_unknown_count",
         "cost_basis",
         "markup",
+        # 供应商成本对账（AIH-TASK-245，设计闸门 #755 v1 §6；`fx_rate_applied` 已在上面）。
+        "reconciled_cost_myr",
+        "source_total",
+        "source_variance",
+        "source_variance_rate",
+        "myr_variance",
+        "myr_variance_rate",
+        "estimated_source_cost",
+        "estimated_cost_myr",
     }
 )
 ADMIN_PREFIX: Final = "/api/v1/admin/"
@@ -48,6 +57,11 @@ ANALYTICS_MODULES: Final = (
     "app.repositories.usage_analytics",
     "app.schemas.usage_analytics",
     "app.api.admin_usage_analytics",
+    # 供应商成本对账（AIH-TASK-245，设计闸门 #755 v1 §6）。
+    "app.services.provider_cost_reconciliation",
+    "app.repositories.provider_cost_reconciliations",
+    "app.schemas.provider_cost_reconciliations",
+    "app.api.admin_provider_cost_reconciliations",
 )
 ROOT: Final = Path(__file__).resolve().parents[2]
 CUSTOMER_MODULES: Final = (
@@ -235,6 +249,8 @@ def test_the_response_check_reports_a_forbidden_name_injected_into_a_fake_schema
         "from app.schemas.usage_analytics import UsageAnalyticsView\n",
         "import app.api.admin_usage_analytics\n",
         "from ..repositories.usage_analytics import paid_payment_totals\n",
+        "from app.services import provider_cost_reconciliation\n",
+        "from app.schemas.provider_cost_reconciliations import ReconciliationView\n",
     ],
 )
 def test_the_import_check_reports_a_margin_analytics_import(source: str) -> None:

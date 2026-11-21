@@ -129,6 +129,9 @@ STATUS_WEBHOOK_ROUTE = PROJECT_ROUTE + "/status-webhook"
 PORTAL_ACCOUNT_ROUTE = "/api/v1/admin/customers/{customer_id}/portal-account"
 PAYMENTS_ROUTE = "/api/v1/admin/payments"
 PAYMENT_SETTINGS_ROUTE = "/api/v1/admin/payment-settings"
+# AIH-TASK-245 的供应商成本对账（设计闸门 #755 v1 §2「管理端接口」）。
+PROVIDER_COSTS_ROUTE = "/api/v1/admin/provider-cost-reconciliations"
+PROVIDER_COST_MONTHS_ROUTE = PROVIDER_COSTS_ROUTE + "/months"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -232,6 +235,11 @@ EXPECTED_ADMIN_ROUTES = {
     # AIH-TASK-191 的管理端支付设置（设计闸门 #587 v3 §2「管理端接口」）。
     ("GET", PAYMENT_SETTINGS_ROUTE),
     ("PUT", PAYMENT_SETTINGS_ROUTE),
+    # AIH-TASK-245 的供应商成本对账（设计闸门 #755 v1 §2「管理端接口」）。
+    ("GET", PROVIDER_COST_MONTHS_ROUTE),
+    ("POST", PROVIDER_COSTS_ROUTE + "/preview"),
+    ("POST", PROVIDER_COSTS_ROUTE),
+    ("GET", PROVIDER_COSTS_ROUTE + "/{reconciliation_id}"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -365,6 +373,25 @@ VALID_BODIES = {
         "reuse_window_seconds": 60,
         "pending_timeout_seconds": 3600,
         "version": 1,
+    },
+    # 供应商成本对账（AIH-TASK-245）：请求体合法，保证 422 不会先于 401 / 403 出现；漏了鉴权的
+    # 处理函数会走到 404 `AI_PROVIDER_NOT_FOUND` 或 `RECONCILIATION_MONTH_INVALID`，过不了
+    # 401 / 403。金额是明显的虚构值。
+    ("POST", PROVIDER_COSTS_ROUTE + "/preview"): {
+        "provider_code": "probe",
+        "billing_month": "2026-12",
+        "source_currency": "USD",
+        "source_total": "1.00",
+        "source_document_reference": "Probe",
+    },
+    ("POST", PROVIDER_COSTS_ROUTE): {
+        "provider_code": "probe",
+        "billing_month": "2026-12",
+        "source_currency": "USD",
+        "source_total": "1.00",
+        "source_document_reference": "Probe",
+        "expected_event_count": 0,
+        "expected_estimated_source_cost": "0",
     },
 }
 
@@ -1001,12 +1028,15 @@ def test_every_admin_route_refuses_non_admins(
         "usage_event_id",
         "payment_id",
         "receipt_id",
+        "reconciliation_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     if path in (USAGE_ANALYTICS_ROUTE, USAGE_ANALYTICS_EXPORT_ROUTE):
         url += (
             "?group_by=provider&occurred_from=2026-01-01T00:00:00Z&occurred_to=2026-01-02T00:00:00Z"
         )
+    if path == PROVIDER_COST_MONTHS_ROUTE:
+        url += "?provider_code=probe"
     headers = {} if caller == "anonymous" else customer_headers(app)
     before, stored = row_counts(app), stored_tenant(app, customer_id)
     project = stored_project(app, project_id)
