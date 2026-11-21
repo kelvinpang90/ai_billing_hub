@@ -61,11 +61,21 @@ function item(overrides: Partial<UsageAnalyticsItem> = {}): UsageAnalyticsItem {
       estimated_provider_cost_myr: "0.06250000",
       gross_margin: "0.06250000",
       gross_margin_rate: "0.5",
+      covered_estimated_cost_myr: "0.03125000",
+      reconciled_provider_cost_myr: "0.03750000",
+      provider_cost_myr: "0.06875000",
+      provider_cost_basis: "mixed",
+      gross_margin_on_provider_cost: "0.05625000",
+      gross_margin_on_provider_cost_rate: "0.45",
     },
     internal_metered_only: {
       event_count: 1,
       estimated_provider_cost_myr: "0.03125000",
       reference_customer_price: "0.06000000",
+      covered_estimated_cost_myr: "0.03125000",
+      reconciled_provider_cost_myr: "0.03437500",
+      provider_cost_myr: "0.03437500",
+      provider_cost_basis: "reconciled",
     },
     ...overrides,
   };
@@ -87,11 +97,21 @@ function totals(): UsageAnalyticsReportTotals {
       estimated_provider_cost_myr: "0.00000000",
       gross_margin: "0.00000000",
       gross_margin_rate: null,
+      covered_estimated_cost_myr: "0.00000000",
+      reconciled_provider_cost_myr: "0.00000000",
+      provider_cost_myr: "0.00000000",
+      provider_cost_basis: "estimated",
+      gross_margin_on_provider_cost: "0.00000000",
+      gross_margin_on_provider_cost_rate: null,
     },
     internal_metered_only: {
       event_count: 0,
       estimated_provider_cost_myr: "0.00000000",
       reference_customer_price: "0.00000000",
+      covered_estimated_cost_myr: "0.00000000",
+      reconciled_provider_cost_myr: "0.00000000",
+      provider_cost_myr: "0.00000000",
+      provider_cost_basis: "estimated",
     },
     payments: {
       period_basis: "paid_at",
@@ -102,6 +122,11 @@ function totals(): UsageAnalyticsReportTotals {
     },
     gross_profit: "0.00000000",
     gross_profit_rate: null,
+    gross_profit_on_provider_cost: "0.00000000",
+    gross_profit_on_provider_cost_rate: null,
+    reconciliation_coverage: [],
+    unallocated_reconciled_months: [],
+    unallocated_reconciled_cost_myr: null,
   };
 }
 
@@ -109,6 +134,8 @@ function report(items: UsageAnalyticsItem[], total: number, number = 1): UsageAn
   return {
     cost_basis: "estimated",
     usage_period_basis: "occurred_at",
+    provider_cost_allocation: "pro_rata_estimated_cost",
+    reconciliation_period_basis: "utc_calendar_month",
     items,
     page: number,
     page_size: 20,
@@ -272,11 +299,21 @@ describe("UsageAnalyticsPage table", SLOW, () => {
               estimated_provider_cost_myr: "0.10000001",
               gross_margin: "-0.00000001",
               gross_margin_rate: "-0.0000000000000001000000000001",
+              covered_estimated_cost_myr: "0.10000001",
+              reconciled_provider_cost_myr: "0.11000002",
+              provider_cost_myr: "0.11000002",
+              provider_cost_basis: "reconciled",
+              gross_margin_on_provider_cost: "99999999999.88999997",
+              gross_margin_on_provider_cost_rate: "0.9999999999999999999989000000",
             },
             internal_metered_only: {
               event_count: 1,
               estimated_provider_cost_myr: "12345678901234567.12345678",
               reference_customer_price: "0.00000000",
+              covered_estimated_cost_myr: "12345678901234567.12345678",
+              reconciled_provider_cost_myr: "12345678901234567.98765432",
+              provider_cost_myr: "12345678901234567.98765432",
+              provider_cost_basis: "reconciled",
             },
           }),
           item({
@@ -290,6 +327,12 @@ describe("UsageAnalyticsPage table", SLOW, () => {
               estimated_provider_cost_myr: "0.00000000",
               gross_margin: "0.00000000",
               gross_margin_rate: null,
+              covered_estimated_cost_myr: "0.00000000",
+              reconciled_provider_cost_myr: "0.00000000",
+              provider_cost_myr: "0.00000000",
+              provider_cost_basis: "estimated",
+              gross_margin_on_provider_cost: "0.00000000",
+              gross_margin_on_provider_cost_rate: null,
             },
           }),
         ],
@@ -320,6 +363,129 @@ describe("UsageAnalyticsPage table", SLOW, () => {
     expect(table.getByRole("columnheader", { name: "Gross margin" })).toBeInTheDocument();
     expect(table.getByRole("columnheader", { name: "Reference customer price" })).toBeInTheDocument();
     expect(table.getByRole("columnheader", { name: "Provider" })).toBeInTheDocument();
+    // AIH-TASK-249：Prepaid 组的「Provider cost」「Margin on provider cost」与 Internal 组的「Provider cost」。
+    expect(table.getAllByRole("columnheader", { name: "Provider cost" })).toHaveLength(2);
+    expect(table.getByRole("columnheader", { name: "Margin on provider cost" })).toBeInTheDocument();
+    expect(first.getByText("0.11000002")).toBeInTheDocument();
+    expect(first.getByText("99999999999.88999997")).toBeInTheDocument();
+    expect(first.getByText("12345678901234567.98765432")).toBeInTheDocument();
+  });
+});
+
+/** 表头里最后一行（列组的子列）的列头文字，按顺序；跳过没有文字的占位格。 */
+function leafHeaders(): string[] {
+  const headerRows = dataTable().querySelectorAll("thead tr");
+  const last = headerRows[headerRows.length - 1];
+  return Array.from(last?.querySelectorAll("th") ?? [])
+    .map((th) => th.textContent?.trim() ?? "")
+    .filter((text) => text !== "");
+}
+
+/** 第 index 行里第 column 格（0 起，按叶子列的顺序）。 */
+function cell(index: number, column: number): HTMLElement {
+  const found = row(index).querySelectorAll<HTMLElement>("td")[column];
+  if (found === undefined) {
+    throw new Error(`no cell ${String(column)}`);
+  }
+  return found;
+}
+
+// 叶子列的顺序：分组、事件数、四种 token、两个平均值（8 列），Prepaid 组 7 列，Internal 组 4 列。
+const PREPAID_PROVIDER_COST = 13;
+const PREPAID_MARGIN_ON_PROVIDER_COST = 14;
+const INTERNAL_PROVIDER_COST = 18;
+
+describe("UsageAnalyticsPage provider cost (AIH-TASK-249)", SLOW, () => {
+  it("adds two columns to the Prepaid group and one to the Internal group, with the basis in small text", async () => {
+    api.getUsageAnalytics.mockResolvedValue(
+      report(
+        [
+          item(),
+          item({
+            group_key: "openai",
+            prepaid: {
+              ...item().prepaid,
+              provider_cost_myr: "0.06250000",
+              provider_cost_basis: "estimated",
+              gross_margin_on_provider_cost: "0.333333333333333333333333333",
+            },
+            internal_metered_only: {
+              ...item().internal_metered_only,
+              provider_cost_myr: "0.03500001",
+              provider_cost_basis: "mixed",
+            },
+          }),
+        ],
+        2,
+      ),
+    );
+
+    renderPage();
+
+    await screen.findByText("anthropic");
+    // 其他列不变，新列只追加在各自列组的末尾。
+    expect(leafHeaders()).toEqual([
+      "Events",
+      "Billable amount",
+      "Estimated provider cost",
+      "Gross margin",
+      "Gross margin ratio",
+      "Provider cost",
+      "Margin on provider cost",
+      "Events",
+      "Estimated provider cost",
+      "Reference customer price",
+      "Provider cost",
+    ]);
+    const table = within(dataTable());
+    expect(table.getByRole("columnheader", { name: "Prepaid (MYR)" })).toBeInTheDocument();
+    expect(table.getByRole("columnheader", { name: "Internal metering only (MYR)" })).toBeInTheDocument();
+
+    // 值原样，下一行小字是口径的显示文案（不是后端原词）。
+    expect(within(cell(0, PREPAID_PROVIDER_COST)).getByText("0.06875000")).toBeInTheDocument();
+    expect(within(cell(0, PREPAID_PROVIDER_COST)).getByText("Mixed (partly reconciled)")).toBeInTheDocument();
+    expect(cell(0, PREPAID_MARGIN_ON_PROVIDER_COST).textContent).toBe("0.05625000");
+    expect(within(cell(0, INTERNAL_PROVIDER_COST)).getByText("0.03437500")).toBeInTheDocument();
+    expect(within(cell(0, INTERNAL_PROVIDER_COST)).getByText("Reconciled")).toBeInTheDocument();
+    expect(within(cell(1, PREPAID_PROVIDER_COST)).getByText("0.06250000")).toBeInTheDocument();
+    expect(within(cell(1, PREPAID_PROVIDER_COST)).getByText("Estimated")).toBeInTheDocument();
+    expect(cell(1, PREPAID_MARGIN_ON_PROVIDER_COST).textContent).toBe("0.333333333333333333333333333");
+    expect(within(cell(1, INTERNAL_PROVIDER_COST)).getByText("0.03500001")).toBeInTheDocument();
+    expect(within(cell(1, INTERNAL_PROVIDER_COST)).getByText("Mixed (partly reconciled)")).toBeInTheDocument();
+    for (const index of [0, 1]) {
+      expect(within(row(index)).queryByText("mixed")).not.toBeInTheDocument();
+      expect(within(row(index)).queryByText("estimated")).not.toBeInTheDocument();
+      expect(within(row(index)).queryByText("reconciled")).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("explains how reconciled cost is allocated, the UTC months and the three bases", () => {
+    api.getUsageAnalytics.mockReturnValue(new Promise(() => undefined));
+
+    renderPage();
+
+    const note = screen.getByText(/allocated to groups in proportion to their estimated cost/);
+    expect(note).toHaveTextContent("it is not the actual cost of each request");
+    expect(note).toHaveTextContent("Reconciled months are UTC calendar months.");
+    expect(note).toHaveTextContent("Estimated: no reconciled month covers this cost, so it is the estimate");
+    expect(note).toHaveTextContent("Reconciled: all of the estimated cost falls in reconciled months");
+    expect(note).toHaveTextContent("Mixed (partly reconciled): part is reconciled and the rest is the estimate.");
+    expect(note).toHaveTextContent(
+      "Gross margin / Gross profit on provider cost use the prepaid provider cost with the same basis; gateway fees are counted by paid_at.",
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows the provider cost totals and the coverage line with the rest of the totals", async () => {
+    api.getUsageAnalytics.mockResolvedValue(report([item()], 1));
+
+    renderPage();
+
+    const totalsBlock = await screen.findByRole("region", { name: "Totals" });
+    expect(within(totalsBlock).getByText("Reconciled months (UTC): none — provider costs are estimated")).toBeInTheDocument();
+    expect(totalsBlock.querySelector("thead")).toBeNull();
+    expect(dataRows()).toHaveLength(1);
   });
 });
 

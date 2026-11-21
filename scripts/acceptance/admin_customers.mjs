@@ -62,6 +62,10 @@
  * AIH-TASK-246 加了管理端供应商成本页的两个只读步骤（open_provider_costs 排在 login 之后、经顶栏自己进供应商成本页；
  * check_provider_cost_months 排在 open_provider_costs 之后、不自己导航，核对月份表格的行数、月份与状态文字），都不点任何
  * 按钮、不打开表单（设计闸门 #755 v1 §2「管理端页面」、§11）。
+ * AIH-TASK-249 加了用量分析页对账后供应商成本的一个只读步骤（check_analytics_provider_cost），排在 open_usage_analytics
+ * 之后、不自己导航，核对合计块里「Provider cost (reconciled where available)」「Gross profit on provider cost」两项与页面
+ * 自己发出的分析 GET 的响应一致（设计闸门 #756 v2 §2「页面」）；check_usage_analytics、check_analytics_totals、
+ * check_analytics_export 与 check_analytics_xlsx 不变（新的两项 th 文字与「Gross profit」不全等，不影响按文字全等找项）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -207,6 +211,8 @@
  *   合计块（check_analytics_totals）只看不点；「Export CSV」按钮（check_analytics_export）**只查不点**（验收不下载文件）。
  *   「Export Excel」按钮（check_analytics_xlsx）同样**只查不点**（验收不下载文件）：不自己导航，停在 open_usage_analytics
  *   打开的那一页，不点「Export Excel」「Export CSV」或任何别的按钮与链接、不改筛选、不翻页，不填也不提交任何表单。
+ *   合计块里的对账后供应商成本（check_analytics_provider_cost）同样只看不点：不自己导航，停在 open_usage_analytics 打开的
+ *   那一页，不点任何按钮与链接、不改筛选、不翻页，不填也不提交任何表单。
  *   钱包核对页（open_wallet_reconciliation）不点运行表的任何一行（不打开不一致列表）、不翻页、不改每页条数、不点
  *   「Try again」或任何别的按钮与链接，不填也不提交任何表单（页面本身没有写操作入口）。
  *   对账单页（open_statements）不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不动客户下拉与
@@ -371,6 +377,18 @@
  *                   「Export Excel」（usageAnalytics.export.buttonXlsx）的按钮恰好一个，且处于可用状态（没有 disabled 属性、
  *                   aria-disabled 不是 true）。找不到按钮是 element_missing，不止一个或一直不可用是 assertion_failed。**不点**
  *                   这个按钮（验收不下载文件），也不点「Export CSV」或任何别的按钮与链接、不改筛选、不翻页、不填也不提交任何表单
+ *   check_analytics_provider_cost
+ *                   本次运行跑过 open_usage_analytics 才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认
+ *                   open_usage_analytics 打开的那一页（落定的判定与失败码同 check_usage_analytics）。后端值取页面自己发出的
+ *                   GET /api/v1/admin/usage-analytics 的响应体（被动观察，不自己发请求、不拦截；取点顶栏之后成功读完的最近
+ *                   一次），不是成功信封、没有 data.totals、totals.prepaid.provider_cost_myr 不是字符串、
+ *                   totals.gross_profit_on_provider_cost 既不是字符串也不是 null，都是 assertion_failed。合计块（规则同
+ *                   check_analytics_totals）里 <th> 文字恰为「Provider cost (reconciled where available)」
+ *                   （usageAnalytics.totals.providerCost）与「Gross profit on provider cost」
+ *                   （usageAnalytics.totals.grossProfitOnProviderCost）的两项各恰好一个，<td> 的全部文字（去首尾空白）分别等于
+ *                   totals.prepaid.provider_cost_myr 与 totals.gross_profit_on_provider_cost（null 时为短横「—」）。找不到合计块
+ *                   或某一项是 element_missing，文字不等或不止一个是 assertion_failed。不改筛选、不翻页。报到前把合计块滚动到
+ *                   视口里（规则同 check_analytics_totals）
  *   open_wallet_reconciliation
  *                   要排在 login 之后。点顶栏「Wallet reconciliation」（en.json 的 nav.walletReconciliation，href 为 paths.ts 的
  *                   walletReconciliation，即 /wallet-reconciliation）进钱包核对页；页面落定：地址是 /wallet-reconciliation，运行表
@@ -889,6 +907,8 @@ const TEXT = {
   analyticsUsageRevenue: "Usage revenue", // usageAnalytics.totals.usageRevenue —— 合计块里的一项（th）
   analyticsGrossProfit: "Gross profit", // usageAnalytics.totals.grossProfit
   analyticsGatewayFees: "Gateway fees", // usageAnalytics.totals.gatewayFees
+  analyticsProviderCost: "Provider cost (reconciled where available)", // usageAnalytics.totals.providerCost
+  analyticsGrossProfitOnProviderCost: "Gross profit on provider cost", // usageAnalytics.totals.grossProfitOnProviderCost
   analyticsNull: "—", // 合计块里 null 的显示（frontend/src/features/usage/UsageEventsPage.tsx 的 EMPTY）
   analyticsExport: "Export CSV", // usageAnalytics.export.button —— 只确认它在且可用，不点
   analyticsExportXlsx: "Export Excel", // usageAnalytics.export.buttonXlsx —— 只确认它在且可用，不点
@@ -3821,6 +3841,36 @@ function probeAnalyticsTotals(lib, T) {
     gatewayFees: item(T.analyticsGatewayFees),
     exportButtons: buttons.length,
     exportEnabled,
+  };
+}
+
+/**
+ * 用量分析页合计块里的对账后供应商成本（check_analytics_provider_cost 用）：合计块（role=region、aria-label 为「Totals」）
+ * 在不在；块里 <th> 文字恰为「Provider cost (reconciled where available)」「Gross profit on provider cost」的两项（带边框的
+ * Descriptions：label 在 <th>，值在紧跟的 <td>）各有几个、恰好一个时 <td> 的全部文字（去首尾空白）。只读 DOM，不点、不填。
+ */
+function probeAnalyticsProviderCost(lib, T) {
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.analyticsTotalsTitle,
+    ) ?? null;
+  const item = (label) => {
+    const cells = [];
+    if (region !== null) {
+      for (const th of region.querySelectorAll("th")) {
+        const td = th.nextElementSibling;
+        if (lib.norm(th.textContent) === label && td && td.tagName === "TD") {
+          cells.push(td);
+        }
+      }
+    }
+    return { count: cells.length, text: cells.length === 1 ? (cells[0].textContent ?? "").trim() : null };
+  };
+  return {
+    path: location.pathname,
+    region: region !== null,
+    providerCost: item(T.analyticsProviderCost),
+    grossProfit: item(T.analyticsGrossProfitOnProviderCost),
   };
 }
 
@@ -7336,6 +7386,67 @@ async function stepCheckAnalyticsTotals(ctx) {
   }
 }
 
+async function stepCheckAnalyticsProviderCost(ctx) {
+  // 不自己导航：只认 open_usage_analytics 打开的那一页，以及点顶栏之后页面自己发出的请求。
+  if (ctx.usageAnalyticsAfterSeq === null) {
+    throw fail("assertion_failed");
+  }
+  await awaitUsageAnalyticsSettled();
+
+  // 后端值：点顶栏之后页面自己发出、成功读完的最近一次分析 GET 的响应体（被动观察）。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestUsageAnalyticsResponse(ctx.usageAnalyticsAfterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const totals = envelope?.success === true ? envelope.data?.totals : null;
+    const providerCost = totals?.prepaid?.provider_cost_myr;
+    const grossProfit = totals?.gross_profit_on_provider_cost;
+    if (typeof providerCost !== "string" || (grossProfit !== null && typeof grossProfit !== "string")) {
+      throw fail("assertion_failed");
+    }
+    expected = { providerCost, grossProfit: grossProfit ?? TEXT.analyticsNull };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 totals 或类型不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 合计块显示的就是这一份响应：两项各恰好一个，<td> 的全部文字逐字等于后端字符串（null 是短横）。
+  const matches = (s) =>
+    s.path === TEXT.usageAnalyticsPath &&
+    s.region &&
+    s.providerCost.count === 1 &&
+    s.grossProfit.count === 1 &&
+    s.providerCost.text === expected.providerCost &&
+    s.grossProfit.text === expected.grossProfit;
+  const shown = await waitFor(() => evaluate(probeAnalyticsProviderCost, TEXT), matches, ELEMENT_WAIT_MS);
+  if (!shown.ok) {
+    const s = shown.value;
+    const missing = s === null || !s.region || s.providerCost.count === 0 || s.grossProfit.count === 0;
+    throw fail(missing ? "element_missing" : "assertion_failed");
+  }
+
+  // Worker 在报到后截图：先把合计块滚进视口。
+  if ((await evaluate(scrollAnalyticsTotalsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(analyticsTotalsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckAnalyticsExport(ctx) {
   // 不自己导航：只认 open_usage_analytics 打开的那一页。
   if (ctx.usageAnalyticsAfterSeq === null) {
@@ -10785,6 +10896,7 @@ const STEPS = {
   check_analytics_totals: stepCheckAnalyticsTotals,
   check_analytics_export: stepCheckAnalyticsExport,
   check_analytics_xlsx: stepCheckAnalyticsXlsx,
+  check_analytics_provider_cost: stepCheckAnalyticsProviderCost,
   open_wallet_reconciliation: stepOpenWalletReconciliation,
   open_statements: stepOpenStatements,
   check_admin_statement_pdf: stepCheckAdminStatementPdf,
@@ -10869,7 +10981,7 @@ async function main() {
     loginSeq: null,
     /**
      * open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null（check_analytics_totals、
-     * check_analytics_export 与 check_analytics_xlsx 这时 assertion_failed）。
+     * check_analytics_export、check_analytics_xlsx 与 check_analytics_provider_cost 这时 assertion_failed）。
      */
     usageAnalyticsAfterSeq: null,
     /**
