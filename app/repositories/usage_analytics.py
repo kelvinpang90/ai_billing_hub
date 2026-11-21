@@ -1,16 +1,29 @@
 """Read-only grouped usage analytics queries.
 
 AIH-TASK-221（设计闸门 #709 v2 §2「仓储」）：按马来西亚日 / 月分组、与分组同列同条件的全量合计、
-`paid_at` 落在区间内的 `PAID` 支付汇总。三个公开函数都只读、不加锁、不提交。
+`paid_at` 落在区间内的 `PAID` 支付汇总。
+AIH-TASK-247（设计闸门 #756 v2 §2「仓储」）：按与区间重叠的当前对账记录汇总覆盖范围内的估算
+（`reconciled_allocation_inputs`），分摊与舍入归接口层。公开函数都只读、不加锁、不提交。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Final, NamedTuple
 
-from sqlalchemy import ColumnElement, Integer, String, case, cast, func, select
+from sqlalchemy import (
+    ColumnElement,
+    Integer,
+    Numeric,
+    String,
+    case,
+    cast,
+    func,
+    select,
+    type_coerce,
+)
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.compiler import SQLCompiler
@@ -18,15 +31,23 @@ from sqlalchemy.sql.functions import FunctionElement
 
 from app.core.fx_source import KUALA_LUMPUR_OFFSET
 from app.models.ai_catalog import AiModel, AiProvider, PayloadShape
+from app.models.base import MONEY_PRECISION, MONEY_SCALE
 from app.models.payments import Payment, PaymentStatus
 from app.models.tenancy import BillingMode, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
+from app.repositories.provider_cost_reconciliations import (
+    ai_module_origin,
+    current_records_overlapping,
+    scope_estimated_myr,
+)
 from app.repositories.usage_events import MalaysiaDay
 
 # 马来西亚月表达式里的小时数，与日期换算同一个偏移（固定 UTC+8）。
 _KUALA_LUMPUR_HOURS: Final = int(KUALA_LUMPUR_OFFSET.total_seconds()) // 3600
 # 只汇总 MYR 的支付：数据库对 `confirmed_currency` 没有 CHECK（设计 §2「仓储」）。
 _PAYMENT_CURRENCY: Final = "MYR"
+# SQLite 把 DECIMAL 存成浮点：覆盖估算之和按金额列的精度转回 Decimal（同对账仓储）。
+_MONEY: Final = Numeric(MONEY_PRECISION, MONEY_SCALE, asdecimal=True)
 
 
 class MalaysiaMonth(FunctionElement[int]):
@@ -98,6 +119,40 @@ class PaidPaymentTotals(NamedTuple):
     topup_amount: Decimal
     gateway_fee: Decimal
     gateway_fee_unknown_count: int
+
+
+@dataclass(frozen=True)
+class CoveringRecord:
+    """One current reconciliation overlapping the period (设计 #756 §2「仓储」)."""
+
+    # 对账记录的 public_id，也是 `AllocationInputs` 两个字典里的记录键。
+    public_id: str
+    provider_code: str
+    # "YYYY-MM"
+    billing_month: str
+    # 不带时区的 UTC。
+    period_start: dt.datetime
+    period_end: dt.datetime
+    # R
+    reconciled_cost_myr: Decimal
+    # E：实时、整个期间、不受报表筛选影响。
+    scope_estimated_myr: Decimal
+
+
+@dataclass(frozen=True)
+class AllocationInputs:
+    """What the allocation needs; keys absent from the dicts count as 0.
+
+    模式键是 `billing_mode_snapshot` 的原值（`"PREPAID"` / `"INTERNAL_METERED_ONLY"`）；
+    `total_covered[(r, m)]` 恰好等于 `group_covered` 里同一 `(r, m)` 各项之和。
+    """
+
+    # 按 provider_id、period_start 升序。
+    records: tuple[CoveringRecord, ...]
+    # (group_key, 记录 public_id, 模式) -> covered
+    group_covered: dict[tuple[str | None, str, str], Decimal]
+    # (记录 public_id, 模式) -> covered
+    total_covered: dict[tuple[str, str], Decimal]
 
 
 _ZERO_TOTALS: Final = UsageAnalyticsTotals(
@@ -242,34 +297,8 @@ def list_usage_analytics(
     if conditions is None:
         return [], 0
 
-    joins: list[object] = []
-    group_key: Any
-    group_name: Any
+    group_key, group_name, joins = _grouping(group_by)
     by_period = group_by in {"day", "month"}
-    if group_by == "day":
-        group_key, group_name = MalaysiaDay(UsageEvent.occurred_at), None
-    elif group_by == "month":
-        group_key, group_name = MalaysiaMonth(UsageEvent.occurred_at), None
-    elif group_by == "provider":
-        group_key, group_name = AiProvider.code, None
-        joins.append((AiProvider, AiProvider.id == UsageEvent.provider_id))
-    elif group_by == "model":
-        group_key = AiProvider.code + ":" + AiModel.code
-        group_name = None
-        joins.extend(
-            (
-                (AiProvider, AiProvider.id == UsageEvent.provider_id),
-                (AiModel, AiModel.id == UsageEvent.model_id),
-            )
-        )
-    elif group_by == "customer":
-        group_key, group_name = Tenant.public_id, Tenant.company_name
-        joins.append((Tenant, Tenant.id == UsageEvent.tenant_id))
-    elif group_by == "project":
-        group_key, group_name = Project.public_id, Project.name
-        joins.append((Project, Project.id == UsageEvent.project_id))
-    else:
-        group_key, group_name = UsageEvent.feature, None
 
     # 排序用未加标签的表达式：ORDER BY 文本与 AIH-TASK-073 相同。
     event_count = func.count(UsageEvent.id)
@@ -299,6 +328,41 @@ def list_usage_analytics(
     return rows, int(session.execute(count_statement).scalar_one())
 
 
+def _grouping(group_by: str) -> tuple[Any, Any, list[Any]]:
+    """`(group key, group name or None, outer joins)` of one dimension.
+
+    `list_usage_analytics` 与 `reconciled_allocation_inputs` 共用（设计 #756 §2「仓储」第 3 步）。
+    """
+    joins: list[Any] = []
+    group_key: Any
+    group_name: Any
+    if group_by == "day":
+        group_key, group_name = MalaysiaDay(UsageEvent.occurred_at), None
+    elif group_by == "month":
+        group_key, group_name = MalaysiaMonth(UsageEvent.occurred_at), None
+    elif group_by == "provider":
+        group_key, group_name = AiProvider.code, None
+        joins.append((AiProvider, AiProvider.id == UsageEvent.provider_id))
+    elif group_by == "model":
+        group_key = AiProvider.code + ":" + AiModel.code
+        group_name = None
+        joins.extend(
+            (
+                (AiProvider, AiProvider.id == UsageEvent.provider_id),
+                (AiModel, AiModel.id == UsageEvent.model_id),
+            )
+        )
+    elif group_by == "customer":
+        group_key, group_name = Tenant.public_id, Tenant.company_name
+        joins.append((Tenant, Tenant.id == UsageEvent.tenant_id))
+    elif group_by == "project":
+        group_key, group_name = Project.public_id, Project.name
+        joins.append((Project, Project.id == UsageEvent.project_id))
+    else:
+        group_key, group_name = UsageEvent.feature, None
+    return group_key, group_name, joins
+
+
 def usage_analytics_totals(
     session: Session,
     *,
@@ -325,6 +389,86 @@ def usage_analytics_totals(
         return _ZERO_TOTALS
     statement = select(*_aggregates()).select_from(UsageEvent).where(*conditions)
     return UsageAnalyticsTotals(**_aggregate_values(session.execute(statement).one()))
+
+
+def reconciled_allocation_inputs(
+    session: Session,
+    *,
+    group_by: str,
+    customer_id: str | None,
+    project_id: str | None,
+    provider: str | None,
+    model: str | None,
+    feature: str | None,
+    occurred_from: dt.datetime,
+    occurred_to: dt.datetime,
+) -> AllocationInputs:
+    """The covered estimates of each current record overlapping the period (设计 #756 §2「仓储」).
+
+    `_conditions` 的查找 L 次；为 None 时就此返回空输入，否则再发 1 + 2n 条
+    （n 为重叠记录数）：每条记录一次实时 E、一次按分组与计费模式的聚合。
+    合计在 Python 里由分组项加出，没有不分组的合计查询。不分摊、不舍入。
+    """
+    conditions = _conditions(
+        session,
+        customer_id=customer_id,
+        project_id=project_id,
+        provider=provider,
+        model=model,
+        feature=feature,
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
+    if conditions is None:
+        return AllocationInputs(records=(), group_covered={}, total_covered={})
+
+    group_key, _, joins = _grouping(group_by)
+    records: list[CoveringRecord] = []
+    group_covered: dict[tuple[str | None, str, str], Decimal] = {}
+    total_covered: dict[tuple[str, str], Decimal] = {}
+    for record, provider_code in current_records_overlapping(
+        session, start=occurred_from, end=occurred_to
+    ):
+        period_start, period_end = record.period_start, record.period_end
+        records.append(
+            CoveringRecord(
+                public_id=record.public_id,
+                provider_code=provider_code,
+                billing_month=record.billing_month,
+                period_start=period_start,
+                period_end=period_end,
+                reconciled_cost_myr=Decimal(record.reconciled_cost_myr),
+                scope_estimated_myr=scope_estimated_myr(
+                    session,
+                    provider_id=record.provider_id,
+                    period_start=period_start,
+                    period_end=period_end,
+                ),
+            )
+        )
+        statement = select(
+            group_key.label("group_key"),
+            UsageEvent.billing_mode_snapshot.label("billing_mode"),
+            type_coerce(func.sum(UsageEvent.estimated_provider_cost_myr), _MONEY).label("covered"),
+        ).select_from(UsageEvent)
+        for table, onclause in joins:
+            statement = statement.outerjoin(table, onclause)
+        statement = statement.where(
+            *conditions,
+            UsageEvent.occurred_at >= max(occurred_from, period_start),
+            UsageEvent.occurred_at < min(occurred_to, period_end),
+            UsageEvent.provider_id == record.provider_id,
+            ai_module_origin(),
+        ).group_by(group_key, UsageEvent.billing_mode_snapshot)
+        for row in session.execute(statement).all():
+            mode = str(row.billing_mode)
+            covered = Decimal(row.covered)
+            group_covered[(_period_key(group_by, row.group_key), record.public_id, mode)] = covered
+            total = (record.public_id, mode)
+            total_covered[total] = total_covered.get(total, Decimal(0)) + covered
+    return AllocationInputs(
+        records=tuple(records), group_covered=group_covered, total_covered=total_covered
+    )
 
 
 def paid_payment_totals(
