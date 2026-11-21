@@ -14314,7 +14314,7 @@ tasks:
     title: 对账后成本第二层：用量分析接口与导出加按比例分摊的供应商成本和基于它的毛利
     purpose: >-
       按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「接口与导出」：GET /api/v1/admin/usage-analytics 的分组项与 totals 加分摊后的供应商成本、口径与基于它的毛利，合计加覆盖的对账月份；CSV 导出在 31 列后追加 10 列；INV-7 守卫追加新键名；docs/api.md 补口径。不做页面：属于 AIH-TASK-249。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-247
       - AIH-TASK-223
