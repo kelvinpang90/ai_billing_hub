@@ -26,6 +26,9 @@ from app.api.admin_payments import router as admin_payments_router
 from app.api.admin_portal_accounts import router as admin_portal_accounts_router
 from app.api.admin_pricing_preview import router as admin_pricing_preview_router
 from app.api.admin_pricing_rules import router as admin_pricing_rules_router
+from app.api.admin_provider_cost_reconciliations import (
+    router as admin_provider_cost_reconciliations_router,
+)
 from app.api.admin_provider_prices import router as admin_provider_prices_router
 from app.api.admin_statements import router as admin_statements_router
 from app.api.admin_usage_analytics import router as admin_usage_analytics_router
@@ -161,6 +164,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(admin_provider_prices_router)
     app.include_router(admin_pricing_rules_router)
     app.include_router(admin_fx_rates_router)
+    # 供应商成本对账（AIH-TASK-245，设计闸门 #755 v1 §2「管理端接口」）。
+    app.include_router(admin_provider_cost_reconciliations_router)
     app.include_router(admin_pricing_preview_router)
     # 用量事件的重新入队（AIH-TASK-032）；查询接口以后加在同一个路由器上。
     app.include_router(admin_usage_events_router)

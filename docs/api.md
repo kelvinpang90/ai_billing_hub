@@ -23,6 +23,7 @@
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
 - [管理端试算预览](#管理端试算预览)（AIH-TASK-031）
 - [管理端用量事件：重新入队](#管理端用量事件重新入队)（AIH-TASK-032）
+- [管理端供应商成本对账](#管理端供应商成本对账)（AIH-TASK-245）：月份总览、预览、确认与详情；只追加，不改任何已计费金额
 - [钱包核对](#钱包核对)（AIH-TASK-134）：管理端只读的核对运行列表与每次运行的不一致记录
 - [内部告警接口](#内部告警接口)（AIH-TASK-042）：机器接口，**不套信封**，是下面通用约定的例外
 - [集成：用量事件摄取](#集成用量事件摄取)（AIH-TASK-029）：集成签名认证，错误信封多一个顶层 `retryable`
@@ -3619,6 +3620,163 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
   `admin_usage_analytics_export_failed`（只带路径）。名额在请求结束时释放。
 - 只读：分组、合计与手续费块在一个只读会话里查（同一快照），不写任何表、**不写审计**、不落盘。成功时服务端记一条
   INFO `admin_usage_analytics_exported`，只带管理员内部 id、`group_by` 与 `GROUP` 行数，不带筛选值、公司名与金额。
+
+---
+
+## 管理端供应商成本对账
+
+设计依据：设计闸门 #755 `APPROVED: design v1`，全文见
+[design/AIH-TASK-242-provider-cost-reconciliation.md](design/AIH-TASK-242-provider-cost-reconciliation.md)
+§2「口径」「管理端接口」。实现登记为 AIH-TASK-245。
+
+管理员每月按供应商账单或成本页**手工录入**某个供应商在一个 UTC 自然月里的实际成本（来源币种原值、不含税），先预览、
+再确认；确认写一行**不可变**的对账记录与一条审计。四个接口都只对 ADMIN（未登录 401 `TOKEN_INVALID`、非 ADMIN 403
+`ADMIN_REQUIRED`；查询参数与请求体由框架在鉴权之前校验，非法输入可能先得 422）。路径里的 id 是记录的 `public_id`。
+
+> ⚠️ 响应含 Acuven 内部的供应商成本，只在 `/api/v1/admin` 下；客户侧任何接口都没有这些字段（INV-7）。
+
+### 口径
+
+| 量 | 定义 |
+| --- | --- |
+| 期间 | 供应商 × **UTC 自然月**：`period_start = YYYY-MM-01T00:00:00`，`period_end` = 下月 1 日 0 点，左闭右开（`period_basis` 恒为 `utc_calendar_month`）。**不是**对账单的马来西亚月 |
+| 范围 | 只含**经 AI 模块发出的调用**（事件的 `event_id` 出现在 AI 模块的 outbox 里，`scope` 恒为 `AI_MODULE`）；集成方用自己的供应商密钥上报的同供应商用量不在范围内 |
+| `estimated_event_count` | 范围内、`occurred_at` 在期间内、已处理的事件数 |
+| `estimated_source_cost` | 这些事件里来源币种等于录入币种的来源成本之和 |
+| `estimated_cost_myr` | 这些事件的估算 MYR 成本之和 |
+| `source_total` | 录入的实际成本（来源币种，≥ 0，至多 8 位小数） |
+| `reconciled_cost_myr` | 录入币种为 MYR 时等于 `source_total`；否则 `source_total × fx_rate_applied` 舍入到 8 位（只舍入一次）。汇率取**期间最后一刻**（`period_end` 减 1 微秒，`fx_rate_moment`）生效的**已发布**汇率版本 |
+| `source_variance` / `source_variance_rate` | `source_total − estimated_source_cost`；除以 `estimated_source_cost`，分母为 0 时 `null` |
+| `myr_variance` / `myr_variance_rate` | `reconciled_cost_myr − estimated_cost_myr`；同上 |
+| `exceeds_threshold` | 来源币种差额率的绝对值 ≥ `variance_threshold`（`"0.05"`，即 5%）；或估算为 0 而实际大于 0。阈值**按来源币种**判，不混入月内汇率波动；只用于页面高亮、不告警 |
+| `unprocessed_event_count` | 期间内属于 AI 模块、尚未处理的事件数（不限供应商） |
+| `outbox_unsettled_count` | AI 模块 outbox 里 `created_at` 在期间内、还没投递完（待发、发送中、暂存、死信）的行数 |
+| `outbox_discarded_count` | 同一区间已丢弃的行数 |
+
+- **MYR 录入**：`fx_rate_version_id`、`fx_rate_applied`、`fx_rate_moment` 三个都为 `null`。非 MYR 时 `fx_rate_version_id`
+  是汇率版本的 `public_id`，`fx_rate_applied` 是去掉末尾 0 的精确十进制串（如 `"4.4"`）。
+- **诊断计数的含义**：未处理与未投递的调用已被供应商计费、估算里还没有，会让差额偏正；已丢弃的永远没有估算；outbox
+  按 `created_at` 归期是近似，月界附近可能差一两笔。计数在确认时快照进记录。
+- 金额是恰好 8 位小数的十进制字符串；差额率与阈值是去掉末尾 0 的十进制字符串；全程 `Decimal`、不经 float。时间字段是
+  不带时区的 UTC，写法同「管理端汇率」：没有 `Z`，例 `2026-12-01T00:00:00`、`2026-12-31T23:59:59.999999`。
+- **只追加**：记录行不可改、不可删。更正 = 追加一行取代行（带 `supersedes_id` 与必填理由），新行为当前版本、旧行为
+  「已被取代」，都保留。同一供应商、范围、月份至多一个根记录，每行至多被取代一次。
+- **不改任何已计费金额**：对账不改用量事件（含估算快照）、钱包、账本与对账单，不发补偿交易。
+
+### 对账记录对象
+
+| 键 | 含义 |
+| --- | --- |
+| `reconciliation_id` | 记录的 `public_id`；预览为 `null` |
+| `provider_code`、`scope`、`billing_month`、`period_basis`、`period_start`、`period_end` | 期间与范围 |
+| `source_document_reference` | 来源说明（去首尾空白后 1–255 字符） |
+| `source_currency`、`source_total` | 录入的币种与实际成本 |
+| `fx_rate_version_id`、`fx_rate_applied`、`fx_rate_moment` | 换算用的汇率（MYR 时都为 `null`） |
+| `reconciled_cost_myr` | 换算后的实际 MYR 成本 |
+| `estimated_event_count`、`estimated_source_cost`、`estimated_cost_myr` | 估算（确认时的快照） |
+| `source_variance`、`source_variance_rate`、`myr_variance`、`myr_variance_rate` | 两种差额与差额率 |
+| `exceeds_threshold`、`variance_threshold` | 是否超阈值；阈值 `"0.05"` |
+| `unprocessed_event_count`、`outbox_unsettled_count`、`outbox_discarded_count` | 诊断计数 |
+| `coverage_method` | 恒为 `PERIOD_AGGREGATE`（供应商 × 期间一个合计数，不分模型） |
+| `supersedes_id`、`reason` | 被取代行的 `public_id` 与更正理由；根记录都为 `null` |
+| `is_current` | 是否当前版本；预览为 `null` |
+| `created_at`、`created_by_email` | 确认时刻（整秒 UTC）与确认人；预览为 `null` |
+
+示例（虚构金额）：
+
+```json
+{
+  "reconciliation_id": "00000000-0000-0000-0000-000000000000",
+  "provider_code": "anthropic", "scope": "AI_MODULE", "billing_month": "2026-12",
+  "period_basis": "utc_calendar_month",
+  "period_start": "2026-12-01T00:00:00", "period_end": "2027-01-01T00:00:00",
+  "source_document_reference": "Cost page, platform workspace, 2026-12",
+  "source_currency": "USD", "source_total": "11.70000000",
+  "fx_rate_version_id": "00000000-0000-0000-0000-000000000000",
+  "fx_rate_applied": "4.4", "fx_rate_moment": "2026-12-31T23:59:59.999999",
+  "reconciled_cost_myr": "51.48000000",
+  "estimated_event_count": 2, "estimated_source_cost": "10.50000000", "estimated_cost_myr": "46.80000000",
+  "source_variance": "1.20000000", "source_variance_rate": "0.1142857142857142857142857143",
+  "myr_variance": "4.68000000", "myr_variance_rate": "0.1",
+  "exceeds_threshold": true, "variance_threshold": "0.05",
+  "unprocessed_event_count": 1, "outbox_unsettled_count": 1, "outbox_discarded_count": 1,
+  "coverage_method": "PERIOD_AGGREGATE",
+  "supersedes_id": null, "reason": null, "is_current": true,
+  "created_at": "2027-01-05T02:00:00", "created_by_email": "…"
+}
+```
+
+### `GET /api/v1/admin/provider-cost-reconciliations/months` —— 月份总览
+
+- `provider_code` 必填，`^[a-z0-9_.-]{1,64}$`，格式不符 422 `VALIDATION_ERROR`；格式对但目录里没有这个供应商 → 404
+  `AI_PROVIDER_NOT_FOUND`（不返回一串未对账的月份）。
+- 200，`data.items`：从首个对账月（`2026-12`）到最近一个已结束的 UTC 月，**最近的在前**，至多 24 个；不分页。首个对账月
+  还没结束时为空列表。每项恰好 `{billing_month, period_start, period_end, status, current}`：`status` 为 `RECONCILED`
+  （`current` 是当前版本的记录对象）或 `NOT_RECONCILED`（`current` 为 `null`）。
+
+### `POST /api/v1/admin/provider-cost-reconciliations/preview` —— 预览
+
+请求体恰好七个字段（多带任何字段，含 `expected_*`，都是 422）：
+
+| 字段 | 规则 |
+| --- | --- |
+| `provider_code` | 必填，1–64 字符；查不到 → 404 `AI_PROVIDER_NOT_FOUND` |
+| `billing_month` | 必填，1–7 字符；不是 `YYYY-MM`、早于首个对账月或还没结束 → 422 `RECONCILIATION_MONTH_INVALID` |
+| `source_currency` | 必填，`^[A-Z]{3}$` |
+| `source_total` | 必填，**JSON 字符串** `[0-9]{1,9}(\.[0-9]{1,8})?`（整数至多 9 位、允许 0）；数字、符号、指数写法都是 422 |
+| `source_document_reference` | 必填，去首尾空白后 1–255 字符；写工作区或账单与月份，不写合同价 |
+| `supersedes_id` | 可选，被更正记录的 `public_id`（1–64 字符，不校验 UUID 格式）；查不到（含不是 UUID 的值）→ 404 `PROVIDER_COST_RECONCILIATION_NOT_FOUND` |
+| `reason` | 更正理由，去首尾空白后 1–255 字符；带 `supersedes_id` 时必填，不带时必须为 `null`，否则 422 `VALIDATION_ERROR` |
+
+200，记录对象（`reconciliation_id`、`is_current`、`created_at`、`created_by_email` 为 `null`）。**不写库**。
+
+### `POST /api/v1/admin/provider-cost-reconciliations` —— 确认
+
+请求体恰好九个字段：预览的七个，加两个必填的期望值（取自预览的响应）：
+
+| 字段 | 规则 |
+| --- | --- |
+| `expected_event_count` | JSON 整数，≥ 0；布尔值与字符串都是 422 |
+| `expected_estimated_source_cost` | **JSON 字符串** `[0-9]{1,12}(\.[0-9]{1,8})?`（允许 0） |
+
+201，记录对象（`is_current` 为 `true`）。同一事务写记录与一条审计 `PROVIDER_COST_RECONCILIATION_CREATE`（审计不含来源说明）。
+期望值与当前估算不等 → 409 `RECONCILIATION_ESTIMATE_CHANGED`（预览之后有事件被处理），重新预览后再确认。
+
+### `GET /api/v1/admin/provider-cost-reconciliations/{reconciliation_id}` —— 详情
+
+路径参数不做格式校验，查不到（含不是 UUID 的值）一律 404 `PROVIDER_COST_RECONCILIATION_NOT_FOUND`。200，恰好四个键：
+
+| 键 | 含义 |
+| --- | --- |
+| `reconciliation` | 这条记录 |
+| `chain` | 同一供应商、范围、月份的整条更正链（最早的在前），每项带 `is_current` |
+| `live_estimate` | 按这条记录的供应商、期间与币种**现在**重算：`estimated_event_count`、`estimated_source_cost`、`estimated_cost_myr`、`currency_mismatch_count`（范围内来源币种不是录入币种的事件数）、`unprocessed_event_count` |
+| `estimate_changed_since_confirmation` | 实时的事件数、来源成本、MYR 估算任一与记录上的快照不等，**或** `currency_mismatch_count > 0` 时为 `true`；未处理数不参与判定 |
+
+详情只读：不取汇率、不重算差额（差额来自记录上的快照）。
+
+### 错误
+
+信封照「通用约定」；业务错误只有 `code` 与 `message`，不带 `details`。422 `VALIDATION_ERROR` 只列字段名、不回显值。
+检查顺序（预览与确认相同，第一个不过的就返回）：请求体 → 理由 → 月份 → 供应商 → 被取代记录 / 已有根 → 汇率 →
+换算后金额 → 估算与币种 →（仅确认）期望值。
+
+| HTTP | `code` | 何时 |
+| --- | --- | --- |
+| 422 | `VALIDATION_ERROR` | 请求体或查询参数不合规 |
+| 422 | `RECONCILIATION_REASON_INVALID` | 理由与 `supersedes_id` 不配对，或去首尾空白后为空、长于 255（服务层再挡一次） |
+| 422 | `RECONCILIATION_MONTH_INVALID` | 月份不是 `YYYY-MM`、早于首个对账月或还没结束 |
+| 404 | `AI_PROVIDER_NOT_FOUND` | 供应商代码查不到 |
+| 404 | `PROVIDER_COST_RECONCILIATION_NOT_FOUND` | 详情的 id 或 `supersedes_id` 查不到（含不是 UUID 的值） |
+| 422 | `RECONCILIATION_SUPERSEDES_MISMATCH` | 被取代记录的供应商、范围或月份与请求不同 |
+| 409 | `RECONCILIATION_NOT_CURRENT` | 被取代记录已有后继（含并发更正的后提交者） |
+| 409 | `RECONCILIATION_EXISTS` | 不带 `supersedes_id` 而该月已有记录（含并发确认的后提交者）；前端收到后**重新拉月份总览**，对当前版本更正 |
+| 422 | `FX_RATE_UNAVAILABLE` | 非 MYR 录入而期间最后一刻没有生效的已发布汇率 |
+| 422 | `RECONCILIATION_AMOUNT_OUT_OF_RANGE` | 换算后的 MYR 成本放不进 `DECIMAL(20,8)` |
+| 422 | `SOURCE_CURRENCY_MISMATCH` | 范围内有事件的来源币种与录入币种不同 |
+| 409 | `RECONCILIATION_ESTIMATE_CHANGED` | 仅确认：期望值与当前估算不等 |
+
+`RECONCILIATION_EXISTS` 与 `RECONCILIATION_NOT_CURRENT` 在预览时也可能返回。
 
 ---
 

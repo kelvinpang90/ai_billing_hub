@@ -43,6 +43,7 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import DateTime, Engine, column, create_engine, delete, insert, select, table, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 # ⚠️ 只为让 SQLite 的 `create_all` 建出 `ai_usage_outbox`；本模块不用它的类，
 # outbox 行一律按表名写（下面的 `_OUTBOX`）。
@@ -786,6 +787,26 @@ def seed_meter_types(factory: sessionmaker[Session]) -> None:
 
 def sqlite_factory() -> Iterator[sessionmaker[Session]]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = create_session_factory(engine)
+    seed_meter_types(factory)
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+
+
+def sqlite_shared_factory() -> Iterator[sessionmaker[Session]]:
+    """Like `sqlite_factory`, with one connection shared by every thread (AIH-TASK-245).
+
+    TestClient 在线程池里跑同步端点：内存库必须所有连接共用一个（StaticPool，与
+    test_admin_customers_api.py 的 app 夹具同理），否则端点看到的是另一个空库。
+    """
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
     Base.metadata.create_all(engine)
     factory = create_session_factory(engine)
     seed_meter_types(factory)
