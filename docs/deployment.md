@@ -237,6 +237,32 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 - `tests/backend/test_compose.py` 要求每个 `*_file` 配置都接进 compose，这两项是登记过的例外（开关默认关、开启时由管理员接入），
   加 secret 的 PR 要连同这个用例一起改。
 
+## 认证配置：下界、跨字段关系与前端基址格式（设计闸门 #751 v3，AIH-TASK-232、233）
+
+这些都在进程启动时由 `Settings` 一次性校验（`app/core/config.py`）。**不合规时 api、worker、beat 都起不来**；
+部署脚本先用新镜像与同一套环境变量跑迁移（`deploy/deploy.sh` 的 `alembic upgrade head`），迁移经 `get_settings()`
+先撞上校验，**部署在迁移步骤中止，旧版本继续跑**。生产没有设下面任何一个键（取默认值），默认值全部满足。
+
+| 环境变量 | 默认 | 约束 |
+| --- | --- | --- |
+| `BILLING_ACCESS_TOKEN_TTL_SECONDS` | 600 | ≥ 60 |
+| `BILLING_REFRESH_TOKEN_IDLE_SECONDS` | 1800 | ≥ 访问令牌寿命 + 60 |
+| `BILLING_REFRESH_TOKEN_TTL_SECONDS` | 43200 | ≥ 闲置期限（它也是会话 cookie 的 `max_age`） |
+| `BILLING_LOGIN_MAX_FAILURES` | 5 | ≥ 3 |
+| `BILLING_LOGIN_LOCKOUT_SECONDS` | 900 | ≥ 300 |
+| `BILLING_AUTH_RATE_LIMIT_BURST` | 20 | ≥ 3（一次冷启动登录要连过三次令牌桶） |
+| `BILLING_AUTH_RATE_LIMIT_PER_MINUTE` | 10 | ≥ 3 |
+| `BILLING_PASSWORD_RESET_MIN_INTERVAL_SECONDS`（新） | 300 | 60–3600，且 ≤ `BILLING_PASSWORD_RESET_TTL_SECONDS`：同一账号在这个间隔内只发一封重置邮件；不超过链接寿命，保证被限频时上一封信里的链接一定还有效 |
+
+每条下界与关系的理由见设计闸门 #751 v3 §2「配置下界」。跨字段关系不成立时，错误信息只说哪条关系不成立。
+
+**`BILLING_FRONTEND_BASE_URL` 的格式**（重置、邀请、通知、付款邮件里的链接与付款跳回地址都由它拼出）：
+
+- 去掉首尾空白后为空 = 未配置，仍合法（依赖它的邮件不发、支付开关打开时建单 503）。
+- 不能含空白、ASCII 控制字符、反斜杠、`?`、`#`；scheme 只能是 `http` 或 `https`；必须有主机名；不能带用户名或密码；
+  端口要能读出且不为 0；路径只能为空或 `/`（前端从根路由，带路径前缀拼出的每条链接都是 404）。末尾的 `/` 会被去掉。
+- **生产（`BILLING_ENVIRONMENT=production`）非空时必须是 `https`**：链接带着一次性令牌，http 会让令牌明文过网。本地可用 http。
+
 ---
 
 ## 3. 进程模型（T0.10 基线的直接输出）
