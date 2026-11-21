@@ -14443,7 +14443,7 @@ tasks:
     title: 供应商成本对账第六层：上月满九天仍未对账时在用量积压告警里提醒三天
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「告警」：app/services/alerts.py 的 usage_processing_backlog 在现有五段之后追加第六段，判定上一个已结束的 UTC 月在月末后第 9 至 12 天内是否有范围内事件却没有当前对账记录；docs/runbook.md 与 docs/api.md 补第六段的含义与处置。不新增维度。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-249
     acceptance_criteria:
