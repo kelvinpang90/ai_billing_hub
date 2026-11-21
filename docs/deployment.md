@@ -176,7 +176,7 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 | `BILLING_AI_HELD_BUFFER_MAX` / `BILLING_AI_HELD_RETRY_SECONDS` | `1000` / `30` |
 
 为 `ai_usage_outbox` 新建一个 Healthchecks 检查，读取应用告警维度后按现有的每维度一检查规则
-推送；8 个基础检查（备份三个、logs、config、services、readyz、disk）加 12 个告警维度各一个，正好是免费档 20 个上限（2026-11-03 接通时核实，见 §8.4「生产接通状态」）。检查名使用 `ai_billing_hub ai_usage_outbox`，
+推送；8 个基础检查（备份三个、logs、config、services、readyz、disk）加 12 个告警维度各一个，正好是免费档 20 个上限（2026-11-03 接通时核实，见 §8.4「生产接通状态」）。2026-11-21 起五个维度并成两个，告警维度剩 9 个、共 17 个检查（见 §8.4「2026-11-21 合并维度」）。检查名使用 `ai_billing_hub ai_usage_outbox`，
 地址写入宿主机 `.env` 的 `BILLING_HEALTHCHECK_ALERT_AI_USAGE_OUTBOX_URL`，周期 5 分钟、宽限 15 分钟，
 绑定既有 Telegram 通知。超过免费档上限前必须先调整监控方案，不能静默省略此检查。
 
@@ -1165,8 +1165,8 @@ app/services/alerts.py（维度注册表）→ GET /internal/alerts（纯文本�
 
 | 维度 | 何时 P2 | Healthchecks 检查 | `.env` 键 | runbook |
 | --- | --- | --- | --- | --- |
-| `fx_fetch` | 某个配置币种最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE`），且至少一条 `FAILED`（= 连续 3 天拉取失败）。周末、假期 BNM 答「无记录」算成功，不误报 | `ai_billing_hub fx_fetch` | `BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL` | [FX 拉取失败](runbook.md) |
-| `fx_stale` | 某个配置币种**当前生效**的版本，报价日距今超过 **5 个日历日**（吉隆坡日期相减；Kelvin 2026-09-29 定，见 ADR-0005 收口条件）；或根本没有生效的版本 | `ai_billing_hub fx_stale` | `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL` | [FX 汇率过期或没有生效的汇率](runbook.md) |
+| `fx_fetch`（2026-11-21 起是 `fx_stale` 一行的成员，没有自己的检查） | 某个配置币种最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT` / `NO_NEW_QUOTE` / `NO_QUOTE_FOR_DATE`），且至少一条 `FAILED`（= 连续 3 天拉取失败）。周末、假期 BNM 答「无记录」算成功，不误报 | 随 `ai_billing_hub fx_stale` 推 | — | [FX 拉取失败](runbook.md) |
+| `fx_stale`（合并行，成员 `fx_fetch`、`fx_stale`；级别取两者最严重的） | 某个配置币种**当前生效**的版本，报价日距今超过 **5 个日历日**（吉隆坡日期相减；Kelvin 2026-09-29 定，见 ADR-0005 收口条件）；或根本没有生效的版本 | `ai_billing_hub fx_stale` | `BILLING_HEALTHCHECK_ALERT_FX_STALE_URL` | [FX 汇率过期或没有生效的汇率](runbook.md) |
 
 行格式与接口细节见 [api.md](api.md)「内部告警接口」。地址规则是通用的：维度 `<名字>` 用
 `BILLING_HEALTHCHECK_ALERT_<名字大写>_URL`。以后 T-E、T-H 注册的维度**只在 `.env` 加地址**，`monitor.sh` 与
@@ -1271,7 +1271,32 @@ app/services/alerts.py（维度注册表）→ GET /internal/alerts（纯文本�
 | 手工跑一次 | 11 个维度 up；`fx_stale` down：USD 生效汇率的报价日是 2026-10-16（18 天），BNM 每天都有新草稿但没有人发布 |
 | 管理员发布 2026-11-03 的 BNM 草稿 | 旧版本在发布时刻截断、新版本接上；下一轮 `fx_stale` 回到 up，20 个检查全部 up |
 
-现在这个项目**正好 20 个检查**（免费档上限）：以后的新信号只能并进已有维度，不能再新建检查（Kelvin 2026-10-17 定，不升级付费档）。⚠️ 以后核实某条告警是否真的在工作，看 VPS 上 `journalctl -t billing-monitor` 的输出，不要只看本文件。
+2026-11-03 起这个项目**正好 20 个检查**（免费档上限）：以后的新信号只能并进已有维度，不能再新建检查（Kelvin 2026-10-17 定，不升级付费档）。2026-11-21 起是 17 个，见下一节。⚠️ 以后核实某条告警是否真的在工作，看 VPS 上 `journalctl -t billing-monitor` 的输出，不要只看本文件。
+
+#### 2026-11-21 合并维度（腾出 3 个检查）
+
+Kelvin 2026-11-21 定：心跳服务继续用免费档、不另开账号（多账号绕过上限算滥用）；由本项目合并维度腾出 3 个检查，
+给别的项目用（Stock Core 生产实例两个、共享基建的 MySQL 备份一个，那三个检查不在本仓库建）。
+
+| 合并行（沿用的检查与 `.env` 键） | 成员 | 不再上报、要删的检查 |
+| --- | --- | --- |
+| `fx_stale`（`ai_billing_hub fx_stale`，`BILLING_HEALTHCHECK_ALERT_FX_STALE_URL`） | `fx_fetch`、`fx_stale` | `ai_billing_hub fx_fetch` |
+| `usage_pricing_error`（`ai_billing_hub usage_pricing_error`，`BILLING_HEALTHCHECK_ALERT_USAGE_PRICING_ERROR_URL`） | `usage_pricing_error`、`usage_fx_rate_error`、`usage_model_unknown` | `ai_billing_hub usage_fx_rate_error`、`ai_billing_hub usage_model_unknown` |
+
+- 合并行的级别取成员里最严重的；通知正文按成员顺序列出每个成员的名字、级别与原摘要（`P2 fx_stale: fx_fetch OK: … | fx_stale P2: …`），
+  看得出是哪一项出的问题。格式见 [api.md](api.md)「内部告警接口」
+- `monitor.sh`、`config_snapshot.sh` 不用改：它们按行、按键名模式通用处理。部署后被并入的三个维度不再出现在接口里，它们的
+  检查收不到 ping，宽限期（15 分钟）过后会变 DOWN、发一条「未上报」—— 这是预期的，删掉即可
+- 上线顺序：部署 → 确认两个合并行的检查在收心跳 → 在 Healthchecks 控制台删上表第三列的 3 个检查（Kelvin 同意后）→
+  `.env` 里那三个键（`BILLING_HEALTHCHECK_ALERT_FX_FETCH_URL`、`…_USAGE_FX_RATE_ERROR_URL`、`…_USAGE_MODEL_UNKNOWN_URL`）
+  已没有维度去读，可以删掉（改前留备份）；留着也无害，`config_snapshot.sh` 只拿它们做「快照里不含地址」的自查
+- 代价与 `disk`、`services` 并进别的检查相同：合并行已经红着时，另一个成员出事**不会再单独通知**，要看通知正文与
+  `journalctl -t billing-monitor -p err` 的每一行
+
+之后这个项目有 **17 个检查**：8 个基础检查（`.env` 键 `BILLING_HEALTHCHECK_<BACKUP|BINLOG|DRILL|LOGS|CONFIG|SERVICES|READYZ|DISK>_URL` 各一个）
+加 9 个告警维度（`fx_stale`、`usage_event_conflicts`、`usage_pricing_error`、`usage_failed`、`usage_processing_backlog`、
+`wallet_negative_balance`、`outbox_backlog`、`status_webhook`、`ai_usage_outbox`）。空出的 3 个位置给别的项目，本项目仍按
+2026-10-17 的规则不新增检查，新信号并进已有维度。
 
 **本地演练**（设计 §7 的 `monitor.sh` 一行；做法同 §8.1：假 docker + 假告警接口 + 一个记录请求的假心跳服务）：
 
