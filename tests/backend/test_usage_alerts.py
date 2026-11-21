@@ -7,7 +7,9 @@ the earliest moments and at most three detail codes — no tenant, no amount. Th
 and the empty-database lines are pinned in test_internal_alerts.py.
 
 `usage_processing_backlog` also carries the missing statements and the late usage of gate #565 v6
-§2「告警」 (AIH-TASK-158), the §7 rows **告警：缺失**, **告警：晚到** and **告警：原有部分**.
+§2「告警」 (AIH-TASK-158), the §7 rows **告警：缺失**, **告警：晚到** and **告警：原有部分**,
+and the unreconciled provider costs of gate #755 v1 §2「告警」 (AIH-TASK-250), the §7 row
+**告警窗口**, on the standard world of provider_cost_world.py.
 
 SQLite only: the dimensions are plain reads (design v3 of #183). Rows are inserted directly with
 placeholder references (SQLite does not enforce the foreign keys); the CHECKs of migrations 0017
@@ -22,6 +24,7 @@ from collections.abc import Iterator
 from decimal import Decimal
 
 import pytest
+from provider_cost_world import V44, World, build_standard_world, reconciliation_fields
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -34,8 +37,9 @@ from app.models.tenancy import AccountStatus, BillingMode, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import ReferenceType, TransactionType, Wallet, WalletTransaction
 from app.models.wallet_reconciliation import ReconciliationRunStatus, WalletReconciliationRun
+from app.repositories import provider_cost_reconciliations as reconciliations
 from app.repositories.wallet import EVENT_BILLING_STATUS_CHANGED
-from app.services import alerts
+from app.services import alerts, provider_cost_reconciliation
 from app.services.account_status import EVENT_ACCOUNT_STATUS_CHANGED
 from app.services.alerts import AlertContext, AlertLevel, AlertResult
 from app.services.password_reset import EVENT_PASSWORD_RESET
@@ -234,8 +238,12 @@ def test_a_ledger_conflict_or_an_overflow_is_p1(factory, code: str) -> None:
 # --- usage_processing_backlog ----------------------------------------------------------------
 
 # The two parts AIH-TASK-158 appends, on a database with no tenant at NOW (2026-10, before the
-# first statement period): the three backlog parts before them are unchanged.
-QUIET = "; 0 statements missing; late usage 24h 0/0 rows (0.00%), 0.00% of amount"
+# first statement period), and the provider cost part of AIH-TASK-250 outside its window: the
+# three backlog parts before them are unchanged.
+NO_PROVIDER_COST = "provider cost reconciled or not due"
+QUIET = (
+    f"; 0 statements missing; late usage 24h 0/0 rows (0.00%), 0.00% of amount; {NO_PROVIDER_COST}"
+)
 
 
 @pytest.mark.parametrize(
@@ -421,7 +429,9 @@ def test_a_missing_statement_is_p2_only_from_6_to_30_hours_after_the_cutoff(
 
     result = backlog(factory, DECEMBER.cutoff + offset)
 
-    assert result == AlertResult(level, f"{NO_BACKLOG_PARTS}; {missing}; {NO_LATE_USAGE}")
+    assert result == AlertResult(
+        level, f"{NO_BACKLOG_PARTS}; {missing}; {NO_LATE_USAGE}; {NO_PROVIDER_COST}"
+    )
 
 
 def test_only_the_period_in_its_window_is_counted(factory) -> None:
@@ -435,7 +445,8 @@ def test_only_the_period_in_its_window_is_counted(factory) -> None:
     after = backlog(factory, JANUARY.cutoff + 6 * HOUR)
     assert after == AlertResult(
         P2,
-        f"{NO_BACKLOG_PARTS}; 1 statements missing, earliest period 2027-01; {NO_LATE_USAGE}",
+        f"{NO_BACKLOG_PARTS}; 1 statements missing, earliest period 2027-01; {NO_LATE_USAGE}; "
+        f"{NO_PROVIDER_COST}",
     )
     assert tenant.public_id not in after.summary
     assert tenant.company_name not in after.summary
@@ -449,7 +460,7 @@ def test_tenants_that_get_no_statement_are_not_missing(factory) -> None:
     now = DECEMBER.cutoff + 6 * HOUR
 
     assert backlog(factory, now) == AlertResult(
-        OK, f"{NO_BACKLOG_PARTS}; 0 statements missing; {NO_LATE_USAGE}"
+        OK, f"{NO_BACKLOG_PARTS}; 0 statements missing; {NO_LATE_USAGE}; {NO_PROVIDER_COST}"
     )
 
     add_tenant(factory, wallet_created_at=DECEMBER.end - SECOND)
@@ -468,7 +479,7 @@ def test_periods_after_the_closure_are_not_missing(factory) -> None:
 
     in_january = backlog(factory, JANUARY.cutoff + 6 * HOUR)
     assert in_january == AlertResult(
-        OK, f"{NO_BACKLOG_PARTS}; 0 statements missing; {NO_LATE_USAGE}"
+        OK, f"{NO_BACKLOG_PARTS}; 0 statements missing; {NO_LATE_USAGE}; {NO_PROVIDER_COST}"
     )
 
     add_statement(factory, closed, DECEMBER)
@@ -508,7 +519,7 @@ def test_the_worst_part_sets_the_level(factory) -> None:
     assert result == AlertResult(
         P1,
         f"1 due, oldest since {stamp(now - 31 * MINUTE)}; 0 PROCESSING; 0 lease expired; "
-        f"1 statements missing, earliest period 2026-12; {NO_LATE_USAGE}",
+        f"1 statements missing, earliest period 2026-12; {NO_LATE_USAGE}; {NO_PROVIDER_COST}",
     )
 
 
@@ -597,7 +608,7 @@ def test_one_late_row_in_100_is_p2(factory) -> None:
     assert result == AlertResult(
         P2,
         f"{NO_BACKLOG_PARTS}; 0 statements missing; "
-        "late usage 24h 1/100 rows (1.00%), 1.00% of amount",
+        f"late usage 24h 1/100 rows (1.00%), 1.00% of amount; {NO_PROVIDER_COST}",
     )
     assert tenant.public_id not in result.summary
     assert tenant.company_name not in result.summary
@@ -666,6 +677,90 @@ def test_a_window_across_a_month_judges_each_part_by_its_month(factory) -> None:
 
     assert result.level is P2
     assert late_part(result) == "late usage 24h 1/4 rows (25.00%), 25.00% of amount"
+
+
+# --- usage_processing_backlog: provider costs (gate #755 v1 §2「告警」, AIH-TASK-250) ---------
+
+# The end of 2027-01, the month judged in February; the standard world has E4 in it.
+FEBRUARY_START = dt.datetime(2027, 2, 1)
+# The other five parts on the standard world in these windows: no backlog, no statement window
+# open, no ledger row.
+FIVE_PARTS = f"{NO_BACKLOG_PARTS}; 0 statements missing; {NO_LATE_USAGE}"
+JANUARY_UNRECONCILED = "provider cost anthropic not reconciled for 2027-01"
+
+
+@pytest.fixture
+def provider_cost_alert_world(provider_cost_sqlite, monkeypatch) -> World:
+    """The standard world on SQLite, with the first reconciliation month pinned to 2026-12."""
+    monkeypatch.setattr(provider_cost_reconciliation, "FIRST_RECONCILIATION_MONTH", "2026-12")
+    return build_standard_world(provider_cost_sqlite)
+
+
+def add_january_record(world: World) -> None:
+    """A root record of 2027-01 (E4: 2.00 USD, V44, 8.80), written by `insert_record`."""
+    with world.factory() as session:
+        reconciliations.insert_record(
+            session,
+            **reconciliation_fields(
+                world,
+                public_id="00000000-0000-0000-0000-000000000001",
+                billing_month="2027-01",
+                source_currency="USD",
+                source_total="2.00",
+                fx=V44,
+                reconciled_cost_myr="8.80",
+                estimated_event_count=1,
+                estimated_source_cost="2.00",
+                estimated_cost_myr="8.80",
+            ),
+        )
+        session.commit()
+
+
+@pytest.mark.parametrize(
+    ("offset", "due"),
+    [
+        (dt.timedelta(days=9) - SECOND, False),
+        (dt.timedelta(days=9), True),
+        (dt.timedelta(days=12) - SECOND, True),
+        (dt.timedelta(days=12), False),
+    ],
+    ids=["before-9-days", "at-9-days", "before-12-days", "at-12-days"],
+)
+@pytest.mark.parametrize("recorded", [False, True], ids=["no-record", "record"])
+def test_last_month_unreconciled_is_p2_only_9_to_12_days_after_it_ended(
+    provider_cost_alert_world: World, offset: dt.timedelta, due: bool, recorded: bool
+) -> None:
+    if recorded:
+        add_january_record(provider_cost_alert_world)
+
+    result = backlog(provider_cost_alert_world.factory, FEBRUARY_START + offset)
+
+    if due and not recorded:
+        assert result == AlertResult(P2, f"{FIVE_PARTS}; {JANUARY_UNRECONCILED}")
+    else:
+        assert result == AlertResult(OK, f"{FIVE_PARTS}; {NO_PROVIDER_COST}")
+    for amount in ("2.00", "8.80", "4.4"):
+        assert amount not in result.summary
+
+
+def test_a_month_without_in_scope_events_is_ok_in_its_window(
+    provider_cost_alert_world: World,
+) -> None:
+    """2027-02 has no in-scope event in the standard world: nothing to reconcile."""
+    result = backlog(provider_cost_alert_world.factory, dt.datetime(2027, 3, 1) + 9 * DAY)
+
+    assert result == AlertResult(OK, f"{FIVE_PARTS}; {NO_PROVIDER_COST}")
+
+
+def test_a_month_before_the_first_reconciliation_month_is_never_reported(
+    provider_cost_alert_world: World, monkeypatch
+) -> None:
+    monkeypatch.setattr(provider_cost_reconciliation, "FIRST_RECONCILIATION_MONTH", "2027-02")
+
+    result = backlog(provider_cost_alert_world.factory, FEBRUARY_START + 9 * DAY)
+
+    assert result == AlertResult(OK, f"{FIVE_PARTS}; {NO_PROVIDER_COST}")
 
 
 # --- wallet_negative_balance -------------------------------------------------------------------
