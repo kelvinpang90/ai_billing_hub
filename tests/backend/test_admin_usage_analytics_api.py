@@ -10,6 +10,24 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from provider_cost_world import (
+    MYR_THREE_DECEMBER,
+    P_CHAT,
+    P_CRM,
+    P_PRE,
+    PROVIDER_CODE,
+    Q1,
+    Q2,
+    Q3,
+    UNALLOCATABLE_RECORDS,
+    add_record,
+    build_myr_three_world,
+    build_standard_world,
+    build_unallocatable_world,
+    mysql_factory,
+    sqlite_shared_factory,
+)
+from provider_cost_world import World as ProviderCostWorld
 from sqlalchemy import create_engine, delete, event, insert, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -300,11 +318,22 @@ def test_period_status_modes_tokens_filters_order_paging_and_money(app, client) 
         "estimated_provider_cost_myr": "0.25000000",
         "gross_margin": "-0.25000000",
         "gross_margin_rate": None,
+        # AIH-TASK-248：没有对账记录，供应商成本就是估算。
+        "covered_estimated_cost_myr": "0.00000000",
+        "reconciled_provider_cost_myr": "0.00000000",
+        "provider_cost_myr": "0.25000000",
+        "provider_cost_basis": "estimated",
+        "gross_margin_on_provider_cost": "-0.25000000",
+        "gross_margin_on_provider_cost_rate": None,
     }
     assert item["internal_metered_only"] == {
         "event_count": 1,
         "estimated_provider_cost_myr": "0.12500000",
         "reference_customer_price": "0.50000000",
+        "covered_estimated_cost_myr": "0.00000000",
+        "reconciled_provider_cost_myr": "0.00000000",
+        "provider_cost_myr": "0.12500000",
+        "provider_cost_basis": "estimated",
     }
     if app.state.engine.dialect.name == "mysql":
         assert item["prepaid"]["estimated_provider_cost_myr"] == "0.25000000"
@@ -840,7 +869,15 @@ TOTALS_KEYS = (ITEM_KEYS - {"group_key", "group_name"}) | {
     "payments",
     "gross_profit",
     "gross_profit_rate",
+    # AIH-TASK-248（设计闸门 #756 v2 §2「接口与导出」）。
+    "gross_profit_on_provider_cost",
+    "gross_profit_on_provider_cost_rate",
+    "reconciliation_coverage",
+    "unallocated_reconciled_months",
+    "unallocated_reconciled_cost_myr",
 }
+# AIH-TASK-248 在 `data` 顶层新增的两个口径键。
+PROVIDER_COST_DATA_KEYS = {"provider_cost_allocation", "reconciliation_period_basis"}
 PAYMENTS_KEYS = {
     "period_basis",
     "paid_count",
@@ -987,7 +1024,9 @@ def test_the_data_keeps_task_073_keys_and_adds_the_period_basis_and_totals(bille
     admin = headers(app, domain=TEST_EMAIL_DOMAIN)
     for group_by in (*GROUPINGS, "day", "month"):
         data = analytics(app, admin, group_by=group_by)
-        assert set(data) == TASK_073_KEYS | {"usage_period_basis", "totals"}, group_by
+        assert set(data) == TASK_073_KEYS | {"usage_period_basis", "totals"} | (
+            PROVIDER_COST_DATA_KEYS
+        ), group_by
         assert (data["cost_basis"], data["usage_period_basis"]) == ("estimated", "occurred_at")
         assert data["items"] and all(set(item) == ITEM_KEYS for item in data["items"]), group_by
         totals = data["totals"]
@@ -1218,3 +1257,421 @@ def test_a_week_grouping_or_a_367_day_span_is_refused_after_authentication(
 def test_days_and_months_are_valid_groupings(app, client, group_by: str) -> None:
     data = query(client, headers(app), group_by=group_by)
     assert (data["total"], data["items"], data["totals"]["event_count"]) == (0, [], 0)
+
+
+# --- AIH-TASK-248：按比例分摊的对账后成本（设计闸门 #756 v2 §2、§7） ---
+#
+# 世界来自 tests/backend/provider_cost_world.py：
+# 标准世界（E1–E6）加 `UNALLOCATABLE_RECORDS` 的 12 月记录
+# （R = 51.48、实时 E = 46.80、R ÷ E = 1.1），`myr_three`，`unallocatable`。
+# SQLite 与真 MySQL 各跑一遍；MySQL 那一半没设 `BILLING_TEST_DATABASE_URL` 时 skip，
+# **skipped 不是 passed**，CI 设了它。金额都能精确表示，两边都逐位比较字符串。
+
+DECEMBER_RECORD = UNALLOCATABLE_RECORDS[0]
+DECEMBER = {"occurred_from": "2026-12-01T00:00:00Z", "occurred_to": "2027-01-01T00:00:00Z"}
+THREE_MONTHS = {"occurred_from": "2026-11-01T00:00:00Z", "occurred_to": "2027-02-01T00:00:00Z"}
+# 两块共有的四个新键与 prepaid 块独有的两个。
+PROVIDER_COST_KEYS = (
+    "covered_estimated_cost_myr",
+    "reconciled_provider_cost_myr",
+    "provider_cost_myr",
+    "provider_cost_basis",
+)
+PREPAID_PROVIDER_COST_KEYS = (
+    *PROVIDER_COST_KEYS,
+    "gross_margin_on_provider_cost",
+    "gross_margin_on_provider_cost_rate",
+)
+TOTALS_PROVIDER_COST_KEYS = (
+    "gross_profit_on_provider_cost",
+    "gross_profit_on_provider_cost_rate",
+    "reconciliation_coverage",
+    "unallocated_reconciled_months",
+    "unallocated_reconciled_cost_myr",
+)
+COVERAGE_KEYS = {
+    "reconciliation_id",
+    "provider_code",
+    "billing_month",
+    "period_start",
+    "period_end",
+    "fully_in_range",
+    "allocatable",
+}
+
+
+@pytest.fixture(params=["sqlite", "mysql"])
+def cost_db(request, monkeypatch):
+    """An empty database for a provider cost world: shared-connection SQLite, and a real MySQL."""
+    if request.param == "mysql":
+        yield from mysql_factory(monkeypatch)
+        return
+    yield from sqlite_shared_factory()
+
+
+@pytest.fixture
+def cost_app(tmp_path, cost_db):
+    application = create_app(settings_for(tmp_path))
+    application.state.engine = cost_db.kw["bind"]
+    application.state.session_factory = cost_db
+    return application
+
+
+def cost_analytics(app, world: ProviderCostWorld, **params) -> dict:
+    """Interface one as the world's administrator."""
+    token = issue_access_token(
+        app.state.settings,
+        user_id=world.admin_id,
+        role="ADMIN",
+        session_id="0" * 32,
+        now=utc_now(),
+    )
+    return query(TestClient(app), {"Authorization": f"Bearer {token}"}, **params)
+
+
+def block(view: dict, name: str, keys: tuple[str, ...]) -> tuple:
+    return tuple(view[name][key] for key in keys)
+
+
+def by_group_name(data: dict) -> dict[str, dict]:
+    return {item["group_name"]: item for item in data["items"]}
+
+
+def by_group_key(data: dict) -> dict[str, dict]:
+    return {item["group_key"]: item for item in data["items"]}
+
+
+def coverage_of(spec, *, fully_in_range: bool = True, allocatable: bool = True) -> dict:
+    """What `totals.reconciliation_coverage` lists for one record (times without `Z`)."""
+    start = dt.datetime.strptime(spec.billing_month, "%Y-%m")
+    end = dt.datetime(start.year + start.month // 12, start.month % 12 + 1, 1)
+    return {
+        "reconciliation_id": spec.public_id,
+        "provider_code": PROVIDER_CODE,
+        "billing_month": spec.billing_month,
+        "period_start": start.isoformat(),
+        "period_end": end.isoformat(),
+        "fully_in_range": fully_in_range,
+        "allocatable": allocatable,
+    }
+
+
+def without_provider_cost(data: dict) -> dict:
+    """`data` with only the AIH-TASK-222 keys: every key AIH-TASK-248 added is dropped."""
+
+    def strip(view: dict) -> dict:
+        kept = {key: value for key, value in view.items() if key not in TOTALS_PROVIDER_COST_KEYS}
+        kept["prepaid"] = {
+            key: value
+            for key, value in view["prepaid"].items()
+            if key not in PREPAID_PROVIDER_COST_KEYS
+        }
+        kept["internal_metered_only"] = {
+            key: value
+            for key, value in view["internal_metered_only"].items()
+            if key not in PROVIDER_COST_KEYS
+        }
+        return kept
+
+    return {
+        **{key: value for key, value in data.items() if key not in PROVIDER_COST_DATA_KEYS},
+        "items": [strip(item) for item in data["items"]],
+        "totals": strip(data["totals"]),
+    }
+
+
+def test_the_december_record_is_allocated_pro_rata_by_project_and_by_provider(cost_app, cost_db):
+    """§7「分摊结果」：区间 [2026-12-01, 2027-01-01)。"""
+    world = build_standard_world(cost_db)
+    add_record(world, DECEMBER_RECORD)
+
+    data = cost_analytics(cost_app, world, group_by="project", **DECEMBER)
+    assert (
+        data["cost_basis"],
+        data["provider_cost_allocation"],
+        data["reconciliation_period_basis"],
+    ) == ("estimated", "pro_rata_estimated_cost", "utc_calendar_month")
+    projects = by_group_name(data)
+    assert set(projects) == {P_CRM, P_PRE, P_CHAT}
+    crm, pre, chat = projects[P_CRM], projects[P_PRE], projects[P_CHAT]
+    assert block(crm, "internal_metered_only", PROVIDER_COST_KEYS) == (
+        "27.00000000",
+        "29.70000000",
+        "29.70000000",
+        "reconciled",
+    )
+    assert block(crm, "prepaid", PREPAID_PROVIDER_COST_KEYS) == (
+        "0.00000000",
+        "0.00000000",
+        "0.00000000",
+        "estimated",
+        "0.00000000",
+        None,
+    )
+    assert block(pre, "prepaid", PREPAID_PROVIDER_COST_KEYS) == (
+        "19.80000000",
+        "21.78000000",
+        "21.78000000",
+        "reconciled",
+        "-21.78000000",
+        None,
+    )
+    assert block(chat, "prepaid", PREPAID_PROVIDER_COST_KEYS) == (
+        "0.00000000",
+        "0.00000000",
+        "450.00000000",
+        "estimated",
+        "-450.00000000",
+        None,
+    )
+    # 两行分摊之和 = R。
+    allocated = Decimal(crm["internal_metered_only"]["reconciled_provider_cost_myr"]) + Decimal(
+        pre["prepaid"]["reconciled_provider_cost_myr"]
+    )
+    assert allocated == Decimal(DECEMBER_RECORD.reconciled_cost_myr)
+
+    totals = data["totals"]
+    assert set(totals) == TOTALS_KEYS
+    assert block(totals, "prepaid", PREPAID_PROVIDER_COST_KEYS) == (
+        "19.80000000",
+        "21.78000000",
+        "471.78000000",
+        "mixed",
+        "-471.78000000",
+        None,
+    )
+    assert block(totals, "internal_metered_only", PROVIDER_COST_KEYS) == (
+        "27.00000000",
+        "29.70000000",
+        "29.70000000",
+        "reconciled",
+    )
+    # 没有支付：手续费块全零，基于供应商成本的毛利 = 基于它的用量毛利。
+    assert totals["payments"]["gateway_fee"] == ZERO_MONEY
+    assert (
+        totals["gross_profit_on_provider_cost"],
+        totals["gross_profit_on_provider_cost_rate"],
+    ) == (
+        "-471.78000000",
+        None,
+    )
+    assert totals["reconciliation_coverage"] == [coverage_of(DECEMBER_RECORD)]
+    assert all(set(item) == COVERAGE_KEYS for item in totals["reconciliation_coverage"])
+    assert (totals["unallocated_reconciled_months"], totals["unallocated_reconciled_cost_myr"]) == (
+        [],
+        None,
+    )
+
+    providers = cost_analytics(cost_app, world, group_by="provider", **DECEMBER)
+    [anthropic] = providers["items"]
+    assert anthropic["group_key"] == PROVIDER_CODE
+    assert block(anthropic, "prepaid", PROVIDER_COST_KEYS) == (
+        "19.80000000",
+        "21.78000000",
+        "471.78000000",
+        "mixed",
+    )
+    assert block(anthropic, "internal_metered_only", PROVIDER_COST_KEYS) == (
+        "27.00000000",
+        "29.70000000",
+        "29.70000000",
+        "reconciled",
+    )
+    assert providers["totals"]["prepaid"]["provider_cost_myr"] == "471.78000000"
+    assert providers["totals"]["internal_metered_only"]["provider_cost_myr"] == "29.70000000"
+
+
+def test_malaysian_months_take_each_event_by_its_utc_month(cost_app, cost_db) -> None:
+    """§7「马来西亚月分组」：区间 [2026-11-01, 2027-02-01)、`group_by=month`。"""
+    world = build_standard_world(cost_db)
+    add_record(world, DECEMBER_RECORD)
+
+    months = by_group_key(cost_analytics(cost_app, world, group_by="month", **THREE_MONTHS))
+    assert set(months) == {"2026-12", "2027-01"}
+    january, december = months["2027-01"], months["2026-12"]
+    # E2：UTC 12 月、马来西亚 1 月。
+    assert block(january, "prepaid", PROVIDER_COST_KEYS) == (
+        "19.80000000",
+        "21.78000000",
+        "21.78000000",
+        "reconciled",
+    )
+    # E4 8.80 未覆盖。
+    assert block(january, "internal_metered_only", PROVIDER_COST_KEYS) == (
+        "0.00000000",
+        "0.00000000",
+        "8.80000000",
+        "estimated",
+    )
+    # E1 覆盖（27.00 → 29.70）+ E3 未覆盖（UTC 11 月、马来西亚 12 月，4.50）。
+    assert block(december, "internal_metered_only", PROVIDER_COST_KEYS) == (
+        "27.00000000",
+        "29.70000000",
+        "34.20000000",
+        "mixed",
+    )
+    # E5：集成方上报，不在范围内。
+    assert block(december, "prepaid", PROVIDER_COST_KEYS) == (
+        "0.00000000",
+        "0.00000000",
+        "450.00000000",
+        "estimated",
+    )
+
+
+def test_a_partly_covered_record_allocates_only_the_events_in_the_period(cost_app, cost_db):
+    """§7「部分覆盖」：区间 [2026-12-15, 2027-01-01)。
+
+    只有 E2 在区间内；E 仍是整月的实时值。
+    """
+    world = build_standard_world(cost_db)
+    add_record(world, DECEMBER_RECORD)
+
+    totals = cost_analytics(
+        cost_app,
+        world,
+        group_by="provider",
+        occurred_from="2026-12-15T00:00:00Z",
+        occurred_to="2027-01-01T00:00:00Z",
+    )["totals"]
+    assert totals["reconciliation_coverage"] == [coverage_of(DECEMBER_RECORD, fully_in_range=False)]
+    assert block(totals, "prepaid", PROVIDER_COST_KEYS) == (
+        "19.80000000",
+        "21.78000000",
+        "21.78000000",
+        "reconciled",
+    )
+    assert block(totals, "internal_metered_only", PROVIDER_COST_KEYS) == (
+        "0.00000000",
+        "0.00000000",
+        "0.00000000",
+        "estimated",
+    )
+
+
+def test_each_group_is_rounded_once_and_the_totals_on_their_own(cost_app, cost_db) -> None:
+    """§7「分摊舍入」：`myr_three` 加 12 月 MYR 1.00 记录；每组 1/3，合计单独算为 1。"""
+    world = build_myr_three_world(cost_db)
+    add_record(world, MYR_THREE_DECEMBER)
+
+    data = cost_analytics(cost_app, world, group_by="project", **DECEMBER)
+    projects = by_group_name(data)
+    assert set(projects) == {Q1, Q2, Q3}
+    for name, item in projects.items():
+        assert block(item, "internal_metered_only", PROVIDER_COST_KEYS) == (
+            "1.00000000",
+            "0.33333333",
+            "0.33333333",
+            "reconciled",
+        ), name
+    assert block(data["totals"], "internal_metered_only", PROVIDER_COST_KEYS) == (
+        "3.00000000",
+        "1.00000000",
+        "1.00000000",
+        "reconciled",
+    )
+    # 文档写明的舍入误差：至多组数 × 0.5×10⁻⁸。
+    grouped_sum = sum(
+        (
+            Decimal(item["internal_metered_only"]["reconciled_provider_cost_myr"])
+            for item in projects.values()
+        ),
+        Decimal(0),
+    )
+    assert Decimal("1.00000000") - grouped_sum == Decimal("0.00000001")
+
+
+def test_a_record_without_estimate_is_disclosed_but_never_allocated(cost_app, cost_db) -> None:
+    """§7「不可分摊」：区间 [2026-11-01, 2027-04-01)。
+
+    12 月可分摊；2 月 E = 0 而 R = 5.00，不可分摊；3 月 E = 0 且 R = 0，可分摊。
+    """
+    world = build_unallocatable_world(cost_db)
+    december, february, march = UNALLOCATABLE_RECORDS
+
+    data = cost_analytics(
+        cost_app,
+        world,
+        group_by="provider",
+        occurred_from="2026-11-01T00:00:00Z",
+        occurred_to="2027-04-01T00:00:00Z",
+    )
+    totals = data["totals"]
+    assert totals["reconciliation_coverage"] == [
+        coverage_of(december),
+        coverage_of(february, allocatable=False),
+        coverage_of(march),
+    ]
+    assert (totals["unallocated_reconciled_months"], totals["unallocated_reconciled_cost_myr"]) == (
+        [f"{PROVIDER_CODE}:2027-02"],
+        "5.00000000",
+    )
+    # 2 月的 5.00 不进任何行：分摊额只有 12 月的 51.48。
+    [anthropic] = data["items"]
+    for view in (anthropic, totals):
+        assert block(view, "prepaid", PREPAID_PROVIDER_COST_KEYS) == (
+            "19.80000000",
+            "21.78000000",
+            "471.78000000",
+            "mixed",
+            "-471.78000000",
+            None,
+        )
+        # E1 覆盖 27.00 → 29.70，E3 4.50 与 E4 8.80 未覆盖。
+        assert block(view, "internal_metered_only", PROVIDER_COST_KEYS) == (
+            "27.00000000",
+            "29.70000000",
+            "43.00000000",
+            "mixed",
+        )
+    assert totals["gross_profit_on_provider_cost"] == "-471.78000000"
+
+
+def test_without_records_the_provider_cost_is_the_estimate_and_old_keys_keep_their_values(
+    cost_app, cost_db
+) -> None:
+    """§7「未覆盖与旧键不变」：没有对账记录；之后加上 12 月记录。
+
+    加记录前后，AIH-TASK-222 的键与值不变。
+    """
+    world = build_standard_world(cost_db)
+
+    before = {
+        group_by: cost_analytics(cost_app, world, group_by=group_by, **THREE_MONTHS)
+        for group_by in ("project", "month")
+    }
+    for data in before.values():
+        totals = data["totals"]
+        for view in (*data["items"], totals):
+            prepaid, internal = view["prepaid"], view["internal_metered_only"]
+            for part in (prepaid, internal):
+                assert (
+                    part["covered_estimated_cost_myr"],
+                    part["reconciled_provider_cost_myr"],
+                    part["provider_cost_basis"],
+                ) == (ZERO_MONEY, ZERO_MONEY, "estimated")
+                assert part["provider_cost_myr"] == part["estimated_provider_cost_myr"]
+            assert prepaid["gross_margin_on_provider_cost"] == prepaid["gross_margin"]
+            assert prepaid["gross_margin_on_provider_cost_rate"] == prepaid["gross_margin_rate"]
+        assert (
+            totals["reconciliation_coverage"],
+            totals["unallocated_reconciled_months"],
+            totals["unallocated_reconciled_cost_myr"],
+        ) == ([], [], None)
+        assert totals["gross_profit_on_provider_cost"] == totals["gross_profit"]
+        assert totals["gross_profit_on_provider_cost_rate"] == totals["gross_profit_rate"]
+    # AIH-TASK-222 的值：估算照标准世界。
+    projects = by_group_name(before["project"])
+    assert projects[P_CRM]["internal_metered_only"]["estimated_provider_cost_myr"] == (
+        "40.30000000"
+    )
+    assert projects[P_CRM]["internal_metered_only"]["reference_customer_price"] == "80.60000000"
+    assert projects[P_PRE]["prepaid"]["estimated_provider_cost_myr"] == "19.80000000"
+    assert projects[P_CHAT]["prepaid"]["estimated_provider_cost_myr"] == "450.00000000"
+
+    add_record(world, DECEMBER_RECORD)
+    for group_by, data in before.items():
+        after = cost_analytics(cost_app, world, group_by=group_by, **THREE_MONTHS)
+        assert after["totals"]["reconciliation_coverage"] == [coverage_of(DECEMBER_RECORD)]
+        assert without_provider_cost(after) == without_provider_cost(data), group_by
+        assert set(without_provider_cost(after)) == TASK_073_KEYS | {"usage_period_basis", "totals"}
