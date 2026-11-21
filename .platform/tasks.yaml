@@ -14134,7 +14134,7 @@ tasks:
     title: 供应商成本对账第四层：管理端对账的月份总览、预览、确认与详情接口
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「管理端接口」与 §6：新建 app/schemas/provider_cost_reconciliations.py 与 app/api/admin_provider_cost_reconciliations.py（GET months、POST preview、POST 确认、GET 详情），在 app/main.py 注册；管理端路由枚举与 INV-7 守卫补新路径、新键名与新模块；docs/api.md 新增「管理端供应商成本对账」一节。不做页面：属于 AIH-TASK-246。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-244
       - AIH-TASK-222
