@@ -27,7 +27,7 @@ from __future__ import annotations
 import datetime as dt
 import itertools
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 
@@ -259,12 +259,11 @@ def usage_event_conflicts(factory: sessionmaker[Session], now: dt.datetime = NOW
 
 # The endpoint's body on an empty database at NOW, one line per registered dimension.
 EMPTY_DATABASE_LINES = (
-    "fx_fetch OK USD no fetch in 72 hours\n"
-    "fx_stale P2 USD no rate in effect\n"
+    "fx_stale P2 fx_fetch OK: USD no fetch in 72 hours | fx_stale P2: USD no rate in effect\n"
     "usage_event_conflicts OK no conflicts in 24 hours\n"
-    "usage_pricing_error OK no PRICING_ERROR events\n"
-    "usage_fx_rate_error OK no FX_RATE_ERROR events\n"
-    "usage_model_unknown OK no MODEL_UNKNOWN events\n"
+    "usage_pricing_error OK usage_pricing_error OK: no PRICING_ERROR events"
+    " | usage_fx_rate_error OK: no FX_RATE_ERROR events"
+    " | usage_model_unknown OK: no MODEL_UNKNOWN events\n"
     "usage_failed OK no failed events\n"
     "usage_processing_backlog OK 0 due; 0 PROCESSING; 0 lease expired; 0 statements missing; "
     "late usage 24h 0/0 rows (0.00%), 0.00% of amount; provider cost reconciled or not due\n"
@@ -283,12 +282,9 @@ def test_the_registry_is_ordered_and_one_line_per_dimension(
 ) -> None:
     names = [dimension.name for dimension in alerts.DIMENSIONS]
     assert names == [
-        "fx_fetch",
         "fx_stale",
         "usage_event_conflicts",
         "usage_pricing_error",
-        "usage_fx_rate_error",
-        "usage_model_unknown",
         "usage_failed",
         "usage_processing_backlog",
         "wallet_negative_balance",
@@ -483,6 +479,69 @@ def test_combine_takes_p2_over_ok_and_ok_when_all_ok() -> None:
     )
     assert alerts._combine([piece(OK, "USD fine"), piece(OK, "EUR fine")]) == AlertResult(
         OK, "USD fine; EUR fine"
+    )
+
+
+# --- merged dimensions (2026-11-21) --------------------------------------------------
+
+
+def fixed(level: AlertLevel, summary: str) -> Callable[[Session, AlertContext], AlertResult]:
+    return lambda session, context: AlertResult(level, summary)
+
+
+def test_merge_takes_the_worst_member_and_lists_every_member(
+    factory: sessionmaker[Session],
+) -> None:
+    members = (
+        alerts.Dimension("a", fixed(OK, "fine")),
+        alerts.Dimension("b", fixed(P2, "minor")),
+        alerts.Dimension("c", fixed(AlertLevel.P1, "severe")),
+    )
+    context = AlertContext(now=NOW, currencies=("USD",))
+    with factory() as session:
+        merged = alerts._merge(session, context, members)
+        p2_only = alerts._merge(session, context, members[:2])
+        all_ok = alerts._merge(session, context, members[:1])
+
+    # Every member stays visible, the OK ones included, so the body tells which one failed.
+    assert merged == AlertResult(AlertLevel.P1, "a OK: fine | b P2: minor | c P1: severe")
+    assert p2_only == AlertResult(P2, "a OK: fine | b P2: minor")
+    assert all_ok == AlertResult(OK, "a OK: fine")
+
+
+def test_the_merged_dimensions_keep_a_member_name_and_their_members(
+    factory: sessionmaker[Session],
+) -> None:
+    """The merged lines keep a member's name: `.env` keys and Healthchecks checks stay as they
+    are. The members, their order and their own checks are unchanged."""
+    registered = {dimension.name: dimension.check for dimension in alerts.DIMENSIONS}
+    assert registered["fx_stale"] is alerts.fx_rates
+    assert registered["usage_pricing_error"] is alerts.usage_unpriced
+    assert [(m.name, m.check) for m in alerts.FX_MEMBERS] == [
+        ("fx_fetch", alerts.fx_fetch),
+        ("fx_stale", alerts.fx_stale),
+    ]
+    assert [(m.name, m.check) for m in alerts.USAGE_UNPRICED_MEMBERS] == [
+        ("usage_pricing_error", alerts.usage_pricing_error),
+        ("usage_fx_rate_error", alerts.usage_fx_rate_error),
+        ("usage_model_unknown", alerts.usage_model_unknown),
+    ]
+    for gone in ("fx_fetch", "usage_fx_rate_error", "usage_model_unknown"):
+        assert gone not in registered
+
+
+def test_fx_rates_is_p2_when_only_the_fetch_fails(factory: sessionmaker[Session]) -> None:
+    publish_bnm(factory, dt.date(2026, 9, 30))
+    for hours in (1, 25, 49):
+        attempt(factory, FxFetchOutcome.FAILED, NOW - hours * HOUR)
+
+    with factory() as session:
+        result = alerts.fx_rates(session, AlertContext(now=NOW, currencies=("USD",)))
+
+    assert result == AlertResult(
+        P2,
+        "fx_fetch P2: USD no successful fetch in 72 hours (3 failed)"
+        " | fx_stale OK: USD quoted 2026-09-30 (1 calendar day)",
     )
 
 
