@@ -525,6 +525,13 @@ def test_billed_sums_are_exact_on_both_databases_and_ties_sort_by_group_key(bill
             "estimated_provider_cost_myr": f"{estimated:.8f}",
             "gross_margin": f"{margin:.8f}",
             "gross_margin_rate": format((margin / billable).normalize(), "f"),
+            # AIH-TASK-248：没有对账记录，供应商成本就是估算。
+            "covered_estimated_cost_myr": "0.00000000",
+            "reconciled_provider_cost_myr": "0.00000000",
+            "provider_cost_myr": f"{estimated:.8f}",
+            "provider_cost_basis": "estimated",
+            "gross_margin_on_provider_cost": f"{margin:.8f}",
+            "gross_margin_on_provider_cost_rate": format((margin / billable).normalize(), "f"),
         }
 
 
