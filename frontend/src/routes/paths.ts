@@ -51,6 +51,11 @@ export const ROUTES = {
   providerPriceDetail: "/pricing/provider-prices/:priceVersionId",
   fxRates: "/fx-rates",
   /**
+   * 管理端供应商成本对账（AIH-TASK-246，设计闸门 #755 v1 §2「管理端页面」）。顶栏在汇率之后有一项；验收脚本
+   * `scripts/acceptance/admin_customers.mjs` 的 `open_provider_costs` 按这个 href 找顶栏链接，改了要同步那里。
+   */
+  providerCosts: "/provider-costs",
+  /**
    * 管理端定价规则与试算（AIH-TASK-037）。顶栏各有一项；验收脚本
    * `scripts/acceptance/admin_customers.mjs` 的 `open_pricing_rules` / `open_pricing_preview` 按这两个 href 找顶栏
    * 链接，改了要同步那里。
