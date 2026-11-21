@@ -101,6 +101,7 @@
 - **计费（T-H）**：在计费事务里 `resolve_model` 之后调用 `lock_fx_rates_shared(session)`（`fx_rate_locks` 的 `FOR SHARE`，持有到计费事务提交），再调用 `resolve_fx_rate`；只处理 `occurred_at ≤` 持锁后当前时间的事件。`fx_rate_version_id` 与 `fx_rate_applied`（`rate` 原值、同精度）写进事件快照。锁顺序：**供应商（S）→ FX（S）→ 定价规则（S）→ 钱包 → 租户**；发布路径各只拿自己那一把锁，不形成环。
 - 由此保证：**一个（币种, 时刻）一旦取到某个版本，以后永远取到同一个版本**（除非那一刻原本无汇率）。计费先 → 事件 `occurred_at` < `t` ≤ 任何新边界；发布先 → 计费读到新表。
 - **计价（T-G）**：`source_currency = MYR` 不查汇率；否则 `resolve_fx_rate` 返回 `None` → `FX_RATE_ERROR`，不扣费；换算按 §80（高精度中间值、只在最终计费额舍入一次）。
+- **供应商成本对账**（设计闸门 #755 v1 §2「口径」「金额与精度」，AIH-TASK-244）：管理员录入的是一个供应商 × UTC 自然月的合计实际成本，换算**只做一次**：在 `lock_fx_rates_shared` 之后用 `resolve_fx_rate(录入币种, period_end − 1 微秒)` 取**期间最后一刻**（下月 1 日 00:00 UTC 前 1 微秒，马来西亚时间次月 1 日 07:59:59.999999）生效的已发布版本，把版本引用 `fx_rate_version_id` 与汇率值 `fx_rate_applied` 记进对账记录，`reconciled_cost_myr = quantize_money(source_total × fx_rate_applied)`（`PRICING_CONTEXT` 内乘、只舍入一次）；录入币种为 MYR 时不取汇率。这与用量事件不同：事件按各自的 `occurred_at` **逐笔**取版本、快照在事件上，所以月内换过汇率版本时，估算 MYR 之和混合了月内各时刻的汇率，对账后 MYR 只用月末那一版，MYR 差额里含月内汇率变化（差额率阈值因此按来源币种判定）。对账不改任何事件快照。月末那一刻取不到汇率 → 422 `FX_RATE_UNAVAILABLE`，补录只走第 4 节的 P1 / P4；两者都补不了时该月暂不能对账，补录另走设计闸门（处置见 `docs/runbook.md`「供应商成本对账」）。
 - **前端（T-K）**：汇率页标明「中间价、吉隆坡中午场、从发布时刻起生效」；预约存在时不给时刻发布会 409，界面提示先撤销预约或指定更晚的时刻。
 
 ## 9. BNM 拉取
