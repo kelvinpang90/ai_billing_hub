@@ -3508,12 +3508,15 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - `PREPAID` 块包含计费额、估算成本、用量毛利（`gross_margin`）和毛利率；`INTERNAL_METERED_ONLY` 只包含事件数、
   估算成本和参考售价。内部计量租户的参考售价不是收入，因此不进入任何毛利。
 
-`data` 在 `items`、`page`、`page_size`、`total` 之外的键（`cost_basis` 沿用 AIH-TASK-073，新增的是 `usage_period_basis` 与 `totals`）：
+`data` 在 `items`、`page`、`page_size`、`total` 之外的键（`cost_basis` 沿用 AIH-TASK-073，新增的是 `usage_period_basis` 与 `totals`；
+AIH-TASK-248 新增 `provider_cost_allocation` 与 `reconciliation_period_basis`，见下文「对账后成本」）：
 
 | 键 | 含义 |
 | --- | --- |
-| `cost_basis` | 固定 `estimated`：成本是处理时保存的估算供应商成本，不是对账后成本 |
+| `cost_basis` | 固定 `estimated`：指原有的 `estimated_provider_cost_myr`，是处理时保存的估算供应商成本，不是对账后成本；含义不变 |
 | `usage_period_basis` | 固定 `occurred_at`：用量收入、估算成本与用量毛利按事件发生时刻归期 |
+| `provider_cost_allocation` | 固定 `pro_rata_estimated_cost`：`provider_cost_myr` 的口径（按估算成本比例分摊对账后成本） |
+| `reconciliation_period_basis` | 固定 `utc_calendar_month`：对账记录的期间是 UTC 自然月 |
 | `totals` | 覆盖全部分组的合计，**不随分页变化** |
 
 `totals` 的键：
@@ -3526,6 +3529,8 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | `payments` | 手续费块，见下；可为 `null` |
 | `gross_profit` | 毛利（扣手续费后）= `prepaid.billable_cost` − `prepaid.estimated_provider_cost_myr` − `payments.gateway_fee`；`payments` 为 `null` 时 `null` |
 | `gross_profit_rate` | `gross_profit` ÷ `prepaid.billable_cost`；计费额为 0 或 `payments` 为 `null` 时 `null` |
+| `gross_profit_on_provider_cost`、`gross_profit_on_provider_cost_rate` | 基于供应商成本的毛利（扣手续费后）与比率，见下文「对账后成本」 |
+| `reconciliation_coverage`、`unallocated_reconciled_months`、`unallocated_reconciled_cost_myr` | 覆盖的对账记录与不可分摊的已对账成本，见下文「对账后成本」 |
 
 `totals.payments`（**现金期间**）：
 
@@ -3558,6 +3563,53 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 `ix_usage_events_project_id` 与 `ix_usage_events_tenant_feature_occurred`；手续费块走 `payments` 上已有的索引
 （`payments` 没有 `paid_at` 索引）。没有新增迁移或索引。
 
+### 对账后成本（`pro_rata_estimated_cost`）
+
+设计依据：设计闸门 #756 `APPROVED: design v2`，全文见
+[design/AIH-TASK-247-provider-cost-allocation.md](design/AIH-TASK-247-provider-cost-allocation.md) §2「规则」「推论」
+「接口与导出」。实现登记为 AIH-TASK-248；对账记录本身见下文「管理端供应商成本对账」。
+
+- **口径**：对一条与区间重叠的当前对账记录 r（供应商 p、UTC 自然月 `[s, e)`、实际 MYR 成本 R），令 E 为该记录范围
+  （经 AI 模块、该供应商、该 UTC 月）内**全部**已处理事件的估算之和。E 是**查询时的实时值**、取整个月、不受报表筛选
+  影响，所以同一对账月的分摊之和恒等于 R（确认之后才处理完的事件也分到成本）。范围内的事件 x 的分摊后成本是
+  `est(x) × R ÷ E`；不在任何当前记录范围内的事件（集成方上报的、未对账月份的、首月之前的）仍用估算。
+- **这是按估算成本比例的分摊，不是逐请求的实际成本**：供应商只按月给出合计，分组行上的数是按估算的比例摊下来的。
+  分摊只在查询时算，不写任何表、不改 `usage_events`、不写审计。
+- 每个分组项与 `totals` 的 `prepaid` 块新增 6 个键，`internal_metered_only` 块新增前 4 个：
+
+| 键 | 含义 |
+| --- | --- |
+| `covered_estimated_cost_myr` | 本块估算里落在某条当前对账记录范围内（且在区间内）的部分 |
+| `reconciled_provider_cost_myr` | 这部分按 `covered × R ÷ E` 分摊后的成本，各记录相加后只舍入一次（8 位） |
+| `provider_cost_myr` | 供应商成本（对账后，未覆盖部分用估算）= `reconciled_provider_cost_myr` + (`estimated_provider_cost_myr` − `covered_estimated_cost_myr`) |
+| `provider_cost_basis` | `estimated`：`covered = 0`（含本块没有事件）；`reconciled`：`covered = estimated_provider_cost_myr` 且大于 0；其余 `mixed`（部分对账、部分估算） |
+| `gross_margin_on_provider_cost` | 只在 `prepaid`：`billable_cost` − `provider_cost_myr` |
+| `gross_margin_on_provider_cost_rate` | 只在 `prepaid`：上一项 ÷ `billable_cost`；计费额为 0 时 `null` |
+
+- `totals` 的两块用合计层的覆盖额**按同一公式单独计算**（每块只舍入一次），**不由分组行相加**。因为每个分组各舍入一次，
+  同一对账月完整落在区间内时，各分组的 `reconciled_provider_cost_myr` 之和与 R（及合计）至多差**组数 × 0.5×10⁻⁸**，
+  组数越多误差越大。例：R = 1.00、三个分组估算相同，每组 `0.33333333`，合计 `1.00000000`。
+- `totals.gross_profit_on_provider_cost` = `prepaid.gross_margin_on_provider_cost` − `payments.gateway_fee`，
+  `gross_profit_on_provider_cost_rate` 为它 ÷ `prepaid.billable_cost`；`payments` 为 `null` 时两者都 `null`、
+  计费额为 0 时比率 `null`（与 `gross_profit` 同一规则）。
+- **UTC 月覆盖与马来西亚日 / 月分组**：对账期间按 UTC 自然月划分，分组按马来西亚日历（UTC+8）。分摊**逐事件按它所属的
+  UTC 月**取系数，所以按马来西亚日 / 月分组时，一个马来西亚月可能同时含有已对账的 UTC 月与未对账的 UTC 月的事件
+  （如马来西亚 1 月 1 日 00:00–08:00 属于 UTC 12 月），这样的组口径是 `mixed`；不会因为口径差把成本算错月。
+  报表区间与对账期间按 `[max(occurred_from, s), min(occurred_to, e))` 求交。
+- `totals.reconciliation_coverage`：与区间重叠的当前对账记录，按供应商、期间起点升序，每项恰好这些键：
+  `reconciliation_id`、`provider_code`、`billing_month`（`YYYY-MM`）、`period_start`、`period_end`（不带时区、不带 `Z`
+  的 ISO 8601 UTC，同对账记录对象）、`fully_in_range`（`occurred_from ≤ period_start` 且 `period_end ≤ occurred_to`；
+  为 `false` 时只有区间内那部分事件参与分摊，E 仍是整月）、`allocatable`。没有记录时为 `[]`，此时全部块
+  `covered = 0`、口径 `estimated`、`provider_cost_myr` 等于估算。
+- **`allocatable`** = `E > 0` 或 `R = 0`。`allocatable = false`（E = 0 而 R > 0：该月有供应商账单、但没有经 AI 模块的
+  已处理事件）的记录**无法分摊**：它的 R 不进任何分组、合计、成本与毛利，只在下面两个字段里单独披露；应检查该月是否真的
+  没有经 AI 模块的用量。E = 0 且 R = 0 的记录没有东西要分，算 `allocatable = true`。
+- `totals.unallocated_reconciled_months`：`allocatable = false` 的记录，每条 `provider_code:YYYY-MM`（如
+  `anthropic:2027-02`），顺序同 `reconciliation_coverage`，没有时 `[]`；`totals.unallocated_reconciled_cost_myr`：这些
+  记录的 R 之和（按记录全额，不按区间切分；8 位小数字符串），没有时 `null`。两者都**不并进**任何成本与毛利。
+- 分摊用到的查询与上面的查询在同一个只读会话里（同一快照）：每条重叠的记录多两条范围聚合。请求进行中才确认的对账记录
+  这次不计，下次计入。
+
 ### `GET /api/v1/admin/usage-analytics/export` —— 导出用量分析（CSV）
 
 设计依据：设计闸门 #709 `APPROVED: design v2` §2「接口二」，全文见
@@ -3579,7 +3631,8 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - **行**：每个分组一行 `GROUP`，顺序与 JSON 接口相同；最后恒有一行 `TOTAL`（没有任何分组时文件 = 表头 + `TOTAL`
   行，仍报手续费）。单元格取 JSON 接口的值转成文本：整数原样、金额与比率与 JSON 逐字相同（金额 8 位小数）、`null`
   写成空字段。格式（UTF-8 带 BOM、RFC 4180、行尾 `\r\n`、响应头 `Cache-Control: no-store` 等）同「客户导出」一节的「CSV 格式」。
-- **列**：表头恰好这 31 列，按这个顺序：
+- **列**：表头恰好这 41 列，按这个顺序（第 1–31 列是 AIH-TASK-223 的原有列，逐字不变；第 32–41 列由 AIH-TASK-248
+  追加，见上文「对账后成本」）：
 
 | # | 列 | `GROUP` 行 | `TOTAL` 行 |
 | --- | --- | --- | --- |
@@ -3596,17 +3649,31 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | 28 | `usage_period_basis` | `occurred_at` | `occurred_at` |
 | 29 | `fee_period_basis` | 空 | `paid_at`；`payments` 为 `null` 时空 |
 | 30–31 | `occurred_from`、`occurred_to` | 解析后的区间，UTC RFC 3339：整秒写 `YYYY-MM-DDTHH:MM:SSZ`，有微秒时写恰好 6 位小数 `YYYY-MM-DDTHH:MM:SS.ffffffZ` | 同左 |
+| 32–34 | `prepaid_provider_cost_myr`、`prepaid_provider_cost_basis`、`prepaid_gross_margin_on_provider_cost` | 分组项 `prepaid` 的 `provider_cost_myr`、`provider_cost_basis`、`gross_margin_on_provider_cost` | `totals.prepaid` 的同名值 |
+| 35–36 | `internal_provider_cost_myr`、`internal_provider_cost_basis` | 分组项 `internal_metered_only` 的 `provider_cost_myr`、`provider_cost_basis` | `totals.internal_metered_only` 的同名值 |
+| 37 | `gross_profit_on_provider_cost` | 空 | `totals.gross_profit_on_provider_cost`；`null` 时空 |
+| 38 | `provider_cost_allocation` | `pro_rata_estimated_cost` | `pro_rata_estimated_cost` |
+| 39 | `reconciled_months` | 空 | `allocatable = true` 的覆盖记录，每条 `provider_code:YYYY-MM`，以 `;` 连接，顺序同 `totals.reconciliation_coverage`（如 `anthropic:2026-12;anthropic:2027-03`）；没有时空 |
+| 40 | `unallocated_reconciled_months` | 空 | `totals.unallocated_reconciled_months` 以 `;` 连接（如 `anthropic:2027-02`）；没有时空 |
+| 41 | `unallocated_reconciled_cost_myr` | 空 | `totals.unallocated_reconciled_cost_myr`（8 位小数）；`null` 时空 |
 
 - 手续费与扣手续费后的毛利**只在 `TOTAL` 行**，不分摊到任何 `GROUP` 行；两个期间口径由第 28、29 列写明。
-- **公式注入防护只作用于 `group_key` 与 `group_name`**（功能标签、公司名、模型代码来自输入）：以 `=`、`+`、`-`、
-  `@`、制表符或回车开头时前加单引号。数值列不加：负毛利 `-0.40000000` 保持是数。
+- 第 27 列 `cost_basis` 仍是 `estimated`，指第 15、19 列的估算成本；第 32–36 列是按估算成本比例分摊的对账后成本
+  （第 38 列写明口径），**不是逐请求的实际成本**。`reconciliation_coverage` 的 `period_start` / `period_end` 与
+  `fully_in_range` 不进文件。
+- **不可分摊的已对账成本**（`allocatable = false`，E = 0 而 R > 0）不进第 32–37 列的任何成本与毛利，也不进第 39 列；
+  它们的月份与 R 之和只由 `TOTAL` 行第 40、41 列披露，与 JSON 的 `totals.unallocated_reconciled_months` /
+  `unallocated_reconciled_cost_myr` 一致。
+- **公式注入防护只作用于 `group_key`、`group_name`、`reconciled_months` 与 `unallocated_reconciled_months`**（功能标签、
+  公司名、模型代码来自输入，两个月份列含供应商代码）：以 `=`、`+`、`-`、`@`、制表符或回车开头时前加单引号。数值列不加：
+  负毛利 `-0.40000000` 保持是数。
 - **文件名**：`usage-analytics_<group_by>_<from>_<to>.csv`，`<from>` / `<to>` 是解析后的 UTC 时刻加 8 小时、按
   `%Y%m%dT%H%M%S` 格式化再接字面 `MYT`，例 `usage-analytics_month_20260101T000000MYT_20270101T000000MYT.csv`；
   不拼任何请求里的原始字符串。
 - **xlsx**（`format=xlsx`）：文件名主干与 CSV 相同、扩展名换成 `.xlsx`，即
   `usage-analytics_<group_by>_<from>_<to>.xlsx`，例 `usage-analytics_month_20260101T000000MYT_20270101T000000MYT.xlsx`；
-  一个工作表，名为 `usage-analytics`；表头、行数、行序（`GROUP` 行在前、`TOTAL` 行恒在末尾）与每个单元格的值都与同参数的
-  CSV 相同。单元格类型、公式前缀、控制字符、响应头与求和写法同「客户导出」一节的 [xlsx 格式](#xlsx-格式)：金额、比率
+  一个工作表，名为 `usage-analytics`；表头（同样是上表的 41 列，与 CSV 共用同一个列常量）、行数、行序（`GROUP` 行在前、
+  `TOTAL` 行恒在末尾）与每个单元格的值都与同参数的 CSV 相同。单元格类型、公式前缀、控制字符、响应头与求和写法同「客户导出」一节的 [xlsx 格式](#xlsx-格式)：金额、比率
   与平均值是文本单元格（与 CSV 逐字相同），整数列是这 10 列：`event_count`、`token_event_count`、`input_tokens`、
   `output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`、`prepaid_event_count`、
   `internal_event_count`、`paid_payment_count`、`gateway_fee_unknown_count`（值不超过 15 位时是数字单元格，否则退回文本）；

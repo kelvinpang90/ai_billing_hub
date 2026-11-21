@@ -107,6 +107,11 @@ DECIMAL_COLUMNS = (
     "gateway_fee",
     "gross_profit",
     "gross_profit_rate",
+    # AIH-TASK-248 追加的金额列（设计闸门 #756 v2 §2「接口与导出」）。
+    "prepaid_provider_cost_myr",
+    "prepaid_gross_margin_on_provider_cost",
+    "internal_provider_cost_myr",
+    "gross_profit_on_provider_cost",
 )
 FILENAME_STEM = "usage-analytics_customer_20260929T170000MYT_20260929T180000MYT"
 
@@ -279,7 +284,8 @@ def assert_same_error(csv_response, xlsx_response, expected: tuple[int, str]) ->
 def test_csv_is_unchanged_and_xlsx_matches_it_cell_for_cell(billed, paid) -> None:
     """§7「管理端 xlsx」：`group_by=customer` 两个客户加手续费。
 
-    不带 `format` 与 `format=csv` 逐字节相同；xlsx 31 列逐格等于 CSV；
+    不带 `format` 与 `format=csv` 逐字节相同；
+    xlsx 41 列（AIH-TASK-248 追加 10 列）逐格等于 CSV；
     10 个整数列是数字；金额、比率、平均值是文本；GROUP 行在前、TOTAL 行恒在末尾；
     文件名 `.xlsx`、工作表名 `usage-analytics`。
     """
@@ -325,7 +331,7 @@ def test_csv_is_unchanged_and_xlsx_matches_it_cell_for_cell(billed, paid) -> Non
     assert values[0] == tuple(COLUMNS)
     assert len(values) == len(table) == 4
     for xlsx_row, csv_row in zip(values, table, strict=True):
-        assert len(xlsx_row) == len(csv_row) == 31
+        assert len(xlsx_row) == len(csv_row) == 41
         for xlsx_value, csv_field in zip(xlsx_row, csv_row, strict=True):
             assert_matches_csv(xlsx_value, csv_field)
 
@@ -352,7 +358,7 @@ def test_csv_is_unchanged_and_xlsx_matches_it_cell_for_cell(billed, paid) -> Non
 
 
 def test_the_integer_column_constant_is_the_designed_one() -> None:
-    """§2「各导出的整数列」管理端一行：恰好 10 列，都在 31 列里、与文本列不相交。"""
+    """§2「各导出的整数列」管理端一行：恰好 10 列，都在 41 列里、与文本列不相交。"""
     assert USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS == INTEGER_COLUMNS
     assert USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS <= set(USAGE_ANALYTICS_EXPORT_COLUMNS)
     assert not USAGE_ANALYTICS_EXPORT_INTEGER_COLUMNS & USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS

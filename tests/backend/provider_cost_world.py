@@ -23,6 +23,7 @@ xdist 换库名（conftest 的 `pytest_configure`）之后才有最终值。
 之后不再改（MySQL 触发器拒绝改 `PROCESSED` 行）。
 
 **变体世界**：`build_fx_switch_world`、`build_myr_three_world`、`build_unallocatable_world`。
+单条根记录经 `add_record` 写（`UNALLOCATABLE_RECORDS` 的 12 月或 `MYR_THREE_DECEMBER`）。
 
 MySQL 那部分需要 `BILLING_TEST_DATABASE_URL` 指向一个**可以被清空的**库，没设时 skip ——
 **不要把 skipped 读成 passed**，CI 设了它并把 skipped 判成失败。uuid 是全零占位。
@@ -883,6 +884,51 @@ def clean(engine: Engine) -> None:
         connection.execute(delete(AiModel))
         connection.execute(delete(AiProvider))
         connection.execute(delete(User).where(User.email.like(f"%{TEST_EMAIL_DOMAIN}")))
+
+
+# --- 单条记录（AIH-TASK-248，设计闸门 #756 v2 §7） ---
+
+# 设计 #756 §7「分摊舍入」：`myr_three` 的 12 月记录 MYR 1.00，估算快照是三个事件各 1.00。
+MYR_THREE_DECEMBER: Final = RecordSpec(
+    "00000000-0000-0000-0000-000000000201",
+    "2026-12",
+    "MYR",
+    "1.00",
+    None,
+    "1.00",
+    3,
+    "3.00",
+    "3.00",
+    0,
+    0,
+    0,
+)
+
+
+def add_record(world: World, spec: RecordSpec) -> str:
+    """One root record of `spec` written by `insert_record` (not through `confirm`)."""
+    with world.factory() as session:
+        reconciliations.insert_record(
+            session,
+            **reconciliation_fields(
+                world,
+                public_id=spec.public_id,
+                billing_month=spec.billing_month,
+                source_currency=spec.source_currency,
+                source_total=spec.source_total,
+                fx=spec.fx,
+                reconciled_cost_myr=spec.reconciled_cost_myr,
+                estimated_event_count=spec.estimated_event_count,
+                estimated_source_cost=spec.estimated_source_cost,
+                estimated_cost_myr=spec.estimated_cost_myr,
+                unprocessed_event_count=spec.unprocessed_event_count,
+                outbox_unsettled_count=spec.outbox_unsettled_count,
+                outbox_discarded_count=spec.outbox_discarded_count,
+            ),
+        )
+        session.commit()
+    world.records.append(spec.public_id)
+    return spec.public_id
 
 
 # --- 钱包（AIH-TASK-244「快照不变」，只在用到的用例里建） ---------------------------------------

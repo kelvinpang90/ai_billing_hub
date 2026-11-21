@@ -49,6 +49,18 @@ FORBIDDEN: Final = frozenset(
         "myr_variance_rate",
         "estimated_source_cost",
         "estimated_cost_myr",
+        # 毛利分析的对账后成本（AIH-TASK-248，设计闸门 #756 v2 §6「客户侧禁止的字段」）。
+        "covered_estimated_cost_myr",
+        "reconciled_provider_cost_myr",
+        "provider_cost_myr",
+        "provider_cost_basis",
+        "gross_margin_on_provider_cost",
+        "gross_margin_on_provider_cost_rate",
+        "gross_profit_on_provider_cost",
+        "gross_profit_on_provider_cost_rate",
+        "reconciliation_coverage",
+        "unallocated_reconciled_months",
+        "unallocated_reconciled_cost_myr",
     }
 )
 ADMIN_PREFIX: Final = "/api/v1/admin/"
@@ -240,6 +252,52 @@ def test_the_response_check_reports_a_forbidden_name_injected_into_a_fake_schema
         },
     }
     assert forbidden_in_responses(fake) == {"/api/v1/customer/fake": {"gateway_fee"}}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "covered_estimated_cost_myr",
+        "reconciled_provider_cost_myr",
+        "provider_cost_myr",
+        "provider_cost_basis",
+        "gross_margin_on_provider_cost",
+        "gross_margin_on_provider_cost_rate",
+        "gross_profit_on_provider_cost",
+        "gross_profit_on_provider_cost_rate",
+        "reconciliation_coverage",
+        "unallocated_reconciled_months",
+        "unallocated_reconciled_cost_myr",
+    ],
+)
+def test_the_response_check_reports_each_provider_cost_name(name: str) -> None:
+    """AIH-TASK-248（设计闸门 #756 v2 §7「INV-7 守卫」）。
+
+    把每个新键名注入假 schema，守卫报出它。
+    """
+    fake = {
+        "paths": {
+            "/api/v1/customer/fake": {
+                "get": {
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Totals"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Totals": {"properties": {"amount": {"type": "string"}, name: {"type": "string"}}}
+            }
+        },
+    }
+    assert forbidden_in_responses(fake) == {"/api/v1/customer/fake": {name}}
 
 
 @pytest.mark.parametrize(
