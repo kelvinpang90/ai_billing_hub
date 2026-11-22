@@ -6,6 +6,34 @@
 
 ---
 
+## spec §136 场景对照表
+
+| # | spec §136 场景（原文） | 对应章节 |
+| --- | --- | --- |
+| 1 | Billing API down | [Billing API 不可用](#billing-api-不可用) |
+| 2 | MySQL down | [MySQL 不可用](#mysql-不可用) |
+| 3 | Redis down | [Redis / Celery broker 不可用](#redis--celery-broker-不可用) |
+| 4 | Celery backlog | [Celery 队列积压](#celery-队列积压)；[celery-beat 停止调度](#celery-beat-停止调度) |
+| 5 | Usage backlog | [用量计费：上线前步骤、错误事件、积压与卡住回收](#用量计费上线前步骤错误事件积压与卡住回收)；[AI 模块用量 outbox：死信、暂存、待复核与积压](#ai-模块用量-outbox死信暂存待复核与积压)；[用量摄取：幂等冲突与摄取中断](#用量摄取幂等冲突usage_event_conflicts-告警与摄取中断) |
+| 6 | payment webhook failure | [支付：复核、事件冲突、事件积压与配置](#支付复核事件冲突事件积压与配置wallet_negative_balance-告警的支付部分) |
+| 7 | stale pending payment and payment reconciliation failure | [支付：复核、事件冲突、事件积压与配置](#支付复核事件冲突事件积压与配置wallet_negative_balance-告警的支付部分)（`stale pending`、`oldest open event`、`review open` 三行）；[过期之后到账](#过期之后到账expired-之后的付款成功) |
+| 8 | pricing error | [用量计费：上线前步骤、错误事件、积压与卡住回收](#用量计费上线前步骤错误事件积压与卡住回收)（`PRICING_ERROR`） |
+| 9 | FX rate error and synchronization failure | [FX 汇率：拉取失败](#fx-汇率拉取失败fx_fetch-告警)；[FX 汇率：过期，或没有生效的汇率](#fx-汇率过期或没有生效的汇率fx_stale-告警)；[FX 汇率：发布了错误的汇率](#fx-汇率发布了错误的汇率退役与补发)；[FX 告警维度不上报](#fx-告警维度不上报healthchecks-报-fx_fetch--fx_stale未上报) |
+| 10 | unknown model | [用量计费：上线前步骤、错误事件、积压与卡住回收](#用量计费上线前步骤错误事件积压与卡住回收)（`MODEL_UNKNOWN`） |
+| 11 | negative wallet | [钱包核对发现不一致](#钱包核对发现不一致wallet_negative_balance-告警-p1)；[用量计费：上线前步骤、错误事件、积压与卡住回收](#用量计费上线前步骤错误事件积压与卡住回收)（负余额） |
+| 12 | status webhook failure | [状态 webhook：推送连续失败、缺签名密钥、签名错误](#状态-webhook推送连续失败缺签名密钥签名错误status_webhook-告警) |
+| 13 | out-of-order status delivery | [状态推送乱序](#状态推送乱序) |
+| 14 | backup failure and full restore | [备份失败：全量备份与 binlog 离机](#备份失败全量备份与-binlog-离机)；[整台 VPS 没了（灾难恢复）](#整台-vps-没了灾难恢复) |
+| 15 | encryption master-key recovery | [主密钥（`master.key`）丢失或要在新主机上重建](#主密钥masterkey丢失或要在新主机上重建) |
+| 16 | document-volume recovery | [文档存储恢复](#文档存储恢复)；[整台 VPS 没了（灾难恢复）](#整台-vps-没了灾难恢复) |
+| 17 | late prior-period usage and cross-period rebill | [上期用量与跨期调整](#上期用量与跨期调整)；[月度对账单](#月度对账单) |
+| 18 | account closure with unresolved financial events | [关户](#关户) |
+
+这 18 行与 spec §136 的 runbook 清单逐条对应、顺序相同，场景名照抄原文。**spec 改了这份清单，要同步改这张表**；新增或改名章节时，
+表里的链接一起改。
+
+---
+
 ## 本文件的写法
 
 每个场景固定五节：**怎么发现 · 影响什么 · 立刻做什么 · 恢复 · 绝不能做什么**。
@@ -15,6 +43,133 @@
 
 文件末尾的「配置项」一节不是故障场景，不套这五节：每个配置项固定写 **含义 · 默认值与取值规则 · 怎么改 ·
 改完怎么生效 · 对已有数据的影响 · 绝不能做什么**。
+
+---
+
+## Billing API 不可用
+
+**首次编写：2026-11-22（AIH-TASK-230）。依据：`deploy/monitor.sh:138-164`（services 维度）、`deploy/monitor.sh:193-223`（readyz 维度）、
+`docker-compose.yml:241-253`（api 的容器健康检查）、`deploy/nginx/billing.conf:88-107`（上游与超时）、[deployment.md](deployment.md) §8.1、§9.5。**
+
+这里的 API 指 `api` 容器：计费 API、管理端与客户门户的后端、Stripe 回调与 AI 模块（`/v1/messages`）在同一个进程里。
+`celery-worker` 与 `celery-beat` 是另外的容器，不经过它。
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| Telegram：`ai_billing_hub services` 变 DOWN，正文 `P1 api is not running`、`P1 api state=<状态>` 或 `P1 api health=<状态>` | **主信号**。巡检每 5 分钟一次，发现问题先隔 45 秒复核再发（部署换版本时也会短暂不健康） |
+| Telegram：`ai_billing_hub readyz` 变 DOWN，正文 `P1 readyz is not answering 2xx (<URL>)` | API 挂了时 `/readyz` 连不上；同一维度通常还有 `P1 billing_ai_readiness_failed` 一行。⚠️ 维度已红时第二个原因不会再通知一次，看 `journalctl -t billing-monitor -p err` 的**全部**行 |
+| 告警维度的检查一起「未上报」，巡检日志 `alerts endpoint is not answering 200` | 巡检读不到 `/internal/alerts` 时刻意不推告警维度，见「FX 告警维度不上报」 |
+| 对外请求 502 | 边缘 nginx 连不上 api：`proxy_connect_timeout 2s`，api 停掉时约 4 秒回 502（`deploy/nginx/billing.conf:92-102`） |
+| 对外请求 503（JSON 信封） | 不是 nginx 自己回的：api 活着、但它的依赖不可用（数据库不通时 `/readyz` 是 503 `DATABASE_UNAVAILABLE`）—— 按「MySQL 不可用」处理 |
+
+⚠️ **api 的容器健康检查探的是 `/healthz`（存活），不是 `/readyz`**（`docker-compose.yml:242-244`）：数据库不通时 api 仍然是
+`healthy`。所以 `api health=unhealthy` 说明进程自己不应答；`readyz` 红而 `api` 那一行是绿的，多半是数据库。
+`billing_nginx` 那一行同时报时先看边缘 nginx：巡检的 `/readyz` 也经过它。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| MySQL 里已落库的一切：用量事件、账本、支付与网关事件、outbox 行 | 用量摄取：集成方拿不到 2xx，按 `retryable` 退避重试，事件留在集成方的 outbox（[api.md「错误与 `retryable`」](api.md#错误与-retryable)） |
+| celery-worker / celery-beat：计费扫描、投递、状态推送、对账照常（它们读写数据库，不经过 api） | Stripe 回调收不到 2xx，Stripe 自动重试约三天（见「支付」一节） |
+| 集成方按最后一次接受的状态放行或拦截（[api.md「集成方怎么应用」](api.md#集成方怎么应用)） | 管理端、客户门户、AI 调用（`/v1/messages`）不可用；进程非正常退出时 AI 模块内存里的暂存缓冲随之丢失，只留 `AI usage not persisted` 日志 |
+| | 告警维度不上报（见上） |
+
+### 立刻做什么
+
+1. 分清是 api、边缘 nginx 还是数据库：`docker compose ps`，看 `api`、`billing_nginx`、`mysql` 三行
+2. 看存活与就绪，不自己拼探测地址，用巡检已有的两条路：
+   - **存活（`/healthz`）**：就是上一步 `api` 那一行的 health —— 容器健康检查探的正是 `/healthz`（`docker-compose.yml:241-244`）
+   - **就绪（`/readyz`）**：巡检在宿主机上按 `BILLING_MONITOR_READYZ_URL`（默认由 `.env` 的 `BILLING_HTTP_PORT` 拼出）探它
+     （`deploy/monitor.sh:102-105`、`deploy/monitor.sh:193-207`）。看最近一轮的结论：`journalctl -t billing-monitor -p err`；
+     要一份当下的结论就手工跑一次 `BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`（同第 6 条）
+
+   `api health=unhealthy` 或 `api is not running` = api 进程的问题，往下走；`api` 是 `healthy` 而 `P1 readyz is not answering 2xx`
+   = 多半是数据库，转「MySQL 不可用」
+3. 看 api 日志：`docker compose logs --since 30m api | tail -200`
+4. **是不是刚部署过**：`cat .last-good-deploy`，对照 GitHub Actions 的 Deploy 运行记录。`deploy.sh` 健康检查或冒烟没过时会自动
+   回滚并以非零退出；新版本已经上线而本身有问题时，按 [deployment.md](deployment.md) §9.5 手工回滚（Deploy workflow 的 `ref`
+   填上一个好的 SHA）
+5. 不是版本问题、进程卡死或反复崩溃：`docker compose restart api`。影响面见「xlsx 导出失败」一节「恢复」第 2 条
+   （优雅排空最长 85 秒、暂存缓冲最后一次落库限时 5 秒）
+6. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. `api` 是 `healthy`（`/healthz` 通）；手工跑一次巡检时 readyz 维度没有问题行（`/readyz` 200 且 `data.status` 为 `ok`）；下一轮巡检 `ai_billing_hub services` 与 `ai_billing_hub readyz` 回到
+   **up**（前提是同一维度没有别的行），告警维度恢复上报
+2. 停机期间的 `AI usage not persisted` 日志行，按「AI 模块用量 outbox」一节的「积压与从日志补录」补录；`HELD` 与待复核按同一节处理
+3. 集成方的积压由它们自行补投，已经落库的事件重投得到 `200 already_received`，不会重复计费（见「用量摄取」一节）；
+   Stripe 的重投按「支付」一节消化
+4. 停机跨过会计期 cut-off 时，那段用量会进上期调整，见「上期用量与跨期调整」
+
+### 绝不能做什么
+
+- **不要把 api 的容器健康检查改成 `/readyz`**：数据库一抖，API 就会被反复重启（`docker-compose.yml:242-244`）
+- **不要用 `docker compose down` 代替 `restart`**：会删网络与容器，扩大影响，也丢掉了部署的回滚落脚点（[deployment.md](deployment.md) §9.6）
+- **不要在 VPS 上改代码或现场构建镜像来「先修好」**：版本有问题只走 §9.5 的回滚
+- **不要为了让巡检变绿去改 `BILLING_MONITOR_READYZ_URL`，或放宽 `/readyz` 的 nginx 名单**：它们与 `/internal/alerts` 同一份名单
+
+---
+
+## MySQL 不可用
+
+**首次编写：2026-11-22（AIH-TASK-230）。依据：`app/api/health.py:53-123`、`app/core/database.py:36-48`、`app/core/database.py:111-124`、
+`app/ai_api/routes.py:105-177`、`app/ai_api/outbox.py:184-252`、`app/ai_api/held.py:52-247`、`docker-compose.yml:185-194`、
+[api.md「错误与 `retryable`」](api.md#错误与-retryable)、[deployment.md](deployment.md) §9.6（一次真实的数据库停机）。**
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| Telegram：`ai_billing_hub services` 变 DOWN，正文 `P1 mysql is not running` 或 `P1 mysql health=<状态>` | 容器健康检查是 `mysqladmin ping`（每 10 秒，连续 12 次失败才算不健康） |
+| Telegram：`ai_billing_hub readyz` 变 DOWN，正文 `P1 readyz is not answering 2xx (<URL>)` | `/readyz` 与 `/healthz/billing`（同一个函数）在数据库不通时返回 **503** `DATABASE_UNAVAILABLE`（没配数据库地址时 `DATABASE_NOT_CONFIGURED`），信封里不说原因；原因在 API 日志 `Database readiness probe failed`（带脱敏异常栈） |
+| 同一维度 `P1 billing_ai_readiness_failed` | `/healthz/ai` 503 `AI_STORE_UNAVAILABLE`，日志 `AI readiness database probe failed` |
+| 告警维度一起「未上报」 | `/internal/alerts` 查库失败返回 503，巡检日志 `alerts endpoint is not answering 200` |
+| `ai_billing_hub binlog` 收到 `/fail`，正文 `cannot reach the database` | binlog 离机每分钟连一次库（见「备份失败」） |
+
+⚠️ `/healthz` 仍然是 200、api 容器仍然是 `healthy`：这是刻意的（`app/api/health.py:1-10`），数据库恢复期间不让 API 被反复重启。
+
+### 影响什么
+
+| 路径 | 行为（以代码为准） |
+| --- | --- |
+| 用量摄取 | 503 `SERVICE_UNAVAILABLE`、`retryable: true`，事件没有落库；集成方保留事件、退避重试，恢复后补投 |
+| AI 调用：鉴权就读不到库 | 503 `AI_STORE_UNAVAILABLE`，**不调用模型、不产生用量**（`app/ai_api/routes.py:105-123`） |
+| AI 调用：模型已经返回、写用量时库断了 | 写不进 `ai_usage_outbox`：CRITICAL 日志 `AI usage not persisted`（带 `commit_outcome`），条目进 api 内存里的暂存缓冲，请求返回 503 `AI_USAGE_NOT_PERSISTED`（`app/ai_api/outbox.py:195-252`、`app/ai_api/routes.py:166-177`）。缓冲每 `BILLING_AI_HELD_RETRY_SECONDS`（默认 30 秒）重试一次，写进库时是 `HELD` 行；上限 `BILLING_AI_HELD_BUFFER_MAX`（默认 1000），满了丢掉最老的一条并记 CRITICAL `AI usage held buffer overflow`（`app/ai_api/held.py:69-74`）；api 停机时最后一次落库限时 5 秒，落不完的只剩日志 |
+| celery-worker / beat 的任务 | 计费扫描、投递、状态推送、钱包核对、对账单生成这一轮读写失败、放弃；数据库就是待办清单，恢复后下一轮接着做 |
+| 管理端、客户门户 | 读写数据库的接口失败 |
+| 已经提交的数据 | 不丢：MySQL 的数据在命名卷 `mysql-data`（`docker-compose.yml:185-186`） |
+| 备份 | binlog 离机与当天的全量都会失败、各自发 `/fail`（见「备份失败」） |
+
+### 立刻做什么
+
+1. 看容器与日志：`docker compose ps mysql`；`docker compose logs --since 30m mysql | tail -200`
+2. 看磁盘：`ai_billing_hub disk` 是否同时红着、`df -h`。磁盘写满时 MySQL 停止写入；binlog 占满的处置见
+   [deployment.md](deployment.md) §5.2.2 末尾（**先查离机是不是坏了**，删文件是最后一步）
+3. 是不是部署引起的（例如网络重建把 mysql 停了）：对照 Deploy 运行记录，按 [deployment.md](deployment.md) §9.6 的经过与恢复方式处理
+4. 容器停了、数据文件完好：`docker compose up -d mysql`，等它 `healthy`
+5. 起不来、数据文件损坏：不要现场修数据文件，按「整台 VPS 没了（灾难恢复）」第 6–8 步从备份恢复到新库，**对账通过之后**再切换
+6. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. `mysql` 是 `healthy`；`/readyz` 200 且 `data.database` 为 `ok`；`/healthz/ai` 200；巡检的 services 与 readyz 回到 **up**
+2. AI 暂存：缓冲里的条目由重试写成 `HELD` 行，`ai_usage_outbox` 维度的 `held` 随之非零（P1）—— 按「AI 模块用量 outbox」一节的
+   `HELD` 与「待复核」处理；api 在这期间重启过的，从 `AI usage not persisted` 日志行补录（同一节）
+3. 集成方补投；计费积压由扫描自动消化，盯 `usage_processing_backlog`。只读核对：`SELECT status, COUNT(*) FROM usage_events GROUP BY status`
+4. binlog：恢复后下一分钟的离机推走积压，`ai_billing_hub binlog` 转绿；报 `gap in the binlog chain` 时按「备份失败」处理
+5. 停机跨过会计期 cut-off 时，见「上期用量与跨期调整」
+
+### 绝不能做什么
+
+- **不要重启 api 指望数据库「好起来」**：api 没坏；重启只会让暂存缓冲走一次限时 5 秒的最后落库，落不完的条目只剩日志
+- **不要直接 UPDATE `ai_usage_outbox` 把 `HELD` 改成 `PENDING`**：只用 `ai-usage-held release` / `discard`（「AI 模块用量 outbox」一节）
+- **不要 `docker compose down -v`**：`-v` 会连 `mysql-data` 卷一起删掉
+- **不要为了腾磁盘删 `/var/lib/mysql` 下的文件或还没离机的 binlog**：见 [deployment.md](deployment.md) §5.2.2
+- **不要在数据库恢复之前手工重跑财务任务**：任务幂等，待办都在库里，恢复后自动接上
 
 ---
 
@@ -460,6 +615,80 @@ Let's Encrypt 正常在剩 30 天时续期，所以剩 21 天还没换 = **续�
 
 ---
 
+## 备份失败：全量备份与 binlog 离机
+
+**首次编写：2026-11-22（AIH-TASK-230）。依据：`deploy/cron.d/ai_billing_hub:26`、`:33`、`:54`；`deploy/backup.sh:40-50`、`:91-100`、
+`:246-247`、`:308-312`；`deploy/binlog_ship.sh:47-92`、`:162-166`、`:239-244`、`:291-294`；[deployment.md](deployment.md) §5.2.6、§5.2.7。**
+备份失败之后要恢复整库，见下一节「整台 VPS 没了（灾难恢复）」。
+
+### 怎么发现
+
+告警全靠 Healthchecks.io 的心跳（dead man's switch）：脚本成功时 ping，失败时立刻 ping `/fail`，「该到的 ping 没到」或收到
+`/fail` 时由 Healthchecks 发 Telegram，恢复后再发一次。
+
+| 任务（cron） | 检查与 `.env` 键 | 立刻 `/fail` | 只有「没收到」才发现 |
+| --- | --- | --- | --- |
+| `binlog_ship.sh`，每分钟 | `ai_billing_hub binlog`（周期 1 分钟、宽限 5 分钟），`BILLING_HEALTHCHECK_BINLOG_URL` | 任何失败；**破 RPO**（上一次成功离机距今超过 `BILLING_BINLOG_RPO_SECONDS`，默认 300 秒，被锁跳过的那一轮也查）。同时以 err 级别写 syslog：`journalctl -t billing-binlog -p err` | cron 没跑、整机挂了、脚本卡死；被锁跳过的那一轮不 ping |
+| `backup.sh`，每天马来西亚 03:17 | `ai_billing_hub full backup`（cron `17 3 * * *`、宽限 1 小时），`BILLING_HEALTHCHECK_BACKUP_URL` | 任何失败，`/fail` 的正文就是失败原因 | cron 没跑、整机挂了、脚本卡死 |
+| `restore_drill.sh`，每周日 04:47 | `ai_billing_hub restore drill`，`BILLING_HEALTHCHECK_DRILL_URL` | 任何失败，包括 R2 上最新一份全量超过 26 小时（全量没到 R2） | 同上 |
+
+⚠️ **没有告警的情形**（照脚本实际行为，如实写）：
+
+- **`.env` 没配心跳地址**：脚本照常跑，失败时只多打一行 `nobody will be told about this`，**没有任何通知**（`deploy/backup.sh:45-46`、
+  `deploy/binlog_ship.sh:67`）
+- **心跳 ping 本身失败**：只记一行 `heartbeat ping failed`，本轮结论不变；Healthchecks 按「没收到」处理，要等宽限期过去才报
+- **`backup.sh` 没有单独的 err 级 syslog**：它的输出整段以 info 级进 `billing-backup`，`journalctl -t billing-backup -p err` 查不到
+  失败，要看全部行。binlog 才有单独的 err 行
+- **`--dry-run` 不 ping**：手工演练不会让检查变绿，也不会报失败
+- **本地轮转删除失败被忽略**（`deploy/backup.sh:308` 的 `|| true`），不报
+- **R2 上的保留期**由桶的 lifecycle 规则管，脚本不检查（[deployment.md](deployment.md) §5.2.1 末尾）
+- **「能恢复」的证明每周一次**：全量与 binlog 的成功 ping 只说明传上去了，能不能恢复要等周日的演练
+
+### 影响什么
+
+| 失败 | 影响 |
+| --- | --- |
+| binlog 离机失败 / 破 RPO | 业务不受影响；但 RPO ≤ 5 分钟不再成立：此刻机器没了，丢的是最后一次成功离机之后的全部写入 |
+| binlog 链断档（`gap in the binlog chain`） | 最近那份全量之后、断档之后的写入不能再按时间点恢复；之后每一轮推送都报这条，直到处理 |
+| 全量失败 | 最近一份可用的全量变旧；恢复仍可以用更早一份全量加之后完整的 binlog 链 |
+| 全量已上传、`FLUSH BINARY LOGS` 失败 | 备份在桶里；在下一次写入之前，恢复**这一份**会因锚点 binlog 不在 R2 被拒（`deploy/backup.sh:246-247`） |
+| 月 / 年备份复制失败 | 当天的全量已在桶里；判据是「这个月还没有」，下一轮自动补 |
+
+### 立刻做什么
+
+1. 看失败原因（只读）：Telegram 通知的正文就是 `/fail` 的正文；再看
+   `journalctl -t billing-binlog -p err --since -1h` 与 `journalctl -t billing-backup --since -1d`
+2. 按报错处理：
+
+   | 报错 | 先查 |
+   | --- | --- |
+   | `R2 is not configured (BILLING_R2_BUCKET / BILLING_R2_ENDPOINT); …` | `.env` 的这两个键 |
+   | `upload failed; …` / `… cannot be read back` / `size mismatch after upload: …` | R2 是否可达、`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`。全量失败时报错里带着本地那份已验证备份的路径 |
+   | `BILLING_BACKUP_PASSPHRASE is not set …` / `encryption failed` / `… cannot be decrypted — NOT uploading` / `… differs — NOT uploading` | 备份口令。**不上传是对的**：解不开的备份比没有更糟 |
+   | `mysqldump failed` / `the dump is empty` / `the dump is truncated (no completion marker)` / `cannot reach the database` | 数据库或磁盘：按「MySQL 不可用」，磁盘看 `ai_billing_hub disk` |
+   | `RPO breached: …` | 上一轮卡住或连续失败：同一时段的其它 err 行就是原因 |
+   | `gap in the binlog chain: …` | 按报错里写的做：先手工跑一次 `bash deploy/backup.sh` 建立新锚点，再删报错点名的进度文件（`deploy/binlog_ship.sh:239-244`）。断档那一段之后无法按时间点恢复，记进事故记录 |
+   | `binary logging is off; PITR is impossible` | `docker-compose.yml` 里 mysql 的启动参数被改过 |
+   | `the backup IS uploaded, but FLUSH BINARY LOGS failed; …` | 备份已在桶里；下一次有写入后 binlog 离机会关掉并推走那个文件。要马上可恢复，修好后手工再跑一次 `bash deploy/backup.sh` |
+
+3. 修好后验证：全量手工跑一次 `bash deploy/backup.sh`；binlog 等下一分钟的 cron
+
+### 恢复
+
+1. 对应的检查收到成功 ping、回到 **up**（binlog：下一分钟；全量：手工跑一次或次日 03:17）
+2. 下一个周日的恢复演练照常通过（`ai_billing_hub restore drill` 为 up）
+3. 破过 RPO 或断过链的，把时间窗写进事故记录：它就是那段时间里的真实 RPO
+
+### 绝不能做什么
+
+- **不要用 `--dry-run` 让检查「先绿」**：它不上传，也不 ping
+- **不要删还没离机的 binlog**，也不要为了消 `RPO breached` 删进度文件：只有 `gap in the binlog chain` 按报错要求先跑全量、再删那一个
+- **不要调大 `BILLING_BINLOG_RPO_SECONDS` 来让告警安静**：它就是 RPO 预算
+- **不要清空 `.env` 里的心跳地址来止住通知**：脚本照跑，失败只剩一行 `nobody will be told about this`
+- **不要把 `.env`、备份口令、R2 凭据或心跳地址贴进工单、聊天或截图**：知道心跳地址的人都能伪造「成功」（[deployment.md](deployment.md) §5.2.6）
+
+---
+
 ## 整台 VPS 没了（灾难恢复）
 
 **首次编写：2026-09-16（T0.9）。§136 的 18 个场景里第三个落地的，也是 §98.1 要求的「书面的灾难恢复顺序与恢复后对账」。**
@@ -657,6 +886,59 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
   （重包裹的后台任务还没有，见 [TODO](TODO.md) 的 T0.9）
 - **不要把密钥值写进 `.env`、仓库、聊天、工单或截图。**ADR-0004 定的是「只有路径进环境变量」
 - **不要为了读到密钥把容器改回 root。**ADR-0004 明写；要改的是宿主机文件的属主
+
+---
+
+## 文档存储恢复
+
+**首次编写：2026-11-22（AIH-TASK-230）。依据（同日核实）：`docker-compose.yml:477-480`、`docker-compose.yml:229-230`、
+`app/api/receipt_download.py:82-110`、`app/services/receipt_pdf.py:1-17`、`app/services/statement_pdf.py:1-19`、`app/services/pdf_text.py:29-45`、
+`Dockerfile:18`；[deployment.md](deployment.md) §5.1 的分层表与 §11。**
+
+⚠️ **本平台没有独立的文档存储。**核实结果：
+
+- `docker-compose.yml` 只有三个命名卷：`mysql-data`、`redis-data`、`celery-beat-state`，没有文档卷；api 唯一的可写挂载是 `/tmp` 的
+  tmpfs（xlsx 导出的临时文件，容器重启即清空，见「xlsx 导出失败」）
+- 收据 PDF：下载时读 `payment_receipts` 行的快照（`snapshot_json`），由 `app/services/receipt_pdf.py` 现场渲染
+- 对账单 PDF：下载时读 `monthly_statements` 行的快照、对账单号与定稿时刻，由 `app/services/statement_pdf.py` 现场渲染，不存文件
+  （见「月度对账单」的「PDF 下载」）
+- 中文字体 `app/data/NotoSansSC-Regular.ttf` 随 `app` 包打进镜像，不在卷上
+- [deployment.md](deployment.md) §5.1 的第四层「不可变文档文件」按设计 Phase 3 才有，现在没有这类数据
+
+所以**文档的恢复就是数据库的恢复**。⚠️ 将来新增文档存储（卷、对象存储或 R2 的文档桶）时，必须回来把本节改写成那份存储自己的
+发现、备份与恢复步骤，并同步改开头的对照表。
+
+### 怎么发现
+
+没有「文档卷丢了」这个信号，也没有单独的告警维度。客户或管理员反馈收据、对账单下载失败（500 `INTERNAL_ERROR`）时，按请求时刻
+与 `request_id` 去 api 日志里找：对账单按「月度对账单」的「PDF 下载失败」那张表；收据的日志是 `Receipt snapshot invalid; download refused`
+（带收据 `public_id`）或字体、渲染类错误，按 [payment-flow.md](payment-flow.md) 的收据一节处理。
+
+### 影响什么
+
+| 情形 | 影响 |
+| --- | --- |
+| 数据库在 | 每一份收据、对账单都能重新下载，同一镜像里字节完全相同 |
+| 数据库丢了或损坏 | 收据、对账单与账本是同一份数据，一起丢；从备份恢复之后一起回来 |
+| 镜像里的字体缺失或损坏 | 只影响含非 Latin-1 字符（如中文公司名）的那些下载；数据不受影响 |
+
+### 立刻做什么
+
+1. 先分清是数据库的问题还是渲染的问题：`/readyz` 是否 200、其他接口是否正常
+2. 数据库不可用：按「MySQL 不可用」；数据库丢失或损坏：按「整台 VPS 没了（灾难恢复）」从备份恢复
+3. 渲染问题（快照不合规、字体读不到）：按「月度对账单」的「PDF 下载失败」处置；字体问题是**重新部署带字体的镜像**
+
+### 恢复
+
+1. 数据库恢复并通过「恢复后对账」之后，在管理端各下载一份收据与一份对账单，与页面上的详情核对（做法同「月度对账单」的
+   「首个账期生成后的人工核对」）
+2. 不需要另外恢复任何文件
+
+### 绝不能做什么
+
+- **不要为了「备份文档」另建一个卷、把 PDF 落盘**：那是新增文档存储，要先按上面的提醒补齐本节与备份方案
+- **不要为了让某份文档能下载去改 `payment_receipts` 或 `monthly_statements` 的行**：行不可改（触发器拒绝），修复要另过设计闸门
+- **不要换 `app/data/NotoSansSC-Regular.ttf`**：会改变历史收据与对账单的字形，要另过设计闸门
 
 ---
 
@@ -1453,6 +1735,59 @@ docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYS
 - **不要为了消 `receipts missing` 手工插收据行或改 `receipt_number_series`**：编号只由开具在系列行锁下分配，手工改会让编号重复或复用；
   收据行插进去就不可改、不可删
 
+### 过期之后到账（`EXPIRED` 之后的付款成功）
+
+**首次编写：2026-11-22（AIH-TASK-230）。依据：`app/models/payments.py:83`、`app/services/payments.py:252-301`、
+`app/services/payment_reconcile.py:11-27`、`docs/payment-flow.md:136`、`docs/payment-flow.md:294`（ADR-0007）。**长时间 `PENDING`
+见上面「怎么发现」的 `stale pending` 一行，网关事件积压见 `oldest open event` 一行；这里只补 `EXPIRED` 之后才到的付款成功。
+
+`EXPIRED` **不是终态**（`FINAL_STATUSES` 只有 `PAID` 与 `REVIEW_REQUIRED`）：之后收到这笔的付款成功事件，事件任务照常认回会话 id、
+向 Stripe 查权威状态，按同一张判定表落状态 —— 判定全部通过就 `EXPIRED` → `PAID` 自动入账（同一事务开收据），任何一条不过就
+`EXPIRED` → `REVIEW_REQUIRED`，**不入账**。⚠️ 补对账只查 `PENDING` 的支付，不会回头再查已经 `EXPIRED` 的：过期之后的到账只靠
+Stripe 的事件送进来。
+
+#### 怎么发现
+
+- 自动入账是正常路径，**没有告警**：worker 日志 `Payment status changed`（INFO，`old_status` 为 `EXPIRED`、`new_status` 为 `PAID`），
+  审计 `GET /api/v1/admin/audit-logs?action=PAYMENT_STATUS_CHANGE`
+- 判定不过：`review open` 大于 0（**P1**），按上面的复核单处理
+- 客户反馈「付了款，页面却显示已过期」
+
+#### 影响什么
+
+- 自动入账：钱已收、入账一次（三层唯一约束），客户在事件处理之前看到的是 `EXPIRED`
+- 进了复核：钱在 Stripe、钱包没加，客户可能仍处于停机，直到结案
+- 事件一直没到：钱在 Stripe、支付停在 `EXPIRED`，平台这一侧没有任何信号
+
+#### 立刻做什么
+
+1. 找出过期之后才入账的支付（只读）：
+
+   ```bash
+   docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+     SELECT public_id, status, status_reason, expires_at, paid_at, review_required_at
+       FROM payments
+      WHERE (status = \"PAID\" AND paid_at > expires_at)
+         OR (status = \"REVIEW_REQUIRED\" AND review_required_at > expires_at)
+      ORDER BY id DESC
+      LIMIT 50"'
+   ```
+
+2. 已经 `PAID`：不用处理；收据没开出来时看上面第 5 步（`receipts missing`）
+3. `REVIEW_REQUIRED`：按上面第 3 步的复核单处理，结案走 [payment-flow.md §6](payment-flow.md#6-复核处理)
+4. 客户说已付款而支付仍是 `EXPIRED`：用第 1 步「看事件」的查询找这笔的网关事件；按支付 `public_id` 在 Stripe Dashboard 查是否真有
+   付款。有付款而事件没到或没认回（`NO_GATEWAY_REFERENCE` 那一行），记进工单交 Kelvin
+
+#### 恢复
+
+- 支付变成 `PAID` 且有收据，或复核单已结案
+
+#### 绝不能做什么
+
+- **不要手工把 `EXPIRED` 改成 `PAID`、补 `TOPUP` 行或直接改钱包**：入账只经 `confirm_payment`（见上面「绝不能做什么」）
+- **不要看到 `EXPIRED` 就在 Stripe 给客户退款**：之后的付款成功事件可能已经让它自动入账；先确认支付的当前状态
+- **不要为了「让它再查一次」改 `expires_at` 或 `last_reconciled_at`**：补对账的候选条件全写在这些列上，改了会让它查错单子
+
 ---
 
 ## 状态 webhook：推送连续失败、缺签名密钥、签名错误（`status_webhook` 告警）
@@ -1565,6 +1900,72 @@ curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/j
   主密钥只能放回原来那份（见「主密钥」一节）
 - **不要退役 `ACTIVE` 签名密钥却不启用新的**：项目立刻变成 `missing secret`，推送停止
 - **不要把完整地址写进工单、聊天、截图或日志查询结果**：路径里可能带集成方的令牌；审计里也只记主机名
+
+---
+
+## 状态推送乱序
+
+**首次编写：2026-11-22（AIH-TASK-230）。依据：`app/services/status_delivery.py:4-20`、`app/services/status_delivery.py:440-480`；
+[api.md「状态 webhook 签名」](api.md#状态-webhook-签名)里「请求体」的 `event_id` 规则、[api.md「集成方怎么应用」](api.md#集成方怎么应用)、[api.md「对账」](api.md#对账)。**
+
+平台这一侧的保证：
+
+- 每个项目一行投递行，只有 `delivered_version` 落后于客户的 `status_version` 才推送；领取时从同一次读取组装快照与版本，重试也是
+  重新领取、发的是当时的最新快照，中间版本被合并
+- 结算带领取令牌，令牌对不上（改了地址、启用了新密钥、租约被接手）什么都不写；送达时 `delivered_version` 取新旧两者的较大值，
+  **只增不减**
+- `event_id` 是 `sevt_<项目 public_id>_<status_version>`，同一版本重发时不变
+
+仍然会乱序：推送与集成方每 4 分钟一次的周期对账（`effective-status`）是两条并行的路，网络也可能让先发的请求后到。所以契约要求
+**集成方按 `status_version` 判断**：版本更大才应用，同版本幂等，更小的忽略并回 2xx。
+
+### 怎么发现
+
+平台**没有**这个场景的告警维度：版本比较发生在集成方那边，平台看不到集成方本地存的版本。能看到的信号：
+
+- 客户或集成方报告状态不对：充值复机之后仍被拦截，或停机之后仍然放行
+- `status_webhook` 维度的 `failing`，`last_http_status` 是 4xx：集成方对旧版本回了非 2xx（契约要求回 2xx），按「状态 webhook」一节
+  那一行请集成方核对
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 平台的计费、余额、账户与项目状态：投递不改任何状态（不变量 1） | 集成方若按到达顺序应用，旧状态会覆盖新状态：该拦的放行（透支风险）或该放的拦截（客户 AI 服务中断） |
+| 投递游标：不会因为乱序往回走 | 直到下一次推送或对账带来更高的版本之前，集成方停在错误的状态 |
+
+### 立刻做什么
+
+1. 只读查平台当前的版本与这个项目的投递游标（**不要 SELECT `status_webhook_url`**）：
+
+   ```bash
+   docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+     SELECT p.public_id AS project, t.public_id AS customer, t.status_version, d.delivered_version,
+            d.delivered_at, d.attempt_count, d.last_error_code, d.last_http_status
+       FROM project_status_deliveries d
+       JOIN projects p ON p.id = d.project_id AND p.tenant_id = d.tenant_id
+       JOIN tenants t ON t.id = d.tenant_id
+      WHERE p.public_id = \"<project_id>\""'
+   ```
+
+2. 请集成方报出它本地这个项目保存的 `status_version`，与上面的 `status_version` 比：
+   - 本地更小：它漏了更新 —— 投递落后时按「状态 webhook」一节排查；投递已追上（`delivered_version` 等于 `status_version`）时，
+     请集成方查它是否拒绝或丢弃了那次推送，下一次周期对账会把它拉到最新
+   - 本地相等或更大，但状态与平台不同：它没有按版本判断（按到达顺序或按时间覆盖了）
+3. 请集成方按 [api.md「集成方怎么应用」](api.md#集成方怎么应用)修正：只按 `status_version` 比较，旧版本忽略并回 2xx；对账用同一条规则
+4. 平台这一侧**不需要重发**：游标落后时会自动推送最新版本，已追上时没有更新的状态可发
+
+### 恢复
+
+- 集成方本地的 `status_version` 与平台一致，状态与 `effective-status` 的返回相同
+- `status_webhook` 维度没有因 4xx 产生的 `failing`
+
+### 绝不能做什么
+
+- **不要直接 UPDATE `project_status_deliveries`**（例如把 `delivered_version` 改小）来「让平台重发」：理由见「状态 webhook」一节
+- **不要为了让集成方收到一次推送去改客户的账户、计费或项目集成状态**：那是真实的状态跃迁，版本 +1、有效状态随之改变、写审计
+- **不要停用项目来「止住乱序」**：有效状态会变成 `BLOCK_AI`，集成方拦截客户的 AI 调用
+- **不要同意集成方改用 `effective_at` 或到达时间排序**：契约只认 `status_version`
 
 ---
 
@@ -1800,6 +2201,61 @@ echo "exit=$?"
 3. 不含成本、毛利、加价、汇率、税额栏或 SST 注册号
 
 不一致时按上表与设计 §10 处置并记下对账单 `public_id`，不要把金额与公司名写进工单。
+
+---
+
+## 上期用量与跨期调整
+
+**首次编写：2026-11-22（AIH-TASK-230）。依据：[ADR-0003](adr/ADR-0003-financial-period-and-cutoff.md)「决策」规则 2–5 与「需要监控的风险」；
+`app/services/statements.py:73-82`、`app/services/statements.py:209-230`、`app/services/statements.py:531-535`；`app/models/wallet.py:65-66`；
+本文件「月度对账单」；[api.md「快照」](api.md#快照)的 `prior_period`；[api.md「管理端手工调账」](api.md#管理端手工调账)；
+[TODO.md](TODO.md) Phase 8 的「Rebill 调整」。**
+
+**规则（以代码为准）**：一行用量账本（`AI_USAGE`）的用量月 `U` 是事件 `occurred_at` 所在的马来西亚日历月。入账时刻早于 `cutoff(U)`
+（`U` 次月第 2 日 00:00，马来西亚时间）的计入 `U`；晚于它的计入**入账那个月**的对账单，放在「上期调整」（`prior_period.usage`，
+按原用量月 `usage_period` 列出条数与金额）。已定稿的对账单不变。没有单独的账本类型：上期调整是对账单按这条规则对 `AI_USAGE`
+行的归类；扣费本身在入账那一刻就发生，余额与停机判定不等对账单。宽限日（次月第 1 日）内入账的上月用量仍计入原月，不算晚到。
+
+**跨期 Rebill 在 V1 没有实现**：`REBILL_CREDIT` / `REBILL_DEBIT` 两个账本类型在模型里有，对账单的 `prior_period.rebill` 一栏照样
+汇总它们，但没有任何代码写这两种行 —— Phase 8 的「Rebill 调整」在 TODO 里未勾选、要先过设计闸门。今天 `rebill` 一栏恒为 0。
+
+### 怎么发现
+
+- `usage_processing_backlog` 的「晚到用量」一段报 P2：`late usage 24h <a>/<b> rows (<x>%), <y>% of amount`，最近 24 小时入账的预付
+  用量里，过了原用量月 cut-off 才入账的条数或金额占比 ≥ 1%（见「用量计费」一节「怎么发现」）
+- 对账单详情或 PDF 的「上期调整」（`Prior-period adjustments`）有行
+- 客户问「为什么上个月的用量出现在这个月的对账单上」
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 金额：晚到的用量照扣一次，不丢、不重复 | 客户的这一期对账单多出「上期调整」，要能解释 |
+| 已定稿的往期对账单：一个字节都不变（INV-12） | 晚到占比高说明投递链路有系统性延迟：每一笔都应能追溯到一次具体的延迟（ADR-0003） |
+| | 已计费金额本身错了（价格、规则、汇率发布错）的事件：V1 没有重算的出口 |
+
+### 立刻做什么
+
+1. 晚到占比告警：按「用量计费」一节「晚到用量占比高」的处置查根因（beat / worker、`ai_usage_outbox` 与 `outbox_backlog` 维度、
+   客户侧投递）；停机或积压跨过 cut-off 的，先按对应章节恢复
+2. 核对某客户某一期：管理端对账单详情（`GET /api/v1/admin/statements/{statement_id}`）的 `prior_period`
+3. 向客户解释：对账单 PDF 上这一节开头有固定说明（原月 cut-off 之后才处理的往期用量，按原用量月列在这里）
+4. 已计费的金额本身错了：这是 Reprocess / Rebill，V1 没有。列出受影响的事件、期间与原因，记进事故记录，留给 Phase 8
+   （与「FX 汇率：发布了错误的汇率」「用量计费」两节的做法一致）
+
+### 恢复
+
+- 晚到用量一段在延迟消除后随 24 小时窗口自动回落
+- 上期调整本身不需要恢复：它就是正确的入账结果
+
+### 绝不能做什么
+
+- **不要重算或改写已定稿的对账单**来把晚到用量「并回」原月：ADR-0003 备选方案 C 已否决（INV-12），定稿行由触发器拒绝修改
+- **不要改事件的 `occurred_at` 或账本行**来移动用量所属的期间：已处理的事件与账本不可变（INV-5、INV-12）
+- **不要用手工调账代替 Rebill**：手工调账只收 `ADJUSTMENT_CREDIT`、`ADJUSTMENT_DEBIT`、`BONUS`、`REFUND_ADJUSTMENT`，rebill 类型 422；
+  调账计入本期的「调整」而不是「上期调整」，也不引用原事件 —— 客户看到的是一笔与原用量无关的调整。手工调账只用于本文件其他章节
+  写明的场景（争议与退款的扣回、关户前的余额清零、负余额、AI 用量待复核的退回）
+- **不要为了消晚到告警删事件或账本行**
 
 ---
 
