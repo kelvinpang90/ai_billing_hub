@@ -3,6 +3,7 @@
 > **来源**：设计闸门 Issue #96。本文件是 `APPROVED: design v3` 那一版正文的**逐字副本**，审查者为独立、只读的 Claude Code 会话（claude-opus-5），因为 Codex 额度不可用，临时替代。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
 > **实现以本文件为准**；与 Issue 不一致时，以 Issue #96 上被批准的 v3 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> 勘误：§2 流程与 §5「校验失败」一行改成实际的校验顺序：请求体与查询参数由 FastAPI 先于 `require_admin` 校验，没带令牌、参数又不合法的请求得到 422 而不是 401。实现与 [api.md](../api.md) 一直是这个顺序，只是文本对齐，版本不变（§12「v3（勘误）」）。
 
 ---
 
@@ -54,7 +55,8 @@
 ## 2. 设计概要
 
 ```text
-HTTP 请求 → require_admin（验签 → 读库确认 ACTIVE 且角色 ADMIN）→ Pydantic 校验
+HTTP 请求 → FastAPI 校验请求体与查询参数（Pydantic；不合法即 422，先于鉴权）
+  → require_admin（验签 → 读库确认 ACTIVE 且角色 ADMIN）
   → services.customers（session_scope：一个事务）
       建客户：create_tenant → create_wallet → record_audit(CUSTOMER_CREATE) → commit
       建项目：按 public_id 找租户 → create_project → record_audit(PROJECT_CREATE) → commit
@@ -147,7 +149,7 @@ HTTP 请求 → require_admin（验签 → 读库确认 ACTIVE 且角色 ADMIN�
 
 | 失败点 | 对外结果 | 数据最终状态 | 是否可重试 | 恢复来源 | 告警 |
 | --- | --- | --- | --- | --- | --- |
-| 校验失败 | 422 `VALIDATION_ERROR`，只列字段名 | 没有任何写入 | 修正后重试 | — | 无 |
+| 校验失败（请求体或查询参数，先于鉴权判：没带令牌、参数又不合法也是 422） | 422 `VALIDATION_ERROR`，只列字段名 | 没有任何写入 | 修正后重试 | — | 无 |
 | 无令牌、令牌无效、账号停用 | 401 `TOKEN_INVALID` | 没有任何写入 | 重新登录 | — | 无 |
 | 非 ADMIN | 403 `ADMIN_REQUIRED` | 没有任何写入 | 否 | — | 无 |
 | 客户不存在 | 404 `CUSTOMER_NOT_FOUND` | 没有任何写入 | 否 | — | 无 |
@@ -276,3 +278,4 @@ HTTP 请求 → require_admin（验签 → 读库确认 ACTIVE 且角色 ADMIN�
 | v1 | 2026-09-19 | 初稿 | — |
 | v2 | 2026-09-19 | ① §7 鉴权改为从 `app.routes` 枚举所有 `/api/v1/admin` 路由逐个断言 401 / 403 / 不写库，并断言路由集合恰好是五个；INV-8 与 §9 同步；② 余额先 quantize 到 8 位再格式化，POST 与 GET 都断言 `"0.00000000"`；③ `page` 上限 10000 | 设计审查 v1 的阻断项（漏调 `require_admin` 测不出来）与两条非阻断备注 |
 | v3 | 2026-09-19 | 引擎统一 `hide_parameters=True`，数据库异常文本不再带 SQL 参数；§5、§6 按现有全局处理器的真实行为改写；§7 加「日志不含个人数据」与引擎配置两条用例；实现范围加 `app/core/database.py`、`tests/backend/test_database.py` | 设计审查 v2 的阻断项：全局处理器会把 SQL 参数（含 email、contact、phone）写进日志 |
+| v3（勘误） | 2026-11-22 | §2 流程把 Pydantic 校验移到 `require_admin` 之前；§5「校验失败」一行注明先于鉴权判。实现、[api.md](../api.md) 与测试早已是这个顺序，契约、事务、失败语义都不变，不算实质修改，版本不变 | AIH-TASK-006 仓库审查的建议（docs/TODO.md 的后续项） |
