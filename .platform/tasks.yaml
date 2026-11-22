@@ -14547,7 +14547,7 @@ tasks:
     title: 运维手册补齐规格要求的十八个故障场景并加覆盖对照表
     purpose: >-
       spec §136 要求 docs/runbook.md 覆盖 18 个故障场景。现有章节已覆盖其中多数，但 Billing API 不可用、MySQL 不可用、备份失败、状态推送乱序、上期用量与跨期调整、文档存储恢复没有对应章节，待支付与支付对账失败要核对现有支付章节是否写到。本任务在 runbook 开头加一张 18 个场景到章节的对照表，并按本文件「本文件的写法」补上缺的章节；每一条都以仓库里已有的代码、部署脚本与文档为依据，不发明新的流程、告警或命令。只改文档。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-251
     acceptance_criteria:
