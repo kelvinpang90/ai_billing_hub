@@ -25,7 +25,7 @@
 | 13 | out-of-order status delivery | [状态推送乱序](#状态推送乱序) |
 | 14 | backup failure and full restore | [备份失败：全量备份与 binlog 离机](#备份失败全量备份与-binlog-离机)；[整台 VPS 没了（灾难恢复）](#整台-vps-没了灾难恢复) |
 | 15 | encryption master-key recovery | [主密钥（`master.key`）丢失或要在新主机上重建](#主密钥masterkey丢失或要在新主机上重建) |
-| 16 | document-volume recovery | [文档存储恢复](#文档存储恢复) |
+| 16 | document-volume recovery | [文档存储恢复](#文档存储恢复)；[整台 VPS 没了（灾难恢复）](#整台-vps-没了灾难恢复) |
 | 17 | late prior-period usage and cross-period rebill | [上期用量与跨期调整](#上期用量与跨期调整)；[月度对账单](#月度对账单) |
 | 18 | account closure with unresolved financial events | [关户](#关户) |
 
@@ -80,14 +80,14 @@
 ### 立刻做什么
 
 1. 分清是 api、边缘 nginx 还是数据库：`docker compose ps`，看 `api`、`billing_nginx`、`mysql` 三行
-2. 在宿主机回环上看存活与就绪（只读；**不要**把响应贴进工单以外的地方）：
+2. 看存活与就绪，不自己拼探测地址，用巡检已有的两条路：
+   - **存活（`/healthz`）**：就是上一步 `api` 那一行的 health —— 容器健康检查探的正是 `/healthz`（`docker-compose.yml:241-244`）
+   - **就绪（`/readyz`）**：巡检在宿主机上按 `BILLING_MONITOR_READYZ_URL`（默认由 `.env` 的 `BILLING_HTTP_PORT` 拼出）探它
+     （`deploy/monitor.sh:102-105`、`deploy/monitor.sh:193-207`）。看最近一轮的结论：`journalctl -t billing-monitor -p err`；
+     要一份当下的结论就手工跑一次 `BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`（同第 6 条）
 
-   ```bash
-   curl -sS -w '\n%{http_code}\n' http://127.0.0.1:<端口>/healthz
-   curl -sS -w '\n%{http_code}\n' http://127.0.0.1:<端口>/readyz
-   ```
-
-   `/healthz` 不通 = api 进程的问题，往下走；`/healthz` 200 而 `/readyz` 503 = 数据库，转「MySQL 不可用」
+   `api health=unhealthy` 或 `api is not running` = api 进程的问题，往下走；`api` 是 `healthy` 而 `P1 readyz is not answering 2xx`
+   = 多半是数据库，转「MySQL 不可用」
 3. 看 api 日志：`docker compose logs --since 30m api | tail -200`
 4. **是不是刚部署过**：`cat .last-good-deploy`，对照 GitHub Actions 的 Deploy 运行记录。`deploy.sh` 健康检查或冒烟没过时会自动
    回滚并以非零退出；新版本已经上线而本身有问题时，按 [deployment.md](deployment.md) §9.5 手工回滚（Deploy workflow 的 `ref`
@@ -98,7 +98,7 @@
 
 ### 恢复
 
-1. `/healthz` 200、`/readyz` 200 且 `data.status` 为 `ok`；下一轮巡检 `ai_billing_hub services` 与 `ai_billing_hub readyz` 回到
+1. `api` 是 `healthy`（`/healthz` 通）；手工跑一次巡检时 readyz 维度没有问题行（`/readyz` 200 且 `data.status` 为 `ok`）；下一轮巡检 `ai_billing_hub services` 与 `ai_billing_hub readyz` 回到
    **up**（前提是同一维度没有别的行），告警维度恢复上报
 2. 停机期间的 `AI usage not persisted` 日志行，按「AI 模块用量 outbox」一节的「积压与从日志补录」补录；`HELD` 与待复核按同一节处理
 3. 集成方的积压由它们自行补投，已经落库的事件重投得到 `200 already_received`，不会重复计费（见「用量摄取」一节）；
