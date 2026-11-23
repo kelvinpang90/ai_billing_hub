@@ -48,7 +48,7 @@
 - 待登记：Phase 6 低余额、停机、复机通知的 WhatsApp 通道（需设计闸门，挂在 `notifications` 逻辑通知之下，依赖 D7）；门户内通知（设计闸门 #471，AIH-TASK-125..128）、Email 通道（设计闸门 #559，AIH-TASK-152..153）已登记
 - 待登记：Phase 6 WhatsApp adapter（依赖 D7）
 - 待登记：Phase 6 健康告警的其余信号（Celery 队列长度已登记为 AIH-TASK-208，日志量增长已登记为 AIH-TASK-252；HTTP 错误率与用量摄取速率要指标管道）；AI 就绪检查已由 AIH-TASK-075 并入 readyz；通知死信、TLS 证书到期、主机时钟同步已登记为 AIH-TASK-149..150。Healthchecks 这个项目 2026-11-03 起 20 个检查实际用满（免费档上限），2026-10-17 Kelvin 定：不升级付费档，新信号并进已有维度、不新增检查；登记时每项写明并进哪个维度
-- 待登记：上线闸门：PDPA 与数据留存政策
+- 待登记：数据留存清理 R1–R7（ADR-0017 已于 2026-11-23 接受，保留期见 docs/data-governance.md §10；R1–R5、R7 各需设计闸门，R6 是运维与文档）。上线闸门「PDPA 与数据留存政策已批准」在清理落地、顾问核对 K1、K4、K19–K22 之后再勾
 - 待登记：上线闸门：RPO/RTO 恢复演练
 - 待登记：上线闸门：支付、Email、WhatsApp 真实账号集成验证
 <!-- openclaw:planning-v1:end -->

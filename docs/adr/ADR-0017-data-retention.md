@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| **状态** | **提议中**：等决策人批准；保留期数字逐条待拍板（`docs/data-governance.md` §10） |
+| **状态** | **已接受**（2026-11-23，Kelvin 批准 `docs/data-governance.md` §10 的建议值；K10 选 a；K19–K22 是暂定值，法律事实待顾问核对，见「收口条件」） |
 | **日期** | 2026-11-16 |
 | **来源** | spec §13、§94、§98.1、§112、§112.1；`REQ-PRIV-001`；上线闸门 Gate 2「PDPA and data-retention policy approved」；`docs/TODO.md`「`password_reset_tokens` 与 `domain_outbox` 都只增不减」 |
 | **影响** | 认证令牌、领域 outbox、AI 模块 outbox、通知、钱包核对记录开始按期删除；关户客户的联系人与门户账号按期匿名化或删除；年备份改为有期限；AI-MODULE 设计的「`ai_usage_outbox` V1 不删」被改变；财务记录与审计的到期清理推迟到另一份 ADR |
@@ -30,7 +30,7 @@ spec §112 要求上线前由 Acuven 批准一份数据治理政策：财务与�
 
 ### 1. 保留期总表
 
-数字是**建议值**，以 `docs/data-governance.md` §10 的编号逐条由决策人拍板；批准后把本表的「建议」改为批准值，作为「补完待定项」原地修订。
+下表是 2026-11-23 的**批准值**（Kelvin 批准 `docs/data-governance.md` §10 的建议值，作为「补完待定项」原地修订）。K1 的 7 年待会计顾问核对，K4 与 K19–K22 的法律事实待法律顾问核对；顾问结论不同时按「收口条件」另写 ADR。
 
 | 类别 | 表 / 对象 | 保留期 | 到期动作 | 本 ADR 是否实现清理 |
 | --- | --- | --- | --- | --- |
@@ -42,7 +42,7 @@ spec §112 要求上线前由 Acuven 批准一份数据治理政策：财务与�
 | 门户账号 | `users`（`CUSTOMER`，`CLOSED` 租户）及级联的 2FA、恢复码、令牌 | K5：与 K4 同时 | 删除 | 是 |
 | 管理员账号 | `users`（`ADMIN`，`DISABLED`） | K6：停用后 12 个月 | 匿名化 | 是 |
 | 认证令牌 | `refresh_tokens`、`password_reset_tokens`、已用 / 已吊销的 `recovery_codes` | K7–K9：过期或用掉满 30 天 | 删除 | 是 |
-| 领域 outbox | `domain_outbox` 的 `SENT` / `FAILED` | K10：满 90 天 | 删除 | 是 |
+| 领域 outbox | `domain_outbox` 的 `SENT` / `FAILED`；三类无处理器的 `PENDING` 行 | K10：终态满 90 天；无处理器的行选 a，维持永久 `PENDING` | 删除终态行；无处理器的行保留 | 是（终态行） |
 | AI 模块 outbox | `ai_usage_outbox` 的 `DELIVERED`、`DISCARDED`、已确认 `DEAD` | K11：满 90 天 | 删除 | 是 |
 | 通知 | `notifications` | K12：满 24 个月；关户客户随 K4 | 删除 | 是 |
 | 运维记录 | `wallet_reconciliation_runs` / `_findings` | K13：满 24 个月（最近一次 `COMPLETED` 不删） | 删除 | 是 |
@@ -81,7 +81,7 @@ K1 与 K3 的到期清理不在本 ADR 实现。最早一批要到 2034 年 1 �
 | # | 任务 | 范围 |
 | --- | --- | --- |
 | R1 | 认证令牌清理（含清理框架） | Beat 条目、批量、开关、只数模式、审计汇总动作；`refresh_tokens`、`password_reset_tokens`、`recovery_codes` |
-| R2 | 领域 outbox 清理 | `domain_outbox` 终态行；三类无处理器事件按 K10 的决定处理 |
+| R2 | 领域 outbox 清理 | `domain_outbox` 终态行；三类无处理器事件按 K10 选 a 保留，不清理 |
 | R3 | AI 模块 outbox 清理 | `ai_usage_outbox` 终态行；改 AI-MODULE 设计「V1 不删」 |
 | R4 | 关户后的个人数据处理 | 联系人匿名化、门户账号删除、停用管理员匿名化；管理端「提前匿名化」入口（数据主体删除请求用） |
 | R5 | 通知与核对记录清理 | `notifications`、钱包核对运行与发现 |
@@ -109,7 +109,7 @@ K1 与 K3 的到期清理不在本 ADR 实现。最早一批要到 2034 年 1 �
 
 ## 收口条件
 
-- 决策人批准本 ADR 与 `docs/data-governance.md` §10 的数字：状态改为「已接受」，第 1 条表格写入批准值。
+- ~~决策人批准本 ADR 与 `docs/data-governance.md` §10 的数字：状态改为「已接受」，第 1 条表格写入批准值。~~ 已完成（2026-11-23）。
 - 法律或会计顾问给出与 K1、K4、K19–K22 不同的结论时，按「改变已生效的决策」另写 ADR。
 - 2033 年内（最早一批财务记录到期之前）另写财务记录与审计的到期清理 ADR。
 - 接入方确认 `conversation_id` 已含个人数据时，重新评估 K23 与摄取侧校验。
