@@ -1,11 +1,11 @@
-# AIH-TASK-253..259 设计：Phase 8 Rebill —— 已计费用量按更正版本重算，差额以补退 / 补扣账本行入账（已批准 v8）
+# AIH-TASK-253..259 设计：Phase 8 Rebill —— 已计费用量按更正版本重算，差额以补退 / 补扣账本行入账（已批准 v12）
 
-> **来源**：设计闸门 Issue #830。本文件是 `APPROVED: design v8` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`）。审查：v1–v7 由 Codex 审查（六轮 REQUEST_CHANGES：读视图、提交结果不明、零计费事件的范围、降级保护与续跑、无差额预览的测试），v7 的 READ COMMITTED 改动来自登记预审；v8 在 Codex 额度用完期间由 Claude Code 审查批准（Kelvin 2026-11-23 选择）。产品决定（9 条）由 Kelvin 2026-11-23 拍板。
+> **来源**：设计闸门 Issue #830。本文件是 `APPROVED: design v12` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`）。审查：Codex（v8 在 Codex 额度用完期间由 Claude Code 审查批准，Kelvin 2026-11-23 选择）；v7、v9 的改动来自登记预审（`READ COMMITTED`、撤回改名降级协议、去掉 SQLite 上会误拒的等式 CHECK）。产品决定（9 条）由 Kelvin 2026-11-23 拍板。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #830 上被批准的 v8 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
-> **任务划分**（登记时调整，设计内容不变）：§11 把前端整层记为 AIH-TASK-257，按 12 条可改路径的上限拆成 AIH-TASK-257（列表与详情）与 AIH-TASK-260（新建页与用量事件详情）；§8 的降级协议（改名、检查、续跑）从 AIH-TASK-253 拆出为 AIH-TASK-261（253 只做「有行就拒绝」的简单保护，261 合并前没有写入方）。确认服务的 MySQL 并发测试与 §7 末尾的变异从 AIH-TASK-255 拆出为 AIH-TASK-262。§7 末尾「四个变异」实列五个，以列出的为准；其中「改为 FOR SHARE」须同时去掉 READ COMMITTED 才会变红。管理端 Rebill 列表的分页照用量事件列表的 page / page_size（§2「管理端接口」写的「游标分页」是笔误，管理端没有游标分页的先例）。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #830 上被批准的 v12 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **任务划分**（登记时调整，设计内容不变）：§11 把前端整层记为 AIH-TASK-257，按 12 条可改路径的上限拆成 AIH-TASK-257（列表与详情）与 AIH-TASK-260（新建页与用量事件详情）；确认服务的 MySQL 并发测试与 §7 末尾的五个变异从 AIH-TASK-255 拆出为 AIH-TASK-262。合并顺序：253 → 254 → 255 → 262 → 258 → 256 → 257 → 260 → 259（258 先于 256，见 §8）。管理端 Rebill 列表的分页照用量事件列表的 page / page_size（§2「管理端接口」写的「游标分页」是笔误，管理端没有游标分页的先例）。
 
-状态：`READY_FOR_REVIEW` · 设计版本：`v8` · 目标 PR：待开（登记 PR 在本设计批准后开）
+状态：`READY_FOR_REVIEW` · 设计版本：`v12` · 目标 PR：待开（登记 PR 在本设计批准后开）
 负责人：Claude
 对应需求：spec §19「Rebill / Reprocess」、§62「Reprocessing UI」、§66 审计动作 `REBILL`、§16（更正规则保留新旧引用）、§131「Reprocess」「Rebill adjustments」、§46 / REQ-PERIOD-001（定稿对账单不可变、跨期 rebill 记为上期调整）
 
@@ -133,7 +133,7 @@
 
 **规范化的 `selection`**（v7）：显式事件形状为 `{"usage_event_ids": [按字符串升序排好的 public_id]}`；条件形状为 `{"occurred_from", "occurred_to", "project_id", "provider", "model"}` 五个键都在，时间换成 UTC 的 `YYYY-MM-DDTHH:MM:SS.ffffffZ`（6 位微秒），没给的可选项为 `null`。`request_fingerprint` 的输入是规范 JSON 的 `{客户 public_id, 两个更正版本 public_id, 规范化的 selection, preview_token, 去首尾空白后的 reason}`。
 
-**一次 Rebill 的对象 = 预览展示的那组事件**（v3，#830 第二轮审查）。条件选事件（日期范围等）只是帮管理员**找出**这组事件的手段，不是「确认时刻该范围内的全部事件」的承诺。指纹保证确认事务处理的集合与预览展示的集合逐个相同（事件、基准、新计费、最近明细）。在确认事务的读视图建立**之后**才提交为 `PROCESSED` 的事件——计费额为 0 的预付事件不经 `post_transaction`、不拿钱包锁（`app/services/usage_billing.py:408`），可能在 Rebill 持锁期间提交；计费额大于 0 的事件在 Rebill 持锁期间等钱包，在 Rebill 之后提交——都不在本次 Rebill 里，与「预览之后才计费的事件不在本次范围」是同一件事：它们由下一次预览发现，再做一次 Rebill。这不会少扣或多扣：本次只改它明细里列出的事件，没列出的事件保持原计费，管理员看到的预览就是将要入账的全部内容。页面与 runbook 写明：做 Rebill 时 `occurred_to` 应取已过 T+1 cut-off 的时刻，避免与仍在计费的用量交错（只是建议，不强制）。
+**一次 Rebill 的对象 = 预览展示的那组事件**（v3，#830 第二轮审查）。条件选事件（日期范围等）只是帮管理员**找出**这组事件的手段，不是「确认时刻该范围内的全部事件」的承诺。指纹保证确认事务处理的集合与预览展示的集合逐个相同（事件、基准、新计费、最近明细）。确认事务在 `READ COMMITTED` 下、拿到钱包锁之后才选事件（§2「服务」第 4 步）。在这一刻之前已提交为 `PROCESSED`、又落在条件范围内的新事件会被选进来，集合与预览不同 → 指纹不符 → 409 `REBILL_PREVIEW_STALE`，管理员重新预览即可；在这一刻之后才提交的事件——计费额为 0 的预付事件不经 `post_transaction`、不拿钱包锁（`app/services/usage_billing.py:408`），可能在 Rebill 持锁期间提交；计费额大于 0 的事件在 Rebill 持锁期间等钱包，在 Rebill 之后提交——都不在本次 Rebill 里，与「预览之后才计费的事件不在本次范围」是同一件事：它们由下一次预览发现，再做一次 Rebill（v9 按 `READ COMMITTED` 改写，v3–v8 写的是「读视图建立之后」）。这不会少扣或多扣：本次只改它明细里列出的事件，没列出的事件保持原计费，管理员看到的预览就是将要入账的全部内容。页面与 runbook 写明：做 Rebill 时 `occurred_to` 应取已过 T+1 cut-off 的时刻，避免与仍在计费的用量交错（只是建议，不强制）。
 
 ### 数据库（迁移 0042，AIH-TASK-253）
 
@@ -159,7 +159,7 @@
 | `created_by` | FK `users.id` | NOT NULL |
 | `created_at` | DATETIME | 整秒 UTC |
 
-CHECK：`event_count BETWEEN 1 AND 1000`；`previous_total >= 0`；`corrected_total >= 0`；`difference = corrected_total - previous_total`；`difference <> 0`。索引 `(tenant_id, id)`。
+CHECK：`event_count BETWEEN 1 AND 1000`；`previous_total >= 0`；`corrected_total >= 0`；`difference <> 0`；`TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(reason, CHAR(9), ' '), CHAR(10), ' '), CHAR(11), ' '), CHAR(12), ' '), CHAR(13), ' ')) <> ''`（名为 `ck_usage_rebills_reason`；v11 起，v12 补上制表、换行、垂直制表、换页、回车：只由 ASCII 空白组成的原因由数据库拒绝；`REPLACE`、`CHAR`、`TRIM` 在 SQLite 与 MySQL 上都可用）。非 ASCII 的空白（如不换行空格）不在数据库兜底范围内，由唯一的写入方——确认接口的请求校验（Python `str.strip()` 后非空，覆盖全部 Unicode 空白）与服务——拒绝；服务写入的是去首尾空白后的原因。索引 `(tenant_id, id)`。**不建「差额 = 新 − 旧」的等式 CHECK**（v9，登记预审）：后端测试的 SQLite 引擎把 `DECIMAL` 当浮点比较，`1.20 - 1.50` 不等于 `-0.30`，合法行会被拒；等式由服务在同一处计算并写入（§2「服务」第 6 步），服务测试对每条写入路径断言 `difference = corrected_total − previous_total`、`difference = corrected_charge − previous_charge`、账本金额 = −Σ 明细差额。
 
 **`usage_rebill_lines`**（一次 Rebill 的逐事件明细）：
 
@@ -179,13 +179,13 @@ CHECK：`event_count BETWEEN 1 AND 1000`；`previous_total >= 0`；`corrected_to
 | `original_statement_id` | FK `monthly_statements.id` | 可空 |
 | `created_at` | DATETIME | 与所属 Rebill 相同 |
 
-CHECK：三个金额的非负与等式、`difference <> 0`。`original_period` 的格式由服务层保证（与迁移 0041 的 `billing_month CHAR(7)` 同一做法，不在数据库里校验月份格式）。唯一 `(rebill_id, usage_event_id)`；索引 `(usage_event_id, id)`（取最近明细）。
+CHECK：三个金额的非负、`difference <> 0`（等式不建 CHECK，理由同上）。`original_period` 的格式由服务层保证（与迁移 0041 的 `billing_month CHAR(7)` 同一做法，不在数据库里校验月份格式）。唯一 `(rebill_id, usage_event_id)`；索引 `(usage_event_id, id)`（取最近明细）。
 
 **只追加**：两张表各一对无条件的 `BEFORE UPDATE` / `BEFORE DELETE` 触发器，`SIGNAL SQLSTATE '45000'`，只在 MySQL 上建，写法照迁移 0041（SQLite 不建，测试里的只追加断言放在 MySQL 分支）。外键都是 `RESTRICT`。不改任何已有表。
 
 ### 服务（`app/services/usage_rebill.py`，AIH-TASK-255）
 
-`preview_rebill(session_factory, *, request) -> RebillPreview`：一个只读事务（不加锁），按上面的口径返回明细（只含 `d ≠ 0` 的事件）、`unchanged_count`、四个合计、账本方向与金额、余额预估（当前余额 − D，只作提示）与 `preview_token`。不写库、不写审计。**没有可入账的差额时预览仍返回 200**（v7）：明细为空或 `D = 0` 时 `ledger_type` 与 `ledger_amount` 为 `null`、`balance_after` 等于当前余额，页面据此禁用确认；只有确认才返回 409 `NOTHING_TO_REBILL` / `REBILL_NET_ZERO`。匹配数为 0 的条件选择在预览里同样是 409 `NOTHING_TO_REBILL`（没有可展示的事件）。
+`preview_rebill(session_factory, *, request) -> RebillPreview`：一个只读事务（不加锁），按上面的口径返回明细（只含 `d ≠ 0` 的事件）、`unchanged_count`、四个合计、账本方向与金额、余额预估（当前余额 − D，只作提示）与 `preview_token`。不写库、不写审计。四个合计与 `event_count` 只按**差额不为 0 的事件**（即将写成明细的那些）计算，与 `usage_rebills` 的同名列一致（v9）。**没有可入账的差额时预览仍返回 200**（v7）：明细为空或 `D = 0` 时 `ledger_type` 与 `ledger_amount` 为 `null`、`balance_after` 等于当前余额，页面据此禁用确认；只有确认才返回 409 `NOTHING_TO_REBILL` / `REBILL_NET_ZERO`。匹配数为 0 的条件选择在预览里同样是 409 `NOTHING_TO_REBILL`（没有可展示的事件）。
 
 `confirm_rebill(session_factory, *, actor, request, preview_token, reason, idempotency_key, context, clock) -> RebillResult`，**两个事务，先后进行**：
 
@@ -352,41 +352,33 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 | 幂等重放 | integration | 同键同参重发；同键异参；两个事务同键并发 | 200 `replayed`；409 `REBILL_CONFLICT`；一个 201 一个 200 |
 | 事务中途失败 | integration | 在写明细时注入异常 | 账本行、余额、审计、outbox、Rebill 行全部不存在；随后同幂等键重发照常执行，结果只有一行账本 |
 | 提交后响应丢失 | integration | 第一次确认已提交（模拟响应丢失：服务调用返回后丢弃结果）；之后又有别的 Rebill 改了同一客户的状态；再用同一幂等键、同一预览指纹重发 | 200 `replayed: true`，返回第一次的结果；账本仍只有一行（不是 409 `REBILL_PREVIEW_STALE`） |
-| 读视图（MySQL） | integration | 捕获确认事务在该连接上执行的语句（SQLAlchemy `before_cursor_execute`），并在事务内读 `@@transaction_isolation` | 隔离级别是 `READ-COMMITTED`；事务的第一条语句是钱包的 `FOR UPDATE`；之后没有 `FOR SHARE` 与其他加锁读（只在 `mysql` 分支断言字面量，CLAUDE.md「写后端测试的约定」）；确认结束后同一连接池取出的连接隔离级别回到引擎默认值 |
+| 读视图（MySQL） | integration | 捕获确认事务在该连接上执行的语句（SQLAlchemy `before_cursor_execute`），并在事务内读 `@@transaction_isolation` | 隔离级别是 `READ-COMMITTED`；事务的第一条语句是钱包的 `FOR UPDATE`；除 `post_transaction` 内部对钱包与租户的 `FOR UPDATE`（既有行为）外，没有任何加锁读、没有 `FOR SHARE`（只在 `mysql` 分支断言字面量，CLAUDE.md「写后端测试的约定」）；确认结束后同一连接池取出的连接隔离级别回到引擎默认值 |
 | 不同客户并发（MySQL） | integration | 两张新表为空；两个客户各自预览后，两个线程同时确认（用屏障让两边都在插入前停住再放行） | 两个都 201，没有 1213 死锁；各自一行账本、一组明细 |
 | 停复机 | integration | 补扣让余额从正变为 ≤ 0（含正好为 0）；补退让停机客户余额变为 > 0 | 同事务里状态变化与状态推送 outbox 行，与 `post_transaction` 既有测试同一断言 |
 | 关户 | integration | 客户已 `CLOSED` | 409 `ACCOUNT_CLOSED`，什么都不写 |
 | 对账单 | integration | 原事件在 10 月（10 月对账单已定稿），11 月确认 Rebill | 10 月对账单逐列不变；明细 `original_statement_id` 指向它；11 月快照 `prior_period.rebill` = Rebill 行金额 |
 | 租户越权 | API | 门户会话调用四个新路由 | 401 / 403；`test_internal_cost_visibility.py` 覆盖新路由 |
 | 金额精度 | unit | 新计费在第 9 位小数四舍五入的边界；差额与合计为 8 位小数精确值 | 与 `price_event` 的结果逐位相同 |
-| 只追加 | migration | MySQL 上对两张表 UPDATE / DELETE；CHECK 违例（差额 ≠ 新 − 旧、差额 0、事件数 0 与 1001、负金额） | 被拒 |
-| 降级保护 | migration | 空表时 `downgrade` 到 0041；插入一组 Rebill 与明细（MySQL 上触发器只拦 UPDATE / DELETE，插入正常）后 `downgrade` | 空表：两张表与触发器都没了；非空：抛出 `RuntimeError`，两张表以原名存在、触发器与行全部仍在、`alembic_version` 仍是 0042 |
-| 降级与确认并发（MySQL） | migration | 另一个连接开事务、向两张表各插入一行但不提交；此时在后台线程执行 `downgrade`，用 `performance_schema.metadata_locks`（`LOCK_STATUS = 'PENDING'`、`OBJECT_NAME = 'usage_rebills'`、按 `DATABASE()` 过滤）确认降级确实在等元数据锁；然后提交那个事务 | 降级抛 `RuntimeError`；两张表以原名存在，那两行都在；`alembic_version` 仍是 0042。另一个变体：那个事务回滚而不是提交 → 降级成功、两张表都没了 |
-| 降级中断后续跑 | migration | ① 打桩让第 1 步改名之后抛异常（模拟进程退出），再执行一次 `downgrade`，表为空 / 非空各一次；② 打桩让第 3 步删完表之后、`alembic_version` 更新之前抛异常，再执行一次 `downgrade`；③ 手工造出「一张原名、一张 `_downgrading` 名」后执行 `downgrade`；④（MySQL）第 3 步的语句是一条同时列出两张表的 `DROP TABLE`（捕获执行的语句断言），执行后 `information_schema.TRIGGERS` 里没有这两张表的触发器 | ① 空：续跑删完、版本变为 0041；非空：改回原名并抛 `RuntimeError`，行都在、版本仍是 0042；② 续跑什么都不删、版本变为 0041；③ 抛「unexpected state」，两张表原样不动；④ 如述 |
-| 降级后的确认 | migration | 降级第 1 步改名之后（用打桩让第 2 步之前暂停）发起一次确认 | 确认在插入时报错并整体回滚：没有账本行、余额不变 |
-| 零计费并发（MySQL） | integration | 客户有事件 a（计费额 > 0，已 `PROCESSED`）与事件 b（预付、计费额为 0，`RECEIVED`），都在条件范围内。预览只含 a。Rebill 确认事务拿到钱包锁并建立读视图后暂停；此时计费处理 b 并提交（不等钱包锁）；Rebill 继续并提交 | Rebill 成功，明细只有 a；b 的快照与状态不受影响；再预览同一条件，b 出现在明细里（更正后计费额 > 0 时） |
-| 用量分析 | integration | Rebill 后按客户、按月分组与合计、CSV 导出 | 收入 = 原计费 + 差额；成本不变；毛利随之变 |
+| 只追加 | migration | MySQL 上对两张表 UPDATE / DELETE；CHECK 违例（差额为 0、事件数 0 与 1001、负金额；原因分别为空串、只有空格、只有制表符、只有换行与回车的组合） | 被拒（这些非等式 CHECK 在 SQLite 与 MySQL 上都拒）；另：原因只有不换行空格时数据库接受（已知边界），确认接口返回 422 `VALIDATION_ERROR` |
+| 降级保护 | migration | 空表时 `downgrade` 到 0041；插入一组 Rebill 与明细后 `downgrade`；只有一张表时（模拟 upgrade 在两条 `CREATE TABLE` 之间中断）分别有行 / 无行时 `downgrade`；（MySQL）捕获语句 | 空表：两张表与触发器都没了；有行：抛 `RuntimeError`，两张表、触发器与行都在、`alembic_version` 仍是 0042；只有一张：有行抛错、无行只删它；两张都在时删表是一条同时列出两张表的 `DROP TABLE` |
+| 零计费并发（MySQL） | integration | 客户有事件 a（计费额 > 0，已 `PROCESSED`）与事件 b（预付、计费额为 0，`RECEIVED`），都在条件范围内；预览只含 a。两个变体：① Rebill 确认拿到钱包锁、**在第 4 步选事件之前**暂停，计费处理 b 并提交（不等钱包锁），Rebill 继续；② Rebill **在第 4 步选完事件之后、写账本之前**暂停，计费处理 b 并提交，Rebill 继续 | ① 409 `REBILL_PREVIEW_STALE`，什么都不写；② Rebill 成功，明细只有 a。两种情况 b 的快照与状态都不受影响；再预览同一条件，b 出现在明细里（更正后计费额 > 0 时） |
+| 用量分析 | integration | Rebill 后按客户、按月分组与合计、CSV 导出；（另一组）两张新表为空 | 收入 = 原计费 + 差额；成本不变；毛利随之变。空表时每个分组、合计与导出与改动前逐位相同 |
 | Redis/Celery 丢失 | 不适用 | 同步请求不经队列 | — |
 
-四个变异必须变红：删掉确认时的指纹比对（并发测试变红）；把 `eff(e)` 改为总用 `billable_cost`（多次更正测试变红）；删掉 `READ COMMITTED` 的设置、并在锁钱包之前加一次普通读（同一客户并发测试变红：B 的读视图建立在 A 提交之前）；把最近明细或幂等查重改为 `FOR SHARE`（不同客户并发测试变红：死锁）；把幂等判定挪到指纹比对之后（「提交后响应丢失」测试变红）。
+五个变异必须变红：删掉确认时的指纹比对（并发测试变红）；把 `eff(e)` 改为总用 `billable_cost`（多次更正测试变红）；删掉 `READ COMMITTED` 的设置、并在锁钱包之前加一次普通读（同一客户并发测试变红：B 的读视图建立在 A 提交之前）；删掉 `READ COMMITTED` 的设置、并把最近明细或幂等查重改为 `FOR SHARE`（不同客户并发测试变红：死锁；只改 `FOR SHARE` 而保留 `READ COMMITTED` 不会变红，因为 `READ COMMITTED` 下查不到行的加锁读不加间隙锁）；把幂等判定挪到指纹比对之后（「提交后响应丢失」测试变红）。
 
 ## 8. 迁移与上线
 
 - 迁移 0042 只新建两张表与触发器，不改已有表、不回填。
-- **`downgrade` 只在两张表都为空时执行，且检查与删表之间不留并发窗口**（v3 起；v4 按 #830 第三轮审查补上并发）。步骤：
-  1. 一条语句同时改名：`RENAME TABLE usage_rebills TO usage_rebills_downgrading, usage_rebill_lines TO usage_rebill_lines_downgrading`。MySQL 的 `RENAME TABLE` 要拿两张表的排他元数据锁：正在写它们的确认事务持有共享元数据锁直到提交或回滚，改名会等它们结束；改名之后，新的确认事务找不到 `usage_rebills`，在插入时报错并整体回滚（账本行也随之回滚，见 §2「事务边界」），不会再有行写进来。触发器随表改名。
-  2. 在改名后的两张表上 `SELECT 1 … LIMIT 1`。任一有行：改回原名（同样一条 `RENAME TABLE`），抛 `RuntimeError("usage_rebills is not empty: downgrading would delete rebill records (spec §19); restore from backup or keep this revision")`，什么都不删。
-  3. 都为空：**一条**语句同时删两张表 `DROP TABLE usage_rebill_lines_downgrading, usage_rebills_downgrading`（v6，#830 第五轮审查）。MySQL 8.0 起 InnoDB 支持原子 DDL：一条 `DROP TABLE` 列出的多张 InnoDB 表要么全删、要么全不删，表上的触发器随表一并删除（生产与 CI 都是 `mysql:8.4`，`docker-compose.yml:140`、`.github/workflows/ci.yml:108`）。所以不存在「只删了一张」的中间状态，也不需要单独删触发器。
-  **可续跑**（v5，#830 第四轮审查）：MySQL 的 DDL 各自隐式提交，三步之间进程退出不会自动回滚。所以 `downgrade` 开头先看当前表名，决定从哪一步开始：
-  - 两张表都以原名存在、都没有 `_downgrading` 名：从第 1 步开始。
-  - 两张表都以 `_downgrading` 名存在、都没有原名（上次在第 1 步之后中断）：跳过第 1 步，从第 2 步继续。
-  - 原名与 `_downgrading` 名都不存在（上次在第 3 步删完表之后、`alembic_version` 更新之前中断）：什么都不用删，直接结束（触发器已随表删除）。
-  - 其他任何组合（例如一张原名、一张 `_downgrading` 名，或同名表两种都在）：抛 `RuntimeError("usage_rebills tables are in an unexpected state: …")`，列出实际存在的表名，什么都不做。第 1 步与恢复都是**一条** `RENAME TABLE` 同时改两张表，第 3 步是**一条** `DROP TABLE` 同时删两张表，三者在 MySQL 里都是原子的，所以任何一步中断都只会停在上面三种状态之一，不会产生这种组合；它只可能来自人工改动，此时由人按 runbook 查看并处理，迁移不猜测。
-  中断期间（表在 `_downgrading` 名下、`alembic_version` 仍是 0042），管理端 Rebill 接口报 500（表不存在）、不会写入任何东西（见第 1 步）；其他功能不受影响。恢复方式写进 runbook：要么重新执行 `alembic downgrade 0041_provider_cost_recon`（按上面的判断续跑：空表就删完，非空就改回原名并报错）；要么放弃降级，手工执行一条 `RENAME TABLE usage_rebills_downgrading TO usage_rebills, usage_rebill_lines_downgrading TO usage_rebill_lines` 回到原状。
-  SQLite（只在测试里用）没有元数据锁，按同样的三步执行（`ALTER TABLE … RENAME TO`），只验证空 / 非空两条分支。有了真实 Rebill 之后，0042 就是不可降级的修订：它保存的逐事件金额、版本与原交易引用是 spec §19 要求的审计链，账本里的 `REBILL_*` 行离开它就无法解释。
+- **`downgrade` 只在两张表都为空时执行，且只在停掉写入方之后由人手工执行**（v9 重写；v3–v8 的「先改名再检查、可续跑」协议撤回）：
+  - **为什么撤回改名协议**（登记预审）：MySQL 8 把元数据锁扩展到外键关联的表，对带外键的子表执行 `RENAME TABLE` 要拿它全部父表（`tenants`、`wallet_transactions`、`usage_events`、`users`、价格与规则表、`monthly_statements`）的排他元数据锁。改名在排队等锁时，排在它后面的计费、钱包、登录等读写全部被挡住——为了防一个极小概率的并发，换来一次可能的全站停顿，得不偿失。
+  - **执行前提**：降级不是部署流水线的一部分（`deploy/deploy.sh` 的回滚只切换镜像、不降级迁移），只由人手工执行。runbook 写明：降级 0042 之前先停 `api` 容器（Rebill 唯一的写入方是管理端确认接口），确认没有进行中的请求，再执行 `alembic downgrade 0041_provider_cost_recon`。写入方停了，「检查之后、删表之前有人提交 Rebill」的窗口就不存在。这是操作前提，不由数据库强制，迁移文件头与 runbook 都写明。
+  - **步骤**：离线模式抛错；两张表都在时，任一有行就抛 `RuntimeError("usage_rebills is not empty: downgrading would delete rebill records (spec §19); restore from backup or keep this revision")`、不发 DDL；都为空就一条语句同时删两张表 `DROP TABLE usage_rebill_lines, usage_rebills`（MySQL 8 的原子 DDL：要么都删、要么都不删，触发器随表删除）；只剩一张（upgrade 在两条 `CREATE TABLE` 之间中断）时有行抛错、无行只删它；都不在时不发 DDL。SQLite（只在测试里用）逐个删。
+  - 有了真实 Rebill 之后，0042 就是不可降级的修订：它保存的逐事件金额、版本与原交易引用是 spec §19 要求的审计链，账本里的 `REBILL_*` 行离开它就无法解释。
 - 上线：合并即部署，功能只对管理员可见，不需要开关（§1「我定的」第 8 条）。
+- **上线顺序与财务口径**（v10，#830 第七轮审查）：能写入 Rebill 的是 AIH-TASK-256 的确认接口，用量分析计入差额的是 AIH-TASK-258。258 必须**先于** 256 合并部署（§11 的顺序），这样任何一个能写 Rebill 的版本，其用量分析都已经计入差额，不存在「已入账、报表漏计」的窗口。258 只依赖 253 建的两张表：表为空时它的结果与改动前逐位相同（§7「用量分析」一行另加空表断言）。
 - 上线后第一次使用前，按 runbook 新增的「Rebill」一节先在测试专用验收租户上做一次小额补退再补扣还原，核对账本、余额、审计与用量分析。
-- 回滚：没有 Rebill 时可降级；有了之后只回滚应用代码、不降级迁移（新表对旧代码无害：旧代码不读它们）。runbook 写明：不得手工删除这两张表的行，也不得为了降级而清表。
+- 回滚：没有 Rebill 时可降级；有了之后只回滚应用代码、不降级迁移（新表对旧代码无害：旧代码不读它们）。runbook 写明：不得手工删除这两张表的行，也不得为了降级而清表。 **回滚应用代码的边界**：部署的回滚只切换到上一个镜像。按 §11 的顺序，256 及之后任何一层的上一个镜像都已包含 258，所以回滚后用量分析仍计入差额。runbook 写明：有了真实 Rebill 之后，不得把应用回滚到 258 之前的版本（那样收入与毛利会漏计已入账的差额）；确需回滚到那么早时，先停用管理端并由人按 `usage_rebill_lines` 手工核对报表。
 
 ## 9. 方案取舍
 
@@ -421,7 +413,7 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 
 ### 实现拆分
 
-七层串行，每层合并后都能单独通过检查与 CI：
+七层串行，每层合并后都能单独通过检查与 CI。**合并顺序是 253 → 254 → 255 → 258 → 256 → 257 → 259**（v10：用量分析 258 先于能写入 Rebill 的接口 256，见 §8「上线顺序与财务口径」；下表按层次列出，不是合并顺序）：
 
 | 任务 | 内容 | 主要文件 | 预计行数 |
 | --- | --- | --- | --- |
@@ -451,3 +443,7 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 | v6 | 2026-11-23 | #830 第五轮审查（Codex）阻断项：降级第 3 步若分两条语句删表，中间中断会只剩一张表 —— 改为一条 `DROP TABLE` 同时删两张表（MySQL 8 原子 DDL，触发器随表删除），续跑分支相应简化；测试加④断言一条语句删两表 |
 | v7 | 2026-11-23 | 登记预审（AIH-TASK-255）发现：`REPEATABLE READ` 下查不到行的 `FOR SHARE` 留间隙锁，不同客户的确认互相死锁 —— 确认事务在 MySQL 上改用 `READ COMMITTED`（照 #751 v3 的密码重置），锁钱包之后全用普通读、去掉 `FOR SHARE` 与 `locking` 参数，补「不同客户并发」测试、改读视图测试与变异；另按预审定下：预览没有可入账差额时仍 200（方向与金额为 null）、`selection` 与 `request_fingerprint` 的规范形式、详情含两个合计与 public_id 形式的引用、超限数量与不适用事件写在错误消息里 |
 | v8 | 2026-11-23 | #830 第六轮审查（Codex）阻断项：§7 把无差额的情况只写成 409、没分预览与确认 —— 「原版本重算」「相抵为 0」两行分别写明预览 200（方向与金额为 null）与确认 409，补「条件匹配为 0」一行 |
+| v9 | 2026-11-23 | 登记预审（第四轮）三处设计缺陷：① SQLite 把 `DECIMAL` 当浮点，「差额 = 新 − 旧」的等式 CHECK 会拒合法行 —— 去掉两条等式 CHECK，由服务计算并在测试里断言；② MySQL 8 对带外键子表的 `RENAME TABLE` 要拿父表的排他元数据锁，v4–v8 的改名降级协议在等锁时会挡住全站读写 —— 撤回改名协议，改为「停掉 api 后由人手工降级 + 有行拒绝 + 一条 DROP 删两表」；③ `READ COMMITTED` 下确认第 4 步会看到之前已提交的零计费事件 —— 「预览指纹」末段与「零计费并发」测试按两种时机改写，读视图测试豁免 `post_transaction` 自身的锁；另：预览合计只按差额不为 0 的事件，§7 变异的个数与「改为 FOR SHARE」的写法更正 |
+| v10 | 2026-11-23 | #830 第七轮审查（Codex）阻断项：确认接口（256）先于用量分析（258）上线，中间窗口与回滚后报表漏计已入账的差额 —— 合并顺序改为 258 先于 256，§8 写明上线顺序与回滚边界（不得回滚到 258 之前），§7 用量分析加空表逐位相同的断言 |
+| v11 | 2026-11-23 | #830 第八轮审查（Codex）阻断项：`reason` 的「去首尾空白后非空」只写在列说明里、CHECK 清单没有，与「只追加」测试要求数据库拒绝空白原因不一致 —— CHECK 清单补 `ck_usage_rebills_reason`（`TRIM(reason) <> ''`） |
+| v12 | 2026-11-23 | #830 第九轮审查（Codex）阻断项：`TRIM` 只去空格，只含制表符的原因能写入 —— `ck_usage_rebills_reason` 先把五种 ASCII 空白控制字符替换为空格再 `TRIM`；非 ASCII 空白写明由请求校验拒绝；「只追加」测试补各种空白原因 |
