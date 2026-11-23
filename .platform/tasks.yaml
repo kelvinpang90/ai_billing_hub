@@ -15213,7 +15213,7 @@ tasks:
   - id: AIH-TASK-264
     title: 数据留存清理第二层：每日清理任务、Beat 调度、三项模式开关与每轮上限配置
     purpose: >-
-      按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §2「任务与配置」：新增 app/tasks/retention.py（三项都 off 时直接返回；MySQL 命名锁 retention_purge:<库名> 防重叠；调用 run_purge），app/core/celery_app.py 登记任务模块与每天 20:17 UTC 的 Beat，app/core/config.py 加三项 off / count / delete 模式（缺省 off）与每轮上限，.env.example 与 docs/deployment.md 的配置清单同步。
+      按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §2「任务与配置」：新增 app/tasks/retention.py（三项都 off 时直接返回；MySQL 命名锁 retention_purge:<库名> 防重叠；调用 run_purge），app/core/celery_app.py 登记任务模块与每天 20:17 UTC 的 Beat，app/core/config.py 加三项 off / count / delete 模式（缺省 off）与每轮上限，docs/deployment.md 的配置清单同步。.env.example 是控制面的敏感路径（名字含 .env），Worker 不能改，由管理员在本任务合并后另开小 PR 补这四个键。
     status: ready
     depends_on:
       - AIH-TASK-263
@@ -15222,19 +15222,17 @@ tasks:
       - 'app/tasks/retention.py：@shared_task(name="app.tasks.retention.purge")，会话工厂照 app/tasks/statements.py 的 lru_cache 写法；读配置，三项都是 off 时直接返回 0、不执行任何 SQL；MySQL 上用 GET_LOCK(CONCAT(''retention_purge:'', DATABASE()), 0) 防重叠，拿不到记一行 INFO 返回 0，finally 里 RELEASE_LOCK（写法照 app/tasks/payment_events.py，SQLite 跳过命名锁）；now 取 utc_now 截到整秒；调用 run_purge 并返回删除总数；出错项与异常类型记一行 ERROR retention_purge_failed（item、error_type），不含行内容'
       - 'app/core/celery_app.py：TASK_MODULES 加 app.tasks.retention；Beat 加一项 retention-purge，crontab(minute=17, hour=20)（UTC，马来西亚 04:17），expires 3600 秒，两个数值写成模块顶部的常量并带注释说明为什么排在 03:17 的全量备份与 03:47 的日志外送之后。tests/backend/test_celery.py 的 Beat 条目集合只追加 retention-purge，并加一条断言它的调度与 expires'
       - 'app/core/config.py：retention_refresh_tokens_mode、retention_password_reset_tokens_mode、retention_recovery_codes_mode 三项 Literal off / count / delete，缺省 off；retention_max_rows_per_item 为 Field(default=50_000, ge=1_000, le=1_000_000)。tests/backend/test_config.py 覆盖缺省值、合法与非法取值（非法模式值与越界上限都让配置校验失败）'
-      - '.env.example 写出 BILLING_RETENTION_REFRESH_TOKENS_MODE、BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE、BILLING_RETENTION_RECOVERY_CODES_MODE（都是 off）与 BILLING_RETENTION_MAX_ROWS_PER_ITEM（50000）及一句注释（先 count 一轮再 delete，见 runbook）；docs/deployment.md 的配置清单照已有各行的格式补这四个键。tests/backend/test_compose.py 若有比对 .env.example 与 Settings 的用例，照它的写法让新键通过'
+      - 'docs/deployment.md 的配置清单照已有各行的格式补 BILLING_RETENTION_REFRESH_TOKENS_MODE、BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE、BILLING_RETENTION_RECOVERY_CODES_MODE（缺省 off）与 BILLING_RETENTION_MAX_ROWS_PER_ITEM（缺省 50000）四行，并写一句先 count 一轮再 delete（见 runbook）。不改 .env.example（Worker 敏感路径，管理员在本任务合并后补）'
       - '测试：新增 tests/backend/test_retention_task.py 覆盖设计 §7「off 模式」（三项都 off 时捕获语句断言没有任何 SQL）、count 与 delete 模式把配置正确传给 run_purge、「并发：两个实例」（MySQL：另一个连接先拿住命名锁，任务记 INFO 后返回 0、不删任何行；锁释放后再跑照常）、出错时 ERROR 日志的字段。后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入'
       - '只改本任务 allowed_change_paths 里的文件；不改 app/services/retention_purge.py 的业务规则（发现缺陷时停下说明）；不改 docker-compose 文件、不新增 Docker secret；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #833'
     allowed_change_paths:
       - app/tasks/retention.py
       - app/core/celery_app.py
       - app/core/config.py
-      - .env.example
       - docs/deployment.md
       - tests/backend/test_retention_task.py
       - tests/backend/test_celery.py
       - tests/backend/test_config.py
-      - tests/backend/test_compose.py
     allowed_commands:
       - docs.check
       - policy.check
