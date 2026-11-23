@@ -14645,3 +14645,465 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # Phase 8 Rebill（设计闸门 #830 已批准 v6，docs/design/AIH-TASK-253-usage-rebill.md）：已计费的预付用量按更正版本重算，差额以一行 REBILL_CREDIT / REBILL_DEBIT 入账，逐事件明细只追加保存。
+  # Kelvin 2026-11-23 采纳 9 条建议（设计 §1「Kelvin 2026-11-23 的决定」）。八层串行：253 数据库 → 254 规则与读 → 255 服务 → 256 接口 → 257 前端列表与详情 → 260 前端新建与用量事件详情 → 258 用量分析 → 259 收尾。
+  # 与设计 §11 的唯一差别是任务划分：设计把前端整层记为 AIH-TASK-257，按 12 条可改路径的上限拆成 257（列表与详情）与 260（新建页与用量事件详情页的按钮和更正历史），契约与设计内容不变（先例：#725 把 210 的一部分拆成 227）。
+  # 253 是第一层：迁移 0042 只建两张只追加的表与四个触发器，预计约 600 行。
+  - id: AIH-TASK-253
+    title: Rebill 第一层：新建只追加的更正记录表与逐事件明细表，迁移 0042
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「数据库（迁移 0042，AIH-TASK-253）」与 §8：新迁移 0042 建 usage_rebills 与 usage_rebill_lines（只追加；CHECK、唯一约束、索引与外键照设计），MySQL 上为两张表各建拒绝 UPDATE 与 DELETE 的触发器；downgrade 照设计 §8 先改名、再检查、有行就改回原名并拒绝、为空才一条语句删两表，并能从中断处续跑；新模型 app/models/usage_rebills.py；docs/database-schema.md 记这两张表。不加写入方、服务与接口：属于 AIH-TASK-254 起的任务。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） 逐条一致，以 §2「数据库（迁移 0042，AIH-TASK-253）」、§3 INV-5、INV-6、INV-10、§7「只追加」「降级保护」「降级与确认并发」「降级中断后续跑」各行、§8 与 §11 AIH-TASK-253 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - '新增 alembic/versions/20261124_0042_usage_rebills.py，revision 为 0042_usage_rebills，down_revision 为 0041_provider_cost_recon；文件头照 alembic/versions/20261117_0041_provider_cost_reconciliations.py 的格式写步骤与 §132 第 13 条分析（已有数据、锁表与停机、备份、部署顺序、每个失败窗口与重跑结局、回滚），写明只建两张新表与四个触发器、不改已有表、不回填，以及有了 Rebill 之后 0042 不可降级的理由'
+      - 'usage_rebills 与 usage_rebill_lines 的列、类型、可空性逐个照设计 §2 的两张表。CHECK：usage_rebills 有 ck_usage_rebills_event_count（1..1000）、_previous_total（>= 0）、_corrected_total（>= 0）、_difference（difference = corrected_total - previous_total）、_difference_nonzero（difference <> 0）、_reason（TRIM(reason) <> 空串）；usage_rebill_lines 有 ck_usage_rebill_lines_previous_charge、_corrected_charge、_estimated_cost（三者 >= 0）、_difference（= corrected_charge - previous_charge）、_difference_nonzero。唯一：uq_usage_rebills_public_id、uq_usage_rebills_idempotency_key、uq_usage_rebills_wallet_transaction_id、uq_usage_rebill_lines_rebill_event (rebill_id, usage_event_id)；索引 ix_usage_rebills_tenant (tenant_id, id)、ix_usage_rebill_lines_usage_event (usage_event_id, id)；每个外键都 RESTRICT，且在子表上有前导列一致的索引（唯一约束或上面的索引能充当的不另建，其余按 ix_<表>_<列> 命名），MySQL 不会为外键自建隐藏索引；original_period 为 CHAR(7)，不在数据库里校验月份格式（与 0041 的 billing_month 同一做法）。新增 app/models/usage_rebills.py 的 UsageRebill 与 UsageRebillLine 模型，与迁移同名同序声明全部约束与索引，alembic/env.py 照现有写法登记'
+      - 'upgrade 照 0041：先逐项检查两张表的形状（列名、类型与宽度、可空性、CHECK、唯一索引、外键与普通索引；任何一项不同 → 抛错且不发 DDL），MySQL 上逐个检查四个触发器的表、时机、事件与正文；预检 log_bin 与 log_bin_trust_function_creators（文案照 0041）紧接在第一条 DDL 之前，什么都不缺时不跑预检；缺什么建什么；离线 --sql 按什么都没做过输出全部 DDL。触发器 trg_usage_rebills_before_update、trg_usage_rebills_before_delete、trg_usage_rebill_lines_before_update、trg_usage_rebill_lines_before_delete 无条件 SIGNAL SQLSTATE ''45000''，消息为 <表名> rows are immutable；SQLite 不建'
+      - 'downgrade 照设计 §8 逐步实现：离线模式抛错；开头按实际存在的表名判断状态——两张都是原名从第 1 步开始，两张都是 _downgrading 名从第 2 步继续，都不存在直接结束，其他任何组合抛 RuntimeError 并列出实际存在的表名、什么都不做；第 1 步一条 RENAME TABLE 同时改两张表；第 2 步任一表有行就一条 RENAME TABLE 改回原名并抛设计 §8 写的 RuntimeError 文案；第 3 步一条 DROP TABLE 同时列出两张表（触发器随表删除，不单独删）。SQLite 照同样三步（ALTER TABLE … RENAME TO，删表可分两条），只验证分支'
+      - '测试：新增 tests/backend/test_usage_rebills_migration.py，覆盖设计 §7「只追加」「降级保护」「降级与确认并发」「降级中断后续跑」四行（「降级与确认并发」里的确认用另一个连接直接插入两张表的行、不提交，等待用 performance_schema.metadata_locks 按设计写的条件确认；④ 捕获语句断言删表是一条同时列出两张表的 DROP TABLE，再读 information_schema.TRIGGERS）；另覆盖表结构（模型与迁移逐项比对；MySQL 上读 information_schema.STATISTICS，除主键外的索引集合恰好是迁移声明的那些）与 CHECK 违例（SQLite 与 MySQL 都拒绝）。迁移场景照 tests/backend/test_provider_cost_reconciliations_migration.py 的写法只在真 MySQL 上跑；MySQL 上清理这两张表只能关外键检查后 TRUNCATE。后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量（只在 mysql 分支断言 MySQL 专有字面量），需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；时间一律注入，等待用轮询加超时、不用固定 sleep'
+      - '已有测试的连带修改：tests/backend/test_migrations.py 照 0041 的写法补两张表与四个触发器的显式集合常量，按表名与按触发器名显式集合比对的用例只在集合里补它们；「0041 是 head」一类断言改为 0042 接在 0041_provider_cost_recon 之后且是 head；tests/backend/test_provider_cost_reconciliations_migration.py 只在 head 变为 0042 导致其辅助函数失败时做最小修改，断言意义不变；其他迁移测试文件若因 head 变化而失败，停下并在 PR 里说明，不自行扩大范围。docs/database-schema.md 新增两张表一节：列及含义、口径（eff(e) 与 refs(e) 的定义、只追加、original_period 的算法）、谁写（AIH-TASK-255 的确认）、谁读（Rebill 接口、用量事件详情、用量分析）、降级规则；在触发器清单里补四个触发器'
+      - '只改本任务 allowed_change_paths 里的文件；不加写入方、服务与接口；不改任何已有表与既有迁移文件；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 docker-compose 文件、不新增 Docker secret；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - alembic/versions/20261124_0042_usage_rebills.py
+      - app/models/usage_rebills.py
+      - alembic/env.py
+      - tests/backend/test_usage_rebills_migration.py
+      - tests/backend/test_migrations.py
+      - tests/backend/test_provider_cost_reconciliations_migration.py
+      - docs/database-schema.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 254 是第二层：只读的规则与仓储，预计约 700 行。不写库、不加锁的写入方。
+  - id: AIH-TASK-254
+    title: Rebill 第二层：当前有效计费、更正版本适用性、按更正版本重算与选事件的只读仓储
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「口径」「更正版本的适用性」「选事件」「预览指纹」：新增 app/repositories/usage_rebills.py（选事件、取最近明细与幂等查重可选加锁读、列表与详情的只读查询、原账期与原对账单）与 app/services/rebill_pricing.py（effective_state、check_corrections、corrected_charge、预览指纹），pricing_engine 只做让重算可复用的最小改动；新增测试夹具 tests/backend/rebill_world.py。不写 Rebill、不写账本：属于 AIH-TASK-255。
+    status: ready
+    depends_on:
+      - AIH-TASK-253
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） 逐条一致，以 §1「我定的」第 4、5 条、§2「口径」「更正版本的适用性」「选事件」「预览指纹」「金额与精度」、§3 INV-6、INV-8、INV-10、§7「原版本重算」「多次更正」「差额为 0 跳过」「计费额为 0 的事件」「适用性」「选事件边界」「显式事件」「金额精度」各行与 §11 AIH-TASK-254 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/usage_rebills.py（只读、不提交；需要加锁的函数带 locking: bool 参数，True 时用 FOR SHARE，写法照仓库里已有的共享锁查询）：按客户与显式 public_id 取事件；按客户与条件选事件并返回匹配数（只选 tenant_id、status = PROCESSED、billing_mode_snapshot = PREPAID，occurred_at 半开区间，provider / model 比目录 code，按 id 升序，最多取 1001 条以判断超限）；按事件取最近一条明细（按明细 id 最大）；按 idempotency_key 取 Rebill；Rebill 列表（可按客户，按 id 倒序，游标分页照用量事件列表）与详情（含全部明细）；按事件的原 AI_USAGE 行计算 original_period（照 docs/design/AIH-TASK-154-monthly-statements.md「账本归属规则」，计费额为 0 时取 occurred_at 的马来西亚月）并取该客户该账期的 monthly_statements 行 id。函数都带 tenant_id 或只按主键 / 唯一键取，不跨租户'
+      - 'app/services/rebill_pricing.py：effective_state(session, events, *, locking) 返回每个事件的 eff、refs 与最近明细 id；check_corrections 按设计「适用性」逐个事件校验更正价格版本与更正规则，任一不适用抛 AppError 子类（422，码 REBILL_PRICE_NOT_APPLICABLE 或 REBILL_RULE_NOT_APPLICABLE，消息带第一个不适用事件的 public_id、不带金额），不看生效区间；corrected_charge 用更正版本（空的取 refs）、快照汇率与事件数量重算，结果溢出抛 422 AMOUNT_OUT_OF_RANGE；preview_token 按设计「预览指纹」的规范 JSON 与 sha256 计算。重算复用 app/services/pricing_engine.py 的 price_event 等函数：pricing_engine 只允许新增 reprice_with 并让 reprice_from_snapshot 改为调用它，或把所需私有函数以公开名导出，二者选一；reprice_from_snapshot 的行为与现有测试不变'
+      - '测试夹具：新增 tests/backend/rebill_world.py（可导入并复用 tests/backend/provider_cost_world.py 与 tests/backend/payment_world.py 的辅助函数，不改它们），能造出预付客户、内部计量客户、已计费与未计费事件（含计费额为 0 的事件与其原 AI_USAGE 行）、PUBLISHED / RETIRED / DRAFT / DISCARDED 的价格版本与规则、已定稿的对账单与已有的 Rebill 明细；共享 fixture 在 tests/backend/conftest.py 注册（定义放在 rebill_world.py，照 provider_cost_world 的登记写法），环境变量在 fixture 里读'
+      - '测试：新增 tests/backend/test_usage_rebills_repository.py 与 tests/backend/test_rebill_pricing.py，覆盖本契约第 1 条列出的设计 §7 各行，并加：不给更正版本时 corrected_charge 与 reprice_from_snapshot 对同一组引用逐位相同；eff(e) = billable_cost + Σ 该事件明细 difference（造两条明细验证）；最近明细在 locking 为 True 时生成加锁读（只在 mysql 分支断言加锁子句字面量）；预览指纹对键顺序、金额格式稳定，任一输入变化指纹都变；条件选事件 1000 条与 1001 条的边界、半开区间、内部计量事件与非 PROCESSED 事件不被选中；别的客户的事件、规则不被选中或判为不适用。后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；时间一律注入，不 sleep'
+      - '静态检查：新模块不出现浮点（照 tests/backend/test_pricing_engine.py 扫描源码的写法，把两个新文件加进被扫描的集合；该测试文件不在本任务可改路径里时，在 tests/backend/test_rebill_pricing.py 里对两个新文件做同样的扫描）；不写日志、不写审计'
+      - '只改本任务 allowed_change_paths 里的文件；不写 usage_rebills / usage_rebill_lines、不写账本、不加接口；不改 app/services/usage_billing.py 与 app/repositories/wallet.py；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - app/repositories/usage_rebills.py
+      - app/services/rebill_pricing.py
+      - app/services/pricing_engine.py
+      - tests/backend/rebill_world.py
+      - tests/backend/conftest.py
+      - tests/backend/test_usage_rebills_repository.py
+      - tests/backend/test_rebill_pricing.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 255 是第三层：预览与确认的业务规则、钱包锁、幂等、指纹、账本与审计，预计约 900 行。并发测试只在 CI 的 MySQL 分片真跑。
+  - id: AIH-TASK-255
+    title: Rebill 第三层：预览与确认，锁钱包后重算比对指纹，写一行补退或补扣并记审计
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「服务」「读视图的约定」「事务边界」与 §4、§5：新增 app/services/usage_rebill.py 的 preview_rebill 与 confirm_rebill（校验事务与确认事务分开；确认事务第一条语句锁钱包；幂等查重与最近明细用加锁读；幂等判定先于指纹比对；经 post_transaction 写一行 REBILL_CREDIT / REBILL_DEBIT；写两张表；审计动作 REBILL）；app/models/auth.py 加 AuditAction.REBILL，审计实体类型 usage_rebill 登记进 app/services/audit_query.py 与前端审计动作清单。不加接口：属于 AIH-TASK-256。
+    status: ready
+    depends_on:
+      - AIH-TASK-254
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） 逐条一致，以 §2「服务」（含「读视图的约定」与第 0 至 8 步）、「事务边界」「时间语义」、§3 INV-2、INV-4、INV-5、INV-11、INV-12、INV-13、§4、§5 与 §7 中未列入 AIH-TASK-253、254、256、258 的各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/usage_rebill.py：preview_rebill 一个只读事务、不加锁、不写库不写审计，返回设计「服务」与「管理端接口」预览一行列出的内容（明细只含差额不为 0 的事件、unchanged_count、四个合计、账本方向与金额、当前余额与预估余额、preview_token）。confirm_rebill 照设计第 0 至 8 步：第 0 步单独的只读事务（结束后才开确认事务）；确认事务的第一条语句是按客户内部 id 锁钱包的 SELECT … FOR UPDATE，之前不执行任何普通读；第 3 步幂等查重与第 4 步取最近明细用加锁读（locking=True）；幂等判定在指纹比对之前；时间在钱包锁之后取并截到整秒；经 app/repositories/wallet.py 的 post_transaction 写账本（reference_type REBILL、reference_id = Rebill public_id、description 与 metadata 照设计，metadata 不含任何成本键），TenantClosed → 409 ACCOUNT_CLOSED，InvalidAmount(BALANCE_OUT_OF_RANGE) → 422 AMOUNT_OUT_OF_RANGE；IntegrityError 且是 idempotency_key 唯一冲突时开新事务重查一次；request_fingerprint 按设计计算'
+      - '错误类都是 AppError 子类、消息不带金额，码与 HTTP 状态逐个照设计「管理端接口」的错误码汇总（本层用到的：CUSTOMER_NOT_FOUND、USAGE_EVENT_NOT_FOUND、PROJECT_NOT_FOUND、PRICING_RULE_NOT_FOUND、PRICE_VERSION_NOT_FOUND、REBILL_NOT_PREPAID、USAGE_EVENT_NOT_REBILLABLE、NOTHING_TO_REBILL、REBILL_NET_ZERO、REBILL_PREVIEW_STALE、REBILL_CONFLICT、ACCOUNT_CLOSED、VALIDATION_ERROR、REBILL_SELECTION_TOO_LARGE、AMOUNT_OUT_OF_RANGE；REBILL_SELECTION_TOO_LARGE 的响应细节带匹配数）；能复用已有同码错误类的就复用'
+      - '审计：app/models/auth.py 的 AuditAction 加 REBILL；app/services/audit_query.py 的 PUBLIC_ENTITY_TYPES 加 usage_rebill；frontend/src/api/adminAudit.ts 的动作清单同步加 REBILL（顺序同后端枚举，后端与前端逐项比对的现有测试照常通过）。审计的 before_state / after_state / reason 照设计第 7 步，不含估算成本'
+      - '测试：新增 tests/backend/test_usage_rebill_service.py 覆盖设计 §7 的「正常路径：补退」「正常路径：补扣」「相抵为 0」「指纹」「幂等重放」（同键并发一条放进并发文件）「事务中途失败」「提交后响应丢失」「停复机」「关户」「对账单」各行（对账单一行：用已定稿的原账期对账单，断言它逐列不变、明细 original_statement_id 指向它；下一期快照的 prior_period.rebill 用现有对账单生成函数验证）；另断言 Rebill 后事件行与原 AI_USAGE 行逐列不变、余额变化等于账本金额、账本金额等于明细差额之和的相反数、两次更正后 −(AI_USAGE + Σ REBILL 份额) = eff(e)'
+      - '新增 tests/backend/test_usage_rebill_concurrency.py（只在真 MySQL 上跑）覆盖设计 §7 的两条「并发（MySQL）」、「零计费并发（MySQL）」、「读视图（MySQL）」、「降级后的确认」与同键并发；等锁一律用 performance_schema.data_lock_waits 联 performance_schema.data_locks、按 DATABASE() 与表名过滤（写法照 tests/backend/test_session_revocation_concurrency.py 的 _WAITING_ON_TABLE，不用 information_schema.INNODB_TRX），轮询加超时、不用固定 sleep；「降级后的确认」用迁移 0042 的 downgrade 打桩在第 1 步后暂停。设计 §7 末尾的四个变异逐个手工做过并在 PR 里写明各自变红的用例。后端测试照 CLAUDE.md「写后端测试的约定」；共享夹具用 tests/backend/rebill_world.py（只允许追加本层需要的辅助函数，不改已有函数的行为）；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；示例 uuid 全零；时间一律注入'
+      - '只改本任务 allowed_change_paths 里的文件；不加接口与前端页面；不改 app/repositories/wallet.py、app/services/usage_billing.py、app/services/statements.py 与 alembic/；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - app/services/usage_rebill.py
+      - app/models/auth.py
+      - app/services/audit_query.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/rebill_world.py
+      - tests/backend/test_usage_rebill_service.py
+      - tests/backend/test_usage_rebill_concurrency.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 256 是第四层：管理端接口与用量事件详情的更正历史，预计约 800 行。
+  - id: AIH-TASK-256
+    title: Rebill 第四层：管理端预览、确认、列表与详情接口，用量事件详情加当前有效计费与更正历史
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「管理端接口」与 §6：新增 app/api/admin_rebills.py 的四个路由（预览、确认、列表、详情）与 app/schemas/usage_rebills.py，app/main.py 注册；GET /api/v1/admin/usage-events/{id} 增加 effective_charge 与 rebills（不增加处理函数）；docs/api.md 新增「管理端 Rebill」一节并更新用量事件详情。不加前端：属于 AIH-TASK-257 与 AIH-TASK-260。
+    status: ready
+    depends_on:
+      - AIH-TASK-255
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） 逐条一致，以 §2「管理端接口」「选事件」「时间语义」、§3 INV-7、INV-8、§6、§7「租户越权」与 §11 AIH-TASK-256 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/api/admin_rebills.py：POST /api/v1/admin/rebills/preview、POST /api/v1/admin/rebills、GET /api/v1/admin/rebills、GET /api/v1/admin/rebills/{id}，每个处理函数第一条语句是 require_admin(request)（与 app/api/admin_usage_events.py 同一约定）；请求体与响应字段逐个照设计「管理端接口」的表；selection 是两种形状之一（显式 usage_event_ids 1..1000 个不重复的 public_id，或 occurred_from / occurred_to 加可选 project_id、provider、model），两种都给或都不给、occurred 不是带时区的 RFC 3339、from 不早于 to → 422 VALIDATION_ERROR；preview_token 必须是 64 位小写十六进制、reason 1..255 且去首尾空白后非空、idempotency_key 小写 UUID（校验写法照 app/schemas/wallet_adjustments.py）；确认 201，重放 200 且 replayed 为真；金额一律定点字符串（money_text）；列表游标分页照用量事件列表'
+      - '用量事件详情：app/api/admin_usage_events.py 的详情处理函数与 app/schemas/usage_events.py 增加 effective_charge（预付已计费事件为 eff(e) 的定点字符串，其他为 null）与 rebills（按明细 id 升序，每项 rebill_id、created_at、previous_charge、corrected_charge、difference）；不新增、不删除处理函数（tests/backend/test_usage_requeue_api.py 钉住的四个处理函数与「管理端路径不含 reprocess」照常通过），列表接口不变'
+      - '测试：新增 tests/backend/test_admin_rebills_api.py 覆盖四个路由的正常路径、每个错误码至少一个用例（码与 HTTP 状态逐个照设计汇总）、请求体校验、重放、列表分页与按客户筛选、详情含全部明细；未登录 401、门户（CUSTOMER）会话 403；tests/backend/test_admin_usage_events_api.py 加详情的 effective_charge 与 rebills（无更正、两次更正、内部计量事件为 null）；tests/backend/test_internal_cost_visibility.py 把四个新路由与改动后的详情纳入已有的成本字段可见性检查（明细的 corrected_estimated_provider_cost_myr 只出现在管理端，门户路由与账本 metadata 里没有任何成本字段）。共享夹具用 tests/backend/rebill_world.py（只允许追加本层需要的辅助函数）；后端测试照 CLAUDE.md「写后端测试的约定」；CI 上不出现 skipped'
+      - 'docs/api.md：新增「管理端 Rebill」一节，写四个路由的请求、响应、错误码汇总、口径（eff(e)、refs(e)、更正版本不看生效区间、一次 Rebill 的对象 = 预览展示的那组事件、预览之后才计费的事件不在本次范围、同键重发的规则与「换新键前必须重新预览」、occurred_to 建议取已过 T+1 cut-off 的时刻）；用量事件详情一节补两个新字段。不写主机名、地址与邮箱'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/services/usage_rebill.py 与 app/services/rebill_pricing.py 的业务规则（发现规则层缺陷时停下并在 PR 里说明）；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - app/schemas/usage_rebills.py
+      - app/api/admin_rebills.py
+      - app/main.py
+      - app/api/admin_usage_events.py
+      - app/schemas/usage_events.py
+      - tests/backend/test_admin_rebills_api.py
+      - tests/backend/test_admin_usage_events_api.py
+      - tests/backend/test_internal_cost_visibility.py
+      - tests/backend/rebill_world.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 257 是第五层：管理端 Rebill 列表页与详情页（设计 §11 的前端层拆成 257 与 260），预计约 500 行。
+  - id: AIH-TASK-257
+    title: Rebill 第五层：管理端 Rebill 列表页与详情页，侧栏加入口
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「管理端页面」中列表与详情两部分：新增 frontend/src/api/adminRebills.ts 的列表与详情封装（预览与确认的封装也在这里一并定义，供 AIH-TASK-260 使用）、frontend/src/features/rebills/RebillsPage.tsx（列表，可按客户筛选）与 RebillDetailPage.tsx（详情含全部明细），路由 /rebills 与 /rebills/:id 只对 ADMIN 注册，侧栏加 Rebills 入口；浏览器验收加两步只读步骤。新建页与用量事件详情页的改动属于 AIH-TASK-260。
+    status: ready
+    depends_on:
+      - AIH-TASK-256
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_rebills
+        - check_rebills_list
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端 Rebill」一节为准，交互以 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「管理端页面」为准；设计 §11 把前端整层记为 AIH-TASK-257，本任务只交付其中的列表与详情，新建页与用量事件详情页由 AIH-TASK-260 交付，这是唯一的有意偏离。与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts 与 frontend/src/api/adminAudit.ts（REBILL 动作已由 AIH-TASK-255 同步）'
+      - 'frontend/src/api/adminRebills.ts：类型 RebillSummary、RebillDetail、RebillLine、RebillPreview、RebillSelection、RebillRequest（金额都是 string，可空的为 string | null）；listRebills(params, signal?) 请求 GET /api/v1/admin/rebills（customer_id、游标）；getRebill(id, signal?) 请求 GET /api/v1/admin/rebills/{id}；previewRebill(body) 请求 POST /api/v1/admin/rebills/preview；confirmRebill(body) 请求 POST /api/v1/admin/rebills（body 含 preview_token、reason、idempotency_key）。写法照 frontend/src/api/adminProviderCosts.ts'
+      - 'frontend/src/features/rebills/RebillsPage.tsx：表格列为 Created、Customer、Events、Ledger、Amount、Reason、By，Ledger 显示 Credit 或 Debit，Amount 显示账本金额原字符串；按客户筛选；游标翻页；行点进详情。RebillDetailPage.tsx：头部显示客户、事件数、四个合计、账本方向与金额、两个更正版本（空显示 Current versions）、原因、操作人与时间，下方明细表列为 Usage event、Occurred、Previous、Corrected、Difference、Original period、Statement；不显示 corrected_estimated_provider_cost_myr 以外的成本字段，该字段列名 Est. cost (MYR)。frontend/src/routes/paths.ts 加 ROUTES.rebills = "/rebills" 与详情路径，frontend/src/routes/index.tsx 照 Provider costs 页的写法只对 ADMIN 注册，frontend/src/layouts/AppLayout.tsx 在 Usage events 之后加导航项 Rebills'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts；不请求任何 /api/v1/customer/ 路径。测试（vitest + Testing Library）：新建 frontend/src/api/adminRebills.test.ts 覆盖四个封装的路径、方法、请求体，金额为字符串；新建 frontend/src/features/rebills/RebillsPage.test.tsx 覆盖列表渲染、按客户筛选发出的参数、翻页、Credit / Debit 显示、详情页头部与明细表、空更正版本显示 Current versions、加载失败的错误提示'
+      - 'scripts/acceptance/admin_customers.mjs 加两步（文件名不变，文件头步骤说明同步）：open_rebills 在 login 之后经导航打开 Rebills 页（链接 href 为 /rebills）；check_rebills_list 须先跑过 open_rebills（否则 assertion_failed），不自己导航，后端值取页面自己发出的 GET /api/v1/admin/rebills 的响应体（被动观察，不自己发请求、不拦截），断言表格数据行数等于 items 数、每行 Events 单元格等于 event_count、Ledger 单元格按 ledger_type 恰为 Credit 或 Debit；items 为空时断言显示空状态文案。沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；复选框只允许 [ ] / [x]；docs/TODO.md 不改（Phase 8 的勾选在 AIH-TASK-259）；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminRebills.ts
+      - frontend/src/api/adminRebills.test.ts
+      - frontend/src/features/rebills/RebillsPage.tsx
+      - frontend/src/features/rebills/RebillDetailPage.tsx
+      - frontend/src/features/rebills/RebillsPage.test.tsx
+      - frontend/src/routes/index.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/layouts/AppLayout.tsx
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 260 是第六层：新建 Rebill 页（预览 + 确认）与用量事件详情页的 Rebill 按钮和更正历史（从设计 §11 的 AIH-TASK-257 拆出），预计约 700 行。
+  - id: AIH-TASK-260
+    title: Rebill 第六层：管理端新建 Rebill 页的预览与确认，用量事件详情页加按钮与更正历史
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「管理端页面」中新建页与用量事件详情两部分：新增 frontend/src/features/rebills/NewRebillPage.tsx（选客户、选事件列表或日期范围、选更正版本、预览、确认，停复机提示，过期预览处理，幂等键在进入确认步骤时生成一次、重试沿用），路由 /rebills/new；用量事件详情页对预付已计费事件显示 Rebill 按钮（跳新建页并预填客户与事件）、当前有效计费与更正历史。
+    status: ready
+    depends_on:
+      - AIH-TASK-257
+    acceptance:
+      kind: browser
+      command: acceptance.browser
+      timeout_seconds: 300
+      writes: false
+      steps:
+        - login
+        - open_new_rebill
+        - check_new_rebill_form
+    acceptance_criteria:
+      - '语义一律以 docs/api.md 的「管理端 Rebill」一节为准，交互以 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「管理端页面」与 §5「提交时或提交后连接中断」一行为准；本任务交付设计 §11 AIH-TASK-257 中的新建页与用量事件详情部分（列表与详情已由 AIH-TASK-257 交付），这是唯一的有意偏离。与后端代码冲突时停下，在 PR 里说明，不自行改设计。不改任何后端文件；不装依赖；不改 .platform/ 与 planning-v1 块；不改 frontend/src/api/client.ts、frontend/src/api/adminAudit.ts 与 frontend/src/api/adminRebills.ts 的已有封装（只允许追加类型）'
+      - 'frontend/src/features/rebills/NewRebillPage.tsx：表单字段为 Customer（必选）、Selection（Usage events 或 Date range 二选一；Date range 下 From、To 按马来西亚时间输入、换成带时区的 RFC 3339 发送，Project、Provider、Model 可选）、Corrective pricing rule、Corrective provider price version（都可空，都空时显示 Recalculate with the current versions 提示）；Preview 按钮在客户与选择齐全前禁用；预览结果显示明细表（Usage event、Occurred、Previous、Corrected、Difference、Original period、Statement）、unchanged_count、合计、账本方向与金额、当前余额与预估余额；当前余额 > 0 而预估 ≤ 0 时显示停机警告，当前 ≤ 0 而预估 > 0 时显示复机提示（判断用字符串转定点比较的工具函数，不用浮点）；Reason 必填才能 Confirm；建议文案提示 To 取已过 T+1 cut-off 的时刻'
+      - '确认行为：进入确认步骤时用 crypto.randomUUID() 生成一次小写幂等键，网络错误或 5xx 后的重试沿用同一个键；收到 409 REBILL_PREVIEW_STALE 时清空预览与确认按钮并提示重新预览；改动任何表单字段都作废当前预览与幂等键；201 或 200（replayed）后跳到该 Rebill 的详情页；其他错误按错误码显示 i18n 文案，并提示换新键之前必须重新预览'
+      - '用量事件详情：frontend/src/features/usage/UsageEventDetailPage.tsx 对 status 为 PROCESSED 且 effective_charge 不为 null 的事件显示 Rebill 按钮（跳 /rebills/new 并经查询参数预填客户与该事件）、Effective charge 与 Rebill history 表（Rebill、Created、Previous、Corrected、Difference，行点进 Rebill 详情）；其他事件不显示按钮与历史；frontend/src/api/adminUsageEvents.ts 的详情类型追加 effective_charge 与 rebills；frontend/src/routes/paths.ts 与 frontend/src/routes/index.tsx 加 /rebills/new（只对 ADMIN，注册在 /rebills/:id 之前或用不冲突的写法）'
+      - '文案走 i18n（frontend/src/i18n/locales/en.json），满足 no-hardcoded-jsx-text 与 keys.test.ts；不请求任何 /api/v1/customer/ 路径。测试（vitest + Testing Library）：新建 frontend/src/features/rebills/NewRebillPage.test.tsx 覆盖预览请求体的两种 selection、时区换算、停机与复机提示的边界（预估恰为 0）、Reason 为空时 Confirm 禁用、重试沿用同一幂等键、改字段后幂等键与预览作废、409 REBILL_PREVIEW_STALE 的处理、成功后跳详情、经查询参数预填；frontend/src/features/usage/UsageEventDetailPage.test.tsx 补按钮与历史的显示条件和跳转'
+      - 'scripts/acceptance/admin_customers.mjs 加两步（文件名不变，文件头步骤说明同步）：open_new_rebill 在 login 之后经 Rebills 页的新建入口打开新建页（href 为 /rebills/new）；check_new_rebill_form 须先跑过 open_new_rebill（否则 assertion_failed），不自己导航，断言 Customer、Selection、两个更正版本字段与 Preview 按钮存在且 Preview 在未选客户时禁用；不点击 Preview 与 Confirm、不发任何写请求。沿用验收脚本已有的约束；脚本只执行 stdin 里 steps 列出的步骤'
+      - 'allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；CI 的 frontend job（含 build）必须全绿；复选框只允许 [ ] / [x]；docs/TODO.md 不改（Phase 8 的勾选在 AIH-TASK-259）；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - scripts/acceptance/admin_customers.mjs
+      - frontend/src/api/adminRebills.ts
+      - frontend/src/api/adminUsageEvents.ts
+      - frontend/src/features/rebills/NewRebillPage.tsx
+      - frontend/src/features/rebills/NewRebillPage.test.tsx
+      - frontend/src/features/usage/UsageEventDetailPage.tsx
+      - frontend/src/features/usage/UsageEventDetailPage.test.tsx
+      - frontend/src/routes/index.tsx
+      - frontend/src/routes/paths.ts
+      - frontend/src/i18n/locales/en.json
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+      - frontend.test
+      - frontend.typecheck
+      - frontend.lint
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 258 是第七层：用量分析的收入含 Rebill 差额，预计约 250 行。
+  - id: AIH-TASK-258
+    title: Rebill 第七层：用量分析的收入与毛利按原事件维度计入更正差额
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §2「用量分析（AIH-TASK-258）」：app/repositories/usage_analytics.py 的 prepaid_billable_cost 改为每个事件的 billable_cost 加该事件全部更正明细 difference 之和（左连接按 usage_event_id 聚合的子查询，空为 0），分组、合计与导出随之变化；估算成本与对账后成本的分摊不变；docs/api.md 用量分析一节写明口径。
+    status: ready
+    depends_on:
+      - AIH-TASK-260
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） 逐条一致，以 §1 Kelvin 第 8 条与「我定的」第 6 条、§2「用量分析（AIH-TASK-258）」、§7「用量分析」一行与 §11 AIH-TASK-258 为准；本设计建立在 docs/design/AIH-TASK-221-margin-analytics.md（设计闸门 #709 已批准 v2）与 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2）之上；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/repositories/usage_analytics.py：_aggregates 里的 prepaid_billable_cost 改为对预付事件求 billable_cost + COALESCE(该事件明细 difference 之和, 0)，明细之和用按 usage_event_id 聚合的子查询左连接（不按明细行展开，避免事件被重复计数；request_count 等计数不变）；list_usage_analytics 与 usage_analytics_totals 一致；reconciled_allocation_inputs 与 paid_payment_totals 不变；SQLite 上金额按金额列精度转回 Decimal（照本文件已有的 _MONEY 写法）'
+      - '测试：新增 tests/backend/test_usage_analytics_rebill.py 覆盖设计 §7「用量分析」一行：一次与两次 Rebill 后按客户、按月、按模型分组与合计的收入 = 原计费 + 差额之和，事件数与估算成本不变，毛利随之变化；一个事件有多条明细时不被重复计数；内部计量事件不受影响；CSV 与 xlsx 导出（经现有导出接口）的收入列同样包含差额。已有的 tests/backend/test_admin_usage_analytics_api.py 等若因口径改变而失败，只在本任务可改路径内的文件里做最小修改并在 PR 里逐条说明；不在可改路径内的测试失败时停下说明。共享夹具用 tests/backend/rebill_world.py（只允许追加本层需要的辅助函数）；后端测试照 CLAUDE.md「写后端测试的约定」：断言 SQL 时不写死方言相关的字面量；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入'
+      - 'docs/api.md 用量分析一节写明「收入含 Rebill 差额，按原事件的维度与 occurred_at 归属；估算成本仍是事件处理时的快照」，导出说明同步；不写主机名、地址与邮箱'
+      - '只改本任务 allowed_change_paths 里的文件；不改接口的请求与响应形状；不改 app/services/usage_rebill.py 与前端；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - app/repositories/usage_analytics.py
+      - tests/backend/test_usage_analytics_rebill.py
+      - tests/backend/test_admin_usage_analytics_api.py
+      - tests/backend/rebill_world.py
+      - docs/api.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  # 259 是收尾：只改文档，预计约 200 行。
+  - id: AIH-TASK-259
+    title: Rebill 收尾：运维手册补 Rebill 流程与故障处置，勾选 Phase 8 的 Reprocess 与 Rebill 调整
+    purpose: >-
+      按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §5、§8 与 §11 AIH-TASK-259：docs/runbook.md 新增「Rebill」一节（何时用 Rebill、何时用重新入队、何时用手工调账；先在测试专用验收租户上小额补退再补扣还原的上线核对；同键重发与换键前重新预览；停复机影响；迁移 0042 不可降级与中断恢复；不得手工删改两张表）；docs/TODO.md 勾选 Phase 8 的 Reprocess 与 Rebill 调整并注明任务与设计闸门。只改文档。
+    status: ready
+    depends_on:
+      - AIH-TASK-258
+    acceptance_criteria:
+      - '内容以 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v6） §1「明确不做什么」、§2「服务」「选事件」、§5、§8 与已合并的 docs/api.md「管理端 Rebill」一节为准；只写仓库里已有的接口、命令、页面与错误码，引用写 文件:行 或章节锚点；涉及数据库的命令只给只读查询，迁移中断恢复的那条 RENAME TABLE 照设计 §8 原文写'
+      - 'docs/runbook.md 新增「Rebill」一节，照「本文件的写法」的结构（怎么发现、影响什么、立刻做什么、恢复、绝不能做什么）写：三种更正手段的选择（未计费错误事件 → 重新入队；已计费的计价错误 → Rebill；与计价无关的补偿或退款 → 手工调账）；更正版本必须先经草稿发布、不看生效区间；预览之后才计费的事件不在本次范围；补扣可能停机、补退可能复机；提交结果不明时同键重发、换新键前必须重新预览；上线后第一次使用前在测试专用验收租户上做一次小额补退再补扣还原的核对步骤；迁移 0042 有行时不可降级、降级中断后的两种恢复方式；绝不能手工 UPDATE / DELETE 两张表或为降级清表'
+      - 'docs/TODO.md：Phase 8 的「Reprocess」与「Rebill 调整」两项改为 [x]，各补一句由 AIH-TASK-253..260（设计闸门 #830）交付；规划块（planning-v1）里「待登记：Phase 8 Reprocess 与 Rebill 调整（需设计闸门）」一行不由本任务改（由登记 PR 处理）；其余内容不改'
+      - '不改代码、测试与 .platform/；不写主机名、IP、地址、邮箱、凭据；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #830'
+    allowed_change_paths:
+      - docs/runbook.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
