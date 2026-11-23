@@ -14590,3 +14590,58 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AIH-TASK-252：spec §95 的 log volume growth（Phase 6 健康告警的其余信号之一；Kelvin 2026-11-23 同意）。不走设计闸门（运维脚本，不碰钱与认证），约 300 行。
+  # 并进已有的 disk 维度（BILLING_HEALTHCHECK_DISK_URL），不新增 Healthchecks 检查、不新增 .env 地址（2026-10-17 Kelvin 定）。
+  # 量的是每天外送时抓到的原始日志字节数按窗口折成的每小时字节数：容器日志走 json-file、每容器 3 x 10 MB 按大小轮转，日志量突增时最先丢的是事故前的历史，这条告警要在那之前响。
+  - id: AIH-TASK-252
+    title: 健康告警：日志外送记下每天的日志量，巡检把日志量突增并进 disk 维度
+    purpose: >-
+      spec §95 要求监控 log volume growth，现在没有任何信号：某个服务开始刷屏时，json-file 按大小轮转会先把事故前的历史顶掉，归档也只抓到截断的一段，而磁盘水位要很久之后才会动。deploy/log_ship.sh 在每次上传确认之后，把这次抓到的原始日志字节数与窗口起止记进归档目录的一份小记录；deploy/monitor.sh 的 disk 维度读这份记录，最新一次的每小时字节数达到之前几次中位数的若干倍且超过绝对下限时报 P2。并进已有的 BILLING_HEALTHCHECK_DISK_URL，不新增检查、不新增 .env 地址；同步部署文档与 runbook。不改应用代码。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 'deploy/log_ship.sh：抓取循环里累加每个服务日志文件的字节数（wc -c，与已有的行数统计并列）得到 TOTAL_BYTES；新增函数 record_volume（参数依次是 NOW、SINCE_EPOCH、TOTAL_BYTES），把一行 <NOW> <SINCE_EPOCH> <TOTAL_BYTES>（三个十进制整数，空格分隔）追加到 ${ARCHIVE_DIR}/.volume-history，追加后只保留最后 30 行，写法是先写同目录临时文件再 mv 覆盖（不留半行）；只在上传分支里、写入 STATE_FILE 的那一行之后调用它，--dry-run、没配 R2、任何 die 路径都不调用；记录里只有数字，没有日志内容；脚本头部注释补一句这份记录给 deploy/monitor.sh 的日志量检查用'
+      - 'deploy/monitor.sh：新增 log_volume_rates 与 check_log_growth，check_disk 在 check_clock 之后调用 check_log_growth（并进 disk 维度，复核时随 check_disk 一起重跑）；沿用本脚本的约定：问题逐行写 stdout、行首是 P1 / P2，普通日志一律走 stderr，命令替换里失败的命令写 || true（set -e 下不中止）。归档目录与 log_ship.sh 同一个口径：${BILLING_LOG_ARCHIVE_DIR:-./logs}（两个脚本都由 cron 在部署目录下运行）。disk_ok_summary 与 disk 维度的 OK 摘要不变'
+      - 'log_volume_rates：读 .volume-history，跳过不是恰好三个十进制整数的行；每行的速率 = TOTAL_BYTES × 3600 ÷ max(3600, NOW − SINCE_EPOCH)，取整数；最新一行之外取它之前最多 7 行的速率求中位数（偶数个取中间两个的平均并取整）作为基线；输出 <最新速率> <基线> 一行。文件不存在或为空、有效行少于 4 行（最新一行加至少 3 行历史）、最新一行的 NOW 早于当前时刻 36 小时以上时不输出（外送停了由 logs 检查报，这里不重复报）'
+      - 'check_log_growth：log_volume_rates 没有输出时 stderr 记一行 log volume history unavailable; skipping the log growth check，不报问题（与 check_clock「量不到不报警」同一条理由）；最新速率不小于 基线 × BILLING_MONITOR_LOG_GROWTH_RATIO（默认 3，正整数）且不小于 BILLING_MONITOR_LOG_GROWTH_MIN_BYTES_PER_HOUR（默认 65536，非负整数）时报 P2 log volume growth <最新速率> B/h vs baseline <基线> B/h (ratio <倍数>, min <下限> B/h)；否则不报。两个配置值不合规（比例不是正整数、下限不是非负整数）时各自按默认值并 stderr 记一行；基线为 0 时只看绝对下限。两个默认值各用一个 _DEFAULT 常量，写法照 CELERY_QUEUE_WARN_DEFAULT；注释写明为什么并进 disk 而不是新检查（免费档已用满，2026-10-17 Kelvin 定；日志撑爆磁盘本来就是 disk 维度要防的事）、为什么用每小时字节数而不是归档大小（外送失败后下一次窗口会变长，按窗口折算才可比）、下限的意义（安静的机器上几 KB 的波动不该报）、以及 json-file 每容器 3 × 10 MB 的上限意味着日志量再涨下去归档会被截断、速率反而封顶，这条告警必须在那之前响。脚本头部「这个脚本补的是四个」那段补上日志量突增这一条并改成对应的数目'
+      - 'tests/backend/test_deploy.py：文本守卫——check_disk 依次调用 check_binlog、check_tls、check_clock、check_log_growth；两个默认值是 3 与 65536；monitor.sh 与 log_ship.sh 的归档目录默认值是同一个串（从两个文件解析出来比较，不写死）；log_ship.sh 里写 .volume-history 的那一行在写 STATE_FILE 之后、且在 DRY_RUN 判断的上传分支之内；不出现 BILLING_HEALTHCHECK_ 开头的新键。用 bash 实际执行的场景用例（写法照同文件 run_host_check / check_celery_queue 那组：从 monitor.sh 截出需要的函数与设置，在临时目录里造 .volume-history，NOW 由用例注入或由记录里的时刻相对当前时刻算出，不 sleep、不起容器、不联网）：没有文件、空文件、只有 3 行有效记录、最新一行超过 36 小时时都不报且 stderr 有 unavailable 那一行；历史 7 行都是 10000 B/h、最新 80000 B/h 报 P2 且正文含两个速率；历史都是 30000 B/h、最新 89999 B/h（过了下限、未到 3 倍）不报；历史都是 10000 B/h、最新 30000 B/h（到了 3 倍、低于 65536 B/h）不报；窗口 48 小时、字节数翻倍的最新一行按速率计不报；有一行坏行被跳过；比例配置为非数字时按 3 处理且 stderr 有一行说明'
+      - 'log_ship.sh 的用例：文本守卫——record_volume 只出现在 DRY_RUN 判断的上传分支里、且在写 STATE_FILE 那一行之后（die 与 enforce_retention 里没有它）；抓取循环里有 wc -c 的累加。用 bash 实际执行的场景用例（从 log_ship.sh 截出 record_volume 与它用到的设置，在临时目录里跑，不起容器、不联网）：空目录时调用一次得到恰好一行且三个数字与参数一致；已有 30 行时再追加一次仍是 30 行、最老一行被丢掉、最新一行在末尾；目录里不留临时文件'
+      - 'docs/deployment.md §8：8.1 表格 disk 一行（或紧随其后新增一行）写进日志量突增的判据、两个阈值、分级（P2）与并进 disk 检查；8.3 诚实清单里注明 log volume growth 已由本任务覆盖、HTTP 错误率与用量摄取速率仍要指标管道；§7 日志外送一节补一句 .volume-history 的格式与用途。docs/runbook.md 新增「日志量突增」一节（怎么发现、影响什么、立刻做什么：按服务看是谁在刷屏（compose logs --since 的行数）、先查是否在重试风暴或攻击、确认外送与归档总量上限是否正常；绝不能做什么：不要删 .volume-history 或调高阈值来消告警，不要清空容器日志——事故调查要的正是这一段），格式照同文件已有各节'
+      - '不改 app/、alembic/、docker-compose.yml、deploy/cron.d/、deploy/ 下其他脚本、.env 类文件；不新增 Healthchecks 检查或 .env 地址键；不装依赖；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；不改 docs/TODO.md 与 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 不适用'
+    allowed_change_paths:
+      - deploy/monitor.sh
+      - deploy/log_ship.sh
+      - tests/backend/test_deploy.py
+      - docs/deployment.md
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
