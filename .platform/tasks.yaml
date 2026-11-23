@@ -14590,3 +14590,58 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # AIH-TASK-252：spec §95 的 log volume growth（Phase 6 健康告警的其余信号之一；Kelvin 2026-11-23 同意）。不走设计闸门（运维脚本，不碰钱与认证），约 250 行。
+  # 并进已有的 disk 维度（BILLING_HEALTHCHECK_DISK_URL），不新增 Healthchecks 检查、不新增 .env 地址（2026-10-17 Kelvin 定）。
+  # 判据直接对准危害：容器日志走 json-file、按大小轮转（每容器 max-size × max-file），某个服务写得快到轮转容量撑不过一天一次的外送时，事故前的历史会在外送之前被顶掉。
+  # #829 第一轮审查（Codex）指出：按每天外送的归档量采样会被轮转封顶、突增时反而漏报；所以改为巡检每 5 分钟按服务量最近一小时的写入量，不依赖外送。
+  - id: AIH-TASK-252
+    title: 健康告警：巡检按服务量最近一小时日志量，快到轮转撑不过一天外送时并进 disk 维度报警
+    purpose: >-
+      spec §95 要求监控 log volume growth，现在没有任何信号：某个服务开始刷屏时，json-file 按大小轮转会先把事故前的历史顶掉（每天 03:47 才外送一次），而磁盘水位要很久之后才会动。deploy/monitor.sh 的 disk 维度新增 check_log_rate：每 5 分钟逐个服务读最近一小时的日志字节数，按 .env 里的轮转配置算出每容器容量，写入速度快到这份容量撑不过外送周期加余量时报 P2。并进已有的 BILLING_HEALTHCHECK_DISK_URL，不新增检查、不新增 .env 地址；同步部署文档与 runbook。不改应用代码，不改 deploy/log_ship.sh。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - 'deploy/monitor.sh：新增 log_rotation_bytes 与 check_log_rate，check_disk 在 check_clock 之后调用 check_log_rate（并进 disk 维度，复核时随 check_disk 一起重跑）；沿用本脚本的约定：问题逐行写 stdout、行首是 P1 / P2，普通日志一律走 stderr，命令替换里失败的命令写 || true（set -e 与 pipefail 下不中止）。disk_ok_summary 与 disk 维度的 OK 摘要不变'
+      - 'log_rotation_bytes：用 env_value 读 .env 的 BILLING_LOG_MAX_SIZE 与 BILLING_LOG_MAX_FILES，缺省时分别是 10m 与 3（与 docker-compose.yml 的 x-logging 默认值一致）；大小接受十进制整数加可选的 k / m / g 后缀（不分大小写，按 1024 进位，无后缀即字节），文件数接受正整数；任一个不合规时 stderr 记一行并按缺省值处理；输出每个容器的轮转容量字节数（大小 × 文件数）'
+      - 'check_log_rate：告警线 = 轮转容量 ÷ BILLING_MONITOR_LOG_RATE_HORIZON_HOURS（默认 60，正整数；不合规时按默认值并 stderr 记一行），取整数；对 SERVICES_P1 与 SERVICES_P2 里的每个服务，用 timeout 10 包住 $COMPOSE logs --no-color --no-log-prefix --since 1h <服务>，经 head -c <告警线 + 1> 截断后 wc -c 得到最近一小时的字节数（截断保证日志刷屏时巡检本身不会读几十 MB）；字节数不小于告警线时报 P2 log rate <服务> >= <告警线> B in the last hour (rotation <容量> B per container would not last <默认或配置的小时数>h)；命令失败、超时或输出为空按 0 处理、不报问题（容器停了由 services 维度报，与 check_clock「量不到不报警」同一条理由）'
+      - '常量与注释：默认 60 小时用一个 _DEFAULT 常量，写法照 CELERY_QUEUE_WARN_DEFAULT；注释写明为什么并进 disk 而不是新检查（免费档已用满，2026-10-17 Kelvin 定；日志撑爆磁盘、日志被轮转顶掉都是宿主机层面的事）；为什么判据是「轮转容量撑多久」而不是相对历史的倍数（#829 审查：按外送归档采样会被轮转封顶，突增时反而漏报；危害本身就是历史在外送前被顶掉）；60 小时的来历（外送每 24 小时一次、logs 检查宽限 2 小时，再乘 2 抵消 json-file 每行的 JSON 包装与时间字段——compose logs 读出的纯文本字节数小于盘上占用）；为什么用 head -c 截断与 timeout。脚本头部「这个脚本补的是四个」那段补上日志写入过快这一条并改成对应的数目'
+      - 'tests/backend/test_deploy.py 的生产巡检一节：文本守卫——check_disk 依次调用 check_binlog、check_tls、check_clock、check_log_rate；默认小时数是 60；log_rotation_bytes 的缺省值与 docker-compose.yml x-logging 里 BILLING_LOG_MAX_SIZE、BILLING_LOG_MAX_FILES 的缺省值一致（从两个文件解析出来比较，不写死）；compose logs 前有 timeout、后有 head -c；不出现 BILLING_HEALTHCHECK_ 开头的新键；已有用例里「check_binlog < check_tls < check_clock」的顺序断言只允许在末尾补上 check_log_rate'
+      - 'tests/backend/test_deploy.py 新增用 bash 实际执行的场景用例（写法照同文件 run_host_check / check_celery_queue 那组：从 monitor.sh 截出 env_value、log_rotation_bytes、check_log_rate 与需要的设置，假的 $COMPOSE 经 BILLING_COMPOSE 指向假脚本，按服务名输出指定字节数，不起容器、不联网、不 sleep）：log_rotation_bytes 缺省时输出 31457280；.env 写 BILLING_LOG_MAX_SIZE=20m、BILLING_LOG_MAX_FILES=5 时输出 104857600；大小写 1g、512k、4096（文件数缺省 3）时分别输出 3221225472、1572864、12288；写 abc 或 0 个文件时按缺省值且 stderr 有一行说明。check_log_rate 缺省配置下告警线是 524288：某个服务 524287 字节不报；524288 字节报 P2 且正文含服务名与告警线；两个服务同时超线报两行；假 compose 非零退出或输出为空时不报；某个服务输出 50 MB 时 head -c 截断、仍只报一行且用例能在正常时间内结束；BILLING_MONITOR_LOG_RATE_HORIZON_HOURS=30 时告警线是 1048576；配置为非数字时按 60 处理且 stderr 有一行说明'
+      - 'docs/deployment.md §8：8.1 表格 disk 一行（或紧随其后新增一行）写进日志写入过快的判据（轮转容量 ÷ 60 小时，缺省约 512 KiB 每小时每服务）、分级（P2）与并进 disk 检查；8.3 诚实清单里注明 log volume growth 已由本任务覆盖、HTTP 错误率与用量摄取速率仍要指标管道；§7 生产日志一节在 json-file 轮转的说明旁补一句这条告警。docs/runbook.md 新增「日志写入过快」一节（怎么发现、影响什么、立刻做什么：按告警里的服务名看它最近在刷什么、先查是否在重试风暴或被攻击、需要保住证据时立刻手工跑一次 deploy/log_ship.sh 提前外送；绝不能做什么：不要为了消告警调小 BILLING_MONITOR_LOG_RATE_HORIZON_HOURS（告警线 = 容量 ÷ 小时数，调小只会把告警线抬高、掩盖问题），不要清空容器日志或删 json 文件——事故调查要的正是这一段），格式照同文件已有各节'
+      - '不改 app/、alembic/、docker-compose.yml、deploy/cron.d/、deploy/log_ship.sh 与 deploy/ 下其他脚本、.env 类文件；不新增 Healthchecks 检查或 .env 地址键；不装依赖；不连生产；不改 .platform/；复选框只允许 [ ] / [x]；不改 docs/TODO.md 与 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 不适用'
+    allowed_change_paths:
+      - deploy/monitor.sh
+      - tests/backend/test_deploy.py
+      - docs/deployment.md
+      - docs/runbook.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
