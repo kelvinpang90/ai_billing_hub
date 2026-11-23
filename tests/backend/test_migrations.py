@@ -275,6 +275,22 @@ _EXPECTED_TRIGGERS_0039 = {
     "trg_payment_receipts_before_delete": ("payment_receipts", "BEFORE", "DELETE"),
 }
 
+# 0041_provider_cost_recon（AIH-TASK-242，设计闸门 #755 v1）建的表与它的两个触发器：从 head 降级到
+# 它之前时随之删掉（空表）。迁移本身由 test_provider_cost_reconciliations_migration.py 验。
+_PROVIDER_COST_TABLE = "provider_cost_reconciliations"
+_EXPECTED_TRIGGERS_0041 = {
+    "trg_provider_cost_reconciliations_before_update": (
+        "provider_cost_reconciliations",
+        "BEFORE",
+        "UPDATE",
+    ),
+    "trg_provider_cost_reconciliations_before_delete": (
+        "provider_cost_reconciliations",
+        "BEFORE",
+        "DELETE",
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # 0021_ai_module（AIH-TASK-056，设计闸门 #281 v23）
@@ -972,7 +988,8 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
         # 汇率版本的 BEFORE UPDATE 由 0033 换成 `…_v2`（_EXPECTED_FX_TRIGGERS_AT_HEAD）；
         # 税务政策版本的 BEFORE UPDATE 由 0034 换成 `…_v2`（_EXPECTED_TAX_TRIGGERS_AT_HEAD）；
         # 对账单的两个由 0035 建，在 test_monthly_statements_migration.py 里验；收据的两个由 0039
-        # 建，在 test_payment_receipts_migration.py 里验。
+        # 建，在 test_payment_receipts_migration.py 里验；供应商成本对账的两个由 0041 建，在
+        # test_provider_cost_reconciliations_migration.py 里验。
         ledger_tables = {"wallets", "wallet_transactions"}
         ours = {name: row for name, row in triggers.items() if row[0] in ledger_tables}
         assert ours == _EXPECTED_TRIGGERS
@@ -988,6 +1005,7 @@ def test_0006_keys_indexes_checks_and_triggers(alembic_config: Config) -> None:
             *_EXPECTED_TAX_TRIGGERS_AT_HEAD,
             *_EXPECTED_TRIGGERS_0035,
             *_EXPECTED_TRIGGERS_0039,
+            *_EXPECTED_TRIGGERS_0041,
         }
         assert set(triggers) == expected
     finally:
@@ -1992,11 +2010,11 @@ def test_0010_downgrade_drops_only_the_two_triggers(alembic_config: Config) -> N
         command.downgrade(alembic_config, _REVISION_0009)
         assert _audit_triggers() == {}
         # 只删触发器：表与列都不动（0012–0015、0017、0020、0021、0022、0028、0029、0035、
-        # 0036、0038 与 0039 的表随降级到 0009 一并删掉）。
+        # 0036、0038、0039 与 0041 的表随降级到 0009 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
         later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE} | _PAYMENTS_TABLES
-        later |= {_PAYMENT_SETTINGS_TABLE} | _RECEIPTS_TABLES
+        later |= {_PAYMENT_SETTINGS_TABLE} | _RECEIPTS_TABLES | {_PROVIDER_COST_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         # 触发器没了，UPDATE / DELETE 又能执行（事务回滚，不留行）。
@@ -2093,11 +2111,11 @@ def test_0011_indexes_exist_at_head_and_downgrade_drops_only_them(
         command.downgrade(alembic_config, _REVISION_0010)
         assert _audit_indexes() == _AUDIT_INDEXES_BEFORE_0011
         # 只删索引：表、列与 0010 的触发器都不动（0012–0015、0017、0020、0021、
-        # 0022、0028、0029、0035、0036、0038 与 0039 的表随降级到 0010 一并删掉）。
+        # 0022、0028、0029、0035、0036、0038、0039 与 0041 的表随降级到 0010 一并删掉）。
         later = _TABLES_0012 | _TABLES_0013 | _TABLES_0014 | _TABLES_0015 | _TABLES_0017
         later |= {_DELIVERIES_TABLE} | _AI_TABLES_0021 | _TABLES_0022 | {_NOTIFICATIONS_TABLE}
         later |= _RECONCILIATION_TABLES | {_STATEMENTS_TABLE} | _PAYMENTS_TABLES
-        later |= {_PAYMENT_SETTINGS_TABLE} | _RECEIPTS_TABLES
+        later |= {_PAYMENT_SETTINGS_TABLE} | _RECEIPTS_TABLES | {_PROVIDER_COST_TABLE}
         assert _table_names() == tables - later
         assert _column_names("audit_logs") == columns
         assert _audit_triggers() == _EXPECTED_TRIGGERS_0010
@@ -6942,16 +6960,20 @@ def test_0025_downgrade_refuses_with_a_customer_or_an_invitation(
 # ---------------------------------------------------------------------------
 # 0040_reset_request_index（AIH-TASK-231，设计闸门 #751 v3）
 #
-# The first cases need no database: the revision chain (after 0039, the head, the ID fits
-# VARCHAR(32)); the index in the migration equals the model's and design §2's (name, column order,
-# not unique) and 0004's index and the `token_hash` unique key are untouched; upgrade creates only
-# it and downgrade drops only it; `create_all` on SQLite (what the unit tests run) builds it. On a
-# real MySQL: it exists at head, and the round trip to 0039 drops and recreates only it (design §7
-# "迁移与模型"). Which index the optimizer picks is not asserted (design §10, assumption 3).
+# The first cases need no database: the revision chain (after 0039, the ID fits VARCHAR(32); 0041
+# of AIH-TASK-242 follows it and is the head); the index in the migration equals the model's and
+# design §2's (name, column order, not unique) and 0004's index and the `token_hash` unique key are
+# untouched; upgrade creates only it and downgrade drops only it; `create_all` on SQLite (what the
+# unit tests run) builds it. On a real MySQL: it exists at head, and the round trip to 0039 drops
+# and recreates only it (design §7 "迁移与模型"). Which index the optimizer picks is not asserted
+# (design §10, assumption 3).
 # ---------------------------------------------------------------------------
 
 _REVISION_0039 = "0039_payment_receipts"
 _REVISION_0040 = "0040_reset_request_index"
+# AIH-TASK-242（设计闸门 #755 v1）的迁移，接在 0040 之后，现在是 head。
+_REVISION_0041 = "0041_provider_cost_recon"
+_MIGRATION_0041 = pathlib.Path("alembic/versions/20261117_0041_provider_cost_reconciliations.py")
 _MIGRATION_0040 = pathlib.Path("alembic/versions/20261116_0040_reset_request_index.py")
 _INDEX_0040 = "ix_password_reset_tokens_user_purpose_created"
 _COLUMNS_0040 = ["user_id", "purpose", "created_at"]
@@ -6972,13 +6994,19 @@ def _reflected_token_indexes(engine: Engine) -> dict[str, tuple[list[str], bool]
     return {str(i["name"]): (list(i["column_names"]), bool(i["unique"])) for i in indexes}
 
 
-def test_0040_follows_0039_and_is_the_head() -> None:
+def test_0040_follows_0039_and_0041_follows_it_as_the_head() -> None:
     migration = _load_0040()
+    spec = importlib.util.spec_from_file_location("migration_0041", _MIGRATION_0041)
+    assert spec is not None and spec.loader is not None
+    following = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(following)
 
     assert migration.revision == _REVISION_0040
     assert migration.down_revision == _REVISION_0039
     assert len(migration.revision) <= 32
-    assert ScriptDirectory.from_config(Config("alembic.ini")).get_current_head() == _REVISION_0040
+    assert following.revision == _REVISION_0041
+    assert following.down_revision == _REVISION_0040
+    assert ScriptDirectory.from_config(Config("alembic.ini")).get_current_head() == _REVISION_0041
 
 
 def test_0040_index_is_the_one_the_model_declares() -> None:
@@ -7040,7 +7068,8 @@ def test_0040_index_exists_at_head_in_order_and_not_unique(alembic_config: Confi
     finally:
         engine.dispose()
 
-    assert version == _REVISION_0040
+    # Head is 0041 (AIH-TASK-242), which follows 0040.
+    assert version == _REVISION_0041
     assert indexes[_INDEX_0040] == (_COLUMNS_0040, False)
     assert indexes[_TOKENS_INDEX_0025] == (_COLUMNS_BEFORE_0040, False)
 
@@ -7050,6 +7079,8 @@ def test_0040_round_trip_drops_and_recreates_only_the_index(alembic_config: Conf
     command.upgrade(alembic_config, "head")
     engine = create_engine(TEST_DATABASE_URL)
     try:
+        # Later revisions (0041's table and triggers) are not this round trip's: compare at 0040.
+        command.downgrade(alembic_config, _REVISION_0040)
         at_head = _schema_snapshot(engine)
         checks = _all_checks()
         triggers = _all_triggers()
@@ -7072,7 +7103,7 @@ def test_0040_round_trip_drops_and_recreates_only_the_index(alembic_config: Conf
         assert _all_checks() == checks
         assert _all_triggers() == triggers
 
-        command.upgrade(alembic_config, "head")
+        command.upgrade(alembic_config, _REVISION_0040)
         assert _alembic_version(engine) == _REVISION_0040
         assert _schema_snapshot(engine) == at_head
         assert _reflected_token_indexes(engine) == tokens_at_head

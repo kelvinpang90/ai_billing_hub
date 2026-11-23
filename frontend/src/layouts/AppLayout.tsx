@@ -95,6 +95,10 @@ export function AppLayout() {
               label: <Link to={ROUTES.fxRates}>{t("nav.fxRates")}</Link>,
             },
             {
+              key: ROUTES.providerCosts,
+              label: <Link to={ROUTES.providerCosts}>{t("nav.providerCosts")}</Link>,
+            },
+            {
               key: ROUTES.pricingRules,
               label: <Link to={ROUTES.pricingRules}>{t("nav.pricingRules")}</Link>,
             },

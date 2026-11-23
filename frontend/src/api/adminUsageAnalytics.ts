@@ -1,6 +1,6 @@
 /**
  * 管理端用量分析（契约见 docs/api.md「管理端用量分析」（AIH-TASK-073）与其后的导出小节；毛利扩展见设计闸门 #709
- * v2，AIH-TASK-224）。
+ * v2，AIH-TASK-224；对账后成本见设计闸门 #756 v2 §2「接口与导出」，AIH-TASK-249）。
  *
  * 两个只读接口，都要 ADMIN：`GET /api/v1/admin/usage-analytics`（分组一页加全量合计）与
  * `GET /api/v1/admin/usage-analytics/export`（同一组条件的 CSV，没有分页）。前端不做任何角色判断，403 原样交给页面显示。
@@ -35,8 +35,28 @@ export const USAGE_ANALYTICS_MAX_SPAN_DAYS = 366;
 // --- 对象 -----------------------------------------------------------------------
 // 只统计 `PROCESSED` 事件。金额都是 MYR、8 位小数的十进制字符串。
 
-/** 预付租户的事件：计费额、估算成本、毛利与毛利率。 */
-export interface UsageAnalyticsPrepaid {
+/**
+ * 一块的供应商成本口径（设计闸门 #756 v2，AIH-TASK-248）：覆盖 = 0（含没有事件）→ `estimated`；覆盖 = 估算且 > 0 →
+ * `reconciled`；其余 `mixed`（部分对账、部分估算）。
+ */
+export type ProviderCostBasis = "estimated" | "reconciled" | "mixed";
+
+/**
+ * 两块共有的对账后成本（按估算成本比例分摊，**不是逐请求的实际成本**；只在查询时算）。
+ * `provider_cost_myr` = `reconciled_provider_cost_myr` + (`estimated_provider_cost_myr` − `covered_estimated_cost_myr`)。
+ */
+export interface UsageAnalyticsProviderCost {
+  /** 本块估算里落在某条当前对账记录范围内（且在区间内）的部分。 */
+  covered_estimated_cost_myr: string;
+  /** 这部分按 covered × R ÷ E 分摊后的成本，每块只舍入一次。 */
+  reconciled_provider_cost_myr: string;
+  /** 供应商成本（对账后，未覆盖部分用估算）。 */
+  provider_cost_myr: string;
+  provider_cost_basis: ProviderCostBasis;
+}
+
+/** 预付租户的事件：计费额、估算成本、毛利与毛利率，以及对账后成本与基于它的毛利。 */
+export interface UsageAnalyticsPrepaid extends UsageAnalyticsProviderCost {
   event_count: number;
   billable_cost: string;
   estimated_provider_cost_myr: string;
@@ -44,10 +64,14 @@ export interface UsageAnalyticsPrepaid {
   gross_margin: string;
   /** 毛利 ÷ 计费额（不是百分数）；计费额为 0 时为 null。 */
   gross_margin_rate: string | null;
+  /** 计费额 − `provider_cost_myr`，可为负。 */
+  gross_margin_on_provider_cost: string;
+  /** 上一项 ÷ 计费额；计费额为 0 时为 null。 */
+  gross_margin_on_provider_cost_rate: string | null;
 }
 
-/** 内部计量租户的事件：参考售价不是收入，不进毛利。 */
-export interface UsageAnalyticsInternalMeteredOnly {
+/** 内部计量租户的事件：参考售价不是收入，不进毛利（对账后成本也没有毛利）。 */
+export interface UsageAnalyticsInternalMeteredOnly extends UsageAnalyticsProviderCost {
   event_count: number;
   estimated_provider_cost_myr: string;
   reference_customer_price: string;
@@ -93,6 +117,21 @@ export interface UsageAnalyticsPayments {
   gateway_fee_unknown_count: number;
 }
 
+/** 与区间重叠的一条当前对账记录（对账期间是 UTC 自然月）。 */
+export interface UsageAnalyticsReconciliationCoverage {
+  reconciliation_id: string;
+  provider_code: string;
+  /** `YYYY-MM`（UTC）。 */
+  billing_month: string;
+  /** 不带时区、不带 `Z` 的 ISO 8601 UTC。 */
+  period_start: string;
+  period_end: string;
+  /** `occurred_from ≤ period_start` 且 `period_end ≤ occurred_to`；为 false 时只有区间内那部分参与分摊。 */
+  fully_in_range: boolean;
+  /** E > 0 或 R = 0；为 false（E = 0 而 R > 0）时这条记录的成本不进任何成本与毛利。 */
+  allocatable: boolean;
+}
+
 /** 覆盖全部分组的合计，不随分页变化。 */
 export interface UsageAnalyticsReportTotals extends UsageAnalyticsAggregate {
   /** 带了 `project_id`、`provider`、`model`、`feature` 任一参数时为 null：手续费不能归属到这些维度。 */
@@ -101,13 +140,27 @@ export interface UsageAnalyticsReportTotals extends UsageAnalyticsAggregate {
   gross_profit: string | null;
   /** `gross_profit` ÷ 用量收入；收入为 0 或 `payments` 为 null 时 null。 */
   gross_profit_rate: string | null;
+  /** `prepaid.gross_margin_on_provider_cost` − 手续费；`payments` 为 null 时 null。 */
+  gross_profit_on_provider_cost: string | null;
+  /** 上一项 ÷ 用量收入；收入为 0 或 `payments` 为 null 时 null。 */
+  gross_profit_on_provider_cost_rate: string | null;
+  /** 按供应商、期间起点升序；没有时为空数组。 */
+  reconciliation_coverage: UsageAnalyticsReconciliationCoverage[];
+  /** `allocatable = false` 的记录，每条 `provider_code:YYYY-MM`，顺序同 `reconciliation_coverage`。 */
+  unallocated_reconciled_months: string[];
+  /** 这些记录的成本之和（按记录全额）；没有时 null。只披露，不并进任何成本与毛利。 */
+  unallocated_reconciled_cost_myr: string | null;
 }
 
 export interface UsageAnalyticsReport {
-  /** 固定为 `estimated`：成本是处理时保存的估算值，不是对账后成本。 */
+  /** 固定为 `estimated`：指 `estimated_provider_cost_myr`，是处理时保存的估算值，不是对账后成本。 */
   cost_basis: "estimated";
   /** 固定为 `occurred_at`：用量收入、估算成本与用量毛利按事件发生时刻归期。 */
   usage_period_basis: "occurred_at";
+  /** 固定为 `pro_rata_estimated_cost`：`provider_cost_myr` 按估算成本比例分摊对账后成本。 */
+  provider_cost_allocation: "pro_rata_estimated_cost";
+  /** 固定为 `utc_calendar_month`：对账记录的期间是 UTC 自然月。 */
+  reconciliation_period_basis: "utc_calendar_month";
   items: UsageAnalyticsItem[];
   page: number;
   page_size: number;

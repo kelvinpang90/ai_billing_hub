@@ -1,7 +1,8 @@
 """Admin usage analytics CSV export end to end (AIH-TASK-223, design gate #709 v2 §2「接口二」, §7).
 
 `GET /api/v1/admin/usage-analytics/export`：参数与接口一相同、没有分页；每个分组一行 GROUP（顺序同
-接口一），末尾恒有一行 TOTAL；31 列；复用客户导出的 CSV 模块、租约与 `ExportCsvResponse`。
+接口一），末尾恒有一行 TOTAL；31 列，AIH-TASK-248（设计闸门 #756 v2）在其后追加 10 列共 41 列；
+复用客户导出的 CSV 模块、租约与 `ExportCsvResponse`。
 
 - 正常路径在 SQLite 与 MySQL 上各跑一遍：事件由真实计费 worker 记账（test_usage_billing.World），
   支付行由本文件的 `paid` 夹具直接写入。MySQL 那一半需要 `BILLING_TEST_DATABASE_URL`，没设时
@@ -28,6 +29,18 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from provider_cost_world import (
+    P_CRM,
+    P_PRE,
+    PROVIDER_CODE,
+    UNALLOCATABLE_RECORDS,
+    add_record,
+    build_standard_world,
+    build_unallocatable_world,
+    mysql_factory,
+    sqlite_shared_factory,
+)
+from provider_cost_world import World as ProviderCostWorld
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -40,6 +53,7 @@ from test_usage_billing import (
     seed_meter_types,
 )
 from test_usage_billing import World as BillingWorld
+from test_xlsx_export import assert_matches_csv, read_values
 
 from app.api import admin_usage_analytics as admin_api
 from app.api import auth as auth_api
@@ -48,6 +62,7 @@ from app.core.csv_export import (
     export_lease_held,
     release_export_lease,
     try_acquire_export_lease,
+    write_csv,
 )
 from app.core.database import create_session_factory
 from app.core.tokens import issue_access_token
@@ -67,6 +82,7 @@ from app.schemas.usage_analytics import (
     UsageAnalyticsItem,
     UsageAnalyticsPayments,
     UsageAnalyticsPrepaid,
+    UsageAnalyticsReconciliationCoverage,
     UsageAnalyticsTotalsView,
     rfc3339_utc,
     usage_analytics_export_group_cells,
@@ -80,8 +96,8 @@ BOM = b"\xef\xbb\xbf"
 T0 = dt.datetime(2026, 1, 1)
 DAY_QUERY = {"occurred_from": "2026-01-01T00:00:00Z", "occurred_to": "2026-01-02T00:00:00Z"}
 
-# 设计 §2「接口二」：表头恰好这 31 列，按这个顺序。多一列、少一列、换顺序都红。
-COLUMNS = [
+# 设计 §2「接口二」：AIH-TASK-223 的 31 列，按这个顺序。
+COLUMNS_223 = [
     "row_type",
     "group_by",
     "group_key",
@@ -114,7 +130,22 @@ COLUMNS = [
     "occurred_from",
     "occurred_to",
 ]
-TEXT_COLUMNS = {"group_key", "group_name"}
+# AIH-TASK-248（设计闸门 #756 v2 §2「接口与导出」）在 31 列之后追加的 10 列，第 32–41 列。
+PROVIDER_COST_COLUMNS = [
+    "prepaid_provider_cost_myr",
+    "prepaid_provider_cost_basis",
+    "prepaid_gross_margin_on_provider_cost",
+    "internal_provider_cost_myr",
+    "internal_provider_cost_basis",
+    "gross_profit_on_provider_cost",
+    "provider_cost_allocation",
+    "reconciled_months",
+    "unallocated_reconciled_months",
+    "unallocated_reconciled_cost_myr",
+]
+# 表头恰好这 41 列，按这个顺序。多一列、少一列、换顺序都红。
+COLUMNS = [*COLUMNS_223, *PROVIDER_COST_COLUMNS]
+TEXT_COLUMNS = {"group_key", "group_name", "reconciled_months", "unallocated_reconciled_months"}
 # TOTAL 行在手续费不可归属时为空的列：第 21–26 与第 29 列。
 FEE_COLUMNS = [
     "paid_payment_count",
@@ -193,7 +224,10 @@ def text(value: Any) -> str:
 
 
 def usage_values(view: dict[str, Any]) -> dict[str, Any]:
-    """Columns 5–20 from a JSON group item or `totals`."""
+    """Columns 5–20 and 32–36 from a JSON group item or `totals`.
+
+    块里其余的新键对不上任何列名，`values.get(name)` 不会取到它们。
+    """
     return {
         **{key: view[key] for key in USAGE_KEYS},
         **{f"prepaid_{key}": value for key, value in view["prepaid"].items()},
@@ -213,6 +247,7 @@ def expected_group(item: dict[str, Any], group_by: str, start: str, end: str) ->
         "usage_period_basis": "occurred_at",
         "occurred_from": start,
         "occurred_to": end,
+        "provider_cost_allocation": "pro_rata_estimated_cost",
     }
     return [text(values.get(name)) for name in COLUMNS]
 
@@ -220,6 +255,11 @@ def expected_group(item: dict[str, Any], group_by: str, start: str, end: str) ->
 def expected_total(totals: dict[str, Any], group_by: str, start: str, end: str) -> list[str]:
     """What interface one's `totals` becomes, column for column."""
     payments = totals["payments"] or {}
+    reconciled = [
+        f"{coverage['provider_code']}:{coverage['billing_month']}"
+        for coverage in totals["reconciliation_coverage"]
+        if coverage["allocatable"]
+    ]
     values = {
         "row_type": "TOTAL",
         "group_by": group_by,
@@ -235,6 +275,11 @@ def expected_total(totals: dict[str, Any], group_by: str, start: str, end: str) 
         "fee_period_basis": payments.get("period_basis"),
         "occurred_from": start,
         "occurred_to": end,
+        "gross_profit_on_provider_cost": totals["gross_profit_on_provider_cost"],
+        "provider_cost_allocation": "pro_rata_estimated_cost",
+        "reconciled_months": ";".join(reconciled),
+        "unallocated_reconciled_months": ";".join(totals["unallocated_reconciled_months"]),
+        "unallocated_reconciled_cost_myr": totals["unallocated_reconciled_cost_myr"],
     }
     return [text(values.get(name)) for name in COLUMNS]
 
@@ -563,7 +608,9 @@ def test_a_customer_export_lists_the_groups_in_order_and_a_total_equal_to_the_js
     assert response.content.count(b"\n") == response.content.count(b"\r\n") == 4
     table = read_csv(response.content)
     assert table[0] == COLUMNS
-    assert len(table[0]) == 31
+    assert len(table[0]) == 41
+    # AIH-TASK-248 只在末尾追加：前 31 列与 AIH-TASK-223 逐字相同。
+    assert table[0][:31] == COLUMNS_223
     groups, total = table[1:-1], table[-1]
     assert [row[0] for row in table[1:]] == ["GROUP", "GROUP", "TOTAL"]
     # 顺序同接口一：事件数倒序。
@@ -599,6 +646,8 @@ def test_a_model_filter_leaves_the_fee_columns_of_the_total_empty(app) -> None:
     total = by_name(rows[-1])
     assert [total[name] for name in FEE_COLUMNS] == [""] * 7
     assert [COLUMNS.index(name) + 1 for name in FEE_COLUMNS] == [21, 22, 23, 24, 25, 26, 29]
+    # 第 37 列同一规则：`payments` 为 null 时空。
+    assert total["gross_profit_on_provider_cost"] == ""
     assert (total["event_count"], total["prepaid_gross_margin"]) == ("2", "-0.25000000")
     assert (total["cost_basis"], total["usage_period_basis"]) == ("estimated", "occurred_at")
 
@@ -648,6 +697,13 @@ def test_an_empty_period_is_the_header_and_a_total_row_that_still_reports_fees(a
         "fee_period_basis": "paid_at",
         "occurred_from": "2025-12-31T16:00:00Z",
         "occurred_to": "2026-12-31T16:00:00Z",
+        "prepaid_provider_cost_myr": "0.00000000",
+        "prepaid_provider_cost_basis": "estimated",
+        "prepaid_gross_margin_on_provider_cost": "0.00000000",
+        "internal_provider_cost_myr": "0.00000000",
+        "internal_provider_cost_basis": "estimated",
+        "gross_profit_on_provider_cost": "0.00000000",
+        "provider_cost_allocation": "pro_rata_estimated_cost",
     }
 
 
@@ -682,11 +738,21 @@ def test_the_period_text_is_whole_seconds_or_exactly_six_places() -> None:
         estimated_provider_cost_myr="0.00000000",
         gross_margin="0.00000000",
         gross_margin_rate=None,
+        covered_estimated_cost_myr="0.00000000",
+        reconciled_provider_cost_myr="0.00000000",
+        provider_cost_myr="0.00000000",
+        provider_cost_basis="estimated",
+        gross_margin_on_provider_cost="0.00000000",
+        gross_margin_on_provider_cost_rate=None,
     )
     internal = UsageAnalyticsInternalMeteredOnly(
         event_count=0,
         estimated_provider_cost_myr="0.00000000",
         reference_customer_price="0.00000000",
+        covered_estimated_cost_myr="0.00000000",
+        reconciled_provider_cost_myr="0.00000000",
+        provider_cost_myr="0.00000000",
+        provider_cost_basis="estimated",
     )
     usage = {
         **dict.fromkeys(USAGE_KEYS[:6], 0),
@@ -714,6 +780,11 @@ def test_the_period_text_is_whole_seconds_or_exactly_six_places() -> None:
             ),
             gross_profit="0.00000000",
             gross_profit_rate=None,
+            gross_profit_on_provider_cost="0.00000000",
+            gross_profit_on_provider_cost_rate=None,
+            reconciliation_coverage=[],
+            unallocated_reconciled_months=[],
+            unallocated_reconciled_cost_myr=None,
         ),
         group_by="month",
         occurred_from=start,
@@ -722,9 +793,10 @@ def test_the_period_text_is_whole_seconds_or_exactly_six_places() -> None:
     assert tuple(USAGE_ANALYTICS_EXPORT_COLUMNS) == tuple(COLUMNS)
     assert set(USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS) == TEXT_COLUMNS
     for cells in (group, total):
-        assert len(cells) == 31
+        assert len(cells) == 41
         assert all(cell is None or type(cell) is str for cell in cells)
-        assert cells[-2:] == ["2026-10-01T00:00:00.000001Z", "2026-11-01T00:00:00Z"]
+        # 第 30–31 列（追加的 10 列在其后）。
+        assert cells[29:31] == ["2026-10-01T00:00:00.000001Z", "2026-11-01T00:00:00Z"]
     assert group[COLUMNS.index("fee_period_basis")] is None
     assert total[COLUMNS.index("fee_period_basis")] == "paid_at"
 
@@ -947,3 +1019,224 @@ def test_paging_parameters_are_ignored(app) -> None:
     admin, _ = sign_in(app)
     rows = exported(app, admin, group_by="customer", page=0, page_size=1, **DAY_QUERY)
     assert [row[0] for row in rows] == ["GROUP", "GROUP", "TOTAL"]
+
+
+# --- AIH-TASK-248：导出追加列（设计闸门 #756 v2 §2、§7） ---
+#
+# 世界来自 tests/backend/provider_cost_world.py；SQLite 与真 MySQL 各跑一遍
+# （MySQL 没设 `BILLING_TEST_DATABASE_URL` 时 skip，**skipped 不是 passed**）。
+
+DECEMBER = {"occurred_from": "2026-12-01T00:00:00Z", "occurred_to": "2027-01-01T00:00:00Z"}
+# 第 39–41 列：只在 TOTAL 行有值的不可分摊披露与覆盖月份。
+MONTH_COLUMNS = (
+    "reconciled_months",
+    "unallocated_reconciled_months",
+    "unallocated_reconciled_cost_myr",
+)
+
+
+@pytest.fixture(params=["sqlite", "mysql"])
+def cost_db(request, monkeypatch):
+    """An empty database for a provider cost world: shared-connection SQLite, and a real MySQL."""
+    if request.param == "mysql":
+        yield from mysql_factory(monkeypatch)
+        return
+    yield from sqlite_shared_factory()
+
+
+@pytest.fixture
+def cost_app(tmp_path, cost_db):
+    application = create_app(settings_for(tmp_path))
+    application.state.engine = cost_db.kw["bind"]
+    application.state.session_factory = cost_db
+    return application
+
+
+def world_admin(app, world: ProviderCostWorld) -> dict[str, str]:
+    token = issue_access_token(
+        app.state.settings,
+        user_id=world.admin_id,
+        role="ADMIN",
+        session_id="0" * 32,
+        now=utc_now(),
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_the_appended_columns_of_an_allocated_month_in_csv_and_xlsx(cost_app, cost_db) -> None:
+    """§7「导出追加列」：「分摊结果」的条件导出 CSV 与 xlsx。
+
+    12 月记录、区间 [2026-12-01, 2027-01-01)、`group_by=project`。
+    """
+    world = build_standard_world(cost_db)
+    add_record(world, UNALLOCATABLE_RECORDS[0])
+    admin = world_admin(cost_app, world)
+    client = TestClient(cost_app)
+    reply = client.get(PATH, params={"group_by": "project", **DECEMBER}, headers=admin)
+    assert reply.status_code == 200, reply.text
+    data = reply.json()["data"]
+    totals = data["totals"]
+    # 本条件下两个披露字段为空。
+    assert (totals["unallocated_reconciled_months"], totals["unallocated_reconciled_cost_myr"]) == (
+        [],
+        None,
+    )
+
+    as_csv = client.get(EXPORT, params={"group_by": "project", **DECEMBER}, headers=admin)
+    as_xlsx = client.get(
+        EXPORT, params={"group_by": "project", "format": "xlsx", **DECEMBER}, headers=admin
+    )
+    assert as_csv.status_code == 200, as_csv.text
+    assert as_xlsx.status_code == 200, as_xlsx.text
+    table = read_csv(as_csv.content)
+    assert table[0] == COLUMNS
+    assert len(table[0]) == 41
+    assert table[0][:31] == COLUMNS_223
+    groups, total = table[1:-1], table[-1]
+    start, end = DECEMBER["occurred_from"], DECEMBER["occurred_to"]
+    for row, item in zip(groups, data["items"], strict=True):
+        assert row == expected_group(item, "project", start, end)
+    assert total == expected_total(totals, "project", start, end)
+
+    rows = {by_name(row)["group_name"]: by_name(row) for row in groups}
+    pre, crm = rows[P_PRE], rows[P_CRM]
+    assert [pre[name] for name in PROVIDER_COST_COLUMNS] == [
+        "21.78000000",
+        "reconciled",
+        "-21.78000000",
+        "0.00000000",
+        "estimated",
+        "",
+        "pro_rata_estimated_cost",
+        "",
+        "",
+        "",
+    ]
+    assert (crm["internal_provider_cost_myr"], crm["internal_provider_cost_basis"]) == (
+        "29.70000000",
+        "reconciled",
+    )
+    assert [by_name(total)[name] for name in PROVIDER_COST_COLUMNS] == [
+        "471.78000000",
+        "mixed",
+        "-471.78000000",
+        "29.70000000",
+        "reconciled",
+        "-471.78000000",
+        "pro_rata_estimated_cost",
+        f"{PROVIDER_CODE}:2026-12",
+        "",
+        "",
+    ]
+
+    # xlsx 用同一个列常量：表头同为 41 列，逐格与 CSV 相同。
+    values = read_values(as_xlsx.content, len(COLUMNS))
+    assert values[0] == tuple(COLUMNS)
+    assert len(values) == len(table)
+    for xlsx_row, csv_row in zip(values, table, strict=True):
+        assert len(xlsx_row) == len(csv_row) == 41
+        for xlsx_value, csv_field in zip(xlsx_row, csv_row, strict=True):
+            assert_matches_csv(xlsx_value, csv_field)
+
+
+def test_an_unallocatable_record_is_disclosed_only_on_the_total_row(cost_app, cost_db) -> None:
+    """§7「不可分摊」的导出：TOTAL 行第 39–41 列，GROUP 行这几列为空。"""
+    world = build_unallocatable_world(cost_db)
+    rows = exported(
+        cost_app,
+        world_admin(cost_app, world),
+        group_by="provider",
+        occurred_from="2026-11-01T00:00:00Z",
+        occurred_to="2027-04-01T00:00:00Z",
+    )
+    groups, total = rows[:-1], rows[-1]
+    assert [COLUMNS.index(name) + 1 for name in MONTH_COLUMNS] == [39, 40, 41]
+    assert [by_name(total)[name] for name in MONTH_COLUMNS] == [
+        f"{PROVIDER_CODE}:2026-12;{PROVIDER_CODE}:2027-03",
+        f"{PROVIDER_CODE}:2027-02",
+        "5.00000000",
+    ]
+    assert groups
+    for row in groups:
+        assert [by_name(row)[name] for name in MONTH_COLUMNS] == ["", "", ""]
+    # 2 月的 5.00 不进成本：供应商成本只含 12 月的分摊。
+    assert by_name(total)["prepaid_provider_cost_myr"] == "471.78000000"
+    assert by_name(total)["internal_provider_cost_myr"] == "43.00000000"
+
+
+def test_the_two_month_columns_get_the_formula_guard() -> None:
+    """§2「接口与导出」：第 39、40 列在公式注入防护的文本列里；第 41 列是金额，不加。"""
+    assert {"reconciled_months", "unallocated_reconciled_months"} <= set(
+        USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS
+    )
+    assert "unallocated_reconciled_cost_myr" not in USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS
+    zero = "0.00000000"
+    prepaid = UsageAnalyticsPrepaid(
+        event_count=0,
+        billable_cost=zero,
+        estimated_provider_cost_myr=zero,
+        gross_margin=zero,
+        gross_margin_rate=None,
+        covered_estimated_cost_myr=zero,
+        reconciled_provider_cost_myr=zero,
+        provider_cost_myr=zero,
+        provider_cost_basis="estimated",
+        gross_margin_on_provider_cost=zero,
+        gross_margin_on_provider_cost_rate=None,
+    )
+    internal = UsageAnalyticsInternalMeteredOnly(
+        event_count=0,
+        estimated_provider_cost_myr=zero,
+        reference_customer_price=zero,
+        covered_estimated_cost_myr=zero,
+        reconciled_provider_cost_myr=zero,
+        provider_cost_myr=zero,
+        provider_cost_basis="estimated",
+    )
+    # 虚构的、以公式字符开头的供应商代码（真实目录代码不会这样写）。
+    coverage = [
+        UsageAnalyticsReconciliationCoverage(
+            reconciliation_id=f"00000000-0000-0000-0000-00000000030{number}",
+            provider_code=code,
+            billing_month=month,
+            period_start=dt.datetime(2026, 12, 1),
+            period_end=dt.datetime(2027, 1, 1),
+            fully_in_range=True,
+            allocatable=allocatable,
+        )
+        for number, (code, month, allocatable) in enumerate(
+            (("=evil", "2026-12", True), ("@evil", "2027-02", False)), start=1
+        )
+    ]
+    totals = UsageAnalyticsTotalsView(
+        **dict.fromkeys(USAGE_KEYS[:6], 0),
+        average_input_tokens=None,
+        average_output_tokens=None,
+        prepaid=prepaid,
+        internal_metered_only=internal,
+        payments=None,
+        gross_profit=None,
+        gross_profit_rate=None,
+        gross_profit_on_provider_cost=None,
+        gross_profit_on_provider_cost_rate=None,
+        reconciliation_coverage=coverage,
+        unallocated_reconciled_months=["@evil:2027-02"],
+        # 虚构的负值：只为说明金额列不加前缀（真实的 R 不为负）。
+        unallocated_reconciled_cost_myr="-5.00000000",
+    )
+    cells = usage_analytics_export_total_cells(
+        totals,
+        group_by="provider",
+        occurred_from=dt.datetime(2026, 12, 1),
+        occurred_to=dt.datetime(2027, 1, 1),
+    )
+    table = read_csv(
+        write_csv(USAGE_ANALYTICS_EXPORT_COLUMNS, [cells], USAGE_ANALYTICS_EXPORT_TEXT_COLUMNS)
+    )
+    assert table[0] == COLUMNS
+    total = by_name(table[1])
+    assert [total[name] for name in MONTH_COLUMNS] == [
+        "'=evil:2026-12",
+        "'@evil:2027-02",
+        "-5.00000000",
+    ]

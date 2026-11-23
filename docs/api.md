@@ -23,6 +23,7 @@
 - [管理端汇率](#管理端汇率)（AIH-TASK-041）
 - [管理端试算预览](#管理端试算预览)（AIH-TASK-031）
 - [管理端用量事件：重新入队](#管理端用量事件重新入队)（AIH-TASK-032）
+- [管理端供应商成本对账](#管理端供应商成本对账)（AIH-TASK-245）：月份总览、预览、确认与详情；只追加，不改任何已计费金额
 - [钱包核对](#钱包核对)（AIH-TASK-134）：管理端只读的核对运行列表与每次运行的不一致记录
 - [内部告警接口](#内部告警接口)（AIH-TASK-042）：机器接口，**不套信封**，是下面通用约定的例外
 - [集成：用量事件摄取](#集成用量事件摄取)（AIH-TASK-029）：集成签名认证，错误信封多一个顶层 `retryable`
@@ -3507,12 +3508,15 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - `PREPAID` 块包含计费额、估算成本、用量毛利（`gross_margin`）和毛利率；`INTERNAL_METERED_ONLY` 只包含事件数、
   估算成本和参考售价。内部计量租户的参考售价不是收入，因此不进入任何毛利。
 
-`data` 在 `items`、`page`、`page_size`、`total` 之外的键（`cost_basis` 沿用 AIH-TASK-073，新增的是 `usage_period_basis` 与 `totals`）：
+`data` 在 `items`、`page`、`page_size`、`total` 之外的键（`cost_basis` 沿用 AIH-TASK-073，新增的是 `usage_period_basis` 与 `totals`；
+AIH-TASK-248 新增 `provider_cost_allocation` 与 `reconciliation_period_basis`，见下文「对账后成本」）：
 
 | 键 | 含义 |
 | --- | --- |
-| `cost_basis` | 固定 `estimated`：成本是处理时保存的估算供应商成本，不是对账后成本 |
+| `cost_basis` | 固定 `estimated`：指原有的 `estimated_provider_cost_myr`，是处理时保存的估算供应商成本，不是对账后成本；含义不变 |
 | `usage_period_basis` | 固定 `occurred_at`：用量收入、估算成本与用量毛利按事件发生时刻归期 |
+| `provider_cost_allocation` | 固定 `pro_rata_estimated_cost`：`provider_cost_myr` 的口径（按估算成本比例分摊对账后成本） |
+| `reconciliation_period_basis` | 固定 `utc_calendar_month`：对账记录的期间是 UTC 自然月 |
 | `totals` | 覆盖全部分组的合计，**不随分页变化** |
 
 `totals` 的键：
@@ -3525,6 +3529,8 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | `payments` | 手续费块，见下；可为 `null` |
 | `gross_profit` | 毛利（扣手续费后）= `prepaid.billable_cost` − `prepaid.estimated_provider_cost_myr` − `payments.gateway_fee`；`payments` 为 `null` 时 `null` |
 | `gross_profit_rate` | `gross_profit` ÷ `prepaid.billable_cost`；计费额为 0 或 `payments` 为 `null` 时 `null` |
+| `gross_profit_on_provider_cost`、`gross_profit_on_provider_cost_rate` | 基于供应商成本的毛利（扣手续费后）与比率，见下文「对账后成本」 |
+| `reconciliation_coverage`、`unallocated_reconciled_months`、`unallocated_reconciled_cost_myr` | 覆盖的对账记录与不可分摊的已对账成本，见下文「对账后成本」 |
 
 `totals.payments`（**现金期间**）：
 
@@ -3557,6 +3563,53 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 `ix_usage_events_project_id` 与 `ix_usage_events_tenant_feature_occurred`；手续费块走 `payments` 上已有的索引
 （`payments` 没有 `paid_at` 索引）。没有新增迁移或索引。
 
+### 对账后成本（`pro_rata_estimated_cost`）
+
+设计依据：设计闸门 #756 `APPROVED: design v2`，全文见
+[design/AIH-TASK-247-provider-cost-allocation.md](design/AIH-TASK-247-provider-cost-allocation.md) §2「规则」「推论」
+「接口与导出」。实现登记为 AIH-TASK-248；对账记录本身见下文「管理端供应商成本对账」。
+
+- **口径**：对一条与区间重叠的当前对账记录 r（供应商 p、UTC 自然月 `[s, e)`、实际 MYR 成本 R），令 E 为该记录范围
+  （经 AI 模块、该供应商、该 UTC 月）内**全部**已处理事件的估算之和。E 是**查询时的实时值**、取整个月、不受报表筛选
+  影响，所以同一对账月的分摊之和恒等于 R（确认之后才处理完的事件也分到成本）。范围内的事件 x 的分摊后成本是
+  `est(x) × R ÷ E`；不在任何当前记录范围内的事件（集成方上报的、未对账月份的、首月之前的）仍用估算。
+- **这是按估算成本比例的分摊，不是逐请求的实际成本**：供应商只按月给出合计，分组行上的数是按估算的比例摊下来的。
+  分摊只在查询时算，不写任何表、不改 `usage_events`、不写审计。
+- 每个分组项与 `totals` 的 `prepaid` 块新增 6 个键，`internal_metered_only` 块新增前 4 个：
+
+| 键 | 含义 |
+| --- | --- |
+| `covered_estimated_cost_myr` | 本块估算里落在某条当前对账记录范围内（且在区间内）的部分 |
+| `reconciled_provider_cost_myr` | 这部分按 `covered × R ÷ E` 分摊后的成本，各记录相加后只舍入一次（8 位） |
+| `provider_cost_myr` | 供应商成本（对账后，未覆盖部分用估算）= `reconciled_provider_cost_myr` + (`estimated_provider_cost_myr` − `covered_estimated_cost_myr`) |
+| `provider_cost_basis` | `estimated`：`covered = 0`（含本块没有事件）；`reconciled`：`covered = estimated_provider_cost_myr` 且大于 0；其余 `mixed`（部分对账、部分估算） |
+| `gross_margin_on_provider_cost` | 只在 `prepaid`：`billable_cost` − `provider_cost_myr` |
+| `gross_margin_on_provider_cost_rate` | 只在 `prepaid`：上一项 ÷ `billable_cost`；计费额为 0 时 `null` |
+
+- `totals` 的两块用合计层的覆盖额**按同一公式单独计算**（每块只舍入一次），**不由分组行相加**。因为每个分组各舍入一次，
+  同一对账月完整落在区间内时，各分组的 `reconciled_provider_cost_myr` 之和与 R（及合计）至多差**组数 × 0.5×10⁻⁸**，
+  组数越多误差越大。例：R = 1.00、三个分组估算相同，每组 `0.33333333`，合计 `1.00000000`。
+- `totals.gross_profit_on_provider_cost` = `prepaid.gross_margin_on_provider_cost` − `payments.gateway_fee`，
+  `gross_profit_on_provider_cost_rate` 为它 ÷ `prepaid.billable_cost`；`payments` 为 `null` 时两者都 `null`、
+  计费额为 0 时比率 `null`（与 `gross_profit` 同一规则）。
+- **UTC 月覆盖与马来西亚日 / 月分组**：对账期间按 UTC 自然月划分，分组按马来西亚日历（UTC+8）。分摊**逐事件按它所属的
+  UTC 月**取系数，所以按马来西亚日 / 月分组时，一个马来西亚月可能同时含有已对账的 UTC 月与未对账的 UTC 月的事件
+  （如马来西亚 1 月 1 日 00:00–08:00 属于 UTC 12 月），这样的组口径是 `mixed`；不会因为口径差把成本算错月。
+  报表区间与对账期间按 `[max(occurred_from, s), min(occurred_to, e))` 求交。
+- `totals.reconciliation_coverage`：与区间重叠的当前对账记录，按供应商、期间起点升序，每项恰好这些键：
+  `reconciliation_id`、`provider_code`、`billing_month`（`YYYY-MM`）、`period_start`、`period_end`（不带时区、不带 `Z`
+  的 ISO 8601 UTC，同对账记录对象）、`fully_in_range`（`occurred_from ≤ period_start` 且 `period_end ≤ occurred_to`；
+  为 `false` 时只有区间内那部分事件参与分摊，E 仍是整月）、`allocatable`。没有记录时为 `[]`，此时全部块
+  `covered = 0`、口径 `estimated`、`provider_cost_myr` 等于估算。
+- **`allocatable`** = `E > 0` 或 `R = 0`。`allocatable = false`（E = 0 而 R > 0：该月有供应商账单、但没有经 AI 模块的
+  已处理事件）的记录**无法分摊**：它的 R 不进任何分组、合计、成本与毛利，只在下面两个字段里单独披露；应检查该月是否真的
+  没有经 AI 模块的用量。E = 0 且 R = 0 的记录没有东西要分，算 `allocatable = true`。
+- `totals.unallocated_reconciled_months`：`allocatable = false` 的记录，每条 `provider_code:YYYY-MM`（如
+  `anthropic:2027-02`），顺序同 `reconciliation_coverage`，没有时 `[]`；`totals.unallocated_reconciled_cost_myr`：这些
+  记录的 R 之和（按记录全额，不按区间切分；8 位小数字符串），没有时 `null`。两者都**不并进**任何成本与毛利。
+- 分摊用到的查询与上面的查询在同一个只读会话里（同一快照）：每条重叠的记录多两条范围聚合。请求进行中才确认的对账记录
+  这次不计，下次计入。
+
 ### `GET /api/v1/admin/usage-analytics/export` —— 导出用量分析（CSV）
 
 设计依据：设计闸门 #709 `APPROVED: design v2` §2「接口二」，全文见
@@ -3578,7 +3631,8 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - **行**：每个分组一行 `GROUP`，顺序与 JSON 接口相同；最后恒有一行 `TOTAL`（没有任何分组时文件 = 表头 + `TOTAL`
   行，仍报手续费）。单元格取 JSON 接口的值转成文本：整数原样、金额与比率与 JSON 逐字相同（金额 8 位小数）、`null`
   写成空字段。格式（UTF-8 带 BOM、RFC 4180、行尾 `\r\n`、响应头 `Cache-Control: no-store` 等）同「客户导出」一节的「CSV 格式」。
-- **列**：表头恰好这 31 列，按这个顺序：
+- **列**：表头恰好这 41 列，按这个顺序（第 1–31 列是 AIH-TASK-223 的原有列，逐字不变；第 32–41 列由 AIH-TASK-248
+  追加，见上文「对账后成本」）：
 
 | # | 列 | `GROUP` 行 | `TOTAL` 行 |
 | --- | --- | --- | --- |
@@ -3595,17 +3649,31 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | 28 | `usage_period_basis` | `occurred_at` | `occurred_at` |
 | 29 | `fee_period_basis` | 空 | `paid_at`；`payments` 为 `null` 时空 |
 | 30–31 | `occurred_from`、`occurred_to` | 解析后的区间，UTC RFC 3339：整秒写 `YYYY-MM-DDTHH:MM:SSZ`，有微秒时写恰好 6 位小数 `YYYY-MM-DDTHH:MM:SS.ffffffZ` | 同左 |
+| 32–34 | `prepaid_provider_cost_myr`、`prepaid_provider_cost_basis`、`prepaid_gross_margin_on_provider_cost` | 分组项 `prepaid` 的 `provider_cost_myr`、`provider_cost_basis`、`gross_margin_on_provider_cost` | `totals.prepaid` 的同名值 |
+| 35–36 | `internal_provider_cost_myr`、`internal_provider_cost_basis` | 分组项 `internal_metered_only` 的 `provider_cost_myr`、`provider_cost_basis` | `totals.internal_metered_only` 的同名值 |
+| 37 | `gross_profit_on_provider_cost` | 空 | `totals.gross_profit_on_provider_cost`；`null` 时空 |
+| 38 | `provider_cost_allocation` | `pro_rata_estimated_cost` | `pro_rata_estimated_cost` |
+| 39 | `reconciled_months` | 空 | `allocatable = true` 的覆盖记录，每条 `provider_code:YYYY-MM`，以 `;` 连接，顺序同 `totals.reconciliation_coverage`（如 `anthropic:2026-12;anthropic:2027-03`）；没有时空 |
+| 40 | `unallocated_reconciled_months` | 空 | `totals.unallocated_reconciled_months` 以 `;` 连接（如 `anthropic:2027-02`）；没有时空 |
+| 41 | `unallocated_reconciled_cost_myr` | 空 | `totals.unallocated_reconciled_cost_myr`（8 位小数）；`null` 时空 |
 
 - 手续费与扣手续费后的毛利**只在 `TOTAL` 行**，不分摊到任何 `GROUP` 行；两个期间口径由第 28、29 列写明。
-- **公式注入防护只作用于 `group_key` 与 `group_name`**（功能标签、公司名、模型代码来自输入）：以 `=`、`+`、`-`、
-  `@`、制表符或回车开头时前加单引号。数值列不加：负毛利 `-0.40000000` 保持是数。
+- 第 27 列 `cost_basis` 仍是 `estimated`，指第 15、19 列的估算成本；第 32–36 列是按估算成本比例分摊的对账后成本
+  （第 38 列写明口径），**不是逐请求的实际成本**。`reconciliation_coverage` 的 `period_start` / `period_end` 与
+  `fully_in_range` 不进文件。
+- **不可分摊的已对账成本**（`allocatable = false`，E = 0 而 R > 0）不进第 32–37 列的任何成本与毛利，也不进第 39 列；
+  它们的月份与 R 之和只由 `TOTAL` 行第 40、41 列披露，与 JSON 的 `totals.unallocated_reconciled_months` /
+  `unallocated_reconciled_cost_myr` 一致。
+- **公式注入防护只作用于 `group_key`、`group_name`、`reconciled_months` 与 `unallocated_reconciled_months`**（功能标签、
+  公司名、模型代码来自输入，两个月份列含供应商代码）：以 `=`、`+`、`-`、`@`、制表符或回车开头时前加单引号。数值列不加：
+  负毛利 `-0.40000000` 保持是数。
 - **文件名**：`usage-analytics_<group_by>_<from>_<to>.csv`，`<from>` / `<to>` 是解析后的 UTC 时刻加 8 小时、按
   `%Y%m%dT%H%M%S` 格式化再接字面 `MYT`，例 `usage-analytics_month_20260101T000000MYT_20270101T000000MYT.csv`；
   不拼任何请求里的原始字符串。
 - **xlsx**（`format=xlsx`）：文件名主干与 CSV 相同、扩展名换成 `.xlsx`，即
   `usage-analytics_<group_by>_<from>_<to>.xlsx`，例 `usage-analytics_month_20260101T000000MYT_20270101T000000MYT.xlsx`；
-  一个工作表，名为 `usage-analytics`；表头、行数、行序（`GROUP` 行在前、`TOTAL` 行恒在末尾）与每个单元格的值都与同参数的
-  CSV 相同。单元格类型、公式前缀、控制字符、响应头与求和写法同「客户导出」一节的 [xlsx 格式](#xlsx-格式)：金额、比率
+  一个工作表，名为 `usage-analytics`；表头（同样是上表的 41 列，与 CSV 共用同一个列常量）、行数、行序（`GROUP` 行在前、
+  `TOTAL` 行恒在末尾）与每个单元格的值都与同参数的 CSV 相同。单元格类型、公式前缀、控制字符、响应头与求和写法同「客户导出」一节的 [xlsx 格式](#xlsx-格式)：金额、比率
   与平均值是文本单元格（与 CSV 逐字相同），整数列是这 10 列：`event_count`、`token_event_count`、`input_tokens`、
   `output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`、`prepaid_event_count`、
   `internal_event_count`、`paid_payment_count`、`gateway_fee_unknown_count`（值不超过 15 位时是数字单元格，否则退回文本）；
@@ -3619,6 +3687,163 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
   `admin_usage_analytics_export_failed`（只带路径）。名额在请求结束时释放。
 - 只读：分组、合计与手续费块在一个只读会话里查（同一快照），不写任何表、**不写审计**、不落盘。成功时服务端记一条
   INFO `admin_usage_analytics_exported`，只带管理员内部 id、`group_by` 与 `GROUP` 行数，不带筛选值、公司名与金额。
+
+---
+
+## 管理端供应商成本对账
+
+设计依据：设计闸门 #755 `APPROVED: design v1`，全文见
+[design/AIH-TASK-242-provider-cost-reconciliation.md](design/AIH-TASK-242-provider-cost-reconciliation.md)
+§2「口径」「管理端接口」。实现登记为 AIH-TASK-245。
+
+管理员每月按供应商账单或成本页**手工录入**某个供应商在一个 UTC 自然月里的实际成本（来源币种原值、不含税），先预览、
+再确认；确认写一行**不可变**的对账记录与一条审计。四个接口都只对 ADMIN（未登录 401 `TOKEN_INVALID`、非 ADMIN 403
+`ADMIN_REQUIRED`；查询参数与请求体由框架在鉴权之前校验，非法输入可能先得 422）。路径里的 id 是记录的 `public_id`。
+
+> ⚠️ 响应含 Acuven 内部的供应商成本，只在 `/api/v1/admin` 下；客户侧任何接口都没有这些字段（INV-7）。
+
+### 口径
+
+| 量 | 定义 |
+| --- | --- |
+| 期间 | 供应商 × **UTC 自然月**：`period_start = YYYY-MM-01T00:00:00`，`period_end` = 下月 1 日 0 点，左闭右开（`period_basis` 恒为 `utc_calendar_month`）。**不是**对账单的马来西亚月 |
+| 范围 | 只含**经 AI 模块发出的调用**（事件的 `event_id` 出现在 AI 模块的 outbox 里，`scope` 恒为 `AI_MODULE`）；集成方用自己的供应商密钥上报的同供应商用量不在范围内 |
+| `estimated_event_count` | 范围内、`occurred_at` 在期间内、已处理的事件数 |
+| `estimated_source_cost` | 这些事件里来源币种等于录入币种的来源成本之和 |
+| `estimated_cost_myr` | 这些事件的估算 MYR 成本之和 |
+| `source_total` | 录入的实际成本（来源币种，≥ 0，至多 8 位小数） |
+| `reconciled_cost_myr` | 录入币种为 MYR 时等于 `source_total`；否则 `source_total × fx_rate_applied` 舍入到 8 位（只舍入一次）。汇率取**期间最后一刻**（`period_end` 减 1 微秒，`fx_rate_moment`）生效的**已发布**汇率版本 |
+| `source_variance` / `source_variance_rate` | `source_total − estimated_source_cost`；除以 `estimated_source_cost`，分母为 0 时 `null` |
+| `myr_variance` / `myr_variance_rate` | `reconciled_cost_myr − estimated_cost_myr`；同上 |
+| `exceeds_threshold` | 来源币种差额率的绝对值 ≥ `variance_threshold`（`"0.05"`，即 5%）；或估算为 0 而实际大于 0。阈值**按来源币种**判，不混入月内汇率波动；只用于页面高亮、不告警 |
+| `unprocessed_event_count` | 期间内属于 AI 模块、尚未处理的事件数（不限供应商） |
+| `outbox_unsettled_count` | AI 模块 outbox 里 `created_at` 在期间内、还没投递完（待发、发送中、暂存、死信）的行数 |
+| `outbox_discarded_count` | 同一区间已丢弃的行数 |
+
+- **MYR 录入**：`fx_rate_version_id`、`fx_rate_applied`、`fx_rate_moment` 三个都为 `null`。非 MYR 时 `fx_rate_version_id`
+  是汇率版本的 `public_id`，`fx_rate_applied` 是去掉末尾 0 的精确十进制串（如 `"4.4"`）。
+- **诊断计数的含义**：未处理与未投递的调用已被供应商计费、估算里还没有，会让差额偏正；已丢弃的永远没有估算；outbox
+  按 `created_at` 归期是近似，月界附近可能差一两笔。计数在确认时快照进记录。
+- 金额是恰好 8 位小数的十进制字符串；差额率与阈值是去掉末尾 0 的十进制字符串；全程 `Decimal`、不经 float。时间字段是
+  不带时区的 UTC，写法同「管理端汇率」：没有 `Z`，例 `2026-12-01T00:00:00`、`2026-12-31T23:59:59.999999`。
+- **只追加**：记录行不可改、不可删。更正 = 追加一行取代行（带 `supersedes_id` 与必填理由），新行为当前版本、旧行为
+  「已被取代」，都保留。同一供应商、范围、月份至多一个根记录，每行至多被取代一次。
+- **不改任何已计费金额**：对账不改用量事件（含估算快照）、钱包、账本与对账单，不发补偿交易。
+
+### 对账记录对象
+
+| 键 | 含义 |
+| --- | --- |
+| `reconciliation_id` | 记录的 `public_id`；预览为 `null` |
+| `provider_code`、`scope`、`billing_month`、`period_basis`、`period_start`、`period_end` | 期间与范围 |
+| `source_document_reference` | 来源说明（去首尾空白后 1–255 字符） |
+| `source_currency`、`source_total` | 录入的币种与实际成本 |
+| `fx_rate_version_id`、`fx_rate_applied`、`fx_rate_moment` | 换算用的汇率（MYR 时都为 `null`） |
+| `reconciled_cost_myr` | 换算后的实际 MYR 成本 |
+| `estimated_event_count`、`estimated_source_cost`、`estimated_cost_myr` | 估算（确认时的快照） |
+| `source_variance`、`source_variance_rate`、`myr_variance`、`myr_variance_rate` | 两种差额与差额率 |
+| `exceeds_threshold`、`variance_threshold` | 是否超阈值；阈值 `"0.05"` |
+| `unprocessed_event_count`、`outbox_unsettled_count`、`outbox_discarded_count` | 诊断计数 |
+| `coverage_method` | 恒为 `PERIOD_AGGREGATE`（供应商 × 期间一个合计数，不分模型） |
+| `supersedes_id`、`reason` | 被取代行的 `public_id` 与更正理由；根记录都为 `null` |
+| `is_current` | 是否当前版本；预览为 `null` |
+| `created_at`、`created_by_email` | 确认时刻（整秒 UTC）与确认人；预览为 `null` |
+
+示例（虚构金额）：
+
+```json
+{
+  "reconciliation_id": "00000000-0000-0000-0000-000000000000",
+  "provider_code": "anthropic", "scope": "AI_MODULE", "billing_month": "2026-12",
+  "period_basis": "utc_calendar_month",
+  "period_start": "2026-12-01T00:00:00", "period_end": "2027-01-01T00:00:00",
+  "source_document_reference": "Cost page, platform workspace, 2026-12",
+  "source_currency": "USD", "source_total": "11.70000000",
+  "fx_rate_version_id": "00000000-0000-0000-0000-000000000000",
+  "fx_rate_applied": "4.4", "fx_rate_moment": "2026-12-31T23:59:59.999999",
+  "reconciled_cost_myr": "51.48000000",
+  "estimated_event_count": 2, "estimated_source_cost": "10.50000000", "estimated_cost_myr": "46.80000000",
+  "source_variance": "1.20000000", "source_variance_rate": "0.1142857142857142857142857143",
+  "myr_variance": "4.68000000", "myr_variance_rate": "0.1",
+  "exceeds_threshold": true, "variance_threshold": "0.05",
+  "unprocessed_event_count": 1, "outbox_unsettled_count": 1, "outbox_discarded_count": 1,
+  "coverage_method": "PERIOD_AGGREGATE",
+  "supersedes_id": null, "reason": null, "is_current": true,
+  "created_at": "2027-01-05T02:00:00", "created_by_email": "…"
+}
+```
+
+### `GET /api/v1/admin/provider-cost-reconciliations/months` —— 月份总览
+
+- `provider_code` 必填，`^[a-z0-9_.-]{1,64}$`，格式不符 422 `VALIDATION_ERROR`；格式对但目录里没有这个供应商 → 404
+  `AI_PROVIDER_NOT_FOUND`（不返回一串未对账的月份）。
+- 200，`data.items`：从首个对账月（`2026-12`）到最近一个已结束的 UTC 月，**最近的在前**，至多 24 个；不分页。首个对账月
+  还没结束时为空列表。每项恰好 `{billing_month, period_start, period_end, status, current}`：`status` 为 `RECONCILED`
+  （`current` 是当前版本的记录对象）或 `NOT_RECONCILED`（`current` 为 `null`）。
+
+### `POST /api/v1/admin/provider-cost-reconciliations/preview` —— 预览
+
+请求体恰好七个字段（多带任何字段，含 `expected_*`，都是 422）：
+
+| 字段 | 规则 |
+| --- | --- |
+| `provider_code` | 必填，1–64 字符；查不到 → 404 `AI_PROVIDER_NOT_FOUND` |
+| `billing_month` | 必填，1–7 字符；不是 `YYYY-MM`、早于首个对账月或还没结束 → 422 `RECONCILIATION_MONTH_INVALID` |
+| `source_currency` | 必填，`^[A-Z]{3}$` |
+| `source_total` | 必填，**JSON 字符串** `[0-9]{1,9}(\.[0-9]{1,8})?`（整数至多 9 位、允许 0）；数字、符号、指数写法都是 422 |
+| `source_document_reference` | 必填，去首尾空白后 1–255 字符；写工作区或账单与月份，不写合同价 |
+| `supersedes_id` | 可选，被更正记录的 `public_id`（1–64 字符，不校验 UUID 格式）；查不到（含不是 UUID 的值）→ 404 `PROVIDER_COST_RECONCILIATION_NOT_FOUND` |
+| `reason` | 更正理由，去首尾空白后 1–255 字符；带 `supersedes_id` 时必填，不带时必须为 `null`，否则 422 `VALIDATION_ERROR` |
+
+200，记录对象（`reconciliation_id`、`is_current`、`created_at`、`created_by_email` 为 `null`）。**不写库**。
+
+### `POST /api/v1/admin/provider-cost-reconciliations` —— 确认
+
+请求体恰好九个字段：预览的七个，加两个必填的期望值（取自预览的响应）：
+
+| 字段 | 规则 |
+| --- | --- |
+| `expected_event_count` | JSON 整数，≥ 0；布尔值与字符串都是 422 |
+| `expected_estimated_source_cost` | **JSON 字符串** `[0-9]{1,12}(\.[0-9]{1,8})?`（允许 0） |
+
+201，记录对象（`is_current` 为 `true`）。同一事务写记录与一条审计 `PROVIDER_COST_RECONCILIATION_CREATE`（审计不含来源说明）。
+期望值与当前估算不等 → 409 `RECONCILIATION_ESTIMATE_CHANGED`（预览之后有事件被处理），重新预览后再确认。
+
+### `GET /api/v1/admin/provider-cost-reconciliations/{reconciliation_id}` —— 详情
+
+路径参数不做格式校验，查不到（含不是 UUID 的值）一律 404 `PROVIDER_COST_RECONCILIATION_NOT_FOUND`。200，恰好四个键：
+
+| 键 | 含义 |
+| --- | --- |
+| `reconciliation` | 这条记录 |
+| `chain` | 同一供应商、范围、月份的整条更正链（最早的在前），每项带 `is_current` |
+| `live_estimate` | 按这条记录的供应商、期间与币种**现在**重算：`estimated_event_count`、`estimated_source_cost`、`estimated_cost_myr`、`currency_mismatch_count`（范围内来源币种不是录入币种的事件数）、`unprocessed_event_count` |
+| `estimate_changed_since_confirmation` | 实时的事件数、来源成本、MYR 估算任一与记录上的快照不等，**或** `currency_mismatch_count > 0` 时为 `true`；未处理数不参与判定 |
+
+详情只读：不取汇率、不重算差额（差额来自记录上的快照）。
+
+### 错误
+
+信封照「通用约定」；业务错误只有 `code` 与 `message`，不带 `details`。422 `VALIDATION_ERROR` 只列字段名、不回显值。
+检查顺序（预览与确认相同，第一个不过的就返回）：请求体 → 理由 → 月份 → 供应商 → 被取代记录 / 已有根 → 汇率 →
+换算后金额 → 估算与币种 →（仅确认）期望值。
+
+| HTTP | `code` | 何时 |
+| --- | --- | --- |
+| 422 | `VALIDATION_ERROR` | 请求体或查询参数不合规 |
+| 422 | `RECONCILIATION_REASON_INVALID` | 理由与 `supersedes_id` 不配对，或去首尾空白后为空、长于 255（服务层再挡一次） |
+| 422 | `RECONCILIATION_MONTH_INVALID` | 月份不是 `YYYY-MM`、早于首个对账月或还没结束 |
+| 404 | `AI_PROVIDER_NOT_FOUND` | 供应商代码查不到 |
+| 404 | `PROVIDER_COST_RECONCILIATION_NOT_FOUND` | 详情的 id 或 `supersedes_id` 查不到（含不是 UUID 的值） |
+| 422 | `RECONCILIATION_SUPERSEDES_MISMATCH` | 被取代记录的供应商、范围或月份与请求不同 |
+| 409 | `RECONCILIATION_NOT_CURRENT` | 被取代记录已有后继（含并发更正的后提交者） |
+| 409 | `RECONCILIATION_EXISTS` | 不带 `supersedes_id` 而该月已有记录（含并发确认的后提交者）；前端收到后**重新拉月份总览**，对当前版本更正 |
+| 422 | `FX_RATE_UNAVAILABLE` | 非 MYR 录入而期间最后一刻没有生效的已发布汇率 |
+| 422 | `RECONCILIATION_AMOUNT_OUT_OF_RANGE` | 换算后的 MYR 成本放不进 `DECIMAL(20,8)` |
+| 422 | `SOURCE_CURRENCY_MISMATCH` | 范围内有事件的来源币种与录入币种不同 |
+| 409 | `RECONCILIATION_ESTIMATE_CHANGED` | 仅确认：期望值与当前估算不等 |
+
+`RECONCILIATION_EXISTS` 与 `RECONCILIATION_NOT_CURRENT` 在预览时也可能返回。
 
 ---
 
@@ -4851,8 +5076,8 @@ AI 密钥须等 AIH-TASK-068 合并后才签发，见设计 §8「部署顺序�
 例如：
 
 ```text
-fx_fetch OK USD last success 2026-09-29
-fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
+fx_stale P2 fx_fetch OK: USD last success 2026-09-29 | fx_stale P2: USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
+usage_event_conflicts OK no conflicts in 24 hours
 ```
 
 - 一个维度一行。多个币种汇总进这一行：级别取各配置币种（`BILLING_FX_CURRENCIES`，按它的顺序）里最严重的；
@@ -4865,17 +5090,25 @@ fx_stale P2 USD quoted 2026-09-24 (6 calendar days); EUR no rate in effect
   一行、级别取最严重的那类；摘要只有三个十进制计数，不含租户与项目 id。
 - AI 用量 outbox 维度 `ai_usage_outbox`（AIH-TASK-066，设计闸门 #281 v23 §2「告警维度」）接在其后；摘要只有计数与秒数，
   不含租户、项目或事件 id。
+- **合并维度**（2026-11-21，Kelvin 定：Healthchecks 免费档 20 个检查已满，给别的项目腾 3 个位置）：五个维度并成两行，
+  `fx_stale` 一行的成员是 `fx_fetch`、`fx_stale`，`usage_pricing_error` 一行的成员是 `usage_pricing_error`、
+  `usage_fx_rate_error`、`usage_model_unknown`。合并维度沿用一个成员的名字，于是沿用它的 Healthchecks 检查与
+  `.env` 键名。下表按**成员**逐个写判定与摘要，成员的判定、阈值与摘要都没变；被并入的三个成员不再有自己的一行。
+  合并行的级别取成员里最严重的，摘要按成员顺序列出**每一个**成员（OK 的也列），格式
+  `<成员> <OK|P1|P2>: <成员摘要>`，成员之间以 ` | ` 分隔。空库例：
+  `usage_pricing_error OK usage_pricing_error OK: no PRICING_ERROR events | usage_fx_rate_error OK: no FX_RATE_ERROR events | usage_model_unknown OK: no MODEL_UNKNOWN events`。
+  代价：合并行已经红着时，另一个成员出事不会再单独通知，要看通知正文。
 
 | 维度 | 何时告警 | 摘要 |
 | --- | --- | --- |
-| `fx_fetch` | 某个配置币种在最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT`、`NO_NEW_QUOTE`、`NO_QUOTE_FOR_DATE` 都算成功），且至少有一条 `FAILED` —— 即连续 3 天拉取失败。72 小时内一条记录都没有是 OK（从未运行或 Beat 停了，由 `fx_stale` 报） | `P2`：`USD no successful fetch in 72 hours (3 failed)`；OK：`USD last success <吉隆坡日期>` 或 `USD no fetch in 72 hours` |
-| `fx_stale` | 某个配置币种**此刻生效**的版本（与 `resolve_fx_rate` 同一条件）的报价日距今**超过 5 个日历日**（吉隆坡日期相减；BNM 版本用报价日，手工录入用 `observed_at` 的吉隆坡日期）；或此刻没有生效的版本（包括只有未来的预约） | `P2`：`USD quoted 2026-09-24 (6 calendar days)` 或 `USD no rate in effect`；OK：`USD quoted 2026-09-29 (1 calendar day)` |
+| `fx_fetch`（成员，并入 `fx_stale` 一行） | 某个配置币种在最近 72 小时内**没有任何**成功的拉取记录（`NEW_DRAFT`、`NO_NEW_QUOTE`、`NO_QUOTE_FOR_DATE` 都算成功），且至少有一条 `FAILED` —— 即连续 3 天拉取失败。72 小时内一条记录都没有是 OK（从未运行或 Beat 停了，由 `fx_stale` 报） | `P2`：`USD no successful fetch in 72 hours (3 failed)`；OK：`USD last success <吉隆坡日期>` 或 `USD no fetch in 72 hours` |
+| `fx_stale`（合并行的名字，也是它的成员） | 某个配置币种**此刻生效**的版本（与 `resolve_fx_rate` 同一条件）的报价日距今**超过 5 个日历日**（吉隆坡日期相减；BNM 版本用报价日，手工录入用 `observed_at` 的吉隆坡日期）；或此刻没有生效的版本（包括只有未来的预约） | `P2`：`USD quoted 2026-09-24 (6 calendar days)` 或 `USD no rate in effect`；OK：`USD quoted 2026-09-29 (1 calendar day)` |
 | `usage_event_conflicts`（AIH-TASK-029） | 最近 24 小时（含恰好 24 小时前）记下了任何一条用量事件幂等冲突（`usage_event_conflicts` 的行；同一冲突请求重发不加行） | `P2`：`2 conflicts in 24 hours, earliest 2026-09-30T04:30:00Z`（条数与其中最早一条的 UTC 时刻）；OK：`no conflicts in 24 hours` |
-| `usage_pricing_error`（AIH-TASK-032） | 存在 `PRICING_ERROR` 的事件：`P2` | `P2`：`3 events PRICING_ERROR, earliest received 2026-10-01T04:00:00Z, codes NO_PRICING_RULE, NO_PROVIDER_PRICE`；OK：`no PRICING_ERROR events` |
-| `usage_fx_rate_error`（AIH-TASK-032） | 存在 `FX_RATE_ERROR` 的事件：`P2` | `P2`：`1 event FX_RATE_ERROR, earliest received …`；OK：`no FX_RATE_ERROR events` |
-| `usage_model_unknown`（AIH-TASK-032） | 存在 `MODEL_UNKNOWN` 的事件：`P2` | `P2`：`2 events MODEL_UNKNOWN, earliest received …`；OK：`no MODEL_UNKNOWN events` |
+| `usage_pricing_error`（AIH-TASK-032；合并行的名字，也是它的成员） | 存在 `PRICING_ERROR` 的事件：`P2` | `P2`：`3 events PRICING_ERROR, earliest received 2026-10-01T04:00:00Z, codes NO_PRICING_RULE, NO_PROVIDER_PRICE`；OK：`no PRICING_ERROR events` |
+| `usage_fx_rate_error`（AIH-TASK-032；成员，并入 `usage_pricing_error` 一行） | 存在 `FX_RATE_ERROR` 的事件：`P2` | `P2`：`1 event FX_RATE_ERROR, earliest received …`；OK：`no FX_RATE_ERROR events` |
+| `usage_model_unknown`（AIH-TASK-032；成员，并入 `usage_pricing_error` 一行） | 存在 `MODEL_UNKNOWN` 的事件：`P2` | `P2`：`2 events MODEL_UNKNOWN, earliest received …`；OK：`no MODEL_UNKNOWN events` |
 | `usage_failed`（AIH-TASK-032） | 存在 `FAILED_FINAL` 的事件，或有 `FAILED_RETRYABLE` 的事件已尝试 ≥ 3 次：`P2`；其中有 `FAILED_FINAL` 带 `LEDGER_CONFLICT` 或 `AMOUNT_OUT_OF_RANGE`：`P1` | `1 FAILED_FINAL, 2 FAILED_RETRYABLE with 3+ attempts, earliest received …, codes LEDGER_CONFLICT, LOCK_WAIT_TIMEOUT`；OK：`no failed events` |
-| `usage_processing_backlog`（AIH-TASK-032） | 最早的可处理事件（`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`）等待超过 5 分钟（§119 p99），或存在租约已过期仍未回收的 `PROCESSING`（回收任务本身停了）：`P2`；等待超过 30 分钟，或有 `PROCESSING` 过期超过 10 分钟：`P1`。等待的起点是事件变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个，`FAILED_RETRYABLE` 取 `next_attempt_at`。另两段（AIH-TASK-158，设计闸门 #565 v6 §2「告警」）：**缺失对账单**——首个账期（`2026-12`）起、`cutoff(M) + 6 小时 ≤ now < cutoff(M) + 30 小时` 的每个账期，与此刻合格（`PREPAID`、有钱包且钱包早于账期结束）的每个租户，没有对账单的项数大于 0：`P2`；只报这 24 小时，窗口过后回到 OK（永久停出若一直报，这个维度的 Healthchecks 检查会一直 down，遮住之后的 `P1`）。**晚到用量**——`[now − 24 小时, now)` 内入账的预付租户 `AI_USAGE` 账本行（内连接得上事件的），按马来西亚月边界拆成至多两段，每段按该月 `K` 判定：`occurred_at < start(K)` 且不是「`occurred_at ≥ start(K-1)` 且 `created_at < cutoff(K-1)`」的为晚到（宽限日内入账的上月用量不算）；晚到条数占比或金额占比 ≥ 1%：`P2`（用精确比值判定，摘要里舍入后的百分比只用于显示）。级别取五部分中最严重的 | 恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>`，只有计数、时刻、账期与百分比，不含租户、金额与公司名。例：`3 due, oldest since 2026-10-01T04:20:00Z; 1 PROCESSING, earliest claimed 2026-10-01T04:29:50Z; 0 lease expired; 0 statements missing; late usage 24h 0/120 rows (0.00%), 0.00% of amount`。缺失对账单部分：`0 statements missing`，或 `<n> statements missing, earliest period <YYYY-MM>`。晚到用量部分：`late usage 24h <晚到条数>/<总条数> rows (<条数占比>%), <金额占比>% of amount`，百分比 `ROUND_HALF_UP` 到两位小数，分母为 0 时写 `0.00`（`0.995%` 显示为 `1.00%`，级别仍 OK）。空库：`0 due; 0 PROCESSING; 0 lease expired; 0 statements missing; late usage 24h 0/0 rows (0.00%), 0.00% of amount` |
+| `usage_processing_backlog`（AIH-TASK-032） | 最早的可处理事件（`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`）等待超过 5 分钟（§119 p99），或存在租约已过期仍未回收的 `PROCESSING`（回收任务本身停了）：`P2`；等待超过 30 分钟，或有 `PROCESSING` 过期超过 10 分钟：`P1`。等待的起点是事件变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个，`FAILED_RETRYABLE` 取 `next_attempt_at`。另两段（AIH-TASK-158，设计闸门 #565 v6 §2「告警」）：**缺失对账单**——首个账期（`2026-12`）起、`cutoff(M) + 6 小时 ≤ now < cutoff(M) + 30 小时` 的每个账期，与此刻合格（`PREPAID`、有钱包且钱包早于账期结束）的每个租户，没有对账单的项数大于 0：`P2`；只报这 24 小时，窗口过后回到 OK（永久停出若一直报，这个维度的 Healthchecks 检查会一直 down，遮住之后的 `P1`）。**晚到用量**——`[now − 24 小时, now)` 内入账的预付租户 `AI_USAGE` 账本行（内连接得上事件的），按马来西亚月边界拆成至多两段，每段按该月 `K` 判定：`occurred_at < start(K)` 且不是「`occurred_at ≥ start(K-1)` 且 `created_at < cutoff(K-1)`」的为晚到（宽限日内入账的上月用量不算）；晚到条数占比或金额占比 ≥ 1%：`P2`（用精确比值判定，摘要里舍入后的百分比只用于显示）。第六段（AIH-TASK-250，设计闸门 #755 v1 §2「告警」）：**供应商成本未对账**——判定月 `m` 为 `now` 所在 UTC 月的上一个月，且不早于首个对账月（`FIRST_RECONCILIATION_MONTH`）；只在 `period_end(m) + 9 天 ≤ now < period_end(m) + 12 天`（上月结束后第 9 至 12 天）里判定：`m` 里有范围内（经 AI 模块）已处理事件的供应商没有当前对账记录：`P2`；窗口外恒 OK，只报这 72 小时（持续红会遮住同一检查后来的故障）。处置：到管理端供应商成本页录入上月的 Console 消耗额。级别取六部分中最严重的 | 恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>; <供应商成本>`，只有计数、时刻、账期、百分比，以及第六段的供应商代码与月份，不含租户、金额与公司名。例：`3 due, oldest since 2026-10-01T04:20:00Z; 1 PROCESSING, earliest claimed 2026-10-01T04:29:50Z; 0 lease expired; 0 statements missing; late usage 24h 0/120 rows (0.00%), 0.00% of amount; provider cost reconciled or not due`。供应商成本部分：`provider cost reconciled or not due`，或 `provider cost <code>,<code> not reconciled for <YYYY-MM>`（供应商代码按字母升序，逗号分隔、无空格）。缺失对账单部分：`0 statements missing`，或 `<n> statements missing, earliest period <YYYY-MM>`。晚到用量部分：`late usage 24h <晚到条数>/<总条数> rows (<条数占比>%), <金额占比>% of amount`，百分比 `ROUND_HALF_UP` 到两位小数，分母为 0 时写 `0.00`（`0.995%` 显示为 `1.00%`，级别仍 OK）。空库：`0 due; 0 PROCESSING; 0 lease expired; 0 statements missing; late usage 24h 0/0 rows (0.00%), 0.00% of amount; provider cost reconciled or not due` |
 | `wallet_negative_balance`（AIH-TASK-032；并入钱包核对 AIH-TASK-133，设计闸门 #474 v13 §2「告警」；并入支付判据 AIH-TASK-175，设计闸门 #580 v3 §2「告警」；支付判据更新 AIH-TASK-181，设计闸门 #585 v3 §2「告警」；缺收据判据 AIH-TASK-201，设计闸门 #589 v2 §2「告警」） | 级别取下列最严重的一条：「待判运行集」里任何一条核对运行的 `wallets_inconsistent > 0`：`P1`；存在余额 < 0 的钱包（§120）：`P2`；没有 `COMPLETED` 的核对运行，或最近一次的 `finished_at` 早于 `now - 30 小时`：`P2`；存在 `run_date` 晚于马来西亚今天、或 `finished_at` 晚于 `now + 10 分钟` 的运行（时钟异常）：`P2`；都不成立：`OK`。**正常行**是 `run_date` 不晚于今天且 `finished_at` 为空或不晚于 `now + 10 分钟` 的运行，其余是时钟异常的行。**最近一次 `COMPLETED`** 是正常行的 `COMPLETED` 里 `id`（插入顺序）最大的一条，不按 `finished_at` 或 `run_date`；只有时钟异常的 `COMPLETED` 行时视为没有。**待判运行集**是它加上 `id` 比它大的全部运行（不论状态、不论正常行还是异常行），没有它时为全部运行：运行中或已放弃的运行记下的不一致同样 P1，P1 持续到出现一次没有不一致的完成运行。`K` 是待判集里除最近一次 `COMPLETED` 以外的运行的 `wallets_inconsistent` 最大值。**支付判据**（窗口一律是 `now − 24 小时 < 时刻 ≤ now`，晚于 now 的不计）：`status = REVIEW_REQUIRED` 的支付（不论进入多久，一直报到结案）：`P1`；`event_type` 为 `charge.dispute.created` 或 `charge.refunded`、`processing_status` 不是 `IGNORED`、`received_at` 在窗口内的支付事件，不含「`charge.refunded` 且关联的支付 `resolution = CLOSED`」（不入账结案后在 Stripe 退款的预期结果）：`P1`；`status = PENDING` 且 `expires_at ≤ now − 3600 秒` 的支付：`P2`；`fingerprint_conflict_at` 在窗口内的支付事件（同一事件 id 收到内容不同的请求体）：`P1`；`BILLING_PAYMENTS_ENABLED` 打开但两个 Stripe 密钥文件有一个读不到或为空、Stripe 密钥前缀不是 `sk_live_` / `sk_test_`、签名密钥前缀不是 `whsec_`、`BILLING_STRIPE_API_BASE_URL` 为空、或 `BILLING_FRONTEND_BASE_URL` 为空：`P1`；`RECEIVED` / `RETRY` / `PROCESSING` 的事件里最早的 `received_at` 距今超过 900 秒（年龄取 `max(0, ⌊now − received_at⌋)` 秒，严格大于）：`P2`；`processed_at` 在窗口内、状态为 `UNMATCHED` 或 `REJECTED` 的事件：`P2`；`status = PAID`、`paid_at ≤ now − 3600 秒` 且没有收据（`payment_receipts` 里没有它的行）的支付：`P2`（正常路径下收据与入账同时提交，这一条只在开具检查持续不过或补发扫描 `receipts-issue-missing` 停摆时触发；处置：看补发扫描的日志 `Receipt back-fill finished` 的计数与 `Receipt not issued; a pre-issue check failed` 的原因码，按 [docs/payment-flow.md](payment-flow.md) 的收据一节与 [runbook](runbook.md) 支付一节第 5 步处理）。争议与退款事件只告警，支付与钱包都不变 | 恰好 `<负余额部分>; <核对部分>`，只有计数与日期。负余额部分：`no wallet below zero` / `1 wallet below zero` / `<n> wallets below zero`。核对部分：`reconciliation never completed`，或 `reconciliation <run_date> checked <N> inconsistent <M>`（最近一次 `COMPLETED`），过期时末尾加 ` stale`；`K > 0` 时再接 `; later inconsistent <K>`；有时钟异常的行时最后接 `; clock anomaly <行数>`。例：`no wallet below zero; reconciliation 2026-10-28 checked 3 inconsistent 0`；`2 wallets below zero; reconciliation 2026-10-26 checked 3 inconsistent 1 stale`；`no wallet below zero; reconciliation never completed`；`no wallet below zero; reconciliation 2026-10-25 checked 3 inconsistent 0 stale; later inconsistent 1`；`no wallet below zero; reconciliation 2026-10-27 checked 3 inconsistent 0 stale; later inconsistent 1; clock anomaly 1`。支付部分只在 `<a>`、`<b>`、`<d>`、`<e>`、`<f>`、`<g>` 任一大于 0、最老未处理事件超过 900 秒（严格大于）或配置判据触发时追加在最后，逐字为 `; payments: review open <a>, event conflicts 24h <b>, oldest open event <c>s, unmatched or rejected 24h <d>, stale pending <e>, disputes or refunds 24h <f>, receipts missing 1h <g>, config <ok\|missing>`（`<a>` 是未结案的复核数；`<c>` 没有未处理事件时为 0；`<e>` 是过期一小时仍 `PENDING` 的支付数；`<f>` 按上面争议与退款的 `P1` 判据计数，已排除 `IGNORED` 与结案后的退款；`<g>` 是入账一小时后仍没有收据的 `PAID` 支付数）；都不成立时摘要与上面逐字相同。例：`no wallet below zero; reconciliation 2026-10-28 checked 3 inconsistent 0; payments: review open 1, event conflicts 24h 0, oldest open event 0s, unmatched or rejected 24h 0, stale pending 0, disputes or refunds 24h 0, receipts missing 1h 0, config ok` |
 | `outbox_backlog`（AIH-TASK-032；并入死信 AIH-TASK-149） | 只看 `domain_outbox` 里**有处理器**的事件类型（`app/tasks/outbox.py` 的 `handled_event_types()`，与周期恢复同一份：邮件类的密码重置、门户邀请、`NOTIFICATION_EMAIL_REQUESTED`（通知邮件，AIH-TASK-152）、`PAYMENT_RECEIPT_EMAIL_REQUESTED`（付款邮件，AIH-TASK-198）与 `PASSWORD_CHANGED_EMAIL_REQUESTED`（改密通知，设计闸门 #751 v3），通知类的 `tenant.billing_status_changed` 与 `tenant.low_balance`）；仍没有处理器的类型（例如 `tenant.account_status_changed`、`tenant.billing_mode_changed`）按设计持久等待，两部分都不计入。两部分：**积压**——存在创建超过 10 分钟（`created_at < now - 10 分钟`）仍 `PENDING` 的行（§120）；**死信**——存在 `FAILED` 且 `processed_at` 晚于 `now - 7 天`（严格大于；`processed_at` 为空的行不计）的行。任一部分成立即 `P2`，都不成立为 OK，不出现 `P1`。7 天窗口与 `usage_event_conflicts` 的窗口做法一致：不需要确认机制，死信过了窗口自动恢复；7 天覆盖周末没人看告警的情况 | 恰好 `<积压部分>; <死信部分>`，只有计数与时刻（UTC），不含租户、`outbox_id`、`aggregate_id`、邮箱或 `event_type`。积压部分：`no handled outbox row pending over 10 minutes` / `1 row pending over 10 minutes, oldest created <时刻>` / `<n> rows pending over 10 minutes, oldest created <时刻>`。死信部分：`no dead letter in 7 days` / `1 dead letter in 7 days, latest <时刻>` / `<n> dead letters in 7 days, latest <时刻>`（`latest` 是其中最晚的 `processed_at`）。例：OK `no handled outbox row pending over 10 minutes; no dead letter in 7 days`；`P2` `no handled outbox row pending over 10 minutes; 2 dead letters in 7 days, latest 2026-10-01T04:00:00Z` |
 | `status_webhook`（AIH-TASK-052） | 只统计 `integration_status = ENABLED` 且设了[状态 webhook 地址](#管理端项目集成状态与状态-webhook-地址)的项目（停用或没有地址的项目不推送，一律不计）。三个计数：**`failing`** = 投递落后（`delivered_version` 为空或小于客户的 `status_version`）且连续失败 ≥ 6 次（按默认退避约 15 分钟）的项目数；**`missing secret`** = 没有 `ACTIVE` [签名密钥](#管理端出站-webhook-签名密钥)的项目数（由数据推导，不看错误码）；**`signing error`** = 投递落后且最近一次因 `SECRET_DECRYPT_FAILED`（密钥解不开）或 `ENCRYPTION_NOT_CONFIGURED`（主密钥未配置）未发送的项目数。级别：`signing error > 0` 为 `P1`（加密配置坏了）；否则 `failing > 0` 或 `missing secret > 0` 为 `P2`；否则 OK | `P1` / `P2`：`failing 1, missing secret 0, signing error 2`（三个都是十进制整数，不做单复数变化）；OK：`no status webhook problem` |

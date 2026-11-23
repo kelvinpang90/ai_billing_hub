@@ -10,7 +10,14 @@
 import { AxiosError, AxiosHeaders, type AxiosResponse } from "axios";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { exportUsageAnalytics, getUsageAnalytics, usageAnalyticsExportUrl } from "./adminUsageAnalytics";
+import {
+  exportUsageAnalytics,
+  getUsageAnalytics,
+  usageAnalyticsExportUrl,
+  type UsageAnalyticsInternalMeteredOnly,
+  type UsageAnalyticsPrepaid,
+  type UsageAnalyticsReport,
+} from "./adminUsageAnalytics";
 import { ApiError, client } from "./client";
 
 const download = vi.hoisted(() => ({ downloadFile: vi.fn() }));
@@ -30,7 +37,15 @@ function envelope(data: unknown) {
   return { data: { success: true, data, error: null, request_id: "req-1" } };
 }
 
-const EMPTY_REPORT = { cost_basis: "estimated", items: [], page: 1, page_size: 20, total: 0 };
+const EMPTY_REPORT = {
+  cost_basis: "estimated",
+  provider_cost_allocation: "pro_rata_estimated_cost",
+  reconciliation_period_basis: "utc_calendar_month",
+  items: [],
+  page: 1,
+  page_size: 20,
+  total: 0,
+};
 
 function rejection(status: number, code: string, message: string, requestId: string) {
   const response = {
@@ -157,6 +172,104 @@ describe("usage analytics", () => {
     expect(typeof result.items[0]?.prepaid.billable_cost).toBe("string");
     expect(typeof result.items[0]?.prepaid.gross_margin_rate).toBe("string");
     expect(typeof result.items[0]?.average_input_tokens).toBe("string");
+  });
+
+  it("passes the reconciled provider cost keys through untouched (AIH-TASK-249)", async () => {
+    const prepaid: UsageAnalyticsPrepaid = {
+      event_count: 3,
+      billable_cost: "0.10000001",
+      estimated_provider_cost_myr: "0.06000000",
+      gross_margin: "0.04000001",
+      gross_margin_rate: "0.4000000959999904000009599999",
+      covered_estimated_cost_myr: "0.03000000",
+      reconciled_provider_cost_myr: "0.03300000",
+      provider_cost_myr: "0.06300000",
+      provider_cost_basis: "mixed",
+      gross_margin_on_provider_cost: "0.03700001",
+      gross_margin_on_provider_cost_rate: "0.333333333333333333333333333",
+    };
+    const internal: UsageAnalyticsInternalMeteredOnly = {
+      event_count: 1,
+      estimated_provider_cost_myr: "0.02000000",
+      reference_customer_price: "0.05000000",
+      covered_estimated_cost_myr: "0.02000000",
+      reconciled_provider_cost_myr: "0.02200000",
+      provider_cost_myr: "0.02200000",
+      provider_cost_basis: "reconciled",
+    };
+    const aggregate = {
+      event_count: 4,
+      token_event_count: 4,
+      input_tokens: 40,
+      output_tokens: 20,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      average_input_tokens: "10",
+      average_output_tokens: "5",
+      prepaid,
+      internal_metered_only: internal,
+    };
+    const report: UsageAnalyticsReport = {
+      cost_basis: "estimated",
+      usage_period_basis: "occurred_at",
+      provider_cost_allocation: "pro_rata_estimated_cost",
+      reconciliation_period_basis: "utc_calendar_month",
+      items: [{ ...aggregate, group_key: "anthropic", group_name: null }],
+      page: 1,
+      page_size: 20,
+      total: 1,
+      totals: {
+        ...aggregate,
+        payments: {
+          period_basis: "paid_at",
+          paid_count: 1,
+          topup_amount: "10.00000000",
+          gateway_fee: "0.01000000",
+          gateway_fee_unknown_count: 0,
+        },
+        gross_profit: "0.03000001",
+        gross_profit_rate: "0.2999999700000029999997",
+        gross_profit_on_provider_cost: "0.02700001",
+        gross_profit_on_provider_cost_rate: null,
+        reconciliation_coverage: [
+          {
+            reconciliation_id: ID,
+            provider_code: "anthropic",
+            billing_month: "2027-01",
+            period_start: "2027-01-01T00:00:00",
+            period_end: "2027-02-01T00:00:00",
+            fully_in_range: false,
+            allocatable: true,
+          },
+          {
+            reconciliation_id: ID,
+            provider_code: "anthropic",
+            billing_month: "2027-02",
+            period_start: "2027-02-01T00:00:00",
+            period_end: "2027-03-01T00:00:00",
+            fully_in_range: true,
+            allocatable: false,
+          },
+        ],
+        unallocated_reconciled_months: ["anthropic:2027-02"],
+        unallocated_reconciled_cost_myr: "7.50000000",
+      },
+    };
+    vi.spyOn(client, "get").mockResolvedValue(envelope(report));
+
+    const result = await getUsageAnalytics({ group_by: "provider", occurred_from: FROM, occurred_to: TO }, 1, 20);
+
+    expect(result).toEqual(report);
+    expect(result.provider_cost_allocation).toBe("pro_rata_estimated_cost");
+    expect(result.reconciliation_period_basis).toBe("utc_calendar_month");
+    expect(result.items[0]?.prepaid.provider_cost_myr).toBe("0.06300000");
+    expect(result.items[0]?.prepaid.gross_margin_on_provider_cost_rate).toBe("0.333333333333333333333333333");
+    expect(result.items[0]?.internal_metered_only.provider_cost_basis).toBe("reconciled");
+    expect(result.totals.gross_profit_on_provider_cost).toBe("0.02700001");
+    expect(result.totals.gross_profit_on_provider_cost_rate).toBeNull();
+    expect(result.totals.reconciliation_coverage.map((record) => record.allocatable)).toEqual([true, false]);
+    expect(result.totals.unallocated_reconciled_months).toEqual(["anthropic:2027-02"]);
+    expect(typeof result.totals.unallocated_reconciled_cost_myr).toBe("string");
   });
 
   it("sends group_by=month as the dimension", async () => {

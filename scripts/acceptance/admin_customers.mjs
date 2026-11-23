@@ -59,6 +59,13 @@
  * AIH-TASK-240 加了用量分析页导出 Excel 按钮的一个只读步骤（check_analytics_xlsx），排在 open_usage_analytics 之后、不自己
  * 导航，只查「Export Excel」恰好一个且可用、不点（设计闸门 #753 v1 §2「浏览器验收」、§11）；check_analytics_totals 不变，
  * check_analytics_export 按文字全等找「Export CSV」，不受新按钮影响、行为不变。
+ * AIH-TASK-246 加了管理端供应商成本页的两个只读步骤（open_provider_costs 排在 login 之后、经顶栏自己进供应商成本页；
+ * check_provider_cost_months 排在 open_provider_costs 之后、不自己导航，核对月份表格的行数、月份与状态文字），都不点任何
+ * 按钮、不打开表单（设计闸门 #755 v1 §2「管理端页面」、§11）。
+ * AIH-TASK-249 加了用量分析页对账后供应商成本的一个只读步骤（check_analytics_provider_cost），排在 open_usage_analytics
+ * 之后、不自己导航，核对合计块里「Provider cost (reconciled where available)」「Gross profit on provider cost」两项与页面
+ * 自己发出的分析 GET 的响应一致（设计闸门 #756 v2 §2「页面」）；check_usage_analytics、check_analytics_totals、
+ * check_analytics_export 与 check_analytics_xlsx 不变（新的两项 th 文字与「Gross profit」不全等，不影响按文字全等找项）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -170,7 +177,8 @@
  *   链接、顶栏「Audit log」、审计页「Action」下拉里 title 为 `LOGIN` 的那一项和「Apply filters」按钮（只让页面按
  *   新的筛选条件重新发 GET）、顶栏「AI catalog」（href 为 /catalog/providers）、供应商页里的「Meter types」链接
  *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
- *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Pricing rules」（href 为 /pricing/rules）、顶栏
+ *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Provider costs」（href 为 /provider-costs）、顶栏「Pricing rules」
+ *   （href 为 /pricing/rules）、顶栏
  *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏
  *   「Usage analytics」（href 为 /usage-analytics）、顶栏「Wallet reconciliation」（href 为 /wallet-reconciliation）、顶栏
  *   「Monthly statements」（href 为 /statements）、顶栏「Payments」（href 为 /payments）、顶栏「Payment settings」
@@ -203,6 +211,8 @@
  *   合计块（check_analytics_totals）只看不点；「Export CSV」按钮（check_analytics_export）**只查不点**（验收不下载文件）。
  *   「Export Excel」按钮（check_analytics_xlsx）同样**只查不点**（验收不下载文件）：不自己导航，停在 open_usage_analytics
  *   打开的那一页，不点「Export Excel」「Export CSV」或任何别的按钮与链接、不改筛选、不翻页，不填也不提交任何表单。
+ *   合计块里的对账后供应商成本（check_analytics_provider_cost）同样只看不点：不自己导航，停在 open_usage_analytics 打开的
+ *   那一页，不点任何按钮与链接、不改筛选、不翻页，不填也不提交任何表单。
  *   钱包核对页（open_wallet_reconciliation）不点运行表的任何一行（不打开不一致列表）、不翻页、不改每页条数、不点
  *   「Try again」或任何别的按钮与链接，不填也不提交任何表单（页面本身没有写操作入口）。
  *   对账单页（open_statements）不点列表的任何一行（不打开详情）、不点「Previous」「Next」（不翻页）、不动客户下拉与
@@ -219,6 +229,10 @@
  *   不动状态与客户下拉和创建日期输入框、不点「Try again」或任何别的按钮与链接，不填也不提交任何表单。
  *   支付设置页（open_payment_settings）不改任何输入框、不点「Save settings」（保存会写数据并把版本加一）、不点
  *   「Refresh」「Try again」或任何别的按钮与链接，不提交任何表单。
+ *   供应商成本页（open_provider_costs、check_provider_cost_months）只点顶栏「Provider costs」（href 为 /provider-costs）这一个
+ *   链接（check_provider_cost_months 连它也不点）：不点「Reconcile」「Correct」（不打开录入表单，更不点「Preview」「Confirm」：
+ *   确认会写一行不可变的对账记录与审计）、不点月份表格的任何一行或展开按钮（不打开详情）、不动供应商下拉，不点任何别的
+ *   按钮与链接，不填也不提交任何表单。
  *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
@@ -363,6 +377,18 @@
  *                   「Export Excel」（usageAnalytics.export.buttonXlsx）的按钮恰好一个，且处于可用状态（没有 disabled 属性、
  *                   aria-disabled 不是 true）。找不到按钮是 element_missing，不止一个或一直不可用是 assertion_failed。**不点**
  *                   这个按钮（验收不下载文件），也不点「Export CSV」或任何别的按钮与链接、不改筛选、不翻页、不填也不提交任何表单
+ *   check_analytics_provider_cost
+ *                   本次运行跑过 open_usage_analytics 才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认
+ *                   open_usage_analytics 打开的那一页（落定的判定与失败码同 check_usage_analytics）。后端值取页面自己发出的
+ *                   GET /api/v1/admin/usage-analytics 的响应体（被动观察，不自己发请求、不拦截；取点顶栏之后成功读完的最近
+ *                   一次），不是成功信封、没有 data.totals、totals.prepaid.provider_cost_myr 不是字符串、
+ *                   totals.gross_profit_on_provider_cost 既不是字符串也不是 null，都是 assertion_failed。合计块（规则同
+ *                   check_analytics_totals）里 <th> 文字恰为「Provider cost (reconciled where available)」
+ *                   （usageAnalytics.totals.providerCost）与「Gross profit on provider cost」
+ *                   （usageAnalytics.totals.grossProfitOnProviderCost）的两项各恰好一个，<td> 的全部文字（去首尾空白）分别等于
+ *                   totals.prepaid.provider_cost_myr 与 totals.gross_profit_on_provider_cost（null 时为短横「—」）。找不到合计块
+ *                   或某一项是 element_missing，文字不等或不止一个是 assertion_failed。不改筛选、不翻页。报到前把合计块滚动到
+ *                   视口里（规则同 check_analytics_totals）
  *   open_wallet_reconciliation
  *                   要排在 login 之后。点顶栏「Wallet reconciliation」（en.json 的 nav.walletReconciliation，href 为 paths.ts 的
  *                   walletReconciliation，即 /wallet-reconciliation）进钱包核对页；页面落定：地址是 /wallet-reconciliation，运行表
@@ -440,6 +466,24 @@
  *                   （paymentSettings.field.version，带边框的 Descriptions：label 在 <th>，值在紧跟的 <td>）恰好一项，文字等于
  *                   version。不改任何输入、不点「Save settings」或任何按钮、不提交任何表单。报到前把设置一块滚动到视口里
  *                   （放得下时整块在视口内，放不下时顶端在视口内）
+ *   open_provider_costs
+ *                   要排在 login 之后（本次运行没跑过 login 就 assertion_failed）。点顶栏「Provider costs」（en.json 的
+ *                   nav.providerCosts，href 为 paths.ts 的 providerCosts，即 /provider-costs）进供应商成本页；页面落定：地址是
+ *                   /provider-costs，月份一块（role=region、aria-label 为「Months」，providerCosts.months.title）不再显示
+ *                   providerCosts.months.loading，且不是加载失败（这一页不用 role=alert：显示 providerCosts.months.loadFailed 或
+ *                   providerCosts.providerNotFound 的文字，或出现任何 role=alert，都是 page_error）、无权限（providerCosts.forbidden，
+ *                   assertion_failed）或路由兜底页；月份表格（表头有「Month (UTC)」「Status」）已经画出来（空列表合法）。不点任何
+ *                   按钮、不点行、不动供应商下拉
+ *   check_provider_cost_months
+ *                   本次运行跑过 open_provider_costs 才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认
+ *                   open_provider_costs 打开的那一页（落定的判定与失败码同 open_provider_costs）。后端值取页面在点顶栏之后自己发出的
+ *                   GET /api/v1/admin/provider-cost-reconciliations/months 的响应体（被动观察，不自己发请求、不拦截；取成功读完的
+ *                   最近一次），不是成功信封、没有 items 数组、某一项的 billing_month 不是非空字符串或 status 不是 RECONCILED /
+ *                   NOT_RECONCILED，都是 assertion_failed。月份表格里带 data-row-key 的数据行数等于 items 的条数，按顺序每一行
+ *                   「Month (UTC)」列的文字等于该项的 billing_month、「Status」列的文字按 status 恰为「Reconciled」或「Not reconciled」
+ *                   （providerCosts.status.reconciled / notReconciled）；items 为空时没有数据行、表格的空状态文字恰为「No completed
+ *                   months to reconcile yet.」（providerCosts.months.empty），同样算通过。不点「Reconcile」「Correct」或任何按钮、
+ *                   不打开表单、不点行、不提交任何表单。报到前把月份一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
  *   check_account_status
  *                   在夹具客户详情（open_fixture 打开的那一页）上，后端值取详情页自己发出的
  *                   GET /api/v1/admin/customers/{customer_id} 的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次
@@ -863,6 +907,8 @@ const TEXT = {
   analyticsUsageRevenue: "Usage revenue", // usageAnalytics.totals.usageRevenue —— 合计块里的一项（th）
   analyticsGrossProfit: "Gross profit", // usageAnalytics.totals.grossProfit
   analyticsGatewayFees: "Gateway fees", // usageAnalytics.totals.gatewayFees
+  analyticsProviderCost: "Provider cost (reconciled where available)", // usageAnalytics.totals.providerCost
+  analyticsGrossProfitOnProviderCost: "Gross profit on provider cost", // usageAnalytics.totals.grossProfitOnProviderCost
   analyticsNull: "—", // 合计块里 null 的显示（frontend/src/features/usage/UsageEventsPage.tsx 的 EMPTY）
   analyticsExport: "Export CSV", // usageAnalytics.export.button —— 只确认它在且可用，不点
   analyticsExportXlsx: "Export Excel", // usageAnalytics.export.buttonXlsx —— 只确认它在且可用，不点
@@ -909,6 +955,17 @@ const TEXT = {
   paymentSettingsLoading: "Loading payment settings…", // paymentSettings.loading
   paymentSettingsMinAmount: "Minimum top-up (MYR)", // paymentSettings.field.minAmount —— 最低充值额输入框的 label，只读不改
   paymentSettingsVersion: "Version", // paymentSettings.field.version —— 设置一块里 Descriptions 的一项
+  navProviderCosts: "Provider costs", // nav.providerCosts —— 顶栏的供应商成本项
+  providerCostsMonthsTitle: "Months", // providerCosts.months.title —— 月份一块的 aria-label
+  providerCostsForbidden: "Only administrators can view provider costs.", // providerCosts.forbidden
+  providerCostsLoading: "Loading months…", // providerCosts.months.loading
+  providerCostsLoadFailed: "The months could not be loaded.", // providerCosts.months.loadFailed（普通文字，不是 role=alert）
+  providerCostsProviderNotFound: "This provider is not in the AI catalog.", // providerCosts.providerNotFound（同上）
+  providerCostsEmpty: "No completed months to reconcile yet.", // providerCosts.months.empty —— 表格的空状态文字
+  providerCostsMonth: "Month (UTC)", // providerCosts.field.month —— 月份表格的列头
+  providerCostsStatus: "Status", // providerCosts.field.status
+  // 月份状态 → 「Status」列的文案（providerCosts.status.reconciled / notReconciled）。
+  providerCostsStatusText: { RECONCILED: "Reconciled", NOT_RECONCILED: "Not reconciled" },
   customersForbidden: "Only administrators can manage customers.", // customers.forbidden —— 客户区块（含签名密钥面板）的无权限
   projectName: "Project name", // customers.projects.field.name —— 项目表格的列头
   projectDescription: "Description", // customers.projects.field.description
@@ -1123,6 +1180,7 @@ const TEXT = {
   statementsPath: "/statements",
   paymentsPath: "/payments",
   paymentSettingsPath: "/payment-settings",
+  providerCostsPath: "/provider-costs",
   portalHomePath: "/portal",
   portalWalletPath: "/portal/wallet",
   portalUsagePath: "/portal/usage",
@@ -1229,6 +1287,11 @@ const PAYMENTS_API = /^\/api\/v1\/admin\/payments$/;
 
 /** 支付设置接口的路径（frontend/src/api/adminPaymentSettings.ts 的 PAYMENT_SETTINGS_URL）。只记 GET：本脚本不保存。 */
 const PAYMENT_SETTINGS_API = /^\/api\/v1\/admin\/payment-settings$/;
+
+/** 供应商成本月份总览接口的路径（frontend/src/api/adminProviderCosts.ts 的 MONTHS_URL）。只记 GET：本脚本不预览、不确认。 */
+const PROVIDER_COST_MONTHS_API = /^\/api\/v1\/admin\/provider-cost-reconciliations\/months$/;
+/** 月份总览里 status 的取值（docs/api.md「管理端供应商成本对账」）。 */
+const PROVIDER_COST_MONTH_STATUSES = new Set(["RECONCILED", "NOT_RECONCILED"]);
 
 /** 钱包流水接口的路径（frontend/src/api/walletTransactions.ts 的 listWalletTransactions）。 */
 const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/transactions$/;
@@ -1765,6 +1828,8 @@ const network = {
   payments: new Map(),
   /** 支付设置接口（只记 GET）：requestId → { status, finished, failed, seq }。 */
   paymentSettings: new Map(),
+  /** 供应商成本月份总览接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
+  providerCostMonths: new Map(),
   /** 钱包流水接口：requestId → { customerId, newest, status, finished, failed, seq }。查询串本身不保存。 */
   walletTransactions: new Map(),
   /** 门户账号接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
@@ -1811,6 +1876,7 @@ function trackedRequest(requestId) {
     network.statementDetails.get(requestId) ??
     network.payments.get(requestId) ??
     network.paymentSettings.get(requestId) ??
+    network.providerCostMonths.get(requestId) ??
     network.walletTransactions.get(requestId) ??
     network.portalAccounts.get(requestId) ??
     network.lowBalanceThresholds.get(requestId) ??
@@ -2184,6 +2250,21 @@ function isPaymentSettings(url) {
   }
 }
 
+/** 是不是供应商成本月份总览接口（同源 https、路径恰好是这个接口，查询串不看、不保存）。 */
+function isProviderCostMonths(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" && parsed.hostname === network.host && PROVIDER_COST_MONTHS_API.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 是不是项目列表接口（同源 https）：是的话回路径里的客户 id 与「查询串是不是第 1 页」，不是回 null。
  * 只留这两样，不保存 URL。
@@ -2408,6 +2489,14 @@ function observeNetwork(sessionId) {
         }
         if (isPaymentSettings(params.request?.url) && params.request?.method === "GET") {
           network.paymentSettings.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
+        if (isProviderCostMonths(params.request?.url) && params.request?.method === "GET") {
+          network.providerCostMonths.set(params.requestId, {
             status: null,
             finished: false,
             failed: false,
@@ -2763,6 +2852,23 @@ function latestPaymentsResponse(afterSeq) {
 function latestPaymentSettingsResponse(afterSeq) {
   let best = null;
   for (const [requestId, request] of network.paymentSettings) {
+    if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/** afterSeq 之后发出、成功读完的供应商成本月份总览请求里最近的一次；还有在路上的就回 null，等它落定。 */
+function latestProviderCostMonthsResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, request] of network.providerCostMonths) {
     if (request.seq <= afterSeq) {
       continue;
     }
@@ -3739,6 +3845,36 @@ function probeAnalyticsTotals(lib, T) {
 }
 
 /**
+ * 用量分析页合计块里的对账后供应商成本（check_analytics_provider_cost 用）：合计块（role=region、aria-label 为「Totals」）
+ * 在不在；块里 <th> 文字恰为「Provider cost (reconciled where available)」「Gross profit on provider cost」的两项（带边框的
+ * Descriptions：label 在 <th>，值在紧跟的 <td>）各有几个、恰好一个时 <td> 的全部文字（去首尾空白）。只读 DOM，不点、不填。
+ */
+function probeAnalyticsProviderCost(lib, T) {
+  const region =
+    [...document.querySelectorAll('[role="region"]')].find(
+      (el) => el.getAttribute("aria-label") === T.analyticsTotalsTitle,
+    ) ?? null;
+  const item = (label) => {
+    const cells = [];
+    if (region !== null) {
+      for (const th of region.querySelectorAll("th")) {
+        const td = th.nextElementSibling;
+        if (lib.norm(th.textContent) === label && td && td.tagName === "TD") {
+          cells.push(td);
+        }
+      }
+    }
+    return { count: cells.length, text: cells.length === 1 ? (cells[0].textContent ?? "").trim() : null };
+  };
+  return {
+    path: location.pathname,
+    region: region !== null,
+    providerCost: item(T.analyticsProviderCost),
+    grossProfit: item(T.analyticsGrossProfitOnProviderCost),
+  };
+}
+
+/**
  * 用量分析页的导出 Excel 按钮（check_analytics_xlsx 用）：整页上文字恰好为「Export Excel」的按钮有几个，恰好一个时它是否
  * 可用（没有 disabled 属性、aria-disabled 不是 true）。只读 DOM，不点、不填。
  */
@@ -4261,6 +4397,100 @@ function probePaymentSettings(lib, T) {
     versionCells: versionCells.length,
     version: versionCells.length > 0 ? lib.norm(versionCells[0].textContent) : null,
   };
+}
+
+/**
+ * 供应商成本页的状态：月份一块（role=region、aria-label 为「Months」）里的表格（表头有「Month (UTC)」「Status」）带
+ * data-row-key 的数据行，按显示顺序逐行取「Month (UTC)」「Status」两列的文字；没有数据行时取空状态那一行（只有一格）的文字。
+ * 这一页的错误是普通文字、不是 role=alert，所以加载失败按文案认（任何 role=alert 也算失败）。只读，不点行、不碰任何按钮。
+ */
+function probeProviderCosts(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.providerCostsMonthsTitle) {
+      region = el;
+      break;
+    }
+  }
+  let table = false;
+  let emptyText = null;
+  const rows = [];
+  if (region !== null) {
+    for (const el of region.querySelectorAll("table")) {
+      const heads = [...el.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+      const month = heads.indexOf(T.providerCostsMonth);
+      const status = heads.indexOf(T.providerCostsStatus);
+      if (month < 0 || status < 0) {
+        continue;
+      }
+      table = true;
+      for (const tr of el.querySelectorAll(":scope > tbody > tr")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        const cells = tr.querySelectorAll(":scope > td");
+        if (tr.hasAttribute("data-row-key")) {
+          rows.push(
+            cells.length === heads.length
+              ? { month: lib.norm(cells[month].textContent), status: lib.norm(cells[status].textContent) }
+              : { month: null, status: null },
+          );
+        } else if (cells.length === 1) {
+          emptyText = lib.norm(cells[0].textContent);
+        }
+      }
+      break;
+    }
+  }
+  const forbidden = lib.leaf(T.providerCostsForbidden) !== null;
+  const failedText = lib.leaf(T.providerCostsLoadFailed) !== null || lib.leaf(T.providerCostsProviderNotFound) !== null;
+  return {
+    ...lib.common(T),
+    region: region !== null,
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.providerCostsLoading) !== null,
+    forbidden,
+    failed: !forbidden && (failedText || lib.alert()),
+    empty: table && rows.length === 0 && emptyText === T.providerCostsEmpty,
+    table,
+    rows,
+  };
+}
+
+/**
+ * 把月份一块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。
+ * 页面函数逐个序列化进页面执行，不能引用本文件的其他函数，所以找 region 的几行在这里与下一个函数里各写一遍。
+ */
+function scrollProviderCostsIntoView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.providerCostsMonthsTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的一块要整块在视口内；放不下的只要求顶端在视口内。 */
+function providerCostsInView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.providerCostsMonthsTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
 }
 
 /** 把设置一块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。 */
@@ -7156,6 +7386,67 @@ async function stepCheckAnalyticsTotals(ctx) {
   }
 }
 
+async function stepCheckAnalyticsProviderCost(ctx) {
+  // 不自己导航：只认 open_usage_analytics 打开的那一页，以及点顶栏之后页面自己发出的请求。
+  if (ctx.usageAnalyticsAfterSeq === null) {
+    throw fail("assertion_failed");
+  }
+  await awaitUsageAnalyticsSettled();
+
+  // 后端值：点顶栏之后页面自己发出、成功读完的最近一次分析 GET 的响应体（被动观察）。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestUsageAnalyticsResponse(ctx.usageAnalyticsAfterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const totals = envelope?.success === true ? envelope.data?.totals : null;
+    const providerCost = totals?.prepaid?.provider_cost_myr;
+    const grossProfit = totals?.gross_profit_on_provider_cost;
+    if (typeof providerCost !== "string" || (grossProfit !== null && typeof grossProfit !== "string")) {
+      throw fail("assertion_failed");
+    }
+    expected = { providerCost, grossProfit: grossProfit ?? TEXT.analyticsNull };
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 totals 或类型不对：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 合计块显示的就是这一份响应：两项各恰好一个，<td> 的全部文字逐字等于后端字符串（null 是短横）。
+  const matches = (s) =>
+    s.path === TEXT.usageAnalyticsPath &&
+    s.region &&
+    s.providerCost.count === 1 &&
+    s.grossProfit.count === 1 &&
+    s.providerCost.text === expected.providerCost &&
+    s.grossProfit.text === expected.grossProfit;
+  const shown = await waitFor(() => evaluate(probeAnalyticsProviderCost, TEXT), matches, ELEMENT_WAIT_MS);
+  if (!shown.ok) {
+    const s = shown.value;
+    const missing = s === null || !s.region || s.providerCost.count === 0 || s.grossProfit.count === 0;
+    throw fail(missing ? "element_missing" : "assertion_failed");
+  }
+
+  // Worker 在报到后截图：先把合计块滚进视口。
+  if ((await evaluate(scrollAnalyticsTotalsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(analyticsTotalsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckAnalyticsExport(ctx) {
   // 不自己导航：只认 open_usage_analytics 打开的那一页。
   if (ctx.usageAnalyticsAfterSeq === null) {
@@ -7800,6 +8091,102 @@ async function stepOpenPaymentSettings(ctx) {
     throw fail("element_missing");
   }
   const visible = await waitFor(() => evaluate(paymentSettingsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
+async function stepOpenProviderCosts(ctx) {
+  if (ctx.loginCompletedAt === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.providerCostsPath;
+  // 点顶栏之前的序号：check_provider_cost_months 只认在这之后页面自己发出的月份总览请求。
+  const beforeClick = network.seq;
+  const link = { text: TEXT.navProviderCosts, href: path };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同钱包核对页。首个对账月还没结束时空列表合法。
+  const opened = await waitFor(() => evaluate(probeProviderCosts, TEXT), catalogSettled(path), ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(opened.value, path, true);
+  ctx.providerCostsAfterSeq = beforeClick;
+}
+
+async function stepCheckProviderCostMonths(ctx) {
+  // 不自己导航：只认 open_provider_costs 打开的那一页，以及点顶栏之后页面自己发出的请求。
+  if (ctx.providerCostsAfterSeq === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.providerCostsPath;
+  const ready = await waitFor(() => evaluate(probeProviderCosts, TEXT), catalogSettled(path), ELEMENT_WAIT_MS);
+  if (!ready.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(ready.value, path, true);
+
+  // 后端值：页面自己发出的那次月份总览 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestProviderCostMonthsResponse(ctx.providerCostsAfterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expected = items.map((item) => {
+      const month = item?.billing_month;
+      const status = item?.status;
+      if (typeof month !== "string" || month.trim() === "" || !PROVIDER_COST_MONTH_STATUSES.has(status)) {
+        throw fail("assertion_failed");
+      }
+      return { month: month.replace(/\s+/g, " ").trim(), status: TEXT.providerCostsStatusText[status] };
+    });
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、月份或状态不合规：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 表格显示的就是这一份响应：数据行数与 items 条数一致，按顺序每行的月份与状态文字一致；items 为空时是空状态文字。
+  const shown = await waitFor(
+    () => evaluate(probeProviderCosts, TEXT),
+    (s) =>
+      s.path === path &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      s.table &&
+      (expected.length === 0
+        ? s.empty
+        : s.rows.length === expected.length &&
+          s.rows.every((row, index) => row.month === expected[index].month && row.status === expected[index].status)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.table ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把月份一块滚进视口。只滚动，不点任何行或按钮。
+  if ((await evaluate(scrollProviderCostsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(providerCostsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
   if (!visible.ok) {
     throw fail("assertion_failed");
   }
@@ -10509,12 +10896,15 @@ const STEPS = {
   check_analytics_totals: stepCheckAnalyticsTotals,
   check_analytics_export: stepCheckAnalyticsExport,
   check_analytics_xlsx: stepCheckAnalyticsXlsx,
+  check_analytics_provider_cost: stepCheckAnalyticsProviderCost,
   open_wallet_reconciliation: stepOpenWalletReconciliation,
   open_statements: stepOpenStatements,
   check_admin_statement_pdf: stepCheckAdminStatementPdf,
   open_payments: stepOpenPayments,
   check_admin_payment_receipts: stepCheckAdminPaymentReceipts,
   open_payment_settings: stepOpenPaymentSettings,
+  open_provider_costs: stepOpenProviderCosts,
+  check_provider_cost_months: stepCheckProviderCostMonths,
   check_account_status: stepCheckAccountStatus,
   check_account_closure: stepCheckAccountClosure,
   check_wallet_transactions: stepCheckWalletTransactions,
@@ -10591,9 +10981,14 @@ async function main() {
     loginSeq: null,
     /**
      * open_usage_analytics 点顶栏之前的网络序号；本次运行没跑过它时为 null（check_analytics_totals、
-     * check_analytics_export 与 check_analytics_xlsx 这时 assertion_failed）。
+     * check_analytics_export、check_analytics_xlsx 与 check_analytics_provider_cost 这时 assertion_failed）。
      */
     usageAnalyticsAfterSeq: null,
+    /**
+     * open_provider_costs 点顶栏之前的网络序号（页面落定之后才写入）；本次运行没跑过它、或它没成功时为 null
+     * （check_provider_cost_months 这时 assertion_failed）。
+     */
+    providerCostsAfterSeq: null,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */
     portalUsageChecked: false,
     /** check_portal_usage_export 成功跑完后为 true：check_portal_monthly_export 只在这之后、停在用量页上跑。 */

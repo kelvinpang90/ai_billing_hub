@@ -15,6 +15,13 @@ from payment_world import (
     paid_payment_maker,  # noqa: F401  (registers the shared fixture)
     payment_settings_seeder,  # noqa: F401  (registers the shared fixture)
 )
+from provider_cost_world import (
+    provider_cost_db,  # noqa: F401  (registers the shared fixture)
+    provider_cost_mysql,  # noqa: F401  (registers the shared fixture)
+    provider_cost_mysql_world,  # noqa: F401  (registers the shared fixture)
+    provider_cost_sqlite,  # noqa: F401  (registers the shared fixture)
+    provider_cost_world,  # noqa: F401  (registers the shared fixture)
+)
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 

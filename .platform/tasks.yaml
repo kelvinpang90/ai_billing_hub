@@ -13914,7 +13914,7 @@ tasks:
     title: Excel 导出第八层：运维手册补 xlsx 导出排查，勾选 Phase 5 与 Phase 7 的导出项
     purpose: >-
       按 docs/design/AIH-TASK-234-excel-exports.md（设计闸门 #753 已批准 v1） §2「tmpfs（AIH-TASK-234）」里「tmpfs 写满时怎么判断、怎么处置」一段、§5（含「各导出的失败日志」表）、§8「监控」、§10 第 4 条与已知限制、§11 AIH-TASK-241：docs/runbook.md 新增 xlsx 导出失败的处置一节，docs/TODO.md 勾选 Phase 5「客户端用量导出」并按决定处理 Phase 7「CSV / Excel 导出」。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-240
     acceptance_criteria:
@@ -13964,7 +13964,7 @@ tasks:
     title: 供应商成本对账第一层：新建不可变的供应商成本对账表与迁移 0041
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「数据库（迁移 0041，AIH-TASK-242）」与 §8：新迁移 0041 建 provider_cost_reconciliations（只插入；STORED 生成列 root_slot、CHECK、唯一索引、复合自引用外键照设计），MySQL 上建两个拒绝 UPDATE 与 DELETE 的触发器；新模型 app/models/provider_cost_reconciliations.py；docs/database-schema.md 记这张表。不加写入方与接口：属于 AIH-TASK-243 起的任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-241
       - AIH-TASK-231
@@ -14022,7 +14022,7 @@ tasks:
     title: 供应商成本对账第二层：范围内估算聚合、诊断计数与对账记录的读写仓储
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「口径」「仓储」：新建 app/repositories/provider_cost_reconciliations.py（ai_module_origin、scope_estimate、scope_estimated_myr、unprocessed_count、outbox_counts、scope_providers、current_record、get_by_public_id、chain、has_successor、current_records_overlapping、insert_record）；设计 §7 的标准世界放进新辅助模块 tests/backend/provider_cost_world.py，夹具在 conftest 注册。不写服务与接口：属于 AIH-TASK-244 起的任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-242
     acceptance_criteria:
@@ -14077,7 +14077,7 @@ tasks:
     title: 供应商成本对账第三层：预览、确认与更正的业务规则、月末汇率换算和审计
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「服务」「检查顺序」「审计」「事务边界」「金额与精度」与 §4：新建 app/services/provider_cost_reconciliation.py（常量、reconciliation_period、preview、confirm、months_overview、get_detail、allocate），AuditAction 加 PROVIDER_COST_RECONCILIATION_CREATE 并同步前端审计动作清单。不写接口：属于 AIH-TASK-245。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-243
     acceptance_criteria:
@@ -14134,7 +14134,7 @@ tasks:
     title: 供应商成本对账第四层：管理端对账的月份总览、预览、确认与详情接口
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「管理端接口」与 §6：新建 app/schemas/provider_cost_reconciliations.py 与 app/api/admin_provider_cost_reconciliations.py（GET months、POST preview、POST 确认、GET 详情），在 app/main.py 注册；管理端路由枚举与 INV-7 守卫补新路径、新键名与新模块；docs/api.md 新增「管理端供应商成本对账」一节。不做页面：属于 AIH-TASK-246。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-244
       - AIH-TASK-222
@@ -14193,7 +14193,7 @@ tasks:
     title: 供应商成本对账第五层：管理端供应商成本页的月份总览、录入预览确认与更正
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「管理端页面」：新建 frontend/src/api/adminProviderCosts.ts 与 frontend/src/features/providerCosts/ProviderCostsPage.tsx（月份表格、Reconcile / Correct 表单、预览后确认、更正链详情），新路由 /provider-costs 与 FX rates 旁的导航，文案进 i18n；验收脚本加两个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-245
     acceptance_criteria:
@@ -14262,7 +14262,7 @@ tasks:
     title: 对账后成本第一层：用量分析仓储按对账记录汇总覆盖范围内的估算成本
     purpose: >-
       按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「规则」与「仓储」：app/repositories/usage_analytics.py 新增 reconciled_allocation_inputs，按与分组区间重叠的当前对账记录，给出每条记录的 R 与实时 E 以及按分组、按计费模式的覆盖估算之和。不改接口、schema 与前端：属于 AIH-TASK-248。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-246
       - AIH-TASK-221
@@ -14314,7 +14314,7 @@ tasks:
     title: 对账后成本第二层：用量分析接口与导出加按比例分摊的供应商成本和基于它的毛利
     purpose: >-
       按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「接口与导出」：GET /api/v1/admin/usage-analytics 的分组项与 totals 加分摊后的供应商成本、口径与基于它的毛利，合计加覆盖的对账月份；CSV 导出在 31 列后追加 10 列；INV-7 守卫追加新键名；docs/api.md 补口径。不做页面：属于 AIH-TASK-249。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-247
       - AIH-TASK-223
@@ -14373,7 +14373,7 @@ tasks:
     title: 对账后成本第三层：管理端用量分析页显示对账后供应商成本、口径与覆盖月份
     purpose: >-
       按 docs/design/AIH-TASK-247-provider-cost-allocation.md（设计闸门 #756 已批准 v2） §2「页面」：frontend/src/api/adminUsageAnalytics.ts 加新键类型，合计块加对账后供应商成本、基于它的毛利与口径、覆盖月份与不可分摊提示，表格加 Provider cost 列，说明文字补分摊口径；验收脚本加一个只读步骤。只做前端。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-248
       - AIH-TASK-224
@@ -14443,7 +14443,7 @@ tasks:
     title: 供应商成本对账第六层：上月满九天仍未对账时在用量积压告警里提醒三天
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §2「告警」：app/services/alerts.py 的 usage_processing_backlog 在现有五段之后追加第六段，判定上一个已结束的 UTC 月在月末后第 9 至 12 天内是否有范围内事件却没有当前对账记录；docs/runbook.md 与 docs/api.md 补第六段的含义与处置。不新增维度。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-249
     acceptance_criteria:
@@ -14496,7 +14496,7 @@ tasks:
     title: 供应商成本对账收尾：运维手册补换钥与月度对账流程，勾选 Phase 8 对账项
     purpose: >-
       按 docs/design/AIH-TASK-242-provider-cost-reconciliation.md（设计闸门 #755 已批准 v1） §6「密钥」、§8「上线后的人工步骤」与 §10：docs/runbook.md 新增「供应商成本对账」一节（操作流程，照「税务政策：首条政策的发布」一节的流程写法，不套故障场景的五个固定小节，放在「月度对账单」一节之后），docs/currency-and-fx.md 补对账换算一段，docs/TODO.md 勾选 Phase 8「供应商账单成本对账」并按条件处理 Phase 7 对应项。不改代码与测试。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-250
     acceptance_criteria:
@@ -14547,7 +14547,7 @@ tasks:
     title: 运维手册补齐规格要求的十八个故障场景并加覆盖对照表
     purpose: >-
       spec §136 要求 docs/runbook.md 覆盖 18 个故障场景。现有章节已覆盖其中多数，但 Billing API 不可用、MySQL 不可用、备份失败、状态推送乱序、上期用量与跨期调整、文档存储恢复没有对应章节，待支付与支付对账失败要核对现有支付章节是否写到。本任务在 runbook 开头加一张 18 个场景到章节的对照表，并按本文件「本文件的写法」补上缺的章节；每一条都以仓库里已有的代码、部署脚本与文档为依据，不发明新的流程、告警或命令。只改文档。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-251
     acceptance_criteria:

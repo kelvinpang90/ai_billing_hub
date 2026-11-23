@@ -14,7 +14,8 @@
  * （`displayTimeToRfc3339`）；两端必填、开始早于结束、跨度不超过 366 天，提交前先挡住。条件与页码放在组件状态里，
  * **不进地址栏**（同用量事件页）。改任何条件都回到第 1 页。
  *
- * PREPAID 与内部计量分两组列：内部计量租户的参考售价不是收入，不进毛利，所以那一组没有毛利列。
+ * PREPAID 与内部计量分两组列：内部计量租户的参考售价不是收入，不进毛利，所以那一组没有毛利列。两组各有对账后的
+ * 「Provider cost」（下一行小字是口径），Prepaid 组另有基于它的毛利（设计闸门 #756 v2 §2「页面」，AIH-TASK-249）。
  *
  * ⚠️ 金额、平均 token 数与毛利率**原样**显示后端的十进制字符串，不经 number，也不重新格式化。说明文字不用 antd
  * 的 `Alert`：它带 `role="alert"`，部署后浏览器验收把页面上任何 `role="alert"` 都当成错误提示。
@@ -46,6 +47,7 @@ import {
   exportUsageAnalytics,
   getUsageAnalytics,
   usageAnalyticsQueryKey,
+  type ProviderCostBasis,
   type UsageAnalyticsGroupBy,
   type UsageAnalyticsItem,
   type UsageAnalyticsQuery,
@@ -55,7 +57,7 @@ import { EXPORT_BUSY, EXPORT_TOO_LARGE, type ExportFormat } from "../../api/down
 import { displayTimeToRfc3339, utcToDisplayInput } from "../../components/DateTimeText";
 import { RequestReference } from "../../components/RequestReference";
 import { CodeText, LoadingBlock, PAGE_SIZE_OPTIONS, usePaging } from "../catalog/ProvidersPage";
-import { UsageAnalyticsTotals } from "./UsageAnalyticsTotals";
+import { ProviderCostBasisText, UsageAnalyticsTotals } from "./UsageAnalyticsTotals";
 import { AdminOnlyNote, EMPTY } from "./UsageEventsPage";
 
 const DEFAULT_GROUP_BY: UsageAnalyticsGroupBy = "provider";
@@ -124,6 +126,18 @@ export function toQuery(values: AnalyticsFormValues): UsageAnalyticsQuery | null
 /** 后端给的十进制字符串，原样显示；没有时「—」。 */
 function DecimalString({ value }: { value: string | null }) {
   return value === null ? <>{EMPTY}</> : <span style={{ fontVariantNumeric: "tabular-nums" }}>{value}</span>;
+}
+
+/** 对账后的供应商成本：后端字符串原样，下一行小字是口径的显示文案（与合计块同一组文案）。 */
+function ProviderCostCell({ value, basis }: { value: string; basis: ProviderCostBasis }) {
+  return (
+    <Space direction="vertical" size={0}>
+      <DecimalString value={value} />
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        <ProviderCostBasisText basis={basis} />
+      </Typography.Text>
+    </Space>
+  );
 }
 
 /** 整数计数（不是金额），原样转成文字。 */
@@ -305,6 +319,18 @@ export function UsageAnalyticsPage() {
           title: t("usageAnalytics.field.grossMarginRate"),
           render: (_: unknown, item) => <DecimalString value={item.prepaid.gross_margin_rate} />,
         },
+        {
+          key: "prepaid_provider_cost",
+          title: t("usageAnalytics.field.providerCost"),
+          render: (_: unknown, item) => (
+            <ProviderCostCell value={item.prepaid.provider_cost_myr} basis={item.prepaid.provider_cost_basis} />
+          ),
+        },
+        {
+          key: "prepaid_margin_on_provider_cost",
+          title: t("usageAnalytics.field.marginOnProviderCost"),
+          render: (_: unknown, item) => <DecimalString value={item.prepaid.gross_margin_on_provider_cost} />,
+        },
       ],
     },
     {
@@ -325,6 +351,16 @@ export function UsageAnalyticsPage() {
           key: "internal_reference_price",
           title: t("usageAnalytics.field.referencePrice"),
           render: (_: unknown, item) => <DecimalString value={item.internal_metered_only.reference_customer_price} />,
+        },
+        {
+          key: "internal_provider_cost",
+          title: t("usageAnalytics.field.providerCost"),
+          render: (_: unknown, item) => (
+            <ProviderCostCell
+              value={item.internal_metered_only.provider_cost_myr}
+              basis={item.internal_metered_only.provider_cost_basis}
+            />
+          ),
         },
       ],
     },
@@ -377,6 +413,7 @@ export function UsageAnalyticsPage() {
       <AdminOnlyNote />
       <Typography.Paragraph type="secondary">{t("usageAnalytics.estimateNote")}</Typography.Paragraph>
       <Typography.Paragraph type="secondary">{t("usageAnalytics.scopeNote")}</Typography.Paragraph>
+      <Typography.Paragraph type="secondary">{t("usageAnalytics.providerCostNote")}</Typography.Paragraph>
       <Form<AnalyticsFormValues>
         form={form}
         name="usageAnalyticsFilters"

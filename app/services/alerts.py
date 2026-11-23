@@ -13,12 +13,18 @@ outbox 积压，设计闸门 #181 v2 §2「告警维度」，AIH-TASK-032）往�
 `usage_processing_backlog` 在积压、PROCESSING、过期租约三部分之后另接两段（设计闸门 #565 v6
 §2「告警」，AIH-TASK-158）：到期后 6 至 30 小时内仍缺失的对账单 P2，最近 24 小时晚到用量的
 条数或金额占比达到 1% P2；Healthchecks 已 20/20，按 Kelvin 2026-11-04 的决定不加维度。
+其后再接第六段（设计闸门 #755 v1 §2「告警」，AIH-TASK-250）：上一个 UTC 月结束后第 9 至 12 天
+内，有范围内已处理事件的供应商仍没有当前对账记录 P2；同样不加维度。
+2026-11-21（Kelvin 定，给别的项目腾 3 个 Healthchecks 位置）五个维度并成两行：
+`fx_fetch` 并进 `fx_stale`，`usage_fx_rate_error`、`usage_model_unknown` 并进
+`usage_pricing_error`，见「合并维度」。
 
 ⚠️ **维度查询全是普通读，不拿 `fx_rate_locks`**（设计 v3）：告警只是提示，
 不参与计费，不应让发布等它。整次请求一个只读事务，从不提交。
 
 ⚠️ **摘要只有计数、日期与币种**（设计 §2、§6、INV-7）：
-不含租户、金额（汇率本身也不写）或任何个人数据。
+不含租户、金额（汇率本身也不写）或任何个人数据。`usage_processing_backlog` 的第六段
+另含供应商代码（设计闸门 #755 v1 §2「告警」），仍没有金额与租户。
 
 多币种汇总进一行（设计 v3）：级别取各配置币种里最严重的；
 有不 OK 的币种时只列它们各一小段，都 OK 时列各币种最近的日期；
@@ -65,7 +71,12 @@ from app.models.usage import UsageEvent, UsageEventStatus
 from app.models.wallet import TransactionType, Wallet, WalletTransaction
 from app.models.wallet_reconciliation import ReconciliationRunStatus, WalletReconciliationRun
 from app.payments.stripe_gateway import CHARGE_EVENT_TYPES, CHARGE_REFUNDED
+from app.repositories import provider_cost_reconciliations as reconciliations
 from app.repositories.usage_events import count_conflicts_since
+
+# ⚠️ 整个模块 import、用时取属性：`FIRST_RECONCILIATION_MONTH` 不拷进本模块的命名空间，
+# 测试 monkeypatch 那个模块上的常量才生效。
+from app.services import provider_cost_reconciliation as provider_costs
 from app.services.auth import utc_now
 from app.services.statements import (
     StatementPeriod,
@@ -110,6 +121,11 @@ STATEMENT_MISSING_WINDOW: Final = dt.timedelta(hours=24)
 LATE_USAGE_WINDOW: Final = dt.timedelta(hours=24)
 LATE_USAGE_SHARE_P2: Final = Decimal("0.01")
 _HUNDREDTH: Final = Decimal("0.01")
+# 供应商成本部分（设计闸门 #755 v1 §2「告警」，AIH-TASK-250）：只在
+# `period_end(m) + 9 天 <= now < period_end(m) + 12 天` 里报，只报 72 小时：
+# 持续红会遮住同一检查后来的故障（同上，`docs/TODO.md:113`）。
+PROVIDER_COST_UNRECONCILED_GRACE: Final = dt.timedelta(days=9)
+PROVIDER_COST_UNRECONCILED_WINDOW: Final = dt.timedelta(days=3)
 # `outbox_backlog`：有处理器的事件类型超过 10 分钟仍 PENDING（§120）。
 OUTBOX_BACKLOG_AGE: Final = dt.timedelta(minutes=10)
 # `outbox_backlog` 的死信部分（AIH-TASK-149）：有处理器的行在这段时间内结算为 FAILED 即 P2。
@@ -556,8 +572,44 @@ def _late_usage(session: Session, now: dt.datetime) -> AlertResult:
     return AlertResult(level, summary)
 
 
+def _unreconciled_provider_costs(session: Session, now: dt.datetime) -> AlertResult:
+    """P2 when last UTC month still lacks a current reconciliation 9 to 12 days after it ended.
+
+    判定月 m 是 `now` 所在 UTC 月的上一个月，早于 `FIRST_RECONCILIATION_MONTH` 不报。窗口内，
+    `scope_providers` 一条查询列出 m 里有范围内已处理事件的供应商（按代码升序），逐个调
+    `current_record`；不调 `scope_estimate`（不要币种与金额）。普通读、不加锁。
+    """
+    quiet = AlertResult(AlertLevel.OK, "provider cost reconciled or not due")
+    previous = now.replace(day=1) - dt.timedelta(days=1)
+    month = f"{previous.year:04d}-{previous.month:02d}"
+    if month < provider_costs.FIRST_RECONCILIATION_MONTH:
+        return quiet
+    start, end = provider_costs.reconciliation_period(month)
+    opens = end + PROVIDER_COST_UNRECONCILED_GRACE
+    if not opens <= now < opens + PROVIDER_COST_UNRECONCILED_WINDOW:
+        return quiet
+    lacking = [
+        code
+        for provider_id, code in reconciliations.scope_providers(
+            session, period_start=start, period_end=end
+        )
+        if reconciliations.current_record(
+            session,
+            provider_id=provider_id,
+            scope=provider_costs.SCOPE_AI_MODULE,
+            billing_month=month,
+        )
+        is None
+    ]
+    if not lacking:
+        return quiet
+    return AlertResult(
+        AlertLevel.P2, f"provider cost {','.join(lacking)} not reconciled for {month}"
+    )
+
+
 def usage_processing_backlog(session: Session, context: AlertContext) -> AlertResult:
-    """The backlog, missing statements and late usage, merged into one line.
+    """The backlog, missing statements, late usage and unreconciled provider costs, in one line.
 
     可处理：`RECEIVED`，或到期的 `FAILED_RETRYABLE`，且 `occurred_at ≤ now`。等待的起点是它
     变得可处理的时刻：`RECEIVED` 取接收与发生时刻中较晚的那个（未来偏差的事件到点才可认领），
@@ -570,13 +622,20 @@ def usage_processing_backlog(session: Session, context: AlertContext) -> AlertRe
     - 晚到用量：`[now − 24h, now)` 内入账的预付租户 `AI_USAGE` 行里 `t(r) ≠ U` 的，条数或金额
       占比 ≥ 1% 即 P2。
 
-    摘要恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>`，只有计数、时刻、
-    账期与百分比；级别取各部分最严重的一个。
+    第六段（设计闸门 #755 v1 §2「告警」，AIH-TASK-250）：
+    - 供应商成本：判定月 m 为上一个 UTC 月（不早于 `FIRST_RECONCILIATION_MONTH`），
+      `period_end(m) + 9 天 <= now < period_end(m) + 12 天` 内，m 里有范围内已处理事件的
+      供应商没有当前对账记录即 P2，摘要 `provider cost <code>,<code> not reconciled for <YYYY-MM>`；
+      否则（含窗口外）`provider cost reconciled or not due`。
+
+    摘要恰好 `<积压>; <PROCESSING>; <过期租约>; <缺失对账单>; <晚到用量>; <供应商成本>`，
+    只有计数、时刻、账期、百分比，以及第六段的供应商代码与月份；级别取各部分最严重的一个。
     """
     backlog = _backlog(session, context.now)
     missing = _missing_statements(session, context.now)
     late = _late_usage(session, context.now)
-    parts = (backlog, missing, late)
+    provider_cost = _unreconciled_provider_costs(session, context.now)
+    parts = (backlog, missing, late, provider_cost)
     level = max((part.level for part in parts), key=_SEVERITY.__getitem__)
     return AlertResult(level, "; ".join(part.summary for part in parts))
 
@@ -951,18 +1010,57 @@ def ai_usage_outbox(session: Session, context: AlertContext) -> AlertResult:
     return AlertResult(AlertLevel.OK, summary)
 
 
+# --- 合并维度（2026-11-21，Kelvin 定）-------------------------------------------------
+#
+# Healthchecks 免费档 20 个检查已用满，要给别的项目腾 3 个位置（不另开账号）：五个成员并成两个
+# 维度。成员的判定、阈值与摘要一律不变，合并只决定「一行里放哪几个成员」：级别取成员里最严重的，
+# 摘要按成员顺序列出**每一个**成员的名字、级别与原摘要（OK 的也列），看得出是哪一项出的问题。
+# 合并维度沿用一个成员的名字，于是沿用它原来的 Healthchecks 检查与 `.env` 键名。
+# 代价与 monitor.sh 并进 disk / services 的那几项相同：这个检查已经红着时，另一个成员出事
+# **不会再单独通知**，要看通知正文与 `journalctl -t billing-monitor` 的每一行。
+
+_MEMBER_SEPARATOR: Final = " | "
+
+FX_MEMBERS: Final[tuple[Dimension, ...]] = (
+    Dimension("fx_fetch", fx_fetch),
+    Dimension("fx_stale", fx_stale),
+)
+# AIH-TASK-032（设计闸门 #181 v2 §2「告警维度」）的三个错误状态，按设计表的顺序。
+USAGE_UNPRICED_MEMBERS: Final[tuple[Dimension, ...]] = (
+    Dimension("usage_pricing_error", usage_pricing_error),
+    Dimension("usage_fx_rate_error", usage_fx_rate_error),
+    Dimension("usage_model_unknown", usage_model_unknown),
+)
+
+
+def _merge(session: Session, context: AlertContext, members: Sequence[Dimension]) -> AlertResult:
+    """The worst level of the members; every member's name, level and summary, in order."""
+    results = [(member.name, member.check(session, context)) for member in members]
+    level = max((result.level for _, result in results), key=_SEVERITY.__getitem__)
+    pieces = [f"{name} {result.level.value}: {result.summary}" for name, result in results]
+    return AlertResult(level, _MEMBER_SEPARATOR.join(pieces))
+
+
+def fx_rates(session: Session, context: AlertContext) -> AlertResult:
+    """`fx_fetch` and `fx_stale` in one line."""
+    return _merge(session, context, FX_MEMBERS)
+
+
+def usage_unpriced(session: Session, context: AlertContext) -> AlertResult:
+    """`usage_pricing_error`, `usage_fx_rate_error` and `usage_model_unknown` in one line."""
+    return _merge(session, context, USAGE_UNPRICED_MEMBERS)
+
+
 # --- 注册表 -------------------------------------------------------------------------
 
 # ⚠️ 有序：接口按这个顺序逐行输出。新维度追加在末尾，名字用小写与下划线
 # （monitor.sh 按它拼 `BILLING_HEALTHCHECK_ALERT_<维度大写>_URL`）。
+# ⚠️ 前两个合并维度的名字是成员名、不是新名字：改名就要改 `.env` 键名与 Healthchecks 检查。
 DIMENSIONS: Final[list[Dimension]] = [
-    Dimension("fx_fetch", fx_fetch),
-    Dimension("fx_stale", fx_stale),
+    Dimension("fx_stale", fx_rates),
     Dimension("usage_event_conflicts", usage_event_conflicts),
     # AIH-TASK-032（设计闸门 #181 v2 §2「告警维度」），按设计表的顺序。
-    Dimension("usage_pricing_error", usage_pricing_error),
-    Dimension("usage_fx_rate_error", usage_fx_rate_error),
-    Dimension("usage_model_unknown", usage_model_unknown),
+    Dimension("usage_pricing_error", usage_unpriced),
     Dimension("usage_failed", usage_failed),
     Dimension("usage_processing_backlog", usage_processing_backlog),
     Dimension("wallet_negative_balance", wallet_negative_balance),
@@ -1010,6 +1108,7 @@ __all__ = [
     "CONFLICT_WINDOW",
     "DIMENSIONS",
     "FAILED_P1_CODES",
+    "FX_MEMBERS",
     "FX_FETCH_WINDOW",
     "FX_STALE_DAYS",
     "LATE_USAGE_SHARE_P2",
@@ -1020,6 +1119,8 @@ __all__ = [
     "PAYMENT_ALERT_WINDOW",
     "PAYMENT_OPEN_EVENT_P2_SECONDS",
     "PAYMENT_STALE_PENDING_AFTER",
+    "PROVIDER_COST_UNRECONCILED_GRACE",
+    "PROVIDER_COST_UNRECONCILED_WINDOW",
     "RECONCILIATION_CLOCK_TOLERANCE",
     "RECONCILIATION_STALE_AFTER",
     "RETRYING_ALERT_ATTEMPTS",
@@ -1028,6 +1129,7 @@ __all__ = [
     "STATEMENT_MISSING_WINDOW",
     "STATUS_WEBHOOK_FAILING_ATTEMPTS",
     "STATUS_WEBHOOK_SIGNING_ERRORS",
+    "USAGE_UNPRICED_MEMBERS",
     "AlertContext",
     "AlertLevel",
     "AlertResult",
@@ -1036,6 +1138,7 @@ __all__ = [
     "ai_usage_outbox",
     "evaluate",
     "fx_fetch",
+    "fx_rates",
     "fx_stale",
     "outbox_backlog",
     "quote_date_of",
@@ -1047,5 +1150,6 @@ __all__ = [
     "usage_model_unknown",
     "usage_pricing_error",
     "usage_processing_backlog",
+    "usage_unpriced",
     "wallet_negative_balance",
 ]

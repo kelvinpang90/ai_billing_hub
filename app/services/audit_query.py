@@ -81,6 +81,9 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         # 恒为 "1"（单行表的主键，不是用户 id）：app/services/payment_settings.py 的修改审计
         # （AIH-TASK-189）。
         "payment_settings",
+        # 对账记录的 public_id：app/services/provider_cost_reconciliation.py 的确认与更正审计
+        # （AIH-TASK-244）。
+        "provider_cost_reconciliation",
     }
 )
 
