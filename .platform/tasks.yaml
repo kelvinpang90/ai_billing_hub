@@ -15155,3 +15155,162 @@ tasks:
       - merge
       - bypass_ci
       - bypass_review
+
+  # 数据留存 R1（设计闸门 #833 已批准 v7，docs/design/AIH-TASK-263-retention-purge.md）：认证令牌的到期清理与清理框架，ADR-0017 第 2、4 条与 docs/data-governance.md §10 K7–K9（Kelvin 2026-11-23 批准）。
+  # 三层串行：263 框架与三项清理 → 264 Celery 任务、Beat 与配置 → 265 文档。三项缺省 off，部署后什么都不发生；按 runbook 先 count 一轮再 delete。
+  - id: AIH-TASK-263
+    title: 数据留存清理第一层：清理框架与刷新令牌、重置邀请令牌、恢复码三项到期清理
+    purpose: >-
+      按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §2「清理框架」「三项清理的条件」「审计动作与查询」「事务边界」：新增 app/services/retention_purge.py（PurgeItem 注册表、run_purge、三项清理：刷新令牌按家族、重置与邀请令牌、已用或已吊销的恢复码；每批在 MySQL 上用 READ COMMITTED、删除与一条审计同一事务提交；无进展即停），AuditAction 加 DATA_RETENTION_PURGE，审计实体类型 data_retention_run 登记进 app/services/audit_query.py 与前端审计动作清单。不加任务、Beat 与配置：属于 AIH-TASK-264。
+    status: ready
+    depends_on: []
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） 逐条一致，以 §1「我定的」、§2「清理框架」「三项清理的条件」「审计动作与查询」「事务边界」「时间语义」、§3、§4、§5 与 §7 中除「Beat」一行外的各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/services/retention_purge.py：PurgeItem 冻结数据类（name、retention、select_ids、delete_ids、count）与恰好三项的注册表（refresh_tokens、password_reset_tokens、recovery_codes，保留期都是代码常量 30 天）；run_purge(session_factory, *, modes, max_rows_per_item, now) 照设计：cutoff = now − retention，now 由调用方给出、截到整秒；delete 模式按主键升序每批最多 1000 行、余量不足时取余量，每批一个短事务；count 模式一个只读事务一条 COUNT；任一项抛错时当前事务回滚、本轮停止、不再处理后面的项；某批选到主键却删 0 行时这一项本轮结束、记一行 WARNING retention_purge_no_progress（item 与选到的主键数）、继续下一项；返回结果含每项的模式、截止时刻、行数与出错项'
+      - '三项条件逐字照设计 §2「三项清理的条件」：刷新令牌的候选家族查询分组前不加 expires_at 过滤，HAVING MAX(expires_at) < cutoff；delete_ids 是一条语句，派生表只按 (user_id, family_id) IN 本批候选家族探查；重置与邀请令牌 expires_at < cutoff（两种 purpose 一样，不保留最新邀请）；恢复码 used_at 或 revoked_at 不为空且早于 cutoff。所有比较严格早于 cutoff；DELETE 的 WHERE 重复选择条件。每个删除批次的事务在 MySQL 上第一句设 READ COMMITTED（写法照 app/services/password_reset.py 的 _start_reset，只在 mysql 方言上设）；count 的只读事务不需要'
+      - '审计：每个删除批次在同一事务里写一条 AuditLog（actor_user_id 为空、actor_role 为 SYSTEM，照 app/repositories/wallet.py 的 SYSTEM_ACTOR_ROLE 写法），action = DATA_RETENTION_PURGE，entity_type = data_retention_run，entity_id = now 的 UTC 日期 YYYY-MM-DD，after_state 恰为 {item, cutoff, batch, deleted}；删除 0 行不写；不另写按轮汇总审计。app/models/auth.py 的 AuditAction 加 DATA_RETENTION_PURGE；app/services/audit_query.py 把 data_retention_run 归入对外 id 一类；frontend/src/api/adminAudit.ts 的动作清单照后端枚举顺序加这一项（前后端逐项比对与实体类型归类守卫照常通过）'
+      - '设计 v5 审查的一条不阻断更正写进实现注释与测试：设计 §4 说业务路径不会读写待删的行并不完全准确——重置成功时把同一用户所有 used_at 为空的兄弟令牌置为已用（app/services/password_reset.py:427-433，不带 expires_at 条件），出示已死家族里用过的令牌时会吊销整个家族（app/services/auth.py:715-726），这两条可能与某个清理批次短暂等锁；锁等待超时按设计 §5 处理（本轮停止、下一轮重做）。测试里这两条业务路径各与一个停在提交前的清理批次并发一次，断言两边最终都成功或清理本轮停止后下一轮补完，业务路径不失败'
+      - '测试：新增 tests/backend/test_retention_purge.py（SQLite 与 MySQL 都跑的行为用例）覆盖设计 §7 的「正常路径」「刷新令牌家族」「活家族排在前面」「无进展即停」「重放检测不变」「邀请与重置令牌」「限频」「恢复码」「边界值」「批与上限」「大家族跨批」「count 模式」「off 模式」「幂等重放」「事务中途失败」「审计与删除一致」「安全」「注册」各行；新增 tests/backend/test_retention_purge_mysql.py（只在真 MySQL 上跑）覆盖「并发：两个实例」（这一层只验证 run_purge 不负责命名锁、两次 run_purge 结果正确；命名锁在 AIH-TASK-264）、「并发：与业务」「锁范围（MySQL）」「隔离级别（MySQL）」与上一条的两条业务路径。等锁用 performance_schema.data_lock_waits 联 performance_schema.data_locks、按 DATABASE() 与表名过滤（写法照 tests/backend/test_session_revocation_concurrency.py 的 _WAITING_ON_TABLE）；设计 §7 的四个变异逐个手工做过并在 PR 里写明各自变红的用例。后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入，等待用轮询加超时'
+      - '只改本任务 allowed_change_paths 里的文件；不加 Celery 任务、Beat 与配置项；不改 app/services/auth.py、app/services/password_reset.py、app/services/two_factor.py、app/services/portal_accounts.py 与 alembic/；不出现 TRUNCATE、DROP、FOREIGN_KEY_CHECKS；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #833'
+    allowed_change_paths:
+      - app/services/retention_purge.py
+      - app/models/auth.py
+      - app/services/audit_query.py
+      - frontend/src/api/adminAudit.ts
+      - tests/backend/test_retention_purge.py
+      - tests/backend/test_retention_purge_mysql.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-264
+    title: 数据留存清理第二层：每日清理任务、Beat 调度、三项模式开关与每轮上限配置
+    purpose: >-
+      按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §2「任务与配置」：新增 app/tasks/retention.py（三项都 off 时直接返回；MySQL 命名锁 retention_purge:<库名> 防重叠；调用 run_purge），app/core/celery_app.py 登记任务模块与每天 20:17 UTC 的 Beat，app/core/config.py 加三项 off / count / delete 模式（缺省 off）与每轮上限，.env.example 与 docs/deployment.md 的配置清单同步。
+    status: ready
+    depends_on:
+      - AIH-TASK-263
+    acceptance_criteria:
+      - '实现与 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） 逐条一致，以 §2「任务与配置」「数据流」、§4「并发」中两个实例一条、§5 配置不合法与重复触发两行、§7「off 模式」「并发：两个实例」「Beat」各行与 §8「上线顺序」为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
+      - 'app/tasks/retention.py：@shared_task(name="app.tasks.retention.purge")，会话工厂照 app/tasks/statements.py 的 lru_cache 写法；读配置，三项都是 off 时直接返回 0、不执行任何 SQL；MySQL 上用 GET_LOCK(CONCAT(''retention_purge:'', DATABASE()), 0) 防重叠，拿不到记一行 INFO 返回 0，finally 里 RELEASE_LOCK（写法照 app/tasks/payment_events.py，SQLite 跳过命名锁）；now 取 utc_now 截到整秒；调用 run_purge 并返回删除总数；出错项与异常类型记一行 ERROR retention_purge_failed（item、error_type），不含行内容'
+      - 'app/core/celery_app.py：TASK_MODULES 加 app.tasks.retention；Beat 加一项 retention-purge，crontab(minute=17, hour=20)（UTC，马来西亚 04:17），expires 3600 秒，两个数值写成模块顶部的常量并带注释说明为什么排在 03:17 的全量备份与 03:47 的日志外送之后。tests/backend/test_celery.py 的 Beat 条目集合只追加 retention-purge，并加一条断言它的调度与 expires'
+      - 'app/core/config.py：retention_refresh_tokens_mode、retention_password_reset_tokens_mode、retention_recovery_codes_mode 三项 Literal off / count / delete，缺省 off；retention_max_rows_per_item 为 Field(default=50_000, ge=1_000, le=1_000_000)。tests/backend/test_config.py 覆盖缺省值、合法与非法取值（非法模式值与越界上限都让配置校验失败）'
+      - '.env.example 写出 BILLING_RETENTION_REFRESH_TOKENS_MODE、BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE、BILLING_RETENTION_RECOVERY_CODES_MODE（都是 off）与 BILLING_RETENTION_MAX_ROWS_PER_ITEM（50000）及一句注释（先 count 一轮再 delete，见 runbook）；docs/deployment.md 的配置清单照已有各行的格式补这四个键。tests/backend/test_compose.py 若有比对 .env.example 与 Settings 的用例，照它的写法让新键通过'
+      - '测试：新增 tests/backend/test_retention_task.py 覆盖设计 §7「off 模式」（三项都 off 时捕获语句断言没有任何 SQL）、count 与 delete 模式把配置正确传给 run_purge、「并发：两个实例」（MySQL：另一个连接先拿住命名锁，任务记 INFO 后返回 0、不删任何行；锁释放后再跑照常）、出错时 ERROR 日志的字段。后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入'
+      - '只改本任务 allowed_change_paths 里的文件；不改 app/services/retention_purge.py 的业务规则（发现缺陷时停下说明）；不改 docker-compose 文件、不新增 Docker secret；不改 app/ai_api/ 下任何文件；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #833'
+    allowed_change_paths:
+      - app/tasks/retention.py
+      - app/core/celery_app.py
+      - app/core/config.py
+      - .env.example
+      - docs/deployment.md
+      - tests/backend/test_retention_task.py
+      - tests/backend/test_celery.py
+      - tests/backend/test_config.py
+      - tests/backend/test_compose.py
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
+
+  - id: AIH-TASK-265
+    title: 数据留存清理收尾：运维手册补清理上线与处置，更正数据治理文档与 ADR-0017 的审计措辞
+    purpose: >-
+      按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §8 与 §11 AIH-TASK-265：docs/runbook.md 新增「数据留存清理」一节；docs/data-governance.md 更正「刷新令牌绝对期限 12 小时」的措辞、不存在的 §6.3 引用与 §6 第 4 款；ADR-0017 第 2 条第 4 款补完为按批审计；docs/TODO.md 的「只增不减」一行注明 password_reset_tokens 那一半已由 AIH-TASK-263..264 处理。只改文档。
+    status: ready
+    depends_on:
+      - AIH-TASK-264
+    acceptance_criteria:
+      - '内容以 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §2、§5、§8 与已合并的 app/services/retention_purge.py、app/tasks/retention.py、app/core/config.py 为准；只写仓库里已有的配置键、日志事件名、审计动作与命令，引用写 文件:行 或章节锚点；涉及数据库的命令只给只读查询'
+      - 'docs/runbook.md 新增「数据留存清理」一节，照「本文件的写法」的结构：上线步骤（三项缺省 off → 在 VPS 的 .env 改为 count、重建 worker 与 beat 容器（命令照 docs/deployment.md 已有写法）→ 等一轮看 INFO 日志里的行数与耗时，count 耗时超过 60 秒按设计 §8 另开加索引任务 → 改为 delete）；怎么发现（WARNING retention_purge_no_progress、ERROR retention_purge_failed、按 entity_id 日期汇总 DATA_RETENTION_PURGE 审计的只读查询）；影响什么（门户账号视图的邀请时间在邀请过期满 30 天被删后为空；重置成功与出示已死家族令牌两条业务路径可能与清理批次短暂等锁）；立刻做什么与绝不能做什么（不手工 DELETE 或 TRUNCATE 这三张表、不为了消告警改保留期，保留期是 ADR-0017 批准的代码常量）'
+      - 'docs/data-governance.md：§4.4 与 §10 K7 里「绝对期限 12 小时」改为与代码一致的说法（刷新令牌每次轮换给新行新的过期时间，没有家族的绝对上限；清理按家族删，见设计 #833），保留期本身不改；§0 与其他引用 §6.3 的地方改为实际存在的小节；§6 第 4 款「每轮一条审计」改为「每个删除批次一条，与删除在同一事务提交」；修订记录补一行'
+      - 'docs/adr/ADR-0017-data-retention.md 第 2 条第 4 款「每轮写一条审计」补完为「每个删除批次写一条审计，与删除在同一事务提交（设计闸门 #833：按轮写无法与删除原子提交）」，其余内容不改，作为原地补完（保留期与范围不变）；docs/TODO.md 里「password_reset_tokens 与 domain_outbox 都只增不减」一行不勾选（domain_outbox 属于 R2），在行末补一句 password_reset_tokens 已由 AIH-TASK-263..264 按 ADR-0017 K8 清理；规划块不改'
+      - '不改代码、测试与 .platform/；不写主机名、IP、地址、邮箱、凭据；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #833'
+    allowed_change_paths:
+      - docs/runbook.md
+      - docs/data-governance.md
+      - docs/adr/ADR-0017-data-retention.md
+      - docs/TODO.md
+    allowed_commands:
+      - docs.check
+      - policy.check
+      - tests.process
+      - lint.fix
+      - format.apply
+      - lint.check
+      - format.check
+    execution: sequential
+    stop_on_first_failure: true
+    max_attempts: 1
+
+    worker_handoff_state: awaiting_review
+    worker_failure_state: failed
+    terminal_states:
+      - completed
+      - failed
+      - cancelled
+
+    creates_branch: true
+    creates_pull_request: true
+    prohibited:
+      - production_deploy
+      - database_migration
+      - dependency_install
+      - credential_access
+      - direct_push_to_protected_branch
+      - merge
+      - bypass_ci
+      - bypass_review
