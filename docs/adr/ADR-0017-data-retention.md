@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| **状态** | **已接受**（2026-11-23，Kelvin 批准 `docs/data-governance.md` §10 的建议值；K10 选 a；K19–K22 是暂定值，法律事实待顾问核对，见「收口条件」） |
+| **状态** | **已接受**（2026-11-23，Kelvin 批准 `docs/data-governance.md` §10 的建议值；K10 原文未给建议，Kelvin 同日单独明确选 a；K19–K22 是暂定值，法律事实待顾问核对，见「收口条件」） |
 | **日期** | 2026-11-16 |
 | **来源** | spec §13、§94、§98.1、§112、§112.1；`REQ-PRIV-001`；上线闸门 Gate 2「PDPA and data-retention policy approved」；`docs/TODO.md`「`password_reset_tokens` 与 `domain_outbox` 都只增不减」 |
 | **影响** | 认证令牌、领域 outbox、AI 模块 outbox、通知、钱包核对记录开始按期删除；关户客户的联系人与门户账号按期匿名化或删除；年备份改为有期限；AI-MODULE 设计的「`ai_usage_outbox` V1 不删」被改变；财务记录与审计的到期清理推迟到另一份 ADR |
@@ -42,7 +42,7 @@ spec §112 要求上线前由 Acuven 批准一份数据治理政策：财务与�
 | 门户账号 | `users`（`CUSTOMER`，`CLOSED` 租户）及级联的 2FA、恢复码、令牌 | K5：与 K4 同时 | 删除 | 是 |
 | 管理员账号 | `users`（`ADMIN`，`DISABLED`） | K6：停用后 12 个月 | 匿名化 | 是 |
 | 认证令牌 | `refresh_tokens`、`password_reset_tokens`、已用 / 已吊销的 `recovery_codes` | K7–K9：过期或用掉满 30 天 | 删除 | 是 |
-| 领域 outbox | `domain_outbox` 的 `SENT` / `FAILED`；三类无处理器的 `PENDING` 行 | K10：终态满 90 天；无处理器的行选 a，维持永久 `PENDING` | 删除终态行；无处理器的行保留 | 是（终态行） |
+| 领域 outbox | `domain_outbox` 的 `SENT` / `FAILED`；三类无处理器的 `PENDING` 行 | K10：终态满 90 天；无处理器的行维持永久 `PENDING`（Kelvin 2026-11-23 明确选 a） | 删除终态行；无处理器的行保留 | 是（终态行） |
 | AI 模块 outbox | `ai_usage_outbox` 的 `DELIVERED`、`DISCARDED`、已确认 `DEAD` | K11：满 90 天 | 删除 | 是 |
 | 通知 | `notifications` | K12：满 24 个月；关户客户随 K4 | 删除 | 是 |
 | 运维记录 | `wallet_reconciliation_runs` / `_findings` | K13：满 24 个月（最近一次 `COMPLETED` 不删） | 删除 | 是 |
