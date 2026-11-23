@@ -1,11 +1,11 @@
-# AIH-TASK-253..259 设计：Phase 8 Rebill —— 已计费用量按更正版本重算，差额以补退 / 补扣账本行入账（已批准 v6）
+# AIH-TASK-253..259 设计：Phase 8 Rebill —— 已计费用量按更正版本重算，差额以补退 / 补扣账本行入账（已批准 v8）
 
-> **来源**：设计闸门 Issue #830。本文件是 `APPROVED: design v6` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`）。审查：Codex，五轮 REQUEST_CHANGES 后 v6 批准（读视图、提交结果不明、零计费事件的范围、降级保护与续跑）。产品决定（9 条）由 Kelvin 2026-11-23 拍板。
+> **来源**：设计闸门 Issue #830。本文件是 `APPROVED: design v8` 那一版正文的**逐字副本**（送审时状态行为 `READY_FOR_REVIEW`）。审查：v1–v7 由 Codex 审查（六轮 REQUEST_CHANGES：读视图、提交结果不明、零计费事件的范围、降级保护与续跑、无差额预览的测试），v7 的 READ COMMITTED 改动来自登记预审；v8 在 Codex 额度用完期间由 Claude Code 审查批准（Kelvin 2026-11-23 选择）。产品决定（9 条）由 Kelvin 2026-11-23 拍板。
 > 放进仓库，是因为 OpenClaw Worker 在沙箱里不联网、读不到 GitHub Issue。
-> **实现以本文件为准**；与 Issue 不一致时，以 Issue #830 上被批准的 v6 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
+> **实现以本文件为准**；与 Issue 不一致时，以 Issue #830 上被批准的 v8 为准。设计要改，就回到 Issue 升版本、重新过闸门，不要直接改本文件。
 > **任务划分**（登记时调整，设计内容不变）：§11 把前端整层记为 AIH-TASK-257，按 12 条可改路径的上限拆成 AIH-TASK-257（列表与详情）与 AIH-TASK-260（新建页与用量事件详情）；§8 的降级协议（改名、检查、续跑）从 AIH-TASK-253 拆出为 AIH-TASK-261（253 只做「有行就拒绝」的简单保护，261 合并前没有写入方）。管理端 Rebill 列表的分页照用量事件列表的 page / page_size（§2「管理端接口」写的「游标分页」是笔误，管理端没有游标分页的先例）。
 
-状态：`READY_FOR_REVIEW` · 设计版本：`v6` · 目标 PR：待开（登记 PR 在本设计批准后开）
+状态：`READY_FOR_REVIEW` · 设计版本：`v8` · 目标 PR：待开（登记 PR 在本设计批准后开）
 负责人：Claude
 对应需求：spec §19「Rebill / Reprocess」、§62「Reprocessing UI」、§66 审计动作 `REBILL`、§16（更正规则保留新旧引用）、§131「Reprocess」「Rebill adjustments」、§46 / REQ-PERIOD-001（定稿对账单不可变、跨期 rebill 记为上期调整）
 
@@ -123,13 +123,15 @@
 请求的 `selection` 二选一：
 
 - `{"usage_event_ids": [...]}`：1 到 1000 个不重复的事件 `public_id`。任一不存在 404 `USAGE_EVENT_NOT_FOUND`；任一不属于该客户、不是 `PROCESSED`、或 `billing_mode_snapshot ≠ 'PREPAID'`，409 `USAGE_EVENT_NOT_REBILLABLE`。
-- `{"occurred_from", "occurred_to", "project_id"?, "provider"?, "model"?}`：`occurred_at ∈ [from, to)`（RFC 3339 带时区，换成 UTC，`from < to`，否则 422 `VALIDATION_ERROR`）；`project_id` 是该客户的项目 `public_id`（不属于该客户 404 `PROJECT_NOT_FOUND`）；`provider` / `model` 比目录的 `code`（已计费事件都有目录引用）。只选 `tenant_id = 客户`、`status = PROCESSED`、`billing_mode_snapshot = 'PREPAID'` 的事件，按 `id` 升序；匹配数 > 1000 时 422 `REBILL_SELECTION_TOO_LARGE`（响应带匹配数），= 0 时 409 `NOTHING_TO_REBILL`。
+- `{"occurred_from", "occurred_to", "project_id"?, "provider"?, "model"?}`：`occurred_at ∈ [from, to)`（RFC 3339 带时区，换成 UTC，`from < to`，否则 422 `VALIDATION_ERROR`）；`project_id` 是该客户的项目 `public_id`（不属于该客户 404 `PROJECT_NOT_FOUND`）；`provider` / `model` 比目录的 `code`（已计费事件都有目录引用）。只选 `tenant_id = 客户`、`status = PROCESSED`、`billing_mode_snapshot = 'PREPAID'` 的事件，按 `id` 升序；匹配数 > 1000 时 422 `REBILL_SELECTION_TOO_LARGE`（匹配数写在错误消息里：`Selection matches <N> usage events; at most 1000.`，现有 `AppError` 没有结构化的细节字段），= 0 时 409 `NOTHING_TO_REBILL`。适用性错误同样把第一个不适用事件的 `public_id` 写在消息里。
 
 客户不存在：404 `CUSTOMER_NOT_FOUND`；客户 `billing_mode = INTERNAL_METERED_ONLY`：409 `REBILL_NOT_PREPAID`。
 
 ### 预览指纹
 
-`preview_token = sha256` 十六进制（64 位），输入是下列内容的规范 JSON（键排序、无空白、金额用 8 位小数的定点字符串）：客户 `public_id`、两个更正版本的 `public_id`（空为 `null`）、`selection` 原样、以及按事件 `id` 升序的 `[事件 public_id, eff(e), new(e), 最近明细 id 或 0]` 列表（包括差额为 0 的事件）。它不是秘密，只用来比较：确认时服务端在钱包锁内用同样的输入重算，不一致就 409 `REBILL_PREVIEW_STALE`。这挡住三种情况：预览之后有别的 Rebill 改了同一事件；匹配集合变了（新事件被计费进来）；请求参数与预览时不同。
+`preview_token = sha256` 十六进制（64 位），输入是下列内容的规范 JSON（键排序、无空白、金额用 8 位小数的定点字符串）：客户 `public_id`、两个更正版本的 `public_id`（空为 `null`）、**规范化后的** `selection`、以及按事件 `id` 升序的 `[事件 public_id, eff(e), new(e), 最近明细 id 或 0]` 列表（包括差额为 0 的事件）。它不是秘密，只用来比较：确认时服务端在钱包锁内用同样的输入重算，不一致就 409 `REBILL_PREVIEW_STALE`。这挡住三种情况：预览之后有别的 Rebill 改了同一事件；匹配集合变了（新事件被计费进来）；请求参数与预览时不同。
+
+**规范化的 `selection`**（v7）：显式事件形状为 `{"usage_event_ids": [按字符串升序排好的 public_id]}`；条件形状为 `{"occurred_from", "occurred_to", "project_id", "provider", "model"}` 五个键都在，时间换成 UTC 的 `YYYY-MM-DDTHH:MM:SS.ffffffZ`（6 位微秒），没给的可选项为 `null`。`request_fingerprint` 的输入是规范 JSON 的 `{客户 public_id, 两个更正版本 public_id, 规范化的 selection, preview_token, 去首尾空白后的 reason}`。
 
 **一次 Rebill 的对象 = 预览展示的那组事件**（v3，#830 第二轮审查）。条件选事件（日期范围等）只是帮管理员**找出**这组事件的手段，不是「确认时刻该范围内的全部事件」的承诺。指纹保证确认事务处理的集合与预览展示的集合逐个相同（事件、基准、新计费、最近明细）。在确认事务的读视图建立**之后**才提交为 `PROCESSED` 的事件——计费额为 0 的预付事件不经 `post_transaction`、不拿钱包锁（`app/services/usage_billing.py:408`），可能在 Rebill 持锁期间提交；计费额大于 0 的事件在 Rebill 持锁期间等钱包，在 Rebill 之后提交——都不在本次 Rebill 里，与「预览之后才计费的事件不在本次范围」是同一件事：它们由下一次预览发现，再做一次 Rebill。这不会少扣或多扣：本次只改它明细里列出的事件，没列出的事件保持原计费，管理员看到的预览就是将要入账的全部内容。页面与 runbook 写明：做 Rebill 时 `occurred_to` 应取已过 T+1 cut-off 的时刻，避免与仍在计费的用量交错（只是建议，不强制）。
 
@@ -183,29 +185,31 @@ CHECK：三个金额的非负与等式、`difference <> 0`。`original_period` �
 
 ### 服务（`app/services/usage_rebill.py`，AIH-TASK-255）
 
-`preview_rebill(session_factory, *, request) -> RebillPreview`：一个只读事务（不加锁），按上面的口径返回明细（只含 `d ≠ 0` 的事件）、`unchanged_count`、四个合计、账本方向（`REBILL_CREDIT` / `REBILL_DEBIT` / 无）、余额预估（当前余额 − D，只作提示）与 `preview_token`。不写库、不写审计。
+`preview_rebill(session_factory, *, request) -> RebillPreview`：一个只读事务（不加锁），按上面的口径返回明细（只含 `d ≠ 0` 的事件）、`unchanged_count`、四个合计、账本方向与金额、余额预估（当前余额 − D，只作提示）与 `preview_token`。不写库、不写审计。**没有可入账的差额时预览仍返回 200**（v7）：明细为空或 `D = 0` 时 `ledger_type` 与 `ledger_amount` 为 `null`、`balance_after` 等于当前余额，页面据此禁用确认；只有确认才返回 409 `NOTHING_TO_REBILL` / `REBILL_NET_ZERO`。匹配数为 0 的条件选择在预览里同样是 409 `NOTHING_TO_REBILL`（没有可展示的事件）。
 
 `confirm_rebill(session_factory, *, actor, request, preview_token, reason, idempotency_key, context, clock) -> RebillResult`，**两个事务，先后进行**：
 
-**读视图的约定**（v2，#830 第一轮审查）：MySQL 默认 `REPEATABLE READ` 下，一个事务的读视图在它的**第一次普通读**时建立，之后不再刷新；拿到行锁不会让它看到在那之后才提交的数据。所以：
+**读视图与锁的约定**（v2 起；v7 按登记预审改为 READ COMMITTED）：
 
-- 锁外的校验放在**单独的一个只读事务**里做完并结束，不与确认事务共用读视图。
-- 确认事务的**第一条语句**是锁钱包的 `SELECT … FOR UPDATE`，之前不执行任何普通读。所有在它之前提交的 Rebill（它们都持有过同一把钱包锁）都在这之后建立的读视图里。
-- 决定金额基准的两次读——幂等查重、取各事件最近一条更正明细——用**加锁读**（`FOR SHARE`）。加锁读总是读最新已提交的版本，与读视图无关，作为第二道保证。
+- **为什么要约定**：MySQL 默认 `REPEATABLE READ` 下，读视图在事务的第一次普通读时建立、之后不再刷新，拿到行锁也看不到之后才提交的数据（#830 第一轮审查）。v2–v6 的对策是「锁前不读 + 两次加锁读（`FOR SHARE`）」；登记预审指出：`REPEATABLE READ` 下查不到行的 `FOR SHARE` 会留间隙锁，两个**不同客户**的确认几乎同时落在同一个间隙（典型是索引末尾），各自插入时插入意向锁互相挡住 → 1213 死锁、一方 500。这与 #751 v3 在密码重置上遇到并解决的是同一个问题（`app/services/password_reset.py:172-190`）。
+- **确认事务在 MySQL 上用 `READ COMMITTED`**：本会话的第一句是 `session.connection(execution_options={"isolation_level": "READ COMMITTED"})`（只在 `mysql` 方言上设，写法照 `password_reset.py`；SQLite 方言不接受，也没有行锁与快照问题；会话结束归还连接时隔离级别还原为引擎默认值，不泄漏到连接池）。`READ COMMITTED` 下每条普通读在执行时取最新已提交的数据，查找不加间隙锁。
+- 确认事务的第一条 SQL 仍是锁钱包的 `SELECT … FOR UPDATE`，之后**全部是普通读**（不再有 `FOR SHARE`）。同一客户的所有 Rebill 都要先拿同一把钱包锁，所以拿到锁之后的每一次读都看得到之前已提交的全部 Rebill 与明细；不同客户的确认之间没有锁交集（各自只锁自己的钱包与租户行，查找不加间隙锁）。
+- 锁外的校验仍放在**单独的一个只读事务**里做完并结束（第 0 步）。
+- 幂等查重是普通读：并发的同一个键由 `idempotency_key` 唯一约束兜底（第 8 步重查）。
 
 步骤：
 
 0. **校验事务**（只读，结束后才开确认事务）：客户存在（404 `CUSTOMER_NOT_FOUND`）、是预付（409 `REBILL_NOT_PREPAID`），取客户内部 id。客户的 id 与 `billing_mode` 的单向性（`PREPAID → INTERNAL_METERED_ONLY` 要求钱包为空、没有用量，`app/services/internal_billing.py:85-107`）保证这一步的结论在确认事务里仍然成立；确认事务第 2 步再用锁内读到的租户行复核一次 `billing_mode`。
-1. **确认事务**开始；第一条语句：按客户内部 id `SELECT … FOR UPDATE` 锁钱包行（与 `post_transaction` 内部的锁是同一行，同事务再锁不阻塞）。**同一客户的所有 Rebill 由此串行**。
+1. **确认事务**开始：先设 `READ COMMITTED`（MySQL）；第一条 SQL：按客户内部 id `SELECT … FOR UPDATE` 锁钱包行（与 `post_transaction` 内部的锁是同一行，同事务再锁不阻塞）。**同一客户的所有 Rebill 由此串行**。
 2. 读租户行（锁后的普通读），`billing_mode ≠ PREPAID` → 409 `REBILL_NOT_PREPAID`。
-3. 按 `idempotency_key` 加锁读（`FOR SHARE`）`usage_rebills`：存在且 `request_fingerprint` 相同 → 返回原结果，`replayed = true`，什么都不写；存在但不同 → 409 `REBILL_CONFLICT`（与手工调账的 `ADJUSTMENT_CONFLICT` 同一叫法）。
-4. 在锁内重新选事件、取 `effective_state`（最近明细用 `FOR SHARE` 加锁读）、校验更正版本、重算、算指纹；指纹 ≠ `preview_token` → 409 `REBILL_PREVIEW_STALE`。**幂等判定（第 3 步）在指纹比对之前**：同键重发时状态早已被第一次改变，必须先按幂等键返回原结果，而不是报过期。明细为空 → 409 `NOTHING_TO_REBILL`；`D = 0` → 409 `REBILL_NET_ZERO`。
+3. 按 `idempotency_key` 读 `usage_rebills`（普通读）：存在且 `request_fingerprint` 相同 → 返回原结果，`replayed = true`，什么都不写；存在但不同 → 409 `REBILL_CONFLICT`（与手工调账的 `ADJUSTMENT_CONFLICT` 同一叫法）。
+4. 在锁内重新选事件、取 `effective_state`（普通读）、校验更正版本、重算、算指纹；指纹 ≠ `preview_token` → 409 `REBILL_PREVIEW_STALE`。**幂等判定（第 3 步）在指纹比对之前**：同键重发时状态早已被第一次改变，必须先按幂等键返回原结果，而不是报过期。明细为空 → 409 `NOTHING_TO_REBILL`；`D = 0` → 409 `REBILL_NET_ZERO`。
 5. 生成 Rebill 的 `public_id`；`post_transaction(tenant_id, REBILL_CREDIT 或 REBILL_DEBIT, amount = −D, reference_type = REBILL, reference_id = public_id, now, created_by = actor.id, description = "Rebill correction (<N> usage events)", metadata = {"rebill": public_id, "events": N}, actor_role, ip, user_agent)`。`TenantClosed` → 409 `ACCOUNT_CLOSED`（什么都不写）；`InvalidAmount("BALANCE_OUT_OF_RANGE")` → 422 `AMOUNT_OUT_OF_RANGE`。
 6. 写 `usage_rebills`（`wallet_transaction_id` = 刚写的账本行）与 N 行 `usage_rebill_lines`。
 7. `record_audit(action = REBILL, entity_type = "usage_rebill", entity_id = public_id, before_state = {"previous_total", "event_count"}, after_state = {"corrected_total", "difference", "wallet_transaction": 账本行 public_id, "corrective_pricing_rule", "corrective_provider_price_version", "selection"}, reason)`。审计里有金额（客户计费额，不是成本），没有估算成本。
 8. 提交。`IntegrityError` 且是 `idempotency_key` 唯一冲突（另一个事务先提交了同一个键）→ 回滚后开一个新事务重查一次，按第 3 步判定；其他 `IntegrityError` 照常抛出。
 
-`rebill_pricing.effective_state` 因此有一个 `locking: bool` 参数：预览传 `False`（普通读），确认传 `True`（`FOR SHARE`）。
+`rebill_pricing.effective_state` 与仓储的读都是普通读，预览与确认共用（v7 去掉了 v2–v6 的 `locking` 参数）。`RebillResult` 的字段与「管理端接口」的 Rebill 详情相同，另加 `replayed`。
 
 所有时间取 `clock()` 截到整秒，在钱包锁**之后**取（与账本 `created_at` 的既有约定一致：对账单按 `created_at` 归属，锁后取值让 Rebill 行的 `created_at` 不早于它所看到的最新状态）。
 
@@ -218,7 +222,7 @@ CHECK：三个金额的非负与等式、`difference <> 0`。`original_period` �
 | POST | `/api/v1/admin/rebills/preview` | 体：`customer_id`、`selection`、`corrective_pricing_rule_id?`、`corrective_provider_price_version_id?`（都是 `public_id`）。200：`lines[]`（`usage_event_id`、`occurred_at`、`project`、`provider`、`model`、`previous_charge`、`corrected_charge`、`difference`、`previous_pricing_rule`、`corrected_pricing_rule`、`previous_provider_price_version`、`corrected_provider_price_version`、`corrected_estimated_provider_cost_myr`、`original_period`、`original_statement_id`）、`unchanged_count`、`event_count`、`previous_total`、`corrected_total`、`difference`、`ledger_type`、`ledger_amount`、`balance`、`balance_after`、`preview_token` |
 | POST | `/api/v1/admin/rebills` | 体：预览的全部字段 + `preview_token`（64 位小写十六进制）+ `reason`（1..255，去首尾空白后非空）+ `idempotency_key`（小写 UUID）。201：Rebill 详情；重放 200，`replayed: true` |
 | GET | `/api/v1/admin/rebills` | `customer_id?`、游标分页（照用量事件列表的写法），按 `id` 倒序：`id`、`customer_id`、`event_count`、`difference`、`ledger_type`、`ledger_amount`、`reason`、`created_by_email`、`created_at` |
-| GET | `/api/v1/admin/rebills/{id}` | 列表字段 + 两个更正版本 + `wallet_transaction_id` + 全部明细 |
+| GET | `/api/v1/admin/rebills/{id}` | 列表字段 + `previous_total` + `corrected_total` + 两个更正版本（各自的 `public_id`，没有为 `null`）+ `wallet_transaction_id` + 全部明细（字段同预览明细，规则、价格版本与对账单都是 `public_id`） |
 
 金额一律是定点字符串（`money_text`）。用量事件详情 `GET /api/v1/admin/usage-events/{id}` 增加 `effective_charge` 与 `rebills[]`（`rebill_id`、`created_at`、`previous_charge`、`corrected_charge`、`difference`，按明细 `id` 升序）；不增加处理函数（`tests/backend/test_usage_requeue_api.py:695` 钉住的 4 个处理函数不变）。
 
@@ -291,7 +295,8 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 
 ### 并发
 
-- **同一客户的两次 Rebill**：都先锁钱包行，串行。后一个的确认事务在拿到锁之前没有任何普通读，读视图在锁之后才建立，最近明细又是加锁读，所以必然看到前一个已提交的明细，最近明细 id 变了 → 指纹不符 → 409 `REBILL_PREVIEW_STALE`（见 §2「读视图的约定」）。若两次选中的事件不重叠且匹配集合不变，指纹仍相同，后一个照常成功（两者互不影响，正确）。
+- **同一客户的两次 Rebill**：都先锁钱包行，串行。后一个的确认事务在 `READ COMMITTED` 下、拿到锁之后才读，所以必然看到前一个已提交的明细，最近明细 id 变了 → 指纹不符 → 409 `REBILL_PREVIEW_STALE`（见 §2「读视图的约定」）。若两次选中的事件不重叠且匹配集合不变，指纹仍相同，后一个照常成功（两者互不影响，正确）。
+- **不同客户的两次 Rebill**（v7）：各自只锁自己的钱包与租户行；`READ COMMITTED` 下的查找不加间隙锁，两边插入 `usage_rebills` / `usage_rebill_lines` / 账本时没有锁交集，可以并行提交，不会死锁。
 - **Rebill 与用量计费**：计费的锁顺序是 事件 → 供应商（S）→ 汇率锁（S）→ 规则锁（S）→ 钱包（X）→ 租户（X）（`usage_billing.py:18-22`）。Rebill 只拿 钱包（X）→ 租户（X），不锁事件与版本行，所以不会成环。计费在 Rebill 持锁期间等钱包；它新计费的事件在 Rebill 之后提交，若落在 Rebill 的条件范围内，下一次预览才能看到。计费额为 0 的预付事件不拿钱包锁，可能在 Rebill 持锁期间提交，同样不在本次 Rebill 里（§2「预览指纹」末段：一次 Rebill 的对象 = 预览展示的那组事件）。Rebill 读的事件都是 `PROCESSED`（不可改），版本与规则的分量不可改，所以不需要计费那几把共享锁。
 - **Rebill 与手工调账、支付入账、关户**：都经 `post_transaction` 锁 钱包 → 租户，同一顺序，串行。关户先提交时 Rebill 在 `post_transaction` 里拿到 `TenantClosed`。
 - **Rebill 与对账单生成**：对账单按账本高水位划分（`ledger_high_sequence`），Rebill 行是普通账本行，在生成之前提交就进这一期、之后提交就进下一期，与其他行同一规则。
@@ -332,10 +337,11 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 | --- | --- | --- | --- |
 | 正常路径：补退 | integration | 3 个事件原计费 1.50 / 0.80 / 0.70，更正规则倍数降低使新计费 1.20 / 0.64 / 0.56 | 一行 `REBILL_CREDIT +0.60`；余额 +0.60；3 行明细；审计 1 条；事件与原账本行逐列不变 |
 | 正常路径：补扣 | integration | 更正价格版本单价更高 | 一行 `REBILL_DEBIT`，金额 = −D；余额减少 |
-| 原版本重算 | unit + integration | 不给更正版本，修改前后的计价函数一致 | 明细为空 → 409 `NOTHING_TO_REBILL`；（用桩让 `price_event` 返回不同值时）按差额入账 |
+| 原版本重算 | unit + integration | 不给更正版本，修改前后的计价函数一致；（另一组）用桩让 `price_event` 返回不同值 | **预览**：200，明细为空、`unchanged_count` = 选中数、`ledger_type` 与 `ledger_amount` 为 `null`、`balance_after` = 当前余额；**确认**（同一预览指纹）：409 `NOTHING_TO_REBILL`，什么都不写。用桩时：预览列出差额，确认按差额入账 |
 | 多次更正 | integration | 同一事件先降后升两次 Rebill | 第二次以第一次的 `corrected_charge` 为基准；`eff(e) = billable_cost + Σ difference`；第二次「原版本重算」用第一次的更正版本 |
 | 差额为 0 跳过 | integration | 5 个事件里 2 个差额为 0 | 明细 3 行，`unchanged_count = 2`，指纹仍包含 5 个事件 |
-| 相抵为 0 | integration | 一个补退 0.10、一个补扣 0.10 | 409 `REBILL_NET_ZERO`，什么都不写 |
+| 相抵为 0 | integration | 一个补退 0.10、一个补扣 0.10 | **预览**：200，明细两行、合计 `difference` = 0、`ledger_type` 与 `ledger_amount` 为 `null`；**确认**（同一预览指纹）：409 `REBILL_NET_ZERO`，什么都不写 |
+| 条件匹配为 0 | integration | 条件选择在范围内没有任何可选事件 | 预览与确认都是 409 `NOTHING_TO_REBILL`（没有可展示的事件，§2「服务」） |
 | 计费额为 0 的事件 | integration | 原计费 0、无原账本行，更正后 > 0 | 明细 `original_wallet_transaction_id` 为空，`original_period` = `occurred_at` 的马来西亚月 |
 | 适用性 | unit | 价格版本：别的模型、别的币种、DRAFT、DISCARDED、缺分量；规则：别的客户、别的项目、别的模型、DRAFT、FIXED_RATE 缺分量；RETIRED 与生效区间不覆盖事件时刻 | 前五 / 前五种 422 对应错误码并带事件 id；RETIRED 与区间不覆盖照常可用 |
 | 选事件边界 | integration | 条件匹配 1000 条成功、1001 条 422 并带匹配数；0 条 409；`[from, to)` 左闭右开；内部计量事件与非 PROCESSED 事件不被选中 | 如述 |
@@ -346,7 +352,8 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 | 幂等重放 | integration | 同键同参重发；同键异参；两个事务同键并发 | 200 `replayed`；409 `REBILL_CONFLICT`；一个 201 一个 200 |
 | 事务中途失败 | integration | 在写明细时注入异常 | 账本行、余额、审计、outbox、Rebill 行全部不存在；随后同幂等键重发照常执行，结果只有一行账本 |
 | 提交后响应丢失 | integration | 第一次确认已提交（模拟响应丢失：服务调用返回后丢弃结果）；之后又有别的 Rebill 改了同一客户的状态；再用同一幂等键、同一预览指纹重发 | 200 `replayed: true`，返回第一次的结果；账本仍只有一行（不是 409 `REBILL_PREVIEW_STALE`） |
-| 读视图（MySQL） | integration | 捕获确认事务在该连接上执行的语句（SQLAlchemy `before_cursor_execute`） | 事务的第一条语句是钱包的 `FOR UPDATE`；取最近明细与幂等查重的语句是加锁读（只在 `mysql` 分支断言加锁子句的字面量，CLAUDE.md「写后端测试的约定」） |
+| 读视图（MySQL） | integration | 捕获确认事务在该连接上执行的语句（SQLAlchemy `before_cursor_execute`），并在事务内读 `@@transaction_isolation` | 隔离级别是 `READ-COMMITTED`；事务的第一条语句是钱包的 `FOR UPDATE`；之后没有 `FOR SHARE` 与其他加锁读（只在 `mysql` 分支断言字面量，CLAUDE.md「写后端测试的约定」）；确认结束后同一连接池取出的连接隔离级别回到引擎默认值 |
+| 不同客户并发（MySQL） | integration | 两张新表为空；两个客户各自预览后，两个线程同时确认（用屏障让两边都在插入前停住再放行） | 两个都 201，没有 1213 死锁；各自一行账本、一组明细 |
 | 停复机 | integration | 补扣让余额从正变为 ≤ 0（含正好为 0）；补退让停机客户余额变为 > 0 | 同事务里状态变化与状态推送 outbox 行，与 `post_transaction` 既有测试同一断言 |
 | 关户 | integration | 客户已 `CLOSED` | 409 `ACCOUNT_CLOSED`，什么都不写 |
 | 对账单 | integration | 原事件在 10 月（10 月对账单已定稿），11 月确认 Rebill | 10 月对账单逐列不变；明细 `original_statement_id` 指向它；11 月快照 `prior_period.rebill` = Rebill 行金额 |
@@ -361,7 +368,7 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 | 用量分析 | integration | Rebill 后按客户、按月分组与合计、CSV 导出 | 收入 = 原计费 + 差额；成本不变；毛利随之变 |
 | Redis/Celery 丢失 | 不适用 | 同步请求不经队列 | — |
 
-四个变异必须变红：删掉确认时的指纹比对（并发测试变红）；把 `eff(e)` 改为总用 `billable_cost`（多次更正测试变红）；在确认事务锁钱包之前加一次普通读、同时把最近明细改为普通读（并发测试变红：B 的读视图建立在 A 提交之前）；把幂等判定挪到指纹比对之后（「提交后响应丢失」测试变红）。
+四个变异必须变红：删掉确认时的指纹比对（并发测试变红）；把 `eff(e)` 改为总用 `billable_cost`（多次更正测试变红）；删掉 `READ COMMITTED` 的设置、并在锁钱包之前加一次普通读（同一客户并发测试变红：B 的读视图建立在 A 提交之前）；把最近明细或幂等查重改为 `FOR SHARE`（不同客户并发测试变红：死锁）；把幂等判定挪到指纹比对之后（「提交后响应丢失」测试变红）。
 
 ## 8. 迁移与上线
 
@@ -442,3 +449,5 @@ Rebill 本身没有状态（只追加的事实记录）。它引起的状态变�
 | v4 | 2026-11-23 | #830 第三轮审查（Codex）阻断项：降级的空表检查与删表之间，并发确认可能提交 Rebill，随后被删表 —— 降级改为先用一条 `RENAME TABLE` 改名（等正在写的事务结束、挡住新的写入），再在改名后的表上检查，有行就改回原名并抛错；补「降级与确认并发」「降级后的确认」两条测试 |
 | v5 | 2026-11-23 | #830 第四轮审查（Codex）阻断项：降级改名之后进程中断，表停在 `_downgrading` 名下、无法恢复 —— `downgrade` 开头按实际表名判断从哪一步续跑，写明中断期间的表现与 runbook 的两种恢复方式，异常组合直接拒绝；补「降级中断后续跑」测试 |
 | v6 | 2026-11-23 | #830 第五轮审查（Codex）阻断项：降级第 3 步若分两条语句删表，中间中断会只剩一张表 —— 改为一条 `DROP TABLE` 同时删两张表（MySQL 8 原子 DDL，触发器随表删除），续跑分支相应简化；测试加④断言一条语句删两表 |
+| v7 | 2026-11-23 | 登记预审（AIH-TASK-255）发现：`REPEATABLE READ` 下查不到行的 `FOR SHARE` 留间隙锁，不同客户的确认互相死锁 —— 确认事务在 MySQL 上改用 `READ COMMITTED`（照 #751 v3 的密码重置），锁钱包之后全用普通读、去掉 `FOR SHARE` 与 `locking` 参数，补「不同客户并发」测试、改读视图测试与变异；另按预审定下：预览没有可入账差额时仍 200（方向与金额为 null）、`selection` 与 `request_fingerprint` 的规范形式、详情含两个合计与 public_id 形式的引用、超限数量与不适用事件写在错误消息里 |
+| v8 | 2026-11-23 | #830 第六轮审查（Codex）阻断项：§7 把无差额的情况只写成 409、没分预览与确认 —— 「原版本重算」「相抵为 0」两行分别写明预览 200（方向与金额为 null）与确认 409，补「条件匹配为 0」一行 |
