@@ -61,6 +61,9 @@ from app.models import (
     usage as _usage_models,  # noqa: F401  (registers usage_events/usage_event_conflicts)
 )
 from app.models import (
+    usage_rebills as _usage_rebill_models,  # noqa: F401  (registers the two rebill tables)
+)
+from app.models import (
     wallet as _wallet_models,  # noqa: F401  (registers wallets/wallet_transactions)
 )
 from app.models import (

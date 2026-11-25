@@ -2,7 +2,7 @@
 
 > spec §136 要求维护的文档之一，Phase 1 起按表逐步补。
 > 本文件记**已裁决的表结构**与裁决理由；字段语义以 spec 为准（§74–§79），冲突时以 spec 为准并走勘误。
-> 最后更新：2026-11-17
+> 最后更新：2026-11-24
 
 ---
 
@@ -21,7 +21,8 @@
   `amount` / `balance_before` / `balance_after`；`provider_price_components` 的 `rate_amount`（原币种单价）与
   `unit_quantity`（多少个计量单位）同一精度；`payments` 的 `expected_amount`、`wallet_credit_amount`、`tax_amount`、
   `confirmed_amount`、`gateway_fee` 也是，`payment_receipts.amount` 也是，`provider_cost_reconciliations` 的 `source_total`、
-  `reconciled_cost_myr`、`estimated_source_cost`、`estimated_cost_myr` 也是。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
+  `reconciled_cost_myr`、`estimated_source_cost`、`estimated_cost_myr` 也是，`usage_rebills` 的三个合计与 `usage_rebill_lines`
+  的三个计费额与 `corrected_estimated_provider_cost_myr` 也是。汇率不是金额：`fx_rate_versions.rate` 是 `DECIMAL(24,10)`（设计闸门
   #183 §2），`provider_cost_reconciliations.fx_rate_applied` 同精度，同样不用浮点
 - **枚举列**：非原生 enum，`VARCHAR` 宽度写死（理由见 `app/models/auth.py` 的 `_ENUM_LENGTH`）
 
@@ -1937,6 +1938,134 @@ DELETE 都被拒绝，记录写错只能追加取代行。SQLite 上没有这两
   `alembic_version` 仍是 0041。为空时先删两个触发器（只删存在的），再删表；表已不在时不发 DDL。`--sql` 离线模式判断不了是否为空，
   直接拒绝、不输出 `DROP`。
 - **生产只回滚应用镜像，不降级 0041**；记录写错用更正（追加取代行），不删行。
+
+---
+
+## Rebill：`usage_rebills` 与 `usage_rebill_lines`（spec §16、§19、§66、§131；AIH-TASK-253，迁移 `0042_usage_rebills`）
+
+设计依据：[design/AIH-TASK-253-usage-rebill.md](design/AIH-TASK-253-usage-rebill.md)（设计闸门 #830 v12）§2「数据库（迁移 0042，
+AIH-TASK-253）」「口径」、§3 INV-5、INV-6、INV-10、§8。已计费（`PROCESSED`）的预付用量事件算错了钱时，管理员按更正版本重算，
+差额以一行 `REBILL_CREDIT` / `REBILL_DEBIT` 账本入账；这两张表记下每次 Rebill 与逐事件明细，是 spec §19 要求的审计链。
+事件行与原 `AI_USAGE` 账本行一个字节不变（INV-5、INV-6）。两张表的行**只插入**，不改、不删。模型在 `app/models/usage_rebills.py`。
+AIH-TASK-253 只建表与触发器，部署后两张表是空的，没有写入方。
+
+**口径**（设计 §2「口径」）：
+
+- **当前有效计费** `eff(e)`：事件 `e` 最近一条明细（按明细 `id` 最大）的 `corrected_charge`；没有明细时是 `usage_events.billable_cost`。
+  恒有 `eff(e) = billable_cost + Σ 该事件明细的 difference`。
+- **当前有效版本** `refs(e)`：最近一条明细的 `corrected_pricing_rule_id`、`corrected_provider_price_version_id`；没有明细时是事件快照的
+  `pricing_rule_id`、`provider_price_version_id`。汇率版本始终是事件快照的 `fx_rate_version_id`（汇率不更正）。
+- **新计费** `new(e)`：按更正版本（请求没指定的那一项取 `refs(e)` 的对应项）与快照汇率重算的 `billable_cost`；**差额**
+  `d(e) = new(e) − eff(e)`，为 0 的事件不写明细。合计差额 `D = Σ d(e)`，账本金额 `= −D`（`D < 0` 写 `REBILL_CREDIT`，`D > 0` 写
+  `REBILL_DEBIT`）。
+- **只追加**：更正写错 → 再做一次 Rebill（把版本改回去），不改、不删任何行。同一事件可以被更正多次，每次以 `eff(e)` 为基准。
+- **原账期** `original_period`（`YYYY-MM`）：原 `AI_USAGE` 行按对账单「账本归属规则」的归属月 `t(r)`（`occurred_at` 所在马来西亚月，
+  晚于该月 cut-off 才入账的取 `created_at` 所在马来西亚月）；计费额为 0、没有原账本行的事件取 `occurred_at` 所在马来西亚月。格式由
+  服务层保证，数据库不校验（与 `provider_cost_reconciliations.billing_month` 同一做法）。
+- **原对账单** `original_statement_id`：确认时这个客户、这个原账期已存在的 `monthly_statements` 行（生成即定稿）；没有为空。原对账单只被
+  引用，不被改（INV-12）；Rebill 行按它自己的 `created_at` 进开放期的 `prior_period.rebill`。
+
+### `usage_rebills`（一次 Rebill 一行）
+
+| 列 | 类型 | 约束 / 含义 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；不出库 |
+| `public_id` | CHAR(36) | 非空，唯一（`uq_usage_rebills_public_id`）；uuid4，对外 id，也是账本行的 `reference_id`（`reference_type = REBILL`） |
+| `tenant_id` | BIGINT | 非空；客户；外键 → `tenants(id)`（`fk_usage_rebills_tenant_id`） |
+| `idempotency_key` | CHAR(36) | 非空，唯一（`uq_usage_rebills_idempotency_key`）；客户端生成的小写 UUID |
+| `request_fingerprint` | CHAR(64) | 非空；规范请求（客户、更正版本、selection、`preview_token`、去首尾空白后的原因）的 sha256 十六进制，幂等重放时比对 |
+| `corrective_pricing_rule_id` | BIGINT | 可空；请求指定的更正规则；外键 → `pricing_rules(id)`（`fk_usage_rebills_corrective_pricing_rule_id`） |
+| `corrective_provider_price_version_id` | BIGINT | 可空；请求指定的更正价格版本；外键 → `provider_price_versions(id)`（`fk_usage_rebills_corrective_provider_price_version_id`） |
+| `event_count` | INT | 非空；明细行数，`BETWEEN 1 AND 1000`（`ck_usage_rebills_event_count`） |
+| `previous_total` | DECIMAL(20,8) | 非空；Σ eff(e)，`>= 0`（`ck_usage_rebills_previous_total`） |
+| `corrected_total` | DECIMAL(20,8) | 非空；Σ new(e)，`>= 0`（`ck_usage_rebills_corrected_total`） |
+| `difference` | DECIMAL(20,8) | 非空；`corrected_total − previous_total`，`<> 0`（`ck_usage_rebills_difference_nonzero`）；账本金额 = −difference |
+| `wallet_transaction_id` | BIGINT | 非空，唯一（`uq_usage_rebills_wallet_transaction_id`）；这次写的那一行 `REBILL_*` 账本；外键 → `wallet_transactions(id)`（`fk_usage_rebills_wallet_transaction_id`） |
+| `reason` | VARCHAR(255) | 非空；去首尾空白后的原因（`ck_usage_rebills_reason`，见下） |
+| `created_by` | BIGINT | 非空；确认的管理员；外键 → `users(id)`（`fk_usage_rebills_created_by`） |
+| `created_at` | DATETIME | 非空；整秒 UTC，钱包锁之后取值；对账单按它的马来西亚月归属 |
+
+`ck_usage_rebills_reason`：`TRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(reason, CHAR(9), ' '), CHAR(10), ' '), CHAR(11), ' '),
+CHAR(12), ' '), CHAR(13), ' ')) <> ''`：把制表、换行、垂直制表、换页、回车依次替换为空格后 `TRIM`，结果不为空串，即只由 ASCII 空白
+组成的原因由数据库拒绝。不换行空格等非 ASCII 空白**不在数据库兜底范围内**（只有不换行空格的原因数据库接受，已知边界），由唯一的写入方
+——确认接口的请求校验（Python `str.strip()` 后非空）与服务——拒绝。
+
+### `usage_rebill_lines`（一次 Rebill 的逐事件明细）
+
+| 列 | 类型 | 约束 / 含义 |
+| --- | --- | --- |
+| `id` | BIGINT | 主键，自增；「最近明细」按它取最大 |
+| `rebill_id` | BIGINT | 非空；外键 → `usage_rebills(id)`（`fk_usage_rebill_lines_rebill_id`） |
+| `usage_event_id` | BIGINT | 非空；外键 → `usage_events(id)`（`fk_usage_rebill_lines_usage_event_id`） |
+| `original_wallet_transaction_id` | BIGINT | 可空；事件原来的 `AI_USAGE` 账本行，计费额为 0 的事件没有；外键 → `wallet_transactions(id)` |
+| `previous_charge` | DECIMAL(20,8) | 非空；eff(e)，`>= 0`（`ck_usage_rebill_lines_previous_charge`） |
+| `corrected_charge` | DECIMAL(20,8) | 非空；new(e)，`>= 0`（`ck_usage_rebill_lines_corrected_charge`） |
+| `difference` | DECIMAL(20,8) | 非空；`corrected_charge − previous_charge`，`<> 0`（`ck_usage_rebill_lines_difference_nonzero`） |
+| `previous_pricing_rule_id`、`previous_provider_price_version_id` | BIGINT | 非空；refs(e)：重算之前的当前有效规则与价格版本；外键 → `pricing_rules(id)`、`provider_price_versions(id)` |
+| `corrected_pricing_rule_id`、`corrected_provider_price_version_id` | BIGINT | 非空；这次重算用的规则与价格版本（之后这个事件的 refs(e)）；外键同上 |
+| `corrected_estimated_provider_cost_myr` | DECIMAL(20,8) | 非空，`>= 0`（`ck_usage_rebill_lines_estimated_cost`）；按更正价格版本算出的估算成本，只给管理端看；用量分析的成本仍以事件快照为准 |
+| `original_period` | CHAR(7) | 非空；`YYYY-MM`，原账期（见「口径」） |
+| `original_statement_id` | BIGINT | 可空；原对账单；外键 → `monthly_statements(id)` |
+| `created_at` | DATETIME | 非空；与所属 Rebill 相同 |
+
+明细的外键都按 `fk_usage_rebill_lines_<列>` 命名。
+
+**不建「差额 = 新 − 旧」的等式 CHECK**（设计 v9）：后端测试的 SQLite 把 `DECIMAL` 当浮点比较，`1.20 - 1.50` 不等于 `-0.30`，合法行
+会被拒。等式由 AIH-TASK-255 的服务在同一处计算并写入，服务测试对每条写入路径断言 `difference = corrected_total − previous_total`、
+`difference = corrected_charge − previous_charge`、账本金额 = −Σ 明细差额。
+
+约束与索引（每个外键在子表上都有前导列一致的索引，MySQL 不自建隐藏索引；唯一约束或设计点名的索引能充当的不另建）：
+
+- `usage_rebills`：唯一 `uq_usage_rebills_public_id`、`uq_usage_rebills_idempotency_key`、`uq_usage_rebills_wallet_transaction_id`
+  （一次 Rebill 恰有一行账本；也是该外键的索引）；`ix_usage_rebills_tenant (tenant_id, id)`（按客户列 Rebill；也是 `tenant_id` 外键的
+  索引）；`ix_usage_rebills_corrective_pricing_rule_id`、`ix_usage_rebills_corrective_provider_price_version_id`、
+  `ix_usage_rebills_created_by`。除主键外恰好七个。
+- `usage_rebill_lines`：唯一 `uq_usage_rebill_lines_rebill_event (rebill_id, usage_event_id)`（一次 Rebill 里一个事件至多一行；也是
+  `rebill_id` 外键的索引）；`ix_usage_rebill_lines_usage_event (usage_event_id, id)`（取一个事件的最近明细；也是 `usage_event_id`
+  外键的索引）；其余六个外键列各一个 `ix_usage_rebill_lines_<列>`。除主键外恰好八个。
+- 所有外键都是 `RESTRICT`：删客户、账本行、事件、规则、价格版本、对账单、用户或 Rebill 都不许连带删掉记录。
+- 后端测试的 SQLite 由模型 `create_all` 建表，不开 `PRAGMA foreign_keys`；CHECK 与唯一约束两种库都测
+  （`tests/backend/test_usage_rebills_migration.py`）。
+
+**行由谁写**：只有 AIH-TASK-255 的确认（`app/services/usage_rebill.py` 的 `confirm_rebill`）：在锁住客户钱包的同一事务里写账本行、
+`usage_rebills` 一行与 N 行 `usage_rebill_lines`、审计 `REBILL`（只 INSERT）。没有任何更新与删除路径。
+
+**谁读**：管理端 Rebill 接口（列表、详情、预览与确认时的 `eff(e)` / `refs(e)`，AIH-TASK-254、256）、管理端用量事件详情的
+`effective_charge` 与更正历史（AIH-TASK-256）、用量分析的收入（`prepaid_billable_cost` 加上该事件全部明细的 `difference`，
+AIH-TASK-258）。客户侧只看到 `REBILL_*` 账本行，看不到这两张表（INV-7）。
+
+### 触发器（迁移 0042 建，只在 MySQL 上）
+
+| 触发器 | 时机 | 作用 |
+| --- | --- | --- |
+| `trg_usage_rebills_before_update` | BEFORE UPDATE | 无条件 `SIGNAL SQLSTATE '45000'`（`usage_rebills rows are immutable`） |
+| `trg_usage_rebills_before_delete` | BEFORE DELETE | 同上 |
+| `trg_usage_rebill_lines_before_update` | BEFORE UPDATE | 无条件 `SIGNAL SQLSTATE '45000'`（`usage_rebill_lines rows are immutable`） |
+| `trg_usage_rebill_lines_before_delete` | BEFORE DELETE | 同上 |
+
+**两张表的行不可改、不可删**（INV-5）：任何 UPDATE（改哪一列都一样）与 DELETE 都被拒绝。SQLite 上没有这四个触发器（与 0039、0041
+同一惯例），服务层本来就没有更新与删除路径。`TRUNCATE` / `DROP` 是 DDL，不经触发器；测试清理用关外键检查加 `TRUNCATE`（明细引用
+Rebill），不删触发器。
+
+### 迁移与回滚（设计 §2「数据库」、§8）
+
+- 0042 只建这两张新表与四个触发器，不改任何已有表、不回填。MySQL 上每张表是**一条**原子的 `CREATE TABLE`（索引、外键与 CHECK 都在
+  里面），先 `usage_rebills` 后 `usage_rebill_lines`，之后四条 `CREATE TRIGGER`。缺什么建什么（补完在两条 `CREATE TABLE` 之间、或建表
+  与建触发器之间中断的升级）。
+- 之前先检查、不对就报错且不发 DDL：表存在时逐项比形状（列的名称、类型与宽度、可空性，**不比服务端默认值**；主键、索引、外键与
+  `RESTRICT`、CHECK 名称）；MySQL 上读 `information_schema.TRIGGERS` 逐个比四个触发器的所在表、时机、事件与主体。
+- 预检 `@@log_bin` 与 `@@log_bin_trust_function_creators`（与 0041 同一个）只在要发 DDL 时跑，紧接在第一条 DDL 之前；什么都不缺时
+  不跑。`--sql` 离线模式按「什么都没做过」输出全部语句。
+- **降级规则**：降级不是部署流水线的一部分，只由人手工执行，**先停掉 `api` 容器**（Rebill 唯一的写入方是管理端确认接口），确认没有
+  进行中的请求，再 `alembic downgrade 0041_provider_cost_recon`。这是操作前提，不由数据库强制（在数据库里挡并发写入要对带外键的
+  子表改名或加表锁，MySQL 8 会为此拿全部父表的排他元数据锁，可能挡住全站读写；设计 v9 撤回了改名协议）。
+- **有行时降级被拒**：`downgrade` 对在的每张表先查 `SELECT 1 FROM <表> LIMIT 1`，任一有行就抛 `RuntimeError`（`usage_rebills is not
+  empty: downgrading would delete rebill records (spec §19); restore from backup or keep this revision`），不发 DDL、不删行，
+  `alembic_version` 仍是 0042。都为空时 MySQL 上**一条** `DROP TABLE usage_rebill_lines, usage_rebills`（原子；触发器随表删除），
+  SQLite 上逐个删；只剩一张（升级在两条 `CREATE TABLE` 之间中断）时只删它；两张都不在时不发 DDL。`--sql` 离线模式判断不了是否为空，
+  直接拒绝、不输出 `DROP`。
+- **有了 Rebill 之后 0042 不可降级**：逐事件的金额、新旧版本与原交易引用是 spec §19 要求的审计链，账本里的 `REBILL_*` 行离开它们就
+  无法解释。生产只回滚应用镜像（新表对旧代码无害：旧代码不读它们），不得手工删除这两张表的行，也不得为了降级而清表。
 
 ---
 
