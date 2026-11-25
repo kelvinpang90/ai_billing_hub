@@ -3,7 +3,7 @@
 # 生产巡检：容器健康 + `/readyz` 降级 + 磁盘水位（spec §94 的磁盘告警、§95 的告警通道；T0.9），
 # 外加应用自己报的告警维度（`GET /internal/alerts`，每行一个维度；设计闸门 #183 v3）。
 #
-# ⚠️ **这个脚本补的是四个「不会有人发现」的故障**，四个都不会让任何请求报错：
+# ⚠️ **这个脚本补的是五个「不会有人发现」的故障**，五个都不会让任何请求报错：
 #   1. celery-beat 停了 —— 周期任务全停，API 一切正常，日志里什么都没有
 #      （探针早就有了，见 docker-compose.yml；缺的一直是**把 unhealthy 送到人手里**）
 #   2. Redis 不可用 —— `/readyz` **刻意**返回 200（app/api/health.py 写了理由），
@@ -15,6 +15,9 @@
 #   4. celery-worker 活着但处理不过来（或卡在某个任务上）—— 容器照样 healthy，表现只是
 #      投递、计费、对账慢慢滞后（AIH-TASK-208）：services 维度在逐个检查容器之后，
 #      再读 Redis broker 里 Celery 默认队列的长度，超过阈值报 P2
+#   5. 某个服务的日志写入过快 —— json-file 按大小轮转，刷屏时事故前的历史在每天一次的外送
+#      之前就被顶掉，而磁盘水位要很久之后才会动（spec §95 的 log volume growth；AIH-TASK-252）：
+#      disk 维度逐个服务读最近一小时的日志量，快到轮转容量撑不过外送周期时报 P2
 #
 # ⚠️ **TLS 与时钟为什么并进 disk、而不是各自一个检查**：Healthchecks 免费档的 20 个检查已经用满。
 # disk 很少变红，并在它里面被别的问题遮住的概率最低。代价是第 1 条取舍要避免的那种：
@@ -25,6 +28,10 @@
 # 已用满（2026-10-17 Kelvin 定：不再新增检查，新的巡检项一律并进已有维度）。它并进 services
 # 是因为两者是同一件事 ——「异步链路的那几个容器在不在干活」，复核时随 check_services 一起重跑。
 # 代价同上：services 已经红着时，积压不会再单独通知。
+#
+# ⚠️ **日志写入过快为什么并进 disk、而不是新开一个检查**：同一个理由，免费档 20 个已用满
+# （2026-10-17 Kelvin 定）。它并进 disk 是因为日志撑爆磁盘、日志被轮转顶掉都是宿主机层面的事，
+# 复核时随 check_disk 一起重跑。代价同上：disk 已经红着时，写入过快不会再单独通知。
 #
 # 由 cron 每 5 分钟跑一次（deploy/cron.d/ai_billing_hub）。
 #
@@ -84,6 +91,23 @@ CELERY_QUEUE=celery
 # 淘汰**，那时队列反而变短。这条告警必须在那之前响 —— 调高它只会让告警来得更晚。
 CELERY_QUEUE_WARN_DEFAULT=500
 CELERY_QUEUE_WARN="${BILLING_MONITOR_CELERY_QUEUE_WARN:-$CELERY_QUEUE_WARN_DEFAULT}"
+
+# 日志写入速度的告警线 = 每容器的轮转容量 ÷ 这个小时数（AIH-TASK-252）。
+#
+# ⚠️ **判据是「轮转容量撑多久」，不是「比平时多几倍」**（#829 审查）：平时的量只能从外送归档采样，
+# 而归档本身就被轮转封顶 —— 刷屏那天采到的「平时」也是被截断的，突增时反而漏报。
+# 危害本身就是「历史在外送之前被顶掉」，所以直接问：照这个速度，轮转容量撑得过外送周期吗？
+#
+# ⚠️ 60 小时的来历：外送每 24 小时一次（03:47，deploy/log_ship.sh），logs 检查宽限 2 小时，
+# 合计 26 小时；再乘 2 是因为 json-file 在盘上给每一行包一层 JSON 加时间字段，
+# 而 `compose logs` 读出的是纯文本，字节数明显小于盘上占用 —— 不乘的话告警线偏松一倍。
+# (24 + 2) × 2 = 52，取 60 再留一点余量。调小它只会把告警线**抬高**（线 = 容量 ÷ 小时数）。
+LOG_RATE_HORIZON_HOURS_DEFAULT=60
+LOG_RATE_HORIZON_HOURS="${BILLING_MONITOR_LOG_RATE_HORIZON_HOURS:-$LOG_RATE_HORIZON_HOURS_DEFAULT}"
+# 轮转配置的缺省值。⚠️ 必须与 docker-compose.yml 里 x-logging 的 `${BILLING_LOG_MAX_SIZE:-10m}`、
+# `${BILLING_LOG_MAX_FILES:-3}` 一致 —— 不一致时算出来的容量不是盘上真实的那一份。
+LOG_MAX_SIZE_DEFAULT=10m
+LOG_MAX_FILES_DEFAULT=3
 
 # 发现问题后隔多久复核一次。⚠️ 不复核的话，**一次正常部署就会误报**：deploy.sh
 # 换版本时容器会有半分钟左右不是 healthy，而那段时间照样可能撞上这个 cron。
@@ -310,6 +334,75 @@ check_clock() {
     [ "$synced" = yes ] || echo "P2 host clock is not NTP-synchronized"
 }
 
+# 每个容器的 json-file 轮转容量（字节）= 单文件大小 × 文件数，取自 `.env` 的 BILLING_LOG_MAX_SIZE /
+# BILLING_LOG_MAX_FILES（缺省同 docker-compose.yml）。大小是十进制整数加可选的 k / m / g
+# （不分大小写，按 1024 进位，无后缀即字节），文件数是正整数。任一个不合规时 stderr 记一行、
+# 那一个按缺省值算 —— 宁可按 compose 的缺省值估，也不让这一项停掉。
+log_rotation_bytes() {
+    local size files per_file
+    size="$(env_value BILLING_LOG_MAX_SIZE)"
+    files="$(env_value BILLING_LOG_MAX_FILES)"
+    # 第一轮试配置值，不合规时记一行、第二轮用缺省值。⚠️ 位数与单文件 1 TiB 的上限
+    # 防的是算术溢出：溢出之后的容量可能是负数，告警线跟着乱掉。
+    for size in "${size:-$LOG_MAX_SIZE_DEFAULT}" "$LOG_MAX_SIZE_DEFAULT"; do
+        per_file=0
+        if [[ "$size" =~ ^([0-9]{1,9})([kKmMgG]?)$ ]]; then
+            per_file=$((10#${BASH_REMATCH[1]}))
+            case "${BASH_REMATCH[2]}" in
+                [kK]) per_file=$((per_file * 1024)) ;;
+                [mM]) per_file=$((per_file * 1048576)) ;;
+                [gG]) per_file=$((per_file * 1073741824)) ;;
+            esac
+        fi
+        if [ "$per_file" -gt 0 ] && [ "$per_file" -le 1099511627776 ]; then
+            break
+        fi
+        log "BILLING_LOG_MAX_SIZE is not a size (digits with an optional k/m/g); using ${LOG_MAX_SIZE_DEFAULT}" >&2
+    done
+    files="${files:-$LOG_MAX_FILES_DEFAULT}"
+    if ! [[ "$files" =~ ^[0-9]{1,4}$ ]] || [ "$((10#$files))" -eq 0 ]; then
+        log "BILLING_LOG_MAX_FILES is not a positive integer; using ${LOG_MAX_FILES_DEFAULT}" >&2
+        files="$LOG_MAX_FILES_DEFAULT"
+    fi
+    printf '%s\n' "$((per_file * 10#$files))"
+}
+
+check_log_rate() {
+    local hours="$LOG_RATE_HORIZON_HOURS" capacity warn svc result bytes status
+    if ! [[ "$hours" =~ ^[0-9]{1,6}$ ]] || [ "$((10#$hours))" -eq 0 ]; then
+        log "BILLING_MONITOR_LOG_RATE_HORIZON_HOURS is not a positive integer; using ${LOG_RATE_HORIZON_HOURS_DEFAULT}" >&2
+        hours="$LOG_RATE_HORIZON_HOURS_DEFAULT"
+    fi
+    hours=$((10#$hours))
+    capacity="$(log_rotation_bytes)"
+    warn=$((capacity / hours))
+    # 容量小于小时数时整除得 0，那样每个服务都「超线」。
+    [ "$warn" -ge 1 ] || warn=1
+    for svc in $SERVICES_P1 $SERVICES_P2; do
+        # ⚠️ `head -c <告警线 + 1>`：只要知道「到没到线」，读满就停。刷屏的服务一小时能写几十 MB，
+        # 不截断的话巡检自己要把它整个读一遍，每 5 分钟一次、七个服务。
+        # ⚠️ `timeout 10`：docker 卡住时 compose logs 会一直等，整轮巡检就拖过下一个 cron 周期。
+        # 命令替换输出两行：读到的字节数、compose（经 timeout）的退出码。
+        result="$({
+            timeout 10 $COMPOSE logs --no-color --no-log-prefix --since 1h "$svc" 2>/dev/null | head -c "$((warn + 1))" | wc -c
+            echo "${PIPESTATUS[0]}"
+        } || true)"
+        bytes="${result%%$'\n'*}"
+        bytes="${bytes//[![:digit:]]/}"
+        status="${result##*$'\n'}"
+        status="${status//[![:digit:]]/}"
+        # ⚠️ 失败、超时、输出为空都按 0、不报：容器停了由 services 维度报，与 check_clock 同一条理由
+        # （量不到不报警）。例外是读满了 warn + 1：那时是 head 先退出，compose 的非零退出码来自
+        # 断掉的管道（SIGPIPE），不是失败 —— 把它也当成失败，刷屏得最凶的时候反而不报。
+        if [ -z "$bytes" ] || { [ "$status" != 0 ] && [ "$bytes" -le "$warn" ]; }; then
+            bytes=0
+        fi
+        if [ "$bytes" -ge "$warn" ]; then
+            echo "P2 log rate ${svc} >= ${warn} B in the last hour (rotation ${capacity} B per container would not last ${hours}h)"
+        fi
+    done
+}
+
 check_disk() {
     local target line device used mount seen=""
     # ⚠️ 用 `df -P` 而不是 `df`：长设备名会让默认输出换行，字段就错位了。
@@ -337,6 +430,9 @@ check_disk() {
     # disk 很少变红，被遮住的概率最低；代价是 disk 已红时这两项出事不再单独通知（见文件头）。
     check_tls
     check_clock
+    # 日志写入过快同样并在这里（AIH-TASK-252）：撑爆磁盘、被轮转顶掉都是宿主机层面的事，
+    # 免费档已用满（2026-10-17 Kelvin 定，见文件头）。
+    check_log_rate
 }
 
 # disk 维度的 OK 摘要：按这一轮实际执行了什么拼接。⚠️ 不能让 check_disk 设变量来告诉这里 ——

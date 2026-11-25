@@ -1878,7 +1878,12 @@ def test_tls_and_clock_ride_on_the_disk_check() -> None:
     assert int(crit.group(1)) < int(warn.group(1))
 
     disk = monitor_function("check_disk")
-    assert disk.index("check_binlog") < disk.index("check_tls") < disk.index("check_clock")
+    assert (
+        disk.index("check_binlog")
+        < disk.index("check_tls")
+        < disk.index("check_clock")
+        < disk.index("check_log_rate")
+    )
 
     # ⚠️ 对端不应答时 s_client 会一直挂着：每一处都必须由 timeout 包住。
     assert monitor.count("openssl s_client") >= 1
@@ -1927,7 +1932,7 @@ printf '%s\\n' "${FAKE_NTP:-}"
 HOST_CHECK_RUNNER = """#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p tools
-for tool in bash sed head date tr timeout df awk; do
+for tool in bash sed head date tr timeout df awk wc; do
     real="$(command -v "$tool")"
     printf '#!%s\\nexec "%s" "$@"\\n' "$BASH" "$real" > "tools/$tool"
     chmod +x "tools/$tool"
@@ -2277,6 +2282,272 @@ def test_a_nonsense_celery_threshold_falls_back_to_500(tmp_path, warn: str) -> N
     assert out.splitlines() == ["P2 celery queue backlog 500 (warn 500)"]
     if warn:
         assert "BILLING_MONITOR_CELERY_QUEUE_WARN is not a non-negative integer; using 500" in err
+
+
+# --- 日志写入过快并进 disk 维度（spec §95 log volume growth；AIH-TASK-252）------------
+
+
+def test_the_log_rate_rides_on_the_disk_check() -> None:
+    """⚠️ json-file 按大小轮转：某个服务刷屏时，事故前的历史在每天一次的外送之前就被顶掉。
+
+    免费档已用满：并进 disk 维度，不新增检查、不新增 `.env` 地址；复核时随 check_disk
+    一起重跑，所以必须由 check_disk 在 check_clock 之后调用。
+    """
+    monitor = uncommented(MONITOR)
+    default = re.search(r"^LOG_RATE_HORIZON_HOURS_DEFAULT=(\d+)$", monitor, re.M)
+    assert default is not None and int(default.group(1)) == 60
+    assert (
+        'LOG_RATE_HORIZON_HOURS="${BILLING_MONITOR_LOG_RATE_HORIZON_HOURS:-'
+        '$LOG_RATE_HORIZON_HOURS_DEFAULT}"' in monitor
+    )
+
+    disk = monitor_function("check_disk")
+    assert disk.index("check_clock") < disk.index("check_log_rate")
+
+    # ⚠️ 缺省值与 compose 不一致时，算出来的容量就不是盘上真实的那一份。两边各自解析出来比。
+    compose = COMPOSE.read_text(encoding="utf-8")
+    logging_block = compose[compose.index("x-logging:") :]
+    rotation = monitor_function("log_rotation_bytes")
+    for key, const in (
+        ("BILLING_LOG_MAX_SIZE", "LOG_MAX_SIZE_DEFAULT"),
+        ("BILLING_LOG_MAX_FILES", "LOG_MAX_FILES_DEFAULT"),
+    ):
+        in_compose = re.search(rf"\$\{{{key}:-([^}}]+)\}}", logging_block)
+        in_monitor = re.search(rf"^{const}=(\S+)$", monitor, re.M)
+        assert in_compose is not None and in_monitor is not None, key
+        assert in_compose.group(1) == in_monitor.group(1), key
+        assert f"env_value {key}" in rotation
+        assert f"${const}" in rotation
+
+    # ⚠️ docker 卡住时 compose logs 会一直等；刷屏时不截断就要整个读一遍。每一处都要两样都有。
+    assert monitor.count("$COMPOSE logs") >= 1
+    assert monitor.count("$COMPOSE logs") == len(
+        re.findall(r"timeout 10 \$COMPOSE logs [^\n|]*\|\s*head -c ", monitor)
+    )
+
+    assert set(re.findall(r"BILLING_HEALTHCHECK_[A-Z0-9_]+", monitor)) == {
+        "BILLING_HEALTHCHECK_SERVICES_URL",
+        "BILLING_HEALTHCHECK_READYZ_URL",
+        "BILLING_HEALTHCHECK_DISK_URL",
+        "BILLING_HEALTHCHECK_ALERT_",
+    }
+    assert 'publish BILLING_HEALTHCHECK_DISK_URL disk "$DISK_OUT" "$(disk_ok_summary)"' in monitor
+
+
+# 假 compose：记下参数；按 FAKE_LOG_BYTES（`<服务>=<字节数>`，空格分隔）给最后一个参数那个服务
+# 吐那么多字节，然后以 FAKE_COMPOSE_EXIT 退出。没列出的服务输出为空。
+FAKE_COMPOSE_LOGS = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> compose_calls
+svc="${*: -1}"
+n=0
+for pair in ${FAKE_LOG_BYTES:-}; do
+    [ "${pair%%=*}" != "$svc" ] || n="${pair#*=}"
+done
+[ "$n" -eq 0 ] || head -c "$n" /dev/zero | tr '\\0' x
+exit "${FAKE_COMPOSE_EXIT:-0}"
+"""
+
+LOG_RATE_LINE = (
+    "P2 log rate {svc} >= {warn} B in the last hour "
+    "(rotation 31457280 B per container would not last {hours}h)"
+)
+
+
+def run_log_rate_check(
+    tmp_path,
+    what: str = "check_log_rate",
+    env_lines: tuple[str, ...] = (),
+    logs: dict[str, int] | None = None,
+    **env,
+) -> tuple[str, str, list[str]]:
+    """把 monitor.sh 的 COMPOSE、服务名单、LOG_ 常量、env_value、log_rotation_bytes 与
+    check_log_rate 原样抠出来，对着假 compose 跑。返回 (stdout, stderr, compose 的参数行)。
+    """
+    bash = shutil.which("bash")
+    assert bash is not None, "需要 bash（CI 是 ubuntu-latest，本地用 git-bash）"
+
+    monitor = uncommented(MONITOR)
+    settings = re.findall(r"^(?:COMPOSE|SERVICES_P[12]|LOG_[A-Z_]+)=.*$", monitor, re.M)
+    assert len(settings) == 7
+    functions = [
+        monitor_function(name) for name in ("env_value", "log_rotation_bytes", "check_log_rate")
+    ]
+
+    work = tmp_path / "lograte"
+    (work / "bin").mkdir(parents=True)
+    run = work / "run.sh"
+    run.write_text(
+        HOST_CHECK_RUNNER + "\n".join(settings + functions) + f"\n{what}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake = work / "bin" / "fake-compose"
+    fake.write_text(FAKE_COMPOSE_LOGS, encoding="utf-8", newline="\n")
+    fake.chmod(0o755)
+    (work / ".env").write_text(
+        "\n".join(["BILLING_HTTP_PORT=8080", *env_lines]) + "\n", encoding="utf-8", newline="\n"
+    )
+
+    full = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("BILLING_MONITOR_") and not k.startswith("FAKE_")
+    }
+    full["BILLING_COMPOSE"] = "fake-compose"
+    if logs:
+        full["FAKE_LOG_BYTES"] = " ".join(f"{svc}={n}" for svc, n in logs.items())
+    full.update(env)
+    # ⚠️ timeout：截断失效时假 compose 会把 50 MB 整个吐完，用例要在这里失败而不是挂住。
+    done = subprocess.run(
+        [bash, str(run)], cwd=work, env=full, capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 0, done.stderr
+    calls_file = work / "compose_calls"
+    calls = calls_file.read_text(encoding="utf-8").splitlines() if calls_file.exists() else []
+    return done.stdout, done.stderr, calls
+
+
+@pytest.mark.parametrize(
+    ("env_lines", "expected"),
+    [
+        ((), 31457280),
+        (("BILLING_LOG_MAX_SIZE=20m", "BILLING_LOG_MAX_FILES=5"), 104857600),
+        (("BILLING_LOG_MAX_SIZE=1g",), 3221225472),
+        (("BILLING_LOG_MAX_SIZE=1G",), 3221225472),
+        (("BILLING_LOG_MAX_SIZE=512k",), 1572864),
+        (("BILLING_LOG_MAX_SIZE=4096",), 12288),
+    ],
+)
+def test_the_rotation_capacity_follows_the_env_file(
+    tmp_path, env_lines: tuple[str, ...], expected: int
+) -> None:
+    """容量 = 单文件大小 × 文件数；k / m / g 按 1024 进位、不分大小写，无后缀即字节。"""
+    out, err, calls = run_log_rate_check(tmp_path, "log_rotation_bytes", env_lines)
+    assert out.splitlines() == [str(expected)]
+    assert "BILLING_LOG_MAX" not in err
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("env_lines", "message"),
+    [
+        (
+            ("BILLING_LOG_MAX_SIZE=abc",),
+            "BILLING_LOG_MAX_SIZE is not a size (digits with an optional k/m/g); using 10m",
+        ),
+        (
+            ("BILLING_LOG_MAX_SIZE=0",),
+            "BILLING_LOG_MAX_SIZE is not a size (digits with an optional k/m/g); using 10m",
+        ),
+        (
+            ("BILLING_LOG_MAX_SIZE=10mb",),
+            "BILLING_LOG_MAX_SIZE is not a size (digits with an optional k/m/g); using 10m",
+        ),
+        (
+            ("BILLING_LOG_MAX_FILES=0",),
+            "BILLING_LOG_MAX_FILES is not a positive integer; using 3",
+        ),
+        (
+            ("BILLING_LOG_MAX_FILES=abc",),
+            "BILLING_LOG_MAX_FILES is not a positive integer; using 3",
+        ),
+    ],
+)
+def test_a_nonsense_rotation_setting_falls_back_to_the_compose_default(
+    tmp_path, env_lines: tuple[str, ...], message: str
+) -> None:
+    """不合规的那一个按缺省值算（与 compose 一致），stderr 记一行说明。"""
+    out, err, _ = run_log_rate_check(tmp_path, "log_rotation_bytes", env_lines)
+    assert out.splitlines() == ["31457280"]
+    assert [line for line in err.splitlines() if message in line] == [f"LOG {message}"]
+
+
+@pytest.mark.parametrize(
+    ("logs", "expected"),
+    [
+        ({}, []),
+        ({"api": 524287}, []),
+        ({"api": 524288}, [LOG_RATE_LINE.format(svc="api", warn=524288, hours=60)]),
+        (
+            {"api": 600000, "redis": 524288, "mysql": 100},
+            [
+                LOG_RATE_LINE.format(svc="api", warn=524288, hours=60),
+                LOG_RATE_LINE.format(svc="redis", warn=524288, hours=60),
+            ],
+        ),
+    ],
+)
+def test_a_service_logging_faster_than_its_rotation_lasts_is_a_p2(
+    tmp_path, logs: dict[str, int], expected: list[str]
+) -> None:
+    """缺省 3 × 10m ÷ 60 小时 = 524288 B：最近一小时不小于它报 P2，正文带服务名与告警线。"""
+    out, err, calls = run_log_rate_check(tmp_path, logs=logs)
+    assert out.splitlines() == expected
+    assert "is not a" not in err
+    # 七个服务逐个查，读的是最近一小时、不带前缀与颜色的纯文本。
+    services = (
+        "mysql",
+        "api",
+        "billing_nginx",
+        "frontend",
+        "redis",
+        "celery-worker",
+        "celery-beat",
+    )
+    assert calls == [f"logs --no-color --no-log-prefix --since 1h {svc}" for svc in services]
+
+
+@pytest.mark.parametrize(
+    ("logs", "env"),
+    [
+        ({}, {"FAKE_COMPOSE_EXIT": "1"}),
+        ({"api": 524288}, {"FAKE_COMPOSE_EXIT": "1"}),
+        # timeout 杀掉时的退出码
+        ({"api": 524288}, {"FAKE_COMPOSE_EXIT": "124"}),
+    ],
+)
+def test_unreadable_logs_are_not_an_alert(
+    tmp_path, logs: dict[str, int], env: dict[str, str]
+) -> None:
+    """命令失败、超时：按 0 处理、不报 —— 容器停了由 services 维度报，量不到不报警。"""
+    out, _, calls = run_log_rate_check(tmp_path, logs=logs, **env)
+    assert out == ""
+    assert len(calls) == 7
+
+
+def test_a_flooding_service_is_read_only_up_to_the_threshold(tmp_path) -> None:
+    """某个服务一小时 50 MB：head -c 读满告警线就停，仍只报那一行，用例很快结束。"""
+    out, _, _ = run_log_rate_check(tmp_path, logs={"celery-worker": 50 * 1024 * 1024})
+    assert out.splitlines() == [LOG_RATE_LINE.format(svc="celery-worker", warn=524288, hours=60)]
+
+
+@pytest.mark.parametrize(
+    ("logs", "expected"),
+    [
+        ({"api": 1048575}, []),
+        ({"api": 1048576}, [LOG_RATE_LINE.format(svc="api", warn=1048576, hours=30)]),
+    ],
+)
+def test_the_log_rate_horizon_can_be_configured(
+    tmp_path, logs: dict[str, int], expected: list[str]
+) -> None:
+    """BILLING_MONITOR_LOG_RATE_HORIZON_HOURS=30：告警线 = 31457280 ÷ 30 = 1048576。"""
+    out, err, _ = run_log_rate_check(
+        tmp_path, logs=logs, BILLING_MONITOR_LOG_RATE_HORIZON_HOURS="30"
+    )
+    assert out.splitlines() == expected
+    assert "is not a positive integer" not in err
+
+
+@pytest.mark.parametrize("hours", ["abc", "0", "-5", "1.5", "60h"])
+def test_a_nonsense_log_rate_horizon_falls_back_to_60(tmp_path, hours: str) -> None:
+    """小时数不是正整数：按默认 60 处理，stderr 记一行说明。"""
+    out, err, _ = run_log_rate_check(
+        tmp_path, logs={"api": 524288}, BILLING_MONITOR_LOG_RATE_HORIZON_HOURS=hours
+    )
+    assert out.splitlines() == [LOG_RATE_LINE.format(svc="api", warn=524288, hours=60)]
+    message = "BILLING_MONITOR_LOG_RATE_HORIZON_HOURS is not a positive integer; using 60"
+    assert [line for line in err.splitlines() if message in line] == [f"LOG {message}"]
 
 
 def test_local_binlog_retention_outlives_one_full_backup_cycle() -> None:

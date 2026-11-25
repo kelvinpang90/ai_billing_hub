@@ -981,7 +981,7 @@ T0.3 做的是日志的**内容与格式**（结构化、request id、脱敏）�
 
 | 要求 | 现状 | 怎么做到的 |
 | --- | --- | --- |
-| 轮转 | compose 的 json-file driver：`max-size 10m` / `max-file 3` | ⚠️ 它**按大小轮转，不按时间** —— 那只是「堵住把磁盘写满」，不是保留期 |
+| 轮转 | compose 的 json-file driver：`max-size 10m` / `max-file 3` | ⚠️ 它**按大小轮转，不按时间** —— 那只是「堵住把磁盘写满」，不是保留期。某个服务写快到轮转容量撑不过外送周期时，巡检在 disk 维度报 P2（§8.1「日志写入过快」） |
 | 保留期 | ✅ `BILLING_LOG_RETENTION_DAYS`，默认 **30 天**（决策 ⑤） | 每天把容器日志抓出来打包加密成归档，**保留期落在归档上**：本机 30 天、R2 35 天 |
 | 磁盘上限 | ✅ `BILLING_LOG_ARCHIVE_CAP_MB`，默认 **512 MB** | 先按保留期删、再按总量从最老删；撞上限**另外**以 err 级别写一条 syslog。加上容器日志那 210 MB，主机层面的日志总量口径 ≈ **0.7 GB** |
 | 安全删除 | ✅ `shred -u`（§112） | ⚠️ 边界在脚本注释里写明：日志式文件系统、SSD 磨损均衡、快照 / 写时复制之下**都不保证**覆盖到原物理块。真正兜底的是**归档本身是加密的** |
@@ -996,6 +996,9 @@ T0.3 做的是日志的**内容与格式**（结构化、request id、脱敏）�
 ⚠️ **为什么必须外送，而不是「把保留期调大」**：json-file 按大小轮转，写得快的那天
 可能只剩几个小时的历史；而事故调查要看的恰恰是**出事前那几天**。保留期这件事在
 本机表达不了，它是**离机那一侧**的属性。
+「写得快的那天」现在有告警（AIH-TASK-252）：巡检每 5 分钟逐服务看最近一小时的日志量，
+快到每容器的轮转容量撑不过外送周期（缺省约 512 KiB 每小时）时在 disk 维度报 P2，
+见 §8.1「日志写入过快」与 [runbook](runbook.md)「日志写入过快」 —— 收到它就该提前手工外送一次。
 
 几条与「日志能不能用」直接相关的取舍：
 
@@ -1071,6 +1074,7 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
 | **Celery 队列积压**（AIH-TASK-208，并进 services 检查） | 七个服务逐个查完之后，`timeout 10 docker compose exec -T redis redis-cli -n 0 LLEN celery`：broker 库号与 `docker-compose.yml` 的 `BILLING_REDIS_URL` 一致，`celery` 是未配置 `task_default_queue` 时的默认队列。输出不是非负整数（redis 没在跑、命令失败、超时、为空）时跳过、不报，只记 stderr —— redis 停了已由上一行报出 | 长度 ≥ **500** = **P2**，正文 `P2 celery queue backlog <N> (warn <阈值>)`（`BILLING_MONITOR_CELERY_QUEUE_WARN` 可调，不是非负整数时按 500 并记一行）。正常时队列接近 0；Redis 设了 `maxmemory` + `allkeys-lru`，积压过大时消息会被淘汰，这条要在那之前响 | Telegram（检查 `ai_billing_hub services`，不新增检查、不新增 `.env` 地址） | 同上；services 已红时积压不再单独通知 | [Celery 队列积压](runbook.md) |
 | **`billing_readiness_degraded_redis`**；同一维度另有 **`billing_ai_readiness_failed`**（AIH-TASK-075） | 宿主机 `GET /readyz`，**读响应体**：`data.status != "ok"`；之后再 `GET /healthz/ai`（默认同一入口，`BILLING_MONITOR_AI_READY_URL` 可覆盖），**状态码与响应体都看**：非 2xx，或正文不含 `"status":"ok"`（前端兜底的 200 HTML 也算失败） | readyz：P2；非 2xx（数据库不通 / API 挂）= **P1**。AI 就绪失败 = **P1**，正文只带 URL 与是否 2xx，不带响应体 | Telegram（检查 `ai_billing_hub readyz`） | 同上 | [Redis / Celery broker 不可用](runbook.md)；[AI 就绪检查失败](runbook.md) |
 | 磁盘水位（§94 点名的那条）**与 binlog 总量预算**；同一维度另有 **TLS 证书到期**与**主机时钟同步**（AIH-TASK-150） | `df -P` 查根文件系统与部署目录（按设备去重）；另外进 mysql 容器量一次 binlog 占用。TLS：主机名取 `.env` 的 `BILLING_FRONTEND_BASE_URL`（只认 https；为空或不是 https 时跳过），`timeout 15 openssl s_client` 取对外证书的 `notAfter`。时钟：`timedatectl show -p NTPSynchronized --value`（命令不存在或输出为空时跳过） | 磁盘 ≥ **80%** = P2、≥ **90%** = P1；binlog ≥ **2 GB** = P2。证书剩余 < **21 天** = P2、< **7 天**或已过期 = P1（`BILLING_MONITOR_TLS_WARN_DAYS` / `BILLING_MONITOR_TLS_CRIT_DAYS`），读不到证书 = P2；时钟不是 `yes` = P2（五个阈值都可调；问题行不带主机名） | Telegram（检查 `ai_billing_hub disk`） | 同上 | §7（日志）、§5.2.2 末尾（binlog）；[TLS 证书即将到期或读不到](runbook.md)；[主机时钟未同步](runbook.md) |
+| **日志写入过快**（spec §95 log volume growth；AIH-TASK-252，并进 disk 检查） | 时钟之后，对七个服务逐个 `timeout 10 docker compose logs --no-color --no-log-prefix --since 1h <服务> \| head -c <告警线 + 1> \| wc -c`：读满告警线就停，刷屏时巡检自己不读几十 MB。告警线 = 每容器轮转容量（`.env` 的 `BILLING_LOG_MAX_SIZE` × `BILLING_LOG_MAX_FILES`，缺省同 `docker-compose.yml`：10m × 3）÷ **60 小时**，缺省 **524 288 B ≈ 512 KiB 每小时每服务**。60 = （外送每 24 小时一次 + logs 检查宽限 2 小时）× 2（json-file 在盘上给每行包一层 JSON 与时间字段，`compose logs` 读出的纯文本更少）再留余量。⚠️ 判据是「轮转容量撑多久」而不是「比平时多几倍」：平时的量只能从外送归档采样，而归档被轮转封顶，突增时反而漏报（#829 审查）。命令失败、超时、输出为空按 0、不报 —— 容器停了由 services 维度报 | 最近一小时 ≥ 告警线 = **P2**，每个服务一行，正文 `P2 log rate <服务> >= <告警线> B in the last hour (rotation <容量> B per container would not last <小时>h)`。`BILLING_MONITOR_LOG_RATE_HORIZON_HOURS` 可调（不是正整数时按 60 并记一行）；轮转配置不合规时按缺省值并记一行 | Telegram（检查 `ai_billing_hub disk`，不新增检查、不新增 `.env` 地址） | 同上；disk 已红时不再单独通知；disk 的 OK 摘要不变 | §7（日志）；[日志写入过快](runbook.md) |
 
 ⚠️ **AI 就绪为什么并进 readyz、而不是自己一个检查**：Healthchecks 免费档的 20 个检查按计划已经排满
 （8 个基础检查加 12 个告警维度，见「AI 模块部署前置与配置」末段；实际到 2026-11-03 才全部建出，见 §8.4「生产接通状态」），不新增检查，也不新增 `.env` 键，复用 `BILLING_HEALTHCHECK_READYZ_URL`。
@@ -1175,7 +1179,9 @@ runbook 链接**。⚠️ **17 项仍未齐** —— 那需要一套指标管道
   需要指标管道，**不在 T0.9 的范围里**，Phase 1 起随功能补。
   ⚠️ 其中 **TLS certificate expiry** 与 **host clock drift** 两项已由 AIH-TASK-150 覆盖（并进磁盘维度，见 §8.1；
   时钟一项看的是「是否在做 NTP 同步」，不量漂移的秒数）；**Celery 队列长度**已由 AIH-TASK-208 覆盖
-  （并进 services 维度，见 §8.1；只看默认队列 `celery` 的长度，不量任务耗时与失败率）
+  （并进 services 维度，见 §8.1；只看默认队列 `celery` 的长度，不量任务耗时与失败率）；
+  **log volume growth** 已由 AIH-TASK-252 覆盖（并进 disk 维度，见 §8.1；逐服务看最近一小时的日志量
+  够不够轮转容量撑过外送周期）。**HTTP 错误率**与**用量摄取速率**仍要指标管道
 - 日志聚合，以及基于日志内容的告警规则（§94 的异地留存也卡在这一条上）
 - 告警的**值班与升级路径**：现在只有一个人、一条 Telegram。`P1 30 分钟未响应升级`
   这类规则等有第二个人再谈 —— 写在 runbook 里而不是配置里
