@@ -26,7 +26,7 @@
 | 14 | backup failure and full restore | [备份失败：全量备份与 binlog 离机](#备份失败全量备份与-binlog-离机)；[整台 VPS 没了（灾难恢复）](#整台-vps-没了灾难恢复) |
 | 15 | encryption master-key recovery | [主密钥（`master.key`）丢失或要在新主机上重建](#主密钥masterkey丢失或要在新主机上重建) |
 | 16 | document-volume recovery | [文档存储恢复](#文档存储恢复)；[整台 VPS 没了（灾难恢复）](#整台-vps-没了灾难恢复) |
-| 17 | late prior-period usage and cross-period rebill | [上期用量与跨期调整](#上期用量与跨期调整)；[月度对账单](#月度对账单) |
+| 17 | late prior-period usage and cross-period rebill | [上期用量与跨期调整](#上期用量与跨期调整)；[月度对账单](#月度对账单)；[Rebill](#rebill) |
 | 18 | account closure with unresolved financial events | [关户](#关户) |
 
 这 18 行与 spec §136 的 runbook 清单逐条对应、顺序相同，场景名照抄原文。**spec 改了这份清单，要同步改这张表**；新增或改名章节时，
@@ -1139,7 +1139,8 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 ### 影响什么
 
 - 错误版本生效期间计费的事件按错误汇率算。⚠️ **已经计费的事件不会因为退役而改变**：一个（币种, 时刻）一旦取到某个
-  版本，以后永远取到同一个（ADR-0005「同一事件重算得出相同 MYR」）。纠正已计费事件走 Phase 8 的 reprocess，不在这里
+  版本，以后永远取到同一个（ADR-0005「同一事件重算得出相同 MYR」）。已计费事件的汇率不在 Rebill 范围内（设计闸门 #830 §1「明确不做什么」），需要时用手工调账，见 [Rebill](#rebill)；未计费的
+  `FX_RATE_ERROR` 走重新入队
 - 退役之后到补发之前，该币种的新事件 `FX_RATE_ERROR`、不扣费；补发把这段空档补上（见下），不会永久丢
 
 ### 立刻做什么
@@ -1151,7 +1152,7 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 | 还是草稿 | 丢弃：`POST …/{fx_rate_id}/discard`。BNM 草稿不可编辑，丢弃后手工录入 |
 | 已发布、**正在生效**（未截断，起点已过） | 1. **先**建好正确的草稿（手工录入，`source_reference` 写清出处与「更正 <错误版本 id>」）<br>2. 退役错误版本：`POST …/{fx_rate_id}/retire`，`reason` 写清原因 —— 从退役时刻 `t` 起该币种取不到汇率<br>3. **立刻**发布正确草稿，**不给 `effective_from`**：按 P4 从退役时刻起首尾相接补上空档（设计 §2 P4、E9 ①） |
 | 已发布、**尚未开始**（预约的） | 退役即撤销预约：它变成空区间、永不生效；前一个版本若仍是已发布、且正是被它截断的，恢复为未截断（R2；以退役结束的不恢复）。然后按需重新发布正确的版本 |
-| 已发布、**已被截断**（历史版本） | 409 `FX_RATE_NOT_RETIRABLE`：它的区间已经结束，不能退役。只能走 Phase 8 reprocess 纠正已计费事件 |
+| 已发布、**已被截断**（历史版本） | 409 `FX_RATE_NOT_RETIRABLE`：它的区间已经结束，不能退役。已计费事件的汇率不在 Rebill 范围内（设计闸门 #830 §1「明确不做什么」），需要时用手工调账，见 [Rebill](#rebill) |
 
 先建草稿再退役，是为了把「退役 → 补发」之间无汇率的空档压到几秒；即使拖久了，补发不给时刻也会从退役时刻起补上。
 
@@ -1160,7 +1161,8 @@ TOTP 密文、生成的验证码与验证器 App 一致、错误的密钥被拒�
 1. 版本列表里：错误版本 `RETIRED [原起点, 退役时刻)`，正确版本 `PUBLISHED [退役时刻, null)`，两者首尾相接
 2. `fx_stale` 保持绿（正确版本的报价日在 5 天内）
 3. 审计里有 `FX_RATE_RETIRE`（带 `reason`）与 `FX_RATE_PUBLISH` 两条，按 `entity_type = fx_rate_version` 可查
-4. 错误版本生效期间已计费的事件：列出受影响的时间段与币种，留给 Phase 8 reprocess（记进当次事故记录）
+4. 错误版本生效期间已计费的事件：列出受影响的时间段与币种（记进当次事故记录）。已计费事件的汇率不在 Rebill 范围内（设计闸门 #830
+   §1「明确不做什么」），需要时用手工调账，见 [Rebill](#rebill)；未计费的 `FX_RATE_ERROR` 走重新入队
 
 ### 绝不能做什么
 
@@ -1462,7 +1464,8 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
 - **不要重新入队 `ACCOUNT_CLOSED` 与 `LEDGER_CONFLICT`**：前者要人工复核，后者是缺陷，修数据要另写补偿行
 - **不要为了「让事件能计价」想办法回溯发布价格、规则或汇率**（例如直接写库改 `effective_from`）：除了时间线为空时的
   第一个版本，发布只在末尾追加、从发布时刻起生效（不许回溯是价格、规则、汇率各自设计的约定）。`occurred_at` 落在空档
-  里的事件，要由那时生效的版本计价 —— 那时没有就是没有，留在错误状态，按 Phase 8 的调整流程处理或与客户另行结算
+  里的事件，要由那时生效的版本计价 —— 那时没有就是没有，留在错误状态。Rebill 不处理未计费事件；价格与规则不能回溯发布，所以这类事件重新入队也算不出价，只能按手工调账处理（见
+  [Rebill](#rebill)）
 - **不要手工把卡住的 `PROCESSING` 改状态**：等租约过期由回收任务处理；手工改会和仍在处理的 worker 抢
 - **不要为了消 `wallet_negative_balance` 去改余额**：余额只经账本变动（INV-4），充值或调账走管理端接口
 
@@ -2289,8 +2292,8 @@ echo "exit=$?"
 按原用量月 `usage_period` 列出条数与金额）。已定稿的对账单不变。没有单独的账本类型：上期调整是对账单按这条规则对 `AI_USAGE`
 行的归类；扣费本身在入账那一刻就发生，余额与停机判定不等对账单。宽限日（次月第 1 日）内入账的上月用量仍计入原月，不算晚到。
 
-**跨期 Rebill 在 V1 没有实现**：`REBILL_CREDIT` / `REBILL_DEBIT` 两个账本类型在模型里有，对账单的 `prior_period.rebill` 一栏照样
-汇总它们，但没有任何代码写这两种行 —— Phase 8 的「Rebill 调整」在 TODO 里未勾选、要先过设计闸门。今天 `rebill` 一栏恒为 0。
+**跨期 Rebill**：由 AIH-TASK-253..260 与 262（设计闸门 #830）交付，流程与故障处置见 [Rebill](#rebill)。`REBILL_CREDIT` /
+`REBILL_DEBIT` 行按确认时刻（`created_at`）的马来西亚月计入当月对账单的 `prior_period.rebill`；原账期已定稿的对账单不变。
 
 ### 怎么发现
 
@@ -2305,7 +2308,7 @@ echo "exit=$?"
 | --- | --- |
 | 金额：晚到的用量照扣一次，不丢、不重复 | 客户的这一期对账单多出「上期调整」，要能解释 |
 | 已定稿的往期对账单：一个字节都不变（INV-12） | 晚到占比高说明投递链路有系统性延迟：每一笔都应能追溯到一次具体的延迟（ADR-0003） |
-| | 已计费金额本身错了（价格、规则、汇率发布错）的事件：V1 没有重算的出口 |
+| | 已计费金额本身错了的事件：价格、规则发布错的走 [Rebill](#rebill)；汇率错的不在 Rebill 范围内，需要时用手工调账 |
 
 ### 立刻做什么
 
@@ -2313,8 +2316,7 @@ echo "exit=$?"
    客户侧投递）；停机或积压跨过 cut-off 的，先按对应章节恢复
 2. 核对某客户某一期：管理端对账单详情（`GET /api/v1/admin/statements/{statement_id}`）的 `prior_period`
 3. 向客户解释：对账单 PDF 上这一节开头有固定说明（原月 cut-off 之后才处理的往期用量，按原用量月列在这里）
-4. 已计费的金额本身错了：这是 Reprocess / Rebill，V1 没有。列出受影响的事件、期间与原因，记进事故记录，留给 Phase 8
-   （与「FX 汇率：发布了错误的汇率」「用量计费」两节的做法一致）
+4. 已计费的金额本身错了：按 [Rebill](#rebill) 一节「先选对手段」处理（计价错误 → Rebill；汇率错误与计价无关的补偿 → 手工调账）
 
 ### 恢复
 
@@ -2329,6 +2331,156 @@ echo "exit=$?"
   调账计入本期的「调整」而不是「上期调整」，也不引用原事件 —— 客户看到的是一笔与原用量无关的调整。手工调账只用于本文件其他章节
   写明的场景（争议与退款的扣回、关户前的余额清零、负余额、AI 用量待复核的退回）
 - **不要为了消晚到告警删事件或账本行**
+
+---
+
+## Rebill
+
+**首次编写：2026-11-25（AIH-TASK-259）。依据：设计闸门 #830 v12（[AIH-TASK-253-usage-rebill.md](design/AIH-TASK-253-usage-rebill.md)）
+§1「Kelvin 2026-11-23 的决定」「明确不做什么」、§2「选事件」「预览指纹」「服务」、§4「跃迁表」、§5、§8；接口契约见
+[api.md「管理端 Rebill」](api.md#管理端-rebill)；迁移见 `alembic/versions/20261124_0042_usage_rebills.py` 文件头「失败处理」「回滚」。**
+
+已计费（`PROCESSED`）的预付事件发现算错了钱时，管理员对**一个客户**的一组事件按更正版本重算：先预览（旧计费、新计费、差额），
+再确认（必填原因、带幂等键）。确认在客户钱包写**恰好一行** `REBILL_CREDIT`（多扣了，退回）或 `REBILL_DEBIT`（少扣了，补扣），
+逐事件的明细写进 `usage_rebills` / `usage_rebill_lines` 两张只追加的表。事件行、原 `AI_USAGE` 行与已定稿的对账单一个字节都不改。
+入口：管理端侧栏「Rebills」（`/rebills` 列表、`/rebills/new` 新建、`/rebills/:id` 详情）；用量事件详情页对已计费的预付事件有
+「Rebill」按钮，跳到新建页并预填客户与该事件。只有 ADMIN 能用，客户门户没有任何 Rebill 入口。
+
+### 先选对手段
+
+| 情形 | 用什么 | 说明 |
+| --- | --- | --- |
+| **未计费**的错误事件（`MODEL_UNKNOWN` / `PRICING_ERROR` / `FX_RATE_ERROR` / `FAILED_FINAL`，账本里没有它的行） | **重新入队**（见「用量计费」一节「立刻做什么」） | Rebill 只选 `PROCESSED` 事件，不处理未计费事件（设计 §1「明确不做什么」）。修好配置后重新入队，由计费照常算 |
+| **已计费**的预付事件，**计价**错了：价格版本、定价规则录错，或计价代码有 bug 已修好 | **Rebill** | 指定更正规则、更正价格版本（只影响 MARKUP 规则），或都不指定（按当前有效版本重算，修了 bug 之后用）。不许手填金额 |
+| 与计价无关的补偿或退款（争议、商务让利、关户前清零等），以及已计费事件的**汇率**错误 | **手工调账**（[api.md「管理端手工调账」](api.md#管理端手工调账)） | 汇率不在 Rebill 范围内：已计费事件的汇率沿用原快照（设计 §1「明确不做什么」） |
+
+Rebill 也不做：内部计量租户（409 `REBILL_NOT_PREPAID`）、跨客户批量（按客户逐个做）、定时或自动 Rebill、撤销（撤销 = 再做一次
+Rebill，把版本改回去）。
+
+### 上线后第一次使用前
+
+AIH-TASK-256 起确认接口即上线（不加开关，设计 §1「我定的」第 8 条）。**在对任何真实客户确认 Rebill 之前**，用测试专用验收夹具
+（`docs/TODO.md`「测试专用验收夹具」的验收管理员与验收租户）
+走一遍。先看验收租户有没有**计费额大于 0 的已计费预付事件**：管理端用量事件列表按该客户与 `status=PROCESSED` 筛
+（`GET /api/v1/admin/usage-events?customer_id=<验收租户>&status=PROCESSED`），找 `billing_mode_snapshot` 为 `PREPAID`、
+`billable_cost` 大于 0 的行。
+
+**有这样的事件**：只选**其中一个**，用显式事件（`{"usage_event_ids": ["<该事件 public_id>"]}`）做一次小额补退、再补扣还原。
+
+1. **记下基线**：该事件的详情（`GET /api/v1/admin/usage-events/{usage_event_id}`）的 `billable_cost`、`effective_charge`、
+   `pricing_rule_id`（原规则）与 `occurred_at`；验收租户的钱包余额与流水
+   （`GET /api/v1/admin/customers/{customer_id}/wallet/transactions`）；用量分析按该客户、覆盖 `occurred_at` 的区间
+   （`GET /api/v1/admin/usage-analytics?group_by=customer&customer_id=<验收租户>&occurred_from=…&occurred_to=…`）的
+   `prepaid.billable_cost`。
+2. **准备补退用的更正规则**（它从不参与真实计费）：查原规则（`GET /api/v1/admin/pricing-rules/{rule_id}`）的 `strategy`，然后为
+   验收租户新建一条 `CUSTOMER` 范围的规则草稿（`POST /api/v1/admin/pricing-rules`，`priority_scope` 为 `CUSTOMER`、`customer_id`
+   为验收租户）：原规则是 MARKUP 就用**更低的倍数**；是 FIXED_RATE 就把**每个分量价调低**（分量要齐全，否则发布 409
+   `PRICING_RULE_INCOMPLETE`）。发布时给 `effective_from`，设在**至少一天之后**（带时区、整秒；409 `EFFECTIVE_FROM_CONFLICT`
+   时换更晚的时刻）；发布后**立即停用**（`POST …/{rule_id}/retire`，`reason` 写明是上线核对）。读回核对：`status` 为 `RETIRED`、
+   `effective_from` 等于 `effective_to`（空区间，永不命中）。更正版本只看「已审批发布过」、不看生效区间，所以它可用。
+3. **补退预览**：`/rebills/new` 选验收租户、「事件列表」填这个事件、更正规则选第 2 步的规则、价格版本不选 →「预览」。
+   **`ledger_type` 必须不为 `null`**（应是 `REBILL_CREDIT`）才确认。降价后差额被舍入成 0（`ledger_type` 为 `null`、确认按钮禁用）时：
+   换一个计费额更大的事件，或照第 2 步再建一条价格更低的规则；**都不行就不做真实确认**，改走下面「没有这样的事件」的路径。
+4. **补退确认**：填原因（例如 `Go-live check on the acceptance fixture: credit`）→「确认」。核对：
+   - 账本：流水里多**一行** `REBILL_CREDIT`，金额等于预览的 `ledger_amount`，`description` 为 `Rebill correction (1 usage events)`；
+     原 `AI_USAGE` 行不变
+   - 余额：增加 `ledger_amount`
+   - 审计：`GET /api/v1/admin/audit-logs?action=REBILL&entity_type=usage_rebill&entity_id=<Rebill public_id>` 恰好一条，原因一致，
+     没有估算成本
+   - 用量分析：同一查询的 `prepaid.billable_cost` 减少了同样的金额，`estimated_provider_cost_myr` 不变
+   - 事件详情：`billable_cost` 与快照字段不变，`effective_charge` 等于预览的 `corrected_charge`，`rebills[]` 一项
+5. **补扣还原**：再开 `/rebills/new`，同一事件，更正规则选**事件原来的规则**（第 1 步记下的 `pricing_rule_id`，也是第一次预览明细的
+   `previous_pricing_rule`）→「预览」：应为 `REBILL_DEBIT`、`ledger_amount` 是第 4 步金额的相反数、`corrected_charge` 等于原
+   `billable_cost`；`ledger_type` 不为 `null` 才确认。确认后核对：余额、用量分析的 `prepaid.billable_cost` 与事件的
+   `effective_charge` 都回到第 1 步的基线；流水有两行 `REBILL_*`，相加为 0；审计 `REBILL` 两条；事件 `rebills[]` 两项。
+6. **副作用**（对测试租户可以接受）：若验收租户正在停机（余额 ≤ 0），补退可能让它复机、补扣又让它停机，各产生一次状态推送；
+   两行 `REBILL_*` 进确认那个马来西亚月对账单的 `prior_period.rebill`（同一月里相加为 0，所以不要跨月末做这两步）。
+
+**没有这样的事件**（例如验收租户从未被计费）：**不做真实确认**。第一次对真实客户做 Rebill 时**只先预览**，把预览（明细、合计、
+`ledger_type` / `ledger_amount`、`balance` / `balance_after`）交给 Kelvin 看过，**由 Kelvin 确认后**再点「确认」；确认后照上面第 4 步的
+清单核对账本、余额、审计与用量分析。这一步不是可选的。
+
+### 怎么发现
+
+| 信号 | 说明 |
+| --- | --- |
+| 客户或财务对某段时间的扣费提出异议，查到用错了价格版本或规则 | 管理端用量事件详情的 `provider_price_version_id` / `pricing_rule_id` 是计费所用的版本 |
+| 发现已发布的价格版本或规则录错（单价、倍数、分量） | 发布不许回溯（见「用量计费」一节「绝不能做什么」），已按它计费的事件只能用 Rebill 纠正 |
+| 计价代码的 bug 修好之后 | 已按旧代码计费的事件用「按当前有效版本重算」 |
+| 确认返回 409 / 422 | 见下「立刻做什么」的错误表 |
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 事件行、原 `AI_USAGE` 行、已定稿的对账单一列不改（INV-5、INV-12）；门户用量页仍显示处理时的计费额 | 客户钱包多一行 `REBILL_*`，余额随之变；客户在钱包流水里看得到（类型、金额、余额、`description`、时间），不发邮件 |
+| 估算成本与对账后成本仍以事件原快照为准 | 用量分析的收入与毛利按原事件的维度与 `occurred_at` 计入差额 |
+| AI 服务、摄取与计费不受影响（Rebill 只在管理端） | Rebill 行按确认时刻（`created_at`）的马来西亚月计入当月对账单的 `prior_period.rebill`；原账期的对账单只被明细引用 |
+| | **停复机**：补扣让余额 ≤ 0（正好为 0 也算）时客户照常停机（`SUSPENDED`）；补退让停机客户的余额 > 0 时照常复机（`ACTIVE`），与账本行同一事务，各产生状态推送（见「状态 webhook」一节）。预览页在 `balance_after` 跨过 0 时有醒目提示 |
+
+### 立刻做什么
+
+1. **定范围**：一个客户；用「事件列表」（1–1000 个事件 `public_id`）或「日期范围」（按 `occurred_at` 取 `[from, to)`，项目、供应商、
+   模型可选，匹配超过 1000 条 422 `REBILL_SELECTION_TOO_LARGE`，按更短的区间分几次做）。**`occurred_to` 取已过 T+1 cut-off 的时刻**
+   （原用量月次月第 2 日 00:00 马来西亚时间之后），避免与仍在计费的用量交错（只是建议，不强制）。
+2. **定更正版本**：更正规则与价格版本都必须**先经草稿 → 发布**（`PUBLISHED` 或 `RETIRED`；`DRAFT`、`DISCARDED` 不可用），
+   **不看生效区间**。价格版本须同供应商、同模型、同来源币种、分量齐全；规则的客户 / 项目 / 供应商 / 模型各自为空或等于事件的；
+   任一事件不适用整个请求 422，消息带第一个不适用事件的 `public_id`。要纠正的是「过去用错了价」：先把正确的版本建草稿、审批发布
+   （从发布时刻起它也正常参与以后的计费），再拿它做更正。
+3. **预览**，核对明细、`unchanged_count`、合计、`ledger_type` / `ledger_amount` 与 `balance_after`；`ledger_type` 为 `null`
+   （没有可入账的差额）时不能确认。补扣让余额跨过 0 会停机，补退会复机，确认前想清楚。
+4. **确认**：填原因（1–255 字符）。**一次 Rebill 的对象 = 预览展示的那组事件**：预览之后才计费的事件不在本次范围，由下一次
+   预览发现、再做一次 Rebill；本次只改明细里列出的事件。
+5. **提交结果不明**（500、超时、连接中断）：结果只有「已完整提交」或「已完整回滚」两种，不会有一半。**用同一幂等键重发**
+   （页面重试沿用同一个键）：已提交 → 200 `replayed: true` 返回原结果；已回滚 → 照常执行。**要换新幂等键，必须先重新预览**：
+   新预览已反映第一次是否提交，换键直接确认可能把同一更正再做一次。先到 `/rebills` 列表或该客户的钱包流水确认有没有这一行也行。
+
+| 错误 | 含义 | 下一步 |
+| --- | --- | --- |
+| 409 `REBILL_PREVIEW_STALE` | 预览之后有别的 Rebill 改了同一事件、匹配集合变了（新事件被计费进来），或请求参数与预览时不同 | 重新预览，核对后再确认 |
+| 409 `REBILL_CONFLICT` | 同一幂等键已用于不同的请求 | 重新预览，用新的幂等键确认 |
+| 409 `NOTHING_TO_REBILL` | 条件匹配为 0；或确认时没有差额不为 0 的事件 | 检查范围与更正版本 |
+| 409 `REBILL_NET_ZERO` | 补退与补扣相抵为 0 | 把补退与补扣的事件分两次做 |
+| 409 `USAGE_EVENT_NOT_REBILLABLE` / `REBILL_NOT_PREPAID` | 事件不属于该客户、未计费或不是预付；客户是内部计量 | 未计费的走重新入队；内部计量不做 Rebill |
+| 409 `ACCOUNT_CLOSED` | 客户已关户，什么都没写 | 不重试；按「关户」一节处理 |
+| 422 `REBILL_PRICE_NOT_APPLICABLE` / `REBILL_RULE_NOT_APPLICABLE` | 更正版本不适用于消息里那个事件 | 换适用的版本，或把那个事件排除出范围 |
+| 422 `AMOUNT_OUT_OF_RANGE` | 结果超出 `DECIMAL(20,8)` | 多半是更正版本录错，核对单价或倍数 |
+| 500 | 锁等待超时、死锁或提交失败；不自动重试 | 按上面第 5 步同键重发 |
+
+### 恢复
+
+- **更正做错了**：没有撤销接口，也不改已有行；再做一次 Rebill，把版本改回去（同一事件以当前有效计费 `effective_charge` 为基准）。
+- **核对**：`/rebills/:id` 详情（或 `GET /api/v1/admin/rebills/{rebill_id}`）的明细、两个合计与 `wallet_transaction_id`；用量事件详情的
+  `effective_charge` 恒等于 `billable_cost` 加 `rebills[]` 的 `difference` 之和；钱包与账本一致性用 `verify_wallet`（只报告不修复）。
+- **迁移 0042 中断**：`upgrade` 中途失败（锁等待超时、进程被杀）时原样重新部署即可，判定与续跑见迁移文件头「失败处理」
+  （`alembic/versions/20261124_0042_usage_rebills.py:88-106`）；报错点名「形状不对」的表或触发器时停下，照文件头那两条由人对照设计处置。
+- **回滚**：生产只回滚应用镜像（`deploy/deploy.sh` 的回滚只切换镜像、不降级迁移）。**有了真实 Rebill 之后 0042 不可降级**：
+  两张表是账本里 `REBILL_*` 行的审计链（spec §19），只回滚代码（新表对旧代码无害：旧代码不读它们）。先只读确认有没有行：
+
+  ```bash
+  docker compose exec mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "
+    SELECT (SELECT COUNT(*) FROM usage_rebills) AS rebills,
+           (SELECT COUNT(*) FROM usage_rebill_lines) AS rebill_lines,
+           (SELECT version_num FROM alembic_version) AS revision"'
+  ```
+
+- **降级 0042**（只在两张表都为空时有意义）：不是部署流水线的一部分，只由人手工执行。**先停 `api` 容器**（Rebill 唯一的写入方是
+  管理端确认接口），确认没有进行中的请求，再执行 `alembic downgrade 0041_provider_cost_recon`。这是操作前提，不由数据库强制。
+  任一张表有行时降级抛 `RuntimeError`（`… is not empty: downgrading would delete rebill records (spec §19); restore from backup or
+  keep this revision`），不发 DDL、不删行，版本仍是 0042 —— 这时就保留这个修订，只回滚代码。`--sql` 离线模式直接抛错（须在线执行）。
+  降级在 MySQL 上用一条语句同时删两张表（原子 DDL）；中途被打断时，仍先停 `api`，原样重跑同一条命令（表已不在时不发 DDL、只把版本退回）。
+- **不得把应用回滚到 AIH-TASK-258 之前的版本**（设计 v10 §8）：那之前的用量分析不计入 Rebill 差额，收入与毛利会漏计已入账的差额。
+  确需回滚到那么早时，先停用管理端，并由人按 `usage_rebill_lines` 手工核对报表（只读查询，例如按 `usage_event_id` 汇总 `difference`）。
+
+### 绝不能做什么
+
+- **不要手工 `UPDATE` / `DELETE` `usage_rebills` 与 `usage_rebill_lines`，也不要为了降级 `TRUNCATE` 或清表。**MySQL 触发器拒绝改与删；
+  绕过去，账本里的 `REBILL_*` 行（不可改、不可删）就无法解释（spec §19、INV-5）
+- **不要直接写库插入 Rebill 行或 `REBILL_*` 账本行**：唯一的写入方是确认接口（锁钱包、幂等、指纹、审计、停复机在同一事务）
+- **不要换新幂等键直接确认一个结果不明的提交**：先同键重发，或先重新预览
+- **不要用未经发布的版本、也不要为了让 Rebill 能用而回溯发布或直接写库改生效时刻**：更正版本只要「已审批发布过」，不需要在过去生效
+- **不要用 Rebill 纠正汇率或未计费事件**，也**不要用手工调账代替计价错误的 Rebill**（手工调账不记录原事件、原金额与所用规则）
+- **不要在 `api` 容器还在跑时降级 0042**，也不要在有 Rebill 之后把应用回滚到 AIH-TASK-258 之前（见「恢复」）
 
 ---
 
@@ -2409,7 +2561,7 @@ AI 模块现在用的 Anthropic 密钥是多个项目共用的，供应商侧分
 5. **再确认**：「Confirm」只在本次预览成功、且预览后表单没改动时可点。成功后提示 `The reconciliation was confirmed.`，那一行变为
    `Reconciled`，写入一行不可变记录与一条审计 `PROVIDER_COST_RECONCILIATION_CREATE`（审计里没有来源说明）
 6. **差额超过 5%**（`Above 5%`）：先用诊断计数解释；解释不了时查该月的供应商价格版本是否漏录调价、折扣。修价格只影响以后的事件，
-   **不改已处理事件**（Reprocess / Rebill 不在本批）；本月的记录照实录，不为了让差额变小改录入额
+   **不改已处理事件**（对账不触发 Rebill；客户计费额确有错时另按 [Rebill](#rebill) 一节处理）；本月的记录照实录，不为了让差额变小改录入额
 
 ### 诊断计数怎么读
 
