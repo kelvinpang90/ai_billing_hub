@@ -14817,7 +14817,7 @@ tasks:
     title: Rebill 并发验证：同客户与不同客户并发确认、零计费并发与读视图
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「读视图与锁的约定」、§4「并发」与 §7：新增 tests/backend/test_usage_rebill_concurrency.py，在真 MySQL 上验证 AIH-TASK-255 的确认服务在并发下的行为，并逐个手工做设计 §7 末尾的五个变异、确认各自变红。只加测试与夹具辅助函数，不改业务代码；发现业务代码缺陷时停下并在 PR 里说明。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-255
     acceptance_criteria:
