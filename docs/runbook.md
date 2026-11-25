@@ -2,7 +2,7 @@
 
 > spec §136 要求 runbook 覆盖 18 个故障场景。**这份文件按场景逐个补，不预留空条目** ——
 > 空标题会让人以为「已经有预案了」。
-> 最后更新：2026-11-21
+> 最后更新：2026-11-25
 
 ---
 
@@ -612,6 +612,74 @@ Let's Encrypt 正常在剩 30 天时续期，所以剩 21 天还没换 = **续�
 - **不要用 `date -s` 手工把时钟一下子拨到位**：时间倒退会让数据库与日志里出现「先发生的事排在后面」；
   交给 NTP 慢慢校正
 - **不要为了让告警安静停掉或卸载 `timedatectl`**：检查会跳过，而时钟照样在漂
+
+---
+
+## 日志写入过快
+
+**首次编写：2026-11-25（AIH-TASK-252）。依据：[deployment.md](deployment.md) §7、§8.1。**
+
+⚠️ **危害不是磁盘，是证据。**容器日志用 json-file 按大小轮转（每容器缺省 3 × 10m），而外送每天 03:47 才一次。
+某个服务开始刷屏时，**事故前的那段历史会在外送之前被轮转顶掉** —— 磁盘水位要很久之后才会动，
+而调查要看的恰恰是被顶掉的那一段。
+
+### 怎么发现
+
+```text
+条件：宿主机每 5 分钟对七个服务逐个读最近一小时的日志字节数
+     （timeout 10 docker compose logs --no-color --no-log-prefix --since 1h <服务>，读满告警线就停）
+告警线：每容器轮转容量（BILLING_LOG_MAX_SIZE × BILLING_LOG_MAX_FILES）÷ BILLING_MONITOR_LOG_RATE_HORIZON_HOURS（默认 60）
+     缺省 31457280 ÷ 60 = 524288 B ≈ 512 KiB 每小时每服务
+分级：最近一小时 ≥ 告警线 = P2
+通知：并在 Healthchecks.io 检查 `ai_billing_hub disk` 里 → Telegram；状态翻转才发，恢复再发一次
+正文：P2 log rate <服务> >= <告警线> B in the last hour (rotation <容量> B per container would not last <小时>h)
+```
+
+⚠️ **它没有自己的检查**（免费档 20 个已用满），`disk` 已红时不会再单独通知 —— 看 `journalctl -t billing-monitor -p err` 的全部行。
+每个超线的服务各一行。
+
+正文里的字节数是「≥ 告警线」，不是实际量：巡检读满告警线就停。命令失败、超时或没有输出时这项按 0 处理、**不报警**
+（容器停了由 services 维度报）。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 请求路径与异步链路本身（这条告警只说明日志量，不说明服务坏了） | 该服务的历史日志：照这个速度，轮转容量撑不到下一次外送，**更早的行会在外送之前被顶掉**，事故调查缺一段 |
+| 磁盘水位（多数时候还远没到 80%） | 刷屏本身往往是别的故障的症状：重试风暴、连接失败循环、被攻击或被刷接口 |
+
+### 立刻做什么
+
+1. 按告警里的服务名看它最近在刷什么（只读）：
+
+   ```bash
+   docker compose logs --no-log-prefix --since 10m <服务> | tail -n 50
+   docker compose logs --no-log-prefix --since 1h <服务> | cut -c1-120 | sort | uniq -c | sort -rn | head -20
+   ```
+
+2. 先判断是不是**重试风暴**（同一条报错反复出现：下游连不上、任务失败后不停重试）或**被攻击**
+   （`billing_nginx` / `api` 里同一来源、同一路径的请求刷屏，401 / 404 / 429 成片）。是的话按对应场景处置：
+   [Redis / Celery broker 不可用](#redis--celery-broker-不可用)、[MySQL 不可用](#mysql-不可用)、
+   [Celery 队列积压](#celery-队列积压) 等；被攻击时在边缘限流或封源
+3. **需要保住证据时，立刻手工跑一次外送**，不要等 03:47：在部署目录跑
+   `flock -n /tmp/ai_billing_hub-logs.lock bash deploy/log_ship.sh`（与 cron 同一个脚本、同一把锁，
+   窗口从上一次成功那一刻起，宁可重叠不留缝）。刷屏持续期间可以隔几小时再跑一次
+4. 修完手工跑一次：`BILLING_MONITOR_RECHECK_SECONDS=0 bash deploy/monitor.sh`
+
+### 恢复
+
+1. 第 1 步的命令看到那个服务的输出回到平时的量
+2. 下一轮巡检 `ai_billing_hub disk` 回到 **up**（前提是同一维度没有别的行）。⚠️ 判据看的是**最近一小时**，
+   刷屏停下之后最多要等一小时这一行才会消失
+3. 刷屏期间若手工外送过，确认那一轮 `ai_billing_hub logs` 是成功 ping，R2 上有对应的归档
+
+### 绝不能做什么
+
+- **不要为了消告警调小 `BILLING_MONITOR_LOG_RATE_HORIZON_HOURS`**：告警线 = 容量 ÷ 小时数，调小只会把告警线**抬高**、
+  掩盖问题 —— 而轮转照样在外送之前把历史顶掉
+- **不要清空容器日志或删 `/var/lib/docker/containers/*/*-json.log`**：事故调查要的正是这一段；
+  删掉之后外送也抓不到了
+- **不要先重建那个容器来「止血」**（`down`、`up -d --force-recreate`）：容器删掉时它的 json 日志一起没了；先外送，再处置
 
 ---
 
