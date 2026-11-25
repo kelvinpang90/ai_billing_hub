@@ -14865,7 +14865,7 @@ tasks:
     title: Rebill 第五层：管理端预览、确认、列表与详情接口，用量事件详情加当前有效计费与更正历史
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「管理端接口」与 §6：新增 app/api/admin_rebills.py 的四个路由（预览、确认、列表、详情）与 app/schemas/usage_rebills.py，app/main.py 注册；GET /api/v1/admin/usage-events/{id} 增加 effective_charge 与 rebills（不增加处理函数）；docs/api.md 新增「管理端 Rebill」一节并更新用量事件详情。不加前端：属于 AIH-TASK-257 与 AIH-TASK-260。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-258
     acceptance_criteria:
