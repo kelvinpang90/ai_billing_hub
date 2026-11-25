@@ -2921,6 +2921,170 @@ token、序号、计数等整数列是数字单元格，可以直接求和。
 
 ---
 
+## 数据留存清理
+
+**首次编写：2026-11-25（AIH-TASK-265）。依据：设计闸门 #833 v7
+（[docs/design/AIH-TASK-263-retention-purge.md](design/AIH-TASK-263-retention-purge.md)）§2「清理框架」「三项清理的条件」「任务与配置」、
+§5、§8；`app/services/retention_purge.py`、`app/tasks/retention.py`、`app/core/config.py:472-481`、
+[deployment.md「数据留存清理配置」](deployment.md#数据留存清理配置设计闸门-833-v7aih-task-264)；保留期见 [ADR-0017](adr/ADR-0017-data-retention.md) K7–K9。**
+
+Beat 条目 `retention-purge`（`app/core/celery_app.py:234-238`）每天 20:17 UTC（马来西亚 04:17）跑一轮 `app.tasks.retention.purge`，
+在 celery-worker 里执行。三项清理（`app/services/retention_purge.py:257-279`）：
+
+| 项名 | 删什么 | 开关（`.env`） |
+| --- | --- | --- |
+| `refresh_tokens` | **按家族**：一个家族的所有行都过期满 30 天，才删这个家族的全部行 | `BILLING_RETENTION_REFRESH_TOKENS_MODE` |
+| `password_reset_tokens` | 过期满 30 天的重置与邀请令牌（邀请也删，不保留最新一条） | `BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE` |
+| `recovery_codes` | 用掉或吊销满 30 天的恢复码 | `BILLING_RETENTION_RECOVERY_CODES_MODE` |
+
+每项一个三值开关，缺省 `off`：`off` 不碰这张表；`count` 只数不删、写一行 INFO；`delete` 按主键每批最多 1000 行一个短事务删除，
+每批在同一事务里写一条 `DATA_RETENTION_PURGE` 审计（`app/services/retention_purge.py:297-337`）。每项每轮最多删
+`BILLING_RETENTION_MAX_ROWS_PER_ITEM`（缺省 50000）行，余下的下一轮继续。三项都 `off` 时任务直接返回、不碰数据库
+（`app/tasks/retention.py:56-59`）。保留期 30 天是代码常量（`app/services/retention_purge.py:53`），不是配置。
+
+这一节一半是上线步骤、一半是故障处置，所以在五节之前加一节 **上线步骤**：**上线步骤 · 怎么发现 · 影响什么 · 立刻做什么 · 恢复 · 绝不能做什么**。
+
+⚠️ 下面的 `<部署目录>`、`<YYYY-MM-DD>` 都是占位符。
+
+### 上线步骤
+
+合并即部署，三项缺省 `off`，部署后什么都不发生（设计 §8）。之后由管理员在 VPS 上按顺序做，**每一步做完、看过结果再做下一步**：
+
+1. **改为 `count`**：在部署目录的 `.env` 里加（或改）三行：
+
+   ```bash
+   BILLING_RETENTION_REFRESH_TOKENS_MODE=count
+   BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE=count
+   BILLING_RETENTION_RECOVERY_CODES_MODE=count
+   ```
+
+2. **重建后端容器**，只改 `.env` 不生效（理由见下面「配置项」一节「改完怎么生效」；compose 的转发在 `docker-compose.yml:107-110`）：
+
+   ```bash
+   cd <部署目录>
+   docker compose up -d     # 只重建配置变了的服务：api / celery-worker / celery-beat
+   ```
+
+   这条命令照 [deployment.md](deployment.md) §9.7 的写法，只在这台主机部署过时成立。三项开关在 `x-backend` 里，api 也会一起重建
+   （api 不跑清理）。
+
+3. **等一轮**（下一个 20:17 UTC 之后），看 worker 日志里每项一行 `retention_purge_item`：
+
+   ```bash
+   docker compose logs --since 26h celery-worker | grep retention_purge
+   ```
+
+   每行有 `item`、`mode`（这里是 `count`）、`cutoff`、`rows`（会删多少行）与 `duration_ms`（`app/services/retention_purge.py:429-438`）。
+   核对：
+   - `rows` 量级是否合理：`refresh_tokens` 的 `rows` 是可删家族的**行数**，不是家族数；
+   - **任何一项 `count` 的 `duration_ms` 超过 60000（60 秒）**：先不要改为 `delete`，按设计 §8 另开任务加索引
+     （三张表在 `expires_at` / `used_at` 上都没有索引，`count` 与 `delete` 走同样的全表条件）；
+   - 三行都在、没有 `retention_purge_failed`。
+
+4. **改为 `delete`**：`.env` 里把核对过的项改为 `delete`，再 `docker compose up -d`。可以逐项改：没核对的那项留在 `count`。
+5. **再等一轮**，确认每项一行 `retention_purge_item`、`mode` 为 `delete`；`rows` 是本轮实际删除的行数。再用下面「怎么发现」的
+   审计查询核对：当天各项审计的 `deleted` 之和等于日志里的 `rows`。
+
+**回滚**：把对应项改回 `off`（或 `count`），`docker compose up -d`。已经删掉的行无法恢复（备份里有，按 K15 / K16 到期），这是政策本身的效果。
+
+### 怎么发现
+
+清理没有自己的告警维度、也没有 Healthchecks 检查（设计 §1「我定的」第 4 条）：失败只影响表多长一天，下一轮自动重做。信号全在
+celery-worker 的日志与审计里（日志每行一个 JSON，事件名在 `message` 字段）：
+
+| 信号 | 说明 |
+| --- | --- |
+| INFO `retention_purge_item`，字段 `item`、`mode`、`cutoff`、`rows`、`duration_ms` | **每项每轮一行**（`off` 的项不写）。`rows` 在 `count` 下是会删的行数，在 `delete` 下是本轮已提交的删除行数；`rows` 等于 `BILLING_RETENTION_MAX_ROWS_PER_ITEM` 说明碰到了每轮上限，余下的下一轮继续 |
+| WARNING `retention_purge_no_progress`，字段 `item`、`selected` | 某一批选到了主键、删除却是 0 行（选择与删除的条件不一致，正常不会发生）。这一项本轮结束、不写审计，后面的项照常（`app/services/retention_purge.py:363-371`） |
+| ERROR `retention_purge_failed`，字段 `item`、`error_type` | 某一批抛错：当前批回滚（删除与它的审计一起），之前提交的批保留，**本轮停止**、后面的项不处理（`app/services/retention_purge.py:418-427`）。只记异常类型，不记消息。出错的那一项与它后面的项这一轮都没有 `retention_purge_item` 行 |
+| INFO `retention_purge_already_running` | 拿不到 MySQL 命名锁，另一个实例正在跑，这一次直接返回（`app/tasks/retention.py:61-64`） |
+| 一天里一行 `retention_purge_item` 都没有 | 三项都是 `off`（正常），或 Beat 没派发（按「celery-beat 停止调度」排查） |
+
+**审计**（`app/services/retention_purge.py:316-336`）：每个删除批次一条，操作者是系统（`actor_role = SYSTEM`，`actor_user_id` 为空），
+`entity_type = 'data_retention_run'`，`entity_id` 是本轮开始时刻的 **UTC 日期**（20:17 UTC 跑的那一轮，马来西亚已经是第二天），
+`after_state` 恰为 `{"batch", "cutoff", "deleted", "item"}`；删除 0 行不写。只读查询：
+
+```bash
+cd <部署目录>
+docker compose exec -T mysql sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
+-- 当天每项删了多少：按 entity_id（日期）与 item 汇总
+SELECT entity_id AS run_date,
+       JSON_UNQUOTE(JSON_EXTRACT(after_state, '$.item')) AS item,
+       COUNT(*) AS batches,
+       SUM(JSON_EXTRACT(after_state, '$.deleted')) AS deleted
+FROM audit_logs
+WHERE entity_type = 'data_retention_run' AND entity_id = '<YYYY-MM-DD>'
+  AND action = 'DATA_RETENTION_PURGE'
+GROUP BY run_date, item
+ORDER BY item;
+
+-- 同一天跑了不止一次时，按 cutoff 分开每一次运行
+SELECT entity_id AS run_date,
+       JSON_UNQUOTE(JSON_EXTRACT(after_state, '$.cutoff')) AS cutoff,
+       JSON_UNQUOTE(JSON_EXTRACT(after_state, '$.item')) AS item,
+       COUNT(*) AS batches,
+       SUM(JSON_EXTRACT(after_state, '$.deleted')) AS deleted
+FROM audit_logs
+WHERE entity_type = 'data_retention_run' AND entity_id = '<YYYY-MM-DD>'
+  AND action = 'DATA_RETENTION_PURGE'
+GROUP BY run_date, cutoff, item
+ORDER BY cutoff, item;
+SQL
+```
+
+- 一轮里所有项共用一个截止时刻 `cutoff = 本轮开始时刻（整秒）− 30 天`，**每次运行的 `cutoff` 不同**，所以同一天的多次运行
+  （例如一次失败后手工重跑，或 Beat 补派发）按 `cutoff` 就能分开。
+- 平常每项每天一批（`batches` 为 1）。`batch` 从 1 起、按项按轮编号；某次运行里出现 1、2 却没有 3 而日志有 `retention_purge_failed`，
+  就是第 3 批回滚了。
+- 两条查询走 `ix_audit_logs_entity`（`entity_type`、`entity_id`）。
+
+### 影响什么
+
+| 仍然正常 | 受影响 |
+| --- | --- |
+| 登录、刷新、忘记密码、接受邀请、2FA 校验：被删的行都是到期满 30 天的终态行，业务路径不再用它们 | **门户账号视图的邀请时间**：`invited_at` 读该用户最新一条邀请（`app/services/portal_accounts.py:240-265`），那一条过期满 30 天被删后为 `null`。这是 K8 的预期效果，页面已支持空值；`INVITED` 用户照常重发邀请 |
+| 刷新令牌的重放检测：活着的家族一行都不删，出示其中过期的旧令牌仍会吊销整个家族 | **两条业务路径可能与清理批次短暂等锁**（`app/services/retention_purge.py:12-20`）：① 重置密码成功时把同一用户所有未用的兄弟令牌置为已用，不带过期条件（`app/services/password_reset.py:427`），会写到正要被删的行；② 出示已死家族里用过的刷新令牌时吊销整个家族（`app/services/auth.py:715`）。清理批次只锁它删的行、事务很短；真等到锁等待超时或死锁时，抛错的一方回滚，清理这边本轮停止、下一轮重做（设计 §5） |
+| 计费、钱包、支付、对账：清理不取钱包、租户或用户行锁 | 清理失败时：表多长一天，没有对外影响 |
+| 用户本身：`users` 行不动 | 被删的行无法从线上库恢复（备份里仍有，按 K15 / K16 到期） |
+
+### 立刻做什么
+
+1. **先看是哪一个信号**：`docker compose logs --since 26h celery-worker | grep retention_purge`。
+2. **ERROR `retention_purge_failed`**：日志只有 `item` 与 `error_type`（异常类型名），数据库不可用与锁等待超时可能是同一个类型名，
+   先看数据库本身：
+   - `mysql` 不健康、`readyz` 同时报 P1：按「MySQL 不可用」处理；清理不用单独做什么，下一轮自动重做。
+   - 数据库正常、只是偶发一次：多半是锁等待超时或死锁，撞上了上面「影响什么」里的两条业务路径。不用处理，下一轮按同样的条件重做。
+   - 连续几天同一项都失败：用上面的审计查询确认从哪天起没有新审计；把那一项改回 `count`（`docker compose up -d`）止住重复失败，
+     开缺陷任务，附 `item`、`error_type` 与日期。⚠️ 不把日志里别的字段或行内容贴进工单。
+   - 删除被外键或触发器拒绝：设计 §5 判定不可能（三张表没有入向外键与触发器）；真出现了说明有人加了，是缺陷，同上开任务，不要换写法重试。
+3. **WARNING `retention_purge_no_progress`**：选择与删除的条件不一致，是代码缺陷。这一项本轮已自行结束（这一批删除 0 行、不写审计；之前提交的批照常有审计），
+   其余项不受影响。开缺陷任务，附 `item` 与 `selected`；在修好之前可以把那一项改回 `count`。
+4. **INFO `retention_purge_already_running` 每天都出现**：确认 `docker compose ps celery-beat` 只有一个、`celery-worker` 只有一组；
+   两个 beat 的处置见「celery-beat 停止调度」「Celery 队列积压」。
+5. **`rows` 每天都等于每轮上限**：积压比每轮上限多，下一轮会继续删；只有在积压长期不降时，才考虑调大
+   `BILLING_RETENTION_MAX_ROWS_PER_ITEM`（1000–1000000，`app/core/config.py:481`），调完 `docker compose up -d`。
+6. **一天一行日志都没有、而开关不是全 `off`**：按「celery-beat 停止调度」排查。漏跑一天不用补，下一轮按同样条件继续（INV-14）。
+
+### 恢复
+
+1. 下一轮每项一行 `retention_purge_item`，没有 `retention_purge_failed` 与 `retention_purge_no_progress`
+2. 审计查询里当天各项的 `deleted` 之和等于日志里的 `rows`；中途失败过的那一轮，失败那一批没有审计，行也都还在
+3. 为止损改回 `count` 的项，修好缺陷合并部署后按「上线步骤」第 4、5 步再改回 `delete`
+
+### 绝不能做什么
+
+- **不要手工 `DELETE` 或 `TRUNCATE` `refresh_tokens`、`password_reset_tokens`、`recovery_codes`**：手工删没有审计；按行删刷新令牌会让
+  活着的家族失去对被盗旧令牌的重放检测；`TRUNCATE` 连未过期的会话、重置与邀请链接、未用的恢复码一起清掉。只让清理任务按条件删
+- **不要为了消告警或让表变小去改保留期**：30 天是 ADR-0017 批准的 K7–K9，在代码里是常量（`app/services/retention_purge.py:52-53`），
+  不是配置；要改就改 ADR、重新过设计闸门
+- **不要跳过 `count` 直接 `delete`**：`count` 那一轮是唯一一次在不删任何行的前提下核对数字与耗时的机会（设计 §8）
+- **不要在 `count` 耗时超过 60 秒时改为 `delete`**：先另开任务加索引；也不要自己在线上建索引
+- **不要为了「快点删完」手工连续触发任务或调到上限 1000000**：每轮上限是为了让每天的清理保持短小；积压会按天消化
+- **排查时不要 `SELECT` 这三张表的 `token_hash` 等列、也不要把行内容贴进工单**：工单里只写项名、截止时刻、批次号、行数与 `error_type`，
+  与日志和审计里的内容一致
+
+---
+
 ## 配置项
 
 **首次编写：2026-09-26（AIH-TASK-013）。**这一节收「运维会去改的配置项」，一项一小节。
