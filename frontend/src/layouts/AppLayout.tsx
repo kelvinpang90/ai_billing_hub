@@ -41,6 +41,10 @@ export function AppLayout() {
   const inUsageEvents =
     location.pathname === ROUTES.usageEvents ||
     location.pathname.startsWith(`${ROUTES.usageEvents}/`);
+  // Rebill 列表与 Rebill 详情都算在顶栏的「Rebills」这一项下面。
+  const inRebills =
+    location.pathname === ROUTES.rebills ||
+    location.pathname.startsWith(`${ROUTES.rebills}/`);
   // 支付列表与支付详情都算在顶栏的「支付」这一项下面。
   const inPayments =
     location.pathname === ROUTES.payments ||
@@ -56,6 +60,8 @@ export function AppLayout() {
     selectedKey = ROUTES.pricingRules;
   } else if (inUsageEvents) {
     selectedKey = ROUTES.usageEvents;
+  } else if (inRebills) {
+    selectedKey = ROUTES.rebills;
   } else if (inPayments) {
     selectedKey = ROUTES.payments;
   }
@@ -109,6 +115,10 @@ export function AppLayout() {
             {
               key: ROUTES.usageEvents,
               label: <Link to={ROUTES.usageEvents}>{t("nav.usageEvents")}</Link>,
+            },
+            {
+              key: ROUTES.rebills,
+              label: <Link to={ROUTES.rebills}>{t("nav.rebills")}</Link>,
             },
             {
               key: ROUTES.usageAnalytics,

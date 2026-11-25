@@ -75,6 +75,12 @@ export const ROUTES = {
    */
   usageAnalytics: "/usage-analytics",
   /**
+   * 管理端 Rebill（AIH-TASK-257，设计闸门 #830 v12 §2「管理端页面」）。顶栏在用量事件之后有一项指向列表页；点列表的一行跳到
+   * 详情页。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `open_rebills` 按列表页的 href 找顶栏链接，改了要同步那里。
+   */
+  rebills: "/rebills",
+  rebillDetail: "/rebills/:rebillId",
+  /**
    * 管理端钱包核对（AIH-TASK-135，设计闸门 #474 v13 §2「前端」）。顶栏有一项；验收脚本
    * `scripts/acceptance/admin_customers.mjs` 的 `open_wallet_reconciliation` 按这个 href 找顶栏链接，改了要同步那里。
    */
@@ -178,6 +184,11 @@ export function pricingRuleDetailPath(ruleId: string): string {
 /** 用量事件详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
 export function usageEventDetailPath(usageEventId: string): string {
   return generatePath(ROUTES.usageEventDetail, { usageEventId });
+}
+
+/** Rebill 详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
+export function rebillDetailPath(rebillId: string): string {
+  return generatePath(ROUTES.rebillDetail, { rebillId });
 }
 
 /** 支付详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
