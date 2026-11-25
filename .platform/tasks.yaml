@@ -14764,7 +14764,7 @@ tasks:
     title: Rebill 第三层：预览与确认，锁钱包后重算比对指纹，写一行补退或补扣并记审计
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「服务」「读视图的约定」「事务边界」与 §4、§5：新增 app/services/usage_rebill.py 的 preview_rebill 与 confirm_rebill（校验事务与确认事务分开；确认事务在 MySQL 上用 READ COMMITTED、第一条 SQL 锁钱包、之后自己的读全是普通读；幂等判定先于指纹比对；经 post_transaction 写一行 REBILL_CREDIT / REBILL_DEBIT；写两张表；审计动作 REBILL）；app/models/auth.py 加 AuditAction.REBILL，审计实体类型 usage_rebill 登记进 app/services/audit_query.py 与前端审计动作清单。不加接口：属于 AIH-TASK-256。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-254
     acceptance_criteria:
