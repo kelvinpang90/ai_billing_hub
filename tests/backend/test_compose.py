@@ -382,6 +382,22 @@ def test_the_retention_settings_reach_backend_services(compose: dict) -> None:
         assert str(env.get(key)) == f"${{{key}:-{default}}}"
 
 
+def test_the_r2_r5_retention_modes_are_forwarded_ahead_of_their_settings(compose: dict) -> None:
+    """设计闸门 #862 v2 §8「上线顺序」第 1 步：四项开关先于 AIH-TASK-266..268 转发，缺省 off。
+
+    每个任务加上配置字段后，把它加进上面那条按 `Settings` 缺省值比对的清单。
+    """
+    env = compose["x-backend"]["environment"]
+    for item in (
+        "domain_outbox",
+        "notifications",
+        "wallet_reconciliation_findings",
+        "wallet_reconciliation_runs",
+    ):
+        key = f"BILLING_RETENTION_{item.upper()}_MODE"
+        assert str(env.get(key)) == f"${{{key}:-off}}"
+
+
 def test_the_auth_endpoints_are_rate_limited_at_the_edge() -> None:
     """spec §53 的 `Login attempt rate limiting`。
 
