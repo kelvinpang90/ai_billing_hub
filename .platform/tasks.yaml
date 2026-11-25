@@ -15114,7 +15114,7 @@ tasks:
     title: Rebill 收尾：运维手册补 Rebill 流程与故障处置，勾选 Phase 8 的 Reprocess 与 Rebill 调整
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §5、§8 与 §11 AIH-TASK-259：docs/runbook.md 新增「Rebill」一节（何时用 Rebill、何时用重新入队、何时用手工调账；先在测试专用验收租户上小额补退再补扣还原的上线核对；同键重发与换键前重新预览；停复机影响；迁移 0042 不可降级与中断恢复；不得手工删改两张表）；docs/TODO.md 勾选 Phase 8 的 Reprocess 与 Rebill 调整并注明任务与设计闸门。只改文档。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-260
     acceptance_criteria:
