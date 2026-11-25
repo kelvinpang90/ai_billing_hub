@@ -102,6 +102,12 @@ x-backend: &backend
     # 集成 API 凭据轮换后旧版本还能用多久（秒，AIH-TASK-012 设计 §2「配置」）。
     # 本文件不读 .env，不在这里转发的话，改 .env 进不了容器。
     BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS: ${BILLING_CREDENTIAL_ROTATION_OVERLAP_SECONDS:-604800}
+    # 数据留存清理的三项模式与每轮上限（AIH-TASK-264；设计闸门 #833 §2「任务与配置」）。
+    # 同样是本文件不读 .env、不转发就改不动：runbook 的上线步骤靠改 .env 再重建 worker 与 beat。
+    BILLING_RETENTION_REFRESH_TOKENS_MODE: ${BILLING_RETENTION_REFRESH_TOKENS_MODE:-off}
+    BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE: ${BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE:-off}
+    BILLING_RETENTION_RECOVERY_CODES_MODE: ${BILLING_RETENTION_RECOVERY_CODES_MODE:-off}
+    BILLING_RETENTION_MAX_ROWS_PER_ITEM: ${BILLING_RETENTION_MAX_ROWS_PER_ITEM:-50000}
     # `GET /internal/alerts` 的监控令牌（设计闸门 #183 v3 §2「内部告警接口」）。同样只给路径，
     # 而且**直接写容器内路径、不经 .env**：`.env` 里只有给宿主机 monitor.sh 用的
     # `BILLING_MONITOR_TOKEN_HOST_FILE`。文件缺失或不可用时接口 404，见下面 secrets 的注释。
