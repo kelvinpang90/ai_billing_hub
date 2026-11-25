@@ -23,6 +23,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "production"]
 FxSourceName = Literal["bnm"]
+# 与 app/services/retention_purge.py 的 `Mode` 同一组取值（那里再挡一道认不出的值）。
+RetentionMode = Literal["off", "count", "delete"]
 
 _logger = logging.getLogger(__name__)
 
@@ -464,6 +466,19 @@ class Settings(BaseSettings):
     payment_reconcile_poll_seconds: int = Field(default=60, ge=30, le=600)
     payment_reconcile_grace_seconds: int = Field(default=300, ge=60, le=3600)
     payment_reconcile_max_seconds: int = Field(default=604_800, ge=86_400, le=2_592_000)
+
+    # --- 数据留存清理（AIH-TASK-264，设计闸门 #833 v7 §2「任务与配置」） ------------------------
+
+    # 每项一个三值开关（设计 §1「我定的」第 3 条）：`off` 不碰这张表，
+    # `count` 只数不删、写一行 INFO，`delete` 真删并写审计。
+    # 缺省全 `off`，上线先 `count` 一轮再 `delete`（设计 §8）。
+    # 键名是 `retention_<项名>_mode`，项名见 app/services/retention_purge.py 的 `ITEMS`。
+    # 保留期（30 天）是代码常量，不是配置（设计 §1「我定的」第 5 条）。
+    retention_refresh_tokens_mode: RetentionMode = "off"
+    retention_password_reset_tokens_mode: RetentionMode = "off"
+    retention_recovery_codes_mode: RetentionMode = "off"
+    # 每项每轮最多删这么多行（按 1000 行一批）。
+    retention_max_rows_per_item: int = Field(default=50_000, ge=1_000, le=1_000_000)
 
     @field_validator("stripe_api_base_url")
     @classmethod

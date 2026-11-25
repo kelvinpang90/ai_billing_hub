@@ -108,6 +108,7 @@ def test_the_periodic_tasks_include_the_ai_usage_delivery_sweep(
         "payment-events-process-due",
         "payment-reconcile-due",
         "receipts-issue-missing",
+        "retention-purge",
     }
     assert "usage-billing-sweep" not in celery_app.conf.beat_schedule
     entry = celery_app.conf.beat_schedule["outbox-recovery"]
@@ -246,6 +247,29 @@ def test_the_statements_task_is_registered(celery_app) -> None:
     assert "app.tasks.statements.generate_due" in celery_app.tasks
 
 
+def test_the_retention_purge_runs_daily_after_the_backup_and_the_log_shipping(celery_app) -> None:
+    """设计闸门 #833 v7 §2「任务与配置」、§7「Beat」。
+
+    每天 20:17 UTC（马来西亚 04:17），expires 3600 秒。
+    马来西亚是固定 UTC+8：排在 03:17 的全量备份与 03:47 的日志外送之后。
+    """
+    entry = celery_app.conf.beat_schedule["retention-purge"]
+
+    assert entry["task"] == "app.tasks.retention.purge"
+    assert entry["schedule"] == crontab(minute=17, hour=20)
+    assert entry["schedule"].minute == {17}
+    assert entry["schedule"].hour == {20}
+    assert [(hour + 8) % 24 for hour in entry["schedule"].hour] == [4]
+    assert entry["options"] == {"expires": 3600}
+
+
+def test_the_retention_task_is_registered(celery_app) -> None:
+    import app.tasks.retention  # noqa: F401
+
+    assert "app.tasks.retention" in celery_app.conf.include
+    assert "app.tasks.retention.purge" in celery_app.tasks
+
+
 def test_the_sweep_does_not_pile_up_while_beat_is_down(celery_app) -> None:
     """⚠️ beat 停了一小时再起来时，攒下的几十次触发**不该**一口气全放出去。
 
@@ -271,6 +295,7 @@ def test_task_modules_are_listed_explicitly(celery_app) -> None:
         "app.tasks.payment_events",
         "app.tasks.payment_reconcile",
         "app.tasks.receipts",
+        "app.tasks.retention",
     ]
     assert celery_app.conf.include == TASK_MODULES
 

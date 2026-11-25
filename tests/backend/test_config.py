@@ -600,3 +600,64 @@ def test_the_customer_invitation_ttl_must_be_positive() -> None:
 
     # 下界本身照常通过。
     assert Settings(customer_invitation_ttl_seconds=1).customer_invitation_ttl_seconds == 1
+
+
+RETENTION_MODE_FIELDS = (
+    "retention_refresh_tokens_mode",
+    "retention_password_reset_tokens_mode",
+    "retention_recovery_codes_mode",
+)
+
+
+def test_the_retention_settings_default_to_off_and_fifty_thousand_rows() -> None:
+    """设计闸门 #833 v7 §2「任务与配置」。
+
+    三项缺省 `off`（部署后什么都不发生，§8），每轮上限 50000。
+    """
+    settings = Settings()
+
+    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == ["off", "off", "off"]
+    assert settings.retention_max_rows_per_item == 50_000
+
+
+@pytest.mark.parametrize("name", RETENTION_MODE_FIELDS)
+@pytest.mark.parametrize("mode", ["off", "count", "delete"])
+def test_each_retention_mode_accepts_off_count_and_delete(name: str, mode: str) -> None:
+    assert getattr(Settings(**{name: mode}), name) == mode
+
+
+@pytest.mark.parametrize("name", RETENTION_MODE_FIELDS)
+@pytest.mark.parametrize("bad", ["", "on", "true", "DELETE", "purge", " delete"])
+def test_an_unknown_retention_mode_fails_validation(name: str, bad: str) -> None:
+    """设计 §5「配置不合法」：认不出的模式值让配置校验失败，不能落到「删除」那一支。"""
+    with pytest.raises(ValidationError):
+        Settings(**{name: bad})
+
+
+def test_the_retention_row_cap_stays_between_one_thousand_and_one_million() -> None:
+    """设计 §5「配置不合法」：上限越界让配置校验失败；两端本身照常通过。"""
+    for bad in (0, 999, 1_000_001):
+        with pytest.raises(ValidationError):
+            Settings(retention_max_rows_per_item=bad)
+
+    for good in (1_000, 1_000_000):
+        assert Settings(retention_max_rows_per_item=good).retention_max_rows_per_item == good
+
+
+def test_the_retention_settings_come_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETENTION_REFRESH_TOKENS_MODE", "count")
+    monkeypatch.setenv("BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE", "delete")
+    monkeypatch.setenv("BILLING_RETENTION_RECOVERY_CODES_MODE", "off")
+    monkeypatch.setenv("BILLING_RETENTION_MAX_ROWS_PER_ITEM", "2000")
+
+    settings = Settings()
+
+    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == ["count", "delete", "off"]
+    assert settings.retention_max_rows_per_item == 2000
+
+
+def test_an_unknown_retention_mode_in_the_environment_fails_validation(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETENTION_RECOVERY_CODES_MODE", "on")
+
+    with pytest.raises(ValidationError):
+        Settings()
