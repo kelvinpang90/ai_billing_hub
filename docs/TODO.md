@@ -373,8 +373,8 @@
 - [x] 草稿 → 管理员审批 → 发布（已由 AIH-TASK-026 交付，设计闸门 #177 v3：供应商价格版本 DRAFT → PUBLISHED → RETIRED，记录 `approved_by` / `approved_at`）
 - [x] 历史版本化（同上，AIH-TASK-026：每次改价是新版本，发布后由 MySQL 触发器保证不可改）
 - [x] 供应商账单成本对账（AIH-TASK-242..246、250、251，设计闸门 #755 v1：管理端「Provider costs」页按供应商 × UTC 自然月手工录入不含税的实际成本，先预览再确认为不可变记录，更正追加取代行，按月末生效的已发布汇率换算，上月满 9 天未对账在 `usage_processing_backlog` 提醒 72 小时，换钥与月度流程见 [runbook.md](runbook.md)「供应商成本对账」；AIH-TASK-247..249，设计闸门 #756 v2：对账后成本按估算成本比例分摊进管理端毛利分析）
-- [ ] Reprocess
-- [ ] Rebill 调整
+- [x] Reprocess（由 AIH-TASK-253..260 与 262 交付，设计闸门 #830 v12：已计费的预付事件按更正版本重算，先预览再确认；未计费的错误事件仍走重新入队，流程见 [runbook.md](runbook.md)「Rebill」）
+- [x] Rebill 调整（由 AIH-TASK-253..260 与 262 交付，设计闸门 #830 v12：每次 Rebill 写一行 `REBILL_CREDIT` / `REBILL_DEBIT` 与逐事件明细，按入账月计入对账单 `prior_period.rebill`，用量分析收入含差额）
 
 ---
 
