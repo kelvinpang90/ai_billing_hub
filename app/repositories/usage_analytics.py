@@ -4,6 +4,8 @@ AIH-TASK-221（设计闸门 #709 v2 §2「仓储」）：按马来西亚日 / �
 `paid_at` 落在区间内的 `PAID` 支付汇总。
 AIH-TASK-247（设计闸门 #756 v2 §2「仓储」）：按与区间重叠的当前对账记录汇总覆盖范围内的估算
 （`reconciled_allocation_inputs`），分摊与舍入归接口层。公开函数都只读、不加锁、不提交。
+AIH-TASK-258（设计闸门 #830 v12 §2「用量分析」）：预付收入是每个事件的 `billable_cost` 加该事件
+全部 Rebill 明细的 `difference` 之和（按原事件的维度与 `occurred_at` 归属）；估算成本仍是事件快照。
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Subquery,
     case,
     cast,
     func,
@@ -35,6 +38,7 @@ from app.models.base import MONEY_PRECISION, MONEY_SCALE
 from app.models.payments import Payment, PaymentStatus
 from app.models.tenancy import BillingMode, Project, Tenant
 from app.models.usage import UsageEvent, UsageEventStatus
+from app.models.usage_rebills import UsageRebillLine
 from app.repositories.provider_cost_reconciliations import (
     ai_module_origin,
     current_records_overlapping,
@@ -208,11 +212,35 @@ def _conditions(
     return conditions
 
 
-def _aggregates() -> list[ColumnElement[Any]]:
-    """The 12 aggregate columns shared by the grouped query and the totals, in row order."""
+def _rebill_differences() -> Subquery:
+    """Σ `difference` of every rebill line, one row per `usage_event_id` (设计 #830 §2「用量分析」).
+
+    先按事件聚合再左连接：一个事件有多条明细时也只连出一行，事件数与 token 不被重复计数。
+    """
+    return (
+        select(
+            UsageRebillLine.usage_event_id.label("usage_event_id"),
+            func.sum(UsageRebillLine.difference).label("difference"),
+        )
+        .group_by(UsageRebillLine.usage_event_id)
+        .subquery("rebill_differences")
+    )
+
+
+def _with_rebill_differences(statement: Any, differences: Subquery) -> Any:
+    return statement.outerjoin(differences, differences.c.usage_event_id == UsageEvent.id)
+
+
+def _aggregates(differences: Subquery) -> list[ColumnElement[Any]]:
+    """The 12 aggregate columns shared by the grouped query and the totals, in row order.
+
+    `differences` 是 `_rebill_differences()`，语句须经 `_with_rebill_differences` 左连接它。
+    """
     token = UsageEvent.payload_shape == PayloadShape.LLM_TOKEN_FIELDS
     prepaid = UsageEvent.billing_mode_snapshot == BillingMode.PREPAID.value
     internal = UsageEvent.billing_mode_snapshot == BillingMode.INTERNAL_METERED_ONLY.value
+    # 收入 = 原计费 + 该事件全部明细差额之和（没有明细为 0）；成本仍是事件快照。
+    revenue = UsageEvent.billable_cost + func.coalesce(differences.c.difference, 0)
     return [
         func.count(UsageEvent.id).label("event_count"),
         _sum(case((token, 1), else_=0)).label("token_event_count"),
@@ -225,7 +253,8 @@ def _aggregates() -> list[ColumnElement[Any]]:
             "cache_read_input_tokens"
         ),
         _sum(case((prepaid, 1), else_=0)).label("prepaid_event_count"),
-        _sum(case((prepaid, UsageEvent.billable_cost), else_=0)).label("prepaid_billable_cost"),
+        # SQLite 上明细差额与计费额按浮点相加：按金额列的精度转回 Decimal。
+        type_coerce(_sum(case((prepaid, revenue), else_=0)), _MONEY).label("prepaid_billable_cost"),
         _sum(case((prepaid, UsageEvent.estimated_provider_cost_myr), else_=0)).label(
             "prepaid_estimated_cost"
         ),
@@ -302,13 +331,15 @@ def list_usage_analytics(
 
     # 排序用未加标签的表达式：ORDER BY 文本与 AIH-TASK-073 相同。
     event_count = func.count(UsageEvent.id)
+    differences = _rebill_differences()
     statement = select(
         group_key.label("group_key"),
         group_name.label("group_name")
         if group_name is not None
         else cast(None, String).label("group_name"),
-        *_aggregates(),
+        *_aggregates(differences),
     ).select_from(UsageEvent)
+    statement = _with_rebill_differences(statement, differences)
     for table, onclause in joins:
         statement = statement.outerjoin(table, onclause)
     group_columns = (group_key,) if group_name is None else (group_key, group_name)
@@ -387,7 +418,10 @@ def usage_analytics_totals(
     )
     if conditions is None:
         return _ZERO_TOTALS
-    statement = select(*_aggregates()).select_from(UsageEvent).where(*conditions)
+    differences = _rebill_differences()
+    statement = _with_rebill_differences(
+        select(*_aggregates(differences)).select_from(UsageEvent), differences
+    ).where(*conditions)
     return UsageAnalyticsTotals(**_aggregate_values(session.execute(statement).one()))
 
 

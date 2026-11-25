@@ -3507,6 +3507,13 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 - 金额是 8 位小数的十进制字符串；平均 token 与比率也是十进制字符串，全程 `Decimal`、不经 float。
 - `PREPAID` 块包含计费额、估算成本、用量毛利（`gross_margin`）和毛利率；`INTERNAL_METERED_ONLY` 只包含事件数、
   估算成本和参考售价。内部计量租户的参考售价不是收入，因此不进入任何毛利。
+- **收入含 Rebill 差额，按原事件的维度与 `occurred_at` 归属；估算成本仍是事件处理时的快照**（AIH-TASK-258，设计闸门
+  #830 `APPROVED: design v12`，全文见 [design/AIH-TASK-253-usage-rebill.md](design/AIH-TASK-253-usage-rebill.md)
+  §2「用量分析」）：`prepaid.billable_cost` 是每个预付事件的 `billable_cost` 加该事件全部 Rebill 明细的 `difference`
+  之和（没有明细为 0），即该事件的当前有效计费。差额归属到原事件的客户、项目、供应商、模型、功能与 `occurred_at`
+  所在的日 / 月，不按 Rebill 的入账时刻归期；同一事件做过多次 Rebill 时差额累加，事件只计一次（事件数与 token 不变）。
+  `estimated_provider_cost_myr`、对账后成本的分摊与内部计量块不受 Rebill 影响；`gross_margin`、
+  `gross_margin_on_provider_cost` 与 `totals.gross_profit*` 随收入一起变。没有任何 Rebill 时数字与计入差额之前相同。
 
 `data` 在 `items`、`page`、`page_size`、`total` 之外的键（`cost_basis` 沿用 AIH-TASK-073，新增的是 `usage_period_basis` 与 `totals`；
 AIH-TASK-248 新增 `provider_cost_allocation` 与 `reconciliation_period_basis`，见下文「对账后成本」）：
@@ -3551,7 +3558,8 @@ AIH-TASK-248 新增 `provider_cost_allocation` 与 `reconciliation_period_basis`
   `"0.00000000"`、`gateway_fee_unknown_count = 0`），与分组为空一致。
 - `gateway_fee_unknown_count > 0` 时，那几笔的手续费**没有被扣**，`gross_profit` 偏高。
 - V1 **不计**：账本调整（`ADJUSTMENT_CREDIT` / `ADJUSTMENT_DEBIT`、`REFUND_ADJUSTMENT`、`BONUS`、
-  `SYSTEM_CORRECTION`、`REBILL_*`）不增减收入，用赠送或调账额度的消费仍按 `billable_cost` 计入用量收入；Stripe
+  `SYSTEM_CORRECTION`）不增减收入，用赠送或调账额度的消费仍按 `billable_cost` 计入用量收入（`REBILL_*` 不按账本行
+  计入，它的差额按原事件计入，见上文）；Stripe
   侧的外部退款与争议不减充值到账额、不改手续费，争议费不计；非 `PAID` 的支付（`REVIEW_REQUIRED`、人工结案后的
   `FAILED`）即使 Stripe 收了钱、扣了手续费也不计。
 - **报表不是定稿数字**：事件后来才处理、手续费后来才补抓到，再查一次数字会变（同一次请求内的几条查询在一个
@@ -3658,6 +3666,9 @@ AIH-TASK-248 新增 `provider_cost_allocation` 与 `reconciliation_period_basis`
 | 41 | `unallocated_reconciled_cost_myr` | 空 | `totals.unallocated_reconciled_cost_myr`（8 位小数）；`null` 时空 |
 
 - 手续费与扣手续费后的毛利**只在 `TOTAL` 行**，不分摊到任何 `GROUP` 行；两个期间口径由第 28、29 列写明。
+- 第 14 列 `prepaid_billable_cost` 与 JSON 的 `prepaid.billable_cost` 同一口径：**收入含 Rebill 差额，按原事件的维度与
+  `occurred_at` 归属；估算成本仍是事件处理时的快照**（见上文）。第 16、17、34 列与 `TOTAL` 行第 25、26、37 列随之变化；
+  第 15、19、32、35 列不受 Rebill 影响。列与表头不变。
 - 第 27 列 `cost_basis` 仍是 `estimated`，指第 15、19 列的估算成本；第 32–36 列是按估算成本比例分摊的对账后成本
   （第 38 列写明口径），**不是逐请求的实际成本**。`reconciliation_coverage` 的 `period_start` / `period_end` 与
   `fully_in_range` 不进文件。

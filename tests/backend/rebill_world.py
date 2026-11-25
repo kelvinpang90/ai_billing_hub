@@ -48,6 +48,7 @@ from provider_cost_world import (
 from provider_cost_world import clean as clean_provider_cost
 from sqlalchemy import Engine, create_engine, func, insert, select, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from alembic import command
 from app.core.database import create_session_factory
@@ -975,6 +976,28 @@ END
 
 def sqlite_factory() -> Iterator[sessionmaker[Session]]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(_SQLITE_LEDGER_TRIGGER)
+    factory = create_session_factory(engine)
+    seed_meter_types(factory)
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+
+
+def sqlite_shared_factory() -> Iterator[sessionmaker[Session]]:
+    """Like `sqlite_factory`, with one connection shared by every thread (AIH-TASK-258).
+
+    TestClient 在线程池里跑同步端点：内存库必须所有连接共用一个（StaticPool，同
+    provider_cost_world 的 `sqlite_shared_factory`），否则端点看到的是另一个空库。
+    """
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql(_SQLITE_LEDGER_TRIGGER)
