@@ -14599,7 +14599,7 @@ tasks:
     title: 健康告警：巡检按服务量最近一小时日志量，快到轮转撑不过一天外送时并进 disk 维度报警
     purpose: >-
       spec §95 要求监控 log volume growth，现在没有任何信号：某个服务开始刷屏时，json-file 按大小轮转会先把事故前的历史顶掉（每天 03:47 才外送一次），而磁盘水位要很久之后才会动。deploy/monitor.sh 的 disk 维度新增 check_log_rate：每 5 分钟逐个服务读最近一小时的日志字节数，按 .env 里的轮转配置算出每容器容量，写入速度快到这份容量撑不过外送周期加余量时报 P2。并进已有的 BILLING_HEALTHCHECK_DISK_URL，不新增检查、不新增 .env 地址；同步部署文档与 runbook。不改应用代码，不改 deploy/log_ship.sh。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - 'deploy/monitor.sh：新增 log_rotation_bytes 与 check_log_rate，check_disk 在 check_clock 之后调用 check_log_rate（并进 disk 维度，复核时随 check_disk 一起重跑）；沿用本脚本的约定：问题逐行写 stdout、行首是 P1 / P2，普通日志一律走 stderr，命令替换里失败的命令写 || true（set -e 与 pipefail 下不中止）。disk_ok_summary 与 disk 维度的 OK 摘要不变'
