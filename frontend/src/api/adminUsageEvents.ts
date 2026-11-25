@@ -111,6 +111,20 @@ export interface UsageEventConflict {
   received_at: string;
 }
 
+/**
+ * 这一事件的一次更正（docs/api.md「详情」的 `rebills`，设计闸门 #830 v12）。三个金额是 8 位小数的字符串，
+ * `difference = corrected_charge − previous_charge`。
+ */
+export interface UsageEventRebill {
+  /** Rebill 的 `public_id`，可用于 Rebill 详情页。 */
+  rebill_id: string;
+  /** Rebill 的确认时刻（不带时区的 UTC）。 */
+  created_at: string;
+  previous_charge: string;
+  corrected_charge: string;
+  difference: string;
+}
+
 export interface UsageEventDetail extends UsageEventSummary {
   schema_version: string;
   payload_shape: string;
@@ -140,6 +154,13 @@ export interface UsageEventDetail extends UsageEventSummary {
   claimed_at: string | null;
   lease_expires_at: string | null;
   conflicts: UsageEventConflict[];
+  /**
+   * 当前有效计费 `eff(e)`：最近一条更正明细的 `corrected_charge`，没有更正时等于 `billable_cost`。只有已计费（`PROCESSED`）
+   * 的预付事件有值；内部计量、未计费与错误状态的事件为 null。
+   */
+  effective_charge: string | null;
+  /** 更正历史，按明细 id 升序；没有时 `[]`。 */
+  rebills: UsageEventRebill[];
 }
 
 export interface RequeueResult {
