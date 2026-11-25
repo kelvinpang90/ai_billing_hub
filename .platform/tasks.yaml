@@ -14654,7 +14654,7 @@ tasks:
     title: Rebill 第一层：新建只追加的更正记录表与逐事件明细表，迁移 0042
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「数据库（迁移 0042，AIH-TASK-253）」与 §8：新迁移 0042 建 usage_rebills 与 usage_rebill_lines（只追加；CHECK、唯一约束、索引与外键照设计），MySQL 上为两张表各建拒绝 UPDATE 与 DELETE 的触发器；downgrade 照设计 v9 §8（离线抛错；任一表有行就抛错、不发 DDL；为空时一条 DROP TABLE 删两表；只剩一张时按它有没有行处理）；新模型 app/models/usage_rebills.py；docs/database-schema.md 记这两张表。不加写入方、服务与接口：属于 AIH-TASK-254 起的任务。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） 逐条一致，以 §2「数据库（迁移 0042，AIH-TASK-253）」、§3 INV-5、INV-6、INV-10、§7「只追加」「降级保护」两行、§8 与 §11 AIH-TASK-253 为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
