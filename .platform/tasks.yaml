@@ -14992,7 +14992,7 @@ tasks:
     title: Rebill 第七层：管理端新建 Rebill 页的预览与确认，用量事件详情页加按钮与更正历史
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「管理端页面」中新建页与用量事件详情两部分：新增 frontend/src/features/rebills/NewRebillPage.tsx（选客户、选事件列表或日期范围、选更正版本、预览、确认，停复机提示，过期预览处理，幂等键在进入确认步骤时生成一次、重试沿用），路由 /rebills/new；用量事件详情页对预付已计费事件显示 Rebill 按钮（跳新建页并预填客户与事件）、当前有效计费与更正历史。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-257
     acceptance:
