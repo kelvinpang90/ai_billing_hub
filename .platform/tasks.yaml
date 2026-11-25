@@ -15162,7 +15162,7 @@ tasks:
     title: 数据留存清理第一层：清理框架与刷新令牌、重置邀请令牌、恢复码三项到期清理
     purpose: >-
       按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §2「清理框架」「三项清理的条件」「审计动作与查询」「事务边界」：新增 app/services/retention_purge.py（PurgeItem 注册表、run_purge、三项清理：刷新令牌按家族、重置与邀请令牌、已用或已吊销的恢复码；每批在 MySQL 上用 READ COMMITTED、删除与一条审计同一事务提交；无进展即停），AuditAction 加 DATA_RETENTION_PURGE，审计实体类型 data_retention_run 登记进 app/services/audit_query.py 与前端审计动作清单。不加任务、Beat 与配置：属于 AIH-TASK-264。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） 逐条一致，以 §1「我定的」、§2「清理框架」「三项清理的条件」「审计动作与查询」「事务边界」「时间语义」、§3、§4、§5 与 §7 中除「Beat」一行外的各行为准；以下两处以本契约为准（登记预审定，不算冲突）：日志改为每项一行 INFO retention_purge_item（含 duration_ms）而不是设计数据流里的整轮一行；设计 §7「并发：两个实例」在本任务只验证 run_purge，命名锁由 AIH-TASK-264 实现与测试。除此之外，设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
