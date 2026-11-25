@@ -14709,7 +14709,7 @@ tasks:
     title: Rebill 第二层：当前有效计费、更正版本适用性、按更正版本重算与选事件的只读仓储
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「口径」「更正版本的适用性」「选事件」「预览指纹」：新增 app/repositories/usage_rebills.py（选事件、取最近明细与幂等查重，全部是普通读、列表与详情的只读查询、原账期与原对账单）与 app/services/rebill_pricing.py（effective_state、check_corrections、corrected_charge、预览指纹），pricing_engine 只做让重算可复用的最小改动；新增测试夹具 tests/backend/rebill_world.py。不写 Rebill、不写账本：属于 AIH-TASK-255。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-253
     acceptance_criteria:
