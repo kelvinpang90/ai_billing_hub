@@ -3475,6 +3475,11 @@ webhook。实现在 `app/api/admin_usage_events.py`、`app/repositories/usage_ev
 | `attempt_count` / `next_attempt_at` | 认领次数与最早再认领时刻 |
 | `claim_token` / `claimed_at` / `lease_expires_at` | 当前认领的防护令牌与租约；只有 `PROCESSING` 时非空 |
 | `conflicts` | 撞了这个 `event_id` 的冲突请求，按写入顺序：`[{"api_key", "mismatch", "received_at"}]`（`api_key` 是请求方的公开 key，`mismatch` 是 `OWNERSHIP` / `FINGERPRINT` / `BOTH`）；没有时 `[]` |
+| `effective_charge` | 当前有效计费 `eff(e)`（8 位小数的字符串，见[管理端 Rebill](#管理端-rebill)「口径」）：最近一条更正明细的 `corrected_charge`，没有更正时等于 `billable_cost`。只有已计费（`PROCESSED`）的预付事件有值；内部计量事件、未计费与错误状态的事件为 null |
+| `rebills` | 这一事件的更正历史，按明细 id 升序：`[{"rebill_id", "created_at", "previous_charge", "corrected_charge", "difference"}]`（`rebill_id` 是 Rebill 的 `public_id`，可用于 `GET /api/v1/admin/rebills/{rebill_id}`；`created_at` 是 Rebill 的确认时刻；三个金额是 8 位小数的字符串，`difference = corrected_charge − previous_charge`）；没有时 `[]`。恒有 `effective_charge = billable_cost + Σ difference` |
+
+`billable_cost`、`wallet_transaction` 与快照字段是事件处理时的原值，Rebill 不改它们（事件行只读）；更正只体现在
+`effective_charge`、`rebills` 与钱包流水的 `REBILL_*` 行里。列表项没有这两个字段。
 
 错误状态的事件没有快照：价格、规则、汇率、成本、计费额、毛利与账本行全为 null（已解析到的 `provider_ref_id` /
 `model_ref_id` 照样给出，方便管理员看缺什么）。
@@ -3855,6 +3860,211 @@ AIH-TASK-248 新增 `provider_cost_allocation` 与 `reconciliation_period_basis`
 | 409 | `RECONCILIATION_ESTIMATE_CHANGED` | 仅确认：期望值与当前估算不等 |
 
 `RECONCILIATION_EXISTS` 与 `RECONCILIATION_NOT_CURRENT` 在预览时也可能返回。
+
+---
+
+## 管理端 Rebill
+
+设计依据：设计闸门 #830 `APPROVED: design v12`，全文见
+[design/AIH-TASK-253-usage-rebill.md](design/AIH-TASK-253-usage-rebill.md) §2「口径」「选事件」「预览指纹」「管理端接口」与 §6。
+实现登记为 AIH-TASK-256：`app/api/admin_rebills.py`、`app/schemas/usage_rebills.py`，业务规则在
+`app/services/usage_rebill.py` 与 `app/services/rebill_pricing.py`。
+
+已计费（`PROCESSED`）的预付用量事件发现算错了钱时，管理员对**一个客户**的一组事件按更正版本重算：先预览（旧计费、新计费、
+差额），再确认（必填原因、带幂等键）。确认在客户钱包写**恰好一行** `REBILL_CREDIT`（多扣了，退回）或 `REBILL_DEBIT`（少扣了，
+补扣），逐事件的明细另存。事件行、原 `AI_USAGE` 账本行与已定稿的对账单一个字节都不改。不许手填金额（那是[手工调账](#管理端手工调账)）；
+未计费的错误事件走[重新入队](#管理端用量事件重新入队)，不走这里。
+
+| 方法与路径 | 成功 | 错误 |
+| --- | --- | --- |
+| `POST /api/v1/admin/rebills/preview` | 200，预览 | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `POST /api/v1/admin/rebills` | 201 首次 / 200 重放，Rebill 详情加 `replayed` | 401 / 403 / 404 / 409 / 422 / 500 / 503 |
+| `GET /api/v1/admin/rebills` | 200，一页 Rebill（游标分页） | 401 / 403 / 422 / 500 / 503 |
+| `GET /api/v1/admin/rebills/{rebill_id}` | 200，Rebill 详情 | 401 / 403 / 404 / 500 / 503 |
+
+- 只有 ADMIN 能调（每个处理函数第一条语句就是鉴权）：未登录 401 `TOKEN_INVALID`，门户（CUSTOMER）会话 403 `ADMIN_REQUIRED`。
+  请求体与 `limit` 由框架在鉴权**之前**校验，非法输入可能先得 422；列表的 `cursor` 在鉴权之后判。客户门户没有任何 Rebill 接口。
+- 路径名是 `rebills`，不是 spec §89 的 `reprocess`。路径里的 `rebill_id` 是 Rebill 的 `public_id`。
+- **成本只在管理端**（INV-7）：明细的 `corrected_estimated_provider_cost_myr` 是 Acuven 内部的估算成本。客户只在钱包流水里看到
+  `REBILL_*` 行（类型、金额、余额、`description` 为 `Rebill correction (<N> usage events)`、时间）；账本行的 `metadata` 只有
+  Rebill id 与事件数，没有任何成本字段。客户侧不发邮件，门户用量页仍显示事件处理时的计费额。
+- 金额一律是恰好 8 位小数的十进制字符串（`money_text`），全程 `Decimal`。时间字段是不带时区的 UTC。
+- 所有引用都是 `public_id`（客户、事件、项目、规则、价格版本、对账单、账本行）；`provider` / `model` 是目录的 `code`。
+  响应不含内部自增 id。
+
+### 口径
+
+| 量 | 定义 |
+| --- | --- |
+| 当前有效计费 `eff(e)` | 事件 `e` 最近一条更正明细（明细 id 最大）的 `corrected_charge`；没有明细时是事件的 `billable_cost`。恒有 `eff(e) = billable_cost + Σ 该事件明细的 difference` |
+| 当前有效版本 `refs(e)` | 最近一条明细的更正规则与更正价格版本；没有明细时是事件快照的 `pricing_rule_id` 与 `provider_price_version_id`。汇率版本始终是事件快照的那一版 |
+| 更正版本 | 请求里的 `corrective_pricing_rule_id`、`corrective_provider_price_version_id`，各自可省略；省略的那一项取 `refs(e)` 的对应项。两项都省略 = **按当前有效版本重算**（修了计价 bug 之后用） |
+| 新计费 `new(e)` | 用事件的数量、更正价格版本的单价、事件快照的汇率与更正规则，经计价引擎算出并舍入一次（8 位小数，`ROUND_HALF_UP`），与计费同一套代码 |
+| 差额 `d(e)` | `new(e) − eff(e)`。`d(e) = 0` 的事件不进明细，只计入 `unchanged_count` |
+| 合计 | `previous_total = Σ eff(e)`、`corrected_total = Σ new(e)`、`difference = corrected_total − previous_total`，**只按差额不为 0 的事件**（即明细里的那些）；`event_count` 是明细行数 |
+| 账本行 | 金额 `= −difference`：`difference < 0` 写 `REBILL_CREDIT`（金额为正，余额增加），`difference > 0` 写 `REBILL_DEBIT`（金额为负，余额减少） |
+| `original_period` | 原 `AI_USAGE` 账本行按对账单「账本归属规则」的归属月（`occurred_at` 所在马来西亚月，晚于该月 cut-off 才入账的取入账所在马来西亚月）；计费额为 0、没有原账本行的事件取 `occurred_at` 所在马来西亚月。`YYYY-MM` |
+| `original_statement_id` | 这个客户、这个原账期已存在的月度对账单（存在即已定稿）的 `public_id`；没有为 `null`。原对账单只被引用、不被改写 |
+
+- **更正版本必须已审批发布过**（`PUBLISHED` 或 `RETIRED`），**不看它的生效区间**：更正版本的意义就是「过去那一刻本该用它」。
+  `DRAFT` 与 `DISCARDED` 不可用。
+- **更正价格版本**须与事件的供应商、模型相同，来源币种与事件快照的 `provider_source_currency` 相同（汇率沿用快照），分量覆盖事件
+  计量类型需要的全部分量；否则 422 `REBILL_PRICE_NOT_APPLICABLE`。
+- **更正规则**的客户、项目、供应商、模型各自为空或等于事件的对应值（别的客户、别的项目、别的模型的规则不适用），FIXED_RATE 的
+  分量覆盖需要的分量；否则 422 `REBILL_RULE_NOT_APPLICABLE`。
+- 任一事件不适用，整个请求失败（不部分执行），消息里带**第一个**不适用事件的 `public_id`。
+- 同一事件可以更正多次，每次以 `eff(e)` 为基准。撤销一次 Rebill = 再做一次 Rebill，把版本改回去。
+- 补扣可以让余额变负：余额 ≤ 0（正好为 0 也算）时客户照常停机（`SUSPENDED`）；补退让余额 > 0 时照常复机（`ACTIVE`），与账本行同一事务。
+- Rebill 行按它的 `created_at`（确认时刻，整秒 UTC）的马来西亚月计入当月对账单的 `prior_period.rebill`；用量分析的收入按原事件的
+  维度与 `occurred_at` 计入差额。
+
+### 请求体
+
+预览与确认共用下面四个字段；`extra` 一律拒绝（不能带金额、`tenant_id`、`created_by` 或任何内部 id），多带任何字段都是 422。
+
+| 字段 | 规则 |
+| --- | --- |
+| `customer_id` | 必填，客户的 `public_id`（1–64 字符）。一次 Rebill 只属于一个客户 |
+| `selection` | 必填，两种形状**二选一**，见下 |
+| `corrective_pricing_rule_id` | 可选，更正规则的 `public_id`（1–64 字符）；省略或 `null` = 取 `refs(e)` |
+| `corrective_provider_price_version_id` | 可选，更正价格版本的 `public_id`（1–64 字符）；省略或 `null` = 取 `refs(e)` |
+
+`selection` 的两种形状：
+
+- **显式事件** `{"usage_event_ids": [...]}`：1 到 1000 个**不重复**的事件 `public_id`。任一不存在 404 `USAGE_EVENT_NOT_FOUND`；任一不属于
+  该客户、不是 `PROCESSED`、或处理时不是预付，409 `USAGE_EVENT_NOT_REBILLABLE`（消息带它的 `public_id`）。
+- **条件** `{"occurred_from", "occurred_to", "project_id"?, "provider"?, "model"?}`：按 `occurred_at` 取 `[occurred_from, occurred_to)`（含起点、
+  不含终点，UTC 比较）。两个时间都必填，RFC 3339、**必须带时区**，小数秒至多 6 位（到微秒），换成 UTC；`occurred_from` 必须早于
+  `occurred_to`。`project_id` 是该客户的项目 `public_id`（不属于该客户 404 `PROJECT_NOT_FOUND`）；`provider` / `model` 与**目录的
+  `code`** 比较（不是上报的原始字符串）。只选该客户的、`PROCESSED` 的、处理时是预付的事件，按事件 id 升序。匹配数超过 1000 → 422
+  `REBILL_SELECTION_TOO_LARGE`（消息 `Selection matches <N> usage events; at most 1000.`，不截断）；为 0 → 409 `NOTHING_TO_REBILL`。
+
+两种都给、都不给、混用（显式事件加任何一个条件字段）、时间不带时区 / 超过 6 位小数 / 不是合法时间、`occurred_from` 不早于
+`occurred_to`、列表为空 / 超过 1000 个 / 有重复：422 `VALIDATION_ERROR`（只列字段名，不回显值）。
+
+服务端把 `selection` **规范化**后参与预览指纹与审计：显式事件的 id 按字符串升序；条件形状五个键都在，时间写成 UTC 的
+`YYYY-MM-DDTHH:MM:SS.ffffffZ`（6 位微秒），没给的可选项为 `null`。所以 `2026-11-10T08:00:00+08:00` 与 `2026-11-10T00:00:00.000000Z`
+是同一个请求。
+
+确认另加三个必填字段：
+
+| 字段 | 规则 |
+| --- | --- |
+| `preview_token` | 预览响应里的 `preview_token`：恰好 64 位**小写**十六进制 |
+| `reason` | 去首尾空白（含不换行空格等全部 Unicode 空白）后 1–255 字符；存的是去首尾空白后的值 |
+| `idempotency_key` | **小写** UUID（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`，大写字母 422）。页面在进入确认步骤时生成一次，重试沿用 |
+
+### `POST /api/v1/admin/rebills/preview` —— 预览
+
+一个只读事务，不加锁、**不写任何行、不写审计**。200：
+
+| 键 | 含义 |
+| --- | --- |
+| `lines` | 差额不为 0 的事件，按事件 id 升序；每项见下表「明细」 |
+| `unchanged_count` | 选中但差额为 0 的事件数 |
+| `event_count` / `previous_total` / `corrected_total` / `difference` | 只按 `lines` 里的事件（见「口径」） |
+| `ledger_type` / `ledger_amount` | 确认后将写的账本类型与金额（`= −difference`）；**没有可入账的差额**（`lines` 为空或 `difference` 为 0）时两者都为 `null`，页面据此禁用确认 |
+| `balance` / `balance_after` | 当前余额与 `balance − difference`（只作提示，确认时以锁内的余额为准） |
+| `preview_token` | 预览指纹，确认时原样带回 |
+
+**明细**（预览的每一行；详情的每一行另加 `rebill_id`）：
+
+| 键 | 含义 |
+| --- | --- |
+| `usage_event_id` / `occurred_at` | 事件的 `public_id` 与发生时刻 |
+| `project` | 事件所属项目的 `public_id`（事件没有项目时为 `null`） |
+| `provider` / `model` | 目录的 `code`，与条件选择用的一致 |
+| `previous_charge` / `corrected_charge` / `difference` | `eff(e)`、`new(e)` 与 `d(e)` |
+| `previous_pricing_rule` / `previous_provider_price_version` | `refs(e)` 的 `public_id` |
+| `corrected_pricing_rule` / `corrected_provider_price_version` | 重算所用规则与价格版本的 `public_id` |
+| `corrected_estimated_provider_cost_myr` | 按更正价格版本算出的估算成本（**只给管理端看**；用量分析的成本仍以事件原快照为准） |
+| `original_period` / `original_statement_id` | 原账期与原对账单的 `public_id`（见「口径」） |
+
+没有可入账的差额时预览仍是 200；只有确认才返回 409 `NOTHING_TO_REBILL` / `REBILL_NET_ZERO`。条件选择匹配为 0 时预览也是 409
+`NOTHING_TO_REBILL`（没有可展示的事件）。
+
+**预览指纹** `preview_token` 是下列内容的规范 JSON 的 sha256（64 位十六进制）：客户、两个更正版本、规范化的 `selection`，以及按事件
+id 升序的每个选中事件（包括差额为 0 的）的 `[事件 public_id, eff(e), new(e), 最近明细 id]`。它不是秘密，只用来比较：确认时服务端在
+钱包锁内用同样的输入重算，不一致就 409 `REBILL_PREVIEW_STALE`。
+
+### `POST /api/v1/admin/rebills` —— 确认
+
+请求体是预览的全部字段，加 `preview_token`、`reason`、`idempotency_key`。一个事务包住锁钱包、幂等查重、锁内重新选事件与重算、
+指纹比对、账本行（含停复机与低余额事件）、Rebill 行与明细、一条审计 `REBILL`（`entity_type` 为 `usage_rebill`；含客户计费额、差额、
+更正版本、规范化的 `selection` 与原因，不含估算成本）；任何一步失败整体回滚，什么都不留。
+
+- **201**：Rebill 详情（见下）加 `"replayed": false`。
+- **同一幂等键、同一请求重发**：**200**，返回第一次的结果，`"replayed": true`，什么都不写。「同一请求」比较的是客户、两个更正版本、
+  规范化的 `selection`、`preview_token` 与去首尾空白后的原因。幂等判定**先于**指纹比对：第一次已提交时，即使之后状态又变了，
+  同键重发仍得到原结果，而不是 409 `REBILL_PREVIEW_STALE`。
+- **同一幂等键、不同请求**：409 `REBILL_CONFLICT`。
+- **一次 Rebill 的对象 = 预览展示的那组事件**。条件选择只是帮管理员**找出**这组事件，不是「确认时刻该范围内的全部事件」的承诺：
+  确认时锁内重新选出的集合、每个事件的基准、新计费与最近明细都必须与预览逐个相同，否则 409 `REBILL_PREVIEW_STALE`（预览之后有别的
+  Rebill 改了同一事件、匹配集合变了、或请求参数与预览时不同），重新预览后再确认。**预览之后才计费的事件不在本次范围**：它们由下一次
+  预览发现，再做一次 Rebill；本次只改明细里列出的事件，没列出的保持原计费，预览展示的就是将要入账的全部内容。
+- **建议**：`occurred_to` 取已过 T+1 cut-off 的时刻，避免与仍在计费的用量交错（只是建议，不强制）。
+- **响应丢失或超时**（500、连接中断）：调用方无法区分「已完整提交」与「已完整回滚」，不会有一半。必须用**同一幂等键**重发：已提交
+  → 200 `replayed: true`；已回滚 → 照常执行。**不得换新幂等键直接确认：要换键，必须先重新预览**（新预览已反映第一次是否提交）。
+- 锁等待超时与死锁是 500，不自动重试；同键重发即可。
+
+### `GET /api/v1/admin/rebills` —— 列表
+
+只读。按 Rebill 的内部 id **倒序**（最新确认的在前），**游标分页**、不给总数：
+
+| 参数 | 规则 |
+| --- | --- |
+| `customer_id` | 可选，客户的 `public_id`。不存在时是空页（`items` 为 `[]`、`next_cursor` 为 `null`），不报 404（与[用量事件列表](#管理端用量事件查询)的同名筛选一样） |
+| `cursor` | 可选，上一页的 `next_cursor`（即上一页最后一条 Rebill 的 `public_id`）。不存在 → 422 `VALIDATION_ERROR` |
+| `limit` | 1–100，默认 50；越界 422 |
+
+200：`{"items": [...], "next_cursor": …}`。`next_cursor` 在还有下一页时是本页最后一条的 `public_id`，否则 `null`。游标按 id 取
+「比它更早」的行，所以翻页期间新增的 Rebill 只会出现在第一页之前，不会让已翻过的页重复或漏看。每项恰好：
+
+| 键 | 含义 |
+| --- | --- |
+| `id` / `customer_id` | Rebill 与客户的 `public_id` |
+| `event_count` / `difference` | 明细行数与合计差额 |
+| `ledger_type` / `ledger_amount` | 那一行账本的类型（`REBILL_CREDIT` / `REBILL_DEBIT`）与金额（`= −difference`） |
+| `reason` / `created_by_email` / `created_at` | 原因、确认人与确认时刻（整秒 UTC） |
+
+### `GET /api/v1/admin/rebills/{rebill_id}` —— 详情
+
+只读。列表项的全部字段，再加：
+
+| 键 | 含义 |
+| --- | --- |
+| `previous_total` / `corrected_total` | 两个合计（`difference = corrected_total − previous_total`） |
+| `corrective_pricing_rule_id` / `corrective_provider_price_version_id` | 请求里的更正规则与价格版本的 `public_id`；没给为 `null` |
+| `wallet_transaction_id` | 那一行 `REBILL_*` 账本的 `public_id` |
+| `lines` | 全部明细，按明细 id 升序；字段同预览的「明细」，另加 `rebill_id`（明细所属 Rebill 的 `public_id`） |
+
+查不到（含不是 UUID 的值）404 `REBILL_NOT_FOUND`。确认的响应与详情相同，另加 `replayed`。
+
+### 错误
+
+信封照「通用约定」；业务错误只有 `code` 与 `message`，不带 `details`。消息不带金额：超限的匹配数与不适用事件的 `public_id` 只在消息里，
+不加响应字段。
+
+| HTTP | `code` | 何时 |
+| --- | --- | --- |
+| 404 | `CUSTOMER_NOT_FOUND` | `customer_id` 查不到 |
+| 404 | `USAGE_EVENT_NOT_FOUND` | 显式事件里有不存在的 `public_id` |
+| 404 | `PROJECT_NOT_FOUND` | 条件里的 `project_id` 不存在或不属于该客户 |
+| 404 | `PRICING_RULE_NOT_FOUND` | 更正规则查不到 |
+| 404 | `PRICE_VERSION_NOT_FOUND` | 更正价格版本查不到（与价格版本接口同名） |
+| 404 | `REBILL_NOT_FOUND` | 详情的 `rebill_id` 查不到 |
+| 409 | `REBILL_NOT_PREPAID` | 客户是内部计量（`INTERNAL_METERED_ONLY`） |
+| 409 | `USAGE_EVENT_NOT_REBILLABLE` | 显式事件属于别的客户、不是 `PROCESSED`、或处理时不是预付 |
+| 409 | `NOTHING_TO_REBILL` | 条件匹配为 0（预览与确认）；仅确认：没有差额不为 0 的事件 |
+| 409 | `REBILL_NET_ZERO` | 仅确认：补退与补扣相抵为 0（需要时分两次做） |
+| 409 | `REBILL_PREVIEW_STALE` | 仅确认：预览之后数据或参数变了，重新预览 |
+| 409 | `REBILL_CONFLICT` | 仅确认：同一幂等键已用于不同的请求 |
+| 409 | `ACCOUNT_CLOSED` | 仅确认：客户已关户，什么都不写 |
+| 422 | `VALIDATION_ERROR` | 请求体或查询参数不合规（见「请求体」与列表参数） |
+| 422 | `REBILL_SELECTION_TOO_LARGE` | 条件匹配超过 1000 条 |
+| 422 | `REBILL_PRICE_NOT_APPLICABLE` | 更正价格版本不适用于某个事件 |
+| 422 | `REBILL_RULE_NOT_APPLICABLE` | 更正规则不适用于某个事件 |
+| 422 | `AMOUNT_OUT_OF_RANGE` | 重算结果、合计或确认后的余额放不进 `DECIMAL(20,8)` |
 
 ---
 

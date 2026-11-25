@@ -8,20 +8,32 @@
 - 客户侧与 AI 模块不导入毛利分析的仓储、schema 与接口模块（`ast` 扫描 import）；
 - 客户的四个导出列常量不含禁用名。
 
+Rebill（AIH-TASK-256，设计闸门 #830 v12 §3 INV-7、§6）：四个新路由与改动后的用量事件详情在管理端，
+明细的 `corrected_estimated_provider_cost_myr` 只出现在它们的响应里、不出现在任何门户路由；
+客户侧不导入 Rebill 的模块；经接口确认的一次 Rebill，账本行 metadata 只有 Rebill id 与事件数
+（这一条连库，SQLite 与真 MySQL 各一遍；MySQL 那一半在 `BILLING_TEST_DATABASE_URL` 未设置时
+skip —— 不要把 skipped 读成 passed，CI 设了它）。
+
 另有两条自检：把禁用名注入假 schema / 假模块时，同一个检查函数报出它（防止守卫空转）。
 """
 
 from __future__ import annotations
 
 import ast
+import datetime as dt
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from rebill_world import A1, R_LOW, A, api_factory, build_world, rebill_api
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.main import create_app
+from app.models.wallet import ReferenceType, WalletTransaction
+from app.repositories.wallet import FORBIDDEN_METADATA_KEYS
 from app.schemas.customer_conversations import CONVERSATION_EXPORT_COLUMNS
 from app.schemas.customer_usage import USAGE_EXPORT_COLUMNS, USAGE_SUMMARY_EXPORT_COLUMNS
 from app.schemas.customer_wallet import WALLET_EXPORT_COLUMNS
@@ -61,9 +73,21 @@ FORBIDDEN: Final = frozenset(
         "reconciliation_coverage",
         "unallocated_reconciled_months",
         "unallocated_reconciled_cost_myr",
+        # Rebill 明细按更正价格版本算出的估算成本（AIH-TASK-256，设计闸门 #830 v12 §3 INV-7、§6）。
+        "corrected_estimated_provider_cost_myr",
     }
 )
 ADMIN_PREFIX: Final = "/api/v1/admin/"
+# Rebill 的四个管理端路由与带更正历史的用量事件详情（AIH-TASK-256）。
+REBILL_ROUTES: Final = (
+    ("post", "/api/v1/admin/rebills/preview"),
+    ("post", "/api/v1/admin/rebills"),
+    ("get", "/api/v1/admin/rebills"),
+    ("get", "/api/v1/admin/rebills/{rebill_id}"),
+)
+USAGE_EVENT_DETAIL: Final = "/api/v1/admin/usage-events/{usage_event_id}"
+# Rebill 账本行 metadata 只许有这两个键（设计 §2「服务」第 5 步）。
+REBILL_METADATA_KEYS: Final = frozenset({"rebill", "events"})
 TOPUP_PATH: Final = "/api/v1/customer/topups"
 ANALYTICS_MODULES: Final = (
     "app.repositories.usage_analytics",
@@ -74,6 +98,12 @@ ANALYTICS_MODULES: Final = (
     "app.repositories.provider_cost_reconciliations",
     "app.schemas.provider_cost_reconciliations",
     "app.api.admin_provider_cost_reconciliations",
+    # Rebill（AIH-TASK-256，设计闸门 #830 v12 §6：客户门户没有任何 Rebill 接口）。
+    "app.services.usage_rebill",
+    "app.services.rebill_pricing",
+    "app.repositories.usage_rebills",
+    "app.schemas.usage_rebills",
+    "app.api.admin_rebills",
 )
 ROOT: Final = Path(__file__).resolve().parents[2]
 CUSTOMER_MODULES: Final = (
@@ -191,6 +221,81 @@ def test_customer_side_responses_carry_no_internal_cost_field(openapi) -> None:
     # 扫描确实读到了属性（没有空转）。
     assert scanned[TOPUP_PATH]
     assert forbidden_in_responses(openapi) == {}
+
+
+def response_names(openapi: dict[str, Any], method: str, path: str) -> set[str]:
+    """Property names of one operation's responses (`$ref` followed)."""
+    components = openapi.get("components", {}).get("schemas", {})
+    operation = openapi["paths"][path][method]
+    return set(_property_names(operation.get("responses", {}), components, set()))
+
+
+def test_rebill_cost_fields_are_on_the_admin_routes_only(openapi) -> None:
+    """AIH-TASK-256：明细的估算成本只在四个管理端 Rebill 路由里；门户路由一个都没有。"""
+    # 列表项没有明细；预览、确认与详情都带明细。
+    with_lines = {route for route in REBILL_ROUTES if route != ("get", "/api/v1/admin/rebills")}
+    for method, path in REBILL_ROUTES:
+        assert path.startswith(ADMIN_PREFIX)
+        names = response_names(openapi, method, path)
+        # 扫描确实读到了属性（没有空转）。
+        assert names, path
+        if (method, path) in with_lines:
+            assert "corrected_estimated_provider_cost_myr" in names, (method, path)
+    # 改动后的用量事件详情：更正历史与当前有效计费在管理端，不在任何门户路由里。
+    detail = response_names(openapi, "get", USAGE_EVENT_DETAIL)
+    assert {"effective_charge", "rebills", "estimated_provider_cost_myr"} <= detail
+    for path, names in non_admin_response_names(openapi).items():
+        assert "rebill" not in path, path
+        assert "corrected_estimated_provider_cost_myr" not in names, path
+    assert forbidden_in_responses(openapi) == {}
+
+
+@pytest.fixture(params=["sqlite", "mysql"])
+def rebill_api_db(request, monkeypatch) -> Iterator[sessionmaker[Session]]:
+    yield from api_factory(request.param, monkeypatch)
+
+
+def test_a_rebill_ledger_row_carries_no_cost_in_its_metadata(tmp_path, rebill_api_db) -> None:
+    """设计 §3 INV-7：账本 metadata 只有 Rebill id 与事件数；门户只看得到账本行。"""
+    world = build_world(rebill_api_db)
+    api = rebill_api(tmp_path, world)
+    world.add_event(project=A1, occurred_at=dt.datetime(2026, 11, 10))
+    body = {
+        "customer_id": world.customers[A].public_id,
+        "selection": {
+            "occurred_from": "2026-11-10T00:00:00Z",
+            "occurred_to": "2026-11-20T00:00:00Z",
+        },
+        "corrective_pricing_rule_id": world.public_rule(R_LOW),
+    }
+    preview = api.client.post("/api/v1/admin/rebills/preview", json=body, headers=api.admin)
+    assert preview.status_code == 200, preview.text
+    # 管理端明细确实带估算成本：下面的断言不是因为字段不存在才成立。
+    assert "corrected_estimated_provider_cost_myr" in preview.json()["data"]["lines"][0]
+    confirmed = api.client.post(
+        "/api/v1/admin/rebills",
+        json={
+            **body,
+            "preview_token": preview.json()["data"]["preview_token"],
+            "reason": "Fictional price correction",
+            "idempotency_key": "00000000-0000-4000-8000-000000000001",
+        },
+        headers=api.admin,
+    )
+    assert confirmed.status_code == 201, confirmed.text
+
+    with world.factory() as session:
+        [row] = session.execute(
+            select(WalletTransaction).where(
+                WalletTransaction.reference_type == ReferenceType.REBILL
+            )
+        ).scalars()
+    metadata = row.metadata_json
+    assert isinstance(metadata, dict)
+    assert set(metadata) == REBILL_METADATA_KEYS
+    assert set(metadata) & (FORBIDDEN | FORBIDDEN_METADATA_KEYS) == set()
+    assert not any("cost" in key or "margin" in key for key in metadata)
+    assert metadata == {"rebill": confirmed.json()["data"]["id"], "events": 1}
 
 
 def test_customer_side_modules_do_not_import_margin_analytics() -> None:

@@ -9,6 +9,8 @@
   rate, the margin with `basis = estimated`, the ledger row's `public_id` and amount, a 0 MYR event
   without a ledger row, an error event without a snapshot, the claim fields of a PROCESSING event,
   the conflicts recorded for its `event_id`, 404 for an unknown id, the exact detail fields;
+- **当前有效计费与更正历史**（AIH-TASK-256）— no correction, two corrections (the last one is
+  effective, both listed by line id), null for internal metering and unbilled events;
 - **越权** — anonymous 401, CUSTOMER 403 (every admin route: test_admin_customers_api.py).
 
 No internal id, credential secret or signature appears in any response. Amounts are fictional
@@ -29,6 +31,17 @@ from decimal import Decimal
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from rebill_world import (
+    A1,
+    I1,
+    A,
+    LineSpec,
+    RebillApi,
+    RebillWorld,
+    api_factory,
+    build_world,
+    rebill_api,
+)
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -139,6 +152,9 @@ DETAIL_FIELDS = SUMMARY_FIELDS | {
     "claimed_at",
     "lease_expires_at",
     "conflicts",
+    # 当前有效计费与更正历史（AIH-TASK-256，设计闸门 #830 v12 §2「管理端接口」）。
+    "effective_charge",
+    "rebills",
 }
 SNAPSHOT_FIELDS = (
     "provider_price_version_id",
@@ -155,6 +171,7 @@ SNAPSHOT_FIELDS = (
     "gross_margin_basis",
     "wallet_transaction",
     "processed_at",
+    "effective_charge",
 )
 
 
@@ -928,6 +945,8 @@ def test_an_myr_event_has_its_snapshot_margin_and_ledger_row_without_fx(
     assert data["billable_cost"] == "0.12500000"
     assert (data["gross_margin"], data["gross_margin_basis"]) == ("0.06250000", "estimated")
     assert data["wallet_transaction"] == {"id": ledger.public_id, "amount": "-0.12500000"}
+    # 没有更正：当前有效计费就是原计费，历史为空。
+    assert (data["effective_charge"], data["rebills"]) == ("0.12500000", [])
     assert data["attempt_count"] == 1
     assert (data["claim_token"], data["claimed_at"], data["lease_expires_at"]) == (None,) * 3
     assert data["next_attempt_at"] is None
@@ -975,6 +994,7 @@ def test_a_zero_event_has_no_ledger_row(client, admin, world) -> None:
     )
     assert (data["gross_margin"], data["gross_margin_basis"]) == ("0.00000000", "estimated")
     assert data["wallet_transaction"] is None
+    assert (data["effective_charge"], data["rebills"]) == ("0.00000000", [])
 
 
 def test_internal_event_displays_reference_price_without_revenue_or_margin(
@@ -1005,6 +1025,8 @@ def test_internal_event_displays_reference_price_without_revenue_or_margin(
     assert detail_event["billable_cost"] == "0.00000000"
     assert detail_event["wallet_transaction"] is None
     assert (detail_event["gross_margin"], detail_event["gross_margin_basis"]) == (None, None)
+    # 内部计量事件不做 Rebill：没有当前有效计费。
+    assert (detail_event["effective_charge"], detail_event["rebills"]) == (None, [])
     item = client.get(LIST, headers=admin).json()["data"]["items"][0]
     assert item["reference_customer_price"] == detail_event["reference_customer_price"]
 
@@ -1121,6 +1143,102 @@ def test_no_internal_id_or_secret_appears(client, admin, world) -> None:
             "secret",
         ):
             assert f'"{name}"' not in text
+
+
+# --- the detail: effective charge and rebill history (AIH-TASK-256) -----------------------
+#
+# 设计闸门 #830 v12 §2「管理端接口」：`effective_charge` 是 eff(e)（预付已计费事件），`rebills`
+# 按明细 id 升序。世界见 tests/backend/rebill_world.py（SQLite 与真 MySQL 各一遍；MySQL 那一半在
+# `BILLING_TEST_DATABASE_URL` 未设置时 skip —— 不要把 skipped 读成 passed，CI 设了它）。默认数量
+# 计费 4.5；明细的计费额都是二进制精确的。
+
+
+@pytest.fixture(params=["sqlite", "mysql"])
+def rebill_api_db(request, monkeypatch) -> Iterator[sessionmaker[Session]]:
+    yield from api_factory(request.param, monkeypatch)
+
+
+@pytest.fixture
+def rebill_scene(tmp_path, rebill_api_db) -> tuple[RebillWorld, RebillApi]:
+    world = build_world(rebill_api_db)
+    return world, rebill_api(tmp_path, world)
+
+
+def rebill_detail(api: RebillApi, public_id: str) -> dict:
+    response = api.client.get(DETAIL.format(usage_event_id=public_id), headers=api.admin)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
+def test_an_uncorrected_event_has_its_charge_and_no_history(rebill_scene) -> None:
+    w, api = rebill_scene
+    event = w.add_event(project=A1, occurred_at=dt.datetime(2026, 11, 10))
+
+    data = rebill_detail(api, event.public_id)
+
+    assert set(data) == DETAIL_FIELDS
+    assert (data["billable_cost"], data["effective_charge"], data["rebills"]) == (
+        "4.50000000",
+        "4.50000000",
+        [],
+    )
+
+
+def test_two_corrections_make_the_last_one_effective_and_list_both(rebill_scene) -> None:
+    w, api = rebill_scene
+    event = w.add_event(project=A1, occurred_at=dt.datetime(2026, 11, 10))
+    other = w.add_event(project=A1, occurred_at=dt.datetime(2026, 11, 11))
+    down = w.add_rebill(A, [LineSpec(event, "3.25")], created_at=dt.datetime(2026, 12, 1))
+    # 另一个事件的明细不出现在这一事件的历史里。
+    w.add_rebill(A, [LineSpec(other, "5")], created_at=dt.datetime(2026, 12, 2))
+    up = w.add_rebill(A, [LineSpec(event, "4")], created_at=dt.datetime(2026, 12, 3))
+
+    data = rebill_detail(api, event.public_id)
+
+    # 事件快照不变；eff(e) = 4.5 − 1.25 + 0.75 = 4（最近一条明细的更正计费）。
+    assert data["billable_cost"] == "4.50000000"
+    assert data["effective_charge"] == "4.00000000"
+    assert data["rebills"] == [
+        {
+            "rebill_id": down.public_id,
+            "created_at": "2026-12-01T00:00:00",
+            "previous_charge": "4.50000000",
+            "corrected_charge": "3.25000000",
+            "difference": "-1.25000000",
+        },
+        {
+            "rebill_id": up.public_id,
+            "created_at": "2026-12-03T00:00:00",
+            "previous_charge": "3.25000000",
+            "corrected_charge": "4.00000000",
+            "difference": "0.75000000",
+        },
+    ]
+    assert Decimal(data["billable_cost"]) + sum(
+        (Decimal(item["difference"]) for item in data["rebills"]), Decimal(0)
+    ) == Decimal(data["effective_charge"])
+    assert rebill_detail(api, other.public_id)["effective_charge"] == "5.00000000"
+
+
+def test_an_internal_metering_event_has_no_effective_charge(rebill_scene) -> None:
+    w, api = rebill_scene
+    event = w.add_event(project=I1, occurred_at=dt.datetime(2026, 11, 10))
+
+    data = rebill_detail(api, event.public_id)
+
+    assert data["billing_mode_snapshot"] == "INTERNAL_METERED_ONLY"
+    assert (data["effective_charge"], data["rebills"]) == (None, [])
+
+
+def test_an_unbilled_event_has_no_effective_charge(rebill_scene) -> None:
+    w, api = rebill_scene
+    event = w.add_event(
+        project=A1, occurred_at=dt.datetime(2026, 11, 10), status=UsageEventStatus.RECEIVED
+    )
+
+    data = rebill_detail(api, event.public_id)
+
+    assert (data["effective_charge"], data["rebills"]) == (None, [])
 
 
 # --- authorization -----------------------------------------------------------------------

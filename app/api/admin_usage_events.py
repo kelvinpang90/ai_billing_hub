@@ -26,6 +26,7 @@ from app.api.auth import request_context, require_admin, require_session_factory
 from app.core.logging import current_request_id
 from app.models.usage import UsageEventStatus
 from app.repositories import usage_events as event_repository
+from app.repositories import usage_rebills as rebill_repository
 from app.schemas.customers import DEFAULT_PAGE_SIZE, MAX_PAGE, MAX_PAGE_SIZE, Page
 from app.schemas.envelope import ApiResponse, success
 from app.schemas.usage_events import (
@@ -102,13 +103,16 @@ def list_usage_events(
 
 @router.get(_EVENTS + "/{usage_event_id}", response_model=ApiResponse[UsageEventDetail])
 def get_usage_event(request: Request, usage_event_id: str) -> ApiResponse[UsageEventDetail]:
-    """Snapshots, version and rule ids, cost, billable amount, margin, ledger row, conflicts."""
+    """Snapshots, version and rule ids, cost, billable amount, margin, ledger row, conflicts,
+    the effective charge and the rebill history."""
     require_admin(request)
     with require_session_factory(request)() as session:
         found = event_repository.get_event_detail(session, usage_event_id)
         if found is None:
             raise usage_requeue.UsageEventNotFound
-        detail = usage_event_detail(found)
+        # 当前有效计费与更正历史（设计闸门 #830 v12 §2「管理端接口」）。
+        history = rebill_repository.event_history(session, found.listed.event.id)
+        detail = usage_event_detail(found, history)
     return success(detail, request_id=current_request_id())
 
 
