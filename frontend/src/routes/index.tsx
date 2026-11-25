@@ -5,7 +5,7 @@
  * 管理端 AI 目录（AIH-TASK-035）、管理端供应商价格与汇率（AIH-TASK-036）、管理端定价规则与试算
  * （AIH-TASK-037）、管理端用量事件与重新入队（AIH-TASK-038）、管理端用量分析（AIH-TASK-074）、管理端钱包核对（AIH-TASK-135）、
  * 管理端月度对账单（AIH-TASK-161）、管理端支付列表（AIH-TASK-184）与详情（AIH-TASK-185）、管理端支付设置（AIH-TASK-194）、
- * 管理端供应商成本对账（AIH-TASK-246）、
+ * 管理端供应商成本对账（AIH-TASK-246）、管理端 Rebill 列表与详情（AIH-TASK-257）、
  * 客户门户首页（AIH-TASK-096，管理端与门户按 `RequireRole` 分流）、客户门户钱包页（AIH-TASK-100）、客户门户用量页
  * （AIH-TASK-105）、客户门户会话页（AIH-TASK-123）、客户门户对账单页（AIH-TASK-162）、客户门户通知页（AIH-TASK-128）、
  * 客户门户充值页（AIH-TASK-192）、客户门户支付历史页与付款结果页（AIH-TASK-193）与兜底页。
@@ -108,6 +108,12 @@ const UsageEventDetailPage = lazy(() =>
 const UsageAnalyticsPage = lazy(() =>
   import("../features/usage/UsageAnalyticsPage").then((m) => ({ default: m.UsageAnalyticsPage })),
 );
+const RebillsPage = lazy(() =>
+  import("../features/rebills/RebillsPage").then((m) => ({ default: m.RebillsPage })),
+);
+const RebillDetailPage = lazy(() =>
+  import("../features/rebills/RebillDetailPage").then((m) => ({ default: m.RebillDetailPage })),
+);
 const WalletReconciliationPage = lazy(() =>
   import("../features/wallet/WalletReconciliationPage").then((m) => ({
     default: m.WalletReconciliationPage,
@@ -209,6 +215,8 @@ export function AppRoutes() {
                 <Route path={ROUTES.usageEvents} element={<UsageEventsPage />} />
                 <Route path={ROUTES.usageEventDetail} element={<UsageEventDetailPage />} />
                 <Route path={ROUTES.usageAnalytics} element={<UsageAnalyticsPage />} />
+                <Route path={ROUTES.rebills} element={<RebillsPage />} />
+                <Route path={ROUTES.rebillDetail} element={<RebillDetailPage />} />
                 <Route path={ROUTES.walletReconciliation} element={<WalletReconciliationPage />} />
                 <Route path={ROUTES.statements} element={<StatementsPage />} />
                 <Route path={ROUTES.payments} element={<PaymentsPage />} />

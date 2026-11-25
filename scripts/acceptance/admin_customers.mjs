@@ -66,6 +66,9 @@
  * 之后、不自己导航，核对合计块里「Provider cost (reconciled where available)」「Gross profit on provider cost」两项与页面
  * 自己发出的分析 GET 的响应一致（设计闸门 #756 v2 §2「页面」）；check_usage_analytics、check_analytics_totals、
  * check_analytics_export 与 check_analytics_xlsx 不变（新的两项 th 文字与「Gross profit」不全等，不影响按文字全等找项）。
+ * AIH-TASK-257 加了管理端 Rebill 列表页的两个只读步骤（open_rebills 排在 login 之后、经顶栏自己进 Rebill 列表页；
+ * check_rebills_list 排在 open_rebills 之后、不自己导航，核对表格的行数、每行「Events」与「Ledger」的文字），都不点任何
+ * 行与按钮、不翻页、不筛选（设计闸门 #830 v12 §2「管理端页面」）。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -179,7 +182,8 @@
  *   （href 为 /catalog/meter-types，不在顶栏里）、顶栏「Provider prices」（href 为 /pricing/provider-prices）、
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Provider costs」（href 为 /provider-costs）、顶栏「Pricing rules」
  *   （href 为 /pricing/rules）、顶栏
- *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏
+ *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏「Rebills」
+ *   （href 为 /rebills）、顶栏
  *   「Usage analytics」（href 为 /usage-analytics）、顶栏「Wallet reconciliation」（href 为 /wallet-reconciliation）、顶栏
  *   「Monthly statements」（href 为 /statements）、顶栏「Payments」（href 为 /payments）、顶栏「Payment settings」
  *   （href 为 /payment-settings）、夹具客户详情里
@@ -233,6 +237,10 @@
  *   链接（check_provider_cost_months 连它也不点）：不点「Reconcile」「Correct」（不打开录入表单，更不点「Preview」「Confirm」：
  *   确认会写一行不可变的对账记录与审计）、不点月份表格的任何一行或展开按钮（不打开详情）、不动供应商下拉，不点任何别的
  *   按钮与链接，不填也不提交任何表单。
+ *   Rebill 列表页（open_rebills、check_rebills_list）只点顶栏「Rebills」（href 为 /rebills）这一个链接（check_rebills_list
+ *   连它也不点）：不点列表的任何一行（不跳到详情页）、不点「Previous」「Next」（不翻页）、不填「Customer ID」、不点「Apply
+ *   filter」「Clear filter」「Try again」或任何别的按钮与链接，不提交任何表单（列表页本身没有写操作入口；本脚本不请求预览，
+ *   更不确认：确认会写一行账本、明细与审计）。
  *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
@@ -484,6 +492,21 @@
  *                   （providerCosts.status.reconciled / notReconciled）；items 为空时没有数据行、表格的空状态文字恰为「No completed
  *                   months to reconcile yet.」（providerCosts.months.empty），同样算通过。不点「Reconcile」「Correct」或任何按钮、
  *                   不打开表单、不点行、不提交任何表单。报到前把月份一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   open_rebills
+ *                   要排在 login 之后（本次运行没跑过 login 就 assertion_failed）。点顶栏「Rebills」（en.json 的 nav.rebills，
+ *                   href 为 paths.ts 的 rebills，即 /rebills）进 Rebill 列表页；页面落定：地址是 /rebills，列表一块（role=region、
+ *                   aria-label 为「Rebill list」，rebills.list.title）不再显示 rebills.list.loading，且不是加载失败（任何错误提示，
+ *                   page_error）、无权限（rebills.forbidden，assertion_failed）或路由兜底页；列表表格（表头有「Events」「Ledger」）
+ *                   已经画出来（空列表合法）。不点任何按钮、不点行、不翻页、不填客户筛选
+ *   check_rebills_list
+ *                   本次运行跑过 open_rebills 才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认 open_rebills 打开的
+ *                   那一页（落定的判定与失败码同 open_rebills）。后端值取页面在点顶栏之后自己发出的 GET /api/v1/admin/rebills 的
+ *                   响应体（被动观察，不自己发请求、不拦截；取成功读完的最近一次；详情 …/rebills/{rebill_id} 与预览不算），不是成功
+ *                   信封、没有 items 数组、某一项的 event_count 不是非负整数或 ledger_type 不是 REBILL_CREDIT / REBILL_DEBIT，都是
+ *                   assertion_failed。列表表格里带 data-row-key 的数据行数等于 items 的条数，按顺序每一行「Events」列的文字等于该项的
+ *                   event_count、「Ledger」列的文字按 ledger_type 恰为「Credit」或「Debit」（rebills.ledger.credit / debit）；items
+ *                   为空时没有数据行、表格的空状态文字恰为「No rebills yet.」（rebills.list.empty），同样算通过。不点行、不点任何
+ *                   按钮、不翻页、不提交任何表单。报到前把列表一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
  *   check_account_status
  *                   在夹具客户详情（open_fixture 打开的那一页）上，后端值取详情页自己发出的
  *                   GET /api/v1/admin/customers/{customer_id} 的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次
@@ -966,6 +989,15 @@ const TEXT = {
   providerCostsStatus: "Status", // providerCosts.field.status
   // 月份状态 → 「Status」列的文案（providerCosts.status.reconciled / notReconciled）。
   providerCostsStatusText: { RECONCILED: "Reconciled", NOT_RECONCILED: "Not reconciled" },
+  navRebills: "Rebills", // nav.rebills —— 顶栏的 Rebill 项
+  rebillsListTitle: "Rebill list", // rebills.list.title —— 列表一块的 aria-label
+  rebillsForbidden: "Only administrators can view rebills.", // rebills.forbidden
+  rebillsLoading: "Loading rebills…", // rebills.list.loading
+  rebillsEmpty: "No rebills yet.", // rebills.list.empty —— 未按客户筛时表格的空状态文字
+  rebillsEvents: "Events", // rebills.field.events —— 列表表格的列头
+  rebillsLedger: "Ledger", // rebills.field.ledger
+  // 账本类型 → 「Ledger」列的文案（rebills.ledger.credit / debit）。
+  rebillsLedgerText: { REBILL_CREDIT: "Credit", REBILL_DEBIT: "Debit" },
   customersForbidden: "Only administrators can manage customers.", // customers.forbidden —— 客户区块（含签名密钥面板）的无权限
   projectName: "Project name", // customers.projects.field.name —— 项目表格的列头
   projectDescription: "Description", // customers.projects.field.description
@@ -1181,6 +1213,7 @@ const TEXT = {
   paymentsPath: "/payments",
   paymentSettingsPath: "/payment-settings",
   providerCostsPath: "/provider-costs",
+  rebillsPath: "/rebills",
   portalHomePath: "/portal",
   portalWalletPath: "/portal/wallet",
   portalUsagePath: "/portal/usage",
@@ -1292,6 +1325,12 @@ const PAYMENT_SETTINGS_API = /^\/api\/v1\/admin\/payment-settings$/;
 const PROVIDER_COST_MONTHS_API = /^\/api\/v1\/admin\/provider-cost-reconciliations\/months$/;
 /** 月份总览里 status 的取值（docs/api.md「管理端供应商成本对账」）。 */
 const PROVIDER_COST_MONTH_STATUSES = new Set(["RECONCILED", "NOT_RECONCILED"]);
+
+/**
+ * Rebill 列表接口的路径（frontend/src/api/adminRebills.ts 的 REBILLS_URL）。只记 GET；详情（…/rebills/{rebill_id}）与预览
+ * （…/rebills/preview）不匹配：本脚本不点行、不预览、不确认。
+ */
+const REBILLS_API = /^\/api\/v1\/admin\/rebills$/;
 
 /** 钱包流水接口的路径（frontend/src/api/walletTransactions.ts 的 listWalletTransactions）。 */
 const WALLET_TRANSACTIONS_API = /^\/api\/v1\/admin\/customers\/([^/]+)\/wallet\/transactions$/;
@@ -1830,6 +1869,8 @@ const network = {
   paymentSettings: new Map(),
   /** 供应商成本月份总览接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
   providerCostMonths: new Map(),
+  /** Rebill 列表接口（只记 GET）：requestId → { status, finished, failed, seq }。查询串本身不保存。 */
+  rebills: new Map(),
   /** 钱包流水接口：requestId → { customerId, newest, status, finished, failed, seq }。查询串本身不保存。 */
   walletTransactions: new Map(),
   /** 门户账号接口（只记 GET）：requestId → { customerId, status, finished, failed, seq }。 */
@@ -1877,6 +1918,7 @@ function trackedRequest(requestId) {
     network.payments.get(requestId) ??
     network.paymentSettings.get(requestId) ??
     network.providerCostMonths.get(requestId) ??
+    network.rebills.get(requestId) ??
     network.walletTransactions.get(requestId) ??
     network.portalAccounts.get(requestId) ??
     network.lowBalanceThresholds.get(requestId) ??
@@ -2265,6 +2307,19 @@ function isProviderCostMonths(url) {
   }
 }
 
+/** 是不是 Rebill 列表接口（同源 https、路径恰好是这个接口，查询串不看、不保存）。 */
+function isRebillsList(url) {
+  if (typeof url !== "string") {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === network.host && REBILLS_API.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 是不是项目列表接口（同源 https）：是的话回路径里的客户 id 与「查询串是不是第 1 页」，不是回 null。
  * 只留这两样，不保存 URL。
@@ -2497,6 +2552,14 @@ function observeNetwork(sessionId) {
         }
         if (isProviderCostMonths(params.request?.url) && params.request?.method === "GET") {
           network.providerCostMonths.set(params.requestId, {
+            status: null,
+            finished: false,
+            failed: false,
+            seq: ++network.seq,
+          });
+        }
+        if (isRebillsList(params.request?.url) && params.request?.method === "GET") {
+          network.rebills.set(params.requestId, {
             status: null,
             finished: false,
             failed: false,
@@ -2869,6 +2932,23 @@ function latestPaymentSettingsResponse(afterSeq) {
 function latestProviderCostMonthsResponse(afterSeq) {
   let best = null;
   for (const [requestId, request] of network.providerCostMonths) {
+    if (request.seq <= afterSeq) {
+      continue;
+    }
+    if (!request.finished && !request.failed) {
+      return null;
+    }
+    if (request.status === 200 && request.finished && !request.failed && (best === null || request.seq > best.seq)) {
+      best = { requestId, seq: request.seq };
+    }
+  }
+  return best;
+}
+
+/** afterSeq 之后发出、成功读完的 Rebill 列表请求里最近的一次；还有在路上的就回 null，等它落定。 */
+function latestRebillsResponse(afterSeq) {
+  let best = null;
+  for (const [requestId, request] of network.rebills) {
     if (request.seq <= afterSeq) {
       continue;
     }
@@ -4481,6 +4561,99 @@ function providerCostsInView(lib, T) {
   let region = null;
   for (const el of document.querySelectorAll('[role="region"]')) {
     if (el.getAttribute("aria-label") === T.providerCostsMonthsTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const rect = region.getBoundingClientRect();
+  const topVisible = rect.top >= 0 && rect.top < window.innerHeight;
+  return rect.height > 0 && topVisible && (rect.bottom <= window.innerHeight || rect.height > window.innerHeight);
+}
+
+/**
+ * Rebill 列表页的状态：列表一块（role=region、aria-label 为「Rebill list」）里的表格（表头有「Events」「Ledger」）带
+ * data-row-key 的数据行，按显示顺序逐行取「Events」「Ledger」两列的文字；没有数据行时取空状态那一行（只有一格）的文字。
+ * 加载失败是 role=alert（无权限也是 alert，但按文案先认成无权限）。只读，不点行、不碰任何按钮。
+ */
+function probeRebills(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.rebillsListTitle) {
+      region = el;
+      break;
+    }
+  }
+  let table = false;
+  let emptyText = null;
+  const rows = [];
+  if (region !== null) {
+    for (const el of region.querySelectorAll("table")) {
+      const heads = [...el.querySelectorAll(":scope > thead > tr > th")].map((th) => lib.norm(th.textContent));
+      const events = heads.indexOf(T.rebillsEvents);
+      const ledger = heads.indexOf(T.rebillsLedger);
+      if (events < 0 || ledger < 0) {
+        continue;
+      }
+      table = true;
+      for (const tr of el.querySelectorAll(":scope > tbody > tr")) {
+        if (tr.getAttribute("aria-hidden") === "true") {
+          continue;
+        }
+        const cells = tr.querySelectorAll(":scope > td");
+        if (tr.hasAttribute("data-row-key")) {
+          rows.push(
+            cells.length === heads.length
+              ? { events: lib.norm(cells[events].textContent), ledger: lib.norm(cells[ledger].textContent) }
+              : { events: null, ledger: null },
+          );
+        } else if (cells.length === 1) {
+          emptyText = lib.norm(cells[0].textContent);
+        }
+      }
+      break;
+    }
+  }
+  const forbidden = lib.leaf(T.rebillsForbidden) !== null;
+  return {
+    ...lib.common(T),
+    region: region !== null,
+    busy: document.querySelector('[aria-busy="true"]') !== null || lib.leaf(T.rebillsLoading) !== null,
+    forbidden,
+    failed: !forbidden && lib.alert(),
+    empty: table && rows.length === 0 && emptyText === T.rebillsEmpty,
+    table,
+    rows,
+  };
+}
+
+/**
+ * 把 Rebill 列表一块滚进视口：放得下时居中，放不下时顶端对齐视口顶端。只滚动，不点任何东西。
+ * 页面函数逐个序列化进页面执行，不能引用本文件的其他函数，所以找 region 的几行在这里与下一个函数里各写一遍。
+ */
+function scrollRebillsIntoView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.rebillsListTitle) {
+      region = el;
+      break;
+    }
+  }
+  if (region === null) {
+    return false;
+  }
+  const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
+  region.scrollIntoView({ block, inline: "nearest" });
+  return true;
+}
+
+/** 放得下视口的一块要整块在视口内；放不下的只要求顶端在视口内。 */
+function rebillsInView(lib, T) {
+  let region = null;
+  for (const el of document.querySelectorAll('[role="region"]')) {
+    if (el.getAttribute("aria-label") === T.rebillsListTitle) {
       region = el;
       break;
     }
@@ -8192,6 +8365,104 @@ async function stepCheckProviderCostMonths(ctx) {
   }
 }
 
+async function stepOpenRebills(ctx) {
+  if (ctx.loginCompletedAt === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.rebillsPath;
+  // 点顶栏之前的序号：check_rebills_list 只认在这之后页面自己发出的列表请求。
+  const beforeClick = network.seq;
+  const link = { text: TEXT.navRebills, href: path };
+  const clicked = await waitFor(() => evaluate(clickNavLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  // 落定的判断与失败码同钱包核对页。还没有人做过 Rebill 时空列表合法。
+  const opened = await waitFor(() => evaluate(probeRebills, TEXT), catalogSettled(path), ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(opened.value, path, true);
+  ctx.rebillsAfterSeq = beforeClick;
+}
+
+async function stepCheckRebillsList(ctx) {
+  // 不自己导航：只认 open_rebills 打开的那一页，以及点顶栏之后页面自己发出的请求。
+  if (ctx.rebillsAfterSeq === null) {
+    throw fail("assertion_failed");
+  }
+  const path = TEXT.rebillsPath;
+  const ready = await waitFor(() => evaluate(probeRebills, TEXT), catalogSettled(path), ELEMENT_WAIT_MS);
+  if (!ready.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(ready.value, path, true);
+
+  // 后端值：页面自己发出的那次列表 GET 的响应体。有还在路上的就等它落定。
+  const observed = await waitFor(
+    async () => latestRebillsResponse(ctx.rebillsAfterSeq),
+    (v) => v !== null,
+    RESPONSE_WAIT_MS,
+  );
+  if (!observed.ok) {
+    throw fail("assertion_failed");
+  }
+  let expected;
+  try {
+    const { body, base64Encoded } = await cdp.send(
+      "Network.getResponseBody",
+      { requestId: observed.value.requestId },
+      sessionId,
+    );
+    const envelope = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+    const items = envelope?.success === true ? envelope.data?.items : null;
+    if (!Array.isArray(items)) {
+      throw fail("assertion_failed");
+    }
+    expected = items.map((item) => {
+      const count = item?.event_count;
+      const ledger = Object.hasOwn(TEXT.rebillsLedgerText, item?.ledger_type)
+        ? TEXT.rebillsLedgerText[item.ledger_type]
+        : null;
+      if (!Number.isInteger(count) || count < 0 || ledger === null) {
+        throw fail("assertion_failed");
+      }
+      return { events: String(count), ledger };
+    });
+  } catch {
+    // 读不到、不是 JSON、不是成功信封、没有 items、事件数不是非负整数或账本类型认不出：都算没观察到可比的后端值。
+    throw fail("assertion_failed");
+  }
+
+  // 表格显示的就是这一份响应：数据行数与 items 条数一致，按顺序每行的事件数与账本类型文字一致；items 为空时是空状态文字。
+  const shown = await waitFor(
+    () => evaluate(probeRebills, TEXT),
+    (s) =>
+      s.path === path &&
+      !s.busy &&
+      !s.failed &&
+      !s.forbidden &&
+      s.table &&
+      (expected.length === 0
+        ? s.empty
+        : s.rows.length === expected.length &&
+          s.rows.every((row, index) => row.events === expected[index].events && row.ledger === expected[index].ledger)),
+    ELEMENT_WAIT_MS,
+  );
+  if (!shown.ok) {
+    throw fail(shown.value !== null && shown.value.table ? "assertion_failed" : "element_missing");
+  }
+
+  // Worker 在报到后截图：先把列表一块滚进视口。只滚动，不点任何行或按钮。
+  if ((await evaluate(scrollRebillsIntoView, TEXT)) !== true) {
+    throw fail("element_missing");
+  }
+  const visible = await waitFor(() => evaluate(rebillsInView, TEXT), (v) => v === true, SCROLL_WAIT_MS);
+  if (!visible.ok) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckWebhookSigning(ctx) {
   if (ctx.customerId === null || ctx.fixture === null) {
     throw fail("assertion_failed");
@@ -10905,6 +11176,8 @@ const STEPS = {
   open_payment_settings: stepOpenPaymentSettings,
   open_provider_costs: stepOpenProviderCosts,
   check_provider_cost_months: stepCheckProviderCostMonths,
+  open_rebills: stepOpenRebills,
+  check_rebills_list: stepCheckRebillsList,
   check_account_status: stepCheckAccountStatus,
   check_account_closure: stepCheckAccountClosure,
   check_wallet_transactions: stepCheckWalletTransactions,
@@ -10989,6 +11262,11 @@ async function main() {
      * （check_provider_cost_months 这时 assertion_failed）。
      */
     providerCostsAfterSeq: null,
+    /**
+     * open_rebills 点顶栏之前的网络序号（页面落定之后才写入）；本次运行没跑过它、或它没成功时为 null
+     * （check_rebills_list 这时 assertion_failed）。
+     */
+    rebillsAfterSeq: null,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */
     portalUsageChecked: false,
     /** check_portal_usage_export 成功跑完后为 true：check_portal_monthly_export 只在这之后、停在用量页上跑。 */
