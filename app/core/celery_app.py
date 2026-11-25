@@ -39,6 +39,7 @@ TASK_MODULES = [
     "app.tasks.payment_events",
     "app.tasks.payment_reconcile",
     "app.tasks.receipts",
+    "app.tasks.retention",
 ]
 
 # Outbox 的周期恢复（spec §25、§98.1；Invariant 14）。
@@ -106,6 +107,14 @@ PAYMENT_RECONCILE_EXPIRES_MARGIN_SECONDS = 1
 # 1 秒。本批上线前的 `PAID` 与开具检查曾经不过的支付只靠它补开收据（INV-14）；不看开关。
 RECEIPT_SWEEP_SECONDS = 300.0
 RECEIPT_SWEEP_EXPIRES_SECONDS = RECEIPT_SWEEP_SECONDS - 1
+
+# 数据留存清理（设计闸门 #833 v7 §2「任务与配置」，AIH-TASK-264）：每天 20:17 UTC = 马来西亚
+# 04:17。排在 03:17 的全量备份与 03:47 的日志外送之后：当天的备份先拿到清理前的全部行（删除不可
+# 恢复，只有备份里还有），清理也不与备份的长一致读、两者的磁盘与网络 I/O 挤在同一时段。
+# `expires = 3600`：beat 停摆后再起来，晚了一小时以上的那次不再补发，规则可重放，次日照常
+# （INV-14）；三项开关全 `off`（缺省）时每一轮直接返回。
+RETENTION_PURGE_SCHEDULE = crontab(minute=17, hour=20)
+RETENTION_PURGE_EXPIRES_SECONDS = 3600
 
 
 class RedisNotConfigured(RuntimeError):
@@ -221,6 +230,11 @@ def create_celery_app(settings: Settings) -> Celery:
                 "task": "app.tasks.receipts.issue_missing",
                 "schedule": RECEIPT_SWEEP_SECONDS,
                 "options": {"expires": RECEIPT_SWEEP_EXPIRES_SECONDS},
+            },
+            "retention-purge": {
+                "task": "app.tasks.retention.purge",
+                "schedule": RETENTION_PURGE_SCHEDULE,
+                "options": {"expires": RETENTION_PURGE_EXPIRES_SECONDS},
             },
         },
     )

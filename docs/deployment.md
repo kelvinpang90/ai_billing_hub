@@ -265,6 +265,26 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 
 ---
 
+## 数据留存清理配置（设计闸门 #833 v7，AIH-TASK-264）
+
+依据：[AIH-TASK-263-retention-purge.md](design/AIH-TASK-263-retention-purge.md) §2「任务与配置」、§8「上线顺序」。
+Beat 条目 `retention-purge` 每天 20:17 UTC（马来西亚 04:17，排在 03:17 的全量备份与 03:47 的日志外送之后）跑一轮，
+`expires` 3600 秒；MySQL 命名锁保证同一时刻只有一个实例在跑。保留期（30 天）是代码常量，不是配置。
+
+配置均以 `BILLING_` 开头（`app/core/config.py`），启动时由 `Settings` 校验，取值不合法时 api、worker、beat 都起不来：
+
+| 配置 | 缺省 | 约束与说明 |
+| --- | --- | --- |
+| `BILLING_RETENTION_REFRESH_TOKENS_MODE` | `off` | `off` / `count` / `delete`；`refresh_tokens` 按家族清理（家族里所有行都过期满 30 天）。`off` 不碰这张表，`count` 只数不删、写一行 INFO 日志，`delete` 真删并按批写审计 |
+| `BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE` | `off` | `off` / `count` / `delete`；`password_reset_tokens`（含邀请）过期满 30 天的行 |
+| `BILLING_RETENTION_RECOVERY_CODES_MODE` | `off` | `off` / `count` / `delete`；用掉或吊销满 30 天的 `recovery_codes` |
+| `BILLING_RETENTION_MAX_ROWS_PER_ITEM` | `50000` | 1000–1000000；每项每轮最多删这么多行（每批最多 1000 行一个短事务），余下的下一轮继续 |
+
+三项缺省 `off`，合并即部署后什么都不发生。⚠️ **每项先设为 `count` 跑一轮、看日志里的行数合理后再改为 `delete`**（见 [runbook.md](runbook.md)）；
+改 `.env` 后要重建 worker 与 beat 容器才生效。
+
+---
+
 ## 3. 进程模型（T0.10 基线的直接输出）
 
 现状：`Dockerfile` 的 CMD 是 `uvicorn app.main:app`，**没有 `--workers`**，也就是单进程。
