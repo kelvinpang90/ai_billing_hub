@@ -349,6 +349,12 @@ class AuditAction(enum.StrEnum):
     # 账本行、两个更正版本与规范化的 `selection`，金额为定点字符串，没有估算成本。
     # 在 spec §66 的清单里。
     REBILL = "REBILL"
+    # AIH-TASK-263（设计闸门 #833 v7 §2「清理框架」）：写入方是 app/services/retention_purge.py
+    # 的 run_purge，每个删除批次一条，与 DELETE 同一事务；操作者为系统；
+    # `entity_type = data_retention_run`、`entity_id = 本轮 now 的 UTC 日期`。`after_state` 恰为
+    # `{item, cutoff, batch, deleted}`，不含行内容。不在 spec §66 的清单里，按 `PROJECT_CREATE`
+    # 的先例补上，记在 PR 描述里。
+    DATA_RETENTION_PURGE = "DATA_RETENTION_PURGE"
 
 
 class AuditLog(Base):
