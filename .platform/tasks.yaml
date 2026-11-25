@@ -15214,7 +15214,7 @@ tasks:
     title: 数据留存清理第二层：每日清理任务、Beat 调度、三项模式开关与每轮上限配置
     purpose: >-
       按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §2「任务与配置」：新增 app/tasks/retention.py（三项都 off 时直接返回；MySQL 命名锁 retention_purge:<库名> 防重叠；调用 run_purge），app/core/celery_app.py 登记任务模块与每天 20:17 UTC 的 Beat，app/core/config.py 加三项 off / count / delete 模式（缺省 off）与每轮上限，docs/deployment.md 的配置清单同步。.env.example 是控制面的敏感路径（名字含 .env），Worker 不能改，由管理员在本任务合并后另开小 PR 补这四个键。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-263
     acceptance_criteria:
