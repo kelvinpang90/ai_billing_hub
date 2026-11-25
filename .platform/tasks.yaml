@@ -15063,7 +15063,7 @@ tasks:
     title: Rebill 第四层：用量分析的收入与毛利按原事件维度计入更正差额
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「用量分析（AIH-TASK-258）」：app/repositories/usage_analytics.py 的 prepaid_billable_cost 改为每个事件的 billable_cost 加该事件全部更正明细 difference 之和（左连接按 usage_event_id 聚合的子查询，空为 0），分组、合计与导出随之变化；估算成本与对账后成本的分摊不变；docs/api.md 用量分析一节写明口径。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-262
     acceptance_criteria:
