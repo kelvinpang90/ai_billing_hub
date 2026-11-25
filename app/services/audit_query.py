@@ -84,6 +84,8 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         # 对账记录的 public_id：app/services/provider_cost_reconciliation.py 的确认与更正审计
         # （AIH-TASK-244）。
         "provider_cost_reconciliation",
+        # Rebill 的 public_id：app/services/usage_rebill.py 的确认审计（AIH-TASK-255）。
+        "usage_rebill",
     }
 )
 

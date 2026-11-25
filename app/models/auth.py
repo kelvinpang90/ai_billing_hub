@@ -342,6 +342,13 @@ class AuditAction(enum.StrEnum):
     # 为新行的金额、汇率版本与估算快照，金额为定点字符串，不含来源说明；`reason` 列写更正理由。
     # 不在 spec §66 的清单里，按 `PROJECT_CREATE` 的先例补上，记在 PR 描述里。
     PROVIDER_COST_RECONCILIATION_CREATE = "PROVIDER_COST_RECONCILIATION_CREATE"
+    # AIH-TASK-255（设计闸门 #830 v12 §2「服务」第 7 步）：写入方是 `confirm_rebill`
+    # （app/services/usage_rebill.py），与 REBILL_* 账本行、`usage_rebills` 与明细同一事务，每次
+    # Rebill 一条；操作者为管理员；`entity_type = usage_rebill`、`entity_id = public_id`。
+    # `before` 为 `previous_total`、`event_count`，`after` 为 `corrected_total`、`difference`、
+    # 账本行、两个更正版本与规范化的 `selection`，金额为定点字符串，没有估算成本。
+    # 在 spec §66 的清单里。
+    REBILL = "REBILL"
 
 
 class AuditLog(Base):
