@@ -82,8 +82,8 @@ from app.services.usage_billing import _quantities
 
 NOVEMBER = dt.datetime(2026, 11, 10, 3, 0, 0)
 HOUR = dt.timedelta(hours=1)
-# 默认数量按 V_BASE、汇率 4.5、R_GLOBAL ×2：0.2203125 USD → 0.99140625 MYR → 1.9828125。
-DEFAULT_CHARGE = Decimal("1.98281250")
+# 默认数量按 V_BASE、汇率 4.5、R_GLOBAL ×2：0.5 USD → 2.25 MYR → 4.5。
+DEFAULT_CHARGE = Decimal("4.50000000")
 NEW_MODULES = (
     pathlib.Path("app/services/rebill_pricing.py"),
     pathlib.Path("app/repositories/usage_rebills.py"),
@@ -195,9 +195,9 @@ def test_recompute_after_a_correction_uses_the_corrected_versions(
         row = w.event(session, charged)
         state = effective_state(session, [row])[row.id]
         lower = corrected_charge(session, row, state, None, w.rule(session, R_LOW))
-    # 0.99140625 × 1.6；差额是 8 位小数的精确值。
-    assert repr(lower.billable_cost) == repr(Decimal("1.58625000"))
-    assert lower.billable_cost - state.eff == Decimal("-0.39656250")
+    # 2.25 × 1.5；差额是 8 位小数的精确值。
+    assert repr(lower.billable_cost) == repr(Decimal("3.37500000"))
+    assert lower.billable_cost - state.eff == Decimal("-1.12500000")
     w.add_rebill(A, [LineSpec(charged, money_text(lower.billable_cost), rule=R_LOW)])
 
     with w.factory() as session:
@@ -226,8 +226,8 @@ def test_a_zero_charge_event_can_be_rebilled_upwards(rebill_world: RebillWorld) 
         assert state.eff == 0
         check_corrections(session, [row], None, w.rule(session, R_LOW))
         result = corrected_charge(session, row, state, None, w.rule(session, R_LOW))
-    # 0.0000078125 USD × 4.5 × 1.6。
-    assert result.billable_cost == Decimal("0.00005625")
+    # 0.0000078125 USD × 4.5 × 1.5 = 0.000052734375，舍入一次。
+    assert result.billable_cost == Decimal("0.00005273")
 
 
 # --- 适用性 ----------------------------------------------------------------------------
@@ -251,7 +251,7 @@ def test_corrective_price_versions_that_do_not_apply(rebill_world: RebillWorld) 
             assert raised.value.http_status == 422
             assert first.public_id in raised.value.message
             assert second.public_id not in raised.value.message
-            assert "1.98" not in raised.value.message
+            assert "4.50" not in raised.value.message
 
 
 def test_corrective_price_versions_ignore_the_effective_period(rebill_world: RebillWorld) -> None:
@@ -322,8 +322,8 @@ def test_corrective_rules_that_apply_whatever_their_period(rebill_world: RebillW
             check_corrections(session, [row], None, w.rule(session, name))
         state = effective_state(session, [row])[row.id]
         result = corrected_charge(session, row, state, None, retired)
-    # 0.99140625 × 2.5。
-    assert result.billable_cost == Decimal("2.47851563")
+    # 2.25 × 2.5。
+    assert result.billable_cost == Decimal("5.62500000")
 
 
 def test_the_first_event_a_correction_does_not_apply_to_is_named(

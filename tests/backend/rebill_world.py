@@ -97,8 +97,11 @@ _TENANT_MODES: Final = {
 }
 _PROJECTS: Final = {A1: A, A2: A, B1: B, I1: INTERNAL}
 
-# 默认数量：按 V_BASE、汇率 4.5、R_GLOBAL ×2 算出计费额 1.98281250。
-DEFAULT_TOKENS: Final = (1000, 500, 200, 1000)
+# 默认数量：按 V_BASE 是 0.5 USD，汇率 4.5 是 2.25 MYR，R_GLOBAL ×2 算出计费额 4.50000000。
+# ⚠️ SQLite 把 Numeric 存成二进制浮点，`ck_wallet_transactions_arithmetic` 在 REAL 上算：
+# 写进账本的金额与余额都必须是二进制精确的（分母是 2 的小次幂），所以这里的数量、单价、
+# R_LOW 的倍数与用例里写给 `add_rebill` 的计费额都照这个选。
+DEFAULT_TOKENS: Final = (1000, 1000, 1000, 8000)
 ZERO_TOKENS: Final = (0, 0, 0, 0)
 _TOKEN_NAMES: Final = (
     "input_tokens",
@@ -221,7 +224,7 @@ RULES: Final = (
         True,
         MODEL_CODE,
         _MARKUP,
-        "1.6",
+        "1.5",
         None,
         "publish",
     ),

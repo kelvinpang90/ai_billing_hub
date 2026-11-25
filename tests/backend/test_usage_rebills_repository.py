@@ -260,7 +260,7 @@ def test_rebill_list_is_id_descending_with_a_cursor_and_an_optional_customer(
     a_events = [w.add_event(project=A1, occurred_at=START + n * HOUR) for n in range(3)]
     b_event = w.add_event(project=B1, occurred_at=START)
     a_first = w.add_rebill(A, [LineSpec(a_events[0], "1.00000000")])
-    a_second = w.add_rebill(A, [LineSpec(a_events[1], "3.00000000")])
+    a_second = w.add_rebill(A, [LineSpec(a_events[1], "5.00000000")])
     b_only = w.add_rebill(B, [LineSpec(b_event, "1.00000000")])
     a_third = w.add_rebill(A, [LineSpec(a_events[2], "1.00000000")])
 
@@ -311,7 +311,7 @@ def test_rebill_detail_names_every_reference_by_public_id(rebill_world: RebillWo
                 version=V_HIGH,
                 original_statement_id=statement_pk,
             ),
-            LineSpec(zero, "0.10000000", rule=R_LOW),
+            LineSpec(zero, "0.12500000", rule=R_LOW),
         ],
         corrective_rule=R_LOW,
     )
@@ -337,10 +337,10 @@ def test_rebill_detail_names_every_reference_by_public_id(rebill_world: RebillWo
     assert summary.customer_id == w.customers[A].public_id
     assert summary.created_by_email == w.admin.email
     assert summary.wallet_transaction_id == ledger.public_id
-    # (1.5 − 1.9828125) + (0.1 − 0) = −0.3828125：多扣了，补退。
-    assert summary.rebill.difference == Decimal("-0.38281250")
+    # (1.5 − 4.5) + (0.125 − 0) = −2.875：多扣了，补退。
+    assert summary.rebill.difference == Decimal("-2.87500000")
     assert summary.ledger_type is TransactionType.REBILL_CREDIT
-    assert summary.ledger_amount == Decimal("0.38281250")
+    assert summary.ledger_amount == Decimal("2.87500000")
     assert detail.corrective_pricing_rule_id == w.public_rule(R_LOW)
     assert detail.corrective_provider_price_version_id is None
 
