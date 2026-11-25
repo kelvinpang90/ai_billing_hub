@@ -86,6 +86,9 @@ PUBLIC_ENTITY_TYPES: Final = frozenset(
         "provider_cost_reconciliation",
         # Rebill 的 public_id：app/services/usage_rebill.py 的确认审计（AIH-TASK-255）。
         "usage_rebill",
+        # 本轮清理 now 的 UTC 日期 YYYY-MM-DD（不是内部 id）：app/services/retention_purge.py
+        # 的按批清理审计（AIH-TASK-263）。
+        "data_retention_run",
     }
 )
 
