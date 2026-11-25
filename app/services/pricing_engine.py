@@ -344,6 +344,13 @@ def _rule_terms(
     return RuleTerms(PricingStrategy.FIXED_RATE, None, covered)
 
 
+# 公开名（设计闸门 #830 v12 §2「更正版本的适用性」，AIH-TASK-254）：Rebill 按更正版本重算与校验
+# 适用性时复用这三个函数，与计费、`reprice_from_snapshot` 同一份实现，不复制。
+meter_components = _meter_components
+covering = _covering
+rule_terms = _rule_terms
+
+
 def resolve_charge_inputs(
     session: Session,
     *,
@@ -783,9 +790,12 @@ __all__ = [
     "ResolvedModelRef",
     "RuleTerms",
     "UnitPrice",
+    "covering",
+    "meter_components",
     "preview_charge",
     "price_event",
     "price_resolved",
     "reprice_from_snapshot",
     "resolve_charge_inputs",
+    "rule_terms",
 ]

@@ -22,6 +22,10 @@ from provider_cost_world import (
     provider_cost_sqlite,  # noqa: F401  (registers the shared fixture)
     provider_cost_world,  # noqa: F401  (registers the shared fixture)
 )
+from rebill_world import (
+    rebill_db,  # noqa: F401  (registers the shared fixture)
+    rebill_world,  # noqa: F401  (registers the shared fixture)
+)
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
