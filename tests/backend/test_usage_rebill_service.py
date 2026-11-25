@@ -249,10 +249,11 @@ def test_credit_writes_one_ledger_row_lines_and_audit_and_leaves_history_alone(
     zero = w.add_event(project=A1, occurred_at=START + 3 * HOUR, tokens=ZERO_TOKENS)
     before_events = {item.id: _row(w, UsageEvent, item.id) for item in [*events, zero]}
     before_ledger = {
-        item.id: _row(w, WalletTransaction, item.wallet_transaction_id)
+        item.wallet_transaction_id: _row(w, WalletTransaction, item.wallet_transaction_id)
         for item in events
         if item.wallet_transaction_id is not None
     }
+    assert len(before_ledger) == len(events)
     balance_before = _balance(w, A)
     request = _request(w, rule=R_LOW)
 
