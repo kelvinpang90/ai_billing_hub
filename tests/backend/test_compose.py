@@ -364,6 +364,24 @@ def test_the_credential_rotation_overlap_reaches_the_backend(compose: dict) -> N
     )
 
 
+def test_the_retention_settings_reach_backend_services(compose: dict) -> None:
+    """设计闸门 #833 §8 的上线步骤靠改 `.env` 切 off / count / delete；compose 不读 `.env`，
+    不转发就改不动（AIH-TASK-265 的 Worker run 发现的，与上面重叠期那条同一个坑）。
+    默认值必须与 `Settings` 一致。
+    """
+    env = compose["x-backend"]["environment"]
+    fields = (
+        "retention_refresh_tokens_mode",
+        "retention_password_reset_tokens_mode",
+        "retention_recovery_codes_mode",
+        "retention_max_rows_per_item",
+    )
+    for field in fields:
+        key = f"BILLING_{field.upper()}"
+        default = Settings.model_fields[field].default
+        assert str(env.get(key)) == f"${{{key}:-{default}}}"
+
+
 def test_the_auth_endpoints_are_rate_limited_at_the_edge() -> None:
     """spec §53 的 `Login attempt rate limiting`。
 
