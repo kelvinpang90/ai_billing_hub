@@ -30,6 +30,7 @@ from app.api.admin_provider_cost_reconciliations import (
     router as admin_provider_cost_reconciliations_router,
 )
 from app.api.admin_provider_prices import router as admin_provider_prices_router
+from app.api.admin_rebills import router as admin_rebills_router
 from app.api.admin_statements import router as admin_statements_router
 from app.api.admin_usage_analytics import router as admin_usage_analytics_router
 from app.api.admin_usage_events import router as admin_usage_events_router
@@ -170,6 +171,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 用量事件的重新入队（AIH-TASK-032）；查询接口以后加在同一个路由器上。
     app.include_router(admin_usage_events_router)
     app.include_router(admin_usage_analytics_router)
+    # 已计费用量的 Rebill：预览、确认、列表与详情
+    # （AIH-TASK-256，设计闸门 #830 v12 §2「管理端接口」）。
+    app.include_router(admin_rebills_router)
     # 钱包核对的只读视图（AIH-TASK-134，设计闸门 #474 v13 §2「管理端接口」）。
     app.include_router(admin_wallet_reconciliation_router)
     # 月度对账单的列表、详情与按客户补生成（AIH-TASK-159，设计闸门 #565 v6 §2「管理端接口」）。

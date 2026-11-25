@@ -27,8 +27,10 @@ MySQL 那部分需要 `BILLING_TEST_DATABASE_URL` 指向一个**可以被清空�
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import itertools
+import os
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -36,6 +38,7 @@ from typing import Any, Final
 
 import pytest
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from provider_cost_world import (
     CONTEXT,
     SETUP_AT,
@@ -51,7 +54,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from alembic import command
+from app.core.config import Settings
 from app.core.database import create_session_factory
+from app.core.tokens import issue_access_token
+from app.main import create_app
 from app.models.ai_catalog import AiModel, AiProvider, UsageMeterType
 from app.models.auth import User, UserRole, UserStatus
 from app.models.base import Base
@@ -74,6 +80,7 @@ from app.repositories.wallet import create_wallet, post_transaction
 from app.schemas.pricing_rules import RuleComponentInput
 from app.schemas.provider_prices import ComponentInput
 from app.services import ai_catalog, fx_rates, pricing_rules, provider_prices
+from app.services.auth import utc_now
 from app.services.pricing_engine import ChargeResult, ChargeSnapshot, reprice_from_snapshot
 from app.services.statements import period_containing, statement_period
 
@@ -1044,3 +1051,64 @@ def rebill_db(request, monkeypatch) -> Iterator[sessionmaker[Session]]:
 def rebill_world(rebill_db) -> RebillWorld:
     """The rebill world on SQLite and on a real MySQL."""
     return build_world(rebill_db)
+
+
+# --- 管理端接口（AIH-TASK-256） ------------------------------------------------------------
+
+
+def api_factory(param: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[sessionmaker[Session]]:
+    """The empty database for endpoint tests: shared-connection SQLite, or a real MySQL.
+
+    用例模块用它写自己的 `params=["sqlite", "mysql"]` 夹具（TestClient 在线程池里跑同步端点）。
+    """
+    if param == "mysql":
+        yield from mysql_factory(monkeypatch)
+        return
+    yield from sqlite_shared_factory()
+
+
+@dataclass
+class RebillApi:
+    """The app over the world's database, with an admin and a portal (CUSTOMER) session."""
+
+    client: TestClient
+    admin: dict[str, str]
+    customer: dict[str, str]
+
+
+def rebill_api(tmp_path: Any, world: RebillWorld) -> RebillApi:
+    """A fresh app whose session factory is the world's; tokens are issued for now."""
+    jwt, master = tmp_path / "jwt.key", tmp_path / "master.key"
+    jwt.write_text("a-test-signing-key-that-is-long-enough", encoding="utf-8")
+    master.write_text(f"1:{base64.b64encode(os.urandom(32)).decode()}\n", encoding="utf-8")
+    application = create_app(
+        Settings(jwt_secret_file=str(jwt), master_key_file=str(master), database_url="")
+    )
+    application.state.engine = world.factory.kw["bind"]
+    application.state.session_factory = world.factory
+    with world.factory() as session:
+        portal = User(
+            email=f"rebill-portal{TEST_EMAIL_DOMAIN}",
+            password_hash="not-a-real-hash",
+            role=UserRole.CUSTOMER,
+            status=UserStatus.ACTIVE,
+            created_at=SETUP_AT,
+            updated_at=SETUP_AT,
+        )
+        session.add(portal)
+        session.commit()
+        portal_id = int(portal.id)
+
+    def headers(user_id: int, role: str) -> dict[str, str]:
+        token = issue_access_token(
+            application.state.settings,
+            user_id=user_id,
+            role=role,
+            session_id="0" * 32,
+            now=utc_now(),
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    return RebillApi(
+        TestClient(application), headers(world.admin_id, "ADMIN"), headers(portal_id, "CUSTOMER")
+    )

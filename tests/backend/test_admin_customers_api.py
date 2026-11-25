@@ -132,6 +132,8 @@ PAYMENT_SETTINGS_ROUTE = "/api/v1/admin/payment-settings"
 # AIH-TASK-245 的供应商成本对账（设计闸门 #755 v1 §2「管理端接口」）。
 PROVIDER_COSTS_ROUTE = "/api/v1/admin/provider-cost-reconciliations"
 PROVIDER_COST_MONTHS_ROUTE = PROVIDER_COSTS_ROUTE + "/months"
+# AIH-TASK-256 的 Rebill（设计闸门 #830 v12 §2「管理端接口」）。
+REBILLS_ROUTE = "/api/v1/admin/rebills"
 EXPECTED_ADMIN_ROUTES = {
     ("POST", "/api/v1/admin/customers"),
     ("GET", "/api/v1/admin/customers"),
@@ -240,6 +242,11 @@ EXPECTED_ADMIN_ROUTES = {
     ("POST", PROVIDER_COSTS_ROUTE + "/preview"),
     ("POST", PROVIDER_COSTS_ROUTE),
     ("GET", PROVIDER_COSTS_ROUTE + "/{reconciliation_id}"),
+    # AIH-TASK-256 的 Rebill（设计闸门 #830 v12 §2「管理端接口」）。
+    ("POST", REBILLS_ROUTE + "/preview"),
+    ("POST", REBILLS_ROUTE),
+    ("GET", REBILLS_ROUTE),
+    ("GET", REBILLS_ROUTE + "/{rebill_id}"),
 }
 
 # AI 目录的鉴权用例预先插入的行共用这个 public_id（全零占位值；各表的 public_id 各自唯一）。
@@ -392,6 +399,19 @@ VALID_BODIES = {
         "source_document_reference": "Probe",
         "expected_event_count": 0,
         "expected_estimated_source_cost": "0",
+    },
+    # Rebill（AIH-TASK-256）：请求体合法，保证 422 不会先于 401 / 403 出现；客户与事件是全零
+    # 占位值，漏了鉴权的处理函数会走到 404 `CUSTOMER_NOT_FOUND`，过不了 401 / 403。
+    ("POST", REBILLS_ROUTE + "/preview"): {
+        "customer_id": PROBE_CATALOG_ID,
+        "selection": {"usage_event_ids": [PROBE_CATALOG_ID]},
+    },
+    ("POST", REBILLS_ROUTE): {
+        "customer_id": PROBE_CATALOG_ID,
+        "selection": {"usage_event_ids": [PROBE_CATALOG_ID]},
+        "preview_token": "0" * 64,
+        "reason": "Probe",
+        "idempotency_key": "00000000-0000-4000-8000-000000000000",
     },
 }
 
@@ -1029,6 +1049,7 @@ def test_every_admin_route_refuses_non_admins(
         "payment_id",
         "receipt_id",
         "reconciliation_id",
+        "rebill_id",
     ):
         url = url.replace("{" + name + "}", PROBE_CATALOG_ID)
     if path in (USAGE_ANALYTICS_ROUTE, USAGE_ANALYTICS_EXPORT_ROUTE):

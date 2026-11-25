@@ -12,20 +12,28 @@
 ⚠️ 时间段在鉴权**之后**解析（与审计日志的 `created_from` / `created_to` 同一个顺序与错误）：
 RFC 3339、必须带时区、整秒（与发布的 `effective_from` 同一个 `Moment`），换成不带时区的 UTC；
 `occurred_from` 必须早于 `occurred_to`。
+
+⚠️ 详情的 `effective_charge` 与 `rebills`（设计闸门 #830 v12 §2「管理端接口」，AIH-TASK-256）：
+`effective_charge` 是 `eff(e)` —— 最近一条更正明细（明细 `id` 最大）的 `corrected_charge`，没有
+明细时是 `billable_cost`；只有已计费的预付事件有值。`rebills` 是这一事件的更正历史，明细 `id`
+升序。列表项不变。
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import re
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.core.errors import AppError
-from app.models.usage import UsageEventConflict, UsageEventStatus
+from app.models.tenancy import BillingMode
+from app.models.usage import UsageEvent, UsageEventConflict, UsageEventStatus
 from app.repositories.usage_events import EventDetailRow, EventListRow
+from app.repositories.usage_rebills import EventRebillLine
 from app.schemas.customers import money_text
 from app.schemas.provider_prices import Moment
 from app.schemas.usage_ingest import FEATURE_PATTERN, MAX_FEATURE_LENGTH
@@ -124,6 +132,16 @@ class UsageEventConflictView(BaseModel):
     received_at: dt.datetime
 
 
+class UsageEventRebillView(BaseModel):
+    """这一事件的一条更正明细：所属 Rebill 的 `public_id`、时刻与三个金额。"""
+
+    rebill_id: str
+    created_at: dt.datetime
+    previous_charge: str
+    corrected_charge: str
+    difference: str
+
+
 class UsageEventDetail(UsageEventSummary):
     schema_version: str
     payload_shape: str
@@ -153,6 +171,10 @@ class UsageEventDetail(UsageEventSummary):
     claimed_at: dt.datetime | None
     lease_expires_at: dt.datetime | None
     conflicts: list[UsageEventConflictView]
+    # 当前有效计费 `eff(e)`；不是已计费的预付事件时为空。
+    effective_charge: str | None
+    # 更正历史，明细 `id` 升序；没有时 `[]`。
+    rebills: list[UsageEventRebillView]
 
 
 def _decimal_text(value: Decimal | None) -> str | None:
@@ -203,7 +225,31 @@ def _conflict_view(conflict: UsageEventConflict) -> UsageEventConflictView:
     )
 
 
-def usage_event_detail(row: EventDetailRow) -> UsageEventDetail:
+def _effective_charge(event: UsageEvent, history: Sequence[EventRebillLine]) -> str | None:
+    # eff(e)：最近一条明细的更正计费，没有明细时是原计费（设计 §2「口径」）。
+    if (
+        UsageEventStatus(event.status) is not UsageEventStatus.PROCESSED
+        or event.billing_mode_snapshot != BillingMode.PREPAID.value
+        or event.billable_cost is None
+    ):
+        return None
+    if history:
+        return money_text(history[-1].line.corrected_charge)
+    return money_text(event.billable_cost)
+
+
+def _rebill_view(item: EventRebillLine) -> UsageEventRebillView:
+    return UsageEventRebillView(
+        rebill_id=item.rebill_id,
+        created_at=item.rebill_created_at,
+        previous_charge=money_text(item.line.previous_charge),
+        corrected_charge=money_text(item.line.corrected_charge),
+        difference=money_text(item.line.difference),
+    )
+
+
+def usage_event_detail(row: EventDetailRow, history: Sequence[EventRebillLine]) -> UsageEventDetail:
+    """`history` is the event's rebill lines, line `id` ascending (`event_history`)."""
     event = row.listed.event
     margin = None
     if (
@@ -243,6 +289,8 @@ def usage_event_detail(row: EventDetailRow) -> UsageEventDetail:
             "claimed_at": event.claimed_at,
             "lease_expires_at": event.lease_expires_at,
             "conflicts": [_conflict_view(conflict) for conflict in row.conflicts],
+            "effective_charge": _effective_charge(event, history),
+            "rebills": [_rebill_view(item) for item in history],
         }
     )
 
@@ -252,6 +300,7 @@ __all__ = [
     "LedgerEntryView",
     "UsageEventConflictView",
     "UsageEventDetail",
+    "UsageEventRebillView",
     "UsageEventSummary",
     "parse_period",
     "parse_feature",
