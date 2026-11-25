@@ -14923,7 +14923,7 @@ tasks:
     title: Rebill 第六层：管理端 Rebill 列表页与详情页，侧栏加入口
     purpose: >-
       按 docs/design/AIH-TASK-253-usage-rebill.md（设计闸门 #830 已批准 v12） §2「管理端页面」中列表与详情两部分：新增 frontend/src/api/adminRebills.ts 的列表与详情封装（预览与确认的封装也在这里一并定义，供 AIH-TASK-260 使用）、frontend/src/features/rebills/RebillsPage.tsx（列表，可按客户筛选）与 RebillDetailPage.tsx（详情含全部明细），路由 /rebills 与 /rebills/:id 只对 ADMIN 注册，侧栏加 Rebills 入口；浏览器验收加两步只读步骤。新建页与用量事件详情页的改动属于 AIH-TASK-260。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-256
     acceptance:
