@@ -15268,7 +15268,7 @@ tasks:
     title: 数据留存清理收尾：运维手册补清理上线与处置，更正数据治理文档与 ADR-0017 的审计措辞
     purpose: >-
       按 docs/design/AIH-TASK-263-retention-purge.md（设计闸门 #833 已批准 v7） §8 与 §11 AIH-TASK-265：docs/runbook.md 新增「数据留存清理」一节；docs/data-governance.md 更正「刷新令牌绝对期限 12 小时」的措辞、不存在的 §6.3 引用与 §6 第 4 款；ADR-0017 第 2 条第 4 款补完为按批审计；docs/TODO.md 的「只增不减」一行注明 password_reset_tokens 那一半已由 AIH-TASK-263..264 处理。只改文档。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-264
     acceptance_criteria:
