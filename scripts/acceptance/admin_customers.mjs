@@ -69,6 +69,9 @@
  * AIH-TASK-257 加了管理端 Rebill 列表页的两个只读步骤（open_rebills 排在 login 之后、经顶栏自己进 Rebill 列表页；
  * check_rebills_list 排在 open_rebills 之后、不自己导航，核对表格的行数、每行「Events」与「Ledger」的文字），都不点任何
  * 行与按钮、不翻页、不筛选（设计闸门 #830 v12 §2「管理端页面」）。
+ * AIH-TASK-260 加了新建 Rebill 页的两个只读步骤（open_new_rebill 排在 login 之后、经顶栏进 Rebill 列表页再点页头的「New rebill」
+ * 进新建页；check_new_rebill_form 排在 open_new_rebill 之后、不自己导航，核对表单字段与 Preview 在未选客户时禁用），都不填任何
+ * 字段、不点「Preview」「Confirm」、不发任何写请求（设计闸门 #830 v12 §2「管理端页面」）；open_rebills 与 check_rebills_list 不变。
  * 文件名沿用，不改。open_catalog / check_meter_types
  * 原定随 AIH-TASK-036 跑，因视口判断缺陷（#252 已修）挪到 AIH-TASK-037 跑；这两个步骤本身没有改。
  *
@@ -183,7 +186,7 @@
  *   顶栏「Exchange rates」（href 为 /fx-rates）、顶栏「Provider costs」（href 为 /provider-costs）、顶栏「Pricing rules」
  *   （href 为 /pricing/rules）、顶栏
  *   「Pricing preview」（href 为 /pricing/preview）、顶栏「Usage events」（href 为 /usage-events）、顶栏「Rebills」
- *   （href 为 /rebills）、顶栏
+ *   （href 为 /rebills）、Rebill 列表页头部的「New rebill」（href 为 /rebills/new，不在顶栏里）、顶栏
  *   「Usage analytics」（href 为 /usage-analytics）、顶栏「Wallet reconciliation」（href 为 /wallet-reconciliation）、顶栏
  *   「Monthly statements」（href 为 /statements）、顶栏「Payments」（href 为 /payments）、顶栏「Payment settings」
  *   （href 为 /payment-settings）、夹具客户详情里
@@ -241,6 +244,10 @@
  *   连它也不点）：不点列表的任何一行（不跳到详情页）、不点「Previous」「Next」（不翻页）、不填「Customer ID」、不点「Apply
  *   filter」「Clear filter」「Try again」或任何别的按钮与链接，不提交任何表单（列表页本身没有写操作入口；本脚本不请求预览，
  *   更不确认：确认会写一行账本、明细与审计）。
+ *   新建 Rebill 页（open_new_rebill、check_new_rebill_form）只点顶栏「Rebills」（href 为 /rebills）与 Rebill 列表页头部的
+ *   「New rebill」链接（href 为 /rebills/new，不在顶栏里）这两个链接（check_new_rebill_form 连它们也不点）：不填「Customer」、
+ *   不切换「Selection」、不填两个更正版本与「Reason」、不点「Preview」（预览只读，但「不提交任何表单」一视同仁）与「Confirm」
+ *   「Retry」「Start over」或任何别的按钮与链接，不发任何写请求。
  *   登录会在服务端留下会话与
  *   登录审计，这是只读验收不可避免的，不算写数据 —— check_audit_entry 核对的正是这一条。若账号走到「首次启用
  *   2FA」那一步，那会写数据，直接 login_failed，不继续。
@@ -507,6 +514,21 @@
  *                   event_count、「Ledger」列的文字按 ledger_type 恰为「Credit」或「Debit」（rebills.ledger.credit / debit）；items
  *                   为空时没有数据行、表格的空状态文字恰为「No rebills yet.」（rebills.list.empty），同样算通过。不点行、不点任何
  *                   按钮、不翻页、不提交任何表单。报到前把列表一块滚动到视口里（放得下时整块在视口内，放不下时顶端在视口内）
+ *   open_new_rebill
+ *                   要排在 login 之后（本次运行没跑过 login 就 assertion_failed）。点顶栏「Rebills」（href 为 /rebills）进 Rebill
+ *                   列表页，落定的判定与失败码同 open_rebills；再点列表页头部（不在 header 里）文字为「New rebill」（en.json 的
+ *                   rebills.new.open）、href 为 /rebills/new（paths.ts 的 rebillCreate）的那一个链接（找不到恰好一个是 element_missing）。
+ *                   新建页落定：地址是 /rebills/new（不是则 navigation_failed），不是路由兜底页或错误页（任何 role=alert 都是
+ *                   page_error），表单画出来了（规则见 check_new_rebill_form，缺了是 element_missing）。不填、不点任何别的东西
+ *   check_new_rebill_form
+ *                   本次运行跑过 open_new_rebill 且成功才能跑（否则 assertion_failed）；不自己导航、不点任何东西，只认
+ *                   open_new_rebill 打开的那一页（落定的判定与失败码同 open_new_rebill）。表单上：「Customer」label
+ *                   （rebills.field.customer）关联着文本框；「Selection」label（rebills.new.field.selection）在，它的两个单选项
+ *                   「Usage events」「Date range」（rebills.new.selection.events / range）都关联着 type 为 radio 的输入框；
+ *                   「Corrective pricing rule」「Corrective provider price version」（rebills.detail.pricingRule / priceVersion）
+ *                   两个 label 都关联着文本框；「Preview」按钮（rebills.new.preview）在。缺任何一个是 element_missing。「Customer」
+ *                   是空的，且「Preview」不可用（有 disabled 属性或 aria-disabled 为 true），否则 assertion_failed。不填任何字段、
+ *                   不点「Preview」「Confirm」、不发任何写请求
  *   check_account_status
  *                   在夹具客户详情（open_fixture 打开的那一页）上，后端值取详情页自己发出的
  *                   GET /api/v1/admin/customers/{customer_id} 的响应体（被动观察，不自己发请求、不拦截；取这个客户最近一次
@@ -998,6 +1020,14 @@ const TEXT = {
   rebillsLedger: "Ledger", // rebills.field.ledger
   // 账本类型 → 「Ledger」列的文案（rebills.ledger.credit / debit）。
   rebillsLedgerText: { REBILL_CREDIT: "Credit", REBILL_DEBIT: "Debit" },
+  rebillsNewLink: "New rebill", // rebills.new.open —— Rebill 列表页头部的链接（不在顶栏里）
+  newRebillCustomer: "Customer", // rebills.field.customer —— 新建页表单的 label
+  newRebillSelection: "Selection", // rebills.new.field.selection
+  newRebillSelectionEvents: "Usage events", // rebills.new.selection.events —— Selection 的单选项
+  newRebillSelectionRange: "Date range", // rebills.new.selection.range
+  newRebillPricingRule: "Corrective pricing rule", // rebills.detail.pricingRule —— 新建页表单的 label
+  newRebillPriceVersion: "Corrective provider price version", // rebills.detail.priceVersion
+  newRebillPreview: "Preview", // rebills.new.preview —— 新建页的预览按钮（本脚本不点）
   customersForbidden: "Only administrators can manage customers.", // customers.forbidden —— 客户区块（含签名密钥面板）的无权限
   projectName: "Project name", // customers.projects.field.name —— 项目表格的列头
   projectDescription: "Description", // customers.projects.field.description
@@ -1214,6 +1244,7 @@ const TEXT = {
   paymentSettingsPath: "/payment-settings",
   providerCostsPath: "/provider-costs",
   rebillsPath: "/rebills",
+  rebillsNewPath: "/rebills/new",
   portalHomePath: "/portal",
   portalWalletPath: "/portal/wallet",
   portalUsagePath: "/portal/usage",
@@ -4647,6 +4678,53 @@ function scrollRebillsIntoView(lib, T) {
   const block = region.getBoundingClientRect().height <= window.innerHeight ? "center" : "start";
   region.scrollIntoView({ block, inline: "nearest" });
   return true;
+}
+
+/**
+ * 页面正文（不在 header 里）中文字为 text、href 恰好为 href 的链接（Rebill 列表页头部的「New rebill」）。恰好一个才点，
+ * 只点这一个；不止一个或没有都回 false。
+ */
+function clickPageLink(lib, { text, href }) {
+  const matches = [...document.querySelectorAll("a")].filter(
+    (a) => a.closest("header") === null && lib.norm(a.textContent) === text && a.getAttribute("href") === href,
+  );
+  if (matches.length !== 1) {
+    return false;
+  }
+  matches[0].click();
+  return true;
+}
+
+/**
+ * 新建 Rebill 页的表单：「Customer」label 关联着文本框（customerEmpty 另报它是不是空的）；「Selection」label 在，它的两个单选项
+ * 「Usage events」「Date range」（antd Radio：<label> 包着 type 为 radio 的输入框）都在；「Corrective pricing rule」「Corrective
+ * provider price version」两个 label 都关联着文本框；「Preview」按钮在（previewDisabled 另报它是否不可用：有 disabled 属性或
+ * aria-disabled 为 true）。页面不读任何数据，没有加载态与无权限文案；任何 role=alert 都算错误提示。只读 DOM，不填、不点。
+ */
+function probeNewRebill(lib, T) {
+  const isText = (el) => el instanceof HTMLInputElement && el.type === "text";
+  const isRadio = (el) => el instanceof HTMLInputElement && el.type === "radio";
+  const customer = lib.control(T.newRebillCustomer);
+  const preview = lib.button(T.newRebillPreview);
+  const fields = {
+    customer: isText(customer),
+    selection:
+      lib.leaf(T.newRebillSelection) !== null &&
+      isRadio(lib.control(T.newRebillSelectionEvents)) &&
+      isRadio(lib.control(T.newRebillSelectionRange)),
+    corrective: isText(lib.control(T.newRebillPricingRule)) && isText(lib.control(T.newRebillPriceVersion)),
+    preview: preview !== null,
+  };
+  return {
+    ...lib.common(T),
+    busy: document.querySelector('[aria-busy="true"]') !== null,
+    failed: lib.alert(),
+    ...fields,
+    form: fields.customer && fields.selection && fields.corrective && fields.preview,
+    customerEmpty: isText(customer) && customer.value.trim() === "",
+    previewDisabled:
+      preview !== null && (preview.hasAttribute("disabled") || preview.getAttribute("aria-disabled") === "true"),
+  };
 }
 
 /** 放得下视口的一块要整块在视口内；放不下的只要求顶端在视口内。 */
@@ -8463,6 +8541,70 @@ async function stepCheckRebillsList(ctx) {
   }
 }
 
+/** 新建 Rebill 页落定：表单画出来了，或者错误提示、走到了别处。 */
+function newRebillSettled(s) {
+  return s.appError || s.notFound || (s.path === TEXT.rebillsNewPath && !s.busy && (s.failed || s.form));
+}
+
+/** 新建 Rebill 页落在了不该落的状态上：各自的失败码。 */
+function rejectNewRebillState(s) {
+  if (s.appError || s.failed) {
+    throw fail("page_error");
+  }
+  if (s.notFound || s.path !== TEXT.rebillsNewPath) {
+    throw fail("navigation_failed");
+  }
+  if (!s.form) {
+    throw fail("element_missing");
+  }
+}
+
+async function stepOpenNewRebill(ctx) {
+  if (ctx.loginCompletedAt === null) {
+    throw fail("assertion_failed");
+  }
+  // 先经顶栏进 Rebill 列表页（落定的判断与失败码同 open_rebills），再点页头的「New rebill」。
+  const listPath = TEXT.rebillsPath;
+  const nav = { text: TEXT.navRebills, href: listPath };
+  const clicked = await waitFor(() => evaluate(clickNavLink, nav), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!clicked.ok) {
+    throw fail("element_missing");
+  }
+  const listed = await waitFor(() => evaluate(probeRebills, TEXT), catalogSettled(listPath), ELEMENT_WAIT_MS);
+  if (!listed.ok) {
+    throw fail("element_missing");
+  }
+  rejectCatalogState(listed.value, listPath, true);
+
+  const link = { text: TEXT.rebillsNewLink, href: TEXT.rebillsNewPath };
+  const pressed = await waitFor(() => evaluate(clickPageLink, link), (v) => v === true, ELEMENT_WAIT_MS);
+  if (!pressed.ok) {
+    throw fail("element_missing");
+  }
+  const opened = await waitFor(() => evaluate(probeNewRebill, TEXT), newRebillSettled, ELEMENT_WAIT_MS);
+  if (!opened.ok) {
+    throw fail(opened.value !== null && opened.value.path !== TEXT.rebillsNewPath ? "navigation_failed" : "element_missing");
+  }
+  rejectNewRebillState(opened.value);
+  ctx.newRebillOpened = true;
+}
+
+async function stepCheckNewRebillForm(ctx) {
+  // 不自己导航：只认 open_new_rebill 打开的那一页。不填任何字段、不点 Preview 与 Confirm、不发任何写请求。
+  if (!ctx.newRebillOpened) {
+    throw fail("assertion_failed");
+  }
+  const ready = await waitFor(() => evaluate(probeNewRebill, TEXT), newRebillSettled, ELEMENT_WAIT_MS);
+  if (!ready.ok) {
+    throw fail(ready.value !== null && ready.value.path !== TEXT.rebillsNewPath ? "navigation_failed" : "element_missing");
+  }
+  rejectNewRebillState(ready.value);
+  // 刚打开的新建页没有预填客户（列表页头部的链接不带查询参数）：Preview 必须是禁用的。
+  if (!ready.value.customerEmpty || !ready.value.previewDisabled) {
+    throw fail("assertion_failed");
+  }
+}
+
 async function stepCheckWebhookSigning(ctx) {
   if (ctx.customerId === null || ctx.fixture === null) {
     throw fail("assertion_failed");
@@ -11178,6 +11320,8 @@ const STEPS = {
   check_provider_cost_months: stepCheckProviderCostMonths,
   open_rebills: stepOpenRebills,
   check_rebills_list: stepCheckRebillsList,
+  open_new_rebill: stepOpenNewRebill,
+  check_new_rebill_form: stepCheckNewRebillForm,
   check_account_status: stepCheckAccountStatus,
   check_account_closure: stepCheckAccountClosure,
   check_wallet_transactions: stepCheckWalletTransactions,
@@ -11267,6 +11411,8 @@ async function main() {
      * （check_rebills_list 这时 assertion_failed）。
      */
     rebillsAfterSeq: null,
+    /** open_new_rebill 成功跑完（新建 Rebill 页的表单已画出来）后为 true：check_new_rebill_form 只在这之后、停在新建页上跑。 */
+    newRebillOpened: false,
     /** check_portal_usage 成功跑完后为 true：check_portal_usage_export 只在这之后、停在用量页上跑。 */
     portalUsageChecked: false,
     /** check_portal_usage_export 成功跑完后为 true：check_portal_monthly_export 只在这之后、停在用量页上跑。 */

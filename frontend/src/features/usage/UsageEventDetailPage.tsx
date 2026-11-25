@@ -7,6 +7,10 @@
  * 错误状态且账本里没有它的行时给出「重新入队」（必填原因，二次确认）；`PROCESSED` 等其余状态不给 ——
  * 后端照样会回 409，这里只是不让人去点一个注定失败的按钮。成功后详情与全部列表过期重读。
  *
+ * 已计费的预付事件（`PROCESSED` 且 `effective_charge` 不为 null，AIH-TASK-260）给出「Rebill」按钮（跳到新建 Rebill 页并预填
+ * 客户与这个事件），并显示当前有效计费与更正历史（点一行进 Rebill 详情）；其他事件都不显示。`billable_cost` 与快照字段仍是
+ * 事件处理时的原值。
+ *
  * 汇率版本没有详情页（汇率页只有列表），所以链接到汇率页，id 原样列出。
  *
  * ⚠️ 金额、汇率与数量按十进制字符串显示（MoneyText / DecimalText），不经 number。
@@ -28,7 +32,7 @@ import {
 } from "antd";
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 
 import {
   USAGE_EVENTS_QUERY_KEY,
@@ -39,6 +43,7 @@ import {
   usageEventDetailQueryKey,
   type UsageEventConflict,
   type UsageEventDetail,
+  type UsageEventRebill,
 } from "../../api/adminUsageEvents";
 import { ApiError } from "../../api/client";
 import { DateTimeText } from "../../components/DateTimeText";
@@ -47,8 +52,10 @@ import {
   ROUTES,
   catalogProviderDetailPath,
   customerDetailPath,
+  newRebillPath,
   pricingRuleDetailPath,
   providerPriceDetailPath,
+  rebillDetailPath,
 } from "../../routes/paths";
 import { CodeText, LoadingBlock, NoticeAlert } from "../catalog/ProvidersPage";
 import {
@@ -68,8 +75,17 @@ export function canRequeue(event: UsageEventDetail): boolean {
   return isRequeuableStatus(event.status) && event.wallet_transaction === null;
 }
 
+/**
+ * 已计费的预付事件（AIH-TASK-256：`PROCESSED` 且 `effective_charge` 不为 null）可以 Rebill，也有当前有效计费与更正历史。
+ * 内部计量、未计费与错误状态的事件 `effective_charge` 为 null。
+ */
+export function canRebill(event: UsageEventDetail): boolean {
+  return event.status === "PROCESSED" && event.effective_charge !== null;
+}
+
 export function UsageEventDetailPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const { usageEventId = "" } = useParams();
   const queryClient = useQueryClient();
   const [requeuing, setRequeuing] = useState(false);
@@ -126,17 +142,26 @@ export function UsageEventDetailPage() {
     setNotice(t("usage.requeue.done"));
   };
 
-  const actions = canRequeue(current) ? (
-    <Button
-      danger
-      onClick={() => {
-        setNotice(null);
-        setRequeuing(true);
-      }}
-    >
-      {t("usage.requeue.open")}
-    </Button>
-  ) : null;
+  let actions: ReactNode = null;
+  if (canRequeue(current)) {
+    actions = (
+      <Button
+        danger
+        onClick={() => {
+          setNotice(null);
+          setRequeuing(true);
+        }}
+      >
+        {t("usage.requeue.open")}
+      </Button>
+    );
+  } else if (canRebill(current)) {
+    actions = (
+      <Button onClick={() => void navigate(newRebillPath(current.customer_id, current.id))}>
+        {t("usage.rebill.open")}
+      </Button>
+    );
+  }
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -149,6 +174,11 @@ export function UsageEventDetailPage() {
       <Card title={t("usage.detail.billing")}>
         <BillingDescriptions event={current} />
       </Card>
+      {canRebill(current) ? (
+        <Card title={t("usage.rebill.history")}>
+          <RebillHistory event={current} />
+        </Card>
+      ) : null}
       <Card title={t("usage.detail.processing")}>
         <ProcessingDescriptions event={current} />
       </Card>
@@ -357,6 +387,62 @@ function ProcessingDescriptions({ event }: { event: UsageEventDetail }) {
     },
   ];
   return <Descriptions bordered size="small" column={1} items={items} />;
+}
+
+/** 当前有效计费与更正历史（按明细 id 升序，顺序由后端决定）。金额原样显示；点一行进 Rebill 详情。 */
+function RebillHistory({ event }: { event: UsageEventDetail }) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const items: DescriptionsProps["items"] = [
+    {
+      key: "effective_charge",
+      label: t("usage.rebill.effectiveCharge"),
+      children: <OptionalMoney amount={event.effective_charge} currency={MYR} />,
+    },
+  ];
+  const open = (rebill: UsageEventRebill): void => {
+    void navigate(rebillDetailPath(rebill.rebill_id));
+  };
+  const columns: TableColumnsType<UsageEventRebill> = [
+    {
+      key: "rebill",
+      title: t("usage.rebill.field.rebill"),
+      render: (_: unknown, rebill) => <CodeText code={rebill.rebill_id} />,
+    },
+    {
+      key: "created_at",
+      title: t("rebills.field.createdAt"),
+      render: (_: unknown, rebill) => <DateTimeText value={rebill.created_at} />,
+    },
+    { key: "previous_charge", title: t("rebills.line.previous"), dataIndex: "previous_charge" },
+    { key: "corrected_charge", title: t("rebills.line.corrected"), dataIndex: "corrected_charge" },
+    { key: "difference", title: t("rebills.line.difference"), dataIndex: "difference" },
+  ];
+  return (
+    <>
+      <Typography.Paragraph type="secondary">{t("usage.rebill.note")}</Typography.Paragraph>
+      <Descriptions bordered size="small" column={1} items={items} style={{ marginBottom: 16 }} />
+      <Table<UsageEventRebill>
+        size="small"
+        rowKey="rebill_id"
+        columns={columns}
+        dataSource={event.rebills}
+        pagination={false}
+        locale={{ emptyText: t("usage.rebill.empty") }}
+        onRow={(rebill) => ({
+          onClick: () => open(rebill),
+          onKeyDown: (keyEvent) => {
+            if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+              keyEvent.preventDefault();
+              open(rebill);
+            }
+          },
+          tabIndex: 0,
+          style: { cursor: "pointer" },
+        })}
+      />
+    </>
+  );
 }
 
 type ConflictRow = UsageEventConflict & { key: string };

@@ -11,6 +11,8 @@
  * 客户列显示客户的 `public_id`（接口不返回公司名）；Ledger 按账本类型显示 Credit / Debit；Amount 原样显示账本金额字符串，
  * 前端不做任何金额运算。
  *
+ * 页头的「New rebill」链接到新建页（`/rebills/new`，AIH-TASK-260）。
+ *
  * 三种状态都画出来（spec §132 DoD 第 8 条）：加载中、失败（带 request_id）、空列表。403 说「没有权限」。只请求
  * `/api/v1/admin/` 路径。
  *
@@ -24,7 +26,7 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Space, Table, Typography, type TableColumnsType } from "antd";
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 
 import { ADMIN_REQUIRED } from "../../api/adminCustomers";
 import {
@@ -40,7 +42,7 @@ import {
 import { ApiError } from "../../api/client";
 import { DateTimeText } from "../../components/DateTimeText";
 import { RequestReference } from "../../components/RequestReference";
-import { rebillDetailPath } from "../../routes/paths";
+import { ROUTES, rebillDetailPath } from "../../routes/paths";
 import { LoadingBlock } from "../catalog/ProvidersPage";
 
 interface FilterValues {
@@ -157,7 +159,7 @@ export function RebillsPage() {
   }
 
   return (
-    <Card title={t("rebills.title")}>
+    <Card title={t("rebills.title")} extra={<Link to={ROUTES.rebillCreate}>{t("rebills.new.open")}</Link>}>
       <Typography.Paragraph type="secondary">{t("rebills.intro")}</Typography.Paragraph>
       <Form<FilterValues>
         form={form}

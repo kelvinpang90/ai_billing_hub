@@ -79,6 +79,12 @@ export const ROUTES = {
    * 详情页。验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `open_rebills` 按列表页的 href 找顶栏链接，改了要同步那里。
    */
   rebills: "/rebills",
+  /**
+   * 新建 Rebill（AIH-TASK-260）：列表页头部的「New rebill」与用量事件详情的「Rebill」按钮指向这里，后者带上
+   * {@link REBILL_CUSTOMER_PARAM} 与 {@link REBILL_USAGE_EVENT_PARAM} 预填。静态段比 `:rebillId` 优先匹配，`new` 不会被当成 id。
+   * 验收脚本 `scripts/acceptance/admin_customers.mjs` 的 `open_new_rebill` 按这个 href 找列表页头部的链接，改了要同步那里。
+   */
+  rebillCreate: "/rebills/new",
   rebillDetail: "/rebills/:rebillId",
   /**
    * 管理端钱包核对（AIH-TASK-135，设计闸门 #474 v13 §2「前端」）。顶栏有一项；验收脚本
@@ -189,6 +195,17 @@ export function usageEventDetailPath(usageEventId: string): string {
 /** Rebill 详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */
 export function rebillDetailPath(rebillId: string): string {
   return generatePath(ROUTES.rebillDetail, { rebillId });
+}
+
+/** 新建 Rebill 页预填客户的查询参数名（客户的 `public_id`）。 */
+export const REBILL_CUSTOMER_PARAM = "customer_id";
+/** 新建 Rebill 页预填一个用量事件的查询参数名（事件的 `public_id`）。 */
+export const REBILL_USAGE_EVENT_PARAM = "usage_event_id";
+
+/** 新建 Rebill 页的地址，预填客户与一个用量事件（用量事件详情的「Rebill」按钮）。查询串由 `URLSearchParams` 转义。 */
+export function newRebillPath(customerId: string, usageEventId: string): string {
+  const query = new URLSearchParams({ [REBILL_CUSTOMER_PARAM]: customerId, [REBILL_USAGE_EVENT_PARAM]: usageEventId });
+  return `${ROUTES.rebillCreate}?${query.toString()}`;
 }
 
 /** 支付详情页的地址。id 只来自后端（uuid 的 `public_id`），理由同 {@link customerDetailPath}。 */

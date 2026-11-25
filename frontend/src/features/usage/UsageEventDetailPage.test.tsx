@@ -1,7 +1,8 @@
 /**
  * 用量事件详情：三种状态、404 与无权限；快照与版本的链接、成本 / 计费额 / 毛利（estimated）与账本引用按字符串
  * 显示；认领信息与冲突记录；「重新入队」只在可重新入队时出现，二次确认、成功后重读、失败时显示后端码对应的
- * 文案与 request_id、提交中防重复。
+ * 文案与 request_id、提交中防重复。「Rebill」按钮、当前有效计费与更正历史只在已计费的预付事件（PROCESSED 且 effective_charge
+ * 不为 null）上出现，按钮跳到预填客户与事件的新建页，历史的一行跳到 Rebill 详情（AIH-TASK-260）。
  *
  * 请求路径与字段名由 `api/adminUsageEvents.test.ts` 管。uuid 一律全零。
  */
@@ -9,7 +10,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { configure, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import "../../i18n";
@@ -84,6 +85,8 @@ function detail(overrides: Partial<UsageEventDetail> = {}): UsageEventDetail {
     claimed_at: null,
     lease_expires_at: null,
     conflicts: [],
+    effective_charge: "0.12500001",
+    rebills: [],
     ...overrides,
   };
 }
@@ -107,7 +110,14 @@ const FAILED = detail({
   gross_margin_basis: null,
   wallet_transaction: null,
   attempt_count: 3,
+  effective_charge: null,
 });
+
+/** 跳转目标的替身：把地址（路径加查询串）显示出来，证明跳到了哪里。 */
+function LocationProbe() {
+  const location = useLocation();
+  return <p data-testid="location">{`${location.pathname}${location.search}`}</p>;
+}
 
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -116,6 +126,8 @@ function renderPage() {
       <MemoryRouter initialEntries={[`/usage-events/${ID}`]}>
         <Routes>
           <Route path={ROUTES.usageEventDetail} element={<UsageEventDetailPage />} />
+          <Route path={ROUTES.rebillCreate} element={<LocationProbe />} />
+          <Route path={ROUTES.rebillDetail} element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -320,6 +332,93 @@ describe("UsageEventDetailPage content", SLOW, () => {
     expect(screen.getAllByText("ak_test_1")).toHaveLength(2);
     expect(screen.getByText("BOTH")).toBeInTheDocument();
     expect(screen.getByText("2026-09-29 17:00:00")).toBeInTheDocument();
+  });
+});
+
+describe("UsageEventDetailPage rebill", SLOW, () => {
+  const REBILL_ID = "rebill-1";
+
+  it("offers Rebill on a billed prepaid event and opens the new rebill page with the customer and the event", async () => {
+    const user = userEvent.setup();
+    api.getUsageEvent.mockResolvedValue(detail({ customer_id: "customer-1", id: "event-1" }));
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "Rebill" }));
+
+    expect(await screen.findByTestId("location")).toHaveTextContent(
+      "/rebills/new?customer_id=customer-1&usage_event_id=event-1",
+    );
+  });
+
+  it("shows the effective charge and an empty history when the event has not been rebilled", async () => {
+    api.getUsageEvent.mockResolvedValue(detail());
+
+    renderPage();
+
+    expect(await screen.findByText("Rebill history")).toBeInTheDocument();
+    expect(field("Effective charge")).toHaveTextContent("MYR 0.12500001");
+    expect(screen.getByText("This event has not been rebilled.")).toBeInTheDocument();
+  });
+
+  it("lists the rebills of the event as sent and opens a rebill from its row", async () => {
+    const user = userEvent.setup();
+    api.getUsageEvent.mockResolvedValue(
+      detail({
+        effective_charge: "0.10000000",
+        rebills: [
+          {
+            rebill_id: REBILL_ID,
+            created_at: "2026-11-20T16:00:00",
+            previous_charge: "0.12500001",
+            corrected_charge: "0.10000000",
+            difference: "-0.02500001",
+          },
+        ],
+      }),
+    );
+
+    renderPage();
+
+    expect(await screen.findByText(REBILL_ID)).toBeInTheDocument();
+    expect(field("Effective charge")).toHaveTextContent("MYR 0.1");
+    expect(screen.getByText("-0.02500001")).toBeInTheDocument();
+    expect(screen.getByText("0.10000000")).toBeInTheDocument();
+    // UTC 16:00 在吉隆坡已经是第二天。
+    expect(screen.getByText("2026-11-21 00:00:00")).toBeInTheDocument();
+    // 原计费额不变，仍是事件处理时的值。
+    expect(field("Billable amount")).toHaveTextContent("MYR 0.12500001");
+
+    const row = screen.getByText(REBILL_ID).closest("tr");
+    if (row === null) {
+      throw new Error("no row");
+    }
+    await user.click(row);
+    expect(await screen.findByTestId("location")).toHaveTextContent(`/rebills/${REBILL_ID}`);
+  });
+
+  it.each([
+    ["an internal metering event", { billing_mode_snapshot: "INTERNAL_METERED_ONLY", effective_charge: null }],
+    ["an event being processed", { status: "PROCESSING", effective_charge: null }],
+    ["a processed event without an effective charge", { effective_charge: null }],
+  ])("shows neither the button nor the history on %s", async (_name, overrides: Partial<UsageEventDetail>) => {
+    api.getUsageEvent.mockResolvedValue(detail(overrides));
+
+    renderPage();
+
+    await screen.findByText("Cost and margin are visible to administrators only.");
+    expect(screen.queryByRole("button", { name: "Rebill" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Rebill history")).not.toBeInTheDocument();
+    expect(screen.queryByText("Effective charge")).not.toBeInTheDocument();
+  });
+
+  it("shows neither the button nor the history on an error event", async () => {
+    api.getUsageEvent.mockResolvedValue(FAILED);
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "Requeue" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rebill" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Rebill history")).not.toBeInTheDocument();
   });
 });
 
