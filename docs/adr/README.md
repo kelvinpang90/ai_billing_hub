@@ -66,7 +66,8 @@
 | [0014](ADR-0014-email-smtp-for-now.md) | Email 传输层：现阶段继续用 SMTP，出现送达问题再换 API 服务 | 已接受 | 2026-10-15 |
 | [0015](ADR-0015-stripe-payment-gateway.md) | 支付网关选定 Stripe：沙箱实测 H1–H4 的结果 | 已接受 | 2026-11-06 |
 | [0016](ADR-0016-no-provider-price-sync.md) | 供应商价格：V1 不做自动同步适配器，只用手工录入草稿 | 已接受 | 2026-11-14 |
-| [0017](ADR-0017-data-retention.md) | 数据留存：按数据类别定保留期，按规则分批清理已到期的终态行 | 已接受 | 2026-11-16 |
+| [0017](ADR-0017-data-retention.md) | 数据留存：按数据类别定保留期，按规则分批清理已到期的终态行 | 已接受，部分被 ADR-0018 取代 | 2026-11-16 |
+| [0018](ADR-0018-no-closure-anonymization-no-ai-outbox-purge.md) | 数据留存：取消关户后的个人数据处理（R4）与 AI 模块 outbox 清理（R3） | 已接受 | 2026-11-26 |
 
 ## 待写（spec §136 要求）
 

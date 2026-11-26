@@ -15478,16 +15478,16 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-269
-    title: 数据留存清理 R2、R5 收尾：运维手册扩到七项，数据治理文档标明交付与 R3 推迟
+    title: 数据留存清理 R2、R5 收尾：运维手册扩到七项，数据治理文档标明交付
     purpose: >-
-      按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §8 与 §11 AIH-TASK-269：docs/runbook.md「数据留存清理」一节从三项扩到七项；docs/data-governance.md 第 4.6、4.8 节与第 12 节标明 R2、R5 已交付，第 4.7 节与第 12 节写明 R3 推迟的理由（ai_usage_outbox 是供应商成本对账判定 AI 模块来源的依据，须先另过闸门加来源标记）；docs/TODO.md 的「只增不减」一行勾掉。只改文档。
+      按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §8 与 §11 AIH-TASK-269：docs/runbook.md「数据留存清理」一节从三项扩到七项；docs/data-governance.md 第 4.6、4.8 节与第 12 节标明 R2、R5 已交付，R3、R4 不做已由 ADR-0018 写进第 4.7 节与第 12 节，本任务不改这几处；docs/TODO.md 的「只增不减」一行勾掉。只改文档。
     status: ready
     depends_on:
       - AIH-TASK-268
     acceptance_criteria:
       - '内容以 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §2、§5、§8、§10 与已合并的 app/services/retention_purge.py、app/core/config.py、docs/deployment.md 为准；只写仓库里已有的配置键、日志事件名、审计动作与命令，引用写 文件:行 或章节锚点；涉及数据库的命令只给只读查询'
-      - 'docs/runbook.md「数据留存清理」一节：清理项表从三项扩到七项（每项写表、条件、保留期与开关键）；上线步骤补一句四个新开关的转发已在 docker-compose.yml，改 .env 后重建 worker 与 beat；怎么发现一节补「某项开了却一轮没有 retention_purge_item」的查法；影响什么补：门户通知满 24 个月消失，客户翻页时游标那条恰好被删会得到 422 cursor、从第一页重翻即可；钱包核对的最近一次 COMPLETED 与比它新的运行永不删、核对连续 24 个月没有正常完成时的说明（设计 §10 假设第 2 条）；绝不能做什么补：不手工删 ai_usage_outbox 的行（供应商成本对账与分摊靠它判定 AI 模块来源，R3 推迟的原因），不手工删 PENDING 的领域 outbox 行'
-      - 'docs/data-governance.md：第 4.6、4.8 节与第 12 节的 R2、R5 行注明已由 AIH-TASK-266..268 交付（设计闸门 #862），保留期不改；第 4.7 节与第 12 节的 R3 行写明推迟：ai_usage_outbox 的行是 app/repositories/provider_cost_reconciliations.py 的 ai_module_origin 判定 AI 模块来源的唯一依据（设计 #755 §10 假设 2），须先另过闸门加持久来源标记再按 K11 清理；第 11 节第 9 条注明无处理器的 PENDING 行按 K10 选 a 维持永久保留；修订记录补一行'
+      - 'docs/runbook.md「数据留存清理」一节：清理项表从三项扩到七项（每项写表、条件、保留期与开关键）；上线步骤补一句四个新开关的转发已在 docker-compose.yml，改 .env 后重建 worker 与 beat；怎么发现一节补「某项开了却一轮没有 retention_purge_item」的查法；影响什么补：门户通知满 24 个月消失，客户翻页时游标那条恰好被删会得到 422 cursor、从第一页重翻即可；钱包核对的最近一次 COMPLETED 与比它新的运行永不删、核对连续 24 个月没有正常完成时的说明（设计 §10 假设第 2 条）；绝不能做什么补：不手工删 ai_usage_outbox 的行（供应商成本对账与分摊靠它判定 AI 模块来源，ADR-0018 因此决定 R3 不做），不手工删 PENDING 的领域 outbox 行'
+      - 'docs/data-governance.md：第 4.6、4.8 节与第 12 节的 R2、R5 行注明已由 AIH-TASK-266..268 交付（设计闸门 #862），保留期不改；第 4.7 节与第 12 节的 R3、R4 行已由 ADR-0018 改写，不改；第 11 节第 9 条注明无处理器的 PENDING 行按 K10 选 a 维持永久保留；修订记录补一行'
       - 'docs/TODO.md：「password_reset_tokens 与 domain_outbox 都只增不减」一行改为 [x]，行末补一句 domain_outbox 已由 AIH-TASK-266 按 K10 清理；规划块不改'
       - '不改代码、测试与 .platform/；不写主机名、IP、地址、邮箱、凭据；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #862'
     allowed_change_paths:
@@ -15528,14 +15528,14 @@ tasks:
   - id: AIH-TASK-270
     title: 数据留存 R6 文档：运维手册补数据主体请求与数据泄露两节，接入文档写明对话标识不放个人数据
     purpose: >-
-      按 docs/data-governance.md 第 12 节 R6 的文档部分（ADR-0017 已接受，K23 由 Kelvin 2026-11-23 批准；只改文档，不走设计闸门）：docs/runbook.md 新增「数据主体请求」「数据泄露」两节，把 docs/data-governance.md 第 8、9 节的流程写成运维步骤；「整台 VPS 没了（灾难恢复）」一节补恢复后按库外登记表重做提前匿名化与门户账号删除；docs/api.md 用量上报的 conversation_id 一行写明禁止放电话号码、邮箱等可识别值，要求 conv_ 加 uuid 一类假名 id。R2 存储上 yearly/ 的 lifecycle（K16）由管理员在控制台配，不在本任务。
+      按 docs/data-governance.md 第 12 节 R6 的文档部分（ADR-0017 已接受，K23 由 Kelvin 2026-11-23 批准；只改文档，不走设计闸门）：docs/runbook.md 新增「数据主体请求」「数据泄露」两节，把 docs/data-governance.md 第 8、9 节的流程写成运维步骤；docs/api.md 用量上报的 conversation_id 一行写明禁止放电话号码、邮箱等可识别值，要求 conv_ 加 uuid 一类假名 id。R2 存储上 yearly/ 的 lifecycle（K16）由管理员在控制台配，不在本任务。
     status: ready
     depends_on: []
     acceptance_criteria:
       - '内容以 docs/data-governance.md 第 5.2、7、8、9 节与第 10 节 K19、K20、K23 为准，不新增政策：时限照 K19、K20 写并注明待顾问核对；只引用 runbook 里已有的条目（吊销会话、轮换集成凭据与 webhook 签名密钥、主密钥事故）与管理端已有的接口和页面，引用写 文件:行 或章节锚点；涉及数据库的命令只给只读查询'
-      - 'docs/runbook.md 新增「数据主体请求」一节，照「本文件的写法」的结构：收到请求后的步骤（开工单、按第 8.1 节核实身份，核实不了只回复无法核实身份；答复只发往已核实的登记地址；库里已没有登记地址时按合同登记的联系方式回拨）、谁做与时限（第 8.2 节）、访问请求逐项查哪里（第 8.3 节）、更正请求能改与不能改的（第 8.4 节）、删除请求：R4 上线前由管理员手工做联系人匿名化与门户账号删除时，只写现有管理端能做的操作，做不到的写明「等 R4」，并要求记进第 5.2 节的库外登记表；绝不能做什么（不在任何原因字段里写个人数据，只写工单号；不发往请求里另给的地址）'
+      - 'docs/runbook.md 新增「数据主体请求」一节，照「本文件的写法」的结构：收到请求后的步骤（开工单、按第 8.1 节核实身份，核实不了只回复无法核实身份；答复只发往已核实的登记地址；库里已没有登记地址时按合同登记的联系方式回拨）、谁做与时限（第 8.2 节）、访问请求逐项查哪里（第 8.3 节）、更正请求能改与不能改的（第 8.4 节）、删除请求照第 8.5 节：不做联系人匿名化与门户账号删除（ADR-0018，R4 不做），答复写明保留依据，联系人信息有误的按第 8.4 节更正；绝不能做什么（不在任何原因字段里写个人数据，只写工单号；不发往请求里另给的地址）'
       - 'docs/runbook.md 新增「数据泄露」一节：照第 9.2 节的七步写成运维步骤（发现与上报、控制时引用 runbook 已有条目、24 小时初评、72 小时通知专员、通知数据主体的识别与联系顺序、登记表、复盘），时限注明以专员指引为准、待顾问核对（K20）；不在登记表或工单里复制泄露的个人数据'
-      - 'docs/runbook.md「整台 VPS 没了（灾难恢复）」一节在恢复完成、对账通过之后补一步：按第 5.2 节的库外登记表，把恢复点之后执行过的提前匿名化与门户账号删除重做一遍，重做前后各写一行记录；其余步骤不改。docs/api.md 用量上报字段表 conversation_id 一行补：不得放电话号码、邮箱等可识别个人的值，用 conv_ 加 uuid 一类假名 id（K23），格式校验不变'
+      - '不改 docs/runbook.md「整台 VPS 没了（灾难恢复）」一节（提前匿名化已由 ADR-0018 取消，恢复后没有要重做的处理）。docs/api.md 用量上报字段表 conversation_id 一行补：不得放电话号码、邮箱等可识别个人的值，用 conv_ 加 uuid 一类假名 id（K23），格式校验不变'
       - '只改本任务 allowed_change_paths 里的文件；不改代码、测试、.platform/ 与 .github/；不写主机名、IP、地址、邮箱、凭据；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 不适用'
     allowed_change_paths:
       - docs/runbook.md

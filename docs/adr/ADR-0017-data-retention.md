@@ -2,7 +2,7 @@
 
 | | |
 | --- | --- |
-| **状态** | **已接受**（2026-11-23，Kelvin 批准 `docs/data-governance.md` §10 的建议值；K10 原文未给建议，Kelvin 同日单独明确选 a；K19–K22 是暂定值，法律事实待顾问核对，见「收口条件」） |
+| **状态** | **已接受，部分被 [ADR-0018](ADR-0018-no-closure-anonymization-no-ai-outbox-purge.md) 取代**（2026-11-26：K4、K5、K6、K11 与 K12 的「关户客户随 K4」取消，R3、R4 不做；其余条款不变）。原状态：**已接受**（2026-11-23，Kelvin 批准 `docs/data-governance.md` §10 的建议值；K10 原文未给建议，Kelvin 同日单独明确选 a；K19–K22 是暂定值，法律事实待顾问核对，见「收口条件」） |
 | **日期** | 2026-11-16 |
 | **来源** | spec §13、§94、§98.1、§112、§112.1；`REQ-PRIV-001`；上线闸门 Gate 2「PDPA and data-retention policy approved」；`docs/TODO.md`「`password_reset_tokens` 与 `domain_outbox` 都只增不减」 |
 | **影响** | 认证令牌、领域 outbox、AI 模块 outbox、通知、钱包核对记录开始按期删除；关户客户的联系人与门户账号按期匿名化或删除；年备份改为有期限；AI-MODULE 设计的「`ai_usage_outbox` V1 不删」被改变；财务记录与审计的到期清理推迟到另一份 ADR |
