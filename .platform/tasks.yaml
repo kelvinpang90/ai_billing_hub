@@ -15372,7 +15372,7 @@ tasks:
     title: 数据留存清理 R5 前半：门户通知写入满 24 个月的到期清理与开关
     purpose: >-
       按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §2「四项清理的条件」第 2 条与「注册与配置」：在 app/services/retention_purge.py 追加 notifications 一项（created_at 早于截止时刻，保留期是代码常量 731 天，已读未读一样），app/core/config.py 加 retention_notifications_mode。docker-compose.yml 的 x-backend.environment 与 .env.example 已由管理员在 #863 转发并写出四个新键（缺省 off），本任务不改它们；关户客户的通知随 K4 删除属于 R4，不在本任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-266
     acceptance_criteria:
