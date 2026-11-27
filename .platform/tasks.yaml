@@ -15317,7 +15317,7 @@ tasks:
     title: 数据留存清理 R2：领域 outbox 结算满 90 天的终态行到期清理与开关
     purpose: >-
       按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §2「四项清理的条件」第 1 条与「注册与配置」：在 app/services/retention_purge.py 的注册表里追加 domain_outbox 一项（SENT / FAILED 且 processed_at 早于截止时刻，保留期是代码常量 90 天，PENDING 一律不碰），app/core/config.py 加 retention_domain_outbox_mode（off / count / delete，缺省 off）。清理框架（run_purge、批次、审计、隔离级别、Celery 任务、Beat）不改。docker-compose.yml 的 x-backend.environment 与 .env.example 已由管理员在 #863 转发并写出四个新键（缺省 off），本任务不改它们。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） 逐条一致，以 §1「我定的」、§2「四项清理的条件」第 1 条「注册与配置」「事务边界」、§3、§4、§5 与 §7 中领域 outbox 各行、「边界值」「保留期常量」「count 与 off」「批与上限」「幂等重放」「锁范围（MySQL）」「R1 用例不受新项干扰」「安全」「配置与转发」各行为准；以下一处以本契约为准（登记预审定，不算冲突）：设计 §3 INV-5 一行与 §7「保留期常量」「count 与 off」两行写的「恰好七项」「四项各 count / off」是 AIH-TASK-268 完成后的终态，本任务注册后注册测试断言恰好四项（R1 三项加 domain_outbox），「count 与 off」只覆盖本项。除此之外，设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
