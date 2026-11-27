@@ -5424,7 +5424,7 @@ JSON 对象，**不接受未声明的字段**（422）。类型是严格的：JS
 | `schema_version` | 是 | 只接受 `"1.0"`；别的字符串 422 `UNSUPPORTED_SCHEMA_VERSION`，不是字符串 422 `VALIDATION_ERROR` |
 | `event_id` | 是 | **UUIDv7 或 ULID 的规范写法**：UUIDv7 = 小写带连字符的 36 字符，`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`；ULID = 26 个大写 Crockford base32 字符，`^[0-7][0-9A-HJKMNP-TV-Z]{25}$`。大写的 UUID、小写的 ULID、别的版本的 UUID 都是 422。全局唯一，按字节比较 |
 | `request_id` | 是 | AI 调用的 id，`^[A-Za-z0-9._:-]{1,128}$` |
-| `conversation_id` | 否 | 同上；可为 `null` |
+| `conversation_id` | 否 | 同上；可为 `null`。⚠️ **不得放电话号码、邮箱等可识别个人的值**，用 `conv_` 加 uuid 一类的假名 id（例如 `conv_<uuid>`；[data-governance.md](data-governance.md) §10 K23）：这一列 `PROCESSED` 之后不可改，误放的个人数据无法清除或匿名化。格式校验不变，服务端不检查内容 |
 | `tenant_id` / `project_id` | 否 | 只作诊断：给出时必须等于凭据所属客户 / 项目的 `public_id`，否则 403。最长 64 个字符（更长 422） |
 | `provider` | 是 | `^[a-z0-9][a-z0-9_-]{0,63}$` |
 | `model` | 是 | `^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$`。目录里没有的模型照收，由计费侧标 `MODEL_UNKNOWN` |
