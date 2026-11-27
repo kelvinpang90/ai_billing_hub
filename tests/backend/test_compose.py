@@ -378,6 +378,9 @@ def test_the_retention_settings_reach_backend_services(compose: dict) -> None:
         "retention_domain_outbox_mode",
         # 设计闸门 #862 v2（AIH-TASK-267）。
         "retention_notifications_mode",
+        # 设计闸门 #862 v2（AIH-TASK-268）。
+        "retention_wallet_reconciliation_findings_mode",
+        "retention_wallet_reconciliation_runs_mode",
         "retention_max_rows_per_item",
     )
     for field in fields:

@@ -239,6 +239,8 @@ def test_only_notifications_written_731_days_ago_go_read_or_unread(db: Db) -> No
         "recovery_codes": 0,
         "domain_outbox": 0,
         ITEM: len(gone),
+        "wallet_reconciliation_findings": 0,
+        "wallet_reconciliation_runs": 0,
     }
     [outcome] = [o for o in result.items if o.item == ITEM]
     assert (outcome.mode, outcome.cutoff) == ("delete", CUTOFF)
