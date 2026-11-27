@@ -281,7 +281,7 @@ Beat 条目 `retention-purge` 每天 20:17 UTC（马来西亚 04:17，排在 03:
 | `BILLING_RETENTION_RECOVERY_CODES_MODE` | `off` | `off` / `count` / `delete`；用掉或吊销满 30 天的 `recovery_codes` |
 | `BILLING_RETENTION_DOMAIN_OUTBOX_MODE` | `off` | `off` / `count` / `delete`；`SENT` / `FAILED` 且结算（`processed_at`）满 90 天的 `domain_outbox` 行；`PENDING` 一行都不动（含没有处理器的事件） |
 | `BILLING_RETENTION_NOTIFICATIONS_MODE` | `off` | `off` / `count` / `delete`；写入（`created_at`）满 731 天的门户通知 `notifications`，已读、未读一样。客户翻页时游标那条恰好被删，下一页返回 422 `cursor`，从第一页重翻即可 |
-| `BILLING_RETENTION_WALLET_RECONCILIATION_FINDINGS_MODE` | `off` | `off` / `count` / `delete`；所属核对运行结束（`finished_at`）满 731 天、状态 `COMPLETED` / `ABANDONED`、且 `id` 小于最近一次 `COMPLETED` 的 `wallet_reconciliation_findings`；最近一次 `COMPLETED` 与比它新的运行的发现一行不动 |
+| `BILLING_RETENTION_WALLET_RECONCILIATION_FINDINGS_MODE` | `off` | `off` / `count` / `delete`；所属核对运行结束（`finished_at`）满 731 天、状态 `COMPLETED` / `ABANDONED`、且运行的 `id` 小于最近一次 `COMPLETED` 的 `id` 的 `wallet_reconciliation_findings`；最近一次 `COMPLETED` 与比它新的运行的发现一行不动 |
 | `BILLING_RETENTION_WALLET_RECONCILIATION_RUNS_MODE` | `off` | `off` / `count` / `delete`；同上条件、且没有发现指向它的 `wallet_reconciliation_runs`；`RUNNING`、最近一次 `COMPLETED` 与比它新的运行一行不动 |
 | `BILLING_RETENTION_MAX_ROWS_PER_ITEM` | `50000` | 1000–1000000；每项每轮最多删这么多行（每批最多 1000 行一个短事务），余下的下一轮继续 |
 

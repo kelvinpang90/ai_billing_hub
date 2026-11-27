@@ -661,6 +661,8 @@ def test_the_retention_settings_come_from_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("BILLING_RETENTION_RECOVERY_CODES_MODE", "off")
     monkeypatch.setenv("BILLING_RETENTION_DOMAIN_OUTBOX_MODE", "count")
     monkeypatch.setenv("BILLING_RETENTION_NOTIFICATIONS_MODE", "delete")
+    monkeypatch.setenv("BILLING_RETENTION_WALLET_RECONCILIATION_FINDINGS_MODE", "count")
+    monkeypatch.setenv("BILLING_RETENTION_WALLET_RECONCILIATION_RUNS_MODE", "delete")
     monkeypatch.setenv("BILLING_RETENTION_MAX_ROWS_PER_ITEM", "2000")
 
     settings = Settings()
@@ -669,6 +671,8 @@ def test_the_retention_settings_come_from_the_environment(monkeypatch) -> None:
         "count",
         "delete",
         "off",
+        "count",
+        "delete",
         "count",
         "delete",
     ]
@@ -681,6 +685,8 @@ def test_the_retention_settings_come_from_the_environment(monkeypatch) -> None:
         "BILLING_RETENTION_RECOVERY_CODES_MODE",
         "BILLING_RETENTION_DOMAIN_OUTBOX_MODE",
         "BILLING_RETENTION_NOTIFICATIONS_MODE",
+        "BILLING_RETENTION_WALLET_RECONCILIATION_FINDINGS_MODE",
+        "BILLING_RETENTION_WALLET_RECONCILIATION_RUNS_MODE",
     ],
 )
 def test_an_unknown_retention_mode_in_the_environment_fails_validation(

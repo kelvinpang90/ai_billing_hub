@@ -4,8 +4,9 @@
 「核对：只开运行一项」「核对：没有任何 `COMPLETED`」，以及这两项的「边界值」
 「count 与 off」。注册表与静态扫描在 tests/backend/test_retention_purge.py。
 
-「正常路径」在清理前后各调用一次 app/services/alerts.py 的
-`wallet_negative_balance`（核对告警并在这一维里），断言两次结果相同，不打桩。
+「正常路径」在清理前后各调用一次 app/services/alerts.py 的核对告警函数
+`_reconciliation`（按 `id` 取最近一次正常 `COMPLETED` 与比它新的运行），断言两次结果相同，
+不打桩。最近一次 `COMPLETED` 有不一致、比它新的 `RUNNING` 也有，结果是 P1 而非 OK。
 
 行为用例在 SQLite 与 MySQL 上各跑一遍（`db` 夹具）。SQLite 打开外键检查，
 与 MySQL 一样拒绝删掉还有发现指向的运行。MySQL 那一半需要
@@ -242,10 +243,9 @@ def purge_audits(db: Db) -> list[AuditLog]:
 
 
 def reconciliation_alert(db: Db) -> alerts.AlertResult:
+    """The reconciliation part of the alert (`_reconciliation`, design gate #474 v13 §2「告警」)."""
     with db.factory() as session:
-        return alerts.wallet_negative_balance(
-            session, alerts.AlertContext(now=NOW, currencies=("USD",))
-        )
+        return alerts._reconciliation(session, NOW)
 
 
 def rows_of(result: PurgeResult) -> dict[str, int]:
@@ -316,7 +316,7 @@ def test_findings_go_first_then_their_runs_and_the_alert_is_unchanged(db: Db) ->
     """设计 §7「核对：正常路径」：结束满 731 天的 `COMPLETED` / `ABANDONED`
     （其中两条有发现）与它们的发现都删，发现先删、运行后删（审计顺序）；
     `RUNNING`、不满 731 天的与最近一次 `COMPLETED`（连同它的发现）留着；
-    核对告警的结果清理前后相同。"""
+    核对告警（`_reconciliation`）的结果清理前后相同。"""
     first = make_tenant(db, 1)
     second = make_tenant(db, 2)
     old_completed = add_run(db, COMPLETED, finished_at=LONG_AGO, inconsistent=2)
@@ -336,8 +336,12 @@ def test_findings_go_first_then_their_runs_and_the_alert_is_unchanged(db: Db) ->
     yesterday = add_run(db, ABANDONED, finished_at=NOW - DAY)
     latest = add_run(db, COMPLETED, finished_at=NOW - HOUR, inconsistent=1)
     latest_finding = add_finding(db, latest, second)
-    running = add_run(db, RUNNING, finished_at=None, started_at=NOW - 10 * SECOND)
+    running = add_run(db, RUNNING, finished_at=None, started_at=NOW - 10 * SECOND, inconsistent=1)
     before = reconciliation_alert(db)
+    assert before == alerts.AlertResult(
+        alerts.AlertLevel.P1,
+        "reconciliation 2026-11-25 checked 3 inconsistent 1; later inconsistent 1",
+    )
 
     result = purge(db)
 
