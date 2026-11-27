@@ -21,6 +21,10 @@ AIH-TASK-264 实现与测试）、「并发：与业务」「锁范围（MySQL�
 
 匹配语句用的是 MySQL 编译出来的 SQL 文本；整个文件只在 MySQL 上跑。审计表只追加、拒绝 DELETE，
 只看本用例开始之后写入的审计。uuid 用全零占位值（死家族用全 f，见「锁范围」）。
+
+设计闸门 #862 v2 §7（AIH-TASK-266）：「锁范围（MySQL）」的 `domain_outbox` 场景也在这里；「R1 用例
+不受新项干扰」——不传 modes 的用例用固定的 R1 三项 `ALL_DELETE`，之后注册的项不开。每个用例前后
+清空 `domain_outbox`（没有触发器、没有入向外键，普通 DELETE 即可）。
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ from app.models.auth import (
     AuditAction,
     AuditLog,
     DomainOutbox,
+    OutboxStatus,
     PasswordResetToken,
     RecoveryCode,
     RefreshToken,
@@ -61,8 +66,9 @@ from app.models.auth import (
 )
 from app.models.tenancy import Tenant
 from app.services.auth import RequestContext, TokenReused, authenticate, refresh_session, utc_now
-from app.services.password_reset import request_reset, reset_password
-from app.services.retention_purge import ITEMS, PurgeResult, run_purge
+from app.services.password_reset import EVENT_PASSWORD_RESET, request_reset, reset_password
+from app.services.retention_purge import DOMAIN_OUTBOX_RETENTION, PurgeResult, run_purge
+from app.tasks import outbox as outbox_task
 
 TEST_DATABASE_URL = os.environ.get("BILLING_TEST_DATABASE_URL", "")
 
@@ -75,8 +81,14 @@ DOMAIN = "@retention-purge-mysql.example.com"
 PASSWORD = "a-perfectly-fine-passphrase"
 NEW_PASSWORD = "another-perfectly-fine-passphrase"
 CONTEXT = RequestContext(ip_address="10.0.0.1", user_agent="pytest")
-ALL_DELETE = {item.name: "delete" for item in ITEMS}
+# 设计闸门 #862 v2 §7「R1 用例不受新项干扰」：固定只开 R1 三项，不由注册表生成。
+ALL_DELETE = {
+    "refresh_tokens": "delete",
+    "password_reset_tokens": "delete",
+    "recovery_codes": "delete",
+}
 NO_CAP = 50_000
+TOKEN_TABLES = ("refresh_tokens", "password_reset_tokens")
 
 GATE_TIMEOUT_SECONDS = 15.0
 LOCK_POLL_INTERVAL_SECONDS = 0.05
@@ -226,23 +238,12 @@ def _lock_report(connection: Connection) -> str:
 
 
 def clean(engine: Engine) -> None:
-    """The three token tables entirely, then this file's users and their outbox rows."""
+    """The three token tables and `domain_outbox` entirely, then this file's users."""
     with engine.begin() as connection:
         connection.execute(delete(RefreshToken))
         connection.execute(delete(PasswordResetToken))
         connection.execute(delete(RecoveryCode))
-        ours = [
-            str(user_id)
-            for user_id in connection.execute(
-                select(User.id).where(User.email.like(f"%{DOMAIN}"))
-            ).scalars()
-        ]
-        if ours:
-            connection.execute(
-                delete(DomainOutbox).where(
-                    DomainOutbox.aggregate_type == "users", DomainOutbox.aggregate_id.in_(ours)
-                )
-            )
+        connection.execute(delete(DomainOutbox))
         connection.execute(delete(User).where(User.email.like(f"%{DOMAIN}")))
         connection.execute(delete(Tenant).where(Tenant.email.like(f"%{DOMAIN}")))
 
@@ -345,14 +346,16 @@ class World:
             f" within {LOCK_POLL_LIMIT_SECONDS}s\n{report}"
         )
 
-    def unblocked(self, name: str, work: Callable[[], Any]) -> Any:
-        """Run `work`; it must finish within 5 s and nobody may wait on the token tables."""
+    def unblocked(
+        self, name: str, work: Callable[[], Any], *, tables: tuple[str, ...] = TOKEN_TABLES
+    ) -> Any:
+        """Run `work`; it must finish within 5 s and nobody may wait on `tables`."""
         started = time.monotonic()
         actor = self.actor(name, work)
         seen: list[str] = []
         with self.observer.connect() as connection:
             while actor.running() and time.monotonic() - started < BUSINESS_LIMIT_SECONDS:
-                for table in ("refresh_tokens", "password_reset_tokens"):
+                for table in tables:
                     if self.waits_on(connection, table):
                         seen.append(table)
                 time.sleep(LOCK_POLL_INTERVAL_SECONDS)
@@ -449,6 +452,31 @@ class World:
                 ],
             )
             session.commit()
+
+    def add_outbox(
+        self,
+        *,
+        status: OutboxStatus,
+        processed_at: dt.datetime | None,
+        attempt_count: int = 1,
+        db: Db | None = None,
+    ) -> int:
+        created = processed_at or self.now
+        with (db or self.main).factory() as session:
+            row = DomainOutbox(
+                event_type=EVENT_PASSWORD_RESET,
+                aggregate_type="users",
+                aggregate_id="0",
+                payload_json=None,
+                status=status,
+                attempt_count=attempt_count,
+                next_retry_at=created,
+                created_at=created,
+                processed_at=processed_at,
+            )
+            session.add(row)
+            session.commit()
+            return int(row.id)
 
     def reset_token(self, name: str) -> str:
         outbox_id = request_reset(
@@ -673,6 +701,62 @@ def test_a_purge_batch_paused_before_commit_blocks_no_login_refresh_or_reset(
     assert len(world.ids(RefreshToken, user_id=first)) == 3, "活家族两行（含轮换）+ 新登录一行"
     assert len(world.ids(RefreshToken, user_id=second)) == 1
     assert len(world.ids(PasswordResetToken)) == 1, "只剩刚签发的那一条"
+    world.assert_no_database_errors(purging)
+
+
+def test_a_domain_outbox_batch_paused_before_commit_blocks_no_insert_or_settlement(
+    world: World,
+) -> None:
+    """设计闸门 #862 v2 §7「锁范围（MySQL）」：`domain_outbox` 的删除批次停在 `DELETE` 之后、
+    提交之前；另一连接插入一行新的领域 outbox、按现有结算写法（app/tasks/outbox.py 的 `_settle`：
+    `WHERE status = 'PENDING' AND attempt_count = :attempt`）把一行 `PENDING` 结算为 `SENT`，
+    都在 5 秒内成功，期间没有人等这张表的行锁；清理随后提交。
+    """
+    old = world.now - DOMAIN_OUTBOX_RETENTION - dt.timedelta(days=1)
+    gone = {
+        world.add_outbox(status=OutboxStatus.SENT, processed_at=old),
+        world.add_outbox(status=OutboxStatus.FAILED, processed_at=old),
+    }
+    pending = world.add_outbox(status=OutboxStatus.PENDING, processed_at=None)
+    recent = world.add_outbox(
+        status=OutboxStatus.SENT, processed_at=world.now - dt.timedelta(days=1)
+    )
+
+    purge_db, business_db = world.db("purge"), world.db("business")
+    gate = world.pause_after(
+        purge_db, "purge: DELETE FROM domain_outbox sent", deletes_from("domain_outbox")
+    )
+    purging = world.actor("purge", lambda: world.purge(purge_db, {"domain_outbox": "delete"}))
+    gate.wait_reached()
+
+    inserted = world.unblocked(
+        "insert a new outbox row",
+        lambda: world.add_outbox(status=OutboxStatus.PENDING, processed_at=None, db=business_db),
+        tables=("domain_outbox",),
+    )
+    claim = outbox_task._Claim(
+        outbox_id=pending,
+        attempt=1,
+        event_type=EVENT_PASSWORD_RESET,
+        aggregate_type="users",
+        aggregate_id="0",
+        payload_json=None,
+        created_at=world.now,
+    )
+    settled = world.unblocked(
+        "settle a PENDING row",
+        lambda: outbox_task._settle(business_db.factory, claim, status=OutboxStatus.SENT),
+        tables=("domain_outbox",),
+    )
+    gate.release()
+    result = purging.value()
+
+    assert settled is True
+    assert result.failed_item is None, result
+    assert world.purged() == {"domain_outbox": 2}
+    assert world.ids(DomainOutbox) == {pending, recent, inserted}
+    assert not gone & world.ids(DomainOutbox)
+    assert world.ids(DomainOutbox, status=OutboxStatus.SENT) == {pending, recent}
     world.assert_no_database_errors(purging)
 
 

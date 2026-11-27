@@ -1,11 +1,15 @@
-"""Retention purge: the framework and the three authentication-token items (AIH-TASK-263).
+"""Retention purge: the framework, the three authentication-token items (AIH-TASK-263) and the
+domain outbox item (AIH-TASK-266).
 
 设计闸门 #833 v7（docs/design/AIH-TASK-263-retention-purge.md）§2「清理框架」「三项清理的条件」
-「审计动作与查询」「事务边界」「时间语义」。这里只有框架与三项清理；Celery 任务、Beat、配置与
+「审计动作与查询」「事务边界」「时间语义」。这里只有框架与注册的清理项；Celery 任务、Beat、配置与
 MySQL 命名锁属于 AIH-TASK-264（app/tasks/retention.py），这个模块不知道它们。
+`domain_outbox` 一项照设计闸门 #862 v2（docs/design/AIH-TASK-266-retention-r2-r5.md）§2「四项清理的
+条件」第 1 条与「注册与配置」，框架本身不改。
 
-- 注册表 `ITEMS` 只在代码里：新增一项必须过设计闸门（设计 §3 INV-5），本任务恰好三项。
-- 保留期是代码常量（设计 §1「我定的」第 5 条），改它要改 ADR-0017，不是配置。
+- 注册表 `ITEMS` 只在代码里：新增一项必须过设计闸门（设计 §3 INV-5）。现在恰好四项：R1 三项与
+  `domain_outbox`。
+- 保留期是代码常量（设计 §1「我定的」第 5 条），每项自己的常量，改它要改 ADR-0017，不是配置。
 - 每一项的规则只依赖行本身的列与同表的其他行，部分完成也一致，下一轮按同样条件继续（INV-14）。
 - 只用 `DELETE … WHERE id IN (…) AND <同样的条件>`；不清空整表、不删表、不关外键检查与触发器。
 
@@ -37,6 +41,8 @@ from app.core.database import session_scope
 from app.models.auth import (
     AuditAction,
     AuditLog,
+    DomainOutbox,
+    OutboxStatus,
     PasswordResetToken,
     RecoveryCode,
     RefreshToken,
@@ -51,6 +57,8 @@ Mode = Literal["off", "count", "delete"]
 BATCH_SIZE: Final = 1000
 # K7–K9（ADR-0017）：三项都是 30 天。
 RETENTION: Final = dt.timedelta(days=30)
+# K10（ADR-0017）：领域 outbox 的终态行结算满 90 天（设计闸门 #862 v2 §2「注册与配置」）。
+DOMAIN_OUTBOX_RETENTION: Final = dt.timedelta(days=90)
 # 审计的实体类型；`entity_id` 是本轮 now 的 UTC 日期（app/services/audit_query.py 归入对外 id）。
 ENTITY_TYPE: Final = "data_retention_run"
 
@@ -252,6 +260,48 @@ def _count_recovery_codes(session: Session, cutoff: dt.datetime) -> int:
     )
 
 
+# --- domain_outbox：结算满 90 天的终态行 -------------------------------------------------
+#
+# 设计闸门 #862 v2 §2「四项清理的条件」第 1 条：`SENT` / `FAILED` 且 `processed_at` 严格早于截止
+# 时刻。不看 `event_type`：没有处理器的三类事件永远是 `PENDING`，自然不在条件里（K10 选 a）；
+# `PENDING` 一行都不碰（INV-13、INV-14）。`processed_at` 为空的终态行（正常不存在）比较为
+# NULL，不删、不计。结算之后没有任何路径再改这一行，选择与删除之间条件不会变。
+
+
+def _outbox_settled(cutoff: dt.datetime) -> ColumnElement[bool]:
+    return and_(
+        DomainOutbox.status.in_((OutboxStatus.SENT, OutboxStatus.FAILED)),
+        DomainOutbox.processed_at < cutoff,
+    )
+
+
+def _select_domain_outbox(session: Session, cutoff: dt.datetime, limit: int) -> list[int]:
+    ids = session.execute(
+        select(DomainOutbox.id)
+        .where(_outbox_settled(cutoff))
+        .order_by(DomainOutbox.id)
+        .limit(limit)
+    ).scalars()
+    return [int(row_id) for row_id in ids]
+
+
+def _delete_domain_outbox(session: Session, cutoff: dt.datetime, ids: Sequence[int]) -> int:
+    result = session.execute(
+        delete(DomainOutbox)
+        .where(DomainOutbox.id.in_(ids), _outbox_settled(cutoff))
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount)
+
+
+def _count_domain_outbox(session: Session, cutoff: dt.datetime) -> int:
+    return int(
+        session.execute(
+            select(func.count()).select_from(DomainOutbox).where(_outbox_settled(cutoff))
+        ).scalar_one()
+    )
+
+
 # --- 注册表 ---------------------------------------------------------------------------
 
 ITEMS: Final[tuple[PurgeItem, ...]] = (
@@ -275,6 +325,14 @@ ITEMS: Final[tuple[PurgeItem, ...]] = (
         select_ids=_select_recovery_codes,
         delete_ids=_delete_recovery_codes,
         count=_count_recovery_codes,
+    ),
+    # 设计闸门 #862 v2 §2「数据流」：R1 三项之后。
+    PurgeItem(
+        name="domain_outbox",
+        retention=DOMAIN_OUTBOX_RETENTION,
+        select_ids=_select_domain_outbox,
+        delete_ids=_delete_domain_outbox,
+        count=_count_domain_outbox,
     ),
 )
 
@@ -441,6 +499,7 @@ def run_purge(
 
 __all__ = [
     "BATCH_SIZE",
+    "DOMAIN_OUTBOX_RETENTION",
     "ENTITY_TYPE",
     "ITEMS",
     "RETENTION",

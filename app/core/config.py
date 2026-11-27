@@ -473,10 +473,14 @@ class Settings(BaseSettings):
     # `count` 只数不删、写一行 INFO，`delete` 真删并写审计。
     # 缺省全 `off`，上线先 `count` 一轮再 `delete`（设计 §8）。
     # 键名是 `retention_<项名>_mode`，项名见 app/services/retention_purge.py 的 `ITEMS`。
-    # 保留期（30 天）是代码常量，不是配置（设计 §1「我定的」第 5 条）。
+    # 保留期是代码常量，不是配置（设计 §1「我定的」第 5 条）：这三项 30 天。
     retention_refresh_tokens_mode: RetentionMode = "off"
     retention_password_reset_tokens_mode: RetentionMode = "off"
     retention_recovery_codes_mode: RetentionMode = "off"
+    # `domain_outbox`（AIH-TASK-266，设计闸门 #862 v2 §2「注册与配置」）：结算满 90 天的
+    # SENT / FAILED 行；保留期是 app/services/retention_purge.py 的 `DOMAIN_OUTBOX_RETENTION`
+    # （ADR-0017 K10）。
+    retention_domain_outbox_mode: RetentionMode = "off"
     # 每项每轮最多删这么多行（按 1000 行一批）。
     retention_max_rows_per_item: int = Field(default=50_000, ge=1_000, le=1_000_000)
 
