@@ -481,6 +481,10 @@ class Settings(BaseSettings):
     # SENT / FAILED 行；保留期是 app/services/retention_purge.py 的 `DOMAIN_OUTBOX_RETENTION`
     # （ADR-0017 K10）。
     retention_domain_outbox_mode: RetentionMode = "off"
+    # `notifications`（AIH-TASK-267，设计闸门 #862 v2 §2「注册与配置」）：写入满 731 天的门户通知，
+    # 已读未读一样；保留期是 app/services/retention_purge.py 的 `NOTIFICATIONS_RETENTION`
+    # （ADR-0017 K12）。
+    retention_notifications_mode: RetentionMode = "off"
     # 每项每轮最多删这么多行（按 1000 行一批）。
     retention_max_rows_per_item: int = Field(default=50_000, ge=1_000, le=1_000_000)
 

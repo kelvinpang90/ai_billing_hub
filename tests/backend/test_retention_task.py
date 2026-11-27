@@ -376,6 +376,7 @@ def test_the_modes_and_the_cap_are_passed_to_run_purge(
         retention_password_reset_tokens_mode=reset,
         retention_recovery_codes_mode=codes,
         retention_domain_outbox_mode="off",
+        retention_notifications_mode="off",
         retention_max_rows_per_item=2_000,
     )
 
@@ -389,6 +390,7 @@ def test_the_modes_and_the_cap_are_passed_to_run_purge(
                 "password_reset_tokens": reset,
                 "recovery_codes": codes,
                 "domain_outbox": "off",
+                "notifications": "off",
             },
             max_rows_per_item=2_000,
             now=NOW,
@@ -417,6 +419,7 @@ def test_the_mode_keys_follow_the_registered_item_names() -> None:
         "password_reset_tokens": "off",
         "recovery_codes": "off",
         "domain_outbox": "off",
+        "notifications": "off",
     }
 
 

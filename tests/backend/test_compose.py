@@ -376,6 +376,8 @@ def test_the_retention_settings_reach_backend_services(compose: dict) -> None:
         "retention_recovery_codes_mode",
         # 设计闸门 #862 v2（AIH-TASK-266）。
         "retention_domain_outbox_mode",
+        # 设计闸门 #862 v2（AIH-TASK-267）。
+        "retention_notifications_mode",
         "retention_max_rows_per_item",
     )
     for field in fields:

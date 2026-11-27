@@ -1,14 +1,14 @@
-"""Retention purge: the framework, the three authentication-token items (AIH-TASK-263) and the
-domain outbox item (AIH-TASK-266).
+"""Retention purge: the framework, the three authentication-token items (AIH-TASK-263), the
+domain outbox item (AIH-TASK-266) and the portal notifications item (AIH-TASK-267).
 
 设计闸门 #833 v7（docs/design/AIH-TASK-263-retention-purge.md）§2「清理框架」「三项清理的条件」
 「审计动作与查询」「事务边界」「时间语义」。这里只有框架与注册的清理项；Celery 任务、Beat、配置与
 MySQL 命名锁属于 AIH-TASK-264（app/tasks/retention.py），这个模块不知道它们。
 `domain_outbox` 一项照设计闸门 #862 v2（docs/design/AIH-TASK-266-retention-r2-r5.md）§2「四项清理的
-条件」第 1 条与「注册与配置」，框架本身不改。
+条件」第 1 条与「注册与配置」，`notifications` 一项照同一设计第 2 条，框架本身不改。
 
-- 注册表 `ITEMS` 只在代码里：新增一项必须过设计闸门（设计 §3 INV-5）。现在恰好四项：R1 三项与
-  `domain_outbox`。
+- 注册表 `ITEMS` 只在代码里：新增一项必须过设计闸门（设计 §3 INV-5）。现在恰好五项：R1 三项、
+  `domain_outbox` 与 `notifications`。
 - 保留期是代码常量（设计 §1「我定的」第 5 条），每项自己的常量，改它要改 ADR-0017，不是配置。
 - 每一项的规则只依赖行本身的列与同表的其他行，部分完成也一致，下一轮按同样条件继续（INV-14）。
 - 只用 `DELETE … WHERE id IN (…) AND <同样的条件>`；不清空整表、不删表、不关外键检查与触发器。
@@ -47,6 +47,7 @@ from app.models.auth import (
     RecoveryCode,
     RefreshToken,
 )
+from app.models.notifications import Notification
 from app.repositories.wallet import SYSTEM_ACTOR_ROLE
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ BATCH_SIZE: Final = 1000
 RETENTION: Final = dt.timedelta(days=30)
 # K10（ADR-0017）：领域 outbox 的终态行结算满 90 天（设计闸门 #862 v2 §2「注册与配置」）。
 DOMAIN_OUTBOX_RETENTION: Final = dt.timedelta(days=90)
+# K12（ADR-0017）：门户通知写入满 24 个月。框架的保留期是 timedelta，而任意连续 24 个日历月最长
+# 731 天（含一个 2 月 29 日）：取 731 天保证每一行都满 24 个月，最多晚一天删（设计闸门 #862 v2
+# §1「我定的」第 2 条）。
+NOTIFICATIONS_RETENTION: Final = dt.timedelta(days=731)
 # 审计的实体类型；`entity_id` 是本轮 now 的 UTC 日期（app/services/audit_query.py 归入对外 id）。
 ENTITY_TYPE: Final = "data_retention_run"
 
@@ -302,6 +307,45 @@ def _count_domain_outbox(session: Session, cutoff: dt.datetime) -> int:
     )
 
 
+# --- notifications：写入满 731 天 -------------------------------------------------------
+#
+# 设计闸门 #862 v2 §2「四项清理的条件」第 2 条：`created_at` 严格早于截止时刻，已读、未读一样
+# （`read_at` 不在条件里）。写入后只有 `read_at` 会变，选择与删除之间条件不会变；被删的通知正被
+# 标已读时，先删则标已读读回 `None`，与「标一条不存在的通知」同一结果（设计 §4「并发」）。
+# 没有入向外键；出向的 `tenants` 是 RESTRICT，删通知不受它限制。
+
+
+def _notification_expired(cutoff: dt.datetime) -> ColumnElement[bool]:
+    return Notification.created_at < cutoff
+
+
+def _select_notifications(session: Session, cutoff: dt.datetime, limit: int) -> list[int]:
+    ids = session.execute(
+        select(Notification.id)
+        .where(_notification_expired(cutoff))
+        .order_by(Notification.id)
+        .limit(limit)
+    ).scalars()
+    return [int(row_id) for row_id in ids]
+
+
+def _delete_notifications(session: Session, cutoff: dt.datetime, ids: Sequence[int]) -> int:
+    result = session.execute(
+        delete(Notification)
+        .where(Notification.id.in_(ids), _notification_expired(cutoff))
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount)
+
+
+def _count_notifications(session: Session, cutoff: dt.datetime) -> int:
+    return int(
+        session.execute(
+            select(func.count()).select_from(Notification).where(_notification_expired(cutoff))
+        ).scalar_one()
+    )
+
+
 # --- 注册表 ---------------------------------------------------------------------------
 
 ITEMS: Final[tuple[PurgeItem, ...]] = (
@@ -333,6 +377,14 @@ ITEMS: Final[tuple[PurgeItem, ...]] = (
         select_ids=_select_domain_outbox,
         delete_ids=_delete_domain_outbox,
         count=_count_domain_outbox,
+    ),
+    # 设计闸门 #862 v2 §2「数据流」：`domain_outbox` 之后。
+    PurgeItem(
+        name="notifications",
+        retention=NOTIFICATIONS_RETENTION,
+        select_ids=_select_notifications,
+        delete_ids=_delete_notifications,
+        count=_count_notifications,
     ),
 )
 
@@ -502,6 +554,7 @@ __all__ = [
     "DOMAIN_OUTBOX_RETENTION",
     "ENTITY_TYPE",
     "ITEMS",
+    "NOTIFICATIONS_RETENTION",
     "RETENTION",
     "ItemOutcome",
     "Mode",
