@@ -180,7 +180,12 @@ def statements(db: Db) -> Iterator[list[str]]:
         event.remove(db.engine, "before_cursor_execute", _capture)
 
 
-ALL_MODES = {f"retention_{item.name}_mode": "delete" for item in ITEMS}
+# 设计闸门 #862 v2 §7「R1 用例不受新项干扰」：固定只开 R1 三项，之后注册的项不在这里（缺省 `off`）。
+ALL_MODES = {
+    "retention_refresh_tokens_mode": "delete",
+    "retention_password_reset_tokens_mode": "delete",
+    "retention_recovery_codes_mode": "delete",
+}
 
 
 # --- 造数 -----------------------------------------------------------------------------
@@ -370,6 +375,10 @@ def test_the_modes_and_the_cap_are_passed_to_run_purge(
         retention_refresh_tokens_mode=refresh,
         retention_password_reset_tokens_mode=reset,
         retention_recovery_codes_mode=codes,
+        retention_domain_outbox_mode="off",
+        retention_notifications_mode="off",
+        retention_wallet_reconciliation_findings_mode="off",
+        retention_wallet_reconciliation_runs_mode="off",
         retention_max_rows_per_item=2_000,
     )
 
@@ -382,6 +391,10 @@ def test_the_modes_and_the_cap_are_passed_to_run_purge(
                 "refresh_tokens": refresh,
                 "password_reset_tokens": reset,
                 "recovery_codes": codes,
+                "domain_outbox": "off",
+                "notifications": "off",
+                "wallet_reconciliation_findings": "off",
+                "wallet_reconciliation_runs": "off",
             },
             max_rows_per_item=2_000,
             now=NOW,
@@ -409,6 +422,10 @@ def test_the_mode_keys_follow_the_registered_item_names() -> None:
         "refresh_tokens": "off",
         "password_reset_tokens": "off",
         "recovery_codes": "off",
+        "domain_outbox": "off",
+        "notifications": "off",
+        "wallet_reconciliation_findings": "off",
+        "wallet_reconciliation_runs": "off",
     }
 
 

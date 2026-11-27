@@ -11,6 +11,12 @@
 审计表只追加、拒绝 DELETE，所以只看本用例开始之后写入的审计（`id` 大于起点）。
 
 时间一律注入：`NOW` 是固定的整秒时刻，截止时刻 `CUTOFF = NOW − 30 天`。uuid 用全零占位值。
+
+设计闸门 #862 v2 §7「R1 用例不受新项干扰」（AIH-TASK-266 起）：这里开 `delete` / `count` 的模式表
+只开 R1 三项，新项（`domain_outbox` 等）一律 `off`，MySQL 测试库里别的用例留下的行不会被新项删掉；
+新项的用例在各自的文件里（`domain_outbox`：tests/backend/test_retention_outbox.py；`notifications`：
+tests/backend/test_retention_notifications.py；钱包核对的发现与运行：
+tests/backend/test_retention_reconciliation.py）。
 """
 
 from __future__ import annotations
@@ -58,9 +64,12 @@ from app.services.password_reset import request_reset
 from app.services.portal_accounts import get_portal_account, resend_invitation
 from app.services.retention_purge import (
     BATCH_SIZE,
+    DOMAIN_OUTBOX_RETENTION,
     ENTITY_TYPE,
     ITEMS,
+    NOTIFICATIONS_RETENTION,
     RETENTION,
+    WALLET_RECONCILIATION_RETENTION,
     PurgeResult,
     run_purge,
 )
@@ -75,9 +84,21 @@ CUTOFF = NOW - dt.timedelta(days=30)
 LONG_AGO = CUTOFF - dt.timedelta(days=5)
 SECOND = dt.timedelta(seconds=1)
 
-ALL_DELETE = {item.name: "delete" for item in ITEMS}
-ALL_COUNT = {item.name: "count" for item in ITEMS}
+R1 = ("refresh_tokens", "password_reset_tokens", "recovery_codes")
+# 设计闸门 #862 v2 §7「R1 用例不受新项干扰」：只开 R1 三项，新项 `off`。
+ALL_DELETE = {name: "delete" for name in R1}
+ALL_COUNT = {name: "count" for name in R1}
 ALL_OFF = {item.name: "off" for item in ITEMS}
+# R1 三项之后注册的项在这些用例里都是 `off`：结果里它们 0 行。
+NEW_ITEMS_OFF = {
+    "domain_outbox": 0,
+    "notifications": 0,
+    "wallet_reconciliation_findings": 0,
+    "wallet_reconciliation_runs": 0,
+}
+OUTBOX_CUTOFF = NOW - DOMAIN_OUTBOX_RETENTION
+NOTIFICATIONS_CUTOFF = NOW - NOTIFICATIONS_RETENTION
+RECONCILIATION_CUTOFF = NOW - WALLET_RECONCILIATION_RETENTION
 NO_CAP = 50_000
 
 _hashes = itertools.count(1)
@@ -468,9 +489,16 @@ def test_only_expired_terminal_rows_go_and_each_item_writes_one_audit(
     for name, model in TABLES.items():
         assert ids(db, model) == seeded.kept[name], name
     assert result.failed_item is None and result.error_type is None
-    assert rows_of(result) == {name: len(rows) for name, rows in seeded.gone.items()}
+    assert rows_of(result) == {
+        **{name: len(rows) for name, rows in seeded.gone.items()},
+        **NEW_ITEMS_OFF,
+    }
     assert [(o.item, o.mode, o.cutoff) for o in result.items] == [
-        (name, "delete", CUTOFF) for name in TABLES
+        *[(name, "delete", CUTOFF) for name in TABLES],
+        ("domain_outbox", "off", OUTBOX_CUTOFF),
+        ("notifications", "off", NOTIFICATIONS_CUTOFF),
+        ("wallet_reconciliation_findings", "off", RECONCILIATION_CUTOFF),
+        ("wallet_reconciliation_runs", "off", RECONCILIATION_CUTOFF),
     ]
     assert result.deleted == sum(len(rows) for rows in seeded.gone.values())
 
@@ -510,7 +538,10 @@ def test_an_unknown_mode_or_item_is_refused_before_any_work(db: Db) -> None:
     with pytest.raises(ValueError):
         purge(db, {"refresh_tokens": "remove"})
     with pytest.raises(ValueError):
-        purge(db, {"domain_outbox": "delete"})
+        # R3 不在设计闸门 #862 v2 里（§1「R3 推迟」）：`ai_usage_outbox` 不是注册项。
+        purge(db, {"ai_usage_outbox": "delete"})
+    with pytest.raises(ValueError):
+        purge(db, {"domain_outbox": "remove"})
 
     assert counts(db) == before
     assert purge_audits(db) == []
@@ -597,7 +628,12 @@ def test_a_batch_that_selects_rows_but_deletes_none_ends_that_item_only(
     assert selects == [3], "选到了却删 0 行：这一项本轮只走一批"
     assert ids(db, RefreshToken) == refresh_rows
     assert result.failed_item is None
-    assert rows_of(result) == {"refresh_tokens": 0, "password_reset_tokens": 1, "recovery_codes": 0}
+    assert rows_of(result) == {
+        "refresh_tokens": 0,
+        "password_reset_tokens": 1,
+        "recovery_codes": 0,
+        **NEW_ITEMS_OFF,
+    }
     [warning] = logged(records, "retention_purge_no_progress")
     assert warning.levelno == logging.WARNING
     assert (warning.item, warning.selected) == ("refresh_tokens", 3)
@@ -782,7 +818,12 @@ def test_a_row_exactly_at_the_cutoff_stays(db: Db) -> None:
     assert ids(db, RefreshToken) == {refresh_at}
     assert ids(db, PasswordResetToken) == {reset_at}
     assert ids(db, RecoveryCode) == {used_at, revoked_at}
-    expected = {"refresh_tokens": 1, "password_reset_tokens": 1, "recovery_codes": 2}
+    expected = {
+        "refresh_tokens": 1,
+        "password_reset_tokens": 1,
+        "recovery_codes": 2,
+        **NEW_ITEMS_OFF,
+    }
     assert rows_of(counted) == rows_of(result) == expected
 
 
@@ -865,12 +906,13 @@ def test_count_mode_deletes_nothing_and_reports_what_delete_would(
 
     assert counts(db) == before
     assert purge_audits(db) == []
-    expected = {name: len(rows) for name, rows in seeded.gone.items()}
+    gone = {name: len(rows) for name, rows in seeded.gone.items()}
+    expected = {**gone, **NEW_ITEMS_OFF}
     assert rows_of(counted) == expected
-    assert [o.mode for o in counted.items] == ["count"] * 3
+    assert [o.mode for o in counted.items] == ["count"] * 3 + ["off"] * 4
     assert counted.deleted == 0
     assert [(r.item, r.mode, r.rows) for r in logged(records, "retention_purge_item")] == [
-        (name, "count", rows) for name, rows in expected.items()
+        (name, "count", rows) for name, rows in gone.items()
     ]
 
     assert rows_of(purge(db)) == expected
@@ -892,7 +934,16 @@ def test_off_mode_runs_no_sql(db: Db, records: list[logging.LogRecord]) -> None:
         event.remove(db.engine, "before_cursor_execute", capture)
 
     assert statements == []
-    assert [(o.item, o.mode, o.rows) for o in result.items] == [(name, "off", 0) for name in TABLES]
+    assert [(o.item, o.mode, o.rows) for o in result.items] == [
+        (name, "off", 0)
+        for name in (
+            *TABLES,
+            "domain_outbox",
+            "notifications",
+            "wallet_reconciliation_findings",
+            "wallet_reconciliation_runs",
+        )
+    ]
     assert rows_of(empty) == rows_of(result)
     assert logged(records, "retention_purge_item") == []
     assert counts(db) == before
@@ -909,7 +960,7 @@ def test_running_twice_with_the_same_now_deletes_nothing_the_second_time(db: Db)
 
     again = purge(db)
 
-    assert rows_of(again) == {name: 0 for name in TABLES}
+    assert rows_of(again) == {**{name: 0 for name in TABLES}, **NEW_ITEMS_OFF}
     assert len(purge_audits(db)) == audits
     assert counts(db) == after_first
 
@@ -974,6 +1025,7 @@ def test_a_failure_in_the_second_batch_keeps_the_first_and_stops_the_round(
         "refresh_tokens": 0,
         "password_reset_tokens": 500,
         "recovery_codes": 1,
+        **NEW_ITEMS_OFF,
     }
     assert counts(db) == {name: 0 for name in TABLES}
     assert batches(db, "password_reset_tokens") == [(1, 1_000), (1, 500)]
@@ -996,19 +1048,49 @@ def test_the_purge_module_never_empties_or_removes_a_table() -> None:
     assert [word for word in FORBIDDEN if word in text] == []
 
 
-def test_exactly_three_items_are_registered_with_thirty_days() -> None:
-    assert [item.name for item in ITEMS] == [
-        "refresh_tokens",
-        "password_reset_tokens",
-        "recovery_codes",
+def test_the_purge_module_does_not_import_the_ai_module() -> None:
+    """设计闸门 #862 v2 §3「供应商成本对账与分摊」：清理不碰 `ai_usage_outbox`。"""
+    text = MODULE.read_text(encoding="utf-8")
+    assert "app.ai_api" not in text
+    assert "ai_usage_outbox" not in text
+
+
+def test_exactly_seven_items_are_registered_in_order_with_their_retention() -> None:
+    """设计闸门 #862 v2 §7「保留期常量」：AIH-TASK-268 之后恰好七项（R1 三项、`domain_outbox`、
+    `notifications`、核对发现、核对运行），顺序固定、发现在运行之前；R1 三项 30 天，领域 outbox
+    90 天，通知与核对两项 731 天；项名与配置键一一对应；没有 `ai_usage_outbox`。
+    """
+    assert [(item.name, item.retention) for item in ITEMS] == [
+        ("refresh_tokens", dt.timedelta(days=30)),
+        ("password_reset_tokens", dt.timedelta(days=30)),
+        ("recovery_codes", dt.timedelta(days=30)),
+        ("domain_outbox", dt.timedelta(days=90)),
+        ("notifications", dt.timedelta(days=731)),
+        ("wallet_reconciliation_findings", dt.timedelta(days=731)),
+        ("wallet_reconciliation_runs", dt.timedelta(days=731)),
     ]
     # 配置键（AIH-TASK-264）是 `retention_<name>_mode`，与项名一一对应。
     assert [f"retention_{item.name}_mode" for item in ITEMS] == [
         "retention_refresh_tokens_mode",
         "retention_password_reset_tokens_mode",
         "retention_recovery_codes_mode",
+        "retention_domain_outbox_mode",
+        "retention_notifications_mode",
+        "retention_wallet_reconciliation_findings_mode",
+        "retention_wallet_reconciliation_runs_mode",
     ]
+    settings = Settings()
+    assert all(getattr(settings, f"retention_{item.name}_mode") == "off" for item in ITEMS)
     assert RETENTION == dt.timedelta(days=30)
-    assert all(item.retention == RETENTION for item in ITEMS)
+    assert DOMAIN_OUTBOX_RETENTION == dt.timedelta(days=90)
+    assert NOTIFICATIONS_RETENTION == dt.timedelta(days=731)
+    assert WALLET_RECONCILIATION_RETENTION == dt.timedelta(days=731)
+    assert all(item.retention == RETENTION for item in ITEMS if item.name in TABLES)
     assert BATCH_SIZE == 1_000
-    assert {item.name for item in ITEMS} == set(TABLES)
+    assert {item.name for item in ITEMS} == set(TABLES) | {
+        "domain_outbox",
+        "notifications",
+        "wallet_reconciliation_findings",
+        "wallet_reconciliation_runs",
+    }
+    assert "ai_usage_outbox" not in {item.name for item in ITEMS}

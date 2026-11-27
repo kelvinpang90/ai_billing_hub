@@ -1,11 +1,18 @@
-"""Retention purge: the framework and the three authentication-token items (AIH-TASK-263).
+"""Retention purge: the framework, the three authentication-token items (AIH-TASK-263), the
+domain outbox item (AIH-TASK-266), the portal notifications item (AIH-TASK-267) and the wallet
+reconciliation findings and runs items (AIH-TASK-268).
 
 设计闸门 #833 v7（docs/design/AIH-TASK-263-retention-purge.md）§2「清理框架」「三项清理的条件」
-「审计动作与查询」「事务边界」「时间语义」。这里只有框架与三项清理；Celery 任务、Beat、配置与
+「审计动作与查询」「事务边界」「时间语义」。这里只有框架与注册的清理项；Celery 任务、Beat、配置与
 MySQL 命名锁属于 AIH-TASK-264（app/tasks/retention.py），这个模块不知道它们。
+`domain_outbox` 一项照设计闸门 #862 v2（docs/design/AIH-TASK-266-retention-r2-r5.md）§2「四项清理的
+条件」第 1 条与「注册与配置」，`notifications` 一项照同一设计第 2 条，
+钱包核对的发现与运行两项照第 3、4 条，框架本身不改。
 
-- 注册表 `ITEMS` 只在代码里：新增一项必须过设计闸门（设计 §3 INV-5），本任务恰好三项。
-- 保留期是代码常量（设计 §1「我定的」第 5 条），改它要改 ADR-0017，不是配置。
+- 注册表 `ITEMS` 只在代码里：新增一项必须过设计闸门（设计 §3 INV-5）。现在恰好七项：R1 三项、
+  `domain_outbox`、`notifications`、`wallet_reconciliation_findings` 与
+  `wallet_reconciliation_runs`。
+- 保留期是代码常量（设计 §1「我定的」第 5 条），每项自己的常量，改它要改 ADR-0017，不是配置。
 - 每一项的规则只依赖行本身的列与同表的其他行，部分完成也一致，下一轮按同样条件继续（INV-14）。
 - 只用 `DELETE … WHERE id IN (…) AND <同样的条件>`；不清空整表、不删表、不关外键检查与触发器。
 
@@ -37,9 +44,17 @@ from app.core.database import session_scope
 from app.models.auth import (
     AuditAction,
     AuditLog,
+    DomainOutbox,
+    OutboxStatus,
     PasswordResetToken,
     RecoveryCode,
     RefreshToken,
+)
+from app.models.notifications import Notification
+from app.models.wallet_reconciliation import (
+    ReconciliationRunStatus,
+    WalletReconciliationFinding,
+    WalletReconciliationRun,
 )
 from app.repositories.wallet import SYSTEM_ACTOR_ROLE
 
@@ -51,6 +66,15 @@ Mode = Literal["off", "count", "delete"]
 BATCH_SIZE: Final = 1000
 # K7–K9（ADR-0017）：三项都是 30 天。
 RETENTION: Final = dt.timedelta(days=30)
+# K10（ADR-0017）：领域 outbox 的终态行结算满 90 天（设计闸门 #862 v2 §2「注册与配置」）。
+DOMAIN_OUTBOX_RETENTION: Final = dt.timedelta(days=90)
+# K12（ADR-0017）：门户通知写入满 24 个月。框架的保留期是 timedelta，而任意连续 24 个日历月最长
+# 731 天（含一个 2 月 29 日）：取 731 天保证每一行都满 24 个月，最多晚一天删（设计闸门 #862 v2
+# §1「我定的」第 2 条）。
+NOTIFICATIONS_RETENTION: Final = dt.timedelta(days=731)
+# K13（ADR-0017）：钱包核对的运行与它的发现，所属运行结束满 24 个月；
+# 取 731 天，理由同上。
+WALLET_RECONCILIATION_RETENTION: Final = dt.timedelta(days=731)
 # 审计的实体类型；`entity_id` 是本轮 now 的 UTC 日期（app/services/audit_query.py 归入对外 id）。
 ENTITY_TYPE: Final = "data_retention_run"
 
@@ -252,6 +276,208 @@ def _count_recovery_codes(session: Session, cutoff: dt.datetime) -> int:
     )
 
 
+# --- domain_outbox：结算满 90 天的终态行 -------------------------------------------------
+#
+# 设计闸门 #862 v2 §2「四项清理的条件」第 1 条：`SENT` / `FAILED` 且 `processed_at` 严格早于截止
+# 时刻。不看 `event_type`：没有处理器的三类事件永远是 `PENDING`，自然不在条件里（K10 选 a）；
+# `PENDING` 一行都不碰（INV-13、INV-14）。`processed_at` 为空的终态行（正常不存在）比较为
+# NULL，不删、不计。结算之后没有任何路径再改这一行，选择与删除之间条件不会变。
+
+
+def _outbox_settled(cutoff: dt.datetime) -> ColumnElement[bool]:
+    return and_(
+        DomainOutbox.status.in_((OutboxStatus.SENT, OutboxStatus.FAILED)),
+        DomainOutbox.processed_at < cutoff,
+    )
+
+
+def _select_domain_outbox(session: Session, cutoff: dt.datetime, limit: int) -> list[int]:
+    ids = session.execute(
+        select(DomainOutbox.id)
+        .where(_outbox_settled(cutoff))
+        .order_by(DomainOutbox.id)
+        .limit(limit)
+    ).scalars()
+    return [int(row_id) for row_id in ids]
+
+
+def _delete_domain_outbox(session: Session, cutoff: dt.datetime, ids: Sequence[int]) -> int:
+    result = session.execute(
+        delete(DomainOutbox)
+        .where(DomainOutbox.id.in_(ids), _outbox_settled(cutoff))
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount)
+
+
+def _count_domain_outbox(session: Session, cutoff: dt.datetime) -> int:
+    return int(
+        session.execute(
+            select(func.count()).select_from(DomainOutbox).where(_outbox_settled(cutoff))
+        ).scalar_one()
+    )
+
+
+# --- notifications：写入满 731 天 -------------------------------------------------------
+#
+# 设计闸门 #862 v2 §2「四项清理的条件」第 2 条：`created_at` 严格早于截止时刻，已读、未读一样
+# （`read_at` 不在条件里）。写入后只有 `read_at` 会变，选择与删除之间条件不会变；被删的通知正被
+# 标已读时，先删则标已读读回 `None`，与「标一条不存在的通知」同一结果（设计 §4「并发」）。
+# 没有入向外键；出向的 `tenants` 是 RESTRICT，删通知不受它限制。
+
+
+def _notification_expired(cutoff: dt.datetime) -> ColumnElement[bool]:
+    return Notification.created_at < cutoff
+
+
+def _select_notifications(session: Session, cutoff: dt.datetime, limit: int) -> list[int]:
+    ids = session.execute(
+        select(Notification.id)
+        .where(_notification_expired(cutoff))
+        .order_by(Notification.id)
+        .limit(limit)
+    ).scalars()
+    return [int(row_id) for row_id in ids]
+
+
+def _delete_notifications(session: Session, cutoff: dt.datetime, ids: Sequence[int]) -> int:
+    result = session.execute(
+        delete(Notification)
+        .where(Notification.id.in_(ids), _notification_expired(cutoff))
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount)
+
+
+def _count_notifications(session: Session, cutoff: dt.datetime) -> int:
+    return int(
+        session.execute(
+            select(func.count()).select_from(Notification).where(_notification_expired(cutoff))
+        ).scalar_one()
+    )
+
+
+# --- 钱包核对的发现与运行：所属运行结束满 731 天 -------------------------------------
+#
+# 设计闸门 #862 v2 §2「四项清理的条件」第 3、4 条。「可删运行」= 已结束
+# （`COMPLETED` / `ABANDONED`）、`finished_at` 严格早于截止时刻、且 `id` 小于
+# `COMPLETED` 里最大的 `id`：最近一次 `COMPLETED` 与比它新的运行永不删
+# （§1「我定的」第 4 条，与告警按 `id` 取「最近完成」对齐）。没有任何 `COMPLETED`
+# 时 `MAX` 为 NULL，`id < NULL` 不成立，一行不删。发现跟着运行的 `finished_at`
+# 走，不看自己的 `checked_at`。运行一项另要求没有发现指向它：只开运行一项时
+# 不会撞上 `fk_wallet_reconciliation_findings_run`（RESTRICT）。
+# `MAX(id)` 在 `select_ids` 与 `DELETE` 各求一次：并发完成一次新运行只会让它
+# 变大，被删的行在 `DELETE` 时刻都满足 `id < 当时的 MAX(id)`（设计 §4「并发」）。
+
+
+def _latest_completed_run_id() -> ColumnElement[Any]:
+    # `correlate(None)`：嵌进同表的 `SELECT id` 时不要被自动关联掉 FROM。
+    return (
+        select(func.max(WalletReconciliationRun.id))
+        .where(WalletReconciliationRun.status == ReconciliationRunStatus.COMPLETED)
+        .correlate(None)
+        .scalar_subquery()
+    )
+
+
+def _latest_completed_run_id_derived() -> ColumnElement[Any]:
+    # 派生表先物化（带聚合，不会被合并进外层），绕开 MySQL「DELETE 的子查询
+    # 不能直接引用目标表」的限制（与刷新令牌的 `live` 同一个理由）。
+    # 运行一项的 `select_ids`、`count` 与 `DELETE` 都用它。
+    latest = (
+        select(func.max(WalletReconciliationRun.id).label("latest"))
+        .where(WalletReconciliationRun.status == ReconciliationRunStatus.COMPLETED)
+        .correlate(None)
+        .subquery("latest_completed")
+    )
+    return select(latest.c.latest).scalar_subquery()
+
+
+def _run_purgeable(
+    cutoff: dt.datetime, latest_completed: ColumnElement[Any]
+) -> ColumnElement[bool]:
+    return and_(
+        WalletReconciliationRun.status.in_(
+            (ReconciliationRunStatus.COMPLETED, ReconciliationRunStatus.ABANDONED)
+        ),
+        WalletReconciliationRun.finished_at < cutoff,
+        WalletReconciliationRun.id < latest_completed,
+    )
+
+
+def _finding_expired(cutoff: dt.datetime) -> ColumnElement[bool]:
+    return WalletReconciliationFinding.run_id.in_(
+        select(WalletReconciliationRun.id).where(_run_purgeable(cutoff, _latest_completed_run_id()))
+    )
+
+
+def _select_reconciliation_findings(session: Session, cutoff: dt.datetime, limit: int) -> list[int]:
+    ids = session.execute(
+        select(WalletReconciliationFinding.id)
+        .where(_finding_expired(cutoff))
+        .order_by(WalletReconciliationFinding.id)
+        .limit(limit)
+    ).scalars()
+    return [int(row_id) for row_id in ids]
+
+
+def _delete_reconciliation_findings(
+    session: Session, cutoff: dt.datetime, ids: Sequence[int]
+) -> int:
+    result = session.execute(
+        delete(WalletReconciliationFinding)
+        .where(WalletReconciliationFinding.id.in_(ids), _finding_expired(cutoff))
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount)
+
+
+def _count_reconciliation_findings(session: Session, cutoff: dt.datetime) -> int:
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(WalletReconciliationFinding)
+            .where(_finding_expired(cutoff))
+        ).scalar_one()
+    )
+
+
+def _run_expired(cutoff: dt.datetime) -> ColumnElement[bool]:
+    has_findings = (
+        select(WalletReconciliationFinding.id)
+        .where(WalletReconciliationFinding.run_id == WalletReconciliationRun.id)
+        .exists()
+    )
+    return and_(_run_purgeable(cutoff, _latest_completed_run_id_derived()), ~has_findings)
+
+
+def _select_reconciliation_runs(session: Session, cutoff: dt.datetime, limit: int) -> list[int]:
+    ids = session.execute(
+        select(WalletReconciliationRun.id)
+        .where(_run_expired(cutoff))
+        .order_by(WalletReconciliationRun.id)
+        .limit(limit)
+    ).scalars()
+    return [int(row_id) for row_id in ids]
+
+
+def _delete_reconciliation_runs(session: Session, cutoff: dt.datetime, ids: Sequence[int]) -> int:
+    result = session.execute(
+        delete(WalletReconciliationRun)
+        .where(WalletReconciliationRun.id.in_(ids), _run_expired(cutoff))
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount)
+
+
+def _count_reconciliation_runs(session: Session, cutoff: dt.datetime) -> int:
+    return int(
+        session.execute(
+            select(func.count()).select_from(WalletReconciliationRun).where(_run_expired(cutoff))
+        ).scalar_one()
+    )
+
+
 # --- 注册表 ---------------------------------------------------------------------------
 
 ITEMS: Final[tuple[PurgeItem, ...]] = (
@@ -275,6 +501,38 @@ ITEMS: Final[tuple[PurgeItem, ...]] = (
         select_ids=_select_recovery_codes,
         delete_ids=_delete_recovery_codes,
         count=_count_recovery_codes,
+    ),
+    # 设计闸门 #862 v2 §2「数据流」：R1 三项之后。
+    PurgeItem(
+        name="domain_outbox",
+        retention=DOMAIN_OUTBOX_RETENTION,
+        select_ids=_select_domain_outbox,
+        delete_ids=_delete_domain_outbox,
+        count=_count_domain_outbox,
+    ),
+    # 设计闸门 #862 v2 §2「数据流」：`domain_outbox` 之后。
+    PurgeItem(
+        name="notifications",
+        retention=NOTIFICATIONS_RETENTION,
+        select_ids=_select_notifications,
+        delete_ids=_delete_notifications,
+        count=_count_notifications,
+    ),
+    # 设计闸门 #862 v2 §2「数据流」：`notifications` 之后，发现在前、运行在后。
+    # 任何一项抛错本轮停止，发现那一项出错不会让运行那一项在同一轮里撞外键。
+    PurgeItem(
+        name="wallet_reconciliation_findings",
+        retention=WALLET_RECONCILIATION_RETENTION,
+        select_ids=_select_reconciliation_findings,
+        delete_ids=_delete_reconciliation_findings,
+        count=_count_reconciliation_findings,
+    ),
+    PurgeItem(
+        name="wallet_reconciliation_runs",
+        retention=WALLET_RECONCILIATION_RETENTION,
+        select_ids=_select_reconciliation_runs,
+        delete_ids=_delete_reconciliation_runs,
+        count=_count_reconciliation_runs,
     ),
 )
 
@@ -441,9 +699,12 @@ def run_purge(
 
 __all__ = [
     "BATCH_SIZE",
+    "DOMAIN_OUTBOX_RETENTION",
     "ENTITY_TYPE",
     "ITEMS",
+    "NOTIFICATIONS_RETENTION",
     "RETENTION",
+    "WALLET_RECONCILIATION_RETENTION",
     "ItemOutcome",
     "Mode",
     "PurgeItem",

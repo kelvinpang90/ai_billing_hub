@@ -15317,7 +15317,7 @@ tasks:
     title: 数据留存清理 R2：领域 outbox 结算满 90 天的终态行到期清理与开关
     purpose: >-
       按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §2「四项清理的条件」第 1 条与「注册与配置」：在 app/services/retention_purge.py 的注册表里追加 domain_outbox 一项（SENT / FAILED 且 processed_at 早于截止时刻，保留期是代码常量 90 天，PENDING 一律不碰），app/core/config.py 加 retention_domain_outbox_mode（off / count / delete，缺省 off）。清理框架（run_purge、批次、审计、隔离级别、Celery 任务、Beat）不改。docker-compose.yml 的 x-backend.environment 与 .env.example 已由管理员在 #863 转发并写出四个新键（缺省 off），本任务不改它们。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） 逐条一致，以 §1「我定的」、§2「四项清理的条件」第 1 条「注册与配置」「事务边界」、§3、§4、§5 与 §7 中领域 outbox 各行、「边界值」「保留期常量」「count 与 off」「批与上限」「幂等重放」「锁范围（MySQL）」「R1 用例不受新项干扰」「安全」「配置与转发」各行为准；以下一处以本契约为准（登记预审定，不算冲突）：设计 §3 INV-5 一行与 §7「保留期常量」「count 与 off」两行写的「恰好七项」「四项各 count / off」是 AIH-TASK-268 完成后的终态，本任务注册后注册测试断言恰好四项（R1 三项加 domain_outbox），「count 与 off」只覆盖本项。除此之外，设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
@@ -15372,14 +15372,14 @@ tasks:
     title: 数据留存清理 R5 前半：门户通知写入满 24 个月的到期清理与开关
     purpose: >-
       按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §2「四项清理的条件」第 2 条与「注册与配置」：在 app/services/retention_purge.py 追加 notifications 一项（created_at 早于截止时刻，保留期是代码常量 731 天，已读未读一样），app/core/config.py 加 retention_notifications_mode。docker-compose.yml 的 x-backend.environment 与 .env.example 已由管理员在 #863 转发并写出四个新键（缺省 off），本任务不改它们；关户客户的通知随 K4 删除属于 R4，不在本任务。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-266
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） 逐条一致，以 §1「我定的」第 2 条、§2「四项清理的条件」第 2 条「注册与配置」、§3「门户通知」「门户通知翻页（v2 更正）」「通知幂等」三行、§4 的并发（标已读竞争）、§5 与 §7「通知正常路径」「通知翻页」「通知标已读竞争」及本项的「边界值」「count 与 off」「配置与转发」各行为准；以下一处以本契约为准（登记预审定，不算冲突）：设计 §3 INV-5 一行与 §7「保留期常量」「count 与 off」两行的「恰好七项」「四项」是 AIH-TASK-268 完成后的终态，本任务注册后注册测试断言恰好五项，「count 与 off」只覆盖本项。除此之外，设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'app/services/retention_purge.py：新增 NOTIFICATIONS_RETENTION = 731 天（注释写明为什么是 731 天：任意连续 24 个日历月最长 731 天）与 notifications 一项，条件 created_at 严格早于 cutoff，DELETE 的 WHERE 重复条件；追加在 domain_outbox 之后。已有各项与框架不改'
       - 'app/core/config.py：retention_notifications_mode（RetentionMode，缺省 off）；tests/backend/test_config.py 与 tests/backend/test_compose.py 的字段清单加这一项；docs/deployment.md 配置表加 BILLING_RETENTION_NOTIFICATIONS_MODE 一行'
-      - '测试：新增 tests/backend/test_retention_notifications.py（SQLite 与 MySQL 都跑），覆盖设计 §7「通知正常路径」「通知标已读竞争」与本项的「边界值」「count 与 off」。设计 §7「通知翻页」一行（含游标那条被删后 422 cursor、从第一页重翻、未读数只计剩下的）走真实接口（登记预审定）：加在 tests/backend/test_customer_notifications_api.py 里，沿用该文件的 both 夹具与 add、page、walk、cursor_error 等辅助函数，清理调用 run_purge(portal.factory, modes 只开 notifications 一项为 delete, …)，不改该文件已有的用例；要让五条里最早两条早于截止时刻，给 add 加一个仅限关键字的参数 created_at，缺省值仍是 CREATED（已有用例的行为不变），不另写回填 UPDATE（登记预审定）。tests/backend/test_retention_task.py 里写死 R1 三项的模式表与键清单（「count 与 delete 模式把配置传给 run_purge」与「配置键跟随注册项名」两条）补上本任务的 notifications 一项（模式 off），其余断言不改、不放宽。tests/backend/test_retention_purge.py 的注册测试改为恰好五项；已有用例的模式表新项为 off。MySQL 上每个用例前后清空 notifications 并删掉本文件邮箱域的租户；后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入'
+      - '测试：新增 tests/backend/test_retention_notifications.py（SQLite 与 MySQL 都跑），覆盖设计 §7「通知正常路径」「通知标已读竞争」与本项的「边界值」「count 与 off」。设计 §7「通知翻页」一行（含游标那条被删后 422 cursor、从第一页重翻、未读数只计剩下的）走真实接口（登记预审定）：加在 tests/backend/test_customer_notifications_api.py 里，沿用该文件的 both 夹具与 add、page、walk、cursor_error 等辅助函数，清理调用 run_purge(portal.factory, modes 只开 notifications 一项为 delete, …)，不改该文件已有的用例；要让五条里最早两条早于截止时刻，给 add 加一个仅限关键字的参数 created_at，缺省值仍是 CREATED（已有用例的行为不变），不另写回填 UPDATE（登记预审定）。tests/backend/test_retention_task.py 里写死 R1 三项的模式表与键清单（「count 与 delete 模式把配置传给 run_purge」与「配置键跟随注册项名」两条）补上本任务的 notifications 一项（模式 off），其余断言不改、不放宽。tests/backend/test_retention_outbox.py 的 test_only_sent_or_failed_rows_settled_ninety_days_ago_go 把整轮结果的 rows_of 与一个写死四项的字典整体比较，而关着的项也会出现在结果里（行数 0），所以给这个期望字典补上 "notifications": 0，该文件其余内容不改（run ca00908a 报出）。tests/backend/test_retention_purge.py 的注册测试改为恰好五项；已有用例的模式表新项为 off。MySQL 上每个用例前后清空 notifications 并删掉本文件邮箱域的租户；后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入'
       - '设计 §7 的「严格早于改为早于或等于」变异对本项手工做过并在 PR 里写明变红的用例'
       - '只改本任务 allowed_change_paths 里的文件；不改 app/repositories/notifications.py、app/api/customer.py、app/tasks/、app/ai_api/ 与 alembic/；不改 docker-compose 文件与 .env.example；不出现 TRUNCATE、DROP、FOREIGN_KEY_CHECKS；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #862'
     allowed_change_paths:
@@ -15392,6 +15392,7 @@ tasks:
       - tests/backend/test_customer_notifications_api.py
       - tests/backend/test_config.py
       - tests/backend/test_compose.py
+      - tests/backend/test_retention_outbox.py
     allowed_commands:
       - docs.check
       - policy.check
@@ -15427,14 +15428,14 @@ tasks:
     title: 数据留存清理 R5 后半：钱包核对发现与运行结束满 24 个月的到期清理与两个开关
     purpose: >-
       按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §2「四项清理的条件」第 3、4 条与「注册与配置」：在 app/services/retention_purge.py 追加 wallet_reconciliation_findings 与 wallet_reconciliation_runs 两项（发现在前；所属运行 COMPLETED / ABANDONED、结束满 731 天、id 小于最大的 COMPLETED id；运行一项还要求没有发现指向它），app/core/config.py 加两个开关。最近一次 COMPLETED 与比它新的运行永不删。docker-compose.yml 的 x-backend.environment 与 .env.example 已由管理员在 #863 转发并写出四个新键（缺省 off），本任务不改它们。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-267
     acceptance_criteria:
       - '实现与 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） 逐条一致，以 §1「我定的」第 1、2、4 条、§2「数据流」的注册顺序与「四项清理的条件」第 3、4 条「注册与配置」、§3「核对告警」「核对外键」两行、§4 的并发（MAX(id) 与发现、运行之间）、§5 与 §7 中核对各行及本项的「边界值」「count 与 off」「配置与转发」各行为准；设计与本契约冲突时以设计文件为准，发现设计本身有问题时停下并在 PR 里说明，不自行改设计'
       - 'app/services/retention_purge.py：新增 WALLET_RECONCILIATION_RETENTION = 731 天与两项，追加在 notifications 之后、发现在前运行在后；可删运行的条件逐字照设计：status IN (COMPLETED, ABANDONED) AND finished_at 严格早于 cutoff AND id 小于 status 为 COMPLETED 的最大 id（没有 COMPLETED 时一行不删）；发现一项 = run_id 属于可删运行；运行一项 = 可删运行 AND 没有发现指向它。运行一项的 DELETE 里引用目标表自身的 MAX(id) 照设计写成派生表（绕开 MySQL 不能在 DELETE 子查询里直接引用目标表的限制），select_ids 与 count 用同一个表达式；两项的 DELETE 都重复整条条件。已有各项与框架不改'
       - 'app/core/config.py：retention_wallet_reconciliation_findings_mode 与 retention_wallet_reconciliation_runs_mode（RetentionMode，缺省 off）；tests/backend/test_config.py 与 tests/backend/test_compose.py 的字段清单加这两项；docs/deployment.md 配置表加两行，并写一句两项一起切换，只开运行一项时有发现的运行不删'
-      - '测试：新增 tests/backend/test_retention_reconciliation.py（SQLite 与 MySQL 都跑），覆盖设计 §7「核对：最近一次 COMPLETED」「核对：正常路径」「核对：只开运行一项」「核对：没有任何 COMPLETED」与两项的「边界值」「count 与 off」；「正常路径」在清理前后各调用一次 app/services/alerts.py 的核对告警函数，断言结果相同。tests/backend/test_retention_purge.py 的注册测试改为恰好七项、顺序与保留期照设计 §7「保留期常量」一行；已有用例的模式表新项为 off。tests/backend/test_retention_task.py 里写死 R1 三项的模式表与键清单（「count 与 delete 模式把配置传给 run_purge」与「配置键跟随注册项名」两条）补上本任务的两项（模式 off），其余断言不改、不放宽。MySQL 上每个用例前后先清空 wallet_reconciliation_findings 再清空 wallet_reconciliation_runs（无触发器；发现以 RESTRICT 指向运行）；后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入'
+      - '测试：新增 tests/backend/test_retention_reconciliation.py（SQLite 与 MySQL 都跑），覆盖设计 §7「核对：最近一次 COMPLETED」「核对：正常路径」「核对：只开运行一项」「核对：没有任何 COMPLETED」与两项的「边界值」「count 与 off」；「正常路径」在清理前后各调用一次 app/services/alerts.py 的核对告警函数，断言结果相同。tests/backend/test_retention_purge.py 的注册测试改为恰好七项、顺序与保留期照设计 §7「保留期常量」一行；已有用例的模式表新项为 off。tests/backend/test_retention_task.py 里写死 R1 三项的模式表与键清单（「count 与 delete 模式把配置传给 run_purge」与「配置键跟随注册项名」两条）补上本任务的两项（模式 off），其余断言不改、不放宽。tests/backend/test_retention_outbox.py 的 test_only_sent_or_failed_rows_settled_ninety_days_ago_go 的整轮结果期望字典同样补上 "wallet_reconciliation_findings": 0 与 "wallet_reconciliation_runs": 0，该文件其余内容不改。tests/backend/test_retention_notifications.py 的 test_only_notifications_written_731_days_ago_go_read_or_unread 同样把整轮结果的 rows_of 与一个写死五项的字典整体比较，期望字典也补上这两项（值 0），该文件其余内容不改（run cb1b3ee7 报出）。MySQL 上每个用例前后先清空 wallet_reconciliation_findings 再清空 wallet_reconciliation_runs（无触发器；发现以 RESTRICT 指向运行）；后端测试照 CLAUDE.md「写后端测试的约定」；需要真 MySQL 的场景在 BILLING_TEST_DATABASE_URL 未设置时 skip（CI 必跑），CI 上不出现 skipped；时间一律注入'
       - '设计 §7 的变异里与本项有关的三个逐个手工做过并在 PR 里写明各自变红的用例：去掉 id 小于最大 COMPLETED id 的条件；去掉运行一项的 NOT EXISTS 发现；把严格早于改为早于或等于'
       - '只改本任务 allowed_change_paths 里的文件；不改 app/services/wallet_reconciliation.py、app/services/alerts.py、app/tasks/、app/ai_api/ 与 alembic/；不改 docker-compose 文件与 .env.example；不出现 TRUNCATE、DROP、FOREIGN_KEY_CHECKS；不装依赖；不对任何数据库执行迁移；不连生产；不改 .platform/ 与 .github/；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #862'
     allowed_change_paths:
@@ -15446,6 +15447,8 @@ tasks:
       - tests/backend/test_retention_task.py
       - tests/backend/test_config.py
       - tests/backend/test_compose.py
+      - tests/backend/test_retention_outbox.py
+      - tests/backend/test_retention_notifications.py
     allowed_commands:
       - docs.check
       - policy.check
@@ -15478,16 +15481,16 @@ tasks:
       - bypass_review
 
   - id: AIH-TASK-269
-    title: 数据留存清理 R2、R5 收尾：运维手册扩到七项，数据治理文档标明交付
+    title: 数据留存清理 R2、R5 收尾：运维手册扩到七项，数据治理文档标明交付与 R3 推迟
     purpose: >-
-      按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §8 与 §11 AIH-TASK-269：docs/runbook.md「数据留存清理」一节从三项扩到七项；docs/data-governance.md 第 4.6、4.8 节与第 12 节标明 R2、R5 已交付，R3、R4 不做已由 ADR-0018 写进第 4.7 节与第 12 节，本任务不改这几处；docs/TODO.md 的「只增不减」一行勾掉。只改文档。
-    status: ready
+      按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §8 与 §11 AIH-TASK-269：docs/runbook.md「数据留存清理」一节从三项扩到七项；docs/data-governance.md 第 4.6、4.8 节与第 12 节标明 R2、R5 已交付，第 4.7 节与第 12 节写明 R3 推迟的理由（ai_usage_outbox 是供应商成本对账判定 AI 模块来源的依据，须先另过闸门加来源标记）；docs/TODO.md 的「只增不减」一行勾掉。只改文档。
+    status: done
     depends_on:
       - AIH-TASK-268
     acceptance_criteria:
       - '内容以 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §2、§5、§8、§10 与已合并的 app/services/retention_purge.py、app/core/config.py、docs/deployment.md 为准；只写仓库里已有的配置键、日志事件名、审计动作与命令，引用写 文件:行 或章节锚点；涉及数据库的命令只给只读查询'
-      - 'docs/runbook.md「数据留存清理」一节：清理项表从三项扩到七项（每项写表、条件、保留期与开关键）；上线步骤补一句四个新开关的转发已在 docker-compose.yml，改 .env 后重建 worker 与 beat；怎么发现一节补「某项开了却一轮没有 retention_purge_item」的查法；影响什么补：门户通知满 24 个月消失，客户翻页时游标那条恰好被删会得到 422 cursor、从第一页重翻即可；钱包核对的最近一次 COMPLETED 与比它新的运行永不删、核对连续 24 个月没有正常完成时的说明（设计 §10 假设第 2 条）；绝不能做什么补：不手工删 ai_usage_outbox 的行（供应商成本对账与分摊靠它判定 AI 模块来源，ADR-0018 因此决定 R3 不做），不手工删 PENDING 的领域 outbox 行'
-      - 'docs/data-governance.md：第 4.6、4.8 节与第 12 节的 R2、R5 行注明已由 AIH-TASK-266..268 交付（设计闸门 #862），保留期不改；第 4.7 节与第 12 节的 R3、R4 行已由 ADR-0018 改写，不改；第 11 节第 9 条注明无处理器的 PENDING 行按 K10 选 a 维持永久保留；修订记录补一行'
+      - 'docs/runbook.md「数据留存清理」一节：清理项表从三项扩到七项（每项写表、条件、保留期与开关键）；上线步骤补一句四个新开关的转发已在 docker-compose.yml，改 .env 后重建 worker 与 beat；怎么发现一节补「某项开了却一轮没有 retention_purge_item」的查法；影响什么补：门户通知满 24 个月消失，客户翻页时游标那条恰好被删会得到 422 cursor、从第一页重翻即可；钱包核对的最近一次 COMPLETED 与比它新的运行永不删、核对连续 24 个月没有正常完成时的说明（设计 §10 假设第 2 条）；绝不能做什么补：不手工删 ai_usage_outbox 的行（供应商成本对账与分摊靠它判定 AI 模块来源，R3 推迟的原因），不手工删 PENDING 的领域 outbox 行'
+      - 'docs/data-governance.md：第 4.6、4.8 节与第 12 节的 R2、R5 行注明已由 AIH-TASK-266..268 交付（设计闸门 #862），保留期不改；第 4.7 节与第 12 节的 R3 行写明推迟：ai_usage_outbox 的行是 app/repositories/provider_cost_reconciliations.py 的 ai_module_origin 判定 AI 模块来源的唯一依据（设计 #755 §10 假设 2），须先另过闸门加持久来源标记再按 K11 清理；第 11 节第 9 条注明无处理器的 PENDING 行按 K10 选 a 维持永久保留；修订记录补一行'
       - 'docs/TODO.md：「password_reset_tokens 与 domain_outbox 都只增不减」一行改为 [x]，行末补一句 domain_outbox 已由 AIH-TASK-266 按 K10 清理；规划块不改'
       - '不改代码、测试与 .platform/；不写主机名、IP、地址、邮箱、凭据；复选框只允许 [ ] / [x]；不改 planning-v1 块；allowed_commands 里的检查全部零退出，skipped 如实报告且不算 passed；以 Draft PR 交付，不合并、不直推。PR 正文的「设计闸门」写 #862'
     allowed_change_paths:

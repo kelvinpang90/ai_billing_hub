@@ -269,7 +269,8 @@ AI 模块合并后才可签发 AI 密钥；在此之前必须先在宿主机创�
 
 依据：[AIH-TASK-263-retention-purge.md](design/AIH-TASK-263-retention-purge.md) §2「任务与配置」、§8「上线顺序」。
 Beat 条目 `retention-purge` 每天 20:17 UTC（马来西亚 04:17，排在 03:17 的全量备份与 03:47 的日志外送之后）跑一轮，
-`expires` 3600 秒；MySQL 命名锁保证同一时刻只有一个实例在跑。保留期（30 天）是代码常量，不是配置。
+`expires` 3600 秒；MySQL 命名锁保证同一时刻只有一个实例在跑。保留期按项是代码常量（`app/services/retention_purge.py`），不是配置：
+`refresh_tokens`、`password_reset_tokens`、`recovery_codes` 30 天；`domain_outbox` 90 天；`notifications` 731 天（24 个月，设计闸门 #862 v2，[AIH-TASK-266-retention-r2-r5.md](design/AIH-TASK-266-retention-r2-r5.md)）。
 
 配置均以 `BILLING_` 开头（`app/core/config.py`），启动时由 `Settings` 校验，取值不合法时 api、worker、beat 都起不来：
 
@@ -278,10 +279,15 @@ Beat 条目 `retention-purge` 每天 20:17 UTC（马来西亚 04:17，排在 03:
 | `BILLING_RETENTION_REFRESH_TOKENS_MODE` | `off` | `off` / `count` / `delete`；`refresh_tokens` 按家族清理（家族里所有行都过期满 30 天）。`off` 不碰这张表，`count` 只数不删、写一行 INFO 日志，`delete` 真删并按批写审计 |
 | `BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE` | `off` | `off` / `count` / `delete`；`password_reset_tokens`（含邀请）过期满 30 天的行 |
 | `BILLING_RETENTION_RECOVERY_CODES_MODE` | `off` | `off` / `count` / `delete`；用掉或吊销满 30 天的 `recovery_codes` |
+| `BILLING_RETENTION_DOMAIN_OUTBOX_MODE` | `off` | `off` / `count` / `delete`；`SENT` / `FAILED` 且结算（`processed_at`）满 90 天的 `domain_outbox` 行；`PENDING` 一行都不动（含没有处理器的事件） |
+| `BILLING_RETENTION_NOTIFICATIONS_MODE` | `off` | `off` / `count` / `delete`；写入（`created_at`）满 731 天的门户通知 `notifications`，已读、未读一样。客户翻页时游标那条恰好被删，下一页返回 422 `cursor`，从第一页重翻即可 |
+| `BILLING_RETENTION_WALLET_RECONCILIATION_FINDINGS_MODE` | `off` | `off` / `count` / `delete`；所属核对运行结束（`finished_at`）满 731 天、状态 `COMPLETED` / `ABANDONED`、且运行的 `id` 小于最近一次 `COMPLETED` 的 `id` 的 `wallet_reconciliation_findings`；最近一次 `COMPLETED` 与比它新的运行的发现一行不动 |
+| `BILLING_RETENTION_WALLET_RECONCILIATION_RUNS_MODE` | `off` | `off` / `count` / `delete`；同上条件、且没有发现指向它的 `wallet_reconciliation_runs`；`RUNNING`、最近一次 `COMPLETED` 与比它新的运行一行不动 |
 | `BILLING_RETENTION_MAX_ROWS_PER_ITEM` | `50000` | 1000–1000000；每项每轮最多删这么多行（每批最多 1000 行一个短事务），余下的下一轮继续 |
 
-三项缺省 `off`，合并即部署后什么都不发生。⚠️ **每项先设为 `count` 跑一轮、看日志里的行数合理后再改为 `delete`**（见 [runbook.md](runbook.md)）；
+每项缺省 `off`，合并即部署后什么都不发生。⚠️ **每项先设为 `count` 跑一轮、看日志里的行数合理后再改为 `delete`**（见 [runbook.md](runbook.md)）；
 改 `.env` 后要重建 worker 与 beat 容器才生效。
+钱包核对的发现与运行两项一起切换（同一轮里发现先删、运行后删）；只开运行一项时，有发现的运行不删。
 
 ---
 

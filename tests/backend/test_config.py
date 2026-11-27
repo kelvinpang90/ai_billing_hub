@@ -606,17 +606,28 @@ RETENTION_MODE_FIELDS = (
     "retention_refresh_tokens_mode",
     "retention_password_reset_tokens_mode",
     "retention_recovery_codes_mode",
+    # 设计闸门 #862 v2 §2「注册与配置」（AIH-TASK-266）。
+    "retention_domain_outbox_mode",
+    # 设计闸门 #862 v2 §2「注册与配置」（AIH-TASK-267）。
+    "retention_notifications_mode",
+    # 设计闸门 #862 v2 §2「注册与配置」（AIH-TASK-268）。
+    "retention_wallet_reconciliation_findings_mode",
+    "retention_wallet_reconciliation_runs_mode",
 )
 
 
 def test_the_retention_settings_default_to_off_and_fifty_thousand_rows() -> None:
-    """设计闸门 #833 v7 §2「任务与配置」。
+    """设计闸门 #833 v7 §2「任务与配置」、#862 v2 §1「可观察的完成标准」第 4 条。
 
-    三项缺省 `off`（部署后什么都不发生，§8），每轮上限 50000。
+    每项缺省 `off`（部署后什么都不发生，§8），每轮上限 50000。
     """
     settings = Settings()
 
-    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == ["off", "off", "off"]
+    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == ["off"] * 7
+    assert settings.retention_domain_outbox_mode == "off"
+    assert settings.retention_notifications_mode == "off"
+    assert settings.retention_wallet_reconciliation_findings_mode == "off"
+    assert settings.retention_wallet_reconciliation_runs_mode == "off"
     assert settings.retention_max_rows_per_item == 50_000
 
 
@@ -648,16 +659,40 @@ def test_the_retention_settings_come_from_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("BILLING_RETENTION_REFRESH_TOKENS_MODE", "count")
     monkeypatch.setenv("BILLING_RETENTION_PASSWORD_RESET_TOKENS_MODE", "delete")
     monkeypatch.setenv("BILLING_RETENTION_RECOVERY_CODES_MODE", "off")
+    monkeypatch.setenv("BILLING_RETENTION_DOMAIN_OUTBOX_MODE", "count")
+    monkeypatch.setenv("BILLING_RETENTION_NOTIFICATIONS_MODE", "delete")
+    monkeypatch.setenv("BILLING_RETENTION_WALLET_RECONCILIATION_FINDINGS_MODE", "count")
+    monkeypatch.setenv("BILLING_RETENTION_WALLET_RECONCILIATION_RUNS_MODE", "delete")
     monkeypatch.setenv("BILLING_RETENTION_MAX_ROWS_PER_ITEM", "2000")
 
     settings = Settings()
 
-    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == ["count", "delete", "off"]
+    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == [
+        "count",
+        "delete",
+        "off",
+        "count",
+        "delete",
+        "count",
+        "delete",
+    ]
     assert settings.retention_max_rows_per_item == 2000
 
 
-def test_an_unknown_retention_mode_in_the_environment_fails_validation(monkeypatch) -> None:
-    monkeypatch.setenv("BILLING_RETENTION_RECOVERY_CODES_MODE", "on")
+@pytest.mark.parametrize(
+    "key",
+    [
+        "BILLING_RETENTION_RECOVERY_CODES_MODE",
+        "BILLING_RETENTION_DOMAIN_OUTBOX_MODE",
+        "BILLING_RETENTION_NOTIFICATIONS_MODE",
+        "BILLING_RETENTION_WALLET_RECONCILIATION_FINDINGS_MODE",
+        "BILLING_RETENTION_WALLET_RECONCILIATION_RUNS_MODE",
+    ],
+)
+def test_an_unknown_retention_mode_in_the_environment_fails_validation(
+    monkeypatch, key: str
+) -> None:
+    monkeypatch.setenv(key, "on")
 
     with pytest.raises(ValidationError):
         Settings()
