@@ -14,7 +14,8 @@
 
 设计闸门 #862 v2 §7「R1 用例不受新项干扰」（AIH-TASK-266 起）：这里开 `delete` / `count` 的模式表
 只开 R1 三项，新项（`domain_outbox` 等）一律 `off`，MySQL 测试库里别的用例留下的行不会被新项删掉；
-新项的用例在各自的文件里（`domain_outbox`：tests/backend/test_retention_outbox.py）。
+新项的用例在各自的文件里（`domain_outbox`：tests/backend/test_retention_outbox.py；`notifications`：
+tests/backend/test_retention_notifications.py）。
 """
 
 from __future__ import annotations
@@ -65,6 +66,7 @@ from app.services.retention_purge import (
     DOMAIN_OUTBOX_RETENTION,
     ENTITY_TYPE,
     ITEMS,
+    NOTIFICATIONS_RETENTION,
     RETENTION,
     PurgeResult,
     run_purge,
@@ -86,8 +88,9 @@ ALL_DELETE = {name: "delete" for name in R1}
 ALL_COUNT = {name: "count" for name in R1}
 ALL_OFF = {item.name: "off" for item in ITEMS}
 # R1 三项之后注册的项在这些用例里都是 `off`：结果里它们 0 行。
-NEW_ITEMS_OFF = {"domain_outbox": 0}
+NEW_ITEMS_OFF = {"domain_outbox": 0, "notifications": 0}
 OUTBOX_CUTOFF = NOW - DOMAIN_OUTBOX_RETENTION
+NOTIFICATIONS_CUTOFF = NOW - NOTIFICATIONS_RETENTION
 NO_CAP = 50_000
 
 _hashes = itertools.count(1)
@@ -485,6 +488,7 @@ def test_only_expired_terminal_rows_go_and_each_item_writes_one_audit(
     assert [(o.item, o.mode, o.cutoff) for o in result.items] == [
         *[(name, "delete", CUTOFF) for name in TABLES],
         ("domain_outbox", "off", OUTBOX_CUTOFF),
+        ("notifications", "off", NOTIFICATIONS_CUTOFF),
     ]
     assert result.deleted == sum(len(rows) for rows in seeded.gone.values())
 
@@ -895,7 +899,7 @@ def test_count_mode_deletes_nothing_and_reports_what_delete_would(
     gone = {name: len(rows) for name, rows in seeded.gone.items()}
     expected = {**gone, **NEW_ITEMS_OFF}
     assert rows_of(counted) == expected
-    assert [o.mode for o in counted.items] == ["count"] * 3 + ["off"]
+    assert [o.mode for o in counted.items] == ["count"] * 3 + ["off"] * 2
     assert counted.deleted == 0
     assert [(r.item, r.mode, r.rows) for r in logged(records, "retention_purge_item")] == [
         (name, "count", rows) for name, rows in gone.items()
@@ -921,7 +925,7 @@ def test_off_mode_runs_no_sql(db: Db, records: list[logging.LogRecord]) -> None:
 
     assert statements == []
     assert [(o.item, o.mode, o.rows) for o in result.items] == [
-        (name, "off", 0) for name in (*TABLES, "domain_outbox")
+        (name, "off", 0) for name in (*TABLES, "domain_outbox", "notifications")
     ]
     assert rows_of(empty) == rows_of(result)
     assert logged(records, "retention_purge_item") == []
@@ -1034,15 +1038,17 @@ def test_the_purge_module_does_not_import_the_ai_module() -> None:
     assert "ai_usage_outbox" not in text
 
 
-def test_exactly_four_items_are_registered_in_order_with_their_retention() -> None:
-    """设计闸门 #862 v2 §7「保留期常量」：AIH-TASK-266 之后恰好四项（R1 三项加 `domain_outbox`），
-    顺序固定；R1 三项 30 天，领域 outbox 90 天；项名与配置键一一对应；没有 `ai_usage_outbox`。
+def test_exactly_five_items_are_registered_in_order_with_their_retention() -> None:
+    """设计闸门 #862 v2 §7「保留期常量」：AIH-TASK-267 之后恰好五项（R1 三项、`domain_outbox` 与
+    `notifications`），顺序固定；R1 三项 30 天，领域 outbox 90 天，通知 731 天；项名与配置键一一
+    对应；没有 `ai_usage_outbox`。
     """
     assert [(item.name, item.retention) for item in ITEMS] == [
         ("refresh_tokens", dt.timedelta(days=30)),
         ("password_reset_tokens", dt.timedelta(days=30)),
         ("recovery_codes", dt.timedelta(days=30)),
         ("domain_outbox", dt.timedelta(days=90)),
+        ("notifications", dt.timedelta(days=731)),
     ]
     # 配置键（AIH-TASK-264）是 `retention_<name>_mode`，与项名一一对应。
     assert [f"retention_{item.name}_mode" for item in ITEMS] == [
@@ -1050,12 +1056,14 @@ def test_exactly_four_items_are_registered_in_order_with_their_retention() -> No
         "retention_password_reset_tokens_mode",
         "retention_recovery_codes_mode",
         "retention_domain_outbox_mode",
+        "retention_notifications_mode",
     ]
     settings = Settings()
     assert all(getattr(settings, f"retention_{item.name}_mode") == "off" for item in ITEMS)
     assert RETENTION == dt.timedelta(days=30)
     assert DOMAIN_OUTBOX_RETENTION == dt.timedelta(days=90)
+    assert NOTIFICATIONS_RETENTION == dt.timedelta(days=731)
     assert all(item.retention == RETENTION for item in ITEMS if item.name in TABLES)
     assert BATCH_SIZE == 1_000
-    assert {item.name for item in ITEMS} == set(TABLES) | {"domain_outbox"}
+    assert {item.name for item in ITEMS} == set(TABLES) | {"domain_outbox", "notifications"}
     assert "ai_usage_outbox" not in {item.name for item in ITEMS}

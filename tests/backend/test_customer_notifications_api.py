@@ -43,6 +43,7 @@ from app.models.tenancy import AccountStatus, Tenant
 from app.models.wallet import REFERENCE_TYPE_FOR, TransactionType
 from app.repositories import wallet as wallet_repository
 from app.schemas.customers import money_text
+from app.services.retention_purge import NOTIFICATIONS_RETENTION, run_purge
 from app.tasks import outbox as outbox_task
 
 NOTIFICATIONS = "/api/v1/customer/notifications"
@@ -125,6 +126,7 @@ def add(
     balance: str = "12.5",
     threshold: str | None = None,
     read_at: dt.datetime | None = None,
+    created_at: dt.datetime = CREATED,
 ) -> dict:
     """Insert one notification row directly; return the item the API should show for it."""
     if kind is NotificationType.LOW_BALANCE and threshold is None:
@@ -140,7 +142,7 @@ def add(
                 balance=Decimal(balance),
                 threshold=None if threshold is None else Decimal(threshold),
                 occurred_at=occurred_at,
-                created_at=CREATED,
+                created_at=created_at,
                 read_at=read_at,
             )
         )
@@ -429,6 +431,60 @@ def test_bad_cursors_are_422_after_authentication(both: Portal) -> None:
     # 合法的游标照常翻页。
     data = page(both, headers, cursor=existing)
     assert data["items"] == []
+
+
+def test_paging_across_a_retention_purge(both: Portal) -> None:
+    """设计闸门 #862 v2 §7「通知翻页」、§3「门户通知翻页（v2 更正）」（AIH-TASK-267）。
+
+    同一租户 5 条，最早两条写入满 731 天。按 `page_size = 2` 取第一页、另按 `page_size = 4` 取一页
+    （它的 `next_cursor` 恰好是会被删的那条）；清理只开 `notifications` 一项。之后拿第一页最后一条
+    当游标取第二页，只有剩下那一条；拿被删那条当游标是 422 `cursor`；从第一页重新翻得到剩下 3 条、
+    连续不重复；未读数只计剩下的。
+    """
+    tenant = both.tenant()
+    headers = both.customer(tenant)
+    purge_now = dt.datetime(2026, 11, 25, 3, 0, 0)
+    expired = purge_now - NOTIFICATIONS_RETENTION - dt.timedelta(days=1)
+    # `source_outbox_id` 越小越旧：被删的是列表最后的两条。
+    old = [
+        add(both, tenant, source_outbox_id=source, occurred_at=expired, created_at=expired)
+        for source in (101, 102)
+    ]
+    newer = [
+        add(both, tenant, source_outbox_id=103, read_at=EARLIER_READ),
+        add(both, tenant, source_outbox_id=104),
+        add(both, tenant, source_outbox_id=105),
+    ]
+    first = page(both, headers, page_size=2)
+    assert first["items"] == [newer[2], newer[1]]
+    assert first["unread_count"] == 4
+    deep = page(both, headers, page_size=4)
+    assert deep["next_cursor"] == old[1]["notification_id"]
+
+    result = run_purge(
+        both.factory,
+        modes={"notifications": "delete"},
+        max_rows_per_item=50_000,
+        now=purge_now,
+    )
+    assert result.failed_item is None
+    assert [(o.item, o.rows) for o in result.items if o.mode != "off"] == [("notifications", 2)]
+
+    second = page(both, headers, page_size=2, cursor=first["next_cursor"])
+    assert second["items"] == [newer[0]]
+    assert second["next_cursor"] is None
+    assert second["unread_count"] == 2
+    for gone in (deep["next_cursor"], old[0]["notification_id"]):
+        response = both.client.get(
+            NOTIFICATIONS, params={"page_size": 2, "cursor": gone}, headers=headers
+        )
+        cursor_error(response)
+
+    pages = walk(both, headers, page_size=2)
+    shown = [item for data in pages for item in data["items"]]
+    assert shown == [newer[2], newer[1], newer[0]]
+    assert len(set(ids(shown))) == 3
+    assert [data["unread_count"] for data in pages] == [2, 2]
 
 
 # --- 路径参数与标已读 ---------------------------------------------------------------------------
