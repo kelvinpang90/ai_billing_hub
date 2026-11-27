@@ -377,6 +377,8 @@ def test_only_sent_or_failed_rows_settled_ninety_days_ago_go(db: Db) -> None:
         "recovery_codes": 0,
         ITEM: len(gone),
         "notifications": 0,
+        "wallet_reconciliation_findings": 0,
+        "wallet_reconciliation_runs": 0,
     }
     [outcome] = [o for o in result.items if o.item == ITEM]
     assert (outcome.mode, outcome.cutoff) == ("delete", CUTOFF)

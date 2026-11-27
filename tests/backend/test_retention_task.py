@@ -377,6 +377,8 @@ def test_the_modes_and_the_cap_are_passed_to_run_purge(
         retention_recovery_codes_mode=codes,
         retention_domain_outbox_mode="off",
         retention_notifications_mode="off",
+        retention_wallet_reconciliation_findings_mode="off",
+        retention_wallet_reconciliation_runs_mode="off",
         retention_max_rows_per_item=2_000,
     )
 
@@ -391,6 +393,8 @@ def test_the_modes_and_the_cap_are_passed_to_run_purge(
                 "recovery_codes": codes,
                 "domain_outbox": "off",
                 "notifications": "off",
+                "wallet_reconciliation_findings": "off",
+                "wallet_reconciliation_runs": "off",
             },
             max_rows_per_item=2_000,
             now=NOW,
@@ -420,6 +424,8 @@ def test_the_mode_keys_follow_the_registered_item_names() -> None:
         "recovery_codes": "off",
         "domain_outbox": "off",
         "notifications": "off",
+        "wallet_reconciliation_findings": "off",
+        "wallet_reconciliation_runs": "off",
     }
 
 

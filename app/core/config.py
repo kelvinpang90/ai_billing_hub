@@ -485,6 +485,12 @@ class Settings(BaseSettings):
     # 已读未读一样；保留期是 app/services/retention_purge.py 的 `NOTIFICATIONS_RETENTION`
     # （ADR-0017 K12）。
     retention_notifications_mode: RetentionMode = "off"
+    # 钱包核对的发现与运行（AIH-TASK-268，设计闸门 #862 v2 §2「注册与配置」）：
+    # 所属运行结束满 731 天、且不是最近一次 COMPLETED（也不比它新）；保留期是
+    # app/services/retention_purge.py 的 `WALLET_RECONCILIATION_RETENTION`（ADR-0017 K13）。
+    # 两项一起切换；只开运行一项时，有发现的运行不删。
+    retention_wallet_reconciliation_findings_mode: RetentionMode = "off"
+    retention_wallet_reconciliation_runs_mode: RetentionMode = "off"
     # 每项每轮最多删这么多行（按 1000 行一批）。
     retention_max_rows_per_item: int = Field(default=50_000, ge=1_000, le=1_000_000)
 

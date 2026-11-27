@@ -610,6 +610,9 @@ RETENTION_MODE_FIELDS = (
     "retention_domain_outbox_mode",
     # 设计闸门 #862 v2 §2「注册与配置」（AIH-TASK-267）。
     "retention_notifications_mode",
+    # 设计闸门 #862 v2 §2「注册与配置」（AIH-TASK-268）。
+    "retention_wallet_reconciliation_findings_mode",
+    "retention_wallet_reconciliation_runs_mode",
 )
 
 
@@ -620,9 +623,11 @@ def test_the_retention_settings_default_to_off_and_fifty_thousand_rows() -> None
     """
     settings = Settings()
 
-    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == ["off"] * 5
+    assert [getattr(settings, name) for name in RETENTION_MODE_FIELDS] == ["off"] * 7
     assert settings.retention_domain_outbox_mode == "off"
     assert settings.retention_notifications_mode == "off"
+    assert settings.retention_wallet_reconciliation_findings_mode == "off"
+    assert settings.retention_wallet_reconciliation_runs_mode == "off"
     assert settings.retention_max_rows_per_item == 50_000
 
 
