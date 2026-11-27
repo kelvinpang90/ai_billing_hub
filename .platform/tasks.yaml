@@ -15532,7 +15532,7 @@ tasks:
     title: 数据留存 R6 文档：运维手册补数据主体请求与数据泄露两节，接入文档写明对话标识不放个人数据
     purpose: >-
       按 docs/data-governance.md 第 12 节 R6 的文档部分（ADR-0017 已接受，K23 由 Kelvin 2026-11-23 批准；只改文档，不走设计闸门）：docs/runbook.md 新增「数据主体请求」「数据泄露」两节，把 docs/data-governance.md 第 8、9 节的流程写成运维步骤；docs/api.md 用量上报的 conversation_id 一行写明禁止放电话号码、邮箱等可识别值，要求 conv_ 加 uuid 一类假名 id。R2 存储上 yearly/ 的 lifecycle（K16）由管理员在控制台配，不在本任务。
-    status: ready
+    status: done
     depends_on: []
     acceptance_criteria:
       - '内容以 docs/data-governance.md 第 5.2、7、8、9 节与第 10 节 K19、K20、K23 为准，不新增政策：时限照 K19、K20 写并注明待顾问核对；只引用 runbook 里已有的条目（吊销会话、轮换集成凭据与 webhook 签名密钥、主密钥事故）与管理端已有的接口和页面，引用写 文件:行 或章节锚点；涉及数据库的命令只给只读查询'
