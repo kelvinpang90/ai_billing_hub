@@ -2929,7 +2929,7 @@ token、序号、计数等整数列是数字单元格，可以直接求和。
 [deployment.md「数据留存清理配置」](deployment.md#数据留存清理配置设计闸门-833-v7aih-task-264)；保留期见 [ADR-0017](adr/ADR-0017-data-retention.md) K7–K9。
 2026-11-27 扩到七项（AIH-TASK-269）。依据：设计闸门 #862 v2
 （[docs/design/AIH-TASK-266-retention-r2-r5.md](design/AIH-TASK-266-retention-r2-r5.md)）§2「四项清理的条件」「注册与配置」、§5、§8、§10；
-R2、R5 由 AIH-TASK-266..268 交付，保留期见 ADR-0017 K10、K12、K13。`ai_usage_outbox`（R3，K11）**不在清理范围**，理由见下面「绝不能做什么」。**
+R2、R5 由 AIH-TASK-266..268 交付，保留期见 ADR-0017 K10、K12、K13。`ai_usage_outbox`（R3，K11）**不在清理范围**（[ADR-0018](adr/ADR-0018-no-closure-anonymization-no-ai-outbox-purge.md) 定为不做），理由见下面「绝不能做什么」。**
 
 Beat 条目 `retention-purge`（`app/core/celery_app.py:234-238`）每天 20:17 UTC（马来西亚 04:17）跑一轮 `app.tasks.retention.purge`，
 在 celery-worker 里执行。七项清理按注册顺序执行（`app/services/retention_purge.py:483-537` 的 `ITEMS`）：
@@ -3127,10 +3127,10 @@ SQL
   手工删核对运行还可能删掉告警依赖的最近一次 `COMPLETED`
 - **不要手工删 `PENDING` 的领域 outbox 行**（含三类没有处理器、永远停在 `PENDING` 的事件）：`PENDING` 是 Invariant 13、14 的事实来源，
   删掉就是状态变了、事件却没了，恢复扫描也捡不回来；无处理器的行按 K10 选 a 永久保留，清理任务一行 `PENDING` 都不碰
-- **不要手工删 `ai_usage_outbox` 的行**（R3 推迟的原因）：供应商成本对账与成本分摊用「`event_id` 在 `ai_usage_outbox` 里存在」判定一个用量事件
+- **不要手工删 `ai_usage_outbox` 的行**（R3 不做的原因）：供应商成本对账与成本分摊用「`event_id` 在 `ai_usage_outbox` 里存在」判定一个用量事件
   是否来自 AI 模块（`app/repositories/provider_cost_reconciliations.py:91-99` 的 `ai_module_origin()`，设计 #755
   [§10 假设 2](design/AIH-TASK-242-provider-cost-reconciliation.md#10-未决问题与假设)）。删掉的行会让那些月份的对账估算、分摊后成本与毛利悄悄变小，
-  被删的 `event_id` 无法恢复。这张表的清理要先另过设计闸门加持久的来源标记（设计 #862 §1「R3 推迟」）
+  被删的 `event_id` 无法恢复。R3 已由 [ADR-0018](adr/ADR-0018-no-closure-anonymization-no-ai-outbox-purge.md) 定为不做（K11 取消），这张表一行不删
 - **不要为了消告警或让表变小去改保留期**：30 天、90 天、731 天是 ADR-0017 批准的 K7–K10、K12、K13，在代码里是常量
   （`app/services/retention_purge.py:66-77`），不是配置；要改就改 ADR、重新过设计闸门
 - **不要跳过 `count` 直接 `delete`**：`count` 那一轮是唯一一次在不删任何行的前提下核对数字与耗时的机会（设计 §8）
