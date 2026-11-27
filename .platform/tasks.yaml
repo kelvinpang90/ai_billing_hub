@@ -15484,7 +15484,7 @@ tasks:
     title: 数据留存清理 R2、R5 收尾：运维手册扩到七项，数据治理文档标明交付与 R3 推迟
     purpose: >-
       按 docs/design/AIH-TASK-266-retention-r2-r5.md（设计闸门 #862 已批准 v2） §8 与 §11 AIH-TASK-269：docs/runbook.md「数据留存清理」一节从三项扩到七项；docs/data-governance.md 第 4.6、4.8 节与第 12 节标明 R2、R5 已交付，第 4.7 节与第 12 节写明 R3 推迟的理由（ai_usage_outbox 是供应商成本对账判定 AI 模块来源的依据，须先另过闸门加来源标记）；docs/TODO.md 的「只增不减」一行勾掉。只改文档。
-    status: ready
+    status: done
     depends_on:
       - AIH-TASK-268
     acceptance_criteria:
