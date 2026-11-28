@@ -163,6 +163,54 @@ def publish_initial_tax_policy(email: str) -> int:
     return 0
 
 
+def restore_verify(database: str) -> int:
+    """Check a restored database (app/services/restore_verify.py); exit 1 if any check fails.
+
+    用 root 连恢复库：应用账号只有生产库的权限。口令从环境变量 `BILLING_MYSQL_ROOT_PASSWORD`
+    读（由 deploy/restore_verify.sh 从 `.env` 传入），不走命令行参数，免得进 `ps` 与 shell 历史。
+    """
+    import os
+    import re
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from sqlalchemy.engine import make_url
+
+    from app.core.crypto import load_keyring
+    from app.services.restore_verify import verify
+
+    # 与 deploy/restore.sh 对目标库名的限制相同。
+    if re.fullmatch(r"[A-Za-z0-9_]+", database) is None:
+        print("database name must be [A-Za-z0-9_]", file=sys.stderr)
+        return 2
+    password = os.environ.get("BILLING_MYSQL_ROOT_PASSWORD", "")
+    if not password:
+        print("BILLING_MYSQL_ROOT_PASSWORD is not set", file=sys.stderr)
+        return 2
+    settings = get_settings()
+    # `set` 负责转义：口令里有 @ : / # 也不会把 DSN 切错位置。
+    url = make_url(settings.database_url).set(username="root", password=password, database=database)
+    engine = create_database_engine(
+        settings.model_copy(update={"database_url": url.render_as_string(hide_password=False)})
+    )
+    head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+    if head is None:
+        print("alembic.ini has no migration head", file=sys.stderr)
+        return 2
+    report = verify(
+        create_session_factory(engine), keyring=load_keyring(settings), expected_head=head
+    )
+    for line in report.facts:
+        print(line)
+    for line in report.failures:
+        print(f"FAIL {line}")
+    if report.passed:
+        print("restore verify passed")
+        return 0
+    print(f"restore verify FAILED: {len(report.failures)} problem(s)")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -202,7 +250,14 @@ def main(argv: list[str] | None = None) -> int:
     held_import.add_argument("--from-log-line", action="append", required=True)
     held_import.add_argument("--reason", required=True)
 
+    verify_restore = sub.add_parser(
+        "restore-verify", help="Read-only checks on a database restored from backup."
+    )
+    verify_restore.add_argument("--database", required=True)
+
     args = parser.parse_args(argv)
+    if args.command == "restore-verify":
+        return restore_verify(args.database)
     if args.command == "create-admin":
         return create_admin(args.email, args.password)
     if args.command == "publish-initial-tax-policy":

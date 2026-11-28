@@ -804,7 +804,8 @@ Let's Encrypt 正常在剩 30 天时续期，所以剩 21 天还没换 = **续�
    （来源：R2 `config/` 最新快照里的 `.last-good-deploy`；或 GitHub Actions → Deploy → 最后一次成功的那次 ——
    合并触发的看它的 commit，手动触发的看 `ref` 输入）。
    ⚠️ **不要直接用 `main` 的最新提交** —— 它未必部署过，灾难当天不是验证新代码的时候
-5. **还原密钥与配置**：`secrets/` 下三个文件，然后
+5. **还原密钥与配置**：`secrets/` 下五个文件（`docker-compose.yml` 末尾的 `secrets:`：`jwt.key`、`master.key`、
+   `smtp.password`、`monitor.token`、`anthropic.key`；少一个，Linux 上任何一个后端容器都建不起来），然后
    ```bash
    chown 10001:10001 secrets/*        # 10001 = 容器运行 UID（ADR-0004）
    chmod 0400 secrets/*
@@ -840,29 +841,31 @@ Let's Encrypt 正常在剩 30 天时续期，所以剩 21 天还没换 = **续�
 
 ### 恢复后对账（§98.1 要求）
 
-⚠️ **「导入成功」不等于「数据对」。**下面这些**每一条都要留下实际数字**，写进当次事故记录：
+⚠️ **「导入成功」不等于「数据对」。**在第 7 步之后、切换之前，用第 4 步那个 SHA 的镜像对恢复库跑只读核对：
 
-```sql
--- 1. 表清单：应为 8 张（7 张业务表 + alembic_version）
-SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE();
-
--- 2. 数据丢失窗口：最后一条审计记录的时间 vs 故障时刻
-SELECT MAX(created_at) FROM audit_logs;
-
--- 3. 待投递的事件：beat 起来之后会自动补投，这里只看量级
-SELECT status, COUNT(*) FROM domain_outbox GROUP BY status;
-
--- 4. 账号：与最近一次演练 / 月报的数字对得上
-SELECT COUNT(*) FROM users;
-SELECT COUNT(*) FROM two_factor_settings;
+```bash
+BILLING_IMAGE=ghcr.io/<owner>/<repo>:<第 4 步那个 SHA> deploy/restore_verify.sh billing_restore
 ```
 
-- **主密钥可用性**：用恢复出来的 `master.key` 解开一条 TOTP 密文（做法见下一节）。
-  ⚠️ 不做这一步的话，「能登录第一因子、过不了第二因子」要等第一个管理员上线才暴露
-- **RPO / RTO 实测值**：把「最后一条审计记录」与「决策时刻」的差、以及第 1 步到第 10 步的耗时
-  都记下来。⚠️ 这两个数字是下一次演练与容量决策的输入，事后补不出来
-- ⚠️ **钱包余额 = 账本流水之和、用量事件计数、支付回调对账 —— 现在做不了**：
-  这些表要到 Phase 1 才存在。写在这里是为了它们落地时**不会被忘掉**，不是假装已经做了
+它只起一个一次性的 api 容器（`--no-deps`，不起 worker 与 beat），用 root 读恢复库（口令从 `.env` 字面读出、只经环境变量传），
+逐项核对（`app/services/restore_verify.py`）：
+
+| 核对 | 不通过的含义 |
+| --- | --- |
+| `alembic_version` 等于镜像里代码的 head | 恢复库与要部署的代码对不上：先查第 4 步选的 SHA |
+| 每个钱包对它的账本（与每日钱包核对同一个判定，问题码见「钱包核对发现不一致」） | 账本或钱包行丢了、坏了：**不切换**，按数据事故处理 |
+| 每一份收据、每一份已定稿对账单都能从快照渲染出 PDF | 文档就是快照（见「文档存储恢复」），渲染不出等于这份文档丢了 |
+| 每一条密文都能用这把 `master.key` 解开：TOTP、集成凭据、状态 webhook 签名密钥 | 钥匙放错了或密文坏了：先按「主密钥丢失或要在新主机上重建」核对指纹 |
+
+另外打印各表按状态的行数（用量事件、支付、对账单、待投递事件）与收据、账本、审计、账号的行数，以及几张主要表最晚一行的时刻。
+全部通过退出 0、最后一行是 `restore verify passed`；任何一项不通过退出 1，`FAIL` 行只带行的 `public_id`（没有的用 id）
+与问题码或异常类名，不带密钥、明文、金额、公司名与邮箱。
+
+- **整段输出**原样写进当次事故 / 演练记录：行数要与最近一次演练、月报的数字对得上
+- **RPO / RTO 实测值**：`latest write overall` 与故障时刻的差就是实测 RPO；第 1 步到第 10 步各步的耗时之和就是实测 RTO。
+  ⚠️ 这两个数字是下一次演练与容量决策的输入，事后补不出来
+- ⚠️ **它不和生产比**：恢复主机上没有生产库，生产在恢复期间也照常在写。恢复库是否**少了**故障前最后几分钟的数据，
+  只能拿 `latest write overall` 与故障时刻比；支付是否与 Stripe 一致，起栈之后由支付对账照常处理
 
 ### 恢复
 
@@ -882,6 +885,26 @@ SELECT COUNT(*) FROM two_factor_settings;
 - **不要用 `docker compose up -d` 起应用**（起 mysql 除外）。理由见第 9 步：新主机的 `.env` 里还没有部署钉进去的镜像 ——compose 会去找一个本地构建的默认标签，然后失败。**起应用只走 `deploy/deploy.sh`**
 - **恢复完成之前不要往 `main` 合并任何东西。**2026-09-18 起合并即部署、不经人工批准：`VPS_*` secret 指着哪台机器，
   一次合并就会对着它开火 —— 指着旧机器是一次红色的 CD，已经改指新机器则是一次没人计划过的发布
+
+### 季度演练：在另一台机器上走一遍
+
+每周日的自动演练（`deploy/restore_drill.sh`）只在生产主机上把备份恢复进一个临时库；「从零搭一台主机」「离线副本」
+「恢复后对账」只有季度演练验得到（[deployment.md](deployment.md) §5.2、§6）。演练按上面第 1–9 步走、每步计时，
+但演练主机**不是**生产，下面几条与真出事时不同：
+
+- ⚠️ **不起 worker 与 beat，也不跑 `deploy/deploy.sh`**（它会起七个服务）：恢复库里的待投递事件、项目的状态 webhook 地址、
+  待发的邮件都是真的，worker 一起就会向真实客户和外部服务发出去，没有任何开关拦得住。第 9 步只起 `redis` 与 `api`，
+  镜像在命令行上给：`BILLING_IMAGE=ghcr.io/<owner>/<repo>:<SHA> docker compose up -d --no-deps redis api`，再看 `/readyz`。
+  这是「不要用 `docker compose up -d` 起应用」那一条在演练里唯一的例外：镜像已经显式给出
+- ⚠️ **不装 cron**：`binlog_ship.sh` 与 `backup.sh` 会把演练主机的 binlog 与全量推进生产用的 R2，弄断真正的 binlog 链
+- **`.env` 里心跳地址留空**：演练主机发出的成功 ping 会盖住生产的真实状态
+- **`secrets/` 里只有 `master.key` 必须是真的**（它就是被验的东西）；另外四个文件放占位内容，演练主机不需要真的 SMTP 口令、
+  监控令牌与供应商密钥。⚠️ 但文件必须存在，否则容器建不起来（第 5 步）
+- **不切流量、不改 DNS、不改 GitHub 的 `VPS_*` secret**（第 10 步不做）
+- **结束后清干净**：演练主机上有一整份生产数据与主密钥。`docker compose down -v` 删掉容器与卷，删掉 `restore/`、`.env`、
+  `secrets/` 与 mysqlbinlog 镜像；用完的离线材料不要留在下载目录或剪贴板里
+- **记录**：每步的开始与结束时刻、`deploy/restore_verify.sh` 的整段输出、实测 RPO 与 RTO、遇到的与本节不符的地方。
+  不符的地方改进本节，和演练记录一起提 PR
 
 ---
 
