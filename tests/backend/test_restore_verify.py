@@ -240,10 +240,25 @@ def test_every_broken_piece_is_reported_without_leaking_it(factory, keyring, tmp
         WEBHOOK_PLAINTEXT,
         "Fictional Reconciliation",
         "Example Sdn Bhd",
-        "999",
+        # 带小数点：输出里的 uuid 是十六进制，不会含「.」，只断言 "999" 会偶尔撞上随机 uuid。
+        "999.00",
         "125.50",
     ):
         assert leaked not in output
+
+
+def test_a_receipt_the_download_would_refuse_is_reported(factory, keyring) -> None:
+    """快照完好、列里的收据号格式不对：下载接口拒绝下载，核对也要报出来。"""
+    with factory() as session:
+        session.execute(update(PaymentReceipt).values(receipt_number="ACV-AIR-26-1"))
+        session.commit()
+
+    report = verify(factory, keyring=keyring, expected_head=HEAD)
+
+    assert len(report.failures) == 1
+    assert report.failures[0].startswith("receipt: ")
+    assert report.failures[0].endswith(": ReceiptSnapshotInvalid")
+    assert "receipts: 0/1 rendered" in report.facts
 
 
 @pytest.mark.parametrize("database", ["billing;DROP", "", "billing-restore"])

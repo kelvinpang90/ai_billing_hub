@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -42,11 +43,14 @@ from app.models.usage import UsageEvent
 from app.models.wallet import WalletTransaction
 from app.repositories.wallet import check_wallet_snapshot
 from app.services.integration_auth import credential_aad
-from app.services.receipt_pdf import render_receipt_pdf
+from app.services.receipt_pdf import ReceiptSnapshotInvalid, render_receipt_pdf
 from app.services.statement_pdf import render_statement_pdf
 from app.services.webhook_signing import webhook_secret_aad
 
 _PDF_MAGIC: Final = b"%PDF-"
+# 与 app/api/receipt_download.py 的 `_RECEIPT_NUMBER` 是同一条规则
+# （那里、receipt_pdf 与 outbox 各有一份）。
+_RECEIPT_NUMBER: Final = re.compile(r"ACV-AIR-[0-9]{4}-[0-9]{6}")
 
 
 @dataclass
@@ -140,14 +144,19 @@ def _render_documents(factory: sessionmaker[Session], report: Report) -> None:
     receipts = _read(
         factory,
         lambda s: s.execute(
-            select(PaymentReceipt.public_id, PaymentReceipt.snapshot_json).order_by(
-                PaymentReceipt.id
-            )
+            select(
+                PaymentReceipt.public_id,
+                PaymentReceipt.receipt_number,
+                PaymentReceipt.snapshot_json,
+            ).order_by(PaymentReceipt.id)
         ).all(),
     )
     rendered = _render_each(
         "receipt",
-        ((public_id, lambda snap=snap: render_receipt_pdf(snap)) for public_id, snap in receipts),
+        (
+            (public_id, lambda number=number, snap=snap: _receipt_pdf(number, snap))
+            for public_id, number, snap in receipts
+        ),
         report,
     )
     report.facts.append(f"receipts: {rendered}/{len(receipts)} rendered")
@@ -179,6 +188,14 @@ def _render_documents(factory: sessionmaker[Session], report: Report) -> None:
         report,
     )
     report.facts.append(f"finalized statements: {rendered}/{len(statements)} rendered")
+
+
+def _receipt_pdf(receipt_number: str, snapshot: dict[str, Any]) -> bytes:
+    # 与下载接口相同（app/api/receipt_download.py）：列里的收据号格式不对就拒绝下载，
+    # 只渲染快照会把这种收据报成「能下载」。
+    if _RECEIPT_NUMBER.fullmatch(receipt_number) is None:
+        raise ReceiptSnapshotInvalid("receipt number column has an unexpected format")
+    return render_receipt_pdf(snapshot)
 
 
 def _render_each(
